@@ -38,10 +38,9 @@ impl JsInterpreter:
     me create_object() -> i64:
         # Mutate through the single owner: an alias/store-back round trip
         # deep-copies the whole object store per allocation (COW).
-        val id = self.object_store.next_id
-        self.object_store.next_id = id + 1
-        self.object_store.obj_proto_ids.push(-1)
-        id
+        # `alloc_object` is a `me` on the store; the nested push was dropped
+        # by the seed interpreter, so the proto table never grew.
+        self.object_store.alloc_object()
 
     me set_object_property(obj_id: i64, key: text, value: JsValue):
         if key != "__simple_frozen" and self._is_object_frozen(obj_id):
@@ -76,17 +75,11 @@ impl JsInterpreter:
         val existing_i = self.object_store.find_prop_slot(obj_id, key)
         if existing_i >= 0:
             if self.object_store.prop_enumerables.get(existing_i) or self.object_store.prop_configurables.get(existing_i):
-                self.object_store.prop_values[existing_i] = stored_value
-                self.object_store.prop_ref_tags[existing_i] = ""
-                self.object_store.prop_ref_ids[existing_i] = ""
+                self.object_store.update_slot(existing_i, stored_value)
                 return
-        self.object_store.prop_obj_ids.push(obj_id)
-        self.object_store.prop_keys.push(key)
-        self.object_store.prop_values.push(stored_value)
-        self.object_store.prop_ref_tags.push("")
-        self.object_store.prop_ref_ids.push("")
-        self.object_store.prop_enumerables.push(true)
-        self.object_store.prop_configurables.push(true)
+        # Nested array writes go through ObjectStore `me` methods: the seed
+        # interpreter drops `self.object_store.<array>.push(x)` made from here.
+        self.object_store.append_slot(obj_id, key, stored_value)
         self.object_store.sync_prop_slots()
 
     me get_object_property(obj_id: i64, key: text) -> JsValue:

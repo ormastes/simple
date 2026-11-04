@@ -1,0 +1,79 @@
+# Regex literals and String.prototype.replace / match / test with RegExp.
+# Bug: js_engine_missing_builtins_regex_promise_prototype_2026-07-11 (item 1).
+# `/b/` used to lex as division, so `'abc'.replace(/b/, 'X')` raised
+# `ReferenceError: b is not defined` and returned the input unchanged.
+
+use std.spec.*
+use std.js.engine.js_error.{JsLogger, LogLevel}
+use std.js.engine.parser.{JsParser}
+use std.js.types.js_types.{JsValue}
+use std.js.engine.interpreter_types.{js_to_string}
+use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
+use std.nogc_sync_mut.js.engine.interpreter_exec.*
+
+fn run_js(source: text) -> text:
+    val logger = JsLogger.new("regex-literal-spec", LogLevel.Error)
+    val parser = JsParser.new(source, logger)
+    match parser.parse_program():
+        Ok(statements):
+            val interpreter = JsInterpreter.new(logger)
+            match interpreter.execute(statements):
+                Ok(value): js_to_string(value)
+                Err(error): "ERR: {error.message}"
+        Err(error): "PARSE-ERR: {error.message}"
+
+describe "JS engine regex literals":
+    it "parses a regex literal as a RegExp object, not as division":
+        expect(run_js("typeof /b/")).to_equal("object")
+        expect(run_js("var re = /-/g; typeof re")).to_equal("object")
+        expect(run_js("typeof new RegExp('x')")).to_equal("object")
+        expect(run_js("typeof RegExp")).to_equal("function")
+
+    it "replaces the first match of a non-global regex literal":
+        expect(run_js("'abc'.replace(/b/, 'X')")).to_equal("aXc")
+
+    it "replaces every match with the g flag":
+        expect(run_js("'a-b-c'.replace(/-/g, '+')")).to_equal("a+b+c")
+        expect(run_js("'a1b22c'.replace(/\\d+/g, '#')")).to_equal("a#b#c")
+
+    it "supports $& and $$ in string replacements":
+        expect(run_js("'abc'.replace(/b/, '<$&>')")).to_equal("a<b>c")
+        expect(run_js("'abc'.replace(/b/, '$$')")).to_equal("a$c")
+
+    it "supports function replacements":
+        expect(run_js("'abc'.replace(/b/, m => '[' + m + ']')")).to_equal("a[b]c")
+        expect(run_js("'a1b2'.replace(/\\d/g, function(d, i) { return d + i; })")).to_equal("a11b23")
+
+    it "honours the i flag":
+        expect(run_js("'ABC'.replace(/b/i, 'x')")).to_equal("AxC")
+
+    it "keeps plain-string replace working":
+        expect(run_js("'abc'.replace('b', 'Y')")).to_equal("aYc")
+
+    it "supports RegExp.prototype.test":
+        expect(run_js("/b/.test('abc')")).to_equal("true")
+        expect(run_js("/z/.test('abc')")).to_equal("false")
+        expect(run_js("var re = /^a.c$/; re.test('abc') && !re.test('abcd')")).to_equal("true")
+
+    it "supports String.prototype.match":
+        expect(run_js("'a1b2c3'.match(/\\d/g).length")).to_equal("3")
+        expect(run_js("'a1b2c3'.match(/\\d/g).join(',')")).to_equal("1,2,3")
+        expect(run_js("'abc'.match(/b/)[0]")).to_equal("b")
+        expect(run_js("'abc'.match(/z/)")).to_equal("null")
+
+    it "supports new RegExp(source, flags)":
+        expect(run_js("'a-b-c'.replace(new RegExp('-', 'g'), '+')")).to_equal("a+b+c")
+        expect(run_js("var re = new RegExp('b'); re.source + re.flags + re.global")).to_equal("bfalse")
+
+    it "exposes source, flags and global on the literal":
+        expect(run_js("var re = /x+/gi; re.source + ' ' + re.flags + ' ' + re.global")).to_equal("x+ gi true")
+
+    it "treats / as division where an expression precedes it":
+        expect(run_js("var a = 8; var b = 2; var c = 2; a / b / c")).to_equal("2")
+        expect(run_js("var x = 8; (x) / 2")).to_equal("4")
+        expect(run_js("var x = 9; x/3 + 1")).to_equal("4")
+        expect(run_js("var half = v => v / 2; half(8) + ',' + half(4)")).to_equal("4,2")
+
+    it "does not treat / inside strings or character classes as a delimiter":
+        expect(run_js("'a/b'.replace(/[/]/, '|')")).to_equal("a|b")
+        expect(run_js("'a/b'.replace('/', '-')")).to_equal("a-b")

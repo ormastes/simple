@@ -220,3 +220,18 @@ No narrow fix: needs `Value::ClassInstance` producers in the Rust seed + redeplo
 (`SIMPLE_INTERP_CLASS_REF=0` opts out). `class_element_reference_spec` is 4/4 by
 default on the rebuilt seed (was 2/4) and its `@tag:in-development` is dropped.
 Coordinator owns the bug_db status change.
+
+## Note 2026-11-04 — sibling shape: nested array field push from another class's `me`
+
+Observed on the Windows Rust seed (`D:/dev/wt/seed/simple.exe`, release tip,
+class-ref semantics default): inside `me` of class A, `self.b.arr.push(x)`
+where `b: B` is a class-typed field and `arr: [T]` is B's array field is
+**dropped** by the tree-walk interpreter (`SIMPLE_EXECUTION_MODE=interpret`
+reproduces on a 20-line probe); the same statement persists when the module is
+JIT-compiled, and a scalar `self.b.n = v` persists in both. `self.b.touch()`
+where `touch` is a `me` on B that does `self.arr.push(x)` persists in both.
+Consequence: the JS engine's `JsInterpreter.set_object_property` lost every
+property write (5 of 6 JS-engine specs red). Worked around in the lib by
+routing the writes through `ObjectStore` `me` methods
+(`vm_object_store.spl: update_slot / append_slot / alloc_object`); the
+interpreter defect itself remains.

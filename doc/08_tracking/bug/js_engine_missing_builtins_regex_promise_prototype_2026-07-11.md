@@ -101,3 +101,42 @@ filed; no root-cause fix applied in this session.
 
 `String.replace(regex, repl)` performs regex substitution; `Promise` is defined;
 `typeof obj.method === "function"` for present prototype methods.
+
+## Note 2026-11-04 — item 1 (regex replace) implemented; store-backed verification blocked on Windows seed
+
+Implemented on `work/feat-js-regex-replace-20261104` (PR against `release/1.0.0`):
+
+- `engine/parser.spl`: `_js_parser_regex_literal_end` applies the standard
+  JS rule (a `/` starts a regex literal when the previous significant token
+  cannot end an expression, via the existing `_js_regex_context`) and every
+  quote-aware scanner (`find_top_level*`, ternary, assignment, split,
+  matching paren/bracket/brace, `primary_end`) skips the literal. A literal
+  `/src/flags` desugars to `new RegExp("src", "flags")` — no AST change.
+- `RegExp` is a lazily registered native constructor
+  (`NATIVE_REGEXP_CONSTRUCTOR`, same pattern as `String`/`Number`); a RegExp
+  value is a plain object tagged `__simple_regexp` with `source`, `flags`,
+  `global`, `ignoreCase`, `multiline`, `lastIndex` and native `test`/`exec`.
+- `String.prototype.replace` routes a tagged search value through
+  `src/lib/common/js/builtins/regexp.spl` (`g` honoured, function replacers
+  called with `(match, offset, string)`, `$&`/`$$` expanded — also for plain
+  string searches); `String.prototype.match` added (`null` on no match).
+- Residual: `$1`/capture groups are not available (the regexp engine records
+  no groups); `/` after `)` is still read as division; regex literals
+  containing `;` or `{` still confuse the statement splitter.
+
+Spec: `test/01_unit/lib/nogc_sync_mut/js/engine/regex_literal_replace_spec.spl`
+— 13/13 on the Windows Rust seed once the object-store defect below was fixed.
+
+Root cause of the initial 3/13: every `JsInterpreter.set_object_property` ->
+`get_object_property` round-trip returned `undefined` on this host because the
+seed *interpreter* drops a nested `self.object_store.<array>.push(x)` /
+`[i] = x` made from another class's `me` method (the array is read as a
+copy; the JIT keeps it, but the engine runs interpreted since
+`JsInterpreter._run_promise_task` fails HIR lowering). Fixed in the same
+branch by routing those writes through `ObjectStore` `me` methods
+(`alloc_object`, new `update_slot` / `append_slot`) in the nogc_sync_mut,
+nogc_async_mut and gc_async_mut `interpreter_object.spl`; `EnvironmentStack.new`
+added to nogc_sync_mut. That took the pre-existing JS-engine specs from
+1/6 green to 4/6 (remaining: nogc_sync_mut `js_vm_reclamation` is an
+intentional RED placeholder; common `js_vm_reclamation` 2/4 reads the common
+family's `env_parent_ids` field against the nogc_sync_mut engine).

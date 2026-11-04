@@ -414,6 +414,10 @@ fn _js_parser_primary_at(expr: text, pos_in: i64) -> JsExpression:
     if ch == "'" or ch == "\"":
         val end = _js_parser_string_end(expr, pos)
         return JsExpression.Literal(value: JsValue.String(v: _js_parser_decode_string_literal(expr.slice(pos + 1, end))))
+    if ch == "/":
+        val re_end = _js_parser_regex_literal_end(expr, pos)
+        if re_end > pos:
+            return _js_parser_regex_literal_at(expr, pos, re_end)
     if ch == "(":
         val end = _js_parser_matching_paren(expr, pos)
         if end > pos:
@@ -472,6 +476,10 @@ fn _js_parser_primary_end(expr: text, pos_in: i64) -> i64:
     if ch == "'" or ch == "\"":
         val end = _js_parser_string_end(expr, pos)
         return if end >= 0: end + 1 else: expr.len()
+    if ch == "/":
+        val re_end = _js_parser_regex_literal_end(expr, pos)
+        if re_end > pos:
+            return re_end + 1
     if ch == "(":
         val end = _js_parser_matching_paren(expr, pos)
         return if end >= 0: end + 1 else: expr.len()
@@ -567,7 +575,10 @@ fn _js_parser_find_ternary_question(expr: text) -> i64:
             else if ch == quote:
                 quote = ""
         else:
-            if ch == "'" or ch == "\"":
+            val re_end = if ch == "/": _js_parser_regex_literal_end(expr, i) else: -1
+            if re_end > i:
+                i = re_end
+            else if ch == "'" or ch == "\"":
                 quote = ch
             else if ch == "(" or ch == "[" or ch == "{":
                 depth = depth + 1
@@ -598,7 +609,10 @@ fn _js_parser_find_ternary_colon(expr: text, question: i64) -> i64:
             else if ch == quote:
                 quote = ""
         else:
-            if ch == "'" or ch == "\"":
+            val re_end = if ch == "/": _js_parser_regex_literal_end(expr, i) else: -1
+            if re_end > i:
+                i = re_end
+            else if ch == "'" or ch == "\"":
                 quote = ch
             else if ch == "(" or ch == "[" or ch == "{":
                 depth = depth + 1
@@ -630,7 +644,10 @@ fn _js_parser_find_top_level(expr: text, needle: text) -> i64:
             else if ch == quote:
                 quote = ""
         else:
-            if ch == "'" or ch == "\"":
+            val re_end = if ch == "/": _js_parser_regex_literal_end(expr, i) else: -1
+            if re_end > i:
+                i = re_end
+            else if ch == "'" or ch == "\"":
                 quote = ch
             else if ch == "(" or ch == "[" or ch == "{":
                 depth = depth + 1
@@ -654,7 +671,10 @@ fn _js_parser_find_top_level_right(expr: text, needle: text) -> i64:
             else if ch == quote:
                 quote = ""
         else:
-            if ch == "'" or ch == "\"":
+            val re_end = if ch == "/": _js_parser_regex_literal_end(expr, i) else: -1
+            if re_end > i:
+                i = re_end
+            else if ch == "'" or ch == "\"":
                 quote = ch
             else if ch == "(" or ch == "[" or ch == "{":
                 depth = depth + 1
@@ -691,7 +711,10 @@ fn _js_parser_find_top_level_right_binary_operator(expr: text, needle: text) -> 
             else if ch == quote:
                 quote = ""
         else:
-            if ch == "'" or ch == "\"":
+            val re_end = if ch == "/": _js_parser_regex_literal_end(expr, i) else: -1
+            if re_end > i:
+                i = re_end
+            else if ch == "'" or ch == "\"":
                 quote = ch
             else if ch == "(" or ch == "[" or ch == "{":
                 depth = depth + 1
@@ -741,7 +764,10 @@ fn _js_parser_find_top_level_assignment(expr: text) -> i64:
             else if ch == quote:
                 quote = ""
         else:
-            if ch == "'" or ch == "\"":
+            val re_end = if ch == "/": _js_parser_regex_literal_end(expr, i) else: -1
+            if re_end > i:
+                i = re_end
+            else if ch == "'" or ch == "\"":
                 quote = ch
             else if ch == "(" or ch == "[" or ch == "{":
                 depth = depth + 1
@@ -769,7 +795,10 @@ fn _js_parser_split_top_level(expr: text, sep: text) -> [text]:
             else if ch == quote:
                 quote = ""
         else:
-            if ch == "'" or ch == "\"":
+            val re_end = if ch == "/": _js_parser_regex_literal_end(expr, i) else: -1
+            if re_end > i:
+                i = re_end
+            else if ch == "'" or ch == "\"":
                 quote = ch
             else if ch == "(" or ch == "[" or ch == "{":
                 depth = depth + 1
@@ -782,6 +811,69 @@ fn _js_parser_split_top_level(expr: text, sep: text) -> [text]:
         i = i + 1
     parts.push(expr.slice(start, expr.len()))
     parts
+
+# If the `/` at `pos` begins a regex literal (standard JS rule: the previous
+# significant token cannot end an expression — see `_js_regex_context`),
+# return the index of the literal's last character (closing `/` or the last
+# flag). Otherwise (division, `//` or `/*`, unterminated) return -1.
+fn _js_parser_regex_literal_end(expr: text, pos: i64) -> i64:
+    val n = expr.len()
+    if pos + 1 >= n:
+        return -1
+    val nxt = expr.slice(pos + 1, pos + 2)
+    if nxt == "/" or nxt == "*":
+        return -1
+    # Previous significant char and, when it is an identifier char, the word.
+    var j = pos - 1
+    while j >= 0:
+        val c = expr.slice(j, j + 1)
+        if c == " " or c == "\t" or c == "\n" or c == "\r":
+            j = j - 1
+            continue
+        break
+    var prev = ""
+    var prev_word = ""
+    if j >= 0:
+        prev = expr.slice(j, j + 1)
+        var w = j
+        while w >= 0 and _js_bal_is_ident_char(expr.slice(w, w + 1)):
+            w = w - 1
+        prev_word = expr.slice(w + 1, j + 1)
+    if not _js_regex_context(prev, prev_word):
+        return -1
+    var i = pos + 1
+    var in_class = false
+    while i < n:
+        val rc = expr.slice(i, i + 1)
+        if rc == "\\":
+            i = i + 2
+            continue
+        if rc == "\n":
+            return -1
+        if rc == "[":
+            in_class = true
+        else if rc == "]":
+            in_class = false
+        else if rc == "/" and not in_class:
+            var f = i + 1
+            while f < n and _js_bal_is_ident_char(expr.slice(f, f + 1)):
+                f = f + 1
+            return f - 1
+        i = i + 1
+    -1
+
+# Regex literal `/source/flags` desugars to `new RegExp("source", "flags")`.
+fn _js_parser_regex_literal_at(expr: text, pos: i64, end: i64) -> JsExpression:
+    var close = end
+    while close > pos and expr.slice(close, close + 1) != "/":
+        close = close - 1
+    JsExpression.NewExpr(
+        callee: JsExpression.Identifier(name: "RegExp"),
+        args: [
+            JsExpression.Literal(value: JsValue.String(v: expr.slice(pos + 1, close))),
+            JsExpression.Literal(value: JsValue.String(v: expr.slice(close + 1, end + 1)))
+        ]
+    )
 
 fn _js_parser_string_end(expr: text, start: i64) -> i64:
     val quote = expr.slice(start, start + 1)
@@ -883,7 +975,10 @@ fn _js_parser_matching_paren(expr: text, start: i64) -> i64:
             else if ch == quote:
                 quote = ""
         else:
-            if ch == "'" or ch == "\"":
+            val re_end = if ch == "/": _js_parser_regex_literal_end(expr, i) else: -1
+            if re_end > i:
+                i = re_end
+            else if ch == "'" or ch == "\"":
                 quote = ch
             else if ch == "(":
                 depth = depth + 1
@@ -906,7 +1001,10 @@ fn _js_parser_matching_bracket(expr: text, start: i64) -> i64:
             else if ch == quote:
                 quote = ""
         else:
-            if ch == "'" or ch == "\"":
+            val re_end = if ch == "/": _js_parser_regex_literal_end(expr, i) else: -1
+            if re_end > i:
+                i = re_end
+            else if ch == "'" or ch == "\"":
                 quote = ch
             else if ch == "[":
                 depth = depth + 1
@@ -929,7 +1027,10 @@ fn _js_parser_matching_brace(expr: text, start: i64) -> i64:
             else if ch == quote:
                 quote = ""
         else:
-            if ch == "'" or ch == "\"":
+            val re_end = if ch == "/": _js_parser_regex_literal_end(expr, i) else: -1
+            if re_end > i:
+                i = re_end
+            else if ch == "'" or ch == "\"":
                 quote = ch
             else if ch == "{":
                 depth = depth + 1

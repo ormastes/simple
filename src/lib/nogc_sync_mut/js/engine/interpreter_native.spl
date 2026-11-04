@@ -12,6 +12,8 @@ use std.js.engine.runtime.{NATIVE_DATA_VIEW_GET_INT8, NATIVE_DATA_VIEW_SET_INT8,
 use std.js.engine.runtime.{NATIVE_NODE_STREAM_READABLE_DESTROY, NATIVE_NODE_STREAM_READABLE_UNPIPE}
 use std.js.engine.runtime.{NATIVE_NODE_HTTP_REQUEST_DESTROY}
 use std.js.engine.runtime.{NATIVE_NODE_HTTP_GET, NATIVE_NODE_HTTPS_GET}
+use std.js.engine.runtime.{NATIVE_REGEXP_CONSTRUCTOR, NATIVE_REGEXP_TEST, NATIVE_REGEXP_EXEC}
+use std.js.builtins.regexp.{RegExpObj, MatchResult, regexp_exec}
 use std.js.engine.runtime.{NATIVE_NODE_HTTP_RESPONSE_PAUSE, NATIVE_NODE_HTTP_RESPONSE_RESUME, NATIVE_NODE_HTTP_RESPONSE_IS_PAUSED, NATIVE_NODE_HTTP_RESPONSE_DESTROY, NATIVE_NODE_HTTP_RESPONSE_READ, NATIVE_NODE_HTTP_RESPONSE_SET_ENCODING, NATIVE_NODE_HTTP_RESPONSE_PIPE, NATIVE_NODE_HTTP_RESPONSE_UNPIPE, NATIVE_NODE_HTTP_RESPONSE_ITERATOR_NEXT}
 use std.js.engine.runtime.{NATIVE_UINT8_ARRAY_FILL, NATIVE_UINT8_ARRAY_INCLUDES, NATIVE_UINT8_ARRAY_INDEX_OF, NATIVE_UINT8_ARRAY_JOIN, NATIVE_UINT8_ARRAY_REVERSE, NATIVE_UINT8_ARRAY_TO_REVERSED, NATIVE_UINT8_ARRAY_TO_SORTED, NATIVE_UINT8_ARRAY_WITH, NATIVE_UINT8_ARRAY_LAST_INDEX_OF, NATIVE_UINT8_ARRAY_TO_STRING, NATIVE_UINT8_ARRAY_TO_LOCALE_STRING, NATIVE_UINT8_ARRAY_AT, NATIVE_UINT8_ARRAY_COPY_WITHIN, NATIVE_UINT8_ARRAY_KEYS, NATIVE_UINT8_ARRAY_VALUES, NATIVE_UINT8_ARRAY_ENTRIES, NATIVE_UINT8_ARRAY_ITERATOR_NEXT, NATIVE_UINT8_ARRAY_ITERATOR_SELF, NATIVE_UINT8_ARRAY_SET, NATIVE_UINT8_ARRAY_SLICE}
 use std.js.engine.runtime.{NATIVE_WEBGPU_ADAPTER_REQUEST_DEVICE, NATIVE_WEBGPU_DEVICE_CREATE_BUFFER, NATIVE_WEBGPU_QUEUE_WRITE_BUFFER}
@@ -279,6 +281,12 @@ impl JsInterpreter:
             return self._native_text_decoder(arg_vals)
         if native_id == NATIVE_TEXT_DECODER_DECODE:
             return self._native_text_decoder_decode(this_val, arg_vals)
+        if native_id == NATIVE_REGEXP_CONSTRUCTOR:
+            return self._native_regexp_constructor(arg_vals)
+        if native_id == NATIVE_REGEXP_TEST:
+            return self._native_regexp_test(this_val, arg_vals)
+        if native_id == NATIVE_REGEXP_EXEC:
+            return self._native_regexp_exec(this_val, arg_vals)
         if native_id == NATIVE_WEBASSEMBLY_VALIDATE:
             return self._native_webassembly_validate(arg_vals)
         if native_id == NATIVE_WEBASSEMBLY_INSTANTIATE:
@@ -4592,6 +4600,67 @@ impl JsInterpreter:
         self._define_method_on(obj_id, "encode", NATIVE_TEXT_ENCODER_ENCODE)
         self._define_method_on(obj_id, "encodeInto", NATIVE_TEXT_ENCODER_ENCODE_INTO)
         JsValue.Object(id: obj_id)
+
+    # RegExp objects are plain objects tagged `__simple_regexp` (same scheme as
+    # typed arrays); `/src/flags` literals desugar to `new RegExp(src, flags)`.
+    me _native_regexp_constructor(arg_vals: [JsValue]) -> JsValue:
+        var source = "(?:)"
+        var flags = ""
+        if arg_vals.len() > 0:
+            match arg_vals[0]:
+                JsValue.Object(src_id):
+                    if to_boolean(self.get_object_property(src_id, "__simple_regexp")):
+                        source = js_to_string(self.get_object_property(src_id, "source"))
+                        flags = js_to_string(self.get_object_property(src_id, "flags"))
+                _:
+                    source = js_to_string(arg_vals[0])
+        if arg_vals.len() > 1:
+            flags = js_to_string(arg_vals[1])
+        val re = RegExpObj.create(source, flags)
+        val obj_id = self.create_object()
+        self.set_object_property(obj_id, "__simple_regexp", JsValue.Boolean(v: true))
+        self.set_object_property(obj_id, "source", JsValue.String(v: source))
+        self.set_object_property(obj_id, "flags", JsValue.String(v: flags))
+        self.set_object_property(obj_id, "global", JsValue.Boolean(v: re.global))
+        self.set_object_property(obj_id, "ignoreCase", JsValue.Boolean(v: re.ignore_case))
+        self.set_object_property(obj_id, "multiline", JsValue.Boolean(v: re.multiline))
+        self.set_object_property(obj_id, "lastIndex", JsValue.Number(v: 0.0))
+        self._define_method_on(obj_id, "test", NATIVE_REGEXP_TEST)
+        self._define_method_on(obj_id, "exec", NATIVE_REGEXP_EXEC)
+        JsValue.Object(id: obj_id)
+
+    # The RegExpObj behind a `__simple_regexp` object, or nil for anything else.
+    me _regexp_of(obj_id: i64) -> RegExpObj?:
+        if obj_id < 0 or not to_boolean(self.get_object_property(obj_id, "__simple_regexp")):
+            return nil
+        RegExpObj.create(
+            js_to_string(self.get_object_property(obj_id, "source")),
+            js_to_string(self.get_object_property(obj_id, "flags"))
+        )
+
+    me _native_regexp_test(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        if arg_vals.len() == 0:
+            return JsValue.Boolean(v: false)
+        match self._regexp_of(_get_obj_id(this_val)):
+            Some(re): JsValue.Boolean(v: regexp_exec(re, js_to_string(arg_vals[0])).matched)
+            nil: JsValue.Boolean(v: false)
+
+    me _native_regexp_exec(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
+        if arg_vals.len() == 0:
+            return JsValue.Null
+        val input = js_to_string(arg_vals[0])
+        var m = MatchResult.no_match()
+        match self._regexp_of(_get_obj_id(this_val)):
+            Some(re): m = regexp_exec(re, input)
+            nil: pass_dn
+        if not m.matched:
+            return JsValue.Null
+        val arr_id = self.create_object()
+        self.set_object_property(arr_id, "0", JsValue.String(v: m.value))
+        self.set_object_property(arr_id, "length", JsValue.Number(v: 1.0))
+        self.set_object_property(arr_id, "index", JsValue.Number(v: m.index.to_f64()))
+        self.set_object_property(arr_id, "input", JsValue.String(v: input))
+        JsValue.Array(id: arr_id)
 
     me _native_text_encoder_encode(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
         var value = ""
