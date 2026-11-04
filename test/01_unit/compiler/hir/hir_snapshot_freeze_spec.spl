@@ -1,0 +1,46 @@
+use std.spec.*
+use compiler.hir.hir_types.{HirModule, HirImport, SymbolTable}
+use compiler.hir.target_hir.hir_snapshot.{hir_snapshot_id_equals}
+use compiler.hir.target_hir.hir_freeze.{HirSnapshot, hir_snapshot_freeze, hir_snapshot_verify, hir_snapshot_read}
+
+fn fixture(name: text, path: text) -> HirModule:
+    HirModule(name: name, path: path, imports: [], exports: [],
+        domain_blocks: [], symbols: SymbolTable.new(), functions: {},
+        gpu_function_targets: {}, gpu_function_backend_orders: {}, classes: {},
+        structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [], extend_enums: [])
+
+describe "HirSnapshot deep freeze (TargetHIR PR-B)":
+    it "derives a canonical id that is stable for identical HIR":
+        val a = hir_snapshot_freeze(fixture("app.main", "a.spl"), 0).unwrap()
+        val b = hir_snapshot_freeze(fixture("app.main", "a.spl"), 0).unwrap()
+        expect(hir_snapshot_id_equals(a.id, b.id)).to_be(true)
+        expect(a.id.content_digest.len()).to_equal(64)
+        expect(hir_snapshot_verify(a)).to_be(true)
+
+    it "gives different HIR content a different id":
+        val a = hir_snapshot_freeze(fixture("app.main", "a.spl"), 0).unwrap()
+        val c = hir_snapshot_freeze(fixture("app.main", "c.spl"), 0).unwrap()
+        expect(a.id.content_digest == c.id.content_digest).to_be(false)
+
+    it "is not affected by mutating the source module after freezing":
+        var m = fixture("app.main", "a.spl")
+        val snap = hir_snapshot_freeze(m, 1).unwrap()
+        val before = snap.frozen_bytes
+        m.path = "mutated.spl"
+        m.exports = ["leak"]
+        expect(snap.frozen_bytes).to_equal(before)
+        expect(hir_snapshot_verify(snap)).to_be(true)
+        val again = hir_snapshot_freeze(m, 1).unwrap()
+        expect(hir_snapshot_id_equals(snap.id, again.id)).to_be(false)
+
+    it "hands out independent copies on read and rejects tampered bytes":
+        val snap = hir_snapshot_freeze(fixture("app.main", "a.spl"), 0).unwrap()
+        var first = hir_snapshot_read(snap).unwrap()
+        expect(first.path).to_equal("a.spl")
+        first.path = "changed.spl"
+        expect(hir_snapshot_read(snap).unwrap().path).to_equal("a.spl")
+        val tampered = HirSnapshot(id: snap.id, frozen_bytes: snap.frozen_bytes + " ", codec: snap.codec)
+        expect(hir_snapshot_verify(tampered)).to_be(false)
+        expect(hir_snapshot_read(tampered).unwrap_err()).to_start_with("hir_snapshot_digest_mismatch:")
