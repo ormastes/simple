@@ -13,8 +13,10 @@
 //! one cached `OnceLock<u64>` and returning `false`, no atomic churn beyond
 //! that). See `doc/05_design/runtime/memory_analysis/m2_guard_and_harden_design.md`.
 
+#![cfg_attr(not(unix), allow(dead_code))]
+
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// Host VM page size. Hard-coding 4096 broke every sampled slot on hosts with
@@ -69,8 +71,8 @@ pub fn mem_guard_should_sample(_size: usize) -> bool {
 struct GuardSlot {
     page_base: usize,
     total_pages: usize,
-    #[allow(dead_code)] // read by future owner-report consumers (M2 fault report is optional here)
-    owner: u32,
+    /// Index of this slot's mirror entry in `FAULT_TABLE` (fault-handler view).
+    fault_idx: usize,
     freed: bool,
 }
 
@@ -81,6 +83,167 @@ struct GuardState {
 }
 
 static GUARD_STATE: OnceLock<Mutex<GuardState>> = OnceLock::new();
+
+// ---- Fault-handler view: lock-free, fixed-size, async-signal-safe ----------
+// The Mutex<HashMap> above cannot be used from a signal handler (locks and
+// allocates), so every tracked slot is mirrored into this static atomic table;
+// the SIGSEGV handler only reads it and emits the report with write(2).
+
+const FAULT_SLOTS: usize = 4096;
+const REPORT_MAX: usize = 320;
+const ST_EMPTY: u8 = 0;
+const ST_LIVE: u8 = 1;
+const ST_FREED: u8 = 2;
+const ST_FILLING: u8 = 3;
+
+struct FaultEntry {
+    state: AtomicU8,
+    base: AtomicUsize,
+    len: AtomicUsize,
+    size: AtomicUsize,
+    owner: AtomicUsize,
+}
+
+#[allow(clippy::declare_interior_mutable_const)]
+const FAULT_EMPTY: FaultEntry = FaultEntry {
+    state: AtomicU8::new(ST_EMPTY),
+    base: AtomicUsize::new(0),
+    len: AtomicUsize::new(0),
+    size: AtomicUsize::new(0),
+    owner: AtomicUsize::new(0),
+};
+static FAULT_TABLE: [FaultEntry; FAULT_SLOTS] = [FAULT_EMPTY; FAULT_SLOTS];
+
+/// Claim a free mirror entry and publish the slot. Returns its index.
+fn fault_record(base: usize, len: usize, size: usize, owner: u32) -> Option<usize> {
+    for (i, e) in FAULT_TABLE.iter().enumerate() {
+        if e.state
+            .compare_exchange(ST_EMPTY, ST_FILLING, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            e.base.store(base, Ordering::Relaxed);
+            e.len.store(len, Ordering::Relaxed);
+            e.size.store(size, Ordering::Relaxed);
+            e.owner.store(owner as usize, Ordering::Relaxed);
+            e.state.store(ST_LIVE, Ordering::Release);
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn fault_mark_freed(idx: usize) {
+    FAULT_TABLE[idx].state.store(ST_FREED, Ordering::Release);
+}
+
+fn fault_clear(idx: usize) {
+    FAULT_TABLE[idx].state.store(ST_EMPTY, Ordering::Release);
+}
+
+struct ReportBuf {
+    buf: [u8; REPORT_MAX],
+    len: usize,
+}
+
+impl ReportBuf {
+    fn str(&mut self, s: &str) {
+        for &b in s.as_bytes() {
+            if self.len + 1 < REPORT_MAX {
+                self.buf[self.len] = b;
+                self.len += 1;
+            }
+        }
+    }
+    fn num(&mut self, mut v: usize, base: usize) {
+        let mut tmp = [0u8; 24];
+        let mut n = 0;
+        loop {
+            tmp[n] = b"0123456789abcdef"[v % base];
+            n += 1;
+            v /= base;
+            if v == 0 || n == tmp.len() {
+                break;
+            }
+        }
+        while n > 0 {
+            n -= 1;
+            if self.len + 1 < REPORT_MAX {
+                self.buf[self.len] = tmp[n];
+                self.len += 1;
+            }
+        }
+    }
+}
+
+/// If `addr` lies in a tracked guard slot, build the one-line owner-attribution
+/// report (class, addr, size, owner id) and return it; `None` for any other
+/// address. Allocation-free and lock-free, so safe to call from a signal handler.
+fn fault_report(addr: usize) -> Option<ReportBuf> {
+    let ps = page_size();
+    for e in FAULT_TABLE.iter() {
+        let st = e.state.load(Ordering::Acquire);
+        if st != ST_LIVE && st != ST_FREED {
+            continue;
+        }
+        let lo = e.base.load(Ordering::Relaxed);
+        let hi = lo + e.len.load(Ordering::Relaxed);
+        if addr < lo || addr >= hi {
+            continue;
+        }
+        let class = if st == ST_FREED {
+            "use-after-free"
+        } else if addr < lo + ps {
+            "underflow"
+        } else if addr >= hi - ps {
+            "overflow"
+        } else {
+            "access"
+        };
+        let mut r = ReportBuf { buf: [0; REPORT_MAX], len: 0 };
+        r.str("[mem_guard] guard-page trap: ");
+        r.str(class);
+        r.str(" addr=0x");
+        r.num(addr, 16);
+        r.str(" size=");
+        r.num(e.size.load(Ordering::Relaxed), 10);
+        r.str(" owner=");
+        r.num(e.owner.load(Ordering::Relaxed), 10);
+        r.str("\n");
+        return Some(r);
+    }
+    None
+}
+
+#[cfg(unix)]
+static mut PREV_SEGV: std::mem::MaybeUninit<libc::sigaction> = std::mem::MaybeUninit::uninit();
+#[cfg(unix)]
+static HANDLER_INSTALLED: std::sync::Once = std::sync::Once::new();
+
+/// SIGSEGV handler: print the report if the fault is in a guard slot, then
+/// restore the previous disposition and return so the faulting instruction
+/// re-executes and the process dies exactly as without us (never swallowed;
+/// non-guard faults take the same path).
+#[cfg(unix)]
+extern "C" fn fault_handler(sig: libc::c_int, info: *mut libc::siginfo_t, _ctx: *mut libc::c_void) {
+    unsafe {
+        let addr = (*info).si_addr() as usize;
+        if let Some(r) = fault_report(addr) {
+            libc::write(2, r.buf.as_ptr() as *const libc::c_void, r.len);
+        }
+        libc::sigaction(sig, (&raw const PREV_SEGV) as *const libc::sigaction, std::ptr::null_mut());
+    }
+}
+
+#[cfg(unix)]
+fn install_fault_handler() {
+    HANDLER_INSTALLED.call_once(|| unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = fault_handler as usize;
+        sa.sa_flags = libc::SA_SIGINFO;
+        libc::sigemptyset(&mut sa.sa_mask);
+        libc::sigaction(libc::SIGSEGV, &sa, (&raw mut PREV_SEGV) as *mut libc::sigaction);
+    });
+}
 
 fn guard_state() -> &'static Mutex<GuardState> {
     GUARD_STATE.get_or_init(|| Mutex::new(GuardState::default()))
@@ -144,13 +307,18 @@ pub fn guard_alloc_sampled(size: usize, owner: u32) -> Option<usize> {
         // Right-align within the data region [page_base+page_size(), trailing_page).
         let user_ptr = trailing_page - size;
 
+        let Some(fault_idx) = fault_record(page_base, map_len, size, owner) else {
+            libc::munmap(base, map_len);
+            return None;
+        };
+        install_fault_handler();
         let mut st = guard_state().lock().unwrap_or_else(|e| e.into_inner());
         st.slots.insert(
             user_ptr,
             GuardSlot {
                 page_base,
                 total_pages,
-                owner,
+                fault_idx,
                 freed: false,
             },
         );
@@ -190,6 +358,7 @@ pub fn guard_free_sampled(ptr: usize) -> bool {
         return false; // double free of a guard slot — refuse
     }
     slot.freed = true;
+    fault_mark_freed(slot.fault_idx);
     let page_base = slot.page_base;
     let map_len = slot.total_pages * page_size();
     unsafe {
@@ -201,6 +370,7 @@ pub fn guard_free_sampled(ptr: usize) -> bool {
             break;
         };
         if let Some(evicted) = st.slots.remove(&evict_ptr) {
+            fault_clear(evicted.fault_idx);
             unsafe {
                 libc::munmap(evicted.page_base as *mut libc::c_void, evicted.total_pages * page_size());
             }
@@ -213,6 +383,38 @@ pub fn guard_free_sampled(ptr: usize) -> bool {
 /// (extern `rt_mem_guard_stats`). 0 whenever `SIMPLE_MEM_GUARD_RATE` is unset.
 pub fn guard_sampled_count() -> i64 {
     SAMPLED_TOTAL.load(Ordering::Relaxed) as i64
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+
+    fn text(r: &ReportBuf) -> String {
+        String::from_utf8_lossy(&r.buf[..r.len]).into_owned()
+    }
+
+    #[test]
+    fn fault_report_names_class_size_and_owner() {
+        let ps = page_size();
+        let base = 0x7000_0000_0000usize;
+        let idx = fault_record(base, 4 * ps, 100, 42).expect("table has room");
+        let over = text(&fault_report(base + 3 * ps + 5).expect("trailing guard"));
+        assert!(over.contains("overflow"), "{over}");
+        assert!(over.contains("size=100"), "{over}");
+        assert!(over.contains("owner=42"), "{over}");
+        let under = text(&fault_report(base + 8).expect("leading guard"));
+        assert!(under.contains("underflow"), "{under}");
+        fault_mark_freed(idx);
+        let uaf = text(&fault_report(base + ps + 3).expect("freed slot"));
+        assert!(uaf.contains("use-after-free"), "{uaf}");
+        fault_clear(idx);
+        assert!(fault_report(base + 3 * ps + 5).is_none(), "cleared slot must not report");
+    }
+
+    #[test]
+    fn fault_report_ignores_non_guard_address() {
+        assert!(fault_report(0x10).is_none());
+    }
 }
 
 // Every test here exercises the real mmap/mprotect-backed implementation
