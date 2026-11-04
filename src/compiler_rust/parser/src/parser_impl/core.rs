@@ -956,6 +956,12 @@ impl<'a> Parser<'a> {
                         | TokenKind::MinusAssign
                         | TokenKind::StarAssign
                         | TokenKind::SlashAssign
+                        | TokenKind::Plus
+                        | TokenKind::Star
+                        | TokenKind::Slash
+                        | TokenKind::Percent
+                        | TokenKind::And
+                        | TokenKind::Or
                         | TokenKind::Dot
                         | TokenKind::LParen
                         | TokenKind::String(_)
