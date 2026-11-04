@@ -5,7 +5,7 @@ use app.io.mod.{dir_create, file_exists, file_read, process_run_bounded}
 use app.io.env_ops.{env_get}
 use std.nogc_sync_mut.io.stderr_ops.{stderr_write}
 use app.compiler_entrypoint.inventory_trace.{CompilerInventoryTraceV1, inventory_trace_create_v1}
-use app.compiler_entrypoint.inventory_refresh_lease.{CompilerInventoryRefreshLeaseV1}
+use app.compiler_entrypoint.inventory_refresh_lease.{CompilerInventoryRefreshLeaseV1, compiler_inventory_lock_wait_v1, compiler_inventory_lock_budget_v1}
 use std.common.crypto.sha256.{sha256_text}
 use std.scv.compile_source_inventory.{CompileSourceEventV1, compile_source_inventory_apply_observed_events_v1, compile_source_inventory_digest_valid_v1, compile_source_inventory_git_event_v1, compile_source_inventory_path_valid_v1, compile_source_inventory_read_pointer_content_v1}
 use std.scv.compile_source_inventory.{compile_source_inventory_cache_root_valid_v1,
@@ -986,7 +986,7 @@ fn _compiler_inventory_refresh_owned_cost_v1(
             trace!.prepared_record = ""
             trace!.result_record = ""
         val lease = CompilerInventoryRefreshLeaseV1(cache_root, trace, cost)
-        if not lease.acquire(300):
+        if not lease.acquire_waiting(compiler_inventory_lock_budget_v1()):
             return compiler_inventory_invalid_v1("compile-event-refresh-lock-unavailable")
         val result = _compiler_inventory_refresh_observed_cost_v1(
             root, cache_root, source_roots, cold_init, trace, cost, lease)
@@ -1070,7 +1070,7 @@ fn compiler_inventory_admit_extra_roots_v1(
     val event_root = compiler_inventory_event_root_v1(cache_root)
     if not dir_create(event_root, true):
         return compiler_inventory_invalid_v1("compile-event-refresh-lock-directory-failed")
-    val refresh_lock = file_lock("{event_root}/refresh.lock", 300)
+    val refresh_lock = compiler_inventory_lock_wait_v1("{event_root}/refresh.lock", compiler_inventory_lock_budget_v1())
     if refresh_lock < 0:
         return compiler_inventory_invalid_v1("compile-event-refresh-lock-unavailable")
     val result = _compiler_inventory_admit_extra_roots_locked_v1(root, cache_root, extra_roots)
