@@ -1367,6 +1367,12 @@ pub(crate) fn evaluate_method_call(
                 }
             }
 
+            // Built-in Display for payload-less enum variants: the variant name.
+            // User-defined `to_string` (handled above) takes precedence.
+            if matches!(method, "to_string" | "to_text") && args.is_empty() && payload.is_none() {
+                return Ok(Value::text(variant.clone()));
+            }
+
             // Some(x) member-call forwarding. Since 60fd804c, `-> T?` functions
             // Some-wrap their plain returns; such a value can then be funneled
             // into a non-Optional context the lib treats as a bare value — e.g.
