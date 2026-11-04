@@ -145,6 +145,13 @@ impl<'a> Parser<'a> {
         Self::from_lexer(source, Lexer::new_for_target(source, os, arch))
     }
 
+    /// Test hook: parse with the ADR-005 char-literal lexer forced on/off,
+    /// independent of `SIMPLE_CHAR_LITERAL_LEXER`.
+    #[cfg(test)]
+    pub(crate) fn new_with_char_literals(source: &'a str, on: bool) -> Self {
+        Self::from_lexer(source, Lexer::new(source).with_char_literals(on))
+    }
+
     fn from_lexer(source: &'a str, mut lexer: Lexer<'a>) -> Self {
         let cond_diagnostics = std::mem::take(&mut lexer.cond_diagnostics);
         let cond_structural_error = (!lexer.cond_balanced).then(|| {
@@ -711,6 +718,7 @@ impl<'a> Parser<'a> {
                         | TokenKind::String(_)
                         | TokenKind::FString(_)
                         | TokenKind::RawString(_)
+                        | TokenKind::CharLit(_)
                         | TokenKind::TypedString(_, _)
                         | TokenKind::TypedRawString(_, _)
                 ) || matches!(&next.kind, TokenKind::Identifier { name, .. } if name == "volatile")
@@ -1351,6 +1359,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::String(_)
                 | TokenKind::FString(_)
                 | TokenKind::RawString(_)
+                | TokenKind::CharLit(_)
                 | TokenKind::TypedString(_, _)
                 | TokenKind::TypedRawString(_, _)
                 | TokenKind::Bool(_)
