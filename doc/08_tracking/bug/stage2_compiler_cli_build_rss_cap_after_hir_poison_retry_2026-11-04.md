@@ -83,6 +83,31 @@ So the RSS kill is a consequence; the root cause is the poison.
   payload-or-nil and flattens, matching the guide's "returns nil if any part
   is nil". (2) a native `Err` receiver follows whatever `if val v = result`
   does natively (`.?` -> `rt_is_some` on the Err handle).
+- **FIXED (work/bug-optchain-20261104): seed `?.` now flattens on both seed
+  lanes.** (a) Seed JIT: `OptionalChain`/`OptionalMethodCall` had no HIR arm
+  and hit the lenient catch-all (`HirExprKind::Nil`), so every `?.` answered
+  nil. New `lower_optional_chain` (`hir/lower/expr/control.rs`) binds the
+  subject once, tests presence (`rt_is_some`, plus `!Err` via
+  `rt_enum_check_variant` for a static Result/Option), reads the member on
+  the payload (`rt_enum_payload` for Result/Option, `rt_unwrap_or_self`
+  otherwise) and yields it as-is, nil on the else edge (raw scalars boxed).
+  (b) Seed interpreter: result is the member value as-is or `Value::Nil`,
+  never `Some(..)`; the field read now goes through the ordinary `.field`
+  evaluator (the old `get_field_value` helper rejected `ClassInstance`, so
+  `a?.v` on a class errored -- helper deleted, no other caller). Probe
+  (`x?.f`, nil receiver, `maybe(0)/maybe(1) ?? d`, method, 3-link chain with
+  nil tail, `Ok`/`Err` receivers, `z?.v == nil`): seed JIT and
+  `SIMPLE_EXECUTION_MODE=interpret` print identical lines. Spec
+  `optional_chain_desugar_spec.spl` 8/8 under the interpreter and under
+  `SIMPLE_JIT_SPEC_ENTRY=1 SIMPLE_JIT_STRICT=1` (the new flattening case
+  fails 7/8 on the pre-fix seed); cargo test
+  `optional_chain_lowers_to_presence_tested_access`. Census: no `src/` site
+  depends on the old `Some(..)` wrapping (`lms/server.spl`
+  `get(k)?.as_string()?` now unwraps the inner Option as intended). Still
+  open, needs a deployed self-hosted compiler: native `Err` receiver --
+  `rt_is_present`/`rt_unwrap_or_self` unwrap only Option, so natively
+  `Err(e)?.f` is treated as present and `Ok(v)?.f` reads on the Result
+  handle, not its payload; not verified here.
 - `git_provider.spl:161,174` `"...^{tree}"` interpolated the local `tree`
   (still `""`) -> `rev^`; escaped as `^\{tree\}` (genuine source bug).
 - **No in-process MIR retry after HIR compile errors.** A MIR shard child

@@ -2320,6 +2320,193 @@ impl Lowerer {
         })
     }
 
+    /// Optional chaining `recv?.member` / `recv?.member(args)`.
+    ///
+    /// Contract (syntax_quick_reference.md § Safe Navigation; self-hosted
+    /// `optional_chain_desugar` in
+    /// src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl):
+    /// evaluate `recv` once; when present (non-nil, not `None`, not `Err`)
+    /// yield the member read on its payload (`Some`/`Ok` unwrapped, any other
+    /// value is itself) AS-IS, otherwise nil. Never re-wrapped in `Some`.
+    /// Before this arm existed the lenient catch-all lowered every `?.` to a
+    /// bare nil under the JIT.
+    pub(super) fn lower_optional_chain(
+        &mut self,
+        receiver: &Expr,
+        member: &str,
+        call_args: Option<&[ast::Argument]>,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        let subject_hir = self.lower_optional_subject(receiver, ctx)?;
+        let subject_ty = subject_hir.ty;
+        let subject_idx = ctx.locals.len();
+        ctx.add_local(format!("$optchain_subject_{}", subject_idx), subject_ty, Mutability::Immutable);
+        let subject_ref = HirExpr {
+            kind: HirExprKind::Local(subject_idx),
+            ty: subject_ty,
+        };
+
+        let is_raw_scalar = matches!(
+            subject_ty,
+            TypeId::BOOL
+                | TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::U64
+                | TypeId::F32
+                | TypeId::F64
+                | TypeId::CHAR
+        );
+        let result_like = matches!(
+            self.module.types.get(subject_ty),
+            Some(HirType::Enum { name, .. }) if name == "Result" || name == "Option"
+        );
+
+        // Presence: never the nil sentinel / canonical None (`rt_is_some`),
+        // and for a static Result never `Err` -- `Err(e)?.f` is nil, matching
+        // the interpreter's `try_unwrap_option_or_result`.
+        let not_none = if is_raw_scalar {
+            HirExpr {
+                kind: HirExprKind::Binary {
+                    op: BinOp::NotEq,
+                    left: Box::new(subject_ref.clone()),
+                    right: Box::new(HirExpr {
+                        kind: HirExprKind::Nil,
+                        ty: TypeId::NIL,
+                    }),
+                },
+                ty: TypeId::BOOL,
+            }
+        } else {
+            HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_is_some".to_string(),
+                    args: vec![subject_ref.clone()],
+                },
+                ty: TypeId::BOOL,
+            }
+        };
+        let condition = if result_like {
+            let err_disc: i64 = {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                "Err".hash(&mut hasher);
+                (hasher.finish() & 0xFFFFFFFF) as i64
+            };
+            let is_err = HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_enum_check_variant".to_string(),
+                    args: vec![
+                        subject_ref.clone(),
+                        HirExpr {
+                            kind: HirExprKind::Integer(self.enum_runtime_id_for_type(subject_ty)),
+                            ty: TypeId::I64,
+                        },
+                        HirExpr {
+                            kind: HirExprKind::Integer(err_disc),
+                            ty: TypeId::I64,
+                        },
+                    ],
+                },
+                ty: TypeId::BOOL,
+            };
+            HirExpr {
+                kind: HirExprKind::Binary {
+                    op: BinOp::And,
+                    left: Box::new(not_none),
+                    right: Box::new(HirExpr {
+                        kind: HirExprKind::Unary {
+                            op: UnaryOp::Not,
+                            operand: Box::new(is_err),
+                        },
+                        ty: TypeId::BOOL,
+                    }),
+                },
+                ty: TypeId::BOOL,
+            }
+        } else {
+            not_none
+        };
+
+        // Payload the member is read on.
+        let (payload_ty, unwrap_fn) = if result_like {
+            (
+                self.result_like_payload_type(subject_ty).unwrap_or(TypeId::ANY),
+                "rt_enum_payload",
+            )
+        } else {
+            match self.module.types.get(subject_ty) {
+                Some(HirType::Pointer { inner, .. }) => (*inner, "rt_unwrap_or_self"),
+                _ => (subject_ty, "rt_unwrap_or_self"),
+            }
+        };
+        let payload_name = format!("$optchain_payload_{}", ctx.locals.len());
+        let payload_idx = ctx.add_local(payload_name.clone(), payload_ty, Mutability::Immutable);
+        let bind_payload = HirStmt::Let {
+            local_index: payload_idx,
+            ty: payload_ty,
+            value: Some(HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: unwrap_fn.to_string(),
+                    args: vec![subject_ref],
+                },
+                ty: payload_ty,
+            }),
+        };
+        let payload_expr = Expr::Identifier(payload_name);
+        let access = match call_args {
+            Some(args) => self.lower_method_call(&payload_expr, member, args, ctx)?,
+            None => self.lower_field_access(&payload_expr, member, ctx)?,
+        };
+
+        // Raw scalars must leave through a tagged slot so the nil edge and the
+        // value edge agree (same hazard as `lower_coalesce`'s default).
+        let access_ty = access.ty;
+        let result_ty = if self.box_scalar_into_tagged_result(TypeId::ANY, access.clone()).ty != access_ty
+            || access_ty == TypeId::NIL
+        {
+            TypeId::ANY
+        } else {
+            access_ty
+        };
+        let access = self.box_scalar_into_tagged_result(TypeId::ANY, access);
+        let access = if result_ty == TypeId::ANY && access.ty != TypeId::ANY {
+            HirExpr { ty: TypeId::ANY, ..access }
+        } else {
+            access
+        };
+
+        let present = HirExpr {
+            kind: HirExprKind::Block(vec![bind_payload, HirStmt::Expr(access)]),
+            ty: result_ty,
+        };
+        let selected = HirExpr {
+            kind: HirExprKind::If {
+                condition: Box::new(condition),
+                then_branch: Box::new(present),
+                else_branch: Some(Box::new(HirExpr {
+                    kind: HirExprKind::Nil,
+                    ty: TypeId::NIL,
+                })),
+            },
+            ty: result_ty,
+        };
+        let store_subject = HirStmt::Let {
+            local_index: subject_idx,
+            ty: subject_ty,
+            value: Some(subject_hir),
+        };
+        Ok(HirExpr {
+            kind: HirExprKind::Block(vec![store_subject, HirStmt::Expr(selected)]),
+            ty: result_ty,
+        })
+    }
+
     /// Box a raw-scalar expression when it must flow out through a slot whose
     /// runtime representation is a tagged `RuntimeValue` (a nullable `T?`, or
     /// `Any`). Returns the expression unchanged in every other case.

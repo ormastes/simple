@@ -109,82 +109,26 @@ fn call_closure_no_args(
     }
 }
 
-/// Helper to get a field value from an object-like value
-fn get_field_value(val: &Value, field: &str) -> Result<Value, CompileError> {
-    match val {
-        Value::Object { fields, class, .. } => {
-            if let Some(v) = fields.get(field) {
-                Ok(v.clone())
-            } else {
-                if std::env::var("SIMPLE_DBG_COLLISION").is_ok() {
-                    eprintln!(
-                        "[DBG GETFIELD] class={} missing_field={} actual_fields=[{}]",
-                        class,
-                        field,
-                        fields.keys().map(|s| s.as_str()).collect::<Vec<_>>().join(",")
-                    );
-                }
-                let ctx = ErrorContext::new()
-                    .with_code(codes::UNDEFINED_FIELD)
-                    .with_help("check the field name");
-                Err(CompileError::semantic_with_context(
-                    format!("class `{}` has no field named `{}`", class, field),
-                    ctx,
-                ))
-            }
+/// Bind the present `?.` payload to a scratch local for the duration of
+/// `body`, restoring any outer binding of the same name afterwards (nested
+/// chains reuse the name).
+fn with_optional_chain_temp(
+    env: &mut Env,
+    payload: Value,
+    body: impl FnOnce(&mut Env, Box<Expr>) -> Result<Value, CompileError>,
+) -> Result<Value, CompileError> {
+    let name = "__optional_chain_temp__".to_string();
+    let saved = env.insert(name.clone(), payload);
+    let result = body(env, Box::new(Expr::Identifier(name.clone())));
+    match saved {
+        Some(prev) => {
+            env.insert(name, prev);
         }
-        Value::Dict(map) => {
-            if let Some(v) = crate::interpreter::module_dict_get(map, field) {
-                Ok(v)
-            } else {
-                let ctx = ErrorContext::new()
-                    .with_code(codes::UNDEFINED_FIELD)
-                    .with_help("key not found in dict");
-                Err(CompileError::semantic_with_context(
-                    format!("key `{}` not found in dict", field),
-                    ctx,
-                ))
-            }
-        }
-        Value::Str(s) => match field {
-            "len" => Ok(Value::Int(s.len() as i64)),
-            "is_empty" => Ok(Value::Bool(s.is_empty())),
-            _ => {
-                let ctx = ErrorContext::new()
-                    .with_code(codes::UNDEFINED_FIELD)
-                    .with_help("available properties on String: len, is_empty");
-                Err(CompileError::semantic_with_context(
-                    format!("unknown property '{field}' on String"),
-                    ctx,
-                ))
-            }
-        },
-        Value::Array(arr) => match field {
-            "len" => Ok(Value::Int(arr.len() as i64)),
-            "is_empty" => Ok(Value::Bool(arr.is_empty())),
-            // Neighbor access for stencil computations (returns first/last element as boundary)
-            "left_neighbor" => Ok(arr.first().cloned().unwrap_or(Value::Nil)),
-            "right_neighbor" => Ok(arr.last().cloned().unwrap_or(Value::Nil)),
-            _ => {
-                let ctx = ErrorContext::new()
-                    .with_code(codes::UNDEFINED_FIELD)
-                    .with_help("available properties on Array: len, is_empty, left_neighbor, right_neighbor");
-                Err(CompileError::semantic_with_context(
-                    format!("unknown property '{field}' on Array"),
-                    ctx,
-                ))
-            }
-        },
-        _ => {
-            let ctx = ErrorContext::new()
-                .with_code(codes::UNDEFINED_FIELD)
-                .with_help("field access requires an object, dict, or value with properties");
-            Err(CompileError::semantic_with_context(
-                format!("cannot access field '{}' on this value type", field),
-                ctx,
-            ))
+        None => {
+            env.remove(&name);
         }
     }
+    result
 }
 
 mod calls;
@@ -613,75 +557,38 @@ pub(crate) fn evaluate_expr(
                 evaluate_expr(default, env, functions, classes, enums, impl_methods)
             }
         }
-        // Optional chaining: expr?.field
+        // Optional chaining: expr?.field / expr?.method(args).
+        // Contract (syntax_quick_reference.md § Safe Navigation, and the
+        // self-hosted `optional_chain_desugar` in
+        // src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl):
+        // the result is the member's value AS-IS when the receiver is present
+        // (Some/Ok payload unwrapped; any other value is itself), else nil.
+        // It is never re-wrapped, so `x?.maybe(0) ?? d` sees the method's own
+        // None and `a?.next?.next?.v` sees a plain nil field. Wrapping here
+        // produced Some(None)/Some(nil) and diverged from JIT + native.
         Expr::OptionalChain { expr: inner, field } => {
             let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
-            if let Some(unwrapped) = try_unwrap_option_or_result(&val) {
-                // Access the field on the unwrapped value
-                let field_val = get_field_value(&unwrapped, field)?;
-
-                // Flatten nested Options: if field_val is already an Option, return it directly
-                // This prevents Some(Some(x)) and gives us just Some(x)
-                if let Value::Enum {
-                    enum_name,
-                    variant,
-                    payload,
-                } = &field_val
-                {
-                    if enum_name == enum_names::OPTION && (variant == enum_names::SOME || variant == enum_names::NONE) {
-                        // Field is already an Option, return it as-is (flattening behavior)
-                        return Ok(field_val);
-                    }
-                }
-
-                // Wrap non-Option result in Some
-                Ok(Value::Enum {
-                    enum_name: enum_names::OPTION.to_string(),
-                    variant: enum_names::SOME.to_string(),
-                    payload: Some(Box::new(field_val)),
-                })
-            } else {
-                // Return None
-                Ok(Value::Enum {
-                    enum_name: enum_names::OPTION.to_string(),
-                    variant: enum_names::NONE.to_string(),
-                    payload: None,
-                })
+            match try_unwrap_option_or_result(&val) {
+                // Read the member through the ordinary `.field` evaluator so
+                // every receiver kind (ClassInstance, Object, Dict, properties)
+                // behaves exactly like `payload.field`.
+                Some(unwrapped) => with_optional_chain_temp(env, unwrapped, |env, recv| {
+                    let access = Expr::FieldAccess {
+                        receiver: recv,
+                        field: field.clone(),
+                    };
+                    evaluate_expr(&access, env, functions, classes, enums, impl_methods)
+                }),
+                None => Ok(Value::Nil),
             }
         }
-        // Optional method call: expr?.method(args)
         Expr::OptionalMethodCall { receiver, method, args } => {
             let val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?;
-            if let Some(unwrapped) = try_unwrap_option_or_result(&val) {
-                // Create a synthetic method call expression on the unwrapped value
-                // We'll temporarily store the unwrapped value in env and call the method
-                let temp_var_name = "__optional_chain_temp__".to_string();
-                env.insert(temp_var_name.clone(), unwrapped);
-                let temp_receiver = Box::new(Expr::Identifier(temp_var_name.clone()));
-                let result = evaluate_method_call(
-                    &temp_receiver,
-                    method,
-                    args,
-                    env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?;
-                env.remove(&temp_var_name);
-                // Wrap result in Some
-                Ok(Value::Enum {
-                    enum_name: enum_names::OPTION.to_string(),
-                    variant: enum_names::SOME.to_string(),
-                    payload: Some(Box::new(result)),
-                })
-            } else {
-                // Return None
-                Ok(Value::Enum {
-                    enum_name: enum_names::OPTION.to_string(),
-                    variant: enum_names::NONE.to_string(),
-                    payload: None,
-                })
+            match try_unwrap_option_or_result(&val) {
+                Some(unwrapped) => with_optional_chain_temp(env, unwrapped, |env, recv| {
+                    evaluate_method_call(&recv, method, args, env, functions, classes, enums, impl_methods)
+                }),
+                None => Ok(Value::Nil),
             }
         }
         // Safe cast with default: expr as Type or: default
