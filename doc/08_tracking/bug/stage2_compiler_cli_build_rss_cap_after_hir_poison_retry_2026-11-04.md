@@ -108,6 +108,27 @@ So the RSS kill is a consequence; the root cause is the poison.
   `rt_is_present`/`rt_unwrap_or_self` unwrap only Option, so natively
   `Err(e)?.f` is treated as present and `Ok(v)?.f` reads on the Result
   handle, not its payload; not verified here.
+- **FIX-IMPLEMENTED, NATIVE VERIFICATION PENDING (work/bug-optchain-native-20261105):
+  native `Result` receiver of `?.`.** Root cause is the desugar, not the
+  runtime helpers: `.?`/`if val` deliberately keep a `Result` opaque-present
+  on every lane (seed: `if val w = Err(..)` binds the Err; docs idiom is
+  `if val v = r.ok.?`), so `rt_is_some`/`rt_unwrap_or_self` stay unchanged
+  (C/Rust twins untouched). `optional_chain_desugar` now takes
+  `receiver_is_result` from `HirLowering.optional_chain_receiver_is_result`
+  (probe-lowers the receiver, diagnostics rolled back, `binding_source_type`
+  is `HirTypeKind.Result`) and tests `recv.ok.?` instead of `recv.?`, so
+  `Ok(v)?.f` binds `v` and `Err(_)?.f` is nil -- the static-Result rule the
+  seed JIT's `lower_optional_chain` uses. `.ok` lowers natively via
+  `lower_result_projection`. Spec: 2 HIR-shape cases (Result receiver ->
+  `ok-projection` for field and method form; untyped receiver unchanged) +
+  1 behaviour case (Result-returning call receiver). Run with the Nov-4
+  seed (`src/compiler_rust/target/release/simple`, predates #6729): 10/11
+  under the interpreter and 10/11 under `SIMPLE_JIT_SPEC_ENTRY=1
+  SIMPLE_JIT_STRICT=1`; the 1 failure ("yields the member value flat") is
+  pre-existing on the unmodified tree with that seed (7/8) and is the #6729
+  seed fix itself. Native end-to-end pending an admitted self-hosted
+  compiler: `bin/simple native-build` of a probe with `Ok(P(x:7))?.x` == 7
+  and `Err("e")?.x` == nil.
 - `git_provider.spl:161,174` `"...^{tree}"` interpolated the local `tree`
   (still `""`) -> `rev^`; escaped as `^\{tree\}` (genuine source bug).
 - **No in-process MIR retry after HIR compile errors.** A MIR shard child
