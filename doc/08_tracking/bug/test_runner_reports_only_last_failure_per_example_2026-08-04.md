@@ -100,3 +100,14 @@ The pure-Simple framework (`src/lib/nogc_sync_mut/spec.spl`) already accumulates
 Status: fix-implemented-partial. Seed is bootstrap-only and not redeployed in this
 lane; a seed fix (append to a bounded Vec) needs a seed rebuild to verify.
 Re-run the fixture on a self-hosted runtime to confirm both messages print.
+
+## Fixed 2026-11-04 (g-lastfail lane)
+
+Seed `BDD_FAILURE_MSG` is now a bounded `Vec<String>` (cap 16, then "+N more");
+all matcher sites push via `push_bdd_failure`; first-failure/pass semantics unchanged.
+Evidence: `cargo test -p simple-compiler --lib failure_retention_tests` 2 passed
+(old single-slot logic keeps only the last message, so the test cannot pass there);
+test-only seed release build (shared target, not deployed) running
+`test test/fixtures/spec_failure_retention/two_failures_block.spl` prints both
+`expected 11 to equal 22` and `expected 33 to equal 44`.
+Status: fixed.
