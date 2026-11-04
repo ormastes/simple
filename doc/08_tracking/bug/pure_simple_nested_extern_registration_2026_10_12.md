@@ -107,3 +107,15 @@ admitted producer, then perform the required compiler/library/MCP checks before
 admission. The broader lexical-scope, generic/effect metadata and later
 module-declaration requirements remain OPEN. The `rt_cpu_count` hoisting
 workaround remains in place.
+
+## c28-w2 triage 2026-11-04: fix landed, verification pending
+
+PR #6369 (084fca5abf4) and #5958 (c78f0b004f5) landed the parser-side
+nested-extern registration and conflicting-signature diagnostic with spec
+`test/01_unit/compiler/frontend/inline_extern_fn_registration_spec.spl`
+(15 scenarios). The `rt_cpu_count` module-scope hoist in
+`src/compiler/00.common/parallel.spl:15` is KEPT. Status:
+fix-implemented-verification-pending. Stage3 repro: run the 15-scenario spec
+with a stage3 CLI, then restore the nested declaration in
+`ParallelConfig.default_config` and native-build `parallel.spl`; success is a
+COFF/ELF object with an undefined `rt_cpu_count` and no HIR "unresolved name".

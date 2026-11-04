@@ -52,3 +52,11 @@ these regressions. Groups 99/104/108/111/116/117/120 retain their prior unresolv
 boundaries; no exact receiver proof for the Result unwrap diagnostics was
 established here. No universal enum completion, formal proof, or release PASS
 is claimed. Root controls the existing six-total retry cap and normal landing.
+
+## c28-w2 triage 2026-11-04: deferred
+
+Consumer mitigation (`val suggestion: text? = ...` at trait_coherence.spl:104)
+is in place on origin; the general branch-join Some/nil metadata inference is
+a native MIR issue and its specs are UNRUN pending a stage3. Status left open.
+Stage3 repro: remove the `: text?` annotation, run
+`test/01_unit/compiler/mir/optional_enum_payload_owner_spec.spl` natively.
