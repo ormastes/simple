@@ -570,6 +570,123 @@ pub fn bare_node_placeholder_v1(decl_type: text) -> text:
         return "Span(start: 0, end: 0, line: 0, col: 0, file: \"\", length: 0)"
     ""
 
+fn bare_placeholder_literal_v1(u: CodecUniverse, type_text: text, depth: i64) -> text:
+    """A literal that builds a bare (never Option-boxed) placeholder of
+    `type_text`, or "" when no safe placeholder exists.
+
+    Generalises bare_node_placeholder_v1 (2026-11-05, stage3 s3_fable41 hello,
+    representation_observe_function_v1+0xa26, fault address -1): after the
+    HirType/SymbolId/Span fix the by-value copy-in of a decoded HirFunction
+    faulted one nested struct later, in func_attr.optimization_req, because the
+    decoder still read every other non-optional struct/enum field through a
+    `var f_x: T? = nil` local. Recursive over the declaration universe:
+    primitives get their zero, an optional gets nil, list/pair/dict get an empty
+    container, a struct is built over ALL its fields, an enum uses its first
+    payload-less variant. Any component without a placeholder (an opaque
+    declaration, an enum with no unit variant, depth beyond 6) makes the whole
+    literal "" so the caller keeps today's `T?` local -- a wrong placeholder is
+    worse than the box it replaces.
+    """
+    if depth > 6:
+        return ""
+    val t = _strip_default(type_text).trim()
+    if t == "":
+        return ""
+    val legacy = bare_node_placeholder_v1(t)
+    if legacy != "":
+        return legacy
+    val s = u.classify(t)
+    if s.cat == "prim_i64":
+        return "0"
+    if s.cat == "prim_bool":
+        return "false"
+    if s.cat == "prim_text":
+        return "\"\""
+    if s.cat == "prim_f64":
+        return "0.0"
+    if s.cat == "prim_char":
+        return "0 as char"
+    if s.cat == "opt":
+        return "nil"
+    if s.cat == "list" or s.cat == "pair":
+        return "[]"
+    if s.cat == "dict":
+        return "{}"
+    if s.cat != "node":
+        return ""
+    val decl = u.decl_of(s.name)
+    if decl.is_enum:
+        for row in decl.variants:
+            if parse_payload_fields(row.payload_schema).len() == 0:
+                return s.name + "." + row.variant
+        return ""
+    var parts: [text] = []
+    for f in decl.fields:
+        val lit = bare_placeholder_literal_v1(u, f.type_text, depth + 1)
+        if lit == "":
+            return ""
+        parts.push(f.binder + ": " + lit)
+    s.name + "(" + _join(parts, ", ") + ")"
+
+fn _field_is_bare(decl: CodecDecl, f: FieldDecl) -> bool:
+    """False when the owning struct carries a `has_<field>` presence flag for a
+    non-legacy type: absence is then a real in-memory state (HirFunction
+    export_attr / driver_manifest_attr / vhdl_metadata are nil under their has_*
+    flag), and decoding it to a placeholder would re-encode as present and break
+    the round-trip byte identity the HIR cache self-check relies on. Such
+    fields keep their `T?` local exactly as before. The legacy HirType /
+    SymbolId / Span literals are always bare (HirExpr.type_ keeps its has_type_
+    flag as the authority)."""
+    if bare_node_placeholder_v1(_strip_default(f.type_text).trim()) != "":
+        return true
+    for g in decl.fields:
+        if g.binder == "has_" + f.binder:
+            return false
+    true
+
+fn _placeholder_helper_name(type_name: text) -> text:
+    "hc_placeholder_" + _codec_snake(type_name)
+
+fn _bare_field_placeholder_expr(u: CodecUniverse, decl_type: text) -> text:
+    """The expression that initialises a bare field local: the literal for the
+    legacy types and enums, a once-emitted helper call for other structs, or ""."""
+    val lit = bare_placeholder_literal_v1(u, decl_type, 0)
+    if lit == "":
+        return ""
+    if bare_node_placeholder_v1(decl_type) == "" and u.is_struct(decl_type):
+        return _placeholder_helper_name(decl_type) + "()"
+    lit
+
+fn _bare_field_helper_types(u: CodecUniverse, order: [text]) -> [text]:
+    """Struct types that some declaration reads into a bare field local (in
+    first-use order), i.e. exactly those _bare_field_placeholder_expr names."""
+    var out: [text] = []
+    for name in order:
+        val decl = u.decl_of(name)
+        var field_types: [text] = []
+        if decl.is_enum:
+            for row in decl.variants:
+                for f in parse_payload_fields(row.payload_schema):
+                    field_types.push(f.type_text)
+        else:
+            for f in decl.fields:
+                if _field_is_bare(decl, f):
+                    field_types.push(f.type_text)
+        for ft in field_types:
+            val shape = u.classify(ft)
+            val dt = _strip_default(ft).trim()
+            if shape.cat == "node" and u.is_struct(dt) and not _contains(out, dt):
+                if _bare_field_placeholder_expr(u, dt) == _placeholder_helper_name(dt) + "()":
+                    out.push(dt)
+    out
+
+fn _emit_placeholder_helpers(u: CodecUniverse, order: [text]) -> text:
+    var out = ""
+    for dt in _bare_field_helper_types(u, order):
+        out = out + "fn " + _placeholder_helper_name(dt) + "() -> " + dt + ":\n"
+        out = out + "    " + bare_placeholder_literal_v1(u, dt, 0) + "\n\n"
+    out
+
 fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: EmitCounter,
         required_node: bool = false, bare_field: bool = false) -> text:
     """Statements that read one value of `type_text` into a new local `target`.
@@ -593,7 +710,10 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         elif s.cat == "prim_bool":
             out = out + indent + "val " + target + " = if raw{k0} == \"N\": nil else: raw{k0} == \"1\"\n"
         else:
-            out = out + indent + "val " + target + " = if raw{k0} == \"\\\\N\": nil else: flat_pool_unescape(raw{k0})\n"
+            # A NON-optional text field decodes an absent value to the empty
+            # string, never nil; opt-inner, list and dict targets keep nil.
+            val absent_text = if bare_field: "\"\"" else: "nil"
+            out = out + indent + "val " + target + " = if raw{k0} == \"\\\\N\": " + absent_text + " else: flat_pool_unescape(raw{k0})\n"
         return out
     if s.cat == "prim_f64":
         return indent + "val " + target + " = hc_read_f64(r)\n"
@@ -616,7 +736,7 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         # as the bare type (see bare_node_placeholder_v1), so the store into
         # the non-optional field never carries an Option transport word. The
         # presence flag is still read; an absent node leaves the placeholder.
-        val placeholder = if bare_field: bare_node_placeholder_v1(decl_type) else: ""
+        val placeholder = if bare_field: _bare_field_placeholder_expr(u, decl_type) else: ""
         var out = if placeholder != "":
             indent + "var " + target + ": " + decl_type + " = " + placeholder + "\n"
         else:
@@ -842,7 +962,7 @@ fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
     var names: [text] = []
     for f in decl.fields:
         val required_function_entry = decl.name == "HirModule" and f.binder == "functions"
-        parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "    ", c, required_function_entry, true))
+        parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "    ", c, required_function_entry, _field_is_bare(decl, f)))
         parts.push(_emit_nil_scalar_reject(u, f.type_text, "f_" + f.binder, "    ", "raw{c.n - 1}",
             decl.name + "." + f.binder))
         names.push(f.binder + ": f_" + f.binder)
@@ -880,6 +1000,7 @@ fn emit_codec_file(u: CodecUniverse) -> text:
     parts.push("# decoders route an unknown stored tag to hc_bad_tag, which exits.\n\n")
     parts.push(codec_use_lines() + "\n")
     val order = codec_emit_order(u)
+    parts.push(_emit_placeholder_helpers(u, order))
     var bodies: [text] = []
     # Optional decoders (NIL-RET-001): every opaque decoder, plus each
     # generated one whose signature came out `T?`.
@@ -914,5 +1035,5 @@ fn codec_decl_count(repo_root: text) -> i64:
 
 export codec_decl_sources, codec_opaque_types, CodecUniverse, CodecDecl, TypeShape
 export extract_codec_struct_fields, codec_closure, codec_emit_order
-export emit_codec_file, generate_codec_into, codec_decl_count
+export emit_codec_file, generate_codec_into, codec_decl_count, bare_placeholder_literal_v1
 export enc_fn_name, dec_fn_name, CODEC_GEN_HEADER
