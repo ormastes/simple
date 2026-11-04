@@ -159,6 +159,38 @@ describe "for-in over enumerate(): runtime pairs become native tuples":
         expect(low.fatal.len()).to_equal(0)
         expect(tuple_count(low.callees, "rt_array_enumerate")).to_equal(1)
         expect(tuple_count(low.callees, "rt_tuple_get")).to_equal(2)
+        # tuple slots (i, p), then the by-value copy of the P record bound to
+        # `p` (lo, hi), then the `.hi` read at field 1: same shape as the
+        # dict-pair case (mir_enumerate_struct_binding_skips_value_copy).
+        expect(low.field_indices).to_equal([0, 1, 0, 1, 1])
+
+    it "struct elements are bound by value: a mutated loop variable is a distinct copy":
+        val low = tuple_lower("struct P:\n" +
+            "    lo: i64\n" +
+            "    hi: i64\n" +
+            "\n" +
+            "fn f(ps: [P]) -> i64:\n" +
+            "    for (i, p) in ps.enumerate():\n" +
+            "        p.lo = i\n" +
+            "    0\n")
+        expect(low.messages.len()).to_equal(0)
+        expect(low.fatal.len()).to_equal(0)
+        # slots (i, p) then the copy's two field loads; the store targets the copy.
+        expect(low.field_indices).to_equal([0, 1, 0, 1])
+
+    it "plain for over struct elements binds by value":
+        val low = tuple_lower("struct P:\n" +
+            "    lo: i64\n" +
+            "    hi: i64\n" +
+            "\n" +
+            "fn f(ps: [P]) -> i64:\n" +
+            "    var s = 0\n" +
+            "    for p in ps:\n" +
+            "        s = s + p.hi\n" +
+            "    s\n")
+        expect(low.messages.len()).to_equal(0)
+        expect(low.fatal.len()).to_equal(0)
+        # by-value copy (lo, hi), then the `.hi` read.
         expect(low.field_indices).to_equal([0, 1, 1])
 
     it "nested array elements retain runtime-array dispatch":
