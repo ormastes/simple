@@ -1,0 +1,86 @@
+@allow(unnamed_duplicate_typed_args) # reason: positional API -- arg order is conventional
+# Shared source-edit core — the built-in producer set of `simple fix`, lint
+# --fix and code actions, keyed by diagnostic code, and the runner every
+# caller uses. Order is the historical collect_fixes_from_source order
+# (registry rules, the two source-form rules, todo_format) so `simple fix`
+# output is unchanged; the AST-backed PANIC-W-INDEX slice comes last.
+use std.tooling.easy_fix.types.{EasyFix, Replacement, FixConfidence, easyfix_with_base}
+use compiler.tools.fix.producer.{FixUnit, FixProducer, fix_producer, fix_view_producer, fix_unit_views,
+    rules_prof_now, rules_prof_mark}
+use compiler.tools.fix.rules.registry.{registry_fix_producers, run_registry_producer}
+use compiler.tools.fix.rules.impl_.lint_primitive_api.{check_primitive_api}
+use compiler.tools.fix.rules.impl_.lint_script_language.{check_simple_script_required}
+use compiler.tools.fix.rules.impl_.panic_index.{PANIC_W_INDEX, check_panic_index}
+
+pub fn builtin_fix_producers() -> [FixProducer]:
+    var producers = registry_fix_producers()
+    producers.push(fix_producer("L:primitive_api/source"))
+    producers.push(fix_producer("L:simple_script_required/source"))
+    producers.push(fix_producer("L:todo_format"))
+    producers.push(fix_view_producer(PANIC_W_INDEX))
+    producers
+
+# Route one producer by code. Unknown codes yield nothing (a registered
+# producer whose code is missing here is a wiring bug the specs pin).
+pub fn run_builtin_producer(code: text, mut unit: FixUnit) -> [EasyFix]:
+    if code == "L:primitive_api/source": return check_primitive_api(unit.source, unit.file)
+    if code == "L:simple_script_required/source": return check_simple_script_required(unit.source, unit.file)
+    if code == "L:todo_format": return check_todo_format(unit.file, unit.source)
+    if code == PANIC_W_INDEX: return check_panic_index(unit)
+    run_registry_producer(code, unit)
+
+# Run producers in order over the unit; every proposal comes back bound to the
+# unit's snapshot version.
+pub fn run_fix_producers(producers: [FixProducer], mut unit: FixUnit) -> [EasyFix]:
+    var all: [EasyFix] = []
+    var t = rules_prof_now()
+    for p in producers:
+        if p.needs_views:
+            val _ = fix_unit_views(unit)
+        val fixes = run_builtin_producer(p.code, unit)
+        t = rules_prof_mark(p.code, t)
+        for f in fixes:
+            all.push(easyfix_with_base(f, unit.snapshot.version))
+    all
+
+pub fn check_todo_format(file_path: text, source: text) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    val lines = source.split("\n")
+    var line_num = 0
+    var byte_offset = 0
+
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+
+        # Check for TODO/FIXME without proper format
+        if trimmed.starts_with("#"):
+            val comment = trimmed.slice(1).trim()
+            if comment.starts_with("TODO:") or comment.starts_with("FIXME:"):
+                val keyword = if comment.starts_with("TODO:"): "TODO" else: "FIXME"
+                val after_colon = comment.slice(keyword.len() + 1).trim()
+
+                if not after_colon.starts_with("["):
+                    val keyword_pos = line.find(keyword)
+                    val colon_pos = keyword_pos + keyword.len() + 1
+                    val insert_pos = byte_offset + colon_pos + 1
+
+                    var fix = EasyFix.create(
+                        id: "L:todo_format:{line_num}",
+                        description: "add [area][priority] format to {keyword} comment",
+                        confidence: FixConfidence.Uncertain
+                    )
+                    fix.add_replacement(Replacement.create(
+                        file: file_path,
+                        start: insert_pos,
+                        end: insert_pos,
+                        line: line_num,
+                        column: colon_pos + 2,
+                        new_text: "[runtime][P2] "
+                    ))
+                    fixes.push(fix)
+
+        byte_offset = byte_offset + line.len() + 1
+
+    fixes
+

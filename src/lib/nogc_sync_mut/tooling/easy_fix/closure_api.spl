@@ -1,0 +1,152 @@
+@allow(unnamed_duplicate_typed_args) # reason: positional API -- arg order is conventional
+# Shared source-edit core — the API a user closure sees inside the sandbox
+# harness. A closure only RETURNS Edit values; nothing here touches disk. The
+# engine turns every Edit into EasyFix proposals and validates them like any
+# built-in fix (rev-3 §9: providers cannot self-certify).
+use std.tooling.easy_fix.node_view.{NodeView, hex_encode, hex_decode, node_view_decode}
+
+# kind: replace | insert | rename | note
+pub struct Edit:
+    kind: text
+    file: text
+    version: text
+    start: i64
+    end: i64
+    new_text: text
+    symbol: text        # rename: old name
+    message: text       # note / description
+    line: i64
+    col: i64
+
+fn _edit(kind: text, node: NodeView, start: i64, end: i64, new_text: text, symbol: text, message: text) -> Edit:
+    Edit(kind: kind, file: node.file, version: node.version, start: start, end: end,
+        new_text: new_text, symbol: symbol, message: message, line: node.line, col: node.col)
+
+pub struct RewriteCtx:
+    closure_name: text
+
+pub fn rewrite_ctx(closure_name: text) -> RewriteCtx:
+    RewriteCtx(closure_name: closure_name)
+
+impl RewriteCtx:
+    fn replace(node: NodeView, new_text: text) -> Edit:
+        _edit("replace", node, node.start, node.end, new_text, "", "replace {node.kind}")
+
+    fn replace_span(node: NodeView, start: i64, end: i64, new_text: text) -> Edit:
+        _edit("replace", node, start, end, new_text, "", "replace span")
+
+    fn insert_before(node: NodeView, new_text: text) -> Edit:
+        _edit("insert", node, node.start, node.start, new_text, "", "insert before {node.kind}")
+
+    fn insert_after(node: NodeView, new_text: text) -> Edit:
+        _edit("insert", node, node.end, node.end, new_text, "", "insert after {node.kind}")
+
+    # Expanded by the engine to every decl / call / ident carrying `node.name`
+    # across the scope (syntax-level; typed resolution is stage3-pending).
+    fn rename(node: NodeView, new_name: text) -> Edit:
+        _edit("rename", node, node.name_start, node.name_end, new_name, node.name, "rename {node.name} -> {new_name}")
+
+    # fn_decl only: `fn f(a):` -> `fn f(a) -> T?:`; replaces an existing `-> X`.
+    fn set_return_type(node: NodeView, ret_type: text) -> Edit:
+        if node.header_end < 0 or node.args_end < 0:
+            return self.note(node, "set_return_type: no header on {node.kind}")
+        _edit("replace", node, node.args_end + 1, node.header_end, " -> " + ret_type, "", "return type -> {ret_type}")
+
+    fn replace_args(node: NodeView, args_text: text) -> Edit:
+        if node.args_start < 0:
+            return self.note(node, "replace_args: no argument list on {node.kind}")
+        _edit("replace", node, node.args_start, node.args_end, args_text, "", "replace arguments")
+
+    fn note(node: NodeView, message: text) -> Edit:
+        _edit("note", node, node.start, node.start, "", "", message)
+
+    # Reorder call arguments to `order` (new position i takes old arg order[i]).
+    # Trivial args (identifiers / literals) are reordered in place; otherwise
+    # every arg is hoisted, in ORIGINAL order, into `val __aN` temporaries on the
+    # enclosing statement line so evaluation order and side effects are kept.
+    fn reorder_args(node: NodeView, order: [i64]) -> [Edit]:
+        if node.args_start < 0:
+            return [self.note(node, "reorder_args: no argument list on {node.kind}")]
+        val args = split_top_level_args(node.args_text)
+        if order.len() != args.len():
+            return [self.note(node, "reorder_args: expected {args.len()} positions, got {order.len()}")]
+        var trivial = true
+        for a in args:
+            if not is_trivial_arg(a): trivial = false
+        var names: [text] = []
+        var hoist = ""
+        var i = 0
+        while i < args.len():
+            if trivial:
+                names.push(args[i].trim())
+            else:
+                names.push("__a{i}")
+                hoist = hoist + node.indent + "val __a{i} = " + args[i].trim() + "\n"
+            i = i + 1
+        var reordered: [text] = []
+        for pos in order:
+            if pos < 0 or pos >= names.len():
+                return [self.note(node, "reorder_args: position {pos} out of range")]
+            reordered.push(names[pos])
+        var edits: [Edit] = [self.replace_args(node, reordered.join(", "))]
+        if not trivial:
+            edits.push(_edit("insert", node, node.stmt_start, node.stmt_start, hoist, "", "hoist arguments"))
+        edits
+
+# Byte-based scanning (`byte_at`): offsets/len/slice are bytes, `s[i]` is chars.
+pub fn split_top_level_args(args_text: text) -> [text]:
+    var out: [text] = []
+    var depth = 0
+    var seg_start = 0
+    var in_str = false
+    var i = 0
+    while i < args_text.len():
+        val c = args_text.byte_at(i)
+        if in_str:
+            if c == 92: i = i + 1
+            elif c == 34: in_str = false
+        elif c == 34: in_str = true
+        elif c == 40 or c == 91 or c == 123: depth = depth + 1
+        elif c == 41 or c == 93 or c == 125: depth = depth - 1
+        elif c == 44 and depth == 0:
+            out.push(args_text.slice(seg_start, i))
+            seg_start = i + 1
+        i = i + 1
+    val last = args_text.slice(seg_start)
+    if last.trim() != "" or out.len() > 0:
+        out.push(last)
+    out
+
+pub fn is_trivial_arg(arg: text) -> bool:
+    val t = arg.trim()
+    if t == "": return true
+    if t.starts_with("\"") and t.ends_with("\""): return true
+    var i = 0
+    while i < t.len():
+        val c = t.byte_at(i)
+        val ok = (c >= 97 and c <= 122) or (c >= 65 and c <= 90) or (c >= 48 and c <= 57) or c == 95 or c == 46
+        if not ok: return false
+        i = i + 1
+    true
+
+# ---- harness-side transport -------------------------------------------------
+# One `@edit|...` line per Edit on stdout; the engine parses them back.
+pub fn edit_encode(e: Edit) -> text:
+    val f: [text] = ["@edit", e.kind, hex_encode(e.file), hex_encode(e.version), "{e.start}", "{e.end}",
+        hex_encode(e.new_text), hex_encode(e.symbol), hex_encode(e.message), "{e.line}", "{e.col}"]
+    f.join("|")
+
+pub fn edit_decode(line: text) -> Edit?:
+    val f = line.split("|")
+    if f.len() < 11 or f[0] != "@edit": return nil
+    Some(Edit(kind: f[1], file: hex_decode(f[2]), version: hex_decode(f[3]), start: int(f[4]) ?? 0,
+        end: int(f[5]) ?? 0, new_text: hex_decode(f[6]), symbol: hex_decode(f[7]),
+        message: hex_decode(f[8]), line: int(f[9]) ?? 0, col: int(f[10]) ?? 0))
+
+pub fn decode_node_records(records: [text]) -> [NodeView]:
+    var views: [NodeView] = []
+    for r in records:
+        if val v = node_view_decode(r):
+            views.push(v)
+    views
+
