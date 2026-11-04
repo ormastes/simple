@@ -27,18 +27,33 @@ EVIDENCE_REV=""
 # spawn is several times slower under MSYS), so every push ERRORed at 10s and
 # agents exported MUST_CHECK_PUSH_BUDGET_S=180 by hand.
 #   Windows (MINGW/MSYS/CYGWIN): x6
-#   Linux: x ceil(2 * loadavg1 / nproc), clamped to 1..6
+#   Linux/BSD/Darwin: x ceil(2 * loadavg1 / nproc), clamped to 1..6
+#   Darwin: additionally floored at x4 (see below)
 must_check_default_budget_s() {
     _bf=1
     case "$(uname -s 2>/dev/null)" in
         MINGW*|MSYS*|CYGWIN*) _bf=6 ;;
         *)
+            _bl=""
             if [ -r /proc/loadavg ]; then
                 _bl=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null)
+            else
+                # Darwin/FreeBSD/OpenBSD/NetBSD have no /proc/loadavg;
+                # `sysctl -n vm.loadavg` prints "{ 1m 5m 15m }".
+                _bl=$(sysctl -n vm.loadavg 2>/dev/null | tr -d '{}' | awk '{ print $1 }')
+            fi
+            if [ -n "$_bl" ]; then
                 _bn=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
                 _bf=$(awk -v l="${_bl:-0}" -v n="${_bn:-1}" 'BEGIN { if (n < 1) n = 1; f = int((2 * l + n - 1) / n); if (f < 1) f = 1; if (f > 6) f = 6; print f }')
             fi
             ;;
+    esac
+    # Measured 2026-11-04 on a 10-core M-series macOS host (load ~5.5,
+    # 146k-file tree): push-tree-size alone took 31.6s wall at 30% CPU
+    # (APFS-bound git ls-tree), so every push ERRORed at 10s. Darwin gets a
+    # x4 floor on top of the load factor, clamped to the same x6 ceiling.
+    case "$(uname -s 2>/dev/null)" in
+        Darwin) _bf=$(( _bf < 4 ? 4 : _bf )) ;;
     esac
     echo $(( 10 * _bf ))
 }

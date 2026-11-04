@@ -52,3 +52,20 @@ The public `gpu_lib_candidates`, `try_load_gpu_lib`, `DynLib.load`, and
 `DynLib.load_checked` signatures are unchanged. SimpleOS keeps the static
 selection from `SIMPLE_OS_KERNEL`; the candidate lookup is only used on hosted
 dynamic paths. SOSIX app and host interfaces are untouched.
+
+## 2026-11-04 native macOS acceptance (lane 4)
+
+Host: macOS 26 (Darwin 25.5.0) arm64, Vulkan loader present at
+`/opt/homebrew/lib/libvulkan.1.dylib`, no CUDA. Tree: release/1.0.0 `63f61763a3f`.
+Binary: `/Users/ormastes/.local/share/simple-seeds/release100-7a0e6fe516f-20261031/simple` (Rust bootstrap seed, interpreter, `SIMPLE_LIB=src`).
+
+- `ffi_dispatch_platform_spec.spl`: 4/4 passed
+- `ffi_cuda_spec.spl`: 3/3 passed (no `spl_dlopen failed for 'libcuda.so.1'` abort)
+- `ffi_vulkan_spec.spl`: 4/4 passed (no `libvulkan.so.1` abort)
+
+The originally affected macOS host case is now VERIFIED on the seed
+interpreter lane. Still unverified: an admitted pure-Simple macOS runtime —
+the only deployed one (`bin/release/aarch64-apple-darwin-macho/simple`,
+2026-09-18) SIGSEGVs (rc 139) in test-runner setup for every spec, a
+stale-deploy/bootstrap issue owned by the bootstrap lane, not this loader.
+Status: VERIFIED on macOS (seed lane); pure-Simple-runtime acceptance pending redeploy.
