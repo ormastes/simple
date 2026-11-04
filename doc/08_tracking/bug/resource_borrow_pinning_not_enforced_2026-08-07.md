@@ -171,3 +171,20 @@ this pass — implementing borrow-liveness tracking is a multi-day compiler
 architecture change, well beyond a per-bug TDD fix. Leaving OPEN, no code
 change made.
 
+
+## Re-verification 2026-11-04 (lane g-borrow-pinning)
+
+The title premise is stale: move/drop of a borrowed place IS rejected when the
+borrow is used afterwards ("cannot move out of `local(0)` because it is
+borrowed"), via the NLL conflict check plus `check_consumes_after_propagation`
+(db481c7d8ea). Pinned by the new passing
+`test/01_unit/compiler/resource/resource_move_while_borrowed_spec.spl` (3/3 on
+the seed interpreter). Not a bug: a borrow never used again is dead under NLL,
+so `Ref; Drop` with no later use is accepted.
+
+Remaining open (architectural, unchanged): foreign-call pinning needs a
+call-scoped region + foreign-call marker; `resource_borrow_pinning_spec.spl`
+stays RED for that reason. Also found: 2 "allows release after ... call
+completes" cases in `resource_pinning_lifetime_spec.spl` now fail because the
+short-borrow checker reports "call argument requires a checked non-retaining
+short contract" for the spec's indirect call (stale fixture vs newer checker).
