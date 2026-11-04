@@ -1,0 +1,297 @@
+# brotli/lz77_encoder.spl — general compressed meta-block encoder (RFC 7932)
+#
+# Minimal encoder: LZ77 commands from the shared hash-chain match finder
+# (std.common.compress.zstd_enc), one block type per category, no context
+# modelling (NTREESL = NTREESD = 1), NPOSTFIX = 0, NDIRECT = 0, no static
+# dictionary and only explicit distance codes (16..63; the last-distance ring
+# buffer is never referenced).  Each meta-block carries its own literal,
+# insert-and-copy and distance prefix codes built from symbol frequencies
+# (prefix_code.spl).  A meta-block whose compressed form is not smaller than
+# the stored form is written as uncompressed meta-blocks instead.
+#
+# Stream layout:
+#   WBITS = 22 ("1" + 3-bit 5)
+#   one or more meta-blocks (compressed, or uncompressed chunks <= 64 KiB)
+#   if the final meta-block was not a compressed ISLAST block:
+#       ISLAST=1, ISLASTEMPTY=1
+
+use std.common.compress.zstd_enc.{zstd_enc_find_sequences}
+use std.nogc_sync_mut.compression.brotli.bit_writer.{
+    BrotliBitWriter,
+    brotli_bits_writer_init,
+    brotli_bits_write,
+    brotli_bits_pad_to_byte,
+    brotli_bits_write_bytes,
+    brotli_bits_writer_finish
+}
+use std.nogc_sync_mut.compression.brotli.prefix_code.{
+    BrotliPrefixCode,
+    brotli_prefix_code_build,
+    brotli_prefix_code_write,
+    brotli_prefix_write_symbol
+}
+
+val BROTLI_LZ77_WBITS: i64 = 22
+val BROTLI_LZ77_MATCH_LEVEL: i64 = 3
+# Payload bytes per compressed meta-block (MNIBBLES <= 6 allows 16 MiB).
+val BROTLI_LZ77_META_MAX: i64 = 4194304
+val BROTLI_LZ77_STORED_CHUNK: i64 = 65536
+
+# Insert-and-copy commands as parallel arrays.  cp == 0 marks the trailing
+# insert-only command (allowed only at the end of a meta-block).
+struct BrotliCmds:
+    ins: [i64]
+    cp: [i64]
+    dist: [i64]
+
+fn _lz_ins_base() -> [i64]:
+    [0, 1, 2, 3, 4, 5, 6, 8, 10, 14, 18, 26, 34, 50, 66, 98, 130, 194, 322, 578, 1090, 2114, 6210, 22594]
+
+fn _lz_ins_extra() -> [i64]:
+    [0, 0, 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 7, 8, 9, 10, 12, 14, 24]
+
+fn _lz_cp_base() -> [i64]:
+    [2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 18, 22, 30, 38, 54, 70, 102, 134, 198, 326, 582, 1094, 2118]
+
+fn _lz_cp_extra() -> [i64]:
+    [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 7, 8, 9, 10, 24]
+
+# Largest code whose base is <= value (tables are ascending).
+fn _lz_code_for(base: [i64], value: i64) -> i64:
+    var c = 0
+    while c + 1 < base.len() and base[c + 1] <= value:
+        c = c + 1
+    c
+
+# Insert-and-copy command symbol for explicit-distance cells (RFC 7932 §5):
+# rows are insert-code groups (0-7, 8-15, 16-23), columns copy-code groups.
+fn _lz_cmd_symbol(icode: i64, ccode: i64) -> i64:
+    val cells = [2, 3, 6, 4, 5, 8, 7, 9, 10]
+    val cell = cells[(icode >> 3) * 3 + (ccode >> 3)]
+    cell * 64 + (icode & 7) * 8 + (ccode & 7)
+
+# Distance code (NPOSTFIX = 0, NDIRECT = 0): dist = ((2 + hbit) << nb) - 3 + extra,
+# dcode = 16 + 2 * (nb - 1) + hbit, extra in [0, 1 << nb).
+fn _lz_dist_code(dist: i64) -> i64:
+    val v = dist + 3
+    var nb = 0
+    while (v >> (nb + 2)) != 0:
+        nb = nb + 1
+    val hbit = (v >> nb) - 2
+    16 + 2 * (nb - 1) + hbit
+
+fn _lz_fill(n: i64, v: i64) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    while i < n:
+        out.push(v)
+        i = i + 1
+    out
+
+# Append all bits of `src` (a finished-or-not writer) to `w`.
+fn _lz_append_writer(w: BrotliBitWriter, src: BrotliBitWriter) -> BrotliBitWriter:
+    var out = w
+    var i = 0
+    while i < src.bytes.len():
+        out = brotli_bits_write(out, src.bytes[i].to_i64(), 8)
+        i = i + 1
+    brotli_bits_write(out, src.buf, src.buf_bits)
+
+fn _lz_writer_bits(w: BrotliBitWriter) -> i64:
+    w.bytes.len() * 8 + w.buf_bits
+
+# Build the command list for the whole input.
+fn _lz_commands(data: [u8]) -> BrotliCmds:
+    val n = data.len()
+    val seqs = zstd_enc_find_sequences(data, BROTLI_LZ77_MATCH_LEVEL)
+    val win_max = (1 << BROTLI_LZ77_WBITS) - 16
+    var ins: [i64] = []
+    var cp: [i64] = []
+    var dist: [i64] = []
+    var lit_start = 0
+    var k = 0
+    while k < seqs.starts.len():
+        val off = seqs.offs[k]
+        if off <= win_max:
+            val mstart = seqs.starts[k] + seqs.lls[k]
+            # A literal run longer than one meta-block is cut into
+            # insert-only commands, each of which ends its meta-block.
+            while mstart - lit_start > BROTLI_LZ77_META_MAX:
+                ins.push(BROTLI_LZ77_META_MAX)
+                cp.push(0)
+                dist.push(0)
+                lit_start = lit_start + BROTLI_LZ77_META_MAX
+            ins.push(mstart - lit_start)
+            cp.push(seqs.mls[k])
+            dist.push(off)
+            lit_start = mstart + seqs.mls[k]
+        k = k + 1
+    while lit_start < n:
+        var run = n - lit_start
+        if run > BROTLI_LZ77_META_MAX:
+            run = BROTLI_LZ77_META_MAX
+        ins.push(run)
+        cp.push(0)
+        dist.push(0)
+        lit_start = lit_start + run
+    BrotliCmds(ins: ins, cp: cp, dist: dist)
+
+# Emit one compressed meta-block covering commands [a, b) of `cmds`, whose
+# payload starts at data[pos] and spans `mlen` bytes.
+fn _lz_emit_compressed(data: [u8], cmds: BrotliCmds, a: i64, b: i64, pos: i64, mlen: i64, is_last: bool) -> BrotliBitWriter:
+    val ins_base = _lz_ins_base()
+    val ins_extra = _lz_ins_extra()
+    val cp_base = _lz_cp_base()
+    val cp_extra = _lz_cp_extra()
+    # Per-command symbols.
+    var cmd_sym: [i64] = []
+    var icodes: [i64] = []
+    var ccodes: [i64] = []
+    var dcodes: [i64] = []
+    var lit_freq = _lz_fill(256, 0)
+    var cmd_freq = _lz_fill(704, 0)
+    var dist_freq = _lz_fill(64, 0)
+    var p = pos
+    var k = a
+    while k < b:
+        val icode = _lz_code_for(ins_base, cmds.ins[k])
+        var ccode = 0
+        var dcode = 0
+        if cmds.cp[k] > 0:
+            ccode = _lz_code_for(cp_base, cmds.cp[k])
+            dcode = _lz_dist_code(cmds.dist[k])
+            dist_freq[dcode] = dist_freq[dcode] + 1
+        val sym = _lz_cmd_symbol(icode, ccode)
+        cmd_freq[sym] = cmd_freq[sym] + 1
+        cmd_sym.push(sym)
+        icodes.push(icode)
+        ccodes.push(ccode)
+        dcodes.push(dcode)
+        var j = 0
+        while j < cmds.ins[k]:
+            val byte = data[p + j].to_i64()
+            lit_freq[byte] = lit_freq[byte] + 1
+            j = j + 1
+        p = p + cmds.ins[k] + cmds.cp[k]
+        k = k + 1
+    val lit_code = brotli_prefix_code_build(lit_freq)
+    val cmd_code = brotli_prefix_code_build(cmd_freq)
+    val dist_code = brotli_prefix_code_build(dist_freq)
+
+    var w = brotli_bits_writer_init()
+    # --- Meta-block header ---
+    if is_last:
+        w = brotli_bits_write(w, 1, 1)   # ISLAST
+        w = brotli_bits_write(w, 0, 1)   # ISLASTEMPTY
+    else:
+        w = brotli_bits_write(w, 0, 1)   # ISLAST
+    var nibbles = 4
+    if mlen > 1048576:
+        nibbles = 6
+    elif mlen > 65536:
+        nibbles = 5
+    w = brotli_bits_write(w, nibbles - 4, 2)
+    w = brotli_bits_write(w, mlen - 1, nibbles * 4)
+    if not is_last:
+        w = brotli_bits_write(w, 0, 1)   # ISUNCOMPRESSED
+    w = brotli_bits_write(w, 0, 1)       # NBLTYPESL = 1
+    w = brotli_bits_write(w, 0, 1)       # NBLTYPESI = 1
+    w = brotli_bits_write(w, 0, 1)       # NBLTYPESD = 1
+    w = brotli_bits_write(w, 0, 2)       # NPOSTFIX = 0
+    w = brotli_bits_write(w, 0, 4)       # NDIRECT = 0
+    w = brotli_bits_write(w, 0, 2)       # CMODE[0] = LSB6
+    w = brotli_bits_write(w, 0, 1)       # NTREESL = 1
+    w = brotli_bits_write(w, 0, 1)       # NTREESD = 1
+    w = brotli_prefix_code_write(w, lit_code, 8)
+    w = brotli_prefix_code_write(w, cmd_code, 10)
+    w = brotli_prefix_code_write(w, dist_code, 6)
+    # --- Commands ---
+    p = pos
+    k = a
+    while k < b:
+        val i2 = k - a
+        w = brotli_prefix_write_symbol(w, cmd_code, cmd_sym[i2])
+        val icode = icodes[i2]
+        w = brotli_bits_write(w, cmds.ins[k] - ins_base[icode], ins_extra[icode])
+        val ccode = ccodes[i2]
+        if cmds.cp[k] > 0:
+            w = brotli_bits_write(w, cmds.cp[k] - cp_base[ccode], cp_extra[ccode])
+        var j = 0
+        while j < cmds.ins[k]:
+            w = brotli_prefix_write_symbol(w, lit_code, data[p + j].to_i64())
+            j = j + 1
+        if cmds.cp[k] > 0:
+            val dcode = dcodes[i2]
+            w = brotli_prefix_write_symbol(w, dist_code, dcode)
+            val nb = 1 + ((dcode - 16) >> 1)
+            val lo = ((2 + ((dcode - 16) & 1)) << nb) - 3
+            w = brotli_bits_write(w, cmds.dist[k] - lo, nb)
+        p = p + cmds.ins[k] + cmds.cp[k]
+        k = k + 1
+    w
+
+# Emit data[pos .. pos+len) as uncompressed meta-blocks (<= 64 KiB each).
+fn _lz_emit_stored(w: BrotliBitWriter, data: [u8], pos: i64, len: i64) -> BrotliBitWriter:
+    var out = w
+    var off = pos
+    val end = pos + len
+    while off < end:
+        var chunk = end - off
+        if chunk > BROTLI_LZ77_STORED_CHUNK:
+            chunk = BROTLI_LZ77_STORED_CHUNK
+        out = brotli_bits_write(out, 0, 1)           # ISLAST = 0
+        out = brotli_bits_write(out, 0, 2)           # MNIBBLES = 4
+        out = brotli_bits_write(out, chunk - 1, 16)  # MLEN - 1
+        out = brotli_bits_write(out, 1, 1)           # ISUNCOMPRESSED
+        out = brotli_bits_pad_to_byte(out)
+        var payload: [u8] = []
+        var i = 0
+        while i < chunk:
+            payload.push(data[off + i])
+            i = i + 1
+        out = brotli_bits_write_bytes(out, payload)
+        off = off + chunk
+    out
+
+# Stored cost in bits of a `len`-byte span (header + padding per chunk).
+fn _lz_stored_bits(len: i64) -> i64:
+    val chunks = (len + BROTLI_LZ77_STORED_CHUNK - 1) / BROTLI_LZ77_STORED_CHUNK
+    len * 8 + chunks * 24
+
+# Encode `data` (non-empty) as a brotli stream of compressed meta-blocks,
+# falling back to stored meta-blocks where compression does not pay.
+fn brotli_encode_lz77(data: [u8]) -> [u8]:
+    val n = data.len()
+    val cmds = _lz_commands(data)
+    val ncmd = cmds.ins.len()
+    var w = brotli_bits_writer_init()
+    w = brotli_bits_write(w, 1, 1)
+    w = brotli_bits_write(w, BROTLI_LZ77_WBITS - 17, 3)
+    var terminated = false
+    var pos = 0
+    var a = 0
+    while a < ncmd:
+        # Grow [a, b) until the meta-block would exceed the size cap.
+        var b = a
+        var mlen = 0
+        while b < ncmd:
+            val span = cmds.ins[b] + cmds.cp[b]
+            if mlen > 0 and mlen + span > BROTLI_LZ77_META_MAX:
+                break
+            mlen = mlen + span
+            b = b + 1
+            if cmds.cp[b - 1] == 0:
+                break   # an insert-only command must end its meta-block
+        val is_last = b == ncmd
+        val block = _lz_emit_compressed(data, cmds, a, b, pos, mlen, is_last)
+        if _lz_writer_bits(block) < _lz_stored_bits(mlen):
+            w = _lz_append_writer(w, block)
+            terminated = is_last
+        else:
+            w = _lz_emit_stored(w, data, pos, mlen)
+        pos = pos + mlen
+        a = b
+    if not terminated:
+        w = brotli_bits_write(w, 1, 1)   # ISLAST
+        w = brotli_bits_write(w, 1, 1)   # ISLASTEMPTY
+    brotli_bits_writer_finish(w)
