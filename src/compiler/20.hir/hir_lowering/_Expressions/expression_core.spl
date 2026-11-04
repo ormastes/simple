@@ -387,7 +387,7 @@ impl HirLowering:
                                 )
                     case ExprKind.OptionalChain(oc_receiver, oc_method):
                         # `recv?.m(args)` parses as Call(OptionalChain(recv, m), args).
-                        return self.lower_hir_expr(optional_chain_desugar(oc_receiver, oc_method, true, call_args_t, e.explicit_call_types, e.span))
+                        return self.lower_hir_expr(optional_chain_desugar(oc_receiver, oc_method, true, call_args_t, e.explicit_call_types, e.span, self.optional_chain_receiver_is_result(oc_receiver)))
                     case _:
                         pass
                 var hir_args: [HirCallArg] = []
@@ -405,7 +405,7 @@ impl HirLowering:
                     hir_type_args = hir_type_args.push(self.lower_type(call_type_t))
                 return HirExpr(kind: HirExprKind.Call(self.lower_hir_expr(call_callee_t), hir_args, hir_type_args), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: e.span), span: e.span)
             case ExprKind.OptionalChain(oc_base, oc_field):
-                return self.lower_hir_expr(optional_chain_desugar(oc_base, oc_field, false, [], [], e.span))
+                return self.lower_hir_expr(optional_chain_desugar(oc_base, oc_field, false, [], [], e.span, self.optional_chain_receiver_is_result(oc_base)))
             case _:
                 pass
         # SEED PATTERN HAZARD (bug doc iteration 18): when a variant pattern's
@@ -1431,10 +1431,40 @@ fn optional_chain_spine_depth(e: Expr) -> i64:
         # SEED PATTERN HAZARD note). Spine depth only needs `?.` links.
         case _: return 0
 
-fn optional_chain_desugar(receiver: Expr, member: text, is_call: bool, args: [CallArg], call_types: [Type], span: Span) -> Expr:
+impl HirLowering:
+    me optional_chain_receiver_is_result(receiver: Expr) -> bool:
+        """True when `receiver` is statically a `Result`. `.?`/`if val` keep a
+        Result opaque-present on every lane (docs: `if val v = r.ok.?`), so
+        `?.` alone must project `Ok(v)` -> v and `Err(_)` -> absent, as the
+        seed interpreter (try_unwrap_option_or_result) and seed JIT
+        (lower_optional_chain, static Result) do. A nested `?.` link yields a
+        flattened value-or-nil, never a Result, so it is not probed. The probe
+        lowering is discarded; its diagnostics are rolled back so the real
+        lowering of the desugared form reports each one once."""
+        if optional_chain_spine_depth(receiver) > 0:
+            return false
+        val saved_errors = self.errors
+        val saved_messages = self.diagnostic_messages
+        val probe = self.lower_hir_expr(receiver)
+        self.errors = saved_errors
+        self.diagnostic_messages = saved_messages
+        val probe_type = self.binding_source_type(probe)
+        match probe_type.kind:
+            case HirTypeKind.Result(_, _): return true
+            case _: return false
+
+fn optional_chain_desugar(receiver: Expr, member: text, is_call: bool, args: [CallArg], call_types: [Type], span: Span, receiver_is_result: bool = false) -> Expr:
     val tmp = "__optchain_{span.line}_{span.col}_{optional_chain_spine_depth(receiver)}"
     val tmp_ref = Expr(kind: ExprKind.Ident(tmp), span: span)
-    val bind = Stmt(kind: StmtKind.Val(tmp, nil, Expr(kind: ExprKind.ExistsCheck(receiver), span: span)), span: span, bind_optional_payload: true)
+    # A static Result receiver goes through its `.ok` projection (Ok(v) ->
+    # Some(v), Err -> None; lowered natively by lower_result_projection), so
+    # the shared if-val shape below binds the Ok payload and treats Err as
+    # absent instead of binding the Result itself.
+    val present_source = if receiver_is_result:
+        Expr(kind: ExprKind.Field(receiver, "ok"), span: span)
+    else:
+        receiver
+    val bind = Stmt(kind: StmtKind.Val(tmp, nil, Expr(kind: ExprKind.ExistsCheck(present_source), span: span)), span: span, bind_optional_payload: true)
     val present_test = Expr(kind: ExprKind.Binary(BinOp.NotEq, tmp_ref, Expr(kind: ExprKind.NilLit, span: span)), span: span)
     val access = if is_call:
         Expr(kind: ExprKind.MethodCall(tmp_ref, member, args), span: span, explicit_call_types: call_types)

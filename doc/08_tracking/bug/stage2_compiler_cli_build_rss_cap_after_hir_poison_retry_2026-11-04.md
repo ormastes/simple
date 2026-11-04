@@ -83,6 +83,52 @@ So the RSS kill is a consequence; the root cause is the poison.
   payload-or-nil and flattens, matching the guide's "returns nil if any part
   is nil". (2) a native `Err` receiver follows whatever `if val v = result`
   does natively (`.?` -> `rt_is_some` on the Err handle).
+- **FIXED (work/bug-optchain-20261104): seed `?.` now flattens on both seed
+  lanes.** (a) Seed JIT: `OptionalChain`/`OptionalMethodCall` had no HIR arm
+  and hit the lenient catch-all (`HirExprKind::Nil`), so every `?.` answered
+  nil. New `lower_optional_chain` (`hir/lower/expr/control.rs`) binds the
+  subject once, tests presence (`rt_is_some`, plus `!Err` via
+  `rt_enum_check_variant` for a static Result/Option), reads the member on
+  the payload (`rt_enum_payload` for Result/Option, `rt_unwrap_or_self`
+  otherwise) and yields it as-is, nil on the else edge (raw scalars boxed).
+  (b) Seed interpreter: result is the member value as-is or `Value::Nil`,
+  never `Some(..)`; the field read now goes through the ordinary `.field`
+  evaluator (the old `get_field_value` helper rejected `ClassInstance`, so
+  `a?.v` on a class errored -- helper deleted, no other caller). Probe
+  (`x?.f`, nil receiver, `maybe(0)/maybe(1) ?? d`, method, 3-link chain with
+  nil tail, `Ok`/`Err` receivers, `z?.v == nil`): seed JIT and
+  `SIMPLE_EXECUTION_MODE=interpret` print identical lines. Spec
+  `optional_chain_desugar_spec.spl` 8/8 under the interpreter and under
+  `SIMPLE_JIT_SPEC_ENTRY=1 SIMPLE_JIT_STRICT=1` (the new flattening case
+  fails 7/8 on the pre-fix seed); cargo test
+  `optional_chain_lowers_to_presence_tested_access`. Census: no `src/` site
+  depends on the old `Some(..)` wrapping (`lms/server.spl`
+  `get(k)?.as_string()?` now unwraps the inner Option as intended). Still
+  open, needs a deployed self-hosted compiler: native `Err` receiver --
+  `rt_is_present`/`rt_unwrap_or_self` unwrap only Option, so natively
+  `Err(e)?.f` is treated as present and `Ok(v)?.f` reads on the Result
+  handle, not its payload; not verified here.
+- **FIX-IMPLEMENTED, NATIVE VERIFICATION PENDING (work/bug-optchain-native-20261105):
+  native `Result` receiver of `?.`.** Root cause is the desugar, not the
+  runtime helpers: `.?`/`if val` deliberately keep a `Result` opaque-present
+  on every lane (seed: `if val w = Err(..)` binds the Err; docs idiom is
+  `if val v = r.ok.?`), so `rt_is_some`/`rt_unwrap_or_self` stay unchanged
+  (C/Rust twins untouched). `optional_chain_desugar` now takes
+  `receiver_is_result` from `HirLowering.optional_chain_receiver_is_result`
+  (probe-lowers the receiver, diagnostics rolled back, `binding_source_type`
+  is `HirTypeKind.Result`) and tests `recv.ok.?` instead of `recv.?`, so
+  `Ok(v)?.f` binds `v` and `Err(_)?.f` is nil -- the static-Result rule the
+  seed JIT's `lower_optional_chain` uses. `.ok` lowers natively via
+  `lower_result_projection`. Spec: 2 HIR-shape cases (Result receiver ->
+  `ok-projection` for field and method form; untyped receiver unchanged) +
+  1 behaviour case (Result-returning call receiver). Run with the Nov-4
+  seed (`src/compiler_rust/target/release/simple`, predates #6729): 10/11
+  under the interpreter and 10/11 under `SIMPLE_JIT_SPEC_ENTRY=1
+  SIMPLE_JIT_STRICT=1`; the 1 failure ("yields the member value flat") is
+  pre-existing on the unmodified tree with that seed (7/8) and is the #6729
+  seed fix itself. Native end-to-end pending an admitted self-hosted
+  compiler: `bin/simple native-build` of a probe with `Ok(P(x:7))?.x` == 7
+  and `Err("e")?.x` == nil.
 - `git_provider.spl:161,174` `"...^{tree}"` interpolated the local `tree`
   (still `""`) -> `rev^`; escaped as `^\{tree\}` (genuine source bug).
 - **No in-process MIR retry after HIR compile errors.** A MIR shard child
@@ -123,3 +169,25 @@ So the RSS kill is a consequence; the root cause is the poison.
   `enum runtime ID collision: TextIoError` (process_ops) and unresolved
   `to_array`/`get` (sha1) then SIGSEGV; these did not appear in the s2c
   full-CLI log and look single-module-mode specific.
+
+## s2f (2026-11-05, release @c2deae964a7, `/private/tmp/boot2-out/s2f`)
+HIR is clean now (no poisoned modules; #6718 holds). Two blockers remain:
+
+1. **`test_runner_build`: `enum runtime ID collision: 'X' and 'X'`** (166x,
+   also in s2e). Same name on both sides. Minimal repro with the s2f Stage 2:
+   `shades.spl` (pub enum Shade) imported by `picker.spl` and `main.spl` ->
+   `collision: 'shades.Shade' and 'shades.Shade'`. `register_enum_runtime_name`
+   (`50.mir/_MirLowering/module_lowering.spl`) compared `Option<text> != text`
+   (`existing != runtime_name`), which the seed-built Stage 2 evaluates as
+   unequal for equal names. Now unwraps with `if val prior_name = ...` and
+   compares text to text. Fix-implemented; verification = the 2-module repro
+   + `test_runner_build` in the next Stage 2 (s2g). The mixed Option/text
+   `!=` codegen in the seed is the underlying defect (not fixed here).
+2. **`compiler_cli_build` killed at the 1800 s per-worker deadline**
+   (`native_internal_timeout_seconds=1800`, elapsed 1810 s, RSS 9.2 GB under
+   cap). With `SHARD_TREE_HEADROOM_KB_V1` >= host RAM the HIR pool is 0, so
+   the single MIR shard worker runs parse+HIR serially (~1420 s to reach MIR
+   setup) and cannot finish MIR within 1800 s; the killed worker was then
+   reported "could not be reaped". **Owner decision:** raise
+   `BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT` for this host class or make the
+   headroom constant host-relative. Not changed here.

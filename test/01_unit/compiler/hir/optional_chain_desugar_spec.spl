@@ -47,6 +47,30 @@ fn oc_lowered_shape(hir: HirExpr) -> text:
         case HirExprKind.OptionalChain(_, _): return "OptionalChain"
         case _: return "other"
 
+fn oc_present_source(hir: HirExpr) -> text:
+    """What the desugared binding tests for presence: `ok-projection` when
+    the receiver goes through `.ok`, `receiver` when it is tested as-is."""
+    match hir.kind:
+        case HirExprKind.Block(block):
+            if block.stmts.len() < 1:
+                return "empty-block"
+            match block.stmts[0].kind:
+                case HirStmtKind.Let(_, _, init):
+                    match init.kind:
+                        case HirExprKind.ExistsCheck(base):
+                            match base.kind:
+                                case HirExprKind.Field(_, name, _):
+                                    if name == "ok":
+                                        return "ok-projection"
+                                    return "field"
+                                case _: return "receiver"
+                        case _: return "no-exists-check"
+                case _: return "block-without-let"
+        case _: return "other"
+
+fn oc_result_type() -> HirType:
+    HirType(kind: HirTypeKind.Result(HirType(kind: HirTypeKind.Int(64, true), span: Span.empty()), HirType(kind: HirTypeKind.Str, span: Span.empty())), span: Span.empty())
+
 describe "HIR lowering desugars safe navigation":
     it "lowers the field form recv?.f to a payload binding plus nil test":
         var hir = HirLowering.new()
@@ -62,6 +86,23 @@ describe "HIR lowering desugars safe navigation":
         val call = Expr(kind: ExprKind.Call(callee, [arg]), span: Span.empty())
         expect(oc_lowered_shape(hir.lower_hir_expr(call))).to_equal("let+if")
 
+    it "tests a static Result receiver through its .ok projection":
+        # Err(e)?.f must be absent and Ok(v)?.f must read v.f natively; the
+        # shared `.?`/if-val presence keeps a Result opaque-present.
+        var hir = HirLowering.new()
+        hir.symbols.define("res", SymbolKind.Parameter, oc_result_type(), Span.empty(), Visibility.Private, false, nil)
+        val field_chain = Expr(kind: ExprKind.OptionalChain(oc_ident("res"), "f"), span: Span.empty())
+        expect(oc_present_source(hir.lower_hir_expr(field_chain))).to_equal("ok-projection")
+        val callee = Expr(kind: ExprKind.OptionalChain(oc_ident("res"), "m"), span: Span.empty())
+        val call = Expr(kind: ExprKind.Call(callee, []), span: Span.empty())
+        expect(oc_present_source(hir.lower_hir_expr(call))).to_equal("ok-projection")
+
+    it "tests a non-Result receiver as-is":
+        var hir = HirLowering.new()
+        hir.symbols.define("recv", SymbolKind.Parameter, nil, Span.empty(), Visibility.Private, false, nil)
+        val chain = Expr(kind: ExprKind.OptionalChain(oc_ident("recv"), "f"), span: Span.empty())
+        expect(oc_present_source(hir.lower_hir_expr(chain))).to_equal("receiver")
+
     it "gives nested links distinct temporaries":
         val inner = Expr(kind: ExprKind.OptionalChain(oc_ident("a"), "b"), span: Span.empty())
         expect(optional_chain_spine_depth(inner)).to_equal(1)
@@ -73,6 +114,15 @@ class OcBox:
     next: OcBox?
     fn get() -> i64:
         self.v
+    fn maybe(n: i64) -> text?:
+        if n > 0:
+            return "m"
+        nil
+
+fn oc_make(ok: bool) -> Result<OcBox, text>:
+    if ok:
+        return Ok(OcBox(v: 4, next: nil))
+    Err("no")
 
 describe "safe navigation semantics":
     it "accesses a field of a present receiver and yields nil otherwise":
@@ -95,6 +145,11 @@ describe "safe navigation semantics":
         expect(ok?.get() ?? -1).to_equal(9)
         expect(er?.get() ?? -2).to_equal(-2)
 
+    it "projects a Result returned by a call":
+        expect(oc_make(true)?.v ?? -1).to_equal(4)
+        expect(oc_make(false)?.v ?? -1).to_equal(-1)
+        expect(oc_make(false)?.get() == nil).to_equal(true)
+
     it "short-circuits a chain on the first absent link":
         val tail = OcBox(v: 3, next: nil)
         val head: OcBox? = Some(OcBox(v: 1, next: Some(tail)))
@@ -103,3 +158,19 @@ describe "safe navigation semantics":
         expect(lone?.v ?? -1).to_equal(5)
         val missing: OcBox? = nil
         expect(missing?.next?.v ?? -1).to_equal(-1)
+
+    it "yields the member value flat, never Some(None) or Some(nil)":
+        # The seed interpreter used to re-wrap: `x?.maybe(0)` was Some(None)
+        # so `?? "d"` answered None, and a nil field became Some(nil) so the
+        # next `?.` link raised. The seed JIT answered nil for every case.
+        val c = OcBox(v: 3, next: nil)
+        val b = OcBox(v: 2, next: Some(c))
+        val a: OcBox? = Some(OcBox(v: 1, next: Some(b)))
+        val z: OcBox? = nil
+        expect(a?.maybe(0) ?? "d").to_equal("d")
+        expect(a?.maybe(1) ?? "d").to_equal("m")
+        expect(z?.maybe(1) ?? "d").to_equal("d")
+        expect(a?.next?.next?.v ?? -1).to_equal(3)
+        expect(a?.next?.next?.next?.v ?? -1).to_equal(-1)
+        expect(z?.v == nil).to_equal(true)
+        expect(c.next?.v == nil).to_equal(true)

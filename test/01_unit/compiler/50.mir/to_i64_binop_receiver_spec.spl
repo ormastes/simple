@@ -8,7 +8,7 @@ Bug: doc/08_tracking/bug/native_to_i64_on_binop_receiver_miscompile_2026-10-27.m
 rt_string_to_int_lenient(raw word) -> 0 for small values, a crash for large ones.
 A receiver proven integer from its own expression (binop, cast, suffix literal),
 or a recorded `val v = 5u64` local, must be widened with a plain Cast; an erased Any receiver
-keeps the text parse.
+keeps a runtime conversion (rt_any_to_int).
 """
 
 # @tag: unit, compiler, mir, builtins
@@ -54,6 +54,12 @@ fn has_dynamic_int_parse(callees: [text]) -> bool:
             return true
     false
 
+fn has_any_to_int(callees: [text]) -> bool:
+    for c in callees:
+        if c == "rt_any_to_int":
+            return true
+    false
+
 describe "to_i64 on integer receivers":
     it "bitand binop receiver is a cast":
         val callees = callees_of("fn f(v: u64) -> i64:\n    (v & 15u64).to_i64()\n")
@@ -80,5 +86,12 @@ describe "to_i64 on integer receivers":
         expect(has_text_parse(callees)).to_equal(false)
         expect(has_dynamic_int_parse(callees)).to_equal(false)
 
-    it "erased Any receiver keeps the text parse":
-        expect(has_text_parse(callees_of("fn f(v: Any) -> i64:\n    v.to_i64()\n"))).to_equal(true)
+    it "erased Any receiver keeps a runtime conversion (rt_any_to_int: parses text, unboxes numbers)":
+        # The erased-receiver arm admits a declared `Any` receiver and, for a
+        # runtime-value local, hands `to_i64` to the tagged conversion owner
+        # rt_any_to_int (method_calls_literals.spl, "tagged conversion owner
+        # parses text and unboxes numbers"). Neither raw text parse is emitted.
+        val callees = callees_of("fn f(v: Any) -> i64:\n    v.to_i64()\n")
+        expect(has_text_parse(callees)).to_equal(false)
+        expect(has_dynamic_int_parse(callees)).to_equal(false)
+        expect(has_any_to_int(callees)).to_equal(true)
