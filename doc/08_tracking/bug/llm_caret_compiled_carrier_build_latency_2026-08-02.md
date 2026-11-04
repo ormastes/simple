@@ -123,3 +123,19 @@ and caused a nil-receiver crash (exit 132, Task #145). Owner-module free
 façades now replace open/startup/query/close plus map/join rendering. Their
 closure contract test exits 0; the three-cycle guard prevented another compile.
 
+
+## 2026-11-04 re-scope (claim sonnet-imw)
+
+The ORIGINAL symptom -- native entry-closure build not finishing inside the 120 s
+watchdog -- is CLOSED. Evidence in this file: 2026-08-09 section (six-module
+tokenizer probe 2.6-2.7 s, PASS `native_sql_tokenizer_substring`) and the
+2026-08-09 root-cause section (ANY/STRING integer casts routed through
+`rt_value_as_int` in both native backends), after which the 95-module database
+carrier compile "reached its final link" (i.e. it no longer times out).
+
+What is still unresolved is a DIFFERENT defect: the final link fails on bare
+built-in method symbols (`len`, `trim`, `starts_with`, `unwrap_err`, ...). That is
+now tracked in
+`llm_caret_native_entry_closure_bare_builtin_method_symbols_2026-11-04.md`
+(row `llm_caret_native_entry_closure_bare_builtin_method_symbols_2026-11-04`).
+This row is re-scoped to the latency/tokenizer part and closed as fixed.

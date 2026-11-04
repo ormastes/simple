@@ -33,3 +33,28 @@ diagnostic evidence for spawn, aliveness, and write failures.
 ## Triage 2026-09-13 (BUGFIX-7 lane)
 
 Out of lane: needs a live installed codex CLI process to spawn and exchange JSON-RPC with; not available/verifiable in this environment. No change made.
+
+## 2026-11-04 re-verification (claim sonnet-imw): handshake WORKS; not reproducible
+
+Re-ran on Windows with the seed `bin/simple.exe` and Codex CLI on PATH
+(`C:\Users\user\AppData\Local\Programs\OpenAI\Codex\bin\codex`). The existing
+`CodexAppServerProcess` (`app.io` piped facade) spawns `codex app-server --listen
+stdio://`, `send("initialize", ...)` is accepted, and the server answers on stdout:
+
+    {"id":1,"result":{"userAgent":"llm-caret-messaging/0.166.0 (Windows 10.0.26100; x86_64) ...","codexHome":"C:\Users\user\.codex","platformFamily":"windows",...}}
+    {"method":"remoteControl/status/changed", ...}
+
+`read_available()` is non-blocking, so a caller must poll with a delay; the
+original attempts most likely read once before the server had answered (no
+diagnostic distinguished that from spawn failure). The result-shaped facades
+(`process_spawn_piped_result` / `process_write_stdin_result`) now give the
+spawn/write diagnostics item 1 asked for.
+
+Regression spec (added): `test/01_unit/app/llm_caret/messaging/codex_app_server_stdio_spec.spl`
+-- spawn-failure diagnostic (`process_spawn_failed`) always; real `initialize`
+round trip + `initialized` notification when `codex` is installed. 2/2 pass.
+
+Remaining from "Required resolution": items 3-4 (`thread/start`,
+`thread/inject_items`, `turn/start`, `turn/steer`, `turn/interrupt`, live adapter
+wiring) are feature work, intentionally not exercised here (they would mutate the
+user's Codex state / start model turns). Status: initialize handshake FIXED/verified.
