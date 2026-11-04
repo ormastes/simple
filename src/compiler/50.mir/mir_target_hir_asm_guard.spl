@@ -3,11 +3,12 @@
 # exhaustiveness check from lower_inline_asm_match. The target is read only
 # from a TargetHIR handle bound to the caller's snapshot; a handle for another
 # snapshot is rejected (THIR-08) instead of deciding with a stale target.
-# The legacy MirLowering route (_MirLowering/asm_and_targets.spl) is untouched;
+# Live wiring (flag-gated, default legacy): see mir_target_hir_live_asm_match_kind;
 # equivalence is pinned in test/01_unit/compiler/50.mir/mir_target_hir_simd_asm_spec.spl.
 
-use compiler.hir.target_hir.hir_snapshot.{HirSnapshotId, hir_snapshot_id_equals, hir_snapshot_id_text}
-use compiler.hir.target_hir.target_hir.{TargetHIR, target_hir_identity}
+use compiler.common.mir_target_context.{MirTargetContext}
+use compiler.hir.target_hir.hir_snapshot.{HirSnapshotId, hir_snapshot_id_new, hir_snapshot_id_equals, hir_snapshot_id_text}
+use compiler.hir.target_hir.target_hir.{TargetHIR, target_hir_identity, target_hir_for_context}
 
 val MIR_TARGET_HIR_ASM_ALL_ARCHS: [text] = ["x86_64", "x86", "aarch64", "arm", "riscv32", "riscv64", "wasm32", "wasm64", "avr", "mcs51", "msp430"]
 
@@ -108,3 +109,49 @@ fn mir_target_hir_asm_missing_archs(arms_archs: [[text]], has_wildcard: bool) ->
 # Decision-cache key: one per (snapshot, target fingerprint, region).
 fn mir_target_hir_asm_guard_key(view: TargetHIR) -> text:
     "asm-guard|" + target_hir_identity(view)
+
+# P4 live wiring: MirLowering.lower_inline_asm_match / lower_asm_assert consult
+# SIMPLE_TARGET_HIR_MODE (legacy|shadow|typed, default legacy) exactly like
+# lower_cfg_select. shadow recomputes the match kind through the typed reader
+# and fails on divergence but keeps the legacy kind; typed uses the typed kind.
+# The live path has no frozen HirSnapshot yet, so it binds a synthetic
+# per-module snapshot id: snapshot identity is NOT enforced until P5/P6.
+fn _mir_thir_asm_live_view(module_name: text, target: MirTargetContext) -> Result<TargetHIR, text>:
+    val snap = hir_snapshot_id_new(if module_name.trim() == "": "mir.live_lowering" else: module_name, "live-lowering-unfrozen", 0)
+    if snap.is_err():
+        return Err(snap.unwrap_err())
+    val view = target_hir_for_context(snap.unwrap(), target, "asm_guard")
+    if view.is_err():
+        return Err(view.unwrap_err())
+    Ok(view.unwrap())
+
+fn mir_target_hir_live_asm_match_kind(
+    mode: text, module_name: text, target: MirTargetContext,
+    archs: [text], has_os: bool, os: text, has_abi: bool, abi: text, has_backend: bool, backend: text,
+    ver_ops: [text], ver_vals: [i64], legacy_kind: text
+) -> Result<text, text>:
+    if mode == "legacy":
+        return Ok(legacy_kind)
+    val pair = _mir_thir_asm_live_view(module_name, target)
+    if pair.is_err():
+        return Err(pair.unwrap_err())
+    val view = pair.unwrap()
+    val typed = mir_target_hir_asm_match_kind(view, view.snapshot, archs, has_os, os, has_abi, abi, has_backend, backend, ver_ops, ver_vals)
+    if typed.is_err():
+        return Err(typed.unwrap_err())
+    val typed_kind = typed.unwrap()
+    if typed_kind != legacy_kind:
+        return Err("target_hir_shadow_mismatch: asm legacy=" + legacy_kind + " typed=" + typed_kind)
+    if mode == "typed":
+        return Ok(typed_kind)
+    Ok(legacy_kind)
+
+fn mir_target_hir_live_asm_missing_archs(mode: text, arms_archs: [[text]], has_wildcard: bool, legacy_missing: [text]) -> Result<[text], text>:
+    if mode == "legacy":
+        return Ok(legacy_missing)
+    val typed = mir_target_hir_asm_missing_archs(arms_archs, has_wildcard)
+    if typed.join(",") != legacy_missing.join(","):
+        return Err("target_hir_shadow_mismatch: asm missing legacy=[" + legacy_missing.join(",") + "] typed=[" + typed.join(",") + "]")
+    if mode == "typed":
+        return Ok(typed)
+    Ok(legacy_missing)
