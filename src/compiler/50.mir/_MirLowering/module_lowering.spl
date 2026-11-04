@@ -748,7 +748,7 @@ impl MirLowering:
         Legacy bare layouts remain usable only when their name is unambiguous.
         """
         if symbol.kind == SymbolKind.Class:
-            return mir_class_identity(symbol)
+            return mir_class_identity_raw(self.symbols, symbol.id.id)
         if symbol.kind != SymbolKind.Struct:
             return symbol.name
         val qualified = self.declared_struct_layout_key(self.composite_layout_key(symbol))
@@ -773,7 +773,7 @@ impl MirLowering:
         is registered, keep the legacy bare-name tier (readers fail closed on
         a conflicting bare name themselves)."""
         if symbol.kind == SymbolKind.Class:
-            return mir_class_identity(symbol)
+            return mir_class_identity_raw(self.symbols, symbol.id.id)
         if symbol.kind == SymbolKind.Struct:
             val qualified = self.declared_struct_layout_key(self.composite_layout_key(symbol))
             if qualified != symbol.name and self.struct_field_order.has(qualified) and not self.struct_field_order_conflict_warned.contains(qualified):
@@ -911,7 +911,7 @@ impl MirLowering:
         match self.symbols.get_symbol_raw(symbol.id):
             case Some(info):
                 if info != nil and info.name != "":
-                    if info.kind == SymbolKind.Class: return mir_class_identity(info)
+                    if info.kind == SymbolKind.Class: return mir_class_identity_raw(self.symbols, symbol.id)
                     return info.name
             case None: ()
         val canonical_key = self.canonical_mir_type_key_v1(symbol.id)
@@ -1325,7 +1325,7 @@ impl MirLowering:
         - struct_field_has_default / struct_field_default_expr for STRUCTS
           (paren-constructor default fills read these by NAME).
         - every NAME-keyed CLASS row: class_type_names (bare name,
-          composite layout key, and mir_class_identity) plus
+          composite layout key, and mir_class_identity_raw) plus
           struct_field_order / struct_field_has_default /
           struct_field_default_expr under the same three keys. Param
           binding and value-method dispatch consult class_type_names to tell
@@ -1335,7 +1335,7 @@ impl MirLowering:
           maps empty for exactly the window where the consumer lowers.
 
         Like the enum inventory, this reads only declaration data through
-        the module's own SymbolTable (composite_layout_key / mir_class_identity
+        the module's own SymbolTable (composite_layout_key / mir_class_identity_raw
         take the declaring symbol) and writes NAME-keyed maps only:
         field_map is keyed by per-module SymbolIds and stays untouched.
         Rows use keep-first semantics on a name collision, matching the
@@ -1396,7 +1396,7 @@ impl MirLowering:
                 if val present_composite_class_symbol = optional_composite_class_symbol:
                     val composite_class_symbol: HirSymbol = present_composite_class_symbol
                     class_keys.push(self.composite_layout_key(composite_class_symbol))
-                    class_keys.push(mir_class_identity(composite_class_symbol))
+                    class_keys.push(mir_class_identity_raw(composite_module.symbols, composite_class.symbol.id))
                 var class_key_i = 0
                 while class_key_i < class_keys.len():
                     val class_key: text = class_keys[class_key_i]
@@ -1691,13 +1691,13 @@ impl MirLowering:
                                 field_type_name = field_type_symbol.name
                                 field_type_ownership_key = self.composite_layout_key(field_type_symbol)
                                 if field_type_symbol.kind == SymbolKind.Class:
-                                    field_type_name = mir_class_identity(field_type_symbol)
+                                    field_type_name = mir_class_identity_raw(symbols, field_type_sym.id)
                                     field_type_ownership_key = field_type_name
                                 elif field_type_symbol.kind == SymbolKind.Enum:
                                     # Projected enum methods use the provider's
                                     # canonical owner, not a bare layout name.
                                     # Keep the separate HIR rebinding key above.
-                                    field_type_name = mir_class_identity(field_type_symbol)
+                                    field_type_name = mir_class_identity_raw(symbols, field_type_sym.id)
                     case HirTypeKind.Optional(optional_inner):
                         # A monomorphic record payload still belongs to the
                         # defining table. The Optional wrapper is not itself
@@ -1711,7 +1711,7 @@ impl MirLowering:
                                         if optional_owner.kind == SymbolKind.Struct or optional_owner.kind == SymbolKind.Class:
                                             field_type_ownership_key = self.composite_layout_key(optional_owner)
                                             if optional_owner.kind == SymbolKind.Class:
-                                                field_type_ownership_key = mir_class_identity(optional_owner)
+                                                field_type_ownership_key = mir_class_identity_raw(symbols, optional_symbol.id)
                             case _: ()
                     case HirTypeKind.Function(_, field_return, _):
                         # The callback value is not a record, but its named
@@ -1722,7 +1722,7 @@ impl MirLowering:
                                 if val return_owner = symbols.get_symbol_raw(return_symbol.id):
                                     field_type_ownership_key = self.composite_layout_key(return_owner)
                                     if return_owner.kind == SymbolKind.Class:
-                                        field_type_ownership_key = mir_class_identity(return_owner)
+                                        field_type_ownership_key = mir_class_identity_raw(symbols, return_symbol.id)
                             case _: ()
                     case Array(field_element_type, _):
                         # Bug (native_class_array_field_mutation_segfault /
@@ -1764,7 +1764,7 @@ impl MirLowering:
                                             field_element_symbol.kind == SymbolKind.Struct:
                                         field_array_element_type_name = self.composite_layout_key(field_element_symbol)
                                         if field_element_symbol.kind == SymbolKind.Class:
-                                            field_array_element_type_name = mir_class_identity(field_element_symbol)
+                                            field_array_element_type_name = mir_class_identity_raw(symbols, field_element_sym.id)
                                         field_type_ownership_key = field_array_element_type_name
 
                             case _: ()
@@ -1782,7 +1782,7 @@ impl MirLowering:
                                             field_slice_element_symbol.kind == SymbolKind.Struct:
                                         field_array_element_type_name = self.composite_layout_key(field_slice_element_symbol)
                                         if field_slice_element_symbol.kind == SymbolKind.Class:
-                                            field_array_element_type_name = mir_class_identity(field_slice_element_symbol)
+                                            field_array_element_type_name = mir_class_identity_raw(symbols, field_slice_element_sym.id)
                                         field_type_ownership_key = field_array_element_type_name
 
                             case _: ()
@@ -1938,7 +1938,7 @@ impl MirLowering:
                 # Types/defaults are relocated after each consumer installs
                 # its own SymbolTable. This prepass only records ID-free layout.
                 val class_attr = if class_def.has_layout_attr: class_def.layout_attr else: layoutattr_default_()
-                self.register_result_err_layout_types(mir_class_identity(class_symbol), class_def.fields, module_symbols)
+                self.register_result_err_layout_types(mir_class_identity_raw(module_symbols, class_def.symbol.id), class_def.fields, module_symbols)
                 self.register_composite_layout_identity(class_symbol, class_def.fields, class_attr)
             psi = psi + 1
         # Same ordering gap for CALL RETURN TYPES: the entry module lowers
@@ -2063,7 +2063,7 @@ impl MirLowering:
                     val prescan_return_symbol: HirSymbol = present_prescan_return_symbol
                     prescan_return_shape = self.composite_layout_key(prescan_return_symbol)
                     if prescan_return_symbol.kind == SymbolKind.Class:
-                        prescan_return_shape = mir_class_identity(prescan_return_symbol)
+                        prescan_return_shape = mir_class_identity_raw(module_symbols, prescan_return_symbol_id.id)
             case Array(prescan_element_type, _) | Slice(prescan_element_type):
                 prescan_return_shape = "__runtime_array__"
                 var prescan_element_shape = "__no_struct_element__"
@@ -2078,7 +2078,7 @@ impl MirLowering:
                             val prescan_element: HirSymbol = present_prescan_element
                             match prescan_element.kind:
                                 case SymbolKind.Class:
-                                    prescan_element_shape = mir_class_identity(prescan_element)
+                                    prescan_element_shape = mir_class_identity_raw(module_symbols, prescan_element_id.id)
                                     prescan_element_identity = self.composite_layout_key(prescan_element)
                                 case SymbolKind.Struct:
                                     prescan_element_shape = self.composite_layout_key(prescan_element)
@@ -2101,7 +2101,7 @@ impl MirLowering:
                         if val err_symbol = module_symbols.get_symbol_raw(err_symbol_id.id):
                             match err_symbol.kind:
                                 case SymbolKind.Class:
-                                    bootstrap_fn_ret_err_shape_register(prescan_call_name, mir_class_identity(err_symbol))
+                                    bootstrap_fn_ret_err_shape_register(prescan_call_name, mir_class_identity_raw(module_symbols, err_symbol_id.id))
                                 case SymbolKind.Struct:
                                     bootstrap_fn_ret_err_shape_register(prescan_call_name, self.composite_layout_key(err_symbol))
                                 case _: ()
@@ -2119,7 +2119,7 @@ impl MirLowering:
                             val prescan_ok_symbol: HirSymbol = present_prescan_ok_symbol
                             match prescan_ok_symbol.kind:
                                 case SymbolKind.Class:
-                                    bootstrap_fn_ret_ok_shape_register(prescan_call_name, mir_class_identity(prescan_ok_symbol))
+                                    bootstrap_fn_ret_ok_shape_register(prescan_call_name, mir_class_identity_raw(module_symbols, prescan_ok_symbol_id.id))
                                 case SymbolKind.Struct:
                                     # Bare name, matching the spelling
                                     # `struct_value_syms`/`lookup_or_invalid`
@@ -2157,7 +2157,7 @@ impl MirLowering:
                             val prescan_optional_symbol: HirSymbol = present_prescan_optional_symbol
                             match prescan_optional_symbol.kind:
                                 case SymbolKind.Class:
-                                    bootstrap_fn_ret_opt_shape_register(prescan_call_name, mir_class_identity(prescan_optional_symbol))
+                                    bootstrap_fn_ret_opt_shape_register(prescan_call_name, mir_class_identity_raw(module_symbols, prescan_optional_symbol_id.id))
                                 case SymbolKind.Struct:
                                     bootstrap_fn_ret_opt_shape_register(
                                         prescan_call_name, self.composite_layout_key(prescan_optional_symbol))
@@ -2794,7 +2794,7 @@ impl MirLowering:
                 self.struct_bare_layout_owner[class_def.name] = class_key
                 if class_key != class_def.name:
                     self.register_composite_field_metadata(class_key, class_def.fields, module.symbols, true)
-                val canonical_class_key = mir_class_identity(class_symbol)
+                val canonical_class_key = mir_class_identity_raw(module.symbols, class_def.symbol.id)
                 if canonical_class_key != class_def.name:
                     self.register_composite_field_metadata(canonical_class_key, class_def.fields, module.symbols, true)
                 val class_attr = if class_def.has_layout_attr: class_def.layout_attr else: layoutattr_default_()
@@ -3243,7 +3243,7 @@ impl MirLowering:
                         val impl_type_symbol: HirSymbol = present_impl_type_symbol
                         impl_type_name = impl_type_symbol.name
                         impl_type_key = self.composite_layout_key(impl_type_symbol)
-                        canonical_impl_type_key = mir_class_identity(impl_type_symbol)
+                        canonical_impl_type_key = mir_class_identity_raw(self.symbols, impl_type_sym.id)
                 case _: ()
             if impl_type_name != "":
                 if impl_type_key == "":
@@ -3338,7 +3338,7 @@ impl MirLowering:
                 self.struct_field_default_expr[self.composite_layout_key(class_owner_symbol)] = field_default_expr
                 self.struct_field_order[self.composite_layout_key(class_owner_symbol)] = field_names
                 val raw_owner = class_owner_symbol.defining_module ?? ""
-                val class_key = mir_class_identity(class_owner_symbol)
+                val class_key = mir_class_identity_raw(module.symbols, sym_id.id)
                 self.class_type_names[class_key] = true
                 self.struct_field_has_default[class_key] = field_has_default
                 self.struct_field_default_expr[class_key] = field_default_expr
