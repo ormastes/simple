@@ -60,28 +60,59 @@ sigs_at() {
 # Range-mode fixture: a release line whose own table .sdn already carries a
 # malformed row (diverged from main) must PASS for a branch that does not add
 # one; a branch that introduces a fused row must FAIL.
+# Push ranges arrive based on origin/main even for release-line pushes, which drags
+# every unrelated release commit into the range. Narrow <base> to the NEWEST
+# merge-base of <head> with any remote-tracking main/release/* ref that is a
+# descendant of merge-base(<base>,<head>) — i.e. the remote branch the push is actually based on.
+narrow_base() {
+    _nb=$(git merge-base "$1" "$2" 2>/dev/null) || _nb=$1
+    for _r in $(git for-each-ref --format='%(refname)' 'refs/remotes/*/main' 'refs/remotes/*/release/*' 2>/dev/null); do
+        _mb=$(git merge-base "$_r" "$2" 2>/dev/null) || continue
+        git merge-base --is-ancestor "$_nb" "$_mb" 2>/dev/null && _nb=$_mb
+    done
+    printf '%s\n' "$_nb"
+}
+
+# Default target set: only files with a validated row grammar. test_db.sdn and
+# other table .sdn files stay out until they have one (see bug
+# sdn_row_shape_gate_test_db_scope_2026-11-04).
+ROW_SHAPE_TARGETS=${ROW_SHAPE_TARGETS:-doc/08_tracking/bug/bug_db.sdn}
+
 range_selftest() {
     g="$1/repo"; hdr='bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|'
+    p=doc/08_tracking/bug/bug_db.sdn; tp=doc/08_tracking/test/test_db.sdn
     row='    b_1, P2, open, "t", src/x.spl, 3, doc/a.md, 2026-10-18, 2026-10-18, true'
     old='    a_1, P2, open, "t", src    a_1, P2, open, "t", src/x.spl, 3, doc/a.md, 2026-10-18, 2026-10-18, true'
     new='    c_1, P2, open, "t", src    c_1, P2, open, "t", src/x.spl, 3, doc/a.md, 2026-10-18, 2026-10-18, true'
     git init -q "$g" && cd "$g" || return 1
+    mkdir -p doc/08_tracking/bug doc/08_tracking/test
     gc() { git -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -qm "$1"; }
-    printf '%s\n%s\n' "$hdr" "$row" > t.sdn; git add t.sdn; gc main; main=$(git rev-parse HEAD)
-    printf '%s\n%s\n%s\n' "$hdr" "$row" "$old" > t.sdn; git add t.sdn; gc release; rel=$(git rev-parse HEAD)
-    printf '%s\n%s\n%s\n    d_1, P3, open, "u", src/y.spl, 4, doc/b.md, 2026-10-19, 2026-10-19, true\n' "$hdr" "$row" "$old" > t.sdn; git add t.sdn; gc clean; clean=$(git rev-parse HEAD)
-    printf '%s\n%s\n%s\n%s\n' "$hdr" "$row" "$old" "$new" > t.sdn; git add t.sdn; git reset -q --soft "$rel"; gc bad; bad=$(git rev-parse HEAD)
+    printf '%s\n%s\n' "$hdr" "$row" > $p; git add $p; gc main; main=$(git rev-parse HEAD)
+    printf '%s\n%s\n%s\n' "$hdr" "$row" "$old" > $p; git add $p; gc release; rel=$(git rev-parse HEAD)
+    printf '%s\n%s\n%s\n    d_1, P3, open, "u", src/y.spl, 4, doc/b.md, 2026-10-19, 2026-10-19, true\n' "$hdr" "$row" "$old" > $p; git add $p; gc clean; clean=$(git rev-parse HEAD)
+    printf '%s\n%s\n%s\n%s\n' "$hdr" "$row" "$old" "$new" > $p; git add $p; git reset -q --soft "$rel"; gc bad; bad=$(git rev-parse HEAD)
     range_check "$rel..$clean" >/dev/null; a=$?
     range_check "$rel..$bad" >/dev/null; b=$?
     range_check "$main..$rel" >/dev/null; c=$?
+    # Release-line push measured against main: unrelated release commits touch
+    # test_db.sdn with text-id rows the heuristics would flag; must PASS.
+    git checkout -q "$rel"
+    printf 'tests |test_id, name|\n    x_1, "a", x_1, 2026-10-18, 2026-10-18, true, 2026-10-18, 2026-10-18, true\n' > $tp; git add $tp; gc rel_testdb; rel2=$(git rev-parse HEAD)
+    # Sanity: the same test_db row IS flagged when test_db is opted in, so the
+    # PASS below comes from scoping, not from a blind scanner.
+    ROW_SHAPE_TARGETS="$p $tp" range_check "$rel..$rel2" >/dev/null; f=$?
+    git update-ref refs/remotes/origin/release/1.0.0 "$rel2"
+    printf '%s\n%s\n%s\n    e_1, P3, open, "u", src/y.spl, 4, doc/b.md, 2026-10-19, 2026-10-19, true\n' "$hdr" "$row" "$old" > $p; git add $p; gc topic; topic=$(git rev-parse HEAD)
+    range_check "$main..$topic" >/dev/null; e=$?
     cd / || return 1
-    [ "$a" = 0 ] && [ "$b" = 1 ] && [ "$c" = 1 ]
+    [ "$a" = 0 ] && [ "$b" = 1 ] && [ "$c" = 1 ] && [ "$e" = 0 ] && [ "$f" = 1 ]
 }
 
 range_check() {
     _rr=$1
     base=${_rr%%..*}; head=${_rr#*..}
-    files=$(git diff --name-only --diff-filter=AM "$_rr" -- '*.sdn') || { echo "ERROR — nothing was checked (git diff failed)"; return 2; }
+    base=$(narrow_base "$base" "$head")
+    files=$(git diff --name-only --diff-filter=AM "$base..$head" -- $ROW_SHAPE_TARGETS) || { echo "ERROR — nothing was checked (git diff failed)"; return 2; }
     tmp=$(mktemp) || return 2; checked=0; failed=""; preexist=0
     for p in $files; do
         git show "$head:$p" > "$tmp" 2>/dev/null || continue
