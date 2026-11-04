@@ -731,6 +731,14 @@ impl MirLowering:
         val init_type = self.local_mir_type_of(init_local) ?? MirType.i64()
         val struct_symbol_id: SymbolId? = match init_type.kind:
             case MirTypeKind.Struct(sym): sym
+            case MirTypeKind.Opaque(opaque_name):
+                # Runtime-handle slot typed by its record owner (enumerate()
+                # pair element): resolve the owner name to its symbol.
+                if opaque_name == struct_type_name:
+                    val opaque_symbol = self.symbols.lookup_or_invalid(opaque_name)
+                    if opaque_symbol.is_valid(): opaque_symbol else: nil
+                else:
+                    nil
             case _: nil
         if val type_symbol = struct_symbol_id:
             val copied = self.copy_struct_value_recursive(init_local, struct_type_name, type_symbol, [struct_type_name])
@@ -4777,9 +4785,16 @@ impl MirLowering:
             # nominal storage using the proven canonical MIR record symbol.
             binding_element_type = self.canonical_array_record_element_type(fesn)
         var b_bind = self.builder
-        val loop_var = b_bind.new_local(nil, binding_element_type, LocalKind.Var)
+        var loop_var = b_bind.new_local(nil, binding_element_type, LocalKind.Var)
         b_bind.emit_copy(loop_var, decoded_elem)
         self.builder = b_bind
+        # Structs are value types (Bug #177): the element is a PLACE read of
+        # the array's storage, so bind a private by-value copy. Classes and
+        # primitives are skipped inside maybe_copy_struct_value. Per-iteration
+        # cost is confined to struct elements.
+        if for_has_real_struct_name:
+            if val elem_copy = self.maybe_copy_struct_value(loop_var, fesn, true):
+                loop_var = elem_copy
         val loop_var_id = mir_stmt_symbol_id_value(var_)
         if loop_var_id < 0:
             self.error("for loop variable has no resolved symbol", Some(body.span))
