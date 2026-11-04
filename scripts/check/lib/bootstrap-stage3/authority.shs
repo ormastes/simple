@@ -243,6 +243,146 @@ bootstrap_stage3_vector_frame() {
     done
 }
 
+# Inherited-descriptor protocol (portable Stage-3 hand-off, 2026-11-04).
+#
+# The Linux protocol hands a child `/proc/<owner>/fd/N` and the child re-opens
+# the OWNER's descriptor through procfs. Hosts without procfs cannot address
+# another process's descriptor at all, so the portable spelling is `fd:N`: the
+# parent opens the input, leaves it without close-on-exec, and the validating
+# child INHERITS descriptor N. Identity and content come from fstat(2)/pread(2)
+# on the inherited descriptor itself -- never from a pathname, never from
+# /dev/fd/N (Darwin fdesc reports its own st_dev; FreeBSD needs fdescfs) -- via
+# the pinned python3 the portable lane already requires. pread at explicit
+# offsets makes the hash independent of the offset shared with the parent.
+# Exit convention for every helper: 0 = match, 1 = mismatch, 2 = cannot
+# determine (unknown OS, missing tool, closed fd). 2 is never a pass.
+bootstrap_stage3_inherited_fd_os_supported() {
+    case "$(uname -s 2>/dev/null)" in
+        Linux|Darwin|FreeBSD|NetBSD|OpenBSD|DragonFly) return 0 ;;
+    esac
+    return 1
+}
+
+bootstrap_stage3_inherited_fd_number() {
+    case "$1" in
+        fd:[0-9]*) bootstrap_stage3_ifd_n=${1#fd:} ;;
+        *) return 1 ;;
+    esac
+    case "$bootstrap_stage3_ifd_n" in ''|*[!0-9]*) return 1 ;; esac
+    printf '%s\n' "$bootstrap_stage3_ifd_n"
+}
+
+# $1=fd $2=dev $3=ino $4=mode (decimal st_mode, as the map records it)
+# $5=sha256 of a regular file, or identity-only for a directory. A regular
+# file whose size/mtime/ctime moved while it was being hashed is a mismatch.
+bootstrap_stage3_inherited_fd_verify() {
+    [ "$#" = 5 ] || return 2
+    case "$1" in ''|*[!0-9]*) return 2 ;; esac
+    bootstrap_stage3_inherited_fd_os_supported || return 2
+    "${bootstrap_stage3_inherited_fd_tool:-${bootstrap_stage3_portable_python:-python3}}" \
+        -I -c 'import hashlib, os, stat, sys
+fd = int(sys.argv[1])
+try:
+    st = os.fstat(fd)
+except (OSError, ValueError):
+    sys.exit(2)
+if (str(st.st_dev), str(st.st_ino), str(st.st_mode)) != tuple(sys.argv[2:5]):
+    sys.exit(1)
+want = sys.argv[5]
+if stat.S_ISDIR(st.st_mode):
+    sys.exit(0 if want == "identity-only" else 1)
+if not stat.S_ISREG(st.st_mode):
+    sys.exit(1)
+digest = hashlib.sha256()
+offset = 0
+try:
+    while True:
+        block = os.pread(fd, 1 << 20, offset)
+        if not block:
+            break
+        digest.update(block)
+        offset += len(block)
+    after = os.fstat(fd)
+except OSError:
+    sys.exit(2)
+if offset != st.st_size or (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != \
+        (st.st_size, st.st_mtime_ns, st.st_ctime_ns):
+    sys.exit(1)
+sys.exit(0 if digest.hexdigest() == want else 1)' "$@" 2>/dev/null
+    bootstrap_stage3_ifd_status=$?
+    case "$bootstrap_stage3_ifd_status" in 0|1) return "$bootstrap_stage3_ifd_status" ;; esac
+    return 2
+}
+
+# Copy the full content of inherited regular-file descriptor $1 to the
+# already-created private file $2 (pread from offset 0).
+bootstrap_stage3_inherited_fd_copy() {
+    [ "$#" = 2 ] || return 2
+    case "$1" in ''|*[!0-9]*) return 2 ;; esac
+    bootstrap_stage3_inherited_fd_os_supported || return 2
+    "${bootstrap_stage3_inherited_fd_tool:-${bootstrap_stage3_portable_python:-python3}}" \
+        -I -c 'import os, stat, sys
+fd = int(sys.argv[1])
+try:
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        sys.exit(1)
+    offset = 0
+    with open(sys.argv[2], "wb") as out:
+        while True:
+            block = os.pread(fd, 1 << 20, offset)
+            if not block:
+                break
+            out.write(block)
+            offset += len(block)
+except (OSError, ValueError):
+    sys.exit(2)
+sys.exit(0 if offset == st.st_size else 1)' "$1" "$2" 2>/dev/null
+    bootstrap_stage3_ifd_status=$?
+    case "$bootstrap_stage3_ifd_status" in 0|1) return "$bootstrap_stage3_ifd_status" ;; esac
+    return 2
+}
+
+# Launch stamp of process $1. Linux: /proc/<pid>/stat field 20 (start time in
+# clock ticks) -- byte-identical to the historical descriptor_owner_start_ticks.
+# Darwin/BSD: process start time in epoch seconds from `ps -o lstart=`.
+# 0 = printed, 1 = no such process, 2 = cannot determine.
+bootstrap_stage3_process_start_stamp() {
+    [ "$#" = 1 ] || return 2
+    case "$1" in ''|0*|*[!0-9]*) return 2 ;; esac
+    if [ -r /proc/self/stat ]; then
+        [ -r "/proc/$1/stat" ] || return 1
+        bootstrap_stage3_pss=$(sed 's/^.*) //' "/proc/$1/stat" | awk '{print $20}') || return 2
+    else
+        case "$(uname -s 2>/dev/null)" in
+            Darwin|FreeBSD|NetBSD|OpenBSD|DragonFly) ;;
+            *) return 2 ;;
+        esac
+        kill -0 "$1" 2>/dev/null || return 1
+        bootstrap_stage3_pss=$(LC_ALL=C "${bootstrap_stage3_process_ps_tool:-ps}" -o lstart= -p "$1" 2>/dev/null) || return 1
+        [ -n "$bootstrap_stage3_pss" ] || return 1
+        bootstrap_stage3_pss=$(LC_ALL=C "${bootstrap_stage3_inherited_fd_tool:-${bootstrap_stage3_portable_python:-python3}}" \
+            -I -c 'import calendar, sys, time
+print(calendar.timegm(time.strptime(" ".join(sys.argv[1].split()), "%a %b %d %H:%M:%S %Y")))' \
+            "$bootstrap_stage3_pss" 2>/dev/null) || return 2
+    fi
+    case "$bootstrap_stage3_pss" in ''|*[!0-9]*) return 2 ;; esac
+    printf '%s\n' "$bootstrap_stage3_pss"
+}
+
+# Is descriptor owner $1 alive AND the same process whose launch stamp $2 was
+# recorded? 0 = yes; 1 = dead, or the pid was reused by a later process;
+# 2 = cannot determine. Non-Linux stamps have one-second resolution: a reuse of
+# the same pid within the owner's own start second is the residual window
+# (documented in the bug record); the inherited descriptor itself pins content.
+bootstrap_stage3_owner_matches() {
+    [ "$#" = 2 ] || return 2
+    case "$2" in ''|*[!0-9]*) return 2 ;; esac
+    bootstrap_stage3_om_live=$(bootstrap_stage3_process_start_stamp "$1")
+    case $? in 0) ;; 1) return 1 ;; *) return 2 ;; esac
+    [ "$bootstrap_stage3_om_live" = "$2" ] || return 1
+}
+
 bootstrap_stage3_validate_descriptor_map() (
     [ "$#" -eq 6 ] || return 1
     bootstrap_stage3_dm_snapshot_dir=
@@ -260,16 +400,30 @@ bootstrap_stage3_validate_descriptor_map() (
     bootstrap_stage3_dm_file=$1 bootstrap_stage3_dm_external_sha=$2
     bootstrap_stage3_dm_schema=$3 bootstrap_stage3_dm_run=$4
     bootstrap_stage3_dm_arch=$5 bootstrap_stage3_dm_roles=$6
-    expr "$bootstrap_stage3_dm_file" : \
-        '/proc/[1-9][0-9]*/fd/[1-9][0-9]*$' >/dev/null || return 1
-    [ -f "$bootstrap_stage3_dm_file" ] || return 1
+    # The map itself arrives either as the owner's procfs descriptor (Linux) or
+    # as an inherited descriptor `fd:N` (any supported host, procfs or not).
+    bootstrap_stage3_dm_map_fd=
+    if bootstrap_stage3_dm_map_fd=$(bootstrap_stage3_inherited_fd_number "$bootstrap_stage3_dm_file"); then
+        :
+    else
+        bootstrap_stage3_dm_map_fd=
+        expr "$bootstrap_stage3_dm_file" : \
+            '/proc/[1-9][0-9]*/fd/[1-9][0-9]*$' >/dev/null || return 1
+        [ -f "$bootstrap_stage3_dm_file" ] || return 1
+    fi
     printf '%s\n' "$bootstrap_stage3_dm_external_sha" | grep -Eq '^[0-9a-f]{64}$' || return 1
-    [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_dm_file")" = "$bootstrap_stage3_dm_external_sha" ] || return 1
+    [ -n "$bootstrap_stage3_dm_map_fd" ] ||
+        [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_dm_file")" = "$bootstrap_stage3_dm_external_sha" ] || return 1
     bootstrap_stage3_dm_snapshot_dir=$(mktemp -d "${TMPDIR:-/tmp}/stage3-dmap.XXXXXX") || return 1
     chmod 0700 "$bootstrap_stage3_dm_snapshot_dir" || return 1
     bootstrap_stage3_dm_snapshot="$bootstrap_stage3_dm_snapshot_dir/map"
     (umask 077; set -C; : >"$bootstrap_stage3_dm_snapshot") || return 1
-    dd if="$bootstrap_stage3_dm_file" of="$bootstrap_stage3_dm_snapshot" bs=65536 2>/dev/null || return 1
+    if [ -n "$bootstrap_stage3_dm_map_fd" ]; then
+        bootstrap_stage3_inherited_fd_copy "$bootstrap_stage3_dm_map_fd" \
+            "$bootstrap_stage3_dm_snapshot" || return 1
+    else
+        dd if="$bootstrap_stage3_dm_file" of="$bootstrap_stage3_dm_snapshot" bs=65536 2>/dev/null || return 1
+    fi
     chmod 0400 "$bootstrap_stage3_dm_snapshot" || return 1
     [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_dm_snapshot")" = "$bootstrap_stage3_dm_external_sha" ] || return 1
     bootstrap_stage3_dm_file=$bootstrap_stage3_dm_snapshot
@@ -280,9 +434,9 @@ bootstrap_stage3_validate_descriptor_map() (
     bootstrap_stage3_dm_owner=$(bootstrap_stage3_manifest_value descriptor_owner_pid "$bootstrap_stage3_dm_file") || return 1
     bootstrap_stage3_dm_start=$(bootstrap_stage3_manifest_value descriptor_owner_start_ticks "$bootstrap_stage3_dm_file") || return 1
     case "$bootstrap_stage3_dm_owner:$bootstrap_stage3_dm_start" in *[!0-9:]*|:*|*:) return 1 ;; esac
-    [ -r "/proc/$bootstrap_stage3_dm_owner/stat" ] || return 1
-    bootstrap_stage3_dm_live_start=$(sed 's/^.*) //' "/proc/$bootstrap_stage3_dm_owner/stat" | awk '{print $20}') || return 1
-    [ "$bootstrap_stage3_dm_live_start" = "$bootstrap_stage3_dm_start" ] || return 1
+    # Linux: the same /proc/<owner>/stat field-20 comparison as before.
+    # Darwin/BSD: kill -0 plus the launch stamp (pid reuse => mismatch).
+    bootstrap_stage3_owner_matches "$bootstrap_stage3_dm_owner" "$bootstrap_stage3_dm_start" || return 1
     set -- $bootstrap_stage3_dm_roles
     [ "$(bootstrap_stage3_manifest_value entry_count "$bootstrap_stage3_dm_file")" = "$#" ] || return 1
     bootstrap_stage3_dm_actual=$(sed -n 's/^\([a-z0-9_]*\)_descriptor=.*/\1/p' "$bootstrap_stage3_dm_file" | tr '\n' ' ' | sed 's/ $//')
@@ -325,6 +479,14 @@ bootstrap_stage3_validate_descriptor_map() (
         if [ "$bootstrap_stage3_dm_descriptor" = descriptor-absent ]; then
             [ "$bootstrap_stage3_dm_role" = compiler_backfill ] || return 1
             [ "$bootstrap_stage3_dm_dev:$bootstrap_stage3_dm_ino:$bootstrap_stage3_dm_mode:$bootstrap_stage3_dm_sha" = absent:absent:absent:absent ] || return 1
+        elif bootstrap_stage3_dm_fd=$(bootstrap_stage3_inherited_fd_number "$bootstrap_stage3_dm_descriptor"); then
+            case "$bootstrap_stage3_dm_sha" in
+                identity-only) ;;
+                *) printf '%s\n' "$bootstrap_stage3_dm_sha" | grep -Eq '^[0-9a-f]{64}$' || return 1 ;;
+            esac
+            bootstrap_stage3_inherited_fd_verify "$bootstrap_stage3_dm_fd" \
+                "$bootstrap_stage3_dm_dev" "$bootstrap_stage3_dm_ino" \
+                "$bootstrap_stage3_dm_mode" "$bootstrap_stage3_dm_sha" || return 1
         else
             case "$bootstrap_stage3_dm_descriptor" in "/proc/$bootstrap_stage3_dm_owner/fd/"[0-9]*) ;; *) return 1 ;; esac
             bootstrap_stage3_dm_fd=${bootstrap_stage3_dm_descriptor##*/}; case "$bootstrap_stage3_dm_fd" in ''|*[!0-9]*) return 1 ;; esac
