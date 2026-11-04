@@ -1,6 +1,6 @@
 // Core function execution logic
 
-use super::arg_binding::{bind_args, bind_args_with_values, name_callee};
+use super::arg_binding::{bind_args, bind_args_with_values, bind_args_with_values_named, name_callee};
 use super::async_support::{is_async_function, wrap_in_promise};
 use super::macros::*;
 use crate::error::CompileError;
@@ -2050,9 +2050,11 @@ fn exec_function_with_values_and_writeback_inner(
     publish_and_repoint(outer_env);
     let mut local_env = captured_env_with_live_globals(func, &Env::new());
     let self_mode = SelfMode::IncludeSelf;
-    let bound = bind_args_with_values(
+    let bound = bind_args_with_values_named(
         &func.params,
         &args,
+        // Spread arguments expand to several values, so names only line up 1:1.
+        if original_args.len() == args.len() { original_args } else { &[] },
         outer_env,
         functions,
         classes,
