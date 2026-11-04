@@ -27,6 +27,10 @@ use os.crypto.ml_kem_kpke.{
     kpke_keygen_512, kpke_encrypt_512, kpke_decrypt_512,
     kpke_keygen_1024, kpke_encrypt_1024, kpke_decrypt_1024,
     kpke_keygen_params, kpke_encrypt_params, kpke_decrypt_params,
+    kpke_keygen_params_simd, kpke_encrypt_params_simd,
+    kpke_decrypt_params_simd,
+    MlKemNttBatchProvider, kpke_keygen_params_provider,
+    kpke_encrypt_params_provider, kpke_decrypt_params_provider,
     ml_kem_g, ml_kem_h, ml_kem_j}
 use os.crypto.ml_kem_ntt.{
     ml_kem_k_512, ml_kem_eta1_512, ml_kem_eta2_512,
@@ -132,6 +136,18 @@ fn _ct_select_bytes(mask: i64, a: list, b: list) -> list:
         i = i + 1
     out
 
+# Best-effort cleanup for mutable, function-owned byte lists. The current GC
+# may retain moved/copied backing storage, so this narrows exposure but is not a
+# guaranteed secure-zero primitive. Callers retain ownership of input lists.
+fn _ml_kem_wipe_owned(values: list):
+    var i: i64 = 0
+    while i < values.len():
+        # Use the language's canonical mutable-list index operation.  The
+        # method-style `set` spelling can bind to an unrelated co-compiled
+        # array surface and fail before cleanup executes.
+        values[i] = 0
+        i = i + 1
+
 # ============================================================================
 # ML-KEM.KeyGen — FIPS 203 Algorithm 16
 # ============================================================================
@@ -146,10 +162,20 @@ fn _ct_select_bytes(mask: i64, a: list, b: list) -> list:
 # can plug their own RNG / KAT seed without re-allocating bytes.
 
 # Parameterized keygen — shared by 512 / 768 / 1024 variants.
-fn ml_kem_keygen_params(d: list, z: list, k_param: i64, eta1: i64) -> tuple:
-    val kp = kpke_keygen_params(d, k_param, eta1)
-    val ek_pke = kp[0]
-    val dk_pke = kp[1]
+fn _ml_kem_keygen_params_mode(d: list, z: list, k_param: i64,
+        eta1: i64, use_simd: bool) -> tuple:
+    var ek_pke = []
+    var dk_pke = []
+    if use_simd:
+        val (simd_ek_pke, simd_dk_pke) = kpke_keygen_params_simd(
+            d, k_param, eta1)
+        ek_pke = simd_ek_pke
+        dk_pke = simd_dk_pke
+    else:
+        val (scalar_ek_pke, scalar_dk_pke) = kpke_keygen_params(
+            d, k_param, eta1)
+        ek_pke = scalar_ek_pke
+        dk_pke = scalar_dk_pke
 
     # H(ek) — 32 bytes.
     val h_ek = ml_kem_h(ek_pke)
@@ -173,11 +199,22 @@ fn ml_kem_keygen_params(d: list, z: list, k_param: i64, eta1: i64) -> tuple:
         dk.push(z.get(l))
         l = l + 1
 
+    _ml_kem_wipe_owned(dk_pke)
     (ek_pke, dk)
+
+fn ml_kem_keygen_params(d: list, z: list, k_param: i64, eta1: i64) -> tuple:
+    _ml_kem_keygen_params_mode(d, z, k_param, eta1, false)
+
+fn ml_kem_keygen_params_simd(d: list, z: list, k_param: i64,
+        eta1: i64) -> tuple:
+    _ml_kem_keygen_params_mode(d, z, k_param, eta1, true)
 
 # 768 entry point (preserved API).
 fn ml_kem_keygen(d: list, z: list) -> tuple:
     ml_kem_keygen_params(d, z, ml_kem_k_768(), ml_kem_eta1_768())
+
+fn ml_kem_keygen_simd(d: list, z: list) -> tuple:
+    ml_kem_keygen_params_simd(d, z, ml_kem_k_768(), ml_kem_eta1_768())
 
 # 512 / 1024 entry points.
 fn ml_kem_keygen_512(d: list, z: list) -> tuple:
@@ -200,8 +237,9 @@ fn ml_kem_keygen_1024(d: list, z: list) -> tuple:
 # callers pass random_bytes(32).
 
 # Parameterized encaps — shared by 512 / 768 / 1024 variants.
-fn ml_kem_encaps_params(ek: list, m: list,
-        k_param: i64, eta1: i64, eta2: i64, du: i64, dv: i64) -> tuple:
+fn _ml_kem_encaps_params_mode(ek: list, m: list,
+        k_param: i64, eta1: i64, eta2: i64, du: i64, dv: i64,
+        use_simd: bool) -> tuple:
     val h_ek = ml_kem_h(ek)
     var input = []
     var i = 0
@@ -212,15 +250,32 @@ fn ml_kem_encaps_params(ek: list, m: list,
     while j < h_ek.len():
         input.push(h_ek.get(j))
         j = j + 1
-    val kr = ml_kem_g(input)
-    val k_shared = kr[0]
-    val r = kr[1]
-    val c = kpke_encrypt_params(ek, m, r, k_param, eta1, eta2, du, dv)
+    val (k_shared, r) = ml_kem_g(input)
+    var c = []
+    if use_simd:
+        c = kpke_encrypt_params_simd(ek, m, r, k_param, eta1, eta2, du, dv)
+    else:
+        c = kpke_encrypt_params(ek, m, r, k_param, eta1, eta2, du, dv)
+    _ml_kem_wipe_owned(input)
+    _ml_kem_wipe_owned(r)
     (k_shared, c)
+
+fn ml_kem_encaps_params(ek: list, m: list,
+        k_param: i64, eta1: i64, eta2: i64, du: i64, dv: i64) -> tuple:
+    _ml_kem_encaps_params_mode(ek, m, k_param, eta1, eta2, du, dv, false)
+
+fn ml_kem_encaps_params_simd(ek: list, m: list,
+        k_param: i64, eta1: i64, eta2: i64, du: i64, dv: i64) -> tuple:
+    _ml_kem_encaps_params_mode(ek, m, k_param, eta1, eta2, du, dv, true)
 
 # 768 entry point (preserved API).
 fn ml_kem_encaps(ek: list, m: list) -> tuple:
     ml_kem_encaps_params(ek, m,
+        ml_kem_k_768(), ml_kem_eta1_768(), ml_kem_eta2_768(),
+        ml_kem_du_768(), ml_kem_dv_768())
+
+fn ml_kem_encaps_simd(ek: list, m: list) -> tuple:
+    ml_kem_encaps_params_simd(ek, m,
         ml_kem_k_768(), ml_kem_eta1_768(), ml_kem_eta2_768(),
         ml_kem_du_768(), ml_kem_dv_768())
 
@@ -254,8 +309,9 @@ fn ml_kem_encaps_1024(ek: list, m: list) -> tuple:
 # Parameterized decaps — shared by 512 / 768 / 1024 variants.
 # Slices the encoded dk by k-derived offsets and dispatches to the matching
 # K-PKE primitives.
-fn ml_kem_decaps_params(dk: list, c: list,
-        k_param: i64, eta1: i64, eta2: i64, du: i64, dv: i64) -> list:
+fn _ml_kem_decaps_params_mode(dk: list, c: list,
+        k_param: i64, eta1: i64, eta2: i64, du: i64, dv: i64,
+        use_simd: bool) -> list:
     val dk_pke_bytes = 384 * k_param            # ByteEncode_12(ŝ) length
     val ek_bytes = 384 * k_param + 32           # ByteEncode_12(t̂) || rho
     # dk = [dk_pke || ek || H(ek) (32) || z (32)] = 768·k + 96.
@@ -281,7 +337,11 @@ fn ml_kem_decaps_params(dk: list, c: list,
         l = l + 1
 
     # m' = K-PKE.Decrypt(dk_pke, c)
-    val m_prime = kpke_decrypt_params(dk_pke, c, k_param, du, dv)
+    var m_prime = []
+    if use_simd:
+        m_prime = kpke_decrypt_params_simd(dk_pke, c, k_param, du, dv)
+    else:
+        m_prime = kpke_decrypt_params(dk_pke, c, k_param, du, dv)
 
     # (K', r') = G(m' || H(ek))
     var input = []
@@ -293,9 +353,7 @@ fn ml_kem_decaps_params(dk: list, c: list,
     while jj < h_ek.len():
         input.push(h_ek.get(jj))
         jj = jj + 1
-    val kr = ml_kem_g(input)
-    val k_prime = kr[0]
-    val r_prime = kr[1]
+    val (k_prime, r_prime) = ml_kem_g(input)
 
     # K_implicit = J(z || c)
     var zc = []
@@ -310,18 +368,163 @@ fn ml_kem_decaps_params(dk: list, c: list,
     val k_implicit = ml_kem_j(zc)
 
     # c' = K-PKE.Encrypt(ek, m', r')
-    val c_prime = kpke_encrypt_params(ek, m_prime, r_prime,
-        k_param, eta1, eta2, du, dv)
+    var c_prime = []
+    if use_simd:
+        c_prime = kpke_encrypt_params_simd(ek, m_prime, r_prime,
+            k_param, eta1, eta2, du, dv)
+    else:
+        c_prime = kpke_encrypt_params(ek, m_prime, r_prime,
+            k_param, eta1, eta2, du, dv)
 
     # Constant-time select between K' and K_implicit by c ?= c'.
     val mask = _ct_bytes_eq(c, c_prime)
-    _ct_select_bytes(mask, k_prime, k_implicit)
+    val selected = _ct_select_bytes(mask, k_prime, k_implicit)
+    _ml_kem_wipe_owned(dk_pke)
+    _ml_kem_wipe_owned(z)
+    _ml_kem_wipe_owned(m_prime)
+    _ml_kem_wipe_owned(input)
+    _ml_kem_wipe_owned(r_prime)
+    _ml_kem_wipe_owned(zc)
+    _ml_kem_wipe_owned(k_prime)
+    _ml_kem_wipe_owned(k_implicit)
+    selected
+
+fn ml_kem_decaps_params(dk: list, c: list,
+        k_param: i64, eta1: i64, eta2: i64, du: i64, dv: i64) -> list:
+    _ml_kem_decaps_params_mode(dk, c, k_param, eta1, eta2, du, dv, false)
+
+fn ml_kem_decaps_params_simd(dk: list, c: list,
+        k_param: i64, eta1: i64, eta2: i64, du: i64, dv: i64) -> list:
+    _ml_kem_decaps_params_mode(dk, c, k_param, eta1, eta2, du, dv, true)
 
 # 768 entry point (preserved API).
 fn ml_kem_decaps(dk: list, c: list) -> list:
     ml_kem_decaps_params(dk, c,
         ml_kem_k_768(), ml_kem_eta1_768(), ml_kem_eta2_768(),
         ml_kem_du_768(), ml_kem_dv_768())
+
+fn ml_kem_decaps_simd(dk: list, c: list) -> list:
+    ml_kem_decaps_params_simd(dk, c,
+        ml_kem_k_768(), ml_kem_eta1_768(), ml_kem_eta2_768(),
+        ml_kem_du_768(), ml_kem_dv_768())
+
+# ML-KEM-768 candidate composition through a narrow batched NTT provider.
+# All FO-transform, encoding, and constant-time selection remain CPU-owned.
+fn ml_kem_keygen_provider(d: list, z: list,
+        provider: MlKemNttBatchProvider) -> Result<tuple, text>:
+    val kp = match kpke_keygen_params_provider(
+            d, ml_kem_k_768(), ml_kem_eta1_768(), provider):
+        case Ok(value): value
+        case Err(reason): return Err(reason)
+    val (ek, dk_pke, _, _, _) = kp
+    val h_ek = ml_kem_h(ek)
+    var dk = []
+    var i: i64 = 0
+    while i < dk_pke.len():
+        dk.push(dk_pke.get(i))
+        i = i + 1
+    i = 0
+    while i < ek.len():
+        dk.push(ek.get(i))
+        i = i + 1
+    i = 0
+    while i < h_ek.len():
+        dk.push(h_ek.get(i))
+        i = i + 1
+    i = 0
+    while i < z.len():
+        dk.push(z.get(i))
+        i = i + 1
+    _ml_kem_wipe_owned(dk_pke)
+    Ok((ek, dk))
+
+fn ml_kem_encaps_provider(ek: list, m: list,
+        provider: MlKemNttBatchProvider) -> Result<tuple, text>:
+    val h_ek = ml_kem_h(ek)
+    var input = []
+    var i: i64 = 0
+    while i < m.len():
+        input.push(m.get(i))
+        i = i + 1
+    i = 0
+    while i < h_ek.len():
+        input.push(h_ek.get(i))
+        i = i + 1
+    val (shared_secret, coins) = ml_kem_g(input)
+    val ciphertext = match kpke_encrypt_params_provider(
+            ek, m, coins, ml_kem_k_768(), ml_kem_eta1_768(),
+            ml_kem_eta2_768(), ml_kem_du_768(), ml_kem_dv_768(), provider):
+        case Ok(value): value
+        case Err(reason):
+            _ml_kem_wipe_owned(input)
+            _ml_kem_wipe_owned(shared_secret)
+            _ml_kem_wipe_owned(coins)
+            return Err(reason)
+    _ml_kem_wipe_owned(input)
+    _ml_kem_wipe_owned(coins)
+    Ok((shared_secret, ciphertext))
+
+fn ml_kem_decaps_provider(dk: list, c: list,
+        provider: MlKemNttBatchProvider) -> Result<list, text>:
+    val dk_pke_bytes = 384 * ml_kem_k_768()
+    val ek_bytes = 384 * ml_kem_k_768() + 32
+    val dk_pke = _ml_kem_slice(dk, 0, dk_pke_bytes)
+    val ek = _ml_kem_slice(dk, dk_pke_bytes, ek_bytes)
+    val h_ek = _ml_kem_slice(dk, dk_pke_bytes + ek_bytes, 32)
+    val z = _ml_kem_slice(dk, dk_pke_bytes + ek_bytes + 32, 32)
+    val m_prime = match kpke_decrypt_params_provider(
+            dk_pke, c, ml_kem_k_768(), ml_kem_du_768(),
+            ml_kem_dv_768(), provider):
+        case Ok(value): value
+        case Err(reason):
+            _ml_kem_wipe_owned(dk_pke)
+            _ml_kem_wipe_owned(z)
+            return Err(reason)
+    var input = []
+    var i: i64 = 0
+    while i < m_prime.len():
+        input.push(m_prime.get(i))
+        i = i + 1
+    i = 0
+    while i < h_ek.len():
+        input.push(h_ek.get(i))
+        i = i + 1
+    val (candidate_secret, coins) = ml_kem_g(input)
+    var zc = []
+    i = 0
+    while i < z.len():
+        zc.push(z.get(i))
+        i = i + 1
+    i = 0
+    while i < c.len():
+        zc.push(c.get(i))
+        i = i + 1
+    val implicit = ml_kem_j(zc)
+    val c_prime = match kpke_encrypt_params_provider(
+            ek, m_prime, coins, ml_kem_k_768(), ml_kem_eta1_768(),
+            ml_kem_eta2_768(), ml_kem_du_768(), ml_kem_dv_768(), provider):
+        case Ok(value): value
+        case Err(reason):
+            _ml_kem_wipe_owned(dk_pke)
+            _ml_kem_wipe_owned(z)
+            _ml_kem_wipe_owned(m_prime)
+            _ml_kem_wipe_owned(input)
+            _ml_kem_wipe_owned(coins)
+            _ml_kem_wipe_owned(zc)
+            _ml_kem_wipe_owned(candidate_secret)
+            _ml_kem_wipe_owned(implicit)
+            return Err(reason)
+    val selected = _ct_select_bytes(
+        _ct_bytes_eq(c, c_prime), candidate_secret, implicit)
+    _ml_kem_wipe_owned(dk_pke)
+    _ml_kem_wipe_owned(z)
+    _ml_kem_wipe_owned(m_prime)
+    _ml_kem_wipe_owned(input)
+    _ml_kem_wipe_owned(coins)
+    _ml_kem_wipe_owned(zc)
+    _ml_kem_wipe_owned(candidate_secret)
+    _ml_kem_wipe_owned(implicit)
+    Ok(selected)
 
 # 512 / 1024 entry points.
 fn ml_kem_decaps_512(dk: list, c: list) -> list:
@@ -333,3 +536,217 @@ fn ml_kem_decaps_1024(dk: list, c: list) -> list:
     ml_kem_decaps_params(dk, c,
         ml_kem_k_1024(), ml_kem_eta1_1024(), ml_kem_eta2_1024(),
         ml_kem_du_1024(), ml_kem_dv_1024())
+
+# ============================================================================
+# Validated ML-KEM-768 boundary
+# ============================================================================
+
+fn _ml_kem_slice(values: list, start: i64, count: i64) -> list:
+    var out = []
+    var i: i64 = 0
+    while i < count:
+        out.push(values.get(start + i))
+        i = i + 1
+    out
+
+fn _ml_kem_octets_valid(values: list) -> bool:
+    # Scan the complete buffer. Generic `list` elements are signed integers,
+    # so length alone does not prove that the value is a byte. Do not mask
+    # hostile values into range: 256 must not alias 0 and -1 must not alias
+    # 255 at a checked cryptographic boundary.
+    var valid: bool = true
+    var index: i64 = 0
+    while index < values.len():
+        val value: i64 = values[index]
+        if value < 0 or value > 0xFF:
+            valid = false
+        index = index + 1
+    valid
+
+fn _ml_kem_768_encoded_poly_valid(values: list, offset: i64) -> i64:
+    # FIPS 203 ByteDecode_12 reduces each 12-bit coefficient modulo q. Its
+    # required re-encode equality is therefore equivalent to requiring every
+    # packed coefficient to be below q. Decode the two coefficients in each
+    # three-byte group directly through typed index reads. This avoids the
+    # native dynamic `list.get` result, whose tagged word must not enter
+    # arithmetic or an apparently explicit `.to_i64()` conversion.
+    var valid: i64 = 0xFF
+    var pair: i64 = 0
+    while pair < 128:
+        val byte_offset = offset + pair * 3
+        # The caller has recorded any non-octet input as invalid. Normalize
+        # before shifts so a hostile, oversized list element cannot overflow
+        # the coefficient arithmetic while the full scan finishes.
+        val b0 = values[byte_offset] & 0xFF
+        val b1 = values[byte_offset + 1] & 0xFF
+        val b2 = values[byte_offset + 2] & 0xFF
+        val coefficient0 = b0 | ((b1 & 0x0F) << 8)
+        val coefficient1 = (b1 >> 4) | (b2 << 4)
+        val reduced0 = coefficient0 % 3329
+        val reduced1 = coefficient1 % 3329
+        valid = valid & _ct_byte_eq(b0, reduced0 & 0xFF)
+        valid = valid & _ct_byte_eq(
+            b1, ((reduced0 >> 8) | ((reduced1 & 0x0F) << 4)) & 0xFF)
+        valid = valid & _ct_byte_eq(b2, (reduced1 >> 4) & 0xFF)
+        pair = pair + 1
+    valid
+
+fn ml_kem_768_encapsulation_key_valid(ek: list) -> bool:
+    if ek.len() != ml_kem_768_ek_bytes():
+        return false
+    # `list` is not element-typed. Reject non-octet integer values before the
+    # low-byte equality helper can make (for example) 256 look equal to 0.
+    # Scan the complete key because rho is unrestricted as an octet string,
+    # not unrestricted as an arbitrary list of integers.
+    var valid: i64 = if _ml_kem_octets_valid(ek): 0xFF else: 0
+    # The first 1152 bytes are k=3 canonically packed 12-bit polynomials. The
+    # remaining 32-byte rho seed accepts every octet value.
+    var poly: i64 = 0
+    while poly < 3:
+        valid = valid & _ml_kem_768_encoded_poly_valid(ek, poly * 384)
+        poly = poly + 1
+    valid == 0xFF
+
+fn ml_kem_768_decapsulation_key_valid(dk: list) -> bool:
+    if dk.len() != ml_kem_768_dk_bytes():
+        return false
+    if not _ml_kem_octets_valid(dk):
+        return false
+    val embedded_ek = _ml_kem_slice(dk, 1152, 1184)
+    if not ml_kem_768_encapsulation_key_valid(embedded_ek):
+        return false
+    val stored_hash = _ml_kem_slice(dk, 2336, 32)
+    _ct_bytes_eq(stored_hash, ml_kem_h(embedded_ek)) == 0xFF
+
+fn ml_kem_keygen_checked(d: list, z: list) -> Result<tuple, text>:
+    if d.len() != 32 or z.len() != 32 or
+            not _ml_kem_octets_valid(d) or not _ml_kem_octets_valid(z):
+        return Err("ML-KEM-768 key generation seeds must be 32 bytes")
+    val pair = ml_kem_keygen(d, z)
+    val (ek, dk) = pair
+    if ek.len() != ml_kem_768_ek_bytes() or
+            dk.len() != ml_kem_768_dk_bytes():
+        return Err("ML-KEM-768 key generation returned invalid sizes")
+    if not ml_kem_768_encapsulation_key_valid(ek):
+        return Err("ML-KEM-768 key generation returned an invalid encapsulation key")
+    if not ml_kem_768_decapsulation_key_valid(dk):
+        return Err("ML-KEM-768 key generation returned an invalid decapsulation key")
+    Ok(pair)
+
+fn ml_kem_encaps_checked(ek: list, m: list) -> Result<tuple, text>:
+    if m.len() != 32 or not _ml_kem_octets_valid(m):
+        return Err("ML-KEM-768 encapsulation message must be 32 bytes")
+    if not ml_kem_768_encapsulation_key_valid(ek):
+        return Err("ML-KEM-768 encapsulation key is invalid")
+    val result = ml_kem_encaps(ek, m)
+    val (shared, ciphertext) = result
+    if shared.len() != 32 or ciphertext.len() != 1088 or
+            not _ml_kem_octets_valid(shared) or
+            not _ml_kem_octets_valid(ciphertext):
+        return Err("ML-KEM-768 encapsulation returned invalid sizes")
+    Ok(result)
+
+fn ml_kem_decaps_checked(dk: list, c: list) -> Result<list, text>:
+    if c.len() != ml_kem_768_ct_bytes() or not _ml_kem_octets_valid(c):
+        return Err("ML-KEM-768 ciphertext must be 1088 bytes")
+    if not ml_kem_768_decapsulation_key_valid(dk):
+        return Err("ML-KEM-768 decapsulation key is invalid")
+    val shared = ml_kem_decaps(dk, c)
+    if shared.len() != ml_kem_768_ss_bytes() or
+            not _ml_kem_octets_valid(shared):
+        return Err("ML-KEM-768 decapsulation returned an invalid shared secret")
+    Ok(shared)
+
+fn ml_kem_keygen_checked_simd(d: list, z: list) -> Result<tuple, text>:
+    if d.len() != 32 or z.len() != 32 or
+            not _ml_kem_octets_valid(d) or not _ml_kem_octets_valid(z):
+        return Err("ML-KEM-768 SIMD key generation seeds must be 32 bytes")
+    val pair = ml_kem_keygen_simd(d, z)
+    val (ek, dk) = pair
+    if ek.len() != ml_kem_768_ek_bytes() or
+            dk.len() != ml_kem_768_dk_bytes():
+        return Err("ML-KEM-768 SIMD key generation returned invalid sizes")
+    if not ml_kem_768_encapsulation_key_valid(ek):
+        return Err("ML-KEM-768 SIMD key generation returned an invalid encapsulation key")
+    if not ml_kem_768_decapsulation_key_valid(dk):
+        return Err("ML-KEM-768 SIMD key generation returned an invalid decapsulation key")
+    Ok(pair)
+
+fn ml_kem_encaps_checked_simd(ek: list, m: list) -> Result<tuple, text>:
+    if m.len() != 32 or not _ml_kem_octets_valid(m):
+        return Err("ML-KEM-768 SIMD encapsulation message must be 32 bytes")
+    if not ml_kem_768_encapsulation_key_valid(ek):
+        return Err("ML-KEM-768 SIMD encapsulation key is invalid")
+    val result = ml_kem_encaps_simd(ek, m)
+    val (shared, ciphertext) = result
+    if shared.len() != 32 or ciphertext.len() != 1088 or
+            not _ml_kem_octets_valid(shared) or
+            not _ml_kem_octets_valid(ciphertext):
+        return Err("ML-KEM-768 SIMD encapsulation returned invalid sizes")
+    Ok(result)
+
+fn ml_kem_decaps_checked_simd(dk: list, c: list) -> Result<list, text>:
+    if c.len() != ml_kem_768_ct_bytes() or not _ml_kem_octets_valid(c):
+        return Err("ML-KEM-768 SIMD ciphertext must be 1088 bytes")
+    if not ml_kem_768_decapsulation_key_valid(dk):
+        return Err("ML-KEM-768 SIMD decapsulation key is invalid")
+    val shared = ml_kem_decaps_simd(dk, c)
+    if shared.len() != ml_kem_768_ss_bytes() or
+            not _ml_kem_octets_valid(shared):
+        return Err("ML-KEM-768 SIMD decapsulation returned an invalid shared secret")
+    Ok(shared)
+
+fn ml_kem_keygen_checked_provider(d: list, z: list,
+        provider: MlKemNttBatchProvider) -> Result<tuple, text>:
+    if d.len() != 32 or z.len() != 32 or
+            not _ml_kem_octets_valid(d) or not _ml_kem_octets_valid(z):
+        return Err("ML-KEM-768 provider key generation seeds must be 32 bytes")
+    val pair = match ml_kem_keygen_provider(d, z, provider):
+        case Ok(value): value
+        case Err(reason): return Err(reason)
+    val (ek, dk) = pair
+    if ek.len() != ml_kem_768_ek_bytes() or
+            dk.len() != ml_kem_768_dk_bytes():
+        return Err("ML-KEM-768 provider key generation returned invalid sizes")
+    if not ml_kem_768_encapsulation_key_valid(ek):
+        return Err("ML-KEM-768 provider key generation returned an invalid encapsulation key")
+    if not ml_kem_768_decapsulation_key_valid(dk):
+        return Err("ML-KEM-768 provider key generation returned an invalid decapsulation key")
+    Ok(pair)
+
+fn ml_kem_encaps_checked_provider(ek: list, m: list,
+        provider: MlKemNttBatchProvider) -> Result<tuple, text>:
+    if m.len() != 32 or not _ml_kem_octets_valid(m):
+        return Err("ML-KEM-768 provider encapsulation message must be 32 bytes")
+    if not ml_kem_768_encapsulation_key_valid(ek):
+        return Err("ML-KEM-768 provider encapsulation key is invalid")
+    val result = match ml_kem_encaps_provider(ek, m, provider):
+        case Ok(value): value
+        case Err(reason): return Err(reason)
+    val (shared, ciphertext) = result
+    if shared.len() != 32 or ciphertext.len() != 1088 or
+            not _ml_kem_octets_valid(shared) or
+            not _ml_kem_octets_valid(ciphertext):
+        return Err("ML-KEM-768 provider encapsulation returned invalid sizes")
+    Ok(result)
+
+fn ml_kem_decaps_checked_provider(dk: list, c: list,
+        provider: MlKemNttBatchProvider) -> Result<list, text>:
+    if c.len() != ml_kem_768_ct_bytes() or not _ml_kem_octets_valid(c):
+        return Err("ML-KEM-768 provider ciphertext must be 1088 bytes")
+    if not ml_kem_768_decapsulation_key_valid(dk):
+        return Err("ML-KEM-768 provider decapsulation key is invalid")
+    val shared = match ml_kem_decaps_provider(dk, c, provider):
+        case Ok(value): value
+        case Err(reason): return Err(reason)
+    if shared.len() != ml_kem_768_ss_bytes() or
+            not _ml_kem_octets_valid(shared):
+        return Err("ML-KEM-768 provider decapsulation returned invalid shared secret")
+    Ok(shared)
+
+export ml_kem_768_encapsulation_key_valid, ml_kem_768_decapsulation_key_valid
+export ml_kem_keygen_checked, ml_kem_encaps_checked, ml_kem_decaps_checked
+export ml_kem_keygen_checked_simd, ml_kem_encaps_checked_simd
+export ml_kem_decaps_checked_simd
+export ml_kem_keygen_checked_provider, ml_kem_encaps_checked_provider
+export ml_kem_decaps_checked_provider
