@@ -1,0 +1,78 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: `if val` binding keeps the payload type, not `T?`
+
+capmap t1_option (stage3, 2026-11-04): `if val v = find(7): print("v={v}")`
+bound the unwrapped payload (rt_unwrap_or_self) but copied the `.?`
+initializer local's `i64?` HIR type onto `v`, so the interpolation used the
+Option formatter (tag via rt_raw_bool_to_string, payload via 0x8(%rax)) on the
+bare value 7 -> AV, rc=139. HIR already projects the Let type to the payload
+(bind_optional_payload), but MIR typed the `.?` result local Tuple(Bool, I64)
+(the ExistsCheck result local in expr_dispatch.spl must be a raw i64 word).
+"""
+
+# @tag: unit, compiler, mir, stage3
+
+use std.spec
+use std.common.string_core.{char_from_code}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn contains(lst: [text], item: text) -> bool:
+    for x in lst:
+        if x == item:
+            return true
+    false
+
+fn callees_of(src: text, target: text) -> [text]:
+    val file = "testdata/if_val_payload_interp_type_spec.spl"
+    val parsed = parse_full_frontend(src, file, "if_val_payload_interp_type_spec", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(hir)
+    var callees: [text] = []
+    for function in mir.functions.values():
+        if not (function.name == target or function.name.ends_with("." + target)):
+            continue
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                callees = callees.push(name)
+                            case _: pass
+                    case _: pass
+    callees
+
+val LB = char_from_code(123)
+val RB = char_from_code(125)
+val FIND = "fn find(n: i64) -> i64?:\n    if n > 0:\n        return n\n    return nil\n\n"
+
+describe "if val payload binding interpolation (capmap t1_option)":
+    it "repro: t1_option renders v as i64, not as an Option":
+        step("lower the exact capmap t1_option entry")
+        val cs = callees_of(FIND + "fn main() -> i64:\n    val a = find(5) ?? 0\n    if val v = find(7):\n        print(\"v=" + LB + "v" + RB + " a=" + LB + "a" + RB + "\")\n    return 0\n", "main")
+        expect(contains(cs, "rt_unwrap_or_self")).to_equal(true)
+        expect(contains(cs, "rt_raw_bool_to_string")).to_equal(false)
+
+    it "prevention: elif val payload is also rendered bare":
+        step("lower an elif val binding interpolated in its arm")
+        val cs = callees_of(FIND + "fn main() -> i64:\n    if find(0) != nil:\n        print(\"none\")\n    elif val w = find(9):\n        print(\"w=" + LB + "w" + RB + "\")\n    return 0\n", "main")
+        expect(contains(cs, "rt_raw_bool_to_string")).to_equal(false)
+
+    it "prevention: if val payload used only in arithmetic stays i64":
+        step("lower v + 1 inside the arm")
+        val cs = callees_of(FIND + "fn main() -> i64:\n    if val v = find(7):\n        return v + 1\n    return 0\n", "main")
+        expect(contains(cs, "rt_raw_bool_to_string")).to_equal(false)
+
+    it "coverage: a plain T? local still keeps its Optional type":
+        step("val o = find(7) is not an if-val binding; the override must not fire")
+        val cs = callees_of(FIND + "fn main() -> i64:\n    val o = find(7)\n    print(\"o=" + LB + "o" + RB + "\")\n    return 0\n", "main")
+        expect(contains(cs, "rt_unwrap_or_self")).to_equal(false)
