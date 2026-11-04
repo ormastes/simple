@@ -1,0 +1,97 @@
+# @cover src/compiler/50.mir/mir_target_hir_layout.spl
+# Live MIR lowering struct layout: target-aware legacy path (bug
+# legacy_struct_layout_host_arch_2026-11-04) + SIMPLE_TARGET_HIR_MODE wiring.
+
+use std.spec.*
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_definitions.{HirField, HirExpr, HirExprKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.mir_target_context.{MirTargetContext, mir_target_context_from_explicit}
+use compiler.types.type_layout.{TypeLayout, FieldLayout, LayoutAttr, layoutattr_c_repr, layoutattr_default_, compute_struct_layout}
+use compiler.mir.mir_target_hir_layout.{mir_target_aware_struct_layout, mir_target_hir_live_struct_layout}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+fn _sp() -> Span:
+    Span(start: 0, end: 0, line: 1, col: 1)
+
+fn _ty(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: _sp())
+
+fn _field(name: text, id: i64, type_: HirType) -> HirField:
+    val absent = HirExpr(kind: HirExprKind.UnitLit, has_type_: false, type_: _ty(HirTypeKind.Unit), span: _sp())
+    HirField(symbol: SymbolId(id: id), name: name, type_: type_,
+        has_default: false, default: absent,
+        visibility: Visibility.Public, is_public: true, is_volatile: false,
+        has_bits_attr: false, bits_width: 0,
+        has_fixed_address: false, fixed_address: 0, span: _sp())
+
+# struct { tag: u8, p: <pointer-sized named>, n: i64 }
+fn pfields() -> [HirField]:
+    [_field("tag", 1, _ty(HirTypeKind.Int(8, false))),
+     _field("p", 2, _ty(HirTypeKind.Named(SymbolId(id: 99), []))),
+     _field("n", 3, _ty(HirTypeKind.Int(64, true)))]
+
+# struct { a: u8, b: i32 }
+fn sfields() -> [HirField]:
+    [_field("a", 1, _ty(HirTypeKind.Int(8, false))),
+     _field("b", 2, _ty(HirTypeKind.Int(32, true)))]
+
+fn ctx(triple: text) -> MirTargetContext:
+    mir_target_context_from_explicit(triple, "llvm", 23).unwrap()
+
+fn offset_of(l: TypeLayout, name: text) -> i64:
+    var r: i64 = -1
+    for f in l.fields:
+        if f.name == name:
+            r = f.offset
+    r
+
+describe "live struct layout: target-aware legacy + TargetHIR wiring":
+    it "host-native (64-bit) layout is unchanged: snapshot of today's offsets":
+        for triple in ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "riscv64-unknown-linux-gnu"]:
+            val c = mir_target_aware_struct_layout(ctx(triple), pfields(), layoutattr_c_repr())
+            expect(c.size).to_equal(24)
+            expect(offset_of(c, "tag")).to_equal(0)
+            expect(offset_of(c, "p")).to_equal(8)
+            expect(offset_of(c, "n")).to_equal(16)
+            val s = mir_target_aware_struct_layout(ctx(triple), sfields(), layoutattr_c_repr())
+            expect(s.size).to_equal(8)
+            expect(offset_of(s, "b")).to_equal(4)
+            val d = mir_target_aware_struct_layout(ctx(triple), pfields(), layoutattr_default_())
+            val legacy = compute_struct_layout(pfields(), layoutattr_default_())
+            expect(d.size).to_equal(legacy.size)
+            expect(d.size).to_equal(24)
+            for name in ["tag", "p", "n"]:
+                expect(offset_of(d, name)).to_equal(offset_of(legacy, name))
+
+    it "cross target: rv32 pointer/i64 offsets follow the target, x86_64 == aarch64":
+        val x = mir_target_aware_struct_layout(ctx("x86_64-unknown-linux-gnu"), pfields(), layoutattr_c_repr())
+        val a = mir_target_aware_struct_layout(ctx("aarch64-unknown-linux-gnu"), pfields(), layoutattr_c_repr())
+        val r = mir_target_aware_struct_layout(ctx("riscv32-unknown-none-elf"), pfields(), layoutattr_c_repr())
+        expect(offset_of(x, "p")).to_equal(offset_of(a, "p"))
+        expect(offset_of(r, "p")).to_equal(4)
+        expect(offset_of(r, "n")).to_equal(8)
+        expect(r.size).to_equal(16)
+
+    it "legacy/shadow/typed agree; a wrong legacy value is caught in shadow":
+        for triple in ["x86_64-unknown-linux-gnu", "riscv32-unknown-none-elf"]:
+            val t = ctx(triple)
+            val legacy = mir_target_aware_struct_layout(t, pfields(), layoutattr_c_repr())
+            for mode in ["legacy", "shadow", "typed"]:
+                val got = mir_target_hir_live_struct_layout(mode, "app.main", t, "P", pfields(), layoutattr_c_repr(), legacy).unwrap()
+                expect(got.size).to_equal(legacy.size)
+                expect(offset_of(got, "n")).to_equal(offset_of(legacy, "n"))
+        val t = ctx("riscv32-unknown-none-elf")
+        # The pre-fix host (LP64) layout for an rv32 target is the defect itself.
+        val host = compute_struct_layout(pfields(), layoutattr_c_repr())
+        val err = mir_target_hir_live_struct_layout("shadow", "app.main", t, "P", pfields(), layoutattr_c_repr(), host).unwrap_err()
+        expect(err).to_start_with("target_hir_shadow_mismatch: layout P")
+        expect(mir_target_hir_live_struct_layout("legacy", "app.main", t, "P", pfields(), layoutattr_c_repr(), host).unwrap().size).to_equal(host.size)
+
+    it "source-shape pin: struct/class lowering routes through the flag-gated reader":
+        val src = file_read("src/compiler/50.mir/_MirLowering/module_lowering.spl")
+        expect(src.contains("mir_target_hir_live_struct_layout(th_mode.unwrap()")).to_be(true)
+        expect(src.contains("self.lowering_struct_layout(struct_def.name")).to_be(true)
+        expect(src.contains("self.lowering_struct_layout(class_def.name")).to_be(true)
+        expect(src.contains("compute_struct_layout(")).to_be(false)

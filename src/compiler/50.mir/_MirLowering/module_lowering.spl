@@ -55,7 +55,7 @@ use compiler.hir.hir_function_order.{hir_function_symbol_order}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{FunctionAttr}
 use compiler.blocks.value.BlockValue
-use compiler.types.type_layout.{compute_struct_layout, layoutattr_default_, FieldLayout}
+use compiler.types.type_layout.{layoutattr_default_, FieldLayout, TypeLayout}
 use compiler.types.type_layout.{LayoutAttr}
 use std.common.crypto.sha256.{sha256_text}
 use compiler.common.native_layout_trace.{MirExternalLayoutTraceV1}
@@ -155,6 +155,8 @@ use compiler.core.interpreter.hashmap.{hm_hash_text}
 # Import struct definitions from types module
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 use compiler.common.mir_target_context.{MirTargetContext, mir_target_context_from}
+use compiler.mir.mir_target_hir_layout.{mir_target_aware_struct_layout, mir_target_hir_live_struct_layout}
+use compiler.mir.mir_target_hir_select.{mir_target_hir_mode_from_env}
 
 # Import split modules so their impl blocks are linked
 use compiler.mir._MirLoweringExpr.expr_dispatch.*
@@ -813,7 +815,8 @@ impl MirLowering:
         direct
 
     fn canonical_layout_digest(fields: [HirField], layout_attr: LayoutAttr) -> text:
-        val layout = compute_struct_layout(fields, layout_attr)
+        # Target-aware: a 32-bit lowering target must not digest LP64 offsets.
+        val layout = mir_target_aware_struct_layout(self.target_context, fields, layout_attr)
         var rows: [text] = ["size={layout.size};align={layout.align};stride={layout.stride}"]
         for raw_field in layout.fields:
             val field: FieldLayout = raw_field
@@ -3921,13 +3924,30 @@ impl MirLowering:
             bootstrap_mir_functions_add(init_function.name, init_function, bootstrap_module_index)
         self.lower_global_initializer_wrapper(module_name_raw, init_name, bootstrap_module_index)
 
+    me lowering_struct_layout(type_name: text, fields: [HirField], layout_attr: LayoutAttr) -> TypeLayout:
+        """Lowering-target layout (legacy LP64 table on 64-bit targets, arch
+        table on 32-bit). SIMPLE_TARGET_HIR_MODE=shadow|typed routes it through
+        the TargetHIR layout reader; a shadow divergence is fatal."""
+        val legacy = mir_target_aware_struct_layout(self.target_context, fields, layout_attr)
+        val th_mode = mir_target_hir_mode_from_env()
+        if th_mode.is_err():
+            self.error_fatal(th_mode.unwrap_err(), nil)
+            return legacy
+        if th_mode.unwrap() == "legacy":
+            return legacy
+        val checked = mir_target_hir_live_struct_layout(th_mode.unwrap(), self.current_module_id, self.target_context, type_name, fields, layout_attr, legacy)
+        if checked.is_err():
+            self.error_fatal(checked.unwrap_err(), nil)
+            return legacy
+        checked.unwrap()
+
     me lower_struct_type(struct_def: HirStruct):
         """Lower a HIR struct definition into MIR type metadata."""
         val layout_attr = if struct_def.has_layout_attr:
             struct_def.layout_attr
         else:
             layoutattr_default_()
-        val layout = compute_struct_layout(struct_def.fields, layout_attr)
+        val layout = self.lowering_struct_layout(struct_def.name, struct_def.fields, layout_attr)
 
         var fields: [MirFieldDef] = []
         var fi = 0
@@ -3976,7 +3996,7 @@ impl MirLowering:
             class_def.layout_attr
         else:
             layoutattr_default_()
-        val layout = compute_struct_layout(class_def.fields, layout_attr)
+        val layout = self.lowering_struct_layout(class_def.name, class_def.fields, layout_attr)
 
         var fields: [MirFieldDef] = []
         var fi = 0
