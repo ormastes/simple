@@ -70,3 +70,14 @@ class field, module global). Negative index counts from the end (as `rt_array_se
 `E3002` (codegen's `rt_index_set` returns false silently; interpreter fails closed instead).
 Spec: `test/01_unit/interpreter/array_set_method_spec.spl` (5/5; 5/5 failed before).
 Status: fix-implemented-partial. Remaining gap: JIT lane (`SIMPLE_EXECUTION_MODE=jit`) still reports `Method 'set' not found on type 'Array'`; interpreter lane is fixed.
+
+## 2026-11-04 fix: return value now matches native `rt_array_set` (bool)
+
+The mutator existed (093e83cb8e7) but returned the array and raised an error when out of range,
+unlike native `rt_array_set` (`bool`, false on invalid index). `apply_array_mutation_in_place`
+(`interpreter_helpers/patterns.rs`, "set" arm) now returns `Some(Bool(true/false))`, no error, no mutation
+on out-of-range. All three write-back callers already use `Some(elem)` as the expression result.
+
+- `test/01_unit/language/array_set_spec.spl`: before 0/5, after 5/5.
+- `test/01_unit/interpreter/array_set_method_spec.spl` (reassigning-form case changed to bool result): before 2/7, after 7/7.
+- Regression sweep (24 array/index/push/list specs under language and compiler/interpreter): no before-pass/after-fail.

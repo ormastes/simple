@@ -653,6 +653,41 @@ impl<'a> MirLowerer<'a> {
                             } else {
                                 val_reg
                             };
+                            // Bug seed_jit_class_field_array_assign_aliases_local_2026-11-04:
+                            // `obj.buf = local_arr` stored the source's rt_array
+                            // handle into the slot, so later writes through the
+                            // field mutated the local too (the interpreter's
+                            // Arc clone + make_mut keeps value semantics). Same
+                            // rule as the `var c = arr` Let arm above: an array
+                            // PLACE gets a private `rt_array_copy`; a fresh
+                            // literal / call result transfers directly.
+                            // A `var` local proven uniquely owned and dead after
+                            // this store hands its buffer over instead
+                            // (`array_move.rs`): the JIT lane never frees the
+                            // copy, so `st.buf = o` in a loop retained one per
+                            // iteration (bug seed_jit_field_store_array_copy_never_freed_2026-11-04).
+                            let handed_over = matches!(&value.kind,
+                                HirExprKind::Local(o) if self.array_move_sites.field_store_locals.contains(o));
+                            let is_array_place = !handed_over
+                                && Self::hir_expr_is_place(&value.kind)
+                                && self
+                                    .type_registry
+                                    .and_then(|tr| tr.get_array_element(target.ty).or_else(|| tr.get_array_element(ty)))
+                                    .is_some();
+                            let val_reg = if is_array_place {
+                                self.with_func(|func, current_block| {
+                                    let dest = func.new_vreg();
+                                    let block = func.block_mut(current_block).unwrap();
+                                    block.instructions.push(MirInst::Call {
+                                        dest: Some(dest),
+                                        target: CallTarget::from_name("rt_array_copy"),
+                                        args: vec![val_reg],
+                                    });
+                                    dest
+                                })?
+                            } else {
+                                val_reg
+                            };
 
                             self.with_func(|func, current_block| {
                                 let block = func.block_mut(current_block).unwrap();
@@ -2151,9 +2186,7 @@ impl<'a> MirLowerer<'a> {
                     let current_idx = func.new_vreg();
                     let boxed_idx = func.new_vreg();
                     let raw_element = func.new_vreg();
-                    let element = if typed_u8_read
-                        || ((needs_int_unbox || needs_float_unbox) && !typed_raw_read)
-                    {
+                    let element = if typed_u8_read || ((needs_int_unbox || needs_float_unbox) && !typed_raw_read) {
                         func.new_vreg()
                     } else {
                         raw_element

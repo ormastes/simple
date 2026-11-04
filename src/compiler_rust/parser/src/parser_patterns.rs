@@ -148,6 +148,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::Float(_)
                 | TokenKind::String(_)
                 | TokenKind::RawString(_)
+                | TokenKind::CharLit(_)
                 | TokenKind::FString(_)
                 | TokenKind::True
                 | TokenKind::False
@@ -461,6 +462,7 @@ impl<'a> Parser<'a> {
             | TokenKind::TypedFloat(_, _)
             | TokenKind::String(_)
             | TokenKind::RawString(_)
+            | TokenKind::CharLit(_)
             | TokenKind::FString(_)
             | TokenKind::Bool(_)
             | TokenKind::Nil => {

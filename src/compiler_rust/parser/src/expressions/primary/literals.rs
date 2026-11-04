@@ -54,6 +54,14 @@ impl<'a> Parser<'a> {
                 self.reject_detached_path_suffix()?;
                 Ok(Expr::String(s))
             }
+            TokenKind::CharLit(c) => {
+                // Char literal (SIMPLE_CHAR_LITERAL_LEXER gate): a char is a
+                // one-scalar string in the seed (see hir control.rs CHAR/STRING
+                // equality), so it lowers to the same node legacy `'x'` did.
+                let s = c.to_string();
+                self.advance();
+                Ok(Expr::String(s))
+            }
             TokenKind::TypedString(s, suffix) => {
                 // String with unit suffix: "127.0.0.1"_ip
                 let s = s.clone();

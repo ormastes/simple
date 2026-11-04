@@ -83,12 +83,11 @@ Evidence:
   tool as-is; the rest need review (escapes/skipped).
 - Guard `check-no-single-quoted-raw-string.shs` left **advisory**, baseline untouched.
 
-Known gap: neither parser accepts the CharLit token yet, so code lexed with the
-gate ON that contains `'x'` fails to parse. That wiring is activation step 1.
+Activation step 1 is done (2026-11-04, below): both parsers accept CharLit.
 
 ## Activation steps (in order)
 
-1. Parser/type-checker: accept `CharLit` (seed `TokenKind::CharLit`, pure-Simple
+1. **DONE 2026-11-04.** Parser/type-checker: accept `CharLit` (seed `TokenKind::CharLit`, pure-Simple
    kind 9) as a `char` literal expression in both front ends.
 2. The bootstrap lane records a passing stage3 self-build.
 3. Run `raw_quote_migrate --verify` per directory in batches (token-neutral),
@@ -97,3 +96,38 @@ gate ON that contains `'x'` fails to parse. That wiring is activation step 1.
 5. Make `check-no-single-quoted-raw-string.shs` blocking in that same PR.
 6. Promote staged warnings to errors once Windows, macOS and Linux each have a
    self-hosted binary.
+
+## Activation step 1 done (2026-11-04)
+
+Both parsers accept `CharLit` wherever a literal is allowed. A `char` is a
+one-scalar text in both front ends today (seed HIR compares `CHAR`/`STRING`
+with `rt_string_eq`; `s[i]` yields a 1-char text). So `CharLit` lowers to the
+exact node the legacy `'x'` already produced, and HIR, typing and evaluation
+are unchanged:
+
+- Seed: `TokenKind::CharLit(c)` → `Expr::String(c.to_string())`
+  (`expressions/primary/literals.rs`). It is accepted at expression start
+  (`primary/mod.rs`), in patterns, including ranges and comma-or patterns
+  (`parser_patterns.rs`), as a no-paren call argument (`no_paren.rs`), and in
+  the two literal-start lookaheads in `parser_impl/core.rs`. Test hook:
+  `Parser::new_with_char_literals`.
+- Pure-Simple: kind 9 → `expr_raw_string_lit(value, 0)`
+  (`_ParserPrimary/primary_expr.spl`). This is the no-interpolation node legacy
+  `'x'` builds, so `'{'` stays literal text.
+- Gate OFF: no token-kind-9 path is reachable, so parsing is byte-for-byte
+  unchanged.
+
+Evidence:
+- `cargo test -p simple-parser --lib`: 424 passed (4 new, in
+  `char_literal_parse_test.rs`). `cargo build --release --bin simple`: green.
+- The built seed runs this program with `SIMPLE_CHAR_LITERAL_LEXER=1`, under both
+  JIT and `SIMPLE_EXECUTION_MODE=interpret`:
+  `val c: char = 'x'`, `s[0] == c`, `match` arms `case 'a'` / `case '\n'`.
+  Output: `eq=true lit=x esc=2 a=1 other=0`. Gate OFF gives the same output.
+  The control `print 'ab'` fails to parse when ON ("more than one Unicode
+  scalar") and prints `ab` when OFF.
+- `test/01_unit/compiler/frontend/parser_char_literal_gate_spec.spl`: 5/5.
+  `lexer_char_literal_gate_spec.spl`: 5/5 unchanged.
+
+The real `Value::Char` / `TAG_SPECIAL` representation (ADR-005
+"Representation and ABI") is separate work and is not needed for this step.

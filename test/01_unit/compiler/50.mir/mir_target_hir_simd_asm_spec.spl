@@ -1,0 +1,144 @@
+use std.spec.*
+use compiler.common.mir_target_context.{MirTargetContext}
+use compiler.common.simd_types.{SimdElementType}
+use compiler.hir.target_hir.hir_snapshot.{hir_snapshot_id_new}
+use compiler.hir.target_hir.target_hir.{TargetHIR, target_hir_for_explicit}
+use compiler.mir.mir_target_hir_simd.{mir_target_hir_simd_class_for, mir_target_hir_simd_class, mir_target_hir_simd_lanes}
+use compiler.mir.mir_target_hir_asm_guard.{mir_target_hir_asm_match_kind_for, mir_target_hir_asm_match_kind, mir_target_hir_asm_missing_archs, mir_target_hir_asm_guard_key}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+val LEGACY_ASM = "src/compiler/50.mir/_MirLowering/asm_and_targets.spl"
+
+# Verbatim copy of the legacy MirLowering.asm_target_spec_match_kind body
+# (TMIR-01 reference oracle; the source pin below fails if the legacy body drifts).
+fn legacy_match_kind(
+    archs: [text], has_os: bool, os: text, has_abi: bool, abi: text, has_backend: bool, backend: text,
+    ver_ops: [text], ver_vals: [i64],
+    target_arch: text, target_os: text, target_abi: text, target_backend: text,
+    target_backend_version: i64
+) -> text:
+    val normalized_target = if target_arch == "amd64" or target_arch == "x64":
+        "x86_64"
+    elif target_arch == "arm64":
+        "aarch64"
+    else:
+        target_arch
+    if archs.len() > 0:
+        var arch_found = false
+        for arch in archs:
+            val normalized_arch = if arch == "amd64" or arch == "x64":
+                "x86_64"
+            elif arch == "arm64":
+                "aarch64"
+            else:
+                arch
+            if normalized_arch == normalized_target:
+                arch_found = true
+                break
+        if not arch_found:
+            return "not_matched"
+    if has_os and os != "_" and os != target_os:
+        return "not_matched"
+    if has_abi and abi != "_" and abi != target_abi:
+        return "not_matched"
+    if has_backend and backend != "_" and backend != target_backend:
+        return "not_matched"
+    if ver_ops.len() > 0 and target_backend_version < 0:
+        return "unknown_version"
+    var have_note = false
+    var i = 0
+    while i < ver_ops.len():
+        val op = ver_ops[i]
+        val value = ver_vals[i]
+        if op == ">=" and target_backend_version < value:
+            return "not_matched"
+        if op == "<=" and target_backend_version > value:
+            return "not_matched"
+        if op == ">" and target_backend_version <= value:
+            return "not_matched"
+        if op == "<" and target_backend_version >= value:
+            return "not_matched"
+        if op == "==" and target_backend_version != value:
+            return "not_matched"
+        if op == "!=" and target_backend_version == value:
+            return "not_matched"
+        if op == "~=" and target_backend_version != value:
+            have_note = true
+        i = i + 1
+    if have_note:
+        return "note"
+    "matched"
+
+fn tier_view(arch: text, tier: text) -> TargetHIR:
+    val snap = hir_snapshot_id_new("app.main", "d1", 0).unwrap()
+    TargetHIR(snapshot: snap, region: "module",
+        target: MirTargetContext(arch: arch, os: "linux", abi: "gnu", backend: "llvm", cpu_tier: tier, version: 23))
+
+describe "TargetHIR SIMD + asm guard (U3)":
+    it "THIR-06: SIMD class table follows the explicit cpu tier, no host probe":
+        expect(mir_target_hir_simd_class_for("x86_64", "").unwrap()).to_equal("x86_sse")
+        expect(mir_target_hir_simd_class_for("x86_64", "x86-64-v3").unwrap()).to_equal("x86_avx")
+        expect(mir_target_hir_simd_class_for("x86_64", "x86-64-v3+avx512vnni").unwrap()).to_equal("x86_avx512")
+        expect(mir_target_hir_simd_class_for("aarch64", "").unwrap()).to_equal("aarch64_neon")
+        expect(mir_target_hir_simd_class_for("aarch64", "armv9+sve2").unwrap()).to_equal("aarch64_sve2")
+        expect(mir_target_hir_simd_class_for("riscv64", "rv64gc+v").unwrap()).to_equal("riscv_rvv")
+        expect(mir_target_hir_simd_class_for("riscv64", "rv64gc").unwrap_err()).to_start_with("target_hir_simd_unsupported: riscv64")
+        expect(mir_target_hir_simd_class_for("avr", "").unwrap_err()).to_equal("target_hir_simd_unsupported: avr")
+
+    it "THIR-06: lane count changes with the capability carried by the view":
+        val base = tier_view("x86_64", "")
+        val v3 = tier_view("x86_64", "x86-64-v3")
+        expect(mir_target_hir_simd_lanes(base, base.snapshot, SimdElementType.F32).unwrap()).to_equal(4)
+        expect(mir_target_hir_simd_lanes(v3, v3.snapshot, SimdElementType.F32).unwrap()).to_equal(8)
+        val wasm = tier_view("wasm32", "")
+        expect(mir_target_hir_simd_lanes(wasm, wasm.snapshot, SimdElementType.F32).unwrap_err()).to_start_with("target_hir_simd_unsupported")
+
+    it "THIR-06: asm match picks the right arm and reports non-exhaustive coverage":
+        val snap = hir_snapshot_id_new("app.main", "d1", 0).unwrap()
+        val arm = target_hir_for_explicit(snap, "aarch64-apple-darwin", "llvm", 23, "module").unwrap()
+        expect(mir_target_hir_asm_match_kind(arm, snap, ["x86_64"], false, "", false, "", false, "", [], []).unwrap()).to_equal("not_matched")
+        expect(mir_target_hir_asm_match_kind(arm, snap, ["arm64"], false, "", false, "", false, "", [], []).unwrap()).to_equal("matched")
+        expect(mir_target_hir_asm_match_kind(arm, snap, ["arm64"], false, "", false, "", true, "llvm", [">="], [24]).unwrap()).to_equal("not_matched")
+        expect(mir_target_hir_asm_match_kind(arm, snap, [], false, "", false, "", false, "", [">="], []).unwrap_err()).to_equal("target_hir_asm_version_constraint_arity")
+        val missing = mir_target_hir_asm_missing_archs([["amd64"], ["arm64", "riscv64"]], false)
+        expect(missing.join(",")).to_equal("x86,arm,riscv32,wasm32,wasm64,avr,mcs51,msp430")
+        expect(mir_target_hir_asm_missing_archs([["x86_64"]], true).len()).to_equal(0)
+
+    it "THIR-08: a view for another generation or target never reuses a guard decision":
+        val s0 = hir_snapshot_id_new("app.main", "d1", 0).unwrap()
+        val s1 = hir_snapshot_id_new("app.main", "d1", 1).unwrap()
+        val v0 = target_hir_for_explicit(s0, "x86_64-unknown-linux-gnu", "llvm", 23, "module").unwrap()
+        val v1 = target_hir_for_explicit(s1, "x86_64-unknown-linux-gnu", "llvm", 23, "module").unwrap()
+        val w0 = target_hir_for_explicit(s0, "x86_64-pc-windows-msvc", "llvm", 23, "module").unwrap()
+        expect(mir_target_hir_asm_match_kind(v0, s1, [], false, "", false, "", false, "", [], []).unwrap_err()).to_start_with("target_hir_snapshot_mismatch:")
+        expect(mir_target_hir_simd_class(v0, s1).unwrap_err()).to_start_with("target_hir_snapshot_mismatch:")
+        expect(mir_target_hir_asm_guard_key(v0) == mir_target_hir_asm_guard_key(v1)).to_be(false)
+        expect(mir_target_hir_asm_guard_key(v0) == mir_target_hir_asm_guard_key(w0)).to_be(false)
+
+    it "TMIR-01: typed predicate equals the legacy predicate over a representative grid":
+        val arch_sets: [[text]] = [[], ["x86_64"], ["amd64", "arm"], ["arm64"], ["riscv64", "x64"]]
+        val targets: [text] = ["x86_64", "amd64", "x64", "aarch64", "arm64", "riscv64", "wasm32"]
+        val oss: [text] = ["linux", "_", "windows"]
+        val ops: [text] = [">=", "<=", ">", "<", "==", "!=", "~="]
+        val versions: [i64] = [-1, 18, 23, 24]
+        var checked = 0
+        for archs in arch_sets:
+            for ta in targets:
+                for os in oss:
+                    for op in ops:
+                        for tv in versions:
+                            for has_os in [false, true]:
+                                val a = mir_target_hir_asm_match_kind_for(archs, has_os, os, true, "_", true, "llvm", [op], [23], ta, "linux", "gnu", "llvm", tv)
+                                val b = legacy_match_kind(archs, has_os, os, true, "_", true, "llvm", [op], [23], ta, "linux", "gnu", "llvm", tv)
+                                expect(a).to_equal(b)
+                                checked = checked + 1
+        expect(mir_target_hir_asm_match_kind_for([], false, "", false, "", true, "cranelift", [], [], "x86_64", "linux", "gnu", "llvm", 23)).to_equal(legacy_match_kind([], false, "", false, "", true, "cranelift", [], [], "x86_64", "linux", "gnu", "llvm", 23))
+        expect(checked).to_equal(5 * 7 * 3 * 7 * 4 * 2)
+
+    it "TMIR-01: legacy predicate source still has the shape the oracle copies":
+        val src = rt_file_read_text(LEGACY_ASM) ?? ""
+        expect(src.contains("me asm_target_spec_match_kind(")).to_be(true)
+        expect(src.contains("if ver_ops.len() > 0 and target_backend_version < 0:")).to_be(true)
+        expect(src.contains("if op == \"~=\" and target_backend_version != value:")).to_be(true)
+        expect(src.contains("val all_archs = [\"x86_64\", \"x86\", \"aarch64\", \"arm\", \"riscv32\", \"riscv64\", \"wasm32\", \"wasm64\", \"avr\", \"mcs51\", \"msp430\"]")).to_be(true)

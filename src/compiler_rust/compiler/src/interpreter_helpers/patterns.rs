@@ -223,22 +223,17 @@ fn apply_array_mutation_in_place(
         "pop" => Ok(Some(vec.pop().unwrap_or(Value::Nil))),
         // `[T].set(i, v)`: same semantics as codegen `rt_array_set` (negative `i`
         // counts from the end). `idx` carries the i64 bits (see
-        // `eval_array_mutator_args`). Out of range fails closed with an error.
+        // `eval_array_mutator_args`). Returns `true` on success and `false`
+        // (no mutation) when out of range, exactly like the native `bool` result.
         "set" => {
             let raw = idx.unwrap_or(0) as i64;
             let len = vec.len() as i64;
             let i = if raw < 0 { len + raw } else { raw };
             if i < 0 || i >= len {
-                let ctx = ErrorContext::new()
-                    .with_code(codes::INDEX_OUT_OF_BOUNDS)
-                    .with_help("Array.set(i, v) requires -len <= i < len");
-                return Err(CompileError::semantic_with_context(
-                    format!("Array.set index {} out of bounds (len {})", raw, len),
-                    ctx,
-                ));
+                return Ok(Some(Value::Bool(false)));
             }
             vec[i as usize] = second.unwrap_or(Value::Nil);
-            Ok(None)
+            Ok(Some(Value::Bool(true)))
         }
         "insert" => {
             let i = idx.unwrap_or(0);
@@ -3283,11 +3278,11 @@ mod array_set_kernel_tests {
     }
 
     #[test]
-    fn set_out_of_range_fails_closed_without_mutating() {
+    fn set_out_of_range_returns_false_without_mutating() {
         for raw in [3i64, 100, -4] {
             let mut v = ints(&[1, 2, 3]);
             let r = apply_array_mutation_in_place("set", &mut v, None, Some(raw as usize), Some(Value::Int(9)));
-            assert!(r.is_err(), "index {raw} must error");
+            assert_eq!(r.unwrap(), Some(Value::Bool(false)), "index {raw} must report false");
             assert_eq!(v, ints(&[1, 2, 3]));
         }
     }
