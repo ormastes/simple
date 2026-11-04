@@ -648,3 +648,5 @@ Package: `src/compiler/20.hir/target_hir/` (kept in a subdirectory, not the 20.h
   `mir_cfg_select_arm`. Shadow equivalence vs legacy for x86/x86_64 x Linux/Windows/SimpleOS, forward and
   reverse order, snapshot bytes unchanged. `lower_cfg_select` is NOT switched yet (legacy path unchanged).
   Spec: `test/01_unit/compiler/50.mir/mir_target_hir_select_spec.spl`.
+
+- **TargetHIR flags (U0, 2026-11-04):** all TargetHIR env knobs are owned by `src/compiler/20.hir/target_hir/target_hir_flags.spl` — `target_hir_mode()` (`SIMPLE_TARGET_HIR_MODE`, legacy|shadow|typed, invalid->legacy; `target_hir_mode_strict()` returns Err on a typo), `target_hir_verify()`, `target_hir_storage()`, `stage3_compiler_path()` (`SIMPLE_STAGE3_COMPILER`, nil = Stage-3 work reports PENDING). Import these; never read the env vars directly. Spec: `test/01_unit/compiler/hir/target_hir_flags_spec.spl`.
