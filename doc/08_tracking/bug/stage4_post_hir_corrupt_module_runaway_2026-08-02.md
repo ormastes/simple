@@ -24,3 +24,11 @@ diagnostic exit remains before retention, preserving original errors.
 through the native-safe typed-key helper. The driver source orders the fatal
 error exit before shared-trait and phase-module retention.
 
+
+## Status 2026-11-04: fix-implemented-verification-pending
+Fix already on release/1.0.0 (driver uses typed-key `hir_function_count`, see
+`driver_hir_pipeline_lowering.spl`, `driver_bootstrap.spl`). Pass-level spec
+re-run on bin/simple.exe (0b2c3d015b7): 4/4 pass.
+Repro: `bin/simple.exe test test/01_unit/compiler/driver/hir_function_count_spec.spl`.
+Native verification: run stage3 bootstrap and confirm Stage4 prints a real
+`functions=N` (not -1) for `app.cli.main` with flat RSS.
