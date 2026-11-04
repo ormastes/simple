@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN (blocked on a compiler deploy; no code fix attempted)
+**Status:** BLOCKED — needs an admitted self-hosted macOS binary (re-triaged 2026-11-04)
 **Found:** 2026-09-06, macOS aarch64 (Darwin 25.5.0)
 **Binary under test:** `src/compiler_rust/target/debug/simple` (the only binary
 this lane is permitted to use; a bootstrap is forbidden this session)
@@ -88,3 +88,22 @@ WIFSIGNALED — asserting `true` here would be asserting the failure mode), and
 `rt_fork_parent_stderr()` containing both `[simple-runtime] Fatal:` and
 `Backtrace:`.
 
+
+## Re-triage 2026-11-04 (release/1.0.0, macOS M4) — BLOCKED, not a seed defect
+
+Root cause: the defect's layer is the binary under test, not missing code.
+Both halves already exist in the C runtime and compile cleanly on Darwin:
+`clang -fsyntax-only` reports 0 errors for `src/runtime/runtime_fork.c`
+(`rt_fork_parent_wait` at :33) and `src/runtime/runtime.c` (crash handler), and
+`scripts/bootstrap/p3-manual-link-stage3.shs:94` links `runtime_fork` into the
+self-hosted binary. The Rust seed is bootstrap-only (CLAUDE.md "Default tooling"),
+so adding a second Rust copy of the fork bridge/crash handler to it would be a
+twin with no consumer, and would not exercise the C handler the plan verifies.
+
+Blocker: no ADMITTED self-hosted macOS Stage 2+ binary exists today — lane1
+(2026-11-04 06:01Z) built s2d but sanity was refused by the memory reserve
+(7943 MiB < 12288). Unblock unchanged: on an admitted macOS binary, the `nm`
+counts become non-zero and the null-write probe returns rc=139 with the
+`[simple-runtime] Fatal: SIGSEGV` + `Backtrace:` banner; then write the fork spec
+described under "Unblock condition". BSD: same C sources (POSIX fork/sigaction);
+no BSD-specific change.
