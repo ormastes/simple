@@ -1,4 +1,5 @@
 use compiler.frontend.core.types.{custom_primitive_underlying_type_tag_by_symbol}
+use compiler.mir.mir_target_hir_symbol_writes.{mir_symbol_write_ledger_child, mir_symbol_write_ledger_adopt}
 use compiler.mir._MirLoweringExpr.enum_semantic_capture_v1.*
 use compiler.mir._MirLoweringExpr.enum_pattern_expansion_v1.*
 use compiler.mir._MirLowering.verification_calls_v1.*
@@ -49,7 +50,7 @@ use compiler.hir.ownership_types.{hir_type_requires_move, hir_type_ownership_is_
 use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.BlockValue
 use compiler.mir.mir_instructions.{MirPlace}
-use compiler.mir.mir_lowering_types.{MirLowering, MirError, MirAdaptedFileWriteBytesExternReceiptV1}
+use compiler.mir.mir_lowering_types.{MirLowering, MirError, MirAdaptedFileWriteBytesExternReceiptV1, mir_error_is_fatal}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 use compiler.mir.text_extern_abi.{text_arg_indices, text_extern_semantic_arity, boxed_text_arg_indices, tagged_text_value_arg_indices, file_write_bytes_array_alias_target}
 use compiler.semantics.match_exhaustiveness.{build_match_coverage, match_coverage_profile_is_critical, match_coverage_critical_missing_ids, match_coverage_requires_hard_error}
@@ -2793,6 +2794,22 @@ impl MirLowering:
                                         return (true, nil)
                             case Err(err):
                                 self.rti_last_error = err.message
+                                # E-RTI-003: RTI answered, but with an
+                                # unsubstituted type parameter (a generic free
+                                # function such as `fn ident<T>(x: T) -> T`
+                                # called as `Box<i64>(v: ident(3))`, capmap
+                                # t1_generic 2026-11-04). RTI.instantiate has
+                                # no callers yet, so argument-driven
+                                # substitution is not available here; treat
+                                # the answer as "cannot answer" exactly like
+                                # E-RTI-001 so the caller's generic-callee
+                                # fallback (module_fn_declared_returns) runs.
+                                # SIMPLE_RTI_STRICT keeps it fatal.
+                                if err.code == "E-RTI-003":
+                                    if (_sffi_env_get("SIMPLE_RTI_STRICT") ?? "") == "1":
+                                        self.error_fatal(err.message, Some(expr.span))
+                                        return (true, nil)
+                                    return (false, nil)
                                 self.error_fatal(err.message, Some(expr.span))
                                 return (true, nil)
                     case Err(err):
@@ -7943,6 +7960,8 @@ impl MirLowering:
                 val layout_symbol_mark = self.symbols.next_symbol_id
                 var lw = MirLowering.new_for_target(self.symbols, self.target_context)
                 lw.mir_tag_probe_active_function = gen_name
+                # nested_lowerer (P6): the lift is a child task with its own overlay.
+                lw.symbol_write_ledger = mir_symbol_write_ledger_child(self.symbol_write_ledger, "lambda{lift_n}")
                 lw.configure_mcdc_mode(
                     self.mcdc_mode, self.mcdc_owner_bytes, self.mcdc_global_bytes,
                     self.mcdc_include_csv, self.mcdc_exclude_csv)
@@ -8166,11 +8185,18 @@ impl MirLowering:
                 # A child error is fatal in both full-HIR and declaration
                 # repository lanes. Never admit a runtime-panic placeholder
                 # merely because this parent has no compact repository.
-                if lw.errors.len() > 0:
-                    for raw_error in lw.errors:
-                        val error: MirError = raw_error
-                        self.errors.push(error)
+                # Only a FATAL child error aborts the lift; non-fatal warnings
+                # (e.g. the staged no-default enum match diagnostic) are
+                # carried to the parent and the lift proceeds.
+                var lifted_child_fatal = false
+                for raw_error in lw.errors:
+                    val error: MirError = raw_error
+                    self.errors.push(error)
+                    if mir_error_is_fatal(error):
+                        lifted_child_fatal = true
+                if lifted_child_fatal:
                     return nil
+                val lifted_child_seen = lw.errors.len()
                 if val typed_return = declared_return:
                     match typed_return.kind:
                         case HirTypeKind.Optional(_): result = lw.ensure_option_handle(result, typed_return)
@@ -8185,12 +8211,22 @@ impl MirLowering:
                         case _: ()
                 elif runtime_any_abi:
                     result = lw.box_runtime_value(result)
-                if lw.errors.len() > 0:
-                    for raw_error in lw.errors:
+                # Only a FATAL child error aborts the lift; non-fatal warnings
+                # (e.g. the staged no-default enum match diagnostic) are
+                # carried to the parent and the lift proceeds.
+                var lifted_tail_fatal = false
+                var lifted_child_idx = 0
+                for raw_error in lw.errors:
+                    if lifted_child_idx >= lifted_child_seen:
                         val error: MirError = raw_error
                         self.errors.push(error)
+                        if mir_error_is_fatal(error):
+                            lifted_tail_fatal = true
+                    lifted_child_idx = lifted_child_idx + 1
+                if lifted_tail_fatal:
                     return nil
                 self.canonical_type_symbols = lw.canonical_type_symbols
+                self.symbol_write_ledger = mir_symbol_write_ledger_adopt(self.symbol_write_ledger, lw.symbol_write_ledger)
                 self.canonical_type_symbol_names = lw.canonical_type_symbol_names
                 self.canonical_type_reverse_scan_rows = lw.canonical_type_reverse_scan_rows
                 self.next_canonical_type_symbol = lw.next_canonical_type_symbol
@@ -8437,7 +8473,7 @@ impl MirLowering:
         # try_inline_lambda_call below keeps beta-reducing it as before.
         if is_direct:
             val callee_sid = mir_expr_symbol_id_value(direct_symbol)
-            if self.local_map.has(callee_sid):
+            if self.local_map.has(callee_sid) and not self.lambda_bindings.has(callee_sid):
                 is_direct = false
             elif self.find_local(callee_sid).id >= 0 and not self.lambda_bindings.has(callee_sid):
                 is_direct = false

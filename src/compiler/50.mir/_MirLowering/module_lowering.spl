@@ -157,6 +157,7 @@ use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 use compiler.common.mir_target_context.{MirTargetContext, mir_target_context_from}
 use compiler.mir.mir_target_hir_layout.{mir_target_aware_struct_layout, mir_target_hir_live_struct_layout}
 use compiler.mir.mir_target_hir_select.{mir_target_hir_mode_from_env}
+use compiler.mir.mir_target_hir_symbol_writes.{mir_symbol_write_ledger_legacy, mir_symbol_write_ledger_open, mir_symbol_write_ledger_resolve}
 
 # Import split modules so their impl blocks are linked
 use compiler.mir._MirLoweringExpr.expr_dispatch.*
@@ -670,6 +671,7 @@ impl MirLowering:
             global_constants_by_id: {},
             global_const_exprs: {},
             array_global_mutation_warned: {},
+            symbol_write_ledger: mir_symbol_write_ledger_legacy(),
             target_context: target_context,
             allow_ambient_bootstrap_policy: true,
             resource_owned_locals: [],
@@ -2635,6 +2637,12 @@ impl MirLowering:
         val guarded_module = self.apply_decl_cfg_guards(module)
         val result = self.lower_module_guarded_v1(guarded_module, providers, is_entry_module,
             archive_function_symbols, archive_primary_globals, archive_trait_thunks)
+        # P6: resolve this task's symbol-writer overlay (shadow: fatal on
+        # divergence from the legacy journal; typed: merge conflicts fatal).
+        val symbol_writes = mir_symbol_write_ledger_resolve(self.symbol_write_ledger)
+        if symbol_writes.is_err():
+            self.error_fatal(symbol_writes.unwrap_err(), nil)
+        self.symbol_write_ledger = mir_symbol_write_ledger_legacy()
         mir_trace_scope_exit(saved_trace_scope_depth)
         result
 
@@ -2668,6 +2676,19 @@ impl MirLowering:
         # per-module lowering session, not a process-lifetime trace cache.
         self.begin_expr_trace_session()
         self.symbols = module.symbols
+        # symbols_alias (P6): freeze the task at the alias site (module id +
+        # table watermark) and open its private symbol-write overlay.
+        val th_symbol_mode = mir_target_hir_mode_from_env()
+        if th_symbol_mode.is_err():
+            self.error_fatal(th_symbol_mode.unwrap_err(), nil)
+            self.symbol_write_ledger = mir_symbol_write_ledger_legacy()
+        else:
+            val opened = mir_symbol_write_ledger_open(th_symbol_mode.unwrap(), self.current_module_id, 0, self.symbols.next_symbol_id)
+            if opened.is_err():
+                self.error_fatal(opened.unwrap_err(), nil)
+                self.symbol_write_ledger = mir_symbol_write_ledger_legacy()
+            else:
+                self.symbol_write_ledger = opened.unwrap()
         if self.declaration_repository != nil:
             # These HirTypes contain consumer-local numeric IDs. Scalar enum
             # identities/kinds and deferred declaration indexes survive; type

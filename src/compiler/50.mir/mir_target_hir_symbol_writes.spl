@@ -1,0 +1,155 @@
+# P6 wiring of doc/03_plan/compiler/hir/immutable_hir_targethir_mir_refactor_plan_2026-11-03.md
+# (§8.1): MirLowering symbol writers routed through the per-task private
+# scratch overlay (compiler.hir.target_hir.target_hir_task_overlay).
+#
+# The eight migration-matrix writer rows (symbols_alias, provider_symbol_writes,
+# default_binding_writes, default_rewrite_writes, resident_global_writes,
+# trait_conversion_writes, trait_thunk_writes, nested_lowerer) still allocate in
+# the live SymbolTable — every caller consumes the returned SymbolId at once —
+# and additionally RECORD each write into this ledger, owned by the lowering
+# task (owner = module id; a nested lowerer is a child owner).
+#
+# Mode (SIMPLE_TARGET_HIR_MODE, strict, read once per module):
+#   legacy -> nothing is recorded; the live table alone is authoritative
+#   shadow -> the owner-order overlay merge must equal the legacy write journal
+#             (same entries); a re-write of a key with a different id, a
+#             cross-owner key conflict, or an unknown writer is fatal
+#   typed  -> the overlay merge is the authoritative write set (conflicts fatal)
+#
+# The ledger is a value struct of parallel arrays (no Dict field): Stage4 does
+# not reliably persist Dict mutations stored inside MirLowering.
+#
+# Scope limit: the frozen snapshot is the module id plus the SymbolTable
+# watermark at the alias site; the immutable base passed to the merge is empty
+# because the live table is not yet split into base + overlay. Read-through of
+# the overlay by lowering (true typed reads) needs the self-hosted Stage-3 path.
+
+use compiler.hir.target_hir.target_hir_task_overlay.{TaskOverlay, task_overlay_merge}
+use compiler.hir.target_hir.hir_snapshot.{HirSnapshotId, hir_snapshot_id_new}
+
+fn mir_symbol_writer_names() -> [text]:
+    ["symbols_alias", "provider_symbol_writes", "default_binding_writes",
+     "default_rewrite_writes", "resident_global_writes", "trait_conversion_writes",
+     "trait_thunk_writes", "nested_lowerer"]
+
+struct MirSymbolWriteLedger:
+    mode: text
+    owner: text
+    rank: i64
+    snapshot: HirSnapshotId
+    entry_owners: [text]
+    entry_keys: [text]
+    entry_values: [text]
+    errors: [text]
+
+fn mir_symbol_write_ledger_legacy() -> MirSymbolWriteLedger:
+    MirSymbolWriteLedger(mode: "legacy", owner: "", rank: 0,
+        snapshot: HirSnapshotId(module_name: "mir.legacy", content_digest: "legacy", generation: 0),
+        entry_owners: [], entry_keys: [], entry_values: [], errors: [])
+
+# Freeze the task: module id + SymbolTable watermark at the alias site.
+fn mir_symbol_write_ledger_open(mode: text, module_id: text, rank: i64, watermark: i64) -> Result<MirSymbolWriteLedger, text>:
+    if mode == "legacy":
+        return Ok(mir_symbol_write_ledger_legacy())
+    if mode != "shadow" and mode != "typed":
+        return Err("target_hir_symbol_writes_bad_mode: " + mode)
+    val owner = if module_id.trim() == "": "mir.live_lowering" else: module_id
+    val snap = hir_snapshot_id_new(owner, "symbols@" + watermark.to_string(), 0)
+    if snap.is_err():
+        return Err(snap.unwrap_err())
+    Ok(MirSymbolWriteLedger(mode: mode, owner: owner, rank: rank, snapshot: snap.unwrap(),
+        entry_owners: [], entry_keys: [], entry_values: [], errors: []))
+
+fn _is_writer(writer: text) -> bool:
+    for w in mir_symbol_writer_names():
+        if w == writer:
+            return true
+    false
+
+# Record one live-table write. Legacy: unchanged ledger (no cost beyond the check).
+fn mir_symbol_write_record(ledger: MirSymbolWriteLedger, writer: text, name: text, id: i64) -> MirSymbolWriteLedger:
+    if ledger.mode == "legacy":
+        return ledger
+    var out = ledger
+    if not _is_writer(writer):
+        out.errors = out.errors.push("target_hir_symbol_writes_unknown_writer: " + writer)
+        return out
+    out.entry_owners = out.entry_owners.push(out.owner)
+    out.entry_keys = out.entry_keys.push(writer + ":" + name)
+    out.entry_values = out.entry_values.push(id.to_string())
+    out
+
+# Child task for a nested lowerer: same mode/snapshot, its own owner.
+fn mir_symbol_write_ledger_child(parent: MirSymbolWriteLedger, label: text) -> MirSymbolWriteLedger:
+    if parent.mode == "legacy":
+        return parent
+    MirSymbolWriteLedger(mode: parent.mode, owner: parent.owner + "/" + label, rank: parent.rank,
+        snapshot: parent.snapshot, entry_owners: [], entry_keys: [], entry_values: [], errors: [])
+
+# Fold a finished child's entries (still tagged with the child owner) into the parent.
+fn mir_symbol_write_ledger_adopt(parent: MirSymbolWriteLedger, child: MirSymbolWriteLedger) -> MirSymbolWriteLedger:
+    if parent.mode == "legacy":
+        return parent
+    var out = parent
+    var i = 0
+    while i < child.entry_keys.len():
+        out.entry_owners = out.entry_owners.push(child.entry_owners[i])
+        out.entry_keys = out.entry_keys.push(child.entry_keys[i])
+        out.entry_values = out.entry_values.push(child.entry_values[i])
+        i = i + 1
+    for e in child.errors:
+        out.errors = out.errors.push(e)
+    out
+
+fn _sorted_unique(xs: [text]) -> [text]:
+    var s = xs
+    s.sort()
+    var out: [text] = []
+    for x in s:
+        if out.len() == 0 or out[out.len() - 1] != x:
+            out.push(x)
+    out
+
+fn _join(xs: [text]) -> text:
+    var s = ""
+    for x in xs:
+        s = s + x + "\n"
+    s
+
+# Legacy -> Ok([]); shadow -> Ok(legacy journal) or fatal Err; typed -> Ok(overlay merge).
+fn mir_symbol_write_ledger_resolve(ledger: MirSymbolWriteLedger) -> Result<[text], text>:
+    if ledger.mode == "legacy":
+        return Ok([])
+    if ledger.errors.len() > 0:
+        return Err(ledger.errors[0])
+    var owner_names: [text] = []
+    var overlays: [TaskOverlay] = []
+    var legacy: [text] = []
+    var i = 0
+    while i < ledger.entry_keys.len():
+        val owner = ledger.entry_owners[i]
+        var slot = -1
+        var j = 0
+        while j < owner_names.len():
+            if owner_names[j] == owner:
+                slot = j
+            j = j + 1
+        if slot < 0:
+            owner_names.push(owner)
+            overlays.push(TaskOverlay.new(owner, ledger.rank))
+            slot = overlays.len() - 1
+        overlays[slot].put(ledger.entry_keys[i], ledger.entry_values[i])
+        legacy.push(ledger.entry_keys[i] + "=" + ledger.entry_values[i])
+        i = i + 1
+    val base: Dict<text, text> = {}
+    val merged = task_overlay_merge(base, overlays)
+    if merged.is_err():
+        return Err(merged.unwrap_err())
+    val m = merged.unwrap()
+    val legacy_set = _sorted_unique(legacy)
+    if ledger.mode == "shadow":
+        if _join(_sorted_unique(m)) != _join(legacy_set):
+            return Err("target_hir_symbol_writes_shadow_mismatch: owner " + ledger.owner + " legacy " + legacy_set.len().to_string() + " writes, overlay " + m.len().to_string() + " entries")
+        # Equal as sets: report the legacy writes in canonical owner order.
+        return Ok(m)
+    Ok(m)

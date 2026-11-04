@@ -1,6 +1,6 @@
 # Seed compiled coalesce duplicates a stateful operand
 
-Status: open; caller workaround active, seed compiler repair pending.
+Status: seed repair landed (ffbb28e9bc9, `lower_coalesce` binds `$coalesce_subject` once; Rust test `compiler/tests/coalesce_single_evaluation.rs`); FIX-IMPLEMENTED, VERIFICATION-PENDING for native (see 2026-11-04 note). Caller workaround stays tagged until a pinned seed containing ffbb28e9bc9 is redeployed.
 Date: 2026-10-12. Status: OPEN compiler defect; caller workaround committed and Phase1 encoder regression passed.
 Bug key: `seed_coalesce_stateful_operand_twice_2026_10_12`.
 Owner scopes: Rust seed HIR lowering; generated pure-Simple AST semantic hash finish and its generator.
@@ -51,3 +51,7 @@ release_phase3 port (PR #3803) the workaround was re-applied to upstream's
 and the source tags now use `recover=fcc1d91ea1b92992c7ebd7ba50f44379999bab4e`,
 its parent on that branch (the pre-workaround state). A row was added to
 `bug_db.sdn` by hand; qualified bug-database reconciliation remains pending.
+
+## Triage 2026-11-04
+
+Already fixed on origin/release/1.0.0: `ffbb28e9bc9` (2026-10-03) rewrote seed `lower_coalesce` to store the operand once in `$coalesce_subject` (present/absent branches read the local); pure-Simple MIR lowering evaluates the left operand once (50.mir, not touched). Added Simple spec `test/01_unit/compiler/semantics/coalesce_stateful_operand_once_spec.spl` (present / absent / chained operands, counter-incrementing call): 3/3 pass on the interpreter with the current seed. Verification pending: run the same spec through `native-build` with a seed built from >= ffbb28e9bc9 (the 2026-10-12 failure was under an older pinned seed), then remove the `@workaround` tag in `ast_semantic_value.spl` and close.

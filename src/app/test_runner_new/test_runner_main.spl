@@ -9,6 +9,7 @@
 #                            result parsing, categorization, warnings, database updates
 
 use std.nogc_sync_mut.io.env_ops.{env_set, env_get}
+use std.nogc_sync_mut.spec.dir_prevention.{DIR_PREVENTION_ENV, dir_prevention_env_value}
 use std.nogc_sync_mut.host_limits.{host_limit_value}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
@@ -942,6 +943,13 @@ fn run_single_test(file_path: text, options: TestOptions) -> TestFileResult:
     # Bound rather than returned as a tail expression so the in-development
     # adjustment below sees EVERY execution mode's result.
     print "[route] mode=" + mode_to_str(effective_options.mode) + " file=" + file_path
+    # Directory-wide prevention policy: every lane below spawns the spec as a
+    # child that inherits this process's environment, so the spec's
+    # `_prevention.sdn` chain (cached per directory) is published here, once,
+    # and restored afterwards so a later spec in a policy-free directory
+    # never inherits it.
+    val previous_dir_prevention = env_get(DIR_PREVENTION_ENV) ?? ""
+    env_set(DIR_PREVENTION_ENV, dir_prevention_env_value(file_path))
     val raw = match effective_options.mode:
         case TestExecutionMode.Interpreter:
             run_test_file_interpreter(file_path, effective_options)
@@ -953,6 +961,7 @@ fn run_single_test(file_path: text, options: TestOptions) -> TestFileResult:
             run_test_file_compile(file_path, effective_options)
         case TestExecutionMode.Composite(spec):
             run_test_file_composite(file_path, effective_options, spec)
+    env_set(DIR_PREVENTION_ENV, previous_dir_prevention)
     in_development_adjust(file_path, options, raw)
 
 # =========================================================================

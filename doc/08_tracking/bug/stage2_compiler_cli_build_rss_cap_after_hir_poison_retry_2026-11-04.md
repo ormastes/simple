@@ -29,15 +29,44 @@ So the RSS kill is a consequence; the root cause is the poison.
   `adaptive_set`, `sprof_collection_profile`. Compiler change: verified only by
   the next Stage 2 rebuild.
 
+## Follow-up fixes (work/bug-mirsig-20261104)
+- **`expr?.method(args)` MIR failure** (`indirect callable lacks a proven
+  function signature`, 6 sites in `git_provider.spl`, repro'd with the s2c
+  Stage 2 `compile`): root cause is the self-hosted parser
+  (`src/compiler/10.frontend/core/parser_expr.spl`, both postfix loops). Token
+  `?.` was consumed as a plain field access -- the `?` was dropped and the
+  following `(` built `Call(Field(base, m))`, an indirect call of a "field"
+  on a `Result`. Now `base?.m(args)` parses as `MethodCall(Try(base), m, args)`
+  -- the try-then-call meaning every in-tree `)?.m(` site relies on
+  (git_provider, scv/db, compiler 50.mir/70.backend/80.driver). The field form
+  `base?.f` is unchanged. Note: the Rust seed's *interpreter* gives
+  `?.m()` safe-navigation semantics (wraps `Some`); the seed has no static
+  lowering for it. Spec: `test/01_unit/compiler/frontend/optional_member_call_parser_spec.spl`
+  (3/3; 2 of 3 fail without the parser change).
+- `git_provider.spl:161,174` `"...^{tree}"` interpolated the local `tree`
+  (still `""`) -> `rev^`; escaped as `^\{tree\}` (genuine source bug).
+- **No in-process MIR retry after HIR compile errors.** A MIR shard child
+  whose frontend stops on HIR diagnostics now writes `HIR_COMPILE_ERRORS`
+  beside the MIR ledger (`native_mir_shard_record_hir_compile_errors_v1`,
+  called after both collect-all summaries in
+  `driver_hir_pipeline_lowering.spl`). The coordinator
+  (`run_mir_shards`, and the focused-capsule path) maps the otherwise
+  indistinguishable "fallback" (no claims) to "fail"
+  (`native_mir_shard_outcome_after_hir_errors_v1`), so the build fails fast
+  with the HIR errors already on stderr. Without the marker (transient/infra:
+  no HIR inventory/cache) the fallback is kept. Spec:
+  `test/01_unit/compiler/driver/native_mir_shard_spec.spl` (12/12).
+- Verification of both in a real Stage 2: pending the next sanctioned
+  bootstrap (s2e).
+
 ## Remaining (not fixed here)
-- After fixing HIR, the single-module `compile` of `git_provider.spl` reaches
-  MIR and fails: `indirect callable lacks a proven function signature`
-  (`switch_operators_calls.spl:9073`). May also hit the full-CLI build.
-- In-process retry after a deterministic HIR failure re-lowers everything
-  without releasing pass #1 state (retained across passes): it should fail
-  fast instead of retrying when the shard failed on compile errors.
 - `SHARD_TREE_HEADROOM_KB_V1` (24 GiB default) >= host RAM on a 24 GiB Mac, so
   the HIR worker pool is always 0 (`effective 0 kB`) and HIR runs in the
-  coordinator. Not touched (reserve policy is owner-controlled).
+  coordinator. Not touched (reserve policy is owner-controlled); same for the
+  12 GiB build memory reserve.
 - HIR cache store `refused=363 reason=decode ... enum allocation failed`:
   separate codec defect, not causal.
+- Single-module `compile` of `git_provider.spl` additionally reports
+  `enum runtime ID collision: TextIoError` (process_ops) and unresolved
+  `to_array`/`get` (sha1) then SIGSEGV; these did not appear in the s2c
+  full-CLI log and look single-module-mode specific.

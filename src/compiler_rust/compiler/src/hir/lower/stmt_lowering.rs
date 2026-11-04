@@ -3820,6 +3820,47 @@ impl Lowerer {
                 Ok(Some(stmts))
             }
 
+            // std.spec `skip`/`skip_it`/`pending`/`planned` only print a line, so
+            // the compiled lane never counted them (`skipped=0` on the JIT vs 1
+            // on the interpreter). Keep the call, and count the example.
+            "skip" | "skip_it" | "pending" | "planned" if !args.is_empty() && args.iter().all(|a| a.name.is_none()) => {
+                let call = self.lower_expr(expr, ctx)?;
+                Ok(Some(vec![
+                    HirStmt::Expr(HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_bdd_note_skip".to_string(),
+                            args: vec![],
+                        },
+                        ty: TypeId::NIL,
+                    }),
+                    HirStmt::Expr(call),
+                ]))
+            }
+
+            // `fail`/`fail_assertion`/`fail_test` are interpreter builtins
+            // (interpreter_call/bdd.rs) that take precedence over any Simple
+            // definition, including std.spec's. `use std.spec.{fail}` resolves
+            // to `spec/__init__.spl`, which does not define them, so the
+            // compiled lane had no symbol (`unresolved external symbol 'fail'`
+            // under SIMPLE_JIT_STRICT). Lower them to the runtime twin so both
+            // engines record the same failure.
+            "fail" | "fail_assertion" | "fail_test" if args.len() <= 1 && args.iter().all(|a| a.name.is_none()) => {
+                let msg = match args.first() {
+                    Some(a) => self.lower_expr(&a.value, ctx)?,
+                    None => HirExpr {
+                        kind: HirExprKind::String("assertion failed".to_string()),
+                        ty: TypeId::STRING,
+                    },
+                };
+                Ok(Some(vec![HirStmt::Expr(HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_bdd_fail_rv".to_string(),
+                        args: vec![msg],
+                    },
+                    ty: TypeId::NIL,
+                })]))
+            }
+
             "it" | "test" | "example" | "specify" => {
                 // it "name": body
                 // → rt_bdd_it_start_rv(name), <body>, rt_bdd_it_end(passed)

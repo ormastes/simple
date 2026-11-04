@@ -793,6 +793,42 @@ impl MirLowering:
         else:
             self.remember_local_hir_type(local.id, HirType(kind: HirTypeKind.Float(64), span: init.span), 0, 0)
 
+    me builtin_remember_array_literal_init(init: HirExpr, local: LocalId):
+        """Untyped `val xs = [1, 2, 3]` / `[1.5, 2.5]`: record `[i64]` / `[f64]`
+        on the binding, so `xs.enumerate()` and friends have a declared element
+        type (a bare MIR `Array(i64)` is never evidence on its own). Only a
+        non-empty literal whose elements are ALL proven default-width ints (or
+        all floats) is recorded; empty or mixed literals record nothing and
+        stay fail-closed. A local that already has a real element type is kept."""
+        if self.builtin_local_has_custom_owner(local):
+            return
+        if val existing = self.find_local_hir_type(local.id):
+            match existing.kind:
+                case HirTypeKind.Array(existing_elem, _):
+                    match existing_elem.kind:
+                        case HirTypeKind.Error | HirTypeKind.Any: ()
+                        case HirTypeKind.Infer(_, _): ()
+                        case _: return
+                case _: return
+        var elem_kind = 0
+        match init.kind:
+            case ArrayLit(lit_elements, _):
+                if lit_elements.len() == 0:
+                    return
+                elem_kind = self.builtin_numeric_expr_kind(lit_elements[0])
+                for lit_elem in lit_elements:
+                    if self.builtin_numeric_expr_kind(lit_elem) != elem_kind:
+                        return
+            case _: return
+        if elem_kind != 1 and elem_kind != 3:
+            return
+        if elem_kind == 1:
+            val int_elem = HirType(kind: HirTypeKind.Int(64, true), span: init.span)
+            self.remember_local_hir_type(local.id, HirType(kind: HirTypeKind.Array(int_elem, nil), span: init.span), 0, 0)
+        else:
+            val float_elem = HirType(kind: HirTypeKind.Float(64), span: init.span)
+            self.remember_local_hir_type(local.id, HirType(kind: HirTypeKind.Array(float_elem, nil), span: init.span), 0, 0)
+
     me remember_untyped_let_nominal_init(init: HirExpr, local: LocalId):
         """Untyped `val x = <expr>` whose initialiser has a recoverable
         declared nominal type (`xs[i]` on `[Node]`, `self.m()` -> `E?`,

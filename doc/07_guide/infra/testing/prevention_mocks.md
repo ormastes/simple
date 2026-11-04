@@ -123,39 +123,45 @@ happened anywhere in the process.
 See also `doc/07_guide/infra/security/mock_policy_system_test_ban.md` for the
 separate mock-creation-ban policy.
 
-## Directory-wide scope: NOT specifiable today
+## Directory-wide scope: `_prevention.sdn` (landed 2026-11-04)
 
-The test runner has no per-directory configuration hook. It reads a single
-repo-level `config/simple.test.sdn`
-(`src/lib/nogc_sync_mut/test_runner/test_config.spl`,
-`find_config_file` at line 297 searches only the current, parent, and
-grandparent directories from the process's cwd — not per-spec-directory).
-Spec discovery (`src/app/test_runner_new/`) has no shared-fixture-per-directory
-mechanism either. A guard armed in one spec file has no way to apply itself
-to every other spec file in the same directory automatically.
+Put a `_prevention.sdn` in a test directory and every spec under it — in
+that directory and all its subdirectories — is checked against the policy
+after every example, with **no import and no per-file declaration**:
 
-**Convention until runner support lands:** put a `_prevention.spl` helper in
-the spec directory that exports a single function, e.g.:
-
-```simple
-# test/01_unit/some/dir/_prevention.spl
-use std.nogc_sync_mut.spec.{prevent_file}
-use std.nogc_sync_mut.src.testing.mock.builder.{MockFunction}
-
-pub fn arm_dir_prevention():
-    """Call this as the first line of every spec body in this directory,
-    AFTER the code under test has run (see the ordering contract above)."""
-    val m = MockFunction.new("forbidden_seam")
-    prevent_file(m, "this directory's specs must not touch <seam>")
+```
+# test/01_unit/some/dir/_prevention.sdn
+prevent:
+  - mock: forbidden_seam
+    reason: specs in this directory must not touch <seam>
+  - mock: budgeted_seam
+    at_most: 2
+    reason: at most two calls per example
 ```
 
-Every spec in the directory imports `_prevention.spl` and calls
-`arm_dir_prevention()` as the first line of its body. This is **opt-in per
-file, not enforced by the runner** — a spec that forgets the import is
-unprotected, and there is no mechanism today that would catch the omission.
+`mock` is the `MockFunction.new(name)` name the forbidden call path is routed
+through; `at_most` defaults to 0. A rule fails an example when that example's
+own calls on a mock of that name exceed the budget (a per-example delta, so a
+mock shared across examples is not double-counted). The failure reads
+`forbidden call (directory policy <file>): <name> called Nx in this example
+(allowed M) — <reason>` and is recorded like any failed `expect`.
 
-The runner-support gap that would make this automatic and non-optional is
-tracked in
+Resolution is **merged, root-most first**: the runner walks from the spec's
+directory up to `test/` (stopping there, or at the filesystem root) and
+collects every `_prevention.sdn` on the way, so a nested directory can add
+rules but cannot cancel an ancestor's. The chain is cached per directory
+(one walk per directory, not per spec) and handed to the spec child through
+`SIMPLE_SPEC_DIR_PREVENTION` (`;`-joined); `std.spec` reads it, enables the
+`MockFunction` auto-registry and arms a before/after_each pair. With no
+policy file nothing is registered and `MockFunction.new` is unchanged.
+
+Limits, stated: mocks built before the first example (module level,
+`before_all`) are outside the per-example window; a spec run by hand with
+`simple run` needs the env var set explicitly; the native/SMF lanes do not
+set the variable yet. Implementation:
+`src/lib/nogc_sync_mut/spec/dir_prevention.spl`, `spec.spl`
+§ "Directory-wide prevention policy", `builder.spl` auto-registry; fixture
+`test/fixtures/dir_prevention/`; design + evidence in
 `doc/08_tracking/bug/sspec_no_dir_wide_prevention_scope_2026-08-07.md`.
 
 ## Don't land a guard you can't drive red

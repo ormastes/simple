@@ -31,35 +31,6 @@ use test.fixtures.svmg.conformance_vectors.{ConformanceVector, all_vectors}
 
 val _KERNEL_PTX: text = "src/lib/gc_async_mut/gpu_lane/svmg_cuda_kernel.ptx"
 
-# "mem_store_load_byte" is EXCLUDED from the bulk pass/fail tally below --
-# not a kernel defect, a real host/device semantic divergence, filed as
-# doc/08_tracking/bug/svmg_device_arena_code_coresidency_diverges_from_ref_vm_2026-08-07.md.
-# ref_vm.spl keeps `code: [u8]` and `arena: [u8]` as two SEPARATE host
-# arrays (opcode fetch reads `self.code`, never `self.arena`), so a STORE8
-# into the arena's DATA region can never perturb fetch. This kernel (and,
-# unavoidably, the Vulkan sibling svmg_vulkan_kernel.spv, which fetches via the
-# identical `arena[code_off+pc]` expression -- see the Vulkan spec's header comment)
-# has only ONE buffer, matching the SGP wire format's literal meaning
-# (code_off/code_len locate code WITHIN the single arena a real device
-# receives). "mem_store_load_byte"'s program (`PUSHI 50; PUSHI 200;
-# STORE8; PUSHI 1; PUSHI 50; LOAD8; SYS_RESULT; HALT 0`) stores to absolute
-# arena offset 50, which lands inside this exact program's own code
-# footprint (code_off=36, code_len=25 -> [36,61)) -- specifically byte 2 of
-# the immediate operand of the very next `PUSHI 1` instruction (arena bytes
-# 47..51). On a real single-buffer device this is genuine (if accidental)
-# self-modifying code: byte 50 becomes 200 before the `PUSHI 1` fetch reads
-# it, so the pushed value is 1 | (200<<16) = 13107201, not 1. Verified this
-# is real device behavior, not a device bug, by first tracking the
-# corruption through two independent kernel rewrites (call-based, then
-# fully-inlined byte helpers) that produced the byte-identical result
-# both times, then hand-tracing the arena byte layout to the exact
-# overlapping instruction. "mem_store_load_word" (the STORE32/LOAD32
-# sibling vector) does not exhibit this because its STORE32 target
-# (absolute offset 100) happens to fall outside that program's own code
-# footprint.
-val _SELF_MODIFYING_CODE_DIVERGENCE_VECTOR: text = "mem_store_load_byte"
-val _SELF_MODIFYING_CODE_DIVERGENT_PASS: i64 = 13107201
-
 # "budget_exhaustion_timeout" is EXCLUDED from the shared-session bulk loop
 # below for a different reason than the self-modifying-code vector above: it
 # is deliberately designed to time out the device. CudaLaneSession.launch_once
@@ -139,8 +110,6 @@ describe "CudaVmExecutor -- SVM-G D3 conformance vectors on a live device":
                 var failed = 0
                 var failed_names = ""
                 for v in vectors:
-                    if v.name == _SELF_MODIFYING_CODE_DIVERGENCE_VECTOR:
-                        continue
                     if v.name == _BUDGET_EXHAUSTION_TIMEOUT_VECTOR:
                         continue
                     val outcome = _run_vector(executor, v)
@@ -154,25 +123,12 @@ describe "CudaVmExecutor -- SVM-G D3 conformance vectors on a live device":
                     else:
                         failed = failed + 1
                         failed_names = failed_names + v.name + " "
-                step("Cuda device conformance: {passed}/{vectors.len() - 2} vectors passed " +
-                    "(2 excluded: {_SELF_MODIFYING_CODE_DIVERGENCE_VECTOR}, " +
+                step("Cuda device conformance: {passed}/{vectors.len() - 1} vectors passed " +
+                    "(1 excluded: " +
                     "{_BUDGET_EXHAUSTION_TIMEOUT_VECTOR}, see comments above)" +
                     (if failed > 0: " (failed: " + failed_names + ")" else: ""))
                 assert_equal(failed, 0)
-                assert_equal(passed, vectors.len() - 2)
-
-                step("Separately verify the excluded vector produces the DEVICE-correct " +
-                    "self-modified result (not ref_vm's host-side expectation)")
-                var divergent_vector = vectors[0]
-                for v in vectors:
-                    if v.name == _SELF_MODIFYING_CODE_DIVERGENCE_VECTOR:
-                        divergent_vector = v
-                val divergent_outcome = _run_vector(executor, divergent_vector)
-                assert_true(divergent_outcome.ok)
-                assert_equal(divergent_outcome.records.len(), 1)
-                if divergent_outcome.records.len() > 0:
-                    assert_equal(divergent_outcome.records[0].passed, _SELF_MODIFYING_CODE_DIVERGENT_PASS)
-                    assert_equal(divergent_outcome.records[0].value, 200)
+                assert_equal(passed, vectors.len() - 1)
 
                 step("Shut the executor down cleanly")
                 expect(executor.shutdown()).to_equal("")

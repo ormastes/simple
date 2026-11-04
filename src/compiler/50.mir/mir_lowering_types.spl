@@ -1,4 +1,5 @@
 use compiler.mir.mir_enum_semantic_types.{MirEnumDeclarationIdentityV1}
+use compiler.mir.mir_target_hir_symbol_writes.{MirSymbolWriteLedger}
 use compiler.mir.enum_semantic_capture_types_v1.{MirEnumPendingMatchV1}
 use compiler.hir.hir_definitions.{HirParam}
 use compiler.mir.verification_call_manifest_finalizer.{ResolvedDirectCallCaptureV1}
@@ -611,6 +612,9 @@ struct MirLowering:
     # "mutable array global has no backing static" diagnostic is emitted once
     # per symbol instead of once per reference site.
     array_global_mutation_warned: Dict<i64, bool>
+    # P6 TargetHIR task overlay ledger for the eight symbol-writer rows
+    # (mir_target_hir_symbol_writes.spl); legacy mode records nothing.
+    symbol_write_ledger: MirSymbolWriteLedger
     target_context: MirTargetContext
     # Compiler-owned source compilation must not inherit bootstrap shortcuts
     # from the process environment. Legacy driver entrypoints leave this true.
@@ -1141,6 +1145,24 @@ impl MirLowering:
             if id != local_id:
                 ids.push(id)
         self.runtime_value_local_ids = ids
+
+# One severity owner for lifted-body checks and the driver collector: the
+# site's own `fatal` flag or the legacy message-prefix allowlist.
+pub fn mir_legacy_message_is_fatal(message: text) -> bool:
+    message.starts_with("undefined variable") or
+        message.starts_with("unresolved method call:") or
+        message.starts_with("unsupported MIR expression:") or
+        message.starts_with("match guards (case x if cond:) are not supported") or
+        message.starts_with("B5b") or
+        message.starts_with("match default binding has no resolved symbol") or
+        message.starts_with("enum match:") or
+        message.starts_with("enum construction: unregistered enum") or
+        message.starts_with("unsupported struct field initializer") or
+        message.starts_with("unsupported Result unwrap payload type") or
+        message.starts_with("for-in over non-array iterables")
+
+pub fn mir_error_is_fatal(e: MirError) -> bool:
+    e.fatal or mir_legacy_message_is_fatal(e.message)
 
 struct MirError:
     """MIR lowering error.

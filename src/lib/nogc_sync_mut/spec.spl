@@ -17,6 +17,8 @@
 # NOTE: No static fn, no try/catch/throw - runs on bootstrap runtime.
 
 use std.nogc_sync_mut.src.testing.mock.prevention.{ForbiddenCallGuard, check_guards}
+use std.nogc_sync_mut.src.testing.mock.builder.{mock_auto_registry, mock_auto_registry_enable}
+use std.nogc_sync_mut.spec.dir_prevention.{DirPreventionRule, dir_prevention_load, DIR_PREVENTION_ENV}
 use std.spec.skip_governance.{
     skip_ref, validate_skip_it, validate_bare_pending,
     validate_free_text_skip, validate_skip_ref_record
@@ -1139,18 +1141,21 @@ fn _drain_after_all(baseline: i64):
 # Prevention mocks
 # ================================================================
 #
-# IMPORTANT ordering contract: call prevent()/prevent_at_most()/prevent_file()
-# AFTER the code under test has run, not at the top of the `it` body. The
-# interpreter copies a class instance (like a MockFunction) by value on every
-# form of storage (array push, class-field construction, closure capture) —
-# only continued access through the ORIGINAL variable observes later
-# mutations. An "arm early, auto-check at the end of _execute_it" design was
-# attempted and found to silently report zero calls (always green) for any
-# guard armed before the forbidden call happened — a fail-open DSL. See
-# doc/08_tracking/bug/prevention_mock_deferred_arming_impossible_2026-08-07.md
-# for the repro. These three functions therefore check IMMEDIATELY, against
-# mockfn's current state, and record a failure right where they are called
-# (same mechanism as a failed `expect`: std.nogc_sync_mut.spec.fail_assertion).
+# Ordering contract: call prevent()/prevent_at_most()/prevent_file() AFTER the
+# code under test has run, not at the top of the `it` body. These three check
+# IMMEDIATELY, against mockfn's current state, and record a failure right where
+# they are called (same mechanism as a failed `expect`: fail_assertion). The
+# original "arm early, auto-check at the end of the example" design was
+# blocked by the interpreter copying class instances by value on storage; that
+# limitation is gone since the class-ref default flip (re-verified 2026-11-04,
+# doc/08_tracking/bug/prevention_mock_deferred_arming_impossible_2026-08-07.md)
+# and the directory-wide policy below is built on exactly that deferred check.
+# The immediate-check semantics of these three are kept unchanged.
+#
+# Directory-wide scope: a `_prevention.sdn` in the spec's directory (or an
+# ancestor up to `test/`) applies to every spec under it with no per-file
+# declaration — see std.nogc_sync_mut.spec.dir_prevention and the
+# `_dir_prevention_*` hooks below.
 #
 # IMPORT NOTE: `use std.spec.*` does NOT reliably expose every pub fn in this
 # module (a pre-existing, unrelated limitation — even the long-standing
@@ -1172,15 +1177,67 @@ pub fn prevent_at_most(mockfn, n: i32, reason: text):
         fail_assertion(msg)
 
 pub fn prevent_file(mockfn, reason: text):
-    """NOTE: true file scope (checked automatically after every example in
-    the spec file) is NOT achievable — module-level spec state does not
-    persist from one `it` example to the next under this runner (verified;
-    see the bug doc above). prevent_file() therefore behaves exactly like
-    prevent(): an immediate check of mockfn's current state in the example
-    it is called from. Call it explicitly in every example (or from
-    before_each/after_each with a mock built fresh each time) to approximate
-    file-wide coverage."""
+    """Deliberately an alias for prevent(): an immediate check of mockfn's
+    current state in the example it is called from. True auto-checked file
+    scope is achievable since 2026-11-04 (the directory-wide policy below
+    runs on exactly that before/after_each hook), but changing this
+    function's semantics is a separate decision. Call it explicitly in
+    every example (or from before_each/after_each) for file-wide coverage,
+    or declare the seam in a `_prevention.sdn`."""
     prevent(mockfn, reason)
+
+# ----------------------------------------------------------------
+# Directory-wide prevention policy (sspec_no_dir_wide_prevention_scope_2026-08-07)
+# ----------------------------------------------------------------
+# The runner resolves `_prevention.sdn` files for the spec's directory chain
+# and passes them in SIMPLE_SPEC_DIR_PREVENTION. When at least one rule
+# loads, MockFunction.new starts recording every mock it builds, and a
+# before_each/after_each pair registered HERE (at module init, so it wraps
+# every example of the importing spec under both the seed's intrinsic `it`
+# and this module's _execute_it) fails any example whose per-example call
+# delta on a named mock exceeds the rule's budget. With no policy nothing is
+# registered and MockFunction.new is unchanged.
+
+var _dir_prevention_env: text = ""
+var _dir_prevention_loaded: bool = false
+var _dir_prevention_rules: [DirPreventionRule] = []
+var _dir_prevention_baseline: [i64] = []
+
+fn _dir_prevention_before():
+    # Policy files are read here, inside the first example, not at module
+    # init: file reads issued while this module is still initialising die
+    # silently under the seed (measured 2026-11-04 — env_get/file_exists
+    # work there, every text-read provider does not), so init only records
+    # the env value and registers the hooks.
+    if not _dir_prevention_loaded:
+        _dir_prevention_rules = dir_prevention_load(_dir_prevention_env)
+        mock_auto_registry_enable()
+        _dir_prevention_loaded = true
+    _dir_prevention_baseline.clear()
+    for m in mock_auto_registry():
+        _dir_prevention_baseline.push(m.call_count() as i64)
+
+fn _dir_prevention_after():
+    val mocks = mock_auto_registry()
+    var i = 0
+    while i < mocks.len():
+        val m = mocks[i]
+        val base: i64 = if i < _dir_prevention_baseline.len(): _dir_prevention_baseline[i] else: 0
+        val delta = (m.call_count() as i64) - base
+        for rule in _dir_prevention_rules:
+            if rule.mock_name == m.name and delta > rule.max_allowed:
+                fail_assertion("forbidden call (directory policy {rule.source}): {m.name} called {delta}x in this example (allowed {rule.max_allowed}) — {rule.reason}")
+        i = i + 1
+
+fn _dir_prevention_init() -> bool:
+    val env_value = env_get(DIR_PREVENTION_ENV) ?? ""
+    if env_value == "":
+        return false
+    _dir_prevention_env = env_value
+    before_each(fn(): _dir_prevention_before())
+    after_each(fn(): _dir_prevention_after())
+    true
+
 
 # ================================================================
 # Expectations
@@ -1717,3 +1774,7 @@ pub fn get_expectation_count() -> i64:
 # Users should import env_detect directly: use std.spec.env_detect.{get_runtime_mode, is_interpreter, ...}
 
 # Internal helper export (used by skip_it, skip_on_interpreter, only_on_interpreter)
+
+# Armed last: module-level initializers in this file run in order, and the
+# hooks must register before any importing spec's first example.
+val _dir_prevention_armed: bool = _dir_prevention_init()

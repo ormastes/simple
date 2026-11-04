@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-04
 - **Area:** seed (`src/compiler_rust`) — `driver/src/exec_core.rs` (`run_file_jit`), `compiler/src/codegen/jit.rs` (`first_unsupported_lambda`)
-- **Status:** partially fixed. The fallback is now visible and fatal under strict mode, and the std.spec closure refusals are fixed. Spec-entry synthesis is implemented but OPT-IN (`SIMPLE_JIT_SPEC_ENTRY=1`) because the compiled rt_bdd lane fails specs that pass on the interpreter (measured below).
+- **Status:** fixed for the sampled set (9/9 verdict parity, see bottom table); spec-entry still opt-in pending a default-on decision. The fallback is now visible and fatal under strict mode, and the std.spec closure refusals are fixed. Spec-entry synthesis is implemented but OPT-IN (`SIMPLE_JIT_SPEC_ENTRY=1`) because the compiled rt_bdd lane fails specs that pass on the interpreter (measured below).
 - **Found by:** PR #6634 report ("spec file still interprets: `jit-bail:no-main-fn`; std.spec `skip` closure is a separate JIT ABI refusal")
 
 ## Symptoms
@@ -68,41 +68,58 @@ mimalloc_gc_async_mut_reuse 3/3, lambda_lift_if_enum_capture_scan 8 pass / 1 fai
 (same as interpreter), for_in_variant_lowering 8/8, failing fixture prints
 "Expected 1 to equal 2".
 
+## Fixed 2026-11-04 (third pass): skip counting on the JIT
+
+HIR lowers a statement call to `skip`/`skip_it`/`pending`/`planned` as
+`rt_bdd_note_skip()` plus the original call (new symbol, Rust runtime +
+`runtime_native.c` twin). `finish_jit_spec_entry` records each as skipped.
+jit_spec_entry_spec now reads `passed=2 skipped=1` on both engines.
+Regression: `mir/lower/tests/bdd_skip_count.rs`.
+
+## Fixed 2026-11-04 (fourth pass): `fail` refusal was not a cross-module link gap
+
+The strict refusal `unresolved external symbol 'fail'` (diagnostic text says
+"cross-module Simple function") was misattributed. Measured:
+
+- Imported Simple functions already link on the per-module JIT: the loader
+  flattens imports into the same JIT module. A 2-module fixture
+  (`use modb.{helper}`, `main` returns `helper(1)`) runs strict and returns 42.
+  Pinned by the cargo test `imported_simple_function_links_under_strict_jit`
+  (driver/src/exec_core.rs).
+- `use std.spec.{..., fail}` is a group import, so it resolves to
+  `spec/__init__.spl`, which does not define `fail`. The definition lives in the
+  `spec.spl` file beside that directory. The interpreter never needs that body,
+  because `fail`/`fail_assertion`/`fail_test` are interpreter builtins
+  (`interpreter_call/bdd.rs`). They take precedence over ANY Simple definition:
+  a user `fn fail` is ignored by the interpreter (measured).
+
+Fix: HIR lowers a statement call to `fail`/`fail_assertion`/`fail_test` to the
+new runtime twin `rt_bdd_fail_rv(msg)` (Rust `bdd_sffi.rs` + C
+`runtime_native.c`). Inside an `it` it marks the example failed. Outside one it
+is fatal (exit 1), matching the interpreter's semantic error. The interpreter is
+untouched. Regression: `mir/lower/tests/bdd_fail_twin.rs`.
+
 ## Remaining gaps (not closed here)
 
-- Some specs still fail under strict mode with
-  `unresolved external symbol 'expect'` (and `'fail'` for
-  builtin_trait_where_bound_spec) (cross-module Simple function).
-  Measured on the `skip_it` fixture. This is the per-module link gap, not the
-  entry.
-- std.spec's `skip(...)` prints "skipped" on the JIT, but `rt_bdd` does not count
-  it, so `skipped=` reads 0 on the JIT and 1 on the interpreter.
 - ~~`skip "name", "reason"` (paren-less, two args) does not parse~~ — decided
   not a bug: the syntax reference (`syntax_quick_reference.md` § No-Paren
   Method Calls, "split needs parens (has arg)") and `doc/07_guide/infra/testing.md`
   only document the single-argument paren-less form (`skip "name":`).
   Multi-argument calls take parentheses: `skip("name", "reason")`.
 
-## Measured verdict parity (worktree seed, `SIMPLE_JIT_STRICT=1`, 2026-11-04)
-
-The JIT rows were taken with synthesis forced on.
+## Measured verdict parity (worktree seed, `SIMPLE_JIT_SPEC_ENTRY=1 SIMPLE_JIT_STRICT=1`, 2026-11-04, after fourth pass)
 
 | spec | interpreter | JIT (spec entry) |
 |---|---|---|
-| compiler/jit_spec_entry/jit_spec_entry_spec | 2 pass, 1 skip | 2 pass (skip not counted) |
-| jit_spec_entry/fixtures/failing_example (deliberately failing) | 1 fail, rc=1 | 1 fail, rc=1 |
-| compiler/20.hir/builtin_trait_where_bound_spec | 4/4 | refused before run (strict compile error) |
-| compiler/50.mir/for_in_variant_lowering_spec | 8/8 | 5 pass / 3 fail |
-| compiler/50.mir/hwir_riscv_scalar_runtime_completion_selector_spec | rc=1 (0 run) | rc=1 (0 run) |
-| compiler/50.mir/lambda_lift_if_enum_capture_scan_spec | 8 pass / 1 fail | 0 pass / 9 fail |
+| compiler/jit_spec_entry/jit_spec_entry_spec | 2 pass, 1 skip | 2 pass, 1 skip |
+| jit_spec_entry/fixtures/failing_example (deliberately failing) | 1 fail, ERROR | 1 fail, ERROR, rc=1 |
+| compiler/20.hir/builtin_trait_where_bound_spec | 4/4 | 4/4 |
+| compiler/50.mir/for_in_variant_lowering_spec | 8/8 | 8/8 |
+| compiler/50.mir/hwir_riscv_scalar_runtime_completion_selector_spec | ERROR (0 run) | ERROR (0 run; unresolvable import `compiler.mir.hwir.riscv_scalar_runtime_completion_selector`, spec-side) |
+| compiler/50.mir/lambda_lift_if_enum_capture_scan_spec | 9/9 | 9/9 |
 | compiler/50.mir/try_struct_payload_field_for_in_spec | 1/1 | 1/1 |
-| lib/alloc/allocator_pool_spec | 4/4 | 0/4 (`Expected nil to equal 0`, `Expected 4795500294561 to equal 1`) |
-| lib/alloc/mimalloc_gc_async_mut_reuse_spec | 3/3 | 0/3 |
+| lib/alloc/allocator_pool_spec | 4/4 | 4/4 |
+| lib/alloc/mimalloc_gc_async_mut_reuse_spec | 3/3 | 3/3 |
 
-The JIT failures show raw versus tagged confusion at `rt_bdd_expect_eq_rv`:
-the actual values print as nil or huge tagged words. Each of these is a real
-compiled-lane bug. They are the reason synthesis stays opt-in. Default-on would
-turn interpreter-green runs red for reasons unrelated to the code under test.
-Next step: fix value encoding at the `expect(...).to_equal(...)` lowering in
-`hir/lower/stmt_lowering.rs` (`try_lower_bdd_matcher_statement`) and
-`runtime/src/value/bdd_sffi.rs`, then flip the default.
+All 9 samples match. Recommendation: flip `SIMPLE_JIT_SPEC_ENTRY` to default-on
+in a separate change after a wider sample. Not flipped here.

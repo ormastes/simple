@@ -1,0 +1,122 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/80.driver/driver_aot_pipeline.spl 0%
+"""
+# go-to-end HIR recovery: collect the import graph before any removal
+
+stage3 faulted in go_to_end_recover_hir_v1 reading a Dict hit (bare if-val
+payload) after remove() calls. The graph is now collected into plain arrays
+before the first remove(), through a match-based helper.
+"""
+use std.spec.{describe, it, expect, step}
+use app.io.mod.{file_read}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir.*
+use compiler.driver.driver.{CompilerDriver}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+
+fn rec_import(path: text) -> HirImport:
+    HirImport(module_path: path, items: [], is_lazy: false, span: Span.empty())
+
+fn rec_module(name: text, imports: [text]) -> HirModule:
+    var his: [HirImport] = []
+    for p in imports:
+        his = his.push(rec_import(p))
+    HirModule(name: name, path: name + ".spl", imports: his,
+        exports: [], domain_blocks: [], symbols: SymbolTable.new(),
+        functions: {}, gpu_function_targets: {},
+        gpu_function_backend_orders: {}, classes: {}, structs: {}, enums: {},
+        bitfields: {}, traits: {}, impls: [], constants: {}, static_asserts: [],
+        aop_advices: [], di_bindings: [], arch_rules: [], mock_decls: [],
+        types: [], extend_enums: [])
+
+fn rec_driver(mods: [HirModule], failed: [text]) -> CompilerDriver:
+    var driver = CompilerDriver.create(driver_core_compile_options_default())
+    for m in mods:
+        driver.ctx.hir_modules[m.name] = m
+    driver.ctx.poisoned_modules = failed
+    driver.ctx.poisoned_module_count_value = failed.len()
+    driver
+
+fn sorted_keys(driver: CompilerDriver) -> [text]:
+    var keys: [text] = driver.ctx.hir_modules.keys()
+    var i = 0
+    while i < keys.len():
+        var j = i + 1
+        while j < keys.len():
+            if keys[j] < keys[i]:
+                val t = keys[i]
+                keys[i] = keys[j]
+                keys[j] = t
+            j = j + 1
+        i = i + 1
+    keys
+
+fn recover_fn_source() -> text:
+    val src = file_read("src/compiler/80.driver/driver_aot_pipeline.spl")
+    val start = src.index_of("me go_to_end_recover_hir_v1() -> bool:") ?? 0
+    val rest = src.substring(start, src.len())
+    val stop = rest.index_of("fn native_staged_codegen_eligible_reason_v1") ?? rest.len()
+    rest.substring(0, stop)
+
+describe "go_to_end_recover_hir_v1":
+    # @req REQ-SSPEC-COMPILER
+    it "removes the failed module and its importer, keeps the rest":
+        step("a imports d, c imports b (failed)")
+        var driver = rec_driver([rec_module("a", ["d"]), rec_module("b", []),
+            rec_module("c", ["b"]), rec_module("d", [])], ["b"])
+        val kept = driver.go_to_end_recover_hir_v1()
+        expect(kept).to_equal(true)
+        expect(sorted_keys(driver)).to_equal(["a", "d"])
+        expect(driver.go_to_end.stage_modules("hir")).to_equal(["b"])
+        expect(driver.go_to_end.stage_modules("hir_dependency")).to_equal(["c"])
+        expect(driver.ctx.poisoned_module_count()).to_equal(0)
+
+    # @req REQ-SSPEC-COMPILER
+    it "removes nothing when no module failed":
+        step("empty poison list")
+        var driver = rec_driver([rec_module("a", ["d"]), rec_module("d", [])], [])
+        val kept = driver.go_to_end_recover_hir_v1()
+        expect(kept).to_equal(false)
+        expect(sorted_keys(driver)).to_equal(["a", "d"])
+        expect(driver.go_to_end.len()).to_equal(0)
+
+    # @req REQ-SSPEC-COMPILER
+    it "excludes a transitive importer through a chain":
+        step("e imports c imports b (failed)")
+        var driver = rec_driver([rec_module("a", ["d"]), rec_module("b", []),
+            rec_module("c", ["b"]), rec_module("d", []),
+            rec_module("e", ["c"])], ["b"])
+        val kept = driver.go_to_end_recover_hir_v1()
+        expect(kept).to_equal(true)
+        expect(sorted_keys(driver)).to_equal(["a", "d"])
+        expect(driver.go_to_end.stage_modules("hir_dependency").len()).to_equal(2)
+
+    # @req REQ-SSPEC-COMPILER
+    it "handles a failed module that is already absent from hir_modules":
+        step("poisoned name has no HirModule")
+        var driver = rec_driver([rec_module("a", ["d"]), rec_module("d", []),
+            rec_module("c", ["b"])], ["b"])
+        val kept = driver.go_to_end_recover_hir_v1()
+        expect(kept).to_equal(true)
+        expect(sorted_keys(driver)).to_equal(["a", "d"])
+
+    # @req REQ-SSPEC-COMPILER
+    it "never binds a Dict hit through a bare if-val in the recovery function":
+        step("source pin")
+        val body = recover_fn_source()
+        expect(body.len() > 100).to_equal(true)
+        expect(body.contains("if val hir_module = self.ctx.hir_modules.get(")).to_equal(false)
+        expect(body.contains("if val ")).to_equal(false)
+        expect(body.contains("go_to_end_hir_import_paths_v1")).to_equal(true)
+
+    # @req REQ-SSPEC-COMPILER
+    it "collects the import graph before the first remove":
+        step("source order pin")
+        val body = recover_fn_source()
+        val collect_at = body.index_of("go_to_end_hir_import_paths_v1(") ?? -1
+        val remove_at = body.index_of("hir_modules.remove(") ?? -1
+        expect(collect_at >= 0).to_equal(true)
+        expect(remove_at >= 0).to_equal(true)
+        expect(collect_at < remove_at).to_equal(true)
