@@ -41,3 +41,19 @@ PR #5635: bind the poll result to an explicitly typed local
 lowers clean under the pinned stage2 (sha 6c5c53aa); the full-CLI build gate then
 proceeds (a separate ctor-mir-20261031 MIR failure inside simple_ring.spl is tracked
 in its own record and is the next gate).
+
+## 2026-11-04 executed + workarounds retired
+
+The HIR fix (`own_params_only` branch in `lower_declared_enum_pattern`, landed as
+e7b5c93ba65) is now proven on the self-hosted HIR: the seed interprets
+`compiler.hir.hir_lowering` as source, so `generic_enum_self_match_spec.spl`
+drives the self-hosted lowering, not the seed's Rust HIR. Extended to 5 cases:
+inline enum method, `impl Poll<T>:` block, `self.poll_result` field subject, and
+the four real lib modules lowered from disk. Knockout (`own_params_only = false`)
+fails the impl-block case and the real-file case with
+`generic enum pattern requires concrete declaration-ordered type arguments` on
+poll.spl; the other shapes are admitted by the 2026-10-31 erased-binder
+(`declared_pattern_slot_type_is_resolved`) relaxation. Workarounds removed in
+`src/lib/nogc_sync_mut/failsafe/core.spl` (3 rebindings), `async/poll.spl`,
+`async/future.spl`, `nogc_async_mut/failsafe/core.spl`. `poll_unwrap` stays for
+rti007 (separate bug). Status: fixed in-tree; Stage 2 redeploy still pending.

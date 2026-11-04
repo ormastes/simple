@@ -542,3 +542,42 @@ needed in `backend_vulkan_font.spl`/`engine.spl`; verifying it needs a native
 run that executes the flush, which the seed interpreter path cannot prove
 authoritatively); (b) admitted self-hosted macOS build from lane 1 for the
 native Engine2D gates.
+
+## 2026-11-04 batched-flush evidence promotion fix (vkfont2 lane)
+
+Fixed the evidence-refresh gap recorded above, at its layer:
+- `_flush_pending_compute_impl` (`backend_vulkan_helpers.spl`) now records the
+  real completion of any flush that carried queued font work
+  (`last_font_flush_{rc,glyphs,fence,waited,fence_destroyed,queue_ns,sync_ns}`
+  on `VulkanBackend`); queueing a new packed batch invalidates the record.
+- New pure `vulkan_font_promote_flushed_batch` (`backend_vulkan_font.spl`)
+  folds that record plus the device readback into the saved
+  `queued-packed-font-batch` evidence; `Engine2D.read_pixels_with_source`
+  applies it after its flush. Promotion is still computed by
+  `_vulkan_font_completion` (needs CPU-oracle parity) — never asserted.
+  Non-queued / empty-batch evidence passes through unchanged (fail-closed).
+- `Engine2D.set_vulkan_font_oracle_mode` exposes the existing backend opt-in
+  so evidence collectors can reach parity; the readback spec opts in and
+  reads evidence after the readback flush.
+- Regression spec: `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font_flush_promotion_spec.spl` 3/3.
+
+Native rerun (M4, MoltenVK, Rust seed `release100-7a0e6fe516f-20261031`):
+- `font_empty_batch_fail_closed_spec.spl`: 5/5.
+- `native_gpu_font_readback_spec.spl`: still 5/8, but the Engine2D row moved from
+  `unavailable reason=queued-packed-font-batch fence=0 readback_bytes=0` to
+  `failed reason=single-packed-font-submit fence=<real> readback_bytes=16384`.
+  Probe of the evidence: real fence (waited+destroyed), readback handle matches
+  `read_pixels_with_source`, 135 nonblank pixels, stage identity all present.
+  Remaining blockers to acceptance item 7 (NOT faked):
+  1. device/CPU-oracle pixel parity mismatch on MoltenVK
+     (`device_checksum != oracle_checksum`) — real raster divergence, next to triage.
+  2. `sync_wait_ns == 0`: fence already signalled by `submit_and_wait_fence`,
+     microsecond clock reads 0; `vulkan_font_stage_evidence_ready` requires > 0.
+  Engine3D row unchanged (`public-vulkan-font-install-failed`).
+- `engine2d_font_state_native_probe.spl` exit 70 (`RenderBackend.read_pixels_region`
+  not found): the Simple source is correct — `RenderBackend` declares it as a trait
+  DEFAULT method (`backend.spl:112`); the seed's hybrid-interp dispatch does not
+  resolve trait default methods on impls that don't override. Seed-side gap, not
+  fixed here.
+
+Status: fix-implemented (evidence promotion); open for parity + sync-wait items.

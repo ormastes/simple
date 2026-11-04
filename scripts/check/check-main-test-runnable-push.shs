@@ -136,6 +136,22 @@ materialise_symlinks_if_windows() {
 
 marker_path() { echo "$MARKER_DIR/$1"; }
 
+# Portable tool selection (macOS / FreeBSD have no GNU coreutils by default).
+# sha256: GNU `sha256sum` (also /sbin on macOS 26+, FreeBSD 14+), else BSD/macOS `shasum -a 256`,
+# else FreeBSD `sha256`. Output is reduced to the bare hex digest so every tool yields the same key.
+# A host with none of them is ERROR -- an empty digest would silently collapse every marker key.
+if command -v sha256sum >/dev/null 2>&1; then SHA256_CMD="sha256sum"
+elif command -v shasum >/dev/null 2>&1; then SHA256_CMD="shasum -a 256"
+elif command -v sha256 >/dev/null 2>&1; then SHA256_CMD="sha256 -q"
+else err "no sha256 tool (tried sha256sum, shasum, sha256)"; fi
+sha256_stdin() { $SHA256_CMD | cut -d" " -f1; }
+# timeout: GNU `timeout` (FreeBSD base has it too), else Homebrew `gtimeout`. Stock macOS has
+# neither; running the fixture unbounded is not an option, and a missing tool used to surface as
+# rc=127 "command not found" -- a fake FAIL blamed on the tree. Now it is an honest ERROR.
+if command -v timeout >/dev/null 2>&1; then TIMEOUT_BIN=$(command -v timeout)
+elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT_BIN=$(command -v gtimeout)
+else err "no timeout tool (install coreutils: timeout or gtimeout)"; fi
+
 record_green() {
     mkdir -p "$MARKER_DIR" 2>/dev/null || return 1
     date -u '+%Y-%m-%dT%H:%M:%SZ' >"$(marker_path "$1")" 2>/dev/null
@@ -148,7 +164,7 @@ content_digest() {
     _a=$(git -C "$_root" rev-parse "$_rev:src/app" 2>/dev/null) || return 1
     _l=$(git -C "$_root" rev-parse "$_rev:src/lib" 2>/dev/null) || return 1
     _f=$(git -C "$_root" rev-parse "$_rev:$FIXTURE" 2>/dev/null) || return 1
-    printf 'app=%s;lib=%s;fixture=%s;v1' "$_a" "$_l" "$_f" | sha256sum | cut -c1-32
+    printf 'app=%s;lib=%s;fixture=%s;v1' "$_a" "$_l" "$_f" | sha256_stdin | cut -c1-32
 }
 
 # Run the fixture inside DIR with BIN. Echoes "ok" / "fail:<detail>".
@@ -170,7 +186,7 @@ run_fixture_in() {
     _want=$(readlink -f "$_bin" 2>/dev/null)
     _have=$(readlink -f "$_dir/bin/simple" 2>/dev/null)
     [ -n "$_want" ] && [ "$_have" = "$_want" ] || ln -sf "$_want" "$_dir/bin/simple" 2>/dev/null
-    _out=$(cd "$_dir" && timeout "$TEST_TIMEOUT" "$_bin" test "$FIXTURE" 2>&1)
+    _out=$(cd "$_dir" && "$TIMEOUT_BIN" "$TEST_TIMEOUT" "$_bin" test "$FIXTURE" 2>&1)
     _rc=$?
     if [ "$_rc" -eq 0 ]; then
         echo "ok"
@@ -356,13 +372,24 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# Capability precondition. A BOOTSTRAP-cli binary (stage builds, `simple-bootstrap`) exposes
+# only `compile` and `native-build`; driving it here used to surface as "SELFTEST FAIL: C2" --
+# a FAIL that blames the tree for a binary that cannot run tests at all. That is absence of
+# evidence, so it is ERROR (still blocking, exit 2), named for what it is. The C2 requirement
+# itself is unchanged: a binary that HAS `test` but ignores the tree still FAILs the selftest.
+_cap_out=$("$TIMEOUT_BIN" 120 "$SIMPLE_BIN" test "$REPO_ROOT/$FIXTURE.capability-probe-nonexistent" 2>&1)
+case "$_cap_out" in
+    *"unknown command 'test'"*|*"unknown command: test"*)
+        err "$SIMPLE_BIN has no 'test' subcommand (bootstrap CLI?); deploy a full-CLI binary or set SIMPLE_BIN" ;;
+esac
+
 # The selftest runs two real fixture invocations (~70s each), which would swamp the marker
 # fast path and make this guard the slowest thing on every push. Its outcome depends on
 # exactly two inputs -- this script and the binary it drives -- so it gets the same
 # content-keyed positive proof: skip only when THIS script and THIS binary have already
 # passed it. Any edit to either re-runs it. --selftest always runs it for real.
 selftest_digest() {
-    { sha256sum "$0"; sha256sum "$SIMPLE_BIN"; } 2>/dev/null | sha256sum | cut -c1-32
+    { sha256_stdin <"$0"; sha256_stdin <"$SIMPLE_BIN"; } 2>/dev/null | sha256_stdin | cut -c1-32
 }
 ST_DIGEST=$(selftest_digest)
 ST_MARKER="$MARKER_DIR/selftest-$ST_DIGEST"
