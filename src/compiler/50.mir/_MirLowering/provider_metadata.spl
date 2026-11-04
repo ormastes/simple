@@ -13,6 +13,14 @@ fn mir_class_identity(symbol: HirSymbol) -> text:
     val owner = _hir_symbol_owner_module(symbol.defining_module ?? "")
     if owner == "": symbol.name else: "{owner}.{symbol.name}"
 
+fn mir_class_identity_raw(symbols: SymbolTable, raw: i64) -> text:
+    """mir_class_identity read through the scalar accessors: no HirSymbol
+    struct value (or HirSymbol? transport) crosses a call boundary (F3 AV at
+    mir_class_identity+0xd1)."""
+    val name = symbols.symbol_name_scalar_raw(raw)
+    val owner = _hir_symbol_owner_module(symbols.symbol_defining_module_scalar_raw(raw))
+    if owner == "": name else: "{owner}.{name}"
+
 fn mir_nominal_owner_matches(name: text, defining_module: text, ownership_key: text) -> bool:
     """Compare one full declaration owner across path and logical spellings.
     The layout registration retains its raw key; only the owner comparison
@@ -473,9 +481,10 @@ impl MirLowering:
             val target = self.symbols.define_with_binding(link, source.kind, nil, source.span,
                 source.visibility, false, Some(owner), false)
             self.symbols.bind_qualified_function(owner, link, target)
-            if source.type_ != nil:
-                # Extract HirType from the optional slot before crossing its ABI.
-                val source_type: HirType = source.type_ ?? HirType(kind: HirTypeKind.Error, span: source.span)
+            val optional_source_type: HirType? = source.type_
+            if val present_source_type = optional_source_type:
+                # stage2 workaround: Option-derived HirType passed by value keeps the Option word (span word 0x1 AV in relocate_provider_type, sweep 2026-11-04)
+                val source_type: HirType = HirType(kind: present_source_type.kind, span: source.span)
                 val relocated_type = self.relocate_provider_type(source_type, provider)
                 # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
                 val optional_target_symbol: HirSymbol? = self.symbols.get_symbol_raw(target.id)
@@ -538,7 +547,9 @@ impl MirLowering:
             # relocate_provider_type+244 (item5_phase3_early_mir_crash_2026_10_14),
             # same family as the field_type/field_default copies in
             # register_provider_class.
-            val expr_declared_type: HirType = expr.type_
+            # stage2 workaround: Option-derived HirType passed by value keeps the Option word (span word 0x1 AV in relocate_provider_type, sweep 2026-11-04)
+            val expr_declared_kind: HirTypeKind = expr.type_.kind
+            val expr_declared_type: HirType = HirType(kind: expr_declared_kind, span: expr.span)
             result.type_ = self.relocate_provider_type(expr_declared_type, provider)
         result.kind = match expr_kind:
             case IntLit(_, _) | FloatLit(_, _) | FloatLexeme(_, _) | BoolLit(_) | CharLit(_) | UnitLit | NilLit:
@@ -639,7 +650,8 @@ impl MirLowering:
                 val optional_elem: HirType? = elem
                 var relocated_elem: HirType? = nil
                 if val present_elem = optional_elem:
-                    val element_type: HirType = present_elem
+                    # stage2 workaround: Option-derived HirType passed by value keeps the Option word (span word 0x1 AV in relocate_provider_type, sweep 2026-11-04)
+                    val element_type: HirType = HirType(kind: present_elem.kind, span: expr.span)
                     relocated_elem = Some(self.relocate_provider_type(element_type, provider))
                 HirExprKind.ArrayLit(relocated_items, relocated_elem)
             case DictLit(entries, key_type, value_type):
@@ -655,11 +667,14 @@ impl MirLowering:
                 # value_type guard.
                 var relocated_key_type: HirType = key_type
                 if key_type != nil:
-                    relocated_key_type = self.relocate_provider_type(key_type, provider)
+                    # stage2 workaround: Option-derived HirType passed by value keeps the Option word (span word 0x1 AV in relocate_provider_type, sweep 2026-11-04)
+                    val bare_key_type: HirType = HirType(kind: key_type.kind, span: expr.span)
+                    relocated_key_type = self.relocate_provider_type(bare_key_type, provider)
                 val optional_value_type: HirType? = value_type
                 var relocated_value_type: HirType? = nil
                 if val present_value_type = optional_value_type:
-                    val concrete_value_type: HirType = present_value_type
+                    # stage2 workaround: Option-derived HirType passed by value keeps the Option word (span word 0x1 AV in relocate_provider_type, sweep 2026-11-04)
+                    val concrete_value_type: HirType = HirType(kind: present_value_type.kind, span: expr.span)
                     relocated_value_type = Some(self.relocate_provider_type(concrete_value_type, provider))
                 HirExprKind.DictLit(relocated_entries, relocated_key_type, relocated_value_type)
             case StructLit(type_, fields):
@@ -677,14 +692,17 @@ impl MirLowering:
                 val optional_repeat_elem: HirType? = elem
                 var relocated_repeat_elem: HirType? = nil
                 if val present_repeat_elem = optional_repeat_elem:
-                    val repeat_elem_type: HirType = present_repeat_elem
+                    # stage2 workaround: Option-derived HirType passed by value keeps the Option word (span word 0x1 AV in relocate_provider_type, sweep 2026-11-04)
+                    val repeat_elem_type: HirType = HirType(kind: present_repeat_elem.kind, span: expr.span)
                     relocated_repeat_elem = Some(self.relocate_provider_type(repeat_elem_type, provider))
                 HirExprKind.ArrayRepeat(self.relocate_provider_default(value, provider, links), self.relocate_provider_default(count, provider, links), relocated_repeat_elem)
             case EnumLit(enum_type, variant, payload):
                 # `field: Vis = Vis.Private`: the enum's Named id belongs to the
                 # provider table; read raw in the consumer it names an
                 # unrelated symbol (bug llvmglobals_2026-10-25).
-                val relocated_enum_type = self.relocate_provider_type(enum_type, provider)
+                # stage2 workaround: Option-derived HirType passed by value keeps the Option word (span word 0x1 AV in relocate_provider_type, sweep 2026-11-04)
+                val bare_enum_type: HirType = HirType(kind: enum_type.kind, span: expr.span)
+                val relocated_enum_type = self.relocate_provider_type(bare_enum_type, provider)
                 val relocated_enum_kind: HirTypeKind = relocated_enum_type.kind
                 match relocated_enum_kind:
                     case Error: HirExprKind.Error
@@ -723,7 +741,8 @@ impl MirLowering:
                 # Annotated copies: nested struct transports lose their declared
                 # value type on the stage-native lane (module_build.spl pattern).
                 var relocated: HirField = field
-                val field_type: HirType = field.type_
+                # stage2 workaround: Option-derived HirType passed by value keeps the Option word (span word 0x1 AV in relocate_provider_type, sweep 2026-11-04)
+                val field_type: HirType = HirType(kind: field.type_.kind, span: field.span)
                 relocated.type_ = self.relocate_provider_type(field_type, provider)
                 if field.has_default and not local:
                     val field_default: HirExpr = field.default
@@ -790,7 +809,8 @@ impl MirLowering:
                 # Annotated copies: nested struct transports lose their declared
                 # value type on the stage-native lane (module_build.spl pattern).
                 var relocated: HirField = field
-                val field_type: HirType = field.type_
+                # stage2 workaround: Option-derived HirType passed by value keeps the Option word (span word 0x1 AV in relocate_provider_type, sweep 2026-11-04)
+                val field_type: HirType = HirType(kind: field.type_.kind, span: field.span)
                 relocated.type_ = self.relocate_provider_type(field_type, provider)
                 if field.has_default:
                     val field_default: HirExpr = field.default
