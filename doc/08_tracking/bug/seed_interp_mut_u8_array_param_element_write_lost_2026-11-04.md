@@ -88,3 +88,10 @@ Downstream: `native_gpu_font_readback_spec.spl` Engine2D row now PASSes under
 The module-level `var` mut-param write-back gap above remains open; it is not the
 same root as the JIT field-store alias fixed in
 `seed_jit_class_field_array_assign_aliases_local_2026-11-04.md`.
+
+## 2026-11-04 note (modvar lane)
+
+The module-level `var` gap is filed and fixed separately in
+`seed_interp_module_var_mut_array_param_write_back_lost_2026-11-04.md`: it was a
+module-SCOPE call site only (interpreter; the no-`main` file demotes the JIT), not
+a JIT defect.
