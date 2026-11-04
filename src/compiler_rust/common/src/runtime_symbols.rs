@@ -1704,6 +1704,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_bdd_it_end",
     "rt_bdd_it_start",
     "rt_bdd_it_start_rv",
+    "rt_bdd_note_skip",
     "rt_bytes_u8_set",
     "rt_cargo_build",
     "rt_cargo_check",
