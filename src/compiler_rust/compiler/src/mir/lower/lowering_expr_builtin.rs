@@ -382,7 +382,7 @@ impl<'a> MirLowerer<'a> {
             && args.len() == 1
             && args[0].ty != TypeId::ANY
             && self.slot_holds_tagged_value(args[0].ty)
-            && matches!(expr_ty, TypeId::BOOL | TypeId::F32 | TypeId::F64)
+            && matches!(expr_ty, TypeId::BOOL | TypeId::F32 | TypeId::F64 | TypeId::U64)
         {
             let arg_reg = self.lower_expr(&args[0])?;
             let raw_result = self.with_func(|func, current_block| {
