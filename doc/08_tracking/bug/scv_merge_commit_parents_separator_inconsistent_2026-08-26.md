@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN (partial). `merge.spl` now writes `parents: <left> <right>` (space-joined).
+**Status:** FIXED 2026-11-04 - all four readers use scv_split_parent_ids (space or legacy comma); pinned by test/01_unit/lib/scv/scv_parent_ids_spec.spl. `merge.spl` now writes `parents: <left> <right>` (space-joined).
 
 ## What was wrong
 `scv_merge_commits` wrote `parents: <left>,<right>` (comma). `scv_write_operation`
