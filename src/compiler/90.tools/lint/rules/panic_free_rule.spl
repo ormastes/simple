@@ -1,0 +1,407 @@
+# PANIC-W-INDEX / PANIC-W-UNWRAP / PANIC-W-DIV: panic-free safe code (warning phase).
+#
+# Policy (ADR-006, doc/04_architecture/adr/ADR-006-panic-free-safe-code.md):
+# safe Simple code is panic-free by default. The compiler must infer, check, or
+# conservatively reject; it must not silently assume safety. This rule is the
+# migration-phase check: it WARNS on every potential panic site it cannot prove
+# safe. `unsafe:` transfers memory-proof duties but does NOT erase a panic
+# effect, so sites inside `unsafe:` are reported too; a fix-it never inserts `unsafe`.
+#
+#   PANIC-W-INDEX   `xs[i]` read or write with no dominating proof
+#   PANIC-W-UNWRAP  `.unwrap()` / `.expect(..)` with no dominating presence proof
+#   PANIC-W-DIV     integer `/` or `%` whose divisor is not a non-zero literal
+#                   and has no dominating non-zero proof
+#
+# Accepted proofs (line-structural, enclosing block or early exit in the same block):
+#   for i in 0..xs.len():  /  for i in 0..<xs.len():     -> xs[i]
+#   if/while i < xs.len()  (as an `and` conjunct)        -> xs[i]
+#   if i >= xs.len(): return|continue|break              -> xs[i] after it
+#   if not xs.is_empty() / xs.len() > 0                  -> xs[0], xs[xs.len() - 1]
+#   if d != 0 / d > 0, or early `if d == 0: return`      -> a / d, a % d
+#   if x.is_some() / x.? / x != nil, or early exit       -> x.unwrap()
+# Anything else warns. It cannot see types, so float `a / b` and dict `m[k]`
+# also warn: that is the conservative direction, never the silent one.
+#
+# Each finding's hint carries the fix-it text after "fix-it: "; the shared
+# fix engine registers these codes as built-in closures.
+use compiler.tools.lint.lint_rule_api.{LintParamsV1, LintUnit, StaticLintCategory, StaticLintFinding, StaticLintLevel, StaticLintRule, lint_rule_provider_iface, static_lint_rule}
+
+struct PanicFact:
+    kind: text
+    subject: text
+    owner: text
+    scope_indent: i64
+
+fn pf_indent_of(line: text) -> i64:
+    var n = 0
+    while n < line.len():
+        val ch = line.substring(n, n + 1)
+        if ch != " " and ch != "\t": break
+        n = n + 1
+    n
+
+fn pf_is_word_char(ch: text) -> bool:
+    (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+
+fn pf_is_digit(ch: text) -> bool:
+    ch >= "0" and ch <= "9"
+
+fn pf_triple_quote_count(line: text) -> i64:
+    var count = 0
+    var i = 0
+    while i + 3 <= line.len():
+        if line.substring(i, i + 3) == "\"\"\"":
+            count = count + 1
+            i = i + 3
+        else:
+            i = i + 1
+    count
+
+fn pf_blank_triple_spans(line: text) -> text:
+    var out = ""
+    var inside = false
+    var i = 0
+    while i < line.len():
+        if i + 3 <= line.len() and line.substring(i, i + 3) == "\"\"\"":
+            inside = not inside
+            out = out + "   "
+            i = i + 3
+            continue
+        out = out + (if inside: " " else: line.substring(i, i + 1))
+        i = i + 1
+    out
+
+fn pf_code_of(line: text) -> text:
+    # Blank string bodies (incl. interpolations) and drop a trailing comment.
+    var out = ""
+    var quote = ""
+    var i = 0
+    while i < line.len():
+        val ch = line.substring(i, i + 1)
+        if quote != "":
+            if ch == "\\":
+                out = out + "  "
+                i = i + 2
+                continue
+            if ch == quote:
+                quote = ""
+                out = out + ch
+            else:
+                out = out + " "
+        elif ch == "\"" or ch == "'":
+            quote = ch
+            out = out + ch
+        elif ch == "#":
+            return out
+        else:
+            out = out + ch
+        i = i + 1
+    out
+
+
+fn pf_strip_header(trimmed: text, keyword: text) -> text:
+    # `if cond:` -> `cond`; returns "" when the line is not that header.
+    if not trimmed.starts_with(keyword + " "): return ""
+    var body = trimmed.substring(keyword.len() + 1, trimmed.len()).trim()
+    val colon = pf_header_colon(body)
+    if colon < 0: return ""
+    body.substring(0, colon).trim()
+
+fn pf_header_colon(body: text) -> i64:
+    # First `:` at bracket depth 0 (the header terminator).
+    var depth = 0
+    var i = 0
+    while i < body.len():
+        val ch = body.substring(i, i + 1)
+        if ch == "(" or ch == "[" or ch == "{": depth = depth + 1
+        elif ch == ")" or ch == "]" or ch == "}": depth = depth - 1
+        elif ch == ":" and depth == 0: return i
+        i = i + 1
+    -1
+
+fn pf_after_header(trimmed: text) -> text:
+    # Text after the header colon of `if cond: stmt` (inline body), else "".
+    val sp = trimmed.index_of(" ", 0)
+    if sp < 0: return ""
+    val body = trimmed.substring(sp + 1, trimmed.len())
+    val colon = pf_header_colon(body)
+    if colon < 0: return ""
+    body.substring(colon + 1, body.len()).trim()
+
+fn pf_is_exit(stmt: text) -> bool:
+    stmt == "return" or stmt.starts_with("return ") or stmt == "continue" or stmt == "break" or stmt.starts_with("panic(") or stmt.starts_with("raise ")
+
+fn pf_len_owner(expr: text) -> text:
+    # `xs.len()` -> `xs`; else "".
+    val e = expr.trim()
+    if e.ends_with(".len()") and e.len() > 6: return e.substring(0, e.len() - 6)
+    ""
+
+fn pf_positive_facts(cond: text, scope_indent: i64) -> [PanicFact]:
+    var facts: [PanicFact] = []
+    for raw in cond.split(" and "):
+        val c = raw.trim()
+        if c.contains(" < "):
+            val parts = c.split(" < ")
+            if parts.len() == 2:
+                val owner = pf_len_owner(parts[1])
+                if owner != "": facts.push(PanicFact("lt", parts[0].trim(), owner, scope_indent))
+        if c.contains(" > "):
+            val parts = c.split(" > ")
+            if parts.len() == 2:
+                val owner = pf_len_owner(parts[0])
+                if owner != "" and parts[1].trim() == "0": facts.push(PanicFact("nonempty", "", owner, scope_indent))
+                elif owner != "": facts.push(PanicFact("lt", parts[1].trim(), owner, scope_indent))
+                else:
+                    if parts[1].trim() == "0": facts.push(PanicFact("nonzero", parts[0].trim(), "", scope_indent))
+        if c.ends_with(" != 0"):
+            val subject = c.substring(0, c.len() - 5).trim()
+            val owner = pf_len_owner(subject)
+            if owner != "": facts.push(PanicFact("nonempty", "", owner, scope_indent))
+            else: facts.push(PanicFact("nonzero", subject, "", scope_indent))
+        if c.ends_with(" >= 1"):
+            val owner = pf_len_owner(c.substring(0, c.len() - 5))
+            if owner != "": facts.push(PanicFact("nonempty", "", owner, scope_indent))
+        if c.starts_with("not ") and c.ends_with(".is_empty()"):
+            facts.push(PanicFact("nonempty", "", c.substring(4, c.len() - 11).trim(), scope_indent))
+        if c.ends_with(".is_some()"):
+            facts.push(PanicFact("some", c.substring(0, c.len() - 10).trim(), "", scope_indent))
+        if c.ends_with(".?"):
+            facts.push(PanicFact("some", c.substring(0, c.len() - 2).trim(), "", scope_indent))
+        if c.ends_with(" != nil"):
+            facts.push(PanicFact("some", c.substring(0, c.len() - 7).trim(), "", scope_indent))
+    facts
+
+fn pf_negated_facts(cond: text, scope_indent: i64) -> [PanicFact]:
+    # Facts that hold AFTER `if cond: <exit>` (each `or` disjunct is false).
+    var facts: [PanicFact] = []
+    for raw in cond.split(" or "):
+        val c = raw.trim()
+        if c.contains(" >= "):
+            val parts = c.split(" >= ")
+            if parts.len() == 2:
+                val owner = pf_len_owner(parts[1])
+                if owner != "": facts.push(PanicFact("lt", parts[0].trim(), owner, scope_indent))
+        if c.ends_with(".is_empty()") and not c.starts_with("not "):
+            facts.push(PanicFact("nonempty", "", c.substring(0, c.len() - 11).trim(), scope_indent))
+        if c.ends_with(" == 0"):
+            val subject = c.substring(0, c.len() - 5).trim()
+            val owner = pf_len_owner(subject)
+            if owner != "": facts.push(PanicFact("nonempty", "", owner, scope_indent))
+            else: facts.push(PanicFact("nonzero", subject, "", scope_indent))
+        if c.ends_with(".is_none()"):
+            facts.push(PanicFact("some", c.substring(0, c.len() - 10).trim(), "", scope_indent))
+        if c.ends_with(" == nil"):
+            facts.push(PanicFact("some", c.substring(0, c.len() - 7).trim(), "", scope_indent))
+    facts
+
+fn pf_for_facts(trimmed: text, scope_indent: i64) -> [PanicFact]:
+    var facts: [PanicFact] = []
+    if not trimmed.starts_with("for "): return facts
+    val in_at = trimmed.index_of(" in ", 0)
+    if in_at < 0: return facts
+    val var_name = trimmed.substring(4, in_at).trim()
+    var range_text = trimmed.substring(in_at + 4, trimmed.len()).trim()
+    if range_text.ends_with(":"): range_text = range_text.substring(0, range_text.len() - 1).trim()
+    var owner = ""
+    if range_text.starts_with("0..<"): owner = pf_len_owner(range_text.substring(4, range_text.len()))
+    elif range_text.starts_with("0.."): owner = pf_len_owner(range_text.substring(3, range_text.len()))
+    elif range_text.starts_with("range(0, ") and range_text.ends_with(")"): owner = pf_len_owner(range_text.substring(9, range_text.len() - 1))
+    elif range_text.starts_with("range(") and range_text.ends_with(")"): owner = pf_len_owner(range_text.substring(6, range_text.len() - 1))
+    if owner != "": facts.push(PanicFact("lt", var_name, owner, scope_indent))
+    facts
+
+fn pf_has_fact(facts: [PanicFact], kind: text, subject: text, owner: text) -> bool:
+    for f in facts:
+        if f.kind == kind and f.subject == subject and f.owner == owner: return true
+    false
+
+fn pf_receiver_before(code: text, end: i64) -> text:
+    # Identifier/field chain ending just before `end` (e.g. `self.items`).
+    var start = end
+    while start > 0:
+        val ch = code.substring(start - 1, start)
+        if pf_is_word_char(ch) or ch == ".": start = start - 1
+        else: break
+    code.substring(start, end)
+
+fn pf_match_close(code: text, open_at: i64, open_ch: text, close_ch: text) -> i64:
+    var depth = 0
+    var i = open_at
+    while i < code.len():
+        val ch = code.substring(i, i + 1)
+        if ch == open_ch: depth = depth + 1
+        elif ch == close_ch:
+            depth = depth - 1
+            if depth == 0: return i
+        i = i + 1
+    -1
+
+fn pf_index_is_proven(facts: [PanicFact], recv: text, idx: text) -> bool:
+    if recv == "": return false
+    if pf_has_fact(facts, "lt", idx, recv): return true
+    if pf_has_fact(facts, "nonempty", "", recv):
+        if idx == "0" or idx == recv + ".len() - 1": return true
+    false
+
+fn pf_finding(code: text, message: text, fix: text, line_num: i64, col: i64) -> StaticLintFinding:
+    StaticLintFinding(code, StaticLintLevel.Warn, StaticLintCategory.Safety, message, "fix-it: " + fix, line_num, col + 1)
+
+fn pf_index_findings(code: text, facts: [PanicFact], line_num: i64) -> [StaticLintFinding]:
+    var out: [StaticLintFinding] = []
+    var i = 1
+    while i < code.len():
+        if code.substring(i, i + 1) != "[":
+            i = i + 1
+            continue
+        val prev = code.substring(i - 1, i)
+        if not (pf_is_word_char(prev) or prev == ")" or prev == "]"):
+            i = i + 1
+            continue
+        val close = pf_match_close(code, i, "[", "]")
+        if close < 0: break
+        val idx = code.substring(i + 1, close).trim()
+        val recv = if prev == ")" or prev == "]": "" else: pf_receiver_before(code, i)
+        # A slice `xs[a:b]` clamps; a type position (`fn f(a: [T])`) never has a word before `[`.
+        if idx != "" and not idx.contains(":") and not pf_index_is_proven(facts, recv, idx):
+            val shown = if recv == "": "expr" else: recv
+            val rest = code.substring(close + 1, code.len()).trim()
+            if rest.starts_with("=") and not rest.starts_with("=="):
+                out.push(pf_finding("PANIC-W-INDEX", "unguarded indexed write `{shown}[{idx}]` can panic out of range",
+                    "`{shown}.set({idx}, <value>)` (returns bool), or guard with `if {idx} < {shown}.len():`", line_num, i))
+            else:
+                out.push(pf_finding("PANIC-W-INDEX", "unguarded index `{shown}[{idx}]` can panic out of range",
+                    "`{shown}.get({idx}) ?? <default>`, or guard with `if {idx} < {shown}.len():`", line_num, i))
+        i = close + 1
+    out
+
+fn pf_unwrap_findings(code: text, facts: [PanicFact], line_num: i64) -> [StaticLintFinding]:
+    var out: [StaticLintFinding] = []
+    for kw in [".unwrap()", ".expect("]:
+        var start = 0
+        while start < code.len():
+            val at = code.index_of(kw, start)
+            if at < 0: break
+            start = at + kw.len()
+            val recv = pf_receiver_before(code, at)
+            if recv != "" and pf_has_fact(facts, "some", recv, ""): continue
+            val shown = if recv == "": "expr" else: recv
+            out.push(pf_finding("PANIC-W-UNWRAP", "`{shown}{kw.replace("(", "").replace(")", "")}` can panic on an absent value",
+                "`{shown} ?? <default>`, or bind it with `if val v = {shown}:`", line_num, at))
+    out
+
+fn pf_divisor_at(code: text, from: i64) -> text:
+    var i = from
+    while i < code.len() and code.substring(i, i + 1) == " ": i = i + 1
+    if i >= code.len(): return ""
+    val first = code.substring(i, i + 1)
+    if first == "(":
+        val close = pf_match_close(code, i, "(", ")")
+        if close < 0: return ""
+        return code.substring(i, close + 1)
+    var j = i
+    while j < code.len():
+        val ch = code.substring(j, j + 1)
+        if pf_is_word_char(ch) or ch == ".": j = j + 1
+        elif ch == "(":
+            val close = pf_match_close(code, j, "(", ")")
+            if close < 0: return code.substring(i, j)
+            j = close + 1
+        else: break
+    code.substring(i, j)
+
+fn pf_is_nonzero_literal(tok: text) -> bool:
+    if tok == "" or not pf_is_digit(tok.substring(0, 1)): return false
+    if tok.contains("."): return true
+    var i = 0
+    while i < tok.len():
+        val ch = tok.substring(i, i + 1)
+        if ch != "0" and ch != "_" and ch != "x" and pf_is_digit(ch): return true
+        if not (pf_is_digit(ch) or ch == "_" or ch == "x"): return true
+        i = i + 1
+    false
+
+fn pf_div_findings(code: text, facts: [PanicFact], line_num: i64) -> [StaticLintFinding]:
+    var out: [StaticLintFinding] = []
+    var i = 1
+    while i < code.len():
+        val ch = code.substring(i, i + 1)
+        if ch != "/" and ch != "%":
+            i = i + 1
+            continue
+        val prev = code.substring(i - 1, i)
+        val next = if i + 1 < code.len(): code.substring(i + 1, i + 2) else: ""
+        # Binary operator only: `a / b`, `a % b`, `a /= b`; a left operand must exist.
+        if prev != " " or (next != " " and next != "="):
+            i = i + 1
+            continue
+        val from = if next == "=": i + 2 else: i + 1
+        val divisor = pf_divisor_at(code, from)
+        i = from
+        if divisor == "" or pf_is_nonzero_literal(divisor): continue
+        if pf_has_fact(facts, "nonzero", divisor, ""): continue
+        out.push(pf_finding("PANIC-W-DIV", "`{ch}` by `{divisor}` can panic: divisor not proven non-zero",
+            "`checked_div(<lhs>, {divisor}) ?? <default>`, or guard with `if {divisor} != 0:`", line_num, i - 1))
+    out
+
+pub fn check_panic_free(content: text) -> [StaticLintFinding]:
+    var findings: [StaticLintFinding] = []
+    var facts: [PanicFact] = []
+    var in_doc = false
+    var codes: [text] = []
+    for line in content.split("\n"):
+        if in_doc:
+            if pf_triple_quote_count(line) % 2 == 1: in_doc = false
+            codes.push("")
+            continue
+        val quotes = pf_triple_quote_count(line)
+        if quotes % 2 == 1:
+            in_doc = true
+            codes.push("")
+            continue
+        val unquoted = if quotes > 0: pf_blank_triple_spans(line) else: line
+        codes.push(pf_code_of(unquoted))
+    var n = 0
+    while n < codes.len():
+        val code = codes[n]
+        n = n + 1
+        val trimmed = code.trim()
+        if trimmed == "": continue
+        val indent = pf_indent_of(code)
+        var kept: [PanicFact] = []
+        for f in facts:
+            if indent >= f.scope_indent: kept.push(f)
+        facts = kept
+        # Check this line's own operands with the facts in force BEFORE it.
+        if code.contains("["):
+            for f in pf_index_findings(code, facts, n): findings.push(f)
+        if code.contains(".unwrap()") or code.contains(".expect("):
+            for f in pf_unwrap_findings(code, facts, n): findings.push(f)
+        if code.contains(" /") or code.contains(" %"):
+            for f in pf_div_findings(code, facts, n): findings.push(f)
+        # Then add the facts this line establishes.
+        for f in pf_for_facts(trimmed, indent + 1): facts.push(f)
+        var cond = pf_strip_header(trimmed, "if")
+        if cond == "": cond = pf_strip_header(trimmed, "elif")
+        if cond == "": cond = pf_strip_header(trimmed, "while")
+        if cond != "":
+            for f in pf_positive_facts(cond, indent + 1): facts.push(f)
+            var exits = false
+            val inline_body = pf_after_header(trimmed)
+            if inline_body != "": exits = pf_is_exit(inline_body)
+            elif n < codes.len():
+                # Two-line form: `if cond:` then a lone exit statement.
+                val body = codes[n].trim()
+                val after_body = if n + 1 < codes.len(): codes[n + 1] else: ""
+                val body_ends = after_body.trim() == "" or pf_indent_of(after_body) <= indent
+                exits = pf_is_exit(body) and body_ends and trimmed.starts_with("if ")
+            if exits and trimmed.starts_with("if "):
+                for f in pf_negated_facts(cond, indent): facts.push(f)
+    findings
+
+fn check_rule(params: LintParamsV1, unit: LintUnit) -> [StaticLintFinding]:
+    val _ = params
+    check_panic_free(unit.content)
+
+pub fn panic_free_lint_rule() -> StaticLintRule:
+    static_lint_rule("panic_free", lint_rule_provider_iface("panic_free"), check_rule)
