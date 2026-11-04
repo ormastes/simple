@@ -108,3 +108,15 @@ semantics, retire/relabel the vector, or accept permanently) — not a local
 code fix — so it stays out of scope for a shard triage pass. No change made.
 Leaving OPEN as documented ("not blocking").
 
+
+## Resolution 2026-11-04 (owner chose option 2)
+
+Retargeted the STORE8/LOAD8 address of `mem_store_load_byte` in
+`test/fixtures/svmg/conformance_vectors.spl` from absolute arena offset 50
+(inside the program's code footprint `[36,61)`) to 128, clearly in the DATA
+region past the code, so ref_vm and the single-buffer device kernels agree
+(expected `(passed: 1, value: 200)`). The vector intent is unchanged (store a
+byte, load it back). Removed the per-vector exclusion and the "device-correct
+self-modified result" check (`13107201`) from the Vulkan, CUDA and Metal
+conformance specs. `ref_vm.spl` is unchanged. Device lanes were host-skipped
+here, so device agreement is by construction, not observed.
