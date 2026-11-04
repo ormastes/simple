@@ -581,9 +581,17 @@ impl HirLowering:
         return Some(HirPattern(kind: HirPatternKind.Enum(enum_type, variant_name, hir_payload), has_type_: true, type_: enum_type, span: p.span))
 
     fn declared_match_subject_type(subject: HirExpr) -> HirType?:
-        if subject.has_type_ and subject.type_ != nil:
-            return subject.type_
-        val symbol = _hir_expr_symbol_or_invalid(subject.kind)
+        # Spec-facing wrapper; the compiler's own call sites use the _parts form.
+        var subject_type: HirType = HirType(kind: HirTypeKind.Error, span: subject.span)
+        if subject.has_type_:
+            subject_type = subject.type_
+        self.declared_match_subject_type_parts(subject.kind, subject.has_type_, subject_type, subject.span)
+
+    # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=the by-value HirExpr param copy faults (AV declared_match_subject_type+0x179/0x18c, addr 0x100000000); take the fields, load type_ only under has_type_ at the caller
+    fn declared_match_subject_type_parts(subject_kind: HirExprKind, subject_has_type: bool, subject_type: HirType, subject_span: Span) -> HirType?:
+        if subject_has_type:
+            return Some(subject_type)
+        val symbol = _hir_expr_symbol_or_invalid(subject_kind)
         if symbol.is_valid():
             if val declaration = self.symbols.get_symbol_raw(symbol.id):
                 return declaration.type_
@@ -603,13 +611,16 @@ impl HirLowering:
             case HirExprKind.TupleLit(elements):
                 var slot_types: [HirType] = []
                 for element in elements:
-                    if val slot_type = self.declared_match_subject_type(element):
+                    var element_type: HirType = HirType(kind: HirTypeKind.Error, span: element.span)
+                    if element.has_type_:
+                        element_type = element.type_
+                    if val slot_type = self.declared_match_subject_type_parts(element.kind, element.has_type_, element_type, element.span):
                         if not declared_pattern_slot_type_is_concrete(slot_type):
                             return nil
                         slot_types = slot_types.push(slot_type)
                     else:
                         return nil
-                return Some(HirType(kind: HirTypeKind.Tuple(slot_types), span: subject.span))
+                return Some(HirType(kind: HirTypeKind.Tuple(slot_types), span: subject_span))
             case _: ()
         nil
 
