@@ -54,6 +54,28 @@ sealed_list() { # rev... -> sorted unique sealed SDN paths (.csm sidecar or lega
     done | sort -u
 }
 
+# extra_outside <sealed-list> : stdin = changed paths; prints those that are NOT
+# a sealed data file and NOT a `X.<algo>_<hex>.csm` seal sibling of a sealed X.sdn
+# (the reseal always adds/removes/renames those).
+extra_outside() {
+    grep -vxF -f "$1" | while IFS= read -r _p; do
+        case "$_p" in
+            *.csm)
+                _d=$(printf '%s\n' "$_p" | sed -n 's|^\(.*\)\.[^./]*_[^./]*\.csm$|\1.sdn|p')
+                if [ -n "$_d" ] && grep -qxF -- "$_d" "$1"; then continue; fi ;;
+        esac
+        printf '%s\n' "$_p"
+    done
+}
+
+# outside_files <B> <H> <C> <workdir> <sealed-list> : files the merge result C
+# changes vs base B that the PR (B...H) did not, minus sealed data + seal siblings.
+outside_files() {
+    git diff --name-only "$1...$2" | sort > "$4/before"
+    git diff --name-only "$1" "$3" | sort > "$4/after"
+    comm -13 "$4/before" "$4/after" | extra_outside "$5"
+}
+
 # reseal_tree <tree> <sealed-list> <workdir> -> prints the new tree: for every
 # sealed data file still present, exactly ONE .csm for the merged content (the
 # driver merges rows only; sidecars are separate files that merge as add/add).
@@ -119,9 +141,7 @@ sync_pr() { # pr -> verdict
     case "$_v" in PASS*) ;; *) echo "FAIL — #$_pr seal check at $_C: $_v"; rm -rf "$_w"; return 1 ;; esac
     # Anti-rewind: the merge must not change what the PR changes vs its base,
     # other than sealed SDN files (whose rows are unioned).
-    git diff --name-only "$_B...$_H" | sort > "$_w/before"
-    git diff --name-only "$_B" "$_C" | sort > "$_w/after"
-    _extra=$(comm -13 "$_w/before" "$_w/after" | grep -vxF -f "$_w/sealed.txt" | tr '\n' ' ')
+    _extra=$(outside_files "$_B" "$_H" "$_C" "$_w" "$_w/sealed.txt")
     if [ -n "$_extra" ]; then
         echo "FAIL — #$_pr merge result changes files outside the PR: $_extra"; rm -rf "$_w"; return 1
     fi
@@ -176,6 +196,35 @@ selftest() {
     git checkout -q -b main2 "$_M"; printf 'w\n' > f.txt; git commit -qam main2; _M2=$(git rev-parse HEAD)
     if merge_sync "$_P2" "$_M2" "$_t/w2"; then echo "selftest FAIL: text conflict passed"; _fails=$((_fails+1))
     else case " $M_CONFLICTS" in *" f.txt "*) ;; *) echo "selftest FAIL: conflict list ($M_CONFLICTS)"; _fails=$((_fails+1)) ;; esac; fi
+
+    # 3 PR touches a .csm-sealed sdn while base carries 2 stale .csm siblings:
+    # sync must succeed (no "outside the PR" for .csm), leave exactly one valid seal,
+    # and still refuse a genuine non-SDN change outside the PR.
+    _n=$((_n+1)); mkdir "$_t/w3"
+    git checkout -q -b base3 "$_O"
+    printf 'seal_policy |glob, algo|\n    *.sdn, crc32\n' > config/check/sdn_seal_policy.sdn
+    printf '#sdn-crc32:0\n%s\n    a, open, 2026-11-01\n' "$H" > cs.sdn
+    sh "$HERE/../check/reseal-sdn-crc32.shs" --no-selftest cs.sdn >/dev/null
+    : > cs.crc32_00000001.csm; : > cs.crc32_00000002.csm
+    git add -A; git commit -qm base3; _O3=$(git rev-parse HEAD)
+    git checkout -q -b main3; git rm -q cs.crc32_00000001.csm cs.crc32_00000002.csm
+    printf '#sdn-crc32:0\n%s\n    a, open, 2026-11-01\n    m, open, 2026-11-03\n' "$H" > cs.sdn
+    git add cs.sdn; git commit -qm main3; _M3=$(git rev-parse HEAD)
+    git checkout -q -b pr3 "$_O3"
+    printf '#sdn-crc32:0\n%s\n    a, open, 2026-11-01\n    p, open, 2026-11-03\n' "$H" > cs.sdn
+    git add cs.sdn; git commit -qm pr3; _P3=$(git rev-parse HEAD)
+    if merge_sync "$_P3" "$_M3" "$_t/w3"; then
+        _C3=$(git commit-tree "$M_TREE" -p "$_P3" -p "$_M3" -m m)
+        _nc=$(git ls-tree -r --name-only "$_C3" | grep -c '^cs\..*\.csm$')
+        _v=$(sh "$SEALCHK" --no-selftest --rev "$_C3" --root "$_g" 2>/dev/null | tail -1)
+        _x=$(outside_files "$_O3" "$_P3" "$_C3" "$_t/w3" "$_t/w3/sealed.txt")
+        { [ "$_nc" = 1 ] && [ -z "$_x" ] && case "$_v" in PASS*) true ;; *) false ;; esac; } \
+            || { echo "selftest FAIL: stale .csm sync (csm=$_nc outside='$_x' $_v)"; _fails=$((_fails+1)); }
+        # genuine non-SDN change outside the PR must still be flagged
+        git checkout -q -b main3b "$_M3"; printf 'q\n' > extra.txt; git add extra.txt; git commit -qm x; _M3b=$(git rev-parse HEAD)
+        _x2=$(outside_files "$_O3" "$_P3" "$_M3b" "$_t/w3" "$_t/w3/sealed.txt")
+        case " $_x2 " in *" extra.txt "*) ;; *) echo "selftest FAIL: non-SDN outside change not flagged ($_x2)"; _fails=$((_fails+1)) ;; esac
+    else echo "selftest FAIL: csm fixture merge failed ($M_CONFLICTS)"; _fails=$((_fails+1)); fi
 
     cd / && rm -rf "$_t"
     if [ $_fails -ne 0 ]; then echo "FAIL — $_fails of $_n selftest fixture(s) failed"; return 1; fi
