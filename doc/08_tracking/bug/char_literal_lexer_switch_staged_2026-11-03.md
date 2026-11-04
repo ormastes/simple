@@ -1,4 +1,4 @@
-| lexer switch (seed + pure-Simple together) | behind `SIMPLE_CHAR_LITERAL_LEXER=1` (this PR) | implemented, **default OFF** |# char_literal_lexer_switch_staged_2026-11-03
+# char_literal_lexer_switch_staged_2026-11-03
 
 - **Status:** implemented-behind-gate (default OFF; activation blocked on the stage3 self-build)
 - **Priority:** P2
@@ -35,7 +35,7 @@ State of the gate on 2026-11-04:
 | migration tool (uses the real lexer) | `src/app/tools/raw_quote_migrate/{main,rewrite}.spl` (`dcab80d215d`) | landed |
 | no-new-sites ratchet | `scripts/check/check-no-single-quoted-raw-string.shs` + `no_single_quoted_raw_string_baseline.txt` (`a929d872ddd`) | landed, **advisory**; baseline = **880** legacy sites |
 | per-directory token-neutral rewrite batches | — | not started |
-| lexer switch (seed + pure-Simple together) | — | blocked on the stage3 gate |
+| lexer switch (seed + pure-Simple together) | behind `SIMPLE_CHAR_LITERAL_LEXER=1` (PR #6592) | implemented, **default OFF**; activation blocked on the stage3 gate |
 | guard → blocking; staged warnings → errors | — | after the switch, then the Win/macOS/Linux self-hosted trigger |
 
 ## Unblock condition and order
