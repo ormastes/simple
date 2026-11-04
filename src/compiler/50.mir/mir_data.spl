@@ -2433,13 +2433,23 @@ fn _bootstrap_fn_delta_text(value: text):
     if _bootstrap_fn_delta_live():
         _bootstrap_fn_journal_texts = _bootstrap_fn_journal_texts.push(value)
 
-fn _bootstrap_fn_delta_mir_type(value: MirType):
+fn _bootstrap_fn_delta_stored_mir_type(name: text):
+    # Journal the dictionary's OWN stored value, read back after the set.
+    # `MirType`/`HirType` are plain value structs: on the native path every
+    # by-value struct parameter gets a Bug #167 prologue copy
+    # (function_lowering.spl, copy_struct_value_recursive), so journaling the
+    # `ty` parameter promoted a copy while the dictionary kept the unpromoted
+    # one; the scope end freed it and every later cross-module lookup read a
+    # dangling HirType (E-MIR-TYPE-Transport caller_disc=-2 / SEGV). Proven
+    # natively on the admitted stage2 (variant A 16/16 dangling, this shape
+    # 0/16): doc/08_tracking/bug/mir_transient_scope_unpromoted_rti_av_2026-11-01.md
     if _bootstrap_fn_delta_live():
-        _bootstrap_fn_journal_mir_types = _bootstrap_fn_journal_mir_types.push(value)
+        _bootstrap_fn_journal_mir_types = _bootstrap_fn_journal_mir_types.push(_bootstrap_fn_ret_types[name])
 
-fn _bootstrap_fn_delta_hir_type(value: HirType):
+fn _bootstrap_fn_delta_stored_hir_type(name: text):
+    # Same stored-value journaling as _bootstrap_fn_delta_stored_mir_type.
     if _bootstrap_fn_delta_live():
-        _bootstrap_fn_journal_hir_types = _bootstrap_fn_journal_hir_types.push(value)
+        _bootstrap_fn_journal_hir_types = _bootstrap_fn_journal_hir_types.push(_bootstrap_fn_ret_hir_types[name])
 
 fn _bootstrap_fn_delta_hir_type_list(value: [HirType]):
     if _bootstrap_fn_delta_live():
@@ -2496,7 +2506,7 @@ fn bootstrap_fn_ret_type_register(name: text, ty: MirType):
     if not _bootstrap_fn_ret_types.contains_key(name):
         _bootstrap_fn_delta_text(name)
     _bootstrap_fn_ret_types[name] = ty
-    _bootstrap_fn_delta_mir_type(ty)
+    _bootstrap_fn_delta_stored_mir_type(name)
 
 fn bootstrap_fn_ret_type_lookup(name: text) -> MirType?:
     # contains_key + [] rather than .get(): Dict.get returns nil on present
@@ -2539,7 +2549,7 @@ fn bootstrap_fn_ret_hir_type_register(name: text, ty: HirType):
         return
     _bootstrap_fn_ret_hir_types[name] = ty
     _bootstrap_fn_delta_text(name)
-    _bootstrap_fn_delta_hir_type(ty)
+    _bootstrap_fn_delta_stored_hir_type(name)
 
 fn bootstrap_fn_ret_hir_type_lookup(name: text) -> HirType?:
     if _bootstrap_fn_ret_hir_ambig.contains_key(name):

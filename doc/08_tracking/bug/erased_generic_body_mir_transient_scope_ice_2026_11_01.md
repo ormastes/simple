@@ -1,6 +1,6 @@
 # Erased generic body ICE: invalid HirType kind carrier after MIR prescan transient scopes (2026-11-01)
 
-status: FIX-IMPLEMENTED-VERIFICATION-PENDING (P1) — needs a stage3/stage2 rebuild to verify; self-hosted stage2 built from release/1.0.0 HEAD cannot
+status: SUPERSEDED (2026-11-05) — bootstrap run 3 (Stage 2 built with the rti-children roots below) still fails with the same `caller_disc=-2` carrier; the leak is the struct-valued `_bootstrap_fn_ret_hir_types` / `_bootstrap_fn_ret_types` delta journal, fixed in `mir_data.spl` — see `mir_transient_scope_unpromoted_rti_av_2026-11-01.md` § "Run 3 verification". Previous status: FIX-IMPLEMENTED-VERIFICATION-PENDING (P1) — needs a stage3/stage2 rebuild to verify; self-hosted stage2 built from release/1.0.0 HEAD cannot
 native-build generic library code that the erased-body model now emits
 
 ## Symptom
