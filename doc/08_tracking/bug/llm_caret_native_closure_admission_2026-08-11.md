@@ -66,3 +66,10 @@ reports 0/2 as expected but is weak evidence since the spec already fails.
 ## Triage 2026-09-13 (BUGFIX-7 lane)
 
 Out of lane: needs a self-hosted non-seed runtime and a matching simple-core archive to run the native closure gate; this host only has the Rust seed. No change made.
+
+## 2026-11-04 dependencies
+
+Native closure admission cannot go green until the MIR/HIR closure failures are
+resolved: native_mir_lambda_and_enum_eq_block_caret_cs_2026_10_19 and
+caret_closure_enum_payload_binding_collection_gaps_2026_11_03. Both need a
+stage3 producer to enumerate remaining diagnostics (TEST_BLOCKED on seed).

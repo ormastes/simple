@@ -263,14 +263,14 @@ fn pf_index_findings(code: text, facts: [PanicFact], line_num: i64) -> [StaticLi
         val idx = code.substring(i + 1, close).trim()
         val recv = if prev == ")" or prev == "]": "" else: pf_receiver_before(code, i)
         # A slice `xs[a:b]` clamps; a type position (`fn f(a: [T])`) never has a word before `[`.
-        if idx != "" and not idx.contains(":") and not pf_index_is_proven(facts, recv, idx):
+        if idx != "" and not idx.contains(":") and not pf_index_is_proven(facts, recv, idx) and not (recv != "" and pf_has_fact(facts, "dict", recv, "")):
             val shown = if recv == "": "expr" else: recv
             val rest = code.substring(close + 1, code.len()).trim()
             if rest.starts_with("=") and not rest.starts_with("=="):
-                out.push(pf_finding("PANIC-W-INDEX", "unguarded indexed write `{shown}[{idx}]` can panic out of range",
+                out.push(pf_finding("PANIC-W-INDEX", "unguarded indexed write `{shown}[{idx}]` may panic out of range (upper bound: receiver type not fully known)",
                     "`{shown}.set({idx}, <value>)` (returns bool), or guard with `if {idx} < {shown}.len():`", line_num, i))
             else:
-                out.push(pf_finding("PANIC-W-INDEX", "unguarded index `{shown}[{idx}]` can panic out of range",
+                out.push(pf_finding("PANIC-W-INDEX", "unguarded index `{shown}[{idx}]` may panic out of range (upper bound: receiver type not fully known)",
                     "`{shown}.get({idx}) ?? <default>`, or guard with `if {idx} < {shown}.len():`", line_num, i))
         i = close + 1
     out
@@ -321,6 +321,85 @@ fn pf_is_nonzero_literal(tok: text) -> bool:
         i = i + 1
     false
 
+fn pf_is_float_literal(tok: text) -> bool:
+    tok != "" and pf_is_digit(tok.substring(0, 1)) and tok.contains(".") and not tok.contains("..")
+
+fn pf_is_float_operand(facts: [PanicFact], tok: text) -> bool:
+    tok != "" and (pf_is_float_literal(tok) or pf_has_fact(facts, "float", tok, ""))
+
+fn pf_type_facts(code: text, trimmed: text, indent: i64, ambiguous: [text]) -> [PanicFact]:
+    # Cheap declared-type hints: `x: f64`/`f32` params and locals, `m: Dict<..>`,
+    # `val x = 1.5`, `val m = {}`. Params scope to the body; locals to the block.
+    var facts: [PanicFact] = []
+    val is_fn = pf_is_fn_header(trimmed)
+    # A name declared more than once in the function (shadowing, re-typing) is
+    # ambiguous: no hint is recorded for it, so its sites still warn (SAF-05).
+    val scope = if is_fn: indent + 1 else: indent
+    for pat in [": f64", ": f32", ": Dict<"]:
+        var start = 0
+        while start < code.len():
+            val at = code.index_of(pat, start)
+            if at < 0: break
+            start = at + pat.len()
+            val after_ok = pat == ": Dict<" or start >= code.len() or not pf_is_word_char(code.substring(start, start + 1))
+            val name = pf_receiver_before(code, at)
+            if after_ok and name != "" and not ambiguous.contains(name): facts.push(PanicFact(if pat == ": Dict<": "dict" else: "float", name, "", scope))
+    if trimmed.starts_with("val ") or trimmed.starts_with("var "):
+        val eq = trimmed.index_of(" = ", 0)
+        if eq > 4 and not ambiguous.contains(pf_decl_name(trimmed.substring(4, eq))):
+            val name = trimmed.substring(4, eq).trim()
+            val rhs = trimmed.substring(eq + 3, trimmed.len()).trim()
+            if pf_is_float_literal(rhs): facts.push(PanicFact("float", name, "", scope))
+            elif rhs == "\{\}" or rhs.starts_with("Dict<") or rhs.starts_with("Dict."): facts.push(PanicFact("dict", name, "", scope))
+    facts
+
+fn pf_is_fn_header(trimmed: text) -> bool:
+    trimmed.starts_with("fn ") or trimmed.starts_with("pub fn ") or trimmed.starts_with("me ") or trimmed.starts_with("static fn ") or trimmed.starts_with("pub me ")
+
+fn pf_decl_name(raw: text) -> text:
+    val t = raw.trim()
+    val colon = t.index_of(":", 0)
+    if colon >= 0: t.substring(0, colon).trim() else: t
+
+fn pf_line_decls(code: text, trimmed: text) -> [text]:
+    # Every name this line declares or annotates: `NAME: T`, `val/var NAME`, `for NAME in`.
+    var names: [text] = []
+    var start = 0
+    while start < code.len():
+        val at = code.index_of(": ", start)
+        if at < 0: break
+        start = at + 2
+        val name = pf_receiver_before(code, at)
+        if name != "" and not names.contains(name): names.push(name)
+    if trimmed.starts_with("val ") or trimmed.starts_with("var "):
+        val eq = trimmed.index_of(" = ", 0)
+        val name = pf_decl_name(if eq > 4: trimmed.substring(4, eq) else: trimmed.substring(4, trimmed.len()))
+        if name != "" and not names.contains(name): names.push(name)
+    if trimmed.starts_with("for "):
+        val in_at = trimmed.index_of(" in ", 0)
+        if in_at > 4:
+            val name = trimmed.substring(4, in_at).trim()
+            if not names.contains(name): names.push(name)
+    names
+
+fn pf_ambiguous_names(codes: [text], first: i64, fn_indent: i64) -> [text]:
+    # Names declared more than once from line `first` to the end of the function
+    # whose header sits at `fn_indent` (fn_indent -1 = whole file).
+    var seen: [text] = []
+    var dup: [text] = []
+    var k = first
+    while k < codes.len():
+        val code = codes[k]
+        val trimmed = code.trim()
+        if k > first and trimmed != "" and fn_indent >= 0 and pf_indent_of(code) <= fn_indent: break
+        k = k + 1
+        if trimmed == "": continue
+        for name in pf_line_decls(code, trimmed):
+            if seen.contains(name):
+                if not dup.contains(name): dup.push(name)
+            else: seen.push(name)
+    dup
+
 fn pf_div_findings(code: text, facts: [PanicFact], line_num: i64) -> [StaticLintFinding]:
     var out: [StaticLintFinding] = []
     var i = 1
@@ -335,13 +414,16 @@ fn pf_div_findings(code: text, facts: [PanicFact], line_num: i64) -> [StaticLint
         if prev != " " or (next != " " and next != "="):
             i = i + 1
             continue
+        val op_at = i
         val from = if next == "=": i + 2 else: i + 1
         val divisor = pf_divisor_at(code, from)
         i = from
         if divisor == "" or pf_is_nonzero_literal(divisor): continue
         if pf_has_fact(facts, "nonzero", divisor, ""): continue
-        out.push(pf_finding("PANIC-W-DIV", "`{ch}` by `{divisor}` can panic: divisor not proven non-zero",
-            "`checked_div(<lhs>, {divisor}) ?? <default>`, or guard with `if {divisor} != 0:`", line_num, i - 1))
+        # Float division never panics (IEEE inf/nan): skip when either operand is known float.
+        if pf_is_float_operand(facts, divisor) or pf_is_float_operand(facts, pf_receiver_before(code, op_at - 1)): continue
+        out.push(pf_finding("PANIC-W-DIV", "`{ch}` by `{divisor}` may panic: divisor not proven non-zero (upper bound: operand types not fully known)",
+            "`checked_div(<lhs>, {divisor}) ?? <default>`, or guard with `if {divisor} != 0:`", line_num, op_at))
     out
 
 pub fn check_panic_free(content: text) -> [StaticLintFinding]:
@@ -361,6 +443,7 @@ pub fn check_panic_free(content: text) -> [StaticLintFinding]:
             continue
         val unquoted = if quotes > 0: pf_blank_triple_spans(line) else: line
         codes.push(pf_code_of(unquoted))
+    var ambiguous = pf_ambiguous_names(codes, 0, -1)
     var n = 0
     while n < codes.len():
         val code = codes[n]
@@ -381,6 +464,8 @@ pub fn check_panic_free(content: text) -> [StaticLintFinding]:
             for f in pf_div_findings(code, facts, n): findings.push(f)
         # Then add the facts this line establishes.
         for f in pf_for_facts(trimmed, indent + 1): facts.push(f)
+        if pf_is_fn_header(trimmed): ambiguous = pf_ambiguous_names(codes, n - 1, indent)
+        for f in pf_type_facts(code, trimmed, indent, ambiguous): facts.push(f)
         var cond = pf_strip_header(trimmed, "if")
         if cond == "": cond = pf_strip_header(trimmed, "elif")
         if cond == "": cond = pf_strip_header(trimmed, "while")

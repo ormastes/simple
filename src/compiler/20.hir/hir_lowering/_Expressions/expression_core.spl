@@ -154,6 +154,13 @@ impl HirLowering:
                             self.error("attributed collection factory generic arguments do not match {expected}", span)
                     case _: ()
 
+    # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=retain_attributed_collection_type takes the initializer HirExpr by value and its prologue copy faults (AV +0x16c, addr 0x100000000) for every binding; callers test the kind first so only attributed factory calls pay the copy
+    fn attributed_factory_call_kind(kind: HirExprKind) -> bool:
+        match kind:
+            case HirExprKind.MethodCall(_, method, _, _):
+                return method == "attributed_at_site" or method == "attributed_with_prior_at_site"
+            case _: return false
+
     me retain_attributed_collection_type(initializer: HirExpr, declared: HirType?) -> HirExpr:
         """Carry a written instance type through the compiler-owned wrapper."""
         if declared == nil:
@@ -165,12 +172,15 @@ impl HirLowering:
                 if method != "attributed_at_site" and method != "attributed_with_prior_at_site":
                     return initializer
                 val owner = _hir_expr_symbol_or_invalid(receiver.kind)
+                # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=storing the HirType? declared into the non-optional HirExpr.type_ keeps the Option word on stage2, and the next by-value copy of typed_receiver faults (AV validate_attributed_collection_factory+0x21d, addr 0x100000000); rebuild a bare HirType from the matched payload
+                var declared_type: HirType = HirType(kind: HirTypeKind.Error, span: receiver.span)
                 match declared.kind:
-                    case HirTypeKind.Named(declared_owner, _):
+                    case HirTypeKind.Named(declared_owner, declared_args):
                         if owner.id != declared_owner.id: return initializer
+                        declared_type = HirType(kind: HirTypeKind.Named(declared_owner, declared_args), span: receiver.span)
                     case _: return initializer
                 val typed_receiver = HirExpr(kind: receiver.kind, has_type_: true,
-                    type_: declared, span: receiver.span)
+                    type_: declared_type, span: receiver.span)
                 # The ordinary expression path already checks family errors.
                 # Recheck only matching/unknown families for generic arguments.
                 if args.len() >= 3:
@@ -618,8 +628,10 @@ impl HirLowering:
                                         type_: HirType(kind: HirTypeKind.Array(mc_dict_value, None), span: e.span),
                                         span: e.span)
                                 case _: ()
-                    self.validate_attributed_collection_factory(
-                        mc_lowered_receiver, method_name_t, hir_args, e.span)
+                    # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=the by-value receiver copy faults (AV validate_attributed_collection_factory+0x22d) for ordinary method calls the callee rejects at once; test the method name before passing the HirExpr
+                    if method_name_t == "attributed_at_site" or method_name_t == "attributed_with_prior_at_site":
+                        self.validate_attributed_collection_factory(
+                            mc_lowered_receiver, method_name_t, hir_args, e.span)
                     return HirExpr(
                         kind: HirExprKind.MethodCall(mc_lowered_receiver, method_name_t, hir_args, mc_static_resolution),
                         has_type_: false,
@@ -1111,7 +1123,10 @@ impl HirLowering:
                 # it is evaluated before any pattern matches, so it must never
                 # see an arm's pattern bindings.
                 val hir_scrutinee = self.lower_hir_expr(scrutinee)
-                val match_subject_type = self.declared_match_subject_type(hir_scrutinee)
+                var scrutinee_type: HirType = HirType(kind: HirTypeKind.Error, span: hir_scrutinee.span)
+                if hir_scrutinee.has_type_:
+                    scrutinee_type = hir_scrutinee.type_
+                val match_subject_type = self.declared_match_subject_type_parts(hir_scrutinee.kind, hir_scrutinee.has_type_, scrutinee_type, hir_scrutinee.span)
                 # One invocation-owned description, shared by all arm/Or
                 # binders. Recursive matches prepare their own local value.
                 val union_pattern_context = self.prepare_source_union_match_v1(match_subject_type, arms)
