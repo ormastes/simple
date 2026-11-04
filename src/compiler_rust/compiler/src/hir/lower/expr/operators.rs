@@ -195,6 +195,9 @@ impl Lowerer {
             // it decoded the raw 0/1 as a heap handle ("nil"/"0"). Branching
             // still worked, which is why this hid behind `if x not in y`.
             ast::BinOp::And | ast::BinOp::Or | ast::BinOp::Is | ast::BinOp::In | ast::BinOp::NotIn => TypeId::BOOL,
+            // `u8 << n` / `u16 << n` promote to a 64-bit int (as the
+            // interpreter does); typing it as the narrow LHS truncated `b0 << 8` to 0.
+            ast::BinOp::ShiftLeft if matches!(left_hir.ty, TypeId::U8 | TypeId::U16) => TypeId::I64,
             // `int * text` is repetition (MIR -> rt_string_repeat), so it is
             // TEXT; falling through to `left_hir.ty` typed `3 * "ab"` as i64.
             // (`text * int` already gets TEXT from the left operand.)

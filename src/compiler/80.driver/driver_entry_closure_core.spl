@@ -25,6 +25,67 @@ extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_pause() -> bool
 @unsafe(reason: "release epoch owner-check scratch", capabilities: [ffi])
 extern fn rt_transient_array_scope_end() -> bool
+@unsafe(reason: "retain one resolver answer past its scratch scope", capabilities: [ffi])
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+
+# Resolver scratch ownership. An import resolution probes numbered
+# directories (rt_dir_list), builds candidate paths and canonical keys, and
+# answers with ONE text (or Missing). Every closure walk -- the CLI entry
+# closure, phase-1 load_sources and the HIR shard worker's admitted-edge
+# graph -- used to call the resolver outside any transient scope, so all of
+# that scratch was process-immortal in the no-GC runtime: measured
+# 2026-11-05 on the admitted aarch64 Stage 2 (sha256 90cffcd7...) with gdb,
+# ~27 rt_dir_list calls and ~110 KB retained per resolution, ~24k
+# resolutions per worker before the first surface parse, 25.8 GB worker RSS
+# at surfaces-ready. The resolver now owns a scope per call and promotes only
+# its answer. Nested callers (an active or paused scope already owned by the
+# caller) keep that scope: the answer then lives as long as the caller's.
+# doc/08_tracking/bug/hir_shard_worker_resolver_scratch_immortal_2026-11-05.md
+fn _driver_resolver_scratch_begin_v1() -> bool:
+    if transient_array_scope_state_v1() != 0:
+        return false
+    # This platform cache survives the scope; initialise it before any
+    # scratch allocation (same contract as _driver_file_natively_owns_v1).
+    val _platform = host_is_windows_host()
+    var started = false
+    unsafe(capabilities: [ffi]):
+        started = rt_transient_array_scope_begin()
+    if not started: panic("resolver scratch begin failed")
+    true
+
+# Two concrete owners on purpose: the promote extern is called with the
+# answer's real type at each site, never through an erased generic carrier.
+fn _driver_resolver_scratch_end_selection_v1(owned: bool, answer: SourceRootResolutionV1):
+    if not owned:
+        return
+    _driver_resolver_scratch_pause_v1()
+    var promoted = false
+    unsafe(capabilities: [ffi]):
+        promoted = rt_transient_heap_promote(answer)
+    if not promoted: panic("resolver answer promotion failed")
+    _driver_resolver_scratch_finish_v1()
+
+fn _driver_resolver_scratch_end_text_v1(owned: bool, answer: text):
+    if not owned:
+        return
+    _driver_resolver_scratch_pause_v1()
+    var promoted = false
+    unsafe(capabilities: [ffi]):
+        promoted = rt_transient_heap_promote(answer)
+    if not promoted: panic("resolver answer promotion failed")
+    _driver_resolver_scratch_finish_v1()
+
+fn _driver_resolver_scratch_pause_v1():
+    var paused = false
+    unsafe(capabilities: [ffi]):
+        paused = rt_transient_array_scope_pause()
+    if not paused: panic("resolver scratch pause failed")
+
+fn _driver_resolver_scratch_finish_v1():
+    var ended = false
+    unsafe(capabilities: [ffi]):
+        ended = rt_transient_array_scope_end()
+    if not ended: panic("resolver scratch end failed")
 
 @unsafe(reason: "raw source-path probe; false includes absent, inaccessible, or provider failure", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
@@ -1403,6 +1464,12 @@ pub fn _driver_resolve_source_root_entry_import_v1(module_path: text, source_roo
     _driver_resolve_source_root_entry_import_from_v1(module_path, source_roots, "")
 
 pub fn _driver_resolve_source_root_entry_import_from_v1(module_path: text, source_roots: [text], entry_dir: text) -> SourceRootResolutionV1:
+    val owned = _driver_resolver_scratch_begin_v1()
+    val selected = _driver_resolve_source_root_entry_import_scratch_v1(module_path, source_roots, entry_dir)
+    _driver_resolver_scratch_end_selection_v1(owned, selected)
+    selected
+
+fn _driver_resolve_source_root_entry_import_scratch_v1(module_path: text, source_roots: [text], entry_dir: text) -> SourceRootResolutionV1:
     # Match native-build's ordered explicit-root contract before probing the
     # checkout. A composition overlay is authoritative for the module it owns;
     # re-resolving that name in src/ silently restores an excluded provider.
@@ -1790,6 +1857,12 @@ pub fn _driver_resolve_entry_import(module_path: text, entry_dir: text) -> text:
     out
 
 fn _driver_resolve_entry_import_untimed(module_path: text, entry_dir: text) -> text:
+    val owned = _driver_resolver_scratch_begin_v1()
+    val resolved = _driver_resolve_entry_import_scratch_v1(module_path, entry_dir)
+    _driver_resolver_scratch_end_text_v1(owned, resolved)
+    resolved
+
+fn _driver_resolve_entry_import_scratch_v1(module_path: text, entry_dir: text) -> text:
     var probe = module_path
     while probe != "":
         val resolved = _driver_resolve_entry_import_exact(probe, entry_dir)

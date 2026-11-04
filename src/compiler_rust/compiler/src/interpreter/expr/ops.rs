@@ -1326,9 +1326,12 @@ pub(super) fn eval_op_expr(
                 }
                 BinOp::ShiftLeft => {
                     // Shift width is always derived from LHS (the value being shifted).
+                    // u8/u16 promote to u64 width (C-style) so `b0 << 8` keeps its high bits and a
+                    // following `| b1` (mixed-width bitor adopts the wider width) does not re-narrow it.
                     if let Value::UInt { value: lv, width } = &left_val {
                         let rhs = right_val.as_int()? as u64;
-                        Ok(wrap_uint(lv.wrapping_shl(rhs as u32), *width))
+                        let out_width = if *width < 32 { 64 } else { *width };
+                        Ok(wrap_uint(lv.wrapping_shl(rhs as u32), out_width))
                     } else {
                         Ok(Value::Int(left_val.as_int()? << right_val.as_int()?))
                     }
