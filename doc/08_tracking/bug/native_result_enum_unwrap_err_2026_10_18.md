@@ -159,3 +159,7 @@ inner types. An unused generic class metadata issue must be reproduced before
 changing template handling; Future's Poll<T> field is Named, whose MIR lowering
 does not recursively lower its type arguments. No broad generic exclusion or
 TypeParam-to-i64 fallback is justified by current evidence.
+
+## Resolution (2026-11-04, opus-n88b)
+
+Status: fix-implemented-verification-pending. Landed in 3a16118c603 (array range slices via lower_runtime_array_slice in text_index_ranges.spl; Result unwrap/unwrap_err admit Enum payloads in method_calls_literals.spl lower_result_unwrap_core). Pass-level spec: `bin/simple.exe test test/01_unit/compiler/50.mir/array_range_unwrap_enum_lowering_spec.spl` (2/2 pass). Native verify (stage3): rebuild with a native producer and compile a[1..].join / Result<_, Enum>.unwrap_err() fixtures; then remove the source workarounds.
