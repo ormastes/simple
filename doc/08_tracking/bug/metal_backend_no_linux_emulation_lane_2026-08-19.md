@@ -2,6 +2,7 @@
 
 - **Date:** 2026-08-19
 - **Status:** BLOCKER-DOCUMENTED (2026-11-04) — host-neutral verification lane exists; GPU-execution lane needs an owner decision. Not a code defect.
+- **Owner/lane:** Linux — `crosscompile_xray_lead/linux_adapter` (reassigned 2026-11-04 by owner decision; removed from the macOS lane and its open count).
 - **Area:** rendering / engine2d backend matrix
 
 ## Evidence
@@ -89,3 +90,21 @@ from the tree at `origin/release/1.0.0`.
 `bin/simple` is admitted by the bootstrap lane; until then the Linux coverage
 is the source-contract + CPU-twin parity listed above. Remaining gap: no
 Linux-side MSL compile and no GPU execution off macOS.
+
+## 2026-11-04 handoff to the Linux lane (owner decision)
+
+The owner ruled this belongs to the Linux side, not the macOS lane: it is a
+Linux capability request (no Metal coverage off macOS), not a native macOS
+defect. It is reassigned to `crosscompile_xray_lead/linux_adapter` and removed
+from the macOS inventory count (`arm64_macos_audit_20261103/current_inventory.*`).
+Handoff summary of what PR #6570 recorded: Linux already has host-neutral
+coverage (`metal_msl_pipeline_spec.spl` source contract,
+`engine2d_shared_raster_parity_spec.spl` + `backend_emu.spl` Metal-exact CPU
+twins, `backend_emulation_spec.spl` availability contract). Open choices for the
+Linux owner: (1) an MSL syntax checker on Linux (third-party or Simple-written;
+validates syntax only, not Apple semantics); (2) a disclosed
+`metal-software-emulation` backend (DirectX pattern) — judged to add a renamed
+lane but no new evidence; (3) real Metal on the `macos-latest` row of
+`gpu-lane-tests.yml`, gated on an admitted self-hosted macOS `bin/simple` —
+the recommended path. Remaining gap unchanged: no Linux-side MSL compile and no
+GPU execution off macOS.

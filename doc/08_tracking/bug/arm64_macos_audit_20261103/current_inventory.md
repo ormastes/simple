@@ -1,6 +1,6 @@
 # Current ARM64/macOS bug inventory — 2026-11-03
 
-73 unique tracked records: 10 open, 22 fixing, 11 verification-pending, 18 fixed, 12 closed. The 22 fixing labels are owner claims, including execution-blocked candidates; they do not mean 22 implemented fixes. The remaining 10 open records are macOS-only platform mentions. All 15 previously unassigned ARM64/shared records were actually dispatched and claimed; see `assigned-15-arm64-shared.md`.
+73 unique tracked records (72 on the macOS/ARM64 lane; `metal_backend_no_linux_emulation_lane_2026-08-19` reassigned to the Linux lane 2026-11-04 and excluded from macOS counts): 10 open, 22 fixing, 11 verification-pending, 18 fixed, 12 closed. The 22 fixing labels are owner claims, including execution-blocked candidates; they do not mean 22 implemented fixes. The remaining 10 open records are macOS-only platform mentions. All 15 previously unassigned ARM64/shared records were actually dispatched and claimed; see `assigned-15-arm64-shared.md`.
 
 This is the initial71-record platform-term inventory plus two newly diagnosed compiler defects, not73reproduced native failures. Windows-only historical context is excluded from platform defect totals; Linux Metal emulation is a capability request. Shared staging/deployment dependencies remain labeled. Historical fixed/closed records are not newly qualified; eight historical acceptance followups remain separate.
 
@@ -67,7 +67,7 @@ Landed narrow repairs: firmwareImage/ESP PR6384, ARM64NIC TX-ring PR6393, and ra
 | P3 | open | macOS: platform/shared context; native acceptance not inferred | `macos_test_runner_blocked_inline_unsafe_and_wrong_deploy_slot_2026-08-31` |
 | P3 | closed | macOS: platform/shared context; native acceptance not inferred | `macos_vulkan_host_wm_live_evidence_cpu_mirror_and_input_gap_2026-07-26` |
 | P3 | open | macOS: platform/shared context; native acceptance not inferred | `main_test_runnable_unsatisfiable_on_macos_2026-09-03` |
-| P3 | blocker-documented | macOS: capability request: Linux Metal emulation (host-neutral lane documented; GPU lane needs owner decision) | `metal_backend_no_linux_emulation_lane_2026-08-19` |
+| P3 | reassigned-linux | Linux (owner `crosscompile_xray_lead/linux_adapter`): capability request: Linux Metal emulation — excluded from macOS counts per owner decision 2026-11-04 | `metal_backend_no_linux_emulation_lane_2026-08-19` |
 | P3 | fixing | macOS, ARM64: platform/shared context; native acceptance not inferred | `phase2_native_build_hello_world_invalid_heap_and_scorer_segv_2026-09-05` |
 | P3 | fixing | ARM64: platform/shared context; native acceptance not inferred | `phase2_stage2_native_build_len_on_i64_aarch64_linux_2026-09-13` |
 | P3 | closed | ARM64: shared dependency; not platform-exclusive | `rv64_host_gpu_real_runtime_exit_facade_2026-07-12` |
