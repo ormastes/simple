@@ -247,3 +247,17 @@ providers, before the strict native recipe above is eligible. Retain provider
 hashes and actual dynamic-loader resolution. Stage 2 admission, a raw Stage 3
 binary, an old trusted manifest, or portable unit tests alone cannot satisfy
 this route. The Metal lane does not author or mint its own producer receipts.
+
+## 2026-11-04 native macOS run (lane 4)
+
+Tree release/1.0.0 `1ebaf7d1e1f`, seed `/Users/ormastes/.local/share/simple-seeds/release100-7a0e6fe516f-20261031/simple`, `--mode=interpreter`:
+- backend_metal_device_identity 2/2, backend_readback_handle_contract 1/1 PASS.
+- draw_ir_adv 68/70: red "submits a GPU-selected Draw IR batch through the
+  runtime host GPU queue" (expected false to equal true) and "stages retained
+  Vulkan composition damage for a partial host refresh" (expected 4278190080
+  to equal 4294901760).
+- window_scene_draw_ir 4/12 and host_compositor_entry 42/61: UNRUNNABLE on
+  release/1.0.0 — see
+  `spec_helpers_dropped_by_release_transplant_88aac2ffe28_2026-11-04.md`.
+Native gate (`build-macos-gpu-2d-live-native.shs --build metal`) needs the
+admitted full-CLI (Lane 1). Status unchanged: source fixed / runtime unverified.
