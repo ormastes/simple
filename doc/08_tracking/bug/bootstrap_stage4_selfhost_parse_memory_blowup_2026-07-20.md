@@ -1,7 +1,7 @@
 # Stage-4 self-host full-CLI build: parse-phase memory blowup (~160MB/file, killed at 64GB)
 
 - **ID:** bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20
-- **Status:** OPEN
+- **Status:** fix-implemented-verification-pending (2026-11-04): reclamation landed in a323583b0dc, 07d2ac8834d, e7380eaee50. Repro/verify on an admitted stage3: `sh scripts/check/check-stage4-selfhost-parse-memory-multifile.shs` (per-file rt_heap_registry_count must stay bounded) plus `sh scripts/check/check-stage4-selfhost-parse-memory.shs`; native RSS evidence still UNRUN.
 - **Severity:** high (blocks the stage3-compiled stage-4 lane entirely; seed-compiled fallback lane unaffected)
 - **Lane:** bootstrap `--full-bootstrap --mode=one-binary --backend=cranelift`, x86_64-linux
 
