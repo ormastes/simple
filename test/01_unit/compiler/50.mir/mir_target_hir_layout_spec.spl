@@ -1,0 +1,81 @@
+# @cover src/compiler/50.mir/mir_target_hir_layout.spl
+# TargetHIR P3 (U2): struct layout + fn ABI read through an explicit TargetHIR.
+# THIR-01 same HIR -> Linux vs Windows x86_64; THIR-02 x86_64/AArch64/RV64/RV32
+# pointer width + alignment; THIR-07 missing/unsupported read is a named Err.
+
+use std.spec.*
+use compiler.hir.hir_types.{HirModule, SymbolTable, HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_definitions.{HirField, HirExpr, HirExprKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.target_hir.hir_freeze.{hir_snapshot_freeze}
+use compiler.hir.target_hir.hir_snapshot.{hir_snapshot_id_new}
+use compiler.hir.target_hir.target_hir.{TargetHIR, target_hir_for_explicit}
+use compiler.types.type_layout.{layoutattr_c_repr}
+use compiler.mir.mir_target_hir_layout.{mir_target_hir_struct_layout, mir_target_hir_fn_abi}
+
+fn fixture() -> HirModule:
+    HirModule(name: "app.layout", path: "a.spl", imports: [], exports: [],
+        domain_blocks: [], symbols: SymbolTable.new(), functions: {},
+        gpu_function_targets: {}, gpu_function_backend_orders: {}, classes: {},
+        structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [], extend_enums: [])
+
+fn _sp() -> Span:
+    Span(start: 0, end: 0, line: 1, col: 1)
+
+fn _ty(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: _sp())
+
+fn _field(name: text, id: i64, type_: HirType) -> HirField:
+    val absent = HirExpr(kind: HirExprKind.UnitLit, has_type_: false, type_: _ty(HirTypeKind.Unit), span: _sp())
+    HirField(symbol: SymbolId(id: id), name: name, type_: type_,
+        has_default: false, default: absent,
+        visibility: Visibility.Public, is_public: true, is_volatile: false,
+        has_bits_attr: false, bits_width: 0,
+        has_fixed_address: false, fixed_address: 0, span: _sp())
+
+# struct { tag: u8, n: i64 } — C order, so i64 alignment decides the offset.
+fn fields() -> [HirField]:
+    [_field("tag", 1, _ty(HirTypeKind.Int(8, false))),
+     _field("n", 2, _ty(HirTypeKind.Int(64, true)))]
+
+fn view_for(snap_id, triple: text) -> TargetHIR:
+    target_hir_for_explicit(snap_id, triple, "llvm", 23, "types").unwrap()
+
+describe "TargetHIR struct layout + fn ABI (P3 U2)":
+    it "THIR-01: one frozen HIR gives shared layout but distinct ABI on Linux vs Windows x86_64":
+        val snap = hir_snapshot_freeze(fixture(), 0).unwrap()
+        val lin = view_for(snap.id, "x86_64-unknown-linux-gnu")
+        val win = view_for(snap.id, "x86_64-pc-windows-msvc")
+        val l = mir_target_hir_struct_layout(lin, snap.id, "Pair", fields(), layoutattr_c_repr()).unwrap()
+        val w = mir_target_hir_struct_layout(win, snap.id, "Pair", fields(), layoutattr_c_repr()).unwrap()
+        expect(l.size).to_equal(w.size)
+        expect(l.field_offsets[1]).to_equal(8)
+        expect(mir_target_hir_fn_abi(lin, snap.id, "main").unwrap()).to_equal("sysv64")
+        expect(mir_target_hir_fn_abi(win, snap.id, "main").unwrap()).to_equal("win64")
+
+    it "THIR-02: pointer-sized field follows the target, not the host":
+        val snap = hir_snapshot_freeze(fixture(), 0).unwrap()
+        val pfields = [_field("tag", 1, _ty(HirTypeKind.Int(8, false))),
+                       _field("p", 2, _ty(HirTypeKind.Named(SymbolId(id: 99), [])))]
+        val x64 = mir_target_hir_struct_layout(view_for(snap.id, "x86_64-unknown-linux-gnu"), snap.id, "P", pfields, layoutattr_c_repr()).unwrap()
+        val a64 = mir_target_hir_struct_layout(view_for(snap.id, "aarch64-unknown-linux-gnu"), snap.id, "P", pfields, layoutattr_c_repr()).unwrap()
+        val rv64 = mir_target_hir_struct_layout(view_for(snap.id, "riscv64-unknown-linux-gnu"), snap.id, "P", pfields, layoutattr_c_repr()).unwrap()
+        val rv32 = mir_target_hir_struct_layout(view_for(snap.id, "riscv32-unknown-none-elf"), snap.id, "P", pfields, layoutattr_c_repr()).unwrap()
+        expect(x64.size).to_equal(16)
+        expect(a64.size).to_equal(16)
+        expect(rv64.field_offsets[1]).to_equal(8)
+        expect(rv32.size).to_equal(8)
+        expect(rv32.field_offsets[1]).to_equal(4)
+
+    it "THIR-07: snapshot mismatch is a named Err, never a fallback":
+        val snap = hir_snapshot_freeze(fixture(), 0).unwrap()
+        val other = hir_snapshot_id_new("app.other", "deadbeef", 1).unwrap()
+        val v = view_for(snap.id, "x86_64-unknown-linux-gnu")
+        val r = mir_target_hir_struct_layout(v, other, "Pair", fields(), layoutattr_c_repr())
+        expect(r.is_err()).to_be(true)
+        expect(r.unwrap_err().starts_with("target_hir_snapshot_mismatch")).to_be(true)
+        expect(mir_target_hir_fn_abi(v, other, "main").is_err()).to_be(true)
+        expect(mir_target_hir_fn_abi(v, snap.id, "").is_err()).to_be(true)
