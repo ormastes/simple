@@ -122,15 +122,16 @@ fn calls(s: Shaped, caller: text, callee: text) -> bool:
             return true
     false
 
-describe "methods of a same-module generic impl are specialized by the receiver (BUG-IT-3)":
-    it "micro_e: Box<i64>(item: 7).get() calls a defined Box__get$i64 returning i64":
+describe "methods of a same-module generic impl are ONE erased body (BUG-IT-3)":
+    it "micro_e: Box<i64>(item: 7).get() calls the single erased Box.get":
         val s = shape(
             "fn probe() -> i64:\n" +
             "    val bx = Box<i64>(item: 7)\n" +
             "    bx.get() + 1\n")
         expect(verdict(s, "probe")).to_equal("add")
-        # No call may still name the unspecialized template.
-        expect(s.ir.contains("Box.get(")).to_equal(false)
+        # One erased body: the call names the shared `Box.get`, no `$i64` copy.
+        expect(calls(s, "probe", "Box.get")).to_equal(true)
+        expect(s.ir.contains("Box__get$")).to_equal(false)
 
     it "the text instance returns a pointer and its result concatenates":
         val s = shape(
@@ -231,28 +232,27 @@ fn expect_call_matches_define(s: Shaped, callee: text):
     expect(call != "").to_equal(true)
     expect(return_type_of_call(call)).to_equal(return_type_of_define(define))
 
-# The return type of a specialization can name a declared type the mangling
-# does not (`wrap$str` returns `Acc`). The call used to be typed i64 against
-# `define ptr` -- one word on 64-bit targets, wrong wherever a pointer is not
-# an i64.
+# The erased body of a generic fn returning a declared type (`wrap` returns
+# `Acc`) has one definition; the call must be typed with the same return type
+# as that definition (no i64-vs-ptr mismatch).
 describe "a generic fn returning a declared type: caller and callee agree":
     it "-> Acc, a struct the type arguments do not mention":
         expect_call_matches_define(shape(RET_PRELUDE +
             "fn probe() -> i64:\n" +
             "    val a = wrap(\"s\")\n" +
-            "    a.n\n"), "wrap$str")
+            "    a.n\n"), "wrap")
 
     it "-> Box<T>, a generic instance of the type argument":
         expect_call_matches_define(shape(RET_PRELUDE +
             "fn probe() -> i64:\n" +
             "    val b = rebox(\"s\")\n" +
-            "    0\n"), "rebox$str")
+            "    0\n"), "rebox")
 
     it "-> [Acc], a container over a declared type":
         expect_call_matches_define(shape(RET_PRELUDE +
             "fn probe() -> i64:\n" +
             "    val xs = listed(\"s\")\n" +
-            "    xs.len()\n"), "listed$str")
+            "    xs.len()\n"), "listed")
 
 # Same-module annotations retain their arguments through the flat parser.
 describe "container field through an annotated generic receiver":
