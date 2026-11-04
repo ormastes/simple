@@ -251,3 +251,7 @@ an admitted full CLI can run test/maintenance/docgen. Do not use the known-bad
 `release/` artifact or any Rust seed to turn `TEST_BLOCKED` into PASS. This
 criterion does not authenticate arbitrarily renamed binaries and does not
 admit Stage 4, build the render carrier, or prove 8K execution.
+
+## Default build mode (2026-11-04)
+
+- Default build mode (user policy 2026-11-04): unset `SIMPLE_FILE_WORKERS` resolves to `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "1"` (`native_file_worker_v1.spl`): file-based src → obj, one process per file (parse → HIR → MIR → obj), then link. Supersedes the 2026-10-26 opt-in. Opt-outs are per invocation only: `SIMPLE_FILE_WORKERS=0` (two-pass shard route), `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` (whole-program route), `SIMPLE_MIR_SHARDING=0`. Never flip a shared default (config, script-global env, constant) to suit one build; pass the option at the call site with a why-comment. Gap: per-package library archives are not yet the default link input. Runtime proof pending a stage3 binary: `sh scripts/check/check-per-file-overlap-receipt.shs <receipt dir>`. See `doc/07_guide/tooling/bootstrap_options.md` § Default build mode.
