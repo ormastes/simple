@@ -55,3 +55,9 @@ and producer7404 actual helper rerun are UNRUN; declaration-proof recovery is
 not yet established as the cause of the large-closure failure. Existing
 receiver guards and owner validation remain enabled. A compiler rebuilt with
 the guard candidate is required before claiming a byte_at producer repair.
+
+## c28-w2 triage 2026-11-04: deferred
+
+Root cause is unproven (error span points at `_NL`, no owner trace) and only
+shows in the large generator closure under native build. Free-function
+workaround kept. Status left open; needs a stage3 owner trace first.

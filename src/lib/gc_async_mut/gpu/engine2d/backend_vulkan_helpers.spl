@@ -13,6 +13,8 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend,
     VK_T_SFFI_BIND_PIPE, VK_T_SFFI_BIND_DESC, VK_T_SFFI_PUSH,
     VK_T_SFFI_DISPATCH, VK_T_SFFI_END, VK_T_SFFI_SUBMIT, VK_T_SFFI_WAIT_FENCE,
     VK_T_FONT_ATLAS_UPLOAD}
+use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
+use std.nogc_sync_mut.sffi.time.{time_monotonic_ns}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.gpu.engine2d.glyph.{render_text_to_buffer}
 use std.nogc_sync_mut.gpu.engine2d.sffi_dispatch.{gpu_sffi_uses_interpreter_array_abi}
@@ -967,6 +969,15 @@ impl VulkanBackend:
         if cmd <= 0:
             return 1
         val has_font_work = self.pending_font_descriptors.len() > 0
+        val font_glyphs = self.pending_font_glyph_count
+        if has_font_work:
+            self.last_font_flush_rc = 0
+            self.last_font_flush_glyphs = font_glyphs
+            self.last_font_flush_fence = 0
+            self.last_font_flush_waited = false
+            self.last_font_flush_fence_destroyed = false
+            self.last_font_flush_queue_ns = 0
+            self.last_font_flush_sync_ns = 0
         val _t_end = vulkan_timing_now_us()
         val _ended = vulkan_sffi_end_compute(cmd)
         vulkan_timing_add(VK_T_SFFI_END, _t_end)
@@ -989,7 +1000,11 @@ impl VulkanBackend:
             self._clear_pending_compute_state()
             return 0
 
+        val font_queue_started = if has_font_work: default_frame_clock().now_micros() else: 0
         val fence = vulkan_counted_submit_and_wait_fence(cmd)
+        if has_font_work:
+            self.last_font_flush_fence = fence
+            self.last_font_flush_queue_ns = (default_frame_clock().now_micros() - font_queue_started) * 1000
         if fence <= 0 and vulkan_order_trace_enabled():
             vulkan_order_trace("flush-fail stage=submit_and_wait_fence cmd={cmd} fence={fence} pending_n={self.pending_compute_count} font_n={self.pending_font_descriptors.len()}")
         if fence < 0:
@@ -1011,6 +1026,7 @@ impl VulkanBackend:
             self.font_frame_submission_count = self.font_frame_submission_count + 1
             self.font_frame_fence_count = self.font_frame_fence_count + 1
 
+        val font_sync_started = if has_font_work: time_monotonic_ns() else: 0
         val _t_wf = vulkan_timing_now_us()
         val completion_waited = vulkan_sffi_wait_fence(fence, 0)
         vulkan_timing_add(VK_T_SFFI_WAIT_FENCE, _t_wf)
@@ -1023,6 +1039,11 @@ impl VulkanBackend:
         val fence_destroyed = vulkan_sffi_destroy_fence(fence)
         val descriptors_released = self._release_pending_compute_descriptors()
         self._clear_pending_compute_state()
+        if has_font_work:
+            self.last_font_flush_waited = completion_waited
+            self.last_font_flush_fence_destroyed = fence_destroyed
+            self.last_font_flush_sync_ns = time_monotonic_ns() - font_sync_started
+            self.last_font_flush_rc = if completion_waited and fence_destroyed and descriptors_released: 1 else: VK_DISPATCH_COMPLETED_INELIGIBLE
         if completion_waited and fence_destroyed and descriptors_released:
             self.observed_device_fence_count = self.observed_device_fence_count + 1
             1

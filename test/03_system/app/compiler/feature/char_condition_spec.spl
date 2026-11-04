@@ -16,11 +16,18 @@ use compiler.common.config.Logger
 use compiler.frontend.frontend.parse_full_frontend
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.items.*
-use compiler.hir.exhaustiveness.char_condition.{cc_mode_resolve}
+use compiler.hir.exhaustiveness.char_condition.{cc_mode_resolve, cc_default_mode, cc_message}
 
 val CODE: text = "W-CHAR-CONDITION"
+val ERR_CODE: text = "E-CHAR-CONDITION"
 
 fn count_diag(body: text, mode: text) -> i64:
+    count_kind(body, mode, "warning")
+
+fn count_err(body: text, mode: text) -> i64:
+    count_kind(body, mode, "error")
+
+fn count_kind(body: text, mode: text, kind: text) -> i64:
     val src = "fn f(c: char, b: bool) -> i64:\n" + body + "    0\n"
     val saved_mode = env_get("SIMPLE_CHAR_CONDITION")
     val saved_profile = env_get("SIMPLE_SAFETY_PROFILE")
@@ -30,9 +37,14 @@ fn count_diag(body: text, mode: text) -> i64:
     var hir_lowering = HirLowering.with_filename("testdata/char_condition.spl")
     val hir = hir_lowering.lower_module(parsed)
     var n = 0
-    for m in hir_lowering.diagnostic_messages:
-        if m.contains(CODE):
-            n = n + 1
+    if kind == "warning":
+        for m in hir_lowering.diagnostic_messages:
+            if m.contains(CODE):
+                n = n + 1
+    else:
+        for e in hir_lowering.errors:
+            if e.message.contains(ERR_CODE):
+                n = n + 1
     val _c = env_set("SIMPLE_CHAR_CONDITION", saved_mode)
     val _d = env_set("SIMPLE_SAFETY_PROFILE", saved_profile)
     n
@@ -63,3 +75,32 @@ describe "char condition staging mode":
     it "is forced to error by critical or verified profiles":
         expect(cc_mode_resolve("warn", "critical")).to_equal("error")
         expect(cc_mode_resolve("", "verified")).to_equal("error")
+
+describe "char condition error mode (SIMPLE_CHAR_CONDITION=error)":
+    it "is fatal for if, elif and while":
+        expect(count_err("    if c:\n        return 1\n", "error")).to_equal(1)
+        expect(count_err("    if b:\n        return 1\n    elif c:\n        return 2\n", "error")).to_equal(1)
+        expect(count_err("    while c:\n        return 1\n", "error")).to_equal(1)
+    it "is fatal for not, and, or":
+        expect(count_err("    val x = not c\n", "error")).to_equal(1)
+        expect(count_err("    val x = c and b\n", "error")).to_equal(1)
+        expect(count_err("    val x = b or c\n", "error")).to_equal(1)
+    it "emits no warning when fatal and no error by default":
+        expect(count_diag("    if c:\n        return 1\n", "error")).to_equal(0)
+        expect(count_err("    if c:\n        return 1\n", "")).to_equal(0)
+    it "stays silent for bool conditions in error mode":
+        expect(count_err("    if b:\n        return 1\n", "error")).to_equal(0)
+        expect(count_err("    if c == 'a':\n        return 1\n", "error")).to_equal(0)
+
+describe "char condition promotion gate":
+    it "has a single default switch, warn until ADR-005 gate opens":
+        expect(cc_default_mode()).to_equal("warn")
+        expect(cc_mode_resolve("", "")).to_equal(cc_default_mode())
+    it "lets env warn opt out only below critical profiles":
+        expect(cc_mode_resolve("warn", "")).to_equal("warn")
+        expect(cc_mode_resolve("warn", "verified")).to_equal("error")
+    it "carries the code and a fix-it hint":
+        expect(cc_message("warn", 3, 8)).to_contain("W-CHAR-CONDITION")
+        expect(cc_message("error", 3, 8)).to_contain("E-CHAR-CONDITION")
+        expect(cc_message("error", 3, 8)).to_contain("help: compare explicitly")
+        expect(cc_message("error", 3, 8)).to_contain("3:8")

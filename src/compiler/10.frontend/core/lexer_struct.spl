@@ -13,7 +13,7 @@
 use compiler.core.tokens.{keyword_lookup, token_requires_rhs, token_can_end_expr}
 use compiler.core.lexer_chars.{is_digit, is_hex_digit, is_alpha, is_ident_char, is_space}
 use std.string_core.{char_code, char_from_code}
-use std.nogc_sync_mut.io_runtime.{env_set}
+use std.nogc_sync_mut.io_runtime.{env_set, env_get_nullable}
 
 # Token text is immutable. Reuse common identifier/literal spellings before
 # join allocates another permanently registered no-GC string.
@@ -169,8 +169,21 @@ struct CoreLexer:
     # call's parentheses needs real NEWLINE/INDENT/DEDENT tokens for its own
     # body even though paren_depth > 0 there. See is_forced_indentation_active.
     force_indent_bracket_depths: [i64]
+    # ADR-005 char-literal lexer gate (SIMPLE_CHAR_LITERAL_LEXER=1; default OFF).
+    # OFF: `'...'` keeps its legacy string meaning. ON: `'x'` is a char literal.
+    char_literal_mode: bool
 
 # ===== Constructor (free function) =====
+
+fn char_literal_lexer_enabled() -> bool:
+    val v: text = env_get_nullable("SIMPLE_CHAR_LITERAL_LEXER") ?? ""
+    v == "1" or v == "true" or v == "on"
+
+# Explicit gate override for specs and callers that must not depend on the env.
+fn make_core_lexer_char_mode(source: text, on: bool) -> CoreLexer:
+    var lexer = make_core_lexer(source)
+    lexer.char_literal_mode = on
+    lexer
 
 fn make_core_lexer(source: text) -> CoreLexer:
     CoreLexer(
@@ -190,7 +203,8 @@ fn make_core_lexer(source: text) -> CoreLexer:
         cur_col: 0,
         cur_start: 0,
         cur_no_interp: false,
-        force_indent_bracket_depths: []
+        force_indent_bracket_depths: [],
+        char_literal_mode: char_literal_lexer_enabled()
     )
 
 # ===== CoreLexer Methods =====
@@ -796,6 +810,95 @@ impl CoreLexer:
         core_token_text_save(num_text)
 
     # ----- String Scanning -----
+
+    # ----- ADR-005 char literal (gate: SIMPLE_CHAR_LITERAL_LEXER, default OFF) -----
+    # Called with the opening `'` still unconsumed. Emits kind 9 (CharLit) whose
+    # text is the decoded scalar, or kind 191 with a message naming r"...".
+    # Mirrors seed scan_char_literal (src/compiler_rust/parser/src/lexer/strings.rs).
+    me scan_char_literal():
+        val start_line: i64 = self.line
+        val start_col: i64 = self.col
+        self.cur_start = self.pos
+        self.cur_no_interp = true
+        self.advance()
+        val hint: text = "; use r\"...\" for raw text"
+        if self.at_end() or self.peek() == "\n":
+            self.make_token(191, "unterminated char literal" + hint, start_line, start_col)
+            return
+        var value: text = ""
+        val first: text = self.advance()
+        if first == "'":
+            self.make_token(191, "empty char literal ''" + hint, start_line, start_col)
+            return
+        if first == "\\":
+            if self.at_end():
+                self.make_token(191, "unterminated char literal" + hint, start_line, start_col)
+                return
+            val esc: text = self.advance()
+            if esc == "n":
+                value = "\n"
+            elif esc == "t":
+                value = "\t"
+            elif esc == "r":
+                value = "\r"
+            elif esc == "0":
+                value = char_from_code(0)
+            elif esc == "\\" or esc == "'" or esc == "\"":
+                value = esc
+            elif esc == "u" and self.peek() == "{":
+                self.advance()
+                var cp: i64 = 0
+                var nd: i64 = 0
+                while not self.at_end() and lex_escape_hex_value(self.peek()) >= 0 and nd < 6:
+                    cp = cp * 16 + lex_escape_hex_value(self.advance())
+                    nd = nd + 1
+                val is_surrogate: bool = cp >= 0xD800 and cp <= 0xDFFF
+                if self.peek() != "}" or nd == 0 or cp > 0x10FFFF or is_surrogate:
+                    self.make_token(191, "invalid unicode escape in char literal" + hint, start_line, start_col)
+                    return
+                self.advance()
+                value = char_from_code(cp)
+            else:
+                self.make_token(191, "invalid escape \\" + esc + " in char literal" + hint, start_line, start_col)
+                return
+        else:
+            value = first
+        if self.peek() == "'":
+            self.advance()
+            self.make_token(9, value, start_line, start_col)
+            self.cur_text = value
+            core_token_text_save(value)
+            return
+        # More than one scalar: consume to the closing quote on this line.
+        var closed: bool = false
+        while not self.at_end() and self.peek() != "\n":
+            val c: text = self.advance()
+            if c == "'":
+                closed = true
+                break
+        if closed:
+            self.make_token(191, "char literal holds more than one Unicode scalar" + hint, start_line, start_col)
+        else:
+            self.make_token(191, "unterminated char literal" + hint, start_line, start_col)
+
+    # True when `'` at pos starts a label-like `'ident` with no closing tick on
+    # this line. Those keep the legacy scan path in both gate modes.
+    fn squote_is_label_like() -> bool:
+        val n: i64 = self.source_chars.len()
+        var p: i64 = self.pos + 1
+        if p >= n:
+            return false
+        val c0: text = self.source_chars[p]
+        if not (is_alpha(c0) or c0 == "_"):
+            return false
+        while p < n:
+            val c: text = self.source_chars[p]
+            if c == "\n":
+                return true
+            if c == "'":
+                return false
+            p = p + 1
+        true
 
     me scan_string_suffix() -> text:
         if self.peek() != "_" or not is_alpha(self.peek_next()):
@@ -1509,7 +1612,10 @@ impl CoreLexer:
             self.scan_string()
             return
         if is_squote:
-            self.scan_string()
+            if self.char_literal_mode and not self.squote_is_label_like():
+                self.scan_char_literal()
+            else:
+                self.scan_string()
             return
 
         # Number literal

@@ -40,3 +40,11 @@ root fix (no ABI copy for text method receivers) retires all of them.
 
 ## Spec
 `test/01_unit/compiler/driver/driver_line_end_spec.spl`.
+
+## c28-w2 triage 2026-11-04: deferred
+
+Needs a native codegen change (text method receivers must not go through
+`rt_interp_cstr`+`rt_string_new` copies) that can only be measured on a stage3
+object; the `byte_at` workaround in `_driver_line_end` is kept. Remaining
+same-family sites listed above are bounded. Status left open; verify by
+re-running the 1.17 MB / 20,000-line repro on a stage3 build and checking RSS < 50 MB.

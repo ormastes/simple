@@ -105,3 +105,7 @@ Seed `run` results: tls_record_capability 3/3 pass (fn exists in http_server/typ
 
 - `sosix/posix_spec` (0/1): root cause is the Rust interpreter, not lib. `interpreter_extern/file_io.rs` `rt_file_open` returns -1 and `rt_file_close` returns false under `#[cfg(not(unix))]`, so on Windows the interpreter-run spec gets fd -1 (then pread/pwrite -> -EINVAL via `fd_positioned_args`). `simple run` (native splice) opens fine (fd=3), `simple test` does not. Needs a Windows `rt_file_open`/`rt_file_close` in the interpreter extern (the runtime `descriptor.rs` already has them).
 - `multicore_green_try_spawn_contract_spec` (5/6): `multicore_green_try_spawn` passes the extern `rt_pool_submit` as a first-class value; the interpreter reports "variable `rt_pool_submit` not found". Lib-free repro: `C:/tmp_lb/e1.spl` (extern fn passed by name as `fn() -> i64`). Compiler/interpreter-root; the extern is backed (`interpreter_extern/mod.rs:902`).
+
+## 2026-11-04 note
+
+Seed interpreter: a declared extern fn used as a first-class value (e.g. `rt_pool_submit` passed by name in `multicore_green_try_spawn`) now resolves to a callable. `multicore_green_try_spawn_contract_spec` 5/6 -> 6/6. Regression: `test/01_unit/compiler/interpreter/extern_fn_as_value_spec.spl`.

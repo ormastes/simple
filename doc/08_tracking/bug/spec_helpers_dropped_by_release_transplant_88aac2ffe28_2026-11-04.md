@@ -1,6 +1,6 @@
 # Spec helper definitions dropped by release transplant 88aac2ffe28
 
-- Status: open
+- Status: fixed for the two named specs (2026-11-04, see wm_metal_glass_multi_receipt_opacity_2026-07-27.md); window_scene_draw_ir 12/12, host_compositor_entry 55/63 (remaining reds recorded there)
 - Found: 2026-11-04 (lane 4, macOS native run of Metal glass acceptance specs)
 - Platform: shared (not macOS-specific)
 
