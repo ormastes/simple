@@ -1,0 +1,139 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# rt_file_lock must never displace a live holder (seed interpreter lane).
+#
+# Bug: seed_rt_file_lock_steals_live_lock_and_timeout_zero_fails_2026-11-04.
+# The interpreter's rt_file_lock used a create_new lock file and deleted any
+# lock file older than 60 s even when its holder was alive, breaking mutual
+# exclusion. Workers are real processes (process_spawn_async of a generated
+# .spl run by the seed), so the interpreter rt_file_lock is what is exercised.
+# Fail-closed: a scenario that spawns or observes nothing FAILS.
+
+use std.spec.*
+use std.io.{file_exists, file_read, file_write, file_delete, dir_create}
+use std.io_runtime.{getpid, process_spawn_async, process_is_running, time_now_monotonic_ms, thread_sleep}
+
+fn scratch_dir() -> text:
+    val dir = "build/tmp/file_lock_no_steal/{getpid()}"
+    dir_create(dir, recursive: true)
+    dir
+
+fn simple_binary() -> text:
+    if file_exists("bin/simple.exe"):
+        return "bin/simple.exe"
+    if file_exists("bin/simple"):
+        return "bin/simple"
+    if file_exists("C:/dev/simple/bin/simple.exe"):
+        return "C:/dev/simple/bin/simple.exe"
+    ""
+
+fn clean(base: text):
+    for p in [base + ".lock", base + ".counter", base + ".hold_ready"]:
+        if file_exists(p):
+            file_delete(p)
+
+# Locked read-modify-write of a counter; records OK/ERR into <out>.
+fn write_counter_worker(base: text, tag: text) -> text:
+    val path = "{scratch_dir()}/counter_{tag}.spl"
+    val out = "{scratch_dir()}/counter_{tag}.out"
+    val src = "use std.io (file_lock, file_unlock, file_read, file_write)\nuse std.io_runtime (thread_sleep)\n\nfn main():\n    val h = file_lock(\"{base}\", 120)\n    if h < 0:\n        file_write(\"{out}\", \"ERR\")\n        return\n    val n = file_read(\"{base}.counter\").trim().to_int()\n    thread_sleep(30)\n    file_write(\"{base}.counter\", (n + 1).to_text())\n    file_unlock(h)\n    file_write(\"{out}\", \"OK\")\n"
+    file_write(path, src)
+    path
+
+# Holds the lock for hold_s seconds, signalling readiness through a file.
+fn write_holder_worker(base: text, hold_s: i64) -> text:
+    val path = "{scratch_dir()}/holder.spl"
+    val src = "use std.io (file_lock, file_unlock, file_write)\nuse std.io_runtime (thread_sleep)\n\nfn main():\n    val h = file_lock(\"{base}\", 30)\n    file_write(\"{base}.hold_ready\", h.to_text())\n    thread_sleep({hold_s * 1000})\n    file_unlock(h)\n"
+    file_write(path, src)
+    path
+
+# One lock attempt with the given timeout; records the handle sign.
+fn write_probe_worker(base: text, tag: text, timeout_s: i64) -> text:
+    val path = "{scratch_dir()}/probe_{tag}.spl"
+    val out = "{scratch_dir()}/probe_{tag}.out"
+    val src = "use std.io (file_lock, file_unlock, file_write)\nuse std.io_runtime (time_now_monotonic_ms)\n\nfn main():\n    val t0 = time_now_monotonic_ms()\n    val h = file_lock(\"{base}\", {timeout_s})\n    val dt = time_now_monotonic_ms() - t0\n    if h > 0:\n        file_unlock(h)\n        file_write(\"{out}\", \"ACQUIRED \" + dt.to_text())\n    else:\n        file_write(\"{out}\", \"BUSY \" + dt.to_text())\n"
+    file_write(path, src)
+    path
+
+fn spawn(worker: text) -> i64:
+    process_spawn_async(simple_binary(), ["run", worker])
+
+fn await_pids(pids: [i64], budget_ms: i64) -> bool:
+    val deadline = time_now_monotonic_ms() + budget_ms
+    while true:
+        var alive = false
+        for pid in pids:
+            if process_is_running(pid):
+                alive = true
+        if not alive:
+            return true
+        if time_now_monotonic_ms() > deadline:
+            return false
+        thread_sleep(100)
+    true
+
+fn await_file(path: text, budget_ms: i64) -> bool:
+    val deadline = time_now_monotonic_ms() + budget_ms
+    while not file_exists(path):
+        if time_now_monotonic_ms() > deadline:
+            return false
+        thread_sleep(100)
+    true
+
+describe "rt_file_lock never steals from a live holder":
+    it "serializes 8 seed contenders (no lost update, all acquire)":
+        # @req REQ-SSPEC-UNIT
+        step("serializes 8 seed contenders")
+        val base = "{scratch_dir()}/contend"
+        clean(base)
+        file_write("{base}.counter", "0")
+        assert_true(simple_binary() != "")
+        var pids: [i64] = []
+        var tags: [text] = []
+        for i in 0..8:
+            val tag = "c{i}"
+            tags.push(tag)
+            pids.push(spawn(write_counter_worker(base, tag)))
+        assert_eq(pids.len(), 8)
+        assert_true(await_pids(pids, 240000))
+        for tag in tags:
+            assert_eq(file_read("{scratch_dir()}/counter_{tag}.out"), "OK")
+        assert_eq(file_read("{base}.counter").trim(), "8")
+        clean(base)
+
+    it "timeout 0 tries exactly once and returns promptly when held":
+        # @req REQ-SSPEC-UNIT
+        step("timeout 0 try-once")
+        val base = "{scratch_dir()}/tryonce"
+        clean(base)
+        val holder = spawn(write_holder_worker(base, 8))
+        assert_true(await_file("{base}.hold_ready", 60000))
+        val probe = spawn(write_probe_worker(base, "t0", 0))
+        assert_true(await_pids([probe], 60000))
+        val got = file_read("{scratch_dir()}/probe_t0.out")
+        assert_true(got.starts_with("BUSY"))
+        step("after the holder exits the lock is free again for a try-once")
+        assert_true(await_pids([holder], 60000))
+        val probe2 = spawn(write_probe_worker(base, "t0b", 0))
+        assert_true(await_pids([probe2], 60000))
+        assert_true(file_read("{scratch_dir()}/probe_t0b.out").starts_with("ACQUIRED"))
+        clean(base)
+
+    it "does not steal a lock held longer than 60s while a waiter tries":
+        # @req REQ-SSPEC-UNIT
+        step("live holder kept > 60s is not stolen")
+        val base = "{scratch_dir()}/nosteal"
+        clean(base)
+        val holder = spawn(write_holder_worker(base, 75))
+        assert_true(await_file("{base}.hold_ready", 60000))
+        # Let the lock age past the old 60 s staleness cutoff.
+        thread_sleep(63000)
+        assert_true(process_is_running(holder))
+        val probe = spawn(write_probe_worker(base, "old", 0))
+        assert_true(await_pids([probe], 60000))
+        assert_true(file_read("{scratch_dir()}/probe_old.out").starts_with("BUSY"))
+        assert_true(process_is_running(holder))
+        assert_true(await_pids([holder], 120000))
+        clean(base)
