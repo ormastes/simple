@@ -64,12 +64,32 @@ selftest() {
 
 FILE=doc/08_tracking/bug/bug_db.sdn
 RUN_SELFTEST_ONLY=0
-for a in "$@"; do
-    case "$a" in
+RANGE=
+while [ $# -gt 0 ]; do
+    case "$1" in
         --selftest) RUN_SELFTEST_ONLY=1 ;;
-        *) FILE=$a ;;
+        --range) RANGE=${2:-}; shift ;;
+        *) FILE=$1 ;;
     esac
+    shift
 done
+if [ "$RANGE" != "" ]; then
+    selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+    case "$RANGE" in *..*) ;; *) echo "ERROR — nothing was checked (--range needs <base>..<head>)"; exit 2 ;; esac
+    head=${RANGE#*..}
+    files=$(git diff --name-only --diff-filter=AM "$RANGE" -- '*.sdn') || { echo "ERROR — nothing was checked (git diff failed)"; exit 2; }
+    tmp=$(mktemp) || exit 2; checked=0; failed=""
+    for p in $files; do
+        git show "$head:$p" > "$tmp" 2>/dev/null || continue
+        out=$(scan "$tmp"); rc=$?
+        [ "$rc" = 2 ] && continue
+        checked=$((checked + 1))
+        if [ "$rc" != 0 ]; then failed="$failed $p"; printf '%s\n' "$out" | sed 's/^/  /'; fi
+    done
+    rm -f "$tmp"
+    if [ -n "$failed" ]; then echo "FAIL — $checked touched table .sdn file(s) checked, malformed:$failed"; exit 1; fi
+    echo "PASS — $checked touched table .sdn file(s) checked at $head, 0 malformed"; exit 0
+fi
 selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
 if [ "$RUN_SELFTEST_ONLY" = 1 ]; then echo "PASS — selftest 4 fixtures"; exit 0; fi
 [ -f "$FILE" ] || { echo "ERROR — nothing was checked ($FILE missing)"; exit 2; }
