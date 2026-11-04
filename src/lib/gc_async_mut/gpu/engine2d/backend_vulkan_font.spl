@@ -583,6 +583,54 @@ fn _vulkan_font_completion(evidence: VulkanFontCompositeEvidence, fence_handle: 
         result.reason = "precompiled-spirv-required"
     result
 
+fn vulkan_font_promote_flushed_batch(queued: VulkanFontCompositeEvidence, flush_rc: i64,
+                                    flushed_glyphs: i64, fence_handle: i64, waited: bool,
+                                    fence_destroyed: bool, queue_ns: i64, sync_ns: i64,
+                                    readback_source: text, readback_handle: i64,
+                                    readback_pixels: [u32]) -> VulkanFontCompositeEvidence:
+    """Publish the completion of a frame-batched font dispatch.
+
+    The batched path (`queued-packed-font-batch`) returns `recorded` evidence
+    before any submit. Once the owning frame batch is flushed and the surface
+    read back, this folds the REAL fence, wait, readback handle and byte count
+    into that saved result. Promotion is still computed by
+    `_vulkan_font_completion`, never asserted: without a CPU-oracle parity run
+    (`set_font_oracle_mode`) the result stays `executed`, not `promoted`.
+    Anything that is not a queued batch with glyphs is returned unchanged, so
+    the empty-batch and rejected paths stay fail-closed.
+    """
+    if queued.reason != "queued-packed-font-batch" or queued.quad_count <= 0 or flushed_glyphs <= 0:
+        return queued
+    var result = queued
+    if flush_rc != 1 or fence_handle <= 0 or not waited:
+        result.status = "failed"
+        result.reason = "flushed-packed-font-completion-failed"
+        result.submitted = fence_handle > 0
+        result.completion_waited = waited
+        result.device_executed = false
+        return result
+    val bytes = readback_pixels.len().to_i64() * 4
+    val has_readback = readback_source == "device_readback" and readback_handle > 0 and bytes > 0
+    result.status = "executed"
+    result.reason = "flushed-packed-font-batch"
+    result.submitted = true
+    result.completion_waited = true
+    result.device_executed = true
+    result.submission_count = 1
+    result.fence_count = 1
+    result.queue_device_ns = queue_ns
+    result.sync_wait_ns = sync_ns
+    result.readback_source = if has_readback: "device_readback" else: "unavailable"
+    result.readback_buffer_handle = if has_readback: readback_handle else: 0
+    result.readback_byte_count = if has_readback: bytes else: 0
+    if has_readback:
+        result.device_checksum = vulkan_font_pixels_checksum(readback_pixels)
+        var nonblank: i64 = 0
+        for px in readback_pixels:
+            if px != 0u32: nonblank = nonblank + 1
+        result.readback_nonblank_pixels = nonblank
+    _vulkan_font_completion(result, fence_handle, true, fence_destroyed)
+
 fn _vulkan_font_with_fallback(evidence: VulkanFontCompositeEvidence,
                               pixels: [u32]) -> VulkanFontCompositeEvidence:
     var replayable = evidence
@@ -1668,6 +1716,10 @@ impl VulkanBackend:
                 # relocating write to that slot is a hazard.
                 self._font_atlas_mark_slot_referenced()
                 self.pending_font_glyph_count = self.pending_font_glyph_count + batch.quads.len()
+                # A new queued batch invalidates any earlier flush record: only
+                # the flush that submits THIS work may promote its evidence.
+                self.last_font_flush_rc = 0
+                self.last_font_flush_glyphs = 0
                 var packed_evidence = _vulkan_font_evidence(pipeline, "recorded", "queued-packed-font-batch",
                     self.d_font_atlas, packed_params, packed_descriptor, packed_command, batch.quads.len(), 1,
                     false, false, framebuffer, 0, 0, 0, false)
@@ -1995,7 +2047,7 @@ export VULKAN_FONT_PARAMS_BYTES
 export vulkan_font_atlas_composite_params
 export vulkan_font_dispatch_groups, vulkan_font_atlas_replacement_status
 export vulkan_font_pixels_checksum, vulkan_font_pixels_equal, vulkan_font_runtime_classification
-export vulkan_font_promotion_ready
+export vulkan_font_promotion_ready, vulkan_font_promote_flushed_batch
 export vulkan_font_changed_pixel_count, vulkan_font_stage_evidence_ready
 export vulkan_font_timed_ns
 export vulkan_font_frame_batch_contract
