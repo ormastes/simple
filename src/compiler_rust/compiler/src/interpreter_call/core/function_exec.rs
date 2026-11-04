@@ -753,6 +753,11 @@ pub(crate) fn execute_function_body(
 
     for param in &func.params {
         local_env.mark_local(param.name.clone());
+        // `fn f(x: i32)`: the parameter's declared narrow width is its static
+        // receiver type for `x.m()` trait dispatch (see `CowEnv::declared_int_widths`).
+        if let Some(width) = Env::narrow_signed_width_of(param.ty.as_ref()) {
+            local_env.set_declared_int_width(&param.name, Some(width));
+        }
         if param_is_borrow_mut(param) {
             local_env.insert(crate::interpreter::place::borrow_param_marker(&param.name), Value::Nil);
         }

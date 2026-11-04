@@ -30,13 +30,18 @@ use crate::value::{OptionVariant, ResultVariant};
 /// binds no names and so contributes nothing.
 ///
 /// See doc/08_tracking/bug/for_loop_variable_leaks_into_enclosing_scope_2026-08-04.md
-pub(crate) fn save_pattern_scope(pattern: &Pattern, env: &Env) -> Vec<(String, Option<Value>)> {
+pub(crate) fn save_pattern_scope(pattern: &Pattern, env: &mut Env) -> Vec<(String, Option<Value>)> {
     let mut names = Vec::new();
     collect_pattern_binding_names(pattern, &mut names);
     names
         .into_iter()
         .map(|name| {
             let prior = env.get(&name).cloned();
+            // A loop variable is a fresh binding: it must not inherit the
+            // declared narrow width of an outer `val y: i32` it shadows (see
+            // `CowEnv::declared_int_widths` INVARIANT). Stashed once per
+            // loop here; `restore_pattern_scope` puts it back.
+            env.shadow_declared_int_width(&name);
             (name, prior)
         })
         .collect()
@@ -46,6 +51,8 @@ pub(crate) fn save_pattern_scope(pattern: &Pattern, env: &Env) -> Vec<(String, O
 /// go back to their previous value, names that did not are removed.
 pub(crate) fn restore_pattern_scope(saved: Vec<(String, Option<Value>)>, env: &mut Env) {
     for (name, prior) in saved {
+        // Twin of the stash in `bind_for_pattern_value`.
+        env.unshadow_declared_int_width(&name);
         match prior {
             Some(value) => {
                 env.insert(name, value);

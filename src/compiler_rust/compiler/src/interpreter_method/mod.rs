@@ -1805,8 +1805,14 @@ pub(crate) fn evaluate_method_call(
     // for user-defined trait implementations on built-in types (e.g., `impl MyTrait for text:`).
     {
         // Map Value type to the possible type names used in `impl Trait for TypeName:`
-        // Runtime ints carry no width, so an explicit `(x as u64).m()` cast names the
-        // impl type; use it first so `impl Trait for i32` does not collapse onto i64.
+        // Runtime ints carry no width, so the receiver's STATIC type names the
+        // impl — the same key the pure-Simple resolver uses
+        // (`Int(bits, signed)`, 35.semantics/resolve_strategies.spl): an explicit
+        // `(x as i32).m()` cast's target, or a bare identifier's declared width
+        // (`val y: i32`, `val w = x as i32`, `fn f(x: i32)`) recorded in the frame
+        // by `CowEnv::set_declared_int_width`. Use it first so `impl Trait for
+        // i32` does not collapse onto i64. Unknown width (plain `val n = 5`,
+        // i64) keeps the existing i64-first order.
         let cast_int_ty: Option<&str> = match (receiver.as_ref(), &recv_val) {
             (Expr::Cast { target_type: Type::Simple(t), .. }, Value::Int(_)) => {
                 match t.as_str() {
@@ -1814,6 +1820,12 @@ pub(crate) fn evaluate_method_call(
                     _ => None,
                 }
             }
+            (Expr::Identifier(name), Value::Int(_)) => match env.declared_int_width(name) {
+                Some(8) => Some("i8"),
+                Some(16) => Some("i16"),
+                Some(32) => Some("i32"),
+                _ => None,
+            },
             _ => None,
         };
         let cast_names: [&str; 4] = [cast_int_ty.unwrap_or(""), "i64", "i32", "int"];

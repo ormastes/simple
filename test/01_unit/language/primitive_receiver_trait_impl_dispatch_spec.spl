@@ -32,11 +32,16 @@
 #   f32 correct | f64 correct | i32 WRONG -- collapses onto the i64 impl.
 #
 # Per testing.md: a spec correctly asserting behavior the implementation does
-# not yet have must stay RED, not be weakened to match the bug. The i32 case
-# below asserts the CORRECT value (1003). It passes on the seed interpreter for
-# a cast receiver (`(x as i32).m()`, 2026-11-04). A bare `val y: i32` receiver
-# still collapses to the i64 impl there, and native lowering keys impls by bare
-# method name; see the bug doc.
+# not yet have must stay RED, not be weakened to match the bug. The i32 cases
+# below assert the CORRECT value (1003). Seed interpreter (2026-11-04): a cast
+# receiver (`(x as i32).m()`) resolves by the cast's target type, and a bare
+# narrow-width receiver (`val y: i32`, `val w = x as i32`, `fn f(x: i32)`)
+# resolves by the binding's DECLARED width, which the seed records in a
+# per-frame side table (`CowEnv::declared_int_width`) — mirroring the
+# pure-Simple resolver, which keys primitive impls on the receiver's static
+# `Int(bits, signed)` type (35.semantics/resolve_strategies.spl). The runtime
+# `Value::Int` still carries no width, so arithmetic/equality/printing are
+# unchanged. Native lowering is a separate defect; see the bug doc.
 
 trait MarkerProbe:
     fn marker_probe() -> i64
@@ -64,6 +69,24 @@ impl MarkerProbe for f32:
 impl MarkerProbe for f64:
     fn marker_probe() -> i64:
         1007
+
+impl MarkerProbe for i8:
+    fn marker_probe() -> i64:
+        1008
+
+impl MarkerProbe for i16:
+    fn marker_probe() -> i64:
+        1009
+
+# Receiver is a PARAMETER whose declared type is the narrow width: the
+# pure-Simple resolver keys the impl on the receiver's static type
+# (`Int(bits, signed)`, resolve_strategies.spl), so these must reach the
+# i32 impl and the i64 impl respectively.
+fn probe_param_i32(x: i32) -> i64:
+    x.marker_probe()
+
+fn probe_param_i64(x: i64) -> i64:
+    x.marker_probe()
 
 struct ControlPoint:
     x: i64
@@ -116,8 +139,83 @@ describe "impl Trait for <primitive> dispatches to the matching impl (interpret 
     it "dispatches correctly on an i32 receiver":
         # @req REQ-SSPEC-UNIT
         step("dispatches correctly on an i32 receiver")
-        # EXPECTED (RED until fixed): should reach the i32 impl and return 1003.
-        # MEASURED today: returns 1002 -- the i64 impl's value -- because
-        # primitive impls register under a bare, unqualified method name
-        # (trait_impl_lowering.spl:242-244), so i32/i64 collide on one key.
+        # An inline cast receiver: the cast's target type is the static type
+        # (seed: `cast_int_ty` sniff in interpreter_method/mod.rs, #6642).
+        # Was RED (1002, the i64 impl) until 2026-11-04.
         assert_equal((7 as i32).marker_probe(), 1003)
+
+    it "dispatches a bare `val y: i32` receiver to the i32 impl":
+        # @req REQ-SSPEC-UNIT
+        step("dispatches a bare `val y: i32` receiver to the i32 impl")
+        # The declared type IS the receiver's static type (pure-Simple keys the
+        # impl on `Int(32, signed)`); the runtime value carries no width.
+        val y: i32 = 5
+        assert_equal(y.marker_probe(), 1003)
+
+    it "dispatches a cast-bound `val w = x as i32` receiver to the i32 impl":
+        # @req REQ-SSPEC-UNIT
+        step("dispatches a cast-bound `val w = x as i32` receiver to the i32 impl")
+        val x = 7
+        val w = x as i32
+        assert_equal(w.marker_probe(), 1003)
+
+    it "dispatches bare i8 and i16 receivers to their own impls":
+        # @req REQ-SSPEC-UNIT
+        step("dispatches bare i8 and i16 receivers to their own impls")
+        val a: i8 = 3
+        val b: i16 = 3
+        assert_equal(a.marker_probe(), 1008)
+        assert_equal(b.marker_probe(), 1009)
+
+    it "dispatches an `fn f(x: i32)` parameter receiver to the i32 impl":
+        # @req REQ-SSPEC-UNIT
+        step("dispatches an `fn f(x: i32)` parameter receiver to the i32 impl")
+        assert_equal(probe_param_i32(9), 1003)
+
+    it "still dispatches i64-typed and untyped integer receivers to the i64 impl":
+        # @req REQ-SSPEC-UNIT
+        step("still dispatches i64-typed and untyped integer receivers to the i64 impl")
+        val z: i64 = 5
+        val n = 5
+        assert_equal(z.marker_probe(), 1002)
+        assert_equal(n.marker_probe(), 1002)
+        assert_equal(probe_param_i64(9), 1002)
+
+    it "a block-scoped `val q: i32` does not leak its width onto the outer `q`":
+        # @req REQ-SSPEC-UNIT
+        step("a block-scoped `val q: i32` does not leak its width onto the outer `q`")
+        # The width belongs to the inner binding; at block exit the outer
+        # (untyped, i64) `q` is visible again and must dispatch as i64.
+        val q = 5
+        if true:
+            val q: i32 = 1
+            assert_equal(q.marker_probe(), 1003)
+        assert_equal(q.marker_probe(), 1002)
+        var w = 5
+        var n = 0
+        while n < 1:
+            val w: i32 = 1
+            n = n + 1
+        assert_equal(w.marker_probe(), 1002)
+
+    it "a `for` variable shadowing an outer `val y: i32` does not inherit its width":
+        # @req REQ-SSPEC-UNIT
+        step("a `for` variable shadowing an outer `val y: i32` does not inherit its width")
+        val y: i32 = 1
+        var seen: i64 = 0
+        for y in [10, 20]:
+            seen = seen + y.marker_probe()
+        # Two untyped loop bindings: i64 impl both times.
+        assert_equal(seen, 2004)
+        # After the loop the outer i32 binding is in scope again.
+        assert_equal(y.marker_probe(), 1003)
+
+    it "a narrow declared width stays plain integer arithmetic and equality":
+        # @req REQ-SSPEC-UNIT
+        step("a narrow declared width stays plain integer arithmetic and equality")
+        # The dispatch fix must not change value semantics: the binding is
+        # still an ordinary integer for arithmetic, comparison and printing.
+        val y: i32 = 5
+        assert_equal(y + 100, 105)
+        assert_equal(y == 5, true)
+        assert_equal(y.to_text(), "5")
