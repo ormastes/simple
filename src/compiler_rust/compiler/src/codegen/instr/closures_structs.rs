@@ -2661,6 +2661,8 @@ fn try_compile_builtin_method_call<M: Module>(
         "is_whitespace" => "rt_string_is_whitespace",
         // See calls.rs: text methods that had no runtime definition at all.
         "char_count" => "rt_string_char_count",
+        "to_digit" => "rt_string_to_digit",
+        "byte_len" => "rt_string_len",
         "capitalize" => "rt_string_capitalize",
         "swapcase" => "rt_string_swapcase",
         "title" | "titlecase" => "rt_string_title",

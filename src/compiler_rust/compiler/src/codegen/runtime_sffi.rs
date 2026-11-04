@@ -2572,6 +2572,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_string_capitalize", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_center", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_char_count", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_to_digit", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_chomp", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_find_all", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_is_alnum", &[I64], &[I64]),

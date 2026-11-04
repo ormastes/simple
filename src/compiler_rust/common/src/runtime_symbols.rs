@@ -593,6 +593,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_string_is_alnum",
     "rt_string_is_whitespace",
     "rt_string_char_count",
+    "rt_string_to_digit",
     "rt_string_capitalize",
     "rt_string_swapcase",
     "rt_string_title",
