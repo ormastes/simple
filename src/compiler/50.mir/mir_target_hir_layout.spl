@@ -1,0 +1,71 @@
+# TargetHIR P3: struct layout + function ABI read through a TargetHIR view.
+# Lives in 50.mir because 20.hir must not import 30.types. Every read is bound
+# to the view's explicit target; a snapshot mismatch or an arch with no layout
+# table is a named Err, never a host default.
+
+use compiler.hir.hir_definitions.{HirField}
+use compiler.hir.target_hir.hir_snapshot.{HirSnapshotId, hir_snapshot_id_equals, hir_snapshot_id_text}
+use compiler.hir.target_hir.target_hir.{TargetHIR}
+use compiler.hir.target_hir.target_hir_resolution.{target_hir_builder_new, target_hir_builder_resolve_required, target_hir_builder_freeze, target_hir_abi}
+use compiler.types.type_layout.{LayoutAttr, TypeLayout, compute_struct_layout_for_arch}
+use std.common.target.{TargetArch}
+
+struct ResolvedStructLayout:
+    type_name: text
+    size: i64
+    align: i64
+    field_offsets: [i64]
+
+fn _mir_thir_arch(name: text) -> Result<TargetArch, text>:
+    if name == "x86_64":
+        return Ok(TargetArch.X86_64)
+    if name == "x86":
+        return Ok(TargetArch.X86)
+    if name == "aarch64":
+        return Ok(TargetArch.Aarch64)
+    if name == "arm":
+        return Ok(TargetArch.Arm)
+    if name == "riscv64":
+        return Ok(TargetArch.Riscv64)
+    if name == "riscv32":
+        return Ok(TargetArch.Riscv32)
+    Err("target_hir_unsupported_arch: " + name)
+
+fn _mir_thir_check_snapshot(view: TargetHIR, snapshot: HirSnapshotId) -> Result<bool, text>:
+    if not hir_snapshot_id_equals(view.snapshot, snapshot):
+        return Err("target_hir_snapshot_mismatch: view=" + hir_snapshot_id_text(view.snapshot) + " read=" + hir_snapshot_id_text(snapshot))
+    Ok(true)
+
+fn mir_target_hir_struct_layout(view: TargetHIR, snapshot: HirSnapshotId, type_name: text, fields: [HirField], attr: LayoutAttr) -> Result<ResolvedStructLayout, text>:
+    val same = _mir_thir_check_snapshot(view, snapshot)
+    if same.is_err():
+        return Err(same.unwrap_err())
+    val arch = _mir_thir_arch(view.target.arch)
+    if arch.is_err():
+        return Err(arch.unwrap_err())
+    val layout: TypeLayout = compute_struct_layout_for_arch(fields, attr, arch.unwrap())
+    # Offsets are reported in declaration order, whatever the physical order.
+    var offsets: [i64] = []
+    for field in fields:
+        var found: i64 = -1
+        for fl in layout.fields:
+            if fl.name == field.name:
+                found = fl.offset
+        if found < 0:
+            return Err("target_hir_field_unresolved: " + type_name + "." + field.name)
+        offsets.push(found)
+    Ok(ResolvedStructLayout(type_name: type_name, size: layout.size, align: layout.align, field_offsets: offsets))
+
+fn mir_target_hir_fn_abi(view: TargetHIR, snapshot: HirSnapshotId, fn_name: text) -> Result<text, text>:
+    val same = _mir_thir_check_snapshot(view, snapshot)
+    if same.is_err():
+        return Err(same.unwrap_err())
+    if fn_name.trim() == "":
+        return Err("target_hir_fn_name_required")
+    val built = target_hir_builder_resolve_required(target_hir_builder_new(view, []))
+    if built.is_err():
+        return Err(built.unwrap_err())
+    val frozen = target_hir_builder_freeze(built.unwrap())
+    if frozen.is_err():
+        return Err(frozen.unwrap_err())
+    Ok(target_hir_abi(frozen.unwrap()))
