@@ -1,8 +1,7 @@
 # macOS bootstrap blocked at origin/main: seed compile break + Linux-only Stage-3 authority lib (2026-09-06)
-## Open 2026-09-16 — needs owner triage
+## Open — re-triaged 2026-11-04: seed + Stage-2 authority FIXED; Stage-3 manifest verification still Linux-only (owner design decision)
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+See "Re-triage 2026-11-04" at the end for evidence.
 
 **Status:** partially FIXED (3 fixes in this change); the remaining `/proc` coupling is documented below.
 **Host:** aarch64-apple-darwin, macOS 25.5.0. **Base:** `1bd13da6125`.
@@ -685,3 +684,36 @@ platform gets wrong. Untouched here.
 | Stage 4 link gate 6 | open (runtime capsule symbol strength) |
 | native f64 correctness | **broken** — blocks deployment on its own |
 
+
+## Re-triage 2026-11-04 (release/1.0.0 `fb18c371767`, aarch64-apple-darwin M4)
+
+Source-level re-check only; the bootstrap was NOT re-run by this triage (a
+separate lane owns it).
+
+**Resolved, with evidence:**
+- Seed compile (defect 1): `src/compiler_rust/runtime/src/cache_host_authority_v1.rs:196-206`
+  now uses `st_mtime_nsec`/`st_ctime_nsec` in every arm; no `st_mtimespec`
+  remains. The bootstrap lane on this host built the Rust seed and a Stage-2
+  binary from it (`/private/tmp/lane1-out/s2b/stage2/aarch64-apple-darwin/simple`,
+  log `/private/tmp/lane1-out/s2b.log`, 2026-11-04T05:41Z).
+- Stage-2 authority (defects 2-3): `authority.shs` gates its `/proc` reads on
+  `[ -r /proc/self/stat ]` / `[ -r /proc/$$/stat ]` (e.g. :2897, :3325) and
+  `manifest-verify.shs:645-676` falls back to `/dev/fd/N` for fd *writes* and a
+  non-procfs pid read.
+- That lane's Stage-2 sanity failure is NOT this bug: the frontend smoke was
+  refused by the host memory reserve (`10615 MiB ... below the 12288 MiB reserve`,
+  s2b.log:55), not by procfs or a SEGV.
+
+**Still OPEN (unchanged design gap):** Stage-3/4 manifest verification remains
+descriptor-pinned through procfs. `manifest-verify.shs` still has 24 `/proc`
+references (e.g. :733-755 bound map via `/proc/<pid>/fd/7|9`, :877-930 manifest
+re-open via `/proc/<pid>/fd/8` compared with GNU `stat -Lc '%d %i %f %s'`), and
+`authority.shs:264-332` (directory-magic-link snapshot) requires
+`/proc/[pid]/fd/N`. Across the directory: authority 18, memory-admission 10,
+self-test 8, manifest-write 7, sanity 5, command-snapshot 5. These paths fail
+closed on macOS/BSD. The file's own comment (:645-650) records why a `/dev/fd`
+substitution is wrong for READ views (dup-not-reopen semantics defeat the
+re-open-and-compare proof), so this was deliberately not patched here: it needs
+an owner decision on the non-procfs pinning mechanism (e.g. `fstat` of the
+held fd via a helper vs. `F_GETPATH` on Darwin). BSD: FreeBSD without
+`linprocfs` has the identical gap.
