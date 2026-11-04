@@ -122,6 +122,23 @@ fn capture_block_scope_shadows<'a>(block: &'a Block, env: &mut Env) -> Vec<(&'a 
     capture_node_scope_shadows(&block.statements, env)
 }
 
+/// Bind pattern-match `bindings` as block-local names for the duration of one
+/// branch/iteration body. Returns the prior values for
+/// `restore_block_scope_shadows`. Unlike `Env::mark_local` (frame-permanent),
+/// this shadows an imported module of the same name only while the body runs.
+pub(crate) fn bind_block_scope_shadows(
+    bindings: std::collections::HashMap<String, Value>,
+    env: &mut Env,
+) -> Vec<(String, Option<Value>)> {
+    let mut saved = Vec::with_capacity(bindings.len());
+    for (name, val) in bindings {
+        saved.push((name.clone(), env.get(&name).cloned()));
+        env.enter_block_local(name.clone());
+        env.insert(name, val);
+    }
+    saved
+}
+
 /// Undo the shadowing captured by `capture_block_scope_shadows`: restore each
 /// name's pre-block value, or remove it entirely if it did not exist before
 /// the block ran (so a block-local `var` never leaks into the caller).

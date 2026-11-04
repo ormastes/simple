@@ -1,0 +1,244 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# Regression: doc/08_tracking/bug/seed_module_name_shadows_match_binding_2026_10_31.md
+# A pattern binding named like an imported module (`value`) must shadow the module.
+
+use std.spec.*
+use std.common.json.value
+use std.common.json.value.{json_parse_value}
+
+fn unwrap_ok(r: Result<i64, text>) -> i64:
+    match r:
+        case Ok(value): value
+        case Err(e): -1
+
+fn unwrap_some(o: Option<i64>) -> i64:
+    match o:
+        case Some(value): value
+        case None: -1
+
+fn mk_ok(n: i64) -> Result<i64, text>:
+    if n > 0:
+        Ok(n)
+    else:
+        Err("neg")
+
+fn unwrap_if_val(n: i64) -> i64:
+    if val Ok(value) = mk_ok(n):
+        return value
+    0
+
+fn unwrap_if_val_expr(n: i64) -> i64:
+    val x = if val Ok(value) = mk_ok(n): value else: 0
+    x
+
+fn module_after_if_val(n: i64) -> bool:
+    if val Ok(value) = mk_ok(n):
+        val _ = value
+    val parsed = value.json_parse_value("1")
+    parsed.is_ok()
+
+fn module_after_while_val() -> bool:
+    var i = 3
+    while val Ok(value) = mk_ok(i):
+        i = i - 1
+    val parsed = value.json_parse_value("2")
+    parsed.is_ok()
+
+fn while_val_sum() -> i64:
+    var i = 3
+    var total = 0
+    while val Ok(value) = mk_ok(i):
+        total = total + value
+        i = i - 1
+    total
+
+fn closure_captures_if_val(n: i64) -> i64:
+    if val Ok(value) = mk_ok(n):
+        val f = \: value + 1
+        return f()
+    0
+
+fn mk_some(n: i64) -> Option<i64>:
+    if n > 0:
+        Some(n)
+    else:
+        None
+
+# (2) outer local of the same name: body write must hit the binding, not the outer.
+fn outer_local_if_val(n: i64) -> i64:
+    var value = 100
+    if val Ok(value) = mk_ok(n):
+        value = value + 1
+    value
+
+fn outer_local_match(n: i64) -> i64:
+    var value = 100
+    match mk_ok(n):
+        case Ok(value):
+            value = value + 1
+        case Err(e):
+            value = -1
+    value
+
+fn outer_local_while_val() -> i64:
+    var value = 100
+    var i = 3
+    while val Ok(value) = mk_ok(i):
+        value = value * 2
+        i = i - 1
+    value
+
+# body writes a DIFFERENT outer var: must persist
+fn other_outer_write(n: i64) -> i64:
+    var total = 1
+    if val Ok(value) = mk_ok(n):
+        total = total + value
+    total
+
+# (1) break / continue / early return paths
+fn module_after_break() -> bool:
+    var i = 3
+    while val Ok(value) = mk_ok(i):
+        i = i - 1
+        if i == 1:
+            break
+    val parsed = value.json_parse_value("3")
+    parsed.is_ok()
+
+fn continue_sum() -> i64:
+    var i = 4
+    var total = 0
+    while val Ok(value) = mk_ok(i):
+        i = i - 1
+        if value == 2:
+            continue
+        total = total + value
+    val parsed = value.json_parse_value("4")
+    if parsed.is_ok(): total else: -1
+
+fn module_after_nested_return(n: i64) -> bool:
+    var ok = false
+    if n > 0:
+        if val Ok(value) = mk_ok(n):
+            ok = value == n
+    val parsed = value.json_parse_value("5")
+    ok and parsed.is_ok()
+
+# nested same-name bindings
+fn nested_same_name(n: i64) -> i64:
+    if val Ok(value) = mk_ok(n):
+        if val Ok(value) = mk_ok(n + 10):
+            val _ = value
+        return value
+    0
+
+# plain identifier form (LetBind::Bind arm), statement position
+fn module_after_plain_if_val(n: i64) -> bool:
+    if val value = mk_some(n):
+        val _ = value
+    val parsed = value.json_parse_value("6")
+    parsed.is_ok()
+
+fn plain_if_val_binds(n: i64) -> i64:
+    if val value = mk_some(n):
+        return value
+    0
+
+# elif val
+fn elif_val(n: i64) -> i64:
+    if n > 100:
+        return -1
+    elif val Ok(value) = mk_ok(n):
+        return value
+    0
+
+fn module_after_elif_val(n: i64) -> bool:
+    if n > 100:
+        val _ = 0
+    elif val Ok(value) = mk_ok(n):
+        val _ = value
+    val parsed = value.json_parse_value("7")
+    parsed.is_ok()
+
+# expression form, module after
+fn module_after_expr_if_val(n: i64) -> bool:
+    val x = if val Ok(value) = mk_ok(n): value else: 0
+    val parsed = value.json_parse_value("8")
+    x == n and parsed.is_ok()
+
+# closure created inside, called after the block
+fn closure_after_block(n: i64) -> i64:
+    var f = \: 0
+    if val Ok(value) = mk_ok(n):
+        f = \: value + 1
+    f()
+
+fn closure_after_match(n: i64) -> i64:
+    var f = \: 0
+    match mk_ok(n):
+        case Ok(value):
+            f = \: value + 1
+        case Err(e):
+            f = \: -1
+    f()
+
+# if val as last statement (exec_if_core), module after in caller-less position
+fn if_val_core_tail(n: i64) -> i64:
+    if val Ok(value) = mk_ok(n):
+        value * 3
+
+describe "module name vs match binding":
+    it "Ok(value) binds the payload, not the module":
+        expect(unwrap_ok(Ok(7))).to_equal(7)
+    it "Some(value) binds the payload, not the module":
+        expect(unwrap_some(Some(9))).to_equal(9)
+    it "if val Ok(value) binds the payload, not the module":
+        expect(unwrap_if_val(7)).to_equal(7)
+    it "if val Ok(value) in expression position binds the payload":
+        expect(unwrap_if_val_expr(8)).to_equal(8)
+    it "while val Ok(value) binds each payload, not the module":
+        expect(while_val_sum()).to_equal(6)
+    it "module stays reachable after an if val block":
+        expect(module_after_if_val(5)).to_equal(true)
+    it "module stays reachable after a while val loop":
+        expect(module_after_while_val()).to_equal(true)
+    it "closure captures the if val payload":
+        expect(closure_captures_if_val(4)).to_equal(5)
+    it "qualified module access still works when no local shadows":
+        val parsed = json_parse_value("1")
+        expect(parsed.is_ok()).to_equal(true)
+
+describe "block-scoped pattern bindings (if/elif/while val)":
+    it "if val: body write goes to the binding, outer local restored":
+        expect(outer_local_if_val(5)).to_equal(100)
+    it "match: body write goes to the binding, outer local restored":
+        expect(outer_local_match(5)).to_equal(100)
+    it "while val: outer local restored after loop":
+        expect(outer_local_while_val()).to_equal(100)
+    it "body write to a different outer var persists":
+        expect(other_outer_write(5)).to_equal(6)
+    it "module reachable after break out of while val":
+        expect(module_after_break()).to_equal(true)
+    it "continue inside while val keeps the sum right and module reachable":
+        expect(continue_sum()).to_equal(8)
+    it "module reachable after nested if val":
+        expect(module_after_nested_return(3)).to_equal(true)
+    it "nested same-name if val restores the outer binding":
+        expect(nested_same_name(2)).to_equal(2)
+    it "plain if val NAME binds the payload":
+        expect(plain_if_val_binds(4)).to_equal(4)
+    it "module reachable after plain if val NAME block":
+        expect(module_after_plain_if_val(4)).to_equal(true)
+    it "elif val binds the payload":
+        expect(elif_val(6)).to_equal(6)
+    it "module reachable after elif val":
+        expect(module_after_elif_val(6)).to_equal(true)
+    it "module reachable after expression-form if val":
+        expect(module_after_expr_if_val(9)).to_equal(true)
+    it "closure made in if val body still sees payload after block":
+        expect(closure_after_block(4)).to_equal(5)
+    it "closure made in match arm still sees payload after arm":
+        expect(closure_after_match(4)).to_equal(5)
+    it "if val as tail statement yields the value":
+        expect(if_val_core_tail(2)).to_equal(6)
