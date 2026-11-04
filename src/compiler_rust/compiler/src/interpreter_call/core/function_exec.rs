@@ -1355,6 +1355,39 @@ fn trap_self_write(site: &str, func_name: &str, caller_name: &str, value: &Value
     );
 }
 
+/// Split a field-argument receiver into its root identifier and the
+/// intermediate field names: `o.h` -> ("o", ["h"]), `o` -> ("o", []).
+fn field_receiver_path(receiver: &simple_parser::ast::Expr) -> Option<(String, Vec<String>)> {
+    match receiver {
+        simple_parser::ast::Expr::Identifier(obj) => Some((obj.clone(), Vec::new())),
+        simple_parser::ast::Expr::FieldAccess { receiver, field } => {
+            let (obj, mut path) = field_receiver_path(receiver)?;
+            path.push(field.clone());
+            Some((obj, path))
+        }
+        _ => None,
+    }
+}
+
+/// Set `root.<path...>.<field> = new`, copy-on-write along the path. False
+/// when the path does not resolve through objects.
+fn set_nested_field(root: &mut Value, path: &[String], field: String, new: Value) -> bool {
+    let Value::Object { fields, .. } = root else {
+        return false;
+    };
+    let fields = Arc::make_mut(fields);
+    match path.split_first() {
+        None => {
+            fields.insert(field, new);
+            true
+        }
+        Some((head, rest)) => match fields.get_mut(head) {
+            Some(child) => set_nested_field(child, rest, field, new),
+            None => false,
+        },
+    }
+}
+
 fn park_written_back_arguments(
     func: &FunctionDef,
     args: &[Argument],
@@ -1373,6 +1406,17 @@ fn park_written_back_arguments(
             continue;
         }
         if !outer_env.is_local(caller_name.as_str()) {
+            continue;
+        }
+        // `f(x.items, x)`: the Field write-back reads `x` from the caller
+        // frame, so a Nil placeholder there would drop the write.
+        let is_field_receiver_root = args.iter().any(|a| match &a.value {
+            simple_parser::ast::Expr::FieldAccess { receiver, .. } => {
+                field_receiver_path(receiver).is_some_and(|(root, _)| root == *caller_name)
+            }
+            _ => false,
+        });
+        if is_field_receiver_root {
             continue;
         }
         let parkable = match outer_env.get(caller_name.as_str()) {
@@ -1630,6 +1674,9 @@ fn write_back_mutable_arguments(
             },
             Field {
                 obj_name: String,
+                // Intermediate fields between `obj_name` and `field_name`
+                // (`o.h.items` -> ["h"]); empty for the one-level case.
+                path: Vec<String>,
                 field_name: String,
                 param_name: String,
             },
@@ -1669,14 +1716,14 @@ fn write_back_mutable_arguments(
                     param_name: param.name.clone(),
                 }
             } else if let simple_parser::ast::Expr::FieldAccess { receiver, field } = &arg.value {
-                if let simple_parser::ast::Expr::Identifier(obj) = receiver.as_ref() {
-                    ArgSource::Field {
-                        obj_name: obj.clone(),
+                match field_receiver_path(receiver) {
+                    Some((obj, path)) => ArgSource::Field {
+                        obj_name: obj,
+                        path,
                         field_name: field.clone(),
                         param_name: param.name.clone(),
-                    }
-                } else {
-                    continue;
+                    },
+                    None => continue,
                 }
             } else {
                 continue;
@@ -1763,6 +1810,7 @@ fn write_back_mutable_arguments(
             }
             ArgSource::Field {
                 obj_name,
+                path,
                 field_name,
                 param_name,
             } => {
@@ -1774,9 +1822,31 @@ fn write_back_mutable_arguments(
                     .find(|p| p.name == param_name)
                     .map(|p| p.mutability.is_mutable())
                     .unwrap_or(false);
+                if !path.is_empty() {
+                    // Nested receiver (`o.h.items`): only an explicit `mut`
+                    // parameter writes back, through the whole field path.
+                    if !field_param_is_mut {
+                        continue;
+                    }
+                    if let Some(callee_val) = local_env.get(&param_name).cloned() {
+                        if matches!(
+                            callee_val,
+                            Value::Array(_) | Value::ByteArray(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
+                        ) {
+                            if let Some(mut root) = outer_env.get(&obj_name).cloned() {
+                                if set_nested_field(&mut root, &path, field_name.clone(), callee_val) {
+                                    mut_field_written.insert((obj_name.clone(), path.join(".") + "." + &field_name));
+                                    outer_env.insert(obj_name, root);
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
                 if !field_param_is_mut
-                    && (mut_field_written.contains(&(obj_name.clone(), field_name.clone()))
-                        || mut_written.contains(&obj_name))
+                    && (mut_field_written.iter().any(|(o, f)| {
+                        *o == obj_name && (*f == field_name || f.starts_with(&format!("{field_name}.")))
+                    }) || mut_written.contains(&obj_name))
                 {
                     continue;
                 }

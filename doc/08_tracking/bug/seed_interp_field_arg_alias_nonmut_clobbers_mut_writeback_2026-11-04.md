@@ -17,10 +17,10 @@ Not related to the pure-Simple T1 bug `pure_simple_interp_copies_mut_struct_para
 Cross-arm follow-up: the Ident and Field arms now consult each other's mut-written sets
 (`f(h.items, h)` and `f(h, h.items)`, struct and class); four shapes added to the probe/spec.
 
-Known remaining gap: nested receiver `o.h.items` is not written back (the Field arm requires an
-Identifier receiver, ~function_exec.rs:1670); interpreter 1 vs JIT 2.
-
-Known remaining gap (class): `f(x.items, x)` with `fn(mut items: [i64], b: Box)` where `Box` is a
-`class`: interpreter 1, JIT 2. In the Field arm the caller's `x` reads as `Nil` at write-back time
-(obj_val == Nil; the aliased class arg appears moved out of the frame), so nothing can be written.
-Struct variant fixed. Not in the probe; needs a call-binding/move investigation.
+Both remaining gaps FIXED (2026-11-04), shapes added to the probe/spec (14 shapes):
+- Class `f(x.items, x)`: root cause was `park_written_back_arguments` parking `x` (identifier arg,
+  replaced by a `Nil` placeholder) so the Field arm read `x` as Nil. Fix: never park a name that is
+  also the root of a field-access argument receiver.
+- Nested receiver `f(o.h.items, ..)`: the Field arm now walks the receiver chain
+  (`field_receiver_path`) and writes back copy-on-write through the path (`set_nested_field`);
+  nested paths write back only for an explicit `mut` parameter.
