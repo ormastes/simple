@@ -1,0 +1,107 @@
+#!/bin/sh
+# Fail-closed guard: no file-lock call in the lockless SCV refresh paths.
+# Usage: check-no-refresh-file-lock.shs [--root DIR] [--selftest]
+# Verdict is the LAST stdout line. Exit 0 PASS / 1 FAIL / 2 ERROR.
+set -u
+
+PATTERN='file_lock\(|rt_file_lock\(|file_unlock\(|rt_file_unlock\(|workaround_host_lock|workaround_host_unlock|file_lock as |file_unlock as '
+
+# scan_tree ROOT -> prints verdict line, returns exit code
+scan_tree() {
+    root=$1
+    if [ ! -d "$root" ]; then
+        echo "ERROR — nothing was checked (root not found: $root)"
+        return 2
+    fi
+    list=$(mktemp) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
+    # Scope = the compile refresh paths made lockless by
+    # doc/05_design/compiler/scv/lockless_refresh.md: the compiler entrypoint
+    # inventory/authority owners, the compile_* SCV modules (source inventory,
+    # snapshot, snapshot retention) and the workaround index store/seam. Other
+    # SCV subsystems (journal, structural pack, managed build-retention store)
+    # keep their own authority and are deliberately outside this ratchet.
+    if [ -d "$root/src/app/compiler_entrypoint" ]; then
+        find "$root/src/app/compiler_entrypoint" -type f -name '*.spl' >> "$list"
+    fi
+    if [ -d "$root/src/lib/scv" ]; then
+        find "$root/src/lib/scv" -type f -name 'compile_*.spl' >> "$list"
+    fi
+    for f in src/app/bug/workaround_store.spl src/lib/nogc_async_mut/sosix/workaround_host.spl; do
+        [ -f "$root/$f" ] && echo "$root/$f" >> "$list"
+    done
+    n=$(wc -l < "$list" | tr -d ' ')
+    if [ "$n" -eq 0 ]; then
+        rm -f "$list"
+        echo "ERROR — nothing was checked (0 files scanned under $root)"
+        return 2
+    fi
+    sites=""
+    k=0
+    while IFS= read -r f; do
+        hits=$(grep -nE "$PATTERN" "$f" 2>/dev/null | grep -vE '^[0-9]+:[[:space:]]*#' | cut -d: -f1)
+        rel=${f#"$root"/}
+        for ln in $hits; do
+            k=$((k + 1))
+            sites="$sites $rel:$ln"
+        done
+    done < "$list"
+    rm -f "$list"
+    if [ "$k" -eq 0 ]; then
+        echo "PASS — $n file(s) scanned, 0 file-lock site(s) in lockless refresh paths"
+        return 0
+    fi
+    echo "FAIL — $n file(s) scanned, $k file-lock site(s):$sites"
+    return 1
+}
+
+selftest() {
+    tmp=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp -d failed)"; exit 2; }
+    pass=0
+    # (a) clean
+    a="$tmp/a"; mkdir -p "$a/src/lib/scv"
+    printf 'val x = file_atomic_write(p, d)\n  # file_lock(p, 5)\n' > "$a/src/lib/scv/compile_x.spl"
+    # An out-of-scope SCV module may still lock; it must not be scanned.
+    printf 'val h = file_lock(p, 5)\n' > "$a/src/lib/scv/journal_fixture.spl"
+    out=$(scan_tree "$a"); rc=$?
+    if [ "$rc" -eq 0 ]; then pass=$((pass + 1)); else echo "selftest (a) failed rc=$rc: $out"; fi
+    # (b) lock call
+    b="$tmp/b"; mkdir -p "$b/src/app/compiler_entrypoint"
+    printf 'fn f():\n    val h = file_lock(path, 5)\n' > "$b/src/app/compiler_entrypoint/y.spl"
+    out=$(scan_tree "$b"); rc=$?
+    case "$out" in *y.spl:2*) named=1 ;; *) named=0 ;; esac
+    if [ "$rc" -eq 1 ] && [ "$named" -eq 1 ]; then pass=$((pass + 1)); else echo "selftest (b) failed rc=$rc: $out"; fi
+    # (c) alias
+    c="$tmp/c"; mkdir -p "$c/src/lib/nogc_async_mut/sosix"
+    printf 'use x.{\n    file_lock as workaround_host_lock,\n}\n' > "$c/src/lib/nogc_async_mut/sosix/workaround_host.spl"
+    out=$(scan_tree "$c"); rc=$?
+    if [ "$rc" -eq 1 ]; then pass=$((pass + 1)); else echo "selftest (c) failed rc=$rc: $out"; fi
+    # (d) empty
+    d="$tmp/d"; mkdir -p "$d"
+    out=$(scan_tree "$d"); rc=$?
+    if [ "$rc" -eq 2 ]; then pass=$((pass + 1)); else echo "selftest (d) failed rc=$rc: $out"; fi
+    rm -rf "$tmp"
+    if [ "$pass" -ne 4 ]; then
+        echo "ERROR — nothing was checked (selftest: $pass/4 fixtures passed)"
+        exit 2
+    fi
+    echo "selftest: 4/4 fixtures passed"
+}
+
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+root=$(CDPATH= cd -- "$here/../.." && pwd)
+only_selftest=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) shift; root=${1:-}; [ -n "$root" ] || { echo "ERROR — nothing was checked (--root needs a value)"; exit 2; } ;;
+        --selftest) only_selftest=1 ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+    shift
+done
+
+selftest
+if [ "$only_selftest" -eq 1 ]; then
+    exit 0
+fi
+scan_tree "$root"
+exit $?

@@ -5,20 +5,20 @@ use app.io.mod.{dir_create, file_exists, file_read, process_run_bounded}
 use app.io.env_ops.{env_get}
 use std.nogc_sync_mut.io.stderr_ops.{stderr_write}
 use app.compiler_entrypoint.inventory_trace.{CompilerInventoryTraceV1, inventory_trace_create_v1}
-use app.compiler_entrypoint.inventory_refresh_lease.{CompilerInventoryRefreshLeaseV1, compiler_inventory_lock_wait_v1, compiler_inventory_lock_budget_v1}
 use std.common.crypto.sha256.{sha256_text}
 use std.scv.compile_source_inventory.{CompileSourceEventV1, compile_source_inventory_apply_observed_events_v1, compile_source_inventory_digest_valid_v1, compile_source_inventory_git_event_v1, compile_source_inventory_path_valid_v1, compile_source_inventory_read_pointer_content_v1}
 use std.scv.compile_source_inventory.{compile_source_inventory_cache_root_valid_v1,
     compile_source_inventory_revalidate_verified_pointer_v1,
     compile_source_inventory_event_path_v1, compile_source_inventory_read_at_pointer_v1,
     compile_source_inventory_filesystem_event_v1, CompileSourceInventoryEntryV1,
-    COMPILE_SOURCE_INVENTORY_MAX_BYTES_V1}
-use std.nogc_sync_mut.io.dir_ops.{dir_walk}
-use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
+    COMPILE_SOURCE_INVENTORY_MAX_BYTES_V1,
+    compile_source_inventory_publish_blob_v1, compile_source_inventory_gc_generations_v1}
+use std.nogc_sync_mut.io.dir_ops.{dir_walk, dir_list}
 use std.nogc_sync_mut.io.file_ops.{
-    file_atomic_write, file_delete, file_is_regular_no_follow, file_size,
-    file_read_regular_no_follow_bounded
+    file_delete, file_is_regular_no_follow, file_size,
+    file_read_regular_no_follow_bounded, file_modified_time
 }
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
 use app.compiler_entrypoint.inventory_scratch.{compiler_inventory_file_event_cost_v1}
 use app.compiler_entrypoint.inventory_binding_scratch.{compiler_inventory_binding_reason_v1}
@@ -630,12 +630,12 @@ fn compiler_inventory_membership_publish_v1(
         return CompilerInventoryMembershipPublicationV1("", false)
     val path = compiler_inventory_membership_path_v1(cache_root, digest)
     val already_exists = file_exists(path)
-    if not already_exists and not file_atomic_write(path, content):
+    # Content-addressed and immutable: stage privately, publish no-replace, and
+    # treat a winner holding identical bytes as our own publication.
+    if not compile_source_inventory_publish_blob_v1(path, content):
         return CompilerInventoryMembershipPublicationV1("", false)
     val admitted = compiler_inventory_membership_read_v1(cache_root, digest)
     if admitted == nil or admitted!.len() != paths.len():
-        if not already_exists:
-            val _discard = file_delete(path)
         return CompilerInventoryMembershipPublicationV1("", false)
     CompilerInventoryMembershipPublicationV1(digest, not already_exists)
 
@@ -697,8 +697,7 @@ fn compiler_inventory_untracked_deletions_v1(
 
 fn _compiler_inventory_refresh_observed_cost_v1(
     root: text, cache_root: text, source_roots: [text], cold_init: bool,
-    trace: CompilerInventoryTraceV1?, cost: ScvCompileCostV1?,
-    lease: CompilerInventoryRefreshLeaseV1
+    trace: CompilerInventoryTraceV1?, cost: ScvCompileCostV1?
 ) -> CompilerInventoryRefreshV1:
     # A cold refresh replaces the inventory, so source_roots must cover the
     # full intended inventory scope. The CLI admission owner supplies the
@@ -722,8 +721,9 @@ fn _compiler_inventory_refresh_observed_cost_v1(
         if source_roots.contains("examples/10_tooling") and cursor.untracked_examples_tooling_digest == "":
             return compiler_inventory_invalid_v1(
                 "examples-tooling-inventory-authority-missing (rerun with SIMPLE_SCV_INVENTORY_COLD_INIT=1)")
-    # Copy membership before releasing the snapshot lease. A concurrent
-    # publisher may retire the old immutable record while we observe Git.
+    # Membership records are immutable, content-addressed and retired only by
+    # age-based GC (compiler_inventory_gc_v1), so a concurrent publisher can
+    # never pull this record out from under an observer.
     var previous_membership: [text]? = nil
     if cursor.valid and not cold_init:
         previous_membership = compiler_inventory_membership_read_v1(
@@ -731,12 +731,10 @@ fn _compiler_inventory_refresh_observed_cost_v1(
         if previous_membership == nil:
             return compiler_inventory_invalid_v1(
                 "untracked-membership-record-invalid (rerun with SIMPLE_SCV_INVENTORY_COLD_INIT=1)")
-    if not lease.release():
-        return compiler_inventory_invalid_v1("compile-event-refresh-unlock-failed")
 
     # Generation blobs are immutable and retained by ordinary publication.
-    # Decode/authenticate the captured generation outside the cursor lease;
-    # the commit phase revalidates both its pointer and bytes before admission.
+    # Decode/authenticate the captured generation now; the commit phase
+    # revalidates both its pointer and bytes before admission.
     if cursor.valid and not cold_init:
         val detail = compiler_inventory_binding_reason_v1(
             cache_root, pointer_content, cursor.inventory_digest,
@@ -877,11 +875,9 @@ fn _compiler_inventory_refresh_observed_cost_v1(
         return compiler_inventory_invalid_v1("filesystem-event-journal-truncated")
     if not compiler_inventory_filesystem_families_valid_v1(root, filesystem_events!):
         return compiler_inventory_invalid_v1("filesystem-event-source-family-unsupported")
-    # Observation has no shared mutable ownership. Reacquire before touching
-    # membership records or publishing CURRENT, and discard stale deltas.
-    val resume_reason = lease.resume(pointer_content)
-    if resume_reason != "":
-        return compiler_inventory_invalid_v1(resume_reason)
+    # Observation has no shared mutable ownership and takes no lock. Publication
+    # below compares CURRENT against the captured pointer; a moved pointer is
+    # reported as superseded and the owner re-observes from the new base.
     if not cold_init and git_events.len() == 0 and filesystem_events!.len() == 0 and
             not membership_changed:
         # Match the exact canonical record publication would write. A changed
@@ -907,20 +903,20 @@ fn _compiler_inventory_refresh_observed_cost_v1(
             # but do not decode the same authenticated generation a second time.
             val reason = compile_source_inventory_revalidate_verified_pointer_v1(
                 cache_root, pointer_content, cursor.inventory_digest)
+            if reason == "publish-cursor-superseded":
+                return compiler_inventory_invalid_v1("compile-event-refresh-snapshot-superseded")
             if reason != "":
                 return compiler_inventory_invalid_v1("observed-event-apply:" + reason)
             if trace != nil: trace!.prepared(0, -1, membership_digest)
             return CompilerInventoryRefreshV1(
                 true, "ok", cursor.inventory_digest, cursor.inventory_generation)
     # Publish only after all journal checks pass. The immutable blob must
-    # exist before inventory CURRENT may name it, but a failed apply must not
-    # leave this refresh's newly created blob behind.
-    var membership_newly_written = false
+    # exist before inventory CURRENT may name it; a blob left behind by a
+    # failed or superseded apply is unreferenced and reclaimed by age-based GC.
     if cold_init or membership_changed:
         val published = compiler_inventory_membership_publish_v1(
             cache_root, next_membership_paths)
         membership_digest = published.digest
-        membership_newly_written = published.newly_written
     if membership_digest == "":
         return compiler_inventory_invalid_v1("untracked-membership-publish-failed")
     if trace != nil:
@@ -931,32 +927,53 @@ fn _compiler_inventory_refresh_observed_cost_v1(
         filesystem_digest, sha256_text(pointer_content), cold_init,
         untracked_src_digest, untracked_test_digest, membership_digest, examples_digest)
     if not inventory.valid:
-        if membership_newly_written and
-                (compile_source_inventory_read_pointer_content_v1(cache_root) ?? "") ==
-                    pointer_content:
-            # The refresh lock excludes other production publishers. Recheck
-            # the immutable content and pointer before deleting; uncertain
-            # ownership retains the record rather than deleting live state.
-            val still_ours = compiler_inventory_membership_read_v1(
-                cache_root, membership_digest)
-            if still_ours == nil or not file_delete(
-                    compiler_inventory_membership_path_v1(cache_root,
-                        membership_digest)):
-                return compiler_inventory_invalid_v1(
-                    "untracked-membership-cleanup-failed:" + inventory.reason)
+        if compiler_inventory_publication_superseded_v1(inventory.reason):
+            return compiler_inventory_invalid_v1("compile-event-refresh-snapshot-superseded")
         return compiler_inventory_invalid_v1(
             "observed-event-apply:" + inventory.reason)
     if trace != nil: trace!.published(inventory.digest, inventory.inventory!.generation)
-    # This refresh lock covers every production membership-record reader.
-    # Retire the previous immutable blob only after CURRENT admits the new
-    # digest; a failed publication must leave the old cursor usable.
-    if cursor.valid and cursor.untracked_membership_digest != "" and
-            cursor.untracked_membership_digest != membership_digest:
-        val obsolete = compiler_inventory_membership_path_v1(
-            cache_root, cursor.untracked_membership_digest)
-        val _retired = file_delete(obsolete)
+    # Never retire the previous membership record here: a concurrent observer
+    # may still be reading it. Age-based GC reclaims unreferenced records.
+    val _reclaimed = compiler_inventory_gc_v1(cache_root, COMPILER_INVENTORY_GC_MIN_AGE_S)
     CompilerInventoryRefreshV1(
         true, "ok", inventory.digest, inventory.inventory!.generation)
+
+# Publication answers are wrapped (`inventory-publication-failed:<reason>`);
+# only these two reasons mean "a concurrent publisher won from our base".
+fn compiler_inventory_publication_superseded_v1(reason: text) -> bool:
+    reason.ends_with("publish-cursor-superseded") or
+        reason.ends_with("publish-superseded-by-newer-generation")
+
+# Unreferenced immutable records (generation blobs, membership records) are
+# reclaimed only when older than this. Shard children re-read their admitted
+# generation by digest for the whole build, so one day is the floor.
+val COMPILER_INVENTORY_GC_MIN_AGE_S: i64 = 86400
+
+# Lock-free reclamation: the only live references are the ones CURRENT names
+# at this instant; everything else older than the floor is garbage for every
+# sweeper, and a delete that loses to a concurrent sweep is not an error.
+fn compiler_inventory_gc_v1(cache_root: text, min_age_s: i64) -> i64:
+    if min_age_s <= 0:
+        return 0
+    var removed = compile_source_inventory_gc_generations_v1(cache_root, min_age_s)
+    val pointer_content = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+    val cursor = compiler_inventory_cursor_read_v1(cache_root, pointer_content)
+    val referenced = if cursor.valid: cursor.untracked_membership_digest else: ""
+    val directory = compiler_inventory_event_root_v1(cache_root) + "/untracked"
+    val now = time_now_unix_micros() / 1000000
+    for name in dir_list(directory):
+        if not name.ends_with(".paths"):
+            continue
+        val digest = name[:name.len() - ".paths".len()]
+        if digest == referenced or not compile_source_inventory_digest_valid_v1(digest):
+            continue
+        val path = "{directory}/{name}"
+        val modified = file_modified_time(path)
+        if modified <= 0 or now - modified < min_age_s:
+            continue
+        if file_delete(path):
+            removed = removed + 1
+    removed
 
 fn _compiler_inventory_refresh_owned_v1(
     root: text, cache_root: text, source_roots: [text], cold_init: bool,
@@ -973,33 +990,36 @@ fn _compiler_inventory_refresh_owned_cost_v1(
         return compiler_inventory_invalid_v1("inventory-cache-root-invalid")
     val event_root = compiler_inventory_event_root_v1(cache_root)
     if not dir_create(event_root, true):
-        return compiler_inventory_invalid_v1("compile-event-refresh-lock-directory-failed")
-    # Only a competing successful publication justifies observing again.
-    # Two attempts bound contention without repeating I/O/binding failures.
+        return compiler_inventory_invalid_v1("compile-event-root-create-failed")
+    # LOCKLESS: no lease, no writer lock. Only a competing successful
+    # publication justifies observing again (warm, from the winner's pointer).
+    # A bounded attempt count keeps I/O and binding failures from repeating.
     var attempt = 0
-    while attempt < 2:
+    var cold = cold_init
+    while attempt < COMPILER_INVENTORY_REFRESH_ATTEMPTS_V1:
         if attempt > 0 and trace != nil:
             # One terminal trace describes the final snapshot; do not append
             # duplicate expected-pointer fields or emit a discarded observation.
-            trace!.begin(root, source_roots, cold_init)
+            trace!.begin(root, source_roots, cold)
             trace!.observed_record = ""
             trace!.prepared_record = ""
             trace!.result_record = ""
-        val lease = CompilerInventoryRefreshLeaseV1(cache_root, trace, cost)
-        if not lease.acquire_waiting(compiler_inventory_lock_budget_v1()):
-            return compiler_inventory_invalid_v1("compile-event-refresh-lock-unavailable")
         val result = _compiler_inventory_refresh_observed_cost_v1(
-            root, cache_root, source_roots, cold_init, trace, cost, lease)
-        # A failed release has uncertain ownership. Do not close an invented
-        # descriptor or retry the transaction after that failure.
-        if result.reason == "compile-event-refresh-unlock-failed":
-            return result
-        if not lease.release():
-            return compiler_inventory_invalid_v1("compile-event-refresh-unlock-failed")
+            root, cache_root, source_roots, cold, trace, cost)
         if result.reason != "compile-event-refresh-snapshot-superseded":
             return result
+        # A competing cold publisher just listed this same checkout. Its
+        # pointer is a fresh, valid cursor, so re-observe WARM from it instead
+        # of walking every source again; N cold starters then converge in one
+        # cheap round rather than N expensive ones.
+        if cold:
+            val winner = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+            if compiler_inventory_cursor_read_v1(cache_root, winner).valid:
+                cold = false
         attempt = attempt + 1
     compiler_inventory_invalid_v1("compile-event-refresh-snapshot-superseded")
+
+val COMPILER_INVENTORY_REFRESH_ATTEMPTS_V1: i64 = 4
 
 # Explicit token seam is diagnostic-only. Tokens never enter an admission key.
 fn compiler_inventory_refresh_traced_v1(
@@ -1016,10 +1036,9 @@ fn compiler_inventory_refresh_traced_cost_v1(
     val result = _compiler_inventory_refresh_owned_cost_v1(
         root, cache_root, source_roots, cold_init, trace, cost)
     if trace != nil:
-        if trace!.lock_released:
-            trace!.finish(result.valid, result.reason, result.inventory_digest, result.inventory_generation)
-            trace!.emit()
-    elif token != "" and result.reason != "compile-event-refresh-unlock-failed":
+        trace!.finish(result.valid, result.reason, result.inventory_digest, result.inventory_generation)
+        trace!.emit()
+    elif token != "":
         stderr_write("inventory-trace-rejected-v1 reason=invalid-attempt-token\n")
     result
 
@@ -1057,11 +1076,12 @@ fn _compiler_inventory_extra_root_owns_v1(extra_roots: [text], identity: text) -
     false
 
 # SCV auto-add + commit for selectors outside the closed event families (an
-# entry such as build/hw/hello.spl). Under the refresh lock, re-derive their
-# rows from the filesystem and publish one generation that keeps the current
-# event cursor, so later family refreshes stay warm. Unchanged rows publish
-# nothing. A source mutated after this commit is refused by the snapshot
-# (snapshot-index-drift): freezing remains fail-closed.
+# entry such as build/hw/hello.spl). Lock-free: re-derive their rows from the
+# filesystem and publish one generation that keeps the current event cursor,
+# so later family refreshes stay warm. Unchanged rows publish nothing. A
+# concurrent publication supersedes the attempt and it is re-derived from the
+# winner's pointer. A source mutated after this commit is refused by the
+# snapshot (snapshot-index-drift): freezing remains fail-closed.
 fn compiler_inventory_admit_extra_roots_v1(
     root: text, cache_root: text, extra_roots: [text]
 ) -> CompilerInventoryRefreshV1:
@@ -1069,16 +1089,16 @@ fn compiler_inventory_admit_extra_roots_v1(
         return compiler_inventory_invalid_v1("inventory-cache-root-invalid")
     val event_root = compiler_inventory_event_root_v1(cache_root)
     if not dir_create(event_root, true):
-        return compiler_inventory_invalid_v1("compile-event-refresh-lock-directory-failed")
-    val refresh_lock = compiler_inventory_lock_wait_v1("{event_root}/refresh.lock", compiler_inventory_lock_budget_v1())
-    if refresh_lock < 0:
-        return compiler_inventory_invalid_v1("compile-event-refresh-lock-unavailable")
-    val result = _compiler_inventory_admit_extra_roots_locked_v1(root, cache_root, extra_roots)
-    if not file_unlock(refresh_lock):
-        return compiler_inventory_invalid_v1("compile-event-refresh-unlock-failed")
-    result
+        return compiler_inventory_invalid_v1("compile-event-root-create-failed")
+    var attempt = 0
+    while attempt < COMPILER_INVENTORY_REFRESH_ATTEMPTS_V1:
+        val result = _compiler_inventory_admit_extra_roots_unlocked_v1(root, cache_root, extra_roots)
+        if result.reason != "compile-event-refresh-snapshot-superseded":
+            return result
+        attempt = attempt + 1
+    compiler_inventory_invalid_v1("compile-event-refresh-snapshot-superseded")
 
-fn _compiler_inventory_admit_extra_roots_locked_v1(
+fn _compiler_inventory_admit_extra_roots_unlocked_v1(
     root: text, cache_root: text, extra_roots: [text]
 ) -> CompilerInventoryRefreshV1:
     val pointer_content = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
@@ -1131,11 +1151,14 @@ fn _compiler_inventory_admit_extra_roots_locked_v1(
         cursor.untracked_src_digest, cursor.untracked_test_digest,
         cursor.untracked_membership_digest, cursor.untracked_examples_tooling_digest)
     if not inventory.valid:
+        if compiler_inventory_publication_superseded_v1(inventory.reason):
+            return compiler_inventory_invalid_v1("compile-event-refresh-snapshot-superseded")
         return compiler_inventory_invalid_v1("extra-root-admission-apply:" + inventory.reason)
     CompilerInventoryRefreshV1(
         true, "ok", inventory.digest, inventory.inventory!.generation)
 
 export compiler_inventory_git_lines_v1, compiler_inventory_git_bound_ms_v1
+export compiler_inventory_gc_v1, COMPILER_INVENTORY_GC_MIN_AGE_S
 export compiler_inventory_cursor_present_v1, compiler_inventory_admit_extra_roots_v1
 export compiler_inventory_refresh_traced_v1
 export compiler_inventory_refresh_traced_cost_v1

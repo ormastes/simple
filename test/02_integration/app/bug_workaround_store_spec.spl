@@ -1,17 +1,33 @@
 # REQ-003 REQ-005 NFR-002 NFR-003 NFR-004
+# Lockless workaround index (doc/05_design/compiler/scv/lockless_refresh.md):
+# per-writer immutable fragments under .simple/workarounds.d/, merged at read.
 use std.spec.{describe, it, expect, step}
 use app.bug.workaround_store.{workaround_status_paths, workaround_tracked_paths,
     workaround_source_candidate, refresh_workarounds_at, load_workarounds_at}
+use app.bug.workaround_index.{encode_workaround_index}
 use std.nogc_async_mut.sosix.workaround_host.{workaround_host_read,
     workaround_host_publish, workaround_host_mkdir, workaround_host_process,
-    workaround_host_temp_dir, workaround_host_remove,
-    workaround_host_lock, workaround_host_unlock}
+    workaround_host_temp_dir, workaround_host_remove, workaround_host_exists,
+    workaround_host_list}
 
 fn workaround_test_git(root: text, args: [text]):
     var invocation = ["-C", root]
     for arg in args: invocation.push(arg)
     val (_, _, code) = workaround_host_process("git", invocation, 30000, 1048576)
     expect(code).to_equal(0)
+
+# The merged, persisted state as bytes: what a reader resolves right now.
+fn admitted_state(root: text) -> text:
+    match load_workarounds_at(root):
+        case Ok(index): encode_workaround_index(index)
+        case Err(reason): "ERR:" + reason
+
+fn fragment_names(root: text) -> [text]:
+    var names: [text] = []
+    for name in workaround_host_list(root + "/.simple/workarounds.d"):
+        if name.ends_with(".sdn"): names.push(name)
+    names.sort()
+    names
 
 describe "workaround store maintenance":
     it "retains both rename paths and ignores documentation and vendored code":
@@ -28,29 +44,16 @@ describe "workaround store maintenance":
         expect(workaround_status_paths(status).unwrap()).to_equal(
             ["src/a.spl", "src/new name.spl", "src/copy.spl"])
 
-    it "rejects writer contention before Git discovery and releases failed discovery":
+    it "reaches the failing Git owner without any writer lock":
         step("An unborn repository has no usable HEAD for refresh")
         expect(workaround_host_mkdir("build/test-artifacts")).to_equal(true)
-        val root = workaround_host_temp_dir("build/test-artifacts", "workaround-lock-first-").unwrap()
+        val root = workaround_host_temp_dir("build/test-artifacts", "workaround-lockless-").unwrap()
         workaround_test_git(root, ["init", "-q"])
-        expect(workaround_host_mkdir(root + "/.simple")).to_equal(true)
-        val lock_path = root + "/.simple/workarounds.sdn.lock"
-        val held = workaround_host_lock(lock_path, 1)
-        expect(held >= 0).to_equal(true)
-        val contended = refresh_workarounds_at(root, false, [])
-        val released = workaround_host_unlock(held)
-        expect(released).to_equal(true)
-        expect(contended.is_err()).to_equal(true)
-        expect(contended.unwrap_err()).to_equal("workaround writer lock unavailable")
-        step("Without contention the same request reaches the failing Git owner")
         val discovery_failed = refresh_workarounds_at(root, false, [])
         expect(discovery_failed.is_err()).to_equal(true)
         expect(discovery_failed.unwrap_err()).to_start_with("workaround Git failed (")
-        val reacquired = workaround_host_lock(lock_path, 1)
-        val reacquired_ok = reacquired >= 0
-        val reacquired_released = if reacquired_ok: workaround_host_unlock(reacquired) else: false
-        expect(reacquired_ok).to_equal(true)
-        expect(reacquired_released).to_equal(true)
+        expect(workaround_host_exists(root + "/.simple/workarounds.sdn.lock")).to_equal(false)
+        expect(fragment_names(root).len()).to_equal(0)
         expect(load_workarounds_at(root).is_err()).to_equal(true)
 
     it "publishes complete batches and preserves bytes on malformed or unknown links":
@@ -70,41 +73,43 @@ describe "workaround store maintenance":
         val initial = refresh_workarounds_at(root, true, []).unwrap()
         expect(initial.complete).to_equal(true)
         expect(initial.links.len()).to_equal(1)
+        expect(fragment_names(root).len()).to_equal(1)
         step("Fullscan includes untracked source markers already supported by incremental refresh")
         val untracked = root + "/src/untracked.spl"
         expect(workaround_host_publish(untracked, "# @workaround bug=sample_bug\nfn b(): 1\n")).to_equal(true)
         expect(refresh_workarounds_at(root, true, []).unwrap().links.len()).to_equal(2)
         expect(workaround_host_remove(untracked)).to_equal(true)
         expect(refresh_workarounds_at(root, true, []).unwrap().links.len()).to_equal(1)
-        val index_path = root + "/.simple/workarounds.sdn"
-        val admitted = workaround_host_read(index_path, 16777216).unwrap()
+        val admitted = admitted_state(root)
+        expect(admitted.starts_with("ERR:")).to_equal(false)
 
-        step("An unchanged refresh returns the admitted state")
+        step("An unchanged refresh returns the admitted state and publishes nothing")
+        val fragments_before = fragment_names(root).len()
         val unchanged = refresh_workarounds_at(root, false, ["src/a.spl"]).unwrap()
         expect(unchanged.complete).to_equal(true)
         expect(unchanged.links.len()).to_equal(1)
         expect(unchanged.revision).to_equal(initial.revision)
-        expect(workaround_host_read(index_path, 16777216).unwrap()).to_equal(admitted)
+        expect(admitted_state(root)).to_equal(admitted)
+        expect(fragment_names(root).len()).to_equal(fragments_before)
 
-        step("A competing writer cannot publish while the index lock is held")
-        val held_lock = workaround_host_lock(root + "/.simple/workarounds.sdn.lock", 1)
-        expect(held_lock >= 0).to_equal(true)
-        val contended = refresh_workarounds_at(root, false, ["src/a.spl"])
-        val released = workaround_host_unlock(held_lock)
-        expect(released).to_equal(true)
-        expect(contended.is_err()).to_equal(true)
-        match contended:
-            case Err(reason): expect(reason).to_equal("workaround writer lock unavailable")
-            case Ok(_): expect(false).to_equal(true)
-        expect(workaround_host_read(index_path, 16777216).unwrap()).to_equal(admitted)
+        step("A competing writer's delta on another path is merged, never lost")
+        val competitor = root + "/src/c.spl"
+        expect(workaround_host_publish(competitor, "# @workaround bug=sample_bug\nfn c(): 1\n")).to_equal(true)
+        expect(refresh_workarounds_at(root, false, ["src/c.spl"]).unwrap().links.len()).to_equal(2)
+        expect(refresh_workarounds_at(root, false, ["src/a.spl"]).unwrap().links.len()).to_equal(2)
+        expect(load_workarounds_at(root).unwrap().links.len()).to_equal(2)
+        expect(workaround_host_remove(competitor)).to_equal(true)
+        expect(refresh_workarounds_at(root, false, ["src/c.spl"]).unwrap().links.len()).to_equal(1)
+        expect(admitted_state(root)).to_equal(admitted)
+        expect(workaround_host_exists(root + "/.simple/workarounds.sdn.lock")).to_equal(false)
 
         step("Reject the entire batch and retain the admitted index")
         expect(workaround_host_publish(source, "# @workaround bug=missing_bug\nfn a(): 2\n")).to_equal(true)
         expect(refresh_workarounds_at(root, false, ["src/a.spl"]).is_err()).to_equal(true)
-        expect(workaround_host_read(index_path, 16777216).unwrap()).to_equal(admitted)
+        expect(admitted_state(root)).to_equal(admitted)
         expect(workaround_host_publish(source, "# @workaround bug=sample_bug recover=bad\nfn a(): 2\n")).to_equal(true)
         expect(refresh_workarounds_at(root, false, ["src/a.spl"]).is_err()).to_equal(true)
-        expect(workaround_host_read(index_path, 16777216).unwrap()).to_equal(admitted)
+        expect(admitted_state(root)).to_equal(admitted)
 
         step("Read the persisted index independently of invalid source contents")
         expect(load_workarounds_at(root).unwrap().links.len()).to_equal(1)
@@ -122,18 +127,25 @@ describe "workaround store maintenance":
         expect(refresh_workarounds_at(root, false, []).unwrap().complete).to_equal(false)
         expect(refresh_workarounds_at(root, true, []).unwrap().complete).to_equal(true)
 
-        step("Only explicit fullscan repairs a corrupt derived index")
-        expect(workaround_host_publish(index_path, "corrupt\n")).to_equal(true)
+        step("Only explicit fullscan repairs a corrupt derived fragment")
+        val names = fragment_names(root)
+        expect(names.len() > 0).to_equal(true)
+        val newest = root + "/.simple/workarounds.d/" + names[names.len() - 1]
+        expect(workaround_host_publish(newest, "corrupt\n")).to_equal(true)
         expect(refresh_workarounds_at(root, false, []).is_err()).to_equal(true)
-        expect(workaround_host_read(index_path, 16777216).unwrap()).to_equal("corrupt\n")
+        expect(workaround_host_read(newest, 16777216).unwrap()).to_equal("corrupt\n")
         expect(refresh_workarounds_at(root, true, []).unwrap().complete).to_equal(true)
+        expect(load_workarounds_at(root).is_ok()).to_equal(true)
 
         step("Pending canonical WAL prevents publishing a stale bug snapshot")
-        val before_wal = workaround_host_read(index_path, 16777216).unwrap()
+        val before_wal = admitted_state(root)
         expect(workaround_host_publish(root + "/doc/08_tracking/bug/bug_db.sdn.wal", "pending\n")).to_equal(true)
         expect(workaround_host_publish(source, "# @workaround bug=sample_bug\nfn a(): 1\n")).to_equal(true)
-        expect(refresh_workarounds_at(root, false, []).is_err()).to_equal(true)
-        expect(workaround_host_read(index_path, 16777216).unwrap()).to_equal(before_wal)
+        # The file equals HEAD again, so Git status does not list it; name it.
+        val wal_refused = refresh_workarounds_at(root, false, ["src/a.spl"])
+        expect(wal_refused.is_err()).to_equal(true)
+        expect(wal_refused.unwrap_err()).to_equal("checkpoint the canonical bug database WAL before workaround refresh")
+        expect(admitted_state(root)).to_equal(before_wal)
 
         step("An empty marker batch needs no bug database snapshot")
         expect(workaround_host_publish(source, "fn a(): 1\n")).to_equal(true)
@@ -141,3 +153,15 @@ describe "workaround store maintenance":
         val empty_batch = refresh_workarounds_at(root, false, ["src/a.spl"]).unwrap()
         expect(empty_batch.complete).to_equal(true)
         expect(empty_batch.links.len()).to_equal(0)
+
+    it "reads a legacy single-file index until the first fragment is published":
+        expect(workaround_host_mkdir("build/test-artifacts")).to_equal(true)
+        val root = workaround_host_temp_dir("build/test-artifacts", "workaround-legacy-").unwrap()
+        expect(workaround_host_mkdir(root + "/.simple")).to_equal(true)
+        val revision = "0123456789abcdef0123456789abcdef01234567"
+        expect(workaround_host_publish(root + "/.simple/workarounds.sdn",
+            "workaround_index |schema, revision, complete|\n    1, \"{revision}\", true\nworkarounds |bug_id, path, line, recover, reason|\n    \"legacy_bug\", \"src/l.spl\", 4, \"\", \"legacy\"\n")).to_equal(true)
+        val legacy = load_workarounds_at(root).unwrap()
+        expect(legacy.complete).to_equal(true)
+        expect(legacy.links.len()).to_equal(1)
+        expect(legacy.links[0].bug_id).to_equal("legacy_bug")
