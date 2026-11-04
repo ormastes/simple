@@ -1,6 +1,8 @@
 # Shared admission for existing lint --fix and simple fix routes.
 # Coordinates use the same text indices as Replacement producers and slicing.
 use std.tooling.easy_fix.types.{EasyFix, Replacement, FixApplicator, easyfix_replacements, easyfix_sort_replacements_descending}
+use std.tooling.easy_fix.snapshot.{SourceSnapshot, ValidationReport, validation_ok, validation_failed}
+use compiler.tools.fix.node_view_walk.{source_parses}
 
 pub fn validated_fix_sources(fixes: [EasyFix], sources: Dict<text, text>) -> Result<Dict<text, text>, text>:
     var buckets: Dict<text, [Replacement]> = {}
@@ -37,3 +39,41 @@ pub fn validated_fix_sources(fixes: [EasyFix], sources: Dict<text, text>) -> Res
                     return Err("{location}: fixes overlap or share an insertion point; choose one fix and rerun lint")
             previous = Some(replacement)
     FixApplicator.apply(fixes, sources)
+
+# ----------------------------------------------------------------------------
+# rev-3 staged validation (fail closed, every proposal set, every caller):
+#   version  — a snapshot-bound proposal must name the analysed revision
+#   edits    — validated_fix_sources: bounds, coordinates, overlap, insertion point
+#   reparse  — every changed file must still parse
+# Returns the report plus the new sources (empty on failure).
+# ----------------------------------------------------------------------------
+
+pub struct FixValidation:
+    report: ValidationReport
+    new_sources: Dict<text, text>
+
+fn _validation_failure(stage: text, error: text) -> FixValidation:
+    val empty: Dict<text, text> = {}
+    FixValidation(report: validation_failed(stage, error), new_sources: empty)
+
+pub fn validate_fix_proposals(fixes: [EasyFix], snapshots: Dict<text, SourceSnapshot>) -> FixValidation:
+    var sources: Dict<text, text> = {}
+    for path in snapshots.keys():
+        sources[path] = snapshots[path].source
+    for fix in fixes:
+        if fix.base_version == "": continue
+        for replacement in easyfix_replacements(fix):
+            if snapshots.has(replacement.file) and snapshots[replacement.file].version != fix.base_version:
+                return _validation_failure("version", "{replacement.file}: proposal {fix.id} was computed against a different revision; rerun analysis")
+    var failure = ""
+    var new_sources: Dict<text, text> = {}
+    match validated_fix_sources(fixes, sources):
+        case Err(e): failure = e
+        case Ok(admitted): new_sources = admitted
+    if failure != "":
+        return _validation_failure("edits", failure)
+    for path in new_sources.keys():
+        if new_sources[path] != sources[path] and not source_parses(path, new_sources[path]):
+            return _validation_failure("reparse", "{path}: applying the proposals produces source that does not parse; no edit returned")
+    FixValidation(report: validation_ok(), new_sources: new_sources)
+

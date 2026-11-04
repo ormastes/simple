@@ -10,6 +10,7 @@ use compiler.tools.lint.main.{
     run_lint_source_with_linter_policy, simple_lint_adapter_result,
     simple_lint_verdict_name, simple_lint_human_summary}
 use lazy compiler.tools.fix.main.{collect_fixes_from_source, FixToolApplicator, apply_fixes_to_disk, fix_read_source}
+use lazy compiler.tools.fix.engine.{fix_filter_by_code, fix_validate, fix_outcome_diff, snapshots_from_sources}
 use lazy compiler.tools.fix.rules.impl_.lint_simd.{check_simd_opportunities, easyfix_id_text, easyfix_description_text}
 use lazy compiler.tools.fix.rules.{check_short_grammar_refactor}
 use std.tooling.easy_fix.{FixConfidence}
@@ -419,14 +420,21 @@ fn run_fix_command(args: [text]) -> i64:
     var dry_run = false
     var fix_all = false
     var fix_id: text = ""
+    var preview = false
+    var diagnostic: text = ""
     var files: [text] = []
     for arg in args:
         if arg == "--dry-run":
             dry_run = true
+        elif arg == "--preview":
+            dry_run = true
+            preview = true
         elif arg == "--fix-all":
             fix_all = true
         elif arg.starts_with("--fix-id="):
             fix_id = arg.slice(9)
+        elif arg.starts_with("--diagnostic="):
+            diagnostic = arg.slice(13)
         elif arg == "fix":
             val _ = 0
         elif not arg.starts_with("-"):
@@ -437,8 +445,10 @@ fn run_fix_command(args: [text]) -> i64:
         print ""
         print "Options:"
         print "  --dry-run   Show what would be fixed without applying"
+        print "  --preview   Dry run plus a unified diff of the proposals"
         print "  --fix-all   Apply all fixes regardless of confidence"
         print "  --fix-id=ID Apply only fixes matching ID prefix"
+        print "  --diagnostic=CODE Only proposals with this diagnostic code (e.g. PANIC-W-INDEX)"
         return 1
 
     var exit_code = 0
@@ -461,7 +471,9 @@ fn run_fix_command(args: [text]) -> i64:
             continue
 
         var filtered = fixes
-        if not fix_all:
+        if diagnostic != "":
+            filtered = fix_filter_by_code(filtered, diagnostic)
+        elif not fix_all:
             filtered = FixToolApplicator.filter_by_confidence(filtered, FixConfidence.Safe)
         if fix_id != "":
             filtered = FixToolApplicator.filter_by_id(filtered, fix_id)
@@ -483,6 +495,8 @@ fn run_fix_command(args: [text]) -> i64:
                 print "  {fixreport_applied(report)} fix(es) applied"
                 for detail in fixreport_details(report):
                     print "  {detail}"
+                if preview:
+                    print fix_outcome_diff(fix_validate(filtered, snapshots_from_sources(sources)))
             case Err(e):
                 _cli_eprint("Error applying fixes to {file_path}: {e}")
                 exit_code = 1

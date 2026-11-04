@@ -1,0 +1,232 @@
+# `simple code <sub>` — the CLI surface of the shared source-edit core
+# (doc/05_design/app/lsp/closure_refactor.md §3).
+#   code refactor --closure <file|-> [--scope <glob>...] [--apply] [--json] [--name <n>] [--timeout-ms <n>]
+#   code ast <file.spl> [--json]
+# Preview (unified diff) is the default; `--apply` is the snapshot writer.
+# The same engine serves `simple fix`, lint --fix, the LSP and the MCP bridge.
+use std.io_runtime.{read_file, file_exists, dir_exists, dir_walk}
+use std.nogc_sync_mut.sffi.diag.{stdin_read_line, eprintln}
+use std.glob.{glob_match}
+use std.common.json.value.{JsonValue, json_value_object_from, json_value_serialize}
+use std.tooling.easy_fix.types.{EasyFix}
+use std.tooling.easy_fix.snapshot.{SourceSnapshot, source_snapshot}
+use std.tooling.easy_fix.node_view.{NodeView}
+use compiler.tools.fix.engine.{fix_validate, fix_outcome_diff, fix_outcome_json, fix_apply_outcome,
+    fix_outcome_changed_files}
+use compiler.tools.fix.closure_runner.{closure_admit, closure_collect, closure_default_binary}
+use compiler.tools.fix.producer.{fix_unit_from_source, fix_unit_views}
+
+pub struct CodeRefactorArgs:
+    closure_path: text
+    scopes: [text]
+    apply: bool
+    json: bool
+    name: text
+    timeout_ms: i64
+    error: text
+
+fn _usage() -> text:
+    "Usage: simple code refactor --closure <file.spl|-> [--scope <glob>...] [--apply] [--json]\n       simple code ast <file.spl> [--json]"
+
+pub fn parse_code_refactor_args(args: [text]) -> CodeRefactorArgs:
+    var out = CodeRefactorArgs(closure_path: "", scopes: [], apply: false, json: false, name: "closure",
+        timeout_ms: 120000, error: "")
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if a == "--closure" and i + 1 < args.len():
+            out.closure_path = args[i + 1]
+            i = i + 1
+        elif a == "--scope" and i + 1 < args.len():
+            out.scopes.push(args[i + 1].replace("\\", "/"))
+            i = i + 1
+        elif a == "--name" and i + 1 < args.len():
+            out.name = args[i + 1]
+            i = i + 1
+        elif a == "--timeout-ms" and i + 1 < args.len():
+            out.timeout_ms = int(args[i + 1]) ?? 120000
+            i = i + 1
+        elif a == "--apply": out.apply = true
+        elif a == "--json": out.json = true
+        elif a == "--dry-run": out.apply = false
+        elif a == "code" or a == "refactor": val _ = 0
+        else: out.error = "unknown argument: {a}"
+        i = i + 1
+    if out.closure_path == "" and out.error == "": out.error = "--closure <file.spl|-> is required"
+    if out.scopes.len() == 0: out.scopes.push("src/**/*.spl")
+    out
+
+# `**` matches any path prefix (directories included); the rest is std.glob.
+pub fn scope_matches(path: text, pattern: text) -> bool:
+    val p = path.replace("\\", "/")
+    val star = pattern.find("**")
+    if star < 0: return glob_match(p, pattern)
+    val prefix = pattern.slice(0, star)
+    var rest = pattern.slice(star + 2)
+    if rest.starts_with("/"): rest = rest.slice(1)
+    if not p.starts_with(prefix): return false
+    val tail = p.slice(prefix.len())
+    if rest == "": return true
+    # try every suffix of `tail` at a path-component boundary
+    var i = 0
+    while i <= tail.len():
+        if i == 0 or tail[i - 1] == "/":
+            if glob_match(tail.slice(i), rest): return true
+        i = i + 1
+    false
+
+fn _scope_root(pattern: text) -> text:
+    var root = pattern
+    val cut = root.find("*")
+    if cut >= 0: root = root.slice(0, cut)
+    val slash = root.rfind("/")
+    if slash >= 0: root = root.slice(0, slash)
+    if root == "": "." else: root
+
+pub fn scope_files(scopes: [text]) -> [text]:
+    var seen: Dict<text, bool> = {}
+    var files: [text] = []
+    for pattern in scopes:
+        if file_exists(pattern) and not dir_exists(pattern):
+            if not seen.has(pattern):
+                seen[pattern] = true
+                files.push(pattern.replace("\\", "/"))
+            continue
+        val root = _scope_root(pattern)
+        if not dir_exists(root): continue
+        for entry in dir_walk(root):
+            val path = entry.replace("\\", "/")
+            if not path.ends_with(".spl"): continue
+            if seen.has(path) or not scope_matches(path, pattern): continue
+            seen[path] = true
+            files.push(path)
+    files.sort()
+    files
+
+fn _read_closure(path: text) -> Result<text, text>:
+    if path == "-":
+        var lines: [text] = []
+        while true:
+            val line = stdin_read_line()
+            if line == nil: break
+            lines.push(line.unwrap())
+        return Ok(lines.join("\n"))
+    if not file_exists(path): return Err("closure file not found: {path}")
+    Ok(read_file(path))
+
+fn _print_notes(proposals: [EasyFix]):
+    for p in proposals:
+        if p.replacements.len() == 0 and p.description.starts_with("note: "):
+            print "{p.id}: {p.description}"
+
+pub fn run_code_refactor(args: [text]) -> i64:
+    val opts = parse_code_refactor_args(args)
+    if opts.error != "":
+        eprintln("Error: {opts.error}")
+        eprintln(_usage())
+        return 2
+    var closure_src = ""
+    match _read_closure(opts.closure_path):
+        case Err(e):
+            eprintln("Error: {e}")
+            return 2
+        case Ok(src): closure_src = src
+    var spec_name = opts.name
+    if spec_name == "closure" and opts.closure_path != "-":
+        var base = opts.closure_path.replace("\\", "/")
+        val slash = base.rfind("/")
+        if slash >= 0: base = base.slice(slash + 1)
+        if base.ends_with(".spl"): base = base.slice(0, base.len() - 4)
+        spec_name = base
+    val admitted = closure_admit(spec_name, closure_src)
+    if admitted.is_err():
+        eprintln("Error: {admitted.unwrap_err()}")
+        return 3
+    val spec = admitted.unwrap()
+    val files = scope_files(opts.scopes)
+    if files.len() == 0:
+        eprintln("Error: no .spl files match scope {opts.scopes.join(" ")}")
+        return 2
+    var snaps: [SourceSnapshot] = []
+    var by_path: Dict<text, SourceSnapshot> = {}
+    for f in files:
+        val snap = source_snapshot(f, read_file(f))
+        snaps.push(snap)
+        by_path[f] = snap
+    val collected = closure_collect(spec, snaps, closure_default_binary(), opts.timeout_ms)
+    if collected.is_err():
+        eprintln("Error: {collected.unwrap_err()}")
+        return 3
+    val proposals = collected.unwrap()
+    val outcome = fix_validate(proposals, by_path)
+    if opts.json:
+        print fix_outcome_json(outcome)
+        if not outcome.report.ok: return 1
+    else:
+        if not outcome.report.ok:
+            eprintln("Error: validation failed at stage {outcome.report.stage}: {outcome.report.errors.join("; ")}")
+            return 1
+        _print_notes(proposals)
+        val diff = fix_outcome_diff(outcome)
+        if diff == "":
+            print "No changes proposed by {spec.name} across {files.len()} file(s)"
+        else:
+            print diff
+    if not opts.apply:
+        if not opts.json:
+            print "Dry run: {fix_outcome_changed_files(outcome).len()} file(s) would change; rerun with --apply to write"
+        return 0
+    match fix_apply_outcome(outcome, false):
+        case Err(e):
+            eprintln("Error applying refactor: {e}")
+            return 1
+        case Ok(report):
+            if not opts.json:
+                print "Applied {report.applied} proposal(s) to {report.modified_files.len()} file(s)"
+                for r in report.receipts: print "  {r}"
+            return 0
+
+fn _view_json(v: NodeView) -> JsonValue:
+    json_value_object_from([
+        ("kind", JsonValue.Str(v.kind)), ("name", JsonValue.Str(v.name)), ("owner", JsonValue.Str(v.owner)),
+        ("ret_type", JsonValue.Str(v.ret_type)), ("receiver", JsonValue.Str(v.receiver)),
+        ("args", JsonValue.Str(v.args_text)), ("text", JsonValue.Str(v.text)),
+        ("start", JsonValue.Int(v.start)), ("end", JsonValue.Int(v.end)),
+        ("line", JsonValue.Int(v.line)), ("col", JsonValue.Int(v.col)),
+        ("in_unsafe", JsonValue.Bool(v.in_unsafe)), ("module", JsonValue.Str(v.module_path))])
+
+pub fn run_code_ast(args: [text]) -> i64:
+    var file = ""
+    var json = false
+    for a in args:
+        if a == "--json": json = true
+        elif a == "code" or a == "ast": val _ = 0
+        elif not a.starts_with("-"): file = a
+    if file == "" or not file_exists(file):
+        eprintln(_usage())
+        return 2
+    val views = fix_unit_views(fix_unit_from_source(file, read_file(file)))
+    if json:
+        var items: [JsonValue] = []
+        for v in views: items.push(_view_json(v))
+        print json_value_serialize(json_value_object_from([("file", JsonValue.Str(file)), ("views", JsonValue.Array(items))]))
+    else:
+        for v in views:
+            print "{v.line}:{v.col} {v.kind} {v.name} [{v.start}..{v.end}]{if v.in_unsafe: " unsafe" else: ""} {v.text.replace("\n", "\\n")}"
+    0
+
+pub fn run_code_command(args: [text]) -> i64:
+    var sub = ""
+    for a in args:
+        if a != "code" and not a.starts_with("-"):
+            sub = a
+            break
+    if args.contains("--help") or args.contains("-h") or sub == "":
+        print _usage()
+        return if sub == "": 1 else: 0
+    if sub == "refactor": return run_code_refactor(args)
+    if sub == "ast": return run_code_ast(args)
+    eprintln("Error: unknown subcommand: {sub}")
+    eprintln(_usage())
+    2
+

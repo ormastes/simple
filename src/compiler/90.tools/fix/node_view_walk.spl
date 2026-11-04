@@ -1,0 +1,296 @@
+@allow(unnamed_duplicate_typed_args) # reason: positional API -- arg order is conventional
+# Shared source-edit core — builds snapshot-bound NodeViews from the pure
+# Simple parser. This is the ONLY place that knows the AST pool; producers and
+# user closures see NodeView values. Spans are byte offsets into the source.
+use compiler.core.parser.{parse_module_silent_checked}
+use compiler.core.ast.{DECL_CLASS, DECL_FN, DECL_STRUCT, decl_get_name, decl_get_span, decl_get_tag,
+    decl_get_param_names, decl_get_type_params, module_get_decls}
+use compiler.core.ast_expr.{EXPR_CALL, EXPR_IDENT, EXPR_INDEX, EXPR_METHOD_CALL, EXPR_NIL_LIT,
+    EXPR_UNSAFE_BLOCK, expr_get_left, expr_get_span, expr_get_str, expr_get_tag}
+use compiler.core.ast_stmt.{STMT_RETURN, stmt_get_tag, stmt_get_span}
+use compiler.core.ast_traversal.{flat_decl_child_decls, flat_decl_child_exprs, flat_decl_child_stmts,
+    flat_expr_child_arms, flat_expr_child_exprs, flat_expr_child_stmts, flat_stmt_child_arms,
+    flat_stmt_child_exprs, flat_stmt_child_stmts, flat_arm_child_exprs, flat_arm_child_stmts}
+use compiler.core.types.{span_is_valid, span_start, span_end, span_line, span_col}
+use std.tooling.easy_fix.node_view.{NodeView, node_view_empty, module_path_for_file}
+use std.tooling.easy_fix.snapshot.{SourceSnapshot}
+
+struct WalkState:
+    snapshot: SourceSnapshot
+    module_path: text
+    views: [NodeView]
+    type_params: Dict<text, text>
+    stmt_start: i64
+    indent: text
+    in_unsafe: bool
+    parent_kind: text
+
+fn _line_start(source: text, offset: i64) -> i64:
+    var i = offset
+    while i > 0 and source[i - 1] != "\n":
+        i = i - 1
+    i
+
+fn _is_ident_char(c: text) -> bool:
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
+
+fn _indent_at(source: text, line_start: i64) -> text:
+    var i = line_start
+    while i < source.len() and (source[i] == " " or source[i] == "\t"):
+        i = i + 1
+    source.slice(line_start, i)
+
+# Offset of the bracket closing the one opened at `open_idx`, or -1.
+fn _match_close(source: text, open_idx: i64, open: text, close: text) -> i64:
+    var depth = 0
+    var i = open_idx
+    var in_str = false
+    while i < source.len():
+        val c = source[i]
+        if in_str:
+            if c == "\\": i = i + 1
+            elif c == "\"": in_str = false
+        elif c == "\"": in_str = true
+        elif c == open: depth = depth + 1
+        elif c == close:
+            depth = depth - 1
+            if depth == 0: return i
+        i = i + 1
+    -1
+
+fn _base(st: WalkState, kind: text, start: i64, end: i64, sp: i64) -> NodeView:
+    var v = node_view_empty()
+    v.file = st.snapshot.file
+    v.version = st.snapshot.version
+    v.module_path = st.module_path
+    v.kind = kind
+    v.start = start
+    v.end = end
+    v.line = span_line(sp)
+    v.col = span_col(sp)
+    v.text = st.snapshot.source.slice(start, end)
+    v.stmt_start = st.stmt_start
+    v.indent = st.indent
+    v.in_unsafe = st.in_unsafe
+    v.parent_kind = st.parent_kind
+    v
+
+fn _trim_decl_end(source: text, start: i64, end: i64) -> i64:
+    # Decl spans run up to the next decl; drop trailing blank lines.
+    var e = end
+    while e > start and (source[e - 1] == "\n" or source[e - 1] == " " or source[e - 1] == "\r"):
+        e = e - 1
+    e
+
+fn _fn_decl_view(st: WalkState, d: i64) -> NodeView?:
+    val sp = decl_get_span(d)
+    if not span_is_valid(sp): return nil
+    val source = st.snapshot.source
+    val start = span_start(sp)
+    val end = _trim_decl_end(source, start, span_end(sp))
+    var v = _base(st, "fn_decl", start, end, sp)
+    val full_name = decl_get_name(d)
+    var name = full_name
+    val sep = full_name.find("__")
+    if sep > 0:
+        v.owner = full_name.slice(0, sep)
+        name = full_name.slice(sep + 2)
+        if st.type_params.has(v.owner): v.owner_type_params = st.type_params[v.owner]
+    v.name = name
+    val params = decl_get_param_names(d)
+    var names: [text] = []
+    for p in params:
+        if p != "self": names.push(p)
+    v.params = names.join(",")
+    val head = source.slice(start, end)
+    val fn_kw = head.find("fn " + name)
+    if fn_kw >= 0:
+        v.name_start = start + fn_kw + 3
+        v.name_end = v.name_start + name.len()
+        val open_after_name = head.slice(fn_kw).find("(")
+        val open_rel = if open_after_name >= 0: fn_kw + open_after_name else: -1
+        if open_rel >= 0:
+            val close = _match_close(source, start + open_rel, "(", ")")
+            if close > 0:
+                v.args_start = start + open_rel + 1
+                v.args_end = close
+                v.args_text = source.slice(v.args_start, v.args_end)
+                var nl = source.find("\n", close)
+                if nl < 0: nl = source.len()
+                val header = source.slice(close + 1, nl)
+                val colon = header.rfind(":")
+                if colon >= 0:
+                    v.header_end = close + 1 + colon
+                    val arrow = header.find("->")
+                    if arrow >= 0 and arrow < colon:
+                        v.ret_type = header.slice(arrow + 2, colon).trim()
+    v.stmt_start = _line_start(source, start)
+    v.indent = _indent_at(source, v.stmt_start)
+    Some(v)
+
+fn _expr_kind(tag: i64) -> text:
+    if tag == EXPR_METHOD_CALL: return "method_call"
+    if tag == EXPR_CALL: return "call"
+    if tag == EXPR_INDEX: return "index"
+    if tag == EXPR_IDENT: return "ident"
+    if tag == EXPR_NIL_LIT: return "nil_lit"
+    if tag == EXPR_UNSAFE_BLOCK: return "unsafe_block"
+    ""
+
+fn _walk_expr(mut st: WalkState, e: i64):
+    if e < 0: return
+    val tag = expr_get_tag(e)
+    val kind = _expr_kind(tag)
+    val sp = expr_get_span(e)
+    val saved_parent = st.parent_kind
+    val saved_unsafe = st.in_unsafe
+    if kind != "" and span_is_valid(sp):
+        val source = st.snapshot.source
+        var start = span_start(sp)
+        var end = span_end(sp)
+        if kind == "method_call" or kind == "call" or kind == "index":
+            # The parser's postfix span can start at the '(' for a zero-arg
+            # method call on a bare identifier; anchor on the receiver/callee.
+            val left0 = expr_get_left(e)
+            val lsp0 = if left0 >= 0: expr_get_span(left0) else: 0
+            if span_is_valid(lsp0) and span_start(lsp0) < start: start = span_start(lsp0)
+        var v = _base(st, kind, start, end, sp)
+        if kind == "ident":
+            v.name = expr_get_str(e)
+            v.name_start = start
+            v.name_end = end
+        elif kind == "method_call" or kind == "call" or kind == "index":
+            val left = expr_get_left(e)
+            val lsp = if left >= 0: expr_get_span(left) else: 0
+            var left_end = start
+            if span_is_valid(lsp):
+                left_end = span_end(lsp)
+                val left_text = source.slice(span_start(lsp), left_end)
+                if kind == "call": v.callee = left_text
+                else: v.receiver = left_text
+            if kind == "method_call":
+                v.name = expr_get_str(e)
+                if not span_is_valid(lsp) and v.name != "":
+                    # Receiver without a span (nested call argument): recover
+                    # `<ident-chain>.<name>` textually just before the span.
+                    var p = start
+                    if p >= v.name.len() and source.slice(p - v.name.len(), p) == v.name:
+                        p = p - v.name.len()
+                        if p > 0 and source[p - 1] == ".":
+                            p = p - 1
+                            var q = p
+                            while q > 0 and (_is_ident_char(source[q - 1]) or source[q - 1] == "."):
+                                q = q - 1
+                            if q < p:
+                                v.receiver = source.slice(q, p)
+                                v.start = q
+                                v.text = source.slice(v.start, v.end)
+                                left_end = p
+                val rel = source.slice(left_end, end).find(v.name)
+                if rel >= 0:
+                    v.name_start = left_end + rel
+                    v.name_end = v.name_start + v.name.len()
+            if kind == "call" and left >= 0 and expr_get_tag(left) == EXPR_IDENT:
+                v.name = expr_get_str(left)
+            val open_ch = if kind == "index": "[" else: "("
+            val close_ch = if kind == "index": "]" else: ")"
+            val search_from = if v.name_end > 0: v.name_end else: left_end
+            val open_rel = source.slice(search_from, end).find(open_ch)
+            if open_rel >= 0:
+                val close = _match_close(source, search_from + open_rel, open_ch, close_ch)
+                if close > 0:
+                    v.args_start = search_from + open_rel + 1
+                    v.args_end = close
+                    v.args_text = source.slice(v.args_start, v.args_end)
+                    if kind != "index" or close + 1 > v.end:
+                        v.end = close + 1
+                        v.text = source.slice(v.start, v.end)
+        st.views.push(v)
+        st.parent_kind = kind
+    if tag == EXPR_UNSAFE_BLOCK: st.in_unsafe = true
+    for c in flat_expr_child_exprs(e): _walk_expr(st, c)
+    for s in flat_expr_child_stmts(e): _walk_stmt(st, s)
+    for a in flat_expr_child_arms(e):
+        for c in flat_arm_child_exprs(a): _walk_expr(st, c)
+        for s in flat_arm_child_stmts(a): _walk_stmt(st, s)
+    st.parent_kind = saved_parent
+    st.in_unsafe = saved_unsafe
+
+fn _walk_stmt(mut st: WalkState, s: i64):
+    if s < 0: return
+    val sp = stmt_get_span(s)
+    val saved_start = st.stmt_start
+    val saved_indent = st.indent
+    val saved_parent = st.parent_kind
+    val source = st.snapshot.source
+    val children = flat_stmt_child_exprs(s)
+    # Statement spans are not always recorded; anchor on the first child
+    # expression that carries one.
+    var anchor = sp
+    var child_end = -1
+    for c in children:
+        val csp = expr_get_span(c)
+        if span_is_valid(csp):
+            if not span_is_valid(anchor): anchor = csp
+            if span_end(csp) > child_end: child_end = span_end(csp)
+    if span_is_valid(anchor):
+        st.stmt_start = _line_start(source, span_start(anchor))
+        st.indent = _indent_at(source, st.stmt_start)
+        if stmt_get_tag(s) == STMT_RETURN:
+            var start = span_start(anchor)
+            var end = span_end(anchor)
+            if not span_is_valid(sp):
+                val kw = st.stmt_start + st.indent.len()
+                if source.slice(kw, kw + 6) == "return": start = kw
+                if child_end > end: end = child_end
+            var v = _base(st, "return", start, end, anchor)
+            st.views.push(v)
+    st.parent_kind = "stmt"
+    for c in flat_stmt_child_exprs(s): _walk_expr(st, c)
+    for c in flat_stmt_child_stmts(s): _walk_stmt(st, c)
+    for a in flat_stmt_child_arms(s):
+        for c in flat_arm_child_exprs(a): _walk_expr(st, c)
+        for c in flat_arm_child_stmts(a): _walk_stmt(st, c)
+    st.stmt_start = saved_start
+    st.indent = saved_indent
+    st.parent_kind = saved_parent
+
+fn _walk_decl(mut st: WalkState, d: i64):
+    val tag = decl_get_tag(d)
+    val sp = decl_get_span(d)
+    if tag == DECL_FN:
+        if val v = _fn_decl_view(st, d):
+            st.views.push(v)
+            st.stmt_start = v.stmt_start
+            st.indent = v.indent
+            st.parent_kind = "fn_decl"
+    elif (tag == DECL_STRUCT or tag == DECL_CLASS) and span_is_valid(sp) and span_end(sp) > span_start(sp):
+        val start = span_start(sp)
+        val end = _trim_decl_end(st.snapshot.source, start, span_end(sp))
+        var v = _base(st, "class_decl", start, end, sp)
+        v.name = decl_get_name(d)
+        v.owner_type_params = decl_get_type_params(d).join(",")
+        st.views.push(v)
+    for c in flat_decl_child_decls(d): _walk_decl(st, c)
+    for e in flat_decl_child_exprs(d): _walk_expr(st, e)
+    for s in flat_decl_child_stmts(d): _walk_stmt(st, s)
+
+# Parse `snapshot.source` and return every matchable node. Err = parse failure.
+pub fn collect_node_views(snapshot: SourceSnapshot) -> Result<[NodeView], text>:
+    if parse_module_silent_checked(snapshot.source, snapshot.file):
+        return Err("{snapshot.file}: parse failed")
+    var st = WalkState(snapshot: snapshot, module_path: module_path_for_file(snapshot.file), views: [],
+        type_params: {}, stmt_start: 0, indent: "", in_unsafe: false, parent_kind: "")
+    val decls = module_get_decls()
+    for d in decls:
+        val tag = decl_get_tag(d)
+        if tag == DECL_STRUCT or tag == DECL_CLASS:
+            st.type_params[decl_get_name(d)] = decl_get_type_params(d).join(",")
+    for d in decls:
+        _walk_decl(st, d)
+    Ok(st.views)
+
+# True when `source` parses (the re-parse validation stage).
+pub fn source_parses(file: text, source: text) -> bool:
+    not parse_module_silent_checked(source, file)
+
