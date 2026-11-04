@@ -3336,7 +3336,15 @@ pub fn rt_file_open(args: &[Value]) -> Result<Value, CompileError> {
             Err(_) => Ok(Value::Int(-1)),
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // CRT descriptor from the runtime, the kind rt_fd_pread/pwrite resolve.
+        let fd = unsafe {
+            simple_runtime::value::sffi::file_io::descriptor::rt_file_open(path.as_ptr(), path.len() as u64, mode as i32)
+        };
+        Ok(Value::Int(i64::from(fd)))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (path, mode);
         Ok(Value::Int(-1))
@@ -3358,7 +3366,11 @@ pub fn rt_file_close(args: &[Value]) -> Result<Value, CompileError> {
     {
         Ok(Value::Bool(unsafe { libc::close(fd) } == 0))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        Ok(Value::Bool(simple_runtime::value::sffi::file_io::descriptor::rt_file_close(fd) != 0))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = fd;
         Ok(Value::Bool(false))

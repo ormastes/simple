@@ -485,7 +485,10 @@ pub mod windows_positioned {
     use windows_sys::Win32::System::IO::OVERLAPPED;
     extern "C" {
         fn _get_osfhandle(fd: i32) -> isize;
+        fn _set_thread_local_invalid_parameter_handler(h: Option<InvalidParameterHandler>) -> Option<InvalidParameterHandler>;
     }
+    type InvalidParameterHandler = unsafe extern "C" fn(*const u16, *const u16, *const u16, u32, usize);
+    unsafe extern "C" fn ignore_invalid_parameter(_: *const u16, _: *const u16, _: *const u16, _: u32, _: usize) {}
     const ERROR_HANDLE_EOF: u32 = 38;
     const ERROR_BROKEN_PIPE: u32 = 109;
 
@@ -493,7 +496,14 @@ pub mod windows_positioned {
         if fd < 0 {
             return None; // CRT would raise an invalid-parameter fault
         }
-        let h = unsafe { _get_osfhandle(fd) };
+        // A closed descriptor makes the CRT fail fast unless the handler is
+        // neutralised; with it ignored _get_osfhandle returns -1 (EBADF).
+        let h = unsafe {
+            let old = _set_thread_local_invalid_parameter_handler(Some(ignore_invalid_parameter));
+            let h = _get_osfhandle(fd);
+            _set_thread_local_invalid_parameter_handler(old);
+            h
+        };
         if h == -1 || h == 0 {
             None
         } else {
