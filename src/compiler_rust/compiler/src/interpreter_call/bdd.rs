@@ -10,6 +10,61 @@ use simple_parser::ast::{Argument, BinOp, ClassDef, EnumDef, Expr, FunctionDef, 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
+
+/// Max failure messages retained per example; further ones only bump a counter.
+const BDD_FAILURE_CAP: usize = 16;
+
+/// Every failing expect inside one example (bounded), instead of only the last.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct BddFailures {
+    msgs: Vec<String>,
+    overflow: usize,
+}
+
+impl BddFailures {
+    pub(crate) const fn new() -> Self {
+        BddFailures { msgs: Vec::new(), overflow: 0 }
+    }
+
+    fn push(&mut self, msg: String) {
+        if self.msgs.len() < BDD_FAILURE_CAP {
+            self.msgs.push(msg);
+        } else {
+            self.overflow += 1;
+        }
+    }
+
+    fn clear(&mut self) {
+        self.msgs.clear();
+        self.overflow = 0;
+    }
+
+    /// Messages joined by newline, with a "+N more" note when the cap was hit.
+    pub(crate) fn summary(&self) -> Option<String> {
+        if self.msgs.is_empty() {
+            return None;
+        }
+        let mut out = self.msgs.join("\n");
+        if self.overflow > 0 {
+            out.push_str(&format!("\n+{} more", self.overflow));
+        }
+        Some(out)
+    }
+}
+
+/// Record one failing expect (appends; earlier failures in the example are kept).
+pub(crate) fn push_bdd_failure(msg: String) {
+    BDD_FAILURE_MSG.with(|cell| cell.borrow_mut().push(msg));
+}
+
+fn take_bdd_failure_summary() -> Option<String> {
+    BDD_FAILURE_MSG.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let out = slot.summary();
+        slot.clear();
+        out
+    })
+}
 use std::sync::Arc;
 
 type Enums = HashMap<String, Arc<EnumDef>>;
@@ -40,7 +95,7 @@ fn record_assertion_failure(msg: String) -> Result<(), CompileError> {
         )));
     }
     BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
-    BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = Some(msg));
+    push_bdd_failure(msg);
     Ok(())
 }
 
@@ -51,8 +106,7 @@ fn record_assertion_failure(msg: String) -> Result<(), CompileError> {
 /// exit 0. A passing matcher outside an `it` is unchanged.
 pub(crate) fn finish_bdd_matcher(result: Value) -> Result<Value, CompileError> {
     if matches!(result, Value::Bool(false)) && !BDD_INSIDE_IT.with(|cell| *cell.borrow()) {
-        let msg = BDD_FAILURE_MSG
-            .with(|cell| cell.borrow_mut().take())
+        let msg = take_bdd_failure_summary()
             .unwrap_or_else(|| "expectation failed".to_string());
         BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = false);
         return Err(CompileError::semantic(format!(
@@ -106,7 +160,7 @@ thread_local! {
     // cannot observe from here, so the `pending` arm raises this flag.
     pub(crate) static BDD_PENDING_IN_IT: RefCell<bool> = const { RefCell::new(false) };
     // Failure message from expect (for display in it block)
-    pub(crate) static BDD_FAILURE_MSG: RefCell<Option<String>> = const { RefCell::new(None) };
+    pub(crate) static BDD_FAILURE_MSG: RefCell<BddFailures> = const { RefCell::new(BddFailures::new()) };
     // Provisional "hollow call" failure: a bare `expect(<call>)` whose result is
     // falsy and which has NOT yet had a matcher applied. A following `.to_*()`
     // matcher clears this (the call was checked after all); if no matcher ever
@@ -986,7 +1040,7 @@ pub(super) fn eval_bdd_builtin(
             BDD_EXPECT_NEEDS_MATCHER.with(|cell| *cell.borrow_mut() = 0);
             BDD_MATCHER_COUNT.with(|cell| *cell.borrow_mut() = 0);
             BDD_VACUOUS_SUBJECT.with(|cell| *cell.borrow_mut() = None);
-            BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = None);
+            BDD_FAILURE_MSG.with(|cell| cell.borrow_mut().clear());
             BDD_PROVISIONAL_MSG.with(|cell| *cell.borrow_mut() = None);
             BDD_PENDING_IN_IT.with(|cell| *cell.borrow_mut() = false);
             BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = true);
@@ -1069,7 +1123,7 @@ pub(super) fn eval_bdd_builtin(
                     let matchers = BDD_MATCHER_COUNT.with(|cell| *cell.borrow());
                     let vacuous = needs > matchers;
                     let failed = hard_failed || (provisional && !matcher_ran) || vacuous;
-                    let mut failure_msg = BDD_FAILURE_MSG.with(|cell| cell.borrow().clone());
+                    let mut failure_msg = BDD_FAILURE_MSG.with(|cell| cell.borrow().summary());
                     // A provisional message is a FALLBACK, never a replacement: it
                     // is reported only when no real matcher failure was recorded.
                     if failure_msg.is_none() {
@@ -2249,7 +2303,7 @@ pub fn clear_bdd_state() {
     BDD_MATCHER_COUNT.with(|cell| *cell.borrow_mut() = 0);
     BDD_VACUOUS_SUBJECT.with(|cell| *cell.borrow_mut() = None);
     BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = false);
-    BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = None);
+    BDD_FAILURE_MSG.with(|cell| cell.borrow_mut().clear());
     BDD_PROVISIONAL_MSG.with(|cell| *cell.borrow_mut() = None);
     BDD_SHARED_EXAMPLES.with(|cell| cell.borrow_mut().clear());
     BDD_CONTEXT_DEFS.with(|cell| cell.borrow_mut().clear());
@@ -2344,5 +2398,43 @@ mod is_condition_present_tests {
         // generic truthy() rather than panicking.
         assert!(!is_condition_present(None, &Value::Int(0)));
         assert!(is_condition_present(None, &Value::Int(1)));
+    }
+}
+
+// Last-failure-only regression: two failing expects inside ONE example must
+// both survive to the reported failure message, not just the second.
+#[cfg(test)]
+mod failure_retention_tests {
+    use super::*;
+
+    fn reported() -> String {
+        BDD_FAILURE_MSG.with(|cell| cell.borrow().summary().unwrap_or_default())
+    }
+
+    #[test]
+    fn two_failing_expects_in_one_example_both_reported() {
+        clear_bdd_state();
+        BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = true);
+        record_assertion_failure("expected 11 to equal 22".to_string()).unwrap();
+        record_assertion_failure("expected 33 to equal 44".to_string()).unwrap();
+        let out = reported();
+        clear_bdd_state();
+        assert!(out.contains("expected 11 to equal 22"), "first failure lost: {out}");
+        assert!(out.contains("expected 33 to equal 44"), "second failure lost: {out}");
+    }
+
+    #[test]
+    fn failures_are_bounded_with_more_note() {
+        clear_bdd_state();
+        BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = true);
+        for i in 0..20 {
+            record_assertion_failure(format!("failure-{i}")).unwrap();
+        }
+        let out = reported();
+        clear_bdd_state();
+        assert!(out.contains("failure-0"), "{out}");
+        assert!(out.contains("failure-15"), "{out}");
+        assert!(!out.contains("failure-16"), "cap exceeded: {out}");
+        assert!(out.contains("+4 more"), "missing overflow note: {out}");
     }
 }

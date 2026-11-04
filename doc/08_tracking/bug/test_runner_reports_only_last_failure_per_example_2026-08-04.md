@@ -86,3 +86,28 @@ Still reproduces on the seed `bin/simple.exe test`: an `it` with two failing exp
 prints only `expected 3 to equal 4` (1 example, 1 failure). Root cause: scalar `BDD_FAILURE_MSG` in
 seed bdd.rs overwritten per failure. Fix needs seed Rust change (append/join in the matcher-fail
 sites) + seed rebuild; deferred. Pure-Simple framework already accumulates (see audit above).
+
+## Verification 2026-11-04 (g-lastfail lane)
+
+Ran `test/fixtures/spec_failure_retention/two_failures_block.spl` (new block-form
+fixture; the function-reference fixture is rejected by the Rust seed BDD with
+"BDD block expected a block or lambda") on the Rust seed `bin/simple.exe run`:
+example 1 prints only `expected 33 to equal 44`; the earlier `11 vs 22` failure is
+lost. So the defect persists in the **seed BDD interpreter** only
+(`src/compiler_rust/compiler/src/interpreter_call/bdd.rs`, scalar
+`BDD_FAILURE_MSG` overwritten by ~dozen matcher sites in `interpreter_method/mod.rs`).
+The pure-Simple framework (`src/lib/nogc_sync_mut/spec.spl`) already accumulates.
+Status: fix-implemented-partial. Seed is bootstrap-only and not redeployed in this
+lane; a seed fix (append to a bounded Vec) needs a seed rebuild to verify.
+Re-run the fixture on a self-hosted runtime to confirm both messages print.
+
+## Fixed 2026-11-04 (g-lastfail lane)
+
+Seed `BDD_FAILURE_MSG` is now a bounded `Vec<String>` (cap 16, then "+N more");
+all matcher sites push via `push_bdd_failure`; first-failure/pass semantics unchanged.
+Evidence: `cargo test -p simple-compiler --lib failure_retention_tests` 2 passed
+(old single-slot logic keeps only the last message, so the test cannot pass there);
+test-only seed release build (shared target, not deployed) running
+`test test/fixtures/spec_failure_retention/two_failures_block.spl` prints both
+`expected 11 to equal 22` and `expected 33 to equal 44`.
+Status: fixed.
