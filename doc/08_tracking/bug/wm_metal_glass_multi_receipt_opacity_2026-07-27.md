@@ -313,3 +313,29 @@ Remaining reds (not weakened, recorded):
   `read_pixels_damaged`, `invalidate_damage_mirror`,
   `create_vulkan_window_present`, `create_vulkan_external_window_present`
   (all still have callers) — Vulkan owner must restore them.
+
+## 2026-11-04 — Vulkan Engine2D methods reconciled (work/bug-vkrestore-20261104)
+
+Corrects the list above: on `release/1.0.0` only TWO of the methods
+`8a87db7d9eb` deleted were still missing. `vulkan_present_readback_bytes`,
+`vulkan_device_finalize_no_readback_count`, `stage_present_damage`,
+`finalize_compute_frame_no_readback`, `present_window_device`,
+`latest_vulkan_frame_receipt`, `read_pixels_damaged`,
+`invalidate_damage_mirror` had already been re-added by later work (several now
+`me` rather than `fn`), and `window_present_enabled` by PR #6579.
+
+- Restored `Engine2D.create_vulkan_window_present` and
+  `Engine2D.create_vulkan_external_window_present` (callers:
+  `compositor_engine2d.spl:274/282`, `hosted_entry.spl:152` via the compositor
+  wrapper, `strict_semantic_vulkan_window_producer.spl:137`). Reconciled with
+  the current `Engine2D` field list (identical to `create_vulkan_backend`) and
+  `VulkanBackend.init_window_present` / `init_external_window_present` /
+  `enable_frame_batching` / `last_error`, all present.
+- No other file in `8a87db7d9eb` removed a definition.
+- Regression spec: `test/01_unit/lib/gc_async_mut/gpu/engine2d/engine_vulkan_present_api_spec.spl`
+  (2/2) pins all 11 names on `Engine2D`.
+- `draw_ir_adv_spec` still 68/70; neither red calls the restored constructors
+  (pixel `0xFF000000` vs `0xFFFF0000` on retained Vulkan damage, and the
+  runtime host GPU queue returning false) — host has no Vulkan device; NOT caused
+  by the deletion. `host_compositor_entry_spec` 55/63 identical with and
+  without this change (same 8 reds listed above).
