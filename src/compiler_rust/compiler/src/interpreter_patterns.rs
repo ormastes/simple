@@ -166,6 +166,10 @@ pub(crate) fn pattern_matches(
     // (class_instance_reference_storage_2026-11-03.md): a `Value::ClassInstance`
     // is matched through an `Object` view of its class + fields. Field values are
     // Arc-clones, so a class-typed field bound by a sub-pattern keeps its identity.
+    // Binding patterns (`x`, `Some(x)` via recursion, Or/Typed wrappers) bind the
+    // ORIGINAL handle `orig`: the view is a snapshot, so binding it would detach
+    // `x` from the shared instance and drop every later mutation through it.
+    let orig = value;
     let object_view;
     let value = if let Value::ClassInstance(instance) = value {
         object_view = Value::Object {
@@ -225,19 +229,19 @@ pub(crate) fn pattern_matches(
                 }
             }
             // Normal identifier pattern - bind the value
-            bindings.insert(name.clone(), value.clone());
+            bindings.insert(name.clone(), orig.clone());
             Ok(true)
         }
 
         Pattern::MutIdentifier(name) => {
-            bindings.insert(name.clone(), value.clone());
+            bindings.insert(name.clone(), orig.clone());
             Ok(true)
         }
 
         Pattern::MoveIdentifier(name) => {
             // Move pattern - transfers ownership during pattern matching
             // For the interpreter, this behaves the same as a regular binding
-            bindings.insert(name.clone(), value.clone());
+            bindings.insert(name.clone(), orig.clone());
             Ok(true)
         }
 
@@ -588,7 +592,7 @@ pub(crate) fn pattern_matches(
         Pattern::Or(patterns) => {
             for pat in patterns {
                 let mut temp_bindings = HashMap::new();
-                if pattern_matches(pat, value, &mut temp_bindings, enums, classes)? {
+                if pattern_matches(pat, orig, &mut temp_bindings, enums, classes)? {
                     bindings.extend(temp_bindings);
                     return Ok(true);
                 }
@@ -610,7 +614,7 @@ pub(crate) fn pattern_matches(
             };
 
             if type_matches {
-                pattern_matches(pattern, value, bindings, enums, classes)
+                pattern_matches(pattern, orig, bindings, enums, classes)
             } else {
                 Ok(false)
             }
