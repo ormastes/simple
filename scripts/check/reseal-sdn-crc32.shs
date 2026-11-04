@@ -77,7 +77,7 @@ selftest() {
     done
 
     # common-dir fallback: a linked worktree with no bin/ of its own resolves the
-    # main checkout's bin/simple; the worktree's own binary wins; SIMPLE_BIN is last
+    # main checkout's bin/simple; SIMPLE_BIN wins over discovery
     (
         cd "$_t" && git init -q main && cd main \
             && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m i \
@@ -87,16 +87,32 @@ selftest() {
     _saved_root=$CSM_TOOL_ROOT
     CSM_TOOL_ROOT=$(cd "$_t/wtree" && pwd -P); command -v cygpath >/dev/null 2>&1 && CSM_TOOL_ROOT=$(cygpath -m "$CSM_TOOL_ROOT")
     _want=$(cd "$_t/main" && pwd -P)/bin/simple
-    _got=$(SIMPLE_BIN="$_t/nonexistent" csm_simple_bin)
+    _got=$(SIMPLE_BIN="" csm_simple_bin)
     [ "$(cd "$(dirname "$_got")" 2>/dev/null && pwd -P)/simple" = "$_want" ] \
         || { echo "selftest FAIL: common-dir bin fallback not resolved ($_got)"; _fails=$((_fails+1)); }
     printf '#!/bin/sh\n' > "$_t/wtree/bin/simple"; chmod +x "$_t/wtree/bin/simple"
-    _got=$(csm_simple_bin)
+    _got=$(SIMPLE_BIN="" csm_simple_bin)
     case "$_got" in */wtree/bin/simple) ;; *) echo "selftest FAIL: worktree bin not preferred ($_got)"; _fails=$((_fails+1)) ;; esac
-    rm -f "$_t/wtree/bin/simple" "$_t/main/bin/simple"
     printf '#!/bin/sh\n' > "$_t/sb"; chmod +x "$_t/sb"
-    [ "$(SIMPLE_BIN="$_t/sb" csm_simple_bin)" = "$_t/sb" ] || { echo "selftest FAIL: SIMPLE_BIN last resort"; _fails=$((_fails+1)); }
+    [ "$(SIMPLE_BIN="$_t/sb" csm_simple_bin)" = "$_t/sb" ] || { echo "selftest FAIL: SIMPLE_BIN must win over discovery"; _fails=$((_fails+1)); }
+    rm -f "$_t/wtree/bin/simple" "$_t/main/bin/simple"
     SIMPLE_BIN="" csm_simple_bin >/dev/null && { echo "selftest FAIL: missing hasher not an error"; _fails=$((_fails+1)); }
+
+    # sparse worktree (no src/lib, no hash app): the hasher must run from the
+    # chosen binary's own checkout, which carries src/app/hash + src/lib
+    mkdir -p "$_t/main/src/app/hash" "$_t/main/src/lib"; : > "$_t/main/src/app/hash/main.spl"
+    cat > "$_t/main/bin/simple" <<'FAKE'
+#!/bin/sh
+pwd > "$(dirname "$0")/ran_in"
+for _a; do :; done
+echo "0123456789abcdef  $_a"
+FAKE
+    chmod +x "$_t/main/bin/simple"
+    printf 'x\n' > "$_t/sp.sdn"
+    _o=$(SIMPLE_BIN="" SDN_SEAL_HASHER=simple csm_hash_hex xxh3 "$_t/sp.sdn" 2>&1)
+    _ri=$(cat "$_t/main/bin/ran_in" 2>/dev/null)
+    [ "$_o" = 0123456789abcdef ] && [ "$_ri" -ef "$_t/main" ] \
+        || { echo "selftest FAIL: sparse worktree not hashed from common-dir root (out=$_o ran_in=$_ri)"; _fails=$((_fails+1)); }
     CSM_TOOL_ROOT=$_saved_root
 
     # Windows: under MSYS_NO_PATHCONV=1 native git/hasher get no /tmp or /c path
