@@ -76,3 +76,18 @@ exhaustion and the empty-module-name collision, per "Required Repair" above)
 needs a dedicated session with the daemon build budget this task does not
 have. Left OPEN, characterization otherwise unchanged.
 
+
+## Fix implemented 2026-11-04 (verification pending)
+
+Code-reading fix: `ModuleResolver.resolve_import` in
+`src/compiler/99.loader/module_resolver/resolution.spl` gained a "Strategy
+bare-tier": a bare `use common.x` / `use nogc_sync_mut.x` (no `std.`) from a
+nested lib file, with no `stdlib_root` configured (entry-closure native builds),
+now resolves against `source_root/lib/<tier>`.
+
+- Unit spec (source-scan; fails without the fix): `test/01_unit/compiler/module_resolver/bare_tier_import_spec.spl`
+- Native repro fixture: `test/fixtures/entry_closure_bare_common_import/main.spl`,
+  expected stdout in `expected_output.txt` (`bare-common-import ok 3`).
+- Stage3 repro command (needs a stage3 binary; not run on this host):
+  `stage3/simple native-build --entry test/fixtures/entry_closure_bare_common_import/main.spl --entry-closure -o out && ./out`
+  Full confirmation: the `simpleos_gpu_host` `device-warm-production` entry-closure build.
