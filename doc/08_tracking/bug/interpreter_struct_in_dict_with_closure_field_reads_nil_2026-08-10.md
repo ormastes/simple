@@ -126,3 +126,7 @@ OPEN; PR #6301 MERGED at 5cec7885187661e950f941045cdb6b8d522a4884 and contribute
 
 ## 2026-11-04 triage (libbug-async): INTERPRETER-ROOT
 Real-API repro: under `fn main` (JIT) `actor_count=1`; same code in a non-`main` function (tree-walk interpreter) `actor_count=0`. `actor_singleton_closure_persistence_spec.spl` under seed `run`: 0/3. Likely same root as the class-field value-copy aliasing in the Promise/Future record (class embedded in a container is copied, not aliased, by the interpreter). No lib change made.
+
+## 2026-11-04 note (libbug-async lane)
+
+`actor_singleton_closure_persistence_spec` was NOT this interpreter bug: `ActorRuntime` was declared `struct`, so the module-level singleton (`get_actor_runtime()` returning a copy, then `.spawn_actor` mutating that copy) lost every spawn by value semantics. Lib-free repro `C:/tmp_lb/a2.spl`: a struct singleton keeps n=0, a class singleton keeps n=1 under `SIMPLE_INTERP_CLASS_REF=1`. Fixed by making `ActorRuntime` a `class` (3/3 under `SIMPLE_INTERP_CLASS_REF=1`). Without that flag the seed interpreter still copies class values (0/3), which is the remaining interpreter-side issue.
