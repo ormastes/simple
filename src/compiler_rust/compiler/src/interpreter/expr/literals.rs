@@ -347,6 +347,25 @@ pub(super) fn eval_literal_expr(
                     captured_env: Arc::new(Env::new()), // Top-level functions don't capture
                 }));
             }
+            // A declared extern fn used as a first-class value (`f(rt_foo)`):
+            // yield a callable that dispatches through the extern table.
+            if crate::interpreter::EXTERN_FUNCTIONS.with(|cell| cell.borrow().contains(name.as_str())) {
+                let ext_name = name.clone();
+                return Ok(Some(Value::NativeFunction(crate::value::NativeFunction {
+                    name: name.clone(),
+                    func: Arc::new(move |args| {
+                        crate::interpreter::interpreter_extern::call_extern_function_with_values(
+                            &ext_name,
+                            args,
+                            &mut Env::new(),
+                            &mut HashMap::new(),
+                            &mut HashMap::new(),
+                            &HashMap::new(),
+                            &HashMap::new(),
+                        )
+                    }),
+                })));
+            }
             // Check classes - return as Constructor for constructor polymorphism
             if classes.contains_key(name) {
                 return Ok(Some(Value::Constructor {
