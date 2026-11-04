@@ -1,7 +1,7 @@
 # `f(x)?.m()` is safe navigation, not try-then-member; native MIR rejects it as an unproven indirect callable
 
 - **Date:** 2026-10-25
-- **Status:** OPEN (compiler gap). Source workaround applied in the two Phase 3 modules that failed.
+- **Status:** CLOSED 2026-11-04 as BY DESIGN (lexing/semantics); see "Disposition" at the end. Source workaround kept. Source workaround applied in the two Phase 3 modules that failed.
 - **release/1.0.0:** only the `archive_file.spl` workaround is ported. `resident_cohort_seal_v1.spl` does not exist on release/1.0.0. The latent-site list below was measured at base `d3fc04205cf`; 24 of the 25 files also exist on release/1.0.0 (not `src/app/bootstrap_builder/resident_source_views.spl`) and are left unchanged there too.
 - **Found in:** Phase 3 run-27e (`/home/yoon/dev/simple-boot-adhoc/build/phase3-ref/run-27e/build.log`),
   Stage 2 p2shard-17 compiler, base `d3fc04205cf`.
@@ -116,3 +116,16 @@ both spellings reach the same unsupported native lowering, so each needs review 
 - `src/app/scv/db/paged_query.spl` (1)
 - `src/app/scv/db/evidence_hydrate.spl` (1)
 - `src/app/scv/db/checkpoint_store.spl` (1)
+
+## Disposition (2026-11-04, closed by design)
+
+`?.` is safe navigation by language design (`syntax_quick_reference.md` § "Safe Navigation
+(`?.`)", documented form `result?.process()?.validate()`); `TokenKind.QuestionDot` is a single
+token and re-lexing `?.` as try + `.` would silently change the meaning of every documented
+safe-nav chain. Try-then-member is spelled `(f(x)?).m()`, which is what `archive_file.spl:75-76`
+already does; that spelling is the supported form, not a workaround to remove. No lexer/parser
+change is made and no failing spec applies (the premise "lexes wrongly" is invalid).
+
+Residual (not a lexer bug, not tracked here): safe-nav on a `Result`-typed base reaches MIR with
+only the "indirect callable" diagnostic; a targeted HIR diagnostic ("did you mean `(expr?).member`")
+would be a nicer error. File as a separate diagnostics feature request if wanted.
