@@ -1,0 +1,128 @@
+# P6 of doc/03_plan/compiler/hir/immutable_hir_targethir_mir_refactor_plan_2026-11-03.md:
+# PER-TASK PRIVATE SCRATCH OVERLAY merged back in OWNER ORDER (owner decision
+# 2026-11-04).
+#
+# Each parallel lowering task (one per module/shard) writes its derived
+# TargetHIR/MIR facts (symbol writes, synthesized callables, default bindings,
+# ...) into its OWN TaskOverlay over the immutable shared base facts. A task
+# reads through `overlay_read(base, own)` only: it sees the shared base and its
+# own writes, never another task's overlay. Overlays are never shared or
+# mutated across tasks.
+#
+# After all tasks finish, `task_overlay_merge` folds the overlays in OWNER
+# ORDER — ascending (rank, owner) where rank is the stable module/shard id —
+# never in completion order. The same key written by two different owners is a
+# FATAL conflict naming both owners (never last-writer-wins). An overlay may not
+# redefine a key of the immutable base. The merged entry list is therefore
+# byte-identical for any task completion order or worker count.
+#
+# Mode gate (SIMPLE_TARGET_HIR_MODE via target_hir_mode()):
+#   legacy -> the legacy result is returned unchanged; overlays are ignored
+#   shadow -> overlay-merged result is compared to legacy; mismatch is fatal
+#   typed  -> overlay-merged result is used
+#
+# Scope: the overlay protocol and its invariants. Wiring the MirLowering
+# SymbolTable writers onto it needs a frozen HirSnapshot carried into
+# MirLowering plus a Stage-3 run (matrix rows pending-stage3).
+
+use compiler.hir.target_hir.target_hir_flags.{target_hir_mode}
+
+class TaskOverlay:
+    owner: text
+    rank: i64
+    keys: [text]
+    values: Dict<text, text>
+
+    static fn new(owner: text, rank: i64) -> TaskOverlay:
+        TaskOverlay(owner: owner, rank: rank, keys: [], values: {})
+
+    # Private scratch write. Rewriting one's own key is allowed (task-local).
+    me put(key: text, value: text):
+        if not self.values.contains_key(key):
+            self.keys.push(key)
+        self.values[key] = value
+
+    fn get(key: text) -> text?:
+        if self.values.contains_key(key):
+            return self.values[key]
+        nil
+
+# A task's view: its own overlay first, then the immutable shared base.
+# There is deliberately no parameter through which another overlay is visible.
+fn overlay_read(base: Dict<text, text>, own: TaskOverlay, key: text) -> text?:
+    val mine = own.get(key)
+    if mine != nil:
+        return mine
+    if base.contains_key(key):
+        return base[key]
+    nil
+
+fn _owner_before(a: TaskOverlay, b: TaskOverlay) -> bool:
+    if a.rank != b.rank:
+        return a.rank < b.rank
+    a.owner < b.owner
+
+fn _sorted_text(xs: [text]) -> [text]:
+    var out: [text] = []
+    for x in xs:
+        var i = out.len()
+        out.push(x)
+        while i > 0 and out[i - 1] > x:
+            out[i] = out[i - 1]
+            i = i - 1
+        out[i] = x
+    out
+
+fn _owner_order(overlays: [TaskOverlay]) -> [TaskOverlay]:
+    var out: [TaskOverlay] = []
+    for o in overlays:
+        var i = out.len()
+        out.push(o)
+        while i > 0 and _owner_before(o, out[i - 1]):
+            out[i] = out[i - 1]
+            i = i - 1
+        out[i] = o
+    out
+
+# Deterministic owner-order merge. Returns "key=value" entries: owners in
+# (rank, owner) order, keys sorted within an owner.
+fn task_overlay_merge(base: Dict<text, text>, overlays: [TaskOverlay]) -> Result<[text], text>:
+    val ordered = _owner_order(overlays)
+    var writer: Dict<text, text> = {}
+    var seen_owner: Dict<text, bool> = {}
+    var merged: [text] = []
+    for o in ordered:
+        if seen_owner.contains_key(o.owner):
+            return Err("target_hir_overlay_duplicate_owner: " + o.owner)
+        seen_owner[o.owner] = true
+        for k in _sorted_text(o.keys):
+            if base.contains_key(k):
+                return Err("target_hir_overlay_base_conflict: key " + k + " owner " + o.owner + " redefines immutable base")
+            if writer.contains_key(k):
+                return Err("target_hir_overlay_conflict: key " + k + " written by owners " + writer[k] + " and " + o.owner)
+            writer[k] = o.owner
+            merged.push(k + "=" + o.values[k])
+    Ok(merged)
+
+fn _entries_text(xs: [text]) -> text:
+    var s = ""
+    for x in xs:
+        s = s + x + "\n"
+    s
+
+# Mode-explicit form (pure; unit-testable).
+fn task_overlay_resolve_for_mode(mode: text, legacy: [text], base: Dict<text, text>, overlays: [TaskOverlay]) -> Result<[text], text>:
+    if mode == "legacy":
+        return Ok(legacy)
+    val merged = task_overlay_merge(base, overlays)
+    if merged.is_err():
+        return merged
+    val m = merged.unwrap()
+    if mode == "shadow":
+        if _entries_text(m) != _entries_text(legacy):
+            return Err("target_hir_overlay_shadow_mismatch: legacy " + legacy.len().to_string() + " entries, overlay " + m.len().to_string() + " entries")
+        return Ok(legacy)
+    Ok(m)
+
+fn task_overlay_resolve(legacy: [text], base: Dict<text, text>, overlays: [TaskOverlay]) -> Result<[text], text>:
+    task_overlay_resolve_for_mode(target_hir_mode(), legacy, base, overlays)

@@ -316,6 +316,12 @@ All phases include an independently reversible flag and targeted SSpec. Do not c
 | **P7 — Performance optimization** | Profile dense vs sparse hot fields, per-region size, transient allocator, parallel target fan-out, no-change OBJ path. Optimize without changing public safety API. | Performance and RSS gates pass; no measurable cache-correctness regression |
 | **P8 — Rollout and legacy removal** | Canary selected Simple modules, then Stage 3 self-hosting and backends, then flag default; retire raw target-dependent HIR/MIR entrypoints only after migration matrix is complete. | Stage 3/4 bootstrap, end-to-end native qualification, CI cross-compiles, rollback tested; source-level code review confirms no unsupported bypasses |
 
+
+### 8.1 P6 owner decision — per-task private scratch overlay (2026-11-04)
+
+Owner decision: P6 mutable task state uses a **per-task private scratch overlay merged back in owner order**. Each parallel task (module/shard) writes derived TargetHIR/MIR facts into its own overlay over the immutable shared HIR; overlays are never shared or mutated across tasks, and a task reads only base + its own overlay. After completion, overlays merge in stable owner order (ascending `(rank, owner)` = module/shard id, never completion order). The same key from two owners — or an overlay redefining an immutable base key — is a fatal error naming both owners; never last-writer-wins. The merged result is byte-identical for any scheduling or worker count.
+
+Implementation: `src/compiler/20.hir/target_hir/target_hir_task_overlay.spl` (`TaskOverlay`, `overlay_read`, `task_overlay_merge`, `task_overlay_resolve[_for_mode]`), gated by `SIMPLE_TARGET_HIR_MODE` (legacy unchanged; shadow compares merged vs legacy, mismatch fatal; typed uses merged). Spec `test/01_unit/compiler/hir/target_hir_task_overlay_spec.spl` (6/6 on the seed interpreter): determinism across completion orders/worker counts, two-owner conflict fatal naming both, no cross-task visibility, shadow mismatch fatal. The 8 former `BLOCKED-owner` rows of `spec/compiler_schema/target_hir_migration_matrix.sdn` are now `pending` with `pending-stage3`: wiring the MirLowering SymbolTable writers onto `TaskOverlay` needs a frozen HirSnapshot carried into MirLowering (off-limits `module_lowering.spl` constructor/alias site) plus a Stage-3 run.
 Recommended flag semantics (names **proposed**, not asserted to exist):
 
 ```text

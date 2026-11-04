@@ -1,0 +1,80 @@
+use std.spec.*
+use compiler.hir.target_hir.target_hir_task_overlay.{TaskOverlay, overlay_read, task_overlay_merge, task_overlay_resolve_for_mode}
+
+fn base_facts() -> Dict<text, text>:
+    var b: Dict<text, text> = {}
+    b["sym:main"] = "fn"
+    b
+
+fn mk(owner: text, rank: i64, k1: text, v1: text, k2: text, v2: text) -> TaskOverlay:
+    var o = TaskOverlay.new(owner, rank)
+    o.put(k2, v2)
+    o.put(k1, v1)
+    o
+
+fn joined(xs: [text]) -> text:
+    var s = ""
+    for x in xs:
+        s = s + x + ";"
+    s
+
+describe "P6 per-task private overlay, owner-order merge":
+    it "is byte-identical across completion orders and worker counts":
+        val a = mk("mod.a", 0, "sym:a1", "x", "sym:a0", "y")
+        val b = mk("mod.b", 1, "sym:b0", "z", "sym:b1", "w")
+        val c = mk("mod.c", 2, "sym:c0", "v", "sym:c1", "u")
+        val r1 = task_overlay_merge(base_facts(), [a, b, c])
+        val r2 = task_overlay_merge(base_facts(), [c, a, b])
+        val r3 = task_overlay_merge(base_facts(), [b, c, a])
+        expect(r1.is_ok()).to_equal(true)
+        val want = "sym:a0=y;sym:a1=x;sym:b0=z;sym:b1=w;sym:c0=v;sym:c1=u;"
+        expect(joined(r1.unwrap())).to_equal(want)
+        expect(joined(r2.unwrap())).to_equal(want)
+        expect(joined(r3.unwrap())).to_equal(want)
+        # one worker doing all three shards' writes in its own private overlays
+        # gives the same bytes as three workers
+        val solo = task_overlay_merge(base_facts(), [mk("mod.c", 2, "sym:c1", "u", "sym:c0", "v"), mk("mod.b", 1, "sym:b1", "w", "sym:b0", "z"), mk("mod.a", 0, "sym:a0", "y", "sym:a1", "x")])
+        expect(joined(solo.unwrap())).to_equal(want)
+
+    it "orders by owner rank, not owner name or completion":
+        val late = mk("zz.first", 0, "k:1", "1", "k:2", "2")
+        val early = mk("aa.second", 5, "k:3", "3", "k:4", "4")
+        expect(joined(task_overlay_merge(base_facts(), [early, late]).unwrap())).to_equal("k:1=1;k:2=2;k:3=3;k:4=4;")
+
+    it "same key from two owners is fatal and names both owners":
+        val a = mk("mod.a", 0, "sym:shared", "1", "sym:a", "2")
+        val b = mk("mod.b", 1, "sym:shared", "1", "sym:b", "3")
+        val r = task_overlay_merge(base_facts(), [b, a])
+        expect(r.is_err()).to_equal(true)
+        val e = r.unwrap_err()
+        expect(e.contains("target_hir_overlay_conflict")).to_equal(true)
+        expect(e.contains("mod.a")).to_equal(true)
+        expect(e.contains("mod.b")).to_equal(true)
+
+    it "rejects redefining the immutable base and duplicate owners":
+        val a = mk("mod.a", 0, "sym:main", "other", "sym:a", "2")
+        expect(task_overlay_merge(base_facts(), [a]).unwrap_err().contains("base_conflict")).to_equal(true)
+        val d1 = mk("mod.d", 0, "k:1", "1", "k:2", "2")
+        val d2 = mk("mod.d", 1, "k:3", "3", "k:4", "4")
+        expect(task_overlay_merge(base_facts(), [d1, d2]).unwrap_err().contains("duplicate_owner")).to_equal(true)
+
+    it "a task cannot observe another task's overlay":
+        val base = base_facts()
+        var a = TaskOverlay.new("mod.a", 0)
+        var b = TaskOverlay.new("mod.b", 1)
+        a.put("sym:only_a", "1")
+        expect(overlay_read(base, a, "sym:only_a")).to_equal("1")
+        expect(overlay_read(base, b, "sym:only_a") == nil).to_equal(true)
+        expect(overlay_read(base, b, "sym:main")).to_equal("fn")
+        expect(base.contains_key("sym:only_a")).to_equal(false)
+
+    it "mode gate: legacy unchanged, typed uses merge, shadow mismatch fatal":
+        val a = mk("mod.a", 0, "k:1", "1", "k:2", "2")
+        val legacy = ["k:1=1", "k:2=2"]
+        val wrong = ["k:1=1", "k:2=X"]
+        expect(joined(task_overlay_resolve_for_mode("legacy", wrong, base_facts(), [a]).unwrap())).to_equal("k:1=1;k:2=X;")
+        expect(joined(task_overlay_resolve_for_mode("typed", wrong, base_facts(), [a]).unwrap())).to_equal("k:1=1;k:2=2;")
+        expect(task_overlay_resolve_for_mode("shadow", legacy, base_facts(), [a]).is_ok()).to_equal(true)
+        val bad = task_overlay_resolve_for_mode("shadow", wrong, base_facts(), [a])
+        expect(bad.is_err()).to_equal(true)
+        expect(bad.unwrap_err().contains("shadow_mismatch")).to_equal(true)
