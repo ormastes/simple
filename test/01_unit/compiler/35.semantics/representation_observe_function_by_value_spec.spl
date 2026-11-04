@@ -1,0 +1,103 @@
+use std.spec.*
+use compiler.hir.hir.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.attributes.{FunctionAttr}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.semantics.representation_boundary.unsafe_observations.{representation_missing_manifest_observations_v1}
+
+# Stage3 canary 2026-11-04 (s3_fable39, hello): the HIR child died with an
+# access violation at address 0 inside
+# representation_observe_function_v1+0x31d -- the PROLOGUE deep copy of the
+# by-value `function: HirFunction` parameter read `return_type.span` as the
+# word 1, passed the Option-tag guard and dereferenced NULL. The function body
+# never ran. These fixtures drive every HirFunction shape the stage3 producers
+# are suspected of (a `Span.empty()` placeholder span, a `HirType?` narrowed
+# with `if val`, a real span) through the same by-value entry, so the class is
+# covered on the seed AND reproduces on a stage3 binary that still miscompiles
+# the copy. Same site family as fable_milestones.md P2/P4/P5.
+
+fn probe_span(line: i64) -> Span:
+    Span(start: line * 10, end: line * 10 + 1, line: line, col: 1, file: "rep.spl", length: 1)
+
+fn nil_expr(span: Span) -> HirExpr:
+    HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: span)
+
+fn empty_block(span: Span) -> HirBlock:
+    HirBlock(stmts: [], has: false, value: nil_expr(span), span: span)
+
+fn unsafe_block(span: Span) -> HirBlock:
+    val inner = empty_block(span)
+    val unsafe_expr = HirExpr(kind: HirExprKind.UnsafeBlock(inner), has_type_: false, type_: nil, span: span)
+    HirBlock(stmts: [], has: true, value: unsafe_expr, span: span)
+
+fn rep_fn(id: i64, name: text, return_type: HirType, body: HirBlock, span: Span) -> HirFunction:
+    HirFunction(symbol: SymbolId(id: id), name: name,
+        type_params: [], params: [],
+        return_type: return_type,
+        body: body,
+        effects: [], visibility: Visibility.Public, is_async: false,
+        is_static: false, is_public: true, is_method: false, is_mutable: false,
+        is_const: false, is_extern: false, func_attr: FunctionAttr.default(),
+        has_export_attr: false, export_attr: nil,
+        has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_suspension: false, has_vhdl_metadata: false, vhdl_metadata: nil,
+        has_doc_comment: false, doc_comment: "", span: span,
+        is_gpu_kernel: false, gpu_target: "", gpu_backend_order: "",
+        verification_contract: nil, is_generic_template: false)
+
+fn rep_module(functions: [HirFunction]) -> HirModule:
+    var by_symbol: Dict<SymbolId, HirFunction> = {}
+    for function in functions:
+        by_symbol[function.symbol] = function
+    HirModule(name: "rep", path: "rep.spl", imports: [],
+        exports: [], domain_blocks: [], symbols: SymbolTable.new(),
+        functions: by_symbol, gpu_function_targets: {},
+        gpu_function_backend_orders: {}, classes: {}, structs: {}, enums: {},
+        bitfields: {}, traits: {}, impls: [], constants: {}, static_asserts: [],
+        aop_advices: [], di_bindings: [], arch_rules: [], mock_decls: [],
+        types: [], extend_enums: [])
+
+fn optional_unit_type(span: Span) -> HirType?:
+    HirType(kind: HirTypeKind.Unit, span: span)
+
+describe "representation_observe_function_v1 by-value HirFunction entry":
+    it "REPRO shape: a function whose return_type span is Span.empty() is observed without faulting":
+        val f = rep_fn(1, "hello", HirType(kind: HirTypeKind.Unit, span: Span.empty()), empty_block(Span.empty()), Span.empty())
+        val out = representation_missing_manifest_observations_v1(rep_module([f]), AssuranceStrictness.Moderate)
+        expect(out.len()).to_equal(0)
+
+    it "sibling: a return_type narrowed from a HirType? with if-val is observed without faulting":
+        var declared = HirType(kind: HirTypeKind.Error, span: probe_span(3))
+        if val narrowed = optional_unit_type(probe_span(4)):
+            declared = HirType(kind: narrowed.kind, span: narrowed.span)
+        val f = rep_fn(2, "narrowed", declared, empty_block(probe_span(4)), probe_span(4))
+        val out = representation_missing_manifest_observations_v1(rep_module([f]), AssuranceStrictness.Strict)
+        expect(out.len()).to_equal(0)
+        expect(declared.span.line).to_equal(4)
+
+    it "sibling: a real-span return_type with a body is observed without faulting":
+        val f = rep_fn(3, "real", HirType(kind: HirTypeKind.Unit, span: probe_span(7)), empty_block(probe_span(7)), probe_span(7))
+        val out = representation_missing_manifest_observations_v1(rep_module([f]), AssuranceStrictness.Robust)
+        expect(out.len()).to_equal(0)
+
+    it "coverage: an unsafe region in an unannotated function reports E-MC-REP-001 as a warning below Critical":
+        val f = rep_fn(4, "risky", HirType(kind: HirTypeKind.Unit, span: probe_span(9)), unsafe_block(probe_span(9)), probe_span(9))
+        val out = representation_missing_manifest_observations_v1(rep_module([f]), AssuranceStrictness.Moderate)
+        expect(out.len()).to_equal(1)
+        expect(out[0].message).to_contain("unsafe region in risky")
+        expect(out[0].code ?? "").to_equal("E-MC-REP-001")
+        expect(out[0].is_error()).to_be(false)
+
+    it "coverage: the same unsafe region is an error under Critical strictness":
+        val f = rep_fn(5, "critical", HirType(kind: HirTypeKind.Unit, span: probe_span(11)), unsafe_block(probe_span(11)), probe_span(11))
+        val out = representation_missing_manifest_observations_v1(rep_module([f]), AssuranceStrictness.Critical)
+        expect(out.len()).to_equal(1)
+        expect(out[0].is_error()).to_be(true)
+
+    it "coverage: several functions of every shape in one module are each observed once":
+        val a = rep_fn(6, "placeholder", HirType(kind: HirTypeKind.Unit, span: Span.empty()), empty_block(Span.empty()), Span.empty())
+        val b = rep_fn(7, "risky_a", HirType(kind: HirTypeKind.Unit, span: probe_span(13)), unsafe_block(probe_span(13)), probe_span(13))
+        val c = rep_fn(8, "risky_b", HirType(kind: HirTypeKind.Error, span: Span.empty()), unsafe_block(probe_span(14)), probe_span(14))
+        val out = representation_missing_manifest_observations_v1(rep_module([a, b, c]), AssuranceStrictness.Moderate)
+        expect(out.len()).to_equal(2)
