@@ -4,6 +4,23 @@ use crate::parser_impl::core::{Parser, ParserMode};
 use crate::token::TokenKind;
 
 impl<'a> Parser<'a> {
+    /// Initializer / assignment right-hand side. Accepts the bare
+    /// `unsafe:` / `danger:` block EXPRESSION (`val x = unsafe:` + indented
+    /// block, value = last expression) here only, never in general expression
+    /// position: there `for e in unsafe:` would swallow the header colon (see
+    /// parse_unsafe_block_primary).
+    pub(crate) fn parse_rhs_expression(&mut self) -> Result<Expr, ParseError> {
+        let bare_unsafe = matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "unsafe" || name == "danger")
+            && matches!(self.peek_next().kind, TokenKind::Colon);
+        if bare_unsafe {
+            self.advance();
+            self.expect(&TokenKind::Colon)?;
+            let block = self.parse_inline_or_block()?;
+            return Ok(Expr::UnsafeBlock(block.statements, vec![]));
+        }
+        self.parse_expression()
+    }
+
     pub(crate) fn parse_expression_or_assignment(&mut self) -> Result<Node, ParseError> {
         let expr = self.parse_expression()?;
         let expr = self.normalize_bare_expect_comparison(expr);
@@ -38,7 +55,7 @@ impl<'a> Parser<'a> {
             // parsers. See doc/08_tracking/bug/
             // seed_assignment_trailing_equals_continuation_2026-07-31.md.
             let indent_count = self.skip_newlines_and_indents_for_method_chain();
-            let mut value = self.parse_expression()?;
+            let mut value = self.parse_rhs_expression()?;
             // Support no-paren calls in assignment: x = double 5
             //
             // This MUST run before the DEDENT drain below. Draining consumes
