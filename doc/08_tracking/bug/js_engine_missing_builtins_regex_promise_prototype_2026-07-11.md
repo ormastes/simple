@@ -101,3 +101,36 @@ filed; no root-cause fix applied in this session.
 
 `String.replace(regex, repl)` performs regex substitution; `Promise` is defined;
 `typeof obj.method === "function"` for present prototype methods.
+
+## Note 2026-11-04 — item 1 (regex replace) implemented; store-backed verification blocked on Windows seed
+
+Implemented on `work/feat-js-regex-replace-20261104` (PR against `release/1.0.0`):
+
+- `engine/parser.spl`: `_js_parser_regex_literal_end` applies the standard
+  JS rule (a `/` starts a regex literal when the previous significant token
+  cannot end an expression, via the existing `_js_regex_context`) and every
+  quote-aware scanner (`find_top_level*`, ternary, assignment, split,
+  matching paren/bracket/brace, `primary_end`) skips the literal. A literal
+  `/src/flags` desugars to `new RegExp("src", "flags")` — no AST change.
+- `RegExp` is a lazily registered native constructor
+  (`NATIVE_REGEXP_CONSTRUCTOR`, same pattern as `String`/`Number`); a RegExp
+  value is a plain object tagged `__simple_regexp` with `source`, `flags`,
+  `global`, `ignoreCase`, `multiline`, `lastIndex` and native `test`/`exec`.
+- `String.prototype.replace` routes a tagged search value through
+  `src/lib/common/js/builtins/regexp.spl` (`g` honoured, function replacers
+  called with `(match, offset, string)`, `$&`/`$$` expanded — also for plain
+  string searches); `String.prototype.match` added (`null` on no match).
+- Residual: `$1`/capture groups are not available (the regexp engine records
+  no groups); `/` after `)` is still read as division; regex literals
+  containing `;` or `{` still confuse the statement splitter.
+
+Spec: `test/01_unit/lib/nogc_sync_mut/js/engine/regex_literal_replace_spec.spl`.
+On this host (Windows, Rust seed `D:/dev/wt/seed/simple.exe`) only the
+parser-layer examples (`typeof /b/` is `object`, division controls, plain
+string replace) go GREEN: every `JsInterpreter.set_object_property` →
+`get_object_property` round-trip returns `undefined` on the UNTOUCHED tree
+too (probe: `create_object` loses its `obj_proto_ids.push`, `prop_keys`
+stays empty), which is why 5 of the 6 pre-existing JS-engine specs
+(including `interpreter_object_single_owner_spec.spl`) are already red here.
+The `__simple_regexp`-backed assertions (`replace`/`test`/`match`/`source`)
+therefore need a Linux / self-hosted run before merge.
