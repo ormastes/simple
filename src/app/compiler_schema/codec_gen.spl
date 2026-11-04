@@ -541,9 +541,43 @@ fn _emit_nil_scalar_reject(u: CodecUniverse, type_text: text, target: text, inde
         return indent + "if " + raw_name + " == \"N\":\n" + indent + "    r.reject_malformed(\"nil_in_non_optional_scalar:{owner_field}\")\n"
     ""
 
+pub fn bare_node_placeholder_v1(decl_type: text) -> text:
+    """A bare (never Option-boxed) placeholder literal for a NON-optional
+    node/opaque field of `decl_type`, or "" when the type has none.
+
+    Stage3 incident 2026-11-04 (s3_fable39 hello, representation_observe_function_v1+0x31d,
+    addr 0): the generated decoder read every node field into a
+    `var f_x: T? = nil` local and stored that local into the NON-optional
+    struct field (`return_type: f_return_type`, `type_: f_type_`, 9 sites).
+    The stage2-built compiler keeps the Option transport word on that store,
+    so the by-value copy-in prologue of the next callee reads
+    `return_type.span` as the word 1, passes the tag guard and faults on
+    NULL -- the same class as the tuple `.N` producer (PR #6625). Only
+    DECODED HIR carries it, which is why the file-worker route (unit children
+    decode the HIR blob) faulted while the in-process route did not.
+
+    The placeholder is a literal struct construction: no `Span.empty()` call
+    (a struct-returning static fn is itself a known stage2 miscompile shape,
+    fable_milestones P4) and no `nil` in a non-optional slot. Types without
+    a cheap literal keep the optional local; a wrong placeholder here would
+    be worse than the box it replaces.
+    """
+    if decl_type == "HirType":
+        return "HirType(kind: HirTypeKind.Error, span: Span(start: 0, end: 0, line: 0, col: 0, file: \"\", length: 0))"
+    if decl_type == "SymbolId":
+        return "SymbolId(id: -1)"
+    if decl_type == "Span":
+        return "Span(start: 0, end: 0, line: 0, col: 0, file: \"\", length: 0)"
+    ""
+
 fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: EmitCounter,
-        required_node: bool = false) -> text:
-    """Statements that read one value of `type_text` into a new local `target`."""
+        required_node: bool = false, bare_field: bool = false) -> text:
+    """Statements that read one value of `type_text` into a new local `target`.
+
+    `bare_field` marks a declaration FIELD target (the local is stored straight
+    into a non-optional struct/payload field); opt-inner, list, pair and dict
+    targets pass false and keep their `T?` local.
+    """
     val s = u.classify(type_text)
     val decl_type = _strip_default(type_text).trim()
     if s.cat == "prim_char":
@@ -577,7 +611,16 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         # unmitigated. The statement form assigns the bare value without
         # boxing; the `opt` branch below keeps that bare value for node/opaque
         # inners (see its note). Wire format is unchanged.
-        var out = indent + "var " + target + ": " + decl_type + "? = nil\n"
+        #
+        # 2026-11-04: a FIELD target with a known bare placeholder is declared
+        # as the bare type (see bare_node_placeholder_v1), so the store into
+        # the non-optional field never carries an Option transport word. The
+        # presence flag is still read; an absent node leaves the placeholder.
+        val placeholder = if bare_field: bare_node_placeholder_v1(decl_type) else: ""
+        var out = if placeholder != "":
+            indent + "var " + target + ": " + decl_type + " = " + placeholder + "\n"
+        else:
+            indent + "var " + target + ": " + decl_type + "? = nil\n"
         out = out + indent + "if r.next_i64() == 1:\n"
         out = out + indent + "    " + target + " = " + callee + "(r)\n"
         if required_node:
@@ -765,7 +808,7 @@ fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
                     nil_flags.push(flag)
                     nil_indices.push(field_index)
                 else:
-                    parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "        ", c))
+                    parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "        ", c, false, true))
                     parts.push(_emit_nil_scalar_reject(u, f.type_text, "f_" + f.binder, "        ", "raw{c.n - 1}",
                         decl.name + "." + row.variant + "." + f.binder))
                 names.push("f_" + f.binder)
@@ -799,7 +842,7 @@ fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
     var names: [text] = []
     for f in decl.fields:
         val required_function_entry = decl.name == "HirModule" and f.binder == "functions"
-        parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "    ", c, required_function_entry))
+        parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "    ", c, required_function_entry, true))
         parts.push(_emit_nil_scalar_reject(u, f.type_text, "f_" + f.binder, "    ", "raw{c.n - 1}",
             decl.name + "." + f.binder))
         names.push(f.binder + ": f_" + f.binder)

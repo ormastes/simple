@@ -1,0 +1,64 @@
+use std.spec.*
+use std.io_runtime.{cwd, file_read, file_exists}
+use app.compiler_schema.codec_gen.{CodecUniverse, emit_codec_file, bare_node_placeholder_v1}
+
+# Stage3 incident 2026-11-04 (s3_fable39 hello canary): the generated HIR
+# decoder read every node field into `var f_x: T? = nil` and stored that
+# optional local straight into a NON-optional struct field
+# (`return_type: f_return_type`, `type_: f_type_`). A stage2-built compiler
+# keeps the Option transport word on that store, so the next by-value copy of
+# the HirFunction read `return_type.span` as the word 1 and faulted on NULL in
+# representation_observe_function_v1+0x31d. Decoded HIR only (file-worker
+# route), never freshly lowered HIR. The generator now declares a FIELD target
+# with a known bare placeholder as the bare type.
+
+fn count_of(haystack: text, needle: text) -> i64:
+    haystack.split(needle).len() - 1
+
+describe "HIR codec generation: bare locals for non-optional node fields":
+    it "REPRO: HirFunction.return_type decodes into a bare HirType local, never a HirType? local":
+        val generated = emit_codec_file(CodecUniverse.load(cwd()))
+        expect(generated).to_contain("    var f_return_type: HirType = HirType(kind: HirTypeKind.Error, span: Span(start: 0, end: 0, line: 0, col: 0, file: \"\", length: 0))\n    if r.next_i64() == 1:\n        f_return_type = hc_dec_hir_type(r)\n")
+        expect(generated.contains("var f_return_type: HirType? = nil")).to_be(false)
+
+    it "sibling: every `type_: f_type_` store (HirExpr, HirParam, HirField, HirConst, HirSymbol, ...) reads a bare local":
+        val generated = emit_codec_file(CodecUniverse.load(cwd()))
+        expect(count_of(generated, "var f_type_: HirType = HirType(kind: HirTypeKind.Error")).to_be_greater_than(5)
+        expect(count_of(generated, "type_: f_type_")).to_be_greater_than(5)
+        # The only `type_` fields that keep an optional local are the ones
+        # DECLARED optional (HirExprKind.ArrayLit.type_: HirType? and
+        # HirSymbol.type_: HirType?): an Option word is the right shape there.
+        expect(count_of(generated, "var f_type_: HirType? = nil")).to_equal(2)
+
+    it "sibling: Var/NamedVar's non-optional SymbolId payload reads a bare SymbolId(id: -1) local":
+        val generated = emit_codec_file(CodecUniverse.load(cwd()))
+        expect(generated.contains("var f_symbol: SymbolId? = nil")).to_be(false)
+        expect(count_of(generated, "var f_symbol: SymbolId = SymbolId(id: -1)")).to_be_greater_than(0)
+
+    it "prevention: opt-inner, list and dict targets keep their optional local (wire format and bare-assign shape unchanged)":
+        val generated = emit_codec_file(CodecUniverse.load(cwd()))
+        expect(count_of(generated, ": HirType? = nil")).to_be_greater_than(0)
+        for line in generated.split("\n"):
+            val t = line.trim()
+            if t.starts_with("var ov") or t.starts_with("var ev") or t.starts_with("var dv") or t.starts_with("var dk"):
+                expect(t.contains("= HirType(kind: HirTypeKind.Error")).to_be(false)
+                expect(t.contains("= SymbolId(id: -1)")).to_be(false)
+
+    it "prevention: the placeholder never calls Span.empty() and never writes nil into a non-optional slot":
+        val generated = emit_codec_file(CodecUniverse.load(cwd()))
+        expect(generated.contains("= HirType(kind: HirTypeKind.Error, span: Span.empty())")).to_be(false)
+        expect(generated.contains(": HirType = nil")).to_be(false)
+        expect(generated.contains(": SymbolId = nil")).to_be(false)
+
+    it "coverage: the placeholder table answers the three bare types and nothing else":
+        expect(bare_node_placeholder_v1("HirType")).to_equal("HirType(kind: HirTypeKind.Error, span: Span(start: 0, end: 0, line: 0, col: 0, file: \"\", length: 0))")
+        expect(bare_node_placeholder_v1("SymbolId")).to_equal("SymbolId(id: -1)")
+        expect(bare_node_placeholder_v1("Span")).to_equal("Span(start: 0, end: 0, line: 0, col: 0, file: \"\", length: 0)")
+        expect(bare_node_placeholder_v1("HirBlock")).to_equal("")
+        expect(bare_node_placeholder_v1("HirType?")).to_equal("")
+        expect(bare_node_placeholder_v1("")).to_equal("")
+
+    it "coverage: the checked-in generated codec is exactly what the generator emits":
+        val checked_path = cwd() + "/src/compiler/20.hir/generated/hir_codec.spl"
+        expect(file_exists(checked_path)).to_equal(true)
+        expect(emit_codec_file(CodecUniverse.load(cwd()))).to_equal(file_read(checked_path))
