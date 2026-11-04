@@ -30,6 +30,8 @@ thread_local! {
     static BDD_DESCRIBE_STACK: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// Accumulated results across all describe blocks: Vec<(total, failed)>
     static BDD_RESULTS: RefCell<Vec<(usize, usize)>> = const { RefCell::new(Vec::new()) };
+    /// Examples declared skipped/pending (`skip`, `skip_it`, `pending`, `planned`)
+    static BDD_SKIPPED: RefCell<usize> = const { RefCell::new(0) };
     /// Before-each callback function pointers (stack per nesting level)
     static BDD_BEFORE_EACH: RefCell<Vec<Vec<i64>>> = RefCell::new(vec![vec![]]);
     /// After-each callback function pointers (stack per nesting level)
@@ -254,6 +256,19 @@ pub fn rt_bdd_snapshot_results() -> Vec<(usize, usize)> {
     BDD_RESULTS.with(|cell| cell.borrow().clone())
 }
 
+/// Count one skipped/pending example. Compiled specs call this beside the
+/// std.spec `skip`/`skip_it`/`pending`/`planned` body, whose only effect is a
+/// printed line, so the verdict's `skipped=` matches the interpreter.
+#[no_mangle]
+pub extern "C" fn rt_bdd_note_skip() {
+    BDD_SKIPPED.with(|cell| *cell.borrow_mut() += 1);
+}
+
+/// Skipped examples counted by `rt_bdd_note_skip` since the last clear.
+pub fn rt_bdd_skipped_count() -> usize {
+    BDD_SKIPPED.with(|cell| *cell.borrow())
+}
+
 /// Clear all BDD state (called between test files or at startup).
 #[no_mangle]
 pub extern "C" fn rt_bdd_clear_state() {
@@ -264,6 +279,7 @@ pub extern "C" fn rt_bdd_clear_state() {
     BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = None);
     BDD_DESCRIBE_STACK.with(|cell| cell.borrow_mut().clear());
     BDD_RESULTS.with(|cell| cell.borrow_mut().clear());
+    BDD_SKIPPED.with(|cell| *cell.borrow_mut() = 0);
     BDD_BEFORE_EACH.with(|cell| *cell.borrow_mut() = vec![vec![]]);
     BDD_AFTER_EACH.with(|cell| *cell.borrow_mut() = vec![vec![]]);
 }

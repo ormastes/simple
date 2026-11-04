@@ -12164,6 +12164,7 @@ int64_t rt_map(int64_t receiver, int64_t closure_value) {
 static int64_t rt_bdd_passed = 0;
 static int64_t rt_bdd_failed = 0;
 static int rt_bdd_current_failed = 0;
+static int64_t rt_bdd_skipped = 0;
 
 static void rt_bdd_print_text(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
@@ -12200,6 +12201,10 @@ void rt_bdd_it_end(int64_t passed) {
 
 int64_t rt_bdd_has_failure(void) {
     return rt_bdd_current_failed ? 1 : 0;
+}
+
+void rt_bdd_note_skip(void) {
+    rt_bdd_skipped += 1;
 }
 
 void rt_bdd_expect_fail(int64_t msg_ptr, int64_t msg_len) {
@@ -12247,6 +12252,7 @@ void rt_bdd_clear_state(void) {
     rt_bdd_passed = 0;
     rt_bdd_failed = 0;
     rt_bdd_current_failed = 0;
+    rt_bdd_skipped = 0;
 }
 
 int64_t rt_hash_text(int64_t value) {

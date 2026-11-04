@@ -68,6 +68,14 @@ mimalloc_gc_async_mut_reuse 3/3, lambda_lift_if_enum_capture_scan 8 pass / 1 fai
 (same as interpreter), for_in_variant_lowering 8/8, failing fixture prints
 "Expected 1 to equal 2".
 
+## Fixed 2026-11-04 (third pass): skip counting on the JIT
+
+HIR lowers a statement call to `skip`/`skip_it`/`pending`/`planned` as
+`rt_bdd_note_skip()` plus the original call (new symbol, Rust runtime +
+`runtime_native.c` twin). `finish_jit_spec_entry` records each as skipped.
+jit_spec_entry_spec now reads `passed=2 skipped=1` on both engines.
+Regression: `mir/lower/tests/bdd_skip_count.rs`.
+
 ## Remaining gaps (not closed here)
 
 - Some specs still fail under strict mode with
@@ -75,8 +83,6 @@ mimalloc_gc_async_mut_reuse 3/3, lambda_lift_if_enum_capture_scan 8 pass / 1 fai
   builtin_trait_where_bound_spec) (cross-module Simple function).
   Measured on the `skip_it` fixture. This is the per-module link gap, not the
   entry.
-- std.spec's `skip(...)` prints "skipped" on the JIT, but `rt_bdd` does not count
-  it, so `skipped=` reads 0 on the JIT and 1 on the interpreter.
 - ~~`skip "name", "reason"` (paren-less, two args) does not parse~~ — decided
   not a bug: the syntax reference (`syntax_quick_reference.md` § No-Paren
   Method Calls, "split needs parens (has arg)") and `doc/07_guide/infra/testing.md`

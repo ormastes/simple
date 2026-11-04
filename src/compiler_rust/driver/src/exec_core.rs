@@ -1548,8 +1548,17 @@ fn finish_jit_spec_entry(path: &Path) -> i32 {
             false,
         );
     }
+    let skipped = simple_runtime::value::rt_bdd_skipped_count();
+    for i in 0..skipped {
+        simple_compiler::interpreter::record_external_test_result(
+            "jit".to_string(),
+            format!("skipped #{}", i + 1),
+            false,
+            true,
+        );
+    }
     eprintln!(
-        "[jit-spec-entry] {} executed on cranelift-jit: {passed} passed, {failed} failed",
+        "[jit-spec-entry] {} executed on cranelift-jit: {passed} passed, {failed} failed, {skipped} skipped",
         path.display()
     );
     if failed > 0 {
