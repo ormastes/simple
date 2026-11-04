@@ -91,3 +91,7 @@ now resolves against `source_root/lib/<tier>`.
 - Stage3 repro command (needs a stage3 binary; not run on this host):
   `stage3/simple native-build --entry test/fixtures/entry_closure_bare_common_import/main.spl --entry-closure -o out && ./out`
   Full confirmation: the `simpleos_gpu_host` `device-warm-production` entry-closure build.
+
+Ordering follow-up: the bare-tier strategy is the LAST resort (after std/lib, source_root/<seg0>
+and project_root/<seg0>), so a project-local `common/` wins. Test strength: the unit spec is
+source-text only; the native fixture `test/fixtures/entry_closure_bare_common_import/` is the real proof.
