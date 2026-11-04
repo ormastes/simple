@@ -5,6 +5,9 @@ use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.attributes.{FunctionAttr}
 use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 use compiler.semantics.representation_boundary.unsafe_observations.{representation_missing_manifest_observations_v1}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.generated.hir_codec.{hc_enc_hir_function, hc_dec_hir_function}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
 
 # Stage3 canary 2026-11-04 (s3_fable39, hello): the HIR child died with an
 # access violation at address 0 inside
@@ -101,3 +104,24 @@ describe "representation_observe_function_v1 by-value HirFunction entry":
         val c = rep_fn(8, "risky_b", HirType(kind: HirTypeKind.Error, span: Span.empty()), unsafe_block(probe_span(14)), probe_span(14))
         val out = representation_missing_manifest_observations_v1(rep_module([a, b, c]), AssuranceStrictness.Moderate)
         expect(out.len()).to_equal(2)
+
+    it "REPRO (decoded HIR): a HirFunction round-tripped through the generated codec is observed without faulting":
+        # The file-worker route decodes the HIR blob; the decoder used to store a
+        # T? local into func_attr / optimization_req / visibility / body, which a
+        # stage3 binary kept as an Option transport word (fault address -1 at
+        # representation_observe_function_v1+0xa26).
+        val original = rep_fn(9, "decoded", HirType(kind: HirTypeKind.Unit, span: probe_span(15)), empty_block(probe_span(15)), probe_span(15))
+        var w = HirCodecWriter.create()
+        hc_enc_hir_function(w, original)
+        expect(w.ok).to_equal(true)
+        val blob = w.finish()
+        expect(blob.len()).to_be_greater_than(0)
+        var r = FlatPoolReader.new(blob)
+        val decoded = hc_dec_hir_function(r)
+        expect(r.ok).to_equal(true)
+        expect(decoded.name).to_equal("decoded")
+        expect(decoded.func_attr.is_entry).to_equal(false)
+        expect(decoded.func_attr.gpu_target).to_equal("")
+        expect(decoded.visibility == Visibility.Public).to_equal(true)
+        val out = representation_missing_manifest_observations_v1(rep_module([decoded]), AssuranceStrictness.Moderate)
+        expect(out.len()).to_equal(0)
