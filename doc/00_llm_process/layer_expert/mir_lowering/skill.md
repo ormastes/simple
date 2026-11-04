@@ -622,3 +622,15 @@ Use `test/04_smoke/bootstrap_tuple_projection.spl` with exact stdout and
 empty-stderr checks; assert-only PASS markers missed the invalid-handle
 diagnostic in the negative control. Fresh compiler admission remains required.
 See `doc/08_tracking/bug/cross_bootstrap_stage2_p2_add_mir_sigbus_20261101.md`.
+
+## 2026-11-04 - TargetHIR migration (immutable HIR plan §11)
+
+Governing plan: `doc/03_plan/compiler/hir/immutable_hir_targethir_mir_refactor_plan_2026-11-03.md`.
+Package: `src/compiler/20.hir/target_hir/` (kept in a subdirectory, not the 20.hir root).
+
+- **PR-A** `hir_snapshot.spl` (`HirSnapshotId`: module + content digest + generation, scoped, never a
+  global hash) and `target_hir.spl` (`TargetHIR` identity facade). A `TargetHIR` is only constructible
+  through `target_hir_for_explicit`, which delegates to `mir_target_context_from_explicit` — implicit
+  host / lossy triples / `auto` backends cannot bind one. No MIR lowerer consumes it yet; the raw-HIR
+  entrypoints from the P0 inventory are pinned by name in
+  `test/01_unit/compiler/hir/target_hir_identity_facade_spec.spl`.
