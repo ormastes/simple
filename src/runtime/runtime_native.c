@@ -12207,6 +12207,13 @@ void rt_bdd_note_skip(void) {
     rt_bdd_skipped += 1;
 }
 
+/* std.spec fail(msg) twin of the Rust rt_bdd_fail_rv. */
+void rt_bdd_fail_rv(int64_t msg_rv) {
+    rt_bdd_current_failed = 1;
+    fputs("\n    ", stdout);
+    rt_bdd_print_text(msg_rv);
+}
+
 void rt_bdd_expect_fail(int64_t msg_ptr, int64_t msg_len) {
     rt_bdd_current_failed = 1;
     if (msg_ptr != 0 && msg_len > 0) {
