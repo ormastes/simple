@@ -9,6 +9,12 @@
 #   2. the dated tables (`bugs`, `bugs_active`) contain at most one
 #      `, <date>, <date>, true|false` terminator and the line ENDS with it;
 #   3. the row's leading id does not reappear as `, <id>, ` glued later in the line.
+#      Only for TEXT ids: a purely numeric id (test_db.sdn `tests`/`suites`) is a
+#      surrogate key and legitimately recurs as a foreign key in the same row
+#      (`    7, 7, 7, 859, ...`) — flagging it made every test_db.sdn touch FAIL.
+# --range <base>..<head> FAILs only on malformed rows NEW at <head> versus the same
+# file at <base>; a pre-existing malformed row on the base line (e.g. a release
+# line whose own data diverges from main) is reported but is not this push's.
 # Verdict is the last stdout line: PASS — <n> row(s) checked / FAIL — ... / ERROR — ...
 # Usage: sh scripts/check/check-sdn-row-shape.shs [--selftest] [file.sdn]
 #        (default doc/08_tracking/bug/bug_db.sdn)
@@ -16,7 +22,7 @@ set -u
 
 scan() {
     awk '
-    function fail(msg) { bad++; if (bad <= 10) print "  line " NR ": " msg }
+    function fail(msg) { bad++; if (lim == 0 || bad <= lim) print "  line " NR ": " msg }
     /^[a-z_]+ \|.*\|$/ {
         t = $1; hdr = $0; sub(/^[^|]*\|/, "", hdr); sub(/\|$/, "", hdr)
         ncol[t] = gsub(/,/, ",", hdr) + 1; cur = t; next
@@ -36,13 +42,63 @@ scan() {
             else if (k == 1 && $0 !~ /, (true|false)$/) fail(cur " row " id ": text after row terminator (fused row)")
         }
         rest = substr($0, length(id) + 6)
-        if (index(rest, ", " id ", ") > 0 || index(rest, "    " id ", ") > 0) fail(cur " row " id ": id repeated inside the row (fused row)")
+        if (id !~ /^[0-9]+$/ && (index(rest, ", " id ", ") > 0 || index(rest, "    " id ", ") > 0)) fail(cur " row " id ": id repeated inside the row (fused row)")
     }
     END {
         if (n == 0) { print "ERROR — nothing was checked (no table rows)"; exit 2 }
         if (bad > 0) { print "FAIL — " n " row(s) checked, " bad " malformed"; exit 1 }
         print "PASS — " n " row(s) checked, 0 malformed"; exit 0
-    }' "$1"
+    }' lim="${2:-10}" "$1"
+}
+
+# Malformed-row signatures (line numbers stripped) for <rev>:<path>; empty when absent.
+sigs_at() {
+    git show "$1:$2" > "$3" 2>/dev/null || { : > "$3.sig"; return 0; }
+    scan "$3" 0 | sed -n 's/^  line [0-9]*: //p' | sort > "$3.sig"
+}
+
+# Range-mode fixture: a release line whose own table .sdn already carries a
+# malformed row (diverged from main) must PASS for a branch that does not add
+# one; a branch that introduces a fused row must FAIL.
+range_selftest() {
+    g="$1/repo"; hdr='bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|'
+    row='    b_1, P2, open, "t", src/x.spl, 3, doc/a.md, 2026-10-18, 2026-10-18, true'
+    old='    a_1, P2, open, "t", src    a_1, P2, open, "t", src/x.spl, 3, doc/a.md, 2026-10-18, 2026-10-18, true'
+    new='    c_1, P2, open, "t", src    c_1, P2, open, "t", src/x.spl, 3, doc/a.md, 2026-10-18, 2026-10-18, true'
+    git init -q "$g" && cd "$g" || return 1
+    gc() { git -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -qm "$1"; }
+    printf '%s\n%s\n' "$hdr" "$row" > t.sdn; git add t.sdn; gc main; main=$(git rev-parse HEAD)
+    printf '%s\n%s\n%s\n' "$hdr" "$row" "$old" > t.sdn; git add t.sdn; gc release; rel=$(git rev-parse HEAD)
+    printf '%s\n%s\n%s\n    d_1, P3, open, "u", src/y.spl, 4, doc/b.md, 2026-10-19, 2026-10-19, true\n' "$hdr" "$row" "$old" > t.sdn; git add t.sdn; gc clean; clean=$(git rev-parse HEAD)
+    printf '%s\n%s\n%s\n%s\n' "$hdr" "$row" "$old" "$new" > t.sdn; git add t.sdn; git reset -q --soft "$rel"; gc bad; bad=$(git rev-parse HEAD)
+    range_check "$rel..$clean" >/dev/null; a=$?
+    range_check "$rel..$bad" >/dev/null; b=$?
+    range_check "$main..$rel" >/dev/null; c=$?
+    cd / || return 1
+    [ "$a" = 0 ] && [ "$b" = 1 ] && [ "$c" = 1 ]
+}
+
+range_check() {
+    _rr=$1
+    base=${_rr%%..*}; head=${_rr#*..}
+    files=$(git diff --name-only --diff-filter=AM "$_rr" -- '*.sdn') || { echo "ERROR — nothing was checked (git diff failed)"; return 2; }
+    tmp=$(mktemp) || return 2; checked=0; failed=""; preexist=0
+    for p in $files; do
+        git show "$head:$p" > "$tmp" 2>/dev/null || continue
+        scan "$tmp" 0 > "$tmp.out"; rc=$?
+        [ "$rc" = 2 ] && continue
+        checked=$((checked + 1))
+        [ "$rc" = 0 ] && continue
+        sed -n 's/^  line [0-9]*: //p' "$tmp.out" | sort > "$tmp.head"
+        sigs_at "$base" "$p" "$tmp.base"
+        newsig=$(comm -23 "$tmp.head" "$tmp.base.sig")
+        n_pre=$(comm -12 "$tmp.head" "$tmp.base.sig" | wc -l | tr -d ' ')
+        preexist=$((preexist + n_pre))
+        if [ -n "$newsig" ]; then failed="$failed $p"; printf '%s\n' "$newsig" | head -10 | sed 's/^/    /'; fi
+    done
+    rm -f "$tmp" "$tmp.out" "$tmp.head" "$tmp.base" "$tmp.base.sig"
+    if [ -n "$failed" ]; then echo "FAIL — $checked touched table .sdn file(s) checked, new malformed rows in:$failed"; return 1; fi
+    echo "PASS — $checked touched table .sdn file(s) checked at $head, 0 new malformed ($preexist pre-existing at $base)"; return 0
 }
 
 selftest() {
@@ -52,14 +108,17 @@ selftest() {
     fused="    a_1, P2, fix, \"t\", src    a_1, P2, open, \"t\", src/x.spl, 3, doc/a.md, 2026-10-18, 2026-10-18, truecompiler    a_1, P2, open, \"t\", src/x.spl, 3, doc/a.md, 2026-10-18, 2026-10-18, true"
     printf 'bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n%s\n' "$fused" > "$d/fused.sdn"
     printf 'bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n    a_1, P2, open, "t", src/x.spl, 3, doc/a.md, 2026-10-18, 2026-10-18, true, extra\n' > "$d/wide.sdn"
+    printf 'tests |test_id, suite_id, name_str, valid|\n    7, 7, 7, true\n' > "$d/numid.sdn"
     : > "$d/empty.sdn"
     scan "$d/ok.sdn" >/dev/null; r1=$?
     scan "$d/fused.sdn" >/dev/null; r2=$?
     scan "$d/wide.sdn" >/dev/null; r3=$?
     scan "$d/empty.sdn" >/dev/null; r4=$?
+    scan "$d/numid.sdn" >/dev/null; r5=$?
+    ( range_selftest "$d" ); r6=$?
     rm -rf "$d"
-    if [ "$r1" = 0 ] && [ "$r2" = 1 ] && [ "$r3" = 1 ] && [ "$r4" = 2 ]; then return 0; fi
-    echo "selftest FAILED: ok=$r1 fused=$r2 wide=$r3 empty=$r4" >&2; return 1
+    if [ "$r1" = 0 ] && [ "$r2" = 1 ] && [ "$r3" = 1 ] && [ "$r4" = 2 ] && [ "$r5" = 0 ] && [ "$r6" = 0 ]; then return 0; fi
+    echo "selftest FAILED: ok=$r1 fused=$r2 wide=$r3 empty=$r4 numid=$r5 range=$r6" >&2; return 1
 }
 
 FILE=doc/08_tracking/bug/bug_db.sdn
@@ -76,21 +135,9 @@ done
 if [ "$RANGE" != "" ]; then
     selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
     case "$RANGE" in *..*) ;; *) echo "ERROR — nothing was checked (--range needs <base>..<head>)"; exit 2 ;; esac
-    head=${RANGE#*..}
-    files=$(git diff --name-only --diff-filter=AM "$RANGE" -- '*.sdn') || { echo "ERROR — nothing was checked (git diff failed)"; exit 2; }
-    tmp=$(mktemp) || exit 2; checked=0; failed=""
-    for p in $files; do
-        git show "$head:$p" > "$tmp" 2>/dev/null || continue
-        out=$(scan "$tmp"); rc=$?
-        [ "$rc" = 2 ] && continue
-        checked=$((checked + 1))
-        if [ "$rc" != 0 ]; then failed="$failed $p"; printf '%s\n' "$out" | sed 's/^/  /'; fi
-    done
-    rm -f "$tmp"
-    if [ -n "$failed" ]; then echo "FAIL — $checked touched table .sdn file(s) checked, malformed:$failed"; exit 1; fi
-    echo "PASS — $checked touched table .sdn file(s) checked at $head, 0 malformed"; exit 0
+    range_check "$RANGE"; exit $?
 fi
 selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
-if [ "$RUN_SELFTEST_ONLY" = 1 ]; then echo "PASS — selftest 4 fixtures"; exit 0; fi
+if [ "$RUN_SELFTEST_ONLY" = 1 ]; then echo "PASS — selftest 7 fixtures"; exit 0; fi
 [ -f "$FILE" ] || { echo "ERROR — nothing was checked ($FILE missing)"; exit 2; }
 scan "$FILE"
