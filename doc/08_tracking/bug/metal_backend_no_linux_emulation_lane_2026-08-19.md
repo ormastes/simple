@@ -1,7 +1,7 @@
 # Metal engine2d backend has no Linux emulation lane — blocked on non-macOS hosts
 
 - **Date:** 2026-08-19
-- **Status:** BLOCKED (environment), honest gate — not a code defect
+- **Status:** BLOCKER-DOCUMENTED (2026-11-04) — host-neutral verification lane exists; GPU-execution lane needs an owner decision. Not a code defect.
 - **Area:** rendering / engine2d backend matrix
 
 ## Evidence
@@ -47,3 +47,45 @@ availability contract, pinned by
    (`test/02_integration/rendering/macos_metal_2d_live_harness.spl`).
 2. Implement a disclosed `metal-software-emulation` RenderBackend mirroring the
    DirectX pattern (honest renamed lane, CPU raster, probe-gated).
+
+## 2026-11-04 triage (metalemu lane, release/1.0.0)
+
+**What already exercises the Metal backend on Linux CI (no GPU claimed):**
+
+- `test/02_integration/rendering/metal_msl_pipeline_spec.spl` — two
+  host-neutral source-contract scenarios: every mandatory session pipeline maps
+  to exactly one MSL `kernel` entry point in `backend_metal_msl.spl`, and a
+  device-glass receipt stays separate from CPU-mirror execution. Its dispatch
+  scenarios fall to an explicit `is_macos() == false` assertion off macOS
+  (non-vacuous OS gate, not a pass).
+- `test/02_integration/rendering/engine2d_shared_raster_parity_spec.spl` plus
+  `src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl` — the "Metal-exact" CPU
+  twin kernels (circle, rounded rect, triangle, `lerp_channel`) pinned
+  bit-for-bit against SoftwareBackend. This is the algorithmic half of a
+  Metal emulation lane and is host-neutral.
+- `test/02_integration/rendering/backend_emulation_spec.spl` — the availability
+  contract ("Metal requires macOS").
+
+These specs were not re-run in this change (doc-only triage); they are cited
+from the tree at `origin/release/1.0.0`.
+
+**What cannot be done honestly in-repo without an owner decision:**
+
+1. *MSL compile check on Linux.* Apple ships no Linux `metal` front-end; the
+   only real compiler is `xcrun metal` / `MTLDevice.newLibraryWithSource`.
+   A third-party MSL parser (or a Simple-written one) would validate syntax,
+   not Apple's semantics — owner must decide whether that is worth carrying.
+2. *GPU execution.* There is no Metal-on-Vulkan runtime. A
+   `metal-software-emulation` RenderBackend (DirectX pattern) would execute on
+   the CPU through the same `backend_emu` kernels already covered above, so it
+   adds a renamed lane, not new evidence. Not implemented: it would be
+   over-engineering with no gain in coverage.
+3. *Real Metal in CI.* `gpu-lane-tests.yml` already has a `macos-latest`
+   matrix row; running `metal_msl_pipeline_spec.spl` there is the honest GPU
+   lane, gated on a runner with a usable `bin/simple` (CI baseline has none —
+   see `publish` job notes in `.claude/rules/vcs.md`).
+
+**Recommendation:** option 3 (macOS runner) once a self-hosted macOS
+`bin/simple` is admitted by the bootstrap lane; until then the Linux coverage
+is the source-contract + CPU-twin parity listed above. Remaining gap: no
+Linux-side MSL compile and no GPU execution off macOS.
