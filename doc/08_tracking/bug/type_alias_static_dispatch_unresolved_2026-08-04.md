@@ -131,3 +131,12 @@ Record already states this is architectural, needing a Rust-seed interpreter
 name-resolution change, out of scope per repo rules, re-confirmed 2026-08-10.
 No change made.
 
+
+## Re-verification 2026-11-04 (c28-w3): STILL REPRODUCES, deferred
+
+Exact repro from this doc (SharedWal / DbfsWal) via `bin/simple.exe test` on seed
+0b2c3d015b7: `2 total, 1 passed, 1 failed` (~14 s wall); alias case still fails.
+Root cause unchanged (seed interpreter has no receiver resolution for
+`type_aliases`; pure-Simple `alias_registry.spl` is a lint-only consumer, so
+editing it cannot change spec-body evaluation). Needs a seed interpreter change
+or the interp path moving off the seed; left open, no code change.

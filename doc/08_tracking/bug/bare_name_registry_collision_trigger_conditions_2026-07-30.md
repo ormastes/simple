@@ -109,3 +109,9 @@ Instrument inside the real `HirLowering`/`SymbolTable` call graph using **real
 code — and bisect what actually makes `fn_matched` false. Until that lands, treat
 the mechanism as open.
 
+
+## c28-w3 2026-11-04: no change
+
+Still no reproducer; OWNER QUESTION in the row stands (module-qualify
+`named_type_register`, or close as not reproducible). Not actionable by a worker
+without that decision.

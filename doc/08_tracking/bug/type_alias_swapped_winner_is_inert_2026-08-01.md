@@ -173,3 +173,13 @@ control confirms the gate still fires.
 - No stage3 error-count table is reported: the run at this tip exited 143
   (SIGTERM), and per `glob_ungate_swaps_import_winners_2026-08-01.md` a count
   census is structurally blind to winner swaps anyway.
+
+## Re-check 2026-11-04 (c28-w3): still latent, no code change
+
+`SymbolKind.TypeAlias` is still defined with a `nil` type at
+`module_declarations_bootstrap.spl:266` and `module_import_registration.spl:889`
+and still has no reader in `src/compiler/` beyond display/kind mapping, so the
+inertness argument above holds. The fix (first-write-wins in `SymbolTable.define`)
+is only meaningful together with alias transparency and has no observable
+behaviour to pin today, so a failing spec cannot be written. Stays open as the
+documented precondition of the alias-transparency work.
