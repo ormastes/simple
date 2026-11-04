@@ -19,6 +19,8 @@ use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
 use std.nogc_sync_mut.io.mod_stub.{is_dir}
 use app.io.source_discovery.{discover_spl_files, source_path_identity}
 use app.io.cli_ops.{_cli_eprint, _cli_process_run, _cli_run_workspace_root_guard}
+use app.io.cli_ops.{cli_kernel_executable_path}
+use app.io.cli_parallel_children.{cli_jobs_from_args, cli_default_workers, cli_run_children_ordered, cli_all_unique}
 use compiler.common.assurance.warning_phase.warning_phase_env_var_name
 
 extern fn rt_env_set(key: text, value: text) -> bool
@@ -31,7 +33,22 @@ pub fn lint_option_error(args: [text]) -> text:
     var other_count = 0
     var expect_profile_tier = false
     var expect_semantic_value = false
+    var expect_jobs_value = false
+    val (_jobs_n, jobs_bad) = cli_jobs_from_args(args)
+    if jobs_bad:
+        return "--jobs requires a positive integer"
     for arg in args:
+        if expect_jobs_value:
+            expect_jobs_value = false
+            other_count = other_count + 1
+            continue
+        if arg == "--jobs":
+            expect_jobs_value = true
+            other_count = other_count + 1
+            continue
+        if arg.starts_with("--jobs=") or arg == "--lint-child-stats":
+            other_count = other_count + 1
+            continue
         if expect_semantic_value:
             if arg == "" or arg.starts_with("-"):
                 return "semantic source authority requires a value"
@@ -80,6 +97,36 @@ pub fn lint_option_error(args: [text]) -> text:
         return "help cannot be combined with files or other options"
     ""
 
+# Child output ends with the newline its own print wrote; print adds one back.
+fn _fan_trim_nl(s: text) -> text:
+    if s.ends_with("\n"):
+        return s[0:s.len() - 1]
+    s
+
+val LINT_CHILD_STATS_PREFIX = "@@LINT-CHILD-STATS"
+
+# Split a fan-out child's stdout into (user-visible output, stats numbers).
+# stats is empty when the child never reached its stats line (crash).
+fn _lint_child_split_stats(stdout: text) -> (text, [i64]):
+    val lines = stdout.split("\n")
+    var kept = ""
+    var stats: [i64] = []
+    var first = true
+    var idx = 0
+    while idx < lines.len():
+        val line = lines[idx]
+        idx = idx + 1
+        if line.starts_with(LINT_CHILD_STATS_PREFIX):
+            for field in line.split(" "):
+                if field != LINT_CHILD_STATS_PREFIX and field != "":
+                    stats.push(field.to_i64() ?? 0)
+            continue
+        if idx == lines.len() and line == "":
+            continue
+        kept = kept + (if first: "" else: "\n") + line
+        first = false
+    (kept, stats)
+
 fn run_lint_command(args: [text]) -> i64:
     val option_error = lint_option_error(args)
     if option_error != "":
@@ -107,19 +154,37 @@ fn run_lint_command(args: [text]) -> i64:
     var run_simd = false
     val json_output = args.contains("--json")
     var normalized_args: [text] = []
+    var child_opts: [text] = []
+    var child_stats_mode = false
+    val (jobs_requested, _jobs_bad) = cli_jobs_from_args(args)
+    var expect_jobs_value = false
     var expect_profile_tier = false
     var expect_semantic_value = false
     for arg in args:
+        if expect_jobs_value:
+            expect_jobs_value = false
+            continue
+        if arg == "--jobs":
+            expect_jobs_value = true
+            continue
+        if arg.starts_with("--jobs="):
+            continue
+        if arg == "--lint-child-stats":
+            child_stats_mode = true
+            continue
         if expect_semantic_value:
             normalized_args.push(arg)
+            child_opts.push(arg)
             expect_semantic_value = false
             continue
         if semantic_markdown_authority_option_v1(arg):
             normalized_args.push(arg)
+            child_opts.push(arg)
             expect_semantic_value = true
             continue
         if expect_profile_tier:
             normalized_args.push("--profile=" + arg)
+            child_opts.push("--profile=" + arg)
             expect_profile_tier = false
             continue
         if arg == "--profile":
@@ -135,8 +200,11 @@ fn run_lint_command(args: [text]) -> i64:
             run_repo_gates = true
         elif arg == "--simd":
             run_simd = true
+            child_opts.push(arg)
         elif not arg.starts_with("-"):
             files.push(arg)
+        else:
+            child_opts.push(arg)
 
     var exit_code = 0
     if json_output and (run_repo_gates or run_mcp_perf):
@@ -147,21 +215,18 @@ fn run_lint_command(args: [text]) -> i64:
         if root_guard_exit != 0:
             exit_code = 1
 
-        val (iso_stdout, iso_stderr, iso_exit) = _cli_process_run("sh", ["scripts/check/check-ui-backend-isolation.shs"])
-        if iso_stdout.len() > 0:
-            print(iso_stdout)
-        if iso_stderr.len() > 0:
-            _cli_eprint(iso_stderr)
-        if iso_exit != 0:
-            exit_code = 1
-
-        val (hot_stdout, hot_stderr, hot_exit) = _cli_process_run("sh", ["scripts/check/check-cpu-hotloop-idiom.shs"])
-        if hot_stdout.len() > 0:
-            print(hot_stdout)
-        if hot_stderr.len() > 0:
-            _cli_eprint(hot_stderr)
-        if hot_exit != 0:
-            exit_code = 1
+        # The two check scripts are independent: run them concurrently and
+        # print in the original (isolation, hot-loop) order.
+        val gate_runs = cli_run_children_ordered("sh", [
+            ["scripts/check/check-ui-backend-isolation.shs"],
+            ["scripts/check/check-cpu-hotloop-idiom.shs"]], 2)
+        for gate in gate_runs:
+            if gate.stdout.len() > 0:
+                print(_fan_trim_nl(gate.stdout))
+            if gate.stderr.len() > 0:
+                _cli_eprint(_fan_trim_nl(gate.stderr))
+            if gate.exit != 0:
+                exit_code = 1
 
     if run_mcp_perf:
         _cli_eprint("Error: --mcp-perf is unavailable until its repository scanner has a production owner")
@@ -246,7 +311,46 @@ fn run_lint_command(args: [text]) -> i64:
         else:
             _cli_eprint("Error: {lint_policy.error}")
         return 2
-    for file_path in lint_files:
+    # Fan out one child per file (same binary, single-file => in-process path,
+    # so children never recurse). Output is replayed in INPUT order.
+    val fan_exe = if child_stats_mode or lint_files.len() < 2: "" else: cli_kernel_executable_path()
+    val fan_workers = if fan_exe == "": 1 else: cli_default_workers(jobs_requested, lint_files)
+    var serial_files: [text] = lint_files
+    if fan_workers > 1:
+        serial_files = []
+        var fan_argvs: [[text]] = []
+        for fan_file in lint_files:
+            var fan_args: [text] = ["lint"]
+            for opt in child_opts:
+                fan_args.push(opt)
+            fan_args.push("--lint-child-stats")
+            fan_args.push("--jobs")
+            fan_args.push("1")
+            fan_args.push(fan_file)
+            fan_argvs.push(fan_args)
+        val fan_runs = cli_run_children_ordered(fan_exe, fan_argvs, fan_workers)
+        for fan_run in fan_runs:
+            val (child_out, stats) = _lint_child_split_stats(fan_run.stdout)
+            if child_out.len() > 0:
+                print(child_out)
+            if fan_run.stderr.len() > 0:
+                _cli_eprint(_fan_trim_nl(fan_run.stderr))
+            if stats.len() != 7:
+                _cli_eprint("Error: lint child produced no result (exit {fan_run.exit})")
+                if exit_code == 0:
+                    exit_code = 1
+                failed_files = failed_files + 1
+                not_linted_files = not_linted_files + 1
+                continue
+            diagnostic_files = diagnostic_files + (stats[0] as u32)
+            error_files = error_files + (stats[1] as u32)
+            warning_files = warning_files + (stats[2] as u32)
+            completed_files = completed_files + (stats[3] as u32)
+            not_linted_files = not_linted_files + (stats[4] as i64)
+            failed_files = failed_files + (stats[5] as i64)
+            if stats[6] != 0 and exit_code == 0:
+                exit_code = stats[6]
+    for file_path in serial_files:
         if not file_exists(file_path):
             if json_output:
                 print "{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"file not found\"}"
@@ -301,6 +405,11 @@ fn run_lint_command(args: [text]) -> i64:
                     print "{file_path}:{line_str2}: info[simd_opportunity]: {easyfix_description_text(sf)}"
                 si = si + 1
 
+    if child_stats_mode:
+        # Fan-out child: the parent owns the aggregate summary.
+        print "{LINT_CHILD_STATS_PREFIX} {diagnostic_files} {error_files} {warning_files} {completed_files} {not_linted_files} {failed_files} {exit_code}"
+        return exit_code
+
     val rule_count = lint_session.lints.len() as u32
     val adapter = simple_lint_adapter_result(
         lint_files.len() as u32, completed_files, not_linted_files as u32,
@@ -315,7 +424,25 @@ fn run_lint_command(args: [text]) -> i64:
         print simple_lint_human_summary(adapter.kernel_result)
     exit_code
 
-fn run_fmt_command(args: [text]) -> i64:
+fn run_fmt_command(all_args: [text]) -> i64:
+    # `--jobs N` belongs to this owner only; strip it before the shared
+    # (closed) fmt option validation and the flag/file scan below.
+    val (jobs_requested, jobs_bad) = cli_jobs_from_args(all_args)
+    if jobs_bad:
+        _cli_eprint("Error: --jobs requires a positive integer")
+        return 2
+    var args: [text] = []
+    var skip_jobs_value = false
+    for raw_arg in all_args:
+        if skip_jobs_value:
+            skip_jobs_value = false
+            continue
+        if raw_arg == "--jobs":
+            skip_jobs_value = true
+            continue
+        if raw_arg.starts_with("--jobs="):
+            continue
+        args.push(raw_arg)
     val option_error = fmt_option_error(args)
     if option_error != "":
         _cli_eprint("Error: {option_error}")
@@ -351,6 +478,32 @@ fn run_fmt_command(args: [text]) -> i64:
         return 1
 
     var exit_code = 0
+    # One child per file when there are several distinct files (duplicates
+    # stay serial: `--write` on the same path must not race itself).
+    val fmt_exe = if files.len() < 2 or not cli_all_unique(files): "" else: cli_kernel_executable_path()
+    val fmt_workers = if fmt_exe == "": 1 else: cli_default_workers(jobs_requested, files)
+    if fmt_workers > 1:
+        var fmt_argvs: [[text]] = []
+        for fmt_file in files:
+            var fmt_args: [text] = ["fmt"]
+            if check_mode:
+                fmt_args.push("--check")
+            if write_mode:
+                fmt_args.push("--write")
+            if diff_mode:
+                fmt_args.push("--diff")
+            fmt_args.push("--jobs")
+            fmt_args.push("1")
+            fmt_args.push(fmt_file)
+            fmt_argvs.push(fmt_args)
+        for fmt_run in cli_run_children_ordered(fmt_exe, fmt_argvs, fmt_workers):
+            if fmt_run.stdout.len() > 0:
+                print(_fan_trim_nl(fmt_run.stdout))
+            if fmt_run.stderr.len() > 0:
+                _cli_eprint(_fan_trim_nl(fmt_run.stderr))
+            if fmt_run.exit != 0:
+                exit_code = 1
+        return exit_code
     for file_path in files:
         if not file_exists(file_path):
             _cli_eprint("Error: File not found: {file_path}")

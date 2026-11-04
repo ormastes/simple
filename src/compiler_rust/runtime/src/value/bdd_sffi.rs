@@ -399,6 +399,24 @@ pub extern "C" fn rt_bdd_expect_eq_rv(actual: i64, expected: i64) {
     }
 }
 
+/// std.spec `fail(msg)` / `fail_assertion(msg)` / `fail_test(msg)` on the
+/// compiled lane.
+///
+/// Twin of the interpreter builtin (`interpreter_call/bdd.rs`
+/// `record_assertion_failure`): inside an `it` it marks the example failed
+/// with `msg`; outside any `it` there is no harness to record it, so it is
+/// fatal (non-zero exit), never silent.
+#[no_mangle]
+pub extern "C" fn rt_bdd_fail_rv(msg_rv: i64) {
+    let msg = unsafe { rv_to_string(RuntimeValue(msg_rv as u64)) };
+    if !BDD_INSIDE_IT.with(|cell| *cell.borrow()) {
+        eprintln!("{msg} (assertion outside an `it` block has no spec harness to record it)");
+        std::process::exit(1);
+    }
+    BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
+    BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = Some(msg));
+}
+
 /// expect_truthy accepting a RuntimeValue.
 ///
 /// A value is truthy when it is not nil and not bool-false and not the
