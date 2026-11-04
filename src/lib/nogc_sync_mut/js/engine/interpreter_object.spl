@@ -43,10 +43,10 @@ impl JsInterpreter:
         # Single-owner mutation: aliasing self.object_store into a local and
         # storing it back deep-copies the entire object store per object
         # creation. See .claude/rules/code-style.md.
-        val id = self.object_store.next_id
-        self.object_store.next_id = id + 1
-        self.object_store.obj_proto_ids.push(-1)
-        id
+        # `alloc_object` is a `me` on the store: the nested
+        # `self.object_store.obj_proto_ids.push(-1)` was dropped by the seed
+        # interpreter, so the proto table never grew.
+        self.object_store.alloc_object()
 
     me _storage_api_property(key: text) -> bool:
         key == "__proto__" or key == "getItem" or key == "setItem" or
@@ -169,21 +169,16 @@ impl JsInterpreter:
         # The latest slot for (obj_id, key) comes from ObjectStore's slot
         # index (same answer as the former backward scan over every stored
         # property, which made each write O(total properties)).
+        # The nested array writes go through ObjectStore `me` methods: the seed
+        # interpreter drops `self.object_store.<array>.push(x)` made from here
+        # (the array is read as a copy), which left every property write lost.
         self.object_store.sync_prop_slots()
         val existing_i = self.object_store.find_prop_slot(obj_id, key)
         if existing_i >= 0:
             if self.object_store.prop_enumerables.get(existing_i) or self.object_store.prop_configurables.get(existing_i):
-                self.object_store.prop_values[existing_i] = stored_value
-                self.object_store.prop_ref_tags[existing_i] = ""
-                self.object_store.prop_ref_ids[existing_i] = ""
+                self.object_store.update_slot(existing_i, stored_value)
                 return
-        self.object_store.prop_obj_ids.push(obj_id)
-        self.object_store.prop_keys.push(key)
-        self.object_store.prop_values.push(stored_value)
-        self.object_store.prop_ref_tags.push("")
-        self.object_store.prop_ref_ids.push("")
-        self.object_store.prop_enumerables.push(true)
-        self.object_store.prop_configurables.push(true)
+        self.object_store.append_slot(obj_id, key, stored_value)
         self.object_store.sync_prop_slots()
 
     me get_object_property(obj_id: i64, key: text) -> JsValue:

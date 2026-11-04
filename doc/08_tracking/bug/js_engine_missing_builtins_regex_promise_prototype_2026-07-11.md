@@ -124,13 +124,19 @@ Implemented on `work/feat-js-regex-replace-20261104` (PR against `release/1.0.0`
   no groups); `/` after `)` is still read as division; regex literals
   containing `;` or `{` still confuse the statement splitter.
 
-Spec: `test/01_unit/lib/nogc_sync_mut/js/engine/regex_literal_replace_spec.spl`.
-On this host (Windows, Rust seed `D:/dev/wt/seed/simple.exe`) only the
-parser-layer examples (`typeof /b/` is `object`, division controls, plain
-string replace) go GREEN: every `JsInterpreter.set_object_property` →
-`get_object_property` round-trip returns `undefined` on the UNTOUCHED tree
-too (probe: `create_object` loses its `obj_proto_ids.push`, `prop_keys`
-stays empty), which is why 5 of the 6 pre-existing JS-engine specs
-(including `interpreter_object_single_owner_spec.spl`) are already red here.
-The `__simple_regexp`-backed assertions (`replace`/`test`/`match`/`source`)
-therefore need a Linux / self-hosted run before merge.
+Spec: `test/01_unit/lib/nogc_sync_mut/js/engine/regex_literal_replace_spec.spl`
+— 13/13 on the Windows Rust seed once the object-store defect below was fixed.
+
+Root cause of the initial 3/13: every `JsInterpreter.set_object_property` ->
+`get_object_property` round-trip returned `undefined` on this host because the
+seed *interpreter* drops a nested `self.object_store.<array>.push(x)` /
+`[i] = x` made from another class's `me` method (the array is read as a
+copy; the JIT keeps it, but the engine runs interpreted since
+`JsInterpreter._run_promise_task` fails HIR lowering). Fixed in the same
+branch by routing those writes through `ObjectStore` `me` methods
+(`alloc_object`, new `update_slot` / `append_slot`) in the nogc_sync_mut,
+nogc_async_mut and gc_async_mut `interpreter_object.spl`; `EnvironmentStack.new`
+added to nogc_sync_mut. That took the pre-existing JS-engine specs from
+1/6 green to 4/6 (remaining: nogc_sync_mut `js_vm_reclamation` is an
+intentional RED placeholder; common `js_vm_reclamation` 2/4 reads the common
+family's `env_parent_ids` field against the nogc_sync_mut engine).
