@@ -1,0 +1,158 @@
+# Lockless publication contracts (doc/05_design/compiler/scv/lockless_refresh.md).
+# Bug: scv_compile_event_refresh_lock_serializes_builds_2026-11-02
+# Repro + prevention: the old publication path took publication.lock and
+# wedged a same-generation race with publish-generation-digest-divergence;
+# the lockless path reports a benign identical-content race as ok, any other
+# same-base race as publish-cursor-superseded, and never leaves a lock file.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory.*
+use std.io_runtime.{file_read}
+use std.nogc_sync_mut.io_runtime.{dir_remove, dir_list}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_write, file_delete}
+use std.nogc_sync_mut.sffi.fs.{file_create_excl}
+
+extern fn rt_getpid() -> i64
+
+val HEAD_A = "0123456789abcdef0123456789abcdef01234567"
+
+fn empty_inventory() -> CompileSourceInventoryV1:
+    CompileSourceInventoryV1(1, 0, [])
+
+fn one_entry_inventory(generation: i64, identity: text, body: text) -> CompileSourceInventoryV1:
+    val change = compile_source_inventory_apply_event_v1(
+        CompileSourceInventoryV1(1, generation, []),
+        compile_source_inventory_git_event_v1("create", identity, body))
+    change.inventory!
+
+fn publish_first(cache_root: text) -> (text, text):
+    compile_source_inventory_publish_reasoned_v1(
+        cache_root, empty_inventory(), HEAD_A, 0, sha256_text(""), sha256_text(""))
+
+describe "lockless inventory publication":
+    it "takes no lock file and leaves none behind":
+        val cache_root = "build/test-artifacts/scv-lockless-nolock-{rt_getpid()}/build/scv"
+        dir_remove(cache_root, true)
+        val (digest, reason) = publish_first(cache_root)
+        expect(reason).to_equal("ok")
+        expect(digest != "").to_equal(true)
+        expect(file_exists(cache_root + "/source-inventory/publication.lock")).to_equal(false)
+        for name in dir_list(cache_root + "/source-inventory"):
+            expect(name.contains("lock")).to_equal(false)
+        dir_remove(cache_root, true)
+
+    it "treats an identical-content same-base race as a benign ok":
+        val cache_root = "build/test-artifacts/scv-lockless-identical-{rt_getpid()}/build/scv"
+        dir_remove(cache_root, true)
+        val (first_digest, first_reason) = publish_first(cache_root)
+        expect(first_reason).to_equal("ok")
+        val base = sha256_text(compile_source_inventory_read_pointer_content_v1(cache_root) ?? "")
+        val next = one_entry_inventory(0, "src/a.spl", "fn a(): 1")
+        # Writer A and writer B both observed the same base pointer and derived
+        # the same generation. Whoever publishes second must still answer ok
+        # with the same digest, and the blob must exist exactly once.
+        val (a_digest, a_reason) = compile_source_inventory_publish_reasoned_v1(
+            cache_root, next, HEAD_A, 0, sha256_text(""), base)
+        expect(a_reason).to_equal("ok")
+        val (b_digest, b_reason) = compile_source_inventory_publish_reasoned_v1(
+            cache_root, next, HEAD_A, 0, sha256_text(""), base)
+        expect(b_reason).to_equal("ok")
+        expect(b_digest).to_equal(a_digest)
+        expect(first_digest != a_digest).to_equal(true)
+        var blobs = 0
+        for name in dir_list(cache_root + "/source-inventory/generations"):
+            if name.ends_with(".inventory"): blobs = blobs + 1
+        expect(blobs).to_equal(2)
+        dir_remove(cache_root, true)
+
+    it "reports a different-content same-base race as superseded, never as a wedge":
+        val cache_root = "build/test-artifacts/scv-lockless-superseded-{rt_getpid()}/build/scv"
+        dir_remove(cache_root, true)
+        val (_first, first_reason) = publish_first(cache_root)
+        expect(first_reason).to_equal("ok")
+        val base_pointer_digest = sha256_text(compile_source_inventory_read_pointer_content_v1(cache_root) ?? "")
+        val a = one_entry_inventory(0, "src/a.spl", "fn a(): 1")
+        val b = one_entry_inventory(0, "src/b.spl", "fn b(): 2")
+        val (a_digest, a_reason) = compile_source_inventory_publish_reasoned_v1(
+            cache_root, a, HEAD_A, 0, sha256_text(""), base_pointer_digest)
+        expect(a_reason).to_equal("ok")
+        val (b_digest, b_reason) = compile_source_inventory_publish_reasoned_v1(
+            cache_root, b, HEAD_A, 0, sha256_text(""), base_pointer_digest)
+        expect(b_digest).to_equal("")
+        expect(b_reason).to_equal("publish-cursor-superseded")
+        # The winner's pointer is intact and resolves to a complete generation.
+        val pointer = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+        expect(compile_source_inventory_read_at_pointer_v1(cache_root, pointer).digest).to_equal(a_digest)
+        dir_remove(cache_root, true)
+
+    it "publishes content-addressed blobs idempotently and refuses a digest collision":
+        val cache_root = "build/test-artifacts/scv-lockless-blob-{rt_getpid()}/build/scv"
+        dir_remove(cache_root, true)
+        val (_d, reason) = publish_first(cache_root)
+        expect(reason).to_equal("ok")
+        val path = cache_root + "/source-inventory/generations/" + sha256_text("blob") + ".inventory"
+        expect(compile_source_inventory_publish_blob_v1(path, "blob")).to_equal(true)
+        expect(compile_source_inventory_publish_blob_v1(path, "blob")).to_equal(true)
+        expect(compile_source_inventory_publish_blob_v1(path, "other")).to_equal(false)
+        expect(file_read(path)).to_equal("blob")
+        for name in dir_list(cache_root + "/source-inventory/generations"):
+            expect(name.contains(".tmp.")).to_equal(false)
+        dir_remove(cache_root, true)
+
+    it "survives a writer killed between stage and publish":
+        val cache_root = "build/test-artifacts/scv-lockless-crash-{rt_getpid()}/build/scv"
+        dir_remove(cache_root, true)
+        val (first_digest, first_reason) = publish_first(cache_root)
+        expect(first_reason).to_equal("ok")
+        val pointer = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+        val storage = cache_root + "/source-inventory"
+        # A publisher stages its generation blob and its pointer, then dies
+        # before either rename. Both stages are private names; neither is a
+        # published object. Use a pid no live process carries.
+        val dead_pid = 2000000000
+        val partial = sha256_text("partial")
+        expect(file_create_excl("{storage}/generations/{partial}.inventory.tmp.{dead_pid}.1", "simple-compile-source-inv")).to_equal(true)
+        expect(file_create_excl("{storage}/CURRENT.tmp.{dead_pid}", partial)).to_equal(true)
+        # Readers resolve CURRENT to the old complete generation.
+        expect(compile_source_inventory_read_pointer_content_v1(cache_root) ?? "").to_equal(pointer)
+        val current = compile_source_inventory_read_current_v1(cache_root)
+        expect(current.valid).to_equal(true)
+        expect(current.digest).to_equal(first_digest)
+        # A later publisher is not blocked and the stages are reclaimed.
+        val next = one_entry_inventory(0, "src/a.spl", "fn a(): 1")
+        val (next_digest, next_reason) = compile_source_inventory_publish_reasoned_v1(
+            cache_root, next, HEAD_A, 0, sha256_text(""), sha256_text(pointer))
+        expect(next_reason).to_equal("ok")
+        expect(next_digest != "").to_equal(true)
+        expect(compile_source_inventory_recover_v1(cache_root)).to_equal(2)
+        expect(file_exists("{storage}/CURRENT.tmp.{dead_pid}")).to_equal(false)
+        dir_remove(cache_root, true)
+
+    it "reclaims only unreferenced generations past the age floor":
+        val cache_root = "build/test-artifacts/scv-lockless-gc-{rt_getpid()}/build/scv"
+        dir_remove(cache_root, true)
+        val (_d, reason) = publish_first(cache_root)
+        expect(reason).to_equal("ok")
+        val pointer = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+        val next = one_entry_inventory(0, "src/a.spl", "fn a(): 1")
+        val (next_digest, next_reason) = compile_source_inventory_publish_reasoned_v1(
+            cache_root, next, HEAD_A, 0, sha256_text(""), sha256_text(pointer))
+        expect(next_reason).to_equal("ok")
+        # Two blobs; only the unreferenced one is a candidate, and a day-scale
+        # floor keeps it: a shard child may still re-read it by digest.
+        expect(compile_source_inventory_gc_generations_v1(cache_root, 86400)).to_equal(0)
+        # With a zero floor nothing is reclaimed either (min_age_s <= 0 is off).
+        expect(compile_source_inventory_gc_generations_v1(cache_root, 0)).to_equal(0)
+        # A one-second floor reclaims the stale blob but never the referenced one.
+        val generations = cache_root + "/source-inventory/generations"
+        var waited = 0
+        while compile_source_inventory_gc_generations_v1(cache_root, 1) == 0 and waited < 40:
+            waited = waited + 1
+            var spin = 0
+            while spin < 2000000: spin = spin + 1
+        expect(file_exists("{generations}/{next_digest}.inventory")).to_equal(true)
+        var remaining = 0
+        for name in dir_list(generations):
+            if name.ends_with(".inventory"): remaining = remaining + 1
+        expect(remaining).to_equal(1)
+        dir_remove(cache_root, true)

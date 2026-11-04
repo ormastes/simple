@@ -5,8 +5,9 @@ fn read_source(path: text) -> text:
     rt_file_read_text(path) ?? ""
 
 # Parse shards must inherit one coordinator-published SCV authority; otherwise
-# every shard cold-acquires and they race {event_root}/refresh.lock
-# (compile-event-refresh-lock-unavailable, inventory_events.spl).
+# every shard cold-observes the whole checkout on its own. The refresh is
+# lockless (doc/05_design/compiler/scv/lockless_refresh.md); inheriting is a
+# cost saving, not a contention fix.
 describe "bootstrap coordinator publishes SCV authority once":
     it "publishes authority before the shard prepass spawns children":
         val source = read_source("src/app/cli/bootstrap_main.spl")
@@ -37,7 +38,7 @@ describe "shard children are not held to the linked-output check":
         expect(source).to_contain("if native_build_missing_output_is_failure_v1(code, output_path, output_ok, shard_child_run):")
 
 describe "workaround index refreshes once per build":
-    it "skips the writer lock in re-executed shard children":
+    it "skips the index refresh in re-executed shard children":
         val source = read_source("src/app/cli/native_build_main.spl")
         expect(source).to_contain("worker != \"1\" and not shard_child")
         expect(source).to_contain("native_build_workarounds_refresh_needed_v1(env_get(\"SIMPLE_NATIVE_BUILD_WORKER\") ?? \"\", shard_child)")

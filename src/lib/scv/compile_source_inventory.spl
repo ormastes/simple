@@ -11,14 +11,14 @@ use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pau
 export use std.scv.compile_source_inventory_core.*
 use std.nogc_sync_mut.io_runtime.{dir_list}
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
-use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_lock, file_unlock}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_publish_noreplace_raw, file_modified_time}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.io_runtime.{process_is_running}
 use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
 
 extern fn rt_getpid() -> i64
 
 extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_rename(from_path: text, to_path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_is_regular_no_follow(path: text) -> bool
 extern fn rt_file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> text?
@@ -586,45 +586,96 @@ fn compile_source_inventory_publish_reasoned_v1(
     val root = compile_source_inventory_storage_v1(cache_root)
     if not rt_dir_create_all("{root}/generations"):
         return ("", "publish-storage-mkdir-failed")
-    val publication_lock = file_lock("{root}/publication.lock", 5)
-    if publication_lock < 0:
-        return ("", "publish-lock-unavailable")
+    # LOCKLESS publication (doc/05_design/compiler/scv/lockless_refresh.md).
+    # Generation blobs are immutable and content-addressed; CURRENT is a small
+    # pointer replaced by one atomic rename. A concurrent publisher is detected
+    # by re-reading CURRENT, never excluded by a lock: a moved pointer with our
+    # exact content is a benign identical-content race, any other move is
+    # `publish-cursor-superseded` and the refresh owner re-observes from it.
     val current_pointer_content = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
     if cursor_head != "" and sha256_text(current_pointer_content) != expected_pointer_digest:
-        val _unlocked = file_unlock(publication_lock)
+        if current_pointer_content == pointer_content:
+            return (digest, "ok")
         return ("", "publish-cursor-superseded")
     val current = compile_source_inventory_read_at_pointer_v1(
         cache_root, current_pointer_content)
     if current.valid and current.inventory!.generation > inventory.generation:
-        val _unlocked = file_unlock(publication_lock)
         return ("", "publish-superseded-by-newer-generation")
     if current.valid and current.inventory!.generation == inventory.generation:
         val existing_digest = current.digest
         if existing_digest == digest:
             if cursor_head == "" or
                     current_pointer_content == pointer_content:
-                val _unlocked = file_unlock(publication_lock)
                 return (digest, "ok")
         else:
-            val _unlocked = file_unlock(publication_lock)
-            # Same generation, different content: no retry can ever clear this.
-            return ("", "publish-generation-digest-divergence (cached inventory at this generation has different content; clear {cache_root} to rebuild)")
+            # Same generation, different content: another publisher advanced
+            # from the same base while we observed. Re-observe from its pointer.
+            return ("", "publish-cursor-superseded")
     val generation_path = "{root}/generations/{digest}.inventory"
-    if not rt_file_exists(generation_path):
-        val generation_staged = "{generation_path}.tmp.{rt_getpid()}"
-        rt_file_delete(generation_staged)
-        if (not file_create_excl(generation_staged, content) or
-                not rt_file_rename(generation_staged, generation_path)):
-            rt_file_delete(generation_staged)
-            val raced = compile_source_inventory_read_text_v1(generation_path)
-            if raced == nil or raced! != content:
-                val _unlocked = file_unlock(publication_lock)
-                return ("", "publish-generation-write-failed")
+    if not compile_source_inventory_publish_blob_v1(generation_path, content):
+        return ("", "publish-generation-write-failed")
+    # Final compare before the swap. The rename itself is the only window a
+    # concurrent same-base publisher can win; its pointer also names a complete
+    # immutable generation, so the next refresh re-derives from whichever won.
+    if cursor_head != "":
+        val latest = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+        if sha256_text(latest) != expected_pointer_digest:
+            if latest == pointer_content:
+                return (digest, "ok")
+            return ("", "publish-cursor-superseded")
     if not file_atomic_write("{root}/CURRENT", pointer_content):
-        val _unlocked = file_unlock(publication_lock)
         return ("", "publish-current-write-failed")
-    val _unlocked = file_unlock(publication_lock)
     (digest, "ok")
+
+fn compile_source_inventory_publish_blob_v1(final_path: text, content: text) -> bool:
+    """Publish one content-addressed immutable file without a lock.
+
+    Stage privately (pid + clock in the name), then publish with the
+    no-replace primitive. A loser whose winner holds identical bytes discards
+    its copy; a partial stage never reaches the final name.
+    """
+    if rt_file_exists(final_path):
+        val existing = compile_source_inventory_read_text_v1(final_path)
+        return existing != nil and existing! == content
+    val staged = "{final_path}.tmp.{rt_getpid()}.{time_now_unix_micros()}"
+    rt_file_delete(staged)
+    if not file_create_excl(staged, content):
+        return false
+    val published = file_publish_noreplace_raw(staged, final_path)
+    if rt_file_exists(staged):
+        rt_file_delete(staged)
+    if published == 1:
+        return true
+    val raced = compile_source_inventory_read_text_v1(final_path)
+    raced != nil and raced! == content
+
+# Age-based, reference-tolerant reclamation of unreferenced generation blobs.
+# Lock-free: the only referenced blob is the one CURRENT names at this instant;
+# every other blob older than `min_age_s` is deleted, and a delete that loses
+# to a concurrent sweep is not an error. Shard children re-read their admitted
+# generation by digest hours into a build, so callers pass a day-scale age.
+fn compile_source_inventory_gc_generations_v1(cache_root: text, min_age_s: i64) -> i64:
+    if not compile_source_inventory_cache_root_valid_v1(cache_root) or min_age_s <= 0:
+        return 0
+    val root = compile_source_inventory_storage_v1(cache_root)
+    val pointer = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+    val separator = pointer.index_of("\n")
+    val referenced = if separator < 0: pointer else: pointer[:separator]
+    val now = time_now_unix_micros() / 1000000
+    var removed = 0
+    for name in dir_list("{root}/generations"):
+        if not name.ends_with(".inventory"):
+            continue
+        val digest = name[:name.len() - ".inventory".len()]
+        if digest == referenced or not compile_source_inventory_digest_valid_v1(digest):
+            continue
+        val path = "{root}/generations/{name}"
+        val modified = file_modified_time(path)
+        if modified <= 0 or now - modified < min_age_s:
+            continue
+        if rt_file_delete(path):
+            removed = removed + 1
+    removed
 
 fn compile_source_inventory_read_current_v1(
     cache_root: text
@@ -640,8 +691,9 @@ fn compile_source_inventory_revalidate_verified_pointer_v1(
     Trusted caller contract: verified_digest came from successful read_at_pointer
     of expected_pointer_content in this same refresh, and fresh Git, journal and
     membership checks passed. This is not standalone inventory admission.
-    Retain the fresh bounded blob read/hash under publication.lock; identical
-    authenticated bytes need no second parse or entry-validation allocation.
+    Re-read the fresh bounded blob and hash it; identical authenticated bytes
+    need no second parse or entry-validation allocation. No lock: CURRENT is
+    compared by full digest, and the generation blob is immutable.
     Empty result means success; other results preserve the rejection reason.
     """
     if not compile_source_inventory_cache_root_valid_v1(cache_root):
@@ -656,47 +708,32 @@ fn compile_source_inventory_revalidate_verified_pointer_v1(
             pointer != verified_digest:
         return "inventory-pointer-invalid"
     val root = compile_source_inventory_storage_v1(cache_root)
-    val publication_lock = file_lock("{root}/publication.lock", 5)
-    if publication_lock < 0:
-        return "publish-lock-unavailable"
     val current_pointer = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
     if sha256_text(current_pointer) != sha256_text(expected_pointer_content):
-        val _unlocked = file_unlock(publication_lock)
         return "publish-cursor-superseded"
-    var reason = ""
     val content = compile_source_inventory_read_text_v1(
         "{root}/generations/{verified_digest}.inventory") ?? ""
     if content == "" or sha256_text(content) != verified_digest:
-        reason = "inventory-generation-invalid"
-    if not file_unlock(publication_lock):
-        return "publish-unlock-failed"
-    reason
+        return "inventory-generation-invalid"
+    ""
 
 fn compile_source_inventory_revalidate_pointer_v1(
     cache_root: text, expected_pointer_content: text
 ) -> CompileSourceInventoryReadV1:
-    """Admit an unchanged refresh under the same lock used by publication.
+    """Admit an unchanged refresh against the current pointer, lock-free.
 
     The event owner must first validate fresh Git, journal and membership state.
     Matching CURRENT bytes do not authorize a cached inventory: reread and
-    validate the complete immutable blob while publication remains excluded.
+    validate the complete immutable blob the pointer names.
     """
     if not compile_source_inventory_cache_root_valid_v1(cache_root):
         return CompileSourceInventoryReadV1(false, "publish-cache-root-invalid", "", nil)
-    val root = compile_source_inventory_storage_v1(cache_root)
-    val publication_lock = file_lock("{root}/publication.lock", 5)
-    if publication_lock < 0:
-        return CompileSourceInventoryReadV1(false, "publish-lock-unavailable", "", nil)
     val pointer_content = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
     # Preserve publication's complete-byte binding. Native text equality may
     # stop at an embedded NUL; a changed CURRENT must still be rejected.
     if sha256_text(pointer_content) != sha256_text(expected_pointer_content):
-        val _unlocked = file_unlock(publication_lock)
         return CompileSourceInventoryReadV1(false, "publish-cursor-superseded", "", nil)
-    val current = compile_source_inventory_read_at_pointer_v1(cache_root, pointer_content)
-    if not file_unlock(publication_lock):
-        return CompileSourceInventoryReadV1(false, "publish-unlock-failed", "", nil)
-    current
+    compile_source_inventory_read_at_pointer_v1(cache_root, pointer_content)
 
 fn compile_source_inventory_read_at_pointer_v1(
     cache_root: text, pointer_content: text
@@ -758,24 +795,22 @@ fn compile_source_inventory_recover_v1(cache_root: text) -> i64:
     if not compile_source_inventory_cache_root_valid_v1(cache_root):
         return 0
     val root = compile_source_inventory_storage_v1(cache_root)
-    val recovery_lock = file_lock("{root}/publication.lock", 1)
-    if recovery_lock < 0:
-        return 0
+    # Lock-free: a stage whose owner pid is dead is garbage for every sweeper;
+    # a delete that loses to a concurrent sweep is simply not counted.
     var removed = 0
     for name in dir_list(root):
         if name.starts_with("CURRENT.tmp."):
-            val owner = name.substring(12).to_i64() ?? -1
+            val owner = name.substring(12).split(".")[0].to_i64() ?? -1
             if owner > 0 and not process_is_running(owner) and
                     rt_file_delete("{root}/{name}"):
                 removed = removed + 1
     for name in dir_list("{root}/generations"):
         if name.contains(".inventory.tmp."):
             val parts = name.split(".tmp.")
-            val owner = if parts.len() == 2: parts[1].to_i64() ?? -1 else: -1
+            val owner = if parts.len() == 2: parts[1].split(".")[0].to_i64() ?? -1 else: -1
             if owner > 0 and not process_is_running(owner) and
                     rt_file_delete("{root}/generations/{name}"):
                 removed = removed + 1
-    val _unlocked = file_unlock(recovery_lock)
     removed
 
 fn compile_source_inventory_snapshot_rows_v1(
@@ -810,6 +845,7 @@ export compile_source_inventory_read_pointer_content_v1, compile_source_inventor
 export compile_source_inventory_revalidate_pointer_v1
 export compile_source_inventory_publication_readback_v1
 export compile_source_inventory_recover_v1
+export compile_source_inventory_publish_blob_v1, compile_source_inventory_gc_generations_v1
 export compile_source_inventory_snapshot_rows_v1
 
 export compile_source_inventory_revalidate_verified_pointer_v1
