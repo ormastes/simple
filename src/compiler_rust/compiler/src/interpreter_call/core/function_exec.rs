@@ -1729,7 +1729,13 @@ fn write_back_mutable_arguments(
                         if param_is_mut {
                             mut_written.insert(caller_name.clone());
                         }
-                        outer_env.insert(caller_name, new_val);
+                        outer_env.insert(caller_name.clone(), new_val);
+                        // A module-level `var` passed from module scope: reads
+                        // resolve through the module-global stores, so the
+                        // frame insert alone is invisible to the caller.
+                        if !outer_env.is_local(&caller_name) {
+                            crate::interpreter::place::sync_module_global(outer_env, &caller_name);
+                        }
                     } else if !param_is_mut && is_value_type_struct(callee_val, classes) {
                         // Value-type struct: fields stay value-copied, but its
                         // container-valued fields are shared handles. See
@@ -1806,7 +1812,10 @@ fn write_back_mutable_arguments(
                                         mut_field_written.insert((obj_name.clone(), field_name.clone()));
                                     }
                                     Arc::make_mut(&mut fields).insert(field_name, callee_val);
-                                    outer_env.insert(obj_name, Value::Object { class, fields });
+                                    outer_env.insert(obj_name.clone(), Value::Object { class, fields });
+                                    if !outer_env.is_local(&obj_name) {
+                                        crate::interpreter::place::sync_module_global(outer_env, &obj_name);
+                                    }
                                 }
                                 other => {
                                     if took {
