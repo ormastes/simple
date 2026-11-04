@@ -96,3 +96,12 @@ commit71b46ad above retained independently. The workaround commit is recorded
 in the integration handoff; these source-only controls are not runtime proof.
 
 Release package note: original workaround commit540674d6d935027f0195f5a137da50386da35c34 is narrowed here to the two production bindings and typed-only tests/provider/manual. Compiler repair71b46ad is retained in its separate candidate, not a dependency silently cherry-picked into release. See `doc/06_spec/01_unit/compiler/mir/result_try_record_array_workaround_spec.md`. All newly packaged tests remain UNRUN.
+
+## 2026-11-04 triage (n88b): fix already landed
+
+`lower_try_expr` now decodes the Ok payload from the lowered call's recorded Result type
+(`find_local_hir_type(res_local.id)` fallback, `decode_declared_enum_payload_slot`) - commit `3aa79ca1610`
+(2026-10-24) in `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`. Status:
+fix-implemented-verification-pending. Native repro (stage3 built after 3aa79ca1610): compile the
+unannotated `phase2_module_roles_select_v1(...)?` + `for p in sel.included_paths` fixture; expect no
+for-in collection `I64` MIR error. Retire the typed-local workarounds after it passes.

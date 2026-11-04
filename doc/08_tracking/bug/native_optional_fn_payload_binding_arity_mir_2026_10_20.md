@@ -35,3 +35,12 @@
   `if val` binding) calls the payload (`rt_unwrap_or_self`) under the inner signature.
 - Status: root fix in review; the parallel.spl workaround stays until a producer built with
   the fix compiles the original form (per bug_linked_workarounds.md).
+
+## 2026-11-04 triage (n88b, opus-n88b): fix already landed, verification-pending
+
+Parser (`10.frontend/core/parser.spl` ~line 1097, callable/composite `Option<T>` inners now keep
+their tag) and MIR (`50.mir/mir_lowering_stmts.spl` ~1320-1364, `rt_unwrap_or_self` under the
+declared inner signature) are both on release/1.0.0. Seed run: `test/01_unit/compiler/50.mir/phase3_misc_container_callable_lowering_spec.spl`
+10/10 pass, including "calls an Option<fn> field through if-val and unwrap with a proven signature".
+Stage3 repro: native-build `src/app/cli/bootstrap_main.spl` after reverting `parallel.spl:498`
+to the original `self.owner_collect_fn(...)` form; expect no `dynamic callable requires proven arity`.

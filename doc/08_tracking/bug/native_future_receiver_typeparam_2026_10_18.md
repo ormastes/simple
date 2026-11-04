@@ -212,3 +212,13 @@ Regression fixture: test/fixtures/compiler/async_file_future_receiver/main.spl. 
 Evidence: C:/dev/wt-s3self/build/native_probe/phase3-hir-codec-import/cycle2-serial-parse/worker-output.exe.go-to-end.sdn and retained full-worker-stderr-1.log/full-worker-stderr-2.log. The command exited 1, with 387 successful MIR modules and two failed owners; aggregate dependency failures blocked all object emission in entry-object mode.
 
 Source review confirms that the supplied task is evaluated exactly once and that the concrete constructor preserves the original Future.from_value fields (empty state and Ready payload). No known runtime regression was found by source review; this does not claim a completed runtime test. The first file-workaround attempt passed HIR/mono for 390 modules but was refused before MIR because ordinary dynload selects Both output. The existing cycle2-native-mode job uses the supported one-binary output mode and remains the pending native qualification; no new retry is implied by this record.
+
+## 2026-11-04 triage (n88b, opus-n88b): deferred, needs stage3 cross-module repro
+
+A single-module analog (`class Fut<T>` with `static fn from_value(v: T) -> Fut<T>`, both
+`Fut.from_value(true)` and `Fut<bool>.from_value(true)` returning `Fut<bool>`) lowers through
+parse->HIR->MIR on current release/1.0.0 with 0 HIR/MIR errors, so the failure needs the imported
+`std.nogc_async_mut.async` `Future<T>` owner. Production callers were already moved to concrete
+construction (9ed67154123, dd0b28e9c72). Stage3 repro: native-build a module whose function
+returns `Future<bool>` via `Future.from_value(true)` imported from std; expect the
+`E-MIR-TYPE-TypeParam` diagnostic if still broken. Status stays open.
