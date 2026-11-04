@@ -7,6 +7,7 @@ use plugins.backend_vhdl.driver.driver_aot_vhdl_output.*
 use compiler.driver.driver_log_helpers.{log_debug, log_error, log_phase, log_bootstrap_flat_warning, log_build_progress, log_build_progress_failure}
 use compiler.driver.driver_ice_boundary.{ice_boundary_finalize}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_reset}
+use compiler.hir.hir_types.{HirImport}
 # NOTE: these two MUST stay at module scope. A function-body-scoped
 # `use <path>.{name}` is a silent no-op for symbol resolution, which made the
 # both-format branch below die post-link with `error[E1002]: function
@@ -425,6 +426,19 @@ impl CompilerDriver:
         stdout_flush()
         CompileResult.CodegenError(verdict)
 
+    me go_to_end_hir_import_paths_v1(name: text) -> [text]:
+        """Import paths of one HIR module as plain text. The Dict hit is never
+        bound bare: it lives only inside the match arm."""
+        var out: [text] = []
+        match self.ctx.hir_modules.get(name):
+            case Some(m):
+                val imports_local: [HirImport] = m.imports
+                for hir_import in imports_local:
+                    out = out.push(hir_import.module_path)
+            case _:
+                out = out
+        out
+
     me go_to_end_recover_hir_v1() -> bool:
         """go-to-end after a failed HIR phase. The HIR routes already DROP a
         poisoned module from ctx.hir_modules; this records each one (with the
@@ -448,6 +462,18 @@ impl CompilerDriver:
             poisoned_idx = poisoned_idx + 1
         if failed.len() == 0:
             return false
+        # Collect the import graph into plain arrays BEFORE any remove(): a
+        # Dict hit read after a remove() faulted on stage3 (sweep 2026-11-04).
+        var candidates: [text] = []
+        var edge_from: [text] = []
+        var edge_to: [text] = []
+        val all_names: [text] = self.ctx.hir_modules.keys()
+        for hir_name in all_names:
+            candidates = candidates.push(hir_name)
+            val import_paths: [text] = self.go_to_end_hir_import_paths_v1(hir_name)
+            for import_path in import_paths:
+                edge_from = edge_from.push(hir_name)
+                edge_to = edge_to.push(import_path)
         for failed_name in failed:
             var failed_path = ""
             for source in self.ctx.sources:
@@ -466,18 +492,6 @@ impl CompilerDriver:
                     "HIR lowering/type-check failed (diagnostics not attributable by path; see the unattributed rows)")
             self.go_to_end.exclude(failed_name)
             self.ctx.hir_modules.remove(failed_name)
-        var candidates: [text] = []
-        var edge_from: [text] = []
-        var edge_to: [text] = []
-        for hir_name in self.ctx.hir_modules.keys():
-            # `.get()` not `[k]`: the native bracket-read of a struct-valued Dict
-            # class field yields an untagged Option payload (AV in this loop on
-            # stage3, sweep 2026-11-04; doc/07_guide/language/dict_native_pitfalls.md).
-            if val hir_module = self.ctx.hir_modules.get(hir_name):
-                candidates = candidates.push(hir_name)
-                for hir_import in hir_module.imports:
-                    edge_from = edge_from.push(hir_name)
-                    edge_to = edge_to.push(hir_import.module_path)
         val blocked = go_to_end_blocked_modules_v1(candidates, edge_from, edge_to, failed)
         for blocked_name in blocked:
             self.go_to_end.record("hir_dependency", blocked_name,
