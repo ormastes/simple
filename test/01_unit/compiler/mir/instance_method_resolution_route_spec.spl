@@ -1,0 +1,79 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Instance method resolution route (capmap t1_class / t1_method)
+
+Pins the instance-method route of MirLowering against the shapes that failed
+only on stage3 with "unresolved method call", and pins the enriched rejection
+text (route, module-qualified Owner::method key, per-registry presence).
+"""
+
+# @tag: unit, compiler, mir, stage2
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lower_source(body: text) -> text:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(body, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: body, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("app.main", surfaces)
+    val hir = lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["main_hir"] = hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "main_hir")
+    val mir = mir_lowering.lower_module(hir, [hir])
+    var out = ""
+    for e in lowering.errors:
+        out = out + "hir: " + e.message + "\n"
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    out
+
+val CLASS_SRC = "class Counter:\n    n: i64\n\n    me bump():\n        self.n = self.n + 1\n\n    me bump_twice():\n        self.bump()\n        self.bump()\n\nfn main() -> i64:\n    var c = Counter(n: 0)\n    c.bump()\n    c.bump_twice()\n    c.n\n"
+val IMPL_SRC = "struct Pt:\n    x: i64\n\nimpl Pt:\n    fn inc(self) -> i64:\n        self.x + 1\n\nfn main() -> i64:\n    val p = Pt(x: 1)\n    p.inc()\n"
+val STATIC_SRC = "class Box:\n    v: i64\n\n    static fn make(v: i64) -> Box:\n        Box(v: v)\n\nfn main() -> i64:\n    val b = Box.make(3)\n    b.v\n"
+val TRAIT_SRC = "trait Greeter:\n    fn level(self) -> i64\n    fn twice(self) -> i64:\n        self.level() + self.level()\n\nstruct G:\n    k: i64\n\nimpl Greeter for G:\n    fn level(self) -> i64:\n        self.k\n\nfn main() -> i64:\n    val g = G(k: 2)\n    g.twice()\n"
+val MISSING_SRC = "class Counter:\n    n: i64\n\n    me bump():\n        self.n = self.n + 1\n\nfn main() -> i64:\n    var c = Counter(n: 0)\n    c.nope()\n    c.n\n"
+
+describe "instance method resolution route":
+    it "resolves self.bump() inside a class method and c.bump() from main":
+        val out = lower_source(CLASS_SRC)
+        expect(out.contains("unresolved method call")).to_equal(false)
+
+    it "resolves an impl method":
+        val out = lower_source(IMPL_SRC)
+        expect(out.contains("unresolved method call")).to_equal(false)
+
+    it "resolves a static fn":
+        val out = lower_source(STATIC_SRC)
+        expect(out.contains("unresolved method call")).to_equal(false)
+
+    it "resolves a trait default method":
+        val out = lower_source(TRAIT_SRC)
+        expect(out.contains("unresolved method call")).to_equal(false)
+
+describe "unresolved method call diagnostics":
+    it "names the route, the Owner::method key and the registries consulted":
+        val out = lower_source(MISSING_SRC)
+        expect(out.contains("unresolved method call: nope")).to_equal(true)
+        expect(out.contains("route=")).to_equal(true)
+        expect(out.contains("Counter::nope")).to_equal(true)
+        expect(out.contains("struct_method_syms=")).to_equal(true)
+
+    it "reports a registry miss for the absent key":
+        val out = lower_source(MISSING_SRC)
+        expect(out.contains("lookup_method_in_type=no")).to_equal(true)
