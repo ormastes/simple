@@ -183,3 +183,16 @@ library's own `Float32.new(2.0)` fails) but does not address the test-path
 failures. Real fix = resolve imported class static methods under SSpec, THEN the
 coercion gap becomes reachable. Source fix was NOT landed (fixes nothing measurable
 on the test path; regression-risky on a hot path for zero suite benefit).
+
+## Update 2026-11-04 - FIXED (int literal -> float widening)
+
+Re-verified on release/1.0.0: the "unknown static method" rejection is gone
+(the unambiguous-arity fallback in `handle_constructor_methods` resolves
+single-candidate statics), but the argument was bound UNCOERCED, so
+`Half.of(3)` with `x: f64` yielded a garbage float (also plain `fn f(x: f64)`
+and `Half(v: 3)`). Fix: `coerce_to_declared_type` (interpreter/node_exec.rs)
+widens `Value::Int` to `f64`/`f32` for float-declared params, and
+`handle_constructor_methods` now applies it when binding positional and named
+args (same coercion plain calls use via `coerce_param`). Regression tests:
+`compiler/tests/interpreter_constructor_test.rs` (3 new). Not fixed here:
+repro (3) same-name static overloads by type (separate registration issue).

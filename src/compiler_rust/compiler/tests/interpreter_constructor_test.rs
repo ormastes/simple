@@ -126,3 +126,50 @@ main = if map_value.keys().len() == 0 and dict_value.keys().len() == 0: 0 else: 
 
     assert_eq!(parse_and_eval(source).unwrap(), 0);
 }
+
+// Bug: seed_constructor_static_method_no_literal_coercion_2026-07-20.
+// An integer literal bound to a float-declared static-method / constructor
+// parameter must widen to the declared float type, like a plain function call.
+#[test]
+fn static_method_widens_int_literal_to_f64_param() {
+    let source = r#"
+struct Half:
+    v: f64
+
+    static fn of(x: f64) -> Half:
+        Half(v: x / 2.0)
+
+val h = Half.of(3)
+main = if h.v == 1.5: 0 else: 1
+"#;
+
+    assert_eq!(parse_and_eval(source).unwrap(), 0);
+}
+
+#[test]
+fn static_method_widens_int_literal_to_f32_param() {
+    let source = r#"
+struct Wrap32:
+    v: f32
+
+    static fn new(x: f32) -> Wrap32:
+        Wrap32(v: x)
+
+val w = Wrap32.new(4)
+main = if w.v == 4.0f32: 0 else: 1
+"#;
+
+    assert_eq!(parse_and_eval(source).unwrap(), 0);
+}
+
+#[test]
+fn plain_function_widens_int_literal_to_f64_param() {
+    let source = r#"
+fn half(x: f64) -> f64:
+    x / 2.0
+
+main = if half(3) == 1.5: 0 else: 1
+"#;
+
+    assert_eq!(parse_and_eval(source).unwrap(), 0);
+}

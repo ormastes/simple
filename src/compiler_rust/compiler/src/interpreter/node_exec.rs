@@ -69,6 +69,16 @@ pub(crate) fn coerce_to_declared_type(value: Value, ty: Option<&Type>) -> Value 
             Value::Enum { enum_name, variant, .. } if enum_name == "Option" => Value::Bool(variant == "Some"),
             _ => value,
         },
+        // Integer -> float widening for a float-declared binding/parameter
+        // (bug: seed_constructor_static_method_no_literal_coercion_2026-07-20).
+        Some(Type::Simple(name)) if name == "f64" && matches!(value, Value::Int(_)) => match value {
+            Value::Int(i) => Value::Float(i as f64),
+            other => other,
+        },
+        Some(Type::Simple(name)) if name == "f32" && matches!(value, Value::Int(_)) => match value {
+            Value::Int(i) => Value::Float32(i as f32),
+            other => other,
+        },
         Some(Type::Simple(_)) => coerce_to_declared_unsigned(value, ty),
         Some(Type::Array { element, size: None }) if matches!(element.as_ref(), Type::Simple(name) if name == "u8") => {
             pack_u8_array(value)

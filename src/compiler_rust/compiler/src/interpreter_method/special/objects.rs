@@ -277,9 +277,11 @@ pub fn handle_constructor_methods(
             // Bind provided arguments
             for (arg_name, val) in evaluated_args {
                 if let Some(name) = arg_name {
-                    local_env.insert(name, val);
+                    let ty = method_def.params.iter().find(|p| p.name == name).and_then(|p| p.ty.as_ref());
+                    local_env.insert(name, crate::interpreter::coerce_to_declared_type(val, ty));
                 } else if positional_idx < method_def.params.len() {
                     let param = &method_def.params[positional_idx];
+                    let val = crate::interpreter::coerce_to_declared_type(val, param.ty.as_ref());
                     local_env.insert(param.name.clone(), val);
                     positional_idx += 1;
                 }
