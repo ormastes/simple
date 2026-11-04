@@ -169,3 +169,25 @@ So the RSS kill is a consequence; the root cause is the poison.
   `enum runtime ID collision: TextIoError` (process_ops) and unresolved
   `to_array`/`get` (sha1) then SIGSEGV; these did not appear in the s2c
   full-CLI log and look single-module-mode specific.
+
+## s2f (2026-11-05, release @c2deae964a7, `/private/tmp/boot2-out/s2f`)
+HIR is clean now (no poisoned modules; #6718 holds). Two blockers remain:
+
+1. **`test_runner_build`: `enum runtime ID collision: 'X' and 'X'`** (166x,
+   also in s2e). Same name on both sides. Minimal repro with the s2f Stage 2:
+   `shades.spl` (pub enum Shade) imported by `picker.spl` and `main.spl` ->
+   `collision: 'shades.Shade' and 'shades.Shade'`. `register_enum_runtime_name`
+   (`50.mir/_MirLowering/module_lowering.spl`) compared `Option<text> != text`
+   (`existing != runtime_name`), which the seed-built Stage 2 evaluates as
+   unequal for equal names. Now unwraps with `if val prior_name = ...` and
+   compares text to text. Fix-implemented; verification = the 2-module repro
+   + `test_runner_build` in the next Stage 2 (s2g). The mixed Option/text
+   `!=` codegen in the seed is the underlying defect (not fixed here).
+2. **`compiler_cli_build` killed at the 1800 s per-worker deadline**
+   (`native_internal_timeout_seconds=1800`, elapsed 1810 s, RSS 9.2 GB under
+   cap). With `SHARD_TREE_HEADROOM_KB_V1` >= host RAM the HIR pool is 0, so
+   the single MIR shard worker runs parse+HIR serially (~1420 s to reach MIR
+   setup) and cannot finish MIR within 1800 s; the killed worker was then
+   reported "could not be reaped". **Owner decision:** raise
+   `BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT` for this host class or make the
+   headroom constant host-relative. Not changed here.
