@@ -1,0 +1,54 @@
+# TargetHIR P3 SIMD capability reader: a pure table from the TargetHIR view's
+# (arch, cpu_tier) to the SIMD register class. No host CPU probe — the tier is
+# whatever the explicit target carries. Unsupported architectures return a
+# named error instead of silently falling back to scalar.
+
+use compiler.common.simd_types.{SimdTargetArch, SimdElementType, simd_lanes_preferred}
+use compiler.hir.target_hir.hir_snapshot.{HirSnapshotId, hir_snapshot_id_equals, hir_snapshot_id_text}
+use compiler.hir.target_hir.target_hir.{TargetHIR}
+
+# Pure table: (arch, cpu_tier) -> SIMD class name, or Err for no SIMD class.
+fn mir_target_hir_simd_class_for(arch: text, cpu_tier: text) -> Result<text, text>:
+    val tier = cpu_tier.lower()
+    if arch == "x86_64" or arch == "x86":
+        if tier.contains("avx512") or tier.contains("x86-64-v4"):
+            return Ok("x86_avx512")
+        if tier.contains("avx2") or tier.contains("avx") or tier.contains("x86-64-v3"):
+            return Ok("x86_avx")
+        return Ok("x86_sse")
+    if arch == "aarch64":
+        if tier.contains("sve2"):
+            return Ok("aarch64_sve2")
+        return Ok("aarch64_neon")
+    if arch == "riscv64" or arch == "riscv32":
+        if tier.contains("rvv") or tier.contains("+v"):
+            return Ok("riscv_rvv")
+        return Err("target_hir_simd_unsupported: " + arch + " without V extension (cpu_tier '" + cpu_tier + "')")
+    Err("target_hir_simd_unsupported: " + arch)
+
+fn mir_target_hir_simd_arch_of(class_name: text) -> SimdTargetArch:
+    if class_name == "x86_avx512":
+        return SimdTargetArch.X86Avx512
+    if class_name == "x86_avx":
+        return SimdTargetArch.X86Avx
+    if class_name == "x86_sse":
+        return SimdTargetArch.X86Sse
+    if class_name == "aarch64_sve2":
+        return SimdTargetArch.AArch64Sve2
+    if class_name == "aarch64_neon":
+        return SimdTargetArch.AArch64Neon
+    if class_name == "riscv_rvv":
+        return SimdTargetArch.RiscVRvv
+    SimdTargetArch.Unknown
+
+fn mir_target_hir_simd_class(view: TargetHIR, snapshot: HirSnapshotId) -> Result<text, text>:
+    if not hir_snapshot_id_equals(view.snapshot, snapshot):
+        return Err("target_hir_snapshot_mismatch: " + hir_snapshot_id_text(view.snapshot) + " != " + hir_snapshot_id_text(snapshot))
+    mir_target_hir_simd_class_for(view.target.arch, view.target.cpu_tier)
+
+# Preferred FixedVec lane count for elem on the view's target.
+fn mir_target_hir_simd_lanes(view: TargetHIR, snapshot: HirSnapshotId, elem: SimdElementType) -> Result<i32, text>:
+    val cls = mir_target_hir_simd_class(view, snapshot)
+    if cls.is_err():
+        return Err(cls.unwrap_err())
+    Ok(simd_lanes_preferred(mir_target_hir_simd_arch_of(cls.unwrap()), elem))

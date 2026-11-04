@@ -1,0 +1,71 @@
+# TargetHIR P8 migration matrix (unit U7, 2026-11-04).
+#
+# Source: doc/03_plan/compiler/hir/immutable_hir_p0_mir_inventory_20261103.md
+# Plan:   doc/03_plan/compiler/hir/immutable_hir_targethir_mir_refactor_plan_2026-11-03.md (P8, IHIR-04)
+# Spec:   test/01_unit/compiler/hir/target_hir_migration_matrix_spec.spl
+#
+# One row per raw-HIR / target-dependent entrypoint or boundary named in the P0
+# inventory. Row format: `id | path:line (P0 baseline 4fccb94e564) | disposition | note`.
+# disposition is one of:
+#   migrated  - every live caller reads typed TargetHIR; the raw route is unreachable
+#   pending   - raw route is still live (a typed reader may exist but is not wired)
+#   retained  - deliberately kept on the legacy path (compatibility contract)
+#
+# HONESTY RULE: a row moves to `migrated` only with live-wiring evidence plus a
+# Stage-3 run. PR-D (#6565) landed a typed reader `mir_target_hir_select_arm`
+# for the expression arm, but nothing calls it from lowering yet; P4 live wiring
+# (asm_and_targets.spl) is in progress. That row is therefore still `pending`.
+#
+# Default-flip rule: target_hir_mode() default stays `legacy` until
+# pending_count == 0 AND the Stage-3 gate (SIMPLE_STAGE3_COMPILER) is set AND a
+# Stage-3 qualification run is recorded. Nothing below claims that today.
+
+matrix_version: 1
+rows:
+  - mir_new_legacy | src/compiler/50.mir/_MirLowering/module_lowering.spl:508 | retained | MirLowering.new unknown-target constructor; compatibility contract, no strict rejection
+  - mir_new_for_target | src/compiler/50.mir/_MirLowering/module_lowering.spl:512 | pending | explicit target context + symbols; no typed TargetHIR field yet; BLOCKED-P5/P6: not a target selection; typed path needs a frozen HirSnapshot carried into MirLowering (live path has none) - cannot migrate without Stage 3
+  - mir_ctor_context_store | src/compiler/50.mir/_MirLowering/module_lowering.spl:655 | pending | retains MirTargetContext; no feature snapshot; BLOCKED-P5/P6: not a target selection; typed path needs a frozen HirSnapshot carried into MirLowering (live path has none) - cannot migrate without Stage 3
+  - mir_ctor_repo_init | src/compiler/50.mir/_MirLowering/module_lowering.spl:663 | pending | compact declaration repository initialised nil; BLOCKED-P5/P6: not a target selection; typed path needs a frozen HirSnapshot carried into MirLowering (live path has none) - cannot migrate without Stage 3
+  - prescan_structs | src/compiler/50.mir/_MirLowering/module_lowering.spl:1842 | pending | raw Dict<text,HirModule> + key; dict/key transport workaround must survive; BLOCKED-P5/P6: not a target selection; typed path needs a frozen HirSnapshot carried into MirLowering (live path has none) - cannot migrate without Stage 3
+  - prescan_callables | src/compiler/50.mir/_MirLowering/module_lowering.spl:1950 | pending | raw Dict<text,HirModule> + key; BLOCKED-P5/P6: not a target selection; typed path needs a frozen HirSnapshot carried into MirLowering (live path has none) - cannot migrate without Stage 3
+  - bootstrap_entry | src/compiler/50.mir/_MirLowering/module_lowering.spl:2278 | pending | raw HIR + provider arrays; BLOCKED-P5/P6: not a target selection; typed path needs a frozen HirSnapshot carried into MirLowering (live path has none) - cannot migrate without Stage 3
+  - closure_entry | src/compiler/50.mir/_MirLowering/module_lowering.spl:2299 | pending | delegates to transient wrapper; BLOCKED-P5/P6: not a target selection; typed path needs a frozen HirSnapshot carried into MirLowering (live path has none) - cannot migrate without Stage 3
+  - transient_wrapper | src/compiler/50.mir/_MirLowering/module_lowering.spl:2326 | pending | raw HIR; scope lifecycle 2399-2542 must be preserved; BLOCKED-P5/P6: not a target selection; typed path needs a frozen HirSnapshot carried into MirLowering (live path has none) - cannot migrate without Stage 3
+  - lower_module | src/compiler/50.mir/_MirLowering/module_lowering.spl:2606 | pending | selects decl guards at 2614; BLOCKED-P5/P6: not a target selection; typed path needs a frozen HirSnapshot carried into MirLowering (live path has none) - cannot migrate without Stage 3
+  - lower_module_guarded | src/compiler/50.mir/_MirLowering/module_lowering.spl:2620 | pending | raw HIR guarded body; BLOCKED-P5/P6: not a target selection; typed path needs a frozen HirSnapshot carried into MirLowering (live path has none) - cannot migrate without Stage 3
+  - symbols_alias | src/compiler/50.mir/_MirLowering/module_lowering.spl:2649 | pending | self.symbols = module.symbols; needs mutable task overlay; BLOCKED-owner: symbol writes on aliased SymbolTable need the mutable task-overlay design decision (plan P6) before a TargetHIR reader exists
+  - emit_all | src/compiler/50.mir/_MirLowering/module_lowering.spl:3512 | pending | raw HIR; BLOCKED-P5/P6: not a target selection; typed path needs a frozen HirSnapshot carried into MirLowering (live path has none) - cannot migrate without Stage 3
+  - emit_function | src/compiler/50.mir/_MirLowering/module_lowering.spl:3554 | pending | raw HIR + raw function; BLOCKED-P5/P6: not a target selection; typed path needs a frozen HirSnapshot carried into MirLowering (live path has none) - cannot migrate without Stage 3
+  - archive_borrowed | src/compiler/50.mir/_MirLowering/archive_borrowed_module_v1.spl:33 | pending | borrowed archive entry; caller-owned scope, symbol continuation 148-157; BLOCKED-P5/P6: not a target selection; typed path needs a frozen HirSnapshot carried into MirLowering (live path has none) - cannot migrate without Stage 3
+  - cfg_select_expr | src/compiler/50.mir/_MirLowering/asm_and_targets.spl:111 | pending | PR-D #6565 typed reader landed (mir_target_hir_select.spl); P4 live wiring in progress, not called yet
+  - cfg_select_expr_features | src/compiler/50.mir/_MirLowering/asm_and_targets.spl:125 | pending | ambient cfg_enabled_features() read; P2 constraints/feature snapshot not wired
+  - cfg_decl_predicate | src/compiler/50.mir/_MirLowering/asm_and_targets.spl:149 | pending | ambient feature read; excluded from PR-D; decl_cfg_keep -> mir_target_hir_live_decl_cfg; wired in asm_and_targets.spl behind SIMPLE_TARGET_HIR_MODE (shadow fatal mismatch, typed uses TargetHIR), spec mir_target_hir_decl_cfg_spec.spl; stays pending until Stage-3 qualification run (honesty rule)
+  - cfg_decl_group | src/compiler/50.mir/_MirLowering/asm_and_targets.spl:232 | pending | ambient feature read; excluded from PR-D; cfg_group_winners -> mir_target_hir_live_select; wired in asm_and_targets.spl behind SIMPLE_TARGET_HIR_MODE (shadow fatal mismatch, typed uses TargetHIR), spec mir_target_hir_decl_cfg_spec.spl; stays pending until Stage-3 qualification run (honesty rule)
+  - apply_decl_cfg_guards | src/compiler/50.mir/_MirLowering/asm_and_targets.spl:242 | pending | var out = module shallow copy at 361; not a deep-freeze proof
+  - cfg_predicate_evaluator | src/compiler/50.mir/mir_cfg_select.spl:1 | retained | target-explicit evaluator; legacy oracle for PR-D equivalence
+  - target_context_ctor | src/compiler/00.common/mir_target_context.spl:144 | retained | explicit caller inputs; feeds TargetHIR view construction
+  - provider_symbol_writes | src/compiler/50.mir/_MirLowering/provider_metadata.spl:375 | pending | symbol writer on aliased table; BLOCKED-owner: symbol writes on aliased SymbolTable need the mutable task-overlay design decision (plan P6) before a TargetHIR reader exists
+  - default_binding_writes | src/compiler/50.mir/_MirLowering/declaration_default_bindings_v1.spl:113 | pending | symbol writer on aliased table; BLOCKED-owner: symbol writes on aliased SymbolTable need the mutable task-overlay design decision (plan P6) before a TargetHIR reader exists
+  - default_rewrite_writes | src/compiler/50.mir/_MirLowering/declaration_default_rewrite_v1.spl:531 | pending | symbol writer on aliased table; BLOCKED-owner: symbol writes on aliased SymbolTable need the mutable task-overlay design decision (plan P6) before a TargetHIR reader exists
+  - resident_global_writes | src/compiler/50.mir/_MirLowering/resident_default_global_owner.spl:68 | pending | symbol writer on aliased table; BLOCKED-owner: symbol writes on aliased SymbolTable need the mutable task-overlay design decision (plan P6) before a TargetHIR reader exists
+  - trait_conversion_writes | src/compiler/50.mir/_MirLowering/native_trait_conversion.spl:174 | pending | synthesizes callable symbols; BLOCKED-owner: symbol writes on aliased SymbolTable need the mutable task-overlay design decision (plan P6) before a TargetHIR reader exists
+  - trait_thunk_writes | src/compiler/50.mir/_MirLowering/native_trait_thunks.spl:33 | pending | synthesizes callable symbols; BLOCKED-owner: symbol writes on aliased SymbolTable need the mutable task-overlay design decision (plan P6) before a TargetHIR reader exists
+  - nested_lowerer | src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:7924 | pending | child lowerer copies symbols/context/repo (8044) and returns symbols (8185); BLOCKED-owner: symbol writes on aliased SymbolTable need the mutable task-overlay design decision (plan P6) before a TargetHIR reader exists
+  - driver_bootstrap_prescan | src/compiler/80.driver/driver_pipeline_lowering.spl:1003 | pending | bootstrap prescan call site; BLOCKED-P5/P6: driver call site passes raw HirModule; needs frozen snapshot transport + Stage-3 streaming-bound run
+  - driver_closure_lower | src/compiler/80.driver/driver_pipeline_lowering.spl:1055 | pending | closure module lowering call site; BLOCKED-P5/P6: driver call site passes raw HirModule; needs frozen snapshot transport + Stage-3 streaming-bound run
+  - driver_entry_lower | src/compiler/80.driver/driver_pipeline_lowering.spl:1070 | pending | entry lowering call site; BLOCKED-P5/P6: driver call site passes raw HirModule; needs frozen snapshot transport + Stage-3 streaming-bound run
+  - driver_direct_prescan | src/compiler/80.driver/driver_pipeline_lowering.spl:1183 | pending | direct-path prescan; BLOCKED-P5/P6: driver call site passes raw HirModule; needs frozen snapshot transport + Stage-3 streaming-bound run
+  - driver_direct_prescan_2 | src/compiler/80.driver/driver_pipeline_lowering.spl:1201 | pending | direct-path prescan; BLOCKED-P5/P6: driver call site passes raw HirModule; needs frozen snapshot transport + Stage-3 streaming-bound run
+  - driver_scoped_lower | src/compiler/80.driver/driver_pipeline_lowering.spl:1484 | pending | per-module lower_module_transient_scoped; no all-program barrier allowed; BLOCKED-P5/P6: driver call site passes raw HirModule; needs frozen snapshot transport + Stage-3 streaming-bound run
+  - driver_fallback_prescan | src/compiler/80.driver/driver_pipeline_lowering.spl:1602 | pending | fallback prescan; BLOCKED-P5/P6: driver call site passes raw HirModule; needs frozen snapshot transport + Stage-3 streaming-bound run
+  - driver_fallback_lower | src/compiler/80.driver/driver_pipeline_lowering.spl:1635 | pending | fallback lowering; BLOCKED-P5/P6: driver call site passes raw HirModule; needs frozen snapshot transport + Stage-3 streaming-bound run
+  - transient_owner_roots | src/compiler/50.mir/_MirLowering/transient_owner.spl:48 | pending | retained-root inventory must add frozen/view fields deliberately; BLOCKED-P5/P6: not a target selection; typed path needs a frozen HirSnapshot carried into MirLowering (live path has none) - cannot migrate without Stage 3
+
+# Legacy-deletion checklist: ALL must hold before any raw entrypoint above is removed.
+legacy_deletion_checklist:
+  - zero_pending | every row is migrated or retained
+  - stage3_gate | SIMPLE_STAGE3_COMPILER set and Stage-3 self-host run recorded with mode=typed
+  - ihir04_strict | raw HirModule into a target-only MIR entrypoint is a compile type error under strict API
+  - legacy_equivalence | disabled/legacy path byte-equivalent MIR on the canary set
+  - streaming_bounds | no all-program retained-HIR barrier; RSS within streaming bound
+  - rollback_tested | target_hir_mode=legacy rollback exercised after flip

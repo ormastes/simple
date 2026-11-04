@@ -15,11 +15,12 @@
 /// - 0: ReadOnly
 /// - 1: ReadWrite
 /// - 2: WriteOnly
+/// - 3: ReadWrite, created when missing, never truncated (positioned writes)
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_open(
     path_ptr: *const u8,
     path_len: u64,
-    mode: i32, // 0=ReadOnly, 1=ReadWrite, 2=WriteOnly
+    mode: i32, // 0=ReadOnly, 1=ReadWrite, 2=WriteOnly, 3=ReadWrite+create
 ) -> i32 {
     if path_ptr.is_null() {
         return -1;
@@ -41,19 +42,21 @@ pub unsafe extern "C" fn rt_file_open(
         const O_RDONLY: i32 = 0x0000;
         const O_WRONLY: i32 = 0x0001;
         const O_RDWR: i32 = 0x0002;
+        const O_CREAT: i32 = 0x0100;
         const O_NOINHERIT: i32 = 0x0080;
         const O_BINARY: i32 = 0x8000;
         let access = match mode {
             0 => O_RDONLY,
             1 => O_RDWR,
             2 => O_WRONLY,
+            3 => O_RDWR | O_CREAT,
             _ => return -1,
         };
         if path_str.contains('\0') {
             return -1;
         }
         let wide: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
-        return _wopen(wide.as_ptr(), O_BINARY | O_NOINHERIT | access);
+        return _wopen(wide.as_ptr(), O_BINARY | O_NOINHERIT | access, 0x180);
     }
 
     #[cfg(unix)]
@@ -64,6 +67,7 @@ pub unsafe extern "C" fn rt_file_open(
             0 => OpenOptions::new().read(true).open(path_str),
             1 => OpenOptions::new().read(true).write(true).open(path_str),
             2 => OpenOptions::new().write(true).open(path_str),
+            3 => OpenOptions::new().read(true).write(true).create(true).open(path_str),
             _ => return -1,
         };
 
@@ -389,8 +393,8 @@ pub extern "C" fn rt_open_fd(path: crate::value::RuntimeValue, flags: i64, mode:
         const O_WRONLY: i32 = 0x0001;
         const O_RDWR: i32 = 0x0002;
         const O_APPEND: i32 = 0x0008;
-        const O_CREAT: i32 = 0x0100;
         const O_TRUNC: i32 = 0x0200;
+        const O_CREAT: i32 = 0x0100;
         const O_NOINHERIT: i32 = 0x0080;
         const O_BINARY: i32 = 0x8000;
         const S_IREAD: i32 = 0x0100;
@@ -485,7 +489,10 @@ pub mod windows_positioned {
     use windows_sys::Win32::System::IO::OVERLAPPED;
     extern "C" {
         fn _get_osfhandle(fd: i32) -> isize;
+        fn _set_thread_local_invalid_parameter_handler(h: Option<InvalidParameterHandler>) -> Option<InvalidParameterHandler>;
     }
+    type InvalidParameterHandler = unsafe extern "C" fn(*const u16, *const u16, *const u16, u32, usize);
+    unsafe extern "C" fn ignore_invalid_parameter(_: *const u16, _: *const u16, _: *const u16, _: u32, _: usize) {}
     const ERROR_HANDLE_EOF: u32 = 38;
     const ERROR_BROKEN_PIPE: u32 = 109;
 
@@ -493,7 +500,14 @@ pub mod windows_positioned {
         if fd < 0 {
             return None; // CRT would raise an invalid-parameter fault
         }
-        let h = unsafe { _get_osfhandle(fd) };
+        // A closed descriptor makes the CRT fail fast unless the handler is
+        // neutralised; with it ignored _get_osfhandle returns -1 (EBADF).
+        let h = unsafe {
+            let old = _set_thread_local_invalid_parameter_handler(Some(ignore_invalid_parameter));
+            let h = _get_osfhandle(fd);
+            _set_thread_local_invalid_parameter_handler(old);
+            h
+        };
         if h == -1 || h == 0 {
             None
         } else {

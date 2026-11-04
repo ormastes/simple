@@ -1,0 +1,110 @@
+# TargetHIR P4 asm guard: pure, typed re-implementation of the legacy
+# MirLowering.asm_target_spec_match_kind predicate plus the asm-match
+# exhaustiveness check from lower_inline_asm_match. The target is read only
+# from a TargetHIR handle bound to the caller's snapshot; a handle for another
+# snapshot is rejected (THIR-08) instead of deciding with a stale target.
+# The legacy MirLowering route (_MirLowering/asm_and_targets.spl) is untouched;
+# equivalence is pinned in test/01_unit/compiler/50.mir/mir_target_hir_simd_asm_spec.spl.
+
+use compiler.hir.target_hir.hir_snapshot.{HirSnapshotId, hir_snapshot_id_equals, hir_snapshot_id_text}
+use compiler.hir.target_hir.target_hir.{TargetHIR, target_hir_identity}
+
+val MIR_TARGET_HIR_ASM_ALL_ARCHS: [text] = ["x86_64", "x86", "aarch64", "arm", "riscv32", "riscv64", "wasm32", "wasm64", "avr", "mcs51", "msp430"]
+
+fn mir_target_hir_asm_normalize_arch(arch: text) -> text:
+    if arch == "amd64" or arch == "x64":
+        return "x86_64"
+    if arch == "arm64":
+        return "aarch64"
+    arch
+
+# Pure predicate: "matched" | "not_matched" | "unknown_version" | "note".
+fn mir_target_hir_asm_match_kind_for(
+    archs: [text], has_os: bool, os: text, has_abi: bool, abi: text, has_backend: bool, backend: text,
+    ver_ops: [text], ver_vals: [i64],
+    target_arch: text, target_os: text, target_abi: text, target_backend: text, target_backend_version: i64
+) -> text:
+    val normalized_target = mir_target_hir_asm_normalize_arch(target_arch)
+    if archs.len() > 0:
+        var arch_found = false
+        for arch in archs:
+            if mir_target_hir_asm_normalize_arch(arch) == normalized_target:
+                arch_found = true
+                break
+        if not arch_found:
+            return "not_matched"
+    if has_os and os != "_" and os != target_os:
+        return "not_matched"
+    if has_abi and abi != "_" and abi != target_abi:
+        return "not_matched"
+    if has_backend and backend != "_" and backend != target_backend:
+        return "not_matched"
+    if ver_ops.len() > 0 and target_backend_version < 0:
+        return "unknown_version"
+    var have_note = false
+    var i = 0
+    while i < ver_ops.len():
+        val op = ver_ops[i]
+        val value = ver_vals[i]
+        if op == ">=" and target_backend_version < value:
+            return "not_matched"
+        if op == "<=" and target_backend_version > value:
+            return "not_matched"
+        if op == ">" and target_backend_version <= value:
+            return "not_matched"
+        if op == "<" and target_backend_version >= value:
+            return "not_matched"
+        if op == "==" and target_backend_version != value:
+            return "not_matched"
+        if op == "!=" and target_backend_version == value:
+            return "not_matched"
+        if op == "~=" and target_backend_version != value:
+            have_note = true
+        i = i + 1
+    if have_note:
+        return "note"
+    "matched"
+
+fn mir_target_hir_asm_check_snapshot(view: TargetHIR, snapshot: HirSnapshotId) -> text?:
+    if not hir_snapshot_id_equals(view.snapshot, snapshot):
+        return Some("target_hir_snapshot_mismatch: " + hir_snapshot_id_text(view.snapshot) + " != " + hir_snapshot_id_text(snapshot))
+    nil
+
+# Typed entry: the target comes from the TargetHIR view only.
+fn mir_target_hir_asm_match_kind(
+    view: TargetHIR, snapshot: HirSnapshotId,
+    archs: [text], has_os: bool, os: text, has_abi: bool, abi: text, has_backend: bool, backend: text,
+    ver_ops: [text], ver_vals: [i64]
+) -> Result<text, text>:
+    val bad = mir_target_hir_asm_check_snapshot(view, snapshot)
+    if bad.?:
+        return Err(bad.unwrap())
+    if ver_ops.len() != ver_vals.len():
+        return Err("target_hir_asm_version_constraint_arity")
+    val t = view.target
+    Ok(mir_target_hir_asm_match_kind_for(archs, has_os, os, has_abi, abi, has_backend, backend,
+        ver_ops, ver_vals, t.arch, t.os, t.abi, t.backend, t.version))
+
+# Architectures a wildcard-less asm match fails to cover (same order and
+# normalization as the legacy non-exhaustive diagnostic).
+fn mir_target_hir_asm_missing_archs(arms_archs: [[text]], has_wildcard: bool) -> [text]:
+    var missing: [text] = []
+    if has_wildcard:
+        return missing
+    var covered: [text] = []
+    for arm_archs in arms_archs:
+        for arch in arm_archs:
+            covered.push(mir_target_hir_asm_normalize_arch(arch))
+    for arch in MIR_TARGET_HIR_ASM_ALL_ARCHS:
+        var found = false
+        for c in covered:
+            if c == arch:
+                found = true
+                break
+        if not found:
+            missing.push(arch)
+    missing
+
+# Decision-cache key: one per (snapshot, target fingerprint, region).
+fn mir_target_hir_asm_guard_key(view: TargetHIR) -> text:
+    "asm-guard|" + target_hir_identity(view)

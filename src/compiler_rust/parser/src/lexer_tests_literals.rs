@@ -820,3 +820,77 @@ mod fstring_brace_escape_tests {
         );
     }
 }
+
+// === ADR-005 char-literal lexer gate (char_literal_lexer_switch_staged_2026-11-03) ===
+
+fn tokenize_char_mode(source: &str, on: bool) -> Vec<TokenKind> {
+    Lexer::new(source)
+        .with_char_literals(on)
+        .tokenize()
+        .into_iter()
+        .map(|t| t.kind)
+        .collect()
+}
+
+fn first_error(kinds: &[TokenKind]) -> Option<String> {
+    kinds.iter().find_map(|k| match k {
+        TokenKind::Error(m) => Some(m.clone()),
+        _ => None,
+    })
+}
+
+#[test]
+fn test_char_gate_on_single_scalars() {
+    for (src, ch) in [("'a'", 'a'), ("'é'", 'é'), ("'한'", '한'), ("'😀'", '😀'), ("' '", ' ')] {
+        assert_eq!(tokenize_char_mode(src, true), vec![TokenKind::CharLit(ch), TokenKind::Eof], "{src}");
+    }
+}
+
+#[test]
+fn test_char_gate_on_escapes() {
+    for (src, ch) in [
+        (r"'\n'", '\n'),
+        (r"'\t'", '\t'),
+        (r"'\0'", '\0'),
+        (r"'\\'", '\\'),
+        (r"'\''", '\''),
+        (r"'\u{1F600}'", '😀'),
+    ] {
+        assert_eq!(tokenize_char_mode(src, true), vec![TokenKind::CharLit(ch), TokenKind::Eof], "{src}");
+    }
+}
+
+#[test]
+fn test_char_gate_on_errors_point_at_raw_text() {
+    for src in ["'ab'", "'hello world'", "''", "'1"] {
+        let kinds = tokenize_char_mode(src, true);
+        let msg = first_error(&kinds).unwrap_or_else(|| panic!("{src} must be a lex error: {kinds:?}"));
+        assert!(msg.contains("r\"...\""), "{src}: {msg}");
+    }
+    // Decomposed e + U+0301 is two scalars: not a char literal.
+    assert!(first_error(&tokenize_char_mode("'e\u{301}'", true)).is_some());
+}
+
+#[test]
+fn test_char_gate_on_label_unchanged() {
+    let kinds = tokenize_char_mode("break 'outer", true);
+    assert!(kinds.contains(&TokenKind::Label("outer".to_string())), "{kinds:?}");
+}
+
+#[test]
+fn test_char_gate_off_keeps_legacy_raw_strings() {
+    assert_eq!(
+        tokenize_char_mode("'a'", false),
+        vec![TokenKind::RawString("a".to_string()), TokenKind::Eof]
+    );
+    assert_eq!(
+        tokenize_char_mode("'hello world'", false),
+        vec![TokenKind::RawString("hello world".to_string()), TokenKind::Eof]
+    );
+    assert_eq!(
+        tokenize_char_mode(r"'\n'", false),
+        vec![TokenKind::RawString("\\n".to_string()), TokenKind::Eof]
+    );
+    let kinds = tokenize_char_mode("break 'outer", false);
+    assert!(kinds.contains(&TokenKind::Label("outer".to_string())), "{kinds:?}");
+}

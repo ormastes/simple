@@ -73,3 +73,5 @@ PR #410. Full findings, plus the two unpinned `vulkan_session.spl` seams
 (`create_command_buffer()` has no session guard; `_cleanup()`'s zeroing is
 vacuous, not a leak) and the self-mocking-spec hazard class, live in
 [engine2d_font_offload](../engine2d_font_offload/skill.md) § 2026-09-06.
+
+- 2026-11-04: `metal-on-vulkan` (alias `metal_on_vulkan`) is an explicit, probe-disclosed VulkanBackend lane like `directx-on-vulkan`; strict `metal` stays macOS-only. Spec: test/02_integration/rendering/metal_on_vulkan_backend_spec.spl.

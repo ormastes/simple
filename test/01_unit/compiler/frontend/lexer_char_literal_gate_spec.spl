@@ -1,0 +1,61 @@
+"""
+## Purpose and audience
+Purpose: Pin the ADR-005 char-literal lexer gate in the pure-Simple CoreLexer.
+Audience: compiler engineers staging the `'x'` char-literal switch.
+## Operator workflow
+Run this spec with the test runner. Gate ON (`SIMPLE_CHAR_LITERAL_LEXER=1`)
+lexes `'x'` as CharLit (kind 9); gate OFF (default) keeps the legacy
+single-quoted string (kind 3). The seed twin is `test_char_gate_*` in
+src/compiler_rust/parser/src/lexer_tests_literals.rs.
+## Compatibility and limitations
+Both parsers accept kind 9 (see parser_char_literal_gate_spec.spl); the
+remaining activation steps are in
+doc/08_tracking/bug/char_literal_lexer_switch_staged_2026-11-03.md.
+"""
+# @req: REQ-COMPILER-FRONTEND-001
+
+use core.lexer_struct.{make_core_lexer_char_mode}
+use std.spec.step
+
+fn first_token(source: text, on: bool) -> [text]:
+    var lexer = make_core_lexer_char_mode(source, on)
+    val kind = lexer.next_token()
+    ["{kind}", lexer.cur_text]
+
+fn first_kind(source: text, on: bool) -> i64:
+    var lexer = make_core_lexer_char_mode(source, on)
+    lexer.next_token()
+
+describe "char-literal lexer gate ON":
+    it "lexes single scalars as CharLit":
+        step("ASCII, accented, Hangul and emoji scalars are one char each")
+        expect(first_token("'a'", true)).to_equal(["9", "a"])
+        expect(first_token("'é'", true)).to_equal(["9", "é"])
+        expect(first_token("'한'", true)).to_equal(["9", "한"])
+        expect(first_token("' '", true)).to_equal(["9", " "])
+
+    it "decodes one escape":
+        step("escapes produce the decoded scalar")
+        expect(first_token("'\\n'", true)).to_equal(["9", "\n"])
+        expect(first_token("'\\t'", true)).to_equal(["9", "\t"])
+        expect(first_token("'\\\\'", true)).to_equal(["9", "\\"])
+        expect(first_token("'\\''", true)).to_equal(["9", "'"])
+        expect(first_token(r"'\u{41}'", true)).to_equal(["9", "A"])
+
+    it "rejects multi-scalar, empty and unterminated literals with an r\"...\" hint":
+        step("error token 191 names the raw-text form")
+        val bad = ["'ab'", "'hello world'", "''", "'1", r"'\u{D800}'"]
+        for src in bad:
+            val tok = first_token(src, true)
+            expect(tok[0]).to_equal("191")
+            expect(tok[1].contains("r\"...\"")).to_equal(true)
+
+describe "char-literal lexer gate OFF (default)":
+    it "keeps legacy single-quoted strings":
+        step("'a' and 'hello world' stay StringLit (kind 3)")
+        expect(first_token("'a'", false)).to_equal(["3", "a"])
+        expect(first_token("'hello world'", false)).to_equal(["3", "hello world"])
+
+    it "never emits CharLit":
+        step("no kind 9 when the gate is off")
+        expect(first_kind("'x'", false)).to_not_equal(9)

@@ -107,3 +107,29 @@ counts become non-zero and the null-write probe returns rc=139 with the
 `[simple-runtime] Fatal: SIGSEGV` + `Backtrace:` banner; then write the fork spec
 described under "Unblock condition". BSD: same C sources (POSIX fork/sigaction);
 no BSD-specific change.
+
+## Update 2026-11-04 — C contract verified natively; specs written and gated
+
+**Verified natively (macOS arm64, Darwin 25.5.0, Apple clang):**
+`src/runtime/test/rt_fork_crash_handler_selfcheck.c` links the real
+`runtime.c` + `runtime_fork.c` and drives both directly (build line in its
+header). Result: `crash child rc=139`, `15 checks, 0 failures`. It proves:
+fork bridge captures a clean child's stdout/stderr/exit code; a forked child
+that calls `rt_install_crash_handler()` and writes through NULL exits 139 with
+`signaled == false` and stderr carrying `[simple-runtime] Fatal:`, `si_code=`
+and `Backtrace:`; without the handler the raw signal is observed
+(`signaled == true`). No C defect was exposed — the runtime code is correct;
+the gap is purely that the Rust seed does not link it.
+
+**Specs written (pending a self-hosted run):** the last describe block of
+`test/01_unit/lib/crash/crash_bundle_spec.spl` now drives a real forked clean
+child and a real forked null-write crash (asserting rc 139, `signaled ==
+false`, banner + `Backtrace:`), exactly the unblock-condition contract above.
+Both examples are wrapped in `skip_on_interpreter`, so on the Rust seed they
+report an explicit skip (measured on seed `release100-7a0e6fe516f-20261031`:
+`5 total, 5 passed, 0 failed, 2 skipped`) rather than a silent-nil vacuous
+pass.
+
+**Still pending:** run that spec on an admitted self-hosted macOS binary
+(bootstrap lane) and confirm the two examples execute and pass; then flip this
+record to FIXED.

@@ -2,10 +2,36 @@
 
 Dated 2026-10-25, against `release/1.0.0`, with the latest user-directed
 per-file worker default updated 2026-10-26. Each item names the PR or file it
-was checked against. The true per-file worker pipeline is off when
-`SIMPLE_FILE_WORKERS` is unset; `SIMPLE_FILE_WORKERS=1` explicitly opts in.
-This source default update is being landed without new runtime verification.
+was checked against. The true per-file worker pipeline is the DEFAULT when
+`SIMPLE_FILE_WORKERS` is unset (2026-11-04); `SIMPLE_FILE_WORKERS=0` opts out.
+See "Default build mode" below.
 
+## Default build mode: file-based src → obj + library link (user policy 2026-11-04)
+
+- **Default (no flag, no env):** each source file goes src → obj in ONE
+  process (parse → HIR → MIR → object, like cc1) via the per-file worker
+  pool; objects are then linked into the binary. Selected by
+  `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "1"`
+  (`src/compiler/80.driver/driver_build/native_file_worker_v1.spl`), pinned
+  by `test/01_unit/compiler/driver/native_file_worker_v1_spec.spl`. Applies to
+  bootstrap Stage 3, release builds and plain `native-build`.
+- **Opt-outs (explicit, per invocation only):** `SIMPLE_FILE_WORKERS=0`
+  (two-pass HIR-shard then MIR-shard route), `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1`
+  (whole-program single-object route), `SIMPLE_MIR_SHARDING=0` (disables the
+  pool and MIR sharding). Related shard knobs: `SIMPLE_PARSE_SHARDING`,
+  `SIMPLE_HIR_SHARDING`, `SIMPLE_MIR_SHARD_COUNT`, `SIMPLE_MIR_SHARD_WORKER_KB`,
+  `SIMPLE_HIR_SHARD_WORKER_KB`, `SIMPLE_FILE_FIBERS`.
+- **Rule: never change a shared default to suit one build.** No config file,
+  script-global env default, or constant flip. A launcher that needs a
+  non-default mode passes the option at its own call site with a comment
+  saying why (e.g. `scripts/bootstrap/p3-entry-groups.shs` sets
+  `SIMPLE_FILE_WORKERS=0` for its generated launcher only).
+- **Gap (not yet default):** per-package/per-layer library archives
+  (`.a`) linked into the binary. Today the pool's per-module objects are
+  linked from the sealed ledger in one link; package archives exist only on
+  the demand-SCC path (`driver/cache/package_archive_cache.spl`).
+- Runtime verification of the flipped default (first-object time, total
+  cold/warm) is **pending a stage3 binary**.
 ## Direct compiler or BuildRunner selection
 
 `simple native-build ...` already compiles directly without BuildRunner. The
@@ -199,8 +225,8 @@ leaders (#4441), and #4525, which makes per-module lowering the default.
   for `SIMPLE_FILE_WORKERS` when unset is the
   single constant `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1` in
   `src/compiler/80.driver/driver_build/native_file_worker_v1.spl` (now
-  `"0"`). Unset or `SIMPLE_FILE_WORKERS=0` leaves the pool off;
-  `SIMPLE_FILE_WORKERS=1` explicitly selects the per-file `src → obj` pool, and
+  `"1"`). Unset or `SIMPLE_FILE_WORKERS=1` selects the per-file `src → obj` pool;
+  `SIMPLE_FILE_WORKERS=0` opts out, and
   `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` keeps the whole-program route. The Stage 3
   scripts pass the knob through when set (exactly `0` or `1`, anything else
   is refused) and hash it into the Stage 3 args receipt; unset adds nothing,

@@ -1,0 +1,93 @@
+#!/bin/sh
+# Fixture gate for the Stage-3 open-fd identity helpers in
+# scripts/check/lib/bootstrap-stage3/manifest-verify.shs
+# (bootstrap_stage3_fd_identity / bootstrap_stage3_fd_matches_path).
+#
+#   sh scripts/check/check-bootstrap-fd-identity.shs [--selftest]
+#
+# Runs on the CURRENT host's arm (Linux procfs, or fstat(2) on Darwin/BSD).
+# Verdict is the last stdout line:
+#   PASS — <n> fixture(s) checked ...   exit 0
+#   FAIL — <fixture> ...                 exit 1
+#   ERROR — nothing was checked (...)    exit 2
+set -u
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || {
+    echo "ERROR — nothing was checked (cannot resolve repo root)"
+    exit 2
+}
+case "${1:-}" in ''|--selftest) ;; *) echo "usage: $0 [--selftest]" >&2; exit 2 ;; esac
+
+# The module only defines functions; it needs a provenance-fail hook in scope.
+bootstrap_stage3_provenance_fail() { return 1; }
+. "$repo_root/scripts/check/lib/bootstrap-stage3/manifest-verify.shs" || {
+    echo "ERROR — nothing was checked (cannot load manifest-verify.shs)"
+    exit 2
+}
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/fd-identity.XXXXXX") || {
+    echo "ERROR — nothing was checked (mktemp failed)"
+    exit 2
+}
+trap 'exec 5<&- 2>/dev/null; rm -rf "$work"' EXIT HUP INT TERM
+checked=0
+
+fail() { echo "FAIL — $1"; exit 1; }
+
+expect() { # name expected-status actual-status
+    [ "$2" = "$3" ] || fail "$1: expected exit $2, got $3"
+    checked=$((checked + 1))
+}
+
+fresh() { # (re)create $work/f with content $1, hold it on fd 5, stamp it
+    exec 5<&- 2>/dev/null
+    printf '%s\n' "$1" >"$work/f" || fail "fixture write"
+    exec 5<"$work/f" || fail "fixture open"
+    stamp=$(bootstrap_stage3_fd_stamp 5) || fail "fixture stamp"
+}
+
+# 1. Same, unchanged file -> PASS (0); identity is "dev ino mode_hex size".
+fresh same
+bootstrap_stage3_fd_matches_path 5 "$work/f" "$stamp"; expect same-file 0 $?
+id=$(bootstrap_stage3_fd_identity 5); expect fd-identity 0 $?
+set -- $id
+[ "$#" = 4 ] && [ "$4" = 5 ] || fail "fd-identity shape: '$id'"
+case "$3" in 81[0-9a-f][0-9a-f]) ;; *) fail "fd-identity mode not regular hex: '$3'" ;; esac
+checked=$((checked + 1))
+
+# 2. Path replaced by rename after open -> FAIL (1), fd identity unchanged.
+fresh original
+printf 'replacement\n' >"$work/g"
+mv -f "$work/g" "$work/f"
+bootstrap_stage3_fd_matches_path 5 "$work/f" "$stamp"; expect renamed-over 1 $?
+[ "$(bootstrap_stage3_fd_identity 5)" = "$id" ] && fail "renamed-over: fd identity must track the held inode, not the path"
+checked=$((checked + 1))
+
+# 3. Same inode modified in place after open (same size) -> FAIL (1).
+fresh aaaa
+sleep 1
+printf 'bbbb\n' >"$work/f"
+bootstrap_stage3_fd_matches_path 5 "$work/f" "$stamp"; expect modified-after-open 1 $?
+
+# 4. Path removed after open -> FAIL (1).
+fresh gone
+rm -f "$work/f"
+bootstrap_stage3_fd_matches_path 5 "$work/f" "$stamp"; expect path-removed 1 $?
+
+# 5. Missing stat tool -> ERROR (2), never PASS.
+fresh tool
+bootstrap_stage3_fd_stamp 5 >/dev/null; expect stamp-ok 0 $?
+bootstrap_stage3_fd_identity_tool="$work/no-such-stat-tool"
+bootstrap_stage3_fd_matches_path 5 "$work/f" "$stamp"; expect missing-tool-match 2 $?
+bootstrap_stage3_fd_identity 5 >/dev/null; expect missing-tool-identity 2 $?
+bootstrap_stage3_fd_stamp 5 >/dev/null; expect missing-tool-stamp 2 $?
+unset bootstrap_stage3_fd_identity_tool
+
+# 6. fd not open / malformed fd -> ERROR (2).
+exec 5<&-
+bootstrap_stage3_fd_matches_path 5 "$work/f" "$stamp"; expect closed-fd 2 $?
+bootstrap_stage3_fd_identity 'x' >/dev/null; expect malformed-fd 2 $?
+bootstrap_stage3_fd_matches_path 5 "$work/f" ''; expect empty-stamp 2 $?
+
+echo "PASS — $checked fixture(s) checked on $(uname -s) arm"
+exit 0
