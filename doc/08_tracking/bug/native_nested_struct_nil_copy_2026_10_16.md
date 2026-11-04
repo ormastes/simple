@@ -33,4 +33,4 @@ Scope: actual TailCallOptimization shared controls, including false manifest pre
 Workaround supplies a canonical owned DriverManifestAttr at MirBuilder sites; cycle3 qualification passed per the record above. Baked producer nil-carrier guard remains to verify.
 Fixture: test/04_smoke/nested_record_nil_copy_native.spl (interpreter lane passes; native lane unverified).
 Stage3 repro: `bin/simple native-build --entry test/04_smoke/nested_record_nil_copy_native.spl --output build/x && build/x` -> expected stdout in the fixture header.
-Status: fix-implemented-verification-pending (source workaround in place; producer defect needs stage3 verification; no compiler edit in this PR).
+Status: open. workaround in place; native repro fixture added; real producer fix still needed.

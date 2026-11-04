@@ -46,4 +46,4 @@ and the dedicated BDD runner remain unrun. The inference owner is still open.
 Workaround: typed [i64] literal over val constants kept at evex_encoding.spl:82.
 Fixture: test/04_smoke/static_val_array_infer_native.spl (interpreter lane passes).
 Stage3 repro: `bin/simple native-build --entry test/04_smoke/static_val_array_infer_native.spl --output build/static_arr && build/static_arr` -> 4 / STATIC_ARRAY_OK.
-Status: fix-implemented-verification-pending.
+Status: open. workaround in place; native repro fixture added; real producer fix still needed.
