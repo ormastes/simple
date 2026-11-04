@@ -634,3 +634,8 @@ Package: `src/compiler/20.hir/target_hir/` (kept in a subdirectory, not the 20.h
   host / lossy triples / `auto` backends cannot bind one. No MIR lowerer consumes it yet; the raw-HIR
   entrypoints from the P0 inventory are pinned by name in
   `test/01_unit/compiler/hir/target_hir_identity_facade_spec.spl`.
+- **PR-B** `hir_freeze.spl`: `hir_snapshot_freeze(module, generation)` deep-freezes by capturing codec
+  bytes (no aliasing of builder dicts/arrays); id digest = sha256 of those bytes; `hir_snapshot_read`
+  verifies the digest and decodes a fresh copy each call. The canonical codec generator reports
+  unavailable on release/1.0.0, so freezing falls back to the legacy codec and records `codec`.
+  Spec: `test/01_unit/compiler/hir/hir_snapshot_freeze_spec.spl`.
