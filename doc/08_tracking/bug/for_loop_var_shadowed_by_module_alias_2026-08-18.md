@@ -70,3 +70,10 @@ module alias is still mis-resolved.
 Make the `for` binding shadow module-namespace bindings in the interpreter /
 JIT scope chain, and add a language-level spec asserting loop-variable shadowing
 precedence over imported module aliases.
+
+## Note 2026-11-05 (related)
+
+Same class, spec-lane reassignment: in a block body, `var input = ...; input = f(...)` with a
+module named `input` imported dropped the local, because `module_global_target`
+(`interpreter_call/block_execution.rs`) returned the `Legacy` global target before consulting
+`env.is_local`. Locals now win first. Regression: `test/01_unit/compiler/interpreter/local_shadows_builtin_input_spec.spl`.
