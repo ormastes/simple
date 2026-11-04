@@ -633,3 +633,37 @@ What turns the Engine2D row green: the interpreter `[u8]` param writeback fix
 (or an admitted self-hosted macOS binary running the spec), then a rerun.
 
 Status: open — sync item fixed; parity item blocked on seed runtime defects.
+
+## 2026-11-04 u8param lane: Engine2D row PASS under `simple test`
+
+Rerun with a seed freshly built from `release/1.0.0` (contains `bafc15f38a7`, the
+`[u8]` mut-param write-back fix; see
+`seed_interp_mut_u8_array_param_element_write_lost_2026-11-04.md`):
+
+- Glyph coverage now reaches the atlas: interpreter probe shows
+  `status=promoted reason=fence-device-identity-readback-proven`,
+  `readback_nonblank_pixels=135`, `device_checksum == oracle_checksum`.
+- **New Simple-side defect found and fixed:** `engine2d_vulkan_font_batch_admits`
+  admitted only `executed`/`recorded`; `_vulkan_font_completion` rewrites a proven
+  batch to `promoted`, so the BEST outcome was rejected and the frame fell back to
+  CPU (`target=cpu`, spec reason `native-vulkan-font-target-not-selected`). It now
+  admits `promoted` (`engine.spl`); covered by
+  `test/01_unit/lib/gpu/engine2d/vulkan_font_batch_admission_spec.spl` (8/8).
+- `native_gpu_font_readback_spec.spl` (interpreter, M4/MoltenVK): still 5/8, but
+  `engine2d_font status=pass reason=`. The 3 failures are the Engine3D row
+  (`public-vulkan-font-install-failed`), the SimpleOS guest capture, and the
+  budgets row — not investigated here.
+
+**`simple run` (JIT) — different root, documented not fixed.** With the fresh
+seed the JIT oracle is no longer blank (`parity=true`, checksums equal) but
+`readback_nonblank_pixels=0`, so `vulkan_font_stage_evidence_ready` fails and the
+status stays `executed` / `single-packed-font-submit`. Cause: in
+`backend_vulkan_font.spl` the oracle is seeded with `oracle.buf = oracle_before`;
+under the seed JIT a class-field array assignment ALIASES the source local
+(interpreter copies), so `draw_image_blend` also mutates `oracle_before` and
+`vulkan_font_changed_pixel_count(oracle_before, after)` counts 0. Minimal repro
+and record: `seed_jit_class_field_array_assign_aliases_local_2026-11-04.md`.
+Not the `[u8]` write-back root.
+
+Status: Engine2D interpreter row green; JIT row blocked on the JIT aliasing defect;
+Engine3D row open.
