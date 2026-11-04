@@ -2,13 +2,16 @@
 # Uses lightweight lsp_query.spl for fast code analysis (no full compiler load).
 # Only falls back to full query.spl for heavy operations (check/diagnostics).
 
-use std.io_runtime.{env_get, file_exists}
+use std.io_runtime.{env_get, env_set_process, file_exists, write_file, file_delete, time_now_unix_micros}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_text_or, json_value_as_bool,
+    json_value_items, json_value_keys, json_value_object_from, json_value_object_set, json_value_serialize}
 use std.nogc_sync_mut.lsp.lsp_json.*
 use std.nogc_sync_mut.lsp.lsp_protocol.{lsp_write_notification}
 use std.nogc_sync_mut.lsp.lsp_file_uri.{lsp_file_uri_to_path, lsp_query_file_argument_v1}
 use std.nogc_sync_mut.lsp.lsp_code_action.{lsp_code_actions_convert_output,
     lsp_code_action_request, lsp_code_action_query_args}
-use std.nogc_sync_mut.lsp.lsp_query_command.{lsp_fast_query_command_v1,
+use std.nogc_sync_mut.lsp.lsp_query_command.{lsp_fast_query_command_v1, lsp_code_query_command_v1,
     lsp_heavy_query_command_v1, lsp_visibility_query_command_v1, lsp_run_query_command_v1}
 
 # REQ-LSPVIS-008: Track whether client supports structured visibility metadata.
@@ -688,3 +691,74 @@ fn lsp_handle_pull_diagnostic(id: text, body: text) -> text:
     val diags_str = SB_L() + diags.join(",") + SB_R()
     val result = jo2(jp("kind", js("full")), jp("items", diags_str))
     make_json_result(id=id, result=result)
+
+# --- Shared source-edit core (doc/05_design/app/lsp/closure_refactor.md §3) ---
+# simple/refactor/closure {closure, scope: [glob], dryRun} -> {workspaceEdit, summary}
+# simple/ast/views {uri} -> {file, views: [...]}
+# Both run `simple code ...` as a child; the core validates every proposal and
+# the editor owns unsaved buffers, so the server returns a WorkspaceEdit and
+# only writes when the caller explicitly sets dryRun=false.
+
+fn _lsp_path_to_uri(path: text) -> text:
+    val p = path.replace("\\", "/")
+    if p.starts_with("/"): return "file://" + p
+    if p.len() > 2 and p[1] == ":": return "file:///" + p
+    p
+
+fn _lsp_changes_with_uris(result: JsonValue) -> JsonValue:
+    val edit = json_value_field(result, "workspaceEdit")
+    val changes = json_value_field(edit, "changes")
+    var pairs: [(text, JsonValue)] = []
+    for key in json_value_keys(changes):
+        pairs.push((_lsp_path_to_uri(key), json_value_field(changes, key)))
+    val rewritten = json_value_object_set(edit, "changes", json_value_object_from(pairs))
+    json_value_object_set(result, "workspaceEdit", rewritten)
+
+fn _lsp_run_code_entry(args: [text]) -> (text, i64):
+    # The seed demotes a file-entry run to the hybrid engine, where list
+    # comprehensions yield []; pin the child to the interpreter.
+    val previous = env_get("SIMPLE_EXECUTION_MODE") ?? ""
+    val _ = env_set_process("SIMPLE_EXECUTION_MODE", "interpret")
+    val (out, code) = lsp_run_query_command_v1(_find_simple_binary(), lsp_code_query_command_v1(args))
+    val _ = env_set_process("SIMPLE_EXECUTION_MODE", previous)
+    (out, code)
+
+fn lsp_handle_refactor_closure(id: text, body: text) -> text:
+    var params = JsonValue.Null
+    match json_parse_value_strict(body):
+        case Ok(v): params = json_value_field(v, "params")
+        case Err(_): return make_error(id, -32602, "simple/refactor/closure: invalid request JSON")
+    val closure = json_value_text_or(json_value_field(params, "closure"), "")
+    if closure == "":
+        return make_error(id, -32602, "simple/refactor/closure: `closure` (Simple source text) is required")
+    var dry_run = true
+    if val d = json_value_as_bool(json_value_field(params, "dryRun")): dry_run = d
+    val path = get_temp_dir() + "/simple_lsp_closure_{time_now_unix_micros()}.spl"
+    if not write_file(path, closure):
+        return make_error(id, -32603, "simple/refactor/closure: cannot stage the closure source")
+    var args: [text] = ["code", "refactor", "--closure", path, "--json"]
+    for g in json_value_items(json_value_field(params, "scope")):
+        val s = json_value_text_or(g, "")
+        if s != "":
+            args.push("--scope")
+            args.push(s)
+    if not dry_run: args.push("--apply")
+    val (out, code) = _lsp_run_code_entry(args)
+    val _ = file_delete(path)
+    val payload = lsp_extract_query_json_payload(out)
+    if payload == "":
+        return make_error(id, -32603, "simple/refactor/closure: no result from the refactor child (exit {code})")
+    match json_parse_value_strict(payload):
+        case Ok(v): return make_json_result(id=id, result=json_value_serialize(_lsp_changes_with_uris(v)))
+        case Err(_): return make_error(id, -32603, "simple/refactor/closure: malformed child result")
+
+fn lsp_handle_ast_views(id: text, body: text) -> text:
+    val uri = _extract_uri(body)
+    val file_path = _uri_to_path(uri)
+    if file_path == "":
+        return make_error(id, -32602, "simple/ast/views: textDocument.uri is required")
+    val (out, code) = _lsp_run_code_entry(["code", "ast", file_path, "--json"])
+    val payload = lsp_extract_query_json_payload(out)
+    if payload == "":
+        return make_error(id, -32603, "simple/ast/views: no result (exit {code})")
+    make_json_result(id=id, result=payload)

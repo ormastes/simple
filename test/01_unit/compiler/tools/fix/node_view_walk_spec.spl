@@ -1,0 +1,95 @@
+# @req REQ-SSPEC-UNIT
+# @cover src/compiler/90.tools/fix/node_view_walk.spl 80%
+"""
+# NodeView walk — snapshot-bound AST views for the shared source-edit core
+
+Design: doc/05_design/app/lsp/closure_refactor.md §2. The walker is the only
+consumer of the AST pool; producers and user closures match on NodeView.
+"""
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.tooling.easy_fix.snapshot.{source_snapshot}
+use std.tooling.easy_fix.node_view.{NodeView, node_view_encode, node_view_decode, module_path_for_file}
+use compiler.tools.fix.node_view_walk.{collect_node_views, source_parses}
+
+val SRC = "class Stack<T>:\n    items: [T]\n\n    fn first():\n        if items.len() == 0:\n            return nil\n        items[0]\n\n    fn last() -> T?:\n        unsafe:\n            items.get_unchecked(items.len() - 1)\n\nfn use_it(s: Stack<i64>) -> i64:\n    val a = s.first()\n    val b = s.items[2]\n    a\n"
+
+fn views_of(kind: text) -> [NodeView]:
+    val snap = source_snapshot("src/app/demo/stack.spl", SRC)
+    var out: [NodeView] = []
+    match collect_node_views(snap):
+        case Ok(views):
+            for v in views:
+                if v.kind == kind: out.push(v)
+        case Err(_):
+            val _ = 0
+    out
+
+fn first_named(kind: text, name: text) -> NodeView?:
+    for v in views_of(kind):
+        if v.name == name: return Some(v)
+    nil
+
+describe "node_view_walk":
+    it "exposes fn decls with owner, params, header offsets and declared return type text":
+        step("walk fn decls")
+        val first = first_named("fn_decl", "first").unwrap()
+        expect(first.owner).to_equal("Stack")
+        expect(first.owner_type_params).to_equal("T")
+        expect(first.ret_type).to_equal("")
+        expect(SRC.slice(first.name_start, first.name_end)).to_equal("first")
+        expect(SRC[first.header_end]).to_equal(":")
+        expect(SRC[first.args_end]).to_equal(")")
+        expect(first.module_path).to_equal("app.demo.stack")
+        val last = first_named("fn_decl", "last").unwrap()
+        expect(last.ret_type).to_equal("T?")
+        val use_it = first_named("fn_decl", "use_it").unwrap()
+        expect(use_it.params).to_equal("s")
+        expect(use_it.ret_type).to_equal("i64")
+
+    it "exposes method calls with receiver, name span and argument span":
+        step("walk method calls")
+        val call = first_named("method_call", "first").unwrap()
+        expect(call.receiver).to_equal("s")
+        expect(SRC.slice(call.name_start, call.name_end)).to_equal("first")
+        expect(call.args_text).to_equal("")
+        expect(call.indent).to_equal("    ")
+        expect(SRC.slice(call.stmt_start, call.stmt_start + 12)).to_equal("    val a = ")
+
+    it "marks nodes inside unsafe: and exposes index receivers":
+        step("walk index + unsafe")
+        val gu = first_named("method_call", "get_unchecked").unwrap()
+        expect(gu.in_unsafe).to_equal(true)
+        expect(gu.args_text).to_equal("items.len() - 1")
+        var unsafe_count = 0
+        var safe_count = 0
+        for v in views_of("index"):
+            if v.in_unsafe: unsafe_count = unsafe_count + 1
+            else: safe_count = safe_count + 1
+        expect(safe_count).to_equal(2)
+        expect(unsafe_count).to_equal(0)
+        val idx = views_of("index")[1]
+        expect(idx.receiver).to_equal("s.items")
+        expect(idx.args_text).to_equal("2")
+        expect(idx.text).to_equal("s.items[2]")
+
+    it "exposes nil literals and return statements":
+        step("walk nil/return")
+        expect(views_of("nil_lit").len()).to_equal(1)
+        expect(views_of("return").len()).to_equal(1)
+        expect(views_of("nil_lit")[0].text).to_equal("nil")
+
+    it "round-trips a view through the record codec":
+        step("codec")
+        val v = first_named("fn_decl", "first").unwrap()
+        val back = node_view_decode(node_view_encode(v)).unwrap()
+        expect(back.name).to_equal("first")
+        expect(back.text).to_equal(v.text)
+        expect(back.header_end).to_equal(v.header_end)
+        expect(back.version).to_equal(v.version)
+
+    it "reports parse failure instead of views":
+        step("reparse")
+        expect(source_parses("x.spl", "fn broken(:\n")).to_equal(false)
+        expect(source_parses("x.spl", "fn ok():\n    1\n")).to_equal(true)
+        expect(module_path_for_file("src/lib/nogc_sync_mut/glob.spl")).to_equal("std.glob")

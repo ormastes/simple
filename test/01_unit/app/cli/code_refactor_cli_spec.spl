@@ -1,0 +1,78 @@
+# @req REQ-SSPEC-UNIT
+# @cover src/app/io/cli_code_commands.spl 70%
+"""
+# `simple code refactor` end to end — closure over a fixture tree
+
+Runs the real CLI entry (child process) with the `first_to_optional` and
+`unchecked_index` fixture closures over a temporary tree: dry-run diff first,
+then `--apply` (snapshot writer), then `--json` (the LSP/MCP payload).
+Nested `bin/simple` startups make this the slowest spec in the group.
+"""
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{write_file, read_file, file_delete, dir_create, dir_exists, file_exists}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use app.io.process_ops.{process_run_timeout}
+use app.io.cli_code_commands.{scope_matches, parse_code_refactor_args}
+
+val STACK = "class Stack<T>:\n    items: [T]\n\n    fn first():\n        if items.len() == 0:\n            return nil\n        items[0]\n\n    fn last() -> T?:\n        unsafe:\n            items[items.len() - 1]\n"
+
+fn binary() -> text:
+    if file_exists("bin/simple.exe"): "bin/simple.exe" else: "bin/simple"
+
+fn run_cli(args: [text]) -> (text, text, i64):
+    var argv: [text] = ["src/app/cli/code_entry.spl"]
+    for a in args: argv.push(a)
+    val (out, err, rc) = process_run_timeout(binary(), argv, 600000)
+    (out, err, rc)
+
+describe "simple code refactor":
+    it "matches scope globs with ** and plain patterns":
+        step("scope")
+        expect(scope_matches("src/app/x/y.spl", "src/**/*.spl")).to_equal(true)
+        expect(scope_matches("src/app/x/y.spl", "src/app/**/*.spl")).to_equal(true)
+        expect(scope_matches("src/lib/x.spl", "src/app/**/*.spl")).to_equal(false)
+        expect(scope_matches("a/b.spl", "a/*.spl")).to_equal(true)
+        val opts = parse_code_refactor_args(["code", "refactor", "--closure", "c.spl", "--scope", "t/**", "--json"])
+        expect(opts.json).to_equal(true)
+        expect(opts.apply).to_equal(false)
+        expect(opts.scopes[0]).to_equal("t/**")
+
+    it "previews, applies and reports the first() -> T? migration through the CLI":
+        step("fixture tree")
+        val root = get_temp_dir().replace("\\", "/") + "/code_refactor_cli_spec"
+        if not dir_exists(root):
+            val _ = dir_create(root, true)
+        val file = root + "/stack.spl"
+        val _ = write_file(file, STACK)
+
+        step("dry run")
+        val (out, err, rc) = run_cli(["code", "refactor", "--closure", "test/fixtures/refactor/first_to_optional.spl", "--scope", root + "/*.spl"])
+        expect(rc).to_equal(0)  # oracle: dry run exits 0 and writes nothing
+        expect(out.contains("-    fn first():")).to_equal(true)
+        expect(out.contains("+    fn first() -> T?:")).to_equal(true)
+        expect(out.contains("Dry run: 1 file(s) would change")).to_equal(true)
+        expect(read_file(file)).to_equal(STACK)
+
+        step("class-shaped closure + notes + json")
+        val (out2, err2, rc2) = run_cli(["code", "refactor", "--closure", "test/fixtures/refactor/unchecked_index.spl", "--scope", root + "/*.spl", "--json"])
+        expect(rc2).to_equal(0)
+        expect(out2.contains("\"newText\":\"items.get_unchecked(items.len() - 1)\"")).to_equal(true)
+        expect(out2.contains("\"ok\":true")).to_equal(true)
+
+        step("apply")
+        val (out3, err3, rc3) = run_cli(["code", "refactor", "--closure", "test/fixtures/refactor/first_to_optional.spl", "--scope", root + "/*.spl", "--apply"])
+        expect(rc3).to_equal(0)
+        expect(out3.contains("Applied 1 proposal(s) to 1 file(s)")).to_equal(true)
+        val after = read_file(file)
+        expect(after.contains("    fn first() -> T?:\n")).to_equal(true)
+        expect(after.contains("return nil")).to_equal(true)  # ERR-01: absence stays nil
+
+        step("sandbox violation is refused before anything runs")
+        val bad = root + "/bad_closure.spl"
+        val _ = write_file(bad, "use std.io_runtime.{write_file}\nfn rewrite(node: NodeView, ctx: RewriteCtx) -> [Edit]:\n    []\n")
+        val (out4, err4, rc4) = run_cli(["code", "refactor", "--closure", bad, "--scope", root + "/*.spl"])
+        expect(rc4).to_equal(3)
+        expect(err4.contains("closure rejected")).to_equal(true)
+        val _ = file_delete(bad)
+        val _ = file_delete(file)
