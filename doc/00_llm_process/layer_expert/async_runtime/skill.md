@@ -98,3 +98,14 @@ is the hosted composition over `async_ring` (`fs`, `sync`, `time`);
 and must not import the hosted capsule. Enforced by
 `scripts/check/check-sosix-capsule-boundaries.shs`. Feature wiki:
 `doc/00_llm_process/feature_expert/sosix_runtime_unification/skill.md`.
+
+## Lockless by default (added 2026-11-04)
+
+Concurrency is lockless by default. Use immutable or content-addressed values,
+actors/rings with ownership transfer, CAS on small cells (with a version or tag
+against ABA, bounded retry, and a typed failure result per ADR-006), or
+per-owner state merged at read time. Files and IPC publish by private write
+plus atomic rename. A lock needs a documented exception and an owner, must be
+bounded and fail closed, and is never held across await or I/O. Architecture:
+`doc/04_architecture/language/concurrency/concurrency_architecture.md`; MDSOC+:
+`doc/04_architecture/compiler/mdsoc/mdsoc_architecture_tobe.md#concurrency-lockless-by-default`.
