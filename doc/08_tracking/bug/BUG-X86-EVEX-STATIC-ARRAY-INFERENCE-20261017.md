@@ -40,3 +40,10 @@ fourteen signed-i32 parser cases. Executable pre/post SHA256:
 724f23e723bbc4ab8f9f77d57284f6d10f156c225f120d14a95ea884a81024bf.
 Production workaround commit: 1c972e8e689. Broad compiler/lib/MCP qualification
 and the dedicated BDD runner remain unrun. The inference owner is still open.
+
+## Triage 2026-11-04 (opus-n88b)
+
+Workaround: typed [i64] literal over val constants kept at evex_encoding.spl:82.
+Fixture: test/04_smoke/static_val_array_infer_native.spl (interpreter lane passes).
+Stage3 repro: `bin/simple native-build --entry test/04_smoke/static_val_array_infer_native.spl --output build/static_arr && build/static_arr` -> 4 / STATIC_ARRAY_OK.
+Status: fix-implemented-verification-pending.
