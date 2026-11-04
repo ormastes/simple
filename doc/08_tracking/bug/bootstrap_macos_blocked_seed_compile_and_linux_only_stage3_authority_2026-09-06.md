@@ -762,3 +762,59 @@ the path). Implemented in `scripts/check/lib/bootstrap-stage3/manifest-verify.sh
    self-test stops at `bootstrap_stage3_seed_inputs_fingerprint` (empty ABI
    policy), and `check-bootstrap-portability.shs` fails its process-lock fixture;
    both fail identically without this change.
+
+## 2026-11-04 (inheritfd): inherited-descriptor protocol on the VERIFIER side
+
+Status: **fix-implemented for the verifier; producer side still OPEN** (Stage 3
+on macOS/BSD remains blocked — see "Still open" below).
+
+Implemented in `scripts/check/lib/bootstrap-stage3/authority.shs`:
+
+- New descriptor spelling `fd:N` = "descriptor N inherited into the validating
+  process". `bootstrap_stage3_inherited_fd_verify` checks `dev ino mode` by
+  `fstat(2)` on the inherited fd and hashes by `pread(2)` from offset 0 (immune
+  to the offset shared with the parent); a size/mtime/ctime change during the
+  hash is a mismatch; directories are identity-only. No procfs, no `/dev/fd`.
+- `bootstrap_stage3_validate_descriptor_map` accepts the map itself as `fd:N`
+  and per-role `fd:N` entries. The `/proc/<owner>/fd/N` path is byte-for-byte
+  unchanged, so Linux keeps its strength; `fd:N` on Linux uses the same
+  fstat/pread proof held by the verifier itself (equal or stronger).
+- Owner liveness: `bootstrap_stage3_owner_matches PID STAMP`. Linux = the same
+  `/proc/<pid>/stat` field-20 comparison. Darwin/BSD = `kill -0` plus the
+  launch stamp from `ps -o lstart=` (epoch seconds). Residual window: pid
+  reuse inside the owner's own start second (1 s resolution); content is still
+  pinned by the inherited fd. Unknown OS → exit 2, never a pass.
+- Fixtures: `sh scripts/check/check-bootstrap-fd-identity.shs --selftest` →
+  `PASS — 33 fixture(s) checked on Darwin arm` (inherited child match;
+  shared-offset; wrong sha/ino FAIL; rename-over FAIL via path check while the
+  fd still pins the inode; same-size modify-after-open FAIL; dir identity;
+  not-inherited ERROR; unknown OS ERROR; owner live/dead/reused; end-to-end
+  map validation in a child with map + inputs on inherited fds, plus reused
+  owner / bad payload digest / bad external sha FAIL).
+  `check-bootstrap-positioned-authority.py`: 36 tests OK before and after.
+
+**Still open (why Stage 3 is not yet runnable on macOS):**
+1. Producer: `bootstrap-stage3-shared-runner.pl` still writes
+   `/proc/<pid>/fd/N` descriptors (:1158, :1175) and `proc_start_ticks`
+   (:1402). It must write `fd:N`, clear FD_CLOEXEC on those handles before
+   exec (perl sets CLOEXEC above `$^F`), and record
+   `bootstrap_stage3_process_start_stamp` as the owner stamp. Note
+   `$F_DUPFD_CLOEXEC = 1030` (:16) is the Linux value (Darwin: 67).
+2. The runner also depends on Linux-only primitives with no Darwin equivalent:
+   exec through `/proc/self/fd/N` (no `fexecve`), O_TMPFILE +
+   `linkat` via `/proc/self/fd` (`link_anonymous_final` :447), and opening
+   leaves through a directory descriptor path (`/proc/self/fd/N/leaf`).
+3. Capsule mode stays refused without procfs
+   (`portable-descriptor-capsule-not-supported`, manifest-write/verify) because
+   ~15 capsule sites (sanity.shs:27, manifest-write :44/:57/:142/:339,
+   manifest-verify :1852-1934, authority capsule sites) address
+   `/proc/<pid>/fd/<dir>/<leaf>`; lifting the refusal before the producer
+   writes `fd:N` would be a capability-free pass, so it remains fail-closed.
+4. Pre-existing, not touched: `check-bootstrap-portability.shs` process-lock
+   fixture ("TERM successor acquired while worker survived") and the
+   provenance self-test empty seed ABI policy — neither blocks the fixtures here.
+
+Stage-3 command once an admitted Stage 2 exists (it will still stop at the
+producer gap above until item 1 lands):
+`sh scripts/bootstrap/resume-stage3-from-admitted.sh <admitted-stage2-output-dir>`
+(e.g. `/private/tmp/boot2-out/s2`).

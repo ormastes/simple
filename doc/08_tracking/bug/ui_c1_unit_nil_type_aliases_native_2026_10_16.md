@@ -26,3 +26,14 @@ producer and actual regression evidence first.
 Evidence: `phase4-ui-0cd6-c1f6-cycle2/terminal-failure-analysis` under the shared
 bootstrap evidence root. The UI lane has used two of three verification
 attempts. No third attempt has been launched for this repair.
+
+## Verification pending (n88_b, 2026-11-04)
+
+Source repair/workaround is pinned by `bin/simple.exe test test/01_unit/compiler/80.driver/n88b_native_workaround_shapes_spec.spl` (8/8 pass on the seed).
+Native repro fixture: `test/fixtures/compiler/n88b_native_producer_idioms_native.spl` (+ `.expected`); covers the UNIT_OK line (Result<unit,_> with Ok(())).
+
+Stage3 repro (expected: no diff output, exit 0; then remove the matching `@workaround` tags):
+
+```
+bin/simple native-build --entry test/fixtures/compiler/n88b_native_producer_idioms_native.spl -o build/n88b_idioms.exe && build/n88b_idioms.exe | diff - test/fixtures/compiler/n88b_native_producer_idioms_native.spl.expected
+```

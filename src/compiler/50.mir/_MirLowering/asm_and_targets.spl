@@ -23,6 +23,7 @@ use compiler.mir.mir_cfg_select.{mir_cfg_select_arm, mir_cfg_item_enabled}
 use compiler.core.cfg_platform.{cfg_enabled_features}
 use compiler.mir.mir_target_hir_select.{mir_target_hir_mode_from_env, mir_target_hir_live_select}
 use compiler.mir.mir_target_hir_decl_cfg.{mir_target_hir_live_decl_cfg}
+use compiler.mir.mir_target_hir_asm_guard.{mir_target_hir_live_asm_match_kind, mir_target_hir_live_asm_missing_archs}
 use compiler.mir.mir_verify_levels.{mir_verify_levels_from_env}
 use compiler.mir.mir_instructions.{MirModule, MirFunction, mir_operand_const_int}
 use compiler.hir.hir_types.*
@@ -421,6 +422,12 @@ impl MirLowering:
         val target_abi = self.get_target_abi()
         val target_backend = self.get_target_backend()
         val target_backend_version = self.get_target_backend_version()
+        # P4: SIMPLE_TARGET_HIR_MODE=shadow|typed routes asm guards through the
+        # TargetHIR reader (off by default). A shadow divergence is fatal.
+        val th_mode = mir_target_hir_mode_from_env()
+        if th_mode.is_err():
+            self.error_fatal(th_mode.unwrap_err(), nil)
+            return nil
 
         # Collect arm specs for exhaustiveness checking
         var arms_archs: [[text]] = []
@@ -458,6 +465,12 @@ impl MirLowering:
                         break
                 if not found:
                     missing.push(arch)
+            if th_mode.unwrap() != "legacy":
+                val checked_missing = mir_target_hir_live_asm_missing_archs(th_mode.unwrap(), arms_archs, has_wildcard, missing)
+                if checked_missing.is_err():
+                    self.error_fatal(checked_missing.unwrap_err(), nil)
+                    return nil
+                missing = checked_missing.unwrap()
             if missing.len() > 0:
                 val missing_str = missing.join(", ")
                 self.error("asm match is non-exhaustive, missing: {missing_str}. Add 'case _: compile_error(\"...\")' for exhaustive matching", nil)
@@ -481,13 +494,22 @@ impl MirLowering:
                     ver_ops.push(self.asm_version_constraint_op(vc))
                     ver_vals.push(self.asm_version_constraint_value(vc))
 
-                val result = self.asm_target_spec_match_kind(
+                var result = self.asm_target_spec_match_kind(
                     self.asm_target_spec_archs(spec), self.asm_target_spec_has_os(spec), self.asm_target_spec_os(spec),
                     self.asm_target_spec_has_abi(spec), self.asm_target_spec_abi(spec), self.asm_target_spec_has_backend(spec), self.asm_target_spec_backend(spec),
                     ver_ops, ver_vals,
                     target_arch, target_os, target_abi, target_backend,
                     target_backend_version
                 )
+                if th_mode.unwrap() != "legacy":
+                    val checked = mir_target_hir_live_asm_match_kind(th_mode.unwrap(), self.current_module_id, self.target_context,
+                        self.asm_target_spec_archs(spec), self.asm_target_spec_has_os(spec), self.asm_target_spec_os(spec),
+                        self.asm_target_spec_has_abi(spec), self.asm_target_spec_abi(spec), self.asm_target_spec_has_backend(spec), self.asm_target_spec_backend(spec),
+                        ver_ops, ver_vals, result)
+                    if checked.is_err():
+                        self.error_fatal(checked.unwrap_err(), Some(arm.span))
+                        return nil
+                    result = checked.unwrap()
 
                 if result == "unknown_version":
                     self.error_fatal("cannot evaluate asm target backend version: {target_backend} version is unavailable", Some(arm.span))
@@ -524,13 +546,26 @@ impl MirLowering:
             ver_ops.push(self.asm_version_constraint_op(vc))
             ver_vals.push(self.asm_version_constraint_value(vc))
 
-        val result = self.asm_target_spec_match_kind(
+        var result = self.asm_target_spec_match_kind(
             self.asm_target_spec_archs(spec), self.asm_target_spec_has_os(spec), self.asm_target_spec_os(spec),
             self.asm_target_spec_has_abi(spec), self.asm_target_spec_abi(spec), self.asm_target_spec_has_backend(spec), self.asm_target_spec_backend(spec),
             ver_ops, ver_vals,
             target_arch, target_os, target_abi, target_backend,
             target_backend_version
         )
+        val th_mode = mir_target_hir_mode_from_env()
+        if th_mode.is_err():
+            self.error_fatal(th_mode.unwrap_err(), span)
+            return
+        if th_mode.unwrap() != "legacy":
+            val checked = mir_target_hir_live_asm_match_kind(th_mode.unwrap(), self.current_module_id, self.target_context,
+                self.asm_target_spec_archs(spec), self.asm_target_spec_has_os(spec), self.asm_target_spec_os(spec),
+                self.asm_target_spec_has_abi(spec), self.asm_target_spec_abi(spec), self.asm_target_spec_has_backend(spec), self.asm_target_spec_backend(spec),
+                ver_ops, ver_vals, result)
+            if checked.is_err():
+                self.error_fatal(checked.unwrap_err(), span)
+                return
+            result = checked.unwrap()
 
         if result == "unknown_version":
             self.error_fatal("cannot evaluate asm target backend version: {target_backend} version is unavailable", span)

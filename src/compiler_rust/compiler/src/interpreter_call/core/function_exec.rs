@@ -1609,6 +1609,9 @@ fn write_back_mutable_arguments(
     // diagnostic and exit code 0. Track the mutated names and never let a
     // non-`mut` parameter clobber one.
     let mut mut_written: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Same rule for `obj.field` arguments: `f(h.items, h.items)` against
+    // `fn f(mut a, b)` must not let `b`'s stale snapshot revert `a`'s write.
+    let mut mut_field_written: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
     for arg in args {
         // A spread can bind multiple parameters, so later positional arguments
         // cannot be reconstructed safely without binder provenance. Named
@@ -1694,7 +1697,10 @@ fn write_back_mutable_arguments(
                     .unwrap_or(false);
                 // Aliased argument: a non-`mut` parameter must never overwrite a
                 // caller binding that a `mut` parameter has already updated.
-                if !param_is_mut && mut_written.contains(&caller_name) {
+                if !param_is_mut
+                    && (mut_written.contains(&caller_name)
+                        || mut_field_written.iter().any(|(o, _)| *o == caller_name))
+                {
                     continue;
                 }
                 if std::env::var("SIMPLE_DEBUG_WBMA").is_ok() {
@@ -1757,6 +1763,17 @@ fn write_back_mutable_arguments(
                 // Write back mutated field value into the caller's object.
                 // e.g., `write_first(self.values, next)` — after the call,
                 // write the callee's `values` param back into `self.values`.
+                let field_param_is_mut = params_to_bind
+                    .iter()
+                    .find(|p| p.name == param_name)
+                    .map(|p| p.mutability.is_mutable())
+                    .unwrap_or(false);
+                if !field_param_is_mut
+                    && (mut_field_written.contains(&(obj_name.clone(), field_name.clone()))
+                        || mut_written.contains(&obj_name))
+                {
+                    continue;
+                }
                 if let Some(callee_val) = local_env.get(&param_name).cloned() {
                     // Value-type structs (task #91) keep VALUE semantics: a
                     // struct passed as `obj.field` is not mutated back either.
@@ -1784,6 +1801,9 @@ fn write_back_mutable_arguments(
                                                 1,
                                             );
                                         }
+                                    }
+                                    if field_param_is_mut {
+                                        mut_field_written.insert((obj_name.clone(), field_name.clone()));
                                     }
                                     Arc::make_mut(&mut fields).insert(field_name, callee_val);
                                     outer_env.insert(obj_name, Value::Object { class, fields });

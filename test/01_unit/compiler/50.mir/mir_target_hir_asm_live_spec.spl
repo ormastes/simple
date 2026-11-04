@@ -1,0 +1,41 @@
+use std.spec.*
+use compiler.common.mir_target_context.{mir_target_context_from_explicit}
+use compiler.mir.mir_target_hir_asm_guard.{mir_target_hir_live_asm_match_kind, mir_target_hir_live_asm_missing_archs}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+# Legacy oracle values are the MirLowering.asm_target_spec_match_kind results
+# for the same spec/target (pinned literally, not recomputed by the reader).
+fn kind(mode: text, triple: text, archs: [text], legacy: text) -> Result<text, text>:
+    val ctx = mir_target_context_from_explicit(triple, "llvm", 23).unwrap()
+    val no_ops: [text] = []
+    val no_vals: [i64] = []
+    mir_target_hir_live_asm_match_kind(mode, "app.main", ctx, archs, false, "", false, "", false, "", no_ops, no_vals, legacy)
+
+describe "live asm guard TargetHIR wiring (P4, SIMPLE_TARGET_HIR_MODE)":
+    it "legacy, shadow and typed agree with the legacy match kind":
+        for mode in ["legacy", "shadow", "typed"]:
+            expect(kind(mode, "x86_64-unknown-linux-gnu", ["x64"], "matched").unwrap()).to_equal("matched")
+            expect(kind(mode, "aarch64-unknown-linux-gnu", ["arm64"], "matched").unwrap()).to_equal("matched")
+            expect(kind(mode, "x86_64-unknown-linux-gnu", ["riscv64"], "not_matched").unwrap()).to_equal("not_matched")
+
+    it "version constraints agree (llvm 23)":
+        val ctx = mir_target_context_from_explicit("x86_64-unknown-linux-gnu", "llvm", 23).unwrap()
+        val r = mir_target_hir_live_asm_match_kind("shadow", "app.main", ctx, ["x86_64"], false, "", false, "", true, "llvm", [">="], [24], "not_matched")
+        expect(r.unwrap()).to_equal("not_matched")
+
+    it "shadow detects an injected legacy divergence; legacy mode does not check":
+        expect(kind("shadow", "x86_64-unknown-linux-gnu", ["x86_64"], "not_matched").unwrap_err()).to_equal("target_hir_shadow_mismatch: asm legacy=not_matched typed=matched")
+        expect(kind("typed", "x86_64-unknown-linux-gnu", ["x86_64"], "not_matched").is_err()).to_be(true)
+        expect(kind("legacy", "x86_64-unknown-linux-gnu", ["x86_64"], "not_matched").unwrap()).to_equal("not_matched")
+
+    it "exhaustiveness missing-arch list is shadow-checked":
+        val arms: [[text]] = [["x64", "arm64"]]
+        val legacy = ["x86", "arm", "riscv32", "riscv64", "wasm32", "wasm64", "avr", "mcs51", "msp430"]
+        expect(mir_target_hir_live_asm_missing_archs("shadow", arms, false, legacy).unwrap().len()).to_equal(9)
+        expect(mir_target_hir_live_asm_missing_archs("typed", arms, true, []).unwrap().len()).to_equal(0)
+        expect(mir_target_hir_live_asm_missing_archs("shadow", arms, false, ["x86"]).unwrap_err()).to_start_with("target_hir_shadow_mismatch: asm missing")
+
+    it "source-shape pin: inline asm match and asm assert route through the flag-gated reader":
+        val src = file_read("src/compiler/50.mir/_MirLowering/asm_and_targets.spl")
+        expect(src.contains("mir_target_hir_live_asm_match_kind(th_mode.unwrap()")).to_be(true)
+        expect(src.contains("mir_target_hir_live_asm_missing_archs(th_mode.unwrap()")).to_be(true)

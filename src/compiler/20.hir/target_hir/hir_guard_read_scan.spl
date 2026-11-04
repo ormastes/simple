@@ -1,0 +1,111 @@
+# TargetHIR cache feed: record the static-guard (`@when` / `@cfg` /
+# cfg-select `__cfg_when__("...")`) reads a module's source performs, as
+# HirGuardRead witnesses for hir_target_constraints_capture. The cache key is
+# computed BEFORE lowering (it is the lookup key), so reads are recovered from
+# the source text and evaluated with the same cfg_eval_key_value the frontend
+# uses. This only OBSERVES guards; it never changes how any guard evaluates.
+#
+# Atom mapping (matches parser_preprocessor._pp_eval_atom):
+#   os/platform/target_os=V, bare OS name   -> os=<normalized>
+#   arch/target_arch=V, bare arch name      -> arch=<normalized>
+#   feature=V                               -> feature=<lower>
+#   family/target_family/cpu=V, other keys  -> kept under their own key, which
+#                                              hir_target_constraints_capture
+#                                              files as deferred (named, never
+#                                              silently satisfied).
+
+use compiler.core.cfg_platform.{cfg_eval_key_value, cfg_normalize_os, cfg_normalize_arch}
+use compiler.hir.target_hir.hir_target_constraints.{HirGuardRead}
+
+val HIR_GUARD_OPENERS = ["@when(", "@cfg(", "__cfg_when__("]
+
+# Balanced-paren body of `seg` (the text right after an opener); "" when the
+# guard is not closed on its line.
+fn _guard_body(seg: text) -> text:
+    var depth = 1
+    var in_str = false
+    var out: [text] = []
+    for ch in seg.chars():
+        if ch == "\"":
+            in_str = not in_str
+        elif not in_str:
+            if ch == "(":
+                depth = depth + 1
+            elif ch == ")":
+                depth = depth - 1
+                if depth == 0:
+                    return out.join("")
+        out.push(ch)
+    ""
+
+# Guard condition bodies (guards are single-line in Simple source).
+fn hir_guard_conditions(src: text) -> [text]:
+    var out: [text] = []
+    for line in src.split("\n"):
+        for opener in HIR_GUARD_OPENERS:
+            if not line.contains(opener):
+                continue
+            val parts = line.split(opener)
+            var k = 1
+            while k < parts.len():
+                val body = _guard_body(parts[k])
+                if body != "":
+                    out.push(body)
+                k = k + 1
+    out
+
+fn _atom_key(raw: text) -> text:
+    if raw == "os": return "os"
+    if raw == "platform": return "os"
+    if raw == "target_os": return "os"
+    if raw == "arch": return "arch"
+    if raw == "target_arch": return "arch"
+    raw
+
+fn _is_skip_word(w: text) -> bool:
+    w == "" or w == "and" or w == "or" or w == "not" or w == "all" or w == "any" or w == "true" or w == "false" or w == "compiled" or w == "interpreter" or w == "debug" or w == "release"
+
+# One condition -> (key, value) atoms, de-sugared to the capture vocabulary.
+fn _condition_atoms(cond: text) -> [text]:
+    var c = cond.trim().replace("\\", "").replace("==", "=")
+    for d in ["(", ")", ",", "&&", "||", "!", "\t", "\""]:
+        c = c.replace(d, " ")
+    var prev = ""
+    while prev != c:
+        prev = c
+        c = c.replace(" =", "=").replace("= ", "=")
+    var atoms: [text] = []
+    for raw in c.split(" "):
+        val w = raw.trim().to_lower()
+        if _is_skip_word(w):
+            continue
+        val kv = w.split("=")
+        if kv.len() == 2 and kv[0] != "":
+            if kv[1] != "":
+                atoms.push(_atom_key(kv[0]) + "=" + kv[1])
+        elif cfg_normalize_os(w) != "":
+            atoms.push("os=" + w)
+        elif cfg_normalize_arch(w) != "":
+            atoms.push("arch=" + w)
+    atoms
+
+fn _canonical_value(key: text, value: text) -> text:
+    if key == "os":
+        val n = cfg_normalize_os(value)
+        if n != "": return n
+    if key == "arch":
+        val n = cfg_normalize_arch(value)
+        if n != "": return n
+    value
+
+# Every guard read in `src`, evaluated for the current target exactly as the
+# frontend evaluates it. Duplicates are collapsed by capture's canonical sort.
+fn hir_guard_reads_from_source(src: text) -> [HirGuardRead]:
+    var reads: [HirGuardRead] = []
+    for cond in hir_guard_conditions(src):
+        for atom in _condition_atoms(cond):
+            val kv = atom.split("=")
+            val key = kv[0]
+            val value = kv[1]
+            reads.push(HirGuardRead(key: key, value: _canonical_value(key, value), held: cfg_eval_key_value(key, value)))
+    reads
