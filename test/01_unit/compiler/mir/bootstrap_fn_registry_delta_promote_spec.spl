@@ -91,7 +91,15 @@ fn delta_unjournaled_writes() -> [text]:
                     delta_window_has(lines, line_index, 0, 2, "_bootstrap_fn_dirty_ret_hir_ambig =")
                 if not actual_key_owner and not delta_window_has(lines, line_index, 3, 3, "_bootstrap_fn_delta_text({key})"):
                     missing.push("key:{line_index + 1}:{trimmed}")
-                if value != "true" and value != "\"\"" and
+                # A struct-valued row (MirType/HirType) must journal the
+                # dictionary's OWN stored value, read back by key: on the
+                # native path the by-value `ty` parameter is a prologue copy,
+                # so journaling `(ty)` promotes the copy and the stored row
+                # dangles after scope end (stage2 E-MIR-TYPE-Transport
+                # caller_disc=-2, 2026-11-05).
+                val stored_journal = delta_window_has(lines, line_index, 0, 3, "_bootstrap_fn_delta_stored_mir_type({key})") or
+                    delta_window_has(lines, line_index, 0, 3, "_bootstrap_fn_delta_stored_hir_type({key})")
+                if value != "true" and value != "\"\"" and not stored_journal and
                         not delta_window_has(lines, line_index, 0, 3, "({value})"):
                     missing.push("value:{line_index + 1}:{trimmed}")
             elif trimmed.contains(" = ") and not trimmed.contains("("):
@@ -143,6 +151,27 @@ describe "bootstrap fn registry promotion is per-module delta":
         expect(missing.len()).to_equal(0)
         if missing.len() > 0:
             print missing.join("\n")
+
+    it "journals struct-valued rows from the dictionary, never from a by-value parameter":
+        # Native proof (admitted stage2 6bb69e92, 2026-11-05): journaling the
+        # `ty` parameter left 16/16 delta-scope rows dangling after scope end;
+        # journaling `registry[name]` left 0/16. The interpreter cannot observe
+        # the prologue copy, so this is a source-shape gate on the two pushes.
+        val lines = (rt_file_read_text("src/compiler/50.mir/mir_data.spl") ?? "").split("\n")
+        var pushes = 0
+        var wrong: [text] = []
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.starts_with("_bootstrap_fn_journal_mir_types = _bootstrap_fn_journal_mir_types.push("):
+                pushes = pushes + 1
+                if not trimmed.contains(".push(_bootstrap_fn_ret_types["):
+                    wrong.push(trimmed)
+            if trimmed.starts_with("_bootstrap_fn_journal_hir_types = _bootstrap_fn_journal_hir_types.push("):
+                pushes = pushes + 1
+                if not trimmed.contains(".push(_bootstrap_fn_ret_hir_types["):
+                    wrong.push(trimmed)
+        expect(pushes).to_equal(2)
+        expect(wrong).to_equal([])
 
     it "keeps ambiguity promotion independent of unrelated HIR metadata growth":
         expect(transient_scope_begin()).to_equal(true)
