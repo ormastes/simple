@@ -98,7 +98,8 @@ only the 3/4-host bound) or the ceiling formula should price test-phase jobs
 like compiler binaries (GB-scale), not compile shards. Same consistency
 requirement for `process-tree-rss-watchdog.pl` as in the original fix.
 
-**Status:** OPEN (recurrence; original floor fix remains valid for its case)
+**Status:** fix implemented 2026-11-05 (see the last section), pending
+verification by a real bootstrap.
 
 **Sixth data point (2026-10-31, campaign `efBuq7`):** with the elevated ceiling
 raised to 56 GiB (request 58720256, admitted at lane start with 83 GiB
@@ -149,3 +150,102 @@ killed at the same 48 GiB cap (campaign `r2e2kR`). Halving build threads does no
 rescue the phase — the dominant term is the two concurrent full-closure tool
 builds (measured 10.5-12.6 GiB each, see bootstrap-from-scratch.sh Stage-2 tests
 comment), not the compile shards. Next lever: `BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1`.
+
+**Fifth data point (2026-11-05, same 121 GiB aarch64 host, release/1.0.0 `0ff9a746185`, `--backend=cranelift`, default build-threads=8, test-workers=4):**
+Stage 2 rebuilt 1567 modules and was ADMITTED (candidate sha256
+`3d956afd7a9bea2b240d62cc580b31dbb2b339a04e9749bf2442ffee93ac2d43`); the matrix's
+first build row `compiler_cli_build` started `[shard] threads=3` HIR workers
+(admission estimate 9,000,000 kB each), all three finished `load_sources`
+(4437 files) and the tree was killed at the cap before HIR began:
+`status=rss-cap-exceeded exit_status=88 peak_rss_kib=50366440` (~15.6 GiB per
+worker after source load alone, vs the 9 GB estimate). Evidence (untracked):
+`build/bootstrap-opus-1/stage2-compiler-tests/aarch64-unknown-linux-gnu/rejection.env`,
+`.../verification/logs/compiler_cli_build.log`. Retry: one sanctioned
+`admit-built-stage2-compiler-tests.shs` re-run against the same admitted Stage 2
+with `BOOTSTRAP_VERIFY_BUILD_THREADS=1 BOOTSTRAP_VERIFY_TEST_WORKERS=1
+BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1` (the one thread count not yet tested
+here); result recorded below.
+
+**Sixth data point (2026-11-05, threads=1 retry of the fifth):** sanctioned
+`admit-built-stage2-compiler-tests.shs` against the same admitted Stage 2 with
+`BOOTSTRAP_VERIFY_BUILD_THREADS=1 BOOTSTRAP_VERIFY_TEST_WORKERS=1
+BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1`. The phase cap scaled DOWN with the
+thread count: `rss_limit_kib=5859375` (6.0e9 bytes; at 8 threads it was the
+50331648 KiB ceiling). The single in-process `compiler_cli_build` parsed 3002
+files (446 s), entered HIR and was killed at module 9/3005:
+`status=rss-cap-exceeded exit_status=88 peak_rss_kib=5860212`. So the phase is
+priced at ~6 GB per build thread while one full-CLI frontend needs ~15 GiB
+(fifth point); no thread count can pass on this host. Thread reduction is
+exhausted. The remaining levers are policy-owned: price the whole-build phase
+on measured full-closure demand, or the explicit paired cap/ceiling env, which
+under `.claude/rules/bootstrap.md` is a DIAGNOSTIC attempt and cannot admit.
+
+Correction (2026-11-05, while fixing): the 5859375 KiB in this data point is
+not "the phase cap scaling down with the thread count". The admit entrypoint
+(`admit-built-stage2-compiler-tests.shs`) never resolved a phase cap at all --
+only `bootstrap-from-scratch.sh` did -- so the campaign watchdog fell to its
+literal default `bc_campaign_rss_cap=${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-5859375}`
+(`bootstrap-verification-campaign.shs`). The per-row owner would have priced
+one thread at 8388608 KiB (`resolve(1)` budget); the campaign's 5.59 GiB was
+the operative kill line. Both entrypoints now run the same whole-build plan.
+
+## Status (2026-11-05): fix implemented -- worker-floor pricing, pending verification by a real bootstrap
+
+Root cause, both recurrences: the phase was priced by compile-shard numbers
+(96 MiB / 5120 MiB per job budget, 1 GiB per job hard ceiling, 48 GiB static
+ceiling), while its WORKERS are full-CLI closure builds measured at ~15.6 GiB
+each after `load_sources` alone (fifth data point). No thread count can pass a
+cap that is not priced per worker at that scale; the explicit paired env is a
+diagnostic attempt by rule and cannot admit.
+
+Fix (`scripts/bootstrap/lib/tree-rss-policy.shs`,
+`bootstrap_tree_rss_whole_build_plan` / `bootstrap_tree_rss_whole_build_export`):
+
+    budget  = min(host_total x tree_rss_host_pct / 100 (default 50%),
+                  3/4 x MemAvailable)
+    workers = min(requested build threads, (budget - base) / (floor x margin)),  >= 1
+    cap     = base + workers x floor x margin
+
+with one named constant per term: `BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB`
+= 16777216 (16 GiB; the measurements above are cited in its comment),
+`BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT` = 150 (runaway margin: a tree
+above `base + workers x 24 GiB` is still killed, exit 88),
+`BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB` = 4 GiB (coordinator 1.32 GiB measured,
+verifier shell, campaign watchdog, interpreter test workers). The worker count
+is REDUCED to what the budget holds (never a cap below the floor), published
+as `BOOTSTRAP_VERIFY_BUILD_THREADS` so the compiler's own pool admission
+(cap x 60% / 9 GB) cannot start more workers than the cap was priced for; a
+host that cannot hold one worker (budget < 29360128 KiB) is refused before the
+phase starts, naming the requirement; unknown host RAM is refused, not floored.
+When the cap exceeds the default hard ceiling the policy publishes it as the
+elevated ceiling pair, and both owners admit it through the EXISTING
+elevated-ceiling admission (3/4 of real total AND available memory, enforce
+mode, declared workers, no fixture hooks) -- recorded in the receipt as
+`cap_source=phase-policy cap_bound=worker-floor-elevated
+compiler_ceiling_admission=elevated`. Monitor mode (nothing enforced) clamps
+to the default ceiling and requests no elevation. An explicit
+`SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB` is kept untouched.
+
+On this host (MemTotal 127600812 KiB, 8 requested threads): budget 63800400
+KiB -> 2 workers, cap 54525952 KiB (26 GiB per worker), elevated ceiling
+54525952 KiB; admitted by the policy and by the real watchdog in enforce mode
+(selftest + `tree-rss-cap-policy-test.shs` 2c). Requires >= 72701270 KiB
+MemAvailable at each admission (campaign start and every native-build row); a
+busier host reduces to 1 worker (cap 29360128 KiB), and below that refuses.
+
+Wired: `bootstrap-from-scratch.sh` stage2-compiler-tests block and
+`admit-built-stage2-compiler-tests.shs` (which previously set no cap at all);
+`bootstrap-verification-campaign.shs` now forwards `--cap-source/--cap-bound`.
+The Stage 2 native-build phase keeps `bootstrap_tree_rss_phase_cap_kib`
+(it admitted on this host). Tests: policy `--selftest` 58 fixtures (14 new
+plan/export cases incl. the real host in enforce mode),
+`scripts/bootstrap/tests/tree-rss-cap-policy-test.shs` 17 cases (its 2a/2b/3
+expectations were stale since the 48 GiB widening and are updated; new 2c
+runs the plan's pair through the real watchdog).
+
+Verification still owed: a real `stage2-compiler-tests` pass on this host
+with the fixed scripts. Note the Stage 2 admission binds `scripts/bootstrap`
+and `scripts/check/lib` in its source snapshot
+(`command-snapshot.shs` `bootstrap_stage3_source_snapshot_once`), so the
+currently admitted Stage 2 (`3d956afd...`, old scripts) cannot be published
+against the fixed tree; Stage 2 is re-admitted on the fixed tree first.

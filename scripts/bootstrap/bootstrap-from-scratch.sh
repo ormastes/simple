@@ -5341,9 +5341,12 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     esac
     case "${stage2_tests_free_kib}" in ''|*[!0-9]*) stage2_tests_free_kib="" ;; esac
     # An explicit BOOTSTRAP_VERIFY_BUILD_THREADS is a deliberate override: it
-    # is honored as-is and deliberately bypasses the free-memory derivation
-    # and the 8-thread hard ceiling below -- the caller who sets this env var
-    # is asserting they already know the safe count for their host.
+    # bypasses the free-memory derivation and the 8-thread hard ceiling below
+    # -- the caller who sets this env var is asserting they already know the
+    # safe count for their host. Either way the count is an UPPER bound for
+    # the whole-build phase pricing in the subshell below, which reduces it to
+    # the workers the host budget holds at the per-worker floor (it never
+    # raises it, and never caps below the floor instead of reducing).
     stage2_tests_build_threads=${BOOTSTRAP_VERIFY_BUILD_THREADS:-}
     if [ -z "${stage2_tests_build_threads}" ]; then
       if [ -n "${stage2_tests_free_kib}" ]; then
@@ -5428,15 +5431,23 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       export BOOTSTRAP_VERIFY_TEST_WORKERS BOOTSTRAP_VERIFY_BUILD_THREADS \
         BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY BOOTSTRAP_STAGE2_TEST_DELEGATE
       export SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS
-      # This phase wraps whole tool builds; the compile-worker budget floors
-      # at 5.59 GiB and killed it (exit 88) on large hosts. An explicit cap
-      # still wins. See bootstrap_tree_rss_phase_cap_kib.
-      if [ -z "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-}" ]; then
-        bootstrap_tree_rss_resolve "${stage2_tests_build_threads}" "${repo_root}" || exit 125
-        SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$(bootstrap_tree_rss_phase_cap_kib "${repo_root}") || exit 125
-        export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
-        echo "stage2-compiler-tests tree RSS cap: ${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB} KiB (whole-build phase)"
-      fi
+      # This phase wraps whole full-CLI closure builds. The compile-worker
+      # budget floored it at 5.59 GiB, and the host-fraction phase cap clamped
+      # to the 48 GiB compile-worker ceiling (3 workers x 15.6 GiB, killed
+      # before HIR; exit 88 both ways, doc/08_tracking/bug/tree_rss_floor_
+      # kills_stage2_compiler_tests_on_large_hosts_2026-10-15.md, data points
+      # 5-6). Price it per worker at the measured floor instead, and run only
+      # as many workers as the host budget holds at that price: the derived
+      # build-thread count above is an upper bound here, the policy publishes
+      # the fitted count as BOOTSTRAP_VERIFY_BUILD_THREADS (plus the cap, and
+      # the elevated ceiling when the cap is above the default ceiling, which
+      # the campaign and row owners admit under real host headroom). An
+      # explicit cap is kept untouched. See bootstrap_tree_rss_whole_build_export.
+      bootstrap_tree_rss_whole_build_export "${stage2_tests_build_threads}" "${repo_root}" || {
+        echo "error: ${bootstrap_tree_rss_refusal}" >&2
+        exit 125
+      }
+      echo "stage2-compiler-tests tree RSS cap: ${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB} KiB, build-threads=${BOOTSTRAP_VERIFY_BUILD_THREADS} (${bootstrap_tree_rss_plan_summary})"
       sh "${repo_root}/scripts/bootstrap/bootstrap-phase-verification.shs" \
         --phase=stage2 \
         --backend="${backend}" \
