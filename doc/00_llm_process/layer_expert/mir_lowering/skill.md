@@ -639,3 +639,7 @@ Package: `src/compiler/20.hir/target_hir/` (kept in a subdirectory, not the 20.h
   verifies the digest and decodes a fresh copy each call. The canonical codec generator reports
   unavailable on release/1.0.0, so freezing falls back to the legacy codec and records `codec`.
   Spec: `test/01_unit/compiler/hir/hir_snapshot_freeze_spec.spl`.
+- **PR-C** `target_hir_resolution.spl`: `TargetHIRBuilder` (new -> resolve_required -> freeze) resolves
+  scalar layouts (size/align; i386-SysV 8-byte align 4, MSVC natural) and the calling ABI per explicit
+  target into an immutable `TargetHIRResolved`. Unknown types / out-of-region reads are named errors.
+  Spec: `test/01_unit/compiler/hir/target_hir_builder_layout_spec.spl` (two targets, one frozen snapshot).

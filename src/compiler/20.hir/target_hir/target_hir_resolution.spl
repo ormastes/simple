@@ -1,0 +1,117 @@
+# PR-C: TargetHIRBuilder resolves scalar type layout and the calling ABI for
+# one narrow region of a TargetHIR, then freezes it into an immutable
+# TargetHIRResolved. Unresolved reads are named errors, never a host default.
+# Pointer widths mirror 30.types arch_pointer_bytes for the explicit arch set
+# (20.hir must not import 30.types); keep the two tables in step.
+
+use compiler.common.mir_target_context.{MirTargetContext}
+use compiler.hir.target_hir.target_hir.{TargetHIR, target_hir_identity}
+
+struct ResolvedLayout:
+    type_name: text
+    size: i64
+    align: i64
+
+struct TargetHIRBuilder:
+    view: TargetHIR
+    required_types: [text]
+    resolved: [ResolvedLayout]
+    abi: text
+    resolved_ok: bool
+
+struct TargetHIRResolved:
+    view: TargetHIR
+    identity: text
+    layouts: [ResolvedLayout]
+    abi: text
+
+fn target_hir_builder_new(view: TargetHIR, required_types: [text]) -> TargetHIRBuilder:
+    TargetHIRBuilder(view: view, required_types: required_types, resolved: [], abi: "", resolved_ok: false)
+
+fn _target_pointer_bytes(t: MirTargetContext) -> i64:
+    if t.arch == "x86_64" or t.arch == "aarch64" or t.arch == "riscv64":
+        return 8
+    if t.arch == "x86" or t.arch == "arm" or t.arch == "riscv32":
+        return 4
+    -1
+
+fn _target_scalar_layout(t: MirTargetContext, name: text) -> Result<ResolvedLayout, text>:
+    val ptr = _target_pointer_bytes(t)
+    if ptr < 0:
+        return Err("target_hir_unsupported_arch: " + t.arch)
+    var size = -1
+    if name == "bool" or name == "i8" or name == "u8":
+        size = 1
+    elif name == "i16" or name == "u16":
+        size = 2
+    elif name == "i32" or name == "u32" or name == "f32" or name == "char":
+        size = 4
+    elif name == "i64" or name == "u64" or name == "f64":
+        size = 8
+    elif name == "isize" or name == "usize" or name == "ptr":
+        size = ptr
+    if size < 0:
+        return Err("target_hir_unresolved_type: " + name)
+    var align = size
+    # i386 System V aligns 8-byte scalars to 4; MSVC keeps natural alignment.
+    if size == 8 and t.arch == "x86" and t.os != "windows":
+        align = 4
+    Ok(ResolvedLayout(type_name: name, size: size, align: align))
+
+fn _target_abi(t: MirTargetContext) -> text:
+    if t.arch == "x86_64":
+        if t.os == "windows":
+            return "win64"
+        return "sysv64"
+    if t.arch == "x86":
+        if t.os == "windows":
+            return "win32-cdecl"
+        return "i386-sysv"
+    if t.arch == "aarch64":
+        if t.os == "macos":
+            return "aapcs64-darwin"
+        if t.os == "windows":
+            return "aapcs64-win"
+        return "aapcs64"
+    if t.arch == "arm":
+        if t.abi == "eabihf":
+            return "aapcs-vfp"
+        return "aapcs"
+    if t.arch == "riscv32":
+        if t.abi == "ilp32d":
+            return "ilp32d"
+        return "ilp32"
+    if t.arch == "riscv64":
+        if t.abi == "lp64d":
+            return "lp64d"
+        return "lp64"
+    ""
+
+fn target_hir_builder_resolve_required(builder: TargetHIRBuilder) -> Result<TargetHIRBuilder, text>:
+    val t = builder.view.target
+    val abi = _target_abi(t)
+    if abi == "":
+        return Err("target_hir_unsupported_arch: " + t.arch)
+    var out: [ResolvedLayout] = []
+    for name in builder.required_types:
+        val layout = _target_scalar_layout(t, name)
+        if layout.is_err():
+            return Err(layout.unwrap_err())
+        out.push(layout.unwrap())
+    Ok(TargetHIRBuilder(view: builder.view, required_types: builder.required_types,
+        resolved: out, abi: abi, resolved_ok: true))
+
+fn target_hir_builder_freeze(builder: TargetHIRBuilder) -> Result<TargetHIRResolved, text>:
+    if not builder.resolved_ok:
+        return Err("target_hir_not_resolved")
+    Ok(TargetHIRResolved(view: builder.view, identity: target_hir_identity(builder.view),
+        layouts: builder.resolved, abi: builder.abi))
+
+fn target_hir_layout(resolved: TargetHIRResolved, type_name: text) -> Result<ResolvedLayout, text>:
+    for layout in resolved.layouts:
+        if layout.type_name == type_name:
+            return Ok(layout)
+    Err("target_hir_layout_not_in_region: " + type_name)
+
+fn target_hir_abi(resolved: TargetHIRResolved) -> text:
+    resolved.abi
