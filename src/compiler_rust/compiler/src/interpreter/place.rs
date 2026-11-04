@@ -466,22 +466,40 @@ fn step_ref<'a>(slot: &'a Value, projection: &Projection) -> Option<&'a Value> {
 /// Deliberately read-only: it must not promote the root out of the shared
 /// environment base just to answer a question.
 pub(crate) fn place_is_live(env: &Env, place: &Place) -> bool {
-    let Some(mut slot) = env.get(&place.root) else {
+    let Some(slot) = env.get(&place.root) else {
         return false;
     };
     // The final projection is an insert target, so it need not exist yet; every
     // intermediate hop must.
-    let Some((_, parents)) = place.projections.split_last() else {
+    if place.projections.is_empty() {
+        return true;
+    }
+    projections_live(slot, &place.projections)
+}
+
+/// Walk `projections` from `slot`. A `Value::ClassInstance` hop keeps its
+/// fields behind a lock, so no reference can be borrowed through it; the field
+/// is read (an Arc-handle clone) and the walk continues on the owned value.
+/// Without this, `self.store.items.push(x)` (a class field holding a class)
+/// was never a live place and the mutation hit a throwaway copy.
+fn projections_live(slot: &Value, projections: &[Projection]) -> bool {
+    let Some((head, rest)) = projections.split_first() else {
         return true;
     };
-    for projection in parents {
-        match step_ref(slot, projection) {
-            Some(next) => slot = next,
-            None => return false,
-        }
+    if rest.is_empty() {
+        // The leaf must exist for a receiver read to make sense.
+        return step_exists(slot, head);
     }
-    // The leaf must exist for a receiver read to make sense.
-    step_exists(slot, place.projections.last().expect("checked non-empty"))
+    if let (Value::ClassInstance(instance), Projection::Field(name)) = (slot, head) {
+        return match instance.field(name) {
+            Some(next) => projections_live(&next, rest),
+            None => false,
+        };
+    }
+    match step_ref(slot, head) {
+        Some(next) => projections_live(next, rest),
+        None => false,
+    }
 }
 
 /// Whether `projection` names an existing slot of `slot` -- `step_ref(..).is_some()`
