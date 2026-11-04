@@ -67,7 +67,7 @@ Landed narrow repairs: firmwareImage/ESP PR6384, ARM64NIC TX-ring PR6393, and ra
 | P3 | open | macOS: platform/shared context; native acceptance not inferred | `macos_test_runner_blocked_inline_unsafe_and_wrong_deploy_slot_2026-08-31` |
 | P3 | closed | macOS: platform/shared context; native acceptance not inferred | `macos_vulkan_host_wm_live_evidence_cpu_mirror_and_input_gap_2026-07-26` |
 | P3 | open | macOS: platform/shared context; native acceptance not inferred | `main_test_runnable_unsatisfiable_on_macos_2026-09-03` |
-| P3 | open | macOS: capability request: Linux Metal emulation | `metal_backend_no_linux_emulation_lane_2026-08-19` |
+| P3 | blocker-documented | macOS: capability request: Linux Metal emulation (host-neutral lane documented; GPU lane needs owner decision) | `metal_backend_no_linux_emulation_lane_2026-08-19` |
 | P3 | fixing | macOS, ARM64: platform/shared context; native acceptance not inferred | `phase2_native_build_hello_world_invalid_heap_and_scorer_segv_2026-09-05` |
 | P3 | fixing | ARM64: platform/shared context; native acceptance not inferred | `phase2_stage2_native_build_len_on_i64_aarch64_linux_2026-09-13` |
 | P3 | closed | ARM64: shared dependency; not platform-exclusive | `rv64_host_gpu_real_runtime_exit_facade_2026-07-12` |
