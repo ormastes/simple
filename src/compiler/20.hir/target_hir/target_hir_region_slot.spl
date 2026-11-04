@@ -1,0 +1,139 @@
+# P5 of doc/03_plan/compiler/hir/immutable_hir_targethir_mir_refactor_plan_2026-11-03.md:
+# single-producer region slots for TargetHIR. A slot is keyed by
+# region_slot_key(snapshot_id, target_id, region). The first claim of an Empty
+# (or Failed/cancelled) slot becomes the one producer; every other claim of the
+# same key becomes an awaiter of that producer's generation. publish/cancel are
+# accepted only from the current owner at the current generation, so a stale
+# producer can never double-publish or overwrite a newer generation.
+# Ready results are immutable text; readers get the published value as-is.
+#
+# The table also pins ONE decoded HirModule per snapshot id: hir_snapshot_read
+# re-decodes on every call, so region producers share the pinned decode instead.
+# A pin is refcounted and stays valid until its last holder unpins, even if the
+# snapshot's owner has dropped it (IHIR-06).
+#
+# Scope: this is the slot protocol and its invariants, exercised by
+# deterministic interleavings. Real multi-thread execution needs the Stage 3
+# compiler and is not claimed here.
+
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.target_hir.hir_freeze.{HirSnapshot, hir_snapshot_read}
+use compiler.hir.target_hir.hir_snapshot.{hir_snapshot_id_text}
+
+enum RegionSlotState:
+    Empty
+    Building(owner: text)
+    Ready(value: text)
+    Failed(reason: text)
+
+enum RegionClaim:
+    Producer(generation: i64)
+    Awaiter(generation: i64)
+    Done(value: text)
+
+fn region_slot_key(snapshot_id: text, target_id: text, region: text) -> text:
+    "thir-slot:" + snapshot_id + "|" + target_id + "|" + region
+
+class RegionSlotTable:
+    states: Dict<text, RegionSlotState>
+    generations: Dict<text, i64>
+    pinned: Dict<text, HirModule>
+    pin_counts: Dict<text, i64>
+    decode_count: i64
+
+    static fn new() -> RegionSlotTable:
+        RegionSlotTable(states: {}, generations: {}, pinned: {}, pin_counts: {}, decode_count: 0)
+
+    fn state(key: text) -> RegionSlotState:
+        if self.states.contains_key(key):
+            return self.states[key]
+        RegionSlotState.Empty
+
+    fn generation(key: text) -> i64:
+        if self.generations.contains_key(key):
+            return self.generations[key]
+        0
+
+    # First claimer of Empty/Failed becomes producer of a new generation.
+    me claim(key: text, owner: text) -> RegionClaim:
+        val st = self.state(key)
+        match st:
+            case RegionSlotState.Building(_):
+                return RegionClaim.Awaiter(generation: self.generation(key))
+            case RegionSlotState.Ready(value):
+                return RegionClaim.Done(value: value)
+            case _:
+                val next = self.generation(key) + 1
+                self.generations[key] = next
+                self.states[key] = RegionSlotState.Building(owner: owner)
+                return RegionClaim.Producer(generation: next)
+
+    fn _owns(key: text, owner: text, generation: i64) -> bool:
+        if self.generation(key) != generation:
+            return false
+        match self.state(key):
+            case RegionSlotState.Building(o):
+                return o == owner
+            case _:
+                return false
+
+    me publish(key: text, owner: text, generation: i64, value: text) -> Result<text, text>:
+        if not self._owns(key, owner, generation):
+            return Err("region_slot_publish_rejected: " + key + " gen " + generation.to_string())
+        self.states[key] = RegionSlotState.Ready(value: value)
+        Ok(value)
+
+    # Cancel or fail the current build; the slot becomes claimable again with
+    # a fresh generation, and awaiters observe Failed instead of waiting forever.
+    me cancel(key: text, owner: text, generation: i64, reason: text) -> Result<bool, text>:
+        if not self._owns(key, owner, generation):
+            return Err("region_slot_cancel_rejected: " + key + " gen " + generation.to_string())
+        self.states[key] = RegionSlotState.Failed(reason: reason)
+        Ok(true)
+
+    # Poll for an awaiter registered at `generation`. Ok(value) when ready,
+    # Err("pending") while building at that generation, Err(reason) on
+    # failure or when the generation it waited on is gone.
+    fn await_slot(key: text, generation: i64) -> Result<text, text>:
+        match self.state(key):
+            case RegionSlotState.Ready(value):
+                return Ok(value)
+            case RegionSlotState.Failed(reason):
+                return Err("region_slot_failed: " + reason)
+            case RegionSlotState.Building(_):
+                if self.generation(key) == generation:
+                    return Err("pending")
+                return Err("region_slot_stale_generation: " + key)
+            case _:
+                return Err("region_slot_empty: " + key)
+
+    # Pin one decoded module per snapshot id; later pins reuse that decode.
+    me pin(snapshot: HirSnapshot) -> Result<HirModule, text>:
+        val sid = hir_snapshot_id_text(snapshot.id)
+        if self.pinned.contains_key(sid):
+            self.pin_counts[sid] = self.pin_counts[sid] + 1
+            return Ok(self.pinned[sid])
+        val decoded = hir_snapshot_read(snapshot)
+        if decoded.is_err():
+            return Err(decoded.unwrap_err())
+        self.decode_count = self.decode_count + 1
+        val module = decoded.unwrap()
+        self.pinned[sid] = module
+        self.pin_counts[sid] = 1
+        Ok(module)
+
+    me unpin(snapshot_id: text) -> i64:
+        if not self.pin_counts.contains_key(snapshot_id):
+            return 0
+        val left = self.pin_counts[snapshot_id] - 1
+        if left <= 0:
+            self.pin_counts.remove(snapshot_id)
+            self.pinned.remove(snapshot_id)
+            return 0
+        self.pin_counts[snapshot_id] = left
+        left
+
+    fn pin_count(snapshot_id: text) -> i64:
+        if self.pin_counts.contains_key(snapshot_id):
+            return self.pin_counts[snapshot_id]
+        0
