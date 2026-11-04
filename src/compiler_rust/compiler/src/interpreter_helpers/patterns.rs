@@ -383,6 +383,115 @@ fn eval_array_mutator_args(
     Ok((item, idx, second))
 }
 
+/// Evaluate (and validate) the operands of a `DICT_MUTATING_METHODS` call
+/// BEFORE the leaf is touched, so a rejected `merge` argument leaves the dict
+/// untouched exactly as the functional path did. Shared by the place-mutation
+/// kernel and the class-instance field fast path.
+#[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
+fn eval_dict_mutator_args(
+    method: &str,
+    args: &[simple_parser::ast::Argument],
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<(Option<Value>, Option<Value>, Option<Arc<HashMap<String, Value>>>), CompileError> {
+    let out = match method {
+        "set" | "insert" => (
+            Some(eval_arg(
+                args,
+                0,
+                Value::Nil,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?),
+            Some(eval_arg(
+                args,
+                1,
+                Value::Nil,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?),
+            None,
+        ),
+        "remove" | "delete" => (
+            Some(eval_arg(
+                args,
+                0,
+                Value::Nil,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?),
+            None,
+            None,
+        ),
+        "merge" | "extend" => {
+            let arg0 = eval_arg(
+                args,
+                0,
+                Value::Dict(Arc::new(HashMap::new())),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
+            match arg0 {
+                Value::Dict(map) => (None, None, Some(crate::interpreter::module_dict_flat(&map).unwrap_or(map))),
+                _ => {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::TYPE_MISMATCH)
+                        .with_help("merge expects a dict argument");
+                    return Err(CompileError::semantic_with_context("merge expects dict argument", ctx));
+                }
+            }
+        }
+        // "clear" takes no operands.
+        _ => (None, None, None),
+    };
+    Ok(out)
+}
+
+/// Apply a `DICT_MUTATING_METHODS` call to an owned map. Mirrors
+/// `interpreter_method/collections.rs::handle_dict_methods` arm for arm,
+/// including `wrap_dict_entry` on the stored value.
+fn apply_dict_mutation_in_place(
+    method: &str,
+    map: &mut HashMap<String, Value>,
+    key_val: Option<Value>,
+    value: Option<Value>,
+    other: Option<Arc<HashMap<String, Value>>>,
+) {
+    match method {
+        "set" | "insert" => {
+            let key_val = key_val.expect("set/insert evaluated its key above");
+            let stored = Value::wrap_dict_entry(&key_val, value.unwrap_or(Value::Nil));
+            map.insert(key_val.to_key_string(), stored);
+        }
+        "remove" | "delete" => {
+            map.remove(&key_val.expect("remove/delete evaluated its key above").to_key_string());
+        }
+        "merge" | "extend" => {
+            if let Some(other) = other {
+                map.extend(other.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+        }
+        "clear" => map.clear(),
+        _ => unreachable!("DICT_MUTATING_METHODS is exhaustive here"),
+    }
+}
+
 /// Ownership-gated in-place mutation for the `obj.field.push(x)` shape.
 ///
 /// The bare-identifier receiver (`arr.push(x)`) already gets in-place mutation via
@@ -417,19 +526,83 @@ pub(crate) fn try_field_array_mutation_in_place(
 ) -> Result<Option<Value>, CompileError> {
     // `write_span` takes four arguments and is handled by its own path; keep this
     // helper to the generic item/idx/second mutators.
-    if method == "write_span" || !ARRAY_MUTATING_METHODS.contains(&method) {
+    if method == "write_span" {
+        return Ok(None);
+    }
+    let is_array_method = ARRAY_MUTATING_METHODS.contains(&method);
+    let is_dict_method = DICT_MUTATING_METHODS.contains(&method);
+    if !is_array_method && !is_dict_method {
         return Ok(None);
     }
     // Only fire for a local object binding whose field is currently a plain array.
-    match env.get(obj_name) {
+    // A reference-semantics `class` binding (`Value::ClassInstance`) takes the
+    // same shape for an array OR a dict field: the field lives behind the
+    // instance's lock, so the mutation happens in place there and is visible
+    // through every handle (the generic path clones the handle and pays a full
+    // copy-on-write per call — O(n^2) accumulation into any class field).
+    let class_instance = match env.get(obj_name) {
         Some(Value::Object { fields, .. }) => match fields.get(field) {
-            Some(Value::Array(_)) => {}
+            Some(Value::Array(_)) if is_array_method => None,
             _ => return Ok(None),
         },
+        Some(Value::ClassInstance(instance)) => {
+            let shape_ok = instance.field_mut(field, |v| match v {
+                Value::Array(_) => is_array_method,
+                Value::Dict(_) => is_dict_method,
+                _ => false,
+            });
+            match shape_ok {
+                Some(true) => Some(Arc::clone(instance)),
+                _ => return Ok(None),
+            }
+        }
         _ => return Ok(None),
+    };
+
+    if let Some(instance) = &class_instance {
+        if is_dict_method && instance.field_mut(field, |v| matches!(v, Value::Dict(_))) == Some(true) {
+            // Operands are evaluated and validated before the lock is taken.
+            let (key_val, value, other) =
+                eval_dict_mutator_args(method, args, env, functions, classes, enums, impl_methods)?;
+            let mutated = instance.field_mut(field, |v| match v {
+                Value::Dict(entries) => {
+                    apply_dict_mutation_in_place(method, Arc::make_mut(entries), key_val, value, other);
+                    Some(Value::Dict(Arc::clone(entries)))
+                }
+                _ => None,
+            });
+            return Ok(mutated.flatten());
+        }
+        if !is_array_method {
+            return Ok(None);
+        }
     }
 
     let (item, idx, second) = eval_array_mutator_args(method, args, env, functions, classes, enums, impl_methods)?;
+
+    if let Some(instance) = class_instance {
+        // Re-read after argument evaluation (an argument may have replaced the
+        // field); the instance handle itself cannot be rebound out from under us.
+        let mutated = instance.field_mut(field, |v| match v {
+            Value::Array(arc) => {
+                crate::perf_counters::bump(&crate::perf_counters::SELF_FIELD_ARR_MUT_CALLS, 1);
+                if Arc::strong_count(arc) > 1 {
+                    crate::perf_counters::bump(&crate::perf_counters::SELF_FIELD_ARR_COW_CLONES, 1);
+                    crate::perf_counters::bump(&crate::perf_counters::SELF_FIELD_ARR_COW_ELEMS_CLONED, arc.len() as u64);
+                }
+                let vec = Arc::make_mut(arc);
+                Some(
+                    apply_array_mutation_in_place(method, vec, item, idx, second)
+                        .map(|popped| popped.unwrap_or_else(|| Value::Array(Arc::clone(arc)))),
+                )
+            }
+            _ => None,
+        });
+        return match mutated {
+            Some(Some(result)) => result.map(Some),
+            _ => Ok(None),
+        };
+    }
 
     // Re-read after argument evaluation: an argument may have rebound `obj_name`
     // or replaced the field, in which case the shape no longer applies.
@@ -693,90 +866,13 @@ pub(crate) fn try_place_mutation_in_place(
             // including `wrap_dict_entry` on the stored value and the fact that
             // `remove` yields the DICT (unlike `[T].remove`, which yields the
             // element).
-            let (key_val, value, other) = match method {
-                "set" | "insert" => (
-                    Some(eval_arg(
-                        args,
-                        0,
-                        Value::Nil,
-                        env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    )?),
-                    Some(eval_arg(
-                        args,
-                        1,
-                        Value::Nil,
-                        env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    )?),
-                    None,
-                ),
-                "remove" | "delete" => (
-                    Some(eval_arg(
-                        args,
-                        0,
-                        Value::Nil,
-                        env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    )?),
-                    None,
-                    None,
-                ),
-                "merge" | "extend" => {
-                    let arg0 = eval_arg(
-                        args,
-                        0,
-                        Value::Dict(Arc::new(HashMap::new())),
-                        env,
-                        functions,
-                        classes,
-                        enums,
-                        impl_methods,
-                    )?;
-                    match arg0 {
-                        Value::Dict(map) => (None, None, Some(crate::interpreter::module_dict_flat(&map).unwrap_or(map))),
-                        _ => {
-                            let ctx = ErrorContext::new()
-                                .with_code(codes::TYPE_MISMATCH)
-                                .with_help("merge expects a dict argument");
-                            return Err(CompileError::semantic_with_context("merge expects dict argument", ctx));
-                        }
-                    }
-                }
-                // "clear" takes no operands.
-                _ => (None, None, None),
-            };
+            let (key_val, value, other) =
+                eval_dict_mutator_args(method, args, env, functions, classes, enums, impl_methods)?;
             let Some(Value::Dict(entries)) = place::place_slot_mut(env, &target) else {
                 return Ok(None);
             };
             note_place_mutation(entries.len(), Arc::strong_count(entries));
-            let map = Arc::make_mut(entries);
-            match method {
-                "set" | "insert" => {
-                    let key_val = key_val.expect("set/insert evaluated its key above");
-                    let stored = Value::wrap_dict_entry(&key_val, value.unwrap_or(Value::Nil));
-                    map.insert(key_val.to_key_string(), stored);
-                }
-                "remove" | "delete" => {
-                    map.remove(&key_val.expect("remove/delete evaluated its key above").to_key_string());
-                }
-                "merge" | "extend" => {
-                    if let Some(other) = other {
-                        map.extend(other.iter().map(|(k, v)| (k.clone(), v.clone())));
-                    }
-                }
-                "clear" => map.clear(),
-                _ => unreachable!("DICT_MUTATING_METHODS is exhaustive here"),
-            }
+            apply_dict_mutation_in_place(method, Arc::make_mut(entries), key_val, value, other);
             Value::Dict(Arc::clone(entries))
         }
         PlaceMutation::Object(class, resolved) => {

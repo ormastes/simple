@@ -3802,6 +3802,36 @@ pub(crate) fn call_method_if_exists(
             }
         }
     }
+    // Reference-semantics `class` receiver: look the method up the same way
+    // and bind `self` to the instance itself (single-key `{"self": value}`
+    // convention honoured by `exec_function_with_values_and_self`).
+    if let Value::ClassInstance(instance) = receiver {
+        let class = instance.class();
+        let method = classes
+            .get(class)
+            .and_then(|class_def| class_def.methods.iter().find(|m| m.name == method_name).cloned())
+            .map(Arc::new)
+            .or_else(|| {
+                impl_methods
+                    .get(class)
+                    .and_then(|ms| ms.iter().find(|m| m.name == method_name).cloned())
+            });
+        if let Some(method) = method {
+            let mut self_fields = HashMap::new();
+            self_fields.insert("self".to_string(), receiver.clone());
+            let self_fields = Arc::new(self_fields);
+            return Ok(Some(crate::interpreter::interpreter_call::exec_function_with_values_and_self(
+                method.as_ref(),
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+                Some((class, &self_fields)),
+            )?));
+        }
+    }
     Ok(None)
 }
 

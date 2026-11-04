@@ -35,3 +35,17 @@ Aliasing needs a shared cell. `Arc::make_mut` on `Object.fields` clones on write
 4. Remove the path-based write-back special cases once the spec is green; drop `@tag:in-development`.
 
 Verification needs a rebuilt seed (not allowed from this lane) -> verification-pending.
+
+## Status 2026-11-04: default flipped (PR "fix(interp): class reference semantics by default")
+- Step 1 done by default: `class_instance_storage_enabled()` is ON unless `SIMPLE_INTERP_CLASS_REF=0`.
+- Step 2 partially: arms added where the 256-spec comparison (nogc_async_mut, immut, class_ref_*,
+  testing_framework, compiler/interpreter) regressed — method dispatch reuses the Object path
+  (arg write-back, trait/blanket impls, callable fields, `__call__`), Some-forwarding field reads,
+  structural `==`, `f(obj.field)` write-back, in-place `self.xs.push(..)`, and no receiver rebind
+  after a same-class-returning method. One tripwire site still fires with the spec green:
+  `patterns::place_method_mutation` (`xs[i].m()`), handled by its fallback path.
+- Step 3 unchanged (`Point` test still builds `Value::Object` directly; unaffected by the flip).
+- Step 4 (remove path-based write-back special cases) NOT done — follow-up.
+- `class_element_reference_spec` and both `class_ref_*_indev_spec` are green and no longer
+  `@tag:in-development`.
+

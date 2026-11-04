@@ -420,6 +420,16 @@ impl PartialEq for Value {
                 },
             ) => na == nb && da == db && ea == eb,
             (Value::Object { class: ca, fields: fa }, Value::Object { class: cb, fields: fb }) => ca == cb && fa == fb,
+            // Reference-semantics class values: same cell is trivially equal;
+            // otherwise structural (class + fields), as for `Value::Object`, so
+            // `==` is unchanged by the storage flip (only identity/aliasing
+            // differs — class_instance_reference_storage_2026-11-03.md).
+            (Value::ClassInstance(a), Value::ClassInstance(b)) => {
+                Arc::ptr_eq(a, b) || (a.class() == b.class() && a.fields_snapshot() == b.fields_snapshot())
+            }
+            (Value::ClassInstance(a), Value::Object { class, fields }) | (Value::Object { class, fields }, Value::ClassInstance(a)) => {
+                a.class() == class && a.fields_snapshot() == **fields
+            }
             (
                 Value::Enum {
                     enum_name: ea,

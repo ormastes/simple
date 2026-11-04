@@ -157,3 +157,11 @@ identically (`semantic: function 'get_test_count' not found` via
 across `it` examples, wildcard-import symbol resolution) and out of scope for
 a local .spl patch, exactly as already concluded. No change made.
 
+
+## 2026-11-04 note (fix-classref lane)
+
+The interpreter limitation this record is blocked on — a class instance held
+in a field / dict / array being value-copied — is removed by the default flip
+of `SIMPLE_INTERP_CLASS_REF` (seed `Value::ClassInstance` carrier). Whether a
+deferred-arming `prevent` can now be built in pure Simple is unverified in
+this lane (no spec exercised it); re-triage on the rebuilt seed.
