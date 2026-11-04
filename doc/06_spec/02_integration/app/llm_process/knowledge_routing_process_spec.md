@@ -1,29 +1,6 @@
 # Knowledge Routing Process Specification
 
-> <details>
-
-<!-- sdn-diagram:id=knowledge_routing_process_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=knowledge_routing_process_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-knowledge_routing_process_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=knowledge_routing_process_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering SPipe deterministic knowledge routing process.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -105,13 +82,18 @@ expect(selected.knowledge_paths.len()).to_equal(0)
 #### should route 2D and web rendering work to the GPU evidence knowledge
 
 - Read the rendering feature routes
+- Exercise exact feature and longest source-prefix selection
+   - Expected: engine2d.reason equals `ok`
+- Keep sibling names outside the renderer source-prefix boundary
+   - Expected: sibling.reason equals `ok`
+   - Expected: sibling.path_selections[0].matched_prefix equals `src/lib`
 - Verify the selected knowledge carries the residency and parity gates
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 68 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -129,6 +111,50 @@ expect(registry).to_contain(
     "prefix: src/lib/gc_async_mut/gpu/browser_engine")
 expect(registry).to_contain(
     "expert_path: doc/00_llm_process/feature_expert/gpu_offload_check/skill.md")
+
+step("Exercise exact feature and longest source-prefix selection")
+val rendering_features = [
+    KnowledgeFeatureRoute(feature_id: "simple_2d_web_renderer_gpu_optimization",
+        group_id: "rendering_ui", group_path: "rendering-group",
+        expert_path: "gpu-offload-expert"),
+    KnowledgeFeatureRoute(feature_id: "web_renderer_vulkan_4k_showcase_hardening",
+        group_id: "rendering_ui", group_path: "rendering-group",
+        expert_path: "gpu-offload-expert"),
+    KnowledgeFeatureRoute(feature_id: "chromium_web_renderer_primitive_differential",
+        group_id: "rendering_ui", group_path: "rendering-group",
+        expert_path: "gpu-offload-expert")]
+val rendering_layers = [
+    KnowledgeLayerRoute(prefix: "src/lib", group_id: "runtime_memory_io",
+        group_path: "lib-layer", expert_path: "",
+        architecture_profile: "mdsoc_plus"),
+    KnowledgeLayerRoute(prefix: "src/lib/gc_async_mut/gpu/engine2d",
+        group_id: "rendering_ui", group_path: "rendering-group",
+        expert_path: "gpu-offload-expert", architecture_profile: "mdsoc_plus"),
+    KnowledgeLayerRoute(prefix: "src/lib/gc_async_mut/gpu/browser_engine",
+        group_id: "rendering_ui", group_path: "rendering-group",
+        expert_path: "gpu-offload-expert", architecture_profile: "mdsoc_plus")]
+val engine2d = select_implementation_knowledge("1",
+    "simple_2d_web_renderer_gpu_optimization",
+    ["src/lib/gc_async_mut/gpu/engine2d/surface.spl"],
+    rendering_features, rendering_layers)
+val browser = select_implementation_knowledge("1",
+    "chromium_web_renderer_primitive_differential",
+    ["src/lib/gc_async_mut/gpu/browser_engine/session.spl"],
+    rendering_features, rendering_layers)
+expect(engine2d.reason).to_equal("ok")
+expect(engine2d.path_selections[0].matched_prefix).to_equal(
+    "src/lib/gc_async_mut/gpu/engine2d")
+expect(engine2d.knowledge_paths).to_contain("gpu-offload-expert")
+expect(browser.path_selections[0].matched_prefix).to_equal(
+    "src/lib/gc_async_mut/gpu/browser_engine")
+
+step("Keep sibling names outside the renderer source-prefix boundary")
+val sibling = select_implementation_knowledge("1",
+    "web_renderer_vulkan_4k_showcase_hardening",
+    ["src/lib/gc_async_mut/gpu/engine2d_extra/main.spl"],
+    rendering_features, rendering_layers)
+expect(sibling.reason).to_equal("ok")
+expect(sibling.path_selections[0].matched_prefix).to_equal("src/lib")
 
 step("Verify the selected knowledge carries the residency and parity gates")
 val group = file_read("doc/00_llm_process/feature_group/rendering_ui/skill.md")
@@ -150,12 +176,12 @@ expect(expert).to_contain("Missing canonical Chrome library or runner")
 | Category | Application |
 | Status | Active |
 | Source | `test/02_integration/app/llm_process/knowledge_routing_process_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-11-04 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering SPipe deterministic knowledge routing process.
 - SPipe deterministic knowledge routing process
 
 ## Scenario Summary
