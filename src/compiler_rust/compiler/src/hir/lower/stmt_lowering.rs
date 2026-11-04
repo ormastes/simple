@@ -3719,8 +3719,16 @@ impl Lowerer {
         let expected = &expected;
 
         if op == BinOp::Eq {
-            let left_hir = self.lower_expr(subject, ctx)?;
-            let right_hir = self.lower_expr(expected, ctx)?;
+            // `.?` in an assertion operand is the presence question (a bool),
+            // not the payload pass-through of value position — the
+            // interpreter's `eval_assertion_operand` rule. `lower_condition`
+            // emits exactly that predicate (`rt_is_present`).
+            let mut lower_operand = |this: &mut Self, e: &Expr| match e {
+                Expr::ExistsCheck(_) => this.lower_condition(e, ctx),
+                _ => this.lower_expr(e, ctx),
+            };
+            let left_hir = lower_operand(self, subject)?;
+            let right_hir = lower_operand(self, expected)?;
             return Ok(Some(vec![HirStmt::Expr(HirExpr {
                 kind: HirExprKind::BuiltinCall {
                     name: "rt_bdd_expect_eq_rv".to_string(),

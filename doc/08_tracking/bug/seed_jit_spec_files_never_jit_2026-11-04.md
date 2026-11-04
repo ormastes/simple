@@ -47,19 +47,41 @@
   scalar-boxing check. `fn mk(k) -> fn(i64) -> i64` now runs on the JIT
   (`r=105`).
 
+## Fixed 2026-11-04 (second pass): raw vs tagged matcher operands
+
+Root cause: `rt_bdd_expect_eq_rv`/`rt_bdd_expect_truthy_rv` take tagged
+RuntimeValues, but MIR passed typed scalar operands raw (`lower_builtin_call_expr`
+generic path). An `any`/optional actual was compared against a raw literal, and
+`rv_to_display` guessed tags (`Expected nil to equal 0`, `Expected 1 to equal 0`
+for `expect(1).to_equal(2)`). Second cause: `expect(p.?).to_equal(true)` lowered
+`.?` in value position (the payload), while the interpreter's
+`eval_assertion_operand` reads it as a presence bool.
+
+- `mir/lower/lowering_expr_builtin.rs`: box each matcher operand by static type
+  (`box_arg_for_any_param`).
+- `hir/lower/stmt_lowering.rs`: `.?` in a `to_equal` operand lowers through
+  `lower_condition` (`rt_is_present`).
+- Regression: `mir/lower/tests/bdd_matcher_boxing.rs` (2 cargo tests).
+
+Re-measured (`SIMPLE_JIT_SPEC_ENTRY=1 SIMPLE_JIT_STRICT=1`): allocator_pool 4/4,
+mimalloc_gc_async_mut_reuse 3/3, lambda_lift_if_enum_capture_scan 8 pass / 1 fail
+(same as interpreter), for_in_variant_lowering 8/8, failing fixture prints
+"Expected 1 to equal 2".
+
 ## Remaining gaps (not closed here)
 
 - Some specs still fail under strict mode with
-  `unresolved external symbol 'expect'` (cross-module Simple function).
+  `unresolved external symbol 'expect'` (and `'fail'` for
+  builtin_trait_where_bound_spec) (cross-module Simple function).
   Measured on the `skip_it` fixture. This is the per-module link gap, not the
   entry.
-- `rt_bdd_expect_eq_rv` failure messages render a raw expected value wrongly
-  (`expect(1).to_equal(2)` prints "Expected 1 to equal 0"). The verdict is
-  still correct.
 - std.spec's `skip(...)` prints "skipped" on the JIT, but `rt_bdd` does not count
   it, so `skipped=` reads 0 on the JIT and 1 on the interpreter.
-- `skip "name", "reason"` (paren-less, two args) does not parse:
-  `expected expression, found Comma`.
+- ~~`skip "name", "reason"` (paren-less, two args) does not parse~~ — decided
+  not a bug: the syntax reference (`syntax_quick_reference.md` § No-Paren
+  Method Calls, "split needs parens (has arg)") and `doc/07_guide/infra/testing.md`
+  only document the single-argument paren-less form (`skip "name":`).
+  Multi-argument calls take parentheses: `skip("name", "reason")`.
 
 ## Measured verdict parity (worktree seed, `SIMPLE_JIT_STRICT=1`, 2026-11-04)
 
