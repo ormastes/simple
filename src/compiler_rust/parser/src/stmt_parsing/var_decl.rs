@@ -427,7 +427,7 @@ impl Parser<'_> {
             } else {
                 false
             };
-            let mut expr = self.parse_expression()?;
+            let mut expr = self.parse_rhs_expression()?;
             // Support no-paren calls in assignment: val x = double 5
             expr = self.parse_with_no_paren_calls(expr)?;
             expr = force_transform_placeholder_lambda(expr);
