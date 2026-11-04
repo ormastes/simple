@@ -48,6 +48,8 @@ static MEM_SNAPSHOT_FILES: LazyLock<Mutex<(i64, HashMap<i64, std::fs::File>)>> =
 struct LockState {
     next_id: i64,
     active: HashMap<i64, std::path::PathBuf>,
+    /// Open lock files whose OS lock this process holds, keyed by lock path.
+    files: HashMap<std::path::PathBuf, std::fs::File>,
 }
 
 impl LockState {
@@ -55,6 +57,7 @@ impl LockState {
         LockState {
             next_id: 1,
             active: HashMap::new(),
+            files: HashMap::new(),
         }
     }
 }
@@ -2319,6 +2322,60 @@ pub fn rt_file_publish_noreplace(args: &[Value]) -> Result<Value, CompileError> 
 mod tests {
     use super::*;
 
+    fn lock_test_path(dir: &tempfile::TempDir) -> (String, std::path::PathBuf) {
+        let base = dir.path().join("res").to_string_lossy().to_string();
+        let lock = std::path::PathBuf::from(format!("{}.lock", base));
+        (base, lock)
+    }
+
+    fn lock_arg(base: &str, timeout: i64) -> [Value; 2] {
+        [Value::text(base.to_string()), Value::Int(timeout)]
+    }
+
+    /// A live holder must never be displaced, however old its lock file is.
+    #[test]
+    fn file_lock_does_not_steal_from_live_holder_even_when_old() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (base, lock) = lock_test_path(&dir);
+        let holder = OpenOptions::new().write(true).create(true).open(&lock).expect("holder open");
+        holder.lock().expect("holder lock");
+        holder
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+            .expect("age lock file");
+        // A positive-timeout waiter must time out, not steal.
+        assert_eq!(rt_file_lock(&lock_arg(&base, 1)).unwrap(), Value::Int(-1));
+        assert_eq!(rt_file_lock(&lock_arg(&base, 0)).unwrap(), Value::Int(-1));
+        drop(holder);
+        // Once the holder is gone, the lock is acquirable.
+        let h = rt_file_lock(&lock_arg(&base, 0)).unwrap();
+        assert!(matches!(h, Value::Int(n) if n > 0), "got {:?}", h);
+        assert_eq!(rt_file_unlock(&[h]).unwrap(), Value::Bool(true));
+    }
+
+    /// Timeout 0 = try exactly once, and must return promptly when held.
+    #[test]
+    fn file_lock_timeout_zero_tries_once() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (base, lock) = lock_test_path(&dir);
+        let holder = OpenOptions::new().write(true).create(true).open(&lock).expect("holder open");
+        holder.lock().expect("holder lock");
+        let start = std::time::Instant::now();
+        assert_eq!(rt_file_lock(&lock_arg(&base, 0)).unwrap(), Value::Int(-1));
+        assert!(start.elapsed() < std::time::Duration::from_millis(400));
+    }
+
+    /// A leftover lock file whose holder died (no OS lock) is not a held lock.
+    #[test]
+    fn file_lock_leftover_file_without_holder_is_acquirable() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (base, lock) = lock_test_path(&dir);
+        fs::write(&lock, b"99999999:ghost").expect("leftover");
+        let h = rt_file_lock(&lock_arg(&base, 0)).unwrap();
+        assert!(matches!(h, Value::Int(n) if n > 0), "got {:?}", h);
+        assert_eq!(rt_file_unlock(&[h]).unwrap(), Value::Bool(true));
+    }
+
+
     #[cfg(unix)]
     #[test]
     fn process_exists_sees_the_current_process_without_proc() {
@@ -3557,7 +3614,16 @@ pub fn rt_path_join(args: &[Value]) -> Result<Value, CompileError> {
 // File Locking
 // ============================================================================
 
-/// Acquire a file lock (PID-based lock file with timeout)
+/// Acquire a file lock backed by an OS advisory lock on `<path>.lock`
+/// (flock on Unix, LockFileEx on Windows, via `File::try_lock`).
+///
+/// The OS releases the lock when the holder dies, so a crashed holder never
+/// needs time-based "stale" detection and a live holder can never be displaced
+/// no matter how long it holds the lock. The lock file itself is left in place
+/// on unlock (deleting it would let a waiter lock an orphaned inode).
+///
+/// `timeout_secs == 0` tries exactly once; a positive timeout polls until the
+/// deadline.
 ///
 /// Callable from Simple as: `rt_file_lock(path, timeout_secs)`
 ///
@@ -3569,65 +3635,51 @@ pub fn rt_file_lock(args: &[Value]) -> Result<Value, CompileError> {
         _ => 10, // default 10 seconds
     };
 
-    let lock_path = format!("{}.lock", path);
-    let pid = std::process::id();
-    let hostname = get_hostname();
-    let lock_content = format!("{}:{}", pid, hostname);
+    let lock_path = std::path::PathBuf::from(format!("{}.lock", path));
 
     // Re-entrant same-process acquisition: the seed fires both unsafe lanes
     // of process helpers, so a compiled file_lock executes twice and the
-    // second attempt previously deadlocked against the first (create_new
-    // sees our own lock file, waits out the timeout, returns -1 -- e.g.
-    // every env create on Windows). If this process already holds the lock
-    // for this path, hand out another handle to the same lock instead.
+    // second attempt previously deadlocked against the first. If this process
+    // already holds the lock for this path, hand out another handle to the
+    // same lock instead.
     {
         let mut state = LOCK_HANDLES.lock().unwrap();
         let state = state.get_or_insert_with(LockState::new);
-        let existing = state
-            .active
-            .values()
-            .any(|p| p == &std::path::PathBuf::from(&lock_path));
-        if existing {
+        if state.files.contains_key(&lock_path) {
             let handle = state.next_id;
             state.next_id += 1;
-            state
-                .active
-                .insert(handle, std::path::PathBuf::from(&lock_path));
+            state.active.insert(handle, lock_path);
             return Ok(Value::Int(handle));
         }
     }
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs as u64);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs.max(0) as u64);
     let mut backoff_ms = 10u64;
 
     loop {
-        // Try to create lock file exclusively
-        match OpenOptions::new().write(true).create_new(true).open(&lock_path) {
-            Ok(mut f) => {
-                let _ = f.write_all(lock_content.as_bytes());
-                // Register handle
+        let file = match OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&lock_path) {
+            Ok(f) => f,
+            Err(_) => return Ok(Value::Int(-1)),
+        };
+        match file.try_lock() {
+            Ok(()) => {
+                // Informational only; the OS lock is the source of truth.
+                let mut f = &file;
+                let _ = f.set_len(0);
+                let _ = f.write_all(format!("{}:{}", std::process::id(), get_hostname()).as_bytes());
                 let mut state = LOCK_HANDLES.lock().unwrap();
                 let state = state.get_or_insert_with(LockState::new);
                 let handle = state.next_id;
                 state.next_id += 1;
-                state.active.insert(handle, std::path::PathBuf::from(&lock_path));
+                state.files.insert(lock_path.clone(), file);
+                state.active.insert(handle, lock_path);
                 return Ok(Value::Int(handle));
             }
             Err(_) => {
-                // Check if lock is stale (>60 seconds old)
-                if let Ok(meta) = fs::metadata(&lock_path) {
-                    if let Ok(modified) = meta.modified() {
-                        if modified.elapsed().unwrap_or_default() > std::time::Duration::from_secs(60) {
-                            let _ = fs::remove_file(&lock_path);
-                            continue;
-                        }
-                    }
-                }
-
+                drop(file);
                 if std::time::Instant::now() >= deadline {
                     return Ok(Value::Int(-1));
                 }
-
                 std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
                 backoff_ms = (backoff_ms * 2).min(500);
             }
@@ -3647,11 +3699,11 @@ pub fn rt_file_unlock(args: &[Value]) -> Result<Value, CompileError> {
     let mut state = LOCK_HANDLES.lock().unwrap();
     if let Some(state) = state.as_mut() {
         if let Some(lock_path) = state.active.remove(&handle) {
-            // Only delete the lock file when no other handle (re-entrant
+            // Release the OS lock only when no other handle (re-entrant
             // same-process acquisition) still references it.
             let still_held = state.active.values().any(|p| p == &lock_path);
             if !still_held {
-                let _ = fs::remove_file(&lock_path);
+                state.files.remove(&lock_path);
             }
             return Ok(Value::Bool(true));
         }
