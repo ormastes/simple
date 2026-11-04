@@ -1,6 +1,6 @@
 # Seed: module name shadows match binding in `Ok(value): value`
 
-**Status:** Open (read-path sites renamed on work/messenger-db-test-layers-20261031; other sites remain exposed)
+**Status:** Fixed (stale). 2026-11-04: dense_storage_rows_spec.spl 8/8 pass on the seed; a minimal `use std.common.json.value` + `case Ok(value): value` repro passes in both run and test modes. Read-path sites were renamed earlier.
 **Severity:** P2
 **Date:** 2026-10-31
 
