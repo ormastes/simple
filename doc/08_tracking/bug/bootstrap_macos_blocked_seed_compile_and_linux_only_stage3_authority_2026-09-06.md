@@ -818,3 +818,43 @@ Stage-3 command once an admitted Stage 2 exists (it will still stop at the
 producer gap above until item 1 lands):
 `sh scripts/bootstrap/resume-stage3-from-admitted.sh <admitted-stage2-output-dir>`
 (e.g. `/private/tmp/boot2-out/s2`).
+
+## 2026-11-04 (runnerport): premise correction — the perl shared runner is not on the macOS route
+
+Status: **no code change; the "producer side" items above do not gate macOS Stage 3.**
+Source-traced at `b77b1631b9a` (release/1.0.0); no Stage 3 run was attempted.
+
+- `scripts/check/lib/bootstrap-stage3-shared-runner.pl` is reached only through
+  `bootstrap_stage3_run_evidenced` (`scripts/check/lib/bootstrap-stage3/runner.shs:4`),
+  which refuses any other platform: `[ "$BSTAGE3_RUN_ARCHITECTURE" = x86_64-unknown-linux-gnu ] || return 64`
+  (`runner.shs:40`) and requires `BSTAGE3_RUN_SYSTEMD_RUN`/`SYSTEMCTL`/`CGROUP_ROOT`.
+  The runner itself validates a systemd unit plan with `exit_type=cgroup` and an
+  active-cgroup receipt (`shared-runner.pl:658-847`), and its directory walks use
+  Linux `syscall` numbers (`:19-20`, dies "unsupported syscall architecture" elsewhere).
+- Its only caller is `bootstrap-stage23-coordinator.pl:568`, which no script under
+  `scripts/` or `src/` invokes (only `test/01_unit/scripts/bootstrap_stage3_*runner*_test.shs`).
+  That lane is a Linux-x86_64 systemd lane on every OS, not a macOS path.
+- The macOS Stage 3 route is `scripts/bootstrap/resume-stage3-from-admitted.sh`
+  Darwin branch (`:1057-1083`): `process-tree-rss-watchdog.pl` -> 
+  `scripts/bootstrap/lib/stage3-native-build-worker.sh` (its only `/proc` use,
+  `:134`, is inside `*-linux-*`), then in-process `bootstrap_stage3_write_manifest`
+  + `bootstrap_stage3_verify_manifest` (`:1401-1404`). It never sources the perl
+  runner and never sets `BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE=1` (only
+  `bootstrap-stage3-provenance-verifier.sh:198,356` do, and that verifier is
+  referenced only by the runner/runner.shs lane).
+- Therefore porting the runner's `/proc/<pid>/fd/N`, `proc_start_ticks`,
+  O_TMPFILE+linkat and `/proc/self/fd` exec to Darwin would not unblock anything:
+  it would still stop at systemd/cgroup validation and at `runner.shs:40`. A port is
+  only meaningful together with a Darwin containment backend for that lane, which is
+  an owner design decision (no systemd/cgroup on Darwin/BSD), not a bug fix.
+- The capsule refusal (`portable-descriptor-capsule-not-supported`) stays fail-closed;
+  nothing on the macOS route reaches it.
+
+What actually gates macOS Stage 3 today: an admitted Stage 2 (lane1 runs on this host
+were built but refused by the 12288 MiB sanity memory reserve,
+`/private/tmp/lanes/stage_artifacts.txt`), then the non-capsule manifest
+write/verify on Darwin, which is so far verified only by fixtures, not a real run.
+
+Stage-3 resume command once an admitted Stage 2 exists:
+`sh scripts/bootstrap/resume-stage3-from-admitted.sh <admitted-stage2-output-dir>`
+(e.g. `/private/tmp/boot2-out/s2`).
