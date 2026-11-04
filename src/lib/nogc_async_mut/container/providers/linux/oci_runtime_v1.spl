@@ -60,6 +60,10 @@ pub struct LinuxOciRequestV1:
     pid_limit: i64
     network_policy: text
     filesystem_policy: text
+    # Build mode (both set): command[0] overrides the image entrypoint, the
+    # staged inputs are mounted read-only and the outputs directory writable.
+    build_input_root: text = ""
+    build_output_root: text = ""
 
 pub struct RootlessCapabilityEvidenceV1:
     uid: text
@@ -1221,9 +1225,28 @@ pub fn build_create_command(engine: text, state_dir: text,
                 "--pids-limit", request.pid_limit.to_text(),
                 "--network", request.network_policy,
                 "--read-only", "--security-opt", "no-new-privileges",
-                "--cap-drop", "ALL",
-                request.image]
-            for value in request.command:
+                "--cap-drop", "ALL"]
+            var rest: [text] = request.command
+            if request.build_input_root != "" or request.build_output_root != "":
+                if request.build_input_root == "" or request.build_output_root == "":
+                    return ("build-root-incomplete", runtime_command_empty())
+                if request.command.len() == 0:
+                    return ("build-command-empty", runtime_command_empty())
+                args.push("--entrypoint")
+                args.push(request.command[0])
+                args.push("--mount")
+                args.push("type=bind,source=" + request.build_input_root +
+                    ",target=/simple-build/inputs,readonly")
+                args.push("--mount")
+                args.push("type=bind,source=" + request.build_output_root +
+                    ",target=/simple-build/outputs")
+                rest = []
+                var i = 1
+                while i < request.command.len():
+                    rest.push(request.command[i])
+                    i = i + 1
+            args.push(request.image)
+            for value in rest:
                 args.push(value)
             for value in request.args:
                 args.push(value)
