@@ -76,6 +76,29 @@ selftest() {
         [ "$_got" = 40f075e0241e0396 ] || { echo "selftest FAIL: native xxhsum $_d dialect not parsed ($_got)"; _fails=$((_fails+1)); }
     done
 
+    # common-dir fallback: a linked worktree with no bin/ of its own resolves the
+    # main checkout's bin/simple; the worktree's own binary wins; SIMPLE_BIN is last
+    (
+        cd "$_t" && git init -q main && cd main \
+            && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m i \
+            && git worktree add -q ../wtree 2>/dev/null && mkdir -p bin ../wtree/bin \
+            && printf '#!/bin/sh\n' > bin/simple && chmod +x bin/simple
+    ) >/dev/null 2>&1
+    _saved_root=$CSM_TOOL_ROOT
+    CSM_TOOL_ROOT=$(cd "$_t/wtree" && pwd -P); command -v cygpath >/dev/null 2>&1 && CSM_TOOL_ROOT=$(cygpath -m "$CSM_TOOL_ROOT")
+    _want=$(cd "$_t/main" && pwd -P)/bin/simple
+    _got=$(SIMPLE_BIN="$_t/nonexistent" csm_simple_bin)
+    [ "$(cd "$(dirname "$_got")" 2>/dev/null && pwd -P)/simple" = "$_want" ] \
+        || { echo "selftest FAIL: common-dir bin fallback not resolved ($_got)"; _fails=$((_fails+1)); }
+    printf '#!/bin/sh\n' > "$_t/wtree/bin/simple"; chmod +x "$_t/wtree/bin/simple"
+    _got=$(csm_simple_bin)
+    case "$_got" in */wtree/bin/simple) ;; *) echo "selftest FAIL: worktree bin not preferred ($_got)"; _fails=$((_fails+1)) ;; esac
+    rm -f "$_t/wtree/bin/simple" "$_t/main/bin/simple"
+    printf '#!/bin/sh\n' > "$_t/sb"; chmod +x "$_t/sb"
+    [ "$(SIMPLE_BIN="$_t/sb" csm_simple_bin)" = "$_t/sb" ] || { echo "selftest FAIL: SIMPLE_BIN last resort"; _fails=$((_fails+1)); }
+    SIMPLE_BIN="" csm_simple_bin >/dev/null && { echo "selftest FAIL: missing hasher not an error"; _fails=$((_fails+1)); }
+    CSM_TOOL_ROOT=$_saved_root
+
     # Windows: under MSYS_NO_PATHCONV=1 native git/hasher get no /tmp or /c path
     # conversion; re-run the whole selftest that way once (guarded against recursion).
     if [ -z "${CSM_SELFTEST_NOCONV:-}" ] && command -v cygpath >/dev/null 2>&1; then
