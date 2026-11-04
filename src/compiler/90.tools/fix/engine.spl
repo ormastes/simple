@@ -1,0 +1,137 @@
+# Shared source-edit core — the one lifecycle every caller runs (rev-3 §13):
+#   snapshot -> producers -> proposals -> staged validation -> preview -> apply -> reanalysis
+# Callers: `simple fix`, `simple code refactor`, lint --fix, LSP codeAction /
+# simple/refactor/closure, the LSP-MCP bridge. Nothing else writes source.
+use std.tooling.easy_fix.types.{EasyFix, FixReport, Replacement, easyfix_id, easyfix_description,
+    easyfix_replacements, easyfix_code, easyfix_sort_replacements_descending}
+use std.tooling.easy_fix.snapshot.{SourceSnapshot, source_snapshot, snapshot_version, ValidationReport,
+    validation_failed, validation_report_text}
+use std.tooling.easy_fix.unified_diff.{unified_diff}
+use std.common.json.value.{JsonValue, json_value_object_from, json_value_serialize}
+use std.nogc_sync_mut.lsp.lsp_code_action.{lsp_edit_source_map, lsp_code_action_text_edit}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_atomic_write, file_exists}
+use compiler.tools.fix.producer.{FixProducer, fix_unit_from_snapshot}
+use compiler.tools.fix.builtins.{run_fix_producers}
+use compiler.tools.fix.source_edits.{validate_fix_proposals}
+
+pub struct FixOutcome:
+    snapshots: Dict<text, SourceSnapshot>
+    proposals: [EasyFix]
+    report: ValidationReport
+    new_sources: Dict<text, text>
+
+pub fn snapshots_from_sources(sources: Dict<text, text>) -> Dict<text, SourceSnapshot>:
+    var out: Dict<text, SourceSnapshot> = {}
+    for path in sources.keys():
+        out[path] = source_snapshot(path, sources[path])
+    out
+
+# Producers over every snapshot, registry order, file order as given.
+pub fn fix_collect(producers: [FixProducer], snapshots: [SourceSnapshot]) -> [EasyFix]:
+    var all: [EasyFix] = []
+    for snap in snapshots:
+        for f in run_fix_producers(producers, fix_unit_from_snapshot(snap)):
+            all.push(f)
+    all
+
+pub fn fix_filter_by_code(proposals: [EasyFix], code: text) -> [EasyFix]:
+    var out: [EasyFix] = []
+    for p in proposals:
+        if easyfix_code(p) == code: out.push(p)
+    out
+
+pub fn fix_validate(proposals: [EasyFix], snapshots: Dict<text, SourceSnapshot>) -> FixOutcome:
+    val validation = validate_fix_proposals(proposals, snapshots)
+    FixOutcome(snapshots: snapshots, proposals: proposals, report: validation.report, new_sources: validation.new_sources)
+
+pub fn fix_outcome_changed_files(outcome: FixOutcome) -> [text]:
+    var files: [text] = []
+    for path in outcome.new_sources.keys():
+        if outcome.new_sources[path] != outcome.snapshots[path].source: files.push(path)
+    files.sort()
+    files
+
+pub fn fix_outcome_diff(outcome: FixOutcome) -> text:
+    var out = ""
+    for path in fix_outcome_changed_files(outcome):
+        out = out + unified_diff(path, outcome.snapshots[path].source, outcome.new_sources[path])
+    out
+
+# LSP WorkspaceEdit `changes` keyed by the path given (the LSP layer maps
+# paths to URIs), built with the same range mapper code actions use.
+pub fn fix_outcome_workspace_edit(outcome: FixOutcome) -> JsonValue:
+    var pairs: [(text, JsonValue)] = []
+    for path in fix_outcome_changed_files(outcome):
+        val map = lsp_edit_source_map(outcome.snapshots[path].source)
+        var reps: [Replacement] = []
+        for p in outcome.proposals:
+            for r in easyfix_replacements(p):
+                if r.file == path: reps.push(r)
+        var edits: [JsonValue] = []
+        val ordered = easyfix_sort_replacements_descending(reps)
+        var i = ordered.len()
+        while i > 0:
+            i = i - 1
+            if val e = lsp_code_action_text_edit(map, ordered[i].start, ordered[i].end, ordered[i].new_text):
+                edits.push(e)
+        pairs.push((path, JsonValue.Array(edits)))
+    json_value_object_from([("changes", json_value_object_from(pairs))])
+
+pub fn fix_outcome_summary(outcome: FixOutcome) -> JsonValue:
+    var files: [JsonValue] = []
+    for path in fix_outcome_changed_files(outcome):
+        var count = 0
+        var ids: [JsonValue] = []
+        for p in outcome.proposals:
+            var touches = false
+            for r in easyfix_replacements(p):
+                if r.file == path: touches = true
+            if touches:
+                count = count + 1
+                ids.push(JsonValue.Str(easyfix_id(p)))
+        files.push(json_value_object_from([("file", JsonValue.Str(path)), ("edits", JsonValue.Int(count)),
+            ("proposals", JsonValue.Array(ids))]))
+    var errors: [JsonValue] = []
+    for e in outcome.report.errors: errors.push(JsonValue.Str(e))
+    json_value_object_from([
+        ("ok", JsonValue.Bool(outcome.report.ok)),
+        ("stage", JsonValue.Str(outcome.report.stage)),
+        ("errors", JsonValue.Array(errors)),
+        ("files", JsonValue.Array(files))])
+
+pub fn fix_outcome_json(outcome: FixOutcome) -> text:
+    json_value_serialize(json_value_object_from([
+        ("workspaceEdit", fix_outcome_workspace_edit(outcome)),
+        ("summary", fix_outcome_summary(outcome))]))
+
+# Snapshot writer (CLI / MCP). The editor owns unsaved buffers and never calls
+# this. Re-admits every file against the analysed snapshot before the first
+# write and again before each atomic write; records a receipt per file.
+pub fn fix_apply_outcome(outcome: FixOutcome, dry_run: bool) -> Result<FixReport, text>:
+    if not outcome.report.ok:
+        return Err(validation_report_text(outcome.report))
+    var report = FixReport.empty()
+    report.applied = outcome.proposals.len()
+    val files = outcome.new_sources.keys()
+    for file in files:
+        if not file_exists(file) or file_read(file) != outcome.snapshots[file].source:
+            return Err("{file}:1:1: source changed since analysis; no fixes applied; rerun lint")
+    for file in files:
+        if not file_exists(file) or file_read(file) != outcome.snapshots[file].source:
+            return Err("{file}:1:1: source changed before fix write; stopped; rerun lint")
+        if not dry_run and not file_atomic_write(file, outcome.new_sources[file]):
+            return Err("Atomic fix write failed: {file}")
+        report.modified_files.push(file)
+        report.receipts.push("{file} {outcome.snapshots[file].version} -> {snapshot_version(outcome.new_sources[file])}")
+    for p in outcome.proposals:
+        report.details.push("[{easyfix_id(p)}] {easyfix_description(p)}")
+    Ok(report)
+
+# Reanalysis after apply: the proposals the producers still raise on the written
+# files (filter by code to check one fix set converged).
+pub fn fix_reanalyze(producers: [FixProducer], files: [text]) -> [EasyFix]:
+    var snaps: [SourceSnapshot] = []
+    for f in files:
+        if file_exists(f): snaps.push(source_snapshot(f, file_read(f)))
+    fix_collect(producers, snaps)
+
