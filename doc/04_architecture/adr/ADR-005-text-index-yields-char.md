@@ -49,7 +49,9 @@ and digit characters gave their digit value (7) rather than their code point
 6. **Byte and iteration APIs stay:** `s.byte_at(i)` (u8, O(1)), `s.chars()`
    (O(n) iteration yielding `char`), `s[a..b]` (returns `text`), and
    `s.char_code_at(i)` (i64 code point, kept for existing callers).
-7. **Out of range** follows the existing text-index policy. `s[i]` with `i`
+7. **Out of range** (superseded as a safe-code contract by
+   [ADR-006](ADR-006-panic-free-safe-code.md): an unproven `s[i]` is
+   PANIC-W-INDEX, warn now and error after enforcement) follows the existing text-index policy. `s[i]` with `i`
    outside `-len..len` is a runtime *index out of bounds* error. Negative
    indices count from the end in code points (`"abc"[-1] == 'c'`). The
    `char_at(i)` method keeps its own policy: over-run returns `""` (see

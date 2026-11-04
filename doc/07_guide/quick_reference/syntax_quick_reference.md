@@ -414,7 +414,7 @@ s.char_code_at(0)                   # 55 (kept)
 s.byte_at(2)                        # 195 (u8, O(1))
 for c in s.chars(): use(c)          # O(n) iteration yielding char
 s[0..2]                             # "72" (slices stay text)
-s[99]                               # runtime error: index out of bounds
+s[99]                               # PANIC-W-INDEX: unproven index (ADR-006); use s.char_at_checked(i) ?? c
 s.char_at(99)                       # "" (char_at keeps its over-run policy)
 ```
 
