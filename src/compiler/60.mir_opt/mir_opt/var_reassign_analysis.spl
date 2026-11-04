@@ -188,7 +188,16 @@ fn var_reassign_collect_term_escapes_with_aliases(
     match term:
         case MirTerminator.Ret(value):
             if value.?:
-                val ret_value = value
+                # Stage3 hello canary (s3_fable38, 2026-11-04, panic: RTS in
+                # native_compile): value is MirOperand?; binding it bare
+                # (val ret_value = value) kept the Option transport word, so
+                # var_reassign_operand_locals match operand.kind fell
+                # through on an Option box and rt_panicd on every function
+                # (every body has a Ret). Same defect and same fix as the
+                # Call/CallIndirect/Intrinsic arms above: ?? with a sentinel
+                # that value.? has already proved unreachable, not
+                # .unwrap() (stolen-unwrap hazard).
+                val ret_value: MirOperand = value ?? MirOperand(kind: MirOperandKind.Copy(LocalId(id: -1)))
                 var_reassign_collect_escape_operand_with_aliases(escaped, ret_value, aliases)
         case If(cond, _, _):
             var_reassign_collect_escape_operand_with_aliases(escaped, cond, aliases)
@@ -196,7 +205,8 @@ fn var_reassign_collect_term_escapes_with_aliases(
             var_reassign_collect_escape_operand_with_aliases(escaped, value, aliases)
         case CallTerminator(dest, func, args, _, _, unwind_payload_dest, unwind_type_tag_dest):
             if dest.?:
-                val term_dest = dest
+                # dest is LocalId? (see the Ret arm above): ?? fallback, never a bare bind.
+                val term_dest: LocalId = dest ?? LocalId(id: -1)
                 escaped[local_alias_root(aliases, var_reassign_local_id_value(term_dest))] = true
             if unwind_payload_dest.?:
                 escaped[local_alias_root(aliases, var_reassign_local_id_value(unwind_payload_dest.unwrap()))] = true
