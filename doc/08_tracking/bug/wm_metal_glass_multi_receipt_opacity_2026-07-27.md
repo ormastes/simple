@@ -261,3 +261,55 @@ Tree release/1.0.0 `1ebaf7d1e1f`, seed `/Users/ormastes/.local/share/simple-seed
   `spec_helpers_dropped_by_release_transplant_88aac2ffe28_2026-11-04.md`.
 Native gate (`build-macos-gpu-2d-live-native.shs --build metal`) needs the
 admitted full-CLI (Lane 1). Status unchanged: source fixed / runtime unverified.
+
+## 2026-11-04 — acceptance specs reconciled on release/1.0.0 (macOS M4, seed interpreter)
+
+Status: **fix-implemented / verification-pending** (native Metal not run).
+
+Binary: `~/.local/share/simple-seeds/release100-7a0e6fe516f-20261031/simple`
+(Rust seed, interpreter). No admitted self-hosted macOS Stage 2 exists
+(`/private/tmp/lanes/stage_artifacts.txt`: lane1 s2d built, sanity refused),
+so the Metal native path could not be exercised; the receipt/opacity
+validation below is covered only through the interpreter.
+
+Changes:
+- `window_scene_draw_ir_spec`: restored the helpers, imports and in-body
+  locals dropped by transplant `88aac2ffe28`/`bb3f6ab8ab2` (from
+  `88aac2ffe28~1`), then reconciled to current source: `maximize-state`
+  text command (added `31d21e30f82`, 2026-08-25) shifts window indices and
+  counts (9->10 legacy, 8->9 themed, plan 34->36); focused-window titlebar is
+  `title_focused`; resolved-font title style index 2 is `font-size` and the
+  advance list moved to `advance_widths`; engine bitmap fallback is now gated
+  by `has_ttf`. **12/12 pass** (was 4/12).
+- `host_compositor_entry_spec`: restored from `88aac2ffe28~1` (helpers,
+  imports, receipt fixtures) and reconciled: provenance evidence now reads
+  `last_readback_source/last_backend_handle/last_readback_checksum`
+  (raw-string contract), requested attempt is
+  `render_draw_ir_composition_from_retained_damage` (`fd085136a6d`),
+  recompose fixture uses a local-web owner (owner port 0; a positive port is
+  renderer-owned since `553ea5aae8e`) and a 64x60 window so content fits.
+  **55/63** (was 42/61). All Metal receipt cases pass (exact pair, missing,
+  duplicate, reordered, extra, unfulfilled, inactive fail-closed).
+- `src/lib/gc_async_mut/gpu/engine2d/engine.spl`: restored
+  `Engine2D.window_present_enabled()` (added `d2b1f7b2235`, deleted by the
+  stale-snapshot commit `8a87db7d9eb`); `host_compositor_core.spl` and
+  `hosted_entry.spl` call it on every Engine2D frame, so any hosted Draw IR
+  frame failed with `method window_present_enabled not found`.
+
+Remaining reds (not weakened, recorded):
+- host `recomposes a rejected host GPU material frame`: the fixture fakes
+  Metal via `selected_backend_name = "metal"` on a CPU engine; the CPU
+  recompose still creates offscreens via `backend_name()=="metal"` ->
+  `create_shared_metal_offscreen` -> `shared-metal-parent-required`. Needs an
+  owner decision: real Metal engine fixture (native lane) vs routing on
+  `metal_backend` presence.
+- host: 7 other reds unrelated to Metal glass (taskbar `contains` arity and
+  `cannot assign to const 'comp'` are seed-interpreter semantics; chrome
+  pixel/theme color, wheel delta, cache release, display-app input).
+- `draw_ir_adv_spec` 68/70: both reds are Vulkan/host-GPU-queue cases, not
+  Metal glass. `8a87db7d9eb` also deleted `Engine2D.vulkan_present_readback_bytes`,
+  `stage_present_damage`, `finalize_compute_frame_no_readback`,
+  `present_window_device`, `latest_vulkan_frame_receipt`,
+  `read_pixels_damaged`, `invalidate_damage_mirror`,
+  `create_vulkan_window_present`, `create_vulkan_external_window_present`
+  (all still have callers) — Vulkan owner must restore them.
