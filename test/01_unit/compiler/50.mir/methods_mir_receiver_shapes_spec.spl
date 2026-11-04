@@ -36,6 +36,11 @@ fn lines(xs: [text]) -> text:
 fn lower_closure(names: [text], srcs: [text]) -> text:
     """Lower every module through HIR, prescan all, then MIR-lower the last one.
     Returns the concatenated HIR/MIR diagnostics ("" when clean)."""
+    val (out, _) = lower_closure_mir(names, srcs)
+    out
+
+fn lower_closure_mir(names: [text], srcs: [text]) -> (text, MirModule):
+    """lower_closure plus the lowered MIR of the last module."""
     val log = Logger(level: 0)
     var modules: Dict<text, Module> = {}
     var sources: [SourceFile] = []
@@ -75,10 +80,22 @@ fn lower_closure(names: [text], srcs: [text]) -> text:
         if not e.message.contains("non-exhaustive enum match"):
             out = out + "mir: " + e.message + "\n"
     print "diagnostics: [" + out + "]"
-    out
+    (out, mir)
 
 fn lower_one(src: text) -> text:
     lower_closure(["app.main"], [src])
+
+fn unit_local_count(src: text, fn_name: text) -> i64:
+    """Number of MIR locals typed Unit in `fn_name` (-1 when the function is absent)."""
+    val (_, mir) = lower_closure_mir(["app.main"], [src])
+    var count = -1
+    for f in mir.functions.values():
+        if f.name == fn_name or f.name.ends_with("." + fn_name):
+            count = 0
+            for l in f.locals:
+                if serialize_mir_type(l.type_) == "\"Unit\"":
+                    count = count + 1
+    count
 
 describe "methods-mir-20261031 receiver shapes":
     it "shape 1 untyped parameter receiver lowers clean":
@@ -122,4 +139,28 @@ describe "methods-mir-20261031 receiver shapes":
 
     it "shape 6 enum payload binder receiver lowers clean":
         val d = lower_one(lines(["enum Outcome:", "    Success(code: [u8], n: i64)", "    Failure(msg: text)", "", "fn code_len(o: Outcome) -> i64:", "    match o:", "        case Success(code, _):", "            code.len()", "        case Failure(msg):", "            msg.len()"]))
+        expect(d).to_equal("")
+
+    it "untyped index/field receiver of a mutating method keeps the i64 write-back slot (Unit placeholder is not a type)":
+        # Since 87aaaa999c7 an untyped HirExpr carries a Unit HirType placeholder
+        # with has_type_ false. The write-back receiver type must come from the
+        # presence bit: a `!= nil` test admitted the placeholder and the GEP /
+        # load / get_field of the receiver slot was typed Unit instead of the
+        # documented i64 default (method_calls_literals.spl, receiver_type).
+        val index_src = lines(["fn push_first(xs):", "    xs[0].push(1)"])
+        expect(lower_one(index_src)).to_equal("")
+        expect(unit_local_count(index_src, "push_first")).to_equal(0)
+        val field_src = lines(["class P:", "    items: [i64]", "", "fn push_items(p):", "    p.items.push(1)"])
+        expect(lower_one(field_src)).to_equal("")
+        expect(unit_local_count(field_src, "push_items")).to_equal(0)
+
+    it "untyped receivers through the positive-only type probes still lower clean (audit pin)":
+        # The `if val x = receiver.type_` probes for Str / Int / Array|Slice only
+        # SET a flag on a positive match, so the Unit placeholder falls through
+        # exactly like an absent type. Pin that the untyped text/int receivers
+        # keep their builtin routes (no unresolved-call diagnostic). `lines()`
+        # is deliberately absent: over an untyped receiver it stays loud by
+        # design (text_builtin_resolution_allowed needs a proven text receiver).
+        val d = lower_one(lines(["fn c(s):", "    s.contains(\"a\")", "", "fn f2(s):", "    s.find(\"a\", 0)", "", "fn sub(s):", "    s.substring(0, 1)", "", "fn ch(n):", "    n.chr()"]))
+        expect(d.contains("unresolved method call")).to_equal(false)
         expect(d).to_equal("")
