@@ -639,35 +639,36 @@ pub(super) fn exec_block_closure_into(
                             // NON-local binding. A bound name that also exists as a module
                             // global therefore read back as the GLOBAL — in the bootstrap
                             // closure `if val get_value = …` returned `<fn:get_value>`.
-                            local_env.mark_local(name.clone());
-                            local_env.insert(name, inner);
+                            let saved = crate::interpreter::bind_block_scope_shadows(std::collections::HashMap::from([(name, inner)]), &mut local_env);
                             record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, true);
-                            last_value = exec_block_closure_mut(
+                            let branch = exec_block_closure_mut(
                                 &if_stmt.then_block.statements,
                                 &mut local_env,
                                 functions,
                                 classes,
                                 enums,
                                 impl_methods,
-                            )?;
+                            );
+                            crate::interpreter::restore_block_scope_shadows(saved, &mut local_env);
+                            last_value = branch?;
                             handled = true;
                         }
                         LetBind::Skip => {}
                         LetBind::NotApplicable => {
                             let mut bindings = std::collections::HashMap::new();
                             if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
-                                for (name, val) in bindings {
-                                    local_env.insert(name, val);
-                                }
+                                let saved = crate::interpreter::bind_block_scope_shadows(bindings, &mut local_env);
                                 record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, true);
-                                last_value = exec_block_closure_mut(
+                                let branch = exec_block_closure_mut(
                                     &if_stmt.then_block.statements,
                                     &mut local_env,
                                     functions,
                                     classes,
                                     enums,
                                     impl_methods,
-                                )?;
+                                );
+                                crate::interpreter::restore_block_scope_shadows(saved, &mut local_env);
+                                last_value = branch?;
                                 handled = true;
                             }
                         }
@@ -722,22 +723,23 @@ pub(super) fn exec_block_closure_into(
                                     // NON-local binding. A bound name that also exists as a module
                                     // global therefore read back as the GLOBAL — in the bootstrap
                                     // closure `if val get_value = …` returned `<fn:get_value>`.
-                                    local_env.mark_local(name.clone());
-                                    local_env.insert(name, inner);
+                                    let saved = crate::interpreter::bind_block_scope_shadows(std::collections::HashMap::from([(name, inner)]), &mut local_env);
                                     record_decision_site(
                                         if_stmt.span.line,
                                         if_stmt.span.column,
                                         sub_elif(elif_idx),
                                         true,
                                     );
-                                    last_value = exec_block_closure_mut(
+                                    let branch = exec_block_closure_mut(
                                         &block.statements,
                                         &mut local_env,
                                         functions,
                                         classes,
                                         enums,
                                         impl_methods,
-                                    )?;
+                                    );
+                                    crate::interpreter::restore_block_scope_shadows(saved, &mut local_env);
+                                    last_value = branch?;
                                     handled = true;
                                     break;
                                 }
@@ -745,23 +747,23 @@ pub(super) fn exec_block_closure_into(
                                 LetBind::NotApplicable => {
                                     let mut bindings = std::collections::HashMap::new();
                                     if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
-                                        for (name, val) in bindings {
-                                            local_env.insert(name, val);
-                                        }
+                                        let saved = crate::interpreter::bind_block_scope_shadows(bindings, &mut local_env);
                                         record_decision_site(
                                             if_stmt.span.line,
                                             if_stmt.span.column,
                                             sub_elif(elif_idx),
                                             true,
                                         );
-                                        last_value = exec_block_closure_mut(
+                                        let branch = exec_block_closure_mut(
                                             &block.statements,
                                             &mut local_env,
                                             functions,
                                             classes,
                                             enums,
                                             impl_methods,
-                                        )?;
+                                        );
+                                        crate::interpreter::restore_block_scope_shadows(saved, &mut local_env);
+                                        last_value = branch?;
                                         handled = true;
                                         break;
                                     }
@@ -1611,35 +1613,36 @@ fn exec_block_closure_mut_inner(
                             // NON-local binding. A bound name that also exists as a module
                             // global therefore read back as the GLOBAL — in the bootstrap
                             // closure `if val get_value = …` returned `<fn:get_value>`.
-                            local_env.mark_local(name.clone());
-                            local_env.insert(name, inner);
+                            let saved = crate::interpreter::bind_block_scope_shadows(std::collections::HashMap::from([(name, inner)]), local_env);
                             record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, true);
-                            last_value = exec_block_closure_mut(
+                            let branch = exec_block_closure_mut(
                                 &if_stmt.then_block.statements,
                                 local_env,
                                 functions,
                                 classes,
                                 enums,
                                 impl_methods,
-                            )?;
+                            );
+                            crate::interpreter::restore_block_scope_shadows(saved, local_env);
+                            last_value = branch?;
                             handled = true;
                         }
                         LetBind::Skip => {}
                         LetBind::NotApplicable => {
                             let mut bindings = std::collections::HashMap::new();
                             if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
-                                for (name, val) in bindings {
-                                    local_env.insert(name, val);
-                                }
+                                let saved = crate::interpreter::bind_block_scope_shadows(bindings, local_env);
                                 record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, true);
-                                last_value = exec_block_closure_mut(
+                                let branch = exec_block_closure_mut(
                                     &if_stmt.then_block.statements,
                                     local_env,
                                     functions,
                                     classes,
                                     enums,
                                     impl_methods,
-                                )?;
+                                );
+                                crate::interpreter::restore_block_scope_shadows(saved, local_env);
+                                last_value = branch?;
                                 handled = true;
                             }
                         }
@@ -1691,22 +1694,23 @@ fn exec_block_closure_mut_inner(
                                     // NON-local binding. A bound name that also exists as a module
                                     // global therefore read back as the GLOBAL — in the bootstrap
                                     // closure `if val get_value = …` returned `<fn:get_value>`.
-                                    local_env.mark_local(name.clone());
-                                    local_env.insert(name, inner);
+                                    let saved = crate::interpreter::bind_block_scope_shadows(std::collections::HashMap::from([(name, inner)]), local_env);
                                     record_decision_site(
                                         if_stmt.span.line,
                                         if_stmt.span.column,
                                         sub_elif(elif_idx),
                                         true,
                                     );
-                                    last_value = exec_block_closure_mut(
+                                    let branch = exec_block_closure_mut(
                                         &block.statements,
                                         local_env,
                                         functions,
                                         classes,
                                         enums,
                                         impl_methods,
-                                    )?;
+                                    );
+                                    crate::interpreter::restore_block_scope_shadows(saved, local_env);
+                                    last_value = branch?;
                                     handled = true;
                                     break;
                                 }
@@ -1714,23 +1718,23 @@ fn exec_block_closure_mut_inner(
                                 LetBind::NotApplicable => {
                                     let mut bindings = std::collections::HashMap::new();
                                     if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
-                                        for (name, val) in bindings {
-                                            local_env.insert(name, val);
-                                        }
+                                        let saved = crate::interpreter::bind_block_scope_shadows(bindings, local_env);
                                         record_decision_site(
                                             if_stmt.span.line,
                                             if_stmt.span.column,
                                             sub_elif(elif_idx),
                                             true,
                                         );
-                                        last_value = exec_block_closure_mut(
+                                        let branch = exec_block_closure_mut(
                                             &block.statements,
                                             local_env,
                                             functions,
                                             classes,
                                             enums,
                                             impl_methods,
-                                        )?;
+                                        );
+                                        crate::interpreter::restore_block_scope_shadows(saved, local_env);
+                                        last_value = branch?;
                                         handled = true;
                                         break;
                                     }

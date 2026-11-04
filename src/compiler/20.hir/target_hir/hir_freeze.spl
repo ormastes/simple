@@ -1,0 +1,47 @@
+# PR-B: deep-freeze an admitted HirModule into an immutable HirSnapshot.
+# Freezing captures canonical codec bytes, so no live dict/array of the
+# builder is aliased: later mutation of the source module cannot reach the
+# snapshot, and every read decodes a fresh, caller-owned copy.
+# The snapshot id digest is sha256 over those bytes. Canonical codec bytes are
+# used when the generated canonical encoder is available; otherwise the stable
+# legacy codec is used and `codec` records which (their headers differ, so the
+# two can never produce the same digest).
+
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec.{hir_canonical_codec_generated_available_v1, hir_module_encode_canonical, hir_module_encode, hir_module_encode_reason, hir_module_decode}
+use compiler.hir.target_hir.hir_snapshot.{HirSnapshotId, hir_snapshot_id_new}
+use std.common.crypto.sha256.{sha256_text}
+
+struct HirSnapshot:
+    id: HirSnapshotId
+    frozen_bytes: text
+    codec: text
+
+fn hir_snapshot_freeze(module: HirModule, generation: i64) -> Result<HirSnapshot, text>:
+    var bytes = ""
+    var codec = "legacy"
+    if hir_canonical_codec_generated_available_v1():
+        val encoded = hir_module_encode_canonical(module)
+        if encoded.is_err():
+            return Err("hir_snapshot_freeze_refused: " + module.name + ": canonical")
+        bytes = encoded.unwrap()
+        codec = "canonical"
+    else:
+        bytes = hir_module_encode(module)
+        if bytes == "":
+            return Err("hir_snapshot_freeze_refused: " + module.name + ": " + hir_module_encode_reason(module))
+    val id = hir_snapshot_id_new(module.name, sha256_text(bytes), generation)
+    if id.is_err():
+        return Err(id.unwrap_err())
+    Ok(HirSnapshot(id: id.unwrap(), frozen_bytes: bytes, codec: codec))
+
+fn hir_snapshot_verify(snapshot: HirSnapshot) -> bool:
+    sha256_text(snapshot.frozen_bytes) == snapshot.id.content_digest
+
+fn hir_snapshot_read(snapshot: HirSnapshot) -> Result<HirModule, text>:
+    if not hir_snapshot_verify(snapshot):
+        return Err("hir_snapshot_digest_mismatch: " + snapshot.id.module_name)
+    val decoded = hir_module_decode(snapshot.frozen_bytes)
+    if decoded == nil:
+        return Err("hir_snapshot_decode_failed: " + snapshot.id.module_name)
+    Ok(decoded.unwrap())

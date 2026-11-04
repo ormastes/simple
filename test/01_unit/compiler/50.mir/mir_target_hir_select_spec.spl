@@ -1,0 +1,45 @@
+use std.spec.*
+use compiler.hir.hir_types.{HirModule, SymbolTable}
+use compiler.common.mir_target_context.{mir_target_context_from_explicit}
+use compiler.mir.mir_cfg_select.{mir_cfg_select_arm}
+use compiler.hir.target_hir.hir_freeze.{hir_snapshot_freeze, hir_snapshot_read}
+use compiler.hir.target_hir.target_hir.{target_hir_for_explicit}
+use compiler.mir.mir_target_hir_select.{mir_target_hir_select_arm}
+
+val ARMS: [text] = ["arch = \"x86\" and os = \"windows\"", "arch = \"x86\"", "arch == \"x86_64\" and os = \"linux\"", "os = \"simpleos\"", ""]
+
+fn fixture(path: text) -> HirModule:
+    HirModule(name: "app.main", path: path, imports: [], exports: [],
+        domain_blocks: [], symbols: SymbolTable.new(), functions: {},
+        gpu_function_targets: {}, gpu_function_backend_orders: {}, classes: {},
+        structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [], extend_enums: [])
+
+describe "TargetHIR cfg arm reader (TargetHIR PR-D)":
+    it "selects the same arms as the legacy reader for x86/x86_64 on Linux, Windows, SimpleOS in both orders":
+        val snap = hir_snapshot_freeze(fixture("a.spl"), 0).unwrap()
+        val before = snap.frozen_bytes
+        val no_feat: [text] = []
+        val triples = ["x86-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "x86-pc-windows-msvc",
+            "x86_64-pc-windows-msvc", "x86-unknown-simpleos", "x86_64-unknown-simpleos"]
+        val expected = [1, 2, 0, 4, 1, 3]
+        for round in [0, 1]:
+            for k in 0..triples.len():
+                val i = if round == 0: k else: triples.len() - 1 - k
+                val view = target_hir_for_explicit(snap.id, triples[i], "llvm", 23, "expr").unwrap()
+                val typed = mir_target_hir_select_arm(view, snap.id, ARMS, no_feat).unwrap()
+                val legacy = mir_cfg_select_arm(ARMS, mir_target_context_from_explicit(triples[i], "llvm", 23).unwrap(), no_feat)
+                expect(typed).to_equal(legacy)
+                expect(typed).to_equal(expected[i])
+                expect(snap.frozen_bytes).to_equal(before)
+        expect(hir_snapshot_read(snap).unwrap().path).to_equal("a.spl")
+
+    it "rejects a handle bound to a different snapshot and malformed conditions":
+        val no_feat: [text] = []
+        val a = hir_snapshot_freeze(fixture("a.spl"), 0).unwrap()
+        val b = hir_snapshot_freeze(fixture("b.spl"), 0).unwrap()
+        val view = target_hir_for_explicit(a.id, "x86_64-unknown-linux-gnu", "llvm", 23, "expr").unwrap()
+        expect(mir_target_hir_select_arm(view, b.id, ARMS, no_feat).unwrap_err()).to_start_with("target_hir_snapshot_mismatch:")
+        expect(mir_target_hir_select_arm(view, a.id, ["bogus_atom"], no_feat).unwrap_err()).to_equal("target_hir_malformed_cfg_condition")
+        expect(mir_target_hir_select_arm(view, a.id, ["windows"], no_feat).unwrap()).to_equal(-1)

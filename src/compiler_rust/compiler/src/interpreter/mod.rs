@@ -115,7 +115,7 @@ pub(crate) use node_exec::{
 mod block_exec;
 pub(crate) use block_exec::{
     assert_dirty_names_invariant, capture_node_scope_shadows, exec_block, exec_block_fn, exec_unsafe_block,
-    restore_block_scope_shadows,
+    bind_block_scope_shadows, restore_block_scope_shadows,
 };
 
 // Public API

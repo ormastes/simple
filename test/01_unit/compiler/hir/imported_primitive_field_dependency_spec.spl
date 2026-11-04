@@ -108,3 +108,19 @@ describe "imported composite primitive field dependencies", tag: ["only-compiled
         lowering.materialize_imported_field_dependency(-1, "probe.owner", "i64", Span.empty(), true)
         expect(lowering.errors.len()).to_equal(1)
         expect(lowering.errors[0].message).to_contain("invalid imported module surface index")
+
+    it "materializes a user nominal inside Option/Result/Dict/array/tuple fields":
+        val provider = "pub struct Payload:\n    value: i64\n"
+        val owner = "use probe.provider.\{Payload\}\n\npub struct Holder:\n    maybe: Payload?\n    opt: Option<Payload>\n    res: Result<Payload, text>\n    many: [Payload]\n    table: Dict<text, Payload>\n    pair: (Payload, i64)\n    deep: Option<[Payload]>\n"
+        val consumer = "use probe.owner.\{Holder\}\n\nfn read(holder: Holder) -> i64:\n    0\n"
+        val lowering = lower_field_consumer(provider, owner, consumer)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.symbols.lookup_qualified_type_raw("probe.owner", "Holder")).to_be_greater_than(-1)
+        expect(lowering.symbols.lookup_qualified_type_raw("probe.provider", "Payload")).to_be_greater_than(-1)
+        expect(lowering.reexport_chase_calls).to_be_less_than(2)
+
+    it "still reports a genuinely missing nominal inside a container":
+        val owner = "pub struct Holder:\n    bad: Option<Missing>\n"
+        val consumer = "use probe.owner.\{Holder\}\n\nfn read(holder: Holder) -> i64:\n    0\n"
+        val lowering = lower_field_consumer("", owner, consumer)
+        expect(lowering.errors.len()).to_be_greater_than(0)
