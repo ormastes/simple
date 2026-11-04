@@ -19,6 +19,17 @@ impl<'a> Parser<'a> {
         let value = if !self.check(&TokenKind::Newline) && !self.is_at_end() {
             Some(self.parse_expression()?)
         } else {
+            // Bare `return` ends at the newline (matches the self-hosted
+            // parser). An indented line right after it can only be a value
+            // the author wrapped onto the next line, so say so.
+            if self.check(&TokenKind::Newline) && self.peek_next().kind == TokenKind::Indent {
+                return Err(ParseError::syntax_error_with_span(
+                    "`return` value must be on the same line as `return` \
+                     (a bare `return` ends at the newline; put the value after `return` \
+                     or continue it with a trailing operator)",
+                    self.current.span,
+                ));
+            }
             None
         };
 
