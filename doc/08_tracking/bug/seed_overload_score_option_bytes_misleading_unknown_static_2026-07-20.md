@@ -1,7 +1,7 @@
 # Seed interp: Option-wrapped extern bytes → misleading "unknown static method" from constructor overload scoring
 
 - **Date:** 2026-07-20
-- **Status:** open (seed Rust defect — .spl call-site workaround landed; see below)
+- **Status:** fixed 2026-11-04 (objects.rs: scoring unwraps Option::Some; "no overload of C.m matches argument types (...)" diagnostic; tests in compiler/tests/interpreter_constructor_test.rs)
 - **Severity:** high (diagnostic actively misleads: reports a name-resolution
   failure for what is an argument-type mismatch; cost multiple debugging hours
   during the emit-object campaign)
