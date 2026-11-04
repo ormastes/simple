@@ -354,6 +354,10 @@ impl Lowerer {
             Expr::Coalesce { expr, default } => self.lower_coalesce(expr, default, ctx),
             // Existence check: expr.? (is present/non-empty)
             Expr::ExistsCheck(inner) => self.lower_exists_check(inner, ctx),
+            Expr::OptionalChain { expr, field } => self.lower_optional_chain(expr, field, None, ctx),
+            Expr::OptionalMethodCall { receiver, method, args } => {
+                self.lower_optional_chain(receiver, method, Some(args), ctx)
+            }
             // Await expression: await expr
             // Simple async is EAGER: await on a non-Future is the identity, so the
             // result type equals the operand type. No Future<T> representation exists

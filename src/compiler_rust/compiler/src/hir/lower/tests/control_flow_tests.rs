@@ -1308,3 +1308,44 @@ fn test_statement_match_without_wildcard_stays_silent() {
         "statement-position match must not carry an exhaustion panic: {repr}"
     );
 }
+
+/// `?.` used to fall through the lenient catch-all and lower to a bare `Nil`
+/// under the JIT, so every safe-navigation read answered nil. It must lower
+/// to a subject binding plus a presence-tested `If` whose else edge is nil.
+#[test]
+fn optional_chain_lowers_to_presence_tested_access() {
+    let module = parse_and_lower(
+        "class Node:\n    v: i64\n    fn get() -> i64:\n        self.v\n\nfn f(n: Node?) -> i64:\n    return n?.v ?? -1\n\nfn g(n: Node?) -> i64:\n    return n?.get() ?? -1\n",
+    )
+    .unwrap();
+    fn contains_chain_if(expr: &HirExpr) -> bool {
+        match &expr.kind {
+            HirExprKind::Block(stmts) => {
+                matches!(stmts.first(), Some(HirStmt::Let { .. }))
+                    && matches!(
+                        stmts.last(),
+                        Some(HirStmt::Expr(HirExpr { kind: HirExprKind::If { else_branch: Some(e), .. }, .. }))
+                            if matches!(e.kind, HirExprKind::Nil)
+                    )
+                    || stmts.iter().any(|s| match s {
+                        HirStmt::Let { value: Some(v), .. } | HirStmt::Expr(v) => contains_chain_if(v),
+                        _ => false,
+                    })
+            }
+            HirExprKind::If { condition, then_branch, else_branch } => {
+                contains_chain_if(condition)
+                    || contains_chain_if(then_branch)
+                    || else_branch.as_ref().is_some_and(|e| contains_chain_if(e))
+            }
+            HirExprKind::BuiltinCall { args, .. } => args.iter().any(contains_chain_if),
+            _ => false,
+        }
+    }
+    for name in ["f", "g"] {
+        let func = module.functions.iter().find(|f| f.name == name).expect("fn");
+        let HirStmt::Return(Some(expr)) = func.body.last().expect("return") else {
+            panic!("expected return in {name}: {:?}", func.body)
+        };
+        assert!(contains_chain_if(expr), "`?.` in {name} did not lower to a presence-tested access: {expr:?}");
+    }
+}

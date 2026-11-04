@@ -738,14 +738,15 @@ pub enum Expr {
     },
 
     /// Optional chaining field access: expr?.field
-    /// Returns Some(field_value) if expr is Some, otherwise None
+    /// Yields the field value as-is when expr is present (Some/Ok payload or a
+    /// plain value), otherwise nil -- never re-wrapped in Some.
     OptionalChain {
         expr: Box<Expr>,
         field: String,
     },
 
     /// Optional chaining method call: expr?.method(args)
-    /// Returns Some(result) if expr is Some, otherwise None
+    /// Yields the call result as-is when expr is present, otherwise nil.
     OptionalMethodCall {
         receiver: Box<Expr>,
         method: String,
