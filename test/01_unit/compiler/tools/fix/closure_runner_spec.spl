@@ -1,0 +1,118 @@
+# @req REQ-SSPEC-UNIT
+# @cover src/compiler/90.tools/fix/closure_runner.spl 75%
+# @cover src/lib/nogc_sync_mut/tooling/easy_fix/closure_api.spl 75%
+"""
+# Closure producer — sandbox admission, harness, edit expansion, rewrite helpers
+
+Design: doc/05_design/app/lsp/closure_refactor.md §2 (Sandbox, Producers).
+A closure only returns Edit values; the core turns them into proposals and
+validates them like any built-in fix. Everything here is in-process; the
+child-process run is covered by the CLI end-to-end spec.
+"""
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{read_file}
+use std.tooling.easy_fix.snapshot.{SourceSnapshot, source_snapshot}
+use std.tooling.easy_fix.node_view.{NodeView}
+use std.tooling.easy_fix.closure_api.{Edit, RewriteCtx, rewrite_ctx, edit_encode, edit_decode,
+    split_top_level_args, is_trivial_arg}
+use compiler.tools.fix.closure_runner.{closure_admit, closure_harness_source, closure_edits_to_fixes, closure_scope_views}
+use compiler.tools.fix.engine.{fix_validate, fix_outcome_diff}
+
+val STACK = "class Stack<T>:\n    items: [T]\n\n    fn first():\n        items[0]\n\n    fn insert(k: text, v: i64):\n        pass\n\nfn use_it(s: Stack<i64>) -> i64:\n    s.insert(\"a\", 1)\n    val b = s.items[2]\n    b\n"
+val CALLS = "fn f(a: i64, b: i64) -> i64:\n    a - b\n\nfn g() -> i64:\n    val r = f(side(), 2)\n    f(1, 2)\n"
+
+fn view_named(views: [NodeView], kind: text, name: text) -> NodeView:
+    for v in views:
+        if v.kind == kind and v.name == name: return v
+    views[0]
+
+fn apply_edits(file: text, source: text, edits: [Edit]) -> text:
+    val snap = source_snapshot(file, source)
+    var snaps: Dict<text, SourceSnapshot> = {}
+    snaps[file] = snap
+    val views = closure_scope_views([snap])
+    val spec = closure_admit("t", "fn rewrite(node: NodeView, ctx: RewriteCtx) -> [Edit]:\n    []\n").unwrap()
+    val outcome = fix_validate(closure_edits_to_fixes(spec, edits, views, snaps), snaps)
+    if not outcome.report.ok: return "VALIDATION FAILED: " + outcome.report.errors.join("; ")
+    outcome.new_sources[file]
+
+describe "closure sandbox admission":
+    it "rejects imports, externs and unsafe blocks":
+        step("deny list")
+        val fs = closure_admit("x", "use std.fs.{read_file}\nfn rewrite(node: NodeView, ctx: RewriteCtx) -> [Edit]:\n    []\n")
+        expect(fs.is_err()).to_equal(true)
+        expect(fs.unwrap_err().contains("`use`")).to_equal(true)
+        expect(closure_admit("x", "extern fn rt_file_read(p: text) -> text\nfn rewrite(node: NodeView, ctx: RewriteCtx) -> [Edit]:\n    []\n").is_err()).to_equal(true)
+        expect(closure_admit("x", "fn rewrite(node: NodeView, ctx: RewriteCtx) -> [Edit]:\n    unsafe:\n        []\n").is_err()).to_equal(true)
+        expect(closure_admit("x", "fn matches(node: NodeView) -> bool:\n    true\n").is_err()).to_equal(true)
+
+    it "accepts the function shape and the class shape":
+        step("shapes")
+        val f = closure_admit("f", read_file("test/fixtures/refactor/first_to_optional.spl")).unwrap()
+        expect(f.class_name).to_equal("")
+        expect(f.has_match).to_equal(true)
+        val c = closure_admit("c", read_file("test/fixtures/refactor/unchecked_index.spl")).unwrap()
+        expect(c.class_name).to_equal("UncheckedIndex")
+        val harness = closure_harness_source(c, closure_scope_views([source_snapshot("s.spl", STACK)]))
+        expect(harness.contains("val __closure = UncheckedIndex()")).to_equal(true)
+        expect(harness.contains("__closure.matches(__v)")).to_equal(true)
+        expect(harness.contains("print(edit_encode(__e))")).to_equal(true)
+        expect(harness.contains("use std.tooling.easy_fix.closure_api")).to_equal(true)
+
+describe "closure rewrite helpers":
+    it "adds a return type to an untyped fn header":
+        step("set_return_type")
+        val views = closure_scope_views([source_snapshot("s.spl", STACK)])
+        val first = view_named(views, "fn_decl", "first")
+        val out = apply_edits("s.spl", STACK, [rewrite_ctx("t").set_return_type(first, "T?")])
+        expect(out.contains("    fn first() -> T?:\n")).to_equal(true)
+
+    it "renames a method and every call site in scope":
+        step("rename")
+        val views = closure_scope_views([source_snapshot("s.spl", STACK)])
+        val decl = view_named(views, "fn_decl", "insert")
+        val out = apply_edits("s.spl", STACK, [rewrite_ctx("t").rename(decl, "set")])
+        expect(out.contains("fn set(k: text, v: i64):")).to_equal(true)
+        expect(out.contains("s.set(\"a\", 1)")).to_equal(true)
+        expect(out.contains("insert")).to_equal(false)
+
+    it "reorders trivial args in place and hoists side-effecting args into temporaries":
+        step("reorder_args")
+        val views = closure_scope_views([source_snapshot("c.spl", CALLS)])
+        var simple_call = views[0]
+        var effect_call = views[0]
+        for v in views:
+            if v.kind == "call" and v.name == "f" and v.args_text == "1, 2": simple_call = v
+            if v.kind == "call" and v.name == "f" and v.args_text.contains("side()"): effect_call = v
+        val ctx = rewrite_ctx("t")
+        val a = apply_edits("c.spl", CALLS, ctx.reorder_args(simple_call, [1, 0]))
+        expect(a.contains("    f(2, 1)\n")).to_equal(true)
+        val b = apply_edits("c.spl", CALLS, ctx.reorder_args(effect_call, [1, 0]))
+        expect(b.contains("    val __a0 = side()\n    val __a1 = 2\n    val r = f(__a1, __a0)\n")).to_equal(true)
+        expect(is_trivial_arg("side()")).to_equal(false)
+        expect(split_top_level_args("a, g(b, c), \"x,y\"").len()).to_equal(3)
+
+    it "turns notes into edit-free proposals and dedupes identical edits":
+        step("notes")
+        val snap = source_snapshot("s.spl", STACK)
+        var snaps: Dict<text, SourceSnapshot> = {}
+        snaps["s.spl"] = snap
+        val views = closure_scope_views([snap])
+        val idx = view_named(views, "index", "")
+        val ctx = rewrite_ctx("t")
+        val spec = closure_admit("t", "fn rewrite(node: NodeView, ctx: RewriteCtx) -> [Edit]:\n    []\n").unwrap()
+        val fixes = closure_edits_to_fixes(spec, [ctx.note(idx, "hello"), ctx.replace(idx, "x"), ctx.replace(idx, "x")], views, snaps)
+        expect(fixes.len()).to_equal(2)
+        expect(fixes[0].description).to_equal("note: hello")
+        expect(fixes[0].replacements.len()).to_equal(0)
+        expect(fixes[1].base_version).to_equal(snap.version)
+
+    it "round-trips edits through the harness line codec":
+        step("codec")
+        val views = closure_scope_views([source_snapshot("s.spl", STACK)])
+        val e = rewrite_ctx("t").replace(views[0], "a|b\n\"c\"")
+        val back = edit_decode(edit_encode(e)).unwrap()
+        expect(back.new_text).to_equal("a|b\n\"c\"")
+        expect(back.file).to_equal("s.spl")
+        expect(edit_decode("garbage") == nil).to_equal(true)

@@ -1,0 +1,211 @@
+# Shared source-edit core — user-closure producer (rev-3 §9 untrusted provider).
+# A closure is Simple source text that matches NodeViews and returns Edit
+# values. It runs ONCE over every view of the scope in a child `bin/simple`
+# process built from a generated harness: inputs are hex-embedded view records,
+# the only output channel is `@edit|...` lines, and the run is bounded by a
+# timeout and an output cap. Admission statically refuses imports, externs and
+# unsafe blocks, so no fs/net/FFI is reachable. Proposals that come back are
+# validated by the core exactly like built-in fixes; nothing here writes.
+use std.tooling.easy_fix.types.{EasyFix, Replacement, FixConfidence}
+use std.tooling.easy_fix.node_view.{NodeView, node_view_encode}
+use std.tooling.easy_fix.snapshot.{SourceSnapshot}
+use std.tooling.easy_fix.closure_api.{Edit, edit_decode}
+use compiler.tools.fix.producer.{fix_unit_from_snapshot, fix_unit_views}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.io_runtime.{write_file, file_exists, file_delete, env_get, env_set_process, time_now_unix_micros}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+
+pub struct ClosureSpec:
+    name: text
+    source: text
+    class_name: text     # "" for the free-function shape
+    has_match: bool
+
+# Denied at an identifier boundary: imports, externs, unsafe/danger blocks and
+# annotations, raw runtime symbols, a competing entry point.
+val DENIED: [text] = ["use", "import", "extern", "unsafe", "danger", "rt_", "fn main("]
+
+# Byte-based scanning: `len()`/`slice`/`find` are bytes, `s[i]` is chars.
+fn _is_ident_byte(b: i64) -> bool:
+    (b >= 97 and b <= 122) or (b >= 65 and b <= 90) or (b >= 48 and b <= 57) or b == 95
+
+fn _has_denied_token(line: text, tok: text) -> bool:
+    var from = 0
+    while from <= line.len() - tok.len():
+        val at = line.slice(from).find(tok)
+        if at < 0: return false
+        val i = from + at
+        var before_ok = true
+        if i > 0: before_ok = not _is_ident_byte(line.byte_at(i - 1))
+        val after = i + tok.len()
+        # `rt_` is a prefix; keywords must end at a boundary (`unsafe:`, `use `, `@unsafe(`)
+        var after_ok = true
+        if not tok.ends_with("_") and not tok.ends_with("(") and after < line.len():
+            after_ok = not _is_ident_byte(line.byte_at(after))
+        if before_ok and after_ok: return true
+        from = i + 1
+    false
+
+# Drop string-literal bodies so a message like "use get()" is not a token.
+fn _strip_strings(line: text) -> text:
+    var parts: [text] = []
+    var in_str = false
+    var seg_start = 0
+    var i = 0
+    while i < line.len():
+        val c = line.byte_at(i)
+        if in_str:
+            if c == 92: i = i + 1
+            elif c == 34:
+                in_str = false
+                seg_start = i + 1
+        elif c == 34:
+            in_str = true
+            parts.push(line.slice(seg_start, i) + " ")
+        i = i + 1
+    if not in_str: parts.push(line.slice(seg_start))
+    parts.join("")
+
+# Static sandbox admission. Err names the first denied token.
+pub fn closure_admit(name: text, source: text) -> Result<ClosureSpec, text>:
+    for line in source.split("\n"):
+        val t = _strip_strings(line.trim())
+        if t.starts_with("#"): continue
+        for d in DENIED:
+            if _has_denied_token(t, d):
+                return Err("closure rejected: `{d.trim()}` is not allowed in a sandboxed closure (line: {t})")
+    if not source.contains("fn rewrite("):
+        return Err("closure rejected: no `fn rewrite(node: NodeView, ctx: RewriteCtx) -> [Edit]` found (optional: `fn matches(node: NodeView) -> bool`; `match` is a keyword)")
+    var class_name = ""
+    for line in source.split("\n"):
+        val t = line.trim()
+        if t.starts_with("class ") and t.ends_with(":"):
+            class_name = t.slice(6, t.len() - 1).trim()
+            val lt = class_name.find("<")
+            if lt >= 0: class_name = class_name.slice(0, lt)
+            break
+    Ok(ClosureSpec(name: name, source: source, class_name: class_name, has_match: source.contains("fn matches(")))
+
+pub fn closure_harness_source(spec: ClosureSpec, views: [NodeView]) -> text:
+    var records: [text] = []
+    for v in views:
+        records.push("\"" + node_view_encode(v) + "\"")
+    val recv = if spec.class_name != "": "__closure." else: ""
+    val match_call = if spec.has_match: "{recv}matches(__v)" else: "true"
+    var out = "use std.tooling.easy_fix.node_view.{NodeView, node_view_decode}\n"
+    out = out + "use std.tooling.easy_fix.closure_api.{Edit, RewriteCtx, rewrite_ctx, edit_encode, split_top_level_args, is_trivial_arg}\n\n"
+    out = out + spec.source + "\n\n"
+    out = out + "val __RECORDS: [text] = [" + records.join(",\n    ") + "]\n\n"
+    out = out + "fn main() -> i64:\n"
+    out = out + "    val __ctx = rewrite_ctx(\"" + spec.name + "\")\n"
+    if spec.class_name != "":
+        out = out + "    val __closure = " + spec.class_name + "()\n"
+    out = out + "    for __r in __RECORDS:\n"
+    out = out + "        if val __v = node_view_decode(__r):\n"
+    out = out + "            if " + match_call + ":\n"
+    out = out + "                for __e in " + recv + "rewrite(__v, __ctx):\n"
+    out = out + "                    print(edit_encode(__e))\n"
+    out = out + "    0\n"
+    out
+
+pub fn closure_default_binary() -> text:
+    val env_bin = env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "": return env_bin
+    if file_exists("bin/simple.exe"): return "bin/simple.exe"
+    "bin/simple"
+
+# Run the harness; Err on admission/timeout/crash/truncation.
+pub fn closure_run(spec: ClosureSpec, views: [NodeView], binary: text, timeout_ms: i64) -> Result<[Edit], text>:
+    val path = get_temp_dir() + "/simple_closure_{time_now_unix_micros()}.spl"
+    if not write_file(path, closure_harness_source(spec, views)):
+        return Err("closure runner: cannot write harness {path}")
+    val previous_mode = env_get("SIMPLE_EXECUTION_MODE") ?? ""
+    val _ = env_set_process("SIMPLE_EXECUTION_MODE", "interpret")
+    val max_out = 64 * 1024 * 1024
+    val (stdout, stderr, code) = process_run_bounded(binary, ["run", path], timeout_ms, max_out)
+    val _ = env_set_process("SIMPLE_EXECUTION_MODE", previous_mode)
+    val _ = file_delete(path)
+    if code != 0:
+        var tail = stderr.trim()
+        if tail.len() > 400: tail = tail.slice(tail.len() - 400)
+        return Err("closure runner: child exited with {code} (timeout {timeout_ms} ms): {tail}")
+    if stdout.len() >= max_out:
+        return Err("closure runner: output exceeded {max_out} bytes")
+    var edits: [Edit] = []
+    for line in stdout.split("\n"):
+        if val e = edit_decode(line.trim()):
+            edits.push(e)
+    Ok(edits)
+
+fn _rename_targets(e: Edit, all_views: [NodeView]) -> [NodeView]:
+    var out: [NodeView] = []
+    for v in all_views:
+        if v.name != e.symbol or v.name_start < 0: continue
+        if v.kind == "fn_decl" or v.kind == "method_call" or v.kind == "ident" or v.kind == "call":
+            out.push(v)
+    out
+
+fn _line_col(source: text, offset: i64) -> (i64, i64):
+    var line = 1
+    var col = 1
+    var i = 0
+    while i < offset and i < source.len():
+        if source.byte_at(i) == 10:
+            line = line + 1
+            col = 1
+        else:
+            col = col + 1
+        i = i + 1
+    (line, col)
+
+# Edits -> proposals. `rename` expands to every same-name site in scope
+# (syntax-level; typed resolution is stage3-pending). Duplicate replacements
+# from several views collapse to one. Notes become proposals with no edits.
+pub fn closure_edits_to_fixes(spec: ClosureSpec, edits: [Edit], all_views: [NodeView],
+                              snapshots: Dict<text, SourceSnapshot>) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    var seen: Dict<text, bool> = {}
+    for e in edits:
+        if not snapshots.has(e.file): continue
+        val source = snapshots[e.file].source
+        if e.kind == "note":
+            var note = EasyFix.create(id: "R:{spec.name}:{e.line}", description: "note: {e.message}", confidence: FixConfidence.Uncertain)
+            note.base_version = e.version
+            fixes.push(note)
+            continue
+        var targets: [(text, i64, i64)] = []
+        if e.kind == "rename":
+            for t in _rename_targets(e, all_views):
+                targets.push((t.file, t.name_start, t.name_end))
+        else:
+            targets.push((e.file, e.start, e.end))
+        for t in targets:
+            val (file, start, end) = t
+            val key = "{file}|{start}|{end}|{e.new_text}"
+            if seen.has(key): continue
+            seen[key] = true
+            if not snapshots.has(file): continue
+            val (line, col) = _line_col(snapshots[file].source, start)
+            var fix = EasyFix.create(id: "R:{spec.name}:{line}", description: e.message, confidence: FixConfidence.Likely)
+            fix.base_version = snapshots[file].version
+            fix.add_replacement(Replacement.create(file: file, start: start, end: end, line: line, column: col, new_text: e.new_text))
+            fixes.push(fix)
+    fixes
+
+# Views for every snapshot (files that do not parse contribute none).
+pub fn closure_scope_views(snapshots: [SourceSnapshot]) -> [NodeView]:
+    var all: [NodeView] = []
+    for s in snapshots:
+        for v in fix_unit_views(fix_unit_from_snapshot(s)):
+            all.push(v)
+    all
+
+# Full producer step for a closure over a scope: views -> sandboxed run -> proposals.
+pub fn closure_collect(spec: ClosureSpec, snapshots: [SourceSnapshot], binary: text, timeout_ms: i64) -> Result<[EasyFix], text>:
+    val views = closure_scope_views(snapshots)
+    var by_path: Dict<text, SourceSnapshot> = {}
+    for s in snapshots: by_path[s.file] = s
+    match closure_run(spec, views, binary, timeout_ms):
+        case Err(e): Err(e)
+        case Ok(edits): Ok(closure_edits_to_fixes(spec, edits, views, by_path))
+

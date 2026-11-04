@@ -111,3 +111,24 @@ interpret mode`. With bootstrap delegation disabled, it identifies itself as
 a Rust seed and cannot parse the current imported `process_ops.spl`. Therefore
 this audit does not claim a new live PASS or change the bug status. Qualification
 still needs a current pure-Simple runtime; no full bootstrap was attempted.
+
+## 2026-11-04 live macOS run (lane 4) — non-qualifying (strict_evidence=0)
+
+Host macOS 26 arm64; tree release/1.0.0 `1ebaf7d1e1f`; `libspl_winit.dylib` built
+from that tree's `src/runtime/spl_winit`; launcher
+`scripts/gui/macos-gui-run.shs` with `SIMPLE_GUI_BINARY` = seed `/Users/ormastes/.local/share/simple-seeds/release100-7a0e6fe516f-20261031/simple`
+(receipt `macos_gui_run_pid_receipt_v3`, `strict_evidence=0`, selected ==
+bundled hash `f923ed0f…62aa9`).
+- AX finds exactly one window "Simple registration regression" for the launched PID.
+- Real cliclick titlebar drag moved AX position 700,206 -> 850,286 (exactly +150,+80).
+- Screen capture shows the window composited with the fixture's 0x204466 fill.
+- Instrumented copy of the fixture received Moved(2), MouseButton(20 press),
+  Keyboard(10, keycode 81 press) from real input: presented/moved/clicked/q all true.
+- AX press of the native close button delivers CloseRequested (loop exits in ~1 s).
+- The physical cliclick on the close button did not produce CloseRequested in
+  three runs. A macOS screen-recording privacy prompt was over the traffic-light
+  area during these runs (it was not dismissed: that is a user security choice),
+  so the physical close-click result is inconclusive, not a provider defect.
+Registration + input delivery are demonstrated live; qualification still needs
+the strict receipt from an admitted pure-Simple full-CLI (Lane 1) and an
+unobstructed close click. Status: open (source repair live-confirmed except close-click).

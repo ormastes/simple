@@ -1,0 +1,107 @@
+# Shared source-edit core — the snapshot-bound AST node view (rev-3 AstNodeRef)
+# that producers and user closures match on. Pure data plus a line-record codec
+# so the same view crosses the sandbox boundary unchanged.
+#
+# Offsets are BYTE offsets into the snapshot source (same indices as
+# Replacement). `version` binds the view to the SourceSnapshot it came from.
+use std.common.text_bytes.{bytes_to_text, text_to_bytes}
+
+pub struct NodeView:
+    file: text
+    version: text
+    module_path: text
+    kind: text          # fn_decl | class_decl | call | method_call | index | ident | nil_lit | return | unsafe_block
+    name: text          # fn / method / identifier name
+    owner: text         # enclosing class for a desugared `Owner__method`
+    owner_type_params: text   # "T" or "K,V"
+    params: text        # comma-joined parameter names
+    ret_type: text      # declared return type text, "" when untyped
+    receiver: text      # source text of the receiver (method_call / index)
+    callee: text        # source text of the callee (call)
+    args_text: text     # text inside the call parentheses / index brackets
+    text: text          # exact source text of the node
+    start: i64
+    end: i64
+    line: i64
+    col: i64
+    header_end: i64     # fn_decl: offset of the ':' closing the header, else -1
+    name_start: i64     # offset of `name` inside the node, -1 when unknown
+    name_end: i64
+    args_start: i64     # offset just after '(' / '[' , -1 when none
+    args_end: i64       # offset of the matching ')' / ']'
+    stmt_start: i64     # start offset of the enclosing statement line
+    indent: text        # indentation of the enclosing statement line
+    in_unsafe: bool
+    parent_kind: text
+
+pub fn node_view_empty() -> NodeView:
+    NodeView(file: "", version: "", module_path: "", kind: "", name: "", owner: "",
+        owner_type_params: "", params: "", ret_type: "", receiver: "", callee: "",
+        args_text: "", text: "", start: 0, end: 0, line: 0, col: 0, header_end: -1,
+        name_start: -1, name_end: -1, args_start: -1, args_end: -1, stmt_start: 0,
+        indent: "", in_unsafe: false, parent_kind: "")
+
+# ---------------------------------------------------------------------------
+# Record codec: one line per view, '|'-separated, every text field hex-encoded
+# so file names, Unicode, newlines and '|' are data. Used to embed views in
+# the sandbox harness and to parse harness output.
+# ---------------------------------------------------------------------------
+val HEX = "0123456789abcdef"
+
+pub fn hex_encode(s: text) -> text:
+    var out: [text] = []
+    for b in text_to_bytes(s):
+        val v: i64 = b
+        out.push(HEX[v / 16] + HEX[v % 16])
+    out.join("")
+
+fn _hex_digit(c: text) -> i64:
+    val i = HEX.find(c)
+    if i < 0: 0 else: i
+
+pub fn hex_decode(h: text) -> text:
+    var bytes: [u8] = []
+    var i = 0
+    while i + 1 < h.len():
+        val v = _hex_digit(h[i]) * 16 + _hex_digit(h[i + 1])
+        bytes.push(v)
+        i = i + 2
+    bytes_to_text(bytes)
+
+pub fn node_view_encode(v: NodeView) -> text:
+    val fields: [text] = [hex_encode(v.file), hex_encode(v.version), hex_encode(v.module_path),
+        v.kind, hex_encode(v.name), hex_encode(v.owner), hex_encode(v.owner_type_params),
+        hex_encode(v.params), hex_encode(v.ret_type), hex_encode(v.receiver), hex_encode(v.callee),
+        hex_encode(v.args_text), hex_encode(v.text), "{v.start}", "{v.end}", "{v.line}", "{v.col}",
+        "{v.header_end}", "{v.name_start}", "{v.name_end}", "{v.args_start}", "{v.args_end}",
+        "{v.stmt_start}", hex_encode(v.indent), if v.in_unsafe: "1" else: "0", v.parent_kind]
+    fields.join("|")
+
+fn _int_field(f: [text], i: i64) -> i64:
+    int(f[i]) ?? 0
+
+pub fn node_view_decode(record: text) -> NodeView?:
+    val f = record.split("|")
+    if f.len() < 26: return nil
+    Some(NodeView(file: hex_decode(f[0]), version: hex_decode(f[1]), module_path: hex_decode(f[2]),
+        kind: f[3], name: hex_decode(f[4]), owner: hex_decode(f[5]), owner_type_params: hex_decode(f[6]),
+        params: hex_decode(f[7]), ret_type: hex_decode(f[8]), receiver: hex_decode(f[9]),
+        callee: hex_decode(f[10]), args_text: hex_decode(f[11]), text: hex_decode(f[12]),
+        start: _int_field(f, 13), end: _int_field(f, 14), line: _int_field(f, 15), col: _int_field(f, 16),
+        header_end: _int_field(f, 17), name_start: _int_field(f, 18), name_end: _int_field(f, 19),
+        args_start: _int_field(f, 20), args_end: _int_field(f, 21), stmt_start: _int_field(f, 22),
+        indent: hex_decode(f[23]), in_unsafe: f[24] == "1", parent_kind: f[25]))
+
+# Module path for a repo-relative source path: src/app/x/y.spl -> app.x.y,
+# src/lib/<family>/a/b.spl -> std.a.b, anything else -> dotted path.
+pub fn module_path_for_file(file: text) -> text:
+    var p = file.replace("\\", "/")
+    if p.ends_with(".spl"): p = p.slice(0, p.len() - 4)
+    val src = p.find("src/")
+    if src >= 0: p = p.slice(src + 4)
+    if p.starts_with("lib/"):
+        val rest = p.slice(4)
+        val slash = rest.find("/")
+        if slash >= 0: p = "std/" + rest.slice(slash + 1)
+    p.replace("/", ".")
+

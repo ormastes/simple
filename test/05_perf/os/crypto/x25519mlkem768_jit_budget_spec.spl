@@ -1,0 +1,87 @@
+# Regression + budget spec for bug
+# x25519mlkem768_jit_fallback_interpreted_execution_2026-08-05.
+#
+# Before: the hybrid-KEM module graph dropped to the tree-walk interpreter
+# (unresolved `cuda_module_load_binary`; ~12 s per operation), and the JIT'd
+# ML-KEM core silently produced wrong bytes (erased list.get / tuple-element
+# ints passed to i64 params without unboxing; `_absorb_block` name clash).
+# After: JIT runs the exchange in well under the budget and is byte-identical
+# to the interpreter. Pinned checksums were captured from the interpreter.
+
+use std.spipe.*
+use os.crypto.ml_kem_ntt.{ntt, intt}
+use os.crypto.ml_kem_kpke.{shake128, kpke_keygen}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# Whole keygen+encapsulate+decapsulate budget (bench total_us). Interpreter: ~39 s; JIT: ~0.26 s.
+# 8 s leaves >30x margin for a loaded host and still fails on the interpreter.
+val EXCHANGE_BUDGET_US: i64 = 8000000
+
+fn _cs(v: list) -> i64:
+    var h: i64 = 7
+    var i: i64 = 0
+    while i < v.len():
+        h = (h * 131 + v.get(i)) % 1000000007
+        i = i + 1
+    h
+
+fn _seq(n: i64, base: i64) -> list:
+    var r: list = []
+    var i: i64 = 0
+    while i < n:
+        r.push((base + i * 7) % 256)
+        i = i + 1
+    r
+
+describe "X25519MLKEM768 JIT execution":
+    it "NTT round-trips and matches the interpreter checksum":
+        var f: list = []
+        var i: i64 = 0
+        while i < 256:
+            f.push((i * 37 + 11) % 3329)
+            i = i + 1
+        val n = ntt(f)
+        val back = intt(n)
+        var ok = true
+        i = 0
+        while i < 256:
+            if back.get(i) != f.get(i):
+                ok = false
+            i = i + 1
+        expect(ok).to_be(true)
+        var s: i64 = 0
+        i = 0
+        while i < 256:
+            s = (s * 131 + n.get(i)) % 1000000007
+            i = i + 1
+        expect(s).to_equal(705343651)
+
+    it "SHAKE128 squeeze and K-PKE keygen match interpreter bytes":
+        val d = _seq(32, 1)
+        expect(_cs(shake128(d, 200))).to_equal(75264152)
+        val kp = kpke_keygen(d)
+        expect(_cs(kp.0)).to_equal(342937824)
+        expect(_cs(kp.1)).to_equal(968580998)
+
+    it "hybrid exchange runs under JIT (no interpreter fallback), byte-identical, in budget":
+        # The test runner forces SIMPLE_EXECUTION_MODE=interpret in its own env; the
+        # child must opt back in to the production JIT path.
+        val r = rt_process_run("sh", ["-c",
+            "SIMPLE_EXECUTION_MODE=jit bin/simple.exe run src/app/test/x25519mlkem768_perf_bench.spl"])
+        val out = r.0
+        val err = r.1
+        expect(r.2).to_equal(0)
+        # Whole-module interpreter demotion is the bug; it must not recur.
+        expect(err.contains("[jit-fallback]")).to_be(false)
+        expect(err.contains("jit-compile-error")).to_be(false)
+        # Interpreter-captured values: secret == recovered == pinned.
+        expect(out.contains("SECRET 920329357 n=64")).to_be(true)
+        expect(out.contains("RECOVERED 920329357 n=64")).to_be(true)
+        expect(out.contains("SHARE 125154642 n=1120")).to_be(true)
+        val marker = "total_us "
+        val at = out.index_of(marker)
+        expect(at >= 0).to_be(true)
+        val rest = out.substring(at + marker.len(), at + marker.len() + 12)
+        val digits = rest.split("\n")[0].trim()
+        expect(digits.to_i64() < EXCHANGE_BUDGET_US).to_be(true)

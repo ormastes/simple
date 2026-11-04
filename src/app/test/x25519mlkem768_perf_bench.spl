@@ -1,0 +1,55 @@
+# X25519MLKEM768 hot-path wall-time bench (keygen / encapsulate / decapsulate).
+# Usage: bin/simple.exe run src/app/test/x25519mlkem768_perf_bench.spl
+# Prints one line per op: "<op> <micros>" then "ROUNDTRIP ok|FAIL" and the
+# shared-secret digest so JIT and interpreter runs can be compared byte-for-byte.
+use lib.common.crypto.x25519_mlkem768.contract.{
+    X25519MlKem768Backend, X25519MlKem768SelectionMode,
+    x25519_mlkem768_default_config}
+use os.crypto.x25519_mlkem768.hybrid.{
+    x25519_mlkem768_keygen, x25519_mlkem768_encapsulate,
+    x25519_mlkem768_decapsulate}
+use test.fixtures.crypto.x25519mlkem768.canonical_fixture.{
+    x25519_mlkem768_fixture_list32, x25519_mlkem768_fixture_bytes32}
+
+extern fn rt_time_now_micros() -> i64
+
+fn _hex(values: list) -> text:
+    # order-sensitive checksum; also prints first/last element
+    var h: i64 = 7
+    var i: i64 = 0
+    while i < values.len():
+        h = (h * 131 + values.get(i)) % 1000000007
+        i = i + 1
+    h.to_text() + " n=" + values.len().to_text()
+
+fn main():
+    var config = x25519_mlkem768_default_config()
+    config.requested_backend = X25519MlKem768Backend.ScalarCpu
+    config.selection_mode = X25519MlKem768SelectionMode.Require
+    val t0 = rt_time_now_micros()
+    val client = match x25519_mlkem768_keygen(config, x25519_mlkem768_fixture_bytes32(1), x25519_mlkem768_fixture_list32(33), x25519_mlkem768_fixture_list32(65)):
+        case Ok(v): v
+        case Err(e):
+            print "keygen Err " + e
+            return
+    val t1 = rt_time_now_micros()
+    print "keygen_us " + (t1 - t0).to_text()
+    val server = match x25519_mlkem768_encapsulate(config, client.client_key_share, x25519_mlkem768_fixture_bytes32(97), x25519_mlkem768_fixture_list32(129)):
+        case Ok(v): v
+        case Err(e):
+            print "encap Err " + e
+            return
+    val t2 = rt_time_now_micros()
+    print "encapsulate_us " + (t2 - t1).to_text()
+    val rec = match x25519_mlkem768_decapsulate(config, server.server_key_share, client.x25519_private_key, client.decapsulation_key):
+        case Ok(v): v
+        case Err(e):
+            print "decap Err " + e
+            return
+    val t3 = rt_time_now_micros()
+    print "decapsulate_us " + (t3 - t2).to_text()
+    print "total_us " + (t3 - t0).to_text()
+    print "SECRET_LEN " + server.shared_secret.len().to_text()
+    print "SECRET " + _hex(server.shared_secret)
+    print "RECOVERED " + _hex(rec.shared_secret)
+    print "SHARE " + _hex(server.server_key_share)
