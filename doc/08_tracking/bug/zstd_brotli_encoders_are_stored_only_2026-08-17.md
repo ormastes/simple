@@ -7,6 +7,23 @@ evidence found in the body. This is bookkeeping, not verification.
 **Status (2026-08-17, revised): zstd FIXED — `zstd_compress_frame` now emits
 real Huffman-coded Compressed_Blocks. brotli STILL-OPEN.**
 
+**Status (2026-11-05): brotli FIXED (Phase 1 minimal RFC 7932 encoder).**
+`src/lib/nogc_sync_mut/compression/brotli/lz77_encoder.spl` emits compressed
+meta-blocks: LZ77 commands from the shared hash-chain finder
+(`zstd_enc_find_sequences`, window 22 bits), per-meta-block canonical prefix
+codes (length-limited to 15, complex-prefix-code headers,
+`prefix_code.spl`), one block type per category, no context modelling, no
+static dictionary, explicit distance codes only; stored fallback per
+meta-block when compression does not pay. `brotli_encode` picks the smallest
+candidate. Evidence (seed interpreter, in-repo decoder AND external
+`brotli -d` byte-exact): 1 B -> 5 B; 39 B text -> 34 B; 64 KiB repetitive
+-> 52 B; 64 KiB random -> 65540 B (stored + 4); 171 KiB markdown -> 65326 B
+(38.1 %, encode 8.9 s). Specs:
+`test/01_unit/lib/nogc_sync_mut/compression/brotli/brotli_lz77_general_{round_trip,large_text}_spec.spl`.
+Residual (not Phase 1): last-distance ring codes, context modelling, static
+dictionary, the `gc_async_mut`/`nogc_async_mut` brotli copies still carry the
+old stored-only encoder.
+
 **Found:** 2026-08-17, lane W11-B of `.spipe/simple_enterprise_suite`, while
 determining whether `test/01_unit/lib/nogc_async_mut/http_server/compression_spec.spl`
 or `src/lib/nogc_async_mut/http_server/compression.spl` was wrong.

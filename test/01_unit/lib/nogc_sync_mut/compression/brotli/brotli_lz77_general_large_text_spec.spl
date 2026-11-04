@@ -1,0 +1,53 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+
+# brotli_lz77_general_large_text_spec.spl
+#
+# ~170 KiB realistic text (three repo markdown files) through the general
+# RFC 7932 encoder and back through the in-repo decoder.  Kept in its own
+# file because the bit-at-a-time decoder dominates the run time (~35 s on
+# the seed interpreter for encode + decode).
+# Bug: doc/08_tracking/bug/zstd_brotli_encoders_are_stored_only_2026-08-17.md
+
+use std.spec.step
+use std.spec.*
+use std.io_runtime.{file_read_bytes}
+use std.nogc_sync_mut.compression.brotli.decoder.{brotli_decode}
+use std.nogc_sync_mut.compression.brotli.encoder.{brotli_encode}
+
+fn _bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn _append(dst: [u8], src: [u8]) -> [u8]:
+    var out = dst
+    var i = 0
+    while i < src.len():
+        out.push(src[i])
+        i = i + 1
+    out
+
+fn _corpus() -> [u8]:
+    var data: [u8] = []
+    data = _append(data, file_read_bytes("README.md"))
+    data = _append(data, file_read_bytes("doc/glossary.md"))
+    data = _append(data, file_read_bytes("doc/07_guide/quick_reference/syntax_quick_reference.md"))
+    data
+
+describe("brotli_encode (general LZ77 + prefix codes) — large realistic text"):
+
+    it "round-trips ~170 KiB of markdown and compresses it below 50 percent":
+        step("read corpus, encode, decode, compare")
+        val payload = _corpus()
+        expect(payload.len() > 150000).to_equal(true)
+        val encoded = brotli_encode(payload)
+        expect(encoded.len() * 2 < payload.len()).to_equal(true)
+        match brotli_decode(encoded):
+            case Ok(out): expect(_bytes_equal(out, payload)).to_equal(true)
+            case Err(_): expect(false).to_equal(true)

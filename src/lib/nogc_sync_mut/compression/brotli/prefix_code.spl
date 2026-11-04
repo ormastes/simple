@@ -1,0 +1,314 @@
+# brotli/prefix_code.spl — prefix-code construction and header emission for
+# compressed meta-blocks (RFC 7932 §3.2 – §3.5).
+#
+# Given per-symbol frequencies this builds a length-limited canonical
+# Huffman code and writes its header in one of the two RFC forms:
+#   - simple prefix code (HSKIP=1) when the alphabet has 0 or 1 used symbols
+#   - complex prefix code (HSKIP=0) otherwise: a code-length code (lengths
+#     limited to 5, written with the fixed variable-length table) followed by
+#     the run-length encoded symbol lengths (symbols 16 and 17 for repeats).
+#
+# Codeword bit order: canonical codes are MSB-first; the LSB-first writer
+# emits them bit-reversed, which is how decoder._huff_decode consumes them.
+
+use std.nogc_sync_mut.compression.brotli.bit_writer.{
+    BrotliBitWriter,
+    brotli_bits_write,
+    brotli_bit_reverse,
+    brotli_bits_write_simple_prefix
+}
+
+# A prefix code over an alphabet.
+# - lens[s]:  codeword length of symbol s (0 = unused / not emitted)
+# - codes[s]: codeword of symbol s already bit-reversed for the LSB-first writer
+# - used:     number of symbols with nonzero frequency
+# - single:   the lone symbol when used <= 1 (0 when used == 0), else -1
+struct BrotliPrefixCode:
+    lens: [i64]
+    codes: [i64]
+    used: i64
+    single: i64
+
+fn _bpc_fill(n: i64, v: i64) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    while i < n:
+        out.push(v)
+        i = i + 1
+    out
+
+# Huffman code lengths for one tree-building pass over `syms` (sorted by
+# ascending weight) with weights `wts`.  Two-queue method: leaves in sorted
+# order, internal nodes in creation order (non-decreasing weights).
+fn _bpc_tree_lengths(syms: [i64], wts: [i64], alpha: i64) -> [i64]:
+    val n = syms.len()
+    # Node arrays: 0..n-1 are leaves, n.. are internal nodes.
+    var weight: [i64] = []
+    var left: [i64] = []
+    var right: [i64] = []
+    var i = 0
+    while i < n:
+        weight.push(wts[i])
+        left.push(-1)
+        right.push(-1)
+        i = i + 1
+    var leaf_q = 0
+    var node_q = n
+    var next = n
+    while next - node_q + (n - leaf_q) > 1:
+        var picks: [i64] = []
+        var p = 0
+        while p < 2:
+            var take_leaf = false
+            if leaf_q < n:
+                if node_q >= next:
+                    take_leaf = true
+                elif weight[leaf_q] <= weight[node_q]:
+                    take_leaf = true
+            if take_leaf:
+                picks.push(leaf_q)
+                leaf_q = leaf_q + 1
+            else:
+                picks.push(node_q)
+                node_q = node_q + 1
+            p = p + 1
+        weight.push(weight[picks[0]] + weight[picks[1]])
+        left.push(picks[0])
+        right.push(picks[1])
+        next = next + 1
+    # Depth from the root (last created node) downwards.
+    var depth = _bpc_fill(next, 0)
+    var k = next - 1
+    while k >= n:
+        depth[left[k]] = depth[k] + 1
+        depth[right[k]] = depth[k] + 1
+        k = k - 1
+    var lens = _bpc_fill(alpha, 0)
+    i = 0
+    while i < n:
+        lens[syms[i]] = depth[i]
+        i = i + 1
+    lens
+
+# Code lengths (limited to `max_len`) from symbol frequencies.
+# Symbols with zero frequency get length 0.  With one used symbol the result
+# gives it length 1; with none every length is 0.  Length limiting follows
+# the reference encoder: raise every used count to a floor and rebuild until
+# the deepest leaf fits.
+fn brotli_prefix_lengths(freq: [i64], max_len: i64) -> [i64]:
+    val alpha = freq.len()
+    var syms: [i64] = []
+    var i = 0
+    while i < alpha:
+        if freq[i] > 0:
+            syms.push(i)
+        i = i + 1
+    val n = syms.len()
+    if n == 0:
+        return _bpc_fill(alpha, 0)
+    if n == 1:
+        var one = _bpc_fill(alpha, 0)
+        one[syms[0]] = 1
+        return one
+    var floor = 1
+    while true:
+        # Insertion sort of the used symbols by (clamped count, symbol).
+        var wts: [i64] = []
+        var order: [i64] = []
+        i = 0
+        while i < n:
+            var w = freq[syms[i]]
+            if w < floor:
+                w = floor
+            var j = wts.len()
+            wts.push(0)
+            order.push(0)
+            while j > 0 and wts[j - 1] > w:
+                wts[j] = wts[j - 1]
+                order[j] = order[j - 1]
+                j = j - 1
+            wts[j] = w
+            order[j] = syms[i]
+            i = i + 1
+        val lens = _bpc_tree_lengths(order, wts, alpha)
+        var deepest = 0
+        i = 0
+        while i < alpha:
+            if lens[i] > deepest:
+                deepest = lens[i]
+            i = i + 1
+        if deepest <= max_len:
+            return lens
+        floor = floor * 2
+    _bpc_fill(alpha, 0)
+
+# Canonical codewords from lengths, bit-reversed for the LSB-first writer.
+fn brotli_prefix_codes(lens: [i64]) -> [i64]:
+    val alpha = lens.len()
+    var bl_count = _bpc_fill(17, 0)
+    var i = 0
+    while i < alpha:
+        if lens[i] > 0:
+            bl_count[lens[i]] = bl_count[lens[i]] + 1
+        i = i + 1
+    var next_code = _bpc_fill(17, 0)
+    var code = 0
+    var bits = 1
+    while bits <= 16:
+        code = (code + bl_count[bits - 1]) << 1
+        next_code[bits] = code
+        bits = bits + 1
+    var codes = _bpc_fill(alpha, 0)
+    i = 0
+    while i < alpha:
+        val l = lens[i]
+        if l > 0:
+            codes[i] = brotli_bit_reverse(next_code[l], l)
+            next_code[l] = next_code[l] + 1
+        i = i + 1
+    codes
+
+# Build a prefix code over `freq` (one entry per alphabet symbol).
+fn brotli_prefix_code_build(freq: [i64]) -> BrotliPrefixCode:
+    val alpha = freq.len()
+    var used = 0
+    var single = 0
+    var i = 0
+    while i < alpha:
+        if freq[i] > 0:
+            used = used + 1
+            single = i
+        i = i + 1
+    if used <= 1:
+        # Simple NSYM=1 code: the decoder reads zero bits per symbol.
+        return BrotliPrefixCode(lens: _bpc_fill(alpha, 0), codes: _bpc_fill(alpha, 0), used: used, single: single)
+    val lens = brotli_prefix_lengths(freq, 15)
+    BrotliPrefixCode(lens: lens, codes: brotli_prefix_codes(lens), used: used, single: -1)
+
+# Write one symbol of `code`.
+fn brotli_prefix_write_symbol(w: BrotliBitWriter, code: BrotliPrefixCode, sym: i64) -> BrotliBitWriter:
+    brotli_bits_write(w, code.codes[sym], code.lens[sym])
+
+# Fixed variable-length code for the 18 code-length-code lengths (RFC 7932
+# §3.5), as (bits, nbits) pairs indexed by the length value 0..5.  These are
+# the inverse of decoder._read_prefix's pfx_len / pfx_val peek table.
+fn _bpc_clc_bits(v: i64) -> i64:
+    val t = [0, 7, 3, 2, 1, 15]
+    t[v]
+
+fn _bpc_clc_nbits(v: i64) -> i64:
+    val t = [2, 4, 3, 2, 2, 4]
+    t[v]
+
+# Write a complex prefix code header for `lens` (at least two nonzero
+# entries).  Run-length symbols: 16 repeats the previous nonzero length
+# (3..6 + chained), 17 repeats zero (3..10 + chained); chained repeats use
+# the reference encoder's digit scheme so consecutive 16/17 symbols compound
+# exactly as decoder._read_prefix accumulates them.
+fn brotli_write_complex_prefix(w: BrotliBitWriter, lens: [i64]) -> BrotliBitWriter:
+    val alpha = lens.len()
+    var last = alpha - 1
+    while last >= 0 and lens[last] == 0:
+        last = last - 1
+    # RLE of lens[0..=last] into (symbol, extra) pairs.
+    var rle_sym: [i64] = []
+    var rle_extra: [i64] = []
+    var i = 0
+    while i <= last:
+        val v = lens[i]
+        var run = 1
+        while i + run <= last and lens[i + run] == v:
+            run = run + 1
+        if v == 0:
+            if run < 3:
+                var q = 0
+                while q < run:
+                    rle_sym.push(0)
+                    rle_extra.push(0)
+                    q = q + 1
+            else:
+                var digits: [i64] = []
+                var rem = run - 3
+                while true:
+                    digits.push(rem & 7)
+                    rem = rem >> 3
+                    if rem == 0:
+                        break
+                    rem = rem - 1
+                var d = digits.len() - 1
+                while d >= 0:
+                    rle_sym.push(17)
+                    rle_extra.push(digits[d])
+                    d = d - 1
+        else:
+            rle_sym.push(v)
+            rle_extra.push(0)
+            val rest = run - 1
+            if rest < 3:
+                var q = 0
+                while q < rest:
+                    rle_sym.push(v)
+                    rle_extra.push(0)
+                    q = q + 1
+            else:
+                var digits: [i64] = []
+                var rem = rest - 3
+                while true:
+                    digits.push(rem & 3)
+                    rem = rem >> 2
+                    if rem == 0:
+                        break
+                    rem = rem - 1
+                var d = digits.len() - 1
+                while d >= 0:
+                    rle_sym.push(16)
+                    rle_extra.push(digits[d])
+                    d = d - 1
+        i = i + run
+    # Code-length code over the 18 RLE symbols, lengths limited to 5.
+    var clc_freq = _bpc_fill(18, 0)
+    i = 0
+    while i < rle_sym.len():
+        clc_freq[rle_sym[i]] = clc_freq[rle_sym[i]] + 1
+        i = i + 1
+    val clc_lens = brotli_prefix_lengths(clc_freq, 5)
+    val clc_codes = brotli_prefix_codes(clc_lens)
+    # A single-symbol code-length code is declared with length 1 but the
+    # decoder reads zero bits per symbol for it (decoder._huff_build single).
+    var clc_used = 0
+    i = 0
+    while i < 18:
+        if clc_lens[i] > 0:
+            clc_used = clc_used + 1
+        i = i + 1
+    var out = brotli_bits_write(w, 0, 2)   # HSKIP = 0
+    # Code-length-code lengths in the RFC order; the decoder stops reading
+    # as soon as the code is complete, so stop emitting at that point too.
+    val order = [1, 2, 3, 4, 0, 5, 17, 6, 16, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    var space = 32
+    i = 0
+    while i < 18 and space > 0:
+        val v = clc_lens[order[i]]
+        out = brotli_bits_write(out, _bpc_clc_bits(v), _bpc_clc_nbits(v))
+        if v != 0:
+            space = space - (32 >> v)
+        i = i + 1
+    # Symbol lengths.
+    i = 0
+    while i < rle_sym.len():
+        val s = rle_sym[i]
+        if clc_used > 1:
+            out = brotli_bits_write(out, clc_codes[s], clc_lens[s])
+        if s == 16:
+            out = brotli_bits_write(out, rle_extra[i], 2)
+        elif s == 17:
+            out = brotli_bits_write(out, rle_extra[i], 3)
+        i = i + 1
+    out
+
+# Write the header of `code` for an alphabet addressed with `alphabet_bits`
+# bits in the simple form.
+fn brotli_prefix_code_write(w: BrotliBitWriter, code: BrotliPrefixCode, alphabet_bits: i64) -> BrotliBitWriter:
+    if code.used <= 1:
+        return brotli_bits_write_simple_prefix(w, alphabet_bits, [code.single])
+    brotli_write_complex_prefix(w, code.lens)
