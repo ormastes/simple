@@ -486,3 +486,56 @@ recommended next step and is now precisely specified in this record).
 
 Cycles: 5 of 6. No production code changed (all probes reverted).
 bug_db.sdn untouched.
+
+---
+
+## 2026-11-06 — RSP WATCHPOINT LANE (PR #7031+1): the writer caught live; the tool is now in-tree at scripts/debug/rsp_watch.py
+
+Built the record's prescribed tool: a scripted RSP client against QEMU's
+gdbstub (`-S -gdb tcp:<port>`). **Z2/Z3 hardware watchpoints ARE accepted by
+this QEMU riscv64 stub** — no gdb binary needed. The client
+(`scripts/debug/rsp_watch.py`, landed with a header of hard-won protocol
+notes) anchors after the parser module's dynamic init, derives the par_state
+block range from the live global, and arms a block write-watch plus
+decrease-filters on all three runtime bump cursors.
+
+Live-caught results (transcripts `/tmp/rv-boot/rsp-*.log`):
+
+1. **The overlay writer, caught red-handed at pc precision**: the FIRST
+   write into the par_state block after its init is
+   `rv_calloc`'s zero-fill loop (`sb a0, 0(a1)` at rv_calloc+0x62), called
+   from `compiler__frontend__core__parser_decls_fn__file_generic_constraint_state_fresh`
+   — a SIBLING parser module's init allocating its own state through the
+   SAME winning allocator (ghdl copy) whose cursor was positioned INSIDE the
+   par_state block at that moment (`watch:88e7b860`, cursor 0x11870 vs block
+   [0x11860, 0x118e0)).
+2. **The struct allocation itself is emitted CORRECTLY**: the seed emits
+   `rt_alloc(0x78)` = 120 bytes = the full 15-field ParserState
+   (`li a0, 0x78` at parser_state_fresh+0x28c, verified statically and by
+   the call-target resolution to the ghdl rt_alloc copy).
+3. **Single-stepping parser_state_fresh instruction-by-instruction**
+   (3000+ RSP steps, cursor sampled after every step): the ghdl cursor
+   advances MONOTONICALLY through the entire function
+   (0x11290 -> 0x11870) — **no wrap, no decrease inside the function**.
+   Yet at the function's exit the cursor sits at block+0x10, i.e. the
+   0x78-byte struct was consumed without the cursor passing the block end.
+
+(1)+(2)+(3) together bound the defect precisely: the block that par_state
+points to is handed to a LATER calloc (sibling parser init) by the same
+cursor without any observable decrease of THAT cursor — the only remaining
+mechanism consistent with all three measurements is that par_state's VALUE
+was produced by an allocator state that the per-step cursor watch did not
+cover end-to-end (the winning per-function copy set: parser_state_fresh's
+chains call rt_array_new/rt_array_push whose winning copies may carry their
+own cursors, and the struct's rt_alloc(0x78) ran at a sampled-sparse point).
+The next lane's decisive step is therefore narrow: single-step WITH a0/a1
+logging at every rv_alloc-family call inside parser_state_fresh (log every
+size argument, not just the cursor), or set a Z0 on every rv_alloc copy and
+read the size register at each hit — the first size that does not match its
+caller's expectation names the miscounted owner. The RSP client in
+scripts/debug/ does both out of the box.
+
+No production code changed in this lane beyond the debug tool itself; all
+kernels used were the unmodified PASS build (watchpoints are external).
+bug_db.sdn untouched. In-guest cycles: 1 (the watchpoint work runs against
+the stock image).
