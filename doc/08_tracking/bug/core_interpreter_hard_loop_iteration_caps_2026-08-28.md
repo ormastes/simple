@@ -95,3 +95,19 @@ Still open (outside the owned file): the statement-form 1,000,001 silent cap in
 (`--execution-limit`) feature. Evidence spec:
 `test/01_unit/compiler_core/interpreter/range_for_no_silent_iteration_cap_spec.spl`.
 
+
+## Update 2026-11-05 — remaining two silent caps removed (release/1.0.0 lane)
+
+- `eval_stmt_for` range arm (`eval_stmts.spl`): the `while iterations < 1000001` silent cap
+  was replaced with the uncapped `while current <= end_n` form mirroring `eval_for_expr`,
+  with the same i64::MAX checked-increment parity guard. Verified: 5/5 quick semantics
+  (exclusive/inclusive boundaries, break, continue, i64::MAX single endpoint) and
+  `registry_scoping_spec` 7/7 via the freshly built seed binary running core_interpret.
+- `eval_list_comp` range arm (`_EvalOps/access_literal_assign_eval.spl`): same cap removed
+  for consistency. Note: this arm is unreachable via `core_interpret` (the iterable is
+  evaluated first and `eval_range` returns an array), so no live behavior change.
+- Over-cap evidence: `stmt_for_comprehension_no_silent_iteration_cap_spec.spl` crosses the
+  old 1,000,001 boundary on the live stmt-for path; it runs with unlimited child budget
+  (~60-75 min per 1M-iteration fixture under host load). RED confirmation of the same cap
+  pattern was captured earlier today at the two sibling sites (`eval_range`:
+  `expected 10001 to equal 1500000`; `eval_for_expr` spec: 3/3 failed pre-fix).
