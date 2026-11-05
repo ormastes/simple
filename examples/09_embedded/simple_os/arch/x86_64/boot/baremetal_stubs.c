@@ -8022,8 +8022,38 @@ RuntimeValue rt_array_last(RuntimeValue a) { (void)a; return NIL_VALUE; }
 RuntimeValue rt_array_repeat(RuntimeValue v, RuntimeValue n) { (void)v; (void)n; return NIL_VALUE; }
 RuntimeValue rt_string_find(RuntimeValue s, RuntimeValue sub) { (void)s; (void)sub; return (RuntimeValue)(-1); }
 RuntimeValue rt_string_rfind(RuntimeValue s, RuntimeValue sub) { (void)s; (void)sub; return (RuntimeValue)(-1); }
-RuntimeValue rt_string_join(RuntimeValue a, RuntimeValue sep) { (void)a; (void)sep; return NIL_VALUE; }
-RuntimeValue rt_string_to_int(RuntimeValue s) { (void)s; return ENCODE_INT(0); }
+RuntimeValue rt_array_join(RuntimeValue arr, RuntimeValue sep);
+RuntimeValue rt_string_join(RuntimeValue a, RuntimeValue sep) { return rt_array_join(a, sep); }
+RuntimeValue rt_string_to_int(RuntimeValue s)
+{
+    if (!IS_HEAP(s)) return 0;
+    RuntimeString *text = (RuntimeString *)DECODE_PTR(s);
+    if (!text || text->hdr.type != HEAP_STRING) return 0;
+    /* Match the hosted lenient decimal prefix parser used by DBFS checkpoint
+     * headers. The previous body returned zero for every valid generation. */
+    uint32_t i = 0;
+    while (i < text->len && (text->data[i] == ' ' || text->data[i] == '\t' ||
+           text->data[i] == '\n' || text->data[i] == '\r')) i++;
+    int negative = 0;
+    if (i < text->len && (text->data[i] == '-' || text->data[i] == '+')) {
+        negative = text->data[i] == '-';
+        i++;
+    }
+    uint64_t limit = negative ? (uint64_t)INT64_MAX + 1ULL : (uint64_t)INT64_MAX;
+    uint64_t value = 0;
+    while (i < text->len && text->data[i] >= '0' && text->data[i] <= '9') {
+        uint32_t digit = (uint32_t)(text->data[i] - '0');
+        if (value > (limit - digit) / 10ULL) {
+            value = limit;
+            while (i + 1 < text->len && text->data[i + 1] >= '0' && text->data[i + 1] <= '9') i++;
+            break;
+        }
+        value = value * 10ULL + digit;
+        i++;
+    }
+    if (negative && value == (uint64_t)INT64_MAX + 1ULL) return INT64_MIN;
+    return negative ? -(int64_t)value : (int64_t)value;
+}
 RuntimeValue rt_option_map(RuntimeValue o, RuntimeValue f) { (void)o; (void)f; return NIL_VALUE; }
 RuntimeValue rt_file_read_text(const char *path, int64_t path_len) {
     return _fat32_read_file_text_value(path, path_len);
@@ -8912,8 +8942,9 @@ RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim)
         }
         if (j == d->len) {
             /* Found delimiter at i */
+            /* rt_string_slice takes RAW indices on this freestanding ABI. */
             RuntimeValue part = rt_string_slice(str,
-                ENCODE_INT(start), ENCODE_INT(i));
+                (RuntimeValue)start, (RuntimeValue)i);
             arr = rt_array_push_handle(arr, part);
             i += d->len;
             start = i;
@@ -8923,7 +8954,7 @@ RuntimeValue rt_string_split(RuntimeValue str, RuntimeValue delim)
     }
     /* Remainder */
     RuntimeValue rest = rt_string_slice(str,
-        ENCODE_INT(start), ENCODE_INT(s->len));
+        (RuntimeValue)start, (RuntimeValue)s->len);
     arr = rt_array_push_handle(arr, rest);
     return arr;
 }
