@@ -56,6 +56,29 @@ exits after its shard; qualify by one sharded SymbolTable87 cohort with
 comparing per-worker `peak_kib` against the unsharded 28 GiB aggregate. A
 runtime-side reclaim (real free on eviction) is the alternative owner.
 
+**Update 2026-11-05 (p1w-item5, code-read; no heavy run).** Runtime-side reclaim
+was attempted and stopped before any code edit:
+
+- MIR: a MirModule is a class instance, i.e. an untagged, unregistered,
+  header-less `rt_alloc` block. `rt_dict_free_deep` frees only keys + dict
+  header (probe P2), and its key/name strings are aliased by HIR/AST/
+  SymbolTable/`_bootstrap_mir_functions` (probe P3). `rt_rc_release`
+  (`runtime_native.c:9849`) frees every reachable tag-0 node, which includes
+  those permanent aliased strings, and runs under the global
+  `rt_core_heap_lifecycle_acquire` spin lock (`runtime_native.c:1687`). Fix
+  owner is either a runtime header/tag for class instances (codegen change)
+  or process-level MIR sharding (`SIMPLE_MIR_SHARDING`).
+- Object bytes (re-scoped option 1: write the LLVM memory buffer straight to
+  the `.o` path, CodegenOutput carries the path): the `[u8]` copied by
+  `rt_bytes_from_raw` (`llvm_lib_backend.spl:139`) is shared by
+  `CodegenOutput`, `backend_plugin/builtin_adapter.spl:107`,
+  `backend_plugin/session_authority_v2.spl:462/491`,
+  `driver_aot_native_output.spl:4503`, `driver_aot_smf_output.spl:207/211`
+  (`smf_part_objects`) and the cache-publication digests. The contract change
+  is feasible but its RSS bound can only be measured on a redeployed native
+  compiler (the seed does not run this runtime path), which exceeds the lane
+  limit; deferred to a lane that can redeploy.
+
 Owner/source: `doc/08_tracking/bug/item5_phase3_open_failures_2026_10_14.md`.
 
 ## item5_native_build_threads_ineffective_2026_10_14
