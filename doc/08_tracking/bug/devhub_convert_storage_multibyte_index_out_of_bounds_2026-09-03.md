@@ -50,3 +50,22 @@ Nothing was changed by this record. The failing code is pure string handling
 with no platform calls, so it is expected to reproduce on Unix — unverified
 here (no Unix host in this session).
 
+## Status 2026-11-05 — NOT REPRODUCIBLE on release/1.0.0 (already fixed)
+
+Verified on branch `work/rel100-devhub-fixes-20261105` @ `c3b2271c310`:
+the character-space rewrite of `src/app/devhub/convert_storage.spl`
+(`_to_chars`/`_chars_join`/`_find_char_in`/`_match_at` helpers, lines 9-58;
+loops in `storage_to_markdown`/`_replace_pairs`/`_extract_tag_name`/
+`_extract_attr` all walk a codepoint-character array instead of mixing
+char-indexed `s[i]` with byte-indexed `s[i:j]`) is already merged here.
+
+Evidence (tracked `bin/simple.exe` seed, `--mode=interpreter`):
+
+```
+bin/simple.exe test test/01_unit/app/devhub/convert_storage_multibyte_spec.spl --mode=interpreter
+SPEC FILE VERDICT: ... outcome=OK declared>=7 executed=7 passed=7 failed=0
+```
+
+Neighbor `test/01_unit/app/devhub/itf_convert_spec.spl`: 16/16 PASS.
+No source change was needed for this record.
+
