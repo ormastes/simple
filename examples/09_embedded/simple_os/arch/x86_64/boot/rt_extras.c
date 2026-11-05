@@ -1433,7 +1433,9 @@ RuntimeValue rt_slice(RuntimeValue collection, RuntimeValue start, RuntimeValue 
 /* ---- Miscellaneous genuinely useful ---- */
 
 RuntimeValue rt_char_from_code(RuntimeValue code) {
-    int64_t c = DECODE_INT(code);
+    /* Cranelift passes the integer codepoint RAW, matching the canonical
+     * simple_core/core_string.spl ABI. DECODE_INT shifted every ASCII byte. */
+    int64_t c = (int64_t)code;
     if (c < 0 || c > 127) c = '?';
     char buf[2] = { (char)c, '\0' };
     return rt_string_from_cstr(buf);

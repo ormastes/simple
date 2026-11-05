@@ -149,5 +149,11 @@ int main(void)
     assert(rows->len == 2);
     expect_text(rows->items[0], "DBFSNS3|1|3319668373");
     expect_text(rows->items[1], "F|2");
+
+    /* The decoder builds every checkpoint byte through this raw-codepoint ABI. */
+    expect_text(rt_char_from_code(68), "D");
+    expect_text(rt_char_from_code(70), "F");
+    expect_text(rt_char_from_code(124), "|");
+    expect_text(rt_char_from_code(52), "4");
     return 0;
 }
