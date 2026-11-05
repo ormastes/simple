@@ -12,7 +12,7 @@ use compiler.backend.linker.smf_reader_memory.*
 
 use compiler.backend.linker.obj_taker.{SmfSymbol, SymbolType, SymbolBinding}
 use compiler.backend.linker.smf_enums.{Platform, Arch, CompressionType}
-use compiler.backend.linker.smf_header.{SMF_HEADER_SIZE, smf_header_field_shift}
+use compiler.backend.linker.smf_header.{SMF_HEADER_SIZE, SMF_SEED_HEADER_SIZE, smf_header_field_shift, smf_header_size_at, smf_header_seed_trailer_offset}
 
 # SMF v1.1 uses the canonical 128-byte packed header layout. Files may store
 # that header either at file offset 0 or as a trailer at EOF-128.
@@ -90,7 +90,7 @@ impl SmfReaderMemory:
     """
     static fn from_data(data: [u8]) -> Result<SmfReaderMemory, text>:
         # Validate minimum size against the canonical 128-byte SMF v1.1 header.
-        if data.len() < SMF_READER_HEADER_SIZE:
+        if data.len() < SMF_SEED_HEADER_SIZE:
             return Err("SMF data too small: {data.len()} bytes")
 
         # v1.1 SMF writes the header as a trailer at EOF-128. Keep offset-0
@@ -263,7 +263,7 @@ impl SmfReaderMemory:
         # CompressionType.from_u8 maps unknown bytes to None_; consult the
         # canonical header's raw byte so unknown formats never become plain.
         val header_offset = self.header.header_offset
-        if header_offset < 0 or header_offset > self.data.len() - SMF_READER_HEADER_SIZE:
+        if header_offset < 0 or header_offset > self.data.len() - smf_header_size_at(self.data, header_offset):
             return Err("SMF header out of bounds")
         if self.data[header_offset + 12] != 0u8:
             return Err("Compressed SMF section extraction is unsupported")
@@ -476,15 +476,23 @@ section_table_offset (u64) to satisfy u64's 8-byte alignment requirement.
   Total: 128 bytes
 """
 fn parse_header_from_bytes(data: [u8]) -> Result<SmfMemoryHeader, text>:
-    if data.len() < SMF_READER_HEADER_SIZE:
+    if data.len() < SMF_SEED_HEADER_SIZE:
         return Err("Not enough data for header")
 
     val header_offset = find_smf_header_offset(data)?
+    # A packed header is 128 bytes; a Rust seed repr(C) header is 96 (trailer at EOF-96).
+    if smf_header_size_at(data, header_offset) > data.len() - header_offset:
+        return Err("Not enough data for header")
 
     # Extract header bytes
     var header_bytes: [u8] = []
     var i = 0
     while i < SMF_READER_HEADER_SIZE:
+        # Zero-pad past EOF: a seed trailer has only 96 bytes and no reserved area.
+        if header_offset + i >= data.len():
+            header_bytes.push(0)
+            i = i + 1
+            continue
         header_bytes.push(data[header_offset + i])
         i = i + 1
 
@@ -587,6 +595,9 @@ fn find_smf_header_offset(data: [u8]) -> Result<i64, text>:
     val trailer_offset = data.len() - SMF_READER_HEADER_SIZE
     if has_smf_magic_at(data, trailer_offset):
         return Ok(trailer_offset)
+    val seed_trailer = smf_header_seed_trailer_offset(data)
+    if seed_trailer >= 0:
+        return Ok(seed_trailer)
     Err("Invalid SMF magic: expected 'SMF\\0'")
 
 """Check for SMF magic at an absolute file offset."""

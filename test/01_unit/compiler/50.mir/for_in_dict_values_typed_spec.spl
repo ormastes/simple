@@ -44,3 +44,22 @@ describe "for-in over Dict.values()":
         print "errors: [{all}]"
         expect(all.contains("non-array")).to_equal(false)
         expect(all.contains("#143")).to_equal(false)
+
+# Prevention (same bug class): `.keys()` on a field, and `.values()` on a
+# Dict-typed parameter, must also iterate as typed arrays. The MIR-side
+# fallback in for_collection_declared_type recovers `[V]`/`[K]` from the
+# receiver's declared Dict<K, V> when the HIR call carries no element type.
+val forin_keys_src = "struct Holder:\n    names: Dict<text, i64>\n\nimpl Holder:\n    fn has_key(k: text) -> bool:\n        for n in self.names.keys():\n            if n == k:\n                return true\n        false\n"
+val forin_param_src = "fn count_long(d: Dict<i64, text>) -> i64:\n    var c = 0\n    for s in d.values():\n        if s.len() > 3:\n            c = c + 1\n    c\n"
+
+describe "for-in over Dict.keys() and Dict-typed params":
+    it "lowers field .keys() without the non-array iterable diagnostic":
+        var all = ""
+        for m in forin_lower(forin_keys_src):
+            all = all + m + "\n"
+        expect(all.contains("#143")).to_equal(false)
+    it "lowers param .values() without the non-array iterable diagnostic":
+        var all = ""
+        for m in forin_lower(forin_param_src):
+            all = all + m + "\n"
+        expect(all.contains("#143")).to_equal(false)

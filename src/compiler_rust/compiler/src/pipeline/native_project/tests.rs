@@ -9,8 +9,8 @@ use crate::codegen::common_backend::{enum_runtime_module_name_from_path, module_
 use crate::incremental::SourceInfo;
 use crate::pipeline::execution::runtime_bundle_env_lock_for_tests as runtime_bundle_env_lock;
 use super::linker::{
-    add_extra_link_objects, is_boot_c_translation_unit, minimal_boot_source_allowed, split_extra_link_objects,
-    validate_extra_link_objects,
+    add_extra_link_objects, freestanding_boot_dir, is_boot_c_translation_unit, minimal_boot_asm_source_allowed,
+    minimal_boot_source_allowed, split_extra_link_objects, validate_extra_link_objects,
 };
 use super::tools::find_hosted_runtime_rlib;
 use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
@@ -157,6 +157,22 @@ fn boot_source_discovery_keeps_required_core_and_skips_fragments() {
 }
 
 #[test]
+fn boot_source_discovery_falls_back_to_source_root_and_prefers_entry() {
+    let temp = tempfile::tempdir().unwrap();
+    let entry = temp.path().join("test/regression/probe.spl");
+    let entry_boot = temp.path().join("test/regression/boot");
+    let source_root = temp.path().join("arch/x86_64");
+    let source_boot = source_root.join("boot");
+    fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    fs::create_dir_all(&source_boot).unwrap();
+    fs::write(&entry, "").unwrap();
+
+    assert_eq!(freestanding_boot_dir(&entry, &[source_root.clone()]), Some(source_boot));
+    fs::create_dir_all(&entry_boot).unwrap();
+    assert_eq!(freestanding_boot_dir(&entry, &[source_root]), Some(entry_boot));
+}
+
+#[test]
 fn minimal_rv64_boot_keeps_entry_and_required_runtime_owners() {
     assert!(minimal_boot_source_allowed("boot_entry", false));
     assert!(minimal_boot_source_allowed("baremetal_runtime_core.inc", false));
@@ -166,6 +182,10 @@ fn minimal_rv64_boot_keeps_entry_and_required_runtime_owners() {
     assert!(!minimal_boot_source_allowed("full_networking_runtime", false));
     assert!(minimal_boot_source_allowed("full_networking_runtime", true));
     assert!(!minimal_boot_source_allowed("unrelated_service", false));
+    assert!(minimal_boot_asm_source_allowed("crt0"));
+    assert!(minimal_boot_asm_source_allowed("context_switch"));
+    assert!(!minimal_boot_asm_source_allowed("multiboot2_elf64_loader"));
+    assert!(!minimal_boot_asm_source_allowed("up2_dci_uefi_transition"));
 }
 
 #[test]

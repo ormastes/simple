@@ -160,3 +160,16 @@ Not a single fixable defect. Left as-is, no code change attempted.
 ## Triage 2026-11-04 (c28-w4)
 
 Triage 2026-11-04: gaps 1 (placeholder-v0 abi/semantic/link digests, module_identity.spl:19-20), 5 (6h lease fallback, lease.spl:50) and 6 still present; gap 3 fixed. Correction: lease.spl EXISTS at src/compiler/80.driver/cache/lease/lease.spl (the 2026-08-17 ABSENT note was path drift). Gap 4 partly moved: disk_cache_bound_v1.spl and HIR free-space admission landed in Oct but admission.spl:96-98 still scopes min_free_ratio to the cache budget with no host free-bytes rt symbol. This is a milestone ledger, not one defect: keep open as tracking; QUESTION: close it and file gaps 1/2/4/5 as separate rows?
+
+## Update 2026-11-05 (w3): gap 5 premise is outdated
+
+`lease_is_reclaimable` in `src/compiler/80.driver/cache/lease/lease.spl` has no
+6h-timeout fallback: a lease is reclaimed only when its owner process is
+provably dead (`process_is_running`); the current process's own lease and any
+live owner stay GC roots regardless of age. `LEASE_STALE_TIMEOUT_SECS` was a
+dead, unreferenced constant and is deleted. Pinned by the new
+`test/01_unit/compiler/cache/lease_liveness_reclaim_spec.spl` (ancient live
+lease kept; fresh dead-owner lease reclaimed; on-disk sweep removes only the
+dead one). The remaining cost of this design (a hung-but-live process pins its
+leases) is the safe direction, not a gap. Gap 5 is CLOSED; gaps 1, 2, 4, 6, 7
+remain; this row stays open as the milestone ledger.
