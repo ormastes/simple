@@ -207,3 +207,6 @@ non-negotiable guardrail, in priority order:
 
 Confirmed unchanged: the doc's own "Recommended fix (converge, or fence)" section documents this as an architectural convention split between the Rust seed's hashed enum discriminants (`codegen/instr/result.rs`) and pure-Simple's positional convention, not yet converged. A real fix requires either a Rust-seed codegen change (cargo build/redeploy cycle) or a cross-runtime fencing decision — both out of scope for this pure-Simple TDD pass. No live cross-over was found (per "Reachability" section), so severity remains low today. Leaving OPEN, no code change made.
 
+
+## 2026-11-05 — left OPEN, re-scoped (mirp2 family A)
+Still a latent ABI hazard, not a live MIR defect: nothing mixes seed-emitted and pure-Simple objects today. Not fixable inside MIR lowering alone. Next step: add a discriminant-convention tag to the link envelope (object/runtime ABI marker) and fail the link when conventions mix; owner decision on whether the seed moves to positional.
