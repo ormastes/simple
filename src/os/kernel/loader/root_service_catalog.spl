@@ -5,14 +5,17 @@
 # supplies only an opaque catalog ID; the kernel owns the executable path,
 # exact child CSpace grants, resource limits, and syscall filter.  The catalog
 # is consumed only by the live PID1 reaper holding root_mint_authority, and it
-# still routes creation through fs_exec_register_image_with_spawn_spec so there
-# is no second CSpace/process creation path.
+# routes creation through the loader's authenticated image registry and one-use
+# token (managed_image_authority_v1 + scheduler adoption), so there is no
+# second CSpace/process creation path and no path-only authority mint.
 
 use os.kernel.types.capability_types.{CapabilitySet, CapabilityToken, CapabilityKind}
-use os.kernel.ipc.cspace_spawn.{CapGrant, AttenuationSpec, SpawnSpec}
+use os.kernel.ipc.cspace_spawn.{CapGrant, AttenuationSpec, SpawnSpec, spawn_with_cspace}
 use os.kernel.loader.workload_image_hash.{workload_image_blake3_hash}
-use os.kernel.loader.process_image.{build_user_process_image}
-use os.kernel.loader.fs_exec_spawn.{FsExecPrepareResult, fs_exec_register_image_with_spawn_spec}
+use os.kernel.loader.managed_image_authority_v1.{managed_image_authority_issue_v1}
+use os.kernel.loader.fs_exec_spawn.{FsExecPrepareResult}
+use os.kernel.loader.executable_launch_arguments_v1.{
+    executable_launch_arguments_v1_validate}
 use os.kernel.loader.executable_source.{resolve_executable_bytes}
 use os.kernel.security.execution_context.{KernelCallContext, kernel_call_context_from_task}
 use os.kernel.scheduler.scheduler.{Scheduler}
@@ -251,19 +254,36 @@ fn _root_service_catalog_launch_entry_from_bytes(
     val context = _root_mint_context(task_id, definition, scheduler)
     if context == nil:
         return FsExecPrepareResult(scheduler: scheduler, pid: -13, entry: 0)
-    val image = build_user_process_image(definition.executable_path, bytes, arch, [definition.executable_path], [])
-    if image.is_err():
-        return FsExecPrepareResult(scheduler: scheduler, pid: -8, entry: 0)
     val spec = SpawnSpec(
         image_hash: workload_image_blake3_hash(bytes), grants: definition.grants,
         isolation: "service:" + definition.name, budget: definition.process_limit
     )
+    val staged = managed_image_authority_issue_v1(bytes, arch,
+        "root-service")
+    if not staged.staged:
+        return FsExecPrepareResult(scheduler: scheduler, pid: staged.error_pid,
+            entry: 0)
+    val launch_result = executable_launch_arguments_v1_validate(
+        definition.executable_path, [definition.executable_path], [])
+    if launch_result.is_err():
+        return FsExecPrepareResult(scheduler: scheduler, pid: -8, entry: 0)
+    # The catalog is the root mint authority: mint the child's CSpace from the
+    # catalog's own SpawnSpec against the transient root delegation sources,
+    # then adopt through the same one-use loader authority as every other
+    # managed launch. Authority derives from root_mint plus the registry
+    # token, never from the executable pathname.
+    val mint = spawn_with_cspace(context.unwrap().capabilities, spec,
+        task_id.id, 1u64, 1u64)
+    var live_scheduler = scheduler
+    val adopted = live_scheduler.adopt_authenticated_executable_pid_with_launch_v1(
+        staged.table, staged.authorities, staged.token, staged.consumer,
+        launch_result.unwrap(), staged.entry_point, priority, mint.caps)
+    if not adopted.receipt.execution_authorized or adopted.pid == 0u64:
+        return FsExecPrepareResult(scheduler: live_scheduler, pid: -13, entry: 0)
     _bind_catalog_limits(
         definition,
-        fs_exec_register_image_with_spawn_spec(
-            context.unwrap(), spec, definition.executable_path, image.unwrap(), priority, scheduler
-        )
-    )
+        FsExecPrepareResult(scheduler: live_scheduler,
+            pid: adopted.pid as i64, entry: staged.entry_point as i64))
 
 pub fn root_service_catalog_launch(
     catalog_id: u64,

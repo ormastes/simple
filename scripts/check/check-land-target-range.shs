@@ -102,4 +102,56 @@ run_case missing-target 2
 [ ! -f ran ]
 [ ! -f signed ]
 echo 'PASS: missing target refuses before dispatch or signing'
-echo 'PASS: land target range, 5 cases'
+
+# --- push exit-status propagation -------------------------------------------
+# Bug (doc/08_tracking/bug/push_gates_unrunnable_on_macos_bsd_awk_2026-09-03.md,
+# final note): land.shs used to run `git push` without checking its status and
+# unconditionally print "submitted", so a blocked push read as a successful
+# landing (rc=0). --submit needs the reseal step too; double it like the gates.
+printf 'echo PASS\n' > scripts/check/reseal-range.shs
+run_case_submit() {
+    label=$1 expected_rc_kind=$2
+    rm -f ran signed
+    rc=0
+    sh scripts/check/land.shs --submit >out.submit 2>&1 || rc=$?
+    case "$expected_rc_kind" in
+        nonzero) [ "$rc" -ne 0 ] || {
+                tail -20 out.submit >&2
+                echo "FAIL: $label (exit 0 despite failed push)" >&2
+                exit 1
+            } ;;
+        zero) [ "$rc" -eq 0 ] || {
+                tail -20 out.submit >&2
+                echo "FAIL: $label (exit $rc, wanted 0)" >&2
+                exit 1
+            } ;;
+    esac
+}
+
+# No 'origin' remote exists in this scratch repo, so the final
+# `git push origin ...` fails; land.shs must propagate that failure.
+unset LAND_TARGET_REF
+run_case_submit submit-failed-push nonzero
+! grep -q 'land.shs: submitted' out.submit || {
+    echo 'FAIL: submit-failed-push printed success after failed push' >&2
+    exit 1
+}
+grep -q 'git push failed' out.submit || {
+    echo 'FAIL: submit-failed-push did not report the push failure' >&2
+    exit 1
+}
+echo 'PASS: failed git push is reported and propagated (no false landing)'
+
+git init -q --bare origin-repo.git
+git remote add origin "$T/origin-repo.git"
+run_case_submit submit-ok-push zero
+grep -q 'land.shs: submitted' out.submit || {
+    echo 'FAIL: submit-ok-push did not print success' >&2
+    exit 1
+}
+git --git-dir=origin-repo.git rev-parse --verify --quiet refs/heads/work/fixture >/dev/null || {
+    echo 'FAIL: submit-ok-push branch missing on remote' >&2
+    exit 1
+}
+echo 'PASS: successful git push still lands with exit 0'
+echo 'PASS: land target range, 7 cases'

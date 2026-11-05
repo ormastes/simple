@@ -1,5 +1,9 @@
-# Status 2026-11-04 — source-level parts FIXED; redeploy dependency on the bootstrap lane
+> **Triage 2026-11-05 (release/1.0.0 worktree):** both source-level defects
+> confirmed fixed in ancestry (seed parser test + slot canonicalisation in
+> `scripts/setup/`); only the external full-CLI redeploy remains. Not selected
+> for this pass — blocked on deployment, not source.
 
+# Status 2026-11-04 — source-level parts FIXED; redeploy dependency on the bootstrap lane
 - **Inline `unsafe(...): expr` (Defect 2): fixed.** Rust seed parser carries
   `parser/src/unsafe_inline_body_test.rs`; pure-Simple parser handles it at
   `src/compiler/10.frontend/core/parser_stmts.spl:644`. Re-verified 2026-11-04:
