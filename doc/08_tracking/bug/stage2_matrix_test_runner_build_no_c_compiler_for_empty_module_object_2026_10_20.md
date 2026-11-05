@@ -27,3 +27,12 @@ matrix task's environment, although the same host builds C in Stage 1/2.
 Check how the matrix task builds its environment (PATH / CC under the
 verification runner) against the empty-module object fallback's
 compiler lookup.
+
+## Fix 2026-11-05 (status: fix-implemented-verification-pending)
+
+When `find_c_compiler()` returns empty, `_compile_selected_module` now writes an
+empty ELF64 ET_REL directly (`src/compiler/80.driver/driver_empty_object.spl`,
+x86_64/aarch64 linux/freebsd; other targets keep the C path). Unit spec:
+`test/01_unit/compiler/80.driver/driver_empty_object_spec.spl` (4/4 on seed).
+Verification: rerun the stage2 matrix `test_runner_build` on aarch64 linux with a
+stage built from this source, then link the produced empty objects.
