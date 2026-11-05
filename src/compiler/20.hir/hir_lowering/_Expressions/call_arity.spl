@@ -1,0 +1,93 @@
+# Call-site arity check for direct calls to this module's free/extern functions.
+#
+# Bug call_site_arity_never_checked_2026-08-04: `f3(7, 8)` against a 3-param
+# `fn f3` compiled silently and read a garbage third argument at run time.
+# The resolve-pass check (35.semantics fill_call_defaults) only matched `Var`
+# callees and that pass does not run on the real compile path; HIR lowering
+# always runs and its errors fail the build, so the check lives here.
+#
+# Scope: a callee that lowers to `NamedVar`/`Var` whose symbol id is a function
+# declared in THIS module. Locals that shadow a function name resolve to a
+# different symbol id and are not checked. Cross-module callees, closures and
+# fn values have no row here and stay unchecked.
+
+use compiler.frontend.parser_types.{ParserFunction, Param}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirCallArg}
+use compiler.hir.hir_lowering.types.HirLowering
+
+impl HirLowering:
+    me record_call_arity_rows(functions: Dict<text, ParserFunction>):
+        var ids: [i64] = []
+        var rows: [text] = []
+        val keys = functions.keys()
+        var key_index = 0
+        while key_index < keys.len():
+            val fn_: ParserFunction = functions[keys[key_index]]
+            val symbol = self.symbols.lookup(fn_.name)
+            if symbol != nil and symbol.? != nil:
+                val found_symbol: SymbolId = symbol.?
+                var row = fn_.name + "|"
+                var param_index = 0
+                while param_index < fn_.params.len():
+                    val param: Param = fn_.params[param_index]
+                    if param_index > 0:
+                        row = row + ","
+                    if param.has_default:
+                        row = row + "?"
+                    row = row + param.name
+                    param_index = param_index + 1
+                ids.push(found_symbol.id)
+                rows.push(row)
+            key_index = key_index + 1
+        self.call_arity_symbol_ids = ids
+        self.call_arity_rows = rows
+
+    me check_call_arity(callee: HirExpr, args: [HirCallArg], span: Span):
+        val callee_kind: HirExprKind = callee.kind
+        var symbol_id = -1
+        match callee_kind:
+            case HirExprKind.NamedVar(sym, _): symbol_id = sym.id
+            case HirExprKind.Var(sym): symbol_id = sym.id
+            case _: return
+        if symbol_id < 0:
+            return
+        var row_index = -1
+        var scan = 0
+        while scan < self.call_arity_symbol_ids.len():
+            if self.call_arity_symbol_ids[scan] == symbol_id:
+                row_index = scan
+                break
+            scan = scan + 1
+        if row_index < 0:
+            return
+        val row: text = self.call_arity_rows[row_index]
+        val bar = row.index_of("|")
+        if bar < 0:
+            return
+        val fn_name = row.substring(0, bar)
+        val param_text = row.substring(bar + 1, row.len())
+        val param_specs: [text] = if param_text == "": [] else: param_text.split(",")
+        val total = param_specs.len()
+        if args.len() > total:
+            self.error("function '{fn_name}' accepts at most {total} argument(s), but {args.len()} were provided", span)
+            return
+        var positional = 0
+        var named: [text] = []
+        for raw_arg in args:
+            val arg: HirCallArg = raw_arg
+            if arg.has_name:
+                named.push(arg.name)
+            else:
+                positional = positional + 1
+        var missing: [text] = []
+        var param_index = 0
+        while param_index < total:
+            val spec: text = param_specs[param_index]
+            if not spec.starts_with("?"):
+                if param_index >= positional and not named.contains(spec):
+                    missing.push(spec)
+            param_index = param_index + 1
+        if missing.len() > 0:
+            self.error("function '{fn_name}' requires argument(s) {missing.join(", ")}, but {args.len()} were provided", span)

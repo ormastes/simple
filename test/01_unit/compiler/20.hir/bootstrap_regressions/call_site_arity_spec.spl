@@ -1,0 +1,85 @@
+# Purpose and audience: compiler engineers who own HIR call lowering.
+# @req REQ-SSPEC-COMPILER
+# Tracks: doc/08_tracking/bug/call_site_arity_never_checked_2026-08-04.md
+"""
+# A direct call with the wrong argument count is a HIR diagnostic
+
+`f3(7, 8)` against a 3-param `fn f3` compiled silently and read a garbage third
+argument (r=3078 seed / -3922 native, PR #6995). HIR lowering now checks every
+direct call to a function declared in the same module: too many, too few,
+trailing defaults, named arguments, extern fns. Locals that shadow a function
+name are not checked against the function.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:hir
+
+use std.spec.{describe, it, expect, step}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.core.parser.{parser_has_errors}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+
+fn arity_hir_errors(source: text) -> text:
+    val file = "testdata/call_site_arity.spl"
+    val parsed = parse_full_frontend(source, file, "call_site_arity", Logger(level: 0))
+    if parser_has_errors():
+        return "PARSE-FAILED"
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir: HirModule = hir_lowering.lower_module(parsed)
+    var errs = ""
+    for e in hir_lowering.errors:
+        errs = errs + e.message + "\n"
+    errs
+
+val f3_decl = "fn f3(a: i64, b: i64, c: i64) -> i64:\n    a * 100 + b * 10 + c\n\n"
+val fd_decl = "fn fd(a: i64, b: i64 = 2, c: i64 = 3) -> i64:\n    a + b + c\n\n"
+
+describe "call-site arity of same-module functions":
+    it "rejects too few arguments (PR #6995 repro f3(7, 8))":
+        val errs = arity_hir_errors(f3_decl + "fn main() -> i64:\n    f3(7, 8)\n")
+        expect(errs.contains("function 'f3' requires argument(s) c")).to_equal(true)
+
+    it "rejects too many arguments":
+        val errs = arity_hir_errors(f3_decl + "fn main() -> i64:\n    f3(1, 2, 3, 4)\n")
+        expect(errs.contains("function 'f3' accepts at most 3 argument(s), but 4")).to_equal(true)
+
+    it "rejects a zero-arg call to a parameterised function":
+        val errs = arity_hir_errors(f3_decl + "fn main() -> i64:\n    f3()\n")
+        expect(errs.contains("requires argument(s) a, b, c")).to_equal(true)
+
+    it "rejects arguments to a zero-param function":
+        val errs = arity_hir_errors("fn z() -> i64:\n    0\n\nfn main() -> i64:\n    z(1)\n")
+        expect(errs.contains("function 'z' accepts at most 0 argument(s)")).to_equal(true)
+
+    it "accepts an exact call":
+        expect(arity_hir_errors(f3_decl + "fn main() -> i64:\n    f3(1, 2, 3)\n")).to_equal("")
+
+    it "accepts omitted trailing defaults":
+        expect(arity_hir_errors(fd_decl + "fn main() -> i64:\n    fd(1) + fd(1, 5) + fd(1, 5, 6)\n")).to_equal("")
+
+    it "rejects too many even with defaults":
+        val errs = arity_hir_errors(fd_decl + "fn main() -> i64:\n    fd(1, 2, 3, 4)\n")
+        expect(errs.contains("function 'fd' accepts at most 3")).to_equal(true)
+
+    it "accepts named arguments covering required params":
+        expect(arity_hir_errors(f3_decl + "fn main() -> i64:\n    f3(1, c: 3, b: 2)\n")).to_equal("")
+
+    it "rejects named arguments that leave a required param uncovered":
+        val errs = arity_hir_errors(f3_decl + "fn main() -> i64:\n    f3(1, c: 3)\n")
+        expect(errs.contains("requires argument(s) b")).to_equal(true)
+
+    it "rejects a wrong-arity call to a same-module extern fn":
+        val errs = arity_hir_errors("extern fn rt_arity_probe(a: i64, b: i64) -> i64\n\nfn main() -> i64:\n    rt_arity_probe(1)\n")
+        expect(errs.contains("function 'rt_arity_probe' requires argument(s) b")).to_equal(true)
+
+    it "rejects a wrong-arity recursive call":
+        val errs = arity_hir_errors("fn r(n: i64) -> i64:\n    if n == 0:\n        return 0\n    r(n - 1, 0)\n")
+        expect(errs.contains("function 'r' accepts at most 1")).to_equal(true)
+
+    it "does not check a local closure that shadows a function name":
+        val src = f3_decl + "fn main() -> i64:\n    val f3 = \\x: x + 1\n    f3(4)\n"
+        expect(arity_hir_errors(src)).to_equal("")
