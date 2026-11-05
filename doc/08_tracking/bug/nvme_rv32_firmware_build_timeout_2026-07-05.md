@@ -1565,3 +1565,79 @@ a long reproduction. Findings hold up:
   re-verification, exactly as the doc's "Concrete next step" section already
   states. No code change made in this pass; not re-run to avoid a
   multi-minute-to-hour blocking build per task scoping.
+
+
+### 2026-11-05 aarch64 Linux host reproduction + script-side cross-toolchain fix
+
+Reproduced in an isolated worktree of `origin/release/1.0.0`
+(`/tmp/wt-libbug-nvmerv32`, branch `work/libbug-linux-nvmerv32-20261105`) on a
+shared aarch64 Linux host (20 cores, other LLM build sessions active).
+
+Host toolchain inventory (precise):
+
+- `riscv64-unknown-elf-gcc`: **absent**; no riscv32 libgcc or compiler-rt
+  builtins archive anywhere on the host (`-print-libgcc-file-name` under clang
+  prints a nonexistent path; only aarch64 builtins installed).
+- `clang-18` (system LLVM 18): **has** the RISC-V backend; assembles and
+  compiles `-march=rv32imac -mabi=ilp32` correctly.
+- `/home/yoon/dev/llvm/install/bin/clang` (dev build 23.1.0): **no RISC-V
+  target** ("No available targets are compatible with triple
+  riscv32-unknown-unknown-elf"); its `llvm-mc` likewise cannot assemble rv32.
+- Present: `ld.lld`, `llvm-objcopy`, `qemu-system-riscv32` (~/.local/bin),
+  `llvm-nm`.
+
+`bin/simple` does not exist in this worktree; the runs substituted
+`NVME_RV32_SIMPLE_BIN=/home/yoon/dev/simple/build/phase_snapshots/phase1_1793422538/simple`
+(aarch64 Rust-seed phase snapshot, "Simple Language v1.0.0-rc.1"), per the
+worktree-substitution note for this host.
+
+Repro command:
+
+```sh
+NVME_RV32_SIMPLE_BIN=/home/yoon/dev/simple/build/phase_snapshots/phase1_1793422538/simple \
+NVME_RV32_BUILD_TIMEOUT_SECS=600 \
+sh scripts/check/check-nvme-rv32-minimal-live.shs
+# STATUS: FAIL nvme-rv32-minimal-live build_rc=124 timeout=600s
+```
+
+Observed stall, matching the architectural root cause already documented above:
+the build subprocess churns at ~97% CPU / ~1.27 GB RSS for the full 600 s; the
+stderr log stops growing after 2115 lines of `[gc-warning]` module-load output
+for compiler-internal modules, and **zero** `[BOOTSTRAP-PHASE]` markers appear —
+not even `compile:start`. So on this host class the interpreted cold-load of
+the compiler graph (upstream of the tiny firmware closure) never reaches the
+first driver phase within 600 s. A longer 2400 s raw-build probe was still
+marker-free and CPU-bound when checked; the cold-load regression is not
+x86_64-specific.
+
+Second, independent host gap found and fixed script-side: even after the
+compiler cold-load is fixed, the wrapper's start-stub step hard-required
+`riscv64-unknown-elf-gcc` (start-stub assemble + `-print-libgcc-file-name`),
+which does not exist on LLVM-only aarch64 hosts. Fix landed in
+`scripts/check/check-nvme-rv32-minimal-live.shs` (worktree branch above):
+
+- Toolchain probe, canonical first: `riscv64-unknown-elf-gcc -march=rv32imac
+  -mabi=ilp32` when present; otherwise the first `clang` (overridable via
+  `NVME_RV32_CROSS_CLANG`) that accepts `--target=riscv32-unknown-elf
+  -march=rv32imac -mabi=ilp32` (compile-probed, so clangs without the RISC-V
+  backend are skipped); otherwise fail closed with a clear message.
+- Soft-arithmetic archive: gcc libgcc → clang per-target compiler-rt builtins
+  archive → link without any archive; `ld.lld` then fails closed only if an
+  object genuinely references an unprovided `__divdi3`/`__moddi3` symbol.
+
+Verification of the fixed chain on this host: with a stub `simple` binary that
+emits a real rv32 object via `clang-18` (returning 0 = all sections pass; the
+only substitution is the compiler output itself, which remains blocked by the
+cold-load above), the wrapper completes end-to-end:
+`NVME_RV32_MINIMAL_SECTIONS=1` run → start stub assembled by the clang-18
+fallback, `_start` renamed via `llvm-objcopy`, linked by `ld.lld` **without**
+any soft-arithmetic archive, QEMU rv32 boot prints
+`ALL RV32 NVME FW CHECKS PASS`, and the wrapper prints
+`STATUS: PASS nvme-rv32-minimal-live`.
+
+Remaining open (unchanged from the architectural prescription above): route
+`native-build` to a compiled dispatch path (or cache a compiled worker) so the
+self-hosted/seed binary stops re-interpreting the compiler graph per
+invocation; until then this wrapper cannot produce
+`build/nvme_fw_rv32_minimal.elf` with a real compiler on this host class
+regardless of timeout.
