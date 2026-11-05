@@ -263,3 +263,18 @@ zero undefined and zero weak `rt_*` symbols.
   `spl_start` undefined (the known vacuous artifact documented in the
   superseded record); the real build script remains the only honest
   measurement.
+
+## Resolution 2026-11-05 (PR #6983, merged; verification landed same day)
+
+- All buckets addressed per "Required resolution": pure-computation ported
+  with real semantics; io/process/capability via named fail-closed traps;
+  capture-notes as hosted-faithful no-ops; session heap honestly partial
+  (legacy no-session answers + named trap for `rt_transient_heap_adopt`).
+- Post-merge verification: `sh scripts/os/build-simpleos-riscv64-interpreter-kernel.shs`
+  (llvm-18 on PATH, checked-in seed, nonce 61b0818628ec55e1) → PASS, both
+  rows, zero undefined symbols.
+- Boot evidence (lane transcript, `/tmp/rv-boot/`): OpenSBI v1.4 →
+  `[interp] serial up, interpreting a hello world` → real frontend lowering.
+  Next row-level blocker (named `rt_process_run` trap from
+  `cfg_platform.spl host_arch()` / `uname`) is tracked in the in-guest
+  hello-world follow-ups, not in this record.
