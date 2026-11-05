@@ -724,56 +724,343 @@ struct MlKemNttSimdReceipt:
     observed_rvv_vlen_bits: i64
 
 # Native ML-KEM NTT SIMD execution observed since the last reset. Only
-# The native provider owns ISA dispatch and thread-local execution receipts.
-# These entry points are shared with the native same-fixture NTT baseline.
-extern fn rt_mlkem_ntt_simd_batch(coefficients: [i64], inverse: bool) -> [i64]
-extern fn rt_mlkem_ntt_simd_backend() -> i64
-extern fn rt_mlkem_ntt_simd_hits() -> i64
-extern fn rt_mlkem_ntt_simd_observed_rvv_vlen_bits() -> i64
-extern fn rt_mlkem_ntt_simd_reset() -> i64
+# `mlkem_ntt_simd_batch` may raise these, and only for chunks the running
+# kernel really executed: a non-zero count is what admits an operation as
+# SIMD-executed, so host capability alone must never set them.
+var _mlkem_ntt_simd_chunk_hits: i64 = 0
+var _mlkem_ntt_simd_rvv_vlen_bits: i64 = 0
+
+fn _mlkem_modq(x: i64) -> i64:
+    """Least non-negative residue of x mod 3329 — the ML-KEM representative."""
+    val r = x % 3329
+    if r < 0:
+        r + 3329
+    else:
+        r
+
+fn _mlkem_ntt_zetas() -> [i64]:
+    """FIPS 203 NTT zeta table, DERIVED not transcribed.
+
+    The table is defined as zetas[i] = 17^BitRev7(i) mod 3329, so it is computed
+    from that definition here. A hand-copied list of 128 literals cannot be
+    distinguished from a mistyped one by reading it, and this tree has already
+    shipped fabricated crypto constants.
+    """
+    var powers: [i64] = []
+    var acc = 1
+    var e = 0
+    while e < 128:
+        powers.push(acc)
+        acc = (acc * 17) % 3329
+        e = e + 1
+    var zetas: [i64] = []
+    var i = 0
+    while i < 128:
+        var rev = 0
+        var rest = i
+        var bit = 0
+        while bit < 7:
+            rev = rev * 2 + (rest % 2)
+            rest = rest / 2
+            bit = bit + 1
+        zetas.push(powers[rev])
+        i = i + 1
+    zetas
+
+fn _mlkem_ntt_forward_avx2(coefficients: [i64]) -> [i64]:
+    """Forward ML-KEM NTT, butterflies fed through the i32x8 vector ops."""
+    val zetas = _mlkem_ntt_zetas()
+    var f: [i64] = []
+    var i = 0
+    while i < 256:
+        f.push(_mlkem_modq(coefficients[i]))
+        i = i + 1
+    var k = 1
+    var len = 128
+    while len >= 2:
+        var start = 0
+        while start < 256:
+            val zeta = zetas[k]
+            k = k + 1
+            val wide = Vec8i.splat(zeta.to_i32())
+            var j = start
+            while len >= 8 and j + 7 < start + len:
+                val lower = Vec8i(
+                    e0: f[j].to_i32(), e1: f[j + 1].to_i32(),
+                    e2: f[j + 2].to_i32(), e3: f[j + 3].to_i32(),
+                    e4: f[j + 4].to_i32(), e5: f[j + 5].to_i32(),
+                    e6: f[j + 6].to_i32(), e7: f[j + 7].to_i32())
+                val upper = Vec8i(
+                    e0: f[j + len].to_i32(), e1: f[j + len + 1].to_i32(),
+                    e2: f[j + len + 2].to_i32(), e3: f[j + len + 3].to_i32(),
+                    e4: f[j + len + 4].to_i32(), e5: f[j + len + 5].to_i32(),
+                    e6: f[j + len + 6].to_i32(), e7: f[j + len + 7].to_i32())
+                val product = simd_mul_i32x8(upper, wide)
+                val sums = simd_add_i32x8(lower, product).to_array()
+                val differences = simd_sub_i32x8(lower, product).to_array()
+                var lane = 0
+                while lane < 8:
+                    f[j + lane] = _mlkem_modq(sums[lane].to_i64())
+                    f[j + len + lane] = _mlkem_modq(differences[lane].to_i64())
+                    lane = lane + 1
+                _mlkem_ntt_simd_chunk_hits = _mlkem_ntt_simd_chunk_hits + 1
+                j = j + 8
+            while j < start + len:
+                val t = (zeta * f[j + len]) % 3329
+                val fj = f[j]
+                f[j + len] = _mlkem_modq(fj - t)
+                f[j] = _mlkem_modq(fj + t)
+                j = j + 1
+            start = start + 2 * len
+        len = len / 2
+    f
+
+fn _mlkem_ntt_inverse_avx2(coefficients: [i64]) -> [i64]:
+    """Inverse ML-KEM NTT, butterflies fed through the i32x8 vector ops."""
+    val zetas = _mlkem_ntt_zetas()
+    var f: [i64] = []
+    var i = 0
+    while i < 256:
+        f.push(_mlkem_modq(coefficients[i]))
+        i = i + 1
+    var k = 127
+    var len = 2
+    while len <= 128:
+        var start = 0
+        while start < 256:
+            val zeta = zetas[k]
+            k = k - 1
+            val wide = Vec8i.splat(zeta.to_i32())
+            var j = start
+            while len >= 8 and j + 7 < start + len:
+                val lower = Vec8i(
+                    e0: f[j].to_i32(), e1: f[j + 1].to_i32(),
+                    e2: f[j + 2].to_i32(), e3: f[j + 3].to_i32(),
+                    e4: f[j + 4].to_i32(), e5: f[j + 5].to_i32(),
+                    e6: f[j + 6].to_i32(), e7: f[j + 7].to_i32())
+                val upper = Vec8i(
+                    e0: f[j + len].to_i32(), e1: f[j + len + 1].to_i32(),
+                    e2: f[j + len + 2].to_i32(), e3: f[j + len + 3].to_i32(),
+                    e4: f[j + len + 4].to_i32(), e5: f[j + len + 5].to_i32(),
+                    e6: f[j + len + 6].to_i32(), e7: f[j + len + 7].to_i32())
+                val sums = simd_add_i32x8(lower, upper).to_array()
+                val twisted = simd_mul_i32x8(
+                    simd_sub_i32x8(upper, lower), wide).to_array()
+                var lane = 0
+                while lane < 8:
+                    f[j + lane] = _mlkem_modq(sums[lane].to_i64())
+                    f[j + len + lane] = _mlkem_modq(twisted[lane].to_i64())
+                    lane = lane + 1
+                _mlkem_ntt_simd_chunk_hits = _mlkem_ntt_simd_chunk_hits + 1
+                j = j + 8
+            while j < start + len:
+                val t = f[j]
+                val fjl = f[j + len]
+                f[j] = _mlkem_modq(t + fjl)
+                f[j + len] = _mlkem_modq(zeta * _mlkem_modq(fjl - t))
+                j = j + 1
+            start = start + 2 * len
+        len = len * 2
+    var idx = 0
+    while idx < 256:
+        f[idx] = (f[idx] * 3303) % 3329
+        idx = idx + 1
+    f
+
+fn _mlkem_ntt_forward_neon(coefficients: [i64]) -> [i64]:
+    """Forward ML-KEM NTT, butterflies fed through the i32x4 (NEON) vector ops.
+
+    Mirrors `_mlkem_ntt_forward_avx2` with four lanes instead of eight: the six
+    layers with a stride of 4 or more run through `simd_mul_i32x4` /
+    `simd_add_i32x4` / `simd_sub_i32x4` (one 128-bit NEON instruction per op on
+    AArch64), and only the final stride-2 layer stays scalar, which is 192
+    butterfly chunks per polynomial.
+    """
+    val zetas = _mlkem_ntt_zetas()
+    var f: [i64] = []
+    var i = 0
+    while i < 256:
+        f.push(_mlkem_modq(coefficients[i]))
+        i = i + 1
+    var k = 1
+    var len = 128
+    while len >= 2:
+        var start = 0
+        while start < 256:
+            val zeta = zetas[k]
+            k = k + 1
+            val wide = Vec4i.splat(zeta.to_i32())
+            var j = start
+            while len >= 4 and j + 3 < start + len:
+                val lower = Vec4i(
+                    x: f[j].to_i32(), y: f[j + 1].to_i32(),
+                    z: f[j + 2].to_i32(), w: f[j + 3].to_i32())
+                val upper = Vec4i(
+                    x: f[j + len].to_i32(), y: f[j + len + 1].to_i32(),
+                    z: f[j + len + 2].to_i32(), w: f[j + len + 3].to_i32())
+                val product = simd_mul_i32x4(upper, wide)
+                val sums = simd_add_i32x4(lower, product).to_array()
+                val differences = simd_sub_i32x4(lower, product).to_array()
+                var lane = 0
+                while lane < 4:
+                    f[j + lane] = _mlkem_modq(sums[lane].to_i64())
+                    f[j + len + lane] = _mlkem_modq(differences[lane].to_i64())
+                    lane = lane + 1
+                _mlkem_ntt_simd_chunk_hits = _mlkem_ntt_simd_chunk_hits + 1
+                j = j + 4
+            while j < start + len:
+                val t = (zeta * f[j + len]) % 3329
+                val fj = f[j]
+                f[j + len] = _mlkem_modq(fj - t)
+                f[j] = _mlkem_modq(fj + t)
+                j = j + 1
+            start = start + 2 * len
+        len = len / 2
+    f
+
+fn _mlkem_ntt_inverse_neon(coefficients: [i64]) -> [i64]:
+    """Inverse ML-KEM NTT, butterflies fed through the i32x4 (NEON) vector ops.
+
+    Mirrors `_mlkem_ntt_inverse_avx2` with four lanes: strides of 4 or more
+    vectorize, the stride-2 layer stays scalar, and the inverse scale (3303) is
+    a separate scalar multiply — never a butterfly chunk.
+    """
+    val zetas = _mlkem_ntt_zetas()
+    var f: [i64] = []
+    var i = 0
+    while i < 256:
+        f.push(_mlkem_modq(coefficients[i]))
+        i = i + 1
+    var k = 127
+    var len = 2
+    while len <= 128:
+        var start = 0
+        while start < 256:
+            val zeta = zetas[k]
+            k = k - 1
+            val wide = Vec4i.splat(zeta.to_i32())
+            var j = start
+            while len >= 4 and j + 3 < start + len:
+                val lower = Vec4i(
+                    x: f[j].to_i32(), y: f[j + 1].to_i32(),
+                    z: f[j + 2].to_i32(), w: f[j + 3].to_i32())
+                val upper = Vec4i(
+                    x: f[j + len].to_i32(), y: f[j + len + 1].to_i32(),
+                    z: f[j + len + 2].to_i32(), w: f[j + len + 3].to_i32())
+                val sums = simd_add_i32x4(lower, upper).to_array()
+                val twisted = simd_mul_i32x4(
+                    simd_sub_i32x4(upper, lower), wide).to_array()
+                var lane = 0
+                while lane < 4:
+                    f[j + lane] = _mlkem_modq(sums[lane].to_i64())
+                    f[j + len + lane] = _mlkem_modq(twisted[lane].to_i64())
+                    lane = lane + 1
+                _mlkem_ntt_simd_chunk_hits = _mlkem_ntt_simd_chunk_hits + 1
+                j = j + 4
+            while j < start + len:
+                val t = f[j]
+                val fjl = f[j + len]
+                f[j] = _mlkem_modq(t + fjl)
+                f[j + len] = _mlkem_modq(zeta * _mlkem_modq(fjl - t))
+                j = j + 1
+            start = start + 2 * len
+        len = len * 2
+    var idx = 0
+    while idx < 256:
+        f[idx] = (f[idx] * 3303) % 3329
+        idx = idx + 1
+    f
 
 fn mlkem_ntt_simd_batch(coefficients: [i64], inverse: bool) -> [i64]:
-    """Transform positive whole 256-coefficient ML-KEM polynomial batches.
+    """Run the ML-KEM NTT batch kernel over whole 256-coefficient polynomials.
 
-    The native provider executes AVX2, NEON, or variable-length RVV butterflies
-    and canonical q=3329 reduction. Unsupported hosts return an empty batch
-    here rather than exposing the provider's scalar reference as SIMD work.
-    No input is changed; each polynomial is transformed independently.
+    Returns the transformed coefficients, or an empty list when no vector
+    kernel executed. `os.crypto.ml_kem_ntt.ntt_simd` / `intt_simd` pass exactly
+    256 and admit the result only when it has 256 entries, falling back to their
+    own path otherwise. `os.crypto.ml_kem_kpke`'s CPU batch provider passes a
+    whole poly-vector — 768 coefficients at k=3 — and turns any length mismatch
+    into an error rather than a fallback, so every input that is a positive
+    multiple of 256 is transformed polynomial by polynomial.
+
+    The executed kernel feeds butterflies through the platform vector ops:
+    eight i32 lanes on AVX2 (`has_avx2()`), four i32 lanes on AArch64 NEON
+    (`has_neon()`). On a native AArch64 build each `simd_*_i32x4` call is one
+    genuine 128-bit NEON instruction; the two narrow AVX2 layers (stride 4 and
+    2) and the single narrow NEON layer (stride 2) stay scalar and are not
+    counted as chunks. RVV has no kernel here and is never selected.
+
+    Coefficients are reduced to [0, 3329) on entry and every write is reduced
+    again, which keeps the products inside i32 and makes the output
+    bit-identical to the scalar `os.crypto.ml_kem_ntt.ntt` / `intt`.
     """
     val total = coefficients.len()
     if total == 0 or total % 256 != 0:
         return []
-    if mlkem_ntt_simd_backend() == 0:
+    val backend = mlkem_ntt_simd_backend()
+    if backend == 0:
         return []
-    unsafe(capabilities: [ffi]):
-        rt_mlkem_ntt_simd_batch(coefficients, inverse)
+    var out: [i64] = []
+    var base = 0
+    while base < total:
+        var block: [i64] = []
+        var i = 0
+        while i < 256:
+            block.push(coefficients[base + i])
+            i = i + 1
+        var transformed: [i64] = []
+        if backend == 1:
+            if inverse:
+                transformed = _mlkem_ntt_inverse_avx2(block)
+            else:
+                transformed = _mlkem_ntt_forward_avx2(block)
+        else:
+            if inverse:
+                transformed = _mlkem_ntt_inverse_neon(block)
+            else:
+                transformed = _mlkem_ntt_forward_neon(block)
+        var j = 0
+        while j < 256:
+            out.push(transformed[j])
+            j = j + 1
+        base = base + 256
+    out
 
 fn mlkem_ntt_simd_backend() -> i64:
-    """Native kernel selector: 1=AVX2, 2=NEON, 3=RVV, 0=unavailable.
+    """Report the backend that `mlkem_ntt_simd_batch` actually executes on.
 
-    Selection identifies the linked provider, not generic CPU capability.
-    Operation admission additionally requires positive observed chunk hits.
+    This answers "is the native SIMD NTT batch path usable", NOT "does this CPU
+    have a vector unit" — `os.crypto.ml_kem_ntt` gates the batch call on
+    `mlkem_ntt_simd_backend() > 0`, and
+    `os.crypto.x25519_mlkem768.execution_policy` records the value as the
+    backend that ran. Reporting a vector ISA that no kernel used would both open
+    that gate onto nothing and fabricate the recorded backend.
+
+    Returns 1 for the AVX2 i32x8 kernel, 2 for the NEON i32x4 kernel, and 0
+    when neither host capability is present. RVV remains declared but
+    unimplemented: it has no kernel here and is therefore never reported.
     """
-    unsafe(capabilities: [ffi]):
-        rt_mlkem_ntt_simd_backend()
+    if has_avx2():
+        return 1
+    if has_neon():
+        return 2
+    0
 
 fn mlkem_ntt_simd_reset():
-    """Clear the current native thread's SIMD execution counters."""
-    unsafe(capabilities: [ffi]):
-        rt_mlkem_ntt_simd_reset()
+    """Clear the observed-execution counters before an ML-KEM NTT operation."""
+    _mlkem_ntt_simd_chunk_hits = 0
+    _mlkem_ntt_simd_rvv_vlen_bits = 0
 
 fn mlkem_ntt_simd_receipt() -> MlKemNttSimdReceipt:
-    """Read actual butterfly chunk counts and observed RVV VLEN.
+    """Read the butterfly chunk counts and observed RVV VLEN of the last batch.
 
-    Reset, batch execution, and receipt observation must stay on the same
-    native thread without yielding. No scalar tail or inverse scale is counted
-    as a butterfly chunk. RVV VLEN is zero until an RVV kernel executes.
+    Reset, batch execution, and receipt observation must stay on one thread
+    without yielding. No scalar tail or inverse scale is counted as a butterfly
+    chunk. RVV VLEN stays 0 until an RVV kernel exists and executes.
     """
-    unsafe(capabilities: [ffi]):
-        MlKemNttSimdReceipt(
-            backend_code: rt_mlkem_ntt_simd_backend(),
-            chunk_hits: rt_mlkem_ntt_simd_hits(),
-            observed_rvv_vlen_bits: rt_mlkem_ntt_simd_observed_rvv_vlen_bits())
+    MlKemNttSimdReceipt(
+        backend_code: mlkem_ntt_simd_backend(),
+        chunk_hits: _mlkem_ntt_simd_chunk_hits,
+        observed_rvv_vlen_bits: _mlkem_ntt_simd_rvv_vlen_bits)
 
 # ============================================================================
 # Exports
