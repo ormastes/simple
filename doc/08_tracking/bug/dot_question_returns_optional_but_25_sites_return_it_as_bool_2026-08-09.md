@@ -1,6 +1,6 @@
 # `.?` yields `T?`, but 25 `-> bool` functions return it directly
 
-Status: FIX PR pending — "wait verification" (host-side native verification pending)
+Status: FIX PR #6980 — "wait verification" (host-side native verification pending)
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 **Filed:** 2026-08-09 (stream F3)
