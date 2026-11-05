@@ -78,3 +78,15 @@ they share the binding mis-type and should be annotated if they ever fault.
 module_build.spl:571 annotated `val fn_key: SymbolId = if ..` (tagged
 `@workaround bug=untyped_val_if_expr_struct_boxed_as_int_dict_key_2026-10-25`).
 Regression spec: `test/01_unit/compiler/50.mir/untyped_if_struct_dict_key_spec.spl`.
+
+## 2026-11-05 compiler fix (candidate 1) landed in source
+
+`remember_merged_arm_identity` (mir_lowering_stmts.spl) now recovers an arm's
+struct name from its HIR type (`optional_payload_struct_name`, fail-closed
+Struct/Class + known-layout gate) when the arm has no `struct_value_syms`
+entry, and joins names through the pure helper `mir_merged_arm_struct_name`
+(spec: `test/01_unit/compiler/50.mir/merged_arm_struct_identity_spec.spl`, 5/5;
+existing `if_merge_arm_types_spec` 5/5 and `untyped_if_struct_dict_key_spec`
+2/2 on the interpreter). Takes effect only once Phase 3 rebuilds the compiler,
+so the module_build.spl workaround stays until a rebuilt stage3 runs the
+unannotated form natively. Row stays open for that native evidence.
