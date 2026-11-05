@@ -53,3 +53,6 @@ cargo test -p simple-compiler --lib at current release/1.0.0:
   suffix_index_keeps_leading_underscore_of_private_helper).
 Acceptance #3 (executing native fixture) and #4 (rebuilt Phase 2 real
 Hello/sanity admission) remain open per the owner lane.
+
+## 2026-11-05 compiler-defects sweep re-verification (winboot-rel100 lane, Windows host)
+cargo test -p simple-compiler --lib at tip 816655ee5cb: filters `numeric_conversion` (3/3) and `private_reader` (3/3) PASS — all six acceptance #1/#2 resolver regressions green (bare never-binds/still-binds-real-owner, primitive-qualified static never-binds, custom owner, exact authored imports). Filter `suffix`: 19 tests, 18 PASS with 1 environmental failure (`test_freestanding_weak_boot_alias_uses_strong_simple_suffix_match`, an unrelated weak/strong alias test that shells out to `cc`; MSYS2 gcc 15's cc1 dies silently because Git-for-Windows `mingw64\bin` precedes MSYS2 on PATH and shadows libwinpthread-1.dll). With Git's mingw64\bin removed from PATH the test passes, so the suffix set is 19/19 on a correctly configured host. Acceptance #3/#4 (native fixture + Phase 2 Hello/sanity admission) remain pending per the owner lane.

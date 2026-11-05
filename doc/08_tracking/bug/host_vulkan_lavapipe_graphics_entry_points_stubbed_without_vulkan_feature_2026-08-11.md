@@ -1,5 +1,26 @@
 # Host Vulkan reaches lavapipe, but every graphics entry point is a 0-returning stub without the `vulkan` cargo feature
 
+## Re-verified 2026-11-05 (vulkan-fixes lane) — Status: FIXED (fail-closed), wait verification
+
+Re-verified on `release/1.0.0` tip (aarch64 host, seed built WITHOUT the
+`vulkan` feature, i.e. the defective configuration):
+
+- `cargo test -p simple-runtime --lib vulkan_feature_disabled` → 2 passed /
+  0 failed (`graphics_entry_point_failure_reports_why`,
+  `no_entry_point_fails_with_an_empty_error_channel`). The stub sweep covers
+  entry points across init/compute/graphics/shader/pipeline/fence/image/
+  swapchain/present, and asserts `rt_vulkan_get_last_error()` names the
+  disabled feature instead of returning empty text.
+- `test/01_unit/infra/counterpart/host_vulkan_lavapipe_compare_spec.spl`
+  (interpreter, feature off) → 6/6 passed on the fail-closed `unavailable`
+  branch.
+
+The remaining leg is the deploy decision (rebuild the seed with
+`--features vulkan` and re-run pixel-level verification on a real ICD).
+
+**Status: wait verification** — fail-closed behaviour verified; native GPU
+(lavapipe/NVIDIA ICD) pixel-level verification pending.
+
 ## Triage 2026-09-13
 OPEN, out of scope for this lane: shard file column is
 src/compiler_rust/runtime/Cargo.toml -- fix requires rebuilding the Rust seed

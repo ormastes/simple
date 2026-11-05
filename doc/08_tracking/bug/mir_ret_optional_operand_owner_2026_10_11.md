@@ -31,3 +31,6 @@ Removal condition: Permanent optional/coalesce owner propagation repair plus ori
   type is remembered on the merged temp, so `(value ?? default).kind` keeps an owner.
 - Spec: `test/01_unit/compiler/mir/ret_optional_operand_owner_spec.spl` (2/2 pass on interpreter; source contract + accessor projection).
 - Workarounds kept. Verify: revert the four `@workaround` locals in `mir_instruction_graph.spl` to untyped `value ?? ...`, native-compile `test/fixtures/compiler/mir_ret_operand_owner/main.spl` on a stage3 with this change, run mir_verify; expect zero MIR19 owner errors.
+
+## 2026-11-05 compiler-defects sweep (winboot-reldefects lane)
+Ancestor check: fix 02fca5e389f "fix(mir): null-coalesce result keeps default operand owner" (merge d5330d9ea26, PR #6264) is an ancestor of tip 816655ee5cb; `null_coalesce_default_owner_type` + fallback are present in expr_dispatch.spl. Host check: test/01_unit/compiler/mir/ret_optional_operand_owner_spec.spl 2/2 PASS (seed interpreter). The four @workaround markers in mir_instruction_graph.spl remain until native mir_verify HIR/MIR replay on a stage3 producer (still pending).

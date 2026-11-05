@@ -49,7 +49,29 @@ typedef struct {
     RuntimeValue payload;
 } RuntimeEnum;
 
-static unsigned char g_heap[64 * 1024] __attribute__((aligned(16)));
+/* This TU duplicates malloc/calloc/realloc/free/rt_alloc with the two main
+ * riscv64 runtime TUs (baremetal_stubs.c, baremetal_runtime_core.inc.c), and
+ * the link resolves the duplicates with --allow-multiple-definition: exactly
+ * ONE copy serves the WHOLE image's allocations, and which copy that is is a
+ * link-order lottery the caller does not control. Every duplicate must
+ * therefore be sized for the whole image AND must not share storage with
+ * module globals.
+ *
+ * The 2026-11-05 first attempt at that invariant -- a 32 MiB STATIC .bss
+ * array -- is the measured root cause of the in-guest par_state corruption:
+ * the array landed at the START of .bss (g_heap at 0x80665000, spanning
+ * 32 MiB) and the parser module global par_state was placed INSIDE its span
+ * (0x8266... family build: par_state at 0x80676fc0, g_heap+0x11fc0). Every
+ * code-side allocation then bump-overlaid live module globals (watchpoint
+ * lane, doc/08_tracking/bug/riscv64_in_guest_parse_recursion_par_state_uninit_2026-11-05.md):
+ * .bss is for ZEROED GLOBALS, not for an allocator arena. This TU now does
+ * what the other two do: own a private, linker-accounted slice of the
+ * linker-reserved 64 MiB .heap (NOLOAD, outside .bss). The three cursors
+ * own disjoint thirds so no lottery outcome can alias another TU's region. */
+extern unsigned char __heap_start[];
+extern unsigned char __heap_end[];
+#define RV_HEAP_BASE (__heap_start + 2ULL * ((unsigned long long)(__heap_end - __heap_start) / 3ULL))
+#define RV_HEAP_SIZE ((size_t)(__heap_end - __heap_start) / 3U)
 static uintptr_t g_heap_off = 0;
 
 extern RuntimeValue spl_start(void);

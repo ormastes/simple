@@ -521,3 +521,31 @@ module and then against owned `src/` as a whole.
     (present in the `test/unit/` twin).
 - Limits: multi-line `use` blocks were not scanned; divergent-rewrite rows were
   not re-judged.
+
+## 2026-11-05 follow-up (stacked on #6913): remaining items
+
+- **`os/apps/browser_demo/browser_demo.spl` restored.** `create_demo_dom` and
+  `count_visible_pixels` verbatim from `5ff78c36804~1`; `render_demo_to_pixels`,
+  `render_demo_stats`, `demo_node_count` and the `render_done`/`node_count`/
+  `pixel_count` fields re-added, adapted to the current API
+  (`BrowserRenderer.create(w,h).render_dom(dom)` returns a `RenderScene`,
+  `execute_scene_to_buffer` returns the buffer). The premise "depends on the
+  deleted `render_scene.executor`" is outdated: that module exists again.
+  `browser_demo_render_spec` 0/2 -> 4/4 (2 new guard examples).
+- **Real defect found on that path:** `browser_engine/layout.spl` defined two
+  private `layout_node` functions (5-arg block walk, 3-arg core wrapper) and
+  imported `layout_core.layout_node as layout_node_core`; `layout_tree` resolved
+  to the 4-arg core function ("expects 4 argument(s), but 5 were provided").
+  The 5-arg walk is renamed `_layout_block_node`.
+  `layout_coverage_closure_spec` 0/13 -> 13/13 (its spec-local `_anchor` helper
+  also collided with `skia/.../selected_arabic.spl:_anchor`; renamed
+  `_mk_anchor`). Interpreter leaking private/aliased names across modules is the
+  underlying cause and is not fixed here.
+- **Dead imports dropped:** `_append_bytes` (hpack/decoder.spl), `mark_destroyed`
+  (os/compositor/wm_spm_client.spl); both were used only on the import line.
+  `encoder_decoder_spec` 48/48, `wm_spm_client_spec` 5/5. Two stale rows removed
+  from `use_target_resolves_baseline.txt`.
+- **Not wipe damage, left open:** `std.common.net.addr.Port` (never defined in any
+  historical blob). `test/01_unit/lib/gui/browser_window_spec.spl` vs its
+  `test/unit/` twin is ordinary divergence, not a lost module.
+- With this, every census row is restored, moved, dead, or reclassified.
