@@ -1,0 +1,24 @@
+# Source pin for lower_expr_impl's explicit Cast / ConvertCall payload decode
+# (expr_dispatch.spl): the target slot must be read as T? and rebuilt bare under
+# if-val. A _sffi_tuple_get_req<HirType> binding keeps the Option transport word;
+# lower_cast_or_convert then passes it by value to native_trait_owner_for_type,
+# which deep-copies a garbage kind payload (s3_fable44 F3 MIR AV
+# native_trait_owner_for_type+0x202e after 'rejected invalid array handle').
+# The lower_exists_check_base sibling is pinned by #6924's spec.
+use std.spec.*
+use app.io.mod.{file_read}
+
+describe "MIR Cast/ConvertCall target decode":
+    val src = file_read("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
+
+    it "does not bind the ConvertCall target via _sffi_tuple_get_req":
+        expect(src.contains("_sffi_tuple_get_req<HirType>(convert_payload, 1)")).to_equal(false)
+
+    it "leaves at most the exists-check Cast req read (#6924 owns it)":
+        expect(src.split("_sffi_tuple_get_req<HirType>(cast_payload, 1)").len() <= 2).to_equal(true)
+
+    it "rebuilds Cast and ConvertCall targets bare under if val":
+        expect(src.contains("if val present_cast_target = _sffi_tuple_get<HirType>(cast_payload, 1):")).to_equal(true)
+        expect(src.contains("if val present_convert_target = _sffi_tuple_get<HirType>(convert_payload, 1):")).to_equal(true)
+        expect(src.contains("HirType(kind: present_cast_target.kind, span: expr.span)")).to_equal(true)
+        expect(src.contains("HirType(kind: present_convert_target.kind, span: expr.span)")).to_equal(true)

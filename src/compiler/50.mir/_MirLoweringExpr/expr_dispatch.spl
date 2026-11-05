@@ -6107,21 +6107,27 @@ impl MirLowering:
             # reports through error_fatal rather than being silently defaulted.
             val cast_payload = _sffi_enum_payload<HirExprKind>(expr_value.kind)
             val cast_operand: HirExpr = _sffi_tuple_get_req<HirExpr>(cast_payload, 0)
-            val cast_target: HirType = _sffi_tuple_get_req<HirType>(cast_payload, 1)
-            if cast_operand == nil or cast_target == nil:
-                self.error_fatal("empty HIR Cast payload", Some(expr_value.span))
-                return self.builder.emit_const_int(0)
-            return self.lower_cast_expr(cast_operand, cast_target, expr.span)
+            # Target read as `T?` and rebuilt BARE under `if val` (#6675 form):
+            # a req-read HirType binding keeps the Option transport word and
+            # lower_cast_or_convert's by-value native_trait_owner_for_type(target)
+            # then deep-copies a garbage kind payload (s3_fable44 F3 +0x202e).
+            if val present_cast_target = _sffi_tuple_get<HirType>(cast_payload, 1):
+                if cast_operand != nil:
+                    val cast_target: HirType = HirType(kind: present_cast_target.kind, span: expr.span)
+                    return self.lower_cast_expr(cast_operand, cast_target, expr.span)
+            self.error_fatal("empty HIR Cast payload", Some(expr_value.span))
+            return self.builder.emit_const_int(0)
         val convert_disc = _sffi_enum_discriminant<HirExprKind>(HirExprKind.ConvertCall(nil_expr, nil_expr.type_))
         if expr_disc == convert_disc:
             # Same explicit payload decode as Cast above (same two-slot shape).
             val convert_payload = _sffi_enum_payload<HirExprKind>(expr_value.kind)
             val convert_operand: HirExpr = _sffi_tuple_get_req<HirExpr>(convert_payload, 0)
-            val convert_target: HirType = _sffi_tuple_get_req<HirType>(convert_payload, 1)
-            if convert_operand == nil or convert_target == nil:
-                self.error_fatal("empty HIR ConvertCall payload", Some(expr_value.span))
-                return self.builder.emit_const_int(0)
-            return self.lower_convert_call_expr(convert_operand, convert_target, expr.span)
+            if val present_convert_target = _sffi_tuple_get<HirType>(convert_payload, 1):
+                if convert_operand != nil:
+                    val convert_target: HirType = HirType(kind: present_convert_target.kind, span: expr.span)
+                    return self.lower_convert_call_expr(convert_operand, convert_target, expr.span)
+            self.error_fatal("empty HIR ConvertCall payload", Some(expr_value.span))
+            return self.builder.emit_const_int(0)
         val call_disc = _sffi_enum_discriminant<HirExprKind>(HirExprKind.Call(nil_expr, [], []))
         if expr_disc == call_disc:
             match expr_value.kind:
