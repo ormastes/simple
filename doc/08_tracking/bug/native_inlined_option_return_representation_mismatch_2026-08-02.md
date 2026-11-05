@@ -236,3 +236,25 @@ return is lowered through `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.sp
 compiler to run. The seed refuses `test`, and no deployed self-hosted native binary exists
 in this lane, so no failing reproduction can be produced. Next step: run that check
 against the next Phase 2 candidate and record the MIR dump of the inlined call site.
+
+## 2026-11-05 premise check (p1-common lane, Windows)
+
+Policy check: the bug is still in scope (`T?` with `nil`-as-absence; `Some`/`None`
+pattern binding unchanged). Re-ran the 2026-08-17 CRIT-C4 probe on the deployed
+Windows seed (`bin/simple.exe`, 40739328 bytes, 2026-11-04):
+
+| engine | `if val u` `u == 42` | `u + 1` | `match Some(m)` | `?? 0` |
+|---|---|---|---|---|
+| interpret | true | 43 | true | true |
+| jit (`SIMPLE_EXECUTION_MODE=jit`) | true | 43 | true | true |
+
+The host-engine divergence is **no longer reproducible**. Fixtures committed at
+`test/fixtures/native_option_if_val_unwrap/{int_main,text_main}.spl`.
+
+Native lane NOT re-observed: `native-build --source test/fixtures/native_option_if_val_unwrap
+--entry-closure` from a sparse git worktree fails before compiling with
+`SCV-E-ADMISSION: directory-alias-inventory-invalid` (also with
+`SIMPLE_SCV_INVENTORY_COLD_INIT=1`); from the shared checkout it fails parsing
+`src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl` ("Unterminated f-string").
+Bug stays open, re-scoped to the native `if val`/`??` unwrap path only; next step is
+a native run of these fixtures on a host where `native-build` admits (Linux stage3).
