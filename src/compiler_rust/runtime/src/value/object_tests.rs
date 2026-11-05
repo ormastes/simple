@@ -631,3 +631,35 @@ fn test_user_variant_discriminants_never_alias_builtin_slots() {
         assert!(d > 1, "user variant {name} aliased a builtin positional slot: {d}");
     }
 }
+
+#[test]
+fn user_enum_discriminants_equal_declaration_index() {
+    use super::{hash_variant_discriminant, register_enum_variants};
+    register_enum_variants(["UePosRed", "UePosGreen", "UePosBlue"]);
+    assert_eq!(hash_variant_discriminant("UePosRed"), 0);
+    assert_eq!(hash_variant_discriminant("UePosGreen"), 1);
+    assert_eq!(hash_variant_discriminant("UePosBlue"), 2);
+}
+
+#[test]
+fn user_enum_shared_variant_same_index_stays_positional() {
+    use super::{hash_variant_discriminant, register_enum_variants};
+    register_enum_variants(["UeShA", "UeShIdle"]);
+    register_enum_variants(["UeShB", "UeShIdle", "UeShC"]);
+    assert_eq!(hash_variant_discriminant("UeShIdle"), 1);
+}
+
+#[test]
+fn user_enum_conflicting_index_is_ambiguous_and_pinned() {
+    use super::{hash_variant_discriminant, register_enum_variants};
+    register_enum_variants(["UeCfX", "UeCfY"]);
+    register_enum_variants(["UeCfY", "UeCfX"]);
+    let x = hash_variant_discriminant("UeCfX");
+    assert!(x > 1, "ambiguous names keep the name-derived tag, got {x}");
+    // A first answer is pinned: later registrations never change it.
+    register_enum_variants(["UePinOnly"]);
+    let first = hash_variant_discriminant("UePinOnly");
+    register_enum_variants(["UePinZ", "UePinOnly"]);
+    assert_eq!(first, 0);
+    assert_eq!(hash_variant_discriminant("UePinOnly"), first);
+}

@@ -645,7 +645,8 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                 });
             }
             Node::Enum(e) => {
-                // Pre-register enum
+                // Pre-register enum (and its positional discriminants)
+                simple_runtime::value::register_enum_variants(e.variants.iter().map(|v| v.name.as_str()));
                 let arc_e = Arc::new(e.clone());
                 enums.insert(e.name.clone(), Arc::clone(&arc_e));
                 GLOBAL_ENUMS.with(|cell| {
@@ -852,6 +853,7 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                 }
             }
             Node::Enum(e) => {
+                simple_runtime::value::register_enum_variants(e.variants.iter().map(|v| v.name.as_str()));
                 enums.insert(e.name.clone(), Arc::new(e.clone()));
                 // Also register in env so EnumName.VariantName syntax works
                 env.insert(
@@ -1855,6 +1857,7 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                             Node::Enum(e) => {
                                 let prefixed_name = format!("{}.{}", mod_decl.name, e.name);
                                 let arc_e = Arc::new(e.clone());
+                                simple_runtime::value::register_enum_variants(e.variants.iter().map(|v| v.name.as_str()));
                                 enums.insert(prefixed_name, Arc::clone(&arc_e));
                                 enums.insert(e.name.clone(), arc_e);
 
