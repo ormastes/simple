@@ -1,0 +1,143 @@
+"""
+## Purpose and audience
+Purpose: Bound ObjectStore property work by whole-store scan iterations
+(`scan_ops`), not wall-clock time, so the quadratic-scan regression stays
+detectable under the deterministic interpreter. A store seeded with decoy
+slots from prior DOM bridge generations must serve per-object writes, reads,
+array lengths, removals, and array creation with zero whole-store scans.
+Audience: maintainers of the JS engine object heap and the browser DOM
+bridge.
+## Operator workflow
+Run this spec with the test runner; each scenario names the bound it pins.
+## Compatibility and limitations
+Pure in-memory; no DOM or network. Background: retained bridge generations
+grow the flat property store monotonically, and whole-store scans per
+operation made per-frame DOM/property work Theta(frames^2).
+Bug record: doc/08_tracking/bug/js_vm_dom_bridge_retention_quadratic_2026-07-30.md
+"""
+# @req: REQ-LIB-GC-ASYNC-MUT-001
+
+use std.spec.*
+use std.spec.step
+use std.js.engine.vm_object_store.{ObjectStore}
+use std.js.types.js_types.{JsValue}
+
+fn scan_slot(store: ObjectStore, obj_id: i64, key: text) -> i64:
+    var i = store.prop_obj_ids.len() - 1
+    while i >= 0:
+        if store.prop_obj_ids[i] == obj_id and store.prop_keys[i] == key:
+            return i
+        i = i - 1
+    -1
+
+fn seed_decoys(store: ObjectStore):
+    # 40 prior-generation objects x 25 properties = 1000 decoy slots.
+    var d = 1
+    while d <= 40:
+        var k = 0
+        while k < 25:
+            store.set_property(d, "d{k}", JsValue.Number(v: k.to_f64()))
+            k = k + 1
+        d = d + 1
+
+describe "ObjectStore whole-store scan bounds":
+    it "serves per-object property work with zero whole-store scans":
+        var store = ObjectStore.create()
+        step("seed 1000 decoy slots from prior bridge generations")
+        seed_decoys(store)
+        assert_equal(store.prop_obj_ids.len(), 1000)
+        step("property work on one live object must not scan decoy slots")
+        var w = 0
+        while w < 40:
+            store.set_property(500, "k{w}", JsValue.Number(v: w.to_f64()))
+            w = w + 1
+        while w < 60:
+            store.set_property(500, "k{w - 40}", JsValue.Number(v: 1000.0 + w.to_f64()))
+            w = w + 1
+        var r = 0
+        while r < 20:
+            match store.get_property(500, "k{r}"):
+                JsValue.Number(v): assert_equal(v, 1040.0 + r.to_f64())
+                _: assert_true(false)
+            r = r + 1
+        step("writes stayed in place: only 40 slots for object 500")
+        assert_equal(store.object_slots(500).len(), 40)
+        assert_equal(store.scan_ops, 0)
+
+    it "serves array length and element access with zero whole-store scans":
+        var store = ObjectStore.create()
+        seed_decoys(store)
+        step("create_array_from N=64 and 2N=128 against a 1000-slot store")
+        var vals_n: [JsValue] = []
+        var vals_2n: [JsValue] = []
+        var i = 0
+        while i < 128:
+            if i < 64:
+                vals_n.push(JsValue.Number(v: i.to_f64()))
+            vals_2n.push(JsValue.Number(v: i.to_f64()))
+            i = i + 1
+        val arr_n = store.create_array_from(vals_n)
+        val arr_2n = store.create_array_from(vals_2n)
+        assert_equal(store.array_length(arr_n), 64)
+        assert_equal(store.array_length(arr_2n), 128)
+        match store.get_by_index(arr_2n, 100):
+            JsValue.Number(v): assert_equal(v, 100.0)
+            _: assert_true(false)
+        match store.get_by_index(arr_n, 63):
+            JsValue.Number(v): assert_equal(v, 63.0)
+            _: assert_true(false)
+        step("in-place indexed element writes stay scan-free")
+        store.set_by_index(arr_n, 7, JsValue.Number(v: 777.0))
+        match store.get_by_index(arr_n, 7):
+            JsValue.Number(v): assert_equal(v, 777.0)
+            _: assert_true(false)
+        assert_equal(store.array_length(arr_n), 64)
+        assert_equal(store.scan_ops, 0)
+
+    it "serves removals with zero whole-store scans and keeps the index exact":
+        var store = ObjectStore.create()
+        seed_decoys(store)
+        var k = 0
+        while k < 10:
+            store.set_property(600, "r{k}", JsValue.Number(v: k.to_f64()))
+            k = k + 1
+        step("remove r0, r4, r9, r5 (r5 twice: idempotent), then keep working")
+        store.remove_property(600, "r0")
+        store.remove_property(600, "r4")
+        store.remove_property(600, "r9")
+        store.remove_property(600, "r5")
+        store.remove_property(600, "r5")
+        assert_equal(store.object_slots(600).len(), 6)
+        match store.get_property(600, "r1"):
+            JsValue.Number(v): assert_equal(v, 1.0)
+            _: assert_true(false)
+        store.set_property(600, "r1", JsValue.Number(v: 42.0))
+        match store.get_property(600, "r1"):
+            JsValue.Number(v): assert_equal(v, 42.0)
+            _: assert_true(false)
+        step("index agrees with the backward-scan oracle after removals")
+        assert_true(store.find_prop_slot(600, "r1") == scan_slot(store, 600, "r1"))
+        assert_equal(store.find_prop_slot(600, "r0"), -1)
+        assert_true(store.find_prop_slot(600, "r7") == scan_slot(store, 600, "r7"))
+        assert_true(store.find_prop_slot(39, "d24") == scan_slot(store, 39, "d24"))
+        assert_equal(store.scan_ops, 0)
+
+    it "keeps mixed workloads scan-free including get_object enumeration":
+        var store = ObjectStore.create()
+        seed_decoys(store)
+        var k = 0
+        while k < 8:
+            store.set_property(700, "e{k}", JsValue.Number(v: k.to_f64()))
+            k = k + 1
+        store.remove_property(700, "e3")
+        step("get_object sees the remaining keys in insertion order")
+        var keys: [text] = []
+        for prop in store.get_object(700).properties:
+            keys.push(prop.key)
+        assert_equal(keys.join(","), "e0,e1,e2,e4,e5,e6,e7")
+        step("decoy objects still enumerate exactly")
+        var dkeys: [text] = []
+        for prop in store.get_object(2).properties:
+            dkeys.push(prop.key)
+        assert_equal(dkeys.len(), 25)
+        assert_equal(store.scan_ops, 0)
