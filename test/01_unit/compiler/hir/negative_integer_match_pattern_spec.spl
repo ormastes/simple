@@ -1,0 +1,74 @@
+# @cover src/compiler/20.hir/hir_lowering/_Expressions/expression_components.spl
+# Regression for negative_integer_match_arms_native_2026-09-30:
+# `case -1:` / `case -2:` / `case _:` over i64 must reach MIR match dispatch
+# as IntLit patterns. The flat bridge preserves the unary minus over the
+# literal; this fold turns Unary(Neg, IntLit(n)) into IntLit(-n) so the
+# scalar int match path accepts the arm instead of rejecting the whole
+# match with a Literal(non-IntLit) diagnostic.
+use std.spec.*
+use std.spec.step
+
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.hir.hir_operators.{HirUnaryOp}
+use compiler.hir.hir_lowering._Expressions.expression_components.{hir_normalize_integer_pattern_literal}
+use compiler.common.diagnostics.span.{Span}
+
+fn neg_int_pattern(value: i64) -> HirExpr:
+    val span = Span.empty()
+    val operand = HirExpr(kind: HirExprKind.IntLit(value, nil), has_type_: true,
+        type_: HirType(kind: HirTypeKind.Int(64, true), span: span), span: span)
+    HirExpr(kind: HirExprKind.Unary(HirUnaryOp.Neg, operand), has_type_: true,
+        type_: operand.type_, span: span)
+
+describe "negative integer match patterns":
+    it "folds unary minus over an integer literal into the literal":
+        step("case -1: and case -2: become IntLit arms")
+        for magnitude in [1, 2, 42, 9223372036854775807]:
+            val result = hir_normalize_integer_pattern_literal(neg_int_pattern(magnitude))
+            expect(result.has_type_).to_be(true)
+            match result.kind:
+                case HirExprKind.IntLit(actual, _): expect(actual).to_equal(0 - magnitude)
+                case _: fail("negative integer pattern did not fold to a literal")
+
+    it "keeps the operand type on the folded literal":
+        step("folded arm retains i64 type for MIR dispatch")
+        val result = hir_normalize_integer_pattern_literal(neg_int_pattern(7))
+        match result.type_.kind:
+            case HirTypeKind.Int(bits, signed):
+                expect(bits).to_equal(64)
+                expect(signed).to_be(true)
+            case _: fail("folded literal lost its type")
+
+    it "leaves the i64 minimum unfolded rather than overflowing":
+        step("-9223372036854775808 has no positive i64 counterpart")
+        val result = hir_normalize_integer_pattern_literal(neg_int_pattern(-9223372036854775808))
+        var still_unary = false
+        match result.kind:
+            case HirExprKind.Unary(_, _): still_unary = true
+            case _: ()
+        expect(still_unary).to_be(true)
+
+    it "leaves negation of a non-literal operand unfolded":
+        step("only literal patterns fold")
+        val span = Span.empty()
+        val bool_type = HirType(kind: HirTypeKind.Bool, span: span)
+        val operand = HirExpr(kind: HirExprKind.BoolLit(true), has_type_: true, type_: bool_type, span: span)
+        val unary = HirExpr(kind: HirExprKind.Unary(HirUnaryOp.Neg, operand), has_type_: true, type_: bool_type, span: span)
+        var still_unary = false
+        match hir_normalize_integer_pattern_literal(unary).kind:
+            case HirExprKind.Unary(_, _): still_unary = true
+            case _: ()
+        expect(still_unary).to_be(true)
+
+    it "keeps existing integer-cast normalization working alongside the fold":
+        step("suffixed casts still normalize")
+        val span = Span.empty()
+        val operand = HirExpr(kind: HirExprKind.IntLit(255, nil), has_type_: true,
+            type_: HirType(kind: HirTypeKind.Int(64, true), span: span), span: span)
+        val target = HirType(kind: HirTypeKind.Int(8, true), span: span)
+        val cast = HirExpr(kind: HirExprKind.Cast(operand, target), has_type_: true, type_: target, span: span)
+        val result = hir_normalize_integer_pattern_literal(cast)
+        match result.kind:
+            case HirExprKind.IntLit(actual, _): expect(actual).to_equal(-1)
+            case _: fail("signed u8 cast no longer normalizes to -1")
