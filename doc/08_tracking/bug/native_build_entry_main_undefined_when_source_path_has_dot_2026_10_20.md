@@ -1,6 +1,6 @@
 # native-build of an entry whose directory path contains a dot links without `__simple_main`
 
-- Status: OPEN (workaround in scripts/check/check-stage-binaries-runnable.shs)
+- Status: FIX IMPLEMENTED, VERIFICATION PENDING (source fix + spec landed in PR #4033, merge ab7088bc82c; workaround in scripts/check/check-stage-binaries-runnable.shs stays until a stage3 rebuild verifies native-build under a dotted dir)
 - Date: 2026-10-20
 - Platform: aarch64-unknown-linux-gnu
 - Severity: P2
@@ -74,3 +74,15 @@ Every compiler, test, docgen, link and runtime check remains UNRUN under the
 source-only protocol. Both existing stage-binary gate workaround tags and
 consumer spellings remain unchanged. This proposal requires higher review;
 it is not production, bootstrap or Phase3 PASS.
+
+## Resolution (2026-11-05)
+
+PR #4033 (`fix(compiler): preserve external dotted source entry identity`,
+merge ab7088bc82c) changed `src/compiler/80.driver/driver_source_loading.spl`
+and landed `test/01_unit/compiler/driver/dotted_source_entry_identity_spec.spl`.
+Current `driver_entry_closure_core.spl` `_driver_physical_module_identity`
+returns (name, repository_member) and only repository sources are
+canonicalized (digit-tier dropping), so external `dot.1` paths keep their
+identity. Verification pending: native-build of the repro under `<tmp>/dot.1/`
+with a rebuilt stage3; then remove the two `@workaround` tags in
+`check-stage-binaries-runnable.shs`.
