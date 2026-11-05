@@ -141,3 +141,46 @@ step, which the gate recipe works around with a manual link. It is not a crash.
 Verdict: the failures do not reproduce on the current pipeline. They are superseded by the
 transport fixes listed in the premise check above. Status: verification-pending. Close this
 once a Phase 2 stage2 candidate built from the current tip passes the same two smokes.
+
+## 2026-11-05 (retry lane r-p2av): the driver rc=1 is explained — missing fold of 3ee90e34dc5
+
+Nobody had read `_run/out/hello/native-build.log.err` from the 43 rerun. Its tail is the real
+failure, and it is the same on both runs:
+
+```
+error: LLVM native linking failed: ... ld.lld: error: undefined symbol: __simple_main
+>>> referenced by C:/Users/user/AppData/Local/Temp/simple_entry_9860/simple_entry.o:(main)
+```
+
+`nm` on the AOT object shows why: it exports
+`__simple_main_C__dev_p3new_s3sanity_root_build_scv_snapshots_scv_revision_v1_4ea8…_test_s3sanity_hello`,
+i.e. `MirToLlvm.llvm_function_symbol_name` took the module-suffixed branch
+(`70.backend/backend/_MirToLlvm/class_def.spl:216-219`) because `entry_main_symbol` was false:
+`llvm_module_is_native_entry` (`core_codegen.spl:387`) compares the module's logical name — derived
+from the frozen SCV snapshot path `<root>/build/scv/snapshots/scv-revision-v1-<hash>/test/s3sanity/hello.spl`
+— against `module_logical_name_from_path("test/s3sanity/hello.spl")`. Before `3ee90e34dc5`
+(2026-11-03, "fix(naming): anchor test/ entries repo-relative so they get __simple_main")
+`module_source_relative_path` only anchored at `/src/` and `/examples/`, so the snapshot path kept its
+absolute spelling and the two names never matched. The gate recipe's manual
+`llvm-objcopy --redefine-sym <mod-main>=__simple_main` is a workaround for exactly this.
+
+Why 43 still shows it although release/1.0.0 carries the fix: `C:/dev/wt/p3-envpol` (the source tree
+43/44/45 are built from) has `src/compiler/00.common/module_path_naming.spl` at `228a48e9ce5`
+(2026-10-25) — `3ee90e34dc5` was never folded, and `00.common` is not in any leaf set so far.
+
+Action for the phase-3 lead (posted to `fable_milestones.md`): fold `3ee90e34dc5` into p3-envpol and
+put `compiler.common.module_path_naming` in the leaf-46 object set; after that the driver's own
+auto-link must succeed (rc=0) on `hello`/`variable` without the objcopy rename.
+
+Repro + bug-site coverage (this PR):
+`test/01_unit/compiler/common/module_path_naming_scv_root_snapshot_spec.spl` — pins the exact 43
+SCV-root path shape (forward- and backslash-spelled, `./`-prefixed entry, sibling `src/` and
+`examples/` snapshot shapes) and calls `llvm_module_is_native_entry` directly with
+`SIMPLE_NATIVE_BUILD_ENTRY` set. Discriminates: with `module_path_naming.spl` at `228a48e9ce5`
+it fails 4/7 (seed interpreter, `bin/simple.exe run`); on the fixed tree 7/7 pass.
+
+Also seen in the same log, NOT the rc=1 cause, recorded for the owners: an early
+`[simple-runtime][error] rejected invalid array handle before dereference (value_bits=0x…6d01)` line
+before lowering (same class as the E-RTI-006 / #6921 reports), and
+`workarounds: refresh failed: …/src/lib/common/serialization/__init__.spl:407: workaround must
+immediately precede the affected block`.
