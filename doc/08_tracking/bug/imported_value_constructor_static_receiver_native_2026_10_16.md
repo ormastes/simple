@@ -49,3 +49,11 @@ before source/fixture review and freeze. A passing old-producer helper probe
 would not qualify a new lowering implementation. The required final target is
 actual full interpreter/backend_types/binop/calls/expr compilation in canonical
 context, collecting every remaining failure. No object/context graft.
+
+## 2026-11-05 status: fix-implemented-verification-pending
+
+Source workaround landed: 79725a1e34d (typed Value owner factories used by
+interpreter consumers) and 2e8ccbb079b (Value owner now
+`compiler.common.runtime_value_v1`, re-exported from backend_types.spl:180).
+No native verification yet: needs a rebuilt stage3 compiling interpreter,
+binop, calls and expr in canonical context. Do not redeploy seed/stage2 for it.

@@ -1,7 +1,7 @@
 // Core function execution logic
 
 use super::arg_binding::{bind_args, bind_args_with_values, bind_args_with_values_named, name_callee};
-use super::async_support::{is_async_function, wrap_in_promise};
+use super::async_support::{is_async_function, wrap_async_result};
 use super::macros::*;
 use crate::error::CompileError;
 use crate::interpreter::{
@@ -923,9 +923,11 @@ pub(crate) fn execute_function_body(
     // plain Int: `0xFFFF_8000_0000_0000` would compare as negative there.
     let result = crate::interpreter::coerce_to_declared_unsigned(result, func.return_type.as_ref());
 
-    // Wrap in Promise if async and requested
+    // Wrap in a ready future if async and requested. When the program has
+    // the std.async Future class this builds the Future.from_value shape;
+    // otherwise it falls back to the legacy Promise wrap.
     let result = if wrap_async && is_async_function(func) {
-        wrap_in_promise(result)
+        wrap_async_result(result, classes.contains_key("Future"))
     } else {
         result
     };
@@ -1614,6 +1616,66 @@ pub(crate) fn write_back_borrow_arguments(
     Ok(())
 }
 
+/// Three-way merge of the final values of an all-`mut` aliased parameter group
+/// against the shared pre-call array handle.
+///
+/// When the SAME caller array reaches two or more `mut` parameters, every
+/// mutation inside the callee copy-on-write-forks its own `Arc` off that
+/// shared handle (the interpreter's mutation paths re-read the binding and
+/// `Arc::make_mut` while any sibling slot still holds a strong ref). The
+/// pre-call handle itself is never parked for a multi-bound caller name, so
+/// `base` here is still the pristine fork point. Each fork is replayed in
+/// argument order:
+///   * ptr-equal to `base` -> the parameter was never mutated; no contribution;
+///   * `base`'s length-or-longer with `base` as an elementwise prefix ->
+///     append-only (push/append/extend/insert-at-end); everything past
+///     `base.len()` is new and is appended to the running result;
+///   * same length as `base` -> in-place slot edits; only the changed slots
+///     overwrite the running result;
+///   * anything else (shrink, or a rewrite that is not a prefix extension) ->
+///     the fork is the newest whole state; last replace wins, matching
+///     shared-storage last-writer semantics.
+///
+/// Returns `None` when no fork contributed (the caller binding is left
+/// untouched, exactly as the per-argument write-back would have). No
+/// synchronization is introduced: this runs on the calling thread after the
+/// callee has returned, and the decision uses only `Arc::ptr_eq` /
+/// elementwise compares — compare-and-swap style handle identity, never a
+/// lock, so concurrent execution semantics are unchanged.
+///
+/// Residual divergence, documented not hidden: a fork cannot record the
+/// interleaving of a sibling's destructive op (pop/remove of a region a
+/// sibling appended), so `push`-then-`pop` mixes across two `mut` aliases may
+/// still differ from the JIT's truly-shared storage. The filed defect class
+/// (append-only and in-place-edit traffic through aliased `mut` params) is
+/// exact.
+fn merge_aliased_mut_array_group(base: &Arc<ArrayData>, forks: &[Value]) -> Option<Vec<Value>> {
+    let base_len = base.len();
+    let mut merged: Vec<Value> = base.to_vec();
+    let mut changed = false;
+    for fork in forks {
+        let Value::Array(fork_arc) = fork else {
+            continue;
+        };
+        if Arc::ptr_eq(fork_arc, base) {
+            continue;
+        }
+        if fork_arc.len() >= base_len && (0..base_len).all(|i| fork_arc[i] == base[i]) {
+            merged.extend(fork_arc[base_len..].iter().cloned());
+        } else if fork_arc.len() == base_len {
+            for i in 0..base_len {
+                if fork_arc[i] != base[i] {
+                    merged[i] = fork_arc[i].clone();
+                }
+            }
+        } else {
+            merged = fork_arc.to_vec();
+        }
+        changed = true;
+    }
+    changed.then_some(merged)
+}
+
 // Bug #19 fix: write back mutable-container parameters to caller's bindings.
 //
 // When a function is called with a simple identifier argument (e.g., `f(a)`)
@@ -1661,6 +1723,60 @@ fn write_back_mutable_arguments(
     // Same rule for `obj.field` arguments: `f(h.items, h.items)` against
     // `fn f(mut a, b)` must not let `b`'s stale snapshot revert `a`'s write.
     let mut mut_field_written: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+
+    // All-`mut` aliased groups (both-aliases-`mut` residual of this bug's doc):
+    // when the SAME caller array binding reaches two or more `mut` parameters,
+    // each body mutation legitimately COW-forks its own `Arc`, and the
+    // per-argument last-wins write-back below drops every fork but the last
+    // (`push_both(z, z)` kept [1,8], losing the [1,7] fork — interpreter 2 vs
+    // JIT 3). The caller handle is never parked for a multi-bound name (see
+    // `park_written_back_arguments`), so it is still the pristine pre-call
+    // base at this point: merge each all-`mut` group's forks back against it
+    // and write ONE reconciled value, then skip the group's members in the
+    // per-argument loop. Groups mixing `mut` and non-`mut` members keep the
+    // existing per-argument path (the mut/immut clobber guard above).
+    let mut merged_group_params: HashSet<String> = HashSet::new();
+    if let Some(bindings) = identifier_arg_bindings(func, args, self_mode) {
+        let mut groups: HashMap<String, Vec<(String, bool)>> = HashMap::new();
+        for (caller_name, param_name) in &bindings {
+            let param_is_mut = params_to_bind
+                .iter()
+                .find(|p| p.name == param_name.as_str())
+                .map(|p| p.mutability.is_mutable())
+                .unwrap_or(false);
+            groups
+                .entry(caller_name.clone())
+                .or_default()
+                .push((param_name.clone(), param_is_mut));
+        }
+        for (caller_name, members) in &groups {
+            if members.len() < 2 || !members.iter().all(|(_, is_mut)| *is_mut) {
+                continue;
+            }
+            let Some(Value::Array(base)) = outer_env.get(caller_name.as_str()) else {
+                continue;
+            };
+            let base = Arc::clone(base);
+            let mut forks: Vec<Value> = Vec::with_capacity(members.len());
+            for (param_name, _) in members {
+                if let Some(v) = local_env.get(param_name.as_str()) {
+                    forks.push(v.clone());
+                }
+            }
+            if let Some(merged) = merge_aliased_mut_array_group(&base, &forks) {
+                let new_val = Value::Array(Arc::new(ArrayData::from(merged)));
+                trap_self_write("write_back_ident_merged", &func.name, caller_name, &new_val);
+                outer_env.insert(caller_name.clone(), new_val);
+                if !outer_env.is_local(caller_name) {
+                    crate::interpreter::place::sync_module_global(outer_env, caller_name);
+                }
+            }
+            for (param_name, _) in members {
+                merged_group_params.insert(param_name.clone());
+            }
+        }
+    }
+
     for arg in args {
         // A spread can bind multiple parameters, so later positional arguments
         // cannot be reconstructed safely without binder provenance. Named
@@ -1740,6 +1856,11 @@ fn write_back_mutable_arguments(
                 param_name,
             } => {
                 if caller_name == METHOD_SELF && self_mode == SelfMode::SkipSelf {
+                    continue;
+                }
+                if merged_group_params.contains(&param_name) {
+                    // Member of an all-`mut` aliased group already reconciled
+                    // by the three-way merge pre-pass above.
                     continue;
                 }
                 let param_is_mut = params_to_bind
@@ -2189,6 +2310,61 @@ fn exec_function_with_bound_args_inner(
 mod tests {
     use super::*;
     use simple_parser::Parser;
+
+    fn int_array(values: &[i64]) -> Value {
+        Value::Array(Arc::new(ArrayData::from(
+            values.iter().map(|v| Value::Int(*v)).collect::<Vec<_>>(),
+        )))
+    }
+
+    fn int_vec(value: &Value) -> Vec<i64> {
+        let Value::Array(items) = value else {
+            panic!("expected array, got {value:?}");
+        };
+        items.iter().map(|v| v.as_int().unwrap()).collect()
+    }
+
+    // The filed both-mut-alias repro: base [1], a pushes 7 ([1,7]), b pushes 8
+    // ([1,8]) -> the shared-storage answer [1,7,8].
+    #[test]
+    fn merge_appends_each_mut_alias_suffix_in_argument_order() {
+        let base = Arc::new(ArrayData::from(vec![Value::Int(1)]));
+        let forks = [int_array(&[1, 7]), int_array(&[1, 8])];
+        let merged = merge_aliased_mut_array_group(&base, &forks).expect("both forks contributed");
+        assert_eq!(
+            merged,
+            vec![Value::Int(1), Value::Int(7), Value::Int(8)]
+        );
+    }
+
+    #[test]
+    fn merge_skips_unmutated_forks_and_reports_no_change_when_all_untouched() {
+        let base = Arc::new(ArrayData::from(vec![Value::Int(1)]));
+        let untouched = Value::Array(Arc::clone(&base));
+        assert!(merge_aliased_mut_array_group(&base, &[untouched]).is_none());
+        // One untouched + one appended fork still merges, ignoring the untouched one.
+        let merged = merge_aliased_mut_array_group(&base, [Value::Array(Arc::clone(&base)), int_array(&[1, 9])].as_slice())
+            .expect("one fork contributed");
+        assert_eq!(merged, vec![Value::Int(1), Value::Int(9)]);
+    }
+
+    #[test]
+    fn merge_carries_same_length_slot_edits_without_dropping_sibling_appends() {
+        let base = Arc::new(ArrayData::from(vec![Value::Int(1), Value::Int(2)]));
+        // a edits slot 0 in place ([9,2]); b appends ([1,2,8]).
+        let forks = [int_array(&[9, 2]), int_array(&[1, 2, 8])];
+        let merged = merge_aliased_mut_array_group(&base, &forks).expect("both forks contributed");
+        assert_eq!(merged, vec![Value::Int(9), Value::Int(2), Value::Int(8)]);
+    }
+
+    #[test]
+    fn merge_last_replace_wins_for_non_prefix_rewrites() {
+        let base = Arc::new(ArrayData::from(vec![Value::Int(1)]));
+        // a appends ([1,7]); b rewrote the whole array ([4,5,6]).
+        let forks = [int_array(&[1, 7]), int_array(&[4, 5, 6])];
+        let merged = merge_aliased_mut_array_group(&base, &forks).expect("both forks contributed");
+        assert_eq!(merged, vec![Value::Int(4), Value::Int(5), Value::Int(6)]);
+    }
 
     #[test]
     fn sffi_return_contract_rejects_missing_non_optional_return() {

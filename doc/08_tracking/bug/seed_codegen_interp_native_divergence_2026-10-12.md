@@ -154,3 +154,53 @@ expected to be this one divergence; the 2026-10-11 hmac/TransferOut batches
 predate it and were genuine source fixes. Do NOT "fix" matrix errors by
 patching sources against the snapshot's behavior until the seed lane
 root-causes this — the interpreted lane is the semantic oracle.
+
+## Update 2026-11-05: path-fired probe committed; seed-lane differential blocked by new SCV cold-init defect
+
+The prescribed diagnostic (eprint inside `enum_payload_local_compatible`
+dumping which acceptance path fires, native vs interpreted) is implemented
+as an env-gated probe, `SIMPLE_ENUM_PAYLOAD_PATH_TRACE=1`
+(src/compiler/50.mir/_MirLoweringExpr/enum_constructor_payload.spl), on
+branch work/seed-div-probe-20261105. It logs remembered-hit (with both
+rendered types), remembered-miss, remembered-accept, and mir-evidence
+entries per payload slot, complementing the rejection-only
+SIMPLE_ENUM_PAYLOAD_TRACE.
+
+Attempting to run the differential on macOS (seed from 2026-11-04 boot,
+tree at current origin/release/1.0.0) surfaced a NEW seed-lane blocker that
+prevents ANY fresh-checkout seed native-build from reaching the compiler
+phases: SCV cold inventory init fails after the first .spl file event
+("git-event-refresh-failed"; git query provably healthy;
+query_status=0/query_bytes=6321321; events=1/read=1/read_bytes=7301).
+Full trace evidence and repro in
+doc/08_tracking/bug/seed_scv_cold_init_second_file_event_fails_2026-11-05.md.
+Until that owner-lane defect is fixed (second transient-scope begin or the
+first event's pause/promote/end on the Rust lane), neither the seed-native
+snapshot build nor the interpreted native_build_main probe can start, so
+the path-fired differential remains queued behind it.
+
+Environment notes for the next attempt (each cost one cycle to find):
+the seed binary needs DYLD_INSERT_LIBRARIES=<bootstrap>/libsimple_runtime.dylib
+(JIT cannot resolve simple_contract_check otherwise), the memory reserve
+needed lowering (SIMPLE_BUILD_MEMORY_RESERVE_BYTES=536870912 under load),
+--runtime-path must stay under the checkout root, `run` passes argv without
+a `--` separator, and SIMPLE_INVENTORY_TRACE_ATTEMPT must be 16-64 hex.
+
+## Differential repro re-run — 2026-11-05
+
+The doc's minimal repro (src/app/sdn_diff_repro/main.spl, sdn.value +
+unused sdn.parser import — the exact closure-order flip shape) was built
+through the current trust-root stage2 candidate (cranelift,
+aarch64-unknown-linux-gnu, worktree at df48a86ff5a):
+
+    native-build src/app/sdn_diff_repro/main.spl --backend=cranelift
+        --threads 1 --mode one-binary --runtime-bundle core-c-bootstrap
+        --emit-object
+
+Result: rc=0, ZERO "payload type mismatch" / "enum construction" errors. The
+enum-payload-comparison divergence does not reproduce at current
+release/1.0.0 source (consistent with the r10 matrix's Oct-12 observation
+that a then-current snapshot compiled the 13-liner cleanly). The doc's
+second symptom site (self-name resolution at sdn/value.spl:48 in the
+test_runner closure) is covered by the stage2 compiler-test matrix; the
+seed-lane miscompile hypothesis remains unproven at current source.

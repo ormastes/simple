@@ -94,3 +94,31 @@ the fall-through continuation when the callee returns.  Likely the same
 MIR/ABI area (`lowering_expr_method.rs` / statement-position call
 continuation).  Reproduce with any `table[k] = v; return` shape compiled
 for aarch64-unknown-none and executed once.
+
+## Current-source negative repro — 2026-11-05
+
+The trap shape no longer reproduces at current release/1.0.0 source. Three
+minimal shapes were compiled for aarch64-unknown-none with the seed cranelift
+backend (--opt-level=aggressive, same flags as
+scripts/qemu/check_simpleos_arm64_clang_compile.shs kernel build) and the
+resulting objects disassembled (aarch64-linux-gnu-objdump):
+
+1. plain `table[k] = v; return 7` with a module-level array — rt_index_set
+   call is followed by a normal epilogue + ret.
+2. method shape `self.values[i] = data; return` (cache-hit arm of a
+   put-method, mirroring Fat32Core._cluster_cache_put) — call followed by
+   proper epilogue + ret; the array header is additionally RELOADED after the
+   call (the Wall-7 stale-receiver repair is present in-tree).
+3. tail-position index-set with implicit return, in a straight-line method
+   and in an if-arm — no udf anywhere in the object.
+
+All three objects contain zero `udf` instructions. The 2026-09-25 trap
+binary predates the in-tree Wall-7 sibling repairs; the index-set analogue
+appears fixed alongside them. Repro recipe for the lane: minimal entry under
+test/_probe_root_tmp, native-build --target aarch64-unknown-none --backend
+cranelift --opt-level=aggressive --entry-closure, disassemble the kept
+objects on link failure (or the linked ELF).
+
+Remaining acceptance NOT claimed: re-running the Wall-9 streaming-payload
+boot to exercised-trap confirmation requires the lane-C1 clang toolchain and
+QEMU boot; the eight original sites should be re-cleared there.

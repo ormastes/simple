@@ -1,3 +1,6 @@
+use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer}
+use std.common.encoding.utf8.{text_codepoints}
+
 fn _strip_tags(html: text) -> text:
     """Remove all HTML tags, returning raw text content."""
     val html_len = html.len()
@@ -40,6 +43,57 @@ fn _normalize_whitespace(s: text) -> text:
             prev_space = false
         i = i + 1
     _text_list_prefix(result, result_count).join("").trim()
+
+pub fn browser_render_vector_font_probe_pixels(text_val: text, font_size: i32, line_height: i32) -> [u32]:
+    """Render text through the Simple Vector Outline lane into an ARGB buffer.
+
+    The buffer is sum-of-advances wide and line_height tall with a white
+    background and black alpha-blended glyph coverage, so partially covered
+    edge pixels land strictly between the background and pure black (that is
+    what exposes antialiasing to callers). Vector-outline glyphs only: no
+    TTF/SFFI face is loaded."""
+    var renderer = FontRenderer.new()
+    val cps = text_codepoints(text_val)
+    var advances: [i32] = []
+    var total_w = 0
+    var gi = 0
+    while gi < cps.len():
+        val glyph = renderer.get_glyph(cps[gi] as i32, font_size)
+        var adv = glyph.advance
+        if adv <= 0:
+            adv = font_size / 2
+            if adv <= 0:
+                adv = 1
+        advances = advances.push(adv)
+        total_w = total_w + adv
+        gi = gi + 1
+    var buf_w = total_w
+    if buf_w <= 0:
+        buf_w = 1
+    var buf_h = line_height
+    if buf_h <= 0:
+        buf_h = font_size
+    if buf_h <= 0:
+        buf_h = 1
+    var buf: [u32] = [0xFFFFFFFFu32; buf_w * buf_h]
+    var pen_x = 0
+    gi = 0
+    while gi < cps.len():
+        val glyph = renderer.get_glyph(cps[gi] as i32, font_size)
+        var row = 0
+        while row < glyph.height and row < buf_h:
+            var col = 0
+            while col < glyph.width:
+                if pen_x + col < buf_w:
+                    val alpha = glyph.pixels[row * glyph.width + col].to_i32()
+                    if alpha > 0:
+                        val c = 255 - alpha
+                        buf[pen_x + col + row * buf_w] = 0xFF000000u32 + (c * 65536 + c * 256 + c).to_u32()
+                col = col + 1
+            row = row + 1
+        pen_x = pen_x + advances[gi]
+        gi = gi + 1
+    buf
 
 pub fn browser_chrome_text_scanline_write_y_probe(write_y: i32) -> i32:
     """Return the glyph scanline write y coordinate without compatibility shifting."""

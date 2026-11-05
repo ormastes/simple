@@ -1,6 +1,28 @@
 # Bug: `text.index_of` returns `nil` for a present substring (Option<i64> mangled)
 
-- **Filed:** 2026-07-07
+- ## Status 2026-11-05 — not reproducible on release/1.0.0 @ c3b2271c310
+
+Runtime: committed `bin/simple.exe` (bootstrap seed, expected warning),
+`--mode=interpreter`, Windows Git Bash.
+
+- `test/01_unit/app/llm_caret/index_of_present_substring_spec.spl`: 5/5 PASS.
+  `text.index_of` now returns a raw usable `i64` (3 for a present substring at
+  index 3, 0 at index 0) directly and across the `json_helpers` module
+  boundary, matching `json_find`.
+- `"7".to_int() ?? -1` → 7 and `("42".to_int() ?? -1) + 7` → 49 under the
+  interpreter (probe run 2026-11-05). The `Option<i64>` mangling described in
+  the symptom is not reproducible; the current compiler contract is the raw
+  `i64` form recorded in the 2026-11-03 owner audit.
+- The `json_helpers.spl` workaround (`json_find`, `json_parse_int`,
+  `_digit_val`) is intentionally retained: it is correct under both JIT and
+  interpreter, and the residual cross-module JIT boxing of the composite
+  `extract_json_int` chain is a deeper compiler defect outside the app lane.
+
+Conclusion: the P1 symptom is fixed upstream on this branch; the workaround
+stays as the conservative parsing path until the JIT residual is repaired in
+the compiler. Closing as not reproducible.
+
+**Filed:** 2026-07-07
 - **Severity:** P1 (silent data loss in any Option<i64>-returning stdlib call)
 - **Component:** self-hosted interpreter — string/Option value boxing
 - **Status:** open; worked around in `src/app/llm_caret/json_helpers.spl`

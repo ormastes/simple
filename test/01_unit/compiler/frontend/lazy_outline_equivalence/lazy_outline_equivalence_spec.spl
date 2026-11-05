@@ -12,18 +12,33 @@
 #
 # ## Design
 #
-# Because `compiler.frontend.treesitter` cannot be imported from interpreter-mode
-# specs (all such imports are blocked — see block_skip_policy_spec.spl), this
-# harness implements a lightweight text-based declaration extractor that mirrors
-# what the outline parser does:
+# The two extraction paths run over the same source text and must yield
+# identical sorted name sets for each sample module:
 #
-#   - **Outline path**: scan only top-level `fn`/`class`/`struct`/`enum`/`trait`
-#     keywords at indent-0, skipping function body lines.
-#   - **Full path**: scan all lines including body lines, but still collect
-#     only the same top-level declarations.
+#   - **Outline path (lazy)**: the REAL treesitter heuristic outline parser,
+#     `treesitter_new(source).parse_outline_heuristic()`
+#     (`src/compiler/10.frontend/treesitter/heuristic.spl`). Its named
+#     declaration surface is collected from the returned `OutlineModule`:
+#     functions, classes, structs, enums, traits (actors / bitfields /
+#     type_aliases / constants are collected too; heuristic mode currently
+#     leaves them empty). `export fn name(...)` lines surface as raw export
+#     item text, so they are normalized through the same
+#     `extract_decl_name` helper the eager path uses.
+#   - **Full path (eager)**: an independent line scan that processes ALL
+#     lines (body lines included) with the local `extract_decl_name`
+#     helper. The indent fence (only column-0 lines can declare) rejects
+#     every indented body line, so the eager scan sees exactly the
+#     top-level declaration surface.
 #
-# Both paths must yield identical sorted name sets for each sample module.
-# This equivalence property is the key guarantee that lazy parsing is safe.
+# Equivalence between two independent implementations (real lazy parser vs
+# eager text scan) is the key guarantee that lazy parsing is safe.
+#
+# `extract_decl_name` deliberately mirrors the keyword set the real
+# heuristic outline parser captures at indent 0 (`fn`/`class`/`struct`/
+# `enum`/`trait`, with optional `pub ` / `export ` prefixes). Declaration
+# forms the heuristic parser drops (`var`/`val` module state, `me` methods,
+# `mod`, `use`/`import`, `impl` blocks) yield "" on the eager path as well,
+# keeping the two surfaces comparable.
 #
 # ## Files Tested
 #
@@ -31,14 +46,14 @@
 #   1. src/compiler/00.common/dependency/graph.spl
 #      (ImportGraph, ImportEdge, ImportKind, CyclicDependencyError + fns)
 #   2. src/lib/common/markdown/types.spl   (struct/enum declarations)
-#   3. src/lib/common/cbor/types.spl       (struct/enum/fn-heavy, 270 lines)
-#   4. src/lib/common/cbor/utilities.spl   (fn-heavy, 117 lines)
-#   5. src/lib/common/ui/color.spl         (struct + fns)
+#   3. src/lib/common/cbor/types.spl       (struct/enum/fn-heavy, 306 lines)
+#   4. src/lib/common/cbor/utilities.spl   (fn-heavy, 130 lines)
+#   5. src/lib/common/ui/color.spl         (class + fns)
 #
 # ## Interpreter Note
 #
 # `it` block bodies execute in interpreter mode. This spec runs fully green
-# in interpreter mode with `SIMPLE_LIB=src bin/simple test <path>`.
+# in interpreter mode with `bin/simple test <path> --no-session-daemon`.
 
 extern fn rt_file_read_text(path: text) -> text?
 
@@ -56,6 +71,8 @@ asserted here; platform-specific behavior is out of scope.
 """
 
 use std.spec
+use compiler.frontend.treesitter.outline_lexer.{treesitter_new}
+use compiler.frontend.treesitter.heuristic.*
 
 # doc-path: doc/01_research/local/lazy_outline_equivalence.md
 # doc-path: doc/03_plan/sys_test/lazy_outline_equivalence.md
@@ -64,33 +81,126 @@ use std.spec
 
 # @manual: primary
 
+fn take_identifier(s: text) -> text:
+    """Extract a leading identifier (alphanumeric + underscore) from s.
+
+    Mirrors heuristic_extract_name in treesitter/heuristic.spl, but
+    returns "" (not "<unknown>") when no identifier starts the string.
+    """
+    var end = 0
+    while end < s.len():
+        val ch = s[end]
+        val is_valid = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_'
+        if is_valid:
+            end = end + 1
+        else:
+            break
+    s.substring(0, end)
+
+fn extract_decl_name(line: text) -> text:
+    """
+    Eager-path declaration extractor for one source line.
+
+    Returns the declared name when `line` is a top-level declaration the
+    real heuristic outline parser captures, else "".
+
+    Fences (matching the real parser's behavior):
+      - indent fence: any leading space means a body/member line, not a
+        top-level declaration (heuristic_indent_level counts spaces).
+      - comment/empty fence: `#` lines and empty lines carry no decls.
+    Prefixes: `pub ` and `export ` are stripped before keyword matching,
+    mirroring heuristic_parse_declaration.
+    Keyword table: fn/class/struct/enum/trait — exactly the named kinds the
+    heuristic parser converts into the OutlineModule declaration surface.
+    `var`/`val`/`me`/`mod`/`use`/`import`/`impl` lines are intentionally
+    rejected: the real parser captures but then drops them (or keeps them
+    outside the named surface), so the eager path drops them too.
+    """
+    if line.len() == 0:
+        return ""
+    if line[0] == ' ':
+        return ""
+    if line[0] == '#':
+        return ""
+    var rest = line
+    if rest.starts_with("pub "):
+        rest = rest[4:]
+    if rest.starts_with("export "):
+        rest = rest[7:]
+    for kw in ["fn ", "class ", "struct ", "enum ", "trait "]:
+        if rest.starts_with(kw):
+            return take_identifier(rest[kw.len():])
+    ""
+
+fn sorted_insert(sorted_names: [text], item: text) -> [text]:
+    """Insert item into an already-sorted list, preserving order (stable)."""
+    var result: [text] = []
+    var placed = false
+    for x in sorted_names:
+        if not placed and x > item:
+            result = result.push(item)
+            placed = true
+        result = result.push(x)
+    if not placed:
+        result = result.push(item)
+    result
+
+fn sort_names(names: [text]) -> [text]:
+    """Return a new list with names sorted ascending (stable insertion sort)."""
+    var result: [text] = []
+    for name in names:
+        result = sorted_insert(result, name)
+    result
+
 fn scan_outline(source: text) -> [text]:
     """
-    Outline path: collect top-level declaration names from col-0 lines only.
-    Mimics treesitter fast_mode: function bodies (indented lines) are skipped.
+    Lazy path: run the REAL treesitter heuristic outline parser over the
+    source and collect the named declaration surface (functions, classes,
+    structs, enums, traits, actors, bitfields, type aliases, constants).
+    Export declarations are normalized to their declared name through
+    extract_decl_name so `export fn my_fn(...)` surfaces as "my_fn".
     """
     var names: [text] = []
-    val lines = source.split("\n")
-    for line in lines:
-        val decl = extract_decl_name(line)
-        if decl.len() > 0:
-            names.push(decl)
+    val module = treesitter_new(source).parse_outline_heuristic()
+    for f in module.functions:
+        names = names.push(f.name)
+    for c in module.classes:
+        names = names.push(c.name)
+    for s in module.structs:
+        names = names.push(s.name)
+    for e in module.enums:
+        names = names.push(e.name)
+    for t in module.traits:
+        names = names.push(t.name)
+    for a in module.actors:
+        names = names.push(a.name)
+    for b in module.bitfields:
+        names = names.push(b.name)
+    for ta in module.type_aliases:
+        names = names.push(ta.name)
+    for cv in module.constants:
+        names = names.push(cv.name)
+    for ex in module.exports:
+        for item in ex.items:
+            val decl = extract_decl_name(item)
+            if decl.len() > 0:
+                names = names.push(decl)
     sort_names(names)
 
 fn scan_full(source: text) -> [text]:
     """
-    Full path: same scan, but explicitly processes ALL lines (including body
-    lines). Since body lines are indented, extract_decl_name rejects them —
-    the result is identical to scan_outline by construction.
-    This represents the full-parse surface extraction contract.
+    Full path: eager, independent line scan that explicitly processes ALL
+    lines (including body lines) through extract_decl_name. The indent
+    fence rejects indented body lines, so the eager scan collects exactly
+    the top-level declaration surface — the full-parse extraction contract.
     """
     var names: [text] = []
     val lines = source.split("\n")
     for line in lines:
-        # full parse would process every line; we still only keep col-0 decls
+        # full parse would process every line; only col-0 decls survive
         val decl = extract_decl_name(line)
         if decl.len() > 0:
-            names.push(decl)
+            names = names.push(decl)
     sort_names(names)
 
 fn names_equal(a: [text], b: [text]) -> bool:
@@ -121,11 +231,19 @@ fn check_nonempty(source: text, label: text) -> bool:
     ok
 
 fn check_name_present(source: text, expected_name: text) -> bool:
-    val names = scan_outline(source)
-    for n in names:
+    # Non-vacuity control: the known declaration must appear in BOTH the
+    # lazy outline surface and the eager full-parse surface.
+    val outline_names = scan_outline(source)
+    val full_names = scan_full(source)
+    var in_outline = false
+    for n in outline_names:
         if n.contains(expected_name):
-            return true
-    false
+            in_outline = true
+    var in_full = false
+    for n in full_names:
+        if n.contains(expected_name):
+            in_full = true
+    in_outline and in_full
 
 fn check(v: bool):
     expect(v).to_equal(true)
@@ -156,12 +274,16 @@ describe "Lazy Outline Equivalence":
 
     This is the AC-4 groundwork spec for task W2-A1 (lazy-parse).
 
-    All assertions compare sorted name lists from two extraction paths:
-    - outline path (col-0 only, mimics treesitter fast_mode)
-    - full path (all lines, same col-0 filter — body lines are indented)
+    All assertions compare sorted name lists from two independent
+    extraction implementations over the same source:
+    - outline path: the real treesitter heuristic outline parser
+      (parse_outline_heuristic)
+    - full path: eager line scan of ALL lines, keeping only column-0
+      declarations (body lines are indented and fenced off)
 
-    The two paths yield identical results by the indent-fence invariant:
-    all top-level declarations in Simple start at column 0.
+    Equivalence plus the non-vacuity checks (non-empty surfaces, known
+    declaration names present in BOTH surfaces) prove the lazy outline is
+    a faithful basis for lazy parsing.
     """
 
     context "graph.spl — ImportGraph + cycle detection":

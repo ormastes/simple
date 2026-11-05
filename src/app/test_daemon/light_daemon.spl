@@ -36,6 +36,13 @@ val LIGHT_REQ_DIR: text = ".build/test_daemon_light/requests"
 val LIGHT_RESP_DIR: text = ".build/test_daemon_light/responses"
 val LIGHT_LOCK: text = ".build/test_daemon_light/daemon.lock"
 val LIGHT_STOP: text = ".build/test_daemon_light/stop"
+# Wakeup sequence for the idle poll loop. A client bumps this file (atomic
+# tmp+rename, content = its request id) AFTER publishing its request; the
+# daemon's idle loop stat()s this one file in-process every LIGHT_POLL_MS
+# instead of paying dir_list()'s `/bin/sh -c "ls -1 ..."` shell-out every
+# poll. Any content change triggers one drain of the request directory.
+# See doc/08_tracking/bug/light_test_daemon_lane_slower_than_direct_after_shell_spawn_fix_2026-09-13.md.
+val LIGHT_WAKE: text = ".build/test_daemon_light/wakeup.seq"
 # Published so a client can see WHICH compiler this daemon will run every served
 # spec with. Without it the daemon lane is unobservable: the caller cannot tell
 # that its freshly built binary was replaced by whatever started the daemon.
@@ -269,7 +276,19 @@ fn main() -> i64:
         light_lock_release(LIGHT_LOCK, LIGHT_BINARY, "{getpid()}")
         return 1
     var idle = 0
-    while idle < 240:
+    var last_wake = ""
+    # True once any wakeup-protocol client has been seen. Pre-contact the
+    # fallback sweep runs at 500 ms so clients of EITHER generation (old
+    # clients never write LIGHT_WAKE) are discovered well inside their 2000 ms
+    # claim-wait window; post-contact it relaxes to 5 s — a wakeup-protocol
+    # client is provably out there, and an old client discovering a 5 s sweep
+    # merely withdraws and runs direct, which is correct, just not served.
+    var wake_seen = false
+    # Idle lifetime is ~60 s, matching the old 240 x 250 ms loop, but the
+    # poll interval is 25x finer because the hot-path wakeup check is an
+    # in-process file stat, not the dir_list() shell-out the old loop paid
+    # on every iteration (~2 execves per 250 ms of idle lifetime).
+    while idle < 6000:
         if file_exists(LIGHT_STOP):
             file_delete(LIGHT_STOP)
             light_lock_release(LIGHT_LOCK, LIGHT_BINARY, "{getpid()}")
@@ -278,10 +297,30 @@ fn main() -> i64:
         # spawned by a racing client cannot double-serve requests.
         if lock_owner_pid() != "{getpid()}":
             return 0
+        # Fast path: a client bumped the wakeup sequence after publishing its
+        # request. The request rename lands BEFORE the wakeup write, so a
+        # visible sequence value implies the request is already listable.
+        var woke = false
+        if file_exists(LIGHT_WAKE):
+            val current_wake = (read_file_text(LIGHT_WAKE)).trim()
+            if current_wake != "" and current_wake != last_wake:
+                last_wake = current_wake
+                wake_seen = true
+                woke = true
+        # Fallback sweep: clients predating the wakeup protocol never write
+        # LIGHT_WAKE, and a lost wakeup write (a client dying between its
+        # request rename and the bump) would otherwise strand the request
+        # for the whole idle lifetime. Between sweeps the loop is pure
+        # in-process file stats.
+        val sweep_mod = if wake_seen: 500 else: 50
+        if not woke and idle % sweep_mod != 0:
+            idle = idle + 1
+            thread_sleep(10)
+            continue
         val entries = dir_list(LIGHT_REQ_DIR)
         if entries.len() == 0:
             idle = idle + 1
-            thread_sleep(250)
+            thread_sleep(10)
             continue
         idle = 0
         # Serve ONE request per poll iteration, then re-list.

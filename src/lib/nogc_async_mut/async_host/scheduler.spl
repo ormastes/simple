@@ -2,7 +2,7 @@
 #
 # Work-stealing scheduler with optional multi-threading support.
 
-use std.async_core.{Poll, Priority, TaskState, CancellationToken}
+use std.async_core.{Priority, TaskState, CancellationToken}
 use std.async_host.waker.{Waker}
 use std.async_host.future.{HostFuture}
 use std.async_host.thread_safe_queue.{ThreadSafeQueue}
@@ -31,7 +31,9 @@ class HostTaskContext:
     cancel_pending: bool = false
     cancellation_requested: bool = false
     cleanup_ids: [i64]
-    cleanup_actions: [fn() -> ()]
+    # i64-encoded unit actions (1 = done) so stored cleanup closures stay on
+    # the encodable closure ABI — see _terminal_host_poll for the constraint.
+    cleanup_actions: [fn() -> i64]
     closed: bool
 
     fn on_owner_thread() -> bool:
@@ -73,7 +75,7 @@ class HostTaskContext:
         self.lifetime.cancel()
         true
 
-    me register_cleanup(resource_id: i64, action: fn() -> ()) -> bool:
+    me register_cleanup(resource_id: i64, action: fn() -> i64) -> bool:
         """Retain a resource cleanup once; reject before exceeding 64 resources."""
         if not self.is_current():
             return false
@@ -91,7 +93,7 @@ class HostTaskContext:
         if not self.is_current():
             return false
         var keep_ids: [i64] = []
-        var keep_actions: [fn() -> ()] = []
+        var keep_actions: [fn() -> i64] = []
         var removed = false
         for index in 0..self.cleanup_ids.len():
             if self.cleanup_ids[index] == resource_id:
@@ -129,7 +131,13 @@ class HostTaskContext:
         self.lifetime.release()
         true
 
-fn _terminal_host_poll() -> Poll<()>: Poll.Ready(())
+# Poll thunks cross the scheduler boundary encoded as i64: 1 = Ready (task
+# body returned), 0 = Pending (task suspended until a wake). A closure typed
+# `fn() -> Poll<()>` is not storable: the closure ABI cannot carry enum/ANY
+# return rows, and any lambda whose body contains an ANY-typed call (e.g. a
+# generic task body) demotes the whole enclosing function off the JIT into
+# the interpreter, where stored closures no longer dispatch.
+fn _terminal_host_poll() -> i64: 1
 
 # ============================================================================
 # Task Death Record — W2-5 H1+H3
@@ -222,7 +230,8 @@ struct HostTask:
     id: usize
     state: TaskState
     priority: Priority
-    poll_fn: fn() -> Poll<()>
+    # i64-encoded Poll: 1 = Ready, 0 = Pending (see _terminal_host_poll).
+    poll_fn: fn() -> i64
     waker: Option<Waker>
     context: HostTaskContext
     task_error: text   # W2-5: non-empty when task died with a .spl-level error
@@ -301,7 +310,7 @@ impl HostScheduler:
             case SchedulerMode.MultiThreaded: true
             case SchedulerMode.SingleThreaded: false
 
-    me schedule(priority: Priority, poll_fn: fn() -> Poll<()>) -> usize:
+    me schedule(priority: Priority, poll_fn: fn() -> i64) -> usize:
         """Schedule task with priority."""
         # A fixed invalid ID preserves this legacy signature on failed
         # admission. try_schedule exposes the same failure as a Result.
@@ -342,7 +351,7 @@ impl HostScheduler:
 
         id
 
-    me schedule_on_worker(worker_id: usize, poll_fn: fn() -> Poll<()>) -> usize:
+    me schedule_on_worker(worker_id: usize, poll_fn: fn() -> i64) -> usize:
         """Schedule on specific worker."""
         val id = self.schedule(Priority.Normal, poll_fn)
         if id != 9223372036854775807 and worker_id < self.worker_count:
@@ -378,7 +387,7 @@ impl HostScheduler:
                         task.context.wake_pending = false
                         self.wake_task(signal.task_id)
 
-    me try_schedule(priority: Priority, poll_fn: fn() -> Poll<()>) -> Result<usize, text>:
+    me try_schedule(priority: Priority, poll_fn: fn() -> i64) -> Result<usize, text>:
         val id = self.schedule(priority, poll_fn)
         if id == 9223372036854775807:
             return Err("host task lifetime capacity or task ID exhausted")
@@ -505,35 +514,34 @@ impl HostScheduler:
                     exit_scheduler_task_id(previous_task_id)
                     self.tasks[id] = t
                     return true
-                match polled:
-                    case Poll.Ready(_):
-                        t.state = TaskState.Completed
-                        t.context.finish()
-                        t.poll_fn = _terminal_host_poll
-                        # W2-5: record death reason — tag with task key at time of completion.
-                        # If the runtime wired an error into task_error, record it as a
-                        # failure; otherwise record clean completion so joiners can correlate.
-                        val tkey = current_unified_task_key("unknown-task")
-                        if t.task_error != "":
-                            val rec = TaskDeathRecord(
-                                task_key: tkey,
-                                task_id: id,
-                                reason: t.task_error
-                            )
-                            self.death_records = self.death_records.push(rec)
-                        # Wake waiters
-                        match t.waker:
-                            case Some(w): w.wake()
-                            case None: pass
-                    case Poll.Pending:
-                        # Check if waker fired during poll
-                        if t.context.wake_pending or waker_check(id):
-                            waker_clear(id)
-                            t.context.wake_pending = false
-                            t.state = TaskState.Pending
-                            self.global_queue = self.global_queue.push(id)
-                        else:
-                            t.state = TaskState.Suspended
+                if polled == 1:
+                    t.state = TaskState.Completed
+                    t.context.finish()
+                    t.poll_fn = _terminal_host_poll
+                    # W2-5: record death reason — tag with task key at time of completion.
+                    # If the runtime wired an error into task_error, record it as a
+                    # failure; otherwise record clean completion so joiners can correlate.
+                    val tkey = current_unified_task_key("unknown-task")
+                    if t.task_error != "":
+                        val rec = TaskDeathRecord(
+                            task_key: tkey,
+                            task_id: id,
+                            reason: t.task_error
+                        )
+                        self.death_records = self.death_records.push(rec)
+                    # Wake waiters
+                    match t.waker:
+                        case Some(w): w.wake()
+                        case None: pass
+                else:
+                    # Check if waker fired during poll
+                    if t.context.wake_pending or waker_check(id):
+                        waker_clear(id)
+                        t.context.wake_pending = false
+                        t.state = TaskState.Pending
+                        self.global_queue = self.global_queue.push(id)
+                    else:
+                        t.state = TaskState.Suspended
 
                 exit_scheduler_task_lifetime(previous_lifetime)
                 exit_scheduler_task_id(previous_task_id)

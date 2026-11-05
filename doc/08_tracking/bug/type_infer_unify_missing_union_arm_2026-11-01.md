@@ -82,3 +82,10 @@ Packet E2 (`work/e2-hm-traversal`, landed as `178ecc247f1`) owns the carrier
 walks in `occurs`, `Substitution.apply` and `collect_free_vars`. This fix only
 touches the `unify` match in `core.spl` and does not alter those functions or
 generalization.
+
+## Verification — 2026-11-05
+
+Executable evidence re-confirmed on release/1.0.0: the closure MC/DC spec
+test/01_unit/compiler/type_infer/coverage/core_mcdc_spec.spl — including
+"core.spl:234 Union self-unify should succeed" (REQ-GEN-COV-CORE-059) — passes
+59/59 under the seed interpreter on an aarch64 Linux host.

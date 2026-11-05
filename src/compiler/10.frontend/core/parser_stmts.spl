@@ -66,7 +66,7 @@ use compiler.frontend.core.lexer.{lex_mark_current_token_as_generic_close}
 use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left, expr_get_args, expr_get_span, expr_set_span}
 use compiler.core.types.{span_is_valid, span_start, span_line, span_col}
 use compiler.core.ast.{expr_get_arg_names, expr_call_args_set}
-use compiler.core.ast.{stmt_expr_stmt, stmt_val_decl, stmt_if_val_decl, stmt_lazy_val_decl, stmt_var_decl}
+use compiler.core.ast.{stmt_expr_stmt, stmt_val_decl, stmt_if_val_decl, stmt_lazy_val_decl, stmt_var_decl, stmt_assign_stmt}
 use compiler.core.ast.{stmt_get_expr, stmt_get_name, module_get_path}
 use compiler.core.ast_stmt.{stmt_i64_set}
 use compiler.core.ast.{stmt_return_stmt, stmt_if_stmt, stmt_if_stmt_with_single_else, stmt_for_stmt, stmt_while_stmt, stmt_block_stmt}
@@ -1363,6 +1363,23 @@ fn parse_statement() -> i64:
             return stmt_val_decl(walrus_name, walrus_type, walrus_init, 0)
         lex_snapshot_rollback(walrus_snap)
         parser_tok_restore(walrus_nums, walrus_text)
+        # Plain assignment statement: `name = expr` at statement start decodes
+        # as STMT_ASSIGN (target identifier + value) instead of an assignment
+        # expression swallowed by STMT_EXPR. Compound targets (`x.y`, `x[i]`,
+        # tuples), compound operators (`+=`) and the `match = x` identifier
+        # path (G33 above) keep the expression-statement form. Peek the token
+        # after the identifier speculatively: the restore above rewound to
+        # the identifier itself, same as the walrus probe above.
+        val assign_snap = lex_snapshot_save()
+        val (assign_nums, assign_text) = parser_tok_save()
+        parser_advance()
+        if par_kind_get() == TOK_ASSIGN:
+            lex_snapshot_commit(assign_snap)
+            parser_advance()
+            val assign_value = parse_expr()
+            return stmt_assign_stmt(expr_ident(walrus_name, 0), assign_value, 0)
+        lex_snapshot_rollback(assign_snap)
+        parser_tok_restore(assign_nums, assign_text)
         val (bc_matched, bc_call) = try_parse_bare_ident_string_call()
         expression = if bc_matched: bc_call else: parse_expr()
     else:

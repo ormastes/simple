@@ -1,10 +1,29 @@
 # Seed native numeric conversion suffix rebinds a private reader
 
 - Priority: P0 (ARM64 Linux bootstrap admission blocker)
-- Status: fixing; no post-fix native pass claimed
+- Status: fixing; resolver regression tests landed (PR #6823, 2026-11-05); native fixture and Phase 2 rebuild admission still pending
 - Owner: `src/compiler_rust/compiler/src/pipeline/native_project/mangle.rs`; suffix lookup in adjacent `imports.rs`
 - Observed: 2026-11-03, ARM64 Linux attempt 8 Phase 2 sanity `p2_add` native build
 - Repair owner: bootstrap_arm64_lead; database owner: bug_db_lead
+
+## Progress
+
+- 2026-11-04: `ce18f9e2026` fixed `suffix_of` to keep the leading underscore of
+  private helpers (`mod___u64` indexes as `_u64`, not `u64`), plus the
+  pre-existing index-level unit test `suffix_index_keeps_leading_underscore_of_private_helper`.
+- 2026-11-05 (PR #6823): acceptance #1/#2 resolver regressions in
+  `mangle.rs` `mod tests`, built through the real `build_suffix_index` with
+  the conflicting `elf_artifact_gate___u64` reader present:
+  - bare numeric conversions (`to_u64`/`to_i64`/...) through
+    `resolve_call_target` stay bare instead of binding the private reader;
+  - primitive-qualified statics (`u64.to_u64`, ...) through
+    `resolve_method_call_static` stay bare;
+  - positive arms: a real conversion owner still binds on both routes;
+  - negative controls: a custom owner (`Px.to_u64`) and exact authored
+    imports still resolve on both routes.
+  Acceptance #3 (executing native fixture) and #4 (rebuilt Phase 2 real
+  Hello/sanity admission) remain open and require the repaired producer
+  plus an ARM64 Linux host or QEMU lane.
 
 ## Failure and evidence
 
@@ -22,3 +41,15 @@ Evidence retained at `/tmp/aspect-fix-rr-attempt8-core-20261103/backtrace.txt` a
 4. The repaired producer rebuilds Phase 2 and passes real compiled Hello/sanity execution before dependent phases. Record exact source, producer, runtime, target and cache lineage.
 
 Repair and acceptance are in progress. A source patch, passing resolver unit test, or linked Phase 2 alone does not close this record. macOS is not asserted reproduced; the resolver is shared.
+
+## Resolver regression re-verification — 2026-11-05
+
+cargo test -p simple-compiler --lib at current release/1.0.0:
+- filters `numeric_conversion`, `private_reader`: 6 distinct resolver tests
+  PASS (bare call-target never-binds/still-binds-real-owner,
+  primitive-qualified static never-binds, custom owner, exact authored
+  imports);
+- filter `suffix`: 17/17 PASS (incl.
+  suffix_index_keeps_leading_underscore_of_private_helper).
+Acceptance #3 (executing native fixture) and #4 (rebuilt Phase 2 real
+Hello/sanity admission) remain open per the owner lane.
