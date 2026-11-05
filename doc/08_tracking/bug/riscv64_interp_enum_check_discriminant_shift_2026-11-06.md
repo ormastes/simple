@@ -121,3 +121,59 @@ seed layer (see
   the gate verdict and transcripts under /tmp/rv-boot/).
 - In-guest cycles used: 2 rebuild+boot cycles plus 7 RSP measurement
   sessions (no rebuilds).
+
+---
+
+## 2026-11-06 — CORRECTION (lane `work/riscv-disc-shift-fix-20261106`, PR #7051+1): the `slli 4` was a HAND-DECODE ERROR; there is NO emitter shift bug
+
+The title defect of this record is WITHDRAWN. Re-examination with the
+host-side fast loop (`SIMPLE_DUMP_CLIF`, `--no-incremental` — the dump only
+fires when the module is actually compiled; the incremental cache otherwise
+silently skips it) shows:
+
+1. **CLIF is clean.** `InterpreterBackendImpl.value_to_string`'s clif
+   contains `iconst.i64 0xe0f5_dd50` (raw hash) feeding
+   `call rt_enum_check_variant(value, iconst 0x04f8_12a4, iconst 0xe0f5_dd50)`
+   directly. No `ishl` anywhere in the function. (Also visible: the dead
+   `iconst 0x751e_8de0` = bare-"Value" id that the site-16 remap pass
+   correctly replaces with the qualified `0x04f8_12a4` in the live operand.)
+2. **The machine code is a correct 3-instruction materialization.** The
+   laneO decode read `lui 0xe0f6` as producing `0xe0f5dd50`; it produces
+   `0x0e0f6000` (bit 31 clear — no sign extension), `addi -0x22b` gives
+   `0x0e0f5dd5`, and `slli 4` gives `0xe0f5dd50` — exactly the raw
+   discriminant. Cranelift factored out the low zero nibble; the factoring
+   is exact. `0xea11_d77b`-style bit-31 constants take the constant-pool
+   load path instead (verified on a minimal collision-enum repro); both
+   paths were verified correct on the object code.
+3. **Live in-guest (RSP, laneP kernel):** `rt_enum_check_variant` receives
+   objects whose stored `enum_id`/`discriminant` EQUAL the baked expected
+   operands (`exp_enum_id=0xe906403, exp_disc=0x0`, object
+   `{type=7, enum_id=0xe906403, disc=0x0}`) — the check ABI agrees in-guest.
+
+So the previous section's root cause is dead. What remains real, measured:
+
+- **Exec-loop re-dispatch:** the same statement object is re-checked
+  forever on hanging nonces (24+ identical check hits on one object).
+- **The laneO `<unknown>` observations:** with correct operands and
+  matching objects, the print-time `Value` checks still need live
+  re-verification; the interpreted arg binding (`val arg: Value = args[0]`,
+  an ANY-erased list element rebind) is the prime suspect for what the
+  check actually receives at print time.
+- The zero- vs sign-extension note on duplicate `rt_enum_check_variant`
+  copies still stands as hardening work, but it is not the gate blocker.
+
+The @workaround fast path in `interpreter_calls.spl` (PR #7051) is
+unaffected: it remains a valid identity-by-construction robustness pattern,
+just not the fix for a non-existent shift bug.
+
+Boot evidence added the same day: a completing nonce (aa11bb22…, laneP
+kernel WITH the #7051 fast path) still renders `<unknown>` twice with rc=0 —
+so the print-time failure is NOT operand materialization; the interpreted
+arg binding (`val arg: Value = args[0]`, ANY-erased list rebind) is the
+prime suspect for what the check actually receives. Also observed:
+`cargo test -p simple-compiler enum` fails
+`seed_builtin_discriminants_are_the_declared_ordinal` ONLY under the
+multi-test filter (registry pollution by a same-process sibling test) and
+passes isolated — a second, in-tree manifestation of the
+registration-order-dependent-discriminant fragility (#6953 family), not a
+regression from this lane (no seed change shipped here).
