@@ -4392,9 +4392,16 @@ impl MirLowering:
             # Explicit payload decode, as the Cast arm of lower_expr_impl does.
             val cast_payload = _sffi_enum_payload<HirExprKind>(base.kind)
             val cast_operand: HirExpr = _sffi_tuple_get_req<HirExpr>(cast_payload, 0)
-            val cast_target: HirType = _sffi_tuple_get_req<HirType>(cast_payload, 1)
-            if cast_operand != nil and cast_target != nil:
-                if self.native_trait_owner_for_type(cast_target) != "":
+            # The target slot is read as `T?` and rebuilt BARE under `if val`
+            # (the #6675 form): unwrapping the generic tuple-get into a plain
+            # HirType binding keeps the Option transport word, and the by-value
+            # HirType param of native_trait_owner_for_type then deep-copies a
+            # garbage kind payload (native_trait_owner_for_type+0x202e on
+            # s3_fable44, stage2 pattern P3). `.kind` goes to the kind-taking
+            # owner lookup; the rebuilt target is what lower_native_trait_as sees.
+            if val present_target = _sffi_tuple_get<HirType>(cast_payload, 1):
+                val cast_target: HirType = HirType(kind: present_target.kind, span: base.span)
+                if cast_operand != nil and self.native_trait_owner_for_kind(cast_target.kind) != "":
                     val operand_local = self.lower_expr(cast_operand)
                     return self.lower_native_trait_as(operand_local, cast_operand, cast_target, base.span, true)
         self.lower_expr(base)
