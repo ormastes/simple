@@ -27,3 +27,18 @@ The initial RV32 parity failure was environment-sensitive: the default shell
 PATH did not resolve llvm-profdata/llvm-cov. No RV32 behavior change is needed.
 A separate diagnostic process capture probe returned its `hal-capture` stdout
 and exit code 7 correctly. LLVM tooling must be present for the C oracle gate.
+
+## Verification 2026-11-05 (riscv-sweep lane, work/riscv-sweep-20261105) — fixed at tip, re-verified
+
+Ran the regression specs on `origin/release/1.0.0` @ `bc3e9b48cb4` with the
+aarch64 Rust seed:
+
+```text
+test/01_unit/os/kernel/arch/riscv/hal_cache_spec.spl    22/22 passed
+test/01_unit/os/kernel/arch/riscv64_boot_spec.spl        5/5 passed
+  (incl. parsed-DTB capability and stride initialization)
+```
+
+The repair described above (initialized-snapshot return, restored range
+admission and helpers, bounded test-log counts) is verified green at tip.
+Status: FIXED.

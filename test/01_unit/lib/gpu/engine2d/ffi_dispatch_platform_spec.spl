@@ -1,18 +1,33 @@
 use std.spec.{describe, it, expect}
-use std.nogc_sync_mut.gpu.engine2d.ffi_dispatch.{gpu_lib_candidates_for_os, gpu_lib_candidates}
+use std.nogc_sync_mut.gpu.engine2d.ffi_dispatch.{gpu_lib_candidates_for_os, gpu_lib_candidates, try_load_gpu_lib}
 use std.nogc_sync_mut.gpu.engine2d.sffi_dispatch.{gpu_lib_candidates_for_os as sffi_gpu_lib_candidates_for_os}
 use std.sffi.dynamic.{DynLib}
-use std.io_runtime.{platform_name}
+use std.io_runtime.{platform_name, file_exists}
 
 describe "GPU dynamic library candidates":
     it "selects Darwin dylibs without relying on environment variables":
         val paths = gpu_lib_candidates_for_os("macos", "vulkan")
-        expect(paths.len()).to_equal(2)
+        expect(paths.len()).to_equal(6)
+        # Bare dylib sonames lead the list; no Linux-only .so soname may
+        # lead or appear anywhere in the Darwin list.
         expect(paths[0]).to_equal("libvulkan.dylib")
         expect(paths[1]).to_equal("libvulkan.1.dylib")
+        # /opt/homebrew is not in the macOS dlopen search path, so an
+        # installed Homebrew loader is only reachable via explicit prefixes.
+        expect(paths[2]).to_equal("/opt/homebrew/lib/libvulkan.dylib")
+        expect(paths[3]).to_equal("/opt/homebrew/lib/libvulkan.1.dylib")
+        expect(paths[4]).to_equal("/usr/local/lib/libvulkan.dylib")
+        expect(paths[5]).to_equal("/usr/local/lib/libvulkan.1.dylib")
+        var i = 0
+        while i < paths.len():
+            expect(paths[i].ends_with(".dylib")).to_equal(true)
+            expect(paths[i].contains(".so")).to_equal(false)
+            i = i + 1
         val sffi_paths = sffi_gpu_lib_candidates_for_os("macos", "vulkan")
+        expect(sffi_paths.len()).to_equal(paths.len())
         expect(sffi_paths[0]).to_equal(paths[0])
-        expect(sffi_paths[1]).to_equal(paths[1])
+        expect(sffi_paths[2]).to_equal(paths[2])
+        expect(sffi_paths[4]).to_equal(paths[4])
 
     it "keeps Linux sonames and Windows DLLs distinct":
         val linux = gpu_lib_candidates_for_os("linux", "vulkan")
@@ -23,8 +38,28 @@ describe "GPU dynamic library candidates":
         expect(windows[0]).to_equal("vulkan.dll")
 
     it "returns nil when a bare provider name cannot load":
+        # DynLib.load documents "Returns nil if dlopen fails" — both the
+        # bare-soname and absolute-path failure shapes must reach that nil,
+        # not raise (the seed interpreter's raw spl_dlopen raises, which
+        # _sffi_dlopen_checked pre-empts with the file_exists probe).
         val lib = DynLib.load("libsimple_gpu_provider_missing_20260921.so")
         expect(lib == nil).to_equal(true)
+        val lib_abs = DynLib.load("/nonexistent/libsimple_gpu_provider_missing_20260921.dylib")
+        expect(lib_abs == nil).to_equal(true)
+
+    it "loads an installed macOS loader through the Homebrew prefix":
+        if platform_name() != "macos":
+            print("SKIPPED: not a macOS host\n")
+            return
+        if not file_exists("/opt/homebrew/lib/libvulkan.dylib"):
+            print("SKIPPED: no Homebrew Vulkan loader on this host\n")
+            return
+        # The bare sonames at the head of the list are unresolvable by the
+        # macOS dlopen search path, so a non-nil result here proves the
+        # explicit /opt/homebrew/lib prefixes are actually probed.
+        val lib = try_load_gpu_lib("vulkan")
+        expect(lib == nil).to_equal(false)
+        print("DEVICE-RAN: try_load_gpu_lib found the Homebrew Vulkan loader\n")
 
     it "uses the runtime platform identity for the live candidate list":
         val actual = gpu_lib_candidates("vulkan")
