@@ -173,15 +173,8 @@ static spl_u64 rt_align8(spl_u64 value) {
 void *rt_alloc(spl_i64 size) {
     spl_u64 next;
     spl_u64 bytes;
-    void *boot_alloc;
     if (size <= 0) {
         return (void *)0;
-    }
-    if (kernel__boot__riscv_noalloc_heap__riscv_noalloc_heap_alloc) {
-        boot_alloc = (void *)(spl_u64)kernel__boot__riscv_noalloc_heap__riscv_noalloc_heap_alloc(size);
-        if (boot_alloc) {
-            return boot_alloc;
-        }
     }
     bytes = rt_align8((spl_u64)size);
     next = rt_align8(g_freestanding_heap_next);

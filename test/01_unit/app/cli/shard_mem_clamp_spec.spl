@@ -5,6 +5,8 @@ use app.cli.shard_mem_clamp.{shard_threads_parent_cap_for}
 use app.cli.shard_mem_clamp.{shard_cgroup_v1_memory_path_from_proc, shard_cgroup_v1_limit_paths, shard_cgroup_v1_limit_kb_from_fields}
 use app.cli.shard_mem_clamp.{shard_macos_available_kb_from_vm_stat}
 use app.cli.shard_mem_clamp.{SHARD_PARSE_WORKER_KB_V1, SHARD_HIR_WORKER_KB_V1}
+use std.nogc_sync_mut.host_limits.{host_limit_value}
+use std.nogc_sync_mut.host_limits.{host_limit_value}
 
 # Mechanism pin for the MemAvailable-derived shard concurrency clamp.
 # Pre-fix the clamp did not exist: the thread count came from host_cpus/2 alone,
@@ -19,6 +21,14 @@ use app.cli.shard_mem_clamp.{SHARD_PARSE_WORKER_KB_V1, SHARD_HIR_WORKER_KB_V1}
 # lives in scripts/check/check-native-build-not-crashing.shs, which runs a real
 # native-build. Do not treat this file as sufficient evidence on its own.
 # doc/09_report/build_parallelism_memory_audit_2026-08-23.md
+fn expected_worker_budget_kb(default_kb: i64) -> i64:
+    # Same derivation as shard_worker_budget_kb with no phase override: the host
+    # config key worker_mem_mib (any layer) wins, else the phase default.
+    val host_kb = shard_host_worker_budget_kb(host_limit_value("worker_mem_mib"))
+    if host_kb > 0:
+        return host_kb
+    default_kb
+
 describe "shard memory clamp":
 
     it "reads real host memory headroom on Windows, Linux and macOS":
@@ -119,8 +129,28 @@ describe "shard memory clamp":
         val hir_cap = shard_threads_cap_for(16, 3000000, avail)
         expect(hir_cap < parse_cap).to_be_true()
 
+    it "keeps the config-derived budget clamp bounded, monotonic and within the cgroup cap":
+        val budget = expected_worker_budget_kb(3000000)
+        expect(budget > 0).to_be_true()
+        var prev = 0
+        for avail in [1000000, 8000000, 16000000, 64000000, 256000000]:
+            val cap = shard_threads_cap_for(64, budget, avail)
+            expect(cap >= 1).to_be_true()
+            expect(cap >= prev).to_be_true()
+            # More than one worker only when they fit in 60% of available memory.
+            if cap > 1:
+                expect(cap * budget <= (avail / 10) * 6).to_be_true()
+            prev = cap
+        # A 24 GiB cgroup cap bounds the tree cap even on a much larger host.
+        val cgroup_kb = 25165824
+        val tree = shard_tree_budget_kb_for(0, cgroup_kb)
+        val capped = shard_threads_tree_cap_for(64, budget, 1000000000, tree, true)
+        expect(capped >= 1).to_be_true()
+        if capped > 1:
+            expect(capped * budget <= (cgroup_kb / 10) * 6).to_be_true()
+
     it "takes the per-phase budget default when no env override is set":
-        expect(shard_worker_budget_kb("SIMPLE_SHARD_BUDGET_UNSET_XYZ", 1650000)).to_equal(1650000)
+        expect(shard_worker_budget_kb("SIMPLE_SHARD_BUDGET_UNSET_XYZ", 1650000)).to_equal(expected_worker_budget_kb(1650000))
 
     # cgroup v2 memory.max (systemd-run -p MemoryMax=, container limits) is an
     # enforced tree cap that no wrapper exports as SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB.
@@ -220,11 +250,11 @@ describe "shard memory clamp":
         val old_host = env_get("SIMPLE_HOST_WORKER_MEM_MIB") ?? ""
         env_set("SIMPLE_HOST_WORKER_MEM_MIB", "")
         env_set(key, "")
-        expect(shard_worker_budget_kb(key, 3000000)).to_equal(3000000)
-        expect(shard_worker_budget_kb(key, 3000000)).to_equal(3000000)
+        expect(shard_worker_budget_kb(key, 3000000)).to_equal(expected_worker_budget_kb(3000000))
+        expect(shard_worker_budget_kb(key, 3000000)).to_equal(expected_worker_budget_kb(3000000))
         for invalid in ["invalid", "0", "-1", "9223372036854775808"]:
             env_set(key, invalid)
-            expect(shard_worker_budget_kb(key, 3000000)).to_equal(3000000)
+            expect(shard_worker_budget_kb(key, 3000000)).to_equal(expected_worker_budget_kb(3000000))
         env_set("SIMPLE_HOST_WORKER_MEM_MIB", "8000")
         expect(shard_worker_budget_kb(key, 3000000)).to_equal(8192000)
         env_set(key, "1000000")
@@ -244,7 +274,7 @@ describe "shard memory clamp":
         expect(shard_worker_budget_kb(key, 9000000)).to_equal(700000)
         env_set("SIMPLE_HOST_WORKER_MEM_MIB", "")
         env_set(key, "")
-        expect(shard_worker_budget_kb(key, 9000000)).to_equal(9000000)
+        expect(shard_worker_budget_kb(key, 9000000)).to_equal(expected_worker_budget_kb(9000000))
         env_set(key, old)
         env_set("SIMPLE_HOST_WORKER_MEM_MIB", old_host)
 
