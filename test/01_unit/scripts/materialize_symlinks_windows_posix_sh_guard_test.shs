@@ -1,0 +1,52 @@
+#!/bin/sh
+# Regression guard for bug setup_shs_pipefail_dash_abort_before_windows_guard_2026-09-13:
+# scripts/setup/materialize-symlinks-windows.shs must remain a harmless no-op
+# under POSIX sh / dash on a non-Windows host (its historical `set -o pipefail`
+# fired before the uname gate and aborted setup.shs on dash-/bin/sh Linux), and
+# its Windows gate must still pass MINGW*/MSYS*/CYGWIN* hosts through to the
+# real body.
+set -u
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+script="${root}/scripts/setup/materialize-symlinks-windows.shs"
+bogus=--definitely-unknown-option
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# 1. Simulated non-Windows host: any POSIX sh must exit 0 with the documented
+#    no-op note. The unknown option proves the uname gate fires BEFORE any body
+#    logic (argument parsing included), so no bash-ism in the Windows-only
+#    body can ever be reached from dash.
+fakebin=$(mktemp -d "${TMPDIR:-/tmp}/materializer-gate-test.XXXXXX") || fail "mktemp"
+trap 'rm -rf "$fakebin"' 0 HUP INT TERM
+printf '%s\n' '#!/bin/sh' 'echo Linux' >"$fakebin/uname"
+chmod +x "$fakebin/uname"
+ran=0
+for shell in sh dash; do
+    command -v "$shell" >/dev/null 2>&1 || continue
+    ran=1
+    out=$(PATH="${fakebin}:$PATH" "$shell" "$script" "$bogus" 2>&1) || fail "${shell}: non-Windows no-op exited rc=$?: ${out}"
+    case "$out" in
+        *'nothing to do on'*) : ;;
+        *) fail "${shell}: missing Windows-only no-op note: ${out}" ;;
+    esac
+done
+[ "$ran" -eq 1 ] || fail "neither sh nor dash found on this host"
+
+# 2. Windows gate still passes MINGW-family hosts through to the body: with a
+#    simulated MINGW uname, the unknown option must be rejected by argument
+#    parsing (exit 2). The same invocation on a simulated non-Windows host exits
+#    0 at the gate (asserted above), so a 0 here would mean the gate is gone.
+#    bash is used for the simulated-Windows run exactly as setup.shs invokes
+#    the materializer: git-bash/MSYS ship bash as sh, where `set -o pipefail`
+#    is legal.
+command -v bash >/dev/null 2>&1 || { echo 'BLOCKED: bash required for the MINGW-gate simulation' >&2; exit 77; }
+printf '%s\n' '#!/bin/sh' 'echo MINGW64_NT-10.0' >"$fakebin/uname"
+out=$(PATH="${fakebin}:$PATH" bash "$script" "$bogus" 2>&1)
+rc=$?
+[ "$rc" -eq 2 ] || fail "MINGW-simulated run exited rc=${rc}, want 2 (unknown option rejected by arg parsing); gate may be gone: ${out}"
+case "$out" in
+    *"unknown option '--definitely-unknown-option'"*) : ;;
+    *) fail "MINGW-simulated run never reached argument parsing: ${out}" ;;
+esac
+
+echo "PASS: materialize-symlinks-windows no-ops under POSIX sh/dash on Linux and the MINGW gate still reaches the body"
