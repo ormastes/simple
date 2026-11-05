@@ -263,3 +263,66 @@ zero undefined and zero weak `rt_*` symbols.
   `spl_start` undefined (the known vacuous artifact documented in the
   superseded record); the real build script remains the only honest
   measurement.
+
+## Resolution 2026-11-05 (PR #6983, merged; verification landed same day)
+
+- All buckets addressed per "Required resolution": pure-computation ported
+  with real semantics; io/process/capability via named fail-closed traps;
+  capture-notes as hosted-faithful no-ops; session heap honestly partial
+  (legacy no-session answers + named trap for `rt_transient_heap_adopt`).
+- Post-merge verification: `sh scripts/os/build-simpleos-riscv64-interpreter-kernel.shs`
+  (llvm-18 on PATH, checked-in seed, nonce 61b0818628ec55e1) → PASS, both
+  rows, zero undefined symbols.
+- Boot evidence (lane transcript, `/tmp/rv-boot/`): OpenSBI v1.4 →
+  `[interp] serial up, interpreting a hello world` → real frontend lowering.
+  Next row-level blocker (named `rt_process_run` trap from
+  `cfg_platform.spl host_arch()` / `uname`) is tracked in the in-guest
+  hello-world follow-ups, not in this record.
+
+
+---
+
+## 2026-11-05 — FOLLOW-UP: the `rt_process_run` boot blocker is CLOSED (env preseed, PR #6983+1)
+
+The next-row-blocker note above (`rt_process_run` trap from
+`cfg_platform.spl` `host_arch()`) is resolved by seeding the guest
+environment in both kernel entries
+(`examples/09_embedded/simple_os/arch/riscv64/interpreter_hello_entry.spl`,
+`buildrun_sanity_entry.spl`, at the top of `spl_start`, before any
+frontend work):
+
+- `UNAME=simpleos` — the value `cfg_detect_os()` normalizes to the
+  "simpleos" cfg OS (the same answer `platform_name()` already gave via
+  "riscv64-baremetal-simpleos"; seeding makes the env self-describing).
+- `HOSTTYPE=riscv64` — the value `cfg_detect_arch()`/`cfg_detect_cpu()`
+  normalize to the riscv64 cfg arch, keeping `host_arch()` (the
+  `uname -m` shell-out, a named fail-closed trap in this runtime) never
+  reached.
+
+Exactly those two keys: every other env var `cfg_platform.spl` reads is
+a manual cross-build override (`SIMPLE_TARGET_*`,
+`SIMPLE_NATIVE_BUILD_TARGET` — unset is truthful for an in-guest row) or
+a Windows-host probe (`OS`/`OSTYPE`/`PLATFORM`/`PROCESSOR_*`) this guest
+does not export. Rebuild + OpenSBI boot (same harness, pinned OpenSBI
+v1.4, `-bios` only, embed assertion passed): BOTH rows now get past the
+trap — `[interp] lowering hello-world source through the real frontend`
+/ `[buildrun] lowering source through the real frontend` — and stop at
+the NEXT honestly-named blocker:
+
+```
+[PANIC] flat AST parser provider admission failed: parser_provider_unqualified: parser.simple.legacy-reference
+```
+
+Root-cause chain for the next lane: panic at
+`src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl:1671`
+(`parse_and_build_module_with_scope_owner`), from
+`parser_provider_v1_admit`
+(`src/compiler/10.frontend/core/frontend.spl:145-153`) returning
+`Err("parser_provider_unqualified: ...")` even though
+`parser_provider_v1_default()` IS `ParserProviderV1.LegacyReference` —
+i.e. `provider != ParserProviderV1.LegacyReference` evaluated true for
+two equal enum values. This is the documented enum-equality gap (no
+dedicated MIR routing; `==` on independently constructed enum values
+compares tagged handles, per the enum-eq note at
+`src/runtime/runtime_native.c` ~11617). Recorded here; NOT fixed in the
+env-preseed lane.
