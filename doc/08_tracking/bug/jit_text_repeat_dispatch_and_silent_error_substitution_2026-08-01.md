@@ -690,3 +690,20 @@ source files reverted. Identical failure list, identical pass count:
 
 None of the three batches in this document adds a failure. They are recorded
 here so a later lane does not attribute them to this work.
+
+# Re-scope 2026-11-05 (mirp2-E premise check, base origin/release/1.0.0)
+
+- **`parse_i64` — FIXED on origin** by `0641097d685` ("fix(codegen,runtime): text
+  parse_* stopped silently erasing its Option"): `parse_int | parse_i32 | parse_i64`
+  now map to the Option-returning `rt_string_parse_int` in
+  `codegen/instr/calls.rs:3753`, `:4408` and `closures_structs.rs:2698`, pinned by
+  the unit assertions at `calls.rs:396-397`. Consistent with the nil-only-as-`T?`
+  policy.
+- **Residual A (new, same family):** `parse_float | parse_f64 | parse_f64_safe`
+  still map to raw `rt_string_to_float` (`calls.rs:3754`), so the float spellings
+  still erase the Option the interpreter returns. Next step: add an
+  Option-returning `rt_string_parse_float` in both runtimes and reroute, mirroring
+  `0641097d685`, with a JIT-vs-interpreter parity spec on `"x".parse_f64()`.
+- **Residual B: `ptr`** — unchanged; still needs the owner decision recorded in
+  batch 5 (pinned-copy vs `rt_string_data` lifetime). Not a transcription job.
+- Status stays open (P2) on residuals A and B only.
