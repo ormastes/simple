@@ -15,3 +15,15 @@ Workaround: bind `.values()` to a typed `[text]` local and iterate it. Tagged
 
 Compiler gap (open): MIR for-in should type `Dict<K,V>.values()` as `[V]` from the declared
 field type instead of falling to I64 when the receiver call is not resolved.
+
+## Compiler fix (2026-11-05, mirp2-C)
+`for_collection_declared_type` (src/compiler/50.mir/mir_lowering_stmts.spl) now
+recovers `[V]`/`[K]` for an argless `.values()`/`.keys()` iterable whose HIR call
+carries no array type, from the receiver's declared `Dict<K, V>` via
+`receiver_declared_type` (locals + field chains). The erased-word collection then
+takes the indexed-array lane instead of #143. Specs:
+test/01_unit/compiler/50.mir/for_in_dict_values_typed_spec.spl (3 cases, pass).
+Gap: the original cross-module unresolved-receiver shape is not reproduced in a
+single-file unit fixture (HIR already stamps the type there); the workaround in
+vhdl_call_lowering stays until a native re-run of that module confirms. Status
+remains open pending that confirmation.

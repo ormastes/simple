@@ -100,10 +100,12 @@ fn _calc_access_serve_fd(fd: i64):
             val marker_at = path.index_of(marker)
             val encoded = if marker_at < 0: "" else: path.slice(marker_at + marker.len(), path.len()).split("&")[0]
             val canonical = encoded.replace("%23", "#")
-            _calc_access_write_response(fd, 200, "application/json", _calc_access_hosts[0].controller.find_json(canonical))
+            val find_host: CalcSessionHost = _calc_access_hosts[0]
+            _calc_access_write_response(fd, 200, "application/json", find_host.controller.find_json(canonical))
             return
         if path.starts_with("/api/test/ui/history"):
-            _calc_access_write_response(fd, 200, "application/json", _calc_access_hosts[0].controller.history_json(64))
+            val history_host: CalcSessionHost = _calc_access_hosts[0]
+            _calc_access_write_response(fd, 200, "application/json", history_host.controller.history_json(64))
             return
         # Calc's authoritative controller already exposes the complete
         # simple.access/v1 snapshot. Returning it for semantic read selectors
@@ -137,19 +139,20 @@ fn _calc_access_handle_action(fd: i64, body: text):
     val value = extract_json_field(body, "value")
     var request_id = extract_json_field(body, "request_id")
     val expected_text = extract_json_field(body, "expected_revision")
-    val before_revision = _calc_access_hosts[0].controller.snapshot_revision()
+    val act_host: CalcSessionHost = _calc_access_hosts[0]
+    val before_revision = act_host.controller.snapshot_revision()
     if request_id == "":
         request_id = "calc-act-" + i64_to_text(before_revision + 1)
     if canonical_id == "" or action == "":
         _calc_access_write_response(fd, 400, "application/json", "{\"error\":\"missing_field\",\"message\":\"canonical_id and action are required\"}")
         return
-    if not _calc_access_hosts[0].controller.has_canonical_id(canonical_id):
+    if not act_host.controller.has_canonical_id(canonical_id):
         val missing = "{\"error\":\"target_not_found\",\"message\":\"Canonical node was not present in the observed snapshot\",\"request_id\":\"" + escape_json(request_id) + "\"}"
         _calc_access_write_response(fd, 404, "application/json", missing)
         return
-    if _calc_access_hosts[0].controller.has_request_id(request_id):
-        val replay_revision = _calc_access_hosts[0].controller.snapshot_revision()
-        val replay_code = _calc_access_hosts[0].controller.request_result_code(request_id)
+    if act_host.controller.has_request_id(request_id):
+        val replay_revision = act_host.controller.snapshot_revision()
+        val replay_code = act_host.controller.request_result_code(request_id)
         if replay_code == "ok":
             val replayed = "{\"ok\":true,\"surface_id\":\"main\",\"canonical_id\":\"" + escape_json(canonical_id) + "\",\"request_id\":\"" + escape_json(request_id) + "\",\"snapshot_revision\":" + i64_to_text(replay_revision) + ",\"replayed\":true}"
             _calc_access_write_response(fd, 200, "application/json", replayed)

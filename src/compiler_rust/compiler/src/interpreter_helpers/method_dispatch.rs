@@ -1029,7 +1029,7 @@ fn find_method_and_exec(
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
     // Check class methods
-    if let Some(class_def) = classes.get(class).cloned() {
+    if let Some(class_def) = crate::interpreter::resolve_class(classes, class) {
         if let Some(func) = class_def.methods.iter().find(|m| m.name == method_name) {
             return Ok(Some(exec_function(
                 func,

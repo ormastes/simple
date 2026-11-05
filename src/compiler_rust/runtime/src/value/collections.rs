@@ -7042,9 +7042,8 @@ pub extern "C" fn rt_array_map(array: RuntimeValue, closure: RuntimeValue) -> Ru
 /// already routed `("Array", "map")` to `rt_array_map` and is left untouched.
 ///
 /// Option behaviour is intentionally unchanged: a non-array receiver still goes
-/// to `rt_option_map` and keeps its exact previous result, including the `Some`
-/// wrap and the None/nil pass-through. Only the array receiver — which had no
-/// correct implementation on these two lanes — changes.
+/// to `rt_option_map`, including its `Some` wrap and None/nil pass-through.
+/// Result receivers preserve `Err` and wrap mapped payloads in `Ok`.
 #[no_mangle]
 pub extern "C" fn rt_map(receiver: RuntimeValue, closure: RuntimeValue) -> RuntimeValue {
     if get_typed_ptr_packed::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
