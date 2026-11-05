@@ -7,3 +7,6 @@ Symptom: B5b: match has multiple wildcard/binding default arms (binding Clocked 
 Workaround (tagged `@workaround bug=match_unqualified_imported_enum_variant_default_arms_2026-10-24`): qualify case patterns VhdlProcessKind.X (src/plugins/backend_vhdl/vhdl_backend.spl). Also vhdl_design_catalog.spl: Ret(nil) -> Ret(None) (nil into optional payload outside unsafe is a real source error).
 
 Root fix location: src/compiler/50.mir/_MirLowering/module_lowering.spl and _MirLoweringExpr/expr_dispatch.spl: resolve bare variant patterns through re-exported (export use) enums.
+
+### 2026-11-05 frontend-match lane
+Compiler-side fix present (register_module_enum_inventory_v1; lexical import variant registration; module_enum_inventory_spec 5/5). Remaining: seed Rust interpreter does not match a bare payload-variant arm (`case Clocked:`), so match_bare_payload_variant_arms_spec fails on bin/simple.exe with "missing return in non-unit function"; JIT with a main is correct. Workaround revert needs stage3.
