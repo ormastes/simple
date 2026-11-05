@@ -143,3 +143,6 @@ Cache isolation in that smoke attempt was incomplete: HIR artifacts used
 appeared in an earlier `47D8...` variable AV, but no source cause, shared cause,
 or use-after-free claim is made. See
 `doc/08_tracking/bug/phase2_candidate_native_smokes_access_violation_2026_11_02.md`.
+
+## 2026-11-05 compiler-defects sweep (winboot-rel100 lane)
+Ancestor check: repair 8aafa6cf8544e4e2f126540a11cdd5c7139341dc is an ancestor of tip 816655ee5cb. Narrow-path host check: test/01_unit/compiler/hir/layout_attr_scalar_codec_spec.spl 5/5 PASS (seed interpreter) — parser + all three factories emit explicit has_explicit_align/explicit_align pairs and malformed nil presence/value fields are rejected by the generated codec. Producer requalification (provenance-bound build + cache/build re-run) remains pending.

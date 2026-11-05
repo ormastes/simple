@@ -2,6 +2,7 @@ export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_c
 use std.gc_async_mut.gpu.browser_engine.style.supports.{eval_supports_query}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_weight}
 use std.gc_async_mut.io.mod_stub.{env_get}
+use std.common.encoding.utf8.{text_codepoints}
 use std.common.ui.ui_frame_clock.{FrameClock}
 use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 fn presentational_attr_decls(node: HNode) -> text:
@@ -1031,8 +1032,39 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 print "[layout-trace] style_stage=metrics-ready index={i} valid={metrics.valid}"
             if metrics.valid:
                 st.resolved_font_identity = metrics.identity
-                st.resolved_font_advances = metrics.advances
-                st.resolved_font_width = metrics.width
+                # CSS text: letter-spacing adds to EVERY glyph advance and
+                # word-spacing adds to each word-separator glyph. Fold both
+                # into the resolved metrics at the single resolution site so
+                # every consumer (layout width/wrap, the framebuffer paint
+                # byte-table, the Draw IR per-codepoint array) agrees; before
+                # this the resolved-metrics paths silently dropped both
+                # properties while the flat-estimate fallback kept them, so a
+                # run painted with resolved metrics was letter-spacing- and
+                # word-spacing-invariant.
+                if st.letter_spacing_px != 0 or st.word_spacing_px != 0:
+                    val metric_cps = text_codepoints(metric_text)
+                    if metric_cps.len() == metrics.advances.len():
+                        var adjusted: [i32] = []
+                        var adjusted_width = 0
+                        var ai = 0
+                        while ai < metrics.advances.len():  # cpu-lane-loop-ok: one pass over the resolved per-codepoint advances of THIS node's own metric string, folding in letter/word spacing; bound is that string's codepoint count
+                            var a = metrics.advances[ai] + st.letter_spacing_px
+                            val cp = metric_cps[ai]
+                            if cp == 32 or cp == 9 or cp == 10 or cp == 13:
+                                a = a + st.word_spacing_px
+                            if a < 1:
+                                a = 1
+                            adjusted.push(a)
+                            adjusted_width = adjusted_width + a
+                            ai = ai + 1
+                        st.resolved_font_advances = adjusted
+                        st.resolved_font_width = adjusted_width
+                    else:
+                        st.resolved_font_advances = metrics.advances
+                        st.resolved_font_width = metrics.width
+                else:
+                    st.resolved_font_advances = metrics.advances
+                    st.resolved_font_width = metrics.width
                 st.resolved_font_line_height = metrics.line_height
         if _wsc_armed():
             _wsc_add_section(4, _wsc_now_us() - _wsc_t)

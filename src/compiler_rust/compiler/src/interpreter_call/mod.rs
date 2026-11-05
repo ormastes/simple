@@ -383,7 +383,7 @@ fn select_overload(candidates: &[Arc<FunctionDef>], values: &[Value]) -> Option<
     best.map(|(_, func)| func)
 }
 
-fn select_named_static_overload<'a, I, F>(
+pub(crate) fn select_named_static_overload<'a, I, F>(
     candidates: I,
     method_name: &str,
     values: &[Value],
@@ -998,7 +998,14 @@ pub(crate) fn evaluate_call(
             // the public aliases like the existing HashMap/BTreeMap builtins so
             // bootstrap code receives a genuinely empty dictionary instead of
             // falling through to receiver lookup or a synthetic `__type__` row.
-            if field == "new" && matches!(module_name.as_str(), "Map" | "Dict" | "HashMap" | "BTreeMap") {
+            // A user-defined class/struct registered under the same name takes
+            // precedence: `use std.nogc_async_mut.src.map.{Map}` must get the
+            // imported Map struct from `Map.new()`, not a builtin dict shadow
+            // (doc/08_tracking/bug/map_insert_if_absent_missing_and_map_new_resolves_to_dict_2026-07-20.md).
+            if field == "new"
+                && matches!(module_name.as_str(), "Map" | "Dict" | "HashMap" | "BTreeMap")
+                && !classes.contains_key(module_name.as_str())
+            {
                 return Ok(Value::Dict(std::sync::Arc::new(std::collections::HashMap::new())));
             }
             // Check for static method call on a type: Type.method()
@@ -1513,8 +1520,14 @@ pub(crate) fn evaluate_call(
                     // `Map.new()`/`Dict.new()` returned a dict pre-loaded with
                     // one bogus entry instead of a genuinely empty one. Join
                     // them into the same empty-`Value::Dict` arm as
-                    // `HashMap`/`BTreeMap`.
-                    "HashMap" | "BTreeMap" | "Map" | "Dict" => {
+                    // `HashMap`/`BTreeMap`. The builtin alias yields to a
+                    // user-defined class of the same name (see the FieldAccess
+                    // site above): an imported `struct Map` must construct via
+                    // its own statics, not be shadowed into a builtin dict.
+                    "HashMap" | "BTreeMap" => {
+                        return Ok(Value::Dict(std::sync::Arc::new(std::collections::HashMap::new())))
+                    }
+                    "Map" | "Dict" if !classes.contains_key(type_name.as_str()) => {
                         return Ok(Value::Dict(std::sync::Arc::new(std::collections::HashMap::new())))
                     }
                     "HashSet" | "BTreeSet" => return Ok(Value::array(Vec::new())),
