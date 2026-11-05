@@ -66,6 +66,13 @@ class BaremetalBackend:
     mask_w: i32
     mask_h: i32
     initialized: bool
+    # Work receipts for the bounded image scan (doc/08_tracking/bug/
+    # baremetal_image_perf_probe_no_verdict_2026-08-12.md): source pixels
+    # offered to the last draw_image call versus pixels actually examined
+    # after bounds/clip intersection. Receipt-backed probes and specs read
+    # these instead of inferring scan behavior.
+    last_image_source_pixels: i64
+    last_image_examined_pixels: i64
 
     static fn create(fb: FramebufferSurface) -> BaremetalBackend:
         """Create a baremetal backend wrapping an initialized framebuffer surface."""
@@ -87,7 +94,9 @@ class BaremetalBackend:
             mask_buf: [],
             mask_w: 0,
             mask_h: 0,
-            initialized: true
+            initialized: true,
+            last_image_source_pixels: 0,
+            last_image_examined_pixels: 0
         )
 
 impl RenderBackend for BaremetalBackend:
@@ -344,6 +353,8 @@ impl RenderBackend for BaremetalBackend:
 
     me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         """Blit a pixel array to the framebuffer."""
+        self.last_image_source_pixels = 0
+        self.last_image_examined_pixels = 0
         # Sanity-guard: negative/huge dimensions (e.g. from a corrupted or
         # unresolved image command) can't turn this into a runaway loop --
         # per-pixel writes below are already bounds-checked unconditionally,
@@ -351,6 +362,7 @@ impl RenderBackend for BaremetalBackend:
         if w <= 0 or h <= 0 or w > BM_MAX_DRAW_DIM or h > BM_MAX_DRAW_DIM:
             return
         val pixel_count = pixels.len()
+        self.last_image_source_pixels = w.to_i64() * h.to_i64()
         var row = 0
         while row < h:
             val py = y + row
@@ -377,6 +389,7 @@ impl RenderBackend for BaremetalBackend:
                     count = self.w - start_x
                 val src_offset = row * w + src_x
                 if count > 0 and src_offset >= 0 and src_offset + count <= pixel_count:
+                    self.last_image_examined_pixels += count.to_i64()
                     self.fb.framebuffer_blend_span_argb(
                         start_x.to_u32(), py.to_u32(), pixels,
                         src_offset, count)
@@ -395,6 +408,8 @@ impl RenderBackend for BaremetalBackend:
                             if (px < self.clip_x or px >= self.clip_x + self.clip_w or
                                 py < self.clip_y or py >= self.clip_y + self.clip_h):
                                 allowed = false
+                        if allowed:
+                            self.last_image_examined_pixels += 1
                         if allowed and _bm_mask_blocks(self, px, py):
                             allowed = false
                         if allowed:
