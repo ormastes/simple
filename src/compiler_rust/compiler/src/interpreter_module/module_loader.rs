@@ -51,6 +51,7 @@ use super::module_cache::{
     is_module_loading, mark_module_loading, merge_cached_module_definitions, unmark_module_loading,
     record_module_visit, record_module_eval_time, record_sibling_preload, MAX_MODULE_DEPTH,
 };
+use super::module_cache::{cached_module_classes, cached_module_enums, unimported_def_collisions};
 use super::module_evaluator::{evaluate_module_exports, evaluate_module_exports_with_preloaded};
 use super::path_resolution::resolve_module_path;
 
@@ -346,6 +347,15 @@ fn bare_export_source_names(target: &ImportTarget) -> Vec<String> {
         ImportTarget::Single(name) | ImportTarget::Aliased { name, .. } => vec![name.clone()],
         ImportTarget::Group(items) => items.iter().flat_map(bare_export_source_names).collect(),
         ImportTarget::Glob => Vec::new(),
+    }
+}
+
+/// Names a braced `use m.{a, b as c}` explicitly imports; `None` for any
+/// other import form (those keep last-registration class merging).
+fn group_import_names(target: &ImportTarget) -> Option<Vec<String>> {
+    match target {
+        ImportTarget::Group(items) => Some(items.iter().flat_map(export_target_names).collect()),
+        _ => None,
     }
 }
 
@@ -915,7 +925,18 @@ pub fn load_and_merge_module(
         // This ensures that static method calls work on imported classes.
         // Functions are Arc<FunctionDef> in the cache; we unwrap to raw FunctionDef for
         // the interpreter's working set, but the Arc clone from cache is cheap.
+        let explicit_names = group_import_names(&use_stmt.target);
+        let preserved = match cached_module_classes(&module_path) {
+            Some(incoming) => unimported_def_collisions(explicit_names.as_deref(), &incoming, classes),
+            None => Vec::new(),
+        };
+        let preserved_enums = match cached_module_enums(&module_path) {
+            Some(incoming) => unimported_def_collisions(explicit_names.as_deref(), &incoming, enums),
+            None => Vec::new(),
+        };
         merge_cached_module_definitions(&module_path, classes, functions, enums);
+        classes.extend(preserved);
+        enums.extend(preserved_enums);
 
         // Use-list check on the cache path: the AST is gone, so consult the
         // surface recorded when this module was first loaded.
@@ -1323,9 +1344,16 @@ pub fn load_and_merge_module(
 
     // Merge freshly loaded definitions into caller's scope (same as cache case above).
     // This ensures static method calls work on imported classes.
+    // A braced import must not let a same-named class it did not ask for
+    // replace the importer's binding (bug
+    // interp_class_name_collision_breaks_test_db_persistence_2026-08-10);
+    // the declaring module still resolves its own via `owner_module_class`.
+    let explicit_names = group_import_names(&use_stmt.target);
+    let preserved = unimported_def_collisions(explicit_names.as_deref(), &module_classes, classes);
     for (name, class_def) in &module_classes {
         classes.insert(name.clone(), class_def.clone());
     }
+    classes.extend(preserved);
     for (name, func_def) in &module_functions {
         if name != "main" {
             // Don't add "main" from imported modules.
@@ -1333,9 +1361,11 @@ pub fn load_and_merge_module(
             functions.insert(name.clone(), Arc::clone(func_def));
         }
     }
+    let preserved_enums = unimported_def_collisions(explicit_names.as_deref(), &module_enums, enums);
     for (name, enum_def) in &module_enums {
         enums.insert(name.clone(), enum_def.clone());
     }
+    enums.extend(preserved_enums);
 
     // Clear partial exports now that full exports are available
     clear_partial_module_exports(&module_path);

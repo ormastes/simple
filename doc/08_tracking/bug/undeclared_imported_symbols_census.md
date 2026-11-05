@@ -902,3 +902,7 @@ method: `doc/08_tracking/test/half_landed_fixes_across_duplicate_test_trees_2026
 The class is now fenced: `scripts/check/check-test-tree-divergence.shs`
 fails a push whose range edits one leg and leaves the twin divergent.
 
+
+## HIR-P2 HC triage 2026-11-05
+
+Census row. Making undeclared imports an error depends on the 1,003-name spec-import backlog (spec_imports_declared_nowhere) and the lower_named_kind whitelist work; erroring now would break hundreds of specs. Blocked on backlog triage; remains OPEN.

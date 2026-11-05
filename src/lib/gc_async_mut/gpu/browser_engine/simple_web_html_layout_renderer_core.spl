@@ -2,8 +2,38 @@ export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_c
 use std.gc_async_mut.gpu.browser_engine.style.supports.{eval_supports_query}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_weight}
 use std.gc_async_mut.io.mod_stub.{env_get}
+use std.common.encoding.utf8.{text_codepoints}
 use std.common.ui.ui_frame_clock.{FrameClock}
 use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
+use common.ui.glyph_bitmap_5x7.{glyph_row_bits, glyph_index_for_char_code}
+
+# Inked pixel width of the built-in 5x7 bitmap cell for one codepoint, at
+# the rasterizer's scale (web_glyph_scale of the font size). The
+# framebuffer text rasterizer (fb_glyph_thin_scaled_clip in
+# ..._paint_primitives.spl) stamps this bitmap cell for every glyph
+# regardless of which face the metrics were resolved from, so an advance
+# narrower than the INKED width (not the whole 5-column cell) makes
+# neighbors overwrite each other's pixels. Blank/unknown codepoints ink
+# nothing and report 0. Used by the style stage to clamp resolved advances
+# so layout, wrap and paint all agree with what the rasterizer actually
+# draws.
+fn _glyph_inked_width_for_paint(cp: i64, scale: i32) -> i32:
+    val gi = glyph_index_for_char_code(cp)
+    if gi < 0:
+        return 0
+    var max_rx = -1
+    var ry = 0
+    while ry < 7:  # cpu-lane-loop-ok: fixed 7-row bitmap probe for ONE codepoint's glyph; bound is the 5x7 cell
+        val bits = glyph_row_bits(gi, ry)
+        var rx = 4
+        while rx > max_rx:
+            if (bits & (1 << (4 - rx))) != 0:
+                max_rx = rx
+            rx = rx - 1
+        ry = ry + 1
+    if max_rx < 0:
+        return 0
+    (max_rx + 1) * scale
 fn presentational_attr_decls(node: HNode) -> text:
     if node.attrs_raw.len() == 0:
         return ""
@@ -995,7 +1025,15 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         else:
             false
         if vector_fonts and nd.tag == "#text" and not metadata_parent:
-            val metric_text = if st.white_space_nowrap: nd.text_data else: nd.text_trimmed
+            # text-transform changes the string the rasterizer actually
+            # paints (apply_text_transform_for_paint runs at paint time), so
+            # metrics must be resolved for the TRANSFORMED string: resolving
+            # on the untransformed string measured lowercase advances and
+            # applied them to uppercase glyph cells, so a `text-transform:
+            # uppercase` run painted differently from the identical
+            # authored-uppercase run.
+            val metric_text_raw = if st.white_space_nowrap: nd.text_data else: nd.text_trimmed
+            val metric_text = apply_text_transform_for_paint(metric_text_raw, st.text_transform)
             if trace_stages:
                 print "[layout-trace] style_stage=metric-text-ready index={i} len={metric_text.len()}"
             val _wsc_lt = if _wsc_armed(): _wsc_now_us() else: 0
@@ -1031,8 +1069,75 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 print "[layout-trace] style_stage=metrics-ready index={i} valid={metrics.valid}"
             if metrics.valid:
                 st.resolved_font_identity = metrics.identity
-                st.resolved_font_advances = metrics.advances
-                st.resolved_font_width = metrics.width
+                # CSS text: letter-spacing adds to EVERY glyph advance and
+                # word-spacing adds to each word-separator glyph. Fold both
+                # into the resolved metrics at the single resolution site so
+                # every consumer (layout width/wrap, the framebuffer paint
+                # byte-table, the Draw IR per-codepoint array) agrees; before
+                # this the resolved-metrics paths silently dropped both
+                # properties while the flat-estimate fallback kept them, so a
+                # run painted with resolved metrics was letter-spacing- and
+                # word-spacing-invariant.
+                #
+                # The framebuffer rasterizer draws every glyph from the
+                # built-in 5x7 bitmap cell scaled by web_glyph_scale
+                # (fb_glyph_thin_scaled_clip), regardless of the resolved
+                # face, so an advance narrower than a glyph's INKED bitmap
+                # width makes neighbors overwrite each other's pixels and
+                # the inked pixel count depends on the overlap phase --
+                # real faces report advances below the inked width for
+                # narrow glyphs (e.g. 'I' at 8 px, advance 2 vs 5 px of
+                # ink), which broke letter-spacing pixel-count invariance:
+                # spreading the run changed the count because it changed
+                # the overlap. Clamp each advance to that glyph's inked
+                # width BEFORE folding spacing, so a clamped run never
+                # overlaps and adding spacing only moves glyphs apart.
+                #
+                # The clamp is applied at scale 1 (font_size <= 8) only.
+                # There the bitmap cell (5 px) exceeds almost every real
+                # advance anyway, so overlap is guaranteed and layout
+                # parity with a real face is already unattainable. At
+                # larger sizes real advances sit just under the 2x-scaled
+                # inked width (10 px) for MOST lowercase glyphs, so
+                # clamping inflates word widths by up to ~25 % and changes
+                # wrap decisions -- measured against the famous-site
+                # corpus oracle, "compatibility" grows 88 -> 123 px and
+                # overflows its 120 px box. That residual overlap at
+                # scale >= 2 is a recorded environmental limit of the
+                # bitmap-cell rasterizer, not fixable without real glyph
+                # rasterization or a wrap-parity break.
+                val metric_scale = web_glyph_scale(st.font_size)
+                val metric_cps = text_codepoints(metric_text)
+                if metric_cps.len() == metrics.advances.len():
+                    var adjusted: [i32] = []
+                    var adjusted_width = 0
+                    var clamped_any = false
+                    var ai = 0
+                    while ai < metrics.advances.len():  # cpu-lane-loop-ok: one pass over the resolved per-codepoint advances of THIS node's own metric string, clamping each to its glyph's inked bitmap width (scale 1 only) and folding in letter/word spacing; bound is that string's codepoint count
+                        var a = metrics.advances[ai]
+                        val cp = metric_cps[ai]
+                        if metric_scale == 1:
+                            val inked = _glyph_inked_width_for_paint(cp, metric_scale)
+                            if a < inked:
+                                a = inked
+                                clamped_any = true
+                        a = a + st.letter_spacing_px
+                        if cp == 32 or cp == 9 or cp == 10 or cp == 13:
+                            a = a + st.word_spacing_px
+                        if a < 1:
+                            a = 1
+                        adjusted.push(a)
+                        adjusted_width = adjusted_width + a
+                        ai = ai + 1
+                    if st.letter_spacing_px != 0 or st.word_spacing_px != 0 or clamped_any:
+                        st.resolved_font_advances = adjusted
+                        st.resolved_font_width = adjusted_width
+                    else:
+                        st.resolved_font_advances = metrics.advances
+                        st.resolved_font_width = metrics.width
+                else:
+                    st.resolved_font_advances = metrics.advances
+                    st.resolved_font_width = metrics.width
                 st.resolved_font_line_height = metrics.line_height
         if _wsc_armed():
             _wsc_add_section(4, _wsc_now_us() - _wsc_t)

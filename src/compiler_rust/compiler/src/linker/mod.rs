@@ -25,6 +25,7 @@ pub mod analysis;
 mod builder;
 #[macro_use]
 mod builder_macros;
+mod abi_symbol_guard;
 mod error;
 mod interner;
 pub mod layout;

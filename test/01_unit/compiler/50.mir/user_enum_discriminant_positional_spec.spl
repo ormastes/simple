@@ -1,0 +1,67 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# User enum discriminants: declaration index everywhere
+
+Follow-up to bug enum_discriminant_convention_split_hashed_seed_vs_positional_pure_simple_2026-08-08.
+User-defined enum variants use their declaration index as the discriminant in
+pure-Simple MIR, in the seed interpreter (rt_enum_discriminant), and in seed
+native codegen (hash_variant_discriminant consults the positional registry fed
+by HIR TypeRegistry). Cross-module: an enum declared in one module keeps its
+positions when lowered together with a module that uses it.
+"""
+
+# @tag: unit, compiler, mir, enum
+
+use std.spec
+use std.io_runtime.{file_read}
+use std.sffi.enum_wire.{rt_enum_discriminant}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{SymbolTable}
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+enum UePosTraffic:
+    UePosStop
+    UePosWait
+    UePosGo
+
+fn uenum_hir(src: text, name: text):
+    val path = "testdata/{name}.spl"
+    val parsed = parse_full_frontend(src, path, name, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    hir_lowering.lower_module(parsed)
+
+fn uenum_disc(value: UePosTraffic) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_discriminant(value)
+
+describe "user enum positional discriminants":
+    it "seed interpreter tags user variants with their declaration index":
+        expect(uenum_disc(UePosTraffic.UePosStop)).to_equal(0)
+        expect(uenum_disc(UePosTraffic.UePosWait)).to_equal(1)
+        expect(uenum_disc(UePosTraffic.UePosGo)).to_equal(2)
+
+    it "pure-Simple MIR keeps positions for an enum declared in another module":
+        val decl = uenum_hir("enum Gear:\n    Park\n    Reverse\n    Neutral\n    Drive\n", "fixture_gear")
+        val user = uenum_hir("fn pick() -> i64:\n    0\n", "fixture_gear_user")
+        var lw = MirLowering.new_for_target(SymbolTable.new(), driver_mir_target_context(driver_core_compile_options_default()))
+        lw.register_module_enum_bootstrap_inventory_v1([user, decl])
+        expect(lw.enum_variant_discriminant("Gear", "Park")).to_equal(0)
+        expect(lw.enum_variant_discriminant("Gear", "Drive")).to_equal(3)
+
+    it "seed native and HIR consult the positional registry, not a name hash":
+        val objs = file_read("src/compiler_rust/runtime/src/value/objects.rs")
+        expect(objs.contains("if let Some(index) = positional_registry::lookup(variant_name)")).to_equal(true)
+        val reg = file_read("src/compiler_rust/compiler/src/hir/type_registry.rs")
+        expect(reg.contains("register_enum_variants")).to_equal(true)
+
+    it "C runtime builds Option and Result positionally":
+        val rt = file_read("src/runtime/runtime_native.c")
+        expect(rt.contains("rt_enum_new(SPL_OPTION_ENUM_ID, 0, payload)")).to_equal(true)
+        expect(rt.contains("rt_enum_new(SPL_RESULT_ENUM_ID, 1, payload)")).to_equal(true)
+        expect(rt.contains("SPL_HASH_SOME")).to_equal(false)
+        expect(rt.contains("SPL_HASH_NONE")).to_equal(false)

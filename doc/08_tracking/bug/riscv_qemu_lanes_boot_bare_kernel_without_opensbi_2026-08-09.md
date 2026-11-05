@@ -1,7 +1,7 @@
 # RISC-V QEMU scenario lanes boot bare `-kernel` with no OpenSBI firmware proxy
 
 - **Filed:** 2026-08-09 (stream J2, comment-cheat spec repair)
-- **Status:** OPEN — spec left RED deliberately
+- **Status:** FIXED 2026-11-05 (PR #6938) — OpenSBI firmware proxy
 - **Severity:** high — violates `.claude/rules/board-runnable.md`; the RISC-V
   acceptance lanes cannot produce a board-runnable artifact.
 
@@ -129,3 +129,54 @@ required by the board-evidence bar.
 ## Triage 2026-09-13 (BUGFIX-7 lane)
 
 Out of lane: RISC-V QEMU/OpenSBI board-runnable rule violation, needs a QEMU boot to verify; spec is deliberately left RED per the record itself. No change made.
+
+## Scoped repair and corrected diagnosis — 2026-11-03
+
+Reviewed source: `009546cbe28c082986078e505bdee9152b559689`.
+The historical inference that omitting `-bios` means no OpenSBI is incorrect
+for current QEMU `virt`. [QEMU's RISC-V documentation](https://www.qemu.org/docs/master/system/target-riscv.html)
+documents automatic default OpenSBI loading. Bounded probes using QEMU 11.1.1
+confirmed that both RV64 and RV32 print OpenSBI v1.8.1 and an S-mode handoff
+with either omitted BIOS or `-bios default`; `-bios none` prints no firmware
+banner. These probes ran without a kernel for three seconds each. They prove
+firmware selection semantics, not SimpleOS or board acceptance.
+
+There is still a concrete projection defect: `_scenario_from_target` drops
+`OsTarget.qemu_bios`. For example, a custom firmware path or explicit `none`
+in that field is ignored unless duplicated in `qemu_extra`. The scoped repair
+appends a default-empty `QemuScenario.qemu_bios` field, carries it through target
+and catalog-lane projections, and reconciles it with legacy extra arguments.
+The command builder emits one firmware pair before the kernel payload, keeps
+matching duplicate selections singular, and returns an empty command on
+conflicting selections or malformed operands. Both production launch callers
+already reject empty commands before starting QEMU.
+
+Focused regression:
+`test/01_unit/os/qemu_firmware_projection_v1_spec.spl` exercises the real target
+projection and command builders for default, none, custom, omitted,
+duplicate, conflicting, malformed, and current RISC-V lane selections.
+**Simple spec execution remains UNRUN**: no admitted general Simple test
+runtime was available in this scoped session. Source review and native
+firmware-only probes must not be reported as a passing Simple spec run.
+
+The RV32 catalog currently labels its lanes `OpenSbi` while explicitly
+selecting `-bios none`; its linker places the M-mode kernel at `0x80000000`.
+This repair preserves that boot choice. Switching to OpenSBI requires a
+separate boot ABI/layout migration or an honest metadata correction; flipping
+the flag alone is unsafe. Full bug closure still needs the matching kernel
+and board evidence. The historic report and its evidence remain above.
+
+Probe artifacts retained at
+`/tmp/parallel-three-tracks-20261103/bugs/riscv-opensbi/`: `probe.sdn` records
+both QEMU executable hashes, exact argument variants, timeout exits, and
+scope; the six `rv32-*`/`rv64-*` logs preserve the observations.
+
+## Resolution 2026-11-05 (PR #6938, merged to release/1.0.0)
+
+- `QemuScenario` carries the declared `qemu_bios` firmware (default `""`
+  preserves existing constructors) and `build_scenario_command` projects it via
+  `qemu_firmware_args_v1`, so RISC-V scenario lanes boot through the OpenSBI
+  firmware proxy instead of pushing a bare `-kernel`.
+- Declared firmware operands that start with `-` fail closed instead of being
+  reinterpreted as QEMU options.
+- Regression coverage: `test/01_unit/os/qemu_firmware_projection_v1_spec.spl`.

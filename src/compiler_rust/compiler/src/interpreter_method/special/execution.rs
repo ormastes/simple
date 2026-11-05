@@ -102,7 +102,7 @@ pub fn find_and_exec_method_with_self(
     impl_methods: &ImplMethods,
 ) -> Result<Option<(Value, Value)>, CompileError> {
     // Check class methods (cached O(1) lookup)
-    if let Some(class_def) = classes.get(class).cloned() {
+    if let Some(class_def) = crate::interpreter::resolve_class(classes, class) {
         if let Some(idx) = lookup_class_method_index(&class_def, class, method) {
             let func = &class_def.methods[idx];
             let (result, updated_self) = exec_function_with_self_return(
@@ -155,7 +155,7 @@ pub fn find_and_exec_method_with_self_owned(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<(Value, Value)>, CompileError> {
-    if let Some(class_def) = classes.get(class).cloned() {
+    if let Some(class_def) = crate::interpreter::resolve_class(classes, class) {
         if let Some(idx) = lookup_class_method_index(&class_def, class, method) {
             let func = &class_def.methods[idx];
             let (result, updated_self) = exec_function_with_self_return(

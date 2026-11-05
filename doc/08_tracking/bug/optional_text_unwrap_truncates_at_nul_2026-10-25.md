@@ -46,3 +46,33 @@ binary-capable content after the fix.
 
 Spec: `test/01_unit/compiler/50.mir/optional_text_unwrap_nul_spec.spl`. It is
 red only natively.
+
+## mirp2-G 2026-11-05: runtime root fix (pending native verification)
+
+Native probe (s3_fable44, Windows): file `ab\0cd` read via
+`rt_file_read_text_at_checked` and unwrapped; a NUL literal probe
+(`"ab" + "\x00" + "cd"`) gave `4` for **all five** forms including `??`, so `??`
+is not immune either: every text decode in this lane ends at `rt_interp_cstr`
+(RtCoreString.data), and length is then recomputed with `rt_strlen`/`strlen`.
+
+Root cause is the length recovery, not the unwrap: `rt_strlen` and the raw
+fallback of `rt_string_len` called `strlen` even when the raw pointer is exactly
+the `data` member of a live registered heap string. Fix
+(`src/runtime/runtime_native.c`): `rt_core_string_from_data_pointer` (same
+validation order as `rt_core_transient_text_data_pointer`: alignment/low-address
+rejects, registry membership before any header read) and both functions return
+the owner's `len`. This covers `.len()`, the `rt_strlen + rt_string_new` re-tag
+(`tag_str_local_if_raw`) and the text extern ABI pair. Rust runtime has no raw
+`char*` fallback (returns -1), so no twin divergence.
+
+Spec: `src/runtime/test/rt_string_len_data_pointer_nul_selfcheck.c` (links the
+real runtime_native.c; red on the old code: `rt_string_len(raw) == 5` failed,
+green after). Existing `test/01_unit/compiler/50.mir/optional_text_unwrap_nul_spec.spl`
+stays the native gate.
+
+Separate, unfixed: a NUL inside a string *literal* (`"\x00"`) is a `.rodata`
+C string, so its length is lost at the literal itself.
+
+Next step: rebuild a native probe against this runtime (needs >12 GB free on C:,
+it had 6.3 GB) and run the spec natively; then drop the
+`inventory_scratch.spl` `?? ""` workaround and close.

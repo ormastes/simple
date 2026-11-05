@@ -1,0 +1,95 @@
+# Prevention for bug smf_header_wire_layout_diverges_rust_vs_simple_2026-08-10:
+# every standalone SMF header reader must agree on the SAME packed image and
+# the SAME Rust-seed repr(C) image (96 B trailer, +4 field shift). A reader that
+# hardcodes packed offsets diverges here.
+use std.spec.{describe, it, expect}
+use compiler.backend.linker.smf_header.{smf_header_from_bytes}
+use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
+use compiler.backend.linker.smf_writer.{SmfWriter, SmfWriterSymbol, SmfWriterSymbolBinding, SmfWriterSymbolType}
+use compiler.driver.cache.cache_validator.{SmfValidationSnapshot}
+use os.smf.smf_dynlib.{smf_artifact_has_export}
+use os.smf.host_target.{smf_host_arch_id}
+use app.startup.launch_metadata.{retained_smf_launch_metadata_v1}
+
+fn packed_image() -> [u8]:
+    var writer = SmfWriter.create()
+    val code: [i64] = [195]
+    writer.add_code_section("code", code)
+    writer.add_symbol(SmfWriterSymbol(
+        name: "parity_probe_v1",
+        binding: SmfWriterSymbolBinding.Global,
+        sym_type: SmfWriterSymbolType.Function,
+        section_index: 0,
+        value: 0,
+        size: code.len(),
+        layout_phase: 0,
+        is_event_loop_anchor: false,
+        layout_pinned: false
+    ))
+    val built = writer.write()
+    if built.is_err():
+        return []
+    var out: [u8] = []
+    for word in built.unwrap():
+        out.push(word as u8)
+    val hs = out.len() - 128
+    out[hs + 6] = 0
+    out[hs + 7] = smf_host_arch_id()
+    var i = 0
+    while i < 8:
+        out[hs + 68 + i] = (0x21 + i) as u8
+        i = i + 1
+    out
+
+fn to_seed_trailer(packed: [u8]) -> [u8]:
+    # Rewrite the packed 128-byte trailer as the Rust seed repr(C) 96-byte one:
+    # 0..20 unchanged, 4 zero padding bytes at 20..24, packed 20..92 moved to 24..96.
+    val hs = packed.len() - 128
+    var out: [u8] = []
+    var i = 0
+    while i < hs:
+        out.push(packed[i])
+        i = i + 1
+    i = 0
+    while i < 96:
+        if i < 20:
+            out.push(packed[hs + i])
+        else:
+            if i < 24:
+                out.push(0)
+            else:
+                out.push(packed[hs + i - 4])
+        i = i + 1
+    out
+fn check_image(bytes: [u8], label: text):
+    val parsed = smf_header_from_bytes(bytes).unwrap()
+    val reader = SmfReaderMemory.from_data(bytes).unwrap()
+    expect(reader.header.section_count).to_equal(parsed.section_count)
+    expect(reader.header.symbol_count).to_equal(parsed.symbol_count)
+    expect(reader.sections_offset).to_equal(parsed.section_table_offset)
+    # Cache validator agrees on the header position and source hash.
+    val snap = SmfValidationSnapshot(data: bytes)
+    expect(snap.valid_header()).to_equal(true)
+    expect(snap.source_hash()).to_equal(0x2827262524232221)
+    # Dynlib preflight accepts the image and finds the export.
+    expect(smf_artifact_has_export(bytes, "parity_probe_v1")).to_equal(true)
+    # Launch metadata reaches section-table validation (no header/offset error).
+    val launch = retained_smf_launch_metadata_v1(bytes, "smf")
+    expect(launch.reason == "smf_magic_invalid" or launch.reason == "smf_header_missing").to_equal(false)
+    expect(launch.reason == "launch_metadata_section_table_invalid").to_equal(false)
+    expect(launch.reason == "smf_data_offset_invalid").to_equal(false)
+
+describe "SMF standalone header readers agree across layouts":
+    it "agree on the packed 128-byte image":
+        check_image(packed_image(), "packed")
+
+    it "agree on the Rust seed 96-byte repr(C) image":
+        check_image(to_seed_trailer(packed_image()), "seed")
+
+    it "decoders see identical table geometry for both layouts":
+        val packed = smf_header_from_bytes(packed_image()).unwrap()
+        val seed = smf_header_from_bytes(to_seed_trailer(packed_image())).unwrap()
+        expect(seed.section_count).to_equal(packed.section_count)
+        expect(seed.symbol_count).to_equal(packed.symbol_count)
+        expect(seed.section_table_offset).to_equal(packed.section_table_offset)
+        expect(seed.symbol_table_offset).to_equal(packed.symbol_table_offset)

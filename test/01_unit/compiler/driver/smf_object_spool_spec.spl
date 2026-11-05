@@ -1,0 +1,138 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/80.driver/driver_build/smf_object_spool_v1.spl 0%
+"""
+# SMF object bytes are spooled to disk, not retained per module
+
+**Category:** Compiler / driver
+**Bug:** doc/08_tracking/bug/item5_phase3_open_failures_2026_10_14.md (item5_native_object_resource_growth_2026_10_14)
+
+## Purpose and Audience
+
+OutputFormat.Both used to keep every emitted module's object bytes in
+`smf_part_objects: {text: [u8]}` until the SMF half was assembled, so resident
+object bytes grew linearly with the module count. The spool writes each object
+to a file at record time and holds only its path and size.
+
+## Expected Outcome
+
+After N recorded modules the spool's live object bytes are 0 and its peak is
+one object, while the old dict retains the sum of all N. Assembly is
+byte-identical to the dict assembly, the shard-link re-record (cache-hit) path
+overwrites in place, a failed write fails closed at assembly, and release
+deletes every spool file. A 200-module stress run keeps live bytes bounded.
+"""
+use std.spec.step
+use std.spec.{describe, it, assert_equal, assert_true, assert_false}
+use std.io_runtime.{file_exists, dir_create_all}
+use compiler.driver.driver_build.smf_staged_parts_v1.{smf_parts_assemble_objects_v1}
+use compiler.driver.driver_build.smf_object_spool_v1.{
+    smf_object_spool_begin_v1, smf_object_spool_put_v1, smf_object_spool_get_v1,
+    smf_object_spool_assemble_v1, smf_object_spool_release_v1,
+    smf_object_spool_count_v1, smf_object_spool_file_name_v1}
+use compiler.driver.driver_build.native_staged_codegen.{NativeStagedCodegenStateV1}
+
+fn spool_dir(tag: text) -> text:
+    "build/tmp/smf_object_spool_spec/{tag}"
+
+fn object_of(seed: i64, size: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < size:
+        out = out.push(((seed + i) % 251).to_u8())
+        i = i + 1
+    out
+
+fn dict_retained_bytes(objects: {text: [u8]}) -> i64:
+    var total = 0
+    for name in objects.keys():
+        total = total + objects[name].len()
+    total
+
+describe "SMF object spool reclaims object bytes":
+    it "old dict retains every module's bytes; the spool retains none":
+        # @req REQ-SSPEC-COMPILER
+        step("record 8 modules of 64 bytes both ways")
+        var objects: {text: [u8]} = {}
+        var spool = smf_object_spool_begin_v1(spool_dir("retain"))
+        var i = 0
+        while i < 8:
+            objects["mod.m{i}"] = object_of(i, 64)
+            spool = smf_object_spool_put_v1(spool, "mod.m{i}", object_of(i, 64))
+            i = i + 1
+        assert_equal(dict_retained_bytes(objects), 512)
+        assert_equal(spool.live_bytes, 0)
+        assert_equal(spool.peak_live_bytes, 64)
+        assert_equal(spool.spooled_bytes, 512)
+        assert_equal(spool.error, "")
+        step("assembly is byte-identical to the dict assembly")
+        val assembled = smf_object_spool_assemble_v1(spool)
+        assert_true(assembled.is_ok())
+        assert_equal(assembled.unwrap(), smf_parts_assemble_objects_v1(objects))
+        spool = smf_object_spool_release_v1(spool)
+        assert_equal(smf_object_spool_count_v1(spool), 0)
+
+    it "re-recording a module overwrites in place (shard-link / cache-hit path)":
+        # @req REQ-SSPEC-COMPILER
+        var spool = smf_object_spool_begin_v1(spool_dir("rerecord"))
+        spool = smf_object_spool_put_v1(spool, "mod.a", object_of(1, 10))
+        spool = smf_object_spool_put_v1(spool, "mod.a", object_of(2, 4))
+        assert_equal(smf_object_spool_count_v1(spool), 1)
+        assert_equal(spool.spooled_bytes, 4)
+        assert_equal(smf_object_spool_get_v1(spool, "mod.a").unwrap(), object_of(2, 4))
+        spool = smf_object_spool_release_v1(spool)
+
+    it "fails closed when the spool cannot write (keep-going error path)":
+        # @req REQ-SSPEC-COMPILER
+        var spool = smf_object_spool_begin_v1("")
+        spool = smf_object_spool_put_v1(spool, "mod.a", object_of(1, 10))
+        assert_equal(spool.live_bytes, 0)
+        assert_true(smf_object_spool_assemble_v1(spool).is_err())
+        var bad = smf_object_spool_begin_v1(spool_dir("badname"))
+        bad = smf_object_spool_put_v1(bad, "mod?x", object_of(1, 3))
+        assert_true(smf_object_spool_assemble_v1(bad).is_err())
+
+    it "names parts injectively":
+        # @req REQ-SSPEC-COMPILER
+        assert_false(smf_object_spool_file_name_v1("a.b") == smf_object_spool_file_name_v1("a_b"))
+        assert_false(smf_object_spool_file_name_v1("a/b") == smf_object_spool_file_name_v1("a.b"))
+        assert_equal(smf_object_spool_file_name_v1("x?"), "")
+
+    it "release deletes the spool files":
+        # @req REQ-SSPEC-COMPILER
+        var spool = smf_object_spool_begin_v1(spool_dir("release"))
+        spool = smf_object_spool_put_v1(spool, "mod.z", object_of(3, 5))
+        val path = spool.paths["mod.z"]
+        assert_true(file_exists(path))
+        spool = smf_object_spool_release_v1(spool)
+        assert_false(file_exists(path))
+
+describe "SMF object spool stress":
+    it "keeps live bytes bounded across 200 synthetic modules":
+        # @req REQ-SSPEC-COMPILER
+        step("fake-emit harness: 200 modules x 256 bytes through put")
+        var spool = smf_object_spool_begin_v1(spool_dir("stress"))
+        var i = 0
+        while i < 200:
+            spool = smf_object_spool_put_v1(spool, "stress.m{i}", object_of(i, 256))
+            assert_equal(spool.live_bytes, 0)
+            i = i + 1
+        assert_equal(spool.peak_live_bytes, 256)
+        assert_equal(spool.spooled_bytes, 51200)
+        assert_equal(smf_object_spool_count_v1(spool), 200)
+        val assembled = smf_object_spool_assemble_v1(spool)
+        assert_true(assembled.is_ok())
+        assert_equal(assembled.unwrap().len(), 51200)
+        spool = smf_object_spool_release_v1(spool)
+        assert_equal(smf_object_spool_count_v1(spool), 0)
+
+describe "Staged codegen state owns an object spool":
+    it "records parts through the state's spool, not a byte dict":
+        # @req REQ-SSPEC-COMPILER
+        var state = NativeStagedCodegenStateV1.begin(4)
+        assert_equal(state.smf_part_objects.live_bytes, 0)
+        state.smf_part_objects.dir = spool_dir("state")
+        state.smf_part_objects = smf_object_spool_put_v1(state.smf_part_objects, "mod.s", object_of(7, 32))
+        assert_equal(state.smf_part_objects.live_bytes, 0)
+        assert_equal(smf_object_spool_count_v1(state.smf_part_objects), 1)
+        state.smf_part_objects = smf_object_spool_release_v1(state.smf_part_objects)

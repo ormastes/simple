@@ -18,6 +18,12 @@ typedef intptr_t RuntimeValue;
 
 #define HEAP_STRING 1U
 #define HEAP_ARRAY 2U
+#define HEAP_DICT 11U
+/* Not duplicated across the runtime TUs; resolve to the single owner. */
+uint64_t     simpleos_dict_count(RuntimeValue dict);
+RuntimeValue simpleos_dict_lookup(RuntimeValue dict, RuntimeValue key);
+int8_t       simpleos_dict_store(RuntimeValue dict, RuntimeValue key, RuntimeValue item);
+
 #define HEAP_ENUM 7U
 
 typedef struct {
@@ -49,7 +55,29 @@ typedef struct {
     RuntimeValue payload;
 } RuntimeEnum;
 
-static unsigned char g_heap[64 * 1024] __attribute__((aligned(16)));
+/* This TU duplicates malloc/calloc/realloc/free/rt_alloc with the two main
+ * riscv64 runtime TUs (baremetal_stubs.c, baremetal_runtime_core.inc.c), and
+ * the link resolves the duplicates with --allow-multiple-definition: exactly
+ * ONE copy serves the WHOLE image's allocations, and which copy that is is a
+ * link-order lottery the caller does not control. Every duplicate must
+ * therefore be sized for the whole image AND must not share storage with
+ * module globals.
+ *
+ * The 2026-11-05 first attempt at that invariant -- a 32 MiB STATIC .bss
+ * array -- is the measured root cause of the in-guest par_state corruption:
+ * the array landed at the START of .bss (g_heap at 0x80665000, spanning
+ * 32 MiB) and the parser module global par_state was placed INSIDE its span
+ * (0x8266... family build: par_state at 0x80676fc0, g_heap+0x11fc0). Every
+ * code-side allocation then bump-overlaid live module globals (watchpoint
+ * lane, doc/08_tracking/bug/riscv64_in_guest_parse_recursion_par_state_uninit_2026-11-05.md):
+ * .bss is for ZEROED GLOBALS, not for an allocator arena. This TU now does
+ * what the other two do: own a private, linker-accounted slice of the
+ * linker-reserved 64 MiB .heap (NOLOAD, outside .bss). The three cursors
+ * own disjoint thirds so no lottery outcome can alias another TU's region. */
+extern unsigned char __heap_start[];
+extern unsigned char __heap_end[];
+#define RV_HEAP_BASE (__heap_start + 2ULL * ((unsigned long long)(__heap_end - __heap_start) / 3ULL))
+#define RV_HEAP_SIZE ((size_t)(__heap_end - __heap_start) / 3U)
 static uintptr_t g_heap_off = 0;
 
 extern RuntimeValue spl_start(void);
@@ -127,7 +155,14 @@ int memcmp(const void *a, const void *b, size_t n)
 
 RuntimeValue rt_alloc(RuntimeValue size)
 {
-    size_t bytes = (size_t)simpleos_raw_or_encoded_int(size);
+    /* compile_struct_init passes RAW size (not tagged) -- the identical
+     * contract the x86_64 sibling documents at its baremetal_stubs.c:763
+     * and the other two riscv64 runtime TUs implement verbatim. Decoding
+     * here (simpleos_raw_or_encoded_int) divided every multiple-of-8 byte
+     * size by 8 (120 -> 15), under-allocating every struct literal and
+     * producing the in-guest par_state overlay
+     * (doc/08_tracking/bug/riscv64_in_guest_parse_recursion_par_state_uninit_2026-11-05.md). */
+    size_t bytes = (size_t)size;
     void *ptr = calloc(1, bytes);
     return ptr ? (RuntimeValue)(uintptr_t)ptr : 0;
 }
@@ -168,14 +203,41 @@ RuntimeValue rt_array_new_with_cap(int64_t cap)
     return rt_array_new((RuntimeValue)cap);
 }
 
+/* The growth logic MUST live in this TU's copy, not only in the other
+ * runtime TUs: which duplicate definition wins the
+ * --allow-multiple-definition link is a per-closure lottery, and on the
+ * 2026-11-06 interpreter closure THIS copy won rt_array_push with the
+ * pre-fix body (len >= cap -> return 0, no growth). Every `[]` defaults
+ * to cap 16 (rt_array_new above), so the lexer scan_string parts array
+ * silently dropped every char past 16 and interpreted string literals
+ * truncated to "HELLO_INTERP_SIM" (16 chars) — measured by RSP
+ * write-watchpoint on the result object. Mirrors baremetal_stubs.c
+ * rt_array_push_handle, whose growth this copy now shares verbatim. */
+static RuntimeValue rt_array_push_handle(RuntimeValue arr, RuntimeValue value)
+{
+    if (!IS_HEAP(arr)) return NIL_VALUE;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    if (a->len >= a->cap) {
+        uint64_t new_cap = a->cap ? a->cap * 2U : 16U;
+        /* Keep growth bounded by the 64 KiB freestanding bump heap. The
+         * array header remains stable while its item storage moves. */
+        if (new_cap > 4096U) return NIL_VALUE;
+        RuntimeValue *grown = (RuntimeValue *)rv_alloc((size_t)new_cap * sizeof(RuntimeValue));
+        if (!grown) return NIL_VALUE;
+        RuntimeValue *old_items = runtime_array_items(a);
+        for (uint64_t i = 0; i < a->len; i++) grown[i] = old_items[i];
+        for (uint64_t i = a->len; i < new_cap; i++) grown[i] = NIL_VALUE;
+        a->items = grown;
+        a->cap = new_cap;
+    }
+    runtime_array_items(a)[a->len++] = value;
+    return arr;
+}
+
 int8_t rt_array_push(RuntimeValue array_value, RuntimeValue item)
 {
-    if (!IS_HEAP(array_value)) return 0;
-    RuntimeArray *array = (RuntimeArray *)DECODE_PTR(array_value);
-    if (!array || array->hdr.type != HEAP_ARRAY) return 0;
-    if (array->len >= array->cap) return 0;
-    runtime_array_items(array)[array->len++] = item;
-    return 1;
+    return rt_array_push_handle(array_value, item) != NIL_VALUE;
 }
 
 static RuntimeValue rt_array_get(RuntimeValue array_value, RuntimeValue index)
@@ -395,21 +457,41 @@ RuntimeValue rt_len(RuntimeValue value)
     if (!hdr) return 0;
     if (hdr->type == HEAP_STRING) return (RuntimeValue)((RuntimeString *)hdr)->len;
     if (hdr->type == HEAP_ARRAY) return (RuntimeValue)((RuntimeArray *)hdr)->len;
+    if (hdr->type == HEAP_DICT) return (RuntimeValue)simpleos_dict_count(value);
     return 0;
 }
 
+RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx);
+
 RuntimeValue rt_index_get(RuntimeValue value, RuntimeValue index)
 {
-    if (!IS_INT(index)) return NIL_VALUE;
     if (!IS_HEAP(value)) return NIL_VALUE;
-    HeapHeader *hdr = (HeapHeader *)DECODE_PTR(value);
+    HeapHeader *hdr0 = (HeapHeader *)DECODE_PTR(value);
+    if (hdr0 && hdr0->type == HEAP_DICT) return simpleos_dict_lookup(value, index);
+    if (!IS_INT(index)) return NIL_VALUE;
+    HeapHeader *hdr = hdr0;
     if (!hdr) return NIL_VALUE;
     if (hdr->type == HEAP_ARRAY) return rt_array_get(value, (RuntimeValue)DECODE_INT(index));
+    if (hdr->type == HEAP_STRING) return rt_string_char_at(value, (RuntimeValue)DECODE_INT(index));
     return NIL_VALUE;
 }
 
+/* The dict arms MUST live in this TU's copies of rt_index_set / rt_index_get
+ * / rt_len, not only in the other runtime TUs: which duplicate definition
+ * wins the --allow-multiple-definition link is a per-closure lottery, and on
+ * the 2026-11-06 closure THIS copy won rt_index_set with the pre-fix body
+ * (every dict write in-guest silently dropped; module.functions stayed
+ * EMPTY; desugar_module then nil-faulted reading func.is_async). Mirrored
+ * verbatim from baremetal_stubs.c, whose comment documents the same
+ * incident class. simpleos_dict_* are not duplicated; declared with the
+ * other HEAP_* defines below. */
 RuntimeValue rt_index_set(RuntimeValue value, RuntimeValue index, RuntimeValue item)
 {
+    if (IS_HEAP(value)) {
+        HeapHeader *hdr = (HeapHeader *)DECODE_PTR(value);
+        if (hdr && hdr->type == HEAP_DICT)
+            return (RuntimeValue)simpleos_dict_store(value, index, item);
+    }
     if (!IS_INT(index)) return 0;
     return rt_array_set(value, (RuntimeValue)DECODE_INT(index), item);
 }

@@ -126,11 +126,11 @@ impl MirToLlvm:
                 self.unknown_func_decls["rt_array_push"] = true
                 self.builder.emit("  {dest_name} = call ptr @rt_array_new(i64 {operands.len()})")
                 for i in 0..operands.len():
-                    val raw_elem = self.translate_operand(operands[i])
+                    val raw_elem = self.translate_operand_at(operands, i)
                     # Cycle-154: verbatim element word (no value_types re-tag;
                     # the tainted value_as_type reinterpreted the single-stmt
                     # body's Stmt element, the 0xfd569c fault's exact value).
-                    val elem_value = self.store_field_bits_verbatim(raw_elem, self.get_operand_type(operands[i]), "i64")
+                    val elem_value = self.store_field_bits_verbatim(raw_elem, self.get_operand_type_at(operands, i), "i64")
                     self.builder.emit("  call i8 @rt_array_push(ptr {dest_name}, i64 {elem_value})")
                 return
             case Struct(_):
@@ -161,9 +161,9 @@ impl MirToLlvm:
                 val word_bytes = natural_alignment(nit)
                 self.builder.emit("  {agg} = call ptr @rt_alloc(i64 {n * word_bytes})")
                 for i in 0..n:
-                    val raw = self.translate_operand(operands[i])
+                    val raw = self.translate_operand_at(operands, i)
                     # Cycle-151: verbatim word store (no value_types re-tag).
-                    val v = self.store_field_bits_verbatim(raw, self.get_operand_type(operands[i]), nit)
+                    val v = self.store_field_bits_verbatim(raw, self.get_operand_type_at(operands, i), nit)
                     val fp = self.builder.fresh_local()
                     self.builder.emit("  {fp} = getelementptr inbounds {nit}, ptr {agg}, i32 {i}")
                     self.builder.emit_store(nit, v, fp)
@@ -206,8 +206,8 @@ impl MirToLlvm:
                 val tup_word_bytes = natural_alignment(tup_nit)
                 self.builder.emit("  {tup_agg} = call ptr @rt_alloc(i64 {tup_n * tup_word_bytes})")
                 for i in 0..tup_n:
-                    val tup_raw = self.translate_operand(operands[i])
-                    val tup_v = self.store_field_bits_verbatim(tup_raw, self.get_operand_type(operands[i]), tup_nit)
+                    val tup_raw = self.translate_operand_at(operands, i)
+                    val tup_v = self.store_field_bits_verbatim(tup_raw, self.get_operand_type_at(operands, i), tup_nit)
                     val tup_fp = self.builder.fresh_local()
                     self.builder.emit("  {tup_fp} = getelementptr inbounds {tup_nit}, ptr {tup_agg}, i32 {i}")
                     self.builder.emit_store(tup_nit, tup_v, tup_fp)
@@ -225,15 +225,15 @@ impl MirToLlvm:
         val agg_ptr = self.builder.fresh_local()
         self.builder.emit_alloca(agg_ptr, agg_ty)
         for i in 0..operands.len():
-            val raw_elem_val = self.translate_operand(operands[i])
-            val elem_ty = self.valid_llvm_type(self.get_operand_type(operands[i]))
+            val raw_elem_val = self.translate_operand_at(operands, i)
+            val elem_ty = self.valid_llvm_type(self.get_operand_type_at(operands, i))
             # Cycle-154 NOTE: a verbatim store here (raw SSA word straight into
             # the typed slot) REGRESSED variant H -- the raw word's SSA type
             # can be narrower than the slot (i32/i1), and the typed store then
             # mismatches. The generic path's value_as_type is load-bearing for
             # WIDTH coercion; its value_types hazard does not bite here because
             # the slot type comes from the operand's own MIR type. Kept typed.
-            val elem_val = self.value_as_type(raw_elem_val, self.get_operand_type(operands[i]), elem_ty)
+            val elem_val = self.value_as_type(raw_elem_val, self.get_operand_type_at(operands, i), elem_ty)
             val elem_ptr = self.builder.fresh_local()
             self.builder.emit("  {elem_ptr} = getelementptr inbounds {agg_ty}, ptr {agg_ptr}, i32 0, i32 {i}")
             self.builder.emit_store(elem_ty, elem_val, elem_ptr)

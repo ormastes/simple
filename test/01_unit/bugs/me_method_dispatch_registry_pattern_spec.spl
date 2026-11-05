@@ -1,0 +1,72 @@
+# Regression spec for the riscv64 freestanding defect where INVOKING a `me`
+# method on a class instance trapped in-guest (CPU re-entered the entry right
+# after a self-receiving call; read-only `me` methods trapped too, so the
+# receiver ABI, not a field store, was at fault).
+#
+# doc/08_tracking/bug/riscv64_freestanding_me_method_invocation_traps_2026-08-31.md
+#
+# HONESTY NOTE (independent review 2026-11-05): this spec pins the exact
+# dispatch shape that trapped so future me-call semantic changes break here
+# first. It is GREEN even on pre-fix code -- the ANY-erasure this bug came
+# from only bites in MIR/native codegen, and --mode=interpreter is
+# dynamically typed. The red-before pin for the fix is
+# scripts/check/check-hir-lower-list-generic-not-any.shs (fails exit 1 when
+# lowercase list<T> resolves to TypeId::ANY).
+#
+# The trap itself is riscv64 freestanding codegen and can only be exercised
+# in-guest (scripts/check/check-simpleos-riscv64-components-in-guest-opensbi.shs);
+# what this spec pins is the exact dispatch shape that trapped — a registry
+# class whose `me` methods append to and scan `self.entries`, constructed
+# through the same static-constructor + array-concat path the mcp row uses —
+# so any change to `me`-method call semantics breaks here first on every
+# backend that runs specs.
+use std.spec
+
+class DispatchEntry:
+    tool_name: text = ""
+    handler_id: i64 = 0
+
+    static fn echo(id: i64) -> DispatchEntry:
+        var e = DispatchEntry()
+        e.tool_name = "echo"
+        e.handler_id = id
+        return e
+
+class DispatchRegistry:
+    entries: list<DispatchEntry> = []
+
+    static fn new_for_test() -> DispatchRegistry:
+        return DispatchRegistry()
+
+    me register(entry: DispatchEntry) -> ():
+        self.entries = self.entries + [entry]
+
+    me find(name: text) -> i64:
+        for e in self.entries:
+            if e.tool_name == name:
+                return e.handler_id
+        return -1
+
+describe "me method invocation on a class instance (riscv64 freestanding trap shape)":
+    it "a me method that stores through self.entries accumulates every call":
+        var reg = DispatchRegistry.new_for_test()
+        reg.register(DispatchEntry.echo(1))
+        reg.register(DispatchEntry.echo(2))
+        expect(reg.entries.len()).to_equal(2)
+
+    it "a read-only me method sees every registered entry":
+        var reg = DispatchRegistry.new_for_test()
+        reg.register(DispatchEntry.echo(7))
+        reg.register(DispatchEntry.echo(8))
+        expect(reg.find("echo")).to_equal(7)
+
+    it "a me method over an empty instance answers the miss sentinel":
+        var reg = DispatchRegistry.new_for_test()
+        expect(reg.find("no_such_tool_at_all")).to_equal(-1)
+
+    it "element field reads survive array concat of the class element type":
+        var reg = DispatchRegistry.new_for_test()
+        reg.register(DispatchEntry.echo(3))
+        var first = reg.entries[0]
+        expect(first.tool_name).to_equal("echo")
+        expect(first.handler_id).to_equal(3)

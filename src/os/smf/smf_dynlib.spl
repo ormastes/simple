@@ -1,4 +1,5 @@
 use std.common.string_core.{bytes_to_text}
+use compiler.backend.linker.smf_header.{smf_header_field_shift, smf_header_size_at, smf_header_seed_trailer_offset, SMF_SEED_HEADER_SIZE}
 use compiler.backend.linker.smf_reader_memory.{
     SmfReaderMemory,
     bytes_to_u32,
@@ -337,18 +338,23 @@ fn smf_dynlib_magic_at(data: [u8], offset: i64) -> bool:
         data[offset + 2] == 70 and data[offset + 3] == 0
 
 fn smf_dynlib_header_offset(data: [u8]) -> i64:
-    if data.len() < SMF_DYNLIB_HEADER_SIZE:
+    if data.len() < SMF_SEED_HEADER_SIZE:
         return -1
     val trailer = data.len() - SMF_DYNLIB_HEADER_SIZE
-    val leading_magic = smf_dynlib_magic_at(data, 0)
-    val trailer_magic = smf_dynlib_magic_at(data, trailer)
-    if leading_magic and trailer_magic and trailer != 0:
+    # Packed v1.1 header: 128 bytes. Rust seed repr(C) header: 96 bytes with a
+    # +4 field shift (see compiler.backend.linker.smf_header).
+    val leading_magic = smf_dynlib_magic_at(data, 0) and
+        (data.len() >= SMF_DYNLIB_HEADER_SIZE or smf_header_field_shift(data, 0) == 4)
+    val trailer_magic = data.len() >= SMF_DYNLIB_HEADER_SIZE and smf_dynlib_magic_at(data, trailer)
+    val seed_trailer = if trailer_magic: -1 else: smf_header_seed_trailer_offset(data)
+    val other_start = if trailer_magic: trailer else: seed_trailer
+    if leading_magic and other_start > 0:
         return -2
     if leading_magic:
         return 0
     if trailer_magic:
         return trailer
-    -1
+    seed_trailer
 
 fn smf_dynlib_nonnegative_u64(data: [u8], offset: i64, field: text) -> Result<i64, text>:
     if not smf_dynlib_range_valid(offset, 8, data.len()):
@@ -382,16 +388,18 @@ fn smf_dynlib_preflight_reader(data: [u8]) -> Result<SmfReaderMemory, text>:
     if data[header_offset + 4] != 1 or data[header_offset + 5] != 1:
         return Err("unsupported smf version")
 
+    val shift = smf_header_field_shift(data, header_offset)
+    val header_size = smf_header_size_at(data, header_offset)
     val section_count = bytes_to_u32(data, header_offset + 16) as i64
-    val symbol_count = bytes_to_u32(data, header_offset + 36) as i64
+    val symbol_count = bytes_to_u32(data, header_offset + 36 + shift) as i64
     if section_count <= 0 or section_count > SMF_DYNLIB_MAX_SECTIONS:
         return Err("invalid section count")
     if symbol_count <= 0 or symbol_count > SMF_DYNLIB_MAX_SYMBOLS:
         return Err("invalid symbol count")
 
-    val data_offset = bytes_to_u32(data, header_offset + 56) as i64
-    val raw_sections = smf_dynlib_nonnegative_u64(data, header_offset + 20, "section table offset")?
-    val raw_symbols = smf_dynlib_nonnegative_u64(data, header_offset + 28, "symbol table offset")?
+    val data_offset = bytes_to_u32(data, header_offset + 56 + shift) as i64
+    val raw_sections = smf_dynlib_nonnegative_u64(data, header_offset + 20 + shift, "section table offset")?
+    val raw_symbols = smf_dynlib_nonnegative_u64(data, header_offset + 28 + shift, "symbol table offset")?
     val sections_offset = smf_dynlib_checked_add(data_offset, raw_sections) ?? return Err("section table offset overflows")
     val symbols_offset = smf_dynlib_checked_add(data_offset, raw_symbols) ?? return Err("symbol table offset overflows")
     val sections_size = section_count * SMF_DYNLIB_SECTION_SIZE
@@ -400,9 +408,9 @@ fn smf_dynlib_preflight_reader(data: [u8]) -> Result<SmfReaderMemory, text>:
         return Err("section table escapes admitted bytes")
     if not smf_dynlib_range_valid(symbols_offset, symbols_size, data.len()):
         return Err("symbol table escapes admitted bytes")
-    if smf_dynlib_ranges_overlap(sections_offset, sections_size, header_offset, SMF_DYNLIB_HEADER_SIZE):
+    if smf_dynlib_ranges_overlap(sections_offset, sections_size, header_offset, header_size):
         return Err("section table overlaps smf header")
-    if smf_dynlib_ranges_overlap(symbols_offset, symbols_size, header_offset, SMF_DYNLIB_HEADER_SIZE):
+    if smf_dynlib_ranges_overlap(symbols_offset, symbols_size, header_offset, header_size):
         return Err("symbol table overlaps smf header")
     if smf_dynlib_ranges_overlap(sections_offset, sections_size, symbols_offset, symbols_size):
         return Err("section and symbol tables overlap")
@@ -434,7 +442,7 @@ fn smf_dynlib_validate_sections(reader: SmfReaderMemory) -> Result<[DynSmfSectio
     val table_size = count * SMF_DYNLIB_SECTION_SIZE
     if not smf_dynlib_range_valid(reader.sections_offset, table_size, total):
         return Err("section table escapes admitted bytes")
-    if smf_dynlib_ranges_overlap(reader.sections_offset, table_size, reader.header.header_offset, SMF_DYNLIB_HEADER_SIZE):
+    if smf_dynlib_ranges_overlap(reader.sections_offset, table_size, reader.header.header_offset, smf_header_size_at(reader.data, reader.header.header_offset)):
         return Err("section table overlaps smf header")
     val symbol_table_size = (reader.header.symbol_count as i64) * SMF_DYNLIB_SYMBOL_SIZE
 
@@ -462,7 +470,7 @@ fn smf_dynlib_validate_sections(reader: SmfReaderMemory) -> Result<[DynSmfSectio
             return Err("section {index} has invalid alignment")
         if smf_dynlib_ranges_overlap(file_offset, size, reader.sections_offset, table_size):
             return Err("section {index} overlaps section table")
-        if smf_dynlib_ranges_overlap(file_offset, size, reader.header.header_offset, SMF_DYNLIB_HEADER_SIZE):
+        if smf_dynlib_ranges_overlap(file_offset, size, reader.header.header_offset, smf_header_size_at(reader.data, reader.header.header_offset)):
             return Err("section {index} overlaps smf header")
         if smf_dynlib_ranges_overlap(file_offset, size, reader.symbols_offset, symbol_table_size):
             return Err("section {index} overlaps symbol table")
@@ -510,13 +518,13 @@ fn smf_dynlib_validate_symbols(reader: SmfReaderMemory, sections: [DynSmfSection
         return Err("symbol table escapes admitted bytes")
     if smf_dynlib_ranges_overlap(reader.symbols_offset, table_size, reader.sections_offset, (reader.header.section_count as i64) * SMF_DYNLIB_SECTION_SIZE):
         return Err("symbol table overlaps section table")
-    if smf_dynlib_ranges_overlap(reader.symbols_offset, table_size, reader.header.header_offset, SMF_DYNLIB_HEADER_SIZE):
+    if smf_dynlib_ranges_overlap(reader.symbols_offset, table_size, reader.header.header_offset, smf_header_size_at(reader.data, reader.header.header_offset)):
         return Err("symbol table overlaps smf header")
     if reader.string_table_offset < reader.symbols_offset + table_size:
         return Err("string table overlaps symbol table")
     if reader.string_table_end <= reader.string_table_offset or reader.string_table_end > total:
         return Err("invalid string table range")
-    if smf_dynlib_ranges_overlap(reader.string_table_offset, reader.string_table_end - reader.string_table_offset, reader.header.header_offset, SMF_DYNLIB_HEADER_SIZE):
+    if smf_dynlib_ranges_overlap(reader.string_table_offset, reader.string_table_end - reader.string_table_offset, reader.header.header_offset, smf_header_size_at(reader.data, reader.header.header_offset)):
         return Err("string table overlaps smf header")
 
     var symbols: [DynSmfWireSymbol] = []
@@ -568,7 +576,7 @@ fn smf_dynlib_validate_symbols(reader: SmfReaderMemory, sections: [DynSmfSection
         seen_names[name] = true
         index = index + 1
 
-    val declared_exports = bytes_to_u32(reader.data, reader.header.header_offset + 40) as i64
+    val declared_exports = bytes_to_u32(reader.data, reader.header.header_offset + 40 + smf_header_field_shift(reader.data, reader.header.header_offset)) as i64
     if exported_count <= 0:
         return Err("smf has no exported symbols")
     if declared_exports != exported_count:

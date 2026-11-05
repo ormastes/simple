@@ -6,7 +6,8 @@ mod special;
 
 use super::{
     eval_arg, eval_arg_int, eval_arg_usize, evaluate_expr, exec_function, exec_function_with_captured_env,
-    exec_function_with_values, find_and_exec_method, instantiate_class, try_method_missing, Enums, ImplMethods,
+    exec_function_with_values, find_and_exec_method, instantiate_class, interpreter_call::select_named_static_overload,
+    try_method_missing, Enums, ImplMethods,
     BITFIELDS, BLANKET_IMPL_METHODS, BLOCK_SCOPED_ENUMS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, TRAIT_IMPLS,
 };
 use crate::error::{codes, typo, CompileError, ErrorContext};
@@ -1412,6 +1413,7 @@ pub(crate) fn evaluate_method_call(
                 // Check if the method name is a variant name
                 let variant_opt = enum_def.variants.iter().find(|v| v.name == method);
                 if let Some(variant) = variant_opt {
+                    super::interpreter_call::validate_enum_variant_arity(&enum_def, method, args.len())?;
                     // Construct enum variant with payload
                     let has_fields = variant.fields.as_ref().is_some_and(|f| !f.is_empty());
                     if !has_fields && args.is_empty() {
@@ -2096,9 +2098,32 @@ pub(crate) fn evaluate_method_call_with_self_update(
     // Builtin text static methods — intercept before evaluate_expr to avoid
     // "variable `text` not found" when the receiver is the builtin type name.
     if let Expr::Identifier(module_name) = receiver.as_ref() {
-        if method == "new" && matches!(module_name.as_str(), "Map" | "Dict" | "HashMap" | "BTreeMap") {
+        // A user-defined class/struct registered under the same name (e.g.
+        // `use std.nogc_async_mut.src.map.{Map}`) takes precedence, so the
+        // imported Map's own statics run instead of the builtin alias
+        // (doc/08_tracking/bug/map_insert_if_absent_missing_and_map_new_resolves_to_dict_2026-07-20.md).
+        if method == "new"
+            && matches!(module_name.as_str(), "Map" | "Dict" | "HashMap" | "BTreeMap")
+            && !classes.contains_key(module_name.as_str())
+        {
             let value = Value::Dict(Arc::new(HashMap::new()));
             return Ok((value, None));
+        }
+        // User class shadowing the builtin alias: dispatch `Map.new()` to the
+        // imported class's own static `new` (the generic path below would
+        // evaluate the bare identifier `Map` and fail with "variable not found").
+        if method == "new" && classes.contains_key(module_name.as_str()) {
+            let evaluated_args: Vec<Value> = args
+                .iter()
+                .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                .collect::<Result<Vec<_>, _>>()?;
+            if let Some(class_def) = classes.get(module_name.as_str()).cloned() {
+                if let Some(func) = select_named_static_overload(class_def.methods.iter(), "new", &evaluated_args) {
+                    let result =
+                        exec_function_with_values(&func, &evaluated_args, env, functions, classes, enums, impl_methods)?;
+                    return Ok((result, None));
+                }
+            }
         }
         if method == "new" && BITFIELDS.with(|cell| cell.borrow().contains_key(module_name)) {
             let value = super::interpreter_call::instantiate_bitfield_from_args(
