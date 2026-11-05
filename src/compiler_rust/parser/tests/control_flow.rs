@@ -430,6 +430,19 @@ fn ts_arrow_hint_count(src: &str) -> usize {
 }
 
 #[test]
+fn parenthesized_arrow_lambda_parses_without_ts_hint() {
+    let src = "(x, y) => x + y";
+    let items = parse(src);
+    let Node::Expression(Expr::Lambda { params, .. }) = &items[0] else {
+        panic!("expected parenthesized arrow lambda");
+    };
+    assert_eq!(params.len(), 2);
+    assert_eq!(params[0].name, "x");
+    assert_eq!(params[1].name, "y");
+    assert_eq!(ts_arrow_hint_count(src), 0);
+}
+
+#[test]
 fn match_arm_with_call_shaped_pattern_is_not_a_ts_arrow_function() {
     // `Some(code) =>` ends in `)`, which is exactly the lexical shape the
     // TsArrowFunction heuristic keys on — but it is a match-arm separator,
