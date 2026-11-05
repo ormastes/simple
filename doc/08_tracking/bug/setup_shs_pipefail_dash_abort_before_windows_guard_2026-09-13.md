@@ -127,3 +127,85 @@ Whichever direction is chosen, add a regression check that runs
 `materialize-symlinks-windows.shs` under dash (or plain POSIX `sh`) on a
 non-Windows `uname -s` and asserts exit 0.
 
+
+## Verification 2026-11-05 (worktree /tmp/wt-libbug-setupshs, branch work/libbug-linux-setupshs-20261105)
+
+Host: aarch64 Linux, `/bin/sh -> dash`.
+
+### Finding: the code fix is already present on release/1.0.0; a regression
+### check was missing and has been added.
+
+The pipefail-before-gate defect no longer exists on `origin/release/1.0.0`
+(HEAD adfeae3765c). It was resolved on main and transplanted to the release
+line by `88aac2ffe28` ("rebase(main): transplant current main tree onto
+release/1.0", 2026-09-29/10-01), which both:
+
+- moved `set -o pipefail` to AFTER the `uname -s` case gate in
+  `scripts/setup/materialize-symlinks-windows.shs` (with an explicit comment:
+  "Keep this after the host gate: /bin/sh is commonly dash on Linux, where
+  `set -o pipefail` is a fatal error"), changed its shebang to
+  `#!/usr/bin/env bash`, and
+- changed `scripts/setup/setup.shs` to invoke the materializer with
+  `bash` instead of `sh`.
+
+### RED (historical reproduction, exact bug-doc failure)
+
+The 2026-09-12 version of the materializer (commit `863438ffac8`, the state
+the bug doc quotes) still fails exactly as filed:
+
+```
+$ dash /tmp/buggy-materialize.sh          # = 863438ffac8:scripts/setup/...
+/tmp/buggy-materialize.sh: 39: set: Illegal option -o pipefail
+EXIT=2
+```
+
+The same commit's `setup.shs` invoked the helper with plain `sh`
+(`sh "${repo_root}/scripts/setup/materialize-symlinks-windows.shs" ...`),
+propagating rc=2 as fatal — matching the bug doc verbatim.
+
+### GREEN (current release/1.0.0)
+
+```
+$ sh scripts/setup/setup.shs              # /bin/sh is dash
+materialize-symlinks-windows: this script is Windows-only (git-bash/MSYS); nothing to do on Linux
+...
+setup: LLVM toolchain available: major 23 (clang version 23.1.0 ...)
+EXIT=0
+
+$ bash scripts/setup/setup.shs            # full run, also exit 0
+EXIT=0
+
+$ dash scripts/setup/materialize-symlinks-windows.shs --bogus-option
+materialize-symlinks-windows: ... nothing to do on Linux
+EXIT=0                                    # gate fires before arg parsing
+
+$ sh -n scripts/setup/setup.shs && dash -n scripts/setup/setup.shs   # OK
+```
+
+Notes:
+- The Windows-guard behavior was verified by simulating a MINGW `uname`: the
+  script no longer takes the no-op exit and proceeds into the body (under
+  `bash` an unknown option is then rejected with exit 2, proving the gate
+  passes MINGW-family hosts through).
+- `sh -n`/`dash -n` on `materialize-symlinks-windows.shs` itself fails at
+  line 1396 (`}` unexpected) because the post-gate Windows-only body
+  legitimately uses bash-only syntax (`$'\r'`, `exec 8>&${fd}` coprocess
+  style). That is by design: only the guarded prefix must be POSIX-clean, and
+  behavioral exit-0 under dash on Linux is the real contract.
+- `setup.shs` full runs emit a pre-existing WARNING that the tracked
+  `bin/simple.exe` cannot run a std-importing program (rc=126) — unrelated
+  stale-binary report, non-fatal by design (BUG-IT-1 guard is a report, not
+  a gate).
+
+### Regression check added
+
+`test/01_unit/scripts/materialize_symlinks_windows_posix_sh_guard_test.shs`
+(POSIX sh, no bashisms): asserts (1) exit 0 + "nothing to do on" note under
+both `sh` and `dash` on a non-Windows host even when passed an unknown
+option, and (2) with a simulated MINGW `uname` under `bash`, argument parsing
+is reached (unknown option -> exit 2), proving the gate still admits Windows
+hosts. Mutated-against-the-buggy-version check: pointing the test at the
+`863438ffac8` version of the script fails with
+`FAIL: sh: non-Windows no-op exited rc=2: ... Illegal option -o pipefail`
+(exit 1), i.e. the test reproduces the original defect. Passes under
+`sh`, `bash`, and `dash` on the fixed tree.
