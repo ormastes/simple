@@ -84,3 +84,19 @@ impractical on this host. Recommended follow-up: capture a profile of
 the codegen worker (module attribution, MIR instruction count per
 module) and compare against the LLVM backend, which the matrix
 benchmarked as the default for good reason.
+
+## Addendum 2: core-c-bootstrap link lib gap (same day)
+
+Standalone self-hosted `native-build` on hosted mingw with
+`--runtime-bundle core-c-bootstrap` fails at link with undefined system
+symbols (BCrypt*, TransmitFile, D3D11*, WinHttp*): the complete windows
+library list in `linker/_LinkerWrapper/native_all_support.spl` is gated
+behind `native_all_input_present`, and
+`native_all_allowed_for_runtime_bundle` explicitly returns false for
+`core-c-bootstrap`, so the runtime objects are linked without the system
+libs. Supplying `--runtime-path <stage2-runtime-authority>` alone does
+not help while the bundle gate stays closed; using the default bundle
+(native_all admitted) with the same runtime path is the working
+configuration for standalone tool builds. Whether the bootstrap lane's
+own core-c-bootstrap links pass because of session env or whether this
+gate is an oversight for standalone hosted builds is worth a follow-up.
