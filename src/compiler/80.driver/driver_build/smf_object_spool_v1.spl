@@ -1,0 +1,125 @@
+# SMF object spool: per-module native object bytes go straight to a file.
+#
+# Bug item5_native_object_resource_growth_2026_10_14: OutputFormat.Both kept
+# every emitted module's object bytes in `smf_part_objects: {text: [u8]}` until
+# the SMF half was assembled, so resident object bytes grew with the module
+# count (69 retained LLVM objects at the SymbolTable87 reserve exit).
+#
+# The spool writes each object to `<dir>/<n>.o` the moment it is recorded and
+# keeps only the path and size. `live_bytes` counts object bytes the spool is
+# holding in memory; it rises by the object size while one put is in flight and
+# returns to 0 when the write lands, so a spec can prove the reclaim. The spool
+# has exactly one owner (the driver's NativeStagedCodegenStateV1, or a shard
+# worker process); updates are value transitions, no locks, no shared counter.
+use std.io_runtime.{file_write_bytes, file_read_bytes_result, file_delete, dir_create_all,
+    getpid, env_get_nullable}
+use std.common.bytes.concat_copy_v1.{bytes_concat_copy_v1}
+
+pub struct SmfObjectSpoolV1:
+    dir: text
+    paths: {text: text}
+    sizes: {text: i64}
+    live_bytes: i64
+    peak_live_bytes: i64
+    spooled_bytes: i64
+    error: text
+
+pub fn smf_object_spool_begin_v1(dir: text) -> SmfObjectSpoolV1:
+    SmfObjectSpoolV1(dir: dir, paths: {}, sizes: {}, live_bytes: 0,
+        peak_live_bytes: 0, spooled_bytes: 0, error: "")
+
+pub fn smf_object_spool_count_v1(spool: SmfObjectSpoolV1) -> i64:
+    spool.paths.keys().len()
+
+pub fn smf_object_spool_has_v1(spool: SmfObjectSpoolV1, name: text) -> bool:
+    spool.paths.contains_key(name)
+
+# Module name -> file stem, injective: shard workers claim distinct modules, so
+# a name-derived stem never collides across workers sharing one directory.
+# Returns "" for a character with no escape (put then fails closed).
+pub fn smf_object_spool_file_name_v1(name: text) -> text:
+    var out = ""
+    for ch in name.chars():
+        if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "-":
+            out = out + ch
+        elif ch == "_":
+            out = out + "__"
+        elif ch == ".":
+            out = out + "_d"
+        elif ch == "/":
+            out = out + "_s"
+        elif ch == "\\":
+            out = out + "_b"
+        elif ch == ":":
+            out = out + "_c"
+        else:
+            return ""
+    out
+
+# Record one module's object. The bytes are written to the spool file and NOT
+# kept; on a write failure `error` is set (fail closed at assembly).
+pub fn smf_object_spool_put_v1(spool: SmfObjectSpoolV1, name: text, bytes: [u8]) -> SmfObjectSpoolV1:
+    var out = spool
+    val size = bytes.len()
+    out.live_bytes = out.live_bytes + size
+    if out.live_bytes > out.peak_live_bytes:
+        out.peak_live_bytes = out.live_bytes
+    if out.dir == "":
+        out.error = "smf object spool has no directory"
+        out.live_bytes = out.live_bytes - size
+        return out
+    val stem = smf_object_spool_file_name_v1(name)
+    if stem == "":
+        out.error = "smf object spool cannot name part: {name}"
+        out.live_bytes = out.live_bytes - size
+        return out
+    dir_create_all(out.dir)
+    val target = "{out.dir}/{stem}.o"
+    if out.paths.contains_key(name):
+        out.spooled_bytes = out.spooled_bytes - out.sizes[name]
+    if file_write_bytes(target, bytes):
+        out.paths[name] = target
+        out.sizes[name] = size
+        out.spooled_bytes = out.spooled_bytes + size
+    else:
+        out.error = "smf object spool write failed: {name} -> {target}"
+    out.live_bytes = out.live_bytes - size
+    out
+
+pub fn smf_object_spool_get_v1(spool: SmfObjectSpoolV1, name: text) -> Result<[u8], text>:
+    if not spool.paths.contains_key(name):
+        return Err("smf object spool has no part: {name}")
+    val read = file_read_bytes_result(spool.paths[name])
+    if read.is_err():
+        return Err("smf object spool read failed: {name}")
+    val bytes = read.unwrap()
+    if bytes.len() != spool.sizes[name]:
+        return Err("smf object spool size mismatch: {name}")
+    Ok(bytes)
+
+# Concatenate the spooled objects in sorted module-name order (Dict.keys()),
+# the order smf_parts_assemble_objects_v1 used, so SMF bytes are unchanged.
+pub fn smf_object_spool_assemble_v1(spool: SmfObjectSpoolV1) -> Result<[u8], text>:
+    if spool.error != "":
+        return Err(spool.error)
+    var out: [u8] = []
+    for name in spool.paths.keys():
+        val part = smf_object_spool_get_v1(spool, name)
+        if part.is_err():
+            return Err(part.unwrap_err())
+        # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
+        out = bytes_concat_copy_v1(out, part.unwrap())
+    Ok(out)
+
+# Delete this spool's own files (never the whole directory: shard workers may
+# share it) and reset to empty.
+pub fn smf_object_spool_release_v1(spool: SmfObjectSpoolV1) -> SmfObjectSpoolV1:
+    for name in spool.paths.keys():
+        file_delete(spool.paths[name])
+    smf_object_spool_begin_v1(spool.dir)
+
+# Per-process spool directory (one owner per process; shard workers and the
+# link step each get their own). SIMPLE_SMF_OBJECT_SPOOL_DIR overrides the root.
+pub fn smf_object_spool_dir_v1() -> text:
+    val root = env_get_nullable("SIMPLE_SMF_OBJECT_SPOOL_DIR") ?? "build/smf_object_spool"
+    "{root}/p{getpid()}"
