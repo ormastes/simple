@@ -1,7 +1,7 @@
 # RISC-V QEMU scenario lanes boot bare `-kernel` with no OpenSBI firmware proxy
 
 - **Filed:** 2026-08-09 (stream J2, comment-cheat spec repair)
-- **Status:** OPEN — spec left RED deliberately
+- **Status:** FIXED 2026-11-05 (PR #6938) — OpenSBI firmware proxy
 - **Severity:** high — violates `.claude/rules/board-runnable.md`; the RISC-V
   acceptance lanes cannot produce a board-runnable artifact.
 
@@ -129,3 +129,13 @@ required by the board-evidence bar.
 ## Triage 2026-09-13 (BUGFIX-7 lane)
 
 Out of lane: RISC-V QEMU/OpenSBI board-runnable rule violation, needs a QEMU boot to verify; spec is deliberately left RED per the record itself. No change made.
+
+## Resolution 2026-11-05 (PR #6938, merged to release/1.0.0)
+
+- `QemuScenario` carries the declared `qemu_bios` firmware (default `""`
+  preserves existing constructors) and `build_scenario_command` projects it via
+  `qemu_firmware_args_v1`, so RISC-V scenario lanes boot through the OpenSBI
+  firmware proxy instead of pushing a bare `-kernel`.
+- Declared firmware operands that start with `-` fail closed instead of being
+  reinterpreted as QEMU options.
+- Regression coverage: `test/01_unit/os/qemu_firmware_projection_v1_spec.spl`.
