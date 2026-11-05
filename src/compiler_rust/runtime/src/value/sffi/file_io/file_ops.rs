@@ -1284,15 +1284,11 @@ pub unsafe extern "C" fn rt_file_lock(path_ptr: *const u8, path_len: u64, timeou
         }
 
         if timeout_secs <= 0 {
-            loop {
-                if unsafe { libc::flock(fd, libc::LOCK_EX) } == 0 {
-                    return i64::from(fd);
-                }
-                if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-                    unsafe { libc::close(fd) };
-                    return -1;
-                }
+            if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return i64::from(fd);
             }
+            unsafe { libc::close(fd) };
+            return -1;
         }
 
         let timeout = std::time::Duration::from_secs(timeout_secs as u64);
@@ -1347,11 +1343,10 @@ pub unsafe extern "C" fn rt_file_lock(path_ptr: *const u8, path_len: u64, timeou
 
         let mut overlapped = OVERLAPPED::default();
         if timeout_secs <= 0 {
-            // Blocking lock.
             let locked = unsafe {
                 LockFileEx(
                     handle,
-                    LOCK_FILE_FLAGS(LOCKFILE_EXCLUSIVE_LOCK.0),
+                    LOCK_FILE_FLAGS(LOCKFILE_EXCLUSIVE_LOCK.0 | LOCKFILE_FAIL_IMMEDIATELY.0),
                     0,
                     u32::MAX,
                     u32::MAX,
@@ -2826,6 +2821,62 @@ mod tests {
             let reacquired = rt_file_lock(path.as_ptr(), path.len() as u64, 1);
             assert!(reacquired >= 0);
             assert!(rt_file_unlock(reacquired));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_lock_nonpositive_timeouts_are_bounded_and_nonblocking() {
+        struct UnlockOnDrop(i64);
+        impl Drop for UnlockOnDrop {
+            fn drop(&mut self) {
+                if self.0 >= 0 {
+                    let _ = unsafe { rt_file_unlock(self.0) };
+                }
+            }
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let lock_path = temp_dir.path().join("nonblocking.lock");
+        let path = lock_path.to_str().unwrap();
+        for timeout_secs in [0, -1] {
+            let handle = unsafe { rt_file_lock(path.as_ptr(), path.len() as u64, timeout_secs) };
+            assert!(handle >= 0);
+            let mut holder = UnlockOnDrop(handle);
+            let contender_path = path.to_owned();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let _contender = std::thread::spawn(move || {
+                let started = std::time::Instant::now();
+                let result =
+                    unsafe { rt_file_lock(contender_path.as_ptr(), contender_path.len() as u64, timeout_secs) };
+                let elapsed = started.elapsed();
+                if result >= 0 {
+                    assert!(unsafe { rt_file_unlock(result) });
+                }
+                sender.send((result, elapsed)).unwrap();
+            });
+
+            // A blocking implementation is released after the bound so its
+            // thread can finish and every descriptor is cleaned up before the
+            // assertion fails.
+            let outcome = receiver.recv_timeout(std::time::Duration::from_secs(2));
+            assert!(unsafe { rt_file_unlock(holder.0) });
+            holder.0 = -1;
+            match outcome {
+                Ok((contended, elapsed)) => {
+                    assert_eq!(contended, -1);
+                    assert!(elapsed < std::time::Duration::from_secs(1));
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    let late = receiver.recv_timeout(std::time::Duration::from_secs(2));
+                    panic!("timeout_secs={timeout_secs} blocked; outcome after unlock: {late:?}");
+                }
+                Err(error) => panic!("contender failed: {error}"),
+            }
+
+            let reacquired = unsafe { rt_file_lock(path.as_ptr(), path.len() as u64, timeout_secs) };
+            assert!(reacquired >= 0);
+            assert!(unsafe { rt_file_unlock(reacquired) });
         }
     }
 

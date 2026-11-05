@@ -6,12 +6,41 @@
 #include <string.h>
 
 #if !defined(_WIN32)
+#include <errno.h>
+#include <signal.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static int check(int condition, const char* message) {
     if (condition) return 1;
     fprintf(stderr, "runtime_host_file_exports_selfcheck: %s\n", message);
     return 0;
+}
+
+static int check_contended_lock_returns(const char* path, int64_t timeout_secs) {
+    pid_t child = fork();
+    if (!check(child >= 0, "fork for lock contention failed")) return 0;
+    if (child == 0) {
+        alarm(2); /* Bound a regression to the old blocking attempt. */
+        int64_t contender = rt_file_lock((const uint8_t*)path, strlen(path), timeout_secs);
+        if (contender >= 0) {
+            rt_file_unlock(contender);
+            _exit(2);
+        }
+        _exit(0);
+    }
+    int status = 0;
+    pid_t waited;
+    do {
+        waited = waitpid(child, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    if (!check(waited == child, "waitpid for lock contender failed")) {
+        kill(child, SIGKILL);
+        waitpid(child, &status, 0);
+        return 0;
+    }
+    return check(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+                 "contended nonpositive-timeout lock did not promptly return -1");
 }
 
 int main(void) {
@@ -31,9 +60,15 @@ int main(void) {
     rt_array_free((SplArray*)(uintptr_t)bytes);
 
     if (!check(rt_file_fsync((const uint8_t*)path, strlen(path)) == 1, "durable sync failed")) return 1;
-    int64_t lock = rt_file_lock((const uint8_t*)path, strlen(path), 1);
-    if (!check(lock >= 0, "lock failed")) return 1;
+    int64_t lock = rt_file_lock((const uint8_t*)path, strlen(path), 0);
+    if (!check(lock >= 0, "zero-timeout uncontended lock failed")) return 1;
+    int contention_ok = check_contended_lock_returns(path, 0);
+    if (!check_contended_lock_returns(path, -1)) contention_ok = 0;
     if (!check(rt_file_unlock(lock), "unlock failed")) return 1;
+    if (!contention_ok) return 1;
+    lock = rt_file_lock((const uint8_t*)path, strlen(path), 0);
+    if (!check(lock >= 0, "zero-timeout reacquire failed")) return 1;
+    if (!check(rt_file_unlock(lock), "reacquired unlock failed")) return 1;
 
     int64_t tagged_path = rt_string_new((const uint8_t*)path, strlen(path));
     int64_t mapping = rt_mmap(tagged_path, sizeof(payload), 0, 1);
