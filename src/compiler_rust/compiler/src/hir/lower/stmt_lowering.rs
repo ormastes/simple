@@ -2477,7 +2477,9 @@ impl Lowerer {
                                 value: Some(value),
                             });
                         }
-                    } else if self.is_real_enum_variant_name(nested_variant_name) {
+                    } else if self.is_real_enum_variant_name(nested_variant_name)
+                        || self.is_builtin_optional_variant_name(nested_variant_name)
+                    {
                         // Nested ENUM-variant pattern inside an enum payload:
                         // `case Const(MirConstValue.Str(name), _):`. The branch
                         // above only ever handled a nested *struct* pattern
@@ -2628,7 +2630,7 @@ impl Lowerer {
                 variant,
                 payload: Some(inner_patterns),
                 ..
-            } if self.is_real_enum_variant_name(variant) => {
+            } if self.is_real_enum_variant_name(variant) || self.is_builtin_optional_variant_name(variant) => {
                 self.bind_nested_payload(variant, slot, inner_patterns, binding_type_map, ctx, out);
             }
             // Positional struct spelling `Point(x, y)`. The parser cannot tell
@@ -3002,11 +3004,7 @@ impl Lowerer {
                 if self.subject_enum_has_variant(subject_ty, name) {
                     // Treat as an identity-aware enum variant pattern.
                     let expected_disc: i64 = {
-                        use std::collections::hash_map::DefaultHasher;
-                        use std::hash::{Hash, Hasher};
-                        let mut hasher = DefaultHasher::new();
-                        name.hash(&mut hasher);
-                        (hasher.finish() & 0xFFFFFFFF) as i64
+                        simple_runtime::value::hash_variant_discriminant(name) as i64
                     };
 
                     let expected_val = HirExpr {
@@ -3329,11 +3327,7 @@ impl Lowerer {
 
                 // Validate the stable enum identity and hashed variant tag.
                 let expected_disc: i64 = {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut hasher = DefaultHasher::new();
-                    variant.hash(&mut hasher);
-                    (hasher.finish() & 0xFFFFFFFF) as i64
+                    simple_runtime::value::hash_variant_discriminant(variant) as i64
                 };
 
                 let expected_val = HirExpr {

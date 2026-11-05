@@ -52,11 +52,17 @@ describe "typed shared scalar product composition":
                 expect(composition.top_port_direction("dispatch_valid")).to_equal("in")
                 expect(composition.top_port_direction("in_ready")).to_equal("out")
                 expect(composition.binding_diagnostic()).to_equal("")
-                expect(composition.muldiv_provider.unwrap().ports.any(
-                    _.name == "canonical_instruction" and _.direction == "out")).to_equal(true)
+                var has_canonical_instruction_out = false
+                for port in composition.muldiv_provider.unwrap().ports:
+                    if port.name == "canonical_instruction" and port.direction == "out":
+                        has_canonical_instruction_out = true
+                expect(has_canonical_instruction_out).to_equal(true)
 
     it "weaves typed observations onto the scalar commit.retire receipt":
-        val built = product("scalar_retire_aspect", CoreConfig.rv64_zca_mission_critical(),
+        # The retire node id is derived from the same product name the render
+        # call uses below; landed owner 8a27fa62644 binds each observation to
+        # this scalar product's own commit.retire node.
+        val built = product("scalar_retire_aspect_rtl", CoreConfig.rv64_zca_mission_critical(),
             0x002081B3)
         expect(built.is_ok()).to_equal(true)
         if built.is_ok():
@@ -242,8 +248,11 @@ describe "typed shared scalar product composition":
         val rv64 = CoreConfig.rv64_zca_mission_critical()
         val load = product("scalar_hash", rv64, 0x0000B083).unwrap()
         val store = product("scalar_hash", rv64, 0x0010B023).unwrap()
+        # Landed owner 8a27fa62644 fails closed (HWIR-E-LSU-PROJECTION-BUS) when
+        # an access exceeds the explicit bus, so the narrow-bus arm uses the
+        # four-byte LW row; geometry still closes into the structural hash.
         val narrow_bus = strict_riscv_scalar_product_composition("scalar_hash", rv64,
-            0x0000B083, LsuConfig.explicit(32, 4).unwrap()).unwrap()
+            0x0000A083, LsuConfig.explicit(32, 4).unwrap()).unwrap()
         expect(load.structural_sha256().len()).to_equal(64)
         expect(load.structural_sha256() == store.structural_sha256()).to_equal(false)
         expect(load.structural_sha256() == narrow_bus.structural_sha256()).to_equal(false)
@@ -262,7 +271,9 @@ describe "typed shared scalar product composition":
                 kind: "trap_to_owner", source_owner: "trap", source_port: "dispatch_tval",
                 destination_owner: "retirement_owner", destination_port: "dispatch_cause",
                 bit_width: 32)
-            expect(rewired.binding_diagnostic()).to_contain("exact provider")
+            # Landed owner 8a27fa62644 spells the binding diagnostic
+            # "requires exact unique typed wiring" (see the example below).
+            expect(rewired.binding_diagnostic()).to_contain("exact unique typed wiring")
 
     it "rejects duplicate destinations and wrong typed LSU endpoints":
         val duplicate = product("scalar_duplicate", CoreConfig.rv64_zca_mission_critical(),
@@ -321,6 +332,12 @@ describe "typed shared scalar product composition":
         expect(registered_metadata).to_equal(3)
 
     it "uses real control exception ports and exports only owner retirement results":
+        # Landed owners route control exception metadata through the typed
+        # completion skid (8a27fa62644 bindings; retirement record stable since
+        # 27f34af15b4): provider retire_cause/retire_tval feed
+        # skid.upstream_execute_trap_* and the skid drives trap's
+        # execute_trap_* ports exactly once.  The retirement owner exports its
+        # 22 typed results (dispatch_ready and protocol_fault stay internal).
         val composition = product("scalar_control_closed", CoreConfig.rv64_zca_mission_critical(),
             0x00208463).unwrap()
         var exception_valid = 0
@@ -329,16 +346,16 @@ describe "typed shared scalar product composition":
         var retirement_outputs = 0
         for binding in composition.bindings:
             if binding.source_port == "execute_exception": exception_valid = exception_valid + 1
-            val is_exception_cause = binding.source_port == "retire_cause" and binding.destination_port == "execute_trap_cause"
-            if is_exception_cause: exception_cause = exception_cause + 1
-            val is_exception_tval = binding.source_port == "retire_tval" and binding.destination_port == "execute_trap_tval"
-            if is_exception_tval: exception_tval = exception_tval + 1
+            if binding.destination_port == "execute_trap_cause":
+                exception_cause = exception_cause + 1
+            if binding.destination_port == "execute_trap_tval":
+                exception_tval = exception_tval + 1
             if binding.kind == "owner_to_composition": retirement_outputs = retirement_outputs + 1
             expect(binding.source_port.starts_with("execute_exception_")).to_equal(false)
         expect(exception_valid).to_equal(1)
         expect(exception_cause).to_equal(1)
         expect(exception_tval).to_equal(1)
-        expect(retirement_outputs).to_equal(23)
+        expect(retirement_outputs).to_equal(22)
         expect(composition.top_port_direction("retire_valid")).to_equal("out")
 
     it "emits an executable ALU top with acceptance and retirement owners":

@@ -170,3 +170,40 @@ callee `add` from `main`'s body. That is a separate defect — row 1
 (`interpreter_hello`) is green but its program never makes a cross-function
 call, so nothing on this lane had exercised callee resolution before. Filed as
 the row's next blocker; it is NOT a regression of this fix.
+
+---
+
+## RE-VERIFIED at tip 2026-11-05 (release/1.0.0 lane `work/riscv-inguest-20261105`)
+
+Classification: **already fixed at tip; no change made.** The RESOLVED
+section above is confirmed against current source; the fix and its guard
+are both present and green.
+
+Source re-read (`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:1559`,
+`match_result_mir_type`): the function carries the exact documented repair —
+a formation guard (`expected_found == nil` and
+`hir_type_kind_discriminant(expected_found.kind) < 0`) before the
+`.kind` dereference, routing a miscompiled extraction to the same
+`MirType.i64()` returned for an absent expected type, with the measured
+in-guest probe (`calls=5 site=switch_operators_calls:839`, nonce-era)
+recorded in its comment.
+
+Commands run and outcomes (all on this host, Rust seed
+`src/compiler_rust/target/bootstrap/simple`):
+
+* `sh scripts/check/check-rv64-match-result-type-guarded.shs`
+  -> `PASS — 1 site checked, match_result_mir_type guards its if-val
+  extraction before dereferencing`; selftest `OK (8 fixtures)`.
+* `<seed> test test/01_unit/compiler/bootstrap/zerokind_nil_optional_aggregate_invariant_spec.spl --mode=interpreter`
+  -> `4 examples, 0 failures` (the ZeroKind-family platform invariants the
+  fix relies on hold hosted).
+
+A hosted end-to-end driver replaying the buildrun pipeline (frontend ->
+HIR -> `MirLowering.lower_module` -> interpret the `add(40,2)` program)
+reached `phase=mir-ok` but the seed then failed to type-check the
+release-branch interpreter's internal `self.call_hir_function` call — a
+seed-vs-branch skew artifact in the ad-hoc driver, not a defect in the
+fix; the pinned guard and the unit spec above are the authoritative
+hosted evidence. The behavioural in-guest half (real OpenSBI boot) is
+not re-run here; the guard's transcript mode plus the original measured
+nonce runs remain the in-guest evidence of record.

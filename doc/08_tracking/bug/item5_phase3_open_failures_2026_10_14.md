@@ -34,6 +34,28 @@ P1: Native object collection exceeds diagnostic memory reserve.
 
 SymbolTable87 passed MIR then exited143 at shared4GiB RAM-plus-swap reserve;69 private LLVM objects retained. Aggregate process RSS exceeded28GiB in some successful cohorts; shared-memory contribution is unisolated. No memory-leak cause or performance qualification claimed. Owned temporary swap is diagnostic only.
 
+**Re-scoped 2026-11-05 (code-read root cause, no heavy run — host memory guard).**
+The growth is not an LLVM-object leak:
+
+- `llvm_lib_backend.spl:126-139` disposes target machine, builder, module,
+  context and memory buffer per module; no native LLVM handle outlives a module.
+- The object bytes are copied into the Simple heap (`rt_bytes_from_raw`) and
+  every MIR module stays in that heap after `evict_mir_modules`: the native
+  runtime has no collector (probe P0, `rt_driver_eviction_reclaim_selfcheck.c`:
+  0 of 2001 allocations reclaimed; cited at `native_staged_codegen.spl:29-34`
+  and `driver_types.spl:1381`). Process RSS is therefore monotone in modules
+  processed — retention by design of the runtime, not a missed dispose.
+- The `retained_objs=` field of `SIMPLE_PHASE_RSS=1` is set from
+  `ctx.mir_modules.len() + 1` (`driver_pipeline_lowering.spl:1598`): it counts
+  resident MIR modules, not LLVM objects, and cannot show reclaimed bytes.
+
+Next step (precise): the memory fix is process-level MIR sharding
+(`SIMPLE_MIR_SHARDING`, `driver_build/native_mir_shard.spl`) so each worker
+exits after its shard; qualify by one sharded SymbolTable87 cohort with
+`SIMPLE_PHASE_RSS=1` on a redeployed compiler when >= 40 GB commit is free,
+comparing per-worker `peak_kib` against the unsharded 28 GiB aggregate. A
+runtime-side reclaim (real free on eviction) is the alternative owner.
+
 Owner/source: `doc/08_tracking/bug/item5_phase3_open_failures_2026_10_14.md`.
 
 ## item5_native_build_threads_ineffective_2026_10_14

@@ -196,3 +196,35 @@ pins the Simple side byte-for-byte and records `RUST_SEED_HEADER_SIZE = 96`,
 Record explicitly states this is architectural and confirmed out of scope for a unilateral fix (needs a dual-write migration, would invalidate cached artifacts). No change made.
 
 **Revalidated 2026-11-02: still plausible because OPEN — ARCHITECTURAL, confirmed genuinely out of scope for a unilateral fix; no merged fix commit with a passing regression is cited in this doc.**
+
+---
+
+## 2026-11-05 — premise re-checked; read-side compatibility landed (partial)
+
+Premise still current on `origin/release/1.0.0`: `header.rs` is still
+`#[repr(C)]` + raw `ptr::read`, and `smf_header_from_bytes` still read packed
+offsets. Not affected by later policy changes (nil/Any/mono).
+
+Fix, within the "Constraint on any fix" above (no layout changed, nothing new
+written): the canonical Simple decoders now accept the seed layout on read.
+
+- `src/compiler/70.backend/linker/smf_header.spl`: new `smf_header_field_shift`
+  (4 when bytes 20..24 are zero padding, `section_count > 0` and the u64 at 24
+  is non-zero; else 0), `SMF_SEED_HEADER_SIZE = 96`, seed trailer at EOF-96,
+  seed hint block (app_type@80, ww@82, wh@84, ph@86, pfc@87, reserved@88), and
+  a zero compile-options area for seed headers. Packed write path untouched.
+- `src/compiler/70.backend/linker/_SmfReaderMemory/header_parser.spl`: fields
+  20..59 read with the same shift.
+
+Evidence: new `src/compiler/70.backend/linker/test/smf_header_seed_layout_spec.spl`
+was RED first (2/9 passed), now 9/9; `smf_layout_parity_spec` 8/8,
+`smf_reader_memory_spec` 4/4, `lib_smf_reader_spec` 3/3.
+
+Still open (same packed-offset pattern, not changed here):
+`src/os/smf/smf_dynlib.spl:386-394` (also tracked by
+`seed_smf_header_padding_vs_pure_simple_reader_2026-10-19`),
+`src/app/startup/launch_metadata.spl:588`,
+`src/compiler/80.driver/cache/cache_validator.spl:300`,
+`src/os/smf/aspect_pack_directory.spl:222`. Writer convergence (dual-write,
+steps 2-5) is still owner work. Known heuristic limit: a seed header with
+`section_count == 0` decodes as packed.
