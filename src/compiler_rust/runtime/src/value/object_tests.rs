@@ -461,11 +461,7 @@ fn test_option_map_none_enum() {
 
     // Create a proper None enum
     let none_disc = {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut h = DefaultHasher::new();
-        "None".hash(&mut h);
-        (h.finish() & 0xFFFFFFFF) as u32
+        super::hash_variant_discriminant("None") as u32
     };
     let none_val = rt_enum_new(super::OPTION_ENUM_ID, none_disc, RuntimeValue::NIL);
     let custom_none = rt_enum_new(super::OPTION_ENUM_ID + 1, none_disc, RuntimeValue::NIL);
@@ -483,11 +479,7 @@ fn test_option_map_some_with_identity() {
 
     // Create Some(42) enum
     let some_disc = {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut h = DefaultHasher::new();
-        "Some".hash(&mut h);
-        (h.finish() & 0xFFFFFFFF) as u32
+        super::hash_variant_discriminant("Some") as u32
     };
     let some_val = rt_enum_new(super::OPTION_ENUM_ID, some_disc, RuntimeValue::from_int(42));
 
@@ -608,4 +600,34 @@ fn test_unwrap_or_value_nil_flat_nullable_returns_default() {
     // A present bare payload is still returned unchanged.
     let five = RuntimeValue::from_int(5);
     assert_eq!(super::rt_unwrap_or_value(five, default), five);
+}
+
+/// Enum discriminant convention (bug
+/// enum_discriminant_convention_split_hashed_seed_vs_positional_pure_simple_2026-08-08):
+/// the builtin Option/Result variants use the POSITIONAL convention shared with
+/// the pure-Simple compiler (`Result: Ok=0, Err=1`, `Option: Some=0, None=1`)
+/// and the C runtime, so a seed-built value read by the other toolchain (or
+/// vice versa) decodes to the same variant.
+#[test]
+fn test_builtin_variant_discriminants_are_positional() {
+    assert_eq!(super::hash_variant_discriminant("Ok"), 0);
+    assert_eq!(super::hash_variant_discriminant("Err"), 1);
+    assert_eq!(super::hash_variant_discriminant("Some"), 0);
+    assert_eq!(super::hash_variant_discriminant("None"), 1);
+
+    let some = super::rt_option_some(RuntimeValue::from_int(5));
+    let none = super::rt_option_none();
+    assert_eq!(rt_enum_discriminant(some), 0);
+    assert_eq!(rt_enum_discriminant(none), 1);
+    assert_eq!(rt_enum_id(some), super::OPTION_ENUM_ID as i64);
+}
+
+/// User variants keep a name-derived tag that can never alias the positional
+/// builtin slots 0/1, so a user enum's `Circle` can never decode as `Err`/`None`.
+#[test]
+fn test_user_variant_discriminants_never_alias_builtin_slots() {
+    for name in ["Circle", "Bold", "Ready", "Pending", "A", "Z", "Nothing", "Error", "ok", "none"] {
+        let d = super::hash_variant_discriminant(name);
+        assert!(d > 1, "user variant {name} aliased a builtin positional slot: {d}");
+    }
 }
