@@ -1850,10 +1850,13 @@ impl Lowerer {
                 // spec test/01_unit/language/if_val_typed_option_class_unwrap_spec.spl
                 let binding_ty = self.optional_boxint_scalar_inner(subject_ty).unwrap_or_else(|| {
                     match self.module.types.get(subject_ty) {
-                        // Presence guards the optional subject; a bound bool is
-                        // its value, not another optional-presence condition.
-                        Some(HirType::Pointer { kind: PointerKind::Shared, inner, .. })
-                            if *inner == TypeId::BOOL => TypeId::BOOL,
+                        // Bool and u64 payloads use their dedicated tagged
+                        // representations, not BoxInt; decode them by inner type.
+                        Some(HirType::Pointer {
+                            kind: PointerKind::Shared,
+                            inner,
+                            ..
+                        }) if matches!(*inner, TypeId::BOOL | TypeId::U64) => *inner,
                         _ => self
                             .optional_reference_payload_inner(subject_ty)
                             .or_else(|| self.optional_enum_payload_inner(subject_ty))
@@ -3004,11 +3007,7 @@ impl Lowerer {
                 if self.subject_enum_has_variant(subject_ty, name) {
                     // Treat as an identity-aware enum variant pattern.
                     let expected_disc: i64 = {
-                        use std::collections::hash_map::DefaultHasher;
-                        use std::hash::{Hash, Hasher};
-                        let mut hasher = DefaultHasher::new();
-                        name.hash(&mut hasher);
-                        (hasher.finish() & 0xFFFFFFFF) as i64
+                        simple_runtime::value::hash_variant_discriminant(name) as i64
                     };
 
                     let expected_val = HirExpr {
@@ -3331,11 +3330,7 @@ impl Lowerer {
 
                 // Validate the stable enum identity and hashed variant tag.
                 let expected_disc: i64 = {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut hasher = DefaultHasher::new();
-                    variant.hash(&mut hasher);
-                    (hasher.finish() & 0xFFFFFFFF) as i64
+                    simple_runtime::value::hash_variant_discriminant(variant) as i64
                 };
 
                 let expected_val = HirExpr {

@@ -3227,8 +3227,20 @@ impl MirLowering:
                 # Nested (depth >= 2) binding: the flat depth-1 bind path
                 # never sees it, so install it here. The raw i64 slot word is
                 # the same representation the depth-1 raw fast path binds.
-                self.local_map[bind_sym.id] = value_local
-                self.bind_local(bind_sym.id, value_local)
+                # When HIR proved the slot type from the subject's generic
+                # arguments (`Ok(Some(chunk))` over `Result<text?, E>`),
+                # decode it like the depth-1 typed bind, else a text payload
+                # stays an i64 word and formats as an integer handle
+                # (native_enum_nil_payload_pattern_2026_10_11).
+                var bound_value = value_local
+                if typed_value == nil and pat.has_type_:
+                    match pat.type_.kind:
+                        case HirTypeKind.Str:
+                            bound_value = self.decode_declared_enum_payload_slot(value_local, pat.type_)
+                            self.remember_local_hir_type(bound_value.id, pat.type_, 0, 0)
+                        case _: ()
+                self.local_map[bind_sym.id] = bound_value
+                self.bind_local(bind_sym.id, bound_value)
             case Literal(lit_expr):
                 self.emit_deep_literal_test(value_local, lit_expr, next_block, pat.span, typed_value, nil_optional_slot)
             case Enum(nested_etype, nested_variant, nested_payload):
@@ -9235,7 +9247,7 @@ impl MirLowering:
             match result_hir.kind:
                 case HirTypeKind.Named(owner, _):
                     if val declaration = self.symbols.get_symbol_raw(owner.id):
-                        val layout_key = self.composite_layout_key(declaration)
+                        val layout_key = self.declared_struct_layout_key(self.composite_layout_key(declaration))
                         if self.struct_field_order.has(layout_key):
                             self.struct_value_syms[indirect_result.id] = layout_key
                 case HirTypeKind.Optional(_):

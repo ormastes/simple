@@ -15,3 +15,61 @@ Durable enum_membership_spec.spl is the equivalent three-example SSpec proposal.
 ## 2026-11-05 — fix implemented, cross-module verification pending (mirp2 family A)
 Direct payload-free enum `==`/`!=` and list membership now lower natively in a single module. Native evidence: s3_fable44.exe (2026-11-05 15:15 build), s3sanity run_case `mirp2a_enum` (enum ==/!= on payload-free enums, list membership by ==, payload-variant match, bare payload-variant arms) -> `CHECKS=10`, rc=0. Durable spec: test/01_unit/compiler/50.mir/enum_eq_and_match_lowering_spec.spl (interpreter 3/3).
 Next step: remove the canonical-name workaround in src/compiler/00.common/backend_plugin/model.spl:75/85 and rebuild that module with the current producer (cross-module enum owner not covered by the single-module repro).
+
+
+---
+
+## 2026-11-05 — Second worked-around call site: `ParserProviderV1` admission (in-guest lane, PR #6983+2)
+
+The riscv64 in-guest interpreter kernel (S-mode, freestanding runtime)
+reached `parse_and_build_module` and panicked at
+`src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl:1671`:
+`parser_provider_v1_admit` returned
+`parser_provider_unqualified: parser.simple.legacy-reference` even though
+`parser_provider_v1_default()` IS `ParserProviderV1.LegacyReference` —
+`provider != ParserProviderV1.LegacyReference` evaluated true for two
+equal, independently constructed enum values (tagged-handle identity
+compare, this record's exact class).
+
+Caller-scoped workaround, same qualified pattern as model.spl:75
+(compare canonical names; no integer-discriminant fallback):
+
+- New helper `parser_provider_v1_same(a, b)` in
+  `src/compiler/10.frontend/core/frontend.spl` (after
+  `parser_provider_v1_name`, exported): returns
+  `parser_provider_v1_name(a) == parser_provider_v1_name(b)`. The name
+  mapping is exhaustive over the four payload-free variants and
+  injective, so equal names <=> equal variants; text `==` compares by
+  content, which the freestanding runtime implements correctly.
+- Five `!= ParserProviderV1.LegacyReference` sites replaced with
+  `not parser_provider_v1_same(..., ParserProviderV1.LegacyReference)`:
+  `frontend.spl:152` (inside `parser_provider_v1_admit` — the panic path
+  for genuinely unqualified providers is preserved: non-legacy names
+  compare unequal and still return Err) and
+  `_FlatAstBridge/module_assembly.spl:1553, 1657, 1672, 1852`
+  (post-admission provider gates in the cache, checked-reference,
+  scope-owner, and centrally-admitted routes).
+
+Host-side regression (checked-in seed, interpreter mode):
+`test/01_unit/compiler/frontend/parser_provider_v1_spec.spl` 8/8 OK and
+`flat_ast_parser_provider_route_v1_spec.spl` 4/4 OK.
+
+Kernel evidence: `build-simpleos-riscv64-interpreter-kernel.shs` PASS
+(both rows); OpenSBI v1.4 boot (`/tmp/rv-boot/interp-serial-provider-admit.log`)
+clears the admission panic — `[interp] lowering hello-world source
+through the real frontend` now proceeds into the parse — and stops at the
+NEXT blocker, a different class (recorded here for the umbrella's
+worked-around-sites list only):
+
+```
+[TRAP] S-mode exception, the guest is parking here
+[TRAP]   scause=0x0000000000000005 sepc=0x0000000080200976
+[TRAP]   stval=0x0000001100000000 sp=0x0000000082e6a8f0
+```
+
+scause=5 load fault in `rt_array_set` (header `type` word load) with an
+untagged garbage receiver 0x0000001100000000, and sp within ~1 KiB of
+the 8 MiB stack top — i.e. unbounded recursion/deep call chain upstream
+in the in-guest frontend (same family as the 2026-08-31 "parser made no
+forward progress" defect, one milestone deeper). Not an
+enum-equality-class defect; NOT fixed in this lane.

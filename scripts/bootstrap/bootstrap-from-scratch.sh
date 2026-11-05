@@ -3,6 +3,10 @@
 # process per file (parse -> HIR -> MIR -> obj), then link. Whole-program is
 # opt-in per invocation only: SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1; two-pass shard
 # route: SIMPLE_FILE_WORKERS=0. Never set these as script-global defaults.
+# 2026-11-05: the admitted compiler's bootstrap_main.spl now applies the same
+# default to EVERY route -- plain positional native-build, Stage 4 and the
+# coordinator/Stage 3 routes (Windows batch included; it delegates here) --
+# so no phase silently falls back to a phase-based whole-program build.
 # See doc/07_guide/tooling/bootstrap_options.md "Default build mode".
 
 # Keep helper subcommands on the canonical bootstrap entrypoint.  Dispatch
@@ -5204,6 +5208,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       MINGW*|MSYS*|CYGWIN*) stage2_tests_timeout_default=21600 ;;
       *) stage2_tests_timeout_default=3600 ;;
     esac
+    # Unscaled here; the whole-build plan below scales it by the worker fit.
     stage2_tests_timeout_seconds=${BOOTSTRAP_VERIFY_TIMEOUT_SECONDS:-${stage2_tests_timeout_default}}
     # `jobs` (this bootstrap's own --jobs selection) is expected to already be
     # a resolved integer by the time this step runs (bootstrap_select_jobs,
@@ -5366,7 +5371,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       # native-build worker count, not a job-scheduling optimization target.
       [ "${stage2_tests_build_threads}" -le 8 ] || stage2_tests_build_threads=8
     fi
-    echo "Stage 2: compiler tests (phase verification matrix, strategy=${stage2_tests_strategy}, profile=${stage2_tests_profile}, timeout=${stage2_tests_timeout_seconds}s, build-threads=${stage2_tests_build_threads}, test-workers=${stage2_tests_workers})"
+    echo "Stage 2: compiler tests (phase verification matrix, strategy=${stage2_tests_strategy}, profile=${stage2_tests_profile}, timeout=${stage2_tests_timeout_seconds}s before worker-fit scaling, build-threads=${stage2_tests_build_threads}, test-workers=${stage2_tests_workers})"
     # Without a milestone the progress watcher reads this multi-minute step as a
     # hang between Stage 2 and Stage 3.
     bootstrap_progress_mark stage2-compiler-tests \
@@ -5417,13 +5422,12 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       # minutes past the 600 s default). The default kills the HIR shard worker
       # mid-promote with the same BLOCKED exit=-2 claimed=0 signature as the
       # mirror stall. Size the per-row internal native-build timeout for the
-      # host; callers may override.
+      # host; callers may override. Published after the whole-build plan below,
+      # scaled by its worker reduction (bootstrap_tree_rss_scaled_timeout).
       case "$(uname -s 2>/dev/null || :)" in
         MINGW*|MSYS*|CYGWIN*) stage2_native_internal_default=14400 ;;
         *) stage2_native_internal_default=1800 ;;
       esac
-      BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT="${BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:-$stage2_native_internal_default}"
-      export BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT
       # Canonical source-derived tests consume their admitted producer, as in
       # run-release-stage2-qualified.shs. Explicit delegation remains opt-in and
       # subject to the phase verifier's existing real MC/DC waiver requirements.
@@ -5447,7 +5451,21 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
         echo "error: ${bootstrap_tree_rss_refusal}" >&2
         exit 125
       }
+      # The time budgets above were calibrated for the requested worker count;
+      # when the plan fits fewer workers, scale the native internal, row and
+      # campaign (verifier default 7200 s) budgets by ceil(requested/fitted),
+      # bounded by BOOTSTRAP_TREE_RSS_TIMEOUT_SCALE_MAX. Explicit env values
+      # are honoured as-is. Run 4 (2026-11-05): 8 -> 2 workers, MIR workers
+      # killed at the unscaled 1800 s with 596/3010 modules claimed.
+      { bootstrap_tree_rss_scaled_timeout BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT "${stage2_native_internal_default}" &&
+        bootstrap_tree_rss_scaled_timeout BOOTSTRAP_VERIFY_TIMEOUT_SECONDS "${stage2_tests_timeout_default}" &&
+        bootstrap_tree_rss_scaled_timeout BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS 7200; } || {
+        echo "error: ${bootstrap_tree_rss_refusal}" >&2
+        exit 125
+      }
+      stage2_tests_timeout_seconds=${BOOTSTRAP_VERIFY_TIMEOUT_SECONDS}
       echo "stage2-compiler-tests tree RSS cap: ${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB} KiB, build-threads=${BOOTSTRAP_VERIFY_BUILD_THREADS} (${bootstrap_tree_rss_plan_summary})"
+      echo "stage2-compiler-tests timeouts: native-internal=${BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT}s row=${BOOTSTRAP_VERIFY_TIMEOUT_SECONDS}s campaign=${BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS}s scale=x${BOOTSTRAP_VERIFY_TIMEOUT_SCALE} (${BOOTSTRAP_VERIFY_TIMEOUT_SOURCE})"
       sh "${repo_root}/scripts/bootstrap/bootstrap-phase-verification.shs" \
         --phase=stage2 \
         --backend="${backend}" \
@@ -5623,7 +5641,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     ${bootstrap_windows_os_env:+"${bootstrap_windows_os_env}"} \
     SIMPLE_BINARY="${stage2_admitted_absolute}" \
     ${stage3_diagnostic_env} ${compiler_ceiling_env:+"${compiler_ceiling_env}"} -- \
-    "${stage2_admitted_absolute}" native-build \
+    sh "${script_dir}/stage-exe-launch.shs" "${stage2_admitted_absolute}" native-build \
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \

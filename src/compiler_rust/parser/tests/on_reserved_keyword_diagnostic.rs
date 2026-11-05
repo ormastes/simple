@@ -17,7 +17,14 @@ fn parse_err(src: &str) -> String {
 
 #[test]
 fn on_in_statement_position_names_reserved_keyword() {
-    for src in ["val on = 1\non + 1\n", "var on = 5\non + 1\n"] {
+    for src in [
+        "val on = 1\non + 1\n",
+        "var on = 5\non + 1\n",
+        "val on = 1\nprint on\n",
+        "var on = 5\nprint on + 1\n",
+        "var on = 5\non = on + 1\nprint on\n",
+        "fn f(on: i64) -> i64:\n    on + 1\n",
+    ] {
         let msg = parse_err(src);
         assert!(
             msg.contains("`on` is a reserved keyword and cannot be used as an identifier"),

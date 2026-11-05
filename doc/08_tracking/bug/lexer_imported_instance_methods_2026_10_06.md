@@ -61,3 +61,7 @@ the guard candidate is required before claiming a byte_at producer repair.
 Root cause is unproven (error span points at `_NL`, no owner trace) and only
 shows in the large generator closure under native build. Free-function
 workaround kept. Status left open; needs a stage3 owner trace first.
+
+## HIR-P2 HC triage 2026-11-05
+
+Native-only evidence (stage3 generator closure); candidate wrappers/fixtures are UNRUN and root cause unproven. Cannot be verified from the interpreter lane; needs stage3 rerun. Remains OPEN (deferred).

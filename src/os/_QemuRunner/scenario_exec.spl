@@ -4,6 +4,7 @@ use os._QemuRunner.runner_targets.*
 use os._QemuRunner.os_build_run.*
 use os._QemuRunner.scenario_catalog.*
 use os._QemuRunner.scenario_disks.*
+use os.qemu_firmware_args_v1.{qemu_firmware_args_v1}
 use os.fs_wrapper_artifact.{fs_wrapper_artifact_admitted}
 use os.qemu_cli_plan_v1.{
     qemu_cli_named_lane_supported_v1, qemu_cli_inspect_named_lane_v1,
@@ -479,14 +480,14 @@ fn _compiler_filesystem_qemu_args(scenario: QemuScenario) -> [text]:
         args.push("virtio-blk-device,drive=cfsexecns1")
     args
 
-fn _compiler_filesystem_non_storage_args(scenario: QemuScenario) -> [text]:
+fn _compiler_filesystem_non_storage_args(extra: [text]) -> [text]:
     var kept: [text] = []
     var i = 0
-    while i < scenario.qemu_extra.len():
-        val option = scenario.qemu_extra[i]
-        if i + 1 < scenario.qemu_extra.len() and option == "-drive":
+    while i < extra.len():
+        val option = extra[i]
+        if i + 1 < extra.len() and option == "-drive":
             i = i + 2
-        elif i + 1 < scenario.qemu_extra.len() and option == "-device" and scenario.qemu_extra[i + 1].contains("drive="):
+        elif i + 1 < extra.len() and option == "-device" and extra[i + 1].contains("drive="):
             i = i + 2
         else:
             kept.push(option)
@@ -495,6 +496,11 @@ fn _compiler_filesystem_non_storage_args(scenario: QemuScenario) -> [text]:
 
 fn _build_scenario_command_impl(scenario: QemuScenario, kernel_path: text, headless: bool) -> [text]:
     """Build QEMU command line from a scenario."""
+    val firmware = match qemu_firmware_args_v1(scenario.qemu_bios, scenario.qemu_extra):
+        case Ok(selected): selected
+        case Err(message):
+            print "[qemu] invalid scenario firmware: {message}"
+            return []
     val qemu_bin = match scenario.arch:
         Architecture.X86_64: "qemu-system-x86_64"
         Architecture.Riscv64: "qemu-system-riscv64"
@@ -525,6 +531,9 @@ fn _build_scenario_command_impl(scenario: QemuScenario, kernel_path: text, headl
         args.push("-display")
         args.push("none")
     args.push("-no-reboot")
+    if firmware.bios != "":
+        args.push("-bios")
+        args.push(firmware.bios)
     if _is_arm_fs_exec_scenario(scenario) and scenario.arch == Architecture.Arm32:
         args.push("-device")
         args.push("loader,file={kernel_path},addr=0x40200000")
@@ -545,12 +554,14 @@ fn _build_scenario_command_impl(scenario: QemuScenario, kernel_path: text, headl
         val compiler_fs_args = _compiler_filesystem_qemu_args(scenario)
         if compiler_fs_args.len() == 0:
             return []
-        for extra in _compiler_filesystem_non_storage_args(scenario):
+        # The storage projection is applied after firmware reconciliation so
+        # legacy -bios pairs cannot reappear or override the selected field.
+        for extra in _compiler_filesystem_non_storage_args(firmware.extra):
             args.push(extra)
         for extra in compiler_fs_args:
             args.push(extra)
     else:
-        for extra in scenario.qemu_extra:
+        for extra in firmware.extra:
             args.push(extra)
     args
 

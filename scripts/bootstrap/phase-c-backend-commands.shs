@@ -47,9 +47,22 @@ EOF
 }
 
 bootstrap_phase_c_run_tool_build() {
-  pcb_backend=$1 pcb_task=$2 pcb_compiler=$3 pcb_entry=$4 pcb_output=$5 pcb_threads=$6
+  pcb_backend=$1 pcb_task=$2 pcb_compiler=$3 pcb_entry=$4 pcb_output=$5 pcb_cache=$6 pcb_threads=$7
   bootstrap_phase_c_backend_valid "$pcb_backend" || return 2
   set -- "$pcb_compiler" native-build "$pcb_entry" "--backend=$pcb_backend" --low-memory
+  # Phase-route pin: these tool entries use AOP advice across module
+  # boundaries, which the per-file pool cannot close (fail-closed
+  # FILE-WORKER-E-CLOSURE-INCOMPLETE, observed 2026-11-05 on
+  # compiler_cli_build). The two-pass route needs the row RSS budget that
+  # BOOTSTRAP_VERIFY_TEST_WORKERS=2 provides (the per-row tree budget is the
+  # session cap divided by concurrent test workers). This is the documented
+  # per-invocation opt-out, not a script-global default.
+  set -- "env" "SIMPLE_FILE_WORKERS=0" "$@"
+  # --cache-dir is mandatory: without it both concurrent tool workers
+  # (cli + runner) share the ambient native cache root and race each other
+  # (HIR ledger creation failed, parse shards SIGSEGV'd, 2026-11-05). The
+  # caller has always computed a private per-tool cache; it was dropped here.
+  set -- "$@" --cache-dir "$pcb_cache"
   # The verifier validates this setting before dispatch. Preserve an explicit
   # diagnostic zero instead of silently using the coordinator's six-hour cap.
   # Standalone callers without a configured timeout retain their existing argv.

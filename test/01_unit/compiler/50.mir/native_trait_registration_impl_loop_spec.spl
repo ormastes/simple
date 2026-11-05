@@ -1,0 +1,29 @@
+# Static source assertion (a runtime repro needs the stage-native lane that AVs
+# at native_trait_owner_for_type+0x202e; it is not reproducible in the interpreter).
+# Pins the F3 fix in register_native_trait_implementations: the impl loop variable
+# is annotated HirImpl, HirType locals are annotated, and the owner lookup goes
+# through native_trait_owner_for_kind(kind), never by-value native_trait_owner_for_type.
+use std.spec
+
+extern fn rt_file_read_text(path: text) -> text?
+
+val NTR_PATH = "src/compiler/50.mir/_MirLowering/native_trait_registration.spl"
+
+fn ntr_register_body() -> text:
+    val src = rt_file_read_text(NTR_PATH) ?? ""
+    val start = src.index_of("me register_native_trait_implementations") ?? -1
+    if start < 0: return ""
+    src.substring(start, src.len())
+
+describe "native trait registration impl loop":
+    it "annotates the impl loop variable as HirImpl":
+        val body = ntr_register_body()
+        expect(body.contains("val implementation: HirImpl = raw_implementation")).to_equal(true)
+    it "annotates declared and relocated trait HirType locals":
+        val body = ntr_register_body()
+        expect(body.contains("val declared_trait: HirType = implementation.trait_")).to_equal(true)
+        expect(body.contains("val relocated_trait: HirType = self.relocate_provider_type(declared_trait")).to_equal(true)
+    it "looks up the owner by kind, not by value":
+        val body = ntr_register_body()
+        expect(body.contains("self.native_trait_owner_for_kind(trait_kind)")).to_equal(true)
+        expect(body.contains("native_trait_owner_for_type(trait_type)")).to_equal(false)

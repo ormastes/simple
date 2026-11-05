@@ -115,3 +115,7 @@ the mechanism as open.
 Still no reproducer; OWNER QUESTION in the row stands (module-qualify
 `named_type_register`, or close as not reproducible). Not actionable by a worker
 without that decision.
+
+## HIR-P2 HC triage 2026-11-05
+
+No reproducer found by any lane; the open decision is an owner call: module-qualify named_type_register (src/compiler/10.frontend/core/types.spl) or close as not reproducible. Renames stay as defensive hygiene. Not actionable without that decision; remains OPEN.
