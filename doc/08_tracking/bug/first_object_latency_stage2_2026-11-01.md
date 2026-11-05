@@ -89,3 +89,27 @@ Remaining (not fixed here, still above 10 s on stage2):
 
 Measure again with the next stage3 build; the shard clamp only takes effect in a binary
 built from this source.
+
+## Repro notes (added 2026-11-05)
+
+- **Binary identity:** frozen stage2 `C:/dev/p3new/stage2.exe`, built from `ef0681fc0e1`
+  (tip `3273833de3d` when probed). Record `sha256sum` and size of the exe with every timing;
+  the file is replaced by other lanes. The shard clamp fix only exists in a binary built
+  from a source tree newer than that, so stage3 is the binary to re-measure.
+- **Command (Windows, PowerShell, from a worktree root):**
+  `stage2.exe native-build --entry-closure --emit-object --source src/lib --source src/compiler --source src/app --entry src/app/dashboard/main.spl --threads 8`
+  with `SIMPLE_RT_OBJ_CACHE_DIR=<one fixed dir>` and, for the cold row only,
+  `SIMPLE_SCV_INVENTORY_COLD_INIT=1`. Wall clock is taken by `C:/dev/p3new/mp4probe/tsprobe.ps1`
+  (timestamped stdout/stderr relay), first `.o` mtime minus process start.
+- **Input:** `src/app/dashboard/main.spl` (1-file closure, the smallest probe). Cross-check
+  with `src/lib/common/serialization/__init__.spl` (1 object, 121.5 s) and
+  `src/app/cli/arch_check.spl` (95 objects).
+- **Expected:** first `.o` within 10 s (project rule `first-object-in-10s`); a 1-object closure
+  should cost process start + closure walk + one codegen, a few seconds.
+- **Observed:** 121-364 s to first `.o` (dashboard 158.1 s; 1-object serialization 121.5 s).
+  Driver `[build]` phases account for only about 13 s; the rest is before `load_sources`.
+  Warm cache without `COLD_INIT`: 74-124 s. Pre-driver floor after the shard clamp:
+  SCV inventory refresh 8.4 s + snapshot reopen 8.7 s + an unsplit ~23 s window before
+  `[parse-closure] parent_walks=1` + ~26 s in-process worker.
+- **Pass criterion for a fixed binary:** the same command prints the first `.o` in <= 10 s
+  wall (warm), with rc=0. Executable pin: `test/03_system/app/compiler/feature/first_object_latency_stage2_spec.spl`.
