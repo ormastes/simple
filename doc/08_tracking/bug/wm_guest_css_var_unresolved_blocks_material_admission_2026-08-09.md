@@ -410,3 +410,19 @@ divergence inside `_css_collect_custom_props`
 (`simple_web_html_layout_renderer_core_css_rules.spl:32`). Next step is still a
 guest lane re-run with the receipts. Stays OPEN until the guest admits the
 window material.
+
+## Premise re-check 2026-11-05
+
+- The `props=0` cause was measured on 2026-08-09 (guest-side
+  `_css_collect_custom_props` harvesting zero custom properties).
+- The substitution fix is landed, but the guest lane is still not green.
+- `_css_collect_custom_props` has since been rewritten. It now lives in
+  `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core_css_rules.spl`
+  (`fn _css_collect_custom_props(css: text, root_attrs: text) -> text`, line 32)
+  and takes `root_attrs`, so the 2026-08-09 measurement describes older code.
+- Current behaviour is unverified, and the bug is guest-only (the host pin spec
+  from 2026-11-03 passes on the same sheet).
+- Next step: re-run `scripts/check/check-simpleos-wm-fullscreen-evidence.shs`
+  with `SIMPLEOS_WM_READINESS_TIMEOUT_MS=420000` on a Linux host against current
+  release, and read the `css-var-unresolved` / `css-var-pass-bailed` serial
+  lines. If `props=0` persists, bisect `find_from` / `substring` in the guest.

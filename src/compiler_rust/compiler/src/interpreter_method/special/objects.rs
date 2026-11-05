@@ -91,7 +91,7 @@ fn constructor_value_matches_type(value: &Value, ty: &Type, type_params: &HashSe
 
 fn constructor_value_matches_type_exact(value: &Value, ty: &Type, type_params: &HashSet<String>) -> bool {
     match ty {
-        Type::Generic { name, args } if matches!(name.as_str(), "List" | "Array" | "Vec") && args.len() == 1 => {
+        Type::Generic { name, args } if matches!(name.as_str(), "List" | "list" | "Array" | "Vec") && args.len() == 1 => {
             match value {
                 Value::Array(items) => items
                     .values_iter()
@@ -151,7 +151,7 @@ fn constructor_overload_score(func: &FunctionDef, values: &[Value], class_generi
                 match ty {
                     Type::Array { .. } => 4,
                     Type::Generic { name, args }
-                        if matches!(name.as_str(), "List" | "Array" | "Vec") && args.len() == 1 =>
+                        if matches!(name.as_str(), "List" | "list" | "Array" | "Vec") && args.len() == 1 =>
                     {
                         4
                     }

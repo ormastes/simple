@@ -350,13 +350,31 @@ pub fn closure_pin_stats() -> (i64, i64, i64) {
 // Enum SFFI functions
 // ============================================================================
 
-/// Hash a variant name to get its discriminant, matching the compiler's hashing scheme.
+/// The single seed definition of an enum variant's runtime discriminant.
+///
+/// Builtin `Result`/`Option` variants use the POSITIONAL convention shared with
+/// the pure-Simple compiler and the C runtime (`Ok=0, Err=1`, `Some=0, None=1`),
+/// so values cross the two toolchains without re-encoding. Other variant names
+/// keep a name-derived tag (the seed lowers by name and has no positional index
+/// at every site); it is kept out of the positional slots 0/1 so it can never
+/// alias `Err`/`None`. See
+/// doc/08_tracking/bug/enum_discriminant_convention_split_hashed_seed_vs_positional_pure_simple_2026-08-08.md.
 pub fn hash_variant_discriminant(variant_name: &str) -> u32 {
+    match variant_name {
+        "Ok" | "Some" => return 0,
+        "Err" | "None" => return 1,
+        _ => {}
+    }
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
     variant_name.hash(&mut hasher);
-    (hasher.finish() & 0xFFFFFFFF) as u32
+    let tag = (hasher.finish() & 0xFFFFFFFF) as u32;
+    if tag < 2 {
+        tag + 2
+    } else {
+        tag
+    }
 }
 
 pub(crate) const RESULT_ENUM_ID: u32 = 0;
