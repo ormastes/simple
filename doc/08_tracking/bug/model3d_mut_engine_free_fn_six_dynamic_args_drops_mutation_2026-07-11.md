@@ -1,6 +1,6 @@
 # `mut Engine3D` free-function call silently drops mutation once 6+ sibling args are dynamic
 
-- **Status:** OPEN
+- **Status:** CLOSED (2026-11-05, does not reproduce)
 - **Discovered:** 2026-07-11 (Lane D: `model3d` 3D node-in-node nesting, `test/02_integration/app/model3d/model3d_nested_nodes_spec.spl`)
 - **Area:** compiler codegen — argument marshalling/register allocation for a free
   function whose first parameter is `mut <ClassType>` (a "handle" class holding
@@ -98,3 +98,21 @@ does NOT reproduce there. `--mode=native --native-backend cranelift` could not b
 exercised: the test daemon rejects it ("does not support pinned native
 execution"). Status therefore stays OPEN, scoped to native/JIT codegen; the spec
 is the regression check to run once a stage3 native toolchain is available.
+
+## Closure (2026-11-05, p1c-m3d)
+
+Re-run on `release/1.0.0` at `27e65c24371` with the deployed `bin/simple.exe`:
+
+- Interpreter (`simple run`) on the original 8-arg shape against the real
+  `Engine3D` (96x72, one dynamic-arg box): center pixel `0xFFCC3020`, i.e. the
+  geometry rasterizes. Not reproduced.
+- Plain `mut` class sink with 7 dynamic `f32` args plus an `f64` variant:
+  correct under the interpreter and under SMF/JIT (`simple compile -o x.smf`).
+- Regression spec `test/02_integration/app/model3d/mut_free_fn_six_args_spec.spl`:
+  4/4 passing, covering the isolation table's variants (6 dynamic args,
+  7 pre-bound `val` locals, packed array and slice, `f64` params).
+
+Remaining gaps, not this bug: native AOT could not be checked on Windows.
+`Engine3D` does not compile (`struct Void has no field named ready`), and
+`--native` linking of the plain probe fails because lld-link gets ELF-style
+`-o`/`--strip-all` args.
