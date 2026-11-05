@@ -11,6 +11,55 @@ use std::cell::RefCell;
 
 use crate::value::core::RuntimeValue;
 
+/// Max failure messages retained per example; further ones only bump a counter.
+const BDD_FAILURE_CAP: usize = 16;
+
+/// Every failing expect inside one example (bounded), instead of only the last.
+#[derive(Clone, Debug, Default)]
+struct BddFailures {
+    msgs: Vec<String>,
+    overflow: usize,
+}
+
+impl BddFailures {
+    const fn new() -> Self {
+        BddFailures {
+            msgs: Vec::new(),
+            overflow: 0,
+        }
+    }
+
+    fn push(&mut self, msg: String) {
+        if self.msgs.len() < BDD_FAILURE_CAP {
+            self.msgs.push(msg);
+        } else {
+            self.overflow += 1;
+        }
+    }
+
+    fn clear(&mut self) {
+        self.msgs.clear();
+        self.overflow = 0;
+    }
+
+    /// Messages joined by newline, with a "+N more" note when the cap was hit.
+    fn summary(&self) -> Option<String> {
+        if self.msgs.is_empty() {
+            return None;
+        }
+        let mut out = self.msgs.join("\n");
+        if self.overflow > 0 {
+            out.push_str(&format!("\n+{} more", self.overflow));
+        }
+        Some(out)
+    }
+}
+
+/// Record one failing expect (appends; earlier failures in the example are kept).
+fn push_bdd_failure(msg: String) {
+    BDD_FAILURE_MSG.with(|cell| cell.borrow_mut().push(msg));
+}
+
 // ============================================================================
 // Thread-local BDD state (mirrors interpreter_call/bdd.rs)
 // ============================================================================
@@ -24,8 +73,8 @@ thread_local! {
     static BDD_EXPECT_FAILED: RefCell<bool> = const { RefCell::new(false) };
     /// Whether we are inside an it-block
     static BDD_INSIDE_IT: RefCell<bool> = const { RefCell::new(false) };
-    /// Failure message from expect
-    static BDD_FAILURE_MSG: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Failure messages from expect
+    static BDD_FAILURE_MSG: RefCell<BddFailures> = const { RefCell::new(BddFailures::new()) };
     /// Stack of describe block names (for nested output)
     static BDD_DESCRIBE_STACK: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     /// Accumulated results across all describe blocks: Vec<(total, failed)>
@@ -113,7 +162,7 @@ pub extern "C" fn rt_bdd_it_start(name_ptr: i64, name_len: i64) {
     let name = unsafe { read_str(name_ptr, name_len) };
 
     BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = false);
-    BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = None);
+    BDD_FAILURE_MSG.with(|cell| cell.borrow_mut().clear());
     BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = true);
 
     BDD_INDENT.with(|cell| {
@@ -135,9 +184,9 @@ pub extern "C" fn rt_bdd_it_end(passed: i64) {
         println!(" \x1b[32m✓\x1b[0m");
     } else {
         println!(" \x1b[31m✗\x1b[0m");
-        // Print failure message if available
+        // Print failure messages if available
         BDD_FAILURE_MSG.with(|cell| {
-            if let Some(ref msg) = *cell.borrow() {
+            if let Some(msg) = cell.borrow().summary() {
                 BDD_INDENT.with(|indent_cell| {
                     let indent = *indent_cell.borrow();
                     println!("{}    \x1b[31m{}\x1b[0m", indent_str(indent), msg);
@@ -169,7 +218,7 @@ pub extern "C" fn rt_bdd_has_failure() -> i64 {
 pub extern "C" fn rt_bdd_expect_fail(msg_ptr: i64, msg_len: i64) {
     let msg = unsafe { read_str(msg_ptr, msg_len) };
     BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
-    BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = Some(msg));
+    push_bdd_failure(msg);
 }
 
 /// Simple equality expectation: check if actual == expected (both as RuntimeValue i64).
@@ -179,7 +228,7 @@ pub extern "C" fn rt_bdd_expect_eq(actual: i64, expected: i64) {
     if actual != expected {
         let msg = format!("Expected {} to equal {}", actual, expected);
         BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
-        BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = Some(msg));
+        push_bdd_failure(msg);
     }
 }
 
@@ -192,7 +241,7 @@ pub extern "C" fn rt_bdd_expect_truthy(value: i64) {
     if !is_truthy {
         let msg = format!("Expected value to be truthy, got {}", value);
         BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
-        BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = Some(msg));
+        push_bdd_failure(msg);
     }
 }
 
@@ -276,7 +325,7 @@ pub extern "C" fn rt_bdd_clear_state() {
     BDD_COUNTS.with(|cell| *cell.borrow_mut() = (0, 0));
     BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = false);
     BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = false);
-    BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = None);
+    BDD_FAILURE_MSG.with(|cell| cell.borrow_mut().clear());
     BDD_DESCRIBE_STACK.with(|cell| cell.borrow_mut().clear());
     BDD_RESULTS.with(|cell| cell.borrow_mut().clear());
     BDD_SKIPPED.with(|cell| *cell.borrow_mut() = 0);
@@ -326,7 +375,7 @@ pub extern "C" fn rt_bdd_it_start_rv(name_rv: i64) {
     let name = unsafe { rv_to_string(RuntimeValue(name_rv as u64)) };
 
     BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = false);
-    BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = None);
+    BDD_FAILURE_MSG.with(|cell| cell.borrow_mut().clear());
     BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = true);
 
     BDD_INDENT.with(|cell| {
@@ -395,7 +444,7 @@ pub extern "C" fn rt_bdd_expect_eq_rv(actual: i64, expected: i64) {
         let expected_str = unsafe { rv_to_display(expected) };
         let msg = format!("Expected {} to equal {}", actual_str, expected_str);
         BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
-        BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = Some(msg));
+        push_bdd_failure(msg);
     }
 }
 
@@ -414,7 +463,7 @@ pub extern "C" fn rt_bdd_fail_rv(msg_rv: i64) {
         std::process::exit(1);
     }
     BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
-    BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = Some(msg));
+    push_bdd_failure(msg);
 }
 
 /// expect_truthy accepting a RuntimeValue.
@@ -459,7 +508,7 @@ pub extern "C" fn rt_bdd_expect_truthy_rv(value: i64) {
         let display = unsafe { rv_to_display(value) };
         let msg = format!("Expected value to be truthy, got {}", display);
         BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
-        BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = Some(msg));
+        push_bdd_failure(msg);
     }
 }
 
@@ -537,5 +586,104 @@ mod tests {
         });
         let failures = rt_bdd_format_results();
         assert_eq!(failures, 1);
+    }
+
+    fn failure_summary() -> Option<String> {
+        BDD_FAILURE_MSG.with(|cell| cell.borrow().summary())
+    }
+
+    fn expect_fail(msg: &str) {
+        rt_bdd_expect_fail(msg.as_ptr() as i64, msg.len() as i64);
+    }
+
+    fn runtime_string(msg: &str) -> RuntimeValue {
+        unsafe { crate::value::rt_string_new(msg.as_ptr(), msg.len() as u64) }
+    }
+
+    fn overflow_failure_slot() {
+        for _ in 0..=BDD_FAILURE_CAP {
+            expect_fail("discarded");
+        }
+    }
+
+    #[test]
+    fn test_bdd_failures_accumulate_in_order() {
+        rt_bdd_clear_state();
+        expect_fail("first");
+        expect_fail("second");
+
+        assert_eq!(failure_summary().as_deref(), Some("first\nsecond"));
+        assert_eq!(rt_bdd_has_failure(), 1);
+    }
+
+    #[test]
+    fn test_bdd_all_failure_entry_points_accumulate() {
+        rt_bdd_clear_state();
+        let name = "all failure entry points";
+        rt_bdd_it_start(name.as_ptr() as i64, name.len() as i64);
+
+        expect_fail("explicit");
+        rt_bdd_expect_eq(1, 2);
+        rt_bdd_expect_truthy(0);
+        rt_bdd_expect_eq_rv(RuntimeValue::from_int(3).0 as i64, RuntimeValue::from_int(4).0 as i64);
+        rt_bdd_expect_truthy_rv(RuntimeValue::FALSE.0 as i64);
+        rt_bdd_fail_rv(runtime_string("fail_rv").0 as i64);
+
+        let expected = concat!(
+            "explicit\n",
+            "Expected 1 to equal 2\n",
+            "Expected value to be truthy, got 0\n",
+            "Expected 3 to equal 4\n",
+            "Expected value to be truthy, got false\n",
+            "fail_rv"
+        );
+        assert_eq!(failure_summary().as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn test_bdd_failure_accumulator_resets() {
+        rt_bdd_clear_state();
+
+        overflow_failure_slot();
+        let raw_name = "raw reset";
+        rt_bdd_it_start(raw_name.as_ptr() as i64, raw_name.len() as i64);
+        assert_eq!(failure_summary(), None);
+        assert_eq!(rt_bdd_has_failure(), 0);
+        expect_fail("raw");
+        assert_eq!(failure_summary().as_deref(), Some("raw"));
+
+        overflow_failure_slot();
+        rt_bdd_it_start_rv(runtime_string("rv reset").0 as i64);
+        assert_eq!(failure_summary(), None);
+        assert_eq!(rt_bdd_has_failure(), 0);
+        expect_fail("rv");
+        assert_eq!(failure_summary().as_deref(), Some("rv"));
+
+        overflow_failure_slot();
+        rt_bdd_clear_state();
+        assert_eq!(failure_summary(), None);
+        assert_eq!(rt_bdd_has_failure(), 0);
+        expect_fail("clear");
+        assert_eq!(failure_summary().as_deref(), Some("clear"));
+    }
+
+    #[test]
+    fn test_bdd_failures_are_bounded_with_more_note() {
+        rt_bdd_clear_state();
+        for i in 0..20 {
+            expect_fail(&format!("failure-{i}"));
+        }
+
+        let retained = (0..BDD_FAILURE_CAP)
+            .map(|i| format!("failure-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let expected = format!("{retained}\n+4 more");
+        assert_eq!(failure_summary().as_deref(), Some(expected.as_str()));
+        BDD_FAILURE_MSG.with(|cell| {
+            let failures = cell.borrow();
+            assert_eq!(failures.msgs.len(), BDD_FAILURE_CAP);
+            assert_eq!(failures.overflow, 4);
+        });
     }
 }
