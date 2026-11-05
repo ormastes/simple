@@ -1,0 +1,194 @@
+#!/bin/sh
+# check-hir-lower-list-generic-not-any.shs
+#
+# Reproduce guard for
+# doc/08_tracking/bug/riscv64_freestanding_me_method_invocation_traps_2026-08-31.md
+#
+# WHAT IT PINS. In the Rust seed's HIR type resolver
+# (src/compiler_rust/compiler/src/hir/lower/type_resolver.rs, Type::Generic
+# arm), the builtin generic `List<T>` was special-cased to HirType::Array but
+# the lowercase spelling `list<T>` — the one stdlib sources actually use,
+# and the one the bare-name fallback already maps to Array — fell through to
+# `_ => Ok(TypeId::ANY)`. Every `list<T>`-typed local, field and parameter was
+# therefore erased to TypeId::ANY at HIR, which made MIR lowering unable to
+# select array semantics for operators: `a + b` over two list-typed operands
+# went to rt_any_add, and a MIXED pair (an ANY-typed `self.entries` field read
+# plus a typed array literal) fell through to a native integer `BinOp`. The
+# latter is the in-guest riscv64 freestanding trap this guard exists to keep
+# dead: `me register(entry)` executed `self.entries = self.entries + [entry]`
+# as `add handle, handle`, stored the garbage sum into the field, and the next
+# element read (`rt_index_get` on a handle whose tag bits the add destroyed)
+# returned nil and trapped on a load from address 8.
+#
+# Why a SOURCE check and not a MIR dump of a built fixture: the MIR check
+# (`SIMPLE_DUMP_MIR=1` showing `Call rt_array_concat` for a `me` method body
+# containing `self.entries + [item]`) was run by hand and is the primary
+# evidence in the bug record; it needs a full seed build. This runs in under a
+# second on every push and catches the same defect at its source.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> definition(s) checked, lowercase list<T> maps to Array   exit 0
+#   FAIL  — ...                                                          exit 1
+#   ERROR — nothing was checked                                          exit 2
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+RESOLVER="$ROOT/src/compiler_rust/compiler/src/hir/lower/type_resolver.rs"
+
+# Classify one resolver source. Prints:
+#   ARRAY   - a Generic arm handles lowercase "list" with one argument and
+#             registers HirType::Array
+#   ANY     - lowercase "list" reaches a TypeId::ANY outcome (missing from the
+#             Array arm, or mapped to ANY explicitly)
+#   NONE    - no Generic "list"/"List" arm found at all (nothing to check)
+classify_file() {
+    _f=$1
+    awk '
+        # Only the Type::Generic family dispatch is in scope: the first
+        # `match family_name.as_str()` after the Generic arm opens it.
+        /Type::Generic \{/ { in_generic = 1 }
+        in_generic && /match family_name\.as_str\(\)/ { in_match = 1; next }
+        in_match && /^            \}/ { in_match = 0; in_generic = 0 }
+        in_match {
+            if ($0 ~ /"list"/ && $0 ~ /=>/) {
+                arm = $0
+                getline body1
+                getline body2
+                getline body3
+                getline body4
+                block = arm " " body1 " " body2 " " body3 " " body4
+                found = 1
+                if (block ~ /HirType::Array/) { print "ARRAY"; exit }
+                if (block ~ /TypeId::ANY/)    { print "ANY";   exit }
+                # a list arm that is neither Array nor ANY is a new shape this
+                # guard does not understand -- report unchecked.
+                print "NONE"; exit
+            }
+            if ($0 ~ /"List"/ && $0 ~ /=>/) { saw_list_only = 1 }
+        }
+        END {
+            # END still runs after exit() above; `found` distinguishes an
+            # already-printed verdict from a fall-through.
+            if (!found) {
+                # no lowercase "list" arm: if a "List"-only arm exists, the
+                # lowercase spelling fell through to the ANY catch-all.
+                if (saw_list_only) print "ANY"
+                else print "NONE"
+            }
+        }
+    ' "$_f"
+}
+
+selftest() {
+    _tmp=$(mktemp -d) || { echo "check-hir-list-generic: ERROR — mktemp failed"; exit 2; }
+    _fail=0
+
+    # F1 (must classify ARRAY): the fixed arm, both spellings.
+    cat > "$_tmp/good.rs" <<'EOS'
+            Type::Generic { name, args } => {
+                let family_name = name;
+                match family_name.as_str() {
+                    "List" | "list" if args.len() == 1 => {
+                        let elem = self.resolve_type(&args[0])?;
+                        Ok(self.module.types.register(HirType::Array {
+                            element: elem,
+                            size: None,
+                        }))
+                    }
+                    _ => Ok(TypeId::ANY),
+                }
+            }
+EOS
+    _c=$(classify_file "$_tmp/good.rs")
+    if [ "$_c" != "ARRAY" ]; then
+        echo "  [selftest] FAIL F1: fixed shape classified as $_c, want ARRAY"
+        _fail=1
+    fi
+
+    # F2 (must classify ANY): the incident shape — capital-List only.
+    cat > "$_tmp/bad.rs" <<'EOS'
+            Type::Generic { name, args } => {
+                let family_name = name;
+                match family_name.as_str() {
+                    // List<T> - same as array
+                    "List" if args.len() == 1 => {
+                        let elem = self.resolve_type(&args[0])?;
+                        Ok(self.module.types.register(HirType::Array {
+                            element: elem,
+                            size: None,
+                        }))
+                    }
+                    _ => Ok(TypeId::ANY),
+                }
+            }
+EOS
+    _c=$(classify_file "$_tmp/bad.rs")
+    if [ "$_c" != "ANY" ]; then
+        echo "  [selftest] FAIL F2: incident shape classified as $_c, want ANY"
+        _fail=1
+    fi
+
+    # F3 (must classify ANY): lowercase list explicitly mapped to ANY.
+    cat > "$_tmp/bad2.rs" <<'EOS'
+            Type::Generic { name, args } => {
+                let family_name = name;
+                match family_name.as_str() {
+                    "list" => Ok(TypeId::ANY),
+                    _ => Ok(TypeId::ANY),
+                }
+            }
+EOS
+    _c=$(classify_file "$_tmp/bad2.rs")
+    if [ "$_c" != "ANY" ]; then
+        echo "  [selftest] FAIL F3: explicit-ANY shape classified as $_c, want ANY"
+        _fail=1
+    fi
+
+    # F4 (must classify NONE): no list arm at all -> caller must ERROR.
+    cat > "$_tmp/none.rs" <<'EOS'
+            Type::Generic { name, args } => {
+                let family_name = name;
+                match family_name.as_str() {
+                    _ => Ok(TypeId::ANY),
+                }
+            }
+EOS
+    _c=$(classify_file "$_tmp/none.rs")
+    if [ "$_c" != "NONE" ]; then
+        echo "  [selftest] FAIL F4: armless fixture classified as $_c, want NONE"
+        _fail=1
+    fi
+
+    rm -rf "$_tmp"
+    if [ "$_fail" -ne 0 ]; then
+        echo "ERROR — nothing was checked: check-hir-list-generic selftest failed"
+        exit 2
+    fi
+    echo "check-hir-list-generic: selftest OK (4 fixtures)"
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+    selftest
+    echo "PASS — check-hir-list-generic selftest fixtures behave"
+    exit 0
+fi
+
+selftest
+
+[ -f "$RESOLVER" ] || { echo "ERROR — nothing was checked: $RESOLVER missing"; exit 2; }
+
+VERDICT=$(classify_file "$RESOLVER")
+case "$VERDICT" in
+    ARRAY)
+        echo "PASS — 1 definition checked, lowercase list<T> resolves to HirType::Array (not TypeId::ANY)"
+        exit 0
+        ;;
+    ANY)
+        echo "FAIL — 1 definition checked, lowercase list<T> still erases to TypeId::ANY in $RESOLVER"
+        exit 1
+        ;;
+    *)
+        echo "ERROR — nothing was checked: no Generic list/List arm recognised in $RESOLVER"
+        exit 2
+        ;;
+esac

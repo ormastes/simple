@@ -68,7 +68,7 @@ use std.gpu.engine2d.backend_capability.{BackendCapability, backend_capability_d
 use std.gc_async_mut.io.mod_stub.{env_get}
 use std.io_runtime.{platform_name}
 use std.gc_async_mut.text_layout.font_renderer.{
-    FontCacheStats, FontGlyphRun, FontRenderBatch, FontRenderConfig, FontRenderer,
+    FontCacheStats, FontGlyphRun, FontRenderBatch, FontRenderConfig, FontRenderQuad, FontRenderer,
     FontExecutionPolicy,
     font_execution_plan, font_execution_plan_into, font_render_config_selection_supported,
     font_renderer_registered_selected_bytes_only
@@ -1838,6 +1838,35 @@ class Engine2D with DrawIrRenderTarget:
     me _draw_font_batch(x: i32, y: i32, batch: FontRenderBatch) -> bool:
         self._draw_font_batch_plan(x, y, batch, ["cuda", "metal", "opencl", "vulkan", "rocm", "cpu"])
 
+    # Count the atlas pixels with nonzero alpha under one quad's atlas rect.
+    # Answers 0 for a rect outside the atlas or an empty atlas. This is the
+    # ink-coverage witness for the fail-closed check in _draw_font_batch_plan:
+    # a staged batch whose quads all reference fully transparent atlas cells
+    # rasterized NOTHING (observed live 2026-11-05: the bundled Noto Sans SC
+    # variable instance at wght=100 produced zero-alpha glyphs at 16px while
+    # staging and every backend receipt reported success), and compositing it
+    # paints nothing while claiming cpu:success.
+    fn _engine2d_font_quad_atlas_ink(batch: FontRenderBatch, quad: FontRenderQuad) -> i64:
+        if batch.atlas_pixels.len() == 0 or quad.width <= 0 or quad.height <= 0:
+            return 0
+        val aw = batch.atlas_width.to_i64()
+        val ah = batch.atlas_height.to_i64()
+        val ax = quad.atlas_x.to_i64()
+        val ay = quad.atlas_y.to_i64()
+        if aw <= 0 or ah <= 0 or ax < 0 or ay < 0 or ax + quad.width.to_i64() > aw or ay + quad.height.to_i64() > ah:
+            return 0
+        var ink: i64 = 0
+        var row: i64 = 0
+        while row < quad.height.to_i64():
+            var col: i64 = 0
+            val base = (ay + row) * aw + ax
+            while col < quad.width.to_i64():
+                if ((batch.atlas_pixels[base + col] >> 24) & 0xFFu32) > 0u32:
+                    ink = ink + 1
+                col = col + 1
+            row = row + 1
+        ink
+
     me _draw_font_batch_cpu_suffix(x: i32, y: i32, batch: FontRenderBatch, submitted: i64) -> i64:
         var quad_index = if submitted < 0 or submitted > batch.quads.len(): 0 else: submitted
         while quad_index < batch.quads.len():
@@ -1991,16 +2020,36 @@ class Engine2D with DrawIrRenderTarget:
         # inline rather than through a zero-arg FontRenderBatch method: see
         # the receiver-materialization note at the top of this function.
         var drawable_quads: i64 = 0
+        var ink_pixels: i64 = 0
         var scan_i: i64 = 0
         while scan_i < n_quads_total:
             if batch.quads[scan_i].width > 0 and batch.quads[scan_i].height > 0:
                 drawable_quads = drawable_quads + 1
+                # Ink-coverage witness: a drawable quad whose atlas rect is
+                # fully transparent means the rasterizer produced no glyph
+                # pixels (broken variable-font instance, observed 2026-11-05
+                # with the bundled Noto Sans SC wght=100 at 16px). Compositing
+                # such a batch reports success while painting nothing, so it
+                # must be refused here with a named reason. Scanning stops at
+                # the first ink pixel; a healthy batch costs ~one glyph cell.
+                if ink_pixels == 0:
+                    ink_pixels = self._engine2d_font_quad_atlas_ink(batch, batch.quads[scan_i])
             scan_i = scan_i + 1
         if drawable_quads == 0:
             val skip_reason = if n_quads_total == 0: "empty-quads" else: "zero-area-quads"
             self.font_batches_skipped_empty = self.font_batches_skipped_empty + 1
             self.last_font_skip_reason = skip_reason
             self.last_font_execution_attempts = ["nothing-to-draw:" + skip_reason]
+            self.last_font_execution_target = ""
+            return false
+        if ink_pixels == 0:
+            # Every drawable quad references a fully transparent atlas rect:
+            # nothing will hit the framebuffer. Refuse loudly (typed reason +
+            # attempts receipt) instead of returning a cpu:success receipt for
+            # a silent no-op composite.
+            self.font_batches_skipped_empty = self.font_batches_skipped_empty + 1
+            self.last_font_skip_reason = "transparent-atlas"
+            self.last_font_execution_attempts = ["nothing-to-draw:transparent-atlas"]
             self.last_font_execution_target = ""
             return false
         self.last_font_skip_reason = ""
@@ -2164,7 +2213,16 @@ class Engine2D with DrawIrRenderTarget:
             if _VEC_TEXT_PROBE and _vec_entry_probe_count < 24:
                 _vec_entry_probe_count = _vec_entry_probe_count + 1
                 print("[vec-text-probe] returned-from-draw_text_configured ok={configured_ok}")
-            return
+            if configured_ok:
+                return
+            # The selected vector face staged nothing drawable (typed receipts
+            # are on the engine: last_font_skip_reason / attempts). Falling
+            # through to the zero-config bitmap chain below degrades the run
+            # to the built-in bitmap font instead of returning with nothing
+            # painted -- the silent no-ink outcome this path had before when a
+            # face selected OK but its rasterizer produced no glyph pixels
+            # (transparent atlas, observed 2026-11-05 with a bundled variable
+            # font instance).
         # NOTE(2026-08-02): a poisoned lane used to `return` here, silently
         # DROPPING the bitmap text draw. It only existed because the router
         # chain below would otherwise dispatch into the dead Vulkan backend;

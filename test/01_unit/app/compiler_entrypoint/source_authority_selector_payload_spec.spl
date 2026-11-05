@@ -1,0 +1,28 @@
+use std.spec.*
+use std.io_runtime.{dir_create_all, file_write, file_read, process_run}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use app.io.file_ops.{path_absolute}
+use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1}
+
+fn git_ok(root: text, args: [text]) -> bool:
+    val (_stdout, _stderr, code) = process_run("git", ["-C", root] + args)
+    code == 0
+
+describe "compiler source authority selector payload":
+    it "extracts the selector array before computing inventory families":
+        val parent = path_absolute("build/test-artifacts")
+        expect(dir_create_all(parent)).to_equal(true)
+        val allocated = secure_temp_dir(parent, "source-authority-selector-payload-")
+        expect(allocated.is_ok()).to_equal(true)
+        val root = allocated.unwrap()
+        expect(dir_create_all(root + "/src/app")).to_equal(true)
+        val source = "fn main() -> i64:\n    42\n"
+        expect(file_write(root + "/src/app/main.spl", source)).to_equal(true)
+        expect(git_ok(root, ["init", "-q"])).to_equal(true)
+        expect(git_ok(root, ["add", "src"])).to_equal(true)
+        expect(git_ok(root, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"])).to_equal(true)
+        val authority = compiler_source_authority_acquire_v1(
+            root, root + "/build/scv", [root + "/src/app"], true)
+        expect(authority.valid).to_equal(true)
+        if authority.valid:
+            expect(file_read(authority.snapshot.snapshot_root + "/src/app/main.spl")).to_equal(source)

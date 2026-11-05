@@ -23,3 +23,10 @@ Retained evidence:
 
 - `build/test-artifacts/starfive-jh7110/live-20260820-resume/openocd-sbi-reset-after-clean-scan.log`
 - `build/test-artifacts/starfive-jh7110/live-20260820-resume/uart-sbi-reset-after-clean-scan.log`
+
+## 2026-11-05 (riscv-sweep lane)
+
+No Tigard probe or VisionFive 2 board access in this lane, so the physical
+action (inspect/reseat VTref, ground, TCK/TMS/TDI/TDO, connector orientation,
+then one conservative read-only scan) cannot be performed. Remains blocked on
+physical hardware.
