@@ -171,6 +171,21 @@ fn backward(t: Tensor):
         propagate_grads(t, grad_output)
 
 
+fn broadcast_reduced_grad(grad_out: TensorF64, shape: [i64]) -> TensorF64:
+    """Expand a length-1 reduced gradient (from sum/mean) to the input shape."""
+    var n: i64 = 1
+    for dim in shape:
+        n = n * dim
+    if grad_out.data.len() == n:
+        return grad_out
+    var data: [f64] = []
+    val g = grad_out.data[0]
+    var i = 0
+    while i < n:
+        data.push(g)
+        i = i + 1
+    from_data(data, shape)
+
 fn propagate_grads(t: Tensor, grad_out: TensorF64):
     val inputs = t.inputs.unwrap()
     val op = t.op_type.unwrap()
@@ -252,18 +267,20 @@ fn propagate_grads(t: Tensor, grad_out: TensorF64):
         OpType.Sum:
             # Broadcast gradient back to input shape
             if inputs[0].requires_grad:
-                inputs[0].backward_step(grad_out)
+                val grad_in = broadcast_reduced_grad(grad_out, inputs[0].value.shape)
+                inputs[0].backward_step(grad_in)
                 if inputs[0].inputs.?:
-                    propagate_grads(inputs[0], grad_out)
+                    propagate_grads(inputs[0], grad_in)
 
         OpType.Mean:
             # Gradient distributed evenly
             val n = inputs[0].value.data.len()
             val grad_scaled = mul_scalar(grad_out, 1.0 / n)
             if inputs[0].requires_grad:
-                inputs[0].backward_step(grad_scaled)
+                val grad_in = broadcast_reduced_grad(grad_scaled, inputs[0].value.shape)
+                inputs[0].backward_step(grad_in)
                 if inputs[0].inputs.?:
-                    propagate_grads(inputs[0], grad_scaled)
+                    propagate_grads(inputs[0], grad_in)
 
         OpType.MulScalar:
             # dy/dx = scalar (where y = x * scalar)
