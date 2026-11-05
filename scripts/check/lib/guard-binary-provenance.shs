@@ -14,8 +14,9 @@
 #   guard_require_binary "$SIMPLE" "$ROOT" any          # seed allowed
 #   guard_require_native_build_binary "$SIMPLE" "$ROOT" # provenance + fresh
 # Self-hosted staleness covers src/compiler and src/lib *.spl. Seed staleness
-# covers src/compiler_rust and src/runtime, whose bytes are linked into that
-# producer. Staleness is exit 2 when SIMPLE_REQUIRE_FRESH=1; otherwise it is
+# covers source inputs in src/compiler_rust and src/runtime, excluding generated
+# target/build/output directories except where those names contain vendored
+# source. Staleness is exit 2 when SIMPLE_REQUIRE_FRESH=1; otherwise it is
 # reported via GUARD_BINARY_NOTE only. Native-build guards always require a
 # fresh producer and record resolved path, size, mtime, and --version output.
 # Seed detection = `--version` banner contains "bootstrap seed" (same probe as
@@ -49,13 +50,14 @@ guard_require_binary() {
     if [ "$_gb_seed" -eq 1 ]; then
         _gb_scope_a=src/compiler_rust
         _gb_scope_b=src/runtime
-        _gb_name='*'
+        _newer=$(find "$_gr/$_gb_scope_a" "$_gr/$_gb_scope_b" \
+            \( -type d \( -name target -o -name build -o -name output \) ! -path '*/vendor/*' -prune \) -o \
+            \( -type f -newer "$_real" -print \) 2>/dev/null | wc -l | tr -d ' ')
     else
         _gb_scope_a=src/compiler
         _gb_scope_b=src/lib
-        _gb_name='*.spl'
+        _newer=$(find "$_gr/$_gb_scope_a" "$_gr/$_gb_scope_b" -type f -name '*.spl' -newer "$_real" -print 2>/dev/null | wc -l | tr -d ' ')
     fi
-    _newer=$(find "$_gr/$_gb_scope_a" "$_gr/$_gb_scope_b" -type f -name "$_gb_name" -newer "$_real" -print 2>/dev/null | wc -l | tr -d ' ')
     if [ "${_newer:-0}" -gt 0 ]; then
         GUARD_BINARY_NOTE=" [STALE: '$_real' predates $_newer source file(s) under $_gb_scope_a and $_gb_scope_b]"
         if [ "${SIMPLE_REQUIRE_FRESH:-0}" = "1" ]; then
@@ -140,8 +142,38 @@ guard_binary_selftest() {
     { [ "$_rc" = 0 ] && case $_o in *"version='simple bootstrap seed 1.0'"*) true;; *) false;; esac; } \
         || { echo "SELFTEST FAILED — current seed producer rejected (rc=$_rc): $_o"; _fail=1; }
 
+    mkdir -p "$_t/src/compiler_rust/target/release" "$_t/src/compiler_rust/driver/target/test-artifacts" \
+        "$_t/src/compiler_rust/build" "$_t/src/compiler_rust/output" \
+        "$_t/src/runtime/target" "$_t/src/runtime/build" "$_t/src/runtime/output"
+    printf 'artifact\n' > "$_t/src/compiler_rust/target/release/simple"
+    printf '{}\n' > "$_t/src/compiler_rust/driver/target/test-artifacts/result.json"
+    printf 'artifact\n' > "$_t/src/compiler_rust/build/generated.rs"
+    printf 'artifact\n' > "$_t/src/compiler_rust/output/generated.rs"
+    printf 'artifact\n' > "$_t/src/runtime/target/generated.c"
+    printf 'artifact\n' > "$_t/src/runtime/build/generated.c"
+    printf 'artifact\n' > "$_t/src/runtime/output/generated.c"
+    touch -d '2003-01-01' \
+        "$_t/src/compiler_rust/target/release/simple" \
+        "$_t/src/compiler_rust/driver/target/test-artifacts/result.json" \
+        "$_t/src/compiler_rust/build/generated.rs" "$_t/src/compiler_rust/output/generated.rs" \
+        "$_t/src/runtime/target/generated.c" "$_t/src/runtime/build/generated.c" "$_t/src/runtime/output/generated.c"
+    _o=$( (guard_require_native_build_binary "$_t/seed" "$_t") 2>&1 ); _rc=$?
+    [ "$_rc" = 0 ] || { echo "SELFTEST FAILED — newer target/build/output artifact rejected a current seed (rc=$_rc): $_o"; _fail=1; }
+
+    mkdir -p "$_t/src/compiler_rust/vendor/cc/src/target"
+    printf 'pub fn vendored_source() {}\n' > "$_t/src/compiler_rust/vendor/cc/src/target/generated.rs"
+    touch -d '2004-01-01' "$_t/src/compiler_rust/vendor/cc/src/target/generated.rs"
+    _o=$( (guard_require_native_build_binary "$_t/seed" "$_t") 2>&1 ); _rc=$?
+    [ "$_rc" = 2 ] || { echo "SELFTEST FAILED — newer vendored source below a target directory was ignored (rc=$_rc): $_o"; _fail=1; }
+
+    rm -f "$_t/src/compiler_rust/vendor/cc/src/target/generated.rs"
+    printf 'int runtime_source;\n' > "$_t/src/runtime/runtime.c"
+    touch -d '2004-01-01' "$_t/src/runtime/runtime.c"
+    _o=$( (guard_require_native_build_binary "$_t/seed" "$_t") 2>&1 ); _rc=$?
+    [ "$_rc" = 2 ] || { echo "SELFTEST FAILED — newer real runtime source was ignored (rc=$_rc): $_o"; _fail=1; }
+
     rm -rf "$_t"
-    if [ "$_fail" = 0 ]; then echo "PASS — 10 fixture(s) checked, provenance helper discriminates"; return 0; fi
+    if [ "$_fail" = 0 ]; then echo "PASS — 13 fixture(s) checked, provenance helper discriminates"; return 0; fi
     echo "FAIL — provenance helper selftest"; return 1
 }
 
