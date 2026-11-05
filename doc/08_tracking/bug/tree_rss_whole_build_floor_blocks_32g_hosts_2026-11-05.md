@@ -61,8 +61,16 @@ process-tree-rss-watchdog.pl.
 
 ## Status
 
-OPEN. Workaround for dependent lanes: build the full CLI from the admitted
-stage-2 compiler with `--cache-dir <stage2-native-cache>`; the cache warmth
-makes the build small and fast, and the standalone spec battery then runs
-through the admitted toolchain (see build/verify-wave1.sh in the
-work/simple-hardening-release-20261013 lane).
+FIXED (2026-11-05): `bootstrap_tree_rss_phase_pricing_resolve` in
+`scripts/bootstrap/lib/tree-rss-policy.shs` makes the phase pricing
+lane-tunable via `SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB`,
+`SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT`, and
+`SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB` — validated canonical positive
+decimals, lowering-only against the immutable shipped defaults, fail-closed
+on malformed or raising values; the refusal now names the knob. Defaults are
+unchanged (cold-build small-host protection preserved); the shipped
+self-test (`tree-rss-policy.shs --selftest`, 64 fixtures) passes. The deeper
+worker-side growth (a no-GC-runtime eviction cannot reclaim; see
+mir_shard_commit_blowup_full_closure_2026-11-05.md) is unchanged — the knob
+admits lanes whose measured need genuinely fits (warm cache), it does not
+make an 18 GiB worker fit a small host.
