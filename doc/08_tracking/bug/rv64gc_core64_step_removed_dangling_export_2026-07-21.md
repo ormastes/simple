@@ -80,7 +80,7 @@ the symbol.
 ## Closed 2026-11-03 (verified fixed)
 Already fixed on release/1.0.0: facade restored by e72ff56c06e / core64_step defined in core.spl (88aac2ffe28). Specs pass: gc_async_mut compression_facade_spec 6/6, sql_facade_spec 4/4, core64_integration_spec 35/35.
 
-## Re-verified 2026-11-05 (RTL lane, PR #NNNN — wait verification)
+## Re-verified 2026-11-05 (RTL lane, PR #6979 — wait verification)
 
 Confirmed still fixed at the release/1.0.0 tip: `core64_step` is defined at
 `src/lib/hardware/rv64gc_rtl/core.spl:777` (with `Core64StepResult` at :772);

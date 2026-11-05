@@ -125,7 +125,7 @@ a defect — a whole reorg phase, not a shard-scale fix. No change made.
 Leaving OPEN.
 
 
-## Resolution 2026-11-05 (RTL lane, PR #NNNN — wait verification)
+## Resolution 2026-11-05 (RTL lane, PR #6979 — wait verification)
 
 State at the release/1.0.0 tip was better than this record: the SA-3 split
 modules already exist under `src/lib/hardware/fpga_linux/` (orchestrator,

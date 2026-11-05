@@ -49,7 +49,7 @@ nand_emu RTL feasibility is otherwise proven (host spec green); VHDL emission
 for multi-file RTL waits on this fix or on routing through the soc_vhdl_gen
 driver.
 
-## Fixed 2026-11-05 (RTL lane, PR #NNNN — wait verification)
+## Fixed 2026-11-05 (RTL lane, PR #6979 — wait verification)
 
 **Root cause (verified at release/1.0.0 tip):** the seed-side module-graph
 resolution this bug originally hit is long fixed (the seed resolves
