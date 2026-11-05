@@ -38,6 +38,21 @@ main = 0
     )
 }
 
+fn block_local_constructor_call(arguments: &str) -> String {
+    format!(
+        r#"
+fn main() -> i64:
+    enum BlockArity:
+        V(value: i64)
+    val constructors = [BlockArity.V]
+    val value = constructors[0]({arguments})
+    match value:
+        case BlockArity.V(payload): return payload
+        case _: return -1
+"#
+    )
+}
+
 fn assert_arity_error(error: String, expected: usize, actual: usize) {
     assert!(error.contains("payload arity mismatch"), "unexpected error: {error}");
     assert!(
@@ -91,6 +106,18 @@ fn main() -> i64:
     return 1
 "#;
     assert_eq!(evaluate(source), Ok(0));
+}
+
+#[test]
+fn interpreter_constructs_block_local_constructor_value_declared_arity() {
+    assert_eq!(evaluate(&block_local_constructor_call("7")), Ok(7));
+}
+
+#[test]
+fn interpreter_rejects_block_local_constructor_value_extra_payload() {
+    let error = evaluate(&block_local_constructor_call("1, 2"))
+        .expect_err("two payloads through a block-local constructor value must be rejected");
+    assert_arity_error(error, 1, 2);
 }
 
 #[test]

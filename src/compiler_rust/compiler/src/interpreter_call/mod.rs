@@ -1911,6 +1911,7 @@ pub(crate) fn evaluate_call(
         } => {
             let enum_def = crate::interpreter::owner_module_enum(&enum_name)
                 .or_else(|| enums.get(&enum_name).cloned())
+                .or_else(|| crate::interpreter::BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(&enum_name).cloned()))
                 .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(&enum_name).cloned()));
             if let Some(enum_def) = enum_def {
                 validate_enum_variant_arity(&enum_def, &variant_name, args.len())?;
