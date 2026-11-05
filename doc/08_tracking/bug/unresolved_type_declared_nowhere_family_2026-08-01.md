@@ -452,3 +452,7 @@ the interpreter on high-bit-set limbs" — the same reasoning may argue for sign
 `usize`, but changing it would contradict this compiler's `HirType.named` and the
 `u64` arm beside it. Needs a deliberate cross-engine decision.
 
+
+## HIR-P2 HC triage 2026-11-05
+
+Class A/B fixes landed; Class C is not verifiable in the interpreter lane. The usize/isize signedness divergence needs a deliberate cross-engine decision (documented in-record). Remains OPEN pending that decision.
