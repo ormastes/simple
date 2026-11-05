@@ -1064,3 +1064,6 @@ a time): 29 OK / 1 ERROR — byte-identical diff to the 2026-11-04 after-sweep
 (four ERROR->OK from other landed commits; the single OK->ERROR,
 `aliased_param_writeback_spec` JIT-probe demotion, is `75bb3e73148`, not this
 change).
+
+## 2026-11-05 reopen triage (verify-sweep s3_fable43 sha256 615859c5c2815f71; seed oracle bin/simple.exe sha256 8c7341592f4d47de)
+Reproduced on seed: probe b0_e (impl MarkerProbe for text/i64) -> 'Function str.marker_probe not found' (seed JIT/dispatch Defect A, Rust-side, needs a seed rebuild to fix; not deployable by a lane). Native: sweep binary crashed rc=-1073741819 on the same file, i.e. the self-hosted Defect B registration fix from 2026-08-09 is unverified on that binary. Next step: native-build b0_e on a stage3 newer than the 2026-08-09 registration-key fix and capture the crash frame; keep OPEN.

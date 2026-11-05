@@ -44,3 +44,6 @@ The landing candidate is based on release_phase3 eca61a8efc4f054f2c37d4cecef2c14
 
 ## 2026-11-03 status: fix-implemented-verification-pending
 Focused native repair qualified (see above); repository-wide verification is the only open item. Workaround tag `RESULT_ERR_MATCH_PROJECTION` kept.
+
+## 2026-11-05 reopen triage (verify-sweep s3_fable43 sha256 615859c5c2815f71; seed oracle bin/simple.exe sha256 8c7341592f4d47de)
+Source fix already present on release/1.0.0 (138315b3863, 2026-10-12: err arms at method_calls_literals.spl and builtin_method_extras.spl). Seed passes probe result_err_projection. The sweep's 'unresolved method call: err' came from a stage3 built before that fix or without it in its source set. Next step: re-run result_err_projection.spl natively on a stage3 built from current release/1.0.0 (expect PASS err_projection); if it still fails the dispatcher line at method_calls_literals.spl:2537 is not reached for the `val r: Result<i64, text> = Err(..)` annotated-local shape. Status: fix-implemented-verification-pending.

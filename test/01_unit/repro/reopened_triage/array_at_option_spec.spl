@@ -1,0 +1,38 @@
+# Purpose and audience: compiler engineers triaging array_at_returns_nil_for_every_index_2026-08-01.
+# @req REQ-SSPEC-COMPILER
+"""
+# Array `.at(i)` is an Option, not the bare element
+
+The 2026-11-05 verify sweep reopened the bug because probe b2r_at compared
+`a.at(1) == 20`. By design `.at` returns `T?` (interpreter arm
+call_method_eval.spl "Array `at`: ... returning Option"; native arm
+method_calls_literals.spl "Array `get`/`at` ... constructs a real Option<T>";
+250+ library call sites `match arr.at(i)`). The correct contract is pinned here:
+in-range reads Some(element), out-of-range and negative reads None, sibling
+first()/last() agree.
+"""
+
+# @tag: unit, compiler, repro, reopened-triage
+
+use std.spec.step
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+fn contract_binary() -> text:
+    val override = env_get("SIMPLE_TEST_BINARY")
+    if override != "" and override != nil:
+        return override
+    "bin/simple.exe"
+
+describe "array at/first/last return Option":
+    it "match on at/first/last sees Some(element) in range and None out of range":
+        step("run array_at_option")
+        val cmd = "'{contract_binary()}' run 'test/fixtures/repro/reopened_triage/array_at_option.spl'"
+        val (out, err, code) = process_run("/bin/sh", ["-c", cmd])
+        assert_equal(code, 0)
+        assert_equal(out.contains("FAIL"), false)
+        assert_equal(out.contains("PASS at_in_range"), true)
+        assert_equal(out.contains("PASS at_out_of_range"), true)
+        assert_equal(out.contains("PASS at_negative"), true)
+        assert_equal(out.contains("PASS first"), true)
+        assert_equal(out.contains("PASS last"), true)

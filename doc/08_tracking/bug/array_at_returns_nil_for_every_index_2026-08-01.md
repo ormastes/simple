@@ -425,3 +425,6 @@ close this bug. Native must be verified by `simple compile --native` plus
 running the produced binary, and JIT by a default `simple foo.spl` run, as done
 in the transcripts above.
 
+
+## 2026-11-05 reopen triage (verify-sweep s3_fable43 sha256 615859c5c2815f71; seed oracle bin/simple.exe sha256 8c7341592f4d47de)
+Reopen premise is wrong, not the compiler. Probe b2r_at compared `a.at(1) == 20`, but `.at` returns an Option by design (interpreter arm call_method_eval.spl 'Array at ... returning Option'; native arm method_calls_literals.spl 'Array get/at ... constructs a real Option<T>'; 250+ library call sites match on Some/None). A match-based probe prints PASS for in-range, out-of-range and negative on the seed. Pinned by test/01_unit/repro/reopened_triage/array_at_option_spec.spl (fixture test/fixtures/repro/reopened_triage/array_at_option.spl). The b2r_at fixture/reopened-spec example in PR #6995 should assert Some(20), not 20. Native lane still needs one run of the new fixture on a current stage3 (native-build then run, expect five PASS lines). Status: closed-as-premise-wrong for seed; native verification-pending.

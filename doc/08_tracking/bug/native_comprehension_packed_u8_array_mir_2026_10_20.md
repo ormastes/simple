@@ -36,3 +36,6 @@ the phase-3 MIR owner (agent a508755bae341480a).
   (`PASS comprehension_packed_u8 65,66`). Engine control: `test/01_unit/compiler/mir/comprehension_packed_u8_engine_native.spl`
   must print `PASS comprehension-packed-u8-engine`.
 - Retire the while-loop workaround in `frontend_advisory_preprocess_port_v1.spl:90` after the repro passes.
+
+## 2026-11-05 reopen triage (verify-sweep s3_fable43 sha256 615859c5c2815f71; seed oracle bin/simple.exe sha256 8c7341592f4d47de)
+Sweep failure (probe b0_g 'FAIL comprehension') was observed on the seed (engine-demotion to hybrid interp; Rust seed does not use lower_list_comprehension) and on s3_fable43, which predates or lacks the 2026-11-04 lower_list_comprehension packed-u8 fix pin. The fix is source-only and cannot be exercised by the seed. Verification step unchanged: native-build test/fixtures/native/comprehension_packed_u8/main.spl on a stage3 containing the fix and compare to expected_output.txt, then retire the while-loop workaround at frontend_advisory_preprocess_port_v1.spl:90. Status stays fix-implemented-verification-pending.

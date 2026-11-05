@@ -176,3 +176,6 @@ The tuple-field shape is deliberately left unasserted there — asserting either
 lane's answer would add a red or bless a defect — so it remains this record's one
 live item. Measured: 7/7 on the fresh seed; the three dict examples fail on the
 deployed seed.
+
+## 2026-11-05 reopen triage (verify-sweep s3_fable43 sha256 615859c5c2815f71; seed oracle bin/simple.exe sha256 8c7341592f4d47de)
+Probe b5_combo (dict d[k].push OK; struct field b.items.push(1)) passes on the seed; it fails only natively with 'rejected invalid array handle', so this sweep row is a native struct-field push defect distinct from the interpreter tuple-field shape this record tracks. Next step: minimal native fixture `struct S: items: [i64]` + `b.items.push(1)`; inspect MIR lowering of push on a GetField receiver (the field array handle is loaded as a value copy, then push mutates/validates a stale handle). Needs a stage3 to confirm; keep OPEN.

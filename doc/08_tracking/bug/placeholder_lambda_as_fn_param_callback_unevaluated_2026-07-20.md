@@ -149,3 +149,6 @@ parameter own the scope needs callee signature knowledge at parse time (not
 available in a single-pass parser) or a post-resolve desugar; that changes
 placeholder scoping semantics and needs an owner decision. Workaround: bind to
 a `val` first, or use an explicit lambda. Pure-Simple AST spec still passes.
+
+## 2026-11-05 reopen triage (verify-sweep s3_fable43 sha256 615859c5c2815f71; seed oracle bin/simple.exe sha256 8c7341592f4d47de)
+Reproduced on seed: apply(_ + 1, 4) prints 40 (expected 5) for both `_` and `_1` forms when the placeholder is an argument to a user fn with an fn(i64)->i64 parameter, while `[1,2,3].map(_ * 2)` and the explicit lambda are correct. So the defect is specific to placeholder-lambda desugar for a free-function callback argument in the Rust seed interpreter; the pure-Simple frontend AST already produces EXPR_LAMBDA (see placeholder_lambda_callback_param_spec). Not fixable without a seed rebuild; no bootstrap path depends on it (compiler sources use explicit lambdas). Left OPEN, deprioritised by bootstrap-only focus.
