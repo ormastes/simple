@@ -239,6 +239,37 @@ fn parse_match_with_patterns() {
     parse_ok("match opt:\n    Option::Some(x) =>\n        x\n    Option::None =>\n        0");
 }
 
+#[test]
+fn parse_arrow_match_arm_with_multiple_enum_fields() {
+    parse_ok(
+        r#"enum Shape:
+    Rectangle(w: f64, h: f64)
+fn perimeter(s: Shape) -> f64:
+    match s:
+        | Rectangle(w, h) -> w + h
+print perimeter(Shape.Rectangle(2.0, 3.0))
+"#,
+    );
+}
+
+#[test]
+fn parse_arrow_match_arm_single_field_and_case_multi_field_controls() {
+    parse_ok(
+        r#"enum Shape:
+    Circle(r: f64)
+    Rectangle(w: f64, h: f64)
+fn circle(s: Shape) -> f64:
+    match s:
+        | Circle(r) -> 2.0 * (r + 1.0)
+fn perimeter(s: Shape) -> f64:
+    match s:
+        case Rectangle(w, h): w + h
+print circle(Shape.Circle(1.0))
+print perimeter(Shape.Rectangle(2.0, 3.0))
+"#,
+    );
+}
+
 // Loop with break - needs newline after break
 #[test]
 fn parse_loop_statement() {
