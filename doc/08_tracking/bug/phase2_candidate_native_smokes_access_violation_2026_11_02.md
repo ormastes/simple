@@ -118,3 +118,9 @@ Still OPEN; not closed and not re-scoped as fixed, because it cannot be re-run h
   rerun the `hello` and `variable` smokes with a private empty `SIMPLE_HIR_CACHE_DIR`. If both
   pass, close as superseded and cite that candidate's SHA256. If either fails, take a minidump
   and bisect `ef0681fc0e1..<tip>` on the smoke that fails.
+
+## 2026-11-05 compiler-defects sweep source audit (winboot-rel100 lane)
+Nil-safety audit of the two fault sites (current source):
+- `MirToLlvm.translate_const` / `translate_const_value` (src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl) match over MirConstValue, which has exactly 8 variants, all covered; per-variant type guards route ptr/int/float/i1 and an invalid const type records E-BACKEND-LLVM-CONST-TYPE via the fail-closed codegen_error. Defensive fix landed: an explicit `case _` arm in both translators records E-BACKEND-LLVM-CONST-GARBAGE (fail-closed, no object) instead of silently falling through on a garbage discriminant — the exact silent-fall-through class the stage2_symbol_display_name_option_transport workaround documented.
+- `mir_expr_symbol_id_value` (expr_dispatch.spl:185) is the single field projection `symbol.id`; no in-language guard exists for a caller-passed invalid reference, consistent with the 2026-11-05 premise check (candidate-compiled value transport, not a source defect).
+Host evidence: new test/01_unit/compiler/backend/llvm_const_value_total_match_guard_spec.spl 4/4 PASS; neighboring llvm_pointer_integer_constant_contract_spec.spl 8/8 PASS (seed interpreter). The AV repro itself still needs a fresh stage2 candidate from current tip with a private SIMPLE_HIR_CACHE_DIR.
