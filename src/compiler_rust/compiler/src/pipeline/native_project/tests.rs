@@ -8140,13 +8140,13 @@ int main(void) {
     if (rt_value_as_int(rt_dict_get(uint_dict, rt_value_u64(0))) != 10) return 112;
     if (rt_value_as_int(rt_dict_get(uint_dict, rt_value_u64(INT64_C(1) << 61))) != 20) return 113;
 
-    int64_t none = rt_enum_new(1, (int32_t)2371748697u, 3);
-    int64_t some = rt_enum_new(1, (int32_t)4053299545u, rt_value_int(9));
+    int64_t none = rt_enum_new(1, 1, 3);
+    int64_t some = rt_enum_new(1, 0, rt_value_int(9));
     if (rt_enum_id(none) != 1 || rt_enum_id(some) != 1 || rt_enum_id(rt_value_int(9)) != -1) return 104;
     if (!rt_is_none(none) || rt_is_some(none)) return 94;
     if (rt_is_none(some) || !rt_is_some(some)) return 95;
-    if ((uint32_t)rt_enum_discriminant(some) != 4053299545u) return 96;
-    if (!rt_enum_check_discriminant(some, 4053299545u)) return 97;
+    if ((uint32_t)rt_enum_discriminant(some) != 0u) return 96;
+    if (!rt_enum_check_discriminant(some, 0u)) return 97;
     if (rt_enum_payload(some) != rt_value_int(9)) return 98;
     int64_t uint_inner = rt_enum_new(77, 1, boxed_u64_max);
     int64_t uint_outer = rt_enum_new(78, 1, uint_inner);

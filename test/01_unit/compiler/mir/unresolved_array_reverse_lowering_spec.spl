@@ -1,0 +1,26 @@
+# Regression pin for `found.reverse()` on a `var found: [text]` local
+# (src/lib/nogc_sync_mut/spec/dir_prevention.spl:94), which killed the stage2
+# test_runner_build (s2g, 2026-11-04) with `unresolved method call: reverse`.
+#
+# Root cause: builtin array methods have no MethodResolver entry, so they
+# always reach the Unresolved arm of method_calls_literals.spl by design; the
+# receiver's array type was NOT lost. That arm's in-place mutation list knew
+# `clear` and `sort` but not `reverse`. Fixed by 82eb75b12d4 (routes `reverse`
+# to rt_reverse_mut, which mutates in place and returns the receiver). The
+# fix is only observable in a natively compiled compiler, so this spec pins
+# the routing in source, mirroring cast_convert_target_rebuild_spec.spl.
+use std.spec.*
+use app.io.mod.{file_read}
+
+describe "MIR unresolved runtime-array reverse()":
+    val src = file_read("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
+
+    it "lists reverse among the zero-arg in-place array mutations":
+        expect(src.contains("(method == \"clear\" or method == \"sort\" or method == \"reverse\")")).to_equal(true)
+
+    it "routes reverse to the in-place runtime symbol rt_reverse_mut":
+        expect(src.contains("elif method == \"reverse\": \"rt_reverse_mut\"")).to_equal(true)
+
+    it "keeps rt_reverse_mut exported by the runtime":
+        val rt_src = file_read("src/runtime/runtime_native.c")
+        expect(rt_src.contains("rt_reverse_mut")).to_equal(true)

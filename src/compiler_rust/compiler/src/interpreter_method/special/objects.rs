@@ -91,7 +91,7 @@ fn constructor_value_matches_type(value: &Value, ty: &Type, type_params: &HashSe
 
 fn constructor_value_matches_type_exact(value: &Value, ty: &Type, type_params: &HashSet<String>) -> bool {
     match ty {
-        Type::Generic { name, args } if matches!(name.as_str(), "List" | "Array" | "Vec") && args.len() == 1 => {
+        Type::Generic { name, args } if matches!(name.as_str(), "List" | "list" | "Array" | "Vec") && args.len() == 1 => {
             match value {
                 Value::Array(items) => items
                     .values_iter()
@@ -151,7 +151,7 @@ fn constructor_overload_score(func: &FunctionDef, values: &[Value], class_generi
                 match ty {
                     Type::Array { .. } => 4,
                     Type::Generic { name, args }
-                        if matches!(name.as_str(), "List" | "Array" | "Vec") && args.len() == 1 =>
+                        if matches!(name.as_str(), "List" | "list" | "Array" | "Vec") && args.len() == 1 =>
                     {
                         4
                     }
@@ -492,6 +492,49 @@ main = Probe.make(5)
 "#,
         );
         assert_eq!(result, 5, "make(5) should use default b=0, returning 5");
+    }
+
+    #[test]
+    fn static_method_default_param_values_match_declarations() {
+        let result = eval_exit(
+            r#"
+class Probe:
+    static fn make(a: i64, b: i64 = 100) -> i64:
+        print("b={b}")
+        a + b
+    static fn one(x: i64 = 42) -> i64:
+        print("x={x}")
+        x
+fn freefn(a: i64, b: i64 = 100) -> i64:
+    print("free b={b}")
+    a + b
+main = Probe.make(5) + Probe.one() + freefn(5)
+"#,
+        );
+        assert_eq!(
+            result, 252,
+            "omitted static and free-function arguments must use their declared defaults"
+        );
+    }
+
+    #[test]
+    fn static_method_default_param_explicit_arguments_override_defaults() {
+        let result = eval_exit(
+            r#"
+class Probe:
+    static fn make(a: i64, b: i64 = 100) -> i64:
+        a + b
+    static fn one(x: i64 = 42) -> i64:
+        x
+fn freefn(a: i64, b: i64 = 100) -> i64:
+    a + b
+main = Probe.make(5, 7) + Probe.one(9) + freefn(5, 7)
+"#,
+        );
+        assert_eq!(
+            result, 33,
+            "explicit static and free-function arguments must override defaults"
+        );
     }
 
     // Regression: a static constructor taking a trait-typed parameter must

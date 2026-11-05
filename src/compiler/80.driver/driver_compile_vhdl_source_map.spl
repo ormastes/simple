@@ -7,8 +7,9 @@
 # - Text utility helpers (_text_to_i64, _decimal_digit_value, _json_escape, _file_contains_vhdl_design)
 
 use compiler.common.driver_core_types.{CompileResult}
-use std.io_runtime.{file_read_nullable, file_delete}
+use std.io_runtime.{file_read_nullable, file_delete, file_exists}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+use compiler.frontend.core.interpreter.module_loader_resolve.{resolve_module_path}
 use compiler.driver.driver_compile_vhdl_codegen.{_simple_vhdl_source_to_text}
 use compiler.driver.driver_compile_vhdl_lowering.{_simple_is_labeled_tuple_type, _simple_labeled_tuple_labels, _simple_labeled_tuple_types}
 use compiler.driver.driver_compile_vhdl_util.{
@@ -31,7 +32,11 @@ fn _simple_join_text(items: [text], sep: text) -> text:
 
 fn _compile_simple_vhdl_subset(path: text, output: text) -> CompileResult:
     val source = file_read_nullable(path) ?? ""
-    val vhdl_result = _simple_vhdl_source_to_text(source)
+    val resolve_result = _simple_vhdl_resolve_imported_type_decls(source, path)
+    if resolve_result.is_err():
+        _delete_simple_vhdl_outputs(output)
+        return CompileResult.RuntimeError(resolve_result.unwrap_err())
+    val vhdl_result = _simple_vhdl_source_to_text(resolve_result.unwrap())
     if vhdl_result.is_err():
         _delete_simple_vhdl_outputs(output)
         return CompileResult.RuntimeError(vhdl_result.unwrap_err())
@@ -46,6 +51,206 @@ fn _compile_simple_vhdl_subset(path: text, output: text) -> CompileResult:
 fn _delete_simple_vhdl_outputs(output: text):
     file_delete(output)
     file_delete(output + ".map.json")
+
+# ---------------------------------------------------------------------------
+# Cross-module type resolution for entry-file VHDL compilation.
+#
+# The subset transpiler is textual and single-file: it learns enum and type
+# declarations only from the entry source text. An entry file that imports a
+# type (`use hardware.nand_emu.nand_types.NeLatchKind`) therefore failed alias
+# resolution even though module-graph interpretation resolves the same import
+# (bug vhdl_entryfile_crossmodule_enum_resolve_2026-07-18). This pre-pass
+# resolves `use` lines through the canonical module resolver, extracts the
+# imported enum / type-alias declarations, and splices them ahead of the
+# entry source so the existing single-file scans see them. Imported symbols
+# that are not type declarations (functions, constants) and symbols whose
+# module cannot be resolved are left untouched — an unknown type still fails
+# closed downstream exactly as before.
+# ---------------------------------------------------------------------------
+
+fn _simple_vhdl_use_imports(source: text) -> [[text]]:
+    # Parse `use a.b.Name` and `use a.b.{N1, N2}` lines into [module_path, symbol] pairs.
+    var imports: [[text]] = []
+    val lines = source.split("\n")
+    for raw_line in lines:
+        val line = raw_line.trim()
+        if not line.starts_with("use "):
+            continue
+        val spec = line.substring(4, line.len()).trim()
+        if spec == "":
+            continue
+        val brace_open = spec.find("{")
+        if brace_open >= 0 and spec.ends_with("}"):
+            val module_path = spec.substring(0, brace_open).trim()
+            val inner = spec.substring(brace_open + 1, spec.len() - 1)
+            val names = inner.split(",")
+            for raw_name in names:
+                val name = raw_name.trim()
+                if module_path != "" and name != "":
+                    imports = imports.push([module_path, name])
+        else:
+            val dot = spec.last_index_of(".")
+            if dot > 0:
+                val module_path = spec.substring(0, dot).trim()
+                val name = spec.substring(dot + 1, spec.len()).trim()
+                if module_path != "" and name != "":
+                    imports = imports.push([module_path, name])
+    imports
+
+fn _simple_vhdl_strip_pub_prefix(line: text) -> text:
+    val trimmed = line.trim()
+    if trimmed.starts_with("pub "):
+        return trimmed.substring(4, trimmed.len()).trim()
+    trimmed
+
+fn _simple_vhdl_declared_type_name(line: text) -> text:
+    # For a trimmed `enum X:`, `struct X:` or `type X = ...` line (optionally
+    # `pub`-prefixed), return X.
+    val normalized = _simple_vhdl_strip_pub_prefix(line)
+    var rest = ""
+    if normalized.starts_with("enum "):
+        rest = normalized.substring(5, normalized.len()).trim()
+    elif normalized.starts_with("struct "):
+        rest = normalized.substring(7, normalized.len()).trim()
+    elif normalized.starts_with("type "):
+        rest = normalized.substring(5, normalized.len()).trim()
+    else:
+        return ""
+    if rest == "":
+        return ""
+    val colon = rest.find(":")
+    val equals = rest.find("=")
+    var cut = rest.len()
+    if colon >= 0 and colon < cut:
+        cut = colon
+    if equals >= 0 and equals < cut:
+        cut = equals
+    val space = rest.find(" ")
+    if space >= 0 and space < cut:
+        cut = space
+    rest.substring(0, cut).trim()
+
+fn _simple_vhdl_source_declares_type(source: text, type_name: text) -> bool:
+    val lines = source.split("\n")
+    for raw_line in lines:
+        val line = raw_line.trim()
+        if line.starts_with("enum ") or line.starts_with("pub enum ") or
+            line.starts_with("struct ") or line.starts_with("pub struct ") or
+            line.starts_with("type ") or line.starts_with("pub type "):
+            if _simple_vhdl_declared_type_name(line) == type_name:
+                return true
+    false
+
+fn _simple_vhdl_is_module_decl_boundary(line: text) -> bool:
+    # A trimmed line that ends the current declaration block in a module file.
+    line.starts_with("@") or line.starts_with("fn ") or line.starts_with("pub ") or
+        line.starts_with("type ") or line.starts_with("enum ") or line.starts_with("struct ")
+
+fn _simple_vhdl_extract_enum_block(lines: [text], start: i64) -> text:
+    # lines[start] is an (optionally `pub`-prefixed) `enum Name:` header. Emit a
+    # clean enum block the subset scanner can consume: `pub` stripped from the
+    # header, docstrings/comments dropped, variants normalized to one indent
+    # level. Block ends at the first blank line (outside docstrings) or the
+    # next declaration.
+    val header = _simple_vhdl_strip_pub_prefix(lines[start])
+    var out = header
+    var in_docstring = false
+    var i = start + 1
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        val quote_count = _simple_vhdl_count_substring(trimmed, "\"\"\"")
+        if quote_count > 0:
+            if quote_count % 2 == 1:
+                in_docstring = not in_docstring
+            i = i + 1
+            continue
+        if in_docstring:
+            i = i + 1
+            continue
+        if trimmed == "":
+            break
+        if trimmed.starts_with("#"):
+            i = i + 1
+            continue
+        if _simple_vhdl_is_module_decl_boundary(trimmed):
+            break
+        var variant = trimmed
+        val comment_at = variant.find(" #")
+        if comment_at >= 0:
+            variant = variant.substring(0, comment_at).trim()
+        if variant != "":
+            out = out + "\n    " + variant
+        i = i + 1
+    out
+
+fn _simple_vhdl_count_substring(value: text, needle: text) -> i64:
+    if needle == "":
+        return 0
+    var count = 0
+    var rest = value
+    while rest.contains(needle):
+        count = count + 1
+        val at = rest.find(needle)
+        rest = rest.substring(at + needle.len(), rest.len())
+    count
+
+fn _simple_vhdl_extract_type_decl(module_source: text, type_name: text) -> text:
+    # Return the verbatim enum block or type-alias line declaring type_name in
+    # module_source, or "" when the module does not declare it as a type.
+    # Enum blocks are re-emitted clean (see _simple_vhdl_extract_enum_block)
+    # because real modules carry docstrings/comments the textual subset
+    # scanner cannot skip.
+    val lines = module_source.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+        if line.starts_with("enum ") or line.starts_with("pub enum "):
+            if _simple_vhdl_declared_type_name(line) == type_name:
+                return _simple_vhdl_extract_enum_block(lines, i)
+        if line.starts_with("type ") or line.starts_with("pub type "):
+            if _simple_vhdl_declared_type_name(line) == type_name:
+                return _simple_vhdl_strip_pub_prefix(line)
+        i = i + 1
+    ""
+
+fn _simple_vhdl_without_use_lines(source: text) -> text:
+    # Drop `use` import lines. After _simple_vhdl_use_imports has harvested
+    # them, a leftover `use` line breaks the single-function facade scan
+    # (it captures the first unrecognized line as the function header).
+    val lines = source.split("\n")
+    var kept: [text] = []
+    for raw_line in lines:
+        if raw_line.trim().starts_with("use "):
+            continue
+        kept = kept.push(raw_line)
+    _simple_join_text(kept, "\n")
+
+fn _simple_vhdl_resolve_imported_type_decls(source: text, entry_path: text) -> Result<text, text>:
+    val stripped = _simple_vhdl_without_use_lines(source)
+    val imports = _simple_vhdl_use_imports(source)
+    if imports.len() == 0:
+        return Ok(stripped)
+    var spliced_names: [text] = []
+    var decl_blocks: [text] = []
+    for imp in imports:
+        val module_path = imp[0]
+        val symbol = imp[1]
+        if vhdl_text_list_contains(spliced_names, symbol):
+            continue
+        if _simple_vhdl_source_declares_type(source, symbol):
+            continue
+        val module_file = resolve_module_path(module_path, entry_path)
+        if module_file == "" or not file_exists(module_file):
+            continue
+        val module_source = file_read_nullable(module_file) ?? ""
+        val block = _simple_vhdl_extract_type_decl(module_source, symbol)
+        if block == "":
+            continue
+        spliced_names = spliced_names.push(symbol)
+        decl_blocks = decl_blocks.push(block)
+    if decl_blocks.len() == 0:
+        return Ok(stripped)
+    Ok(_simple_join_text(decl_blocks, "\n\n") + "\n\n" + stripped)
 
 fn _write_simple_vhdl_source_map(path: text, output: text, source: text, vhdl: text):
     val map_path = output + ".map.json"

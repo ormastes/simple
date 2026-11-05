@@ -4,6 +4,7 @@ use std.common.crypto.sha256.{sha256_text}
 use std.io_runtime.{file_delete, file_exists}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_get, json_value_as_text}
 use compiler.common.assurance.policy_schema.{AssuranceConvention, AssuranceGrade, AssuranceStrictness, ResolvedAssurancePolicyV1}
 use compiler.mir.hwir.aspects.{HwAspectLock, HwAspectLockEntry, hwir_aspect_lock_sha256}
 use compiler.mir.hwir.types.{CoreConfig, HwPort}
@@ -861,18 +862,32 @@ fn vhdl_remove_production_artifacts(output: text) -> bool:
             return false
     true
 
-fn vhdl_rendered_claims_compiler_owned_gen2(rendered: VhdlArtifactRendered) -> bool:
+fn vhdl_rendered_claims_compiler_owned_gen2(rendered: VhdlArtifactRendered) -> Result<bool, text>:
     """Identify the three compiler-owned Gen2 provenance routes in a rendered
     artifact bundle.
 
-    This intentionally examines the canonical manifest route marker, rather
-    than VHDL entity text.  A generic writer cannot infer semantic ownership
-    from raw VHDL, but it must never persist a bundle that *claims* one of the
-    reserved compiler product routes.
+    Decode the actual top-level route, including JSON escapes in keys/values.
+    A byte substring alone misses a valid `\\u0068wir-gen2-product` claim.
+    Duplicate keys must fail rather than letting reader choice decide which
+    provenance route wins. This is an intake guard, not compiler authority.
     """
-    rendered.manifest.contains("hwir-gen2-product") or
+    val manifest = match json_parse_value_strict(rendered.manifest):
+        case Ok(value): value
+        case Err(_): return Err("VHDL raw artifact writer requires an unambiguous JSON manifest")
+    match manifest:
+        case JsonValue.Object(_, _): ()
+        case _: return Err("VHDL raw artifact writer requires a JSON object manifest")
+    val route_value = json_value_get(manifest, "generation_route")
+    if route_value == nil:
+        return Err("VHDL raw artifact writer requires a text generation_route")
+    val route_text = json_value_as_text(route_value.unwrap())
+    if route_text == nil:
+        return Err("VHDL raw artifact writer requires a text generation_route")
+    val route = route_text.unwrap()
+    Ok(route.starts_with("hwir-gen2-") or
+        rendered.manifest.contains("hwir-gen2-product") or
         rendered.manifest.contains("hwir-gen2-stateful-product") or
-        rendered.manifest.contains("hwir-gen2-trap-stateful-product")
+        rendered.manifest.contains("hwir-gen2-trap-stateful-product"))
 
 fn vhdl_text_claims_compiler_owned_gen2(vhdl: text) -> bool:
     """Reject reserved compiler-product route markers in a raw VHDL payload.
@@ -917,8 +932,8 @@ pub fn vhdl_write_production_artifacts(output: text, vhdl: text,
     typed HWIR closure.  Rejection occurs before stale-artifact cleanup so a
     raw caller cannot erase a known product bundle while attempting a bypass.
     """
-    if vhdl_rendered_claims_compiler_owned_gen2(rendered) or
-        vhdl_text_claims_compiler_owned_gen2(vhdl):
+    val compiler_owned_route = vhdl_rendered_claims_compiler_owned_gen2(rendered)?
+    if compiler_owned_route or vhdl_text_claims_compiler_owned_gen2(vhdl):
         return Err("VHDL raw artifact writer refuses compiler-owned RISC-V Gen2 routes")
     vhdl_write_artifacts_after_authorization(output, vhdl, rendered)
 

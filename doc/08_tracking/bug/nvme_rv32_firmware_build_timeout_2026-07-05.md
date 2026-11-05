@@ -1641,3 +1641,14 @@ self-hosted/seed binary stops re-interpreting the compiler graph per
 invocation; until then this wrapper cannot produce
 `build/nvme_fw_rv32_minimal.elf` with a real compiler on this host class
 regardless of timeout.
+
+### Verification 2026-11-05 (riscv-sweep lane, work/riscv-sweep-20261105)
+
+This lane independently re-ran the scalar host logic gate on
+`origin/release/1.0.0` @ `bc3e9b48cb4` with the aarch64 Rust seed:
+`run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl` prints
+`RV32 NVME FW LOGIC OK`. The 2026-11-05 aarch64 host reproduction and
+script-side cross-toolchain fix recorded above stands as the current status;
+the architectural blocker (interpreted compiler-graph cold-load per
+`native-build` invocation) remains open. No new build-loop attempt was made
+in this pass.

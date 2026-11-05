@@ -494,3 +494,71 @@ before `interpret_hir_module`, and print the raw value rather than a comparison
 result. Do not assume the module is empty: `phase=mir-ok functions lowered`
 printed, which is weak evidence that lowering saw something.
 
+
+---
+
+# VERIFIED AT TIP (2026-11-05, worktree lane) — fix present, in-guest repro green
+
+Re-verified against `origin/release/1.0.0` (worktree `/tmp/riscv-laneA`) by a
+fresh session. Three independent checks:
+
+1. **The fix is in the source.** The linked definition now carries the
+   tagged-bool arm
+   (`examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_runtime_core.inc.c:1138-1143`):
+   `if (value == 11) return 1; if (value == 19) return 0;` ahead of the
+   `simpleos_raw_or_encoded_int` fallback, with a comment restating the
+   contract. (The fix commit recorded in this document as `71222183a0a` was
+   rewritten by the 2026-10 tree transplant; `git merge-base --is-ancestor`
+   fails on the old hash, but the merge `91bc01a35eb` "PR #257 — tagged-bool
+   decode, baremetal heap tags, riscv64 in-guest fixes" IS an ancestor and the
+   arm is physically present at tip.)
+
+2. **The shape guard is GREEN at tip.**
+   `sh scripts/check/check-baremetal-tagged-bool-decode.shs` →
+   `PASS — 4 definition(s) checked, all decode the tagged bool` (rc=0).
+
+3. **The repro runs CORRECTLY in-guest under real OpenSBI v1.4 fw_payload**
+   (never `-kernel`, never `isa-debug-exit`). A new probe entry
+   `examples/09_embedded/simple_os/arch/riscv64/freestanding_cmp_probe_entry.spl`
+   (steps 1-4) re-ran this record's exact shapes — `tup_early_false(false)`
+   destructured, bool in tuple position 1, `(false, true)` both positions, and
+   `ab[0]`/`ab[1]` out of a `[bool]` array — and every line printed EXPECTED:
+
+   ```
+   [probe] tup(0) destructured = false (EXPECTED)
+   [probe] tup pos1 bool = false (EXPECTED)
+   [probe] tup both pos0 = false (EXPECTED)
+   [probe] tup both pos1 = true (EXPECTED)
+   [probe] array bool [0] = false (EXPECTED)
+   [probe] array bool [1] = true (EXPECTED)
+   ```
+
+   Exact command (from the worktree root, seed =
+   `src/compiler_rust/target/bootstrap/simple`, plus an extracted
+   `riscv64-unknown-elf` toolchain and clang-18 for the riscv64 C runtime —
+   both host-side-only workarounds):
+
+   ```
+   ENTRY=examples/09_embedded/simple_os/arch/riscv64/freestanding_cmp_probe_entry.spl \
+   SIMPLE_BIN=<seed> sh scripts/check/run-riscv64-text-probe-opensbi.shs
+   ```
+
+   Full serial log: `build/os/riscv64_cmp_probe/probe.serial.log` (39 probe
+   lines, probe rc=0).
+
+## Scope notes
+
+- The probe kernel's closure deliberately avoids the full in-guest compiler
+  closure: at tip the interpreter/buildrun gate kernels fail to LINK on
+  unrelated missing runtime symbols (`rt_value_truthy`, `rt_value_as_bool`,
+  `rt_transient_heap_adopt`, `rt_session_alloc_begin/end`,
+  `spl_collection_capture_note_*` — referenced by the current stdlib, absent
+  from the riscv64 baremetal runtime). That breakage is pre-existing at tip
+  and outside this record; the minimal probe closure sidesteps it, so this
+  verification stands on its own.
+- Host-side note: `text != ""` at tip requires `rt_text_eq_any`, which the
+  riscv freestanding runtime lacked; that defect and its fix are recorded in
+  `riscv64_freestanding_text_neq_empty_literal_true_for_zero_length_2026-09-01.md`
+  and are also part of the same probe run.
+
+**Status: FIXED at tip, behaviorally verified in-guest 2026-11-05.**
