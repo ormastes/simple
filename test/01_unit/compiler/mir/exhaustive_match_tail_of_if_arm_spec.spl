@@ -1,4 +1,3 @@
-# @tag:in-development
 # @req REQ-SSPEC-COMPILER
 """
 # Exhaustive-arms check must not warn for a fully covered match
@@ -7,7 +6,7 @@ Bug: exhaustive_match_warning_misfires_on_if_arm_tail_2026-11-04. A `match` whos
 arms cover every variant but which is the tail of an `if` arm emits the
 "non-exhaustive enum match ... Arms are textually exhaustive" warning
 (src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl ~5159-5190).
-Expected to FAIL until the 50.mir owner lane fixes it; excluded from whole-suite runs.
+Fixed: the warning fires only when a variant is genuinely missing.
 """
 
 use std.spec
@@ -47,3 +46,19 @@ describe "fully covered match produces no non-exhaustive warning":
     it "still warns when a variant is genuinely missing":
         val src = ENUMS + "fn f(r: RouteLoad) -> i64:\n    match r:\n        case RouteLoad.Loaded(v): v\n"
         expect(exhaustive_warnings(src).len()).to_equal(1)
+    it "still warns and names the missing variant of a three-variant enum":
+        val src = "enum Tri:\n    A\n    B\n    C\n\nfn f(t: Tri) -> i64:\n    match t:\n        case Tri.A: 1\n        case Tri.B: 2\n"
+        val w = exhaustive_warnings(src)
+        expect(w.len()).to_equal(1)
+        expect(w[0].contains("Missing: C")).to_equal(true)
+
+describe "similar patterns stay quiet when fully covered":
+    it "fully covered three-variant enum":
+        val src = "enum Tri:\n    A\n    B\n    C\n\nfn f(t: Tri) -> i64:\n    match t:\n        case Tri.A: 1\n        case Tri.B: 2\n        case Tri.C: 3\n"
+        expect(exhaustive_warnings(src).len()).to_equal(0)
+    it "fully covered bool match":
+        val src = "fn f(b: bool) -> i64:\n    match b:\n        case true: 1\n        case false: 0\n"
+        expect(exhaustive_warnings(src).len()).to_equal(0)
+    it "covered enum with a default arm":
+        val src = ENUMS + "fn f(r: RouteLoad) -> i64:\n    match r:\n        case RouteLoad.Loaded(v): v\n        case _: 0\n"
+        expect(exhaustive_warnings(src).len()).to_equal(0)

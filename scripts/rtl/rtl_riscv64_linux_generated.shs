@@ -1,13 +1,80 @@
 #!/bin/bash
 # Public smoke wrapper for the generated RV64 RTL Linux handoff lane.
+#
+# The lane payload must be built by an LLVM-capable Simple compiler. Instead
+# of trusting executable bits alone, this wrapper probes each candidate's
+# native-build subcommand directly (a silent rc=3 means the binary lacks it)
+# and then verifies a real `native-build --backend llvm` compile.
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+LANE_ID="rv64"
 GENERATOR="$REPO_ROOT/src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl"
 RUNNER="$REPO_ROOT/src/lib/nogc_async_mut_noalloc/baremetal/ghdl_generated_rv64_linux_handoff_runner.shs"
 SMOKE="$REPO_ROOT/examples/09_embedded/fpga_riscv/sw/generated_rv64_linux_handoff_smoke.s"
 TIMEOUT=30
+SIMPLE_BINARY=""
+
+can_run_simple_bin() {
+    local candidate="$1"
+    [ -n "$candidate" ] && [ -f "$candidate" ] && [ -x "$candidate" ]
+}
+
+build_simple_candidate_list() {
+    # Most capable first; the generic wrapper is the last resort.
+    echo "$REPO_ROOT/bin/release/x86_64-unknown-linux-gnu/simple"
+    echo "$REPO_ROOT/build/bootstrap/full/x86_64-unknown-linux-gnu/simple"
+    echo "$REPO_ROOT/src/compiler_rust/target/bootstrap/simple"
+    echo "$REPO_ROOT/src/compiler_rust/target/release/simple"
+    echo "$REPO_ROOT/bin/simple"
+}
+
+probe_dir=""
+cleanup_probe() {
+    [ -n "$probe_dir" ] && rm -rf "$probe_dir"
+}
+trap cleanup_probe EXIT
+
+can_native_build_with_candidate() {
+    local candidate="$1"
+    can_run_simple_bin "$candidate" || return 1
+    # Probe the subcommand itself: a silent rc=3 means native-build is
+    # unsupported by this binary, so it can never build the lane payload.
+    if ! timeout 5 "$candidate" native-build --help >/dev/null 2>&1; then
+        echo "SKIP: $candidate native-build unsupported/silent rc=3"
+        return 1
+    fi
+    if [ -z "$probe_dir" ]; then
+        probe_dir="$(mktemp -d "/tmp/rtl_${LANE_ID}_llvm_probe.XXXXXX")"
+    fi
+    cat > "$probe_dir/probe.spl" <<'PROBE'
+fn main() -> i64:
+    0
+PROBE
+    if "$candidate" native-build --backend llvm --entry "$probe_dir/probe.spl" --output "$probe_dir/probe_bin" >"$probe_dir/native_build.log" 2>&1; then
+        return 0
+    fi
+    if grep -q "missing llvm feature" "$probe_dir/native_build.log"; then
+        echo "SKIP: $candidate missing llvm feature (log: $(cat "$probe_dir/native_build.log"))"
+    fi
+    return 1
+}
+
+select_simple_binary() {
+    local candidate
+    while IFS= read -r candidate; do
+        if can_native_build_with_candidate "$candidate"; then
+            SIMPLE_BINARY="$candidate"
+            return 0
+        fi
+    done < <(build_simple_candidate_list)
+    echo "FAIL: unable to build $LANE_ID payload with an LLVM-capable Simple compiler"
+    echo "tried candidates:"
+    build_simple_candidate_list | sed 's/^/  - /'
+    echo "prerequisite: an LLVM-capable Simple compiler (cargo build --features llvm -p simple-driver)"
+    return 1
+}
 
 check_tools() {
     local missing=0
@@ -23,8 +90,16 @@ check_tools() {
             missing=1
         fi
     done
-    if [ ! -x "$REPO_ROOT/bin/release/simple" ]; then
-        echo "MISSING: $REPO_ROOT/bin/release/simple"
+    local candidate
+    local any_candidate=0
+    while IFS= read -r candidate; do
+        if can_run_simple_bin "$candidate"; then
+            any_candidate=1
+        fi
+    done < <(build_simple_candidate_list)
+    if [ "$any_candidate" = "0" ]; then
+        echo "MISSING: no Simple compiler candidate in:"
+        build_simple_candidate_list | sed 's/^/  - /'
         missing=1
     fi
     if [ "$missing" = "1" ]; then
@@ -39,6 +114,11 @@ for arg in "$@"; do
         --timeout=*) TIMEOUT="${arg#--timeout=}" ;;
     esac
 done
+
+if ! select_simple_binary; then
+    exit 1
+fi
+export SIMPLE_BINARY
 
 if [ ! -f "$RUNNER" ] || [ ! -f "$SMOKE" ]; then
     echo "SKIP: generated RV64 RTL Linux smoke runner or program is not present"

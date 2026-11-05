@@ -1,6 +1,36 @@
 # Gen2 Raw Artifact Writer Can Pair Valid Provenance with Arbitrary VHDL
 
-Status: exported bypass removed; language-level authority remains unresolved
+Status: FIXED 2026-11-05 (PR #6937) — escaped-route intake guard; exported-bypass authority angle tracked below
+
+## 2026-11-03: escaped JSON route bypass in the generic writer
+
+Source audit at release `009546cbe28` found a narrower remaining exported-path
+defect, independent of the private-receipt enforcement gap below. The generic
+writer inspected raw manifest substrings. A valid JSON route such as
+`"generation_route":"\u0068wir-gen2-product"` retains its reserved Gen2 meaning
+after JSON decoding, but contains none of the literal route markers. With
+unmarked arbitrary VHDL, that input reached cleanup and writing.
+
+The writer now uses the existing strict typed JSON decoder before any file
+operation. It requires an object with a text `generation_route`, rejects
+duplicate decoded keys and malformed input, and refuses decoded `hwir-gen2-`
+routes. Existing conservative literal-marker rejection remains, and the
+generic `legacy-vhdl` and `hwir-strict` paths remain available. JSON remains the
+existing artifact interoperability format; this does not introduce a new
+configuration format or confer authority on a decoded manifest.
+
+Focused additions to `vhdl_artifact_manifest_spec.spl` exercise escaped route
+values and keys, duplicate/malformed/missing route rejection, preservation of
+all three existing files on refusal, and successful generic writes. The
+independent JSON standards fixture confirms 18 encoded variants preserve the
+reserved decoded route while all three pre-fix literal predicates miss them;
+two generic controls preserve their route. That bounded fixture is not
+execution of the Simple writer or its specs.
+
+Simple regression execution is **UNRUN** because no admitted runtime is
+available in this session. Native RV32/RV64 CLI/GHDL qualification and the
+broader language-level private-access/constructor/field-write authority gap
+remain unresolved; this patch must not mark the overall bug fixed.
 
 ## Observation
 
@@ -108,3 +138,12 @@ Reconfirmed: exported bypass already removed per this record; the
 language-level authority gap (compiler cannot enforce a provenance/VHDL
 pairing invariant) remains unresolved and needs type-system-level work.
 Left as-is, no code change attempted.
+
+## Resolution 2026-11-05 (PR #6937, merged to release/1.0.0)
+
+- `vhdl_rendered_claims_compiler_owned_gen2` decodes the manifest
+  `generation_route` as strict JSON and fails closed on non-object manifests,
+  so an escaped route claim (e.g. `\u0068wir-gen2-product`) can no longer slip
+  past byte-substring matching; `vhdl_write_production_artifacts` propagates
+  the rejection.
+- Regression coverage: `test/01_unit/compiler/backend/vhdl_artifact_manifest_spec.spl`.

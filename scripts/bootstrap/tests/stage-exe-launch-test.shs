@@ -1,0 +1,39 @@
+#!/bin/sh
+# Selftest for stage-exe-launch.shs: diagnostic on loader codes, silence otherwise.
+set -u
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+launch="$here/../stage-exe-launch.shs"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/stage-launch.XXXXXX") || exit 2
+trap 'rm -rf "$tmp"' EXIT
+mk() { printf '#!/bin/sh\nexit %s\n' "$2" > "$tmp/$1"; chmod +x "$tmp/$1"; }
+mk f127 127; mk ok 0; mk f3 3
+fail=0
+n=0
+# loader-code case: expects rc passthrough, diagnostic naming $3 and NOT $4
+check_diag() {
+    n=$((n + 1))
+    err=$(sh "$launch" "$tmp/$1" 2>&1 >/dev/null); rc=$?
+    [ "$rc" = "$2" ] || { echo "FAIL: $1 rc $rc != $2"; fail=1; }
+    case "$err" in *"$3"*) ;; *) echo "FAIL: $1 diagnostic lacks $3"; fail=1;; esac
+    case "$err" in *"$4"*) echo "FAIL: $1 diagnostic wrongly names $4"; fail=1;; esac
+}
+check_diag f127 127 0xC0000139 0xC0000135
+# 32-bit NTSTATUS values cannot be real exit codes of a POSIX fake, so use --classify
+classify() {
+    n=$((n + 1))
+    err=$(sh "$launch" --classify "$1" x.exe 2>&1)
+    case "$err" in *"$2"*) ;; *) echo "FAIL: rc $1 diagnostic lacks $2"; fail=1;; esac
+    case "$err" in *"$3"*) echo "FAIL: rc $1 diagnostic wrongly names $3"; fail=1;; esac
+}
+classify 3221225781 0xC0000135 0xC0000139
+classify -1073741515 0xC0000135 0xC0000139
+classify 3221225785 0xC0000139 0xC0000135
+classify -1073741511 0xC0000139 0xC0000135
+n=$((n + 1)); err=$(sh "$launch" "$tmp/f127" 2>&1 >/dev/null)
+case "$err" in *libLLVM-23.dll*) ;; *) echo "FAIL: 127 lacks DLL-clash cause"; fail=1;; esac
+n=$((n + 1)); err=$(sh "$launch" "$tmp/ok" 2>&1); rc=$?
+[ "$rc" = 0 ] && [ -z "$err" ] || { echo "FAIL: ok run not silent"; fail=1; }
+n=$((n + 1)); err=$(sh "$launch" "$tmp/f3" 2>&1); rc=$?
+[ "$rc" = 3 ] && [ -z "$err" ] || { echo "FAIL: other rc must pass through silently"; fail=1; }
+if [ "$fail" = 0 ]; then echo "PASS - $n launcher cases checked"; exit 0; fi
+echo "FAIL"; exit 1
