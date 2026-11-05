@@ -731,6 +731,10 @@ fn eval_for_expr(eid: i64) -> i64:
 
     # Iterate over range (check if iterable is a range pair)
     # Range is stored as: left=start, right=end, i_val=inclusive
+    # The loop is bounded by the range end itself; there is deliberately no
+    # iteration cap here (see
+    # doc/08_tracking/bug/core_interpreter_hard_loop_iteration_caps_2026-08-28.md):
+    # a silent cap turned `for i in 0..2_000_000` into a wrong partial answer.
     if kind == VAL_INT:
         # Check if iterable_eid is a RANGE expression
         val iterable_tag = expr_get(iterable_eid).tag
@@ -745,18 +749,12 @@ fn eval_for_expr(eid: i64) -> i64:
             val end_n = val_get_int(end_val)
             var current = start_n
             val limit = end_n
-            var _range_iter: i64 = 0
-            while _range_iter < 1000001:
+            while current <= limit:
                 if eval_breaking: break
                 if eval_returning: break
                 if eval_had_error: break
-                val should_stop = current > limit
-                val at_limit = current == limit
-                if inclusive != 0:
-                    if should_stop: break
-                else:
-                    if at_limit: break
-                    if should_stop: break
+                if inclusive == 0:
+                    if current == limit: break
                 eval_continuing = false
                 env_push_scope()
                 env_define(iter_name, val_make_int(current))
@@ -767,8 +765,10 @@ fn eval_for_expr(eid: i64) -> i64:
                     if eval_continuing: break
                     last_val = eval_stmt(sid)
                 env_pop_scope()
+                # Seed parity: checked increment — stop at i64::MAX instead of
+                # wrapping to a ~2^63-iteration loop (seed breaks on overflow).
+                if current == 9223372036854775807: break
                 current = current + 1
-                _range_iter = _range_iter + 1
             eval_breaking = false
             eval_continuing = false
             return last_val
@@ -777,7 +777,10 @@ fn eval_for_expr(eid: i64) -> i64:
     -1
 
 # ===== Range Expression =====
-# Range creates an array of integers for now
+# Range creates an array of integers for now. Materialize every element —
+# a silent element cap here turned `0..2_000_000` (and any range-for whose
+# iterable evaluates through this path) into a wrong truncated array. See
+# doc/08_tracking/bug/core_interpreter_hard_loop_iteration_caps_2026-08-28.md.
 fn eval_range(eid: i64) -> i64:
     val e_node = expr_get(eid)
     val start_val = eval_expr(e_node.left)
@@ -789,18 +792,13 @@ fn eval_range(eid: i64) -> i64:
     val end_n = val_get_int(end_val)
     var elements: [i64] = []
     var current = start_n
-    var _range_iter2: i64 = 0
-    while _range_iter2 < 10001:
-        val should_stop = current > end_n
-        val at_limit = current == end_n
-        if inclusive != 0:
-            if should_stop: break
-        else:
-            if at_limit: break
-            if should_stop: break
+    while current <= end_n:
+        if inclusive == 0:
+            if current == end_n: break
         elements.push(val_make_int(current))
+        # Same checked-increment parity guard as eval_for_expr.
+        if current == 9223372036854775807: break
         current = current + 1
-        _range_iter2 = _range_iter2 + 1
     val_make_array(elements)
 
 # ===== While Expression =====
