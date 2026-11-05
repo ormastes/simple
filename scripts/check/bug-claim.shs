@@ -81,7 +81,8 @@ MAX_AGE_S=$(parse_age "${BUG_CLAIM_MAX_AGE:-24h}")
 LOCK_RETRIES="${BUG_CLAIM_LOCK_RETRIES:-60}"
 case "$LOCK_RETRIES" in ''|*[!0-9]*) die "bad BUG_CLAIM_LOCK_RETRIES" ;; esac
 
-valid_id() { case "$1" in ''|*[!A-Za-z0-9._/:+-]*) return 1 ;; *) return 0 ;; esac; }
+valid_id() { case "$1" in -*) die "flag-like value '$1' is not a valid id (flags are --session, --intent, --note, --pr; put the id before flags)" ;; esac; case "$1" in ''|*[!A-Za-z0-9._/:+-]*) return 1 ;; *) return 0 ;; esac; }
+flagval() { case "$2" in --*) die "$1 got flag-like value '$2'" ;; esac; }
 clean_note() { printf '%s' "$1" | tr '\r\n\t' '   ' | tr '"' ' ' | tr "'" ' ' | tr '\134' ' '; }
 
 # --- selftest ----------------------------------------------------------------
@@ -132,6 +133,17 @@ FX
     chk "show for_fixing" "CLAIMED: SP-A-1 fixing by s4" "$(run show SP-A-1 --intent for_fixing --session s4)"
     chk "show --session=" "CLAIMED: MIXED_C_3 fixing by s5" "$(run show MIXED_C_3 --session=s5 --intent=for_fixing)"
     chk "show missing session value" "requires --session" "$(run show SP-A-1 --intent for_fixing --session)"
+    chk "claim flag as session" "flag-like value" "$(run claim SP-A-1 --intent)"
+    chk "claim flag as session not stored" "session=s4" "$(run status SP-A-1)"
+    chk "claim flag-led bug id" "flag-like value" "$(run claim --intent s9)"
+    chk "claim --session flag value" "flag-like value" "$(run claim SP-A-1 --session --note x)"
+    chk "claim --note missing value" "needs a value" "$(run claim SP-A-1 --session s9 --note)"
+    chk "show --session flag value" "flag-like value" "$(run show SP-A-1 --session --intent for_fixing)"
+    chk "show --intent flag value" "flag-like value" "$(run show SP-A-1 --intent --session s9)"
+    chk "show flag order" "CLAIMED: SP-A-1 fixing by s4" "$(run show SP-A-1 --session s4 --intent for_fixing)"
+    chk "release flag session" "flag-like value" "$(run release SP-A-1 --intent)"
+    chk "heartbeat flag session" "flag-like value" "$(run heartbeat SP-A-1 --intent)"
+    chk "done flag session" "flag-like value" "$(run done SP-A-1 --intent)"
     chk "unknown bug" "unknown bug" "$(run claim NOPE-9 s1)"
     for _id in unindented_row_2026_11_03 after_unindented_2026-08-17 crlf-id-9_2026-08-10; do
         chk "claim $_id" "CLAIMED: $_id" "$(run claim "$_id" s1)"
@@ -369,9 +381,9 @@ cmd_claim() { # bug session [note]
         _cb="$1"; shift; _cs=""; _cn=""
         while [ $# -gt 0 ]; do
             case "$1" in
-                --session) [ $# -ge 2 ] || die "--session needs a value"; _cs="$2"; shift 2 ;;
+                --session) [ $# -ge 2 ] || die "--session needs a value"; flagval --session "$2"; _cs="$2"; shift 2 ;;
                 --session=*) _cs="${1#--session=}"; shift ;;
-                --note) [ $# -ge 2 ] || die "--note needs a value"; _cn="$2"; shift 2 ;;
+                --note) [ $# -ge 2 ] || die "--note needs a value"; flagval --note "$2"; _cn="$2"; shift 2 ;;
                 --note=*) _cn="${1#--note=}"; shift ;;
                 *) die "unknown claim option $1" ;;
             esac
@@ -592,11 +604,11 @@ cmd_show() {
     valid_id "$_b" || die "bad bug_id"
     while [ $# -gt 0 ]; do
         case "$1" in
-            --intent) [ $# -ge 2 ] || die "--intent needs a value"; _intent="$2"; shift 2 ;;
+            --intent) [ $# -ge 2 ] || die "--intent needs a value"; flagval --intent "$2"; _intent="$2"; shift 2 ;;
             --intent=*) _intent="${1#--intent=}"; shift ;;
-            --session) [ $# -ge 2 ] || die "show --intent for_fixing requires --session <id>"; _s="$2"; shift 2 ;;
+            --session) [ $# -ge 2 ] || die "show --intent for_fixing requires --session <id>"; flagval --session "$2"; _s="$2"; shift 2 ;;
             --session=*) _s="${1#--session=}"; shift ;;
-            --note) [ $# -ge 2 ] || die "--note needs a value"; _n="$2"; shift 2 ;;
+            --note) [ $# -ge 2 ] || die "--note needs a value"; flagval --note "$2"; _n="$2"; shift 2 ;;
             --note=*) _n="${1#--note=}"; shift ;;
             *) die "unknown show option $1" ;;
         esac
