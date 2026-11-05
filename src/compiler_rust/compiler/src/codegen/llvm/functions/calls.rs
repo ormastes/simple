@@ -2683,11 +2683,9 @@ impl LlvmBackend {
                 let recv = self.get_vreg(&args[0], vreg_map)?;
                 let recv = self.coerce_value_to_type(recv, Some(i64_type.into()), builder)?;
                 let variant = if method_name == "is_ok" { "Ok" } else { "Err" };
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                use std::hash::{Hash, Hasher};
-                variant.hash(&mut hasher);
                 let enum_id = i64_type.const_zero();
-                let disc = i64_type.const_int(hasher.finish() & 0xFFFF_FFFF, false);
+                let disc =
+                    i64_type.const_int(u64::from(simple_runtime::value::hash_variant_discriminant(variant)), false);
                 let call_site = builder
                     .build_call(rt_func, &[recv.into(), enum_id.into(), disc.into()], "direct_enum_variant")
                     .map_err(|e| crate::error::factory::llvm_build_failed("direct enum variant call", &e))?;

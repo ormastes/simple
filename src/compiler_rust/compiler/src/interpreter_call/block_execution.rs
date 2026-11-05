@@ -876,14 +876,18 @@ pub(super) fn exec_block_closure_into(
                 restore_pattern_scope(for_saved_scope, &mut local_env);
             }
             Node::Match(match_stmt) => {
-                let subject = evaluate_expr(
-                    &match_stmt.subject,
-                    &mut local_env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?;
+                // Read the subject through its place and remember it, so
+                // arm payload-binding container mutations can merge back
+                // into the caller's storage (two-hop place chain).
+                let (subject, subject_place) =
+                    crate::interpreter::interpreter_patterns::evaluate_match_subject(
+                        &match_stmt.subject,
+                        &mut local_env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?;
                 let mut matched = false;
                 for arm in &match_stmt.arms {
                     let mut bindings = std::collections::HashMap::new();
@@ -929,6 +933,16 @@ pub(super) fn exec_block_closure_into(
                             classes,
                             enums,
                             impl_methods,
+                        );
+                        // Carry payload-binding container mutations back into
+                        // the subject BEFORE the shadowed bindings are
+                        // restored away.
+                        crate::interpreter::interpreter_patterns::merge_arm_bindings_into_subject(
+                            subject_place.as_ref(),
+                            &subject,
+                            &arm.pattern,
+                            &mut local_env,
+                            classes,
                         );
                         for (name, prev) in shadowed.into_iter().rev() {
                             local_env.exit_block_local(&name);
@@ -1831,7 +1845,15 @@ fn exec_block_closure_mut_inner(
                 restore_pattern_scope(for_saved_scope, local_env);
             }
             Node::Match(match_stmt) => {
-                let subject = evaluate_expr(&match_stmt.subject, local_env, functions, classes, enums, impl_methods)?;
+                let (subject, subject_place) =
+                    crate::interpreter::interpreter_patterns::evaluate_match_subject(
+                        &match_stmt.subject,
+                        &mut *local_env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?;
                 let mut matched = false;
                 for arm in &match_stmt.arms {
                     let mut bindings = std::collections::HashMap::new();
@@ -1877,6 +1899,16 @@ fn exec_block_closure_mut_inner(
                             classes,
                             enums,
                             impl_methods,
+                        );
+                        // Carry payload-binding container mutations back into
+                        // the subject BEFORE the shadowed bindings are
+                        // restored away.
+                        crate::interpreter::interpreter_patterns::merge_arm_bindings_into_subject(
+                            subject_place.as_ref(),
+                            &subject,
+                            &arm.pattern,
+                            local_env,
+                            classes,
                         );
                         for (name, prev) in shadowed.into_iter().rev() {
                             local_env.exit_block_local(&name);
