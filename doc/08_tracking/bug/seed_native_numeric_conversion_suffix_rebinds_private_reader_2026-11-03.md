@@ -41,3 +41,15 @@ Evidence retained at `/tmp/aspect-fix-rr-attempt8-core-20261103/backtrace.txt` a
 4. The repaired producer rebuilds Phase 2 and passes real compiled Hello/sanity execution before dependent phases. Record exact source, producer, runtime, target and cache lineage.
 
 Repair and acceptance are in progress. A source patch, passing resolver unit test, or linked Phase 2 alone does not close this record. macOS is not asserted reproduced; the resolver is shared.
+
+## Resolver regression re-verification — 2026-11-05
+
+cargo test -p simple-compiler --lib at current release/1.0.0:
+- filters `numeric_conversion`, `private_reader`: 6 distinct resolver tests
+  PASS (bare call-target never-binds/still-binds-real-owner,
+  primitive-qualified static never-binds, custom owner, exact authored
+  imports);
+- filter `suffix`: 17/17 PASS (incl.
+  suffix_index_keeps_leading_underscore_of_private_helper).
+Acceptance #3 (executing native fixture) and #4 (rebuilt Phase 2 real
+Hello/sanity admission) remain open per the owner lane.
