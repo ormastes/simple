@@ -58,3 +58,46 @@ fn seed_builtin_discriminants_match_pure_simple_positional_order() {
     assert_eq!([d("Ok"), d("Err")], [0, 1]);
     assert_eq!([d("Some"), d("None")], [0, 1]);
 }
+
+#[test]
+fn hir_enum_registration_assigns_declaration_index() {
+    use crate::hir::{HirType, TypeRegistry};
+    use simple_runtime::value::hash_variant_discriminant as d;
+    let mut registry = TypeRegistry::new();
+    registry.register_named(
+        "UeHirLight".to_string(),
+        HirType::Enum {
+            name: "UeHirLight".to_string(),
+            variants: vec![("UeHirOff".into(), None), ("UeHirDim".into(), None), ("UeHirOn".into(), None)],
+            generic_params: vec![],
+            is_generic_template: false,
+            type_bindings: Default::default(),
+        },
+    );
+    assert_eq!([d("UeHirOff"), d("UeHirDim"), d("UeHirOn")], [0, 1, 2]);
+}
+
+/// Every place the seed learns an enum declaration must feed the positional
+/// registry; a new `enums.insert(` without it reintroduces name hashing for
+/// that path (the interpreter matched by name, native by hashed tag).
+#[test]
+fn every_interpreter_enum_registration_feeds_positional_registry() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut offenders = Vec::new();
+    for file in ["interpreter_eval.rs", "interpreter_sffi.rs"] {
+        let text = std::fs::read_to_string(root.join(file)).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            let t = line.trim_start();
+            if t.starts_with("enums.insert(e.name.clone(), Arc::new(") || t.starts_with("enums.insert(prefixed_name") {
+                let window = lines[i.saturating_sub(3)..i].join("\n");
+                if !window.contains("register_enum_variants") {
+                    offenders.push(format!("{file}:{}", i + 1));
+                }
+            }
+        }
+    }
+    let reg = std::fs::read_to_string(root.join("hir/type_registry.rs")).unwrap();
+    assert!(reg.matches("note_enum_positions(&ty)").count() >= 2, "TypeRegistry register/update_named must feed positions");
+    assert!(offenders.is_empty(), "enum registrations without positional discriminants: {offenders:#?}");
+}

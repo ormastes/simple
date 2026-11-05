@@ -20,9 +20,11 @@
 # A check script's `--selftest` must build any git fixtures under a private
 # `mktemp -d` repo, never touch the invoking repo's HEAD, index, working
 # tree, or git config. This guard proves that mechanically for every listed
-# script by comparing `git rev-parse HEAD` and `git status --porcelain`
-# before and after running `--selftest`, instead of relying on someone
-# reading the script's source and trusting a comment.
+# script in a fresh scratch clone. It compares the resolved HEAD commit, raw
+# HEAD/index/config files, optional worktree config, and status before and
+# after `--selftest`, with hook-style GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE/
+# GIT_COMMON_DIR exports aimed at that disposable caller. The real checkout
+# is never the selftest target.
 #
 # Verdict convention (.claude/rules/vcs.md § Pre-push guards): the LAST line
 # of stdout is PASS/FAIL/ERROR; a run that checked zero scripts is ERROR,
@@ -106,16 +108,63 @@ case "${1:-}" in
         ;;
 esac
 
+# Keep this harness's own setup and snapshots independent of any hook exports.
+# The per-guard invocation below deliberately restores the hostile selectors.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+    GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE \
+    GIT_CONFIG GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS
+
 selftest || exit 1
 
 cd "$ROOT_DIR"
 
+run_tmp=$(mktemp -d) || {
+    echo "ERROR — nothing was checked: cannot create scratch root"
+    exit 2
+}
+trap 'rm -rf "$tmp" "$run_tmp"' EXIT
+
 # Scripts previously found (or plausibly could be found) to leak git state
 # from their --selftest into the invoking repo. Add to this list as new
 # guards with a --selftest and a git-touching fixture are written.
-GUARDS="scripts/check/check-ghdl-gate-rc-swallow.shs
+DEFAULT_GUARDS="scripts/check/check-ghdl-gate-rc-swallow.shs
 scripts/check/check-seed-builds-push.shs
 scripts/check/check-tree-size-push.shs"
+# A targeted list avoids rerunning unrelated expensive fixtures when repairing
+# one guard. The default remains the complete dynamic isolation suite.
+GUARDS=${GUARD_ISOLATION_GUARDS:-$DEFAULT_GUARDS}
+
+snapshot_repo() {
+    sn_repo=$1
+    sn_dest=$2
+    mkdir -p "$sn_dest"
+    if ! git -C "$sn_repo" rev-parse HEAD >"$sn_dest/head-commit" 2>/dev/null; then
+        echo ERROR >"$sn_dest/head-commit"
+    fi
+    if ! git -C "$sn_repo" status --porcelain >"$sn_dest/status" 2>/dev/null; then
+        echo ERROR >"$sn_dest/status"
+    fi
+    for sn_file in HEAD index config config.worktree; do
+        if [ -f "$sn_repo/.git/$sn_file" ]; then
+            cp "$sn_repo/.git/$sn_file" "$sn_dest/$sn_file"
+        fi
+    done
+}
+
+# Print the first differing snapshot item and return 0; return 1 when identical.
+snapshot_change() {
+    sc_before=$1
+    sc_after=$2
+    for sc_file in head-commit HEAD index config config.worktree status; do
+        if [ -f "$sc_before/$sc_file" ] || [ -f "$sc_after/$sc_file" ]; then
+            if ! cmp -s "$sc_before/$sc_file" "$sc_after/$sc_file"; then
+                echo "$sc_file"
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
 
 checked=0
 bad=""
@@ -132,23 +181,80 @@ for g in $GUARDS; do
     fi
 
     checked=$((checked + 1))
+    case_dir="$run_tmp/$checked"
+    repo="$case_dir/caller"
+    mkdir -p "$case_dir/tmp" "$case_dir/home" "$case_dir/cache" \
+        "$case_dir/cargo-home" "$case_dir/cargo-target" \
+        "$case_dir/green-markers" "$case_dir/storage"
 
-    before_head="$(git rev-parse HEAD)"
-    before_status="$(git status --porcelain)"
+    # A shared clone keeps object storage read-only at the source while giving
+    # the selftest a real caller repository whose HEAD, index and config are
+    # safe to corrupt if isolation regresses. Checkout only the guard surface.
+    if ! git clone --shared --no-checkout --quiet "$ROOT_DIR" "$repo" \
+        >"$case_dir/clone.out" 2>&1; then
+        cat "$case_dir/clone.out"
+        echo "ERROR — nothing was checked: cannot create scratch caller clone for $g"
+        exit 2
+    fi
+    if ! git -C "$repo" sparse-checkout set scripts/check scripts/lib \
+        >>"$case_dir/clone.out" 2>&1 ||
+       ! git -C "$repo" checkout -q >>"$case_dir/clone.out" 2>&1; then
+        cat "$case_dir/clone.out"
+        echo "ERROR — nothing was checked: cannot populate scratch caller clone for $g"
+        exit 2
+    fi
 
-    sh "$g" --selftest >/tmp/.guard-isolation-$$-out 2>&1 || true
-    rm -f /tmp/.guard-isolation-$$-out
+    # Test the working-tree version of the guard, not only its committed copy.
+    if ! (
+        cp "$ROOT_DIR/$g" "$repo/$g" &&
+        git -C "$repo" config user.email caller@fixture &&
+        git -C "$repo" config user.name caller &&
+        printf 'staged caller data\n' >"$repo/caller-staged.txt" &&
+        git -C "$repo" add -- caller-staged.txt &&
+        printf 'untracked caller data\n' >"$repo/caller-untracked.txt" &&
+        : >"$case_dir/gitconfig-global" &&
+        : >"$case_dir/gitconfig-system"
+    ) >"$case_dir/setup.out" 2>&1; then
+        cat "$case_dir/setup.out"
+        echo "ERROR — nothing was checked: cannot initialize scratch caller state for $g"
+        exit 2
+    fi
 
-    after_head="$(git rev-parse HEAD)"
-    after_status="$(git status --porcelain)"
+    snapshot_repo "$repo" "$case_dir/before"
 
-    if [ "$before_head" != "$after_head" ]; then
-        bad="$bad $g(HEAD moved $before_head->$after_head)"
+    # Reproduce push-hook exports exactly. A bare `git -C` does not override
+    # these variables, so the historical fixture calls would commit, stage and
+    # configure this caller clone. Private temp/cache/config roots also prevent
+    # a broken guard from escaping into the user's real files.
+    (
+        cd "$repo" || exit 2
+        env \
+            GIT_DIR="$repo/.git" \
+            GIT_WORK_TREE="$repo" \
+            GIT_INDEX_FILE="$repo/.git/index" \
+            GIT_COMMON_DIR="$repo/.git" \
+            GIT_CONFIG_GLOBAL="$case_dir/gitconfig-global" \
+            GIT_CONFIG_SYSTEM="$case_dir/gitconfig-system" \
+            HOME="$case_dir/home" \
+            XDG_CACHE_HOME="$case_dir/cache" \
+            TMPDIR="$case_dir/tmp" \
+            CARGO_HOME="$case_dir/cargo-home" \
+            CARGO_TARGET_ROOT="$case_dir/cargo-target" \
+            SEED_GREEN_MARKER_DIR="$case_dir/green-markers" \
+            SIMPLE_USER_STORAGE_ROOT="$case_dir/storage" \
+            KEEP_BUILD_DIR=0 \
+            sh "$g" --selftest
+    ) >"$case_dir/selftest.out" 2>&1 || true
+
+    snapshot_repo "$repo" "$case_dir/after"
+    if changed=$(snapshot_change "$case_dir/before" "$case_dir/after"); then
+        bad="$bad $g($changed changed)"
+        echo "FAIL DETAIL — $g changed scratch caller $changed; selftest output follows:"
+        tail -n 20 "$case_dir/selftest.out"
         continue
     fi
-    if [ "$before_status" != "$after_status" ]; then
-        bad="$bad $g(working-tree/index status changed)"
-        continue
+    if [ "$g" = "scripts/check/check-seed-builds-push.shs" ]; then
+        cat "$case_dir/selftest.out"
     fi
 done
 
@@ -158,9 +264,9 @@ if [ "$checked" -eq 0 ]; then
 fi
 
 if [ -n "$bad" ]; then
-    echo "FAIL — $checked guard(s) checked, selftest mutated the invoking repo:$bad"
+    echo "FAIL — $checked guard(s) checked, selftest mutated a scratch caller repo:$bad"
     exit 1
 fi
 
-echo "PASS — $checked guard(s) checked, 0 mutated the invoking repo's HEAD or status"
+echo "PASS — $checked guard(s) checked in scratch clones with hook-style Git exports, 0 changed caller HEAD, index, config, or status"
 exit 0

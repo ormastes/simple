@@ -132,7 +132,16 @@ impl TypeRegistry {
         registry
     }
 
+    /// Feed enum declarations to the runtime's positional discriminant
+    /// registry so variant-name-only sites use the declaration index.
+    fn note_enum_positions(ty: &HirType) {
+        if let HirType::Enum { variants, .. } = ty {
+            simple_runtime::value::register_enum_variants(variants.iter().map(|(name, _)| name.as_str()));
+        }
+    }
+
     pub fn register(&mut self, ty: HirType) -> TypeId {
+        Self::note_enum_positions(&ty);
         let id = self.allocator.alloc();
         self.types.insert(id, ty);
         id
@@ -198,6 +207,7 @@ impl TypeRegistry {
             }
             // Update in place - keep the same TypeId
             self.optional_type_ids.remove(&existing_id);
+            Self::note_enum_positions(&ty);
             self.types.insert(existing_id, ty);
             existing_id
         } else {

@@ -70,7 +70,7 @@ Decisions:
 | linux | implied gnu | x86, x86_64, arm, aarch64, riscv32, riscv64 |
 | freebsd | implied | x86_64, aarch64, riscv64 |
 | macos | implied | x86_64, aarch64 |
-| windows | mingw, msvc | x86, x86_64, aarch64 (under each abi) |
+| windows | mingw, msvc (C runtime roots only; Simple roots use `windows/<arch>`, see §3a) | x86, x86_64, aarch64 |
 | simpleos | implied | x86_64, aarch64, riscv32, riscv64 |
 
 ARM32/x86-32/RV32 directory slots exist so placement is decided before code
@@ -259,3 +259,10 @@ each registered root. Baseline-relative: current violations frozen in
 Verdict line: `PASS — <n> ...` / `FAIL — ...` / `ERROR — nothing was checked`.
 Wired as an advisory push-tier row (`config/check/must_check_gates.sdn`) and in
 the extended CI job.
+
+## 6. Skeleton roots (2026-11-05)
+
+Skeleton dirs (each holding only a `FILE.md` with a migration TODO) exist under:
+`src/runtime/platform` (C root: `windows/{mingw,msvc}/<arch>`), and the Simple
+roots `src/lib/nogc_sync_mut/platform`, `src/lib/nogc_async_mut/platform`,
+`src/lib/nogc_sync_mut/sosix` (`windows/<arch>`; Simple code never forks per ABI).
