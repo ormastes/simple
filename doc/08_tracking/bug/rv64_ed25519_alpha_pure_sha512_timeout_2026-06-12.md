@@ -633,3 +633,21 @@ seed vector in addition to empty and `abc`.
 - **inferred**: the only reproduction is `SIMPLEOS_RV64_SSH_LIVE=1 ... test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl`, a live RISC-V QEMU SimpleOS+OpenSSH lane. This triage host is Windows with no riscv64 QEMU lane and no `src/compiler_rust/target/release/simple`; nothing here can execute it.
 - **measured**: 14 of the 16 repo paths this entry cites still exist, so it is not stale-by-removal. The two missing (`examples/09_embedded/simple_os/arch/riscv64/ed25519_probe_entry.spl`, `src/os/qemu_runner_part5.spl`) are the focused probe and a since-refactored runner split, not the subject code.
 - Verdict: still OPEN — a real runtime/pure Ed25519 signature mismatch, needing the Linux RV64 QEMU lane to confirm or clear.
+
+## Verification 2026-11-05 (riscv-sweep lane, work/riscv-sweep-20261105)
+
+Host-side dual-backend oracles re-run on `origin/release/1.0.0` @ `bc3e9b48cb4`
+(aarch64 Rust seed):
+
+```text
+ed25519_rfc8032_spec.spl          15/15 passed
+curve25519_rfc7748_spec.spl       10/10 passed
+dual_backend_alpha_spec.spl        4/4 passed
+sha512_direct_kat_spec.spl         3/3 passed
+```
+
+The pure-Simple crypto paths are clean on host. The recorded blocker is RV64
+*native execution* of the pure paths inside the live SSH lane; the live gate
+(`rv64_ssh_live_login_in_qemu_spec.spl` with `SIMPLEOS_RV64_SSH_LIVE=1`) was
+not re-run this pass (multi-minute RV64 native-build + QEMU + OpenSSH lane).
+Status: OPEN; host-side oracles green, live RV64 lane still required to close.
