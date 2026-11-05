@@ -160,3 +160,42 @@ pr1/pr2 must be true on the seed JIT lane. Suspect area:
 src/compiler_rust/compiler/src/codegen/ (extern argument lowering; compare
 with how pure-Simple MIR marks mut-class params). The JIT-vs-interpreted
 differential on this 20-line probe is the acceptance test.
+
+## Refinement 2026-11-05 (evening): dual-implementation symbol split, not a param copy
+
+Follow-up probes refine the mechanism (the 20-line repro stays deterministic:
+seed JIT pr1/pr2=false 3/3; seed interpreted true/true; pure-Simple true/true):
+
+1. `SIMPLE_TRANSIENT_PROMOTE_DEBUG=1` prints NOTHING on the failing JIT lane.
+   That debug print lives only in the C copy (runtime_native.c:3394). So the
+   promote JIT'd code calls is NOT the C copy — it is the Rust twin
+   (runtime/src/value/collections.rs:3081, #[no_mangle]
+   `rt_transient_heap_promote`), whose early `return 0` paths (e.g. the
+   fail-closed unknown-heap-kind walk below :3129) have no debug print.
+2. The Rust twin walks the RUST heap registry; JIT'd code allocates class
+   instances through plain-symbol `rt_object_new`, which ALSO exists in both
+   runtimes (Rust twin: runtime/src/value/objects.rs:92, #[no_mangle], calls
+   `track_transient_heap`; C twin in runtime_native.c). The executable
+   exports exactly one `_rt_object_new` (nm); which twin won the link is
+   not visible post-link.
+3. If the JIT-bound `_rt_object_new` is the C twin, JIT'd class instances
+   are invisible to the Rust registry -> the Rust promote walk fail-closes
+   -> false on every cycle, exactly as observed; the interpreter allocates
+   through in-crate Rust APIs (registered) -> true. No demotion is involved
+   (zero engine-demotion lines on the repro).
+
+So the mechanism class is: per-symbol dual-implementation (C vs Rust twin)
+linkage split across the JIT boundary — one more facet of the 2026-10-12
+divergence family (same source, two runtime implementations disagreeing
+data-dependently), NOT an argument-copy ABI defect.
+
+Decisive next check for the owner (minutes, no rebuild): disassemble the
+executable's `_rt_object_new` and `_rt_transient_heap_promote`
+(e.g. `otool -tvV` / gdb `disas`) and compare against both twins' code, or
+ld -map / `nm -m` at build time to see which object file supplies each
+plain symbol. Fix direction accordingly: (a) make the linkage uniform — all
+plain rt_* symbols resolve to ONE runtime family in the seed binary
+(prefer the Rust twins where they exist, since the interpreter and
+transient/promote family already use them), or (b) register C-heap objects
+with the Rust registry. Acceptance test unchanged: the 20-line probe's
+pr1/pr2 must be true on the seed JIT lane.
