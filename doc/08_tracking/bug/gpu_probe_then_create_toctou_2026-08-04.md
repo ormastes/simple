@@ -485,3 +485,57 @@ family fixed. Resume with all five changed specs plus device/fd-pressure and
 unavailable-device runs on a qualified producer; verify skipped coverage remains
 explicit and provenance sabotage fails. The independent historical module-load
 startup timing report is unchanged and needs a current producer reproduction.
+
+## 2026-11-05 production fix — strict create no longer gates on a probe prediction
+
+Fixed on branch `work/libbug-std-gputoctou-20261105` (base `origin/release/1.0.0`),
+worktree `/tmp/wt-libbug-gputoctou`.
+
+`Engine2D.create_with_backend_strict`
+(`src/lib/gc_async_mut/gpu/engine2d/engine.spl`) previously ran
+`probe_backend()` first and returned `Err(probe)` when the probe was not
+Initialized, attempting the create only when the probe predicted success. That
+is the production form of this bug: the probe runs an independent
+create+init+shutdown and caches nothing, so its answer does not survive the
+gap to the create. Both corruption directions lived inside the factory:
+
+- **False RED** — the probe transiently fails while the create would succeed:
+  strict create returned `Err` without ever attempting the create.
+- **Wasted/vacuous half** — the probe succeeds and the create then fails: a
+  typed `Err` was returned, but only after a full wasted probe cycle (and, for
+  vulkan before the instance-reuse fix, a second device acquisition).
+
+**Fix: the create IS the validation.** `create_with_backend_strict` now
+attempts `create_requested_backend` unconditionally — no probe gate. On create
+failure it consults ONE diagnostic probe taken AFTER the failed create (whose
+reason therefore describes the failure moment, never a pre-create prediction)
+and returns that typed result; only when the backend still probes healthy does
+it fall back to `BackendProbeResult.failed(canon, <create message>)`. The Err
+contract observed by the strict spec family is unchanged (terminal status,
+`requested_name` == the canonical request, backend-specific reason text such
+as the Linux/Metal "macOS" diagnostic, never a cpu/software substitute name),
+and a successful create no longer pays a probe cycle. First Green attempt
+(create-only error, no post-failure probe) regressed `metal_strict_spec`
+14/14 → 12/14 by losing the backend's own diagnostic; the post-failure probe
+restored 14/14.
+
+Because probe-vs-create divergence cannot be reproduced deterministically on
+GPU-less hosts, two disclosed fault-injection knobs were added beside
+`SIMPLE_2D_BACKEND` (same precedent as the `SIMPLE_VK_*_SABOTAGE` and
+`SIMPLE_2D_SIMD` test hooks; inert when unset):
+
+- `SIMPLE_2D_PROBE_FAULT` — forces ONE canonical backend's `probe_backend`
+  answer to Unavailable while the create path stays healthy.
+- `SIMPLE_2D_CREATE_FAULT` — forces ONE canonical backend's
+  `create_requested_backend` to fail while the probe stays healthy.
+
+Regression spec:
+`test/01_unit/lib/gpu/engine2d/engine_strict_create_toctou_spec.spl` — 3
+examples covering both directions plus honest-named facade fallback. RED
+pre-fix (3/3 failed), GREEN post-fix (3/3 passed) under the phase1 seed CLI on
+an aarch64 host.
+
+Known residual (unchanged): on hosts with a real device, the
+`web_engine2d_gpu_offload_parity_spec` pixel-parity examples can still diverge
+from the CPU oracle for rendering reasons unrelated to this factory change —
+verified byte-identical failures with the fix stashed and applied.

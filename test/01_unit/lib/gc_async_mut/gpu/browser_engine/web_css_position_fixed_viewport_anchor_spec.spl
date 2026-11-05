@@ -1,0 +1,122 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# Bug: doc/08_tracking/bug/browser_engine_css_position_fixed_not_viewport_anchored_2026-08-08.md
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_decl_apply.spl
+
+use std.spec.step
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir}
+use common.ui.draw_ir.{DrawIrCommand}
+
+fn _fixed_command_by_id(
+    commands: [DrawIrCommand], component_id: text
+) -> DrawIrCommand:
+    var idx = 0
+    while idx < commands.len():
+        if commands[idx].component_id == component_id:
+            return commands[idx]
+        idx = idx + 1
+    commands[0]
+
+describe "position: fixed viewport anchoring":
+    """
+    A fixed-positioned box's containing block is always the viewport
+    (CSS 2.2 10.1: the viewport, for fixed positioning), no matter which
+    ancestor is positioned or margined. Offsets given as left/top resolve
+    from the viewport origin (0,0); offsets given as right/bottom resolve
+    from the viewport's right/bottom edges. Regression guard for
+    doc/08_tracking/bug/browser_engine_css_position_fixed_not_viewport_anchored_2026-08-08.md.
+    """
+
+    it "fixed left/top anchors to the viewport origin inside a margined wrapper":
+        # @req REQ-SSPEC-UNIT
+        step("fixed left/top anchors to the viewport origin inside a margined wrapper")
+        val html = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff}" +
+            "#wrap{display:block;margin:20px;width:10px;height:10px}" +
+            "#fx{position:fixed;left:1px;top:2px;width:8px;height:8px;" +
+            "background-color:#ff0000}" +
+            "</style></head><body><div id='wrap'><div id='fx'></div></div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val fx = _fixed_command_by_id(composition.batches[0].commands, "fx")
+        expect(fx.x).to_equal(1)
+        expect(fx.y).to_equal(2)
+
+    it "fixed right/bottom anchors to the viewport edges inside a margined wrapper":
+        # @req REQ-SSPEC-UNIT
+        step("fixed right/bottom anchors to the viewport edges inside a margined wrapper")
+        val html = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff}" +
+            "#wrap{display:block;margin:20px;width:10px;height:10px}" +
+            "#fx{position:fixed;right:1px;bottom:2px;width:8px;height:8px;" +
+            "background-color:#ff0000}" +
+            "</style></head><body><div id='wrap'><div id='fx'></div></div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val fx = _fixed_command_by_id(composition.batches[0].commands, "fx")
+        # 64 (viewport) - 8 (box) - 1 (right inset) = 55; 64 - 8 - 2 = 54.
+        # Anchoring to the 20px-margined 10px wrapper would give 21 and 20.
+        expect(fx.x).to_equal(55)
+        expect(fx.y).to_equal(54)
+
+    it "fixed left/top ignores a positioned ancestor's box":
+        # @req REQ-SSPEC-UNIT
+        step("fixed left/top ignores a positioned ancestor's box")
+        val html = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff}" +
+            "#anc{display:block;position:relative;margin:7px;width:40px;height:40px;" +
+            "background-color:#3b82f6}" +
+            "#fx{position:fixed;left:1px;top:2px;width:8px;height:8px;" +
+            "background-color:#ff0000}" +
+            "</style></head><body><div id='anc'><div id='fx'></div></div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val fx = _fixed_command_by_id(composition.batches[0].commands, "fx")
+        # If fixed wrongly shared absolute's containing-block rule it would
+        # anchor to #anc's box origin (7,7) + (1,2) = (8,9).
+        expect(fx.x).to_equal(1)
+        expect(fx.y).to_equal(2)
+
+    it "fixed right/bottom ignores a positioned ancestor's box":
+        # @req REQ-SSPEC-UNIT
+        step("fixed right/bottom ignores a positioned ancestor's box")
+        val html = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff}" +
+            "#anc{display:block;position:relative;margin:7px;width:40px;height:40px;" +
+            "background-color:#3b82f6}" +
+            "#fx{position:fixed;right:1px;bottom:2px;width:8px;height:8px;" +
+            "background-color:#ff0000}" +
+            "</style></head><body><div id='anc'><div id='fx'></div></div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val fx = _fixed_command_by_id(composition.batches[0].commands, "fx")
+        # Anchoring to #anc would give 7 + 40 - 8 - 1 = 38 and
+        # 7 + 40 - 8 - 2 = 37 instead of the viewport-anchored 55 and 54.
+        expect(fx.x).to_equal(55)
+        expect(fx.y).to_equal(54)
+
+    it "fixed box is out of flow for following siblings":
+        # @req REQ-SSPEC-UNIT
+        step("fixed box is out of flow for following siblings")
+        val html = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff}" +
+            "#fx{position:fixed;left:30px;top:30px;width:8px;height:8px;" +
+            "background-color:#ff0000}" +
+            "#sib{display:block;width:20px;height:10px;background-color:#22c55e}" +
+            "</style></head><body><div id='fx'></div><div id='sib'></div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 64)
+        val sib = _fixed_command_by_id(composition.batches[0].commands, "sib")
+        # The sibling must start at the top of the flow, not below the fixed box.
+        expect(sib.x).to_equal(0)
+        expect(sib.y).to_equal(0)

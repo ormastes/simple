@@ -1653,6 +1653,15 @@ impl HirLowering:
                     # and in the steady state it never executes. Kept as two
                     # statements rather than one chained index expression --
                     # the two-step form is the shape this file has always used.
+                    # IMPLIDX-GUARD: the positions come from a memo that can
+                    # outlive the surface rows they index. Fail closed with one
+                    # precise diagnostic instead of indexing a dead array.
+                    val live_impl_count: i64 = imported_mod.impls.len()
+                    if impl_position < 0 or impl_position >= live_impl_count:
+                        self.error(
+                            hir_stale_surface_index_message("impls", imported_mod.module_name, surface_key, imported_name, impl_position, live_impl_count),
+                            import_span)
+                        return
                     val impl_: ModuleSurfaceImpl = imported_mod.impls[impl_position]
                     val method: ModuleSurfaceCallable = impl_.methods[method_name]
                     val kind = if method.is_static: SymbolKind.Function else: SymbolKind.Method
@@ -1707,11 +1716,22 @@ impl HirLowering:
                     if trait_source.found:
                         val trait_module_index = trait_source.module_index
                         trait_module_found = trait_module_index >= 0
+                        val surface_count: i64 = self.module_surfaces.surfaces.len()
+                        if trait_module_found and trait_module_index >= surface_count:
+                            self.error(
+                                hir_stale_surface_index_message("surfaces", imported_mod.module_name, surface_key, imported_name, trait_module_index, surface_count),
+                                import_span)
+                            trait_module_found = false
                         if trait_module_found:
                             trait_module = self.module_surfaces.surfaces[trait_module_index]
                         trait_source_name = trait_source.item_name
                     val trait_position = module_surface_name_position(
                         trait_module.trait_names, trait_source_name)
+                    if trait_module_found and trait_position >= trait_module.trait_values.len():
+                        self.error(
+                            hir_stale_surface_index_message("trait_values", trait_module.module_name, surface_key, trait_source_name, trait_position, trait_module.trait_values.len()),
+                            import_span)
+                        trait_module_found = false
                     if trait_module_found and trait_position >= 0:
                         val trait_: ModuleSurfaceTrait = trait_module.trait_values[trait_position]
                         for trait_method in trait_.methods:
@@ -1875,3 +1895,8 @@ fn hir_dependency_type_name(dependency: text) -> text:
     if dependency.starts_with("has_") and dependency.len() > 4:
         return dependency[4:]
     dependency
+
+fn hir_stale_surface_index_message(kind: text, module_name: text, surface_key: text, owner: text, position: i64, live_len: i64) -> text:
+    """One precise diagnostic for a memoized position that no longer fits the
+    live surface array it indexes (stale impl/name index after teardown)."""
+    "stale surface index [{kind}]: module={module_name} surface_key={surface_key} owner={owner} position={position} live_len={live_len}; the memoized index outlived the surface rows it indexes"

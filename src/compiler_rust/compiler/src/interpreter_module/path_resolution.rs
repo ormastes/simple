@@ -1021,6 +1021,33 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
             // This handles imports like `use sdn.parser.{parse}` where the module lives
             // under src/lib/common/sdn/parser.spl but doesn't have a `std.` prefix.
             if !is_stdlib {
+                // Root facade first: a bare legacy `import string` from a script
+                // outside the library tree names the ROOT `src/lib/string.spl`
+                // compatibility facade, not whichever concurrency family happens
+                // to carry a same-named package — the family hit served only the
+                // 8 `bm_*` symbols and ignored every facade export (`char_at`,
+                // `str_char_at`, ...). See doc/08_tracking/bug/legacy_import_string_namespace_dict_ignores_source_content_2026-08-11.md.
+                // Mirrors the pure-Simple resolver, which probes the root facade
+                // before the family fallback.
+                for lib_subpath in &["src/lib", "src/std"] {
+                    let lib_candidate = current.join(lib_subpath);
+                    if !p_exists(&lib_candidate) {
+                        continue;
+                    }
+                    let facade_relative: PathBuf = parts.iter().collect();
+                    let mut facade_path = lib_candidate.join(&facade_relative);
+                    facade_path.set_extension("spl");
+                    if p_exists(&facade_path) && p_is_file(&facade_path) {
+                        trace!(path = ?facade_path, "Found bare import at root lib facade (file)");
+                        return Ok(facade_path);
+                    }
+                    let mut facade_init = lib_candidate.join(&facade_relative);
+                    facade_init.push("__init__.spl");
+                    if p_exists(&facade_init) && p_is_file(&facade_init) {
+                        trace!(path = ?facade_init, "Found bare import at root lib facade (package)");
+                        return Ok(facade_init);
+                    }
+                }
                 for stdlib_subpath in &["src/lib", "src/std"] {
                     let stdlib_candidate = current.join(stdlib_subpath);
                     if !p_exists(&stdlib_candidate) {

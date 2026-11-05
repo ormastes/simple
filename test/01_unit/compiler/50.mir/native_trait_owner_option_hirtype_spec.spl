@@ -1,0 +1,135 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# native_trait_owner_for_type must not take an Option-derived HirType by value
+
+Stage3 fault (s3_fable41b): MirLowering.native_trait_owner_for_type+0x20b3
+(native_trait_registration.spl) AVs at address 0. The function reads only
+type_.kind but takes the HirType by value, so its prologue deep-copies the
+whole struct; when a caller narrowed the HirType out of an Option the span word
+is an Option transport word and the copy dereferences it. The fix is a by-kind
+entry point, native_trait_owner_for_kind, and Option-derived callers pass .kind.
+
+The seed cannot reproduce the stage3 fault. Parts: (1) by-kind answers like the
+by-type API for every arm, (2) Option-derived types keep their answer through
+the by-kind API, (3) source pins on the converted call sites.
+"""
+
+# @tag: unit, compiler, mir, native-trait, stage2-workaround
+
+use std.spec
+use std.io_runtime.{file_read}
+use compiler.hir.hir_types.{SymbolTable, SymbolKind, HirType, HirTypeKind, SymbolId}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn nto_span() -> Span:
+    Span.new(7, 9, 3, 4)
+
+fn nto_lowering_with(symbols: SymbolTable):
+    MirLowering.new_for_target(symbols, driver_mir_target_context(driver_core_compile_options_default()))
+
+fn nto_trait_table() -> SymbolTable:
+    var table = SymbolTable.new()
+    table.define("NtoShape", SymbolKind.Trait, nil, nto_span(), Visibility.Public, false, Some("nto_mod"))
+    table
+
+describe "native_trait_owner_for_kind matches native_trait_owner_for_type (arms)":
+    it "Named trait symbol answers the same owner":
+        var table = SymbolTable.new()
+        val id = table.define("NtoShape", SymbolKind.Trait, nil, nto_span(), Visibility.Public, false, Some("nto_mod"))
+        val lowering = nto_lowering_with(table)
+        val t = HirType(kind: HirTypeKind.Named(id, []), span: nto_span())
+        val by_type = lowering.native_trait_owner_for_type(t)
+        val by_kind = lowering.native_trait_owner_for_kind(t.kind)
+        assert_true(by_kind != "")
+        expect(by_kind).to_equal(by_type)
+
+    it "DynTrait answers the same owner":
+        var table = SymbolTable.new()
+        val id = table.define("NtoShape", SymbolKind.Trait, nil, nto_span(), Visibility.Public, false, Some("nto_mod"))
+        val lowering = nto_lowering_with(table)
+        val t = HirType(kind: HirTypeKind.DynTrait(id), span: nto_span())
+        expect(lowering.native_trait_owner_for_kind(t.kind)).to_equal(lowering.native_trait_owner_for_type(t))
+        assert_true(lowering.native_trait_owner_for_kind(t.kind) != "")
+
+    it "Named class symbol is not a trait owner":
+        var table = SymbolTable.new()
+        val id = table.define("NtoWidget", SymbolKind.Class, nil, nto_span(), Visibility.Public, false, Some("nto_mod"))
+        val lowering = nto_lowering_with(table)
+        val t = HirType(kind: HirTypeKind.Named(id, []), span: nto_span())
+        expect(lowering.native_trait_owner_for_kind(t.kind)).to_equal("")
+        expect(lowering.native_trait_owner_for_type(t)).to_equal("")
+
+    it "Named with a missing symbol answers empty":
+        val lowering = nto_lowering_with(SymbolTable.new())
+        val t = HirType(kind: HirTypeKind.Named(SymbolId(id: 99999), []), span: nto_span())
+        expect(lowering.native_trait_owner_for_kind(t.kind)).to_equal("")
+        expect(lowering.native_trait_owner_for_type(t)).to_equal("")
+
+    it "Tuple answers empty":
+        val lowering = nto_lowering_with(SymbolTable.new())
+        val t = HirType(kind: HirTypeKind.Tuple([]), span: nto_span())
+        expect(lowering.native_trait_owner_for_kind(t.kind)).to_equal("")
+        expect(lowering.native_trait_owner_for_type(t)).to_equal("")
+
+    it "Error kind answers empty":
+        val lowering = nto_lowering_with(SymbolTable.new())
+        val t = HirType(kind: HirTypeKind.Error, span: nto_span())
+        expect(lowering.native_trait_owner_for_kind(t.kind)).to_equal("")
+        expect(lowering.native_trait_owner_for_type(t)).to_equal("")
+
+describe "Option-derived HirType through the by-kind API (similar-pattern prevention)":
+    it "if-val narrowed type keeps the owner via .kind":
+        var table = SymbolTable.new()
+        val id = table.define("NtoShape", SymbolKind.Trait, nil, nto_span(), Visibility.Public, false, Some("nto_mod"))
+        val lowering = nto_lowering_with(table)
+        val opt: HirType? = Some(HirType(kind: HirTypeKind.Named(id, []), span: nto_span()))
+        var owner = ""
+        if val present = opt:
+            owner = lowering.native_trait_owner_for_kind(present.kind)
+        assert_true(owner != "")
+
+    it "?? default keeps the owner via .kind":
+        var table = SymbolTable.new()
+        val id = table.define("NtoShape", SymbolKind.Trait, nil, nto_span(), Visibility.Public, false, Some("nto_mod"))
+        val lowering = nto_lowering_with(table)
+        val opt: HirType? = Some(HirType(kind: HirTypeKind.Named(id, []), span: nto_span()))
+        val t: HirType = opt ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
+        assert_true(lowering.native_trait_owner_for_kind(t.kind) != "")
+
+    it ".unwrap() keeps the owner via .kind":
+        var table = SymbolTable.new()
+        val id = table.define("NtoShape", SymbolKind.Trait, nil, nto_span(), Visibility.Public, false, Some("nto_mod"))
+        val lowering = nto_lowering_with(table)
+        val opt: HirType? = Some(HirType(kind: HirTypeKind.DynTrait(id), span: nto_span()))
+        assert_true(lowering.native_trait_owner_for_kind(opt.unwrap().kind) != "")
+
+describe "call sites pass .kind, not the Option-derived value (source pins)":
+    it "switch_operators_calls.spl preserve_native_trait_match_result uses the by-kind API":
+        val src = file_read("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl")
+        assert_true(src.contains("native_trait_owner_for_kind(declared_source.kind)"))
+        assert_true(src.contains("native_trait_owner_for_kind(declared_prior.kind)"))
+        expect(src.contains("native_trait_owner_for_type(declared_source)")).to_equal(false)
+        expect(src.contains("native_trait_owner_for_type(declared_prior)")).to_equal(false)
+
+    it "method_calls_literals.spl native receiver uses the by-kind API":
+        val src = file_read("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
+        assert_true(src.contains("native_trait_owner_for_kind(native_receiver_type.kind)"))
+        expect(src.contains("native_trait_owner_for_type(native_receiver_type)")).to_equal(false)
+
+    it "native_trait_owner_for_type is a thin delegate":
+        val src = file_read("src/compiler/50.mir/_MirLowering/native_trait_registration.spl")
+        assert_true(src.contains("fn native_trait_owner_for_kind(kind: HirTypeKind) -> text:"))
+        assert_true(src.contains("self.native_trait_owner_for_kind(type_.kind)"))
+
+    it "native_trait_conversion.spl Option-narrowed locals use the by-kind API":
+        val src = file_read("src/compiler/50.mir/_MirLowering/native_trait_conversion.spl")
+        assert_true(src.contains("native_trait_owner_for_kind(existing.kind)"))
+        assert_true(src.contains("native_trait_owner_for_kind(declared_source.kind)"))
+        assert_true(src.contains("native_trait_owner_for_kind(source.kind)"))
+        expect(src.contains("native_trait_owner_for_type(existing)")).to_equal(false)
+        expect(src.contains("native_trait_owner_for_type(declared_source)")).to_equal(false)
+        expect(src.contains("native_trait_owner_for_type(source)")).to_equal(false)

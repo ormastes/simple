@@ -6,12 +6,12 @@
 
 use compiler.core.ast.{
     ast_reset,
-    EXPR_CALL, EXPR_IDENT, EXPR_INT_LIT, EXPR_MATCH, EXPR_STRING_LIT, EXPR_UNIT, expr_count, expr_int_lit, expr_get_args, expr_get_int, expr_get_left, expr_get_str, expr_get_tag,
+    EXPR_ASSIGN, EXPR_CALL, EXPR_IDENT, EXPR_INT_LIT, EXPR_MATCH, EXPR_STRING_LIT, EXPR_UNIT, expr_count, expr_int_lit, expr_get_args, expr_get_int, expr_get_left, expr_get_str, expr_get_tag,
     STMT_EXPR, STMT_RETURN, STMT_VAL_DECL, STMT_VAR_DECL, stmt_count, stmt_expr_stmt, stmt_get_expr, stmt_get_name, stmt_get_tag,
     DECL_IMPL, arm_get_body, arm_get_pattern, decl_get_body, decl_get_param_muts, decl_get_param_names,
     decl_get_tag, module_get_decls
 }
-use compiler.core.parser.{parser_get_errors, parser_has_errors, parser_init_with_path, parser_prepare_persistent_globals}
+use compiler.core.parser.{parser_get_errors, parser_has_errors, parser_init_with_path}
 use compiler.core.parser_decls.{parse_module_body}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
 use std.io_runtime.{read_file}
@@ -20,7 +20,6 @@ extern fn rt_env_get(key: text) -> text?
 extern fn rt_env_set(key: text, value: text) -> bool
 
 fn standalone_parser_init(source: text, path: text):
-    parser_prepare_persistent_globals()
     parser_init_with_path(source, path)
 
 describe "bootstrap expression and statement native arenas":
@@ -242,10 +241,15 @@ describe "bootstrap Some destructuring bindings":
         expect(parser_has_errors()).to_equal(true)
         expect(parser_get_errors().join("\n")).to_contain("expected =, got ( '('")
         val body = decl_get_body(module_get_decls()[0])
+        expect(body.len()).to_equal(2)
         expect(stmt_get_tag(body[0])).to_equal(STMT_VAR_DECL)
         expect(stmt_get_name(body[0])).to_equal("Some")
-        expect(expr_get_tag(stmt_get_expr(body[0]))).to_equal(EXPR_IDENT)
-        expect(expr_get_str(stmt_get_expr(body[0]))).to_equal("value")
+        # Recovery parses the remainder `(value) = maybe` as the initializer
+        # expression (assignment), preserving every user token, and the
+        # trailing `value` line still parses as an ordinary ident expression.
+        expect(expr_get_tag(stmt_get_expr(body[0]))).to_equal(EXPR_ASSIGN)
+        expect(expr_get_tag(stmt_get_expr(body[1]))).to_equal(EXPR_IDENT)
+        expect(expr_get_str(stmt_get_expr(body[1]))).to_equal("value")
         ast_reset()
 
     it "recovers malformed Some bindings without reparsing the initializer":

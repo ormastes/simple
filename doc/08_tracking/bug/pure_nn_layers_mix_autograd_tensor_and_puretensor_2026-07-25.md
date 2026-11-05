@@ -90,3 +90,43 @@ Softmax, Dropout, LeakyReLU, ELU and GELU still use raw values. They must not be
 silently bridged into tracked Sequential. Their graph-aware migration is not
 included in this bounded candidate. The broad parked training suite is not
 unparked or represented as passing.
+
+## 2026-11-05 first real execution + bounded backward fix (partial)
+
+Session: `work/libbug-std-purenn-20261105` (worktree off `origin/release/1.0.0`).
+Test CLI: phase-1 snapshot binary (Rust seed; `bin/simple` unavailable in the
+worktree) on aarch64 Linux, both `--mode=interpreter` and default compiled
+mode. Neighboring pure specs were baselined green before and after
+(`tensor_spec` 27 pass / 3 skip, `tensor_ops_spec` 16 pass, `autograd_spec` and
+`data_spec` 1 pass / 1 pending each — unchanged).
+
+What the first real run of `pure/test/nn_spec.spl` showed:
+
+1. The original type-surface symptom is resolved in this snapshot:
+   `Linear`/`ReLU`/`Sigmoid`/`Tanh`/`Sequential` are uniformly autograd
+   `Tensor`, `Linear.forward` runs, and 2/7 scenarios pass (batch-axis
+   contract; frozen-operand no-graph contract).
+2. `backward(tensor_sum(output))` crashed with
+   `array index out of bounds: index is 1 but length is 1`. Root cause:
+   `OpType.Sum`/`OpType.Mean` in `propagate_grads`
+   (`src/lib/gc_async_mut/pure/autograd.spl`) passed the length-1 reduced
+   gradient through unchanged to a multi-element input. Fixed by broadcasting
+   the reduced gradient to the input shape (`broadcast_reduced_grad`). After
+   the fix the crash is gone in both interpreter and compiled modes.
+3. The remaining 5 scenarios fail with `unwrap() on None`: leaf gradients
+   never reach caller-held tensors. Probed extensively (P1–P17): class
+   instances are shared only through direct variables/parameters and `me`
+   methods on them; list slots deep-copy class values at store time, class
+   field reads copy, and closures capture by value. The autograd tape stores
+   `inputs: [Tensor]`, so every `backward_step` during propagation mutates a
+   throwaway copy and `layer.weight.grad` / `input.grad` stay `nil`. No
+   std-lib-only redesign can bridge this: gradient write-back through a stored
+   graph requires shared references the current runtime does not provide
+   (`src/lib/gc_async_mut/pure/training.spl:627` already notes
+   "backward(loss) call would go here when autograd is available"). This is a
+   compiler/runtime semantics gap (aggregate slots copy), not fixable inside
+   `std.pure.*`; recorded here so the parked suites are not re-diagnosed from
+   scratch.
+
+Status: remains OPEN. Sum/Mean backward broadcast fixed; leaf-gradient
+propagation blocked on runtime shared-reference semantics.

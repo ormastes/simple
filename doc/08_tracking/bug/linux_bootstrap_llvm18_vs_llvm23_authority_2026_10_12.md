@@ -17,3 +17,24 @@ Official archive Polly/PollyISL and static LLVM availability is unexecuted. Inst
 ## Resolution (2026-11-03)
 
 2026-11-03: workflow now installs the exact LLVM 23.1.1 archive via scripts/setup/install-linux-phase23-llvm23.shs + pin-linux-phase23-llvm23.shs; real CI run still pending.
+
+## Verification Evidence (2026-11-05)
+
+Environment: aarch64 Linux host; `/usr/lib/llvm-18` and `/usr/lib/llvm-23` present (`clang-18` at /usr/bin, `clang-23` at ~/dev/llvm/install/bin, `opt-23` at /usr/bin).
+
+Worktree: `/tmp/wt-libbug-llvmauth`, branch `work/libbug-linux-llvmauth-20261105`, base `origin/release/1.0.0` (adfeae3765c).
+
+Named check executed:
+
+```
+$ cd /tmp/wt-libbug-llvmauth && sh test/01_unit/scripts/linux_phase23_llvm23_workflow_test.shs
+Actual Linux workflow wiring: valid commands + seven negative removals PASS
+```
+
+Result: PASS on first run, no fixes needed. The test exercises the real workflow steps `Install FreeType (Linux)`, `Install C tools (Linux Cranelift)`, and `Install exact LLVM authority (Linux LLVM)` from `.github/workflows/rust-bootstrap-multiplatform.yml` (lines ~372-380) with mocked sudo/apt, a fake installer, and a fake toolchain; verifies the pin helper publishes `LLVM_SYS_231_PREFIX`, the Cranelift apt deps (libfreetype6-dev, libunwind-dev, clang-18, lld-18, llvm-18-dev) are requested, and seven single-element removals are each rejected.
+
+Note: the named check is pure sh+embedded-python and does not invoke the Simple CLI; the phase1 snapshot binary substitution for `bin/simple` was not required for this check.
+
+Sanity-confirmed in worktree: `scripts/setup/install-linux-phase23-llvm23.shs`, `scripts/check/pin-linux-phase23-llvm23.shs` exist and the workflow references them; workflow YAML unchanged.
+
+Scope note: this verifies the workflow wiring/fixture level only; the real ~2 GB LLVM 23.1.1 archive download, installation, and full native bootstrap execution remain unexecuted (as the doc already records).

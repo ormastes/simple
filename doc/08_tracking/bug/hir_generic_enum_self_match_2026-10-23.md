@@ -57,3 +57,6 @@ poll.spl; the other shapes are admitted by the 2026-10-31 erased-binder
 `src/lib/nogc_sync_mut/failsafe/core.spl` (3 rebindings), `async/poll.spl`,
 `async/future.spl`, `nogc_async_mut/failsafe/core.spl`. `poll_unwrap` stays for
 rti007 (separate bug). Status: fixed in-tree; Stage 2 redeploy still pending.
+
+## Bootstrap repro/prevention 2026-11-05
+Bootstrap review: HIR fix on release (e7b5c93ba65), proof spec test/01_unit/compiler/20.hir/generic_enum_self_match_spec.spl (PR #6584). Lib workarounds stay until a Stage 2 producer with the fix is deployed. Verification-pending.

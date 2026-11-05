@@ -106,6 +106,15 @@ pub struct Parser<'a> {
     /// this counter tracks how many should be consumed at a later point (e.g., after
     /// an if-block before checking for elif/else).
     pub(crate) deferred_dedent_count: usize,
+    /// Set by `parse_block_body` when the body loop ended on a same-line
+    /// trailing `else:`/`elif` (at the body's own column, no closing Dedent
+    /// in between) instead of the block's own `Dedent`. The still-open INDENT
+    /// is closed by the DEDENT that trails the else/elif arm, so an `if` chain
+    /// reader must consume it once the whole chain is parsed. Always assigned
+    /// (true or false) by `parse_block_body`; consumers clear it before
+    /// parsing the branch they want to interrogate. See doc/08_tracking/bug/
+    /// riscv_scalar_product_vhdl_else_parse_2026-08-12.md.
+    pub(crate) block_body_ended_on_else: bool,
     /// `Some(call_arg_depth)` while parsing the INLINE then-branch of an `if`
     /// expression. At that depth an `else:` after `expr as Type` belongs to the
     /// `if`, not to the `CastElse` form: `if c: x as i64 else: 0` is an if/else
@@ -188,6 +197,7 @@ impl<'a> Parser<'a> {
             trait_alias_forwards: Vec::new(),
             binary_indent_count: 0,
             deferred_dedent_count: 0,
+            block_body_ended_on_else: false,
             inline_if_then_call_depth: None,
             call_arg_depth: 0,
             ho_arg_depth: 0,
@@ -285,6 +295,7 @@ impl<'a> Parser<'a> {
             trait_alias_forwards: Vec::new(),
             binary_indent_count: 0,
             deferred_dedent_count: 0,
+            block_body_ended_on_else: false,
             inline_if_then_call_depth: None,
             call_arg_depth: 0,
             ho_arg_depth: 0,
@@ -1410,6 +1421,15 @@ impl<'a> Parser<'a> {
         let mut statements = Vec::new();
         let mut iterations = 0usize;
 
+        // A block body statement may be followed by a same-line trailing
+        // `else:`/`elif` at the body's own column (no Dedent in between) —
+        // e.g. `if c:\n    stmt else: stmt`. The self-hosted grammar accepts
+        // that form; without the Else/Elif break below the loop fed the
+        // `else` to `parse_item` and died with "expected expression, found
+        // Else". The body's INDENT is still open in that case (its Dedent
+        // only follows the else/elif arm), so flag it for the if-chain
+        // reader. See doc/08_tracking/bug/
+        // riscv_scalar_product_vhdl_else_parse_2026-08-12.md.
         while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
             self.check_loop_limit(iterations, "parse_block_body")?;
             iterations += 1;
@@ -1418,7 +1438,11 @@ impl<'a> Parser<'a> {
             while self.check(&TokenKind::Newline) {
                 self.advance();
             }
-            if self.check(&TokenKind::Dedent) || self.is_at_end() {
+            if self.check(&TokenKind::Dedent)
+                || self.is_at_end()
+                || self.check(&TokenKind::Else)
+                || self.check(&TokenKind::Elif)
+            {
                 break;
             }
 
@@ -1430,6 +1454,8 @@ impl<'a> Parser<'a> {
                 self.advance();
             }
         }
+
+        self.block_body_ended_on_else = self.check(&TokenKind::Else) || self.check(&TokenKind::Elif);
 
         if self.check(&TokenKind::Dedent) {
             self.advance();

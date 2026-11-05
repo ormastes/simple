@@ -178,3 +178,38 @@ Results: 7 total, 7 passed, 0 failed          # rc=0
 `match` on an `Option<Enum>` value now fires the correct arm. Closing as
 already fixed; no source change was made by this lane.
 
+
+
+## Re-measurement 2026-11-05 — SEED FIX LANDED (94bb1e16459); tracked binary predates it; JIT residual open
+
+Binary A (tracked release/1.0.0 seed `bin/simple.exe`, committed 2026-10-31 as
+5a6bd3fd58c — PRE-fix): fixture row 4 = FALLTHROUGH under
+`SIMPLE_EXECUTION_MODE=interpret`, unchanged from every prior session.
+
+Binary B (seed rebuilt 2026-11-05 from source containing 94bb1e16459
+"fix(seed): match on Option<enum> looks through Some for user enum variant
+patterns", 2026-11-03): fixture row 4 = **A7**. All four rows green on both
+engines.
+
+The seed fix adds, in `interpreter_patterns.rs` `Pattern::Enum`, exactly the
+unwrap the pure-Simple interpreter got 2026-08-06: a `Value::Enum` scrutinee
+whose enum is `Option` and whose variant is `Some`, matched against a pattern
+that is neither `Some`/`None` nor names `Option`/`Result`, recurses into the
+payload before comparing tags.
+
+Regression gate added with this note:
+`test/01_unit/compiler/interpreter/option_enum_match_variant_spec.spl` +
+`probe_option_enum_match.spl` (8 checks: implicit/explicit/local construction
+shapes, match expression form, `Some(...)`-wrapped pattern regression guard,
+nil fall-through and `case nil:` controls). Verified red-before on binary A
+(interpreter `it` red, 2/3) and green-after on binary B (3/3), ~0.7s. The spec
+stays red until the tracked seed binary is refreshed past 94bb1e16459.
+
+STILL OPEN — JIT lane only: the cranelift JIT match lowering does not strip
+the Some box for user-variant patterns when the value was built by an explicit
+`Some(...)` construction (`fn f() -> Evt?: Some(Evt.Click(x: 5))`, or a local
+`val a = Some(Evt.Click(...))`); those shapes silently take the wildcard. The
+nested form `case Some(Evt.Click(x))` additionally binds the payload to nil.
+Pinned verbatim by the spec's third `it` so the numbers cannot move unnoticed.
+Tracked under
+enum_pattern_match_optional_value_silent_fallthrough_2026-07-20.md.

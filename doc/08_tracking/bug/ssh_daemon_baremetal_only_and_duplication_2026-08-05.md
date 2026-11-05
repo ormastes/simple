@@ -388,3 +388,52 @@ Six duplication sites also noted but not detailed here given budget.
 Out of this lane's per-item scope. Leaving OPEN.
 
 
+
+## Fix 2026-11-05: hosted listener path for sshd (partial — bind/accept/close only)
+
+Scope: the daemon-host-bind blocker only (recommended-order item 1, "port to
+`rt_io_tcp_*`" option). Findings 1-6 are untouched.
+
+Root cause recap: `SshDaemon.bind_and_ready()` / `accept_and_handle_once_result()`
+/ `stop()` in `src/os/apps/sshd/sshd.spl` called `rt_boot_tcp_bind` /
+`rt_boot_tcp_accept_timeout` / `rt_net_close` directly. Those externs are
+defined only in the rv64 freestanding runtime, so on a hosted OS the daemon
+died with `semantic: unknown extern function: rt_boot_tcp_bind` before it
+could ever listen.
+
+Fix (TDD, branch `work/libbug-linux-sshdnet-20261105` off `origin/release/1.0.0`):
+
+- `src/os/apps/sshd/sshd.spl` now routes the three listener operations through
+  target-selected helpers, mirroring the existing `@cfg` idiom in
+  `src/os/kernel/net/rt_net_socket_facade.spl`:
+  - `@cfg(riscv64)` -> `rt_boot_tcp_*` / `rt_net_close` (baremetal live lane,
+    unchanged behavior);
+  - `@cfg(not(riscv64))` -> hosted `rt_io_tcp_bind` / `rt_io_tcp_accept_timeout`
+    / `rt_io_tcp_close` (registered in the host runtime and the interpreter,
+    real host sockets).
+  `stop()` was made `pub` so hosted callers/specs can shut the daemon down.
+- New spec `test/01_unit/os/apps/sshd/sshd_hosted_listener_bind_spec.spl`
+  (interpreter mode): asserts `bind_and_ready()` binds a real host TCP
+  listener (ephemeral port 0), `running` flips true, and bind is repeatable
+  after `stop()`. RED before the fix (`unknown extern function:
+  rt_boot_tcp_bind`), GREEN after (2/2).
+
+Verification (Rust seed
+`build/phase_snapshots/phase1_1793422538/simple`, aarch64 host, worktree
+`/tmp/wt-libbug-sshdnet`):
+
+- New spec: 2/2 PASS under `--mode=interpreter`.
+- Regression: all 39 other specs in `test/01_unit/os/apps/sshd` have
+  byte-identical verdicts vs. the unmodified baseline (181 passed / 114
+  failed overall — the failures are pre-existing on this branch, e.g.
+  `sshd_credential_provider_spec.spl` 2/4 fail at baseline because
+  `SshUserDb.add_user_identity`/`has_authorized_key` do not exist in this
+  tree). `test/01_unit/os/kernel/net`: 52/63, failures identical at baseline
+  (none import the changed module). `lint src/os/apps/sshd/sshd.spl`: 9
+  errors, all pre-existing at baseline.
+
+Explicitly NOT done (out of scope): the accepted-session hot path
+(`ssh_session.spl` / `ssh_session_kex.spl` `rt_boot_tcp_send_*` fixed-frame
+externs, `rt_net_socket_facade`'s broken `not(riscv64)` branches) remains
+baremetal-only — a hosted client that connects will still fail inside the
+session loop. Duplication findings 1-6 remain open architecture decisions.

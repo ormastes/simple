@@ -52,3 +52,44 @@ up to the nearest positioned ancestor.
 - `test/03_system/gui/web_css/web_css_positioning_spec.spl` — `it "position:
   fixed anchors to the viewport"` (RED-by-design, left RED per project
   testing rules; do not weaken the assertion to hide this gap).
+
+## Fix evidence (2026-11-05, worktree branch work/libbug-std-cssfixed-20261105 off origin/release/1.0.0)
+
+Findings on this branch: the `left`/`top` half of this bug was already fixed
+here (`decl_apply` maps `position:fixed` onto the absolute layout lane with
+`position_fixed` retained, and `absolute_child_x`/`absolute_child_y` in
+`simple_web_html_layout_renderer_layout_foundation.spl` returned raw
+`left_px`/`top_px` for fixed boxes). The `right`/`bottom` insets were still
+resolved against the nearest ancestor's box, so the bug remained observable
+for right/bottom-anchored fixed boxes.
+
+Fix: `absolute_child_x`/`absolute_child_y` now check `position_fixed` first
+and resolve `right` against `viewport_w` and `bottom` against `viewport_h`;
+`viewport_w` is threaded through `layout`/`layout_with_style` exactly like the
+existing `viewport_h` pass-through (all root `layout(...)` call sites pass the
+viewport width).
+
+RED (before fix), new spec
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_css_position_fixed_viewport_anchor_spec.spl`:
+5 examples, 2 failures — both right/bottom cases anchored to the ancestor
+(`expected 20 to equal 54` inside a 20px-margined wrapper; `expected 37 to
+equal 54` inside a 7px-margined positioned ancestor). GREEN (after fix):
+5 examples, 0 failures.
+
+Regression checks (interpreter, seed CLI): `web_css_positioning_spec.spl`
+unchanged at 4 passed / 2 failed (the 2 failures are the unrelated
+float/clear RED-by-design gap); all other 7 specs under
+`test/03_system/gui/web_css/` match their pristine-branch baselines exactly;
+`simple_web_html_layout_renderer_paint_layout_coverage_closure_spec.spl`
+52/52; `simple_web_flex_grow_weighted_spec.spl` 3/3.
+
+## Fix-forward 2026-11-05 (follow-up to #6764)
+
+- `layout_selected` (simple_web_html_layout_renderer_layout_engine.spl:159) passed an
+  out-of-scope `viewport_w` on the contain:layout island path (`semantic: variable
+  viewport_w not found`); now passes `width` (the viewport width), matching the full
+  `layout(` fallback.
+- Two specs still used the old 15-arg `layout(` shape:
+  test/01_unit/browser_engine/simple_web_width_centering_spec.spl (800, 800, 600) and
+  containment_paint_contain_wired_spec.spl x3 (WIDTH, WIDTH, HEIGHT).
+- Repro + source pins: test/01_unit/lib/gc_async_mut/gpu/browser_engine/layout_selected_viewport_w_spec.spl.

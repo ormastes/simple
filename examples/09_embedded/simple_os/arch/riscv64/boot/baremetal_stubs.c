@@ -26,8 +26,13 @@ typedef intptr_t RuntimeValue;
 #define TAG_FLOAT   ((uintptr_t)0x2)
 #define TAG_SPECIAL ((uintptr_t)0x3)
 #define NIL_VALUE   ((RuntimeValue)TAG_SPECIAL)
-#define TRUE_VALUE  ENCODE_INT(1)
-#define FALSE_VALUE ENCODE_INT(0)
+/* Codegen tags (src/compiler_rust/compiler/src/codegen/llvm/instructions.rs
+ * `tagged_bool_const`): true = 11, false = 19. Spelled out because this TU
+ * does not include arch/common/baremetal_runtime.h. */
+#define TRUE_VALUE  ((RuntimeValue)11)
+#define FALSE_VALUE ((RuntimeValue)19)
+_Static_assert(TRUE_VALUE == 11, "TRUE_VALUE must match codegen tagged true (11)");
+_Static_assert(FALSE_VALUE == 19, "FALSE_VALUE must match codegen tagged false (19)");
 
 #define ENCODE_INT(v) ((RuntimeValue)(((uint64_t)(int64_t)(v) << 3) | TAG_INT))
 #define DECODE_INT(v) ((int64_t)(v) >> 3)

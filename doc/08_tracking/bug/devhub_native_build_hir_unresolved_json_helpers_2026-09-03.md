@@ -110,3 +110,53 @@ on a 7-line json program. `[mir-lower] WARNING: unresolved method call
 those runs, so any future "successful" devhub build is suspect until they are
 addressed.
 
+## Status 2026-11-05 — NOT REPRODUCIBLE on release/1.0.0 (defect class fixed)
+
+Verified on branch `work/rel100-devhub-fixes-20261105` @ `c3b2271c310`:
+
+1. **Data side (this record's "repaired data-side" commits) is merged here.**
+   `src/lib/common/json/__init__.spl` now declares real `export use`
+   owner-module edges (`common.json.{array_ops,object_ops,parser,path_ops,
+   serializer,types,utilities,validation}.*`), and the file_system facade has
+   likewise (facade-owner fix `0a3963ca0d5` reachable from HEAD).
+2. **Compiler side is merged here.** `bb27a92a7a8` ("fix(compiler,lib): four
+   native-build defects — devhub 175→21, MIR module globals, caret suite,
+   diagnostics transport (#345)") is an ancestor of HEAD.
+3. **Re-ran the original repro** with the tracked `bin/simple.exe` seed:
+
+   ```
+   bin/simple.exe native-build src/app/devhub/main.spl -o build/devhub-lane/devhub_native.exe
+   ```
+
+   The log contains **zero** `unresolved name` / `invalid export origin` /
+   `unresolved type` lines — HIR name resolution, the phase this record's
+   175-error census died in, is clean. The build proceeded deep into later
+   phases and was killed at a 20-minute wall-clock cap during codegen; no
+   artifact was produced in this session.
+4. **Interpreter lane still healthy:** `bin/simple.exe run
+   src/app/devhub/main.spl --version` prints `devhub 0.1.0` (exit 0), and the
+   full `test/01_unit/app/devhub` suite runs 1046+ examples with only one
+   unrelated, separately-explained failure (see below).
+
+**Still open, tracked elsewhere (not this record):** the remaining 21-error
+census and the post-HIR MIR/SEGV warnings named in the UPDATE above remain the
+subject of the sibling records (`hir_generic_type_param_unresolved_cross_module`,
+`print_raw_builtin_unknown_to_selfhosted_hir`,
+`implicit_self_field_read_unresolved_in_plain_fn_method`, and the unfiled
+`rt_env_cwd` item) plus the stage2 SEGV-after-monomorphize caveat.
+
+**Suite note for the merge owner:** in the directory-mode unit sweep,
+`test/01_unit/app/devhub/wiki_backend_routing_spec.spl` fails 15/1 while the
+same file passes 16/16 when run alone. Root cause (verified by env diff and
+stderr capture): the directory runner exports `SIMPLE_JIT_ENABLED=1` to route
+children (single-file runs instead set `SIMPLE_EXECUTION_MODE=interpret`), so
+the spec's last test — which spawns the real `bin/itf wiki --help` — executes
+devhub through the seed JIT. The seed JIT then reports 23 pre-existing
+`[CODEGEN-STUB-FALLBACK] body compilation failed` errors, all in
+`src/lib/{gc_async_mut,nogc_async_mut,nogc_sync_mut}/http_client/request.spl`
+(`GlobalLoad: unresolved identifier 'request'` in `create_headers`,
+`add_header`, `send_request`, `http_get/post/put/delete`, `response_*`),
+unrelated to the `errors.spl` `kind` regression that test guards. None of the
+23 failing functions are in `src/app/devhub/**`; fixing them belongs to the
+http_client/seed-JIT lane. No source change was made for this record.
+

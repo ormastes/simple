@@ -1,0 +1,82 @@
+# Purpose and audience: executable regression evidence for the production half of
+# doc/08_tracking/bug/gpu_probe_then_create_toctou_2026-08-04.md.
+#
+# The spec family around web_engine2d_gpu_offload_* was repaired to never assert
+# from a probe prediction. This spec pins the matching factory invariant:
+# Engine2D.create_with_backend_strict must not gate the device create on a
+# SEPARATE probe_backend prediction. The probe runs its own create+init+shutdown
+# and then throws it away; the strict create is a SECOND, INDEPENDENT create, so
+# the probe's answer does not survive the gap to creation — in EITHER direction:
+#
+#   probe fails, create would succeed -> gating on the probe used to false-RED
+#     the lane (strict create returned Err without ever attempting the create).
+#   probe succeeds, create then fails -> the failure must surface as a typed
+#     diagnostic built from the CREATE's own error, never as a silent
+#     cpu/software substitute wearing the requested backend's name.
+#
+# Both directions are driven through documented fault-injection env knobs
+# (SIMPLE_2D_PROBE_FAULT / SIMPLE_2D_CREATE_FAULT, implemented next to
+# SIMPLE_2D_BACKEND in engine.spl), so probe-vs-create divergence is
+# deterministic on hosts with no GPU — no fd pressure, no real device needed.
+# The knobs follow the established SIMPLE_VK_*_SABOTAGE / SIMPLE_2D_SIMD
+# precedent: disclosed test hooks, inert when unset.
+#
+# @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 80%
+# @tag: unit, gpu, engine2d, toctou, strict-create, provenance
+
+use std.spec.{describe, it, expect, step}
+use std.env.variables.{env_set}
+use std.gpu.engine2d.engine.{Engine2D}
+use std.gpu.engine2d.backend_probe.{BackendStatus, backend_probe_initialized}
+
+describe "Engine2D strict create closes the probe-then-create TOCTOU":
+    it "attempts the create when the probe's prediction fails (false-red direction)":
+        step("Inject a probe failure for the 'software' lane and confirm the probe reports it")
+        env_set("SIMPLE_2D_PROBE_FAULT", "software")
+        val probe = Engine2D.probe_backend(8, 8, "software")
+        expect(backend_probe_initialized(probe)).to_equal(false)
+        print("[toctou] probe predicted unavailable; the create must re-validate at creation, not trust this prediction")
+
+        step("Strict create must attempt the create and stand on its own result")
+        val created = Engine2D.create_with_backend_strict(8, 8, "software")
+        env_set("SIMPLE_2D_PROBE_FAULT", "")
+        expect(created.is_ok()).to_equal(true)
+        var engine = created.unwrap()
+        expect(engine.backend_name()).to_equal("software")
+        engine.clear(0xff000000u32)
+        engine.draw_rect_filled(2, 2, 4, 4, 0xffff0000u32)
+        val px = engine.read_pixels()
+        expect(px.len()).to_equal(64)
+        expect(px[3 * 8 + 3]).to_equal(0xffff0000u32)
+        expect(px[0]).to_equal(0xff000000u32)
+        engine.shutdown()
+
+    it "fails structurally from the create's own evidence when the create fails after a healthy probe (vacuous direction)":
+        step("Inject a create failure for the 'cpu' lane; the probe itself must stay healthy")
+        env_set("SIMPLE_2D_CREATE_FAULT", "cpu")
+        val probe = Engine2D.probe_backend(8, 8, "cpu")
+        expect(backend_probe_initialized(probe)).to_equal(true)
+
+        step("Strict create must return a typed failure naming the requested backend, sourced from the create")
+        val created = Engine2D.create_with_backend_strict(8, 8, "cpu")
+        env_set("SIMPLE_2D_CREATE_FAULT", "")
+        expect(created.is_ok()).to_equal(false)
+        val diag = created.unwrap_err()
+        expect(diag.requested_name).to_equal("cpu")
+        expect(diag.selected_name).to_equal("cpu")
+        expect(diag.status).to_equal(BackendStatus.Failed)
+        expect(diag.reason).to_contain("injected create fault")
+        expect(diag.fallback_reason.len()).to_be_greater_than(0)
+
+    it "facade create_with_backend degrades to an honestly-named CPU lane under a create fault":
+        step("Inject a create failure for 'software' and confirm the facade fallback does not wear the requested name")
+        env_set("SIMPLE_2D_CREATE_FAULT", "software")
+        val engine = Engine2D.create_with_backend(8, 8, "software")
+        env_set("SIMPLE_2D_CREATE_FAULT", "")
+        expect(engine.backend_name()).to_equal("cpu")
+        engine.clear(0xff000000u32)
+        engine.draw_rect_filled(1, 1, 2, 2, 0xff00ff00u32)
+        val px = engine.read_pixels()
+        expect(px.len()).to_equal(64)
+        expect(px[1 * 8 + 1]).to_equal(0xff00ff00u32)
+        engine.shutdown()

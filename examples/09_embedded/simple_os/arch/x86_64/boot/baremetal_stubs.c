@@ -326,8 +326,13 @@ static int8_t _simpleos_log_write_cstr(int64_t level, const char *msg)
 #define IS_NIL(v)      ((v) == (RuntimeValue)TAG_SPECIAL)
 
 #define NIL_VALUE      ((RuntimeValue)TAG_SPECIAL)
-#define TRUE_VALUE     ENCODE_INT(1)
-#define FALSE_VALUE    ENCODE_INT(0)
+/* Codegen tags (src/compiler_rust/compiler/src/codegen/llvm/instructions.rs
+ * `tagged_bool_const`): true = 11, false = 19. Spelled out because this TU
+ * does not include arch/common/baremetal_runtime.h. */
+#define TRUE_VALUE     ((RuntimeValue)11)
+#define FALSE_VALUE    ((RuntimeValue)19)
+_Static_assert(TRUE_VALUE == 11, "TRUE_VALUE must match codegen tagged true (11)");
+_Static_assert(FALSE_VALUE == 19, "FALSE_VALUE must match codegen tagged false (19)");
 
 /* HeapHeader — 8 bytes, matches src/runtime/runtime_value.h and the Rust
  * runtime's repr(C) heap header (value/heap.rs): object_type u8, gc_flags u8,

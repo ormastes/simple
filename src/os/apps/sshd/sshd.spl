@@ -41,6 +41,45 @@ extern fn rt_boot_tcp_accept_timeout(fd: i64, ms: i64) -> i64
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
+# Hosted-runtime TCP externs (registered in the host runtime and the
+# interpreter; see rt_io_tcp_* in src/runtime/runtime_native.c).
+extern fn rt_io_tcp_bind(addr: text) -> i64
+extern fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64
+extern fn rt_io_tcp_close(fd: i64) -> bool
+
+# ---------------------------------------------------------------------------
+# Listener transport selection.
+#
+# The rv64 live lane binds through the boot-local TCP runtime (rt_boot_tcp_*,
+# defined only in the riscv64 freestanding runtime). On a hosted OS those
+# externs do not exist, so the daemon must bind through the hosted rt_io_tcp_*
+# runtime instead. See doc/08_tracking/bug/
+# ssh_daemon_baremetal_only_and_duplication_2026-08-05.md.
+# ---------------------------------------------------------------------------
+
+@cfg(riscv64)
+fn _sshd_listener_bind(port: u16) -> i64:
+    rt_boot_tcp_bind("0.0.0.0:{port}")
+
+@cfg(not(riscv64))
+fn _sshd_listener_bind(port: u16) -> i64:
+    rt_io_tcp_bind("0.0.0.0:{port}")
+
+@cfg(riscv64)
+fn _sshd_listener_accept_timeout(listen_fd: i64, ms: i64) -> i64:
+    rt_boot_tcp_accept_timeout(listen_fd, ms)
+
+@cfg(not(riscv64))
+fn _sshd_listener_accept_timeout(listen_fd: i64, ms: i64) -> i64:
+    rt_io_tcp_accept_timeout(listen_fd, ms)
+
+@cfg(riscv64)
+fn _sshd_listener_close(listen_fd: i64):
+    rt_net_close(listen_fd)
+
+@cfg(not(riscv64))
+fn _sshd_listener_close(listen_fd: i64):
+    rt_io_tcp_close(listen_fd)
 
 # ============================================================================
 # Constants
@@ -555,13 +594,12 @@ impl SshDaemon:
         serial_println("[sshd] configured host identity ready")
         serial_println("[sshd] Host keys ready")
 
-        # The RV64 live lane uses the boot-local TCP runtime directly.
-        # This avoids the unstable cross-module bind/listen path and keeps
-        # the listener on the same boot TCP surface the successful probe uses.
-        val fd = rt_boot_tcp_bind("0.0.0.0:{self.port}")
+        # The listener transport is target-selected: rv64 uses the boot-local
+        # TCP runtime; a hosted OS uses the hosted rt_io_tcp_* runtime.
+        val fd = _sshd_listener_bind(self.port)
         if fd < 0:
-            serial_println("[sshd] rt_boot_tcp_bind failed")
-            return Err("failed to bind boot TCP listener: {fd}")
+            serial_println("[sshd] listener bind failed")
+            return Err("failed to bind TCP listener: {fd}")
         self.listen_fd = fd
         serial_println("[sshd] start: socket ready")
 
@@ -642,7 +680,7 @@ impl SshDaemon:
         blocking forever inside accept_loop(). Requires bind_and_ready()
         (or start(), which calls it) to have run first.
         """
-        val raw_client_fd = rt_boot_tcp_accept_timeout(self.listen_fd, 1)
+        val raw_client_fd = _sshd_listener_accept_timeout(self.listen_fd, 1)
         if raw_client_fd < 0:
             return SshDaemonAcceptResult(accepted: false, session_complete: false, accept_resumed: false)
         val client_fd = normalize_boot_tcp_client_fd(raw_client_fd)
@@ -770,7 +808,7 @@ impl SshDaemon:
             rsa_sha2_512_cert: nil
         )
 
-    me stop():
+    pub me stop():
         """Stop the SSH daemon and close the listening socket."""
         self.running = false
         self.capability_probe_identity = ""
@@ -778,7 +816,7 @@ impl SshDaemon:
         self.capability_pending_sequence = 0
         self.published_capabilities = []
         if self.listen_fd >= 0:
-            rt_net_close(self.listen_fd)
+            _sshd_listener_close(self.listen_fd)
             self.listen_fd = -1
 
         # Close all active sessions

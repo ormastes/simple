@@ -144,3 +144,62 @@ count: 0). The historical deployed Rust dictionary symptom therefore remains
 unverified; this source candidate alone does not establish that its original
 producer was repaired. Keep the bug open pending admitted interpreter/native
 regressions and the compiler/core/lib/MCP checks required by repository policy.
+
+
+## 2026-11-05 — ROOT-CAUSED + FIXED (Rust seed resolver), partial regression admission
+
+Root cause (Rust seed, `src/compiler_rust/compiler/src/interpreter_module/path_resolution.rs`):
+for a bare single-segment import such as legacy `import string`, the final
+fallback search in `resolve_module_path_uncached` probed ONLY the concurrency
+family subdirectories (`src/lib/<family>/string.spl` /
+`src/lib/<family>/string/__init__.spl`). It never probed the root facade
+`src/lib/string.spl`. The family scan hit
+`src/lib/nogc_async_mut_noalloc/string/__init__.spl` — whose entire export
+surface is the 8 `bm_*` symbols — so `import string` from any caller outside
+the library tree bound a namespace dict containing exactly those 8 keys,
+ignoring `src/lib/string.spl` entirely (its `char_at`, `str_char_at`,
+`char_code`, `str_repeat`, ...). That is the exact stale-dict symptom observed
+since 2026-08-11. Scripts inside `src/lib` were unaffected because the
+parent-directory climb resolves the facade before the fallback ever runs.
+
+Fix: in the same fallback block, probe the ROOT facade
+(`src/lib/<name>.spl`, then `src/lib/<name>/__init__.spl`) BEFORE the family
+subdirectory scan, mirroring the pure-Simple resolver semantics already
+asserted by `test/01_unit/compiler/interpreter/full_module_source_namespace_spec.spl`
+(root facade wins for bare `string`; caller-local source still wins via the
+earlier caller-relative strategies, unchanged). Blast radius: only bare
+non-stdlib imports whose first segment names an existing root `src/lib` file
+or package change target — verified no such other legacy import exists in
+`test/01_unit`, `test/02_integration`, `test/00_unit`, `test/00_quick`, or
+`examples` (only Python `import os`-style lines matched).
+
+Verification (worktree /tmp/wt-libbug-strns on release/1.0.0 base
+adfeae3765c; host aarch64 Linux; `bin/simple` absent — RED ran on the
+phase1 snapshot seed, GREEN on the worktree-rebuilt seed
+`src/compiler_rust/target/release/simple` from this fix, cargo
+`--release --bin simple`):
+
+- `simple run` of the doc's two-line reproducer now prints `char_at=e`
+  (previously: `method 'char_at' not found on type 'dict'` with the 8
+  `bm_*` keys).
+- `test/02_integration/compiler/interpreter/legacy_string_source_namespace_spec.spl`
+  example 1 (the exact legacy string repro: `char_at`, `str_char_at`,
+  `char_code`, `str_repeat` values) PASSES. Example 2 still fails on its
+  FINAL assertion (`expect(transform(7)).to_equal(-93)`: the caller's own
+  local `fn transform` dispatches to the imported provider's body) — that
+  misdispatch reproduces verbatim on the UNMODIFIED phase1 seed and is
+  independent of `import string` (fails without the import line, on both
+  binaries). It is a separate pre-existing seed defect (imported module's
+  same-named fn shadows the caller's local fn via the merged flat function
+  table), out of scope for this bug.
+- Regression, all PASS on the rebuilt seed: string_core_spec (2),
+  string_core_basic_coverage_spec (279), string_core_ops_spec (207),
+  string_builder_spec (10), rt_string_ends_with_extern_dispatch_spec (12),
+  full_module_source_namespace_spec (4), tool_checker_spec (3, exercises
+  bare `import spipe` — confirms non-facade bare imports still reach the
+  family fallback unchanged).
+
+Status: the original stale-8-`bm_*`-dict symptom is FIXED in the seed
+resolver source. Re-verify against a redeployed `bin/release/<triple>/simple`
+built from this source before closing. The separate caller-local-fn
+shadowing defect above should get its own bug entry if none exists.

@@ -487,3 +487,201 @@ fn sidecar_dialect_identity_and_target_admission() {
     assert!(!std::fs::read_to_string(path).expect("foreign source").contains("out dx, al"));
     clear_inline_asm_blocks();
 }
+
+#[test]
+fn naked_sidecar_attribute_does_not_change_regular_asm() {
+    use crate::codegen::inline_asm::{clear_inline_asm_blocks, register_inline_asm, register_naked_inline_asm};
+    use crate::hir::AsmDialect;
+    use crate::pipeline::native_project::inline_asm_emit::write_inline_asm_c_for_target;
+
+    let _guard = inline_asm_test_lock().lock().expect("inline asm test lock");
+    clear_inline_asm_blocks();
+    let instructions = vec!["nop".to_string()];
+    let regular = register_inline_asm(&instructions, true, AsmDialect::Default);
+    let naked = register_naked_inline_asm(&instructions, true, AsmDialect::Default);
+    assert_ne!(regular, naked, "naked and regular bodies must not share a sidecar symbol");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_inline_asm_c_for_target(dir.path(), Some(("x86_64-unknown-none", "", "")))
+        .expect("write asm")
+        .expect("sidecar");
+    let source = std::fs::read_to_string(path).expect("read asm");
+    assert!(source.contains(&format!("__attribute__((used)) void {regular}(void)")));
+    assert!(source.contains(&format!("__attribute__((used, naked)) void {naked}(void)")));
+    clear_inline_asm_blocks();
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+fn disassemble_symbol(object: &std::path::Path, symbol: &str) -> String {
+    let output = std::process::Command::new("objdump")
+        .arg("-d")
+        .arg(format!("--disassemble={symbol}"))
+        .arg(object)
+        .output()
+        .expect("run objdump");
+    assert!(output.status.success(), "objdump {symbol}: {}", String::from_utf8_lossy(&output.stderr));
+    String::from_utf8(output.stdout).expect("objdump utf8")
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+fn first_instruction(disassembly: &str) -> &str {
+    disassembly
+        .lines()
+        .find(|line| line.contains(":\t"))
+        .and_then(|line| line.split('\t').nth(2))
+        .map(str::trim)
+        .unwrap_or_else(|| panic!("no instruction in disassembly:\n{disassembly}"))
+}
+
+/// Reproduces both SimpleOS mutex failures from
+/// `naked_asm_lowering_miscompiles_simpleos_mutex_2026-09-01`: a sidecar frame
+/// prologue and a wrapper call followed by ud2. Also executes the resulting
+/// objects so the CAS transitions and CPU-ID return path are checked, not just
+/// the generated C source.
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+#[test]
+fn naked_simpleos_mutex_cas_cpu_id_disassembly_and_execution() {
+    use crate::hir::{AsmDialect, TypeId};
+    use crate::mir::{BlockId, LocalKind, MirFunction, MirInst, MirLocal, MirModule, Terminator};
+    use simple_parser::ast::Visibility;
+
+    fn naked_function(name: &str, param_count: usize, instructions: &[&str]) -> MirFunction {
+        let mut func = MirFunction::new(name.to_string(), TypeId::I64, Visibility::Public);
+        func.attributes.push("naked".to_string());
+        for index in 0..param_count {
+            func.params.push(MirLocal {
+                name: format!("arg{index}"),
+                ty: TypeId::I64,
+                kind: LocalKind::Parameter,
+                is_ghost: false,
+            });
+        }
+        func.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::InlineAsm {
+            dialect: AsmDialect::Default,
+            instructions: instructions.iter().map(|instruction| instruction.to_string()).collect(),
+            volatile: true,
+            constraints: "~{memory}".to_string(),
+            inputs: vec![],
+            outputs: vec![],
+        });
+        func.block_mut(BlockId(0)).unwrap().terminator = Terminator::Unreachable;
+        func
+    }
+
+    let _guard = inline_asm_test_lock().lock().expect("inline asm test lock");
+    crate::codegen::inline_asm::clear_inline_asm_blocks();
+    let mut module = MirModule::new();
+    module.functions.push(naked_function(
+        "_mutex_word_cas",
+        3,
+        &[
+            "mov eax, esi",
+            "lock cmpxchg dword ptr [rdi], edx",
+            "sete al",
+            "movzx eax, al",
+            "ret",
+        ],
+    ));
+    module.functions.push(naked_function(
+        "_mutex_cpu_id",
+        0,
+        &[
+            "push rbx",
+            "xor eax, eax",
+            "cpuid",
+            "cmp eax, 0xb",
+            "jb .Lsimpleos_mutex_x64_legacy_apic",
+            "mov eax, 0xb",
+            "xor ecx, ecx",
+            "cpuid",
+            "test ebx, ebx",
+            "jz .Lsimpleos_mutex_x64_legacy_apic",
+            "mov eax, edx",
+            "pop rbx",
+            "ret",
+            ".Lsimpleos_mutex_x64_legacy_apic:",
+            "mov eax, 1",
+            "cpuid",
+            "shr ebx, 24",
+            "movzx eax, bl",
+            "pop rbx",
+            "ret",
+        ],
+    ));
+    let object = crate::codegen::Codegen::new()
+        .expect("codegen")
+        .compile_module(&module)
+        .expect("compile naked mutex module");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let wrappers = dir.path().join("mutex_wrappers.o");
+    std::fs::write(&wrappers, object).expect("write wrappers");
+    let asm_object = crate::pipeline::native_project::inline_asm_emit::compile_inline_asm_c(
+        dir.path(),
+        Some(("x86_64-unknown-none", "", "")),
+    )
+    .expect("compile naked sidecar")
+    .expect("sidecar object");
+
+    let blocks = crate::codegen::inline_asm::collected_inline_asm_blocks();
+    assert_eq!(blocks.len(), 2);
+    assert!(blocks.iter().all(|block| block.naked));
+    let cas_symbol = &blocks
+        .iter()
+        .find(|block| block.instructions.iter().any(|instruction| instruction.contains("cmpxchg")))
+        .expect("CAS block")
+        .symbol;
+    let cpu_symbol = &blocks
+        .iter()
+        .find(|block| block.instructions.iter().any(|instruction| instruction == "cpuid"))
+        .expect("CPU-ID block")
+        .symbol;
+
+    let cas_thunk = disassemble_symbol(&asm_object, cas_symbol);
+    assert!(first_instruction(&cas_thunk).starts_with("mov    %esi,%eax"), "{cas_thunk}");
+    assert!(cas_thunk.contains("lock cmpxchg %edx,(%rdi)"), "{cas_thunk}");
+    assert!(cas_thunk.contains("sete   %al") && cas_thunk.contains("movzbl %al,%eax"), "{cas_thunk}");
+    assert!(!cas_thunk.contains("%rbp"), "naked CAS sidecar gained a frame:\n{cas_thunk}");
+    let cpu_thunk = disassemble_symbol(&asm_object, cpu_symbol);
+    assert!(first_instruction(&cpu_thunk).starts_with("push   %rbx"), "{cpu_thunk}");
+    assert_eq!(cpu_thunk.matches("cpuid").count(), 3, "{cpu_thunk}");
+    assert!(cpu_thunk.contains("shr    $0x18,%ebx"), "{cpu_thunk}");
+    assert!(!cpu_thunk.contains("%rbp"), "naked CPU-ID sidecar gained a frame:\n{cpu_thunk}");
+
+    for wrapper in ["_mutex_word_cas", "_mutex_cpu_id"] {
+        let disassembly = disassemble_symbol(&wrappers, wrapper);
+        assert!(disassembly.contains("call"), "wrapper does not call its thunk:\n{disassembly}");
+        assert!(disassembly.contains("ret"), "wrapper does not propagate the return:\n{disassembly}");
+        assert!(!disassembly.contains("ud2"), "wrapper traps after its call:\n{disassembly}");
+    }
+
+    let harness = dir.path().join("mutex_harness.c");
+    std::fs::write(
+        &harness,
+        r#"#include <stdint.h>
+extern uint64_t _mutex_word_cas(uint64_t addr, uint32_t expected, uint32_t desired);
+extern uint64_t _mutex_cpu_id(void);
+int main(void) {
+    uint32_t word = 0;
+    if (_mutex_word_cas((uint64_t)(uintptr_t)&word, 0, 42) != 1 || word != 42) return 1;
+    if (_mutex_word_cas((uint64_t)(uintptr_t)&word, 0, 99) != 0 || word != 42) return 2;
+    if (_mutex_word_cas((uint64_t)(uintptr_t)&word, 42, 0) != 1 || word != 0) return 3;
+    (void)_mutex_cpu_id();
+    return 0;
+}
+"#,
+    )
+    .expect("write harness");
+    let executable = dir.path().join("mutex_harness");
+    let link = std::process::Command::new("clang")
+        .arg("-no-pie")
+        .arg(&harness)
+        .arg(&wrappers)
+        .arg(&asm_object)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .expect("link mutex harness");
+    assert!(link.status.success(), "link mutex harness: {}", String::from_utf8_lossy(&link.stderr));
+    let run = std::process::Command::new(&executable).output().expect("run mutex harness");
+    assert!(run.status.success(), "mutex harness failed: {run:?}");
+    crate::codegen::inline_asm::clear_inline_asm_blocks();
+}
