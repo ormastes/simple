@@ -230,3 +230,60 @@ slot owners), a different class from this record's clobber — filed here
 as the new tail: next lane owns the constructor lowering; the runtime
 side of THIS record is closed (no clobber remains: the sentinel proves
 the global and, post-fix, no overlay writer exists inside .bss).
+
+---
+
+## 2026-11-05 — REPRO LANE (PR #7011+1): the deterministic word is a struct-literal codegen defect, minimally reproduced and bisected
+
+The byte-identical 0x0000001100000001 is NOT an overlay and NOT an
+array-literal defect. Reproduced in isolation, in-guest, and bisected:
+
+- Plain locals `var a: [i64] = [0]` (also `[text] = [""]`, four of
+  them): **correct in-guest** (`PROBE OK array literals`).
+- Struct literal with ONE field `[i64]`: **OK**. TWO fields
+  (`[i64]`,`[text]`): **OK**. FOUR array fields (`ProbeFourA(a:[0],
+  b:[0], c:[0], d:[0])`): **FAULTS** on the first field read —
+  scause=5, stval = `0x0000003300000008` (earlier program revision:
+  `0x0000001100000008`; the high half tracks an ALLOCATION SIZE, 0x11
+  = 17 then, 0x33 = 51 now; low half is type 8 = HEAP_STRING_BUILDER).
+  So a struct-literal FIELD receives a pointer to / the header of an
+  unrelated string-builder allocation once the literal has ~4 fields.
+- Host `simple run` (JIT/interpreter) passes the identical struct-literal
+  repro (`STRUCT LITERAL OK`) — the defect is **AOT cranelift only**.
+  Both the checked-in seed and a seed rebuilt from this branch
+  (release tip `13a060d644e`) reproduce it: genuine release-tip bug,
+  not seed staleness.
+- `simple compile` SMF output is target-independent (only addresses
+  differ between riscv64 and x64 SMF), so the corruption is born in
+  the AOT backend's struct-init value plumbing
+  (`codegen/instr/closures_structs.rs::compile_struct_init` stores
+  field_values at MIR-provided offsets; with ~4 array-typed field
+  values — likely spilled — the value/field pairing breaks). The
+  likely trigger boundary (2 fields OK, 4 broken) points at a
+  register-pressure / spill path in the emitter, not at the offset
+  table itself.
+
+Repro for the next (seed) lane — in-guest probe used by this lane
+(temporary kernel-entry probe, reverted):
+
+```spl
+struct ProbeFourA:
+    a: [i64]
+    b: [i64]
+    c: [i64]
+    d: [i64]
+
+fn probe() -> bool:
+    var q: ProbeFourA = ProbeFourA(a: [0], b: [0], c: [0], d: [0])
+    # first read of q.a faults: q.a == garbage {size,type} word
+```
+
+In-guest iteration loop: add the probe to
+`examples/09_embedded/simple_os/arch/riscv64/interpreter_hello_entry.spl`,
+`sh scripts/os/build-simpleos-riscv64-interpreter-kernel.shs` (~80 s),
+wrap the interp kernel.Image in the pinned OpenSBI v1.4 fw_payload and
+boot `-machine virt -cpu rv64 -smp 1 -m 512M -bios fw_payload.bin
+-serial file:log` (~3.5 min). Host AOT x86_64 builds of even a trivial
+entry exceeded 5 min on this host (SCV admission closure), so in-guest
+is the practical loop. Cycles: 6 of 6 used; stopping per the rule with
+the repro, bisect, and candidate area recorded.
