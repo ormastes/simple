@@ -479,12 +479,12 @@ mod tests {
         );
     }
 
-    /// Cross-validated against the runtime crate's exports (131 after the u32
+    /// Cross-validated against the runtime crate's exports (132 as of 2026-11-05; 131 after the u32
     /// array readback exports were registered on 2026-09-19); hold that
     /// number so a silent drop is a failure.
     #[test]
     fn family_size_is_pinned() {
-        assert_eq!(VULKAN_FNS.len(), 131);
+        assert_eq!(VULKAN_FNS.len(), 132);
     }
 
     /// A duplicated registry row can satisfy source coverage while inflating
