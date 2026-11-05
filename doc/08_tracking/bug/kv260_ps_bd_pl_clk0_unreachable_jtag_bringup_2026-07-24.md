@@ -107,3 +107,9 @@ recorded here for a follow-up change.
   removed.
 - `scripts/fpga/build_k26_rv32.shs`, `generate_rv32_vhdl.shs` — existing
   CFGMCLK clocking pattern to follow for the fix.
+
+## 2026-11-05 (riscv-sweep lane)
+
+No KV260/JTAG hardware session is possible in this lane; the root cause and
+the architectural resolution (free-running CFGMCLK clocking for JTAG-only
+bring-up) stand as recorded. Remains blocked on physical board work.

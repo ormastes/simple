@@ -49,7 +49,21 @@ typedef struct {
     RuntimeValue payload;
 } RuntimeEnum;
 
-static unsigned char g_heap[64 * 1024] __attribute__((aligned(16)));
+/* This TU duplicates malloc/calloc/realloc/free/rt_alloc with the two main
+ * riscv64 runtime TUs (baremetal_stubs.c, baremetal_runtime_core.inc.c), and
+ * the link resolves the duplicates with --allow-multiple-definition: exactly
+ * ONE copy serves the WHOLE image's allocations, and which copy that is is a
+ * link-order lottery the caller does not control. Measured 2026-11-05 on the
+ * in-guest interpreter kernel (closure growth had moved the lottery): this
+ * copy won, every image allocation came from this array, 64 KiB exhausted
+ * inside parser_state_fresh, rv_alloc returned NULL, and the unchecked struct
+ * store faulted with stval=0 before any [interp] banner. Every duplicate must
+ * therefore be sized for the whole image, not for the ghdl probe alone.
+ * .bss is NOLOAD (absent from the flat Image) and 512M of RAM backs it, so
+ * the size costs nothing but boot-time zeroing. The two main TUs serve from
+ * their 32M halves of the linker-reserved .heap; this array matches that
+ * scale so no lottery outcome is a regression. */
+static unsigned char g_heap[32 * 1024 * 1024] __attribute__((aligned(16)));
 static uintptr_t g_heap_off = 0;
 
 extern RuntimeValue spl_start(void);

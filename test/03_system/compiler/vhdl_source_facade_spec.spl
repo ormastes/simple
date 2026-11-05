@@ -889,3 +889,55 @@ describe "VHDL Source Facade":
         delete_file(src_path)
         delete_file(out_path)
         delete_file(map_path)
+
+    it "aot_vhdl_file resolves an imported enum type through a relative cross-module use":
+        # Regression: vhdl_entryfile_crossmodule_enum_resolve_2026-07-18
+        # A payload-free enum declared in a sibling module and imported via
+        # `use` must resolve through the entry-file VHDL path exactly as
+        # module-graph interpretation resolves it.
+        step("aot_vhdl_file resolves an imported enum type through a relative cross-module use")
+        val types_path = "/tmp/sml_vhdl_crossmod_types.spl"
+        val src_path = "/tmp/sml_vhdl_crossmod_frontend.spl"
+        val out_path = "/tmp/sml_vhdl_crossmod_frontend.vhd"
+        delete_file(types_path)
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(types_path, "enum LatchKind:\n    Command\n    Address\n    DataIn\n    Illegal\n")
+        write_file(src_path, "use .sml_vhdl_crossmod_types.LatchKind\n\n@hardware\nfn classify(cle: bool) -> LatchKind:\n    if cle:\n        LatchKind.Command\n    else:\n        LatchKind.Illegal")
+
+        val result = aot_vhdl_file(src_path, out_path)
+        check_msg(result.is_success(), result.get_errors().join("\n"))
+        check_msg(rt_file_exists(out_path), "VHDL output file was not created")
+        val output = rt_file_read_text(out_path) ?? ""
+        check_msg(output.contains("type LatchKind_t is (Command, Address, DataIn, Illegal);"), output)
+        check_msg(output.contains("result_out : out LatchKind_t"), output)
+        if local_ghdl_available():
+            check_msg(local_ghdl_analyze_and_elaborate(out_path, "classify"), "GHDL rejected cross-module enum VHDL")
+
+        delete_file(types_path)
+        delete_file(src_path)
+        delete_file(out_path)
+
+    it "aot_vhdl_file resolves a std-lib enum type imported by dotted module path":
+        # Regression: vhdl_entryfile_crossmodule_enum_resolve_2026-07-18
+        # Same failure through the canonical src/lib resolution path used by
+        # src/lib/hardware/nand_emu/rtl/pin_frontend.spl (`use
+        # hardware.nand_emu.nand_types.NeLatchKind`).
+        step("aot_vhdl_file resolves a std-lib enum type imported by dotted module path")
+        val src_path = "/tmp/sml_vhdl_crossmod_stdlib_frontend.spl"
+        val out_path = "/tmp/sml_vhdl_crossmod_stdlib_frontend.vhd"
+        delete_file(src_path)
+        delete_file(out_path)
+        write_file(src_path, "use hardware.nand_emu.nand_types.NeLatchKind\n\n@hardware\nfn ne_latch_classify(cle: bool) -> NeLatchKind:\n    if cle:\n        NeLatchKind.Command\n    else:\n        NeLatchKind.Illegal")
+
+        val result = aot_vhdl_file(src_path, out_path)
+        check_msg(result.is_success(), result.get_errors().join("\n"))
+        check_msg(rt_file_exists(out_path), "VHDL output file was not created")
+        val output = rt_file_read_text(out_path) ?? ""
+        check_msg(output.contains("type NeLatchKind_t is"), output)
+        check_msg(output.contains("result_out : out NeLatchKind_t"), output)
+        if local_ghdl_available():
+            check_msg(local_ghdl_analyze_and_elaborate(out_path, "ne_latch_classify"), "GHDL rejected std-lib imported enum VHDL")
+
+        delete_file(src_path)
+        delete_file(out_path)

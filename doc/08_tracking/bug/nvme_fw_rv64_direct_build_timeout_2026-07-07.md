@@ -1884,3 +1884,20 @@ throughout every round, confirming the FW logic itself is not at fault.
 Classifying as **ARCHITECTURAL-OPEN**: the fix is a compiler/build throughput
 improvement (or a longer allotted build budget for this target), out of scope
 for a bug-doc-only pass. Leaving OPEN.
+
+## Verification 2026-11-05 (riscv-sweep lane, work/riscv-sweep-20261105)
+
+Re-verified against `origin/release/1.0.0` @ `bc3e9b48cb4`. A fresh full-closure
+RV64 direct build still cannot complete inside a bounded session, so the
+2026-08-09 ARCHITECTURAL-OPEN classification stands; no new source-shape
+choke-point splitting was attempted this pass. Fresh scalar host logic gate on
+the current aarch64 Rust seed:
+
+```text
+src/compiler_rust/target/bootstrap/simple run \
+  examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl
+RV32 NVME FW LOGIC OK
+```
+
+Status: OPEN (architectural native-build parse/throughput; the compiled-dispatch
+remedy identified in the rv32 sibling record remains the prescribed fix).
