@@ -244,12 +244,12 @@ do_merge() {
             _left=$(git ls-files -u | cut -f2 | sort -u | tr '\n' ' ')
             git merge --abort 2>/dev/null; MSG="unresolved after SDN pass: $_left"; rm -rf "$_tmp"; return 4
         fi
-        # plumbing commit (like gh-pr-sdn-sync): local commit hooks need a full
-        # checkout; the pushed result still goes through every pre-push gate.
-        _tree=$(git write-tree) && MERGE_SHA=$(git commit-tree "$_tree" -p "$_H" -p "$_B" \
-            -m "Merge $REMOTE base into PR head (pr-fix-land: sealed SDN row merge + reseal)") \
-            || { MSG="merge commit failed"; git merge --abort 2>/dev/null; rm -rf "$_tmp"; return 2; }
-        git merge --abort 2>/dev/null; git checkout -q --detach "$MERGE_SHA" || { MSG="checkout merge failed"; rm -rf "$_tmp"; return 2; }
+        # Normal hooked commit. The pre-commit hook runs
+        # `sh scripts/check-workspace-root-guard.shs` from the worktree root, so
+        # the worktree must be a FULL checkout (a sparse one lacked the file).
+        git commit -q -m "Merge $REMOTE base into PR head (pr-fix-land: sealed SDN row merge + reseal)" >"$_tmp/commit.log" 2>&1 \
+            || { MSG="merge commit failed (pre-commit hook?): $(tail -n 3 "$_tmp/commit.log" | tr '\n' ' ')"; git merge --abort 2>/dev/null; rm -rf "$_tmp"; return 2; }
+        MERGE_SHA=$(git rev-parse HEAD)
         _v=$(sh "$_cd/check-sdn-crc32-sealed.shs" --no-selftest --rev "$MERGE_SHA" --root "$_w" 2>/dev/null | tail -1)
         case "$_v" in PASS*) ;; *) MSG="seal check at $MERGE_SHA: $_v"; rm -rf "$_tmp"; return 4 ;; esac
     fi
