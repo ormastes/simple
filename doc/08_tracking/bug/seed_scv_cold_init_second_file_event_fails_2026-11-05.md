@@ -107,3 +107,56 @@ candidates 1 and 2 (one env-gated eprint each is enough). If it is the
 second transient scope begin, the fix belongs in the Rust seed's
 transient-scope state handling (or the workaround-store defect above is
 corrupting the scope stack and is the real root).
+
+## Root cause 2026-11-05 (afternoon): seed JIT miscompiles `mut` params to generic externs (Bug #167 class)
+
+Distinguished the two candidates with a minimal probe (begin/pause/promote/end
+twice over a small struct, file `scope_probe.spl`, 20 lines) on the three lanes:
+
+| lane | pr1 | pr2 |
+|---|---|---|
+| seed JIT (native) | **false** | **false** |
+| seed interpreted (`SIMPLE_EXECUTION_MODE=interpret`) | true | true |
+| pure-Simple `bin/simple` (1.0.0-beta) | true | true |
+
+Per-lane variance is allocation-order sensitive (a variant probe promoting
+i64/[text]/[SmallEvent] returned all-true on the seed JIT and false/true/true
+interpreted), matching this family's perturbation law.
+
+`rt_transient_heap_promote` (src/runtime/runtime_native.c:3351) returns 0 in
+exactly these cases: scope not active/paused (excluded — begin/pause returned
+true immediately before), or `rt_core_transient_classify(value)` gives
+root_class 0 while `rt_core_is_heap(value)` and the pointer is not a
+registered immortal (runtime_native.c:3379-3392 falls to
+`ok = root_class == 1 && ...` = false). Scalars and non-heap copies are a
+no-op SUCCESS (return 1). So on the seed-native lane the promoted struct
+arrives as a NON-TRANSIENT HEAP COPY: promotion is correctly refused.
+
+Mechanism: `transient_heap_promote_v1<T>(mut value: T)`
+(src/compiler/50.mir/_MirLowering/transient_owner_sffi.spl:46) binds `mut` by
+REFERENCE precisely so the callee prologue cannot make the Bug #167 defensive
+copy ("promoted only that fresh copy while the scope-owned original was
+freed at scope end and later reused",
+doc/08_tracking/bug/transient_promote_struct_param_copy_dangles_2026-10-25.md).
+Pure-Simple codegen honors the by-reference binding; the seed JIT evidently
+still copies (or mis-tags) the argument, so `rt_transient_heap_promote` sees a
+regular-heap duplicate and refuses. This is the same class as the 2026-10-12
+divergence (doc/08_tracking/bug/seed_codegen_interp_native_divergence_2026-10-12.md)
+— a third, fully isolated symptom site with a 20-line repro.
+
+Consequence chain: seed-native/hybrid lane -> `transient_heap_promote_v1`
+returns false -> `compiler_inventory_file_event_cost_v1` returns nil after
+materializing the event -> cold SCV init aborts at the first/second .spl file
+-> every fresh-checkout seed native-build is refused. The interpreted and
+pure-Simple lanes are unaffected, which is why CI's pure-Simple SCV passes
+while any seed-driven build on a fresh cache fails.
+
+## Fix direction (seed lane, owner)
+
+Wherever the seed JIT lowers an extern call with a `mut`-class parameter
+(generic `T` at minimum), it must pass the caller's exact root (by reference /
+no defensive copy) and preserve the value tag. Verify with the probe above:
+pr1/pr2 must be true on the seed JIT lane. Suspect area:
+src/compiler_rust/compiler/src/codegen/ (extern argument lowering; compare
+with how pure-Simple MIR marks mut-class params). The JIT-vs-interpreted
+differential on this 20-line probe is the acceptance test.
