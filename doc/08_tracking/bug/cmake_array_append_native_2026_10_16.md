@@ -29,3 +29,19 @@ array receivers: `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
 on the current seed. The `[text]`/`push` workaround in `cmake_gen.spl` stays until
 a rebuilt stage3 producer compiles the original `parts.append` form; stage3 repro:
 `bootstrap/stage3/simple native-build <cmake_gen renderer fixture>` per section above.
+
+## Stage-producer verification — 2026-11-05
+
+The `.append` alias lowering (b8fe5bfeb3f) was verified through a rebuilt
+pure-Simple producer, one stage earlier than the doc's stage3 repro: the
+trust-root stage2 candidate (cranelift, aarch64-unknown-linux-gnu, worktree
+at df48a86ff5a) native-built a fixture reproducing the original cmake_gen
+renderer shape (var parts: [text] = []; parts.append(...) including a
+conditional arm and a join loop). Result: build rc=0 with ZERO "unresolved
+method call: append" rows, and the rendered output controls pass (3 parts,
+exit 0). unresolved_builtin_ufcs_method_spec.spl: 6/6 under the seed
+interpreter on the same host.
+
+Not claimed: the doc's literal stage3-producer repro and the retained
+[text]/push workaround removal (that stays per the doc until the stage3
+rebuilt producer runs); BDD/broad gates remain with the owner lane.
