@@ -647,6 +647,7 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
             Node::Enum(e) => {
                 // Pre-register enum
                 let arc_e = Arc::new(e.clone());
+                crate::interpreter::record_flattened_owner_enum(&arc_e);
                 enums.insert(e.name.clone(), Arc::clone(&arc_e));
                 GLOBAL_ENUMS.with(|cell| {
                     crate::interpreter::interpreter_module::module_evaluator::evaluation_helpers::warn_on_ambiguous_bare_enum_name(

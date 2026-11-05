@@ -180,7 +180,7 @@ use interpreter_call::{
 // Module caching and loading state
 #[path = "../module_cache.rs"]
 mod module_cache;
-pub use module_cache::{owner_module_class, owner_module_enum, record_flattened_owner_class, resolve_class};
+pub use module_cache::{owner_module_class, owner_module_enum, record_flattened_owner_class, record_flattened_owner_enum, resolve_class};
 pub use module_cache::clear_module_cache;
 pub use module_cache::{clear_probe_source_cache, probe_source_cached};
 pub use module_cache::{
