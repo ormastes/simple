@@ -1,0 +1,97 @@
+# Probe: `match` on an `Option<Enum>` scrutinee against the user enum's OWN
+# variant patterns (no `Some(...)` wrapper in the arm).
+#
+# Defect family:
+#   doc/08_tracking/bug/interpreter_match_on_option_of_enum_fires_no_arm_2026-08-06.md
+#   doc/08_tracking/bug/match_on_optional_enum_variant_falls_to_wildcard_2026-08-07.md
+#   doc/08_tracking/bug/enum_pattern_match_optional_value_silent_fallthrough_2026-07-20.md
+#
+# A `T?` value holding a user enum is `Option::Some(<enum>)` at runtime. A
+# variant pattern of the user enum (`Evt.Click(x)`) must look through the Some
+# wrapper; before the seed fix 94bb1e16459 the interpreter compared the
+# wrapper's own tag ("Some") against "Click" and silently fell through every
+# arm (wildcard, or nil with no diagnostic when no wildcard existed).
+#
+# Run under BOTH engines:
+#   SIMPLE_EXECUTION_MODE=interpreter bin/simple run <this file>
+#   SIMPLE_EXECUTION_MODE=jit        bin/simple run <this file>
+#
+# Known-open residual (JIT lane only): the explicit-`Some(...)` construction
+# shapes still fall to the wildcard under the cranelift JIT because the JIT
+# match lowering does not strip the Some box for user-variant patterns. Those
+# checks print FAIL on the JIT and are pinned by the companion spec
+# option_enum_match_variant_spec.spl so the number cannot move unnoticed.
+
+enum Evt:
+    Click(x: i64)
+    Key(code: i64)
+
+fn opt_evt(v: Evt) -> Evt?:
+    v
+
+fn make_explicit() -> Evt?:
+    Some(Evt.Click(x: 5))
+
+fn none_evt() -> Evt?:
+    val r: Evt? = nil
+    r
+
+var fails: i64 = 0
+
+fn check(name: text, got: text, want: text):
+    if got == want:
+        print "PASS " + name
+    else:
+        print "FAIL " + name + ": got " + got + " want " + want
+        fails = fails + 1
+
+fn classify(v: Evt?) -> text:
+    match v:
+        case Evt.Click(x): return "click{x}"
+        case Evt.Key(c): return "key{c}"
+        case _: return "WILDCARD"
+
+fn main():
+    # 1. Implicit Some-wrap through a function return (`fn f(v: Evt) -> Evt?: v`)
+    check("implicit_wrap_fn", classify(opt_evt(Evt.Click(x: 5))), "click5")
+
+    # 2. Explicit `Some(...)` returned through a `-> Evt?` function
+    check("explicit_some_fn", classify(make_explicit()), "click5")
+
+    # 3. Local explicit construction `val a = Some(Evt.Click(...))`
+    val a = Some(Evt.Click(x: 7))
+    check("local_explicit", classify(a), "click7")
+
+    # 4. Local implicit binding `val b: Evt? = Evt.Click(...)`
+    val b: Evt? = Evt.Click(x: 6)
+    check("local_implicit", classify(b), "click6")
+
+    # 5. The `Some(...)`-wrapped pattern form must keep working (no over-unwrap)
+    val c = opt_evt(Evt.Click(x: 8))
+    match c:
+        case Some(Evt.Click(x)): check("wrapped_pattern", "some_click{x}", "some_click8")
+        case _: check("wrapped_pattern", "WILDCARD", "some_click8")
+
+    # 6. nil must NOT match a user-variant arm — it falls to the wildcard
+    check("nil_falls_through", classify(none_evt()), "WILDCARD")
+
+    # 7. `case nil:` still matches the nil scrutinee
+    val n = none_evt()
+    var nil_arm = "not_nil"
+    match n:
+        case nil: nil_arm = "nil_matched"
+        case _: nil_arm = "not_nil"
+    check("nil_arm", nil_arm, "nil_matched")
+
+    # 8. Match EXPRESSION form, not just the statement form
+    val e = opt_evt(Evt.Key(code: 3))
+    val expr_result = match e:
+        case Evt.Click(x) => "click{x}"
+        case Evt.Key(c) => "key{c}"
+        case _ => "WILDCARD"
+    check("expression_form", expr_result, "key3")
+
+    if fails == 0:
+        print "OPTION_ENUM_MATCH PROBE: ALL PASS"
+    else:
+        print "OPTION_ENUM_MATCH PROBE: " + fails.to_text() + " FAILED"
