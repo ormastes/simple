@@ -200,3 +200,59 @@ exactly what the current resource lock forbids — deferred, not shortcut.
 Deferred verification: rerun
 `sh scripts/check/check-linux-hosted-wm-live-window-evidence.shs` on a quiet
 host after Stage-4 completes.
+
+
+## Re-check 2026-11-05 (aarch64 Linux host, clean release/1.0.0 worktree)
+
+Re-verified from a dedicated clean worktree
+(`work/libbug-linux-wmglyph-20261105` off `origin/release/1.0.0`), per the
+calibration procedure's step 1. The gate script is byte-identical to the
+main checkout, so every prior finding still applies.
+
+**Environment-block chain proven on this host (none fixable without the
+admitted Linux X11 phase environment):**
+
+- `xdotool`, ImageMagick (`import`/`convert`), and `Xvfb` are all absent,
+  and the host has no root/sudo, so the capture toolchain cannot be
+  installed. The gate exits at line 791 (`missing-command-xdotool`) — before
+  the compiler is even version-checked — which is *past* the
+  `GLYPH_RGB_SHA256=pending` declaration but long before the glyph oracle
+  hard-fail (line 1188 in this revision; line 966 at the revision this doc
+  originally surveyed).
+- No `libsimple_runtime.so` runtime provider exists on this host, so
+  `admit_runtime_provider` could not pass even with the toolchain present.
+- The only Simple binaries on this host are the Rust seed / phase-snapshot
+  builds; the prescribed phase1 seed is rejected by the gate's own
+  `--version` seed filter (per this doc's admission-rule note), and no
+  pure-Simple `bin/release/<triple>/simple` exists here.
+
+**Calibration status:** still uncalibratable here, exactly as this doc
+predicted for an interpreter-only, no-native-build-closure host. No hash was
+invented or back-filled; `GLYPH_RGB_SHA256` remains `pending`. The oracle
+hard-fail is and remains the designed fail-closed terminal state for a
+pending pin outside `LINUX_HOSTED_WM_CALIBRATE_GLYPH=1`.
+
+**Code change this pass (coverage, not a relaxation):** the gate's
+`--self-test` exercised `glyph_oracle_mode` only with a pinned digest; the
+pending-pin decision path this bug is named for had zero host-independent
+coverage. The self-test now asserts all three designed decisions:
+`pending`+no flag → `calibration-required` (the hard-fail path),
+`pending`+`LINUX_HOSTED_WM_CALIBRATE_GLYPH=1` → `calibration-only` (the
+designed path past the hard-fail), and any real digest → `pinned` with or
+without the flag. The executable contract in
+`test/03_system/gui/linux_hosted_wm_live_window_spec.spl` was extended to
+match. The production gate behavior is unchanged: fail-closed on pending,
+calibration-only under the flag.
+
+**Naming note:** this doc and
+`doc/06_spec/03_system/gui/linux_hosted_wm_live_window_spec.md` say the
+calibration run ends at `glyph-oracle-calibration-only-*`; the script (and
+the .spl spec, which is the executable contract) emit
+`glyph-oracle-calibration-candidate-*` / `-candidate-invalid`. Same designed
+terminal state, two names; left as-is to avoid churning the spec-locked
+string, recorded here so the next calibration run is not misread.
+
+**Still open:** blocker #5 (real render to hash). The valid calibration
+procedure above remains the only admissible fix, and it requires the
+admitted X11 phase environment (toolchain + quiet host + pure-Simple binary
++ runtime provider DSO).
