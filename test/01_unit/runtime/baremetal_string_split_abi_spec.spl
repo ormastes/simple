@@ -1,0 +1,111 @@
+# Pinned offline contract for the baremetal string-split/decode fault class
+# (bug simpleos_simple_web_decode_string_fault_storm_2026-07-12).
+#
+# The SimpleOS guest faulted in baremetal `decode_string` on heap-like tagged
+# values (0x8100000000 / 0x1400000000 / 0x1100000000) reached through
+# `rt_string_split` -> `[text]` indexing -> `starts_with`/`contains` in the
+# canonical Simple Web renderer. The runtime half of the contract (baremetal
+# `rt_string_split` returns the raw `RuntimeArray*`, not the encoded handle) is
+# C-side and cannot execute on this aarch64 Linux host; this spec pins the
+# Simple-level contract that must hold on every lane:
+#
+#   1. Behavioral: `text.split(d)` yields a well-formed `[text]` whose elements
+#      decode at BYTE level (len/bytes/trim/starts_with/index/iterate, and a
+#      round-trip through a `[text]` array) — including multi-byte documents,
+#      and including the renderer's own paren-aware comma splitter.
+#   2. Source contract: the renderer's gradient decode/split path scans in ONE
+#      index space. `len()`/`substring()` are byte-indexed on the compiled
+#      lane the renderer ships in, so a scanner that bounds with `len()` while
+#      probing with character-indexed `char_at` cuts split parts mid-UTF-8
+#      sequence and hands malformed text values to the byte-level decode that
+#      follows (the exact fault class above). Split-derived receivers feeding
+#      `starts_with` must route through the tagged-text facade
+#      `text_starts_with_portable` (doc/08_tracking/bug/
+#      simpleos_simple_web_decode_string_fault_storm_2026-07-12.md).
+
+extern fn rt_file_read_text(path: text) -> text?
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{split_top_level_commas_paren_aware, parse_gradient_stops, text_starts_with_portable}
+
+describe "split results are decodable tagged text on every lane":
+    it "split parts decode byte-wise (len/bytes/trim/starts_with)":
+        val parts = "a,bb,ccc".split(",")
+        expect(parts.len()).to_equal(3)
+        expect(parts[0]).to_equal("a")
+        expect(parts[1].starts_with("b")).to_equal(true)
+        expect(parts[1].len()).to_equal(2)
+        expect(parts[1].bytes()[0]).to_equal(98)
+
+    it "split parts survive a [text] array round-trip":
+        var arr: [text] = []
+        arr.push("x,y".split(",")[1])
+        expect(arr.len()).to_equal(1)
+        expect(arr[0].trim()).to_equal("y")
+        expect(arr[0].starts_with("y")).to_equal(true)
+        expect(arr[0].len()).to_equal(1)
+
+    it "split parts iterate and join back":
+        var joined = ""
+        for part in "one;two;three".split(";"):
+            joined = "{joined}|{part.len()}"
+        expect(joined).to_equal("|3|3|5")
+
+    it "splits multi-byte documents into well-formed byte-decodable parts":
+        val parts = "café,naïve".split(",")
+        expect(parts.len()).to_equal(2)
+        expect(parts[0].len()).to_equal(5)
+        expect(parts[1].len()).to_equal(6)
+        expect(parts[1].bytes()[1]).to_equal(97)
+
+    it "empty delimiter stays decodable on both lanes (engine-divergent shape)":
+        # ENGINE DIVERGENCE: hosted `rt_string_split` maps an empty delimiter to
+        # `rt_string_chars` (["a","b","c"] for "abc"), while the interpreter
+        # keeps empty edge parts (["","a","b","c",""]). The renderer never
+        # splits on "", so this pins only what both lanes owe the decode path:
+        # a non-nil array whose elements are well-formed, byte-decodable text.
+        val chars = "abc".split("")
+        expect(chars.len() >= 3).to_equal(true)
+        expect(chars[1]).to_equal("a")
+        expect(chars[1].len()).to_equal(1)
+        expect(chars[1].bytes()[0]).to_equal(97)
+
+describe "renderer paren-aware comma splitter stays byte-faithful":
+    it "splits gradient stops on top-level commas only (ASCII control)":
+        val parts = split_top_level_commas_paren_aware("180deg, rgba(255,255,255,0.09), red")
+        expect(parts.len()).to_equal(3)
+        expect(parts[0]).to_equal("180deg")
+        expect(parts[1]).to_equal("rgba(255,255,255,0.09)")
+        expect(parts[2]).to_equal("red")
+
+    it "multi-byte stops come back as well-formed text, provable via bytes()":
+        # Asserted through bytes(), not substring(): the interpreter's
+        # substring is character-indexed while the compiled lane is
+        # byte-indexed (see simple_web_html_layout_renderer_scan_index_space_spec.spl),
+        # and bytes() speaks the byte index space in BOTH lanes.
+        val parts = split_top_level_commas_paren_aware("red, café, blue")
+        expect(parts.len()).to_equal(3)
+        expect(parts[1].len()).to_equal(5)
+        expect(parts[1].bytes()[0]).to_equal(99)
+        expect(parts[1].bytes()[3]).to_equal(195)
+        expect(parts[1].bytes()[4]).to_equal(169)
+
+    it "gradient stop parse over multi-byte stops yields the ASCII stops":
+        # "café" is not a color; parse_color_any fails it safely, but the two
+        # ASCII stops on either side must still resolve.
+        val stops = parse_gradient_stops("linear-gradient(to right, red, café, blue)")
+        expect(stops.len()).to_equal(3)
+
+describe "gradient decode/split path scans one index space (source contract)":
+    it "comma splitter probes bytes, not characters":
+        # RED guard for the decode_string fault class: `char_at` is
+        # CHARACTER-indexed while `len()`/`substring()` are byte-indexed on the
+        # compiled lane, so a len()-bounded char_at scan cuts parts mid-sequence.
+        val src = rt_file_read_text("src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_foundation.spl") ?? ""
+        expect(src).to_contain("val cb = s.bytes()")
+
+    it "split-derived starts_with receivers route through the tagged-text facade":
+        val src = rt_file_read_text("src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_foundation.spl") ?? ""
+        expect(src).to_contain("text_starts_with_portable(part, \"to \")")
+        expect(src).to_contain("text_starts_with_portable(lower, \"circle\")")
+        expect(src).to_contain("text_starts_with_portable(lower, \"ellipse\")")
