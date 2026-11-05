@@ -1,0 +1,92 @@
+# Purpose and audience: regression evidence for bug native_enum_nil_payload_pattern_2026_10_11.
+# @req REQ-SSPEC-COMPILER
+# A binder nested in a builtin wrapper (`Ok(Some(chunk))`) must be bound as TEXT.
+# Native stage3 43 bound the raw payload word (printed as i64). The behavior
+# group runs in the interpreter (native evidence: PR #6943 fixture
+# test/fixtures/compiler/result_optional_payload_text_binding); the source
+# group pins the fix at the bug site and fails on the pre-fix compiler source.
+
+use std.spec.step
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn hir_components_source() -> text:
+    rt_file_read_text("src/compiler/20.hir/hir_lowering/_Expressions/expression_components.spl") ?? ""
+
+fn switch_source() -> text:
+    rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl") ?? ""
+
+fn ok_some(r: Result<text?, text>) -> text:
+    match r:
+        Ok(Some(chunk)): "[{chunk}]"
+        Ok(nil): "nil"
+        Err(p): "err:{p}"
+
+fn ok_some_concat(r: Result<text?, text>, out: text) -> text:
+    match r:
+        Ok(Some(chunk)): out + chunk
+        Ok(nil): out
+        Err(_): "err"
+
+fn err_some(r: Result<i64, text?>) -> text:
+    match r:
+        Ok(_): "ok"
+        Err(Some(why)): "why={why}"
+        Err(_): "why=nil"
+
+fn opt_result(v: Option<Result<text, i64>>) -> text:
+    match v:
+        Some(Ok(t)): "t={t}"
+        Some(Err(c)): "c={c}"
+        _: "none"
+
+fn ok_some_int(r: Result<i64?, text>) -> i64:
+    match r:
+        Ok(Some(n)): n + 1
+        Ok(nil): -1
+        Err(_): -2
+
+fn flat_ok(r: Result<text, text>) -> text:
+    match r:
+        Ok(t): "ok={t}"
+        Err(e): "err={e}"
+
+describe "nested builtin-wrapper text binder":
+    it "binds Ok(Some(chunk)) as text (repro)":
+        step("repro")
+        expect(ok_some(Ok(Some("bc")))).to_equal("[bc]")
+        expect(ok_some_concat(Ok(Some("bc")), "a")).to_equal("abc")
+
+    it "selects Some(nil)/Err(nil)-shaped arms":
+        step("nil arms")
+        expect(ok_some(Ok(nil))).to_equal("nil")
+        expect(err_some(Err(nil))).to_equal("why=nil")
+        expect(err_some(Err(Some("x")))).to_equal("why=x")
+
+    it "binds text through nested Option<Result<text>>":
+        step("option result")
+        expect(opt_result(Some(Ok("q")))).to_equal("t=q")
+        expect(opt_result(Some(Err(3)))).to_equal("c=3")
+
+    it "keeps non-text payloads through the same binder path":
+        step("int payload")
+        expect(ok_some_int(Ok(Some(41)))).to_equal(42)
+        expect(ok_some_int(Ok(nil))).to_equal(-1)
+
+    it "keeps the flat (non-nested) pattern":
+        step("flat")
+        expect(flat_ok(Ok("a"))).to_equal("ok=a")
+        expect(flat_ok(Err("b"))).to_equal("err=b")
+
+describe "nested wrapper binder fix at the bug site":
+    it "HIR types nested wrapper binders from the subject generics":
+        step("hir")
+        val s = hir_components_source()
+        expect(s).to_contain("fn pattern_is_builtin_wrapper_v1(p: Pattern) -> bool:")
+        expect(s).to_contain("me lower_nested_wrapper_v1(p: Pattern, subject_type: HirType) -> HirPattern?:")
+
+    it "MIR emit_deep_subpattern decodes a HIR-proven text slot":
+        step("mir")
+        val s = switch_source()
+        expect(s).to_contain("bound_value = self.decode_declared_enum_payload_slot(value_local, pat.type_)")
+        expect(s).to_contain("self.local_map[bind_sym.id] = bound_value")
