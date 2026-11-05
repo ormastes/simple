@@ -1,0 +1,70 @@
+# Original-form regression for bug native_enum_nil_payload_pattern_2026_10_11 (#2981):
+# nested Ok(Some(chunk)) / Ok(nil) arms on Result<text?, text>, no identity helper.
+# Before the fix the JIT treated the nested `Some(..)` as an irrefutable struct
+# pattern: Ok(nil) took the Ok(Some(c)) arm and `c` was never bound.
+enum Holder:
+    Slot(v: i64?)
+    Empty
+
+fn consume(result: Result<text?, text>, output: text, capacity: i64) -> text:
+    match result:
+        Ok(Some(chunk)):
+            if chunk.len() > capacity - output.len(): return "overflow"
+            return output + chunk
+        Ok(nil):
+            return output
+        Err(problem):
+            if problem == "process_stdout_eof": return "eof:" + output
+            return "error:" + problem
+
+fn count_kind(result: Result<i64?, text>) -> i64:
+    match result:
+        Ok(Some(n)): n
+        Ok(nil): -1
+        Err(_): -2
+
+fn none_kind(result: Result<i64?, text>) -> i64:
+    match result:
+        Ok(None): 0
+        Ok(Some(5)): 5
+        Ok(Some(n)): n + 100
+        Err(_): -2
+
+fn holder_kind(h: Holder) -> i64:
+    match h:
+        Holder.Slot(Some(n)): n
+        Holder.Slot(nil): -1
+        Holder.Empty: -3
+
+fn produced(flag: bool) -> text?:
+    if flag: return "raw"
+    nil
+
+fn wrap(flag: bool) -> Result<text?, text>:
+    Ok(produced(flag))
+
+fn main() -> i64:
+    val chunk: Result<text?, text> = Ok(Some("bc"))
+    val empty: Result<text?, text> = Ok(Some(""))
+    val waiting: Result<text?, text> = Ok(nil)
+    val eof: Result<text?, text> = Err("process_stdout_eof")
+    val error: Result<text?, text> = Err("read failed")
+    if consume(chunk, "a", 3) != "abc": return 1
+    if consume(chunk, "a", 2) != "overflow": return 2
+    if consume(empty, "abc", 3) != "abc": return 3
+    if consume(waiting, "abc", 3) != "abc": return 4
+    if consume(eof, "abc", 3) != "eof:abc": return 5
+    if consume(error, "abc", 3) != "error:read failed": return 6
+    if count_kind(Ok(Some(7))) != 7: return 7
+    if count_kind(Ok(nil)) != -1: return 8
+    if count_kind(Err("x")) != -2: return 9
+    if none_kind(Ok(nil)) != 0: return 10
+    if none_kind(Ok(Some(5))) != 5: return 11
+    if none_kind(Ok(Some(6))) != 106: return 12
+    if holder_kind(Holder.Slot(Some(4))) != 4: return 13
+    if holder_kind(Holder.Slot(nil)) != -1: return 14
+    if holder_kind(Holder.Empty) != -3: return 15
+    if consume(wrap(true), "x", 9) != "xraw": return 16
+    if consume(wrap(false), "x", 9) != "x": return 17
+    print "result_optional_payload_original: PASS"
+    0

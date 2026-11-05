@@ -57,3 +57,5 @@ interpreter consumers) and 2e8ccbb079b (Value owner now
 `compiler.common.runtime_value_v1`, re-exported from backend_types.spl:180).
 No native verification yet: needs a rebuilt stage3 compiling interpreter,
 binop, calls and expr in canonical context. Do not redeploy seed/stage2 for it.
+
+Repro/prevention (added 2026-11-05): native fixture test/fixtures/compiler/imported_value_constructor_static_receiver/main.spl (stage3 repro in its header; UNRUN natively), interpreter spec test/01_unit/compiler/bootstrap_regressions/imported_value_constructor_static_receiver_spec.spl (passes on bin/simple.exe).

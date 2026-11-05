@@ -513,25 +513,30 @@ impl ReturnTypeInterfaceTable:
         ReturnTypeInterfaceTable(rows_by_module: {}, rows_by_key: {}, aliases: {})
 
     fn row_at(decl: DeclRef) -> ReturnTypeRow?:
-        if not self.rows_by_module.has(decl.module_id): return nil
-        val rows: Dict<text, ReturnTypeRow> = self.rows_by_module[decl.module_id]
-        if not rows.has(decl.decl_id): return nil
-        Some(rows[decl.decl_id])
+        # `.get()` not `[k]`: native bracket-read of a class-field Dict returns corrupt data
+        # (dict_class_field_contains_key_after_insert_2026-08-08, #6535 precedent).
+        if val rows = self.rows_by_module.get(decl.module_id):
+            if val row = rows.get(decl.decl_id):
+                return Some(row)
+        nil
 
     me register_row(module_id: text, row: ReturnTypeRow) -> Result<i64, RtiError>:
         var rows: Dict<text, ReturnTypeRow> = {}
-        if self.rows_by_module.has(module_id):
-            rows = self.rows_by_module[module_id]
-        val key_text = rti_key_text(row.key)
-        val owned = module_id + "|" + row.decl.decl_id
-        if self.rows_by_key.has(key_text) and self.rows_by_key[key_text] != owned:
-            # @workaround bug=mono_generic_return_ctx_inference_2026-10-27 recover=902437eff3b8 reason=phase1-e05b9162-lacks-expected-return-inference
-            return Err(rti_error("E-RTI-006", "two rows for callee '{row.key.name}' in module '{module_id}': {self.rows_by_key[key_text]} and {owned} ({row.decl.display})"))
-        if rows.has(row.decl.decl_id):
-            if rti_row_canonical_text_v1(rows[row.decl.decl_id]) == rti_row_canonical_text_v1(row):
+        if val existing_rows = self.rows_by_module.get(module_id):
+            rows = existing_rows
+        # Identical re-registration (main is registered several times by design)
+        # returns before the stored owner text is ever read.
+        if val prior = rows.get(row.decl.decl_id):
+            if rti_row_canonical_text_v1(prior) == rti_row_canonical_text_v1(row):
                 return Ok(0)
             # @workaround bug=mono_generic_return_ctx_inference_2026-10-27 recover=902437eff3b8 reason=phase1-e05b9162-lacks-expected-return-inference
             return Err(rti_error("E-RTI-006", "conflicting rows for '{row.decl.display}' in module '{module_id}'"))
+        val key_text = rti_key_text(row.key)
+        val owned = module_id + "|" + row.decl.decl_id
+        if val owner = self.rows_by_key.get(key_text):
+            if owner != owned:
+                # @workaround bug=mono_generic_return_ctx_inference_2026-10-27 recover=902437eff3b8 reason=phase1-e05b9162-lacks-expected-return-inference
+                return Err(rti_error("E-RTI-006", "two rows for callee '{row.key.name}' in module '{module_id}': {owner} and {owned} ({row.decl.display})"))
         rows[row.decl.decl_id] = row
         self.rows_by_module[module_id] = rows
         self.rows_by_key[key_text] = owned
@@ -568,9 +573,10 @@ impl ReturnTypeInterfaceTable:
                         self.record_alias(rti_module_id(imp.module_path) + "#" + alias, item.name)
 
     me record_alias(key: text, name: text):
-        if self.aliases.has(key) and self.aliases[key] != name:
-            self.aliases[key] = ""
-            return
+        if val prior = self.aliases.get(key):
+            if prior != name:
+                self.aliases[key] = ""
+                return
         self.aliases[key] = name
 
     me register_hir_module(module: HirModule) -> Result<RtiRowsV1, RtiError>:
@@ -692,8 +698,9 @@ impl ReturnTypeInterfaceTable:
             return rti_method_ref(rti_owner_ref(symbols, module_id, parts[0]), parts[1])
         val local = rti_last_segment(name)
         val alias_key = module_id + "#" + local
-        if self.aliases.has(alias_key) and self.aliases[alias_key] != "":
-            return rti_fn_ref(module_id, self.aliases[alias_key])
+        if val bound = self.aliases.get(alias_key):
+            if bound != "":
+                return rti_fn_ref(module_id, bound)
         rti_fn_ref(module_id, local)
 
     fn callee_return(expr: HirExpr, symbols: SymbolTable, receiver_type: HirType?) -> Result<ReturnTypeEntry, RtiError>:
