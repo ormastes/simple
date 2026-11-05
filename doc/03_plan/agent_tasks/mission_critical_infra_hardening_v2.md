@@ -265,3 +265,14 @@ specs and a signed native-facade receipt exercises the source-matched deployed
 ABI; the focused C evidence alone is not a release claim. Release is eligible
 only after the independent receipt accepts all 20 requirements and
 the aggregate reports `release_blockers=none`.
+
+## Status 2026-11-05 (release/1.0.0)
+
+Focused specs GREEN on the seed runner: compiler_admission 10/10, DrawIR generation
+arena v3 8/8, DrawIR packed generation store v3 7/7, sosix certified_manifest 16/16,
+bounded_process_policy 12/12, mci_evidence_manifest_v1 7/7, system spec
+`mission_critical_infra_hardening_v2_spec` 19/19 (two stale allocation fixtures fixed:
+allocation requires an open generation via `checkpoint()`; UNSEALED pin added).
+Still open: `domain_arena_v1_spec` 3 failures (`write_byte` byte banks and
+`DOMAIN_ARENA_V1_MAX_QUOTA_BYTES` unimplemented in `domain_arena_v1.spl`). Seed results are
+development diagnostics, not pure-Simple release evidence.
