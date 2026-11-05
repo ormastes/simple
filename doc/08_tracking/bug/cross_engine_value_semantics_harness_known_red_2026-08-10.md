@@ -84,3 +84,13 @@ coverage. Left exactly as is.
 Reconfirmed: this is a deliberately-landed KNOWN-RED differential harness
 documenting real engine divergences, not a single fixable defect in
 itself. Left as-is, no code change attempted.
+
+## Re-verification 2026-11-05 — CLOSED (premise outdated)
+Ran `bin/simple.exe run test/03_system/language/value_semantics/cross_engine_value_semantics_spec.spl`
+from a worktree of origin/release/1.0.0 (4397a4ce3c6) with the deployed
+`bin/simple.exe` (40,739,328 bytes, mtime 2026-11-04 16:58):
+`SPEC FILE VERDICT: outcome=OK declared>=13 executed=13 passed=13 failed=0`.
+All probes p1..p11 agree between interpreter and JIT lanes (p2 deep copy and
+p8 nested index assignment included); the AOT lane reaches native-build or
+reports the known llc-20 blocker. The 2026-08-10 KNOWN-RED table (7 failing
+probes) no longer reproduces. The spec stays as a regression guard.

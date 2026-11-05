@@ -426,3 +426,13 @@ The actual native regression now checks parsed reversed declarations, equal-span
 ### Final bounded result, 2026-10-16
 
 With the concrete ordering containment, the final actual native probe completed monomorphization for 413 modules: the earlier `array_sort_by` specialization refusal was crossed. This does not establish the ordering assertions, because subsequent MIR lowering reported semantic failures and the supervisor stopped the process at 8,392,880 KiB (exit88, quiescent1) before native execution. See `native_compiler_behavior_probe_retention_and_semantics.md` and the final output's `mcdc-token-stack-native-probe/final-failure-summary.json`. The general inference/callable defect remains OPEN, the O(n²) local workaround limitation remains explicit, and the authored ordering SSpec is UNRUN. No fourth cycle was attempted.
+
+## 2026-11-05 premise check (mirp2-B)
+Still a Rust-seed (cranelift JIT) defect; the pure-Simple native path handles the
+same shapes correctly (s3_fable44 native repro, see
+`native_mir_lambda_and_enum_eq_block_caret_cs_2026_10_19.md`). Under the
+"seed is bootstrap-only" policy this is now only a seed-speed lever (stage1
+interpreted fallback), belonging to family E (seed JIT/cranelift). Left OPEN.
+Next step: in `cranelift_emitter.rs` `emit_global_load` fn-ref branch, box the
+`func_addr` into an `rt_closure_new(addr, nil-env)` value so indirect calls go
+through the same closure ABI as lambdas, then drop the module-wide refusal.

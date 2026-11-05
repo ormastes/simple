@@ -95,7 +95,8 @@ impl MirLowering:
             if concrete.parameter_mutability.len() != concrete.params.len(): return "method {method}: incomplete implementation parameter mutability"
             if self.mir_hir_type_is_resource_direct(slot.result): return "method {method}: declaration resource return requires a drop slot"
             if self.mir_hir_type_is_resource_direct(concrete.result): return "method {method}: implementation resource return requires a drop slot"
-            val receiver_owner = self.native_trait_owner_for_type(slot.params[0])
+            val receiver_type: HirType = slot.params[0]
+            val receiver_owner = self.native_trait_owner_for_kind(receiver_type.kind)
             if receiver_owner != layout.owner: return "method {method}: trait receiver expected={layout.owner} actual={receiver_owner}"
             val concrete_receiver = self.native_trait_signature_type_key(concrete.params[0])
             val expected_receiver = self.native_trait_signature_type_key(implementation.concrete_type)
@@ -232,10 +233,16 @@ impl MirLowering:
                 return
             function_index[function_id] = function_position
             function_position = function_position + 1
-        for implementation in module.impls:
+        for raw_implementation in module.impls:
+            val implementation: HirImpl = raw_implementation
             if not implementation.has_trait_: continue
-            val trait_type = self.relocate_provider_type(implementation.trait_, module.symbols)
-            val owner = self.native_trait_owner_for_type(trait_type)
+            # Annotated locals + kind-only owner lookup: an un-annotated impl-loop
+            # field read handed by value to native_trait_owner_for_type deep-copied a
+            # garbage kind payload on the stage-native lane (F3 AV +0x202e).
+            val declared_trait: HirType = implementation.trait_
+            val relocated_trait: HirType = self.relocate_provider_type(declared_trait, module.symbols)
+            val trait_kind: HirTypeKind = relocated_trait.kind
+            val owner = self.native_trait_owner_for_kind(trait_kind)
             val index = self.native_trait_layout_index(owner)
             if index < 0: continue
             val concrete_id = match implementation.type_.kind:

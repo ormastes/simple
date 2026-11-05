@@ -740,3 +740,7 @@ python3 classify.py <path> out.json rows.json  # module-resolves / does-not-reso
 ```
 
 
+
+## HIR-P2 HC triage 2026-11-05
+
+Name-checking mechanism landed 2026-09-19 (spec 5/5). Remaining 1,003-name / 782-module backlog must be triaged per spec family (canvas/webgpu, blink, riscv, wine/proton, llvm-backend, http_server), not as one bug. Remains OPEN as backlog.

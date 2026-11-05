@@ -1,0 +1,53 @@
+# Statement-start `name = expr` decodes as STMT_ASSIGN; compound forms keep
+# the expression-statement form (PR #6839 follow-up).
+#
+# @cover src/compiler/10.frontend/core/parser_stmts.spl
+
+use compiler.core.ast.{
+    ast_reset, EXPR_ASSIGN, EXPR_IDENT, EXPR_INT_LIT,
+    STMT_ASSIGN, STMT_EXPR, STMT_COMPOUND_ASSIGN,
+    expr_get_tag, expr_get_str, stmt_get_tag, stmt_get_expr, stmt_get_body,
+    decl_get_body, module_get_decls
+}
+use compiler.core.parser.{parser_has_errors, parser_init_with_path}
+use compiler.core.parser_decls.{parse_module_body}
+
+fn _body_of(src: text, path: text) -> [i64]:
+    ast_reset()
+    parser_init_with_path(src, path)
+    parse_module_body()
+    val decls = module_get_decls()
+    decl_get_body(decls[0])
+
+describe "statement-start assignment decoding":
+    it "decodes `x = 1` as STMT_ASSIGN with identifier target and value":
+        val body = _body_of("fn f():\n    var x = 0\n    x = 1\n", "assign_plain.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(body.len()).to_equal(2)
+        expect(stmt_get_tag(body[1])).to_equal(STMT_ASSIGN)
+        val target = stmt_get_expr(body[1])
+        expect(expr_get_tag(target)).to_equal(EXPR_IDENT)
+        expect(expr_get_str(target)).to_equal("x")
+        val values = stmt_get_body(body[1])
+        expect(values.len()).to_equal(1)
+        expect(expr_get_tag(values[0])).to_equal(EXPR_INT_LIT)
+        ast_reset()
+
+    it "keeps `x.y = 1` as an expression statement":
+        val body = _body_of("fn f(x):\n    x.y = 1\n", "assign_field.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(stmt_get_tag(body[0]) != STMT_ASSIGN).to_equal(true)
+        expect(stmt_get_tag(body[0])).to_equal(STMT_EXPR)
+        ast_reset()
+
+    it "keeps `x += 1` out of STMT_ASSIGN":
+        val body = _body_of("fn f():\n    var x = 0\n    x += 1\n", "assign_compound.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(stmt_get_tag(body[1]) != STMT_ASSIGN).to_equal(true)
+        ast_reset()
+
+    it "keeps tuple targets `(a, b) = pair` out of STMT_ASSIGN":
+        val body = _body_of("fn f(pair):\n    var a = 0\n    var b = 0\n    (a, b) = pair\n", "assign_tuple.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(stmt_get_tag(body[2]) != STMT_ASSIGN).to_equal(true)
+        ast_reset()

@@ -103,3 +103,9 @@ env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH SIMPLE_NO_STUB_FALLBACK=1 \
 # tip: unresolved name: rt_env_get / name; after fixes: unresolved method call: find/join/last/pop
 ```
 
+
+## 2026-11-05 note (mirp2-B)
+"Closure" here means the import closure of std.env, not lambdas. Not re-probed
+natively this session. Left OPEN; next step: native-build an entry importing
+`std.nogc_sync_mut.env.platform.{detect_os}` with s3_fable44 and record whether
+array find/join/last/pop and text methods still fail.

@@ -12,6 +12,10 @@ Actual private production object SHA256 5f023e255628b6772b7b942cf275b2b3675d4277
 
 Durable enum_membership_spec.spl is the equivalent three-example SSpec proposal. Its SSpec runner/import route is UNRUN; the actual native criterion is the evidence above. Receipt.spl remains an independent failing group: role comparisons and Result.err().unwrap() calls should be replaced only with verified equivalent matches, preserving the exact BackendPluginError payload and operation checks. No receipt source is changed here. Full compiler/library checks, full backend contract suite, cross-target behavior, performance, and complete Phase3 build/link remain unqualified.
 
+## 2026-11-05 — fix implemented, cross-module verification pending (mirp2 family A)
+Direct payload-free enum `==`/`!=` and list membership now lower natively in a single module. Native evidence: s3_fable44.exe (2026-11-05 15:15 build), s3sanity run_case `mirp2a_enum` (enum ==/!= on payload-free enums, list membership by ==, payload-variant match, bare payload-variant arms) -> `CHECKS=10`, rc=0. Durable spec: test/01_unit/compiler/50.mir/enum_eq_and_match_lowering_spec.spl (interpreter 3/3).
+Next step: remove the canonical-name workaround in src/compiler/00.common/backend_plugin/model.spl:75/85 and rebuild that module with the current producer (cross-module enum owner not covered by the single-module repro).
+
 
 ---
 
