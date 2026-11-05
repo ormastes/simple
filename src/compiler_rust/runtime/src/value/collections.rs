@@ -2792,7 +2792,12 @@ pub extern "C" fn rt_collection_set(receiver: RuntimeValue, key: RuntimeValue, v
     if get_typed_ptr_packed::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
         // Array indices arrive TAGGED; `as_index_i64` decodes every integer
         // representation the tag uses — the same decode `rt_index_set` applies.
-        let index = key.as_index_i64().unwrap_or(-1);
+        // A non-integer key is out of range by definition and must return FALSE
+        // with NO mutation: substituting -1 here would normalize to `len-1` and
+        // silently overwrite the last element.
+        let Some(index) = key.as_index_i64() else {
+            return RuntimeValue::FALSE;
+        };
         return RuntimeValue::from_bool(rt_array_set(receiver, index, value));
     }
 
@@ -2812,7 +2817,7 @@ fn collection_set_missing_type(receiver: RuntimeValue) -> &'static [u8] {
 mod collection_set_tests {
     use super::{
         collection_set_missing_type, rt_array_len, rt_array_new, rt_array_push, rt_collection_set, rt_index_get,
-        rt_tuple_new,
+        rt_string_new, rt_tuple_new,
     };
     use crate::value::dict::{rt_dict_get, rt_dict_new};
     use crate::value::RuntimeValue;
@@ -2886,6 +2891,23 @@ mod collection_set_tests {
         assert!(!oob_neg.as_bool());
         assert_eq!(rt_array_len(arr), 3);
         assert_eq!(rt_index_get(arr, RuntimeValue::from_int(1)).as_int(), 3);
+
+        // Non-integer keys (text, float) must be rejected with NO mutation:
+        // `rt_index_set`'s Array contract is `as_index_i64() == None => false`.
+        // An earlier version of this arm substituted -1 for a non-int key,
+        // which `normalize_index` turned into len-1 and silently overwrote
+        // the LAST element (parallel-review P1, 2026-11-05).
+        let text_key = rt_string_new(b"k".as_ptr(), 1);
+        let text_res = rt_collection_set(arr, text_key, RuntimeValue::from_int(42));
+        assert!(!text_res.as_bool(), "text key must return false, not overwrite the last element");
+        let float_res = rt_collection_set(arr, RuntimeValue::from_float(1.5), RuntimeValue::from_int(42));
+        assert!(!float_res.as_bool(), "float key must return false, not overwrite the last element");
+        assert_eq!(rt_array_len(arr), 3);
+        assert_eq!(
+            rt_index_get(arr, RuntimeValue::from_int(2)).as_int(),
+            7,
+            "last element must be intact after non-integer-key rejections"
+        );
     }
 
     fn assert_rejected_child(kind: &str) {

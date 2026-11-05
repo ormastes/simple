@@ -131,6 +131,16 @@ set(10,99) / set(-10,42)), seed built from this branch:
 | `SIMPLE_EXECUTION_MODE=jit` | **abort: `Method 'set' not found on type 'Array'`** | identical to interpret |
 | native default | **abort: `Method 'set' not found on type 'Array'`** | identical to interpret |
 
+2026-11-05 parallel-review follow-up (P1): the Array arm initially decoded the
+index with `as_index_i64().unwrap_or(-1)`, so a non-integer key on the erased
+compiled lane normalized to `len-1` and silently overwrote the LAST element
+(`arr.set("k", v)` returned true). Fixed to return `false` with no mutation on
+a non-integer key, matching `rt_index_set`'s `None => false` contract. Pinned
+by child-test assertions in `erased_array_set_accepts_child` (text key, float
+key, last element intact) — failed pre-fix, pass post-fix; the full
+`collection_set_tests` module is 6/6 and the three-engine repro output is
+unchanged.
+
 Specs with the rebuilt seed: `test/01_unit/language/array_set_spec.spl`
 5/5 PASS, `test/01_unit/interpreter/array_set_method_spec.spl` 7/7 PASS
 (both previously passing under interpret only; the array-set examples in
