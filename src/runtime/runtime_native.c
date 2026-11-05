@@ -12133,20 +12133,29 @@ int64_t rt_find(int64_t receiver, int64_t arg) {
     return rt_string_find(receiver, arg);
 }
 
-/* Option::map. Absent from this file entirely until now, which is why the
- * type-blind `map` dispatch could not link on the C lane at all. Semantics are
- * pinned to the Rust rt_option_map (runtime/src/value/objects.rs): None/nil is
- * returned UNCHANGED with the closure never invoked, a null closure yields nil,
- * and otherwise the payload is passed to the closure and the result re-wrapped
- * in Some. Some is (enum_id 1, discriminant 0) and None is (1, 1) — the same
- * constants rt_array_at in this file already builds its Option with. */
+/* Option/Result::map. Absent from this file entirely until now, which is why
+ * the type-blind `map` dispatch could not link on the C lane at all. Semantics
+ * are pinned to the Rust rt_option_map (runtime/src/value/objects.rs): None/nil
+ * and Result.Err are returned UNCHANGED with the closure never invoked, a null
+ * closure yields nil, and otherwise the payload is passed to the closure and
+ * re-wrapped in the corresponding present variant. Option Some is (enum_id 1,
+ * discriminant 0) and None is (1, 1) — the same constants rt_array_at in this
+ * file already builds its Option with. */
 int64_t rt_option_map(int64_t value, int64_t closure_value) {
     if (rt_is_none(value)) return value;
+    RtCoreEnum* e = rt_core_as_enum(value);
+    int result_ok = 0;
+    if (e && e->enum_id == RT_RESULT_ENUM_ID) {
+        if (e->discriminant == RT_DISC_ERR) return value;
+        result_ok = e->discriminant == RT_DISC_OK;
+    }
     int64_t payload = rt_enum_payload(value);
     int64_t func_ptr = rt_closure_func_ptr(closure_value);
     if (!func_ptr) return rt_core_nil();
     RtArrayElemFn func = (RtArrayElemFn)(uintptr_t)func_ptr;
-    return rt_enum_new(1, 0, func(closure_value, payload));
+    int64_t mapped = func(closure_value, payload);
+    if (result_ok) return rt_enum_new(RT_RESULT_ENUM_ID, RT_DISC_OK, mapped);
+    return rt_enum_new(1, 0, mapped);
 }
 
 /* Receiver-polymorphic map: arrays go to rt_array_map, everything else keeps
