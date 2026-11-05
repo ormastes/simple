@@ -591,6 +591,92 @@ fn sync_vars_to_vregs(
     }
 }
 
+/// Cranelift cannot inline raw assembly. A naked body is therefore emitted as
+/// a same-ABI call to its C sidecar, explicitly forwarding arguments and
+/// returning the assembly body's result instead of falling through to ud2.
+fn compile_naked_function_body<M: Module>(
+    module: &mut M,
+    cranelift_func: &mut cranelift_codegen::ir::Function,
+    func: &MirFunction,
+    func_ids: &mut super::super::func_id_table::FuncIdTable,
+) -> InstrResult<()> {
+    let mut asm_blocks = 0usize;
+    let mut naked_asm = None;
+    for block in &func.blocks {
+        for inst in &block.instructions {
+            match inst {
+                MirInst::InlineAsm {
+                    dialect,
+                    instructions,
+                    volatile,
+                    constraints,
+                    inputs,
+                    outputs,
+                } => {
+                    let declared: Vec<&str> = constraints
+                        .split(',')
+                        .filter(|c| !c.is_empty() && *c != "~{memory}")
+                        .collect();
+                    if !declared.is_empty() || !inputs.is_empty() || !outputs.is_empty() {
+                        return Err(format!(
+                            "E-NAKED-CLOBBER: `{}` is @naked; its raw asm block must not carry clobbers(...) \
+                             or bound operands (the whole register file belongs to the author), found `{}`",
+                            func.name, constraints
+                        ));
+                    }
+                    naked_asm = Some((instructions, *volatile, *dialect));
+                    asm_blocks += 1;
+                }
+                other => {
+                    return Err(format!(
+                        "E-NAKED-BODY: `{}` is @naked; its body must be exactly one raw asm block, found {:?}",
+                        func.name, other
+                    ));
+                }
+            }
+        }
+        if !matches!(block.terminator, Terminator::Return(None) | Terminator::Unreachable) {
+            return Err(format!(
+                "E-NAKED-BODY: `{}` is @naked; control flow other than fall-through is not allowed, found {:?}",
+                func.name, block.terminator
+            ));
+        }
+    }
+    if asm_blocks != 1 {
+        return Err(format!(
+            "E-NAKED-BODY: `{}` is @naked; its body must be exactly one raw asm block, found {asm_blocks}",
+            func.name
+        ));
+    }
+
+    let (instructions, volatile, dialect) = naked_asm.expect("one naked asm block");
+    let symbol = crate::codegen::inline_asm::register_naked_inline_asm(instructions, volatile, dialect);
+    let func_id = if let Some(func_id) = func_ids.get(&symbol).copied() {
+        func_id
+    } else {
+        let sig = crate::codegen::shared::build_mir_signature(func, module.isa().default_call_conv());
+        let func_id = module
+            .declare_function(&symbol, cranelift_module::Linkage::Import, &sig)
+            .map_err(|e| e.to_string())?;
+        func_ids.insert(symbol, func_id);
+        func_id
+    };
+
+    let mut func_ctx = FunctionBuilderContext::new();
+    let mut builder = FunctionBuilder::new(cranelift_func, &mut func_ctx);
+    let entry = builder.create_block();
+    builder.append_block_params_for_function_params(entry);
+    builder.switch_to_block(entry);
+    let func_ref = module.declare_func_in_func(func_id, builder.func);
+    let args = builder.block_params(entry).to_vec();
+    let call = builder.ins().call(func_ref, &args);
+    let results = builder.inst_results(call).to_vec();
+    builder.ins().return_(&results);
+    builder.seal_block(entry);
+    builder.finalize();
+    Ok(())
+}
+
 /// Compile a complete MIR function body.
 /// This is shared between AOT (cranelift.rs) and JIT (jit.rs) backends.
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
@@ -621,6 +707,10 @@ pub fn compile_function_body<M: Module>(
     // the hosted `u64 len@8; data*@24` layout.
     fam_arrays: bool,
 ) -> InstrResult<()> {
+    if func.attributes.iter().any(|attr| attr == "naked") {
+        return compile_naked_function_body(module, cranelift_func, func, func_ids);
+    }
+
     let mut func_ctx = FunctionBuilderContext::new();
     let mut builder = FunctionBuilder::new(cranelift_func, &mut func_ctx);
 

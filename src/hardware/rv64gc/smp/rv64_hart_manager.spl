@@ -1,0 +1,76 @@
+"""
+# RV64 Hart Manager
+
+Multi-hart coordination and scheduling for SMP configurations.
+"""
+
+use hardware.rv64gc.smp.rv64_hart.Rv64Hart
+use hardware.rv64gc.pkg.rv64_types_pkg.PrivilegeMode
+
+class Rv64HartManager:
+    harts: [Rv64Hart]
+    num_harts: i64
+
+    static fn create(num_harts: i64, reset_vector: i64) -> Rv64HartManager:
+        """Create a multi-hart configuration. Hart 0 is the boot hart."""
+        var h: [Rv64Hart] = []
+        var i = 0
+        while i < num_harts:
+            var hart = Rv64Hart.create(i, reset_vector)
+            # Only hart 0 starts running; others start halted
+            if i != 0:
+                hart.halt()
+            h = h + [hart]
+            i = i + 1
+        Rv64HartManager(harts: h, num_harts: num_harts)
+
+    fn get_hart(hartid: i64) -> Rv64Hart:
+        """Get hart by ID."""
+        self.harts[hartid]
+
+    me get_hart_mut(hartid: i64) -> Rv64Hart:
+        """Get mutable hart reference by ID."""
+        self.harts[hartid]
+
+    fn active_hart_count() -> i64:
+        """Count number of non-halted harts."""
+        var count = 0
+        var i = 0
+        while i < self.num_harts:
+            if self.harts[i].is_halted() == false:
+                count = count + 1
+            i = i + 1
+        count
+
+    me wake_hart(hartid: i64):
+        """Wake a halted hart (e.g., via IPI)."""
+        if hartid < self.num_harts:
+            self.harts[hartid].resume()
+            self.harts[hartid].exit_wfi()
+
+    me halt_hart(hartid: i64):
+        """Halt a hart."""
+        if hartid < self.num_harts:
+            self.harts[hartid].halt()
+
+    me tick_all():
+        """Advance cycle counter for all active harts."""
+        var i = 0
+        while i < self.num_harts:
+            if self.harts[i].is_halted() == false:
+                self.harts[i].tick()
+            i = i + 1
+
+    me send_ipi(target_hartid: i64):
+        """Send inter-processor interrupt to a hart.
+        Sets the MSIP bit in the target hart's mip register."""
+        if target_hartid < self.num_harts:
+            val mip = self.harts[target_hartid].read_csr(0x344)  # CSR_MIP
+            self.harts[target_hartid].write_csr(0x344, mip or 0x8)  # Set MSIP (bit 3)
+            self.harts[target_hartid].exit_wfi()
+
+    me clear_ipi(target_hartid: i64):
+        """Clear inter-processor interrupt for a hart."""
+        if target_hartid < self.num_harts:
+            val mip = self.harts[target_hartid].read_csr(0x344)
+            self.harts[target_hartid].write_csr(0x344, mip and 0xFFFFFFFFFFFFFFF7)

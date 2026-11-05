@@ -182,3 +182,42 @@ these undefineds can come from the skip-comments.
 
 **Status of this record: FIXED.** The next rv64 WM blocker is the runtime
 symbol closure, which belongs to those records.
+
+## Verification re-run 2026-11-05 (worktree work/libbug-w6-rv64asm-20261105 on origin/release/1.0.0)
+
+Fix confirmed already present and complete on this branch: symmetric
+`block_matches_target` in `src/compiler_rust/compiler/src/pipeline/native_project/inline_asm_emit.rs`
+(keeps only target-family blocks, skips operand-bearing lines) and the parser
+re-brace in `src/compiler_rust/parser/src/stmt_parsing/asm.rs`
+(`extract_asm_block_strings` re-wraps `render_asm_placeholder` output in `{...}`).
+
+Evidence:
+
+- Reproduce tests GREEN: `cargo test -p simple-parser --lib asm` 31/31;
+  `cargo test -p simple-compiler --lib inline_asm` 19/19 (incl.
+  `native_inline_asm_riscv_target_rejects_x86_blocks`,
+  `native_inline_asm_x86_target_still_rejects_riscv_blocks`,
+  `native_inline_asm_riscv_skips_block_form_operand_placeholders`,
+  `test_asm_block_form_keeps_operand_placeholder_braces`).
+- Cross-compile probes: x86 mnemonics (`in eax, dx`, `mov cr3, eax`,
+  `out dx, eax`, `invlpg`) under
+  `clang-18 --target=riscv64-unknown-elf -march=rv64gc -c` fail with the exact
+  "unrecognized instruction mnemonic, did you mean: li/mv?" errors from this
+  record; clean rv64 mnemonics compile to a .o.
+- Consumer build GREEN: `sh scripts/os/build-simpleos-riscv64-wm-kernel.shs`
+  (seed built at `src/compiler_rust/target/release/simple`) produced
+  `build/os/riscv64_wm/wm/kernel.elf` (RISC-V ELF64, 75 MB, carries
+  `wm_vulkan_smoke_row` + `riscv64_display_initialize` + nonce) and
+  `kernel.Image`. `kernel-build.log` mentions `simple_asm_blocks` ZERO times —
+  the sidecar translation unit assembles clean for riscv64. The build now also
+  clears the LINK stage, so the runtime-symbol closure that blocked the 2026-09
+  gate run has since been fixed on this branch.
+- Toolchain note for reproducing on this host: the default `clang` on PATH is a
+  custom LLVM-23 build WITHOUT the RISC-V target
+  ("unable to create target: 'No available targets are compatible with triple
+  \"riscv64-unknown-unknown-elf\"'"); the build must be run with
+  `CC=clang-18 CXX=clang-18` (Ubuntu clang-18 has the backend; there is no
+  `clang++-18` binary, only the `clang-18` driver).
+- The full render-smoke gate (`check-simpleos-riscv64-wm-render-smoke-opensbi.shs`)
+  could not be booted here: it needs OpenSBI built with a riscv64 cross-gcc and
+  none is installed on this host (the gate skips with "no riscv64 cross-gcc").

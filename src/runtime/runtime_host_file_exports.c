@@ -105,6 +105,7 @@ int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout
     memset(&overlapped, 0, sizeof(overlapped));
     DWORD flags = LOCKFILE_EXCLUSIVE_LOCK;
     if (timeout_secs <= 0) {
+        flags |= LOCKFILE_FAIL_IMMEDIATELY;
         if (!LockFileEx(file, flags, 0, MAXDWORD, MAXDWORD, &overlapped)) {
             CloseHandle(file);
             return -1;
@@ -129,7 +130,7 @@ int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout
     free(path);
     if (fd < 0) return -1;
     if (timeout_secs <= 0) {
-        if (flock(fd, LOCK_EX) == 0) return fd;
+        if (flock(fd, LOCK_EX | LOCK_NB) == 0) return fd;
         close(fd);
         return -1;
     }

@@ -43,7 +43,7 @@ describe "bootstrap AST declaration count slots":
         expect(decl_reset).to_contain("decl_tag.clear()")
         expect(decl_reset).to_contain("decl_impl_trait.clear()")
         expect(decl_reset).to_contain("decl_param_mut_text.clear()")
-        expect(module_state_src).to_contain("module_decl_slots.clear()")
+        expect(module_state_src).to_contain("ast_module_decl_slots_clear()")
         expect(decl_reset).to_not_contain("    decl_tag = []\n    decl_span = []")
         expect(expr_reset).to_contain("expr_tag.clear()")
         expect(expr_reset).to_contain("asm_arm_archs.clear()")
@@ -57,36 +57,32 @@ describe "bootstrap AST declaration count slots":
         val parser_init_start = parser_source.index_of("fn parser_init_with_path(source: text, path: text):") ?? -1
         val parser_advance_start = parser_source.index_of("fn parser_advance():") ?? -1
         val lexer_init_start = lexer_source.index_of("fn lex_init_with_path(source: text, source_path: text):") ?? -1
-        val lexer_state_start = lexer_source.index_of("fn lex_state_get(key: text, fallback: text)") ?? -1
         expect(parser_init_start).to_be_greater_than(-1)
         expect(parser_advance_start).to_be_greater_than(parser_init_start)
         expect(lexer_init_start).to_be_greater_than(-1)
-        expect(lexer_state_start).to_be_greater_than(lexer_init_start)
         val parser_init_body = parser_source.substring(parser_init_start, parser_advance_start)
-        val lexer_init_body = lexer_source.substring(lexer_init_start, lexer_state_start)
 
-        expect(parser_init_body).to_contain("par_errors.clear()")
-        expect(parser_init_body).to_contain("par_warnings.clear()")
-        expect(parser_init_body).to_contain("par_struct_names.clear()")
-        expect(parser_init_body).to_contain("par_kind_slot[0] = 0")
-        expect(parser_init_body).to_contain("par_text_slot[0] = \"\"")
-        expect(parser_init_body).to_contain("par_line_slot[0] = 0")
-        expect(parser_init_body).to_contain("par_col_slot[0] = 0")
-        for name in ["par_errors", "par_warnings", "par_struct_names", "par_kind_slot", "par_text_slot", "par_line_slot", "par_col_slot"]:
-            expect(parser_init_body).to_not_contain("\n    {name} =")
+        # Per-parse scratch lives on the context-owned `par_state` struct:
+        # diagnostic/name containers get fresh scope-local owners each parse,
+        # while the small scalar slots are reused in place behind nil guards.
+        expect(parser_init_body).to_contain("par_state.par_errors = []")
+        expect(parser_init_body).to_contain("par_state.par_warnings = []")
+        expect(parser_init_body).to_contain("par_state.par_struct_names = []")
+        expect(parser_init_body).to_contain("if par_state.par_kind_slot == nil:")
+        expect(parser_init_body).to_contain("par_state.par_kind_slot[0] = 0")
+        expect(parser_init_body).to_contain("par_state.par_text_slot[0] = \"\"")
+        expect(parser_init_body).to_contain("par_state.par_line_slot[0] = 0")
+        expect(parser_init_body).to_contain("par_state.par_col_slot[0] = 0")
         expect(parser_source).to_not_contain("parser_lex_source_cached")
         expect(parser_source).to_not_contain("par_src_cache")
         expect(parser_source).to_not_contain("SIMPLE_BOOTSTRAP_LEX_SOURCE_GEN")
         expect(lexer_source).to_not_contain("SIMPLE_BOOTSTRAP_LEX_SOURCE_GEN")
-        expect(bridge_source).to_not_contain("parser_lex_source_gen_bump")
-        # The direct module-owned lexer avoids retaining CoreLexer aggregates
-        # inside a reset-crossing one-element module array.
-        expect(lexer_source).to_contain("var current_core_lexer: CoreLexer = make_core_lexer(\"\")")
-        expect(lexer_source).to_contain("var current_core_lexer_live: bool = false")
-        expect(lexer_source).to_not_contain("current_core_lexer_slot")
-        expect(lexer_init_body).to_contain("current_core_lexer = make_core_lexer(core_source)")
-        expect(lexer_init_body).to_contain("current_core_lexer_live = true")
-        expect(lexer_init_body).to_not_contain("rt_array_free(")
+        expect(parser_source).to_not_contain("parser_lex_source_gen_bump")
+        # The active lexer crosses parses through a nil-guarded one-element
+        # slot array; the inline source owner is replaced whole per file.
+        expect(lexer_source).to_contain("var current_core_lexer_slot: [CoreLexer] = []")
+        expect(lexer_source).to_contain("if current_core_lexer_slot.len() == 0:")
+        expect(lexer_source).to_contain("lex_inline_source_slot = [core_source]")
 
         val large_module = parse_and_build_module("fn stale_large() -> i64:\n" + "    0\n".repeat(256), "large_state_probe.spl")
         val large_expr_count = expr_owner_len()
@@ -201,10 +197,15 @@ describe "bootstrap AST declaration count slots":
         expect(rt_env_set("SIMPLE_BOOTSTRAP_EXPR_0_TAG", "1")).to_equal(true)
         expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_COUNT", "1")).to_equal(true)
         expect(rt_env_set("SIMPLE_BOOTSTRAP_STMT_0_TAG", "1")).to_equal(true)
+        # Count mirrors are still consulted in interpreter bootstrap mode...
         expect(expr_count()).to_equal(1)
         expect(stmt_count()).to_equal(1)
-        expect(expr_get_tag(0)).to_equal(1)
-        expect(stmt_get_tag(0)).to_equal(1)
+        # ...but the per-index tag mirrors are legacy seed-bootstrap output
+        # with no remaining consumer, and tag getters are arena-authoritative:
+        # a stale mirror tag is never trusted for an arena slot that does not
+        # exist (fail-closed -1, mirroring module_decl_at).
+        expect(expr_get_tag(0)).to_equal(-1)
+        expect(stmt_get_tag(0)).to_equal(-1)
 
     it "ignores stale declaration mirrors in native arena mode":
         val old_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP") ?? ""

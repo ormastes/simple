@@ -246,7 +246,32 @@ impl TypeRegistry {
     ///   `u8`-declared loop-variable slot — corrupting the loop variable
     ///   (see doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md).
     /// - Other types (Range, custom iterators) → None (caller should fallback)
-    pub fn get_iterable_element(&self, id: TypeId) -> Option<TypeId> {
+    pub fn get_iterable_element(&mut self, id: TypeId) -> Option<TypeId> {
+        // Dicts: iterate as (K, V) 2-tuples. This MUST be HirType::Tuple
+        // rather than a 2-element array or the bare value type, to match
+        // the runtime representation the For codegen consumes:
+        // `rt_for_iterable(dict)` -> `rt_dict_entries` (runtime/src/value/
+        // dict.rs) yields an ARRAY whose elements are `rt_tuple_new(2)`
+        // heap TUPLES — one tagged tuple handle per entry, exactly what
+        // the interpreter binds (`Value::Tuple([key, value])`,
+        // interpreter_call/block_execution.rs `get_iterator_values`). The
+        // pure-Simple MIR producer types the same entry as
+        // `Tuple(K, V)` (50.mir/mir_lowering_stmts.spl, dict entries
+        // lane), and the seed codegen stores every non-primitive TypeId —
+        // Tuple included — as ONE pointer-sized word (codegen/
+        // types_util.rs `type_id_to_cranelift`/`type_id_size`), so a
+        // Tuple-typed loop slot holds the tagged tuple handle verbatim
+        // with no aggregate-layout ABI risk. Field/index access on the
+        // entry then resolves through the existing tuple paths (HIR
+        // access.rs tuple index typing; MIR `rt_tuple_get`). Without this
+        // arm the entry lowered as ANY and native HIR hard-failed on any
+        // field access off it (bug:
+        // doc/08_tracking/bug/seed_native_hir_dict_for_loop_entry_any_2026_10_22.md).
+        if let Some(HirType::Dict { key, value }) = self.types.get(&id) {
+            let (key, value) = (*key, *value);
+            let entry = self.register(HirType::Tuple(vec![key, value]));
+            return Some(entry);
+        }
         match self.types.get(&id) {
             // Arrays: element type is T
             Some(HirType::Array { element, .. }) => Some(*element),

@@ -6,7 +6,11 @@ evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
-Fixed in the compiler (2026-10-19 note below). The SimpleOS Draw IR call site still carries the source workaround, which is harmless.
+Status: FIXED (2026-10-19) — codegen verified on freestanding x86_64 ELF. The
+compiler fix (`dc662dde275`, landed on release/1.0.0 via PR #6751) makes the
+MIR `.?` value arm yield the payload, so the guard boolean is never used as the
+struct pointer. The SimpleOS Draw IR call site still carries the source
+workaround, which is harmless.
 
 2026-10-18: does not reproduce on hosted x86_64 Windows. The Stage 2
 self-hosted compiler (release_phase3 e77412a8eef, LLVM backend, core-C

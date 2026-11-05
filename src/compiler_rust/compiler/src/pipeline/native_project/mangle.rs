@@ -1042,13 +1042,17 @@ fn resolve_call_target(
     }
 }
 
+/// Resolve an ambiguous free-function call to the definition whose module path
+/// shares the longest prefix with the caller (a sibling split-part behind a
+/// facade). Not limited to `_`-prefixed names: facade-crossing calls to public
+/// helpers fail identically. A tie or no shared prefix stays unresolved.
 fn resolve_ambiguous_private_call_in_module(
     name: &str,
     prefix: &str,
     ambiguous_names: &std::collections::HashSet<String>,
     suffix_index: &std::collections::HashMap<String, Vec<String>>,
 ) -> Option<String> {
-    if !name.starts_with('_') || !ambiguous_names.contains(name) {
+    if !ambiguous_names.contains(name) {
         return None;
     }
 
@@ -1779,6 +1783,167 @@ mod tests {
         }
         assert!(!is_enum_helper_method("len"));
         assert!(!is_enum_helper_method("to_string"));
+    }
+
+    /// Acceptance regressions for the XXH3 Phase-2 SIGSEGV (2026-11-03, ARM64
+    /// Linux attempt 8, `seed_native_numeric_conversion_suffix_rebinds_private_
+    /// reader_2026-11-03`): the private byte reader
+    /// `elf_artifact_gate___u64` indexed as bare `u64`, and
+    /// `resolve_by_suffix("to_u64")` cut `("to", "u64")` and rebound the
+    /// erased-receiver `.to_u64()` in xxh3.spl to it (the ELF reader received
+    /// integer 176 as its array pointer). `ce18f9e2026` fixed `suffix_of` to
+    /// keep the leading underscore; these tests pin both resolver routes so
+    /// the index keying can never regress back.
+    fn gate_reader_suffix_index() -> HashMap<String, Vec<String>> {
+        // Built through the real indexer, not hand-keyed: the tests then guard
+        // the actual `suffix_of` invariant, not a copy of it.
+        let mut all: HashMap<String, Vec<String>> = HashMap::new();
+        all.insert(
+            "gate".to_string(),
+            vec!["compiler__backend__introspection__elf_artifact_gate___u64".to_string()],
+        );
+        super::super::imports::build_suffix_index(&all)
+    }
+
+    /// Bare route 1: an erased-receiver numeric conversion reaching
+    /// `resolve_call_target` must stay bare when the only same-suffix symbol
+    /// in the closure is the private reader.
+    #[test]
+    fn bare_numeric_conversion_call_target_never_binds_private_reader() {
+        let idx = gate_reader_suffix_index();
+        assert!(
+            idx.get("u64").is_none(),
+            "the private reader must not index under the bare `u64` key"
+        );
+        for conv in ["to_u64", "to_i64", "to_u32", "to_i32", "to_u8", "to_i8"] {
+            assert_eq!(run_call_target(conv, &idx), conv, "{conv} must stay bare");
+        }
+    }
+
+    /// Bare route 1, positive arm: with a real conversion owner in the
+    /// closure the bare name still binds to it, so the guard is not
+    /// "never resolve".
+    #[test]
+    fn bare_numeric_conversion_call_target_still_binds_real_owner() {
+        let mut idx = gate_reader_suffix_index();
+        idx.insert(
+            "to_u64".to_string(),
+            vec!["core__numeric__convert__to_u64".to_string()],
+        );
+        assert_eq!(run_call_target("to_u64", &idx), "core__numeric__convert__to_u64");
+    }
+
+    /// Qualified route 2: a primitive-qualified static call (`u64.to_u64`)
+    /// bypasses the bare-name numeric guard in `resolve_method_call_static`,
+    /// so its safety rests entirely on the index keying.
+    #[test]
+    fn primitive_qualified_numeric_static_never_binds_private_reader() {
+        let idx = gate_reader_suffix_index();
+        for qualified in ["u64.to_u64", "i64.to_i64", "u8.to_u64", "i32.to_i64"] {
+            assert_eq!(
+                run_method_static(qualified, &idx),
+                qualified,
+                "{qualified} must stay bare"
+            );
+        }
+    }
+
+    /// Qualified route 2, positive arm: a genuinely owned conversion still
+    /// resolves to its owner even with the private reader present.
+    #[test]
+    fn primitive_qualified_numeric_static_still_binds_real_owner() {
+        let mut idx = gate_reader_suffix_index();
+        idx.insert(
+            "to_u64".to_string(),
+            vec!["core__numeric__u64.to_u64".to_string()],
+        );
+        assert_eq!(run_method_static("u64.to_u64", &idx), "core__numeric__u64.to_u64");
+    }
+
+    /// Negative control (acceptance #2): a CUSTOM owner's own conversion keeps
+    /// binding on both resolver routes; the private reader must not shadow it.
+    #[test]
+    fn custom_owner_numeric_conversion_still_resolves() {
+        let mut idx = gate_reader_suffix_index();
+        idx.insert(
+            "to_u64".to_string(),
+            vec!["lib__window__geometry__Px.to_u64".to_string()],
+        );
+        assert_eq!(run_method_static("Px.to_u64", &idx), "lib__window__geometry__Px.to_u64");
+        assert_eq!(run_call_target("Px.to_u64", &idx), "lib__window__geometry__Px.to_u64");
+    }
+
+    /// Negative control (acceptance #2): an exact authored import wins over
+    /// every suffix path. Driven through the real `mangle_mir` so the test
+    /// exercises the production routing -- the call site consults
+    /// `use_map`/`import_map` by exact name before the resolver ever runs --
+    /// with the private reader present in the suffix index.
+    #[test]
+    fn exact_authored_import_wins_over_private_reader_suffix() {
+        use crate::mir::{MirFunction, MirInst, MirModule, Terminator};
+
+        fn module_with(insts: Vec<MirInst>) -> MirModule {
+            let mut mir = MirModule::new();
+            let mut func = MirFunction::new(
+                "main".to_string(),
+                crate::hir::TypeId::VOID,
+                simple_parser::Visibility::Private,
+            );
+            func.blocks[0].instructions.extend(insts);
+            func.blocks[0].terminator = Terminator::Return(None);
+            mir.functions.push(func);
+            mir
+        }
+
+        let idx = gate_reader_suffix_index();
+        let import_map = HashMap::from([(
+            "to_u64".to_string(),
+            "lib__common__numeric__to_u64".to_string(),
+        )]);
+
+        // MethodCallStatic route.
+        let mut mir = module_with(vec![MirInst::MethodCallStatic {
+            dest: None,
+            receiver: crate::mir::VReg(0),
+            func_name: "to_u64".to_string(),
+            args: vec![],
+        }]);
+        super::mangle_mir(
+            &mut mir,
+            "app__entry",
+            true,
+            &import_map,
+            &std::collections::HashSet::new(),
+            &HashMap::new(),
+            &idx,
+        );
+        match &mir.functions[0].blocks[0].instructions[0] {
+            MirInst::MethodCallStatic { func_name, .. } => {
+                assert_eq!(func_name, "lib__common__numeric__to_u64")
+            }
+            other => panic!("expected static method call, got {other:?}"),
+        }
+
+        // CallTarget route.
+        let mut mir = module_with(vec![MirInst::Call {
+            dest: None,
+            target: CallTarget::Pure("to_u64".to_string()),
+            args: vec![],
+        }]);
+        let unresolved = super::mangle_mir(
+            &mut mir,
+            "app__entry",
+            true,
+            &import_map,
+            &std::collections::HashSet::new(),
+            &HashMap::new(),
+            &idx,
+        );
+        assert_eq!(unresolved, 0, "the exact import must resolve the call");
+        match &mir.functions[0].blocks[0].instructions[0] {
+            MirInst::Call { target, .. } => assert_eq!(target.name(), "lib__common__numeric__to_u64"),
+            other => panic!("expected call, got {other:?}"),
+        }
     }
 }
 

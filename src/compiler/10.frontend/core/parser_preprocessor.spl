@@ -930,6 +930,28 @@ fn _pp_preprocess_conditionals_body(source: text) -> text:
 
     final_lines.join("\n")
 
+# Decisions are recorded in two passes (@when/@elif/@else/@end during the
+# directive pass, per-declaration @cfg during the second pass), so the raw
+# list is grouped by pass, not by source position. Receipts bind decisions
+# positionally (decisions[0] must be the first directive in the file) and
+# the decision digest commits to that order, so canonicalise to ascending
+# source line before the list leaves this module. Stable: same-line records
+# keep their record order.
+fn _pp_decisions_by_source_line(decisions: [FrontendCfgDecisionV1]) -> [FrontendCfgDecisionV1]:
+    var result: [FrontendCfgDecisionV1] = []
+    for decision in decisions:
+        result = result.push(decision)
+    var i = 1
+    while i < result.len():
+        var j = i
+        while j > 0 and result[j - 1].line > result[j].line:
+            val tmp = result[j]
+            result[j] = result[j - 1]
+            result[j - 1] = tmp
+            j = j - 1
+        i = i + 1
+    result
+
 pub fn _pp_preprocess_conditionals_target_receipted_v1(
     source: text, target_os: text, target_arch: text
 ) -> Result<FrontendTargetPreprocessV1, text>:
@@ -942,7 +964,7 @@ pub fn _pp_preprocess_conditionals_target_receipted_v1(
     pp_state._pp_target_decisions = []
     val preprocessed = _pp_preprocess_conditionals(source)
     val error = pp_state._pp_target_error
-    val decisions = pp_state._pp_target_decisions
+    val decisions = _pp_decisions_by_source_line(pp_state._pp_target_decisions)
     pp_state._pp_target_mode = false
     pp_state._pp_target_os = ""
     pp_state._pp_target_arch = ""

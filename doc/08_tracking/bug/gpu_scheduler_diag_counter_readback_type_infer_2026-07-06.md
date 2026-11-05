@@ -69,3 +69,13 @@ describe "repro":
   `?? <default>` coalesce type-checks against `V`.
 - Once fixed, re-enable stage-facet + counter/summary assertions in the GPU
   scheduler diag spec (and drop the warmup dependency in diag_spec).
+
+## Status 2026-11-05 (GPU lane, work/rel100-gpu-fixes-20261105)
+
+Not reproducible on release/1.0.0 lineage @ c3b2271c310. The first-touch repro
+(`dbg_counter_value` miss-path, counter accumulation + summary line, and
+stage-facet enable from a fresh process) passes 3/3 under
+`bin/simple test test/01_unit/lib/nogc_sync_mut/diag_counter_readback_first_touch_spec.spl --mode=interpreter`.
+The interpreter monomorphization ordering fix appears already landed. New spec
+`test/01_unit/lib/nogc_sync_mut/diag_counter_readback_first_touch_spec.spl`
+kept as a regression guard pinning first-touch order. No source change needed.

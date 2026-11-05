@@ -1,4 +1,9 @@
 # macos-gui-run.shs exits 141 after a successful launch; its winit-marker gate refuses dlopen-route binaries
+
+> **Triage 2026-11-05 (release/1.0.0 worktree):** both defects confirmed fixed
+> in ancestry — `find_exact_app_pid` captures `ps` into a variable (no SIGPIPE
+> under pipefail) and `has_winit_marker` accepts the dlopen route via
+> `winit_dylib_available`. Not selected for this pass.
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution

@@ -1,4 +1,30 @@
 # Simple Web Text Decoration Geometry Clip Blocker
+
+## Verified + repaired 2026-11-05 (worktree work/libbug-w6-textdecor-20261105)
+
+Behavioral verification on the Linux/aarch64 evidence lane
+(`build/phase_snapshots/phase1_1793422538/simple`, interpreter mode):
+
+- `text_decoration_geometry_clip_spec.spl` failed 1/5 before the fix:
+  "moves independent underline ink for positive and negative offsets"
+  (`expected 36 to equal 28`) — `text-underline-offset:-4px` moved the
+  underline 4px *down* instead of up.
+- Root cause: `apply_declarations` resolved the property with
+  `parse_int(text_underline_offset_norm)`
+  (`simple_web_html_layout_renderer_decl_apply.spl`), and the renderer's
+  `parse_int` drops a leading `-` (it only accumulates digits), so every
+  negative offset silently became positive. Paint geometry, tile ink
+  bounds, and ancestor clipping were all correct once the resolved value
+  had the right sign.
+- Fix: parse with the existing `parse_signed_nth_int(value, 0)`
+  (same helper as text-shadow/box-shadow offsets); non-numeric values
+  (e.g. `from-font`) fall back to 0 as before.
+- After the fix: `text_decoration_geometry_clip_spec.spl` 5/5 PASS.
+- Regression baselines (identical before and after the fix, pre-existing
+  failures unrelated to this change):
+  `browser_renderer_spec.spl` 112/130 (18 pre-existing failures),
+  `text_decoration_paint_parity_spec.spl` 2/4 (2 pre-existing failures).
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution

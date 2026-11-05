@@ -1,0 +1,88 @@
+# Regression: hir_abi_interface_parts_v1 must skip nil-valued declaration
+# entries instead of dereferencing them. A present dict key can read back nil
+# on the shard-stage2 binary (the false-nil draw the codec twins in
+# hir_codec.spl already guard); this walk feeds the delegated HIR worker's
+# TLDR header path. See doc/08_tracking/bug/stage2_mir_shard_flat_pool_text_len_minus1_2026-10-22.md
+# (lane 61: deterministic nil-lookup-result dereference in a bounded table
+# scan, caught at simple_exe+0x16c37f).
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_types.{HirModule, SymbolId, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirFunction, HirConst, HirExpr, HirExprKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.abi_interface.{hir_abi_interface_digest_v1}
+
+fn nil_guard_module() -> HirModule:
+    val parsed = parse_full_frontend(
+        "fn zeta() -> i64:\n    7\n\n" +
+        "fn alpha() -> i64:\n    1\n\n" +
+        "fn middle() -> i64:\n    9\n",
+        "abi_nil_guard.spl", "abi_nil_guard", Logger(level: 0))
+    var lowering = HirLowering.with_filename("abi_nil_guard.spl")
+    val module = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    expect(module.functions.len()).to_equal(3)
+    val keys = module.functions.keys()
+    for key in keys:
+        var function: HirFunction = module.functions[key]
+        function.is_public = true
+        module.functions[key] = function
+    module
+
+fn prune_functions(module: HirModule, drop_id: i64) -> text:
+    # Digest of the same module with the dropped entry removed entirely: the
+    # reference a correct nil-skip must reproduce exactly.
+    val keys = module.functions.keys()
+    var kept: Dict<SymbolId, HirFunction> = {}
+    for key in keys:
+        if key.id != drop_id:
+            kept[key] = module.functions[key]
+    val original = module.functions
+    module.functions = kept
+    val pruned = hir_abi_interface_digest_v1(module).unwrap()
+    module.functions = original
+    pruned
+
+describe "HIR ABI interface nil-valued declaration entries":
+    it "skips a nil-valued function entry and matches the pruned-module digest":
+        val module = nil_guard_module()
+        val keys = module.functions.keys()
+        val full_digest = hir_abi_interface_digest_v1(module).unwrap()
+        val pruned_digest = prune_functions(module, keys[0].id)
+        module.functions[keys[0]] = nil
+        val guarded = hir_abi_interface_digest_v1(module)
+        expect(guarded.is_ok()).to_equal(true)
+        expect(guarded.unwrap()).to_equal(pruned_digest)
+        expect(guarded.unwrap() == full_digest).to_equal(false)
+
+    it "skips a nil-valued constant entry and matches the pruned-module digest":
+        val module = nil_guard_module()
+        val span = Span.default()
+        val ty = HirType(kind: HirTypeKind.Int(bits: 64, signed: true), span: span)
+        val value = HirExpr(kind: HirExprKind.UnitLit, has_type_: false,
+            type_: ty, span: span)
+        val symbol_a = SymbolId.new(1)
+        val symbol_b = SymbolId.new(2)
+        module.constants[symbol_a] = HirConst(symbol: symbol_a, name: "first_const",
+            type_: ty, value: value, is_mutable: false, visibility: Visibility.Public,
+            is_public: true, is_volatile: false, has_fixed_address: false,
+            fixed_address: 0, span: span)
+        module.constants[symbol_b] = HirConst(symbol: symbol_b, name: "second_const",
+            type_: ty, value: value, is_mutable: false, visibility: Visibility.Public,
+            is_public: true, is_volatile: false, has_fixed_address: false,
+            fixed_address: 0, span: span)
+        val full_digest = hir_abi_interface_digest_v1(module).unwrap()
+        val original_constants = module.constants
+        var kept_constants: Dict<SymbolId, HirConst> = {}
+        kept_constants[symbol_b] = module.constants[symbol_b]
+        module.constants = kept_constants
+        val pruned_digest = hir_abi_interface_digest_v1(module).unwrap()
+        module.constants = original_constants
+        module.constants[symbol_a] = nil
+        val guarded = hir_abi_interface_digest_v1(module)
+        expect(guarded.is_ok()).to_equal(true)
+        expect(guarded.unwrap()).to_equal(pruned_digest)
+        expect(guarded.unwrap() == full_digest).to_equal(false)

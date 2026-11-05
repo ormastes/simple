@@ -190,7 +190,8 @@ pub(crate) fn write_inline_asm_c_for_target(
             crate::hir::AsmDialect::Att => false,
             crate::hir::AsmDialect::Intel => true,
         };
-        code.push_str(&format!("__attribute__((used)) void {}(void) {{\n", block.symbol));
+        let naked_attr = if block.naked { ", naked" } else { "" };
+        code.push_str(&format!("__attribute__((used{})) void {}(void) {{\n", naked_attr, block.symbol));
         code.push_str("    __asm__ volatile (\n");
         if use_intel_syntax {
             code.push_str("        \".intel_syntax noprefix\\n\"\n");

@@ -2772,16 +2772,33 @@ pub extern "C" fn rt_collection_remove(receiver: RuntimeValue, key: RuntimeValue
 
 /// `set`: receiver-dispatched for erased collection receivers.
 ///
-/// Only Dict owns this method in the language. An erased Dict retains the
-/// fluent result of `Dict.set`, while Array and Tuple take the same loud
-/// method-not-found path as statically typed receivers. Do not route this
-/// through `rt_index_set` or `rt_tuple_set`: those implement index assignment
-/// and tuple construction, not the `.set()` method.
+/// The interpreter has implemented `[T].set(i, v)` since 2026-11-03 — bool
+/// result, negative index counts from the end, out-of-range returns false with
+/// no mutation, exactly `rt_array_set` (see
+/// doc/08_tracking/bug/array_set_missing_on_interpreter_2026-08-18.md). The
+/// erased compiled-lane dispatch lands here for ANY receiver, so an Array must
+/// take those same semantics rather than fail closed: before this arm,
+/// `a.set(0, 9)` on the JIT/native lanes aborted with "Method 'set' not found
+/// on type 'Array'" while the interpreter accepted it.
+///
+/// Dict keeps its fluent receiver result; Tuple and every other receiver keep
+/// the loud method-not-found path (the interpreter has no `tuple.set` either).
 #[no_mangle]
 pub extern "C" fn rt_collection_set(receiver: RuntimeValue, key: RuntimeValue, value: RuntimeValue) -> RuntimeValue {
     if get_typed_ptr::<crate::value::dict::RuntimeDict>(receiver, HeapObjectType::Dict).is_some() {
         let _ = crate::value::dict::rt_dict_set(receiver, key, value);
         return receiver;
+    }
+    if get_typed_ptr_packed::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
+        // Array indices arrive TAGGED; `as_index_i64` decodes every integer
+        // representation the tag uses — the same decode `rt_index_set` applies.
+        // A non-integer key is out of range by definition and must return FALSE
+        // with NO mutation: substituting -1 here would normalize to `len-1` and
+        // silently overwrite the last element.
+        let Some(index) = key.as_index_i64() else {
+            return RuntimeValue::FALSE;
+        };
+        return RuntimeValue::from_bool(rt_array_set(receiver, index, value));
     }
 
     let type_name = collection_set_missing_type(receiver);
@@ -2798,7 +2815,10 @@ fn collection_set_missing_type(receiver: RuntimeValue) -> &'static [u8] {
 
 #[cfg(test)]
 mod collection_set_tests {
-    use super::{collection_set_missing_type, rt_array_new, rt_collection_set, rt_tuple_new};
+    use super::{
+        collection_set_missing_type, rt_array_len, rt_array_new, rt_array_push, rt_collection_set, rt_index_get,
+        rt_string_new, rt_tuple_new,
+    };
     use crate::value::dict::{rt_dict_get, rt_dict_new};
     use crate::value::RuntimeValue;
 
@@ -2812,9 +2832,82 @@ mod collection_set_tests {
     }
 
     #[test]
-    fn array_and_tuple_set_keep_their_method_not_found_identity() {
-        assert_eq!(collection_set_missing_type(rt_array_new(3)), b"Array");
+    fn tuple_keeps_its_method_not_found_identity() {
+        // Arrays no longer reach `collection_set_missing_type` (`.set` is a real
+        // array method since 2026-11-05); Tuple and unknown receivers still fail
+        // closed through it.
         assert_eq!(collection_set_missing_type(rt_tuple_new(3)), b"Tuple");
+    }
+
+    // doc/08_tracking/bug/array_set_missing_on_interpreter_2026-08-18.md: the
+    // interpreter gained `[T].set(i, v)` (bool result, `rt_array_set`
+    // semantics) but the erased compiled-lane dispatch still funneled
+    // `a.set(i, v)` into `rt_collection_set`, which aborted with
+    // "Method 'set' not found on type 'Array'". This child-process test is the
+    // JIT/native-lane regression: pre-fix the child aborts (exit 70), post-fix
+    // it exits 0 having asserted the full `rt_array_set` contract.
+    #[test]
+    fn erased_array_set_mutates_in_place_and_returns_bool() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("value::collections::collection_set_tests::erased_array_set_accepts_child")
+            .arg("--nocapture")
+            .env("SIMPLE_COLLECTION_SET_ACCEPT_CHILD", "1")
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "array.set through rt_collection_set must succeed (pre-fix it loudly \
+             rejected arrays): stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn erased_array_set_accepts_child() {
+        if std::env::var_os("SIMPLE_COLLECTION_SET_ACCEPT_CHILD").is_none() {
+            return;
+        }
+        let arr = rt_array_new(0);
+        rt_array_push(arr, RuntimeValue::from_int(5));
+        rt_array_push(arr, RuntimeValue::from_int(3));
+        rt_array_push(arr, RuntimeValue::from_int(1));
+
+        // In range: returns TRUE and mutates in place.
+        let ok = rt_collection_set(arr, RuntimeValue::from_int(0), RuntimeValue::from_int(99));
+        assert!(ok.as_bool(), "in-range array set must return true");
+        assert_eq!(rt_index_get(arr, RuntimeValue::from_int(0)).as_int(), 99);
+
+        // Negative index counts from the end (`rt_array_set` contract).
+        let ok_neg = rt_collection_set(arr, RuntimeValue::from_int(-1), RuntimeValue::from_int(7));
+        assert!(ok_neg.as_bool(), "negative-index array set must return true");
+        assert_eq!(rt_index_get(arr, RuntimeValue::from_int(2)).as_int(), 7);
+
+        // Out of range on either side: returns FALSE, no mutation.
+        let oob = rt_collection_set(arr, RuntimeValue::from_int(10), RuntimeValue::from_int(1));
+        assert!(!oob.as_bool());
+        let oob_neg = rt_collection_set(arr, RuntimeValue::from_int(-10), RuntimeValue::from_int(1));
+        assert!(!oob_neg.as_bool());
+        assert_eq!(rt_array_len(arr), 3);
+        assert_eq!(rt_index_get(arr, RuntimeValue::from_int(1)).as_int(), 3);
+
+        // Non-integer keys (text, float) must be rejected with NO mutation:
+        // `rt_index_set`'s Array contract is `as_index_i64() == None => false`.
+        // An earlier version of this arm substituted -1 for a non-int key,
+        // which `normalize_index` turned into len-1 and silently overwrote
+        // the LAST element (parallel-review P1, 2026-11-05).
+        let text_key = rt_string_new(b"k".as_ptr(), 1);
+        let text_res = rt_collection_set(arr, text_key, RuntimeValue::from_int(42));
+        assert!(!text_res.as_bool(), "text key must return false, not overwrite the last element");
+        let float_res = rt_collection_set(arr, RuntimeValue::from_float(1.5), RuntimeValue::from_int(42));
+        assert!(!float_res.as_bool(), "float key must return false, not overwrite the last element");
+        assert_eq!(rt_array_len(arr), 3);
+        assert_eq!(
+            rt_index_get(arr, RuntimeValue::from_int(2)).as_int(),
+            7,
+            "last element must be intact after non-integer-key rejections"
+        );
     }
 
     fn assert_rejected_child(kind: &str) {
@@ -2835,18 +2928,6 @@ mod collection_set_tests {
             "missing receiver type in diagnostic: {stderr}"
         );
         assert!(stderr.contains("set"), "missing method in diagnostic: {stderr}");
-    }
-
-    #[test]
-    fn array_set_rejection_is_loud() {
-        assert_rejected_child("array");
-    }
-
-    #[test]
-    fn array_set_rejection_child() {
-        if std::env::var_os("SIMPLE_COLLECTION_SET_REJECTION_CHILD").is_some() {
-            rt_collection_set(rt_array_new(0), RuntimeValue::from_int(1), RuntimeValue::from_int(2));
-        }
     }
 
     #[test]
@@ -3129,15 +3210,26 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
         // below: they may own state this walk cannot understand.
         return true;
     }
+    let raw_debug = std::env::var_os("SIMPLE_TRANSIENT_RAW_PROMOTE_DEBUG")
+        .is_some_and(|v| v != "0");
     if !root_raw && value.heap_type().is_none() {
+        if raw_debug {
+            eprintln!("[raw-promote] false exit=unknown-heap-kind word={:#x} is_heap={} heap_type={:?}", value.0, value.is_heap(), value.heap_type());
+        }
         return false;
     }
     TRANSIENT_HEAP_SCOPE.with(|slot| {
         let mut slot = slot.borrow_mut();
         let Some(scope) = slot.as_mut() else {
+            if raw_debug {
+                eprintln!("[raw-promote] false exit=no-scope word={:#x}", value.0);
+            }
             return false;
         };
         if !scope.paused {
+            if raw_debug {
+                eprintln!("[raw-promote] false exit=not-paused word={:#x}", value.0);
+            }
             return false;
         }
 
@@ -3161,6 +3253,9 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
                 }
                 if word_count > 0 {
                     if words.is_null() {
+                        if raw_debug {
+                            eprintln!("[raw-promote] false exit=words-null current={:#x} canonical={:#x} count={}", current.0, canonical_ptr, word_count);
+                        }
                         return false;
                     }
                     let raw_words = unsafe { std::slice::from_raw_parts(words, word_count as usize) };
@@ -3180,6 +3275,9 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
         }
         for ptr in reachable_raw.iter() {
             if unsafe { rt_transient_raw_promote(*ptr) } == 0 {
+                if raw_debug {
+                    eprintln!("[raw-promote] false exit=promote-refused ptr={:#x} root_word={:#x} raw_len={}", ptr, value.0, reachable_raw.len());
+                }
                 return false;
             }
         }

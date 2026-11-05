@@ -119,3 +119,39 @@ SimpleOS backing is a spin lock with a 65536-spin budget and no blocking or pree
 correct only because bring-up is single-core and serialized. Upgrade path: fix the
 naked lowering, then replace the spin lock with a scheduler-backed blocking lock when
 SMP lands, then split the coarse lock per device instance.
+
+## Addendum 2026-11-05 — CAS critical-section provider no longer depends on @naked
+
+The critical-section *provider* side of this bug is fixed on
+`work/libbug-cas-critsect-20261105`. `src/os/kernel/net/thread_shim.spl`
+no longer carries any `@naked` function: the six `_mutex_word_cas` asm
+variants, the six `_mutex_cpu_id` variants, the raw-pointer calloc arena, and
+all `@cfg` dispatch are deleted. In their place:
+
+- `spl_mutex_create` allocates a word from the runtime freestanding atomic
+  handle space via `rt_atomic_int_new(0)` (bounded to the existing 256-word
+  boot budget, never recycled).
+- Every acquire/release/destroy transition is a single
+  `rt_atomic_int_compare_exchange` against that state word. The freestanding
+  runtime implements it in compiled C (`atomic_slot_owner.inc.c`,
+  `__atomic_compare_exchange_n`), i.e. a real lock-free hardware CAS
+  (x86_64 `lock cmpxchg`, arm64 `ldaxr`/`stlxr`, riscv `lr.w.aq`/`sc.w.rl`)
+  with no Simple-level asm thunk and therefore no exposure to the broken
+  `@naked` lowering.
+- The owner word is `spl_thread_current_id() + 1` instead of
+  `cpuid + 1`. Per-core ownership is not recoverable without naked
+  cpuid/mpidr assembly; bring-up is single-core and serialized, so this is
+  equivalent there. Per-core ownership must return with the
+  scheduler-backed blocking lock at SMP time, not by restoring `@naked`.
+- Fail-closed semantics are preserved exactly: invalid handles fabricate
+  false from the atomic ABI, double unlock fails, destroy is terminal, a
+  destroy on an owned word leaves it owned.
+
+Pinned by `test/01_unit/os/kernel/net/thread_shim_cas_critical_section_spec.spl`
+(5/5 at interpreter level on the seed binary; the dbfs admission probe spec
+stays 7/7). The compiler half is fixed by `ba7f6fc5c45`: naked sidecars are
+emitted without a compiler-generated frame and their wrappers return the
+sidecar result instead of trapping. The focused CAS/CPU-ID disassembly and
+execution regression plus the ordinary-asm regression pass. On the subsequent
+OVMF DBFS run, the guest reached `critical-section provider=ready`, proving the
+real mutex path rather than merely linking it.

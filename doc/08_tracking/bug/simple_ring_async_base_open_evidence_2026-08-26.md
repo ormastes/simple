@@ -80,3 +80,78 @@ binary, add a concurrency/resource model for ownership and cancellation
 linearization, mechanize the remaining concrete/arbitrary-capacity and liveness
 obligations, and retain the measured receipts. A single interleaving, bounded
 trace depth, or source inspection must not close this finding.
+
+## Evidence run 2026-11-05 (diagnostic lane, worktree work/libbug-w6-ring-20261105)
+
+Environment: worktree `/tmp/wt-libbug-w6-ring` on `origin/release/1.0.0`
+(adfeae3765c; identical to main HEAD for every file in this lane). Host aarch64
+Linux. `bin/simple` is absent in the worktree, so the plan commands were executed
+with the substitute CLI
+`/home/yoon/dev/simple/build/phase_snapshots/phase1_1793422538/simple`.
+IMPORTANT (per Finding 1): that binary is the Rust bootstrap seed
+(43,367,912 bytes, v1.0.0-rc.1, prints the seed-only warning). Everything below
+is diagnostic evidence only; it does NOT satisfy the pure-Simple/SPipe
+acceptance gate and does not close Finding 1.
+
+Binary identity: sha256 424d712cda338669d26121495041531b63cb67e30a1b07151e9a026c2d813cd6
+recorded before and after the run — identical.
+
+Open-path audit (async-first): no ring/transport `open` function exists. The
+async-base open handshake is `SoftwareRingProvider.create` ->
+`admit`/`admit_for_depth` (pure profile validation, no I/O, no waits, no
+blocking primitive) followed by nonblocking poll via `poll_future_compat`,
+whose `FutureCompatReceipt` records `blocking_used=false` and
+`scheduler_created=false`. Mission profiles carry `blocking_allowed=false`.
+The open path is async-first as designed; no broken/incomplete component was
+found, so no TDD fix was required.
+
+Per-file native verdicts (`SIMPLE_NO_STUB_FALLBACK=1 ... test <file>
+--mode=native`), logs under `build/test-artifacts/simple_ring_async_base/native/`:
+
+- simple_ring_async_v1_spec: OK 10/10
+- async_profile_v1_spec: OK 18/18
+- simple_ring_spec (async_ring): OK 9/9
+- mission_adapter_spec: OK 10/10
+- async_trace_ring_spec: OK 9/9
+- mission_ready_set_spec: OK 6/6
+- simple_ring_async_base_integration_spec: OK 2/2
+- simple_ring_profile_integration_spec: OK 4/4
+- simple_ring_future_compat_spec: OK 3/3
+- simple_ring_async_base_concurrency_spec: OK 5/5
+- simple_ring_async_base_bounded_model_spec (117,649 traces): OK 1/1
+- simple_ring_async_base_spec (system/SPipe): OK 7/7
+- simple_ring_async_base_perf_spec (p50/p99/p99.9, throughput, high-water): OK 2/2
+
+All native runs carry `degraded=mcdc-unavailable:compiler-lacks-probe-emission`;
+interpreter cross-check of the same files is also fully green. Zero dropped
+examples, zero failures.
+
+Regression (neighboring ring/transport/async specs, interpreter, all OK):
+simple_ring_rti004_wa_spec 6/6, poll_spec 2/2, scheduler_spec 2/2,
+wcet_adapter_spec 3/3, async_ref_interest_contract_spec 3/3,
+async_ref_wake_contract_spec 3/3, lockless_map_async_ref_spec 4/4,
+lockless_map_boundary_contract_spec 1/1.
+
+Gate results:
+
+- `check src/lib ...` (plan line 1): FAIL-fast (exit 1) without a self-hosted
+  worker: "ERROR: no admitted cached self-hosted check worker artifact is
+  available ... deploy bin/release/<triple>/simple or set SIMPLE_BINARY".
+  With `SIMPLE_BINARY=<seed>` the check proceeded through 17,381 log lines with
+  zero errors but did not complete within the session budget (~16 min) and was
+  terminated; no verdict is claimed. This is Finding 1's blocker reproduced.
+- `spipe-docgen`: generated 1 doc, 0 stubs; however the seed tool's output
+  regressed the committed manual (-78 lines), so the regenerated file was
+  reverted and this is recorded as diagnostic-only.
+- `sspec-maintain scan`: BLOCKED — command not present on the seed binary
+  ("error: file not found: sspec-maintain").
+- Layout guard `find doc/06_spec -name '*_spec.spl' | wc -l`: 0.
+- `scripts/audit/direct-env-runtime-guard.shs --working`: STATUS: PASS.
+- `scripts/audit/direct-env-runtime-guard.shs --staged`: STATUS: PASS.
+
+Disposition: the async-base open path is functional and async-first at the
+spec level (all 13 plan spec files green on the substitute binary). Finding 1
+remains BLOCKED on SRA-P3-001 (deploy an admitted pure-Simple binary); Finding 3
+(await lowering / rt_future_await) and Finding 4 (perf/concurrency proof) are
+unchanged by this run. Raw logs and receipts:
+`build/test-artifacts/simple_ring_async_base/` (gitignored).

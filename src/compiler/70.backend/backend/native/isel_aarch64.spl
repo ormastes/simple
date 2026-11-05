@@ -63,6 +63,11 @@ fn a64_lower_const(ctx: ISelContext, value: MirConstValue, type_: MirType) -> Lo
             LoweredOperand(insts: [adrp_inst, add_inst], result: low.result, ctx: low.ctx)
         case Zero:
             isel_emit_one(ctx, A64_OP_MOVZ, [op_imm(0)])
+        case Float(_) | FloatLexeme(_):
+            # Defense in depth: module validation (a64_module_float_rejections)
+            # rejects these before lowering; an operand-carried float constant
+            # that bypasses that scan must still fail loudly, not lower as 0.
+            panic("aarch64 native: floating-point constant has no lowering in the direct backend")
         case _:
             isel_emit_one(ctx, A64_OP_MOVZ, [op_imm(0)])
 
@@ -139,6 +144,12 @@ fn a64_alloc_temp(ctx: ISelContext) -> LoweredOperand:
 # ============================================================================
 
 fn isel_module_aarch64(module: MirModule) -> MachModule:
+    # Reject floating-point programs up front: lowering them would silently
+    # emit integer ops and zero constants (see a64_module_float_rejections).
+    val float_rejections = a64_module_float_rejections(module)
+    if float_rejections.len() > 0:
+        panic(float_rejections[0])
+
     var mach_module = new_mach_module(module.name)
     var ctx = new_isel_context()
 
@@ -238,6 +249,46 @@ fn a64_static_initializer_supported(value: MirConstValue) -> bool:
     match value:
         case Int(_) | Zero: true
         case _: false
+
+# ============================================================================
+# Floating-Point Rejection
+# ============================================================================
+# The direct AArch64 backend has no scalar floating-point support: every
+# binop lowers as an integer op (a64_isel_binop) and float constants lower
+# as zero. Until FP registers, the FP ABI and FP instruction encodings
+# exist, every float site must be rejected with an explicit diagnostic
+# instead of silently miscompiling (bug native_aarch64_scalar_float_
+# silent_integer_lowering_2026_11_03).
+
+fn a64_is_float_type(type_: MirType) -> bool:
+    match type_.kind:
+        case F32 | F64: true
+        case _: false
+
+fn a64_const_is_float(value: MirConstValue) -> bool:
+    match value:
+        case Float(_) | FloatLexeme(_): true
+        case _: false
+
+fn a64_module_float_rejections(module: MirModule) -> [text]:
+    var rejections: [text] = []
+    for func in mir_module_functions_sorted(module):
+        if a64_is_float_type(func.signature.return_type):
+            rejections.push("aarch64 native: function '{func.name}' has unsupported floating-point return type; the direct backend only supports integer scalar code")
+        for param_type in func.signature.params:
+            if a64_is_float_type(param_type):
+                rejections.push("aarch64 native: function '{func.name}' has an unsupported floating-point parameter type; the direct backend only supports integer scalar code")
+        for local in func.locals:
+            if a64_is_float_type(local.type_):
+                rejections.push("aarch64 native: function '{func.name}' local {local.id.id} has unsupported floating-point type; the direct backend only supports integer scalar code")
+        for block in func.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case Const(_, value, _):
+                        if a64_const_is_float(value):
+                            rejections.push("aarch64 native: function '{func.name}' has an unsupported floating-point constant; the direct backend only supports integer scalar code")
+                    case _: ()
+    rejections
 
 fn a64_isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
     var mach_func = new_mach_function(func.name)

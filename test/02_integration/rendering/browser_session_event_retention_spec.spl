@@ -1,13 +1,17 @@
 """DOM event dispatch must not duplicate stateless runtime registrations.
 
-The event objects themselves remain retained until the JS VM gains
-reachability-aware reclamation; this spec keeps that residual bug visible.
+Repeated same-document listener dispatches allocate a fresh JS event object
+per event, but reachability-based reclamation runs at the event-loop
+quiescence point after each outermost dispatch: the page-retained latest
+event stays reachable while superseded event objects are reclaimed, so the
+object heap no longer grows per dispatch.
 """
 
 use std.spec.*
 
 use std.gc_async_mut.web.browser_session.{BrowserSession}
 use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.web.browser_session_loading.*
 use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{DomNodeRoute}
 
 fn _event_retention_route(
@@ -56,7 +60,7 @@ describe "BrowserSession DOM event retention":
             ).unwrap()
             event_index = event_index + 1
 
-        step("Verify shared registrations stay flat while GC debt stays visible")
+        step("Verify shared registrations stay flat and GC debt is reclaimed")
         val final_state = session.runtime_state.unwrap()
         expect(final_state.runtime.interpreter.functions.len()).to_equal(
             warm_function_count
@@ -67,6 +71,9 @@ describe "BrowserSession DOM event retention":
         expect(final_state.runtime.interpreter.global_var_names.len()).to_equal(
             warm_global_count
         )
+        # Reachability reclamation at the dispatch quiescence point keeps the
+        # heap flat: the retained latest event survives, superseded event
+        # objects are reclaimed, so no net growth across repeated dispatches.
         expect(
             final_state.runtime.interpreter.object_store.obj_proto_ids.len()
-        ).to_be_greater_than(warm_object_count)
+        ).to_equal(warm_object_count)

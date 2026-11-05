@@ -131,3 +131,23 @@ binary on this host, identical pre/post. The live-device diff for the
 budget vector still needs qualification on a host with a working CUDA
 lane; the field-for-field expectations are unchanged and the host ref_vm
 side of the diff is covered by `test/01_unit/lib/svmg/ref_vm_debug_spec.spl`.
+
+## 2026-11-05 parallel-lane addendum (work/rel100-gpu-fixes-20261105)
+
+An independent parallel lane fixed the same conflation (this doc's core
+defect) with equivalent semantics; the landed session-layer resolution is
+upstream commit `057f96411b6`'s `classify_launch_outcome` and is kept
+verbatim. Two non-redundant pieces from the parallel lane are added on top:
+
+- `src/lib/gc_async_mut/gpu_lane/cuda_vm_executor.spl` — `timed_out` on the
+  launch-error path now keys off `cuda-lane-sync-completion-unknown`
+  (the old `cuda-lane-device-timeout-sentinel` string is dead after the
+  session fix, so `timed_out` could never latch). This matches the intent
+  stated in the landed commit message ("executor marks it timed_out,
+  making DebugTarget STOP_TIMEOUT reachable").
+- `test/03_system/gpu_lane/cuda_vm_executor_conformance_spec.spl` — the
+  `budget_exhaustion_timeout` vector is no longer excluded/poison-latched;
+  it runs in the shared main loop and the session is expected to shut down
+  cleanly. (The parallel lane's own `test/02_integration` budget-sentinel
+  spec was dropped as redundant with the landed
+  `test/01_unit/lib/gpu_lane/cuda_lane_budget_sentinel_spec.spl`.)

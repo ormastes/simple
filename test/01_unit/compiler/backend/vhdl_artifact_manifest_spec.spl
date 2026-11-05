@@ -15,6 +15,7 @@ use compiler.mir.hwir.stateful_frontend.{strict_zca_single_outstanding_frontend_
 use compiler.mir.hwir.frontend.{strict_zca_rv32_cjal_migrating_predecode_hwir, strict_zca_rv64_addiw_migrating_predecode_hwir}
 use compiler.backend.hwir_to_vhdl.{compile_strict_zca_single_outstanding_frontend_product, compile_strict_zca_trap_single_outstanding_frontend_product}
 use compiler.common.assurance.policy.{policy_for_profile_name}
+use std.common.json.value.{json_parse_value_strict, json_value_get, json_value_as_text}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text?
@@ -574,6 +575,71 @@ describe "VHDL production artifact manifest":
         expect(driver_source).to_contain("gen2_write_authorized_vhdl_artifact_emission")
         expect(driver_source.contains("vhdl_write_compiler_gen2_production_artifacts")).to_equal(false)
         expect(driver_source.contains("vhdl_write_production_artifacts(output, emitted.vhdl")).to_equal(false)
+        rt_dir_remove_all(root)
+
+    it "rejects escaped Gen2 route claims before changing existing artifacts":
+        val root = "build/vhdl_raw_encoded_route_contract"
+        rt_dir_remove_all(root)
+        expect(rt_dir_create(root, true)).to_equal(true)
+        val output = root + "/core.vhd"
+        val product = artifact_trap_gen2_input(output)
+        expect(vhdl_validate_production_artifact_input(product).is_ok()).to_equal(true)
+        val vhdl = "entity forged is\n"
+        for encoded_key in ["generation_route", "\\u0067eneration_route"]:
+            for escaped_prefix in ["\\u0068wir-gen2", "hwir\\u002dgen2", "hwir-gen\\u0032"]:
+                expect(rt_file_write_text(output, "known-vhdl")).to_equal(true)
+                expect(rt_file_write_text(output + ".map.json", "known-map")).to_equal(true)
+                expect(rt_file_write_text(output + ".gen.json", "known-manifest")).to_equal(true)
+                var rendered = vhdl_render_production_artifacts(product, vhdl)
+                rendered.manifest = rendered.manifest.replace("generation_route", encoded_key)
+                rendered.manifest = rendered.manifest.replace("hwir-gen2", escaped_prefix)
+                # A conforming reader still observes the reserved Gen2 route.
+                val decoded = json_parse_value_strict(rendered.manifest).unwrap()
+                val route = json_value_get(decoded, "generation_route").unwrap()
+                expect(json_value_as_text(route).unwrap()).to_equal(product.generation_route)
+                expect(rendered.manifest.contains("hwir-gen2")).to_equal(false)
+                expect(vhdl_write_production_artifacts(output, vhdl, rendered).unwrap_err()).to_equal(
+                    "VHDL raw artifact writer refuses compiler-owned RISC-V Gen2 routes")
+                expect(rt_file_read_text(output).unwrap()).to_equal("known-vhdl")
+                expect(rt_file_read_text(output + ".map.json").unwrap()).to_equal("known-map")
+                expect(rt_file_read_text(output + ".gen.json").unwrap()).to_equal("known-manifest")
+        rt_dir_remove_all(root)
+
+    it "rejects ambiguous or malformed manifest routes before stale cleanup":
+        val root = "build/vhdl_raw_invalid_route_contract"
+        rt_dir_remove_all(root)
+        expect(rt_dir_create(root, true)).to_equal(true)
+        val output = root + "/core.vhd"
+        val vhdl = "entity core is\n"
+        for manifest in ["{", "[]", "{}", "{\"generation_route\":false}",
+                "{\"generation_route\":\"legacy-vhdl\",\"\\u0067eneration_route\":\"legacy-vhdl\"}",
+                "{\"generation_route\":\"legacy-vhdl\"} false"]:
+            expect(rt_file_write_text(output, "known-vhdl")).to_equal(true)
+            expect(rt_file_write_text(output + ".map.json", "known-map")).to_equal(true)
+            expect(rt_file_write_text(output + ".gen.json", "known-manifest")).to_equal(true)
+            var rendered = vhdl_render_production_artifacts(artifact_input([], [], output), vhdl)
+            rendered.manifest = manifest
+            expect(vhdl_write_production_artifacts(output, vhdl, rendered).is_err()).to_equal(true)
+            expect(rt_file_read_text(output).unwrap()).to_equal("known-vhdl")
+            expect(rt_file_read_text(output + ".map.json").unwrap()).to_equal("known-map")
+            expect(rt_file_read_text(output + ".gen.json").unwrap()).to_equal("known-manifest")
+        rt_dir_remove_all(root)
+
+    it "preserves generic legacy and strict writes with decoded route spellings":
+        val root = "build/vhdl_raw_generic_route_contract"
+        rt_dir_remove_all(root)
+        expect(rt_dir_create(root, true)).to_equal(true)
+        val output = root + "/core.vhd"
+        val vhdl = "entity core is\n"
+        for route in ["legacy-vhdl", "hwir-strict"]:
+            var input = artifact_input([], [], output)
+            input.generation_route = route
+            var rendered = vhdl_render_production_artifacts(input, vhdl)
+            rendered.manifest = rendered.manifest.replace("generation_route", "\\u0067eneration_route")
+            expect(vhdl_write_production_artifacts(output, vhdl, rendered).is_ok()).to_equal(true)
+            expect(rt_file_read_text(output).unwrap()).to_equal(vhdl)
+            expect(rt_file_read_text(output + ".map.json").unwrap()).to_equal(rendered.source_map)
+            expect(rt_file_read_text(output + ".gen.json").unwrap()).to_equal(rendered.manifest)
         rt_dir_remove_all(root)
 
     it "returns an error when the VHDL path is not writable":

@@ -42,3 +42,25 @@ Status: fix-implemented-verification-pending.
   (expect 0 diagnostics). Then rebuild the native identity fixture, confirm there
   are no `unresolved method call 'to_text'` warnings, and only then retire the
   `typed_*` aliases in `src/compiler/80.driver/native_capsule_mir_identity.spl:128,186,190,266`.
+
+## Verification (2026-11-05) — closed as fixed at MIR lowering
+
+Base `origin/release/1.0.0` (contains `90d1f293648`). Deployed binary
+`C:/dev/simple/bin/simple.exe`; the compiler under test is loaded from source.
+
+- `bin/simple test test/01_unit/compiler/50.mir/i64_receiver_to_text_binding_spec.spl`
+  -> `executed=1 passed=1 failed=0`, `diagnostics: []` (all three fixture shapes:
+  `if val fixed_size = size`, `lo_value`/`hi_value` optional payload pairs,
+  `for device_id in f.manifest.device_ids`).
+- Discrimination control: with the I64 scalar arm (line ~5009) removed AND the
+  declared-type retype fallback disabled in
+  `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`, the same spec
+  FAILS (`passed=0 failed=1`) with
+  `mir: unresolved method call: to_text route=runtime-fallback key=::to_text` —
+  the exact C35 const-0 placeholder. Disabling only the fallback still passes:
+  the receivers now carry an I64 MIR local type, so the primary scalar arm
+  resolves them and the fallback is defence in depth.
+- Not re-run: a full native C35 identity-fixture build (heavy native lane). The
+  `typed_*` aliases in `src/compiler/80.driver/native_capsule_mir_identity.spl`
+  are value-preserving and stay; removing them is optional cleanup, not part of
+  this defect.

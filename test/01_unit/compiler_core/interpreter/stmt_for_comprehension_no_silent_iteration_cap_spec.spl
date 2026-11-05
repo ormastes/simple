@@ -1,0 +1,74 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# bug: doc/08_tracking/bug/core_interpreter_hard_loop_iteration_caps_2026-08-28.md
+#
+# Sibling of range_for_no_silent_iteration_cap_spec.spl. That spec covers the
+# expression paths in eval.spl (eval_for_expr / eval_range). This spec covers
+# the two remaining silent-cap sites documented in the bug:
+# - eval_stmts.spl eval_stmt_for (statement-form `for i in start..end:`),
+#   which carried `while iterations < 1000001` and silently stopped after
+#   1,000,001 iterations with NO error.
+# - _EvalOps/access_literal_assign_eval.spl eval_list_comp (list
+#   comprehension over a range expression), which carried the same silent
+#   1,000,001 cap.
+#
+# Both loops iterate a range whose element count is fixed by the range bounds
+# before the loop starts: they are bounded by construction and cannot
+# infinite-loop, so per the bug's chosen semantics the cap is removed outright
+# (matching the Rust seed, which has no cap) instead of being made loud.
+# Inclusive (`..=`) and exclusive (`..`) break semantics must be preserved.
+#
+# Fixtures sit just above the old 1,000,001 cap (not at the doc's 1.5M):
+# this spec is itself interpreted, so multi-million-iteration fixtures would
+# take minutes for no extra signal.
+
+use std.spec.step
+
+use compiler.core.interpreter.mod.{core_interpret}
+use compiler.core.interpreter.eval.{eval_has_error, eval_get_error}
+use compiler.core.interpreter.value.{val_get_int, val_get_array}
+
+describe "core interpreter statement-for and comprehension have no silent iteration cap":
+    it "completes a statement range-for past the old 1,000,001 cap with the correct count":
+        step("Verify: statement for 0..1000002 accumulates the full count, not 1000001")
+        # Before the fix the loop ended silently after 1,000,001 iterations
+        # (no interpreter error), returning a wrong count.
+        val src = "var acc: i64 = 0\nfor i in 0..1000002:\n    acc = acc + 1\nacc\n"
+        val result = core_interpret(src, "stmt_for_cap_repro.spl")
+        if eval_has_error():
+            print "interpreter error: {eval_get_error()}"
+        expect(eval_has_error()).to_equal(false)
+        expect(val_get_int(result)).to_equal(1000002)
+
+    it "completes an inclusive statement range-for past the old cap, keeping ..= endpoint semantics":
+        step("Verify: statement for 0..=1000001 runs every element including the endpoint")
+        # Inclusive range 0..=1000001 has 1000002 elements; old cap truncated
+        # to 1000001 silently.
+        val src = "var acc: i64 = 0\nfor i in 0..=1000001:\n    acc = acc + 1\nacc\n"
+        val result = core_interpret(src, "stmt_for_inclusive_cap_repro.spl")
+        if eval_has_error():
+            print "interpreter error: {eval_get_error()}"
+        expect(eval_has_error()).to_equal(false)
+        expect(val_get_int(result)).to_equal(1000002)
+
+    it "builds a list comprehension over a range past the old 1,000,001 cap":
+        step("Verify: [i for i in 0..1000002] materializes every element")
+        # Old cap silently stopped comprehension collection after 1,000,001
+        # elements, so len() reported 1000001 with no error.
+        val src = "val xs = [i for i in 0..1000002]\n[xs.len(), xs[1000001]]\n"
+        val result = core_interpret(src, "list_comp_cap_repro.spl")
+        if eval_has_error():
+            print "interpreter error: {eval_get_error()}"
+        expect(eval_has_error()).to_equal(false)
+        val parts = val_get_array(result)
+        expect(val_get_int(parts[0])).to_equal(1000002)
+        expect(val_get_int(parts[1])).to_equal(1000001)
+
+    it "still runs short statement-for and comprehension loops correctly (control)":
+        step("Verify: normal short loops are unaffected by the cap removal")
+        val src = "var acc: i64 = 0\nfor i in 0..5:\n    acc = acc + i\nval ys = [i * 2 for i in 0..=3]\n[acc, ys.len(), ys[3]]\n"
+        val result = core_interpret(src, "stmt_for_comp_short_control.spl")
+        expect(eval_has_error()).to_equal(false)
+        val parts = val_get_array(result)
+        expect(val_get_int(parts[0])).to_equal(10)
+        expect(val_get_int(parts[1])).to_equal(4)
+        expect(val_get_int(parts[2])).to_equal(6)
