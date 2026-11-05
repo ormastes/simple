@@ -245,3 +245,50 @@ wins the link.
 Verification (nonce aa11bb22cc33dd44): interpreted prints render the FULL
 marker — `HELLO_INTERP_SIMPLEOS_RISCV64_OK nonce=aa11bb22cc33dd44` and the
 full second line, rc=0. Official gate verdict recorded in the PR.
+
+---
+
+## 2026-11-06 — BUILDRUN MIR `bad_mode` FIXED (lane `work/riscv-buildrun-mir-20261106`, PR #7051+5): guest Result/field corruption on the symbol-write-ledger path; gate rows both green
+
+Symptom: the buildrun row died at phase=hir-ok with
+`FAIL mir lowering error: target_hir_symbol_writes_bad_mode: ` — an EMPTY
+mode, which `target_hir_mode_parse_strict` can never produce (unset /
+empty / invalid all map to Ok("legacy")). Measured chain (RSP on the
+buildrun guest, error_fatal breakpoint):
+
+1. `unwrap()` on the strict mode Result returned "" — the Ok TEXT payload
+   lost (same riscv64 in-guest AOT Result<text> corruption family as the
+   Ok-wrapper leak). Fix 1: `target_hir_mode_or_legacy()` in
+   target_hir_flags.spl — a Result-free plain-text read; the ledger open
+   got a valid mode. Error became a fully EMPTY message instead.
+2. The new empty message came from the P6 resolve at the end of
+   lower_module: `error_fatal` received **msg = 0x3 (NIL)** three times
+   (measured), i.e. is_err() mis-answered true on an Ok-by-construction
+   legacy resolve and unwrap_err() lost the text. Fix 2: skip the Err
+   branch when the ledger mode is legacy — but the ledger's mode FIELD
+   read answered non-"legacy" (guard still entered; measured again).
+3. Fix 3 (landed): gate the strict resolve on the RAW env var instead of
+   the corrupted struct field — `(env_get_opt("SIMPLE_TARGET_HIR_MODE") ??
+   "").trim().lower()` in {"shadow","typed"} runs the divergence-fatal
+   resolve (hosted shadow/typed verification unchanged); unset/legacy
+   (every in-guest row + the hosted default) skips the no-op resolve.
+
+Verification (nonce aa11bb22cc33dd44): buildrun row prints
+`phase=mir-ok functions lowered`, runs the built program, prints
+`BUILDRUN_SIMPLEOS_RISCV64_OK sum=42 nonce=aa11bb22cc33dd44`, Ok, rc=0.
+Official gate verdict in the PR. Cycles used: 5 of 6.
+
+Residual: `unwrap()`/`is_err()`/struct-field reads on this path remain
+unreliable in-guest; more sites of the same family will surface until the
+seed codegen layer is fixed. Recorded per the par_state precedent.
+
+GATE VERDICT (same day, official):
+`PASS — 2 row(s) checked: the Simple INTERPRETER evaluated a hello world and
+a build-and-run sanity program was MIR-lowered then run, both in-guest on
+SimpleOS riscv64 under real OpenSBI v1.4 firmware via -bios fw_payload
+(no -kernel, no isa-debug-exit), each printing its own output carrying
+this run's nonce 615614fb9798417f` — the whole gate is green; the
+in-guest interpreter AND in-guest MIR-lower-and-run rows both satisfy the
+nonce anchor. This closes the gate's remaining row; the residual
+seed-codegen family (guest Result/field corruption, exec-loop
+re-dispatch) remains recorded for future lanes.
