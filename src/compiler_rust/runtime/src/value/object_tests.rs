@@ -663,3 +663,18 @@ fn user_enum_conflicting_index_is_ambiguous_and_pinned() {
     assert_eq!(first, 0);
     assert_eq!(hash_variant_discriminant("UePinOnly"), first);
 }
+
+/// #6953 review: two enums sharing a variant name at different indexes,
+/// both declared before any lookup, resolve deterministically (name-derived,
+/// never one enum's index leaking into the other).
+#[test]
+fn user_enum_shared_name_different_index_is_deterministic() {
+    use super::{hash_variant_discriminant, register_enum_variants};
+    register_enum_variants(["UeDdX", "UeDdShared"]);
+    register_enum_variants(["UeDdShared", "UeDdZ"]);
+    let d = hash_variant_discriminant("UeDdShared");
+    assert!(d > 1, "conflicting shared name must not take either enum's index, got {d}");
+    assert_eq!(hash_variant_discriminant("UeDdShared"), d);
+    assert_eq!(hash_variant_discriminant("UeDdX"), 0);
+    assert_eq!(hash_variant_discriminant("UeDdZ"), 1);
+}

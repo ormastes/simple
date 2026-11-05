@@ -397,6 +397,18 @@ mod positional_registry {
                     if let Slot::Index(existing) = *slot {
                         if existing != index {
                             *slot = Slot::Ambiguous;
+                            // A conflict arriving after the name was already
+                            // answered positionally cannot be undone: fail loud
+                            // instead of letting seed and pure-Simple disagree.
+                            if let Some(p) = pinned().get(name) {
+                                if let Slot::Index(pinned_index) = *p {
+                                    eprintln!(
+                                        "simple: enum variant `{name}` declared at index {index} after it was \
+                                         already resolved positionally to {pinned_index}; discriminant is \
+                                         registration-order dependent (see #6953)"
+                                    );
+                                }
+                            }
                         }
                     }
                 })
