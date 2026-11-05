@@ -97,12 +97,20 @@ die() { printf 'build-aarch64-efi-esp: ERROR — %s\n' "$1" >&2; exit 1; }
 if [ -z "${AAVMF_CODE:-}" ]; then
     for c in /usr/share/AAVMF/AAVMF_CODE.fd \
              /usr/share/AAVMF/AAVMF_CODE.no-secboot.fd \
-             /usr/share/qemu-efi-aarch64/QEMU_EFI.fd; do
+             /usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
+             /opt/homebrew/share/qemu/edk2-aarch64-code.fd \
+             /usr/local/share/qemu/edk2-aarch64-code.fd; do
         [ -f "$c" ] && { AAVMF_CODE=$c; break; }
     done
 fi
 if [ -z "${AAVMF_VARS:-}" ]; then
-    for c in /usr/share/AAVMF/AAVMF_VARS.fd; do
+    # Homebrew QEMU ships no edk2-aarch64-vars.fd; its edk2-arm-vars.fd is the
+    # NVRAM template QEMU's own descriptor pairs with edk2-aarch64-code.fd
+    # (share/qemu/firmware/60-edk2-aarch64.json: "nvram-template":
+    # edk2-arm-vars.fd).
+    for c in /usr/share/AAVMF/AAVMF_VARS.fd \
+             /opt/homebrew/share/qemu/edk2-arm-vars.fd \
+             /usr/local/share/qemu/edk2-arm-vars.fd; do
         [ -f "$c" ] && { AAVMF_VARS=$c; break; }
     done
 fi
@@ -119,17 +127,23 @@ command -v mkfs.vfat >/dev/null 2>&1 || command -v /usr/sbin/mkfs.vfat >/dev/nul
 MKFS=$(command -v mkfs.vfat 2>/dev/null || echo /usr/sbin/mkfs.vfat)
 
 # --- FAT writer -------------------------------------------------------------
+# Preferred: mtools (mmd/mcopy/mdir), a plain packaged build tool on Linux and
+# Homebrew -- no network, no venv. Fallback when mtools is absent: pyfatfs.
+USE_MTOOLS=0
+if command -v mcopy >/dev/null 2>&1 && command -v mmd >/dev/null 2>&1 && command -v mdir >/dev/null 2>&1; then
+    USE_MTOOLS=1
+fi
 # No mtools and no root-mount available in this environment, so files are
 # written into the FAT image with pyfatfs from a repo-local venv. The venv is
 # created on demand and is a BUILD TOOL, exactly like mkfs.vfat -- it is not
 # product code, and nothing at runtime depends on it.
-if [ ! -x "$VENV/bin/python" ]; then
+if [ "$USE_MTOOLS" = 0 ] && [ ! -x "$VENV/bin/python" ]; then
     echo "[esp] creating FAT-writer venv at $VENV"
     python3 -m venv "$VENV" >/dev/null 2>&1 || die "could not create venv at $VENV"
     "$VENV/bin/pip" install --quiet pyfatfs 'setuptools<81' >/dev/null 2>&1 \
         || die "could not install pyfatfs into $VENV (network required once)"
 fi
-"$VENV/bin/python" -c 'import pyfatfs' >/dev/null 2>&1 || die "pyfatfs unusable in $VENV"
+[ "$USE_MTOOLS" = 1 ] || "$VENV/bin/python" -c 'import pyfatfs' >/dev/null 2>&1 || die "pyfatfs unusable in $VENV"
 
 mkdir -p "$OUT_DIR"
 ESP=$OUT_DIR/esp.img
@@ -159,6 +173,23 @@ esac
 STARTUP_NSH=$(mktemp)
 printf 'FS0:\\EFI\\BOOT\\BOOTAA64.EFI\r\n' > "$STARTUP_NSH"
 
+if [ "$USE_MTOOLS" = 1 ]; then
+    export MTOOLS_SKIP_CHECK=1
+    mmd -i "$ESP" ::/EFI ::/EFI/BOOT ::/boot || die "mmd failed on $ESP"
+    mcopy -i "$ESP" "$BOOTAA64" ::/EFI/BOOT/BOOTAA64.EFI || die "mcopy BOOTAA64.EFI failed"
+    mcopy -i "$ESP" "$KERNEL_ELF" ::/boot/kernel.elf || die "mcopy kernel.elf failed"
+    mcopy -i "$ESP" "$LIMINE_CONF" ::/limine.conf || die "mcopy limine.conf failed"
+    mcopy -i "$ESP" "$STARTUP_NSH" ::/startup.nsh || die "mcopy startup.nsh failed"
+    # Verify by READING BACK each file and comparing bytes: a zero-length or
+    # truncated FAT entry must not read as a successful build.
+    for pair in "$BOOTAA64=::/EFI/BOOT/BOOTAA64.EFI" "$KERNEL_ELF=::/boot/kernel.elf" \
+                "$LIMINE_CONF=::/limine.conf" "$STARTUP_NSH=::/startup.nsh"; do
+        src=${pair%%=::*}; dst=::${pair#*=::}
+        mtype -i "$ESP" "$dst" 2>/dev/null | cmp -s - "$src" \
+            || die "VERIFY FAILED: $dst on $ESP does not match $src"
+        echo "[esp]   ${dst#::}  $(wc -c <"$src" | tr -d ' ') bytes"
+    done
+else
 ESP="$ESP" BOOTAA64="$BOOTAA64" KERNEL_ELF="$KERNEL_ELF" \
 LIMINE_CONF="$LIMINE_CONF" STARTUP_NSH="$STARTUP_NSH" \
 "$VENV/bin/python" - <<'PY' || die "populating the FAT image failed"
@@ -206,6 +237,7 @@ if bad:
     print("[esp] VERIFY FAILED: " + "; ".join(bad), file=sys.stderr)
     sys.exit(1)
 PY
+fi
 
 rm -f "$LIMINE_CONF" "$STARTUP_NSH"
 
@@ -216,5 +248,6 @@ cp -f "$AAVMF_VARS" "$OUT_DIR/AAVMF_VARS.fd"
 chmod u+w "$OUT_DIR/AAVMF_VARS.fd"
 
 echo "[esp] built $ESP ($(wc -c <"$ESP") bytes)"
-echo "[esp] sha256 $(sha256sum "$ESP" | cut -d' ' -f1)"
+if command -v sha256sum >/dev/null 2>&1; then esp_sha=$(sha256sum "$ESP"); else esp_sha=$(shasum -a 256 "$ESP"); fi
+echo "[esp] sha256 ${esp_sha%% *}"
 echo "[esp] OK — boot it with: sh scripts/check/check-simpleos-arm64-efi-real-firmware-boot.shs"
