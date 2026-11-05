@@ -10,6 +10,11 @@ use os.services.launcher.launcher_registry.{
     MAX_APPS, MOD_META, MOD_CTRL, MOD_ALT, MOD_SHIFT,
     app_count, _app_index_by_name
 }
+use os.services.launcher.launcher_association_registry.{
+    launcher_associations_authoritative_v1,
+    launcher_validate_association_projection_v1,
+    launcher_commit_association_projection_v1
+}
 
 class LauncherCompositionLoadV1:
     ok: bool
@@ -92,17 +97,31 @@ fn _launcher_commit_composition_v1(image: SimpleCompositionImageV1) -> LauncherC
         # SCI capability here would create a weaker second policy authority.
         if candidate.capabilities.len() > 0:
             return LauncherCompositionLoadV1(ok: false, code: "SCI_LAUNCHER_MANIFEST_CAPABILITY_PROJECTION_REQUIRED", registered_count: 0, failed_app_id: candidate.app_id)
-        # Associations currently have no mutable/indexed owner API; the legacy
-        # lookup is compiled into launcher_registry. Keep SCI authoritative by
-        # rejecting rather than silently allowing the legacy table to win.
-        if candidate.associations.len() > 0:
-            return LauncherCompositionLoadV1(ok: false, code: "SCI_LAUNCHER_ASSOCIATION_PROJECTION_REQUIRED", registered_count: 0, failed_app_id: candidate.app_id)
         val projected_shortcut = _project_shortcut_v1(candidate.shortcut)
         if not projected_shortcut.ok:
             return LauncherCompositionLoadV1(ok: false, code: "SCI_LAUNCHER_SHORTCUT_INVALID", registered_count: 0, failed_app_id: candidate.app_id)
         if (_app_index_by_name(candidate.display_name) >= 0 and not _composition_owned_name_v1(candidate.display_name)) or _composition_name_seen_v1(image, checked, candidate.display_name):
             return LauncherCompositionLoadV1(ok: false, code: "SCI_LAUNCHER_DUPLICATE_NAME", registered_count: 0, failed_app_id: candidate.app_id)
         checked = checked + 1
+
+    # Associations are validated by their owner (keys, duplicates, targets in
+    # this image's catalog) before any launcher state is mutated.
+    var association_keys: [text] = []
+    var association_paths: [text] = []
+    var catalog_paths: [text] = []
+    var assoc_app = 0
+    while assoc_app < image.apps.len():
+        val record = image.apps[assoc_app]
+        catalog_paths.push(record.artifact_path)
+        var assoc_index = 0
+        while assoc_index < record.associations.len():
+            association_keys.push(record.associations[assoc_index])
+            association_paths.push(record.artifact_path)
+            assoc_index = assoc_index + 1
+        assoc_app = assoc_app + 1
+    val association_code = launcher_validate_association_projection_v1(association_keys, association_paths, catalog_paths)
+    if association_code != "SCI_LAUNCHER_OK":
+        return LauncherCompositionLoadV1(ok: false, code: association_code, registered_count: 0, failed_app_id: "")
 
     var retiring = 0
     while retiring < composition_app_names_v1.len():
@@ -122,6 +141,11 @@ fn _launcher_commit_composition_v1(image: SimpleCompositionImageV1) -> LauncherC
         next_names.push(app.display_name)
         registered = registered + 1
         i = i + 1
+    # Take over the association table only when this image declares
+    # associations, or when a previous SCI image already did (so a reload can
+    # clear them). Otherwise the legacy defaults stay in force.
+    if association_keys.len() > 0 or launcher_associations_authoritative_v1():
+        launcher_commit_association_projection_v1(association_keys, association_paths)
     composition_app_ids_v1 = next_ids
     composition_app_names_v1 = next_names
     LauncherCompositionLoadV1(ok: true, code: "SCI_LAUNCHER_OK", registered_count: registered, failed_app_id: "")
