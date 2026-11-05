@@ -674,3 +674,15 @@ AOT and is never used for evidence):
 This defect is the SAME class as this record's (#7040+1 rt_alloc): one TU's
 duplicate runtime body winning the link lottery. bug_db.sdn untouched.
 In-guest cycles: 2.
+
+---
+
+## 2026-11-06 — INTERPRETED-PRINT LANE (PR #7045+1): the <unknown> tail is a seed enum-discriminant shift + an exec-loop miscompile, NOT a runtime TU drift — see the new record
+
+One-line pointer: the `<unknown>` interpreted-print tail that closed the
+previous section is root-caused in
+`riscv64_interp_enum_check_discriminant_shift_2026-11-06.md` (measured:
+baked `rt_enum_check_variant` discriminant operand arrives `slli 4`-shifted
+in-guest; a second, nonce-dependent exec-loop statement-advance miscompile
+layers beneath it). New defect class → its own dated record; this chain's
+blocker list is unaffected otherwise.
