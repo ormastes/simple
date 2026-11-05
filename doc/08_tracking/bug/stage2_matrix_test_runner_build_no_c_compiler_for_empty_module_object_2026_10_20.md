@@ -30,7 +30,7 @@ compiler lookup.
 
 ## Fix 2026-11-05 (status: fix-implemented-verification-pending)
 
-When `find_c_compiler()` returns empty, `_compile_selected_module` now writes an
+Helper landed; the hot-file hunk (scratchpad bs_hunk_<id>.patch, `_compile_selected_module` calls it when `find_c_compiler()` is empty) is pending the phase-3 owner. The helper writes an
 empty ELF64 ET_REL directly (`src/compiler/80.driver/driver_empty_object.spl`,
 x86_64/aarch64 linux/freebsd; other targets keep the C path). Unit spec:
 `test/01_unit/compiler/80.driver/driver_empty_object_spec.spl` (4/4 on seed).
