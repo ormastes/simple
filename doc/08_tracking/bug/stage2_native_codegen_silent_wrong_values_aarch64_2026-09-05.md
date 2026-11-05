@@ -178,3 +178,13 @@ indirect-call garbage and the empty-Array.map defects do not reproduce.
 Defects 3-5 of this doc were not re-exercised; the f64 arithmetic sibling is
 verified separately (stage2_native_f64_arithmetic_lowered_as_integer_ops
 record, 2026-11-05).
+
+## Defects 3-5 fixed at current source — verified 2026-11-05
+
+Same stage2 candidate as the defects 1-2 record. Combined probe (closure
+capture call `add_k(5) == 15`; `Dict.len()` 1 and 2 for insert-built and
+literal dicts): exit 0 — no SIGSEGV, correct values. Nonexistent-method probe
+(`{"a": 1}.size()`): build REFUSED with a fatal `unresolved method call:
+size` MIR lowering error (build rc=1, no binary emitted) — the seed's
+refusal-to-substitute mitigation now holds on the stage2 lane too, so all
+five recorded defects are verified fixed at current release/1.0.0 source.
