@@ -89,3 +89,50 @@ change attempted.
 `rt_image_load`/stb_image (`src/runtime/runtime_image.c`) rejecting a
 standards-valid 1x1 PNG, a native runtime issue out of scope for `src/lib`.
 No new fixture attempted. No code change. Leaving OPEN.
+
+## Triage 2026-11-05 (work/libbug-w6-imgwrap-20261105) — FIXED for Image; FileLock latent
+
+Live-handle fixture UNBLOCKED: `rt_image_load` decodes
+`test/fixture/io/tiny_1x1.png` fine under the phase1 test binary
+(`build/phase_snapshots/phase1_1793422538/simple`, cwd = worktree root) —
+earlier "returns 0" observations do not reproduce there.
+
+With a genuine handle reachable, the double-close defect turned out to be REAL
+and worse than "guard correct by inspection": in the spec-runner execution
+path, mutation through an `Optional`-unwrapped class binding does not persist
+(each access re-materializes a copy; reproduced with a minimal
+`class ProbeBox` factory returning `ProbeBox?`). `load_image_resource()`
+returned `Image?`, so `img.close()` zeroed only a temporary copy and a second
+`img.close()` re-entered `rt_image_free` on the still-live original pointer —
+child-died-by-signal (double-free). Plain-constructed `Image(handle: h, ...)`
+did NOT reproduce this, which is why `simple run` probes looked healthy.
+
+Fix (src/lib/nogc_sync_mut/io/image_sffi.spl, TDD via
+test/01_unit/io/image_sffi_resource_wrapper_spec.spl):
+- `load_image_resource(path) -> Image` (non-optional): failure returns the
+  invalid sentinel `Image(handle: 0, ...)`; `is_valid()` is the nil-check.
+- `Image.close()` is now `me fn close():` (mutating receiver, matching the
+  tcp_socket/checkpoint_ring/intent_log consuming-drop idiom).
+- Deprecated pair made fail-closed the same way: `load_image(path) ->
+  LoadedImageData` (sentinel on failure) and `free_image(img) ->
+  LoadedImageData` is now a consuming drop that returns the value with its
+  handle zeroed (`img = free_image(img)`; a second call is a defined no-op).
+  The old by-value-parameter shape could not be zeroed reliably and made a
+  second `free_image()` a double-free on a live handle.
+
+Spec now proves, against a genuinely-acquired stb_image handle: decode of
+tiny_1x1.png (1x1x4), double `.close()` no-op without crash/double-free,
+`get_pixel` returns 0 after close, and `free_image` double-call fail-closed.
+13/13 examples pass. No in-repo callers of the changed functions besides the
+spec; `std.io` re-exports and the gc_sync_mut/gc_async_mut/nogc_async_mut
+family facades still resolve.
+
+OUT OF SCOPE / remaining: `SffiFileLock.close()`
+(src/lib/nogc_sync_mut/sffi/io.spl:208) is still a plain `fn close()` whose
+mutation has the same non-persistence exposure once a live fd is used; the
+same `Optional`-unwrap hazard applies to `file_lock_acquire()`'s `FileLock?`.
+Pre-existing unrelated failures observed on the base commit (not this
+change): file_lock_resource_wrapper_spec (`FileLock` renamed to
+`SffiFileLock`, import stale) and resource_sffi_pilot_spec (parse error).
+The Optional-unwrap mutation loss itself is a seed-binary runtime issue
+(compiler/runtime, not src/lib) and should be filed separately.

@@ -38,7 +38,7 @@ use std.spec.step
 
 use std.spec
 use std.spec.step
-use std.nogc_sync_mut.io.image_sffi.{Image, load_image_resource, ImageData, load_image, free_image}
+use std.nogc_sync_mut.io.image_sffi.{Image, load_image_resource, LoadedImageData, load_image, free_image}
 
 
 describe "Image resource wrapper":
@@ -102,14 +102,70 @@ describe "Image resource wrapper":
         val img = Image(handle: 0, width: 10, height: 20, channels: 4)
         assert_equal(img.get_pixel(5, 5), 0)
 
-    it "ImageData (deprecated) still exists":
+    it "LoadedImageData (deprecated) still exists":
         # @req REQ-SSPEC-UNIT
-        step("ImageData (deprecated) still exists")
-        val img = ImageData(handle: 42, width: 100, height: 100, channels: 4)
+        step("LoadedImageData (deprecated) still exists")
+        val img = LoadedImageData(handle: 42, width: 100, height: 100, channels: 4)
         assert_true(img.is_valid())
 
-    it "load_image (deprecated) still works":
+    it "load_image (deprecated) returns invalid sentinel on missing file":
         # @req REQ-SSPEC-UNIT
-        step("load_image (deprecated) still works")
+        step("load_image (deprecated) returns invalid sentinel on missing file")
         val result = load_image("/nonexistent/path")
-        assert_nil(result)
+        assert_false(result.is_valid())
+        assert_equal(result.handle, 0)
+
+    # Live-handle fixtures (doc/08_tracking/bug/image_wrapper_close_needs_live_handle_fixture_2026-08-07.md):
+    # `test/fixture/io/tiny_1x1.png` is a genuinely valid 1x1 RGBA PNG that
+    # `rt_image_load` decodes, so `.close()` below exercises the REAL
+    # `rt_image_free` C path on a genuinely-acquired handle — not a fabricated
+    # pointer (undefined behavior) and not the skipped-extern sentinel case.
+    # The factories intentionally return a non-optional sentinel value rather
+    # than Optional: mutation through an Optional-unwrapped class binding does
+    # not persist in every runtime path, which silently defeats the one-shot
+    # close guard and turns a second close into a real double-free crash.
+
+    it "load_image_resource decodes tiny_1x1.png into a live handle":
+        # @req REQ-SSPEC-UNIT
+        step("load_image_resource decodes tiny_1x1.png into a live handle")
+        val img = load_image_resource("test/fixture/io/tiny_1x1.png")
+        assert_true(img.is_valid())
+        assert_equal(img.width, 1)
+        assert_equal(img.height, 1)
+        assert_equal(img.channels, 4)
+        img.close()
+
+    it "load_image_resource returns invalid sentinel on missing file":
+        # @req REQ-SSPEC-UNIT
+        step("load_image_resource returns invalid sentinel on missing file")
+        val img = load_image_resource("/nonexistent/path")
+        assert_false(img.is_valid())
+        assert_equal(img.handle, 0)
+        # close on the invalid sentinel must be a safe no-op
+        img.close()
+        assert_equal(img.handle, 0)
+
+    it "double-close on a live handle is a defined no-op":
+        # @req REQ-SSPEC-UNIT
+        step("double-close on a live handle is a defined no-op")
+        val img = load_image_resource("test/fixture/io/tiny_1x1.png")
+        assert_true(img.is_valid())
+        img.close()
+        assert_equal(img.handle, 0)
+        # Second close must not crash and must not double-free.
+        img.close()
+        assert_equal(img.handle, 0)
+        assert_false(img.is_valid())
+        assert_equal(img.get_pixel(0, 0), 0)
+
+    it "free_image on a live handle is fail-closed against double-free":
+        # @req REQ-SSPEC-UNIT
+        step("free_image on a live handle is fail-closed against double-free")
+        var img = load_image("test/fixture/io/tiny_1x1.png")
+        assert_true(img.is_valid())
+        img = free_image(img)
+        # Consuming drop: returned handle is invalidated so a second call is a no-op.
+        assert_equal(img.handle, 0)
+        assert_false(img.is_valid())
+        img = free_image(img)
+        assert_equal(img.handle, 0)
