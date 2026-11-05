@@ -203,14 +203,41 @@ RuntimeValue rt_array_new_with_cap(int64_t cap)
     return rt_array_new((RuntimeValue)cap);
 }
 
+/* The growth logic MUST live in this TU's copy, not only in the other
+ * runtime TUs: which duplicate definition wins the
+ * --allow-multiple-definition link is a per-closure lottery, and on the
+ * 2026-11-06 interpreter closure THIS copy won rt_array_push with the
+ * pre-fix body (len >= cap -> return 0, no growth). Every `[]` defaults
+ * to cap 16 (rt_array_new above), so the lexer scan_string parts array
+ * silently dropped every char past 16 and interpreted string literals
+ * truncated to "HELLO_INTERP_SIM" (16 chars) — measured by RSP
+ * write-watchpoint on the result object. Mirrors baremetal_stubs.c
+ * rt_array_push_handle, whose growth this copy now shares verbatim. */
+static RuntimeValue rt_array_push_handle(RuntimeValue arr, RuntimeValue value)
+{
+    if (!IS_HEAP(arr)) return NIL_VALUE;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    if (a->len >= a->cap) {
+        uint64_t new_cap = a->cap ? a->cap * 2U : 16U;
+        /* Keep growth bounded by the 64 KiB freestanding bump heap. The
+         * array header remains stable while its item storage moves. */
+        if (new_cap > 4096U) return NIL_VALUE;
+        RuntimeValue *grown = (RuntimeValue *)rv_alloc((size_t)new_cap * sizeof(RuntimeValue));
+        if (!grown) return NIL_VALUE;
+        RuntimeValue *old_items = runtime_array_items(a);
+        for (uint64_t i = 0; i < a->len; i++) grown[i] = old_items[i];
+        for (uint64_t i = a->len; i < new_cap; i++) grown[i] = NIL_VALUE;
+        a->items = grown;
+        a->cap = new_cap;
+    }
+    runtime_array_items(a)[a->len++] = value;
+    return arr;
+}
+
 int8_t rt_array_push(RuntimeValue array_value, RuntimeValue item)
 {
-    if (!IS_HEAP(array_value)) return 0;
-    RuntimeArray *array = (RuntimeArray *)DECODE_PTR(array_value);
-    if (!array || array->hdr.type != HEAP_ARRAY) return 0;
-    if (array->len >= array->cap) return 0;
-    runtime_array_items(array)[array->len++] = item;
-    return 1;
+    return rt_array_push_handle(array_value, item) != NIL_VALUE;
 }
 
 static RuntimeValue rt_array_get(RuntimeValue array_value, RuntimeValue index)
