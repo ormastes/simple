@@ -73,3 +73,10 @@ Any rv32-board soak report MUST label `0x7EB5A8A9`/`A77902FA` as
 **host/GHDL-simulated**, not board-captured, until option 1 or 2 lands. A
 `bytes=0` ttyUSB2 capture is the expected (blocked) state, not evidence of a
 core stall.
+
+## 2026-11-05 (riscv-sweep lane)
+
+No hardware access in this lane. The fabric UART (H12/PMOD J2) is still not
+routed to any host tty, so `0x7EB5A8A9` remains a host/GHDL-simulated golden;
+fix options 1 (external USB-UART on PMOD J2) and 2 (EMIO bridge / TAP
+de-framer) are unchanged. Remains blocked on physical hardware.

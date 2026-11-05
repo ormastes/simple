@@ -77,3 +77,10 @@ truncated to 16 bits.
   to become a writable RAM fed by an external (SBA) write port — core surgery,
   filed here, deliberately NOT done. Hardware single-step via the monitor
   channel (dcsr.step) is unaffected and fully works on the real hart.
+
+## 2026-11-05 (riscv-sweep lane)
+
+Status unchanged: Gap 3 (full x0..x31 + full-width pc readback) is CLOSED;
+Gap 1 (halt/clk-enable port) and Gap 2 (SBA-into-fetch / writable code RAM)
+remain OPEN and require an RTL change plus a hardware debug session. Remains
+blocked on physical hardware.
