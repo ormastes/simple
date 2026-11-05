@@ -16,10 +16,10 @@ use crate::error::CompileError;
 use crate::value::Value;
 use simple_runtime::value::hash_variant_discriminant;
 
-/// Get the discriminant (name-hash tag) of an enum value.
+/// Get the discriminant (declaration index) of an enum value.
 ///
 /// Mirrors `simple_runtime::value::objects::rt_enum_discriminant`: returns
-/// the hash of the variant name (truncated to u32, sign-extended to i64) for
+/// the positional declaration index (via the seed positional registry) for
 /// an enum value, or -1 if the value is not an enum.
 pub fn rt_enum_discriminant_fn(args: &[Value]) -> Result<Value, CompileError> {
     let disc = match args.first() {

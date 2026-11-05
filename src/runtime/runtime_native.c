@@ -20549,13 +20549,16 @@ void rt_trap_unimplemented(const char *symbol) {
 
 /* ---- Option / Result construction -------------------------------------
  * Mirrors rt_option_some/rt_option_none in the Rust runtime, which build a
- * canonical enum with the reserved Option enum_id 1 and the stable 32-bit
- * variant-name hashes. Result has no reserved enum_id; the same hashes are
- * already the identification key used by rt_unwrap_or_trap above, so Ok/Err
- * are constructed with them here. Keeping these four consistent with
+ * canonical enum with the reserved Option enum_id 1 and positional
+ * discriminants (Some=0, None=1; Ok=0, Err=1), the convention shared with
+ * pure-Simple MIR and the seed's hash_variant_discriminant. Legacy hashed
+ * Some/None/Ok/Err tags from already-built objects are still accepted by
+ * unwrap/try. Keeping these consistent with
  * rt_unwrap_or_trap is what makes `?`/`??`/`.unwrap()` agree. */
 #define SPL_OPTION_ENUM_ID   1
 #define SPL_RESULT_ENUM_ID   2
+/* Legacy hashed Option tags: already-built stage objects may still carry
+ * them, so unwrap/try keep accepting them alongside the positional ones. */
 #define SPL_HASH_SOME 4053299545u
 #define SPL_HASH_NONE 2371748697u
 #define SPL_HASH_OK   2405352012u
@@ -20567,8 +20570,8 @@ void rt_trap_unimplemented(const char *symbol) {
  * runtime, the one the bootstrap/native lane actually links, only ever
  * MENTIONED it in a comment. Semantics transcribed from the pure-Simple
  * definition in src/runtime/simple_core/core_values.spl:78, which is the
- * canonical one: ordinal discriminants for the reserved Option enum_id 1, and
- * the stable 32-bit variant-name hashes for Result, which has no reserved id. */
+ * canonical one: ordinal discriminants for Option (id 1) and Result (id 2);
+ * untagged legacy Result values are still matched by Ok/Err name hash. */
 int64_t rt_unwrap_or_trap(int64_t value) {
     int64_t enum_id = rt_enum_id(value);
     int64_t discriminant;
@@ -20583,6 +20586,13 @@ int64_t rt_unwrap_or_trap(int64_t value) {
         }
         return value;
     }
+    if (enum_id == SPL_RESULT_ENUM_ID && discriminant == 0) return rt_enum_payload(value);
+    if (enum_id == SPL_RESULT_ENUM_ID && discriminant == 1) {
+        fprintf(stderr, "simple runtime: .unwrap() called on Err\n");
+        fflush(stderr);
+        abort();
+    }
+    /* Untagged legacy Result lane (no reserved id) still carries name hashes. */
     if (discriminant == (int64_t)SPL_HASH_OK) return rt_enum_payload(value);
     if (discriminant == (int64_t)SPL_HASH_ERR) {
         fprintf(stderr, "simple runtime: .unwrap() called on Err\n");
@@ -20593,19 +20603,19 @@ int64_t rt_unwrap_or_trap(int64_t value) {
 }
 
 int64_t rt_option_some(int64_t payload) {
-    return rt_enum_new(SPL_OPTION_ENUM_ID, (int32_t)SPL_HASH_SOME, payload);
+    return rt_enum_new(SPL_OPTION_ENUM_ID, 0, payload);
 }
 
 int64_t rt_option_none(void) {
-    return rt_enum_new(SPL_OPTION_ENUM_ID, (int32_t)SPL_HASH_NONE, rt_value_nil());
+    return rt_enum_new(SPL_OPTION_ENUM_ID, 1, rt_value_nil());
 }
 
 int64_t rt_result_ok(int64_t payload) {
-    return rt_enum_new(SPL_RESULT_ENUM_ID, (int32_t)SPL_HASH_OK, payload);
+    return rt_enum_new(SPL_RESULT_ENUM_ID, 0, payload);
 }
 
 int64_t rt_result_err(int64_t payload) {
-    return rt_enum_new(SPL_RESULT_ENUM_ID, (int32_t)SPL_HASH_ERR, payload);
+    return rt_enum_new(SPL_RESULT_ENUM_ID, 1, payload);
 }
 
 /* `?` propagation: yield the Some/Ok payload, otherwise hand the wrapper back
