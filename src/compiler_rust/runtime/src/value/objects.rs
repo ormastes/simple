@@ -350,13 +350,31 @@ pub fn closure_pin_stats() -> (i64, i64, i64) {
 // Enum SFFI functions
 // ============================================================================
 
-/// Hash a variant name to get its discriminant, matching the compiler's hashing scheme.
+/// The single seed definition of an enum variant's runtime discriminant.
+///
+/// Builtin `Result`/`Option` variants use the POSITIONAL convention shared with
+/// the pure-Simple compiler and the C runtime (`Ok=0, Err=1`, `Some=0, None=1`),
+/// so values cross the two toolchains without re-encoding. Other variant names
+/// keep a name-derived tag (the seed lowers by name and has no positional index
+/// at every site); it is kept out of the positional slots 0/1 so it can never
+/// alias `Err`/`None`. See
+/// doc/08_tracking/bug/enum_discriminant_convention_split_hashed_seed_vs_positional_pure_simple_2026-08-08.md.
 pub fn hash_variant_discriminant(variant_name: &str) -> u32 {
+    match variant_name {
+        "Ok" | "Some" => return 0,
+        "Err" | "None" => return 1,
+        _ => {}
+    }
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
     variant_name.hash(&mut hasher);
-    (hasher.finish() & 0xFFFFFFFF) as u32
+    let tag = (hasher.finish() & 0xFFFFFFFF) as u32;
+    if tag < 2 {
+        tag + 2
+    } else {
+        tag
+    }
 }
 
 pub(crate) const RESULT_ENUM_ID: u32 = 0;
@@ -519,6 +537,15 @@ pub extern "C" fn rt_heap_ref_registered(value: RuntimeValue) -> i8 {
 
 #[no_mangle]
 pub extern "C" fn rt_unwrap_or_trap(value: RuntimeValue) -> RuntimeValue {
+    // Absent flat-nullable optional (`i64? = nil`, failed `parse_int`): nil IS
+    // None, so it must trap exactly like a boxed None — not propagate as a
+    // present value (doc/08_tracking/bug/unwrap_family_treats_flat_nil_as_present_2026-09-13.md).
+    // Matches the tree-walk interpreter, which already raises
+    // "called unwrap on None" for a runtime flat-nil receiver.
+    if value.is_nil() {
+        eprintln!("error: called unwrap on None");
+        std::process::abort();
+    }
     let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) else {
         // Not a boxed enum — bare/flat-nullable payload convention: return
         // the raw value unchanged (matches `rt_unwrap_or_self`).
@@ -610,13 +637,6 @@ pub extern "C" fn rt_unwrap_or_value(value: RuntimeValue, default: RuntimeValue)
 /// doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
 #[no_mangle]
 pub extern "C" fn rt_expect_or_trap(value: RuntimeValue, msg: RuntimeValue) -> RuntimeValue {
-    let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) else {
-        // Not a boxed enum — bare/flat-nullable payload convention: return
-        // the raw value unchanged (matches `rt_unwrap_or_trap`).
-        return value;
-    };
-    let (enum_id, discriminant, payload) = unsafe { ((*p).enum_id, (*p).discriminant, (*p).payload) };
-
     let trap = || -> ! {
         let text = super::collections::rt_string_data(msg);
         let len = super::collections::rt_string_len(msg);
@@ -629,6 +649,19 @@ pub extern "C" fn rt_expect_or_trap(value: RuntimeValue, msg: RuntimeValue) -> R
         eprintln!("{message}");
         std::process::abort();
     };
+
+    // Absent flat-nullable optional: nil IS None — trap with the caller's
+    // message, exactly like a boxed None (see `rt_unwrap_or_trap` and
+    // doc/08_tracking/bug/unwrap_family_treats_flat_nil_as_present_2026-09-13.md).
+    if value.is_nil() {
+        trap();
+    }
+    let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) else {
+        // Not a boxed enum — bare/flat-nullable payload convention: return
+        // the raw value unchanged (matches `rt_unwrap_or_trap`).
+        return value;
+    };
+    let (enum_id, discriminant, payload) = unsafe { ((*p).enum_id, (*p).discriminant, (*p).payload) };
 
     if enum_id == OPTION_ENUM_ID {
         if discriminant == hash_variant_discriminant("Some") {

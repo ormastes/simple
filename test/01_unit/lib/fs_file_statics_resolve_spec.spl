@@ -1,0 +1,44 @@
+# Regression for doc/08_tracking/bug/fs_file_class_collision_wrong_static_method_2026-09-01.
+# A flat src/lib/nogc_sync_mut/fs.spl and the src/lib/nogc_sync_mut/fs/ directory
+# package both claimed the `std.fs` module name, and `use std.fs.{File}` resolved
+# to the narrow std.fs.path File (no write_bytes static). The flat module moved
+# into the package as std.fs.flat and fs/__init__.spl re-exports it, so
+# `std.fs.{File}` is the full File class again. Files are written under /tmp and
+# removed after each example.
+use std.spec.{describe, it, expect, is_windows}
+use std.fs.{File}
+use std.nogc_sync_mut.io_runtime.{file_delete, file_exists}
+
+fn probe_path(tag: text) -> text:
+    "/tmp/simple_fs_file_statics_spec_{tag}.bin"
+
+describe "std.fs.File resolves the full static surface":
+    it "File.write_bytes writes real bytes retrievable via File.read_bytes":
+        if is_windows():
+            return
+        val path = probe_path("write_bytes")
+        val _ = file_delete(path)
+        expect(file_exists(path)).to_equal(false)
+        expect(File.write_bytes(path, [10u8, 20u8, 30u8, 40u8])).to_equal(true)
+        expect(File.read_bytes(path) ?? [0u8]).to_equal([10u8, 20u8, 30u8, 40u8])
+        expect(file_exists(path)).to_equal(true)
+        val _done = file_delete(path)
+
+    it "File.write then File.read round-trips real content":
+        if is_windows():
+            return
+        val path = probe_path("write_text")
+        val _ = file_delete(path)
+        expect(File.write(path, "collision fix round trip")).to_equal(true)
+        expect(File.read(path) ?? "").to_equal("collision fix round trip")
+        val _done = file_delete(path)
+
+    it "File.exists answers honestly for present and absent paths":
+        if is_windows():
+            return
+        val path = probe_path("exists")
+        val _ = file_delete(path)
+        expect(File.exists(path)).to_equal(false)
+        expect(File.write(path, "x")).to_equal(true)
+        expect(File.exists(path)).to_equal(true)
+        val _done = file_delete(path)
