@@ -1,7 +1,7 @@
 # Native entry closure requires unavailable `rt_env_vars`
 
 Date: 2026-09-09  
-Status: open; blocks compiled Slang owner-fixture qualification.
+Status: CLOSED (outdated, 2026-11-05) — see addendum.
 
 ## Reproducer
 
@@ -72,3 +72,12 @@ this is resolved. It is not blocked by anything in the TRACE32 sources — a
 **zero** `[CODEGEN BODY]` / `[CODEGEN-STUB-FALLBACK]` markers, and marker
 emission is eager (an uncalled function containing a bad bare reference still
 emits one, verified), so the absence is evidence, not a gap in coverage.
+
+## Addendum 2026-11-05 — closed as outdated (W3b)
+
+Stage3 `s3_fable44` `native-build --entry-closure` of an entry using
+`use std.io.env_ops.{env_vars}` (and an import-only variant) passes semantic
+analysis: `unknown extern function: rt_env_vars` no longer appears in any log.
+Both builds now AV during MIR (`phase=mir done=0`, in a child worker; lldb on the
+main process never stops), which is the s3_fable44 F3 AV
+(`native_trait_owner_for_type+0x202e`) fixed by PR #6933 — a separate defect.

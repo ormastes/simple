@@ -2,7 +2,7 @@
 
 - **Filed:** 2026-09-03
 - **Severity:** critical — produces a silent infinite self-recursion (stack overflow) in the emitted binary
-- **Status:** OPEN
+- **Status:** OPEN — premise untestable on stage3 s3_fable44 (2026-11-05, see addendum)
 - **Platforms:** ALL. Reproduced on Windows MSVC; the defect is in the shared Rust-seed AOT lowering,
   not in any Windows-specific code. Linux/macOS bootstrap lanes are affected identically and are
   latent only because they have not rebuilt since 2026-09-02.
@@ -164,3 +164,25 @@ every platform.
 ## Host-environment classification (2026-09-18)
 
 Audited by the fix-pipeline classification review: **environment-blocked: real-gpu** — [env-blocked:windows]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Addendum 2026-11-05 (W3b, stage3 s3_fable44)
+
+The alias premise could not be re-measured: on s3_fable44 **every** build with two
+uncached modules crashes the compiler (0xC0000005) in codegen, alias or not
+(`w3_two`: plain `use m.{probe}`; `w3_alias2`: alias with no local shadow; `w3_alias`:
+this bug's shape). The log shows `AOT compile error ... unit (bare): H<binary> ...
+reason capsule-not-found name-len=35`.
+
+Root cause of that crash (not this bug): `driver_aot_native_output.spl` passed
+`builder.build(_compile_frozen_module_capsule(..., _1))`. `build` is not a
+higher-order callee, so by placeholder scoping the inner `_1` desugars to its own
+identity lambda and the `name: text` parameter receives a function pointer. Proven
+on a single-module fixture (`test/w3/w3_ph.spl`, `drive(comp(b, ..., s, _1))`):
+the object's `__lambda_lift_0` is `mov rcx,rax; ret` (`48 89 c8 c3` — the exact
+"garbage" unit-name bytes) and its address is passed as `comp`'s 8th argument;
+the binary AVs at run time. Already fixed on release by `45fb9585333` (explicit
+closures, `scripts/check/check-no-placeholder-callbacks.shs`). Remaining gap: the
+type checker accepts a `fn` value for a `text` parameter, which is why this was
+silent.
+
+Next step: re-run `w3_alias` on the first stage3 built with `45fb9585333`.

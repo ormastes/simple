@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN (2026-09-13)
+- Status: CLOSED (outdated, 2026-11-05) — see addendum.
 - Found: bootstrap lane BOOT-11, `work/bootstrap-codegen-1-2026-09-13`, base `origin/main f26970e9d93`
 - Severity: **blocks every native measurement.** No `.spl` can be native-built on
   this tree with any deployed binary, so no native-codegen defect can be
@@ -64,3 +64,12 @@ and every other spec that shells out to `native-build` cannot pass at this
 commit. A green `bin/simple test` run is therefore NOT evidence about the native
 lane today.
 
+
+## Addendum 2026-11-05 — closed as outdated (W3b)
+
+Stage3 `s3_fable44` `native-build --entry-closure` of an entry using
+`use std.io.env_ops.{env_vars}` (and an import-only variant) passes semantic
+analysis: `unknown extern function: rt_env_vars` no longer appears in any log.
+Both builds now AV during MIR (`phase=mir done=0`, in a child worker; lldb on the
+main process never stops), which is the s3_fable44 F3 AV
+(`native_trait_owner_for_type+0x202e`) fixed by PR #6933 — a separate defect.
