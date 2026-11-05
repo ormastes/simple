@@ -33,6 +33,52 @@
 set -eu
 
 REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+
+# Homebrew LLVM (macOS) ships RISC-V-capable clang/llvm-readelf/llvm-objcopy
+# but keg-only, off PATH; Apple's /usr/bin/clang has no RISC-V target and macOS
+# has no `readelf`/`objcopy` at all. On Linux/FreeBSD these dirs do not exist.
+LLVM_EXTRA_DIRS=${LLVM_EXTRA_DIRS:-/opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin}
+
+# pick_tool <name>... : print the first runnable candidate (PATH, then
+# LLVM_EXTRA_DIRS); return 1 when none is found.
+pick_tool() {
+    for c in "$@"; do
+        command -v "$c" >/dev/null 2>&1 && { command -v "$c"; return 0; }
+    done
+    for d in $LLVM_EXTRA_DIRS; do
+        for c in "$@"; do
+            [ -x "$d/$c" ] && { printf '%s\n' "$d/$c"; return 0; }
+        done
+    done
+    return 1
+}
+
+# clang_targets_riscv <clang> : 0 when it can compile for riscv64-unknown-elf.
+clang_targets_riscv() {
+    printf 'int x;\n' | "$1" --target=riscv64-unknown-elf -x c -c -o /dev/null - >/dev/null 2>&1
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+    st=$(mktemp -d); st_fail=0
+    mkdir -p "$st/llvm" "$st/bin"
+    printf '#!/bin/sh\nexit 0\n' >"$st/llvm/llvm-readelf"; chmod +x "$st/llvm/llvm-readelf"
+    printf '#!/bin/sh\nexit 1\n' >"$st/bin/clang"; chmod +x "$st/bin/clang"
+    # (1) llvm-readelf only in an extra dir -> found there.
+    got=$(PATH=/usr/bin:/bin LLVM_EXTRA_DIRS="$st/llvm" pick_tool zz-no-readelf llvm-readelf) || got=
+    [ "$got" = "$st/llvm/llvm-readelf" ] || { echo "selftest: extra-dir probe got '$got'" >&2; st_fail=1; }
+    # (2) nothing anywhere -> non-zero.
+    if PATH=/usr/bin:/bin LLVM_EXTRA_DIRS="$st/none" pick_tool zz-a zz-b >/dev/null; then
+        echo "selftest: empty probe wrongly succeeded" >&2; st_fail=1
+    fi
+    # (3) a clang that rejects riscv is detected.
+    if clang_targets_riscv "$st/bin/clang"; then
+        echo "selftest: non-riscv clang wrongly accepted" >&2; st_fail=1
+    fi
+    rm -rf "$st"
+    [ "$st_fail" -eq 0 ] || { echo "FAIL — build-riscv64-hello-kernel selftest"; exit 1; }
+    echo "PASS — build-riscv64-hello-kernel selftest: 3 fixture(s) checked"
+    exit 0
+fi
 cd "$REPO_ROOT"
 
 OUT_DIR=${OUT_DIR:-$REPO_ROOT/build/os/riscv64_hello}
@@ -50,43 +96,58 @@ fail() { printf 'build-riscv64-hello-kernel: ERROR — %s\n' "$*" >&2; exit 1; }
 [ -f "$ENTRY" ] || fail "missing entry $ENTRY"
 [ -f "$LDS" ] || fail "missing linker script $LDS"
 
+READELF=$(pick_tool readelf llvm-readelf riscv64-unknown-elf-readelf riscv64-linux-gnu-readelf) \
+    || fail "no readelf (probed readelf, llvm-readelf, riscv64-*-readelf on PATH and in: $LLVM_EXTRA_DIRS)"
+OBJCOPY=$(pick_tool riscv64-unknown-elf-objcopy riscv64-linux-gnu-objcopy llvm-objcopy objcopy) \
+    || fail "no objcopy (probed riscv64-*-objcopy, llvm-objcopy, objcopy on PATH and in: $LLVM_EXTRA_DIRS)"
+
+# native-build links the freestanding image with the first `clang` on PATH.
+# Apple clang has no RISC-V target; prefer a RISC-V-capable LLVM dir instead.
+CC_NOTE="clang on PATH"
+if ! clang_targets_riscv clang; then
+    rv_dir=
+    for d in $LLVM_EXTRA_DIRS; do
+        [ -x "$d/clang" ] && clang_targets_riscv "$d/clang" && { rv_dir=$d; break; }
+    done
+    [ -n "$rv_dir" ] || fail "clang on PATH cannot target riscv64-unknown-elf (Apple clang has none) and no RISC-V-capable clang in: $LLVM_EXTRA_DIRS — install LLVM (brew install llvm)"
+    PATH=$rv_dir:$PATH; export PATH
+    CC_NOTE="clang from $rv_dir (prepended to PATH)"
+fi
+
 mkdir -p "$OUT_DIR"
 rm -f "$KERNEL" "$IMAGE"
 
 # Exit status read DIRECTLY into a variable on the next line — never through a
 # pipe, whose $? is the last pipeline element's status.
+# `set -e` would abort silently on a failing native-build before `rc=$?` ran
+# (observed: bare exit 2 with no message), so capture the status via `||`.
+rc=0
 "$SIMPLE_BIN" native-build --backend cranelift --entry-closure \
     --timeout "$NB_TIMEOUT" \
     --entry "$ENTRY" \
     --target riscv64gc-unknown-none-elf \
     --linker-script "$LDS" \
-    -o "$KERNEL" >"$LOG" 2>&1
-rc=$?
+    -o "$KERNEL" >"$LOG" 2>&1 || rc=$?
 [ "$rc" -eq 0 ] || { tail -40 "$LOG" >&2; fail "native-build failed (rc=$rc), log: $LOG"; }
 
 [ -s "$KERNEL" ] || fail "native-build reported success but $KERNEL is missing or empty"
 
-hdr=$(readelf -h "$KERNEL" 2>/dev/null) || fail "readelf could not parse $KERNEL"
+hdr=$("$READELF" -h "$KERNEL" 2>/dev/null) || fail "readelf could not parse $KERNEL"
 case "$hdr" in
     *RISC-V*) ;;
     *) fail "$KERNEL is not a RISC-V ELF" ;;
 esac
-readelf -SW "$KERNEL" 2>/dev/null | grep -q ' \.text ' \
+"$READELF" -SW "$KERNEL" 2>/dev/null | grep -q ' \.text ' \
     || fail "$KERNEL has no .text section (empty-link false success)"
 
 # Real-not-stub check: the hello-world program function must actually be in the
 # image. --gc-sections has previously discarded an unrooted reachable graph and
 # still reported a successful link.
-readelf -sW "$KERNEL" 2>/dev/null | grep -q 'hello_world_program' \
+"$READELF" -sW "$KERNEL" 2>/dev/null | grep -q 'hello_world_program' \
     || fail "$KERNEL contains no hello_world_program symbol (the program was garbage-collected out)"
 
-OBJCOPY=
-for c in riscv64-unknown-elf-objcopy riscv64-linux-gnu-objcopy llvm-objcopy objcopy; do
-    command -v "$c" >/dev/null 2>&1 && { OBJCOPY=$c; break; }
-done
-[ -n "$OBJCOPY" ] || fail "no objcopy available to extract the flat Image"
 "$OBJCOPY" -O binary "$KERNEL" "$IMAGE" || fail "flat Image extraction failed"
 [ -s "$IMAGE" ] || fail "flat Image $IMAGE is empty"
 
-printf 'PASS — riscv64 hello-world kernel built by the RUST SEED (%s): %s (%s bytes ELF) + %s (%s bytes flat Image with .text and hello_world_program)\n' \
-    "$SIMPLE_BIN" "$KERNEL" "$(wc -c <"$KERNEL")" "$IMAGE" "$(wc -c <"$IMAGE")"
+printf 'PASS — riscv64 hello-world kernel built by the RUST SEED (%s): %s (%s bytes ELF) + %s (%s bytes flat Image with .text and hello_world_program); link %s\n' \
+    "$SIMPLE_BIN" "$KERNEL" "$(wc -c <"$KERNEL")" "$IMAGE" "$(wc -c <"$IMAGE")" "$CC_NOTE"

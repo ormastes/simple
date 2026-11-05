@@ -9,7 +9,7 @@ use app.io.env_ops (env_get, env_set)
 use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1,
     compiler_source_authority_inherit_v1, compiler_source_authority_publish_v1,
     compiler_source_authority_clear_v1}
-use app.compiler_entrypoint.derived_composition.{compiler_cuda_composition_root_v1}
+use app.compiler_entrypoint.derived_composition.{compiler_cuda_composition_root_v1, compiler_cuda_composition_selector_v1}
 use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1,
     compile_source_inventory_checkout_cache_root_v1}
 use app.io.time_ops (time_now_unix_micros)
@@ -142,6 +142,16 @@ fn _nb_scv_relative_path_v1(path: text) -> text:
         return ""
     absolute.substring(prefix.len(), absolute.len())
 
+fn _nb_scv_snapshot_build_path_v1(checkout: text, snapshot_root: text, path: text, relative: text) -> text:
+    # Ordinary generated sources are admitted verbatim. Only CUDA composition
+    # selectors map back to their canonical source records.
+    if compiler_cuda_composition_selector_v1(relative):
+        val derived = compiler_cuda_composition_root_v1(
+            checkout, snapshot_root, path, false)
+        if derived.is_err(): return ""
+        return snapshot_root + "/" + derived.unwrap()
+    snapshot_root + "/" + relative
+
 fn _nb_scv_snapshot_path_v1(path: text) -> text:
     val path_abs = _nb_path_absolute_raw(path)
     if path_abs == nil:
@@ -161,10 +171,8 @@ fn _nb_scv_snapshot_path_v1(path: text) -> text:
         val checkout_abs = _nb_path_absolute_raw(".")
         if checkout_abs == nil: return ""
         val checkout = _nb_trim_trailing_slashes(checkout_abs.unwrap().replace("\\", "/"))
-        val derived = compiler_cuda_composition_root_v1(
-            checkout, _nb_scv_snapshot_root_v1, path, false)
-        if derived.is_err(): return ""
-        return _nb_scv_snapshot_root_v1 + "/" + derived.unwrap()
+        return _nb_scv_snapshot_build_path_v1(
+            checkout, _nb_scv_snapshot_root_v1, path, relative)
     _nb_scv_snapshot_root_v1 + "/" + relative
 
 fn _nb_scv_key_v1(entry: text, source_dirs: [text], revision: text) -> text:

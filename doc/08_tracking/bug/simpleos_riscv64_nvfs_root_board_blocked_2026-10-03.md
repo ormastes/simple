@@ -64,3 +64,11 @@ it on a VF2 with a serial adapter on UART0, and record the transcript with
 board identity: boot 1 must reach `NVFS_RV64_ROOT_SANITY_PASSED` with
 `NVFS superblock found on dw-mshc@0x16020000 partition 2`, and boot 2 after a
 cold power cycle must show `persisted:match content=nvfs-persist-ok`.
+
+## Verification 2026-11-05 (riscv-sweep lane, work/riscv-sweep-20261105)
+
+No physical-board access in this lane (no Tigard UART/JTAG probe or USB-serial
+adapter attached to this host session), so no board identity or transcript can
+be captured. The QEMU `virt` gate remains the only executable evidence and is
+green per the 2026-10-04 record; the DW MSHC driver is still host-spec-only.
+Status: OPEN — blocked on physical VisionFive 2 hardware access.

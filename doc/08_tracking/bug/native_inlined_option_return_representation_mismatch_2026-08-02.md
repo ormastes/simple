@@ -1,6 +1,6 @@
 # Native inlined Option return representation mismatch
 
-Status: open  
+Status: resolved-disappeared (2026-11-05, native stage3 43 run correct)  
 Severity: P1 native semantic parity  
 Fix owner: `/root/native-option-return-representation` — TRACKED, NOT PARALLEL-CLAIMABLE
 
@@ -258,3 +258,34 @@ Native lane NOT re-observed: `native-build --source test/fixtures/native_option_
 `src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl` ("Unterminated f-string").
 Bug stays open, re-scoped to the native `if val`/`??` unwrap path only; next step is
 a native run of these fixtures on a host where `native-build` admits (Linux stage3).
+
+## 2026-11-05 native re-run on Windows stage3 `s3_fable43` (lane p1w-inlopt): DOES NOT REPRODUCE
+
+Binary: `C:/dev/wt/_p1win/s3_fable43.exe` (copied to `C:/dev/wt/p1w-inlopt-run/s3.exe`).
+Recipe: `C:/dev/p3new/s3sanity/run_case_g43b.ps1` adapted (root = sparse worktree on
+`origin/release/1.0.0` d63e10af753, `--source src/lib`, `--entry-closure`, `--backend llvm`,
+`--target x86_64-pc-windows-gnu`, `--runtime-bundle core-c-bootstrap`, 4 GB cap), entry
+renamed to `__simple_main` with `llvm-objcopy --redefine-sym`, manual link via the
+generated `.link-command.txt` rsp **plus `-lwinhttp`** (the emitted rsp omits it:
+11 undefined `WinHttp*` symbols — separate link-line gap).
+
+| fixture | native output | expected |
+|---|---|---|
+| `test/fixtures/native_option_eq_representation/main.spl` | `hit=match miss=no-match none=match` rc=0 | same |
+| `test/fixtures/native_option_if_val_unwrap/int_main.spl` | `true / 43 / true / true` rc=0 | same |
+
+Object disassembly (`llvm-objdump -d -r`) of `main.spl`: `lookup` returns `rt_enum_new`
+for both `Some` and `None`; `hit == Some("run_id")` lowers to `rt_is_none` x2 +
+`rt_unwrap_or_self` x2 + `rt_text_eq_any` on the payloads — both sides use the same
+boxed representation, no bare-text-vs-enum mismatch. `absent == None` is a raw handle
+compare that is correct because `runtime_native.c rt_enum_new` interns payload-free
+variants (non-transient scope).
+
+Not runnable on 43 (unrelated stage3 defects, not this bug):
+`struct_method_main.spl` and `text_main.spl` fail MIR lowering with
+`unresolved method call: get` / `label route=runtime-fallback` (struct instance methods
+in a single-module build).
+
+Verdict: representation mismatch not reproduced on native; status set to
+`resolved-disappeared`. Reopen if the original `SdnRow.get(...) == Some(id)` shape
+fails once multi-module stage3 builds work.
