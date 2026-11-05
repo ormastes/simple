@@ -126,3 +126,24 @@ number of probes was affordable in this session; not completed here.
 and `origin/main` (990 commits touching those paths) with the above
 matched-pair probe as the bisect script is the mechanical next step.
 
+
+## No longer reproducible at current source — 2026-11-05
+
+Two independent verifications at current release/1.0.0:
+
+1. The trust-root bootstrap built Stage 2 itself on this host (aarch64
+   Linux): 1567 modules compiled and linked by the seed, sanity gate PASS.
+   This is the exact operation this doc records as impossible (the blocking
+   closure was the compiler's own graph, which the bootstrap compiles
+   end-to-end).
+2. The doc's precise recipe — deployed seed running native-build of a
+   2-line hello world, forcing the seed to load/interpret its own
+   ~1800-module source graph — ran for 900s (hit the probe timeout, still
+   compiling) with ZERO occurrences of `method 'len' not found on type
+   'i64'`; bootstrap error counts at every recorded point were 0. On
+   2026-09-13 this failure was immediate and deterministic.
+
+The registry-corruption defect does not reproduce at current source. Not
+claimed: the probe build did not complete within the window (it is slow, not
+failed); the stage2 compiler-test matrix end-to-end result remains the
+final acceptance for running the suite under stage 2.

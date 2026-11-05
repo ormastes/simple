@@ -149,3 +149,16 @@ with a type at all, and where its MirType is assigned. A fix there repairs this
 defect and plausibly others in the same family, whereas special-casing the binop
 would leave the metadata gap intact.
 
+
+## Fixed at current source — verified 2026-11-05
+
+The current stage2 candidate (pure-Simple compiler built by the trust-root
+bootstrap, --backend=cranelift, aarch64-unknown-linux-gnu, worktree at
+df48a86ff5a) compiled and ran:
+
+    fn addf(a: f64, b: f64) -> f64: a + b
+    main: return 0 iff addf(1.5, 2.25) == 3.75
+
+Result: exit 0 — f64 addition is correct, no integer-bit-pattern lowering.
+The silent-wrong-value f64 arithmetic lowering does not reproduce at current
+release/1.0.0 source.

@@ -25,3 +25,10 @@ One line: `self.register_struct_identity_layout_key(source, key)` after the prov
 
 ## Evidence
 imported_struct_operator_owner_spec: 16 failed -> 16 passed. 14 other 50.mir specs unchanged (all pass).
+
+## Verification — 2026-11-05
+
+test/01_unit/compiler/50.mir/imported_struct_operator_owner_spec.spl: 16/16
+PASS under the seed interpreter on an aarch64 Linux host (was 16/16 failing
+with "indirect call return record has no declared owner layout" before the
+2026-11-04 fix on work/mir-owner-layout-20261104).
