@@ -1,0 +1,163 @@
+# Writer/reader convergence for bug smf_header_wire_layout_diverges_rust_vs_simple_2026-08-10.
+# SmfHeader.to_seed_bytes() must be byte-identical to a hand-built Rust seed
+# repr(C) header and must be read back field-for-field by every reader.
+use std.spec.{describe, it, expect}
+use compiler.backend.linker.smf_header.{SmfHeader, smf_header_from_bytes, smf_header_field_shift, smf_header_size_at, smf_header_seed_trailer_offset}
+use compiler.backend.linker.smf_enums.{Platform, Arch}
+use compiler.driver.cache.cache_validator.{SmfValidationSnapshot}
+
+fn sample() -> SmfHeader:
+    var h = SmfHeader.new_v1_1(Platform.Linux, Arch.X86_64)
+    h.flags = 0x11223344
+    h.section_count = 3
+    h.section_table_offset = 0x1000
+    h.symbol_table_offset = 0x2000
+    h.symbol_count = 7
+    h.exported_count = 5
+    h.entry_point = 0xAABBCCDDEEFF0011
+    h.stub_size = 0x11223344
+    h.smf_data_offset = 0x55667788
+    h.module_hash = 0xDEADBEEFCAFEF00D
+    h.source_hash = 0x0123456789ABCDEF
+    h.app_type = 2
+    h.window_width = 1280
+    h.window_height = 720
+    h.prefetch_hint = 1
+    h.prefetch_file_count = 9
+    h
+
+fn le(v: i64, n: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < n:
+        out.push(((v >> (8 * i)) & 0xFF) as u8)
+        i = i + 1
+    out
+
+# Hand-built from the offsets in src/compiler_rust/common/src/smf/header.rs.
+fn hand_built_seed() -> [u8]:
+    var b: [u8] = []
+    var z = 0
+    while z < 96:
+        b.push(0)
+        z = z + 1
+    b[0] = 83
+    b[1] = 77
+    b[2] = 70
+    b[3] = 0
+    b[4] = 1
+    b[5] = 1
+    var w = sample()
+    b[6] = w.platform
+    b[7] = w.arch
+    b = put_at(b, 8, le(0x11223344, 4))
+    b = put_at(b, 16, le(3, 4))
+    b = put_at(b, 24, le(0x1000, 8))
+    b = put_at(b, 32, le(0x2000, 8))
+    b = put_at(b, 40, le(7, 4))
+    b = put_at(b, 44, le(5, 4))
+    b = put_at(b, 48, [0x11, 0x00, 0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA])
+    b = put_at(b, 56, le(0x11223344, 4))
+    b = put_at(b, 60, le(0x55667788, 4))
+    b = put_at(b, 64, [0x0D, 0xF0, 0xFE, 0xCA, 0xEF, 0xBE, 0xAD, 0xDE])
+    b = put_at(b, 72, [0xEF, 0xCD, 0xAB, 0x89, 0x67, 0x45, 0x23, 0x01])
+    b[80] = 2
+    b = put_at(b, 82, le(1280, 2))
+    b = put_at(b, 84, le(720, 2))
+    b[86] = 1
+    b[87] = 9
+    b
+
+fn put_at(b: [u8], at: i64, bytes: [u8]) -> [u8]:
+    var out = b
+    var k = 0
+    while k < bytes.len():
+        out[at + k] = bytes[k]
+        k = k + 1
+    out
+
+fn with_body(hdr: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 200:
+        out.push(0)
+        i = i + 1
+    out + hdr
+
+describe "SMF seed-layout writer":
+    it "emits exactly 96 bytes":
+        expect sample().to_seed_bytes().len() == 96
+
+    it "is byte-identical to a hand-built seed repr(C) header":
+        val got = sample().to_seed_bytes()
+        val want = hand_built_seed()
+        var i = 0
+        while i < 96:
+            expect got[i] == want[i]
+            i = i + 1
+
+    it "keeps 4 zero padding bytes at 20..24 and zero trailing pad":
+        val got = sample().to_seed_bytes()
+        expect got[20] == 0 and got[21] == 0 and got[22] == 0 and got[23] == 0
+        expect got[93] == 0 and got[94] == 0 and got[95] == 0
+
+describe "SMF seed writer -> readers":
+    it "locator helper finds the seed trailer and reports shift 4 / size 96":
+        val img = with_body(sample().to_seed_bytes())
+        val start = smf_header_seed_trailer_offset(img)
+        expect start == img.len() - 96
+        expect smf_header_field_shift(img, start) == 4
+        expect smf_header_size_at(img, start) == 96
+
+    it "smf_header_from_bytes reads back identical fields":
+        val h = sample()
+        val p = smf_header_from_bytes(with_body(h.to_seed_bytes())).unwrap()
+        expect p.flags == h.flags
+        expect p.section_count == 3
+        expect p.section_table_offset == 0x1000
+        expect p.symbol_table_offset == 0x2000
+        expect p.symbol_count == 7
+        expect p.exported_count == 5
+        expect p.entry_point == h.entry_point
+        expect p.stub_size == h.stub_size
+        expect p.smf_data_offset == h.smf_data_offset
+        expect p.module_hash == h.module_hash
+        expect p.source_hash == h.source_hash
+        expect p.app_type == 2
+        expect p.window_width == 1280
+        expect p.window_height == 720
+        expect p.prefetch_hint == 1
+        expect p.prefetch_file_count == 9
+
+    it "cache validator reads the same header position and source hash":
+        val snap = SmfValidationSnapshot(data: with_body(sample().to_seed_bytes()))
+        expect snap.valid_header() == true
+        expect snap.source_hash() == 0x0123456789ABCDEF
+
+    it "packed writer output is still read as shift 0 (no regression)":
+        val packed = sample().to_bytes()
+        expect smf_header_field_shift(packed, 0) == 0
+        val p = smf_header_from_bytes(packed).unwrap()
+        expect p.section_table_offset == 0x1000
+        expect p.window_width == 1280
+
+describe "SMF seed header rejection":
+    it "rejects wrong magic":
+        var img = with_body(sample().to_seed_bytes())
+        img[img.len() - 96] = 88
+        expect smf_header_seed_trailer_offset(img) == -1
+        expect smf_header_from_bytes(img).is_err() == true
+
+    it "rejects a truncated seed header":
+        val img = sample().to_seed_bytes()
+        var cut: [u8] = []
+        var i = 0
+        while i < 90:
+            cut.push(img[i])
+            i = i + 1
+        expect smf_header_from_bytes(cut).is_err() == true
+
+    it "does not treat a seed header with no sections as seed-shaped":
+        var h = sample()
+        h.section_count = 0
+        expect smf_header_seed_trailer_offset(with_body(h.to_seed_bytes())) == -1
