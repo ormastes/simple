@@ -1,0 +1,102 @@
+# Purpose and audience: compiler engineers fixing bugs the 2026-11-05 verify sweep reopened (PRs #6977/#6982).
+# @req REQ-SSPEC-COMPILER
+# @tag:in-development
+"""
+# Verify-sweep REOPENED bugs: repros asserting the CORRECT behaviour
+
+Every example here fails today (the sweep reopened these rows). They are tagged
+in-development so whole-suite runs skip them; each documents the behaviour a fix
+must deliver. Fixtures: test/fixtures/repro/verify_sweep/.
+
+Oracle: examples marked "seed" reproduce under `bin/simple.exe run`. Examples
+marked "native" only fail in a native build (s3_fable43) and need
+SIMPLE_NATIVE_PROBE_CMD, a command invoked as `<cmd> <fixture.spl>` that builds
+and runs the fixture natively and prints its stdout. Without it they fail with a
+clear message rather than passing vacuously.
+"""
+
+use std.spec.step
+use std.spec.*
+use std.io_runtime.{process_run, env_get, host_os}
+
+val FIXTURE_DIR = "test/fixtures/repro/verify_sweep"
+
+fn contract_binary() -> text:
+    val override = env_get("SIMPLE_TEST_BINARY")
+    if override != "":
+        return override
+    if host_os() == "windows":
+        return "bin/simple.exe"
+    "bin/simple"
+
+fn run_fixture(name: text) -> (text, text, i64):
+    process_run(contract_binary(), ["run", "{FIXTURE_DIR}/{name}.spl"])
+
+fn native_fixture(name: text) -> (text, text, i64):
+    val probe = env_get("SIMPLE_NATIVE_PROBE_CMD")
+    if probe == "":
+        return ("", "SIMPLE_NATIVE_PROBE_CMD not set: native probe runner required", 99)
+    process_run(probe, ["{FIXTURE_DIR}/{name}.spl"])
+
+describe "verify-sweep reopened bugs (P1 first)":
+    # P1-class correctness bug: a wrong-arity call compiles silently and runs on
+    # garbage arguments (native: r=-3922, seed: r=3078).
+    it "call_site_arity_never_checked: f3(7, 8) on a 3-param fn is a compile-time arity error":
+        # seed + native
+        step("run b2r_arity (f3 declared with 3 params, called with 2)")
+        val (out, err, code) = run_fixture("b2r_arity")
+        step("a correct compiler rejects the program: nonzero exit, no program output")
+        assert_equal(out.contains("COMPILED-OK"), false)
+        assert_equal(code != 0, true)
+
+    it "array_at_returns_nil_for_every_index: [10,20,30].at(1) == 20":
+        # seed + native
+        val (out, err, code) = run_fixture("b2r_at")
+        assert_equal(out.contains("PASS at"), true)
+        assert_equal(code, 0)
+
+    it "primitive_receiver_trait_impl_dispatch: impl Trait for text/i64 dispatches":
+        # seed (Function 'str.marker_probe' not found) + native (compiler crash)
+        val (out, err, code) = run_fixture("b0_e")
+        assert_equal(out.contains("PASS"), true)
+        assert_equal(out.contains("unresolved symbol"), false)
+
+    it "native_comprehension_packed_u8_array_mir: [v as i64 for v in bytes]":
+        # seed (FAIL comprehension) + native (E-MIR-EXPR-Comprehension)
+        val (out, err, code) = run_fixture("b0_g")
+        assert_equal(out.contains("FAIL comprehension"), false)
+        assert_equal(out.contains("PASS"), true)
+
+    it "placeholder_lambda_as_fn_param_callback_unevaluated: apply(_1 + 1, 4) == 5":
+        # seed
+        val (out, err, code) = run_fixture("b5_placeholder_lambda")
+        assert_equal(out.contains("R=5"), true)
+        assert_equal(out.contains("R2=5"), true)
+
+    it "hir_tui_builtin_len_resolution: free len(x) resolves in HIR":
+        # seed (FAIL free_len); native-build reported unresolved len
+        val (out, err, code) = run_fixture("hir_free_len_call")
+        assert_equal(out.contains("PASS free_len"), true)
+        assert_equal(code, 0)
+
+    it "result_err_record_owner_erased: Err(e) -> e.message/e.code of a local struct":
+        # native
+        val (out, err, code) = native_fixture("b4r_errrec")
+        assert_equal(out.contains("PASS"), true)
+        assert_equal(code, 0)
+
+    it "mutate_through_index_loses_write: b.items.push(1) on a struct field":
+        # native
+        val (out, err, code) = native_fixture("b5_combo")
+        assert_equal(out.contains("FAIL fieldpush"), false)
+        assert_equal(out.contains("PASS"), true)
+
+    it "result_err_missing_native_projection: Result.err() resolves":
+        # native (MIR lowering error: unresolved method call: err)
+        val (out, err, code) = native_fixture("result_err_projection")
+        assert_equal(out.contains("PASS err_projection"), true)
+        assert_equal(code, 0)
+
+# seed_if_val_typed_option_class_binds_option_or_segv_2026-11-03 is already
+# pinned by test/01_unit/language/if_val_typed_option_class_unwrap_spec.spl
+# (9 failures under seed_simple.exe at sweep time); no duplicate repro added.
