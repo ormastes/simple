@@ -215,3 +215,33 @@ fixed. Exec-loop re-dispatch (the earlier defect 2) is bounded on
 completing nonces (the Print case re-enters many times — 60+ probe
 constructions observed — but the run finishes with exactly two prints);
 unbounded on hanging nonces. Both recorded for the next lane.
+
+---
+
+## 2026-11-06 — 16-CHAR LITERAL TRUNCATION FIXED (lane `work/riscv-string-trunc-20261106`, PR #7051+4): the winning duplicate `rt_array_push` never grew; default cap is 16
+
+Measured chain (RSP write-watchpoint on the result object at 0x80e6c5d0 —
+stable across boots — caught `rt_string_concat` mid-copy; the concat's own
+frame held `HELLO_INTERP_SI` (15) + `M` (1)):
+
+1. `lexer_struct.spl scan_string` builds token text via
+   `parts.push(advance())` char-by-char, then `parts.join("")`. `var parts:
+   [text] = []` lowers to `rt_array_new(0)`.
+2. Winning in-guest `rt_array_new` (disasm): `cap = raw_or_encoded(0); if
+   (cap == 0) cap = 0x10` — DEFAULT CAPACITY = 16.
+3. Winning in-guest `rt_array_push` (disasm, the ghdl TU's copy):
+   `if (len >= cap) return 0` — NO GROWTH, silently drops. Pushes 17..56 of
+   the 56-char literal vanished; join produced exactly "HELLO_INTERP_SIM".
+   Same defect family as #7044 (duplicate-TU lottery): the stubs and
+   baremetal_runtime_core.inc.c copies both delegate to a GROWING
+   rt_array_push_handle (cap*2, 4096 ceiling); only the ghdl TU carried the
+   pre-fix no-growth body.
+
+Fix: mirrored the growing `rt_array_push_handle` into
+`ghdl_boot_info_runtime.c` verbatim (its rt_array_push now delegates), with
+the incident comment — all three runtime TUs now grow regardless of which
+wins the link.
+
+Verification (nonce aa11bb22cc33dd44): interpreted prints render the FULL
+marker — `HELLO_INTERP_SIMPLEOS_RISCV64_OK nonce=aa11bb22cc33dd44` and the
+full second line, rc=0. Official gate verdict recorded in the PR.
