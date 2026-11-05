@@ -101,8 +101,14 @@ extern unsigned char __heap_end[];
  * one shared base would let them hand out the same bytes twice; before this
  * change each TU owned a separate 1 MiB array, and halving preserves exactly
  * that disjointness at 32x the size. baremetal_stubs.c takes the LOW half. */
+/* First of three disjoint thirds of the linker-reserved .heap; the other
+ * two TUs (baremetal_runtime_core.inc.c, ghdl_boot_info_runtime.c) own the
+ * second and third. Thirds -- not halves -- since the ghdl proof TU also
+ * carries a full allocator duplicate (see the matching comment there and
+ * doc/08_tracking/bug/riscv64_in_guest_parse_recursion_par_state_uninit_2026-11-05.md:
+ * a duplicate that served from a static .bss array overlaid module globals). */
 #define RV_HEAP_BASE (__heap_start)
-#define RV_HEAP_SIZE ((size_t)(__heap_end - __heap_start) / 2U)
+#define RV_HEAP_SIZE ((size_t)(__heap_end - __heap_start) / 3U)
 static uintptr_t g_heap_off = 0;
 static unsigned char g_virtq[8192] __attribute__((aligned(4096)));
 static unsigned char g_dma[1024] __attribute__((aligned(512)));
