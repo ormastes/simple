@@ -182,3 +182,13 @@ This lack of context makes seed-vs-self-hosted discrepancies hard to localize. A
 
 The two h1_client.spl guard fixes landed in the browser development lane. The BROWSER_MAX_RESOURCE_BYTES `pub val` change was made but downstream chunked-decode failure was not resolved as part of this investigation — that work remains open.
 
+
+## Update 2026-11-05 (F1 lane)
+
+Divergence A residual fixed in the seed BDD assertion path
+(`src/compiler_rust/compiler/src/interpreter_call/bdd.rs`, comparison-form
+`expect`): `expect(opt.? == nil)` collapsed `.?` to bool and compared
+`false == nil`, so the spec said false while `simple run` said true. A `.?`
+compared with a literal `nil` now keeps its `T?` value. Repro:
+`test/01_unit/compiler/interpreter/exists_check_presence_regression_spec.spl` case "optional .? passes the payload through". Divergence C
+(module-private `val` imports) is outside the `.?` family and stays open.

@@ -1,6 +1,6 @@
 # Stage 2 matrix full-CLI build peaks above 40 GiB in MIR
 
-- Status: OPEN
+- Status: verification-pending (re-scoped 2026-11-05, see end)
 - Date: 2026-10-19
 - Platform: aarch64-unknown-linux-gnu, 121 GiB host
 - Blocks: `stage2-compiler-tests` `compiler_cli_build` under the lane's 40 GiB
@@ -99,3 +99,44 @@ Audited process-global datasets in `src/compiler/50.mir` and `80.driver`.
 - Unbounded-but-small siblings left (session-keyed, no per-edit growth):
   `BITFIELD_REGISTRY`, `_smf_cached_modules`, `_bootstrap_llvm_*_key_*`,
   `_g_entry_scan_*` (has reset), `_bootstrap_type_runtime_names` (has reset).
+
+## Re-scope 2026-11-05 (p1c-s240g, code reading; no full-CLI build run)
+
+No full-CLI build was run (host memory guard: another 70 GB build live).
+Findings against base `origin/release/1.0.0` @ 27e65c24371:
+
+1. **The measured growth is not in MIR.** Both the r8 Stage 3 table and the
+   r11 table above grow linearly (~57 MB/module) during **HIR**, before MIR
+   starts. The title's "in MIR lowering" attribution is only the r8 Stage 2
+   observation that the kill landed after MIR began.
+2. **The retention paths have since been rebuilt under the BuildSession
+   model** (BuildSession owns build data, bounded global caches):
+   - cfef5e4eec0 (BSM P2): session-owned `BootstrapHirStore`, removes the
+     O(N^2) `promote_last`.
+   - f1e2edad6c7 (BSM P3): session-owned bootstrap MIR registries, staged
+     rows published per module scope.
+   - e587b09a884 / ed2581b83d3 / 88bc2edede3 / d05dc7079db: MIR transient
+     scope promotes only the declared owner inventory; the per-module arena
+     is reclaimed (`lower_module` docstring, module_lowering.spl ~2350).
+   - eb60c43c224: count-bounded HIR cache side tables + retention budget spec.
+   - 7c959393f02 / 4898f95a5c9: import-closure-only HIR for MIR shard /
+     file-worker children.
+   - Staged native codegen (`SIMPLE_NATIVE_STAGED_CODEGEN_BATCH`, bootstrap
+     default 32) evicts each flushed batch's MIR
+     (`driver_aot_pipeline.spl:636 evict_mir_modules`), so `ctx.mir_modules`
+     no longer holds the whole closure on the bootstrap lane.
+3. **Newer measurement contradicts the 40 GiB HIR slope:** bug
+   `stage2_compiler_cli_build_rss_cap_after_hir_poison_retry_2026-11-04`
+   records Stage 2 `compiler_cli_build` lowering **all 3020 modules through
+   HIR under a 12 GiB tree cap** (macOS M4). Its RSS kill came from an
+   in-process HIR retry after a compile-error poison, fixed there. f6f000233c8
+   (2026-11-05) re-prices the Stage 2 compiler-tests cap per full-CLI worker.
+4. Only residual retention found by reading: `lower_emit_fn_values`
+   (module_lowering.spl ~3573) keeps the previous module's
+   `HirFunction` list alive until the next module overwrites it. This is
+   bounded to ONE module, so it cannot explain tens of GiB; it was left as is.
+
+**Remaining to close:** a MIR-phase peak RSS for the full-CLI closure on the
+next sanctioned Stage 2 rerun (s2d). Close this bug as fixed if that peak is
+under 40 GiB. If it is not, reopen it with `SIMPLE_PHASE_RSS=1` per-phase
+attribution.
