@@ -217,15 +217,32 @@ impl HirLowering:
     me record_impl_textual_method_keys(impls: [Impl]):
         """Index every method written in this module's impl blocks as
         "Owner::method" before any impl is lowered, so trait-default injection
-        sees an override regardless of impl block order."""
+        sees an override regardless of impl block order.
+
+        A method written BOTH in a trait impl and in an inherent impl of the
+        same owner is two bodies under one `Owner::method` symbol (bug
+        trait_default_inherent_override_duplicate_symbol_2026-10-24, case 2:
+        calls silently bind the wrong arity). Reject it here. An inherent body
+        that overrides a trait DEFAULT (not written in the trait impl) is legal."""
         var keys: [text] = []
+        var trait_keys: [text] = []
+        var inherent_keys: [text] = []
         var impl_index = 0
         while impl_index < impls.len():
             val impl_: Impl = impls[impl_index]
             val owner_name = parser_type_kind_named_name(impl_.type_.kind)
             if owner_name != "":
                 for method_name in impl_.methods.keys():
-                    keys.push("{owner_name}::{method_name}")
+                    val key = "{owner_name}::{method_name}"
+                    keys.push(key)
+                    if impl_.has_trait_:
+                        if inherent_keys.contains(key):
+                            self.error("method '{method_name}' of '{owner_name}' is defined in both a trait impl and an inherent impl; rename one (they would share symbol '{key}')", impl_.span)
+                        trait_keys.push(key)
+                    else:
+                        if trait_keys.contains(key):
+                            self.error("method '{method_name}' of '{owner_name}' is defined in both a trait impl and an inherent impl; rename one (they would share symbol '{key}')", impl_.span)
+                        inherent_keys.push(key)
             impl_index = impl_index + 1
         self.impl_textual_method_keys = keys
 
