@@ -15,7 +15,7 @@
 
 use std.common.crypto.word_ops.{rotr32}
 use std.common.crypto.sha256_core.{sha256_initial_hash, sha256_pad_message, sha256_process_block}
-use std.common.crypto.secure_memory.{SecureZeroReport, secure_zero_i64_slots}
+use std.common.crypto.secure_memory.{SecureZeroReport, secure_zero_u8_slots}
 use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text}
 
 # SHA-256 round constants (first 32 bits of fractional parts of cube roots of first 64 primes).
@@ -275,6 +275,15 @@ fn _sha256_digest_hex(digest: [u8]) -> text:
 # Virtual byte j of the SHA-256 padded message for `data` (padding computed,
 # never materialized): data bytes, then 0x80, zeros, and the 8-byte big-endian
 # bit length occupying [total_len-8, total_len).
+# Big-endian word read for the packed-byte schedule below. Every stored value
+# is pre-masked to 32 bits, so four bytes hold one word exactly. Writes are
+# spelled out at each call site instead of routed through a helper: arrays are
+# caller-owned values, so a mutating helper would update only its copy.
+fn _sha256_w_get(w: [u8], word_index: i64) -> i64:
+    val base = word_index * 4
+    ((w[base] as i64) * 16777216) + ((w[base + 1] as i64) * 65536) +
+        ((w[base + 2] as i64) * 256) + (w[base + 3] as i64)
+
 fn _sha256_padded_byte(data: [u8], data_len: i64, total_len: i64, j: i64) -> i64:
     if j < data_len:
         return data[j] as i64
@@ -298,19 +307,22 @@ fn _sha256_padded_byte(data: [u8], data_len: i64, total_len: i64, j: i64) -> i64
 # 64-entry K constants list, and a fresh h list PER BLOCK -- for a 1.7MB font
 # that is 26,694 blocks and burned the remaining ~50MB of the 192MiB
 # bump heap in one hash (live: `[PANIC] heap exhausted heap_off=0xbffff80`).
-# Now: ONE reused [i64] w[64] schedule (index-assigned in place), ONE K list,
-# hash state in 8 scalar locals, words assembled by direct indexing into the
-# input, and padding synthesized virtually for the final block(s) only.
+# Now: ONE reused packed-byte schedule holding 64 big-endian words (256 bytes,
+# index-assigned in place), ONE K list, hash state in 8 scalar locals, words
+# assembled by direct indexing into the input, and padding synthesized
+# virtually for the final block(s) only.
+# The schedule is a packed [u8] rather than a boxed [i64] list because the
+# zeroization contract routes it through secure_zero_u8_slots: the volatile
+# readback facade can address packed byte storage on every engine, while
+# boxed non-byte arrays answer rt_array_data_ptr == 0 on some (the
+# interpreter), which would fail the credential-hash wipe closed and deny
+# registration (doc/08_tracking/bug/simpleos_server_credential_zeroization_gap_2026-08-14.md).
 # Total allocations per call: 2 small arrays + the 64-char hex build,
 # independent of input size.
 fn _sha256_u8_hex_owned(data: [u8], require_zeroization: bool) -> text:
     val mask32 = 4294967295  # 0xFFFFFFFF
     val k = _sha256_k()
-    var w: [i64] = []
-    var zi = 0
-    while zi < 64:
-        w.push(0)
-        zi = zi + 1
+    var w: [u8] = [0u8; 256]
 
     var h0 = 1779033703
     var h1 = 3144134277
@@ -340,7 +352,11 @@ fn _sha256_u8_hex_owned(data: [u8], require_zeroization: bool) -> text:
                 val b1 = data[base + 1] as i64
                 val b2 = data[base + 2] as i64
                 val b3 = data[base + 3] as i64
-                w[wi] = (b0 * 16777216) + (b1 * 65536) + (b2 * 256) + b3
+                val word = (b0 * 16777216) + (b1 * 65536) + (b2 * 256) + b3
+                w[wi * 4]     = ((word >> 24) & 255) as u8
+                w[wi * 4 + 1] = ((word >> 16) & 255) as u8
+                w[wi * 4 + 2] = ((word >> 8) & 255) as u8
+                w[wi * 4 + 3] = (word & 255) as u8
                 wi = wi + 1
         else:
             # Tail block(s): read through the virtual padded message.
@@ -350,16 +366,25 @@ fn _sha256_u8_hex_owned(data: [u8], require_zeroization: bool) -> text:
                 val b1 = _sha256_padded_byte(data, data_len, total_len, base + 1)
                 val b2 = _sha256_padded_byte(data, data_len, total_len, base + 2)
                 val b3 = _sha256_padded_byte(data, data_len, total_len, base + 3)
-                w[wi] = (b0 * 16777216) + (b1 * 65536) + (b2 * 256) + b3
+                val word = (b0 * 16777216) + (b1 * 65536) + (b2 * 256) + b3
+                w[wi * 4]     = ((word >> 24) & 255) as u8
+                w[wi * 4 + 1] = ((word >> 16) & 255) as u8
+                w[wi * 4 + 2] = ((word >> 8) & 255) as u8
+                w[wi * 4 + 3] = (word & 255) as u8
                 wi = wi + 1
 
         wi = 16
         while wi < 64:
-            val w15 = w[wi - 15]
-            val w2  = w[wi - 2]
+            val w15 = _sha256_w_get(w, wi - 15)
+            val w2  = _sha256_w_get(w, wi - 2)
             val s0 = (rotr32(w15, 7) ^ rotr32(w15, 18) ^ (w15 >> 3)) & mask32
             val s1 = (rotr32(w2, 17) ^ rotr32(w2,  19) ^ (w2  >> 10)) & mask32
-            w[wi] = (w[wi - 16] + s0 + w[wi - 7] + s1) & mask32
+            val expanded = (_sha256_w_get(w, wi - 16) + s0 +
+                _sha256_w_get(w, wi - 7) + s1) & mask32
+            w[wi * 4]     = ((expanded >> 24) & 255) as u8
+            w[wi * 4 + 1] = ((expanded >> 16) & 255) as u8
+            w[wi * 4 + 2] = ((expanded >> 8) & 255) as u8
+            w[wi * 4 + 3] = (expanded & 255) as u8
             wi = wi + 1
 
         var a = h0
@@ -375,7 +400,7 @@ fn _sha256_u8_hex_owned(data: [u8], require_zeroization: bool) -> text:
         while ri < 64:
             val big_s1 = (rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25)) & mask32
             val ch     = ((e & f) ^ ((e ^ mask32) & g)) & mask32
-            val temp1  = (hh + big_s1 + ch + k[ri] + w[ri]) & mask32
+            val temp1  = (hh + big_s1 + ch + k[ri] + _sha256_w_get(w, ri)) & mask32
             val big_s0 = (rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22)) & mask32
             val maj    = ((a & b) ^ (a & c) ^ (b & c)) & mask32
             val temp2  = (big_s0 + maj) & mask32
@@ -402,11 +427,28 @@ fn _sha256_u8_hex_owned(data: [u8], require_zeroization: bool) -> text:
 
     val digits = "0123456789abcdef"
     var result: [text] = [""; 64]
-    val words = [h0, h1, h2, h3, h4, h5, h6, h7]
+    # Final eight-word projection in the same packed big-endian byte layout as
+    # the schedule, so one facade wipes both on every engine.
+    var words: [u8] = [0u8; 32]
+    var word_i = 0
+    while word_i < 8:
+        val word = if word_i == 0: h0
+        else: if word_i == 1: h1
+        else: if word_i == 2: h2
+        else: if word_i == 3: h3
+        else: if word_i == 4: h4
+        else: if word_i == 5: h5
+        else: if word_i == 6: h6
+        else: h7
+        words[word_i * 4]     = ((word >> 24) & 255) as u8
+        words[word_i * 4 + 1] = ((word >> 16) & 255) as u8
+        words[word_i * 4 + 2] = ((word >> 8) & 255) as u8
+        words[word_i * 4 + 3] = (word & 255) as u8
+        word_i = word_i + 1
     var out_i = 0
     var result_i = 0
     while out_i < 8:
-        val word = words[out_i]
+        val word = _sha256_w_get(words, out_i)
         var shift = 28
         while shift >= 0:
             val nibble = (word >> shift) & 15
@@ -417,8 +459,8 @@ fn _sha256_u8_hex_owned(data: [u8], require_zeroization: bool) -> text:
     # `w` contains the expanded credential-derived message schedule and
     # `words` contains the final working-state projection. On bump/no-GC
     # targets their backing allocations otherwise survive for process life.
-    val schedule_wipe: SecureZeroReport = secure_zero_i64_slots(w)
-    val words_wipe: SecureZeroReport = secure_zero_i64_slots(words)
+    val schedule_wipe: SecureZeroReport = secure_zero_u8_slots(w)
+    val words_wipe: SecureZeroReport = secure_zero_u8_slots(words)
     if require_zeroization and
        (not schedule_wipe.verified() or not words_wipe.verified()):
         return ""
