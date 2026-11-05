@@ -146,3 +146,24 @@ binding in `doc/07_guide/quick_reference/syntax_quick_reference.md`.
 3. Add a regression spec directly targeting this shape (Optional-enum matched
    with field-binding constructor arms) so a future compiler fix has a red
    test to turn green, and so this doesn't regress unnoticed again.
+
+
+## Re-measurement 2026-11-05 — interpreter lane FIXED (94bb1e16459); JIT lane still silently wildcards
+
+Re-run of this record's UIEvent repro shape on release/1.0.0 with the seed
+rebuilt 2026-11-05 (contains 94bb1e16459): under
+`SIMPLE_EXECUTION_MODE=interpret`, matching an `Evt?` scrutinee directly
+against `case Evt.Click(x):` now fires the variant arm for every construction
+shape (implicit function wrap, explicit `Some(...)` return, local explicit,
+local implicit). The tree-walk interpreter half of this record is closed by
+the seed fix; the tracked release/1.0.0 binary (5a6bd3fd58c, 2026-10-31)
+predates it and still shows the fall-through until refreshed.
+
+The JIT (cranelift default) lane is UNCHANGED for two construction shapes:
+explicit `Some(...)` values matched against bare variant patterns silently
+take the wildcard, and `case Some(Evt.Click(x))` over an implicitly-wrapped
+value binds the payload to nil. Minimal repro and both-lane pins:
+`test/01_unit/compiler/interpreter/probe_option_enum_match.spl`,
+gated by `option_enum_match_variant_spec.spl`. This is the remaining live half
+of the family; it lives in the JIT match lowering (out of the
+frontend/interpreter scope of the 2026-11-05 lane).
