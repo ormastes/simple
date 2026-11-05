@@ -92,3 +92,27 @@ the firmware scripts, so it fails builds nobody asked to profile.
 ## Related
 
 - `doc/08_tracking/bug/seed_emit_object_superlinear_hang_large_module_2026-07-20.md`
+
+## Verification 2026-11-05 (riscv-sweep lane, work/riscv-sweep-20261105) — fixed at tip (seed rebuilt)
+
+Fix option 1 from this record has happened: the current aarch64 Rust seed
+(`src/compiler_rust/target/bootstrap/simple`, rebuilt 2026-11-05) now carries
+`rt_heap_registry_count` as a strong text symbol:
+
+```text
+$ nm src/compiler_rust/target/bootstrap/simple | grep rt_heap_registry_count
+...
+0000000002397ce8 T rt_heap_registry_count
+```
+
+plus the `interpreter_extern::memory` registration. The flag-gated
+`semantic: unknown extern function: rt_heap_registry_count` failure mode can no
+longer occur against this seed. The doc's own A/B probe
+(`native-build --target riscv32 --emit-object` with
+`SIMPLE_COMPILER_PHASE_PROFILE=1`) was re-attempted in this pass but could not
+complete within a 240 s bound — the run spends the entire budget in the
+interpreted compiler-graph cold-load that is the subject of the rv32 sibling
+record (`nvme_rv32_firmware_build_timeout_2026-07-05.md`), never reaching the
+firmware extern-resolution phase. Status: FIXED at tip by seed redeployment
+(symbol-presence proof above); option 2 (diagnostic degrade) remains a
+hardening suggestion, not required for closure.
