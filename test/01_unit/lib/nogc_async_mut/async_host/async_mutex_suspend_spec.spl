@@ -18,11 +18,11 @@ var saved_lease: Option<AsyncMutexLease> = nil
 var finish_holder: bool = false
 var foreign_context: Option<HostTaskContext> = nil
 
-fn holding_task() -> Poll<()>:
+fn holding_task() -> i64:
     owner_polls = owner_polls + 1
     if finish_holder and owner_polls > 1:
         visits = visits.push(11)
-        return Poll.Ready(())
+        return 1
     val cx_lookup = scheduler.task_context(owner_id)
     val cx = cx_lookup.unwrap()
     match mutex.poll_acquire(cx):
@@ -30,9 +30,9 @@ fn holding_task() -> Poll<()>:
             saved_lease = Some(lease)
             visits = visits.push(10)
         case _: fail("holder must acquire")
-    Poll.Pending
+    0
 
-fn waiting_task() -> Poll<()>:
+fn waiting_task() -> i64:
     val cx_lookup = scheduler.task_context(waiter_id)
     val cx = cx_lookup.unwrap()
     match mutex.poll_acquire(cx):
@@ -48,7 +48,7 @@ fn waiting_task() -> Poll<()>:
             Poll.Ready(())
         case _: fail("waiter unexpectedly refused")
 
-fn second_waiting_task() -> Poll<()>:
+fn second_waiting_task() -> i64:
     val cx_lookup = scheduler.task_context(second_id)
     val cx = cx_lookup.unwrap()
     match mutex.poll_acquire(cx):
@@ -61,9 +61,9 @@ fn second_waiting_task() -> Poll<()>:
             Poll.Ready(())
         case _: fail("second waiter unexpectedly refused")
 
-fn independent_task() -> Poll<()>:
+fn independent_task() -> i64:
     visits = visits.push(99)
-    Poll.Ready(())
+    1
 
 fn setup_tasks():
     scheduler = HostScheduler.new(1)
@@ -77,7 +77,7 @@ fn setup_tasks():
     second_id = scheduler.schedule(Priority.Normal, second_waiting_task)
     scheduler.schedule(Priority.Normal, independent_task)
 
-fn refused_task() -> Poll<()>:
+fn refused_task() -> i64:
     val cx_lookup = scheduler.task_context(second_id)
     val cx = cx_lookup.unwrap()
     match mutex.poll_acquire(cx):
@@ -86,7 +86,7 @@ fn refused_task() -> Poll<()>:
             Poll.Ready(())
         case _: fail("full/closed mutex must refuse without parking")
 
-fn foreign_task() -> Poll<()>:
+fn foreign_task() -> i64:
     val cx = foreign_context.unwrap()
     match mutex.poll_acquire(cx):
         case Poll.Ready(Err(_)):
@@ -94,7 +94,7 @@ fn foreign_task() -> Poll<()>:
             Poll.Ready(())
         case _: fail("another scheduler's local task zero cannot borrow this context")
 
-fn epoch_task() -> Poll<()>:
+fn epoch_task() -> i64:
     val cx_lookup = scheduler.task_context(owner_id)
     val cx = cx_lookup.unwrap()
     val first = match mutex.poll_acquire(cx):
@@ -106,9 +106,9 @@ fn epoch_task() -> Poll<()>:
         case _: fail("reacquire")
     expect(mutex.release(first)).to_equal(false)
     expect(mutex.release(second)).to_equal(true)
-    Poll.Ready(())
+    1
 
-fn closing_waiter_task() -> Poll<()>:
+fn closing_waiter_task() -> i64:
     val cx_lookup = scheduler.task_context(waiter_id)
     val cx = cx_lookup.unwrap()
     match mutex.poll_acquire(cx):
@@ -123,7 +123,7 @@ fn closing_waiter_task() -> Poll<()>:
 var reentrant_polls: i64 = 0
 var parked_polls: i64 = 0
 
-fn reentrant_wake_task() -> Poll<()>:
+fn reentrant_wake_task() -> i64:
     reentrant_polls = reentrant_polls + 1
     if reentrant_polls == 1:
         val cx_lookup = scheduler.task_context(owner_id)
@@ -131,14 +131,14 @@ fn reentrant_wake_task() -> Poll<()>:
         expect(cx.wake()).to_equal(true)
         # This drains readiness while this task is still Running.
         scheduler.has_runnable()
-        return Poll.Pending
-    Poll.Ready(())
+        return 0
+    1
 
-fn parked_worker_task() -> Poll<()>:
+fn parked_worker_task() -> i64:
     parked_polls = parked_polls + 1
-    Poll.Pending
+    0
 
-fn sequential_resources_task() -> Poll<()>:
+fn sequential_resources_task() -> i64:
     val cx_lookup = scheduler.task_context(owner_id)
     val cx = cx_lookup.unwrap()
     for _ in 0..65:
@@ -149,7 +149,7 @@ fn sequential_resources_task() -> Poll<()>:
         expect(resource.release(lease)).to_equal(true)
         expect(resource.close()).to_equal(true)
     expect(cx.cleanup_ids.len()).to_equal(0)
-    Poll.Ready(())
+    1
 
 describe "hosted mutex suspension and terminal cleanup":
     it "parks contention while another task progresses and hands off FIFO":

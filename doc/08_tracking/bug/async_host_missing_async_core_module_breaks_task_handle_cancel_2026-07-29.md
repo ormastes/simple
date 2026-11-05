@@ -94,3 +94,42 @@ them, and re-verify each of the ~12 dependent files actually compiles and constr
 (not just string-matches) via real specs — mirroring
 `test/01_unit/lib/nogc_async_mut/cancellation_spec.spl`'s approach of importing and
 calling the real module instead of grepping its source text.
+
+
+## Update 2026-11-05 (work/libbug-async-core-20261105) — module created; task-handle/cancel dispatch fixed
+
+`std.async_core` now resolves: `src/lib/nogc_async_mut/async_core.spl` exports
+`AsyncError`, `Priority` (new canonical definitions) and re-exports `Poll`
+(`std.async.poll`), `TaskState` (`std.async.task`), `CancellationToken`
+(`std.async.cancellation`). The async_host task-handle/cancel family builds and
+its dispatch path works end-to-end:
+
+- **Root cause found (closure ABI, not module resolution):** a closure whose
+  body contains an ANY-typed call (e.g. a generic task body `f() -> T`) or
+  whose return row is an enum/ANY (`Poll<()>`) is unencodable on the JIT
+  closure ABI; the enclosing function is demoted to the interpreter, where
+  stored closures no longer dispatch (the scheduler polled tasks, the poll
+  matched neither `Ready` nor `Pending`, and the task stuck in `Running`).
+  Fix: scheduler thunks are now `fn() -> i64` (1 = Ready, 0 = Pending);
+  `HostRuntime.run_task` routes the generic call through a free helper
+  (`_host_run_ready`) so the lambda body stays encodable. Cleanup actions are
+  likewise `fn() -> i64`.
+- `HostTaskHandle.is_cancelled()` now derives from the lifetime token (a live
+  class reference) instead of the cached `context.cancellation_requested`,
+  which reads stale through the snapshot the hybrid engine hands back.
+- Evidence: `async_host_handle_cancellation_contract_spec.spl` 2/2 (was 0/2,
+  header said "Expected-red … UNRUN"); owner_thread_queue 5/5,
+  task_error_surfacing 18/18, async_host 7/7, cancellation 8/8, async 10/10,
+  atomic_map OK — all on the real modules.
+
+**Remaining open (NOT fixed here, seed-level):** `async_mutex_suspend_spec`
+(12/15 red), `async_host_handle_cleanup_contract_spec` (7/8 red) and
+`host_promise_terminal_spec` (3/3 red) still fail. Minimal repros show the lib
+logic is correct when it compiles wholesale to JIT; the failures come from the
+filed seed hybrid-engine bug (class instances ferried between JIT-compiled and
+interpreted functions come back as stale snapshots — field writes on
+`task_context().unwrap()` results are lost; same class of bug documented for
+cancellation 2026-07-29), plus one missing seed extern
+(`spl_condvar_create`) and one nil-lease edge in `sync.spl`
+(`mutex_lifetime` on nil in the 65-sequential-locks test). Fixing those needs
+the seed interpreter/compiler fix, not more lib work.
