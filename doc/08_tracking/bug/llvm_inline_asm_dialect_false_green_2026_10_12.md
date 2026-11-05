@@ -103,3 +103,6 @@ renders `AsmLocation.RegSpec` constraints as the literal text `{name}`
 `"{{" + name + "}}"`) and emits asm operand args as `i64` without coercing the
 value, both of which llc rejects for RegSpec operands. These block
 end-to-end pure-Simple LLVM emission of any RegSpec inline asm until fixed.
+
+## 2026-11-05 compiler-defects sweep (winboot-rel100 lane)
+Ancestor check: seed-side typed dialect transport a652b819e43 "fix(llvm): retain typed assembly dialect across seed lowering" and source-owner explicit-dialect repair 754803cda4e are ancestors of tip 816655ee5cb (merge fd2b4f32fa5, PR #6791); io.spl now carries `options(intel_syntax)` on all six port instructions with no @workaround tags. Host checks (Windows, LLVM 23.1.1 lld-link): cargo test -p simple-compiler --lib inline_asm 20/20 PASS; test/01_unit/compiler/backend/llvm_inline_asm_dialect_admission_spec.spl 14/14 PASS on the seed interpreter (the aarch64-host example-4 llvm-objdump rendering gap does not reproduce here).

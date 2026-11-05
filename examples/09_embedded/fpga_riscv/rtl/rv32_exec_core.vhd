@@ -93,11 +93,15 @@ architecture rtl of rv32_exec_core is
   signal rom_b : rom_t := init_rom;
   signal data_rom : data_rom_t := init_data_rom;
   -- CSR file: minimal set for zicsr (mhartid=0, mstatus, mtvec, mie, mip)
+  -- plus trap-entry bookkeeping (mcause/mepc) so ecall/ebreak, illegal
+  -- instructions and the reserved all-zero halfword enter mtvec visibly.
   signal csr_mhartid : unsigned(31 downto 0) := x"00000000";
   signal csr_mstatus : unsigned(31 downto 0) := x"00000000";
   signal csr_mtvec : unsigned(31 downto 0) := x"00000000";
   signal csr_mie : unsigned(31 downto 0) := x"00000000";
   signal csr_mip : unsigned(31 downto 0) := x"00000000";
+  signal csr_mcause : unsigned(31 downto 0) := x"00000000";
+  signal csr_mepc : unsigned(31 downto 0) := x"00000000";
   -- Divider FSM state (multi-cycle for div/divu/rem/remu)
   signal div_op_q : std_logic_vector(2 downto 0) := (others => '0');
   signal div_running_q : std_logic := '0';
@@ -309,6 +313,7 @@ begin
     variable rom_wd : std_logic_vector(31 downto 0);
     variable idxp1 : natural;
     variable ld_w : std_logic_vector(31 downto 0);
+    variable trap_taken : boolean;
   begin
     if rising_edge(clk) then
       -- Default memory port addressing: prefetch current pc words. States
@@ -377,6 +382,8 @@ begin
         csr_mtvec <= (others => '0');
         csr_mie <= (others => '0');
         csr_mip <= (others => '0');
+        csr_mcause <= (others => '0');
+        csr_mepc <= (others => '0');
         div_running_q <= '0';
         div_op_q <= (others => '0');
         div_sign_q <= '0';
@@ -476,6 +483,7 @@ begin
         -- DIVIDE / deferred LOAD / deferred STORE transitions).
         state_q <= S_FETCH;
         pc_next := pc_q + 4;
+        trap_taken := false;
         -- pc_idx was set in the per-cycle defaults; instruction words were
         -- registered from the replicated BRAMs during S_FETCH.
         if pc_idx < ROM_WORDS then
@@ -558,7 +566,14 @@ begin
           end if;
 
           if h(1 downto 0) = "00" then
-            if h(15 downto 13) = "000" then
+            if h = "0000000000000000" then
+              -- All-zero compressed halfword: permanently illegal encoding
+              -- (C extension reserved). Trap so it is observable.
+              trap_taken := true;
+              csr_mcause <= x"00000002";
+              csr_mepc <= pc_q;
+              pc_q <= csr_mtvec;
+            elsif h(15 downto 13) = "000" then
               rd := 8 + to_integer(unsigned(h(4 downto 2)));
               r(rd) := r(2) + c_addi4spn_imm(h);
             elsif h(15 downto 13) = "010" then
@@ -634,9 +649,15 @@ begin
                   r(rd) := r(rs2);
                 end if;
               else
-                -- c.jalr rs1 (rs2=0): ra=pc+2, pc=rs1  /  c.add rd,rs2 (rs2/=0): rd+=rs2
+                -- c.ebreak (rs2=0, rd=0): breakpoint trap. c.jalr rs1 (rs2=0,
+                -- rd/=0): ra=pc+2, pc=rs1  /  c.add rd,rs2 (rs2/=0): rd+=rs2
                 if rs2 = 0 then
-                  if rd /= 0 then
+                  if rd = 0 then
+                    trap_taken := true;
+                    csr_mcause <= x"00000003";
+                    csr_mepc <= pc_q;
+                    pc_q <= csr_mtvec;
+                  elsif rd /= 0 then
                     pc_next := r(rd);
                     r(1) := pc_q + 2;
                   end if;
@@ -956,15 +977,17 @@ begin
                 when "000" =>
                   -- ecall (funct7=0000000) / ebreak (funct7=0000001)
                   if ins(31 downto 20) = "000000000000" then
-                    -- ecall: halt cleanly
-                    state_q <= S_FETCH;
-                    pc_q <= pc_q;
-                    null;
+                    -- ecall: enter the M-mode trap vector
+                    trap_taken := true;
+                    csr_mcause <= x"0000000B";
+                    csr_mepc <= pc_q;
+                    pc_q <= csr_mtvec;
                   elsif ins(31 downto 20) = "000000000001" then
-                    -- ebreak: halt cleanly
-                    state_q <= S_FETCH;
-                    pc_q <= pc_q;
-                    null;
+                    -- ebreak: breakpoint trap
+                    trap_taken := true;
+                    csr_mcause <= x"00000003";
+                    csr_mepc <= pc_q;
+                    pc_q <= csr_mtvec;
                   end if;
                 when "001" =>
                   -- csrrw
@@ -1050,9 +1073,19 @@ begin
                 when others => null;
               end case;
             when "0101111" =>
-              null;
+              -- A extension not implemented: trap (illegal instruction) so
+              -- atomics are observable instead of silently retiring.
+              trap_taken := true;
+              csr_mcause <= x"00000002";
+              csr_mepc <= pc_q;
+              pc_q <= csr_mtvec;
             when others =>
-              null;
+              -- Unknown opcode: trap (illegal instruction) so a runaway pc
+              -- is observable instead of silently retiring.
+              trap_taken := true;
+              csr_mcause <= x"00000002";
+              csr_mepc <= pc_q;
+              pc_q <= csr_mtvec;
           end case;
         end if;
 
@@ -1081,7 +1114,9 @@ begin
           div_rd_q <= 0;
         end if;
         regs_q <= r;
-        if state_q = S_EXEC then
+        -- A taken trap redirects pc to mtvec inside the decode arm; the
+        -- sequential pc_next commit must not override it.
+        if state_q = S_EXEC and not trap_taken then
           pc_q <= pc_next;
         end if;
       end if;

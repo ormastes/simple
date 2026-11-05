@@ -284,6 +284,8 @@ impl<'a> Parser<'a> {
             | TokenKind::On
             | TokenKind::Into
             | TokenKind::Bind
+            | TokenKind::Allow
+            | TokenKind::Forbid
             | TokenKind::Unwrap
             | TokenKind::Lazy
             | TokenKind::Skip => self.parse_primary_identifier(),

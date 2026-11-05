@@ -140,14 +140,31 @@ BOOTSTRAP_TREE_RSS_WORKER_MEM_MIB_DEFAULT=3300
 # A worker measured above floor x margin is evidence to raise the FLOOR here
 # (and in the bug record), not to widen the margin.
 BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB=16777216
+# Immutable defaults the env-resolution compares against, so repeated
+# resolutions in one shell stay anchored to the shipped policy.
+BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_DEFAULT_KIB=$BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB
 # Runaway margin over the floor, percent of the floor: a tree above
 # base + workers x floor x margin is a genuine runaway and is still killed
 # (exit 88); HIR growth over the post-load_sources floor stays admitted.
 BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT=150
+BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_DEFAULT_PCT=$BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT
 # Non-worker residue of the phase tree: build coordinator (measured 1.32 GiB,
 # 2026-10-27), verifier shell, campaign watchdog, interpreter test workers
 # (they run already-built binaries spec by spec; unmeasured, small).
 BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB=4194304
+BOOTSTRAP_TREE_RSS_PHASE_BASE_DEFAULT_KIB=$BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB
+# Upper bound on the whole-build phase timeout scale. The time budgets
+# (native internal 1800 s, row 3600 s, campaign 7200 s) were calibrated for the
+# REQUESTED worker count; when the plan fits fewer workers the same module
+# count takes proportionally longer, so the defaults are scaled by
+# ceil(requested / fitted), bounded here so nothing becomes unbounded.
+# Measured 2026-11-05 (bootstrap run 4, release/1.0.0 13a060d644e, 121 GiB
+# aarch64): 8 requested -> 2 fitted; both MIR shard workers were killed at the
+# 1800 s internal timeout with 596 of 3010 modules claimed (~0.68 modules/s
+# combined after ~900 s of pre-MIR setup), i.e. ~75 min of MIR alone. x4 gives
+# 7200 s internal / 14400 s row / 28800 s campaign; a hung worker is still
+# killed at the scaled limit.
+BOOTSTRAP_TREE_RSS_TIMEOUT_SCALE_MAX=4
 
 # bootstrap_tree_rss_worker_mem_mib REPO_ROOT -> per-worker MiB (always valid).
 bootstrap_tree_rss_worker_mem_mib() {
@@ -518,6 +535,96 @@ bootstrap_tree_rss_phase_worker_kib() {
   printf '%s\n' $((BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB * BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT / 100))
 }
 
+# bootstrap_tree_rss_timeout_scale REQUESTED FITTED -> min(ceil(R/F), MAX), >= 1.
+# Anything that is not a positive decimal pair (or F >= R) scales by 1.
+bootstrap_tree_rss_timeout_scale() {
+  btr_ts_r=$(bootstrap_tree_rss_canonical_uint "${1:-}" 3)
+  btr_ts_w=$(bootstrap_tree_rss_canonical_uint "${2:-}" 3)
+  btr_ts=1
+  if [ -n "$btr_ts_r" ] && [ -n "$btr_ts_w" ] && [ "$btr_ts_w" -ge 1 ] && [ "$btr_ts_r" -gt "$btr_ts_w" ]; then
+    btr_ts=$(((btr_ts_r + btr_ts_w - 1) / btr_ts_w))
+    [ "$btr_ts" -le "$BOOTSTRAP_TREE_RSS_TIMEOUT_SCALE_MAX" ] || btr_ts=$BOOTSTRAP_TREE_RSS_TIMEOUT_SCALE_MAX
+  fi
+  printf '%s\n' "$btr_ts"
+}
+
+# bootstrap_tree_rss_scaled_timeout VAR DEFAULT_SECONDS
+# Publishes the whole-build phase time budget VAR (an env var name): an
+# explicit, user-set non-empty VAR is honoured verbatim (it must still be a
+# positive decimal; the verifier's own policy refuses anything else); else
+# DEFAULT x bootstrap_tree_rss_plan_timeout_scale. Exports VAR and folds the
+# attribution into BOOTSTRAP_VERIFY_TIMEOUT_SOURCE (explicit | phase-policy |
+# phase-policy-scaled, comma-joined VAR:source) and BOOTSTRAP_VERIFY_TIMEOUT_SCALE
+# for the verification receipt. Returns 1 on a malformed DEFAULT.
+bootstrap_tree_rss_scaled_timeout() {
+  btr_sto_var=$1
+  btr_sto_default=$(bootstrap_tree_rss_canonical_uint "${2:-}" 6)
+  [ -n "$btr_sto_default" ] && [ "$btr_sto_default" -gt 0 ] || {
+    bootstrap_tree_rss_refusal="tree RSS policy: default timeout for $btr_sto_var must be a positive decimal, got '${2:-}'"
+    return 1
+  }
+  case "$btr_sto_var" in ''|*[!A-Z0-9_]*) bootstrap_tree_rss_refusal="tree RSS policy: bad timeout variable '$btr_sto_var'"; return 1 ;; esac
+  eval "btr_sto_explicit=\${$btr_sto_var:-}"
+  btr_sto_scale=${bootstrap_tree_rss_plan_timeout_scale:-1}
+  if [ -n "$btr_sto_explicit" ]; then
+    btr_sto_source=explicit
+  else
+    eval "$btr_sto_var=\$((btr_sto_default * btr_sto_scale))"
+    btr_sto_source=phase-policy
+    [ "$btr_sto_scale" -le 1 ] || btr_sto_source=phase-policy-scaled
+  fi
+  export "$btr_sto_var"
+  BOOTSTRAP_VERIFY_TIMEOUT_SOURCE="${BOOTSTRAP_VERIFY_TIMEOUT_SOURCE:+$BOOTSTRAP_VERIFY_TIMEOUT_SOURCE,}$btr_sto_var:$btr_sto_source"
+  BOOTSTRAP_VERIFY_TIMEOUT_SCALE=$btr_sto_scale
+  export BOOTSTRAP_VERIFY_TIMEOUT_SOURCE BOOTSTRAP_VERIFY_TIMEOUT_SCALE
+}
+
+# Apply lane-local overrides of the whole-build phase worker pricing
+# (SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB / _MARGIN_PCT / _BASE_KIB).
+# Defaults price a COLD full-CLI build and stay the small-host protection;
+# warm-cache lanes and larger hosts may LOWER them, never raise them (raising
+# the floor or margin is a policy change, not a lane tuning, and a typo must
+# not silently buy a bigger reservation than admission would grant).
+# Returns 1 with bootstrap_tree_rss_refusal on a malformed or raising value.
+bootstrap_tree_rss_phase_pricing_resolve() {
+  case ${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB:-} in
+    "") ;;
+    *[!0-9]*|0)
+      bootstrap_tree_rss_refusal="tree RSS policy: SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB must be a positive decimal KiB value, got '${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB}'"
+      return 1 ;;
+    *)
+      [ "$SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB" -le "$BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_DEFAULT_KIB" ] || {
+        bootstrap_tree_rss_refusal="tree RSS policy: SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB may lower the phase worker floor (<= default ${BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_DEFAULT_KIB}) but not raise it, got '${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB}'"
+        return 1
+      }
+      BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB=$SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB ;;
+  esac
+  case ${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT:-} in
+    "") ;;
+    *[!0-9]*|0)
+      bootstrap_tree_rss_refusal="tree RSS policy: SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT must be a positive decimal percent, got '${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT}'"
+      return 1 ;;
+    *)
+      [ "$SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT" -le "$BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_DEFAULT_PCT" ] || {
+        bootstrap_tree_rss_refusal="tree RSS policy: SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT may lower the phase worker margin (<= default ${BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_DEFAULT_PCT}) but not raise it, got '${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT}'"
+        return 1
+      }
+      BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT=$SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT ;;
+  esac
+  case ${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB:-} in
+    "") ;;
+    *[!0-9]*|0)
+      bootstrap_tree_rss_refusal="tree RSS policy: SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB must be a positive decimal KiB value, got '${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB}'"
+      return 1 ;;
+    *)
+      [ "$SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB" -le "$BOOTSTRAP_TREE_RSS_PHASE_BASE_DEFAULT_KIB" ] || {
+        bootstrap_tree_rss_refusal="tree RSS policy: SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB may lower the phase base (<= default ${BOOTSTRAP_TREE_RSS_PHASE_BASE_DEFAULT_KIB}) but not raise it, got '${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB}'"
+        return 1
+      }
+      BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB=$SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB ;;
+  esac
+}
+
 # bootstrap_tree_rss_whole_build_plan REQUESTED_WORKERS [REPO_ROOT]
 # Prices the Stage 2 compiler-tests phase by its real per-worker need
 # (BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB) instead of the compile-shard
@@ -549,6 +656,7 @@ bootstrap_tree_rss_whole_build_plan() {
   bootstrap_tree_rss_plan_ceiling_kib=0
   bootstrap_tree_rss_plan_budget_kib=0
   bootstrap_tree_rss_plan_bound=refused
+  bootstrap_tree_rss_plan_timeout_scale=1
   bootstrap_tree_rss_plan_summary=
   bootstrap_tree_rss_source=default
   [ -n "$btr_wb_requested" ] && [ "$btr_wb_requested" -ge 1 ] && [ "$btr_wb_requested" -le 128 ] || {
@@ -556,6 +664,7 @@ bootstrap_tree_rss_whole_build_plan() {
     return 1
   }
   bootstrap_tree_rss_probe_host || return 1
+  bootstrap_tree_rss_phase_pricing_resolve || return 1
   btr_wb_worker=$(bootstrap_tree_rss_phase_worker_kib)
   btr_wb_one=$((BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB + btr_wb_worker))
   btr_wb_price="base ${BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB} KiB + worker floor ${BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB} KiB x ${BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT}%"
@@ -581,7 +690,7 @@ bootstrap_tree_rss_whole_build_plan() {
   bootstrap_tree_rss_plan_budget_kib=$btr_wb_budget
   btr_wb_fit=$(((btr_wb_budget - BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB) / btr_wb_worker))
   [ "$btr_wb_fit" -ge 1 ] || {
-    bootstrap_tree_rss_refusal="tree RSS policy: whole-build phase cannot fit one full-CLI build worker: host budget ${btr_wb_budget} KiB (${btr_wb_budget_bound}; host RAM via ${bootstrap_tree_rss_host_total_source}) is below the one-worker requirement ${btr_wb_one} KiB (${btr_wb_price}); free host memory (another lane?) or raise tree_rss_host_pct (max ${BOOTSTRAP_TREE_RSS_HOST_PCT_MAX})"
+    bootstrap_tree_rss_refusal="tree RSS policy: whole-build phase cannot fit one full-CLI build worker: host budget ${btr_wb_budget} KiB (${btr_wb_budget_bound}; host RAM via ${bootstrap_tree_rss_host_total_source}) is below the one-worker requirement ${btr_wb_one} KiB (${btr_wb_price}); free host memory (another lane?), raise tree_rss_host_pct (max ${BOOTSTRAP_TREE_RSS_HOST_PCT_MAX}), or lower the phase pricing for a warm-cache lane via SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB (<= ${BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB} KiB)"
     return 1
   }
   bootstrap_tree_rss_plan_workers=$btr_wb_fit
@@ -593,7 +702,8 @@ bootstrap_tree_rss_whole_build_plan() {
     bootstrap_tree_rss_plan_ceiling_kib=$bootstrap_tree_rss_plan_cap_kib
     bootstrap_tree_rss_plan_bound=worker-floor-elevated
   fi
-  bootstrap_tree_rss_plan_summary="whole-build phase: workers ${bootstrap_tree_rss_plan_workers} (requested ${btr_wb_requested}, host budget fits ${btr_wb_fit}), cap ${bootstrap_tree_rss_plan_cap_kib} KiB = ${btr_wb_price} x ${bootstrap_tree_rss_plan_workers}, host budget ${btr_wb_budget} KiB (${btr_wb_budget_bound}; host RAM via ${bootstrap_tree_rss_host_total_source}), default ceiling ${btr_wb_default_ceiling} KiB, elevated ceiling ${bootstrap_tree_rss_plan_ceiling_kib} KiB, bound ${bootstrap_tree_rss_plan_bound}"
+  bootstrap_tree_rss_plan_timeout_scale=$(bootstrap_tree_rss_timeout_scale "$btr_wb_requested" "$bootstrap_tree_rss_plan_workers")
+  bootstrap_tree_rss_plan_summary="whole-build phase: workers ${bootstrap_tree_rss_plan_workers} (requested ${btr_wb_requested}, host budget fits ${btr_wb_fit}, timeout scale x${bootstrap_tree_rss_plan_timeout_scale}), cap ${bootstrap_tree_rss_plan_cap_kib} KiB = ${btr_wb_price} x ${bootstrap_tree_rss_plan_workers}, host budget ${btr_wb_budget} KiB (${btr_wb_budget_bound}; host RAM via ${bootstrap_tree_rss_host_total_source}), default ceiling ${btr_wb_default_ceiling} KiB, elevated ceiling ${bootstrap_tree_rss_plan_ceiling_kib} KiB, bound ${bootstrap_tree_rss_plan_bound}"
 }
 
 # bootstrap_tree_rss_whole_build_export REQUESTED_WORKERS [REPO_ROOT]
@@ -609,6 +719,9 @@ bootstrap_tree_rss_whole_build_plan() {
 #       the compiler's own pool admission (cap x 60% / 9 GB) cannot start more
 #       workers than the cap was priced for
 #   SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE/_BOUND   receipt attribution
+#   bootstrap_tree_rss_plan_timeout_scale  ceil(requested / fitted) bounded by
+#       BOOTSTRAP_TREE_RSS_TIMEOUT_SCALE_MAX (1 for an explicit cap); callers
+#       publish their time budgets through bootstrap_tree_rss_scaled_timeout
 # An explicit SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB already in the
 # environment is kept untouched (a monitored diagnostic attempt, not policy).
 # Monitor mode enforces nothing, and the watchdog still refuses a cap above
@@ -621,6 +734,9 @@ bootstrap_tree_rss_whole_build_plan() {
 # phase starts, instead of as an exit-125 receipt minutes later.
 bootstrap_tree_rss_whole_build_export() {
   btr_we_requested=$(bootstrap_tree_rss_canonical_uint "${1:-}" 3)
+  # Attribution is rebuilt by bootstrap_tree_rss_scaled_timeout per phase.
+  BOOTSTRAP_VERIFY_TIMEOUT_SOURCE=
+  bootstrap_tree_rss_plan_timeout_scale=1
   if [ -n "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-}" ]; then
     # Kept as-is, but admitted NOW (over-ceiling is refused here, not by the
     # campaign minutes later) and the requested count is published unchanged
@@ -941,6 +1057,68 @@ bootstrap_tree_rss__selftest() {
     echo "selftest FAIL: whole-build export under monitor fixture: got $btr_st_got" >&2
     btr_st_fail=1
   }
+  # Time budgets scale with the worker reduction: ceil(requested / fitted),
+  # bounded by BOOTSTRAP_TREE_RSS_TIMEOUT_SCALE_MAX (run 4, 2026-11-05: 8 -> 2
+  # workers, MIR workers killed at the unscaled 1800 s internal timeout).
+  for btr_st_ts in 8:2:4 8:1:4 8:8:1 1:1:1 3:2:2 8:3:3 128:1:4 2:4:1 x:2:1 8:0:1; do
+    btr_st_n=$((btr_st_n + 1))
+    btr_st_got=$(bootstrap_tree_rss_timeout_scale "${btr_st_ts%%:*}" "$(echo "$btr_st_ts" | cut -d: -f2)")
+    [ "$btr_st_got" = "${btr_st_ts##*:}" ] || {
+      echo "selftest FAIL: timeout-scale-$btr_st_ts: got $btr_st_got" >&2
+      btr_st_fail=1
+    }
+  done
+  # timeout-plan LABEL MEMINFO REQUESTED WANT [SETUP]: WANT = workers:scale:
+  # native:row:campaign:source after the export and the three published budgets
+  # (defaults 1800 / 3600 / 7200, the from-scratch Linux defaults).
+  btr_st_timeout_plan() {
+    btr_st_n=$((btr_st_n + 1))
+    btr_st_got=$(
+      unset SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT SIMPLE_HOST_TREE_RSS_HOST_PCT SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+      unset SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB SIMPLE_HOST_CONFIG SIMPLE_HOST_ENV_FILE BOOTSTRAP_VERIFY_BUILD_THREADS
+      unset BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT BOOTSTRAP_VERIFY_TIMEOUT_SECONDS BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS
+      unset SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND
+      BOOTSTRAP_VERIFY_TIMEOUT_SOURCE=stale-from-caller
+      SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
+      BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$btr_st_dir/$2"
+      BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1
+      [ -z "${5:-}" ] || eval "$5"
+      bootstrap_tree_rss_whole_build_export "$3" '' || { printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal"; exit 0; }
+      bootstrap_tree_rss_scaled_timeout BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT 1800 &&
+        bootstrap_tree_rss_scaled_timeout BOOTSTRAP_VERIFY_TIMEOUT_SECONDS 3600 &&
+        bootstrap_tree_rss_scaled_timeout BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS 7200 ||
+        { printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal"; exit 0; }
+      printf '%s:%s:%s:%s:%s:%s' "$BOOTSTRAP_VERIFY_BUILD_THREADS" "$BOOTSTRAP_VERIFY_TIMEOUT_SCALE" \
+        "$BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT" "$BOOTSTRAP_VERIFY_TIMEOUT_SECONDS" \
+        "$BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS" "$BOOTSTRAP_VERIFY_TIMEOUT_SOURCE"
+    )
+    [ "$btr_st_got" = "$4" ] && return 0
+    echo "selftest FAIL: timeout-plan-$1: want $4 got $btr_st_got" >&2
+    btr_st_fail=1
+  }
+  btr_st_pp=BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:phase-policy-scaled,BOOTSTRAP_VERIFY_TIMEOUT_SECONDS:phase-policy-scaled,BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS:phase-policy-scaled
+  # Run 4's shape: 8 requested, 2 fitted -> x4 on every default budget.
+  btr_st_timeout_plan aarch64-8-to-2-scales-x4 aarch64 8 "2:4:7200:14400:28800:$btr_st_pp"
+  # 8 requested, 1 fitted -> ceil 8, bounded to x4 (never unbounded).
+  btr_st_timeout_plan busy-8-to-1-bounded-x4 aarch64-busy 8 "1:4:7200:14400:28800:$btr_st_pp"
+  # No reduction -> budgets unchanged.
+  btr_st_timeout_plan no-reduction-unchanged aarch64 1 \
+    "1:1:1800:3600:7200:BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:phase-policy,BOOTSTRAP_VERIFY_TIMEOUT_SECONDS:phase-policy,BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS:phase-policy"
+  # Explicit user timeouts are honoured verbatim even when workers shrink.
+  btr_st_timeout_plan explicit-timeouts-unchanged aarch64 8 \
+    "2:4:900:1000:5000:BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:explicit,BOOTSTRAP_VERIFY_TIMEOUT_SECONDS:explicit,BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS:explicit" \
+    'BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT=900 BOOTSTRAP_VERIFY_TIMEOUT_SECONDS=1000 BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS=5000'
+  # An explicit cap is not policy-priced: workers as requested, no scaling.
+  btr_st_timeout_plan explicit-cap-unscaled aarch64 8 \
+    "8:1:1800:3600:7200:BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:phase-policy,BOOTSTRAP_VERIFY_TIMEOUT_SECONDS:phase-policy,BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS:phase-policy" \
+    'unset BOOTSTRAP_TREE_RSS_MEMINFO_PATH BOOTSTRAP_TREE_RSS_TEST_FIXTURE; SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=12582912'
+  # A malformed default is refused, never substituted.
+  btr_st_n=$((btr_st_n + 1))
+  btr_st_got=$(bootstrap_tree_rss_scaled_timeout BOOTSTRAP_VERIFY_TIMEOUT_SECONDS 36x0 && printf ADMITTED || printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal")
+  case "$btr_st_got" in
+    'REFUSED=tree RSS policy: default timeout for BOOTSTRAP_VERIFY_TIMEOUT_SECONDS must be a positive decimal'*) ;;
+    *) echo "selftest FAIL: scaled-timeout malformed default: $btr_st_got" >&2; btr_st_fail=1 ;;
+  esac
   # An explicit cap is kept as-is (a monitored diagnostic attempt, not policy):
   # nothing is re-priced, but it is admitted up front, the requested thread
   # count is published unchanged, and it keeps the explicit-env attribution.
@@ -1011,12 +1189,12 @@ bootstrap_tree_rss__selftest() {
         [ "$bootstrap_tree_rss_bound" = "$bootstrap_tree_rss_plan_bound" ] && printf ADMITTED || printf 'wrong-export:%s' "$bootstrap_tree_rss_summary"
     else
       case "$bootstrap_tree_rss_refusal" in
-        *'cannot fit one full-CLI build worker'*'worker floor 16777216 KiB'*) printf TOO-SMALL ;;
-        *'compiler ceiling '*' refused (previous='*'available_bound='*)
+        (*'cannot fit one full-CLI build worker'*'worker floor 16777216 KiB'*) printf TOO-SMALL ;;
+        (*'compiler ceiling '*' refused (previous='*'available_bound='*)
           # Only a real headroom shortfall may refuse here: the plan was
           # within 3/4 of MemAvailable at plan time, admission re-read it.
           [ -n "$btr_st_avail" ] && printf HEADROOM-REFUSED || printf 'refused-without-headroom-evidence' ;;
-        *) printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal" ;;
+        (*) printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal" ;;
       esac
     fi
   )

@@ -157,6 +157,7 @@ use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 use compiler.common.mir_target_context.{MirTargetContext, mir_target_context_from}
 use compiler.mir.mir_target_hir_layout.{mir_target_aware_struct_layout, mir_target_hir_live_struct_layout}
 use compiler.mir.mir_target_hir_select.{mir_target_hir_mode_from_env}
+use compiler.hir.target_hir.target_hir_flags.{target_hir_mode_or_legacy}
 use compiler.mir.mir_target_hir_symbol_writes.{mir_symbol_write_ledger_legacy, mir_symbol_write_ledger_open, mir_symbol_write_ledger_resolve}
 
 # Import split modules so their impl blocks are linked
@@ -701,16 +702,10 @@ impl MirLowering:
         symbol.id
 
     fn composite_layout_key(symbol: HirSymbol) -> text:
-        # DELIBERATELY NOT normalized yet -- see the BLOCKER section of
-        # doc/08_tracking/bug/mir_qualified_field_key_namespace_mismatch_2026-08-08.md.
-        # Wrapping this in mir_layout_canonical_module_name() is the one-line
-        # change that makes resolve_field_index's module-qualified tier
-        # actually fire across an import, but on its own it is HARMFUL: the
-        # CONSTRUCTION path (lower_struct_construct) is still bare-name keyed,
-        # so a read newly resolved against the defining module's layout would
-        # disagree with a write laid out from the collided bare key. Land it
-        # only together with the struct_value_syms re-namespacing described
-        # there.
+        # Raw (un-normalized) key: path-form for declarations, dotted for
+        # imports. Readers MUST fold it through declared_struct_layout_key,
+        # which maps the canonical dotted identity onto the registered layout
+        # (bug mir_qualified_field_key_namespace_mismatch_2026-08-08).
         val defining_module = symbol.defining_module ?? ""
         if defining_module != "":
             return "{defining_module}::{symbol.name}"
@@ -2642,9 +2637,12 @@ impl MirLowering:
             archive_function_symbols, archive_primary_globals, archive_trait_thunks)
         # P6: resolve this task's symbol-writer overlay (shadow: fatal on
         # divergence from the legacy journal; typed: merge conflicts fatal).
-        val symbol_writes = mir_symbol_write_ledger_resolve(self.symbol_write_ledger)
-        if symbol_writes.is_err():
-            self.error_fatal(symbol_writes.unwrap_err(), nil)
+        # @workaround bug=riscv64_guest_result_text_payload_empty_2026_11_06 reason=the riscv64 in-guest AOT build corrupts this Result round-trip end to end: the ledger's mode FIELD read answers non-"legacy" (measured: this guard still entered the branch), is_err() answers true, unwrap_err() answers NIL (error_fatal received msg=0x3 three times — the empty `mir lowering error`). Legacy resolve is a no-op, so gate the strict resolve on the raw env var — unset/legacy (every in-guest row and the hosted default) skips it; shadow/typed keep the divergence fatal on hosted builds.
+        val th_mode_raw = (mir_lower_env_get("SIMPLE_TARGET_HIR_MODE") ?? "").trim().lower()
+        if th_mode_raw == "shadow" or th_mode_raw == "typed":
+            val symbol_writes = mir_symbol_write_ledger_resolve(self.symbol_write_ledger)
+            if symbol_writes.is_err():
+                self.error_fatal(symbol_writes.unwrap_err(), nil)
         self.symbol_write_ledger = mir_symbol_write_ledger_legacy()
         mir_trace_scope_exit(saved_trace_scope_depth)
         result
@@ -2681,17 +2679,10 @@ impl MirLowering:
         self.symbols = module.symbols
         # symbols_alias (P6): freeze the task at the alias site (module id +
         # table watermark) and open its private symbol-write overlay.
-        val th_symbol_mode = mir_target_hir_mode_from_env()
-        if th_symbol_mode.is_err():
-            self.error_fatal(th_symbol_mode.unwrap_err(), nil)
-            self.symbol_write_ledger = mir_symbol_write_ledger_legacy()
-        else:
-            val opened = mir_symbol_write_ledger_open(th_symbol_mode.unwrap(), self.current_module_id, 0, self.symbols.next_symbol_id)
-            if opened.is_err():
-                self.error_fatal(opened.unwrap_err(), nil)
-                self.symbol_write_ledger = mir_symbol_write_ledger_legacy()
-            else:
-                self.symbol_write_ledger = opened.unwrap()
+        # @workaround bug=riscv64_guest_result_text_payload_empty_2026_11_06 reason=the strict mode read returns Result<text, text> whose Ok TEXT payload the riscv64 in-guest AOT build loses (unwrap answers \"\") — measured: the buildrun row died with `target_hir_symbol_writes_bad_mode: ` and an EMPTY mode, which target_hir_mode_parse_strict can never produce (unset/empty/invalid all map to Ok(\"legacy\")). Read the mode Result-free; opened is Ok by construction (mode is one of the three accepted literals), so skip the is_err/unwrap_err text round-trip too.
+        val th_symbol_mode = target_hir_mode_or_legacy()
+        val opened = mir_symbol_write_ledger_open(th_symbol_mode, self.current_module_id, 0, self.symbols.next_symbol_id)
+        self.symbol_write_ledger = opened.unwrap()
         if self.declaration_repository != nil:
             # These HirTypes contain consumer-local numeric IDs. Scalar enum
             # identities/kinds and deferred declaration indexes survive; type

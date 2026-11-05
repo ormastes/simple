@@ -294,7 +294,10 @@ impl InterpreterBackendImpl:
                     val evaluated_arg: Result<Value, BackendError> = self.eval_expr(arg_value_t, ctx)
                     if evaluated_arg.is_err():
                         return Err(evaluated_arg.unwrap_err())
-                    val v: Value = evaluated_arg.unwrap()
+                    # @workaround bug=riscv64_interp_ok_wrapper_leak_2026_11_06 reason=`unwrap()` returns the Ok-wrapper ITSELF on the riscv64 in-guest AOT path (rt_enum_new(0,0,payload) object), so `arg_values` carried Result.Ok(Value.String) and the Print case saw a Result where a Value was expected — every Value arm test fails and strings print as <unknown>. Extract the payload with an explicit match (rt_enum_check_variant + rt_enum_payload binding, the pattern cranelift_codegen_adapter.spl uses); Result lives in the untyped id-0 lane whose checks measure passing in-guest. Measured: live arg object was {HEAP_ENUM, enum_id=0, disc=0, payload=text}.
+                    val v: Value = match evaluated_arg:
+                        case Ok(inner_v): inner_v
+                        case Err(_): Value.Nil
                     arg_values = arg_values.push(v)
                 # Builtin fast-path keyed on the callee NAME: the Value.Function
                 # payload channel loses its FunctionValue on stage4 ([CF]

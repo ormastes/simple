@@ -1,0 +1,258 @@
+#!/bin/sh
+# check-platform-variant-dirs.shs — enforce the platform variant directory rule.
+# Rule: doc/04_architecture/platform/platform_variant_directory_rule.md
+#
+# Checks (baseline-relative; current debt frozen in
+# scripts/check/platform_variant_dirs_baseline.txt, new or grown FAILs):
+#   name:      variant dir uses a forbidden alias (arm64, mac, win32, ...)
+#   order:     variant segments out of os -> abi -> arch order, or abi level
+#              outside windows / under a Simple root (Simple never forks per ABI)
+#   skeleton:  a supported-matrix dir is missing under a registered root
+#   api:       a populated variant lacks a public fn/extern name a sibling has
+#   extsig:    extern signature differs between windows/mingw and windows/msvc
+#   cond:      platform conditionals in a root's level-0 (common) file (count)
+#
+# Fork-light by design (one find + one awk per scan): Windows hosts under load
+# measured 2.5 s per fork, so a per-dir/per-file shell loop is unusable.
+#
+# Usage: check-platform-variant-dirs.shs [--root DIR] [--baseline FILE]
+#        [--generate-baseline] [--print-skeleton c|spl] [--selftest]
+# Verdict (last stdout line): PASS — <n> ... (0) / FAIL — ... (1) /
+#   ERROR — nothing was checked (2)
+set -u
+
+OS_SET="linux freebsd macos windows simpleos"
+WIN_ABI_SET="mingw msvc"
+ARCH_SET="x86 x86_64 arm aarch64 riscv32 riscv64"
+ALIAS_SET="arm64 mac darwin osx win win32 win64 amd64 x64 i386 i686 ia32 armv7 arm32 rv32 rv64 gnullvm"
+# Registered roots. C roots get windows/<abi>/<arch>; Simple roots windows/<arch>.
+ROOTS_C=${PVD_ROOTS_C-"src/runtime/platform"}
+ROOTS_SPL=${PVD_ROOTS_SPL-"src/lib/nogc_sync_mut/platform src/lib/nogc_async_mut/platform src/lib/nogc_sync_mut/sosix"}
+NAME_SCAN_DIRS=${PVD_NAME_SCAN_DIRS-"src/lib src/runtime src/os variants"}
+
+arches_for() { # sets ARCHES (no fork)
+    case "$1" in
+        linux) ARCHES="$ARCH_SET" ;;
+        freebsd) ARCHES="x86_64 aarch64 riscv64" ;;
+        macos) ARCHES="x86_64 aarch64" ;;
+        windows) ARCHES="x86 x86_64 aarch64" ;;
+        simpleos) ARCHES="x86_64 aarch64 riscv32 riscv64" ;;
+    esac
+}
+
+skeleton_list() { # kind -> sets SKEL (space-separated rel dirs, no fork)
+    SKEL=""
+    for _os in $OS_SET; do
+        SKEL="$SKEL $_os"; arches_for "$_os"
+        if [ "$_os" = windows ] && [ "$1" = c ]; then
+            for _abi in $WIN_ABI_SET; do
+                SKEL="$SKEL $_os/$_abi"
+                for _a in $ARCHES; do SKEL="$SKEL $_os/$_abi/$_a"; done
+            done
+        else
+            for _a in $ARCHES; do SKEL="$SKEL $_os/$_a"; done
+        fi
+    done
+}
+
+# scan REPO OUT -> writes sorted "key<TAB>count"; prints checked-item count
+scan() {
+    _repo=$1; _out=$2; _dirs=""
+    for _d in $NAME_SCAN_DIRS $ROOTS_C $ROOTS_SPL; do
+        [ -d "$_repo/$_d" ] && _dirs="$_dirs $_repo/$_d"
+    done
+    skeleton_list c; _sk_c=$SKEL; skeleton_list spl; _sk_spl=$SKEL
+    if [ -n "$_dirs" ]; then
+        # shellcheck disable=SC2086
+        find $_dirs \( -name vendor -o -path '*/port/rust/patches' \) -prune -o \( -type d -printf 'd\t%p\n' \) -o \( -type f -printf 'f\t%p\n' \) 2>/dev/null
+    fi | awk -F'\t' -v repo="$_repo/" -v alias=" $ALIAS_SET " -v oss=" $OS_SET " \
+        -v abis=" $WIN_ABI_SET " -v arches=" $ARCH_SET " -v rc="$ROOTS_C" -v rs="$ROOTS_SPL" \
+        -v skc="$_sk_c" -v sks="$_sk_spl" -v out="$_out" '
+    function kind(s) { if (index(oss, " " s " ")) return "os"; if (index(abis, " " s " ")) return "abi"; if (index(arches, " " s " ")) return "arch"; return "other" }
+    function add(k, c) { v[k] += c }
+    function rootof(p,   r) { for (r in R) if (p == r || index(p, r "/") == 1) return r; return "" }
+    BEGIN {
+        nr = split(rc, a, " "); for (i = 1; i <= nr; i++) { R[a[i]] = "c" }
+        nr = split(rs, a, " "); for (i = 1; i <= nr; i++) { R[a[i]] = "spl" }
+        condc = "^[ \t]*#[ \t]*(if|ifdef|ifndef|elif).*(_WIN32|_WIN64|_MSC_VER|__MINGW32__|__MINGW64__|__aarch64__|_M_ARM64|_M_X64|__x86_64__|__linux__|__APPLE__|__FreeBSD__|__riscv)"
+        conds = "(@cfg\\((os|arch|target_os|target_arch)|(host_os|target_os|os_name)\\(\\) *== *\")"
+        n = 0
+    }
+    {
+        t = $1; p = substr($2, length(repo) + 1); n++
+        if (t == "d") {
+            D[p] = 1; m = split(p, seg, "/")
+            if (index(alias, " " seg[m] " ")) add("name:" p, 1)
+            r = rootof(p)
+            if (r != "" && p != r) {
+                rel = substr(p, length(r) + 2); k = split(rel, s2, "/"); rank = 0; bad = 0; prev = ""
+                for (i = 1; i <= k; i++) {
+                    kd = kind(s2[i])
+                    if (kd == "os") { if (rank >= 1) bad = 1; rank = 1 }
+                    else if (kd == "abi") { if (rank != 1 || prev != "windows" || R[r] == "spl") bad = 1; rank = 2 }
+                    else if (kd == "arch") { if (rank >= 3) bad = 1; rank = 3 }
+                    prev = s2[i]
+                }
+                if (bad) add("order:" p, 1)
+            }
+        } else {
+            m = split(p, seg, "/"); dir = substr(p, 1, length(p) - length(seg[m]) - 1)
+            r = rootof(p)
+            if (r == "") next
+            if (dir == r) { F0[p] = 1 }
+            else if (p ~ /\.(spl|h)$/) {
+                k = split(dir, s2, "/"); if (kind(s2[k]) != "other") { VF[dir] = VF[dir] " " p }
+            }
+        }
+    }
+    END {
+        # skeleton
+        for (r in R) {
+            if (!(r in D)) { add("skeleton:" r, 1); continue }
+            k = split(R[r] == "c" ? skc : sks, a, " ")
+            for (i = 1; i <= k; i++) { n++; if (!((r "/" a[i]) in D)) add("skeleton:" r "/" a[i], 1) }
+        }
+        # cond: level-0 files
+        for (f in F0) {
+            pat = (f ~ /\.(c|h)$/) ? condc : (f ~ /\.spl$/ ? conds : "")
+            if (pat == "") continue
+            c = 0; while ((getline ln < (repo f)) > 0) if (ln ~ pat) c++; close(repo f)
+            if (c > 0) add("cond:" f, c)
+        }
+        # collect public names + extern sigs per populated variant dir
+        for (d in VF) {
+            k = split(VF[d], fl, " ")
+            for (i = 1; i <= k; i++) {
+                while ((getline ln < (repo fl[i])) > 0) {
+                    if (fl[i] ~ /\.spl$/ && match(ln, /^(pub +)?(extern +)?fn +[A-Za-z_][A-Za-z0-9_]*/)) {
+                        nm = substr(ln, RSTART, RLENGTH); sub(/.*fn +/, "", nm); NM[d, nm] = 1; ALLN[d] = ALLN[d] " " nm
+                    }
+                    if (ln ~ /^[ \t]*extern[ \t]/) {
+                        sig = ln; gsub(/[ \t]+/, " ", sig); sub(/^ /, "", sig)
+                        nm = sig; if (nm ~ /fn /) { sub(/.*fn +/, "", nm); sub(/[^A-Za-z0-9_].*/, "", nm) } else { sub(/ *\(.*/, "", nm); sub(/.* \**/, "", nm) }
+                        SIG[d, nm] = sig; EXN[d] = EXN[d] " " nm
+                    }
+                }
+                close(repo fl[i])
+            }
+            m = split(d, s2, "/"); par = substr(d, 1, length(d) - length(s2[m]) - 1); SIBS[par] = SIBS[par] " " d
+        }
+        # api: siblings (same parent) share public names
+        for (par in SIBS) {
+            k = split(SIBS[par], sb, " ")
+            if (k < 2) continue
+            delete U
+            for (i = 1; i <= k; i++) { q = split(ALLN[sb[i]], ns, " "); for (j = 1; j <= q; j++) U[ns[j]] = 1 }
+            for (i = 1; i <= k; i++) for (nm in U) { n++; if (!((sb[i], nm) in NM)) add("api:" sb[i] ":" nm, 1) }
+        }
+        # extsig: windows/mingw[/arch] vs windows/msvc[/arch]
+        for (d in EXN) {
+            if (d !~ /\/windows\/mingw(\/[^\/]+)?$/) continue
+            o = d; sub(/\/windows\/mingw/, "/windows/msvc", o)
+            q = split(EXN[d], ns, " ")
+            for (j = 1; j <= q; j++) { n++; nm = ns[j]; if (((o, nm) in SIG) && SIG[o, nm] != SIG[d, nm]) add("extsig:" d ":" nm, 1) }
+        }
+        for (k2 in v) printf "%s\t%d\n", k2, v[k2] > out
+        close(out)
+        print n
+    }'
+    [ -f "$_out" ] || : > "$_out"
+}
+
+run_check() { # repo baseline -> verdict, rc
+    _repo=$1; _base=$2
+    [ -f "$_base" ] || { echo "ERROR — nothing was checked (baseline $_base missing)"; return 2; }
+    _v="$_repo/.pvd_scan.$$"; rm -f "$_v"
+    _n=$(scan "$_repo" "$_v")
+    if [ "${_n:-0}" -le 0 ]; then rm -f "$_v"; echo "ERROR — nothing was checked (0 items under $_repo)"; return 2; fi
+    # one awk: new/grown offenders, totals, stale count
+    _res=$(awk -F'\t' 'FILENAME == ARGV[1] { b[$1] = $2; next }
+        { tot++; if (!($1 in b)) { print "NEW " $1 " (" $2 ")"; off++ } else if ($2 + 0 > b[$1] + 0) { print "GREW " $1 " (" b[$1] " -> " $2 ")"; off++ }; cur[$1] = $2 }
+        END { for (k in b) if (!(k in cur) || cur[k] + 0 < b[k] + 0) st++; printf "#%d %d %d\n", off + 0, tot + 0, st + 0 }' "$_base" "$_v")
+    rm -f "$_v"
+    _sum=${_res##*#}; set -- $_sum; _off=$1; _tot=$2; _st=$3
+    [ "$_st" -gt 0 ] && echo "note: $_st baseline entr(ies) shrank or vanished — tighten with --generate-baseline in a reviewed change" >&2
+    if [ "$_off" -gt 0 ]; then
+        printf '%s\n' "${_res%#*}"
+        echo "FAIL — $_n item(s) checked, $_off new/grown platform-variant violation(s) beyond baseline ($_tot current)"
+        return 1
+    fi
+    echo "PASS — $_n item(s) checked, 0 new/grown violations ($_tot frozen in baseline)"
+    return 0
+}
+
+selftest() {
+    _t=${TMPDIR:-/tmp}/pvd_selftest.$$; rm -rf "$_t"; _fail=0
+    skeleton_list c; _ps=""; for _r in $ROOTS_C; do for _s in $SKEL; do _ps="$_ps $_t/p/$_r/$_s"; done; done
+    skeleton_list spl; for _r in $ROOTS_SPL; do for _s in $SKEL; do _ps="$_ps $_t/p/$_r/$_s"; done; done
+    _sp=src/lib/nogc_sync_mut/platform; _rp=src/runtime/platform
+    # shellcheck disable=SC2086
+    mkdir -p $_ps "$_t/p/src/os"
+    printf 'fn open_file(p: text) -> i64:\n    0\n' > "$_t/p/$_sp/linux/io.spl"
+    printf 'pub fn open_file(p: text) -> i64:\n    0\n' > "$_t/p/$_sp/windows/io.spl"
+    printf 'int x;\n' > "$_t/p/$_rp/common.c"
+    : > "$_t/p/base.txt"
+    cp -r "$_t/p" "$_t/clean"; cp -r "$_t/p" "$_t/alias"; cp -r "$_t/p" "$_t/skel"; cp -r "$_t/p" "$_t/order"
+    cp -r "$_t/p" "$_t/api"; cp -r "$_t/p" "$_t/ext"; cp -r "$_t/p" "$_t/cond"; cp -r "$_t/p" "$_t/abi"
+    mkdir -p "$_t/alias/src/os/kernel/arch/arm64" "$_t/order/$_rp/linux/x86_64/windows" "$_t/abi/$_sp/windows/msvc"
+    rm -rf "$_t/skel/$_rp/windows/msvc/aarch64"
+    printf 'fn close_file(h: i64):\n    pass\n' >> "$_t/api/$_sp/linux/io.spl"
+    printf 'extern int rt_a(int x);\n' > "$_t/ext/$_rp/windows/mingw/a.h"
+    printf 'extern int rt_a(long x);\n' > "$_t/ext/$_rp/windows/msvc/a.h"
+    printf '#ifdef _WIN32\n#endif\n' >> "$_t/cond/$_rp/common.c"
+    expect() { # name want_rc dir
+        _o=$(run_check "$_t/$3" "$_t/$3/base.txt" 2>/dev/null); _rc=$?
+        [ "$_rc" -eq "$2" ] || { echo "selftest FAIL: $1 rc=$_rc want $2: ${_o##*
+}" >&2; _fail=1; }
+        SELFTEST_N=$((SELFTEST_N + 1))
+    }
+    SELFTEST_N=0
+    expect clean 0 clean
+    expect alias-arm64 1 alias
+    expect skeleton-missing 1 skel
+    expect order-os-under-arch 1 order
+    expect abi-under-simple-root 1 abi
+    expect api-missing 1 api
+    expect extsig-mismatch 1 ext
+    expect cond-new 1 cond
+    printf 'cond:%s/common.c\t1\n' "$_rp" > "$_t/cond/base.txt"; expect cond-frozen 0 cond
+    printf '#if defined(_MSC_VER)\n#endif\n' >> "$_t/cond/$_rp/common.c"; expect cond-grown 1 cond
+    mkdir -p "$_t/empty"; : > "$_t/empty/base.txt"
+    _o=$(PVD_NAME_SCAN_DIRS="" PVD_ROOTS_C="" PVD_ROOTS_SPL="" sh "$SELF" --no-selftest --root "$_t/empty" --baseline "$_t/empty/base.txt" 2>/dev/null)
+    [ $? -eq 2 ] || { echo "selftest FAIL: empty tree must ERROR: $_o" >&2; _fail=1; }
+    SELFTEST_N=$((SELFTEST_N + 1))
+    rm -rf "$_t"
+    return $_fail
+}
+
+SELF=$0; ROOT=""; BASE=""; GEN=""; ONLY_SELFTEST=""; SKIP_SELFTEST=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) ONLY_SELFTEST=1 ;;
+        --no-selftest) SKIP_SELFTEST=1 ;;  # internal: the selftest's own empty-tree probe
+        --print-skeleton) skeleton_list "${2:-spl}"; printf '%s\n' $SKEL; exit 0 ;;
+        --root) ROOT=$2; shift ;;
+        --baseline) BASE=$2; shift ;;
+        --generate-baseline) GEN=1 ;;
+        *) echo "ERROR — nothing was checked (unknown arg $1)"; exit 2 ;;
+    esac
+    shift
+done
+if [ -n "$ONLY_SELFTEST" ]; then
+    if selftest; then echo "PASS — $SELFTEST_N selftest fixture(s) checked"; exit 0; fi
+    echo "FAIL — selftest"; exit 1
+fi
+if [ -z "$SKIP_SELFTEST" ]; then
+    selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+fi
+[ -n "$ROOT" ] || ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "ERROR — nothing was checked (not in a repo)"; exit 2; }
+[ -n "$BASE" ] || BASE="$ROOT/scripts/check/platform_variant_dirs_baseline.txt"
+if [ -n "$GEN" ]; then
+    _n=$(scan "$ROOT" "$BASE.tmp.$$")
+    [ "${_n:-0}" -gt 0 ] || { rm -f "$BASE.tmp.$$"; echo "ERROR — nothing was checked"; exit 2; }
+    LC_ALL=C sort "$BASE.tmp.$$" > "$BASE"; rm -f "$BASE.tmp.$$"
+    echo "PASS — $_n item(s) checked, baseline written: $(wc -l < "$BASE" | tr -d ' ') entr(ies)"
+    exit 0
+fi
+run_check "$ROOT" "$BASE"
+exit $?

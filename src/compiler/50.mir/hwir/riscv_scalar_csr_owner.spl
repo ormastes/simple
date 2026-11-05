@@ -36,6 +36,7 @@ fn csr_owner_ports(x: i32) -> [HwPort]:
         HwPort.input("dispatch_instruction_length_bytes", "Bits", 3),
         HwPort.input("dispatch_rd", "Bits", 5),
         HwPort.output("dispatch_ready", "Bits", 1), HwPort.output("dispatch_accept", "Bits", 1),
+        HwPort.output("dispatch_identity_ok", "Bits", 1),
         HwPort.output("completion_valid", "Bits", 1),
         HwPort.output("completion_decode_valid", "Bits", 1),
         HwPort.output("protocol_fault", "Bits", 1),
@@ -121,13 +122,15 @@ fn csr_clear_assignments(x: i32) -> [HwSeqAssignment]:
 fn csr_owner_outputs(x: i32) -> [HwSeqOutputBinding]:
     val empty = [HwSeqGuard.low("full_reg"), HwSeqGuard.low("fault_reg")]
     val accepted = [HwSeqGuard.high("dispatch_valid"), HwSeqGuard.low("full_reg"),
-        HwSeqGuard.low("fault_reg"), HwSeqGuard.high("dispatch_identity_ok")]
+        HwSeqGuard.low("fault_reg"), HwSeqGuard.high("dispatch_identity_match")]
     val occupied = [HwSeqGuard.high("full_reg")]
     val commit = [HwSeqGuard.high("full_reg"), HwSeqGuard.high("completion_ready"),
         HwSeqGuard.high("csr_write_reg"), HwSeqGuard.low("fault_reg"),
         HwSeqGuard.low("illegal_valid_reg"), HwSeqGuard.low("execute_trap_valid_reg")]
     var outputs = [HwSeqOutputBinding.all("dispatch_ready", empty),
         HwSeqOutputBinding.all("dispatch_accept", accepted),
+        HwSeqOutputBinding.all("dispatch_identity_ok",
+            [HwSeqGuard.high("dispatch_identity_match")]),
         HwSeqOutputBinding.direct("completion_valid", "full_reg", 1),
         HwSeqOutputBinding.direct("completion_decode_valid", "full_reg", 1),
         HwSeqOutputBinding.direct("protocol_fault", "fault_reg", 1),
@@ -156,11 +159,11 @@ pub fn strict_riscv_scalar_csr_owner(module_name: text, config: CoreConfig,
                     HwSeqGuard.high("full_reg")], assignments: csr_clear_assignments(x)),
             HwSeqRule(name: "identity_fault", guards: [HwSeqGuard.high("dispatch_valid"),
                     HwSeqGuard.low("full_reg"), HwSeqGuard.low("fault_reg"),
-                    HwSeqGuard.low("dispatch_identity_ok")], assignments: [
+                    HwSeqGuard.low("dispatch_identity_match")], assignments: [
                     HwSeqAssignment(destination: "fault_reg", value: HwSeqValue.copy("dispatch_valid", 1))]),
             HwSeqRule(name: "capture", guards: [HwSeqGuard.high("dispatch_valid"),
                     HwSeqGuard.low("full_reg"), HwSeqGuard.low("fault_reg"),
-                    HwSeqGuard.high("dispatch_identity_ok")], assignments: csr_capture_assignments(x))],
+                    HwSeqGuard.high("dispatch_identity_match")], assignments: csr_capture_assignments(x))],
         outputs: csr_owner_outputs(x), decoder_pins: csr_projection_pins(projection))
     val module = HwSequentialModuleDef(node_id: HwNodeId.module_root(module_name),
         entity_name: module_name, config: config, origins: [
@@ -174,7 +177,7 @@ pub fn strict_riscv_scalar_csr_owner(module_name: text, config: CoreConfig,
             HwSignal.comb("length_match", "Bits", 1), HwSignal.comb("rd_match", "Bits", 1),
             HwSignal.comb("event_and_instruction_match", "Bits", 1),
             HwSignal.comb("length_and_rd_match", "Bits", 1),
-            HwSignal.comb("dispatch_identity_ok", "Bits", 1),
+            HwSignal.comb("dispatch_identity_match", "Bits", 1),
             HwSignal.comb("full_is_low", "Bits", 1), HwSignal.comb("fault_is_low", "Bits", 1),
             HwSignal.comb("empty_healthy", "Bits", 1),
             HwSignal.comb("valid_and_identity", "Bits", 1),
@@ -195,12 +198,12 @@ pub fn strict_riscv_scalar_csr_owner(module_name: text, config: CoreConfig,
             HwCombOp.binary("and", "event_and_instruction_match", "event_ids_match",
                 "instruction_match", 1),
             HwCombOp.binary("and", "length_and_rd_match", "length_match", "rd_match", 1),
-            HwCombOp.binary("and", "dispatch_identity_ok", "event_and_instruction_match",
+            HwCombOp.binary("and", "dispatch_identity_match", "event_and_instruction_match",
                 "length_and_rd_match", 1),
             HwCombOp.binary("eq", "full_is_low", "full_reg", "zero1", 1),
             HwCombOp.binary("eq", "fault_is_low", "fault_reg", "zero1", 1),
             HwCombOp.binary("and", "empty_healthy", "full_is_low", "fault_is_low", 1),
-            HwCombOp.binary("and", "valid_and_identity", "dispatch_valid", "dispatch_identity_ok", 1),
+            HwCombOp.binary("and", "valid_and_identity", "dispatch_valid", "dispatch_identity_match", 1),
             HwCombOp.binary("and", "csr_projection_valid", "valid_and_identity", "empty_healthy", 1)],
         datapath_compare_ops: [], datapath_select_ops: [], datapath_bit_extract_ops: [],
         datapath_fixed_slice_ops: [], plan: plan, child_entity: child_name,

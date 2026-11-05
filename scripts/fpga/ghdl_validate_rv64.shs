@@ -48,6 +48,19 @@ ANALYSIS_ORDER="rv64imac_core_product rv64imac_core_product_wb clint plic uart16
 set -- $ANALYSIS_ORDER
 MODULE_COUNT=$#
 
+# These are the generator's required artifacts, excluding only its Vivado-only
+# soc_top_rv64_k26 top. Never substitute the same-named handwritten board DUT.
+# Check the whole closure before analysis so stale work-library units cannot
+# hide a missing generated source in a subsequent elaboration.
+MISSING=0
+for module in $ANALYSIS_ORDER; do
+    if [ ! -s "$VHDL_DIR/${module}.vhd" ]; then
+        echo "ERROR: required generated artifact missing or empty: $module.vhd"
+        MISSING=$((MISSING + 1))
+    fi
+done
+[ "$MISSING" -eq 0 ] || exit 1
+
 # Phase 1: Analyze
 echo "--- Phase: Analyze ---"
 PASS=0
@@ -55,10 +68,6 @@ FAIL=0
 
 for module in $ANALYSIS_ORDER; do
     VHD_FILE="$VHDL_DIR/${module}.vhd"
-    if [ ! -f "$VHD_FILE" ]; then
-        echo "  SKIP: $module.vhd (not found)"
-        continue
-    fi
     printf "  Analyzing %s.vhd ... " "$module"
     if GHDL_OUT=$(ghdl -a --std=08 --workdir="$WORK_DIR" "$VHD_FILE" 2>&1); then
         echo "OK"
@@ -73,17 +82,21 @@ done
 echo ""
 echo "Analysis: $PASS passed, $FAIL failed out of $MODULE_COUNT modules"
 
+# A later elaboration must not consume stale units after any analysis failure.
+[ "$FAIL" -eq 0 ] && [ "$PASS" -gt 0 ] && [ "$PASS" -eq "$MODULE_COUNT" ] || exit 1
 if [ "$PHASE" = "analyze" ]; then
-    [ $FAIL -eq 0 ] && exit 0 || exit 1
+    exit 0
 fi
 
 # Phase 2: Elaborate
 echo ""
 echo "--- Phase: Elaborate ---"
 printf "  Elaborating soc_top_rv64 ... "
-if ghdl -e --std=08 --workdir="$WORK_DIR" soc_top_rv64 2>&1 | tail -40; then
+if TOP_OUT=$(ghdl -e --std=08 --workdir="$WORK_DIR" soc_top_rv64 2>&1); then
+    printf '%s\n' "$TOP_OUT" | tail -40
     echo "OK"
 else
+    printf '%s\n' "$TOP_OUT" | tail -40
     echo "FAIL"
     exit 1
 fi
@@ -102,30 +115,30 @@ if [ ! -f "$TB_FILE" ]; then
 fi
 
 printf "  Analyzing testbench ... "
-TB_OUT=$(ghdl -a --std=08 --workdir="$WORK_DIR" "$TB_FILE" 2>&1) || true
-if echo "$TB_OUT" | grep -q ":error:"; then
+if TB_OUT=$(ghdl -a --std=08 --workdir="$WORK_DIR" "$TB_FILE" 2>&1); then
+    echo "OK"
+else
     echo "FAIL"
     echo "$TB_OUT" | tail -40
     exit 1
 fi
-echo "OK"
 
 printf "  Elaborating testbench ... "
-ELAB_OUT=$(ghdl -e --std=08 --workdir="$WORK_DIR" tb_rv64_wb_soc_smoke 2>&1) || true
-if echo "$ELAB_OUT" | grep -q "error"; then
+if ELAB_OUT=$(ghdl -e --std=08 --workdir="$WORK_DIR" tb_rv64_wb_soc_smoke 2>&1); then
+    echo "OK"
+else
     echo "FAIL"
     echo "$ELAB_OUT" | tail -40
     exit 1
 fi
-echo "OK"
 
 printf "  Running simulation ... "
-SIM_OUT=$(cd "$VHDL_DIR" && ghdl -r --std=08 --workdir="$WORK_DIR" tb_rv64_wb_soc_smoke --stop-time=10ms 2>&1) || true
-echo "$SIM_OUT" | tail -40
-SIM_EXIT=0
-if echo "$SIM_OUT" | grep -q "error"; then
-    SIM_EXIT=1
+if SIM_OUT=$(cd "$VHDL_DIR" && ghdl -r --std=08 --workdir="$WORK_DIR" tb_rv64_wb_soc_smoke --stop-time=10ms 2>&1); then
+    SIM_EXIT=0
+else
+    SIM_EXIT=$?
 fi
+printf '%s\n' "$SIM_OUT" | tail -40
 
 if [ $SIM_EXIT -eq 0 ] &&
    echo "$SIM_OUT" | grep -q "RV64_UART_TX_ACTIVITY_SEEN" &&

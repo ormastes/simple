@@ -167,6 +167,7 @@ pub fn init_interpreter_state(items: &[Node]) {
         enums.clear();
         for item in items {
             if let Node::Enum(e) = item {
+                simple_runtime::value::register_enum_variants(e.variants.iter().map(|v| v.name.as_str()));
                 enums.insert(e.name.clone(), Arc::new(e.clone()));
             }
         }

@@ -72,11 +72,18 @@ typedef struct RtString {
     char data[];
 } RtString;
 
+/* FAM layout -- MUST match Target::uses_fam_array_abi() for aarch64 baremetal
+ * (src/compiler_rust/common/src/target.rs): {HeapHeader(8), u32 len@8,
+ * u32 cap@12, items@16}. The compiler INLINES array len/get at those offsets,
+ * so a hosted-style {u64 len, u64 cap, data*} here made every inlined
+ * `for x in arr` read the capacity word as element 0 and fault (PMM data abort
+ * at FAR 0x40 under EDK2/AAVMF, found 2026-11-05). Growth relocates the block,
+ * which is why rt_array_push returns the (possibly new) array value. */
 typedef struct RtArray {
     RtHeapHeader header;
-    spl_u64 len;
-    spl_u64 capacity;
-    spl_i64 *data;
+    spl_u32 len;
+    spl_u32 capacity;
+    spl_i64 data[];
 } RtArray;
 
 typedef struct RtTuple {
@@ -365,7 +372,7 @@ spl_i64 rt_string_bytes(spl_i64 value) {
         return out;
     }
     for (spl_u64 i = 0; i < s->len; i = i + 1) {
-        rt_array_push(out, rt_int((spl_i64)(spl_u8)s->data[i]));
+        out = rt_array_push(out, rt_int((spl_i64)(spl_u8)s->data[i]));
     }
     return out;
 }
@@ -382,7 +389,7 @@ spl_i64 rt_string_chars(spl_i64 value) {
         if (lead >= 0xC2 && lead <= 0xDF && i + 2 <= s->len) width = 2;
         else if (lead >= 0xE0 && lead <= 0xEF && i + 3 <= s->len) width = 3;
         else if (lead >= 0xF0 && lead <= 0xF4 && i + 4 <= s->len) width = 4;
-        rt_array_push(out, rt_string_new((spl_i64)(spl_u64)(s->data + i), (spl_i64)width));
+        out = rt_array_push(out, rt_string_new((spl_i64)(spl_u64)(s->data + i), (spl_i64)width));
         i += width;
     }
     return out;
@@ -621,12 +628,12 @@ spl_i64 rt_len(spl_i64 value) {
 
 spl_i64 rt_array_new(spl_i64 capacity_value) {
     spl_u64 capacity = capacity_value <= 4 ? 4 : (spl_u64)capacity_value;
-    RtArray *array = (RtArray *)rt_alloc((spl_i64)sizeof(RtArray));
-    if (!array) {
+    RtArray *array;
+    if (capacity > 0xffffffffULL) {
         return rt_nil();
     }
-    array->data = (spl_i64 *)rt_alloc((spl_i64)(capacity * sizeof(spl_i64)));
-    if (!array->data) {
+    array = (RtArray *)rt_alloc((spl_i64)(sizeof(RtArray) + capacity * sizeof(spl_i64)));
+    if (!array) {
         return rt_nil();
     }
     array->header.object_type = RT_HEAP_ARRAY;
@@ -634,7 +641,7 @@ spl_i64 rt_array_new(spl_i64 capacity_value) {
     array->header.reserved = 0;
     array->header.size = (spl_u32)sizeof(RtArray);
     array->len = 0;
-    array->capacity = capacity;
+    array->capacity = (spl_u32)capacity;
     for (spl_u64 i = 0; i < capacity; i = i + 1) {
         array->data[i] = rt_nil();
     }
@@ -669,31 +676,44 @@ spl_i64 rt_array_new_with_cap_u64(spl_i64 capacity_value) {
     return rt_array_new(capacity_value);
 }
 
+/* PUSH-RETURN ABI: aarch64-unknown-none-elf is an `array_push_returns_header()`
+ * target (src/compiler_rust/common/src/target.rs), so compiled code stores this
+ * function's RETURN back as the array value after every push. Returning a bool
+ * `1` there turned `regions` into the int 1 after the first push, and the
+ * Limine memory map reached PMM with 0 regions ("Total memory regions: 0",
+ * MEMORY-INIT-FAIL, found 2026-11-05). This runtime's header never moves (the
+ * block may relocate on growth), so success returns the CURRENT array value; 0
+ * on failure. In-file callers must store the return, like compiled code. */
 spl_i64 rt_array_push(spl_i64 array_value, spl_i64 value) {
     RtArray *array = rt_as_array(array_value);
-    spl_i64 *new_data;
-    spl_u64 new_capacity;
     if (!array) {
         return 0;
     }
     if (array->len >= array->capacity) {
-        new_capacity = array->capacity < 4 ? 4 : array->capacity * 2;
-        new_data = (spl_i64 *)rt_alloc((spl_i64)(new_capacity * sizeof(spl_i64)));
-        if (!new_data) {
+        spl_u64 new_capacity = array->capacity < 4 ? 4 : (spl_u64)array->capacity * 2;
+        RtArray *grown;
+        if (new_capacity > 0xffffffffULL) {
             return 0;
         }
+        grown = (RtArray *)rt_alloc((spl_i64)(sizeof(RtArray) + new_capacity * sizeof(spl_i64)));
+        if (!grown) {
+            return 0;
+        }
+        grown->header = array->header;
+        grown->len = array->len;
+        grown->capacity = (spl_u32)new_capacity;
         for (spl_u64 i = 0; i < array->len; i = i + 1) {
-            new_data[i] = array->data[i];
+            grown->data[i] = array->data[i];
         }
         for (spl_u64 i = array->len; i < new_capacity; i = i + 1) {
-            new_data[i] = rt_nil();
+            grown->data[i] = rt_nil();
         }
-        array->data = new_data;
-        array->capacity = new_capacity;
+        array = grown;
+        array_value = rt_heap(array);
     }
     array->data[array->len] = value;
     array->len = array->len + 1;
-    return 1;
+    return array_value;
 }
 
 spl_i64 rt_array_concat(spl_i64 left_value, spl_i64 right_value) {
@@ -706,10 +726,10 @@ spl_i64 rt_array_concat(spl_i64 left_value, spl_i64 right_value) {
         return rt_nil();
     }
     for (spl_u64 i = 0; i < left_len; i = i + 1) {
-        rt_array_push(out, left->data[i]);
+        out = rt_array_push(out, left->data[i]);
     }
     for (spl_u64 i = 0; i < right_len; i = i + 1) {
-        rt_array_push(out, right->data[i]);
+        out = rt_array_push(out, right->data[i]);
     }
     return out;
 }
@@ -776,8 +796,7 @@ spl_i64 rt_typed_bytes_u8_push(spl_i64 collection, spl_i64 value) {
 }
 
 spl_i64 rt_push_byte(spl_i64 collection, spl_i64 value) {
-    rt_array_push(collection, rt_int(value & 0xffLL));
-    return collection;
+    return rt_array_push(collection, rt_int(value & 0xffLL));
 }
 
 spl_i64 rt_typed_words_u32_push(spl_i64 collection, spl_i64 value) {
@@ -794,7 +813,7 @@ spl_i64 rt_typed_words_u64_push(spl_i64 collection, spl_i64 value) {
 
 spl_i64 rt_array_data_ptr(spl_i64 collection) {
     RtArray *array = rt_as_array(collection);
-    if (!array || !array->data) {
+    if (!array) {
         return 0;
     }
     return (spl_i64)(spl_u64)array->data;
@@ -810,7 +829,7 @@ spl_i64 rt_array_set_len_known_text(spl_i64 collection, spl_i64 len_value) {
     if (!array || len < 0 || (spl_u64)len > array->capacity) {
         return 0;
     }
-    array->len = (spl_u64)len;
+    array->len = (spl_u32)len;
     return 1;
 }
 
@@ -882,7 +901,7 @@ spl_i64 rt_array_repeat(spl_i64 value, spl_i64 count_value) {
     }
     array = rt_array_new(count);
     for (spl_i64 i = 0; i < count; i = i + 1) {
-        rt_array_push(array, value);
+        array = rt_array_push(array, value);
     }
     return array;
 }
@@ -1320,7 +1339,7 @@ spl_i64 rt_string_split(spl_i64 value, spl_i64 sep_value) {
         return out;
     }
     if (sep->len == 0) {
-        rt_array_push(out, value);
+        out = rt_array_push(out, value);
         return out;
     }
     while (start <= string->len) {
@@ -1339,13 +1358,13 @@ spl_i64 rt_string_split(spl_i64 value, spl_i64 sep_value) {
             }
         }
         if (match_at == string->len) {
-            rt_array_push(out, rt_string_new((spl_i64)(spl_u64)&string->data[start], (spl_i64)(string->len - start)));
+            out = rt_array_push(out, rt_string_new((spl_i64)(spl_u64)&string->data[start], (spl_i64)(string->len - start)));
             break;
         }
-        rt_array_push(out, rt_string_new((spl_i64)(spl_u64)&string->data[start], (spl_i64)(match_at - start)));
+        out = rt_array_push(out, rt_string_new((spl_i64)(spl_u64)&string->data[start], (spl_i64)(match_at - start)));
         start = match_at + sep->len;
         if (start == string->len) {
-            rt_array_push(out, rt_string_new((spl_i64)(spl_u64)"", 0));
+            out = rt_array_push(out, rt_string_new((spl_i64)(spl_u64)"", 0));
             break;
         }
     }
@@ -1397,7 +1416,7 @@ spl_i64 rt_bytes_slice(spl_i64 array_value, spl_i64 start_value, spl_i64 len_val
     }
     out = rt_array_new(len);
     for (spl_i64 i = 0; i < len; i = i + 1) {
-        rt_array_push(out, array->data[start + i]);
+        out = rt_array_push(out, array->data[start + i]);
     }
     return out;
 }
@@ -1426,10 +1445,10 @@ spl_i64 rt_bytes_concat(spl_i64 left_value, spl_i64 right_value) {
     }
     out = rt_array_new((spl_i64)(left->len + right->len));
     for (spl_u64 i = 0; i < left->len; i = i + 1) {
-        rt_array_push(out, left->data[i]);
+        out = rt_array_push(out, left->data[i]);
     }
     for (spl_u64 i = 0; i < right->len; i = i + 1) {
-        rt_array_push(out, right->data[i]);
+        out = rt_array_push(out, right->data[i]);
     }
     return out;
 }
@@ -1886,7 +1905,7 @@ spl_i64 rt_byte_array_new_len(spl_i64 len_value) {
         return array;
     }
     for (spl_i64 i = 0; i < len; i = i + 1) {
-        rt_array_push(array, rt_int(0));
+        array = rt_array_push(array, rt_int(0));
     }
     return array;
 }
@@ -1899,27 +1918,27 @@ spl_i64 rt_text_to_bytes(spl_i64 text_value) {
     }
     out = rt_array_new((spl_i64)string->len);
     for (spl_u64 i = 0; i < string->len; i = i + 1) {
-        rt_array_push(out, rt_int((spl_i64)(unsigned char)string->data[i]));
+        out = rt_array_push(out, rt_int((spl_i64)(unsigned char)string->data[i]));
     }
     return out;
 }
 
 spl_i64 rt_ssh_userauth_password_only_failure_payload(void) {
     spl_i64 out = rt_array_new(14);
-    rt_array_push(out, rt_int(51));
-    rt_array_push(out, rt_int(0));
-    rt_array_push(out, rt_int(0));
-    rt_array_push(out, rt_int(0));
-    rt_array_push(out, rt_int(8));
-    rt_array_push(out, rt_int('p'));
-    rt_array_push(out, rt_int('a'));
-    rt_array_push(out, rt_int('s'));
-    rt_array_push(out, rt_int('s'));
-    rt_array_push(out, rt_int('w'));
-    rt_array_push(out, rt_int('o'));
-    rt_array_push(out, rt_int('r'));
-    rt_array_push(out, rt_int('d'));
-    rt_array_push(out, rt_special(RT_VALUE_SPECIAL_FALSE));
+    out = rt_array_push(out, rt_int(51));
+    out = rt_array_push(out, rt_int(0));
+    out = rt_array_push(out, rt_int(0));
+    out = rt_array_push(out, rt_int(0));
+    out = rt_array_push(out, rt_int(8));
+    out = rt_array_push(out, rt_int('p'));
+    out = rt_array_push(out, rt_int('a'));
+    out = rt_array_push(out, rt_int('s'));
+    out = rt_array_push(out, rt_int('s'));
+    out = rt_array_push(out, rt_int('w'));
+    out = rt_array_push(out, rt_int('o'));
+    out = rt_array_push(out, rt_int('r'));
+    out = rt_array_push(out, rt_int('d'));
+    out = rt_array_push(out, rt_special(RT_VALUE_SPECIAL_FALSE));
     return out;
 }
 
@@ -2017,6 +2036,33 @@ spl_u64 rt_arm64_mrs_sctlr_el1(void) {
     spl_u64 value;
     __asm__ volatile("mrs %0, sctlr_el1" : "=r"(value));
     return value;
+}
+
+/* Link-closure gaps found 2026-11-05 building the Limine kernel on macOS
+ * (`ld.lld: undefined symbol` for each). All three already exist in the
+ * hosted runtime / the arm64 EL1-direct lane (arch/arm64/boot/baremetal_stubs.c);
+ * this lane only lacked definitions.
+ *
+ * rt_arm64_mrs_mpidr_el1: bare read of MPIDR_EL1 for cpu.spl's topology query. */
+spl_u64 rt_arm64_mrs_mpidr_el1(void) {
+    spl_u64 value;
+    __asm__ volatile("mrs %0, mpidr_el1" : "=r"(value));
+    return value;
+}
+
+/* rt_value_u64: box a u64. This runtime has no wide-int heap object (see
+ * rt_value_unbox_int above), so this is the same tag bridge as rt_value_int;
+ * values >= 2^60 are not representable on this lane, exactly as for i64. */
+spl_i64 rt_value_u64(spl_i64 bits) {
+    return bits << 3;
+}
+
+/* rt_enum_check_variant: twin of runtime_native.c / baremetal_stubs.c.
+ * enum_id 0 is the legacy untyped lane (including Result) and matches any id. */
+spl_i64 rt_enum_check_variant(spl_i64 value, spl_i64 expected_enum_id, spl_i64 expected_discriminant) {
+    RtEnum *e = rt_as_enum(value);
+    if (!e || (spl_i64)e->discriminant != expected_discriminant) return 0;
+    return expected_enum_id == 0 || e->enum_id == 0 || (spl_i64)e->enum_id == expected_enum_id;
 }
 
 /* ============================================================================
@@ -2878,10 +2924,15 @@ spl_i64 rt_array_extend_i64(spl_i64 dst_value, spl_i64 src_value, spl_i64 count_
     if ((spl_u64)count > src->len) {
         return 0;
     }
+    /* In-place contract (returns 1/0, not an array value): growth would
+     * relocate dst under the FAM layout, leaving the caller's handle stale, so
+     * a dst without room is refused rather than half-extended. */
+    if ((spl_u64)dst->len + (spl_u64)count > dst->capacity) {
+        return 0;
+    }
     for (spl_i64 i = 0; i < count; i = i + 1) {
-        if (!rt_array_push(dst_value, src->data[i])) {
-            return 0;
-        }
+        dst->data[dst->len] = src->data[i];
+        dst->len = dst->len + 1;
     }
     return 1;
 }

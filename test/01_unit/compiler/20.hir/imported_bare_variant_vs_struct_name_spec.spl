@@ -1,0 +1,70 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Bare variant of an IMPORTED enum vs an imported same-named struct
+
+Bug: match_variant_pattern_shadowed_by_struct_name_2026-10-24. The original
+failure (poll_generator.spl) had `struct Expr` and `enum StmtKind { Expr(..) }`
+in a DIFFERENT module from the `match`. `enum_variant_names` held only the
+module's own and lexically-imported variants, so a bare `case Expr(e):` over a
+`StmtKind` subject was reinterpreted as a positional `Expr` struct pattern and
+MIR failed with "enum match: unsupported arm pattern (Struct)".
+"""
+
+# @tag: unit, compiler, hir, enum, imports, match
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+val ast_source = "struct Expr:\n    id: i64\n\nenum StmtKind:\n    Expr(Expr)\n    Return(Expr)\n    Other\n\nstruct Stmt:\n    kind: StmtKind\n\nstruct Block:\n    stmts: [Stmt]\n"
+
+fn consumer_errors(consumer_source: text, needle: text) -> i64:
+    val log = Logger(level: 0)
+    val ast_ast = parse_full_frontend(ast_source, "lib/ast.spl", "lib.ast", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.ast"] = ast_ast
+    val sources = [SourceFile(path: "lib/ast.spl", content: ast_source, module_name: "lib.ast")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
+    val hir = consumer_lowering.lower_module(consumer_ast)
+    var n = 0
+    for herr in consumer_lowering.errors:
+        if herr.message.contains(needle):
+            n = n + 1
+    val target_context = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+    val mir = lowering.lower_module(hir)
+    for err in lowering.errors:
+        if err.message.contains(needle):
+            n = n + 1
+    n
+
+describe "imported bare variant shadowed by an imported same-named struct":
+    it "resolves bare Expr(e) through the imported subject enum (field subject)":
+        val src = "use lib.ast.\{Expr, StmtKind, Stmt\}\n\nfn f(s: Stmt) -> i64:\n    val r = match s.kind:\n        case Expr(e):\n            e.id\n        case Return(e):\n            e.id\n        case _:\n            0\n    r\n"
+        expect(consumer_errors(src, "unsupported arm pattern")).to_equal(0)
+    it "resolves bare Expr(e) on an imported-enum parameter subject":
+        val src = "use lib.ast.\{Expr, StmtKind\}\n\nfn g(k: StmtKind) -> i64:\n    val r = match k:\n        case Expr(e):\n            e.id\n        case _:\n            0\n    r\n"
+        expect(consumer_errors(src, "unsupported arm pattern")).to_equal(0)
+    it "resolves the qualified spelling too":
+        val src = "use lib.ast.\{Expr, StmtKind\}\n\nfn g(k: StmtKind) -> i64:\n    val r = match k:\n        case StmtKind.Expr(e):\n            e.id\n        case _:\n            0\n    r\n"
+        expect(consumer_errors(src, "unsupported arm pattern")).to_equal(0)
+    it "still treats an imported struct-only subject as a struct pattern":
+        val src = "use lib.ast.\{Expr\}\n\nfn h(x: Expr) -> i64:\n    val r = match x:\n        case Expr(i):\n            i\n    r\n"
+        expect(consumer_errors(src, "unsupported arm pattern")).to_equal(0)
+    it "resolves bare Expr(e) under a glob import over an indexed element subject (poll_generator shape)":
+        val src = "use lib.ast.*\n\nfn f(b: Block) -> i64:\n    val last = b.stmts[b.stmts.len() - 1]\n    val r = match last.kind:\n        case Expr(e): e.id\n        case Return(e): e.id\n        case _: 0\n    r\n"
+        expect(consumer_errors(src, "unsupported arm pattern")).to_equal(0)
+    it "reports no HIR/MIR error at all for the poll_generator shape":
+        val src = "use lib.ast.*\n\nfn f(b: Block) -> i64:\n    val last = b.stmts[b.stmts.len() - 1]\n    val r = match last.kind:\n        case Expr(e): e.id\n        case Return(e): e.id\n        case _: 0\n    r\n"
+        expect(consumer_errors(src, "")).to_equal(0)

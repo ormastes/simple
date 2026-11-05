@@ -36,7 +36,9 @@ case "$strategy" in full) profile=full ;; normal) profile=slim ;; *) exit 64 ;; 
 # full-CLI parse alone is ~1 file/s over ~2950 files; the CLI + runner + tests
 # campaign does not fit 2 h there.
 case "$plat" in *windows*) default_timeout=21600 ;; *) default_timeout=3600 ;; esac
-timeout=${timeout:-$default_timeout}
+# --timeout-seconds (or BOOTSTRAP_VERIFY_TIMEOUT_SECONDS) is explicit and kept
+# as-is; the default is scaled by the whole-build plan's worker fit below.
+timeout=${timeout:-${BOOTSTRAP_VERIFY_TIMEOUT_SECONDS:-}}
 compiler="$out/stage3/$plat/stage2-admitted/simple"
 [ -f "$compiler" ] || compiler="$compiler.exe"
 [ -f "$compiler" ] && [ -f "$(dirname "$compiler")/admission.env" ] ||
@@ -67,10 +69,9 @@ status=0
   # (BLOCKED exit=-2 claimed=0) on the full-CLI build.
   # Windows: one pinned frontend worker -> cold full-CLI build takes hours; 1800s
   # always expired there (exit=-2). Host-scaled default, env-overridable.
+  # Published after the whole-build plan below, scaled by its worker fit.
   case "$plat" in *windows*) native_internal_default=14400 ;; *) native_internal_default=1800 ;; esac
-  BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT="${BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:-$native_internal_default}"
-  export BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY BOOTSTRAP_STAGE2_TEST_DELEGATE SIMPLE_PROJECT_ROOT \
-    BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT
+  export BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY BOOTSTRAP_STAGE2_TEST_DELEGATE SIMPLE_PROJECT_ROOT
   # Same whole-build phase pricing bootstrap-from-scratch.sh gives this gate.
   # Without it the campaign watchdog fell to its literal 5859375 KiB default
   # and killed the single in-process full-CLI build at HIR module 9/3005
@@ -93,7 +94,22 @@ status=0
     echo "admit-stage2: $bootstrap_tree_rss_refusal" >&2
     exit 125
   }
+  # Same worker-fit timeout scaling bootstrap-from-scratch.sh applies: the
+  # native internal, row and campaign (verifier default 7200 s) budgets were
+  # calibrated for the requested workers, so scale them by ceil(requested /
+  # fitted), bounded by BOOTSTRAP_TREE_RSS_TIMEOUT_SCALE_MAX; explicit values
+  # are kept. Run 4 (2026-11-05): 8 -> 2 workers, both MIR workers killed at
+  # the unscaled 1800 s with 596 of 3010 modules claimed.
+  BOOTSTRAP_VERIFY_TIMEOUT_SECONDS=$timeout
+  { bootstrap_tree_rss_scaled_timeout BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT "$native_internal_default" &&
+    bootstrap_tree_rss_scaled_timeout BOOTSTRAP_VERIFY_TIMEOUT_SECONDS "$default_timeout" &&
+    bootstrap_tree_rss_scaled_timeout BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS 7200; } || {
+    echo "admit-stage2: $bootstrap_tree_rss_refusal" >&2
+    exit 125
+  }
+  timeout=$BOOTSTRAP_VERIFY_TIMEOUT_SECONDS
   echo "admit-stage2: tree RSS cap ${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB} KiB, build-threads=${BOOTSTRAP_VERIFY_BUILD_THREADS} ($bootstrap_tree_rss_plan_summary)"
+  echo "admit-stage2: timeouts native-internal=${BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT}s row=${timeout}s campaign=${BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS}s scale=x${BOOTSTRAP_VERIFY_TIMEOUT_SCALE} (${BOOTSTRAP_VERIFY_TIMEOUT_SOURCE})"
   sh "$src/scripts/bootstrap/bootstrap-phase-verification.shs" --phase=stage2 \
     "--backend=$backend" "--compiler=$compiler" "--compiler-sha256=$sha" \
     "--strategy=$strategy" "--profile=$profile" --hash-policy=canonical \

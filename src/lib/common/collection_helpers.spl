@@ -1,0 +1,464 @@
+# Collection Helpers — Phase 1 stdlib helper module.
+#
+# Spec: test/01_unit/lib/std/common/collection_helpers_spec.spl
+# Bug: doc/08_tracking/bug/std_collection_helpers_module_missing_2026-09-01.md
+#
+# Pure functions over [T]; none mutate their argument. Callback parameters use
+# the `fn(...) -> ...` callable type so both lambdas (`\x: ...`), shorthand
+# bodies (`_1 % 2 == 0`), and method references (`&:len`) are accepted.
+#
+# @tag:stdlib
+# @tag:collections
+
+use std.nogc_sync_mut.src.map.{Map}
+
+# ============================================================================
+# Sort / Min / Max by Key
+# ============================================================================
+
+pub fn sort_by_key<T, K>(arr: [T], key_fn: fn(T) -> K) -> [T]:
+    """Return a new array sorted ascending by key_fn. Stable. Empty/singleton in -> same out."""
+    var sorted: [T] = []
+    for item in arr:
+        var i = 0
+        var placed = false
+        while i < sorted.len() and not placed:
+            if key_fn(sorted[i]) <= key_fn(item):
+                i = i + 1
+            else:
+                placed = true
+        var combined: [T] = []
+        var j = 0
+        while j < i:
+            combined.push(sorted[j])
+            j = j + 1
+        combined.push(item)
+        while j < sorted.len():
+            combined.push(sorted[j])
+            j = j + 1
+        sorted = combined
+    sorted
+
+pub fn min_by_key<T, K>(arr: [T], key_fn: fn(T) -> K) -> T?:
+    """Return the element with the smallest key, or nil for an empty array."""
+    if arr.len() == 0:
+        return nil
+    var best = arr[0]
+    var i = 1
+    while i < arr.len():
+        if key_fn(arr[i]) < key_fn(best):
+            best = arr[i]
+        i = i + 1
+    best
+
+pub fn max_by_key<T, K>(arr: [T], key_fn: fn(T) -> K) -> T?:
+    """Return the element with the largest key, or nil for an empty array."""
+    if arr.len() == 0:
+        return nil
+    var best = arr[0]
+    var i = 1
+    while i < arr.len():
+        if key_fn(arr[i]) > key_fn(best):
+            best = arr[i]
+        i = i + 1
+    best
+
+# ============================================================================
+# Flat Map / Compact Map
+# ============================================================================
+
+pub fn flat_map<T, U>(arr: [T], mapper: fn(T) -> [U]) -> [U]:
+    """Map each element to an array and flatten the results one level."""
+    var result: [U] = []
+    for item in arr:
+        val mapped = mapper(item)
+        for sub in mapped:
+            result.push(sub)
+    result
+
+pub fn compact_map<T, U>(arr: [T], mapper: fn(T) -> U?) -> [U]:
+    """Map each element, dropping the results that are nil."""
+    var result: [U] = []
+    for item in arr:
+        val mapped = mapper(item)
+        if mapped != nil:
+            result.push(mapped)
+    result
+
+# ============================================================================
+# Insert / Remove / Pop / Shift
+# ============================================================================
+
+pub fn insert_at<T>(arr: [T], index: i64, value: T) -> [T]:
+    """Return a new array with value inserted at index (before the element there)."""
+    if index < 0 or index > arr.len():
+        return arr
+    var result: [T] = []
+    var i = 0
+    while i < index:
+        result.push(arr[i])
+        i = i + 1
+    result.push(value)
+    while i < arr.len():
+        result.push(arr[i])
+        i = i + 1
+    result
+
+pub fn remove_at<T>(arr: [T], index: i64) -> [T]:
+    """Return a new array with the element at index removed; out of bounds -> original."""
+    if index < 0 or index >= arr.len():
+        return arr
+    var result: [T] = []
+    var i = 0
+    while i < arr.len():
+        if i != index:
+            result.push(arr[i])
+        i = i + 1
+    result
+
+pub fn arr_pop<T>(arr: [T]) -> ([T], T?):
+    """Return (array without last element, last element). Empty -> ([], nil)."""
+    if arr.len() == 0:
+        return ([], nil)
+    var rest: [T] = []
+    var i = 0
+    while i < arr.len() - 1:
+        rest.push(arr[i])
+        i = i + 1
+    (rest, arr[arr.len() - 1])
+
+pub fn arr_shift<T>(arr: [T]) -> ([T], T?):
+    """Return (array without first element, first element). Empty -> ([], nil)."""
+    if arr.len() == 0:
+        return ([], nil)
+    var rest: [T] = []
+    var i = 1
+    while i < arr.len():
+        rest.push(arr[i])
+        i = i + 1
+    (rest, arr[0])
+
+# ============================================================================
+# Reject / None / One
+# ============================================================================
+
+pub fn reject<T>(arr: [T], predicate: fn(T) -> bool) -> [T]:
+    """Return the elements for which predicate is false."""
+    var result: [T] = []
+    for item in arr:
+        if not predicate(item):
+            result.push(item)
+    result
+
+pub fn none<T>(arr: [T], predicate: fn(T) -> bool) -> bool:
+    """True when no element satisfies the predicate (vacuously true for empty)."""
+    for item in arr:
+        if predicate(item):
+            return false
+    true
+
+pub fn one<T>(arr: [T], predicate: fn(T) -> bool) -> bool:
+    """True when exactly one element satisfies the predicate."""
+    var count = 0
+    for item in arr:
+        if predicate(item):
+            count = count + 1
+            if count > 1:
+                return false
+    count == 1
+
+# ============================================================================
+# Find Last / Find Last Index / At
+# ============================================================================
+
+pub fn find_last<T>(arr: [T], predicate: fn(T) -> bool) -> T?:
+    """Return the last element satisfying the predicate, or nil."""
+    var i = arr.len() - 1
+    while i >= 0:
+        if predicate(arr[i]):
+            return arr[i]
+        i = i - 1
+    nil
+
+pub fn find_last_index<T>(arr: [T], predicate: fn(T) -> bool) -> i64?:
+    """Return the index of the last element satisfying the predicate, or nil."""
+    var i = arr.len() - 1
+    while i >= 0:
+        if predicate(arr[i]):
+            return i
+        i = i - 1
+    nil
+
+pub fn at<T>(arr: [T], index: i64) -> T?:
+    """Safe indexed get: negative counts from the end; out of range -> nil."""
+    var i = index
+    if i < 0:
+        i = arr.len() + i
+    if i < 0 or i >= arr.len():
+        return nil
+    arr[i]
+
+# ============================================================================
+# Clone / Chunk / Each Slice / Each Cons / Pairwise
+# ============================================================================
+
+pub fn arr_clone<T>(arr: [T]) -> [T]:
+    """Return a shallow copy of the array."""
+    var result: [T] = []
+    for item in arr:
+        result.push(item)
+    result
+
+pub fn chunk<T>(arr: [T], size: i64) -> [[T]]:
+    """Split into consecutive chunks of `size`; last chunk may be shorter.
+    size <= 0 or empty input -> empty result."""
+    var result: [[T]] = []
+    if size <= 0:
+        return result
+    var i = 0
+    while i < arr.len():
+        var piece: [T] = []
+        var j = i
+        while j < arr.len() and j < i + size:
+            piece.push(arr[j])
+            j = j + 1
+        result.push(piece)
+        i = i + size
+    result
+
+pub fn each_slice<T>(arr: [T], size: i64) -> [[T]]:
+    """Alias of chunk: consecutive non-overlapping slices of `size`."""
+    chunk(arr, size)
+
+pub fn each_cons<T>(arr: [T], size: i64) -> [[T]]:
+    """Return every consecutive run of `size` elements (sliding windows)."""
+    var result: [[T]] = []
+    if size <= 0 or arr.len() < size:
+        return result
+    var i = 0
+    while i + size <= arr.len():
+        var window: [T] = []
+        var j = i
+        while j < i + size:
+            window.push(arr[j])
+            j = j + 1
+        result.push(window)
+        i = i + 1
+    result
+
+pub fn pairwise<T>(arr: [T]) -> [[T]]:
+    """Return consecutive pairs: [[a0,a1],[a1,a2],...]."""
+    each_cons(arr, 2)
+
+# ============================================================================
+# Sum By / Product / Tally
+# ============================================================================
+
+pub fn sum_by<T>(arr: [T], key_fn: fn(T) -> i64) -> i64:
+    """Sum of key_fn applied to each element; empty -> 0."""
+    var total: i64 = 0
+    for item in arr:
+        total = total + key_fn(item)
+    total
+
+pub fn product(arr: [i64]) -> i64:
+    """Product of all elements; empty -> 1."""
+    var acc: i64 = 1
+    for item in arr:
+        acc = acc * item
+    acc
+
+pub fn tally<T>(arr: [T]) -> Map<T, i64> where T: Hash + Eq:
+    """Count element frequencies into a Map."""
+    var counts: Map<T, i64> = Map.new()
+    for item in arr:
+        match counts.get(item):
+            Some(n):
+                counts.insert(item, n + 1)
+            None:
+                counts.insert(item, 1)
+    counts
+
+# ============================================================================
+# Compress / Values At / Fill
+# ============================================================================
+
+pub fn compress<T>(arr: [T], selectors: [bool]) -> [T]:
+    """Keep arr[i] when selectors[i] is true; stops at the shorter length."""
+    var result: [T] = []
+    var i = 0
+    while i < arr.len() and i < selectors.len():
+        if selectors[i]:
+            result.push(arr[i])
+        i = i + 1
+    result
+
+pub fn values_at<T>(arr: [T], indices: [i64]) -> [T]:
+    """Return the elements at the given indices (silently skipping bad ones)."""
+    var result: [T] = []
+    for idx in indices:
+        val v = at(arr, idx)
+        if v != nil:
+            result.push(v)
+    result
+
+pub fn fill<T>(arr: [T], value: T) -> [T]:
+    """Return a new array of the same length with every element set to value."""
+    var result: [T] = []
+    var i = 0
+    while i < arr.len():
+        result.push(value)
+        i = i + 1
+    result
+
+# ============================================================================
+# Reduce Right / Replace Range / Zip Longest
+# ============================================================================
+
+pub fn reduce_right<T, U>(arr: [T], init: U, folder: fn(U, T) -> U) -> U:
+    """Fold from right to left: folder(... folder(folder(init, last), ...), first)."""
+    var acc = init
+    var i = arr.len() - 1
+    while i >= 0:
+        acc = folder(acc, arr[i])
+        i = i - 1
+    acc
+
+pub fn replace_range<T>(arr: [T], start: i64, end_exclusive: i64, replacement: [T]) -> [T]:
+    """Replace arr[start:end_exclusive] with replacement (end clamped to len)."""
+    var s = start
+    var e = end_exclusive
+    if s < 0:
+        s = 0
+    if e > arr.len():
+        e = arr.len()
+    if e < s:
+        e = s
+    var result: [T] = []
+    var i = 0
+    while i < s:
+        result.push(arr[i])
+        i = i + 1
+    for item in replacement:
+        result.push(item)
+    i = e
+    while i < arr.len():
+        result.push(arr[i])
+        i = i + 1
+    result
+
+pub fn zip_longest<T, U>(a: [T], b: [U], fill_a: T, fill_b: U) -> [(T, U)]:
+    """Zip two arrays to the longer length, padding the shorter with fills."""
+    var result: [(T, U)] = []
+    val n = if a.len() > b.len(): a.len() else: b.len()
+    var i = 0
+    while i < n:
+        val av = if i < a.len(): a[i] else: fill_a
+        val bv = if i < b.len(): b[i] else: fill_b
+        result.push((av, bv))
+        i = i + 1
+    result
+
+# ============================================================================
+# Slice When / Chunk While
+# ============================================================================
+
+pub fn slice_when<T>(arr: [T], split_before: fn(T, T) -> bool) -> [[T]]:
+    """Split before each element b where split_before(prev, b) is true."""
+    var result: [[T]] = []
+    if arr.len() == 0:
+        return result
+    var current: [T] = [arr[0]]
+    var i = 1
+    while i < arr.len():
+        if split_before(arr[i - 1], arr[i]):
+            result.push(current)
+            current = []
+        current.push(arr[i])
+        i = i + 1
+    result.push(current)
+    result
+
+pub fn chunk_while<T>(arr: [T], keep_together: fn(T, T) -> bool) -> [[T]]:
+    """Chunk consecutive elements while keep_together(prev, next) holds."""
+    slice_when(arr, \a, b: not keep_together(a, b))
+
+# ============================================================================
+# Top N / Bottom N
+# ============================================================================
+
+pub fn top_n<T>(arr: [T], n: i64) -> [T]:
+    """Return the n largest elements, descending. n <= 0 or empty -> []."""
+    if n <= 0 or arr.len() == 0:
+        return []
+    var sorted = _sort_asc(arr)
+    var result: [T] = []
+    var i = sorted.len() - 1
+    while i >= 0 and result.len() < n:
+        result.push(sorted[i])
+        i = i - 1
+    result
+
+pub fn bottom_n<T>(arr: [T], n: i64) -> [T]:
+    """Return the n smallest elements, ascending. n <= 0 or empty -> []."""
+    if n <= 0 or arr.len() == 0:
+        return []
+    var sorted = _sort_asc(arr)
+    var result: [T] = []
+    var i = 0
+    while i < sorted.len() and result.len() < n:
+        result.push(sorted[i])
+        i = i + 1
+    result
+
+# Insertion sort ascending on the elements directly (numeric/ordered T).
+fn _sort_asc<T>(arr: [T]) -> [T]:
+    var sorted: [T] = []
+    for item in arr:
+        var i = 0
+        var placed = false
+        while i < sorted.len() and not placed:
+            if item < sorted[i]:
+                placed = true
+            else:
+                i = i + 1
+        var combined: [T] = []
+        var j = 0
+        while j < i:
+            combined.push(sorted[j])
+            j = j + 1
+        combined.push(item)
+        while j < sorted.len():
+            combined.push(sorted[j])
+            j = j + 1
+        sorted = combined
+    sorted
+
+# ============================================================================
+# Compare / Dedup By
+# ============================================================================
+
+pub fn arr_compare<T>(a: [T], b: [T]) -> i64:
+    """Lexicographic comparison: -1, 0, or 1. Shorter prefix sorts first."""
+    var i = 0
+    while i < a.len() and i < b.len():
+        if a[i] < b[i]:
+            return -1
+        if a[i] > b[i]:
+            return 1
+        i = i + 1
+    if a.len() < b.len():
+        return -1
+    if a.len() > b.len():
+        return 1
+    0
+
+pub fn dedup_by<T>(arr: [T], dup: fn(T, T) -> bool) -> [T]:
+    """Remove consecutive duplicates: drop b when dup(prev_kept, b) is true."""
+    var result: [T] = []
+    for item in arr:
+        if result.len() > 0 and dup(result[result.len() - 1], item):
+            pass_dn
+        else:
+            result.push(item)
+    result
