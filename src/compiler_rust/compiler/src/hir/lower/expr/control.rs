@@ -852,11 +852,7 @@ impl Lowerer {
 
                 // Validate the stable enum identity and hashed variant tag.
                 let expected_disc: i64 = {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut hasher = DefaultHasher::new();
-                    variant.hash(&mut hasher);
-                    (hasher.finish() & 0xFFFFFFFF) as i64
+                    simple_runtime::value::hash_variant_discriminant(variant) as i64
                 };
 
                 let expected_val = HirExpr {
@@ -954,6 +950,22 @@ impl Lowerer {
         self.module.types.iter().any(|(_, ty)| {
             matches!(ty, HirType::Enum { variants, .. }
                 if variants.iter().any(|(v, _)| v == variant))
+        })
+    }
+
+    /// Is `variant` the BUILTIN optional's `Some`/`None` (nil-boxing `T?`
+    /// representation), rather than a variant of a user-declared enum?
+    /// A user enum may name its variants `Some`/`None`; only the generic
+    /// builtin `Option<T>` registration is excluded from that check (same
+    /// genericity rule as `lower_pattern_condition`).
+    pub(crate) fn is_builtin_optional_variant_name(&self, variant: &str) -> bool {
+        if variant != "Some" && variant != "None" {
+            return false;
+        }
+        !self.module.types.iter().any(|(_, ty)| {
+            matches!(ty, HirType::Enum { name, variants, generic_params, .. }
+                if variants.iter().any(|(v, _)| v == variant)
+                    && !(name == "Option" && !generic_params.is_empty()))
         })
     }
 
@@ -1209,17 +1221,45 @@ impl Lowerer {
                 // irrefutable, but a refutable sub-pattern inside it
                 // (`P(Point(0, b))`) still has to be tested, by positional
                 // field access rather than payload extraction.
+                // Nested builtin optional (`Ok(Some(c))`, `Ok(None)`): the slot
+                // holds a `T?` in either runtime form (boxed Some or raw
+                // payload, nil for absence), so the test is presence/absence,
+                // never a discriminant. Without this `Some` fell to the struct
+                // path below, became irrefutable, and `Ok(nil)` took the
+                // `Ok(Some(c))` arm with `c` unbound.
+                // Bug: doc/08_tracking/bug/native_enum_nil_payload_pattern_2026_10_11.md
+                if self.is_builtin_optional_variant_name(variant) {
+                    let probe = if variant == "None" { "rt_is_none" } else { "rt_is_some" };
+                    let presence = HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: probe.to_string(),
+                            args: vec![slot.clone()],
+                        },
+                        ty: TypeId::BOOL,
+                    };
+                    let deeper = payload
+                        .as_ref()
+                        .filter(|_| variant == "Some")
+                        .and_then(|inner| self.nested_payload_condition(variant, slot, inner, ctx));
+                    return Some(match deeper {
+                        None => presence,
+                        Some(inner_test) => HirExpr {
+                            kind: HirExprKind::Binary {
+                                op: BinOp::And,
+                                left: Box::new(presence),
+                                right: Box::new(inner_test),
+                            },
+                            ty: TypeId::BOOL,
+                        },
+                    });
+                }
                 if !self.is_real_enum_variant_name(variant) {
                     let fields = payload.as_ref()?;
                     let positional: Vec<(usize, &Pattern)> = fields.iter().enumerate().collect();
                     return self.struct_fields_condition(slot, variant, &positional, ctx);
                 }
                 let expected_disc: i64 = {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut hasher = DefaultHasher::new();
-                    variant.hash(&mut hasher);
-                    (hasher.finish() & 0xFFFFFFFF) as i64
+                    simple_runtime::value::hash_variant_discriminant(variant) as i64
                 };
                 let tag_test = HirExpr {
                     kind: HirExprKind::BuiltinCall {
@@ -2392,11 +2432,7 @@ impl Lowerer {
         };
         let condition = if result_like {
             let err_disc: i64 = {
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                let mut hasher = DefaultHasher::new();
-                "Err".hash(&mut hasher);
-                (hasher.finish() & 0xFFFFFFFF) as i64
+                simple_runtime::value::hash_variant_discriminant("Err") as i64
             };
             let is_err = HirExpr {
                 kind: HirExprKind::BuiltinCall {
@@ -2995,13 +3031,7 @@ impl Lowerer {
             ty: TypeId::BOOL,
         };
         let is_err = || {
-            let err_disc: i64 = {
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                let mut hasher = DefaultHasher::new();
-                "Err".hash(&mut hasher);
-                (hasher.finish() & 0xFFFF_FFFF) as i64
-            };
+            let err_disc: i64 = simple_runtime::value::hash_variant_discriminant("Err") as i64;
             builtin_check(
                 "rt_enum_check_variant",
                 vec![
@@ -3345,11 +3375,7 @@ impl Lowerer {
 
         // Hashed "Err" discriminant — same convention as match lowering.
         let err_disc: i64 = {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            let mut hasher = DefaultHasher::new();
-            "Err".hash(&mut hasher);
-            (hasher.finish() & 0xFFFFFFFF) as i64
+            simple_runtime::value::hash_variant_discriminant("Err") as i64
         };
 
         let is_err = HirExpr {

@@ -1,5 +1,29 @@
 # riscv64 freestanding: the top-level declaration walk yields the SAME function twice
 
+## VERIFIED FIXED AT TIP 2026-11-05
+
+Re-verified from a clean worktree of `origin/release/1.0.0`:
+
+```
+sh scripts/check/check-decl-index-lookup-not-empty-text-compare.shs
+  -> check-decl-index-lookup: selftest OK (5 fixtures)
+  -> check-decl-index-lookup: PASS — 4 site(s) checked, none compares against
+     an empty literal
+```
+
+Source re-verification: `module_decl_at`
+(`src/compiler/10.frontend/core/_Ast/module_state.spl:432-454`) still carries
+the measured `env_value.len() > 0` form with the full 2026-09-01 in-guest
+measurement comment, i.e. the fix is live and pinned by the wired gate above.
+
+In-guest re-run of the buildrun row
+(`scripts/check/check-simpleos-riscv64-interpreter-in-guest-opensbi.shs`) was
+NOT repeated: this record's own 2026-09-01 resolution measured that after the
+fix, row 2 moves on to a DIFFERENT, later blocker
+(`riscv64_in_guest_mir_lower_type_zero_kind_on_main_2026-09-01.md`, still OPEN
+on this branch), so that gate's verdict cannot go green from this defect
+alone and cannot add discriminating evidence for it.
+
 - Status: **OPEN** — the current blocker for goal item 1 row 2 (SimpleOS riscv64
   in-guest build-and-run sanity).
 - Date: 2026-09-01

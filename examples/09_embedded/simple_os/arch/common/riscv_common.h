@@ -581,6 +581,53 @@ RuntimeValue rt_native_neq(RuntimeValue a, RuntimeValue b)
     return rt_native_eq(a, b) ? 0 : 1;
 }
 
+/* Representation-aware typed text equality, required by the MIR lowering of
+ * statically typed String ==/!= (commit 060926039bc routes both through
+ * rt_text_eq_any on every backend, replacing the old inline path). Without
+ * this definition the freestanding riscv64/32 link dies with an undefined
+ * symbol, exactly like every other lane that had not ported it (the x86_64
+ * comment above rt_text_eq_raw_raw records the same gap for this family).
+ *
+ * Semantics mirror the hosted implementation (runtime_native.c): nil sentinel
+ * aware (nil == nil, nil vs any real string is NOT equal), heap-vs-raw via
+ * riscv_text_eq_heap_vs_raw under the same plausibility guards as
+ * rt_native_eq, and raw-vs-raw by bounded content compare — a bare "" literal
+ * is an untagged char* global, so two distinct raw literals must never be
+ * compared by address. The hosted twin additionally covers RtCoreString STR1
+ * strings; no STR1 producer exists on this lane. */
+static int riscv_text_eq_raw_raw(RuntimeValue left, RuntimeValue right)
+{
+    if (left == right) return 1;
+    if (!riscv_plausible_raw_text(left) || !riscv_plausible_raw_text(right)) return 0;
+    const char *a = (const char *)(uintptr_t)left;
+    const char *b = (const char *)(uintptr_t)right;
+    for (;;) {
+        if (*a != *b) return 0;
+        if (*a == '\0') return 1;
+        a++;
+        b++;
+    }
+}
+
+RuntimeValue rt_text_eq_any(RuntimeValue left, RuntimeValue right)
+{
+    if (left == NIL_VALUE || right == NIL_VALUE) return left == right ? 1 : 0;
+    const RuntimeString *sl = riscv_heap_string(left);
+    const RuntimeString *sr = riscv_heap_string(right);
+    if (sl || sr) {
+        if (sl && sr) {
+            if (sl->len != sr->len) return 0;
+            for (uint64_t i = 0; i < (uint64_t)sl->len; i++) {
+                if (sl->data[i] != sr->data[i]) return 0;
+            }
+            return 1;
+        }
+        if (sl) return riscv_text_eq_heap_vs_raw(sl, right) ? 1 : 0;
+        return riscv_text_eq_heap_vs_raw(sr, left) ? 1 : 0;
+    }
+    return riscv_text_eq_raw_raw(left, right) ? 1 : 0;
+}
+
 /* --------------------------------------------------------------------------
  * NVFS probe (identical between rv32 and rv64)
  * -------------------------------------------------------------------------- */
