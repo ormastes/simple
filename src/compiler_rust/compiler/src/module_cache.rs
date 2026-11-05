@@ -1665,3 +1665,176 @@ pub fn owner_module_enum(name: &str) -> Option<Arc<EnumDef>> {
             .and_then(|m| m.get(name).cloned())
     })
 }
+
+/// Class declared by the module that is currently executing, if that module
+/// declares `name`. Mirrors [`owner_module_enum`]: a same-named class from
+/// another co-loaded module must not hijack construction or method dispatch
+/// inside the declaring module. See bug
+/// `interp_class_name_collision_breaks_test_db_persistence_2026-08-10`.
+pub fn owner_module_class(name: &str) -> Option<Arc<ClassDef>> {
+    // Top-level execution has no function owner; the flattening loader records
+    // the root module's imports under `<entry>` (see `import_bound_candidate`).
+    let mut owner = crate::interpreter::CURRENT_EXEC_MODULE
+        .with(|cell| cell.borrow().clone())
+        .unwrap_or_else(|| Arc::from("<entry>"));
+    let mut name = name.to_owned();
+    // Own declaration first, then follow explicit `use m.{Name}` bindings to
+    // the declaring module (bounded: facade chains, never cyclic hangs).
+    for _ in 0..8 {
+        let own = FLATTEN_OWNER_CLASSES
+            .with(|t| t.borrow().get(&owner).and_then(|m| m.get(&name).cloned()))
+            .or_else(|| {
+                MODULE_CLASSES_CACHE.with(|cache| {
+                    cache.borrow().get(Path::new(&*owner)).and_then(|m| m.get(&name).cloned())
+                })
+            });
+        if own.is_some() {
+            return own;
+        }
+        let (next_owner, next_name) = crate::interpreter::owner_bindings(&owner)
+            .and_then(|b| b.get(&name).map(std::borrow::Cow::into_owned))?;
+        if next_owner == owner && next_name == name {
+            return None;
+        }
+        owner = next_owner;
+        name = next_name;
+    }
+    None
+}
+
+thread_local! {
+    /// Flattened-lane class table keyed by declaring module (owner path key).
+    /// The flat `classes` map is last-registration-wins by bare name; this one
+    /// is not. See bug interp_class_name_collision_breaks_test_db_persistence_2026-08-10.
+    static FLATTEN_OWNER_CLASSES: RefCell<HashMap<Arc<str>, HashMap<String, Arc<ClassDef>>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Record a flattened class under its declaring module, derived from the
+/// owner attribute the flattening loader puts on its methods. Classes with no
+/// owner-tagged method (no methods, or a non-flattened run) are not recorded.
+pub fn record_flattened_owner_class(class_def: &Arc<ClassDef>) {
+    let owner = class_def.methods.iter().find_map(|m| {
+        m.attributes.iter().find_map(|a| {
+            a.name
+                .strip_prefix(crate::interpreter::FLATTEN_MODULE_OWNER_ATTR_PREFIX)
+                .map(|raw| Arc::<str>::from(normalize_path_key(Path::new(raw)).to_string_lossy().as_ref()))
+        })
+    });
+    if let Some(owner) = owner {
+        FLATTEN_OWNER_CLASSES.with(|t| {
+            t.borrow_mut()
+                .entry(owner)
+                .or_default()
+                .insert(class_def.name.clone(), Arc::clone(class_def));
+        });
+    }
+}
+
+/// Resolve a bare class name: the executing module's own class first, then
+/// the caller's flat scope table.
+pub fn resolve_class(classes: &HashMap<String, Arc<ClassDef>>, name: &str) -> Option<Arc<ClassDef>> {
+    owner_module_class(name).or_else(|| classes.get(name).cloned())
+}
+
+/// Snapshot scope classes that a `use m.{a, b}` import must not clobber:
+/// a name the incoming module defines, that is already bound in scope to a
+/// DIFFERENT class (another module's), and that the braced list does not name.
+/// Callers re-insert the snapshot after merging. Non-group imports keep the
+/// previous last-registration behaviour.
+pub fn unimported_def_collisions<T>(
+    explicit: Option<&[String]>,
+    incoming: &HashMap<String, Arc<T>>,
+    classes: &HashMap<String, Arc<T>>,
+) -> Vec<(String, Arc<T>)> {
+    let Some(explicit) = explicit else { return Vec::new() };
+    incoming
+        .iter()
+        .filter_map(|(name, def)| {
+            let existing = classes.get(name)?;
+            if Arc::ptr_eq(existing, def) || explicit.iter().any(|n| n == name) {
+                return None;
+            }
+            Some((name.clone(), Arc::clone(existing)))
+        })
+        .collect()
+}
+
+/// Cached class table of a module, if loaded.
+pub fn cached_module_classes(path: &Path) -> Option<HashMap<String, Arc<ClassDef>>> {
+    let key = normalize_path_key(path);
+    MODULE_CLASSES_CACHE.with(|cache| cache.borrow().get(&key).cloned())
+}
+
+#[cfg(test)]
+mod class_collision_tests {
+    use super::*;
+    use simple_parser::ast::Node;
+
+    fn class_def(src: &str) -> Arc<ClassDef> {
+        let module = simple_parser::Parser::new(src).parse().expect("parse class fixture");
+        module
+            .items
+            .into_iter()
+            .find_map(|n| match n {
+                Node::Class(c) => Some(Arc::new(c)),
+                _ => None,
+            })
+            .expect("fixture declares a class")
+    }
+
+    #[test]
+    fn braced_import_keeps_importers_same_name_class() {
+        let a = class_def("class Interner:\n    n: i64\n");
+        let b = class_def("class Interner:\n    label: text\n");
+        let mut scope = HashMap::new();
+        scope.insert("Interner".to_string(), Arc::clone(&a));
+        let mut incoming = HashMap::new();
+        incoming.insert("Interner".to_string(), Arc::clone(&b));
+
+        let explicit = vec!["tag_b".to_string()];
+        let preserved = unimported_def_collisions(Some(&explicit), &incoming, &scope);
+        scope.extend(incoming.clone());
+        scope.extend(preserved);
+        assert!(Arc::ptr_eq(&scope["Interner"], &a), "unimported same-name class clobbered importer's");
+    }
+
+    #[test]
+    fn explicitly_imported_same_name_class_still_wins() {
+        let a = class_def("class Point:\n    x: i64\n");
+        let b = class_def("class Point:\n    y: i64\n");
+        let scope: HashMap<_, _> = [("Point".to_string(), Arc::clone(&a))].into_iter().collect();
+        let incoming: HashMap<_, _> = [("Point".to_string(), Arc::clone(&b))].into_iter().collect();
+        let explicit = vec!["Point".to_string()];
+        assert!(unimported_def_collisions(Some(&explicit), &incoming, &scope).is_empty());
+        // Non-braced imports keep previous behaviour.
+        assert!(unimported_def_collisions(None, &incoming, &scope).is_empty());
+        // Same Arc re-merged is not a collision.
+        let same: HashMap<_, _> = [("Point".to_string(), Arc::clone(&a))].into_iter().collect();
+        assert!(unimported_def_collisions(Some(&[]), &same, &scope).is_empty());
+    }
+
+    #[test]
+    fn owner_module_class_prefers_executing_modules_class() {
+        let a = class_def("class Pair:\n    l: i64\n");
+        let b = class_def("class Pair:\n    r: i64\n");
+        let owner = "/probe/owner_b.spl";
+        MODULE_CLASSES_CACHE.with(|c| {
+            c.borrow_mut()
+                .insert(PathBuf::from(owner), [("Pair".to_string(), Arc::clone(&b))].into_iter().collect())
+        });
+        let scope: HashMap<_, _> = [("Pair".to_string(), Arc::clone(&a))].into_iter().collect();
+        let saved = crate::interpreter::CURRENT_EXEC_MODULE.with(|c| c.replace(Some(Arc::from(owner))));
+        assert!(Arc::ptr_eq(&resolve_class(&scope, "Pair").unwrap(), &b));
+        crate::interpreter::CURRENT_EXEC_MODULE.with(|c| *c.borrow_mut() = None);
+        assert!(Arc::ptr_eq(&resolve_class(&scope, "Pair").unwrap(), &a));
+        crate::interpreter::CURRENT_EXEC_MODULE.with(|c| *c.borrow_mut() = saved);
+        MODULE_CLASSES_CACHE.with(|c| c.borrow_mut().remove(Path::new(owner)));
+    }
+}
+
+/// Cached enum table of a module, if loaded.
+pub fn cached_module_enums(path: &Path) -> Option<HashMap<String, Arc<EnumDef>>> {
+    let key = normalize_path_key(path);
+    MODULE_ENUMS_CACHE.with(|cache| cache.borrow().get(&key).cloned())
+}

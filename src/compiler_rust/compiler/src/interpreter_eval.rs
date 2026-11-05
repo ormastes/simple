@@ -671,6 +671,7 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                     },
                 );
                 let arc_c = Arc::new(c.clone());
+                crate::interpreter::record_flattened_owner_class(&arc_c);
                 classes.insert(c.name.clone(), Arc::clone(&arc_c));
                 CLASS_OVERLOADS.with(|cell| {
                     cell.borrow_mut().entry(c.name.clone()).or_default().push(arc_c);
@@ -944,7 +945,9 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                     updated
                 };
 
-                classes.insert(final_class.name.clone(), Arc::new(final_class.clone()));
+                let final_arc = Arc::new(final_class.clone());
+                crate::interpreter::record_flattened_owner_class(&final_arc);
+                classes.insert(final_class.name.clone(), final_arc);
                 // Store in env as Constructor value so it can be called like MyClass()
                 env.insert(
                     final_class.name.clone(),
