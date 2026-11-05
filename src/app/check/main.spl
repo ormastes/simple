@@ -13,11 +13,11 @@ use app.check.targets.{expand_check_targets}
 use app.check.check_options.{check_option_error}
 use app.check.concurrency_lint.{run_concurrency_api_lint}
 use compiler.tools.lint.semantic_check.{simple_semantic_check_source, simple_check_is_clean}
-use compiler.tools.lint.check_diagnostic.{CheckDiagnostic, check_diagnostic_text, check_diagnostic_json, check_parser_diagnostic}
+use compiler.tools.lint.check_diagnostic.{CheckDiagnostic, check_diagnostic_text, check_diagnostic_json, check_parser_diagnostic, check_import_roots, check_unresolved_import_diagnostics}
 use common.text.{escape_json}
 
 use std.io_runtime.{get_args}
-use std.io_runtime.{file_exists}
+use std.io_runtime.{file_exists, dir_exists}
 use std.io_runtime.{read_file_text}
 @unsafe(reason: "raw transient heap scope ABI", capabilities: [ffi])
 extern fn rt_transient_array_scope_begin() -> bool
@@ -228,6 +228,31 @@ fn emit_check_diagnostic(diagnostic: CheckDiagnostic, as_json: bool):
 fn emit_check_message(path: text, message: text, as_json: bool):
     emit_check_diagnostic(CheckDiagnostic(path: path, code: "check", message: message), as_json)
 
+# W0410 warnings emitted so far; warnings never count as failures.
+var check_warning_count: i64 = 0
+
+fn check_import_root_known(path: text, root: text) -> bool:
+    if root == "std" or root == "self" or root == "super" or root == "crate":
+        return true
+    var dir = "."
+    val slash = path.last_index_of("/")
+    if slash > 0:
+        dir = path[:slash]
+    for base in ["src", "src/lib", dir]:
+        if dir_exists("{base}/{root}") or file_exists("{base}/{root}.spl"):
+            return true
+    false
+
+fn emit_unresolved_import_warnings(path: text, source: text, as_json: bool) -> i64:
+    var known: [text] = []
+    for entry in check_import_roots(source):
+        if not known.contains(entry.2) and check_import_root_known(path, entry.2):
+            known.push(entry.2)
+    val warnings = check_unresolved_import_diagnostics(path, source, known)
+    for warning in warnings:
+        emit_check_diagnostic(warning, as_json)
+    warnings.len()
+
 fn check_one_profiled(path: text, as_json: bool, phase_profile: bool, syntax_only: bool, done: i64, total: i64) -> i64:
     var file_started_us: i64 = 0
     var phase_started_us: i64 = 0
@@ -275,6 +300,7 @@ fn check_one_profiled(path: text, as_json: bool, phase_profile: bool, syntax_onl
             val total = errors.len() + concurrency_errors.len()
             failure_count = if total > 0: total else: 1
         elif not syntax_only:
+            check_warning_count = check_warning_count + emit_unresolved_import_warnings(path, source, as_json)
             ast_reset()
             val semantic_result = simple_semantic_check_source(source, path)
             if phase_profile:
@@ -348,13 +374,15 @@ fn main() -> i64:
             errors = errors + failed
             files_with_errors = files_with_errors + 1
 
-    val status = if errors == 0: "ok" else: "error"
+    val status = if errors > 0: "error" elif check_warning_count > 0: "warning" else: "ok"
     if phase_profile:
         val _command_mark = check_phase_mark(true, "command_total", command_started_us, "all", checked, files.len(), status)
     if as_json:
         val coverage = if syntax_only: "syntax-only" else: "semantic"
         val semantic_complete = if syntax_only: "false" elif errors == 0: "true" else: "false"
         print "{\"command\":\"check\",\"status\":\"{status}\",\"coverage\":\"{coverage}\",\"semantic_complete\":{semantic_complete},\"checked\":{checked},\"files\":{files.len()},\"errors\":{errors},\"files_with_errors\":{files_with_errors}}"
+    elif errors == 0 and check_warning_count > 0:
+        print "{check_warning_count} warning(s) found in {checked} file(s)"
     elif errors == 0:
         if syntax_only:
             print "Syntax-only check passed ({checked} file(s)); semantic coverage was not requested"
