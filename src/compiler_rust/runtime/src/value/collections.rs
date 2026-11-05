@@ -3129,15 +3129,26 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
         // below: they may own state this walk cannot understand.
         return true;
     }
+    let raw_debug = std::env::var_os("SIMPLE_TRANSIENT_RAW_PROMOTE_DEBUG")
+        .is_some_and(|v| v != "0");
     if !root_raw && value.heap_type().is_none() {
+        if raw_debug {
+            eprintln!("[raw-promote] false exit=unknown-heap-kind word={:#x} is_heap={} heap_type={:?}", value.0, value.is_heap(), value.heap_type());
+        }
         return false;
     }
     TRANSIENT_HEAP_SCOPE.with(|slot| {
         let mut slot = slot.borrow_mut();
         let Some(scope) = slot.as_mut() else {
+            if raw_debug {
+                eprintln!("[raw-promote] false exit=no-scope word={:#x}", value.0);
+            }
             return false;
         };
         if !scope.paused {
+            if raw_debug {
+                eprintln!("[raw-promote] false exit=not-paused word={:#x}", value.0);
+            }
             return false;
         }
 
@@ -3161,6 +3172,9 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
                 }
                 if word_count > 0 {
                     if words.is_null() {
+                        if raw_debug {
+                            eprintln!("[raw-promote] false exit=words-null current={:#x} canonical={:#x} count={}", current.0, canonical_ptr, word_count);
+                        }
                         return false;
                     }
                     let raw_words = unsafe { std::slice::from_raw_parts(words, word_count as usize) };
@@ -3180,6 +3194,9 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
         }
         for ptr in reachable_raw.iter() {
             if unsafe { rt_transient_raw_promote(*ptr) } == 0 {
+                if raw_debug {
+                    eprintln!("[raw-promote] false exit=promote-refused ptr={:#x} root_word={:#x} raw_len={}", ptr, value.0, reachable_raw.len());
+                }
                 return false;
             }
         }

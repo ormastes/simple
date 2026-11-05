@@ -254,3 +254,40 @@ SIMPLE_SCV_INVENTORY_COLD_INIT=1 \
   --runtime-path src/compiler_rust/target/aarch64-apple-darwin/bootstrap \
   -o build/probe.o
 ```
+
+## Update 2026-11-05 (night): definitive mechanism — JIT rt-symbol surface binds the preloaded dylib's twins
+
+Instrumented ALL FIVE `return false` exits of the Rust twin's
+`rt_transient_heap_promote` (runtime/src/value/collections.rs, env-gated on
+SIMPLE_TRANSIENT_RAW_PROMOTE_DEBUG, format strings verified present in the
+rebuilt binary via strings(1); the executable's plain `_rt_transient_heap_promote`
+disassembles to the Rust twin calling RuntimeValue::heap_type). Result: the SCV
+flow still fails with `retained=false` and ZERO debug lines — the executing
+promote is NOT the executable's twin.
+
+Why: the seed binary does not export `simple_contract_check`, so JIT-finalize
+crashes (cranelift get_address) unless a runtime dylib is preloaded
+(DYLD_INSERT_LIBRARIES). With the dylib present, the JIT resolves its runtime
+symbols from the dylib — a SECOND, stale (2026-11-04) copy of the runtime —
+while the interpreter and the executable's own code use the executable's
+current twins. Evidence: the 20-line probe passes with NO dylib (it never
+references simple_contract_check, so its rt symbols bind from the executable);
+the big native_build program needs the dylib and its event-promote then runs
+the stale twin. All five current-source exits instrumented and silent; the
+stale twin's behavior is whatever code shipped Nov 4.
+
+Consequences:
+- This morning's "dual-implementation split" refinement was the right family;
+  the split is not per-symbol link order but JIT-symbol-source: executable
+  (no-dylib programs) vs preloaded dylib (any program JIT-compiling a
+  contract call).
+- The SCV cold-init failure will very likely clear by rebuilding the runtime
+  dylib from current sources (or by eliminating the dylib requirement: export
+  the contract/check symbols from the seed executable so JIT binds the
+  executable's own current twins). The latter is the cleaner fix — one runtime
+  copy per process.
+
+Repro note for the next cycle: `cargo build -p simple-driver` (~4 min warm)
+plus the dylib assembly step from scripts/bootstrap/bootstrap-from-scratch.sh
+(rust-native-all-build + publish), or test the no-dylib path on any program
+that JIT-compiles a contract call after the export fix.
