@@ -1,4 +1,5 @@
 use std.common.bytes.concat_copy_v1.{bytes_concat_copy_v1}
+use compiler.backend.linker.smf_header.{smf_header_field_shift, smf_header_seed_trailer_offset, SMF_SEED_HEADER_SIZE}
 # Simple App Startup Launch Metadata
 #
 # Pure policy helpers shared by CLI, build metadata checks, and SimpleOS launch
@@ -553,12 +554,21 @@ pub struct RetainedSmfLaunchMetadataV1:
 
 pub fn retained_smf_launch_metadata_v1(bytes: [u8], fallback_kind: text) -> RetainedSmfLaunchMetadataV1:
     val fallback = launch_metadata_default(fallback_kind)
-    if bytes.len() < 128:
+    if bytes.len() < SMF_SEED_HEADER_SIZE:
         return RetainedSmfLaunchMetadataV1(
             present: false, ok: false, metadata: fallback,
             reason: "smf_header_missing")
 
-    val header = bytes.len() - 128
+    # Packed v1.1 trailer at EOF-128; Rust seed repr(C) trailer at EOF-96 with a
+    # +4 field shift (canonical decoder: compiler.backend.linker.smf_header).
+    val packed_header = if bytes.len() >= 128: bytes.len() - 128 else: -1
+    val seed_header = if packed_header >= 0 and bytes[packed_header] == 83 and bytes[packed_header + 1] == 77 and bytes[packed_header + 2] == 70 and bytes[packed_header + 3] == 0: -1 else: smf_header_seed_trailer_offset(bytes)
+    val header = if seed_header >= 0: seed_header else: packed_header
+    if header < 0:
+        return RetainedSmfLaunchMetadataV1(
+            present: false, ok: false, metadata: fallback,
+            reason: "smf_header_missing")
+    val shift = smf_header_field_shift(bytes, header)
     if bytes[header] != 83 or bytes[header + 1] != 77 or bytes[header + 2] != 70 or bytes[header + 3] != 0:
         return RetainedSmfLaunchMetadataV1(
             present: false, ok: false, metadata: fallback,
@@ -578,16 +588,16 @@ pub fn retained_smf_launch_metadata_v1(bytes: [u8], fallback_kind: text) -> Reta
     # Raw table/section offsets are payload-relative in v1.1.  Keep the
     # conversion explicit so a wrapper stub cannot shift one table while the
     # section payload is checked against another coordinate system.
-    val stub_size = _launch_meta_le_u32(bytes, header + 52)
-    val data_offset = _launch_meta_le_u32(bytes, header + 56)
+    val stub_size = _launch_meta_le_u32(bytes, header + 52 + shift)
+    val data_offset = _launch_meta_le_u32(bytes, header + 56 + shift)
     if stub_size < 0 or data_offset < 0 or stub_size != data_offset or data_offset > header:
         return RetainedSmfLaunchMetadataV1(
             present: false, ok: false, metadata: fallback,
             reason: "smf_data_offset_invalid")
     val section_count = _launch_meta_le_u32(bytes, header + 16)
-    val section_table_raw = _launch_meta_le_u64(bytes, header + 20)
-    val symbol_table_raw = _launch_meta_le_u64(bytes, header + 28)
-    val symbol_count = _launch_meta_le_u32(bytes, header + 36)
+    val section_table_raw = _launch_meta_le_u64(bytes, header + 20 + shift)
+    val symbol_table_raw = _launch_meta_le_u64(bytes, header + 28 + shift)
+    val symbol_count = _launch_meta_le_u32(bytes, header + 36 + shift)
     val section_entry_size = 64
     if section_count <= 0:
         return RetainedSmfLaunchMetadataV1(

@@ -494,6 +494,49 @@ main = Probe.make(5)
         assert_eq!(result, 5, "make(5) should use default b=0, returning 5");
     }
 
+    #[test]
+    fn static_method_default_param_values_match_declarations() {
+        let result = eval_exit(
+            r#"
+class Probe:
+    static fn make(a: i64, b: i64 = 100) -> i64:
+        print("b={b}")
+        a + b
+    static fn one(x: i64 = 42) -> i64:
+        print("x={x}")
+        x
+fn freefn(a: i64, b: i64 = 100) -> i64:
+    print("free b={b}")
+    a + b
+main = Probe.make(5) + Probe.one() + freefn(5)
+"#,
+        );
+        assert_eq!(
+            result, 252,
+            "omitted static and free-function arguments must use their declared defaults"
+        );
+    }
+
+    #[test]
+    fn static_method_default_param_explicit_arguments_override_defaults() {
+        let result = eval_exit(
+            r#"
+class Probe:
+    static fn make(a: i64, b: i64 = 100) -> i64:
+        a + b
+    static fn one(x: i64 = 42) -> i64:
+        x
+fn freefn(a: i64, b: i64 = 100) -> i64:
+    a + b
+main = Probe.make(5, 7) + Probe.one(9) + freefn(5, 7)
+"#,
+        );
+        assert_eq!(
+            result, 33,
+            "explicit static and free-function arguments must override defaults"
+        );
+    }
+
     // Regression: a static constructor taking a trait-typed parameter must
     // accept any concrete argument that implements the trait, not only a
     // value whose class is literally named after the trait. Before this fix,

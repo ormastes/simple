@@ -55,3 +55,51 @@ fn plain_binding_of_first_still_works() {
     let src = "fn main() -> i64:\n    val xs: [i64] = [41, 2]\n    val f = xs.first()\n    val l = xs.last()\n    f + l\n";
     assert_eq!(run(src), 43);
 }
+
+#[test]
+fn u64_coalesce_preserves_present_sentinel_wide_and_absent_values() {
+    let src = r#"fn main() -> i64:
+    val xs: [u64] = [3u64, 9223372036854775808u64]
+    val empty: [u64] = []
+    if (xs.first() ?? 9u64) != 3u64: return 1
+    if (xs.last() ?? 9u64) != 9223372036854775808u64: return 2
+    if (xs.get(0) ?? 9u64) != 3u64: return 3
+    if (xs.get(1) ?? 9u64) != 9223372036854775808u64: return 4
+    if (xs.get(99) ?? 9u64) != 9u64: return 5
+    if (xs.min() ?? 9u64) != 3u64: return 6
+    if (xs.max() ?? 9u64) != 9223372036854775808u64: return 7
+    if (empty.first() ?? 9u64) != 9u64: return 8
+    if (empty.last() ?? 9u64) != 9u64: return 9
+    if (empty.min() ?? 9u64) != 9u64: return 10
+    if (empty.max() ?? 9u64) != 9u64: return 11
+    return 0
+"#;
+    assert_eq!(run(src), 0);
+}
+
+#[test]
+fn u64_optional_bindings_and_mutating_accessors_preserve_payloads() {
+    let src = r#"fn main() -> i64:
+    var xs: [u64] = [3u64, 7u64]
+    val empty: [u64] = []
+    var if_got: u64 = 0u64
+    if val x = xs.first():
+        if_got = x
+    if if_got != 3u64: return 1
+    var match_got: u64 = 0u64
+    match xs.first():
+        case Some(v): match_got = v
+        case _: return 2
+    if match_got != 3u64: return 3
+    if (xs.pop() ?? 9u64) != 7u64: return 4
+    if (xs.remove(0) ?? 9u64) != 3u64: return 5
+    if (xs.pop() ?? 9u64) != 9u64: return 6
+    if val e = empty.first():
+        return 7
+    match empty.first():
+        case Some(v): return 8
+        case _: match_got = 0u64
+    return 0
+"#;
+    assert_eq!(run(src), 0);
+}
