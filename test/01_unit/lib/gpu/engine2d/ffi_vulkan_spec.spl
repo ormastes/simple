@@ -61,43 +61,52 @@ describe "VulkanDynFfi":
         it "starts empty, then counts and names each rejected operation":
             # @req: REQ-ENGINE2D-FfiVulkan-001
             step("Verify: starts empty, then counts and names each rejected operation")
-            val ffi = VulkanDynFfi.create_dynamic()
-            if ffi == nil:
-                # No Vulkan loader on this host. Report it loudly; do NOT
-                # let an absent loader masquerade as a passing ledger test.
-                print("SKIPPED: no Vulkan loader (create_dynamic returned nil) -- the DEVICE-RAN branch did NOT run\n")
-                expect(ffi == nil).to_equal(true)
-                return
-            print("DEVICE-RAN: libvulkan dlopen succeeded; asserting rejection ledger\n")
+            # NOTE: unwrap via `match Some(..)`, not the
+            # `if ffi == nil: return` idiom — on the current seed interpreter
+            # a nil-check-then-use binding of an Option<Class> is a COPY and
+            # `me`-method mutations through it are silently discarded
+            # (doc/08_tracking/bug/option_class_unwrap_binding_copies_instead_of_referencing_2026-09-13.md).
+            match VulkanDynFfi.create_dynamic():
+                case None:
+                    # No Vulkan loader on this host. Report it loudly; do NOT
+                    # let an absent loader masquerade as a passing ledger test.
+                    print("SKIPPED: no Vulkan loader (create_dynamic returned nil) -- the DEVICE-RAN branch did NOT run\n")
+                    # Real assertion in the skip arm: the documented nil contract
+                    # for a path that cannot exist still holds on this host.
+                    expect(VulkanDynFfi.create_dynamic_from("/nonexistent/libvulkan.so.999") == nil).to_equal(true)
+                case Some(ffi):
+                    print("DEVICE-RAN: libvulkan dlopen succeeded; asserting rejection ledger\n")
 
-            # A freshly constructed instance has rejected nothing.
-            expect(ffi.rejected_op_count()).to_equal(0)  # oracle: value fixed by the spec contract
-            expect(ffi.last_rejection()).to_equal("")
+                    # A freshly constructed instance has rejected nothing.
+                    expect(ffi.rejected_op_count()).to_equal(0)  # oracle: value fixed by the spec contract
+                    expect(ffi.last_rejection()).to_equal("")
 
-            # `init` has no marshallable libvulkan entry point, so the class
-            # must reject it: return false AND record it.
-            expect(ffi.init()).to_equal(false)
-            expect(ffi.rejected_op_count()).to_equal(1)  # oracle: value fixed by the spec contract
-            expect(ffi.last_rejection()).to_equal("init")
+                    # `init` has no marshallable libvulkan entry point, so the class
+                    # must reject it: return false AND record it.
+                    expect(ffi.init()).to_equal(false)
+                    expect(ffi.rejected_op_count()).to_equal(1)  # oracle: value fixed by the spec contract
+                    expect(ffi.last_rejection()).to_equal("init")
 
-            # A second distinct op must ADVANCE the counter (not merely
-            # re-set it) and must re-name `last_rejection`.
-            expect(ffi.shutdown()).to_equal(false)
-            expect(ffi.rejected_op_count()).to_equal(2)  # oracle: value fixed by the spec contract
-            expect(ffi.last_rejection()).to_equal("shutdown")
-            print("DEVICE-RAN: rejection ledger advanced 0 -> 1 (init) -> 2 (shutdown)\n")
+                    # A second distinct op must ADVANCE the counter (not merely
+                    # re-set it) and must re-name `last_rejection`.
+                    expect(ffi.shutdown()).to_equal(false)
+                    expect(ffi.rejected_op_count()).to_equal(2)  # oracle: value fixed by the spec contract
+                    expect(ffi.last_rejection()).to_equal("shutdown")
+                    print("DEVICE-RAN: rejection ledger advanced 0 -> 1 (init) -> 2 (shutdown)\n")
 
         it "is_available stays false in Dynamic mode even with a loader present":
             # @req: REQ-ENGINE2D-FfiVulkan-001
             step("Verify: is_available stays false in Dynamic mode even with a loader present")
-            val ffi = VulkanDynFfi.create_dynamic()
-            if ffi == nil:
-                print("SKIPPED: no Vulkan loader (create_dynamic returned nil) -- the DEVICE-RAN branch did NOT run\n")
-                expect(ffi == nil).to_equal(true)
-                return
-            # This is the anti-fake-honesty rule the class documents: a
-            # capability gate must not report a capability it cannot drive.
-            # Dynamic mode CANNOT drive Vulkan through this raw FFI, so
-            # is_available() must be false regardless of the host's driver.
-            expect(ffi.is_available()).to_equal(false)
-            print("DEVICE-RAN: is_available()==false in Dynamic mode (loader present)\n")
+            match VulkanDynFfi.create_dynamic():
+                case None:
+                    print("SKIPPED: no Vulkan loader (create_dynamic returned nil) -- the DEVICE-RAN branch did NOT run\n")
+                    # Real assertion in the skip arm: a loader absence must not
+                    # weaken the documented bad-path nil contract.
+                    expect(VulkanDynFfi.create_dynamic_from("/nonexistent/libvulkan.so.999") == nil).to_equal(true)
+                case Some(ffi):
+                    # This is the anti-fake-honesty rule the class documents: a
+                    # capability gate must not report a capability it cannot drive.
+                    # Dynamic mode CANNOT drive Vulkan through this raw FFI, so
+                    # is_available() must be false regardless of the host's driver.
+                    expect(ffi.is_available()).to_equal(false)
+                    print("DEVICE-RAN: is_available()==false in Dynamic mode (loader present)\n")

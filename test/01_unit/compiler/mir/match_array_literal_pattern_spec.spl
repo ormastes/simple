@@ -1,0 +1,46 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Array-literal case patterns are not wildcards
+
+Bug: match_array_literal_patterns_multiple_wildcard_arms_2026-10-24. `case [1, 0]:`
+over an [i64] subject must not lower as a wildcard arm (MIR B5b: "match has
+multiple wildcard arms").
+"""
+
+# @tag: unit, compiler, mir, match
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn mir_errors(src: text) -> [text]:
+    val parsed = parse_full_frontend(src, "testdata/arr_pat.spl", "arr_pat", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("testdata/arr_pat.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    val target_context = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+    val mir = lowering.lower_module(hir)
+    var out: [text] = []
+    for err in lowering.errors:
+        out.push(err.message)
+    out
+
+fn count_containing(errs: [text], needle: text) -> i64:
+    var n = 0
+    for e in errs:
+        if e.contains(needle):
+            n = n + 1
+    n
+
+describe "array literal case patterns":
+    it "does not report multiple wildcard arms for distinct array patterns":
+        val src = "fn f(v: [i64]) -> i64:\n    val r = match v:\n        case [1, 0]:\n            10\n        case [1, 1]:\n            11\n        case _:\n            0\n    r\n"
+        expect(count_containing(mir_errors(src), "multiple wildcard")).to_equal(0)
+    it "does not report unsupported pattern for an array literal arm":
+        val src = "fn g(v: [i64]) -> i64:\n    val r = match v:\n        case [1, 0]:\n            10\n        case _:\n            0\n    r\n"
+        expect(count_containing(mir_errors(src), "unsupported")).to_equal(0)

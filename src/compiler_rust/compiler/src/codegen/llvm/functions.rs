@@ -1696,11 +1696,7 @@ impl LlvmBackend {
                             .unwrap_or_else(|| i64_type.const_int(u64::MAX, false).into())
                             .into_int_value();
                         let expected = {
-                            use std::collections::hash_map::DefaultHasher;
-                            use std::hash::{Hash, Hasher};
-                            let mut hasher = DefaultHasher::new();
-                            variant_name.hash(&mut hasher);
-                            (hasher.finish() & 0xFFFFFFFF) as u64
+                            simple_runtime::value::hash_variant_discriminant(variant_name) as u64
                         };
                         let expected_val = i64_type.const_int(expected, false);
                         let disc_cmp = builder
@@ -1832,11 +1828,7 @@ impl LlvmBackend {
                 let i64_t = self.runtime_int_type();
                 let i32_t = self.context_ref().i32_type();
                 let disc = {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut hasher = DefaultHasher::new();
-                    variant_name.hash(&mut hasher);
-                    (hasher.finish() & 0xFFFFFFFF) as u32
+                    simple_runtime::value::hash_variant_discriminant(variant_name) as u32
                 };
                 let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
                     let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
@@ -1870,11 +1862,7 @@ impl LlvmBackend {
                 let i64_t = self.runtime_int_type();
                 let i32_t = self.context_ref().i32_type();
                 let disc = {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut hasher = DefaultHasher::new();
-                    variant_name.hash(&mut hasher);
-                    (hasher.finish() & 0xFFFFFFFF) as u32
+                    simple_runtime::value::hash_variant_discriminant(variant_name) as u32
                 };
                 let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
                     let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
@@ -1984,11 +1972,7 @@ impl LlvmBackend {
                 let i64_t = self.runtime_int_type();
                 let i32_t = self.context_ref().i32_type();
                 let disc = {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut h = DefaultHasher::new();
-                    "Some".hash(&mut h);
-                    (h.finish() & 0xFFFFFFFF) as u32
+                    simple_runtime::value::hash_variant_discriminant("Some") as u32
                 };
                 let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
                     let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
@@ -2016,11 +2000,7 @@ impl LlvmBackend {
                 let i64_t = self.runtime_int_type();
                 let i32_t = self.context_ref().i32_type();
                 let disc = {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut h = DefaultHasher::new();
-                    "None".hash(&mut h);
-                    (h.finish() & 0xFFFFFFFF) as u32
+                    simple_runtime::value::hash_variant_discriminant("None") as u32
                 };
                 let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
                     let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
@@ -2047,11 +2027,7 @@ impl LlvmBackend {
                 let i64_t = self.runtime_int_type();
                 let i32_t = self.context_ref().i32_type();
                 let disc = {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut h = DefaultHasher::new();
-                    "Ok".hash(&mut h);
-                    (h.finish() & 0xFFFFFFFF) as u32
+                    simple_runtime::value::hash_variant_discriminant("Ok") as u32
                 };
                 let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
                     let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
@@ -2079,11 +2055,7 @@ impl LlvmBackend {
                 let i64_t = self.runtime_int_type();
                 let i32_t = self.context_ref().i32_type();
                 let disc = {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut h = DefaultHasher::new();
-                    "Err".hash(&mut h);
-                    (h.finish() & 0xFFFFFFFF) as u32
+                    simple_runtime::value::hash_variant_discriminant("Err") as u32
                 };
                 let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
                     let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
