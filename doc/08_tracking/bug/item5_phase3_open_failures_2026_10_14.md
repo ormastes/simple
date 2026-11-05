@@ -132,3 +132,39 @@ Fix the observed MIR crash owner, qualify each changed object, build the full co
 ## Closed 2026-11-04
 
 `item5_cranelift_module_data_support_2026_10_14` closed: imported globals are bound through `cranelift_import_global_accessor_v1` and non-scalar statics get a handle slot with a guarded module initializer (`declare_module_statics` / `cranelift_static_init_supported` in `cranelift_codegen_adapter.spl`; landed in a1d66e52206, d2f4ca104ae). Imported non-public statics are deliberately rejected. Mixed LLVM/Cranelift runtime initialization remains unqualified and is not tracked by this row.
+
+## 2026-11-05 narrow fix (r-item5)
+
+Retention (Simple side): `NativeStagedCodegenStateV1.smf_part_objects: {text: [u8]}`
+(`driver_build/native_staged_codegen.spl:74`) held every emitted module's
+object bytes until `collect_smf_bytes` (`driver_aot_smf_output.spl:211`,
+`driver_aot_pipeline.spl:883`) — resident bytes = sum over all modules.
+
+Fix (option 1, object bytes -> file direct): new single-owner
+`driver_build/smf_object_spool_v1.spl`. `smf_object_spool_put_v1` writes the
+object to `build/smf_object_spool/p<pid>/<injective-stem>.o` and keeps only
+path + size; `live_bytes` counts bytes held in memory (rises by one object
+during a put, back to 0 when it lands); `peak_live_bytes`/`spooled_bytes`
+prove the reclaim. Assembly reads back in sorted key order (byte-identical to
+`smf_parts_assemble_objects_v1`), fails closed on any write/read/size error,
+and the spool is released (own files deleted) after assembly and after a
+shard worker writes its parts. Value transitions with one owner per process:
+no locks, no shared counter. Peak during final SMF assembly is still one
+whole SMF blob (inherent to the single-blob format).
+
+Specs (seed `bin/simple.exe run`):
+- `test/01_unit/compiler/driver/smf_object_spool_spec.spl` — 7/7 OK. Before
+  (dict): 8x64 B retained 512 B; after (spool): live 0, peak 64. Stress: 200
+  synthetic modules x 256 B (fake-emit harness, no llc), live 0 after every
+  put, peak 256, spooled 51200, assembly 51200 B, release -> 0 parts.
+- regressions OK: `smf_staged_parts_spec` 6/6, `native_staged_codegen_spec`
+  9/9, `native_mir_shard_spec` 12/12.
+
+Option 2 (refcounted MIR eviction) not implemented: the blocker recorded above
+stands — MirModule instances carry no runtime header/tag, and their name/key
+strings are aliased by HIR/AST/SymbolTable, so a release-at-0 side table would
+free strings it does not own. Needs a class-instance tag (codegen) first.
+
+Unverified: stage3 RSS on SymbolTable87 (no redeploy in this lane); the
+LLVM-side retention (`llvm_lib_backend.spl:139` `rt_bytes_from_raw` copy) in the
+pure native path is already dropped after `write_elf_bytes_to_file`.
