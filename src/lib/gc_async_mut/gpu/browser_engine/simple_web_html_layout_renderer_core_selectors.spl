@@ -43,6 +43,48 @@ fn attr_selector_matches(attrs: text, expr: text) -> bool:
         if case_insensitive:
             return actual.len() > 0 and actual.lower().ends_with(want.lower())
         return actual.len() > 0 and actual.ends_with(want)
+    # Substring, whitespace-token, and dash-match operators must be
+    # inspected before the bare "=" scan below: their marker characters
+    # (*, ~, |) sit immediately left of the same "=" the exact branch
+    # would otherwise claim, misreading `data-tags*='beta'` as an exact
+    # match on the literal attribute name `data-tags*`.
+    val substr_op = text_index_of(raw, "*=")
+    if substr_op >= 0:
+        val name = raw.substring(0, substr_op).trim()
+        val want = unquote_css_attr_value(raw.substring(substr_op + 2, raw.len()))
+        val actual = attr_value(attrs, name)
+        if case_insensitive:
+            return actual.len() > 0 and actual.lower().contains(want.lower())
+        return actual.len() > 0 and actual.contains(want)
+    val token_op = text_index_of(raw, "~=")
+    if token_op >= 0:
+        val name = raw.substring(0, token_op).trim()
+        val want = unquote_css_attr_value(raw.substring(token_op + 2, raw.len()))
+        # CSS Selectors 4: an empty ~= operand can never match.
+        if want.len() == 0:
+            return false
+        val actual = attr_value(attrs, name)
+        val words = split_class_words_trimmed(actual)
+        var wi = 0
+        while wi < words.len():  # cpu-lane-loop-ok: linear scan of ONE node's attribute token list for one wanted token; bound is that attribute's token count
+            if case_insensitive:
+                if words[wi].lower() == want.lower():
+                    return true
+            else:
+                if words[wi] == want:
+                    return true
+            wi = wi + 1
+        return false
+    val dash_op = text_index_of(raw, "|=")
+    if dash_op >= 0:
+        val name = raw.substring(0, dash_op).trim()
+        val want = unquote_css_attr_value(raw.substring(dash_op + 2, raw.len()))
+        val actual = attr_value(attrs, name)
+        if case_insensitive:
+            val a = actual.lower()
+            val w = want.lower()
+            return a == w or a.starts_with(w + "-")
+        return actual == want or actual.starts_with(want + "-")
     val exact_op = text_index_of(raw, "=")
     if exact_op >= 0:
         val name = raw.substring(0, exact_op).trim()
@@ -632,6 +674,9 @@ val ATTR_OP_PRESENT: i32 = 0     # bare [name]
 val ATTR_OP_EXACT: i32 = 1       # =
 val ATTR_OP_PREFIX: i32 = 2      # ^=
 val ATTR_OP_SUFFIX: i32 = 3      # $=
+val ATTR_OP_SUBSTR: i32 = 4      # *=
+val ATTR_OP_TOKEN: i32 = 5       # ~=
+val ATTR_OP_DASH: i32 = 6        # |=
 
 fn _dead_parsed_sel() -> ParsedSel:
     ParsedSel(
@@ -679,6 +724,24 @@ fn _parse_attr_test(expr: text) -> ParsedAttr:
         val name = raw.substring(0, suffix_op).trim()
         val want = unquote_css_attr_value(raw.substring(suffix_op + 2, raw.len()))
         return ParsedAttr(name: name, op: ATTR_OP_SUFFIX, want: want, want_lower: want.lower(), ci: case_insensitive)
+    # Substring/token/dash probes mirror attr_selector_matches: they run
+    # before the bare "=" scan so the marker char left of the same "=" is
+    # not swallowed into the attribute name of an exact test.
+    val substr_op = text_index_of(raw, "*=")
+    if substr_op >= 0:
+        val name = raw.substring(0, substr_op).trim()
+        val want = unquote_css_attr_value(raw.substring(substr_op + 2, raw.len()))
+        return ParsedAttr(name: name, op: ATTR_OP_SUBSTR, want: want, want_lower: want.lower(), ci: case_insensitive)
+    val token_op = text_index_of(raw, "~=")
+    if token_op >= 0:
+        val name = raw.substring(0, token_op).trim()
+        val want = unquote_css_attr_value(raw.substring(token_op + 2, raw.len()))
+        return ParsedAttr(name: name, op: ATTR_OP_TOKEN, want: want, want_lower: want.lower(), ci: case_insensitive)
+    val dash_op = text_index_of(raw, "|=")
+    if dash_op >= 0:
+        val name = raw.substring(0, dash_op).trim()
+        val want = unquote_css_attr_value(raw.substring(dash_op + 2, raw.len()))
+        return ParsedAttr(name: name, op: ATTR_OP_DASH, want: want, want_lower: want.lower(), ci: case_insensitive)
     val exact_op = text_index_of(raw, "=")
     if exact_op >= 0:
         val name = raw.substring(0, exact_op).trim()
@@ -697,6 +760,32 @@ fn parsed_attr_matches(attrs: text, t: ParsedAttr) -> bool:
         if t.ci:
             return actual.len() > 0 and actual.lower().ends_with(t.want_lower)
         return actual.len() > 0 and actual.ends_with(t.want)
+    if t.op == ATTR_OP_SUBSTR:
+        val actual = attr_value(attrs, t.name)
+        if t.ci:
+            return actual.len() > 0 and actual.lower().contains(t.want_lower)
+        return actual.len() > 0 and actual.contains(t.want)
+    if t.op == ATTR_OP_TOKEN:
+        # CSS Selectors 4: an empty ~= operand can never match.
+        if t.want.len() == 0:
+            return false
+        val words = split_class_words_trimmed(attr_value(attrs, t.name))
+        var wi = 0
+        while wi < words.len():  # cpu-lane-loop-ok: linear scan of ONE node's attribute token list for one wanted token; bound is that attribute's token count
+            if t.ci:
+                if words[wi].lower() == t.want_lower:
+                    return true
+            else:
+                if words[wi] == t.want:
+                    return true
+            wi = wi + 1
+        return false
+    if t.op == ATTR_OP_DASH:
+        val actual = attr_value(attrs, t.name)
+        if t.ci:
+            val a = actual.lower()
+            return a == t.want_lower or a.starts_with(t.want_lower + "-")
+        return actual == t.want or actual.starts_with(t.want + "-")
     if t.op == ATTR_OP_EXACT:
         if t.ci:
             return attr_value(attrs, t.name).lower() == t.want_lower

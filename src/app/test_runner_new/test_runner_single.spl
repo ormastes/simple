@@ -31,6 +31,7 @@ use app.io.cli_ops.{cli_current_exe_path}
 use std.spec.in_development.{source_is_in_development, in_development_explicit_line}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES, TestRunOutcome, test_run_outcome_exit_code}
 use app.test_runner_new.client_arg_shape.{client_tag_value, client_select_tagged}
+use app.test_runner_new.timeout_budget.{client_default_timeout_secs}
 use std.test_runner.child_cwd.{spec_child_launch_plan, child_cwd_absolute, child_cwd_anchor_path}
 use std.sffi.env.{env_cwd_raw, env_set_cwd_raw}
 use std.nogc_sync_mut.test_runner.resource_policy.{test_max_procs_value_valid}
@@ -319,7 +320,12 @@ fn clean_args() -> [text]:
 
 fn parse_child_run(args: [text]) -> ChildRun:
     var path = ""
-    var timeout_secs = 120
+    # 2026-11-05: default raised 120 -> 900 via client_default_timeout_secs()
+    # (env-aware, matches KILL_SIMPLE_MIN_AGE_SECS). The 2026-08-17 raise
+    # covered the client path only; this lane still killed healthy long specs
+    # deterministically at 120s with no BDD summary. Bug:
+    # doc/08_tracking/bug/fetch_wasm_chain_spec_runner_premature_child_termination_2026-06-30.md
+    var timeout_secs = client_default_timeout_secs()
     var list_only = false
     var compiler = ""
     var extra_paths: [text] = []
@@ -474,8 +480,9 @@ fn spec_exec_limit_directive(file_path: text) -> i64:
 fn spec_timeout_secs_directive(file_path: text) -> i64:
     """Parse `# @timeout_secs <N>` from a spec header (0 when absent/invalid).
 
-    The per-spec child wall-clock budget defaults to 120s and the only other
-    lever is the `slow_it` 600s floor. A spec whose HONEST run exceeds 600s
+    The per-spec child wall-clock budget defaults to 900s (see
+    client_default_timeout_secs) and the only other lever is the `slow_it`
+    600s floor. A spec whose HONEST run exceeds 600s
     therefore had no way to ask for more: the child was killed mid-run and the
     outer runner printed "Process timed out" with NO verdict line at all — a
     fail-open hole, because a spec that cannot report a verdict can never
