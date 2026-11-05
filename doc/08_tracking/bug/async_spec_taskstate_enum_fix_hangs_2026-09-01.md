@@ -1,10 +1,10 @@
 # async_spec.spl: TaskState declared as `class` instead of `enum` — fixing the declaration hangs the run
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-05 — Resolved: hang was a spec-side value-semantics infinite loop, fixed by e8cfbc4d5e5
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN
+**Status:** CLOSED 2026-11-05 (RESOLVED 2026-09-18 by e8cfbc4d5e5, re-verified by reproduction + full-mode runs)
 **Filed:** 2026-09-01
 **Found by:** triage of `test/01_unit/lib/std/` failures on Windows
   (`test/01_unit/lib/std/async_spec.spl`, 21/45 passing).
@@ -74,4 +74,66 @@ bin/simple test test/01_unit/lib/std/async_spec.spl
 timeout 30 bin/simple test test/01_unit/lib/std/async_spec.spl; echo "rc=$?"
 # rc=124
 ```
+
+## Resolution 2026-11-05 — hang located, root cause, and verification
+
+**Where the hang was.** Runtime, in the spec's own `Executor.run()` loop —
+not parse, not HIR, not an engine defect, and not Windows-specific. With
+`class TaskState:` the file fails semantically before any executor code runs
+(`method 'Pending' not found`); changing it to `enum` lets execution reach
+the executor double, which then spins forever.
+
+**Root cause (spec-side).** The pre-fix `Future`/`Promise` doubles embedded
+an `AsyncState` class field, and Simple has value semantics: construction
+and anon-tuple destructuring deep-copy. The old `Promise.new()` returned
+`(Future(state: state), Promise(state: state))` — two *copies* of one
+`AsyncState`, so `promise.complete(99)` mutated only the `Promise` copy and
+the destructured `future` polled `Pending` forever. In the
+`it "should wake suspended task"` example a task is spawned on that
+never-ready future; `Executor.run()` loops `while self.running and
+self.tasks.len() > 0`, and `run_iteration()` re-queues every suspended task
+onto `ready_queue`, so `tasks` never drains and the loop never exits.
+
+**Fix (already landed as e8cfbc4d5e5, "test(std): repair async_spec
+Future/Promise state model (registry-based)").** Both halves of this bug
+were fixed there, on 2026-09-18: `TaskState` is now declared `enum`, and
+the doubles share mutable state through a module-level `_async_states`
+registry keyed by `state_id` (the idiom from
+`test/01_unit/lib/nogc_async_mut/promise_spec.spl`), so `Promise.new()`
+handles poll consistently and the suspended task actually wakes. No engine
+or stdlib change was needed. The existing `it "should wake suspended task"`
+block is the regression test: under the old state model it hangs (rc=124).
+
+**RED (hang reproduced, aarch64 Linux, phase-snapshot seed binary).**
+Pre-fix spec (`git show e8cfbc4d5e5^:test/01_unit/lib/std/async_spec.spl`,
+with `class TaskState:` -> `enum TaskState:` applied per this doc's repro):
+
+```
+timeout 120 <simple> test <pre-fix spec>   # rc=124, no verdict emitted
+```
+
+A minimal standalone probe using the old doubles (never-ready future +
+`Executor.run()`) prints `before run` and never reaches `after run`,
+confirming the infinite loop is in the executor double's re-queue logic.
+
+**GREEN (current tree).** `test/01_unit/lib/std/async_spec.spl` with the
+landed fix:
+
+```
+<simple> test test/01_unit/lib/std/async_spec.spl                 # 46/46 passed
+<simple> test ... --mode interpreter                              # 46/46 passed
+<simple> test ... --mode native                                   # 46/46 passed
+```
+
+**Regression (neighboring async specs, all with timeouts).**
+`test/01_unit/lib/nogc_async_mut/promise_spec.spl` — 20/20 passed.
+Sibling `test/01_unit/lib/std/concurrency/promise_spec.spl` — 12/19 passed,
+7 failed with pre-existing, unrelated `semantic: unknown static method new
+on class Promise` (production `std.async.Promise` API surface; separate
+lane, not this bug).
+
+**Remaining concerns.** None for this bug. The production
+`std.async` promise shared-state registry remains a documented follow-up
+lane per e8cfbc4d5e5's message; the sibling concurrency spec's 7 failures
+are a distinct issue.
 
