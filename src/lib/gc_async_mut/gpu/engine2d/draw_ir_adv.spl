@@ -1478,6 +1478,43 @@ fn _engine2d_draw_ir_unsupported_command_kinds(commands: [DrawIrCommand]) -> tex
         return "none"
     kinds
 
+# Clip logically in force for a text paint: the command's clip translated by
+# the render offset and intersected with the active clip when present, else
+# the ambient active clip. Degraded/fallback text containment must intersect
+# with this rather than replace it.
+fn _engine2d_draw_ir_text_effective_clip(command_clip: DrawIrRect, active_clip: DrawIrRect, offset_x: i32, offset_y: i32) -> DrawIrRect:
+    if command_clip.present:
+        return draw_ir_rect_intersection(
+            draw_ir_rect_translate(command_clip, offset_x, offset_y),
+            active_clip)
+    return active_clip
+
+fn _engine2d_draw_ir_restore_clip(eng: Engine2D, clip: DrawIrRect):
+    if clip.present:
+        eng.set_clip(clip.x, clip.y, clip.width, clip.height)
+    else:
+        eng.clear_clip()
+
+# Degraded-face bitmap fallback for a text command whose resolved vector batch
+# could not be staged. The run was measured/wrapped with the selected vector
+# face's advances, but the bitmap fallback face paints WIDER glyphs, so an
+# unconstrained fallback draw spills past the laid-out right edge into adjacent
+# boxes (observed 2026-11-05: bitmap pixels landed right of a 120px block that
+# the vector layout had wrapped correctly). Cap the paint horizontally at the
+# command's laid-out extent, INTERSECTED with the clip already in force
+# (paint_clip) so container/overflow clipping is not discarded; vertical
+# overflow stays visible, matching CSS overflow:visible.
+fn _engine2d_draw_ir_text_bitmap_fallback(eng: Engine2D, x: i32, y: i32, command: DrawIrCommand, paint_clip: DrawIrRect):
+    if command.width > 0:
+        val band = draw_ir_rect_intersection(
+            paint_clip,
+            draw_ir_rect_bounds(x, 0, command.width, eng.height()))
+        eng.set_clip(band.x, band.y, band.width, band.height)
+        eng.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
+        _engine2d_draw_ir_restore_clip(eng, paint_clip)
+    else:
+        eng.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
+
 fn _engine2d_draw_ir_append_unsupported_reason(reason: text, unsupported_kinds: text) -> text:
     if unsupported_kinds == "none":
         return reason
@@ -2174,6 +2211,11 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
             eng.set_clip(
                 clip.x, clip.y, clip.width, clip.height
             )
+        # Clip logically in force for text paints below. Horizontal
+        # containment of degraded/fallback text must INTERSECT with this,
+        # never replace it (replacing discards the container/overflow clip).
+        val text_paint_clip = _engine2d_draw_ir_text_effective_clip(
+            command_clip, active_clip, offset_x, offset_y)
         if command_kind == DRAW_IR_COMMAND_RECT:
             # A concrete Metal composition requests a device receipt for every
             # canonical WM glass surface, even when its metadata or bounds are
@@ -2273,7 +2315,24 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
                         if payload_valid:
                             drawn = eng.draw_shaped_text(x, y, command.glyph_run, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
                     else:
-                        drawn = eng.draw_text_with_advances(x, y, command.text_value, advances, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
+                        # A resolved-advance run is bounded horizontally to the
+                        # command's laid-out extent: when the realized face is
+                        # wider than the face layout measured with (font
+                        # substitution or a degraded no-identity run), an
+                        # unbounded paint spills into adjacent boxes (observed
+                        # 2026-11-05). Vertical overflow stays visible, matching
+                        # CSS overflow:visible. Skipped when the command carries
+                        # no laid-out width (unstyled producers emit width=0):
+                        # an empty clip rect would erase the whole paint.
+                        if command.width > 0:
+                            val band = draw_ir_rect_intersection(
+                                text_paint_clip,
+                                draw_ir_rect_bounds(x, 0, command.width, eng.height()))
+                            eng.set_clip(band.x, band.y, band.width, band.height)
+                            drawn = eng.draw_text_with_advances(x, y, command.text_value, advances, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
+                            _engine2d_draw_ir_restore_clip(eng, text_paint_clip)
+                        else:
+                            drawn = eng.draw_text_with_advances(x, y, command.text_value, advances, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
                     if probe_this:
                         _e2d_text_probe_count = _e2d_text_probe_count + 1
                         val branch_kind = if shaped and payload_valid: "shaped" else if not shaped: "resolved" else: "shaped-invalid"
@@ -2293,7 +2352,7 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
                         # advances rather than dropping it -- one unstageable
                         # run used to cost every pixel of the page.
                         eng.mark_cpu_fallback_reason("text-advance-arity")
-                        eng.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
+                        _engine2d_draw_ir_text_bitmap_fallback(eng, x, y, command, text_paint_clip)
                         rendered = rendered + 1
                         # Discriminator vs the callee-side receipt: this line
                         # with shaped=false and NO [e2d-batch] line means the
@@ -2312,14 +2371,22 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
                     # it. Paint the run with the font's own advances instead
                     # and RECORD the boundary crossing; never drop the Draw IR.
                     eng.mark_cpu_fallback_reason("text-advance-arity")
-                    eng.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
+                    _engine2d_draw_ir_text_bitmap_fallback(eng, x, y, command, text_paint_clip)
                     rendered = rendered + 1
                     print("[e2d-ir] text-advance-arity-fallback text_len={command.text_value.len()} shaped={shaped}")
                 else:
                     if probe_this:
                         _e2d_text_probe_count = _e2d_text_probe_count + 1
                         print("[e2d-text-probe] ir kind=plain len={command.text_value.len()}")
-                    eng.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
+                    if command.width > 0:
+                        val band = draw_ir_rect_intersection(
+                            text_paint_clip,
+                            draw_ir_rect_bounds(x, 0, command.width, eng.height()))
+                        eng.set_clip(band.x, band.y, band.width, band.height)
+                        eng.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
+                        _engine2d_draw_ir_restore_clip(eng, text_paint_clip)
+                    else:
+                        eng.draw_text(x, y, command.text_value, command.color, _engine2d_draw_ir_text_font_size(command.computed_style))
                     rendered = rendered + 1
             if not font_ready:
                 skipped = skipped + 1

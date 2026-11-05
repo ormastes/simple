@@ -106,8 +106,11 @@ extern unsigned char __heap_end[];
 /* The HIGH half of the linker-reserved `.heap`. See the matching comment in
  * baremetal_stubs.c: the two riscv64 runtime TUs each keep a private bump
  * cursor, so they must own disjoint halves of the region. */
-#define RV_HEAP_BASE (__heap_start + ((size_t)(__heap_end - __heap_start) / 2U))
-#define RV_HEAP_SIZE ((size_t)(__heap_end - __heap_start) / 2U)
+/* Second of three disjoint thirds of the linker-reserved .heap (baremetal_stubs.c
+ * owns the first, ghdl_boot_info_runtime.c the third) -- see the matching
+ * comment in baremetal_stubs.c. */
+#define RV_HEAP_BASE (__heap_start + ((size_t)(__heap_end - __heap_start) / 3U))
+#define RV_HEAP_SIZE ((size_t)(__heap_end - __heap_start) / 3U)
 static uintptr_t g_heap_off = 0;
 static unsigned char g_virtq[8192] __attribute__((aligned(4096)));
 static unsigned char g_dma[1024] __attribute__((aligned(512)));
@@ -2762,3 +2765,577 @@ int64_t rt_thread_local_new(void)
     static int64_t g_thread_local_next = 1;
     return g_thread_local_next++;
 }
+
+/* ---------------------------------------------------------------------------
+ * Fifth tranche: the 2026-11-05 compiler-growth gap (bug record
+ * doc/08_tracking/bug/riscv64_in_guest_kernel_link_blocked_35_symbols_2026-11-05.md).
+ *
+ * The in-guest INTERPRETER kernel link (--entry-closure over
+ * interpreter_hello_entry.spl) failed with 33 undefined symbols in four
+ * buckets. Signatures follow the ABI authority documented above (this file's
+ * header and the rt_dict_new block): src/compiler_rust/compiler/src/codegen/
+ * runtime_sffi.rs's RuntimeFuncSpec table, checked per symbol below; where a
+ * freestanding sibling disagrees with that table, the table wins.
+ *
+ * The honesty rule is the one the aarch64 freestanding runtime states at its
+ * SPL_P10_TRAP block, mirrored here verbatim in intent: (1) REAL SEMANTICS
+ * where the computation is host-independent; (2) a DEFINED answer ONLY where
+ * it is the true one for this lane and the caller is written to recognise it;
+ * (3) a NAMED LOUD TRAP for everything else. A plausible-looking wrong value
+ * is never allowed.
+ * ------------------------------------------------------------------------- */
+
+/* Named fail-closed trap shared by every admitted stub below. Prints the
+ * symbol name over the same serial sink as rt_unwrap_or_trap (this file's
+ * diagnostics section) and parks the hart in WFI, exactly like the aarch64
+ * sibling's rt_trap_unimplemented. A silent park is indistinguishable from
+ * any other guest wedge, so this MUST print. */
+static void rv_runtime_trap_unimplemented(const char *symbol)
+{
+    serial_puts("\r\n[TRAP] rv64 freestanding kernel runtime: `");
+    serial_puts(symbol ? symbol : "(null)");
+    serial_puts("` was called. No host subsystem backs this entry point in the "
+                "in-guest S-mode kernel.\r\n[TRAP] Named trap stub, not an "
+                "implementation. Core parked.\r\n");
+    for (;;) {
+        __asm__ volatile("wfi");
+    }
+}
+
+/* Arity is spelled per the RuntimeFuncSpec table, but a trap body never
+ * returns and never reads an argument, so the shape is only documentation. */
+#define RV_RUNTIME_TRAP_N(name)                                  \
+    int64_t name(void) {                                         \
+        rv_runtime_trap_unimplemented(#name);                    \
+        return 0;                                                \
+    }
+#define RV_RUNTIME_TRAP_1(name)                                  \
+    int64_t name(int64_t a) {                                    \
+        (void)a;                                                 \
+        rv_runtime_trap_unimplemented(#name);                    \
+        return 0;                                                \
+    }
+#define RV_RUNTIME_TRAP_2(name)                                  \
+    int64_t name(int64_t a, int64_t b) {                         \
+        (void)a; (void)b;                                        \
+        rv_runtime_trap_unimplemented(#name);                    \
+        return 0;                                                \
+    }
+#define RV_RUNTIME_TRAP_3(name)                                  \
+    int64_t name(int64_t a, int64_t b, int64_t c) {              \
+        (void)a; (void)b; (void)c;                               \
+        rv_runtime_trap_unimplemented(#name);                    \
+        return 0;                                                \
+    }
+#define RV_RUNTIME_TRAP_5(name)                                  \
+    int64_t name(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e) { \
+        (void)a; (void)b; (void)c; (void)d; (void)e;             \
+        rv_runtime_trap_unimplemented(#name);                    \
+        return 0;                                                \
+    }
+
+/* ---- Bucket 1: pure computation (7). Real semantics, no host dependency. -- */
+
+/* (I64)->(I64), runtime_sffi.rs:899. Same rule as the hosted twin
+ * (runtime_native.c:10900): the raw data pointer of the array, 0 when the
+ * value is not an array. Inline-item arrays report the inline slot, matching
+ * runtime_array_items above. */
+int64_t rt_array_data_ptr_text(int64_t collection)
+{
+    RuntimeArray *a = (RuntimeArray *)0;
+    if (IS_HEAP(collection)) {
+        RuntimeArray *candidate = (RuntimeArray *)DECODE_PTR(collection);
+        if (candidate && candidate->hdr.type == HEAP_ARRAY) a = candidate;
+    }
+    if (!a) return 0;
+    return (int64_t)(intptr_t)runtime_array_items(a);
+}
+
+/* (I64)->(I8), runtime_sffi.rs:680. Elements are TAGGED ints (the [i64] and
+ * [u8] spellings in utf8.spl / text_bytes.spl are the same physical array), so
+ * every element goes through simpleos_raw_or_encoded_int, the same decode the
+ * aarch64 sibling's rt_index_arg performs. The codec table is the one
+ * src/lib/common/encoding/utf8.spl documents. Semantics follow the hosted
+ * twin (runtime_native.c:12441): a value that is not a decodable byte array
+ * is REFUSED (0), not reported valid -- the aarch64 sibling answers 1 for a
+ * non-array input and that divergence is recorded rather than copied. */
+static int64_t rv_utf8_find_invalid(int64_t bytes_value)
+{
+    if (!IS_HEAP(bytes_value)) return 0;
+    RuntimeArray *array = (RuntimeArray *)DECODE_PTR(bytes_value);
+    if (!array || array->hdr.type != HEAP_ARRAY) return 0;
+    uint64_t i = 0;
+    while (i < array->len) {
+        uint32_t b0 = (uint32_t)(simpleos_raw_or_encoded_int(array->items[i]) & 0xFF);
+        int64_t need;
+        uint32_t cp;
+        if (b0 < 0x80U) need = 1;
+        else if (b0 >= 0xC2U && b0 <= 0xDFU) need = 2;
+        else if (b0 >= 0xE0U && b0 <= 0xEFU) need = 3;
+        else if (b0 >= 0xF0U && b0 <= 0xF4U) need = 4;
+        else return (int64_t)i;
+        if (i + (uint64_t)need > array->len) return (int64_t)i;
+        if (need == 1) {
+            i += 1;
+            continue;
+        }
+        for (int64_t k = 1; k < need; k++) {
+            uint32_t bk = (uint32_t)(simpleos_raw_or_encoded_int(array->items[i + (uint64_t)k]) & 0xFF);
+            if ((bk & 0xC0U) != 0x80U) return (int64_t)i;
+        }
+        {
+            uint32_t b1 = need > 1 ? (uint32_t)(simpleos_raw_or_encoded_int(array->items[i + 1]) & 0xFF) : 0U;
+            uint32_t b2 = need > 2 ? (uint32_t)(simpleos_raw_or_encoded_int(array->items[i + 2]) & 0xFF) : 0U;
+            uint32_t b3 = need > 3 ? (uint32_t)(simpleos_raw_or_encoded_int(array->items[i + 3]) & 0xFF) : 0U;
+            if (need == 2) {
+                cp = ((b0 & 0x1FU) << 6) | (b1 & 0x3FU);
+                if (cp < 0x80U) return (int64_t)i;
+            } else if (need == 3) {
+                cp = ((b0 & 0x0FU) << 12) | ((b1 & 0x3FU) << 6) | (b2 & 0x3FU);
+                if (cp < 0x800U) return (int64_t)i;
+                if (cp >= 0xD800U && cp <= 0xDFFFU) return (int64_t)i;
+            } else {
+                cp = ((b0 & 0x07U) << 18) | ((b1 & 0x3FU) << 12) |
+                     ((b2 & 0x3FU) << 6) | (b3 & 0x3FU);
+                if (cp < 0x10000U || cp > 0x10FFFFU) return (int64_t)i;
+            }
+        }
+        i += (uint64_t)need;
+    }
+    return -1;
+}
+
+int8_t rt_utf8_validate(int64_t bytes_value)
+{
+    if (!IS_HEAP(bytes_value)) return 0;
+    {
+        RuntimeArray *array = (RuntimeArray *)DECODE_PTR(bytes_value);
+        if (!array || array->hdr.type != HEAP_ARRAY) return 0;
+    }
+    return rv_utf8_find_invalid(bytes_value) < 0 ? 1 : 0;
+}
+
+/* (I64,I64)->(I64), runtime_sffi.rs:420. Raw-address read with a tagged
+ * result, the x86_64 freestanding sibling's exact body (rt_extras.c:381):
+ * the address and offset are raw words, the loaded word is ENCODE_INT'd. */
+int64_t rt_ptr_read_i64(int64_t addr, int64_t offset)
+{
+    int64_t *p = (int64_t *)((uintptr_t)addr + (uintptr_t)offset);
+    return (int64_t)ENCODE_INT(*p);
+}
+
+/* (I64)->(I64) and (I64,I64,I64)->(I8), runtime_sffi.rs:345,348. These are
+ * the load/CAS siblings of rt_atomic_int_new above (this file's fourth
+ * tranche): the handle is the RAW cell pointer that rt_atomic_int_new
+ * returns, and the stored word is whatever simpleos_raw_or_encoded_int made
+ * of the constructor argument -- both ported verbatim, never re-decoded here,
+ * matching the hosted twin (runtime_native.c:988-1000). The hosted contract
+ * returns the cell word verbatim from load; a NULL handle reads as 0 and the
+ * CAS reports failure, again as hosted. This image is single-hart, but the
+ * seq_cst builtins are kept anyway -- they cost nothing and cannot silently
+ * weaken if the lane ever grows a second hart. */
+int64_t rt_atomic_int_load(int64_t handle)
+{
+    RuntimeAtomicInt *a = (RuntimeAtomicInt *)(intptr_t)handle;
+    if (!a) return 0;
+    return __atomic_load_n(&a->value, __ATOMIC_SEQ_CST);
+}
+
+int8_t rt_atomic_int_compare_exchange(int64_t handle, int64_t current, int64_t new_value)
+{
+    RuntimeAtomicInt *a = (RuntimeAtomicInt *)(intptr_t)handle;
+    int64_t expected = current;
+    if (!a) return 0;
+    return __atomic_compare_exchange_n(&a->value, &expected, new_value, 0,
+                                       __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)
+               ? 1
+               : 0;
+}
+
+/* (I64)->(I8), runtime_sffi.rs:720. NOT truthiness: the hosted twin
+ * (runtime_native.c:4238) decodes the tagged bool, i.e. answers 1 only for
+ * the codegen `true` constant. In this lane's tag table (see
+ * rt_value_unbox_int above) that constant is 11, `false` is 19. The x86_64
+ * freestanding sibling's body is a truthiness test and contradicts the
+ * hosted contract; the hosted twin is mirrored instead. */
+int8_t rt_value_as_bool(int64_t value)
+{
+    return value == (int64_t)TRUE_VALUE ? 1 : 0;
+}
+
+/* (I64)->(I8), runtime_sffi.rs:742. Mirror of the hosted
+ * rt_core_value_truthy (runtime_native.c:11914), with this lane's float
+ * representations (heap cell from rt_value_float, legacy shifted TAG_FLOAT):
+ * ints test their decoded value; the tagged bool constant tests equal to
+ * `true`; heap words test a non-NULL payload; floats test != 0.0. Char
+ * truthiness is a type error on the hosted twin and fails closed there, so
+ * it fails closed here too -- loudly, through the named trap. */
+int8_t rt_value_truthy(int64_t value)
+{
+    uintptr_t tag = (uintptr_t)value & TAG_MASK;
+    if (tag == TAG_SPECIAL) {
+        uint64_t payload = ((uint64_t)value) >> 3;
+        if ((payload & ~0x1FFFFFULL) == (1ULL << 40)) {
+            rv_runtime_trap_unimplemented("rt_value_truthy(char: type error, compare explicitly)");
+        }
+        return value == (int64_t)TRUE_VALUE ? 1 : 0;
+    }
+    if (tag == TAG_INT) return DECODE_INT((RuntimeValue)value) != 0 ? 1 : 0;
+    if (tag == TAG_HEAP) return ((uint64_t)value & ~TAG_MASK) != 0 ? 1 : 0;
+    if (tag == TAG_FLOAT) {
+        uint64_t bits = (uint64_t)value >> 3;
+        double f;
+        __builtin_memcpy(&f, &bits, sizeof(f));
+        return f != 0.0 ? 1 : 0;
+    }
+    return 0;
+}
+
+/* ---- Bucket 2: io / process / thread — no VFS, no processes, no threads
+ * in the in-guest S-mode kernel. Every caller reaches for a host subsystem
+ * this image does not have, so every one traps with a named message. This
+ * mirrors the aarch64 freestanding sibling's SPL_P10_TRAP block; the x86_64
+ * sibling's silent NIL no-ops for the same names are the silent-lie class
+ * and were NOT copied. */
+RV_RUNTIME_TRAP_3(rt_io_file_open)          /* (path_ptr, path_len, mode) -> fd */
+RV_RUNTIME_TRAP_2(rt_io_file_open_read)     /* (path_ptr, path_len) -> fd       */
+RV_RUNTIME_TRAP_2(rt_io_file_open_write)    /* (path_ptr, path_len) -> fd       */
+RV_RUNTIME_TRAP_2(rt_io_file_open_append)   /* (path_ptr, path_len) -> fd       */
+RV_RUNTIME_TRAP_2(rt_io_file_read)          /* (fd, size) -> array              */
+RV_RUNTIME_TRAP_3(rt_io_file_seek)          /* (fd, offset, whence) -> pos      */
+RV_RUNTIME_TRAP_1(rt_io_file_close_value)   /* (fd) -> 0/1                      */
+RV_RUNTIME_TRAP_3(rt_process_run)           /* (cmd_ptr, cmd_len, args) -> ...  */
+RV_RUNTIME_TRAP_5(rt_process_run_bounded)   /* + timeout_ms, max_output_bytes   */
+RV_RUNTIME_TRAP_3(rt_process_run_tuple)     /* (cmd_ptr, cmd_len, args) -> i64  */
+RV_RUNTIME_TRAP_5(rt_process_run_bounded_tuple)
+
+void rt_thread_sleep(int64_t millis)
+{
+    (void)millis;
+    rv_runtime_trap_unimplemented("rt_thread_sleep");
+}
+
+/* ---- Capability / identity queries. Truthful DEFINED answers where the
+ * caller is written to recognise them, named traps elsewhere. */
+
+/* Signal and atexit state, like the aarch64 freestanding sibling
+ * (freestanding_runtime.c:2596-2615): SimpleOS in-guest has no POSIX signal
+ * delivery and no process teardown, so "nothing pending" is the true answer,
+ * and src/lib/nogc_sync_mut/io/signal_stubs.spl reads `<= 0` as
+ * "not installed". Returning a nonzero fake pending flag would register a
+ * handler that can never fire -- the silent lie -- so 0 it is. */
+int64_t rt_signal_check(int64_t signal_num)
+{
+    (void)signal_num;
+    return 0;
+}
+
+int64_t rt_atexit_check(void)
+{
+    return 0;
+}
+
+/* runtime_sffi.rs:2422-2423. There is no honest static answer: this image is
+ * an AOT-compiled freestanding kernel that is neither the hosted tree-walk
+ * interpreter runtime nor a JIT runtime, but its callers branch real
+ * behaviour on the answer (flat_pool_packed_v1.spl:1051 chooses an mmap
+ * fast path on "not interpreter"). Guessing `false` would route the guest
+ * into a host-mapping path that does not exist here; the record's bucket
+ * rule for capability queries is fail closed, so both trap with a named
+ * message. */
+RV_RUNTIME_TRAP_N(rt_is_interpreter_runtime)
+RV_RUNTIME_TRAP_N(rt_is_jit_runtime)
+
+/* ()->(I64), runtime_sffi.rs:1075. The x86_64 sibling answers a hardcoded 1
+ * (its guest is uniprocessor); this lane's guest hart count is a boot
+ * property, not a constant, so a fixed number could silently lie under a
+ * multi-hart -smp. The aarch64 sibling traps; that is mirrored. */
+RV_RUNTIME_TRAP_N(spl_thread_cpu_count)
+
+/* ---- Bucket 3: adaptive-collection capture-note instrumentation
+ * (runtime_sffi.rs:2467-2472, hosted twin runtime_collection_capture_impl.h).
+ * The hosted contract for every note_* entry is: return 1 when no capture
+ * session is active ("nothing to record"), 0 on a recording error. A
+ * freestanding in-guest kernel can never begin a capture session (its
+ * begin/finish/abort surface is not in this closure and would itself need
+ * host I/O), so "capture inactive" is the TRUE state of this lane and 1 is
+ * the honest no-op-with-note answer -- exactly what the hosted twin returns
+ * before any session starts. */
+int64_t spl_collection_capture_note_size(int64_t site, int64_t target, int64_t size)
+{
+    (void)site; (void)target; (void)size;
+    return 1;
+}
+
+int64_t spl_collection_capture_note_lookup(int64_t site, int64_t target, int64_t found)
+{
+    (void)site; (void)target; (void)found;
+    return 1;
+}
+
+int64_t spl_collection_capture_note_materialization(int64_t site, int64_t target)
+{
+    (void)site; (void)target;
+    return 1;
+}
+
+int64_t spl_collection_capture_note_hash_probe(int64_t site, int64_t target, int64_t probes, int64_t collisions)
+{
+    (void)site; (void)target; (void)probes; (void)collisions;
+    return 1;
+}
+
+int64_t spl_collection_capture_note_filter(int64_t site, int64_t target, int64_t evaluated, int64_t accepted)
+{
+    (void)site; (void)target; (void)evaluated; (void)accepted;
+    return 1;
+}
+
+int64_t spl_collection_capture_note_loop(int64_t site, int64_t target, int64_t trips)
+{
+    (void)site; (void)target; (void)trips;
+    return 1;
+}
+
+/* ---- Bucket 4: session / transient heap (runtime_sffi.rs:458-460; the
+ * state query is the (I64)->() form declared in bootstrap_hir_store.spl:38).
+ *
+ * No freestanding sibling ANYWHERE in the tree implements this discipline
+ * (checked: aarch64 and x86_64 freestanding runtimes, src/os/kernel/arch
+ * freestanding runtimes). Porting it wrong -- refuse-everything or
+ * accept-everything stubs -- would silently change what the in-guest BUILD
+ * half produces, the exact silent-lie class the bug record names. So:
+ *
+ *   rt_session_alloc_begin/end -> 0, the hosted "no live session" answer
+ *     (runtime_native.c:3539-3549 returns 0 when no session heap is live).
+ *     A 0 keeps the bootstrap stores' session_on=false, which selects the
+ *     pre-session LEGACY append+promote path -- the path this guest row
+ *     actually booted with before the session discipline existed. That is a
+ *     true, caller-recognised answer, not a stub.
+ *   rt_transient_array_scope_state_v1 -> 0: no module scope is running on a
+ *     runtime that has no scope machinery; bootstrap_hir_store.spl:68 reads
+ *     == 1 as "scope running", so 0 keeps the same legacy path.
+ *   rt_transient_heap_adopt -> NAMED TRAP. Adopt is reached only from the
+ *     session publish path; if execution ever gets there on this lane, the
+ *     session discipline the caller assumes does not exist and no return
+ *     value is truthful -- failing loud beats failing plausible. This bucket
+ *     is therefore PARTIALLY addressed: the image links and the legacy
+ *     no-session path works; a real in-guest session heap needs the design
+ *     session the bug record calls for. */
+int8_t rt_session_alloc_begin(void)
+{
+    return 0;
+}
+
+int8_t rt_session_alloc_end(void)
+{
+    return 0;
+}
+
+int64_t rt_transient_array_scope_state_v1(void)
+{
+    return 0;
+}
+
+int8_t rt_transient_heap_adopt(int64_t value)
+{
+    (void)value;
+    rv_runtime_trap_unimplemented("rt_transient_heap_adopt");
+    return 0;
+}
+
+
+/* ---------------------------------------------------------------------------
+ * Fifth tranche, part 2: the build-and-run row's own closure gap, measured on
+ * the same link (the record above lists the interpreter row's set; the
+ * buildrun row references nine further names, reported here per the same
+ * buckets and the same honesty rule).
+ * ------------------------------------------------------------------------- */
+
+/* ---- Pure computation (6). Real semantics. -------------------------------- */
+
+/* (I64)->(I64), runtime_sffi.rs:499. Hosted twin (runtime_native.c:11519):
+ * the array length, -1 when the value is not an array. Tuples are HEAP_ARRAY
+ * in this runtime (rt_tuple_new above), so the array rule covers them. */
+int64_t rt_tuple_len(int64_t tuple)
+{
+    RuntimeArray *a = simpleos_array_from_handle((RuntimeValue)tuple);
+    if (!a) return -1;
+    return (int64_t)a->len;
+}
+
+/* ()->(I64), (I64)->(I8), (I64)->(I8): runtime_sffi.rs:716,721,722. The
+ * hosted twins are one line each (runtime_native.c:4242-4258) and port
+ * verbatim under this lane's tag table: nil is the TAG_SPECIAL word 3
+ * (NIL_VALUE above), int is the TAG_INT low tag. The hosted is_int also
+ * accepts heap-int/heap-uint boxes; this runtime has no such boxes (its
+ * integers are always inline TAG_INT), so the tag test is the whole truth
+ * here, not a weakening. */
+int64_t rt_value_nil(void)
+{
+    return (int64_t)NIL_VALUE;
+}
+
+int8_t rt_value_is_nil(int64_t value)
+{
+    return value == (int64_t)NIL_VALUE ? 1 : 0;
+}
+
+int8_t rt_value_is_int(int64_t value)
+{
+    return ((uintptr_t)value & TAG_MASK) == TAG_INT ? 1 : 0;
+}
+
+/* Non-mutating `sorted`, hosted twin runtime_native.c:7239. Same contract:
+ * a NEW array (the input and its order are preserved), nil when the receiver
+ * is not an array. The comparator is the hosted rt_sorted_value_cmp rule:
+ * two texts compare byte-lexicographically (shorter prefix first); tagged
+ * ints compare numerically; floats compare numerically; ints sort before
+ * floats; anything else mixed compares Equal. This lane's float forms are
+ * the tranche-4 HEAP_FLOAT cell and the legacy shifted TAG_FLOAT, handled
+ * exactly as rt_value_as_float above. The hosted twin sorts with a stable
+ * O(n log n) merge; this port keeps this file's existing rt_sort insertion
+ * sort so the comparator has exactly one local definition -- the row's
+ * sorted arrays are small, and a stable sort answers identically either
+ * way. */
+static int rv_sorted_value_cmp(int64_t a, int64_t b)
+{
+    RuntimeString *sa = IS_HEAP(a) ? (RuntimeString *)DECODE_PTR(a) : (RuntimeString *)0;
+    RuntimeString *sb = IS_HEAP(b) ? (RuntimeString *)DECODE_PTR(b) : (RuntimeString *)0;
+    if (sa && sa->hdr.type != HEAP_STRING) sa = 0;
+    if (sb && sb->hdr.type != HEAP_STRING) sb = 0;
+    /* Both texts byte-lexicographically. rt_text_cmp_any treats a non-text
+     * side as "", so it may only be used when BOTH sides are texts --
+     * otherwise a text/int pair would order as "vs empty string" instead of
+     * Equal, which is the hosted mixed-type answer. */
+    if (sa && sb) {
+        return (int)(int64_t)rt_text_cmp_any((RuntimeValue)a, (RuntimeValue)b);
+    }
+    {
+        int a_is_int = ((uintptr_t)a & TAG_MASK) == TAG_INT;
+        int b_is_int = ((uintptr_t)b & TAG_MASK) == TAG_INT;
+        int a_is_float = (((uintptr_t)a & TAG_MASK) == TAG_FLOAT) ||
+                         (IS_HEAP(a) && sa == 0 && ((HeapHeader *)DECODE_PTR(a))->type == HEAP_FLOAT);
+        int b_is_float = (((uintptr_t)b & TAG_MASK) == TAG_FLOAT) ||
+                         (IS_HEAP(b) && sb == 0 && ((HeapHeader *)DECODE_PTR(b))->type == HEAP_FLOAT);
+        if (a_is_int && b_is_int) {
+            int64_t x = DECODE_INT((RuntimeValue)a);
+            int64_t y = DECODE_INT((RuntimeValue)b);
+            return (x > y) - (x < y);
+        }
+        if (a_is_float && b_is_float) {
+            double x = rt_value_as_float((RuntimeValue)a);
+            double y = rt_value_as_float((RuntimeValue)b);
+            return (x > y) - (x < y); /* NaN compares Equal, as hosted. */
+        }
+        if (a_is_int && b_is_float) return -1;
+        if (a_is_float && b_is_int) return 1;
+        return 0;
+    }
+}
+
+int64_t rt_array_sorted(int64_t receiver)
+{
+    RuntimeArray *a = simpleos_array_from_handle((RuntimeValue)receiver);
+    if (!a) return (int64_t)NIL_VALUE;
+    {
+        RuntimeValue copy = rt_array_copy((RuntimeValue)receiver);
+        RuntimeArray *c;
+        RuntimeValue *items;
+        if (copy == NIL_VALUE) return (int64_t)NIL_VALUE;
+        c = simpleos_array_from_handle(copy);
+        if (!c) return (int64_t)NIL_VALUE;
+        items = runtime_array_items(c);
+        for (uint64_t i = 1; i < c->len; i++) {
+            int64_t key = (int64_t)items[i];
+            int64_t j = (int64_t)i - 1;
+            while (j >= 0 && rv_sorted_value_cmp((int64_t)items[(uint64_t)j], key) > 0) {
+                items[(uint64_t)j + 1] = items[(uint64_t)j];
+                j--;
+            }
+            items[(uint64_t)j + 1] = (RuntimeValue)key;
+        }
+        return (int64_t)copy;
+    }
+}
+
+/* ---- HIR codec node guard (1): defined, caller-recognised answer. --------- */
+
+/* (I64)->(I8). Referenced by src/compiler/20.hir/generated/hir_codec.spl:17,68.
+ * The hosted standalone-lane twin (runtime_native.c:11671, the
+ * SIMPLE_CORE_C_STANDALONE form) is the wellformed probe, NOT the strict
+ * registry-membership probe of mixed builds: AOT lowering allocates HIR node
+ * structs as raw rt_alloc blocks that are never registered, so a
+ * registry-only answer would refuse every HIR module and the codec would
+ * cache nothing -- the documented Phase-3 failure. That is exactly this
+ * lane's situation (bump-arena objects, no registry), so the standalone twin
+ * is mirrored: reject nil and the zero page, accept everything else. False
+ * rejects are safe (they only decline to cache), false accepts only mean a
+ * garbage node is read later, which the codec's own guards name. */
+int8_t rt_heap_ref_registered(int64_t value)
+{
+    return (((uint64_t)value) & ~TAG_MASK) >= 4096 ? 1 : 0;
+}
+
+/* ---- Evidence snapshot + VFS reads (2): fail closed. ---------------------- */
+
+/* (I64,I64)->(I64), runtime_sffi.rs:2275, and the 19-word record form below.
+ * Hosted twin (runtime.c:2353) opens a host evidence file O_EXCL|O_NOFOLLOW;
+ * the in-guest kernel has no writable evidence sink and no host filesystem,
+ * so setup truthfully fails closed with -1 -- the caller
+ * (src/compiler/80.driver/driver_mem_snapshot.spl:48) reports -1 as
+ * "fail-closed setup failure" and disables recording. rt_mem_snapshot_record
+ * is only reached when a snapshot fd >= 0 exists, which this answer never
+ * produces; if execution ever reaches it anyway, the named trap fires --
+ * there is no truthful record to write. */
+int64_t rt_mem_snapshot_open(int64_t path_ptr, int64_t path_len)
+{
+    (void)path_ptr; (void)path_len;
+    return -1;
+}
+
+int64_t rt_mem_snapshot_record(int64_t fd, int64_t seq,
+                               int64_t event_ptr, int64_t event_len,
+                               int64_t phase_ptr, int64_t phase_len,
+                               int64_t source_index,
+                               int64_t source_path_ptr, int64_t source_path_len,
+                               int64_t retained_modules, int64_t validation_keys,
+                               int64_t validation_values, int64_t shared_traits,
+                               int64_t hir_names, int64_t hir_symbols,
+                               int64_t hir_functions, int64_t hir_constants,
+                               int64_t hir_enums, int64_t hir_structs,
+                               int64_t hir_classes)
+{
+    (void)fd; (void)seq;
+    (void)event_ptr; (void)event_len;
+    (void)phase_ptr; (void)phase_len;
+    (void)source_index;
+    (void)source_path_ptr; (void)source_path_len;
+    (void)retained_modules; (void)validation_keys;
+    (void)validation_values; (void)shared_traits;
+    (void)hir_names; (void)hir_symbols;
+    (void)hir_functions; (void)hir_constants;
+    (void)hir_enums; (void)hir_structs;
+    (void)hir_classes;
+    rv_runtime_trap_unimplemented("rt_mem_snapshot_record");
+    return 0;
+}
+
+/* (I64,I64,I64)->(I64) and ()->(I64), runtime_sffi.rs:2243-2244. The readers
+ * go through the same host-filesystem bucket as rt_io_file_* above: trap with
+ * a named message. The failure-code query is a different kind of entry point:
+ * with the readers trapped it is never preceded by a read, so the hosted
+ * "never called" sentinel 77 is its truthful value, spelled out so no caller
+ * mistakes it for a real arm code. */
+RV_RUNTIME_TRAP_3(rt_file_read_regular_no_follow_bounded_bytes)
+
+int64_t rt_file_read_regular_no_follow_last_failure(void)
+{
+    return 77; /* hosted sentinel: never called */
+}
+
+#undef RV_RUNTIME_TRAP_N
+#undef RV_RUNTIME_TRAP_1
+#undef RV_RUNTIME_TRAP_2
+#undef RV_RUNTIME_TRAP_3
+#undef RV_RUNTIME_TRAP_5

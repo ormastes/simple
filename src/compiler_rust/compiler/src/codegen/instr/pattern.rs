@@ -170,11 +170,7 @@ pub(crate) fn compile_pattern_bind<M: Module>(
 
 /// Calculate discriminant for enum variant (stub - returns hash of name)
 fn calculate_variant_discriminant(variant_name: &str) -> u32 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    variant_name.hash(&mut hasher);
-    (hasher.finish() & 0xFFFFFFFF) as u32
+    simple_runtime::value::hash_variant_discriminant(variant_name) as u32
 }
 
 pub(crate) fn compile_enum_unit<M: Module>(

@@ -10,7 +10,7 @@ use crate::error::CompileError;
 use crate::value::Value;
 use simple_parser::ast::{Expr, FStringPart, Pattern, Type};
 
-use super::{Classes, Enums, BLOCK_SCOPED_ENUMS, MODULE_GLOBALS};
+use super::{Classes, Enums, ImplMethods, BLOCK_SCOPED_ENUMS, MODULE_GLOBALS};
 
 fn pattern_enum_name_matches(pattern_name: &str, value_name: &str) -> bool {
     if pattern_name == "_" || pattern_name == value_name || matches!(pattern_name, "Option" | "Result") {
@@ -201,9 +201,11 @@ pub(crate) fn pattern_matches(
                 if let Some(enum_def) = enum_def {
                     let is_variant = enum_def.variants.iter().any(|v| &v.name == name);
                     if is_variant {
-                        // This is a unit variant pattern - match only if variant matches
-                        // and the value has no payload (unit variant)
-                        return Ok(variant == name && payload.is_none());
+                        // A bare variant name is a variant test, not a binding: it matches
+                        // on the variant alone, whether or not the variant carries a payload
+                        // (`case Clocked:` against `Clocked(dom)`). The payload is ignored.
+                        let _ = payload;
+                        return Ok(variant == name);
                     }
                     // See doc/08_tracking/bug/case_bare_ident_is_irrefutable_binding_2026-08-01.md
                     //
@@ -723,6 +725,242 @@ pub(crate) fn check_enum_exhaustiveness(
     } else {
         Some(missing)
     }
+}
+
+/// Map the bindings of a MATCHED arm pattern to the storage they alias inside
+/// the match subject: `(binding name, steps from subject root to the aliased
+/// storage)`. This is the provenance the post-arm container merge uses to
+/// carry shared-handle mutations (array/dict/bytearray fields) from a payload
+/// binding back into the subject without touching value-semantic scalars.
+///
+/// Only structurally unambiguous aliases are reported: whole-subject
+/// identifier patterns, enum-variant payload patterns, positional
+/// class/struct payload patterns (declaration order), and tuple/array
+/// element patterns. Literal, wildcard, and guard-shaped patterns bind
+/// nothing worth merging (or nothing at all).
+pub(crate) fn pattern_subject_binding_paths(
+    pattern: &Pattern,
+    subject: &Value,
+    classes: &Classes,
+) -> Vec<(String, Vec<crate::interpreter::place::SubjectStep>)> {
+    use crate::interpreter::place::SubjectStep;
+    fn prepend(
+        paths: Vec<(String, Vec<SubjectStep>)>,
+        step: SubjectStep,
+    ) -> Vec<(String, Vec<SubjectStep>)> {
+        paths
+            .into_iter()
+            .map(|(name, mut steps)| {
+                steps.insert(0, step.clone());
+                (name, steps)
+            })
+            .collect()
+    }
+    match pattern {
+        Pattern::Identifier(name) | Pattern::MutIdentifier(name) | Pattern::MoveIdentifier(name) => {
+            vec![(name.clone(), Vec::new())]
+        }
+        Pattern::Typed { pattern, .. } => pattern_subject_binding_paths(pattern, subject, classes),
+        Pattern::Wildcard | Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Rest => Vec::new(),
+        // Named struct pattern `case Point(x: a, y: b)`: field patterns alias
+        // the object's fields by name.
+        Pattern::Struct { fields, .. } => {
+            let Value::Object { fields: obj_fields, .. } = subject else {
+                return Vec::new();
+            };
+            let mut out = Vec::new();
+            for (field_name, pat) in fields {
+                let Some(field_val) = obj_fields.get(field_name) else {
+                    continue;
+                };
+                out.extend(prepend(
+                    pattern_subject_binding_paths(pat, field_val, classes),
+                    SubjectStep::Field(field_name.clone()),
+                ));
+            }
+            out
+        }
+        Pattern::Tuple(patterns) | Pattern::Array(patterns) => {
+            let elements: Option<Vec<&Value>> = match subject {
+                Value::Tuple(values) => patterns
+                    .len()
+                    .eq(&values.len())
+                    .then(|| values.iter().collect()),
+                Value::Array(items) => patterns
+                    .len()
+                    .eq(&items.len())
+                    .then(|| (0..items.len()).map(|i| &items[i]).collect()),
+                _ => None,
+            };
+            let Some(elements) = elements else {
+                return Vec::new();
+            };
+            let mut out = Vec::new();
+            for (idx, (pat, elem)) in patterns.iter().zip(elements).enumerate() {
+                out.extend(prepend(
+                    pattern_subject_binding_paths(pat, elem, classes),
+                    SubjectStep::Index(idx as i64),
+                ));
+            }
+            out
+        }
+        Pattern::Enum {
+            name: enum_name,
+            variant,
+            payload,
+        } => match (subject, payload) {
+            // Real enum subject: payload patterns alias the variant payload.
+            (
+                Value::Enum {
+                    enum_name: value_name,
+                    variant: value_variant,
+                    payload: value_payload,
+                },
+                Some(patterns),
+            ) if pattern_enum_name_matches(enum_name, value_name)
+                && variant == value_variant
+                && value_payload.is_some() =>
+            {
+                let value_payload = value_payload.as_ref().expect("checked above");
+                if patterns.len() == 1 {
+                    prepend(
+                        pattern_subject_binding_paths(&patterns[0], value_payload, classes),
+                        SubjectStep::Payload,
+                    )
+                } else if let Value::Tuple(values) = value_payload.as_ref() {
+                    if patterns.len() != values.len() {
+                        return Vec::new();
+                    }
+                    let mut out = Vec::new();
+                    for (idx, (pat, elem)) in patterns.iter().zip(values.iter()).enumerate() {
+                        for (name, mut steps) in pattern_subject_binding_paths(pat, elem, classes) {
+                            steps.insert(0, SubjectStep::Index(idx as i64));
+                            steps.insert(0, SubjectStep::Payload);
+                            out.push((name, steps));
+                        }
+                    }
+                    out
+                } else {
+                    Vec::new()
+                }
+            }
+            // Positional class/struct pattern: payload patterns alias fields
+            // in declaration order (same rule `pattern_matches` binds by).
+            (Value::Object { class, fields }, Some(patterns))
+                if (*enum_name == "_" || enum_name == class || matches!(enum_name.as_str(), "Option" | "Result"))
+                    && variant == class =>
+            {
+                let Some(class_def) = classes.get(class.as_str()) else {
+                    return Vec::new();
+                };
+                let field_names: Vec<&str> = class_def.fields.iter().map(|f| f.name.as_str()).collect();
+                if patterns.len() != field_names.len() {
+                    return Vec::new();
+                }
+                let mut out = Vec::new();
+                for (pat, field_name) in patterns.iter().zip(field_names) {
+                    let Some(field_val) = fields.get(field_name) else {
+                        continue;
+                    };
+                    out.extend(prepend(
+                        pattern_subject_binding_paths(pat, field_val, classes),
+                        SubjectStep::Field(field_name.to_string()),
+                    ));
+                }
+                out
+            }
+            _ => Vec::new(),
+        },
+        // `Pattern::Or` / guard combinations: an alternative arm may bind
+        // through a different route; conservatively merge nothing.
+        _ => Vec::new(),
+    }
+}
+
+/// After a match arm ran, carry container mutations made through its payload
+/// bindings back into the match subject (the "two-hop" place chain: payload
+/// binding -> enum payload -> array element / field -> subject root). Reads
+/// the post-arm subject from its place when the subject is an lvalue, merges
+/// each still-live binding's shared containers into it, and writes it back.
+/// Value-semantic scalar fields are never carried (see
+/// `merge_shared_collection_fields`). `binding_values` must be the POST-arm
+/// values of the bindings named by `pattern_subject_binding_paths`.
+pub(crate) fn merge_match_arm_subject_bindings(
+    subject_place: Option<&crate::interpreter::place::Place>,
+    subject_fallback: &Value,
+    pattern: &Pattern,
+    binding_values: &[(String, Value)],
+    env: &mut crate::value::Env,
+    classes: &Classes,
+) {
+    let paths = pattern_subject_binding_paths(pattern, subject_fallback, classes);
+    if paths.is_empty() {
+        return;
+    }
+    let mut current = subject_place
+        .and_then(|place| crate::interpreter::place::place_slot_ref(env, place).cloned())
+        .unwrap_or_else(|| subject_fallback.clone());
+    let mut changed = false;
+    for (name, steps) in &paths {
+        let Some((_, binding)) = binding_values.iter().find(|(n, _)| n == name) else {
+            continue;
+        };
+        if crate::interpreter::place::merge_subject_step(&mut current, steps, binding) {
+            changed = true;
+        }
+    }
+    if changed {
+        if let Some(place) = subject_place {
+            crate::interpreter::place::write_place(env, place, current);
+        }
+    }
+}
+
+/// Evaluate a match subject THROUGH its place when the subject is an lvalue:
+/// index expressions run exactly once, and the post-arm payload-binding merge
+/// gets the place to write back through. Non-place subjects keep their
+/// previous evaluate-once behavior with `place == None`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_match_subject(
+    subject_expr: &Expr,
+    env: &mut crate::value::Env,
+    functions: &mut HashMap<String, std::sync::Arc<simple_parser::ast::FunctionDef>>,
+    classes: &mut Classes,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<(Value, Option<crate::interpreter::place::Place>), CompileError> {
+    let place = crate::interpreter::place::resolve_place(subject_expr, env, functions, classes, enums, impl_methods)?;
+    let value = match &place {
+        Some(p) => match crate::interpreter::place::place_slot_ref(env, p) {
+            Some(v) => v.clone(),
+            None => crate::interpreter::evaluate_expr(subject_expr, env, functions, classes, enums, impl_methods)?,
+        },
+        None => crate::interpreter::evaluate_expr(subject_expr, env, functions, classes, enums, impl_methods)?,
+    };
+    Ok((value, place))
+}
+
+/// Post-arm reconciliation shared by every match executor: while the arm's
+/// payload bindings are still live in `env`, collect their (possibly
+/// mutated) values and merge shared containers back into the match subject
+/// through its place. No-op for patterns that bind nothing aliasing the
+/// subject.
+pub(crate) fn merge_arm_bindings_into_subject(
+    subject_place: Option<&crate::interpreter::place::Place>,
+    subject: &Value,
+    pattern: &Pattern,
+    env: &mut crate::value::Env,
+    classes: &Classes,
+) {
+    let paths = pattern_subject_binding_paths(pattern, subject, classes);
+    if paths.is_empty() {
+        return;
+    }
+    let binding_values: Vec<(String, Value)> = paths
+        .iter()
+        .filter_map(|(name, _)| env.get(name).cloned().map(|v| (name.clone(), v)))
+        .collect();
+    merge_match_arm_subject_bindings(subject_place, subject, pattern, &binding_values, env, classes);
 }
 
 #[cfg(test)]
@@ -1514,5 +1752,44 @@ main = construct()
         let mut bindings = HashMap::new();
         assert!(pattern_matches(&nil, &Value::Nil, &mut bindings, &enums, &classes).unwrap());
         assert_eq!(OPTION_PATTERN_OVER_RESULT_HITS.load(Ordering::Relaxed), before);
+    }
+
+    // --- bare `case Variant:` arm against a PAYLOAD-carrying variant ---
+    // Bug: doc/08_tracking/bug/match_unqualified_imported_enum_variant_default_arms_2026-10-24.md
+    // The bare identifier arm was required to see `payload.is_none()`, so a
+    // payload variant matched no arm and the fn faulted "missing return".
+
+    const BARE_PAYLOAD_ENUM: &str = "enum PK:\n    Comb(s: i64)\n    Clocked(d: i64)\n    Idle\n";
+
+    #[test]
+    fn bare_arm_matches_payload_variant() {
+        let src = format!(
+            "{BARE_PAYLOAD_ENUM}fn f(k: PK) -> i64:\n    match k:\n        case Comb: 1\n        case Clocked: 2\n        case Idle: 3\nmain = f(PK.Clocked(9)) + 10 * f(PK.Comb(1)) + 100 * f(PK.Idle)\n"
+        );
+        assert_eq!(run(&src), 2 + 10 + 300);
+    }
+
+    #[test]
+    fn bare_arm_payload_variant_with_default_arm() {
+        let src = format!(
+            "{BARE_PAYLOAD_ENUM}fn f(k: PK) -> i64:\n    match k:\n        case Clocked: 2\n        case _: 7\nmain = f(PK.Clocked(9)) + 10 * f(PK.Comb(1))\n"
+        );
+        assert_eq!(run(&src), 2 + 70);
+    }
+
+    #[test]
+    fn qualified_arm_still_matches_payload_variant() {
+        let src = format!(
+            "{BARE_PAYLOAD_ENUM}fn f(k: PK) -> i64:\n    match k:\n        case PK.Comb: 1\n        case PK.Clocked: 2\n        case PK.Idle: 3\nmain = f(PK.Clocked(9)) + 10 * f(PK.Comb(1))\n"
+        );
+        assert_eq!(run(&src), 12);
+    }
+
+    #[test]
+    fn bare_arm_payload_variant_nested_in_match() {
+        let src = format!(
+            "{BARE_PAYLOAD_ENUM}fn f(a: PK, b: PK) -> i64:\n    match a:\n        case Comb:\n            match b:\n                case Clocked: 5\n                case _: 6\n        case _: 9\nmain = f(PK.Comb(1), PK.Clocked(2)) + 10 * f(PK.Comb(1), PK.Idle) + 100 * f(PK.Idle, PK.Idle)\n"
+        );
+        assert_eq!(run(&src), 5 + 60 + 900);
     }
 }

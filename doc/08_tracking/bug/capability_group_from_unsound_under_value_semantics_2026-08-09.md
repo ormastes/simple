@@ -101,3 +101,14 @@ no code change attempted.
 ## Triage 2026-11-04 (c28-w4)
 
 Triage 2026-11-04 on seed 0b2c3d015b7: debug_target_ref_spec 71/71 pass in 12.6s (library-side corrected single-value group shape holds). Remaining item is P0 desugar of .from() (lint detector dynamic_capability_acquire.spl only flags spellings). NOTE premise risk: the unsoundness rests on classes having value semantics; other lanes report an interpreter class-ref default flip (SIMPLE_INTERP_CLASS_REF=1) is pending - if it lands the premise changes and this row must be re-scoped. QUESTION: is class-ref flip the intended direction (then close as obsolete) or do value-class semantics stay?
+
+## Re-scoped 2026-11-05 (HB2) — premise is lane-dependent; remaining item is a feature
+
+Probe (`class Cell`, `var b = a; a.bump()`) on seed release/1.0.0: default JIT
+prints `a=1 b=1` (reference semantics), `SIMPLE_EXECUTION_MODE=interpreter`
+prints `a=1 b=0` (value semantics). The "classes are value types" premise
+therefore holds only on the interpreter lane; the lanes disagree (that
+divergence belongs to the class-ref flip work, not this row). The corrected
+single-value group shape is sound under BOTH semantics, so no library change
+is needed. What remains is the P0 `.from()` desugar (feature work, owner
+decision on class semantics). Left OPEN, no code change.

@@ -1,14 +1,49 @@
 # Seed semantic check cannot close kernel files on x86_64 host (cfg-strip leak)
 
-Status: open. Priority: P1 toolchain evidence blocker. Owner: seed cfg strip
-(pure-Simple `src/compiler` fix; the Rust seed is not patched).
+Status: fixed (seed type checker), 2026-11-05. Priority: P1 toolchain
+evidence blocker. Owner: seed type checker
+(`src/compiler_rust/type/src/checker_check.rs`).
 
 Observed 2026-11-05: `simple compile <any kernel loader/scheduler file>.spl
 --format=smf` (Rust seed, x86_64 Linux host) fails with
 `semantic: Undefined("undefined identifier: rt_arm64_user_as_create")` —
 identical at HEAD without local changes (calibrated via `git stash`).
 
-Root cause is already diagnosed in-code:
+Root cause (corrected 2026-11-05; the original cfg-strip diagnosis below was
+WRONG for current HEAD): the fn-level cfg strip works -- a wrong-arch body
+with an undefined identifier compiles cleanly on this host, and
+`Undefined("undefined identifier: rt_arm64_user_as_create")` reproduces with
+NO `@cfg` involved at all. The actual defect is in the seed's type checker:
+`TypeChecker::check_node` (`src/compiler_rust/type/src/checker_check.rs`) had
+no `Node::Extern` arm in its statement pass, so an `extern fn` declaration
+INSIDE a function body (the parser emits `Node::Extern` there too, e.g.
+`src/os/kernel/memory/user_address_space.spl:47`) fell into the `_ => Ok(())`
+wildcard and never bound the extern name. The very next call to the extern
+then aborted the unit with `Undefined("undefined identifier: ...")`
+(`src/compiler_rust/type/src/checker_infer.rs:38`). Top-level externs were
+unaffected because the checker's module-level first pass binds them.
+
+This also explains the "--target aarch64 does not help" observation: with an
+aarch64-effective target the `@cfg(arm64)` bodies are ACTIVE and are checked,
+and their body-local extern declarations hit the wildcard.
+
+Fix: `checker_check.rs` `check_node` now binds `Node::Extern` names that are
+not already registered (module-level externs keep their first-pass binding
+unchanged; body-local ones are bound for the enclosing scope only, since the
+function-body env is cloned/restored). Regression test:
+`src/compiler_rust/type/tests/body_local_extern.rs` (3 tests; 2 fail before
+the fix with the exact reported error, all pass after).
+
+Note: this patches the Rust seed contrary to the original owner note below;
+the seed is the only verifiable lane until an admitted self-hosted CLI
+exists, and the language deliberately supports body-local `extern fn`
+(widespread across kernel loader files). The pure-Simple compiler should be
+checked for parity on the same construct (cf. bug
+`pure_simple_nested_extern_registration_2026_10_12`).
+
+Original (incorrect) diagnosis, kept for the record:
+
+Root cause was already diagnosed in-code:
 `src/os/kernel/memory/user_address_space.spl:16-20` NOTE(cross-arch import
 leak) — the seed's cfg strip does not remove `@cfg(arm64)`/ `@cfg(riscv64)`
 bodies (or cfg-gated top-level `use` lines), so host compiles pull ARM64

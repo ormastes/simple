@@ -1,0 +1,55 @@
+# @req REQ-SSPEC-UNIT
+"""
+# HTTP worker per-fd async handler registry.
+
+Pins submit/complete/cancel on Worker (http_server/worker.spl, PR #6804):
+one live job per fd, exactly-once completion, stale-signal refusal, and
+idempotent cancellation.
+"""
+
+use std.spec
+use std.spec.step
+use std.http_server.server.{build_default_pipeline}
+use std.http_server.{default_server_config}
+use std.http_server.worker.{Worker}
+use std.http_server.router.{AsyncRouter}
+use std.http_server.handler.{create_default_registry}
+use std.concurrent.channel.{channel_new}
+
+describe "Worker per-fd async handler registry":
+    it "registers, dispatches completion, and removes per-fd jobs":
+        step("registers, dispatches completion, and removes per-fd jobs")
+        var config = default_server_config()
+        config.listen_addr = "127.0.0.1:0"
+        config.worker_count = 1
+        val worker_result = Worker.create(
+            0, config, AsyncRouter.new(config.locations),
+            build_default_pipeline(), create_default_registry(""),
+            channel_new()
+        )
+        match worker_result:
+            Ok(w):
+                var worker = w
+                # register
+                expect(worker.submit_async_handler(7, 100, 5)).to_be(true)
+                expect(worker.async_job_by_fd.contains_key(7)).to_be(true)
+                expect(worker.async_fd_by_job[100]).to_be(7)
+                expect(worker.async_channel_by_fd[7]).to_be(5)
+                # second job on a parked fd rejected
+                expect(worker.submit_async_handler(7, 101, 5)).to_be(false)
+                # stale completion refused, binding intact
+                expect(worker.complete_async_handler(7, 999)).to_be(false)
+                expect(worker.async_job_by_fd.contains_key(7)).to_be(true)
+                # completion dispatch exactly once
+                expect(worker.complete_async_handler(7, 100)).to_be(true)
+                expect(worker.complete_async_handler(7, 100)).to_be(false)
+                expect(worker.async_job_by_fd.contains_key(7)).to_be(false)
+                expect(worker.async_fd_by_job.contains_key(100)).to_be(false)
+                # fd reusable; cancel removes once
+                expect(worker.submit_async_handler(7, 102, 6)).to_be(true)
+                expect(worker.cancel_async_handler(7)).to_be(true)
+                expect(worker.cancel_async_handler(7)).to_be(false)
+                expect(worker.async_fd_by_job.contains_key(102)).to_be(false)
+                expect(worker.async_channel_by_fd.contains_key(7)).to_be(false)
+                worker.abort_start()
+            Err(_): fail("worker owner construction failed")

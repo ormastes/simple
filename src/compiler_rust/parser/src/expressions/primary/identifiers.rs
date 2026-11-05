@@ -147,6 +147,8 @@ impl<'a> Parser<'a> {
             TokenKind::On => self.parse_keyword_identifier("on"),
             TokenKind::Into => self.parse_keyword_identifier("into"),
             TokenKind::Bind => self.parse_keyword_identifier("bind"),
+            TokenKind::Allow => self.parse_keyword_identifier("allow"),
+            TokenKind::Forbid => self.parse_keyword_identifier("forbid"),
             TokenKind::Unwrap => self.parse_keyword_identifier("unwrap"),
             // Allow 'lazy' and 'skip' as identifiers (e.g., var lazy = false)
             TokenKind::Lazy => self.parse_keyword_identifier("lazy"),

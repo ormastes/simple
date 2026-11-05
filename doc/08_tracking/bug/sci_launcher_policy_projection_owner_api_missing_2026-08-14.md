@@ -72,3 +72,26 @@ Exceeds this lane's per-item budget as a single fix; not attempted.
 Confirmed files are not fenced, but scope is a multi-part design task.
 Leaving OPEN.
 
+
+## Update 2026-11-05 (w3): associations wired; scoped capabilities still open
+
+Premise re-checked on origin/release/1.0.0: the association owner module
+`launcher_association_registry.spl` (validate/commit/authoritative index) had
+landed but nothing called it: `launcher_composition.spl` still returned
+`SCI_LAUNCHER_ASSOCIATION_PROJECTION_REQUIRED` and `launcher_registry.spl`
+still used only the hard-coded extension table.
+
+Fixed: `_launcher_commit_composition_v1` now validates the image's association
+keys/targets with the owner API before any mutation (malformed ->
+`SCI_LAUNCHER_ASSOCIATION_INVALID`, duplicate -> `SCI_LAUNCHER_ASSOCIATION_DUPLICATE`)
+and commits the index after registration; `launcher_associated_app_for_path`
+resolves through the projected index once it is authoritative (legacy defaults
+stay when no SCI image declares associations). Tests:
+`test/01_unit/os/services/launcher/launcher_composition_spec.spl` (3 new cases;
+the old fail-closed association case was replaced).
+
+Still open: typed path-scoped capability projection through
+`SimpleArtifactManifest` (item 1 of the unblock list) -- capabilities still
+fail closed with `SCI_LAUNCHER_MANIFEST_CAPABILITY_PROJECTION_REQUIRED`.
+`launcher_replace_composition_catalog_v1` (atomic replace) exists but is not
+wired because it retires built-in apps, which the sequential adapter does not.

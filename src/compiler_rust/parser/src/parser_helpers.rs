@@ -1028,6 +1028,8 @@ impl<'a> Parser<'a> {
             TokenKind::Assume => "assume".to_string(),
             // Allow contextual keywords as identifiers
             TokenKind::Actor => "actor".to_string(),
+            TokenKind::Allow => "allow".to_string(),
+            TokenKind::Forbid => "forbid".to_string(),
             TokenKind::Kernel => "kernel".to_string(),
             TokenKind::Gen => "gen".to_string(),
             TokenKind::Sync => "sync".to_string(),
@@ -1254,6 +1256,8 @@ impl<'a> Parser<'a> {
             TokenKind::With => "with",
             TokenKind::On => "on",
             TokenKind::Bind => "bind",
+            TokenKind::Allow => "allow",
+            TokenKind::Forbid => "forbid",
             TokenKind::Var => "var",
             TokenKind::Move => "move",
             TokenKind::Unwrap => "unwrap",

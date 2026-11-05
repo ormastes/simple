@@ -14,6 +14,7 @@
 # Pipeline: MIR -> ISel (this module) -> RegAlloc -> Encode -> ELF
 
 use compiler.mir.mir_instruction_graph.{mir_module_functions_sorted}
+use compiler.mir.mir_json.{serialize_binop}
 use compiler.mir.mir_data.{MirModule, MirFunction, MirBlock, MirInst, MirInstKind, MirBinOp, MirUnaryOp, MirOperand, MirOperandKind, MirConstValue, MirTerminator, MirType, MirTypeKind, MirStatic, LocalId, LocalKind, BlockId, SwitchCase}
 use compiler.backend.native.mach_inst.{MachReg, virtual_reg, physical_reg, reg_id, Operand, OperandKind, op_reg, op_phys, op_virt, op_imm, op_mem, op_label, op_sym, operand_get_reg, MachInst, new_mach_inst, MachBlock, new_mach_block, mach_block_add_inst, MachFunction, new_mach_function, mach_func_add_block, mach_func_set_frame_size, MachModule, DataEntry, new_mach_module, mach_module_add_func, mach_module_add_data, mach_module_add_extern}
 use compiler.backend.common.isel_common.{LoweredOperand, ISelFuncResult, ISelBlockResult, ISelInstResult, local_to_vreg, local_vreg_op, isel_fresh_dest, isel_emit_one}
@@ -270,6 +271,11 @@ fn a64_const_is_float(value: MirConstValue) -> bool:
         case Float(_) | FloatLexeme(_): true
         case _: false
 
+fn a64_operand_is_float_const(operand: MirOperand) -> bool:
+    match operand.kind:
+        case Const(value, _): a64_const_is_float(value)
+        case _: false
+
 fn a64_module_float_rejections(module: MirModule) -> [text]:
     var rejections: [text] = []
     for func in mir_module_functions_sorted(module):
@@ -287,6 +293,17 @@ fn a64_module_float_rejections(module: MirModule) -> [text]:
                     case Const(_, value, _):
                         if a64_const_is_float(value):
                             rejections.push("aarch64 native: function '{func.name}' has an unsupported floating-point constant; the direct backend only supports integer scalar code")
+                    case BinOp(_, op, left, right):
+                        # Operand-carried float constants bypass the Const scan
+                        # above; reject them up front, naming the operation,
+                        # instead of reaching a64_lower_const during lowering.
+                        if a64_operand_is_float_const(left):
+                            rejections.push("aarch64 native: function '{func.name}' has an unsupported floating-point constant operand in '{serialize_binop(op)}'; the direct backend only supports integer scalar code")
+                        if a64_operand_is_float_const(right):
+                            rejections.push("aarch64 native: function '{func.name}' has an unsupported floating-point constant operand in '{serialize_binop(op)}'; the direct backend only supports integer scalar code")
+                    case UnaryOp(_, _, operand):
+                        if a64_operand_is_float_const(operand):
+                            rejections.push("aarch64 native: function '{func.name}' has an unsupported floating-point constant operand in a unary operation; the direct backend only supports integer scalar code")
                     case _: ()
     rejections
 

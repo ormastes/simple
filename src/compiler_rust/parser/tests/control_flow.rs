@@ -239,6 +239,37 @@ fn parse_match_with_patterns() {
     parse_ok("match opt:\n    Option::Some(x) =>\n        x\n    Option::None =>\n        0");
 }
 
+#[test]
+fn parse_arrow_match_arm_with_multiple_enum_fields() {
+    parse_ok(
+        r#"enum Shape:
+    Rectangle(w: f64, h: f64)
+fn perimeter(s: Shape) -> f64:
+    match s:
+        | Rectangle(w, h) -> w + h
+print perimeter(Shape.Rectangle(2.0, 3.0))
+"#,
+    );
+}
+
+#[test]
+fn parse_arrow_match_arm_single_field_and_case_multi_field_controls() {
+    parse_ok(
+        r#"enum Shape:
+    Circle(r: f64)
+    Rectangle(w: f64, h: f64)
+fn circle(s: Shape) -> f64:
+    match s:
+        | Circle(r) -> 2.0 * (r + 1.0)
+fn perimeter(s: Shape) -> f64:
+    match s:
+        case Rectangle(w, h): w + h
+print circle(Shape.Circle(1.0))
+print perimeter(Shape.Rectangle(2.0, 3.0))
+"#,
+    );
+}
+
 // Loop with break - needs newline after break
 #[test]
 fn parse_loop_statement() {
@@ -427,6 +458,19 @@ fn ts_arrow_hint_count(src: &str) -> usize {
         .iter()
         .filter(|h| h.help.as_deref().is_some_and(|m| m.contains("'=>' is for lambdas")))
         .count()
+}
+
+#[test]
+fn parenthesized_arrow_lambda_parses_without_ts_hint() {
+    let src = "(x, y) => x + y";
+    let items = parse(src);
+    let Node::Expression(Expr::Lambda { params, .. }) = &items[0] else {
+        panic!("expected parenthesized arrow lambda");
+    };
+    assert_eq!(params.len(), 2);
+    assert_eq!(params[0].name, "x");
+    assert_eq!(params[1].name, "y");
+    assert_eq!(ts_arrow_hint_count(src), 0);
 }
 
 #[test]

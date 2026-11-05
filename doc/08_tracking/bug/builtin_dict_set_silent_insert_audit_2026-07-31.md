@@ -340,3 +340,11 @@ row-by-row here:
   then `d.contains_key("k")`; if green, close and re-point the 69 AFFECTED sites
   list as verified. `doc/07_guide/language/dict_native_pitfalls.md` is absent on
   this branch, so the "update the pitfalls doc" action item is blocked on that too.
+
+## mirp2-G 2026-11-05: left open
+
+`244170a1819` ("dispatch erased Dict set dynamically") is on release/1.0.0. The
+native repro from the 2026-11-04 triage (`val d: Dict<text,text> = {}`;
+`d.set("k","v")`; `d.contains_key("k")`) was not run: native probing blocked by
+disk (C: 6.3 GB free, s3sanity harness needs 12 GB). Next step: run that probe
+with s3_fable44; if green, close and mark the AFFECTED list verified.

@@ -477,7 +477,9 @@ pub fn rt_transient_heap_promote_share_begin(args: &[Value]) -> Result<Value, Co
             "rt_transient_heap_promote_share_begin requires 0 arguments",
         ));
     }
-    Ok(Value::Bool(simple_runtime::value::rt_transient_heap_promote_share_begin()))
+    Ok(Value::Bool(
+        simple_runtime::value::rt_transient_heap_promote_share_begin(),
+    ))
 }
 
 pub fn rt_transient_heap_promote_share_end(args: &[Value]) -> Result<Value, CompileError> {
@@ -513,7 +515,9 @@ pub fn rt_session_heap_end(args: &[Value]) -> Result<Value, CompileError> {
             ))
         }
     };
-    Ok(Value::Bool(session.is_some_and(|id| simple_runtime::value::rt_session_heap_end(id))))
+    Ok(Value::Bool(
+        session.is_some_and(|id| simple_runtime::value::rt_session_heap_end(id)),
+    ))
 }
 
 pub fn rt_session_alloc_begin(args: &[Value]) -> Result<Value, CompileError> {
@@ -548,10 +552,7 @@ pub fn rt_transient_heap_adopt(args: &[Value]) -> Result<Value, CompileError> {
             simple_runtime::value::rt_transient_heap_adopt(simple_runtime::value::RuntimeValue::from_raw(*value))
         }
         Value::Nil => true,
-        _ => {
-            simple_runtime::value::rt_session_heap_id() != 0
-                && simple_runtime::value::transient_heap_scope_paused()
-        }
+        _ => simple_runtime::value::rt_session_heap_id() != 0 && simple_runtime::value::transient_heap_scope_paused(),
     };
     Ok(Value::Bool(adopted))
 }
@@ -1239,8 +1240,7 @@ pub fn rt_mprotect(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_mprotect(args: &[Value]) -> Result<Value, CompileError> {
     use windows_sys::Win32::System::Diagnostics::Debug::FlushInstructionCache;
     use windows_sys::Win32::System::Memory::{
-        VirtualProtect, PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE,
-        PAGE_WRITECOPY,
+        VirtualProtect, PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY,
     };
 
     if args.len() != 3 {
@@ -1574,7 +1574,10 @@ mod ptr_read_u8_tests {
         let write_exec = (libc::PROT_WRITE | libc::PROT_EXEC) as i64;
         let refused = rt_mprotect(&[Value::Int(rw), Value::Int(4096), Value::Int(write_exec)]).unwrap();
         assert_eq!(refused, Value::Int(-1), "W^X must still be refused");
-        assert_eq!(rt_munmap_raw(&[Value::Int(rw), Value::Int(4096)]).unwrap(), Value::Int(0));
+        assert_eq!(
+            rt_munmap_raw(&[Value::Int(rw), Value::Int(4096)]).unwrap(),
+            Value::Int(0)
+        );
     }
 
     /// Regression: the Windows seed had no `rt_mprotect` ("unavailable on this
@@ -2044,7 +2047,9 @@ pub fn rt_array_bytes_basis_len(args: &[Value]) -> Result<Value, CompileError> {
 /// while the caller retains the array value, as the native contract requires.
 pub fn rt_array_bytes_basis_ptr(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
-        return Err(CompileError::runtime("rt_array_bytes_basis_ptr requires 1 argument (array)"));
+        return Err(CompileError::runtime(
+            "rt_array_bytes_basis_ptr requires 1 argument (array)",
+        ));
     }
     rt_array_data_ptr(args)
 }
@@ -2105,9 +2110,9 @@ pub fn rt_array_bytes_validate(args: &[Value]) -> Result<Value, CompileError> {
 /// caller-owned packed storage whose pointer `rt_array_bytes_basis_ptr`
 /// handed out (a real in-process buffer hosted), returning the length.
 pub fn rt_array_bytes_copy_checked(args: &[Value]) -> Result<Value, CompileError> {
-    let source = args
-        .first()
-        .ok_or_else(|| CompileError::runtime("rt_array_bytes_copy_checked requires 3 arguments (array, out, capacity)"))?;
+    let source = args.first().ok_or_else(|| {
+        CompileError::runtime("rt_array_bytes_copy_checked requires 3 arguments (array, out, capacity)")
+    })?;
     let out = args
         .get(1)
         .and_then(|value| value.as_int().ok())
@@ -2422,7 +2427,10 @@ mod tests {
         let fixed = Value::fixed_size_array(2, vec![Value::Int(7), Value::Int(8)]).unwrap();
         assert_eq!(rt_array_bytes_validate(&[fixed]).unwrap(), Value::Int(2));
 
-        let suffixed = Value::array(vec![Value::UInt { value: 0x53, width: 8 }, Value::UInt { value: 0, width: 8 }]);
+        let suffixed = Value::array(vec![
+            Value::UInt { value: 0x53, width: 8 },
+            Value::UInt { value: 0, width: 8 },
+        ]);
         assert_eq!(rt_array_bytes_validate(&[suffixed]).unwrap(), Value::Int(2));
 
         let wide = Value::array(vec![Value::UInt { value: 256, width: 16 }]);
@@ -2457,12 +2465,8 @@ mod tests {
         .unwrap();
         assert_eq!(short_capacity, Value::Int(-22), "capacity < length refuses");
 
-        let null_out = rt_array_bytes_copy_checked(&[
-            Value::byte_array(vec![1]),
-            Value::Int(0),
-            Value::Int(1),
-        ])
-        .unwrap();
+        let null_out =
+            rt_array_bytes_copy_checked(&[Value::byte_array(vec![1]), Value::Int(0), Value::Int(1)]).unwrap();
         assert_eq!(null_out, Value::Int(-22), "NULL destination with len > 0 refuses");
 
         let invalid_source = rt_array_bytes_copy_checked(&[
@@ -2484,7 +2488,11 @@ mod tests {
         assert_eq!(promote(&composite), Value::Bool(false), "scope open but not paused");
         assert_eq!(rt_transient_array_scope_pause(&[]).unwrap(), Value::Bool(true));
         assert_eq!(promote(&composite), Value::Bool(true), "paused scope");
-        assert_eq!(promote(&Value::Nil), Value::Bool(true), "nil owns nothing: no-op success, as in the runtimes");
+        assert_eq!(
+            promote(&Value::Nil),
+            Value::Bool(true),
+            "nil owns nothing: no-op success, as in the runtimes"
+        );
         assert_eq!(rt_transient_array_scope_end(&[]).unwrap(), Value::Bool(true));
         assert_eq!(promote(&composite), Value::Bool(false), "scope ended");
     }
@@ -2604,10 +2612,16 @@ mod tests {
     #[test]
     fn transient_heap_promote_nil_is_noop_success_in_any_scope_state() {
         // Mirrors value/collections.rs: nil owns no transient state.
-        assert!(matches!(rt_transient_heap_promote(&[Value::Nil]), Ok(Value::Bool(true))));
+        assert!(matches!(
+            rt_transient_heap_promote(&[Value::Nil]),
+            Ok(Value::Bool(true))
+        ));
         assert!(matches!(rt_transient_array_scope_begin(&[]), Ok(Value::Bool(true))));
         assert!(matches!(rt_transient_array_scope_pause(&[]), Ok(Value::Bool(true))));
-        assert!(matches!(rt_transient_heap_promote(&[Value::Nil]), Ok(Value::Bool(true))));
+        assert!(matches!(
+            rt_transient_heap_promote(&[Value::Nil]),
+            Ok(Value::Bool(true))
+        ));
         assert!(matches!(rt_transient_array_scope_end(&[]), Ok(Value::Bool(true))));
     }
 
@@ -2939,17 +2953,23 @@ fn rc_runtime_handle(name: &str, args: &[Value]) -> Result<Option<simple_runtime
 /// so share/retain/release answer false and count/graph_bytes answer -1.
 pub fn rt_rc_share(args: &[Value]) -> Result<Value, CompileError> {
     let handle = rc_runtime_handle("rt_rc_share", args)?;
-    Ok(Value::Bool(handle.is_some_and(|v| simple_runtime::value::rt_rc_share(v))))
+    Ok(Value::Bool(
+        handle.is_some_and(|v| simple_runtime::value::rt_rc_share(v)),
+    ))
 }
 
 pub fn rt_rc_retain(args: &[Value]) -> Result<Value, CompileError> {
     let handle = rc_runtime_handle("rt_rc_retain", args)?;
-    Ok(Value::Bool(handle.is_some_and(|v| simple_runtime::value::rt_rc_retain(v))))
+    Ok(Value::Bool(
+        handle.is_some_and(|v| simple_runtime::value::rt_rc_retain(v)),
+    ))
 }
 
 pub fn rt_rc_release(args: &[Value]) -> Result<Value, CompileError> {
     let handle = rc_runtime_handle("rt_rc_release", args)?;
-    Ok(Value::Bool(handle.is_some_and(|v| simple_runtime::value::rt_rc_release(v))))
+    Ok(Value::Bool(
+        handle.is_some_and(|v| simple_runtime::value::rt_rc_release(v)),
+    ))
 }
 
 pub fn rt_rc_count(args: &[Value]) -> Result<Value, CompileError> {
@@ -2959,5 +2979,7 @@ pub fn rt_rc_count(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_heap_graph_bytes(args: &[Value]) -> Result<Value, CompileError> {
     let handle = rc_runtime_handle("rt_heap_graph_bytes", args)?;
-    Ok(Value::Int(handle.map_or(-1, |v| simple_runtime::value::rt_heap_graph_bytes(v))))
+    Ok(Value::Int(
+        handle.map_or(-1, |v| simple_runtime::value::rt_heap_graph_bytes(v)),
+    ))
 }

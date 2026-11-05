@@ -159,7 +159,7 @@ impl Lowerer {
     /// hir/lower/stmt_lowering.rs), so `UnboxInt` is the exact inverse either
     /// way. `u64` (HeapUInt), `f64`/`f32` (raw enum payload bits vs BoxFloat)
     /// and `bool` (`rt_value_bool`) each have asymmetric representations and
-    /// stay on the old path.
+    /// are not accepted by this BoxInt-specific helper.
     pub(in crate::hir::lower) fn optional_boxint_scalar_inner(&self, ty: TypeId) -> Option<TypeId> {
         match self.module.types.get(ty) {
             Some(HirType::Pointer {
@@ -195,7 +195,7 @@ impl Lowerer {
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
         let lowered = self.lower_expr(expr, ctx)?;
-        Ok(self.optionalize_array_accessor(lowered))
+        Ok(self.optionalize_array_accessor(lowered, ctx))
     }
 
     /// Like `lower_optional_subject`, but only when some pattern actually tests
@@ -231,7 +231,11 @@ impl Lowerer {
         }
     }
 
-    pub(in crate::hir::lower) fn optionalize_array_accessor(&mut self, lowered: HirExpr) -> HirExpr {
+    pub(in crate::hir::lower) fn optionalize_array_accessor(
+        &mut self,
+        lowered: HirExpr,
+        ctx: &mut FunctionContext,
+    ) -> HirExpr {
         let HirExprKind::MethodCall {
             receiver,
             method,
@@ -247,7 +251,7 @@ impl Lowerer {
         };
         if !matches!(
             element,
-            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32
+            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
         ) || lowered.ty != element
         {
             return lowered;
@@ -272,10 +276,66 @@ impl Lowerer {
             capability: ast::ReferenceCapability::Shared,
             inner: element,
         });
-        HirExpr {
+        let tagged_call = HirExpr {
             kind: HirExprKind::BuiltinCall {
                 name: rt_name.to_string(),
                 args: call_args,
+            },
+            ty: optional_ty,
+        };
+        if element != TypeId::U64 {
+            return tagged_call;
+        }
+
+        // Packed u64 accessors may produce a signed integer box. Keep that word
+        // for the absence test, but normalize a present payload to HeapUInt.
+        // The temp is essential: pop/remove must not run once for each use.
+        let subject_idx = ctx.add_local(
+            "$optional_u64_accessor".to_string(),
+            optional_ty,
+            ast::Mutability::Immutable,
+        );
+        let subject = || HirExpr {
+            kind: HirExprKind::Local(subject_idx),
+            ty: optional_ty,
+        };
+        let condition = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_is_some".to_string(),
+                args: vec![subject()],
+            },
+            ty: TypeId::BOOL,
+        };
+        let raw_payload = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_value_as_u64".to_string(),
+                args: vec![subject()],
+            },
+            ty: TypeId::U64,
+        };
+        let present = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_value_u64".to_string(),
+                args: vec![raw_payload],
+            },
+            ty: optional_ty,
+        };
+        let absent = HirExpr {
+            kind: HirExprKind::Nil,
+            ty: TypeId::NIL,
+        };
+        HirExpr {
+            kind: HirExprKind::LetIn {
+                local_idx: subject_idx,
+                value: Box::new(tagged_call),
+                body: Box::new(HirExpr {
+                    kind: HirExprKind::If {
+                        condition: Box::new(condition),
+                        then_branch: Box::new(present),
+                        else_branch: Some(Box::new(absent)),
+                    },
+                    ty: optional_ty,
+                }),
             },
             ty: optional_ty,
         }

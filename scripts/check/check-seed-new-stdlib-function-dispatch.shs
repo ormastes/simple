@@ -1,0 +1,140 @@
+#!/bin/sh
+# Usage: sh scripts/check/check-seed-new-stdlib-function-dispatch.shs [--simple <seed>]
+
+set -u
+
+repo_root=$(CDPATH= cd -- "$(dirname "$0")/../.." 2>/dev/null && pwd) || exit 2
+simple_bin=${SIMPLE_SEED:-}
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --simple)
+            shift
+            simple_bin=${1:-}
+            ;;
+        *)
+            echo "ERROR: unknown argument: $1" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+
+if [ -z "$simple_bin" ]; then
+    for candidate in \
+        "$repo_root/src/compiler_rust/target/bootstrap/simple" \
+        "$repo_root/src/compiler_rust/target/bootstrap/simple.exe"
+    do
+        if [ -x "$candidate" ]; then
+            simple_bin=$candidate
+            break
+        fi
+    done
+fi
+if [ -z "$simple_bin" ]; then
+    echo "ERROR: no runnable Rust seed; pass --simple <path>" >&2
+    exit 2
+fi
+case "$simple_bin" in
+    /* | [A-Za-z]:*) ;;
+    *) simple_bin="$(pwd)/$simple_bin" ;;
+esac
+if [ ! -f "$simple_bin" ] || [ ! -x "$simple_bin" ]; then
+    echo "ERROR: no runnable Rust seed; pass --simple <path>" >&2
+    exit 2
+fi
+
+work=$(mktemp -d) || exit 2
+cleanup() { rm -rf "$work"; }
+trap cleanup EXIT INT TERM
+checks=0
+
+run_probe() {
+    probe_root=$1
+    mode=$2
+    name=$3
+    expected=$4
+    stdout="$work/$mode.$name.stdout"
+    stderr="$work/$mode.$name.stderr"
+    expected_file="$work/$mode.$name.expected"
+
+    if (
+        cd "$probe_root" && \
+        SIMPLE_EXECUTION_MODE="$mode" \
+        SIMPLE_JIT_STRICT=1 \
+        SIMPLE_RUST_SEED_WARNING=0 \
+        SIMPLE_CACHE="$probe_root/cache-$name" \
+            "$simple_bin" run "$probe_root/probes/$name" >"$stdout" 2>"$stderr"
+    ); then
+        rc=0
+    else
+        rc=$?
+    fi
+    if [ "$rc" -ne 0 ]; then
+        echo "FAIL: $mode/$name exited $rc" >&2
+        cat "$stdout" >&2
+        cat "$stderr" >&2
+        exit 1
+    fi
+
+    printf '%b' "$expected" >"$expected_file"
+    if ! diff -u "$expected_file" "$stdout"; then
+        echo "FAIL: $mode/$name produced unexpected output" >&2
+        cat "$stderr" >&2
+        exit 1
+    fi
+    checks=$((checks + 1))
+}
+
+for mode in interpreter jit; do
+    root="$work/$mode"
+    module="$root/src/lib/nogc_sync_mut/env/platform.spl"
+    mkdir -p "$root/probes" "$(dirname "$module")"
+    cat >"$module" <<'EOF'
+fn detect_os() -> text:
+    "windows"
+
+fn is_linux() -> bool:
+    detect_os() == "linux"
+EOF
+    cat >"$root/probes/existing_only.spl" <<'EOF'
+use std.env.platform.{detect_os, is_linux}
+
+fn main():
+    print("a=" + detect_os())
+    print(is_linux())
+EOF
+    run_probe "$root" "$mode" existing_only.spl 'a=windows\nfalse\n'
+
+    cat >>"$module" <<'EOF'
+
+fn os_from_uname(sysname: text) -> text:
+    if sysname == "Linux":
+        return "linux"
+    if sysname == "Darwin":
+        return "macos"
+    if sysname == "FreeBSD":
+        return "freebsd"
+    if sysname == "OpenBSD":
+        return "openbsd"
+    if sysname == "NetBSD":
+        return "netbsd"
+    "unknown"
+EOF
+    cat >"$root/probes/mixed_calls.spl" <<'EOF'
+use std.env.platform.{detect_os, os_from_uname}
+
+fn main():
+    print("a=" + detect_os())
+    print("b=" + os_from_uname("Linux"))
+EOF
+    cat >"$root/probes/import_only_new.spl" <<'EOF'
+use std.env.platform.{os_from_uname}
+
+fn main():
+    print(os_from_uname("FreeBSD"))
+EOF
+    run_probe "$root" "$mode" mixed_calls.spl 'a=windows\nb=linux\n'
+    run_probe "$root" "$mode" import_only_new.spl 'freebsd\n'
+done
+
+echo "PASS: $checks newly added stdlib function call checks"

@@ -18,6 +18,10 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_print_value(value: i64)
 extern fn rt_println_value(value: i64)
+# Raw enum introspection for the string fast path below. Typed enum argument,
+# same ABI pattern as interpreter.spl's rt_enum_discriminant(HirExprKind).
+extern fn rt_enum_discriminant(value: Value) -> i64
+extern fn rt_enum_payload(value: Value) -> i64
 extern fn rt_file_exists(path_ptr: i64, path_len: i64) -> bool
 extern fn rt_file_exists_probe_begin() -> i64
 extern fn rt_file_exists_probe_end(token: i64) -> i64
@@ -296,32 +300,36 @@ impl InterpreterBackendImpl:
                     # Typed rebind (stage4 ANY-erased list element).
                     val arg: Value = args[0]
                     itrace("[BUILTIN] Print arg bound nil={arg == nil}")
-                    match arg:
-                        case Value.RuntimeValue(ptr):
-                            itrace("[BUILTIN] Print RuntimeValue case")
-                            rt_print_value(ptr)
-                        # Pure-Simple print path for scalars: the
-                        # rt_value_int -> rt_print_value pointer round-trip
-                        # SEGVs on stage4 ("[BUILTIN] Print ptr done" then
-                        # crash, iteration 18); value_to_string + print is
-                        # equivalent and stays in Simple.
-                        case Value.Int(iv):
-                            itrace("[BUILTIN] Print Int case")
-                            print "{iv}"
-                        case Value.Float(fv):
-                            print "{fv}"
-                        case Value.Bool(bv):
-                            if bv:
-                                print "true"
-                            else:
-                                print "false"
-                        case Value.String(sv):
-                            print sv
-                        case Value.Nil:
-                            print "nil"
-                        case _:
-                            val msg = self.value_to_string(arg)
-                            print msg
+                    # @workaround bug=riscv64_interp_enum_check_discriminant_shift_2026_11_06 reason=in the riscv64 in-guest build every `case Value.X` pattern test lowers to rt_enum_check_variant whose baked discriminant operand arrives one nibble shifted (ctor stamps the unshifted hash), so the match always falls through and strings print as <unknown>. Identity-check against a freshly constructed String probe (both discriminants come from rt_enum_new at runtime and therefore agree) and print the raw payload; non-enum values answer -1 and never match the probe. See doc/08_tracking/bug/riscv64_interp_enum_check_discriminant_shift_2026-11-06.md.
+                    if rt_enum_discriminant(arg) == rt_enum_discriminant(backend_value_string_v1("")):
+                        rt_print_value(rt_enum_payload(arg))
+                    else:
+                        match arg:
+                            case Value.RuntimeValue(ptr):
+                                itrace("[BUILTIN] Print RuntimeValue case")
+                                rt_print_value(ptr)
+                            # Pure-Simple print path for scalars: the
+                            # rt_value_int -> rt_print_value pointer round-trip
+                            # SEGVs on stage4 ("[BUILTIN] Print ptr done" then
+                            # crash, iteration 18); value_to_string + print is
+                            # equivalent and stays in Simple.
+                            case Value.Int(iv):
+                                itrace("[BUILTIN] Print Int case")
+                                print "{iv}"
+                            case Value.Float(fv):
+                                print "{fv}"
+                            case Value.Bool(bv):
+                                if bv:
+                                    print "true"
+                                else:
+                                    print "false"
+                            case Value.String(sv):
+                                print sv
+                            case Value.Nil:
+                                print "nil"
+                            case _:
+                                val msg = self.value_to_string(arg)
+                                print msg
                 else:
                     print ""
                 Some(Ok(Value.Nil))
@@ -345,12 +353,17 @@ impl InterpreterBackendImpl:
             case BuiltinTag.Println:
                 if args.len() > 0:
                     val arg = args[0]
-                    match arg:
-                        case Value.RuntimeValue(ptr):
-                            rt_println_value(ptr)
-                        case _:
-                            val msg = self.value_to_string(arg)
-                            print msg
+                    # Same string fast path as BuiltinTag.Print above
+                    # (riscv64_interp_enum_check_discriminant_shift_2026_11_06).
+                    if rt_enum_discriminant(arg) == rt_enum_discriminant(backend_value_string_v1("")):
+                        rt_println_value(rt_enum_payload(arg))
+                    else:
+                        match arg:
+                            case Value.RuntimeValue(ptr):
+                                rt_println_value(ptr)
+                            case _:
+                                val msg = self.value_to_string(arg)
+                                print msg
                 else:
                     print ""
                 Some(Ok(Value.Nil))

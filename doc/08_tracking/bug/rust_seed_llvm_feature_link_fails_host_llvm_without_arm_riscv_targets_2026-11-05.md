@@ -77,3 +77,19 @@ Error path: unit tests `codegen::llvm_jit::target_availability_tests` call
 `cargo test --release -p simple-compiler --features llvm --lib target_availability`
 -> 2 passed, asserting `LLVM target RISCV is not available` / `LLVM target ARM ...`.
 Before the fix the same call could not link at all.
+
+## Verification 2026-11-05 (riscv-sweep lane, work/riscv-sweep-20261105) — re-verified in isolation
+
+Independent re-run in an isolated worktree of `origin/release/1.0.0`
+(`work/riscv-sweep-20261105`) on this host class (aarch64 Linux; host LLVM 23
+built with only `AArch64 X86 NVPTX`):
+
+```text
+cargo test -p simple-compiler --features llvm --lib target_availability
+test codegen::llvm_jit::target_availability_tests::missing_arm_target_is_clear_error ... ok
+test codegen::llvm_jit::target_availability_tests::missing_riscv_target_is_clear_error ... ok
+test result: ok. 2 passed; 0 failed
+```
+
+Confirms the `build.rs` `llvm-config --targets-built` gating and the clear
+error path at tip on a host LLVM without ARM/RISCV targets. Status: FIXED.

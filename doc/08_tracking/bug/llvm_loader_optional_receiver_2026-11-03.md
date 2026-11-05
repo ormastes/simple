@@ -54,3 +54,6 @@ The authored regression exercises the actual loader, verifies a stable handle
 and lifetime identity, resolves `LLVMContextCreate` through the normal checked
 owner, and creates/disposes a real context. It remains unexecuted. Plugin19,
 Cranelift, and bootstrap qualification remain pending independently.
+
+## 2026-11-05 compiler-defects sweep (winboot-rel100 lane)
+Ancestor check: fix 292fee2b7ee (explicit optional payload binding in llvm_lib) is an ancestor of tip 816655ee5cb. Host check: test/01_unit/lib/sffi/llvm_loader_optional_receiver_spec.spl 1/1 PASS under bin/simple.exe (seed interpreter, --no-session-daemon). Runtime/plugin19/CLI/bootstrap qualification remains open per the original doc boundary.
