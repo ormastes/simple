@@ -8,7 +8,7 @@ use common.ui.widget.{UITree, UIEvent, WidgetNode}
 use common.ui.builder.{build_tree_with_title}
 use common.ui.theme_registry.{ThemeId, theme_id_key}
 use common.ui.ios_icons.{ios_icon}
-use common.rich_text.attributed_text.{RichDocument, DocBlock, TextSpan, InlineStyle, empty_document, document_word_count, document_headings, block_to_plain_text, spans_to_plain_text}
+use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle, empty_document, document_word_count, document_headings, block_to_plain_text, spans_to_plain_text}
 use common.rich_text.editor.{RichTextEditor, TextCursor}
 use common.office.undo.{UndoStack, UndoEntry}
 
@@ -143,23 +143,23 @@ class WordApp:
                 me.modified = true
             "format_h1" =>
                 me._push_undo("Heading 1")
-                me.editor.set_heading_level(1)
+                me._set_block_kind(BlockKind.Heading1)
                 me.modified = true
             "format_h2" =>
                 me._push_undo("Heading 2")
-                me.editor.set_heading_level(2)
+                me._set_block_kind(BlockKind.Heading2)
                 me.modified = true
             "format_h3" =>
                 me._push_undo("Heading 3")
-                me.editor.set_heading_level(3)
+                me._set_block_kind(BlockKind.Heading3)
                 me.modified = true
             "format_bullet_list" =>
                 me._push_undo("Bullet List")
-                me.editor.convert_to_bullet_list()
+                me._set_block_kind(BlockKind.BulletItem)
                 me.modified = true
             "format_quote" =>
                 me._push_undo("Quote")
-                me.editor.convert_to_quote()
+                me._set_block_kind(BlockKind.Quote)
                 me.modified = true
             "toggle_sidebar" =>
                 me.sidebar_visible = not me.sidebar_visible
@@ -181,11 +181,19 @@ class WordApp:
                 if action.starts_with("goto_block_"):
                     val idx_str = action.slice(11, action.len())
                     val idx = _parse_int(idx_str)
-                    me.editor.move_to_block(idx)
+                    me.editor.move_to(idx.to_i64(), 0)
+
+    me _set_block_kind(kind: BlockKind):
+        """Convert the block under the cursor to `kind`, keeping its spans."""
+        val bi = me.editor.cursor.block_index
+        val doc = me.editor.doc
+        if bi < 0 or bi >= doc.blocks.len():
+            return
+        doc.blocks[bi] = DocBlock(kind: kind, spans: doc.blocks[bi].spans)
 
     me _push_undo(description: text):
         """Push the current document state onto the undo stack before a mutation."""
-        val before = me.editor.serialize()
+        val before = _serialize_document(me.editor.doc)
         me.undo_stack.push(UndoEntry(
             id: "{me.undo_stack.position + 1}",
             description: description,
@@ -199,15 +207,15 @@ class WordApp:
 
     me save() -> text:
         """Serialize the current document to text for saving."""
-        return me.editor.serialize()
+        return _serialize_document(me.editor.doc)
 
     me word_count() -> i32:
         """Return the total word count of the document."""
-        return document_word_count(me.editor.doc)
+        return document_word_count(me.editor.doc).to_i32()
 
     me current_line() -> i32:
         """Return the current cursor line (1-based)."""
-        return me.editor.cursor.block_index + 1
+        return (me.editor.cursor.block_index + 1).to_i32()
 
 # =========================================================================
 # Internal Helpers
@@ -227,11 +235,34 @@ fn _extract_filename(path: text) -> text:
         return path.slice(last_sep + 1, path.len())
     return path
 
+fn _plain_span(content: text) -> TextSpan:
+    TextSpan(text: content, style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "", revision_id: "")
+
+fn _plain_block(kind: BlockKind, content: text) -> DocBlock:
+    DocBlock(kind: kind, spans: [_plain_span(content)])
+
+fn _block_prefix(kind: BlockKind) -> text:
+    match kind:
+        case BlockKind.Heading1: "# "
+        case BlockKind.Heading2: "## "
+        case BlockKind.Heading3: "### "
+        case BlockKind.BulletItem: "- "
+        case BlockKind.Quote: "> "
+        case _: ""
+
+fn _serialize_document(doc: RichDocument) -> text:
+    """Inverse of `_deserialize_content`: 'title: ...' then one line per block."""
+    var out = "title: " + doc.title
+    for block in doc.blocks:
+        out = out + "\n" + _block_prefix(block.kind) + block_to_plain_text(block)
+    out
+
 fn _deserialize_content(path: text, content: text) -> RichDocument:
     """Deserialize text content into a RichDocument.
 
     Format: first line 'title: ...' sets the title, remaining non-empty
-    lines become paragraph blocks. Blank lines are skipped."""
+    lines become blocks (markdown-style '#', '-', '>' prefixes). Blank lines
+    are skipped."""
     var title = _extract_filename(path)
     val lines = content.split("\n")
     var blocks: [DocBlock] = []
@@ -247,37 +278,24 @@ fn _deserialize_content(path: text, content: text) -> RichDocument:
         if trimmed == "":
             continue
         if trimmed.starts_with("### "):
-            val heading_text = trimmed.slice(4, trimmed.len())
-            val span = TextSpan(content: heading_text, styles: [])
-            blocks = blocks.push(DocBlock.Heading(level: 3, spans: [span]))
+            blocks.push(_plain_block(BlockKind.Heading3, trimmed.slice(4, trimmed.len())))
         elif trimmed.starts_with("## "):
-            val heading_text = trimmed.slice(3, trimmed.len())
-            val span = TextSpan(content: heading_text, styles: [])
-            blocks = blocks.push(DocBlock.Heading(level: 2, spans: [span]))
+            blocks.push(_plain_block(BlockKind.Heading2, trimmed.slice(3, trimmed.len())))
         elif trimmed.starts_with("# "):
-            val heading_text = trimmed.slice(2, trimmed.len())
-            val span = TextSpan(content: heading_text, styles: [])
-            blocks = blocks.push(DocBlock.Heading(level: 1, spans: [span]))
+            blocks.push(_plain_block(BlockKind.Heading1, trimmed.slice(2, trimmed.len())))
         elif trimmed.starts_with("- "):
-            val item_text = trimmed.slice(2, trimmed.len())
-            val item_span = TextSpan(content: item_text, styles: [])
-            blocks = blocks.push(DocBlock.BulletList(items: [[item_span]]))
+            blocks.push(_plain_block(BlockKind.BulletItem, trimmed.slice(2, trimmed.len())))
         elif trimmed.starts_with("> "):
-            val quote_text = trimmed.slice(2, trimmed.len())
-            val inner_span = TextSpan(content: quote_text, styles: [])
-            val inner_block = DocBlock.Paragraph(spans: [inner_span])
-            blocks = blocks.push(DocBlock.Quote(blocks: [inner_block]))
-        elif trimmed == "---":
-            blocks = blocks.push(DocBlock.HorizontalRule)
+            blocks.push(_plain_block(BlockKind.Quote, trimmed.slice(2, trimmed.len())))
         else:
-            val span = TextSpan(content: trimmed, styles: [])
-            blocks = blocks.push(DocBlock.Paragraph(spans: [span]))
+            blocks.push(_plain_block(BlockKind.Paragraph, trimmed))
 
     if blocks.len() == 0:
-        val empty_span = TextSpan(content: "", styles: [])
-        blocks = blocks.push(DocBlock.Paragraph(spans: [empty_span]))
+        blocks.push(_plain_block(BlockKind.Paragraph, ""))
 
-    return RichDocument(title: title, blocks: blocks, metadata: {})
+    val doc = RichDocument.new(title)
+    doc.blocks = blocks
+    doc
 
 fn _parse_int(s: text) -> i32:
     """Parse a simple non-negative integer from a string. Returns 0 on failure."""
