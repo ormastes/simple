@@ -118,3 +118,26 @@ Still OPEN; not closed and not re-scoped as fixed, because it cannot be re-run h
   rerun the `hello` and `variable` smokes with a private empty `SIMPLE_HIR_CACHE_DIR`. If both
   pass, close as superseded and cite that candidate's SHA256. If either fails, take a minidump
   and bisect `ef0681fc0e1..<tip>` on the smoke that fails.
+
+## 2026-11-05 rerun on stage3 43 (lane p1w-p2av): no access violation
+
+Binary: `s3_fable43.exe`, SHA256 `615859c5c2815f7164fa092ca62d95ad6f4ef5753cc76a3860beb25b827fccd7`
+(built from release/1.0.0). I ran each case on its own as a single module. I used an adapted
+copy of `C:/dev/p3new/s3sanity/run_case_g43b.ps1`, with `SIMPLE_HIR_CACHE=0` and a private
+cache and output dir. It ran `native-build --entry-closure --entry test/s3sanity/<case>.spl
+--target x86_64-pc-windows-gnu --backend llvm --keep-going`, then renamed the entry symbol and
+linked manually with llvm-mingw clang.
+
+| Case | Source | Build wall | Peak RSS | Run |
+|---|---|---:|---:|---|
+| `hello` | `print("hello")` | 464 s | 2.21 GB | rc=0, stdout `hello` |
+| `variable` | `val s = "x"; print(s)` | 335 s | 2.30 GB | rc=0, stdout `x` |
+
+Neither case hit `0xC0000005`. Both reached the stages where the candidate had faulted:
+`translate_const` (native_compile) and `mir_expr_symbol_id_value` (mir_lower). Each produced its
+`__simple_main` object. The driver's own rc=1 comes from the known 43 auto-link/entry-rename
+step, which the gate recipe works around with a manual link. It is not a crash.
+
+Verdict: the failures do not reproduce on the current pipeline. They are superseded by the
+transport fixes listed in the premise check above. Status: verification-pending. Close this
+once a Phase 2 stage2 candidate built from the current tip passes the same two smokes.
