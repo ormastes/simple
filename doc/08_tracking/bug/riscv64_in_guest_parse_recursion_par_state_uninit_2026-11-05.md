@@ -163,3 +163,70 @@ hard rule (6 cycles) stopped the investigation here; all temporary
 instrumentation (INIT-TRACE in `linker.rs`, direct-call diagnostic in
 `boot_entry.c`) was reverted, and the kernel build re-verified PASS on
 the clean tree.
+
+---
+
+## 2026-11-05 — WATCHPOINT LANE (PR #7001+1): the clobber caught, fix landed, residual defect filed
+
+No riscv64-capable gdb exists on this host (host gdb 15.1 is aarch64-only;
+/tmp/riscv-tools has no gdb), so the hardware-watchpoint route was out.
+Used the software-sentinel fallback instead.
+
+### Method
+
+Temporary probe (all reverted) in the runtime TU: `rv64_par_state_note()`
+snapshots the `par_state` global + its first 20 words at the top of
+spl_start; `rv64_par_state_check(tag)` at entry-phase boundaries;
+`rv64_par_state_dump(tag)` from the trap handler.
+
+### Findings
+
+1. **The global is never clobbered.** At the fault: `cur == exp ==
+   0x80676fc1` — `par_state` holds the same valid tagged pointer the
+   init stored. The #7001 "clobbered between boot and parse" hypothesis
+   is HALF right: the global survives; its POINTEE gets overlaid.
+2. **The struct's pointee IS written over by allocations.** Trap-time
+   field dump vs the boot snapshot: fields 0-3 legitimately re-created
+   by `parser_init_with_path`'s reset; **fields 6, 10, 14 all hold
+   0x0000001100000001** (and field 8 = 0xffffffffffffff00, field 18 =
+   0x000000a000000002) — array-header-shaped data written over the
+   struct by a bump allocator.
+3. **The writer: the ghdl TU's 32 MiB static `g_heap` array from PR
+   #6983.** Measured in the same ELF: `g_heap` at 0x80665000 (the very
+   start of .bss, spanning 32 MiB) and `par_state`'s struct at
+   0x80676fc0 = g_heap + 0x11fc0 — INSIDE the array's span. `.bss` is
+   for zeroed globals; making it also the allocator arena meant every
+   code-side allocation bump-overlaid live module globals. The 64 KiB
+   original array never reached the globals; the 32 MiB enlargement
+   did. Root cause of the "clobber" = the #6983 fix itself.
+
+### Fix (landed)
+
+- `ghdl_boot_info_runtime.c`: the 32 MiB static .bss array is DELETED.
+  That TU now owns the THIRD disjoint slice of the linker-reserved
+  `.heap` (RV_HEAP_BASE/RV_HEAP_SIZE), exactly like the other two
+  runtime TUs — never .bss.
+- `baremetal_stubs.c` / `baremetal_runtime_core.inc.c`: halves ->
+  thirds (first / second slice) so all three duplicate allocators own
+  disjoint regions regardless of the --allow-multiple-definition
+  lottery.
+- `linker_riscv_common.ld`: `.heap` 64M -> 192M so each third keeps
+  the 64M per-owner capacity the halves used to carry; fits in the
+  510M RAM region (NOLOAD, no flat-Image bytes).
+
+### Result
+
+The boot recovered everything the overlay had been corrupting serial-
+early (banners, prints — the mid-fix 21MiB-thirds boot panicked with an
+empty message pre-banner because init allocations exceeded a third;
+the 192M heap fixed that). The parse now reaches the same rt_array_set
+load fault — but the garbage word is byte-identical
+(0x0000001100000001) across completely different memory layouts, i.e.
+it is DETERMINISTIC DATA, not an overlay artifact: an (i32,i32)-shaped
+pair (1, 17) sitting in every `[...]`-literal-initialized ParserState
+slot field. That is a seed codegen value-representation defect in the
+array-literal construction (fields 6/10/14 = the three `[]`/`[0]`
+slot owners), a different class from this record's clobber — filed here
+as the new tail: next lane owns the constructor lowering; the runtime
+side of THIS record is closed (no clobber remains: the sentinel proves
+the global and, post-fix, no overlay writer exists inside .bss).
