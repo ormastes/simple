@@ -620,9 +620,12 @@ impl<'a> Parser<'a> {
             // Route @ and legacy #[...] to attributed_item.
             TokenKind::At | TokenKind::Hash => self.parse_attributed_item_with_doc(doc_comment),
             TokenKind::Async => {
-                // `async fn` — skip async keyword, parse as regular function
-                self.advance();
-                self.parse_function_with_doc(doc_comment)
+                // `async fn` — route through the async parser so the
+                // Effect::Async marker is recorded. Parsing as a regular
+                // function here dropped the effect, so interpreted no-await
+                // async calls returned their raw body value instead of a
+                // ready future (no_await_future_behavior_spec).
+                self.parse_async_function_with_doc(doc_comment)
             }
             TokenKind::Fn => {
                 // Disambiguate: fn name(...) is function definition,
