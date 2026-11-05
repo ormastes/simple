@@ -23,6 +23,7 @@ pub(crate) use core::{
     instantiate_class, publish_and_repoint, publish_before_block_clone, publish_live_bound_globals, refresh_live_bound_globals,
     sync_live_bound_globals, sync_owned_captured_globals, ProceedContext, IN_NEW_METHOD,
 };
+pub(crate) use core::function_exec::merge_shared_collection_fields;
 pub(crate) use core::bitfield_support::instantiate_bitfield_from_args;
 
 use std::sync::Arc;
