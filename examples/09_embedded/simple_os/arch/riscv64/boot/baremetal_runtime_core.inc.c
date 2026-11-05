@@ -106,8 +106,11 @@ extern unsigned char __heap_end[];
 /* The HIGH half of the linker-reserved `.heap`. See the matching comment in
  * baremetal_stubs.c: the two riscv64 runtime TUs each keep a private bump
  * cursor, so they must own disjoint halves of the region. */
-#define RV_HEAP_BASE (__heap_start + ((size_t)(__heap_end - __heap_start) / 2U))
-#define RV_HEAP_SIZE ((size_t)(__heap_end - __heap_start) / 2U)
+/* Second of three disjoint thirds of the linker-reserved .heap (baremetal_stubs.c
+ * owns the first, ghdl_boot_info_runtime.c the third) -- see the matching
+ * comment in baremetal_stubs.c. */
+#define RV_HEAP_BASE (__heap_start + ((size_t)(__heap_end - __heap_start) / 3U))
+#define RV_HEAP_SIZE ((size_t)(__heap_end - __heap_start) / 3U)
 static uintptr_t g_heap_off = 0;
 static unsigned char g_virtq[8192] __attribute__((aligned(4096)));
 static unsigned char g_dma[1024] __attribute__((aligned(512)));
