@@ -1458,6 +1458,33 @@ RuntimeValue rt_native_neq(RuntimeValue a, RuntimeValue b)
     return rt_native_eq(a, b) ? 0 : 1;
 }
 
+/* Text-specific equality used by the Cranelift text lowering. Unlike the
+ * fabricated weak body, this must compare literal CONTENT: NVMe's
+ * nvme_controller_refusal_reason() and its caller can hold distinct allocations
+ * of "ready". Preserve the existing heap/raw guards and also handle two raw
+ * literals, which rt_native_eq deliberately compares only by identity. */
+static int rt_text_eq_raw_raw(RuntimeValue left, RuntimeValue right)
+{
+    if (left == right) return 1;
+    if ((uint64_t)left < 0x10000ULL || (uint64_t)right < 0x10000ULL) return 0;
+    if (IS_HEAP(left) || IS_HEAP(right)) return 0;
+    const char *a = (const char *)(uintptr_t)left;
+    const char *b = (const char *)(uintptr_t)right;
+    for (;;) {
+        if (*a != *b) return 0;
+        if (*a == '\0') return 1;
+        a++;
+        b++;
+    }
+}
+
+RuntimeValue rt_text_eq_any(RuntimeValue left, RuntimeValue right)
+{
+    if (IS_NIL(left) || IS_NIL(right)) return left == right ? 1 : 0;
+    if (IS_HEAP(left) || IS_HEAP(right)) return rt_native_eq(left, right);
+    return rt_text_eq_raw_raw(left, right);
+}
+
 #define MAX_PCI_CACHED 64
 static struct {
     uint8_t bus, dev, func;
