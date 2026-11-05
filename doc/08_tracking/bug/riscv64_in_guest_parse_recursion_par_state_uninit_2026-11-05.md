@@ -118,3 +118,48 @@ interp closure) to answer: was
 side dropped it, then re-run this repro — the acceptance is the guest
 advancing past `parser_init_with_path` into real tokenization (or the
 next honestly-named blocker).
+
+---
+
+## 2026-11-05 — CORRECTION (lane `work/riscv-inguest-module-init-20261105`): "init never runs" is DISPROVEN
+
+The root-cause boundary above ("the parser module's init is missing from
+the generated caller") is WRONG. Measured on the current tip
+(`d5bfa447382`):
+
+- `generate_init_caller` DOES run for the freestanding link
+  (`linker.rs:2847`, `link_objects_freestanding`) and finds **150**
+  inits (temporary INIT-TRACE instrumentation, reverted) — including
+  `__module_init_compiler__frontend__core__parser`.
+- The generated `_init_all.o` carries both a GOT_HI20 and a CALL_PLT
+  relocation against the parser init; the final kernel's GOT slot for
+  it is populated (`0x80663638 = 0x8033f9d4`), and `boot_entry.c:95`
+  calls `__simple_call_module_inits()` before `spl_start`.
+- The init body is correct: `__module_init_..._parser_dynamic`
+  (`0x8033f998`) calls `parser_state_fresh` and stores the result
+  through a pool entry whose value is exactly `&par_state`
+  (`0x82669218`) — verified from the linked bytes.
+- DECISIVE EXPERIMENT (temporary, reverted): boot_entry was patched to
+  call `__module_init_compiler__frontend__core__parser()` DIRECTLY
+  before `spl_start`. The parse faulted IDENTICALLY afterwards
+  (scause=5 in rt_array_set, garbage tagged receiver
+  `0x0000001900000000`, `/tmp/rv-boot/interp-serial-diag.log`). So the
+  initializer RUNS and STORES CORRECTLY, and `par_state` is STILL
+  zero/garbage when `parser_init_with_path` reads it. The defect is
+  DOWNSTREAM of the init: the global is clobbered between boot and the
+  parse, or the accessor and initializer disagree on the global's
+  representation/layout in a way static analysis of this lane could not
+  pin down (the accessor's field offsets 0x58..0x70 for the token slots
+  are consistent with the 15-field `ParserState`; both functions live in
+  the SAME object `mod_116.o`, so the duplicate-object lottery does not
+  apply to them; `.bss`/`.stack` do NOT overlap in this build — a
+  4-byte gap, correcting the transient suspicion raised mid-lane).
+
+Next-lane recommendation: attach QEMU's gdb stub and set a hardware
+watchpoint on `&par_state` (`0x82669218`) across boot→parse to catch
+the clobbering write red-handed; alternatively instrument the seed to
+trace the store/load addresses of `par_state` at runtime. The lane's
+hard rule (6 cycles) stopped the investigation here; all temporary
+instrumentation (INIT-TRACE in `linker.rs`, direct-call diagnostic in
+`boot_entry.c`) was reverted, and the kernel build re-verified PASS on
+the clean tree.
