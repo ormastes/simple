@@ -144,3 +144,7 @@ unmerged: (1)+(2) merge into `browser_engine/style/computed.spl` still
 requires explicit sign-off from that lane's owner before a session outside
 this task's stated scope edits it. No merge performed. Status stays OPEN.
 
+
+## HIR-P2 HC triage 2026-11-05
+
+Selector blocker (b) is gone (css_selector_spec 22/22). Merge into browser_engine/style/computed.spl still needs explicit sign-off from the browser_engine lane owner; no technical lock, but a stated scope boundary. Remains OPEN pending owner sign-off.

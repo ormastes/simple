@@ -257,3 +257,7 @@ declares no `SdnValue`-typed code at all); left as-is, harmless.
 - `src/lib/common/crypto/x509.spl` — `X509ParseResult` → `X509DerParseResult`
 - `scripts/check/check-type-name-collisions.shs` — new DUP001 checker
 - `doc/08_tracking/bug/duplicate_type_name_collision_audit_2026-07-17.md` — this doc
+
+## HIR-P2 HC triage 2026-11-05
+
+Audit deliverable done (renames + DUP001 checker scripts/check/check-type-name-collisions.shs). Remaining work is the by-name class/enum registry keying in eval_tables.spl, tracked by interp_class_name_collision_breaks_test_db_persistence_2026-08-10; the collision-warning spec already pins the diagnostic. Re-scoped: candidate to close in favour of that row once owner confirms; left OPEN.
