@@ -330,3 +330,66 @@ Findings:
 
 No production code changed in this lane (temp host tests, the x86_64
 test gate, and the in-guest entry probe all reverted). Cycles: 5 of 6.
+
+---
+
+## 2026-11-05 — SRET-PROBE LANE (PR #7020+1): NOT sret — the ghdl bump cursor is REWOUND mid-init; field-level evidence
+
+All in-guest evidence built with a RELEASE-BUILT seed
+(`/tmp/riscvH-target/release/simple` from `4d041e6cbf6`), fresh native
+cache (`compiled=614 reused=0`) — no stale artifacts.
+
+Boundary probes (in-guest, entry probes, reverted):
+- 16-field struct of `[i64]` returned BY VALUE from a plain fn, zeros:
+  **OK** (f0/f7/f15 read back). Distinct per-field values [i]..[i]:
+  **OK** — no value/field swap. So large-struct return lowering is
+  CORRECT; the #7020 sret hypothesis is dead.
+- The SAME shape as a MODULE-LEVEL `var g: Probe16 = make()` (the
+  par_state pattern): **faults** reading f11 — BUT the global itself
+  holds a valid, stable tagged heap pointer (0x88e8a2d1 at spl_start,
+  unchanged after 32 more allocations).
+
+Field-level dump of the struct at spl_start (16 words): f0, f1, f6, f7,
+f15 are make's valid array pointers; **f2-f5 are a complete
+RuntimeString** `{size=33, type=HEAP_STRING}, len=16,
+data="0123456789abcdef"` (the hex-literal const of
+mcdc_exclusion_evidence.spl / duplicate_check/incremental.spl), and
+**f8-f14 are another RuntimeString** `{size=54, type=HEAP_STRING},
+len=37, data="simple.instrumentation.cutover/atomic"` (the
+ASPECT_CUTOVER_ATOMIC_EXT_V1 const of
+src/lib/common/plugin/aspect_params.spl). Two independent modules'
+string-const allocations landed INSIDE the struct block at offsets
++16 and +64, with 16-byte alignment spacing exactly matching two
+sequential `rv_alloc`s from a cursor positioned at struct+16.
+
+The core TU's own `g_heap_off` at spl_start is 0xdf00 and STABLE
+across further allocation — the core cursor never served the struct
+and was not poisoned. The struct was served from the ghdl third (heap
+offset 0x80142d0). Since a single bump cursor cannot allocate inside
+its own earlier block, the ghdl cursor must have been REWOUND from
+just past the struct (0x88e8a350) to struct+16 (0x88e8a2e0) AFTER the
+entry module's init ran and BEFORE the aspect/hex string-const inits
+ran, then bumped forward again (subsequent allocations — including
+PROBE-A/B's 32 arrays — continue past the struct, which is why the
+global value and f0/f1/f6/f7/f15 stay stable).
+
+The rewind writer is UNBOUND within this lane's budget: it stores an
+offset ≈ struct_base+16 into the ghdl copy of `g_heap_off` between
+two module inits inside `__simple_call_module_inits`. Both this lane
+and the pre-#7011 laneE kernels show the identical mechanism (there:
+0x1100000001 = {size=17, type=1} string headers), so it is
+seed-independent and cache-independent.
+
+Next lane's first experiment (one in-guest boot): bisect the init
+table — disable the aspect_params init (or the hex-const module's
+init) in `__simple_call_module_inits` and check whether the overlay
+strings disappear from the struct; then walk backwards to find which
+init's store rewinds the ghdl `g_heap_off` (a hardware-watchpoint
+equivalent: POISON g_heap_off with a sentinel after the entry module's
+init and dump it at spl_start; the init that flips it is the writer).
+Candidate mechanism to check first: a string-const global init
+(`emit_module_init`'s init_strings path) whose `global_ids` lookup
+resolved to the ghdl `g_heap_off` address (weak-symbol resolution
+across the runtime TUs), storing a heap pointer into the cursor.
+
+No production code changed (all probes reverted). Cycles: 5 of 6.
