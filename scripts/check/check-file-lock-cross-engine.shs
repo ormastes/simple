@@ -1,0 +1,101 @@
+#!/bin/sh
+# Bidirectional contention between the Rust seed interpreter and production
+# core-C runtime. The supplied path already ends in .lock; neither owner may
+# append another suffix. Run: sh scripts/check/check-file-lock-cross-engine.shs \
+#   src/compiler_rust/target/bootstrap/simple [output-dir]
+set -eu
+[ "$(uname -s)" = Linux ] || { echo 'ERROR: cross-engine regression currently requires Linux' >&2; exit 2; }
+[ "$#" -ge 1 ] && [ "$#" -le 2 ] || { echo 'usage: check-file-lock-cross-engine.shs SIMPLE [OUTPUT_DIR]' >&2; exit 64; }
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+seed=$1
+case "$seed" in /*) ;; *) seed="$root/$seed" ;; esac
+[ -x "$seed" ] || { echo "ERROR: seed is not executable: $seed" >&2; exit 2; }
+work=${2:-$root/build/file-lock-cross-engine}
+mkdir -p "$work"
+work=$(CDPATH= cd -- "$work" && pwd -P)
+cc=${CC:-clang}
+lock="$work/publication.lock"
+ready="$work/ready"
+release="$work/release"
+out="$work/out"
+holder_pid=
+trap 'if [ -n "$holder_pid" ]; then kill "$holder_pid" 2>/dev/null || true; wait "$holder_pid" 2>/dev/null || true; fi' EXIT HUP INT TERM
+
+"$cc" -c -O2 -ffunction-sections -fdata-sections -std=gnu11 \
+    -DSIMPLE_CORE_C_STANDALONE=1 -DSIMPLE_RUNTIME_MEMORY_OWNER=1 \
+    -I"$root/src/runtime" -I"$root/src/runtime/platform" \
+    "$root/src/runtime/runtime_native.c" -o "$work/runtime_native.o"
+"$cc" -c -O2 -ffunction-sections -fdata-sections -std=gnu11 \
+    -DSIMPLE_CORE_C_STANDALONE=1 -DSIMPLE_RUNTIME_MEMORY_OWNER=1 \
+    -I"$root/src/runtime" -I"$root/src/runtime/platform" \
+    "$root/src/runtime/runtime_memory.c" -o "$work/runtime_memory.o"
+"$cc" -std=gnu11 -I"$root/src/runtime" \
+    "$root/src/runtime/test/rt_file_lock_cross_engine_selfcheck.c" \
+    "$work/runtime_native.o" "$work/runtime_memory.o" \
+    -Wl,--gc-sections -lpthread -lm -ldl -o "$work/native-lock"
+
+cat > "$work/interpreter-hold.spl" <<EOF
+use std.io (file_lock, file_unlock, file_write, file_exists)
+use std.io_runtime (thread_sleep)
+fn main():
+    val h = file_lock("$lock", 0)
+    file_write("$ready", h.to_text())
+    var waited = 0
+    while not file_exists("$release") and waited < 10000:
+        thread_sleep(50)
+        waited = waited + 50
+    file_unlock(h)
+EOF
+cat > "$work/interpreter-probe.spl" <<EOF
+use std.io (file_lock, file_unlock, file_write)
+fn main():
+    val h = file_lock("$lock", 0)
+    if h > 0:
+        file_unlock(h)
+        file_write("$out", "ACQUIRED")
+    else:
+        file_write("$out", "BUSY")
+EOF
+
+await_file() {
+    path=$1
+    count=0
+    while [ ! -f "$path" ]; do
+        count=$((count + 1))
+        [ "$count" -le 200 ] || { echo "FAIL: timed out waiting for $path" >&2; exit 1; }
+        sleep 0.05
+    done
+}
+expect_result() {
+    expected=$1
+    actual=$(cat "$out")
+    [ "$actual" = "$expected" ] || { echo "FAIL: expected $expected, got $actual" >&2; exit 1; }
+}
+run_interpreter_probe() {
+    rm -f "$out"
+    SIMPLE_LIB="$root/src" SIMPLE_BINARY="$seed" "$seed" run "$work/interpreter-probe.spl"
+}
+
+rm -f "$ready" "$release" "$out"
+"$work/native-lock" hold "$lock" "$ready" "$release" & holder_pid=$!
+await_file "$ready"
+[ "$(cat "$ready")" = LOCKED ] || { echo 'FAIL: native holder did not acquire' >&2; exit 1; }
+run_interpreter_probe
+expect_result BUSY
+: > "$release"
+wait "$holder_pid"; holder_pid=
+run_interpreter_probe
+expect_result ACQUIRED
+
+rm -f "$ready" "$release" "$out"
+SIMPLE_LIB="$root/src" SIMPLE_BINARY="$seed" "$seed" run "$work/interpreter-hold.spl" & holder_pid=$!
+await_file "$ready"
+case "$(cat "$ready")" in -*|0|ERROR) echo 'FAIL: interpreter holder did not acquire' >&2; exit 1 ;; esac
+"$work/native-lock" probe "$lock" "$out"
+expect_result BUSY
+: > "$release"
+wait "$holder_pid"; holder_pid=
+"$work/native-lock" probe "$lock" "$out"
+expect_result ACQUIRED
+
+printf 'PASS: native/interpreter contention and reacquire in both directions\n'

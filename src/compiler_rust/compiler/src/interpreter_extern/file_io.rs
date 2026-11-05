@@ -2323,58 +2323,98 @@ mod tests {
     use super::*;
 
     fn lock_test_path(dir: &tempfile::TempDir) -> (String, std::path::PathBuf) {
-        let base = dir.path().join("res").to_string_lossy().to_string();
-        let lock = std::path::PathBuf::from(format!("{}.lock", base));
-        (base, lock)
+        let lock = dir.path().join("res.lock");
+        let supplied = lock.to_string_lossy().to_string();
+        (supplied, lock)
     }
 
-    fn lock_arg(base: &str, timeout: i64) -> [Value; 2] {
-        [Value::text(base.to_string()), Value::Int(timeout)]
+    fn lock_arg(path: &str, timeout: i64) -> [Value; 2] {
+        [Value::text(path.to_string()), Value::Int(timeout)]
     }
 
     /// A live holder must never be displaced, however old its lock file is.
+    /// The supplied path is the locked file itself, matching the native owners.
     #[test]
     fn file_lock_does_not_steal_from_live_holder_even_when_old() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let (base, lock) = lock_test_path(&dir);
-        let holder = OpenOptions::new().write(true).create(true).open(&lock).expect("holder open");
+        let (supplied, lock) = lock_test_path(&dir);
+        let holder = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(&lock)
+            .expect("holder open");
         holder.lock().expect("holder lock");
         holder
             .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
             .expect("age lock file");
         // A positive-timeout waiter must time out, not steal.
-        assert_eq!(rt_file_lock(&lock_arg(&base, 1)).unwrap(), Value::Int(-1));
-        assert_eq!(rt_file_lock(&lock_arg(&base, 0)).unwrap(), Value::Int(-1));
+        assert_eq!(rt_file_lock(&lock_arg(&supplied, 1)).unwrap(), Value::Int(-1));
+        assert_eq!(rt_file_lock(&lock_arg(&supplied, 0)).unwrap(), Value::Int(-1));
         drop(holder);
         // Once the holder is gone, the lock is acquirable.
-        let h = rt_file_lock(&lock_arg(&base, 0)).unwrap();
+        let h = rt_file_lock(&lock_arg(&supplied, 0)).unwrap();
         assert!(matches!(h, Value::Int(n) if n > 0), "got {:?}", h);
         assert_eq!(rt_file_unlock(&[h]).unwrap(), Value::Bool(true));
     }
 
-    /// Timeout 0 = try exactly once, and must return promptly when held.
+    /// Nonpositive timeouts try exactly once and return promptly when held.
     #[test]
-    fn file_lock_timeout_zero_tries_once() {
+    fn file_lock_nonpositive_timeouts_try_once() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let (base, lock) = lock_test_path(&dir);
-        let holder = OpenOptions::new().write(true).create(true).open(&lock).expect("holder open");
+        let (supplied, lock) = lock_test_path(&dir);
+        let holder = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(&lock)
+            .expect("holder open");
         holder.lock().expect("holder lock");
-        let start = std::time::Instant::now();
-        assert_eq!(rt_file_lock(&lock_arg(&base, 0)).unwrap(), Value::Int(-1));
-        assert!(start.elapsed() < std::time::Duration::from_millis(400));
+        for timeout in [0, -1] {
+            let start = std::time::Instant::now();
+            assert_eq!(rt_file_lock(&lock_arg(&supplied, timeout)).unwrap(), Value::Int(-1));
+            assert!(start.elapsed() < std::time::Duration::from_millis(400));
+        }
     }
 
     /// A leftover lock file whose holder died (no OS lock) is not a held lock.
     #[test]
     fn file_lock_leftover_file_without_holder_is_acquirable() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let (base, lock) = lock_test_path(&dir);
+        let (supplied, lock) = lock_test_path(&dir);
         fs::write(&lock, b"99999999:ghost").expect("leftover");
-        let h = rt_file_lock(&lock_arg(&base, 0)).unwrap();
+        let h = rt_file_lock(&lock_arg(&supplied, 0)).unwrap();
         assert!(matches!(h, Value::Int(n) if n > 0), "got {:?}", h);
         assert_eq!(rt_file_unlock(&[h]).unwrap(), Value::Bool(true));
     }
 
+    /// Re-entrant handles share one file, released only after the last unlock.
+    #[test]
+    fn file_lock_reentrant_handles_preserve_exclusive_ownership() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (supplied, lock) = lock_test_path(&dir);
+        let first = rt_file_lock(&lock_arg(&supplied, 0)).unwrap();
+        let second = rt_file_lock(&lock_arg(&supplied, 0)).unwrap();
+        assert!(matches!(first, Value::Int(n) if n > 0));
+        assert!(matches!(second, Value::Int(n) if n > 0));
+        assert_ne!(first, second);
+        assert_eq!(rt_file_unlock(&[first]).unwrap(), Value::Bool(true));
+        let contender = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(&lock)
+            .expect("contender open");
+        assert!(
+            contender.try_lock().is_err(),
+            "first unlock released the shared OS lock"
+        );
+        drop(contender);
+        assert_eq!(rt_file_unlock(&[second]).unwrap(), Value::Bool(true));
+        let reacquired = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(&lock)
+            .expect("reacquire open");
+        reacquired.try_lock().expect("last unlock must release the OS lock");
+    }
 
     #[cfg(unix)]
     #[test]
@@ -3615,15 +3655,16 @@ pub fn rt_path_join(args: &[Value]) -> Result<Value, CompileError> {
 // File Locking
 // ============================================================================
 
-/// Acquire a file lock backed by an OS advisory lock on `<path>.lock`
-/// (flock on Unix, LockFileEx on Windows, via `File::try_lock`).
+/// Acquire a file lock backed by an OS advisory lock on the supplied `path`
+/// (flock on Unix, LockFileEx on Windows, via `File::try_lock`). This is the
+/// same file the native C and Rust providers lock; no suffix is appended.
 ///
 /// The OS releases the lock when the holder dies, so a crashed holder never
 /// needs time-based "stale" detection and a live holder can never be displaced
 /// no matter how long it holds the lock. The lock file itself is left in place
 /// on unlock (deleting it would let a waiter lock an orphaned inode).
 ///
-/// `timeout_secs == 0` tries exactly once; a positive timeout polls until the
+/// Nonpositive timeouts try exactly once; a positive timeout polls until the
 /// deadline.
 ///
 /// Callable from Simple as: `rt_file_lock(path, timeout_secs)`
@@ -3636,7 +3677,7 @@ pub fn rt_file_lock(args: &[Value]) -> Result<Value, CompileError> {
         _ => 10, // default 10 seconds
     };
 
-    let lock_path = std::path::PathBuf::from(format!("{}.lock", path));
+    let lock_path = std::path::PathBuf::from(path);
 
     // Re-entrant same-process acquisition: the seed fires both unsafe lanes
     // of process helpers, so a compiled file_lock executes twice and the
