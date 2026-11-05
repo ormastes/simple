@@ -819,11 +819,28 @@ fn gradient_dither_threshold(px: i32, py: i32) -> i32:
     if mx == 2: return 12
     5
 
+# Endpoint-exact vertical gradient ramp with ordered dither on the remainder.
+# Chromium/Skia hit the stop colors exactly at both ends of a linear-gradient
+# tile (t = pos / (span - 1)), and the ordered Bayer threshold only resolves
+# the fractional pixel between the two nearest integers; all channels (R, G,
+# B, A) share the same matrix and rounding rule. The previous centered
+# variant (b_weight = 2*pos + 1 over 2*span) never reached the end stop and
+# biased every channel fraction, which is what made the B channel look like
+# it followed a different rule.
 fn mix_channel_gradient_centered(a: i32, b: i32, pos: i32, span: i32, px: i32, py: i32) -> i32:
     if span <= 0:
         return a
-    val denom = span * 2
-    val b_weight = pos * 2 + 1
+    if span == 1:
+        # 1-px tile: the ramp degenerates to the dithered midpoint of the two
+        # stops (pinned by paint_primitives coverage byte oracles).
+        val weighted = a + b
+        var base = weighted / 2
+        val rem = weighted - base * 2
+        if rem > 0 and rem * 16 > gradient_dither_threshold(px, py) * 2:
+            base = base + 1
+        return base
+    val denom = span - 1
+    val b_weight = pos
     val weighted = a * (denom - b_weight) + b * b_weight
     var base = weighted / denom
     val rem = weighted - base * denom

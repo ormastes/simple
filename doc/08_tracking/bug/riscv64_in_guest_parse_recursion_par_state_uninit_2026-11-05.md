@@ -118,3 +118,172 @@ interp closure) to answer: was
 side dropped it, then re-run this repro — the acceptance is the guest
 advancing past `parser_init_with_path` into real tokenization (or the
 next honestly-named blocker).
+
+---
+
+## 2026-11-05 — CORRECTION (lane `work/riscv-inguest-module-init-20261105`): "init never runs" is DISPROVEN
+
+The root-cause boundary above ("the parser module's init is missing from
+the generated caller") is WRONG. Measured on the current tip
+(`d5bfa447382`):
+
+- `generate_init_caller` DOES run for the freestanding link
+  (`linker.rs:2847`, `link_objects_freestanding`) and finds **150**
+  inits (temporary INIT-TRACE instrumentation, reverted) — including
+  `__module_init_compiler__frontend__core__parser`.
+- The generated `_init_all.o` carries both a GOT_HI20 and a CALL_PLT
+  relocation against the parser init; the final kernel's GOT slot for
+  it is populated (`0x80663638 = 0x8033f9d4`), and `boot_entry.c:95`
+  calls `__simple_call_module_inits()` before `spl_start`.
+- The init body is correct: `__module_init_..._parser_dynamic`
+  (`0x8033f998`) calls `parser_state_fresh` and stores the result
+  through a pool entry whose value is exactly `&par_state`
+  (`0x82669218`) — verified from the linked bytes.
+- DECISIVE EXPERIMENT (temporary, reverted): boot_entry was patched to
+  call `__module_init_compiler__frontend__core__parser()` DIRECTLY
+  before `spl_start`. The parse faulted IDENTICALLY afterwards
+  (scause=5 in rt_array_set, garbage tagged receiver
+  `0x0000001900000000`, `/tmp/rv-boot/interp-serial-diag.log`). So the
+  initializer RUNS and STORES CORRECTLY, and `par_state` is STILL
+  zero/garbage when `parser_init_with_path` reads it. The defect is
+  DOWNSTREAM of the init: the global is clobbered between boot and the
+  parse, or the accessor and initializer disagree on the global's
+  representation/layout in a way static analysis of this lane could not
+  pin down (the accessor's field offsets 0x58..0x70 for the token slots
+  are consistent with the 15-field `ParserState`; both functions live in
+  the SAME object `mod_116.o`, so the duplicate-object lottery does not
+  apply to them; `.bss`/`.stack` do NOT overlap in this build — a
+  4-byte gap, correcting the transient suspicion raised mid-lane).
+
+Next-lane recommendation: attach QEMU's gdb stub and set a hardware
+watchpoint on `&par_state` (`0x82669218`) across boot→parse to catch
+the clobbering write red-handed; alternatively instrument the seed to
+trace the store/load addresses of `par_state` at runtime. The lane's
+hard rule (6 cycles) stopped the investigation here; all temporary
+instrumentation (INIT-TRACE in `linker.rs`, direct-call diagnostic in
+`boot_entry.c`) was reverted, and the kernel build re-verified PASS on
+the clean tree.
+
+---
+
+## 2026-11-05 — WATCHPOINT LANE (PR #7001+1): the clobber caught, fix landed, residual defect filed
+
+No riscv64-capable gdb exists on this host (host gdb 15.1 is aarch64-only;
+/tmp/riscv-tools has no gdb), so the hardware-watchpoint route was out.
+Used the software-sentinel fallback instead.
+
+### Method
+
+Temporary probe (all reverted) in the runtime TU: `rv64_par_state_note()`
+snapshots the `par_state` global + its first 20 words at the top of
+spl_start; `rv64_par_state_check(tag)` at entry-phase boundaries;
+`rv64_par_state_dump(tag)` from the trap handler.
+
+### Findings
+
+1. **The global is never clobbered.** At the fault: `cur == exp ==
+   0x80676fc1` — `par_state` holds the same valid tagged pointer the
+   init stored. The #7001 "clobbered between boot and parse" hypothesis
+   is HALF right: the global survives; its POINTEE gets overlaid.
+2. **The struct's pointee IS written over by allocations.** Trap-time
+   field dump vs the boot snapshot: fields 0-3 legitimately re-created
+   by `parser_init_with_path`'s reset; **fields 6, 10, 14 all hold
+   0x0000001100000001** (and field 8 = 0xffffffffffffff00, field 18 =
+   0x000000a000000002) — array-header-shaped data written over the
+   struct by a bump allocator.
+3. **The writer: the ghdl TU's 32 MiB static `g_heap` array from PR
+   #6983.** Measured in the same ELF: `g_heap` at 0x80665000 (the very
+   start of .bss, spanning 32 MiB) and `par_state`'s struct at
+   0x80676fc0 = g_heap + 0x11fc0 — INSIDE the array's span. `.bss` is
+   for zeroed globals; making it also the allocator arena meant every
+   code-side allocation bump-overlaid live module globals. The 64 KiB
+   original array never reached the globals; the 32 MiB enlargement
+   did. Root cause of the "clobber" = the #6983 fix itself.
+
+### Fix (landed)
+
+- `ghdl_boot_info_runtime.c`: the 32 MiB static .bss array is DELETED.
+  That TU now owns the THIRD disjoint slice of the linker-reserved
+  `.heap` (RV_HEAP_BASE/RV_HEAP_SIZE), exactly like the other two
+  runtime TUs — never .bss.
+- `baremetal_stubs.c` / `baremetal_runtime_core.inc.c`: halves ->
+  thirds (first / second slice) so all three duplicate allocators own
+  disjoint regions regardless of the --allow-multiple-definition
+  lottery.
+- `linker_riscv_common.ld`: `.heap` 64M -> 192M so each third keeps
+  the 64M per-owner capacity the halves used to carry; fits in the
+  510M RAM region (NOLOAD, no flat-Image bytes).
+
+### Result
+
+The boot recovered everything the overlay had been corrupting serial-
+early (banners, prints — the mid-fix 21MiB-thirds boot panicked with an
+empty message pre-banner because init allocations exceeded a third;
+the 192M heap fixed that). The parse now reaches the same rt_array_set
+load fault — but the garbage word is byte-identical
+(0x0000001100000001) across completely different memory layouts, i.e.
+it is DETERMINISTIC DATA, not an overlay artifact: an (i32,i32)-shaped
+pair (1, 17) sitting in every `[...]`-literal-initialized ParserState
+slot field. That is a seed codegen value-representation defect in the
+array-literal construction (fields 6/10/14 = the three `[]`/`[0]`
+slot owners), a different class from this record's clobber — filed here
+as the new tail: next lane owns the constructor lowering; the runtime
+side of THIS record is closed (no clobber remains: the sentinel proves
+the global and, post-fix, no overlay writer exists inside .bss).
+
+---
+
+## 2026-11-05 — REPRO LANE (PR #7011+1): the deterministic word is a struct-literal codegen defect, minimally reproduced and bisected
+
+The byte-identical 0x0000001100000001 is NOT an overlay and NOT an
+array-literal defect. Reproduced in isolation, in-guest, and bisected:
+
+- Plain locals `var a: [i64] = [0]` (also `[text] = [""]`, four of
+  them): **correct in-guest** (`PROBE OK array literals`).
+- Struct literal with ONE field `[i64]`: **OK**. TWO fields
+  (`[i64]`,`[text]`): **OK**. FOUR array fields (`ProbeFourA(a:[0],
+  b:[0], c:[0], d:[0])`): **FAULTS** on the first field read —
+  scause=5, stval = `0x0000003300000008` (earlier program revision:
+  `0x0000001100000008`; the high half tracks an ALLOCATION SIZE, 0x11
+  = 17 then, 0x33 = 51 now; low half is type 8 = HEAP_STRING_BUILDER).
+  So a struct-literal FIELD receives a pointer to / the header of an
+  unrelated string-builder allocation once the literal has ~4 fields.
+- Host `simple run` (JIT/interpreter) passes the identical struct-literal
+  repro (`STRUCT LITERAL OK`) — the defect is **AOT cranelift only**.
+  Both the checked-in seed and a seed rebuilt from this branch
+  (release tip `13a060d644e`) reproduce it: genuine release-tip bug,
+  not seed staleness.
+- `simple compile` SMF output is target-independent (only addresses
+  differ between riscv64 and x64 SMF), so the corruption is born in
+  the AOT backend's struct-init value plumbing
+  (`codegen/instr/closures_structs.rs::compile_struct_init` stores
+  field_values at MIR-provided offsets; with ~4 array-typed field
+  values — likely spilled — the value/field pairing breaks). The
+  likely trigger boundary (2 fields OK, 4 broken) points at a
+  register-pressure / spill path in the emitter, not at the offset
+  table itself.
+
+Repro for the next (seed) lane — in-guest probe used by this lane
+(temporary kernel-entry probe, reverted):
+
+```spl
+struct ProbeFourA:
+    a: [i64]
+    b: [i64]
+    c: [i64]
+    d: [i64]
+
+fn probe() -> bool:
+    var q: ProbeFourA = ProbeFourA(a: [0], b: [0], c: [0], d: [0])
+    # first read of q.a faults: q.a == garbage {size,type} word
+```
+
+In-guest iteration loop: add the probe to
+`examples/09_embedded/simple_os/arch/riscv64/interpreter_hello_entry.spl`,
+`sh scripts/os/build-simpleos-riscv64-interpreter-kernel.shs` (~80 s),
+wrap the interp kernel.Image in the pinned OpenSBI v1.4 fw_payload and
+boot `-machine virt -cpu rv64 -smp 1 -m 512M -bios fw_payload.bin
+-serial file:log` (~3.5 min). Host AOT x86_64 builds of even a trivial
+entry exceeded 5 min on this host (SCV admission closure), so in-guest
+is the practical loop. Cycles: 6 of 6 used; stopping per the rule with
+the repro, bisect, and candidate area recorded.
