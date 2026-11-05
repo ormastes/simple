@@ -1,0 +1,57 @@
+# Source pin for lower_exists_check_base (expr_dispatch.spl): the Cast target
+# slot must be read as T? and rebuilt bare under if-val, never unwrapped by the
+# generic tuple-get into a plain HirType binding that is then passed by value
+# (stage2 pattern P3; native_trait_owner_for_type+0x202e AV on s3_fable44).
+# Sibling prevention: no site in the MIR expression lowerer may feed a
+# _sffi_tuple_get_req<HirType> binding straight into native_trait_owner_for_type.
+use std.spec.*
+use app.io.mod.{file_read}
+
+fn body_of(src: text, header: text) -> [text]:
+    var out: [text] = []
+    var inside = false
+    for line in src.split("\n"):
+        if line.contains(header):
+            inside = true
+            continue
+        if inside and (line.starts_with("    me ") or line.starts_with("    fn ")): break
+        if inside: out.push(line.trim())
+    out
+
+describe "lower_exists_check_base Cast target decode":
+    val src = file_read("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
+    val body = body_of(src, "me lower_exists_check_base(")
+
+    it "reads the target slot as T? and rebuilds it bare under if val":
+        var optional_read = 0
+        var bare_rebuild = 0
+        for t in body:
+            if t.starts_with("#"): continue
+            if t.contains("if val") and t.contains("_sffi_tuple_get<HirType>(cast_payload, 1)"): optional_read = optional_read + 1
+            if t.contains("HirType(kind:") and t.contains(".kind, span:"): bare_rebuild = bare_rebuild + 1
+        expect(optional_read).to_equal(1)
+        expect(bare_rebuild).to_equal(1)
+
+    it "never unwraps the target into a plain HirType binding":
+        var bad = 0
+        for t in body:
+            if t.starts_with("#"): continue
+            if t.contains("_sffi_tuple_get_req<HirType>"): bad = bad + 1
+            if t.contains("native_trait_owner_for_type("): bad = bad + 1
+        expect(bad).to_equal(0)
+
+    it "sibling: no tuple-get-req HirType binding feeds native_trait_owner_for_type anywhere in the lowerer":
+        var req_names: [text] = []
+        var bad: [text] = []
+        for line in src.split("\n"):
+            val t = line.trim()
+            if t.starts_with("#"): continue
+            if t.contains("_sffi_tuple_get_req<HirType>"):
+                val name = t.split(":")[0].replace("val ", "").trim()
+                req_names.push(name)
+                continue
+            if t.contains("native_trait_owner_for_type("):
+                for name in req_names:
+                    if t.contains("native_trait_owner_for_type(" + name + ")"): bad.push(t)
+            if t.starts_with("me ") or t.starts_with("fn "): req_names = []
+        expect(bad.len()).to_equal(0)

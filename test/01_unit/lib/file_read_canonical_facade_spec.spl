@@ -1,0 +1,62 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+#
+# Guard for the lane consolidation in
+# doc/08_tracking/bug/file_read_has_23_definitions_with_two_return_types_2026-08-16.md.
+#
+# The return-type spread was closed 2026-08-16 (optional shape renamed
+# `file_read_opt`); sixteen mutually substitutable `-> text` copies remained.
+# This spec guards the 2026-11-05 convergence of the fs/io/file/sqlite-owned
+# copies onto the single blessed owner `pub fn file_read` in
+# src/lib/nogc_sync_mut/io_runtime.spl. The remaining same-named definitions
+# live outside that ownership lane (src/app, src/os, src/compiler internals,
+# gc_async_mut pure runtime, async mcp resources) and are tracked separately.
+#
+# Sibling: file_read_single_return_type_spec.spl (return-type guard).
+
+use std.spec.step
+
+use std.io_runtime.{shell_output}
+use std.nogc_sync_mut.io_runtime.{file_read, file_write, file_delete, file_exists, getpid}
+use std.spec.{expect, is_windows}
+
+fn lane_source_count(pattern: text) -> i64:
+    # Count pattern hits in the lane-owned modules only.
+    val cmd = "/usr/bin/grep -rn -E '" + pattern + "'"
+        + " src/lib/nogc_sync_mut/io/file_ops.spl"
+        + " src/lib/nogc_sync_mut/sffi/io.spl"
+        + " src/lib/nogc_sync_mut/database/core.spl"
+        + " src/lib/nogc_sync_mut/database/atomic.spl"
+        + " src/lib/nogc_async_mut/io/mod_stub.spl"
+        + " | /usr/bin/grep -v '^[^:]*:[0-9]*:#' | wc -l"
+    shell_output(cmd).trim().to_i64()
+
+describe "file_read canonical facade in the fs/io/file/sqlite lane":
+    it "positive control: scanner sees a local definition shape that exists elsewhere":
+        step("positive control: scanner sees a local definition shape that exists elsewhere")
+        # io_runtime.spl is not in the scanned lane set, so its own blessed
+        # definition must NOT be counted; use an out-of-lane file to prove the
+        # pattern itself matches real source.
+        val cmd = "/usr/bin/grep -c -E '^pub fn file_read\\(path: text\\) -> text:' src/lib/nogc_sync_mut/io_runtime.spl"
+        expect(shell_output(cmd).trim().to_i64() >= 1).to_equal(true)
+
+    it "negative control: scanner matches nothing for an impossible symbol":
+        step("negative control: scanner matches nothing for an impossible symbol")
+        expect(lane_source_count("fn file_read_no_such_symbol_xyzzy\\(")).to_equal(0)
+
+    it "no lane-owned module redefines fn file_read anymore":
+        step("no lane-owned module redefines fn file_read anymore")
+        expect(lane_source_count("^[[:space:]]*fn file_read\\(")).to_equal(0)
+
+    it "canonical io_runtime file_read reads real content and maps absent to empty text":
+        step("canonical io_runtime file_read reads real content and maps absent to empty text")
+        if is_windows():
+            return
+        val path = "/tmp/simple_file_read_canonical_spec_{getpid()}.txt"
+        val _ = file_delete(path)
+        expect(file_read(path)).to_equal("")
+        expect(file_exists(path)).to_equal(false)
+        expect(file_write(path, "canonical facade body")).to_equal(true)
+        expect(file_read(path)).to_equal("canonical facade body")
+        val _done = file_delete(path)
+        expect(file_read(path)).to_equal("")

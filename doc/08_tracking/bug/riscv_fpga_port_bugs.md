@@ -83,3 +83,10 @@ Bug ID format: `BUG-RISCV-FPGA-NNN` (three-digit sequential)
 - `src/os/kernel/arch/riscv64/platform/board_memory_map.spl` — Memory map trait
 - `src/os/kernel/arch/riscv64/platform/kria_memory_map.spl` — K26 addresses
 - `src/os/kernel/arch/riscv64/platform/litex_memory_map.spl` — LiteX/DE10-Nano addresses
+
+## 2026-11-05 (riscv-sweep lane)
+
+Tracker re-checked; still no host-actionable rows — the open RISC-V FPGA port
+items (KV260 clocking/UART routing, rv32 exec-core debug ports, StarFive TAP
+wiring) remain blocked on physical FPGA board access. No software change was
+made or needed in this pass.

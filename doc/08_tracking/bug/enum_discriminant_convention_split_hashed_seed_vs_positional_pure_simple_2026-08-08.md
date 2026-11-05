@@ -207,3 +207,29 @@ non-negotiable guardrail, in priority order:
 
 Confirmed unchanged: the doc's own "Recommended fix (converge, or fence)" section documents this as an architectural convention split between the Rust seed's hashed enum discriminants (`codegen/instr/result.rs`) and pure-Simple's positional convention, not yet converged. A real fix requires either a Rust-seed codegen change (cargo build/redeploy cycle) or a cross-runtime fencing decision — both out of scope for this pure-Simple TDD pass. No live cross-over was found (per "Reachability" section), so severity remains low today. Leaving OPEN, no code change made.
 
+
+## Status 2026-11-05 — seed converged on positional for Result/Option; duplicate rt_enum_new link guard
+
+Root cause: the seed had no single discriminant definition — ~20 inline
+`DefaultHasher(name) & 0xFFFFFFFF` copies across codegen/HIR/MIR/LLVM plus the
+runtime's `hash_variant_discriminant`, all hashing, while pure-Simple MIR uses
+`enum_variant_disc` (declared position). `--allow-multiple-definition` in the
+seed's native linker let a second `rt_enum_new` win silently by link order.
+
+Fix:
+- `runtime/src/value/objects.rs::hash_variant_discriminant` is now the only
+  definition: `Ok`/`Some` = 0, `Err`/`None` = 1 (pure-Simple positional);
+  other names keep a name-derived tag forced out of slots 0/1. Every inline
+  copy now calls it.
+- `compiler/src/linker/abi_symbol_guard.rs`: `run_link_pass` fails when
+  `rt_enum_new` is defined by more than one input (objects or archive members).
+- Prevention: `codegen/enum_discriminant_convention_tests.rs` fails on any new
+  inline 32-bit `DefaultHasher` discriminant in compiler or runtime sources;
+  `test/01_unit/compiler/50.mir/enum_discriminant_positional_convention_spec.spl`
+  pins pure-Simple positions and cross-checks the seed definition.
+
+Remaining gap (named, not filled): user-enum discriminants in the seed are still
+name-derived, not positional — the seed lowers several sites by variant name
+alone without the enum's declared order. The C runtime still also accepts the
+legacy hashed Option/Result values (`RT_DISC_*`). The `native_project` layered
+link (native_all + core C, /FORCE:MULTIPLE) is intentionally not guarded.

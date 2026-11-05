@@ -1,6 +1,45 @@
 # Freestanding riscv64: `for x in <array>` yields a good element only on iteration 1 (2026-08-31)
 
-Status: **ROOT CAUSE NOT YET PROVEN — diagnosis narrowed with in-guest evidence.**
+## VERIFIED FIXED AT TIP 2026-11-05 — in-guest re-run on a fresh lane
+
+Re-verified from a clean worktree of `origin/release/1.0.0`, in-guest under
+real OpenSBI v1.4 `fw_payload` (`-bios` only, no `-kernel`, no
+`isa-debug-exit`), QEMU 11.1.1, host-side Rust seed cross-compiling to
+`riscv64gc-unknown-none-elf` with clang-18 + ld.lld standing in for the
+riscv64 GNU toolchain (none installed on this host).
+
+Commands and outcomes:
+
+```
+sh scripts/check/check-freestanding-rt-value-int-tags.shs
+  -> PASS — 6 definition(s) checked, 0 untagged
+sh scripts/check/run-riscv64-text-probe-opensbi.shs
+  -> probe runs to PROBE_TEXT_PRIMITIVES_SIMPLEOS_RISCV64_DONE; every
+     previously-red row is now green in the serial log:
+       9d accumulated = "user"}      (was: single ")
+       9e ch/acc trace: 7 non-empty iterations, acc builds to "user"}
+       9h accumulated = "user"}      (was: single ")
+       9k ch.len = EXPECTED x7       (was: 6x WRONG)
+     green rows (9a/9b/9f/9g/9i/9j) byte-consistent with the fix record.
+```
+
+Environment caveat (does not affect the verdict): the probe link at tip on a
+host WITHOUT `/home/ormastes/dev/pub/simple/...` fails with undefined
+`rt_text_eq_any`, because `full_networking_runtime.c` includes the full
+freestanding runtime by absolute path into that checkout (the "third,
+separate defect" below). For this verification run only, a scratch TU
+providing exactly that one missing symbol was added to the boot directory and
+NOT committed; the tracked tree was otherwise untouched.
+
+The in-repo `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c` CANNOT
+simply replace the absolute include: it diverged from the external copy during
+the `88aac2ffe28` transplant and is missing the entire
+`rt_boot_tcp_registry_*` core (`RtBootTcpRegistryEntry`, `lookup`,
+`allocate`, `can_allocate`, ...) that `rt_net_socket_facade.spl` links
+against. Vendoring the external file (suggested next step 3) stays OPEN and is
+now tracked as blocked on obtaining that file's current content.
+
+**ROOT CAUSE NOT YET PROVEN — diagnosis narrowed with in-guest evidence.**
 No fix shipped. No workaround shipped. Everything below was measured on this
 lane, in-guest, under real OpenSBI `fw_payload` (`-bios` only; no `-kernel`, no
 `isa-debug-exit`), with a freshly built Rust seed
