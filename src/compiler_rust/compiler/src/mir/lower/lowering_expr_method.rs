@@ -2627,19 +2627,18 @@ mod enum_discriminant_abi_tests {
         );
     }
 
-    /// TRUE-POSITIVE CONTROL for the numeric disagreement with the MIR `.spl`
-    /// lowering, which uses the DECLARED ORDINAL (first variant = 0). The seed
-    /// returns a 32-bit hash, so the two engines disagree numerically even for
-    /// enums that do not collide at all. Pinned so the divergence cannot be
-    /// quietly claimed to be resolved.
+    /// The builtin Result/Option discriminants now AGREE with the MIR `.spl`
+    /// lowering's DECLARED ORDINAL (`Ok`/`Some` = 0, `Err`/`None` = 1), closing
+    /// enum_discriminant_convention_split_hashed_seed_vs_positional_pure_simple_2026-08-08.
+    /// User variants remain name-derived in the seed (no enum order at every
+    /// lowering site) and must never alias the builtin slots.
     #[test]
-    fn seed_discriminant_is_a_hash_not_the_declared_ordinal() {
-        // `Ok` is the FIRST variant of Result, so the MIR lowering assigns it
-        // 0 and `Err` 1. The seed assigns neither.
-        assert_ne!(MirLowerer::enum_variant_discriminant("Ok"), 0);
-        assert_ne!(MirLowerer::enum_variant_discriminant("Err"), 1);
-        // Well above any plausible ordinal, i.e. unmistakably a hash.
-        assert!(MirLowerer::enum_variant_discriminant("Ok") > i64::from(u16::MAX));
+    fn seed_builtin_discriminants_are_the_declared_ordinal() {
+        assert_eq!(MirLowerer::enum_variant_discriminant("Ok"), 0);
+        assert_eq!(MirLowerer::enum_variant_discriminant("Err"), 1);
+        assert_eq!(MirLowerer::enum_variant_discriminant("Some"), 0);
+        assert_eq!(MirLowerer::enum_variant_discriminant("None"), 1);
+        assert!(MirLowerer::enum_variant_discriminant("Circle") > 1);
     }
 }
 

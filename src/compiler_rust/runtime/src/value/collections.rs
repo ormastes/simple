@@ -3210,8 +3210,11 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
         // below: they may own state this walk cannot understand.
         return true;
     }
-    let raw_debug = std::env::var_os("SIMPLE_TRANSIENT_RAW_PROMOTE_DEBUG")
-        .is_some_and(|v| v != "0");
+    // Cached once: an env lookup takes a lock and allocates, too costly per call.
+    static RAW_PROMOTE_DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let raw_debug = *RAW_PROMOTE_DEBUG.get_or_init(|| {
+        std::env::var_os("SIMPLE_TRANSIENT_RAW_PROMOTE_DEBUG").is_some_and(|v| v != "0")
+    });
     if !root_raw && value.heap_type().is_none() {
         if raw_debug {
             eprintln!("[raw-promote] false exit=unknown-heap-kind word={:#x} is_heap={} heap_type={:?}", value.0, value.is_heap(), value.heap_type());

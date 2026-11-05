@@ -1,5 +1,43 @@
 # riscv64 freestanding runtime: `text.len()` wrong and in-loop string accumulation loses content (2026-08-31)
 
+## VERIFIED FIXED AT TIP 2026-11-05 — in-guest re-run on a fresh lane
+
+Re-verified from a clean worktree of `origin/release/1.0.0`, in-guest under
+real OpenSBI v1.4 `fw_payload` (`-bios` only, no `-kernel`, no
+`isa-debug-exit`), QEMU 11.1.1, host-side Rust seed cross-compiling to
+`riscv64gc-unknown-none-elf` with clang-18 + ld.lld standing in for the
+riscv64 GNU toolchain.
+
+Commands and outcomes:
+
+```
+sh scripts/check/check-freestanding-string-len-abi.shs
+  -> PASS — 8 check(s) run, codegen .len() ABI (i64 len at +8, data at +16)
+     holds on every 64-bit freestanding lane
+sh scripts/check/run-riscv64-text-probe-opensbi.shs
+  -> defect 1 (text.len()): "[probe] len = EXPECTED" (15 for
+     {"role":"user"}). The "len-decoded-as-1 = WRONG" control line is
+     expected-by-construction: it proves the returned value is RAW, matching
+     the runtime contract pinned by the gate above.
+  -> defect 2 (in-loop accumulation): rows 9d/9e/9h/9k all green, acc builds
+     to "user"}. This defect was superseded by (and fixed with)
+     freestanding_riscv64_for_in_array_yields_nil_after_first_element_2026-08-31.md
+     (the rt_value_int identity body); the re-run confirms it.
+```
+
+Known residuals, both pre-existing and separately filed, neither in this
+record's scope: the `9c` `Q`-for-`"` substitution (both before and after the
+fix era) and the mcp-row trap, which is
+riscv64_freestanding_me_method_invocation_traps_2026-08-31.md — see that
+record's 2026-11-05 section for the root cause found there (lowercase
+`list<T>` erasing to ANY at HIR, degrading `self.entries + [entry]` to a
+native integer add).
+
+Same uncommitted-scratch-TU caveat as the for-in record's 2026-11-05 section:
+the tracked probe link at tip needs `rt_text_eq_any` provided outside the
+absolute-path include on hosts without the ormastes checkout; nothing about
+that caveat affects the len/accumulation verdicts above.
+
 Status: OPEN. Blocks running real toolchain components (caret, MCP, linter,
 test runner) in-guest on SimpleOS riscv64.
 
