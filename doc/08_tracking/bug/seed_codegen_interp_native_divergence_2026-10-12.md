@@ -185,3 +185,22 @@ the seed binary needs DYLD_INSERT_LIBRARIES=<bootstrap>/libsimple_runtime.dylib
 needed lowering (SIMPLE_BUILD_MEMORY_RESERVE_BYTES=536870912 under load),
 --runtime-path must stay under the checkout root, `run` passes argv without
 a `--` separator, and SIMPLE_INVENTORY_TRACE_ATTEMPT must be 16-64 hex.
+
+## Differential repro re-run — 2026-11-05
+
+The doc's minimal repro (src/app/sdn_diff_repro/main.spl, sdn.value +
+unused sdn.parser import — the exact closure-order flip shape) was built
+through the current trust-root stage2 candidate (cranelift,
+aarch64-unknown-linux-gnu, worktree at df48a86ff5a):
+
+    native-build src/app/sdn_diff_repro/main.spl --backend=cranelift
+        --threads 1 --mode one-binary --runtime-bundle core-c-bootstrap
+        --emit-object
+
+Result: rc=0, ZERO "payload type mismatch" / "enum construction" errors. The
+enum-payload-comparison divergence does not reproduce at current
+release/1.0.0 source (consistent with the r10 matrix's Oct-12 observation
+that a then-current snapshot compiled the 13-liner cleanly). The doc's
+second symptom site (self-name resolution at sdn/value.spl:48 in the
+test_runner closure) is covered by the stage2 compiler-test matrix; the
+seed-lane miscompile hypothesis remains unproven at current source.
