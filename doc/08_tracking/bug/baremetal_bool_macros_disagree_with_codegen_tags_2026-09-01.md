@@ -60,3 +60,46 @@ runtime (both `baremetal_stubs.c`, whose definitions win the link, and
 make the header agree with codegen — with a per-DEFINITION guard, since a
 tree-wide grep cannot tell which definition the linker actually selected.
 
+
+## Resolution evidence — 2026-11-05
+
+Fixed on `work/libbug-linux-booltag-20261105` (branched from `origin/release/1.0.0`).
+
+**Canonical encoding: the codegen tags won** — `true = 11`, `false = 19`
+(`TAG_SPECIAL` payloads), per this doc's "Next step" ("make the header agree
+with codegen"). `tagged_bool_const` in
+`src/compiler_rust/compiler/src/codegen/llvm/instructions.rs:14-17` is the
+source of truth and is pinned by
+`scripts/check/check-baremetal-tagged-bool-decode.shs`.
+
+All 7 definitions of `TRUE_VALUE`/`FALSE_VALUE` were aligned:
+
+- `arch/common/baremetal_runtime.h:74-75` — now alias the existing
+  `TAGGED_BOOL_TRUE`/`TAGGED_BOOL_FALSE` macros (11/19), with file-scope
+  `_Static_assert` guards.
+- `arch/{x86_64,x86_32,arm64,arm32,riscv64}/boot/baremetal_stubs.c` and
+  `arch/riscv64/boot/baremetal_runtime_core.inc.c` — each self-contained TU
+  redefines the pair; each was changed to the literal tagged values (spelled
+  out because these TUs do not include the common header) **and** given its
+  own `_Static_assert(TRUE_VALUE == 11, ...)` /
+  `_Static_assert(FALSE_VALUE == 19, ...)` guard, per this doc's
+  per-DEFINITION-guard requirement: any future drift now fails the build at
+  the offending definition instead of silently relinking the old encoding.
+
+Verified (aarch64 Linux host, source-level + host cc only):
+
+- RED (pre-fix): extracted constants compiled to `TRUE_VALUE=8 vs 11 MISMATCH`,
+  `FALSE_VALUE=0 vs 19 MISMATCH`.
+- GREEN (post-fix): `TRUE_VALUE=11 MATCH`, `FALSE_VALUE=19 MATCH`; a
+  deliberately-diverged definition fails to compile with
+  `static assertion failed: "TRUE_VALUE must match codegen tagged true (11)"`.
+- `grep` sweep: no `ENCODE_INT(1)`/`ENCODE_INT(0)`-based bool definitions
+  remain under `examples/09_embedded/`.
+- `cc -fsyntax-only -ffreestanding` (c11/gnu11 as appropriate) passes for all
+  touched TUs and every TU that includes `baremetal_runtime.h`.
+- `sh scripts/check/check-baremetal-tagged-bool-decode.shs` →
+  `PASS — 4 definition(s) checked, all decode the tagged bool` (exit 0).
+
+Not verified here (no hardware/semihosting on this host): actual baremetal
+boot on any target; the change is ABI-visible only at runtime<->codegen bool
+boundaries, which is exactly the defect.
