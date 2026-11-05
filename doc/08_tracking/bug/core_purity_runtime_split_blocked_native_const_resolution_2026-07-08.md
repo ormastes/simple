@@ -51,3 +51,34 @@ mechanical relocation; it perturbs this fragile resolution.
 Recommend (1) or (3) — both are their own tracked work, not a rider on the purity fix. Until then,
 `common/js/engine/runtime.spl` stays the last baselined-adjacent core-purity item (gate
 `core_purity_new=1`).
+
+## Resolution note (2026-11-05, work/libbug-w6-corepurity-20261105)
+
+Root cause was NOT a general module-system `val`-resolution defect. Probe
+diagnosis (canary: changing the id value in `common/js/engine/runtime.spl` did
+not change what a `use std.js.engine.runtime.{NATIVE_JSON_PARSE}` importer
+observed) showed that `std.js.engine.runtime` from higher tiers binds
+`src/lib/nogc_sync_mut/js/engine/runtime.spl` (tier fallback), while the
+"common defines ~48" constants — `NATIVE_PARSE_INT`, `NATIVE_CONSOLE_LOG`,
+`NATIVE_MATH_*`, `NATIVE_STRING_*`, `NATIVE_ARRAY_*`, the `*_CONSTRUCTOR`
+family, etc. — exist ONLY in `src/lib/common/js/engine/runtime.spl`, reachable
+there under the distinct name `std.common.js.engine.runtime`. So cross-module
+`use std.js.engine.runtime.{NATIVE_PARSE_INT}` failed with "variable not
+found" because the constant genuinely does not exist in the bound copy.
+
+Fix (std-lib only, no purity weakening — the pure constants stay in common as
+the single source of truth):
+
+1. `src/lib/common/js/engine/runtime.spl`: the 30 previously private
+   `val NATIVE_*` are now `pub val` and are listed in explicit `export`
+   statements (mirroring the nogc copy's existing convention).
+2. `src/lib/nogc_sync_mut/js/engine/runtime.spl`: `export use
+   std.common.js.engine.runtime.{...}` re-exports those 30 constants, so every
+   tier whose `std.js.engine.runtime` lookup falls back to this copy resolves
+   them. Names the nogc copy already defines locally (a divergent-id duplicate
+   set: `NATIVE_FETCH`, `NATIVE_RESPONSE_*`, `NATIVE_STORAGE_*`,
+   `NATIVE_BLOB_TEXT`, `NATIVE_NAVIGATOR_GPU_REQUEST_ADAPTER`) keep their local
+   values — reconciling those duplicated ids remains separate work (option 3).
+
+Regression spec: `test/01_unit/lib/common/js_runtime_native_const_cross_module_spec.spl`
+(RED: `semantic: variable NATIVE_PARSE_INT not found`; GREEN after fix).
