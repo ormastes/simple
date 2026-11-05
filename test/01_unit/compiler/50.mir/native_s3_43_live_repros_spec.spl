@@ -1,0 +1,43 @@
+# Purpose and audience: compiler engineers verifying stage3 native-build repros.
+# @req REQ-SSPEC-COMPILER
+# @tag:in-development
+# Tracks: match_variant_pattern_shadowed_by_struct_name_2026-10-24,
+#         bare_field_reference_in_methods_is_illegal_but_pervasive_2026-08-10
+"""
+# Native-build repros found live by the 2026-11-05 native-repro sweep
+
+Run with a stage3 binary: `SIMPLE_TEST_BINARY=<stage3 exe> bin/simple.exe run <this spec>`.
+Evidence binary: s3_fable43.exe sha256 615859c5c2815f7164fa092ca62d95ad6f4ef5753cc76a3860beb25b827fccd7.
+The match-variant case FAILS today (llc: use of undefined value) so the spec is in-development.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val FIXTURE_DIR = "test/fixtures/repro/compiler/native_s3_43"
+
+fn native_binary() -> text:
+    val override = env_get("SIMPLE_TEST_BINARY")
+    if override != "" and override != nil:
+        return override
+    "bin/simple"
+
+fn native_build(fixture: text) -> (text, text, i64):
+    val out = "build/native_s3_43/{fixture}.exe"
+    val cmd = "'{native_binary()}' native-build --entry-closure --entry '{FIXTURE_DIR}/{fixture}.spl' --source src/lib -o '{out}'"
+    process_run("/bin/sh", ["-c", cmd])
+
+describe "stage3 native-build live repros":
+    it "bare enum variant pattern over a same-named struct compiles (match_variant_shadow)":
+        step("native-build the struct Expr + enum StmtKind.Expr fixture")
+        val (out, err, code) = native_build("match_variant_shadow_native_repro")
+        step("Confirm llc did not reject the module")
+        assert_equal(err.contains("use of undefined value"), false)
+        assert_equal(code, 0)
+
+    it "bare field reference in a method is rejected with a frontend diagnostic":
+        step("native-build the bare 'return xlen' fixture")
+        val (out, err, code) = native_build("bare_field_native_repro")
+        step("Confirm failure is the HIR unresolved-name diagnostic")
+        assert_equal(code == 0, false)
+        assert_equal((out + err).contains("unresolved name: xlen"), true)
