@@ -792,8 +792,7 @@ pub extern "C" fn rt_is_present(value: RuntimeValue) -> bool {
     }
 }
 
-/// Map over an Option value: if Some(x), apply closure to x and return Some(result).
-/// If None/nil, return None.
+/// Map over an Option or Result value, preserving the absent variant.
 /// The closure is a RuntimeValue containing a function pointer (RuntimeClosure).
 #[no_mangle]
 pub extern "C" fn rt_option_map(value: RuntimeValue, closure: RuntimeValue) -> RuntimeValue {
@@ -802,7 +801,20 @@ pub extern "C" fn rt_option_map(value: RuntimeValue, closure: RuntimeValue) -> R
         return value;
     }
 
-    // Extract the payload from Some(x)
+    let mut result_ok_discriminant = None;
+    if let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) {
+        let (enum_id, discriminant) = unsafe { ((*p).enum_id, (*p).discriminant) };
+        if enum_id == RESULT_ENUM_ID {
+            if discriminant == hash_variant_discriminant("Err") {
+                return value;
+            }
+            if discriminant == hash_variant_discriminant("Ok") {
+                result_ok_discriminant = Some(discriminant);
+            }
+        }
+    }
+
+    // Extract the payload from Some(x) or Ok(x)
     let payload = rt_enum_payload(value);
 
     // Get function pointer from closure
@@ -816,8 +828,10 @@ pub extern "C" fn rt_option_map(value: RuntimeValue, closure: RuntimeValue) -> R
     let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(func_ptr) };
     let result = func(closure, payload);
 
-    // Wrap result in Some
-    rt_option_some(result)
+    match result_ok_discriminant {
+        Some(discriminant) => rt_enum_new(RESULT_ENUM_ID, discriminant, result),
+        None => rt_option_some(result),
+    }
 }
 
 // ============================================================================
