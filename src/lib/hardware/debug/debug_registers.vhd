@@ -17,9 +17,10 @@
 --                     Single hart: hasel/hartsello/hartselhi ignored, read 0.
 --                     haltreq/resumereq/ackhavereset are write-only (read 0)
 --                     per spec field access "W".
---   0x11 DMSTATUS   — version=2 (0.13), authenticated=1 (no auth), and
---                     single-hart status: all==any for halted/running/
---                     resumeack/havereset.
+--   0x11 DMSTATUS   — version=2 (0.13), authenticated(7)/authbusy(6) from
+--                     the debug-auth lifecycle below (computed state, never
+--                     a constant), and single-hart status: all==any for
+--                     halted/running/resumeack/havereset.
 --   0x12 HARTINFO   — all zero (nscratch=0, dataaccess=0, datasize=0).
 --   0x16 ABSTRACTCS — datacount(3:0)=2, busy(12), cmderr(10:8, W1C);
 --                     progbufsize(28:24)=0 (no program buffer).
@@ -106,6 +107,37 @@
 --   (sb_err_i sampled with the ack) — same handshake as the GPR port.
 --   sbbusy covers the whole window. dmactive=0 resets all SBA state.
 --
+-- Debug authentication lifecycle (bug
+-- riscv_debug_module_authenticated_hardwired_2026-09-01: dmstatus.authenticated
+-- used to be hard-wired to 1 with no auth unit, so any JTAG connection got
+-- the live System Bus Access engine — full system-memory read/write).
+-- authenticated is now a computed state bound to fuse/OTP inputs:
+--   lifecycle_i = "00" OPEN        — unprovisioned device (fab/test/
+--                                    development): debug open, no
+--                                    challenge. Production must not ship
+--                                    this state.
+--   lifecycle_i = "01" PROVISIONED — debugger writes the response to
+--                                    AUTHDATA (0x30); a match against
+--                                    auth_key_i (OTP key) authenticates the
+--                                    session, a mismatch de-authenticates.
+--   lifecycle_i = "10" LOCKED      — debug disabled (provisioned-and-
+--                                    locked fuse): authenticated is forced
+--                                    0 and the challenge is ignored.
+--   lifecycle_i = "11"             — reserved, treated as LOCKED.
+-- dmstatus.authbusy sets on an AUTHDATA write and clears on the next
+-- DMSTATUS read. Authentication (like all DM state) resets on dmactive=0
+-- or rst. RMA re-entry is an OTP-controller operation: it moves the fuses
+-- back to OPEN for the RMA station, then re-locks — the DM itself only
+-- reads the fuse snapshot.
+--
+-- SBA gating: while authenticated = 0, every SBA bus access (read or
+-- write, any trigger source) is denied at the sb_start choke point with
+-- sberror = 7 (other: access denied); no sb_re_o/sb_we_o is asserted and
+-- system memory is untouched.
+--
+--   0x30 AUTHDATA   — challenge response, write-only (reads 0). Forwarded
+--                     by dmi_bus; only honored while dmactive=1.
+
 -- Abstract command execution (GPR port): on an accepted transfer command the
 -- block asserts gpr_re_o or gpr_we_o (level) with gpr_regno_o/gpr_wdata_o
 -- held stable until the hart pulses gpr_ack_i for one clock; busy is set for
@@ -191,7 +223,14 @@ entity debug_registers is
     -- Status inputs (from DM core / hart)
     halted_i    : in  std_logic;
     running_i   : in  std_logic;
-    resumeack_i : in  std_logic
+    resumeack_i : in  std_logic;
+
+    -- Debug authentication lifecycle (fuse/OTP-bound; see header). The
+    -- defaults fail closed: PROVISIONED with an all-zero OTP key means SBA
+    -- stays denied until the challenge succeeds — instantiations that do
+    -- not wire the fuse model get a gated DM, not an open one.
+    lifecycle_i : in  std_logic_vector(1 downto 0)  := "01";
+    auth_key_i  : in  std_logic_vector(31 downto 0) := (others => '0')
   );
 end entity debug_registers;
 
@@ -204,6 +243,7 @@ architecture rtl of debug_registers is
   constant A_HARTINFO   : std_logic_vector(6 downto 0) := "0010010";  -- 0x12
   constant A_ABSTRACTCS : std_logic_vector(6 downto 0) := "0010110";  -- 0x16
   constant A_COMMAND    : std_logic_vector(6 downto 0) := "0010111";  -- 0x17
+  constant A_AUTHDATA   : std_logic_vector(6 downto 0) := "0110000";  -- 0x30
   constant A_SBCS       : std_logic_vector(6 downto 0) := "0111000";  -- 0x38
   constant A_SBADDRESS0 : std_logic_vector(6 downto 0) := "0111001";  -- 0x39
   constant A_SBADDRESS1 : std_logic_vector(6 downto 0) := "0111010";  -- 0x3A
@@ -247,6 +287,16 @@ architecture rtl of debug_registers is
   signal step_pending_r : std_logic := '0';
   signal halted_q       : std_logic := '0';
 
+  -- Debug-auth lifecycle state (bug
+  -- riscv_debug_module_authenticated_hardwired_2026-09-01). Computed every
+  -- clock from the fuse snapshot and the AUTHDATA challenge — never a
+  -- constant.
+  constant LC_OPEN        : std_logic_vector(1 downto 0) := "00";
+  constant LC_PROVISIONED : std_logic_vector(1 downto 0) := "01";
+  constant LC_LOCKED      : std_logic_vector(1 downto 0) := "10";
+  signal authenticated_r : std_logic := '0';
+  signal authbusy_r      : std_logic := '0';
+
   -- Stage-5 SBA state
   signal sbaddr_r      : std_logic_vector(63 downto 0) := (others => '0');
   signal sbdata_r      : std_logic_vector(63 downto 0) := (others => '0');
@@ -279,7 +329,9 @@ begin
     -- unsupported sbaccess size. Caller must have checked sbbusy already.
     procedure sb_start(wr : boolean) is
     begin
-      if sberror_r = "000" and sbbusyerror_r = '0' then
+      if authenticated_r = '0' then  -- AUTH-GATE-DENY: SBA denied while unauthenticated
+        sberror_r <= "111";  -- 7 = other: access denied (unauthenticated)
+      elsif sberror_r = "000" and sbbusyerror_r = '0' then
         if sbaccess_r /= "010" and sbaccess_r /= "011" then
           sberror_r <= "100";  -- 4 = unsupported size
         else
@@ -331,11 +383,26 @@ begin
       sb_we_r        <= '0';
       sb_wdata_r     <= (others => '0');
       mstatus_r      <= (others => '0');
+      authenticated_r <= '0';
+      authbusy_r      <= '0';
       rdata_r        <= (others => '0');
       ready_r        <= '0';
     elsif rising_edge(clk) then
       ready_r        <= '0';
       resume_pulse_r <= '0';
+
+      -- Debug-auth lifecycle enforcement (fuse snapshot; see header).
+      -- OPEN authenticates unconditionally, LOCKED forces unauthenticated,
+      -- PROVISIONED is challenge-driven via AUTHDATA below.
+      case lifecycle_i is
+        when LC_OPEN =>
+          authenticated_r <= '1';
+        when LC_LOCKED =>
+          authenticated_r <= '0';
+          authbusy_r      <= '0';
+        when others =>
+          null;  -- PROVISIONED: state changes only via the AUTHDATA challenge
+      end case;
 
       -- Stage 4: capture dpc/dcsr.cause/dcsr.prv on the halted rising edge.
       halted_q <= halted_i;
@@ -429,6 +496,8 @@ begin
               sb_re_r        <= '0';
               sb_we_r        <= '0';
               mstatus_r      <= (others => '0');
+              authenticated_r <= '0';
+              authbusy_r      <= '0';
             else
               dmactive_r <= '1';
               if dmactive_r = '1' then
@@ -593,6 +662,18 @@ begin
                 end if;
               end if;
             end if;
+          elsif dmi_addr = A_AUTHDATA then
+            if dmactive_r = '1' then
+              -- Challenge response (see header): compare against the OTP
+              -- key; a match authenticates, a mismatch de-authenticates.
+              -- authbusy sets here and clears on the next DMSTATUS read.
+              authbusy_r <= '1';
+              if lifecycle_i = LC_PROVISIONED and dmi_wdata = auth_key_i then
+                authenticated_r <= '1';
+              else
+                authenticated_r <= '0';
+              end if;
+            end if;
           elsif dmi_addr = A_SBCS then
             if dmactive_r = '1' then
               sbbusyerror_r <= sbbusyerror_r and not dmi_wdata(22);  -- W1C
@@ -657,8 +738,10 @@ begin
             end if;
           elsif dmi_addr = A_DMSTATUS then
             dmstatus_v := (others => '0');
-            dmstatus_v(3 downto 0) := "0010";  -- version 2 = spec 0.13
-            dmstatus_v(7) := '1';              -- authenticated (no auth unit)
+            dmstatus_v(3 downto 0) := "0010";       -- version 2 = spec 0.13
+            dmstatus_v(6) := authbusy_r;            -- authbusy (clear-on-read below)
+            dmstatus_v(7) := authenticated_r;       -- AUTH-STATE: computed auth lifecycle
+            authbusy_r <= '0';                      -- clears on DMSTATUS read
             if dmactive_r = '1' then
               dmstatus_v(8)  := halted_i;      -- anyhalted
               dmstatus_v(9)  := halted_i;      -- allhalted

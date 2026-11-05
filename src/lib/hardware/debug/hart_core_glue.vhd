@@ -141,7 +141,14 @@ begin
       dpc_o => dpc_o_s, step_o => step_o_s,
       sb_re_o => sb_re_s, sb_we_o => sb_we_s,
       sb_addr_o => sb_addr_s, sb_wdata_o => sb_wdata_s, sb_size_o => sb_size_s,
-      sb_rdata_i => sb_rdata_s, sb_ack_i => sb_ack_s, sb_err_i => sb_err_s);
+      sb_rdata_i => sb_rdata_s, sb_ack_i => sb_ack_s, sb_err_i => sb_err_s,
+      -- Development bring-up tie-off (hart e2e has no authdata flow): the
+      -- device models an UNPROVISIONED part (OPEN), the documented fab/
+      -- test state. Production ties lifecycle_i/auth_key_i from OTP
+      -- fuses; a PROVISIONED part requires the challenge and a LOCKED
+      -- ("10") part denies System Bus Access entirely.
+      lifecycle_i => "00",
+      auth_key_i  => (others => '0'));
 
   ----------------------------------------------------------------------------
   -- Real rv32 hart (READ-ONLY core, clock-gated)
