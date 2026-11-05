@@ -207,6 +207,24 @@ fn test_enum_new_with_payload() {
 }
 
 #[test]
+fn test_result_unwrap_returns_payload() {
+    let payload = RuntimeValue::from_int(42);
+    // Pure-Simple MIR uses legacy enum id 0; the C constructor reserves id 2.
+    // Both carry positional Ok=0 and must unwrap to the payload, not the enum.
+    for enum_id in [super::RESULT_ENUM_ID, 2] {
+        let result = rt_enum_new(enum_id, 0, payload);
+        assert!(crate::value::heap::is_registered_heap_ptr(result.as_heap_ptr()));
+        assert_eq!(super::rt_unwrap_or_trap(result).as_int(), 42);
+    }
+}
+
+#[test]
+fn test_option_unwrap_returns_positional_payload() {
+    let result = rt_enum_new(super::OPTION_ENUM_ID, 0, RuntimeValue::from_int(42));
+    assert_eq!(super::rt_unwrap_or_trap(result).as_int(), 42);
+}
+
+#[test]
 fn test_enum_new_nil_payload() {
     let enum_id = 1;
     let discriminant = 0;

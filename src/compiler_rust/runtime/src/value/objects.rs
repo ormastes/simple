@@ -560,11 +560,11 @@ pub extern "C" fn rt_unwrap_or_self(value: RuntimeValue) -> RuntimeValue {
 /// receiver unchanged — see
 /// doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
 ///
-/// `Result` has no reserved enum_id (it is registered like any other
-/// stdlib/user enum), so `Ok`/`Err` are identified the same way
-/// `is_ok`/`is_err` already do in codegen: by discriminant-hash comparison
-/// against the canonical variant names, not by enum_id. A receiver that is
-/// neither Option nor Result (an arbitrary user enum) falls back to the old
+/// `Result` has no single reserved enum_id across the native runtimes, so
+/// `Ok`/`Err` are identified by the canonical discriminant helper rather than
+/// by enum_id. Builtins use positional tags; older custom variants retain
+/// their registered or name-derived tags. A receiver that is neither Option
+/// nor Result (an arbitrary user enum) falls back to the old
 /// "return self" behavior, unchanged from `rt_unwrap_or_self` — widening
 /// unwrap-trap semantics to arbitrary user enums is out of scope here.
 /// Formation probe for heap-typed enum/Option payloads at fail-closed
