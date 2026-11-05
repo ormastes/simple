@@ -4436,10 +4436,34 @@ int64_t rt_string_new_literal(const uint8_t* bytes, uint64_t len) {
     return value;
 }
 
+/* A raw `char*` that is exactly the `data` member of a live registered heap
+ * string (the rt_interp_cstr decode used by `t!`, `match Some(s)`, `if val`,
+ * `.unwrap()` and `??` on a `text?`) still owns a length. strlen() on it cut
+ * binary-capable text at the first NUL (bug
+ * optional_text_unwrap_truncates_at_nul_2026-10-25: SCV digested 4158 of
+ * 11465 bytes). Same validation order as rt_core_transient_text_data_pointer:
+ * cheap rejects, then registry membership BEFORE the header is read, so an
+ * arbitrary pointer (e.g. a .rodata literal) is never dereferenced. */
+static RtCoreString* rt_core_string_from_data_pointer(int64_t value) {
+    const uint64_t data_off = offsetof(RtCoreString, data);
+    uint64_t w = (uint64_t)value;
+    if ((w & (sizeof(uint64_t) - 1)) != 0 || w <= 0x10000 + data_off) return NULL;
+    if (rt_core_immortal_registry_len == 0 && !rt_core_immortal_frozen) return NULL;
+    RtCoreString* s = (RtCoreString*)(uintptr_t)(w - data_off);
+    if (!rt_core_is_registered_immortal_ptr(s) ||
+            rt_core_registered_object_kind(s) != RT_VALUE_HEAP_STRING) {
+        return NULL;
+    }
+    return s;
+}
+
 int64_t rt_string_len(int64_t string) {
     RtCoreString* s = rt_core_as_string(string);
     if (s) return (int64_t)s->len;
-    return string >= 0x10000 ? (int64_t)strlen((const char*)(uintptr_t)string) : -1;
+    if (string < 0x10000) return -1;
+    RtCoreString* owner = rt_core_string_from_data_pointer(string);
+    if (owner) return (int64_t)owner->len;
+    return (int64_t)strlen((const char*)(uintptr_t)string);
 }
 
 /* The raw-pointer fallback MUST mirror rt_string_len's, with the identical
@@ -8810,6 +8834,11 @@ int64_t rt_dma_cache_line_size(void) {
  * ================================================================ */
 
 int64_t rt_strlen(const char* s) {
+    /* `.len()` and tag_str_local_if_raw (rt_strlen + rt_string_new re-tag) on
+     * a raw text local: keep the owning heap string's length so an embedded
+     * NUL does not truncate (optional_text_unwrap_truncates_at_nul_2026-10-25). */
+    RtCoreString* owner = rt_core_string_from_data_pointer((int64_t)(uintptr_t)s);
+    if (owner) return (int64_t)owner->len;
     return spl_str_len(s);
 }
 
