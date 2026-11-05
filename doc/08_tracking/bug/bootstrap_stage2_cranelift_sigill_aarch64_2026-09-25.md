@@ -87,3 +87,25 @@ longer implemented by the Rust seed and the pipeline emits one-binary instead
 ~6 weeks of stage2 codegen repairs landed in between. Whatever the exact
 repair, the rc=132 signature does not reproduce at current release/1.0.0
 source. Not claimed: stages beyond stage2 (the repro stops there by design).
+
+## Stage2 compiler-test matrix — final record (2026-11-05)
+
+The stage2 phase-verification matrix (strategy=normal, profile=slim) ran to
+its campaign deadline on the same trust-root candidate. Per-cell results
+(verification/summary.env):
+
+- compiler_version: PASS (candidate reports simple-bootstrap 1.0.0-rc.1).
+- test_runner_build: PASS in 338s, artifact present (sha256
+  390fccc80f8a...). The stage2 candidate builds the test runner end-to-end.
+- compiler_cli_build: FAIL after 2951s — the ONLY failed cell, and it is the
+  MIR-shard worker-reap blockage filed as
+  stage2_mir_shard_worker_reap_block_low_memory_2026-11-05 (failed_modules=0;
+  no lowering/codegen error).
+- module_compile sweep: INCOMPLETE (campaign deadline; 15113-module
+  inventory unfinished). Every module compile that ran completed PASS
+  (samples f06-f08v, p3: all PASS with artifacts).
+
+No codegen defect surfaced anywhere in the matrix. The 2026-09-25 SIGILL
+and the stage2 aarch64 native-codegen failure family are not reproducible
+at current release/1.0.0 source; the remaining stage2 gate is the filed
+shard-lifecycle infra issue.
