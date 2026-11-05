@@ -1,0 +1,162 @@
+# Managed verified-image staging and one-use authority issue.
+#
+# Repair for the removed fs_exec_register_image_with_spawn_spec path-only mint
+# (doc/08_tracking/bug/simpleos_managed_container_launch_authority_mismatch_2026-09-27.md).
+# Managed callers (container runtime, agent runtime, root service catalog) hold
+# already-verified image bytes plus a compiled launch policy. This module stages
+# those exact bytes into a loader-private ramfs mount, registers the staged
+# image with the loader authority registry, and hands back the one-use token
+# and planned load consumer for the scheduler adoption seam.
+#
+# No pathname, caller identity, or byte vector alone can mint authority: the
+# registry binds the token to the staged image's mount/file/generation identity
+# and rejects replay, and the staged table is retained until the caller either
+# adopts or the issue path releases it.
+
+use std.fs_driver.mount_table.{MountTable, ExecuteOpenBinding}
+use std.fs_driver.mount_table_support.{PositionedDriverKind}
+use std.fs_driver.types.{MountOptions, OpenFlags, ExecuteTrust}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.ramfs.{RamFsDriver}
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{
+    ExecutableImageHandleV1, executable_admission_schema_version,
+    executable_image_handle_validate}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.loader.elf_loader.{ExecutableElfLayoutV1, elf_authenticated_layout_v1}
+use os.kernel.loader.executable_authority_registry.{
+    ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1,
+    executable_authority_loader_owner, executable_authority_issue_verified}
+use os.kernel.loader.executable_admission_pipeline.{
+    executable_loader_release_retrieved}
+use os.kernel.loader.executable_load_plan_v1.{
+    ExecutableLoadConsumerV1, ExecutableLoadConsumerStateV1,
+    executable_load_consumer_new_v1, executable_load_consumer_plan_v1}
+
+pub struct ManagedImageAuthorityV1:
+    staged: bool
+    error_pid: i64
+    table: MountTable
+    authorities: ExecutableAuthorityRegistryV1
+    token: ExecutableAuthorityTokenV1
+    consumer: ExecutableLoadConsumerV1
+    entry_point: u64
+
+fn _issue_fail(error_pid: i64) -> ManagedImageAuthorityV1:
+    ManagedImageAuthorityV1(
+        staged: false, error_pid: error_pid, table: MountTable.new(),
+        authorities: ExecutableAuthorityRegistryV1(owner_epoch: 0u64),
+        token: ExecutableAuthorityTokenV1(slot_index: 0, generation: 0u64,
+            nonce: 0u64),
+        consumer: executable_load_consumer_new_v1("", "", ""),
+        entry_point: 0u64)
+
+fn _managed_arch_text(arch: Architecture) -> text:
+    if arch == Architecture.X86_64:
+        return "x86_64"
+    if arch == Architecture.Arm64:
+        return "arm64"
+    if arch == Architecture.Riscv64:
+        return "riscv64"
+    ""
+
+fn _issue_from_binding(table: MountTable, binding: ExecuteOpenBinding,
+        bytes: [u8], arch: Architecture, layout: ExecutableElfLayoutV1,
+        role: text) -> ManagedImageAuthorityV1:
+    val owner_result = executable_authority_loader_owner()
+    if owner_result.is_err():
+        return _issue_fail(-13)
+    val owner = owner_result.unwrap()
+    val arch_text = _managed_arch_text(arch)
+    if arch_text == "":
+        return _issue_fail(-8)
+    val image_hash = sha256_u8_hex(bytes)
+    val handle = ExecutableImageHandleV1(
+        schema_version: executable_admission_schema_version(),
+        open_handle_id: binding.file_handle.id,
+        mount_id: binding.mount_id.id as u64,
+        filesystem_name: binding.backend_kind,
+        canonical_source_path: binding.canonical_source_path,
+        mount_generation: binding.mount_generation,
+        file_id: binding.file_handle.id,
+        file_generation: binding.content_generation,
+        size_bytes: binding.size as u64,
+        role: role,
+        target: ManifestTarget(os: "simpleos", arch: arch_text,
+            abi: "simpleos"),
+        verified_load_ranges: layout.load_ranges,
+        image_hash: image_hash,
+        admission_id: "managed:" + image_hash,
+        trust_epoch: binding.namespace_generation,
+        read_count: 0u64,
+        read_bytes: 0u64,
+        consumed: false)
+    if not executable_image_handle_validate(handle).ok:
+        return _issue_fail(-8)
+    val issued = executable_authority_issue_verified(
+        owner, handle, true, layout.entry_point)
+    match issued:
+        case Err(_):
+            return _issue_fail(-13)
+        case Ok(token):
+            val consumer = executable_load_consumer_plan_v1(
+                executable_load_consumer_new_v1("simpleos", arch_text,
+                    "simpleos"),
+                handle, layout.entry_point)
+            if consumer.state != ExecutableLoadConsumerStateV1.Validated:
+                _ = executable_loader_release_retrieved(table, owner, token)
+                return _issue_fail(-8)
+            ManagedImageAuthorityV1(staged: true, error_pid: 0, table: table,
+                authorities: owner, token: token, consumer: consumer,
+                entry_point: layout.entry_point)
+
+pub fn managed_image_authority_issue_v1(bytes: [u8], arch: Architecture,
+        role: text) -> ManagedImageAuthorityV1:
+    """Stage verified managed bytes and issue one loader-registry authority.
+
+    The caller must already have verified the bytes against its own policy
+    digest; this function additionally binds the staged image to its exact
+    mount/file/generation identity before the registry issues the one-use
+    token. On every failure the staged binding is released or dropped with no
+    token minted.
+    """
+    if bytes.len() < 5:
+        return _issue_fail(-8)
+    val layout_result = elf_authenticated_layout_v1(bytes, arch)
+    if layout_result.is_err():
+        return _issue_fail(-8)
+    val layout = layout_result.unwrap()
+    if layout.entry_point == 0u64:
+        return _issue_fail(-8)
+    var table = MountTable.new()
+    match table.mount("/", DriverInstance.RamFs(driver: RamFsDriver.new()),
+            MountOptions.default()):
+        case Err(_):
+            return _issue_fail(-5)
+        case Ok(_): ()
+    match table.open("/managed-image", OpenFlags.create_write()):
+        case Err(_):
+            return _issue_fail(-5)
+        case Ok(handle):
+            match table.positioned_write_bytes(handle.id,
+                    PositionedDriverKind.Auto, 0u64, bytes):
+                case Err(_):
+                    _ = table.close(handle)
+                    return _issue_fail(-5)
+                case Ok(written):
+                    if written as i64 != bytes.len():
+                        _ = table.close(handle)
+                        return _issue_fail(-5)
+            match table.close(handle):
+                case Err(_):
+                    return _issue_fail(-5)
+                case Ok(_): ()
+    match table.open_for_execute("/managed-image", ExecuteTrust.Trusted):
+        case Err(_):
+            return _issue_fail(-5)
+        case Ok(binding):
+            _issue_from_binding(table, binding, bytes, arch, layout, role)
+
+export ManagedImageAuthorityV1
+export managed_image_authority_issue_v1

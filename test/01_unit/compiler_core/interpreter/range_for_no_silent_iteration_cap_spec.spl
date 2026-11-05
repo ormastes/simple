@@ -1,0 +1,61 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# bug: doc/08_tracking/bug/core_interpreter_hard_loop_iteration_caps_2026-08-28.md
+#
+# The interpreted programs below are evaluated by the pure-Simple tree-walk
+# interpreter through `core_interpret` (the same nested-interpreter model as
+# src/app/test_runner_new/inprocess_probe.spl), so the loop iteration logic
+# under test lives in src/compiler/10.frontend/core/interpreter/eval.spl
+# (`eval_for_expr` / `eval_range`), not in the host pipeline.
+#
+# Original defect: `eval_for_expr` carried a hard `while _range_iter < 1000001`
+# guard that simply ended the loop after 1,000,001 iterations with NO error,
+# so `for i in 0..1500000: acc = acc + 1` silently produced acc = 1000001
+# instead of 1500000. A silent wrong answer. `eval_range` had the same silent
+# truncation at 10,001 elements. The Rust seed has no such cap.
+
+use std.spec.step
+
+use compiler.core.interpreter.mod.{core_interpret}
+use compiler.core.interpreter.eval.{eval_has_error, eval_get_error}
+use compiler.core.interpreter.value.{val_get_int, val_get_array}
+
+describe "core interpreter range-for has no silent iteration cap":
+    it "completes a range-for past the old 10,001-element range cap with the correct count":
+        step("Verify: range-for past 10,001 elements accumulates the full count")
+        # Doc repro (doc/08_tracking/bug/core_interpreter_hard_loop_iteration_caps_2026-08-28.md):
+        # before the fix the core interpreter silently returned a truncated
+        # count (capped range array) with no error. The fixture crosses the old
+        # 10,001-element cap but stays small: this spec is itself interpreted,
+        # so multi-million-iteration fixtures would take minutes for no extra
+        # signal.
+        val src = "var acc: i64 = 0\nfor i in 0..20000:\n    acc = acc + 1\nacc\n"
+        val result = core_interpret(src, "range_for_cap_repro.spl")
+        if eval_has_error():
+            print "interpreter error: {eval_get_error()}"
+        expect(eval_has_error()).to_equal(false)
+        expect(val_get_int(result)).to_equal(20000)
+
+    it "completes an inclusive range-for past the old range cap":
+        step("Verify: inclusive range-for runs every element including the endpoint")
+        val src = "var acc: i64 = 0\nfor i in 0..=20000:\n    acc = acc + 1\nacc\n"
+        val result = core_interpret(src, "range_for_inclusive_cap_repro.spl")
+        if eval_has_error():
+            print "interpreter error: {eval_get_error()}"
+        expect(eval_has_error()).to_equal(false)
+        expect(val_get_int(result)).to_equal(20001)
+
+    it "still runs a short range-for correctly (control)":
+        step("Verify: a normal short loop is unaffected by the cap removal")
+        val src = "var acc: i64 = 0\nfor i in 0..5:\n    acc = acc + i\nacc\n"
+        val result = core_interpret(src, "range_for_short_control.spl")
+        expect(eval_has_error()).to_equal(false)
+        expect(val_get_int(result)).to_equal(10)
+
+    it "builds a range array past the old 10,001-element eval_range cap":
+        step("Verify: eval_range materializes every element instead of truncating at 10001")
+        val src = "val r = 0..12000\n[r.len(), r[11999]]\n"
+        val result = core_interpret(src, "eval_range_cap_repro.spl")
+        expect(eval_has_error()).to_equal(false)
+        val parts = val_get_array(result)
+        expect(val_get_int(parts[0])).to_equal(12000)
+        expect(val_get_int(parts[1])).to_equal(11999)

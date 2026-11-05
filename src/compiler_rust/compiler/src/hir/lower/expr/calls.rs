@@ -358,6 +358,17 @@ impl Lowerer {
         for (arg, hir) in args.iter().zip(args_hir) {
             let index = match arg.name.as_deref() {
                 None => {
+                    // Positional arguments fill the lowest UNFILLED slots in
+                    // order: a named argument may precede them (the
+                    // interpreter binds `f(1, c: 3, 2, 4)` as a=1, b=2, c=3,
+                    // d=4), so the cursor must skip slots a named argument
+                    // already took. Advancing blindly from the argument
+                    // position collided with earlier named slots ("parameter
+                    // N more than once or beyond its arity",
+                    // seed_jit_hir_positional_after_named_arg_2026-11-04).
+                    while next_positional < slots.len() && slots[next_positional].is_some() {
+                        next_positional += 1;
+                    }
                     let i = next_positional;
                     next_positional += 1;
                     i

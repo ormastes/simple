@@ -1,0 +1,248 @@
+# Windows Server process-isolated container provider leaf.
+#
+# The provider owns the Windows edge only. Per the cross-host architecture the
+# controller requests windows/windows/native-container and the provider selects
+# an immutable Windows image with PROCESS isolation over HCS; Hyper-V
+# isolation, utility VMs, HostProcess workloads, and bare host processes are
+# rejected by design. The initial runtime bridge is containerd plus its
+# runhcs shim; a later direct HCS/SFFI route needs its own design.
+#
+# This leaf is contract-level: it owns the host/image admission matrix,
+# process-isolation observation checks, exact argv construction for the
+# containerd/runhcs bridge, and fail-closed lifecycle admission. Live HCS
+# execution is admitted only on a Windows Server host with a positive probe
+# and a selected privilege route; everywhere else lifecycle operations fail
+# closed with an explicit blocked reason.
+
+use std.common.contracts.container.runtime_v1.{
+    RuntimeIdentityV1, RuntimeCommandV1, RuntimeStateV1, RuntimeOperationV1,
+    RuntimeProbeV1, RuntimeProviderContractV1, RuntimeProviderV1,
+    RUNTIME_STATUS_REJECTED, RUNTIME_STATUS_BLOCKED, RUNTIME_STATUS_OK,
+    runtime_command_empty, runtime_probe_unavailable, RUNTIME_PRIVILEGE_UNKNOWN,
+    RUNTIME_PRIVILEGE_ROOT}
+use std.common.contracts.container.host_capability_v1.{
+    ContainerHostCapabilityV1, CONTAINER_CLIENT_PRIVILEGE_DELEGATED_V1,
+    CONTAINER_CLIENT_PRIVILEGE_UNAVAILABLE_V1, CONTAINER_ISOLATION_NATIVE_V1}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
+
+pub const WINDOWS_HCS_ENGINE_V1 = "windows-hcs-v1"
+pub const WINDOWS_CONTAINERD_BRIDGE_V1 = "containerd+runhcs"
+pub const WINDOWS_DEFAULT_TIMEOUT_MS: i64 = 30000
+
+# Enumerated Microsoft host/image compatibility pairs. These are exact pairs,
+# not a blanket cross-version grant; anything absent is a rejection.
+pub fn windows_host_image_pair_admitted_v1(host_edition: text,
+        host_build: text, image_build: text, development_preview: bool) -> bool:
+    if host_edition == "server":
+        if host_build == "2025" or host_build == "2022":
+            return image_build == "2025" or image_build == "2022"
+        return false
+    if host_edition == "windows11" and development_preview:
+        if image_build == "2022":
+            return true
+        if image_build == "2025":
+            return host_build == "23h2" or host_build == "24h2"
+        return false
+    false
+
+# The runtime must report the requested mode back exactly. Any HostProcess,
+# Hyper-V, or utility-VM observation is rejected and the workload is torn
+# down by the caller; a copied receipt never overrides the live observation.
+pub fn windows_isolation_observation_admitted_v1(requested: text,
+        observed: text) -> bool:
+    requested == "process" and observed == "process"
+
+fn _token_v1(value: text) -> bool:
+    if value == "" or value.len() > 128:
+        return false
+    for ch in value.chars():
+        if not ((ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or
+                (ch >= "0" and ch <= "9") or ch == "-" or ch == "_" or ch == "."):
+            return false
+    true
+
+fn _unavailable_v1(reason: text) -> RuntimeProbeV1:
+    runtime_probe_unavailable(WINDOWS_HCS_ENGINE_V1,
+        WINDOWS_CONTAINERD_BRIDGE_V1, reason)
+
+fn _capability_unavailable(reason: text) -> ContainerHostCapabilityV1:
+    ContainerHostCapabilityV1(host_os: "windows", guest_os: "windows",
+        provider_id: WINDOWS_HCS_ENGINE_V1,
+        isolation_class: CONTAINER_ISOLATION_NATIVE_V1,
+        client_privilege: CONTAINER_CLIENT_PRIVILEGE_UNAVAILABLE_V1,
+        admin_setup: true, launch_capable: false, reason: reason)
+
+fn _operation_v1(state: RuntimeStateV1, operation: text, status: text,
+        reason: text) -> RuntimeOperationV1:
+    RuntimeOperationV1(status: status, operation: operation,
+        command: runtime_command_empty(), state: state, exit_code: -1,
+        stdout: "", stderr: "", reason: reason)
+
+pub fn windows_hcs_provider_contract_v1() -> RuntimeProviderContractV1:
+    RuntimeProviderContractV1(provider_id: WINDOWS_HCS_ENGINE_V1, version: 1,
+        supports_recovery: false, supports_logs: true)
+
+# Pure request admission. The workload name is the provider-owned identity
+# bound at create; a user-chosen container name is never the HCS identity.
+pub fn windows_hcs_request_reason_v1(identity: RuntimeIdentityV1,
+        workload_name: text, isolation: text, image_digest: text) -> text:
+    if identity.pod_uid == "" or identity.attempt <= 0 or
+            identity.provider_generation <= 0 or identity.operation_id == "" or
+            identity.node_boot_id == "" or identity.native_id != "":
+        return "windows-hcs-invalid-attempt-identity"
+    if identity.engine != WINDOWS_HCS_ENGINE_V1:
+        return "windows-hcs-engine-mismatch"
+    if not _token_v1(workload_name):
+        return "windows-hcs-workload-name-invalid"
+    if workload_name != identity.pod_uid and
+            not workload_name.starts_with(identity.pod_uid + "-"):
+        return "windows-hcs-workload-name-not-attempt-bound"
+    if isolation != "process":
+        return "windows-hcs-process-isolation-required"
+    if image_digest == "" or image_digest.contains("\n") or
+            image_digest.contains("\r") or image_digest.contains(" "):
+        return "windows-hcs-image-digest-invalid"
+    if image_digest.starts_with("sha256:") and image_digest.len() != 71:
+        return "windows-hcs-image-digest-invalid"
+    ""
+
+# Exact argv for the containerd + runhcs bridge. containerd owns image
+# layers, scratch, and the HCS compute/process handles; this leaf only
+# constructs the bounded operation commands.
+pub fn windows_hcs_command_v1(operation: text, workload_name: text,
+        image_digest: text) -> RuntimeCommandV1:
+    if operation == "create":
+        return RuntimeCommandV1(operation: operation, program: "ctr",
+            args: ["run", "--rm", "--runtime", "io.containerd.runhcs.v1",
+                "--snapshotter", "windows", image_digest, workload_name])
+    if operation == "wait":
+        return RuntimeCommandV1(operation: operation, program: "hcsdiag",
+            args: ["list", "-q"])
+    if operation == "stop":
+        return RuntimeCommandV1(operation: operation, program: "ctr",
+            args: ["tasks", "kill", "--signal", "term", workload_name])
+    if operation == "destroy":
+        return RuntimeCommandV1(operation: operation, program: "ctr",
+            args: ["containers", "delete", "--force", workload_name])
+    runtime_command_empty()
+
+pub class WindowsHcsRuntimeProviderV1:
+    platform: text
+    host_edition: text
+    host_build: text
+    development_preview: bool
+    node_boot_id: text
+    provider_generation: i64
+    timeout_ms: i64
+    live_enabled: bool
+    scripted: bool
+    scripted_launch_capable: bool
+    scripted_reason: text
+
+impl WindowsHcsRuntimeProviderV1:
+    pub static fn new(platform: text, host_edition: text, host_build: text,
+            development_preview: bool, node_boot_id: text,
+            provider_generation: i64, live_enabled: bool = true,
+            timeout_ms: i64 = WINDOWS_DEFAULT_TIMEOUT_MS) -> WindowsHcsRuntimeProviderV1:
+        val effective = if timeout_ms > 0 then timeout_ms else WINDOWS_DEFAULT_TIMEOUT_MS
+        WindowsHcsRuntimeProviderV1(platform: platform, host_edition: host_edition,
+            host_build: host_build, development_preview: development_preview,
+            node_boot_id: node_boot_id, provider_generation: provider_generation,
+            timeout_ms: effective, live_enabled: live_enabled, scripted: false,
+            scripted_launch_capable: false, scripted_reason: "")
+
+    pub static fn scripted(host_edition: text, host_build: text,
+            node_boot_id: text, provider_generation: i64,
+            launch_capable: bool, reason: text) -> WindowsHcsRuntimeProviderV1:
+        var provider = WindowsHcsRuntimeProviderV1.new("windows", host_edition,
+            host_build, false, node_boot_id, provider_generation, false)
+        provider.scripted = true
+        provider.scripted_launch_capable = launch_capable
+        provider.scripted_reason = reason
+        provider
+
+    pub fn probe(self) -> RuntimeProbeV1:
+        if self.scripted:
+            if self.scripted_launch_capable:
+                return RuntimeProbeV1(provider: WINDOWS_HCS_ENGINE_V1,
+                    engine: WINDOWS_CONTAINERD_BRIDGE_V1, engine_present: true,
+                    healthy: true, launch_capable: true,
+                    privilege: RUNTIME_PRIVILEGE_ROOT,
+                    reason: if self.scripted_reason != "" then self.scripted_reason
+                        else "windows-hcs-scripted-probe")
+            return _unavailable_v1(if self.scripted_reason != "" then
+                self.scripted_reason else "windows-hcs-scripted-unavailable")
+        if not self.live_enabled or self.platform != "windows" or
+                self.node_boot_id == "" or self.provider_generation <= 0:
+            return _unavailable_v1("windows-hcs-live-host-unavailable")
+        # Under a strict rootless policy no proven user-level Windows runtime
+        # exists: the honest verdict is unavailable, not delegated.
+        if self.host_edition != "server" and not self.development_preview:
+            return _unavailable_v1("windows-hcs-server-or-preview-required")
+        val version = process_run_timeout("containerd", ["--version"],
+            self.timeout_ms)
+        if version.2 != 0 or version.1.trim() == "":
+            return _unavailable_v1("windows-hcs-containerd-missing")
+        RuntimeProbeV1(provider: WINDOWS_HCS_ENGINE_V1,
+            engine: WINDOWS_CONTAINERD_BRIDGE_V1, engine_present: true,
+            healthy: true, launch_capable: true, privilege: RUNTIME_PRIVILEGE_ROOT,
+            reason: "windows-hcs-bridge-present")
+
+    pub fn lifecycle_request_v1(self, state: RuntimeStateV1,
+            operation: text, workload_name: text, image_digest: text,
+            image_build: text, requested_isolation: text) -> RuntimeOperationV1:
+        if operation != "create" and operation != "wait" and
+                operation != "stop" and operation != "destroy":
+            return _operation_v1(state, operation, RUNTIME_STATUS_REJECTED,
+                "windows-hcs-unsupported-operation")
+        val reason = windows_hcs_request_reason_v1(state.identity, workload_name,
+            requested_isolation, image_digest)
+        if reason != "":
+            return _operation_v1(state, operation, RUNTIME_STATUS_REJECTED, reason)
+        if not windows_host_image_pair_admitted_v1(self.host_edition,
+                self.host_build, image_build, self.development_preview):
+            return _operation_v1(state, operation, RUNTIME_STATUS_REJECTED,
+                "windows-hcs-host-image-pair-incompatible")
+        val probe = self.probe()
+        if not probe.launch_capable:
+            return _operation_v1(state, operation, RUNTIME_STATUS_BLOCKED,
+                if probe.reason != "" then probe.reason
+                else "windows-hcs-launch-unavailable")
+        if self.scripted:
+            return _operation_v1(state, operation, RUNTIME_STATUS_BLOCKED,
+                "windows-hcs-scripted-live-execution-unavailable")
+        val command = windows_hcs_command_v1(operation, workload_name,
+            image_digest)
+        if command.program == "":
+            return _operation_v1(state, operation, RUNTIME_STATUS_REJECTED,
+                "windows-hcs-command-unsupported")
+        RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: operation,
+            command: command, state: state, exit_code: -1, stdout: "", stderr: "",
+            reason: "windows-hcs-command-admitted")
+
+# Pure translation of a live launch-capable probe. A capable probe describes
+# the delegated route (one-time privileged provisioning of the containerd/
+# HCS service); the ordinary launch client stays unprivileged. Scripted
+# probes are never live evidence.
+pub fn windows_hcs_capability_from_probe_v1(probe: RuntimeProbeV1,
+        live_source: bool) -> ContainerHostCapabilityV1:
+    if not live_source:
+        return _capability_unavailable("windows-hcs-live-probe-unavailable")
+    if probe.provider != WINDOWS_HCS_ENGINE_V1:
+        return _capability_unavailable("windows-hcs-provider-required")
+    if not probe.engine_present or not probe.healthy or not probe.launch_capable:
+        return _capability_unavailable(
+            if probe.reason != "" then probe.reason
+            else "windows-hcs-launch-unavailable")
+    ContainerHostCapabilityV1(host_os: "windows", guest_os: "windows",
+        provider_id: WINDOWS_HCS_ENGINE_V1,
+        isolation_class: CONTAINER_ISOLATION_NATIVE_V1,
+        client_privilege: CONTAINER_CLIENT_PRIVILEGE_DELEGATED_V1,
+        admin_setup: true, launch_capable: true,
+        reason: if probe.reason != "" then probe.reason else "windows-hcs-delegated")
+
+export WindowsHcsRuntimeProviderV1, WINDOWS_HCS_ENGINE_V1
+export windows_hcs_provider_contract_v1, windows_hcs_request_reason_v1
+export windows_hcs_command_v1, windows_hcs_capability_from_probe_v1
+export windows_host_image_pair_admitted_v1, windows_isolation_observation_admitted_v1
+export WINDOWS_CONTAINERD_BRIDGE_V1

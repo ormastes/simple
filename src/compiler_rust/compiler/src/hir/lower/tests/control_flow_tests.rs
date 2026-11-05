@@ -372,6 +372,159 @@ fn test_untyped_empty_array_specializes_on_first_append() {
     ));
 }
 
+/// Collect every sub-expression of `expr` (including `expr` itself) by
+/// walking the few container variants these dict for-loop fixtures produce.
+fn collect_exprs<'a>(expr: &'a HirExpr, out: &mut Vec<&'a HirExpr>) {
+    out.push(expr);
+    match &expr.kind {
+        HirExprKind::Binary { left, right, .. } => {
+            collect_exprs(left, out);
+            collect_exprs(right, out);
+        }
+        HirExprKind::Index { receiver, index } => {
+            collect_exprs(receiver, out);
+            collect_exprs(index, out);
+        }
+        HirExprKind::FieldAccess { receiver, .. } => collect_exprs(receiver, out),
+        _ => {}
+    }
+}
+
+/// `for entry in dict` must bind the entry as the (K, V) tuple the runtime
+/// produces (rt_for_iterable -> rt_dict_entries -> rt_tuple pairs), not ANY —
+/// otherwise `entry[1]` carries no value type and native HIR hard-fails on any
+/// field access off it (bug: seed_native_hir_dict_for_loop_entry_any_2026_10_22).
+#[test]
+fn dict_for_loop_entry_is_typed_key_value_tuple() {
+    let module = parse_and_lower(
+        "fn probe(scores: Dict<text, i64>) -> i64:\n    var total = 0\n    for entry in scores:\n        total = total + entry[1]\n    return total\n",
+    )
+    .unwrap();
+
+    let func = &module.functions[0];
+    let HirStmt::For {
+        pattern_local,
+        body,
+        ..
+    } = func
+        .body
+        .iter()
+        .find(|stmt| matches!(stmt, HirStmt::For { .. }))
+        .expect("for loop statement")
+    else {
+        panic!("expected for loop statement")
+    };
+
+    let loop_local_index = pattern_local.expect("loop local should be recorded");
+    let loop_local = &func.locals[loop_local_index - func.params.len()];
+    assert_eq!(loop_local.name, "entry");
+    let entry_ty = module
+        .types
+        .get(loop_local.ty)
+        .unwrap_or_else(|| panic!("loop entry type {:?} not registered", loop_local.ty));
+    let HirType::Tuple(elems) = entry_ty else {
+        panic!("dict for-loop entry must lower as Tuple(K, V), not {entry_ty:?}");
+    };
+    assert_eq!(elems, &vec![TypeId::STRING, TypeId::I64]);
+
+    // `entry[1]` must type as the dict value type (i64), not ANY.
+    let mut exprs = Vec::new();
+    for stmt in body {
+        if let HirStmt::Assign { value, .. } = stmt {
+            collect_exprs(value, &mut exprs);
+        }
+    }
+    let index_on_entry = exprs
+        .iter()
+        .find(|expr| {
+            matches!(
+                &expr.kind,
+                HirExprKind::Index { receiver, .. }
+                    if matches!(receiver.kind, HirExprKind::Local(idx) if idx == loop_local_index)
+            )
+        })
+        .expect("entry[1] index expression in loop body");
+    assert_eq!(
+        index_on_entry.ty,
+        TypeId::I64,
+        "entry[1] must carry the dict value type"
+    );
+}
+
+/// Tuple destructuring `for (k, v) in dict` inherits the same ANY-entry bug:
+/// both pattern bindings must come out as K and V.
+#[test]
+fn dict_for_loop_tuple_destructure_binds_key_and_value_types() {
+    let module = parse_and_lower(
+        "fn probe(scores: Dict<text, i64>) -> i64:\n    var total = 0\n    for (k, v) in scores:\n        total = total + v\n    return total\n",
+    )
+    .unwrap();
+
+    let func = &module.functions[0];
+    let HirStmt::For { body, .. } = func
+        .body
+        .iter()
+        .find(|stmt| matches!(stmt, HirStmt::For { .. }))
+        .expect("for loop statement")
+    else {
+        panic!("expected for loop statement")
+    };
+
+    let mut binding_tys = Vec::new();
+    for stmt in body.iter().take(2) {
+        let HirStmt::Let { local_index, ty, .. } = stmt else {
+            panic!("expected destructuring let, got {stmt:?}");
+        };
+        binding_tys.push((
+            func.locals[*local_index - func.params.len()].name.clone(),
+            *ty,
+        ));
+    }
+    assert_eq!(binding_tys, vec![("k".to_string(), TypeId::STRING), ("v".to_string(), TypeId::I64)]);
+}
+
+/// Exact bug scenario: a field access on `entry[1]` over `Dict<text, S>` must
+/// lower (native HIR previously hard-failed with "cannot infer field type ...
+/// struct 'ANY'"). The field access must carry the field's declared type.
+#[test]
+fn dict_for_loop_entry_value_field_access_lowers() {
+    let module = parse_and_lower(
+        "class Alias:\n    owner_id: text\n\nfn probe(aliases: Dict<text, Alias>) -> text:\n    for entry in aliases:\n        val owner = entry[1].owner_id\n        return owner\n    return \"\"\n",
+    )
+    .unwrap();
+
+    let func = module.functions.iter().find(|f| f.name == "probe").expect("probe fn");
+    let HirStmt::For { body, .. } = func
+        .body
+        .iter()
+        .find(|stmt| matches!(stmt, HirStmt::For { .. }))
+        .expect("for loop statement")
+    else {
+        panic!("expected for loop statement")
+    };
+    let HirStmt::Let { value: Some(value), .. } = &body[0] else {
+        panic!("expected destructuring-free let, got {:?}", body[0]);
+    };
+    let mut exprs = Vec::new();
+    collect_exprs(value, &mut exprs);
+    // The `entry[1]` receiver of the field access must type as the dict VALUE
+    // type (struct Alias), not ANY — with ANY the field access only survives
+    // via blind single-candidate resolution and hard-fails in real modules
+    // with several same-field structs (safety_checker_places.spl).
+    let index_expr = exprs
+        .iter()
+        .find(|expr| matches!(expr.kind, HirExprKind::Index { .. }))
+        .expect("entry[1] index expression");
+    assert!(
+        matches!(
+            module.types.get(index_expr.ty),
+            Some(HirType::Struct { name, .. }) if name == "Alias"
+        ),
+        "entry[1] must carry the dict value struct type, got {:?}",
+        module.types.get(index_expr.ty)
+    );
+}
+
 /// A3 cranelift gap: positional class pattern `case ClassName(a, b, c)` must lower
 /// with Bool(true) condition (not rt_enum_check_discriminant) and FieldAccess
 /// bindings (not rt_enum_payload) so compiled/JIT mode matches correctly.
@@ -1348,4 +1501,37 @@ fn optional_chain_lowers_to_presence_tested_access() {
         };
         assert!(contains_chain_if(expr), "`?.` in {name} did not lower to a presence-tested access: {expr:?}");
     }
+}
+
+#[test]
+fn positional_args_after_named_fill_lowest_unfilled_slots() {
+    // seed_jit_hir_positional_after_named_arg_2026-11-04: the JIT HIR used to
+    // advance the positional cursor blindly, colliding with an earlier named
+    // argument's slot ("parameter N more than once or beyond its arity") and
+    // dropping the whole module to the interpreter. The interpreter binds
+    // positionals to the lowest unfilled slots, in order; the JIT must match.
+    let module = parse_and_lower(
+        "fn combo(a: i64, b: i64, c: i64, d: i64) -> i64:\n    return a\n\nfn main() -> i64:\n    return combo(1, c: 3, 2, 4)\n",
+    )
+    .unwrap();
+
+    let func = module.functions.iter().find(|f| f.name == "main").expect("main fn");
+    let HirStmt::Return(Some(expr)) = func.body.last().expect("main return") else {
+        panic!("expected return: {:?}", func.body)
+    };
+    let HirExprKind::Call { args, .. } = &expr.kind else {
+        panic!("expected call: {expr:?}")
+    };
+    let slot_values: Vec<i64> = args
+        .iter()
+        .map(|a| match &a.kind {
+            HirExprKind::Integer(v) => *v,
+            other => panic!("non-literal slot in call order: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        slot_values,
+        vec![1, 2, 3, 4],
+        "positional-after-named must fill declared slot order a=1, b=2, c=3, d=4"
+    );
 }

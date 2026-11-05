@@ -398,6 +398,16 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "print_raw",
     "rt_time_now_unix",
     "rt_entropy_hardware_ready",
+    // Contract checks (runtime/src/value/sffi/contracts.rs; emitted by codegen
+    // as RuntimeFuncSpec in compiler/src/codegen/runtime_sffi.rs, tier Core).
+    // Without these entries the generated static runtime-symbol table never
+    // contained them, so the seed JIT hit "can't resolve symbol
+    // simple_contract_check" at finalize and dropped the whole module to the
+    // interpreter — reproduced 2026-11-05 with the pure-Simple native-build
+    // app under SIMPLE_EXECUTION_MODE=jit while re-triaging
+    // doc/08_tracking/bug/seed_codegen_interp_native_divergence_2026-10-12.md.
+    "simple_contract_check",
+    "simple_contract_check_msg",
     // AOP runtime operations
     "rt_aop_invoke_around",
     "rt_aop_proceed",
@@ -2661,6 +2671,25 @@ mod tests {
         for symbol in ["rt_struct_alloc", "rt_struct_receiver_valid"] {
             assert!(CORE_REQUIRED_RUNTIME_SYMBOLS.contains(&symbol));
             assert!(RUNTIME_SYMBOL_NAMES.contains(&symbol));
+        }
+    }
+
+    #[test]
+    fn contract_check_pair_is_present_in_full_manifest() {
+        // Both are defined in runtime/src/value/sffi/contracts.rs and emitted
+        // by codegen (RuntimeFuncSpec in compiler/src/codegen/runtime_sffi.rs,
+        // tier Core), but they were absent from this list, so the generated
+        // static runtime-symbol table never contained them and the seed JIT
+        // panicked at finalize ("can't resolve symbol simple_contract_check")
+        // and dropped the whole module to the interpreter. Reproduced
+        // 2026-11-05 while re-triaging
+        // doc/08_tracking/bug/seed_codegen_interp_native_divergence_2026-10-12.md:
+        // the pure-Simple native-build app de-JITed in full under
+        // SIMPLE_EXECUTION_MODE=jit. See also
+        // doc/08_tracking/bug/jit_silent_interpreter_fallback_on_unresolved_extern_2026-11-03.md.
+        for symbol in ["simple_contract_check", "simple_contract_check_msg"] {
+            assert!(RUNTIME_SYMBOL_NAMES.contains(&symbol));
+            assert_eq!(symbol_tier_of(symbol), RuntimeSymbolTier::Core);
         }
     }
 

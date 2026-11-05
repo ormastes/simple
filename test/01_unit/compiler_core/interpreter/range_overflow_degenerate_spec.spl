@@ -1,0 +1,43 @@
+# Range-for / eval_range: degenerate ranges and i64::MAX increment parity with the seed.
+# The seed (interpreter_helpers/collections.rs range_object_values) uses checked_add and
+# stops on overflow; the pure-Simple core interpreter must not wrap past i64::MAX into a
+# ~2^63-iteration loop. See doc/08_tracking/bug/core_interpreter_hard_loop_iteration_caps_2026-08-28.md.
+use std.spec.step
+use compiler.core.interpreter.mod.{core_interpret}
+use compiler.core.interpreter.eval.{eval_has_error, eval_get_error}
+use compiler.core.interpreter.value.{val_get_int, val_get_array}
+
+describe "range overflow and degenerate cases":
+    it "exclusive degenerate 5..5 yields empty":
+        step("probe")
+        val result = core_interpret("var acc: i64 = 0\nfor i in 5..5:\n    acc = acc + 1\nacc\n", "deg1.spl")
+        if eval_has_error():
+            print "interpreter error: {eval_get_error()}"
+        expect(eval_has_error()).to_equal(false)
+        expect(val_get_int(result)).to_equal(0)
+
+    it "inclusive degenerate 0..=0 iterates once":
+        step("probe")
+        val result = core_interpret("var acc: i64 = 0\nfor i in 0..=0:\n    acc = acc + i\nacc\n", "deg2.spl")
+        if eval_has_error():
+            print "interpreter error: {eval_get_error()}"
+        expect(eval_has_error()).to_equal(false)
+        expect(val_get_int(result)).to_equal(0)
+
+    it "range ending at i64::MAX iterates the single endpoint once":
+        step("probe")
+        val result = core_interpret("var acc: i64 = 0\nfor i in 9223372036854775807..=9223372036854775807:\n    acc = acc + i\nacc\n", "max1.spl")
+        if eval_has_error():
+            print "interpreter error: {eval_get_error()}"
+        expect(eval_has_error()).to_equal(false)
+        expect(val_get_int(result)).to_equal(9223372036854775807)
+
+    it "eval_range array ending at i64::MAX has the single element":
+        step("probe")
+        val result = core_interpret("9223372036854775807..=9223372036854775807\n", "max2.spl")
+        if eval_has_error():
+            print "interpreter error: {eval_get_error()}"
+        expect(eval_has_error()).to_equal(false)
+        val arr = val_get_array(result)
+        expect(arr.len()).to_equal(1)
+        expect(val_get_int(arr[0])).to_equal(9223372036854775807)
