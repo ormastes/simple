@@ -454,3 +454,92 @@ sharing change.
 
 - Method receivers (`self` aliased with an argument) — still not measured.
 - Native/AOT lane — not measured.
+
+
+## FIXED 2026-11-05 (both-aliases-`mut` case) — worktree /private/tmp/rel100-seedfix-20261105, branch work/seed-interp-fixes-20261105
+
+The 2026-11-05 "still open" residual above is fixed in the Rust seed by a
+write-back-time three-way merge. No push; commit pending lane review.
+
+### Fix design (handle sharing reconciled at the write-back seam)
+
+The recommended direction was bind-time handle sharing in
+`interpreter_call/core/arg_binding.rs`. Investigated and rejected as a
+no-op: giving two `mut` params clones of ONE `Arc` changes nothing
+observable, because every in-body mutation re-reads the binding and
+`Arc::make_mut`s it — with two live param slots the strong count is always
+> 1, so each mutation COW-forks regardless, and the existing parking
+machinery (`park_written_back_arguments`) deliberately leaves a multi-bound
+caller name UNPARKED precisely because "only one write-back wins" was the
+accepted behavior. The sharing that actually exists in the representation
+is that never-parked caller handle: it is still the pristine pre-call fork
+point when `write_back_mutable_arguments` runs.
+
+So the fix binds the reconciliation to that shared handle, at the only seam
+where all forks coexist: `write_back_mutable_arguments`
+(`interpreter_call/core/function_exec.rs`) now pre-passes the identifier
+argument bindings, finds caller names reached by >= 2 params that are ALL
+declared `mut`, and for those array groups merges each param's final local
+value ("fork") back against the shared pre-call base in argument order:
+
+- fork `Arc::ptr_eq` the base -> never mutated, no contribution;
+- base is an elementwise prefix of the fork -> append-only (push/append/
+  extend); the fork's tail past `base.len()` is appended;
+- same length as base -> in-place slot edits; changed slots overwrite;
+- anything else -> last replace wins (matches shared-storage last-writer).
+
+One reconciled value is written to the caller binding and the group's
+members are skipped by the per-argument last-wins loop. Groups mixing
+`mut` and non-`mut` members, single-param bindings, dict/object/tuple
+shapes, and field-path arguments are untouched — byte-identical behavior
+outside the all-`mut` array group. NO locks, NO mutexes, NO added
+synchronization: the merge runs on the calling thread after the callee
+returns, using only `Arc::ptr_eq` and elementwise compares (compare-and-
+swap-style handle identity), so the interpreter's concurrent execution
+semantics are unchanged. No new `Value` variant, no binder change, no
+touch of `interpreter_helpers/patterns.rs` (out of this lane's ownership).
+
+Helper `merge_aliased_mut_array_group` is unit-tested in function_exec.rs
+(append order, untouched forks, slot edits, last-replace-wins).
+
+### RED -> GREEN evidence (binary /private/tmp/rel100-cargo-f/release/simple, macOS arm64, built from this branch)
+
+- RED (pre-fix build, same target dir): probe_aliased_both_mut_param.spl
+  under `SIMPLE_EXECUTION_MODE=interpret` -> `both_mut_len 2,
+  both_mut_last 8`; under `=jit` -> `both_mut_len 3, both_mut_last 8`.
+- GREEN (post-fix): BOTH engines -> `both_mut_len 3, both_mut_last 8`.
+- Class probe `probe_aliased_param_writeback.spl`: `ALIASED_PARAM_WRITEBACK
+  PROBE: ALL PASS` under BOTH engines (all 13 PASS lines), with
+  `OBSERVE aliased_array_both_mut=3` on both (was 2 vs 3).
+- `test/01_unit/compiler/interpreter/aliased_param_writeback_spec.spl`:
+  `Results: 4 total, 4 passed, 0 failed` under BOTH interpret and jit
+  (the 4th `it` block now asserts the fixed value 3 on both engines,
+  replacing the 2-vs-3 divergence pin; probe comment updated likewise).
+- `test/01_unit/lib/common/gpu/engine2d/scalar_oracle_spec.spl`:
+  `Results: 44 total, 44 passed, 0 failed` under BOTH interpret and jit.
+- `cargo test --release -p simple-compiler --lib interpreter_call`: `ok. 39
+  passed; 0 failed` (includes the 4 new `merge_*` unit tests); 4515 filtered
+  out. No pre-existing unrelated failures in this filter.
+
+### Residual divergence (documented, not hidden)
+
+A COW fork records no interleaving history: destructive mixes across two
+`mut` aliases (one param pops/removes a region a sibling appended) cannot
+always be reconstructed into the JIT's truly-shared-storage answer; the
+merge treats a non-prefix rewrite as a last-wins replace. The filed defect
+class (append-only and in-place-edit traffic through aliased `mut` params)
+is exact. Intra-body cross-reads of a sibling's not-yet-written fork also
+remain COW-isolated — achieving those would require true shared mutable
+storage in the callee frame, which the interpreter's mutation paths (in
+`interpreter_helpers/`, outside this lane's ownership) do not support for
+two distinct bindings.
+
+### Pure-Simple side
+
+Unchanged from the 2026-08-06 investigation update: the pure-Simple
+frontend interpreter (`src/compiler/10.frontend/**`, owned by another
+lane) binds both aliased parameter names to the identical arena `value_id`
+and has no separate copy-out step, so it is structurally immune to this
+defect class. It remains unreachable in this tree without a self-hosted
+bootstrap, so that immunity is argued from source, not re-verified
+dynamically.
