@@ -1,0 +1,41 @@
+# Purpose and audience: executable evidence for compiler engineers owning native
+# enum/Option payload pattern lowering.
+# @req REQ-SSPEC-UNIT
+#
+# Regression for doc/08_tracking/bug native_enum_nil_payload_pattern_2026_10_11:
+# a nested `Ok(Some(x))` / `Ok(nil)` pattern was lowered as an irrefutable struct
+# pattern by native codegen, so `Ok(nil)` took the `Ok(Some(c))` arm. The defect
+# shows up when a fixture is compiled as its own program (the sspec runner
+# interprets spec modules, so an in-spec match would not reach the seed's HIR
+# lowering), so this spec runs each fixture as a separate `simple run` process
+# and asserts its exact stdout and exit status. Native-build is not used: it
+# needs a linker environment the spec host may lack. Each fixture returns a distinct
+# non-zero exit code per failing check, so a regression names the broken case.
+#
+# Fixtures:
+#   test/fixtures/compiler/result_optional_payload_original/main.spl  (builtin T?)
+#   test/fixtures/compiler/result_user_some_variant_payload/main.spl  (user enum
+#     with a variant named `Some` must keep the discriminant path)
+
+use std.spec.step
+
+use std.io_runtime.{process_run, env_get, env_set}
+
+fn build_and_run(name: text) -> (text, text, i64):
+    env_set("SIMPLE_RUST_SEED_WARNING", "0")
+    process_run(env_get("SIMPLE_BINARY") ?? "bin/simple", ["run", "test/fixtures/compiler/" + name + "/main.spl"])
+
+describe "nested optional payload patterns in enum payloads":
+
+    it "keeps Ok(nil) off the Ok(Some(c)) arm for builtin T? payloads":
+        step("run the original-form fixture")
+        val ran = build_and_run("result_optional_payload_original")
+        step("exit 0 means all 17 checks passed; a non-zero code names the failing check")
+        assert_equal(ran[2], 0)
+        assert_equal(ran[0].trim(), "result_optional_payload_original: PASS")
+
+    it "keeps the discriminant path for a user enum variant named Some":
+        step("run the user-Some fixture")
+        val ran = build_and_run("result_user_some_variant_payload")
+        assert_equal(ran[2], 0)
+        assert_equal(ran[0].trim(), "result_user_some_variant_payload: PASS")
