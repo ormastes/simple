@@ -1,4 +1,9 @@
 # `check-vulkan-2d-c-compare.shs` always reports `compare_status=skipped` — two independent causes
+
+> **Triage 2026-11-05 (release/1.0.0 worktree):** Cause 1 fixed in ancestry —
+> per-leg admission (`perf_compare_admit_leg`) is now wired into the script and
+> promotes `measured-unadmitted` to `admitted`. Cause 2 (no self-hosted binary
+> on the host) is a deployment gap, not source. Not selected for this pass.
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution

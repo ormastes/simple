@@ -697,3 +697,17 @@ re-check. Also note the `Status re-verified 2026-08-17 by source inspection
 run; it should not be read as evidence in either direction.
 
 **Revalidated 2026-11-02: still plausible because OPEN (P1); no merged fix commit with a passing regression is cited in this doc.**
+
+## Premise re-check 2026-11-05 (p1-common lane, Windows host)
+
+- Premise still current: `composite_layout_key` is still deliberately
+  un-normalized (`50.mir/_MirLowering/module_lowering.spl`), no later policy
+  (nil/Any/panic-free/mono removal) obsoletes the bare-vs-qualified key split.
+- Interpreter control on `test/fixtures/compiler/mir_qualified_field_key/`:
+  PASS (`viafn.gamma=888`, `a.errors=333`), as before.
+- Native oracle unavailable on this host: the deployed `bin/simple.exe` is the
+  Rust seed, and its `native-build` of the fixture fails before codegen
+  (`parse: ... 70.backend/backend/_MirToLlvm/core_codegen.spl: Unterminated
+  f-string` from the shared checkout's compiler sources). Blocker A therefore
+  still holds; Blocker B (design-sized re-namespacing of ~10 bare-keyed maps)
+  is unchanged. No code landed; stays OPEN pending a stage3-capable host.

@@ -109,3 +109,17 @@ to `src`.
 `error: failed to push some refs`. It does not propagate the push's exit status,
 so a blocked push reads as a successful landing.
 
+### Status 2026-11-05 — FIXED on release/1.0.0
+
+Reproduced in the existing `scripts/check/check-land-target-range.shs` scratch
+fixture (no `origin` remote → `git push` fails with
+`fatal: 'origin' does not appear to be a git repository`, yet land.shs printed
+`submitted` and exited 0). Fix: `scripts/check/land.shs` now runs
+`git push` under `if`/`else`, prints `land.shs: ERROR — git push failed
+(rc=N); <branch> was NOT submitted` to stderr, and exits with the push's own
+status; the success path is unchanged. Regression coverage: two new
+`--submit` cases in `scripts/check/check-land-target-range.shs`
+(failed push → nonzero exit, no `submitted` line; live bare-remote push →
+exit 0 and ref present on remote). All 7 harness cases PASS on macOS
+aarch64 (run is pure POSIX sh, no platform-specific behavior).
+

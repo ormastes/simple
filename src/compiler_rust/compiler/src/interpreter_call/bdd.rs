@@ -1325,8 +1325,20 @@ pub(super) fn eval_bdd_builtin(
                 if matches!(op, BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq));
             if is_cmp_form {
                 if let Expr::Binary { op, left, right } = arg_expr {
-                    let left_val = eval_assertion_operand(left, env, functions, classes, enums, impl_methods)?;
-                    let right_val = eval_assertion_operand(right, env, functions, classes, enums, impl_methods)?;
+                    // A `.?` compared against a literal `nil` is a T? value
+                    // comparison (`opt.? == nil`), the documented contract; the
+                    // bool collapse would turn it into `false == nil` and
+                    // diverge from `simple run`. Keep the payload there.
+                    let left_val = if matches!(right.as_ref(), Expr::Nil) {
+                        evaluate_expr(left, env, functions, classes, enums, impl_methods)?
+                    } else {
+                        eval_assertion_operand(left, env, functions, classes, enums, impl_methods)?
+                    };
+                    let right_val = if matches!(left.as_ref(), Expr::Nil) {
+                        evaluate_expr(right, env, functions, classes, enums, impl_methods)?
+                    } else {
+                        eval_assertion_operand(right, env, functions, classes, enums, impl_methods)?
+                    };
                     let (matched, op_word) = match op {
                         // Bridge `nil` (Value::Nil) and `Option::None`: the language's
                         // `==` treats an empty optional as equal to `nil` (see
