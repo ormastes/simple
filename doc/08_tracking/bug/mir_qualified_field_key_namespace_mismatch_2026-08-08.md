@@ -748,3 +748,40 @@ does not hit `capsule-not-found` — then rerun the probe above; it must print
 `direct.gamma=888` after the paired fix (qualify `composite_layout_key` via
 `mir_layout_canonical_module_name` AND re-key `lower_struct_construct`).
 No compiler code changed in this pass.
+
+## 2026-11-05 (r-mirqf lane) — 43 multi-module crash root-caused; remaining reader fixed
+
+**Crash on s3_fable43 (part A).** Minimal 2-module probe (`two_main.spl` imports
+`leaf_value` from `two_leaf.spl`, `--entry-closure`, `--source test/mqf`)
+reproduces: rc=0xC0000005 after 345 s / 1.34 GB, log
+`AOT compile error ... unit (bare): H<8B>..VWSH<83>.. reason: capsule-not-found`
+then `rejected invalid array handle (value_bits=0x00000122db8a3871)`.
+Dump `av_77700.txt` (sym43.sh): `rip=0x122da9cdd91` (heap, same arena as the
+bad array handle) — a call through a garbage closure code pointer; the "unit
+name" bytes are an x86 prologue (`48 .. 56 57 53 48 83 ec` = push rsi/rdi/rbx;
+sub rsp), i.e. the callback received its code/env word as the `unit_name`
+argument. That is the `_1` placeholder-callback site at
+`80.driver/driver_aot_native_output.spl` (`builder.build(...)`, now line 2749),
+which PR #6919 (d63e10af753) rewrote into an explicit `fn(unit_name: text)`
+closure; s3_fable43 predates it. Not #6921, not a new defect. Verifiable on
+s3_fable45 (drvfix8, not yet published at time of writing).
+
+**Fix (part C).** The construction half (`lower_struct_construct` ->
+`struct_value_layout_key`) and the reader fold (`declared_struct_layout_key`,
+canonical dotted identity -> registered path-form layout via
+`struct_identity_layout_key`) had already landed (ownerlayout-mir-20261031),
+making both halves of the two-part plan present. One reader still consumed the
+raw key: `emit_typed_function_value_call`
+(`50.mir/_MirLoweringExpr/switch_operators_calls.spl:9238`) — an indirect call
+returning an IMPORTED record (dotted owner) missed `struct_field_order` and
+lost its provenance, so field reads fell back to the collided bare layout.
+Now folded through `declared_struct_layout_key`. Stale "DELIBERATELY NOT
+normalized" comment on `composite_layout_key` replaced.
+Spec: `test/01_unit/compiler/mir/mir_qualified_field_key_namespace_spec.spl`
+— before 3/4 (bug-site example FAIL), after 4/4 OK (seed interpreter).
+Sibling specs unchanged by this edit (pre-existing 1 failure each:
+`struct_field_order_module_qualified_spec` 3/4, `qualified_struct_field_owner_spec` 12/13;
+`indirect_call_return_owner_spec` is stale vs the 7-arg signature, 1/8).
+
+**Unverified:** native 3-module probe (`mqf_main`, expect `direct.gamma=888`)
+needs a stage3 carrying #6919 (s3_fable45+). Status stays OPEN until then.
