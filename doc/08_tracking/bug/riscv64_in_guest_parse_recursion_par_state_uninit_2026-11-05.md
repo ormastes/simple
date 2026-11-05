@@ -618,3 +618,59 @@ Verification (release-built seed from this branch):
 
 This record's blocker chain is CLOSED. bug_db.sdn untouched.
 In-guest cycles: 1.
+
+---
+
+## 2026-11-06 — DESUGAR NIL-DEREF LANE (PR #7044): dict arms missing from the lottery-winning ghdl TU copy of rt_index_set — module.functions stayed EMPTY
+
+The #7042 tail's next blocker was `scause=5, load from 0x38 at
+desugar_module+0x1a68` — `func.is_async` on `func = nil`, where
+`func = module.functions["main"]` answered nil. RSP watchpoint session
+(scripts/debug/rsp_watch.py) measured the frame LIVE at the fault: all four
+in-frame dicts had len=0. Every dict WRITE in-guest was being silently
+dropped; the reads were honest.
+
+Root cause: SAME defect family as this record's rt_alloc incident — the
+`--allow-multiple-definition` duplicate-symbol lottery. The winning linked
+`rt_index_set` (0x80200e94) was the PRE-FIX body
+(`if (!IS_INT(index)) return 0;`, no dict arm) from
+`ghdl_boot_info_runtime.c`; its `rt_index_get`/`rt_len` were likewise the
+stale copies. The closure grew (interpreter row) and the lottery flipped to
+the ghdl TU — the copy whose rt_alloc fix landed in #7040+1 only fixed
+rt_alloc, never the dict subscript arms. `rt_dict_set`/`rt_dict_get` are not
+referenced by this closure (nm); the subscript path is the only dict route.
+
+Fix: mirrored the dict arms VERBATIM into the ghdl TU's
+`rt_len` (HEAP_DICT -> simpleos_dict_count), `rt_index_get`
+(receiver-kind-first: dict arm via simpleos_dict_lookup before the
+IS_INT(index) guard, then array, then string via rt_string_char_at) and
+`rt_index_set` (IS_HEAP + HEAP_DICT -> simpleos_dict_store before the
+int/array path). HEAP_DICT=11U and the simpleos_dict_* forward declarations
+added near the TU's other HEAP_* defines. A comment above rt_index_set
+records the incident. Audited ALL 19 overlapping rt_* bodies between the
+ghdl TU and baremetal_stubs.c afterwards: every remaining difference is
+semantically equivalent (renames/comment text); the dict arms were the only
+stale semantic gap.
+
+Verification (release-built seed from this branch,
+/tmp/riscvN-target/release/simple — the checked-in seed still miscompiles
+AOT and is never used for evidence):
+- Kernel build PASS, both rows (nonce d6e3e8341a6cceeb).
+- OpenSBI fw_payload boot: the guest now runs parse -> desugar ->
+  HirLowering -> `[interp] hir ready, invoking
+  InterpreterBackendImpl.interpret_hir_module` -> the interpreted `main`
+  RUNS TO COMPLETION (two print statements execute, interpreter returns Ok,
+  row rc=0, transcript /tmp/rv-boot/n3-serial.log). Deeper in-guest progress
+  than any prior lane; the interpreted hello world is now REAL.
+- Clearly-different NEXT tail, for the next lane: both interpreted prints
+  render as `<unknown>` instead of the HELLO marker text. The interpreted
+  string value's tag is not recognized by
+  `src/lib/nogc_async_mut/runtime_value.spl:360` to_string's is_int/
+  is_float/is_bool/is_nil/is_ptr ladder (falls through to "<unknown>") — the
+  interpreter's text-value encoding vs that ladder is the open question.
+  Note the gate's nonce check therefore still cannot pass; the row's own
+  markers up to and including rc=0 are the evidence.
+
+This defect is the SAME class as this record's (#7040+1 rt_alloc): one TU's
+duplicate runtime body winning the link lottery. bug_db.sdn untouched.
+In-guest cycles: 2.
