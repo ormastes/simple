@@ -1,0 +1,125 @@
+"""Windows HCS provider leaf: matrix admission, isolation checks, argv, fail-closed lifecycle."""
+
+use std.spec.{describe, it, expect}
+use std.common.contracts.container.runtime_v1.{
+    RuntimeIdentityV1, runtime_state_empty, RUNTIME_PHASE_PREPARED,
+    RUNTIME_STATUS_OK, RUNTIME_STATUS_REJECTED, RUNTIME_STATUS_BLOCKED}
+use std.common.contracts.container.host_capability_v1.{
+    container_host_admission_reason_v1, ContainerHostRequirementV1,
+    CONTAINER_ISOLATION_NATIVE_V1}
+use std.nogc_async_mut.container.providers.windows.hcs_runtime_v1.{
+    WindowsHcsRuntimeProviderV1, windows_hcs_provider_contract_v1,
+    windows_hcs_request_reason_v1, windows_hcs_command_v1,
+    windows_hcs_capability_from_probe_v1, windows_host_image_pair_admitted_v1,
+    windows_isolation_observation_admitted_v1, WINDOWS_HCS_ENGINE_V1}
+
+fn _identity() -> RuntimeIdentityV1:
+    RuntimeIdentityV1(pod_uid: "pod-1", attempt: 1, provider_generation: 1,
+        operation_id: "op-1", engine: WINDOWS_HCS_ENGINE_V1, native_id: "",
+        node_boot_id: "boot-1")
+
+fn _prepared_state() -> std.common.contracts.container.runtime_v1.RuntimeStateV1:
+    var state = runtime_state_empty()
+    state.phase = RUNTIME_PHASE_PREPARED
+    state.identity = _identity()
+    state
+
+fn _scripted_capable() -> WindowsHcsRuntimeProviderV1:
+    WindowsHcsRuntimeProviderV1.scripted("server", "2025", "boot-1", 1, true, "")
+
+describe "windows hcs provider leaf":
+    it "advertises the v1 contract with honest optional capabilities":
+        val contract = windows_hcs_provider_contract_v1()
+        expect(contract.provider_id).to_equal(WINDOWS_HCS_ENGINE_V1)
+        expect(contract.supports_recovery).to_equal(false)
+        expect(contract.supports_logs).to_equal(true)
+
+    it "admits only enumerated host image pairs":
+        expect(windows_host_image_pair_admitted_v1("server", "2025", "2022",
+            false)).to_equal(true)
+        expect(windows_host_image_pair_admitted_v1("server", "2025", "2025",
+            false)).to_equal(true)
+        expect(windows_host_image_pair_admitted_v1("server", "2019", "2022",
+            false)).to_equal(false)
+        expect(windows_host_image_pair_admitted_v1("server", "2025", "2019",
+            false)).to_equal(false)
+        expect(windows_host_image_pair_admitted_v1("windows11", "23h2", "2025",
+            true)).to_equal(true)
+        expect(windows_host_image_pair_admitted_v1("windows11", "22h2", "2025",
+            true)).to_equal(false)
+        expect(windows_host_image_pair_admitted_v1("windows11", "23h2", "2025",
+            false)).to_equal(false)
+
+    it "accepts only exact process isolation observations":
+        expect(windows_isolation_observation_admitted_v1("process",
+            "process")).to_equal(true)
+        expect(windows_isolation_observation_admitted_v1("process",
+            "hyperv")).to_equal(false)
+        expect(windows_isolation_observation_admitted_v1("process",
+            "hostprocess")).to_equal(false)
+        expect(windows_isolation_observation_admitted_v1("process",
+            "utility-vm")).to_equal(false)
+
+    it "validates request identity name binding isolation and digest":
+        expect(windows_hcs_request_reason_v1(_identity(), "pod-1", "process",
+            "sha256:" + "a".repeat(64))).to_equal("")
+        expect(windows_hcs_request_reason_v1(_identity(), "pod-1", "hyperv",
+            "sha256:" + "a".repeat(64))).to_equal(
+            "windows-hcs-process-isolation-required")
+        expect(windows_hcs_request_reason_v1(_identity(), "other", "process",
+            "sha256:" + "a".repeat(64))).to_equal(
+            "windows-hcs-workload-name-not-attempt-bound")
+        expect(windows_hcs_request_reason_v1(_identity(), "pod-1", "process",
+            "sha256:short")).to_equal("windows-hcs-image-digest-invalid")
+
+    it "constructs exact bridge argv without a shell":
+        val digest = "sha256:" + "a".repeat(64)
+        val create = windows_hcs_command_v1("create", "pod-1", digest)
+        expect(create.program).to_equal("ctr")
+        expect(create.args).to_equal(["run", "--rm", "--runtime",
+            "io.containerd.runhcs.v1", "--snapshotter", "windows", digest,
+            "pod-1"])
+        val destroy = windows_hcs_command_v1("destroy", "pod-1", digest)
+        expect(destroy.args).to_equal(["containers", "delete", "--force",
+            "pod-1"])
+        expect(windows_hcs_command_v1("bogus", "pod-1", digest).program).to_equal("")
+
+    it "translates a live capable probe into the delegated route":
+        val probe = _scripted_capable().probe()
+        expect(probe.launch_capable).to_equal(true)
+        val capability = windows_hcs_capability_from_probe_v1(probe, true)
+        expect(capability.launch_capable).to_equal(true)
+        expect(capability.client_privilege).to_equal("delegated")
+        expect(capability.admin_setup).to_equal(true)
+        expect(container_host_admission_reason_v1(capability,
+            ContainerHostRequirementV1(host_os: "windows", guest_os: "windows",
+                isolation_class: CONTAINER_ISOLATION_NATIVE_V1,
+                require_unprivileged_client: false))).to_equal("")
+
+    it "never reports scripted probe evidence as a live capability":
+        val capability = windows_hcs_capability_from_probe_v1(
+            _scripted_capable().probe(), false)
+        expect(capability.launch_capable).to_equal(false)
+
+    it "fails lifecycle closed on a non-windows host":
+        val provider = WindowsHcsRuntimeProviderV1.new("linux", "server",
+            "2025", false, "boot-1", 1, true)
+        val request = provider.lifecycle_request_v1(_prepared_state(), "create",
+            "pod-1", "sha256:" + "a".repeat(64), "2025", "process")
+        expect(request.status).to_equal(RUNTIME_STATUS_BLOCKED)
+
+    it "blocks scripted live execution even when the probe is capable":
+        val request = _scripted_capable().lifecycle_request_v1(
+            _prepared_state(), "create", "pod-1", "sha256:" + "a".repeat(64),
+            "2025", "process")
+        expect(request.status).to_equal(RUNTIME_STATUS_BLOCKED)
+        expect(request.reason).to_equal(
+            "windows-hcs-scripted-live-execution-unavailable")
+
+    it "rejects incompatible host image pairs before probing":
+        val provider = WindowsHcsRuntimeProviderV1.scripted("server", "2019",
+            "boot-1", 1, true, "")
+        val request = provider.lifecycle_request_v1(_prepared_state(), "create",
+            "pod-1", "sha256:" + "a".repeat(64), "2022", "process")
+        expect(request.status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(request.reason).to_equal("windows-hcs-host-image-pair-incompatible")
