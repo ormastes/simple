@@ -718,9 +718,29 @@ impl HmInferContext:
             # Return type annotated - use Check mode to propagate into body
             match self.infer_block(fn_.body):
                 case Ok(body_ty):
-                    match self.subsume(body_ty, fn_.return_type):
-                        case Err(e): self.error(e)
-                        case _: pass
+                    # Implicit tail: the same optional-payload rejection
+                    # infer_return_expr applies to explicit `return`
+                    # statements. A bare `.?` (or any optional) tail body in a
+                    # non-optional-return function used to surface only as a
+                    # span-0:0 generic `type mismatch`, or subsume silently
+                    # and leak the payload (or nil) to callers. See
+                    # doc/08_tracking/bug/dot_question_returns_optional_but_25_sites_return_it_as_bool_2026-08-09.md
+                    val resolved_body = self.resolve(body_ty)
+                    val declared = self.resolve(fn_.return_type)
+                    val optional_tail_leak = match resolved_body.kind:
+                        case Optional(_):
+                            match declared.kind:
+                                case Optional(_) | Infer(_, _): false
+                                case _: true
+                        case _: false
+                    if optional_tail_leak:
+                        self.error(TypeInferError.Other(
+                            "optional value of type '{resolved_body.kind}' cannot satisfy the non-optional return type '{declared.kind}' of function '{self.current_fn_name}' ('.?' yields T? -- the payload if present, nil if absent); return `expr != nil` or an explicit comparison instead",
+                            fn_.span))
+                    else:
+                        match self.subsume(body_ty, fn_.return_type):
+                            case Err(e): self.error(e)
+                            case _: pass
                 case Err(e):
                     self.error(e)
         else:
