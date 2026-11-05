@@ -29,3 +29,14 @@ Traceability annotation base: `64b8854eaa6eee9470470ddbcef5fa2165902d13`. No ear
 
 ## Lane note 2026-11-03 (wl01 lane)
 Deferred: per the row the workaround stays active until original-form controls and the real consumer pass on a rebuilt producer; MIR enum literal-payload provenance owners cannot be qualified without native runs.
+
+## Native (pure-Simple) lane note 2026-11-05 (p1w-enumnil)
+Reproduced on stage3 43 (`s3_fable43.exe`, x86_64-pc-windows-gnu, llvm-mingw, `native-build --entry-closure --backend llvm --runtime-bundle core-c-bootstrap`, entry renamed + relinked with `-lwinhttp`):
+`test/fixtures/compiler/result_optional_payload_original` exits rc=1 (first check, `consume(Ok(Some("bc")), "a", 3) != "abc"`).
+A probe isolated it: in an `Ok(Some(chunk))` arm over `Result<text?, text>`, `chunk.len()` = 2 (correct), but `"{chunk}"` prints `1861464387841`. The binder holds the raw payload word, not text. Arm selection (`Ok(nil)`, `Err`) and `i64` payloads were already correct natively.
+
+Root cause: HIR `lower_match_pattern` (expression_components.spl) routed nested builtin wrappers through the untyped `lower_pattern` path. Only a unit-variant or `nil` inner pattern got the subject-derived slot type. So `chunk` had no type, and MIR `emit_deep_subpattern` bound the raw `rt_unwrap_or_self` word as i64.
+
+Fix: HIR now lowers a builtin wrapper nested in a builtin wrapper with its slot type taken from the subject's generic arguments (`lower_nested_wrapper_v1`). MIR's depth>=2 binding decodes a HIR-proven `text` slot through `decode_declared_enum_payload_slot`. New fixture: `test/fixtures/compiler/result_optional_payload_text_binding`.
+
+Status: fix-implemented-verification-pending. Verifying needs a stage3 rebuilt from this source. On 43 the new fixture builds and links, prints the canary, and exits rc=1 (fails before the fix). Repro: build that fixture and `result_optional_payload_original` with the new stage3 using the recipe above; both should print PASS with rc=0. A separate finding: on 43, a fixture draft with `Err(nil)` over `Result<i64, text?>` plus `Some(nil)`/`nil` over `text??` failed MIR (the arm was not isolated) with "nil sub-pattern requires a declared optional payload slot". That is not covered by this fix.
