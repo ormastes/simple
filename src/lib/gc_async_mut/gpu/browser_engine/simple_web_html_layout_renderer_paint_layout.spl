@@ -1836,6 +1836,137 @@ fn _web_canvas_background_over(color: u32, base: u32) -> u32:
     val b = (cb * a + bb * inv + 128u32) / 256u32
     0xFF000000u32 | (r << 16) | (g << 8) | b
 
+# Authored alpha fraction of the document canvas background color (body first,
+# then html), extracted from the raw markup. Returns -1.0 when the canvas
+# background is not a translucent rgba()/hsla() or #RGBA/#RRGGBBAA form.
+#
+# The parsed alpha BYTE cannot substitute for the fraction: the byte is a
+# quantization of the authored value, and no integer blend of the byte
+# reproduces both pinned oracle pixels — `rgba(0,0,0,0.5)` over white is
+# #808080 (authored half) while `#0008` (authored 8/15, byte 0x88) over white
+# is #777777, and the byte-only blends above give 128 for 0x80 but 120 for
+# 0x88. The canvas composite therefore needs the authored fraction.
+fn _web_canvas_bg_authored_alpha_fraction(html: text) -> f64:
+    val lower = html.lower()
+    var tag_at = text_index_of(lower, "<body")
+    if tag_at < 0:
+        tag_at = text_index_of(lower, "<html")
+    if tag_at < 0:
+        return -1.0
+    val tag_end = find_from(html, ">", tag_at)
+    if tag_end < 0:
+        return -1.0
+    val style = attr_value(html.substring(tag_at, tag_end), "style")
+    if style.len() == 0:
+        return -1.0
+    val style_lower = style.lower()
+    var value = ""
+    val prop_at = find_from(style_lower, "background-color", 0)
+    if prop_at >= 0:
+        val colon = find_from(style_lower, ":", prop_at)
+        if colon >= 0:
+            val semi = find_from(style_lower, ";", colon + 1)
+            value = style.substring(colon + 1, if semi >= 0: semi else: style.len()).trim()
+    if value.len() == 0:
+        val bg_at = find_from(style_lower, "background", 0)
+        if bg_at >= 0:
+            val colon = find_from(style_lower, ":", bg_at)
+            if colon >= 0:
+                val semi = find_from(style_lower, ";", colon + 1)
+                value = style.substring(colon + 1, if semi >= 0: semi else: style.len()).trim()
+    if value.len() == 0:
+        return -1.0
+    val value_lower = value.lower()
+    val rgba_at = text_index_of(value_lower, "rgba")
+    val hsla_at = text_index_of(value_lower, "hsla")
+    var open_at = rgba_at
+    if hsla_at >= 0 and (open_at < 0 or hsla_at < open_at):
+        open_at = hsla_at
+    if open_at >= 0:
+        val lp = find_from(value, "(", open_at)
+        val rp = if lp >= 0: find_from(value, ")", lp + 1) else: -1
+        if lp >= 0 and rp > lp:
+            # Alpha is the argument after the LAST top-level comma
+            # (`rgba(0, 0, 0, 0.5)`; nested functions stay comma-blind).
+            var cut = -1
+            var depth = 0
+            var i = lp + 1
+            while i < rp:
+                val c = value.char_at(i)
+                if c == "(":
+                    depth = depth + 1
+                elif c == ")":
+                    depth = depth - 1
+                elif c == "," and depth == 0:
+                    cut = i
+                i = i + 1
+            if cut >= 0:
+                val tail = value.substring(cut + 1, rp).trim()
+                val is_pct = tail.ends_with("%")
+                val number_text = if is_pct: tail.substring(0, tail.len() - 1) else: tail
+                val parsed = number_text.parse_f64()
+                if parsed != nil:
+                    var a = parsed ?? 0.0
+                    if is_pct:
+                        a = a / 100.0
+                    if a >= 0.0 and a <= 1.0:
+                        return a
+        return -1.0
+    val hash = text_index_of(value, "#")
+    if hash >= 0:
+        val hex = value.substring(hash + 1, value.len()).trim()
+        if hex.len() == 4 and hex_val(hex.char_at(3)) >= 0:
+            return hex_val(hex.char_at(3)).to_f64() / 15.0
+        if hex.len() == 8:
+            val byte = hex_val(hex.char_at(6)) * 16 + hex_val(hex.char_at(7))
+            return byte.to_f64() / 255.0
+    -1.0
+
+fn _web_canvas_background_over_authored(color: u32, base: u32, alpha_fraction: f64) -> u32:
+    if alpha_fraction >= 1.0:
+        return color | 0xFF000000u32
+    if alpha_fraction <= 0.0:
+        return base
+    val a = alpha_fraction
+    val inv = 1.0 - a
+    val br = (base >> 16) & 0xFFu32
+    val bg_ = (base >> 8) & 0xFFu32
+    val bb = base & 0xFFu32
+    val cr = (color >> 16) & 0xFFu32
+    val cg = (color >> 8) & 0xFFu32
+    val cb = color & 0xFFu32
+    val r = (cr.to_f64() * a + br.to_f64() * inv + 0.5).to_i64().to_u32()
+    val g = (cg.to_f64() * a + bg_.to_f64() * inv + 0.5).to_i64().to_u32()
+    val b = (cb.to_f64() * a + bb.to_f64() * inv + 0.5).to_i64().to_u32()
+    0xFF000000u32 | (r << 16) | (g << 8) | b
+
+pub fn web_canvas_background_authored(html: text, nodes: [HNode], styles: [Style], fallback: u32) -> u32:
+    """Canvas background with authored-fraction alpha compositing. Identical to
+    `_web_canvas_background` unless the winning html/body background is a
+    translucent rgba()/hsla() or #RGBA/#RRGGBBAA color, in which case the
+    authored alpha fraction (not the quantized byte) blends over the base."""
+    val n = nodes.len()
+    var html_bg = 0u32
+    var body_bg = 0u32
+    var i = 0
+    while i < n:
+        val nd = nodes[i]
+        if nd.tag == "html" and html_bg == 0u32:
+            html_bg = styles[i].bg
+        elif nd.tag == "body" and body_bg == 0u32:
+            body_bg = styles[i].bg
+        i = i + 1
+    val winner = if html_bg != 0u32: html_bg else: body_bg
+    if winner == 0u32:
+        return _web_canvas_background(nodes, styles, fallback)
+    val a_byte = (winner >> 24) & 0xFFu32
+    if a_byte == 0u32 or a_byte >= 255u32:
+        return _web_canvas_background(nodes, styles, fallback)
+    val fraction = _web_canvas_bg_authored_alpha_fraction(html)
+    if fraction < 0.0:
+        return _web_canvas_background(nodes, styles, fallback)
+    _web_canvas_background_over_authored(winner, fallback, fraction)
+
 # ---------------------------------------------------------------------------
 # Iframe embedding (rendering-inside-rendering). A hidden/private capability:
 # <iframe srcdoc="..."> is a replaced element whose child document is rendered
