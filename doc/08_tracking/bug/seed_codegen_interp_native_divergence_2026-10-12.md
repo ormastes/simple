@@ -186,6 +186,111 @@ needed lowering (SIMPLE_BUILD_MEMORY_RESERVE_BYTES=536870912 under load),
 --runtime-path must stay under the checkout root, `run` passes argv without
 a `--` separator, and SIMPLE_INVENTORY_TRACE_ATTEMPT must be 16-64 hex.
 
+## Re-triage 2026-11-05 (release/1.0.0 @ bba784f076a) — NO LONGER REPRODUCIBLE
+
+Verdict: the divergence is **fixed in ancestry**. The doc's minimal repro no
+longer diverges: on this branch both the seed-jit lane and the seed-interpreter
+lane accept `src/app/sdn_diff_repro/main.spl` (incl. the `sdn.parser` import
+flip) with **zero** `payload type mismatch` errors.
+
+### Fix attribution
+
+The fixing commits are the 2026-10-19 seed-jit module-qualified identity pair:
+
+- `285c714d224` "fix(seed-jit): module-qualified struct identity for
+  same-named flattened structs" — the run/JIT flatten lane collapsed
+  same-named structs from different modules onto one layout
+  (e.g. `TextSpan` in `10.frontend/block_types` vs `db/accel`), so which
+  layout a name bound depended on module load order — exactly this doc's
+  closure/symbol-order flip signature.
+- `b89e4d4ac0a` "fix(seed-jit): owner-scope enum payloads/trait sigs;
+  fail closed on aliased colliding structs" — flattener tags enums with
+  their owner and rewrites enum variant payload types / method / trait
+  signatures through the declaring owner's scope. Commit message records
+  the TDD red-before (enum payload test) evidence.
+
+This root cause supersedes the remembered-HIR-registry-corruption hypothesis
+above: the registry reads were fine; the types flowing into the comparison
+were bound to the wrong module's layout data-dependently.
+
+### Evidence (all 2026-11-05, macOS aarch64, worktree
+### /private/tmp/rel100-codegenfix-20261105, isolated CARGO_TARGET_DIR)
+
+1. Mechanism-level RED→GREEN. Checking out the post-fix test file
+   `src/compiler_rust/compiler/tests/jit_same_name_struct_module_qualified.rs`
+   (from b89e4d4ac0a) at its parent `285c714d224` and running
+   `cargo test -p simple-compiler --test jit_same_name_struct_module_qualified`
+   there: **9 passed, 2 failed** — `enum_payload_in_non_default_owner_uses_its_own_struct_layout`
+   fails with "Cannot infer field type: struct 'TextSpan' field 'len'
+   (declared fields: start, end)" (the load-order layout corruption), and
+   `type_alias_of_a_colliding_struct_fails_closed` fails (silent default
+   layout binding instead of the fail-closed refusal). The same test binary
+   at HEAD bba784f076a: **11/11 pass**.
+2. Full-program seed-jit lane. After unblocking the JIT lane (see the
+   `simple_contract_check` note below), the pure-Simple `native-build` of
+   the exact repro under `SIMPLE_EXECUTION_MODE=jit --backend=cranelift
+   --emit-object` ran the real JIT end-to-end through HIR/surface/MIR/
+   AOP/native_compile with **`payload-mismatch count: 0`** (the original
+   failure was 4x "enum construction '...SdnValue.Dict/Array': payload type
+   mismatch at 0"). The run stopped only at the final `ld.lld` emit-object
+   link on transiently-raced `build/native_cache/aot-*.o` cache objects
+   (valid Mach-O on disk afterwards) — a link-infra symptom unrelated to
+   the divergence, not a semantic failure.
+3. Seed-side acceptance: `SIMPLE_EXECUTION_MODE=interpret` and `=jit`
+   `simple run src/app/sdn_diff_repro/main.spl` both exit 0 on the rebuilt
+   seed.
+4. `cargo test -p simple-compiler --lib codegen`: 1010 passed, 1 pre-existing
+   failure (`codegen::cranelift::tests::test_aot_emits_discardable_function_sections`,
+   fails on the clean tree too; unrelated).
+
+### Blocker found and fixed while re-triaging (same session)
+
+The jit lane could not run at all on this branch: the pure-Simple
+`native-build` app references `simple_contract_check` /
+`simple_contract_check_msg` (defined in
+`src/compiler_rust/runtime/src/value/sffi/contracts.rs`, emitted by codegen as
+tier-Core RuntimeFuncSpec), but both names were missing from
+`RUNTIME_SYMBOL_NAMES` in `src/compiler_rust/common/src/runtime_symbols.rs`.
+The generated static runtime-symbol table therefore never contained them, the
+seed JIT panicked at finalize (`can't resolve symbol simple_contract_check`,
+cranelift-jit `JITModule::get_address`), and the whole compiler app silently
+dropped to the interpreter — the exact masking class of
+`jit_silent_interpreter_fallback_on_unresolved_extern_2026-11-03.md`, and the
+reason no full-program jit-lane measurement of this divergence existed after
+2026-10-16. Fixed with TDD: new RED test
+`contract_check_pair_is_present_in_full_manifest` (simple-runtime-abi), then
+the two manifest entries. After a seed rebuild, the jit lane ran natively for
+the first time in this triage (evidence item 2).
+
+### Neighbor doc check (native_dict_items_missing_lowering_2026_10_18)
+
+Also no longer reproducible: the `.items()` lowering fix `9e55c23dd16`
+("fix(mir): lower native Dict.items through paired entry conversion") is in
+ancestry. `test/fixtures/compiler/native_dict_items.spl` passes under the seed
+interpreter (prints `DICT_ITEMS_NATIVE_PASS`); under jit the method resolves
+and 12/16 checks pass, failing only at the `Dict<bool, f64>` items loop
+(return 13) — a distinct bool/f64 residual, not the missing lowering.
+
+### Remaining unverified / follow-ups
+
+- The full-program **interpreted-oracle** lane did complete all semantic
+  phases (HIR/surface/MIR/AOP/native_compile) with **0 payload mismatches**;
+  it stopped at the same final emit-object link as the jit lane. Item 2
+  above (which previously described the jit lane stopping there) applies to
+  both lanes.
+- The `ld.lld` emit-object link failure is systematic on this macOS aarch64
+  host, not only a cache race: the aot-*.o inputs are valid Mach-O 64-bit
+  arm64 objects, but the build invokes the ELF/COFF `ld.lld` flavor, which
+  answers `unknown file type` for Mach-O inputs (the correct flavor is
+  `ld64.lld`). Every `--emit-object` final link on macOS is affected; the
+  pure-Simple codegen output itself is fine. Worth its own bug record in the
+  link/infra lane; it did not affect the semantic verdict here.
+- A distinct residual seen while probing the neighbor doc: under jit,
+  `Dict<bool, f64>` `.items()` iteration mis-associates (fixture returns 13;
+  interpreter lane passes). Not this divergence; belongs to the bool/f64
+  boxing family (see `seed_enum_bool_payload_boxed_as_int_2026_11_03.md`
+  class) or a dict-items pair-conversion slot issue.
+
 ## Differential repro re-run — 2026-11-05
 
 The doc's minimal repro (src/app/sdn_diff_repro/main.spl, sdn.value +
