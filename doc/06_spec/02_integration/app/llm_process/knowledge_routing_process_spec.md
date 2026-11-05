@@ -176,7 +176,7 @@ expect(expert).to_contain("Missing canonical Chrome library or runner")
 | Category | Application |
 | Status | Active |
 | Source | `test/02_integration/app/llm_process/knowledge_routing_process_spec.spl` |
-| Updated | 2026-11-04 |
+| Updated | 2026-11-05 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
