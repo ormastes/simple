@@ -711,3 +711,40 @@ run; it should not be read as evidence in either direction.
   f-string` from the shared checkout's compiler sources). Blocker A therefore
   still holds; Blocker B (design-sized re-namespacing of ~10 bare-keyed maps)
   is unchanged. No code landed; stays OPEN pending a stage3-capable host.
+
+---
+
+## 2026-11-05 — stage3 "43" (s3_fable43.exe) tried as native oracle: NOT REPRODUCIBLE THERE (blocked)
+
+Status stays OPEN (P1). Prior attempt (docs PR #6886) was blocked on "no
+native oracle"; this pass tried the Windows stage3 build `s3_fable43.exe`
+(copied to the lane dir) with the s3sanity recipe
+(`C:/dev/p3new/s3sanity/run_case_g43b.ps1`, adapted paths, `-CapGB 4`):
+`native-build --entry-closure --entry test/mqf/<case>.spl --source src/lib
+--source src/app --source src/compiler --source src/os [--source test/mqf]
+--runtime-bundle core-c-bootstrap --target x86_64-pc-windows-gnu --backend llvm
+--keep-going --go-to-end --threads 8`, then the manual entry-rename + link.
+
+Fixture: the 3-module probe above (mod_a `Config[alpha,beta,errors]`,
+mod_b `Config[errors,gamma]`, main imports mod_b's `Config` and constructs it;
+expected `direct.gamma=888`).
+
+- Hello canary: build rc=1 (wrapper), object emitted, linked,
+  `RESULT hello rc=0 stdout=[hello]` (wall 537 s, peak 1.38 GB).
+- 3-module probe, run 1 and retry: `objs=0`, process rc=-1073741819
+  (access violation), `RESULT mqf_main COMPILE-FAIL`. All 3 modules pass
+  HIR/MIR/weave (`succeeded=3 failed=0`), then `phase=native_compile` fails:
+  `error: AOT compile error ... unit (bare): <garbage bytes>
+  reason (bare): capsule-not-found  name-len=35 reason-len=17`, plus
+  `rejected invalid array handle before dereference; probable compiler/FFI ABI
+  mismatch`.
+
+Verdict: stage3 43 cannot compile ANY multi-module program (known 43 caveat:
+2+ module batches fail), and this defect is by construction cross-module
+(a locally-defined type is re-registered with `overwrite: true`, so a
+single-module program cannot exhibit it). 43 is therefore not an oracle for
+this bug. Unblock condition: a stage3 whose multi-module `native_compile`
+does not hit `capsule-not-found` — then rerun the probe above; it must print
+`direct.gamma=888` after the paired fix (qualify `composite_layout_key` via
+`mir_layout_canonical_module_name` AND re-key `lower_struct_construct`).
+No compiler code changed in this pass.
