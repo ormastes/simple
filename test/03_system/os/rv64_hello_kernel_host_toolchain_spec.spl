@@ -1,0 +1,52 @@
+# @cover scripts/os/build-simpleos-riscv64-hello-kernel.shs 60%
+# @cover scripts/check/check-simpleos-riscv64-hello-world-in-guest-opensbi.shs 30%
+# Purpose and audience: pins the host-toolchain fixes that let the riscv64
+# OpenSBI hello lane build and boot from a macOS host (Apple clang has no
+# RISC-V target; macOS has no readelf/objcopy/cross-gcc).
+# @req REQ-SOS-RV64-HELLO-HOST-TOOLCHAIN
+# @tag:system
+
+use std.spec.step
+
+use std.spec.*
+
+"""rv64 hello kernel lane: host toolchain probing (readelf/objcopy/clang/OpenSBI LLVM=1)."""
+
+extern fn rt_process_run(program: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_read_text(path: text) -> text
+
+val BUILD = "scripts/os/build-simpleos-riscv64-hello-kernel.shs"
+val GATE = "scripts/check/check-simpleos-riscv64-hello-world-in-guest-opensbi.shs"
+
+fn _last_line(out: text) -> text:
+    val lines = out.trim().split("\n")
+    lines[lines.len() - 1]
+
+describe "riscv64 hello kernel host toolchain":
+    it "build script selftest (extra-dir probe, empty probe, non-riscv clang) passes":
+        step("run build script --selftest")
+        val (out, err, rc) = rt_process_run("sh", [BUILD, "--selftest"])
+        expect(rc).to_equal(0)
+        expect(_last_line(out)).to_start_with("PASS")
+
+    it "build script reports a failing native-build instead of exiting silently under set -e":
+        step("read build script")
+        val src = rt_file_read_text(BUILD)
+        expect(src).to_contain("-o \"$KERNEL\" >\"$LOG\" 2>&1 || rc=$?")
+
+    it "build script resolves readelf through pick_tool, not a bare PATH lookup":
+        step("read build script")
+        val src = rt_file_read_text(BUILD)
+        expect(src).to_contain("READELF=$(pick_tool readelf llvm-readelf")
+        expect(src).to_contain("hdr=$(\"$READELF\" -h")
+
+    it "gate builds OpenSBI with LLVM=1 when no riscv64 cross-gcc exists":
+        step("read gate script")
+        val src = rt_file_read_text(GATE)
+        expect(src).to_contain("LLVM=1 platform-genflags-y=-Wno-unused-but-set-global")
+
+    it "gate selftest still passes":
+        step("run gate --selftest")
+        val (out, err, rc) = rt_process_run("sh", [GATE, "--selftest"])
+        expect(rc).to_equal(0)
+        expect(out).to_contain("PASS")

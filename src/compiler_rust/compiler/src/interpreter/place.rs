@@ -229,6 +229,18 @@ fn project_mut<'a>(root: &'a mut Value, projections: &[Projection]) -> Option<&'
     Some(slot)
 }
 
+/// Merge container-handle mutations from a callee parameter back into the
+/// storage `projections` designate, starting from a clone of the place's
+/// ROOT value (the caller's binding). Only the leaf merge runs the
+/// shared-container carry (see `merge_shared_collection_fields`); scalar
+/// fields keep value semantics. Returns true when the root changed.
+pub(crate) fn merge_place_containers(root: &mut Value, projections: &[Projection], binding: &Value) -> bool {
+    let Some(leaf) = project_mut(root, projections) else {
+        return false;
+    };
+    crate::interpreter::interpreter_call::merge_shared_collection_fields(leaf, binding)
+}
+
 /// Write `value` at the end of `projections`, starting from `slot`.
 ///
 /// The COW hops (`Object`, `Array`, `Dict`, tuples) are `step_mut` +
@@ -513,6 +525,63 @@ fn step_exists(slot: &Value, projection: &Projection) -> bool {
         // reference to hand out; existence is answered by a read.
         (Value::ClassInstance(instance), Projection::Field(name)) => instance.field(name).is_some(),
         _ => step_ref(slot, projection).is_some(),
+    }
+}
+
+/// One step from a match subject (or an argument root) to the storage an arm
+/// payload binding aliases inside it. `Payload` exists only for enum subjects
+/// (`case Ram(d)` binds `d` to the variant payload).
+#[derive(Debug, Clone)]
+pub(crate) enum SubjectStep {
+    /// Enum variant payload.
+    Payload,
+    /// Struct/class field by name.
+    Field(String),
+    /// Array/tuple element by literal index.
+    Index(i64),
+}
+
+/// Merge container-handle mutations from an arm payload binding back into the
+/// subject storage it aliases, following `steps` from `slot`. The leaf merge
+/// is `merge_shared_collection_fields`: only shared containers (array/dict/
+/// bytearray handles, including ones nested inside payload structs) are
+/// carried back, so value semantics for scalar fields are preserved exactly.
+/// Returns true when `slot` changed.
+pub(crate) fn merge_subject_step(slot: &mut Value, steps: &[SubjectStep], binding: &Value) -> bool {
+    let Some((head, rest)) = steps.split_first() else {
+        return crate::interpreter::interpreter_call::merge_shared_collection_fields(slot, binding);
+    };
+    match (slot, head) {
+        (Value::Enum { payload: Some(payload), .. }, SubjectStep::Payload) => {
+            merge_subject_step(&mut **payload, rest, binding)
+        }
+        (Value::Object { fields, .. }, SubjectStep::Field(name)) => {
+            if !fields.contains_key(name) {
+                return false;
+            }
+            let field = Arc::make_mut(fields).get_mut(name).expect("field presence checked");
+            merge_subject_step(field, rest, binding)
+        }
+        (Value::Array(items), SubjectStep::Index(index)) => {
+            let Some(idx) = normalize_index(items.len(), &Value::Int(*index)) else {
+                return false;
+            };
+            let elem = match Arc::get_mut(items).and_then(|data| data.get_mut(idx)) {
+                Some(elem) => elem,
+                None => Arc::make_mut(items).get_mut(idx).expect("index in bounds"),
+            };
+            merge_subject_step(elem, rest, binding)
+        }
+        (Value::Tuple(items), SubjectStep::Index(index)) => {
+            let Ok(idx) = usize::try_from(*index) else {
+                return false;
+            };
+            let Some(elem) = items.get_mut(idx) else {
+                return false;
+            };
+            merge_subject_step(elem, rest, binding)
+        }
+        _ => false,
     }
 }
 

@@ -73,3 +73,6 @@ distinguished by a fresh self-hosted build:
 **Revalidated 2026-11-02: still plausible because OPEN — toolchain/binary drift; needs a rebuilt self-hosted compiler; no merged fix commit with a passing regression is cited in this doc.**
 
 **Closed 2026-11-03 (stale, group C triage):** candidate 1 (toolchain drift) applies: the cited binary is the 2026-09-18 rc.1 build. Candidate 2 is already addressed in source: `hc_enc_hir_module` (src/compiler/20.hir/generated/hir_codec.spl:5296) is nil-safe and rejects ill-formed/unregistered nodes via `rt_heap_ref_wellformed` / `rt_heap_ref_registered` before any field load. Reopen only if a freshly built current-tree binary reproduces.
+
+## 2026-11-05 compiler-defects sweep (winboot-rel100 lane)
+Focused source audit of src/compiler/20.hir/generated/hir_codec.spl: all 97 `hc_enc_*` encoder entrypoints carry the three-guard prologue (nil check, `rt_heap_ref_wellformed`, `rt_heap_ref_registered`) before any field load; `HirCodecWriter.reject` sets ok=false and `finish()` returns "" (fail-closed, no object from a poisoned module). Host check: test/01_unit/compiler/hir/hir_codec_module_node_guard_spec.spl 1/1 PASS (seed interpreter). No defensive fix was necessary; the 2026-11-03 close rationale is confirmed in current source. Reopen condition unchanged: a freshly built current-tree binary reproducing the SIGSEGV.

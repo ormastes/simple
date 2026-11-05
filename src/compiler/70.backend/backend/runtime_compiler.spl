@@ -247,7 +247,19 @@ pub fn hosted_c_compiler_plan(target: text, host_os_name: text, host_arch_name: 
         return HostedCCompilerPlan(requires_cross: true, supported: true, command: "aarch64-linux-gnu-gcc")
     if host_os_name == "linux" and target_arch == "riscv64":
         return HostedCCompilerPlan(requires_cross: true, supported: true, command: "riscv64-linux-gnu-gcc")
+    # Apple clang and the macOS SDK are multi-arch: arm64 <-> x86_64 Darwin
+    # cross needs only `--target=<triple>` (see hosted_cross_c_target_args).
+    val darwin_host = host_os_name == "macos" or host_os_name == "darwin"
+    if darwin_host and target.ends_with("-apple-darwin") and target_arch != "riscv64":
+        return HostedCCompilerPlan(requires_cross: true, supported: true, command: "clang")
     HostedCCompilerPlan(requires_cross: true, supported: false, command: "")
+
+pub fn hosted_cross_c_target_args(target: text, host_os_name: text, host_arch_name: text) -> [text]:
+    """Driver flags that retarget a clang compile/link for a supported Darwin cross plan."""
+    val plan = hosted_c_compiler_plan(target, host_os_name, host_arch_name)
+    if plan.requires_cross and plan.supported and target.ends_with("-apple-darwin"):
+        return ["--target={target}"]
+    []
 
 pub fn hosted_cross_c_compiler_name(target: text, host_os_name: text, host_arch_name: text) -> text:
     val plan = hosted_c_compiler_plan(target, host_os_name, host_arch_name)
@@ -534,10 +546,26 @@ fn find_runtime_source_dir() -> text:
 
 fn _runtime_dir_not_found_message() -> text:
     """Honest diagnostic for a failed runtime-source lookup."""
-    val cwd = rt_path_absolute(".") ?? "<unknown>"
-    val exe_path = rt_path_absolute("/proc/self/exe") ?? "<unknown>"
+    # Typed vars + statements only (bug native_build_inprocess_link_access_violation_2026-11-05):
+    # on Windows `rt_path_absolute("/proc/self/exe")` is nil, and the native
+    # lane rendered the `?? "<unknown>"` / Option if-expression results as a
+    # non-text handle, so the first concat strlen'd garbage and the worker
+    # died 0xC0000005 instead of reporting this message.
+    var cwd: text = "<unknown>"
+    val cwd_abs = rt_path_absolute(".")
+    if cwd_abs != nil:
+        cwd = cwd_abs.unwrap()
+    var exe_path: text = "<unknown>"
+    if not _is_windows():
+        val exe_abs = rt_path_absolute("/proc/self/exe")
+        if exe_abs != nil:
+            exe_path = exe_abs.unwrap()
+    var pr: text = "<unset>"
     val project_root = env_get_nullable("SIMPLE_PROJECT_ROOT")
-    val pr = if project_root != "" and project_root != nil: project_root else: "<unset>"
+    if project_root != nil:
+        val root_text: text = project_root.unwrap()
+        if root_text != "":
+            pr = root_text
     var msg = "Runtime source directory not found: no src/runtime/runtime.c under the current directory ({cwd}), "
     msg = msg + "under any ancestor of it, or under any ancestor of the running executable ({exe_path}). "
     msg = msg + "SIMPLE_PROJECT_ROOT={pr} - set SIMPLE_PROJECT_ROOT to the repository root to resolve this explicitly."
@@ -952,6 +980,8 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
             comp_args = ["-c"]
             if target.ends_with("-pc-windows-gnu"):
                 comp_args.push("--target=x86_64-w64-windows-gnu")
+            for target_arg in hosted_cross_c_target_args(target, host_os(), host_arch()):
+                comp_args.push(target_arg)
             for abi_define in abi_defines:
                 comp_args.push(abi_define)
             if not _is_windows():
