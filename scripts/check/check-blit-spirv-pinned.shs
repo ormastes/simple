@@ -50,15 +50,17 @@ find_glslang() {
     command -v glslangValidator 2>/dev/null || true
 }
 
-# Region-scoped extraction: `spirv_blit()` is one of many blobs in that module,
+    # Region-scoped extraction: `spirv_blit()` is one of many blobs in that module,
 # so a whole-file grep (what the rect-batch guard can safely do, its module
-# holding exactly one blob) would splice every kernel together.
+# holding exactly one blob) would splice every kernel together. Word lines
+# only: the docstring carries prose hex (0x101F2F3F) that is not blob data.
 extract_blob_bytes() {
     awk '
     /^fn spirv_blit\(\)/ { inblit = 1 }
     inblit && $0 == "    ]" { inblit = 0; next }
     inblit { print }
-    ' "$1" | grep -o '0x[0-9A-Fa-f][0-9A-Fa-f]u8' | sed 's/^0x//; s/u8$//' | tr 'A-F' 'a-f'
+    ' "$1" | grep -E '^[[:space:]]*(0x[0-9A-Fa-f]{2},?[[:space:]]*)+$' \
+      | grep -o '0x[0-9A-Fa-f][0-9A-Fa-f]' | sed 's/^0x//' | tr 'A-F' 'a-f'
 }
 extract_blob_sha() {
     awk '
@@ -102,8 +104,8 @@ compare_pair() {
     fi
 
     _fresh_sha=$(head -1 "$_tmp/words" | awk '{print $3}')
-    tail -n +2 "$_tmp/words" | grep -o '0x[0-9A-Fa-f][0-9A-Fa-f]u8' \
-        | sed 's/^0x//; s/u8$//' | tr 'A-F' 'a-f' > "$_tmp/fresh_bytes"
+    tail -n +2 "$_tmp/words" | grep -o '0x[0-9A-Fa-f][0-9A-Fa-f]' \
+        | sed 's/^0x//' | tr 'A-F' 'a-f' > "$_tmp/fresh_bytes"
     extract_blob_bytes "$_blob" > "$_tmp/blob_bytes"
 
     _nf=$(wc -l < "$_tmp/fresh_bytes" | tr -d ' ')
@@ -113,7 +115,7 @@ compare_pair() {
         rm -rf "$_tmp"; return 2
     fi
     if [ "$_ns" -eq 0 ]; then
-        CMP_REASON="no 0xNNu8 bytes found inside spirv_blit() in $_blob"
+        CMP_REASON="no 0xNN bytes found inside spirv_blit() in $_blob"
         rm -rf "$_tmp"; return 2
     fi
     CMP_BYTES="$_nf"
@@ -205,7 +207,7 @@ selftest() {
 
     # Fixture 2 -- ONE tampered word in the blob must FAIL. This is the
     # "someone hand-edited the hex" case.
-    awk '!t && /^    0x/ { sub(/0x00u8/, "0x7Fu8"); if ($0 ~ /0x7Fu8/) t = 1 } { print }' \
+    awk '!t && /^    0x/ { sub(/0x00,/, "0x7F,"); if ($0 ~ /0x7F,/) t = 1 } { print }' \
         "$_t/ok_blob.spl" > "$_t/tampered.spl"
     if cmp -s "$_t/ok_blob.spl" "$_t/tampered.spl"; then
         echo "selftest FIXTURE 2 could not tamper any word" >&2
