@@ -34,13 +34,70 @@ fn js_parse_program_subset(source: text) -> [JsStatement]:
         i = i + 1
     statements
 
-fn _js_parser_statement(stmt: text) -> JsStatement:
+# Object destructuring pattern `{a, b: c}`: each entry binds the property
+# named by the key; the bound variable is the value expression (an
+# Identifier for the plain `{a}` shorthand).
+fn _js_parser_object_pattern(raw: text) -> JsExpression:
+    val inner = raw.slice(1, raw.len() - 1)
+    val parts = _js_parser_split_top_level(inner, ",")
+    var props: [DestructProp] = []
+    var i = 0
+    while i < parts.len():
+        val part = parts.get(i).trim()
+        if part != "":
+            val colon = _js_parser_find_top_level(part, ":")
+            if colon > 0:
+                var key = part.slice(0, colon).trim()
+                if (key.starts_with("\"") and key.ends_with("\"")) or (key.starts_with("'") and key.ends_with("'")):
+                    key = key.slice(1, key.len() - 1).trim()
+                props.push(DestructProp(key: key, value: JsExpression.Identifier(name: part.slice(colon + 1, part.len()).trim())))
+            else:
+                props.push(DestructProp(key: part, value: JsExpression.Identifier(name: part)))
+        i = i + 1
+    JsExpression.ObjectPattern(props: props)
+
+# Array destructuring pattern `[x, y]`: entries are binding identifiers.
+fn _js_parser_array_pattern(raw: text) -> JsExpression:
+    val inner = raw.slice(1, raw.len() - 1)
+    val parts = _js_parser_split_top_level(inner, ",")
+    var elements: [JsExpression] = []
+    var i = 0
+    while i < parts.len():
+        val part = parts.get(i).trim()
+        if part != "":
+            if part.starts_with("..."):
+                elements.push(JsExpression.SpreadElement(argument: JsExpression.Identifier(name: part.slice(3, part.len()).trim())))
+            else:
+                elements.push(JsExpression.Identifier(name: part))
+        i = i + 1
+    JsExpression.ArrayPattern(elements: elements)
+
+fn _js_parser_var_decl_kind(stmt: text) -> text:
     if stmt.starts_with("var "):
-        val body = stmt.slice(4, stmt.len()).trim()
+        return "var"
+    if stmt.starts_with("let "):
+        return "let"
+    if stmt.starts_with("const "):
+        return "const"
+    ""
+
+fn _js_parser_statement(stmt: text) -> JsStatement:
+    val decl_kind = _js_parser_var_decl_kind(stmt)
+    if decl_kind != "":
+        val kw_len = decl_kind.len() + 1
+        val body = stmt.slice(kw_len, stmt.len()).trim()
         val eq = _js_parser_find_top_level(body, "=")
-        if eq >= 0:
-            return JsStatement.VarDecl(body.slice(0, eq).trim(), _js_parser_expression(body.slice(eq + 1, body.len())))
-        return JsStatement.VarDecl(body, JsExpression.Literal(value: JsValue.Undefined))
+        val name = if eq >= 0: body.slice(0, eq).trim() else: body
+        val init = if eq >= 0: _js_parser_expression(body.slice(eq + 1, body.len())) else: JsExpression.Literal(value: JsValue.Undefined)
+        if name.starts_with("{"):
+            return JsStatement.DestructVarDecl(pattern: _js_parser_object_pattern(name), init: init, kind: decl_kind)
+        if name.starts_with("["):
+            return JsStatement.DestructVarDecl(pattern: _js_parser_array_pattern(name), init: init, kind: decl_kind)
+        if decl_kind == "let":
+            return JsStatement.LetDecl(name, init)
+        if decl_kind == "const":
+            return JsStatement.ConstDecl(name, init)
+        return JsStatement.VarDecl(name, init)
     if stmt.starts_with("function ") or stmt.starts_with("function("):
         # Function DECLARATION: `function name(a) { ... }`. Desugar to
         # `var name = function(a) { ... }` — _js_parser_function_expression
@@ -71,6 +128,8 @@ fn _js_parser_statement(stmt: text) -> JsStatement:
         return _js_parser_while_statement(stmt)
     if _js_parser_starts_with_keyword(stmt, "if"):
         return _js_parser_if_statement(stmt)
+    if _js_parser_starts_with_keyword(stmt, "class"):
+        return _js_parser_class_statement(stmt)
     if stmt.starts_with("{"):
         val be = _js_parser_matching_brace(stmt, 0)
         if be >= 0:
@@ -92,6 +151,14 @@ fn _js_parser_starts_with_keyword(stmt: text, kw: text) -> bool:
 fn _js_parser_leading_construct_end(stmt: text) -> i64:
     if stmt.starts_with("function ") or stmt.starts_with("function("):
         val bs = _js_parser_find_function_body_start(stmt, 0)
+        if bs < 0:
+            return -1
+        val be = _js_parser_matching_brace(stmt, bs)
+        if be < 0:
+            return -1
+        return be + 1
+    if _js_parser_starts_with_keyword(stmt, "class"):
+        val bs = _js_parser_find_char_from(stmt, "{", 0)
         if bs < 0:
             return -1
         val be = _js_parser_matching_brace(stmt, bs)
@@ -228,6 +295,73 @@ fn _js_parser_for_statement(stmt: text) -> JsStatement:
         if up != "":
             update_expr = _js_parser_expression(up)
     JsStatement.For(init: init_stmt, cond: cond_expr, update: update_expr, body: body)
+
+# Class declaration: `class Name [extends Parent] { constructor(...) {...} methods... }`.
+# Each member becomes a FnDecl — the constructor (synthesized empty when
+# absent, or exec_class_decl never registers the class) and the methods.
+fn _js_parser_class_statement(stmt: text) -> JsStatement:
+    val name_start = _js_parser_skip_spaces(stmt, 5)
+    val name_end = _js_parser_identifier_end(stmt, name_start)
+    val name = stmt.slice(name_start, name_end)
+    var parent_name = ""
+    var pos = _js_parser_skip_spaces(stmt, name_end)
+    if _js_parser_starts_with_keyword(stmt.slice(pos, stmt.len()), "extends"):
+        val pstart = _js_parser_skip_spaces(stmt, pos + 7)
+        val pend = _js_parser_identifier_end(stmt, pstart)
+        parent_name = stmt.slice(pstart, pend)
+        pos = _js_parser_skip_spaces(stmt, pend)
+    var constructor = JsStatement.FnDecl("constructor", [], [])
+    var methods: [JsStatement] = []
+    if pos >= stmt.len() or stmt.slice(pos, pos + 1) != "{":
+        return JsStatement.ClassDecl(name: name, parent_name: parent_name, constructor: constructor, methods: methods)
+    val be = _js_parser_matching_brace(stmt, pos)
+    val body_end = if be >= 0: be else: stmt.len()
+    var i = _js_parser_skip_member_separator(stmt, pos + 1, body_end)
+    while i < body_end:
+        val mstart = i
+        val mend = _js_parser_identifier_end(stmt, i)
+        if mend <= mstart:
+            break
+        val mname = stmt.slice(mstart, mend)
+        val open = _js_parser_find_char_from(stmt, "(", mend)
+        if open < 0 or open >= body_end:
+            break
+        val close = _js_parser_matching_paren(stmt, open)
+        if close < 0 or close >= body_end:
+            break
+        val params_text = stmt.slice(open + 1, close)
+        val param_parts = _js_parser_split_top_level(params_text, ",")
+        var params: [text] = []
+        var pi = 0
+        while pi < param_parts.len():
+            val p = param_parts.get(pi).trim()
+            if p != "":
+                params.push(p)
+            pi = pi + 1
+        val body_start = _js_parser_skip_spaces(stmt, close + 1)
+        if body_start >= stmt.len() or stmt.slice(body_start, body_start + 1) != "{":
+            break
+        val mbe = _js_parser_matching_brace(stmt, body_start)
+        if mbe < 0 or mbe > body_end:
+            break
+        val mbody = js_parse_program_subset(stmt.slice(body_start + 1, mbe))
+        if mname == "constructor":
+            constructor = JsStatement.FnDecl(mname, params, mbody)
+        else:
+            methods.push(JsStatement.FnDecl(mname, params, mbody))
+        i = _js_parser_skip_member_separator(stmt, mbe + 1, body_end)
+    JsStatement.ClassDecl(name: name, parent_name: parent_name, constructor: constructor, methods: methods)
+
+# Skip spaces and member separators (`;` `,`) between class body members.
+fn _js_parser_skip_member_separator(stmt: text, pos_in: i64, limit: i64) -> i64:
+    var i = pos_in
+    while i < stmt.len() and i < limit:
+        val ch = stmt.slice(i, i + 1)
+        if ch == " " or ch == "\n" or ch == "\r" or ch == "\t" or ch == ";" or ch == ",":
+            i = i + 1
+        else:
+            break
+    i
 
 fn _js_parser_while_statement(stmt: text) -> JsStatement:
     val open = _js_parser_find_char_from(stmt, "(", 0)
@@ -395,13 +529,31 @@ fn _js_parser_postfix(expr: text) -> JsExpression:
             val arg_text = if end > pos: expr.slice(pos + 1, end) else: ""
             val arg_parts = _js_parser_split_top_level(arg_text, ",")
             var args: [JsExpression] = []
+            var has_spread = false
             var ai = 0
             while ai < arg_parts.len():
                 val arg = arg_parts.get(ai).trim()
                 if arg != "":
-                    args.push(_js_parser_expression(arg))
+                    if arg.starts_with("..."):
+                        has_spread = true
+                        args.push(JsExpression.SpreadElement(argument: _js_parser_expression(arg.slice(3, arg.len()))))
+                    else:
+                        args.push(_js_parser_expression(arg))
                 ai = ai + 1
-            current = JsExpression.Call(callee: current, args: args)
+            if has_spread:
+                # The generic call path evaluates each argument expression
+                # once, so a SpreadElement would arrive as a single array
+                # value. Desugar to `.apply(null, [...])`: the array literal
+                # evaluator already expands SpreadElement elements.
+                current = JsExpression.Call(
+                    callee: JsExpression.Member(object: current, property: "apply"),
+                    args: [
+                        JsExpression.Literal(value: JsValue.Null),
+                        JsExpression.Array(elements: args)
+                    ]
+                )
+            else:
+                current = JsExpression.Call(callee: current, args: args)
             pos = if end >= 0: end + 1 else: expr.len()
         else if ch == "[":
             val end = _js_parser_matching_bracket(expr, pos)
@@ -420,6 +572,8 @@ fn _js_parser_primary_at(expr: text, pos_in: i64) -> JsExpression:
     if ch == "'" or ch == "\"":
         val end = _js_parser_string_end(expr, pos)
         return JsExpression.Literal(value: JsValue.String(v: _js_parser_decode_string_literal(expr.slice(pos + 1, end))))
+    if ch == "`":
+        return _js_parser_template_literal_at(expr, pos)
     if ch == "/":
         val re_end = _js_parser_regex_literal_end(expr, pos)
         if re_end > pos:
@@ -437,7 +591,10 @@ fn _js_parser_primary_at(expr: text, pos_in: i64) -> JsExpression:
         while ei < elem_parts.len():
             val elem = elem_parts.get(ei).trim()
             if elem != "":
-                elements.push(_js_parser_expression(elem))
+                if elem.starts_with("..."):
+                    elements.push(JsExpression.SpreadElement(argument: _js_parser_expression(elem.slice(3, elem.len()))))
+                else:
+                    elements.push(_js_parser_expression(elem))
             ei = ei + 1
         return JsExpression.Array(elements: elements)
     if ch == "{":
@@ -481,6 +638,9 @@ fn _js_parser_primary_end(expr: text, pos_in: i64) -> i64:
     val ch = expr.slice(pos, pos + 1)
     if ch == "'" or ch == "\"":
         val end = _js_parser_string_end(expr, pos)
+        return if end >= 0: end + 1 else: expr.len()
+    if ch == "`":
+        val end = _js_parser_template_end(expr, pos)
         return if end >= 0: end + 1 else: expr.len()
     if ch == "/":
         val re_end = _js_parser_regex_literal_end(expr, pos)
@@ -892,6 +1052,55 @@ fn _js_parser_string_end(expr: text, start: i64) -> i64:
             return i
         i = i + 1
     expr.len()
+
+# Index of the closing backtick of the template literal starting at `start`,
+# skipping escaped characters and whole `${ ... }` interpolation regions, or
+# -1 when unterminated.
+fn _js_parser_template_end(expr: text, start: i64) -> i64:
+    var i = start + 1
+    while i < expr.len():
+        val ch = expr.slice(i, i + 1)
+        if ch == "\\":
+            i = i + 2
+            continue
+        if ch == "`":
+            return i
+        if ch == "$" and i + 1 < expr.len() and expr.slice(i + 1, i + 2) == "{":
+            val close = _js_parser_matching_brace(expr, i + 1)
+            if close < 0:
+                return -1
+            i = close + 1
+            continue
+        i = i + 1
+    -1
+
+# Template literal starting at `pos`: quasis are the raw text runs between
+# `${ ... }` regions, expressions the interpolated values.
+fn _js_parser_template_literal_at(expr: text, pos: i64) -> JsExpression:
+    var quasis: [text] = []
+    var expressions: [JsExpression] = []
+    var quasi_start = pos + 1
+    var i = pos + 1
+    while i < expr.len():
+        val ch = expr.slice(i, i + 1)
+        if ch == "\\":
+            i = i + 2
+            continue
+        if ch == "`":
+            quasis.push(expr.slice(quasi_start, i))
+            return JsExpression.TemplateLiteral(quasis: quasis, expressions: expressions)
+        if ch == "$" and i + 1 < expr.len() and expr.slice(i + 1, i + 2) == "{":
+            quasis.push(expr.slice(quasi_start, i))
+            val close = _js_parser_matching_brace(expr, i + 1)
+            if close < 0:
+                return JsExpression.TemplateLiteral(quasis: quasis, expressions: expressions)
+            expressions.push(_js_parser_expression(expr.slice(i + 2, close)))
+            i = close + 1
+            quasi_start = i
+            continue
+        i = i + 1
+    quasis.push(expr.slice(quasi_start, expr.len()))
+    JsExpression.TemplateLiteral(quasis: quasis, expressions: expressions)
 
 fn _js_parser_hex_digit(ch: text) -> i64:
     if ch >= "0" and ch <= "9":
