@@ -11,6 +11,7 @@
 #   4. Dependencies — did any imported module's interface change?
 
 
+use compiler.backend.linker.smf_header.{smf_header_field_shift, smf_header_seed_trailer_offset}
 use std.common.string_core.{bytes_to_text}
 use compiler.driver.cache.cache_types.{
     CacheCheckResult,
@@ -250,16 +251,33 @@ class SmfValidationSnapshot:
         SmfValidationSnapshot(data: file_read_bytes(path))
 
     fn valid_header() -> bool:
-        self.data.len() >= 128
+        self.header_start() >= 0
 
     fn header_start() -> i64:
-        if not self.valid_header():
-            return -1
-        self.data.len() - 128
+        # Packed v1.1 trailer at EOF-128 (the only layout Simple writes); the
+        # Rust seed's repr(C) trailer at EOF-96 is the fallback when no packed
+        # magic is there (canonical decoder: compiler.backend.linker.smf_header).
+        val len = self.data.len()
+        val packed = if len >= 128: len - 128 else: -1
+        val packed_magic = packed >= 0 and self.data[packed] == 83 and self.data[packed + 1] == 77 and self.data[packed + 2] == 70 and self.data[packed + 3] == 0
+        if packed_magic:
+            return packed
+        val seed = smf_header_seed_trailer_offset(self.data)
+        if seed >= 0:
+            return seed
+        packed
+
+    # 4 for a Rust seed repr(C) header, 0 for packed; added to every field offset >= 20.
+    fn field_shift() -> i64:
+        val start = self.header_start()
+        if start < 0:
+            return 0
+        smf_header_field_shift(self.data, start)
 
     fn reserved_bytes() -> [u8]:
         val start = self.header_start()
-        if start < 0:
+        # Seed headers have no compile-options reserved area: treat as empty.
+        if start < 0 or self.field_shift() != 0:
             return []
         var out: [u8] = []
         var i = 0
@@ -290,14 +308,14 @@ class SmfValidationSnapshot:
 
     fn source_hash() -> i64:
         val start = self.header_start()
-        if start < 0: 0 else: self.u64_at(start + 68)
+        if start < 0: 0 else: self.u64_at(start + 68 + self.field_shift())
 
     fn dependencies() -> [CacheDependency]:
         val start = self.header_start()
         if start < 0:
             return []
         val section_count = self.u32_at(start + 16)
-        val table_offset = self.u64_at(start + 20)
+        val table_offset = self.u64_at(start + 20 + self.field_shift())
         # Prove the complete table range before entering the loop. Besides
         # preventing signed-offset wraparound, this caps malformed work by the
         # actual artifact size rather than an attacker-controlled u32 count.
