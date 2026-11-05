@@ -1952,6 +1952,91 @@ fn convert_flat_if_stmt(root_idx: i64) -> Stmt:
     val chain_expr = Expr(kind: ExprKind.IfChain(arms, None), span: arms[0].span)
     Stmt(kind: StmtKind.Expr(chain_expr), span: arms[0].span)
 
+# Canonical `target.later(...) gpu \:` / `host \:` lane callback (host_gpu_lane
+# REQ-001). The core grammar parses the marker through the ordinary
+# trailing-lambda sugar as `gpu(target.later(...), \: block)`, so the lane
+# survives lexing/parsing but arrives here as a plain Expr statement. Recognize
+# exactly that canonical shape and lift it to StmtKind.TargetLater; anything
+# else (a real `gpu(...)` call, dynamic lane names, extra args) is left
+# untouched. Pinned by test/01_unit/compiler/frontend/host_gpu_lane_structural_bridge_spec.spl.
+fn convert_flat_target_later(e: Expr, span: Span) -> Stmt?:
+    val call_args = match e.kind:
+        case ExprKind.Call(_, args): args
+        case _: return None
+    val callee = match e.kind:
+        case ExprKind.Call(c, _): c
+        case _: return None
+    val lane_name = target_later_callee_lane(callee)
+    if lane_name == "" or call_args.len() != 2:
+        return None
+    if call_args[0].has_name or call_args[1].has_name:
+        return None
+    val later_call = call_args[0].value
+    if not target_later_is_later_call(later_call):
+        return None
+    val block = target_later_lambda_block(call_args[1].value)
+    if block == None:
+        return None
+    val config = target_later_config(lane_name, later_call, span)
+    Some(Stmt(kind: StmtKind.TargetLater(config, block.unwrap()), span: span))
+
+fn target_later_callee_lane(callee: Expr) -> text:
+    match callee.kind:
+        case ExprKind.Ident(name):
+            if name == "gpu" or name == "host": name else: ""
+        case _:
+            ""
+
+fn target_later_is_later_call(later_call: Expr) -> bool:
+    match later_call.kind:
+        case ExprKind.MethodCall(receiver, name, _):
+            target_later_is_target_base(receiver) and name == "later"
+        case ExprKind.Call(callee, _):
+            # `target.later(...)` may also surface as a plain field call.
+            match callee.kind:
+                case ExprKind.Field(base, name):
+                    target_later_is_target_base(base) and name == "later"
+                case _:
+                    false
+        case _:
+            false
+
+fn target_later_is_target_base(base: Expr) -> bool:
+    match base.kind:
+        case ExprKind.Ident(name):
+            name == "target"
+        case _:
+            false
+
+fn target_later_lambda_block(body: Expr) -> Block?:
+    match body.kind:
+        case ExprKind.Lambda(_, lambda_body):
+            match lambda_body.kind:
+                case ExprKind.Block(b):
+                    Some(b)
+                case _:
+                    None
+        case ExprKind.Block(b):
+            Some(b)
+        case _:
+            None
+
+fn target_later_config(lane_name: text, later_call: Expr, span: Span) -> TargetLaterConfig:
+    var max_packet: i64? = None
+    val later_args = match later_call.kind:
+        case ExprKind.MethodCall(_, _, args): args
+        case ExprKind.Call(_, args): args
+        case _: []
+    for a in later_args:
+        if a.has_name and a.name == "max_packet":
+            match a.value.kind:
+                case ExprKind.IntLit(v):
+                    max_packet = Some(v)
+                case _:
+                    ()
+    val lane = if lane_name == "gpu": TargetLane.Gpu else: TargetLane.Host
+    TargetLaterConfig(lane: lane, max_packet: max_packet, call: later_call, span: span)
+
 fn convert_flat_stmt(idx: i64) -> Stmt:
     if idx < 0:
         val nil_span = make_span()
@@ -1967,6 +2052,14 @@ fn convert_flat_stmt(idx: i64) -> Stmt:
             decl_get_imports(import_decl), decl_get_is_lazy(import_decl) != 0), span: span)
     if tag == STMT_EXPR:
         val e = convert_flat_expr(stmt_get_expr(idx))
+        # host_gpu_lane REQ-001: `target.later(...) gpu \:` / `host \:` parses
+        # as an ordinary trailing-lambda call (`gpu(target.later(...), \:`block)`).
+        # Lift the canonical shape into StmtKind.TargetLater so the lane marker
+        # survives as rich AST metadata, not only a source-text check
+        # diagnostic. Any non-canonical shape stays a plain Expr statement.
+        val lane_stmt = convert_flat_target_later(e, span)
+        if lane_stmt != None:
+            return lane_stmt.unwrap()
         return Stmt(kind: StmtKind.Expr(e), span: span)
     elif tag == STMT_RETURN:
         val ret_idx = stmt_get_expr(idx)
