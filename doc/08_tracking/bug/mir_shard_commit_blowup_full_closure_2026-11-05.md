@@ -68,3 +68,19 @@ parallelism:
 
 OPEN (mitigation retry in flight in the work/simple-hardening-release-20261013
 lane; the stage-2 trust root itself remains admitted and unaffected).
+
+## Addendum (same day, test-runner closure)
+
+The reduced-closure standalone test-runner build (322 modules, sources
+src/compiler + src/app + src/lib, entry src/app/test_runner_new/main.spl)
+fits memory comfortably (MIR/codegen RSS ~5 GiB) but exposed a second
+pathology in the self-hosted codegen path: `native_compile` spent 40+
+minutes on a single module (indicator `lib.nogc_async_mut.sosix.stdio`,
+a 41-line source file, worker ~1300s CPU and climbing). Whether the
+indicator lags the real in-flight module or a 41-line extern-heavy file
+genuinely expands into a codegen super-linear cliff, single-module
+compile times of this magnitude make from-scratch tool builds
+impractical on this host. Recommended follow-up: capture a profile of
+the codegen worker (module attribution, MIR instruction count per
+module) and compare against the LLVM backend, which the matrix
+benchmarked as the default for good reason.
