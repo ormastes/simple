@@ -707,3 +707,14 @@ here so a later lane does not attribute them to this work.
 - **Residual B: `ptr`** — unchanged; still needs the owner decision recorded in
   batch 5 (pinned-copy vs `rt_string_data` lifetime). Not a transcription job.
 - Status stays open (P2) on residuals A and B only.
+
+## E2 premise check (2026-11-05) — parse_float residual is NOT a bug
+The "parse_float/parse_f64/parse_f64_safe drop the Option at calls.rs:3754"
+residual is a false premise. `rt_string_to_float`
+(runtime/src/value/collections.rs:6171) returns a TAGGED RuntimeValue —
+`from_float(f)` on success, `RuntimeValue::NIL` on failure — and HIR types
+these three names `TypeId::ANY` (hir/lower/expr/mod.rs:2326). That is exactly
+the Option-preserving shape 0641097d685 copied for parse_int. Remaining open
+item is only the ptr-lifetime owner decision. Note for a follow-up: `to_float`
+/`to_f64` share the same NIL-on-failure symbol, unlike total `to_int` (0) —
+check whether `to_float` is specified total before changing it.
