@@ -24,6 +24,11 @@ class ObjectStore:
     # "{obj_id}" -> every slot of that object, ascending (same order a
     # forward scan visits them). Maintained together with prop_slot_index.
     obj_slot_index: Dict<text, [i64]>
+    # Whole-store scan iterations performed as a fallback when the slot
+    # index could not answer (or by operations that have not been moved to
+    # the index yet). Hot paths must keep this at 0; specs bound property
+    # work by it instead of wall-clock time.
+    scan_ops: i64
 
 fn _prop_slot_key(obj_id: i64, key: text) -> text:
     # obj_id is an integer, so the first ':' always ends it: unambiguous.
@@ -43,7 +48,8 @@ impl ObjectStore:
             obj_proto_ids: [],
             prop_slot_index: {},
             prop_slot_indexed: 0,
-            obj_slot_index: {}
+            obj_slot_index: {},
+            scan_ops: 0
         )
 
     me reindex_prop_slots():
@@ -82,6 +88,7 @@ impl ObjectStore:
         var slots: [i64] = []
         var i = 0
         while i < n:
+            self.scan_ops = self.scan_ops + 1
             if self.prop_obj_ids[i] == obj_id:
                 slots.push(i)
             i = i + 1
@@ -99,6 +106,7 @@ impl ObjectStore:
                 return slot
         var i = n - 1
         while i >= 0:
+            self.scan_ops = self.scan_ops + 1
             if self.prop_obj_ids[i] == obj_id and self.prop_keys[i] == key:
                 return i
             i = i - 1
@@ -124,19 +132,20 @@ impl ObjectStore:
         JsObject(properties: props)
 
     me set_property(obj_id: i64, key: text, value: JsValue):
+        # Per-object slot list from the index (synced first, like
+        # JsInterpreter.set_object_property); same first-match update and
+        # append semantics as the former whole-store forward scan.
+        self.sync_prop_slots()
+        val slots = self.object_slots(obj_id)
         var i = 0
-        while i < self.prop_obj_ids.len():
-            if self.prop_obj_ids[i] == obj_id and self.prop_keys[i] == key:
-                self.prop_values[i] = value
+        while i < slots.len():
+            val s = slots[i]
+            if self.prop_keys[s] == key:
+                self.prop_values[s] = value
                 return
             i = i + 1
-        self.prop_obj_ids.push(obj_id)
-        self.prop_ref_ids.push(obj_id)
-        self.prop_ref_tags.push(0)
-        self.prop_keys.push(key)
-        self.prop_values.push(value)
-        self.prop_enumerables.push(true)
-        self.prop_configurables.push(true)
+        self.append_slot(obj_id, key, value)
+        self.sync_prop_slots()
 
     # Slot mutators for JsInterpreter.set_object_property. They exist because
     # the seed interpreter drops a nested `self.object_store.<array>.push(x)` /
@@ -167,29 +176,30 @@ impl ObjectStore:
         JsValue.Undefined
 
     me remove_property(obj_id: i64, key: text):
-        var i = self.prop_obj_ids.len() - 1
+        self.sync_prop_slots()
+        val slots = self.object_slots(obj_id)
+        var i = slots.len() - 1
         while i >= 0:
-            if self.prop_obj_ids[i] == obj_id and self.prop_keys[i] == key:
-                self.prop_obj_ids.remove(i)
-                self.prop_ref_ids.remove(i)
-                self.prop_ref_tags.remove(i)
-                self.prop_keys.remove(i)
-                self.prop_values.remove(i)
-                self.prop_enumerables.remove(i)
-                self.prop_configurables.remove(i)
+            val s = slots[i]
+            if self.prop_keys[s] == key:
+                self.prop_obj_ids.remove(s)
+                self.prop_ref_ids.remove(s)
+                self.prop_ref_tags.remove(s)
+                self.prop_keys.remove(s)
+                self.prop_values.remove(s)
+                self.prop_enumerables.remove(s)
+                self.prop_configurables.remove(s)
             i = i - 1
         self.reindex_prop_slots()
 
     me array_length(arr_id: i64) -> i64:
+        # Only this object's slots can hold its element keys.
+        self.sync_prop_slots()
         var max_idx = -1
-        var i = 0
-        while i < self.prop_obj_ids.len():
-            if self.prop_obj_ids[i] == arr_id:
-                val k = self.prop_keys[i]
-                val idx = k.parse_int() ?? -1
-                if idx > max_idx:
-                    max_idx = idx
-            i = i + 1
+        for s in self.object_slots(arr_id):
+            val idx = self.prop_keys[s].parse_int() ?? -1
+            if idx > max_idx:
+                max_idx = idx
         max_idx + 1
 
     me get_by_index(arr_id: i64, idx: i64) -> JsValue:
