@@ -63,3 +63,15 @@ original poll.spl error. `poll.spl` `is_ready`/`is_pending` and `future.spl`
 `complete`/`map`/`then` now match `self` / `self.poll_result` directly;
 `poll_is_ready` is kept as a thin helper for `poll_rti007_wa_spec`, and
 `poll_unwrap` stays for rti007_any_return_rows_2026-11-01.
+
+## 2026-11-05 resolution (HIR P2 worker HA)
+Root fix already on release/1.0.0 (`lower_declared_enum_pattern` own-method identity
+substitution + resolved-not-concrete binder rule, expression_components.spl ~520-545).
+Verified: interpreter `test/01_unit/compiler/20.hir/generic_enum_self_match_spec.spl` 5/5
+(incl. self field `Poll<T>` in `class Future<T>` and the real poll.spl/future.spl), and a
+stage3 native probe (s3_fable44) of `match self` / `match self.poll_result` on a generic
+enum: 0 "generic enum pattern" HIR errors. Workaround tags retired in poll.spl and
+failsafe/core.spl (the free-function helpers stay: they also serve the separate
+rti007_any_return_rows `unwrap() -> T` workaround). Separate finding: that probe's MIR
+reported `unresolved method call: is_ready/done route=runtime-fallback` for methods of a
+generic enum/class declared in a test-dir module — not this row's class.
