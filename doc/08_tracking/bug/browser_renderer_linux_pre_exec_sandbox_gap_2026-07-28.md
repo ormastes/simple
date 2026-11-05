@@ -80,3 +80,77 @@ remaining runtime contract.
 This restores source-level admission evidence for the pre-exec stage. The
 installed pure-Simple ready/frame artifact remains the outstanding release
 evidence described above.
+
+## 2026-11-05 Linux runtime evidence (aarch64)
+
+Host: aarch64 Linux (Ubuntu, kernel with seccomp+Landlock; namespace posture
+`unavailable`, uid=gid=1000 — same posture as the 2026-09-21 admission run).
+All commands used the worktree at `/tmp/wt-libbug-presandbox` with the
+seed-built full CLI
+`/home/yoon/dev/simple/build/phase_snapshots/phase1_1793422538/simple`
+substituted wherever the gate refers to `bin/simple` (no `bin/simple` exists
+on this host).
+
+Evidence ran:
+
+1. `sh test/01_unit/runtime/run_process_piped_write_test.shs` — the bounded
+   gate named above. Result: **PASS (exit 0)**, stable across 5 consecutive
+   runs. The gate now proves, through the production
+   `rt_browser_renderer_spawn_sandboxed` broker path: pre-main constructor
+   denials (host-file read EACCES, socket EPERM, fork EPERM), hostile loader
+   environment absent post-scrub (LD_PRELOAD, LD_AUDIT, LD_DEBUG,
+   LD_DEBUG_OUTPUT, LD_LIBRARY_PATH, LD_ORIGIN_PATH), stage-one Landlock
+   host-file write denial (open O_WRONLY -> EACCES) before stage two, stage
+   two entry, and the ready/frame protocol (`small` in, `sandbox-ok` out)
+   with a second concurrent renderer, slot reuse, and no host mutation.
+2. `sh scripts/check/check-browser-renderer-sandbox-seccomp.shs` — the
+   admission check. Result: **PASS — 8 check(s) verified** (SANDBOX-N/E/D,
+   startup-failure, namespace posture `unavailable` matching observed
+   `/proc/self/ns/net` identity, partial-failure exit 126). No regression
+   from the gate repair; the stage-two allow-list contract (non-allow-listed
+   socket() is SIGSYS-killed, not EPERM-denied) is confirmed intact.
+3. `simple test test/03_system/security/hosted_renderer_loader_environment_spec.spl
+   --mode=interpreter` — Result: **PASS (1/1)**.
+
+Root causes found while closing the gap (the gate was red on this branch for
+two independent reasons):
+
+- **Link break (new, 2026-10-31):** `e2e83308682` ("session-owned process
+  trees") made `rt_process_spawn_piped_argv` call `rt_child_set_pdeathsig`,
+  which lives in `src/runtime/runtime_process_tree.c`. The single-TU gate
+  link no longer resolved it. Fix: the gate now links
+  `runtime_process_tree.c` alongside `runtime_process.c` (`--gc-sections`
+  still drops the unused wider-runtime paths).
+- **Probe/filter contract mismatch (pre-existing, arch-independent):** the
+  probe's post-`sandbox_enter` checks expected `EPERM`/`EACCES` errno
+  denials for ~30 syscalls (getrlimit, open, socket, fork, execve, fcntl,
+  ...). The shipped stage-two policy is the SANDBOX-E allow-list whose
+  default is `SECCOMP_RET_KILL_PROCESS`; the first post-enter syscall
+  (`getrlimit`, probe code 14) SIGSYS-killed the worker (raw wait status
+  0x9f, verified by gdb backtrace: `sandbox_limit_is` -> `syscall`). A deny
+  with errno post-enter is unobservable in-process under that contract —
+  the probe would have to die to "check" it — and the deny-list shape is
+  the reverted full-policy design this bug doc forbids reinstalling. Fix:
+  the probe now observes denials with errno only where the architecture
+  provides them (stage one: pre-main constructor file/socket/fork, loader
+  env scrub, Landlock write denial pre-enter) and uses the surviving
+  ready/frame handshake as the in-jail evidence, exactly the acceptance
+  shape this doc states. No source filter changed.
+
+Also repaired `hosted_renderer_loader_environment_spec.spl`, which could not
+execute at all: the literal C snippet `"{NULL}"` was parsed as string
+interpolation of an undefined variable; escaped to `{{NULL}}`. Assertion
+content unchanged.
+
+Files changed (worktree branch `work/libbug-linux-presandbox-20261105`):
+- `test/01_unit/runtime/run_process_piped_write_test.shs` — link `runtime_process_tree.c`.
+- `test/01_unit/runtime/process_piped_write_test.c` — probe rewritten to the
+  SANDBOX-E allow-list contract; constructor gains loader-env scrub
+  evidence; unused `sandbox_limit_is` removed.
+- `test/03_system/security/hosted_renderer_loader_environment_spec.spl` —
+  `{{NULL}}` escape only.
+- This doc (appended evidence).
+
+macOS/Windows remain fail-closed and untouched: `rt_browser_renderer_sandbox_enter`
+still returns false off Linux and the preinit marker is never set without
+the broker-fixed argv + empty environment.
