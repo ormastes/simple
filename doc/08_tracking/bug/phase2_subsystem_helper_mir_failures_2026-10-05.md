@@ -64,3 +64,22 @@ re-running the six-lane generator/verdict helper builds on a current Phase 2 pro
 `helper-build-failures.json` from producer 916be6c2 is the only diagnostic, and it predates
 the rework. Next step: rerun the helper builds on the current candidate and re-scope from
 the fresh diagnostics.
+
+## 2026-11-05 p1c-p2sub premise check: still valid, still blocked (no code change)
+
+- Premise is not outdated by current policy (nil-as-absence, panic-free, no-Any,
+  mono removal): the reported failures are MIR-lowering resolution defects
+  (`FlatPoolReader` static ctor/method resolution, `ord`, `Result`/process-handle
+  methods, enum arm lowering, I64 collection iteration), not policy-shaped code.
+- Named sites still exist on `origin/release/1.0.0`:
+  `src/compiler/10.frontend/core/flat_pool_codec.spl:111` (`pub class FlatPoolReader`,
+  `static fn new` at :143), `src/compiler/10.frontend/desugar/placeholder_lambda.spl`
+  (path moved from the original note), `src/lib/nogc_sync_mut/io/{process_ops,env_ops}.spl`.
+  No commit on the branch cites this bug id as fixed.
+- Not reproducible today: the `helper-build-failures.json` packet is not on this
+  host or in the repo; the failing path is pure-Simple native MIR lowering, which the
+  Rust seed (`bin/simple.exe`) does not exercise; stage3 is not deployed yet (phase 3
+  still building). A seed-side repro would prove nothing about this defect.
+- Action: keep OPEN, P1. Unblock condition: a deployed stage3/self-hosted compiler;
+  then re-run the generator + main-verdict helper native builds for the six lanes,
+  capture fresh diagnostics, and write per-site repro specs (TDD) before fixing.
