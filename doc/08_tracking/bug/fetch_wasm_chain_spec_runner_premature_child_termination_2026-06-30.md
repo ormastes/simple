@@ -1,7 +1,7 @@
 # Bug: `browser_session_fetch_wasm_chain_spec.spl` file-level FAIL despite 250/250 passing
 
 - **Date:** 2026-06-30
-- **Status:** Open
+- **Status:** FIX PR pending — "wait verification" (host-side native verification pending)
 - **Component:** test runner (`src/app/test_runner_new/`) — NOT the js/web library under test
 - **Severity:** Medium (false-negative test result; the code under test is correct)
 - **Spec:** `test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl` (250 it-blocks, ~6370 lines)
@@ -118,3 +118,74 @@ The identifier is defined and exported from
 but not in compile mode. This does not affect the default interpreter test path
 but blocks `--mode=native/smf` for this spec. Tracks with the known
 "compile-mode false-greens / SSpec compile pipeline" fragility.
+
+## Fix 2026-11-05 (wasm-fixes lane) — per-child default budget 120s -> 900s
+
+Reproduced at this branch tip on the aarch64 host. Two distinct mechanisms
+were at play historically, and the second one was still live:
+
+1. (Historical, already mitigated before this lane.) The non-deterministic
+   ~64s kills with 111/122/123 lines were the host-wide
+   `scripts/resource/kill_simple_monitor.shs` CPU-spin guard back when its
+   `MIN_AGE_SECS` default was 60s (raised to 900 on 2026-08-17). The runner
+   now also propagates its budget into the child env
+   (`SIMPLE_TIMEOUT_SECONDS`, raise-only), which the monitor reads live.
+
+2. (Fixed here.) The 2026-08-17 raise of the client default to
+   `CLIENT_DEFAULT_TIMEOUT_SECS = 900` never reached the direct-dispatch and
+   single-file lanes, which still hardcoded 120s:
+   - `src/lib/nogc_sync_mut/test_runner/test_runner_args.spl`
+     (`parse_test_args`, `var timeout = 120`) — feeds
+     `TestOptions.timeout`, the budget `run_test_file_interpreter` hands to
+     `process_run_timeout`/`process_run_with_limits`. This is the path
+     `bin/simple test <file>` takes when the session daemon is unavailable
+     ("running directly [fallback]").
+   - `src/app/test_runner_new/test_runner_single.spl` (`parse_child_run`)
+     and its std twin `src/lib/nogc_sync_mut/test_runner/test_runner_single.spl`.
+
+   Measured on this host (aarch64 seed, interpreter/JIT): the spec's honest
+   direct run is 250/250, exit 0, but takes ~586s wall / ~873 MB RSS — far
+   above the 120s lane budget, so the runner killed the child at
+   `budget_ms=120079` with no BDD summary: a DETERMINISTIC premature
+   termination, the stable remnant of this bug.
+
+   Fix: all four per-child defaults now agree at 900s (the app single lane
+   derives its default from `client_default_timeout_secs()`, so
+   `SIMPLE_TIMEOUT_SECONDS` keeps working there; the std twins carry the
+   literal with a sync comment). 900 matches `KILL_SIMPLE_MIN_AGE_SECS`, so
+   the per-spec budget and the runaway reaper no longer race.
+
+3. (Also fixed here — exposed by raising the default.) `run_scoped_child`
+   (`src/lib/nogc_sync_mut/test_runner/native_owned_process.spl`) overwrites
+   the resource-scope wall budget with the per-file timeout but kept the
+   UNIT-class CPU budget at its default 600s. A single-threaded child
+   legally using its 900s wall grant therefore always tripped the smaller
+   CPU budget and died as "Declared resource budget exceeded" at ~600s —
+   the raised timeout was still a lie. New `scoped_cpu_budget_ms` helper
+   keeps the CPU grant >= the wall grant (0 = inherit stays disabled).
+
+Evidence:
+- RED (pre-fix): `simple test test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl`
+  -> `timeout=1 reason=aggregate-lane-timeout budget_ms=120079`,
+  `Results: 1 total, 0 passed, 1 failed, 1 timed out (unverified)`.
+- RED (pre-fix, new pin spec):
+  `test/01_unit/app/test_runner_new/direct_lane_timeout_default_spec.spl`
+  -> 1 passed, 3 failed (default still 120).
+- GREEN (post-fix): same pin spec 4/4; affected spec run through the runner
+  to completion with 250/250 (repeated runs — see PR body).
+
+Post-fix end-to-end (source-mode runner — the phase1-testrunner binary in
+this environment is a frozen native build predating the fix, so the runner
+was executed from the worktree sources:
+`SIMPLE_LIB=src $SEED run src/app/test_runner_new/main.spl test <spec> --mode=interpreter`):
+- resource scope ACTIVE (default limits): 250 total, 250 passed, 0 failed,
+  601.6s — past the old 600s CPU tripwire that previously reported
+  "Declared resource budget exceeded".
+- `--no-limits` probe: 250 total, 250 passed, 0 failed, 606.4s.
+Both deterministic full completions with the BDD summary intact.
+
+Note: 873 MB child RSS is far below both the 16GB `process_run_with_limits`
+ceiling and the monitor's 24GB RSS guard, so no memory limiter fires; this
+was purely the wall-clock default. The unrelated Rust-seed JIT panic
+("can't resolve symbol simple_contract_check" in cranelift finalize, seen
+once adjacent to a timeout kill) is a separate seed defect, not this bug.
