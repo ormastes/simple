@@ -1,5 +1,7 @@
-//! Regression for
-//! `doc/08_tracking/bug/placeholder_lambda_as_fn_param_callback_unevaluated_2026-07-20.md`.
+//! Regressions for
+//! `doc/08_tracking/bug/placeholder_lambda_as_fn_param_callback_unevaluated_2026-07-20.md`
+//! and
+//! `doc/08_tracking/bug/placeholder_lambda_scoping_nested_ordinary_call_2026-08-31.md`.
 //!
 //! A placeholder belongs to the nearest enclosing call argument, so
 //! `print(apply(_1 + 1, 41) + 0)` makes `apply`'s first argument the lambda,
@@ -18,6 +20,21 @@ mod placeholder_innermost_call {
         let lambda = dump.find("Lambda").expect("a lambda must be produced");
         let apply = dump.find("\"apply\"").expect("apply call present");
         assert!(lambda > apply, "lambda must sit inside apply's argument, not wrap print's: {dump}");
+    }
+
+    #[test]
+    fn filed_nested_ordinary_call_owns_second_placeholder_argument() {
+        let dump = ast(
+            "fn main():\n    expect(index_of_func(\"hello\", _1 == \"l\")).to_equal(2)\n",
+        );
+        let lambda = dump.find("Lambda").expect("a lambda must be produced");
+        let index_of_func = dump
+            .find("\"index_of_func\"")
+            .expect("index_of_func call present");
+        assert!(
+            lambda > index_of_func,
+            "lambda must sit inside index_of_func's second argument, not wrap expect's: {dump}"
+        );
     }
 
     #[test]
