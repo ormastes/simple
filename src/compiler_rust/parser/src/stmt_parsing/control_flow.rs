@@ -390,13 +390,23 @@ impl<'a> Parser<'a> {
         // (shallow continuation) — see doc/08_tracking/bug/
         // seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md.
         let then_block = self.parse_condition_block()?;
+        // A block body that ended on a same-line trailing `else:`/`elif`
+        // (see `parse_block_body`) left its INDENT open; the matching DEDENT
+        // trails the whole chain's final arm, so count it here and consume
+        // it after the chain. See doc/08_tracking/bug/
+        // riscv_scalar_product_vhdl_else_parse_2026-08-12.md.
+        let mut trailing_unclosed_indents = if self.block_body_ended_on_else { 1 } else { 0 };
 
         let mut elif_branches = Vec::new();
         while self.check(&TokenKind::Elif) {
             self.advance();
             let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
             self.expect(&TokenKind::Colon)?;
+            self.block_body_ended_on_else = false;
             let elif_block = self.parse_elif_or_else_if_body()?;
+            if self.block_body_ended_on_else {
+                trailing_unclosed_indents += 1;
+            }
             elif_branches.push((elif_pattern, elif_condition, elif_block));
             if self.check(&TokenKind::Newline)
                 && (self.peek_through_newlines_and_indents_is(&TokenKind::Elif)
@@ -419,7 +429,11 @@ impl<'a> Parser<'a> {
                 self.advance(); // consume 'if'
                 let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
                 self.expect(&TokenKind::Colon)?;
+                self.block_body_ended_on_else = false;
                 let elif_block = self.parse_elif_or_else_if_body()?;
+                if self.block_body_ended_on_else {
+                    trailing_unclosed_indents += 1;
+                }
                 elif_branches.push((elif_pattern, elif_condition, elif_block));
 
                 if self.check(&TokenKind::Newline) && self.peek_through_newlines_and_indents_is(&TokenKind::Else) {
@@ -442,7 +456,25 @@ impl<'a> Parser<'a> {
             // we need to parse the else block
             if self.check(&TokenKind::Colon) {
                 self.expect(&TokenKind::Colon)?;
+                self.block_body_ended_on_else = false;
                 else_block = Some(self.parse_inline_or_block()?);
+                if self.block_body_ended_on_else {
+                    trailing_unclosed_indents += 1;
+                }
+            }
+        }
+
+        // Close the INDENTs left open by block bodies that ended on a
+        // same-line trailing else:/elif: each matching DEDENT trails the
+        // chain's final arm. Defensive — only consume what is actually there.
+        // See doc/08_tracking/bug/
+        // riscv_scalar_product_vhdl_else_parse_2026-08-12.md.
+        for _ in 0..trailing_unclosed_indents {
+            if self.check(&TokenKind::Newline) && matches!(self.peek_next().kind, TokenKind::Dedent) {
+                self.advance(); // consume Newline
+                self.advance(); // consume Dedent
+            } else if self.check(&TokenKind::Dedent) {
+                self.advance(); // consume Dedent
             }
         }
 
@@ -1158,14 +1190,20 @@ impl<'a> Parser<'a> {
         // `parse_condition_block` reconciles any DEDENT deferred by a
         // multi-line condition continuation — see doc/08_tracking/bug/
         // seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md.
+        self.block_body_ended_on_else = false;
         let then_block = self.parse_condition_block()?;
+        let mut trailing_unclosed_indents = if self.block_body_ended_on_else { 1 } else { 0 };
 
         let mut elif_branches = Vec::new();
         while self.check(&TokenKind::Elif) {
             self.advance();
             let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
             self.expect(&TokenKind::Colon)?;
+            self.block_body_ended_on_else = false;
             let elif_block = self.parse_condition_block()?;
+            if self.block_body_ended_on_else {
+                trailing_unclosed_indents += 1;
+            }
             elif_branches.push((elif_pattern, elif_condition, elif_block));
         }
 
@@ -1176,7 +1214,11 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
                 self.expect(&TokenKind::Colon)?;
+                self.block_body_ended_on_else = false;
                 let elif_block = self.parse_condition_block()?;
+                if self.block_body_ended_on_else {
+                    trailing_unclosed_indents += 1;
+                }
                 elif_branches.push((elif_pattern, elif_condition, elif_block));
 
                 if self.check(&TokenKind::Else) {
@@ -1188,7 +1230,22 @@ impl<'a> Parser<'a> {
 
             if self.check(&TokenKind::Colon) {
                 self.expect(&TokenKind::Colon)?;
+                self.block_body_ended_on_else = false;
                 else_block = Some(self.parse_condition_block()?);
+                if self.block_body_ended_on_else {
+                    trailing_unclosed_indents += 1;
+                }
+            }
+        }
+
+        // Close INDENTs left open by block bodies that ended on a same-line
+        // trailing else:/elif — see `parse_if` above.
+        for _ in 0..trailing_unclosed_indents {
+            if self.check(&TokenKind::Newline) && matches!(self.peek_next().kind, TokenKind::Dedent) {
+                self.advance(); // consume Newline
+                self.advance(); // consume Dedent
+            } else if self.check(&TokenKind::Dedent) {
+                self.advance(); // consume Dedent
             }
         }
 

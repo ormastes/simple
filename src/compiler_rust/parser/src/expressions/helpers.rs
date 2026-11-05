@@ -207,6 +207,10 @@ impl<'a> Parser<'a> {
         }
 
         // Support both inline and block-form syntax for then branch
+        // Set when a block-form then-arm ends with a same-line trailing
+        // `else:`/`elif` so its still-open Indent can be closed by the Dedent
+        // that trails the else/elif arm once the whole chain is parsed.
+        let mut then_arm_indent_unclosed = false;
         let then_branch = if use_braces {
             // Curly brace form: if cond { body } else { body }
             self.parse_brace_block_expr()?
@@ -252,12 +256,26 @@ impl<'a> Parser<'a> {
                 }
 
                 let mut statements = Vec::new();
+                // A then-arm may be followed by a same-line trailing `else:`
+                // / `elif ...:` at the arm's own column (no Dedent in between)
+                // — e.g. `if c:\n    "a" else: "b"`. The self-hosted grammar
+                // accepts that form; without the Else/Elif break below the
+                // loop fed the `else` to `parse_item` and died with
+                // "expected expression, found Else". Mirrors the empty
+                // then-branch check above, which already treats a bare
+                // Else/Elif as this if-expression's own continuation.
+                // See doc/08_tracking/bug/
+                // riscv_scalar_product_vhdl_else_parse_2026-08-12.md.
                 while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
                     // Skip empty lines and same-line statement separators.
                     while self.check(&TokenKind::Newline) || self.check(&TokenKind::Semicolon) {
                         self.advance();
                     }
-                    if self.check(&TokenKind::Dedent) || self.is_at_end() {
+                    if self.check(&TokenKind::Dedent)
+                        || self.is_at_end()
+                        || self.check(&TokenKind::Else)
+                        || self.check(&TokenKind::Elif)
+                    {
                         break;
                     }
 
@@ -268,6 +286,15 @@ impl<'a> Parser<'a> {
                         self.advance();
                     }
                 }
+
+                // When the loop above broke on a same-line trailing
+                // Else/Elif instead of the arm's closing Dedent, the arm's
+                // Indent stays open: its Dedent is only emitted after the
+                // trailing else/elif arm's line ends. Remember this so the
+                // Dedent can be consumed once the whole if/elif/else chain
+                // has been parsed (see below, next to the
+                // continuation_indents reconciliation).
+                then_arm_indent_unclosed = self.check(&TokenKind::Else) || self.check(&TokenKind::Elif);
 
                 if self.check(&TokenKind::Dedent) {
                     self.advance();
@@ -429,6 +456,22 @@ impl<'a> Parser<'a> {
                 } else if self.check(&TokenKind::Dedent) {
                     self.advance(); // consume Dedent
                 }
+            }
+        }
+
+        // Close a block-form then-arm Indent left open by a same-line
+        // trailing else:/elif. The matching Dedent trails the else/elif arm:
+        // consume an optional Newline followed by the Dedent (or a bare
+        // Dedent). Defensive — if the tokens are not there (e.g. the else
+        // arm already consumed the level), leave the stream untouched.
+        // See doc/08_tracking/bug/
+        // riscv_scalar_product_vhdl_else_parse_2026-08-12.md.
+        if then_arm_indent_unclosed {
+            if self.check(&TokenKind::Newline) && matches!(self.peek_next().kind, TokenKind::Dedent) {
+                self.advance(); // consume Newline
+                self.advance(); // consume Dedent
+            } else if self.check(&TokenKind::Dedent) {
+                self.advance(); // consume Dedent
             }
         }
 
