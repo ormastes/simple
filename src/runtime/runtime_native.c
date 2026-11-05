@@ -20599,8 +20599,9 @@ void rt_trap_unimplemented(const char *symbol) {
  * runtime, the one the bootstrap/native lane actually links, only ever
  * MENTIONED it in a comment. Semantics transcribed from the pure-Simple
  * definition in src/runtime/simple_core/core_values.spl:78, which is the
- * canonical one: ordinal discriminants for Option (id 1) and Result (id 2);
- * untagged legacy Result values are still matched by Ok/Err name hash. */
+ * canonical one: ordinal discriminants for Option (id 1) and Result (id 2
+ * plus the legacy untagged id 0 used by pure-Simple MIR); older hashed
+ * Result values are still matched by Ok/Err name hash. */
 int64_t rt_unwrap_or_trap(int64_t value) {
     int64_t enum_id = rt_enum_id(value);
     int64_t discriminant;
@@ -20615,8 +20616,8 @@ int64_t rt_unwrap_or_trap(int64_t value) {
         }
         return value;
     }
-    if (enum_id == SPL_RESULT_ENUM_ID && discriminant == 0) return rt_enum_payload(value);
-    if (enum_id == SPL_RESULT_ENUM_ID && discriminant == 1) {
+    if ((enum_id == SPL_RESULT_ENUM_ID || enum_id == 0) && discriminant == 0) return rt_enum_payload(value);
+    if ((enum_id == SPL_RESULT_ENUM_ID || enum_id == 0) && discriminant == 1) {
         fprintf(stderr, "simple runtime: .unwrap() called on Err\n");
         fflush(stderr);
         abort();
