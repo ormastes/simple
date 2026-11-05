@@ -53,3 +53,48 @@ identical).
 applied it only as a disclosed, identical measurement patch to BOTH sides so the
 before/after comparison could run at all. It needs an owner.
 
+
+## Verification evidence — 2026-11-05 (aarch64 host, worktree `work/libbug-linux-cargotest-20261105` @ `origin/release/1.0.0` `adfeae3765c`)
+
+Host: aarch64 Linux. `cargo 1.99.1 (5f94df478 2026-08-27)`, `rustc 1.99.1 (58cf8f9c3 2026-10-13)`.
+
+Command (from `src/compiler_rust/`, worktree-local `target/`):
+
+```
+cargo test --lib -p simple-compiler
+```
+
+Result: **the target package now COMPILES on aarch64** — the
+`is_x86_feature_detected!` macro-expansion blocker is gone. On
+`origin/release/1.0.0` the test at issue is `common/src/target.rs:1304-1320`
+`the_host_target_widens_exactly_when_the_host_admits_avx512`, now behind a real
+`#[cfg(target_arch = "x86_64")]` (matching the fix sketched above); production
+probe `common/src/target.rs:303-312` is likewise cfg-guarded, and
+`compiler/src/codegen/llvm/backend_core.rs` `default_x86_64_cpu_tests` no longer
+references the macro.
+
+Suite executed: `test result: FAILED. 4608 passed; 8 failed; 5 ignored; 0 measured; 0 filtered out; finished in 224.51s`
+
+The 8 failures are unrelated to this bug (no macro-expansion/compile errors;
+all are runtime assertion failures):
+
+- `interpreter::interpreter_extern::vulkan::tests::{family_size_is_pinned,
+  text_return_is_text_not_int, text_returning_entry_points_are_typed_as_text}`
+  — registry/runtime skew: `VULKAN_FNS.len()` is 132 vs pinned 131, and
+  `rt_vulkan_get_last_error` is in the registry but not linked into the test
+  binary (expected 7 text returns, got 8). Cross-component drift, needs owner.
+- `mir::lower::tests::branch_coverage::calls::primitive_field_method_call_is_builtin_qualified`
+  — expects a `MirInst::MethodCallStatic` with `func_name == "i32.to_string"`;
+  lowering emits something else.
+- `pipeline::native_project::tests::{test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi,
+  test_core_lane_runtime_required_abi_stdout_stderr_and_values,
+  test_runtime_bundle_hosted_is_allowed_for_bootstrap_entry_only,
+  test_simple_core_source_tree_emits_partial_runtime_archive}`
+  — native-build probe mismatches (extra `rt_secure_temp_dir_*`/`rt_process_rss_kib`
+  exports, exit codes 44/77 from ABI probes, hosted archive path expectation).
+
+No fix attempted on this lane: none of the 8 is the aarch64 compile blocker
+this bug tracks, and the vulkan pin/count skew is a deliberate anti-inflation
+guard that needs the owning lane's context. Diagnosed first failure verbatim:
+`family_size_is_pinned`: `assertion left == right failed: left: 132, right: 131`
+at `compiler/src/interpreter_extern/vulkan.rs:487`.
