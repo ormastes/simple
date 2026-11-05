@@ -291,3 +291,24 @@ Repro note for the next cycle: `cargo build -p simple-driver` (~4 min warm)
 plus the dylib assembly step from scripts/bootstrap/bootstrap-from-scratch.sh
 (rust-native-all-build + publish), or test the no-dylib path on any program
 that JIT-compiles a contract call after the export fix.
+## RESOLVED 2026-11-05: macOS seed now exports its runtime symbols (fix landed)
+
+Root cause of the dylib-twin split: `.cargo/config.toml` set
+`-Wl,--export-dynamic` only for `x86_64-unknown-linux-gnu` (an ELF flag;
+macOS ld64 needs the single-dash `-export_dynamic` and had NO darwin section
+at all). The seed executable therefore never exported `simple_contract_check`
+etc., forcing the dylib preload, which moved the JIT's entire rt-symbol
+surface onto the stale second runtime.
+
+Fix (this PR's sibling commit on work/seed-export-rt-symbols-20261105):
+add `[target.aarch64-apple-darwin]` and `[target.x86_64-apple-darwin]`
+sections with `-C link-arg=-Wl,-export_dynamic`.
+
+Acceptance evidence (seed rebuilt from this branch, NO dylib preload):
+- `nm -gU` on the new binary exports `simple_contract_check` and
+  `simple_contract_check_msg` (2 matches; previously 0).
+- The SCV cold-init repro (native_build interpreted, sdn_diff_repro entry)
+  passes the inventory phase: 44,669 file-events all complete with
+  `retained=true` (previously: failure on the first file event), and the
+  build proceeds into the compiler phases — the JIT resolves every runtime
+  symbol from the executable's own current twins.
