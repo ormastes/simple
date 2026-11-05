@@ -82,3 +82,14 @@ float/clear RED-by-design gap); all other 7 specs under
 `test/03_system/gui/web_css/` match their pristine-branch baselines exactly;
 `simple_web_html_layout_renderer_paint_layout_coverage_closure_spec.spl`
 52/52; `simple_web_flex_grow_weighted_spec.spl` 3/3.
+
+## Fix-forward 2026-11-05 (follow-up to #6764)
+
+- `layout_selected` (simple_web_html_layout_renderer_layout_engine.spl:159) passed an
+  out-of-scope `viewport_w` on the contain:layout island path (`semantic: variable
+  viewport_w not found`); now passes `width` (the viewport width), matching the full
+  `layout(` fallback.
+- Two specs still used the old 15-arg `layout(` shape:
+  test/01_unit/browser_engine/simple_web_width_centering_spec.spl (800, 800, 600) and
+  containment_paint_contain_wired_spec.spl x3 (WIDTH, WIDTH, HEIGHT).
+- Repro + source pins: test/01_unit/lib/gc_async_mut/gpu/browser_engine/layout_selected_viewport_w_spec.spl.
