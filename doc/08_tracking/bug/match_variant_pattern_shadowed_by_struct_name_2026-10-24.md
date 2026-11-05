@@ -17,3 +17,11 @@ and the subject-typed path resolves the variant first, so single-module shadowin
 had `StmtKind` and `Expr` in DIFFERENT modules (poll_generator imports both), so the likely trigger is
 `enum_variant_names` not yet holding the imported enum's variants. Verification needs a stage3/native compile with the
 workaround at `poll_generator.spl:~182` reverted to bare `case Expr(e):`. Workaround kept. Spec kept as regression coverage.
+
+## 2026-11-05 resolution (HIR P2 worker HA)
+Cross-module shape now covered: `test/01_unit/compiler/20.hir/imported_bare_variant_vs_struct_name_spec.spl`
+(6/6, interpreter) lowers a consumer that imports `struct Expr` + `enum StmtKind { Expr(Expr) }`
+(braced and glob imports, field / param / indexed-element subjects) through HIR+MIR with 0 errors.
+Stage3 native probe (s3_fable44, two modules, glob import, poll_generator shape): HIR and MIR
+of both modules succeed (no "unsupported arm pattern"). Workaround retired: poll_generator.spl
+is back to bare `case Expr(e)` / `case Return(e)`.

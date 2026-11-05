@@ -1,0 +1,70 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Every hand-written MinGW link line carries the driver's system libraries
+
+The driver's MinGW link (`shared_linking.spl`, `mingw_libs`) is the source of
+truth for Windows system import libraries. The manual Stage 3 relink
+(`scripts/bootstrap/p3-manual-link-stage3.shs`) writes its own literal clang
+line and the `.link-command.txt` it records; it lost `-lwinhttp` when the
+WinHTTP provider landed (e65e0e6b891, 2026-11-03), so every relinked s3 binary failed with
+undefined `WinHttp*` symbols. Bug: mingw_manual_link_missing_winhttp_2026-11-05.
+"""
+
+# @tag: unit, compiler, backend, linker, windows
+
+use std.spec
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn read_or_empty(path: text) -> text:
+    val t = rt_file_read_text(path)
+    if t.?:
+        return t ?? ""
+    ""
+
+fn driver_mingw_libs() -> [text]:
+    val src = read_or_empty("src/compiler/70.backend/linker/_LinkerWrapper/shared_linking.spl")
+    val marker = "val mingw_libs = ["
+    val start = src.index_of(marker)
+    if start < 0:
+        return []
+    val rest = src.substring(start + marker.len())
+    val list_text = rest.substring(0, rest.index_of("]"))
+    var libs: [text] = []
+    for part in list_text.split(","):
+        val name = part.trim().replace("\"", "")
+        if name.len() > 0:
+            libs = libs.push(name)
+    libs
+
+fn missing_libs(line_src: text, libs: [text]) -> [text]:
+    var missing: [text] = []
+    for lib in libs:
+        if not line_src.contains("-l{lib} "):
+            missing = missing.push(lib)
+    missing
+
+describe "MinGW system library parity":
+    it "reads a non-empty driver mingw_libs list including winhttp":
+        val libs = driver_mingw_libs()
+        expect(libs.len()).to_be_greater_than(5)
+        expect(libs.contains("winhttp")).to_equal(true)
+
+    it "manual stage3 relink line carries every driver system lib":
+        val script = read_or_empty("scripts/bootstrap/p3-manual-link-stage3.shs")
+        expect(script.len()).to_be_greater_than(0)
+        expect(missing_libs(script, driver_mingw_libs())).to_equal([])
+
+    it "detects a dropped library (guard is not vacuous)":
+        val line = "clang -lkernel32 -lws2_32 -lmswsock -o x"
+        expect(missing_libs(line, ["kernel32", "winhttp"])).to_equal(["winhttp"])
+
+    it "native-all link line carries the network libs (winhttp, ws2_32, mswsock, bcrypt)":
+        val src = read_or_empty("src/compiler/70.backend/linker/_LinkerWrapper/native_all_support.spl")
+        for lib in ["kernel32", "ws2_32", "winhttp", "mswsock", "bcrypt", "userenv", "ntdll"]:
+            expect(src.contains("\"-l{lib}\"")).to_equal(true)
+
+    it "both shared_linking mingw_libs lists agree on the network subset":
+        val src = read_or_empty("src/compiler/70.backend/linker/_LinkerWrapper/shared_linking.spl")
+        val second = "val mingw_libs = [\"kernel32\", \"ws2_32\", \"winhttp\", \"mswsock\", \"bcrypt\", \"userenv\", \"ntdll\"]"
+        expect(src.contains(second)).to_equal(true)

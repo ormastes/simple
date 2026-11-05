@@ -63,9 +63,9 @@ fn compiler_alias_present_v1(base: text, relative: text) -> bool?:
     nil
 
 fn compiler_inventory_aliases_v1(root: text, scopes: [text]) -> CompilerInventoryAliasesV1?:
-    val checkout_result = path_final_existing(root)
-    if checkout_result.is_err(): return nil
-    val checkout = checkout_result.unwrap()
+    val checkout = match path_final_existing(root):
+        case Ok(value): value
+        case Err(_): return nil
     val base = compile_source_inventory_plain_checkout_v1(checkout.path)
     val listed = compiler_alias_git_paths_v1(base, scopes)
     if listed == nil: return nil
@@ -86,9 +86,9 @@ fn compiler_inventory_aliases_v1(root: text, scopes: [text]) -> CompilerInventor
         # Existing non-directory links are outside this directory adapter.
         # An unresolved tracked link remains fail-closed: it might name a
         # formerly admitted directory, so guessing file-kind loses authority.
-        val owner_result = path_final_existing(alias)
-        if owner_result.is_err(): return nil
-        val owner = owner_result.unwrap()
+        val owner = match path_final_existing(alias):
+            case Ok(value): value
+            case Err(_): return nil
         if not dir_exists(alias): continue
         if not path_identity_contains(checkout, owner) or path_identity_same(checkout, owner): return nil
         val physical = compile_source_inventory_plain_checkout_v1(owner.path)
@@ -119,22 +119,25 @@ fn compiler_inventory_aliases_v1(root: text, scopes: [text]) -> CompilerInventor
             val source_present = compiler_alias_present_v1(base, child.path)
             if source_present == nil: return nil
             if not source_present!: continue
-            val resolved_result = path_final_existing(source)
-            if resolved_result.is_err(): return nil
-            val resolved = resolved_result.unwrap()
+            val resolved = match path_final_existing(source):
+                case Ok(value): value
+                case Err(_): return nil
             if not path_identity_contains(owner, resolved): return nil
-            val content = file_read_regular_no_follow_bounded(source, 64 * 1024 * 1024)
-            if content.is_err(): return nil
-            val after = path_final_existing(alias)
-            if after.is_err(): return nil
-            if not path_identity_same(owner, after.unwrap()): return nil
-            val source_after = path_final_existing(source)
-            if source_after.is_err(): return nil
-            if not path_identity_same(resolved, source_after.unwrap()): return nil
+            val content = match file_read_regular_no_follow_bounded(source, 64 * 1024 * 1024):
+                case Ok(value): value
+                case Err(_): return nil
+            val after = match path_final_existing(alias):
+                case Ok(value): value
+                case Err(_): return nil
+            if not path_identity_same(owner, after): return nil
+            val source_after = match path_final_existing(source):
+                case Ok(value): value
+                case Err(_): return nil
+            if not path_identity_same(resolved, source_after): return nil
             if seen.has(identity): return nil
             seen[identity] = true
             paths.push(identity)
-            events.push(compile_source_inventory_git_event_v1("modify", identity, content.unwrap()))
+            events.push(compile_source_inventory_git_event_v1("modify", identity, content))
     # Resolution/readback assumes a trusted, stable checkout parent, matching
     # path_identity and snapshot admission. This is not dirfd-pinned protection
     # against hostile remove-and-restore races. Snapshot materialization still

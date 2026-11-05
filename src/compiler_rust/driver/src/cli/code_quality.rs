@@ -263,6 +263,12 @@ fn collect_spipe_quality_diagnostics(path: &Path, source: &str) -> Vec<Diagnosti
                 || normalized.contains("to_end_with(")
                 || normalized.contains("to_be_greater_than(")
                 || normalized.contains("to_be_less_than(")
+                || normalized.contains("assert_true(")
+                || normalized.contains("assert_false(")
+                || normalized.contains("assert_equal(")
+                || normalized.contains("assert_not_equal(")
+                || normalized.contains("assert_contains(")
+                || normalized.contains("assert_nil(")
         });
         let has_skip = statements.iter().any(|stmt| {
             let normalized = compact(stmt);
@@ -1604,5 +1610,45 @@ pub fn run_fmt(args: &[String]) -> i32 {
                 1
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spipe005_accepts_standalone_assertion_family_and_rejects_empty_example() {
+        for assertion in [
+            "assert_true",
+            "assert_false",
+            "assert_equal",
+            "assert_not_equal",
+            "assert_contains",
+            "assert_nil",
+        ] {
+            let source = format!("it \"uses {assertion}\":\n    {assertion}(true)\n");
+            let diagnostics = collect_spipe_quality_diagnostics(Path::new("assertion_family_spec.spl"), &source);
+            assert!(
+                !diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.code.as_deref() == Some("SPIPE005")),
+                "{assertion} must count as a real assertion: {diagnostics:?}"
+            );
+        }
+
+        let diagnostics = collect_spipe_quality_diagnostics(
+            Path::new("missing_assertion_spec.spl"),
+            "it \"has no assertion\":\n    val x = 1\n",
+        );
+        let spipe005: Vec<_> = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code.as_deref() == Some("SPIPE005"))
+            .collect();
+        assert_eq!(
+            spipe005.len(),
+            1,
+            "example without assertions must still fail: {diagnostics:?}"
+        );
     }
 }

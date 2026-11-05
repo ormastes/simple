@@ -796,6 +796,21 @@ impl Lowerer {
         args: &[ast::Argument],
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
+        let expected = match self.module.types.get(type_id) {
+            Some(HirType::Enum { variants, .. }) => variants
+                .iter()
+                .find(|(name, _)| name == member)
+                .map(|(_, fields)| fields.as_ref().map_or(0, Vec::len)),
+            _ => None,
+        };
+        if let Some(expected) = expected {
+            if expected != args.len() {
+                return Err(LowerError::Unsupported(format!(
+                    "enum construction `{type_name}.{member}`: payload arity mismatch: expected {expected}, got {}",
+                    args.len()
+                )));
+            }
+        }
         let args_hir = self.lower_call_args(args, ctx)?;
         Ok(HirExpr {
             kind: HirExprKind::Call {

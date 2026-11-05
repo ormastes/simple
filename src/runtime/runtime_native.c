@@ -4436,10 +4436,34 @@ int64_t rt_string_new_literal(const uint8_t* bytes, uint64_t len) {
     return value;
 }
 
+/* A raw `char*` that is exactly the `data` member of a live registered heap
+ * string (the rt_interp_cstr decode used by `t!`, `match Some(s)`, `if val`,
+ * `.unwrap()` and `??` on a `text?`) still owns a length. strlen() on it cut
+ * binary-capable text at the first NUL (bug
+ * optional_text_unwrap_truncates_at_nul_2026-10-25: SCV digested 4158 of
+ * 11465 bytes). Same validation order as rt_core_transient_text_data_pointer:
+ * cheap rejects, then registry membership BEFORE the header is read, so an
+ * arbitrary pointer (e.g. a .rodata literal) is never dereferenced. */
+static RtCoreString* rt_core_string_from_data_pointer(int64_t value) {
+    const uint64_t data_off = offsetof(RtCoreString, data);
+    uint64_t w = (uint64_t)value;
+    if ((w & (sizeof(uint64_t) - 1)) != 0 || w <= 0x10000 + data_off) return NULL;
+    if (rt_core_immortal_registry_len == 0 && !rt_core_immortal_frozen) return NULL;
+    RtCoreString* s = (RtCoreString*)(uintptr_t)(w - data_off);
+    if (!rt_core_is_registered_immortal_ptr(s) ||
+            rt_core_registered_object_kind(s) != RT_VALUE_HEAP_STRING) {
+        return NULL;
+    }
+    return s;
+}
+
 int64_t rt_string_len(int64_t string) {
     RtCoreString* s = rt_core_as_string(string);
     if (s) return (int64_t)s->len;
-    return string >= 0x10000 ? (int64_t)strlen((const char*)(uintptr_t)string) : -1;
+    if (string < 0x10000) return -1;
+    RtCoreString* owner = rt_core_string_from_data_pointer(string);
+    if (owner) return (int64_t)owner->len;
+    return (int64_t)strlen((const char*)(uintptr_t)string);
 }
 
 /* The raw-pointer fallback MUST mirror rt_string_len's, with the identical
@@ -8810,6 +8834,11 @@ int64_t rt_dma_cache_line_size(void) {
  * ================================================================ */
 
 int64_t rt_strlen(const char* s) {
+    /* `.len()` and tag_str_local_if_raw (rt_strlen + rt_string_new re-tag) on
+     * a raw text local: keep the owning heap string's length so an embedded
+     * NUL does not truncate (optional_text_unwrap_truncates_at_nul_2026-10-25). */
+    RtCoreString* owner = rt_core_string_from_data_pointer((int64_t)(uintptr_t)s);
+    if (owner) return (int64_t)owner->len;
     return spl_str_len(s);
 }
 
@@ -20549,13 +20578,16 @@ void rt_trap_unimplemented(const char *symbol) {
 
 /* ---- Option / Result construction -------------------------------------
  * Mirrors rt_option_some/rt_option_none in the Rust runtime, which build a
- * canonical enum with the reserved Option enum_id 1 and the stable 32-bit
- * variant-name hashes. Result has no reserved enum_id; the same hashes are
- * already the identification key used by rt_unwrap_or_trap above, so Ok/Err
- * are constructed with them here. Keeping these four consistent with
+ * canonical enum with the reserved Option enum_id 1 and positional
+ * discriminants (Some=0, None=1; Ok=0, Err=1), the convention shared with
+ * pure-Simple MIR and the seed's hash_variant_discriminant. Legacy hashed
+ * Some/None/Ok/Err tags from already-built objects are still accepted by
+ * unwrap/try. Keeping these consistent with
  * rt_unwrap_or_trap is what makes `?`/`??`/`.unwrap()` agree. */
 #define SPL_OPTION_ENUM_ID   1
 #define SPL_RESULT_ENUM_ID   2
+/* Legacy hashed Option tags: already-built stage objects may still carry
+ * them, so unwrap/try keep accepting them alongside the positional ones. */
 #define SPL_HASH_SOME 4053299545u
 #define SPL_HASH_NONE 2371748697u
 #define SPL_HASH_OK   2405352012u
@@ -20567,8 +20599,9 @@ void rt_trap_unimplemented(const char *symbol) {
  * runtime, the one the bootstrap/native lane actually links, only ever
  * MENTIONED it in a comment. Semantics transcribed from the pure-Simple
  * definition in src/runtime/simple_core/core_values.spl:78, which is the
- * canonical one: ordinal discriminants for the reserved Option enum_id 1, and
- * the stable 32-bit variant-name hashes for Result, which has no reserved id. */
+ * canonical one: ordinal discriminants for Option (id 1) and Result (id 2
+ * plus the legacy untagged id 0 used by pure-Simple MIR); older hashed
+ * Result values are still matched by Ok/Err name hash. */
 int64_t rt_unwrap_or_trap(int64_t value) {
     int64_t enum_id = rt_enum_id(value);
     int64_t discriminant;
@@ -20583,6 +20616,13 @@ int64_t rt_unwrap_or_trap(int64_t value) {
         }
         return value;
     }
+    if ((enum_id == SPL_RESULT_ENUM_ID || enum_id == 0) && discriminant == 0) return rt_enum_payload(value);
+    if ((enum_id == SPL_RESULT_ENUM_ID || enum_id == 0) && discriminant == 1) {
+        fprintf(stderr, "simple runtime: .unwrap() called on Err\n");
+        fflush(stderr);
+        abort();
+    }
+    /* Untagged legacy Result lane (no reserved id) still carries name hashes. */
     if (discriminant == (int64_t)SPL_HASH_OK) return rt_enum_payload(value);
     if (discriminant == (int64_t)SPL_HASH_ERR) {
         fprintf(stderr, "simple runtime: .unwrap() called on Err\n");
@@ -20593,19 +20633,19 @@ int64_t rt_unwrap_or_trap(int64_t value) {
 }
 
 int64_t rt_option_some(int64_t payload) {
-    return rt_enum_new(SPL_OPTION_ENUM_ID, (int32_t)SPL_HASH_SOME, payload);
+    return rt_enum_new(SPL_OPTION_ENUM_ID, 0, payload);
 }
 
 int64_t rt_option_none(void) {
-    return rt_enum_new(SPL_OPTION_ENUM_ID, (int32_t)SPL_HASH_NONE, rt_value_nil());
+    return rt_enum_new(SPL_OPTION_ENUM_ID, 1, rt_value_nil());
 }
 
 int64_t rt_result_ok(int64_t payload) {
-    return rt_enum_new(SPL_RESULT_ENUM_ID, (int32_t)SPL_HASH_OK, payload);
+    return rt_enum_new(SPL_RESULT_ENUM_ID, 0, payload);
 }
 
 int64_t rt_result_err(int64_t payload) {
-    return rt_enum_new(SPL_RESULT_ENUM_ID, (int32_t)SPL_HASH_ERR, payload);
+    return rt_enum_new(SPL_RESULT_ENUM_ID, 1, payload);
 }
 
 /* `?` propagation: yield the Some/Ok payload, otherwise hand the wrapper back

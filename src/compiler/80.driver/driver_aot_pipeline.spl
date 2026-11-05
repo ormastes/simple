@@ -36,6 +36,8 @@ use compiler.driver.driver_build.native_mir_shard.{NATIVE_MIR_SHARD_QUEUE_ENV_V1
     native_mir_shard_link_ledger_v1, native_mir_shard_publish_pass_v1,
     native_mir_shard_link_inputs_v1, native_mir_shard_module_passed_v1,
     native_mir_shard_smf_part_write_v1, native_mir_shard_smf_part_read_v1}
+use compiler.driver.driver_build.smf_object_spool_v1.{smf_object_spool_put_v1,
+    smf_object_spool_has_v1, smf_object_spool_get_v1, smf_object_spool_release_v1}
 use compiler.driver.driver_build.smf_staged_parts_v1.{smf_staged_output_format_refusal_v1,
     smf_part_encode_v1, smf_part_decode_ok_v1, smf_part_decode_object_v1,
     smf_part_decode_manifest_v1}
@@ -880,7 +882,8 @@ impl CompilerDriver:
                 val part = part_read.unwrap()
                 if not smf_part_decode_ok_v1(part):
                     return CompileResult.CodegenError("MIR shard SMF part malformed: {part_module}")
-                self.native_staged_codegen.smf_part_objects[part_module] = smf_part_decode_object_v1(part)
+                self.native_staged_codegen.smf_part_objects = smf_object_spool_put_v1(
+                    self.native_staged_codegen.smf_part_objects, part_module, smf_part_decode_object_v1(part))
                 self.native_staged_codegen.smf_part_manifests[part_module] = smf_part_decode_manifest_v1(part)
         print "[mir-shard] link modules={inputs.modules.len()} objects={inputs.object_files.len()} objectless={inputs.objectless}"
         val output = self.ctx.options.output_file ?? _driver_default_output(self.ctx.options.input_files)
@@ -904,11 +907,16 @@ impl CompilerDriver:
         for claimed_name in self.native_staged_codegen.shard_claimed_names:
             var part_object: [u8] = []
             var part_manifest: [u8] = []
-            if self.native_staged_codegen.smf_part_objects.contains_key(claimed_name):
-                part_object = self.native_staged_codegen.smf_part_objects[claimed_name]
+            if smf_object_spool_has_v1(self.native_staged_codegen.smf_part_objects, claimed_name):
+                val spooled = smf_object_spool_get_v1(self.native_staged_codegen.smf_part_objects, claimed_name)
+                if spooled.is_err():
+                    return "MIR shard SMF part spool read failed: {spooled.unwrap_err()}"
+                part_object = spooled.unwrap()
                 part_manifest = self.native_staged_codegen.smf_part_manifests[claimed_name]
             if not native_mir_shard_smf_part_write_v1(queue, claimed_name,
                     smf_part_encode_v1(part_object, part_manifest)):
                 return "MIR shard SMF part write failed: {claimed_name}"
+        self.native_staged_codegen.smf_part_objects = smf_object_spool_release_v1(
+            self.native_staged_codegen.smf_part_objects)
         ""
 use compiler.common.diagnostics.span.{Span}

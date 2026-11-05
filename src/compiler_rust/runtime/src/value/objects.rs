@@ -359,11 +359,94 @@ pub fn closure_pin_stats() -> (i64, i64, i64) {
 /// at every site); it is kept out of the positional slots 0/1 so it can never
 /// alias `Err`/`None`. See
 /// doc/08_tracking/bug/enum_discriminant_convention_split_hashed_seed_vs_positional_pure_simple_2026-08-08.md.
+/// Per-variant-name positional discriminant registry (lockless DashMap).
+///
+/// Pure-Simple and the C runtime use the declaration index as the enum
+/// discriminant. Seed sites that only know a variant name resolve it here:
+/// every registered enum declaring `name` at the same index makes that index
+/// the discriminant. The first answer for a name is pinned so that a later,
+/// conflicting registration can never make construction and match disagree
+/// inside one process; a name declared at different indexes before its first
+/// use is ambiguous and keeps the legacy name-derived tag.
+mod positional_registry {
+    use dashmap::DashMap;
+    use std::sync::OnceLock;
+
+    #[derive(Clone, Copy)]
+    enum Slot {
+        Index(u32),
+        Ambiguous,
+    }
+
+    fn slots() -> &'static DashMap<String, Slot> {
+        static SLOTS: OnceLock<DashMap<String, Slot>> = OnceLock::new();
+        SLOTS.get_or_init(DashMap::new)
+    }
+
+    fn pinned() -> &'static DashMap<String, Slot> {
+        static PINNED: OnceLock<DashMap<String, Slot>> = OnceLock::new();
+        PINNED.get_or_init(DashMap::new)
+    }
+
+    pub fn register<'a>(variants: impl IntoIterator<Item = &'a str>) {
+        for (index, name) in variants.into_iter().enumerate() {
+            let index = index as u32;
+            slots()
+                .entry(name.to_string())
+                .and_modify(|slot| {
+                    if let Slot::Index(existing) = *slot {
+                        if existing != index {
+                            *slot = Slot::Ambiguous;
+                            // A conflict arriving after the name was already
+                            // answered positionally cannot be undone: fail loud
+                            // instead of letting seed and pure-Simple disagree.
+                            if let Some(p) = pinned().get(name) {
+                                if let Slot::Index(pinned_index) = *p {
+                                    eprintln!(
+                                        "simple: enum variant `{name}` declared at index {index} after it was \
+                                         already resolved positionally to {pinned_index}; discriminant is \
+                                         registration-order dependent (see #6953)"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                })
+                .or_insert(Slot::Index(index));
+        }
+    }
+
+    pub fn lookup(name: &str) -> Option<u32> {
+        if let Some(slot) = pinned().get(name) {
+            return match *slot {
+                Slot::Index(index) => Some(index),
+                Slot::Ambiguous => None,
+            };
+        }
+        // Unregistered names are not pinned: the declaration may still arrive.
+        let slot = *slots().get(name)?;
+        let slot = *pinned().entry(name.to_string()).or_insert(slot);
+        match slot {
+            Slot::Index(index) => Some(index),
+            Slot::Ambiguous => None,
+        }
+    }
+}
+
+/// Register an enum declaration's variants in declaration order so that
+/// `hash_variant_discriminant` yields the positional (pure-Simple) index.
+pub fn register_enum_variants<'a>(variants: impl IntoIterator<Item = &'a str>) {
+    positional_registry::register(variants);
+}
+
 pub fn hash_variant_discriminant(variant_name: &str) -> u32 {
     match variant_name {
         "Ok" | "Some" => return 0,
         "Err" | "None" => return 1,
         _ => {}
+    }
+    if let Some(index) = positional_registry::lookup(variant_name) {
+        return index;
     }
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -477,11 +560,11 @@ pub extern "C" fn rt_unwrap_or_self(value: RuntimeValue) -> RuntimeValue {
 /// receiver unchanged — see
 /// doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
 ///
-/// `Result` has no reserved enum_id (it is registered like any other
-/// stdlib/user enum), so `Ok`/`Err` are identified the same way
-/// `is_ok`/`is_err` already do in codegen: by discriminant-hash comparison
-/// against the canonical variant names, not by enum_id. A receiver that is
-/// neither Option nor Result (an arbitrary user enum) falls back to the old
+/// `Result` has no single reserved enum_id across the native runtimes, so
+/// `Ok`/`Err` are identified by the canonical discriminant helper rather than
+/// by enum_id. Builtins use positional tags; older custom variants retain
+/// their registered or name-derived tags. A receiver that is neither Option
+/// nor Result (an arbitrary user enum) falls back to the old
 /// "return self" behavior, unchanged from `rt_unwrap_or_self` — widening
 /// unwrap-trap semantics to arbitrary user enums is out of scope here.
 /// Formation probe for heap-typed enum/Option payloads at fail-closed
