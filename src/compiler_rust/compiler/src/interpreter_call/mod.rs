@@ -47,6 +47,33 @@ type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 
 const METHOD_SELF: &str = "self";
 
+fn enum_variant_arity_error(enum_name: &str, variant_name: &str, expected: usize, actual: usize) -> CompileError {
+    let ctx = ErrorContext::new()
+        .with_code(codes::ARGUMENT_COUNT_MISMATCH)
+        .with_help(format!("pass exactly {expected} payload argument(s)"));
+    CompileError::semantic_with_context(
+        format!(
+            "enum construction `{enum_name}.{variant_name}`: payload arity mismatch: expected {expected}, got {actual}"
+        ),
+        ctx,
+    )
+}
+
+pub(crate) fn validate_enum_variant_arity(
+    enum_def: &EnumDef,
+    variant_name: &str,
+    actual: usize,
+) -> Result<(), CompileError> {
+    let Some(variant) = enum_def.variants.iter().find(|variant| variant.name == variant_name) else {
+        return Ok(());
+    };
+    let expected = variant.fields.as_ref().map_or(0, Vec::len);
+    if actual == expected {
+        return Ok(());
+    }
+    Err(enum_variant_arity_error(&enum_def.name, variant_name, expected, actual))
+}
+
 /// Cached `SIMPLE_DEBUG_OVERLOAD_SELECT` flag. This is read on the hot overload-
 /// resolution path (per candidate, per param, and recursively per array element),
 /// where calling `std::env::var_os` every time is pathologically slow — it locks
@@ -1099,6 +1126,7 @@ pub(crate) fn evaluate_call(
             }
             if let Some(enum_def) = enum_def_opt {
                 if enum_def.variants.iter().any(|v| &v.name == field) {
+                    validate_enum_variant_arity(&enum_def, field, args.len())?;
                     let payload = if args.is_empty() {
                         None
                     } else if args.len() == 1 {
@@ -1139,6 +1167,7 @@ pub(crate) fn evaluate_call(
                 crate::interpreter::BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(module_name).cloned())
             {
                 if enum_def.variants.iter().any(|v| &v.name == field) {
+                    validate_enum_variant_arity(&enum_def, field, args.len())?;
                     let payload = if args.is_empty() {
                         None
                     } else if args.len() == 1 {
@@ -1297,6 +1326,7 @@ pub(crate) fn evaluate_call(
                 .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(type_name).cloned()));
             if let Some(enum_def) = path_enum_def.as_ref() {
                 if enum_def.variants.iter().any(|v| &v.name == method_name) {
+                    validate_enum_variant_arity(enum_def, method_name, args.len())?;
                     let payload = if args.is_empty() {
                         None
                     } else if args.len() == 1 {
@@ -1444,10 +1474,11 @@ pub(crate) fn evaluate_call(
 
             // Special handling for built-in Option and Result types
             if type_name == "Option" && (method_name == "Some" || method_name == "None") {
+                let expected = usize::from(method_name == "Some");
+                if args.len() != expected {
+                    return Err(enum_variant_arity_error(type_name, method_name, expected, args.len()));
+                }
                 let payload = if method_name == "Some" {
-                    if args.is_empty() {
-                        return Err(CompileError::semantic("Option.Some requires one argument"));
-                    }
                     Some(Box::new(evaluate_expr(
                         &args[0].value,
                         env,
@@ -1476,11 +1507,8 @@ pub(crate) fn evaluate_call(
             }
 
             if type_name == "Result" && (method_name == "Ok" || method_name == "Err") {
-                if args.is_empty() {
-                    return Err(CompileError::semantic(format!(
-                        "Result.{} requires one argument",
-                        method_name
-                    )));
+                if args.len() != 1 {
+                    return Err(enum_variant_arity_error(type_name, method_name, 1, args.len()));
                 }
                 let payload = Some(Box::new(evaluate_expr(
                     &args[0].value,
@@ -1619,6 +1647,7 @@ pub(crate) fn evaluate_call(
                 .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(type_name.as_str()).cloned()));
             if let Some(enum_def) = tail_enum_def.as_ref() {
                 if enum_def.variants.iter().any(|v| v.name == *method_name) {
+                    validate_enum_variant_arity(enum_def, method_name, args.len())?;
                     let payload = if args.is_empty() {
                         None
                     } else if args.len() == 1 {
@@ -1880,8 +1909,13 @@ pub(crate) fn evaluate_call(
             enum_name,
             variant_name,
         } => {
-            // Construct enum variant with payload
-            // Currently supports single payload value
+            let enum_def = crate::interpreter::owner_module_enum(&enum_name)
+                .or_else(|| enums.get(&enum_name).cloned())
+                .or_else(|| crate::interpreter::BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(&enum_name).cloned()))
+                .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(&enum_name).cloned()));
+            if let Some(enum_def) = enum_def {
+                validate_enum_variant_arity(&enum_def, &variant_name, args.len())?;
+            }
             let payload = if args.is_empty() {
                 None
             } else if args.len() == 1 {
