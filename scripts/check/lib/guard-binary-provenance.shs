@@ -12,8 +12,12 @@
 #   . "$ROOT/scripts/check/lib/guard-binary-provenance.shs"
 #   guard_require_binary "$SIMPLE" "$ROOT" selfhosted   # seed -> exit 2
 #   guard_require_binary "$SIMPLE" "$ROOT" any          # seed allowed
-# Staleness (binary older than src/compiler or src/lib *.spl) is exit 2 when
-# SIMPLE_REQUIRE_FRESH=1; otherwise it is reported via GUARD_BINARY_NOTE only.
+#   guard_require_native_build_binary "$SIMPLE" "$ROOT" # provenance + fresh
+# Self-hosted staleness covers src/compiler and src/lib *.spl. Seed staleness
+# covers src/compiler_rust and src/runtime, whose bytes are linked into that
+# producer. Staleness is exit 2 when SIMPLE_REQUIRE_FRESH=1; otherwise it is
+# reported via GUARD_BINARY_NOTE only. Native-build guards always require a
+# fresh producer and record resolved path, size, mtime, and --version output.
 # Seed detection = `--version` banner contains "bootstrap seed" (same probe as
 # check-lint-binary-staleness.shs; nm/strings are unsound for lineage).
 #
@@ -36,24 +40,67 @@ guard_require_binary() {
         exit 2
     fi
     _real=$(readlink -f "$_gb" 2>/dev/null || echo "$_gb")
-    if [ "$_gn" = "selfhosted" ] && guard_binary_is_seed "$_gb"; then
+    _gb_seed=0
+    if guard_binary_is_seed "$_gb"; then _gb_seed=1; fi
+    if [ "$_gn" = "selfhosted" ] && [ "$_gb_seed" -eq 1 ]; then
         echo "ERROR — nothing was checked: compiler '$_real' is the Rust bootstrap seed; this gate needs self-hosted behavior (set SIMPLE_BIN to a self-hosted build)"
         exit 2
     fi
-    _newer=$(find "$_gr/src/compiler" "$_gr/src/lib" -name '*.spl' -newer "$_real" -print 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$_gb_seed" -eq 1 ]; then
+        _gb_scope_a=src/compiler_rust
+        _gb_scope_b=src/runtime
+        _gb_name='*'
+    else
+        _gb_scope_a=src/compiler
+        _gb_scope_b=src/lib
+        _gb_name='*.spl'
+    fi
+    _newer=$(find "$_gr/$_gb_scope_a" "$_gr/$_gb_scope_b" -type f -name "$_gb_name" -newer "$_real" -print 2>/dev/null | wc -l | tr -d ' ')
     if [ "${_newer:-0}" -gt 0 ]; then
-        GUARD_BINARY_NOTE=" [STALE: '$_real' predates $_newer source file(s)]"
+        GUARD_BINARY_NOTE=" [STALE: '$_real' predates $_newer source file(s) under $_gb_scope_a and $_gb_scope_b]"
         if [ "${SIMPLE_REQUIRE_FRESH:-0}" = "1" ]; then
-            echo "ERROR — nothing was checked: compiler '$_real' is older than $_newer source file(s); SIMPLE_REQUIRE_FRESH=1"
+            echo "ERROR — nothing was checked: compiler '$_real' is older than $_newer source file(s) under $_gb_scope_a and $_gb_scope_b; SIMPLE_REQUIRE_FRESH=1"
             exit 2
         fi
     fi
     return 0
 }
 
+guard_require_native_build_binary() {
+    _gnb=$1; _gnr=$2
+    if [ ! -x "$_gnb" ] && [ -x "$_gnb.exe" ]; then _gnb="$_gnb.exe"; fi
+    if [ ! -x "$_gnb" ]; then
+        echo "ERROR — nothing was checked: native-build compiler '$_gnb' is not executable"
+        exit 2
+    fi
+    _gnb_real=$(readlink -f "$_gnb" 2>/dev/null || echo "$_gnb")
+    if ! _gnb_size=$(stat -c '%s' "$_gnb_real" 2>/dev/null); then
+        if ! _gnb_size=$(stat -f '%z' "$_gnb_real" 2>/dev/null); then _gnb_size=unknown; fi
+    fi
+    if ! _gnb_mtime=$(stat -c '%y' "$_gnb_real" 2>/dev/null); then
+        if ! _gnb_mtime=$(stat -f '%Sm' "$_gnb_real" 2>/dev/null); then _gnb_mtime=unknown; fi
+    fi
+    if _gnb_version_raw=$("$_gnb" --version 2>&1); then
+        _gnb_version_rc=0
+    else
+        _gnb_version_rc=$?
+    fi
+    _gnb_version=$(printf '%s' "$_gnb_version_raw" | tr '\r\n' '  ')
+    [ -n "$_gnb_size" ] || _gnb_size=unknown
+    [ -n "$_gnb_mtime" ] || _gnb_mtime=unknown
+    [ -n "$_gnb_version" ] || _gnb_version=unknown
+    echo "PROVENANCE — native-build compiler path='$_gnb_real' size=$_gnb_size mtime='$_gnb_mtime' version='$_gnb_version'"
+    if [ "$_gnb_size" = unknown ] || [ "$_gnb_mtime" = unknown ] || \
+       [ "$_gnb_version_rc" -ne 0 ] || [ "$_gnb_version" = unknown ]; then
+        echo "ERROR — nothing was checked: native-build compiler provenance is incomplete (version rc=$_gnb_version_rc)"
+        exit 2
+    fi
+    SIMPLE_REQUIRE_FRESH=1 guard_require_binary "$_gnb" "$_gnr" any
+}
+
 guard_binary_selftest() {
     _t=$(mktemp -d) || return 2
-    mkdir -p "$_t/src/compiler"
+    mkdir -p "$_t/src/compiler" "$_t/src/compiler_rust" "$_t/src/runtime"
     printf '#!/bin/sh\necho "simple bootstrap seed 1.0"\n' > "$_t/seed"
     printf '#!/bin/sh\necho "simple 1.0 self-hosted"\n' > "$_t/real"
     chmod +x "$_t/seed" "$_t/real"
@@ -68,13 +115,33 @@ guard_binary_selftest() {
     _o=$( (guard_require_binary "$_t/missing" "$_t" any) 2>&1 ); _rc=$?
     [ "$_rc" = 2 ] || { echo "SELFTEST FAILED — missing binary not exit 2"; _fail=1; }
     touch -d '2000-01-01' "$_t/real"; printf 'x\n' > "$_t/src/compiler/a.spl"
+    touch -d '2001-01-01' "$_t/src/compiler/a.spl"
     _o=$( (SIMPLE_REQUIRE_FRESH=1 guard_require_binary "$_t/real" "$_t" any) 2>&1 ); _rc=$?
     [ "$_rc" = 2 ] || { echo "SELFTEST FAILED — stale binary not rejected under SIMPLE_REQUIRE_FRESH=1"; _fail=1; }
     cp "$_t/real" "$_t/winbin.exe"
     (guard_require_binary "$_t/winbin" "$_t" any) >/dev/null 2>&1 \
         || { echo "SELFTEST FAILED — bare name with .exe sibling rejected"; _fail=1; }
+
+    _o=$( (guard_require_native_build_binary "$_t/real" "$_t") 2>&1 ); _rc=$?
+    { [ "$_rc" = 2 ] && case $_o in *"PROVENANCE — native-build compiler path='$_t/real' size="*"mtime="*"version='simple 1.0 self-hosted'"*"ERROR — nothing was checked"*) true;; *) false;; esac; } \
+        || { echo "SELFTEST FAILED — stale native-build producer not rejected with provenance (rc=$_rc): $_o"; _fail=1; }
+    touch -d '2002-01-01' "$_t/real"
+    _o=$( (guard_require_native_build_binary "$_t/real" "$_t") 2>&1 ); _rc=$?
+    { [ "$_rc" = 0 ] && case $_o in *"PROVENANCE — native-build compiler path='$_t/real' size="*"mtime="*"version='simple 1.0 self-hosted'"*) true;; *) false;; esac; } \
+        || { echo "SELFTEST FAILED — current native-build producer rejected or provenance missing (rc=$_rc): $_o"; _fail=1; }
+
+    touch -d '2000-01-01' "$_t/seed"; printf 'fn main() {}\n' > "$_t/src/compiler_rust/main.rs"
+    touch -d '2001-01-01' "$_t/src/compiler_rust/main.rs"
+    _o=$( (guard_require_native_build_binary "$_t/seed" "$_t") 2>&1 ); _rc=$?
+    { [ "$_rc" = 2 ] && case $_o in *"ERROR — nothing was checked"*"src/compiler_rust and src/runtime"*) true;; *) false;; esac; } \
+        || { echo "SELFTEST FAILED — stale seed producer not rejected against seed sources (rc=$_rc): $_o"; _fail=1; }
+    touch -d '2002-01-01' "$_t/seed"
+    _o=$( (guard_require_native_build_binary "$_t/seed" "$_t") 2>&1 ); _rc=$?
+    { [ "$_rc" = 0 ] && case $_o in *"version='simple bootstrap seed 1.0'"*) true;; *) false;; esac; } \
+        || { echo "SELFTEST FAILED — current seed producer rejected (rc=$_rc): $_o"; _fail=1; }
+
     rm -rf "$_t"
-    if [ "$_fail" = 0 ]; then echo "PASS — 6 fixture(s) checked, provenance helper discriminates"; return 0; fi
+    if [ "$_fail" = 0 ]; then echo "PASS — 10 fixture(s) checked, provenance helper discriminates"; return 0; fi
     echo "FAIL — provenance helper selftest"; return 1
 }
 
