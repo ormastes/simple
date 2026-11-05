@@ -140,14 +140,19 @@ BOOTSTRAP_TREE_RSS_WORKER_MEM_MIB_DEFAULT=3300
 # A worker measured above floor x margin is evidence to raise the FLOOR here
 # (and in the bug record), not to widen the margin.
 BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB=16777216
+# Immutable defaults the env-resolution compares against, so repeated
+# resolutions in one shell stay anchored to the shipped policy.
+BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_DEFAULT_KIB=$BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB
 # Runaway margin over the floor, percent of the floor: a tree above
 # base + workers x floor x margin is a genuine runaway and is still killed
 # (exit 88); HIR growth over the post-load_sources floor stays admitted.
 BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT=150
+BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_DEFAULT_PCT=$BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT
 # Non-worker residue of the phase tree: build coordinator (measured 1.32 GiB,
 # 2026-10-27), verifier shell, campaign watchdog, interpreter test workers
 # (they run already-built binaries spec by spec; unmeasured, small).
 BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB=4194304
+BOOTSTRAP_TREE_RSS_PHASE_BASE_DEFAULT_KIB=$BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB
 # Upper bound on the whole-build phase timeout scale. The time budgets
 # (native internal 1800 s, row 3600 s, campaign 7200 s) were calibrated for the
 # REQUESTED worker count; when the plan fits fewer workers the same module
@@ -574,6 +579,52 @@ bootstrap_tree_rss_scaled_timeout() {
   export BOOTSTRAP_VERIFY_TIMEOUT_SOURCE BOOTSTRAP_VERIFY_TIMEOUT_SCALE
 }
 
+# Apply lane-local overrides of the whole-build phase worker pricing
+# (SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB / _MARGIN_PCT / _BASE_KIB).
+# Defaults price a COLD full-CLI build and stay the small-host protection;
+# warm-cache lanes and larger hosts may LOWER them, never raise them (raising
+# the floor or margin is a policy change, not a lane tuning, and a typo must
+# not silently buy a bigger reservation than admission would grant).
+# Returns 1 with bootstrap_tree_rss_refusal on a malformed or raising value.
+bootstrap_tree_rss_phase_pricing_resolve() {
+  case ${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB:-} in
+    "") ;;
+    *[!0-9]*|0)
+      bootstrap_tree_rss_refusal="tree RSS policy: SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB must be a positive decimal KiB value, got '${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB}'"
+      return 1 ;;
+    *)
+      [ "$SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB" -le "$BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_DEFAULT_KIB" ] || {
+        bootstrap_tree_rss_refusal="tree RSS policy: SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB may lower the phase worker floor (<= default ${BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_DEFAULT_KIB}) but not raise it, got '${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB}'"
+        return 1
+      }
+      BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB=$SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB ;;
+  esac
+  case ${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT:-} in
+    "") ;;
+    *[!0-9]*|0)
+      bootstrap_tree_rss_refusal="tree RSS policy: SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT must be a positive decimal percent, got '${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT}'"
+      return 1 ;;
+    *)
+      [ "$SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT" -le "$BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_DEFAULT_PCT" ] || {
+        bootstrap_tree_rss_refusal="tree RSS policy: SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT may lower the phase worker margin (<= default ${BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_DEFAULT_PCT}) but not raise it, got '${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT}'"
+        return 1
+      }
+      BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT=$SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT ;;
+  esac
+  case ${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB:-} in
+    "") ;;
+    *[!0-9]*|0)
+      bootstrap_tree_rss_refusal="tree RSS policy: SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB must be a positive decimal KiB value, got '${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB}'"
+      return 1 ;;
+    *)
+      [ "$SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB" -le "$BOOTSTRAP_TREE_RSS_PHASE_BASE_DEFAULT_KIB" ] || {
+        bootstrap_tree_rss_refusal="tree RSS policy: SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB may lower the phase base (<= default ${BOOTSTRAP_TREE_RSS_PHASE_BASE_DEFAULT_KIB}) but not raise it, got '${SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB}'"
+        return 1
+      }
+      BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB=$SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB ;;
+  esac
+}
+
 # bootstrap_tree_rss_whole_build_plan REQUESTED_WORKERS [REPO_ROOT]
 # Prices the Stage 2 compiler-tests phase by its real per-worker need
 # (BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB) instead of the compile-shard
@@ -613,6 +664,7 @@ bootstrap_tree_rss_whole_build_plan() {
     return 1
   }
   bootstrap_tree_rss_probe_host || return 1
+  bootstrap_tree_rss_phase_pricing_resolve || return 1
   btr_wb_worker=$(bootstrap_tree_rss_phase_worker_kib)
   btr_wb_one=$((BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB + btr_wb_worker))
   btr_wb_price="base ${BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB} KiB + worker floor ${BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB} KiB x ${BOOTSTRAP_TREE_RSS_PHASE_WORKER_MARGIN_PCT}%"
@@ -638,7 +690,7 @@ bootstrap_tree_rss_whole_build_plan() {
   bootstrap_tree_rss_plan_budget_kib=$btr_wb_budget
   btr_wb_fit=$(((btr_wb_budget - BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB) / btr_wb_worker))
   [ "$btr_wb_fit" -ge 1 ] || {
-    bootstrap_tree_rss_refusal="tree RSS policy: whole-build phase cannot fit one full-CLI build worker: host budget ${btr_wb_budget} KiB (${btr_wb_budget_bound}; host RAM via ${bootstrap_tree_rss_host_total_source}) is below the one-worker requirement ${btr_wb_one} KiB (${btr_wb_price}); free host memory (another lane?) or raise tree_rss_host_pct (max ${BOOTSTRAP_TREE_RSS_HOST_PCT_MAX})"
+    bootstrap_tree_rss_refusal="tree RSS policy: whole-build phase cannot fit one full-CLI build worker: host budget ${btr_wb_budget} KiB (${btr_wb_budget_bound}; host RAM via ${bootstrap_tree_rss_host_total_source}) is below the one-worker requirement ${btr_wb_one} KiB (${btr_wb_price}); free host memory (another lane?), raise tree_rss_host_pct (max ${BOOTSTRAP_TREE_RSS_HOST_PCT_MAX}), or lower the phase pricing for a warm-cache lane via SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB (<= ${BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB} KiB)"
     return 1
   }
   bootstrap_tree_rss_plan_workers=$btr_wb_fit

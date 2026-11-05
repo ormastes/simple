@@ -268,3 +268,14 @@ Last two live call sites fixed (caller-audited):
 
 Guard spec test/01_unit/compiler/semantics/bool_fn_tail_exists_check_spec.spl
 extended with both sites (10/10).
+
+## HB2 sweep 2026-11-05
+
+Census missed two shapes: a multi-line call whose tail line is `...).?`
+(`retained_binary_cas_verify_v1`, `src/app/build/scheduler/retained_binary_cas.spl`, `[u8]?`)
+and a `.?` as the last operand of an `and` chain
+(`_environment_variant_frontend_binding_live_v1`, `src/compiler/99.loader/`). Both now
+`!= nil`; guard spec extended (RED 2/2 before, GREEN 2/2 after). Still open, out of the
+bootstrap focus: `src/os/apps/simple_browser/main.spl:81` (`text_out.?`) and
+`src/os/kernel/loader/installed_artifact_catalog_v1.spl:339` (`i64?` `.?` — also treats
+0 alias bytes as false).

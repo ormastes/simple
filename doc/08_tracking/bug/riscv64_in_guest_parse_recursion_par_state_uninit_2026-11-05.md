@@ -437,3 +437,52 @@ wrap `rt_string_new` in the WINNING TU to trap if its RETURNED pointer lies
 inside the probe struct's block range (recorded at entry-init), printing the
 caller's ra. The first string constructed into the live block names the
 call site; the caller's destination computation then names the corruptor.
+
+---
+
+## 2026-11-06 — STRING-WRITER HUNT (PR #7028+1): allocation-entry traps caught make_probe16_zero's OWN arrays entering the recorded block; the header-wide cursor guard proves NO cursor EVER rewinds
+
+Experiments (in-guest, release-built seed, all probes reverted):
+
+1. **String/array-into-live-block traps in all three runtime TUs**
+   (rt_string_new/rt_array_new entry guards vs the entry probe's recorded
+   block [lo,hi)): fired as
+   `[STRTRAP-ghdl-arr-entry] p=0x88e888d0 ra=<inside make_probe16_zero's
+   6th array chain> lo=0x88e888c0 hi=0x88e88940` — i.e. the probe struct's
+   OWN constructor, mid-execution, allocating an array with the ghdl
+   cursor INSIDE the struct block it will eventually return. The recorded
+   block equals g_probe16's value, so this implies the struct block exists
+   before the mid-sequence array — with arrays-emitted-before-struct
+   (verified call order: 16x (value_int, array_new, push) THEN rt_alloc),
+   the only consistent reading is a SECOND construction pass over the
+   same block.
+2. **Header-wide cursor-rewind guard** (`rv_alloc` is per-TU static
+   inline; the guard was added to the shared header so ALL THREE TUs'
+   cursors are watched, each tagged): a bump cursor only increases, so
+   ANY decrease traps with the TU tag and victim ra. Across the full
+   boot: **NO TRAP**. Combined with the previous lane's ghdl-only guard
+   (also silent), NO cursor of ANY runtime TU is EVER rewound.
+
+So: the overlay RuntimeStrings inside the probe struct (and by
+extension par_state) are NOT produced by any allocation through any
+cursor, and no cursor is ever rewound. The strings MATERIALIZE inside
+live blocks. The remaining mechanism class: a DIRECT WRITE whose
+destination pointer equals a live-block interior address — the writer
+computes dst = base + offset where the pair (base, offset) is corrupt
+in a way that yields an in-use heap address, or follows a stale
+pointer table. Catching it needs a DATA watchpoint on the block
+(no riscv64 gdb on this host) or a write-probe: the next lane's
+experiment is a .bss canary pair AROUND a relocated probe struct is
+not applicable (the write targets the heap) — instead, guard pages are
+unavailable (no MMU), so the practical probe is: at spl_start, verify
+the probe struct's f2/f8 sentinel fields; if overwritten, scan the
+.trap-stale pointer registry... Given six consecutive lanes have
+closed around this defect with the allocator fully exonerated, the
+remaining hunt needs interactive debugging (QEMU gdb stub + a
+riscv-capable gdb built from source, or a scripted stub client speaking
+the RSP protocol directly — the stub is machine-readable and can
+implement the watchpoint in software by single-stepping, which is the
+recommended next step and is now precisely specified in this record).
+
+Cycles: 5 of 6. No production code changed (all probes reverted).
+bug_db.sdn untouched.
