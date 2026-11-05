@@ -1,0 +1,63 @@
+"""
+## Purpose and audience
+
+Regression guard for bug
+`string_interpolation_silently_evaluates_literal_braces_2026-07-28`:
+`"!{!0}"` silently became `"!true"` because `{!0}` parses as an expression.
+CINTERP001 warns when an interpolation inside a string literal references no
+identifier (a constant expression) — almost always literal text such as LLVM
+metadata, regex quantifiers or JSON. `{{` escaping silences it. For compiler
+engineers changing lint rules.
+"""
+use compiler.semantics.lint.constant_interpolation.{check_constant_interpolation}
+use compiler.tools.lint.static_rules.{static_lint_rule_table}
+
+fn ci_count(src: text) -> i64:
+    check_constant_interpolation(src, "probe.spl").len()
+
+describe "CINTERP001 constant interpolation":
+    it "flags the LLVM metadata incident shape {!0}":
+        expect(ci_count("val s = \"!llvm.dbg.cu = !{{!0}}\"\n")).to_equal(1)
+
+    it "flags a bare integer constant (regex quantifier)":
+        expect(ci_count("val r = \"a{{2}}\"\n")).to_equal(1)
+
+    it "flags constant arithmetic":
+        expect(ci_count("print \"x{{1+1}}\"\n")).to_equal(1)
+
+    it "flags comma constants":
+        expect(ci_count("val s = \"!{{!1, !2}}\"\n")).to_equal(1)
+
+    it "reports code and line number":
+        val fs = check_constant_interpolation("val a = 1\nval s = \"{{0}}\"\n", "probe.spl")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].line_num).to_equal(2)
+        expect(fs[0].code).to_equal("CINTERP001")
+
+    it "does not flag a real interpolation":
+        expect(ci_count("print \"got={{b}}\"\n")).to_equal(0)
+
+    it "does not flag an expression referencing a name":
+        expect(ci_count("print \"n={{x + 1}}\"\n")).to_equal(0)
+
+    it "does not flag the escaped double-brace form":
+        expect(ci_count("val s = \"!{{{{!0}}}}\"\n")).to_equal(0)
+
+    it "does not flag comment lines":
+        expect(ci_count("# \"!{{!0}}\"\n")).to_equal(0)
+
+    it "does not flag braces outside string literals":
+        expect(ci_count("val d = {{1: 2}}\n")).to_equal(0)
+
+    it "does not flag empty braces":
+        expect(ci_count("val s = \"{{}}\"\n")).to_equal(0)
+
+    it "does not flag raw single-quoted text":
+        expect(ci_count("val s = '!{{!0}}'\n")).to_equal(0)
+
+    it "is registered in the static lint rule table":
+        var found = false
+        for rule in static_lint_rule_table():
+            if rule.id() == "constant_interpolation":
+                found = true
+        expect(found).to_equal(true)

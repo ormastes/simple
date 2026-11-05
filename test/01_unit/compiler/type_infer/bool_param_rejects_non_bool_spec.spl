@@ -1,0 +1,67 @@
+"""
+## Purpose and audience
+
+Regression guard for bug
+`bool_typed_parameter_accepts_non_bool_and_jit_corrupts_it_2026-08-04`
+(half 1: "a `bool`-declared parameter accepts a non-bool silently").
+Drives the pure-Simple HM checker directly: an argument checked against a
+`bool` parameter type (`inference_expr_calls.spl:44`, `InferMode.Check`)
+must be rejected unless it is itself `bool`. Similar-pattern vectors cover
+`i64`, `text`, `i64?` and a literal int. For compiler engineers changing
+call-argument checking or `unify`.
+"""
+use compiler.types.type_infer_types.*
+use compiler.types.type_infer.context.*
+use compiler.types.type_infer.core.*
+use compiler.types.type_infer.inference_expr.*
+use compiler.hir.hir.*
+use compiler.frontend.core.lexer.*
+use compiler.common.diagnostics.span.{Span}
+
+fn bp_sp() -> Span:
+    lex_span_empty()
+
+fn bp_mk(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: bp_sp())
+
+fn bp_verdict(result: Result<(), TypeInferError>) -> text:
+    match result:
+        case Ok(_): "ok"
+        case Err(TypeInferError.Mismatch(_, _, _)): "mismatch"
+        case Err(_): "other-error"
+
+fn bp_check(expr: HirExpr, expected: HirType) -> text:
+    var ctx = HmInferContext.new()
+    match ctx.infer_expr(expr, InferMode.Check(expected)):
+        case Ok(_): "ok"
+        case Err(TypeInferError.Mismatch(_, _, _)): "mismatch"
+        case Err(_): "other-error"
+
+fn bp_unify(found: HirType) -> text:
+    var ctx = HmInferContext.new()
+    bp_verdict(ctx.unify(bp_mk(HirTypeKind.Bool), found))
+
+describe "bool parameter accepts only bool (HM checker)":
+    it "bool argument unifies with a bool parameter":
+        expect(bp_unify(bp_mk(HirTypeKind.Bool))).to_equal("ok")
+
+    it "i64 argument is rejected for a bool parameter":
+        expect(bp_unify(bp_mk(HirTypeKind.Int(64, true)))).to_equal("mismatch")
+
+    it "text argument is rejected for a bool parameter":
+        expect(bp_unify(bp_mk(HirTypeKind.Str))).to_equal("mismatch")
+
+    it "i64? argument is rejected for a bool parameter":
+        expect(bp_unify(bp_mk(HirTypeKind.Optional(bp_mk(HirTypeKind.Int(64, true)))))).to_equal("mismatch")
+
+    it "integer literal checked against bool is rejected (call-arg site)":
+        val lit = HirExpr(kind: HirExprKind.IntLit(42, nil), type_: nil, span: bp_sp())
+        expect(bp_check(lit, bp_mk(HirTypeKind.Bool))).to_equal("mismatch")
+
+    it "integer literal zero checked against bool is rejected":
+        val lit = HirExpr(kind: HirExprKind.IntLit(0, nil), type_: nil, span: bp_sp())
+        expect(bp_check(lit, bp_mk(HirTypeKind.Bool))).to_equal("mismatch")
+
+    it "bool literal checked against bool is accepted":
+        val lit = HirExpr(kind: HirExprKind.BoolLit(true), type_: nil, span: bp_sp())
+        expect(bp_check(lit, bp_mk(HirTypeKind.Bool))).to_equal("ok")

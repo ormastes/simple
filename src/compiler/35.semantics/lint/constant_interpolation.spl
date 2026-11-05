@@ -1,0 +1,114 @@
+# Constant String-Interpolation Lint
+#
+# CINTERP001: an interpolation `{...}` inside a double-quoted string literal
+#             whose content references no identifier                  WARNING
+#
+# Why: interpolation evaluates any brace content that parses as an
+# expression. `"!{!0}"` silently became `"!true"` (logical-not of 0) in the
+# LLVM IR builder; `{!1, !2}` survived only because the comma made it
+# unparseable. A real interpolation references a name; a constant one is
+# almost always literal text (LLVM metadata, regex quantifiers, JSON).
+# Escape with `{{`/`}}` to silence.
+#
+# Bug: doc/08_tracking/bug/string_interpolation_silently_evaluates_literal_braces_2026-07-28.md
+#
+# Text-heuristic (no AST dependency) so it runs in interpreter-mode specs,
+# matching leading_operator.spl.
+
+pub struct ConstantInterpolationFinding:
+    code: text
+    severity: text
+    message: text
+    note: text
+    line_num: i64
+
+fn _ci_is_name_char(ch: text) -> bool:
+    if ch == "_":
+        return true
+    val lower = "abcdefghijklmnopqrstuvwxyz"
+    val upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    lower.contains(ch) or upper.contains(ch)
+
+fn _ci_has_name(body: text) -> bool:
+    var i = 0
+    val len = body.len()
+    while i < len:
+        if _ci_is_name_char(body.substring(i, i + 1)):
+            return true
+        i = i + 1
+    false
+
+fn _ci_scan_line(line: text, line_num: i64) -> [ConstantInterpolationFinding]:
+    var out: [ConstantInterpolationFinding] = []
+    val len = line.len()
+    var in_dq = false
+    var in_sq = false
+    var raw = false
+    var i = 0
+    while i < len:
+        val ch = line.substring(i, i + 1)
+        if in_sq:
+            if ch == "\\":
+                i = i + 2
+                continue
+            if ch == "'":
+                in_sq = false
+            i = i + 1
+            continue
+        if not in_dq:
+            if ch == "#":
+                return out
+            if ch == "'":
+                in_sq = true
+            elif ch == "\"":
+                in_dq = true
+                raw = i > 0 and line.substring(i - 1, i) == "r"
+            i = i + 1
+            continue
+        # inside a double-quoted literal
+        if ch == "\\":
+            i = i + 2
+            continue
+        if ch == "\"":
+            in_dq = false
+            i = i + 1
+            continue
+        if ch == "{{" and not raw:
+            if i + 1 < len and line.substring(i + 1, i + 2) == "{{":
+                i = i + 2
+                continue
+            var j = i + 1
+            var closed = -1
+            while j < len:
+                val cj = line.substring(j, j + 1)
+                if cj == "}}" or cj == "\"":
+                    if cj == "}}":
+                        closed = j
+                    break
+                j = j + 1
+            if closed > i + 1:
+                val body = line.substring(i + 1, closed)
+                if body.trim() != "" and not _ci_has_name(body):
+                    out.push(ConstantInterpolationFinding(
+                        code: "CINTERP001",
+                        severity: "warning",
+                        message: "string interpolation `{{{body}}}` references no name and is evaluated as a constant",
+                        note: "write `{{{{` and `}}}}` if the braces are literal text",
+                        line_num: line_num))
+            if closed > 0:
+                i = closed + 1
+                continue
+        i = i + 1
+    out
+
+pub fn check_constant_interpolation(content: text, path: text) -> [ConstantInterpolationFinding]:
+    val _ = path
+    var findings: [ConstantInterpolationFinding] = []
+    var line_num = 0
+    for line in content.split("\n"):
+        line_num = line_num + 1
+        if line.trim().starts_with("#"):
+            continue
+        for f in _ci_scan_line(line, line_num):
+            findings.push(f)
+    findings
