@@ -73,3 +73,11 @@ Native closure admission cannot go green until the MIR/HIR closure failures are
 resolved: native_mir_lambda_and_enum_eq_block_caret_cs_2026_10_19 and
 caret_closure_enum_payload_binding_collection_gaps_2026_11_03. Both need a
 stage3 producer to enumerate remaining diagnostics (TEST_BLOCKED on seed).
+
+## 2026-11-05 note (mirp2-B)
+Misbucketed under "closures": this is native *link-closure admission* (runtime
+archive providers: tagged filesystem ABI, duplicate-safe thread callback), not
+lambda lowering. MIR lambda lowering itself is verified working natively
+(see native_mir_lambda_and_enum_eq_block_caret_cs_2026_10_19.md). Left OPEN;
+next step: admit a simple-core archive owning the tagged fs ABI and re-run the
+cache-preserving Caret closure probe.
