@@ -51,3 +51,5 @@ Source repairs landed in c9de4bdeaf0 (explicit trait-default slots, typed JSON,
 qualified patterns, Unicode predicates). Native cycle UNRUN: needs a rebuilt
 stage3 compiling the 15.blocks modules. The baked-producer omission of trait
 default slots itself is not fixed in the producer; only worked around in source.
+
+Repro/prevention (added 2026-11-05): native fixture test/fixtures/compiler/outline_block_trait_default_slots/main.spl (stage3 repro in its header; UNRUN natively), interpreter spec test/01_unit/compiler/bootstrap_regressions/outline_block_trait_default_slots_spec.spl (passes on bin/simple.exe).
