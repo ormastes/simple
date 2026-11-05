@@ -3044,11 +3044,7 @@ fn compile_known_enum_constructor_call<M: Module>(
         return true;
     };
 
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    variant_name.hash(&mut hasher);
-    let disc = (hasher.finish() & 0xFFFFFFFF) as i64;
+    let disc = simple_runtime::value::hash_variant_discriminant(variant_name) as i64;
     let enum_id_val = builder.ins().iconst(
         types::I32,
         i64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)),
@@ -3862,11 +3858,7 @@ pub fn compile_call<M: Module>(
         if let Some(d) = dest {
             // Use hashed discriminants consistently with pattern matching
             let disc = {
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                let mut hasher = DefaultHasher::new();
-                variant_name.hash(&mut hasher);
-                (hasher.finish() & 0xFFFFFFFF) as i64
+                simple_runtime::value::hash_variant_discriminant(variant_name) as i64
             };
             let enum_id_val = builder.ins().iconst(types::I32, builtin_enum_id);
             let disc_val = builder.ins().iconst(types::I32, disc);

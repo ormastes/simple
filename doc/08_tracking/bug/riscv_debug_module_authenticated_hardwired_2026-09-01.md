@@ -115,3 +115,33 @@ Remaining concerns (honest scope limits):
 Tracked as gate 6.4 in `doc/03_plan/hardware/simple_riscv_production_dft_svap_plan.md`,
 landing ADVISORY and honestly RED.
 
+## 2026-11-05 — Verification (work branch work/riscv-rtl-infra-20261105)
+
+Status: **already fixed at tip of release/1.0.0** (base c909eb427c3); the
+2026-11-05 FIXED section above (from work/libbug-linux-rvdbg-20261105) is
+present in this branch. Verified by source inspection:
+
+- No constant `authenticated` remains: `debug_registers.vhd:743` drives
+  `dmstatus_v(7) := authenticated_r`, a computed register reset to `'0'`
+  (:386) and set only by the lifecycle/authdata logic (:395-401, :672-674).
+- `lifecycle_i` fuse input exists on `riscv_debug_module.vhd` (:94) and the
+  SBA deny branch (`sberror_r <= "111"` while `authenticated_r = '0'`) is at
+  :332-333.
+- `tb_auth_gate.vhd` and the executable spec
+  `test/01_unit/lib/hardware/debug/dm_auth_gate_spec.spl` are both in-tree.
+
+Executable evidence (Rust seed binary, aarch64 host, interpreter mode):
+
+```
+SIMPLE_RUST_SEED_WARNING=0 timeout 120 \
+  /home/yoon/dev/simple/src/compiler_rust/target/bootstrap/simple test \
+  test/01_unit/lib/hardware/debug/dm_auth_gate_spec.spl --mode=interpreter
+```
+
+Outcome: `outcome=OK declared>=5 executed=5 passed=5 failed=0` — **5/5
+examples pass**, including the sabotage (non-vacuity) examples. Limitation:
+GHDL is not installed on this host (`command -v ghdl` → not found), so the
+VHDL testbench simulation itself was not re-run here; the prior GHDL 4.1.0
+evidence in the FIXED section stands, and the executable spec pins the same
+invariants against the current sources. No code change needed in this lane.
+

@@ -1,0 +1,81 @@
+# @req REQ-SSPEC-COMPILER
+# bug: phase2_candidate_native_smokes_access_violation_2026_11_02 (source audit)
+#
+# The 2026-11-02 stage2 candidate AV'd at MirToLlvm.translate_const+215 and
+# mir_expr_symbol_id_value+68 in candidate-COMPILED code. Source audit result:
+# - translate_const / translate_const_value match over MirConstValue, which has
+#   exactly 8 variants; all 8 are covered. A garbage discriminant used to fall
+#   through silently, so a defensive `case _` arm now records
+#   E-BACKEND-LLVM-CONST-GARBAGE via codegen_error (fail-closed: no object).
+# - mir_expr_symbol_id_value is the single field projection `symbol.id`; a
+#   fault there means the caller passed an invalid reference (value-transport
+#   miscompile), which has no in-language guard site.
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.*
+use compiler.mir.mir_types.{MirType}
+
+fn guard_generator(name: text) -> MirToLlvm:
+    val generator = MirToLlvm.create(name, CodegenTarget.X86_64, nil)
+    generator.allow_ambient_codegen_policy = false
+    generator.group_bootstrap_mode_set = true
+    generator.group_bootstrap_mode = false
+    generator
+
+describe "LLVM const translator garbage-discriminant guard":
+    it "translates all eight MirConstValue variants without a diagnostic":
+        step("Regression: the defensive arm must not fire on valid variants")
+        val i64_ty = MirType.i64()
+        val cases: [(MirConstValue, MirType)] = [
+            (MirConstValue.Int(5), i64_ty),
+            (MirConstValue.Float(1.5), MirType(kind: MirTypeKind.F64)),
+            (MirConstValue.Bool(true), MirType.bool()),
+            (MirConstValue.Str("hi"), MirType(kind: MirTypeKind.Opaque("str"))),
+            (MirConstValue.Zero, i64_ty),
+            (MirConstValue.FloatLexeme("2.5"), MirType(kind: MirTypeKind.F64)),
+            (MirConstValue.Array([]), MirType(kind: MirTypeKind.Array(i64_ty, -1))),
+            (MirConstValue.Tuple([]), MirType(kind: MirTypeKind.Tuple([i64_ty]))),
+            (MirConstValue.Struct({}), MirType(kind: MirTypeKind.Struct(SymbolId(id: 3))))]
+        for pair in cases:
+            val typed = guard_generator("test.const_guard.typed")
+            typed.translate_const(LocalId(id: 1), pair.0, pair.1)
+            expect(typed.codegen_errors.len()).to_equal(0)
+            val erased = guard_generator("test.const_guard.erased")
+            expect(erased.translate_const_value(pair.0).len()).to_be_greater_than(0)
+            expect(erased.codegen_errors.len()).to_equal(0)
+
+    it "emits real IR for representative scalar, string and aggregate constants":
+        step("The guard arm changes no valid-variant behavior")
+        val generator = guard_generator("test.const_guard.ir")
+        generator.translate_const(LocalId(id: 1), MirConstValue.Int(5), MirType.i64())
+        generator.translate_const(LocalId(id: 2), MirConstValue.Bool(true), MirType.bool())
+        generator.translate_const(LocalId(id: 3), MirConstValue.Str("hi"), MirType(kind: MirTypeKind.Opaque("str")))
+        generator.translate_const(LocalId(id: 4), MirConstValue.Array([]),
+            MirType(kind: MirTypeKind.Array(MirType.i64(), -1)))
+        val ir = generator.builder.build()
+        expect(ir).to_contain("%l1 = add i64 5, 0")
+        expect(ir).to_contain("%l2 = add i1 1, 0")
+        expect(ir).to_contain("getelementptr inbounds")
+        expect(ir).to_contain("zeroinitializer")
+        expect(generator.codegen_errors.len()).to_equal(0)
+        expect(generator.translate_const_value(MirConstValue.Int(7))).to_equal("7")
+        expect(generator.translate_const_value(MirConstValue.Bool(false))).to_equal("0")
+        expect(generator.codegen_errors.len()).to_equal(0)
+
+    it "carries a fail-closed catch-all for a garbage discriminant":
+        step("Source contract: both translators reject unknown discs via codegen_error")
+        val source = file_read("src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl")
+        expect(source).to_contain("E-BACKEND-LLVM-CONST-GARBAGE")
+        expect(source).to_contain("reached translate_const\"")
+        expect(source).to_contain("reached translate_const_value")
+
+    it "keeps the symbol-id accessor a single field projection":
+        step("Source contract: no fixable nil path exists inside the accessor itself")
+        val source = file_read("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
+        expect(source).to_contain("fn mir_expr_symbol_id_value(symbol: SymbolId) -> i64:")
+        expect(source).to_contain("    symbol.id")

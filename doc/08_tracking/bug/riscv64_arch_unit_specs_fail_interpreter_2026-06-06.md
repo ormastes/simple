@@ -87,3 +87,32 @@ x86_32_trap_model, hal_riscv64_phase_a, riscv64_ipc_destroy_port,
 riscv64_noalloc_pmm, riscv64_boot_tcp_policy, riscv64_freestanding_policy and
 others) show byte-identical verdicts before and after the change; the remaining
 failures among them pre-date this fix on release/1.0.0.
+
+## 2026-11-05 — Verification (work branch work/riscv-rtl-infra-20261105)
+
+Status: **already fixed at tip of release/1.0.0** (base c909eb427c3). Both
+root causes from the evidence above are present in the tree:
+`RV64_SSTATUS_FS_MASK` / `RV64_SSTATUS_FS_INITIAL` / `RV64_CONTEXT_BYTES` are
+defined in `src/os/kernel/arch/riscv64/trap_model.spl:22-26` and used in the
+initial sstatus values, and `riscv64_interrupt_spec.spl` publishes the boot
+hart identity fixture (`riscv_publish_boot_hart_identity_v1(read_tp())`).
+
+Re-verified all four specs under interpreter mode with the Rust seed binary
+(aarch64 host):
+
+```
+SIMPLE_RUST_SEED_WARNING=0 timeout 120 \
+  /home/yoon/dev/simple/src/compiler_rust/target/bootstrap/simple test \
+  test/01_unit/os/kernel/arch/<spec>_spec.spl --mode=interpreter
+```
+
+| Spec | Outcome 2026-11-05 |
+|------|--------------------|
+| riscv64_boot_spec.spl | 5 passed / 0 failed |
+| riscv64_interrupt_spec.spl | 10 passed / 0 failed |
+| riscv64_trap_frame_spec.spl | 4 passed / 0 failed |
+| riscv64_trap_model_spec.spl | 6 passed / 0 failed |
+
+All four report `outcome=OK`. Matches the "After" column of the 2026-11-05
+evidence table above; the fix from work/libbug-linux-rv64specs-20261105 has
+landed. No code change needed in this lane.

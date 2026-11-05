@@ -5443,7 +5443,16 @@ pub(crate) fn exec_match_core(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<(Control, Option<Value>), CompileError> {
-    let subject = evaluate_expr(&match_stmt.subject, env, functions, classes, enums, impl_methods)?;
+    // Read the subject through its place (index expressions evaluate exactly
+    // once) so the post-arm payload-binding merge can write back through it.
+    let (subject, subject_place) = crate::interpreter::interpreter_patterns::evaluate_match_subject(
+        &match_stmt.subject,
+        env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+    )?;
 
     // Check for strong enum - disallow wildcard/catch-all patterns
     if let Value::Enum { enum_name, .. } = &subject {
@@ -5505,6 +5514,20 @@ pub(crate) fn exec_match_core(
 
             // Execute the match arm body and capture both flow and value
             let result = exec_block_fn(&arm.body, env, functions, classes, enums, impl_methods);
+
+            // Carry container mutations made through this arm's payload
+            // bindings back into the match subject BEFORE the shadowed
+            // bindings are restored (restoring drops the mutated payload
+            // binding). Only shared containers move — scalar writes through a
+            // by-value payload binding keep value semantics. See
+            // doc/08_tracking/bug/seed_interpreter_cross_module_struct_field_read_zero_2026-11-05.md.
+            crate::interpreter::interpreter_patterns::merge_arm_bindings_into_subject(
+                subject_place.as_ref(),
+                &subject,
+                &arm.pattern,
+                env,
+                classes,
+            );
 
             // Restore shadowed values (or remove arm-only bindings) even on error
             for (name, prev) in shadowed.into_iter().rev() {
