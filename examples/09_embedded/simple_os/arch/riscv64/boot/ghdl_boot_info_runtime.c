@@ -149,7 +149,14 @@ int memcmp(const void *a, const void *b, size_t n)
 
 RuntimeValue rt_alloc(RuntimeValue size)
 {
-    size_t bytes = (size_t)simpleos_raw_or_encoded_int(size);
+    /* compile_struct_init passes RAW size (not tagged) -- the identical
+     * contract the x86_64 sibling documents at its baremetal_stubs.c:763
+     * and the other two riscv64 runtime TUs implement verbatim. Decoding
+     * here (simpleos_raw_or_encoded_int) divided every multiple-of-8 byte
+     * size by 8 (120 -> 15), under-allocating every struct literal and
+     * producing the in-guest par_state overlay
+     * (doc/08_tracking/bug/riscv64_in_guest_parse_recursion_par_state_uninit_2026-11-05.md). */
+    size_t bytes = (size_t)size;
     void *ptr = calloc(1, bytes);
     return ptr ? (RuntimeValue)(uintptr_t)ptr : 0;
 }
