@@ -39,3 +39,11 @@ Owner: RISC-V Gen2 scalar-retirement integration wave
 ## Triage 2026-09-13 (BUGFIX-7 lane)
 
 Out of lane: development-stage architectural product limitation (RISC-V Gen2 frontend), not a bounded bug fix. No change made.
+
+## Verification 2026-11-05 (riscv-sweep lane, work/riscv-sweep-20261105)
+
+Re-confirmed as a development-stage architectural product limitation; the
+2026-09-13 triage verdict (out of lane for a bounded bug fix) stands. No
+retirement-producer contract binding `dispatch_lineage` to a frozen
+`RetireRecord` producer, and no composed RV32/RV64 target evidence from parcel
+capture through retirement and reset, has landed at tip. Status: OPEN.

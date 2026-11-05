@@ -1,0 +1,62 @@
+# Bug smf_header_wire_layout_diverges_rust_vs_simple_2026-08-10: the cache
+# validator's SMF snapshot must locate the header and source_hash on a
+# Rust-seed repr(C) (96 B, +4) trailer.
+use std.spec.{describe, it, expect}
+use compiler.driver.cache.cache_validator.{SmfValidationSnapshot}
+use compiler.backend.linker.smf_writer.{SmfWriter}
+
+fn packed_artifact() -> [u8]:
+    var writer = SmfWriter.create()
+    val code: [i64] = [195]
+    writer.add_code_section("code", code)
+    val built = writer.write()
+    if built.is_err():
+        return []
+    var b: [u8] = []
+    for word in built.unwrap():
+        b.push(word as u8)
+    val hs = b.len() - 128
+    var i = 0
+    while i < 8:
+        b[hs + 68 + i] = (0x11 + i) as u8
+        i = i + 1
+    b
+
+fn to_seed_trailer(packed: [u8]) -> [u8]:
+    # Rewrite the packed 128-byte trailer as the Rust seed repr(C) 96-byte one:
+    # 0..20 unchanged, 4 zero padding bytes at 20..24, packed 20..92 moved to 24..96.
+    val hs = packed.len() - 128
+    var out: [u8] = []
+    var i = 0
+    while i < hs:
+        out.push(packed[i])
+        i = i + 1
+    i = 0
+    while i < 96:
+        if i < 20:
+            out.push(packed[hs + i])
+        else:
+            if i < 24:
+                out.push(0)
+            else:
+                out.push(packed[hs + i - 4])
+        i = i + 1
+    out
+describe "cache validator SMF snapshot header layouts":
+    it "reads the packed trailer at EOF-128 with source_hash at +68":
+        val packed = packed_artifact()
+        val snap = SmfValidationSnapshot(data: packed)
+        expect(snap.valid_header()).to_equal(true)
+        expect(snap.header_start()).to_equal(packed.len() - 128)
+        expect(snap.source_hash()).to_equal(0x1817161514131211)
+
+    it "reads the Rust seed trailer at EOF-96 with source_hash at +72":
+        val seed = to_seed_trailer(packed_artifact())
+        val snap = SmfValidationSnapshot(data: seed)
+        expect(snap.valid_header()).to_equal(true)
+        expect(snap.header_start()).to_equal(seed.len() - 96)
+        expect(snap.source_hash()).to_equal(0x1817161514131211)
+
+    it "treats the missing compile-options area of a seed header as empty":
+        val seed = to_seed_trailer(packed_artifact())
+        expect(SmfValidationSnapshot(data: seed).reserved_bytes().len()).to_equal(0)

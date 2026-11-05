@@ -2477,7 +2477,9 @@ impl Lowerer {
                                 value: Some(value),
                             });
                         }
-                    } else if self.is_real_enum_variant_name(nested_variant_name) {
+                    } else if self.is_real_enum_variant_name(nested_variant_name)
+                        || self.is_builtin_optional_variant_name(nested_variant_name)
+                    {
                         // Nested ENUM-variant pattern inside an enum payload:
                         // `case Const(MirConstValue.Str(name), _):`. The branch
                         // above only ever handled a nested *struct* pattern
@@ -2628,7 +2630,7 @@ impl Lowerer {
                 variant,
                 payload: Some(inner_patterns),
                 ..
-            } if self.is_real_enum_variant_name(variant) => {
+            } if self.is_real_enum_variant_name(variant) || self.is_builtin_optional_variant_name(variant) => {
                 self.bind_nested_payload(variant, slot, inner_patterns, binding_type_map, ctx, out);
             }
             // Positional struct spelling `Point(x, y)`. The parser cannot tell

@@ -141,3 +141,14 @@ units, which fails for four of them under `arch/riscv64/boot/`. It is non-fatal
 today (they are `#include`d by the real TU) but it makes every riscv64 build log
 carry spurious "failed to compile" lines that mask real errors.
 
+
+## Verification 2026-11-05 (riscv-sweep lane, work/riscv-sweep-20261105)
+
+Re-checked at tip `origin/release/1.0.0` @ `bc3e9b48cb4`: the native build/run
+rows remain green by the 2026-08-31 evidence, and the interpreter row is still
+blocked by the deliberate Stage2 admission policy gate — there is no
+canonical Stage2-admitted pure-Simple compiler in this environment to build
+the in-guest interpreter payload, and routing around the gate would produce an
+artifact both install-image provenance guards reject. No bootstrap deployment
+exists in this lane, so the interpreter row cannot advance here. Status: OPEN
+(blocked on self-hosted compiler admission, not on this lane's code).

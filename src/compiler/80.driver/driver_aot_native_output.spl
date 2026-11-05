@@ -38,6 +38,7 @@ use std.nogc_sync_mut.path.{dirname, basename}
 use compiler.backend.backend_helpers.{compile_module_with_backend,
     compile_module_with_backend_scoped_v1, get_effective_backend_name,
     llvm_module_ir_to_path_v1, llvm_module_llc_argv_v1}
+use compiler.driver.driver_empty_object.{driver_empty_object_bytes}
 use compiler.driver.driver_build.native_codegen_pool_v1.{native_codegen_pool_run_v1,
     native_codegen_pool_workers_v1, native_codegen_headroom_kib_v1,
     native_codegen_kib_field_v1, NativeCodegenPoolResultV1,
@@ -2746,11 +2747,10 @@ impl CompilerDriver:
 
                 for name in uncached_names:
                     builder.add_unit(name, [])
-
-                val build_result = builder.build(_compile_frozen_module_capsule_prefetched_v1(
+                val build_result = builder.build(fn(unit_name: text) -> Result<text, text>: _compile_frozen_module_capsule_prefetched_v1(
                     capsules, effective_backend, native_target, is_release,
                     driver_opt_level, provider_receipt_hash, backend_session,
-                    pool_objects, _1))
+                    pool_objects, unit_name))
                 _driver_codegen_pool_cleanup_v1(pool_objects)
                 cache_miss_count = cache_miss_count + build_result.stats.completed
                     + build_result.stats.failed
@@ -4345,6 +4345,13 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
                 "failed to write empty module C file {empty_c_path}")
         val empty_cc = find_c_compiler()
         if empty_cc == "":
+            # No C compiler discoverable (stage 2 matrix env): write an empty
+            # ELF relocatable directly instead of failing the unit.
+            val empty_target = env_get_nullable("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+            val empty_bytes = driver_empty_object_bytes(empty_target)
+            if empty_bytes != nil and file_write_bytes(empty_obj_path, empty_bytes!) and
+                    file_is_regular_no_follow(empty_obj_path):
+                return Ok(empty_obj_path)
             return _aot_compile_failure(name,
                 "no C compiler available for empty module object {empty_c_path}")
         val empty_args: [text] = if _is_msvc_cc(empty_cc):
@@ -4656,8 +4663,8 @@ fn _driver_codegen_pool_prefetch_v1(batch: FrozenNativeModuleCapsuleBatchV1,
     print "[NATIVE] codegen: {names.len()} uncached module(s), concurrency={workers} (process pool: {workers} llc workers, IR translation serial in this process; cpus={host_cpus} budget_kib={budget_kib} headroom_kib={headroom_kib})"
     _sffi_stdout_flush()
     val result = native_codegen_pool_run_v1(find_llc(), names, workers, stage_root, ledger,
-        _driver_codegen_pool_emit_v1(batch, backend_name, target, is_release,
-            opt_level, provider_receipt_hash, names, _1, _2, _3))
+        fn(job_index: i64, ir_path: text, obj_path: text) -> [text]: _driver_codegen_pool_emit_v1(batch, backend_name, target, is_release,
+            opt_level, provider_receipt_hash, names, job_index, ir_path, obj_path))
     var index: i64 = 0
     while index < names.len():
         if result.states[index] == NATIVE_CODEGEN_JOB_PASS_V1:

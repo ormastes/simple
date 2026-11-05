@@ -423,3 +423,19 @@ requires the target module to actually be import-ready). Not a single
 localized bug; out of this lane's per-item budget. Leaving OPEN.
 
 
+
+## 2026-11-05 re-check of the headline finding (origin/release/1.0.0 4397a4ce3c6)
+
+Premise still holds: `test/01_unit/compiler/hir/hir_types_spec.spl` still has
+86 `expect true` bodies (all real assertions and the `use std.hir.*` import
+commented out). Root cause for why it cannot simply be re-enabled: `TypeId`
+(`void_ty`, `i64_ty`, `nil_ty`, `is_void`, ...) is not defined under
+`src/lib` or `src/compiler`; the only Simple definitions live in the Rust-side
+std copies `src/compiler_rust/lib/std/src/hir/{eval,lower,module}.spl`, and the
+live Rust type is `TypeId(pub u32)` in
+`src/compiler_rust/compiler/src/hir/types/type_system.rs`. `std.hir` therefore
+does not resolve from the self-hosted tree.
+Remediation needs an owner decision (port the TypeId surface to
+`src/compiler/20.hir` and rewrite the spec with real assertions, or delete the
+spec as covering a nonexistent module). No spec was changed in this slice.
+The family remediation remains OPEN.

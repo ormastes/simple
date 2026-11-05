@@ -620,6 +620,15 @@ pub extern "C" fn rt_heap_ref_registered(value: RuntimeValue) -> i8 {
 
 #[no_mangle]
 pub extern "C" fn rt_unwrap_or_trap(value: RuntimeValue) -> RuntimeValue {
+    // Absent flat-nullable optional (`i64? = nil`, failed `parse_int`): nil IS
+    // None, so it must trap exactly like a boxed None — not propagate as a
+    // present value (doc/08_tracking/bug/unwrap_family_treats_flat_nil_as_present_2026-09-13.md).
+    // Matches the tree-walk interpreter, which already raises
+    // "called unwrap on None" for a runtime flat-nil receiver.
+    if value.is_nil() {
+        eprintln!("error: called unwrap on None");
+        std::process::abort();
+    }
     let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) else {
         // Not a boxed enum — bare/flat-nullable payload convention: return
         // the raw value unchanged (matches `rt_unwrap_or_self`).
@@ -711,13 +720,6 @@ pub extern "C" fn rt_unwrap_or_value(value: RuntimeValue, default: RuntimeValue)
 /// doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
 #[no_mangle]
 pub extern "C" fn rt_expect_or_trap(value: RuntimeValue, msg: RuntimeValue) -> RuntimeValue {
-    let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) else {
-        // Not a boxed enum — bare/flat-nullable payload convention: return
-        // the raw value unchanged (matches `rt_unwrap_or_trap`).
-        return value;
-    };
-    let (enum_id, discriminant, payload) = unsafe { ((*p).enum_id, (*p).discriminant, (*p).payload) };
-
     let trap = || -> ! {
         let text = super::collections::rt_string_data(msg);
         let len = super::collections::rt_string_len(msg);
@@ -730,6 +732,19 @@ pub extern "C" fn rt_expect_or_trap(value: RuntimeValue, msg: RuntimeValue) -> R
         eprintln!("{message}");
         std::process::abort();
     };
+
+    // Absent flat-nullable optional: nil IS None — trap with the caller's
+    // message, exactly like a boxed None (see `rt_unwrap_or_trap` and
+    // doc/08_tracking/bug/unwrap_family_treats_flat_nil_as_present_2026-09-13.md).
+    if value.is_nil() {
+        trap();
+    }
+    let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) else {
+        // Not a boxed enum — bare/flat-nullable payload convention: return
+        // the raw value unchanged (matches `rt_unwrap_or_trap`).
+        return value;
+    };
+    let (enum_id, discriminant, payload) = unsafe { ((*p).enum_id, (*p).discriminant, (*p).payload) };
 
     if enum_id == OPTION_ENUM_ID {
         if discriminant == hash_variant_discriminant("Some") {

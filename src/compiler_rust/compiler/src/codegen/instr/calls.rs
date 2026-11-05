@@ -4298,7 +4298,16 @@ pub fn compile_call<M: Module>(
                 "trim_start" | "trim_left" => Some("rt_string_trim_start"),
                 "trim_end" | "trim_right" => Some("rt_string_trim_end"),
                 "split" => Some("rt_string_split"),
-                "bytes" => Some("rt_string_bytes"),
+                // `to_bytes` is the interpreter's alias of `bytes`
+                // (interpreter_method/string.rs: `"bytes" | "to_bytes"` and
+                // interpreter_helpers/method_dispatch.rs), and the LLVM lane
+                // maps it too (codegen/llvm/functions.rs). Only this JIT table
+                // lacked it, so `"ok".to_bytes()` raised
+                // "Function 'str.to_bytes' not found" under `run` while working
+                // on the interpreter. Text-only name (no array/dict `to_bytes`
+                // method exists), so the alias cannot mis-route another
+                // receiver. See doc/08_tracking/bug/text_to_bytes_method_missing_on_text_receiver_2026-09-06.md
+                "bytes" | "to_bytes" => Some("rt_string_bytes"),
                 "chars" => Some("rt_string_chars"),
                 "lines" | "split_lines" => Some("rt_string_lines"),
                 "replace" => Some("rt_string_replace"),
