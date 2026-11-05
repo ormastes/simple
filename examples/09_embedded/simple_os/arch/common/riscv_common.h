@@ -585,8 +585,7 @@ RuntimeValue rt_native_neq(RuntimeValue a, RuntimeValue b)
  * statically typed String ==/!= (commit 060926039bc routes both through
  * rt_text_eq_any on every backend, replacing the old inline path). Without
  * this definition the freestanding riscv64/32 link dies with an undefined
- * symbol, exactly like every other lane that had not ported it (the x86_64
- * comment above rt_text_eq_raw_raw records the same gap for this family).
+ * symbol; every other freestanding lane now carries the same port.
  *
  * Semantics mirror the hosted implementation (runtime_native.c): nil sentinel
  * aware (nil == nil, nil vs any real string is NOT equal), heap-vs-raw via
@@ -597,7 +596,11 @@ RuntimeValue rt_native_neq(RuntimeValue a, RuntimeValue b)
  * strings; no STR1 producer exists on this lane. */
 static int riscv_text_eq_raw_raw(RuntimeValue left, RuntimeValue right)
 {
-    if (left == right) return 1;
+    /* Equal addresses mean equal CONTENT only when the value is actually a
+     * plausible raw string; two equal non-string words (small ints, equal
+     * heap handles) must answer NOT-EQUAL here, matching the hosted twin's
+     * rt_interp_cstr(int) -> NULL path (independent review 2026-11-05). */
+    if (left == right && riscv_plausible_raw_text(left)) return 1;
     if (!riscv_plausible_raw_text(left) || !riscv_plausible_raw_text(right)) return 0;
     const char *a = (const char *)(uintptr_t)left;
     const char *b = (const char *)(uintptr_t)right;
