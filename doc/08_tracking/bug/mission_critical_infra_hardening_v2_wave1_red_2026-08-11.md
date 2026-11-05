@@ -234,3 +234,21 @@ ones, so this doc should be split into three rows before any of them is
 actioned.
 
 **Not reproduced from this lane** — see the parent reports Unproven list.
+
+## Revalidation 2026-11-05 (release/1.0.0, seed `bin/simple.exe run`)
+
+Premise mostly outdated. GREEN now: `compiler_admission_spec` 10/10,
+`draw_ir_generation_arena_v3_spec` 8/8, `draw_ir_packed_generation_store_v3_spec` 7/7,
+`certified_manifest_spec` 16/16, `bounded_process_policy_spec` 12/12,
+`mci_evidence_manifest_v1_spec` 7/7. Required fix 3 (SHA-256 profile hash) is in
+`domain_arena_v1.spl` (`relaxed_allocation_profile_hash_v1`); no `receipts[-1]` remains (fix 6).
+
+Fixed this pass: `test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl`
+had 2 stale fixtures (`try_allocate` without `checkpoint()`; the arena correctly answers
+UNSEALED when no generation is open). Added `checkpoint()` and a pin scenario
+asserting UNSEALED before checkpoint: 19/19.
+
+Remaining (why this stays OPEN): `domain_arena_v1_spec` 3 failures —
+`DomainArenaV1.write_byte`/byte banks and `DOMAIN_ARENA_V1_MAX_QUOTA_BYTES` are specified
+but not implemented in `src/lib/nogc_sync_mut/mission_critical/domain_arena_v1.spl`
+(a feature slice, not a fixture bug); fix 4/5 full designed-storage scope also open.

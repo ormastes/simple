@@ -61,3 +61,118 @@ loss and preserves hosted semantics exactly, but it does not fix the
 comparison, and every other `!= ""` in the tree is still affected on this
 target.
 
+
+---
+
+# FIXED (2026-11-05, worktree lane) — the lowering this bug lived in was
+# replaced at tip; the riscv freestanding runtime was missing the replacement's
+# helper, and this change ports it.
+
+## What tip actually looks like (measured, not assumed)
+
+Commit `060926039bc` ("Fix typed text equality across source and ABI",
+2026-11-03) changed the game two days before this verification: statically
+typed `String` `==`/`!=` now lowers, at MIR level, to a single runtime call
+`rt_text_eq_any(left, right)` on EVERY backend (`lowering_expr_ops.rs`, the
+`BinOp::Eq | BinOp::NotEq && left.ty == STRING && right.ty == STRING` arm),
+with `!=` emitted as `eq XOR 1`. The old inline comparison path this bug
+documented no longer exists, so the 2026-09-01 "context-dependent wrong
+answer" symptom cannot recur in that form.
+
+But the riscv freestanding runtime had **no `rt_text_eq_any` at all** — the
+x86_64 port's own comment (`baremetal_stubs.c`, above
+`rt_text_eq_raw_raw`) records that this function "never [was] ported to the
+freestanding lane". Measured at tip by rebuilding the row-2 kernel on this
+host: the link dies hard —
+
+```
+ld.lld: error: undefined symbol: rt_text_eq_any
+```
+
+— i.e. at tip `text != ""` on this lane did not miscompile; the kernel did
+not link at all. (The aarch64/arm32/arm64/x86_32 freestanding runtimes are in
+the same state per their own comments; only x86_64 and now riscv define it.
+Those lanes are outside this record.)
+
+## The fix
+
+Ported `rt_text_eq_any` into `examples/09_embedded/simple_os/arch/common/riscv_common.h`
+(shared by the riscv32 and riscv64 baremetal runtimes, which both `#include`
+it), placed right after `rt_native_neq` and reusing its exact safety
+machinery:
+
+- **nil-sentinel aware**: `NIL_VALUE` (3) on either side answers equal only
+  to itself — this is the `rt_env_get(key) ?? ""` miss path from the original
+  measurement, where the operand is whatever `??` materialises.
+- **heap-vs-raw**: routes through the existing `riscv_heap_string` /
+  `riscv_text_eq_heap_vs_raw`, so a heap string (e.g. a `.substring()`
+  result) compares by CONTENT against a raw untagged `""` literal, under the
+  plausibility guards (raw word must live inside the image; small words
+  rejected) that fence the 2026-08-11 raw-literal defect.
+- **raw-vs-raw**: new `riscv_text_eq_raw_raw` compares two raw literals by
+  bounded char content (identity fast path first), because a bare literal is
+  a `char*` global and address-only comparison makes two distinct empty
+  literals "not equal" forever.
+
+Semantics mirror the hosted implementation (`runtime_native.c`) and the
+x86_64 freestanding port. Return convention is raw 0/1, matching the
+`RUNTIME_FUNCS` spec (`[I64, I64] -> [I64]`) the Cranelift/LLVM backends
+emit against.
+
+## Why a source-shape guard rather than a host behavioural test
+
+The defect is freestanding-link-shaped: the hosted interpreter and the LLVM
+hosted backend were always correct, and a host test cannot exercise the
+baremetal link. Guard:
+`scripts/check/check-riscv-text-eq-any.shs` — extracts EVERY `rt_text_eq_any`
+definition under `arch/common` + `arch/riscv32` + `arch/riscv64` and judges
+each body separately for (a) the nil arm and (b) a raw-content path, with a
+fatal 6-fixture `--selftest` including the duplicate-definition case (one
+good sibling must not excuse a bad one) and the nil-only stub case. GREEN
+after the fix: `PASS — 1 definition(s) checked, all nil-aware and
+raw-content-comparing`.
+
+## In-guest verification (real OpenSBI v1.4 fw_payload, never -kernel)
+
+Same probe run as the sibling records
+(`examples/09_embedded/simple_os/arch/riscv64/freestanding_cmp_probe_entry.spl`,
+steps 8-10; probe rc=0; serial log
+`build/os/riscv64_cmp_probe/probe.serial.log`). Every comparison shape
+recorded in this document, plus the bare-literal controls:
+
+```
+[probe] coalesced env len = EXPECTED                  <- 0
+[probe] coalesced env == "" = true (EXPECTED)
+[probe] coalesced env != "" = false (EXPECTED)        <- THE 2026-09-01 measurement, now correct
+[probe] heap empty len = EXPECTED                     <- 0
+[probe] heap empty == "" = true (EXPECTED)
+[probe] heap empty != "" = false (EXPECTED)
+[probe] "" == "" = true (EXPECTED)
+[probe] "" != "" = false (EXPECTED)
+[probe] nonempty == literal = true (EXPECTED)
+[probe] nonempty != same literal = false (EXPECTED)
+[probe] diff content != = true (EXPECTED)
+```
+
+Command (from the worktree root):
+
+```
+ENTRY=examples/09_embedded/simple_os/arch/riscv64/freestanding_cmp_probe_entry.spl \
+SIMPLE_BIN=<rust seed> sh scripts/check/run-riscv64-text-probe-opensbi.shs
+```
+
+## Not covered by this fix (stated, not papered over)
+
+- The `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c` dialect (a
+  different tag convention) also lacks `rt_text_eq_any`; its native-build
+  lane will hit the same undefined symbol if it lowers typed text equality.
+  Follow-up, outside this record.
+- The repaired `module_decl_at` call site (`env_value.len() > 0`) stays as
+  is; it is correct and need not revert.
+- The full interpreter/buildrun gate kernels still fail to link at tip on
+  unrelated missing symbols (`rt_value_truthy`, `rt_value_as_bool`,
+  `rt_transient_heap_adopt`, `rt_session_alloc_begin/end`,
+  `spl_collection_capture_note_*`); the probe kernel's minimal closure
+  sidesteps them. That breakage predates this change.
+
+**Status: FIXED (2026-11-05), behaviorally verified in-guest.**

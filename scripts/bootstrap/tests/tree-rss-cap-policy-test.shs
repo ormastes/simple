@@ -307,4 +307,46 @@ grep -Fq 'bootstrap_abort_reason=tree-rss-cap-refused' "$entry" &&
     fail 'bootstrap entry does not record RSS refusal reasons'
 ok
 
+# 6. Worker-fit timeout scaling (run 4, 2026-11-05: the plan fitted 2 of 8
+#    workers but the 1800 s native internal timeout was not scaled, so both MIR
+#    shard workers were killed with 596 of 3010 modules claimed). The real
+#    policy: 8 -> 2 scales x4, the bound holds, no reduction and explicit
+#    values are unchanged; both Stage 2 test owners publish through it and the
+#    verifier records the attribution in its summary receipt.
+. "$policy"
+[ "$(bootstrap_tree_rss_timeout_scale 8 2)" = 4 ] || fail 'timeout scale 8 -> 2 is not x4'
+[ "$(bootstrap_tree_rss_timeout_scale 8 8)" = 1 ] || fail 'timeout scale without reduction is not x1'
+[ "$(bootstrap_tree_rss_timeout_scale 64 1)" = "$BOOTSTRAP_TREE_RSS_TIMEOUT_SCALE_MAX" ] &&
+    [ "$BOOTSTRAP_TREE_RSS_TIMEOUT_SCALE_MAX" -eq 4 ] || fail 'timeout scale bound not respected'
+ok
+got=$(
+    unset BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT BOOTSTRAP_VERIFY_TIMEOUT_SOURCE
+    bootstrap_tree_rss_plan_timeout_scale=4
+    bootstrap_tree_rss_scaled_timeout BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT 1800 || exit 1
+    printf '%s:%s' "$BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT" "$BOOTSTRAP_VERIFY_TIMEOUT_SOURCE"
+)
+[ "$got" = '7200:BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:phase-policy-scaled' ] ||
+    fail "default native internal timeout not scaled x4: $got"
+got=$(
+    unset BOOTSTRAP_VERIFY_TIMEOUT_SOURCE
+    BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT=900
+    bootstrap_tree_rss_plan_timeout_scale=4
+    bootstrap_tree_rss_scaled_timeout BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT 1800 || exit 1
+    printf '%s:%s' "$BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT" "$BOOTSTRAP_VERIFY_TIMEOUT_SOURCE"
+)
+[ "$got" = '900:BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:explicit' ] ||
+    fail "explicit native internal timeout not kept: $got"
+ok
+for owner in "$entry" "$root/scripts/bootstrap/admit-built-stage2-compiler-tests.shs"; do
+    for budget in 'BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT' 'BOOTSTRAP_VERIFY_TIMEOUT_SECONDS' \
+        'BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS'; do
+        grep -Fq "bootstrap_tree_rss_scaled_timeout $budget " "$owner" ||
+            fail "${owner##*/} does not publish $budget through the worker-fit scaling"
+    done
+done
+grep -Fq 'echo "timeout_source=${BOOTSTRAP_VERIFY_TIMEOUT_SOURCE:-default}"' \
+    "$root/scripts/bootstrap/bootstrap-phase-verification.shs" ||
+    fail 'verifier summary does not record timeout_source'
+ok
+
 echo "PASS — $checks tree RSS cap policy case(s) checked"

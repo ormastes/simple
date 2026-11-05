@@ -1,0 +1,97 @@
+# SimpleOS riscv64 in-guest MINIMAL `me`-method probe (OpenSBI real-firmware lane).
+#
+# Diagnostic entry for
+# doc/08_tracking/bug/riscv64_freestanding_me_method_invocation_traps_2026-08-31.md.
+# That record narrowed the in-guest trap to INVOKING a `me` method on a class
+# instance at all (a read-only `me` method trapped exactly like a storing one;
+# static fn constructors on the same classes worked). Its suggested next probe
+# was this: the smallest possible reproduction — one class with `me` methods
+# that only print and touch fields — small enough to disassemble if it traps.
+#
+# Shapes exercised, in order, printing after each so the last line printed
+# names the culprit:
+#   p1  static constructor + plain field read       (known-good control)
+#   p2  `me` method that only prints                (receiver ABI, no field)
+#   p3  `me` method that reads self                 (receiver + field read)
+#   p4  `me` method that stores self.entries + [e]  (the exact mcp register shape)
+#   p5  read-only `me` find over self.entries       (the exact mcp m3f shape)
+#
+# Boot chain and forbidden-flag policy identical to hello_world_sbi_entry.spl:
+# real OpenSBI v1.4 fw_payload via -bios only, NEVER -kernel, NEVER
+# isa-debug-exit.
+
+@unsafe(reason: "foreign serial output provider is not artifact-verified", capabilities: [ffi])
+extern fn serial_println(msg: text)
+
+class ProbeEntry:
+    name: text = ""
+    id: i64 = 0
+
+    static fn make(n: text, i: i64) -> ProbeEntry:
+        var e = ProbeEntry()
+        e.name = n
+        e.id = i
+        return e
+
+class ProbeRegistry:
+    entries: list<ProbeEntry> = []
+
+    static fn new_for_test() -> ProbeRegistry:
+        return ProbeRegistry()
+
+    me ping() -> ():
+        serial_println("[meprobe] p2 me ping ok")
+
+    me first_id() -> i64:
+        return self.entries[0].id
+
+    me register(entry: ProbeEntry) -> ():
+        self.entries = self.entries + [entry]
+
+    me find(name: text) -> i64:
+        for e in self.entries:
+            if e.name == name:
+                return e.id
+        return -1
+
+fn spl_start():
+    serial_println("")
+    serial_println("[meprobe] SimpleOS riscv64 me-method probe (OpenSBI fw_payload)")
+
+    # p1: static constructor + plain field read — proven shape, control row.
+    val entry = ProbeEntry.make("echo", 41)
+    if entry.id == 41:
+        serial_println("[meprobe] p1 static ctor + field read ok")
+    else:
+        serial_println("[meprobe] p1 WRONG")
+
+    # p2: `me` method that only prints — no field touched at all.
+    val reg2 = ProbeRegistry.new_for_test()
+    reg2.ping()
+
+    # p3: `me` method reading self through an element subscript.
+    val reg3 = ProbeRegistry.new_for_test()
+    reg3.register(ProbeEntry.make("echo", 7))
+    if reg3.first_id() == 7:
+        serial_println("[meprobe] p3 me self field read ok")
+    else:
+        serial_println("[meprobe] p3 WRONG")
+
+    # p4/p5: the exact mcp dispatch shape — store via self, then read-only find.
+    val reg = ProbeRegistry.new_for_test()
+    reg.register(ProbeEntry.make("echo", 1))
+    reg.register(ProbeEntry.make("second", 2))
+    if reg.entries.len() == 2:
+        serial_println("[meprobe] p4 me register appended ok")
+    else:
+        serial_println("[meprobe] p4 WRONG")
+    if reg.find("second") == 2:
+        serial_println("[meprobe] p5 me find ok")
+    else:
+        serial_println("[meprobe] p5 WRONG")
+    if reg.find("no_such_tool_at_all") == -1:
+        serial_println("[meprobe] p5b me find miss ok")
+    else:
+        serial_println("[meprobe] p5b WRONG")
+
+    serial_println("PROBE_ME_METHOD_SIMPLEOS_RISCV64_DONE")
