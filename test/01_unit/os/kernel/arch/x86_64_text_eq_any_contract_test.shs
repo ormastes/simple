@@ -1,0 +1,50 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../../.." && pwd)
+cd "$root"
+work=$(mktemp -d "${TMPDIR:-/tmp}/x86-text-eq-any.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+runtime=examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c
+harness=test/01_unit/os/kernel/arch/x86_64_text_eq_any_contract_test.c
+out="$work/text_eq_test.c"
+
+cat > "$out" <<'EOF'
+#include <stddef.h>
+#include <stdint.h>
+typedef int64_t RuntimeValue;
+#define TAG_MASK 0x7ULL
+#define TAG_INT 0x0ULL
+#define TAG_HEAP 0x1ULL
+#define ENCODE_INT(v) ((RuntimeValue)(((uint64_t)(int64_t)(v) << 3) | TAG_INT))
+#define ENCODE_PTR(p) ((RuntimeValue)((uint64_t)(uintptr_t)(p) | TAG_HEAP))
+#define DECODE_PTR(v) ((void *)((uint64_t)(v) & ~TAG_MASK))
+#define IS_HEAP(v) (((uint64_t)(v) & TAG_MASK) == TAG_HEAP)
+#define IS_NIL(v) ((v) == (RuntimeValue)0x3ULL)
+#define NIL_VALUE ((RuntimeValue)0x3ULL)
+#define HEAP_STRING 2
+typedef struct {
+    uint8_t type;
+    uint8_t gc_flags;
+    uint16_t reserved;
+    uint32_t size;
+} HeapHeader;
+typedef struct {
+    HeapHeader hdr;
+    uint32_t len;
+    uint32_t cap;
+    char data[];
+} RuntimeString;
+EOF
+
+awk '
+    /^\/\* Bug \(2026-08-11\): freestanding `text ==/ { on = 1 }
+    /^#define MAX_PCI_CACHED/ { on = 0 }
+    on { print }
+' "$runtime" >> "$out"
+cat "$harness" >> "$out"
+
+"${CC:-cc}" -std=c11 -Wall -Wextra -Werror "$out" -o "$work/text_eq_test"
+"$work/text_eq_test"
+echo 'PASS x86_64 freestanding rt_text_eq_any content equality'

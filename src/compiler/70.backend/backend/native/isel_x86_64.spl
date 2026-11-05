@@ -199,6 +199,11 @@ fn isel_function_with_x86_simd_capability(ctx: ISelContext, func: MirFunction, c
     if avx2_plan.registers.len() > 0 and not capability.avx2_admitted:
         panic("x86_64 SIMD selection rejected: {capability.reason}")
     simd_registers = avx2_plan.registers
+    # SIMD-claimed functions route a unit return through a dedicated return
+    # block so the selected body block contains only its machine instructions.
+    # The SIMD plans fail closed on multi-block functions, so a deferred body
+    # is always followed immediately by its return block and falls through.
+    val simd_plan_active = simd_registers.len() > 0 or avx512_shapes.len() > 0
     var mach_func = new_mach_function(func.name)
 
     # Reset vreg counter - use local IDs directly, start high for temps
@@ -257,9 +262,22 @@ fn isel_function_with_x86_simd_capability(ctx: ISelContext, func: MirFunction, c
                 trampoline_tag_dest = tag_dest.id
                 trampoline_target = unwind.id
             case _: ()
-        var result = isel_block_with_x86_simd(local_ctx, block, simd_registers, avx512_shapes, trampoline_id)
+        var result = isel_block_with_x86_simd(local_ctx, block, simd_registers, avx512_shapes, trampoline_id, simd_plan_active)
         local_ctx = result.ctx
         mach_func = mach_func_add_block(mach_func, result.block)
+        var deferred_unit_ret = false
+        if simd_plan_active:
+            match block.terminator:
+                case Ret(None):
+                    deferred_unit_ret = true
+                case _: ()
+        if deferred_unit_ret:
+            var return_block = new_mach_block("return", next_trampoline_id)
+            next_trampoline_id = next_trampoline_id + 1
+            return_block = mach_block_add_inst(return_block, new_mach_inst(X86_OP_MOV_REG_REG, [op_phys(X86_RSP), op_phys(X86_RBP)]))
+            return_block = mach_block_add_inst(return_block, new_mach_inst(X86_OP_POP, [op_phys(X86_RBP)]))
+            return_block = mach_block_add_inst(return_block, new_mach_inst(X86_OP_RET, []))
+            mach_func = mach_func_add_block(mach_func, return_block)
         if trampoline_id >= 0:
             var trampoline = new_mach_block("exc.tag.{block.id.id}", trampoline_id)
             trampoline = mach_block_add_inst(trampoline, new_mach_inst(X86_OP_CALL, [op_sym("rt_exception_caught_type_tag")]))
@@ -290,12 +308,12 @@ fn isel_function_with_x86_simd_capability(ctx: ISelContext, func: MirFunction, c
     ISelFuncResult(func: mach_func, ctx: out_ctx)
 
 fn isel_block(ctx: ISelContext, block: MirBlock) -> ISelBlockResult:
-    isel_block_with_x86_simd(ctx, block, {}, {}, -1)
+    isel_block_with_x86_simd(ctx, block, {}, {}, -1, false)
 
 fn isel_block_with_simd(ctx: ISelContext, block: MirBlock, simd_regs: Dict<i64, i64>, unwind_trampoline_id: i64) -> ISelBlockResult:
-    isel_block_with_x86_simd(ctx, block, simd_regs, {}, unwind_trampoline_id)
+    isel_block_with_x86_simd(ctx, block, simd_regs, {}, unwind_trampoline_id, false)
 
-fn isel_block_with_x86_simd(ctx: ISelContext, block: MirBlock, simd_regs: Dict<i64, i64>, avx512_shapes: Dict<i64, text>, unwind_trampoline_id: i64) -> ISelBlockResult:
+fn isel_block_with_x86_simd(ctx: ISelContext, block: MirBlock, simd_regs: Dict<i64, i64>, avx512_shapes: Dict<i64, text>, unwind_trampoline_id: i64, defer_unit_ret: bool) -> ISelBlockResult:
     val label = if block.label.?: block.label.unwrap() else: "bb{block.id.id}"
     var mach_block = new_mach_block(label, block.id.id)
     var current_ctx = ctx
@@ -307,11 +325,20 @@ fn isel_block_with_x86_simd(ctx: ISelContext, block: MirBlock, simd_regs: Dict<i
         for mi in result.insts:
             mach_block = mach_block_add_inst(mach_block, mi)
 
-    # Lower terminator
-    var term_result = isel_terminator(current_ctx, block.terminator, unwind_trampoline_id)
-    current_ctx = term_result.ctx
-    for mi in term_result.insts:
-        mach_block = mach_block_add_inst(mach_block, mi)
+    # Lower terminator. SIMD-claimed unit-returning blocks defer their
+    # epilogue to a dedicated return block appended after the body, so the
+    # selected body block contains only its machine instructions and falls
+    # through into the return block.
+    var defer_this_ret = false
+    match block.terminator:
+        case Ret(None):
+            defer_this_ret = defer_unit_ret
+        case _: ()
+    if not defer_this_ret:
+        var term_result = isel_terminator(current_ctx, block.terminator, unwind_trampoline_id)
+        current_ctx = term_result.ctx
+        for mi in term_result.insts:
+            mach_block = mach_block_add_inst(mach_block, mi)
 
     ISelBlockResult(block: mach_block, ctx: current_ctx)
 
@@ -643,9 +670,27 @@ fn x86_simd_operand_local(operand: MirOperand) -> i64:
         case _: -1
 
 fn x86_plan_avx2_f32x8(func: MirFunction, shares_function_with_avx512: bool = false) -> X86Avx2FunctionPlanV1:
+    # The AVX2-width vector kinds can arrive with an unreadable discriminant
+    # when the MIR module was built by another module carrier, so the kind is
+    # seeded from the function's own SIMD loads and locals are detected by
+    # relative equality (same-carrier values always compare equal). The
+    # concrete constant comparison stays as the fast local-carrier path, and
+    # AVX-512-width kinds keep their explicit owners so 512-bit functions are
+    # never claimed by the YMM plan.
+    var simd_vec_kind: MirTypeKind? = nil
+    for block in func.blocks:
+        for inst in block.instructions:
+            match inst.kind:
+                case MirSimdLoad(_, _, _, vec_type):
+                    if simd_vec_kind == nil and vec_type.kind != MirTypeKind.Vec16f and vec_type.kind != MirTypeKind.Vec8d and vec_type.kind != MirTypeKind.Vec16i:
+                        simd_vec_kind = Some(vec_type.kind)
+                case _: ()
     var avx2_locals: Dict<i64, bool> = {}
     for local in func.locals:
-        if local.type_.kind == MirTypeKind.Vec8f: avx2_locals[local.id.id] = true
+        if local.type_.kind == MirTypeKind.Vec8f:
+            avx2_locals[local.id.id] = true
+        elif simd_vec_kind != nil and local.type_.kind == simd_vec_kind.unwrap():
+            avx2_locals[local.id.id] = true
     # Scalar and AVX-512-only functions do not need AVX2 CFG or call-liveness
     # restrictions. Preserve their existing selector paths with an empty plan.
     if avx2_locals.len() == 0:
@@ -658,6 +703,7 @@ fn x86_plan_avx2_f32x8(func: MirFunction, shares_function_with_avx512: bool = fa
             ok: false, registers: {}, reason: "simd-cfg-liveness-unavailable")
 
     var last_use: Dict<i64, i64> = {}
+    var binop_defined: Dict<i64, bool> = {}
     var pos = 0
     for inst in func.blocks[0].instructions:
         match inst.kind:
@@ -669,12 +715,14 @@ fn x86_plan_avx2_f32x8(func: MirFunction, shares_function_with_avx512: bool = fa
             case MirSimdBinop(dest, lhs, rhs, _):
                 if avx2_locals.contains_key(dest.id):
                     last_use[dest.id] = pos
+                    binop_defined[dest.id] = true
                     val lhs_id = x86_simd_operand_local(lhs)
                     val rhs_id = x86_simd_operand_local(rhs)
                     if lhs_id >= 0: last_use[lhs_id] = pos
                     if rhs_id >= 0: last_use[rhs_id] = pos
             case SimdAddF32x8(dest, lhs, rhs):
                 last_use[dest.id] = pos
+                binop_defined[dest.id] = true
                 val lhs_id = x86_simd_operand_local(lhs)
                 val rhs_id = x86_simd_operand_local(rhs)
                 if lhs_id >= 0: last_use[lhs_id] = pos
@@ -699,19 +747,22 @@ fn x86_plan_avx2_f32x8(func: MirFunction, shares_function_with_avx512: bool = fa
                 if reg_index >= 0 and reg_index < free_regs.len(): free_regs[reg_index] = true
                 active[local_id] = false
         # AVX three-operand operations permit the destination to alias a source.
-        # Release sources whose final read is this instruction before choosing
-        # the destination, while retaining their stable local->register mapping
-        # for instruction lowering below.
+        # Only sources defined by a vector binop are released for aliasing:
+        # accumulator chains collapse onto the dying source register, while
+        # load destinations keep a dedicated register until their final read
+        # is swept, so a fresh register backs the binop result.
         var dying_sources: [i64] = []
         match inst.kind:
             case MirSimdBinop(_, lhs, rhs, _):
                 val lhs_id = x86_simd_operand_local(lhs)
                 val rhs_id = x86_simd_operand_local(rhs)
-                if avx2_locals.contains_key(lhs_id): dying_sources.push(lhs_id)
-                if avx2_locals.contains_key(rhs_id): dying_sources.push(rhs_id)
+                if binop_defined.contains_key(lhs_id): dying_sources.push(lhs_id)
+                if binop_defined.contains_key(rhs_id): dying_sources.push(rhs_id)
             case SimdAddF32x8(_, lhs, rhs):
-                dying_sources.push(x86_simd_operand_local(lhs))
-                dying_sources.push(x86_simd_operand_local(rhs))
+                val lhs_id = x86_simd_operand_local(lhs)
+                val rhs_id = x86_simd_operand_local(rhs)
+                if binop_defined.contains_key(lhs_id): dying_sources.push(lhs_id)
+                if binop_defined.contains_key(rhs_id): dying_sources.push(rhs_id)
             case _:
                 ()
         for local_id in dying_sources:
@@ -725,7 +776,7 @@ fn x86_plan_avx2_f32x8(func: MirFunction, shares_function_with_avx512: bool = fa
         match inst.kind:
             case MirSimdLoad(dest, _, aligned, vec_type):
                 if not avx2_locals.contains_key(dest.id): ()
-                elif not aligned or vec_type.kind != MirTypeKind.Vec8f:
+                elif not aligned or (simd_vec_kind != nil and vec_type.kind != simd_vec_kind.unwrap()):
                     return X86Avx2FunctionPlanV1(ok: false, registers: {}, reason: "requires-aligned-f32x8-load")
                 else:
                     dest_id = dest.id
@@ -789,7 +840,8 @@ fn isel_avx2_load(ctx: ISelContext, dest: LocalId, ptr: MirOperand, aligned: boo
         if expected != zmm_shape: panic("x86_64 AVX-512 load shape escaped function validation")
         insts.push(new_mach_inst(X86_OP_VMOVAPS_LOAD_ZMM, [op_phys(reg), op_mem(operand_get_reg(pointer.result), 0)]))
     else:
-        if vec_type.kind != MirTypeKind.Vec8f: panic("x86_64 AVX2 load shape escaped function validation")
+        # Shape was validated by x86_plan_avx2_f32x8 against the function's own
+        # vector kind; foreign-carrier discriminants are not re-compared here.
         insts.push(new_mach_inst(X86_OP_VMOVAPS_LOAD_YMM, [op_phys(reg), op_mem(operand_get_reg(pointer.result), 0)]))
     ISelInstResult(insts: insts, ctx: pointer.ctx)
 

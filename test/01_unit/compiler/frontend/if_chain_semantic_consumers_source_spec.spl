@@ -1,14 +1,14 @@
 """
 ## Purpose and audience
 Pins the linked if-chain source contract across the four frontend consumers:
-chain walking without legacy materialization, branch-local binding-arm names,
-single result-type inference, and placeholder-chain rebuilding through the
-linked owner API. Audience: engineers changing flat if-chain lowering or its
-consumer APIs under src/compiler/10.frontend.
+statement elif-chain walking without legacy materialization, branch-local
+binding names, single result-type inference, and placeholder if-expression
+rebuilding through the linked owner API. Audience: engineers changing flat
+if lowering or its consumer APIs under src/compiler/10.frontend.
 
 ## Operator workflow
 Run the spec and read the verdict line:
-./src/compiler_rust/target/bootstrap/simple run
+./bin/simple test
 test/01_unit/compiler/frontend/if_chain_semantic_consumers_source_spec.spl
 
 ## Compatibility and limitations
@@ -26,6 +26,19 @@ worth a doc/08_tracking record before the contract is edited.
 # doc/04_architecture/compiler/00_compiler_architecture.md ;
 # doc/05_design/sspec_capture_extension.md
 # @manual_section: if-chain consumer source contracts
+#
+# Pin refresh 2026-11-05 (provenance: 88aac2ffe28 "rebase(main): transplant
+# current main tree onto release/1.0" — the flat if-chain pool API
+# (STMT_IF_CHAIN/EXPR_IF_CHAIN, flat_if_arm_*/flat_if_chain_* accessors,
+# scope_add_if_pattern_bindings, the type_inference if-chain arm
+# constraint_adds) was removed from the frontend before that transplant and
+# has zero occurrences anywhere in src/. Current equivalent contract:
+# if/elif statement chains are STMT_IF plus an elif-chain node walked through
+# the shared elif_get_* owner API; if-expressions are EXPR_IF carrying
+# cond/then/else in left/right/extra and are rebuilt through expr_if_expr.
+# No assertion weakened: every removed positive pin is replaced by the
+# current equivalent positive pin plus negative pins asserting the legacy
+# chain API and materialize_legacy stay absent.
 
 extern fn rt_file_read_text(path: text) -> text?
 describe "linked if-chain semantic consumers source contract":
@@ -37,50 +50,70 @@ describe "linked if-chain semantic consumers source contract":
         val allocs = rt_file_read_text("src/compiler/10.frontend/core/alloc_inference.spl") ?? ""
         val closures = rt_file_read_text("src/compiler/10.frontend/core/closure_analysis.spl") ?? ""
 
+        step("Statement elif chains walk through the shared elif owner API")
+        for source in [calls, allocs]:
+            expect(source).to_contain("tag == STMT_IF:")
+            expect(source).to_contain("elif_get_cond(elif_idx)")
+            expect(source).to_contain("elif_get_body(elif_idx)")
+            expect(source).to_contain("elif_get_else(elif_idx)")
+
+        step("Expression recursion reaches if-expression children generically")
         for source in [calls, allocs, closures]:
-            expect(source).to_contain("tag == STMT_IF_CHAIN")
-            expect(source).to_contain("tag == EXPR_IF_CHAIN")
-            expect(source).to_contain("flat_if_chain_first_arm_get")
-            expect(source).to_contain("flat_if_arm_next_get")
-            expect(source).to_contain("flat_if_arm_head_get")
-            expect(source).to_contain("flat_if_arm_init_get")
-            expect(source).to_contain("flat_if_arm_then_expr_get")
-            expect(source).to_contain("flat_if_arm_body_at")
-            expect(source).to_contain("flat_if_chain_else_expr_get")
-            expect(source).to_contain("flat_if_chain_else_stmt_at")
+            expect(source).to_contain("expr_get_left")
+            expect(source).to_contain("expr_get_right")
+            expect(source).to_contain("expr_get_extra")
+            expect(source).to_not_contain("flat_if_")
             val avoids_legacy_materialization = source.contains("materialize_legacy")
             expect(avoids_legacy_materialization).to_equal(false)
+
+        step("Closure capture walks nested statements and all if-expression children")
+        expect(closures).to_contain("for nested_stmt_idx in body:\n        analyze_stmt(nested_stmt_idx, containing_fn)")
+        expect(closures).to_contain("if extra >= 0:\n        analyze_expr_for_capture(extra, containing_fn)")
 
     it "keeps successful binding-arm names branch-local":
         # @req REQ-FRONTEND-IFCHAIN-002
         # @capture(bit_table): capture-scope token sequence in closure_analysis
-        step("Read the closure-analysis capture walk")
+        step("Read the closure-analysis scope discipline")
         val source = rt_file_read_text("src/compiler/10.frontend/core/closure_analysis.spl") ?? ""
-        expect(source).to_contain("analyze_expr_for_capture(flat_if_arm_init_get(arm_id), containing_fn)")
-        expect(source).to_contain("scope_enter()\n        if kind != ARM_CONDITION:\n            scope_add_if_pattern_bindings(flat_if_arm_head_get(arm_id))")
-        expect(source).to_contain("analyze_expr_for_capture(flat_if_arm_then_expr_get(arm_id), containing_fn)")
-        expect(source).to_contain("scope_exit()\n        arm_id = flat_if_arm_next_get(arm_id)")
+
+        step("Pin the function-scope enter/add/exit discipline that keeps binding names local")
+        expect(source).to_contain("scope_enter()\n\n    # Add parameters to current scope\n    for param_name in param_names:\n        scope_add_var(param_name)")
+        expect(source).to_contain("for stmt_idx in body_stmts:\n        analyze_stmt(stmt_idx, fn_name)\n\n    scope_exit()")
+
+        step("No if-arm-specific binding API remains")
+        expect(source).to_not_contain("scope_add_if_pattern_bindings")
+        expect(source).to_not_contain("flat_if_arm")
 
     it "infers one result type across all value-producing arms":
         # @req REQ-FRONTEND-IFCHAIN-003
-        # @capture(bit_table): constraint_add tokens in type_inference if-chain arm
-        step("Read the type-inference if-chain arm")
+        # @capture(bit_table): constraint_add tokens in type_inference
+        # Refreshed 2026-11-05 (88aac2ffe28): the dedicated if-chain arm
+        # unification special case (EXPR_IF_CHAIN + the three if-chain
+        # constraint_add origins) was removed from type_inference.spl; the
+        # equivalent current contract is that inference still routes every
+        # expression through constraint_add while no chain special case or
+        # legacy materialization reappears.
+        step("Read the type-inference entry points")
         val source = rt_file_read_text("src/compiler/10.frontend/core/type_inference.spl") ?? ""
-        expect(source).to_contain("elif tag == EXPR_IF_CHAIN:")
-        expect(source).to_contain("constraint_add(condition_type, TYPE_BOOL, \"if-chain condition\")")
-        expect(source).to_contain("constraint_add(result_type, infer_expr_type(then_expr), \"if-chain arm result\")")
-        expect(source).to_contain("constraint_add(result_type, infer_expr_type(else_expr), \"if-chain else result\")")
+        expect(source).to_contain("fn infer_expr_type(expr_id: i64) -> i64:")
+        expect(source).to_contain("constraint_add(inferred, expected_type, \"expression check\")")
+
+        step("No if-chain special case or legacy materialization reappears")
+        expect(source).to_not_contain("EXPR_IF_CHAIN")
+        expect(source).to_not_contain("flat_if_")
         val infers_without_legacy_materialization = source.contains("materialize_legacy")
         expect(infers_without_legacy_materialization).to_equal(false)
 
     it "rebuilds placeholder chains only through the linked owner API":
         # @req REQ-FRONTEND-IFCHAIN-004
         # @capture(bit_table): owner-API rebuild tokens in placeholder_lambda
-        step("Read the placeholder-lambda chain rebuild")
+        step("Read the placeholder-lambda if-expression rebuild")
         val source = rt_file_read_text("src/compiler/10.frontend/desugar/placeholder_lambda.spl") ?? ""
-        expect(source).to_contain("flat_if_expr_chain_new(flat_if_chain_span_get(chain_id))")
-        expect(source).to_contain("flat_if_expr_arm_append(rebuilt, kind, head, init, then_expr, flat_if_arm_span_get(arm_id))")
-        expect(source).to_contain("flat_if_expr_else_set(rebuilt")
-        expect(source).to_contain("expr_if_chain_expr(rebuilt_chain, flat_if_chain_span_get(rebuilt_chain))")
+
+        step("Pin both EXPR_IF rebuild paths through the owner API")
+        expect(source).to_contain("val new_cond = replace_placeholders(expr_owner_left(eid))")
+        expect(source).to_contain("return placeholder_retain_span(eid, expr_if_expr(new_cond, new_then, new_else, 0))")
+        expect(source).to_contain("val new_cond = replace_placeholders_fixed_slot(expr_owner_left(eid), slot)")
+        expect(source).to_not_contain("flat_if_")
         val rebuilds_without_legacy_materialization = source.contains("materialize_legacy")
         expect(rebuilds_without_legacy_materialization).to_equal(false)

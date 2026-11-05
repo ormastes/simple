@@ -94,3 +94,27 @@ exact call sites so the seed change is mechanical.
 The nine regression-guard examples (`1.0`, `3.14`, `1e5`, `0.0`, `x.0`,
 `r.0.name`, `x.method()`, `x.name`, `0..10`) pass both before and after, which
 is what proves the re-split did not disturb ordinary float lexing.
+
+## 2026-11-05 re-measurement (release/1.0.0 bug-fix batch)
+
+The "guards pass" claim above no longer holds and the "float munch"
+diagnosis is outdated. Re-measured on the merged release/1.0.0 tip with the
+2026-11-05 seed: the tuple-index examples (9/13) pass, but the four float
+guards (`1.0`, `3.14`, `1e5`, `0.0`) fail with the spec's -1.0 sentinel.
+The float LEXEMES are intact end-to-end (`FloatLexeme("1.0")` etc. from
+`parse_and_build_module`) — commit c9aa3c05a4d (2026-10-08, "Preserve native
+float ... ownership") deliberately switched the flat bridge's EXPR_FLOAT_LIT
+arm from `FloatLit(f64)` to `FloatLexeme(text)`, so the spec's
+`ExprKind.FloatLit(v)` match arm no longer fires. No f64 is corrupted.
+
+Resolution landed in the pure-Simple bridge (not the seed): expression float
+literals convert to `FloatLit(f64)` again, while the two contexts whose
+specs pin exact decimal text keep `FloatLexeme` — module-level const/val
+initializers (MIR negates/folds the lexeme textually) and float literal
+match patterns — via the `flat_bridge_lexeme_float_literals` mode flag in
+`src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl`, set by
+`module_assembly.spl` for const initializers and inside
+`convert_flat_pattern` for float patterns. `nested_tuple_index_parse_spec`,
+`unary_literal_module_const_static_spec`,
+`float_literal_pattern_bridge_spec` and
+`imported_global_infer_storage_spec` all pass together after the change.

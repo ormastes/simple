@@ -1,7 +1,7 @@
 // Core function execution logic
 
 use super::arg_binding::{bind_args, bind_args_with_values, bind_args_with_values_named, name_callee};
-use super::async_support::{is_async_function, wrap_in_promise};
+use super::async_support::{is_async_function, wrap_async_result};
 use super::macros::*;
 use crate::error::CompileError;
 use crate::interpreter::{
@@ -923,9 +923,11 @@ pub(crate) fn execute_function_body(
     // plain Int: `0xFFFF_8000_0000_0000` would compare as negative there.
     let result = crate::interpreter::coerce_to_declared_unsigned(result, func.return_type.as_ref());
 
-    // Wrap in Promise if async and requested
+    // Wrap in a ready future if async and requested. When the program has
+    // the std.async Future class this builds the Future.from_value shape;
+    // otherwise it falls back to the legacy Promise wrap.
     let result = if wrap_async && is_async_function(func) {
-        wrap_in_promise(result)
+        wrap_async_result(result, classes.contains_key("Future"))
     } else {
         result
     };

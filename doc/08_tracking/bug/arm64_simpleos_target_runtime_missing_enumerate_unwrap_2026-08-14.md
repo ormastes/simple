@@ -60,3 +60,14 @@ prefix, so both requested members can be extracted into one link.
   remains undefined.
 - The retained payload objects were not rebuilt and no full payload build was
   run.
+
+## Verification — 2026-11-05
+
+Landed a source-level guard spec
+(test/01_unit/runtime/arm64_target_runtime_symbols_spec.spl, 2/2 under the
+seed interpreter on an aarch64 Linux host) pinning that core_values.spl owns
+rt_unwrap_or_trap (Ok/Some unwrap, fail-closed Err/None abort via
+_sffi_core_values_abort, stable-hash discriminants) and core_array_query.spl
+owns rt_array_enumerate. The focused AArch64 relocatable-link acceptance over
+retained payload objects still requires an ARM64 build lane and is not
+claimed.

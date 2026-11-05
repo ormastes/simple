@@ -1274,3 +1274,28 @@ Facts established:
 Next: (a) lane 62 gate-check on lane B's stage2-fixes + mir-mem-fixes-r10
 base; (b) source-level identification of the 0x16c37f scan loop for a nil
 guard; (c) if the r10 base still crashes, cdb-catch on it and diff the site.
+
+## Annotation 2026-11-05: nil-guard hardening of hir_abi_interface_parts_v1 declaration walks
+
+Lane 61 follow-up, step (b) of the doc's "Next" list. The unguarded
+declaration-dict walks in src/compiler/20.hir/abi_interface.spl
+(`hir_abi_interface_parts_v1`, functions/structs/classes/enums/bitfields/
+traits/constants) now skip entries whose bracket read returns nil, mirroring
+the proven extraction shape of the codec twins (hir_codec.spl
+`codec_abi_*_parts_v1`, which carry the same guards precisely because this
+draw family faults on the shard-stage2 binary; see also the documented
+"Dict.get can falsely report nil for a present tagged integer" hazard).
+This walk feeds the delegated HIR worker's TLDR header path
+(`tldr_function_header_from_hir_v1` -> `hir_abi_interface_encoded_v1`), which
+runs post-seal in the worker -- the phase and draw family of the caught
+0x16c37f nil-lookup-result dereference.
+
+Scope note: this is the requested hardening/containment, NOT the root-cause
+cure. The false-nil read itself (allocation-order-sensitive; perturbation
+law) remains the owner lane's runtime/heap defect. If the deterministic
+BISECT3 crash persists on the next gate run, the crash site should now move
+or surface as a refused/skipped entry rather than an AV; capture which.
+
+Regression: test/01_unit/compiler/hir/abi_interface_nil_guard_spec.spl --
+nil-valued function and constant entries are skipped and reproduce exactly
+the digest of the entry-pruned module.

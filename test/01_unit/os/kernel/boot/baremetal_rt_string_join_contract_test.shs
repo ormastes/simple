@@ -1,0 +1,81 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../../.." && pwd)
+cd "$root"
+work=$(mktemp -d "${TMPDIR:-/tmp}/x86-string-join.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+runtime=examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c
+extras=examples/09_embedded/simple_os/arch/x86_64/boot/rt_extras.c
+harness=test/01_unit/os/kernel/boot/baremetal_rt_string_join_contract_test.c
+out="$work/string_join_test.c"
+
+cat > "$out" <<'EOF'
+#include <stddef.h>
+#include <stdint.h>
+typedef int64_t RuntimeValue;
+#define TAG_MASK 0x7ULL
+#define TAG_HEAP 0x1ULL
+#define ENCODE_INT(v) ((RuntimeValue)(((uint64_t)(int64_t)(v) << 3)))
+#define ENCODE_PTR(p) ((RuntimeValue)((uint64_t)(uintptr_t)(p) | TAG_HEAP))
+#define DECODE_PTR(v) ((void *)((uint64_t)(v) & ~TAG_MASK))
+#define IS_HEAP(v) (((uint64_t)(v) & TAG_MASK) == TAG_HEAP)
+#define NIL_VALUE ((RuntimeValue)0x3ULL)
+#define HEAP_STRING 2
+#define HEAP_ARRAY 3
+typedef struct {
+    uint8_t type;
+    uint8_t gc_flags;
+    uint16_t reserved;
+    uint32_t size;
+} HeapHeader;
+typedef struct {
+    HeapHeader hdr;
+    uint32_t len;
+    uint32_t cap;
+    char data[];
+} RuntimeString;
+typedef struct {
+    HeapHeader hdr;
+    uint32_t len;
+    uint32_t cap;
+    RuntimeValue *items;
+} RuntimeArray;
+RuntimeValue *runtime_array_items(RuntimeArray *array);
+RuntimeValue rt_value_to_string(RuntimeValue value);
+RuntimeValue rt_string_from_cstr(const char *text);
+RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len);
+RuntimeValue rt_string_concat(RuntimeValue left, RuntimeValue right);
+RuntimeString *decode_string(RuntimeValue value);
+RuntimeValue rt_array_new(RuntimeValue capacity);
+RuntimeValue rt_string_slice(RuntimeValue value, RuntimeValue start, RuntimeValue end);
+static RuntimeValue rt_array_push_handle(RuntimeValue value, RuntimeValue item);
+EOF
+
+awk '
+    /^RuntimeValue rt_array_join\(RuntimeValue arr, RuntimeValue sep\);/ { print; getline; print; next }
+    /^\/\* rt_array_join\(arr, sep\)/ { on = 1 }
+    /^\/\* rt_array_concat\(arr_a, arr_b\)/ { on = 0 }
+    on { print }
+' "$runtime" >> "$out"
+awk '
+    /^RuntimeValue rt_string_to_int\(RuntimeValue s\)/ { on = 1 }
+    on { print }
+    on && /^}/ { exit }
+' "$runtime" >> "$out"
+awk '
+    /^\/\* rt_string_split: split by delimiter/ { on = 1 }
+    /^\/\* rt_string_partition:/ { on = 0 }
+    on { print }
+' "$runtime" >> "$out"
+awk '
+    /^RuntimeValue rt_char_from_code\(RuntimeValue code\)/ { on = 1 }
+    on { print }
+    on && /^}/ { exit }
+' "$extras" >> "$out"
+cat "$harness" >> "$out"
+
+"${CC:-cc}" -std=c11 -Wall -Wextra -Werror "$out" -o "$work/string_join_test"
+"$work/string_join_test"
+echo 'PASS x86_64 freestanding join, parse, split, and raw-codepoint chr'

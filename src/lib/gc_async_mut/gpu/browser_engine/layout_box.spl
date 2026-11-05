@@ -10,29 +10,41 @@ enum BeBoxKind:
     Anonymous
 
 class BeLayoutBox:
-    """A computed layout box: geometry, children, and source node reference."""
-    node_id: i64          # corresponding BeDomNode.node_id, or -1 for anonymous
-    kind: BeBoxKind
+    """A computed layout box: geometry, children, and source node reference.
+
+    Content-area geometry (`content_x`/`content_y`/`content_width`/
+    `content_height`) is stored, not derived: the box model insets are baked
+    in at construction time by `block_for`/`text_box`, so partial-box
+    constructors (specs, test fixtures) can pin content geometry directly
+    without replicating the padding/border arithmetic."""
+    node_id: i64 = -1          # corresponding BeDomNode.node_id, or -1 for anonymous
+    kind: BeBoxKind = BeBoxKind.Block
     # Computed geometry (pixels from content-area origin)
-    x: f64
-    y: f64
-    width: f64
-    height: f64
+    x: f64 = 0.0
+    y: f64 = 0.0
+    width: f64 = 0.0
+    height: f64 = 0.0
+    # Content-area geometry (after padding+border offset)
+    content_x: f64 = 0.0
+    content_y: f64 = 0.0
+    content_width: f64 = 0.0
+    content_height: f64 = 0.0
     # Box model
-    margin_top: f64
-    margin_right: f64
-    margin_bottom: f64
-    margin_left: f64
-    padding_top: f64
-    padding_right: f64
-    padding_bottom: f64
-    padding_left: f64
-    border_width: f64
+    margin_top: f64 = 0.0
+    margin_right: f64 = 0.0
+    margin_bottom: f64 = 0.0
+    margin_left: f64 = 0.0
+    padding_top: f64 = 0.0
+    padding_right: f64 = 0.0
+    padding_bottom: f64 = 0.0
+    padding_left: f64 = 0.0
+    border_width: f64 = 0.0
     # Content
-    text_content: text    # non-empty for text boxes
-    tag_name: text
-    style: StyleProps
-    children: [BeLayoutBox]
+    node: BeDomNode? = nil    # source node reference, nil for anonymous boxes
+    text_content: text = ""   # non-empty for text boxes
+    tag_name: text = ""
+    style: StyleProps = StyleProps.empty()
+    children: [BeLayoutBox] = []
 
 impl BeLayoutBox:
     static fn block_for(node: BeDomNode, x: f64, y: f64, width: f64, height: f64) -> BeLayoutBox:
@@ -44,6 +56,10 @@ impl BeLayoutBox:
             y: y,
             width: width,
             height: height,
+            content_x: x + node.style.padding_left + node.style.border_width,
+            content_y: y + node.style.padding_top + node.style.border_width,
+            content_width: width - node.style.padding_left - node.style.padding_right - node.style.border_width * 2.0,
+            content_height: height - node.style.padding_top - node.style.padding_bottom - node.style.border_width * 2.0,
             margin_top: node.style.margin_top,
             margin_right: node.style.margin_right,
             margin_bottom: node.style.margin_bottom,
@@ -53,6 +69,7 @@ impl BeLayoutBox:
             padding_bottom: node.style.padding_bottom,
             padding_left: node.style.padding_left,
             border_width: node.style.border_width,
+            node: node,
             text_content: "",
             tag_name: node.tag_name,
             style: node.style,
@@ -68,6 +85,10 @@ impl BeLayoutBox:
             y: y,
             width: width,
             height: height,
+            content_x: x,
+            content_y: y,
+            content_width: width,
+            content_height: height,
             margin_top: 0.0,
             margin_right: 0.0,
             margin_bottom: 0.0,
@@ -77,12 +98,20 @@ impl BeLayoutBox:
             padding_bottom: 0.0,
             padding_left: 0.0,
             border_width: 0.0,
+            node: node,
             text_content: data,
             tag_name: "#text",
             style: node.style,
             children: []
         )
 
+    # Content-area geometry, DERIVED per call from the stored border-box
+    # geometry plus the box model. The class also carries content_x/
+    # content_y/content_width/content_height as stored FIELDS so partial-box
+    # constructors (spec fixtures) can pin content geometry directly; the
+    # constructors above initialise those fields to exactly these derived
+    # values. Call sites that observe mutated boxes must use these methods,
+    # never the stored fields.
     fn content_width() -> f64:
         self.width - self.padding_left - self.padding_right - self.border_width * 2.0
 

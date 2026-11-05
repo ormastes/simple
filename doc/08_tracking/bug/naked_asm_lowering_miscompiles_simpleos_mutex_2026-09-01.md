@@ -149,9 +149,9 @@ all `@cfg` dispatch are deleted. In their place:
 
 Pinned by `test/01_unit/os/kernel/net/thread_shim_cas_critical_section_spec.spl`
 (5/5 at interpreter level on the seed binary; the dbfs admission probe spec
-stays 7/7). This does NOT close the compiler half of the bug: the seed's
-cranelift freestanding backend still ignores `@naked` (prologue before the
-asm thunk, `ud2` after the wrapper call), so `@naked` remains silently
-broken for every other user. The codegen fix sketch above is unchanged and
-still required; this addendum removes the SimpleOS mutex provider from the
-blast radius.
+stays 7/7). The compiler half is fixed by `ba7f6fc5c45`: naked sidecars are
+emitted without a compiler-generated frame and their wrappers return the
+sidecar result instead of trapping. The focused CAS/CPU-ID disassembly and
+execution regression plus the ordinary-asm regression pass. On the subsequent
+OVMF DBFS run, the guest reached `critical-section provider=ready`, proving the
+real mutex path rather than merely linking it.
