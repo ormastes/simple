@@ -217,7 +217,29 @@ OPENSBI_CROSS=
 for c in riscv64-linux-gnu- riscv64-unknown-elf-; do
     command -v "${c}gcc" >/dev/null 2>&1 && { OPENSBI_CROSS=$c; break; }
 done
-[ -n "$OPENSBI_CROSS" ] || nothing "no riscv64 cross-gcc to build OpenSBI"
+# No cross-gcc (e.g. macOS): build OpenSBI with LLVM=1 — upstream-supported —
+# using a RISC-V-capable clang + ld.lld + llvm-objcopy found on PATH or in the
+# keg-only Homebrew LLVM dir. Newer clang flags OpenSBI v1.4's cadence-uart.c
+# with -Wunused-but-set-global under -Werror; platform-genflags-y (unused by
+# PLATFORM=generic) appends the opt-out AFTER -Wall so it takes effect.
+OPENSBI_TOOLCHAIN_ARGS=
+OPENSBI_TOOLCHAIN_NOTE=
+if [ -n "$OPENSBI_CROSS" ]; then
+    OPENSBI_TOOLCHAIN_ARGS="CROSS_COMPILE=$OPENSBI_CROSS"
+    OPENSBI_TOOLCHAIN_NOTE="OpenSBI via ${OPENSBI_CROSS}gcc"
+else
+    for d in "" ${LLVM_EXTRA_DIRS:-/opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin}; do
+        if [ -z "$d" ]; then cl=$(command -v clang 2>/dev/null) || continue; d=$(dirname "$cl"); fi
+        [ -x "$d/clang" ] && [ -x "$d/llvm-objcopy" ] && [ -x "$d/llvm-ar" ] || continue
+        printf 'int x;\n' | "$d/clang" --target=riscv64-unknown-elf -x c -c -o /dev/null - >/dev/null 2>&1 || continue
+        command -v ld.lld >/dev/null 2>&1 || [ -x "$d/ld.lld" ] || continue
+        PATH=$d:$PATH; export PATH
+        OPENSBI_TOOLCHAIN_ARGS="LLVM=1 platform-genflags-y=-Wno-unused-but-set-global"
+        OPENSBI_TOOLCHAIN_NOTE="OpenSBI via LLVM=1 ($d/clang)"
+        break
+    done
+fi
+[ -n "$OPENSBI_TOOLCHAIN_ARGS" ] || nothing "no riscv64 cross-gcc and no RISC-V-capable clang+ld.lld+llvm-objcopy to build OpenSBI"
 
 mkdir -p "$WORK"
 
@@ -235,7 +257,8 @@ else
 fi
 
 # --- build fw_payload: REAL FIRMWARE with the hello guest embedded ----------
-make -C "$OPENSBI_SRC" PLATFORM=generic CROSS_COMPILE="$OPENSBI_CROSS" \
+# shellcheck disable=SC2086
+make -C "$OPENSBI_SRC" PLATFORM=generic $OPENSBI_TOOLCHAIN_ARGS \
     FW_PAYLOAD=y FW_PAYLOAD_PATH="$IMAGE" FW_PAYLOAD_OFFSET=0x200000 -j4 \
     >"$WORK/opensbi-build.log" 2>&1 \
     || { tail -20 "$WORK/opensbi-build.log" >&2; nothing "OpenSBI fw_payload build failed"; }
@@ -274,5 +297,5 @@ fi
 [ "$n_programs" -gt 0 ] || nothing "no programs were executed (log: $LOG)"
 n_lines=$(wc -l <"$LOG" | tr -d ' ')
 
-printf 'PASS — %s program(s) checked, a Simple hello world compiled by the RUST SEED ran in-guest on SimpleOS riscv64 under real OpenSBI %s firmware via -bios fw_payload (no -kernel, no isa-debug-exit) and printed its own output; %s; %s serial line(s); log %s\n' \
-    "$n_programs" "$OPENSBI_TAG" "$interp_note" "$n_lines" "$LOG"
+printf 'PASS — %s program(s) checked, a Simple hello world compiled by the RUST SEED ran in-guest on SimpleOS riscv64 under real OpenSBI %s firmware via -bios fw_payload (no -kernel, no isa-debug-exit) and printed its own output; %s; %s; %s serial line(s); log %s\n' \
+    "$n_programs" "$OPENSBI_TAG" "$interp_note" "$OPENSBI_TOOLCHAIN_NOTE" "$n_lines" "$LOG"

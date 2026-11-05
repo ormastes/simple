@@ -43,3 +43,14 @@ Whether the fault is the unsigned `<` against a call result, the `u64` local's
 initial value, or the `u64` `+` is unknown; a minimal native-build repro on
 riscv64 and x86_64 freestanding is the next step. The i64 workaround is in
 `nvfs_root_entry.spl::find_nvfs_slot`.
+
+## Verification 2026-11-05 (riscv-sweep lane, work/riscv-sweep-20261105)
+
+Re-checked at tip `origin/release/1.0.0` @ `bc3e9b48cb4`: the committed
+i64-counter workaround in `nvfs_root_entry.spl::find_nvfs_slot` is still in
+place. No minimal riscv64 native-build repro was constructed in this pass, so
+the seed `u64` ordering-compare / while-counter lowering defect remains
+unreproduced on target; the 2026-10-04 related evidence (ordering compares on
+`be32` call results lowering to dynamic `rt_native_cmp`) is likewise still
+worked around via typed locals. Status: OPEN (worked around); a minimal
+freestanding rv32/rv64 native repro remains the next step.

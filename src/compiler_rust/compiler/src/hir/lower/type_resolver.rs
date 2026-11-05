@@ -655,8 +655,18 @@ impl Lowerer {
                     "Result" if args.len() == 1 || args.len() == 2 => self
                         .instantiate_builtin_generic_enum("Result", args)
                         .expect("Result arity checked above"),
-                    // List<T> - same as array
-                    "List" if args.len() == 1 => {
+                    // List<T> / list<T> - same as array. Lowercase `list` must
+                    // resolve identically: the bare-name fallback above already
+                    // maps bare `list` to Array, and stdlib sources spell the
+                    // generic lowercase almost everywhere. Leaving lowercase
+                    // `list<T>` on the `_ => ANY` fallthrough erased every
+                    // list-typed local/field/param to ANY at HIR, which made
+                    // `self.entries + [item]` degrade to a native integer add
+                    // (codegen/instr BinOp) instead of rt_array_concat -- the
+                    // me-method store then wrote a garbage handle and the next
+                    // element read trapped in-guest on riscv64 freestanding
+                    // (doc/08_tracking/bug/riscv64_freestanding_me_method_invocation_traps_2026-08-31.md).
+                    "List" | "list" if args.len() == 1 => {
                         let elem = self.resolve_type(&args[0])?;
                         Ok(self.module.types.register(HirType::Array {
                             element: elem,

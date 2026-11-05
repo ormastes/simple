@@ -295,3 +295,12 @@ same runtime entry points, the link silently picks one, and a fix to the other
 looks correct in source review and is inert at runtime. It has now cost two
 sessions on this one function. Deduplicating the boot TUs is a separate change.
 
+
+## Verification 2026-11-05 (riscv-sweep lane, work/riscv-sweep-20261105) — resolved at tip, re-verified
+
+`check-freestanding-dict-arms-in-every-definition.shs` PASSes at
+`origin/release/1.0.0` @ `bc3e9b48cb4` (selftest 4 fixtures OK; 6 definitions
+checked, 0 missing a HEAP_DICT arm), pinning the dict arms in the link-winning
+`baremetal_stubs.c` `rt_index_set` / `rt_index_get` / `rt_len`. The in-guest
+row-1 GREEN evidence remains the 2026-09-01 boot recorded above. Status:
+RESOLVED at tip.

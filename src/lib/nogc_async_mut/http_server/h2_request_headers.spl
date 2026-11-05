@@ -80,4 +80,71 @@ pub fn h2_validate_request_headers(headers: [HpackHeader]) -> H2RequestHeaderVal
         return H2RequestHeaderValidation(valid: false, reason: "missing :scheme or :path")
     H2RequestHeaderValidation(valid: true, reason: "")
 
-export H2RequestHeaderValidation, H2_MAX_HEADER_LIST_BYTES
+# ---------------------------------------------------------------------------
+# Strict authority-source validation — RFC 9113 §8.3.1 / RFC 7540 §8.1.2.3.
+#
+# `h2_validate_request_headers` above is the tolerant wire gate: it admits
+# host-only sections, matching and conflicting :authority/Host pairs, and
+# requests with no authority, because the connection layer canonicalizes
+# Host fields to a single authoritative value downstream (see
+# `_decode_and_buffer_request`). This function is the strict policy a server
+# applies when it must reject rather than canonicalize:
+#
+# - An ordinary request needs exactly one authority source: :authority or a
+#   single Host field. Neither source is "missing request authority".
+# - :authority and Host may both be present only when they identify the same
+#   entity; comparison is ASCII case-insensitive (no default-port
+#   normalization, parity with the HTTP/1 Host policy).
+# - Duplicate Host fields are never valid (Host is not list-based).
+# - CONNECT requires :authority (RFC 9113 §8.5); an accompanying Host must
+#   still agree with it.
+# - OPTIONS * does not require an authority, but a conflicting pair is still
+#   rejected.
+#
+# Returns "" when the authority sources are well-formed, else a short reason.
+# Callers map a nonempty result to a malformed-request rejection.
+# ---------------------------------------------------------------------------
+
+fn _h2_normalized_authority(value: text) -> text:
+    value.lower()
+
+pub fn h2_request_authority_error(headers: [HpackHeader]) -> text:
+    var method = ""
+    var path = ""
+    var authority = ""
+    var saw_authority = false
+    var host_count = 0
+    var host_value = ""
+    var i = 0
+    while i < headers.len():
+        val h = headers[i]
+        if h.name == ":method":
+            method = h.value
+        elif h.name == ":path":
+            path = h.value
+        elif h.name == ":authority":
+            saw_authority = true
+            authority = h.value
+        elif h.name == "host":
+            host_count = host_count + 1
+            host_value = h.value
+        i = i + 1
+    if host_count > 1:
+        return "multiple host fields"
+    if method == "CONNECT":
+        if not saw_authority:
+            return "CONNECT requires :authority"
+        if host_count == 1 and _h2_normalized_authority(authority) != _h2_normalized_authority(host_value):
+            return ":authority and host mismatch"
+        return ""
+    if method == "OPTIONS" and path == "*":
+        if saw_authority and host_count == 1 and _h2_normalized_authority(authority) != _h2_normalized_authority(host_value):
+            return ":authority and host mismatch"
+        return ""
+    if not saw_authority and host_count == 0:
+        return "missing request authority"
+    if saw_authority and host_count == 1 and _h2_normalized_authority(authority) != _h2_normalized_authority(host_value):
+        return ":authority and host mismatch"
+    ""
+
+export H2RequestHeaderValidation, H2_MAX_HEADER_LIST_BYTES, h2_request_authority_error
