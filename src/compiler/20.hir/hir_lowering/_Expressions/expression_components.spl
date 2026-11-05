@@ -63,6 +63,10 @@ fn or_bare_name_is_variant_reference(name: text) -> bool:
     val first = name.char_at(0)
     first >= "A" and first <= "Z"
 
+
+fn nil_payload_pattern_non_optional_message(variant: text) -> text:
+    "`{variant}(nil)` can never match: the {variant} payload is not optional (nil is only the T? absence literal); match absence with `case nil:` on an optional subject, or declare the payload as T?"
+
 impl HirLowering:
     me lower_expr_list(exprs: [Expr]) -> [HirExpr]:
         var result: [HirExpr] = []
@@ -355,6 +359,71 @@ impl HirLowering:
         var wrapper_payload: HirPatternPayload? = nil
         wrapper_payload = Some(HirPatternPayload.Tuple([inner]))
         HirPattern(kind: HirPatternKind.Enum(HirType(kind: HirTypeKind.Error, span: span), wrapper, wrapper_payload), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
+
+    fn pattern_is_builtin_wrapper_v1(p: Pattern) -> bool:
+        """Unqualified one-slot `Some(..)` / `Ok(..)` / `Err(..)` pattern."""
+        match p.kind:
+            case PatternKind.Enum(enum_name, variant_name, payload):
+                if enum_name != "": return false
+                if variant_name != "Some" and variant_name != "Ok" and variant_name != "Err": return false
+                val payload_opt: EnumPatternPayload? = payload
+                if val pl = payload_opt:
+                    match pl:
+                        case Tuple(items): return items.len() == 1
+                        case _: ()
+            case _: ()
+        false
+
+    me wrapper_slot_subject_v1(variant_name: text, subject_type: HirType?) -> HirType?:
+        """Concrete payload slot type of builtin wrapper `variant_name` over
+        `subject_type` (`T` of `T?` / `Option<T>`, `T`/`E` of `Result<T, E>`),
+        or nil when the subject does not prove it."""
+        if val subject = subject_type:
+            match subject.kind:
+                case HirTypeKind.Optional(inner):
+                    if variant_name == "Some": return Some(inner)
+                case HirTypeKind.Result(ok_type, err_type):
+                    if variant_name == "Ok": return Some(ok_type)
+                    if variant_name == "Err": return Some(err_type)
+                case HirTypeKind.Named(symbol, args):
+                    val type_name = self.symbols.symbol_name_scalar_raw(symbol.id)
+                    if type_name == "Option" and args.len() == 1 and variant_name == "Some": return Some(args[0])
+                    if type_name == "Result" and args.len() == 2:
+                        if variant_name == "Ok": return Some(args[0])
+                        if variant_name == "Err": return Some(args[1])
+                case _: ()
+        nil
+
+    me lower_nested_wrapper_v1(p: Pattern, subject_type: HirType) -> HirPattern?:
+        """Lower a builtin wrapper pattern nested in another wrapper with its
+        payload typed from `subject_type`; nil when the slot is not proven, so
+        the caller keeps its existing lowering."""
+        match p.kind:
+            case PatternKind.Enum(_, variant_name, payload):
+                val slot_type = self.wrapper_slot_subject_v1(variant_name, Some(subject_type))
+                if val slot = slot_type:
+                    val payload_opt: EnumPatternPayload? = payload
+                    if val pl = payload_opt:
+                        match pl:
+                            case Tuple(items):
+                                if items.len() != 1: return nil
+                                val inner_p: Pattern = items[0]
+                                var inner_lowered: HirPattern? = nil
+                                if self.pattern_is_builtin_wrapper_v1(inner_p):
+                                    inner_lowered = self.lower_nested_wrapper_v1(inner_p, slot)
+                                if inner_lowered == nil:
+                                    var lowered = self.lower_match_pattern(inner_p, Some(slot))
+                                    if self.pattern_is_nil_literal(inner_p):
+                                        match slot.kind:
+                                            case HirTypeKind.Optional(_):
+                                                lowered = HirPattern(kind: lowered.kind, has_type_: true, type_: slot, span: lowered.span)
+                                            case _: ()
+                                    inner_lowered = Some(lowered)
+                                if val done = inner_lowered:
+                                    return Some(self.wrapper_pattern(variant_name, done, p.span))
+                            case _: ()
+            case _: ()
+        nil
 
     fn pattern_is_nil_literal(p: Pattern) -> bool:
         match p.kind:
@@ -734,6 +803,15 @@ impl HirLowering:
                     if val wrapper_pl = payload_opt:
                         match wrapper_pl:
                             case Tuple(wrapper_patterns):
+                                # native_enum_nil_payload_pattern_2026_10_11:
+                                # `Ok(Some(chunk))` over `Result<text?, E>`. The
+                                # nested wrapper's binder must carry the slot
+                                # type (`text`), else native MIR binds the raw
+                                # payload word and formats it as an integer.
+                                if wrapper_patterns.len() == 1 and self.pattern_is_builtin_wrapper_v1(wrapper_patterns[0]):
+                                    if val nested_outer_slot = self.wrapper_slot_subject_v1(variant_name, subject_type):
+                                        if val nested_lowered = self.lower_nested_wrapper_v1(wrapper_patterns[0], nested_outer_slot):
+                                            return self.wrapper_pattern(variant_name, nested_lowered, p.span)
                                 # Only when the wrapped pattern names a possible
                                 # unit variant: a plain `Some(x)` keeps its
                                 # existing lowering untouched.
@@ -785,7 +863,17 @@ impl HirLowering:
                                                 match nil_slot_type.kind:
                                                     case HirTypeKind.Optional(_):
                                                         wrapped_inner = HirPattern(kind: wrapped_inner.kind, has_type_: true, type_: nil_slot_type, span: wrapped_inner.span)
-                                                    case _: ()
+                                                    case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Any | HirTypeKind.TypeParam(_, _): ()
+                                                    case HirTypeKind.Named(nil_slot_owner, _):
+                                                        if self.symbols.symbol_name_scalar_raw(nil_slot_owner.id) != "Option":
+                                                            self.error(nil_payload_pattern_non_optional_message(variant_name), p.span)
+                                                            return HirPattern(kind: HirPatternKind.Error, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: p.span), span: p.span)
+                                                    case _:
+                                                        # nil_payload_pattern_on_non_optional_slot_2026-11-05:
+                                                        # nil is only the T? absence literal; it can never
+                                                        # match a non-optional payload.
+                                                        self.error(nil_payload_pattern_non_optional_message(variant_name), p.span)
+                                                        return HirPattern(kind: HirPatternKind.Error, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: p.span), span: p.span)
                                         return self.wrapper_pattern(variant_name, wrapped_inner, p.span)
                             case _: ()
             case PatternKind.Tuple(elements):

@@ -196,3 +196,12 @@ Update 2026-11-04: fixture fixed (branch work/g-pinning-lifetime-fixture). The c
 Already re-triaged today (section above, lane g-borrow-pinning). Remaining scope is
 foreign-call pinning (call-scoped region + foreign-call marker), architectural;
 deferred, status stays open.
+
+## Re-verified 2026-11-05 (HB2) — still ARCHITECTURAL-OPEN
+
+`BorrowGraph.record_move` (`borrow_graph.spl:652`) still checks only
+`moved_now`; no `borrows_of`/`has_conflicting_borrow` consultation. `git grep`
+for `pinning|BorrowPin|foreign_call_borrow` in `55.borrow/` and `50.mir/`:
+0 hits. A local "reject move with outstanding borrow" check without borrow
+liveness would flag every move after any earlier borrow (borrows never
+expire), so it is not a safe local fix. Left OPEN.

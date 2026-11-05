@@ -48,3 +48,15 @@ Needs a native codegen change (text method receivers must not go through
 object; the `byte_at` workaround in `_driver_line_end` is kept. Remaining
 same-family sites listed above are bounded. Status left open; verify by
 re-running the 1.17 MB / 20,000-line repro on a stage3 build and checking RSS < 50 MB.
+
+## mirp2-G 2026-11-05: left open
+
+Premise still current (receiver copy via `rt_interp_cstr` + `rt_string_new`
+in text-method lowering). Not changed this session: the fix is MIR lowering of
+text method receivers and can only be measured on a stage3 object; native probing
+was blocked (C: had 6.3 GB free, harness needs 12 GB). Note the related runtime
+change for optional_text_unwrap_truncates_at_nul_2026-10-25 makes `rt_strlen` on
+a heap-string data pointer O(1) via the registry, which removes the per-call
+`strlen` but not the copy. Next step unchanged: lower `index_of`/`contains` on a
+text receiver to the direct `__simple_rt_string_*` entry (as `byte_at` already is)
+and rerun the 1.17 MB / 20,000-line repro (target RSS < 50 MB).

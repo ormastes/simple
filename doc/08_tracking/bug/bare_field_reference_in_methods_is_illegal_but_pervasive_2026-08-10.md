@@ -586,6 +586,10 @@ Leaving OPEN, no attempt.
 
 
 
+## HIR-P2 HC triage 2026-11-05
+
+Premise holds (illegal in every lane; not a compiler gap). Fix is a ~740-site mechanical rewrite across src/os, src/compiler, src/lib; needs a scoped per-module plan (and a lint rule to ratchet) rather than one family PR. Re-scoped: remains OPEN as a systemic migration; no code change here.
+
 ## HIR-P2 HC2 compiler-subset rescan 2026-11-05
 
 Re-scanned every `.spl` under `src/compiler/**` at origin/release/1.0.0

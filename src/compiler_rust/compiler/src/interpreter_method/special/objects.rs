@@ -365,6 +365,11 @@ pub fn handle_constructor_methods(
             .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(class_name).cloned()));
         if let Some(enum_def) = enum_def {
             if let Some(variant) = enum_def.variants.iter().find(|v| v.name == method) {
+                crate::interpreter::interpreter_call::validate_enum_variant_arity(
+                    &enum_def,
+                    method,
+                    positional_values.len(),
+                )?;
                 let has_fields = variant.fields.as_ref().is_some_and(|f| !f.is_empty());
                 let payload = if !has_fields && positional_values.is_empty() {
                     None
@@ -425,6 +430,7 @@ pub fn handle_constructor_methods(
         .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(class_name).cloned()));
     if let Some(enum_def) = enum_def {
         if let Some(variant) = enum_def.variants.iter().find(|v| v.name == method) {
+            crate::interpreter::interpreter_call::validate_enum_variant_arity(&enum_def, method, args.len())?;
             // Args are still unevaluated on this no-class path.
             let mut variant_values: Vec<Value> = Vec::with_capacity(args.len());
             for arg in args {

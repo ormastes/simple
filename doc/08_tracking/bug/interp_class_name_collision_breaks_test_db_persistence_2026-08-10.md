@@ -98,3 +98,7 @@ co-compiled duplicate-symbol warning to classes so collisions are loud.
 Reconfirmed: worked around by renames, diagnostic landed; by-name class
 resolution across modules remains OPEN, needing resolver-level work. Left
 as-is, no code change attempted.
+
+## HIR-P2 HC triage 2026-11-05
+
+Reconfirmed: renames + warning landed (class_name_collision_warning_spec). Keying classes by (module,name) is resolver-level work touching eval_tables.spl and the seed; with 1,917 latent duplicate names it needs a staged plan (warn -> qualify -> error). No safe small fix; remains OPEN.

@@ -317,6 +317,8 @@ impl<'a> Parser<'a> {
             // set, or `var into = 3` is rejected while `into + 1` would be fine.
             TokenKind::Into => self.parse_keyword_as_pattern("into"),
             TokenKind::Bind => self.parse_keyword_as_pattern("bind"),
+            TokenKind::Allow => self.parse_keyword_as_pattern("allow"),
+            TokenKind::Forbid => self.parse_keyword_as_pattern("forbid"),
             TokenKind::Unwrap => self.parse_keyword_as_pattern("unwrap"),
             TokenKind::On => self.parse_keyword_as_pattern("on"),
             TokenKind::With => self.parse_keyword_as_pattern("with"),

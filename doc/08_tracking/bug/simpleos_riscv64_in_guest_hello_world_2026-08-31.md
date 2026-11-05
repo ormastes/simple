@@ -152,3 +152,20 @@ the in-guest interpreter payload, and routing around the gate would produce an
 artifact both install-image provenance guards reject. No bootstrap deployment
 exists in this lane, so the interpreter row cannot advance here. Status: OPEN
 (blocked on self-hosted compiler admission, not on this lane's code).
+
+## Resolution 2026-11-06 (PR chain #6983..#7061; gate verified)
+
+`check-simpleos-riscv64-interpreter-in-guest-opensbi.shs` now PASSES both
+rows: the in-guest Simple interpreter evaluated a hello world and a
+build-and-run sanity program was MIR-lowered then run, both on SimpleOS
+riscv64 under real OpenSBI v1.4 firmware via `-bios fw_payload`, each print
+carrying the run's nonce. The fourteen-PR chain fixed, in order: the
+35-symbol kernel link port, the duplicate-allocator heap partitioning, the
+guest cfg-env preseed, the parser-provider enum-equality workaround, the
+par_state overlay root cause (ghdl duplicate rt_alloc decoding the raw byte
+size as a tagged int), the stale dict-arm duplicates, the Ok-wrapper leak
+in interpreted arg binding, the no-growth rt_array_push duplicate, and the
+guest Result/field text-payload corruptions (Result-free workarounds, seed
+codegen family recorded open). Deepest evidence chain:
+doc/08_tracking/bug/riscv64_in_guest_parse_recursion_par_state_uninit_2026-11-05.md
+and doc/08_tracking/bug/riscv64_interp_enum_check_discriminant_shift_2026-11-06.md.
