@@ -3003,6 +3003,24 @@ mod tests {
 
     #[test]
     fn sandbox_capability_table_gates_file_text_io() {
+        const ISOLATED_CHILD: &str = "SIMPLE_FILE_OPS_SANDBOX_CAPABILITY_CHILD";
+        if std::env::var_os(ISOLATED_CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("value::sffi::file_io::file_ops::tests::sandbox_capability_table_gates_file_text_io")
+                .arg("--nocapture")
+                .env(ISOLATED_CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated sandbox capability test failed:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("sandboxed.txt");
         fs::write(&file_path, "allowed").unwrap();
