@@ -207,7 +207,25 @@ pub(super) fn eval_control_expr(
             Ok(Some(result))
         }
         Expr::Match { subject, arms } => {
-            let subject_val = evaluate_expr(subject, env, functions, classes, enums, impl_methods)?;
+            // Resolve the subject's place up front: read the subject through
+            // it (index expressions evaluate exactly once) and merge arm
+            // payload-binding container mutations back through it after the
+            // matched arm ran (the two-hop place chain).
+            let subject_place = crate::interpreter::place::resolve_place(
+                subject,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
+            let subject_val = match &subject_place {
+                Some(place) => match crate::interpreter::place::place_slot_ref(env, place) {
+                    Some(value) => value.clone(),
+                    None => evaluate_expr(subject, env, functions, classes, enums, impl_methods)?,
+                },
+                None => evaluate_expr(subject, env, functions, classes, enums, impl_methods)?,
+            };
 
             // Check pattern exhaustiveness for enums
             if let Value::Enum { enum_name, .. } = &subject_val {
@@ -391,6 +409,33 @@ pub(super) fn eval_control_expr(
                     }
                     // Write back only what the arm actually wrote.
                     crate::interpreter::block_exec::copy_back_block_writes(&arm_env, env);
+                    // Carry container mutations made through this arm's
+                    // payload bindings back into the match subject (payload
+                    // binding -> enum payload -> subject). Arm bindings live
+                    // only in `arm_env`; read their post-arm values before
+                    // the env clone is dropped. Scalar writes keep value
+                    // semantics (merge_shared_collection_fields).
+                    let binding_paths = crate::interpreter::interpreter_patterns::pattern_subject_binding_paths(
+                        &arm.pattern,
+                        &subject_val,
+                        classes,
+                    );
+                    if !binding_paths.is_empty() {
+                        let binding_values: Vec<(String, Value)> = binding_paths
+                            .iter()
+                            .filter_map(|(name, _)| {
+                                arm_env.get(name).cloned().map(|v| (name.clone(), v))
+                            })
+                            .collect();
+                        crate::interpreter::interpreter_patterns::merge_match_arm_subject_bindings(
+                            subject_place.as_ref(),
+                            &subject_val,
+                            &arm.pattern,
+                            &binding_values,
+                            env,
+                            classes,
+                        );
+                    }
                     return Ok(Some(result));
                 }
             }
