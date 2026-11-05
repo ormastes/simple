@@ -387,3 +387,70 @@ cannot move in either direction without someone being told.
   spec as passing until someone has seen a `Results: N total, N passed` line
   from it.
 
+
+## RE-TRIAGED 2026-11-05 on release/1.0.0 (worktree /private/tmp/rel100-seedfix-20261105, HEAD a2d7d55a10b)
+
+The 2026-08-17 "FIX WRITTEN, NOT YET BUILD-VERIFIED" patch **is in ancestry and is
+verified working**. It landed as `bba6ccae1fd` ("fix(interpreter): non-mut param
+write-back clobbered an aliased mut param", 2026-08-17), with follow-ups
+`1006e3363f0` (obj.field alias) and `1e53a2b6e11` (nested-path field write-back).
+`git merge-base --is-ancestor bba6ccae1fd HEAD` → in ancestry.
+
+### Evidence (seed built from this branch: `cargo build --release`, CARGO_TARGET_DIR=/private/tmp/rel100-cargo-c; binary /private/tmp/rel100-cargo-c/release/simple, macOS arm64)
+
+- Probe `test/01_unit/compiler/interpreter/probe_aliased_param_writeback.spl`:
+  - `SIMPLE_EXECUTION_MODE=interpret` → `ALIASED_PARAM_WRITEBACK PROBE: ALL PASS`
+    (all 13 PASS lines, including the five shapes that failed on 2026-08-17:
+    `aliased_array_mut_first`, `_first_value`, `_middle`, `_named_args`,
+    `aliased_dict_mut_first`). Only `OBSERVE aliased_array_both_mut=2` remains,
+    see "still open" below.
+  - `SIMPLE_EXECUTION_MODE=jit` → `ALIASED_PARAM_WRITEBACK PROBE: ALL PASS`,
+    `OBSERVE aliased_array_both_mut=3`.
+- Original repro: `simple test test/01_unit/lib/common/gpu/engine2d/scalar_oracle_spec.spl`
+  → `Results: 44 total, 44 passed, 0 failed` under BOTH interpret and jit;
+  the two aliased-copy rows assert the contract values (e[4]=1, e[15]=12,
+  hash 280943671307053) and pass on the interpreter. The spec's stale
+  "pins broken behaviour" comment block was updated to record the fix.
+- Regression spec `test/01_unit/compiler/interpreter/aliased_param_writeback_spec.spl`
+  → 4/4 passed under both engines.
+- `cargo test --release -p simple-compiler --lib` → 4521 passed, 24 failed,
+  5 ignored. The 24 failures are all in codegen/vulkan/native_project/
+  pipeline-lowering modules (host-environment-dependent: vulkan device symbols,
+  native link/stub shapes) — none in `interpreter_call` or any write-back path,
+  and none caused by this lane, which changed no Rust code. Listed for the
+  record: the failures pre-date this triage on release/1.0.0 @ a2d7d55a10b.
+
+Verdict for the FILED defect (mut + non-mut aliasing, arrays/dicts/objects,
+named args, one-level and nested field paths): **FIXED and verified** on
+release/1.0.0.
+
+### Still open: both aliases declared `mut` (unchanged from 2026-08-17)
+
+Minimal repro re-run today on this branch
+(`test/01_unit/compiler/interpreter/probe_aliased_both_mut_param.spl`, created
+2026-11-05 as a pinned standalone reproducer):
+
+```
+fn push_both(mut a: [i64], mut b: [i64]): a.push(7); b.push(8)
+var z: [i64] = [1]; push_both(z, z)
+```
+
+- `interpret` → `both_mut_len 2`  (last write-back wins: [1,8])
+- `jit`     → `both_mut_len 3`  (shared storage: [1,7,8])
+
+Still a genuine interpreter/JIT divergence of the same defect class, and still
+NOT fixable from `write_back_mutable_arguments`: both parameters legitimately
+fork their own Arc during the body, and after the body the two snapshots
+([1,7] and [1,8]) cannot be merged into the true interleaving ([1,7,8]) — the
+mutation history is gone. A correct fix requires the callee's aliased parameter
+bindings to share one mutable handle at bind time
+(`interpreter_call/core/arg_binding.rs`), which is outside the 2026-11-05
+lane's owned paths. The existing `OBSERVE aliased_array_both_mut` rows in
+`aliased_param_writeback_spec.spl` keep the divergence pinned (2 vs 3), so the
+number cannot move silently. Recommend a separate bug/lane for the bind-time
+sharing change.
+
+### Unverified
+
+- Method receivers (`self` aliased with an argument) — still not measured.
+- Native/AOT lane — not measured.
