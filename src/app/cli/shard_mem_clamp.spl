@@ -522,23 +522,92 @@ pub fn shard_cgroup_memory_max_kb_from_fields(fields: [text]) -> i64:
             best = kb
     best
 
+# ===== cgroup v1 memory.limit_in_bytes ========================================
+#
+# v1-only and hybrid hosts have no "0::" row in /proc/self/cgroup, so the v2
+# probe finds nothing and fanout would be sized from host MemAvailable -- the
+# same OOM class the v2 probe fixed. The v1 memory controller row
+# ("9:memory:/docker/abc") names the cgroup under the memory hierarchy mount,
+# and memory.limit_in_bytes holds the cap. v1 reports "unlimited" as the huge
+# numeric sentinel 9223372036854771712 (0x7FFFFFFFFFFFF000), not the text
+# "max": any parsed limit at or above 2^62 bytes is that sentinel region, not
+# a usable per-tree cap, so it is ignored -- never read as a bound of 0.
+
+# v1 memory controller path from a /proc/self/cgroup table. A v2-only table
+# (a "0::" row, no memory controller row) yields "" -- the v2 probe owns it.
+pub fn shard_cgroup_v1_memory_path_from_proc(table: text) -> text:
+    for line in table.split("\n"):
+        val fields = line.split(":")
+        if fields.len() == 3 and fields[1] == "memory":
+            return fields[2].trim()
+    ""
+
+# memory.limit_in_bytes files from the leaf cgroup up to the v1 root.
+pub fn shard_cgroup_v1_limit_paths(cgroup_path: text) -> [text]:
+    if cgroup_path == "" or not cgroup_path.starts_with("/"):
+        return []
+    var paths: [text] = []
+    var current = cgroup_path
+    while current.len() > 1 and current.ends_with("/"):
+        current = current.substring(0, current.len() - 1)
+    while true:
+        val prefix = if current == "/": "" else: current
+        paths = paths.push("/sys/fs/cgroup/memory" + prefix + "/memory.limit_in_bytes")
+        if current == "/":
+            break
+        val slash = current.rfind("/")
+        current = if slash <= 0: "/" else: current.substring(0, slash)
+    paths
+
+# Smallest numeric memory.limit_in_bytes (bytes) on the chain, in kB; values in
+# the unlimited-sentinel region (>= 2^62 bytes), junk and unreadable levels are
+# skipped; 0 when every level is one of those.
+pub fn shard_cgroup_v1_limit_kb_from_fields(fields: [text]) -> i64:
+    var best: i64 = 0
+    for field in fields:
+        val bytes = shard_mem_available_kb_from_field(field)
+        if bytes <= 0 or bytes >= 4611686018427387904:
+            continue
+        val kb = bytes / 1024
+        if kb <= 0:
+            continue
+        if best == 0 or kb < best:
+            best = kb
+    best
+
 @when(os="windows"):
 # Windows job objects export their cap through the RSS watchdog; no cgroup.
 pub fn shard_cgroup_memory_max_kb() -> i64:
     0
 @else:
 # Same subprocess mechanism as shard_mem_available_kb (see the NOTE there); a
-# child inherits this process's cgroup, so its /proc/self/cgroup is ours.
+# child inherits this process's cgroup, so its /proc/self/cgroup is ours. v2
+# unified rows and the v1 memory controller row are both probed; when a hybrid
+# table carries both, the tighter bound wins.
 pub fn shard_cgroup_memory_max_kb() -> i64:
     val (table, _err, code) = process_run_timeout("cat", ["/proc/self/cgroup"], 2000)
     if code != 0:
         return 0
-    var fields: [text] = []
-    for candidate in shard_cgroup_memory_max_paths(shard_cgroup_v2_path_from_proc(table)):
-        val (out, _e, rc) = process_run_timeout("cat", [candidate], 2000)
-        if rc == 0:
-            fields = fields.push(out.trim())
-    shard_cgroup_memory_max_kb_from_fields(fields)
+    var best: i64 = 0
+    val v2_path = shard_cgroup_v2_path_from_proc(table)
+    if v2_path != "":
+        var fields: [text] = []
+        for candidate in shard_cgroup_memory_max_paths(v2_path):
+            val (out, _e, rc) = process_run_timeout("cat", [candidate], 2000)
+            if rc == 0:
+                fields = fields.push(out.trim())
+        best = shard_cgroup_memory_max_kb_from_fields(fields)
+    val v1_path = shard_cgroup_v1_memory_path_from_proc(table)
+    if v1_path != "":
+        var fields: [text] = []
+        for candidate in shard_cgroup_v1_limit_paths(v1_path):
+            val (out, _e, rc) = process_run_timeout("cat", [candidate], 2000)
+            if rc == 0:
+                fields = fields.push(out.trim())
+        val v1_kb = shard_cgroup_v1_limit_kb_from_fields(fields)
+        if v1_kb > 0 and (best == 0 or v1_kb < best):
+            best = v1_kb
+    best
 @end
 
 # The enclosing cgroup cap may only tighten a declared tree budget: an

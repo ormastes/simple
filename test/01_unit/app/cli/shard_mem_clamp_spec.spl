@@ -2,6 +2,7 @@ use std.spec
 use app.cli.shard_mem_clamp.{shard_mem_available_kb, shard_mem_available_kb_from_field, shard_threads_cap_for, shard_threads_tree_cap_for, shard_worker_budget_kb, shard_host_threads_cap, shard_host_worker_budget_kb, shard_host_budget_floor_kb, shard_cgroup_v2_path_from_proc, shard_cgroup_memory_max_paths, shard_cgroup_memory_max_kb_from_fields, shard_cgroup_memory_max_kb, shard_tree_budget_kb_for, shard_threads_mem_cap}
 use app.io.env_ops.{env_get, env_set}
 use app.cli.shard_mem_clamp.{shard_threads_parent_cap_for}
+use app.cli.shard_mem_clamp.{shard_cgroup_v1_memory_path_from_proc, shard_cgroup_v1_limit_paths, shard_cgroup_v1_limit_kb_from_fields}
 use app.cli.shard_mem_clamp.{shard_macos_available_kb_from_vm_stat}
 use app.cli.shard_mem_clamp.{SHARD_PARSE_WORKER_KB_V1, SHARD_HIR_WORKER_KB_V1}
 
@@ -181,6 +182,35 @@ describe "shard memory clamp":
         expect(shard_tree_budget_kb_for(0, 0)).to_equal(0)
         # 24 GiB cgroup, 3 GB HIR workers: 0.6 * 24 GiB / 3 GB = 5, not 8.
         expect(shard_threads_tree_cap_for(8, 3000000, 108000000, shard_tree_budget_kb_for(0, 25165824), true)).to_equal(5)
+
+    # cgroup v1 (memory/memory.limit_in_bytes): v1-only and hybrid hosts have no
+    # "0::" row, so the v2 probe finds nothing and the clamp would size fanout
+    # from host MemAvailable -- the same OOM class on older distros, Docker on
+    # v1 hosts, and CI runners on v1 (the 2026-10-19 bug's v1 half).
+    it "finds the cgroup v1 memory controller path from a v1 or hybrid table":
+        expect(shard_cgroup_v1_memory_path_from_proc("9:memory:/docker/abc\n")).to_equal("/docker/abc")
+        expect(shard_cgroup_v1_memory_path_from_proc("11:cpu:/x\n9:memory:/docker/abc\n")).to_equal("/docker/abc")
+        # A v2-only table has no memory controller row; the v2 probe owns it.
+        expect(shard_cgroup_v1_memory_path_from_proc("0::/user.slice\n")).to_equal("")
+        expect(shard_cgroup_v1_memory_path_from_proc("")).to_equal("")
+
+    it "walks memory.limit_in_bytes from the leaf cgroup up to the v1 root":
+        expect(shard_cgroup_v1_limit_paths("/a/b")).to_equal([
+            "/sys/fs/cgroup/memory/a/b/memory.limit_in_bytes",
+            "/sys/fs/cgroup/memory/a/memory.limit_in_bytes",
+            "/sys/fs/cgroup/memory/memory.limit_in_bytes"])
+        expect(shard_cgroup_v1_limit_paths("/")).to_equal(["/sys/fs/cgroup/memory/memory.limit_in_bytes"])
+        expect(shard_cgroup_v1_limit_paths("")).to_equal([])
+
+    it "takes the smallest numeric v1 limit and treats the unlimited sentinel as no bound":
+        # 24 GiB leaf, parents unlimited (v1's sentinel is numeric, not "max").
+        expect(shard_cgroup_v1_limit_kb_from_fields(["25769803776", "9223372036854771712", "9223372036854771712"])).to_equal(25165824)
+        # The tightest ancestor wins, not the leaf.
+        expect(shard_cgroup_v1_limit_kb_from_fields(["9223372036854771712", "8589934592"])).to_equal(8388608)
+        # Everything unlimited or junk means no bound known, never a bound of 0.
+        expect(shard_cgroup_v1_limit_kb_from_fields(["9223372036854771712"])).to_equal(0)
+        expect(shard_cgroup_v1_limit_kb_from_fields(["", "junk", "-5"])).to_equal(0)
+        expect(shard_cgroup_v1_limit_kb_from_fields([])).to_equal(0)
 
     # The coordinator peak is never a worker budget (2026-10-24: flooring at it
     # collapsed admission to one worker, 41 deaths); the parent arg is gone.
