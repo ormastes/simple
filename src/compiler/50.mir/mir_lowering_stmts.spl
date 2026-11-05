@@ -190,6 +190,32 @@ fn mir_elem_type_is_unspecific(t: MirType) -> bool:
         case I64: true
         case _: false
 
+fn mir_merged_arm_struct_name(recorded: [text], from_hir: [text]) -> text:
+    """Struct name every arm of a value-position merge agrees on, or "".
+
+    `recorded[i]` is arm i's struct_value_syms entry; `from_hir[i]` is the name
+    recovered from its HIR type (fail-closed layout gate), used only when the
+    arm has no recorded name. bug=untyped_val_if_expr_struct_boxed_as_int_dict_key_2026-10-25:
+    a struct-returning CALL arm carries its struct only as a HIR type, so
+    without the fallback it disagreed with a constructor arm and the merge
+    slot became a plain i64 (int-boxed as a Dict key)."""
+    if recorded.len() == 0:
+        return ""
+    var shared = ""
+    var i = 0
+    while i < recorded.len():
+        var name = recorded[i]
+        if name == "" and i < from_hir.len():
+            name = from_hir[i]
+        if name == "":
+            return ""
+        if i == 0:
+            shared = name
+        elif name != shared:
+            return ""
+        i = i + 1
+    shared
+
 fn mir_merge_arm_types(first: MirType, second: MirType) -> MirType:
     """Pick the more specific of two branch result types at a merge block.
 
@@ -3433,8 +3459,8 @@ impl MirLowering:
         (`hir_types_equal`); otherwise the slot stays unknown."""
         if arm_locals.len() == 0:
             return
-        var shared_struct = ""
-        var struct_known = true
+        var arm_recorded_structs: [text] = []
+        var arm_hir_structs: [text] = []
         var all_typed = true
         var typed_index = -1
         var saw_empty_array = false
@@ -3447,10 +3473,12 @@ impl MirLowering:
                 self.remember_merged_optional_arm_type(dest, arm_locals)
                 return
             val arm_struct = if self.struct_value_syms.contains(arm_local.id): self.struct_value_syms[arm_local.id] else: ""
-            if arm_i == 0:
-                shared_struct = arm_struct
-            elif arm_struct != shared_struct:
-                struct_known = false
+            arm_recorded_structs.push(arm_struct)
+            var arm_hir_struct = ""
+            if arm_struct == "":
+                if val arm_hir_for_struct = self.find_local_hir_type(arm_local.id):
+                    arm_hir_struct = self.optional_payload_struct_name(arm_hir_for_struct)
+            arm_hir_structs.push(arm_hir_struct)
             if self.empty_array_lit_locals.contains(arm_local.id) and self.find_local_hir_type(arm_local.id) == nil:
                 # bug=enum_payload_type_mismatch_untyped_match_value_2026-10-24:
                 # a context-free `[]` arm has no element evidence of its own;
@@ -3466,7 +3494,8 @@ impl MirLowering:
             else:
                 all_typed = false
             arm_i = arm_i + 1
-        if struct_known and shared_struct != "" and not self.struct_value_syms.contains(dest.id):
+        val shared_struct = mir_merged_arm_struct_name(arm_recorded_structs, arm_hir_structs)
+        if shared_struct != "" and not self.struct_value_syms.contains(dest.id):
             self.struct_value_syms[dest.id] = shared_struct
         if typed_index < 0:
             all_typed = false
