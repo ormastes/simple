@@ -5641,7 +5641,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     ${bootstrap_windows_os_env:+"${bootstrap_windows_os_env}"} \
     SIMPLE_BINARY="${stage2_admitted_absolute}" \
     ${stage3_diagnostic_env} ${compiler_ceiling_env:+"${compiler_ceiling_env}"} -- \
-    "${stage2_admitted_absolute}" native-build \
+    sh "${script_dir}/stage-exe-launch.shs" "${stage2_admitted_absolute}" native-build \
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
