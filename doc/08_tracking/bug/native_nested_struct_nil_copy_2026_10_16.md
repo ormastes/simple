@@ -34,3 +34,6 @@ Workaround supplies a canonical owned DriverManifestAttr at MirBuilder sites; cy
 Fixture: test/04_smoke/nested_record_nil_copy_native.spl (interpreter lane passes; native lane unverified).
 Stage3 repro: `bin/simple native-build --entry test/04_smoke/nested_record_nil_copy_native.spl --output build/x && build/x` -> expected stdout in the fixture header.
 Status: open. workaround in place; native repro fixture added; real producer fix still needed.
+
+## Bootstrap repro/prevention 2026-11-05
+Bootstrap review: fixture test/04_smoke/nested_record_nil_copy_native.spl exists; workaround in place; verification-pending on a stage3 native run. No new change.

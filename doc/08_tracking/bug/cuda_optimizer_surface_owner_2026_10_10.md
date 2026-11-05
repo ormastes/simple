@@ -70,3 +70,6 @@ at the top of `auto_vectorize_cost.spl`. Sources were frozen before the final
 run; that existing marker now immediately precedes its affected OR-pattern arm.
 The canonical bug database reports pending WAL checkpoint before workaround
 refresh; its database/index was not modified by this lane.
+
+## Bootstrap repro/prevention 2026-11-05
+Spec: test/01_unit/compiler/mir_opt/cuda_optimizer_owner_imports_spec.spl (owners + 4 optimizer modules import together; passes on seed). Status: verification-pending; retire the explicit imports only after a stage3 producer compiles the CUDA closure without them.
