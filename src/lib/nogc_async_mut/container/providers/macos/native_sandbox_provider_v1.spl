@@ -1,0 +1,124 @@
+# Native macOS App Sandbox provider leaf.
+#
+# This is the controller-side lifecycle owner for the macOS row of the
+# cross-host container contract. Per the architecture it is a native-sandbox
+# capability, not a kernel container: one signed helper identity, one trusted
+# owner, serialized attempts, and no substitution of generic spawn, Podman,
+# Docker, Apple `container`, QEMU, or an unsandboxed process.
+#
+# The provider owns admission validation, provisioned-worker session state,
+# and exact command framing through mac_worker protocol v1. It deliberately
+# does not self-advance the lifecycle oracle: prepared -> created advances
+# only from a validated worker receipt published by the independently
+# launched, OS-authenticated helper service, which does not exist in-tree
+# yet. Until then every lifecycle request fails closed with an explicit
+# blocked reason.
+
+use std.common.contracts.container.runtime_v1.{
+    RuntimeIdentityV1, RuntimeStateV1, RuntimeOperationV1,
+    RUNTIME_PHASE_PREPARED, RUNTIME_STATUS_REJECTED, RUNTIME_STATUS_BLOCKED,
+    runtime_command_empty}
+use std.nogc_async_mut.container.providers.macos.native_admission_v1.{
+    MacOsNativeSandboxAdmissionV1, MACOS_NATIVE_SANDBOX_ENGINE_V1}
+use std.nogc_async_mut.container.providers.macos.worker_protocol_v1.{
+    MacWorkerSessionV1, mac_worker_encode_request_v1,
+    MAC_WORKER_SUBMIT_V1, MAC_WORKER_STATUS_V1, MAC_WORKER_CANCEL_V1,
+    MAC_WORKER_CLOSE_V1}
+
+pub struct MacOsSandboxSubmitV1:
+    operation: RuntimeOperationV1
+    frame: [u8]
+
+fn _operation_v1(state: RuntimeStateV1, operation: text, status: text,
+        reason: text) -> RuntimeOperationV1:
+    RuntimeOperationV1(status: status, operation: operation,
+        command: runtime_command_empty(), state: state, exit_code: -1,
+        stdout: "", stderr: "", reason: reason)
+
+pub class MacOsNativeSandboxProviderV1:
+    admission: MacOsNativeSandboxAdmissionV1
+    session: MacWorkerSessionV1?
+    has_session: bool
+
+impl MacOsNativeSandboxProviderV1:
+    pub static fn prepare(identity: RuntimeIdentityV1) -> MacOsNativeSandboxProviderV1:
+        MacOsNativeSandboxProviderV1(
+            admission: MacOsNativeSandboxAdmissionV1.prepare(identity),
+            session: nil, has_session: false)
+
+    pub fn state_for(self) -> RuntimeStateV1:
+        self.admission.state
+
+    # One provisioned helper identity per provider instance. Key and nonce
+    # must arrive over an OS-authenticated channel from the independently
+    # launched service; possession of the secret is not proof of a signed or
+    # sandboxed peer, so lifecycle publication stays blocked regardless.
+    pub fn provision_worker_v1(self, key: [u8], nonce: [u8]) -> RuntimeOperationV1:
+        if self.has_session:
+            return _operation_v1(self.admission.state, "provision",
+                RUNTIME_STATUS_REJECTED, "macos-native-owner-already-provisioned")
+        val state = self.admission.state
+        if state.phase != RUNTIME_PHASE_PREPARED:
+            return _operation_v1(state, "provision", RUNTIME_STATUS_REJECTED,
+                "macos-native-prepared-state-required")
+        val provisioned = MacWorkerSessionV1.provision(state.identity, key, nonce)
+        match provisioned:
+            case Err(reason):
+                _operation_v1(state, "provision", RUNTIME_STATUS_REJECTED, reason)
+            case Ok(session):
+                self.session = Some(session)
+                self.has_session = true
+                _operation_v1(state, "provision", RUNTIME_STATUS_BLOCKED,
+                    "macos-native-signed-sandbox-owner-required")
+
+    # Encode one worker command for the provisioned helper. The command is
+    # admitted only when request validation passes and a session exists; the
+    # lifecycle oracle is not advanced because no validated native receipt
+    # has been published back yet.
+    pub fn command_v1(self, operation: i64, payload: [u8]) -> MacOsSandboxSubmitV1:
+        val state = self.admission.state
+        if not self.has_session or self.session == nil:
+            return MacOsSandboxSubmitV1(operation: _operation_v1(state,
+                "worker-command", RUNTIME_STATUS_BLOCKED,
+                "macos-native-signed-sandbox-owner-required"), frame: [])
+        val frame = mac_worker_encode_request_v1(state.identity,
+            _session_key(self.session.unwrap()), _session_nonce(self.session.unwrap()),
+            operation, _session_next_sequence(self.session.unwrap()), payload)
+        match frame:
+            case Err(reason):
+                MacOsSandboxSubmitV1(operation: _operation_v1(state,
+                    "worker-command", RUNTIME_STATUS_REJECTED, reason), frame: [])
+            case Ok(bytes):
+                MacOsSandboxSubmitV1(operation: _operation_v1(state,
+                    "worker-command", RUNTIME_STATUS_BLOCKED,
+                    "macos-native-awaiting-worker-receipt"), frame: bytes)
+
+    pub fn close_v1(self) -> RuntimeOperationV1:
+        if not self.has_session or self.session == nil:
+            return _operation_v1(self.admission.state, "close",
+                RUNTIME_STATUS_BLOCKED, "macos-native-signed-sandbox-owner-required")
+        val state = self.admission.state
+        self.session = nil
+        self.has_session = false
+        _operation_v1(state, "close", RUNTIME_STATUS_BLOCKED,
+            "macos-native-signed-sandbox-owner-required")
+
+# Session projection helpers. A provisioned session is a mutable owner:
+# reconstructing or copying it loses replay state, so the provider keeps the
+# single instance and projects immutable views for framing only.
+fn _session_key(session: MacWorkerSessionV1) -> [u8]:
+    var key: [u8] = []
+    for byte in session.secret:
+        key.push(byte as u8)
+    key
+
+fn _session_nonce(session: MacWorkerSessionV1) -> [u8]:
+    session.nonce
+
+fn _session_next_sequence(session: MacWorkerSessionV1) -> i64:
+    session.next_sequence
+
+export MacOsNativeSandboxProviderV1, MacOsSandboxSubmitV1
+export MACOS_NATIVE_SANDBOX_ENGINE_V1
+export MAC_WORKER_SUBMIT_V1, MAC_WORKER_STATUS_V1, MAC_WORKER_CANCEL_V1
+export MAC_WORKER_CLOSE_V1
