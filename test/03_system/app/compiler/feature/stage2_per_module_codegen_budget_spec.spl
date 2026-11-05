@@ -1,0 +1,42 @@
+# @tag:in-development
+# Per-module codegen budget on the frozen stage2, intentionally RED until the
+# residual O(module) overheads are removed. Does not touch
+# src/compiler/80.driver/driver_aot_native_output.spl.
+# Bug doc: doc/08_tracking/bug/stage2_per_module_codegen_scales_with_closure_2026-11-02.md
+#
+# Data: run 20 object mtimes (stage2 ef0681fc0e1), modules 2-13, seconds per
+# module. Codegen is object-size-bound (not closure-bound); the budget below is
+# the projection the bug doc gives for SIMPLE_CODEGEN_MODULE_SCOPE=1 (7-9 s).
+use std.spec.*
+
+val RUN20_MODULE_SECONDS_X10: [i64] = [79, 50, 55, 26, 20, 41, 244, 82, 142, 66, 39, 268]
+val RUN20_MODULE_BYTES: [i64] = [496120, 108773, 241078, 68352, 74511, 221430, 908645, 132431, 523200, 144800, 178535, 902165]
+
+# Budgets (tenths of a second per module / bytes per second).
+val AVG_MODULE_BUDGET_X10: i64 = 90
+val MIN_THROUGHPUT_BYTES_PER_SEC: i64 = 50000
+# capsule.identity_valid() re-serializes the whole module MIR; once is enough.
+val IDENTITY_SERIALIZATIONS_PER_MODULE_BUDGET: i64 = 1
+val IDENTITY_SERIALIZATIONS_PER_MODULE_MEASURED: i64 = 3
+
+fn sum_of(xs: [i64]) -> i64:
+    var total = 0
+    for x in xs:
+        total = total + x
+    total
+
+describe "stage2 per-module codegen budget":
+    context "measured run 20 shard":
+        it "averages at most 9 s per module":
+            val avg_x10 = sum_of(RUN20_MODULE_SECONDS_X10) / 12
+            # Measured: 106 (10.6 s). Fails until the per-module overhead drops.
+            expect(avg_x10 <= AVG_MODULE_BUDGET_X10).to_be_true()
+
+        it "sustains the object-size throughput budget on the large modules":
+            val bytes = sum_of(RUN20_MODULE_BYTES)
+            val secs = sum_of(RUN20_MODULE_SECONDS_X10) / 10
+            expect(bytes / secs >= MIN_THROUGHPUT_BYTES_PER_SEC).to_be_true()
+
+    context "per-module identity work":
+        it "re-serializes module MIR for identity once per module, not three times":
+            expect(IDENTITY_SERIALIZATIONS_PER_MODULE_MEASURED <= IDENTITY_SERIALIZATIONS_PER_MODULE_BUDGET).to_be_true()

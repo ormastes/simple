@@ -1,0 +1,127 @@
+"""
+RTI table registration must not bracket-read class-field Dicts: under native
+codegen that read returns a corrupt text (dict_class_field_contains_key_after_insert),
+which turned a benign re-registration into a fatal E-RTI-006 with garbage rows.
+"""
+# @cover src/compiler/20.hir/return_type_interface_v1.spl
+
+use std.spec.*
+use app.io.mod.{file_read}
+use compiler.hir.hir_types.*
+use compiler.hir.return_type_interface_v1.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+
+fn row_of(module_id: text, decl_name: text, key_name: text, term: RtType) -> ReturnTypeRow:
+    ReturnTypeRow(decl: rti_fn_ref(module_id, decl_name),
+        key: CalleeKey(module_id: module_id, owner: nil, name: key_name, is_static: false),
+        type_param_count: 0, entry: ReturnTypeEntry.Decided(term))
+
+fn err_code<T>(r: Result<T, RtiError>) -> text:
+    match r:
+        case Ok(_): "ok"
+        case Err(e): e.code
+
+fn err_message<T>(r: Result<T, RtiError>) -> text:
+    match r:
+        case Ok(_): ""
+        case Err(e): e.message
+
+describe "RTI row registration is idempotent":
+    it "accepts the same callee row twice":
+        var table = ReturnTypeInterfaceTable.new()
+        val row = row_of("m.a", "f", "f", RtType.Builtin("i64"))
+        expect(table.register_row("m.a", row).unwrap()).to_equal(1)
+        expect(table.register_row("m.a", row).unwrap()).to_equal(0)
+        expect(err_code(table.register_row("m.a", row))).to_equal("ok")
+
+    it "accepts the main row three times and keeps exactly one row":
+        var table = ReturnTypeInterfaceTable.new()
+        val row = row_of("m.hello", "main", "main", RtType.Builtin("i64"))
+        expect(err_code(table.register_row("m.hello", row))).to_equal("ok")
+        expect(err_code(table.register_row("m.hello", row))).to_equal("ok")
+        expect(err_code(table.register_rows([row]))).to_equal("ok")
+        expect(table.rows_by_module.keys().len()).to_equal(1)
+        expect(table.rows_by_key.keys().len()).to_equal(1)
+        expect(hello_row_count(table)).to_equal(1)
+
+    it "still rejects a different decl under the same key, naming both rows":
+        var table = ReturnTypeInterfaceTable.new()
+        val first = row_of("m.b", "f", "f", RtType.Builtin("i64"))
+        val second = row_of("m.b", "g", "f", RtType.Builtin("i64"))
+        expect(table.register_row("m.b", first).unwrap()).to_equal(1)
+        val r = table.register_row("m.b", second)
+        expect(err_code(r)).to_equal("E-RTI-006")
+        expect(err_message(r).contains("m.b|" + first.decl.decl_id)).to_equal(true)
+        expect(err_message(r).contains("m.b|" + second.decl.decl_id)).to_equal(true)
+        expect(err_message(r).contains("callee 'f'")).to_equal(true)
+
+    it "still rejects a conflicting row for the same decl":
+        var table = ReturnTypeInterfaceTable.new()
+        expect(table.register_row("m.c", row_of("m.c", "f", "f", RtType.Builtin("i64"))).unwrap()).to_equal(1)
+        expect(err_code(table.register_row("m.c", row_of("m.c", "f", "f", RtType.Builtin("bool"))))).to_equal("E-RTI-006")
+
+describe "RTI rows_by_module lookups":
+    it "answers a present row":
+        var table = ReturnTypeInterfaceTable.new()
+        val row = row_of("m.d", "f", "f", RtType.Builtin("i64"))
+        table.register_row("m.d", row).unwrap()
+        var present = false
+        var found_id = ""
+        if val found = table.row_at(row.decl):
+            present = true
+            found_id = found.decl.decl_id
+        expect(present).to_equal(true)
+        expect(found_id).to_equal(row.decl.decl_id)
+
+    it "answers absent module and absent decl":
+        var table = ReturnTypeInterfaceTable.new()
+        table.register_row("m.e", row_of("m.e", "f", "f", RtType.Builtin("i64"))).unwrap()
+        expect(row_present(table, rti_fn_ref("m.nowhere", "f"))).to_equal(false)
+        expect(row_present(table, rti_fn_ref("m.e", "absent"))).to_equal(false)
+
+describe "RTI alias conflicts":
+    it "keeps an identical alias and poisons a conflicting one":
+        var table = ReturnTypeInterfaceTable.new()
+        table.record_alias("m.f#x", "a")
+        table.record_alias("m.f#x", "a")
+        expect(table.aliases.get("m.f#x").unwrap()).to_equal("a")
+        expect(alias_probe(table, "m.f", "x")).to_equal(rti_fn_ref("m.f", "a").decl_id)
+        table.record_alias("m.f#x", "b")
+        expect(table.aliases.get("m.f#x").unwrap()).to_equal("")
+        expect(alias_probe(table, "m.f", "x")).to_equal(rti_fn_ref("m.f", "x").decl_id)
+
+describe "RTI table source pin":
+    it "has no class-field Dict bracket reads":
+        val src = file_read("src/compiler/20.hir/return_type_interface_v1.spl")
+        var bad: [text] = []
+        for line in src.split("\n"):
+            val t = line.trim()
+            if t.starts_with("#"): continue
+            for field in ["self.rows_by_key[", "self.rows_by_module[", "self.aliases["]:
+                if t.contains(field):
+                    # a write is `self.x[k] = v` at statement start
+                    val is_write = t.starts_with(field) and t.contains("] = ")
+                    if not is_write:
+                        bad.push(t)
+        expect(bad.len()).to_equal(0)
+
+fn probe_symbols() -> SymbolTable:
+    val path = "src/rti_idem/mod.spl"
+    val ast = parse_full_frontend("fn main() -> i64:\n    0\n", path, path, Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    lowering.lower_module(ast).symbols
+
+fn alias_probe(table: ReturnTypeInterfaceTable, module_id: text, name: text) -> text:
+    table.callable_ref(probe_symbols(), module_id, name).decl_id
+
+fn row_present(table: ReturnTypeInterfaceTable, decl: DeclRef) -> bool:
+    if val _r = table.row_at(decl):
+        return true
+    false
+
+fn hello_row_count(table: ReturnTypeInterfaceTable) -> i64:
+    if val rows = table.rows_by_module.get("m.hello"):
+        return rows.keys().len()
+    0

@@ -483,3 +483,41 @@ revive dead code.
   Restoring means reviving APIs whose dependencies moved.
 - `shared_mdi_render_windows_from_simple_gui_scene` is only a string in a
   system spec. `format_utils` (deleted module) is unchanged from above.
+
+## Re-census 2026-11-05 (origin/release/1.0.0, committed content)
+
+Premise check: mostly resolved. Re-ran the consumer axis (every `use <mod>.{names}`
+importer in `src/` and `test/`, single-line blocks) against all 39 truncation
+rows plus `common/format_utils.spl`, checking each imported name against the
+module and then against owned `src/` as a whole.
+
+- **Restored or moved, no action (32+ modules):** current line counts of the
+  census modules have grown back or the symbols moved into split sub-modules
+  (`js/engine/interpreter` -> `nogc_sync_mut/js/engine/interpreter.spl`;
+  `host_compositor_entry`, `wm_action_applier`, `file_explorer`, `cli/main`,
+  `tcp` -> `host_compositor_core`/`wm_action_lifecycle`/`_FileExplorer/model`/
+  `_CliMain/main_and_help`/`tcp_socket`). `common/format_utils.spl` exists
+  again (622 lines). Every importer name resolves.
+- **Still damaged, restored here:** `src/lib/content/feature/render_widget_host_view.spl`
+  (29-line guessed API `new(id, width, height)`; specs `render_widget_host_view_spec`
+  and `browser_window_spec` use the real `new(surface_id, bounds, dc)` plus
+  `InputEvent`/`InputEventKind`). Restored verbatim from blob in commit
+  `797bf03d016` (51 lines). Spec went 0/4 -> 4/4; its own helpers `_rect`,
+  `_surface_id`, `_dc` had also been lost and were re-added (copied from the
+  `test/unit/lib/gui/browser_window_spec.spl` twin).
+- **Still open, not restorable by this change:**
+  - `os/apps/browser_demo/browser_demo.spl`: `render_demo_to_pixels`,
+    `render_done`, `node_count`, `pixel_count` missing (used by
+    `test/01_unit/os/apps/browser_demo_render_spec.spl`); current file is a
+    43-line UI-builder rewrite, needs owner decision.
+  - `std.common.net.addr.Port` (imported by netstack `dccp.spl`/`sctp.spl`):
+    never defined in any historical blob of that path, so this is an
+    unlanded definition, not wipe damage.
+  - Consumer drift, not wipe damage: `os/compositor/wm_spm_client.spl` imports
+    `mark_destroyed` (module exports `window_mark_destroyed`);
+    `hpack/decoder.spl` imports `_append_bytes` (encoder renamed it
+    `_hpack_enc_append_bytes`). Neither name is used past the import line.
+  - `test/01_unit/lib/gui/browser_window_spec.spl` lacks its helper functions
+    (present in the `test/unit/` twin).
+- Limits: multi-line `use` blocks were not scanned; divergent-rewrite rows were
+  not re-judged.

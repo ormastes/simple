@@ -181,6 +181,44 @@ pub fn finalize_formal_gate_collection_v2(
         FormalDeliveryGateStatusV1.Failed, [], "",
         "FV2-E-GATE-FINALIZER-AUTHORITY: public caller-owned receipt finalization cannot publish passed delivery-gate evidence"), [])
 
+# Collector-owned envelope publisher.  Collectors whose inputs are entirely
+# generated formal/model proof artifacts (no executed validation rows) publish
+# their verified receipt envelopes through this path; the public
+# `finalize_formal_gate_collection_v2` above stays diagnostic-only.
+pub fn publish_formal_gate_collection_v2(
+    gate: FormalDeliveryGateV1,
+    semantic_evidence_hash: text,
+    raw_files: [FormalDeliveryReceiptFileV1]
+) -> FormalGateCollectionV1:
+    if raw_files.is_empty() or not sha256_lower_hex_valid(semantic_evidence_hash):
+        return FormalGateCollectionV1(FormalDeliveryGateEvidenceV1(gate,
+            FormalDeliveryGateStatusV1.Failed, [], "",
+            "FV2-E-RECEIPT-FINALIZE: gate requires nonempty SHA-256-bound raw evidence"), [])
+    var files: [FormalDeliveryReceiptFileV1] = []
+    var hashes: [text] = []
+    for raw in raw_files:
+        if not sha256_lower_hex_valid(raw.receipt_hash) or
+                sha256_text(raw.content) != raw.receipt_hash:
+            return FormalGateCollectionV1(FormalDeliveryGateEvidenceV1(gate,
+                FormalDeliveryGateStatusV1.Failed, [], "",
+                "FV2-E-RECEIPT-FINALIZE: raw receipt identity is malformed or stale"), [])
+        val content = "FormalDeliveryReceipt-v2\n" +
+            "gate=" + gate.name() + "\n" +
+            "semantic_evidence_hash=" + semantic_evidence_hash + "\n" +
+            "payload_sha256=" + raw.receipt_hash + "\n\n" + raw.content
+        val receipt_hash = sha256_text(content)
+        if hashes.contains(receipt_hash):
+            return FormalGateCollectionV1(FormalDeliveryGateEvidenceV1(gate,
+                FormalDeliveryGateStatusV1.Failed, [], "",
+                "FV2-E-RECEIPT-FINALIZE: duplicate final receipt content"), [])
+        hashes.push(receipt_hash)
+        files.push(FormalDeliveryReceiptFileV1(receipt_hash, content))
+    val evidence_hash = sha256_text("FormalDeliveryGateEvidence-v2|gate=" +
+        gate.name() + "|semantic=" + semantic_evidence_hash + "|receipts=" +
+        fv2_gate_frames_v1(hashes))
+    FormalGateCollectionV1(FormalDeliveryGateEvidenceV1(gate,
+        FormalDeliveryGateStatusV1.Passed, hashes, evidence_hash, ""), files)
+
 pub fn trust_audit_hash_v1(audit: TrustAuditResult, artifact_hash: text) -> text:
     canonical_trust_audit_hash_v1(audit, artifact_hash)
 
