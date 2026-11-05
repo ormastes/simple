@@ -1042,13 +1042,17 @@ fn resolve_call_target(
     }
 }
 
+/// Resolve an ambiguous free-function call to the definition whose module path
+/// shares the longest prefix with the caller (a sibling split-part behind a
+/// facade). Not limited to `_`-prefixed names: facade-crossing calls to public
+/// helpers fail identically. A tie or no shared prefix stays unresolved.
 fn resolve_ambiguous_private_call_in_module(
     name: &str,
     prefix: &str,
     ambiguous_names: &std::collections::HashSet<String>,
     suffix_index: &std::collections::HashMap<String, Vec<String>>,
 ) -> Option<String> {
-    if !name.starts_with('_') || !ambiguous_names.contains(name) {
+    if !ambiguous_names.contains(name) {
         return None;
     }
 
