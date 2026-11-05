@@ -1850,10 +1850,13 @@ impl Lowerer {
                 // spec test/01_unit/language/if_val_typed_option_class_unwrap_spec.spl
                 let binding_ty = self.optional_boxint_scalar_inner(subject_ty).unwrap_or_else(|| {
                     match self.module.types.get(subject_ty) {
-                        // Presence guards the optional subject; a bound bool is
-                        // its value, not another optional-presence condition.
-                        Some(HirType::Pointer { kind: PointerKind::Shared, inner, .. })
-                            if *inner == TypeId::BOOL => TypeId::BOOL,
+                        // Bool and u64 payloads use their dedicated tagged
+                        // representations, not BoxInt; decode them by inner type.
+                        Some(HirType::Pointer {
+                            kind: PointerKind::Shared,
+                            inner,
+                            ..
+                        }) if matches!(*inner, TypeId::BOOL | TypeId::U64) => *inner,
                         _ => self
                             .optional_reference_payload_inner(subject_ty)
                             .or_else(|| self.optional_enum_payload_inner(subject_ty))

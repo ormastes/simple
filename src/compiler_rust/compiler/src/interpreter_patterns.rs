@@ -201,9 +201,11 @@ pub(crate) fn pattern_matches(
                 if let Some(enum_def) = enum_def {
                     let is_variant = enum_def.variants.iter().any(|v| &v.name == name);
                     if is_variant {
-                        // This is a unit variant pattern - match only if variant matches
-                        // and the value has no payload (unit variant)
-                        return Ok(variant == name && payload.is_none());
+                        // A bare variant name is a variant test, not a binding: it matches
+                        // on the variant alone, whether or not the variant carries a payload
+                        // (`case Clocked:` against `Clocked(dom)`). The payload is ignored.
+                        let _ = payload;
+                        return Ok(variant == name);
                     }
                     // See doc/08_tracking/bug/case_bare_ident_is_irrefutable_binding_2026-08-01.md
                     //
@@ -1750,5 +1752,44 @@ main = construct()
         let mut bindings = HashMap::new();
         assert!(pattern_matches(&nil, &Value::Nil, &mut bindings, &enums, &classes).unwrap());
         assert_eq!(OPTION_PATTERN_OVER_RESULT_HITS.load(Ordering::Relaxed), before);
+    }
+
+    // --- bare `case Variant:` arm against a PAYLOAD-carrying variant ---
+    // Bug: doc/08_tracking/bug/match_unqualified_imported_enum_variant_default_arms_2026-10-24.md
+    // The bare identifier arm was required to see `payload.is_none()`, so a
+    // payload variant matched no arm and the fn faulted "missing return".
+
+    const BARE_PAYLOAD_ENUM: &str = "enum PK:\n    Comb(s: i64)\n    Clocked(d: i64)\n    Idle\n";
+
+    #[test]
+    fn bare_arm_matches_payload_variant() {
+        let src = format!(
+            "{BARE_PAYLOAD_ENUM}fn f(k: PK) -> i64:\n    match k:\n        case Comb: 1\n        case Clocked: 2\n        case Idle: 3\nmain = f(PK.Clocked(9)) + 10 * f(PK.Comb(1)) + 100 * f(PK.Idle)\n"
+        );
+        assert_eq!(run(&src), 2 + 10 + 300);
+    }
+
+    #[test]
+    fn bare_arm_payload_variant_with_default_arm() {
+        let src = format!(
+            "{BARE_PAYLOAD_ENUM}fn f(k: PK) -> i64:\n    match k:\n        case Clocked: 2\n        case _: 7\nmain = f(PK.Clocked(9)) + 10 * f(PK.Comb(1))\n"
+        );
+        assert_eq!(run(&src), 2 + 70);
+    }
+
+    #[test]
+    fn qualified_arm_still_matches_payload_variant() {
+        let src = format!(
+            "{BARE_PAYLOAD_ENUM}fn f(k: PK) -> i64:\n    match k:\n        case PK.Comb: 1\n        case PK.Clocked: 2\n        case PK.Idle: 3\nmain = f(PK.Clocked(9)) + 10 * f(PK.Comb(1))\n"
+        );
+        assert_eq!(run(&src), 12);
+    }
+
+    #[test]
+    fn bare_arm_payload_variant_nested_in_match() {
+        let src = format!(
+            "{BARE_PAYLOAD_ENUM}fn f(a: PK, b: PK) -> i64:\n    match a:\n        case Comb:\n            match b:\n                case Clocked: 5\n                case _: 6\n        case _: 9\nmain = f(PK.Comb(1), PK.Clocked(2)) + 10 * f(PK.Comb(1), PK.Idle) + 100 * f(PK.Idle, PK.Idle)\n"
+        );
+        assert_eq!(run(&src), 5 + 60 + 900);
     }
 }

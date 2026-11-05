@@ -104,3 +104,12 @@ safe again. The separately-retracted
 `x64_freestanding_chained_len_cast_miscompile.md` was a mis-attribution of THIS
 corruption to a chained cast.
 
+
+## mirp2-G 2026-11-05: left open
+
+Ledger row is `fixing`; doc banner says closed. The defect is a frontend
+method-name collision (`u8.to_i64()` bound to `VfsFileSize.to_i64()`), not
+extern ABI, and only reproduces in the full freestanding sshd closure. Not worked
+this session (freestanding x86_64 QEMU lane, out of family G scope). Next step:
+an HIR method-resolution spec where a user class defining `to_i64` is in scope and
+`u8.to_i64()` must stay the primitive conversion.

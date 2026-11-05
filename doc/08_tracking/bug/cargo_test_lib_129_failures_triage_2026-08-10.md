@@ -354,3 +354,23 @@ an isolated `CARGO_TARGET_DIR` and competes with the live bootstrap).
 ## Triage 2026-09-13 (BUGFIX-7 lane)
 
 Out of lane: Rust seed (cargo test -p simple-compiler --lib), needs a seed rebuild to re-run. No change made.
+
+## Re-measure 2026-11-05 (release/1.0.0 @ 4397a4ce3c6+, Windows, `cargo test -p simple-compiler --lib`)
+
+Premise (129 failures) is outdated. Measured in a sparse worktree with own
+`CARGO_TARGET_DIR`: **4,561 passed / 27 failed / 6 ignored** (4,594 tests; the target compiles).
+`hir::lower::tests::expression_tests` is 68/68 green (the 8 string-method lowering
+failures listed above are gone). Categories A-C stay resolved.
+
+Fixed this pass: `interpreter_extern::vulkan::tests::family_size_is_pinned` (registry has
+132 `rt_vulkan_*` rows; the source-coverage and uniqueness tests already pass, so the pin
+was stale at 131).
+
+Remaining 26 (not fixed here): `native_project` x10 (entry-closure/facade/stage4 contract),
+`pipeline::{execution x2, lowering x2, module_loader}`, `vulkan` x2 (`rt_vulkan_get_last_error`
+unlinked in this Windows binary), `cranelift_sffi` FMA, `codegen::local_execution_tests`
+typed-dict float key (JIT returns garbage `2298544112721`, expected 7), `mir::...calls::
+primitive_field_method_call_is_builtin_qualified`, `hir::lower::import_loader` aliased trait
+folder, `cache_host`, `font`, `module_resolver` x2 (Windows `C:/tmp` vs `/tmp` fixture;
+`inventory_scratch_import`). Some are environmental (sparse worktree lacks `src/app`,
+test dirs; Windows paths) and need re-run in a full checkout before attribution.
