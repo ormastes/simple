@@ -1,0 +1,225 @@
+#!/bin/sh
+# check-riscv-text-eq-any.shs
+#
+# Pins the riscv64 fix for
+# doc/08_tracking/bug/riscv64_freestanding_text_neq_empty_literal_true_for_zero_length_2026-09-01.md
+#
+# THE DEFECT AT TIP
+# -----------------
+# Since 060926039bc, the MIR lowering of statically typed String ==/!= routes
+# through the runtime helper rt_text_eq_any on EVERY backend (it is the only
+# text-equality path left). The riscv freestanding runtime (shared between
+# riscv32/riscv64 via arch/common/riscv_common.h) never had that function — the
+# x86_64 port's own comment records the same gap for the rest of the family.
+# The freestanding link therefore died with:
+#
+#     ld.lld: error: undefined symbol: rt_text_eq_any
+#
+# so `text != ""` on this lane did not miscompile at tip; it did not link at
+# all. The port must be SEMANTICALLY complete, not present-but-stubbed, or it
+# re-creates the original 2026-09-01 symptom (`!= ""` TRUE for empty text):
+# the definition must (a) handle the nil sentinel (rt_env_get's miss path
+# coalesces through `?? ""`, and nil-vs-string must answer NOT EQUAL while
+# nil == nil answers EQUAL) and (b) content-compare a RAW untagged literal
+# against a heap string and against another raw literal — a bare "" literal is
+# a char* global, so an address-only comparison makes two distinct empty
+# literals "not equal" forever.
+#
+# WHY PER-DEFINITION
+# ------------------
+# riscv_common.h is #included into several translation units (baremetal_stubs.c
+# AND baremetal_runtime_core.inc.c are alternative runtimes that both pull it
+# in), and this tree has repeatedly been burned by duplicate definitions where
+# the good sibling masked the bad one. So every definition found is judged on
+# its own body; checking zero definitions is an ERROR, never a pass.
+#
+# Verdict is always the LAST line of stdout:
+#   PASS  — <n> definition(s) checked, all nil-aware and raw-content-comparing   exit 0
+#   FAIL  — ...                                                                  exit 1
+#   ERROR — nothing was checked                                                  exit 2
+#
+# `--selftest` runs before every scan and is fatal.
+
+set -u
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+SEARCH_REL="examples/09_embedded/simple_os/arch"
+# The shared header plus both arch trees that include it. Globs are resolved
+# below; a missing riscv32 tree is not an error (its absence means fewer
+# places a definition can hide, which the zero-checked rule still covers).
+SEARCH_DIRS="$SEARCH_REL/common $SEARCH_REL/riscv32 $SEARCH_REL/riscv64"
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT INT TERM
+
+# Print "<file>\t<startline>\t<body>" for every DEFINITION of rt_text_eq_any
+# under the search dirs, delimited by brace depth. A prototype (line ending in
+# `;`, no `{`) is not a definition and is skipped.
+extract_defs() {
+    for d in $SEARCH_DIRS; do
+        [ -d "$1/$d" ] || continue
+        find "$1/$d" \( -name '*.c' -o -name '*.h' -o -name '*.inc.c' \) -type f 2>/dev/null
+    done | sort | while IFS= read -r f; do
+        awk -v FNAME="$f" '
+            /rt_text_eq_any[[:space:]]*\(/ && !/^[[:space:]]*\*/ && !/;[[:space:]]*$/ {
+                if (indef) next
+                indef = 1; depth = 0; body = ""; start = NR; seen_open = 0
+            }
+            indef {
+                body = body " " $0
+                n = gsub(/\{/, "{"); m = gsub(/\}/, "}")
+                depth += n - m
+                if (n > 0) seen_open = 1
+                if (seen_open && depth <= 0) {
+                    print FNAME "\t" start "\t" body
+                    indef = 0
+                }
+                if (!seen_open && $0 ~ /;[[:space:]]*$/) indef = 0
+                next
+            }
+        ' "$f"
+    done
+}
+
+# A definition is acceptable when its body (a) is nil-sentinel aware and
+# (b) has a raw-literal content path. Accept any spelling of the nil sentinel
+# and any helper whose name carries "raw", so the guard forces the semantics
+# without pinning one dialect's helper names.
+judge_def() {
+    body=$1
+    has_nil=0
+    has_raw=0
+    printf '%s' "$body" | grep -qE 'NIL_VALUE|IS_NIL|rt_core_nil' && has_nil=1
+    printf '%s' "$body" | grep -qE 'raw' && has_raw=1
+    missing=""
+    [ "$has_nil" -eq 1 ] || missing="$missing nil-sentinel"
+    [ "$has_raw" -eq 1 ] || missing="$missing raw-content-path"
+    if [ -n "$missing" ]; then
+        echo "incomplete:$missing"
+        return 1
+    fi
+    return 0
+}
+
+scan_tree() {
+    extract_defs "$1" > "$TMP/defs.txt" 2>/dev/null || true
+    checked=0
+    offenders=""
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        f=${line%%	*}
+        rest=${line#*	}
+        ln=${rest%%	*}
+        body=${rest#*	}
+        checked=$((checked + 1))
+        if reason=$(judge_def "$body"); then
+            :
+        else
+            rel=${f#"$1/"}
+            offenders="$offenders $rel:$ln ($reason);"
+        fi
+    done < "$TMP/defs.txt"
+    EV_CHECKED=$checked
+    EV_OFFENDERS=$offenders
+}
+
+# ---------------------------------------------------------------- selftest
+selftest() {
+    st_fail=0
+    fx="$TMP/fx"
+    d="$fx/$SEARCH_REL/common"
+
+    GOOD='RuntimeValue rt_text_eq_any(RuntimeValue left, RuntimeValue right)
+{
+    if (left == NIL_VALUE || right == NIL_VALUE) return left == right ? 1 : 0;
+    return riscv_text_eq_raw_raw(left, right);
+}'
+    # Incident replay shape: an address-only compare — no nil arm, no raw path.
+    BAD='RuntimeValue rt_text_eq_any(RuntimeValue left, RuntimeValue right)
+{
+    return left == right ? 1 : 0;
+}'
+    # Present-but-stubbed shape: nil handled, raw content compare missing.
+    HALF='RuntimeValue rt_text_eq_any(RuntimeValue left, RuntimeValue right)
+{
+    if (left == NIL_VALUE || right == NIL_VALUE) return left == right ? 1 : 0;
+    return 0;
+}'
+
+    # 1. single good definition must PASS
+    rm -rf "$fx"; mkdir -p "$d"; printf '%s\n' "$GOOD" > "$d/a.h"
+    scan_tree "$fx"
+    if [ "$EV_CHECKED" -ne 1 ] || [ -n "$(echo "$EV_OFFENDERS" | tr -d ' ')" ]; then
+        echo "selftest[1] good definition: expected 1 checked / 0 offenders, got $EV_CHECKED / '$EV_OFFENDERS'"; st_fail=1
+    fi
+
+    # 2. incident replay: address-only body must FAIL
+    rm -rf "$fx"; mkdir -p "$d"; printf '%s\n' "$BAD" > "$d/a.h"
+    scan_tree "$fx"
+    if [ "$EV_CHECKED" -ne 1 ] || [ -z "$(echo "$EV_OFFENDERS" | tr -d ' ')" ]; then
+        echo "selftest[2] incident replay: expected an offender, got $EV_CHECKED / '$EV_OFFENDERS'"; st_fail=1
+    fi
+
+    # 3. duplicate definitions: one good must NOT excuse a bad sibling
+    rm -rf "$fx"; mkdir -p "$d"
+    printf '%s\n' "$GOOD" > "$d/good.h"
+    printf '%s\n' "$BAD"  > "$d/bad.h"
+    scan_tree "$fx"
+    if [ "$EV_CHECKED" -ne 2 ] || [ -z "$(echo "$EV_OFFENDERS" | tr -d ' ')" ]; then
+        echo "selftest[3] duplicate definitions: expected 2 checked and the bad one flagged, got $EV_CHECKED / '$EV_OFFENDERS'"; st_fail=1
+    fi
+    case "$EV_OFFENDERS" in
+        *bad.h*) : ;;
+        *) echo "selftest[3] duplicate definitions: offender should name bad.h, got '$EV_OFFENDERS'"; st_fail=1 ;;
+    esac
+
+    # 4. nil-aware but raw-missing (stubbed) must FAIL
+    rm -rf "$fx"; mkdir -p "$d"; printf '%s\n' "$HALF" > "$d/a.h"
+    scan_tree "$fx"
+    if [ -z "$(echo "$EV_OFFENDERS" | tr -d ' ')" ]; then
+        echo "selftest[4] nil-only stub: expected FAIL when the raw path is missing"; st_fail=1
+    fi
+
+    # 5. a prototype alone is not a definition -> 0 checked -> caller ERRORs
+    rm -rf "$fx"; mkdir -p "$d"
+    echo 'RuntimeValue rt_text_eq_any(RuntimeValue left, RuntimeValue right);' > "$d/proto.h"
+    scan_tree "$fx"
+    if [ "$EV_CHECKED" -ne 0 ]; then
+        echo "selftest[5] prototype only: expected 0 checked, got $EV_CHECKED"; st_fail=1
+    fi
+
+    # 6. empty tree -> 0 checked -> caller ERRORs
+    rm -rf "$fx"; mkdir -p "$d"
+    scan_tree "$fx"
+    if [ "$EV_CHECKED" -ne 0 ]; then
+        echo "selftest[6] empty tree: expected 0 checked, got $EV_CHECKED"; st_fail=1
+    fi
+
+    if [ "$st_fail" -ne 0 ]; then
+        echo "ERROR — nothing was checked (selftest failed)"
+        exit 2
+    fi
+}
+
+selftest
+
+if [ "${1:-}" = "--selftest" ]; then
+    echo "PASS — 6 selftest fixture(s) checked, selftest only"
+    exit 0
+fi
+
+scan_tree "$REPO_ROOT"
+
+if [ "${EV_CHECKED:-0}" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no rt_text_eq_any definition found under $SEARCH_DIRS)"
+    exit 2
+fi
+
+off=$(echo "$EV_OFFENDERS" | sed 's/^ *//;s/ *$//')
+if [ -n "$off" ]; then
+    echo "FAIL — $EV_CHECKED definition(s) checked, offending: $off"
+    exit 1
+fi
+
+echo "PASS — $EV_CHECKED definition(s) checked, all nil-aware and raw-content-comparing"
+exit 0

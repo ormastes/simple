@@ -1,0 +1,105 @@
+#!/bin/sh
+# Fence for the enum-discriminant convention split (bug
+# enum_discriminant_convention_split_hashed_seed_vs_positional_pure_simple_2026-08-08).
+#
+# The Rust seed + Rust runtime HASH enum discriminants; pure-Simple codegen + the
+# C runtime (runtime_native.c) use the POSITIONAL index. Each toolchain is
+# self-consistent; a mix is silent (rt_enum_new stores the u32 verbatim). Two checks:
+#   1. SOURCE: the C runtime must carry no hashed-discriminant symbol, and the
+#      Rust runtime must carry no positional Err/None constant of the C kind.
+#   2. ARTIFACT (optional, `--artifact FILE ...`): a binary must not embed BOTH
+#      runtimes' .rodata canaries ("Result::Err(" = C runtime; "runtime/src/value"
+#      = Rust runtime). Both present = mixed envelope = FAIL.
+# Verdict is the last stdout line: PASS (0) / FAIL (1) / ERROR - nothing was checked (2).
+# `--selftest` runs first and is fatal.
+set -u
+
+C_CANARY='Result::Err('
+RUST_CANARY='runtime/src/value'
+
+# artifact_class FILE -> prints C|RUST|MIXED|NEITHER
+artifact_class() {
+    c=$(grep -a -c -F "$C_CANARY" "$1" 2>/dev/null); c=${c:-0}
+    r=$(grep -a -c -F "$RUST_CANARY" "$1" 2>/dev/null); r=${r:-0}
+    if [ "$c" -gt 0 ] && [ "$r" -gt 0 ]; then echo MIXED
+    elif [ "$c" -gt 0 ]; then echo C
+    elif [ "$r" -gt 0 ]; then echo RUST
+    else echo NEITHER; fi
+}
+
+# source_scan ROOT -> prints offending file list (one per line); sets SRC_CHECKED
+source_scan() {
+    root=$1
+    SRC_CHECKED=0
+    set --
+    for f in "$root"/src/runtime/*.c "$root"/src/runtime/*.h; do
+        [ -f "$f" ] || continue
+        case "$f" in */vendor/*|*miniaudio.h|*stb_*) continue ;; esac
+        set -- "$@" "$f"
+    done
+    SRC_CHECKED=$#
+    if [ $# -gt 0 ]; then
+        grep -l -E "hash_variant_discriminant" "$@" 2>/dev/null | while read -r hit; do
+            echo "$hit: hashed discriminant in C runtime"
+        done
+    fi
+    rtdir="$root/src/compiler_rust/runtime/src"
+    if [ -d "$rtdir" ]; then
+        SRC_CHECKED=$((SRC_CHECKED + 1))
+        # The Rust runtime must derive Err/None discriminants through the hash helper.
+        if ! grep -rq 'hash_variant_discriminant' "$rtdir"; then
+            echo "$rtdir: Rust runtime lost hash_variant_discriminant (convention changed; update the fence deliberately)"
+        fi
+    fi
+}
+
+selftest() {
+    t=$(mktemp -d) || return 2
+    printf 'xx Result::Err( yy' > "$t/c.bin"
+    printf 'xx runtime/src/value/objects.rs yy' > "$t/r.bin"
+    printf 'Result::Err( and runtime/src/value' > "$t/m.bin"
+    printf 'nothing' > "$t/n.bin"
+    ok=0
+    [ "$(artifact_class "$t/c.bin")" = C ] || { echo "selftest: C fixture misclassified"; ok=1; }
+    [ "$(artifact_class "$t/r.bin")" = RUST ] || { echo "selftest: RUST fixture misclassified"; ok=1; }
+    [ "$(artifact_class "$t/m.bin")" = MIXED ] || { echo "selftest: MIXED fixture not detected"; ok=1; }
+    [ "$(artifact_class "$t/n.bin")" = NEITHER ] || { echo "selftest: NEITHER fixture misclassified"; ok=1; }
+    mkdir -p "$t/good/src/runtime" "$t/bad/src/runtime"
+    printf 'int rt_enum_new(void){return 0;}\n' > "$t/good/src/runtime/a.c"
+    printf 'unsigned hash_variant_discriminant(const char*n);\n' > "$t/bad/src/runtime/a.c"
+    [ -z "$(source_scan "$t/good")" ] || { echo "selftest: clean C runtime flagged"; ok=1; }
+    [ -n "$(source_scan "$t/bad")" ] || { echo "selftest: hashed C runtime not flagged"; ok=1; }
+    rm -rf "$t"
+    return $ok
+}
+
+root=.
+artifacts=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) root=$2; shift 2 ;;
+        --artifact) artifacts="$artifacts $2"; shift 2 ;;
+        --selftest-only) selftest && echo "PASS - selftest ok" && exit 0; echo "FAIL - selftest"; exit 1 ;;
+        *) echo "ERROR - nothing was checked (unknown arg $1)"; exit 2 ;;
+    esac
+done
+
+if ! selftest; then echo "ERROR - nothing was checked (selftest failed)"; exit 2; fi
+
+scan_out=$(mktemp); source_scan "$root" > "$scan_out"; offenders=$(cat "$scan_out"); rm -f "$scan_out"
+checked=$SRC_CHECKED
+for a in $artifacts; do
+    [ -f "$a" ] || { echo "ERROR - nothing was checked (missing artifact $a)"; exit 2; }
+    checked=$((checked + 1))
+    cls=$(artifact_class "$a")
+    [ "$cls" = MIXED ] && offenders="$offenders
+$a: embeds both C-runtime and Rust-runtime canaries (mixed discriminant conventions)"
+done
+if [ "$checked" -eq 0 ]; then echo "ERROR - nothing was checked (0 sources/artifacts)"; exit 2; fi
+if [ -n "$offenders" ]; then
+    echo "$offenders"
+    echo "FAIL - $checked item(s) checked, mixed/changed enum discriminant convention"
+    exit 1
+fi
+echo "PASS - $checked item(s) checked, enum discriminant conventions segregated"
+exit 0

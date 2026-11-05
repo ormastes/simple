@@ -362,6 +362,104 @@ mod tests {
         assert_eq!(compiled(), 1, "generated native call must deliver all six C ABI words");
     }
 
+    /// doc/08_tracking/bug/file_write_bytes_truncates_to_3_bytes_under_codegen_2026-08-27.md:
+    /// a compiled call site for the Simple-facing `rt_file_write_bytes` spelling
+    /// must cross as exactly TWO owner words (path RuntimeValue, `[u8]` array
+    /// RuntimeValue) into the owner-preserving `rt_file_write_bytes_array`
+    /// adapter, which extracts the byte (ptr, len) pair itself. The historical
+    /// defect expanded only the path text to (ptr, len) and passed the array
+    /// handle as `data_ptr` with a stale register as `data_len`, silently
+    /// writing 3 garbage bytes while returning `true`.
+    #[test]
+    fn file_write_bytes_compiled_call_writes_every_byte_of_a_u8_array() {
+        use cranelift_codegen::{ir::{types, AbiParam, InstBuilder}, settings};
+        use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+        use cranelift_jit::{JITBuilder, JITModule};
+        use cranelift_module::Module;
+
+        // Table pins: the Simple-facing 4-arg C-ABI spelling binds to the
+        // 2-RuntimeValue adapter, and NEITHER adapter argument may be
+        // (ptr, len)-expanded at the call site — partial expansion of the
+        // path alone is exactly the misaligned-ABI shape that produced the
+        // 3-byte garbage write.
+        assert_eq!(
+            sffi_alias_target("rt_file_write_bytes"),
+            Some("rt_file_write_bytes_array"),
+            "Simple-facing spelling must bind to the owner-preserving byte adapter"
+        );
+        assert_eq!(text_arg_indices("rt_file_write_bytes_array"), None);
+        assert_eq!(boxed_text_arg_indices("rt_file_write_bytes_array"), None);
+        assert_eq!(super::text_cstr_arg_indices("rt_file_write_bytes_array"), None);
+
+        // End-to-end: JIT-compile `entry(path, data) = rt_file_write_bytes_array(path, data)`
+        // against the REAL runtime adapter and verify the full payload lands.
+        let isa = cranelift_native::builder().expect("host ISA")
+            .finish(settings::Flags::new(settings::builder())).expect("ISA flags");
+        let mut jit = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        jit.symbol(
+            "rt_file_write_bytes_array",
+            simple_runtime::value::rt_file_write_bytes_array as *const u8,
+        );
+        let mut module = JITModule::new(jit);
+        let spec = crate::codegen::runtime_sffi::spec_for("rt_file_write_bytes_array")
+            .expect("registered file-write byte adapter signature");
+        let signature = spec.build_signature(module.make_signature().call_conv);
+        assert_eq!(signature.params.len(), 2, "adapter takes exactly path + data owners");
+        let adapter = module.declare_function(spec.name, Linkage::Import, &signature).unwrap();
+
+        let mut context = module.make_context();
+        context.func.signature = module.make_signature();
+        context.func.signature.params.push(AbiParam::new(types::I64));
+        context.func.signature.params.push(AbiParam::new(types::I64));
+        context.func.signature.returns.push(AbiParam::new(types::I64));
+        let entry = module.declare_function("file_write_bytes_abi_probe", Linkage::Export,
+            &context.func.signature).unwrap();
+        let mut frontend = FunctionBuilderContext::new();
+        {
+            let mut builder = FunctionBuilder::new(&mut context.func, &mut frontend);
+            let block = builder.create_block();
+            builder.switch_to_block(block);
+            builder.seal_block(block);
+            let path_word = builder.append_block_param(block, types::I64);
+            let data_word = builder.append_block_param(block, types::I64);
+            let target = module.declare_func_in_func(adapter, builder.func);
+            let adapted = super::adapt_args_to_signature(&mut builder, target, vec![path_word, data_word]);
+            assert_eq!(adapted.len(), 2, "both owner words must reach the call, no truncation");
+            let call = builder.ins().call(target, &adapted);
+            let ok = builder.inst_results(call)[0];
+            let wide = builder.ins().uextend(types::I64, ok);
+            builder.ins().return_(&[wide]);
+            builder.finalize();
+        }
+        module.define_function(entry, &mut context).unwrap();
+        module.finalize_definitions().unwrap();
+        let compiled: extern "C" fn(i64, i64) -> i64 = unsafe {
+            std::mem::transmute(module.get_finalized_function(entry))
+        };
+
+        let out = std::env::temp_dir()
+            .join(format!("simple_fwbytes_abi_probe_{}.bin", std::process::id()));
+        let path_text = out.to_string_lossy().to_string();
+        let path_value = simple_runtime::value::rt_string_new(path_text.as_ptr(), path_text.len() as u64);
+        // 256-byte payload with the high bit set on every other byte: the
+        // observed failure wrote 3 header bytes, and a length taken from the
+        // wrong field (elements-of-something-else) or a pointer truncated to
+        // i32 cannot survive a full-content check at this size.
+        let payload: Vec<u8> = (0..256u32).map(|i| ((i * 37 + 11) & 0xff) as u8).collect();
+        assert!(payload.iter().any(|b| b & 0x80 != 0), "payload must exercise high bits");
+        let data_value = unsafe {
+            simple_runtime::value::rt_bytes_from_raw(payload.as_ptr() as i64, payload.len() as i64)
+        };
+
+        let ok = compiled(path_value.to_raw() as i64, data_value.to_raw() as i64);
+        assert_eq!(ok, 1, "adapter must report success");
+        let written = std::fs::read(&out).expect("adapter must create the file");
+        std::fs::remove_file(&out).ok();
+        assert_eq!(written.len(), payload.len(),
+            "byte length must be the full array length in bytes, not elements of another width");
+        assert_eq!(written, payload, "every byte incl. high-bit values must round-trip");
+    }
+
     #[test]
     fn owned_process_v3_start_expands_only_command_text() {
         assert_eq!(
@@ -3044,11 +3142,7 @@ fn compile_known_enum_constructor_call<M: Module>(
         return true;
     };
 
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    variant_name.hash(&mut hasher);
-    let disc = (hasher.finish() & 0xFFFFFFFF) as i64;
+    let disc = simple_runtime::value::hash_variant_discriminant(variant_name) as i64;
     let enum_id_val = builder.ins().iconst(
         types::I32,
         i64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)),
@@ -3862,11 +3956,7 @@ pub fn compile_call<M: Module>(
         if let Some(d) = dest {
             // Use hashed discriminants consistently with pattern matching
             let disc = {
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                let mut hasher = DefaultHasher::new();
-                variant_name.hash(&mut hasher);
-                (hasher.finish() & 0xFFFFFFFF) as i64
+                simple_runtime::value::hash_variant_discriminant(variant_name) as i64
             };
             let enum_id_val = builder.ins().iconst(types::I32, builtin_enum_id);
             let disc_val = builder.ins().iconst(types::I32, disc);
@@ -4306,7 +4396,16 @@ pub fn compile_call<M: Module>(
                 "trim_start" | "trim_left" => Some("rt_string_trim_start"),
                 "trim_end" | "trim_right" => Some("rt_string_trim_end"),
                 "split" => Some("rt_string_split"),
-                "bytes" => Some("rt_string_bytes"),
+                // `to_bytes` is the interpreter's alias of `bytes`
+                // (interpreter_method/string.rs: `"bytes" | "to_bytes"` and
+                // interpreter_helpers/method_dispatch.rs), and the LLVM lane
+                // maps it too (codegen/llvm/functions.rs). Only this JIT table
+                // lacked it, so `"ok".to_bytes()` raised
+                // "Function 'str.to_bytes' not found" under `run` while working
+                // on the interpreter. Text-only name (no array/dict `to_bytes`
+                // method exists), so the alias cannot mis-route another
+                // receiver. See doc/08_tracking/bug/text_to_bytes_method_missing_on_text_receiver_2026-09-06.md
+                "bytes" | "to_bytes" => Some("rt_string_bytes"),
                 "chars" => Some("rt_string_chars"),
                 "lines" | "split_lines" => Some("rt_string_lines"),
                 "replace" => Some("rt_string_replace"),

@@ -1,0 +1,159 @@
+"""
+## Purpose and audience
+
+Purpose: prove the NEON (i32x4) and AVX2 (i32x8) ML-KEM NTT kernels in
+`std.simd` produce exactly the output of a scalar FIPS 203 reference NTT.
+Audience: engineers changing the SIMD NTT kernels (PR #6796 follow-up).
+
+## Operator workflow
+
+1. Run `bin/simple.exe run test/01_unit/lib/simd/mlkem_ntt_simd_kernels_spec.spl`.
+2. Every scenario must pass; a mismatch is a kernel regression.
+
+## Compatibility and limitations
+
+Kernels are executed through the portable Vec4i/Vec8i ops on any host; this
+does not prove the host CPU lowered them to real NEON/AVX2 instructions.
+"""
+
+# @tag: unit, crypto, simd, mlkem, ntt
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.simd.{_mlkem_ntt_forward_avx2, _mlkem_ntt_inverse_avx2, _mlkem_ntt_forward_neon, _mlkem_ntt_inverse_neon}
+
+fn ref_modq(x: i64) -> i64:
+    val r = x % 3329
+    if r < 0:
+        r + 3329
+    else:
+        r
+
+fn ref_zetas() -> [i64]:
+    var zetas: [i64] = []
+    var i = 0
+    while i < 128:
+        var rev = 0
+        var rest = i
+        var bit = 0
+        while bit < 7:
+            rev = rev * 2 + (rest % 2)
+            rest = rest / 2
+            bit = bit + 1
+        var p = 1
+        var e = 0
+        while e < rev:
+            p = (p * 17) % 3329
+            e = e + 1
+        zetas.push(p)
+        i = i + 1
+    zetas
+
+fn ref_ntt(input: [i64]) -> [i64]:
+    """Scalar FIPS 203 Algorithm 9 (NTT)."""
+    val zetas = ref_zetas()
+    var f: [i64] = []
+    var i = 0
+    while i < 256:
+        f.push(ref_modq(input[i]))
+        i = i + 1
+    var k = 1
+    var len = 128
+    while len >= 2:
+        var start = 0
+        while start < 256:
+            val zeta = zetas[k]
+            k = k + 1
+            var j = start
+            while j < start + len:
+                val t = ref_modq(zeta * f[j + len])
+                f[j + len] = ref_modq(f[j] - t)
+                f[j] = ref_modq(f[j] + t)
+                j = j + 1
+            start = start + 2 * len
+        len = len / 2
+    f
+
+fn ref_intt(input: [i64]) -> [i64]:
+    """Scalar FIPS 203 Algorithm 10 (NTT^-1)."""
+    val zetas = ref_zetas()
+    var f: [i64] = []
+    var i = 0
+    while i < 256:
+        f.push(ref_modq(input[i]))
+        i = i + 1
+    var k = 127
+    var len = 2
+    while len <= 128:
+        var start = 0
+        while start < 256:
+            val zeta = zetas[k]
+            k = k - 1
+            var j = start
+            while j < start + len:
+                val t = f[j]
+                f[j] = ref_modq(t + f[j + len])
+                f[j + len] = ref_modq(zeta * ref_modq(f[j + len] - t))
+                j = j + 1
+            start = start + 2 * len
+        len = len * 2
+    var idx = 0
+    while idx < 256:
+        f[idx] = ref_modq(f[idx] * 3303)
+        idx = idx + 1
+    f
+
+fn vec_ramp() -> [i64]:
+    var v: [i64] = []
+    var i = 0
+    while i < 256:
+        v.push((i * 37 + 11) % 3329)
+        i = i + 1
+    v
+
+fn vec_lcg() -> [i64]:
+    var v: [i64] = []
+    var s = 12345
+    var i = 0
+    while i < 256:
+        s = (s * 1103515245 + 12345) % 2147483648
+        v.push(s % 3329)
+        i = i + 1
+    v
+
+fn vec_delta() -> [i64]:
+    var v: [i64] = []
+    var i = 0
+    while i < 256:
+        v.push(0)
+        i = i + 1
+    v[0] = 1
+    v
+
+fn mismatches(a: [i64], b: [i64]) -> i64:
+    var n = 0
+    var i = 0
+    while i < 256:
+        if a[i] != b[i]:
+            n = n + 1
+        i = i + 1
+    n
+
+describe "ML-KEM SIMD NTT kernels match scalar reference":
+    it "AVX2 forward NTT equals scalar NTT":
+        expect(mismatches(_mlkem_ntt_forward_avx2(vec_ramp()), ref_ntt(vec_ramp()))).to_equal(0)
+        expect(mismatches(_mlkem_ntt_forward_avx2(vec_lcg()), ref_ntt(vec_lcg()))).to_equal(0)
+        expect(mismatches(_mlkem_ntt_forward_avx2(vec_delta()), ref_ntt(vec_delta()))).to_equal(0)
+
+    it "NEON forward NTT equals scalar NTT":
+        expect(mismatches(_mlkem_ntt_forward_neon(vec_ramp()), ref_ntt(vec_ramp()))).to_equal(0)
+        expect(mismatches(_mlkem_ntt_forward_neon(vec_lcg()), ref_ntt(vec_lcg()))).to_equal(0)
+        expect(mismatches(_mlkem_ntt_forward_neon(vec_delta()), ref_ntt(vec_delta()))).to_equal(0)
+
+    it "AVX2 and NEON inverse NTT equal scalar inverse":
+        expect(mismatches(_mlkem_ntt_inverse_avx2(vec_lcg()), ref_intt(vec_lcg()))).to_equal(0)
+        expect(mismatches(_mlkem_ntt_inverse_neon(vec_lcg()), ref_intt(vec_lcg()))).to_equal(0)
+        expect(mismatches(_mlkem_ntt_inverse_neon(vec_ramp()), ref_intt(vec_ramp()))).to_equal(0)
+
+    it "inverse(forward(x)) round-trips to x":
+        expect(mismatches(_mlkem_ntt_inverse_avx2(_mlkem_ntt_forward_avx2(vec_lcg())), vec_lcg())).to_equal(0)
+        expect(mismatches(_mlkem_ntt_inverse_neon(_mlkem_ntt_forward_neon(vec_lcg())), vec_lcg())).to_equal(0)

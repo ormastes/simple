@@ -1,0 +1,68 @@
+# Empty relocatable object for MIR-empty modules, produced without a C compiler.
+#
+# Entry-closure builds compile re-export facades whose MIR is empty. The old
+# path wrote a C stub and shelled out to find_c_compiler(); in environments with
+# no discoverable C compiler (stage 2 matrix test_runner_build, 168 units) every
+# such unit failed with "no C compiler available for empty module object".
+# For ELF targets a valid empty ET_REL needs only a header plus a section-name
+# table, so write the bytes directly. Non-ELF targets return nil (caller keeps
+# the C-compiler path).
+
+fn _eo_push_le(bytes: [u8], value: i64, width: i64) -> [u8]:
+    var out = bytes
+    var i = 0
+    var v = value
+    while i < width:
+        out.push((v % 256) as u8)
+        v = v / 256
+        i = i + 1
+    out
+
+fn _eo_elf_machine(target: text) -> i64:
+    if target.starts_with("x86_64-"): return 62
+    if target.starts_with("aarch64-"): return 183
+    0
+
+fn driver_empty_object_supported(target: text) -> bool:
+    val is_elf_os = target.contains("-linux-") or target.contains("freebsd") or target.ends_with("-linux")
+    is_elf_os and _eo_elf_machine(target) != 0
+
+# ELF64 little-endian ET_REL: header, ".shstrtab" payload, null + shstrtab headers.
+fn driver_empty_object_bytes(target: text) -> [u8]?:
+    if not driver_empty_object_supported(target):
+        return nil
+    var b: [u8] = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    b = _eo_push_le(b, 1, 2)                         # e_type ET_REL
+    b = _eo_push_le(b, _eo_elf_machine(target), 2)   # e_machine
+    b = _eo_push_le(b, 1, 4)                         # e_version
+    b = _eo_push_le(b, 0, 8)                         # e_entry
+    b = _eo_push_le(b, 0, 8)                         # e_phoff
+    b = _eo_push_le(b, 80, 8)                        # e_shoff
+    b = _eo_push_le(b, 0, 4)                         # e_flags
+    b = _eo_push_le(b, 64, 2)                        # e_ehsize
+    b = _eo_push_le(b, 0, 2)                         # e_phentsize
+    b = _eo_push_le(b, 0, 2)                         # e_phnum
+    b = _eo_push_le(b, 64, 2)                        # e_shentsize
+    b = _eo_push_le(b, 2, 2)                         # e_shnum
+    b = _eo_push_le(b, 1, 2)                         # e_shstrndx
+    # .shstrtab content at offset 64: "\0.shstrtab\0" (11 bytes) + 5 pad
+    val strtab: [u8] = [0, 46, 115, 104, 115, 116, 114, 116, 97, 98, 0, 0, 0, 0, 0, 0]
+    for c in strtab:
+        b.push(c)
+    # section 0: null
+    var i = 0
+    while i < 64:
+        b.push(0)
+        i = i + 1
+    # section 1: .shstrtab
+    b = _eo_push_le(b, 1, 4)    # sh_name
+    b = _eo_push_le(b, 3, 4)    # SHT_STRTAB
+    b = _eo_push_le(b, 0, 8)    # flags
+    b = _eo_push_le(b, 0, 8)    # addr
+    b = _eo_push_le(b, 64, 8)   # offset
+    b = _eo_push_le(b, 11, 8)   # size
+    b = _eo_push_le(b, 0, 4)    # link
+    b = _eo_push_le(b, 0, 4)    # info
+    b = _eo_push_le(b, 1, 8)    # addralign
+    b = _eo_push_le(b, 0, 8)    # entsize
+    b
