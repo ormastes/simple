@@ -169,3 +169,8 @@ generation verification is pending — this is the "wait verification" state.
 The old monolith at `src/hardware/fpga_linux/riscv_fpga_linux.spl` is retained
 (verified consumers: test/03_system/app/hardware/feature/riscv_fpga_linux_spec.spl,
 test/01_unit/compiler/backend/vhdl_backend_spec.spl, both green).
+
+## Premise triage 2026-11-05 (mirp2-F, origin/release/1.0.0 @ 27e65c24371-era)
+Premise gone: `src/plugins/backend_vhdl/vhdl/vhdl_emit_{fp,simd,cache,hart}_stub.spl`
+all exist on release/1.0.0 (PR #6979). Row already `fixed`; only the
+host-side native/synthesis verification noted in bug_db remains. No action.

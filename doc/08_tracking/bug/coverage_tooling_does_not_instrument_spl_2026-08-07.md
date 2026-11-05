@@ -601,3 +601,10 @@ the 4/10 hand-checked against the artifact rows (exactly 4 rows have both
 counts > 0). Branch coverage is now measurable on the spipe/.spl runner
 path, with the executed-decisions denominator caveat above.
 
+
+## Premise triage 2026-11-05 (mirp2-F, origin/release/1.0.0 @ 27e65c24371-era)
+Original premise (no .spl coverage at all) is OBSOLETE: interpreter-path branch
+coverage works (2026-08-15 verification above) and
+`50.mir/mir_coverage_probe_admission.spl` + LLVM probe hooks exist. Re-scope
+title to the two residuals: (1) static decision denominator via MIR probe plan,
+(2) probe emission on the production native `lower_to_mir` path. Left open.

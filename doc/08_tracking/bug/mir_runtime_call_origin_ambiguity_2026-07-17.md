@@ -212,3 +212,12 @@ confirmed unaffected or fixed to match, and (c) a decision is made on
 whether the `.push()`/`.map()`/`.filter()` gap needs closing before this
 doc can be marked fully RESOLVED (it is out of scope for the fixture but
 in scope for the doc's stated "Required fix").
+
+## Premise triage 2026-11-05 (mirp2-F, origin/release/1.0.0 @ 27e65c24371-era)
+Premise partially current: `src/compiler/50.mir/mir_call_ownership.spl`
+fixes the hardcoded aggregate path (local definition mangled) and documents a
+KNOWN OPEN GAP: `.push()/.map()/.filter()` emit ordinary
+`Call(Const(Str("rt_array_push")))` byte-identical to a source call. Re-scope
+to exactly that gap: add an explicit call-origin flag on MirInstKind.Call
+consumed by every Const(Str) resolver (interpreter, C, native isel, wasm,
+LLVM, Cranelift). Left open.

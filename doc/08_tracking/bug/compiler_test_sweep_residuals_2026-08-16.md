@@ -417,3 +417,10 @@ lane cannot perform (blocked bootstrap), and the remainder (interpreter items
 1-8) each need dedicated `src/compiler/10.frontend/core/interpreter/` work
 well beyond a single triage pass. Leaving OPEN, no fix attempted here — too
 large for this lane's per-item budget as a single row.
+
+## Premise triage 2026-11-05 (mirp2-F, origin/release/1.0.0 @ 27e65c24371-era)
+Umbrella/tracking row, not one defect. Re-scope: each "Filed" item and DEFECT
+1/2 in this doc should be its own row (several already are via linked docs);
+this umbrella should close once each residual has a row. DEFECT 2 (`.?` bound
+to val) must be re-judged against current Option policy (nil only as T?
+absence) before being worked. Left open.

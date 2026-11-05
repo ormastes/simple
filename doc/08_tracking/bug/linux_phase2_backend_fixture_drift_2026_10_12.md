@@ -26,3 +26,8 @@ change was required.
   (c) fake verifier stops forwarding `--backend` (accepts only cranelift):
   2 failures (llvm good/binding only). Corruptions were applied to throwaway
   copies under /tmp, never committed.
+
+## Premise triage 2026-11-05 (mirp2-F, origin/release/1.0.0 @ 27e65c24371-era)
+CLOSE: fix commits 114ff44787b + d80aaaa574f are ancestors of release/1.0.0; the
+2026-11-05 re-verification above (32 scenarios, 0 failures, 3 non-vacuity
+corruptions caught) is the evidence. bug_db status should be `fixed`.

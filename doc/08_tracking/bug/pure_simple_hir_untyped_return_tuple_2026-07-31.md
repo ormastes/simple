@@ -109,3 +109,9 @@ new mutability regression passes; its containing intensive spec reports 38
 passes and two pre-existing failures. The bijection worker's targeted run timed
 out in the existing daemon and remains unverified.
 
+
+## Premise triage 2026-11-05 (mirp2-F, origin/release/1.0.0 @ 27e65c24371-era)
+Repro spec `test/01_unit/compiler/backend/vulkan_source_storage_buffer_abi_spec.spl`
+still exists. Untestable here: needs a full-CLI pure-Simple binary (seed
+refuses `test`). Next step: run the repro command on a deployed self-hosted
+binary; close if 'kind on Tuple' no longer occurs. Left open.

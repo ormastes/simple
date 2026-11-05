@@ -2790,3 +2790,8 @@ files  vac_examples  family (digits collapsed to N)
 ## Triage 2026-09-13
 
 This is a 5,095-file census with an ongoing multi-session repair backlog (6 repaired so far), not a single actionable bug. No new repair attempted this pass given the remaining shard size. Leaving OPEN as previously tracked.
+
+## Premise triage 2026-11-05 (mirp2-F, origin/release/1.0.0 @ 27e65c24371-era)
+Census/backlog row; premise (inert assertion forms exist) still true by
+construction. Not a MIR bug: re-scope to a lint-rule ratchet (flag inert forms
+on new/changed specs) + backlog burn-down. Left open.

@@ -70,3 +70,11 @@ and now points at this doc for the `mir_lowering_new_spec.spl` classification.
 34 total/15 passed/19 failed — 2 more examples, 5 more failures). Still
 reproduces and is still large-scope pre-existing MIR-lowering compiler work,
 well beyond this lane's per-bug budget. No change made.
+
+## Premise triage 2026-11-05 (mirp2-F, origin/release/1.0.0 @ 27e65c24371-era)
+Premise current (last measured 12/36 pass, 2026-09-13). This is a
+spec-vs-source-text drift row (spec asserts raw source of
+switch_operators_calls.spl), not a lowering defect. Next step: re-run on the
+self-hosted binary, then for each failing example either update the
+source-text assertion or delete examples asserting removed code; behavioural
+coverage belongs in lowering specs. Left open.

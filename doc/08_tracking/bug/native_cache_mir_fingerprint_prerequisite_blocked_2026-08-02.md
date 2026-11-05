@@ -45,3 +45,12 @@ attempted.
 Still BLOCKED, explicitly claimed/audited by another lane (`pure_parser_close`);
 needs a full canonical MIR serializer, out of scope for a shard fix. No
 change made. Leaving OPEN/BLOCKED.
+
+## Premise triage 2026-11-05 (mirp2-F, origin/release/1.0.0 @ 27e65c24371-era)
+Premise STILL CURRENT: `src/compiler/50.mir/mir_serialization.spl:14`
+`serialize_mir_module` still iterates `module.functions.values()` unsorted and
+omits statics/constants/types. `interface_digest_of` now HAS callers
+(80.driver/cache/{action_key,native_interface_slice,block/block_key}.spl,
+35.semantics/interface/compile_interface.spl), so the dependency-interface half
+is no longer blocked. Re-scope: remaining work = canonical sorted MIR
+serializer only. Not a P2 MIR bug; design/feature work. Left open.

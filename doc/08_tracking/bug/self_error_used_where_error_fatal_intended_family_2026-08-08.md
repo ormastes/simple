@@ -409,3 +409,12 @@ immediately afterward with no further gap between edit and commit, per the
 standing shared-WC guidance in `.claude/rules/vcs.md` and this repo's
 memory notes on write-tool/edit clobbering.
 
+
+## Premise triage 2026-11-05 (mirp2-F, origin/release/1.0.0 @ 27e65c24371-era)
+Premise STILL CURRENT under panic-free/fail-closed policy: the legacy
+message-prefix promotion survives as `mir_legacy_message_is_fatal`
+(`80.driver/driver_mir_error_owner.spl:9-13`), and 50.mir still has 70
+`self.error(` sites vs 324 `self.error_fatal(`. Re-scope: next step is a
+per-site audit of those 70 (each either intended-warning with a comment, or
+flipped to error_fatal with a spec), then delete the legacy prefix allowlist.
+Left open.
