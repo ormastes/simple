@@ -407,3 +407,8 @@ and verified fixed at tip. The lane's current RED state is a NEW defect
 port lane.** File it against
 `build-simpleos-riscv64-interpreter-kernel.shs`; the measurement commands
 in this section reproduce the list exactly.
+
+## Follow-up 2026-11-05
+
+The NEW 35-symbol link blocker is tracked as its own record:
+`riscv64_in_guest_kernel_link_blocked_35_symbols_2026-11-05.md` (P2, open).
