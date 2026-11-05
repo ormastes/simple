@@ -51,6 +51,7 @@ use app.cli.bootstrap_backend_installer.{bootstrap_install_worker_backends_v1,
     bootstrap_backend_request_error_v1, bootstrap_backend_choices_v1,
     bootstrap_backend_capability_label_v1}
 use app.io.env_ops.{env_get, env_set}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable}
 use std.nogc_sync_mut.io_runtime.{file_exists, file_size, remove_file_if_exists, dir_create}
 
 fn native_build_help() -> i64:
@@ -198,6 +199,27 @@ fn bootstrap_shard_child_active() -> bool:
     (env_get("SIMPLE_MIR_SHARD") ?? "") != "" or (env_get("SIMPLE_HIR_SHARD") ?? "") != "" or
         (env_get("SIMPLE_PARSE_SHARD") ?? "") != "" or (env_get("SIMPLE_MIR_SHARD_LINK") ?? "") != ""
 
+# Role-flag twin of bootstrap_shard_child_active for argv: shard/worker
+# children re-enter this binary with their role flag in argv and no role env
+# (the flag->env translation happens on the routes that spawn them). A child
+# must never re-enter the per-file pool its parent is running.
+fn bootstrap_build_role_child_requested(args: [text]) -> bool:
+    for arg in args:
+        if arg.starts_with("--file-worker=") or arg.starts_with("--hir-shard=") or
+                arg.starts_with("--mir-shard=") or arg.starts_with("--parse-shard=") or
+                arg.starts_with("--parse-fibers="):
+            return true
+    false
+
+# The per-file pool needs >= 2 admitted workers and refuses (fail closed) a
+# single-worker request. A --threads 1 build keeps its in-process route: one
+# process compiling one file at a time is already the cc1 shape, and the
+# refused-pool hard error (observed 2026-11-05 in the stage2 receiver proof)
+# is worse than never selecting the pool. Unset threads default to the host
+# CPU count inside the pool admission, which is > 1.
+fn bootstrap_pool_worker_count_usable(args: [text]) -> bool:
+    bootstrap_native_build_thread_count(args) != 1
+
 # per_file: the per-file route was selected (Stage3 / plain coordinator). Then
 # only a sealed ledger is accepted -- no verdict fails closed instead of
 # silently building a whole-program binary (P-H review round 1).
@@ -275,8 +297,9 @@ fn run_bootstrap_native_build_coordinator(args: [text]) -> i64:
     # pool when selected; the in-process build then links the per-module
     # objects from the sealed ledger (SIMPLE_MIR_SHARD_LINK). A FAILED or
     # OBJECT-PENDING module blocks the link (prepass returns false).
-    if native_bootstrap_stage3_per_file_selected_v1(
-            env_get(NATIVE_FILE_WORKERS_ENV_V1) ?? NATIVE_PER_FILE_PIPELINE_DEFAULT_V1,
+    if bootstrap_pool_worker_count_usable(args) and
+            native_bootstrap_stage3_per_file_selected_v1(
+            env_get_nullable(NATIVE_FILE_WORKERS_ENV_V1) ?? NATIVE_PER_FILE_PIPELINE_DEFAULT_V1,
             env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? ""):
         print "[coordinator-route] per-file worker pool + per-module link"
         if not bootstrap_coordinator_publish_authority_v1(worker_args):
@@ -443,6 +466,9 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
         print "  --emit-shared               Emit a shared library"
         print "  --backend=<{bootstrap_backend_choices_v1()}>  Codegen backend (default auto)"
         print "  --mode=<dynload|one-binary> Link mode"
+        print "  (default build mode: per-file worker pool; opt out with"
+        print "   SIMPLE_FILE_WORKERS=0 two-pass shards, or"
+        print "   SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 whole-program)"
         print "  --no-borrow-check           Skip the borrow checker"
         print "  --entry <file.spl>          Explicit entry module"
         print "  --source <dir>              Bound the scanned source roots"
@@ -497,7 +523,7 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
             # keeps the single-object whole-program route (HIR warm-up only).
             if explicit_entry == "src/app/cli/bootstrap_main.spl" and mode == "dynload":
                 val stage3_allow_mir = native_bootstrap_stage3_per_file_selected_v1(
-                    env_get(NATIVE_FILE_WORKERS_ENV_V1) ?? NATIVE_PER_FILE_PIPELINE_DEFAULT_V1,
+                    env_get_nullable(NATIVE_FILE_WORKERS_ENV_V1) ?? NATIVE_PER_FILE_PIPELINE_DEFAULT_V1,
                     env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? "")
                 if stage3_allow_mir:
                     print "[stage3-route] per-file worker pool + per-module link"
@@ -522,9 +548,18 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
         # Seed only the entry. The driver resolves its transitive imports and
         # then enables closure mode; pre-enabling it while passing whole source
         # roots made Stage 4 parse every file before it could prune anything.
-        # HIR then MIR+codegen run in per-module shard workers first; the
-        # in-process capsule below links their objects (SIMPLE_MIR_SHARD_LINK).
-        if not bootstrap_capsule_shard_prepass(args, true):
+        # BUILD MODE (user policy 2026-11-05): Stage 4 defaults to the per-file
+        # worker pool (one process per file, per-module objects, one link).
+        # Opt out per invocation: SIMPLE_FILE_WORKERS=0 (two-pass shard route)
+        # or SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 (single-object whole-program).
+        val stage4_per_file = not bootstrap_build_role_child_requested(args) and
+            bootstrap_pool_worker_count_usable(args) and
+            native_bootstrap_stage3_per_file_selected_v1(
+                env_get_nullable(NATIVE_FILE_WORKERS_ENV_V1) ?? NATIVE_PER_FILE_PIPELINE_DEFAULT_V1,
+                env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? "")
+        if stage4_per_file:
+            print "[stage4-route] per-file worker pool + per-module link"
+        if not bootstrap_capsule_shard_prepass_routed(args, true, stage4_per_file):
             return 1
         return bootstrap_stage4_link_or_place_v1(args)
     val entry_path = native_build_single_spl_positional(args)
@@ -535,6 +570,40 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
     # below. The coordinator owns process/cache sharding, failure fallback, and
     # MemAvailable fanout clamping; the real build remains the sole mutable
     # CompileContext owner.
+    # Role-child dispatches, mirroring the coordinator route's top: a
+    # --file-worker child runs the claim loop (never the pool or a full
+    # build), and shard flags become role env before any fall-through route
+    # so the worker capsule honors the role. Without these, a pool child
+    # re-entering this positional section misrouted into a full in-process
+    # build (observed 2026-11-05: workers BLOCKED claimed=0 after each ran
+    # the whole build itself).
+    if bootstrap_file_worker_requested(args):
+        return run_native_file_worker_v1(args)
+    bootstrap_capsule_shard_child_env(args)
+    # BUILD MODE (user policy 2026-11-05): a top-level positional native-build
+    # defaults to the per-file worker pool (one process per file: parse -> HIR
+    # -> MIR -> obj, then one link over the per-module objects). Opt out per
+    # invocation: SIMPLE_FILE_WORKERS=0 (two-pass shard route) or
+    # SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 (single-object whole-program route).
+    # Role children (--file-worker/--hir-shard/--mir-shard/--parse-shard)
+    # never re-enter the pool; they fall through to their own routes below.
+    # This block MUST precede the process-route early return: that route
+    # serves every threads>1 positional build, which is exactly the build the
+    # pool replaces.
+    if not bootstrap_build_role_child_requested(args) and
+            bootstrap_pool_worker_count_usable(args) and
+            native_bootstrap_stage3_per_file_selected_v1(
+                env_get_nullable(NATIVE_FILE_WORKERS_ENV_V1) ?? NATIVE_PER_FILE_PIPELINE_DEFAULT_V1,
+                env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? ""):
+        print "[positional-route] per-file worker pool + per-module link"
+        val pool_worker_args = bootstrap_native_build_worker_args(args)
+        if not bootstrap_coordinator_publish_authority_v1(pool_worker_args):
+            return 1
+        if not native_build_coordinator_prepublish_closure_v1(pool_worker_args):
+            return 1
+        if not bootstrap_capsule_shard_prepass_routed(args, true, true):
+            return 1
+        return run_bootstrap_stage3_process_route(args)
     if bootstrap_stage3_process_route_requested(
             args, env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "",
             env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? "",
