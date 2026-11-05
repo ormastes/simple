@@ -1,0 +1,98 @@
+# @tag: startup, launch-metadata, retained-smf
+# Bug smf_header_wire_layout_diverges_rust_vs_simple_2026-08-10: retained
+# launch metadata must decode a Rust-seed repr(C) (96 B, +4 shift) trailer.
+use std.spec.{describe, it, expect}
+use app.startup.launch_metadata.{
+    launch_metadata_default,
+    retained_smf_launch_metadata_v1,
+    render_launch_metadata_sidecar
+}
+
+fn put_u32(bytes: [u8], offset: i64, value: i64) -> [u8]:
+    var out = bytes
+    var i = 0
+    while i < 4:
+        out[offset + i] = ((value >> (i * 8)) & 255) as u8
+        i = i + 1
+    out
+
+fn put_u64(bytes: [u8], offset: i64, value: i64) -> [u8]:
+    var out = bytes
+    var i = 0
+    while i < 8:
+        out[offset + i] = ((value >> (i * 8)) & 255) as u8
+        i = i + 1
+    out
+
+fn zeros(count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out.push(0)
+        i = i + 1
+    out
+
+fn section_entry(section_type: i64, offset: i64, size: i64) -> [u8]:
+    var entry = zeros(64)
+    entry[0] = section_type as u8
+    entry = put_u32(entry, 4, 1)
+    entry = put_u64(entry, 8, offset)
+    entry = put_u64(entry, 16, size)
+    entry = put_u64(entry, 24, size)
+    entry = put_u64(entry, 32, 16)
+    entry
+
+fn packed_image() -> [u8]:
+    val payload = render_launch_metadata_sidecar(launch_metadata_default("smf")).bytes()
+    var out: [u8] = []
+    for b in payload:
+        out.push(b)
+    out = out.concat(zeros(8))
+    val table = out.len()
+    val rows = 2
+    out = out.concat(section_entry(15, 0, payload.len()))
+    out = out.concat(section_entry(1, payload.len(), 8))
+    var header = zeros(128)
+    header[0] = 83
+    header[1] = 77
+    header[2] = 70
+    header[3] = 0
+    header[4] = 1
+    header[5] = 1
+    header = put_u32(header, 16, rows)
+    header = put_u64(header, 20, table)
+    header = put_u64(header, 28, out.len())
+    out.concat(header)
+
+fn to_seed_trailer(packed: [u8]) -> [u8]:
+    # Rewrite the packed 128-byte trailer as the Rust seed repr(C) 96-byte one:
+    # 0..20 unchanged, 4 zero padding bytes at 20..24, packed 20..92 moved to 24..96.
+    val hs = packed.len() - 128
+    var out: [u8] = []
+    var i = 0
+    while i < hs:
+        out.push(packed[i])
+        i = i + 1
+    i = 0
+    while i < 96:
+        if i < 20:
+            out.push(packed[hs + i])
+        else:
+            if i < 24:
+                out.push(0)
+            else:
+                out.push(packed[hs + i - 4])
+        i = i + 1
+    out
+
+describe "retained SMF launch metadata header layouts":
+    it "decodes the packed 128-byte trailer":
+        val r = retained_smf_launch_metadata_v1(packed_image(), "smf")
+        expect(r.reason).to_equal("launch_metadata_retained")
+        expect(r.ok).to_equal(true)
+
+    it "decodes the Rust seed 96-byte repr(C) trailer":
+        val r = retained_smf_launch_metadata_v1(to_seed_trailer(packed_image()), "smf")
+        expect(r.reason).to_equal("launch_metadata_retained")
+        expect(r.ok).to_equal(true)
+        expect(r.metadata.entry_kind).to_equal("smf")

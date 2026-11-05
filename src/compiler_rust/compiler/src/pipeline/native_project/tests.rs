@@ -9,8 +9,8 @@ use crate::codegen::common_backend::{enum_runtime_module_name_from_path, module_
 use crate::incremental::SourceInfo;
 use crate::pipeline::execution::runtime_bundle_env_lock_for_tests as runtime_bundle_env_lock;
 use super::linker::{
-    add_extra_link_objects, is_boot_c_translation_unit, minimal_boot_source_allowed, split_extra_link_objects,
-    validate_extra_link_objects,
+    add_extra_link_objects, freestanding_boot_dir, is_boot_c_translation_unit, minimal_boot_asm_source_allowed,
+    minimal_boot_source_allowed, split_extra_link_objects, validate_extra_link_objects,
 };
 use super::tools::find_hosted_runtime_rlib;
 use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
@@ -157,6 +157,22 @@ fn boot_source_discovery_keeps_required_core_and_skips_fragments() {
 }
 
 #[test]
+fn boot_source_discovery_falls_back_to_source_root_and_prefers_entry() {
+    let temp = tempfile::tempdir().unwrap();
+    let entry = temp.path().join("test/regression/probe.spl");
+    let entry_boot = temp.path().join("test/regression/boot");
+    let source_root = temp.path().join("arch/x86_64");
+    let source_boot = source_root.join("boot");
+    fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    fs::create_dir_all(&source_boot).unwrap();
+    fs::write(&entry, "").unwrap();
+
+    assert_eq!(freestanding_boot_dir(&entry, &[source_root.clone()]), Some(source_boot));
+    fs::create_dir_all(&entry_boot).unwrap();
+    assert_eq!(freestanding_boot_dir(&entry, &[source_root]), Some(entry_boot));
+}
+
+#[test]
 fn minimal_rv64_boot_keeps_entry_and_required_runtime_owners() {
     assert!(minimal_boot_source_allowed("boot_entry", false));
     assert!(minimal_boot_source_allowed("baremetal_runtime_core.inc", false));
@@ -166,6 +182,10 @@ fn minimal_rv64_boot_keeps_entry_and_required_runtime_owners() {
     assert!(!minimal_boot_source_allowed("full_networking_runtime", false));
     assert!(minimal_boot_source_allowed("full_networking_runtime", true));
     assert!(!minimal_boot_source_allowed("unrelated_service", false));
+    assert!(minimal_boot_asm_source_allowed("crt0"));
+    assert!(minimal_boot_asm_source_allowed("context_switch"));
+    assert!(!minimal_boot_asm_source_allowed("multiboot2_elf64_loader"));
+    assert!(!minimal_boot_asm_source_allowed("up2_dci_uefi_transition"));
 }
 
 #[test]
@@ -8140,13 +8160,13 @@ int main(void) {
     if (rt_value_as_int(rt_dict_get(uint_dict, rt_value_u64(0))) != 10) return 112;
     if (rt_value_as_int(rt_dict_get(uint_dict, rt_value_u64(INT64_C(1) << 61))) != 20) return 113;
 
-    int64_t none = rt_enum_new(1, (int32_t)2371748697u, 3);
-    int64_t some = rt_enum_new(1, (int32_t)4053299545u, rt_value_int(9));
+    int64_t none = rt_enum_new(1, 1, 3);
+    int64_t some = rt_enum_new(1, 0, rt_value_int(9));
     if (rt_enum_id(none) != 1 || rt_enum_id(some) != 1 || rt_enum_id(rt_value_int(9)) != -1) return 104;
     if (!rt_is_none(none) || rt_is_some(none)) return 94;
     if (rt_is_none(some) || !rt_is_some(some)) return 95;
-    if ((uint32_t)rt_enum_discriminant(some) != 4053299545u) return 96;
-    if (!rt_enum_check_discriminant(some, 4053299545u)) return 97;
+    if ((uint32_t)rt_enum_discriminant(some) != 0u) return 96;
+    if (!rt_enum_check_discriminant(some, 0u)) return 97;
     if (rt_enum_payload(some) != rt_value_int(9)) return 98;
     int64_t uint_inner = rt_enum_new(77, 1, boxed_u64_max);
     int64_t uint_outer = rt_enum_new(78, 1, uint_inner);

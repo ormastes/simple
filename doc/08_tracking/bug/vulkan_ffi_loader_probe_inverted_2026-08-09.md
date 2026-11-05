@@ -1,4 +1,29 @@
 # `VulkanFfi.loader_probe()` reports false on a host with a working Vulkan loader
+## Re-verified 2026-11-05 (vulkan-fixes lane) — Status: FIXED, wait verification
+
+The fix this doc recommended (resolution check via `DynLib.sym` instead of the
+`call0(...) != 0` call-status comparison) is present on `release/1.0.0` tip at
+`src/lib/nogc_sync_mut/gpu/engine2d/ffi_vulkan.spl:128-155` with an inline
+comment documenting both original defects. The Dynamic-mode regression test
+this doc's "Spec status" section asked for is now added to
+`test/01_unit/lib/gpu/engine2d/ffi_vulkan_spec.spl` ("loader_probe (raw
+symbol-resolution signal) / reports true when the host loader resolves
+vkEnumerateInstanceVersion"): red-first proven against a temporarily restored
+inverted probe ("expected false to equal true"), 5/5 green with the fix
+(2026-11-05, seed interpreter, host with libvulkan.so.1 present).
+
+Audit finding (same honesty class, NOT fixed here): a portable negative
+control (probe a library without the export and require false) is blocked by
+an interpreter/native divergence — the interpreter-extern `spl_dlsym`
+(`src/compiler_rust/compiler/src/interpreter_extern/wsffi.rs:362`) raises a
+typed error on an unresolved symbol while native `spl_dlsym` returns 0, so
+`DynLib.sym`'s documented "Returns 0 if not found"
+(`src/lib/nogc_sync_mut/sffi/dynamic.spl:354`) holds only on the native path.
+Recorded here so the divergence is not lost.
+
+**Status: wait verification** — fix and regression test on tip; native GPU
+lane verification pending.
+
 ## Closed 2026-09-16 — Status RESOLVED 2026-08-17; source-content evidence fix present in ffi_vulkan.spl
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is

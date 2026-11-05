@@ -1,0 +1,94 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+#
+# Ed25519 SFFI verification wrapper — argument order and error separation.
+#   -> doc/08_tracking/bug/ed25519_sffi_argument_order_and_error_conflation_2026-08-21.md
+#
+# The checked wrapper `ed25519_verify_native_checked(pubkey, message,
+# signature)` must:
+#   - take arguments in the Simple/interpreter order (public_key, message,
+#     signature) — the native export consumes (message, pubkey, signature)
+#     and the wrapper is the single place that binding is fixed;
+#   - return Ok(true) for a valid RFC 8032 signature;
+#   - return Ok(false) for a well-formed but cryptographically invalid
+#     signature (error conflation: this must NOT be an Err);
+#   - return Err for malformed bridge input (wrong key/signature lengths) —
+#     distinguishable from a cryptographic rejection.
+#
+# Vectors are RFC 8032 §7.1 test vectors 1 and 2 (empty and 1-byte messages).
+
+use std.spec.step
+
+use std.spec.{describe, it, assert_equal, assert_true}
+use std.nogc_sync_mut.io.signature_sffi.{ed25519_verify_native_checked}
+use std.common.serialization.{hex_to_bytes}
+
+fn _hex_u8(h: text) -> [u8]:
+    val raw = hex_to_bytes(h)
+    var out: [u8] = []
+    var i = 0
+    while i < raw.len():
+        out.push((raw[i] & 255).to_u8())
+        i = i + 1
+    out
+
+# RFC 8032 §7.1 test vector 1 (empty message).
+val _RFC8032_V1_PK = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+val _RFC8032_V1_SIG = "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+
+# RFC 8032 §7.1 test vector 2 (message = 0x72).
+val _RFC8032_V2_PK = "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"
+val _RFC8032_V2_MSG_HEX = "72"
+val _RFC8032_V2_SIG = "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00"
+
+describe "ed25519_verify_native_checked — argument order and error separation (RFC 8032)":
+    it "POSITIVE CONTROL: vector 1 (empty message) verifies true":
+        # @req REQ-SSPEC-LIB
+        step("POSITIVE CONTROL: vector 1 (empty message) verifies true")
+        # If the wrapper passed (pubkey, message) straight into the native
+        # (message, pubkey) slots, this well-formed vector would be rejected
+        # and the example would fail RED.
+        val r = ed25519_verify_native_checked(_hex_u8(_RFC8032_V1_PK), [], _hex_u8(_RFC8032_V1_SIG))
+        assert_equal(r.is_ok(), true)
+        assert_equal(r.unwrap(), true)
+
+    it "vector 2 (message 0x72) verifies true — message slot really is second":
+        # @req REQ-SSPEC-LIB
+        step("vector 2 (message 0x72) verifies true — message slot really is second")
+        val r = ed25519_verify_native_checked(
+            _hex_u8(_RFC8032_V2_PK), _hex_u8(_RFC8032_V2_MSG_HEX), _hex_u8(_RFC8032_V2_SIG))
+        assert_equal(r.is_ok(), true)
+        assert_equal(r.unwrap(), true)
+
+    it "wrong message for a valid (key, signature) pair is Ok(false), not Err":
+        # @req REQ-SSPEC-LIB
+        step("wrong message for a valid (key, signature) pair is Ok(false), not Err")
+        # Error-conflation pin: an authentic cryptographic rejection must be
+        # observable as Ok(false), distinguishable from malformed bridge input.
+        val r = ed25519_verify_native_checked(_hex_u8(_RFC8032_V2_PK), [0x73u8], _hex_u8(_RFC8032_V2_SIG))
+        assert_equal(r.is_ok(), true)
+        assert_equal(r.unwrap(), false)
+
+    it "corrupted signature byte is Ok(false), not Err":
+        # @req REQ-SSPEC-LIB
+        step("corrupted signature byte is Ok(false), not Err")
+        var sig = _hex_u8(_RFC8032_V1_SIG)
+        sig[0] = sig[0] ^ 0x01u8
+        val r = ed25519_verify_native_checked(_hex_u8(_RFC8032_V1_PK), [], sig)
+        assert_equal(r.is_ok(), true)
+        assert_equal(r.unwrap(), false)
+
+    it "malformed public key length is Err, distinguishable from Ok(false)":
+        # @req REQ-SSPEC-LIB
+        step("malformed public key length is Err, distinguishable from Ok(false)")
+        val short_pk = [0x01u8, 0x02u8, 0x03u8]
+        val r = ed25519_verify_native_checked(short_pk, [], _hex_u8(_RFC8032_V1_SIG))
+        assert_equal(r.is_err(), true)
+
+    it "malformed signature length is Err, distinguishable from Ok(false)":
+        # @req REQ-SSPEC-LIB
+        step("malformed signature length is Err, distinguishable from Ok(false)")
+        var short_sig = _hex_u8(_RFC8032_V1_SIG)
+        short_sig.pop()
+        val r = ed25519_verify_native_checked(_hex_u8(_RFC8032_V1_PK), [], short_sig)
+        assert_equal(r.is_err(), true)

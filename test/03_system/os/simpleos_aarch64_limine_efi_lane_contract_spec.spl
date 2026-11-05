@@ -1,0 +1,51 @@
+"""SimpleOS aarch64 Limine real-firmware lane contract (EDK2/AAVMF -> BOOTAA64.EFI -> kernel.elf).
+
+Each `it` pins one defect found 2026-11-05 building + booting the lane from macOS arm64.
+"""
+
+use std.io_runtime.{file_read}
+use std.spec.*
+
+val RUNTIME = "examples/09_embedded/simple_os/arch/aarch64/boot/freestanding_runtime.c"
+
+describe "SimpleOS aarch64 Limine EFI lane":
+    # @manual scenario evidence: sh scripts/check/check-simpleos-arm64-efi-real-firmware-boot.shs
+    it "lays RtArray out in the FAM ABI the compiler inlines for aarch64 baremetal":
+        val rt = file_read(RUNTIME)
+        val target = file_read("src/compiler_rust/common/src/target.rs")
+        expect(target).to_contain("TargetArch::Aarch64 | TargetArch::Arm | TargetArch::X86")
+        expect(rt).to_contain("    spl_u32 len;\n    spl_u32 capacity;\n    spl_i64 data[];\n} RtArray;")
+        expect(rt.contains("    spl_i64 *data;\n} RtArray;")).to_equal(false)
+
+    it "returns the current array value from rt_array_push (push-returns-header ABI)":
+        val rt = file_read(RUNTIME)
+        val target = file_read("src/compiler_rust/common/src/target.rs")
+        expect(target).to_contain("pub const fn array_push_returns_header(&self) -> bool")
+        expect(rt).to_contain("    array->len = array->len + 1;\n    return array_value;\n}")
+        expect(rt).to_contain("out = rt_array_push(out, ")
+        expect(rt.contains("\n        rt_array_push(out, ")).to_equal(false)
+
+    it "defines the link-closure symbols the kernel references":
+        val rt = file_read(RUNTIME)
+        expect(rt).to_contain("spl_u64 rt_arm64_mrs_mpidr_el1(void)")
+        expect(rt).to_contain("spl_i64 rt_value_u64(spl_i64 bits)")
+        expect(rt).to_contain("spl_i64 rt_enum_check_variant(spl_i64 value, spl_i64 expected_enum_id, spl_i64 expected_discriminant)")
+
+    it "falls back to llvm-readelf when binutils readelf is absent (macOS)":
+        val sh = file_read("scripts/os/build-simpleos-aarch64-limine-kernel.shs")
+        expect(sh).to_contain("for c in readelf llvm-readelf /opt/homebrew/opt/llvm/bin/llvm-readelf")
+        expect(sh).to_contain("hdr=$(\"$READELF\" -h")
+
+    it "finds Homebrew EDK2 firmware and writes the ESP with mtools":
+        val sh = file_read("scripts/os/build-simpleos-aarch64-efi-esp.shs")
+        expect(sh).to_contain("/opt/homebrew/share/qemu/edk2-aarch64-code.fd")
+        expect(sh).to_contain("/opt/homebrew/share/qemu/edk2-arm-vars.fd")
+        expect(sh).to_contain("mcopy -i \"$ESP\" \"$KERNEL_ELF\" ::/boot/kernel.elf")
+        expect(sh).to_contain("mtype -i \"$ESP\" \"$dst\"")
+        expect(sh).to_contain("shasum -a 256")
+
+    it "requires MEMORY-INIT-OK and refuses any kernel-reported stage FAIL":
+        val gate = file_read("scripts/check/check-simpleos-arm64-efi-real-firmware-boot.shs")
+        expect(gate).to_contain("'SIMPLEOS-AARCH64-LIMINE-MEMORY-INIT-OK'")
+        expect(gate).to_contain("SIMPLEOS-AARCH64-LIMINE-[A-Z0-9-]*-FAIL")
+        expect(gate).to_contain("/opt/homebrew/share/qemu/edk2-arm-vars.fd")

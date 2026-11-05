@@ -358,6 +358,60 @@ fn test_isolated_thread_spawn_with_args_and_join_direct_function_record() {
     rt_thread_free(handle);
 }
 
+// doc/08_tracking/bug/isolated_thread_raw_worker_argument_heuristic_flake_2026-08-12.md
+// The worker-argument ABI is a property of the closure WORD encoding only:
+// an int-tagged word (addr << 3, above the user-VA ceiling) means the worker
+// takes raw i64 parameters; a real record address means RuntimeValue
+// parameters. It must never depend on where the allocator put the record,
+// on test order, or on concurrent spawns.
+
+#[test]
+fn test_isolated_thread_heap_record_word_is_never_raw_abi() {
+    // Many live records spread the allocator over its arenas; every real
+    // record address must classify as the tagged (RuntimeValue) ABI.
+    let records: Vec<_> = (0..4096).map(|_| native_closure_record(add_values as *const ())).collect();
+    for r in &records {
+        assert!(!native_word_exceeds_user_va(r.as_ptr() as u64));
+    }
+}
+
+#[test]
+fn test_isolated_thread_worker_args_stress_concurrent_spawners() {
+    // Stress: 16 spawner threads x 32 spawns, closure and direct records,
+    // interleaved. A shape/address heuristic or shared classification state
+    // shows up here as a wrong sum (historically 5 or 36 instead of 42).
+    extern "C" fn direct_add(left: RuntimeValue, right: RuntimeValue) -> RuntimeValue {
+        RuntimeValue::from_int(left.as_int() + right.as_int())
+    }
+    let spawners: Vec<_> = (0..16)
+        .map(|s| {
+            thread::spawn(move || {
+                for i in 0..32i64 {
+                    let left = s * 1000 + i;
+                    let record = if (s + i) % 2 == 0 {
+                        native_closure_record(add_values as *const ())
+                    } else {
+                        native_direct_function_record(direct_add as *const ())
+                    };
+                    let handle = rt_thread_spawn_isolated_with_args(
+                        record.as_ptr() as u64,
+                        RuntimeValue::from_int(left),
+                        RuntimeValue::from_int(42 - left),
+                    );
+                    assert!(handle != 0);
+                    let result = rt_thread_join(handle);
+                    assert!(result.is_int());
+                    assert_eq!(result.as_int(), 42, "spawner {} iter {}", s, i);
+                    rt_thread_free(handle);
+                }
+            })
+        })
+        .collect();
+    for s in spawners {
+        s.join().expect("spawner panicked");
+    }
+}
+
 #[test]
 fn test_isolated_thread_is_done() {
     extern "C" fn slow_work(_closure: u64, v: RuntimeValue) -> RuntimeValue {

@@ -3210,8 +3210,11 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
         // below: they may own state this walk cannot understand.
         return true;
     }
-    let raw_debug = std::env::var_os("SIMPLE_TRANSIENT_RAW_PROMOTE_DEBUG")
-        .is_some_and(|v| v != "0");
+    // Cached once: an env lookup takes a lock and allocates, too costly per call.
+    static RAW_PROMOTE_DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let raw_debug = *RAW_PROMOTE_DEBUG.get_or_init(|| {
+        std::env::var_os("SIMPLE_TRANSIENT_RAW_PROMOTE_DEBUG").is_some_and(|v| v != "0")
+    });
     if !root_raw && value.heap_type().is_none() {
         if raw_debug {
             eprintln!("[raw-promote] false exit=unknown-heap-kind word={:#x} is_heap={} heap_type={:?}", value.0, value.is_heap(), value.heap_type());
@@ -7039,9 +7042,8 @@ pub extern "C" fn rt_array_map(array: RuntimeValue, closure: RuntimeValue) -> Ru
 /// already routed `("Array", "map")` to `rt_array_map` and is left untouched.
 ///
 /// Option behaviour is intentionally unchanged: a non-array receiver still goes
-/// to `rt_option_map` and keeps its exact previous result, including the `Some`
-/// wrap and the None/nil pass-through. Only the array receiver — which had no
-/// correct implementation on these two lanes — changes.
+/// to `rt_option_map`, including its `Some` wrap and None/nil pass-through.
+/// Result receivers preserve `Err` and wrap mapped payloads in `Ok`.
 #[no_mangle]
 pub extern "C" fn rt_map(receiver: RuntimeValue, closure: RuntimeValue) -> RuntimeValue {
     if get_typed_ptr_packed::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {

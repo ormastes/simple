@@ -207,6 +207,24 @@ fn test_enum_new_with_payload() {
 }
 
 #[test]
+fn test_result_unwrap_returns_payload() {
+    let payload = RuntimeValue::from_int(42);
+    // Pure-Simple MIR uses legacy enum id 0; the C constructor reserves id 2.
+    // Both carry positional Ok=0 and must unwrap to the payload, not the enum.
+    for enum_id in [super::RESULT_ENUM_ID, 2] {
+        let result = rt_enum_new(enum_id, 0, payload);
+        assert!(crate::value::heap::is_registered_heap_ptr(result.as_heap_ptr()));
+        assert_eq!(super::rt_unwrap_or_trap(result).as_int(), 42);
+    }
+}
+
+#[test]
+fn test_option_unwrap_returns_positional_payload() {
+    let result = rt_enum_new(super::OPTION_ENUM_ID, 0, RuntimeValue::from_int(42));
+    assert_eq!(super::rt_unwrap_or_trap(result).as_int(), 42);
+}
+
+#[test]
 fn test_enum_new_nil_payload() {
     let enum_id = 1;
     let discriminant = 0;
@@ -461,11 +479,7 @@ fn test_option_map_none_enum() {
 
     // Create a proper None enum
     let none_disc = {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut h = DefaultHasher::new();
-        "None".hash(&mut h);
-        (h.finish() & 0xFFFFFFFF) as u32
+        super::hash_variant_discriminant("None") as u32
     };
     let none_val = rt_enum_new(super::OPTION_ENUM_ID, none_disc, RuntimeValue::NIL);
     let custom_none = rt_enum_new(super::OPTION_ENUM_ID + 1, none_disc, RuntimeValue::NIL);
@@ -483,11 +497,7 @@ fn test_option_map_some_with_identity() {
 
     // Create Some(42) enum
     let some_disc = {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut h = DefaultHasher::new();
-        "Some".hash(&mut h);
-        (h.finish() & 0xFFFFFFFF) as u32
+        super::hash_variant_discriminant("Some") as u32
     };
     let some_val = rt_enum_new(super::OPTION_ENUM_ID, some_disc, RuntimeValue::from_int(42));
 
@@ -504,6 +514,36 @@ fn test_option_map_some_with_identity() {
     assert_eq!(rt_enum_id(result), super::OPTION_ENUM_ID as i64);
     let payload = rt_enum_payload(result);
     assert_eq!(payload.as_int(), 42);
+}
+
+static RESULT_MAP_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+extern "C" fn result_map_increment(_closure: RuntimeValue, payload: RuntimeValue) -> RuntimeValue {
+    RESULT_MAP_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    RuntimeValue::from_int(payload.as_int() + 1)
+}
+
+#[test]
+fn test_result_map_preserves_err_and_wraps_mapped_ok() {
+    RESULT_MAP_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+    let ok_disc = super::hash_variant_discriminant("Ok");
+    let err_disc = super::hash_variant_discriminant("Err");
+    let err = rt_enum_new(super::RESULT_ENUM_ID, err_disc, RuntimeValue::from_int(42));
+    let ok = rt_enum_new(super::RESULT_ENUM_ID, ok_disc, RuntimeValue::from_int(42));
+    let closure = rt_closure_new(result_map_increment as *const u8, 0);
+
+    let mapped_err = super::rt_option_map(err, closure);
+    assert_eq!(mapped_err, err);
+    let dispatched_err = crate::value::rt_map(err, closure);
+    assert_eq!(dispatched_err, err);
+    assert_eq!(RESULT_MAP_CALLS.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    for mapped_ok in [super::rt_option_map(ok, closure), crate::value::rt_map(ok, closure)] {
+        assert_eq!(rt_enum_id(mapped_ok), super::RESULT_ENUM_ID as i64);
+        assert_eq!(rt_enum_discriminant(mapped_ok), ok_disc as i64);
+        assert_eq!(rt_enum_payload(mapped_ok).as_int(), 43);
+    }
+    assert_eq!(RESULT_MAP_CALLS.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
 
@@ -608,4 +648,81 @@ fn test_unwrap_or_value_nil_flat_nullable_returns_default() {
     // A present bare payload is still returned unchanged.
     let five = RuntimeValue::from_int(5);
     assert_eq!(super::rt_unwrap_or_value(five, default), five);
+}
+
+/// Enum discriminant convention (bug
+/// enum_discriminant_convention_split_hashed_seed_vs_positional_pure_simple_2026-08-08):
+/// the builtin Option/Result variants use the POSITIONAL convention shared with
+/// the pure-Simple compiler (`Result: Ok=0, Err=1`, `Option: Some=0, None=1`)
+/// and the C runtime, so a seed-built value read by the other toolchain (or
+/// vice versa) decodes to the same variant.
+#[test]
+fn test_builtin_variant_discriminants_are_positional() {
+    assert_eq!(super::hash_variant_discriminant("Ok"), 0);
+    assert_eq!(super::hash_variant_discriminant("Err"), 1);
+    assert_eq!(super::hash_variant_discriminant("Some"), 0);
+    assert_eq!(super::hash_variant_discriminant("None"), 1);
+
+    let some = super::rt_option_some(RuntimeValue::from_int(5));
+    let none = super::rt_option_none();
+    assert_eq!(rt_enum_discriminant(some), 0);
+    assert_eq!(rt_enum_discriminant(none), 1);
+    assert_eq!(rt_enum_id(some), super::OPTION_ENUM_ID as i64);
+}
+
+/// User variants keep a name-derived tag that can never alias the positional
+/// builtin slots 0/1, so a user enum's `Circle` can never decode as `Err`/`None`.
+#[test]
+fn test_user_variant_discriminants_never_alias_builtin_slots() {
+    for name in ["Circle", "Bold", "Ready", "Pending", "A", "Z", "Nothing", "Error", "ok", "none"] {
+        let d = super::hash_variant_discriminant(name);
+        assert!(d > 1, "user variant {name} aliased a builtin positional slot: {d}");
+    }
+}
+
+#[test]
+fn user_enum_discriminants_equal_declaration_index() {
+    use super::{hash_variant_discriminant, register_enum_variants};
+    register_enum_variants(["UePosRed", "UePosGreen", "UePosBlue"]);
+    assert_eq!(hash_variant_discriminant("UePosRed"), 0);
+    assert_eq!(hash_variant_discriminant("UePosGreen"), 1);
+    assert_eq!(hash_variant_discriminant("UePosBlue"), 2);
+}
+
+#[test]
+fn user_enum_shared_variant_same_index_stays_positional() {
+    use super::{hash_variant_discriminant, register_enum_variants};
+    register_enum_variants(["UeShA", "UeShIdle"]);
+    register_enum_variants(["UeShB", "UeShIdle", "UeShC"]);
+    assert_eq!(hash_variant_discriminant("UeShIdle"), 1);
+}
+
+#[test]
+fn user_enum_conflicting_index_is_ambiguous_and_pinned() {
+    use super::{hash_variant_discriminant, register_enum_variants};
+    register_enum_variants(["UeCfX", "UeCfY"]);
+    register_enum_variants(["UeCfY", "UeCfX"]);
+    let x = hash_variant_discriminant("UeCfX");
+    assert!(x > 1, "ambiguous names keep the name-derived tag, got {x}");
+    // A first answer is pinned: later registrations never change it.
+    register_enum_variants(["UePinOnly"]);
+    let first = hash_variant_discriminant("UePinOnly");
+    register_enum_variants(["UePinZ", "UePinOnly"]);
+    assert_eq!(first, 0);
+    assert_eq!(hash_variant_discriminant("UePinOnly"), first);
+}
+
+/// #6953 review: two enums sharing a variant name at different indexes,
+/// both declared before any lookup, resolve deterministically (name-derived,
+/// never one enum's index leaking into the other).
+#[test]
+fn user_enum_shared_name_different_index_is_deterministic() {
+    use super::{hash_variant_discriminant, register_enum_variants};
+    register_enum_variants(["UeDdX", "UeDdShared"]);
+    register_enum_variants(["UeDdShared", "UeDdZ"]);
+    let d = hash_variant_discriminant("UeDdShared");
+    assert!(d > 1, "conflicting shared name must not take either enum's index, got {d}");
+    assert_eq!(hash_variant_discriminant("UeDdShared"), d);
+    assert_eq!(hash_variant_discriminant("UeDdX"), 0);
+    assert_eq!(hash_variant_discriminant("UeDdZ"), 1);
 }

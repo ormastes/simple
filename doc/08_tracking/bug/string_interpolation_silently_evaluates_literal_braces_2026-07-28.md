@@ -61,3 +61,16 @@ backward-compatible.
 
 - `doc/07_guide/language/dict_native_pitfalls.md` — same family: silent wrong
   values rather than a loud failure.
+
+## Fixed 2026-11-05 (HB2) — general guard landed as lint CINTERP001
+
+The suggested fix is implemented: `src/compiler/35.semantics/lint/constant_interpolation.spl`
+(`check_constant_interpolation`) warns when an interpolation inside a
+double-quoted literal references no identifier (`{!0}`, `{2}`, `{1+1}`,
+`{!1, !2}`); `{{`/`}}` escapes, comments, single-quoted text, `r"..."` raw
+strings and empty braces are not flagged. Registered as static lint rule
+`constant_interpolation` (`src/compiler/90.tools/lint/rules/constant_interpolation_rule.spl`,
+`static_rules.spl`). Spec: `test/01_unit/compiler/lint/constant_interpolation_spec.spl`
+— written first and RED (module absent), now 13/13 on the seed
+(`bin/simple.exe run`). The language behaviour (constant braces ARE evaluated)
+is unchanged by design; the lint is the agreed diagnostic.

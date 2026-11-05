@@ -33,3 +33,13 @@ NOT a spec-content issue.
 Reproduce under `--mode=interpreter` vs default system mode with the real
 spec, then audit the system runner's per-test process/env reset for file-read
 facade state (rt_io file cache, cwd).
+
+## 2026-11-05 follow-up evidence (network-gate lane)
+The trigger is NOT purely example count: identical 13-test subsets of
+test/system/simpleos_riscv_network_gate_spec.spl differing only in the `it`
+name string diverge — an RV64-named copy passes while an RV32-named copy fails
+file-reads, both pointed at the same rv64 script file. T16 additionally turned
+out to be a real spec defect (helper called with a missing `qemu/` path
+prefix) that only mimicked the runner bug; after fixing it, T17 alone remains
+runner-blocked with empty helper file-reads. This points at name/state-
+correlated per-test isolation state in the system runner, not a resource cap.

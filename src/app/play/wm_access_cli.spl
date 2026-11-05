@@ -110,13 +110,22 @@ pub fn wm_access_execute(command: text, args: [text], output_mode: AccessOutputM
         return Err(AccessError.detailed("timeout", "WM access request timed out", "TIMEOUT", "Observe current state before retrying", true, false))
     val captured_at_ms = _wm_access_now_ms()
     val snapshot = wm_access_snapshot_from_windows(windows, captured_at_ms)
-    val result = match descriptor.operation:
-        ACCESS_OPERATION_LIST: access_result_from_snapshot(ACCESS_OPERATION_LIST, WM_ACCESS_SOURCE, "", snapshot.access, WM_ACCESS_LIMIT)
-        ACCESS_OPERATION_SNAPSHOT: AccessResult.document(ACCESS_OPERATION_SNAPSHOT, WM_ACCESS_SOURCE, "", snapshot.access.snapshot_revision, ui_access_snapshot_to_json(snapshot.access), snapshot.access.nodes.len().to_i64(), false)
-        ACCESS_OPERATION_FIND: _wm_access_find(snapshot, args[1])
-        ACCESS_OPERATION_ACT: return _wm_access_act(snapshot, args, output_mode, started_at_ms)
-        _: return Err(AccessError.create("invalid_argument", "unsupported WM operation"))
+    if descriptor.operation == ACCESS_OPERATION_ACT:
+        return _wm_access_act(snapshot, args, output_mode, started_at_ms)
+    val result = match _wm_access_read_result(descriptor.operation, snapshot, args):
+        Ok(found): found
+        Err(e): return Err(e)
     Ok(_wm_access_render(result, output_mode))
+
+fn _wm_access_read_result(operation: text, snapshot: WinTextSnapshot, args: [text]) -> Result<AccessResult, AccessError>:
+    # Constants are not match patterns (a bare name binds), so dispatch by equality.
+    if operation == ACCESS_OPERATION_LIST:
+        return Ok(access_result_from_snapshot(ACCESS_OPERATION_LIST, WM_ACCESS_SOURCE, "", snapshot.access, WM_ACCESS_LIMIT))
+    if operation == ACCESS_OPERATION_SNAPSHOT:
+        return Ok(AccessResult.document(ACCESS_OPERATION_SNAPSHOT, WM_ACCESS_SOURCE, "", snapshot.access.snapshot_revision, ui_access_snapshot_to_json(snapshot.access), snapshot.access.nodes.len().to_i64(), false))
+    if operation == ACCESS_OPERATION_FIND:
+        return Ok(_wm_access_find(snapshot, args[1]))
+    Err(AccessError.create("invalid_argument", "unsupported WM operation"))
 
 fn _wm_access_find(snapshot: WinTextSnapshot, query: text) -> AccessResult:
     val nodes = win_text_find_nodes(snapshot, "", "", query, WM_ACCESS_LIMIT.to_i32())

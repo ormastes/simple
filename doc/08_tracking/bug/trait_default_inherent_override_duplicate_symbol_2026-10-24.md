@@ -1,6 +1,6 @@
 # Same-name methods on one owner collapse onto one `Owner::method` symbol (Phase-3 run-16)
 
-- **Status:** workaround landed (source); compiler fix committed, unexecuted
+- **Status:** fixed (both cases) on release/1.0.0 — case 1 by `record_impl_textual_method_keys` (present on origin/release/1.0.0); case 2 by a HIR diagnostic (2026-11-05, work/mirp2-D)
 - **Found:** Phase-3 run-16, `build/phase3-ref/run-16/build.log`, producer p2shard-9
   (capsule `07c652daea41…`), source head `7d86e04a5ab`, backend cranelift aarch64.
 
@@ -58,3 +58,14 @@ Green results (same producer):
   trait's, and the multiset of non-blank lines is identical per file.
 - lean: the inherent `export_function` is renamed `export_mir_function`.
   It has no external callers.
+
+## Case 2 closed (2026-11-05, work/mirp2-D)
+
+- `record_impl_textual_method_keys` (`src/compiler/20.hir/hir_lowering/_Items/trait_impl_lowering.spl`)
+  now errors when one owner's method name is written in both a trait impl and an
+  inherent impl ("defined in both a trait impl and an inherent impl"), either
+  block order. Inherent override of an UNWRITTEN trait default stays legal.
+- Spec `test/01_unit/compiler/20.hir/bootstrap_regressions/trait_inherent_same_name_duplicate_spec.spl`:
+  red without the fix (2 of 4 fail), 4/4 green with it (interpreter, `bin/simple.exe run`).
+  `inherent_override_of_trait_default_spec.spl` stays 2/2 green.
+- The source workarounds (47 TypeMapper moves, lean rename) are compatible and stay.
