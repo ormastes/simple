@@ -13,6 +13,11 @@ class ObjectStore:
     prop_enumerables: [bool]
     prop_configurables: [bool]
     obj_proto_ids: [i64]
+    # Ids reclaimed by collect_unreachable(), reused by alloc_object() in LIFO
+    # order so the object heap stops growing once garbage exists. Object ids
+    # are never renumbered: every reference (property values, host bindings,
+    # listener registries) stays valid across a collection.
+    free_object_ids: [i64]
     # Lookup index over the flat property arrays: "{obj_id}:{key}" -> the
     # LAST slot holding that (obj_id, key), i.e. exactly what the backward
     # scans return. Entries [0, prop_slot_indexed) are indexed; appends are
@@ -41,6 +46,7 @@ impl ObjectStore:
             prop_enumerables: [],
             prop_configurables: [],
             obj_proto_ids: [],
+            free_object_ids: [],
             prop_slot_index: {},
             prop_slot_indexed: 0,
             obj_slot_index: {}
@@ -105,6 +111,13 @@ impl ObjectStore:
         -1
 
     me alloc_object() -> i64:
+        if self.free_object_ids.len() > 0:
+            val reused = self.free_object_ids.get(
+                self.free_object_ids.len() - 1
+            )
+            self.free_object_ids.pop()
+            self.obj_proto_ids[reused - 1] = -1
+            return reused
         val id = self.next_id
         self.next_id = self.next_id + 1
         self.obj_proto_ids.push(-1)
@@ -112,6 +125,103 @@ impl ObjectStore:
 
     me alloc_array() -> i64:
         self.alloc_object()
+
+    # --- Reachability-based reclamation ---
+
+    me collect_unreachable(root_obj_ids: [i64]) -> i64:
+        """Reclaim objects proven unreachable from `root_obj_ids`.
+
+        Marks roots and everything reachable through property values and
+        prototype slots, then drops property slots of unmarked objects and
+        recycles their ids through the free list. Object ids are never
+        renumbered, so outstanding references to surviving objects stay
+        valid. Must only be called at quiescence points (no dispatch or
+        script execution in flight).
+        """
+        val object_count = self.obj_proto_ids.len()
+        if object_count == 0:
+            return 0
+        self.sync_prop_slots()
+        var marked: [bool] = []
+        var fill = 0
+        while fill < object_count:
+            marked.push(false)
+            fill = fill + 1
+        var worklist: [i64] = []
+        for root_id in root_obj_ids:
+            if root_id >= 1 and root_id <= object_count:
+                if not marked.get(root_id - 1):
+                    marked[root_id - 1] = true
+                    worklist.push(root_id)
+        while worklist.len() > 0:
+            val current = worklist.get(worklist.len() - 1)
+            worklist.pop()
+            val proto = self.obj_proto_ids.get(current - 1)
+            if proto >= 1 and proto <= object_count:
+                if not marked.get(proto - 1):
+                    marked[proto - 1] = true
+                    worklist.push(proto)
+            for slot in self.object_slots(current):
+                match self.prop_values.get(slot):
+                    JsValue.Object(ref_id):
+                        if ref_id >= 1 and ref_id <= object_count:
+                            if not marked.get(ref_id - 1):
+                                marked[ref_id - 1] = true
+                                worklist.push(ref_id)
+                    JsValue.Array(ref_id):
+                        if ref_id >= 1 and ref_id <= object_count:
+                            if not marked.get(ref_id - 1):
+                                marked[ref_id - 1] = true
+                                worklist.push(ref_id)
+                    _:
+                        pass_dn
+        var reclaimed = 0
+        var obj_id = 1
+        while obj_id <= object_count:
+            if not marked.get(obj_id - 1):
+                self.obj_proto_ids[obj_id - 1] = -1
+                self.free_object_ids.push(obj_id)
+                reclaimed = reclaimed + 1
+            obj_id = obj_id + 1
+        if reclaimed == 0:
+            return 0
+        var keep_prop_obj_ids: [i64] = []
+        var keep_prop_ref_ids: [i64] = []
+        var keep_prop_ref_tags: [i64] = []
+        var keep_prop_keys: [text] = []
+        var keep_prop_values: [JsValue] = []
+        var keep_prop_enumerables: [bool] = []
+        var keep_prop_configurables: [bool] = []
+        var slot_index = 0
+        val total_slots = self.prop_obj_ids.len()
+        while slot_index < total_slots:
+            val owner = self.prop_obj_ids.get(slot_index)
+            val owner_live = (
+                owner >= 1 and owner <= object_count and
+                marked.get(owner - 1)
+            )
+            if owner_live:
+                keep_prop_obj_ids.push(self.prop_obj_ids.get(slot_index))
+                keep_prop_ref_ids.push(self.prop_ref_ids.get(slot_index))
+                keep_prop_ref_tags.push(self.prop_ref_tags.get(slot_index))
+                keep_prop_keys.push(self.prop_keys.get(slot_index))
+                keep_prop_values.push(self.prop_values.get(slot_index))
+                keep_prop_enumerables.push(
+                    self.prop_enumerables.get(slot_index)
+                )
+                keep_prop_configurables.push(
+                    self.prop_configurables.get(slot_index)
+                )
+            slot_index = slot_index + 1
+        self.prop_obj_ids = keep_prop_obj_ids
+        self.prop_ref_ids = keep_prop_ref_ids
+        self.prop_ref_tags = keep_prop_ref_tags
+        self.prop_keys = keep_prop_keys
+        self.prop_values = keep_prop_values
+        self.prop_enumerables = keep_prop_enumerables
+        self.prop_configurables = keep_prop_configurables
+        self.reindex_prop_slots()
+        reclaimed
 
     me get_object(id: i64) -> JsObject:
         var props: [JsProperty] = []
