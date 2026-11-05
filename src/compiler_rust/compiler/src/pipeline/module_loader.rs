@@ -3348,11 +3348,13 @@ mod tests {
         let relative_module = Path::new("src/lib/common/probe.spl");
         let runtime_module = runtime_root.join(relative_module);
         let seed_module = seed_root.join(relative_module);
+        let runtime_marker = "# runtime cwd worktree marker\n";
+        let seed_marker = "# seed build worktree marker\n";
         fs::create_dir_all(runtime_module.parent().unwrap()).unwrap();
         fs::create_dir_all(seed_module.parent().unwrap()).unwrap();
         fs::create_dir_all(&seed_manifest).unwrap();
-        fs::write(&runtime_module, "# runtime worktree\n").unwrap();
-        fs::write(&seed_module, "# seed build worktree\n").unwrap();
+        fs::write(&runtime_module, runtime_marker).unwrap();
+        fs::write(&seed_module, seed_marker).unwrap();
 
         let parts = ["std".to_string(), "probe".to_string()];
         let import = use_stmt(&["std", "probe"], ImportTarget::Glob);
@@ -3365,6 +3367,27 @@ mod tests {
         let resolved = resolve_from_stdlib_fallbacks(runtime_root, &seed_manifest, &parts, &import).unwrap();
 
         assert_eq!(resolved, runtime_module);
+        assert_eq!(fs::read_to_string(resolved).unwrap(), runtime_marker);
+    }
+
+    #[test]
+    fn stdlib_fallback_uses_seed_build_worktree_when_runtime_worktree_lacks_module() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime_root = temp.path().join("runtime-worktree");
+        let seed_manifest = temp.path().join("seed-worktree/src/compiler_rust/compiler");
+        let seed_module = temp.path().join("seed-worktree/src/lib/common/probe.spl");
+        let seed_marker = "# seed build worktree fallback marker\n";
+        fs::create_dir_all(&runtime_root).unwrap();
+        fs::create_dir_all(seed_module.parent().unwrap()).unwrap();
+        fs::create_dir_all(&seed_manifest).unwrap();
+        fs::write(&seed_module, seed_marker).unwrap();
+
+        let parts = ["std".to_string(), "probe".to_string()];
+        let import = use_stmt(&["std", "probe"], ImportTarget::Glob);
+        let resolved = resolve_from_stdlib_fallbacks(runtime_root, &seed_manifest, &parts, &import).unwrap();
+
+        assert_eq!(resolved.canonicalize().unwrap(), seed_module.canonicalize().unwrap());
+        assert_eq!(fs::read_to_string(resolved).unwrap(), seed_marker);
     }
 
     #[test]
