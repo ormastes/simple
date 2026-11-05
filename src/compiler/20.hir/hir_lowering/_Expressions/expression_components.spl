@@ -18,6 +18,25 @@ use compiler.hir.hir_lowering.pattern_enum_substitution.{declared_pattern_slot_t
 # diagnostic; they must never turn into an unconditional wildcard.
 fn hir_normalize_integer_pattern_literal(expr: HirExpr) -> HirExpr:
     match expr.kind:
+        case HirExprKind.Unary(op, operand):
+            # `case -1:` -- the flat bridge preserves the unary minus over the
+            # literal (convert_nodes.spl EXPR_UNARY pattern arm), so without
+            # this fold a negative arm reaches MIR match dispatch as a
+            # Literal(non-IntLit) and the whole match is rejected (bug
+            # negative_integer_match_arms_native_2026-09-30). Fold negation
+            # of an integer literal into the literal itself. The i64 minimum
+            # has no positive counterpart: leave it unfolded so it fails at
+            # the ordinary unsupported-pattern diagnostic instead of
+            # overflowing silently.
+            match op:
+                case HirUnaryOp.Neg:
+                    match operand.kind:
+                        case HirExprKind.IntLit(value, _):
+                            if value != -9223372036854775808:
+                                return HirExpr(kind: HirExprKind.IntLit(0 - value, None),
+                                    has_type_: true, type_: operand.type_, span: expr.span)
+                        case _: ()
+                case _: ()
         case HirExprKind.Cast(operand, target):
             match operand.kind:
                 case HirExprKind.IntLit(value, _):

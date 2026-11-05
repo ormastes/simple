@@ -1,6 +1,167 @@
 # Canonical HTTP worker export.
 #
-# The mutable Worker owner lives in worker_owner.spl. This facade deliberately
-# exports only that owner; protocol and lifecycle state are not duplicated.
+# The mutable Worker owner lives in worker_owner.spl. This facade exports
+# that owner plus the per-fd async handler registry extension: typed job
+# admission, exactly-once completion/cancellation, and the connection close
+# path that tears a socket down only after its pending async job is revoked.
 use std.nogc_async_mut.http_server.worker_connection_extensions
+use std.nogc_async_mut.io.tcp_backend.{tcp_backend_close}
+use std.http_server.types.{HttpRequestData, HttpResponseData, LocationConfig}
 export use std.nogc_async_mut.http_server.worker_owner.{Worker, WorkerResourceSnapshot}
+
+impl Worker:
+    # ========================================================================
+    # Async Handler Registry (per-fd typed job tracking)
+    # ========================================================================
+
+    pub(package) me submit_async_handler(fd: i64, job_id: i64,
+                                         completion_channel_id: i64) -> bool:
+        """Bind an admitted async job to its connection fd.
+
+        The worker is the sole socket reader: while the binding is live no
+        receive is re-armed on this fd, so a pending render never races a
+        competing receive for pipelined bytes. One live job per fd — a
+        second submission on a parked connection is rejected.
+        """
+        if self.async_job_by_fd.contains_key(fd):
+            return false
+        self.async_job_by_fd[fd] = job_id
+        self.async_channel_by_fd[fd] = completion_channel_id
+        self.async_fd_by_job[job_id] = fd
+        true
+
+    pub(package) me complete_async_handler(fd: i64, job_id: i64) -> bool:
+        """Claim terminal completion for the fd's pending job exactly once.
+
+        A stale or duplicate signal — job id mismatch, or the job was
+        already cancelled by close_connection — is refused, so a late
+        completion can never resurrect a closed connection.
+        """
+        if not self.async_job_by_fd.contains_key(fd):
+            return false
+        if self.async_job_by_fd[fd] != job_id:
+            return false
+        self.async_job_by_fd.remove(fd)
+        self.async_channel_by_fd.remove(fd)
+        self.async_fd_by_job.remove(job_id)
+        true
+
+    pub(package) me cancel_async_handler(fd: i64) -> bool:
+        """Revoke the fd's pending job exactly once.
+
+        Idempotent close/probe races observe the removed binding and return
+        false instead of double-cancelling; the first caller wins the job.
+        """
+        if not self.async_job_by_fd.contains_key(fd):
+            return false
+        val job_id = self.async_job_by_fd[fd]
+        self.async_job_by_fd.remove(fd)
+        self.async_channel_by_fd.remove(fd)
+        self.async_fd_by_job.remove(job_id)
+        self.async_response_by_job.remove(job_id)
+        true
+
+    pub(package) me park_async_response(job_id: i64, response: HttpResponseData):
+        """Park a finished render in the worker-owned response mailbox.
+
+        The completion signal on the inbox channel is scalar (job_id only),
+        so the response payload crosses through this store; the delivering
+        loop claims it with the job identity that announced it.
+        """
+        self.async_response_by_job[job_id] = response
+
+    pub(package) me submit_async_location(fd: i64, location: LocationConfig,
+                                          request: HttpRequestData, now: i64):
+        """Hand a matched async location to the typed job registry.
+
+        The registered submitter accepts (job_id, completion_channel_id,
+        request, location) and signals the worker inbox once the response is
+        parked. Rejection — or a second request on a parked connection —
+        fails closed with 503; the synchronous registry dispatch never runs
+        for an async-admitted type.
+        """
+        if self.async_job_by_fd.contains_key(fd):
+            self.send_error(fd, 503, "Async handler service unavailable", now)
+            return
+        self.async_job_seq = self.async_job_seq + 1
+        val job_id = self.async_job_seq
+        val inbox_id = self.async_inbox.id()
+        val accepted = self.handler_registry.submit_async(
+            location.handler_type, job_id, inbox_id, request, location)
+        if not accepted:
+            self.send_error(fd, 503, "Async handler service unavailable", now)
+            return
+        self.submit_async_handler(fd, job_id, inbox_id)
+
+    pub(package) me deliver_async_completion(job_id: i64, now: i64):
+        """Deliver a completion signal announced on the worker inbox.
+
+        Cancelled jobs (connection closed while pending) have no binding
+        and their stale signals are dropped. A completed job without a
+        parked response fails closed on the still-open connection.
+        """
+        if not self.async_fd_by_job.contains_key(job_id):
+            return
+        val fd = self.async_fd_by_job[job_id]
+        if not self.complete_async_handler(fd, job_id):
+            return
+        if self.async_response_by_job.contains_key(job_id):
+            val response = self.async_response_by_job[job_id]
+            self.async_response_by_job.remove(job_id)
+            self.send_response(fd, response, now)
+        else:
+            self.send_error(fd, 503, "Async handler service unavailable", now)
+
+    # ========================================================================
+    # Connection Lifecycle
+    # ========================================================================
+
+    pub(package) me close_connection(fd: i64):
+        """Close a connection and remove from tracking (including TLS state).
+
+        An observed close routes through exactly-once async cancellation:
+        any pending async handler job is revoked first, then the driver
+        drops the fd's in-flight operations before the socket close.
+        """
+        if not self.connections.contains_key(fd):
+            return
+        self.cancel_async_handler(fd)
+        self.driver.cancel_fd(fd)
+        self.release_fd_operations(fd)
+        tcp_backend_close(fd)
+        self.connections.remove(fd)
+        if self.active_count > 0:
+            self.active_count = self.active_count - 1
+
+    pub(package) me close_all_connections():
+        """Close all active connections during shutdown."""
+        # Snapshot and close open sendfile handles before connection teardown;
+        # close_connection then only owns the socket and cancellation maps.
+        val open_file_clients = self.sendfile_open_files.keys()
+        var file_close_ops: [i64] = []
+        for client_fd in open_file_clients:
+            val open_file = self.sendfile_open_files[client_fd]
+            file_close_ops.push(self.driver.submit_close(open_file))
+        self.sendfile_open_files = {}
+
+        val fds = self.connections.keys()
+        for fd in fds:
+            self.close_connection(fd)
+        # Close H2 connections
+        val h2_fds = self.h2_connections.keys()
+        for fd in h2_fds:
+            self.close_h2_connection(fd)
+        self.drain_file_close_operations(file_close_ops)
+        self.connections = {}
+        self.h2_connections = {}
+        self.op_to_fd = {}
+        self.op_type = {}
+        self.sendfile_pending = {}
+        self.sendfile_open_files = {}
+        self.tls_sessions = {}
+        self.tls_rx_streams = {}
+        self.async_job_by_fd = {}
+        self.async_channel_by_fd = {}
+        self.async_fd_by_job = {}
+        self.async_response_by_job = {}
+        self.active_count = 0

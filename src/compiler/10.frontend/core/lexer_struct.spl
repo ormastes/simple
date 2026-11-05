@@ -1530,10 +1530,22 @@ impl CoreLexer:
             self.skip_spaces()
 
         if self.at_end():
-            # Emit pending dedents for remaining indentation
+            # EOF and dedent tokens consume no source, but their recorded
+            # start must still name the true consume point: span owners read
+            # cur_start for declaration ends, and a stale value (the previous
+            # token's start) shortened a trailing declaration's span on
+            # UTF-8 sources (module_expression_source_span spec).
+            self.cur_start = self.pos
+            # Emit pending dedents for remaining indentation. Drain the whole
+            # stack here: one dedent is emitted now and the remaining slen-2
+            # via pending_dedents (slen-1 total, matching the slen-1 indents).
+            # Draining upfront is required because the pending_dedents path in
+            # next_token() does not pop; a single pop left slen>1 on re-entry
+            # and at_end() emitted one spurious extra dedent (3 for 2 indents).
             val slen: i64 = self.indent_stack.len()
             if slen > 1:
-                self.indent_stack.pop()
+                while self.indent_stack.len() > 1:
+                    self.indent_stack.pop()
                 self.pending_dedents = slen - 2
                 val tl: i64 = self.line
                 val tc: i64 = self.col

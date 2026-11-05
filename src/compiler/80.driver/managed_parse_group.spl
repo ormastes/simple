@@ -143,10 +143,13 @@ fn managed_parse_group_module_v1(owner: ManagedParseGroupOwnerV1, module: Manage
                 Err(_invalid): ()
     # Explicit invalid/mismatched cache authority or decode is a miss. An I/O
     # failure or parser-reported policy error above is not hidden by a reparse.
-    # Capture at most once per path per process: a repeat dump of an identical
-    # module re-exposes the transient-scope reclaim poison window (lane-48b
-    # trace and doc stage2_mir_shard_flat_pool_text_len_minus1_2026-10-22.md).
-    val _already_captured = flat_pool_capture_already_captured(module.source_path)
+    # Capture at most once per (path, admitted source digest) per process: a
+    # repeat dump of identical bytes re-exposes the transient-scope reclaim
+    # poison window (lane-48b trace and doc
+    # stage2_mir_shard_flat_pool_text_len_minus1_2026-10-22.md). The digest
+    # (not the bare path) is the dedup identity: the same path re-admitted with
+    # changed bytes is a different artifact and must capture again.
+    val _already_captured = flat_pool_capture_already_captured(module.source_path, module.source_digest)
     if not _already_captured:
         flat_pool_capture_arm()
     var parsed = parse_and_build_module_scoped(parse_source, module.source_path, false)
@@ -155,7 +158,7 @@ fn managed_parse_group_module_v1(owner: ManagedParseGroupOwnerV1, module: Manage
     else:
         flat_pool_capture_take()
     if not _already_captured:
-        flat_pool_capture_record(module.source_path)
+        flat_pool_capture_record(module.source_path, module.source_digest)
     if parser_has_errors(): return managed_parse_group_errors_v1(module)
     if domain_blocks.len() > 0: parsed.domain_blocks = domain_blocks
     val _completed = desugar_module(parsed)

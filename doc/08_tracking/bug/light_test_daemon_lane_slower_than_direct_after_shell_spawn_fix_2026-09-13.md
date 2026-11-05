@@ -98,3 +98,54 @@ grep -c 'execve("/bin/sh"' /tmp/warm.log                     # 0, post-fix
 ## Update 2026-11-03
 No change. The light daemon is bypassed on non-linux; a wall-time budget spec
 must be authored and measured on linux. Left open.
+
+
+## Update 2026-11-05 — polling fixed; per-request worker re-compile remains
+Measured on this host (aarch64, shared, phase1 seed binary
+`build/phase_snapshots/phase1_1793422538/simple`, worktree
+wt-libbug-w6-daemonperf, fixture test/fixtures/concurrency/conc_a_spec.spl,
+5 warm samples per lane):
+
+| scenario | before (median) | after (median) |
+|---|---|---|
+| daemon lane (warm) | 1.47 s (1.33–1.60) | 1.27 s (1.25–1.31) |
+| direct lane | 0.68 s (0.62–0.73) | 0.69 s (0.68–0.70) |
+
+A strace of the warm daemon lane showed the doc's "socket setup /
+serialization / handshake" notes were only half the story: the daemon's idle
+loop called `dir_list(LIGHT_REQ_DIR)` every 250 ms, and `dir_list()` is a
+SHELL-OUT — every idle poll was `execve("/bin/sh", ["-c", "ls -1 ..."]) +
+execve("/usr/bin/ls")`, ~480 fork/execs per 60 s daemon lifetime. So the lane
+had NOT actually reached zero shell spawns; it moved them into the daemon's
+poll loop. The client separately polled the response every 100 ms.
+
+Fixed (this lane): wakeup-protocol signaling.
+- `run_one_via_daemon()` bumps a wakeup sequence file
+  (`.build/test_daemon_light/wakeup.seq`, atomic tmp+rename, content = the
+  request id) AFTER the request rename is visible.
+- `light_daemon.spl`'s idle loop stat()s that one file in-process every
+  10 ms (was: dir_list shell-out every 250 ms); a changed sequence triggers
+  one drain of the request dir. A dir_list fallback sweep remains for
+  clients predating the protocol: 500 ms cadence until the first wakeup is
+  seen, 5 s afterwards (an old client discovering the 5 s sweep withdraws
+  within its 2000 ms claim-wait and runs direct — correct, just not
+  served). Idle lifetime unchanged (~60 s), stop-file latency improved
+  250 ms -> <=10 ms.
+- Client response pickup polls every 10 ms (was 100 ms), cutting up to
+  100 ms of per-request pickup latency.
+
+Measured result: ~0.2 s/invocation off the warm daemon lane (1.47 -> 1.27 s
+median), idle daemon now performs zero subprocess work in steady state
+(strace pin: 4 execves per 3 s window = only the two daemon-start execves
+plus one drain; pre-fix 26). Pinned by
+`test/05_perf/test_runner/light_daemon_wakeup_no_idle_shell_spec.spl`.
+
+Still open (dominant remaining term): the per-request worker
+`simple run test_runner_new/test_runner_single.spl ...` re-compiles the
+full runner module graph in a fresh child on EVERY request (amortization
+factor 1.0, as daemon_backlog.spl already documents). Serving in-process is
+the only way to remove it, but the response body is built from the worker's
+captured stdout and there is no in-process stdout-capture facility in the
+stdlib, so that change needs runtime support or a structured (non-printed)
+verdict transport. The lane is still ~0.58 s slower than direct per
+invocation because of it.

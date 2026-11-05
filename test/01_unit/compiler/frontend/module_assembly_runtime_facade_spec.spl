@@ -26,8 +26,18 @@ describe "flat AST module assembly runtime facade ownership":
         expect(source).to_not_contain("rt_env_set(")
 
         step("Pin the adapter definitions plus every intended call site")
-        expect(source.split("_sffi_env_get(").len()).to_equal(9)
-        expect(source.split("_sffi_env_set(").len()).to_equal(8)
+        # Pin refreshed 2026-11-05: call-site count grew 8 -> 14 (get) and
+        # 7 -> 8 (set) from intentional refactors, all still routed through
+        # the same facade pair:
+        #   88aac2ffe28 (rebase transplant) added the SIMPLE_LEX_PHASE_PROFILE
+        #     and SIMPLE_FRONTEND_CACHE_BOUNDARY_PROFILE cached gates,
+        #   a4cb095fc8b/d9127debbaf added the env-gated SIMPLE_CAPTURE_TRACE
+        #     arm/take/dump-gate reads,
+        #   e27c0c6630b added the dangling-text poisoned-refusal restore arm.
+        # Counts include the one `fn _sffi_env_get(`/`fn _sffi_env_set(`
+        # adapter definition each.
+        expect(source.split("_sffi_env_get(").len()).to_equal(15)
+        expect(source.split("_sffi_env_set(").len()).to_equal(10)
 
     it "preserves gates and scoped lexer environment restoration":
         step("Load the flat AST module assembly source")
@@ -40,7 +50,10 @@ describe "flat AST module assembly runtime facade ownership":
         step("Pin lexer state capture and restoration order")
         expect(source).to_contain("val saved_lex_source = _sffi_env_get(\"SIMPLE_BOOTSTRAP_LEX_SOURCE\") ?? \"\"\n    val saved_lex_path = _sffi_env_get(\"SIMPLE_BOOTSTRAP_LEX_PATH\") ?? \"\"")
         expect(source).to_contain("_sffi_env_set(\n            \"SIMPLE_BOOTSTRAP_LEX_SOURCE\", saved_lex_source)\n        val path_restored = _sffi_env_set(\n            \"SIMPLE_BOOTSTRAP_LEX_PATH\", saved_lex_path)")
-        expect(source).to_contain("if not _sffi_env_set(\"SIMPLE_BOOTSTRAP_LEX_SOURCE\", saved_lex_source):\n            panic(\"failed to restore SIMPLE_BOOTSTRAP_LEX_SOURCE for {path}\")\n        if not _sffi_env_set(\"SIMPLE_BOOTSTRAP_LEX_PATH\", saved_lex_path):")
+        # Pin refreshed 2026-11-05: braces escaped (\{path\}) so the spec
+        # string carries the literal source text; same escaped-brace class as
+        # ca61588c2b3 (see 4aeccb46899 spec-pin refresh note).
+        expect(source).to_contain("if not _sffi_env_set(\"SIMPLE_BOOTSTRAP_LEX_SOURCE\", saved_lex_source):\n            panic(\"failed to restore SIMPLE_BOOTSTRAP_LEX_SOURCE for \{path\}\")\n        if not _sffi_env_set(\"SIMPLE_BOOTSTRAP_LEX_PATH\", saved_lex_path):")
 
     it "bounds environment work in blob-hit failure and success paths":
         step("Isolate the cache-hit build function")
@@ -55,16 +68,32 @@ describe "flat AST module assembly runtime facade ownership":
         expect(blob_body.split("_sffi_env_get(").len()).to_equal(3)
 
         step("Restore source then path exactly once on decode failure")
-        val failure_arm = blob_body.split("if not flat_pools_restore_all(blob):")[1].split("val _hp_t2")[0]
+        # Pin refreshed 2026-11-05: the failure marker moved from
+        # `if not flat_pools_restore_all(blob):` to `if not blob_usable:`
+        # under 6a0bacef7e9 (.spab packed-view hit path); the restore-once
+        # contract is unchanged.
+        val failure_arm = blob_body.split("if not blob_usable:")[1].split("val _hp_t2")[0]
         expect(failure_arm.split("_sffi_env_set(").len()).to_equal(3)
         expect(failure_arm.split("\"SIMPLE_BOOTSTRAP_LEX_SOURCE\", saved_lex_source").len()).to_equal(2)
         expect(failure_arm.split("\"SIMPLE_BOOTSTRAP_LEX_PATH\", saved_lex_path").len()).to_equal(2)
 
         step("Restore source then path exactly once after a successful build")
-        val success_arm = blob_body.split("val _hp_t2")[1]
+        # Pin refreshed 2026-11-05: the post-`val _hp_t2` region now also
+        # contains the dangling-text poisoned-refusal arm added by e27c0c6630b,
+        # so the success arm is bounded at that marker first.
+        val success_arm = blob_body.split("val _hp_t2")[1].split("if flat_pool_capture_poisoned_v1():")[0]
         expect(success_arm.split("_sffi_env_set(").len()).to_equal(3)
         expect(success_arm.split("\"SIMPLE_BOOTSTRAP_LEX_SOURCE\", saved_lex_source").len()).to_equal(2)
         expect(success_arm.split("\"SIMPLE_BOOTSTRAP_LEX_PATH\", saved_lex_path").len()).to_equal(2)
+
+        step("Restore source then path exactly once on the poisoned-refusal path")
+        # Pin added 2026-11-05: e27c0c6630b refuses cache hits whose restored
+        # pool texts dangle; the refusal arm restores lexer state exactly once
+        # before returning nil.
+        val refusal_arm = blob_body.split("if flat_pool_capture_poisoned_v1():")[1]
+        expect(refusal_arm.split("_sffi_env_set(").len()).to_equal(3)
+        expect(refusal_arm.split("\"SIMPLE_BOOTSTRAP_LEX_SOURCE\", saved_lex_source").len()).to_equal(2)
+        expect(refusal_arm.split("\"SIMPLE_BOOTSTRAP_LEX_PATH\", saved_lex_path").len()).to_equal(2)
 
     it "bounds environment work in scoped parser paths":
         step("Isolate the scoped parser build function")
@@ -76,7 +105,10 @@ describe "flat AST module assembly runtime facade ownership":
         step("Capture each lexer environment value exactly once")
         expect(scoped_body.split("_sffi_env_get(\"SIMPLE_BOOTSTRAP_LEX_SOURCE\")").len()).to_equal(2)
         expect(scoped_body.split("_sffi_env_get(\"SIMPLE_BOOTSTRAP_LEX_PATH\")").len()).to_equal(2)
-        expect(scoped_body.split("_sffi_env_get(").len()).to_equal(3)
+        # Pin refreshed 2026-11-05: total get count 3 -> 5; a4cb095fc8b added
+        # the two env-gated SIMPLE_CAPTURE_TRACE reads (dump-gate and
+        # blob-built trace) inside the scoped build.
+        expect(scoped_body.split("_sffi_env_get(").len()).to_equal(5)
 
         step("Keep the transient path free of environment restoration")
         val scoped_tail = scoped_body.split("            rt_transient_heap_promote(built_module)\n        if not module_promoted:")[1]

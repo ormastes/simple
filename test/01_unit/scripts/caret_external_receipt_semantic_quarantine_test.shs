@@ -1,0 +1,157 @@
+#!/bin/sh
+# Caret external must-check semantic authenticity regression test.
+#
+# A trusted reviewer signature authenticates the summary bytes and attachment
+# hashes; it cannot turn generic acceptance.*=PASS labels into proof that
+# providers ran, children were reaped, or smux owned real PTYs. The external
+# validator must therefore fail all five production Caret rows closed after
+# signature authentication and before any generic evidence attachment is
+# loaded. See doc/08_tracking/bug/caret_external_receipt_semantic_authenticity_2026-08-25.md
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
+external_validator="$ROOT/scripts/check/check-external-must-check-receipt.shs"
+[ -f "$external_validator" ] || { echo "FAIL: missing $external_validator"; exit 1; }
+
+external_fixture=$(mktemp -d)
+trap 'rm -rf "$external_fixture"' EXIT INT TERM
+
+mkdir -p "$external_fixture/evidence" "$external_fixture/config/check"
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+    -out "$external_fixture/reviewer-private.pem" >/dev/null 2>&1 || {
+    echo "FAIL: could not generate reviewer key"; exit 1; }
+openssl pkey -in "$external_fixture/reviewer-private.pem" -pubout \
+    -out "$external_fixture/config/check/fixture-reviewer.pem" >/dev/null 2>&1 || {
+    echo "FAIL: could not extract reviewer public key"; exit 1; }
+reviewer_public_sha=$(sha256sum "$external_fixture/config/check/fixture-reviewer.pem" | awk '{print $1}')
+printf '%s\n' \
+    'must_check_external_reviewers:' \
+    '  schema: "simple.must-check-reviewer-policy/v1"' \
+    'trusted_reviewers |key_id, public_key_path, public_key_sha256|' \
+    "    fixture-reviewer, config/check/fixture-reviewer.pem, $reviewer_public_sha" \
+    > "$external_fixture/config/check/must_check_external_reviewers.sdn"
+
+external_fp=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+external_run=run-caret-quarantine
+cat > "$external_fixture/evidence/command.env" <<EOF
+evidence_schema=simple.must-check-command/v1
+gate_id=caret-installed-provider-launches
+source_fingerprint=$external_fp
+run_id=$external_run
+command=check-caret-generic
+exit_status=0
+final_verdict=PASS
+EOF
+cat > "$external_fixture/evidence/target.env" <<EOF
+evidence_schema=simple.must-check-target/v1
+gate_id=caret-installed-provider-launches
+run_id=$external_run
+target_kind=native-host
+target_id=fixture-host
+final_verdict=PASS
+EOF
+cat > "$external_fixture/evidence/toolchain.env" <<EOF
+evidence_schema=simple.must-check-toolchain/v1
+gate_id=caret-installed-provider-launches
+run_id=$external_run
+toolchain_id=fixture-toolchain
+final_verdict=PASS
+EOF
+cat > "$external_fixture/evidence/observations.env" <<EOF
+evidence_schema=simple.must-check-observations/v1
+gate_id=caret-installed-provider-launches
+source_fingerprint=$external_fp
+run_id=$external_run
+acceptance_ids=claude,codex,gemini,kimi,caret-routing,bounded-stop,no-leak
+acceptance.claude=PASS
+acceptance.codex=PASS
+acceptance.gemini=PASS
+acceptance.kimi=PASS
+acceptance.caret-routing=PASS
+acceptance.bounded-stop=PASS
+acceptance.no-leak=PASS
+final_verdict=PASS
+EOF
+
+git -C "$external_fixture" init -q
+git -C "$external_fixture" config core.autocrlf false
+git -C "$external_fixture" config user.name must-check-test
+git -C "$external_fixture" config user.email must-check-test@example.invalid
+git -C "$external_fixture" add config/check
+git -C "$external_fixture" commit -qm reviewer-policy
+
+git -C "$external_fixture" add evidence
+git -C "$external_fixture" commit -qm caret-evidence-blobs
+# Hash the committed blobs, not the working-tree files: platform line-ending
+# conversion must not skew the attachment hashes the artifact authenticates.
+command_sha=$(git -C "$external_fixture" show HEAD:evidence/command.env | sha256sum | awk '{print $1}')
+target_sha=$(git -C "$external_fixture" show HEAD:evidence/target.env | sha256sum | awk '{print $1}')
+toolchain_sha=$(git -C "$external_fixture" show HEAD:evidence/toolchain.env | sha256sum | awk '{print $1}')
+observations_sha=$(git -C "$external_fixture" show HEAD:evidence/observations.env | sha256sum | awk '{print $1}')
+
+external_artifact="$external_fixture/evidence/summary.env"
+cat > "$external_artifact" <<EOF
+evidence_schema=simple.must-check-external-evidence/v2
+gate_id=caret-installed-provider-launches
+source_fingerprint=$external_fp
+final_verdict=PASS
+producer_id=server-producer
+producer_kind=native-host
+run_id=$external_run
+produced_at_utc=2000-01-01T00:00:00Z
+reviewer_key_id=fixture-reviewer
+command_receipt_path=evidence/command.env
+command_receipt_sha256=$command_sha
+target_identity_path=evidence/target.env
+target_identity_sha256=$target_sha
+toolchain_identity_path=evidence/toolchain.env
+toolchain_identity_sha256=$toolchain_sha
+observations_path=evidence/observations.env
+observations_sha256=$observations_sha
+acceptance_contract=caret-installed-provider-launches/v1
+acceptance_ids=claude,codex,gemini,kimi,caret-routing,bounded-stop,no-leak
+EOF
+
+# A trusted signature cannot promote generic Caret PASS labels. Exercise all
+# five production Caret rows, and make the first attachment path hostile to
+# prove quarantine happens after signature authentication but before loading
+# generic evidence attachments.
+for caret_case in \
+    'caret-local-llm-launch|slang-provider,readiness,generation,response,timeout,stop,no-leak' \
+    'caret-installed-provider-launches|claude,codex,gemini,kimi,caret-routing,bounded-stop,no-leak' \
+    'caret-agent-runtime-primitives|launch,status,cancel,stop,no-leak' \
+    'caret-production-multi-manager-launch|multi-launch,parent-supervision,poll,stop,exit,no-leak' \
+    'caret-smux-multi-launch|smux-pty,multi-launch,capture,resize,cancel,stop,no-leak'; do
+    caret_gate=${caret_case%%|*}
+    caret_ids=${caret_case#*|}
+    sed \
+        -e "s/^gate_id=caret-installed-provider-launches\$/gate_id=$caret_gate/" \
+        -e "s|^command_receipt_path=.*\$|command_receipt_path=../../hostile|" \
+        -e "s|^acceptance_contract=.*\$|acceptance_contract=$caret_gate/v1|" \
+        -e "s|^acceptance_ids=.*\$|acceptance_ids=$caret_ids|" \
+        "$external_artifact" > "$external_fixture/caret.artifact"
+    openssl dgst -sha256 -sign "$external_fixture/reviewer-private.pem" \
+        -out "$external_fixture/evidence/reviewer.sig" "$external_fixture/caret.artifact"
+    caret_signature_sha=$(sha256sum "$external_fixture/evidence/reviewer.sig" | awk '{print $1}')
+    printf '%s\n' \
+        'reviewer_signature_path=evidence/reviewer.sig' \
+        "reviewer_signature_sha256=$caret_signature_sha" > "$external_fixture/caret.receipt"
+    git -C "$external_fixture" add evidence/reviewer.sig
+    git -C "$external_fixture" commit -qm "signed-quarantined-$caret_gate"
+    if MUST_CHECK_ROOT="$external_fixture" \
+        MUST_CHECK_RECEIPT_FILE="$external_fixture/caret.receipt" \
+        MUST_CHECK_ARTIFACT_FILE="$external_fixture/caret.artifact" \
+        MUST_CHECK_EXPECTED_GATE="$caret_gate" \
+        MUST_CHECK_EXPECTED_FINGERPRINT=$external_fp \
+        sh "$external_validator" > "$external_fixture/caret.out" 2>&1; then
+        echo "FAIL: generic signed Caret receipt was admitted: $caret_gate"
+        exit 1
+    fi
+    grep -Fq "caret-semantic-validator-not-implemented-$caret_gate" "$external_fixture/caret.out" || {
+        echo "FAIL: Caret receipt did not fail at semantic quarantine: $caret_gate"
+        cat "$external_fixture/caret.out" >&2
+        exit 1
+    }
+done
+
+echo "PASS: all five generic signed Caret receipts fail closed at the semantic quarantine"

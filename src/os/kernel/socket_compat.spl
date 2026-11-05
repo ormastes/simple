@@ -13,6 +13,7 @@
 
 use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
 use os.kernel.errno.{EACCES, ENOSYS, ECONNREFUSED, ENOTCONN, EAGAIN, EMFILE, EADDRINUSE}
+use os.kernel.net.socket_ipc_transport.{socket_ipc_send_bytes, socket_ipc_recv_bytes}
 use os.kernel.fd_table.{fd_alloc, fd_set, fd_close, fd_is_valid, fd_get_status_flags, fd_get_type, fd_get_backend_handle, fd_update_ready}
 use os.ai_cli_js_node_contract.{AiCliManifest, ai_cli_socket_network_decision}
 # Well-known netstack service IPC port
@@ -46,8 +47,10 @@ use os.kernel.boot.mmio.{mmio_write8, mmio_read8}
 # (inline asm in syscall_raw.spl not supported by Cranelift)
 extern fn rt_ipc_send(port: u64, method: u64, flags: u64, buf_addr: u64, buf_len: u64) -> i64
 extern fn rt_ipc_recv(port: u64, buf_addr: u64, max_len: u64) -> i64
-extern fn rt_ipc_send_bytes(port: u64, method: u64, data: [u8]) -> i64
-extern fn rt_ipc_recv_bytes(port: u64, max_len: i64) -> [u8]
+# Byte-array IPC goes through the architecture-neutral transport wrappers
+# (os.kernel.net.socket_ipc_transport): the raw rt_ipc_*_bytes runtime
+# bridge is x86_64-only; other targets fail closed with ENOSYS instead of
+# acquiring an unresolved symbol at link time.
 
 # ============================================================================
 # Socket Address
@@ -337,12 +340,12 @@ fn _array_data_ptr(data: [u8]) -> u64:
 
 fn _net_ipc_request(method: u32, payload: [u8]) -> _NetIpcReply:
     """Send IPC request to netstack and receive i32 reply."""
-    val send_result = rt_ipc_send_bytes(_NET_PORT, method as u64, payload)
+    val send_result = socket_ipc_send_bytes(_NET_PORT, method as u64, payload)
     if send_result < 0:
         return _NetIpcReply(status: -5, value_i32: 0)
 
     # Receive reply: status(i32) | value(i32)
-    val reply_buf = rt_ipc_recv_bytes(_NET_PORT, 64)
+    val reply_buf = socket_ipc_recv_bytes(_NET_PORT, 64)
     if reply_buf.len() < 4:
         return _NetIpcReply(status: -5, value_i32: 0)
 
@@ -352,12 +355,12 @@ fn _net_ipc_request(method: u32, payload: [u8]) -> _NetIpcReply:
 
 fn _net_ipc_request_bytes(method: u32, payload: [u8]) -> _NetIpcReplyBytes:
     """Send IPC request to netstack and receive byte array reply."""
-    val send_result = rt_ipc_send_bytes(_NET_PORT, method as u64, payload)
+    val send_result = socket_ipc_send_bytes(_NET_PORT, method as u64, payload)
     if send_result < 0:
         return _NetIpcReplyBytes(status: -5, data: [])
 
     # Receive reply: status(i32) | data(bytes)
-    val reply_buf = rt_ipc_recv_bytes(_NET_PORT, 4096)
+    val reply_buf = socket_ipc_recv_bytes(_NET_PORT, 4096)
     if reply_buf.len() < 4:
         return _NetIpcReplyBytes(status: -5, data: [])
 
@@ -379,7 +382,7 @@ fn _net_close_remote(net_fd: i32):
     """Send NET_CLOSE to netstack for a netstack-side fd."""
     var payload: [u8] = []
     _sock_push_i32(payload, net_fd)
-    rt_ipc_send_bytes(_NET_PORT, NET_CLOSE as u64, payload)
+    socket_ipc_send_bytes(_NET_PORT, NET_CLOSE as u64, payload)
     # Best-effort close: ignore IPC errors
 
 # ============================================================================

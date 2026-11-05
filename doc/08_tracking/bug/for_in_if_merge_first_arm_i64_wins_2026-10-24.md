@@ -11,3 +11,24 @@ Fix: `mir_merge_arm_types` returns `second` when `first` is I64 and `second` is 
 Workaround (sibling lane, f64949e6b99): annotate `val route: PackageIndexRouteV1`.
 
 Spec: test/01_unit/compiler/50.mir/if_merge_unresolved_arm_struct_for_in_spec.spl (NOT executed; no runnable full-CLI compiler here; fix unverified by bootstrap).
+
+## Verification — 2026-11-05
+
+The source fix (mir_merge_arm_types keeps a Struct second arm over an
+unresolved I64 first arm) was already landed when this pass ran; the bug doc's
+"fix unverified by bootstrap" gap is now closed with executable evidence.
+
+PR (merged into release/1.0.0): adds the direct contract spec
+`test/01_unit/compiler/50.mir/if_merge_arm_types_spec.spl` — five scenarios
+calling mir_merge_arm_types directly, including the pinned pre-existing array
+element-refinement behavior (I64 element = "unknown", refined from a specific
+second arm with size preserved). Discrimination confirmed: with the repair arm
+removed, the key scenario fails (`expected i64 to equal struct`).
+
+Evidence: seed interpreter on an aarch64 Linux host, 5/5 PASS; sibling
+integration spec `if_merge_unresolved_arm_struct_for_in_spec.spl` 1/1
+unchanged. Manual:
+`doc/06_spec/01_unit/compiler/50.mir/if_merge_arm_types_spec.md`.
+End-to-end stage-3 validation remains pending on an admitted self-hosted
+binary; the sibling-lane `val route: PackageIndexRouteV1` workaround
+annotation is intentionally left in place.

@@ -90,3 +90,13 @@ text/text, `elif` chains, and nested tail `if`s. Verified in `_scratch/mabs5.spl
 against the interpreter oracle.
 
 **Revalidated 2026-11-02: still plausible because the report title (Tail `if` with one float arm and one integer arm loses the value (JIT)) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## Source-level verification — 2026-11-05
+
+cargo test -p simple-compiler --lib tail_if_statement_merge_slot: 4/4 PASS at
+current release/1.0.0 source (float arms, float+int mix, int arms, text arms).
+The original program still prints the garbage values on the JIT lane with the
+deployed seed binary, as expected — that binary predates the 2026-11-03 fix
+(seed binary dated Oct 31; lowering_stmt.rs fix committed Nov 3-4), while the
+SIMPLE_EXECUTION_MODE=interpret oracle prints MIX_NEG=1.5 / MIX_POS=2.
+Remaining acceptance: re-run the JIT repro after the next seed redeploy.

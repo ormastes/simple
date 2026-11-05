@@ -36,6 +36,36 @@ until those boundaries are demonstrated.
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
+## Status 2026-11-05 — not reproducible on release/1.0.0 @ c3b2271c310
+
+Runtime: committed `bin/simple.exe` (bootstrap seed, expected warning),
+`--mode=interpreter`, Windows Git Bash.
+
+- The original colliding name is gone: the library owner is now
+  `lib_parse_claude_json_response` (rename landed in 59e35ae6eec), and the app
+  owner uses structured JSON (`std.common.json.*`). No source-level duplicate
+  of `parse_claude_json_response` remains.
+- Canonical production-owner spec
+  `test/01_unit/app/llm_caret/claude_cli_spec.spl`: 85/85 PASS (interpreter).
+  The 8 historical failures do not reproduce.
+- New faithful cross-module reproducer
+  `test/01_unit/app/llm_caret/claude_cli_cross_module_owner_spec.spl`
+  co-compiles `app.llm_caret.claude_cli` and `std.nogc_async_mut.llm.claude_cli`
+  (which still share `parse_claude_stream_line`, `build_claude_args`,
+  `CliResponse`, `CliStreamEvent`, `claude_cli_send`, `claude_cli_stream`) and
+  asserts each module's own semantics win on both sides of the boundary:
+  4/4 PASS (interpreter). No `compiler_cross_module_private_symbol_collision`
+  warning names any claude symbol in that co-compile.
+- Library search-offset contract spec
+  `test/01_unit/lib/nogc_async_mut/llm/claude_json_index_contract_spec.spl`:
+  5/5 PASS.
+
+Conclusion: the global-registry mis-dispatch hypothesis is not reproducible on
+this branch; the historical 8-example failure was repaired by earlier
+contract-restoration work (9bb1acec43b, 59e35ae6eec). The new owner-isolation
+spec keeps the co-compile boundary covered. Closing as not reproducible; reopen
+only with a failing run of the new spec.
+
 **Date:** 2026-07-20
 **Severity:** medium
 **Status:** open — hypothesis, not confirmed by isolated repro

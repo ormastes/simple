@@ -5,6 +5,7 @@
 # which made cold SCV inventory init impossible on every Rust-lane binary
 # since 966bc0159ed. Read through the Rust-backed checked text reader instead.
 use std.nogc_sync_mut.sffi.fs.{file_read_text_at_checked}
+use app.io.env_ops.{env_get}
 use std.scv.compile_source_inventory_core.{CompileSourceEventV1, compile_source_inventory_git_event_cost_v1}
 use std.scv.compile_cost_v1.{ScvCompileCostV1, scv_cost_now_v1, scv_cost_elapsed_v1}
 use compiler.mir._MirLowering.transient_owner_sffi.{transient_array_scope_begin_v1, transient_array_scope_pause_v1, transient_array_scope_end_v1, transient_heap_promote_v1}
@@ -17,10 +18,19 @@ fn compiler_inventory_file_event_v1(
 fn compiler_inventory_file_event_cost_v1(
     operation: text, identity: text, absolute: text, cost: ScvCompileCostV1?
 ) -> CompileSourceEventV1?:
+    # SIMPLE_SCV_FILE_EVENT_DEBUG=1: localize the cold-init second-file failure
+    # (doc/08_tracking/bug/seed_scv_cold_init_second_file_event_fails_2026-11-05.md).
+    val fe_debug = (env_get("SIMPLE_SCV_FILE_EVENT_DEBUG") ?? "") == "1"
+    if fe_debug:
+        eprint("[file-event] enter identity={identity}\n")
     if not transient_array_scope_begin_v1():
+        if fe_debug:
+            eprint("[file-event] scope-begin-failed identity={identity}\n")
         return nil
     val read_started = scv_cost_now_v1(cost)
     val content: text? = file_read_text_at_checked(absolute, 0, 1073741824)
+    if fe_debug:
+        eprint("[file-event] read identity={identity} nil={content == nil}\n")
     if cost != nil:
         cost!.record_read(scv_cost_elapsed_v1(cost, read_started),
             if content == nil: 0 else: content!.len())
@@ -38,11 +48,17 @@ fn compiler_inventory_file_event_cost_v1(
     val event = compile_source_inventory_git_event_cost_v1(
         operation, identity, content_text, cost)
     if cost != nil: cost!.record_event(scv_cost_elapsed_v1(cost, event_started))
+    if fe_debug:
+        eprint("[file-event] event-made identity={identity} nil={event == nil}\n")
     if not transient_array_scope_pause_v1():
+        if fe_debug:
+            eprint("[file-event] pause-failed identity={identity}\n")
         transient_array_scope_end_v1()
         return nil
     val retained = transient_heap_promote_v1<CompileSourceEventV1>(event)
     val ended = transient_array_scope_end_v1()
+    if fe_debug:
+        eprint("[file-event] done identity={identity} retained={retained} ended={ended}\n")
     if not retained or not ended:
         return nil
     Some(event)

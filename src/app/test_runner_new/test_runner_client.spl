@@ -48,6 +48,10 @@ val LIGHT_DAEMON_DIR: text = ".build/test_daemon_light"
 val LIGHT_REQ_DIR: text = ".build/test_daemon_light/requests"
 val LIGHT_RESP_DIR: text = ".build/test_daemon_light/responses"
 val LIGHT_LOCK: text = ".build/test_daemon_light/daemon.lock"
+# Wakeup sequence bumped after every request publish; the daemon's idle loop
+# stat()s this file in-process instead of shelling out to `ls -1` (dir_list)
+# every 250 ms. Shared with light_daemon.spl (see its LIGHT_WAKE note).
+val LIGHT_WAKE: text = ".build/test_daemon_light/wakeup.seq"
 # The live daemon records here the absolute path of the binary it executes every
 # served spec with (written by light_daemon.spl at startup). Read below so this
 # client can tell whether the daemon lane would silently substitute a different
@@ -607,6 +611,13 @@ fn run_one_via_daemon(path: text, timeout_ms: i64, seq: i64,
         file_delete(resp_path)
         print "ERROR: test daemon request write failed: {req_path}"
         return 1
+    # Wake the daemon AFTER the request rename is visible: its idle loop
+    # stat()s this sequence file in-process every ~10 ms, so a visible bump
+    # replaces the old 250 ms dir_list() poll (a `/bin/sh -c "ls -1 ..."`
+    # shell-out per poll) with a ~10 ms claim path. Best-effort: a lost bump
+    # (e.g. this process dying here) only costs one 500 ms daemon fallback
+    # sweep, never the request.
+    val _ = atomic_write_text(LIGHT_WAKE, id)
     val deadline = expiry_micros + (LIGHT_REQUEST_RESPONSE_GRACE_MS * 1000)
     val submitted_micros = time_now_unix_micros()
     var claimed = false
@@ -630,7 +641,11 @@ fn run_one_via_daemon(path: text, timeout_ms: i64, seq: i64,
                     file_delete(withdrawn_path)
                     return LIGHT_DAEMON_WITHDRAWN_RESULT
                 claimed = true
-        thread_sleep(100)
+        # Poll every 10 ms: the response lands only when the served spec
+        # finishes (typically seconds away), so a fine poll costs ~100
+        # in-process file stats per second of runtime and cuts the old
+        # 100 ms loop's up-to-100 ms pickup latency to ~10 ms.
+        thread_sleep(10)
     # No response inside the budget + grace. Emit a verdict so the spec reads
     # BROKEN, not UNRUN, and name the lock + the one-line remedy: the most
     # common cause of a whole-corpus version of this message is a stale lock

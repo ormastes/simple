@@ -131,3 +131,17 @@ provider_metadata.spl (7370e13e86d et al.) are harmless but no longer required
 for this crash; removing them is a follow-up cleanup, NOT part of this fix.
 The strict-bootstrap stage-2 compiler-test matrix gate for this defect is the
 `test_runner_build` task; it passes with the fixed compiler (PR #2943).
+
+## Regression spec landed — 2026-11-05
+
+PR #2943 fixed the source (nil key_type guard in relocate_provider_default's
+DictLit arm) without an executable regression. Landed
+test/01_unit/compiler/mir/provider_dict_default_relocation_spec.spl: three
+scenarios calling relocate_provider_default directly — nil-key_type DictLit
+(default transported via archive/SMF HIR-summary reconstruction; the ordinary
+frontend now stamps an Infer(0,0) placeholder instead, verified while writing
+the spec), present-key-type control, and a no-relocation-error check.
+Discrimination confirmed: forcing the guard off fails both nil-key_type
+scenarios under the seed interpreter; with the guard, 3/3 PASS on an aarch64
+Linux host. Manual:
+doc/06_spec/01_unit/compiler/mir/provider_dict_default_relocation_spec.md.

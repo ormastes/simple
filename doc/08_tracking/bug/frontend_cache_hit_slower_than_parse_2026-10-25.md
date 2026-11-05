@@ -56,3 +56,25 @@ opt-in (`SIMPLE_FRONTEND_SPAB=1`).
 ## Next
 
 Re-run the 308-file stage2 with the profile flag and confirm hit < 130 ms.
+
+## Follow-up 2026-11-05: supplied-source stores skipped by path-only capture dedup
+
+After the `.spab` default landed, `test/01_unit/compiler/frontend/supplied_source_cache_key_spec.spl`
+failed 3/7 under seed-interpreter `test` mode. Two distinct causes:
+
+1. `frontend_parse_or_restore` (frontend.spl) consulted
+   `flat_pool_capture_already_captured(file_path)` keyed by PATH ONLY. A
+   supplied-source parse (same `file_path`, different source bytes, the very
+   case commit 8e0f9d0eafd keyed the cache for) was treated as "already
+   captured": the second and later contents under one path never captured,
+   never stored, and never hit, so `frontend_parse_cache_load` returned ""
+   and hits never incremented. Fixed by keying the dedup record by
+   (path, cache content key) in `_FlatAstBridge/module_assembly.spl`
+   (`flat_pool_capture_already_captured`/`flat_pool_capture_record`) and
+   threading the caller's content key through `frontend.spl` and
+   `80.driver/managed_parse_group.spl` (source_digest there).
+2. The spec hand-crafts text `.fpc` entries and reads them through
+   `frontend_parse_cache_load`, which only reads that format; with `.spab` the
+   default store, a normal parse never writes `.fpc`. The spec now publishes
+   `SIMPLE_FRONTEND_SPAB=0` alongside its private scope (the documented
+   opt-out), selecting the line-cache format it tests.

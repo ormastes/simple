@@ -3,6 +3,8 @@
 # Converts paint-phase commands into DrawScene-compatible scene commands
 # for consumption by Engine2D backends.
 
+use std.gc_async_mut.gpu.browser_engine.layout_box.{BeLayoutBox}
+
 pub class PaintSceneCommand:
     kind: text
     x: i32
@@ -29,6 +31,7 @@ pub class PaintCommand:
     pixel_width: i32
     pixel_height: i32
     pixels: [u32]
+    text_val: text = ""   # non-empty for "text" commands
 
 impl PaintCommand:
     static fn fill_rect(x: i32, y: i32, width: i32, height: i32, color: u32) -> PaintCommand:
@@ -331,6 +334,94 @@ pub fn paint_scrollbar(
     var commands: [PaintCommand] = [track, thumb]
     commands
 
+# ============================================================================
+# Layout-box text painting
+# ============================================================================
+
+fn _paint_wrap_text(text_val: text, max_px: i32, char_w: i32) -> [text]:
+    """Greedy word-wrap one paragraph to max_px at char_w px per character.
+    A single word longer than max_px stays on its own line (no mid-word break)."""
+    val words = text_val.split(" ")
+    var lines: [text] = []
+    var cur = ""
+    var cur_w = 0
+    for word in words:
+        if word == "":
+            continue
+        val word_w = word.len() * char_w
+        val sep = if cur.len() > 0: char_w else: 0
+        if cur.len() > 0 and cur_w + sep + word_w > max_px:
+            lines.push(cur)
+            cur = word
+            cur_w = word_w
+        else:
+            if cur.len() > 0:
+                cur = cur + " " + word
+            else:
+                cur = word
+            cur_w = cur_w + sep + word_w
+    if cur.len() > 0:
+        lines.push(cur)
+    lines
+
+pub fn paint_layout_box(box_: BeLayoutBox, commands: [PaintCommand]) -> [PaintCommand]:
+    """Paint one layout box's text content into paint commands.
+
+    Explicit newlines always start new paint lines; each paragraph line is
+    greedily word-wrapped to the box content width at font_size/4 px per
+    character. `text-decoration: underline` emits a "rect" command after each
+    "text" command, sized to the line width, with the len * font_size/2 px
+    fallback when the content width is zero (no wrap pass ran to measure
+    against)."""
+    var text_val = box_.text_content
+    var node_style = box_.style
+    if box_.node != nil:
+        val src = box_.node.?
+        if text_val == "":
+            text_val = src.data
+        node_style = src.style
+    if text_val == "":
+        return commands
+    var font_size = node_style.font_size.to_i32()
+    if font_size <= 0:
+        font_size = 16
+    val line_height = font_size + font_size / 5
+    var char_w = font_size / 4
+    if char_w <= 0:
+        char_w = 1
+    val underline = node_style.text_decoration.contains("underline")
+    val origin_x = box_.content_x().to_i32()
+    val max_w = box_.content_width().to_i32()
+    var pen_y = box_.y.to_i32()
+    var empty_pixels: [u32] = []
+    var out = commands
+    val paragraphs = text_val.split("\n")
+    for para in paragraphs:
+        var lines: [text] = [""; 1]
+        if max_w > 0:
+            lines = _paint_wrap_text(para, max_w, char_w)
+        else:
+            lines[0] = para
+        for ln in lines:
+            val line_w = ln.len() * char_w
+            out = out.push(PaintCommand(
+                kind: "text", x: origin_x, y: pen_y,
+                width: line_w, height: line_height, color: 0xFF000000u32,
+                pixel_width: 0, pixel_height: 0, pixels: empty_pixels, text_val: ln
+            ))
+            if underline:
+                # Decoration width: the measured line width when a wrap pass
+                # ran, else the len * font_size/2 fallback.
+                val deco_w = if max_w > 0: line_w else: ln.len() * (font_size / 2)
+                out = out.push(PaintCommand(
+                    kind: "rect", x: origin_x, y: pen_y + font_size - 2,
+                    width: deco_w, height: 2, color: 0xFF000000u32,
+                    pixel_width: 0, pixel_height: 0, pixels: empty_pixels, text_val: ""
+                ))
+            pen_y = pen_y + line_height
+    out
+
 export PaintCommand, PaintScene, PaintSceneCommand, paint_commands_to_scene
+export paint_layout_box
 export generate_paint_list, paint_tree_to_scene
 export ObjectFitResult, compute_object_fit, paint_scrollbar

@@ -40,7 +40,7 @@ use std.nogc_async_mut.io.tcp_backend.{
     tcp_backend_set_nodelay,
     tcp_backend_set_nonblocking
 }
-use std.concurrent.channel.{Channel}
+use std.concurrent.channel.{Channel, channel_new}
 use std.thread_sffi.{spl_thread_sleep}
 
 use std.http_server.types.{
@@ -142,6 +142,16 @@ pub class Worker:
     tls_config: TlsConfig?
     tls_sessions: Dict<i64, TlsSessionState>
     tls_rx_streams: Dict<i64, TlsApplicationRecordStreamV1>
+    # Per-fd async handler job tracking (see worker.spl): fd -> admitted
+    # job_id, fd -> completion channel, job_id -> owning fd, and the
+    # worker-owned response mailbox keyed by job_id. The worker stays the
+    # sole socket reader while a job is pending.
+    async_job_by_fd: Dict<i64, i64>
+    async_channel_by_fd: Dict<i64, i64>
+    async_fd_by_job: Dict<i64, i64>
+    async_response_by_job: Dict<i64, HttpResponseData>
+    async_inbox: Channel
+    async_job_seq: i64
 
     pub static fn create(worker_id: i64, config: ServerConfig,
                      router: AsyncRouter, pipeline: MiddlewarePipeline,
@@ -223,7 +233,13 @@ pub class Worker:
             static_file_fallback_count: 0,
             tls_config: tls_cfg,
             tls_sessions: {},
-            tls_rx_streams: {}
+            tls_rx_streams: {},
+            async_job_by_fd: {},
+            async_channel_by_fd: {},
+            async_fd_by_job: {},
+            async_response_by_job: {},
+            async_inbox: channel_new(),
+            async_job_seq: 0
         ))
 
     pub(package) me run():
@@ -251,6 +267,19 @@ pub class Worker:
                     break
                 elif cmd == "drain":
                     self.draining = true
+
+            # Typed async handler completions: the submitter signals a scalar
+            # job_id on the worker inbox once the response is parked. Drained
+            # before the driver poll so a finished render resumes its
+            # connection in the same iteration.
+            var async_drain = 0
+            while async_drain < 1024:
+                val async_msg = self.async_inbox.try_recv()
+                if not async_msg.?:
+                    break
+                val async_job_id = async_msg as i64
+                self.deliver_async_completion(async_job_id, _http_time_now_ms())
+                async_drain = async_drain + 1
 
             self.driver.flush()
             val completion_count = self.driver.poll_count(64, 10)
@@ -405,6 +434,14 @@ pub class Worker:
         val route_result = self.router.route(request)
         match route_result:
             Ok((location, params)):
+                # Async-first: a location whose handler_type was admitted as
+                # an async submitter is handed to the typed job registry and
+                # the connection is parked until the completion signal; only
+                # synchronous handlers dispatch inline below.
+                if is_dynamic_handler(location.handler_type) and self.handler_registry.has_async(location.handler_type):
+                    self.submit_async_location(fd, location, request, now)
+                    self.pipeline.run_log_phase(request, self.config)
+                    return
                 # AC-4 (assessment P0-D): dynamic handler types dispatch through
                 # the handler registry under a server-established security
                 # context; only static locations use the inline fast path.

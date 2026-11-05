@@ -1,0 +1,58 @@
+# Promise chaining / rejection propagation / prototype basics in the nogc JS engine.
+# Bug: js_engine_missing_builtins_regex_promise_prototype_2026-07-11 (item 2, residual).
+
+use std.spec.*
+use std.js.engine.js_error.{JsLogger, LogLevel}
+use std.js.engine.parser.{JsParser}
+use std.js.types.js_types.{JsValue}
+use std.js.engine.interpreter_types.{js_to_string}
+use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
+use std.nogc_sync_mut.js.engine.interpreter_exec.*
+
+# Run `source`, drain the microtask queue, and return global `r` as text.
+fn run_js_drained(source: text) -> text:
+    val logger = JsLogger.new("promise-chain-spec", LogLevel.Error)
+    val parser = JsParser.new(source, logger)
+    match parser.parse_program():
+        Ok(statements):
+            val interpreter = JsInterpreter.new(logger)
+            match interpreter.execute(statements):
+                Ok(value):
+                    var rounds = 0
+                    while rounds < 16 and interpreter.drain_pending_microtasks():
+                        rounds = rounds + 1
+                    match interpreter.lookup_global_value("r"):
+                        Some(v): js_to_string(v)
+                        nil: "<no r>"
+                Err(error): "ERR: {error.message}"
+        Err(error): "PARSE-ERR: {error.message}"
+
+describe "JS engine Promise chaining":
+    it "propagates rejection through thens without onRejected":
+        expect(run_js_drained("var r = 0; Promise.reject('e1').then(v => { r = 'f'; }).then(v => { r = 'f2'; }).catch(e => { r = 'c:' + e; });")).to_equal("c:e1")
+
+    it "rejects the chain when a handler returns a rejected promise":
+        expect(run_js_drained("var r = 0; Promise.resolve(1).then(v => Promise.reject('inner')).catch(e => { r = 'c:' + e; });")).to_equal("c:inner")
+
+    it "fulfills the chain when a handler returns a fulfilled promise":
+        expect(run_js_drained("var r = 0; Promise.resolve(1).then(v => Promise.resolve(v + 10)).then(v => { r = v; });")).to_equal("11")
+
+    it "passes the settled value through finally on fulfillment":
+        expect(run_js_drained("var r = 0; Promise.resolve(5).finally(() => { r = 'fin'; }).then(v => { r = r + ':' + v; });")).to_equal("fin:5")
+
+    it "propagates rejection through finally without onRejected":
+        expect(run_js_drained("var r = 0; Promise.reject('x').finally(() => { r = 'fin'; }).catch(e => { r = r + ':' + e; });")).to_equal("fin:x")
+
+    it "ignores the finally callback return value":
+        expect(run_js_drained("var r = 0; Promise.resolve(1).finally(() => 99).then(v => { r = v; });")).to_equal("1")
+
+    it "fans out to multiple thens on the same promise":
+        expect(run_js_drained("var r = ''; var p = Promise.resolve(3); p.then(v => { r = r + 'a' + v; }); p.then(v => { r = r + 'b' + v; });")).to_equal("a3b3")
+
+    it "resolves a promise to itself unchanged":
+        expect(run_js_drained("var r = 0; var p = Promise.resolve(8); r = Promise.resolve(p) === p;")).to_equal("true")
+
+    it "exposes Promise and prototype methods for introspection":
+        expect(run_js_drained("var r = 0; r = typeof Promise;")).to_equal("function")
+        expect(run_js_drained("var r = 0; r = typeof Promise.resolve;")).to_equal("function")
+        expect(run_js_drained("var r = 0; r = typeof Promise.prototype.then;")).to_equal("function")

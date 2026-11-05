@@ -2768,7 +2768,7 @@ S2(rt_result_ok) S2(rt_result_err) S1(rt_result_is_ok) S1(rt_result_is_err)
 S1(rt_result_unwrap) S2(rt_result_unwrap_or)
 
 S1(rt_weak_ref) S1(rt_weak_deref) S2(rt_closure_call) S1(rt_closure_bind)
-S3(rt_ipc_send_bytes) S2(rt_ipc_recv_bytes) S2(rt_collection_remove)
+S2(rt_collection_remove)
 
 /* MMIO — use RAW addresses (not DECODE_INT) to match x86_64 convention.
  * Simple code passes MMIO addresses as raw u64 values. */

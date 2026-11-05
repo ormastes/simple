@@ -1513,12 +1513,24 @@ fn parse_color(raw: text) -> u32:
         return 0u32
     if s.char_at(0) == "#":
         val h_len = s.len() - 1
+        if h_len == 8:
+            val r = hex_val(s.char_at(1)) * 16 + hex_val(s.char_at(2))
+            val g = hex_val(s.char_at(3)) * 16 + hex_val(s.char_at(4))
+            val b = hex_val(s.char_at(5)) * 16 + hex_val(s.char_at(6))
+            val a = hex_val(s.char_at(7)) * 16 + hex_val(s.char_at(8))
+            return (a.to_u32() << 24) | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
         if h_len >= 6:
             val r = hex_val(s.char_at(1)) * 16 + hex_val(s.char_at(2))
             val g = hex_val(s.char_at(3)) * 16 + hex_val(s.char_at(4))
             val b = hex_val(s.char_at(5)) * 16 + hex_val(s.char_at(6))
             return web_argb(r, g, b)
-        if h_len >= 3:
+        if h_len == 4:
+            val r = hex_val(s.char_at(1)) * 17
+            val g = hex_val(s.char_at(2)) * 17
+            val b = hex_val(s.char_at(3)) * 17
+            val a = hex_val(s.char_at(4)) * 17
+            return (a.to_u32() << 24) | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
+        if h_len == 3:
             val r = hex_val(s.char_at(1)) * 17
             val g = hex_val(s.char_at(2)) * 17
             val b = hex_val(s.char_at(3)) * 17
@@ -1659,11 +1671,16 @@ fn gradient_matching_close(s: text, lp: i32) -> i32:
     var depth = 0
     var i = lp
     val n = s.len()
+    # BYTE-indexed for the same reason as split_top_level_commas_paren_aware:
+    # a char_at probe here shifts the returned close-paren offset on any
+    # multi-byte gradient value and truncates the `inner` text the splitter
+    # then receives. ASCII `(` / `)` bytes never appear inside a UTF-8 sequence.
+    val pb = s.bytes()
     while i < n:
-        val c = s.char_at(i)
-        if c == "(":
+        val c = pb[i]
+        if c == 40:
             depth = depth + 1
-        elif c == ")":
+        elif c == 41:
             depth = depth - 1
             if depth == 0:
                 return i
@@ -1699,7 +1716,7 @@ fn parse_linear_gradient_color(raw: text, target: i32) -> u32:
     var item_index = 0
     for raw_part in split_top_level_commas_paren_aware(inner):
         val part = raw_part.trim()
-        if part.starts_with("to ") or part == "top" or part == "bottom" or part == "left" or part == "right" or is_gradient_angle_token(part):
+        if text_starts_with_portable(part, "to ") or part == "top" or part == "bottom" or part == "left" or part == "right" or is_gradient_angle_token(part):
             item_index = item_index - 1
         elif item_index == target:
             # Alpha-aware: glass-theme gradients carry rgba() stops whose alpha
@@ -1735,13 +1752,22 @@ fn split_top_level_commas_paren_aware(s: text) -> [text]:
     var start = 0
     var i = 0
     val n = s.len()
+    # BYTE-indexed scan, like text_matches_at/skip_wrap_spaces: `len()` and
+    # `substring()` are byte-indexed, while `char_at` is CHARACTER-indexed, so
+    # a len()-bounded char_at probe shifts every split point after a multi-byte
+    # character and cuts parts mid-UTF-8-sequence (regression guard:
+    # test/01_unit/runtime/baremetal_string_split_abi_spec.spl). The compared
+    # bytes are ASCII `(`, `)`, `,` (< 0x80), which never occur inside a UTF-8
+    # multi-byte sequence, so byte probing is answer-identical on ASCII and
+    # correct on multi-byte input.
+    val cb = s.bytes()
     while i < n:
-        val c = s.char_at(i)
-        if c == "(":
+        val c = cb[i]
+        if c == 40:
             depth = depth + 1
-        elif c == ")":
+        elif c == 41:
             depth = depth - 1
-        elif c == "," and depth == 0:
+        elif c == 44 and depth == 0:
             parts.push(s.substring(start, i).trim())
             start = i + 1
         i = i + 1
@@ -1773,7 +1799,7 @@ fn is_radial_gradient(raw: text) -> bool:
 fn is_gradient_shape_or_position_token(s: text) -> bool:
     val lower = s.lower()
     (
-        lower.starts_with("circle") or lower.starts_with("ellipse") or
+        text_starts_with_portable(lower, "circle") or text_starts_with_portable(lower, "ellipse") or
         text_index_of(lower, "at ") >= 0 or lower == "closest-side" or
         lower == "closest-corner" or lower == "farthest-side" or
         lower == "farthest-corner"
@@ -1904,7 +1930,7 @@ fn parse_gradient_stops(raw: text) -> [GradientStopSpec]:
         val skip = if radial:
             is_gradient_shape_or_position_token(part)
         else:
-            part.starts_with("to ") or part == "top" or part == "bottom" or part == "left" or part == "right" or is_gradient_angle_token(part)
+            text_starts_with_portable(part, "to ") or part == "top" or part == "bottom" or part == "left" or part == "right" or is_gradient_angle_token(part)
         if not skip:
             color_parts.push(part)
         idx = idx + 1

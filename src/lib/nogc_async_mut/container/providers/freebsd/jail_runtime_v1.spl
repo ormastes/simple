@@ -1,0 +1,236 @@
+# FreeBSD jail-backed Simple Container provider leaf.
+#
+# The provider owns the FreeBSD edge only. Per the cross-host architecture,
+# FreeBSD executes native FreeBSD workloads through the FreeBSD OCI runtime
+# backed by jails; no host substitutes a VM or a Linux guest. The documented
+# Podman-on-jail route requires administrator provisioning, so a launch-capable
+# probe always reports the delegated privilege route with admin_setup set;
+# a strict rootless `user` route stays unavailable on this host.
+#
+# This leaf is contract-level: it owns admission validation, probe evidence
+# translation, and exact argv construction for the native jail/OCI tools.
+# Live lifecycle execution is admitted only on a FreeBSD host with a positive
+# probe; everywhere else lifecycle operations fail closed with an explicit
+# blocked reason, never a fabricated receipt.
+
+use std.common.contracts.container.runtime_v1.{
+    RuntimeIdentityV1, RuntimeCommandV1, RuntimeStateV1, RuntimeOperationV1,
+    RuntimeProbeV1, RuntimeProviderContractV1, RuntimeProviderV1,
+    RUNTIME_PHASE_PREPARED, RUNTIME_STATUS_REJECTED, RUNTIME_STATUS_BLOCKED,
+    RUNTIME_STATUS_OK, runtime_command_empty, runtime_state_empty,
+    runtime_probe_unavailable, RUNTIME_PRIVILEGE_UNKNOWN, RUNTIME_PRIVILEGE_ROOT}
+use std.common.contracts.container.host_capability_v1.{
+    ContainerHostCapabilityV1, CONTAINER_CLIENT_PRIVILEGE_DELEGATED_V1,
+    CONTAINER_CLIENT_PRIVILEGE_UNAVAILABLE_V1, CONTAINER_ISOLATION_NATIVE_V1}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
+
+pub const FREEBSD_JAIL_ENGINE_V1 = "freebsd-jail-v1"
+pub const FREEBSD_OCI_RUNTIME_DEFAULT_V1 = "ocijail"
+pub const FREEBSD_DEFAULT_TIMEOUT_MS: i64 = 30000
+pub const FREEBSD_JAIL_NAME_MAX_CHARS: i64 = 64
+
+pub fn freebsd_jail_provider_contract_v1() -> RuntimeProviderContractV1:
+    RuntimeProviderContractV1(provider_id: FREEBSD_JAIL_ENGINE_V1, version: 1,
+        supports_recovery: false, supports_logs: true)
+
+fn _token_v1(value: text) -> bool:
+    if value == "" or value.len() > FREEBSD_JAIL_NAME_MAX_CHARS:
+        return false
+    for ch in value.chars():
+        if not ((ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or
+                (ch >= "0" and ch <= "9") or ch == "-" or ch == "_" or ch == "."):
+            return false
+    true
+
+fn _unavailable_v1(reason: text) -> RuntimeProbeV1:
+    runtime_probe_unavailable(FREEBSD_JAIL_ENGINE_V1,
+        FREEBSD_OCI_RUNTIME_DEFAULT_V1, reason)
+
+fn _capability_unavailable(reason: text) -> ContainerHostCapabilityV1:
+    ContainerHostCapabilityV1(host_os: "freebsd", guest_os: "freebsd",
+        provider_id: FREEBSD_JAIL_ENGINE_V1,
+        isolation_class: CONTAINER_ISOLATION_NATIVE_V1,
+        client_privilege: CONTAINER_CLIENT_PRIVILEGE_UNAVAILABLE_V1,
+        admin_setup: true, launch_capable: false, reason: reason)
+
+fn _operation_v1(state: RuntimeStateV1, operation: text, status: text,
+        reason: text) -> RuntimeOperationV1:
+    RuntimeOperationV1(status: status, operation: operation,
+        command: runtime_command_empty(), state: state, exit_code: -1,
+        stdout: "", stderr: "", reason: reason)
+
+# Request admission is pure: it validates identity, jail name, image ABI, and
+# policy before any host observation. An empty reason admits the request
+# shape; it is never permission to launch.
+pub fn freebsd_jail_request_reason_v1(identity: RuntimeIdentityV1,
+        jail_name: text, image_ref: text, host_abi: text,
+        image_abi: text) -> text:
+    if identity.pod_uid == "" or identity.attempt <= 0 or
+            identity.provider_generation <= 0 or identity.operation_id == "" or
+            identity.node_boot_id == "" or identity.native_id != "":
+        return "freebsd-jail-invalid-attempt-identity"
+    if identity.engine != FREEBSD_JAIL_ENGINE_V1:
+        return "freebsd-jail-engine-mismatch"
+    if not _token_v1(jail_name):
+        return "freebsd-jail-name-invalid"
+    if jail_name != identity.pod_uid and
+            not jail_name.starts_with(identity.pod_uid + "-"):
+        return "freebsd-jail-name-not-attempt-bound"
+    if image_ref == "" or image_ref.contains("\n") or image_ref.contains("\r") or
+            image_ref.starts_with("-") or image_ref.contains(" "):
+        return "freebsd-jail-image-ref-invalid"
+    if host_abi == "" or image_abi == "" or host_abi != image_abi:
+        return "freebsd-jail-abi-mismatch"
+    ""
+
+# Exact argv for one native operation. The jail name is the provider-owned
+# identity bound at create time; a user-chosen container name is never the
+# native identity. No shell is involved: argv is passed directly.
+pub fn freebsd_jail_command_v1(operation: text, jail_name: text,
+        image_ref: text, oci_runtime: text) -> RuntimeCommandV1:
+    val runtime = if oci_runtime == "" then FREEBSD_OCI_RUNTIME_DEFAULT_V1
+        else oci_runtime
+    if operation == "create":
+        return RuntimeCommandV1(operation: operation, program: runtime,
+            args: ["create", "--name", jail_name, image_ref])
+    if operation == "start":
+        return RuntimeCommandV1(operation: operation, program: runtime,
+            args: ["start", jail_name])
+    if operation == "wait":
+        return RuntimeCommandV1(operation: operation, program: "jls",
+            args: ["-j", jail_name, "jid"])
+    if operation == "stop":
+        return RuntimeCommandV1(operation: operation, program: runtime,
+            args: ["kill", jail_name, "TERM"])
+    if operation == "destroy":
+        return RuntimeCommandV1(operation: operation, program: runtime,
+            args: ["delete", "--force", jail_name])
+    runtime_command_empty()
+
+# Pure translation of the provider's observed probe into a host capability.
+# A launch-capable FreeBSD jail probe always describes the delegated route:
+# administrator provisioning installs the jail runtime and grants, while the
+# launch client itself may stay unprivileged. `live_source` must be false for
+# scripted probes: their launch capability is a fixture, not host evidence.
+pub fn freebsd_jail_capability_from_probe_v1(probe: RuntimeProbeV1,
+        live_source: bool) -> ContainerHostCapabilityV1:
+    if not live_source:
+        return _capability_unavailable("freebsd-jail-live-probe-unavailable")
+    if probe.provider != FREEBSD_JAIL_ENGINE_V1:
+        return _capability_unavailable("freebsd-jail-provider-required")
+    if not probe.engine_present or not probe.healthy or not probe.launch_capable:
+        return _capability_unavailable(
+            if probe.reason != "" then probe.reason
+            else "freebsd-jail-launch-unavailable")
+    ContainerHostCapabilityV1(host_os: "freebsd", guest_os: "freebsd",
+        provider_id: FREEBSD_JAIL_ENGINE_V1,
+        isolation_class: CONTAINER_ISOLATION_NATIVE_V1,
+        client_privilege: CONTAINER_CLIENT_PRIVILEGE_DELEGATED_V1,
+        admin_setup: true, launch_capable: true,
+        reason: if probe.reason != "" then probe.reason else "freebsd-jail-delegated")
+
+pub class FreebsdJailRuntimeProviderV1:
+    platform: text
+    oci_runtime: text
+    state_dir: text
+    node_boot_id: text
+    provider_generation: i64
+    timeout_ms: i64
+    live_enabled: bool
+    scripted: bool
+    scripted_launch_capable: bool
+    scripted_reason: text
+
+impl FreebsdJailRuntimeProviderV1:
+    pub static fn new(platform: text, oci_runtime: text, state_dir: text,
+            node_boot_id: text, provider_generation: i64,
+            live_enabled: bool = true,
+            timeout_ms: i64 = FREEBSD_DEFAULT_TIMEOUT_MS) -> FreebsdJailRuntimeProviderV1:
+        val effective = if timeout_ms > 0 then timeout_ms else FREEBSD_DEFAULT_TIMEOUT_MS
+        FreebsdJailRuntimeProviderV1(platform: platform,
+            oci_runtime: if oci_runtime == "" then FREEBSD_OCI_RUNTIME_DEFAULT_V1
+                else oci_runtime,
+            state_dir: state_dir, node_boot_id: node_boot_id,
+            provider_generation: provider_generation, timeout_ms: effective,
+            live_enabled: live_enabled, scripted: false,
+            scripted_launch_capable: false, scripted_reason: "")
+
+    # Deterministic probe seam for contract tests: the script declares the
+    # observed host verdict; nothing here infers capability from a name.
+    pub static fn scripted(oci_runtime: text, state_dir: text,
+            node_boot_id: text, provider_generation: i64,
+            launch_capable: bool, reason: text) -> FreebsdJailRuntimeProviderV1:
+        var provider = FreebsdJailRuntimeProviderV1.new("freebsd",
+            oci_runtime, state_dir, node_boot_id, provider_generation, false)
+        provider.scripted = true
+        provider.scripted_launch_capable = launch_capable
+        provider.scripted_reason = reason
+        provider
+
+    pub fn probe(self) -> RuntimeProbeV1:
+        if self.scripted:
+            if self.scripted_launch_capable:
+                return RuntimeProbeV1(provider: FREEBSD_JAIL_ENGINE_V1,
+                    engine: self.oci_runtime, engine_present: true,
+                    healthy: true, launch_capable: true,
+                    privilege: RUNTIME_PRIVILEGE_ROOT,
+                    reason: if self.scripted_reason != "" then self.scripted_reason
+                        else "freebsd-jail-scripted-probe")
+            return _unavailable_v1(if self.scripted_reason != "" then
+                self.scripted_reason else "freebsd-jail-scripted-unavailable")
+        if not self.live_enabled or self.platform != "freebsd" or
+                self.node_boot_id == "" or self.provider_generation <= 0:
+            return _unavailable_v1("freebsd-jail-live-host-unavailable")
+        if self.state_dir == "" or self.state_dir.contains("..") or
+                self.state_dir.contains("\n") or self.state_dir.contains("\r"):
+            return _unavailable_v1("freebsd-jail-state-directory-invalid")
+        # Preflight observes the native tools only. Engine presence and a
+        # healthy version probe are not launch authority; the lifecycle
+        # operations re-check capability before any mutation.
+        val version = process_run_timeout(self.oci_runtime, ["--version"],
+            self.timeout_ms)
+        if version.2 != 0 or version.1.trim() == "":
+            return _unavailable_v1("freebsd-jail-runtime-missing")
+        val jls = process_run_timeout("jls", ["-v"], self.timeout_ms)
+        if jls.2 != 0:
+            return _unavailable_v1("freebsd-jail-jls-unavailable")
+        RuntimeProbeV1(provider: FREEBSD_JAIL_ENGINE_V1, engine: self.oci_runtime,
+            engine_present: true, healthy: true, launch_capable: true,
+            privilege: RUNTIME_PRIVILEGE_ROOT, reason: "freebsd-jail-tools-present")
+
+    # Lifecycle requests fail closed unless the live probe is launch-capable
+    # on a FreeBSD host. This leaf performs no native mutation: the argv is
+    # returned for the live owner's executor, and a non-admitted request is
+    # blocked with its exact reason.
+    pub fn lifecycle_request_v1(self, state: RuntimeStateV1,
+            operation: text, jail_name: text, image_ref: text) -> RuntimeOperationV1:
+        if operation != "create" and operation != "start" and
+                operation != "wait" and operation != "stop" and
+                operation != "destroy":
+            return _operation_v1(state, operation, RUNTIME_STATUS_REJECTED,
+                "freebsd-jail-unsupported-operation")
+        val reason = freebsd_jail_request_reason_v1(state.identity, jail_name,
+            image_ref, "freebsd", "freebsd")
+        if reason != "":
+            return _operation_v1(state, operation, RUNTIME_STATUS_REJECTED, reason)
+        val probe = self.probe()
+        if not probe.launch_capable:
+            return _operation_v1(state, operation, RUNTIME_STATUS_BLOCKED,
+                if probe.reason != "" then probe.reason
+                else "freebsd-jail-launch-unavailable")
+        if self.scripted:
+            return _operation_v1(state, operation, RUNTIME_STATUS_BLOCKED,
+                "freebsd-jail-scripted-live-execution-unavailable")
+        val command = freebsd_jail_command_v1(operation, jail_name, image_ref,
+            self.oci_runtime)
+        if command.program == "":
+            return _operation_v1(state, operation, RUNTIME_STATUS_REJECTED,
+                "freebsd-jail-command-unsupported")
+        RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: operation,
+            command: command, state: state, exit_code: -1, stdout: "", stderr: "",
+            reason: "freebsd-jail-command-admitted")
+
+export FreebsdJailRuntimeProviderV1, FREEBSD_JAIL_ENGINE_V1
+export freebsd_jail_provider_contract_v1, freebsd_jail_request_reason_v1
+export freebsd_jail_command_v1, freebsd_jail_capability_from_probe_v1
+export FREEBSD_OCI_RUNTIME_DEFAULT_V1
