@@ -1502,3 +1502,36 @@ fn optional_chain_lowers_to_presence_tested_access() {
         assert!(contains_chain_if(expr), "`?.` in {name} did not lower to a presence-tested access: {expr:?}");
     }
 }
+
+#[test]
+fn positional_args_after_named_fill_lowest_unfilled_slots() {
+    // seed_jit_hir_positional_after_named_arg_2026-11-04: the JIT HIR used to
+    // advance the positional cursor blindly, colliding with an earlier named
+    // argument's slot ("parameter N more than once or beyond its arity") and
+    // dropping the whole module to the interpreter. The interpreter binds
+    // positionals to the lowest unfilled slots, in order; the JIT must match.
+    let module = parse_and_lower(
+        "fn combo(a: i64, b: i64, c: i64, d: i64) -> i64:\n    return a\n\nfn main() -> i64:\n    return combo(1, c: 3, 2, 4)\n",
+    )
+    .unwrap();
+
+    let func = module.functions.iter().find(|f| f.name == "main").expect("main fn");
+    let HirStmt::Return(Some(expr)) = func.body.last().expect("main return") else {
+        panic!("expected return: {:?}", func.body)
+    };
+    let HirExprKind::Call { args, .. } = &expr.kind else {
+        panic!("expected call: {expr:?}")
+    };
+    let slot_values: Vec<i64> = args
+        .iter()
+        .map(|a| match &a.kind {
+            HirExprKind::Integer(v) => *v,
+            other => panic!("non-literal slot in call order: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        slot_values,
+        vec![1, 2, 3, 4],
+        "positional-after-named must fill declared slot order a=1, b=2, c=3, d=4"
+    );
+}
