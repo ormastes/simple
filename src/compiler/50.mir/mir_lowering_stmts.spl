@@ -4304,7 +4304,33 @@ impl MirLowering:
             match iter.kind:
                 case Var(_) | NamedVar(_, _):
                     return self.receiver_declared_type(iter)
-                case _: return None
+                case _: ()
+        # `for x in self.d.values()` / `.keys()` whose receiver method was
+        # unresolved at HIR (bug for_in_dict_values_i64_2026-10-24): the call
+        # carried no element type, so the collection lowered as a bare I64
+        # word and hit #143. Recover `[V]` / `[K]` from the receiver's
+        # declared Dict<K, V> (local or field chain), the same shape HIR
+        # stamps when the receiver IS resolved (expression_core.spl).
+        var iter_has_elem_type = false
+        if iter.has_type_:
+            match iter.type_.kind:
+                case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_): iter_has_elem_type = true
+                case _: ()
+        if not iter_has_elem_type:
+            match iter.kind:
+                case HirExprKind.MethodCall(dv_receiver, dv_method, dv_args, _):
+                    if dv_args.len() == 0 and (dv_method == "values" or dv_method == "keys"):
+                        if val dv_recv_type = self.receiver_declared_type(dv_receiver):
+                            match dv_recv_type.kind:
+                                case HirTypeKind.Dict(dv_key_t, dv_value_t):
+                                    var dv_elem = dv_key_t
+                                    if dv_method == "values":
+                                        dv_elem = dv_value_t
+                                    return Some(HirType(kind: HirTypeKind.Array(dv_elem, None), span: iter.span))
+                                case _: ()
+                case _: ()
+        if not iter.has_type_:
+            return None
         iter.type_
 
     me lower_for_iterator(var_: SymbolId, iter: HirExpr, body: HirBlock, source_span: Span) -> LocalId:
