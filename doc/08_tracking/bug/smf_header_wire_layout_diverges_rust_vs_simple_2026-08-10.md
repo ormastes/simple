@@ -247,3 +247,22 @@ Regressions green: seed_layout 9/9, layout_parity 8/8, reader_memory 4/4,
 lib_smf_reader 3/3, smf_header 4/4, launch_metadata_section_index 13/13.
 `aspect_pack_directory_spec` 16/18 identical before/after (pre-existing facet
 load/reload failures). Writer convergence (dual-write) remains owner work.
+
+## 2026-11-05 writer convergence (r-smfhdr)
+
+- Added `SmfHeader.to_seed_bytes()` (`70.backend/linker/smf_header.spl`): serializes the
+  Rust seed `#[repr(C)]` 96-byte layout (4 pad bytes at 20..24, hints app_type@80
+  ww@82 wh@84 ph@86 pfc@87 res@88, zero tail pad). Readers and writer share the
+  locator helpers `smf_header_field_shift` / `smf_header_size_at` / `smf_header_seed_trailer_offset`.
+- DECISION: the default writers (`70.backend/linker/smf_writer.spl`, `80.driver/smf_writer.spl`)
+  still call `to_bytes()` (packed 128). Switching them drops the compile-options hash
+  (`reserved[0..16]`, absent in the seed layout), invalidates cached artifacts, and
+  breaks pinned specs (`smf_layout_parity_spec`, `smf_header_spec`). Default switch needs
+  the dual-write migration/owner decision; bug stays OPEN for that.
+- New spec `linker/test/smf_header_writer_reader_roundtrip_spec.spl`: byte-for-byte vs hand-built
+  seed header, readback via `smf_header_from_bytes` + cache validator, locator helper direct,
+  wrong-magic / truncated / zero-section rejection, trailing-pad check.
+- Discrimination (readers reverted to origin/release/1.0.0, header_parser, cache_validator,
+  launch_metadata, smf_dynlib, aspect_pack_directory):
+  parity `passed=2 failed=1`; roundtrip `passed=9 failed=1`.
+- Fixed: parity `passed=3 failed=0`; roundtrip `declared>=10 executed=10 passed=10 failed=0`.
