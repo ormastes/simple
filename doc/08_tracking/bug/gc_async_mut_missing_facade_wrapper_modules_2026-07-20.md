@@ -140,3 +140,31 @@ were executed and this report does not mark the bug fixed.
 
 ## Closed 2026-11-03 (verified fixed)
 Already fixed on release/1.0.0: facade restored by e72ff56c06e / core64_step defined in core.spl (88aac2ffe28). Specs pass: gc_async_mut compression_facade_spec 6/6, sql_facade_spec 4/4, core64_integration_spec 35/35.
+
+## Behavioral re-verification 2026-11-05 (worktree work/libbug-std-gcfacade-20261105)
+
+Independent TDD re-verification from a clean worktree of `origin/release/1.0.0`
+(HEAD adfeae3765c), using the phase1 self-hosted CLI
+(`build/phase_snapshots/phase1_1793422538/simple`; `bin/simple` not present
+in this snapshot — substituted per task note).
+
+- RED: temporarily removed `src/lib/gc_async_mut/compression/lz4.spl` →
+  `compression_facade_spec.spl` failed with the original
+  `error: semantic: Cannot resolve module: std.gc_async_mut.compression.lz4`.
+  Temporarily removed `src/lib/gc_async_mut/database/sql/escape.spl` →
+  `sql_facade_spec.spl` failed with
+  `error: runtime: Module "std.gc_async_mut.database.sql" does not export 'escape'`.
+  Both failure signatures match the reported defect class.
+- GREEN (facades restored, working tree identical to origin/release/1.0.0):
+  - `test/01_unit/lib/gc_async_mut/compression/compression_facade_spec.spl` — 6/6 PASS
+  - `test/01_unit/lib/gc_async_mut/database/sql/sql_facade_spec.spl` — 4/4 PASS
+  - `test/01_unit/lib/gc_async_mut/database/sql/sql_init_facade_spec.spl` — 1/1 PASS
+  - `test/01_unit/lib/gc_async_mut/database/test_extended/test_extended_facade_spec.spl` — 1/1 PASS
+  - `test/01_unit/lib/gc_async_mut/database/vector/database_vector_facade_spec.spl` — 2/2 PASS
+  - nogc_async_mut counterparts (compression, sql, sql_init facade specs) — all PASS
+
+Conclusion: the 2026-11-03 repair (e72ff56c06e) is behaviorally confirmed on
+release/1.0.0. No source changes were required; this pass adds only executable
+verification evidence. Remaining "likely-same-class" specs listed above were
+not all re-run; database/test_extended and database/vector facades verified
+green this pass.
