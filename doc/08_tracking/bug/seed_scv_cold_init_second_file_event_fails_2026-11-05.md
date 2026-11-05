@@ -199,3 +199,58 @@ plain rt_* symbols resolve to ONE runtime family in the seed binary
 transient/promote family already use them), or (b) register C-heap objects
 with the Rust registry. Acceptance test unchanged: the 20-line probe's
 pr1/pr2 must be true on the seed JIT lane.
+
+## Update 2026-11-05 (late): exact failing step localized on CURRENT sources
+
+Built the seed fresh from current origin/release/1.0.0 (4m20s, cargo cache
+warm). Results:
+
+- The 20-line struct-promote probe now PASSES on the fresh seed JIT lane
+  (pr1/pr2=true 3/3, no dylib preload needed) — the SmallEvent-class
+  manifestation is gone from current sources. The boot2-era binaries still
+  fail it, so that half was fixed (or perturbed away) between
+  53af1b6f081 and HEAD.
+- The REAL SCV cold-init flow still fails identically on the fresh seed
+  (same reason_sha=3ea349...). An env-gated step trace in
+  compiler_inventory_file_event_cost_v1 (SIMPLE_SCV_FILE_EVENT_DEBUG=1,
+  committed with this update) pinpoints the exact step:
+
+    [file-event] read    identity=.../backend_switching.spl nil=false
+    [file-event] event-made identity=... nil=false
+    [file-event] done    identity=... retained=false ended=true
+
+  Scope begin/pause/end all succeed; the event (a `struct
+  CompileSourceEventV1`, i.e. a RAW-tagged block, not a class object) reads
+  and materializes fine; `transient_heap_promote_v1<CompileSourceEventV1>`
+  returns FALSE on the seed lane (interpreted and pure-Simple unaffected).
+
+Mechanism analysis at the raw-path level: the Rust twin's promote walk
+(collections.rs:3154-3184) reads the struct via C `rt_transient_raw_words`
+(succeeds: raw table OR C struct-alloc registry), then promotes each
+reachable raw ptr via C `rt_transient_raw_promote` (runtime_memory.c:205),
+which returns 0 only when the ptr is in NEITHER the raw table NOR the C
+struct-alloc registry. Since raw_words and raw_promote share the raw table
+and both consult the struct registry, a consistent C-side state cannot
+produce words-OK + promote-0 for the same ptr — so the failing ptr is
+either (a) a child raw block of the event that raw_words admitted through
+one registry but whose promote-time registry state differs, or (b) a raw
+block whose words came from a registry that promote does not re-check in
+the same way. Distinguishing (a) from (b) needs one more instrumented
+cycle: env-gated eprint of the failing `ptr` at collections.rs:3182-3184
+plus the two registry membership checks for that ptr.
+
+Repro (fresh seed, ~3 min build with warm cargo cache):
+```
+cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml \
+  --profile bootstrap --target aarch64-apple-darwin -p simple-driver
+DYLD_INSERT_LIBRARIES=<any bootstrap>/libsimple_runtime.dylib \
+  # still required: JIT cannot resolve simple_contract_check from the exe
+SIMPLE_LIB=$PWD/src SIMPLE_SCV_FILE_EVENT_DEBUG=1 \
+SIMPLE_BUILD_MEMORY_RESERVE_BYTES=536870912 \
+SIMPLE_SCV_INVENTORY_COLD_INIT=1 \
+<fresh seed> run src/app/cli/native_build_main.spl native-build \
+  --entry src/app/sdn_diff_repro/main.spl --emit-object \
+  --backend=cranelift --threads 1 --mode dynload \
+  --runtime-path src/compiler_rust/target/aarch64-apple-darwin/bootstrap \
+  -o build/probe.o
+```
