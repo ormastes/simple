@@ -578,3 +578,43 @@ needs the cranelift register-allocation investigation with the MIR+CLIF in
 hand (the landed RSP client and SIMPLE_DUMP_CLIF/SIMPLE_DUMP_MIR provide
 both). Recorded as the precise next step. No production code changed (ring
 instrumentation reverted); bug_db.sdn untouched. In-guest cycles: 2.
+
+---
+
+## 2026-11-06 — ROOT CAUSE FIXED (PR #7040+1): ghdl TU's rt_alloc decoded the raw byte size — the "field count" was size/8
+
+The size-log lane's "field count" was a coincidence that unmasked the real
+defect. The three-way layer proof resolved to a ONE-LINE runtime bug:
+
+- The ABI contract (documented at the x86_64 sibling,
+  `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c:763`):
+  "compile_struct_init passes RAW size (not tagged)".
+- Both main riscv64 TUs honor it:
+  `baremetal_stubs.c:284` and `baremetal_runtime_core.inc.c:224` use the
+  size verbatim.
+- The ghdl proof TU's duplicate copy
+  (`ghdl_boot_info_runtime.c:150`, added with the TU) applied
+  `simpleos_raw_or_encoded_int(size)` -- the TAGGED-VALUE decode -- to the
+  RAW byte count. Every multiple-of-8 byte size divides by 8: 120 -> 15,
+  16 -> 2. This copy won the duplicate-symbol lottery for rt_alloc, so every
+  struct literal in-guest was under-allocated 8x. The "0xf/0x2 = field
+  count" reading was 120/8 and 16/8 -- correct bytes mangled by the decode,
+  not a wrong size at the emitter.
+
+Fix (this PR): ghdl_boot_info_runtime.c rt_alloc uses the raw size verbatim,
+matching its two siblings and the documented contract.
+
+Verification (release-built seed from this branch):
+- Kernel build PASS, both rows.
+- OpenSBI boot: the par_state overlay fault is GONE; the frontend now runs
+  the REAL PARSE and reaches DESUGAR -- the guest proceeds past
+  "[interp] lowering hello-world source" deep into
+  `compiler__frontend__desugar__desugar_async__desugar_module`, stopping at a
+  CLEARLY DIFFERENT next blocker: scause=5 load from 0x38
+  (a nil-struct field deref) at desugar_module+0x1a68
+  (transcript /tmp/rv-boot/interp-serial-m1.log). Deeper in-guest progress
+  than any prior lane; the nil-deref in desugar is the new tail for the next
+  lane.
+
+This record's blocker chain is CLOSED. bug_db.sdn untouched.
+In-guest cycles: 1.
