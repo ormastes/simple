@@ -1,15 +1,20 @@
 # Managed workload launch — the typed PID1-to-kernel execution seam.
 #
 # A service manager may compile declarative policy in userspace, but it cannot
-# mint authority. This adapter rechecks the compiled image binding and routes
-# the policy through the sole live SpawnSpec/CSpace path. It deliberately takes
-# executable bytes from the trusted image loader boundary, not from manifest
-# text or a caller-provided capability pouch.
+# mint authority. This adapter rechecks the compiled image binding, verifies
+# the exact launch bytes against the SpawnSpec digest, and routes creation
+# through the loader's authenticated image registry and one-use token
+# (managed_image_authority_v1 + fs_exec_adopt_authenticated_with_launch_v1).
+# It deliberately never recreates the removed path-only mint.
 
 use os.services.workload.workload_manifest.{CompiledExecutionPolicy}
-use os.kernel.loader.workload_image_hash.{workload_image_hash_is_canonical}
-use os.kernel.loader.process_image.{build_user_process_image}
-use os.kernel.loader.fs_exec_spawn.{FsExecPrepareResult, fs_exec_register_image_with_spawn_spec}
+use os.kernel.loader.workload_image_hash.{workload_image_hash_is_canonical,
+    workload_image_blake3_hash}
+use os.kernel.loader.managed_image_authority_v1.{
+    managed_image_authority_issue_v1}
+use os.kernel.loader.fs_exec_spawn.{FsExecPrepareResult,
+    fs_exec_adopt_authenticated_with_launch_v1}
+use os.kernel.loader.spawn_recipes.{SPAWN_RECIPE_APP_LAUNCHER}
 use os.kernel.security.execution_context.{KernelCallContext}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.types.task_types.{TaskId, TaskPriority}
@@ -34,22 +39,28 @@ pub fn launch_compiled_workload_into_scheduler(
     priority: TaskPriority,
     scheduler: Scheduler
 ) -> FsExecPrepareResult:
-    """Launch one verified policy through the sole managed CSpace path.
+    """Launch one verified policy through the sole managed authority seam.
 
     This is intentionally not a generic role/path syscall. A malformed or
-    internally inconsistent policy fails before image parsing and CSpace
-    minting; the downstream launch then independently matches the exact image
-    bytes against `spawn_spec.image_hash` before it creates a child TCB.
+    internally inconsistent policy fails before image staging and authority
+    issue; the adoption then independently rechecks the caller's execute
+    capability, the recipe launch contract, and the exact image bytes against
+    `spawn_spec.image_hash` before it creates a child TCB.
     """
     if not _policy_is_self_consistent(policy):
         return FsExecPrepareResult(scheduler: scheduler, pid: -13, entry: 0)
-    val image_result = build_user_process_image(
-        policy.image.executable_path, bytes, arch, argv, envp)
-    if image_result.is_err():
-        return FsExecPrepareResult(scheduler: scheduler, pid: -8, entry: 0)
-    val prepared = fs_exec_register_image_with_spawn_spec(
-        context, policy.spawn_spec, policy.image.executable_path,
-        image_result.unwrap(), priority, scheduler)
+    if workload_image_blake3_hash(bytes) != policy.spawn_spec.image_hash:
+        return FsExecPrepareResult(scheduler: scheduler, pid: -13, entry: 0)
+    val staged = managed_image_authority_issue_v1(bytes, arch,
+        "managed-workload")
+    if not staged.staged:
+        return FsExecPrepareResult(scheduler: scheduler,
+            pid: staged.error_pid, entry: 0)
+    val prepared = fs_exec_adopt_authenticated_with_launch_v1(
+        scheduler, staged.table, staged.authorities, staged.token,
+        staged.consumer, staged.entry_point, context.task_id.id as i64,
+        context.capabilities, policy.image.executable_path, argv, envp,
+        SPAWN_RECIPE_APP_LAUNCHER)
     if prepared.pid <= 0:
         return prepared
     var live_scheduler = prepared.scheduler

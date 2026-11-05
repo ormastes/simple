@@ -5,6 +5,11 @@
 -- real window; every access requires polling like on real silicon).
 --
 -- Acceptance checks (each backed by `assert ... severity failure`):
+--   0. Authentication (bug
+--      riscv_debug_module_authenticated_hardwired_2026-09-01): the DM is
+--      PROVISIONED with OTP key AUTH_KEY; SBA is denied (sberror=7) while
+--      unauthenticated, a wrong authdata response stays unauthenticated,
+--      the correct response authenticates and the following checks run.
 --   1. SBCS reset value: sbversion=1, sbaccess=2, sbasize=64,
 --      sbaccess32/64=1 (exact value 0x2004080C).
 --   2. sbreadonaddr, 64-bit: write SBADDRESS0=0x10 -> SBDATA0/SBDATA1 ==
@@ -63,11 +68,17 @@ architecture sim of tb_sba is
   signal sb_err   : std_logic;
 
   constant A_DMCONTROL  : std_logic_vector(6 downto 0) := "0010000";  -- 0x10
+  constant A_DMSTATUS   : std_logic_vector(6 downto 0) := "0010001";  -- 0x11
+  constant A_AUTHDATA   : std_logic_vector(6 downto 0) := "0110000";  -- 0x30
   constant A_SBCS       : std_logic_vector(6 downto 0) := "0111000";  -- 0x38
   constant A_SBADDRESS0 : std_logic_vector(6 downto 0) := "0111001";  -- 0x39
   constant A_SBADDRESS1 : std_logic_vector(6 downto 0) := "0111010";  -- 0x3A
   constant A_SBDATA0    : std_logic_vector(6 downto 0) := "0111100";  -- 0x3C
   constant A_SBDATA1    : std_logic_vector(6 downto 0) := "0111101";  -- 0x3D
+
+  -- Provisioned-lifecycle OTP key for the authdata challenge (bug
+  -- riscv_debug_module_authenticated_hardwired_2026-09-01).
+  constant AUTH_KEY : std_logic_vector(31 downto 0) := x"A5A55A5A";
 
 begin
 
@@ -89,6 +100,8 @@ begin
       dmi_wdata => dm_wdata, dmi_op => dm_op,
       dmi_rdata => dm_rdata, dmi_resp => dm_resp, dmi_ready => dm_ready,
       halted_i => '1', running_i => '0',
+      lifecycle_i => "01",       -- PROVISIONED: SBA gated until challenge
+      auth_key_i  => AUTH_KEY,
       sb_re_o => sb_re, sb_we_o => sb_we,
       sb_addr_o => sb_addr, sb_wdata_o => sb_wdata, sb_size_o => sb_size,
       sb_rdata_i => sb_rdata, sb_ack_i => sb_ack, sb_err_i => sb_err);
@@ -167,6 +180,36 @@ begin
     dmi_read(A_DMCONTROL, rd);
     assert rd(0) = '1'
       report "dmactive did not read back 1" severity failure;
+
+    ---------------------------------------------------------------------
+    -- CHECK0: SBA is gated until the authdata challenge succeeds (bug
+    -- riscv_debug_module_authenticated_hardwired_2026-09-01).
+    dmi_read(A_DMSTATUS, rd);
+    assert rd(7) = '0'
+      report "CHECK0 FAIL: authenticated before challenge, DMSTATUS=0x"
+        & to_hstring(rd) severity failure;
+    dmi_write(A_AUTHDATA, x"FFFFFFFF");  -- wrong key: stays unauthenticated
+    dmi_read(A_DMSTATUS, rd);
+    assert rd(7) = '0'
+      report "CHECK0 FAIL: wrong key authenticated, DMSTATUS=0x"
+        & to_hstring(rd) severity failure;
+    dmi_write(A_SBDATA0, x"DEADBEEF");   -- unauthenticated: must be denied
+    dmi_read(A_SBCS, rd);
+    assert rd(14 downto 12) = "111"
+      report "CHECK0 FAIL: unauthenticated SBA write not denied, SBCS=0x"
+        & to_hstring(rd) severity failure;
+    dmi_write(A_SBCS, x"00047000");      -- W1C sberror, keep sbaccess=2
+    dmi_read(A_SBCS, rd);
+    assert rd(14 downto 12) = "000"
+      report "CHECK0 FAIL: sberror not W1C-cleared, SBCS=0x"
+        & to_hstring(rd) severity failure;
+    dmi_write(A_AUTHDATA, AUTH_KEY);     -- correct key: authenticated
+    dmi_read(A_DMSTATUS, rd);
+    assert rd(7) = '1'
+      report "CHECK0 FAIL: correct key not authenticated, DMSTATUS=0x"
+        & to_hstring(rd) severity failure;
+    report "CHECK0 PASS: SBA gated until authdata challenge succeeds"
+      severity note;
 
     ---------------------------------------------------------------------
     -- Check 1: SBCS reset/capability value.

@@ -1,0 +1,122 @@
+# @cover src/lib/nogc_sync_mut/js/engine/vm_object_store.spl
+# @cover src/lib/nogc_async_mut/gpu/browser_engine/script/event_api.spl
+
+"""Reachability-aware reclamation of the JS VM object heap.
+
+Browser DOM dispatch hands page listeners a fresh event object per event.
+Page code may retain the latest event, so reclamation must be
+reachability-based: objects proven unreachable from globals, environments,
+call frames, pending callbacks/promises, timers, host bindings, and listener
+registries are reclaimed; retained events survive.
+"""
+
+use std.spec.*
+
+use std.js.engine.js_error.{JsLogger, LogLevel}
+use std.js.types.js_types.{JsValue}
+use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
+
+fn _expect_string_property(
+    interpreter: JsInterpreter, object_id: i64, key: text, expected: text
+):
+    match interpreter.get_object_property(object_id, key):
+        JsValue.String(value):
+            expect(value).to_equal(expected)
+        _:
+            fail("expected string property {object_id}.{key}")
+
+describe "JS VM object heap reachability reclamation":
+    it "reclaims only objects unreachable from the root set":
+        step("Allocate a rooted object, a chained child, and an orphan")
+        var interpreter = JsInterpreter.new(
+            JsLogger.new("object-store-reachability-gc", LogLevel.Error)
+        )
+        val kept_id = interpreter.create_object()
+        val child_id = interpreter.create_object()
+        val dropped_id = interpreter.create_object()
+        interpreter.set_object_property(
+            kept_id, "name", JsValue.String(v: "kept")
+        )
+        interpreter.set_object_property(
+            kept_id, "child", JsValue.Object(id: child_id)
+        )
+        interpreter.set_object_property(
+            child_id, "name", JsValue.String(v: "child")
+        )
+        interpreter.set_object_property(
+            dropped_id, "name", JsValue.String(v: "dropped")
+        )
+        interpreter.define_global_value(
+            "rooted", JsValue.Object(id: kept_id)
+        )
+        val live_before = interpreter.object_store.obj_proto_ids.len()
+
+        step("Collect garbage and reclaim exactly the orphan")
+        val reclaimed = interpreter.collect_garbage()
+        expect(reclaimed).to_equal(1)
+
+        step("Rooted object, chained child, and their properties survive")
+        _expect_string_property(interpreter, kept_id, "name", "kept")
+        _expect_string_property(interpreter, child_id, "name", "child")
+        match interpreter.get_object_property(kept_id, "child"):
+            JsValue.Object(id):
+                expect(id).to_equal(child_id)
+            _:
+                fail("expected kept.child to reference the child object")
+
+        step("The reclaimed object's storage is gone")
+        match interpreter.get_object_property(dropped_id, "name"):
+            JsValue.Undefined:
+                pass_dn
+            _:
+                fail("expected reclaimed object property to be gone")
+        expect(
+            interpreter.object_store.obj_proto_ids.len()
+        ).to_equal(live_before)
+
+        step("The next allocation reuses the reclaimed object id")
+        val reused_id = interpreter.create_object()
+        expect(reused_id).to_equal(dropped_id)
+        expect(
+            interpreter.object_store.obj_proto_ids.len()
+        ).to_equal(live_before)
+
+    it "keeps the retained latest event while reclaiming superseded ones":
+        step("Simulate repeated event dispatch retaining only the latest event")
+        var interpreter = JsInterpreter.new(
+            JsLogger.new("object-store-event-retention-gc", LogLevel.Error)
+        )
+        val first_event = interpreter.create_object()
+        interpreter.set_object_property(
+            first_event, "type", JsValue.String(v: "probe")
+        )
+        interpreter.define_global_value(
+            "event", JsValue.Object(id: first_event)
+        )
+        interpreter.define_global_value(
+            "retainedEvent", JsValue.Object(id: first_event)
+        )
+
+        step("A second dispatch supersedes the first event everywhere")
+        val second_event = interpreter.create_object()
+        interpreter.set_object_property(
+            second_event, "type", JsValue.String(v: "probe")
+        )
+        interpreter.define_global_value(
+            "event", JsValue.Object(id: second_event)
+        )
+        interpreter.define_global_value(
+            "retainedEvent", JsValue.Object(id: second_event)
+        )
+
+        step("Reclaim the superseded event but keep the retained one")
+        val reclaimed = interpreter.collect_garbage()
+        expect(reclaimed).to_equal(1)
+        _expect_string_property(
+            interpreter, second_event, "type", "probe"
+        )
+        match interpreter.lookup_global_value("retainedEvent"):
+            Some(JsValue.Object(id)):
+                expect(id).to_equal(second_event)
+            _:
+                fail("expected retainedEvent to reference the latest event")

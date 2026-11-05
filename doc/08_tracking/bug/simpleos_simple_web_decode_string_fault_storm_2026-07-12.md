@@ -1,6 +1,45 @@
 # SimpleOS Simple Web `decode_string` Fault Storm
 ## Open 2026-09-16 — needs owner triage
 
+## 2026-11-05 — offline TDD fix: gradient decode/split index-space violation (worktree work/libbug-w6-decstr-20261105)
+
+Residual std-lib instance of this fault class, fixed at interpreter/spec level
+(aarch64 Linux host; the x86_64 baremetal lane cannot execute here). The
+canonical renderer's gradient decode chain in
+`simple_web_html_layout_renderer_foundation.spl` bounded its scanners with
+`len()` (BYTES) while probing with `char_at` (CHARACTERS):
+`split_top_level_commas_paren_aware` and `gradient_matching_close`. On any
+multi-byte gradient value, every split point after a multi-byte character
+shifted, `substring` cut parts mid-UTF-8-sequence, and the malformed parts
+(mangled to U+FFFD in the interpreter; a mistagged/untagged slice on the
+compiled lane, the same shape as the heap-like tagged values this bug is
+tracked for) were handed to the byte-level decode that follows. Reproduced
+behaviorally: `split_top_level_commas_paren_aware("red, café, blue")` returned
+`["red", "caf<U+FFFD>", ", blue"]` instead of `["red", "café", "blue"]`.
+
+Fix: both scanners now probe `s.bytes()` (ASCII `(`, `)`, `,` never occur
+inside a UTF-8 multi-byte sequence, so byte probing is answer-identical on
+ASCII and correct on multi-byte input — same reasoning as the HTML admission
+guard). The three gradient-decode `starts_with` receivers on split-part /
+`lower()` results now route through the tagged-text facade
+`text_starts_with_portable` per this doc's dispatch-hazard mitigation.
+
+Offline contract pinned by (new)
+`test/01_unit/runtime/baremetal_string_split_abi_spec.spl`: behavioral ABI
+pins (split parts are decodable tagged text: len/bytes/trim/starts_with/
+iterate/`[text]` round-trip, multi-byte documents, empty-delimiter
+engine-divergence note) plus source-contract pins on the scanner index space
+and facade routing. Regression sweep green: scan_index_space (20), foundation
+_gradient (13), computed_style_hot_split (4), background_gradient_over_color
+(5), gradient_stops_wiring (8), ABI spec (10). Pre-existing, unrelated:
+`simple_web_html_layout_renderer_module_split_spec.spl` size gate fails on
+pristine release/1.0.0 HEAD (`simple_web_html_layout_renderer.spl` 146240 and
+`..._decl_apply.spl` 133657 bytes, both over the 128 KiB parser-input budget;
+not touched by this change). Not closed: the live SimpleOS zero-exception
+three-content-frame gate still has not re-run; `is_gradient_angle_token`
+retains a benign char_at/len mismatch (multibyte angle tokens fail closed to
+"not an angle").
+
 ## 2026-09-22 — production-path text-owner cleanup (offline)
 
 The earlier live decode fault fix remains recorded below. The theme-package

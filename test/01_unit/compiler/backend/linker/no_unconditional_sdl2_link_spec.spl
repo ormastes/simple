@@ -1,0 +1,38 @@
+# Source-level guard for linux_native_link_unconditional_lsdl2_2026-09-06.
+#
+# The hosted link paths used to push -lSDL2 unconditionally, so native-build
+# failed at the link step on any host without the SDL2 dev package (the
+# linker must FIND libSDL2 even under --as-needed). The repair removes the
+# unconditional push from every OS arm: src/runtime/runtime_sdl2.c binds SDL
+# via dlopen/dlsym at first use, the runtime archive carries zero undefined
+# SDL_* symbols, and a program that wants SDL2 linked statically requests it
+# through config.libraries. This spec pins that no active (non-comment)
+# source line reintroduces an SDL2 link, and that the config.libraries
+# request path stays intact.
+#
+# @cover src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl
+# @cover src/compiler/70.backend/linker/_LinkerWrapper/native_all_support.spl
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read}
+
+fn assert_sdl2_mentions_are_comments(path: text):
+    val source = file_read(path)
+    for raw_line in source.split("\n"):
+        val line = raw_line.trim()
+        if line.contains("SDL2"):
+            expect(line.starts_with("#")).to_be(true)
+
+describe "hosted native link never requests SDL2 unconditionally":
+    it "mentions SDL2 only in comments in the linker wrapper":
+        step("scan native_linking.spl for active SDL2 link pushes")
+        assert_sdl2_mentions_are_comments("src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl")
+
+    it "mentions SDL2 only in comments in the shared support-args table":
+        step("scan native_all_support.spl (covers linux/freebsd/macos arms)")
+        assert_sdl2_mentions_are_comments("src/compiler/70.backend/linker/_LinkerWrapper/native_all_support.spl")
+
+    it "keeps the config.libraries request path for programs that want SDL2 linked":
+        step("explicit -l requests still flow from build config")
+        val source = file_read("src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl")
+        expect(source).to_contain("for lib in config.libraries:")

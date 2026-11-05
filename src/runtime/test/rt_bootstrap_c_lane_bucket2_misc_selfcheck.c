@@ -13,14 +13,16 @@
  * rt_file_lock/rt_file_unlock.
  *
  * Build (links against the standalone-compiled runtime_native.o, i.e. the
- * exact TU the core-C bootstrap archive is made from -- same recipe as
- * rt_runtime_kind_probes_core_c_selfcheck.c beside this file):
- *   cc -c -std=gnu11 -ffunction-sections -DSIMPLE_CORE_C_STANDALONE=1 \
+ * exact TU the core-C bootstrap archive is made from, plus its memory owner):
+ *   clang -c -std=gnu11 -ffunction-sections -DSIMPLE_CORE_C_STANDALONE=1 \
  *      -DSIMPLE_RUNTIME_MEMORY_OWNER=1 -mno-outline-atomics \
  *      -Isrc/runtime -Isrc/runtime/platform src/runtime/runtime_native.c -o rn.o
- *   cc -std=gnu11 -Wl,--gc-sections \
+ *   clang -c -std=gnu11 -ffunction-sections -DSIMPLE_CORE_C_STANDALONE=1 \
+ *      -DSIMPLE_RUNTIME_MEMORY_OWNER=1 -mno-outline-atomics \
+ *      -Isrc/runtime -Isrc/runtime/platform src/runtime/runtime_memory.c -o runtime_memory.o
+ *   clang -std=gnu11 -Wl,--gc-sections \
  *      src/runtime/test/rt_bootstrap_c_lane_bucket2_misc_selfcheck.c \
- *      rn.o -lpthread -lm -ldl -o selfcheck && ./selfcheck
+ *      rn.o runtime_memory.o -lpthread -lm -ldl -o selfcheck && ./selfcheck
  */
 #include <math.h>
 #include <stdbool.h>
@@ -31,6 +33,9 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <stdlib.h>
+#include <errno.h>
+#include <signal.h>
+#include <sys/wait.h>
 
 extern int64_t rt_time_now_seconds(void);
 /* rt_remove takes a single boxed RuntimeValue text handle (see the code
@@ -269,6 +274,34 @@ static void check_mmap_family(void) {
     }
 }
 
+static void check_contended_lock_returns(const char* path, int64_t timeout_secs) {
+    pid_t child = fork();
+    CHECK(child >= 0, "fork for rt_file_lock contention must succeed");
+    if (child < 0) return;
+    if (child == 0) {
+        alarm(2); /* Bound a regression to the old blocking attempt. */
+        int64_t contender = rt_file_lock((const uint8_t*)path, strlen(path), timeout_secs);
+        if (contender >= 0) {
+            rt_file_unlock(contender);
+            _exit(2);
+        }
+        _exit(0);
+    }
+    int status = 0;
+    pid_t waited;
+    do {
+        waited = waitpid(child, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    if (waited != child) {
+        CHECK(0, "waitpid for rt_file_lock contender must succeed");
+        kill(child, SIGKILL);
+        waitpid(child, &status, 0);
+        return;
+    }
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "contended nonpositive-timeout rt_file_lock must promptly return -1");
+}
+
 static void check_file_lock(void) {
     char path[] = "/tmp/rt_bucket2_selfcheck_lock_XXXXXX";
     int fd = mkstemp(path);
@@ -277,7 +310,16 @@ static void check_file_lock(void) {
         close(fd);
         int64_t handle = rt_file_lock((const uint8_t*)path, strlen(path), 0);
         CHECK(handle >= 0, "rt_file_lock on a real file returns a non-negative descriptor");
-        CHECK(rt_file_unlock(handle) == true, "rt_file_unlock releases and closes cleanly");
+        if (handle >= 0) {
+            check_contended_lock_returns(path, 0);
+            check_contended_lock_returns(path, -1);
+            CHECK(rt_file_unlock(handle) == true, "rt_file_unlock releases and closes cleanly");
+            handle = rt_file_lock((const uint8_t*)path, strlen(path), 0);
+            CHECK(handle >= 0, "zero-timeout rt_file_lock reacquires after unlock");
+            if (handle >= 0) {
+                CHECK(rt_file_unlock(handle) == true, "reacquired rt_file_lock releases cleanly");
+            }
+        }
         unlink(path);
     }
 }

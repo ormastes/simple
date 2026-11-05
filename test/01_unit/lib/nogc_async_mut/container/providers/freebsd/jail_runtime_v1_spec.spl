@@ -1,0 +1,120 @@
+"""FreeBSD jail provider leaf: admission, probe translation, exact argv, fail-closed lifecycle."""
+
+use std.spec.{describe, it, expect}
+use std.common.contracts.container.runtime_v1.{
+    RuntimeIdentityV1, runtime_state_empty, RUNTIME_PHASE_PREPARED,
+    RUNTIME_STATUS_OK, RUNTIME_STATUS_REJECTED, RUNTIME_STATUS_BLOCKED}
+use std.common.contracts.container.host_capability_v1.{
+    container_host_admission_reason_v1, ContainerHostRequirementV1,
+    CONTAINER_ISOLATION_NATIVE_V1}
+use std.nogc_async_mut.container.providers.freebsd.jail_runtime_v1.{
+    FreebsdJailRuntimeProviderV1, freebsd_jail_provider_contract_v1,
+    freebsd_jail_request_reason_v1, freebsd_jail_command_v1,
+    freebsd_jail_capability_from_probe_v1, FREEBSD_JAIL_ENGINE_V1}
+
+fn _identity() -> RuntimeIdentityV1:
+    RuntimeIdentityV1(pod_uid: "pod-1", attempt: 1, provider_generation: 1,
+        operation_id: "op-1", engine: FREEBSD_JAIL_ENGINE_V1, native_id: "",
+        node_boot_id: "boot-1")
+
+fn _prepared_state() -> std.common.contracts.container.runtime_v1.RuntimeStateV1:
+    var state = runtime_state_empty()
+    state.phase = RUNTIME_PHASE_PREPARED
+    state.identity = _identity()
+    state
+
+fn _scripted_capable() -> FreebsdJailRuntimeProviderV1:
+    FreebsdJailRuntimeProviderV1.scripted("ocijail", "/var/db/containers",
+        "boot-1", 1, true, "")
+
+describe "freebsd jail provider leaf":
+    it "advertises the v1 contract with honest optional capabilities":
+        val contract = freebsd_jail_provider_contract_v1()
+        expect(contract.provider_id).to_equal(FREEBSD_JAIL_ENGINE_V1)
+        expect(contract.version).to_equal(1)
+        expect(contract.supports_recovery).to_equal(false)
+        expect(contract.supports_logs).to_equal(true)
+
+    it "admits only attempt-bound identities with matching jail abi":
+        expect(freebsd_jail_request_reason_v1(_identity(), "pod-1", "freebsd:14.1",
+            "freebsd", "freebsd")).to_equal("")
+        expect(freebsd_jail_request_reason_v1(_identity(), "pod-1", "freebsd:14.1",
+            "freebsd", "linux")).to_equal("freebsd-jail-abi-mismatch")
+        expect(freebsd_jail_request_reason_v1(_identity(), "unrelated-name",
+            "freebsd:14.1", "freebsd", "freebsd")).to_equal(
+            "freebsd-jail-name-not-attempt-bound")
+
+    it "rejects malformed identities images and jail names":
+        var bad_engine = _identity()
+        bad_engine.engine = "other-engine"
+        expect(freebsd_jail_request_reason_v1(bad_engine, "pod-1", "freebsd:14.1",
+            "freebsd", "freebsd")).to_equal("freebsd-jail-engine-mismatch")
+        expect(freebsd_jail_request_reason_v1(_identity(), "pod-1",
+            "freebsd:14.1\ninject", "freebsd", "freebsd")).to_equal(
+            "freebsd-jail-image-ref-invalid")
+        expect(freebsd_jail_request_reason_v1(_identity(), "bad name",
+            "freebsd:14.1", "freebsd", "freebsd")).to_equal(
+            "freebsd-jail-name-invalid")
+        var bound = _identity()
+        bound.native_id = "42"
+        expect(freebsd_jail_request_reason_v1(bound, "pod-1", "freebsd:14.1",
+            "freebsd", "freebsd")).to_equal("freebsd-jail-invalid-attempt-identity")
+
+    it "constructs exact argv for each native operation without a shell":
+        val create = freebsd_jail_command_v1("create", "pod-1", "freebsd:14.1", "")
+        expect(create.program).to_equal("ocijail")
+        expect(create.args).to_equal(["create", "--name", "pod-1", "freebsd:14.1"])
+        val stop = freebsd_jail_command_v1("stop", "pod-1", "", "ocijail")
+        expect(stop.args).to_equal(["kill", "pod-1", "TERM"])
+        val destroy = freebsd_jail_command_v1("destroy", "pod-1", "", "ocijail")
+        expect(destroy.args).to_equal(["delete", "--force", "pod-1"])
+        val wait = freebsd_jail_command_v1("wait", "pod-1", "", "ocijail")
+        expect(wait.program).to_equal("jls")
+        expect(freebsd_jail_command_v1("bogus", "pod-1", "", "").program).to_equal("")
+
+    it "translates a live launch-capable probe into the delegated route":
+        val probe = _scripted_capable().probe()
+        expect(probe.launch_capable).to_equal(true)
+        val capability = freebsd_jail_capability_from_probe_v1(probe, true)
+        expect(capability.launch_capable).to_equal(true)
+        expect(capability.client_privilege).to_equal("delegated")
+        expect(capability.admin_setup).to_equal(true)
+        expect(capability.host_os).to_equal("freebsd")
+        expect(capability.guest_os).to_equal("freebsd")
+
+    it "never reports scripted probe evidence as a live capability":
+        val probe = _scripted_capable().probe()
+        val capability = freebsd_jail_capability_from_probe_v1(probe, false)
+        expect(capability.launch_capable).to_equal(false)
+        expect(capability.reason).to_equal("freebsd-jail-live-probe-unavailable")
+
+    it "satisfies exact host admission for a live delegated capability":
+        val capability = freebsd_jail_capability_from_probe_v1(
+            _scripted_capable().probe(), true)
+        expect(container_host_admission_reason_v1(capability,
+            ContainerHostRequirementV1(host_os: "freebsd", guest_os: "freebsd",
+                isolation_class: CONTAINER_ISOLATION_NATIVE_V1,
+                require_unprivileged_client: false))).to_equal("")
+
+    it "fails lifecycle requests closed on a non-live host":
+        val provider = FreebsdJailRuntimeProviderV1.new("linux", "", "/state",
+            "boot-1", 1, true)
+        val request = provider.lifecycle_request_v1(_prepared_state(), "create",
+            "pod-1", "freebsd:14.1")
+        expect(request.status).to_equal(RUNTIME_STATUS_BLOCKED)
+
+    it "blocks scripted lifecycle execution even when the probe is capable":
+        val request = _scripted_capable().lifecycle_request_v1(
+            _prepared_state(), "create", "pod-1", "freebsd:14.1")
+        expect(request.status).to_equal(RUNTIME_STATUS_BLOCKED)
+        expect(request.reason).to_equal(
+            "freebsd-jail-scripted-live-execution-unavailable")
+
+    it "rejects unsupported operations and malformed requests before probing":
+        val provider = _scripted_capable()
+        val bad_op = provider.lifecycle_request_v1(_prepared_state(), "exec",
+            "pod-1", "freebsd:14.1")
+        expect(bad_op.status).to_equal(RUNTIME_STATUS_REJECTED)
+        val bad_req = provider.lifecycle_request_v1(_prepared_state(), "create",
+            "unrelated-name", "freebsd:14.1")
+        expect(bad_req.status).to_equal(RUNTIME_STATUS_REJECTED)

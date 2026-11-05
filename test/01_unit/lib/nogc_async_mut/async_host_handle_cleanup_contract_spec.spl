@@ -27,7 +27,7 @@ fn cleanup_handle(id: usize) -> HostTaskHandle<()>:
     HostTaskHandle(task_id: id, state: TaskState.Pending, result: nil,
         error: nil, cancel_token: context.lifetime, wakers: [], context: Some(context))
 
-fn cleanup_holder_poll() -> Poll<()>:
+fn cleanup_holder_poll() -> i64:
     val context_result = cleanup_scheduler.task_context(cleanup_holder)
     val context = context_result.unwrap()
     match cleanup_mutex.poll_acquire(context):
@@ -35,9 +35,9 @@ fn cleanup_holder_poll() -> Poll<()>:
             cleanup_saved_lease = Some(lease)
             cleanup_visits = cleanup_visits.push(10)
         case _: fail("holder must acquire the actual mutex")
-    Poll.Pending
+    0
 
-fn cleanup_waiter_poll() -> Poll<()>:
+fn cleanup_waiter_poll() -> i64:
     val context_result = cleanup_scheduler.task_context(cleanup_waiter)
     val context = context_result.unwrap()
     match cleanup_mutex.poll_acquire(context):
@@ -50,7 +50,7 @@ fn cleanup_waiter_poll() -> Poll<()>:
             Poll.Ready(())
         case _: fail("waiter unexpectedly refused")
 
-fn cleanup_successor_poll() -> Poll<()>:
+fn cleanup_successor_poll() -> i64:
     val context_result = cleanup_scheduler.task_context(cleanup_successor)
     val context = context_result.unwrap()
     match cleanup_mutex.poll_acquire(context):
@@ -83,10 +83,11 @@ fn cleanup_teardown():
         expect(cleanup_scheduler.reap_task(id)).to_equal(true)
     expect(cleanup_mutex.close()).to_equal(true)
 
-fn cleanup_once():
+fn cleanup_once() -> i64:
     cleanup_runs = cleanup_runs + 1
+    1
 
-fn cleanup_running_poll() -> Poll<()>:
+fn cleanup_running_poll() -> i64:
     val context_result = cleanup_scheduler.task_context(cleanup_holder)
     val context = context_result.unwrap()
     expect(context.register_cleanup(900, cleanup_once)).to_equal(true)
@@ -95,9 +96,9 @@ fn cleanup_running_poll() -> Poll<()>:
     cleanup_scheduler.has_runnable()
     expect(cleanup_runs).to_equal(0)
     if cleanup_running_ready:
-        Poll.Ready(())
+        1
     else:
-        Poll.Pending
+        0
 
 fn cleanup_running_case(ready: bool):
     val baseline = cancellation_registry_live_count()
@@ -115,9 +116,9 @@ fn cleanup_running_case(ready: bool):
     expect(cleanup_scheduler.reap_task(cleanup_holder)).to_equal(true)
     expect(cancellation_registry_live_count()).to_equal(baseline)
 
-fn cleanup_independent_poll() -> Poll<()>:
+fn cleanup_independent_poll() -> i64:
     cleanup_visits = cleanup_visits.push(99)
-    Poll.Ready(())
+    1
 
 # Only immutable scalar IDs cross this boundary. The child constructs and owns
 # all context/queue state; no live parent task authority or cleanup crosses.
@@ -142,27 +143,29 @@ var cleanup_chain_a_count: i64 = 0
 var cleanup_chain_b_count: i64 = 0
 var cleanup_chain_b_context: Option<HostTaskContext> = nil
 
-fn cleanup_chain_a_action():
+fn cleanup_chain_a_action() -> i64:
     cleanup_chain_a_count = cleanup_chain_a_count + 1
     val context = cleanup_chain_b_context.unwrap()
     expect(context.request_cancel()).to_equal(true)
+    1
 
-fn cleanup_chain_b_action():
+fn cleanup_chain_b_action() -> i64:
     cleanup_chain_b_count = cleanup_chain_b_count + 1
+    1
 
-fn cleanup_chain_a_poll() -> Poll<()>:
+fn cleanup_chain_a_poll() -> i64:
     val result = cleanup_scheduler.task_context(cleanup_holder)
     val context = result.unwrap()
     expect(context.register_cleanup(901, cleanup_chain_a_action)).to_equal(true)
     cleanup_visits = cleanup_visits.push(40)
-    Poll.Pending
+    0
 
-fn cleanup_chain_b_poll() -> Poll<()>:
+fn cleanup_chain_b_poll() -> i64:
     val result = cleanup_scheduler.task_context(cleanup_waiter)
     val context = result.unwrap()
     expect(context.register_cleanup(902, cleanup_chain_b_action)).to_equal(true)
     cleanup_visits = cleanup_visits.push(50)
-    Poll.Pending
+    0
 
 describe "Runtime handle cancellation cleans actual parked ownership", tag: ["only-compiled"]:
     it "unlinks a parked waiter and releases a holder exactly once":

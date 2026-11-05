@@ -70,7 +70,7 @@ pub enum ParseError {
         context: Option<Box<ParseContext>>,
     },
 
-    #[error("Unexpected token: expected {expected}, found {found}")]
+    #[error("Unexpected token: expected {expected}, found {found} at line {0}, column {1}", span.line, span.column)]
     UnexpectedToken {
         expected: String,
         found: String,

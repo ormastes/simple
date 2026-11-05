@@ -183,3 +183,36 @@ RuntimeValue rt_unwrap_or_trap(RuntimeValue value)
     if (e->discriminant == err) SIMPLEOS_FV_PANIC("called unwrap on Err");
     return value;
 }
+
+RuntimeValue rt_enum_check_variant(RuntimeValue value,
+                                   RuntimeValue expected_enum_id,
+                                   RuntimeValue expected_discriminant)
+{
+    if (!IS_HEAP(value)) return 0;
+    uintptr_t raw = (uintptr_t)DECODE_PTR(value);
+    if (!raw) return 0;
+    SimpleOsFreestandingEnumV1 *e = (SimpleOsFreestandingEnumV1 *)raw;
+    if (e->hdr.type != HEAP_ENUM) return 0;
+    if (e->discriminant != (uint32_t)(int32_t)expected_discriminant) return 0;
+    /* ID zero is the legacy untyped enum lane, including Result. The real
+     * predicate is required by .is_ok()/.is_err(): the fabricated weak body
+     * returned zero for Err, so callers skipped their error branch and
+     * rt_unwrap_or_trap panicked on the same value. */
+    if (expected_enum_id == 0 || e->enum_id == 0) return 1;
+    return e->enum_id == (uint32_t)(int32_t)expected_enum_id ? 1 : 0;
+}
+
+RuntimeValue rt_is_present(RuntimeValue value)
+{
+    /* Twin of rt_is_none in baremetal_stubs.c and of the other freestanding
+     * providers: nil and a nil-payload enum (Option.None) are absent, scalar
+     * values are present. The weak zero body made every `to_i64() ?? -1` in
+     * DBFS checkpoint decoding choose -1 even for a valid Some. */
+    if (IS_NIL(value)) return 0;
+    if (!IS_HEAP(value)) return 1;
+    uintptr_t raw = (uintptr_t)DECODE_PTR(value);
+    if (!raw) return 1;
+    SimpleOsFreestandingEnumV1 *e = (SimpleOsFreestandingEnumV1 *)raw;
+    if (e->hdr.type == HEAP_ENUM && IS_NIL(e->payload)) return 0;
+    return 1;
+}

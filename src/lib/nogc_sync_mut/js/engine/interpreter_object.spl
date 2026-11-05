@@ -48,6 +48,188 @@ impl JsInterpreter:
         # interpreter, so the proto table never grew.
         self.object_store.alloc_object()
 
+    me collect_garbage() -> i64:
+        """Reachability-based reclamation of the object heap.
+
+        Roots: globals (latest binding per name wins, matching
+        lookup_global_value), environments, call frames, pending
+        callbacks/promises, timers, host bindings, and listener registries —
+        everything that can hold a live reference across a quiescence point.
+        Only objects proven unreachable are reclaimed. Callers must invoke
+        this only at event-loop quiescence points, never during dispatch.
+        """
+        var roots: [i64] = []
+        var shadowed_globals: [text] = []
+        var global_i = self.global_var_names.len() - 1
+        while global_i >= 0:
+            val global_name = self.global_var_names.get(global_i)
+            var already_shadowed = false
+            for seen in shadowed_globals:
+                if seen == global_name:
+                    already_shadowed = true
+            if not already_shadowed:
+                shadowed_globals.push(global_name)
+                match self.global_var_values.get(global_i):
+                    JsValue.Object(id):
+                        roots.push(id)
+                    JsValue.Array(id):
+                        roots.push(id)
+                    _:
+                        pass_dn
+            global_i = global_i - 1
+        for env_frame in self.env_stack.frames:
+            for binding_name in env_frame.bindings.keys():
+                match env_frame.bindings.get(binding_name):
+                    Some(JsValue.Object(id)):
+                        roots.push(id)
+                    Some(JsValue.Array(id)):
+                        roots.push(id)
+                    _:
+                        pass_dn
+        for call in self.call_stack:
+            match call.this_value:
+                JsValue.Object(id):
+                    roots.push(id)
+                JsValue.Array(id):
+                    roots.push(id)
+                _:
+                    pass_dn
+            match call.return_value:
+                JsValue.Object(id):
+                    roots.push(id)
+                JsValue.Array(id):
+                    roots.push(id)
+                _:
+                    pass_dn
+        for timer_task in self.pending_timer_tasks:
+            for timer_arg in timer_task.callback_args:
+                match timer_arg:
+                    JsValue.Object(id):
+                        roots.push(id)
+                    JsValue.Array(id):
+                        roots.push(id)
+                    _:
+                        pass_dn
+        for promise_task in self.pending_promise_tasks:
+            roots.push(promise_task.promise_id)
+        for promise_record in self.promise_handlers:
+            roots.push(promise_record.id)
+            roots.push(promise_record.next_promise_id)
+        for promise_registration in self.promise_handler_registrations:
+            roots.push(promise_registration.promise_id)
+            roots.push(promise_registration.next_promise_id)
+        for async_request in self.pending_async_requests:
+            roots.push(async_request.request_obj_id)
+        for async_request in self.pending_async_request_registry:
+            roots.push(async_request.request_obj_id)
+        for event_callback in self.pending_host_event_callbacks:
+            match event_callback:
+                JsValue.Object(id):
+                    roots.push(id)
+                JsValue.Array(id):
+                    roots.push(id)
+                _:
+                    pass_dn
+        for timer_handle_object_id in self.timer_handle_object_ids:
+            roots.push(timer_handle_object_id)
+        for bound_arg_array_id in self.bound_function_arg_array_ids:
+            roots.push(bound_arg_array_id)
+        for bound_this in self.bound_function_this_values:
+            match bound_this:
+                JsValue.Object(id):
+                    roots.push(id)
+                JsValue.Array(id):
+                    roots.push(id)
+                _:
+                    pass_dn
+        for wasm_import in self.wasm_export_bound_imports:
+            match wasm_import:
+                JsValue.Object(id):
+                    roots.push(id)
+                JsValue.Array(id):
+                    roots.push(id)
+                _:
+                    pass_dn
+        for require_cache_value in self.node_require_cache_values:
+            match require_cache_value:
+                JsValue.Object(id):
+                    roots.push(id)
+                JsValue.Array(id):
+                    roots.push(id)
+                _:
+                    pass_dn
+        match self.node_require_last_cache_value:
+            JsValue.Object(id):
+                roots.push(id)
+            JsValue.Array(id):
+                roots.push(id)
+            _:
+                pass_dn
+        match self.return_value:
+            JsValue.Object(id):
+                roots.push(id)
+            JsValue.Array(id):
+                roots.push(id)
+            _:
+                pass_dn
+        match self.thrown_value:
+            JsValue.Object(id):
+                roots.push(id)
+            JsValue.Array(id):
+                roots.push(id)
+            _:
+                pass_dn
+        match self.host_document_title_value:
+            JsValue.Object(id):
+                roots.push(id)
+            JsValue.Array(id):
+                roots.push(id)
+            _:
+                pass_dn
+        match self.host_document_cookie_value:
+            JsValue.Object(id):
+                roots.push(id)
+            JsValue.Array(id):
+                roots.push(id)
+            _:
+                pass_dn
+        match self.host_body_inner_html_value:
+            JsValue.Object(id):
+                roots.push(id)
+            JsValue.Array(id):
+                roots.push(id)
+            _:
+                pass_dn
+        match self.host_body_text_content_value:
+            JsValue.Object(id):
+                roots.push(id)
+            JsValue.Array(id):
+                roots.push(id)
+            _:
+                pass_dn
+        # Host bindings and well-known prototypes.
+        roots.push(self.host_window_id)
+        roots.push(self.host_document_id)
+        roots.push(self.host_body_id)
+        roots.push(self.host_location_id)
+        roots.push(self.host_navigator_id)
+        roots.push(self.host_chrome_id)
+        roots.push(self.host_session_storage_id)
+        roots.push(self.host_local_storage_id)
+        roots.push(self.host_promise_id)
+        roots.push(self.host_dom_element_list_id)
+        roots.push(self.promise_ctor_id)
+        roots.push(self.promise_proto_id)
+        roots.push(self.response_proto_id)
+        roots.push(self.array_buffer_proto_id)
+        roots.push(self.uint8_array_proto_id)
+        roots.push(self.data_view_proto_id)
+        for host_element_id in self.host_dom_element_ids:
+            roots.push(host_element_id)
+        for host_style_id in self.host_dom_style_ids:
+            roots.push(host_style_id)
+        self.object_store.collect_unreachable(roots)
+
     me _storage_api_property(key: text) -> bool:
         key == "__proto__" or key == "getItem" or key == "setItem" or
         key == "removeItem" or key == "clear" or key == "key" or
@@ -243,20 +425,22 @@ impl JsInterpreter:
         JsValue.Undefined
 
     me get_object_property_exact_key(obj_id: i64, key: text) -> JsValue:
-        val store = self.object_store
-        var i = store.prop_keys.len() - 1
+        # Same last-match-wins exact-key scan as before, restricted to this
+        # object's indexed slots instead of every stored property.
+        val slots = self.object_store.object_slots(obj_id)
+        var i = slots.len() - 1
         while i >= 0:
-            if store.prop_obj_ids.get(i) == obj_id:
-                val prop_key = store.prop_keys.get(i)
-                if prop_key.len() == key.len():
-                    var exact = true
-                    var j = 0
-                    while j < key.len():
-                        if prop_key.slice(j, j + 1) != key.slice(j, j + 1):
-                            exact = false
-                        j = j + 1
-                    if exact:
-                        return store.prop_values.get(i)
+            val s = slots[i]
+            val prop_key = self.object_store.prop_keys.get(s)
+            if prop_key.len() == key.len():
+                var exact = true
+                var j = 0
+                while j < key.len():
+                    if prop_key.slice(j, j + 1) != key.slice(j, j + 1):
+                        exact = false
+                    j = j + 1
+                if exact:
+                    return self.object_store.prop_values.get(s)
             i = i - 1
         JsValue.Undefined
 

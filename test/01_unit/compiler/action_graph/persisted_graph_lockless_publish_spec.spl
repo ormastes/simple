@@ -1,0 +1,89 @@
+# @req REQ-SSPEC-UNIT
+# @cover src/compiler/80.driver/action_graph/persisted_graph.spl
+
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{cwd_process, dir_remove_all, file_exists, file_read_result}
+use compiler.driver.action_graph.persisted_graph.{
+    PersistedBuildGraphV1, persisted_graph_digest_v1,
+    persisted_graph_encode_v1, persisted_graph_load_current_v1,
+    persisted_graph_publish_v1
+}
+
+describe "compiler build graph lockless publication":
+    it "publishes without ever creating a lock file and tolerates duplicate publication":
+        # @req REQ-SSPEC-UNIT
+        val root = cwd_process() + "/build/test/persisted-graph-lockless"
+        dir_remove_all(root)
+        val provisional = PersistedBuildGraphV1("seed", "", "snapshot-1", [])
+        val generation = persisted_graph_digest_v1(provisional)
+        val graph = PersistedBuildGraphV1(generation, "", "snapshot-1", [])
+
+        step("Publish a staged graph and atomically advance CURRENT, lock-free")
+        expect(persisted_graph_publish_v1(root, graph)).to_equal("ok")
+        expect(file_read_result(root + "/CURRENT").unwrap()).to_equal(generation)
+        expect(file_exists(root + "/publication.lock")).to_equal(false)
+
+        step("Duplicate publication of the identical graph is a benign no-replace race")
+        expect(persisted_graph_publish_v1(root, graph)).to_equal("ok")
+        expect(file_read_result(root + "/CURRENT").unwrap()).to_equal(generation)
+        expect(file_read_result(root + "/generations/" + generation + ".graph").unwrap()).to_equal(
+            persisted_graph_encode_v1(graph))
+        expect(file_exists(root + "/publication.lock")).to_equal(false)
+        dir_remove_all(root)
+
+    it "rejects a publisher whose base generation was superseded instead of blocking":
+        # @req REQ-SSPEC-UNIT
+        val root = cwd_process() + "/build/test/persisted-graph-cas-reject"
+        dir_remove_all(root)
+        val provisional_a = PersistedBuildGraphV1("seed-a", "", "snapshot-1", [])
+        val generation_a = persisted_graph_digest_v1(provisional_a)
+        val graph_a = PersistedBuildGraphV1(generation_a, "", "snapshot-1", [])
+
+        step("First publisher wins the base and advances CURRENT")
+        expect(persisted_graph_publish_v1(root, graph_a)).to_equal("ok")
+
+        step("A second publisher still derived from the empty base loses the pre-swap compare")
+        val provisional_b = PersistedBuildGraphV1("seed-b", "", "snapshot-2", [])
+        val generation_b = persisted_graph_digest_v1(provisional_b)
+        val graph_b = PersistedBuildGraphV1(generation_b, "", "snapshot-2", [])
+        expect(persisted_graph_publish_v1(root, graph_b)).to_equal("parent-generation-changed")
+        expect(file_read_result(root + "/CURRENT").unwrap()).to_equal(generation_a)
+
+        step("The owner re-derives from the winner's generation and publishes cleanly")
+        val provisional_c = PersistedBuildGraphV1("seed-c", generation_a, "snapshot-2", [])
+        val generation_c = persisted_graph_digest_v1(provisional_c)
+        val graph_c = PersistedBuildGraphV1(generation_c, generation_a, "snapshot-2", [])
+        expect(persisted_graph_publish_v1(root, graph_c)).to_equal("ok")
+        expect(file_read_result(root + "/CURRENT").unwrap()).to_equal(generation_c)
+        expect(persisted_graph_load_current_v1(root).unwrap().generation).to_equal(generation_c)
+        expect(file_exists(root + "/publication.lock")).to_equal(false)
+        dir_remove_all(root)
+
+    it "answers parent-generation-changed when two publishers race from one base":
+        # @req REQ-SSPEC-UNIT
+        val root = cwd_process() + "/build/test/persisted-graph-cas-race"
+        dir_remove_all(root)
+        val provisional_seed = PersistedBuildGraphV1("seed", "", "snapshot-1", [])
+        val generation_seed = persisted_graph_digest_v1(provisional_seed)
+        val graph_seed = PersistedBuildGraphV1(generation_seed, "", "snapshot-1", [])
+
+        step("Seed one shared base generation")
+        expect(persisted_graph_publish_v1(root, graph_seed)).to_equal("ok")
+
+        step("Two publishers derive different graphs from the same base; the first wins")
+        val provisional_x = PersistedBuildGraphV1("seed-x", generation_seed, "snapshot-x", [])
+        val generation_x = persisted_graph_digest_v1(provisional_x)
+        val graph_x = PersistedBuildGraphV1(generation_x, generation_seed, "snapshot-x", [])
+        val provisional_y = PersistedBuildGraphV1("seed-y", generation_seed, "snapshot-y", [])
+        val generation_y = persisted_graph_digest_v1(provisional_y)
+        val graph_y = PersistedBuildGraphV1(generation_y, generation_seed, "snapshot-y", [])
+        expect(persisted_graph_publish_v1(root, graph_x)).to_equal("ok")
+        expect(file_read_result(root + "/CURRENT").unwrap()).to_equal(generation_x)
+
+        step("The loser's pre-swap compare sees CURRENT moved off its base and rejects")
+        expect(persisted_graph_publish_v1(root, graph_y)).to_equal("parent-generation-changed")
+        expect(file_read_result(root + "/CURRENT").unwrap()).to_equal(generation_x)
+        expect(persisted_graph_load_current_v1(root).unwrap().generation).to_equal(generation_x)
+        expect(file_exists(root + "/publication.lock")).to_equal(false)
+        dir_remove_all(root)

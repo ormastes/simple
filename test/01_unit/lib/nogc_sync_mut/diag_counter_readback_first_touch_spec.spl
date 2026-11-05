@@ -1,0 +1,36 @@
+# std.diag counter read-back — first-monomorphization repro
+#
+# Bug: gpu_scheduler_diag_counter_readback_type_infer_2026-07-06
+# `Dict<text,i64>.get(k) ?? 0` mis-infers the result as the KEY type (text)
+# when this generic instantiation is the FIRST one monomorphized in the
+# process. diag_spec.spl only passes because its earlier `it` blocks warm the
+# monomorphization first. This spec touches the read-back path as
+# first-toucher in a fresh process.
+#
+# Covers: dbg_counter_value miss-path read-back and dbg_summary counter line
+# as first-touch; the stage-facet enable path (dbg_stage with stage facet on).
+
+use std.diag.{
+    dbg_diag_reset, dbg_force_facet, dbg_counter_value, dbg_summary,
+    dbg_count, dbg_stage, dbg_last_emit
+}
+
+describe "std.diag counter read-back (first-touch monomorphization)":
+    it "reads a missing counter as 0 without a type error":
+        dbg_diag_reset()
+        expect(dbg_counter_value("nope")).to_equal(0)
+
+    it "accumulates a written counter and reports it in the summary":
+        dbg_diag_reset()
+        dbg_force_facet("timers")
+        dbg_count("bytes_sent", 5)
+        dbg_count("bytes_sent", 3)
+        expect(dbg_counter_value("bytes_sent")).to_equal(8)
+        expect(dbg_summary()).to_contain("counter bytes_sent = 8")
+
+describe "std.diag stage facet (first-touch monomorphization)":
+    it "emits a stage line when the stage facet is enabled from a fresh process":
+        dbg_diag_reset()
+        dbg_force_facet("stage")
+        dbg_stage("gpu_queue", "submit")
+        expect(dbg_last_emit()).to_contain("[gpu_queue] stage submit")

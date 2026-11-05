@@ -631,64 +631,94 @@ fn flush_sandbox_lowering(
 mod tests {
     use super::*;
 
+    fn run_isolated(test_name: &str, test: impl FnOnce()) {
+        const ISOLATED_CHILD: &str = "SIMPLE_SECURITY_RUNTIME_ISOLATED_CHILD";
+        if std::env::var_os(ISOLATED_CHILD).is_some() {
+            test();
+            return;
+        }
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(format!("security_runtime::tests::{}", test_name))
+            .arg("--nocapture")
+            .env(ISOLATED_CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated security runtime test `{}` failed:\nstdout:\n{}\nstderr:\n{}",
+            test_name,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn tracks_security_gate_runtime_counters() {
-        rt_security_reset_counters();
-        rt_security_register_policy(22, true);
-        rt_security_register_sandbox(33);
-        rt_security_enter_gate(11);
-        rt_security_require_policy(22);
-        rt_security_enter_sandbox(33);
-        rt_security_audit_start(11, 44);
-        rt_security_audit_success(11);
-        assert_eq!(rt_security_gate_depth(), 1);
-        assert_eq!(rt_security_policy_checks(), 1);
-        assert_eq!(rt_security_audit_events(), 2);
-        assert_eq!(rt_security_last_gate_id(), 11);
-        assert_eq!(rt_security_last_policy_id(), 22);
-        assert_eq!(rt_security_last_sandbox_id(), 33);
-        assert_eq!(rt_security_last_audit_id(), 44);
-        assert!(rt_security_policy_allowed());
-        assert!(rt_security_sandbox_registered());
+        run_isolated("tracks_security_gate_runtime_counters", || {
+            rt_security_reset_counters();
+            rt_security_register_policy(22, true);
+            rt_security_register_sandbox(33);
+            rt_security_enter_gate(11);
+            rt_security_require_policy(22);
+            rt_security_enter_sandbox(33);
+            rt_security_audit_start(11, 44);
+            rt_security_audit_success(11);
+            assert_eq!(rt_security_gate_depth(), 1);
+            assert_eq!(rt_security_policy_checks(), 1);
+            assert_eq!(rt_security_audit_events(), 2);
+            assert_eq!(rt_security_last_gate_id(), 11);
+            assert_eq!(rt_security_last_policy_id(), 22);
+            assert_eq!(rt_security_last_sandbox_id(), 33);
+            assert_eq!(rt_security_last_audit_id(), 44);
+            assert!(rt_security_policy_allowed());
+            assert!(rt_security_sandbox_registered());
 
-        rt_security_exit_sandbox(33);
-        rt_security_exit_gate(11);
-        assert_eq!(rt_security_gate_depth(), 0);
+            rt_security_exit_sandbox(33);
+            rt_security_exit_gate(11);
+            assert_eq!(rt_security_gate_depth(), 0);
+        });
     }
 
     #[test]
     fn policy_registry_can_deny_policy_id() {
-        rt_security_reset_counters();
-        rt_security_register_policy(77, false);
-        rt_security_require_policy(77);
-        assert!(!rt_security_policy_allowed());
+        run_isolated("policy_registry_can_deny_policy_id", || {
+            rt_security_reset_counters();
+            rt_security_register_policy(77, false);
+            rt_security_require_policy(77);
+            assert!(!rt_security_policy_allowed());
+        });
     }
 
     #[test]
     fn loads_generated_registry_entries_from_security_aop_sdn() {
-        rt_security_reset_counters();
-        let policy_id = security_metadata_id("CanRequestAdminAction");
-        let sandbox_id = security_metadata_id("admin_sandbox");
-        let manifest = format!(
-            "security_aop_lowering:\n  advice_plans:\n    - gate: UserAdminGate\n      steps:\n        - require_policy: CanRequestAdminAction\n          id: {}\n        - enter_sandbox: admin_sandbox\n          id: {}\n",
-            policy_id, sandbox_id
-        );
+        run_isolated("loads_generated_registry_entries_from_security_aop_sdn", || {
+            rt_security_reset_counters();
+            let policy_id = security_metadata_id("CanRequestAdminAction");
+            let sandbox_id = security_metadata_id("admin_sandbox");
+            let manifest = format!(
+                "security_aop_lowering:\n  advice_plans:\n    - gate: UserAdminGate\n      steps:\n        - require_policy: CanRequestAdminAction\n          id: {}\n        - enter_sandbox: admin_sandbox\n          id: {}\n",
+                policy_id, sandbox_id
+            );
 
-        let loaded = rt_security_load_registry_sdn(manifest.as_ptr(), manifest.len() as u64);
-        assert_eq!(loaded, 2);
-        assert_eq!(rt_security_loaded_registry_entries(), 2);
-        rt_security_require_policy(policy_id);
-        assert!(rt_security_policy_allowed());
-        rt_security_enter_sandbox(sandbox_id);
-        assert!(rt_security_sandbox_registered());
+            let loaded = rt_security_load_registry_sdn(manifest.as_ptr(), manifest.len() as u64);
+            assert_eq!(loaded, 2);
+            assert_eq!(rt_security_loaded_registry_entries(), 2);
+            rt_security_require_policy(policy_id);
+            assert!(rt_security_policy_allowed());
+            rt_security_enter_sandbox(sandbox_id);
+            assert!(rt_security_sandbox_registered());
+        });
     }
 
     #[test]
     fn loads_sandbox_lowering_metadata_into_runtime_registry() {
-        rt_security_reset_counters();
-        let sandbox_id = security_metadata_id("admin_sandbox");
-        let backend_id = security_metadata_id("linux_landlock_seccomp_namespaces");
-        let manifest = "\
+        run_isolated("loads_sandbox_lowering_metadata_into_runtime_registry", || {
+            rt_security_reset_counters();
+            let sandbox_id = security_metadata_id("admin_sandbox");
+            let backend_id = security_metadata_id("linux_landlock_seccomp_namespaces");
+            let manifest = "\
 sandbox_lowering:
   admin_sandbox:
     source_backend: auto
@@ -700,22 +730,24 @@ sandbox_lowering:
       - AuditLog
 ";
 
-        let loaded = rt_security_load_registry_sdn(manifest.as_ptr(), manifest.len() as u64);
-        assert_eq!(loaded, 1);
-        assert_eq!(rt_security_loaded_registry_entries(), 1);
-        rt_security_enter_sandbox(sandbox_id);
-        assert!(rt_security_sandbox_registered());
-        assert_eq!(rt_security_last_sandbox_backend_id(), backend_id);
-        assert_eq!(rt_security_last_sandbox_capability_handles(), 2);
+            let loaded = rt_security_load_registry_sdn(manifest.as_ptr(), manifest.len() as u64);
+            assert_eq!(loaded, 1);
+            assert_eq!(rt_security_loaded_registry_entries(), 1);
+            rt_security_enter_sandbox(sandbox_id);
+            assert!(rt_security_sandbox_registered());
+            assert_eq!(rt_security_last_sandbox_backend_id(), backend_id);
+            assert_eq!(rt_security_last_sandbox_capability_handles(), 2);
+        });
     }
 
     #[test]
     fn active_sandbox_enforces_lowered_capability_handles() {
-        rt_security_reset_counters();
-        let sandbox_id = security_metadata_id("plugin_sandbox");
-        let read_dir_id = security_metadata_id("ReadDir");
-        let network_id = security_metadata_id("Network");
-        let manifest = "\
+        run_isolated("active_sandbox_enforces_lowered_capability_handles", || {
+            rt_security_reset_counters();
+            let sandbox_id = security_metadata_id("plugin_sandbox");
+            let read_dir_id = security_metadata_id("ReadDir");
+            let network_id = security_metadata_id("Network");
+            let manifest = "\
 sandbox_lowering:
   plugin_sandbox:
     source_backend: simple_os
@@ -731,25 +763,27 @@ sandbox_lowering:
       net: deny all
 ";
 
-        assert_eq!(
-            rt_security_load_registry_sdn(manifest.as_ptr(), manifest.len() as u64),
-            1
-        );
-        assert!(rt_security_sandbox_capability_allowed(network_id));
-        rt_security_enter_sandbox(sandbox_id);
-        assert!(rt_security_sandbox_capability_allowed(read_dir_id));
-        assert!(!rt_security_sandbox_capability_allowed(network_id));
-        assert!(!rt_security_last_sandbox_capability_allowed());
-        assert_eq!(rt_security_sandbox_capability_denials(), 1);
-        rt_security_exit_sandbox(sandbox_id);
-        assert!(rt_security_sandbox_capability_allowed(network_id));
+            assert_eq!(
+                rt_security_load_registry_sdn(manifest.as_ptr(), manifest.len() as u64),
+                1
+            );
+            assert!(rt_security_sandbox_capability_allowed(network_id));
+            rt_security_enter_sandbox(sandbox_id);
+            assert!(rt_security_sandbox_capability_allowed(read_dir_id));
+            assert!(!rt_security_sandbox_capability_allowed(network_id));
+            assert!(!rt_security_last_sandbox_capability_allowed());
+            assert_eq!(rt_security_sandbox_capability_denials(), 1);
+            rt_security_exit_sandbox(sandbox_id);
+            assert!(rt_security_sandbox_capability_allowed(network_id));
+        });
     }
 
     #[test]
     fn active_sandbox_filters_vm_host_imports_by_capability_class() {
-        rt_security_reset_counters();
-        let sandbox_id = security_metadata_id("vm_plugin");
-        let manifest = "\
+        run_isolated("active_sandbox_filters_vm_host_imports_by_capability_class", || {
+            rt_security_reset_counters();
+            let sandbox_id = security_metadata_id("vm_plugin");
+            let manifest = "\
 sandbox_lowering:
   vm_plugin:
     source_backend: simple_vm
@@ -766,49 +800,51 @@ sandbox_lowering:
       env: deny all
 ";
 
-        assert_eq!(
-            rt_security_load_registry_sdn(manifest.as_ptr(), manifest.len() as u64),
-            1
-        );
-        rt_security_enter_sandbox(sandbox_id);
+            assert_eq!(
+                rt_security_load_registry_sdn(manifest.as_ptr(), manifest.len() as u64),
+                1
+            );
+            rt_security_enter_sandbox(sandbox_id);
 
-        assert!(rt_security_host_import_allowed(
-            b"rt_file_read_text".as_ptr(),
-            "rt_file_read_text".len() as u64
-        ));
-        assert!(!rt_security_host_import_allowed(
-            b"rt_file_write_text".as_ptr(),
-            "rt_file_write_text".len() as u64
-        ));
-        assert!(!rt_security_host_import_allowed(
-            b"rt_http_get".as_ptr(),
-            "rt_http_get".len() as u64
-        ));
-        assert!(!rt_security_host_import_allowed(
-            b"rt_process_run".as_ptr(),
-            "rt_process_run".len() as u64
-        ));
-        assert!(!rt_security_host_import_allowed(
-            b"rt_env_get".as_ptr(),
-            "rt_env_get".len() as u64
-        ));
-        assert!(!rt_security_last_host_import_allowed());
-        assert!(!rt_security_host_import_allowed(
-            b"rt_plugin_custom_host_call".as_ptr(),
-            "rt_plugin_custom_host_call".len() as u64
-        ));
-        assert!(rt_security_host_import_allowed(
-            b"rt_security_enter_gate".as_ptr(),
-            "rt_security_enter_gate".len() as u64
-        ));
-        assert_eq!(rt_security_host_import_denials(), 5);
+            assert!(rt_security_host_import_allowed(
+                b"rt_file_read_text".as_ptr(),
+                "rt_file_read_text".len() as u64
+            ));
+            assert!(!rt_security_host_import_allowed(
+                b"rt_file_write_text".as_ptr(),
+                "rt_file_write_text".len() as u64
+            ));
+            assert!(!rt_security_host_import_allowed(
+                b"rt_http_get".as_ptr(),
+                "rt_http_get".len() as u64
+            ));
+            assert!(!rt_security_host_import_allowed(
+                b"rt_process_run".as_ptr(),
+                "rt_process_run".len() as u64
+            ));
+            assert!(!rt_security_host_import_allowed(
+                b"rt_env_get".as_ptr(),
+                "rt_env_get".len() as u64
+            ));
+            assert!(!rt_security_last_host_import_allowed());
+            assert!(!rt_security_host_import_allowed(
+                b"rt_plugin_custom_host_call".as_ptr(),
+                "rt_plugin_custom_host_call".len() as u64
+            ));
+            assert!(rt_security_host_import_allowed(
+                b"rt_security_enter_gate".as_ptr(),
+                "rt_security_enter_gate".len() as u64
+            ));
+            assert_eq!(rt_security_host_import_denials(), 5);
+        });
     }
 
     #[test]
     fn write_only_vm_host_import_filter_denies_read_imports() {
-        rt_security_reset_counters();
-        let sandbox_id = security_metadata_id("writer_plugin");
-        let manifest = "\
+        run_isolated("write_only_vm_host_import_filter_denies_read_imports", || {
+            rt_security_reset_counters();
+            let sandbox_id = security_metadata_id("writer_plugin");
+            let manifest = "\
 sandbox_lowering:
   writer_plugin:
     source_backend: simple_vm
@@ -820,18 +856,19 @@ sandbox_lowering:
       - WriteFile[\"/reports/output.txt\"]
 ";
 
-        assert_eq!(
-            rt_security_load_registry_sdn(manifest.as_ptr(), manifest.len() as u64),
-            1
-        );
-        rt_security_enter_sandbox(sandbox_id);
-        assert!(rt_security_host_import_allowed(
-            b"rt_file_write_text".as_ptr(),
-            "rt_file_write_text".len() as u64
-        ));
-        assert!(!rt_security_host_import_allowed(
-            b"rt_file_read_text".as_ptr(),
-            "rt_file_read_text".len() as u64
-        ));
+            assert_eq!(
+                rt_security_load_registry_sdn(manifest.as_ptr(), manifest.len() as u64),
+                1
+            );
+            rt_security_enter_sandbox(sandbox_id);
+            assert!(rt_security_host_import_allowed(
+                b"rt_file_write_text".as_ptr(),
+                "rt_file_write_text".len() as u64
+            ));
+            assert!(!rt_security_host_import_allowed(
+                b"rt_file_read_text".as_ptr(),
+                "rt_file_read_text".len() as u64
+            ));
+        });
     }
 }

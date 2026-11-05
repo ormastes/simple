@@ -184,3 +184,107 @@ src/compiler/ refactor-damage family, 2 unrelated sites already fixed, ~29
 remaining genuinely out of scope pending a from-scratch classifier re-run).
 Re-deriving the classifier to find new candidates is out of this lane's
 per-bug budget. No change made.
+
+---
+
+## Appendix: re-audit 2026-11-05 (`src/lib` + `src/app`, release/1.0.0 base)
+
+Re-ran the audit from scratch on `origin/release/1.0.0` (branch
+`work/libbug-w6-resultaudit-20261105`), scope restricted to `src/lib` and
+`src/app` per this pass's brief (`src/compiler/**` family remains owned by
+the refactor-damage lane and is out of scope here).
+
+### Method
+
+New line-based Python classifier (throwaway, kept in scratch of the
+executing session, not committed), same definition as the 2026-08-08 audit:
+a `fn`/`me` whose declared return type does not contain `Result` and whose
+body contains `return Ok(...)`/`return Err(...)`, a bare `Ok(...)`/`Err(...)`
+tail expression, or any other `Ok(`/`Err(` construction. Handles single- and
+multi-line signatures, `"""..."""` docstring regions, full-line comments,
+and single/double-quoted spans.
+
+Injection-tested both directions before trusting counts, after every
+classifier revision:
+- planted `fn parse_thing(s: text) -> text:` with `return Err(...)` /
+  `Ok(s)` tail → **flagged** (all revisions).
+- planted `fn good_result_fn(...) -> Result<text, text>:` → **not flagged**.
+- planted match arms (`Ok(v):`), case arms (`case Ok(v): ...`, inline
+  `Ok(v): return v`), arrow arms (`Ok(v) -> v`, `Ok(v) => t`), `if val
+  Ok(x) = r:` destructuring, docstring-embedded `return Err(...)` → **not
+  flagged** (after fixes; the `=>` arm form and inline `case Ok(v): return v`
+  form were initially missed and the classifier was corrected, same as the
+  2026-08-08 audit's `->` arrow fix).
+
+### Counts
+
+| Stage | Fns flagged |
+|-------|-------------|
+| Naive sweep (any `Ok(`/`Err(` in a non-Result fn body) | 74 |
+| − string-embedded generated Rust (`src/app/ffi_gen.specs/*`, exclusion 2) | 19 |
+| − match/case/arrow arms, `if val` destructuring, comments, quoted spans, qualified variants | 43 |
+| **Residual candidates** | **12** |
+
+All 74 hits were manually reviewed at source level; every residual
+candidate is a false positive. No blanket exclusions were applied to the
+residual 12 — each is classified below.
+
+### Residual candidate classification (12 sites, all FALSE POSITIVES)
+
+| Site | Declared type | Verdict |
+|------|---------------|---------|
+| `src/app/interpreter/helpers/debug.spl:144` `evaluate_watches` | `Array` | Ok/Err constructed as tuple *elements* (`results.push((expr, Ok(v)))`); function returns the Array, never a Result. |
+| `src/lib/common/cert/x509_typed.spl:77` `_xt_read_tlv` | `_XtTlv` | Qualified **custom enum** variant constructors `_XtTlv.Err(msg: ...)` / `_XtTlv.Ok(r: ...)`; every return path (and the bare tail) constructs `_XtTlv`, matching the declared type exactly. |
+| `src/lib/scv/integrity.spl:27,576,706`; `integrity_checkpoint.spl:9`; `maintenance.spl:96`; `native_shadow.spl:167`; `parser_lock.spl:62`; `shadow.spl:23`; `stabilize.spl:70`; `store.spl:628` (10 fns) | `text` | `scv_content_id_for_file(path) -> Result<text, text>` (store.spl:54) is **compared against** `Ok(chunk)` (`!=` / `==`); `Ok(...)` is a comparison operand, never the function's own return. Each enclosing fn returns `text` (joined error messages / `""`). |
+
+Excluded-population spot checks (beyond the injection tests):
+- `src/app/ffi_gen.specs/*` (19 fns): every hit is a line of a string
+  literal containing generated Rust `Ok(...) => ...` match arms — exclusion
+  2 of the 2026-08-08 audit, confirmed by content.
+- `src/app/{model3d,sound,spritesheet}/main.spl`,
+  `src/app/spipe_knowledge_provider/*`,
+  `src/lib/gc_async_mut/web/browser_session_runtime.spl`,
+  `src/lib/scv/{compile_snapshot,snapshot_v2,compile_snapshot_values_v1}.spl`:
+  `if val Err(e) = r:` / `if val Ok(x) = r:` — Result destructuring, never
+  construction; enclosing returns are `i64`/`bool`/`text` exit codes.
+- `src/lib/common/{char_from_code_pure,structural/component/descriptor}.spl`,
+  `src/lib/gc_async_mut/slang/.../streaming_readiness.spl`,
+  `src/lib/nogc_sync_mut/spec/evidence/counterpart/chrome_dom_snapshot_provider.spl`:
+  `Ok(t) => t` / `Err(_) => ""` match arms (the `=>` arrow form).
+- `src/lib/nogc_sync_mut/io/tls_common_hooks.spl`,
+  `web_ui/command.spl`, `src/lib/nogc_async_mut/async_ring/simple_ring.spl`,
+  `src/lib/common/crypto/chacha20_poly1305*.spl`,
+  `src/lib/nogc_sync_mut/net/http.spl`: `case <QualifiedType>.Ok(...):`
+  arms / tuple patterns mapping a Result to a different outcome type.
+- `src/app/portal/controllers/auth_controller.spl`: hits are inside
+  `#`-commented-out code blocks.
+
+### Historical fix confirmed present on release/1.0.0
+
+```
+src/lib/nogc_sync_mut/src/dl/config_loader.spl:22   -> Result<DLConfig, text>
+src/lib/nogc_sync_mut/src/dl/config_loader.spl:313  -> Result<DLConfig, text>
+```
+
+`test/01_unit/lib/gc_async_mut/dl/config_loader_spec.spl` (the tracker's
+named repro) on this branch: `declared>=1 executed=1 passed=1 failed=0
+skipped=0 dropped=0`, run with the phase1 self-hosted binary
+(`build/phase_snapshots/phase1_1793422538/simple`, aarch64 Linux host).
+
+### Conclusion
+
+**`src/lib` + `src/app` on `origin/release/1.0.0`: ZERO true
+`return-type-result-mismatch` defects remain.** The two genuine drift sites
+from the 2026-08-08 pass are fixed and verified; the 12 residual candidates
+above are all legitimate Result-as-value / custom-enum-variant /
+destructuring patterns. This is consistent with the 2026-08-17
+re-verification's "CLOSED for `src/lib`" verdict, now extended to
+`src/app` and to the release branch. The genuine open remainder stays the
+~22-site `src/compiler/**` refactor-damage family, owned by another lane
+and out of scope for this pass.
+
+Limitations recorded: (a) fns with *inferred* return types (no `->`) are out
+of this record's declared-type definition and were not swept; (b) the
+classifier is line/indent-based, not a real parse — the injection tests and
+100% manual review of all 74 naive hits are the correctness backstop, same
+as the 2026-08-08 method.

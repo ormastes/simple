@@ -1,0 +1,60 @@
+"""
+## Purpose and audience
+Purpose: Cross-module owner-isolation reproducer for
+doc/08_tracking/bug/parse_claude_json_response_name_collision_2026-07-20.md.
+Co-compiles app.llm_caret.claude_cli and std.nogc_async_mut.llm.claude_cli in a
+single program (they still share the symbol names parse_claude_stream_line,
+build_claude_args, CliResponse, CliStreamEvent, claude_cli_send, claude_cli_stream)
+and asserts each module's own definition wins for its own call sites.
+Audience: llm_caret maintainers deciding whether the historical global-registry
+mis-dispatch hypothesis is still live.
+"""
+# @req: REQ-APP-LLM-CARET-XMOD-001 — same-named functions across the app and
+# library claude_cli modules must not hijack each other's dispatch.
+
+use app.llm_caret.claude_cli.{
+    build_claude_args, parse_claude_json_response, parse_claude_stream_line
+}
+use std.nogc_async_mut.llm.claude_cli.{lib_parse_claude_json_response}
+use std.mcp.helpers.{LB, RB, Q}
+
+fn _args_count(args: [text], needle: text) -> i64:
+    var count = 0
+    for arg in args:
+        if arg == needle:
+            count = count + 1
+    count
+
+describe "app owner keeps its own semantics when the library module is co-compiled":
+    it "app parse_claude_json_response rejects invalid JSON as an error":
+        val resp = parse_claude_json_response("{not json")
+        expect(resp.is_error).to_equal(true)
+        expect(resp.error).to_contain("invalid JSON")
+
+    it "app parse_claude_stream_line flags unsupported event types as invalid":
+        val evt = parse_claude_stream_line(
+            LB() + Q() + "type" + Q() + ":" + Q() + "mystery_event" + Q() + RB()
+        )
+        expect(evt.event_type).to_equal("error")
+        expect(evt.stop_reason).to_equal("invalid")
+
+    it "app build_claude_args emits one variadic allowedTools flag":
+        val args = build_claude_args("Hi", "", "", "", "", 0, 0, "", ["Read", "Write"], [], false)
+        expect(_args_count(args, "--allowedTools")).to_equal(1)
+
+describe "library owner keeps its own semantics when the app module is co-compiled":
+    it "lib_parse_claude_json_response extracts fields without structured JSON":
+        val raw = LB() +
+            Q() + "result" + Q() + ":" + Q() + "hello" + Q() + "," +
+            Q() + "model" + Q() + ":" + Q() + "sonnet" + Q() + "," +
+            Q() + "session_id" + Q() + ":" + Q() + "session-1" + Q() + "," +
+            Q() + "input_tokens" + Q() + ":42," +
+            Q() + "output_tokens" + Q() + ":9," +
+            Q() + "is_error" + Q() + ":false" + RB()
+        val response = lib_parse_claude_json_response(raw)
+        expect(response.content).to_equal("hello")
+        expect(response.model).to_equal("sonnet")
+        expect(response.session_id).to_equal("session-1")
+        expect(response.input_tokens).to_equal(42)
+        expect(response.output_tokens).to_equal(9)
+        expect(response.is_error).to_equal(false)

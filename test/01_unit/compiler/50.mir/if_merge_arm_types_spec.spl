@@ -1,0 +1,68 @@
+# @req REQ-SSPEC-COMPILER
+"""
+Direct contract for mir_merge_arm_types (mir_lowering_stmts.spl).
+
+Bug for_in_if_merge_first_arm_i64_wins_2026-10-24: `val x = if c: <match>
+else: call()` typed the merged result from the first arm only. When the
+then-arm (a match / Result-payload tail the lowering could not type) lowered
+to bare I64 and the else-arm carried a struct type, the struct type was
+discarded and `for e in x.field` hit #143. The repair keeps a struct-typed
+later arm over an unresolved I64 first arm; the array element-refinement
+behavior must be unchanged.
+"""
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+
+use std.spec
+use std.spec.step
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_types.{MirType, MirTypeKind}
+use compiler.mir.mir_lowering_stmts.{mir_merge_arm_types}
+
+val I64_T = MirType.i64()
+
+fn struct_t() -> MirType:
+    MirType(kind: MirTypeKind.Struct(SymbolId.new(7)))
+
+fn merge_kind(t: MirType) -> text:
+    match t.kind:
+        case MirTypeKind.I64: "i64"
+        case MirTypeKind.Struct(_): "struct"
+        case MirTypeKind.Array(_, _): "array"
+        case _: "other"
+
+describe "mir_merge_arm_types":
+    it "keeps a struct second arm over an unresolved i64 first arm":
+        step("merge(I64, Struct) -> Struct")
+        expect(merge_kind(mir_merge_arm_types(I64_T, struct_t()))).to_equal("struct")
+
+    it "keeps the incumbent i64 when the second arm is also i64":
+        step("merge(I64, I64) -> I64")
+        expect(merge_kind(mir_merge_arm_types(I64_T, MirType.i64()))).to_equal("i64")
+
+    it "does not let a later i64 arm displace a struct first arm":
+        step("merge(Struct, I64) -> Struct")
+        expect(merge_kind(mir_merge_arm_types(struct_t(), I64_T))).to_equal("struct")
+
+    it "still refines an unspecific array element from the second arm":
+        step("merge(Array(I64,0), Array(Struct,0)) -> Array(Struct,0)")
+        val first = MirType(kind: MirTypeKind.Array(MirType.i64(), 0))
+        val second = MirType(kind: MirTypeKind.Array(struct_t(), 0))
+        val merged = mir_merge_arm_types(first, second)
+        expect(merge_kind(merged)).to_equal("array")
+        match merged.kind:
+            case MirTypeKind.Array(elem, _):
+                expect(merge_kind(elem)).to_equal("struct")
+            case _: fail("merged arm lost its array shape")
+
+    it "refines an i64 (unknown) element from a specific second arm, keeping size":
+        step("merge(Array(I64,2), Array(Struct,0)) -> Array(Struct,2)")
+        val first = MirType(kind: MirTypeKind.Array(MirType.i64(), 2))
+        val second = MirType(kind: MirTypeKind.Array(struct_t(), 0))
+        val merged = mir_merge_arm_types(first, second)
+        match merged.kind:
+            case MirTypeKind.Array(elem, size):
+                expect(merge_kind(elem)).to_equal("struct")
+                expect(size).to_equal(2)
+            case _: fail("array shape lost in element refinement")

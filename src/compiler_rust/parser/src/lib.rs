@@ -71,3 +71,5 @@ mod char_literal_parse_test;
 mod pipe_lambda_typed_param_test;
 mod nogc_sigil_new_test;
 mod inline_if_as_cast_else_test;
+#[cfg(test)]
+mod if_expr_newline_arm_trailing_else_test;

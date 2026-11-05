@@ -37,6 +37,33 @@ pub(crate) fn is_async_function(func: &FunctionDef) -> bool {
     func.effects.iter().any(|e| matches!(e, Effect::Async))
 }
 
+/// Wrap an interpreted async function's result.
+///
+/// When the running program has registered the std.async `Future` class
+/// (the pure-Simple async surface), construct the `Future.from_value`
+/// shape — `state: []`, `poll_result: Poll.Ready(value)` — so the call
+/// returns a real ready future that `poll()`/`is_ready()` work on. Programs
+/// without that class keep the legacy Promise shape.
+pub(crate) fn wrap_async_result(value: Value, has_future_class: bool) -> Value {
+    if has_future_class {
+        let mut fields = HashMap::new();
+        fields.insert("state".to_string(), Value::array(vec![]));
+        fields.insert(
+            "poll_result".to_string(),
+            Value::Enum {
+                enum_name: "Poll".to_string(),
+                variant: "Ready".to_string(),
+                payload: Some(Box::new(value)),
+            },
+        );
+        return Value::Object {
+            class: "Future".to_string(),
+            fields: Arc::new(fields),
+        };
+    }
+    wrap_in_promise(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

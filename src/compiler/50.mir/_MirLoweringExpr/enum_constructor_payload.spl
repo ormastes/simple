@@ -339,7 +339,13 @@ impl MirLowering:
                     case _: ()
             case _: ()
         var remembered_concrete_negative = false
+        # SIMPLE_ENUM_PAYLOAD_PATH_TRACE=1 (seed-lane diagnostic for
+        # doc/08_tracking/bug/seed_codegen_interp_native_divergence_2026-10-12.md):
+        # dump which acceptance path fires per payload slot.
+        val path_trace = (mir_lower_env_get("SIMPLE_ENUM_PAYLOAD_PATH_TRACE") ?? "") == "1"
         if val actual = self.find_local_hir_type(local.id):
+            if path_trace:
+                eprint("[enum-payload-path] remembered module={self.current_module_id} local={local.id} expected='{hir_type_shape_key(expected, true)}' actual='{hir_type_shape_key(actual, true)}'\n")
             match actual.kind:
                 case HirTypeKind.Infer(_, _) | HirTypeKind.Error: ()
                 case _:
@@ -347,10 +353,15 @@ impl MirLowering:
                     # row. Erased MIR storage alone cannot refute a concrete
                     # element/nominal contradiction (Any may also use I64).
                     if enum_payload_types_alias_compatible(expected, actual, self.symbols):
+                        if path_trace:
+                            eprint("[enum-payload-path] remembered-accept module={self.current_module_id} local={local.id}\n")
                         return true
                     if self.enum_payload_present_fills_optional(expected, actual):
                         return true
                     remembered_concrete_negative = true
+        else:
+            if path_trace:
+                eprint("[enum-payload-path] remembered-miss module={self.current_module_id} local={local.id} expected='{hir_type_shape_key(expected, true)}' line={expression.span.line}\n")
         if val actual = self.enum_match_expr_type(expression):
             match actual.kind:
                 case HirTypeKind.Infer(_, _) | HirTypeKind.Error: ()
@@ -365,6 +376,8 @@ impl MirLowering:
         val maybe_actual_mir = self.local_mir_type_of(local)
         if not maybe_actual_mir.?: return false
         val actual_mir = maybe_actual_mir ?? MirType.unit()
+        if path_trace:
+            eprint("[enum-payload-path] mir-evidence module={self.current_module_id} local={local.id} expected='{hir_type_shape_key(expected, true)}' mir_present={maybe_actual_mir.?} remembered_negative={remembered_concrete_negative}\n")
         # Primitive MIR types are sufficient evidence for literals and typed
         # operations on the native no-inference path. Opaque i64 is not enough
         # evidence for Result, Optional, arrays or nominal enum/class payloads.

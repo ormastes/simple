@@ -775,7 +775,15 @@ fn flat_ast_to_module(path: text) -> ParserModule:
             val body = decl_get_body(idx)
             var init = Expr(kind: ExprKind.NilLit, span: span)
             if body.len() > 0:
+                # Module-level const/val initializers keep exact float
+                # lexemes: MIR folds a negated float const by negating the
+                # lexeme text and derives imported-global storage from the
+                # folded lexeme (unary_literal_module_const_static_spec,
+                # imported_global_infer_storage_spec).
+                val saved_float_mode = flat_bridge_lexeme_float_literals
+                flat_bridge_lexeme_float_literals = true
                 init = convert_flat_expr(body[0])
+                flat_bridge_lexeme_float_literals = saved_float_mode
             val const_type_tag = decl_get_ret_type(idx)
             if c_name.starts_with("_expr_"):
                 match init.kind:
@@ -1008,6 +1016,13 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                 span: span
             )
             if c_name.starts_with("_expr_"):
+                # Recovered module docstring (raw string literal: EXPR_STRING_LIT
+                # with I=1, see expr_raw_string_lit) must never become the
+                # synthetic script main that HIR lowers as executable source.
+                # Drop it entirely: no main entry, no restored constant.
+                if body.len() > 0 and expr_get_tag(body[0]) == EXPR_STRING_LIT and expr_get_int(body[0]) != 0:
+                    di = di + 1
+                    continue
                 # Bare top-level statement: defer. If the module has no `fn main`
                 # these become a synthetic main body; otherwise they are restored
                 # as constants (previous behavior).
@@ -1455,20 +1470,34 @@ pub fn flat_pool_import_refs_v1() -> [SpabImportRefV1]:
                 refs.push(SpabImportRefV1(decl_index: idx, module_path: decl_get_name(idx), name: name))
         k = k + 1
     refs
-# Paths already captured this process. Re-capturing an identical path is
-# always redundant (the blob is content-identical) and each repeat dump
-# re-exposes the transient-scope reclaim window that poisons the capture
-# (lane-48b trace: the second unscoped dump of p2_add in one process is the
-# one that hits dead pool strings). See doc/08_tracking/bug/
-# stage2_mir_shard_flat_pool_text_len_minus1_2026-10-22.md.
+# Source content a captured path was last dumped under, one row per
+# (path, content key) pair. The key is the frontend cache's private source key
+# (an xxh3 of the exact parse source): re-dumping the SAME path+key is always
+# redundant (the blob is content-identical) and each repeat dump re-exposes the
+# transient-scope reclaim window that poisons the capture (lane-48b trace: the
+# second unscoped dump of p2_add in one process is the one that hits dead pool
+# strings). The SAME PATH under a DIFFERENT key is different supplied source
+# bytes, so it must capture and store again -- keying this record by path alone
+# silently skipped the store for every supplied-source parse after the first
+# under one path (supplied_source_cache_key_spec: changed supplied bytes never
+# reached the cache and a same-source alias never hit). A disk-read path maps
+# 1:1 to content, so this never re-dumps there.
+# See doc/08_tracking/bug/stage2_mir_shard_flat_pool_text_len_minus1_2026-10-22.md.
 var _fab_captured_paths: [text] = []
+var _fab_captured_keys: [text] = []
 
-pub fn flat_pool_capture_already_captured(path: text) -> bool:
-    _fab_captured_paths.contains(path)
+pub fn flat_pool_capture_already_captured(path: text, content_key: text) -> bool:
+    var i = 0
+    while i < _fab_captured_paths.len():
+        if _fab_captured_paths[i] == path and _fab_captured_keys[i] == content_key:
+            return true
+        i = i + 1
+    false
 
-pub fn flat_pool_capture_record(path: text):
-    if not _fab_captured_paths.contains(path):
+pub fn flat_pool_capture_record(path: text, content_key: text):
+    if not flat_pool_capture_already_captured(path, content_key):
         _fab_captured_paths = _fab_captured_paths.push(path)
+        _fab_captured_keys = _fab_captured_keys.push(content_key)
 
 var _fab_capture_arm_tag: text = ""
 

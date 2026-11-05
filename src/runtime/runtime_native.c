@@ -13819,7 +13819,8 @@ bool rt_madvise(int64_t addr, int64_t size, int64_t advice) {
 /* ---- file_ops.rs: rt_file_lock / rt_file_unlock -------------------------- */
 
 /* Acquire an exclusive OS file lock (flock); mirrors file_ops.rs's
- * rt_file_lock exactly, including its EINTR-retry / timeout-poll shape. The
+ * rt_file_lock exactly: nonpositive timeouts make one nonblocking attempt,
+ * while positive timeouts use the EINTR-retry / timeout-poll shape. The
  * returned descriptor must be consumed exactly once by rt_file_unlock. */
 int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout_secs) {
     char path[RT_TEXT_PATH_MAX];
@@ -13838,7 +13839,7 @@ int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout
     OVERLAPPED overlapped;
     if (timeout_secs <= 0) {
         memset(&overlapped, 0, sizeof(overlapped));
-        if (LockFileEx(handle, LOCKFILE_EXCLUSIVE_LOCK, 0,
+        if (LockFileEx(handle, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0,
                        MAXDWORD, MAXDWORD, &overlapped)) {
             return (int64_t)fd;
         }
@@ -13865,10 +13866,9 @@ int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout
     int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
     if (fd < 0) return -1;
     if (timeout_secs <= 0) {
-        for (;;) {
-            if (flock(fd, LOCK_EX) == 0) return (int64_t)fd;
-            if (errno != EINTR) { close(fd); return -1; }
-        }
+        if (flock(fd, LOCK_EX | LOCK_NB) == 0) return (int64_t)fd;
+        close(fd);
+        return -1;
     }
     struct timespec deadline;
     clock_gettime(CLOCK_MONOTONIC, &deadline);

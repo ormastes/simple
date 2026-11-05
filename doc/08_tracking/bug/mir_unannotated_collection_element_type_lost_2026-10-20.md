@@ -43,3 +43,6 @@ fix builds the original form.
 
 Bug DB (`bug_db.sdn`) reconciliation pending: the qualified `simple check-dbs`
 CLI is not available on this host; this dated record carries the fields.
+
+## Bootstrap repro/prevention 2026-11-05
+Spec: test/01_unit/compiler/mir/unannotated_collection_pop_spec.spl (interpreter, passes). Native repro: test/fixtures/compiler/unannotated_collection_pop/main.spl; stage3: bin/simple native-build --entry <fixture> --output build/ucp && build/ucp, expect UNANNOTATED_POP_OK (failing producer: "unresolved method call: pop"). Status: verification-pending.
