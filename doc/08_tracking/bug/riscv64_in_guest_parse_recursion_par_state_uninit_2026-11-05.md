@@ -287,3 +287,46 @@ boot `-machine virt -cpu rv64 -smp 1 -m 512M -bios fw_payload.bin
 entry exceeded 5 min on this host (SCV admission closure), so in-guest
 is the practical loop. Cycles: 6 of 6 used; stopping per the rule with
 the repro, bisect, and candidate area recorded.
+
+---
+
+## 2026-11-05 — SEED-CODEGEN LANE (PR #7019+1): the 4-field struct-literal defect was the STALE CHECKED-IN SEED; the ParserState fault is a different, open defect
+
+Fast host harness built first (this host has no riscv gdb and host AOT
+x64 builds of any entry exceed 5 min, so): `LocalExecutionManager::cranelift()`
+JIT tests (temporarily un-gated from x86_64 for this run, reverted) plus
+`SIMPLE_DUMP_CLIF=probe` AOT object compiles.
+
+Findings:
+
+1. **The 4-field struct-literal corruption is NOT in release.** The
+   identical 4-field repro PASSES on the host cranelift JIT and its AOT
+   CLIF is exactly right (four independent box/new/push chains; stores
+   pair v3/v8/v13/v18 with offsets 0/8/16/24 of the rt_alloc'd block).
+   Re-tested IN-GUEST with a seed rebuilt from THIS branch (release tip
+   `9bf94d89a91`): `PROBE OK four-field struct literal`. All prior
+   in-guest repros that showed the fault (including #7019's) were built
+   with the CHECKED-IN bootstrap seed — which was built from the
+   diverged main tree and lacks release's struct-init fixes. Root
+   cause of THAT defect: stale seed, fixed in release already.
+   OPERATIONAL LESSON, load-bearing for every future in-guest lane:
+   `SIMPLE_BIN` for `build-simpleos-riscv64-interpreter-kernel.shs`
+   MUST be a seed built from the same release commit; the checked-in
+   `src/compiler_rust/target/bootstrap/simple` is main-built and
+   silently miscompiles struct literals.
+
+2. **The ParserState parse fault PERSISTS with the release seed**
+   (same scause=5 rt_array_set trap, stval=0x0000001100000000, after
+   the now-passing 4-field probe). So par_state's construction differs
+   from the plain 4-field case in a way that still breaks: it is a
+   15-FIELD struct returned BY VALUE from `parser_state_fresh` into a
+   MODULE-INIT (`__module_init_..._dynamic`) and stored into a module
+   GLOBAL. The prime remaining suspects, in order: (a) large-struct
+   RETURN ABI (sret) in the AOT cranelift path for rv64 — a 120-byte
+   struct vs the 32-byte probe; (b) the module-init/global store path.
+   Next lane's first probe: a >=16-field struct returned from a plain
+   function, read back field-by-field, in-guest (entry probe), with a
+   release-built seed; then the same inside a module-init.
+
+No production code changed in this lane (temp host tests, the x86_64
+test gate, and the in-guest entry probe all reverted). Cycles: 5 of 6.
