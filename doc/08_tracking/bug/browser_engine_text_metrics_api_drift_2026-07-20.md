@@ -62,3 +62,47 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 90 \
 - `test/01_unit/app/ui.chromium/text_metrics_spec.spl` (13 of 14 examples,
   4 distinct root causes as above)
 
+
+## Resolution progress 2026-11-05 (work/libbug-w6-textmetrics-20261105, release/1.0.0 base)
+
+Partial fix landed for the API-gap root causes (1)-(3); 13 of 14 examples in
+`test/01_unit/app/ui.chromium/text_metrics_spec.spl` now pass (was 1 of 14).
+
+Landed surface:
+
+- `BeLayoutBox` gained STORED `content_x`/`content_y`/`content_width`/
+  `content_height` fields plus a `node: BeDomNode?` field and per-field
+  defaults, so partial-box constructors compile; the per-call derived
+  METHODS of the same names were kept (Simple dispatches field access vs
+  method call by syntax), preserving the
+  `test/03_system/browser_engine/layout_box_content_contract_spec.spl`
+  contract (6/6 green).
+- `layout.spl` gained the 3-arg `layout_node(node, container, parent_style)`
+  overload delegating to layout_core with a fresh `FloatContext`.
+- `paint.spl` gained `paint_layout_box` (newline split, greedy word wrap,
+  per-line underline rect with the len*font_size/2 zero-width fallback) and
+  `PaintCommand.text_val`; `StyleProps.text_decoration` +
+  `BeDomNode.set_style` longhands make `text-decoration: underline`
+  reachable from CSS.
+- `BeRenderResult.warnings` is populated by `render_html_to_pixels` with
+  `html_fast_famous_site_corpus_pixel_path` (corpus fixture text) /
+  `html_fast_fill_pixel_path` (monospace stack) receipts.
+- `text_painter.browser_render_vector_font_probe_pixels` renders through the
+  Simple Vector Outline lane into a white ARGB buffer with blended black
+  coverage.
+- `browser_serif_font_candidates` order pinned to LiberationSerif, then the
+  two `examples/09_embedded/simple_os/fonts/serif/` bundled faces, then the
+  existing fallbacks (spec-pinned strings; missing files fall through).
+
+Environment dependency (root cause 4): the SFFI examples additionally need
+`libspl_fonts.so`, built from the in-tree crate
+(`cargo build --profile bootstrap -p spl_fonts`, installed to
+`build/bootstrap/lib/`), plus the host LiberationSerif TTF (present).
+
+Remaining failure (1 example): "SFFI TTF glyph bearing_y exposes hinted
+bitmap bottom offset" pins `bearing_y == 0` for 'G'@16px, but Liberation
+Serif 'G' genuinely rasterizes one pixel below the baseline (fontdue
+`ymin=-1`, verified row -1 carries real coverage, sum 718; the pure-Simple
+sfnt lane agrees at -1). The pinned value matches only a hinted FreeType
+build (the crate's optional `freetype` feature; headers absent on this
+host) or a non-overshooting first-priority font. Spec was not weakened.
