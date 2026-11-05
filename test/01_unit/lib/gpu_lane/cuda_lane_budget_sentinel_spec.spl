@@ -1,0 +1,48 @@
+# Regression spec for
+# doc/08_tracking/bug/cuda_lane_conflates_svmg_budget_sentinel_with_device_timeout_2026-08-09.md
+#
+# The SVM-G VM writes SENTINEL_TIMEOUT (0xDEAD0000) to the arena sentinel
+# slot BEFORE returning normally when it exhausts its step budget. A launch
+# that provably completed (fence/sync succeeded) carrying that word is
+# therefore a budget expiry -- an expected, observable SVM-G outcome -- NOT
+# a device timeout. `CudaLaneSession.launch_once` used to decode the sentinel
+# alone and latch `completion_unknown`/`release_pending`, making the budget
+# stop unobservable and retiring the session impossible.
+#
+# The discriminator is implemented in the pure `classify_launch_outcome`
+# helper so the distinction is unit-testable without a CUDA device.
+
+use std.spec.*
+use std.gc_async_mut.gpu_lane.cuda_lane_session.{classify_launch_outcome}
+use std.nogc_sync_mut.test_runner.gpu_mailbox.{
+    SENTINEL_TIMEOUT, SENTINEL_EXIT_MASK}
+
+describe "CudaLaneSession launch outcome classification (budget sentinel vs device timeout)":
+    it "reports a completed launch carrying SENTINEL_TIMEOUT as budget expiry, not device timeout":
+        # The launch completed (sync succeeded) and the kernel wrote the
+        # budget sentinel before returning normally. Expect: NO error, and
+        # the completion latch stays OFF so the arena is read back and the
+        # caller can decode the budget stop from the sentinel word.
+        val (err, completion_unknown, release_pending) =
+            classify_launch_outcome(true, SENTINEL_TIMEOUT)
+        expect(err).to_equal("")
+        expect(completion_unknown).to_equal(false)
+        expect(release_pending).to_equal(false)
+
+    it "still latches completion-unknown when the launch failed to complete":
+        # A launch whose sync FAILED genuinely stopped responding; the
+        # completion state is unknown and the session must not release
+        # device resources. This latch is deliberate and must survive the
+        # budget-sentinel fix.
+        val (err, completion_unknown, release_pending) =
+            classify_launch_outcome(false, SENTINEL_TIMEOUT)
+        expect(err).to_equal("cuda-lane-sync-completion-unknown")
+        expect(completion_unknown).to_equal(true)
+        expect(release_pending).to_equal(true)
+
+    it "treats a normal exit sentinel on a completed launch as a plain success":
+        val (err, completion_unknown, release_pending) =
+            classify_launch_outcome(true, SENTINEL_EXIT_MASK | 0u32)
+        expect(err).to_equal("")
+        expect(completion_unknown).to_equal(false)
+        expect(release_pending).to_equal(false)

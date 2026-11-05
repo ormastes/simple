@@ -97,3 +97,37 @@ budget sentinel with a device timeout per this record. GPU lane semantics
 fix, needs CUDA hardware to verify safely; not attempted here. Left OPEN
 (P2), no code change attempted.
 
+
+## Fix evidence 2026-11-05 (work/libbug-std-cudasentinel-20261105)
+
+Fixed in `src/lib/gc_async_mut/gpu_lane/cuda_lane_session.spl`: the launch
+outcome classification was factored into a pure, unit-testable helper
+`classify_launch_outcome(launch_completed, sentinel_raw)`. A launch that
+provably completed (sync succeeded) now returns success with the
+completion latch OFF regardless of the arena sentinel -- the kernel writes
+`SENTINEL_TIMEOUT` before returning normally on VM budget exhaustion, so a
+completed launch carrying `0xDEAD0000` is a budget expiry that the caller
+decodes from the readback arena (executor `_decode_sentinel` marks it
+`timed_out`, making `DebugTarget`'s `STOP_TIMEOUT` reachable on this lane).
+The `completion_unknown`/`release_pending` latch now fires only when the
+launch actually failed to complete (sync failure) -- the deliberate
+protection for a genuinely incomplete device launch is unchanged.
+
+RED: new unit spec `test/01_unit/lib/gpu_lane/cuda_lane_budget_sentinel_spec.spl`
+failed 3/3 pre-fix (`semantic: function 'classify_launch_outcome' not found`
+-- the lane layer had no seam to report a completed budget sentinel as
+anything but a device timeout). GREEN: same spec passes 3/3 post-fix.
+The asserted-failure branch for the `budget_expiry_while_debugging` vector
+was deleted from `test/03_system/gpu_lane/cuda_debug_session_conformance_spec.spl`
+per this doc's instruction; the vector now falls through to
+`_diff_device_vs_ref`.
+
+Device qualification caveat: this host lists an NVIDIA GB10 GPU and
+`CudaLaneSession.probe()` returns "", but every device spec (including the
+pre-existing `cuda_jit_hello_spec` live row and `cuda_vm_executor_conformance_spec`)
+fails at `cuda-lane-arena-guard-init-failed` (HtoD guard upload) both
+before and after the fix -- an environment/driver limitation of the seed
+binary on this host, identical pre/post. The live-device diff for the
+budget vector still needs qualification on a host with a working CUDA
+lane; the field-for-field expectations are unchanged and the host ref_vm
+side of the diff is covered by `test/01_unit/lib/svmg/ref_vm_debug_spec.spl`.
