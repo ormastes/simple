@@ -584,14 +584,23 @@ impl SshSession:
                 self.send_seq = (self.send_seq + 1) & 0xFFFFFFFF
                 return
             val header = _build_plain_packet_header(payload.len(), 8)
-            var packet = _copy_bytes_stable(header.header)
+            # Assemble the wire frame with the in-place packed `.push`
+            # intrinsic, not per-byte `rt_push_byte` reassignment: the extern
+            # form recopied the growing prefix on every byte (O(len^2) per
+            # packet) and carries the documented extern-return BYTE_PACKED
+            # hazard (see _copy_bytes_stable in ssh_session_helpers).
+            var packet: [u8] = []
             var i: u64 = 0
+            while i < header.header.len():
+                packet.push(header.header[i])
+                i = i + 1
+            i = 0
             while i < payload.len():
-                packet = rt_push_byte(packet, ssh_session_u8_at(payload, i).to_i64())
+                packet.push(ssh_session_u8_at(payload, i))
                 i = i + 1
             i = 0
             while i < header.padding_len:
-                packet = rt_push_byte(packet, 0)
+                packet.push(0)
                 i = i + 1
             self.raw_send(packet)
         self.send_seq = (self.send_seq + 1) & 0xFFFFFFFF

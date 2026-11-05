@@ -167,3 +167,14 @@ null *store* during construction, not an empty *read* of an uninitialised
 global. The interpreter row gets past this point, so whatever is null here is
 reached only on the build-and-run path. Next step is to identify which store in
 `make_core_lexer` is at that offset; not done here.
+
+## Verification 2026-11-05 (riscv-sweep lane, work/riscv-sweep-20261105) — resolved at tip, fix-presence re-verified
+
+The guest-local fixed-capacity env table backing `_sffi_env_set` /
+`_sffi_env_get` is present at tip in
+`examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_runtime_core.inc.c`
+(`simpleos_env_table` / `simpleos_env_count` / `simpleos_env_find`, around
+line 2382), so the `failed to restore SIMPLE_BOOTSTRAP_LEX_SOURCE` panic path
+is backed in source. The in-guest interpreter/build-and-run gate evidence
+remains the 2026-09-01 resolution recorded above (the two successor defects
+named there are tracked separately). Status: RESOLVED at tip.
