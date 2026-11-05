@@ -177,3 +177,41 @@ multi-test filter (registry pollution by a same-process sibling test) and
 passes isolated — a second, in-tree manifestation of the
 registration-order-dependent-discriminant fragility (#6953 family), not a
 regression from this lane (no seed change shipped here).
+
+---
+
+## 2026-11-06 — OK-WRAPPER LEAK FIXED (lane `work/riscv-args-binding-20261106`, PR #7051+3): `.unwrap()` returned the Ok-wrapper itself; interpreted prints now render REAL text
+
+Root cause of the print-time fall-through, measured end to end:
+
+1. `backend_value_string_v1`'s CLIF is correct —
+   `rt_enum_new(0x04f8_12a4, 0xe0f5_dd50 as i32, text)` — and
+   `try_call_builtin`'s Value-arm tests carry the matching constants.
+2. Live, the print arg object was `{HEAP_ENUM, enum_id=0, disc=0,
+   payload=text}` — that is `rt_enum_new(0, 0, payload)` = **Result.Ok**:
+   `val v: Value = evaluated_arg.unwrap()` in interpreter_expr.spl's Call
+   arg eval returned the Ok-WRAPPER, not the payload, on the riscv64
+   in-guest AOT path. `args[0]` was therefore a Result, every `case
+   Value.X` test failed (Value's enum_id is 0x04f8_12a4, not 0), and
+   `type_name()` answered "unknown" — the `<unknown>` tail in full.
+3. Fix (tagged @workaround bug=riscv64_interp_ok_wrapper_leak_2026_11_06):
+   extract the payload with an explicit `match evaluated_arg: case
+   Ok(inner_v): inner_v` — the rt_enum_check_variant + rt_enum_payload
+   binding pattern `cranelift_codegen_adapter.spl` already uses; Result
+   lives in the untyped id-0 lane whose checks measure passing in-guest.
+
+Verification (nonce aa11bb22cc33dd44, completing): interpreted prints now
+emit REAL TEXT — `HELLO_INTERP_SIM` twice, rc=0 (was `<unknown>`).
+
+## NEXT TAIL, precisely measured the same session: interpreted string literals truncate to 16 chars in-guest
+
+The printed text is exactly 16 chars: the string object passed to
+`backend_value_string_v1` is genuinely `{type=1, size=33, len=16}` with
+zero padding after "HELLO_INTERP_SIM" — a true construction-time
+truncation in the guest frontend's literal lexing/slicing (the enclosing
+source text is complete: parsing finds the closing quote and the second
+print statement). The gate's nonce marker still cannot pass until this is
+fixed. Exec-loop re-dispatch (the earlier defect 2) is bounded on
+completing nonces (the Print case re-enters many times — 60+ probe
+constructions observed — but the run finishes with exactly two prints);
+unbounded on hanging nonces. Both recorded for the next lane.
