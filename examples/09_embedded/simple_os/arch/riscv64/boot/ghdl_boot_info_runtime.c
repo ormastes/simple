@@ -18,6 +18,12 @@ typedef intptr_t RuntimeValue;
 
 #define HEAP_STRING 1U
 #define HEAP_ARRAY 2U
+#define HEAP_DICT 11U
+/* Not duplicated across the runtime TUs; resolve to the single owner. */
+uint64_t     simpleos_dict_count(RuntimeValue dict);
+RuntimeValue simpleos_dict_lookup(RuntimeValue dict, RuntimeValue key);
+int8_t       simpleos_dict_store(RuntimeValue dict, RuntimeValue key, RuntimeValue item);
+
 #define HEAP_ENUM 7U
 
 typedef struct {
@@ -424,21 +430,41 @@ RuntimeValue rt_len(RuntimeValue value)
     if (!hdr) return 0;
     if (hdr->type == HEAP_STRING) return (RuntimeValue)((RuntimeString *)hdr)->len;
     if (hdr->type == HEAP_ARRAY) return (RuntimeValue)((RuntimeArray *)hdr)->len;
+    if (hdr->type == HEAP_DICT) return (RuntimeValue)simpleos_dict_count(value);
     return 0;
 }
 
+RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx);
+
 RuntimeValue rt_index_get(RuntimeValue value, RuntimeValue index)
 {
-    if (!IS_INT(index)) return NIL_VALUE;
     if (!IS_HEAP(value)) return NIL_VALUE;
-    HeapHeader *hdr = (HeapHeader *)DECODE_PTR(value);
+    HeapHeader *hdr0 = (HeapHeader *)DECODE_PTR(value);
+    if (hdr0 && hdr0->type == HEAP_DICT) return simpleos_dict_lookup(value, index);
+    if (!IS_INT(index)) return NIL_VALUE;
+    HeapHeader *hdr = hdr0;
     if (!hdr) return NIL_VALUE;
     if (hdr->type == HEAP_ARRAY) return rt_array_get(value, (RuntimeValue)DECODE_INT(index));
+    if (hdr->type == HEAP_STRING) return rt_string_char_at(value, (RuntimeValue)DECODE_INT(index));
     return NIL_VALUE;
 }
 
+/* The dict arms MUST live in this TU's copies of rt_index_set / rt_index_get
+ * / rt_len, not only in the other runtime TUs: which duplicate definition
+ * wins the --allow-multiple-definition link is a per-closure lottery, and on
+ * the 2026-11-06 closure THIS copy won rt_index_set with the pre-fix body
+ * (every dict write in-guest silently dropped; module.functions stayed
+ * EMPTY; desugar_module then nil-faulted reading func.is_async). Mirrored
+ * verbatim from baremetal_stubs.c, whose comment documents the same
+ * incident class. simpleos_dict_* are not duplicated; declared with the
+ * other HEAP_* defines below. */
 RuntimeValue rt_index_set(RuntimeValue value, RuntimeValue index, RuntimeValue item)
 {
+    if (IS_HEAP(value)) {
+        HeapHeader *hdr = (HeapHeader *)DECODE_PTR(value);
+        if (hdr && hdr->type == HEAP_DICT)
+            return (RuntimeValue)simpleos_dict_store(value, index, item);
+    }
     if (!IS_INT(index)) return 0;
     return rt_array_set(value, (RuntimeValue)DECODE_INT(index), item);
 }
