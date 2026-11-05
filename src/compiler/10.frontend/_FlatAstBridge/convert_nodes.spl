@@ -1,6 +1,7 @@
 # Explicit payload owners survive import-surface projection.
 use compiler.frontend.core._AstExpr.nodes.{asm_arm_owner_abi, asm_arm_owner_archs, asm_arm_owner_asm_text, asm_arm_owner_backend, asm_arm_owner_error_msg, asm_arm_owner_is_compile_error, asm_arm_owner_is_wildcard, asm_arm_owner_os, asm_arm_owner_ver_ops, asm_arm_owner_ver_vals}
 use compiler.frontend.parser_types_expr.{Expr, ExprKind, Interpolation}
+use compiler.frontend.parser_types_utils.{parse_float_literal}
 use compiler.frontend.core.ast_expr.{expr_get_call_type_args}
 use compiler.core.ast_stmt.{STMT_USE_IMPORT}
 # Flat AST Bridge: flat expr/stmt/type/decl conversion helpers.
@@ -928,6 +929,17 @@ fn flat_bridge_decode_brace_escapes(value: text) -> text:
         parts.push(value[run_start:n])
     parts.join("")
 
+# Float literals convert to the value form ExprKind.FloatLit(f64) by default.
+# Two contexts must instead keep the exact decimal spelling as
+# ExprKind.FloatLexeme(text): module-level const/val initializers (MIR folds
+# a negated float const by negating the lexeme text; unary_literal_module_
+# const_static_spec and imported_global_infer_storage_spec pin that) and
+# float literal match patterns (HIR/MIR match on the lexeme text;
+# float_literal_pattern_bridge_spec pins that). The owner module sets this
+# flag around those conversions; every other float literal rides the f64
+# value form.
+pub var flat_bridge_lexeme_float_literals: bool = false
+
 fn convert_flat_expr(idx: i64) -> Expr:
     if idx < 0:
         return Expr(kind: ExprKind.NilLit, span: make_span())
@@ -939,7 +951,9 @@ fn convert_flat_expr(idx: i64) -> Expr:
     if tag == EXPR_INT_LIT:
         return Expr(kind: ExprKind.IntLit(expr_get_int(idx)), span: span)
     if tag == EXPR_FLOAT_LIT:
-        return Expr(kind: ExprKind.FloatLexeme(expr_get_float(idx)), span: span)
+        if flat_bridge_lexeme_float_literals:
+            return Expr(kind: ExprKind.FloatLexeme(expr_get_float(idx)), span: span)
+        return Expr(kind: ExprKind.FloatLit(parse_float_literal(expr_get_float(idx))), span: span)
     if tag == EXPR_STRING_LIT:
         val str_val = expr_get_str(idx)
         if expr_get_int(idx) != 0:
@@ -1631,6 +1645,15 @@ fn convert_flat_pattern(pat_eid: i64) -> Pattern:
         # literal test (`v == nil`), and over a union carrying a `nil` member
         # it is the arm that names that member (bug doc
         # union_narrowing_has_no_grammar_or_runtime_2026-08-21.md).
+        # Float literal patterns keep the exact decimal lexeme: HIR/MIR match
+        # on the lexeme text (float_literal_pattern_bridge_spec), so ride the
+        # lexeme-preserving bridge mode for the whole literal conversion.
+        if ptag == EXPR_FLOAT_LIT:
+            val saved_float_mode = flat_bridge_lexeme_float_literals
+            flat_bridge_lexeme_float_literals = true
+            val lexeme_literal = convert_flat_expr(pat_eid)
+            flat_bridge_lexeme_float_literals = saved_float_mode
+            return Pattern(kind: PatternKind.Literal(lexeme_literal), span: pspan)
         return Pattern(kind: PatternKind.Literal(convert_flat_expr(pat_eid)), span: pspan)
     elif ptag == EXPR_BINARY:
         # `1 | 2 | 3` (or-pattern) parses as a chain of EXPR_BINARY(BitOr)
@@ -1713,6 +1736,15 @@ fn convert_flat_pattern(pat_eid: i64) -> Pattern:
         # expression still falls through unchanged.
         val neg_operand_tag = expr_get_tag(expr_get_left(pat_eid))
         if expr_get_int(pat_eid) == 61 and (neg_operand_tag == EXPR_INT_LIT or neg_operand_tag == EXPR_FLOAT_LIT):
+            if neg_operand_tag == EXPR_FLOAT_LIT:
+                # Negative float literal pattern: the operand keeps its exact
+                # decimal lexeme (same contract as the float literal branch
+                # above); the unary minus wraps the lexeme form.
+                val saved_neg_float_mode = flat_bridge_lexeme_float_literals
+                flat_bridge_lexeme_float_literals = true
+                val neg_float_literal = convert_flat_expr(pat_eid)
+                flat_bridge_lexeme_float_literals = saved_neg_float_mode
+                return Pattern(kind: PatternKind.Literal(neg_float_literal), span: pspan)
             return Pattern(kind: PatternKind.Literal(convert_flat_expr(pat_eid)), span: pspan)
     # Every pattern shape that reaches this catch-all is silently degraded
     # to an UNCONDITIONAL wildcard -- it matches everything and binds nothing,
