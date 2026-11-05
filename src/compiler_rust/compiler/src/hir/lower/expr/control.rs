@@ -852,11 +852,7 @@ impl Lowerer {
 
                 // Validate the stable enum identity and hashed variant tag.
                 let expected_disc: i64 = {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut hasher = DefaultHasher::new();
-                    variant.hash(&mut hasher);
-                    (hasher.finish() & 0xFFFFFFFF) as i64
+                    simple_runtime::value::hash_variant_discriminant(variant) as i64
                 };
 
                 let expected_val = HirExpr {
@@ -1215,11 +1211,7 @@ impl Lowerer {
                     return self.struct_fields_condition(slot, variant, &positional, ctx);
                 }
                 let expected_disc: i64 = {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut hasher = DefaultHasher::new();
-                    variant.hash(&mut hasher);
-                    (hasher.finish() & 0xFFFFFFFF) as i64
+                    simple_runtime::value::hash_variant_discriminant(variant) as i64
                 };
                 let tag_test = HirExpr {
                     kind: HirExprKind::BuiltinCall {
@@ -2392,11 +2384,7 @@ impl Lowerer {
         };
         let condition = if result_like {
             let err_disc: i64 = {
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                let mut hasher = DefaultHasher::new();
-                "Err".hash(&mut hasher);
-                (hasher.finish() & 0xFFFFFFFF) as i64
+                simple_runtime::value::hash_variant_discriminant("Err") as i64
             };
             let is_err = HirExpr {
                 kind: HirExprKind::BuiltinCall {
@@ -2995,13 +2983,7 @@ impl Lowerer {
             ty: TypeId::BOOL,
         };
         let is_err = || {
-            let err_disc: i64 = {
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                let mut hasher = DefaultHasher::new();
-                "Err".hash(&mut hasher);
-                (hasher.finish() & 0xFFFF_FFFF) as i64
-            };
+            let err_disc: i64 = simple_runtime::value::hash_variant_discriminant("Err") as i64;
             builtin_check(
                 "rt_enum_check_variant",
                 vec![
@@ -3345,11 +3327,7 @@ impl Lowerer {
 
         // Hashed "Err" discriminant — same convention as match lowering.
         let err_disc: i64 = {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            let mut hasher = DefaultHasher::new();
-            "Err".hash(&mut hasher);
-            (hasher.finish() & 0xFFFFFFFF) as i64
+            simple_runtime::value::hash_variant_discriminant("Err") as i64
         };
 
         let is_err = HirExpr {
