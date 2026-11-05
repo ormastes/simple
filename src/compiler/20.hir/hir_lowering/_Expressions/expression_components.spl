@@ -63,6 +63,10 @@ fn or_bare_name_is_variant_reference(name: text) -> bool:
     val first = name.char_at(0)
     first >= "A" and first <= "Z"
 
+
+fn nil_payload_pattern_non_optional_message(variant: text) -> text:
+    "`{variant}(nil)` can never match: the {variant} payload is not optional (nil is only the T? absence literal); match absence with `case nil:` on an optional subject, or declare the payload as T?"
+
 impl HirLowering:
     me lower_expr_list(exprs: [Expr]) -> [HirExpr]:
         var result: [HirExpr] = []
@@ -859,7 +863,17 @@ impl HirLowering:
                                                 match nil_slot_type.kind:
                                                     case HirTypeKind.Optional(_):
                                                         wrapped_inner = HirPattern(kind: wrapped_inner.kind, has_type_: true, type_: nil_slot_type, span: wrapped_inner.span)
-                                                    case _: ()
+                                                    case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Any | HirTypeKind.TypeParam(_, _): ()
+                                                    case HirTypeKind.Named(nil_slot_owner, _):
+                                                        if self.symbols.symbol_name_scalar_raw(nil_slot_owner.id) != "Option":
+                                                            self.error(nil_payload_pattern_non_optional_message(variant_name), p.span)
+                                                            return HirPattern(kind: HirPatternKind.Error, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: p.span), span: p.span)
+                                                    case _:
+                                                        # nil_payload_pattern_on_non_optional_slot_2026-11-05:
+                                                        # nil is only the T? absence literal; it can never
+                                                        # match a non-optional payload.
+                                                        self.error(nil_payload_pattern_non_optional_message(variant_name), p.span)
+                                                        return HirPattern(kind: HirPatternKind.Error, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: p.span), span: p.span)
                                         return self.wrapper_pattern(variant_name, wrapped_inner, p.span)
                             case _: ()
             case PatternKind.Tuple(elements):

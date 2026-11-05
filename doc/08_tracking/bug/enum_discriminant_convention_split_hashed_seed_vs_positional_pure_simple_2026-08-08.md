@@ -208,6 +208,19 @@ non-negotiable guardrail, in priority order:
 Confirmed unchanged: the doc's own "Recommended fix (converge, or fence)" section documents this as an architectural convention split between the Rust seed's hashed enum discriminants (`codegen/instr/result.rs`) and pure-Simple's positional convention, not yet converged. A real fix requires either a Rust-seed codegen change (cargo build/redeploy cycle) or a cross-runtime fencing decision — both out of scope for this pure-Simple TDD pass. No live cross-over was found (per "Reachability" section), so severity remains low today. Leaving OPEN, no code change made.
 
 
+## Status 2026-11-05 — fence added (convergence still open)
+
+Added `scripts/check/check-enum-discriminant-convention-fence.shs` (step 1 of
+"Recommended fix", the fence only): fails if the C runtime sources gain a
+`hash_variant_discriminant` reference, if the Rust runtime loses it (convention
+changed without updating the fence), or -- with `--artifact FILE` -- if a binary
+embeds BOTH runtimes' `.rodata` canaries (`Result::Err(` = C, `runtime/src/value`
+= Rust). `--selftest` (fatal, runs first) pins classifier fixtures for C / Rust /
+MIXED / NEITHER and a clean-vs-hashed C source tree. Not done: converging on the
+positional convention (cross-toolchain ABI change, seed + Rust runtime must move
+together) and failing the seed link on duplicate `rt_enum_new`
+(`--allow-multiple-definition`, linker.rs:145). Bug stays open.
+
 ## Status 2026-11-05 — seed converged on positional for Result/Option; duplicate rt_enum_new link guard
 
 Root cause: the seed had no single discriminant definition — ~20 inline

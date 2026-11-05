@@ -1,0 +1,442 @@
+#!/bin/sh
+# pr-fix-land.shs — THE one landing path for a reviewed PR: gate on the review
+# verdict, merge the base in, resolve sealed SDN tables (bug_db.sdn) row by row,
+# reseal to exactly ONE .csm, guard against rewinds, push, admin-merge, clean up.
+#
+# WHY: almost every PR conflict on this repo is doc/08_tracking/bug/bug_db.sdn
+# plus its sidecar seal `bug_db.<algo>_<hex>.csm` — every PR that touches a row
+# renames the seal, so two such PRs always collide even with disjoint rows.
+# The ad-hoc scripts that handled this (whole-file copies, grep-by-id splices)
+# each lost rows at least once. This script is the single sanctioned path.
+#
+# STEPS
+#   1 gate     latest verdict on the CURRENT head SHA (a PR review whose
+#              commit_id is the head, or an issue comment naming the head sha)
+#              must start with "VERDICT: LAND" or "READY TO LAND"; PR must be OPEN.
+#   2 worktree temp FULL (non-sparse) worktree of the PR head under $PFL_WT_ROOT,
+#              administered from an existing clone ($PFL_ADMIN, C:/dev/wt/bsrows),
+#              never C:/dev/simple; full tree (pre-push tree-size gate; src/lib + src/app/hash
+#              (the xxh3 hasher). Fetches origin/<base>.
+#   3 merge    `git merge <base>` into the PR head. Sealed SDN files are resolved
+#              ROW BY ROW keyed by (table, row id) from merge-base/base/PR blobs:
+#                start from base rows; apply rows the PR changed or added;
+#                a row deleted on either side stays deleted; rows deleted on
+#                neither side are kept. Never a whole side. Fail-closed CONFLICT
+#                when both sides changed one row differently, or one side
+#                changed a row the other deleted.
+#              Every `<stem>.*.csm` is removed and the file resealed to exactly
+#              one .csm, verified by check-sdn-crc32-sealed.shs.
+#              Any other conflict: abort, list files, exit 4.
+#   4 rewind   a file that differs from base after the merge but was not touched
+#              by the PR's own (non-merge) commits is a FAIL, exit 5.
+#   5 land     push to the PR branch (pre-push gates run; never --no-verify),
+#              admin-merge when no check is FAILING, retry from step 3 at most
+#              twice when the merge fails (base advanced), verify MERGED,
+#              delete the remote branch and the worktree.
+#
+# Usage:
+#   sh scripts/vcs/pr-fix-land.shs <PR#> [--dry-run]
+#   sh scripts/vcs/pr-fix-land.shs --selftest
+# Env: PFL_WT_ROOT, PFL_ADMIN, PFL_BASE (expected base, default release/1.0.0),
+#      PFL_KEEP_WT=1 (keep the worktree for debugging).
+#
+# Verdict is ALWAYS the last stdout line:
+#   LANDED — #<n> ...                       exit 0
+#   HELD — #<n> dry-run: would land ...     exit 0
+#   HELD — #<n> <reason>                    exit 1 failing check / merge retries,
+#                                                3 not reviewed, 4 conflict,
+#                                                5 rewind
+#   ERROR — <reason>                        exit 2
+
+set -u
+
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+WT_ROOT=${PFL_WT_ROOT:-C:/dev/wt}
+ADMIN=${PFL_ADMIN:-C:/dev/wt/bsrows}
+EXPECT_BASE=${PFL_BASE:-release/1.0.0}
+REMOTE=origin
+DRY=0
+W=""
+WT_MADE=0
+
+say() { echo "pr-fix-land: $*" >&2; }
+
+checkdir() { # worktree -> dir holding reseal/check scripts
+    if [ -f "$1/scripts/check/reseal-sdn-crc32.shs" ]; then echo "$1/scripts/check"
+    elif [ -f "$HERE/../check/reseal-sdn-crc32.shs" ]; then (cd "$HERE/../check" && pwd)
+    else echo "$ADMIN/scripts/check"; fi
+}
+
+# ---------------------------------------------------------------- row resolver
+# resolve_rows <O> <B> <P> : merge-base / base / PR copies of one SDN table file.
+# Writes the merged body to stdout. rc 0 clean, 1 row conflict (named on
+# stderr), 3 unsupported layout (header change, table removed).
+resolve_rows() {
+    { echo "@@SIDE 1"; [ -f "$1" ] && awk 1 "$1"
+      echo "@@SIDE 2"; [ -f "$2" ] && awk 1 "$2"
+      echo "@@SIDE 3"; [ -f "$3" ] && awk 1 "$3"; } | tr -d '\r' | awk '
+    function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+    function fields(s, arr,   n, i, c, q, cur) {
+        n = 0; q = 0; cur = ""
+        for (i = 1; i <= length(s); i++) {
+            c = substr(s, i, 1)
+            if (c == "\"") q = !q
+            if (c == "," && !q) { arr[++n] = trim(cur); cur = ""; continue }
+            cur = cur c
+        }
+        arr[++n] = trim(cur); return n
+    }
+    /^@@SIDE [123]$/ { s = $2 + 0; t = ""; next }
+    /^[A-Za-z_][A-Za-z0-9_]* \|.*\|[ \t]*$/ {
+        t = $1; hdr[s, t] = $0
+        if (!((s, t) in seen)) { seen[s, t] = 1; tord[s, ++nt[s]] = t }
+        h = $0; sub(/^[^|]*\|/, "", h); sub(/\|[ \t]*$/, "", h)
+        nc = fields(h, cols); two[t] = (nc >= 2 && cols[2] == "line_num")
+        next
+    }
+    {
+        if (t == "") { if (s == 2 && $0 !~ /^#sdn-crc32:/) pre[++npre] = $0; next }
+        n = ++nl[s, t]; line[s, t, n] = $0
+        if ($0 ~ /^[ \t]*$/ || $0 ~ /^[ \t]*#/) { isrow[s, t, n] = 0; next }
+        isrow[s, t, n] = 1
+        fields($0, f); k = f[1]; if (two[t]) k = k SUBSEP f[2]
+        key[s, t, n] = k; cnt[s, t, k]++; row[s, t, k] = $0; txt[s, t, $0]++
+        last[s, t] = n
+    }
+    function conflict(t, k, why,   kk) { kk = k; gsub(SUBSEP, ",", kk); print "CONFLICT " t " " kk ": " why > "/dev/stderr"; nconf++ }
+    function uniq(t, k) { return cnt[1, t, k] <= 1 && cnt[2, t, k] <= 1 && cnt[3, t, k] <= 1 }
+    function decide(t, k,   ho, hb, hp, o, b, p) {   # sets OUT ("" = drop)
+        ho = cnt[1, t, k] > 0; hb = cnt[2, t, k] > 0; hp = cnt[3, t, k] > 0
+        o = row[1, t, k]; b = row[2, t, k]; p = row[3, t, k]; OUT = ""
+        if (hp && ho && p == o) { if (hb) OUT = b; return }          # PR left it alone
+        if (hp) {                                                    # PR changed / added
+            if (ho && !hb) { conflict(t, k, "base deleted a row the PR changed"); return }
+            if (!ho && hb && b != p) { conflict(t, k, "added on both sides differently"); return }
+            if (ho && hb && b != o && b != p) { conflict(t, k, "changed on both sides differently"); return }
+            OUT = p; return
+        }
+        if (ho) {                                                    # PR deleted
+            if (hb && b != o) conflict(t, k, "PR deleted a row base changed")
+            return
+        }
+        if (hb) OUT = b                                              # base-only row
+    }
+    function want(t, r,   w) { w = txt[2, t, r] + txt[3, t, r] - txt[1, t, r]; return w < 0 ? 0 : w }
+    function extras(t,   i, k, r) {                                  # PR rows base lacks
+        for (i = 1; i <= nl[3, t]; i++) {
+            if (!isrow[3, t, i]) continue
+            k = key[3, t, i]; r = line[3, t, i]
+            if (uniq(t, k)) {
+                if (cnt[2, t, k] > 0 || ((t, k) in done)) continue
+                done[t, k] = 1; decide(t, k); if (OUT != "") print OUT
+            } else if (++used[t, r] <= want(t, r)) print r
+        }
+    }
+    function table(t,   i, k, r) {
+        print hdr[2, t]
+        for (i = 1; i <= nl[2, t]; i++) {
+            r = line[2, t, i]
+            if (!isrow[2, t, i]) { if (i <= last[2, t]) print r; continue }
+            k = key[2, t, i]
+            if (uniq(t, k)) { decide(t, k); if (OUT != "") print OUT }
+            else if (++used[t, r] <= want(t, r)) print r
+            if (i == last[2, t]) extras(t)
+        }
+        if (!last[2, t]) extras(t)
+        for (i = last[2, t] + 1; i <= nl[2, t]; i++) print line[2, t, i]
+    }
+    END {
+        for (i = 1; i <= nt[2]; i++) {
+            t = tord[2, i]
+            if (((3, t) in seen) && hdr[2, t] != hdr[3, t]) { print "UNSUPPORTED table " t ": header differs" > "/dev/stderr"; exit 3 }
+            if (((1, t) in seen) && !((3, t) in seen)) { print "UNSUPPORTED table " t ": removed by PR" > "/dev/stderr"; exit 3 }
+        }
+        for (i = 1; i <= npre; i++) print pre[i]
+        for (i = 1; i <= nt[2]; i++) table(tord[2, i])
+        for (i = 1; i <= nt[3]; i++) {
+            t = tord[3, i]; if ((2, t) in seen) continue
+            if ((1, t) in seen) { print "UNSUPPORTED table " t ": removed by base, kept by PR" > "/dev/stderr"; exit 3 }
+            print hdr[3, t]; for (j = 1; j <= nl[3, t]; j++) print line[3, t, j]
+        }
+        exit nconf > 0 ? 1 : 0
+    }'
+}
+
+# ---------------------------------------------------------------- gate
+# verdict_pick: stdin = "<iso-time>\t<first line>" per review/comment on the head.
+# rc 0 when the LATEST verdict-shaped line is LAND, 1 otherwise (none, or HOLD).
+verdict_pick() {
+    sed 's/\t[*#> ]*/\t/' | grep -E "$(printf '\t')(VERDICT:|READY TO LAND|NOT READY)" | sort | tail -1 \
+        | grep -qE "$(printf '\t')(VERDICT: *LAND|READY TO LAND)"
+}
+
+gate() { # pr head-sha -> rc 0 reviewed
+    _short=$(echo "$2" | cut -c1-10)
+    { gh api "repos/{owner}/{repo}/pulls/$1/reviews" --paginate \
+          --jq ".[] | select(.commit_id == \"$2\") | [.submitted_at, ((.body // \"\") | split(\"\n\")[0])] | @tsv"
+      gh api "repos/{owner}/{repo}/issues/$1/comments" --paginate \
+          --jq ".[] | select((.body // \"\") | contains(\"$_short\")) | [.created_at, (.body | split(\"\n\")[0])] | @tsv"
+    } 2>/dev/null | verdict_pick
+}
+
+# ---------------------------------------------------------------- merge
+sealed_of() { # rev... -> sealed .sdn paths (a .csm sidecar exists in any rev)
+    for _r in "$@"; do
+        git ls-tree -r --name-only "$_r" | sed -n 's|^\(.*\)\.[a-z0-9]*_[0-9a-f]*\.csm$|\1.sdn|p'
+    done | sort -u
+}
+blob() { git cat-file -e "$1:$2" 2>/dev/null && git cat-file -p "$1:$2" | tr -d '\r' > "$3" || rm -f "$3"; }
+bid() { git rev-parse -q --verify "$1:$2" 2>/dev/null || echo none; }
+
+# do_merge <worktree> <pr-head-sha> <base-sha> -> MERGE_SHA, MSG; rc 0 ok,
+# 4 conflict (merge aborted), 5 rewind, 2 error. Runs inside the worktree.
+do_merge() {
+    _w=$1; _H=$2; _B=$3; MSG=""; MERGE_SHA=""; CSM_RESOLVED=0
+    cd "$_w" || { MSG="cannot enter $_w"; return 2; }
+    _tmp=$(mktemp -d) || { MSG="mktemp"; return 2; }
+    git checkout -q --detach "$_H" || { MSG="checkout $_H failed"; return 2; }
+    _O=$(git merge-base "$_H" "$_B") || { MSG="no merge-base"; return 2; }
+    if [ "$_O" = "$_B" ]; then MERGE_SHA=$_H; MSG="already up to date"
+    else
+        sealed_of "$_O" "$_B" "$_H" > "$_tmp/sealed"
+        git merge -q --no-ff --no-commit "$_B" >"$_tmp/merge.log" 2>&1
+        git ls-files -u | cut -f2 | sort -u > "$_tmp/unmerged"
+        : > "$_tmp/other"
+        while IFS= read -r _p; do
+            case "$_p" in
+                *.csm) _s=$(echo "$_p" | sed -n 's|^\(.*\)\.[a-z0-9]*_[0-9a-f]*\.csm$|\1.sdn|p')
+                       grep -qxF "$_s" "$_tmp/sealed" && { CSM_RESOLVED=1; continue; } ;;
+                *.sdn) grep -qxF "$_p" "$_tmp/sealed" && continue ;;
+            esac
+            echo "$_p" >> "$_tmp/other"
+        done < "$_tmp/unmerged"
+        if [ -s "$_tmp/other" ]; then
+            git merge --abort 2>/dev/null; MSG="non-SDN conflicts: $(tr '\n' ' ' < "$_tmp/other")"
+            rm -rf "$_tmp"; return 4
+        fi
+        _cd=$(checkdir "$_w")
+        while IFS= read -r _s; do
+            _o=$(bid "$_O" "$_s"); _b=$(bid "$_B" "$_s"); _h=$(bid "$_H" "$_s")
+            _stem=${_s%.sdn}
+            _ncsm=$(git ls-files -- "$_stem.*.csm" | sort -u | wc -l | tr -d ' ')
+            [ "$_o" = "$_b" ] && [ "$_o" = "$_h" ] && [ "$_ncsm" -le 1 ] && ! grep -qxF "$_s" "$_tmp/unmerged" && continue
+            [ "$_ncsm" -gt 1 ] && CSM_RESOLVED=1
+            if [ "$_o" != "$_b" ] && [ "$_o" != "$_h" ] && [ "$_b" != "$_h" ]; then
+                blob "$_O" "$_s" "$_tmp/o"; blob "$_B" "$_s" "$_tmp/b"; blob "$_H" "$_s" "$_tmp/p"
+                if ! resolve_rows "$_tmp/o" "$_tmp/b" "$_tmp/p" > "$_tmp/m" 2>"$_tmp/rc.err"; then
+                    git merge --abort 2>/dev/null
+                    MSG="row conflict in $_s: $(head -5 "$_tmp/rc.err" | tr '\n' ';')"; rm -rf "$_tmp"; return 4
+                fi
+                mkdir -p "$(dirname "$_s")"; cp "$_tmp/m" "$_s"
+            elif [ ! -f "$_s" ]; then
+                git checkout -q "$_B" -- "$_s" 2>/dev/null || git checkout -q "$_H" -- "$_s" 2>/dev/null
+            fi
+            git ls-files -- "$_stem.*.csm" | sort -u | while IFS= read -r _c; do
+                git rm -q --cached --sparse -f -- "$_c" >/dev/null 2>&1 || git update-index --force-remove -- "$_c"
+            done
+            rm -f "$_stem".*.csm
+            [ -f "$_s" ] || continue
+            _r=$(sh "$_cd/reseal-sdn-crc32.shs" --no-selftest "$_s" | tail -1)
+            case "$_r" in PASS*) ;; *) git merge --abort 2>/dev/null; MSG="reseal $_s: $_r"; rm -rf "$_tmp"; return 4 ;; esac
+            git add --sparse -f -- "$_s" "$_stem".*.csm || { git merge --abort 2>/dev/null; MSG="git add $_s failed"; rm -rf "$_tmp"; return 2; }
+        done < "$_tmp/sealed"
+        if [ -n "$(git ls-files -u)" ]; then
+            _left=$(git ls-files -u | cut -f2 | sort -u | tr '\n' ' ')
+            git merge --abort 2>/dev/null; MSG="unresolved after SDN pass: $_left"; rm -rf "$_tmp"; return 4
+        fi
+        # Normal hooked commit. The pre-commit hook runs
+        # `sh scripts/check-workspace-root-guard.shs` from the worktree root, so
+        # the worktree must be a FULL checkout (a sparse one lacked the file).
+        git commit -q -m "Merge $REMOTE base into PR head (pr-fix-land: sealed SDN row merge + reseal)" >"$_tmp/commit.log" 2>&1 \
+            || { MSG="merge commit failed (pre-commit hook?): $(tail -n 3 "$_tmp/commit.log" | tr '\n' ' ')"; git merge --abort 2>/dev/null; rm -rf "$_tmp"; return 2; }
+        MERGE_SHA=$(git rev-parse HEAD)
+        _v=$(sh "$_cd/check-sdn-crc32-sealed.shs" --no-selftest --rev "$MERGE_SHA" --root "$_w" 2>/dev/null | tail -1)
+        case "$_v" in PASS*) ;; *) MSG="seal check at $MERGE_SHA: $_v"; rm -rf "$_tmp"; return 4 ;; esac
+    fi
+    # rewind guard: every file differing from base must be the PR's own work
+    git log --no-merges --format= --name-only "$_O..$_H" | sed '/^$/d' | sort -u > "$_tmp/touched"
+    sealed_of "$_B" "$MERGE_SHA" > "$_tmp/sealed2"
+    git diff --name-only "$_B" "$MERGE_SHA" | sort -u > "$_tmp/changed"
+    _rew=$(comm -23 "$_tmp/changed" "$_tmp/touched" | while IFS= read -r _p; do
+        grep -qxF "$_p" "$_tmp/sealed2" && continue
+        case "$_p" in *.csm) _s=$(echo "$_p" | sed -n 's|^\(.*\)\.[a-z0-9]*_[0-9a-f]*\.csm$|\1.sdn|p')
+                     grep -qxF "$_s" "$_tmp/sealed2" && continue ;; esac
+        if git cat-file -e "$MERGE_SHA:$_p" 2>/dev/null; then echo "reverted:$_p"; else echo "deleted:$_p"; fi
+    done | tr '\n' ' ')
+    rm -rf "$_tmp"
+    if [ -n "$_rew" ]; then MSG="rewind vs base, not touched by PR commits: $_rew"; return 5; fi
+    [ -n "$MSG" ] || MSG="merged base -> $MERGE_SHA, seals verified"
+    return 0
+}
+
+# ---------------------------------------------------------------- landing
+cleanup() {
+    [ "$WT_MADE" = 1 ] || return 0
+    [ "${PFL_KEEP_WT:-0}" = 1 ] && { say "kept worktree $W"; return 0; }
+    cd "$ADMIN" 2>/dev/null || cd /
+    git -C "$ADMIN" worktree remove --force "$W" >/dev/null 2>&1 || rm -rf "$W"
+    git -C "$ADMIN" worktree prune >/dev/null 2>&1
+    WT_MADE=0
+}
+finish() { # rc verdict...
+    _rc=$1; shift; cleanup; echo "$*"; exit "$_rc"
+}
+
+pr_field() { gh pr view "$PR" --json "$1" --jq ".$1" 2>/dev/null; }
+
+land() {
+    PR=$1
+    cd "$ADMIN" 2>/dev/null || finish 2 "ERROR — admin clone $ADMIN missing"
+    _info=$(gh pr view "$PR" --json state,headRefName,headRefOid,baseRefName,isCrossRepository \
+        --jq '[.state,.headRefName,.headRefOid,.baseRefName,(.isCrossRepository|tostring)]|@tsv' 2>/dev/null) \
+        || finish 2 "ERROR — #$PR: gh pr view failed"
+    _state=$(echo "$_info" | cut -f1); HREF=$(echo "$_info" | cut -f2); HSHA=$(echo "$_info" | cut -f3)
+    BASE=$(echo "$_info" | cut -f4); _fork=$(echo "$_info" | cut -f5)
+    [ "$_state" = OPEN ] || finish 2 "ERROR — #$PR is $_state, not OPEN"
+    [ "$_fork" = false ] || finish 2 "ERROR — #$PR is from a fork"
+    [ "$BASE" = "$EXPECT_BASE" ] || finish 2 "ERROR — #$PR base is $BASE, expected $EXPECT_BASE"
+    gate "$PR" "$HSHA" || finish 3 "HELD — #$PR not reviewed: no VERDICT: LAND / READY TO LAND on head $(echo "$HSHA" | cut -c1-11)"
+    [ "$(pr_field state)" = OPEN ] || finish 2 "ERROR — #$PR closed during gate"
+    say "#$PR gate PASS on $(echo "$HSHA" | cut -c1-11) ($HREF)"
+
+    W="$WT_ROOT/pfl-$PR-$$"
+    _i=0; until mkdir "$WT_ROOT/.create.lock" 2>/dev/null; do _i=$((_i+1)); [ $_i -gt 40 ] && finish 2 "ERROR — $WT_ROOT/.create.lock held >10 min"; sleep 15; done
+    git -C "$ADMIN" fetch -q "$REMOTE" "+refs/heads/$BASE:refs/remotes/$REMOTE/$BASE" "+refs/heads/$HREF:refs/remotes/$REMOTE/$HREF" \
+        && git -C "$ADMIN" worktree add -q --detach --no-checkout "$W" "$HSHA" >/dev/null 2>&1; _rc=$?
+    [ $_rc -eq 0 ] && WT_MADE=1
+    # FULL tree, never sparse: pre-push check-tree-size-push errors without a
+    # verdict on a sparse worktree (and src/lib + src/app/hash feed the hasher).
+    rmdir "$WT_ROOT/.create.lock"
+    [ $_rc -eq 0 ] || finish 2 "ERROR — #$PR: worktree $W setup failed"
+    git -C "$W" checkout -q --detach "$HSHA" >/dev/null 2>&1 || finish 2 "ERROR — #$PR: checkout failed"
+
+    _try=0
+    while :; do
+        _try=$((_try+1))
+        git -C "$W" fetch -q "$REMOTE" "+refs/heads/$BASE:refs/remotes/$REMOTE/$BASE" || finish 2 "ERROR — #$PR: fetch $BASE failed"
+        _B=$(git -C "$W" rev-parse "refs/remotes/$REMOTE/$BASE")
+        _cur=$(pr_field headRefOid)
+        [ "$_try" -eq 1 ] && [ "$_cur" != "$HSHA" ] && finish 2 "ERROR — #$PR head moved during setup ($_cur); rerun"
+        do_merge "$W" "$_cur" "$_B"; _rc=$?
+        case $_rc in
+            0) ;;
+            4) finish 4 "HELD — #$PR needs a human/agent fix: $MSG" ;;
+            5) finish 5 "HELD — #$PR $MSG" ;;
+            *) finish 2 "ERROR — #$PR: $MSG" ;;
+        esac
+        say "#$PR $MSG"
+        if [ "$DRY" = 1 ]; then
+            _f=$(gh pr checks "$PR" --json name,bucket --jq '.[]|select(.bucket=="fail")|.name' 2>/dev/null | tr '\n' ',')
+            finish 0 "HELD — #$PR dry-run: would land; merge $(echo "$MERGE_SHA" | cut -c1-11) clean, seals + rewind guard PASS${_f:+; failing checks: $_f}"
+        fi
+        if [ "$MERGE_SHA" != "$_cur" ]; then
+            ( cd "$W" && unset MSYS_NO_PATHCONV && MUST_CHECK_PUSH_BUDGET_S=${MUST_CHECK_PUSH_BUDGET_S:-900} git push -q "$REMOTE" "$MERGE_SHA:refs/heads/$HREF" ) >&2
+            [ "$(git -C "$W" ls-remote "$REMOTE" "refs/heads/$HREF" | cut -f1)" = "$MERGE_SHA" ] \
+                || finish 1 "HELD — #$PR push of $MERGE_SHA to $HREF rejected (see pre-push output above)"
+            sleep 5
+        fi
+        _f=$(gh pr checks "$PR" --json name,bucket --jq '.[]|select(.bucket=="fail")|.name' 2>/dev/null | tr '\n' ',')
+        [ -z "$_f" ] || finish 1 "HELD — #$PR failing checks: $_f"
+        [ "$(pr_field state)" = OPEN ] || finish 2 "ERROR — #$PR no longer OPEN before merge"
+        _mo=$(gh pr merge "$PR" --admin --merge 2>&1)
+        [ "$(pr_field state)" = MERGED ] && break
+        say "#$PR merge attempt $_try failed: $(echo "$_mo" | tail -1)"
+        [ "$_try" -gt 2 ] && finish 1 "HELD — #$PR merge failed after 2 retries: $(echo "$_mo" | tail -1)"
+    done
+    ( unset MSYS_NO_PATHCONV; git -C "$W" push -q "$REMOTE" --delete "$HREF" ) >/dev/null 2>&1
+    finish 0 "LANDED — #$PR merged into $BASE (head $(echo "$MERGE_SHA" | cut -c1-11)), branch $HREF deleted"
+}
+
+# ---------------------------------------------------------------- selftest
+selftest() {
+    SDN_SEAL_ALGO=crc32; export SDN_SEAL_ALGO
+    _t=$(mktemp -d) && { _t=$(cygpath -m "$_t" 2>/dev/null || echo "$_t"); } || return 1
+    _fails=0; _n=0
+    fail() { echo "selftest FAIL: $*"; _fails=$((_fails+1)); }
+    _g="$_t/r"; mkdir -p "$_g/doc" "$_g/config/check" && cd "$_g" && git init -q . || return 1
+    git config core.autocrlf false; git config user.name t; git config user.email t@t
+    git config commit.gpgsign false; git config core.hooksPath /dev/null
+    _cd=$(checkdir "$_g")
+    printf 'seal_policy |glob, algo|\n    *.sdn, crc32\n' > config/check/sdn_seal_policy.sdn
+    H='bugs |id, status, title, updated_at|'
+    L='bug_fix_claims |bug_id, state, claimed_at|'
+    db() { printf '%s\n' "$H" "$@" > doc/bug_db.sdn; printf '\n%s\n    a, claimed, 2026-11-01\n' "$L" >> doc/bug_db.sdn
+           rm -f doc/bug_db.*.csm; sh "$_cd/reseal-sdn-crc32.shs" --no-selftest doc/bug_db.sdn >/dev/null; }
+    a0='    a, open, ta, 2026-11-01'; b0='    b, open, tb, 2026-11-01'
+    e0='    e, open, te, 2026-11-01'; x0='    x, open, tx, 2026-11-01'
+    db "$a0" "$b0" "$e0" "$x0"; printf 'v1\n' > f.txt; printf 'k\n' > k.txt
+    git add -A; git commit -qm base; _O=$(git rev-parse HEAD)
+    # base: change b, delete e, add d
+    db "$a0" '    b, fixed, tb, 2026-11-02' "$x0" '    d, open, td, 2026-11-02'
+    printf 'v2\n' > f.txt; git add -A; git commit -qm main; _M=$(git rev-parse HEAD)
+    # PR: change a, delete x, add c
+    git checkout -q -b pr "$_O"
+    db '    a, fixed, ta, 2026-11-03' "$b0" "$e0" '    c, open, tc, 2026-11-03'
+    printf 'pr\n' > g.txt; git add -A; git commit -qm pr; _P=$(git rev-parse HEAD)
+
+    # 1 bug_db row conflict + .csm rename conflict -> row merge, ONE seal, PASS
+    _n=$((_n+1))
+    if do_merge "$_g" "$_P" "$_M"; then
+        _db=$(git show "$MERGE_SHA:doc/bug_db.sdn")
+        _ncsm=$(git ls-tree --name-only "$MERGE_SHA" doc/ | grep -c '\.csm$')
+        echo "$_db" | grep -q '^    a, fixed' && echo "$_db" | grep -q '^    b, fixed' \
+            && echo "$_db" | grep -q '^    c, open' && echo "$_db" | grep -q '^    d, open' \
+            && ! echo "$_db" | grep -q '^    [ex],' && [ "$_ncsm" = 1 ] && [ "$CSM_RESOLVED" = 1 ] \
+            && [ "$(git show "$MERGE_SHA:f.txt")" = v2 ] && git cat-file -e "$MERGE_SHA:g.txt" \
+            || fail "row/csm merge wrong (csm=$_ncsm resolved=$CSM_RESOLVED): $(echo "$_db" | tr '\n' '|')"
+        _v=$(sh "$_cd/check-sdn-crc32-sealed.shs" --no-selftest --rev "$MERGE_SHA" --root "$_g" 2>/dev/null | tail -1)
+        case "$_v" in PASS*) ;; *) fail "seal check after merge: $_v" ;; esac
+    else fail "row conflict not resolved (rc=$? $MSG)"; fi
+
+    # 2 same row changed differently on both sides -> exit 4, nothing committed
+    _n=$((_n+1))
+    git checkout -q -B pr2 "$_O"; db '    a, wontfix, ta, 2026-11-04' "$b0" "$e0" "$x0"; git commit -qam pr2; _P2=$(git rev-parse HEAD)
+    git checkout -q -B m2 "$_M"; db '    a, fixed, ta, 2026-11-05' '    b, fixed, tb, 2026-11-02' "$x0" '    d, open, td, 2026-11-02'
+    git commit -qam m2; _M2=$(git rev-parse HEAD)
+    do_merge "$_g" "$_P2" "$_M2"; _rc=$?
+    { [ $_rc -eq 4 ] && case "$MSG" in *"row conflict"*bug_db*) true ;; *) false ;; esac && [ -z "$(git ls-files -u)" ]; } \
+        || fail "both-sides row edit not fail-closed (rc=$_rc $MSG)"
+
+    # 3 non-SDN conflict -> exit 4 naming the file
+    _n=$((_n+1))
+    git checkout -q -B pr3 "$_O"; printf 'pr3\n' > f.txt; git commit -qam pr3; _P3=$(git rev-parse HEAD)
+    do_merge "$_g" "$_P3" "$_M"; _rc=$?
+    { [ $_rc -eq 4 ] && case "$MSG" in *f.txt*) true ;; *) false ;; esac; } || fail "text conflict (rc=$_rc $MSG)"
+
+    # 4 rewind: a PR merge commit silently reverts base's k.txt -> exit 5
+    _n=$((_n+1))
+    git checkout -q -B m4 "$_M"; printf 'k2\n' > k.txt; git commit -qam m4; _M4=$(git rev-parse HEAD)
+    git checkout -q -B pr4 "$_P"; git merge -q --no-ff --no-commit "$_M4" >/dev/null 2>&1
+    git checkout -q "$_P" -- doc; printf 'k\n' > k.txt; git add -A; git commit -qm 'stale merge' >/dev/null 2>&1
+    git checkout -q -B m4b "$_M4"; printf 'n\n' > n.txt; git add n.txt; git commit -qm m4b; _M4b=$(git rev-parse HEAD)
+    git checkout -q pr4; _P4=$(git rev-parse HEAD)
+    do_merge "$_g" "$_P4" "$_M4b"; _rc=$?
+    { [ $_rc -eq 5 ] && case "$MSG" in *reverted:k.txt*) true ;; *) false ;; esac; } || fail "rewind not caught (rc=$_rc $MSG)"
+
+    # 5 gate: latest verdict on head decides
+    _n=$((_n+1)); _tb=$(printf '\t')
+    printf '2026-11-05T01:00:00Z%sVERDICT: LAND | ok\n' "$_tb" | verdict_pick || fail "gate: LAND rejected"
+    printf '2026-11-05T01:00:00Z%s**READY TO LAND**\n' "$_tb" | verdict_pick || fail "gate: READY TO LAND rejected"
+    printf '2026-11-05T01:00:00Z%sVERDICT: LAND\n2026-11-05T02:00:00Z%sVERDICT: HOLD\n' "$_tb" "$_tb" | verdict_pick && fail "gate: later HOLD ignored"
+    printf '2026-11-05T01:00:00Z%sRelease lander review: LAND\n' "$_tb" | verdict_pick && fail "gate: non-verdict line accepted"
+
+    cd / && rm -rf "$_t"
+    if [ $_fails -ne 0 ]; then echo "FAIL — $_fails of $_n selftest fixture(s) failed"; return 1; fi
+    echo "PASS — $_n selftest fixture(s) passed"
+}
+
+PR=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) selftest; exit $? ;;
+        --dry-run) DRY=1 ;;
+        -h|--help) sed -n '2,52p' "$0"; exit 2 ;;
+        *[!0-9]*|'') echo "ERROR — bad argument: $1"; exit 2 ;;
+        *) PR=$1 ;;
+    esac
+    shift
+done
+[ -n "$PR" ] || { echo "ERROR — nothing was checked (no PR given)"; exit 2; }
+trap 'cleanup' EXIT
+trap 'cleanup; echo "ERROR — interrupted"; exit 2' INT TERM
+land "$PR"

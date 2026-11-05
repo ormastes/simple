@@ -40,8 +40,18 @@ fn test_let_mut_statement() {
 
 #[test]
 fn test_val_match_keyword_is_rejected_but_contextual_distinctions_remain() {
-    let error = parse("val match = 5").expect_err("match is reserved for immutable bindings");
-    assert!(error.to_string().contains("reserved keyword 'match'"));
+    for source in [
+        "val match = 5",
+        "val match: i64 = 5",
+        "fn probe():\n    val match = 5\n",
+        "fn probe():\n    val match: i64 = 5\n",
+    ] {
+        let error = parse(source).expect_err("match is reserved for immutable bindings");
+        assert!(
+            error.to_string().contains("reserved keyword 'match'"),
+            "{source}: {error}"
+        );
+    }
 
     let module = parse("var match = 5").expect("grammar note G33 permits contextual var match");
     let Node::Let(stmt) = &module.items[0] else {
@@ -49,6 +59,11 @@ fn test_val_match_keyword_is_rejected_but_contextual_distinctions_remain() {
     };
     assert_eq!(stmt.pattern, Pattern::Identifier("match".to_string()));
     assert_eq!(stmt.mutability, Mutability::Mutable);
+    parse("fn probe():\n    var match = 5\n    match = match + 1\n")
+        .expect("mutable match bindings remain readable and assignable");
+    parse("let selected = match [0]:\n    0 => 7\n    _ => 9")
+        .expect("match expressions retain their keyword meaning");
+    parse("use compression.match").expect("match remains valid as a module-path segment");
 
     let contextual = parse("val class = 5").expect("class remains a contextual val binding name");
     let Node::Let(stmt) = &contextual.items[0] else {

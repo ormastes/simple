@@ -1413,6 +1413,7 @@ pub(crate) fn evaluate_method_call(
                 // Check if the method name is a variant name
                 let variant_opt = enum_def.variants.iter().find(|v| v.name == method);
                 if let Some(variant) = variant_opt {
+                    super::interpreter_call::validate_enum_variant_arity(&enum_def, method, args.len())?;
                     // Construct enum variant with payload
                     let has_fields = variant.fields.as_ref().is_some_and(|f| !f.is_empty());
                     if !has_fields && args.is_empty() {
