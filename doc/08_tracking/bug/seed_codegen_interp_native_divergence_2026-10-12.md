@@ -204,3 +204,35 @@ that a then-current snapshot compiled the 13-liner cleanly). The doc's
 second symptom site (self-name resolution at sdn/value.spl:48 in the
 test_runner closure) is covered by the stage2 compiler-test matrix; the
 seed-lane miscompile hypothesis remains unproven at current source.
+
+## Update 2026-11-05: sdn_diff_repro phases clean on the macOS seed lane after the export fix
+
+With the seed rebuilt from current release/1.0.0 (including the macOS
+-export_dynamic fix, PR #6894), the full prescribed repro now runs END TO END
+through every compiler phase on the previously-blocked lane, with NO dylib
+preload:
+
+- SCV cold inventory init: 44,669/44,669 file-events retained=true
+  (was: git-event-refresh-failed on the first event).
+- HIR: 6/6 modules succeeded, 0 errors.
+- MIR: 6/6 modules succeeded, 0 errors, ZERO "payload type mismatch"
+  diagnostics — including lib.common.sdn.parser, the exact closure-content
+  flip module from this doc's order-dependence table.
+- bootstrap-error-count: 0 at entry/post-lowering/post-diagnostics/post-store
+  for every source.
+
+The build only stopped at the final emit-object relocatable link
+(ld.lld "unknown file type" on valid Mach-O arm64 aot-*.o files — a
+linker-flavor/invocation matter in this ad-hoc repro environment, not a
+compiler-phase defect; tracked separately if it recurs in the matrix).
+
+Interpretation: on current macOS sources with one runtime copy per process,
+the seed-native compiler and the interpreted compiler AGREE on the
+sdn_diff_repro closure. Together with the SCV cold-init resolution, the
+evidence says the divergence family this doc tracked was dominated by the
+stale-second-runtime mechanism (missing seed exports -> forced dylib ->
+split runtime state corrupting name/id-keyed registries data-dependently).
+Windows-lane confirmation remains (the original matrix failures were
+Windows); if a payload mismatch resurfaces there on a seed built WITH the
+export fix (or the Windows equivalent: exporting the contract symbols from
+the exe), capture SIMPLE_ENUM_PAYLOAD_PATH_TRACE=1 (#6834) immediately.
