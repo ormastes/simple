@@ -287,3 +287,12 @@ at a `condition: bool` parameter) still pass and were left untouched.
 Future triage: before citing this ledger as seed debt for a `.?`-shaped
 failure, check whether the pin compares `.?` with strict `==`; if so it is a
 spec bug per the compiler-source contract.
+
+## Closed 2026-11-05 — outdated premise (F1 lane)
+
+The premise ("`.?` must return bool") predates the `.?` -> `T?` change.
+Current contract: `doc/07_guide/quick_reference/syntax_quick_reference.md`
+§ "Existence Check (`.?`) — Returns `T?`" (`opt.?` is a pass-through).
+Re-measured on the release/1.0.0 seed: `find(true).?` prints the payload and
+`find(false).?` prints `nil` — exactly the documented behaviour. A `-> bool`
+function must spell presence as `opt != nil`. Pinned by `test/01_unit/compiler/interpreter/exists_check_presence_regression_spec.spl`.
