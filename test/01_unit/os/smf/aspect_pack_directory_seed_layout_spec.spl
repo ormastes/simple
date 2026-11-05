@@ -1,0 +1,75 @@
+# Bug smf_header_wire_layout_diverges_rust_vs_simple_2026-08-10: the outer
+# aspect-pack SMF parser must accept a Rust-seed repr(C) (96 B, +4) trailer.
+use std.spec.{describe, it, expect}
+use std.common.aspect_pack.{ApkModuleSourceV2, apk_build_pack_v2}
+use os.smf.aspect_pack_directory.{aspect_pack_directory_parse_from_outer_smf_bytes}
+use compiler.backend.linker.smf_writer.{SmfWriter, SmfWriterSymbol, SmfWriterSymbolBinding, SmfWriterSymbolType, smf_build_aspect_pack_image}
+
+fn nested_module_bytes(code: [u8]) -> [u8]:
+    var writer = SmfWriter.create()
+    var words: [i64] = []
+    for byte in code:
+        words.push(byte as i64)
+    writer.add_code_section("code", words)
+    writer.add_symbol(SmfWriterSymbol(
+        name: "trace_facet_v1",
+        binding: SmfWriterSymbolBinding.Global,
+        sym_type: SmfWriterSymbolType.Function,
+        section_index: 0,
+        value: 0,
+        size: words.len(),
+        layout_phase: 0,
+        is_event_loop_anchor: false,
+        layout_pinned: false
+    ))
+    val built = writer.write()
+    if built.is_err():
+        return []
+    var bytes: [u8] = []
+    for word in built.unwrap():
+        bytes.push(word as u8)
+    bytes
+
+fn packed_outer() -> [u8]:
+    val modules = [
+        ApkModuleSourceV2(
+            module_id: "trace.module",
+            aspect_id: "trace.aspect",
+            module_abi_hash: "module-abi-7",
+            required_core_public_abi_hash: "core-abi-3",
+            variant_fingerprint: "linux-x86_64",
+            payload: nested_module_bytes([195 as u8])
+        )
+    ]
+    smf_build_aspect_pack_image(apk_build_pack_v2(modules).bytes).unwrap()
+
+fn to_seed_trailer(packed: [u8]) -> [u8]:
+    # Rewrite the packed 128-byte trailer as the Rust seed repr(C) 96-byte one:
+    # 0..20 unchanged, 4 zero padding bytes at 20..24, packed 20..92 moved to 24..96.
+    val hs = packed.len() - 128
+    var out: [u8] = []
+    var i = 0
+    while i < hs:
+        out.push(packed[i])
+        i = i + 1
+    i = 0
+    while i < 96:
+        if i < 20:
+            out.push(packed[hs + i])
+        else:
+            if i < 24:
+                out.push(0)
+            else:
+                out.push(packed[hs + i - 4])
+        i = i + 1
+    out
+describe "aspect pack outer SMF header layouts":
+    it "parses the packed 128-byte trailer":
+        val parsed = aspect_pack_directory_parse_from_outer_smf_bytes(packed_outer())
+        expect(parsed.ok).to_equal(true)
+        expect(parsed.directory.entries[0].module_id).to_equal("trace.module")
+
+    it "parses the Rust seed 96-byte repr(C) trailer":
+        val parsed = aspect_pack_directory_parse_from_outer_smf_bytes(to_seed_trailer(packed_outer()))
+        expect(parsed.ok).to_equal(true)
+        expect(parsed.directory.entries[0].module_id).to_equal("trace.module")

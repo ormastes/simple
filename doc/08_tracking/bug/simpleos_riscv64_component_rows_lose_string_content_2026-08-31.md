@@ -70,3 +70,21 @@ find which stage first reports zero. The same probe answers caret's
 Cross-arch reference: the identical product code round-trips green on x86_64
 (`COMPONENT_MCP_SIMPLEOS_X86_64_OK`) and aarch64, so the defect is in this
 runtime's own string implementation, not in the component or the compiler.
+
+## Verification 2026-11-05 (riscv-sweep lane, work/riscv-sweep-20261105) — SUPERSEDED, fixed at tip
+
+This record's premise is stale. It is superseded by
+`riscv64_erased_receiver_routes_class_method_to_rt_find_2026-08-31.md`, which
+measured all three defects FIXED 2026-09-01 and the riscv64 component gate
+4 of 4 GREEN in-guest under real OpenSBI. This pass, on
+`origin/release/1.0.0` @ `bc3e9b48cb4`:
+
+- `check-simpleos-riscv64-components-in-guest-opensbi.shs` built the component
+  kernel cleanly with the current seed (`kernel.elf` 314704 bytes, all 4
+  component row symbols present). The OpenSBI firmware + QEMU boot stage is
+  host-blocked today (no riscv64 cross-gcc on this aarch64 host), so the
+  in-guest boot itself was not re-run in this lane.
+- `check-freestanding-byte-array-slot-tags.shs` PASS (10 definitions, 0
+  untagged), pinning the defect-2 byte-slot tagging fix in source.
+
+Status: FIXED at tip, per the superseding record's measured in-guest evidence.
