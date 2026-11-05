@@ -3,6 +3,10 @@
 # process per file (parse -> HIR -> MIR -> obj), then link. Whole-program is
 # opt-in per invocation only: SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1; two-pass shard
 # route: SIMPLE_FILE_WORKERS=0. Never set these as script-global defaults.
+# 2026-11-05: the admitted compiler's bootstrap_main.spl now applies the same
+# default to EVERY route -- plain positional native-build, Stage 4 and the
+# coordinator/Stage 3 routes (Windows batch included; it delegates here) --
+# so no phase silently falls back to a phase-based whole-program build.
 # See doc/07_guide/tooling/bootstrap_options.md "Default build mode".
 
 # Keep helper subcommands on the canonical bootstrap entrypoint.  Dispatch

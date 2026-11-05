@@ -331,6 +331,31 @@ pub fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: 
     elif bootstrap_io and file_exists(obj_path):
         print "[llvm-tools] llc-object"
 
+    # Flaky-spawn retry (2026-11-05): under the per-file worker pool the llc
+    # subprocess intermittently never runs -- the process facade returns
+    # success with no child and no object (reproduced: identical invocations
+    # fail then pass). Re-run the identical invocation while the object is
+    # missing before declaring a module failure.
+    var spawn_attempts = 0
+    while not file_exists(obj_path) and spawn_attempts < 2:
+        spawn_attempts = spawn_attempts + 1
+        if bootstrap_io:
+            print "[llvm-tools] llc-retry {spawn_attempts}"
+        val (retry_out, retry_err, retry_code) = backend_shell_tuple(cmd)
+        llc_out = retry_out
+        llc_err = retry_err
+        llc_code = retry_code
+        if llvm_llc_error_diagnostic(llc_code, llc_out, llc_err, llc, compile_input_path) != "":
+            file_delete(obj_path)
+            if bootstrap_io:
+                print "[llvm-direct] failed-ir {ir_path}"
+                return Err("llc failed during bootstrap; preserved LLVM IR path printed above")
+            return Err("llc failed (exit {llc_code}):\n{llc_out}{llc_err}\n\nCommand: {cmd}")
+    if not file_exists(obj_path):
+        if bootstrap_io:
+            print "[llvm-tools] llc-no-object"
+        return Err("llc produced no object file after retries: {obj_path}\nCommand: {cmd}")
+
     # Clean up IR file only after successful llc. On failure, preserve it so
     # native-build diagnostics can point at the malformed IR.
     # SIMPLE_KEEP_LLVM_IR=1 preserves the .ll even on success for debugging.
