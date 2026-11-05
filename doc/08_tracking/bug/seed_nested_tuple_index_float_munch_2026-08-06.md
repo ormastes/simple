@@ -118,3 +118,12 @@ match patterns — via the `flat_bridge_lexeme_float_literals` mode flag in
 `unary_literal_module_const_static_spec`,
 `float_literal_pattern_bridge_spec` and
 `imported_global_infer_storage_spec` all pass together after the change.
+
+## Re-verification — 2026-11-05
+
+Both halves re-verified on an aarch64 Linux host:
+- seed-lane spec nested_tuple_index_seed_parser_spec.spl: 9/9 under the seed
+  interpreter;
+- pure-Simple spec nested_tuple_index_parse_spec.spl: 13/13 under the seed
+  interpreter;
+- behavioral: ((1, 2), 3).0.1 prints V=2 on the deployed seed's default lane.

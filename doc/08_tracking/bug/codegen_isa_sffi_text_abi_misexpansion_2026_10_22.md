@@ -132,3 +132,26 @@ Expect `avx=1 bogus=0`. If the seed-built native binary prints garbage, the
 defect is in seed call lowering of `rt_string_data(<text param>)` (not in
 `codegen.spl`); write a Rust test in `calls.rs` against that lowering. If it
 prints the expected values, close this bug as invalid with that transcript.
+
+## Premise check (2026-11-05, lane p1-common) — downgraded P1 -> P3
+
+The filed mechanism ("call-site lowering re-expands the already-extracted
+pointer") requires a text-ABI registry row on the callee. Checked on
+`origin/release/1.0.0`:
+
+- `src/compiler_rust/compiler/src/codegen/instr/calls.rs` and
+  `src/compiler/50.mir/text_extern_abi.spl` carry **no** row for any
+  `rt_cranelift_*` / `spl_cranelift_*` symbol; the wrappers' externs are
+  declared with plain `i64` params, so the `rt_string_data(..)` results pass
+  through unchanged.
+- `rt_string_data` / `rt_string_len` themselves are now listed in
+  `tagged_text_value_arg_indices` (parity audit 2026-10-25, after this bug was
+  filed), so both producers pass them the tagged text value.
+- The accepted `io_file_open` fix in `src/lib/nogc_sync_mut/sffi/fs.spl:321-345`
+  uses exactly this manual `rt_string_data`/`rt_string_len` pattern on
+  registry-free two-arg twins; the failing form there was the
+  registry-listed `rt_io_file_open`.
+
+No seed-built native repro exists. Kept open at P3: close once a seed-built
+binary reads back `cranelift_aot_isa_feature_v2` correctly; reopen at P1 with
+the transcript if it does not. No code change.
