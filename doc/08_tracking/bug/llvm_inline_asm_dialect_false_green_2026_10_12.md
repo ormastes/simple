@@ -59,3 +59,47 @@ This metadata repair does not establish LLVM callback error handling, failed
 object/cache publication prevention in the Rust path, original x86 port opcode
 bytes, hardware execution, or current-source bootstrap qualification. Those
 remain removal gates; ARM host execution would not establish x86-native success.
+
+## Source-owner explicit-dialect repair (2026-11-05, aarch64 host, worktree `work/libbug-linux-asmdialect-20261105`)
+
+The six tagged directive workarounds in
+`src/lib/nogc_async_mut_noalloc/baremetal/x86/io.spl` were replaced by the
+prescribed explicit dialect declaration: each `asm volatile(...)` now carries
+`options(intel_syntax)` with the bare Intel template (no
+`.intel_syntax noprefix` / `.att_syntax prefix` text, registers, inputs,
+outputs, volatile markers and `io_wait` unchanged), and the `@workaround` tags
+were removed. The typed dialect transport (`AsmDialect::from_options`,
+`parser/src/stmt_parsing/asm.rs` `options(...)`; LLVM paths select
+`InlineAsmDialect::Intel`; pure-Simple `aggregate_intrinsics.spl` appends
+`inteldialect`) is present in this branch's source, satisfying the
+prerequisite for workaround removal.
+
+Verification on this host (seed snapshot binary, no LLVM feature, so no
+compiler-native IR emission; interpreter + external LLVM 23.1.0 tools):
+
+- `llvm_inline_asm_dialect_admission_spec.spl` (interpreter): 3/4 examples
+  PASS — bare Intel ports in default AT&T are rejected (false-green closed),
+  and all six port instructions with `inteldialect` retain bytes
+  `EE`/`EC`/`66 EF`/`66 ED`/`EF`/`ED` through llc 23.1.0 + llvm-objdump.
+  Example 4 (warning-producing objects) FAILS identically before and after the
+  change and identically on `main`: with `--function-sections`, the inline
+  label `error:` becomes a local symbol and this host's llvm-objdump 23.1.0
+  splits the `<inline_asm_probe>` symbol run at `<error>:`, so the spec's
+  scanner never sees the `ee out` instruction. Host-toolchain rendering
+  detail, unrelated to this bug; not fixed here.
+- Dedicated probe (interpreter, pure-Simple frontend + LLVM emitter over the
+  exact repaired statements): all six `asm` blocks lower to MIR with
+  `options = ["intel_syntax"]`, volatile set, no directive text; the emitter
+  produces `call void asm sideeffect inteldialect "out dx, al", ...` with
+  `inteldialect` x3 and no `.intel_syntax`; the emitted text assembles through
+  llc and disassembles to the expected `out` opcodes.
+- Seed frontend compiles the modified module cleanly (`simple compile` to SMF,
+  `simple lint` 0 errors; only the pre-existing style warning).
+
+Pre-existing separate defects observed (identical for the old workaround
+source, out of scope here, repair candidates): the pure-Simple LLVM emitter
+renders `AsmLocation.RegSpec` constraints as the literal text `{name}`
+(`_MirToLlvm/asm_constraints_helpers.spl` `constraint_location`, should be
+`"{{" + name + "}}"`) and emits asm operand args as `i64` without coercing the
+value, both of which llc rejects for RegSpec operands. These block
+end-to-end pure-Simple LLVM emission of any RegSpec inline asm until fixed.
