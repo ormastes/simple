@@ -448,3 +448,9 @@ non-unit function is refused by both engines rather than silently yielding `0` i
 one of them. The record's own argument for preferring a runtime observation over
 a bare-name compile-time checker is unaffected — 336 enum names are declared more
 than once, and that has not changed.
+
+## Re-verification — 2026-11-05
+
+enum_match_fallthrough_trap_spec.spl: 6/6 PASS under the seed interpreter on
+an aarch64 Linux host — partial enum matches with no default arm fail closed
+(rt_panic + Abort) as recorded by the 2026-09-19 fix.

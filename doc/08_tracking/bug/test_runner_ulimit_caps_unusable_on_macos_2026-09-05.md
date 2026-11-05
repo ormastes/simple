@@ -1,4 +1,8 @@
 # Test runner's ulimit caps make `simple test <dir>` unusable on macOS (2026-09-05)
+
+> **Triage 2026-11-05 (release/1.0.0 worktree):** source fix verified on the
+> native macOS seed lane per the 2026-11-04 acceptance below; nothing
+> source-level remains reproducible here. Not selected for this pass.
 ## Update 2026-09-21 — process-policy source fix, native verification pending
 
 Status: fix-implemented-verification-pending
