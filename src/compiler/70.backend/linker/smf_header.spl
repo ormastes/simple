@@ -456,15 +456,47 @@ fn u64_to_bytes(value: u64) -> [u8]:
 fn smf_header_has_magic_at(bytes: [u8], start: i64) -> bool:
     start >= 0 and bytes.len() >= start + 4 and bytes[start] == 83 and bytes[start + 1] == 77 and bytes[start + 2] == 70 and bytes[start + 3] == 0
 
+"""Size of the Rust seed's #[repr(C)] SmfHeader (src/compiler_rust/common/src/smf/header.rs).
+
+The seed writes the header as raw struct bytes: 4 alignment-padding bytes after
+section_count shift every later field by +4, the hint block is re-aligned, and
+the struct is 96 bytes with no compile-options reserved area. Readers accept
+both layouts; the packed 128-byte layout remains the only one Simple writes.
+"""
+pub val SMF_SEED_HEADER_SIZE: i64 = 96
+
+fn smf_header_seed_shaped_at(bytes: [u8], start: i64) -> bool:
+    if not smf_header_has_magic_at(bytes, start) or bytes.len() < start + SMF_SEED_HEADER_SIZE:
+        return false
+    val section_count = bytes_to_u32_le_header(bytes, start + 16)
+    val padding = bytes_to_u32_le_header(bytes, start + 20)
+    val seed_section_table = bytes_to_u64_le_header(bytes, start + 24)
+    # Packed layout puts section_table_offset's low word at 20, which is
+    # non-zero for any file below 4 GiB that has sections. The seed's 20..24 is
+    # always zero padding with section_table_offset (>= header size) at 24.
+    section_count > 0 and padding == 0 and seed_section_table != 0
+
+"""Field shift of the header at `start`: 4 for the Rust seed repr(C) layout, 0 for packed."""
+pub fn smf_header_field_shift(bytes: [u8], start: i64) -> i64:
+    if smf_header_seed_shaped_at(bytes, start):
+        return 4
+    0
+
 fn smf_header_offset(bytes: [u8]) -> Result<i64, text>:
-    if bytes.len() < SMF_HEADER_SIZE:
+    if bytes.len() < SMF_SEED_HEADER_SIZE:
         return Err("Not enough data for SMF header")
     if smf_header_has_magic_at(bytes, 0):
-        return Ok(0)
-    val trailer_offset = bytes.len() - SMF_HEADER_SIZE
-    if smf_header_has_magic_at(bytes, trailer_offset):
-        return Ok(trailer_offset)
-    Err("Invalid SMF magic: expected 'SMF\\0'")
+        if bytes.len() >= SMF_HEADER_SIZE or smf_header_seed_shaped_at(bytes, 0):
+            return Ok(0)
+        return Err("Not enough data for SMF header")
+    if bytes.len() >= SMF_HEADER_SIZE:
+        val trailer_offset = bytes.len() - SMF_HEADER_SIZE
+        if smf_header_has_magic_at(bytes, trailer_offset):
+            return Ok(trailer_offset)
+    val seed_trailer = bytes.len() - SMF_SEED_HEADER_SIZE
+    if smf_header_seed_shaped_at(bytes, seed_trailer):
+        return Ok(seed_trailer)
+    Err("Invalid SMF magic: expected 'SMF\0'")
 
 fn bytes_to_u16_le(bytes: [u8], start: i64) -> u16:
     ((bytes[start] as u16) | ((bytes[start + 1] as u16) << 8))
@@ -487,11 +519,25 @@ fn bytes_to_u64_le_header(bytes: [u8], start: i64) -> u64:
 
 fn smf_header_from_bytes(bytes: [u8]) -> Result<SmfHeader, text>:
     val offset = smf_header_offset(bytes)?
+    val shift = smf_header_field_shift(bytes, offset)
     var reserved: [u8] = []
     var i = 0
     while i < 40:
-        reserved.push(bytes[offset + 88 + i])
+        # The seed header has no compile-options/reserved area: read as zeros.
+        if shift == 0:
+            reserved.push(bytes[offset + 88 + i])
+        else:
+            reserved.push(0)
         i = i + 1
+    val o = offset + shift
+    # Hint block: packed app_type@76 ww@77 wh@79 ph@81 pfc@82 hints[5]@83;
+    # seed repr(C) app_type@80 ww@82 wh@84 ph@86 pfc@87 reserved[5]@88.
+    val h_app = if shift == 0: offset + 76 else: offset + 80
+    val h_ww = if shift == 0: offset + 77 else: offset + 82
+    val h_wh = if shift == 0: offset + 79 else: offset + 84
+    val h_ph = if shift == 0: offset + 81 else: offset + 86
+    val h_pfc = if shift == 0: offset + 82 else: offset + 87
+    val h_res = if shift == 0: offset + 83 else: offset + 88
     Ok(SmfHeader(
         magic: [bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]],
         version_major: bytes[offset + 4],
@@ -503,24 +549,24 @@ fn smf_header_from_bytes(bytes: [u8]) -> Result<SmfHeader, text>:
         compression_level: bytes[offset + 13],
         reserved_compression: [bytes[offset + 14], bytes[offset + 15]],
         section_count: bytes_to_u32_le_header(bytes, offset + 16),
-        section_table_offset: bytes_to_u64_le_header(bytes, offset + 20),
-        symbol_table_offset: bytes_to_u64_le_header(bytes, offset + 28),
-        symbol_count: bytes_to_u32_le_header(bytes, offset + 36),
-        exported_count: bytes_to_u32_le_header(bytes, offset + 40),
-        entry_point: bytes_to_u64_le_header(bytes, offset + 44),
-        stub_size: bytes_to_u32_le_header(bytes, offset + 52),
-        smf_data_offset: bytes_to_u32_le_header(bytes, offset + 56),
-        module_hash: bytes_to_u64_le_header(bytes, offset + 60),
-        source_hash: bytes_to_u64_le_header(bytes, offset + 68),
-        app_type: bytes[offset + 76],
-        window_width: bytes_to_u16_le(bytes, offset + 77),
-        window_height: bytes_to_u16_le(bytes, offset + 79),
-        prefetch_hint: bytes[offset + 81],
-        prefetch_file_count: bytes[offset + 82],
-        reserved_hints: [bytes[offset + 83], bytes[offset + 84], bytes[offset + 85], bytes[offset + 86], bytes[offset + 87]],
+        section_table_offset: bytes_to_u64_le_header(bytes, o + 20),
+        symbol_table_offset: bytes_to_u64_le_header(bytes, o + 28),
+        symbol_count: bytes_to_u32_le_header(bytes, o + 36),
+        exported_count: bytes_to_u32_le_header(bytes, o + 40),
+        entry_point: bytes_to_u64_le_header(bytes, o + 44),
+        stub_size: bytes_to_u32_le_header(bytes, o + 52),
+        smf_data_offset: bytes_to_u32_le_header(bytes, o + 56),
+        module_hash: bytes_to_u64_le_header(bytes, o + 60),
+        source_hash: bytes_to_u64_le_header(bytes, o + 68),
+        app_type: bytes[h_app],
+        window_width: bytes_to_u16_le(bytes, h_ww),
+        window_height: bytes_to_u16_le(bytes, h_wh),
+        prefetch_hint: bytes[h_ph],
+        prefetch_file_count: bytes[h_pfc],
+        reserved_hints: [bytes[h_res], bytes[h_res + 1], bytes[h_res + 2], bytes[h_res + 3], bytes[h_res + 4]],
         reserved: reserved
     ))
 
-export SMF_MAGIC, SMF_HEADER_SIZE
+export SMF_MAGIC, SMF_HEADER_SIZE, SMF_SEED_HEADER_SIZE
 export SMF_FLAG_EXECUTABLE, SMF_FLAG_RELOADABLE, SMF_FLAG_DEBUG_INFO, SMF_FLAG_PIC, SMF_FLAG_HAS_STUB, SMF_FLAG_ASPECT_PACK
-export u16_to_bytes, u32_to_bytes, u64_to_bytes, smf_header_from_bytes
+export u16_to_bytes, u32_to_bytes, u64_to_bytes, smf_header_from_bytes, smf_header_field_shift

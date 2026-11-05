@@ -86,3 +86,35 @@ HIR-cache contamination is not ruled out (the driver reads `SIMPLE_HIR_CACHE_DIR
 private cache was passed only to the frontend). Next step for the Phase 2 owner: rerun both
 smokes with `SIMPLE_HIR_CACHE_DIR` set to a private empty dir, and capture a minidump of
 the 0xC0000005.
+
+## 2026-11-05 premise check (lane p1c-p2cav)
+
+Still OPEN; not closed and not re-scoped as fixed, because it cannot be re-run here.
+
+- **Premise still current.** Nothing in today's policy (nil only as `T?` absence, no `Any`
+  outside unsafe, panic-free safe code, mono removed) makes the two smokes invalid: `print`
+  of a hello string and of a `val` local are ordinary safe programs that a Phase 2 candidate
+  must compile.
+- **Fault site source is trivially safe.** `mir_expr_symbol_id_value(symbol: SymbolId) -> i64`
+  (`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:185`) is just `symbol.id`.
+  Faulting on `movq (%rsi), %rax` there means the caller passed an invalid `SymbolId`
+  reference, so the defect is in how candidate-compiled code moves the value, not in this
+  function.
+- **Source moved a lot since the candidate.** Candidate source `c9078245fa1` (2026-11-02).
+  Since then, release/1.0.0 carries 10+ changes to `expr_dispatch.spl` alone that target this
+  kind of stage2 value-transport miscompile. Among them: `cd656fa2d69` (local_map mirror for a
+  mis-bucketed local index; that fixes `val`-then-use "undefined variable"),
+  `87aaaa999c7` / `735ceebbfc6` (no by-value `HirExpr` hops on the stage2 binding path),
+  `6406b3699ef`, `26becc4bd64` (stage3 AV +0xd1 through scalar accessors), `dc662dde275`.
+  None of them is proven to fix either case.
+- **Older stage2 did not fail this way.** The frozen stage2 from `ef0681fc0e1` (2026-10-27)
+  compiled the stage3 objects and stage3 hello
+  (`stage2_local_symbol_index_bucket_tagged_id_2026-11-03.md`). So this candidate's failures
+  are either a regression in `ef0681fc0e1..c9078245fa1` or are specific to this candidate.
+- **Repro blocked.** The only stage2 binary on the host is under `C:/dev/p3new`, which fix
+  lanes may not touch, and it is in use. Building a fresh stage2 from the current base did not
+  fit the host memory guard: 42.6 GB free commit at 13:40 KST, with a 70 GB build running.
+- **Next step (owner):** build a stage2 candidate from the current release/1.0.0 tip, then
+  rerun the `hello` and `variable` smokes with a private empty `SIMPLE_HIR_CACHE_DIR`. If both
+  pass, close as superseded and cite that candidate's SHA256. If either fails, take a minidump
+  and bisect `ef0681fc0e1..<tip>` on the smoke that fails.

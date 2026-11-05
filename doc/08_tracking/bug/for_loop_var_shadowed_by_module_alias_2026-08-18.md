@@ -77,3 +77,17 @@ Same class, spec-lane reassignment: in a block body, `var input = ...; input = f
 module named `input` imported dropped the local, because `module_global_target`
 (`interpreter_call/block_execution.rs`) returned the `Legacy` global target before consulting
 `env.is_local`. Locals now win first. Regression: `test/01_unit/compiler/interpreter/local_shadows_builtin_input_spec.spl`.
+
+## Not reproducible at current source — 2026-11-05
+
+The doc's minimal reproducer shape was rebuilt at current release/1.0.0 and
+run on an aarch64 Linux host with the deployed seed, on BOTH lanes: a
+consumer module aliasing a provider as `m` (`use m.{Box}`), with a for-loop
+variable named `m` whose body calls `m.show()` on the element. Expected
+(filed behaviour): dispatch on the namespace dict ("method `show` not found
+on type `dict`"). Observed: `box1` / `box2` on BOTH the JIT and interpreter
+lanes — the loop binding shadows the module alias, `m.show()` dispatches on
+the Box element. The 2026-11-05 locals-win resolution change
+(module_global_target consulting env.is_local first, regression
+local_shadows_builtin_input_spec.spl) appears to cover the for-binding case
+as well; no separate loop-scope fix was found in history.
