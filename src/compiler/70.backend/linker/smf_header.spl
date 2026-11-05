@@ -468,6 +468,11 @@ pub val SMF_SEED_HEADER_SIZE: i64 = 96
 fn smf_header_seed_shaped_at(bytes: [u8], start: i64) -> bool:
     if not smf_header_has_magic_at(bytes, start) or bytes.len() < start + SMF_SEED_HEADER_SIZE:
         return false
+    # A header whose packed 128-byte extent ends exactly at EOF is the packed
+    # trailer; a seed trailer sits at EOF-96. Without this, a packed header whose
+    # section_table_offset is 0 (padding word 0) is mistaken for a seed header.
+    if start + SMF_HEADER_SIZE == bytes.len():
+        return false
     val section_count = bytes_to_u32_le_header(bytes, start + 16)
     val padding = bytes_to_u32_le_header(bytes, start + 20)
     val seed_section_table = bytes_to_u64_le_header(bytes, start + 24)
@@ -481,6 +486,26 @@ pub fn smf_header_field_shift(bytes: [u8], start: i64) -> i64:
     if smf_header_seed_shaped_at(bytes, start):
         return 4
     0
+
+"""Header byte size of the header at `start`: 96 for the seed layout, 128 for packed."""
+pub fn smf_header_size_at(bytes: [u8], start: i64) -> i64:
+    if smf_header_seed_shaped_at(bytes, start):
+        return SMF_SEED_HEADER_SIZE
+    SMF_HEADER_SIZE
+
+"""Start of a seed-layout trailer header at EOF-96, or -1.
+
+Standalone readers that locate the packed EOF-128 trailer themselves call this
+as the fallback, then add `smf_header_field_shift(bytes, start)` to every field
+offset >= 20 and use `smf_header_size_at` for header-overlap checks.
+"""
+pub fn smf_header_seed_trailer_offset(bytes: [u8]) -> i64:
+    if bytes.len() < SMF_SEED_HEADER_SIZE:
+        return -1
+    val start = bytes.len() - SMF_SEED_HEADER_SIZE
+    if smf_header_seed_shaped_at(bytes, start):
+        return start
+    -1
 
 fn smf_header_offset(bytes: [u8]) -> Result<i64, text>:
     if bytes.len() < SMF_SEED_HEADER_SIZE:
@@ -569,4 +594,4 @@ fn smf_header_from_bytes(bytes: [u8]) -> Result<SmfHeader, text>:
 
 export SMF_MAGIC, SMF_HEADER_SIZE, SMF_SEED_HEADER_SIZE
 export SMF_FLAG_EXECUTABLE, SMF_FLAG_RELOADABLE, SMF_FLAG_DEBUG_INFO, SMF_FLAG_PIC, SMF_FLAG_HAS_STUB, SMF_FLAG_ASPECT_PACK
-export u16_to_bytes, u32_to_bytes, u64_to_bytes, smf_header_from_bytes, smf_header_field_shift
+export u16_to_bytes, u32_to_bytes, u64_to_bytes, smf_header_from_bytes, smf_header_field_shift, smf_header_size_at, smf_header_seed_trailer_offset

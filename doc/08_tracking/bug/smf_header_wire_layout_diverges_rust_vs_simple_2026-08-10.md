@@ -228,3 +228,22 @@ Still open (same packed-offset pattern, not changed here):
 `src/os/smf/aspect_pack_directory.spl:222`. Writer convergence (dual-write,
 steps 2-5) is still owner work. Known heuristic limit: a seed header with
 `section_count == 0` decodes as packed.
+
+## 2026-11-05 — remaining 4 readers converged on read (p1w-smfhdr)
+
+`smf_dynlib.spl`, `launch_metadata.spl`, `cache_validator.spl`,
+`aspect_pack_directory.spl` (plus `_SmfReaderMemory/header_parser.spl`, which
+lacked the seed EOF-96 trailer) now locate the seed trailer and add
+`smf_header_field_shift` to every field offset >= 20, using the new exported
+`smf_header_size_at` / `smf_header_seed_trailer_offset` from `smf_header.spl`.
+`smf_header_seed_shaped_at` now rejects a header whose packed 128-byte extent
+ends exactly at EOF (packed trailer with section_table_offset 0 was misread).
+
+TDD (`bin/simple.exe test <spec>`), before -> after: smf_dynlib_seed_layout 2/3->3/3,
+launch_metadata_seed_layout 1/2->2/2, aspect_pack_directory_seed_layout 1/2->2/2,
+smf_cache_validator_seed_layout 1/3->3/3; prevention
+`smf_header_reader_parity_spec` 3/3 (all readers agree on seed + packed images).
+Regressions green: seed_layout 9/9, layout_parity 8/8, reader_memory 4/4,
+lib_smf_reader 3/3, smf_header 4/4, launch_metadata_section_index 13/13.
+`aspect_pack_directory_spec` 16/18 identical before/after (pre-existing facet
+load/reload failures). Writer convergence (dual-write) remains owner work.
