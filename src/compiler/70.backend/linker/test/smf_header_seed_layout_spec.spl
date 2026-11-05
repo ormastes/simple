@@ -1,0 +1,168 @@
+# Repro + prevention for bug smf_header_wire_layout_diverges_rust_vs_simple_2026-08-10.
+#
+# The Rust seed writes SmfHeader as raw #[repr(C)] bytes (96 B, 4 padding
+# bytes after section_count). The pure-Simple decoder read every field from
+# section_table_offset onward 4 bytes early, so a seed-written .smf decoded
+# as garbage (section_table_offset 412316860416 instead of 96). The decoder
+# must recognise the seed layout on read; the packed 128-B write layout is
+# unchanged (see smf_layout_parity_spec.spl).
+
+use compiler.backend.linker.smf_header.{SmfHeader, smf_header_from_bytes, smf_header_field_shift}
+use compiler.backend.linker.smf_enums.{Platform, Arch}
+
+fn put_u16(buf: [u8], at: i64, v: i64) -> [u8]:
+    var b = buf
+    b[at] = (v & 0xFF) as u8
+    b[at + 1] = ((v >> 8) & 0xFF) as u8
+    b
+
+fn put_u32(buf: [u8], at: i64, v: i64) -> [u8]:
+    var b = buf
+    var i = 0
+    while i < 4:
+        b[at + i] = ((v >> (i * 8)) & 0xFF) as u8
+        i = i + 1
+    b
+
+fn put_u64(buf: [u8], at: i64, v: i64) -> [u8]:
+    var b = buf
+    var i = 0
+    while i < 8:
+        b[at + i] = ((v >> (i * 8)) & 0xFF) as u8
+        i = i + 1
+    b
+
+# Byte image of the Rust seed's repr(C) SmfHeader (offsets from offset_of probe).
+fn seed_header_bytes(section_count: i64) -> [u8]:
+    var b: [u8] = []
+    var i = 0
+    while i < 96:
+        b.push(0)
+        i = i + 1
+    b[0] = 83
+    b[1] = 77
+    b[2] = 70
+    b[3] = 0
+    b[4] = 1
+    b[5] = 1
+    b[6] = 1
+    b[7] = 1
+    b = put_u32(b, 8, 0x11)
+    b = put_u32(b, 16, section_count)
+    # 20..24 is repr(C) padding (zero)
+    b = put_u64(b, 24, 96)
+    b = put_u64(b, 32, 0x103FB8)
+    b = put_u32(b, 40, 2073)
+    b = put_u32(b, 44, 983)
+    b = put_u64(b, 48, 0x4000)
+    b = put_u32(b, 56, 0x200)
+    b = put_u32(b, 60, 0x300)
+    b = put_u64(b, 64, 0x0123456789ABCDEF)
+    b = put_u64(b, 72, 0x0FEDCBA987654321)
+    b[80] = 2
+    b = put_u16(b, 82, 1280)
+    b = put_u16(b, 84, 720)
+    b[86] = 1
+    b[87] = 4
+    b
+
+fn pad_to(bytes: [u8], n: i64) -> [u8]:
+    var b = bytes
+    while b.len() < n:
+        b.push(0)
+    b
+
+describe "Rust seed repr(C) SMF header decode (bug repro)":
+    it "decodes section_table_offset at 24, not the packed 20":
+        val bytes = pad_to(seed_header_bytes(3), 256)
+        match smf_header_from_bytes(bytes):
+            Ok(p):
+                expect p.section_count == 3
+                expect p.section_table_offset == 96
+                expect p.symbol_table_offset == 0x103FB8
+                expect p.symbol_count == 2073
+                expect p.exported_count == 983
+            Err(e):
+                expect e == ""
+
+    it "decodes the execution, hash and hint fields at seed offsets":
+        val bytes = pad_to(seed_header_bytes(7), 256)
+        match smf_header_from_bytes(bytes):
+            Ok(p):
+                expect p.entry_point == 0x4000
+                expect p.stub_size == 0x200
+                expect p.smf_data_offset == 0x300
+                expect p.module_hash == 0x0123456789ABCDEF
+                expect p.source_hash == 0x0FEDCBA987654321
+                expect p.app_type == 2
+                expect p.window_width == 1280
+                expect p.window_height == 720
+                expect p.prefetch_hint == 1
+                expect p.prefetch_file_count == 4
+                expect not p.has_compile_options_hash()
+            Err(e):
+                expect e == ""
+
+    it "accepts a seed header-only buffer shorter than the packed 128 bytes":
+        val bytes = seed_header_bytes(3)
+        expect bytes.len() == 96
+        match smf_header_from_bytes(bytes):
+            Ok(p):
+                expect p.section_table_offset == 96
+            Err(e):
+                expect e == ""
+
+    it "finds a seed trailer at EOF-96 behind a stub":
+        var file: [u8] = []
+        var i = 0
+        while i < 64:
+            file.push(0x90)
+            i = i + 1
+        file = file + seed_header_bytes(3)
+        match smf_header_from_bytes(file):
+            Ok(p):
+                expect p.entry_point == 0x4000
+                expect p.symbol_count == 2073
+            Err(e):
+                expect e == ""
+
+describe "SMF header layout detection (prevention)":
+    it "reports shift 4 for the seed layout":
+        expect smf_header_field_shift(pad_to(seed_header_bytes(3), 256), 0) == 4
+
+    it "reports shift 0 for a packed Simple header with sections":
+        var h = SmfHeader.new_v1_1(Platform.Linux, Arch.X86_64)
+        h.section_count = 3
+        h.section_table_offset = 128
+        h.symbol_table_offset = 0x1000
+        expect smf_header_field_shift(h.to_bytes(), 0) == 0
+
+    it "reports shift 0 for a packed header with no sections":
+        var h = SmfHeader.new_v1_1(Platform.Linux, Arch.X86_64)
+        h.symbol_table_offset = 0x1000
+        expect smf_header_field_shift(h.to_bytes(), 0) == 0
+
+    it "still round-trips a packed header unchanged":
+        var h = SmfHeader.new_v1_1(Platform.Linux, Arch.X86_64)
+        h.section_count = 2
+        h.section_table_offset = 128
+        h.symbol_table_offset = 0x2000
+        h.entry_point = 0x77
+        h.app_type = 3
+        match smf_header_from_bytes(h.to_bytes()):
+            Ok(p):
+                expect p.section_table_offset == 128
+                expect p.symbol_table_offset == 0x2000
+                expect p.entry_point == 0x77
+                expect p.app_type == 3
+            Err(e):
+                expect e == ""
+
+    it "rejects a buffer shorter than the seed header":
+        val bytes = seed_header_bytes(3)
+        var short: [u8] = []
+        var i = 0
+        while i < 90:
+            short.push(bytes[i])
+            i = i + 1
+        expect smf_header_from_bytes(short).err.?

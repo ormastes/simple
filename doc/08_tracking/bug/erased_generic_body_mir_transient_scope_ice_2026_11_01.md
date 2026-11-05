@@ -111,3 +111,21 @@ Spec: `test/01_unit/compiler/mir/transient_owner_promotes_every_field_spec.spl`
 Verification pending (needs a rebuilt stage2): run the Reproduce steps above;
 expect `PASS production array_sort_by three record layouts ...` with no
 `[mir-type-invariant]` line.
+
+## Re-scope (2026-11-05, premise check)
+
+The fix above is LANDED on `release/1.0.0`: `d05dc7079db` (promote `rti`
+children + `vm_*` roots) and follow-up `82eb75b12d4` (journal the stored
+HirType/MirType registry row, not the by-value copy). The prior claim was
+stale and the row still said `open`; status is now
+`fix-implemented-verification-pending`. No further code change is needed.
+
+Evidence on current base (`origin/release/1.0.0`):
+`test/01_unit/compiler/mir/transient_owner_promotes_every_field_spec.spl`
+-> 6 total, 6 passed, 0 failed (deployed `bin/simple.exe`).
+
+Still open: the end-to-end Reproduce differential needs a stage2 rebuilt from
+a base that contains both commits; no such binary exists on this host and a
+stage2 build is a heavy build outside the probe budget. Close as `fixed` once
+that run prints `PASS production array_sort_by three record layouts ...`
+with no `[mir-type-invariant]` line.

@@ -76,3 +76,26 @@ Tests: `test_value_match_without_wildcard_fails_closed`,
 `test_statement_match_without_wildcard_stays_silent` in
 `hir/lower/tests/control_flow_tests.rs` (56/56 pass). Status: verification pending a JIT run of
 `pick(4)` on a seed built from this change.
+
+## Verification — 2026-11-05
+
+The 2026-11-03 fix is verified executable at current release/1.0.0 source:
+
+- cargo test -p simple-compiler --lib: test_value_match_without_wildcard_fails_closed,
+  test_value_match_with_wildcard_has_no_exhaustion_panic,
+  test_statement_match_without_wildcard_stays_silent — 3/3 PASS.
+- Behavioral JIT run on a current-source seed build (bootstrap cargo target,
+  built 2026-11-05): `val r = match s: case "a": 1; case "b": 2` with s="z"
+  now emits "invalid pattern: match expression exhausted without matching
+  any pattern" and aborts (exit 134) — fail closed, matching the
+  interpreter, instead of silently yielding 0.
+- Scope note: the fix deliberately keeps the SILENT fall-through for an
+  implicit tail-expression match (`fn pick(s): match s: ...` as the whole
+  body — the doc's original repro shape still prints 0, rc=0) because a tail
+  match is indistinguishable from a statement match in HIR, and bootstrap
+  sources may depend on the fall-through. Extending fail-closed to implicit
+  tails remains tied to the proposed-rule spec change recorded above.
+
+Remaining acceptance: the full proposed rule (fail-closed on every lane
+regardless of SIMPLE_SAFETY_PROFILE, including implicit tails) still needs
+the strictness-tiers spec change before it becomes compiler behaviour.

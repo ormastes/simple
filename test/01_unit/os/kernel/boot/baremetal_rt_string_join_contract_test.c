@@ -155,5 +155,6 @@ int main(void)
     expect_text(rt_char_from_code(70), "F");
     expect_text(rt_char_from_code(124), "|");
     expect_text(rt_char_from_code(52), "4");
+
     return 0;
 }

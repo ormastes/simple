@@ -63,3 +63,18 @@ Re-repair (this lane):
 Re-verification: `socket_ipc_transport_link_contract_spec.spl` 3/3 PASS on the
 aarch64 host (2026-11-05). Remaining acceptance unchanged: SOSIX/QEMU ARM64
 build admission (target link must show no undefined `rt_ipc_*_bytes`).
+
+## Verification — 2026-11-05
+
+- Guard spec test/01_unit/os/kernel/net/socket_ipc_transport_link_contract_spec.spl:
+  3/3 under the seed interpreter on an aarch64 Linux host.
+- ARM64 freestanding link probe (seed cranelift native-build,
+  --target aarch64-unknown-none --entry-closure, entry importing
+  os.kernel.socket_compat and calling sock_create/sock_close): the only
+  undefined symbols are sock_create/sock_close/rt_value_unbox_int — the
+  x86_64-only rt_ipc_send_bytes / rt_ipc_recv_bytes raw bridge no longer
+  leaks into the ARM64 closure, which is exactly this repair's acceptance.
+
+Remaining: SOSIX/QEMU ARM64 build admission stays with the future ARM64 build
+owner per the doc; the socket symbol shape above is a separate matter for
+that lane.

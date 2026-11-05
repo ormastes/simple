@@ -74,3 +74,28 @@ Cargo test: `test_jit_unresolved_cross_module_simple_fn_error_names_the_cause`
 with `SIMPLE_JIT_STRICT=1` non-zero exit with the same text. Needs a rebuilt seed.
 Sibling silent sites: `driver/src/exec_core.rs` jit-compile-error / jit-panic
 fallbacks already print `[INFO]` + record an engine demotion; left unchanged.
+
+## Addendum 2026-11-05: simple_contract_check instance found and fixed
+
+While re-triaging `seed_codegen_interp_native_divergence_2026-10-12.md`, the
+pure-Simple `native-build` app (the whole self-hosted compiler) could not run
+under the seed JIT at all: it references `simple_contract_check` /
+`simple_contract_check_msg` (runtime/src/value/sffi/contracts.rs, emitted by
+codegen as tier-Core RuntimeFuncSpec), but both names were missing from
+`RUNTIME_SYMBOL_NAMES` (src/compiler_rust/common/src/runtime_symbols.rs), so
+the generated static runtime-symbol table never contained them. The seed JIT
+then panicked at finalize (`can't resolve symbol simple_contract_check`,
+cranelift-jit `JITModule::get_address`) and dropped the ENTIRE compiler app to
+the interpreter — a silent whole-program fallback that also defeated
+`first_unresolved_import` pre-classification (the panic surfaced at
+`finalize_definitions`, not at the import scan). This is why no full-program
+jit-lane measurement of the enum-payload divergence existed after
+2026-10-16.
+
+Fixed on `work/rel100-codegen-divergence-20261105` with TDD: RED test
+`contract_check_pair_is_present_in_full_manifest` (simple-runtime-abi), then
+the two manifest entries plus a comment. After a seed rebuild, the jit lane
+ran natively end-to-end (reached native_compile; see the 2026-11-05 section
+of the divergence doc). The pre-existing unrelated failure
+`realloc_is_exactly_once_and_adjacent_to_alloc_in_full_manifest`
+(simple-runtime-abi) fails on the clean tree too and was left alone.
