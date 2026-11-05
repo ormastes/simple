@@ -162,3 +162,18 @@ different sessions/commits over time, not one bulk artifact.
 
 Out of lane: 982-file test-tree divergence needs the check-test-tree-divergence.shs baseline machinery and careful reviewed diffing, well beyond a single-bug budget. No change made.
 
+
+## 2026-11-05 re-measurement (origin/release/1.0.0 4397a4ce3c6)
+
+The 982-vs-982 premise above is outdated. `check-test-tree-divergence.shs
+--ref origin/release/1.0.0` now reports: 873 diverged vs 455 baselined
+(421 new, 3 stale-baselined), 62 mirror-only (61 unallowlisted). The guard is
+RED with a much larger NEW-divergence backlog than the one diagnosed here.
+
+Slice fixed: the 3 stale baseline lines the guard named
+(`unit:lib/common/error_core_spec.spl`, `error_format_spec.spl`,
+`error_spec.spl`) were removed from the baseline (455 -> 452 entries).
+
+Remaining (kept open): 421 new diverged pairs and 61 unallowlisted mirror-only
+files. Each needs reviewed per-pair triage (canonical vs shadow); do NOT
+`--generate-baseline` over them without reading the diff.
