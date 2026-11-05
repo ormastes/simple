@@ -189,6 +189,41 @@ Specs (Windows Rust seed `D:/dev/wt/seed/simple.exe`):
 `test/01_unit/lib/nogc_sync_mut/js/engine/promise_constructor_spec.spl`
 1/6 -> 6/6.
 
+## Note 2026-11-05 (worktree w6) — Promise.all / Promise.race implemented
+
+On `work/libbug-w6-jspromise-20261105` (branch from `origin/release/1.0.0`, aarch64
+Linux seed binary `build/phase_snapshots/phase1_1793422538/simple`):
+
+- The 2026-11-05 note above lists `Promise.all`/`Promise.race` as not covered;
+  re-verification showed the rest of the promise side (constructor, resolve,
+  reject, then/catch/finally chains, rejection propagation, prototype
+  introspection) already green on release/1.0.0, so `all`/`race` were the
+  remaining patchable promise gap. `typeof Promise.all` was "undefined".
+- Fix (nogc_sync_mut engine only): new natives `NATIVE_PROMISE_ALL` (-75) and
+  `NATIVE_PROMISE_RACE` (-76) registered as statics in
+  `interpreter_native.spl::_promise_global_object`. Each element is adopted
+  through `_native_promise_resolve` (host promises by identity, plain values
+  wrapped), then a pair of aggregation step natives (`NATIVE_PROMISE_AGG_FULFILL`
+  -77 / `NATIVE_PROMISE_AGG_REJECT` -78) is registered as its then-handlers;
+  the aggregate promise id and element index ride in the step native's name
+  (`__simple_promise_{all|race}_{fulfill|reject}:<agg>:<idx>`), the same
+  name-rides-context idiom as `__simple_promise_settle:<id>`. `Promise.all`
+  settles fulfilled with an index-ordered results array once all elements are
+  in, rejects on the first rejection, and resolves `[]` immediately;
+  `Promise.race` settles with the first element to settle (settle-once in
+  `_settle_promise` drops the losers) and stays pending on `[]`, per JS.
+  Already-settled elements are enqueued via `_enqueue_promise_task`, matching
+  the existing `.then` microtask-deferral idiom.
+- New spec: `test/01_unit/lib/nogc_sync_mut/js/engine/promise_all_race_spec.spl`
+  0/10 -> 10/10; chaining/regression spec
+  `test/01_unit/lib/nogc_sync_mut/js/engine/promise_chaining_spec.spl` 9/9
+  (documents the already-green then/catch/finally/prototype behavior).
+  Full engine unit dir: 53 examples, 49 passed; the 4 failures are the
+  pre-existing `js_vm_reclamation_spec.spl` intentional-RED placeholder (fails
+  0/4 identically on the unpatched base — verified via stash).
+- Residual: `Promise.all` does not adopt non-host thenables (plain objects
+  with a `then` method are wrapped as values, not unwrapped); `async/await`
+  remains a feature-sized gap as noted above.
 ## Note 2026-11-05 — item 1 verified closed on release/1.0.0 (worktree re-verification)
 
 Worktree branch `work/libbug-std-jsregex-20261105` (off `origin/release/1.0.0`,
