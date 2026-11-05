@@ -1,0 +1,20 @@
+#!/bin/sh
+# Selftest for stage-exe-launch.shs: diagnostic on loader codes, silence otherwise.
+set -u
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+launch="$here/../stage-exe-launch.shs"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/stage-launch.XXXXXX") || exit 2
+trap 'rm -rf "$tmp"' EXIT
+printf '#!/bin/sh\nexit 127\n' > "$tmp/f127"; chmod +x "$tmp/f127"
+printf '#!/bin/sh\nexit 0\n' > "$tmp/ok"; chmod +x "$tmp/ok"
+printf '#!/bin/sh\nexit 3\n' > "$tmp/f3"; chmod +x "$tmp/f3"
+fail=0
+err=$(sh "$launch" "$tmp/f127" 2>&1 >/dev/null); rc=$?
+[ "$rc" = 127 ] || { echo "FAIL: rc $rc != 127"; fail=1; }
+case "$err" in *0xC0000139*libLLVM-23.dll*) ;; *) echo "FAIL: no diagnostic for 127"; fail=1;; esac
+err=$(sh "$launch" "$tmp/ok" 2>&1); rc=$?
+[ "$rc" = 0 ] && [ -z "$err" ] || { echo "FAIL: ok run not silent"; fail=1; }
+err=$(sh "$launch" "$tmp/f3" 2>&1); rc=$?
+[ "$rc" = 3 ] && [ -z "$err" ] || { echo "FAIL: other rc must pass through silently"; fail=1; }
+if [ "$fail" = 0 ]; then echo "PASS - 3 launcher cases checked"; exit 0; fi
+echo "FAIL"; exit 1
