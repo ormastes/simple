@@ -29,3 +29,13 @@ candidate and fallback magic
 scalars and delegates the selection decision to the unchanged exported
 `starfive_dtb_policy_select` ABI. Final RV64 object/link acceptance remains
 deferred until a source-matched admitted pure-Simple compiler exists.
+
+## Verification 2026-11-05 (riscv-sweep lane, work/riscv-sweep-20261105)
+
+Re-checked at tip `origin/release/1.0.0` @ `bc3e9b48cb4`: no source-matched
+admitted pure-Simple compiler RV64 freestanding object-emission path exists
+yet; the acceptance criterion (admitted pure-Simple compiler emits the
+freestanding RV64 relocatable containing `starfive_dtb_policy_select`, linked
+with the compiled `starfive_runtime.c` object and board linker script without
+libc) is unchanged. No new evidence this pass. Status: OPEN, blocked on the
+admitted self-hosted compiler lane.

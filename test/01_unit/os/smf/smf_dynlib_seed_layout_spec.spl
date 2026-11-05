@@ -1,0 +1,67 @@
+# Bug smf_header_wire_layout_diverges_rust_vs_simple_2026-08-10: the dynlib
+# preflight must accept a Rust-seed repr(C) (96 B, +4 field shift) trailer.
+use std.spec.{describe, it, expect}
+use os.smf.smf_dynlib.{smf_artifact_has_export}
+use os.smf.host_target.{smf_host_arch_id}
+use compiler.backend.linker.smf_writer.{SmfWriter, SmfWriterSymbol, SmfWriterSymbolBinding, SmfWriterSymbolType}
+
+fn packed_artifact(export_name: text) -> [u8]:
+    var writer = SmfWriter.create()
+    val code: [i64] = [195]
+    writer.add_code_section("code", code)
+    writer.add_symbol(SmfWriterSymbol(
+        name: export_name,
+        binding: SmfWriterSymbolBinding.Global,
+        sym_type: SmfWriterSymbolType.Function,
+        section_index: 0,
+        value: 0,
+        size: code.len(),
+        layout_phase: 0,
+        is_event_loop_anchor: false,
+        layout_pinned: false
+    ))
+    val built = writer.write()
+    if built.is_err():
+        return []
+    var out: [u8] = []
+    for word in built.unwrap():
+        out.push(word as u8)
+    # platform 0 = any, arch = this host, so host-compat admission passes anywhere
+    val hs = out.len() - 128
+    out[hs + 6] = 0
+    out[hs + 7] = smf_host_arch_id()
+    out
+
+fn to_seed_trailer(packed: [u8]) -> [u8]:
+    # Rewrite the packed 128-byte trailer as the Rust seed repr(C) 96-byte one:
+    # 0..20 unchanged, 4 zero padding bytes at 20..24, packed 20..92 moved to 24..96.
+    val hs = packed.len() - 128
+    var out: [u8] = []
+    var i = 0
+    while i < hs:
+        out.push(packed[i])
+        i = i + 1
+    i = 0
+    while i < 96:
+        if i < 20:
+            out.push(packed[hs + i])
+        else:
+            if i < 24:
+                out.push(0)
+            else:
+                out.push(packed[hs + i - 4])
+        i = i + 1
+    out
+
+describe "smf_dynlib preflight header layouts":
+    it "accepts the packed 128-byte trailer":
+        expect(smf_artifact_has_export(packed_artifact("seed_probe_v1"), "seed_probe_v1")).to_equal(true)
+
+    it "accepts the Rust seed 96-byte repr(C) trailer":
+        val seed = to_seed_trailer(packed_artifact("seed_probe_v1"))
+        expect(seed.len() > 96).to_equal(true)
+        expect(smf_artifact_has_export(seed, "seed_probe_v1")).to_equal(true)
+
+    it "still rejects an unknown export on the seed layout":
+        val seed = to_seed_trailer(packed_artifact("seed_probe_v1"))
+        expect(smf_artifact_has_export(seed, "other_v1")).to_equal(false)
