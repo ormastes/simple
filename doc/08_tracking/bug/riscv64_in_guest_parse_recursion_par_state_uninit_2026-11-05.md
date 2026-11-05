@@ -539,3 +539,42 @@ No production code changed in this lane beyond the debug tool itself; all
 kernels used were the unmodified PASS build (watchpoints are external).
 bug_db.sdn untouched. In-guest cycles: 1 (the watchpoint work runs against
 the stock image).
+
+---
+
+## 2026-11-06 — SIZE-LOG LANE (PR #7038+1): the size is clobbered INSIDE the calloc chain; MIR and the rt_alloc call are correct
+
+Instrumented the winning TU's rv_alloc with an allocation ring (size,
+cursor-before, ra per entry, read back through the RSP client at the
+parser-init anchor; all probes reverted). Decisive entries (transcripts
+/tmp/rv-boot/alloc-ring.json, rsp-corrupt-watch*.log):
+
+- The ring's tail shows ParserState's block handed out by rv_calloc with
+  **size 0xf (15 = the field count)** at third-offset 0x11860 -- par_state's
+  exact block. ParserLexicalBindings went through the same path with size
+  **0x2 (2 = its field count)**. Empty-array literals (0xa0 each) and the
+  "" string (0x11) are correct.
+- The kernel's MIR for parser_state_fresh is CORRECT: `StructInit {
+  struct_size: 120, field_offsets: [0..112], 15 fields }` (and 16 for
+  ParserLexicalBindings) -- SIMPLE_DUMP_MIR at the kernel build.
+- An RSP breakpoint on rt_alloc's entry, hit inside the fresh window, read
+  **a0 = 0x10 = 16 -- the CORRECT byte size** for ParserLexicalBindings,
+  with the caller ra in parser_state_fresh.
+
+So: the seed emits the correct byte size into rt_alloc (a0 = 0x10), the MIR
+carries 120 for ParserState -- but rv_alloc (three frames deep, inside
+calloc/rv_calloc) RECEIVES 0x2/0xf (the field counts). **The size argument
+is clobbered between rt_alloc's entry and rv_alloc's entry -- inside the
+generated calloc/rv_calloc code (a register-allocation/clobber defect in the
+AOT cranelift emission for this closure), where the live field-count value
+replaces the size.** The runtime overlay, the deterministic 0x1100000001
+class words, and the sibling-init zero-fill landing inside par_state's block
+all follow from the 15-byte struct allocation being treated as 120 bytes by
+its accessors and writers.
+
+Fix layer: the seed's AOT codegen for the calloc/rv_calloc frame (size
+argument live-range). A clean minimal fix is NOT bounded in this lane: it
+needs the cranelift register-allocation investigation with the MIR+CLIF in
+hand (the landed RSP client and SIMPLE_DUMP_CLIF/SIMPLE_DUMP_MIR provide
+both). Recorded as the precise next step. No production code changed (ring
+instrumentation reverted); bug_db.sdn untouched. In-guest cycles: 2.
