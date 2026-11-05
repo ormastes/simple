@@ -1,0 +1,64 @@
+use std.spec
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolTable, HirSymbol, SymbolKind, ScopeId}
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+
+# Bug mir_qualified_field_key_namespace_mismatch_2026-08-08: a DECLARATION
+# symbol carries a path-form defining_module ("src/provider.spl") while an
+# IMPORTED symbol carries the dotted form ("provider"). Every layout-key
+# reader must fold both onto the one registered layout.
+
+fn nsq_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn nsq_record(id: i64, module_name: text) -> HirSymbol:
+    HirSymbol(id: SymbolId(id: id), name: "Reply", kind: SymbolKind.Struct,
+        type_: nil, scope: ScopeId(id: 0), span: Span.empty(),
+        visibility: Visibility.Public, is_public: true, is_mutable: false,
+        defining_module: Some(module_name))
+
+fn nsq_lowering() -> MirLowering:
+    var symbols = SymbolTable.new()
+    # 7 = the declaration (path form), 77 = the import of the same type (dotted form).
+    symbols.register_preserved_symbol(nsq_record(7, "src/provider.spl"))
+    symbols.register_preserved_symbol(nsq_record(77, "provider"))
+    var lowering = MirLowering.new(symbols)
+    lowering.struct_field_order["src/provider.spl::Reply"] = ["status", "stdout", "stderr"]
+    lowering.struct_field_order["Reply"] = ["alpha", "beta", "status"]
+    lowering.struct_identity_layout_key["provider::Reply"] = "src/provider.spl::Reply"
+    var builder = lowering.builder
+    builder.begin_function(SymbolId(id: 90), "probe", MirSignature(params: [], return_type: MirType.unit(), is_variadic: false), Span.empty())
+    lowering.builder = builder
+    lowering
+
+describe "mir qualified field key namespace":
+    it "folds the dotted import key onto the path-registered layout":
+        val lowering = nsq_lowering()
+        expect(lowering.declared_struct_layout_key("provider::Reply")).to_equal("src/provider.spl::Reply")
+        expect(lowering.declared_struct_layout_key("src/provider.spl::Reply")).to_equal("src/provider.spl::Reply")
+
+    it "gives declaration and import symbols the same layout key":
+        val lowering = nsq_lowering()
+        val decl_key = lowering.declared_struct_layout_key(lowering.composite_layout_key(nsq_record(7, "src/provider.spl")))
+        val import_key = lowering.declared_struct_layout_key(lowering.composite_layout_key(nsq_record(77, "provider")))
+        expect(import_key).to_equal(decl_key)
+
+    it "construction and value provenance pick the same imported layout, not the bare one":
+        var lowering = nsq_lowering()
+        expect(lowering.struct_value_layout_key(nsq_record(77, "provider"))).to_equal("src/provider.spl::Reply")
+        expect(lowering.struct_value_provenance_key(nsq_record(77, "provider"))).to_equal("src/provider.spl::Reply")
+
+    it "records the folded layout for an indirect call returning an imported record":
+        var lowering = nsq_lowering()
+        val result_type = nsq_type(HirTypeKind.Named(SymbolId(id: 77), []))
+        val signature = nsq_type(HirTypeKind.Function([], result_type, []))
+        var builder = lowering.builder
+        val callable = builder.new_temp(MirType.i64())
+        lowering.builder = builder
+        val result = lowering.emit_typed_function_value_call(callable, [], Some(signature), Span.empty(), nil, [], 0)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.struct_value_syms.get(result.id) ?? "").to_equal("src/provider.spl::Reply")

@@ -498,6 +498,36 @@ fn test_option_map_some_with_identity() {
     assert_eq!(payload.as_int(), 42);
 }
 
+static RESULT_MAP_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+extern "C" fn result_map_increment(_closure: RuntimeValue, payload: RuntimeValue) -> RuntimeValue {
+    RESULT_MAP_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    RuntimeValue::from_int(payload.as_int() + 1)
+}
+
+#[test]
+fn test_result_map_preserves_err_and_wraps_mapped_ok() {
+    RESULT_MAP_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+    let ok_disc = super::hash_variant_discriminant("Ok");
+    let err_disc = super::hash_variant_discriminant("Err");
+    let err = rt_enum_new(super::RESULT_ENUM_ID, err_disc, RuntimeValue::from_int(42));
+    let ok = rt_enum_new(super::RESULT_ENUM_ID, ok_disc, RuntimeValue::from_int(42));
+    let closure = rt_closure_new(result_map_increment as *const u8, 0);
+
+    let mapped_err = super::rt_option_map(err, closure);
+    assert_eq!(mapped_err, err);
+    let dispatched_err = crate::value::rt_map(err, closure);
+    assert_eq!(dispatched_err, err);
+    assert_eq!(RESULT_MAP_CALLS.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    for mapped_ok in [super::rt_option_map(ok, closure), crate::value::rt_map(ok, closure)] {
+        assert_eq!(rt_enum_id(mapped_ok), super::RESULT_ENUM_ID as i64);
+        assert_eq!(rt_enum_discriminant(mapped_ok), ok_disc as i64);
+        assert_eq!(rt_enum_payload(mapped_ok).as_int(), 43);
+    }
+    assert_eq!(RESULT_MAP_CALLS.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
 
 /// `.?` presence, the ONE definition both native backends call
 /// (`rt_is_present`), pinned against the tree-walk interpreter's

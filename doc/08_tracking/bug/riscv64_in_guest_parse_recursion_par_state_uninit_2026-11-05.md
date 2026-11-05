@@ -230,3 +230,210 @@ slot owners), a different class from this record's clobber — filed here
 as the new tail: next lane owns the constructor lowering; the runtime
 side of THIS record is closed (no clobber remains: the sentinel proves
 the global and, post-fix, no overlay writer exists inside .bss).
+
+---
+
+## 2026-11-05 — REPRO LANE (PR #7011+1): the deterministic word is a struct-literal codegen defect, minimally reproduced and bisected
+
+The byte-identical 0x0000001100000001 is NOT an overlay and NOT an
+array-literal defect. Reproduced in isolation, in-guest, and bisected:
+
+- Plain locals `var a: [i64] = [0]` (also `[text] = [""]`, four of
+  them): **correct in-guest** (`PROBE OK array literals`).
+- Struct literal with ONE field `[i64]`: **OK**. TWO fields
+  (`[i64]`,`[text]`): **OK**. FOUR array fields (`ProbeFourA(a:[0],
+  b:[0], c:[0], d:[0])`): **FAULTS** on the first field read —
+  scause=5, stval = `0x0000003300000008` (earlier program revision:
+  `0x0000001100000008`; the high half tracks an ALLOCATION SIZE, 0x11
+  = 17 then, 0x33 = 51 now; low half is type 8 = HEAP_STRING_BUILDER).
+  So a struct-literal FIELD receives a pointer to / the header of an
+  unrelated string-builder allocation once the literal has ~4 fields.
+- Host `simple run` (JIT/interpreter) passes the identical struct-literal
+  repro (`STRUCT LITERAL OK`) — the defect is **AOT cranelift only**.
+  Both the checked-in seed and a seed rebuilt from this branch
+  (release tip `13a060d644e`) reproduce it: genuine release-tip bug,
+  not seed staleness.
+- `simple compile` SMF output is target-independent (only addresses
+  differ between riscv64 and x64 SMF), so the corruption is born in
+  the AOT backend's struct-init value plumbing
+  (`codegen/instr/closures_structs.rs::compile_struct_init` stores
+  field_values at MIR-provided offsets; with ~4 array-typed field
+  values — likely spilled — the value/field pairing breaks). The
+  likely trigger boundary (2 fields OK, 4 broken) points at a
+  register-pressure / spill path in the emitter, not at the offset
+  table itself.
+
+Repro for the next (seed) lane — in-guest probe used by this lane
+(temporary kernel-entry probe, reverted):
+
+```spl
+struct ProbeFourA:
+    a: [i64]
+    b: [i64]
+    c: [i64]
+    d: [i64]
+
+fn probe() -> bool:
+    var q: ProbeFourA = ProbeFourA(a: [0], b: [0], c: [0], d: [0])
+    # first read of q.a faults: q.a == garbage {size,type} word
+```
+
+In-guest iteration loop: add the probe to
+`examples/09_embedded/simple_os/arch/riscv64/interpreter_hello_entry.spl`,
+`sh scripts/os/build-simpleos-riscv64-interpreter-kernel.shs` (~80 s),
+wrap the interp kernel.Image in the pinned OpenSBI v1.4 fw_payload and
+boot `-machine virt -cpu rv64 -smp 1 -m 512M -bios fw_payload.bin
+-serial file:log` (~3.5 min). Host AOT x86_64 builds of even a trivial
+entry exceeded 5 min on this host (SCV admission closure), so in-guest
+is the practical loop. Cycles: 6 of 6 used; stopping per the rule with
+the repro, bisect, and candidate area recorded.
+
+---
+
+## 2026-11-05 — SEED-CODEGEN LANE (PR #7019+1): the 4-field struct-literal defect was the STALE CHECKED-IN SEED; the ParserState fault is a different, open defect
+
+Fast host harness built first (this host has no riscv gdb and host AOT
+x64 builds of any entry exceed 5 min, so): `LocalExecutionManager::cranelift()`
+JIT tests (temporarily un-gated from x86_64 for this run, reverted) plus
+`SIMPLE_DUMP_CLIF=probe` AOT object compiles.
+
+Findings:
+
+1. **The 4-field struct-literal corruption is NOT in release.** The
+   identical 4-field repro PASSES on the host cranelift JIT and its AOT
+   CLIF is exactly right (four independent box/new/push chains; stores
+   pair v3/v8/v13/v18 with offsets 0/8/16/24 of the rt_alloc'd block).
+   Re-tested IN-GUEST with a seed rebuilt from THIS branch (release tip
+   `9bf94d89a91`): `PROBE OK four-field struct literal`. All prior
+   in-guest repros that showed the fault (including #7019's) were built
+   with the CHECKED-IN bootstrap seed — which was built from the
+   diverged main tree and lacks release's struct-init fixes. Root
+   cause of THAT defect: stale seed, fixed in release already.
+   OPERATIONAL LESSON, load-bearing for every future in-guest lane:
+   `SIMPLE_BIN` for `build-simpleos-riscv64-interpreter-kernel.shs`
+   MUST be a seed built from the same release commit; the checked-in
+   `src/compiler_rust/target/bootstrap/simple` is main-built and
+   silently miscompiles struct literals.
+
+2. **The ParserState parse fault PERSISTS with the release seed**
+   (same scause=5 rt_array_set trap, stval=0x0000001100000000, after
+   the now-passing 4-field probe). So par_state's construction differs
+   from the plain 4-field case in a way that still breaks: it is a
+   15-FIELD struct returned BY VALUE from `parser_state_fresh` into a
+   MODULE-INIT (`__module_init_..._dynamic`) and stored into a module
+   GLOBAL. The prime remaining suspects, in order: (a) large-struct
+   RETURN ABI (sret) in the AOT cranelift path for rv64 — a 120-byte
+   struct vs the 32-byte probe; (b) the module-init/global store path.
+   Next lane's first probe: a >=16-field struct returned from a plain
+   function, read back field-by-field, in-guest (entry probe), with a
+   release-built seed; then the same inside a module-init.
+
+No production code changed in this lane (temp host tests, the x86_64
+test gate, and the in-guest entry probe all reverted). Cycles: 5 of 6.
+
+---
+
+## 2026-11-05 — SRET-PROBE LANE (PR #7020+1): NOT sret — the ghdl bump cursor is REWOUND mid-init; field-level evidence
+
+All in-guest evidence built with a RELEASE-BUILT seed
+(`/tmp/riscvH-target/release/simple` from `4d041e6cbf6`), fresh native
+cache (`compiled=614 reused=0`) — no stale artifacts.
+
+Boundary probes (in-guest, entry probes, reverted):
+- 16-field struct of `[i64]` returned BY VALUE from a plain fn, zeros:
+  **OK** (f0/f7/f15 read back). Distinct per-field values [i]..[i]:
+  **OK** — no value/field swap. So large-struct return lowering is
+  CORRECT; the #7020 sret hypothesis is dead.
+- The SAME shape as a MODULE-LEVEL `var g: Probe16 = make()` (the
+  par_state pattern): **faults** reading f11 — BUT the global itself
+  holds a valid, stable tagged heap pointer (0x88e8a2d1 at spl_start,
+  unchanged after 32 more allocations).
+
+Field-level dump of the struct at spl_start (16 words): f0, f1, f6, f7,
+f15 are make's valid array pointers; **f2-f5 are a complete
+RuntimeString** `{size=33, type=HEAP_STRING}, len=16,
+data="0123456789abcdef"` (the hex-literal const of
+mcdc_exclusion_evidence.spl / duplicate_check/incremental.spl), and
+**f8-f14 are another RuntimeString** `{size=54, type=HEAP_STRING},
+len=37, data="simple.instrumentation.cutover/atomic"` (the
+ASPECT_CUTOVER_ATOMIC_EXT_V1 const of
+src/lib/common/plugin/aspect_params.spl). Two independent modules'
+string-const allocations landed INSIDE the struct block at offsets
++16 and +64, with 16-byte alignment spacing exactly matching two
+sequential `rv_alloc`s from a cursor positioned at struct+16.
+
+The core TU's own `g_heap_off` at spl_start is 0xdf00 and STABLE
+across further allocation — the core cursor never served the struct
+and was not poisoned. The struct was served from the ghdl third (heap
+offset 0x80142d0). Since a single bump cursor cannot allocate inside
+its own earlier block, the ghdl cursor must have been REWOUND from
+just past the struct (0x88e8a350) to struct+16 (0x88e8a2e0) AFTER the
+entry module's init ran and BEFORE the aspect/hex string-const inits
+ran, then bumped forward again (subsequent allocations — including
+PROBE-A/B's 32 arrays — continue past the struct, which is why the
+global value and f0/f1/f6/f7/f15 stay stable).
+
+The rewind writer is UNBOUND within this lane's budget: it stores an
+offset ≈ struct_base+16 into the ghdl copy of `g_heap_off` between
+two module inits inside `__simple_call_module_inits`. Both this lane
+and the pre-#7011 laneE kernels show the identical mechanism (there:
+0x1100000001 = {size=17, type=1} string headers), so it is
+seed-independent and cache-independent.
+
+Next lane's first experiment (one in-guest boot): bisect the init
+table — disable the aspect_params init (or the hex-const module's
+init) in `__simple_call_module_inits` and check whether the overlay
+strings disappear from the struct; then walk backwards to find which
+init's store rewinds the ghdl `g_heap_off` (a hardware-watchpoint
+equivalent: POISON g_heap_off with a sentinel after the entry module's
+init and dump it at spl_start; the init that flips it is the writer).
+Candidate mechanism to check first: a string-const global init
+(`emit_module_init`'s init_strings path) whose `global_ids` lookup
+resolved to the ghdl `g_heap_off` address (weak-symbol resolution
+across the runtime TUs), storing a heap pointer into the cursor.
+
+No production code changed (all probes reverted). Cycles: 5 of 6.
+
+---
+
+## 2026-11-05 — WRITER-HUNT LANE (PR #7023+1): the rewind theory is DEAD; corruption is a direct write via an unknown path
+
+Experiments (in-guest, release-built seed, all probes reverted):
+
+1. **Poison experiment**: setting the ghdl cursor to an out-of-range sentinel
+   after the entry module's init made the next unguarded allocation return
+   NULL and the first consumer (`lib.log.BackendSlot.empty` init) store
+   through it — proving the corruptor is not "the next allocator" per se.
+2. **Rewind detector on every guarded allocation entry of the ghdl copy**
+   (`malloc`, `calloc`, `rt_string_new`, `rt_array_new`): a bump cursor only
+   increases, so the first allocation observing a decrease of `g_heap_off`
+   would trap with prev/now/ra. NO TRAP EVER FIRED — even though the parse
+   fault reproduced identically (stval=0x1100000000). Combined with the
+   earlier static proof that only the owning TU's allocators can address the
+   static `g_heap_off` (PC-relative, TU-private), a cursor rewind DID NOT
+   happen: the two RuntimeStrings observed inside the probe struct
+   ("0123456789abcdef", "simple.instrumentation.cutover/atomic") were NOT
+   produced by any allocation through the ghdl cursor.
+3. Therefore the overlay is a **DIRECT MEMORY WRITE**: some code computed
+   struct+16 / struct+64 as a copy destination and wrote string object
+   images (header+len+copied .rodata bytes) there — i.e., it held or built
+   a destination pointer equal to an address inside a LIVE heap block, then
+   ran a string-construction sequence into it. The value layout is exactly a
+   RuntimeString produced by the winning `rt_string_new` (header
+   {size<<32|type=1}, len qword, copied bytes), so the writer is a
+   string-construction call site whose DESTINATION pointer is corrupt, not
+   the allocator. Candidates to check next: any string builder / concat /
+   slice / interpolation path that writes through a caller-supplied or
+   cached destination pointer, and any global that caches a heap pointer
+   across the module-init phase (a pointer captured before the struct
+   existed would have to point INTO the future struct block — impossible
+   for a bump heap, so the destination is more likely computed from a
+   corrupted base/index: `dst = base + garbage_offset` where the result
+   coincides with live blocks).
+
+Next lane's decisive experiment (one boot): guard ALL THREE TUs' allocation
+entries (not just ghdl's) with the same decrease-trap AND — more directly —
+wrap `rt_string_new` in the WINNING TU to trap if its RETURNED pointer lies
+inside the probe struct's block range (recorded at entry-init), printing the
+caller's ra. The first string constructed into the live block names the
+call site; the caller's destination computation then names the corruptor.

@@ -215,6 +215,21 @@ pub(super) fn minimal_boot_source_allowed(stem: &str, ssh_live_boot: bool) -> bo
         || stem == "ed25519_verify_helper"
 }
 
+pub(super) fn minimal_boot_asm_source_allowed(stem: &str) -> bool {
+    stem != "multiboot2_elf64_loader" && stem != "up2_dci_uefi_transition"
+}
+
+pub(super) fn freestanding_boot_dir(entry: &Path, source_dirs: &[PathBuf]) -> Option<PathBuf> {
+    let entry_boot = entry.parent().unwrap_or(Path::new(".")).join("boot");
+    if entry_boot.is_dir() {
+        return Some(entry_boot);
+    }
+    source_dirs
+        .iter()
+        .map(|root| root.join("boot"))
+        .find(|path| path.is_dir())
+}
+
 fn wrap_elf32_multiboot(output: &Path, objcopy_bin: &str) -> Result<(), String> {
     let file_name = output
         .file_name()
@@ -2919,13 +2934,14 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
                     .and_then(|name| name.to_str())
                     .map(|name| name == "desktop_service_entry.spl")
                     .unwrap_or(false);
-            let boot_dir = entry.parent().unwrap_or(std::path::Path::new(".")).join("boot");
+            let boot_dir = freestanding_boot_dir(entry, &self.source_dirs);
+            let minimal_boot = std::env::var("SIMPLE_BOOT_MINIMAL").is_ok();
             let debug_boot_sources = self.config.verbose || std::env::var("SIMPLE_LINKER_DEBUG").is_ok();
             if skip_boot_autodiscovery && debug_boot_sources {
                 eprintln!("  Boot autodiscovery skipped for {}", entry.display());
             }
             let proof_runtime_stem = "ghdl_boot_info_runtime";
-            if boot_dir.is_dir() {
+            if let Some(boot_dir) = boot_dir {
                 if debug_boot_sources {
                     eprintln!("  Boot directory: {}", boot_dir.display());
                 }
@@ -2955,6 +2971,9 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
                                     continue;
                                 }
                                 let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+                                if minimal_boot && !minimal_boot_asm_source_allowed(&stem) {
+                                    continue;
+                                }
                                 let out = temp_dir.join(format!("_boot_{}.o", stem));
                                 let mut assembled = false;
                                 let mut last_stderr = String::new();
@@ -3021,7 +3040,6 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
                             if skip_boot_autodiscovery && stem != proof_runtime_stem {
                                 continue;
                             }
-                            let minimal_boot = std::env::var("SIMPLE_BOOT_MINIMAL").is_ok();
                             let ssh_live_boot = std::env::var("SIMPLE_SSH_LIVE_BUILD_MARKER").is_ok();
                             if rv64_desktop_service_boot
                                 && stem != "full_networking_runtime"

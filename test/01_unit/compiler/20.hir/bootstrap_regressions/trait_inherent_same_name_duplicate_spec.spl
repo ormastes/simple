@@ -1,0 +1,62 @@
+# Purpose and audience: compiler engineers who own HIR impl lowering and
+# method symbol mangling.
+# @req REQ-SSPEC-COMPILER
+# Tracks: doc/08_tracking/bug/trait_default_inherent_override_duplicate_symbol_2026-10-24.md
+"""
+# A method written in BOTH a trait impl and an inherent impl is a diagnostic
+
+`method_symbol_name` mangles `Owner::name` with no trait or arity part, so a
+trait-impl `export_function(a, b)` and an inherent `export_function(a..f)` on
+one owner shared a symbol: 7-arg calls bound the 3-param body
+(`mismatched argument count ... got 7, expected 3`, lean_backend, run-16).
+HIR now rejects the shape. Overriding a trait DEFAULT inherently stays legal
+(case 1, covered by inherent_override_of_trait_default_spec).
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:hir
+# @tag:traits
+
+use std.spec.{describe, it, expect, step}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.core.parser.{parser_has_errors}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+
+fn dup_hir_errors(source: text) -> text:
+    val file = "testdata/trait_inherent_dup.spl"
+    val parsed = parse_full_frontend(source, file, "trait_inherent_dup", Logger(level: 0))
+    if parser_has_errors():
+        return "PARSE-FAILED"
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir: HirModule = hir_lowering.lower_module(parsed)
+    var errs = ""
+    for e in hir_lowering.errors:
+        errs = errs + e.message + "\n"
+    errs
+
+val dup_trait = "trait V:\n    fn f(a: i64) -> i64\n    fn g(a: i64) -> i64:\n        a\n\nstruct L:\n    v: i64\n\n"
+val dup_trait_impl = "impl V for L:\n    fn f(a: i64) -> i64:\n        a + 1\n\n"
+
+describe "trait impl and inherent impl writing the same method name":
+    it "rejects an inherent method that duplicates a written trait-impl method (inherent last)":
+        val src = dup_trait + dup_trait_impl + "impl L:\n    fn f(a: i64, b: i64, c: i64) -> i64:\n        a + b + c\n"
+        val errs = dup_hir_errors(src)
+        expect(errs.contains("defined in both a trait impl and an inherent impl")).to_equal(true)
+        expect(errs.contains("L::f")).to_equal(true)
+
+    it "rejects the same shape with the inherent impl first":
+        val src = dup_trait + "impl L:\n    fn f(a: i64, b: i64) -> i64:\n        a + b\n\n" + dup_trait_impl
+        val errs = dup_hir_errors(src)
+        expect(errs.contains("defined in both a trait impl and an inherent impl")).to_equal(true)
+
+    it "still accepts an inherent override of an unwritten trait default":
+        val src = dup_trait + dup_trait_impl + "impl L:\n    fn g(a: i64) -> i64:\n        a * 2\n"
+        expect(dup_hir_errors(src)).to_equal("")
+
+    it "accepts distinct inherent names next to a trait impl (lean workaround shape)":
+        val src = dup_trait + dup_trait_impl + "impl L:\n    fn f_wide(a: i64, b: i64) -> i64:\n        a + b\n"
+        expect(dup_hir_errors(src)).to_equal("")
