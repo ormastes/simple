@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN (P1 — blocks every push)
+**Status:** CLOSED (outdated, 2026-11-05) — see addendum.
 **Filed:** 2026-08-17
 **Component:** pure-Simple parser (native-build lane) vs Rust seed parser
 **Class:** engine divergence — the same source parses in one engine and not the other
@@ -79,3 +79,8 @@ accept — but the divergence itself is the defect and will recur elsewhere.
   would fail the same way (only the first was bisected).
 - Whether the seed's acceptance is deliberate or itself a laxity bug.
 
+
+## Addendum 2026-11-05 — closed as outdated (W3b)
+
+Stage3 `s3_fable44` builds, links and runs a fixture with module-level
+`var x: i64 = -1` and `var s: text = ""`: rc=0, stdout `PASS modvar`.

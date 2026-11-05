@@ -140,3 +140,11 @@ ancestor directories.
 
 Until these conditions and the admitted Stage-4 RV32/RV64 run are complete,
 the qualification state remains development-stage and fail-closed.
+
+## Verification 2026-11-05 (riscv-sweep lane, work/riscv-sweep-20261105)
+
+Architectural status unchanged at tip: the receipt remains controlled-run
+provenance, not an adversarial boundary. The coverage-inventory design
+(compiler-emitted zero-count decision manifest, `MirCoverage*V1` lowering) and
+the descriptor-relative runtime snapshot transaction remain unimplemented; the
+containment rules above still govern. Status: OPEN.

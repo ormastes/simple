@@ -1,6 +1,6 @@
 # `.?` yields `T?`, but 25 `-> bool` functions return it directly
 
-Status: OPEN (P2)
+Status: FIX PR #6980 — "wait verification" (host-side native verification pending)
 Status re-verified 2026-08-17 by source inspection (triage shard 01).
 
 **Filed:** 2026-08-09 (stream F3)
@@ -229,3 +229,53 @@ bool; the operator-vs-call-sites ruling question above is unchanged.
 ## Triage 2026-11-04 (c28-w4)
 
 Census 2026-11-04 (multiline grep, non-exhaustive) of tail .? in -> bool fns still live: src/compiler/25.traits/trait_def.spl:62 has_default; src/compiler/20.hir/hir_codec_key_order.spl:70 return right.?; src/compiler/35.semantics/const_keys.spl:174 has_suggestion and :299 can_validate (self.is_const and self.schema.?); src/lib/nogc_sync_mut/database/bug.spl:155 and src/lib/nogc_async_mut/database/bug.spl:151 is_split_table_db; src/app/interpreter/lazy/lazy_val.spl:390 and lazy_val_fixed.spl:388 contains; src/app/pkg/manifest.spl:108 has_dep; src/compiler/70.backend/backend/vhdl/vhdl_call_lowering.spl:292 and :855; src/compiler/60.mir_opt/mir_opt/pattern/rule_engine.spl:276. Earlier-listed unfixed: lock.spl:47 dict.spl:94 llvm_backend.spl:344 llvm_loader.spl:41 macho_inspect.spl:204 pe_parser.spl:299 lean/runner.spl:102 durability.spl:483 vfs.spl:147 (not re-read). No code change in this PR: several sit in lint/compiler lanes and each needs a caller audit. QUESTION (still blocking): operator-vs-call-sites ruling; contract doc says .? returns T? so sites should become != nil.
+
+## Fix 2026-11-05 (wasm-fixes lane) — implicit-tail diagnostic + last two live sites
+
+Census re-run at this branch tip (scanner over every `fn`/`me` signature
+containing `-> bool`, body scanned to first dedent): all sites listed in the
+2026-11-04 triage note above are ALREADY converged except two, and the two
+remaining tail-shape hits (`rule_engine.spl:276` `provider.enabled and not
+...missing_fact(...).?` and `hir_lowering/types.spl:1645` `not
+self.symbols.lookup(name).?`) are type-honest — `not (X.?)` is a real bool.
+
+Checker gap closed here: `infer_return_expr` (explicit `return`) already
+rejected the optional payload, but the IMPLICIT tail body flowed through
+body-vs-return-type `subsume` and surfaced only as a span-0:0 generic
+`type mismatch` (or subsume silently, depending on the producer). The
+implicit-tail path in `infer_function`
+(src/compiler/30.types/type_infer/inference_control.spl) now emits the same
+targeted diagnostic ("optional value of type ... cannot satisfy the
+non-optional return type ... of function ... ('.?' yields T?)") for any
+optional-typed bare tail body in a concrete non-optional-return function.
+New pinning example in
+test/01_unit/compiler/type_infer/non_optional_return_optional_payload_spec.spl
+(RED before: no targeted diagnostic; GREEN after). Full spec: 8/8.
+
+Last two live call sites fixed (caller-audited):
+- src/compiler/20.hir/hir_codec_key_order.spl
+  `hc_symbol_id_key_before_v1`: `if not left.?: return right.?` → the
+  nil-ordering shape of its sibling `_hc_symbol_id_index_before_v1`
+  (`left == nil` / `right != nil` / `left.id < right.id`). Behavior pinned by
+  test/01_unit/compiler/hir/hir_codec_key_order_v1_spec.spl (its two
+  `fail("MissingEvidence: ...")` examples are pre-existing intentional REDs).
+  The `@workaround a174_struct_nil_comparison_dispatch_2026_10_16` marker was
+  dropped: the workaround justified the `.?` shape; the sibling already uses
+  struct `== nil` in the same file.
+- src/compiler/95.interp/interpreter/operators.spl
+  `TruthinessRules.is_truthy_string`: `v.?` → `v != ""` (semantically
+  identical: `.?` on text yields the string when non-empty, nil when "").
+
+Guard spec test/01_unit/compiler/semantics/bool_fn_tail_exists_check_spec.spl
+extended with both sites (10/10).
+
+## HB2 sweep 2026-11-05
+
+Census missed two shapes: a multi-line call whose tail line is `...).?`
+(`retained_binary_cas_verify_v1`, `src/app/build/scheduler/retained_binary_cas.spl`, `[u8]?`)
+and a `.?` as the last operand of an `and` chain
+(`_environment_variant_frontend_binding_live_v1`, `src/compiler/99.loader/`). Both now
+`!= nil`; guard spec extended (RED 2/2 before, GREEN 2/2 after). Still open, out of the
+bootstrap focus: `src/os/apps/simple_browser/main.spl:81` (`text_out.?`) and
+`src/os/kernel/loader/installed_artifact_catalog_v1.spl:339` (`i64?` `.?` — also treats
+0 alias bytes as false).

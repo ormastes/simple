@@ -292,3 +292,21 @@ compile-time checker after measuring 286 candidate sites and 336 enum names
 declared more than once. Any fix here deserves the same measurement first.
 `src/compiler/30.types/bidirectional_checking.spl` is where argument agreement
 lives; PR #1077 is open on the sibling `type_infer/*` files.
+
+## Re-scoped 2026-11-05 (HB2) — pure-Simple checker already rejects; remainder is seed-only
+
+New spec `test/01_unit/compiler/type_infer/bool_param_rejects_non_bool_spec.spl`
+drives the pure-Simple HM checker at the call-argument site
+(`inference_expr_calls.spl:44`, `InferMode.Check(param)`): `i64`, `text`, `i64?`,
+literal `42` and literal `0` against a `bool` parameter all yield `Mismatch`;
+`bool` is accepted. 7/7 pass. So half 1 is enforced by the self-hosted
+compiler's type checker, the default tooling.
+
+Still reproduces on the Rust seed (bootstrap-only): `take_bool(42)` and
+`take_bool(0)` both print `got=true` (`coerce_param` in
+`src/compiler_rust/compiler/src/interpreter_call/core/arg_binding.rs` coerces
+any value to bool). Not fixed here: seed rebuild is out of this lane, and the
+seed is not the normal tool. Native end-to-end confirmation is blocked —
+`s3_fable44.exe native-build` SEGVs (rc 139) on a 6-line probe after HIR, so
+whether HM runs as a gate in the native pipeline is unverified. Row stays
+OPEN, scoped to: seed `coerce_param` bool arm + native-pipeline gating proof.

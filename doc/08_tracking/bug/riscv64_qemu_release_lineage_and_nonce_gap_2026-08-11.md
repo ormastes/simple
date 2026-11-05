@@ -37,3 +37,11 @@ the canonical system spec is run once through the deployed pure-Simple CLI.
 - Merge owner: SOSIX/QEMU integration lane
 - Final reviewer: independent normal/highest-capability reviewer
 
+
+## Verification 2026-11-05 (riscv-sweep lane, work/riscv-sweep-20261105)
+
+Bookkeeping re-check only. Both release blockers stand: RV64 cross-compilation
+still routes through the Rust seed (no deployed pure-Simple target path), and
+the guest markers are not yet correlated with a per-run runner nonce, so the
+strict receipt classifier still cannot accept them. No canonical system-spec
+run through the deployed pure-Simple CLI exists. Status: OPEN (unchanged).

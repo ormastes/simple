@@ -260,3 +260,50 @@ and `scripts/check/lib` in its source snapshot
 (`command-snapshot.shs` `bootstrap_stage3_source_snapshot_once`), so the
 currently admitted Stage 2 (`3d956afd...`, old scripts) cannot be published
 against the fixed tree; Stage 2 is re-admitted on the fixed tree first.
+
+## Run 4 (2026-11-05, release/1.0.0 `13a060d644e`, Linux aarch64 121 GiB): memory fixed, time budgets not scaled
+
+The worker-floor plan worked for memory: Stage 2 compiler tests passed every
+row except `compiler_cli_build`, whose tree peaked at max_rss 23 GiB (inside
+the cap). The plan reduced the requested 8 build workers to 2, but the time
+budgets were still the ones calibrated for 8:
+
+- native internal timeout 1800 s (`BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT`,
+  passed as `native-build --timeout`), row timeout 3600 s ("timeout=3600s" in
+  the Stage 2 banner), campaign deadline 7200 s (verifier default).
+- `compiler_cli_build.log`: ~900 s of parse/HIR/MIR setup, then MIR at
+  ~0.68 modules/s combined (576 done at 1748 s build-elapsed); both MIR shard
+  workers killed at the internal timeout:
+  `owner=1/2@0 status=BLOCKED exit=-2 claimed=317`,
+  `owner=0/2@0 status=BLOCKED exit=-2 claimed=279` -> 596 of 3010 modules ->
+  `blocked=worker could not be reaped` -> `MIR shard aggregate failure`.
+  Phase elapsed 3171 s. 3010 modules at that rate need ~75 min of MIR alone.
+
+Fix (`scripts/bootstrap/lib/tree-rss-policy.shs`): the whole-build plan now
+also computes `bootstrap_tree_rss_plan_timeout_scale = min(ceil(requested /
+fitted), BOOTSTRAP_TREE_RSS_TIMEOUT_SCALE_MAX=4)` (1 when nothing was reduced
+or the cap is explicit), and `bootstrap_tree_rss_scaled_timeout VAR DEFAULT`
+publishes each budget as DEFAULT x scale unless VAR was set explicitly (kept
+verbatim). Both Stage 2 test owners (`bootstrap-from-scratch.sh`,
+`admit-built-stage2-compiler-tests.shs`) publish the native internal, row and
+campaign budgets through it after the plan; on this host that is 7200 / 14400 /
+28800 s. The verifier summary records `timeout_source=` (per budget, `VAR:source` comma-joined:
+`explicit` | `phase-policy` | `phase-policy-scaled`) and `timeout_scale=`.
+Still fail closed: a hung worker is killed at the scaled limit, the scale is
+bounded, and a malformed default is refused.
+
+Not changed: the MIR reaper (`native_build_main.spl` ~1148) sends SIGTERM via
+the generic `rt_process_kill` (`runtime_process.c` ~107) and gives up after a
+5 s wait with no SIGKILL escalation ("worker could not be reaped"). Escalating
+inside the shared primitive changes every caller's graceful-shutdown
+semantics, and editing the `.spl` site changes compiler source (new Stage 2
+needed); left as a follow-up.
+
+Re-test note: `scripts/bootstrap` is part of the admitted source snapshot
+(`command-snapshot.shs` authority list), so the run-4 admitted Stage 2 cannot
+be published against the fixed tree. Without a rebuild it can be re-tested on
+its own frozen source with explicit budgets, which the old scripts already
+honour: `BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT=7200
+BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS=28800` (env) plus `--timeout-seconds=14400` (the old
+admit script does not read `BOOTSTRAP_VERIFY_TIMEOUT_SECONDS`); that receipt is
+a manual-budget re-test and carries no `timeout_source`.

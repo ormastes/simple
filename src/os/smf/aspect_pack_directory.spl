@@ -4,6 +4,7 @@
 # the SMFAPK1 directory wire and cross-checks it against both that catalog and
 # the dynSMF manifest.  Admission never guesses an export symbol or ABI.
 
+use compiler.backend.linker.smf_header.{smf_header_field_shift, smf_header_size_at, smf_header_seed_trailer_offset, SMF_SEED_HEADER_SIZE}
 use std.common.string_core.{bytes_to_text}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.common.aspect_pack.{
@@ -166,18 +167,23 @@ fn _aspect_pack_outer_magic_at(data: [u8], offset: i64) -> bool:
         data[offset + 2] == 70 and data[offset + 3] == 0
 
 fn _aspect_pack_outer_header_offset(data: [u8]) -> i64:
-    if data.len() < ASPECT_PACK_OUTER_SMF_HEADER_SIZE:
+    if data.len() < SMF_SEED_HEADER_SIZE:
         return -1
     val trailer = data.len() - ASPECT_PACK_OUTER_SMF_HEADER_SIZE
-    val leading_magic = _aspect_pack_outer_magic_at(data, 0)
-    val trailer_magic = _aspect_pack_outer_magic_at(data, trailer)
-    if leading_magic and trailer_magic and trailer != 0:
+    # Packed v1.1 header: 128 bytes. Rust seed repr(C) header: 96 bytes with a
+    # +4 field shift (canonical decoder: compiler.backend.linker.smf_header).
+    val leading_magic = _aspect_pack_outer_magic_at(data, 0) and
+        (data.len() >= ASPECT_PACK_OUTER_SMF_HEADER_SIZE or smf_header_field_shift(data, 0) == 4)
+    val trailer_magic = data.len() >= ASPECT_PACK_OUTER_SMF_HEADER_SIZE and _aspect_pack_outer_magic_at(data, trailer)
+    val seed_trailer = if trailer_magic: -1 else: smf_header_seed_trailer_offset(data)
+    val other_start = if trailer_magic: trailer else: seed_trailer
+    if leading_magic and other_start > 0:
         return -2
     if leading_magic:
         return 0
     if trailer_magic:
         return trailer
-    -1
+    seed_trailer
 
 fn _aspect_pack_outer_nonnegative_u64(data: [u8], offset: i64) -> i64?:
     if not _aspect_pack_outer_range_valid(offset, 8, data.len()):
@@ -211,16 +217,18 @@ fn aspect_pack_directory_parse_from_outer_smf_bytes(data: [u8]) -> AspectPackDir
     if data[header_offset + 12] != 0:
         return _aspect_pack_parse_error("ASPECT_PACK_OUTER_COMPRESSED", "compressed outer SMF is unsupported")
 
+    val shift = smf_header_field_shift(data, header_offset)
+    val header_size = smf_header_size_at(data, header_offset)
     val section_count = _aspect_pack_read_u32(data, header_offset + 16)
-    val symbol_count = _aspect_pack_read_u32(data, header_offset + 36)
+    val symbol_count = _aspect_pack_read_u32(data, header_offset + 36 + shift)
     if section_count <= 0 or section_count > ASPECT_PACK_OUTER_SMF_MAX_SECTIONS:
         return _aspect_pack_parse_error("ASPECT_PACK_OUTER_BAD_SECTION_COUNT", "outer SMF section count is outside the admitted range")
     if symbol_count < 0 or symbol_count > ASPECT_PACK_OUTER_SMF_MAX_SYMBOLS:
         return _aspect_pack_parse_error("ASPECT_PACK_OUTER_BAD_SYMBOL_COUNT", "outer SMF symbol count is outside the admitted range")
 
-    val data_offset = _aspect_pack_read_u32(data, header_offset + 56)
-    val raw_sections = _aspect_pack_outer_nonnegative_u64(data, header_offset + 20)
-    val raw_symbols = _aspect_pack_outer_nonnegative_u64(data, header_offset + 28)
+    val data_offset = _aspect_pack_read_u32(data, header_offset + 56 + shift)
+    val raw_sections = _aspect_pack_outer_nonnegative_u64(data, header_offset + 20 + shift)
+    val raw_symbols = _aspect_pack_outer_nonnegative_u64(data, header_offset + 28 + shift)
     if raw_sections == nil or raw_symbols == nil:
         return _aspect_pack_parse_error("ASPECT_PACK_OUTER_TABLE_OFFSET", "outer SMF table offset exceeds the signed loader range")
     val sections_offset = _aspect_pack_outer_checked_add(data_offset, raw_sections!)
@@ -233,8 +241,8 @@ fn aspect_pack_directory_parse_from_outer_smf_bytes(data: [u8]) -> AspectPackDir
         return _aspect_pack_parse_error("ASPECT_PACK_OUTER_SECTION_TABLE_RANGE", "outer SMF section table escapes admitted bytes")
     if not _aspect_pack_outer_range_valid(symbols_offset!, symbol_table_size, data.len()):
         return _aspect_pack_parse_error("ASPECT_PACK_OUTER_SYMBOL_TABLE_RANGE", "outer SMF symbol table escapes admitted bytes")
-    if (_aspect_pack_outer_ranges_overlap(sections_offset!, section_table_size, header_offset, ASPECT_PACK_OUTER_SMF_HEADER_SIZE) or
-        _aspect_pack_outer_ranges_overlap(symbols_offset!, symbol_table_size, header_offset, ASPECT_PACK_OUTER_SMF_HEADER_SIZE) or
+    if (_aspect_pack_outer_ranges_overlap(sections_offset!, section_table_size, header_offset, header_size) or
+        _aspect_pack_outer_ranges_overlap(symbols_offset!, symbol_table_size, header_offset, header_size) or
         _aspect_pack_outer_ranges_overlap(sections_offset!, section_table_size, symbols_offset!, symbol_table_size)):
         return _aspect_pack_parse_error("ASPECT_PACK_OUTER_TABLE_OVERLAP", "outer SMF tables overlap each other or the header")
 
@@ -260,7 +268,7 @@ fn aspect_pack_directory_parse_from_outer_smf_bytes(data: [u8]) -> AspectPackDir
             return _aspect_pack_parse_error("ASPECT_PACK_OUTER_ALIGNMENT", "outer SMF section alignment is invalid")
         if (_aspect_pack_outer_ranges_overlap(file_offset!, size!, sections_offset!, section_table_size) or
             _aspect_pack_outer_ranges_overlap(file_offset!, size!, symbols_offset!, symbol_table_size) or
-            _aspect_pack_outer_ranges_overlap(file_offset!, size!, header_offset, ASPECT_PACK_OUTER_SMF_HEADER_SIZE)):
+            _aspect_pack_outer_ranges_overlap(file_offset!, size!, header_offset, header_size)):
             return _aspect_pack_parse_error("ASPECT_PACK_OUTER_SECTION_OVERLAP", "outer SMF section overlaps metadata")
         if section_sizes_by_offset.has(file_offset!):
             return _aspect_pack_parse_error("ASPECT_PACK_OUTER_SECTION_OVERLAP", "outer SMF sections overlap")

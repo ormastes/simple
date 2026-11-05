@@ -546,10 +546,26 @@ fn find_runtime_source_dir() -> text:
 
 fn _runtime_dir_not_found_message() -> text:
     """Honest diagnostic for a failed runtime-source lookup."""
-    val cwd = rt_path_absolute(".") ?? "<unknown>"
-    val exe_path = rt_path_absolute("/proc/self/exe") ?? "<unknown>"
+    # Typed vars + statements only (bug native_build_inprocess_link_access_violation_2026-11-05):
+    # on Windows `rt_path_absolute("/proc/self/exe")` is nil, and the native
+    # lane rendered the `?? "<unknown>"` / Option if-expression results as a
+    # non-text handle, so the first concat strlen'd garbage and the worker
+    # died 0xC0000005 instead of reporting this message.
+    var cwd: text = "<unknown>"
+    val cwd_abs = rt_path_absolute(".")
+    if cwd_abs != nil:
+        cwd = cwd_abs.unwrap()
+    var exe_path: text = "<unknown>"
+    if not _is_windows():
+        val exe_abs = rt_path_absolute("/proc/self/exe")
+        if exe_abs != nil:
+            exe_path = exe_abs.unwrap()
+    var pr: text = "<unset>"
     val project_root = env_get_nullable("SIMPLE_PROJECT_ROOT")
-    val pr = if project_root != "" and project_root != nil: project_root else: "<unset>"
+    if project_root != nil:
+        val root_text: text = project_root.unwrap()
+        if root_text != "":
+            pr = root_text
     var msg = "Runtime source directory not found: no src/runtime/runtime.c under the current directory ({cwd}), "
     msg = msg + "under any ancestor of it, or under any ancestor of the running executable ({exe_path}). "
     msg = msg + "SIMPLE_PROJECT_ROOT={pr} - set SIMPLE_PROJECT_ROOT to the repository root to resolve this explicitly."

@@ -1,7 +1,7 @@
 use compiler.frontend.core.parser_preprocessor.{preprocess_conditionals}
 # Flat AST Bridge: module assembly (flat_ast_to_module, parse_and_build_module).
 use compiler.frontend.flat_ast_bridge.*
-use compiler.core.frontend.{ParserProviderV1, ParserProviderAdmissionV1, parser_provider_v1_admit, parser_provider_v1_default}
+use compiler.core.frontend.{ParserProviderV1, ParserProviderAdmissionV1, parser_provider_v1_admit, parser_provider_v1_default, parser_provider_v1_same}
 use compiler.frontend.trace_policy.{
     frontend_compiler_trace_enabled,
     frontend_compiler_trace_scope_enter,
@@ -1544,13 +1544,10 @@ pub fn build_module_from_packed_view_v1(view: SpabViewV1, source: text, path: te
     _build_module_from_cache_v1("", Some(view), source, path)
 
 fn _build_module_from_cache_v1(blob: text, packed: SpabViewV1?, source: text, path: text) -> ParserModule?:
-    # A match expression whose FIRST arm is panic() loses every later arm value
-    # (result reads as constant 0 -> NULL deref here). Keep the Ok arm first.
-    # @workaround bug=match_expr_panic_first_arm_drops_result_2026-10-25 reason=ok_arm_first
     val admission: ParserProviderAdmissionV1 = match parser_provider_v1_admit(parser_provider_v1_default()):
-        case Ok(value): value
         case Err(reason): panic("flat AST cache provider admission failed: {reason}")
-    if admission.provider != ParserProviderV1.LegacyReference:
+        case Ok(value): value
+    if not parser_provider_v1_same(admission.provider, ParserProviderV1.LegacyReference):
         panic("flat AST cache admitted non-legacy provider: {admission.provider_id}")
     # Hit-path profile, same gate as the miss path above
     # (SIMPLE_PARSE_PHASE_PROFILE=1). Without it a hit's cost was invisible:
@@ -1654,7 +1651,7 @@ pub fn parse_and_build_module_checked_reference_v1(source: text, path: text) -> 
     # This path admits original coordinates only. Never preprocess directives
     # or reuse a cache blob lacking a checked source/coordinate receipt.
     val admission = parser_provider_v1_admit(parser_provider_v1_default())?
-    if admission.provider != ParserProviderV1.LegacyReference:
+    if not parser_provider_v1_same(admission.provider, ParserProviderV1.LegacyReference):
         return Err("parse: unsupported parser provider: " + admission.provider_id)
     if preprocess_conditionals(source) != source:
         return Err("unsupported_syntax: conditional source requires an original-source map")
@@ -1665,11 +1662,10 @@ pub fn parse_and_build_module_checked_reference_v1(source: text, path: text) -> 
 
 fn parse_and_build_module_with_scope_owner(source: text, path: text,
     streaming_scope: bool, borrowed_scope: bool, reference_checked: bool) -> FlatReferenceCheckedParseV1:
-    # @workaround bug=match_expr_panic_first_arm_drops_result_2026-10-25 reason=ok_arm_first
     val admission: ParserProviderAdmissionV1 = match parser_provider_v1_admit(parser_provider_v1_default()):
-        case Ok(receipt): receipt
         case Err(reason): panic("flat AST parser provider admission failed: {reason}")
-    if admission.provider != ParserProviderV1.LegacyReference:
+        case Ok(receipt): receipt
+    if not parser_provider_v1_same(admission.provider, ParserProviderV1.LegacyReference):
         panic("flat AST parser admitted non-legacy provider: {admission.provider_id}")
     val saved_compiler_trace_scope = frontend_compiler_trace_scope_enter()
     val saved_lex_source = _sffi_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
@@ -1849,7 +1845,7 @@ pub fn parse_and_build_module_scoped_for_provider(
     # not enter trace scopes, reset pools, initialize lexer globals, arm
     # transient storage, append diagnostics, or mutate cache-capture state.
     val admission = parser_provider_v1_admit(provider)?
-    if admission.provider != ParserProviderV1.LegacyReference:
+    if not parser_provider_v1_same(admission.provider, ParserProviderV1.LegacyReference):
         return Err("parser_provider_admission_invalid: " + admission.provider_id)
     Ok(parse_and_build_module_scoped(source, path, streaming_scope))
 
