@@ -156,17 +156,25 @@ impl NativeBinaryBuilder {
             .iter()
             .any(|lib| matches!(lib.as_str(), "simple_runtime" | "simple_native_all" | "simple_compiler"));
 
+        let mut abi_inputs: Vec<PathBuf> = vec![obj_path.to_path_buf()];
         if !runtime_free_object && !has_named_runtime_root {
             if let Some(runtime_dir) = runtime_dir.as_ref() {
                 let runtime_lib = runtime_dir.join("libsimple_runtime.a");
                 let compiler_lib = runtime_dir.join("libsimple_compiler.a");
                 if runtime_lib.exists() {
                     builder = builder.object(&runtime_lib);
+                    abi_inputs.push(runtime_lib);
                 } else if compiler_lib.exists() {
                     builder = builder.object(&compiler_lib);
+                    abi_inputs.push(compiler_lib);
                 }
             }
         }
+
+        // `--allow-multiple-definition` (below) would silently pick one of two
+        // `rt_enum_new` definitions by link order; refuse that instead.
+        abi_inputs.extend(extra_stubs.iter().cloned());
+        crate::linker::abi_symbol_guard::check_unique_abi_definitions(&abi_inputs)?;
 
         if !extra_stubs.is_empty()
             && runtime_dir.is_some()

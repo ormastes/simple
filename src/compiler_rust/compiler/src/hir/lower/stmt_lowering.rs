@@ -3004,11 +3004,7 @@ impl Lowerer {
                 if self.subject_enum_has_variant(subject_ty, name) {
                     // Treat as an identity-aware enum variant pattern.
                     let expected_disc: i64 = {
-                        use std::collections::hash_map::DefaultHasher;
-                        use std::hash::{Hash, Hasher};
-                        let mut hasher = DefaultHasher::new();
-                        name.hash(&mut hasher);
-                        (hasher.finish() & 0xFFFFFFFF) as i64
+                        simple_runtime::value::hash_variant_discriminant(name) as i64
                     };
 
                     let expected_val = HirExpr {
@@ -3331,11 +3327,7 @@ impl Lowerer {
 
                 // Validate the stable enum identity and hashed variant tag.
                 let expected_disc: i64 = {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut hasher = DefaultHasher::new();
-                    variant.hash(&mut hasher);
-                    (hasher.finish() & 0xFFFFFFFF) as i64
+                    simple_runtime::value::hash_variant_discriminant(variant) as i64
                 };
 
                 let expected_val = HirExpr {

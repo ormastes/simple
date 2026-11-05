@@ -708,8 +708,9 @@ fn emit_aggregate_block_copy<M: Module>(
     // The word is an `Option` representation: `src/app/compiler_schema/codec_gen.spl`
     // identifies it as an inline `Some` box, `hash("Some") << 32 | 1`, stored
     // into a NON-optional node field (`HirType.span` is declared `span: Span`).
-    // `0xf1987159` is `hash_variant_discriminant("Some")`, asserted executably
-    // at `pipeline/native_project/tests.rs:8075`.
+    // `0xf1987159` was the pre-2026-11 HASHED `Some` discriminant; the seed now
+    // uses the positional `Some=0` (`hash_variant_discriminant`), so a word
+    // carrying it is a stale-convention producer.
     //
     // What makes it UNDETECTABLE here is a numeric collision: `OPTION_ENUM_ID`
     // is 1 (`runtime/src/value/objects.rs:363`) and so is `RT_VALUE_TAG_HEAP`,
@@ -2512,11 +2513,7 @@ fn try_compile_builtin_method_call<M: Module>(
         "is_ok" | "is_err" => {
             let check_variant = if method == "is_ok" { "Ok" } else { "Err" };
             let disc = {
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                let mut hasher = DefaultHasher::new();
-                check_variant.hash(&mut hasher);
-                (hasher.finish() & 0xFFFFFFFF) as i64
+                simple_runtime::value::hash_variant_discriminant(check_variant) as i64
             };
             let Some(&check_id) = ctx.runtime_funcs.get("rt_enum_check_variant") else {
                 return Ok(None);
