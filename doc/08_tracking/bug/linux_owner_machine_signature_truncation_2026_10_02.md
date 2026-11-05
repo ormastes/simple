@@ -22,3 +22,11 @@ building a worker image is not manager-task acceptance.
 Evidence: capacity-sosix-cfe2287a-images-linux/gdb-copy-attempt1.log under the
 manager bootstrap verification directory. The two original rejected manager
 attempts remain preserved. Corrected producer/image qualification is pending.
+
+## Regression verification — 2026-11-05
+
+cargo test -p simple-compiler --lib linux_owner_machine_signatures: 1/1 PASS
+(linux_owner_machine_signatures_preserve_all_ptr_len_pairs); the eight
+rt_linux_group_* RuntimeFuncSpec entries are present in
+codegen/runtime_sffi.rs. The generated-Cranelft-call and linux_capacity_abi
+C-adapter qualifications recorded in this doc remain with the manager lane.

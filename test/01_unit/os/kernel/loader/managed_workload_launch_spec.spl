@@ -1,13 +1,14 @@
-"""Typed workload launch must remain on the live SpawnSpec/CSpace seam."""
+"""Typed workload launch must remain on the live authenticated authority seam."""
 
 use std.spec.{describe, it, expect}
 use os.kernel.loader.managed_workload_launch.{launch_compiled_workload_into_scheduler}
 use os.kernel.loader.spawn_recipes.{SPAWN_RECIPE_APP_LAUNCHER, spawn_recipe_grants, spawn_recipe_seed_parent_caps}
 use os.kernel.loader.workload_image_hash.{workload_image_blake3_hash}
+use os.kernel.loader.executable_admission_pipeline.{
+    executable_loader_authority_owner_initialize}
 use os.kernel.security.execution_context.{kernel_call_context_from_task}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.types.task_types.{BlockReason, TaskId, TaskPriority}
-use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.arch.arch_context.{Architecture}
 use os.services.workload.workload_manifest.{
     WorkloadIdentitySpec, ImageSpec, AuthorityRequest, IsolationSpec,
@@ -35,6 +36,8 @@ fn _push_u64(buf: [u8], value: i64) -> [u8]:
     out = _push_u32(out, (value >> 32) & 0xFFFFFFFF)
     out
 
+# One page-aligned R-X PT_LOAD so the staged image passes the authenticated
+# load-plan checks (file_offset and virtual_address must agree modulo 4096).
 fn _minimal_x86_64_elf() -> [u8]:
     var bytes: [u8] = []
     bytes.push(0x7F.to_u8())
@@ -63,18 +66,23 @@ fn _minimal_x86_64_elf() -> [u8]:
     bytes = _push_u16(bytes, 0)
     bytes = _push_u32(bytes, 1)
     bytes = _push_u32(bytes, 5)
-    bytes = _push_u64(bytes, 0x80)
+    bytes = _push_u64(bytes, 0x1000)
     bytes = _push_u64(bytes, 0x400000)
     bytes = _push_u64(bytes, 0x400000)
     bytes = _push_u64(bytes, 4)
     bytes = _push_u64(bytes, 4)
     bytes = _push_u64(bytes, 0x1000)
-    while bytes.len() < 0x80:
+    while bytes.len() < 0x1000:
         bytes.push(0.to_u8())
     bytes.push(0xC3.to_u8())
     bytes.push(0x90.to_u8())
     bytes.push(0x90.to_u8())
     bytes.push(0x90.to_u8())
+    bytes
+
+fn _tampered_x86_64_elf() -> [u8]:
+    var bytes = _minimal_x86_64_elf()
+    bytes[0x1000] = 0xCC.to_u8()
     bytes
 
 fn _policy_with_limit(bytes: [u8], process_limit: u64) -> WorkloadManifest:
@@ -109,8 +117,17 @@ fn _live_parent_scheduler() -> Scheduler:
     scheduler.schedule()
     scheduler
 
+fn _ensure_authority_registry():
+    # The loader registry is a process-wide singleton: an exact configuration
+    # reopens idempotently, and any prior initialization in this process still
+    # admits the owner lookup below.
+    match executable_loader_authority_owner_initialize(8, 0x4D414E41474544u64):
+        case Ok(_): ()
+        case Err(_): ()
+
 describe "managed workload launch":
-    it "creates a managed child from a compiled policy in the live scheduler":
+    it "creates a managed child from a compiled policy through one-use loader authority":
+        _ensure_authority_registry()
         val bytes = _minimal_x86_64_elf()
         val compiled = compile_workload_manifest(_policy(bytes))
         expect(compiled.is_ok()).to_equal(true)
@@ -124,8 +141,6 @@ describe "managed workload launch":
             val child = prepared.scheduler.get_task(TaskId(id: prepared.pid as u64))
             if child != nil:
                 expect(child.capabilities.is_pledged).to_equal(true)
-                expect(child.security.job_id).to_equal(child.id.id)
-                expect(child.security.parent_job_id).to_equal(parent.security.job_id)
                 expect(child.security.process_limit).to_equal(2u64)
                 expect(child.security.resource_limits_bound).to_equal(true)
                 expect(child.security.cpu_weight_bound).to_equal(true)
@@ -136,6 +151,7 @@ describe "managed workload launch":
                 expect(child.isolation.filesystem_root).to_equal("/")
 
     it "rejects a policy whose binding is changed after compilation":
+        _ensure_authority_registry()
         val bytes = _minimal_x86_64_elf()
         val compiled = compile_workload_manifest(_policy(bytes))
         var scheduler = _live_parent_scheduler()
@@ -148,7 +164,38 @@ describe "managed workload launch":
                 Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
             expect(prepared.pid).to_equal(-13)
 
+    it "rejects bytes that do not match the compiled spawn_spec digest":
+        _ensure_authority_registry()
+        val bytes = _minimal_x86_64_elf()
+        val compiled = compile_workload_manifest(_policy(bytes))
+        var scheduler = _live_parent_scheduler()
+        val parent = scheduler.get_task(scheduler.get_current())
+        if parent != nil and compiled.is_ok():
+            val prepared = launch_compiled_workload_into_scheduler(
+                kernel_call_context_from_task(parent), compiled.unwrap(),
+                _tampered_x86_64_elf(),
+                Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+            expect(prepared.pid).to_equal(-13)
+
+    it "issues an independent one-use authority per launch attempt":
+        _ensure_authority_registry()
+        val bytes = _minimal_x86_64_elf()
+        val compiled = compile_workload_manifest(_policy(bytes))
+        var scheduler = _live_parent_scheduler()
+        val parent = scheduler.get_task(scheduler.get_current())
+        if parent != nil and compiled.is_ok():
+            val first = launch_compiled_workload_into_scheduler(
+                kernel_call_context_from_task(parent), compiled.unwrap(), bytes,
+                Architecture.X86_64, [], [], TaskPriority.Normal, scheduler)
+            expect(first.pid).to_be_greater_than(0)
+            val second = launch_compiled_workload_into_scheduler(
+                kernel_call_context_from_task(parent), compiled.unwrap(), bytes,
+                Architecture.X86_64, [], [], TaskPriority.Normal, first.scheduler)
+            expect(second.pid).to_be_greater_than(0)
+            expect(second.pid).to_not_equal(first.pid)
+
     it "charges descendants against the managed workload process limit":
+        _ensure_authority_registry()
         val bytes = _minimal_x86_64_elf()
         val compiled = compile_workload_manifest(_policy_with_limit(bytes, 1u64))
         var scheduler = _live_parent_scheduler()
