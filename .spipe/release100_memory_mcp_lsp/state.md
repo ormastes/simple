@@ -96,3 +96,9 @@ All full-plan acceptance requirements remain in scope. Each new regression must 
 
 - Rebased six owned commits in `/private/tmp/simple-release100-reconciled-20261106` onto release `6beb0b4463db0fb309db7a74bf1c9120ad15ebce`. Only codec owner files overlapped; generated conflict resolved preserving upstream presence/scalar validation and all113 decoder/placeholder blocks plus97 bounded encoder wrappers. Independent integration review found no new issues. Memory repair count remains4; runtime/regeneration NOT_RUN.
 - Frozen bootstrap source and original next checkpoint remain unchanged. Bootstrap session6563 confirmed live with active worker CPU; same fixed deadline retained.
+
+## Canonical overlay analysis continuation
+
+- Current source check API is path-only; no full immutable overlay entry/import analysis API was found. Legacy query parsing and scalar prerequisite probes do not supply semantic snapshot authority. Diagnostic output currently lacks a complete analyzed-snapshot/failure envelope; disk equality preflight cannot exclude ABA.
+- Implementation assigned to compiler source-loading owner (debug_truth) and LSP/worker owner (lsp_revision_review), with one shared source_analysis_v1 contract agreed before dependent edits. Design: `doc/05_design/tooling/lsp_snapshot_analysis_2026-11-06.md`. All execution/performance gates remain open.
+- Bootstrap session6563 revalidated live, with later module codegen progress. Same original deadline retained; no restart.
