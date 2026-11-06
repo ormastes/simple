@@ -33,7 +33,7 @@ describe "native-build per-file pool memory admission":
         expect(shard_threads_cap_for(2, SHARD_MIR_WORKER_KB_V1, 0)).to_equal(1)
 
 # Phase-4 admission (stage2 e4746b05): worker estimate from WORKER peaks, tree
-# budget clamped to cap_or_free - 24 GB.
+# budget bounded separately by the tree cap and free host memory reserve.
 describe "native-build pool admission: worker estimate and tree clamp":
     val gb = 1048576
     val default_kb = 9000000
@@ -66,10 +66,21 @@ describe "native-build pool admission: worker estimate and tree clamp":
     it "falls back to free commit when no cap is set":
         expect(shard_effective_tree_budget_kb_v1(90 * gb, 0, 50 * gb)).to_equal(26 * gb)
 
+    it "keeps the host reserve outside a smaller scoped compiler cap":
+        expect(shard_effective_tree_budget_kb_v1(25165824, 25165824, 97608600)).to_equal(25165824)
+
+    it "tightens a large compiler cap when actual host free memory is low":
+        expect(shard_effective_tree_budget_kb_v1(90 * gb, 64 * gb, 30 * gb)).to_equal(6 * gb)
+        expect(shard_effective_tree_budget_kb_v1(90 * gb, 64 * gb, 24 * gb)).to_equal(0)
+
+    it "preserves explicit host reserve and smaller declared budgets":
+        expect(shard_effective_tree_budget_kb_v1(90 * gb, 64 * gb, 96 * gb, 80 * gb)).to_equal(16 * gb)
+        expect(shard_effective_tree_budget_kb_v1(8 * gb, 64 * gb, 96 * gb)).to_equal(8 * gb)
+
     it "a declared budget below the clamp is kept":
         expect(shard_effective_tree_budget_kb_v1(30 * gb, 64 * gb, 0)).to_equal(30 * gb)
 
-    it "a cap of 24 GB or less refuses":
+    it "a cap of 24 GB or less refuses when host free memory is unknown":
         expect(shard_effective_tree_budget_kb_v1(90 * gb, 24 * gb, 0)).to_equal(0)
         expect(shard_effective_tree_budget_kb_v1(90 * gb, 10 * gb, 0)).to_equal(0)
         expect(shard_pool_workers_v1(0, 3565158) < 2).to_be_true()
