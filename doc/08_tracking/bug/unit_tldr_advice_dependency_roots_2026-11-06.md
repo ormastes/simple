@@ -1,6 +1,6 @@
 # Unit TLDR planning omitted advice dependency roots
 
-Status: source repair prepared; native regression blocked by the old producer ABI; full producer verification pending.
+Status: source repair prepared; native baseline blocked by non-public parser statics; full producer verification pending.
 
 The root qualification attempt retained under
 `/home/yoon/dev/simple-bootstrap-qualification-20261106/build/bootstrap-qualification/`
@@ -52,9 +52,12 @@ the HIR log confirms the private path. Compilation reached native codegen,
 then failed with exit 1 and `all_stopped=true`:
 
 `E-BACKEND-CRANELIFT-CALL-ABI`: `parser_cli.parse_cli_option_value` passes f64 to
-`_AstExpr.nodes.expr_float_lit`, but the frozen producer declares its argument
-i64. See `build.log` lines 4848–4854 and `result.sdn`. Zero assertions ran.
-This is an old-producer compilation blocker, not an advice-regression result.
+`_AstExpr.nodes.expr_float_lit`, while its text parameter is represented as
+i64 in the native ABI. See `build.log` lines 4848–4854 and `result.sdn`. Zero assertions ran.
+This exposed a source caller defect: `expr_float_lit` expects the original text
+lexeme, while `parser_cli` passed `fval.to_float()`. PR #7269, merge
+`457e9c7b7f7a48bfa7280fa901ed6776d46da613`, corrected the caller to pass `fval`.
+This compilation failure was not an advice-regression result.
 
 Both attempts used immutable opus10 Phase 2 SHA256
 `43f9a6fc68ac232fcb3d28b0a28ada8fba5b04f5e16326e8f122d09208671c5f`, its matching
@@ -74,6 +77,26 @@ A newer producer has separate Hello build/run evidence: SHA256
 with runtime sibling `authority/runtime`. Parent recorded normal per-file
 Cranelift Hello build/run exits 0, both quiescent. That is a candidate for the
 next isolated baseline and repair fixture, not full admission or an advice PASS.
+
+Attempt 3 was a guard preflight refusal: interval 250 ms exceeded the supported
+1–100 ms range. No compiler launched; `guard-preflight-rejected.log` is retained
+under the before worktree `build/bootstrap-advice-plan-new/before/`.
+Attempt 4 uses the established canonical timeout guard with default 100 ms,
+enforced 24 GiB ceiling, 1200 s timeout and 10 s grace. The isolated before
+worktree includes the merged parser caller fix on release base
+`f50693b310067c6e3a4db5b24dc633676d8a7f87`; frontend, HIR, native and temporary
+paths are private. It uses the newer producer above, Cranelift, explicit
+whole-program fixture mode and disabled TLDR staging switches; the fixture
+still invokes the actual production planner/readiness owners. It terminated with exit 1, `quiescent=1`, and peak RSS 10,549,924 KiB.
+Native codegen completed 284 modules plus 37 cache hits, with two failures:
+`extend_decls` imports non-public `enum_module_body.PENDING_CLOCKED_ARGS`;
+`parser_decls_use` imports non-public `fn_struct_decls.file_generic_constraint_modes`.
+Cranelift requires visibility-preserving accessor support for these statics.
+The exact logs, `build.sh`, `build.env` and native AOT diagnostics are retained
+at `/home/yoon/dev/simple-bootstrap-advice-plan-before-20261106/build/bootstrap-advice-plan-new/before/`.
+No assertion executable was produced. Attempt 5 (after) was not launched;
+the next scoped verification needs these caller/visibility boundaries repaired
+or a qualified producer that supports them. Four attempts have been consumed.
 
 Full woven advice execution and helper-object scheduling remain next-producer
 qualification gates. Summary readiness alone does not establish a complete
