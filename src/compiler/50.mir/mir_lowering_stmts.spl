@@ -3677,6 +3677,20 @@ impl MirLowering:
                 args.len() == 0 and (kind == 1 or kind == 2 or kind == 3)
             case _: false
 
+    me optional_join_word_slot(dest: LocalId):
+        """An untyped join with a `nil` / Option arm whose payload `T` is not
+        known still holds one Option word (handle or nil sentinel). A merge
+        temp left at the first arm's Unit type (a `Some(..)` ctor arm) made the
+        nil arm's word an "integer constant defining void" natively
+        (E-BACKEND-LLVM-CONST-TYPE, s3 oj_* fixtures 2026-11-06)."""
+        if val mir_ty = self.local_mir_type_of(dest):
+            match mir_ty.kind:
+                case MirTypeKind.Unit:
+                    self.builder.set_local_type(dest, MirType.i64())
+                    self.option_value_locals[dest.id] = true
+                    self.mark_runtime_value_local(dest.id)
+                case _: ()
+
     me join_untyped_optional_arms(dest: LocalId, arm_locals: [LocalId]) -> LocalId:
         """Join the arms of an UNTYPED value-position if/elif/match to `T?`.
 
@@ -3740,9 +3754,11 @@ impl MirLowering:
         if ambiguous != "":
             if mir_optional_join_strict():
                 self.error_fatal("E-OPT-JOIN: untyped if/match binding joins nil / T / T? arms ambiguously ({ambiguous}); annotate the binding as `T?`", nil)
+            self.optional_join_word_slot(dest)
             return dest
         if payload_index < 0:
             # Only absent arms: nothing names T.
+            self.optional_join_word_slot(dest)
             return dest
         if val first_type = self.find_local_hir_type(arm_locals[payload_index].id):
             var payload = first_type
