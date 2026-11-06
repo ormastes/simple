@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-09-03
-- Status: OPEN
+- Status: CLOSED 2026-11-06 — `terminal.spl` now declares `extern fn print_raw(data: text) -> i64` (200debf89df), backed by `src/runtime/runtime_native.c` `print_raw`; resolves as an ordinary extern in the self-hosted HIR.
 - Platform: platform-independent (measured on Windows x86_64-pc-windows-msvc)
 - Severity: poisons `std.tui.terminal`, which cascades into any app using it
 

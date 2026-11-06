@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Found:** 2026-07-23, MCP native rebuild campaign (rMCP11).
-**Status:** OPEN — call site worked around (std.string_core.char_from_code).
+**Status:** PARTIAL (2026-11-06) — reported repro `text.from_char_code` now lowers via `try_lower_text_static_builtin` (41087e3bbba; spec `test/01_unit/compiler/backend/text_static_builtin_lowering_spec.spl`). Sibling forms (`i64.parse`, `text.new/from_bytes/...`) still OPEN.
 
 ## Re-verification (2026-08-10)
 Re-checked against current `main`: `is_static_method_call` still lives in
