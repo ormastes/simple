@@ -1165,6 +1165,30 @@ impl ExecCore {
             }
         }
 
+        // HIR lowering has no list/dict comprehension form: under the lenient
+        // lowering used below it becomes `nil` (`[x*2 for x in xs].len()` prints
+        // -1). Only the interpreter evaluates comprehensions, so drop the whole
+        // module to it rather than miscompile.
+        // See doc/08_tracking/bug/seed_run_comprehension_empty_hybrid_splice_2026-11-04.md.
+        let comprehension_fn = simple_compiler::compilability::analyze_module(
+            &ast.items,
+            simple_compiler::compilability::CompilabilityMode::HybridJit,
+        )
+        .into_iter()
+        .find(|(_, status)| {
+            status
+                .reasons()
+                .contains(&simple_compiler::compilability::FallbackReason::Comprehension)
+        })
+        .map(|(name, _)| name);
+        if let Some(name) = comprehension_fn {
+            return Err(jit_strict_fallback_error_for(
+                "list/dict comprehension has no JIT lowering",
+                &format!("function `{name}`"),
+                Some(path),
+            ));
+        }
+
         // Lower to HIR with context so imported types (enums, classes) are resolved.
         // Lenient variant: aligns this lane's `Lowerer::with_module_resolver`
         // memory-safety strictness with the canonical native-build/compile lane

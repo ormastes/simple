@@ -17,6 +17,9 @@ pub enum FallbackReason {
     DynamicTypes,
     /// Collection operations requiring runtime support
     CollectionOps,
+    /// List/dict comprehension. HIR lowering has no comprehension form (the
+    /// lenient lane turns it into `nil`), so only the interpreter evaluates it.
+    Comprehension,
     /// Array/tuple/dict literals
     CollectionLiteral,
     /// String operations (beyond simple constants)
@@ -828,6 +831,7 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>, mode: Compilabil
                 analyze_expr(cond, reasons, mode);
             }
             add_reason(reasons, FallbackReason::CollectionOps);
+            add_reason(reasons, FallbackReason::Comprehension);
         }
 
         Expr::DictComprehension {
@@ -844,6 +848,7 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>, mode: Compilabil
                 analyze_expr(cond, reasons, mode);
             }
             add_reason(reasons, FallbackReason::CollectionOps);
+            add_reason(reasons, FallbackReason::Comprehension);
         }
 
         // Path expressions now lower through HIR/MIR and should not force

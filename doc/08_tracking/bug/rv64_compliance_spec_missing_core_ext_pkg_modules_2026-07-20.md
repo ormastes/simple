@@ -1,7 +1,7 @@
 # `rv64_compliance_spec.spl` imports modules that don't exist in `src/lib/hardware/rv64gc`
 
 - **Date:** 2026-07-20
-- **Status:** open
+- **Status:** FIXED 2026-11-06
 - **Area:** `src/lib/hardware/rv64gc/**` (pure Simple RISC-V RV64GC core model)
 
 ## Symptom
@@ -48,3 +48,13 @@ pass. Flagging for follow-up: either implement
 `src/lib/hardware/rv64gc/{core/rv64_execute,ext/rv64_muldiv,ext/rv64_atomics,pkg/rv64_types_pkg}.spl`
 to match what the spec expects, or retire the spec if RV64GC compliance
 testing was superseded by `top/rv64_machine.spl`.
+
+## Resolution (2026-11-06)
+
+The root-cause section above was wrong: the modules were never missing, they
+live in `src/hardware/rv64gc/{core,ext,pkg}/` (not `src/lib/hardware/...`) and
+`hardware.rv64gc.*` resolves to them. On the Rust seed the spec already ran
+20/22 (RED at this checkout: 2 failures, not 0/22). The two failures were spec
+bugs: `(misa >> 5) and 1` / `(misa >> 3) and 1` used logical `and` (yields
+`true`) instead of bitwise `&`. Fixed to `& 1`, assertions unchanged
+(expect `== 1`). Result: 22/22 passed.
