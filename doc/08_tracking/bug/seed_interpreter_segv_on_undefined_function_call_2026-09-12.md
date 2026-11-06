@@ -2,7 +2,7 @@
 
 Date: 2026-09-12. Host: Windows 11 (Git Bash). Binary: `bin/simple.exe`
 (Rust bootstrap seed, built 2026-09-02, 16,347,136 bytes).
-Status: OPEN. Lane: **interpreter/JIT (`run`) only** — see "Phase-2 applicability".
+Status: FIXED (already, verified 2026-11-06) — see "Resolution". Lane: **interpreter/JIT (`run`) only** — see "Phase-2 applicability".
 Found while diagnosing: `t32_mcp_server` exiting with rc=139 and no diagnostic.
 
 ## Symptom
@@ -105,3 +105,16 @@ MCP handshake + `tools/list` round-trip returns rc=0 (this exact case was
 rc=139), and that no generated `t32_mcp_server.cmd` swallows stderr with
 `2>nul`. `--selftest` is fatal and includes the two-line reproducer above,
 which must SEGV for the gate's premise to hold.
+
+## Resolution (verified 2026-11-06)
+
+No longer reproduces on a seed built from `release/1.0.0` @ `ecb705896a4` (debug) (Windows).
+`test/fixtures/seed_interp/undefined_function_call_repro.spl`:
+
+- `SIMPLE_EXECUTION_MODE=interpret`: rc=1,
+  ``error[E1002]: function `no_such_fn` not found``.
+- default `run`: rc=1; the JIT refuses the module
+  (`unresolved external symbol 'no_such_fn' ... would NULL-jump in JIT;
+  deferring to interpreter`) and the interpreter reports the same E1002.
+
+No SIGSEGV, and the identifier is named. No code change in this pass.
