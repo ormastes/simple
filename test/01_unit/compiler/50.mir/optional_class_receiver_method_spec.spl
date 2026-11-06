@@ -1,0 +1,130 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Stage2 MIR: method call on an optional (`T?`) class receiver
+
+Bootstrap run 13 (Stage 2, `compiler_cli_build`) rejected ~200 method calls
+whose receiver's static type is `C?` for a class `C`:
+`val cuda = self.cuda_backend.?` then `cuda.set_clip(..)`, and
+`self.ffi.is_available()` on a `CudaFfi?` field after a nil guard. MIR has no
+flow typing, so the receiver stays `Optional(C)` and the method lookup found
+no owner (`key=::set_clip`).
+
+Bug: doc/08_tracking/bug/stage2_optional_class_receiver_method_unresolved_2026-11-07.md
+"""
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+
+val CLASS_SRC = "trait Shape:\n    fn area() -> i64\n\nclass Box:\n    w: i64\n\n    fn get_w() -> i64:\n        self.w\n\n    me grow(n: i64):\n        self.w = self.w + n\n\nimpl Shape for Box:\n    fn area() -> i64:\n        self.w * self.w\n\n"
+val HOLDER_SRC = "class Holder:\n    inner: Box?\n\n"
+
+# (a) direct field receiver after a nil guard
+val DIRECT_SRC = "impl Holder:\n    fn direct() -> i64:\n        if self.inner == nil:\n            return 0\n        self.inner.get_w()\n\nfn main() -> i64:\n    0\n"
+# (b) explicit exists-check binding, then fn + me calls
+val EXISTS_SRC = "impl Holder:\n    me via_exists() -> i64:\n        val b = self.inner.?\n        b.grow(1)\n        b.get_w()\n\nfn main() -> i64:\n    0\n"
+# (c) nil-guarded alias of an optional local
+val ALIAS_SRC = "impl Holder:\n    fn via_alias() -> i64:\n        val active = self.inner\n        if active == nil:\n            return 0\n        val b = active\n        b.get_w()\n\nfn main() -> i64:\n    0\n"
+# control: `if val` destructure (already supported)
+val IFVAL_SRC = "impl Holder:\n    fn via_if_val() -> i64:\n        if val b = self.inner:\n            return b.get_w()\n        0\n\nfn main() -> i64:\n    0\n"
+# negative: the class declares no such method
+val MISSING_SRC = "impl Holder:\n    fn missing() -> i64:\n        if self.inner == nil:\n            return 0\n        self.inner.no_such_method()\n\nfn main() -> i64:\n    0\n"
+# trait-impl method on the optional class (the engine2d RenderBackend shape)
+val TRAIT_IMPL_SRC = "impl Holder:\n    fn via_trait_impl() -> i64:\n        if self.inner == nil:\n            return 0\n        self.inner.area()\n\nfn main() -> i64:\n    0\n"
+# negative: a struct payload is a copy, so it is not unwrapped for dispatch
+val STRUCT_SRC = "struct Pt:\n    x: i64\n\n    fn get_x() -> i64:\n        self.x\n\nclass PtHolder:\n    p: Pt?\n\nimpl PtHolder:\n    fn via_struct() -> i64:\n        if self.p == nil:\n            return 0\n        self.p.get_x()\n\nfn main() -> i64:\n    0\n"
+# negative: an Option API name stays Option-owned even when the class declares it
+val OPTION_API_SRC = "class Note:\n    v: i64\n\n    fn expect(m: text) -> i64:\n        self.v\n\nclass NoteHolder:\n    n: Note?\n\nimpl NoteHolder:\n    fn via_option_api() -> i64:\n        if self.n == nil:\n            return 0\n        self.n.expect(\"x\")\n\nfn main() -> i64:\n    0\n"
+# negative: an optional primitive has no class owner to dispatch to
+val PRIM_SRC = "fn bad(x: i64?) -> i64:\n    x.no_such_method()\n\nfn main() -> i64:\n    0\n"
+
+struct Lowered:
+    errors: [text]
+    callees: [text]
+
+fn lower_source(src: text) -> Lowered:
+    val parsed = parse_full_frontend(src, "opt_recv.spl", "opt_recv", Logger(level: 0))
+    var hl = HirLowering.with_filename("opt_recv.spl")
+    val hir = hl.lower_module(parsed)
+    expect(hl.errors.len()).to_equal(0)
+    var ml = MirLowering.new(hir.symbols)
+    val mir = ml.lower_module(hir)
+    var errors: [text] = []
+    for e in ml.errors:
+        if e.fatal:
+            errors = errors.push(e.message)
+    var callees: [text] = []
+    for function in mir.functions.values():
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                callees = callees.push(name)
+                            case _: pass
+                    case _: pass
+    Lowered(errors: errors, callees: callees)
+
+fn count_matching(names: [text], needle: text) -> i64:
+    var n = 0
+    for name in names:
+        if name.contains(needle):
+            n = n + 1
+    n
+
+describe "stage2 MIR method call on an optional class receiver":
+    it "control: if-val destructure dispatches to the class method":
+        val lowered = lower_source(CLASS_SRC + HOLDER_SRC + IFVAL_SRC)
+        expect(lowered.errors).to_equal([])
+        expect(count_matching(lowered.callees, "Box.get_w")).to_equal(1)
+
+    it "dispatches a nil-guarded optional field receiver to the class method":
+        val lowered = lower_source(CLASS_SRC + HOLDER_SRC + DIRECT_SRC)
+        expect(lowered.errors).to_equal([])
+        expect(count_matching(lowered.callees, "Box.get_w")).to_equal(1)
+
+    it "dispatches fn and me calls through an exists-check binding":
+        val lowered = lower_source(CLASS_SRC + HOLDER_SRC + EXISTS_SRC)
+        expect(lowered.errors).to_equal([])
+        expect(count_matching(lowered.callees, "Box.get_w")).to_equal(1)
+        expect(count_matching(lowered.callees, "Box.grow")).to_equal(1)
+
+    it "dispatches through a nil-guarded alias of an optional local":
+        val lowered = lower_source(CLASS_SRC + HOLDER_SRC + ALIAS_SRC)
+        expect(lowered.errors).to_equal([])
+        expect(count_matching(lowered.callees, "Box.get_w")).to_equal(1)
+
+    it "still rejects an unknown method on an optional primitive":
+        val lowered = lower_source(PRIM_SRC)
+        expect(lowered.errors.len()).to_equal(1)
+        expect(lowered.errors[0]).to_contain("unresolved method call: no_such_method")
+
+    it "emits the rt_is_some presence test and rt_panic on the nil path":
+        val lowered = lower_source(CLASS_SRC + HOLDER_SRC + DIRECT_SRC)
+        expect(count_matching(lowered.callees, "rt_is_some")).to_equal(1)
+        expect(count_matching(lowered.callees, "rt_panic")).to_equal(1)
+
+    it "still rejects a method the optional class does not declare":
+        val lowered = lower_source(CLASS_SRC + HOLDER_SRC + MISSING_SRC)
+        expect(lowered.errors.len()).to_equal(1)
+        expect(lowered.errors[0]).to_contain("unresolved method call: no_such_method")
+
+    it "dispatches a trait-impl method on an optional class receiver":
+        val lowered = lower_source(CLASS_SRC + HOLDER_SRC + TRAIT_IMPL_SRC)
+        expect(lowered.errors).to_equal([])
+        expect(count_matching(lowered.callees, "Box.area")).to_equal(1)
+
+    it "does not unwrap an optional struct receiver for dispatch":
+        val lowered = lower_source(STRUCT_SRC)
+        expect(count_matching(lowered.callees, "Pt.get_x")).to_equal(0)
+        expect(lowered.errors.len()).to_equal(1)
+        expect(lowered.errors[0]).to_contain("unresolved method call: get_x")
+
+    it "keeps an Option API name away from a same-named class method":
+        val lowered = lower_source(OPTION_API_SRC)
+        expect(count_matching(lowered.callees, "Note.expect")).to_equal(0)
