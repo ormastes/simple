@@ -6,7 +6,7 @@ use std.common.sdn.encode.{sdn_encode_canonical}
 use app.traceability.query_options_v1.{TraceQueryOptionsV1}
 use app.traceability.extract.snapshot_pipeline.{TraceSnapshotBuild}
 use app.traceability.query_render_v1.{trace_query_ingestion_line_v1, trace_query_ingestion_sdn_v1}
-use std.common.traceability.sidecar_v1.{sidecar_references_from_v1}
+use std.common.traceability.sidecar_v1.{sidecar_references_from_v1, sidecar_references_at_path_v1}
 
 fn refs_table_text_v1(value: text) -> text:
     var out = ""
@@ -46,10 +46,13 @@ pub fn trace_query_render_refs_v1(build: TraceSnapshotBuild, page: TraceReferenc
     var scope: [SdnValue] = []
     for path in build.scope.selected_roots: scope.push(SdnValue.String(path))
     val ingestion = trace_query_ingestion_sdn_v1(build)
-    val sidecar = sidecar_references_from_v1(build.sidecar_references, page.selected.id)
+    # A file page selects a path: sidecar rows match on path, not on node id.
+    val sidecar = if options.kind == "file": sidecar_references_at_path_v1(build.sidecar_references, options.selected_id)
+        else: sidecar_references_from_v1(build.sidecar_references, page.selected.id)
     var sidecar_rows: [SdnValue] = []
     for reference in sidecar:
         sidecar_rows.push(SdnValue.Dict({"source_kind": SdnValue.String(reference.source_kind),
+            "from": SdnValue.String(reference.from_id),
             "relation": SdnValue.String(reference.relation), "path": SdnValue.String(reference.path),
             "locator": SdnValue.String(reference.locator), "authority": SdnValue.String(reference.authority)}))
     if options.format == "sdn":
@@ -91,9 +94,9 @@ pub fn trace_query_render_refs_v1(build: TraceSnapshotBuild, page: TraceReferenc
     output = output + "Total references: " + page.total_count.to_text() + "\n"
     if page.next_cursor != "": output = output + "Next cursor: " + page.next_cursor + "\n"
     for locator in page.locators:
-        output = output + "LOCATOR\t" + refs_table_text_v1(locator.path) + "\t" + refs_table_text_v1(locator.locator_kind) + "\t" + refs_table_text_v1(locator.locator) + "\n"
+        output = output + "LOCATOR\t" + refs_table_text_v1(locator.path) + "\t" + refs_table_text_v1(locator.locator_kind) + "\t" + refs_table_text_v1(locator.locator) + "\t" + refs_table_text_v1(locator.entity_id) + "\n"
     for reference in sidecar:
-        output = output + "SIDECAR\t" + reference.relation + "\t" + refs_table_text_v1(reference.path) + "\t" + refs_table_text_v1(reference.locator) + "\t" + reference.authority + "\n"
+        output = output + "SIDECAR\t" + reference.relation + "\t" + refs_table_text_v1(reference.path) + "\t" + refs_table_text_v1(reference.locator) + "\t" + reference.authority + "\t" + refs_table_text_v1(reference.from_id) + "\n"
     shown = 0
     for issue in page.diagnostics:
         if shown >= 200: break
