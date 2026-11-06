@@ -183,7 +183,7 @@ extern "C" fn add_values(_closure: u64, v1: RuntimeValue, v2: RuntimeValue) -> R
 #[test]
 fn test_isolated_thread_spawn_and_join() {
     let closure = native_closure_record(double_value as *const ());
-    let handle = rt_thread_spawn_isolated(closure.as_ptr() as u64, RuntimeValue::from_int(21));
+    let handle = rt_thread_spawn_isolated_kind(RT_WORKER_CLOSURE_ADDRESS, closure.as_ptr() as u64, RuntimeValue::from_int(21));
 
     assert!(handle != 0);
     assert!(rt_thread_id(handle) > 0);
@@ -198,7 +198,7 @@ fn test_isolated_thread_spawn_and_join() {
 #[test]
 fn test_isolated_thread_spawn_with_args_and_join() {
     let closure = native_closure_record(add_values as *const ());
-    let handle = rt_thread_spawn_isolated_with_args(
+    let handle = rt_thread_spawn_isolated_with_args_kind(RT_WORKER_CLOSURE_ADDRESS,
         closure.as_ptr() as u64,
         RuntimeValue::from_int(10),
         RuntimeValue::from_int(32),
@@ -217,7 +217,7 @@ fn test_isolated_thread_spawn_with_args_and_join() {
 fn test_isolated_thread_rejects_mutable_heap_graph_before_spawn() {
     let closure = native_closure_record(double_value as *const ());
     let array = crate::value::rt_array_new(1);
-    let handle = rt_thread_spawn_isolated(closure.as_ptr() as u64, array);
+    let handle = rt_thread_spawn_isolated_kind(RT_WORKER_CLOSURE_ADDRESS, closure.as_ptr() as u64, array);
 
     assert_eq!(handle, 0);
     crate::value::rt_array_free(array);
@@ -228,7 +228,7 @@ fn test_isolated_thread_with_args_rejects_heap_graph_in_second_input() {
     let closure = native_closure_record(add_values as *const ());
     let array = crate::value::rt_array_new(1);
     let handle =
-        rt_thread_spawn_isolated_with_args(closure.as_ptr() as u64, RuntimeValue::from_int(1), array);
+        rt_thread_spawn_isolated_with_args_kind(RT_WORKER_CLOSURE_ADDRESS, closure.as_ptr() as u64, RuntimeValue::from_int(1), array);
 
     assert_eq!(handle, 0);
     crate::value::rt_array_free(array);
@@ -242,7 +242,7 @@ fn test_isolated_thread_accepts_synchronized_channel_handle() {
 
     let closure = native_closure_record(channel_worker as *const ());
     let channel = crate::value::rt_channel_new();
-    let handle = rt_thread_spawn_isolated(closure.as_ptr() as u64, channel);
+    let handle = rt_thread_spawn_isolated_kind(RT_WORKER_CLOSURE_ADDRESS, closure.as_ptr() as u64, channel);
 
     assert_ne!(handle, 0);
     assert_eq!(rt_thread_join(handle), RuntimeValue::TRUE);
@@ -254,7 +254,7 @@ fn test_isolated_thread_accepts_synchronized_channel_handle() {
 fn test_limited_thread_rejects_mutable_heap_graph_before_spawn() {
     let closure = native_closure_record(double_value as *const ());
     let array = crate::value::rt_array_new(1);
-    let handle = rt_thread_spawn_limited(closure.as_ptr() as u64, array, -1, -1, -1, -1);
+    let handle = rt_thread_spawn_limited(closure.as_ptr() as u64 | 1, array, -1, -1, -1, -1);
 
     assert_eq!(handle, 0);
     crate::value::rt_array_free(array);
@@ -265,7 +265,7 @@ fn test_limited_thread_with_args_rejects_heap_graph_in_second_input() {
     let closure = native_closure_record(add_values as *const ());
     let array = crate::value::rt_array_new(1);
     let handle = rt_thread_spawn_limited_with_args(
-        closure.as_ptr() as u64,
+        closure.as_ptr() as u64 | 1,
         RuntimeValue::from_int(1),
         array,
         -1,
@@ -286,7 +286,7 @@ fn test_isolated_thread_spawn_and_join_direct_function_record() {
     }
 
     let closure = native_direct_function_record(direct_worker as *const ());
-    let handle = rt_thread_spawn_isolated(
+    let handle = rt_thread_spawn_isolated_kind(RT_WORKER_CLOSURE_ADDRESS, 
         (&*closure) as *const [usize; 2] as *const usize as u64,
         RuntimeValue::from_int(41),
     );
@@ -319,7 +319,7 @@ fn test_isolated_thread_static_direct_record_is_data_not_code() {
     };
     let record_addr = &RECORD as *const DirectRecord as u64;
     assert!(!native_word_exceeds_user_va(record_addr));
-    let handle = rt_thread_spawn_isolated(record_addr, RuntimeValue::from_int(40));
+    let handle = rt_thread_spawn_isolated_kind(RT_WORKER_CLOSURE_ADDRESS, record_addr, RuntimeValue::from_int(40));
     assert!(handle != 0);
     let result = rt_thread_join(handle);
     assert!(result.is_int());
@@ -344,7 +344,7 @@ fn test_isolated_thread_spawn_with_args_and_join_direct_function_record() {
     }
 
     let closure = native_direct_function_record(direct_add as *const ());
-    let handle = rt_thread_spawn_isolated_with_args(
+    let handle = rt_thread_spawn_isolated_with_args_kind(RT_WORKER_CLOSURE_ADDRESS,
         (&*closure) as *const [usize; 2] as *const usize as u64,
         RuntimeValue::from_int(10),
         RuntimeValue::from_int(32),
@@ -359,49 +359,263 @@ fn test_isolated_thread_spawn_with_args_and_join_direct_function_record() {
 }
 
 // doc/08_tracking/bug/isolated_thread_raw_worker_argument_heuristic_flake_2026-08-12.md
-// The worker-argument ABI is a property of the closure WORD encoding only:
-// an int-tagged word (addr << 3, above the user-VA ceiling) means the worker
-// takes raw i64 parameters; a real record address means RuntimeValue
-// parameters. It must never depend on where the allocator put the record,
-// on test order, or on concurrent spawns.
+// The worker ABI is an explicit kind chosen by the spawner, never inferred
+// from the closure word's value. ADDRESS: machine address, RuntimeValue args.
+// VALUE: tagged RuntimeValue decoded by its own tag -- TAG_INT (addr << 3) is
+// a raw native record with raw i64 args, TAG_HEAP (addr | 1) a heap record
+// with RuntimeValue args. Results must not depend on where the allocator put
+// a record, on test order, or on concurrent spawns.
+
+extern "C" fn add_raw_words(_closure: u64, a: u64, b: u64) -> RuntimeValue {
+    RuntimeValue::from_int(a as i64 + b as i64)
+}
+
+extern "C" fn direct_add_raw(a: u64, b: u64) -> RuntimeValue {
+    RuntimeValue::from_int(a as i64 + b as i64)
+}
+
+extern "C" fn direct_add_values(left: RuntimeValue, right: RuntimeValue) -> RuntimeValue {
+    RuntimeValue::from_int(left.as_int() + right.as_int())
+}
 
 #[test]
-fn test_isolated_thread_heap_record_word_is_never_raw_abi() {
-    // Many live records spread the allocator over its arenas; every real
-    // record address must classify as the tagged (RuntimeValue) ABI.
-    let records: Vec<_> = (0..4096).map(|_| native_closure_record(add_values as *const ())).collect();
-    for r in &records {
-        assert!(!native_word_exceeds_user_va(r.as_ptr() as u64));
+fn test_worker_closure_kind_decode_is_explicit() {
+    let addr: u64 = 0x0000_0001_0000_0000;
+    assert_eq!(native_worker_closure_word(RT_WORKER_CLOSURE_ADDRESS, addr), Some((addr, false)));
+    assert_eq!(native_worker_closure_word(RT_WORKER_CLOSURE_VALUE, addr << 3), Some((addr, true)));
+    assert_eq!(native_worker_closure_word(RT_WORKER_CLOSURE_VALUE, addr | 1), Some((addr, false)));
+    // The same word means different things under different kinds -- the kind,
+    // not the value, decides.
+    assert_eq!(native_worker_closure_word(RT_WORKER_CLOSURE_ADDRESS, addr << 3), Some((addr << 3, false)));
+    assert_eq!(native_worker_closure_word(RT_WORKER_CLOSURE_VALUE, addr), Some((addr >> 3, true)));
+    // Rejections: unknown kinds, non-callable RuntimeValue tags (nil, bool,
+    // float...), payloads in the null page, and "addresses" above user VA.
+    for kind in [0, 3, -1, i64::MAX] {
+        assert_eq!(native_worker_closure_word(kind, addr), None, "kind {}", kind);
+    }
+    for tag in 2..8u64 {
+        assert_eq!(native_worker_closure_word(RT_WORKER_CLOSURE_VALUE, addr | tag), None, "tag {}", tag);
+    }
+    assert_eq!(native_worker_closure_word(RT_WORKER_CLOSURE_VALUE, RuntimeValue::NIL.0), None);
+    assert_eq!(native_worker_closure_word(RT_WORKER_CLOSURE_VALUE, 4095 << 3), None);
+    assert_eq!(native_worker_closure_word(RT_WORKER_CLOSURE_ADDRESS, 4095), None);
+    assert_eq!(native_worker_closure_word(RT_WORKER_CLOSURE_ADDRESS, u64::MAX & !0x7), None);
+    assert_eq!(rt_thread_spawn_isolated_kind(0, addr, RuntimeValue::from_int(1)), 0);
+}
+
+#[test]
+fn test_isolated_thread_value_int_tagged_record_selects_raw_abi_at_any_address() {
+    // Every heap address, including ones far below the old VA-ceiling cutoff,
+    // decodes the same way: the tag says raw ABI.
+    for _ in 0..64 {
+        let closure = native_closure_record(add_raw_words as *const ());
+        let word = (closure.as_ptr() as u64) << 3;
+        let handle = rt_thread_spawn_isolated_with_args(word, RuntimeValue::from_int(10), RuntimeValue::from_int(32));
+        assert!(handle != 0);
+        assert_eq!(rt_thread_join(handle).as_int(), 42);
+        rt_thread_free(handle);
     }
 }
 
 #[test]
-fn test_isolated_thread_worker_args_stress_concurrent_spawners() {
-    // Stress: 16 spawner threads x 32 spawns, closure and direct records,
-    // interleaved. A shape/address heuristic or shared classification state
-    // shows up here as a wrong sum (historically 5 or 36 instead of 42).
-    extern "C" fn direct_add(left: RuntimeValue, right: RuntimeValue) -> RuntimeValue {
-        RuntimeValue::from_int(left.as_int() + right.as_int())
+fn test_isolated_thread_value_heap_tagged_record_keeps_runtime_value_abi() {
+    let closure = native_closure_record(add_values as *const ());
+    let word = (closure.as_ptr() as u64) | 1;
+    let handle = rt_thread_spawn_isolated_with_args(word, RuntimeValue::from_int(10), RuntimeValue::from_int(32));
+    assert!(handle != 0);
+    assert_eq!(rt_thread_join(handle).as_int(), 42);
+    rt_thread_free(handle);
+}
+
+#[test]
+fn test_isolated_thread_classifier_follows_kind_not_value() {
+    let closure = native_closure_record(add_values as *const ());
+    let addr = closure.as_ptr() as u64;
+    match unsafe { native_callable(RT_WORKER_CLOSURE_ADDRESS, addr) } {
+        Some(NativeCallable::ClosureRecord { closure_ptr, raw_worker_args, .. }) => {
+            assert_eq!(closure_ptr, addr);
+            assert!(!raw_worker_args);
+        }
+        _ => panic!("ADDRESS record must classify as a RuntimeValue-ABI closure record"),
     }
-    let spawners: Vec<_> = (0..16)
+    match unsafe { native_callable(RT_WORKER_CLOSURE_VALUE, addr << 3) } {
+        Some(NativeCallable::ClosureRecord { closure_ptr, raw_worker_args, .. }) => {
+            assert_eq!(closure_ptr, addr);
+            assert!(raw_worker_args);
+        }
+        _ => panic!("VALUE int-tagged record must classify as a raw-ABI closure record"),
+    }
+    let direct = native_direct_function_record(add_values as *const ());
+    match unsafe { native_callable(RT_WORKER_CLOSURE_VALUE, (direct.as_ptr() as u64) << 3) } {
+        Some(NativeCallable::DirectFunction { raw_worker_args, .. }) => assert!(raw_worker_args),
+        _ => panic!("VALUE int-tagged direct-function record must stay a direct function"),
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn test_isolated_thread_unmapped_word_fails_closed() {
+    // A record word naming no committed memory is rejected, never read.
+    let unmapped: u64 = 0x0000_1230_0000_0000;
+    assert!(unsafe { native_callable(RT_WORKER_CLOSURE_ADDRESS, unmapped) }.is_none());
+    assert_eq!(rt_thread_spawn_isolated(unmapped << 3, RuntimeValue::from_int(1)), 0);
+    assert_eq!(
+        rt_thread_spawn_isolated_kind(RT_WORKER_CLOSURE_ADDRESS, unmapped, RuntimeValue::from_int(1)),
+        0
+    );
+}
+
+// Two committed records at A and A << 3, each with a code entry: the word
+// A << 3 is a valid machine address AND a valid int-tagged RuntimeValue. Any
+// value-based classifier must guess (the 2026-11-06 resolver rejected it as
+// ambiguous; the VA-ceiling rule took the address). With an explicit kind the
+// spawner's declaration decides, so both spawns succeed deterministically and
+// reach DIFFERENT workers.
+struct DualDecodeFixture {
+    low: usize,
+    high: usize,
+}
+
+#[cfg(windows)]
+unsafe fn map_fixed_page(addr: usize) -> bool {
+    use windows_sys::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
+    VirtualAlloc(addr as *const std::ffi::c_void, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) as usize == addr
+}
+
+#[cfg(windows)]
+unsafe fn unmap_page(addr: usize) {
+    use windows_sys::Win32::System::Memory::{VirtualFree, MEM_RELEASE};
+    VirtualFree(addr as *mut std::ffi::c_void, 0, MEM_RELEASE);
+}
+
+#[cfg(unix)]
+unsafe fn map_fixed_page(addr: usize) -> bool {
+    let p = libc::mmap(
+        addr as *mut libc::c_void,
+        4096,
+        libc::PROT_READ | libc::PROT_WRITE,
+        libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+        -1,
+        0,
+    );
+    if p == libc::MAP_FAILED {
+        return false;
+    }
+    if p as usize != addr {
+        libc::munmap(p, 4096);
+        return false;
+    }
+    true
+}
+
+#[cfg(unix)]
+unsafe fn unmap_page(addr: usize) {
+    libc::munmap(addr as *mut libc::c_void, 4096);
+}
+
+impl DualDecodeFixture {
+    fn new() -> Self {
+        // Windows allocation granularity is 64 KiB, so both pages are 64 KiB
+        // aligned. A << 3 stays below every user-VA ceiling, so the word is a
+        // plausible address on every host.
+        for shift in [28u32, 30, 32, 34, 36, 38, 40] {
+            for slot in 1..8usize {
+                let low = (slot << shift) + 0x10000 * 3;
+                let high = low << 3;
+                unsafe {
+                    if !map_fixed_page(low) {
+                        continue;
+                    }
+                    if !map_fixed_page(high) {
+                        unmap_page(low);
+                        continue;
+                    }
+                    *(low as *mut [usize; 2]) = [add_raw_words as *const () as usize, 0];
+                    *(high as *mut [usize; 2]) = [add_values as *const () as usize, 0];
+                }
+                return DualDecodeFixture { low, high };
+            }
+        }
+        panic!("could not map a dual-decode fixture page pair");
+    }
+}
+
+impl Drop for DualDecodeFixture {
+    fn drop(&mut self) {
+        unsafe {
+            unmap_page(self.low);
+            unmap_page(self.high);
+        }
+    }
+}
+
+#[test]
+fn test_isolated_thread_dual_decodable_word_follows_declared_kind() {
+    let fx = DualDecodeFixture::new();
+    let word = fx.high as u64;
+    assert_eq!(word, (fx.low as u64) << 3);
+    assert!(!native_word_exceeds_user_va(word));
+    // VALUE: int-tagged -> record at A, raw worker (add_raw_words).
+    let h = rt_thread_spawn_isolated_with_args(word, RuntimeValue::from_int(10), RuntimeValue::from_int(32));
+    assert!(h != 0, "VALUE spawn of a dual-decodable word must not be rejected");
+    assert_eq!(rt_thread_join(h).as_int(), 42);
+    rt_thread_free(h);
+    // ADDRESS: record at A << 3, RuntimeValue worker (add_values).
+    let h = rt_thread_spawn_isolated_with_args_kind(
+        RT_WORKER_CLOSURE_ADDRESS,
+        word,
+        RuntimeValue::from_int(10),
+        RuntimeValue::from_int(32),
+    );
+    assert!(h != 0, "ADDRESS spawn of a dual-decodable word must not be rejected");
+    assert_eq!(rt_thread_join(h).as_int(), 42);
+    rt_thread_free(h);
+}
+
+#[test]
+fn test_isolated_thread_explicit_kind_stress_concurrent_spawners() {
+    // Stress: 16 spawners x 64 spawns = 1024 spawns per run, interleaving
+    // every encoding (VALUE int-tagged raw, VALUE heap-tagged, ADDRESS,
+    // direct-function records, and the dual-decodable fixture word) with
+    // integer arguments that look like pointers (record addresses, page
+    // multiples, values below 4096). A value-based classifier shows up as a
+    // wrong sum or a rejected spawn.
+    let fx = std::sync::Arc::new(DualDecodeFixture::new());
+    let spawners: Vec<_> = (0..16i64)
         .map(|s| {
+            let fx = fx.clone();
             thread::spawn(move || {
-                for i in 0..32i64 {
-                    let left = s * 1000 + i;
-                    let record = if (s + i) % 2 == 0 {
-                        native_closure_record(add_values as *const ())
-                    } else {
-                        native_direct_function_record(direct_add as *const ())
+                for i in 0..64i64 {
+                    let rv_record = native_closure_record(add_values as *const ());
+                    let raw_record = native_closure_record(add_raw_words as *const ());
+                    let rv_direct = native_direct_function_record(direct_add_values as *const ());
+                    let raw_direct = native_direct_function_record(direct_add_raw as *const ());
+                    let left = match i % 4 {
+                        0 => raw_record.as_ptr() as i64,
+                        1 => fx.low as i64,
+                        2 => 0x1000 * (s + 1),
+                        _ => 8 * i,
                     };
-                    let handle = rt_thread_spawn_isolated_with_args(
-                        record.as_ptr() as u64,
+                    let right = 42 - left;
+                    let (kind, word) = match (s + i) % 6 {
+                        0 => (RT_WORKER_CLOSURE_VALUE, (raw_record.as_ptr() as u64) << 3),
+                        1 => (RT_WORKER_CLOSURE_VALUE, (rv_record.as_ptr() as u64) | 1),
+                        2 => (RT_WORKER_CLOSURE_ADDRESS, rv_record.as_ptr() as u64),
+                        3 => (RT_WORKER_CLOSURE_VALUE, (raw_direct.as_ptr() as u64) << 3),
+                        4 => (RT_WORKER_CLOSURE_ADDRESS, rv_direct.as_ptr() as u64),
+                        _ if i % 2 == 0 => (RT_WORKER_CLOSURE_VALUE, fx.high as u64),
+                        _ => (RT_WORKER_CLOSURE_ADDRESS, fx.high as u64),
+                    };
+                    let handle = rt_thread_spawn_isolated_with_args_kind(
+                        kind,
+                        word,
                         RuntimeValue::from_int(left),
-                        RuntimeValue::from_int(42 - left),
+                        RuntimeValue::from_int(right),
                     );
-                    assert!(handle != 0);
+                    assert!(handle != 0, "spawner {} iter {} kind {} rejected", s, i, kind);
                     let result = rt_thread_join(handle);
                     assert!(result.is_int());
-                    assert_eq!(result.as_int(), 42, "spawner {} iter {}", s, i);
+                    assert_eq!(result.as_int(), 42, "spawner {} iter {} kind {}", s, i, kind);
                     rt_thread_free(handle);
                 }
             })
@@ -412,95 +626,33 @@ fn test_isolated_thread_worker_args_stress_concurrent_spawners() {
     }
 }
 
-// Residual Windows-heap wrong-guess (owner decision 2026-11-06, P0): a record
-// at a Windows heap address (~2^40) passed in the int-tagged form `addr << 3`
-// stays below the user-VA ceiling. The VA-ceiling rule alone then reads the
-// tagged word as the record address itself (access violation / wrong ABI).
-// The classifier must validate both decodings against committed memory and
-// pick the only valid one, failing closed when neither or both are valid.
-#[cfg(windows)]
-extern "C" fn add_raw_words(_closure: u64, a: u64, b: u64) -> RuntimeValue {
-    RuntimeValue::from_int(a as i64 + b as i64)
-}
-
-#[cfg(windows)]
 #[test]
-fn test_isolated_thread_tagged_word_below_va_ceiling_selects_raw_abi() {
-    let closure = native_closure_record(add_raw_words as *const ());
-    let word = (closure.as_ptr() as u64) << 3;
-    assert!(!native_word_exceeds_user_va(word), "fixture must sit below the ceiling");
-    let handle = rt_thread_spawn_isolated_with_args(word, RuntimeValue::from_int(10), RuntimeValue::from_int(32));
-    assert!(handle != 0);
-    let result = rt_thread_join(handle);
-    assert!(result.is_int());
-    assert_eq!(result.as_int(), 42);
-    rt_thread_free(handle);
-}
-
-#[cfg(windows)]
-#[test]
-fn test_isolated_thread_classifier_decodes_both_word_forms() {
-    let closure = native_closure_record(add_values as *const ());
-    let addr = closure.as_ptr() as u64;
-    match unsafe { native_callable(addr) } {
-        Some(NativeCallable::ClosureRecord { closure_ptr, raw_worker_args, .. }) => {
-            assert_eq!(closure_ptr, addr);
-            assert!(!raw_worker_args);
-        }
-        _ => panic!("raw record address must classify as a RuntimeValue-ABI closure record"),
-    }
-    match unsafe { native_callable(addr << 3) } {
-        Some(NativeCallable::ClosureRecord { closure_ptr, raw_worker_args, .. }) => {
-            assert_eq!(closure_ptr, addr);
-            assert!(raw_worker_args);
-        }
-        _ => panic!("tagged record word must classify as a raw-ABI closure record"),
-    }
-    let direct = native_direct_function_record(add_values as *const ());
-    match unsafe { native_callable((direct.as_ptr() as u64) << 3) } {
-        Some(NativeCallable::DirectFunction { raw_worker_args, .. }) => assert!(raw_worker_args),
-        _ => panic!("tagged direct-function record must stay a direct function"),
-    }
-}
-
-#[cfg(windows)]
-#[test]
-fn test_isolated_thread_unmapped_word_fails_closed() {
-    // A word naming neither a committed record nor its tagged form must be
-    // rejected (spawn returns 0), never dereferenced.
-    let unmapped: u64 = 0x0000_1230_0000_0000;
-    assert!(unsafe { native_callable(unmapped) }.is_none());
-    assert_eq!(rt_thread_spawn_isolated(unmapped, RuntimeValue::from_int(1)), 0);
-}
-
-#[cfg(windows)]
-#[test]
-fn test_isolated_thread_tagged_and_raw_words_stress_concurrent_spawners() {
-    // Stress: 16 spawners x 32 spawns interleaving raw record addresses
-    // (RuntimeValue ABI) and below-ceiling tagged words (raw ABI). Any
-    // shared/racy classification or address guess shows up as a wrong sum.
-    let spawners: Vec<_> = (0..16)
+fn test_isolated_thread_legacy_value_entry_stress_concurrent_spawners() {
+    // Same stress through the Simple-facing legacy entry (kind VALUE):
+    // int-tagged raw records, heap-tagged records, and the dual-decodable
+    // word, 16 x 64 = 1024 spawns per run.
+    let fx = std::sync::Arc::new(DualDecodeFixture::new());
+    let spawners: Vec<_> = (0..16i64)
         .map(|s| {
+            let fx = fx.clone();
             thread::spawn(move || {
-                for i in 0..32i64 {
-                    let left = s * 1000 + i;
-                    let tagged = (s + i) % 2 == 0;
-                    let record = if tagged {
-                        native_closure_record(add_raw_words as *const ())
-                    } else {
-                        native_closure_record(add_values as *const ())
+                for i in 0..64i64 {
+                    let rv_record = native_closure_record(add_values as *const ());
+                    let raw_record = native_closure_record(add_raw_words as *const ());
+                    let left = if i % 2 == 0 { raw_record.as_ptr() as i64 } else { 0x1000 * (s + 1) };
+                    let word = match (s + i) % 3 {
+                        0 => (raw_record.as_ptr() as u64) << 3,
+                        1 => (rv_record.as_ptr() as u64) | 1,
+                        _ => fx.high as u64,
                     };
-                    let addr = record.as_ptr() as u64;
-                    let word = if tagged { addr << 3 } else { addr };
                     let handle = rt_thread_spawn_isolated_with_args(
                         word,
                         RuntimeValue::from_int(left),
                         RuntimeValue::from_int(42 - left),
                     );
-                    assert!(handle != 0, "spawner {} iter {}", s, i);
+                    assert!(handle != 0, "spawner {} iter {} word {:#x} rejected", s, i, word);
                     let result = rt_thread_join(handle);
-                    assert!(result.is_int());
-                    assert_eq!(result.as_int(), 42, "spawner {} iter {} tagged {}", s, i, tagged);
+                    assert_eq!(result.as_int(), 42, "spawner {} iter {} word {:#x}", s, i, word);
                     rt_thread_free(handle);
                 }
             })
@@ -519,7 +671,7 @@ fn test_isolated_thread_is_done() {
     }
 
     let closure = native_closure_record(slow_work as *const ());
-    let handle = rt_thread_spawn_isolated(closure.as_ptr() as u64, RuntimeValue::from_int(1));
+    let handle = rt_thread_spawn_isolated_kind(RT_WORKER_CLOSURE_ADDRESS, closure.as_ptr() as u64, RuntimeValue::from_int(1));
 
     // Thread should not be done immediately
     assert_eq!(rt_thread_is_done(handle), 0);
