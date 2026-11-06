@@ -179,6 +179,10 @@ int main(void) {
         failures += !check(result != 0 && free_calls == 1,
                            "exact output maximum is accepted and released once");
         if (result != 0) {
+            failures += !check(provider_output[0] == 'X' &&
+                               ((const char *)(uintptr_t)result)[0] == 'o' &&
+                               ((const char *)(uintptr_t)result)[OUTPUT_MAX - 1] == 'o',
+                               "owned output survives provider release poisoning storage");
             failures += !check(((const char *)(uintptr_t)result)[OUTPUT_MAX] == '\0',
                                "max-size output copy is NUL terminated");
             rt_free((void *)(uintptr_t)result);

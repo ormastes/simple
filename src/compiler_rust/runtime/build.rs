@@ -37,6 +37,8 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_process_owned_cwd_private.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_process_owned_sha256_private.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_process_owned_windows_async_private.h");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_scv_wasm_ffi.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_scv_wasm_ffi.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_file_view.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory_headroom.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_dynload.c");
@@ -419,6 +421,8 @@ fn compile_c_runtime_sources() {
         // also declares extern "C" live in runtime_packed_span.c, also never
         // registered here.
         "runtime_packed_span.c",
+        // Raw callback bridge: copies provider output before releasing its handle.
+        "runtime_scv_wasm_ffi.c",
         // rt_process_run_owned_bounded_value / observed sibling + rt_process_owned_* (Vulkan
         // Engine2D native-JIT blocker, doc/08_tracking/bug/
         // vulkan_engine2d_native_jit_missing_rt_struct_receiver_valid_2026-08-12.md
@@ -720,6 +724,7 @@ fn collect_c_runtime_exports(root: &Path, target_os: &str, native_all_provider: 
             .into_iter().filter(|symbol| symbol.starts_with("rt_gpu_provider_")));
     }
     const LINKED_C_SOURCES: &[&str] = &[
+        "runtime_scv_wasm_ffi.c",
         "runtime_memory_headroom.c",
         "runtime_memory.c",
         "runtime_alloc_observer.c",

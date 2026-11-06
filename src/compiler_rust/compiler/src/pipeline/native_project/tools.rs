@@ -609,6 +609,7 @@ fn build_c_runtime_library(
         // hands a raw base pointer to Simple code. Kept a separate TU so it
         // stays auditable in isolation.
         "runtime_packed_span.c",
+        "runtime_scv_wasm_ffi.c",
         // Terminal probes (rt_terminal_is_tty / rt_terminal_stdout_is_tty / raw
         // mode / size / rt_stdin_read_byte) backing the std.tui.terminal externs.
         // Was never an archive member, so a core-C native link of anything
@@ -668,6 +669,7 @@ fn build_c_runtime_library(
         "runtime_core_intrinsics_impl.h",
         "runtime_shared_parse_cell_private.h",
         "runtime_packed_span.h",
+        "runtime_scv_wasm_ffi.h",
         "runtime_fork.h",
         "runtime_memtrack.h",
         "runtime_simd_dispatch.h",
