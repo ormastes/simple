@@ -1,0 +1,69 @@
+# Pure projection of an already admitted UTF-8 snapshot. Providers own syntax
+# selection; this module never infers semantic completeness from text matches.
+use std.common.source.contracts.{SourceSnapshotV1, SourceRangeV1, SourceProjectionV1}
+use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text, utf8_bytes_valid}
+
+fn source_byte_boundary_v1(bytes: [u8], offset: i64) -> bool:
+    if offset < 0 or offset > bytes.len(): return false
+    if offset == bytes.len(): return true
+    val byte = bytes[offset].to_i64()
+    byte < 128 or byte >= 192
+
+pub fn source_project_ranges_v1(snapshot: SourceSnapshotV1,
+        selections: [SourceRangeV1], max_bytes: i64) -> Result<SourceProjectionV1, text>:
+    """Select ordered, disjoint original-byte ranges; preserve every omission.
+
+    No parser capability is inferred: the result is raw_text, and a provider
+    must retain its own syntax/semantic provenance outside this value.
+    """
+    if snapshot.snapshot_id == "": return Err("snapshot_identity_required")
+    if max_bytes < 0: return Err("invalid_source_budget")
+    val bytes = text_to_utf8_bytes(snapshot.source)
+    if not utf8_bytes_valid(bytes): return Err("unsupported_source_encoding")
+    var output: [u8] = []
+    var omitted: [SourceRangeV1] = []
+    var previous_end = 0
+    var selected_bytes = 0
+    for span in selections:
+        if span.start_byte < previous_end or span.end_byte < span.start_byte:
+            return Err("unordered_or_overlapping_source_ranges")
+        if not source_byte_boundary_v1(bytes, span.start_byte) or not source_byte_boundary_v1(bytes, span.end_byte):
+            return Err("invalid_source_byte_boundary")
+        val count = span.end_byte - span.start_byte
+        if count > max_bytes - selected_bytes: return Err("source_selection_exceeds_budget")
+        if span.start_byte > previous_end:
+            omitted.push(SourceRangeV1(previous_end, span.start_byte))
+        var index = span.start_byte
+        while index < span.end_byte:
+            output.push(bytes[index])
+            index = index + 1
+        selected_bytes = selected_bytes + count
+        previous_end = span.end_byte
+    if previous_end < bytes.len(): omitted.push(SourceRangeV1(previous_end, bytes.len()))
+    val completeness = if omitted.len() == 0: "complete" else: "partial"
+    Ok(SourceProjectionV1(snapshot.snapshot_id, bytes_to_text(output), selections,
+        omitted, completeness, "raw_text", -1))
+
+pub fn source_project_raw_v1(snapshot: SourceSnapshotV1, start_byte: i64,
+        max_bytes: i64) -> Result<SourceProjectionV1, text>:
+    """Return a bounded page of whole source lines, including original CRLF.
+
+    A line larger than the page is rejected, never sliced into invalid UTF-8
+    or misleading partial tokens. Continuations must use this snapshot ID.
+    """
+    if max_bytes <= 0: return Err("invalid_source_budget")
+    val bytes = text_to_utf8_bytes(snapshot.source)
+    if start_byte < 0 or start_byte > bytes.len(): return Err("invalid_source_offset")
+    if start_byte > 0 and start_byte < bytes.len() and bytes[start_byte - 1] != 10:
+        return Err("source_offset_requires_line_boundary")
+    var end_byte = start_byte
+    var cursor = start_byte
+    while cursor < bytes.len() and cursor - start_byte < max_bytes:
+        if bytes[cursor] == 10: end_byte = cursor + 1
+        cursor = cursor + 1
+    if cursor == bytes.len(): end_byte = cursor
+    if end_byte == start_byte and start_byte < bytes.len():
+        return Err("source_line_exceeds_budget")
+    var result = source_project_ranges_v1(snapshot, [SourceRangeV1(start_byte, end_byte)], max_bytes)?
+    if end_byte < bytes.len(): result.next_byte = end_byte
+    Ok(result)
