@@ -338,7 +338,8 @@ a selection; per-function toggle = a new prepared selection (new generation).
 - Evidence lane on a non-x86 host: `check-xray-native-x86-64-objects.shs`
   (cross-emitted objects, relocations, sled disassembly, OFF object clean,
   twin vs assembled trampoline, patcher ops). Executing the patched code needs
-  an x86-64 Linux host and is not part of that check.
+  an x86-64 Linux host and is not part of that check; like the PR5/PR5b rows
+  its gate row runs `--selftest` only (the full run needs `--simple <bin>`).
 ---
 
 ## D. Backend-neutral V1 contract placement and the draft branch
