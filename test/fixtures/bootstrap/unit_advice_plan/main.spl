@@ -1,0 +1,47 @@
+use compiler.driver.driver_unit_tldr_plan_v1.{unit_tldr_plan_v1, unit_tldr_needed_flags_v1, unit_tldr_surface_for_v1}
+use compiler.driver.driver_worker_surface_graph_v1.{worker_surface_import_ids_v1, worker_surface_ready_v1}
+use std.io_runtime.{file_read, getpid}
+
+fn main() -> i64:
+    val root = "test/fixtures/bootstrap/unit_advice_plan/"
+    val names = ["pkg.a", "pkg.z", "pkg.h", "pkg.q", "pkg.u"]
+    var paths: [text] = []
+    var modules: Dict<text, text> = {}
+    for name in names:
+        val path = root + name.replace(".", "/") + ".spl"
+        paths.push(path)
+        modules[name] = path
+    val picked = [paths[0]]
+    val advice_paths = [paths[1], paths[1]]
+    val cache = "build/bootstrap-advice-plan/runtime-" + getpid().to_text()
+    val plan = unit_tldr_plan_v1("advice-readiness", cache, picked, modules, advice_paths)
+    val parsed = unit_tldr_needed_flags_v1(plan, paths, advice_paths)
+    var built: [bool] = []
+    var edges: [[i64]] = []
+    var index = 0
+    while index < paths.len():
+        built.push(parsed[index] or unit_tldr_surface_for_v1(plan, names[index]).?)
+        val imports = worker_surface_import_ids_v1(file_read(paths[index]))
+        var targets: [i64] = []
+        var target_index = 0
+        while target_index < names.len():
+            if imports.contains(names[target_index]): targets.push(target_index)
+            target_index = target_index + 1
+        edges.push(targets)
+        index = index + 1
+    val ready = worker_surface_ready_v1(built, edges)
+    if not ready[1]:
+        print "FAIL: genuine advice import dependency is not surface-ready"
+        return 1
+    if not ready[0] or not ready[2] or not ready[3]: return 2
+    if ready[4]: return 3
+    if plan.picked.len() != 1 or plan.picked[0] != paths[0]: return 4
+    if not parsed[1]: return 5
+    if plan.parse_paths.len() != 2: return 6
+    if unit_tldr_surface_for_v1(plan, "pkg.u").?: return 7
+    if plan.surfaces.len() != 2: return 8
+    # Keep the existing four-argument API behavior for ordinary units.
+    val ordinary = unit_tldr_plan_v1("ordinary", cache + "-ordinary", picked, modules)
+    if ordinary.parse_paths.len() != 1 or ordinary.surfaces.len() != 0: return 9
+    print "PASS: 9 advice-plan/readiness assertions"
+    0
