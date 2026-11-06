@@ -248,3 +248,11 @@ already handles the ClassInstance hop. Fix: `place_is_live` now walks hops with
 `projections_live`, which reads the field through the instance (Arc-handle
 clone) and continues on the owned value; `write_place` then lands the result.
 Regression spec: `test/01_unit/compiler/interpreter/nested_class_field_array_mutation_spec.spl`.
+
+## 2026-11-06 re-verification
+
+Seed from `f1390d48254`: `class_element_reference_spec` 4/4 by default (2/4
+with `SIMPLE_INTERP_CLASS_REF=0`); list-element method, list-element alias,
+for-loop element, nested grid, `map`/`filter` result, slice, dict value and
+`Option` payload probes all share identity on the interpreter. Owner decision
+2026-11-06 confirms the direction (classes reference, structs value).

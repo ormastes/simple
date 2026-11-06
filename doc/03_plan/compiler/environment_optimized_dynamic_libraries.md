@@ -611,11 +611,11 @@ selection order is unchanged, the number is recorded.
 | # | Criterion | State |
 |---|---|---|
 | 1 | Per-symbol ISA gate: baseline objects vector-free; L1/L2 `xmm` only; L3 `ymm` no `zmm`; L4 `zmm`; aarch64 L1 `v.16b/4s`, L2/L3 `z`-regs; riscv64 `vsetvli` | met (52 gates) |
-| 2 | All levels byte-identical to the scalar oracle for every tail length, CRLF across a block edge, max span | met on the run/qemu cells above |
+| 2 | All levels byte-identical to the scalar oracle for every tail length, CRLF across a block edge, max span | met — 2026-11-06 `vector_level_parity_selftest.c` per cap: lengths 0..131 (words/bytes), every start offset 0..63, spans ending at a guard page, CRLF/CR-CR-LF/lone-CR at every block edge, 1 GiB max span (reserved, first pages committed) + MAX+1 refused; 1,223,212 cases/cap PASS on Windows L0–L4. Mutation check: an L4 CRLF bound `>=64` (1-byte over-read) and a dropped bitmap tail word are both caught; the old bench missed the over-read |
 | 3 | Capped variants (`_cap0`..`_cap3`) report `min(cap, host)` and carry distinct implementation IDs and digests | met |
 | 4 | Simple-side db (`PureDatabase` RowBitmap AND) and web (HTTP `FIND_CRLF`) probes through the provider on the self-hosted chain, receipt names the executed level | **open** — not in this evidence set |
-| 5 | Below-max reason codes (`cpu-missing:` / `xcr0:` / `cap:` / `os:`) in receipts | **open follow-up** — only `selected_level` exists |
-| 6 | `.init_array` / `DT_INIT` / PE TLS-directory emptiness checked by the gate (today it holds by construction only) | **open follow-up** |
+| 5 | Below-max reason codes (`cpu-missing:` / `xcr0:` / `cap:` / `os:`) in receipts | met (2026-11-06) — additive export `int32_t simple_vector_level_reason_v1(char *buf, uint64_t size)`: stable code (0 max, 1 cpu-missing, 2 xcr0, 3 cap, 4 os, 5 build) + bounded NUL-terminated text; printed and asserted on every per-cap gate line (`cap0..3: reason=cap:N`, `cap4: reason=max` on Xeon W-2135); host level cross-checked against an independent CPUID decode (`uncapped L4 = CPUID-decoded L4`). `build:force-no-avx512` verified ad hoc. `cpu-missing`/`xcr0`/`os` text is exercised only by construction here (no CPU lacking a feature available; qemu lane expectations added, not run on this host) |
+| 6 | `.init_array` / `DT_INIT` / PE TLS-directory emptiness checked by the gate | met (2026-11-06) — `gate_init` (llvm-readobj, fail-closed on an unreadable table): every level/dispatcher/provider object free of ELF `.init_array .preinit_array .fini_array .ctors .dtors .init .fini .tdata .tbss`, COFF `.CRT$X* .tls$`, Mach-O `__mod_init_func __init_offsets __thread_*`, and TLS symbols; linked images' init-table / PT_TLS / PE TLS-directory footprint must equal the level-free cap0 image (`DT_INIT` and the mingw TLS directory exist post-link only and belong to the CRT). Fixtures per target: a constructor and a `_Thread_local` object must be rejected, a clean object accepted. The constructor fixture first passed vacuously (GlobalOpt folded a constant-store ctor) — now calls out |
 | 7 | Legacy lanes green; unknown arch refuses | met |
 
 ### Risks found and mitigations
@@ -628,10 +628,10 @@ selection order is unchanged, the number is recorded.
 | `xgetbv` `#UD` when OSXSAVE is clear (SimpleOS, thin hypervisors) | OSXSAVE is part of the v3 conjunction tested first (done) |
 | RVV: HWCAP `V` set but per-process vector OFF | `prctl(PR_RISCV_V_GET_CONTROL)` current-state check (done) |
 | Hybrid cores / per-thread SVE VL / RVV VLEN | trust OS-normalised CPUID/hwcaps; SVE/RVV kernels are VLA; qemu vlen 128 and 256 both PASS (done) |
-| v4 code loaded on a v1 CPU | no constructors/static init/TLS in level TUs; only the dispatcher references `lN` symbols; ISA gate (done); init-section emptiness gate (open) |
+| v4 code loaded on a v1 CPU | no constructors/static init/TLS in level TUs; only the dispatcher references `lN` symbols; ISA gate (done); init-section emptiness gate with must-reject fixtures (done) |
 | LTO / `always_inline` pulling wide code into the baseline TU | no LTO in the build; ISA gate on the baseline objects (done) |
 | Probe on every call | one probe, `atomic_int` cache (done) |
-| One digest for all levels hides the executed level | `simple_vector_selected_level_v1()` (done); reason codes (open) |
+| One digest for all levels hides the executed level | `simple_vector_selected_level_v1()` (done); `simple_vector_level_reason_v1()` reason codes (done) |
 | Capped build admitted under the production name | cap folded into implementation ID and `_capN` file name (done) |
 | Non-deterministic PE digest | `-Wl,--no-insert-timestamp`, lld, explicit `.def` exports (done) |
 | AVX-512 downclock makes L4 slower on short/bandwidth-bound spans | measured and recorded; selection stays safety-ordered; cap is the only override |

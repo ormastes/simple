@@ -1,0 +1,58 @@
+# @req REQ-SSPEC-COMPILER
+# Regression: `val x = unsafe(capabilities: [ffi]): maybe()` must transport
+# `maybe`'s declared `text?` return to the binding exactly like
+# `val x = maybe()`. Before the fix the binding got no type, a later
+# `if val p = x` bound its payload as unit, and native codegen failed with
+# E-BACKEND-LLVM-CONST-TYPE "integer constant cannot define void".
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolTable, SymbolId, SymbolKind}
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirBlock}
+use compiler.hir.hir_lowering.binding_types.{hir_binding_direct_call_return_kind, hir_binding_transparent_kind}
+
+fn ty(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn untyped(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, type_: nil, span: Span.empty())
+
+fn call_of(symbol: SymbolId) -> HirExpr:
+    untyped(HirExprKind.Call(untyped(HirExprKind.NamedVar(symbol, "maybe")), [], []))
+
+fn tail_block(value: HirExpr) -> HirBlock:
+    HirBlock(stmts: [], has: true, value: value, span: Span.empty())
+
+fn optional_text_return(kind: HirExprKind, table: SymbolTable) -> bool:
+    val found = hir_binding_direct_call_return_kind(hir_binding_transparent_kind(kind), table)
+    if found == nil:
+        return false
+    match found.unwrap().kind:
+        case HirTypeKind.Optional(inner): inner.kind == HirTypeKind.Str
+        case _: false
+
+describe "binding type transport through value-transparent blocks":
+    it "sees an Option-returning call through an unsafe block":
+        val table = SymbolTable.new()
+        val ret = ty(HirTypeKind.Optional(ty(HirTypeKind.Str)))
+        val maybe = table.define("maybe", SymbolKind.Function,
+            ty(HirTypeKind.Function([], ret, [])), Span.empty(), Visibility.Public, false, nil)
+        val wrapped = HirExprKind.UnsafeBlock(tail_block(call_of(maybe)))
+        expect(optional_text_return(call_of(maybe).kind, table)).to_equal(true)
+        expect(optional_text_return(wrapped, table)).to_equal(true)
+
+    it "sees through nested unsafe and nograd blocks":
+        val table = SymbolTable.new()
+        val ret = ty(HirTypeKind.Optional(ty(HirTypeKind.Str)))
+        val maybe = table.define("maybe", SymbolKind.Function,
+            ty(HirTypeKind.Function([], ret, [])), Span.empty(), Visibility.Public, false, nil)
+        val inner = untyped(HirExprKind.NogradBlock(tail_block(call_of(maybe))))
+        val outer = HirExprKind.UnsafeBlock(tail_block(inner))
+        expect(optional_text_return(outer, table)).to_equal(true)
+
+    it "leaves a value-less unsafe block opaque":
+        val table = SymbolTable.new()
+        val empty = HirBlock(stmts: [], has: false, value: untyped(HirExprKind.NilLit), span: Span.empty())
+        val found = hir_binding_direct_call_return_kind(hir_binding_transparent_kind(HirExprKind.UnsafeBlock(empty)), table)
+        expect(found == nil).to_equal(true)

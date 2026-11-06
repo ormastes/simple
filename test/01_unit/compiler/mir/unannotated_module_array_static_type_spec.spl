@@ -1,0 +1,88 @@
+"""MIR static types for unannotated module array literals over `val` constants.
+
+Regression for BUG-X86-EVEX-STATIC-ARRAY-INFERENCE-20261017: producer0015
+rejected `val X86_ZMM_ALLOCATABLE = [X86_ZMM0, ...]` with
+"cannot derive module static type from unresolved initializer".
+"""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering.MirLowering
+
+fn lower_report(source: text, wanted: text) -> text:
+    val path = "unannotated_module_array_static_type_fixture.spl"
+    val parsed = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    var lowering = MirLowering.new(hir.symbols)
+    for constant in hir.constants.values():
+        lowering.lower_const(constant)
+    for constant in hir.constants.values():
+        lowering.lower_static(constant)
+    var report = ""
+    for error in lowering.errors:
+        report = report + error.message + ";"
+    if report != "":
+        return "errors:" + report
+    for static_ in lowering.builder.module.statics.values():
+        if static_.name.ends_with("__" + wanted) or static_.name == wanted:
+            match static_.type_.kind:
+                case MirTypeKind.Array(element, _):
+                    match element.kind:
+                        case MirTypeKind.I64: return "array:i64"
+                        case MirTypeKind.F64: return "array:f64"
+                        case MirTypeKind.Bool: return "array:bool"
+                        case _: return "array:other"
+                case _: return "other"
+    "missing"
+
+fn production_report(source: text, wanted: text) -> text:
+    # Production `lower_module` order: the constants table is not walked in
+    # source order, so the array may be typed before its element constants.
+    val path = "unannotated_module_array_static_order_fixture.spl"
+    val parsed = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var report = ""
+    for error in lowering.errors:
+        report = report + "error:" + error.message + "\n"
+    for static_ in mir.statics.values():
+        if static_.name.ends_with("__" + wanted) or static_.name == wanted:
+            match static_.type_.kind:
+                case MirTypeKind.Array(_, _): report = report + "static:array"
+                case _: report = report + "static:other"
+    report
+
+describe "unannotated module array static type inference":
+    it "types an unannotated register-id array through lower_module (ordering trap)":
+        val source = "val zz_zmm0 = 48\nval zz_zmm31 = 79\nval aa_zmm_allocatable = [zz_zmm0, zz_zmm31]\nfn first() -> i64:\n    aa_zmm_allocatable[0]\n"
+        val report = production_report(source, "aa_zmm_allocatable")
+        expect(report.contains("cannot derive module static type")).to_be(false)
+
+
+    it "infers [i64] for an array of integer val constants (EVEX register ids)":
+        val source = "val ZMM0 = 48\nval ZMM1 = 49\nval ZMM31 = 79\nval ZMM_ALLOCATABLE = [ZMM0, ZMM1, ZMM31]\n"
+        expect(lower_report(source, "ZMM_ALLOCATABLE")).to_equal("array:i64")
+
+    it "infers [i64] when constants and literals are mixed (k-mask ids)":
+        val source = "val K1 = 81\nval K7 = 87\nvar K_ALLOCATABLE = [K1, 84, K7]\n"
+        expect(lower_report(source, "K_ALLOCATABLE")).to_equal("array:i64")
+
+    it "infers element kinds other than integers":
+        expect(lower_report("val A = 1.5\nvar FS = [A, 2.5]\n", "FS")).to_equal("array:f64")
+        expect(lower_report("val T = true\nvar BS = [T, false]\n", "BS")).to_equal("array:bool")
+
+    it "keeps the annotated workaround form working":
+        val source = "val R0 = 0\nval R1 = 1\nval ALLOC: [i64] = [R0, R1]\n"
+        expect(lower_report(source, "ALLOC")).to_equal("array:i64")
+
+    it "keeps mixed-kind and unresolved arrays diagnostic":
+        expect(lower_report("val A = 1\nvar MIXED = [A, true]\n", "MIXED")).to_contain("cannot derive module static type")
+        expect(lower_report("val A: i32 = 0\nval B: i64 = 1\nvar WIDTHS = [A, B]\n", "WIDTHS")).to_contain("cannot derive module static type")

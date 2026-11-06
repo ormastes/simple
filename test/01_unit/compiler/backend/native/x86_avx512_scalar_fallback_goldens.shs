@@ -1,0 +1,67 @@
+#!/bin/sh
+# Regenerates the byte goldens of x86_avx512_scalar_fallback_encoding_spec.spl.
+# Each case is hand-written reference asm for one scalar-fallback helper call
+# (lane loops unrolled here), assembled by llvm-mc and printed as
+# "<name> <hex>". {rex} and {disp32} pin the assembler to the encoder's
+# choices: a REX byte on every instruction and disp32 frame displacements.
+#   LLVM_BIN=C:/llvm/install/bin sh x86_avx512_scalar_fallback_goldens.shs
+set -eu
+LLVM_BIN=${LLVM_BIN:-C:/llvm/install/bin}
+MC=$LLVM_BIN/llvm-mc
+work=$(mktemp -d "${TMPDIR:-/tmp}/avx512-goldens.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+asm() {
+  name=$1; shift
+  printf '%s\n' ".intel_syntax noprefix" "$@" > "$work/g.s"
+  "$MC" -triple=x86_64-pc-linux -mattr=+avx512f,+avx512bw,+avx512vl -filetype=obj -o "$work/g.o" "$work/g.s"
+  "$LLVM_BIN/llvm-objcopy" -O binary --only-section=.text "$work/g.o" "$work/g.bin"
+  printf '%s ' "$name"; od -An -v -tx1 "$work/g.bin" | tr -d ' \n'; echo
+}
+
+# copy: 2-byte mask image r13+0 -> rbp-64 through r9
+asm copy2 "{rex} {disp32} movzx r9d, word ptr [r13]" "{disp32} mov word ptr [rbp - 64], r9w"
+# copy: 16 bytes rbp-128 -> rdi+8 through rax
+asm copy16 "{disp32} mov rax, qword ptr [rbp - 128]" "{disp32} mov qword ptr [rdi + 8], rax" "{disp32} mov rax, qword ptr [rbp - 120]" "{disp32} mov qword ptr [rdi + 16], rax"
+# splat: two f64 lanes from r12, two i32 lanes from esi
+asm splat64 "{disp32} mov qword ptr [rbp - 64], r12" "{disp32} mov qword ptr [rbp - 56], r12"
+asm splat32 "{rex} {disp32} mov dword ptr [rbp - 32], esi" "{rex} {disp32} mov dword ptr [rbp - 28], esi"
+
+L=""; for i in $(seq 0 15); do L="$L|{rex} {disp32} movss xmm0, dword ptr [rbp - $((128 - 4*i))]|{rex} {disp32} addss xmm0, dword ptr [rbp - $((192 - 4*i))]|{rex} {disp32} movss dword ptr [rbp - $((64 - 4*i))], xmm0"; done
+IFS='|'; asm fbin_add_f32 $L; unset IFS
+L=""; for i in $(seq 0 7); do L="$L|{rex} {disp32} movsd xmm0, qword ptr [rbp - $((128 - 8*i))]|{rex} {disp32} maxsd xmm0, qword ptr [rbp - $((192 - 8*i))]|{rex} {disp32} movsd qword ptr [rbp - $((64 - 8*i))], xmm0"; done
+IFS='|'; asm fbin_max_f64 $L; unset IFS
+
+L=""; for i in $(seq 0 15); do L="$L|{disp32} mov r10d, dword ptr [rbp - $((128 - 4*i))]|not r10d|{disp32} and r10d, dword ptr [rbp - $((192 - 4*i))]|{disp32} mov dword ptr [rbp - $((64 - 4*i))], r10d"; done
+IFS='|'; asm ibin_andnot $L; unset IFS
+L=""; for i in $(seq 0 15); do L="$L|{disp32} mov r10d, dword ptr [rbp - $((128 - 4*i))]|{disp32} cmp r10d, dword ptr [rbp - $((192 - 4*i))]|{disp32} cmovg r10d, dword ptr [rbp - $((192 - 4*i))]|{disp32} mov dword ptr [rbp - $((64 - 4*i))], r10d"; done
+IFS='|'; asm ibin_min $L; unset IFS
+L=""; for i in $(seq 0 15); do L="$L|{disp32} mov r10d, dword ptr [rbp - $((128 - 4*i))]|{disp32} mov dword ptr [rbp - 256], r10d|push rcx|{rex} {disp32} mov ecx, dword ptr [rbp - $((192 - 4*i))]|{rex} {disp32} sar dword ptr [rbp - 256], cl|pop rcx|{disp32} mov r10d, dword ptr [rbp - 256]|{disp32} mov dword ptr [rbp - $((64 - 4*i))], r10d"; done
+IFS='|'; asm ibin_sar $L; unset IFS
+
+L=""; for i in $(seq 0 15); do L="$L|{rex} {disp32} mov ebx, dword ptr [rbp - $((128 - 4*i))]|{rex} btc ebx, 31|{rex} {disp32} mov dword ptr [rbp - $((64 - 4*i))], ebx"; done
+IFS='|'; asm un_neg_f32 $L; unset IFS
+L="movabs r8, 4607182418800017408"; for i in $(seq 0 7); do L="$L|movq xmm0, r8|{rex} {disp32} divsd xmm0, qword ptr [rbp - $((128 - 8*i))]|{rex} {disp32} movsd qword ptr [rbp - $((64 - 8*i))], xmm0"; done
+IFS='|'; asm un_recip_f64 $L; unset IFS
+L="{rex} mov eax, 1065353216"; for i in $(seq 0 15); do L="$L|{rex} {disp32} sqrtss xmm1, dword ptr [rbp - $((128 - 4*i))]|{rex} movd xmm0, eax|{rex} divss xmm0, xmm1|{rex} {disp32} movss dword ptr [rbp - $((64 - 4*i))], xmm0"; done
+IFS='|'; asm un_rsqrt_f32 $L; unset IFS
+L=""; for i in $(seq 0 15); do L="$L|{disp32} mov r15d, dword ptr [rbp - $((128 - 4*i))]|neg r15d|{disp32} mov dword ptr [rbp - $((64 - 4*i))], r15d"; done
+IFS='|'; asm un_neg_i32 $L; unset IFS
+
+shift_of() { if [ "$1" = 1 ]; then echo "{rex} shl esi, 1"; else echo "{rex} shl esi, $1"; fi; }
+L="xor r10d, r10d"; for i in $(seq 0 15); do L="$L|{rex} {disp32} movss xmm0, dword ptr [rbp - $((192 - 4*i))]|{rex} {disp32} cmpss xmm0, dword ptr [rbp - $((128 - 4*i))], 1|{rex} movd esi, xmm0|{rex} and esi, 1|$(shift_of $i)|or r10d, esi"; done
+L="$L|{disp32} mov word ptr [rbp - 64], r10w"
+IFS='|'; asm cmp_gt_f32 $L; unset IFS
+L="xor r10d, r10d"; for i in $(seq 0 15); do L="$L|{rex} {disp32} mov esi, dword ptr [rbp - $((128 - 4*i))]|{rex} {disp32} cmp esi, dword ptr [rbp - $((192 - 4*i))]|{rex} setle sil|{rex} movzx esi, sil|$(shift_of $i)|or r10d, esi"; done
+L="$L|{disp32} mov word ptr [rbp - 64], r10w"
+IFS='|'; asm cmp_le_i32 $L; unset IFS
+
+L="{disp32} movzx r11d, word ptr [rbp - 256]"; for i in $(seq 0 7); do L="$L|{disp32} mov rdx, qword ptr [rbp - $((192 - 8*i))]|test r11d, $((1 << i))|{disp32} cmovne rdx, qword ptr [rbp - $((128 - 8*i))]|{disp32} mov qword ptr [rbp - $((64 - 8*i))], rdx"; done
+IFS='|'; asm select_f64 $L; unset IFS
+
+asm mask_andnot "{rex} {disp32} movzx ecx, word ptr [rbp - 128]" "{rex} not ecx" "{rex} {disp32} and cx, word ptr [rbp - 192]" "{rex} {disp32} mov word ptr [rbp - 64], cx"
+asm mask_not "{rex} {disp32} movzx ecx, word ptr [rbp - 128]" "{rex} not ecx" "{rex} {disp32} mov word ptr [rbp - 64], cx"
+
+L=""; for i in $(seq 0 7); do L="$L|{disp32} movsxd rdi, dword ptr [rbp - $((400 - 4*i))]|mov r9, qword ptr [rbp + 8*rdi - 300]|{disp32} mov qword ptr [rbp - $((64 - 8*i))], r9"; done
+IFS='|'; asm permute_f64 $L; unset IFS
+L="cmp r12, 16|jb 1f|ud2|1:|{disp32} mov eax, dword ptr [rbp + 4*r12 - 128]"; for i in $(seq 0 15); do L="$L|{rex} {disp32} mov dword ptr [rbp - $((64 - 4*i))], eax"; done
+IFS='|'; asm broadcast_f32 $L; unset IFS

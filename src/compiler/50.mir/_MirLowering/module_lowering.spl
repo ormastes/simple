@@ -268,6 +268,39 @@ impl MirLowering:
                     return self.infer_unfolded_static_expr_type_bounded(
                         self.global_const_exprs[symbol.id], depth + 1, visit_budget)
                 nil
+            case ArrayLit(elements, lit_type):
+                # `val ALLOC = [R0, R1]` over module `val` integer constants
+                # (BUG-X86-EVEX-STATIC-ARRAY-INFERENCE-20261017). Admissible
+                # only when every element recovers the SAME type: a declared
+                # constant type wins over its initializer, and differing
+                # widths, signs or kinds stay diagnostic (never coerced).
+                if val settled_lit = lit_type:
+                    match settled_lit.kind:
+                        case HirTypeKind.Array(_, _): return Some(self.lower_type(settled_lit))
+                        case _: ()
+                if elements.len() == 0:
+                    return nil
+                var element_type: MirType? = nil
+                for element in elements:
+                    var found: MirType? = nil
+                    match element.kind:
+                        case Var(elem_sym) | NamedVar(elem_sym, _):
+                            if val elem_info = self.symbols.get_symbol_raw(elem_sym.id):
+                                found = self.static_scalar_type_from_hir(elem_info.type_)
+                        case _: ()
+                    if not found.?:
+                        found = self.infer_unfolded_static_expr_type_bounded(element, depth + 1, visit_budget)
+                    if not found.?:
+                        return nil
+                    val next = found.unwrap()
+                    if val prior = element_type:
+                        if prior.kind != next.kind:
+                            return nil
+                    else:
+                        element_type = Some(next)
+                if val elem = element_type:
+                    return Some(MirType(kind: MirTypeKind.Array(elem, 0)))
+                nil
             case Binary(op, left, right):
                 val left_type = self.infer_unfolded_static_expr_type_bounded(left, depth + 1, visit_budget)
                 val right_type = self.infer_unfolded_static_expr_type_bounded(right, depth + 1, visit_budget)
@@ -3730,8 +3763,11 @@ impl MirLowering:
                     case _:
                         match const_.type_.kind:
                             case Infer(_, _):
-                                self.error_fatal("cannot derive module static type from unresolved initializer; add an explicit annotation", Some(const_.value.span))
-                                MirType.i64()
+                                if val inferred = self.infer_unfolded_static_expr_type(const_.value):
+                                    inferred
+                                else:
+                                    self.error_fatal("cannot derive module static type from unresolved initializer; add an explicit annotation", Some(const_.value.span))
+                                    MirType.i64()
                             case Str: MirType(kind: MirTypeKind.Opaque("str"))
                             case _: self.lower_type(const_.type_)
         val init_const: MirConstant? = match folded:

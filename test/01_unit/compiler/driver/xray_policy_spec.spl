@@ -1,0 +1,159 @@
+"""XRay structural PR1: static switch, never-list, Cranelift rejection, cache-key token."""
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_types.{MirSignature, MirType}
+use compiler.mir.mir_instruction_graph.{MirFunction, MirModule}
+use compiler.common.driver_compile_options.{driver_core_compile_options_default, compileoptions_normalize_mir_optimization}
+use compiler.driver.driver_xray_policy.*
+use compiler.common.module_path_naming.{module_logical_name_from_path}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.common.driver_core_modes.{CompileMode}
+
+fn xray_fn(id: i64, name: text) -> MirFunction:
+    var builder = MirBuilder.new()
+    builder.begin_function(SymbolId(id: id), name,
+        MirSignature(params: [], return_type: MirType.unit(), is_variadic: false), Span.empty())
+    builder.terminate_return(nil)
+    builder.end_function()
+
+fn xray_module(name: text, functions: [MirFunction]) -> MirModule:
+    var table: Dict<SymbolId, MirFunction> = {}
+    for f in functions:
+        table[f.symbol] = f
+    MirModule(name: name, functions: table, statics: {}, constants: {}, types: {})
+
+fn xray_mode_of(module: MirModule, id: i64) -> i64:
+    module.functions[SymbolId(id: id)].xray_mode
+
+describe "XRay static switch (CompileOptions)":
+    it "is off by default":
+        val options = driver_core_compile_options_default()
+        expect(options.xray_enabled).to_equal(false)
+
+    it "survives MIR optimization normalization":
+        var options = driver_core_compile_options_default()
+        options.xray_enabled = true
+        options.opt_level = 2
+        val normalized = compileoptions_normalize_mir_optimization(options)
+        expect(normalized.xray_enabled).to_equal(true)
+
+describe "xray_policy_apply":
+    it "returns the module untouched when the static switch is off":
+        val module = xray_module("app.main", [xray_fn(1, "main"), xray_fn(2, "helper")])
+        val applied = xray_policy_apply(module, XrayBuildPolicy.off())
+        expect(xray_mode_of(applied, 1)).to_equal(0)
+        expect(xray_mode_of(applied, 2)).to_equal(0)
+
+    it "marks every ordinary function when on":
+        val module = xray_module("app.main", [xray_fn(1, "main"), xray_fn(2, "helper")])
+        val applied = xray_policy_apply(module, XrayBuildPolicy.on())
+        expect(xray_mode_of(applied, 1)).to_equal(XRAY_MODE_ENTRY_EXIT_TAIL)
+        expect(xray_mode_of(applied, 2)).to_equal(XRAY_MODE_ENTRY_EXIT_TAIL)
+
+    it "omits tail-exit sleds when the policy excludes them":
+        val module = xray_module("app.main", [xray_fn(1, "main")])
+        var policy = XrayBuildPolicy.on()
+        policy.include_tail_exit = false
+        val applied = xray_policy_apply(module, policy)
+        expect(xray_mode_of(applied, 1)).to_equal(XRAY_MODE_ENTRY_EXIT)
+
+    it "never instruments naked, inline, kernel, generic-template or sectioned functions":
+        var naked = xray_fn(1, "naked_fn")
+        naked.is_naked = true
+        var inline_fn = xray_fn(2, "inline_fn")
+        inline_fn.is_inline = true
+        var kernel = xray_fn(3, "kernel_fn")
+        kernel.is_kernel = true
+        var template = xray_fn(4, "template_fn")
+        template.is_generic_template = true
+        var isr = xray_fn(5, "isr_fn")
+        isr.section = ".isr_vector"
+        val plain = xray_fn(6, "plain_fn")
+        val module = xray_module("app.main", [naked, inline_fn, kernel, template, isr, plain])
+        val applied = xray_policy_apply(module, XrayBuildPolicy.on())
+        expect(xray_mode_of(applied, 1)).to_equal(0)
+        expect(xray_mode_of(applied, 2)).to_equal(0)
+        expect(xray_mode_of(applied, 3)).to_equal(0)
+        expect(xray_mode_of(applied, 4)).to_equal(0)
+        expect(xray_mode_of(applied, 5)).to_equal(0)
+        expect(xray_mode_of(applied, 6)).to_equal(XRAY_MODE_ENTRY_EXIT_TAIL)
+
+    it "never instruments runtime hooks and the xray handler itself":
+        val hook = xray_fn(1, "__spl_trace_fn_enter")
+        val rt = xray_fn(2, "rt_alloc")
+        val handler = xray_fn(3, "simple_xray_handler")
+        val module = xray_module("app.main", [hook, rt, handler])
+        val applied = xray_policy_apply(module, XrayBuildPolicy.on())
+        expect(xray_mode_of(applied, 1)).to_equal(0)
+        expect(xray_mode_of(applied, 2)).to_equal(0)
+        expect(xray_mode_of(applied, 3)).to_equal(0)
+
+    it "never instruments trace and allocator library modules (real module names)":
+        for path in ["src/lib/common/trace/observer_contract_v1.spl", "src/lib/nogc_sync_mut/trace/channel.spl",
+                "src/lib/nogc_sync_mut/allocator.spl", "src/lib/gc_async_mut/allocator.spl"]:
+            val module_name = module_logical_name_from_path(path)
+            val module = xray_module(module_name, [xray_fn(1, "work")])
+            val applied = xray_policy_apply(module, XrayBuildPolicy.on())
+            expect(xray_mode_of(applied, 1)).to_equal(0)
+
+    it "still instruments ordinary library and app modules":
+        for path in ["src/lib/common/text.spl", "src/app/cli/main.spl"]:
+            val module = xray_module(module_logical_name_from_path(path), [xray_fn(1, "work")])
+            val applied = xray_policy_apply(module, XrayBuildPolicy.on())
+            expect(xray_mode_of(applied, 1)).to_equal(XRAY_MODE_ENTRY_EXIT_TAIL)
+
+describe "xray_policy_resolve":
+    it "accepts off on every backend, including Cranelift":
+        expect(xray_policy_resolve(false, "aot", "cranelift", false, "native").is_ok()).to_equal(true)
+        expect(xray_policy_resolve(false, "jit", "auto", false, "native").is_ok()).to_equal(true)
+
+    it "rejects --xray with Cranelift as an unsupported target":
+        val result = xray_policy_resolve(true, "aot", "cranelift", false, "native")
+        expect(result.is_err()).to_equal(true)
+        match result:
+            case Err(message):
+                expect(message).to_contain("XRAY-E-UNSUPPORTED-TARGET")
+                expect(message).to_contain("Cranelift")
+            case _:
+                expect(false).to_equal(true)
+
+    it "rejects --xray outside AOT and on non-native backends":
+        expect(xray_policy_resolve(true, "jit", "llvm", false, "native").is_err()).to_equal(true)
+        expect(xray_policy_resolve(true, "interpret", "llvm", false, "native").is_err()).to_equal(true)
+        expect(xray_policy_resolve(true, "aot", "vhdl", false, "native").is_err()).to_equal(true)
+        expect(xray_policy_resolve(true, "aot", "wasm", false, "native").is_err()).to_equal(true)
+
+    it "rejects --xray for non-native output formats (no emitter for SMF)":
+        expect(xray_policy_resolve(true, "aot", "llvm", false, "smf").is_err()).to_equal(true)
+        expect(xray_policy_resolve(true, "aot", "llvm", false, "self-contained").is_err()).to_equal(true)
+        expect(xray_policy_resolve(false, "aot", "llvm", false, "smf").is_ok()).to_equal(true)
+
+    it "accepts --xray for AOT LLVM and pure-Simple native":
+        expect(xray_policy_resolve(true, "aot", "llvm", false, "native").is_ok()).to_equal(true)
+        expect(xray_policy_resolve(true, "aot", "auto", false, "native").is_ok()).to_equal(true)
+        expect(xray_policy_resolve(true, "aot", "native", false, "native").is_ok()).to_equal(true)
+
+describe "XRay driver gate (CompileContext.create)":
+    it "records the Cranelift rejection before any pipeline runs":
+        var options = driver_core_compile_options_default()
+        options.mode = CompileMode.Aot
+        options.backend = "cranelift"
+        options.xray_enabled = true
+        val ctx = CompileContext.create(options)
+        expect(ctx.config.contains_key("xray_config_error")).to_equal(true)
+        expect(ctx.config.contains_key("xray")).to_equal(false)
+
+    it "writes no xray config key when the static switch is off":
+        var options = driver_core_compile_options_default()
+        options.mode = CompileMode.Aot
+        options.backend = "cranelift"
+        val ctx = CompileContext.create(options)
+        expect(ctx.config.contains_key("xray_config_error")).to_equal(false)
+        expect(ctx.config.contains_key("xray")).to_equal(false)
+
+describe "XRay cache-key token":
+    it "adds nothing when off and a token when on":
+        expect(xray_option_identity_suffix(false)).to_equal("")
+        expect(xray_option_identity_suffix(true)).to_equal("|xray=on")

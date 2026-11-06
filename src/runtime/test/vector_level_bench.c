@@ -1,6 +1,6 @@
 /* Levelled vector provider: parity + native kernel timing through the real
  * wire ABI (query -> apply), on any OS. Usage:
- *   vector_level_bench <provider.{so,dylib,dll}> <expect_level|-1> [reps]
+ *   vector_level_bench <provider.{so,dylib,dll}> <expect_level|-1> [reps [expect_reason|-]]
  * Prints one PASS line with level, ns/op for bitmap AND (1 Mbit) and HTTP
  * FIND_CRLF (1 MiB), and the same ops from an in-harness scalar reference
  * (-O2, loop vectorization disabled) so the speedup is measured on the same machine. */
@@ -70,7 +70,8 @@ int main(int argc, char **argv) {
     simple_vector_query_fn_v1 query = (simple_vector_query_fn_v1)SYM(lib, "simple_provider_query_v1");
     apply = (simple_vector_apply_fn_v1)SYM(lib, "simple_vector_apply_v1");
     int32_t (*level_fn)(void) = (int32_t (*)(void))SYM(lib, "simple_vector_selected_level_v1");
-    if (!query || !apply || !level_fn) FAIL("missing export");
+    int32_t (*reason_fn)(char *, uint64_t) = (int32_t (*)(char *, uint64_t))SYM(lib, "simple_vector_level_reason_v1");
+    if (!query || !apply || !level_fn || !reason_fn) FAIL("missing export");
     uint8_t pq[44] = {0}, pr[84];
     simple_vector_wr32(pq, 44); simple_vector_wr64(pq + 4, SIMPLE_VECTOR_KERNELS_V1_INTERFACE);
     simple_vector_wr32(pq + 12, 1); simple_vector_wr64(pq + 20, 1); simple_vector_wr64(pq + 36, 15);
@@ -78,6 +79,16 @@ int main(int argc, char **argv) {
     handle = (int64_t)simple_vector_rd64(pr + 16);
     int level = level_fn();
     if (expect >= 0 && level != expect) FAIL("level %d expected %d", level, expect);
+    /* Reason contract: stable code + text, truncation-safe, NULL-safe. */
+    char reason[64], tiny[4] = {'x', 'x', 'x', 'x'};
+    const int32_t code = reason_fn(reason, sizeof reason);
+    if (code < 0 || code > 5 || !reason[0]) FAIL("reason code=%d text='%s'", code, reason);
+    if (reason_fn(NULL, 0) != code || reason_fn(tiny, sizeof tiny) != code || tiny[3] != 0 ||
+            strncmp(tiny, reason, 3) != 0) FAIL("reason query not stable/bounded");
+    static const char *const prefix[] = {"max", "cpu-missing:", "xcr0:0x", "cap:", "os:", "build:"};
+    if (strncmp(reason, prefix[code], strlen(prefix[code])) != 0) FAIL("reason code %d text '%s'", code, reason);
+    if (argc > 4 && strcmp(argv[4], "-") != 0 && strcmp(argv[4], reason) != 0)
+        FAIL("reason '%s' expected '%s'", reason, argv[4]);
 
     uint32_t *a = malloc(4 * (WORDS + 8)), *b = malloc(4 * (WORDS + 8)), *o = malloc(4 * (WORDS + 8)), *ref = malloc(4 * (WORDS + 8));
     uint8_t *h = malloc(BYTES + 64);
@@ -105,7 +116,7 @@ int main(int argc, char **argv) {
         if (st != want) FAIL("http n=%zu status=%u want=%u", n, st, want);
         if (level > 0 && f != ref_find(h, n, crlf, 'Z')) FAIL("http mismatch crlf=%d n=%zu pos=%zu got=%lld", crlf, n, pos, (long long)f);
     }
-    if (level == 0) { printf("PASS level=0 refused parity-checked\n"); return 0; }
+    if (level == 0) { printf("PASS level=0 reason=%s refused parity-checked\n", reason); return 0; }
 
     memset(h, 'x', BYTES); h[BYTES - 2] = '\r'; h[BYTES - 1] = '\n';
     /* Best of 7 batches (min is robust on a shared, loaded host); the asm
@@ -124,7 +135,7 @@ int main(int argc, char **argv) {
     }
     if (memcmp(o, ref, WORDS * 4)) FAIL("bitmap timing parity");
     if (f != fs || f != BYTES - 2) FAIL("http timing parity %lld %lld", (long long)f, (long long)fs);
-    printf("PASS level=%d bitmap_and_1mbit_ns=%.0f scalar_ns=%.0f speedup=%.1fx http_crlf_1mib_ns=%.0f scalar_ns=%.0f speedup=%.1fx\n",
-        level, bitmap_ns, bitmap_scalar_ns, bitmap_scalar_ns / bitmap_ns, http_ns, http_scalar_ns, http_scalar_ns / http_ns);
+    printf("PASS level=%d reason=%s bitmap_and_1mbit_ns=%.0f scalar_ns=%.0f speedup=%.1fx http_crlf_1mib_ns=%.0f scalar_ns=%.0f speedup=%.1fx\n",
+        level, reason, bitmap_ns, bitmap_scalar_ns, bitmap_scalar_ns / bitmap_ns, http_ns, http_scalar_ns, http_scalar_ns / http_ns);
     return 0;
 }

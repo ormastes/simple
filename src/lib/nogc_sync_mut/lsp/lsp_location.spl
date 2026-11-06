@@ -1,0 +1,126 @@
+# Pure parsing of one-shot query output lines into LSP locations.
+#
+# The query children print `{file}:{line}: [kind] signature` (definition),
+# `{file}:{line}: source text` (references) or `{file}:{line}:{col}` and never a
+# column for the first two. This module anchors on the FIRST `:<digits>` field
+# after an optional Windows drive prefix, so `D:\x.spl:12: [fn] fn f(a: T):`
+# yields file `D:\x.spl`, line 12 and the trailer intact. The trailer is then
+# used to derive the identifier column from the actual source line, so the
+# editor lands on the name rather than column 0.
+
+struct LspQueryLocationV1:
+    file: text
+    line: i64          # 1-based as printed by the query child
+    column: i64?       # 1-based when the child printed one
+    trailer: text      # text after the location fields, trimmed
+
+fn _is_digit_byte(b: i64) -> bool:
+    b >= 48 and b <= 57
+
+fn _is_ident_byte(b: i64) -> bool:
+    (b >= 48 and b <= 57) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or b == 95
+
+fn _all_digits(s: text) -> bool:
+    if s.len() == 0: return false
+    var i = 0
+    while i < s.len():
+        if not _is_digit_byte(s.byte_at(i)): return false
+        i = i + 1
+    true
+
+fn _has_drive_prefix(s: text) -> bool:
+    if s.len() < 3: return false
+    val b0 = s.byte_at(0)
+    val alpha = (b0 >= 65 and b0 <= 90) or (b0 >= 97 and b0 <= 122)
+    val sep = s.byte_at(2)
+    alpha and s.byte_at(1) == 58 and (sep == 47 or sep == 92)
+
+# Lines the query children print instead of a location.
+pub fn lsp_query_line_is_location_v1(line: text) -> bool:
+    val t = line.trim()
+    if t == "" or t == "null": return false
+    if t.starts_with("No ") or t.starts_with("Error") or t.starts_with("Could not"): return false
+    if t.starts_with("Usage") or t.starts_with("Unknown"): return false
+    true
+
+pub fn lsp_parse_query_location_v1(raw: text) -> LspQueryLocationV1?:
+    val line = raw.trim()
+    if not lsp_query_line_is_location_v1(line): return nil
+    var i = 0
+    if _has_drive_prefix(line): i = 2
+    while i < line.len():
+        if line.byte_at(i) == 58:
+            var j = i + 1
+            while j < line.len() and _is_digit_byte(line.byte_at(j)):
+                j = j + 1
+            val has_digits = j > i + 1
+            val boundary = j == line.len() or line.byte_at(j) == 58
+            if has_digits and boundary:
+                val file = line.substring(0, i)
+                val line_no = line.substring(i + 1, j).to_int() ?? 0
+                if file == "" or line_no <= 0: return nil
+                var column: i64? = nil
+                var trailer = ""
+                if j < line.len():
+                    val rest = line.substring(j + 1)
+                    var k = 0
+                    while k < rest.len() and _is_digit_byte(rest.byte_at(k)):
+                        k = k + 1
+                    if k > 0 and (k == rest.len() or rest.byte_at(k) == 58):
+                        column = rest.substring(0, k).to_int()
+                        if k < rest.len(): trailer = rest.substring(k + 1).trim()
+                    else:
+                        trailer = rest.trim()
+                return LspQueryLocationV1(file: file, line: line_no, column: column, trailer: trailer)
+        i = i + 1
+    nil
+
+# The identifier a trailer names: `[fn] fn foo(a: T)` -> foo, `[method] Owner.bar` -> bar,
+# `val x = foo(1)` -> foo. Empty when nothing identifier-like is present.
+pub fn lsp_location_identifier_from_trailer_v1(trailer: text) -> text:
+    var t = trailer.trim()
+    if t.starts_with("["):
+        val close = t.index_of("]")
+        if close >= 0: t = t.substring(close + 1).trim()
+    val fwd = t.index_of(" (forwarded")
+    if fwd >= 0: t = t.substring(0, fwd)
+    val paren = t.index_of("(")
+    if paren >= 0: t = t.substring(0, paren)
+    t = t.trim()
+    # Last whitespace-separated token, then last dotted segment.
+    var start = t.len()
+    while start > 0 and _is_ident_byte(t.byte_at(start - 1)):
+        start = start - 1
+    t.substring(start)
+
+# 0-based column of `name` as a whole word in `source_line`; -1 when absent.
+pub fn lsp_location_word_column_v1(source_line: text, name: text) -> i64:
+    if name == "": return -1
+    var from = 0
+    while from <= source_line.len() - name.len():
+        val rel = source_line.substring(from).index_of(name)
+        if rel < 0: return -1
+        val hit = from + rel
+        val before_ok = hit == 0 or not _is_ident_byte(source_line.byte_at(hit - 1))
+        val after = hit + name.len()
+        val after_ok = after >= source_line.len() or not _is_ident_byte(source_line.byte_at(after))
+        if before_ok and after_ok: return hit
+        from = hit + 1
+    -1
+
+# 0-based LSP column for a parsed location given the source line it points at.
+# A printed column wins; otherwise the trailer's identifier is located in the
+# line; otherwise 0.
+pub fn lsp_location_lsp_column_v1(loc: LspQueryLocationV1, source_line: text) -> i64:
+    match loc.column:
+        case Some(c):
+            if c > 0: return c - 1
+            return 0
+        case nil:
+            val name = lsp_location_identifier_from_trailer_v1(loc.trailer)
+            val col = lsp_location_word_column_v1(source_line, name)
+            if col >= 0: return col
+            0
+
+export LspQueryLocationV1, lsp_query_line_is_location_v1, lsp_parse_query_location_v1
+export lsp_location_identifier_from_trailer_v1, lsp_location_word_column_v1, lsp_location_lsp_column_v1

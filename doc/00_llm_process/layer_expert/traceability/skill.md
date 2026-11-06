@@ -17,3 +17,14 @@ Read [architecture](../../../04_architecture/extreme_typing_traceability.md),
 [source-gap audit](../../../01_research/local/extreme_typing_traceability.md).
 Proposed interfaces remain unimplemented until reviewed runtime evidence says
 otherwise. Source work uses the selected feature/layer knowledge receipt.
+
+## Query entry (2026-11-06)
+
+`src/app/traceability/query_main.spl` has a `main`, so it runs directly:
+`<simple> run src/app/traceability/query_main.spl list|show <kind> [id]
+[--format=sdn] [--snapshot=git:<rev>|index] [--declaration=<sdn>]`. Same args
+and exit codes as `simple trace`. Registered declarations may start with `#`
+comment lines (the SDN parser now skips leading comment lines for every
+top-level shape, not only block mappings). The git/index snapshot routes use
+`OwnedProcessLease` and need the native runtime provider; the worktree preview
+does not. Agent-facing reading guide: `doc/07_guide/infra/trace_query_p0.md`.

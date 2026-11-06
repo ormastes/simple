@@ -166,3 +166,11 @@ understood and a concrete alternative lane is proposed, but that lane
 was not exercised to completion this pass, so the batch should proceed
 under it in a future pass rather than being declared unblocked here.
 
+
+## 2026-11-05 mirp2-E3 re-scope
+
+Classified structural (cross-module Simple fn import unresolved in seed
+single-module JIT); fallback is loud and answers correct. Seed is
+bootstrap-only and `src/os/**` crypto probes are not a bootstrap lane; the
+verification lane for os crypto is the pure-Simple binary. Re-scoped
+non-bootstrap; CLOSED for the seed.
