@@ -1,8 +1,8 @@
 # Seed: `i32` arithmetic overflow diverges between interpreter and JIT
 
-- **Status:** FIXED in the interpreter 2026-11-06 (branch
-  `work/seed-interp-correctness-20261106`) — see "Resolution" below. The JIT
-  `i32::MIN - 1` edge (no wrap) remains a codegen-side gap, not fixed here.
+- **Status:** fixed. Interpreter fixed 2026-11-06 (branch
+  `work/seed-interp-correctness-20261106`), see "Resolution". JIT/codegen half fixed
+  2026-11-06 (branch `work/seed-jit-batch2-20261106`), see "Resolution (JIT)".
 - **Engines:** Rust seed (`src/compiler_rust`), `SIMPLE_EXECUTION_MODE=interpreter`
   vs `SIMPLE_EXECUTION_MODE=jit`. Binary: `cargo-rel100/release/simple`
   built from `work/seed-i32-width-20261104` (declared-width dispatch table
@@ -97,3 +97,36 @@ Rust tests in `interpreter/expr/ops.rs`: `i32_declared_arithmetic_wraps_on_both_
 (before: `left: 8, right: 127`; after ok), `i32_param_arithmetic_wraps`
 (before `0` vs `1`; after ok), `untyped_and_i64_arithmetic_still_promotes`
 (ok before and after — guards the i64 path).
+
+## Resolution (JIT)
+
+Root cause: `codegen/instr/core.rs::compile_binop` computes every integer op in
+i64. A narrow result was only wrapped by an incidental narrowing `Store` into a
+typed local. `val n = m + 1` therefore wrapped, while `(k - 1)` used directly as
+an operand did not. MIR for the repro showed `Store ty=i32` after the `Add` and
+no narrowing after the `Sub`.
+
+Fix: `compile_binop` now narrows `+ - * / <<` results to the declared width
+(`ireduce` then `sextend` or `uextend`) through `narrow_arith_width`. That function
+mirrors the interpreter's `static_int_width` rule: both operands share one narrow
+width, or one is narrow and the other is an untyped literal (`iconst`). For
+`u8`/`u16`/`u32` the literal must also fit the width, as in
+`uint_arith_wrap_width`. An i64 variable operand keeps the result wide on both
+engines.
+
+Fixture `test/fixtures/compiler/seed_jit_miscompiles/i32_min_minus_one_wrap.spl`:
+
+| engine | before (base ecb705896a4) | after |
+|---|---|---|
+| JIT | `i32_min_minus_1 -2147483649`, `rev 2147483649 u -1 s -32769 b 256` | `2147483647`, `rev -2147483647 u 4294967295 s 32767 b 0` |
+| interpreter | `2147483647`, `rev -2147483647 u 4294967295 s 32767 b 0` | unchanged |
+
+Rust test `compiler/tests/i32_overflow_wrap_jit.rs`:
+`i32_arithmetic_wraps_on_both_edges_without_a_narrowing_store` (before: FAILED
+`left: 2`; after ok), `narrow_unsigned_and_i16_arithmetic_wraps` (before:
+FAILED `left: 1`; after ok).
+
+Known limit: a literal defined in another MIR block reaches codegen through a
+Cranelift variable rather than an `iconst`, so it is treated as a wide
+operand and the result is not narrowed. That is the old behaviour, not a new
+divergence.
