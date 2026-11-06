@@ -151,7 +151,15 @@ fn make_partition(subject: SnapshotSubject, artifact: SnapshotArtifact,
             case Err(diagnostics):
                 facts.complete = false
                 facts.diagnostics = diagnostics
-            case Ok(decoded): facts = decoded
+            case Ok(decoded):
+                # The cold extractor consumes only the declared rows of a
+                # decoded owner; keep exactly that payload so composition
+                # cannot gain diagnostics or completeness bits it lacks.
+                facts.nodes = decoded.nodes
+                facts.test_definitions = decoded.test_definitions
+                facts.claims = decoded.claims
+                facts.origins = decoded.origins
+                facts.locators = decoded.locators
     TraceSnapshotPartition(artifact: artifact, declaration_registered: declaration_registered,
         facts: facts, content_sha256: partition_digest(artifact.content), facts_fingerprint: partition_fact_digest(facts))
 
@@ -185,6 +193,11 @@ fn identity_signature(facts: TraceFacts, identity: text) -> [text]:
     for node in facts.nodes:
         if node.id == identity:
             rows.push(sdn_encode_canonical(partition_sdn_strings(["kind", "title"], [node_kind_name(node.kind), node.title])))
+    # Declaration-only locator moves change what an identity resolves to even
+    # when its node rows are byte-identical.
+    for locator in facts.locators:
+        if locator.entity_id == identity:
+            rows.push(sdn_encode_canonical(partition_sdn_strings(["path", "locator_kind", "locator"], [locator.path, locator.locator_kind, locator.locator])))
     trace_sorted_ids(rows)
 
 fn changed_identity_keys(before: TraceFacts, after: TraceFacts) -> [text]:
@@ -284,10 +297,6 @@ fn compose_partition_facts(subject: SnapshotSubject, artifacts: [SnapshotArtifac
             rule_id: "snapshot-extraction-v1", entity_id: "", origin_id: "",
             message: "invalid policy extraction budgets", severity: "error"))
         return facts
-    if not declaration_path_valid(declarations):
-        facts.complete = false
-        facts.diagnostics.push(TraceDiagnostic(code: "TRACE-AUTHORITY-CONFLICT", subject_id: subject.snapshot_id,
-            rule_id: "declarations", entity_id: "", origin_id: "", message: "invalid or repeated declaration registration", severity: "error"))
     var artifact_by_path: Dict<text, SnapshotArtifact> = {}
     for artifact in artifacts: artifact_by_path[artifact.path] = artifact
     for partition in partitions:
@@ -303,11 +312,18 @@ fn compose_partition_facts(subject: SnapshotSubject, artifacts: [SnapshotArtifac
             facts.diagnostics.push(TraceDiagnostic(code: "TRACE-SNAPSHOT-INCOMPLETE", subject_id: subject.snapshot_id,
                 rule_id: "declarations", entity_id: partition.artifact.path, origin_id: "",
                 message: "partition declaration membership differs from frozen registration", severity: "error"))
+    # Same per-path diagnostic identity and order as extract_snapshot_trace_facts_cold.
+    var registered: [text] = []
     for path in declarations:
+        if registered.contains(path) or not trace_path_valid(path):
+            facts.complete = false
+            facts.diagnostics.push(TraceDiagnostic(code: "TRACE-AUTHORITY-CONFLICT", subject_id: subject.snapshot_id,
+                rule_id: "snapshot-extraction-v1", entity_id: path, origin_id: "", message: "invalid or repeated declaration registration", severity: "error"))
+        registered.push(path)
         if not artifact_by_path.contains_key(path):
             facts.complete = false
             facts.diagnostics.push(TraceDiagnostic(code: "TRACE-MISSING-ENDPOINT", subject_id: subject.snapshot_id,
-                rule_id: "declarations", entity_id: path, origin_id: "", message: "registered declaration is absent from exact snapshot", severity: "error"))
+                rule_id: "snapshot-extraction-v1", entity_id: path, origin_id: "", message: "registered declaration is absent from exact snapshot", severity: "error"))
     var declared_kinds: Dict<text, TraceNodeKind> = {}
     for node in facts.nodes: declared_kinds[node.id] = node.kind
     var declared_files: Dict<text, bool> = {}
@@ -349,10 +365,6 @@ fn compose_partition_facts(subject: SnapshotSubject, artifacts: [SnapshotArtifac
         pinned.push(TraceLocator(entity_id: locator.entity_id, path: locator.path, locator_kind: locator.locator_kind,
             locator: locator.locator, blob_id: artifact.blob_id))
     facts.locators = pinned
-    if facts.nodes.len() > policy.max_nodes or facts.claims.len() > policy.max_claims:
-        facts.complete = false
-        facts.diagnostics.push(TraceDiagnostic(code: "TRACE-SNAPSHOT-INCOMPLETE", subject_id: subject.snapshot_id,
-            rule_id: policy.id, entity_id: "", origin_id: "", message: "snapshot fact budget exhausted", severity: "error"))
     facts
 
 fn retained_dependencies(facts: TraceFacts, partitions: [TraceSnapshotPartition],
@@ -412,17 +424,26 @@ pub fn build_trace_snapshot_partition_set(snapshot: SnapshotInput, declaration_p
         partitions: partitions, facts: facts, facts_fingerprint: partition_fact_digest(facts), dependencies: dependencies,
         dependency_fingerprint: dependency_fingerprint(dependencies), dependency_inventory_complete: facts.complete))
 
-fn trace_partition_invalidation(base: TraceSnapshotPartitionSet,
+# Plans over the union of both generations: owners and dependency rows of the
+# retained base and of the composed candidate. An inventory that cannot be
+# classified is a full rebuild reported incomplete, never a complete closure.
+fn trace_partition_invalidation(base: TraceSnapshotPartitionSet, candidate: TraceSnapshotPartitionSet,
     changed_paths: [text], changed_identities: [text], changed_memberships: [text],
     changed_configurations: [text], dependency_inventory_complete: bool, policy_changed: bool, extractor_changed: bool,
     schema_changed: bool, limit: i64) -> TraceInvalidation:
     var known: [text] = []
     for partition in base.partitions: known.push(partition.artifact.path)
-    plan_trace_invalidation(TraceInvalidationInput(known_paths: known, changed_paths: changed_paths,
+    for partition in candidate.partitions:
+        if not known.contains(partition.artifact.path): known.push(partition.artifact.path)
+    var plan = plan_trace_invalidation(TraceInvalidationInput(known_paths: known, changed_paths: changed_paths,
         changed_identities: changed_identities, changed_memberships: changed_memberships,
-        changed_configurations: changed_configurations, dependencies: base.dependencies,
+        changed_configurations: changed_configurations, dependencies: base.dependencies + candidate.dependencies,
         dependency_inventory_complete: dependency_inventory_complete, policy_changed: policy_changed,
         extractor_changed: extractor_changed, schema_changed: schema_changed, max_affected: limit))
+    if not dependency_inventory_complete:
+        plan.full_rebuild = true
+        plan.complete = false
+    plan
 
 # Reuses only owner-local decoded partitions whose exact artifact and all
 # extractor/schema/policy/config bindings match. Cross-file resolution is rebuilt.
@@ -435,12 +456,15 @@ pub fn update_trace_snapshot_partitions(base: TraceSnapshotPartitionSet, candida
         return Err("TRACE-PARTITIONS-INCOMPLETE: candidate subject is incompatible with retained base")
     if not declaration_path_valid(declaration_paths) or candidate.artifacts.len() > 40000:
         return Err("TRACE-PARTITIONS-INCOMPLETE: candidate inventory invalid")
-    val policy_changed = base.policy_binding_id != policy_binding_id
+    # The binding is recomputed from the policy payload; the caller label is
+    # only checked against it and never trusted on its own.
+    val computed_binding = trace_snapshot_policy_binding(policy)
+    if policy_binding_id != computed_binding:
+        return Err("TRACE-PARTITIONS-INCOMPLETE: supplied policy binding does not match exact policy contents")
+    val policy_changed = base.policy_binding_id != computed_binding
     val extractor_changed = base.extractor_id != extractor_id
     val schema_changed = base.schema_id != schema_id
     val config_changed = base.configuration_id != configuration_id
-    if policy_binding_id != trace_snapshot_policy_binding(policy):
-        return Err("TRACE-PARTITIONS-INCOMPLETE: supplied policy binding does not match exact policy contents")
     val bindings_match = not policy_changed and not extractor_changed and not schema_changed and not config_changed
     val old = partition_by_path(base.partitions)
     var partition_rows_valid = true
@@ -481,7 +505,7 @@ pub fn update_trace_snapshot_partitions(base: TraceSnapshotPartitionSet, candida
     if not facts.complete: updated.dependency_inventory_complete = false
     var identity_changes = changed_identities + changed_identity_keys(base.facts, facts)
     var membership_changes = changed_memberships + changed_paths + changed_membership_keys(base.facts, facts)
-    val invalidation = trace_partition_invalidation(base, changed_paths, identity_changes,
+    val invalidation = trace_partition_invalidation(base, updated, changed_paths, identity_changes,
         membership_changes, changed_configurations + (if config_changed: [base.configuration_id] + [configuration_id] else: []),
         complete_deps and facts.complete, policy_changed, extractor_changed, schema_changed, limit)
     val graph = resolve_trace_graph(facts, policy)

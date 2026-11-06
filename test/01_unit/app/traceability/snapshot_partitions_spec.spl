@@ -247,3 +247,108 @@ describe "Retained owner-local snapshot fact partitions (in-development)":
                         expect(updated.invalidation.full_rebuild).to_equal(true)
                         partition_graph_equal(updated.graph, resolve_trace_graph(extract_snapshot_trace_facts_cold(candidate,
                             changed_policy, [], "manifest:snap:new", "generation:snap:new"), changed_policy))
+
+fn declaration_with_claim_to(target_id: text) -> text:
+    '{schema: {name: simple.trace.declarations, version: 1}, nodes: [{id: "feature:owner", kind: feature, title: Owner}], test_definitions: [], claims: [{id: "claim:owner", from_id: "feature:owner", relation: specifies, to_id: "' + target_id + '", origin_id: "origin:owner", operation: add, rule_id: "decl-v1", scope_id: ""}], origins: [{id: "origin:owner", kind: explicit, locator: "line:1"}], locators: [{entity_id: "feature:owner", path: "doc/a.trace.sdn", locator_kind: file, locator: ""}]}'
+
+fn tight_policy() -> TracePolicy:
+    var policy = partition_policy()
+    policy.max_nodes = 2
+    policy
+
+fn oracle_snapshot(snapshot_id: text) -> SnapshotInput:
+    val broken = SnapshotArtifact(path: "doc/broken.trace.sdn", blob_id: "blob:broken", content: "{schema: [malformed]", visibility: "selected_content")
+    val good = SnapshotArtifact(path: "doc/b.trace.sdn", blob_id: "blob:b", content: declaration_with_requirement("requirement:x", "doc/b.trace.sdn"), visibility: "selected_content")
+    val base = partition_snapshot(snapshot_id, true)
+    SnapshotInput(subject: partition_subject(snapshot_id), artifacts: [broken, good, base.artifacts[0], base.artifacts[1]], complete: true)
+
+describe "Partition review blockers (in-development)":
+    it "invalidates an identity consumer when only the identity's declared locator moves":
+        val owner = SnapshotArtifact(path: "doc/a.trace.sdn", blob_id: "blob:owner", content: declaration_with_claim_to("requirement:x"), visibility: "selected_content")
+        val before = SnapshotArtifact(path: "doc/b.trace.sdn", blob_id: "blob:b1", content: declaration_with_requirement("requirement:x", "doc/b.trace.sdn"), visibility: "selected_content")
+        val after = SnapshotArtifact(path: "doc/b.trace.sdn", blob_id: "blob:b2", content: declaration_with_requirement("requirement:x", "src/app/a.spl"), visibility: "selected_content")
+        val source = partition_snapshot("snap:old", false).artifacts[0]
+        val old = SnapshotInput(subject: partition_subject("snap:old"), artifacts: [owner, before, source], complete: true)
+        val candidate = SnapshotInput(subject: partition_subject("snap:new"), artifacts: [owner, after, source], complete: true)
+        val decls = ["doc/a.trace.sdn", "doc/b.trace.sdn"]
+        match partition_set(old, decls):
+            case Err(reason): fail(reason)
+            case Ok(base):
+                match update_trace_snapshot_partitions(base, candidate, decls, "extractor:v1", "schema:v1",
+                    partition_policy(), partition_policy_binding(), "config:v1", "manifest:snap:new", "generation:snap:new", [], [], [], 100):
+                    case Err(reason): fail(reason)
+                    case Ok(updated):
+                        expect(updated.invalidation.affected_paths.contains("doc/a.trace.sdn")).to_equal(true)
+                        partition_graph_equal(updated.graph, partition_cold_graph(candidate, decls))
+
+    it "invalidates a consumer of a fallback artifact identity when that artifact is deleted":
+        val fallback = "artifact:746573742f30315f756e69742f6170702f615f737065632e73706c"
+        val owner = SnapshotArtifact(path: "doc/a.trace.sdn", blob_id: "blob:owner", content: declaration_with_claim_to(fallback), visibility: "selected_content")
+        val old = SnapshotInput(subject: partition_subject("snap:old"), artifacts: partition_snapshot("snap:old", true).artifacts + [owner], complete: true)
+        val candidate = SnapshotInput(subject: partition_subject("snap:new"), artifacts: partition_snapshot("snap:new", false).artifacts + [owner], complete: true)
+        match partition_set(old, ["doc/a.trace.sdn"]):
+            case Err(reason): fail(reason)
+            case Ok(base):
+                match update_trace_snapshot_partitions(base, candidate, ["doc/a.trace.sdn"], "extractor:v1", "schema:v1",
+                    partition_policy(), partition_policy_binding(), "config:v1", "manifest:snap:new", "generation:snap:new", [], [], [], 100):
+                    case Err(reason): fail(reason)
+                    case Ok(updated):
+                        expect(updated.invalidation.affected_paths.contains("doc/a.trace.sdn")).to_equal(true)
+
+    it "reports an incomplete full rebuild when the dependency inventory cannot be classified":
+        val broken = SnapshotArtifact(path: "doc/broken.trace.sdn", blob_id: "blob:broken", content: "{schema: [malformed]", visibility: "selected_content")
+        val snapshot = SnapshotInput(subject: partition_subject("snap:broken"), artifacts: [broken], complete: true)
+        match partition_set(snapshot, ["doc/broken.trace.sdn"]):
+            case Err(reason): fail(reason)
+            case Ok(base):
+                match update_trace_snapshot_partitions(base, snapshot, ["doc/broken.trace.sdn"], "extractor:v1", "schema:v1",
+                    partition_policy(), partition_policy_binding(), "config:v1", "manifest:snap:broken", "generation:snap:broken", [], [], [], 100):
+                    case Err(reason): fail(reason)
+                    case Ok(updated):
+                        expect(updated.invalidation.full_rebuild).to_equal(true)
+                        expect(updated.invalidation.complete).to_equal(false)
+
+    it "rebinds and fully rebuilds when a policy differs only by a duplicated rule":
+        var dup = partition_policy()
+        dup.conventions = dup.conventions + [dup.conventions[0]]
+        expect(trace_snapshot_policy_binding(dup) == partition_policy_binding()).to_equal(false)
+        match partition_set(partition_snapshot("snap:old", false), []):
+            case Err(reason): fail(reason)
+            case Ok(base):
+                match update_trace_snapshot_partitions(base, partition_snapshot("snap:new", false), [], "extractor:v1", "schema:v1",
+                    dup, partition_policy_binding(), "config:v1", "manifest:snap:new", "generation:snap:new", [], [], [], 100):
+                    case Ok(_): fail("stale caller binding accepted for a different policy")
+                    case Err(reason): expect(reason).to_contain("does not match exact policy contents")
+                match update_trace_snapshot_partitions(base, partition_snapshot("snap:new", false), [], "extractor:v1", "schema:v1",
+                    dup, trace_snapshot_policy_binding(dup), "config:v1", "manifest:snap:new", "generation:snap:new", [], [], [], 100):
+                    case Err(reason): fail(reason)
+                    case Ok(updated):
+                        expect(updated.reused_paths.len()).to_equal(0)
+                        expect(updated.invalidation.full_rebuild).to_equal(true)
+
+    it "matches full cold TraceFacts on error branches (malformed and missing declarations)":
+        val snapshot = oracle_snapshot("snap:err")
+        val decls = ["doc/broken.trace.sdn", "doc/b.trace.sdn", "doc/absent.trace.sdn"]
+        val cold = extract_snapshot_trace_facts_cold(snapshot, partition_policy(), decls, "manifest:snap:err", "generation:snap:err")
+        partition_facts_equal(extract_snapshot_trace_facts(snapshot, partition_policy(), decls, "manifest:snap:err", "generation:snap:err"), cold)
+        match partition_set(snapshot, decls):
+            case Err(reason): fail(reason)
+            case Ok(base):
+                partition_facts_equal(base.facts, cold)
+                val next = oracle_snapshot("snap:err2")
+                match update_trace_snapshot_partitions(base, next, decls, "extractor:v1", "schema:v1",
+                    partition_policy(), partition_policy_binding(), "config:v1", "manifest:snap:err2", "generation:snap:err2", [], [], [], 100):
+                    case Err(reason): fail(reason)
+                    case Ok(updated):
+                        partition_facts_equal(updated.facts, extract_snapshot_trace_facts_cold(next,
+                            partition_policy(), decls, "manifest:snap:err2", "generation:snap:err2"))
+
+    it "matches full cold TraceFacts when the node budget is exhausted":
+        val snapshot = oracle_snapshot("snap:budget")
+        val decls = ["doc/broken.trace.sdn", "doc/b.trace.sdn"]
+        val cold = extract_snapshot_trace_facts_cold(snapshot, tight_policy(), decls, "manifest:snap:budget", "generation:snap:budget")
+        expect(cold.complete).to_equal(false)
+        match build_trace_snapshot_partition_set(snapshot, decls, "extractor:v1", "schema:v1", tight_policy(),
+            trace_snapshot_policy_binding(tight_policy()), "config:v1", "manifest:snap:budget", "generation:snap:budget"):
+            case Err(reason): fail(reason)
+            case Ok(base): partition_facts_equal(base.facts, cold)
