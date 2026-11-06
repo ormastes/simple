@@ -6053,7 +6053,8 @@ mod cuda_status_tests {
 
 #[cfg(test)]
 mod foreign_text_tests {
-    use super::c_ptr_to_string;
+    use super::{c_ptr_to_string, rt_webgpu_create_surface_fn};
+    use crate::value::Value;
 
     #[test]
     fn null_foreign_text_is_a_contract_error() {
