@@ -613,8 +613,51 @@ bootstrap_stage3_verify_composed_snapshot() (
     done
 )
 
+# Generic preserved-candidate composition. Every ordinary admission replay
+# checks this graph; losing producer state or fresh control evidence is fatal.
+bootstrap_stage3_verify_requalification_sanity() (
+    [ "$#" = 5 ] || return 1
+    record=$1 candidate=$4
+    bootstrap_stage3_sanity_safe_regular "$record" || return 1
+    [ "$(wc -l <"$record" | tr -d ' ')" = 23 ] || return 1
+    [ "$(sed 's/=.*//' "$record" | tr '\n' ' ')" = 'schema status source_snapshot_sha256 runtime_snapshot_sha256 tool_snapshot_sha256 build_args_sha256 full_sanity_path full_sanity_sha256 producer_state_path producer_state_sha256 historical_admission_path historical_admission_sha256 control_root control_source_path control_source_sha256 control_scripts_path control_scripts_sha256 control_runtime_path control_runtime_sha256 control_tools_path control_tools_sha256 control_state_path control_state_sha256 ' ] || return 1
+    bootstrap_stage3_sanity_expect schema "$record" simple-bootstrap-sanity-requalification-v1 || return 1
+    bootstrap_stage3_sanity_expect status "$record" pass || return 1
+    value() { bootstrap_stage3_manifest_value "$1" "$record"; }
+    for role in full_sanity producer_state historical_admission control_source control_scripts control_runtime control_tools control_state; do
+        file=$(value "${role}_path") || return 1
+        bootstrap_stage3_sanity_safe_regular "$file" || return 1
+        [ "$(bootstrap_stage3_hash_file "$file")" = "$(value "${role}_sha256")" ] || return 1
+    done
+    bootstrap_stage3_git_state_schema_valid "$(value producer_state_path)" || return 1
+    bootstrap_stage3_git_state_schema_valid "$(value control_state_path)" || return 1
+    control_root=$(value control_root) || return 1
+    bootstrap_stage3_normalized_absolute "$control_root" || return 1
+    [ -d "$control_root" ] && [ ! -L "$control_root" ] &&
+        [ "$(CDPATH= cd -- "$control_root" && pwd -P)" = "$control_root" ] || return 1
+    # Replay the immutable materialized fixture bytes, not just the manifest.
+    scratch=$(mktemp -d "${TMPDIR:-/tmp}/simple-requalification-replay.XXXXXX") || return 1
+    trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+    bootstrap_stage3_source_snapshot "$scratch/source" "$control_root" || return 1
+    bootstrap_stage3_directory_snapshot "$scratch/scripts" "$control_root/scripts" || return 1
+    bootstrap_stage3_directory_snapshot "$scratch/runtime" "$control_root/src/runtime" || return 1
+    for role in source scripts runtime; do
+        cmp -s "$scratch/$role" "$(value "control_${role}_path")" || return 1
+    done
+    full=$(value full_sanity_path) || return 1
+    [ "$(bootstrap_stage3_manifest_value schema "$full")" = simple-bootstrap-sanity-evidence-v1 ] || return 1
+    bootstrap_stage3_verify_sanity_evidence_receipt "$full" "$full" "${full%/*}" "$candidate" "$control_root"
+)
+
 bootstrap_stage3_verify_composed_sanity_input_tuple() (
     [ "$#" = 5 ] || return 1
+    if [ "$(bootstrap_stage3_manifest_value schema "$1")" = simple-bootstrap-sanity-requalification-v1 ]; then
+        for binding in "source_snapshot_sha256:$2" "runtime_snapshot_sha256:$3" "tool_snapshot_sha256:$4"; do
+            [ "$(bootstrap_stage3_manifest_value "${binding%%:*}" "$1")" = "$(bootstrap_stage3_hash_file "${binding#*:}")" ] || return 1
+        done
+        [ "$(bootstrap_stage3_manifest_value build_args_sha256 "$1")" = "$5" ]
+        return $?
+    fi
     if [ "$(bootstrap_stage3_manifest_value schema "$1")" = simple-bootstrap-sanity-frontend-continuation-v1 ]; then
         bootstrap_stage3_verify_frontend_continuation_inputs "$@"
         return $?
@@ -920,6 +963,22 @@ _bootstrap_stage3_verify_sanity_evidence_receipt_legacy() (
     done
 )
 
+# One writer shared by fresh builds and preserved-candidate requalification.
+bootstrap_stage3_write_receiver_evidence_receipt() (
+    [ "$#" = 8 ] || return 1
+    {
+        echo "schema=simple-bootstrap-stage2-receiver-evidence-v1"
+        echo "status=$2"
+        echo "runtime_compare_status=$3"
+        echo "probe_exit=$4"
+        echo "candidate_sha256_before=$5"
+        echo "candidate_sha256_after=$6"
+        echo "runtime_snapshot_sha256=$(bootstrap_stage3_hash_file "$7")"
+        echo "probe_log=$8"
+        echo "probe_log_sha256=$(bootstrap_stage3_hash_file "$8")"
+    } >"$1"
+)
+
 bootstrap_stage3_verify_receiver_evidence_receipt() (
     [ "$#" = 8 ] || return 1
     bootstrap_stage3_receiver_file=$1
@@ -1148,7 +1207,68 @@ bootstrap_stage3_verify_admission_runtime_authority() {
     fi
 }
 
+# Historical integrity is not executable admission. Only the normal verifier
+# below combines it with the required sanity and receiver execution evidence.
 bootstrap_stage3_verify_stage2_admission_receipt() (
+    bootstrap_stage3_verify_stage2_admission_preparation "$@" || return 1
+    bootstrap_stage3_verify_requalification_commit "$1" "${14}"
+)
+
+# Internal preparation is not product admission. The requalification owner
+# uses it while constructing the runtime binding before the publisher is reaped.
+bootstrap_stage3_verify_stage2_admission_preparation() (
+    [ "$#" = 21 ] || return 1
+    bootstrap_stage3_verify_sanity_evidence_receipt \
+        "${14}" "${15}" "${16}" "$3" "${21}" || return 1
+    bootstrap_stage3_verify_composed_sanity_input_tuple \
+        "${14}" "$5" "$7" "${11}" "${13}" || return 1
+    bootstrap_stage3_verify_receiver_evidence_receipt \
+        "${17}" "${18}" "$3" "$4" "$7" "$8" "${19}" "${20}" || return 1
+    bootstrap_stage3_verify_stage2_historical_chain "$@"
+)
+
+# Shared by full replay and direct authority consumers. Legacy sanity schemas
+# retain their prior admission contract; the new composition cannot authorize
+# any consumer until its publisher has terminated and the parent commits it.
+bootstrap_stage3_verify_requalification_commit() (
+    [ "$#" = 1 ] || [ "$#" = 2 ] || return 1
+    admission=$1
+    bootstrap_stage3_sanity_safe_regular "$admission" || return 1
+    # Full replay may map immutable display paths to a relocated legacy capsule.
+    # Its already-verified actual sanity path preserves that existing contract.
+    sanity=${2:-$(bootstrap_stage3_manifest_value sanity_evidence_path "$admission")}
+    bootstrap_stage3_sanity_safe_regular "$sanity" || return 1
+    [ "$(bootstrap_stage3_hash_file "$sanity")" = "$(bootstrap_stage3_manifest_value sanity_evidence_sha256 "$admission")" ] || return 1
+    schema=$(bootstrap_stage3_manifest_value schema "$sanity") || return 1
+    case "$schema" in
+        simple-bootstrap-sanity-requalification-v1) ;;
+        simple-bootstrap-sanity-evidence-v1|simple-bootstrap-sanity-components-v1|\
+        simple-bootstrap-sanity-version-composition-v1|simple-bootstrap-sanity-frontend-continuation-v1|\
+        simple-bootstrap-sanity-control-composition-v1)
+            return 0 ;;
+        *) return 1 ;;
+    esac
+    [ "$(bootstrap_stage3_manifest_value admission_receipt_path "$admission")" = "$admission" ] || return 1
+    case "$admission" in */stage3/*/stage2-admitted/admission.env) ;; *) return 1 ;; esac
+    generation=$(dirname -- "$(dirname -- "$(dirname -- "$(dirname -- "$admission")")")")
+    marker=$generation/requalification-commit.env
+    publication=$generation/publication-process.env
+    bootstrap_stage3_sanity_safe_regular "$marker" || return 1
+    bootstrap_stage3_sanity_safe_regular "$publication" || return 1
+    [ "$(wc -l <"$marker" | tr -d ' ')" = 4 ] || return 1
+    [ "$(sed 's/=.*//' "$marker" | tr '\n' ' ')" = 'schema admission_sha256 publication_receipt_path publication_receipt_sha256 ' ] || return 1
+    bootstrap_stage3_sanity_expect schema "$marker" simple-stage2-requalification-commit-v1 || return 1
+    bootstrap_stage3_sanity_expect admission_sha256 "$marker" "$(bootstrap_stage3_hash_file "$admission")" || return 1
+    bootstrap_stage3_sanity_expect publication_receipt_path "$marker" "$publication" || return 1
+    bootstrap_stage3_sanity_expect publication_receipt_sha256 "$marker" "$(bootstrap_stage3_hash_file "$publication")" || return 1
+    bootstrap_stage3_sanity_expect status "$publication" complete || return 1
+    bootstrap_stage3_sanity_expect exit_status "$publication" 0
+)
+
+# Internal recovery precheck ONLY. A successful return never admits a parent,
+# product, or probe: old execution companion logs may have been lost. Recovery
+# must execute the full canonical controls afresh and call the normal verifier.
+bootstrap_stage3_verify_stage2_historical_chain() (
     [ "$#" = 21 ] || return 1
     bootstrap_stage3_admission_receipt=$1
     bootstrap_stage3_admission_receipt_display=$2
@@ -1172,20 +1292,6 @@ bootstrap_stage3_verify_stage2_admission_receipt() (
         "$bootstrap_stage3_admission_receiver_log_display"; do
         bootstrap_stage3_normalized_absolute "$bootstrap_stage3_admission_display" || return 1
     done
-    bootstrap_stage3_verify_sanity_evidence_receipt \
-        "$bootstrap_stage3_admission_sanity" \
-        "$bootstrap_stage3_admission_sanity_display" \
-        "$bootstrap_stage3_admission_sanity_companion_parent" \
-        "$bootstrap_stage3_admission_candidate" \
-        "$bootstrap_stage3_admission_root" || return 1
-    bootstrap_stage3_verify_composed_sanity_input_tuple "$bootstrap_stage3_admission_sanity" \
-        "$bootstrap_stage3_admission_source" "$bootstrap_stage3_admission_runtime" \
-        "$bootstrap_stage3_admission_tool" "$bootstrap_stage3_admission_args_sha" || return 1
-    bootstrap_stage3_verify_receiver_evidence_receipt \
-        "$bootstrap_stage3_admission_receiver" "$bootstrap_stage3_admission_receiver_display" \
-        "$bootstrap_stage3_admission_candidate" "$bootstrap_stage3_admission_candidate_display" \
-        "$bootstrap_stage3_admission_runtime" "$bootstrap_stage3_admission_runtime_display" \
-        "$bootstrap_stage3_admission_receiver_log" "$bootstrap_stage3_admission_receiver_log_display" || return 1
     bootstrap_stage3_sanity_regular_authority \
         "$bootstrap_stage3_admission_receipt" || return 1
     # 24 keys + the three simple_abi_* rows the writer emits between
@@ -1521,6 +1627,9 @@ bootstrap_stage3_verify_sanity_evidence_receipt() (
     bootstrap_stage3_sanity_regular_authority "$bcc_file" || return 1
     bcc_schema=$(bootstrap_stage3_manifest_value schema "$bcc_file") || return 1
     case "$bcc_schema" in
+        simple-bootstrap-sanity-requalification-v1)
+            bootstrap_stage3_verify_requalification_sanity "$@"
+            ;;
         simple-bootstrap-sanity-frontend-continuation-v1)
             bootstrap_stage3_verify_frontend_continuation_receipt "$@"
             ;;
