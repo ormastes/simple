@@ -2,11 +2,13 @@
 #
 # Entry-closure builds compile re-export facades whose MIR is empty. The old
 # path wrote a C stub and shelled out to find_c_compiler(); in environments with
-# no discoverable C compiler (stage 2 matrix test_runner_build, 168 units) every
-# such unit failed with "no C compiler available for empty module object".
-# For ELF targets a valid empty ET_REL needs only a header plus a section-name
-# table, so write the bytes directly. Non-ELF targets return nil (caller keeps
-# the C-compiler path).
+# no discoverable C compiler (stage 2 matrix test_runner_build, 168 units on
+# Linux, 64 on the Windows GNU lane) every such unit failed with "no C compiler
+# available for empty module object". Write the bytes directly instead:
+#   - ELF targets: a valid empty ET_REL (header + section-name table).
+#   - Windows (COFF) targets: one 4-byte .data section plus one external data
+#     symbol, matching what `int <symbol> = 0;` compiles to.
+# Other targets (Mach-O) return nil and the caller keeps the C-compiler path.
 
 fn _eo_push_le(bytes: [u8], value: i64, width: i64) -> [u8]:
     var out = bytes
@@ -23,14 +25,83 @@ fn _eo_elf_machine(target: text) -> i64:
     if target.starts_with("aarch64-"): return 183
     0
 
-fn driver_empty_object_supported(target: text) -> bool:
+fn _eo_coff_machine(target: text) -> i64:
+    if target.starts_with("x86_64-"): return 34404     # IMAGE_FILE_MACHINE_AMD64 0x8664
+    if target.starts_with("aarch64-"): return 43620    # IMAGE_FILE_MACHINE_ARM64 0xAA64
+    0
+
+fn _eo_is_elf(target: text) -> bool:
     val is_elf_os = target.contains("-linux-") or target.contains("freebsd") or target.ends_with("-linux")
     is_elf_os and _eo_elf_machine(target) != 0
 
+fn _eo_is_coff(target: text) -> bool:
+    target.contains("-windows") and _eo_coff_machine(target) != 0
+
+fn driver_empty_object_supported(target: text) -> bool:
+    _eo_is_elf(target) or _eo_is_coff(target)
+
+# Target used for the empty object: the explicit build target when set, else
+# the compiler host (an unset SIMPLE_NATIVE_BUILD_TARGET means a host build).
+fn driver_empty_object_target(explicit_target: text, host_os: text, host_arch: text) -> text:
+    if explicit_target != "":
+        return explicit_target
+    if host_os == "windows": return host_arch + "-pc-windows-gnu"
+    if host_os == "linux": return host_arch + "-unknown-linux-gnu"
+    if host_os == "freebsd": return host_arch + "-unknown-freebsd"
+    host_arch + "-unknown-" + host_os
+
+fn driver_empty_object_bytes(target: text, symbol: text) -> [u8]?:
+    if _eo_is_elf(target):
+        return _eo_elf_bytes(target)
+    if _eo_is_coff(target) and symbol != "":
+        return _eo_coff_bytes(target, symbol)
+    nil
+
+# COFF relocatable: file header (20) + one section header (40) + 4 bytes of
+# .data + one symbol record (18) + string table (4-byte size + name + NUL).
+fn _eo_coff_bytes(target: text, symbol: text) -> [u8]:
+    val data_off = 20 + 40
+    val sym_off = data_off + 4
+    var b: [u8] = []
+    b = _eo_push_le(b, _eo_coff_machine(target), 2)   # Machine
+    b = _eo_push_le(b, 1, 2)                          # NumberOfSections
+    b = _eo_push_le(b, 0, 4)                          # TimeDateStamp (deterministic)
+    b = _eo_push_le(b, sym_off, 4)                    # PointerToSymbolTable
+    b = _eo_push_le(b, 1, 4)                          # NumberOfSymbols
+    b = _eo_push_le(b, 0, 2)                          # SizeOfOptionalHeader
+    b = _eo_push_le(b, 0, 2)                          # Characteristics
+    # section header ".data"
+    val sec_name: [u8] = [46, 100, 97, 116, 97, 0, 0, 0]
+    for c in sec_name:
+        b.push(c)
+    b = _eo_push_le(b, 0, 4)                          # VirtualSize
+    b = _eo_push_le(b, 0, 4)                          # VirtualAddress
+    b = _eo_push_le(b, 4, 4)                          # SizeOfRawData
+    b = _eo_push_le(b, data_off, 4)                   # PointerToRawData
+    b = _eo_push_le(b, 0, 4)                          # PointerToRelocations
+    b = _eo_push_le(b, 0, 4)                          # PointerToLinenumbers
+    b = _eo_push_le(b, 0, 2)                          # NumberOfRelocations
+    b = _eo_push_le(b, 0, 2)                          # NumberOfLinenumbers
+    # INITIALIZED_DATA 0x40 | ALIGN_4BYTES 0x00300000 | MEM_READ | MEM_WRITE
+    b = _eo_push_le(b, 3224371264, 4)                 # 0xC0300040
+    b = _eo_push_le(b, 0, 4)                          # .data payload: int = 0
+    # symbol: long name via string table offset 4
+    b = _eo_push_le(b, 0, 4)                          # Zeroes
+    b = _eo_push_le(b, 4, 4)                          # Offset into string table
+    b = _eo_push_le(b, 0, 4)                          # Value
+    b = _eo_push_le(b, 1, 2)                          # SectionNumber
+    b = _eo_push_le(b, 0, 2)                          # Type
+    b.push(2)                                         # IMAGE_SYM_CLASS_EXTERNAL
+    b.push(0)                                         # NumberOfAuxSymbols
+    val name_bytes = symbol.bytes()
+    b = _eo_push_le(b, 4 + name_bytes.len() + 1, 4)   # string table size
+    for c in name_bytes:
+        b.push(c)
+    b.push(0)
+    b
+
 # ELF64 little-endian ET_REL: header, ".shstrtab" payload, null + shstrtab headers.
-fn driver_empty_object_bytes(target: text) -> [u8]?:
-    if not driver_empty_object_supported(target):
-        return nil
+fn _eo_elf_bytes(target: text) -> [u8]:
     var b: [u8] = [127, 69, 76, 70, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     b = _eo_push_le(b, 1, 2)                         # e_type ET_REL
     b = _eo_push_le(b, _eo_elf_machine(target), 2)   # e_machine

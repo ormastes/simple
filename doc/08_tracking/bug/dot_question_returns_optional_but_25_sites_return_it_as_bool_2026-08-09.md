@@ -279,3 +279,13 @@ and a `.?` as the last operand of an `and` chain
 bootstrap focus: `src/os/apps/simple_browser/main.spl:81` (`text_out.?`) and
 `src/os/kernel/loader/installed_artifact_catalog_v1.spl:339` (`i64?` `.?` — also treats
 0 alias bytes as false).
+
+## hbhd leftovers 2026-11-06
+
+Last two src/os sites fixed: `installed_artifact_catalog_v1.spl` record gate now
+`installed_artifact_alias_text_bytes_bounded_v1(aliases) != nil` (0 alias bytes is valid,
+was falsy under `.?`); `simple_browser/main.spl` `_read_file_via_vfs -> text?` now returns
+`nil` for empty text instead of a bool. Guard spec
+`test/01_unit/compiler/semantics/bool_fn_tail_exists_check_spec.spl` RED 2/3 -> GREEN 15/15;
+helper now stops at `pub fn`/`class`/`struct`. Verification pending: SimpleOS native build of
+both modules (stage3).

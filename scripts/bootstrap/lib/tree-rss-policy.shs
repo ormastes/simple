@@ -688,6 +688,28 @@ bootstrap_tree_rss_whole_build_plan() {
   fi
   bootstrap_tree_rss_plan_budget_kib=$btr_wb_budget
   btr_wb_fit=$(((btr_wb_budget - BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB) / btr_wb_worker))
+  btr_wb_small=0
+  if [ "$btr_wb_fit" -lt 1 ]; then
+    # Small-host single-worker mode (2026-11-06): the host cannot hold one
+    # worker at floor x margin (24 GiB macOS arm64: ~18 GiB at 75% vs ~28 GiB).
+    # Run exactly ONE worker under the host budget at the max host share
+    # (still bounded by 3/4 of available); a runaway above that is killed.
+    # Logged as small-host mode, never silent. Refused only when the budget
+    # cannot even hold the phase base.
+    btr_wb_sbudget=$((bootstrap_tree_rss_host_total_kib / 100 * BOOTSTRAP_TREE_RSS_HOST_PCT_MAX))
+    btr_wb_sbound="host RAM ${bootstrap_tree_rss_host_total_kib} KiB x ${BOOTSTRAP_TREE_RSS_HOST_PCT_MAX}% (small-host max)"
+    if [ -n "$bootstrap_tree_rss_host_available_kib" ] && [ "$btr_wb_avail" -lt "$btr_wb_sbudget" ]; then
+      btr_wb_sbudget=$btr_wb_avail
+      btr_wb_sbound="3/4 of available ${bootstrap_tree_rss_host_available_kib} KiB"
+    fi
+    if [ "$btr_wb_sbudget" -gt "$BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB" ]; then
+      btr_wb_small=1
+      btr_wb_fit=1
+      btr_wb_budget=$btr_wb_sbudget
+      btr_wb_budget_bound=$btr_wb_sbound
+      bootstrap_tree_rss_plan_budget_kib=$btr_wb_budget
+    fi
+  fi
   [ "$btr_wb_fit" -ge 1 ] || {
     bootstrap_tree_rss_refusal="tree RSS policy: whole-build phase cannot fit one full-CLI build worker: host budget ${btr_wb_budget} KiB (${btr_wb_budget_bound}; host RAM via ${bootstrap_tree_rss_host_total_source}) is below the one-worker requirement ${btr_wb_one} KiB (${btr_wb_price}); free host memory (another lane?), raise tree_rss_host_pct (max ${BOOTSTRAP_TREE_RSS_HOST_PCT_MAX}), or lower the phase pricing for a warm-cache lane via SIMPLE_BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB (<= ${BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB} KiB)"
     return 1
@@ -695,14 +717,20 @@ bootstrap_tree_rss_whole_build_plan() {
   bootstrap_tree_rss_plan_workers=$btr_wb_fit
   [ "$bootstrap_tree_rss_plan_workers" -le "$btr_wb_requested" ] || bootstrap_tree_rss_plan_workers=$btr_wb_requested
   bootstrap_tree_rss_plan_cap_kib=$((BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB + bootstrap_tree_rss_plan_workers * btr_wb_worker))
+  [ "$btr_wb_small" = 0 ] || bootstrap_tree_rss_plan_cap_kib=$btr_wb_budget
   btr_wb_default_ceiling=$(bootstrap_tree_rss_ceiling_kib "$bootstrap_tree_rss_plan_workers" "$bootstrap_tree_rss_host_total_kib")
   bootstrap_tree_rss_plan_bound=worker-floor
   if [ "$bootstrap_tree_rss_plan_cap_kib" -gt "$btr_wb_default_ceiling" ]; then
     bootstrap_tree_rss_plan_ceiling_kib=$bootstrap_tree_rss_plan_cap_kib
     bootstrap_tree_rss_plan_bound=worker-floor-elevated
   fi
+  if [ "$btr_wb_small" = 1 ]; then
+    bootstrap_tree_rss_plan_bound=small-host-one-worker
+    [ "$bootstrap_tree_rss_plan_ceiling_kib" = 0 ] || bootstrap_tree_rss_plan_bound=small-host-one-worker-elevated
+    btr_wb_price="SMALL-HOST MODE: 1 worker under host budget (one-worker requirement $btr_wb_one KiB = $btr_wb_price exceeds it)"
+  fi
   bootstrap_tree_rss_plan_timeout_scale=$(bootstrap_tree_rss_timeout_scale "$btr_wb_requested" "$bootstrap_tree_rss_plan_workers")
-  bootstrap_tree_rss_plan_summary="whole-build phase: workers ${bootstrap_tree_rss_plan_workers} (requested ${btr_wb_requested}, host budget fits ${btr_wb_fit}, timeout scale x${bootstrap_tree_rss_plan_timeout_scale}), cap ${bootstrap_tree_rss_plan_cap_kib} KiB = ${btr_wb_price} x ${bootstrap_tree_rss_plan_workers}, host budget ${btr_wb_budget} KiB (${btr_wb_budget_bound}; host RAM via ${bootstrap_tree_rss_host_total_source}), default ceiling ${btr_wb_default_ceiling} KiB, elevated ceiling ${bootstrap_tree_rss_plan_ceiling_kib} KiB, bound ${bootstrap_tree_rss_plan_bound}"
+  bootstrap_tree_rss_plan_summary="whole-build phase: workers ${bootstrap_tree_rss_plan_workers} (requested ${btr_wb_requested}, host budget fits ${btr_wb_fit}, timeout scale x${bootstrap_tree_rss_plan_timeout_scale}), cap ${bootstrap_tree_rss_plan_cap_kib} KiB = ${btr_wb_price}$([ "$btr_wb_small" = 1 ] || printf ' x %s' "$bootstrap_tree_rss_plan_workers"), host budget ${btr_wb_budget} KiB (${btr_wb_budget_bound}; host RAM via ${bootstrap_tree_rss_host_total_source}), default ceiling ${btr_wb_default_ceiling} KiB, elevated ceiling ${bootstrap_tree_rss_plan_ceiling_kib} KiB, bound ${bootstrap_tree_rss_plan_bound}"
 }
 
 # bootstrap_tree_rss_whole_build_export REQUESTED_WORKERS [REPO_ROOT]
@@ -804,6 +832,7 @@ bootstrap_tree_rss__selftest() {
   btr_st_n=0
   printf 'MemTotal:       134094232 kB\n' >"$btr_st_dir/big"
   printf 'MemTotal:        16000000 kB\n' >"$btr_st_dir/small"
+  printf 'MemTotal:         5000000 kB\n' >"$btr_st_dir/tiny"
   : >"$btr_st_dir/none"
   # The 2026-11-05 incident host (121 GiB aarch64), idle and with another
   # lane holding most of it (MemAvailable 40 GB), and a 64 GiB host.
@@ -1031,8 +1060,13 @@ bootstrap_tree_rss__selftest() {
   btr_st_plan aarch64-pct75-three-workers aarch64 8 3:79691776:79691776:worker-floor-elevated SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=75
   # Tiny host: 16 GB x 50% = 8000000 KiB < one worker (29360128): fail closed,
   # naming the requirement.
-  btr_st_plan tiny-host-fails-closed small 8 'REFUSED=cannot fit one full-CLI build worker: host budget 8000000 KiB'
-  btr_st_plan tiny-host-names-floor small 8 'REFUSED=worker floor 16777216 KiB x 150%'
+  # Small host (16 GB): below one worker at floor x margin -> small-host
+  # single-worker mode at 75% of RAM (12000000 KiB), cap = that budget.
+  btr_st_plan small-host-one-worker small 8 1:12000000:0:small-host-one-worker
+  btr_st_plan small-host-ignores-default-pct small 1 1:12000000:0:small-host-one-worker SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=50
+  # Even the max share cannot hold the 4 GiB phase base: still refused.
+  btr_st_plan tiny-host-fails-closed tiny 8 'REFUSED=cannot fit one full-CLI build worker'
+  btr_st_plan tiny-host-names-floor tiny 8 'REFUSED=worker floor 16777216 KiB x 150%'
   # Unknown host RAM is no evidence: refused, not floored.
   btr_st_plan unknown-host-fails-closed none 8 'REFUSED=needs host RAM evidence'
   btr_st_plan junk-workers-refused aarch64 8x 'REFUSED=worker count must be a decimal 1..128'

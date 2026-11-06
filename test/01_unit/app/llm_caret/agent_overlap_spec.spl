@@ -1,0 +1,50 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+#
+# Cross-agent overlap (design §18.1, acceptance case 7): same-file overlaps
+# are reported with a strength label and are never presented as a Git merge
+# conflict.
+
+use std.spec
+use std.spec.step
+use app.llm_caret.agent_plan.{AgentFileChangeSet}
+use app.llm_caret.agent_overlap.{agent_overlaps_v1, agent_overlaps_for_v1,
+    agent_overlap_report_md_v1, AGENT_OVERLAP_NOT_A_MERGE_VERDICT_V1}
+
+fn sets_v1() -> [AgentFileChangeSet]:
+    [
+        AgentFileChangeSet(agent_id: "agent-a", changed_files: ["src/x.spl", "src/y.spl", "src\\z.spl"]),
+        AgentFileChangeSet(agent_id: "agent-b", changed_files: ["src/y.spl", "src/z.spl"]),
+        AgentFileChangeSet(agent_id: "agent-c", changed_files: ["doc/readme.md"]),
+    ]
+
+describe "agent overlap detection":
+    it "reports each shared file once per agent pair with a weak same_file strength":
+        # @req REQ-SSPEC-UNIT
+        step("pairwise overlaps")
+        val overlaps = agent_overlaps_v1(sets_v1())
+        expect(overlaps.len()).to_equal(2)
+        expect(overlaps[0].agent_a).to_equal("agent-a")
+        expect(overlaps[0].agent_b).to_equal("agent-b")
+        expect(overlaps[0].path).to_equal("src/y.spl")
+        expect(overlaps[1].path).to_equal("src/z.spl")
+        expect(overlaps[1].kind).to_equal("same_file")
+        expect(overlaps[1].strength).to_equal("weak")
+
+    it "filters overlaps by agent and yields none for a disjoint agent":
+        # @req REQ-SSPEC-UNIT
+        step("per-agent filter")
+        val overlaps = agent_overlaps_v1(sets_v1())
+        expect(agent_overlaps_for_v1(overlaps, "agent-b").len()).to_equal(2)
+        expect(agent_overlaps_for_v1(overlaps, "agent-c").len()).to_equal(0)
+        expect(agent_overlaps_v1([]).len()).to_equal(0)
+
+    it "renders a deterministic Markdown table that disclaims a merge verdict":
+        # @req REQ-SSPEC-UNIT
+        step("markdown report")
+        val md = agent_overlap_report_md_v1(agent_overlaps_v1(sets_v1()))
+        expect(md.contains(AGENT_OVERLAP_NOT_A_MERGE_VERDICT_V1)).to_equal(true)
+        expect(md.contains("| agent-a | agent-b | `src/y.spl` | same_file | weak |")).to_equal(true)
+        expect(md.contains("conflict:")).to_equal(false)
+        expect(agent_overlap_report_md_v1([]).contains("No overlapping files")).to_equal(true)

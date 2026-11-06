@@ -14,7 +14,7 @@ use compiler.backend.native.mach_inst.{MachReg, MachRegKind, virtual_reg, physic
 use compiler.backend.native.mach_inst.{X86_RAX, X86_RCX, X86_RDX, X86_RBX, X86_RSP, X86_RBP, X86_RSI, X86_RDI, X86_R8, X86_R9, X86_R10, X86_R11, X86_R12, X86_R13, X86_R14, X86_R15, X86_ALLOCATABLE, X86_CALLEE_SAVED}
 use compiler.backend.native.mach_inst.{X86_XMM_ALLOCATABLE, X86_YMM_ALLOCATABLE}
 use compiler.backend.native.mach_inst.{op_imm}
-use compiler.backend.native.mach_inst.{X86_OP_MOV_REG_REG, X86_OP_MOV_REG_MEM, X86_OP_MOV_MEM_REG, X86_OP_SUB_IMM, X86_OP_CALL, X86_OP_CALL_INDIRECT}
+use compiler.backend.native.mach_inst.{X86_OP_MOV_REG_REG, X86_OP_MOV_REG_MEM, X86_OP_MOV_MEM_REG, X86_OP_SUB_IMM, X86_OP_CALL, X86_OP_CALL_INDIRECT, X86_OP_PUSH, X86_OP_POP}
 use compiler.backend.native.mach_inst.{AARCH64_SP, AARCH64_X29, AARCH64_CALLEE_SAVED, A64_OP_SUB_IMM, A64_OP_STR, A64_OP_LDR, A64_OP_MOV}
 use compiler.backend.native.mach_inst.{RV_X1, RV_X2, RV_X9, RV_X18, RV_X19, RV_X20, RV_X21, RV_X22, RV_X23, RV_X24, RV_X25, RV_X26, RV_X27, RV_X31, RV_OP_ADDI, RV_OP_ADD, RV_OP_LI, RV_OP_SD, RV_OP_LD}
 
@@ -371,8 +371,117 @@ fn function_has_x86_avx512(func: MachFunction) -> bool:
                 return true
     false
 
-fn x86_avx512_spill_admitted(has_avx512: bool, spill_count: i64) -> bool:
-    not has_avx512 or spill_count == 0
+# AVX-512 frame functions spill through their own rewriter instead of the
+# generic one: spill slots live BELOW the isel frame (whose 64-byte vector
+# slots start at rbp-8), R11/R10 are taken out of allocation so they are free
+# scratch, and an instruction with more than two spilled operands borrows a
+# further register around itself with push/pop.
+val X86_AVX512_SPILL_BORROW: [i64] = [X86_RBX, X86_RSI, X86_RDI, X86_R8, X86_R9, X86_R12, X86_R13, X86_R14, X86_R15]
+
+fn x86_avx512_without_spill_scratch(registers: [i64]) -> [i64]:
+    var out: [i64] = []
+    for reg in registers:
+        if reg != X86_R10 and reg != X86_R11: out.push(reg)
+    out
+
+fn x86_avx512_allocate(func: MachFunction, alloc_regs: [i64]) -> RegAllocResult:
+    val intervals = compute_live_intervals(func)
+    val first = linear_scan_x86_64(intervals, alloc_regs)
+    if first.spills.len() == 0: return first
+    linear_scan_x86_64(intervals, x86_avx512_without_spill_scratch(alloc_regs))
+
+fn x86_avx512_operand_vreg(operand: Operand) -> i64:
+    match operand.kind:
+        case Reg(reg):
+            match reg.kind:
+                case Virtual(id): id
+                case _: -1
+        case Mem(base, _):
+            match base.kind:
+                case Virtual(id): id
+                case _: -1
+        case _: -1
+
+fn x86_avx512_operand_phys(operand: Operand, result: RegAllocResult) -> i64:
+    val vreg = x86_avx512_operand_vreg(operand)
+    if vreg >= 0:
+        if result.assignments.contains_key(vreg) and result.assignments[vreg] >= 0: return result.assignments[vreg]
+        return -1
+    match operand.kind:
+        case Reg(reg):
+            match reg.kind:
+                case Physical(id): id
+                case _: -1
+        case Mem(base, _):
+            match base.kind:
+                case Physical(id): id
+                case _: -1
+        case _: -1
+
+fn x86_avx512_is_spilled(vreg: i64, result: RegAllocResult) -> bool:
+    if vreg < 0: return false
+    if result.assignments.contains_key(vreg) and result.assignments[vreg] >= 0: return false
+    if not result.spills.contains_key(vreg):
+        panic("x86-avx512 register allocation has neither a register nor a spill slot for vreg {vreg}")
+    true
+
+fn x86_avx512_spill_offset(result: RegAllocResult, vreg: i64, spill_base: i64) -> i64:
+    0 - (spill_base + (result.spills[vreg] + 1) * 8)
+
+fn rewrite_inst_x86_avx512_spill(inst: MachInst, result: RegAllocResult, spill_base: i64) -> [MachInst]:
+    """Rewrite one instruction of an AVX-512 frame function. Each spilled
+    register (or memory-base) vreg gets one scratch register: it is loaded
+    before, the instruction runs on the scratch, and the scratch is stored
+    back after (a dead store for pure uses). The same vreg always maps to the
+    same scratch, so a vreg read and written twice stays coherent."""
+    var spilled: [i64] = []
+    var busy: [i64] = []
+    for operand in inst.operands:
+        val vreg = x86_avx512_operand_vreg(operand)
+        if x86_avx512_is_spilled(vreg, result):
+            if not spilled.contains(vreg): spilled.push(vreg)
+        else:
+            val phys = x86_avx512_operand_phys(operand, result)
+            if phys >= 0: busy.push(phys)
+    if spilled.len() == 0: return [rewrite_inst_no_spill(inst, result, "x86-avx512")]
+    var scratch: Dict<i64, i64> = {}
+    var borrowed: [i64] = []
+    for index in 0..spilled.len():
+        var reg = -1
+        if index == 0: reg = X86_R11
+        elif index == 1: reg = X86_R10
+        else:
+            for candidate in X86_AVX512_SPILL_BORROW:
+                if reg < 0 and not busy.contains(candidate) and not borrowed.contains(candidate): reg = candidate
+            if reg < 0: panic("x86-avx512 spill rewrite found no register to borrow for {spilled.len()} spilled operands")
+            borrowed.push(reg)
+        scratch[spilled[index]] = reg
+    var operands: [Operand] = []
+    for operand in inst.operands:
+        val vreg = x86_avx512_operand_vreg(operand)
+        if vreg >= 0 and scratch.contains_key(vreg):
+            match operand.kind:
+                case Mem(_, offset): operands.push(op_mem(physical_reg(scratch[vreg]), offset))
+                case _: operands.push(op_phys(scratch[vreg]))
+        else:
+            val phys = x86_avx512_operand_phys(operand, result)
+            match operand.kind:
+                case Reg(_): operands.push(if phys >= 0: op_phys(phys) else: operand)
+                case Mem(_, offset): operands.push(if phys >= 0: op_mem(physical_reg(phys), offset) else: operand)
+                case _: operands.push(operand)
+    var out: [MachInst] = []
+    for reg in borrowed:
+        out.push(new_mach_inst(X86_OP_PUSH, [op_phys(reg)]))
+    for vreg in spilled:
+        out.push(new_mach_inst(X86_OP_MOV_REG_MEM, [op_phys(scratch[vreg]), op_mem(physical_reg(X86_RBP), x86_avx512_spill_offset(result, vreg, spill_base))]))
+    out.push(MachInst(opcode: inst.opcode, operands: operands, size: inst.size))
+    for vreg in spilled:
+        out.push(new_mach_inst(X86_OP_MOV_MEM_REG, [op_mem(physical_reg(X86_RBP), x86_avx512_spill_offset(result, vreg, spill_base)), op_phys(scratch[vreg])]))
+    var index = borrowed.len() - 1
+    while index >= 0:
+        out.push(new_mach_inst(X86_OP_POP, [op_phys(borrowed[index])]))
+        index = index - 1
+    out
 
 # ============================================================================
 # Apply Register Allocation
@@ -387,11 +496,10 @@ fn regalloc_function(func: MachFunction) -> MachFunction:
     # Functions without calls can use the full register set.
     val alloc_regs = if function_has_calls(func) then X86_CALLEE_SAVED else X86_ALLOCATABLE
 
-    # Run linear scan
-    val result = linear_scan_x86_64(intervals, alloc_regs)
+    # Run linear scan. AVX-512 frame functions reserve R10/R11 as spill
+    # scratch whenever spilling is needed (see rewrite_inst_x86_avx512_spill).
     val has_avx512 = function_has_x86_avx512(func)
-    if not x86_avx512_spill_admitted(has_avx512, result.spills.len()):
-        panic("x86-avx512 native GPR pressure requires {result.spills.len()} spills, but generic x86 spill rewriting is unsafe for AVX-512 functions")
+    val result = if has_avx512: x86_avx512_allocate(func, alloc_regs) else: linear_scan_x86_64(intervals, alloc_regs)
 
     # Calculate frame layout including callee-saved register storage
     val callee_save_count = result.used_callee_saved.len()
@@ -408,7 +516,7 @@ fn regalloc_function(func: MachFunction) -> MachFunction:
         var new_block = new_mach_block(block.label, block.block_id)
         for inst in block.insts:
             val rewritten = if has_avx512:
-                [rewrite_inst_no_spill(inst, result, "x86-avx512")]
+                rewrite_inst_x86_avx512_spill(inst, result, func.frame_size)
             else:
                 rewrite_inst(inst, result)
             for ri in rewritten:

@@ -310,3 +310,6 @@ seed is not the normal tool. Native end-to-end confirmation is blocked —
 `s3_fable44.exe native-build` SEGVs (rc 139) on a 6-line probe after HIR, so
 whether HM runs as a gate in the native pipeline is unverified. Row stays
 OPEN, scoped to: seed `coerce_param` bool arm + native-pipeline gating proof.
+
+## 2026-11-06 skipped
+The interpreter deliberately coerces non-bool args to bool by presence (`present_value_as_bool_arg`, arg_binding.rs) because 2,174 spec sites pass `x.?` payloads to `bool` params; the runtime cannot tell `f(5)` from `f(x.?)`. A rejection needs a static check (literal/typed arg vs bool param) aligned with the pure-Simple checker. f(5) still returns 1.

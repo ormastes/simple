@@ -132,6 +132,12 @@ fn avx512_cmp_bytes(kdest: i64, lhs: i64, rhs: i64, shape: i64, op: i64) -> [i64
     val predicates = [0, 4, 1, 2, 14, 13]
     avx512_rr(kdest, lhs, rhs, 1, if shape == 2: 1 else: 0, if shape == 2: 1 else: 0, 0xC2) + [predicates[op]]
 
+fn avx512_select_bytes(dest: i64, yes: i64, kmask: i64, shape: i64) -> [i64]:
+    # VPBLENDMD/VPBLENDMQ dest{k}, dest(no), yes: a set mask bit takes `yes`.
+    # EVEX.512.66.0F38 64 /r -- map 0F38 (mm=2). It was emitted with mm=3
+    # (0F3A), an undefined opcode that raised #UD on every select.
+    evex_encode_3op_zmm(dest, dest, yes, kmask, false, 2, if shape == 2: 1 else: 0, 1, 0x64)
+
 fn avx512_mem_tail(reg: i64, base: i64, offset: i64) -> [i64]:
     if reg < 0 or reg > 15 or base < 0 or base > 15 or offset < -2147483648 or offset > 2147483647:
         panic("invalid AVX-512 scalar memory operand")
@@ -141,8 +147,10 @@ fn avx512_mem_tail(reg: i64, base: i64, offset: i64) -> [i64]:
 
 fn avx512_kmem_bytes(kreg: i64, base: i64, offset: i64, store: bool) -> [i64]:
     if kreg < 1 or kreg > 7: panic("AVX-512 mask scratch must be k1..k7")
-    # KMOVW is in AVX-512F. K byte/dword forms require extra subsets.
-    [0xC4, if base >= 8: 0xC1 else: 0xE1, 0x78, if store: 0x91 else: 0x90] + avx512_mem_tail(kreg, base, offset)
+    # KMOVW is in AVX-512F. K byte/dword forms require extra subsets. A low
+    # base takes the canonical two-byte VEX (C5 F8); R8..R15 need VEX.B.
+    val vex = if base >= 8: [0xC4, 0xC1, 0x78] else: [0xC5, 0xF8]
+    vex + [if store: 0x91 else: 0x90] + avx512_mem_tail(kreg, base, offset)
 
 fn avx512_kop_bytes(dest: i64, lhs: i64, rhs: i64, op: i64) -> [i64]:
     val code = if op == 7: 0x41 elif op == 8: 0x45 elif op == 9: 0x47 elif op == 10: 0x42 elif op == 14: 0x44 elif op == 15: 0x46 else: -1

@@ -25,6 +25,13 @@ class HostedWebCli:
     simpleos: bool
     check_only: bool
     show_help: bool
+    # Opt-in single-owner plaintext loopback lane (SimpleHttpServer). With a
+    # provider path it installs the admitted HTTP vector parser; without one,
+    # or when admission fails, it serves with the scalar parser.
+    single_owner: bool
+    vector_provider_path: text
+    vector_provider_sha256: text
+    max_requests: i64
 
 class HostedWebParse:
     config: HostedWebCli
@@ -52,7 +59,11 @@ fn default_hosted_web_cli() -> HostedWebCli:
         launch_id: "",
         simpleos: false,
         check_only: false,
-        show_help: false
+        show_help: false,
+        single_owner: false,
+        vector_provider_path: "",
+        vector_provider_sha256: "",
+        max_requests: 0
     )
 
 fn _hosted_parse_i64(raw: text, option: text, minimum: i64, maximum: i64) -> Result<i64, text>:
@@ -88,6 +99,10 @@ fn parse_hosted_web_cli(args: [text]) -> HostedWebParse:
             config.simpleos = true
             i = i + 1
             continue
+        if option == "--single-owner":
+            config.single_owner = true
+            i = i + 1
+            continue
 
         val raw = match _hosted_next(args, i, option):
             Ok(value): value
@@ -99,6 +114,12 @@ fn parse_hosted_web_cli(args: [text]) -> HostedWebParse:
             "--tls-cert": config.tls_cert_path = raw
             "--tls-key": config.tls_key_path = raw
             "--launch-id": config.launch_id = raw
+            "--vector-provider": config.vector_provider_path = raw
+            "--vector-provider-sha256": config.vector_provider_sha256 = raw
+            "--max-requests":
+                match _hosted_parse_i64(raw, option, 0, 1000000000):
+                    Ok(value): config.max_requests = value
+                    Err(message): return HostedWebParse(config: config, error: message)
             "--workers":
                 match _hosted_parse_i64(raw, option, 0, 256):
                     Ok(value): config.worker_count = value
@@ -153,6 +174,19 @@ fn parse_hosted_web_cli(args: [text]) -> HostedWebParse:
         config.worker_count = 1
         config.ssr_backend = "cpu"
 
+    if (config.vector_provider_path == "") != (config.vector_provider_sha256 == ""):
+        return HostedWebParse(config: config,
+            error: "--vector-provider and --vector-provider-sha256 must be supplied together")
+    if config.vector_provider_path != "":
+        config.single_owner = true
+    if config.single_owner:
+        if config.simpleos or config.tls_cert_path != "":
+            return HostedWebParse(config: config,
+                error: "--single-owner/--vector-provider is a plaintext loopback lane; it refuses --simpleos and TLS")
+        if hosted_web_listen_port(config.listen_addr) < 0:
+            return HostedWebParse(config: config, error: "--listen must be HOST:PORT for the single-owner lane")
+    elif config.max_requests != 0:
+        return HostedWebParse(config: config, error: "--max-requests applies only to the single-owner lane")
     if config.listen_addr == "":
         return HostedWebParse(config: config, error: "--listen must not be empty")
     if not config.ssr_path.starts_with("/"):
@@ -167,6 +201,21 @@ fn parse_hosted_web_cli(args: [text]) -> HostedWebParse:
         return HostedWebParse(config: config,
             error: "non-loopback listeners require --tls-cert and --tls-key")
     HostedWebParse(config: config, error: "")
+
+# Port of a HOST:PORT listen address, or -1 when it does not parse.
+fn hosted_web_listen_port(addr: text) -> i64:
+    val colon = addr.last_index_of(":")
+    if colon <= 0 or colon + 1 >= addr.len():
+        return -1
+    val port = addr.substring(colon + 1).to_int() ?? -1
+    if port < 0 or port > 65535:
+        return -1
+    port
+
+fn hosted_web_listen_host(addr: text) -> text:
+    val colon = addr.last_index_of(":")
+    if colon <= 0: return addr
+    addr.substring(0, colon)
 
 fn hosted_web_server_config(cli: HostedWebCli) -> ServerConfig:
     var location = default_location_config()
@@ -202,3 +251,4 @@ fn hosted_web_registry(cli: HostedWebCli) -> Result<HandlerRegistry, text>:
 export HostedWebCli, HostedWebParse, HOSTED_SSR_HANDLER
 export default_hosted_web_cli, parse_hosted_web_cli
 export hosted_web_server_config, hosted_web_registry
+export hosted_web_listen_port, hosted_web_listen_host

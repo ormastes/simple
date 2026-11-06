@@ -412,6 +412,105 @@ fn test_isolated_thread_worker_args_stress_concurrent_spawners() {
     }
 }
 
+// Residual Windows-heap wrong-guess (owner decision 2026-11-06, P0): a record
+// at a Windows heap address (~2^40) passed in the int-tagged form `addr << 3`
+// stays below the user-VA ceiling. The VA-ceiling rule alone then reads the
+// tagged word as the record address itself (access violation / wrong ABI).
+// The classifier must validate both decodings against committed memory and
+// pick the only valid one, failing closed when neither or both are valid.
+#[cfg(windows)]
+extern "C" fn add_raw_words(_closure: u64, a: u64, b: u64) -> RuntimeValue {
+    RuntimeValue::from_int(a as i64 + b as i64)
+}
+
+#[cfg(windows)]
+#[test]
+fn test_isolated_thread_tagged_word_below_va_ceiling_selects_raw_abi() {
+    let closure = native_closure_record(add_raw_words as *const ());
+    let word = (closure.as_ptr() as u64) << 3;
+    assert!(!native_word_exceeds_user_va(word), "fixture must sit below the ceiling");
+    let handle = rt_thread_spawn_isolated_with_args(word, RuntimeValue::from_int(10), RuntimeValue::from_int(32));
+    assert!(handle != 0);
+    let result = rt_thread_join(handle);
+    assert!(result.is_int());
+    assert_eq!(result.as_int(), 42);
+    rt_thread_free(handle);
+}
+
+#[cfg(windows)]
+#[test]
+fn test_isolated_thread_classifier_decodes_both_word_forms() {
+    let closure = native_closure_record(add_values as *const ());
+    let addr = closure.as_ptr() as u64;
+    match unsafe { native_callable(addr) } {
+        Some(NativeCallable::ClosureRecord { closure_ptr, raw_worker_args, .. }) => {
+            assert_eq!(closure_ptr, addr);
+            assert!(!raw_worker_args);
+        }
+        _ => panic!("raw record address must classify as a RuntimeValue-ABI closure record"),
+    }
+    match unsafe { native_callable(addr << 3) } {
+        Some(NativeCallable::ClosureRecord { closure_ptr, raw_worker_args, .. }) => {
+            assert_eq!(closure_ptr, addr);
+            assert!(raw_worker_args);
+        }
+        _ => panic!("tagged record word must classify as a raw-ABI closure record"),
+    }
+    let direct = native_direct_function_record(add_values as *const ());
+    match unsafe { native_callable((direct.as_ptr() as u64) << 3) } {
+        Some(NativeCallable::DirectFunction { raw_worker_args, .. }) => assert!(raw_worker_args),
+        _ => panic!("tagged direct-function record must stay a direct function"),
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn test_isolated_thread_unmapped_word_fails_closed() {
+    // A word naming neither a committed record nor its tagged form must be
+    // rejected (spawn returns 0), never dereferenced.
+    let unmapped: u64 = 0x0000_1230_0000_0000;
+    assert!(unsafe { native_callable(unmapped) }.is_none());
+    assert_eq!(rt_thread_spawn_isolated(unmapped, RuntimeValue::from_int(1)), 0);
+}
+
+#[cfg(windows)]
+#[test]
+fn test_isolated_thread_tagged_and_raw_words_stress_concurrent_spawners() {
+    // Stress: 16 spawners x 32 spawns interleaving raw record addresses
+    // (RuntimeValue ABI) and below-ceiling tagged words (raw ABI). Any
+    // shared/racy classification or address guess shows up as a wrong sum.
+    let spawners: Vec<_> = (0..16)
+        .map(|s| {
+            thread::spawn(move || {
+                for i in 0..32i64 {
+                    let left = s * 1000 + i;
+                    let tagged = (s + i) % 2 == 0;
+                    let record = if tagged {
+                        native_closure_record(add_raw_words as *const ())
+                    } else {
+                        native_closure_record(add_values as *const ())
+                    };
+                    let addr = record.as_ptr() as u64;
+                    let word = if tagged { addr << 3 } else { addr };
+                    let handle = rt_thread_spawn_isolated_with_args(
+                        word,
+                        RuntimeValue::from_int(left),
+                        RuntimeValue::from_int(42 - left),
+                    );
+                    assert!(handle != 0, "spawner {} iter {}", s, i);
+                    let result = rt_thread_join(handle);
+                    assert!(result.is_int());
+                    assert_eq!(result.as_int(), 42, "spawner {} iter {} tagged {}", s, i, tagged);
+                    rt_thread_free(handle);
+                }
+            })
+        })
+        .collect();
+    for s in spawners {
+        s.join().expect("spawner panicked");
+    }
+}
+
 #[test]
 fn test_isolated_thread_is_done() {
     extern "C" fn slow_work(_closure: u64, v: RuntimeValue) -> RuntimeValue {

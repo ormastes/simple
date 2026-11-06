@@ -248,3 +248,10 @@ TDD evidence (seed binary `build/phase_snapshots/phase1_1793422538/simple`,
   `js_vm_reclamation_spec.spl` 0/4 remains RED but is a pre-existing
   intentional placeholder noted in the 2026-11-04 note above, untouched by
   this verification.
+
+## Update 2026-11-06 — verified GREEN on release/1.0.0 (all three items)
+
+`regex_literal_replace_spec.spl` 17/17 and `regex_replace_noop_repro_spec.spl`
+5/5 on the Rust seed (`String.replace` with a RegExp works, see
+`interpreter_string_methods.spl` `_regexp_replace`). No code change needed;
+status: FIXED.

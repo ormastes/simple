@@ -11,14 +11,25 @@
 #   run      host-native DSO (.dll on Windows, .so on Linux) + every cap, parity+timing
 #   qemu     aarch64/riscv64 .so under qemu-user with CPU models per level
 #   compile  FreeBSD/macOS/SimpleOS/Windows-ARM objects (no sysroot: libc-free TUs only)
+# Every lane also gates each object it builds:
+#   ISA      per-level need/deny disassembly patterns (+ negative fixtures:
+#            a zmm-free object labelled L4 and an L4 object labelled L3 fail)
+#   init     no constructor / static-init / TLS: ELF .init_array .ctors .init
+#            .tdata/.tbss + TLS symbols; COFF .CRT$X* .tls$; Mach-O
+#            __mod_init_func __thread_*; linked images may carry no more
+#            init/TLS than the level-free cap0 image (+ fixtures that must fail)
+# The run/qemu lanes print each cap's admitted level and its reason
+# (simple_vector_level_reason_v1: max | cap:N | cpu-missing:F | xcr0:0xB | os:R)
+# and run vector_level_parity_selftest.c (every level vs a scalar oracle).
 # Usage: check-vector-provider-levels.shs ABS_OUT [run|qemu|compile|all]
 set -u
 out=${1:?usage: check-vector-provider-levels.shs ABS_OUT [run|qemu|compile|all]}
 lanes=${2:-all}
-case "$out" in /*) ;; *) echo 'absolute output path required' >&2; exit 2;; esac
+case "$out" in /*|[A-Za-z]:/*) ;; *) echo 'absolute output path required' >&2; exit 2;; esac
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 src=$root/src/runtime/providers/vector
 bench=$root/src/runtime/test/vector_level_bench.c
+parity=$root/src/runtime/test/vector_level_parity_selftest.c
 mkdir -p "$out"
 cc=${CLANG:-clang}
 command -v "$cc" >/dev/null 2>&1 || cc=/c/llvm/install/bin/clang
@@ -30,6 +41,13 @@ for o in llvm-objdump "$(dirname "$(command -v "$cc")")/llvm-objdump" llvm-objdu
     command -v "$o" >/dev/null 2>&1 && objdump=$o
 done
 [ -n "$objdump" ] || { echo 'ERROR — nothing was checked (llvm-objdump not found)'; exit 2; }
+# The init/TLS gate reads section and symbol tables of ELF, COFF and Mach-O.
+readobj=${READOBJ:-}
+for o in llvm-readobj "$(dirname "$(command -v "$cc")")/llvm-readobj" llvm-readobj-23 /usr/lib/llvm-*/bin/llvm-readobj; do
+    [ -n "$readobj" ] && break
+    command -v "$o" >/dev/null 2>&1 && readobj=$o
+done
+[ -n "$readobj" ] || { echo 'ERROR — nothing was checked (llvm-readobj not found)'; exit 2; }
 checked=0 failed=0 skipped=0
 log=$out/build.log
 : >"$log"
@@ -74,7 +92,7 @@ EOF
 build_target() {
     t=$1 d=$2 extra=$3 link=$4
     mkdir -p "$d"
-    rm -f "$d"/*.o "$d"/*.dis "$d"/*.dll "$d"/*.so "$d"/vector_level_bench*  # never gate or ship a stale object
+    rm -f "$d"/*.o "$d"/*.dis "$d"/*.dll "$d"/*.so "$d"/vector_level_bench* "$d"/vector_level_parity_selftest* "$d"/fx-*  # never gate or ship a stale object
     tf="--target=$t $extra"
     base=$(base_flags "$t")
     impl=$(cat "$src"/*.c "$src"/*.h | sha256sum | cut -c1-16)
@@ -105,6 +123,7 @@ build_target() {
             || { fail "$t provider cap$cap compile"; return; }
     done
     gate_isa "$t" "$d"
+    gate_init "$t" "$d"
     [ "$link" = yes ] || return
     for cap in 0 1 2 3 4; do
         name=simple_vector_provider_levelled; [ $cap = 4 ] || name=${name}_cap$cap
@@ -114,7 +133,7 @@ build_target() {
         done
         case $t in
             *windows*)
-                printf 'EXPORTS\nsimple_provider_query_v1\nsimple_vector_apply_v1\nsimple_vector_executed_iterations_v1\nsimple_vector_selected_level_v1\n' >"$d/provider.def"
+                printf 'EXPORTS\nsimple_provider_query_v1\nsimple_vector_apply_v1\nsimple_vector_executed_iterations_v1\nsimple_vector_selected_level_v1\nsimple_vector_level_reason_v1\n' >"$d/provider.def"
                 c "$cc" $tf -shared -fuse-ld=lld -Wl,--no-insert-timestamp "$d/provider-cap$cap.o" "$d/dispatch-cap$cap.o" $objs "$d/provider.def" -o "$d/$name.dll" \
                     || { fail "$t link $name"; continue; } ;;
             *)
@@ -125,16 +144,41 @@ build_target() {
     case $t in *windows*) exe=$d/vector_level_bench.exe;; *) exe=$d/vector_level_bench;; esac
     c "$cc" $tf -std=c11 -O2 -Wall -Wextra -Werror -fuse-ld=lld "$bench" -o "$exe" $( case $t in *windows*) ;; *) echo -ldl;; esac ) \
         || fail "$t bench harness compile"
+    c "$cc" $tf -std=c11 -O2 -Wall -Wextra -Werror -fuse-ld=lld "$parity" -o "${exe%vector_level_bench*}vector_level_parity_selftest${exe##*vector_level_bench}" \
+        $( case $t in *windows*) ;; *) echo -ldl;; esac ) || fail "$t parity selftest compile"
+    gate_images "$t" "$d"
     (cd "$d" && sha256sum ./*.dll ./*.so 2>/dev/null) >"$d/artifacts.sha256"
     ok "$t built $(wc -l <"$d/artifacts.sha256") levelled DSO(s)"
 }
 
+# isa_verdict ARCH LEVEL DISASSEMBLY -> ok | none (no level-N vector code) | exceeds
+isa_verdict() {
+    case $1:$2 in
+        x86_64:1|x86_64:2) need='(pand|por|pcmpeqb)[^ ]* +%?xmm|xmm[0-9]'; deny='[yz]mm[0-9]';;
+        x86_64:3) need='ymm[0-9]'; deny='zmm[0-9]';;
+        x86_64:4) need='zmm[0-9]'; deny='^$';;
+        # Mach-O disassembles in Apple syntax (and.16b v0, ...), ELF/PE in v0.16b.
+        aarch64:1) need='\.(16b|4s)\b'; deny='\bz[0-9]+\.';;
+        aarch64:*) need='\bz[0-9]+\.'; deny='^$';;
+        riscv64:*) need='vsetvli|vsetivli'; deny='^$';;
+    esac
+    if ! grep -Eiq "$need" "$3"; then echo none
+    elif [ "$deny" != '^$' ] && grep -Eiq "$deny" "$3"; then echo exceeds
+    else echo ok; fi
+}
+
+isa_selftest() { # isa_selftest LABEL LEVEL DISASSEMBLY EXPECTED_VERDICT
+    got=$(isa_verdict "$a" "$2" "$3")
+    if [ "$got" = "$4" ]; then ok "$t ISA selftest: $1 rejected ($got)"
+    else fail "$t ISA selftest: $1 NOT rejected (verdict $got, want $4)"; fi
+}
+
 gate_isa() {
-    t=$1 d=$2
+    t=$1 d=$2 a=$(arch_of "$1")
     for f in "$d"/dispatch-cap4.o "$d"/provider-cap4.o; do
         [ -f "$f" ] || continue
         "$objdump" -d "$f" >"$f.dis" 2>&1
-        case $(arch_of "$t") in
+        case $a in
             x86_64) pat='[yz]mm[0-9]|kmov';;
             aarch64) pat='\bz[0-9]+\.|\bv[0-9]+\.(16b|4s|8h)';;
             riscv64) pat='vsetvli|vle[0-9]|vse[0-9]';;
@@ -144,32 +188,130 @@ gate_isa() {
     for f in "$d"/l*-*.o; do
         "$objdump" -d "$f" >"$f.dis" 2>&1
         lv=$(basename "$f" | sed 's/^l\([0-9]\).*/\1/')
-        case $(arch_of "$t"):$lv in
-            x86_64:1|x86_64:2) need='(pand|por|pcmpeqb)[^ ]* +%?xmm|xmm[0-9]'; deny='[yz]mm[0-9]';;
-            x86_64:3) need='ymm[0-9]'; deny='zmm[0-9]';;
-            x86_64:4) need='zmm[0-9]'; deny='^$';;
-            # Mach-O disassembles in Apple syntax (and.16b v0, ...), ELF/PE in v0.16b.
-            aarch64:1) need='\.(16b|4s)\b'; deny='\bz[0-9]+\.';;
-            aarch64:*) need='\bz[0-9]+\.'; deny='^$';;
-            riscv64:*) need='vsetvli|vsetivli'; deny='^$';;
+        case $(isa_verdict "$a" "$lv" "$f.dis") in
+            none) fail "$t $(basename "$f") no L$lv vector instructions (scalar under a SIMD label)";;
+            exceeds) fail "$t $(basename "$f") exceeds L$lv ISA";;
+            *) ok "$t $(basename "$f") L$lv ISA";;
         esac
-        if ! grep -Eiq "$need" "$f.dis"; then fail "$t $(basename "$f") no L$lv vector instructions (scalar under a SIMD label)"
-        elif [ "$deny" != '^$' ] && grep -Eiq "$deny" "$f.dis"; then fail "$t $(basename "$f") exceeds L$lv ISA"
-        else ok "$t $(basename "$f") L$lv ISA"; fi
+    done
+    # Negative fixtures: the classifier must reject exactly what it exists to reject.
+    neg=$d/neg-isa.o
+    case $a in
+        x86_64)
+            if c "$cc" $tf $warn -march=x86-64-v3 -c "$src/vector_level_portable.c" -o "$neg" && "$objdump" -d "$neg" >"$neg.dis" 2>&1; then
+                isa_selftest "zmm-free (x86-64-v3) object labelled L4" 4 "$neg.dis" none
+            else fail "$t ISA selftest fixture did not build"; fi
+            [ -f "$d/l4-bitmap.o.dis" ] && isa_selftest "AVX-512 object labelled L3" 3 "$d/l4-bitmap.o.dis" exceeds ;;
+        aarch64)
+            [ -f "$d/l1-bitmap.o.dis" ] && isa_selftest "NEON-only object labelled L2" 2 "$d/l1-bitmap.o.dis" none
+            [ -f "$d/l2-bitmap.o.dis" ] && isa_selftest "SVE-only object labelled L1" 1 "$d/l2-bitmap.o.dis" none ;;
+        riscv64)
+            if c "$cc" $tf $warn -march=rv64gc -mabi=lp64d -c "$src/vector_level_portable.c" -o "$neg" && "$objdump" -d "$neg" >"$neg.dis" 2>&1; then
+                isa_selftest "scalar rv64gc object labelled L1" 1 "$neg.dis" none
+            else fail "$t ISA selftest fixture did not build"; fi ;;
+    esac
+}
+
+# Constructors, static initialisers and TLS in a level object would run (or
+# be laid out) at load time on a CPU that never admits that level.
+init_sec_re='^(\.rela?)?\.(init_array|preinit_array|fini_array|ctors|dtors|init|fini|tdata|tbss|tls)([.$].*)?$|^\.CRT\$X|^__(mod_init_func|mod_term_func|init_offsets|thread_vars|thread_data|thread_bss|thread_ptrs)$'
+init_sym_re='Name: _*(tls_get_addr|tls_index|tls_used|emutls_[A-Za-z0-9_.]*|tlv_bootstrap|tls_guard|cxa_thread_atexit[A-Za-z_]*)\b|Type: TLS'
+# init_findings OBJ: prints offending sections/symbols; rc 2 = unreadable (fail-closed)
+init_findings() {
+    secs=$("$readobj" --sections "$1" 2>/dev/null) || return 2
+    names=$(printf '%s\n' "$secs" | sed -n 's/^ *Name: \([^ ]*\).*/\1/p')
+    printf '%s\n' "$names" | grep -Eq '^(\.text|__text)' || return 2
+    syms=$("$readobj" --symbols "$1" 2>/dev/null) || return 2
+    printf '%s\n' "$names" | grep -E "$init_sec_re"
+    printf '%s\n' "$syms" | grep -Eo "$init_sym_re" | sort -u
+    return 0
+}
+
+init_selftest() { # init_selftest NAME EXPECT(reject|accept) C-SOURCE
+    printf '%s\n' "$3" >"$d/fx-$1.c"
+    # An unversioned darwin triple predates Mach-O TLS (10.7); version it here only.
+    fxv=""; case $t in *apple-darwin*) fxv=-mmacosx-version-min=11.0;; esac
+    if ! c "$cc" $tf $fxv -std=c11 -O2 -c "$d/fx-$1.c" -o "$d/fx-$1.o"; then
+        fail "$t init selftest $1: fixture did not build"; return
+    fi
+    found=$(init_findings "$d/fx-$1.o"); rc=$?
+    found=$(printf '%s' "$found" | tr '\n' ' ')
+    if [ $rc -ne 0 ]; then fail "$t init selftest $1: fixture unreadable"
+    elif [ "$2" = reject ] && [ -n "$found" ]; then ok "$t init selftest: $1 fixture rejected ($found)"
+    elif [ "$2" = accept ] && [ -z "$found" ]; then ok "$t init selftest: $1 fixture accepted"
+    else fail "$t init selftest $1: want $2, found '$found'"; fi
+}
+
+gate_init() {
+    t=$1 d=$2 clean=0
+    for f in "$d"/l*-*.o "$d"/dispatch-cap*.o "$d"/provider-cap*.o; do
+        [ -f "$f" ] || continue
+        found=$(init_findings "$f"); rc=$?
+        found=$(printf '%s' "$found" | tr '\n' ' ')
+        if [ $rc -ne 0 ]; then fail "$t $(basename "$f") section/symbol table unreadable (init gate fail-closed)"
+        elif [ -n "$found" ]; then fail "$t $(basename "$f") carries constructor/static-init/TLS: $found"
+        else clean=$((clean + 1)); fi
+    done
+    [ $clean -gt 0 ] && ok "$t init gate: $clean object(s) free of constructors/static-init/TLS"
+    # The constructor calls out: a constant store would be folded into the
+    # initializer by GlobalOpt and the fixture would prove nothing.
+    init_selftest ctor reject 'extern void simple_fx_hook(void); __attribute__((constructor)) static void simple_fx_ctor(void) { simple_fx_hook(); } int simple_fx_get(int x) { return x; }'
+    init_selftest tls reject '_Thread_local int simple_fx_tls; int simple_fx_get(void) { return ++simple_fx_tls; }'
+    init_selftest clean accept 'int simple_fx_get(int x) { return x + 1; }'
+}
+
+# Linked image: init-table / TLS footprint, compared against the cap0 image,
+# which links no level object (DT_INIT etc. exist post-link only, owned by CRT).
+image_footprint() {
+    case $1 in
+        *.dll) tls=$("$readobj" --coff-tls-directory "$1" 2>/dev/null) || return
+            s=$(printf '%s\n' "$tls" | sed -n 's/.*StartAddressOfRawData: *\(0x[0-9A-Fa-f]*\).*/\1/p')
+            e=$(printf '%s\n' "$tls" | sed -n 's/.*EndAddressOfRawData: *\(0x[0-9A-Fa-f]*\).*/\1/p')
+            z=$(printf '%s\n' "$tls" | sed -n 's/.*SizeOfZeroFill: *\(0x[0-9A-Fa-f]*\).*/\1/p')
+            if [ -z "$s" ]; then echo tls=none; else echo "tls-raw=$((e - s)) tls-zero=$((z))"; fi;;
+        *) { "$readobj" --dynamic-table "$1" 2>/dev/null | awk '$2 ~ /^(INIT|FINI|INIT_ARRAYSZ|PREINIT_ARRAYSZ|FINI_ARRAYSZ)$/ { printf "%s=%s ", $2, ($2 ~ /SZ$/ ? $3 : "present") }'
+             "$readobj" --program-headers "$1" 2>/dev/null | awk '/Type: PT_TLS/ {t=1} t && /MemSize:/ {printf "PT_TLS=%s", $2; t=0}'
+             echo; };;
+    esac
+}
+
+gate_images() {
+    t=$1 d=$2
+    ref=$(ls "$d"/simple_vector_provider_levelled_cap0.dll "$d"/simple_vector_provider_levelled_cap0.so 2>/dev/null | head -1)
+    [ -n "$ref" ] || { fail "$t image init gate: no cap0 reference image"; return; }
+    want=$(image_footprint "$ref")
+    [ -n "$want" ] || { fail "$t image init gate: cap0 footprint unreadable"; return; }
+    for img in "$d"/simple_vector_provider_levelled*.dll "$d"/simple_vector_provider_levelled*.so; do
+        [ -f "$img" ] && [ "$img" != "$ref" ] || continue
+        got=$(image_footprint "$img")
+        if [ "$got" = "$want" ]; then ok "$t $(basename "$img") init/TLS footprint = level-free cap0 ($want)"
+        else fail "$t $(basename "$img") init/TLS footprint '$got' exceeds level-free cap0 '$want'"; fi
     done
 }
 
-run_caps() { # run_caps DIR HOSTLEVEL RUNNER... ; caps above host level must report host level
-    d=$1 host=$2; shift 2
+run_caps() { # run_caps DIR HOSTLEVEL HOSTREASON RUNNER... ; caps at/above host report the host level and reason
+    d=$1 host=$2 hreason=$3; shift 3
+    exe=$(ls "$d"/vector_level_bench.exe "$d"/vector_level_bench 2>/dev/null | head -1)
+    pexe=$(ls "$d"/vector_level_parity_selftest.exe "$d"/vector_level_parity_selftest 2>/dev/null | head -1)
     for cap in 0 1 2 3 4; do
         name=simple_vector_provider_levelled; [ $cap = 4 ] || name=${name}_cap$cap
         dso=$(ls "$d/$name".dll "$d/$name".so 2>/dev/null | head -1)
         [ -n "$dso" ] || continue
-        expect=$cap; [ $cap -gt "$host" ] && expect=$host
-        exe=$(ls "$d"/vector_level_bench.exe "$d"/vector_level_bench 2>/dev/null | head -1)
-        line=$("$@" "$exe" "$dso" "$expect" "${REPS:-300}" 2>&1); rc=$?
+        expect=$cap reason=cap:$cap
+        [ $cap -ge "$host" ] && expect=$host reason=$hreason
+        line=$("$@" "$exe" "$dso" "$expect" "${REPS:-300}" "$reason" 2>&1); rc=$?
         if [ $rc -eq 0 ]; then ok "$(basename "$d") cap$cap: $line"; printf '%s cap%s %s\n' "$(basename "$d")" $cap "$line" >>"$out/results.txt"
         else fail "$(basename "$d") cap$cap rc=$rc: $line"; fi
+        if [ -z "$pexe" ]; then fail "$(basename "$d") cap$cap parity: selftest binary missing"; continue; fi
+        line=$("$@" "$pexe" "$dso" ${PARITY_MODE:-} 2>&1); rc=$?
+        if [ $rc -eq 0 ]; then ok "$(basename "$d") cap$cap parity: $line"; printf '%s cap%s %s\n' "$(basename "$d")" $cap "$line" >>"$out/results.txt"
+        else fail "$(basename "$d") cap$cap parity rc=$rc: $line"; fi
+        # The uncapped image must admit exactly the independently decoded CPUID level.
+        truth=$(printf '%s\n' "$line" | sed -n 's/.*cpuid_level=\(-*[0-9]\).*/\1/p')
+        if [ $cap = 4 ] && [ $rc -eq 0 ] && [ "$truth" != -1 ]; then
+            if [ "$truth" = "$host" ]; then ok "$(basename "$d") uncapped L$host = CPUID-decoded L$truth"
+            else fail "$(basename "$d") uncapped L$host != CPUID-decoded L$truth"; fi
+        fi
     done
 }
 
@@ -183,27 +325,30 @@ case $lanes in all|run)
     if [ -n "$t" ]; then
         extra=""; case $t in *linux*) extra="--gcc-toolchain=/usr";; esac
         build_target "$t" "$out/$t" "$extra" yes
-        host=$(sh -c '"$1" "$2" -1 1' _ "$(ls "$out/$t"/vector_level_bench* | head -1)" "$(ls "$out/$t"/simple_vector_provider_levelled.dll "$out/$t"/simple_vector_provider_levelled.so 2>/dev/null | head -1)" 2>/dev/null | sed -n 's/.*level=\([0-9]\).*/\1/p')
-        if [ -n "$host" ]; then note "host $t admits L$host"; run_caps "$out/$t" "$host"; else fail "$t host level probe did not run"; fi
+        probe=$(sh -c '"$1" "$2" -1 1' _ "$(ls "$out/$t"/vector_level_bench* | head -1)" "$(ls "$out/$t"/simple_vector_provider_levelled.dll "$out/$t"/simple_vector_provider_levelled.so 2>/dev/null | head -1)" 2>/dev/null)
+        host=$(printf '%s\n' "$probe" | sed -n 's/.*level=\([0-9]\).*/\1/p')
+        hreason=$(printf '%s\n' "$probe" | sed -n 's/.*reason=\([^ ]*\).*/\1/p')
+        if [ -n "$host" ] && [ -n "$hreason" ]; then note "host $t admits L$host (reason=$hreason)"; run_caps "$out/$t" "$host" "$hreason"; else fail "$t host level probe did not run: $probe"; fi
     else skip "run lane: unsupported host $(uname -s)"; fi
 ;; esac
 case $lanes in all|qemu)
     if [ "$(uname -s)" = Linux ] && command -v qemu-aarch64 >/dev/null 2>&1; then
         build_target aarch64-linux-gnu "$out/aarch64-linux-gnu" --gcc-toolchain=/usr yes
         q="qemu-aarch64 -L /usr/aarch64-linux-gnu"
-        REPS=2; run_caps "$out/aarch64-linux-gnu" 3 $q -cpu max; unset REPS
+        REPS=2 PARITY_MODE=quick; run_caps "$out/aarch64-linux-gnu" 3 max $q -cpu max; unset REPS PARITY_MODE
         d=$out/aarch64-linux-gnu
-        for m in "neoverse-n1 1" "a64fx 2" "max 3"; do
+        for m in "neoverse-n1 1 cpu-missing:sve" "a64fx 2 cpu-missing:sve2" "max 3 max"; do
             set -- $m
-            line=$($q -cpu $1 "$d/vector_level_bench" "$d/simple_vector_provider_levelled.so" $2 2 2>&1) && ok "aarch64 -cpu $1 admits L$2: $line" || fail "aarch64 -cpu $1 expected L$2: $line"
+            line=$($q -cpu $1 "$d/vector_level_bench" "$d/simple_vector_provider_levelled.so" $2 2 $3 2>&1) && ok "aarch64 -cpu $1 admits L$2 ($3): $line" || fail "aarch64 -cpu $1 expected L$2 $3: $line"
         done
     else skip "qemu lane aarch64: needs Linux + qemu-aarch64 + aarch64-linux-gnu sysroot"; fi
     if [ "$(uname -s)" = Linux ] && command -v qemu-riscv64 >/dev/null 2>&1; then
         build_target riscv64-linux-gnu "$out/riscv64-linux-gnu" --gcc-toolchain=/usr yes
         d=$out/riscv64-linux-gnu q="qemu-riscv64 -L /usr/riscv64-linux-gnu"
-        for m in "rva23u64,vlen=128,elen=64 1" "rva23u64,vlen=256,elen=64 1" "max,v=false 0"; do
+        for m in "rva23u64,vlen=128,elen=64 1 max" "rva23u64,vlen=256,elen=64 1 max" "max,v=false 0 cpu-missing:v"; do
             set -- $m
-            line=$($q -cpu $1 "$d/vector_level_bench" "$d/simple_vector_provider_levelled.so" $2 2 2>&1) && ok "riscv64 -cpu $1 admits L$2: $line" || fail "riscv64 -cpu $1 expected L$2: $line"
+            line=$($q -cpu $1 "$d/vector_level_bench" "$d/simple_vector_provider_levelled.so" $2 2 $3 2>&1) && ok "riscv64 -cpu $1 admits L$2 ($3): $line" || fail "riscv64 -cpu $1 expected L$2 $3: $line"
+            line=$($q -cpu $1 "$d/vector_level_parity_selftest" "$d/simple_vector_provider_levelled.so" quick 2>&1) && ok "riscv64 -cpu $1 parity: $line" || fail "riscv64 -cpu $1 parity: $line"
         done
     else skip "qemu lane riscv64: needs Linux + qemu-riscv64 + riscv64-linux-gnu sysroot"; fi
 ;; esac

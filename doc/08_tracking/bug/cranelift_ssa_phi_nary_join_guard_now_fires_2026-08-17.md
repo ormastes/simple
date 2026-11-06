@@ -253,3 +253,13 @@ misdiagnosis). Per this repo's TDD rule (failing spec first), a mechanical
 observe it fail first, then pass, is not landed here. Left OPEN as scoped by
 the prior triage: "N-ary fallback unimplemented; guard path leaks an unset
 value_map entry" is the accurate remaining description.
+
+## 2026-11-05 mirp2-E3
+
+Not a Rust-seed row: the guard is pure Simple
+(`src/compiler/70.backend/backend/cranelift_codegen_adapter.spl`). Secondary
+concern FIXED: the guard no longer does a bare `return` leaving
+`value_map[dest]` unset; it now emits `cranelift_trap`, switches to a fresh
+continuation block and binds the dest to `iconst 0` (fail closed, same shape
+as the unsupported-intrinsic arm). N-ary fallback remains unimplemented and
+latent (headline already disproven 2026-08-17). Status: open P3, latent.

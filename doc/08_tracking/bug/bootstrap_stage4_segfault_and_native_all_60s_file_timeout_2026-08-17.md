@@ -149,3 +149,6 @@ gate can only ever return ERROR on a real artifact, and hand-writing the
 manifest to satisfy it would be fabricating provenance. Either the admission
 producer ships, or the gate needs a documented way to grade an
 explicitly-declared hand-driven artifact.
+
+## Round-10 verdict note (2026-11-06)
+Defect 2 (native_all 60s default): ALREADY-FIXED - native_all/src/lib.rs no longer declares the 60s timeout; test native_build_provider_uses_compiler_sized_file_timeout pins the NativeBuildConfig default. Defect 1 (stage4 load_sources SEGV) and Defect 3 (generic-arg misparse, needs a bisect of data_ops.spl) are host-blocked / verification-pending: they need a Phase-3 stage3 binary. Command: bootstrap/stage3/<triple>/simple native-build --source src/compiler --source src/app --source src/lib --entry src/app/cli/main.spl --entry-closure --threads 4 -o build/stage4/simple

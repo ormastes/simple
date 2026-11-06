@@ -311,7 +311,7 @@ impl<'a> MirLowerer<'a> {
             && args.len() == 1
             && expr_ty == TypeId::BOOL
             && args[0].ty != TypeId::ANY
-            && self.unwrap_subject_payload_is_tagged(args[0].ty)
+            && self.slot_holds_tagged_optional(args[0].ty)
         {
             let arg_reg = self.lower_expr(&args[0])?;
             return self.with_func(|func, current_block| {
@@ -346,7 +346,7 @@ impl<'a> MirLowerer<'a> {
         if name == "rt_unwrap_or_self"
             && args.len() == 1
             && args[0].ty != TypeId::ANY
-            && self.unwrap_subject_payload_is_tagged(args[0].ty)
+            && self.slot_holds_tagged_optional(args[0].ty)
             && matches!(
                 expr_ty,
                 TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32
@@ -405,7 +405,7 @@ impl<'a> MirLowerer<'a> {
         if name == "rt_unwrap_or_self"
             && args.len() == 1
             && args[0].ty != TypeId::ANY
-            && self.unwrap_subject_payload_is_tagged(args[0].ty)
+            && self.slot_holds_tagged_optional(args[0].ty)
             && matches!(expr_ty, TypeId::BOOL | TypeId::F32 | TypeId::F64 | TypeId::U64)
         {
             let arg_reg = self.lower_expr(&args[0])?;
@@ -418,6 +418,13 @@ impl<'a> MirLowerer<'a> {
                 });
                 dest
             })?;
+            // `u64` payloads (BoxInt or `rt_value_u64`-tagged) are decoded by
+            // `rt_value_as_u64`. The explicit `Option<u64>` enum slot is not
+            // `slot_holds_tagged_value`, so `unbox_scalar_for_raw_slot` would
+            // skip the decode and leave the tagged word (5 printed as 40).
+            if expr_ty == TypeId::U64 {
+                return self.unbox_u64_runtime_value(raw_result);
+            }
             return self.unbox_scalar_for_raw_slot(expr_ty, args[0].ty, raw_result);
         }
 
