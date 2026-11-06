@@ -31,7 +31,7 @@ artifacts) must sort explicitly, e.g. `for name in d.keys().sort():` — see
 |--------|---------|-------------------|
 | Seed interpreter (`Value::Dict`, `Value::FrozenDict`) | `Arc<DictMap>`, `DictMap = indexmap::IndexMap<String, Value>` (`src/compiler_rust/compiler/src/value.rs`) | IndexMap order; removal uses `shift_remove` (never `swap_remove` / deprecated `remove`). All order-visible boundaries go through `dict_entries_ordered` (`value_impl.rs`). |
 | Rust runtime (JIT / seed native) `RuntimeDict` | open addressing (`src/compiler_rust/runtime/src/value/dict.rs`) | per-slot u64 insertion stamp stored after the (key, value) pairs in the same allocation, `next_seq` counter; `dict_collect` sorts live slots by stamp. Grow and remove-backshift carry stamps. |
-| C runtime `RtCoreDict` (`src/runtime/runtime_native.c`) | open addressing + tombstones | `RtCoreDictEntry.seq` + `RtCoreDict.next_seq`; resize carries stamps (`rt_core_dict_put_seq`); `rt_core_dict_ordered_slots` feeds keys/values/entries/format. |
+| C runtime `RtCoreDict` (`src/runtime/runtime_native.c`) | open addressing + tombstones | `RtCoreDictEntry.seq` + `RtCoreDict.next_seq`; resize carries stamps (`core_dict_put_seq`); `core_dict_ordered_slots` feeds keys/values/entries/format. |
 | Pure-Simple core runtime (`src/runtime/simple_core/core_array.spl`) | dense array | appends in order; `rt_dict_remove` shifts later entries down (no swap-remove). |
 | Pure-Simple frontend interpreter (`src/compiler/10.frontend/core/interpreter`) | `__dict` struct field list | upsert appends / replaces in place. |
 

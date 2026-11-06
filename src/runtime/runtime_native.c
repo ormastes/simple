@@ -1580,8 +1580,8 @@ typedef struct RtCoreUInt {
 static RtCoreDict* rt_core_as_dict(int64_t value);
 static int64_t rt_core_dict_lookup(RtCoreDict* d, int64_t key);
 static int rt_core_dict_put(RtCoreDict* d, int64_t key, int64_t value);
-static int rt_core_dict_put_seq(RtCoreDict* d, int64_t key, int64_t value, int64_t seq);
-static int64_t* rt_core_dict_ordered_slots(RtCoreDict* d, int64_t* count);
+static int core_dict_put_seq(RtCoreDict* d, int64_t key, int64_t value, int64_t seq);
+static int64_t* core_dict_ordered_slots(RtCoreDict* d, int64_t* count);
 static int rt_core_dict_has(RtCoreDict* d, int64_t key);
 static int rt_core_dict_del(RtCoreDict* d, int64_t key, int64_t* removed);
 
@@ -5007,7 +5007,7 @@ static int64_t rt_core_format_array_like(RtCoreArray* array, int is_tuple) {
 static int64_t rt_core_format_dict(RtCoreDict* dict) {
     if (dict->len <= 0) return rt_string_new((const uint8_t*)"{}", 2);
     int64_t out_i = 0;
-    int64_t* slots = rt_core_dict_ordered_slots(dict, &out_i);
+    int64_t* slots = core_dict_ordered_slots(dict, &out_i);
     if (!slots) return rt_string_new((const uint8_t*)"{}", 2);
     int64_t sb = rt_string_builder_new();
     if (!sb) {
@@ -12859,7 +12859,7 @@ static void rt_core_dict_resize(RtCoreDict* d, int64_t new_cap) {
     /* Re-insert in insertion order and renumber stamps 0..len-1, so a dict
      * that saw removes regains the ordered-view fast path. */
     int64_t live = 0;
-    int64_t* order = rt_core_dict_ordered_slots(d, &live);
+    int64_t* order = core_dict_ordered_slots(d, &live);
     RtCoreDictEntry* fresh = (RtCoreDictEntry*)rt_observed_calloc_v1((size_t)new_cap, sizeof(RtCoreDictEntry));
     if (!fresh) { free(order); return; }
     core_dict_read_advance(d);
@@ -12871,7 +12871,7 @@ static void rt_core_dict_resize(RtCoreDict* d, int64_t new_cap) {
     d->tombstones = 0;
     for (int64_t r = 0; r < live; r++) {
         RtCoreDictEntry* e = &old[order[r]];
-        rt_core_dict_put_seq(d, e->key, e->value, r);
+        core_dict_put_seq(d, e->key, e->value, r);
     }
     d->next_seq = live;
     free(order);
@@ -12880,13 +12880,13 @@ static void rt_core_dict_resize(RtCoreDict* d, int64_t new_cap) {
 }
 
 static int rt_core_dict_put(RtCoreDict* d, int64_t key, int64_t value) {
-    return rt_core_dict_put_seq(d, key, value, -1);
+    return core_dict_put_seq(d, key, value, -1);
 }
 
 /* seq < 0: a NEW key takes the next insertion stamp (appends to the order);
  * replacing an existing key's value keeps its stamp (keeps its position).
  * seq >= 0 is only passed by rt_core_dict_resize to carry stamps over. */
-static int rt_core_dict_put_seq(RtCoreDict* d, int64_t key, int64_t value, int64_t seq) {
+static int core_dict_put_seq(RtCoreDict* d, int64_t key, int64_t value, int64_t seq) {
     if (!d || !d->entries) return 0;
     core_dict_read_advance(d);
     /* Resize at 70% load (live + tombstones). */
@@ -13201,7 +13201,7 @@ typedef struct RtCoreDictOrderSlot {
     int64_t slot;
 } RtCoreDictOrderSlot;
 
-static int rt_core_dict_order_cmp(const void* a, const void* b) {
+static int core_dict_order_cmp(const void* a, const void* b) {
     int64_t sa = ((const RtCoreDictOrderSlot*)a)->seq;
     int64_t sb = ((const RtCoreDictOrderSlot*)b)->seq;
     return sa < sb ? -1 : (sa > sb ? 1 : 0);
@@ -13213,18 +13213,18 @@ static int rt_core_dict_order_cmp(const void* a, const void* b) {
  * the last clear/resize the stamps are exactly 0..len-1, so each slot lands
  * at out[stamp]. Otherwise sort by stamp, O(n log n). Allocation failure is
  * fatal: a non-empty dict must never read back as empty. */
-static void rt_core_dict_order_oom(int64_t len) {
+static void core_dict_order_oom(int64_t len) {
     fprintf(stderr, "rt_dict: out of memory building ordered view (len=%lld)\n", (long long)len);
     fflush(stderr);
     abort();
 }
 
-static int64_t* rt_core_dict_ordered_slots(RtCoreDict* d, int64_t* count) {
+static int64_t* core_dict_ordered_slots(RtCoreDict* d, int64_t* count) {
     *count = 0;
     if (!d || !d->entries || d->len <= 0) return NULL;
     int64_t n = d->len;
     int64_t* slots = (int64_t*)rt_observed_malloc_v1((size_t)n * sizeof(int64_t));
-    if (!slots) rt_core_dict_order_oom(n);
+    if (!slots) core_dict_order_oom(n);
     if (d->next_seq == n) {
         int dense = 1;
         int64_t placed = 0;
@@ -13242,7 +13242,7 @@ static int64_t* rt_core_dict_ordered_slots(RtCoreDict* d, int64_t* count) {
         }
     }
     RtCoreDictOrderSlot* order = (RtCoreDictOrderSlot*)rt_observed_malloc_v1((size_t)n * sizeof(RtCoreDictOrderSlot));
-    if (!order) rt_core_dict_order_oom(n);
+    if (!order) core_dict_order_oom(n);
     int64_t m = 0;
     for (int64_t i = 0; i < d->cap && m < n; i++) {
         if (d->entries[i].occupied != 1) continue;
@@ -13250,7 +13250,7 @@ static int64_t* rt_core_dict_ordered_slots(RtCoreDict* d, int64_t* count) {
         order[m].slot = i;
         m++;
     }
-    qsort(order, (size_t)m, sizeof(RtCoreDictOrderSlot), rt_core_dict_order_cmp);
+    qsort(order, (size_t)m, sizeof(RtCoreDictOrderSlot), core_dict_order_cmp);
     for (int64_t i = 0; i < m; i++) slots[i] = order[i].slot;
     *count = m;
     free(order);
@@ -13263,7 +13263,7 @@ int64_t rt_dict_keys(int64_t dict) {
     SplArray* arr = rt_array_new(d->len);
     if (!arr) return rt_core_nil();
     int64_t n = 0;
-    int64_t* slots = rt_core_dict_ordered_slots(d, &n);
+    int64_t* slots = core_dict_ordered_slots(d, &n);
     for (int64_t i = 0; i < n; i++) rt_array_push(arr, d->entries[slots[i]].key);
     free(slots);
     return (int64_t)(uintptr_t)arr;
@@ -13275,7 +13275,7 @@ int64_t rt_dict_values(int64_t dict) {
     SplArray* arr = rt_array_new(d->len);
     if (!arr) return rt_core_nil();
     int64_t n = 0;
-    int64_t* slots = rt_core_dict_ordered_slots(d, &n);
+    int64_t* slots = core_dict_ordered_slots(d, &n);
     for (int64_t i = 0; i < n; i++) rt_array_push(arr, d->entries[slots[i]].value);
     free(slots);
     return (int64_t)(uintptr_t)arr;
@@ -13288,7 +13288,7 @@ int64_t rt_dict_entries(int64_t dict) {
     SplArray* arr = rt_array_new(d->len);
     if (!arr) return rt_core_nil();
     int64_t n = 0;
-    int64_t* slots = rt_core_dict_ordered_slots(d, &n);
+    int64_t* slots = core_dict_ordered_slots(d, &n);
     for (int64_t i = 0; i < n; i++) {
         RtCoreDictEntry* e = &d->entries[slots[i]];
         int64_t pair = rt_tuple_new(2);
