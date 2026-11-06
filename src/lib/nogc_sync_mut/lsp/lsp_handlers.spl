@@ -5,9 +5,11 @@
 use std.io_runtime.{env_get, env_set_process, file_exists, read_file, write_file, file_delete, time_now_unix_micros, cwd}
 use std.nogc_sync_mut.lsp.lsp_location.{lsp_parse_query_location_v1, lsp_location_lsp_column_v1,
     lsp_location_identifier_from_trailer_v1}
-use std.nogc_sync_mut.lsp.lsp_call_edges.{lsp_call_edges_parse_output_v1}
+use std.nogc_sync_mut.lsp.lsp_call_edges.{lsp_call_edges_parse_output_v1, lsp_call_edges_parse_note_v1}
 use std.nogc_sync_mut.lsp.lsp_call_hierarchy.{lsp_call_hierarchy_request_item_v1,
-    lsp_call_hierarchy_item_json_v1, lsp_call_hierarchy_calls_json_v1}
+    lsp_call_hierarchy_item_json_v1, lsp_call_hierarchy_calls_with_note_json_v1}
+use std.nogc_sync_mut.lsp.lsp_reference_role.{lsp_reference_role_v1, lsp_references_include_declaration_v1}
+use std.nogc_sync_mut.lsp.lsp_query_symbol.{lsp_query_symbol_at_v1}
 use std.nogc_sync_mut.env.platform.{get_temp_dir}
 use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_text_or, json_value_as_bool,
     json_value_items, json_value_keys, json_value_object_from, json_value_object_set, json_value_serialize}
@@ -388,12 +390,25 @@ fn lsp_handle_references(id: text, body: text) -> text:
     (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
     if exit_code != 0 or out.trim() == "":
         return make_json_result(id=id, result=SB_L() + SB_R())
+    # `context.includeDeclaration: false` drops lines whose role is the
+    # declaration of the queried symbol (the role is derived from the printed
+    # source text, so no second child run is needed).
+    val include_decl = lsp_references_include_declaration_v1(body)
+    var symbol = ""
+    if not include_decl:
+        symbol = lsp_query_symbol_at_v1(file_path, int(line) + 1, int(col) + 1)
     val lines = out.split("\n")
     var locs: [text] = []
     for loc_line in lines:
         val trimmed = loc_line.trim()
         if trimmed == "" or trimmed.starts_with("No ") or trimmed.starts_with("Error"):
             continue
+        if not include_decl and symbol != "":
+            match lsp_parse_query_location_v1(trimmed):
+                case Some(parsed):
+                    if lsp_reference_role_v1(parsed.trailer, symbol) == "declaration":
+                        continue
+                case nil: pass
         val loc = _parse_location(trimmed)
         if loc != "null":
             locs.push(loc)
@@ -625,7 +640,9 @@ fn _handle_call_hierarchy_direction(id: text, body: text, subcmd: text, key: tex
             var uris: [text] = []
             for e in edges:
                 uris.push(_lsp_location_uri(e.file))
-            make_json_result(id=id, result=lsp_call_hierarchy_calls_json_v1(edges, uris, key))
+            # A truncated walk is reported, never silently presented as complete.
+            val note = lsp_call_edges_parse_note_v1(out)
+            make_json_result(id=id, result=lsp_call_hierarchy_calls_with_note_json_v1(edges, uris, key, item.uri, note))
         case nil:
             make_json_result(id=id, result=SB_L() + SB_R())
 

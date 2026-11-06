@@ -15,9 +15,10 @@ use std.common.json.parser.{json_parse}
 use std.common.json.object_ops.{json_object_get}
 use std.common.json.types.{json_get_type, json_to_number, json_to_string}
 use std.common.json.array_ops.{json_array_get, json_array_length}
-use std.nogc_sync_mut.lsp.lsp_call_edges.{LspCallEdgeV1}
+use std.nogc_sync_mut.lsp.lsp_call_edges.{LspCallEdgeV1, lsp_call_edges_parse_output_v1, lsp_call_edges_parse_note_v1}
 use std.nogc_sync_mut.lsp.lsp_call_hierarchy.{lsp_call_hierarchy_request_item_v1,
-    lsp_call_hierarchy_item_json_v1, lsp_call_hierarchy_calls_json_v1}
+    lsp_call_hierarchy_item_json_v1, lsp_call_hierarchy_calls_json_v1,
+    lsp_call_hierarchy_calls_with_note_json_v1, LSP_CALL_HIERARCHY_PARTIAL_NAME_V1}
 use std.nogc_sync_mut.lsp.lsp_handlers.{lsp_handle_prepare_call_hierarchy, lsp_handle_outgoing_calls,
     lsp_handle_incoming_calls}
 use app.cli.query_call_edges.{engine_outgoing_calls_lines, engine_incoming_calls_lines}
@@ -95,6 +96,37 @@ describe "lsp_call_hierarchy wire helpers":
         expect(json_to_number(json_object_get(site, "line"))).to_equal(11.0)
         expect(json_to_number(json_object_get(site, "character"))).to_equal(4.0)
 
+    it "surfaces a truncated walk as a partial-result marker, never as a complete list":
+        # @req REQ-SSPEC-UNIT
+        step("note line parsed out of the child's output")
+        val note = "[search truncated: budget:max_wall_ms after 7400 file(s), 1 byte(s) — part of the tree was NOT searched]"
+        val output = "g|/b.spl|10|12|5|heuristic\n" + note + "\n"
+        expect(lsp_call_edges_parse_output_v1(output).len()).to_equal(1)
+        expect(lsp_call_edges_parse_note_v1(output)!).to_equal(note)
+        expect(lsp_call_edges_parse_note_v1("g|/b.spl|10|12|5|heuristic\n") == nil).to_equal(true)
+        expect(lsp_call_edges_parse_note_v1("[more than 100 matches; the whole tree was searched, only the first 100 are listed]")! != "").to_equal(true)
+
+        step("marker entry appended, every edge flagged partial")
+        val edge = LspCallEdgeV1(name: "g", file: "/b.spl", def_line: 10, site_line: 12, site_col: 5, resolution: "heuristic")
+        val calls = json_parse(lsp_call_hierarchy_calls_with_note_json_v1([edge], ["file:///b.spl"], "from", "file:///a.spl", note))
+        expect(json_array_length(calls)).to_equal(2)
+        val edge_item = json_object_get(json_array_get(calls, 0), "from")
+        expect(json_get_type(json_object_get(json_object_get(edge_item, "data"), "partial"))).to_equal("boolean")
+        val marker = json_array_get(calls, 1)
+        val from = json_object_get(marker, "from")
+        expect(json_to_string(json_object_get(from, "name"))).to_equal(LSP_CALL_HIERARCHY_PARTIAL_NAME_V1)
+        expect(json_to_string(json_object_get(from, "detail"))).to_equal(note)
+        expect(json_to_string(json_object_get(from, "uri"))).to_equal("file:///a.spl")
+        expect(json_to_string(json_object_get(json_object_get(from, "data"), "note"))).to_equal(note)
+        expect(json_array_length(json_object_get(marker, "fromRanges"))).to_equal(0)
+
+        step("a complete result carries no marker and no partial flag")
+        val complete = json_parse(lsp_call_hierarchy_calls_with_note_json_v1([edge], ["file:///b.spl"], "from", "file:///a.spl", nil))
+        expect(json_array_length(complete)).to_equal(1)
+        val data = json_object_get(json_object_get(json_array_get(complete, 0), "from"), "data")
+        expect(json_object_get(data, "partial")).to_be_nil()
+        expect(json_to_string(json_object_get(data, "resolution"))).to_equal("heuristic")
+
 describe "call-edge engine over a real file":
     it "lists outgoing calls of a function, labelled heuristic (textual)":
         # @req REQ-SSPEC-UNIT
@@ -144,7 +176,16 @@ describe "LSP callHierarchy handlers":
 
         val incoming = result_of_v1(lsp_handle_incoming_calls("3", item_request_body_v1(path, 0, 3)))
         dir_remove_all(root)
-        expect(json_array_length(incoming)).to_equal(1)
+        # The bounded `src/` walk behind incoming-calls may stop on its wall
+        # budget on a large repo; that must surface as the partial marker
+        # (last entry, no fromRanges), never as extra edges or a silent drop.
+        expect(json_array_length(incoming) >= 1).to_equal(true)
+        var k = 1
+        while k < json_array_length(incoming):
+            val extra = json_array_get(incoming, k)
+            expect(json_to_string(json_object_get(json_object_get(extra, "from"), "name"))).to_equal(LSP_CALL_HIERARCHY_PARTIAL_NAME_V1)
+            expect(json_array_length(json_object_get(extra, "fromRanges"))).to_equal(0)
+            k = k + 1
         val from = json_object_get(json_array_get(incoming, 0), "from")
         expect(json_to_string(json_object_get(from, "name"))).to_equal("lsp_ch_fixture_caller_v1")
         val site = json_object_get(json_array_get(json_object_get(json_array_get(incoming, 0), "fromRanges"), 0), "start")
