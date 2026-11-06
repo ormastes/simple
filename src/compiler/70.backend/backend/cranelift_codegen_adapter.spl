@@ -1364,8 +1364,20 @@ fn cl_translate_unaryop(ctx: i64, op: MirUnaryOp, a: i64, operand: MirOperand, f
                 val negated = cranelift_bxor(ctx, bits, mask)
                 cranelift_bitcast(ctx, float_type, negated)
             else:
-                val zero = cranelift_iconst(ctx, mir_type_to_cl(operand_type(operand, func)), 0)
-                cranelift_isub(ctx, zero, a)
+                # Integer SSA values are uniformly I64 in this lane, so the
+                # zero must be I64 too: an I32 zero against the I64 operand
+                # failed the verifier (`isub.i32 0, v: arg 1 has type i64`).
+                # A signed narrow result is re-sign-extended so that negating
+                # the minimum wraps at its declared width (-(-2^31) == -2^31).
+                # Unsigned narrow results are canonicalized by the caller.
+                val zero = cranelift_iconst(ctx, CL_TYPE_I64, 0)
+                val negated = cranelift_isub(ctx, zero, a)
+                val neg_type = operand_type(operand, func)
+                match neg_type.kind:
+                    case I8 | I16 | I32:
+                        val narrow_cl = cl_cast_narrow_int_type(neg_type)
+                        cranelift_sextend(ctx, CL_TYPE_I64, cranelift_ireduce(ctx, narrow_cl, negated))
+                    case _: negated
         case Not:
             # i64 mask, not i8: bool values (cmp results, bool locals, consts)
             # are uniformly i64 in this backend (see mir_type_to_cl).
