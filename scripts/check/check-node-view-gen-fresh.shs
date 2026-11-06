@@ -1,0 +1,91 @@
+#!/bin/sh
+# check-node-view-gen-fresh.shs — the generated @node_tree view must be
+# FRESH: byte-identical to a generator run over the committed schema.
+#
+# WHY: src/compiler/10.frontend/generated/binary_expr_view.spl is produced by
+# src/app/compiler_schema/node_view_gen.spl from
+# config/data_policy/compiler_ast_binary_expr.sdn (data plan W3,
+# doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md
+# section 12.1). A hand edit or a schema edit without regeneration would let
+# the typed view drift from the schema digest and AttrIds in its header.
+#
+# Verdict (always the LAST line of stdout):
+#   PASS — <n> view(s) generated, committed module fresh   exit 0
+#   FAIL — ...                                             exit 1
+#   ERROR — nothing was checked                            exit 2
+# --selftest runs before every scan and is fatal.
+set -u
+
+ROOT="${ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+SIMPLE_BIN="${SIMPLE_BIN:-$ROOT/bin/simple}"
+SCHEMA_REL="config/data_policy/compiler_ast_binary_expr.sdn"
+GEN_REL="src/compiler/10.frontend/generated/binary_expr_view.spl"
+TMP="${TMPDIR:-/tmp}/node-view-gen-fresh-$$"
+mkdir -p "$TMP"
+trap 'rm -rf "$TMP"' EXIT
+
+# generate <root> <log>: runs the generator against <root>'s schema and writes
+# <root>/<GEN_REL>; returns the generator's exit status.
+generate() {
+    _root="$1"; _log="$2"
+    mkdir -p "$_root/$(dirname "$GEN_REL")"
+    ( cd "$ROOT" && SIMPLE_REPO_ROOT="$_root" SIMPLE_EXECUTION_MODE=interpret \
+        "$SIMPLE_BIN" run "src/app/compiler_schema/main.spl" node_views ) >"$_log" 2>&1
+    _rc=$?
+    return $_rc
+}
+
+selftest() {
+    # Fixture 1: a clean copy of the committed schema reproduces the committed module.
+    _fx="$TMP/selftest-clean"
+    mkdir -p "$_fx/$(dirname "$SCHEMA_REL")"
+    cp "$ROOT/$SCHEMA_REL" "$_fx/$SCHEMA_REL"
+    if ! generate "$_fx" "$_fx/gen.log"; then
+        echo "selftest: clean fixture failed to generate"; tail -5 "$_fx/gen.log"; return 1
+    fi
+    if ! cmp -s "$_fx/$GEN_REL" "$ROOT/$GEN_REL"; then
+        echo "selftest: clean fixture generated different bytes from $GEN_REL"; return 1
+    fi
+    # Fixture 2: an accessor for an undeclared attribute must FAIL generation.
+    _bad="$TMP/selftest-bad"
+    mkdir -p "$_bad/$(dirname "$SCHEMA_REL")"
+    sed 's/^            op: "expr_get_int"$/            op: "expr_get_int"\n            right: "expr_get_right"/' \
+        "$ROOT/$SCHEMA_REL" > "$_bad/$SCHEMA_REL"
+    if generate "$_bad" "$_bad/gen.log"; then
+        echo "selftest: an undeclared accessor did NOT fail generation"; return 1
+    fi
+    if ! grep -q "accessor maps undeclared attribute 'right'" "$_bad/gen.log"; then
+        echo "selftest: generation failed for the wrong reason"; tail -5 "$_bad/gen.log"; return 1
+    fi
+    echo "selftest: 2 fixture(s) ok"
+    return 0
+}
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "ERROR — nothing was checked (no runnable Simple binary at $SIMPLE_BIN)"
+    exit 2
+fi
+if ! selftest; then
+    echo "ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+if [ "${1:-}" = "--selftest" ]; then
+    echo "PASS — 2 selftest fixture(s) checked"
+    exit 0
+fi
+
+_live="$TMP/live"
+mkdir -p "$_live/$(dirname "$SCHEMA_REL")"
+cp "$ROOT/$SCHEMA_REL" "$_live/$SCHEMA_REL"
+if ! generate "$_live" "$_live/gen.log"; then
+    tail -5 "$_live/gen.log"
+    echo "FAIL — generator rejected $SCHEMA_REL (see above)"
+    exit 1
+fi
+if ! cmp -s "$_live/$GEN_REL" "$ROOT/$GEN_REL"; then
+    diff -u "$ROOT/$GEN_REL" "$_live/$GEN_REL" | head -40
+    echo "FAIL — 1 view generated, but $GEN_REL is STALE; regenerate: bin/simple run src/app/compiler_schema/main.spl node_views"
+    exit 1
+fi
+echo "PASS — 1 view(s) generated, committed module fresh"
+exit 0

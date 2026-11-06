@@ -254,10 +254,24 @@ fn acc_parse_class_name(trimmed: text) -> text:
 # Global indexing across many files
 # ============================================================================
 
+# A generated semantic artifact (e.g. a `@node_tree` view, data plan W3)
+# carries its schema/AttrId/origin header; its accessors are the logical
+# attribute surface, never dummy forwarders to strip.
+pub fn acc_is_semantic_artifact(source: text) -> bool:
+    for line in source.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with("# @semantic_artifact"):
+            return true
+        if trimmed.len() > 0 and not trimmed.starts_with("#"):
+            return false
+    false
+
 # Collect all dummy accessor records from a {file: source} map.
 fn collect_dummy_records(sources: Dict<text, text>) -> [AccRecord]:
     var out: [AccRecord] = []
     for file in sources.keys():
+        if acc_is_semantic_artifact(sources[file]):
+            continue
         val classes = parse_accessor_classes(sources[file])
         for c in classes:
             # a suffix is "real" within this class if any same-suffix method is
@@ -286,9 +300,11 @@ pub fn acc_suffix_has_real(c: AccClass, field: text) -> bool:
 fn collect_poisoned_names(sources: Dict<text, text>) -> Dict<text, bool>:
     var poison: Dict<text, bool> = {}
     for file in sources.keys():
+        val artifact = acc_is_semantic_artifact(sources[file])
         val classes = parse_accessor_classes(sources[file])
         for c in classes:
             for m in c.methods:
-                if m.kind != "" and not m.is_dummy:
+                # Every accessor of a semantic artifact counts as real.
+                if m.kind != "" and (artifact or not m.is_dummy):
                     poison[m.name] = true
     poison

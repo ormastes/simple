@@ -1,0 +1,74 @@
+# AST node pool pilot reference stores (data plan W3, doc/03_plan/compiler/
+# data/data_attributes_layout_containers_xray_2026-11-06.md sections 6.2,
+# 12.3, 14.3 item 2).
+#
+# The direct store is the generated `BinaryExprView` over the existing AST
+# pool owner accessors. These two adapters hold the same logical attributes in
+# a column (SoA) layout and in a hash-keyed row layout, so parity can be
+# checked through one logical surface. They are reference adapters for the
+# pilot, not production storage, and own no node identity: a node id is the
+# AST pool index.
+
+use compiler.frontend.generated.binary_expr_view.{BinaryExprView}
+
+# Columns (SoA): one array per attribute, indexed by position in `nodes`.
+class BinaryExprColumnsV1:
+    nodes: [i64]
+    spans: [i64]
+    lefts: [i64]
+    ops: [i64]
+
+impl BinaryExprColumnsV1:
+    fn source_span(position: i64) -> i64:
+        self.spans[position]
+
+    fn left(position: i64) -> i64:
+        self.lefts[position]
+
+    fn op(position: i64) -> i64:
+        self.ops[position]
+
+fn binary_expr_columns_from_pool(nodes: [i64]) -> BinaryExprColumnsV1:
+    var spans: [i64] = []
+    var lefts: [i64] = []
+    var ops: [i64] = []
+    for node in nodes:
+        val view = BinaryExprView(node: node)
+        spans.push(view.source_span())
+        lefts.push(view.left())
+        ops.push(view.op())
+    BinaryExprColumnsV1(nodes: nodes, spans: spans, lefts: lefts, ops: ops)
+
+# Rows keyed by node id in a hash map. A missing row is an error, never zero.
+struct BinaryExprRowV1:
+    source_span: i64
+    left: i64
+    op: i64
+
+class BinaryExprRowsV1:
+    rows: Dict<i64, BinaryExprRowV1>
+
+impl BinaryExprRowsV1:
+    fn row(node: i64) -> Result<BinaryExprRowV1, text>:
+        if not self.rows.contains_key(node):
+            return Err("no row for node " + node.to_text())
+        Ok(self.rows[node])
+
+    fn source_span(node: i64) -> Result<i64, text>:
+        Ok(self.row(node)?.source_span)
+
+    fn left(node: i64) -> Result<i64, text>:
+        Ok(self.row(node)?.left)
+
+    fn op(node: i64) -> Result<i64, text>:
+        Ok(self.row(node)?.op)
+
+fn binary_expr_rows_from_pool(nodes: [i64]) -> BinaryExprRowsV1:
+    var rows: Dict<i64, BinaryExprRowV1> = {}
+    for node in nodes:
+        val view = BinaryExprView(node: node)
+        rows[node] = BinaryExprRowV1(source_span: view.source_span(), left: view.left(), op: view.op())
+    BinaryExprRowsV1(rows: rows)
+
+export BinaryExprColumnsV1, BinaryExprRowV1, BinaryExprRowsV1
+export binary_expr_columns_from_pool, binary_expr_rows_from_pool

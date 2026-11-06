@@ -1,0 +1,116 @@
+# @cover src/app/compiler_schema/node_view_gen.spl 80%
+"""
+## Purpose and audience
+The AST node-pool pilot exposes the binary-expression family of the existing
+compiler AST pool through a generated `@node_tree` view: `source_span`, `left`
+and `op` read through the owner accessors, and the sparse analysis attribute
+`inferred_type: text?` lives in a hash-backed side store. Readers are compiler
+authors adopting typed node views and the storage owners comparing layouts.
+Plan: doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md
+(W3, sections 12.1, 12.3, 14.3 item 2; ATTR-25, ATTR-26). Category: Language.
+## Operator workflow
+bin/simple test test/02_integration/compiler/data/ast_node_pool_pilot_spec.spl
+Regenerate the view: bin/simple run src/app/compiler_schema/main.spl node_views
+## Compatibility and limitations
+Read and access half only: no `NotInit` builder (W2c) and no native layout
+lowering. The column and hash stores are reference adapters for parity, not
+production storage.
+## Verification guidance and troubleshooting
+A RED on the freshness scenario means the committed generated view differs
+from a fresh generation: regenerate it, never hand-edit it.
+"""
+# Lifecycle: doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md
+# @manual_section: AST node pool pilot
+
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use std.nogc_sync_mut.tooling.easy_fix.accessor_rewrite.{apply_accessor_fixes}
+use compiler.core.ast.{expr_binary, expr_int_lit}
+use compiler.frontend.generated.binary_expr_view.*
+use compiler.frontend.node_pool_pilot.*
+use app.compiler_schema.node_view_gen.{node_view_generate_text, NODE_VIEW_SCHEMA_PATH}
+
+fn build_nodes() -> [i64]:
+    val a = expr_int_lit(1, 101)
+    val b = expr_int_lit(2, 102)
+    val c = expr_int_lit(3, 103)
+    val sum = expr_binary(60, a, b, 201)
+    val product = expr_binary(62, sum, c, 202)
+    [sum, product]
+
+describe "AST node pool pilot":
+    it "returns the same source span through direct, column and sparse-hash storage":
+        # @req REQ-ATTR-25
+        step("Build two binary expressions in the compiler AST pool")
+        val nodes = build_nodes()
+        step("Read every attribute through the generated view, a column store and a hash store")
+        val columns = binary_expr_columns_from_pool(nodes)
+        val rows = binary_expr_rows_from_pool(nodes)
+        # @capture(exec): attribute values per storage
+        step("Verify the three storages agree on every node and attribute")
+        for i in 0..nodes.len():
+            val view = BinaryExprView(node: nodes[i])
+            expect(columns.source_span(i)).to_equal(view.source_span())
+            expect(rows.source_span(nodes[i]).unwrap()).to_equal(view.source_span())
+            expect(columns.left(i)).to_equal(view.left())
+            expect(rows.left(nodes[i]).unwrap()).to_equal(view.left())
+            expect(columns.op(i)).to_equal(view.op())
+            expect(rows.op(nodes[i]).unwrap()).to_equal(view.op())
+        expect(BinaryExprView(node: nodes[0]).op()).to_equal(60)  # oracle: built with op 60
+        expect(BinaryExprView(node: nodes[1]).left()).to_equal(nodes[0])  # oracle: product's left is sum
+        expect(BinaryExprView(node: nodes[1]).source_span()).to_equal(202)  # oracle: span id given to the product
+
+    it "keeps a sparse absent entry distinct from an explicitly stored None":
+        # @req REQ-ATTR-26
+        step("Store a type for one node, an explicit None for another, and nothing for a third")
+        var store = BinaryExprInferredTypeStore.create()
+        store.set(1, Some("i64"))
+        store.set(2, None)
+        # @capture(exec): sparse lookups
+        step("Verify present, explicit None and absent are three different answers")
+        expect(store.get(1).unwrap().unwrap()).to_equal("i64")
+        expect(store.get(2).is_ok()).to_equal(true)
+        expect(store.get(2).unwrap().is_none()).to_equal(true)
+        expect(store.get(3).is_err()).to_equal(true)
+        expect(store.len()).to_equal(2)  # oracle: two entries stored, the third absent
+
+    it "generates the committed view deterministically from the SPL+SDN schema":
+        # @req REQ-ATTR-25
+        step("Generate the view twice from the schema file and read the committed module")
+        val schema = file_read(NODE_VIEW_SCHEMA_PATH)
+        val first = node_view_generate_text(schema, NODE_VIEW_SCHEMA_PATH).unwrap()
+        val second = node_view_generate_text(schema, NODE_VIEW_SCHEMA_PATH).unwrap()
+        val committed = file_read("src/compiler/10.frontend/generated/binary_expr_view.spl")
+        # @capture(exec): generated text header
+        step("Verify both generations match each other and the committed file, and carry the semantic-artifact header")
+        expect(first).to_equal(second)
+        expect(committed).to_equal(first)
+        expect(first).to_contain("# @semantic_artifact node_tree compiler.ast")
+        expect(first).to_contain("schema_digest ")
+        expect(first).to_contain("AttrId compiler.ast#")
+
+    it "rejects a schema whose accessor map names an undeclared attribute":
+        # @req REQ-ATTR-25
+        step("Generate from a schema that maps an accessor for an attribute it does not declare")
+        val bad = "data_policy:\n    declarations:\n        binary_expr:\n            tree: \"compiler.ast\"\n            view: \"compiler.ast.BinaryExprView\"\n            attributes:\n                left:\n                    type: \"i64\"\n                    required: true\nnode_views:\n    binary_expr:\n        class: \"BinaryExprView\"\n        owner_import: \"compiler.core.ast\"\n        accessors:\n            left: \"expr_get_left\"\n            right: \"expr_get_right\"\n"
+        # @capture(exec): generator diagnostic
+        step("Verify generation fails and names the attribute")
+        val outcome = node_view_generate_text(bad, "bad.sdn")
+        expect(outcome.is_err()).to_equal(true)
+        expect(outcome.unwrap_err()).to_contain("right")
+
+    it "leaves a semantic-artifact module alone in accessor cleanup":
+        # @req REQ-ATTR-25
+        step("Run the dummy-accessor cleanup over a generated module and over the same text without the marker")
+        val body = "class V:\n    x: i64\n    fn get_x() -> i64:\n        self.x\nfn use_it(v: V) -> i64:\n    v.get_x()\n"
+        val marked = "# @semantic_artifact node_tree compiler.ast\n" + body
+        var sources: Dict<text, text> = {}
+        sources["gen.spl"] = marked
+        val kept = apply_accessor_fixes(sources, false).0
+        var plain: Dict<text, text> = {}
+        plain["plain.spl"] = body
+        val rewritten = apply_accessor_fixes(plain, false).0
+        # @capture(exec): cleanup outputs
+        step("Verify the marked module is untouched while the unmarked one is rewritten")
+        expect(kept["gen.spl"]).to_equal(marked)
+        expect(rewritten["plain.spl"] == body).to_equal(false)

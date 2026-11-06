@@ -1,0 +1,198 @@
+# @node_tree view generator (data plan W3, doc/03_plan/compiler/data/
+# data_attributes_layout_containers_xray_2026-11-06.md sections 3.5, 12.1, 12.3).
+#
+# Input: one SDN file holding the logical schema (`data_policy.declarations`,
+# resolved by the W1 resolver, so SPL and SDN declarations share one surface)
+# and `node_views`, which maps each stored attribute to an existing owner
+# accessor and each sparse attribute to a hash-backed side store.
+# Output: one deterministic `.spl` module, committed and freshness-checked
+# (scripts/check/check-node-view-gen-fresh.shs). The module header marks it a
+# semantic artifact (schema, AttrId, origin) so accessor cleanup keeps it.
+# Runs with the existing admitted compiler; the output needs no new feature.
+
+use std.common.sdn.parser.{parse}
+use std.common.sdn.value.{SdnValue}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use compiler.common.data.data_schema_contracts.*
+use compiler.common.data.data_schema_resolver.*
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+val NODE_VIEW_SCHEMA_PATH: text = "config/data_policy/compiler_ast_binary_expr.sdn"
+val NODE_VIEW_OUTPUT_PATH: text = "src/compiler/10.frontend/generated/binary_expr_view.spl"
+val NODE_VIEW_OWNER: text = "compiler.ast"
+
+fn nv_sorted(items: [text]) -> [text]:
+    var out: [text] = []
+    for item in items:
+        var i = out.len()
+        out.push(item)
+        while i > 0 and out[i] < out[i - 1]:
+            val t = out[i - 1]
+            out[i - 1] = out[i]
+            out[i] = t
+            i = i - 1
+    out
+
+fn nv_keys(value: SdnValue) -> [text]:
+    match value.as_dict():
+        case Some(d):
+            var keys: [text] = []
+            for k in d.keys():
+                keys.push(k)
+            nv_sorted(keys)
+        case None: []
+
+fn nv_text(value: SdnValue, key: text) -> text:
+    match value.get(key):
+        case Some(v):
+            match v.as_str():
+                case Some(s): s
+                case None: ""
+        case None: ""
+
+fn nv_section(value: SdnValue, key: text) -> SdnValue:
+    match value.get(key):
+        case Some(v): v
+        case None: SdnValue.Null
+
+fn nv_attr(surface: DataSchemaSurfaceV1, name: text) -> DataResolvedAttrV1?:
+    for a in surface.attrs:
+        if a.name == name:
+            return Some(a)
+    None
+
+fn nv_requiredness(value: DataRequirednessV1) -> text:
+    match value:
+        case DataRequirednessV1.Required: "required"
+        case DataRequirednessV1.Optional: "optional"
+        case DataRequirednessV1.Defaulted: "defaulted"
+
+# Element type of `Option<T>` (sparse attributes only).
+fn nv_option_element(type_canonical: text) -> text:
+    if type_canonical.starts_with("Option<") and type_canonical.ends_with(">"):
+        return type_canonical.substring(7, type_canonical.len() - 1)
+    ""
+
+fn node_view_generate_text(schema_text: text, origin: text) -> Result<text, text>:
+    val decls_result = data_schema_decls_from_sdn_v1(schema_text, origin, NODE_VIEW_OWNER)
+    if decls_result.is_err():
+        return Err("schema: " + decls_result.unwrap_err()[0].message)
+    val decls = decls_result.unwrap()
+    val root = match parse(schema_text):
+        case Ok(v): v
+        case Err(e): return Err("schema: " + e)
+    val views = nv_section(root, "node_views")
+    val view_keys = nv_keys(views)
+    if view_keys.len() != 1:
+        return Err("node_views must declare exactly one view, found {view_keys.len()}")
+    val view = nv_section(views, view_keys[0])
+    val class_name = nv_text(view, "class")
+    val owner_import = nv_text(view, "owner_import")
+    if class_name.len() == 0 or owner_import.len() == 0:
+        return Err("node view '{view_keys[0]}' needs class and owner_import")
+    var view_decls: [DataAttrDeclV1] = []
+    var tree = ""
+    for d in decls:
+        if d.view.ends_with("." + class_name):
+            view_decls.push(d)
+            tree = d.tree
+    if view_decls.len() == 0:
+        return Err("no declaration names view class '{class_name}'")
+    val resolved = data_schema_resolve_v1(data_schema_authority_v1(tree, [NODE_VIEW_OWNER]), view_decls, [])
+    if resolved.is_err():
+        return Err("schema: " + resolved.unwrap_err()[0].message)
+    val surface = resolved.unwrap()
+    val accessors = nv_section(view, "accessors")
+    val sparse = nv_section(view, "sparse")
+    for key in nv_keys(accessors):
+        if not nv_attr(surface, key).?:
+            return Err("accessor maps undeclared attribute '{key}'")
+    for key in nv_keys(sparse):
+        if not nv_attr(surface, key).?:
+            return Err("sparse store names undeclared attribute '{key}'")
+    for a in surface.attrs:
+        val stored = nv_text(accessors, a.name).len() > 0
+        val is_sparse = nv_text(sparse, a.name).len() > 0
+        if stored == is_sparse:
+            return Err("attribute '{a.name}' needs exactly one of an owner accessor or a sparse store")
+        if is_sparse and nv_option_element(a.type_canonical).len() == 0:
+            return Err("sparse attribute '{a.name}' must be declared Option<T>")
+    # ---- emit ----
+    var lines: [text] = []
+    lines.push("# GENERATED — do not edit; regenerate with: bin/simple run src/app/compiler_schema/main.spl node_views")
+    lines.push("# @semantic_artifact node_tree {tree} view {class_name}")
+    lines.push("# origin: {origin}")
+    lines.push("# schema_digest {surface.schema_digest}")
+    for a in surface.attrs:
+        val target = if nv_text(accessors, a.name).len() > 0: nv_text(accessors, a.name) else: nv_text(sparse, a.name) + " (sparse)"
+        lines.push("# AttrId {tree}#{a.id.ordinal} {a.name}: {a.type_canonical} {nv_requiredness(a.requiredness)} -> {target}")
+    lines.push("")
+    var owner_fns: [text] = []
+    for key in nv_keys(accessors):
+        owner_fns.push(nv_text(accessors, key))
+    lines.push("use " + owner_import + ".{" + nv_sorted(owner_fns).join(", ") + "}")
+    lines.push("")
+    lines.push("@node_tree(\"" + tree + "\")")
+    lines.push("class " + class_name + ":")
+    lines.push("    node: i64")
+    lines.push("")
+    lines.push("impl " + class_name + ":")
+    var first = true
+    for a in surface.attrs:
+        val accessor = nv_text(accessors, a.name)
+        if accessor.len() == 0:
+            continue
+        if not first:
+            lines.push("")
+        first = false
+        lines.push("    # AttrId {tree}#{a.id.ordinal}")
+        lines.push("    fn {a.name}() -> {a.type_canonical}:")
+        lines.push("        {accessor}(self.node)")
+    val lb = """{"""
+    val rb = """}"""
+    for a in surface.attrs:
+        val store = nv_text(sparse, a.name)
+        if store.len() == 0:
+            continue
+        val element = nv_option_element(a.type_canonical)
+        lines.push("")
+        lines.push("# Sparse attribute `{a.name}` (AttrId {tree}#{a.id.ordinal}): an entry is absent,")
+        lines.push("# an explicit None, or a value. Absence is never reported as None.")
+        lines.push("class " + store + ":")
+        lines.push("    present: Dict<i64, bool>")
+        lines.push("    values: Dict<i64, " + element + ">")
+        lines.push("")
+        lines.push("impl " + store + ":")
+        lines.push("    static fn create() -> " + store + ":")
+        lines.push("        " + store + "(present: " + lb + rb + ", values: " + lb + rb + ")")
+        lines.push("")
+        lines.push("    me set(node: i64, value: " + element + "?):")
+        lines.push("        match value:")
+        lines.push("            case Some(v):")
+        lines.push("                self.present[node] = true")
+        lines.push("                self.values[node] = v")
+        lines.push("            case None:")
+        lines.push("                self.present[node] = false")
+        lines.push("")
+        lines.push("    fn get(node: i64) -> Result<" + element + "?, text>:")
+        lines.push("        if not self.present.contains_key(node):")
+        lines.push("            return Err(\"absent: no " + a.name + " entry for node \" + node.to_text())")
+        lines.push("        if self.present[node]:")
+        lines.push("            return Ok(Some(self.values[node]))")
+        lines.push("        Ok(None)")
+        lines.push("")
+        lines.push("    fn len() -> i64:")
+        lines.push("        self.present.len()")
+    Ok(lines.join("\n") + "\n")
+
+# CLI entry: regenerate the committed view from the committed schema.
+fn node_view_generate_into(root: text) -> Result<text, text>:
+    val schema_path = root + "/" + NODE_VIEW_SCHEMA_PATH
+    val output_path = root + "/" + NODE_VIEW_OUTPUT_PATH
+    val generated = node_view_generate_text(file_read(schema_path), NODE_VIEW_SCHEMA_PATH)?
+    if not rt_file_write_text(output_path, generated):
+        return Err("cannot write " + output_path)
+    Ok(output_path)
+
+export NODE_VIEW_SCHEMA_PATH, NODE_VIEW_OUTPUT_PATH, node_view_generate_text, node_view_generate_into
