@@ -41,3 +41,54 @@ qualify concrete worktree-provider properties. See the CLI TDD report for
 source-stage boundaries, owned inputs and P2 oracle limitations. Direct Unicode
 selection is proven; find transport of that filename remains open. All20REQ/40AC
 remain required; no full runtime or protected admission PASS is claimed.
+
+## Query entry and harness surface increment — 2026-11-06 (slice 1)
+
+Scope statement: slice 1 ("P0 query usable on seed") changes **no module or
+layer boundary, no data model, no graph schema and no SDN document shape**.
+`std.common.traceability` stays the pure owner; app adapters keep snapshots,
+processes and rendering. The increment adds one entry route, one harness knob
+and one input-tolerance rule, each listed here so later slices align to it.
+
+1. **Direct program entry for the query CLI.** `src/app/traceability/query_main.spl`
+   exposes `fn main() -> i64` that forwards `get_cli_args()` to
+   `run_trace_query_v1` and exits with its status. `<simple> run
+   src/app/traceability/query_main.spl <args>` therefore has exactly the argv
+   contract and exit codes of `simple trace <args>` (0 help/complete, 1
+   rendered-but-unverified or `TRACE-QUERY-NOT-FOUND`, 2 error). Rationale: no
+   admitted Stage4 CLI dispatches `trace`, and the Rust seed dispatches none of
+   the pure-Simple commands; program-run is the delivery route on any binary
+   that can `run`. The `simple trace` registration (command_registry) is
+   unchanged and remains the eventual surface; `main` is additive. The
+   traceability-check entry (`main.spl`) already follows this shape.
+
+2. **Harness contract.** `trace_query_p0_spec` accepts
+   `SIMPLE_TRACE_QUERY_TEST_COMMAND` -- a whitespace-split command prefix that
+   already routes to the query entry (the spec appends only query args) -- as an
+   alternative to `SIMPLE_TRACE_QUERY_TEST_BINARY` (`<binary> trace <args>`).
+   Neither set is still an explicit failure; no fallback process result exists.
+   `scripts/check/check-trace-query-p0.shs` is the single owner of the
+   alternate-index fixture (`build/test-artifacts/trace_query_p0/index`, built
+   with `git read-tree HEAD` + one `update-index --cacheinfo` of a modified
+   declaration blob; never the real index or worktree) and exports
+   `GIT_INDEX_FILE` only for the spec process.
+
+3. **Declaration input tolerance.** Registered declaration files
+   (`doc/08_tracking/trace/features/*.sdn`) may begin with `#` comment lines.
+   This is satisfied in the shared SDN parser (`std.common.sdn.parser.parse`
+   skips leading full-line comments before every top-level shape dispatch,
+   matching what the block-mapping route already did), not in the trace codec;
+   `decode_trace_declarations` and the `simple.trace.declarations/1` schema are
+   unchanged.
+
+4. **Snapshot adapter tiers (stated, not changed).** `worktree_preview` reads
+   files in-process and runs on the interpreter. `git_commit` and `git_index`
+   go through `OwnedProcessLease` (owned-process v3), which the Rust seed
+   interpreter deliberately reports as unavailable (`rt_process_owned_v3_adapter_unavailable`);
+   those two routes and the mislabeled-tree rejection verify only on a native
+   runtime provider (self-hosted/native `bin/simple`). Specs that need them are
+   therefore Phase-3 verification, not seed-fixable defects.
+
+Next slices (reverse references: which specs cover a requirement, bug <->
+file links) touch the query model (`TraceNodeQueryV1`/page result) and will
+get their own increment in this document before code lands.
