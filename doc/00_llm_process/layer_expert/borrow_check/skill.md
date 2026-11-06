@@ -144,3 +144,14 @@ this layer), not the 2026-08-01 placeholder-nil bug (SIGILL, pre-HIR).
 
 Detail: `doc/08_tracking/bug/stage3_native_build_segv_two_distinct_faults_tagged_value_seam_2026-08-11.md`.
 Tracked: `.spipe/stage3-segfault-fix/` AC-3, AC-4.
+
+## 2026-11-06 strict no-GC option policy
+
+The AOT bootstrap route now invokes the borrow checker. Historical bootstrap
+bypass and seed-based test instructions above describe their dated artifacts,
+not current admission. `CompileContext.nogc_ownership_required` is set only by
+successful typed HIR admission and survives HIR eviction; strict contexts reject
+`--no-borrow-check` with `NOGC-POLICY-002`. Legacy-only contexts keep their explicit
+diagnostic bypass. See `doc/07_guide/compiler/strict_nogc_ownership_gate.md`.
+The focused specs are authored but await an admitted full pure-Simple runtime;
+do not use the Rust seed or source inspection as production execution evidence.
