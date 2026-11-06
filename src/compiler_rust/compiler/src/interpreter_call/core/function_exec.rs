@@ -2054,6 +2054,7 @@ fn write_back_mutable_arguments(
                     // the shared cell (recorded in `mut_written` by the pre-pass):
                     // nothing to write back.
                     if param_is_mut && matches!(callee_val, Value::ClassInstance(_)) {
+                        mut_written.insert(caller_name.clone());
                         continue;
                     }
                     // Value-type structs (task #91) keep VALUE semantics: never
