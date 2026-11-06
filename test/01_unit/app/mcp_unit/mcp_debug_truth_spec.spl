@@ -1,0 +1,118 @@
+"""
+MCP debug truthfulness: exercise actual lazy handlers against a configured,
+unattached OpenOCD target. No subprocess or hardware is launched by this
+fixture. This proves protocol refusal behavior, not live debugging capability.
+REQ-MCP-DEBUG-TRUTH: source improvement plan PROTO-02 and section 12.
+"""
+use app.mcp.dap_bridge.{DapSession, dap_create_session, dap_find_session, dap_close_session}
+use app.mcp.main_lazy_debug_tools.{handle_debug_stack_trace, handle_debug_get_variables, handle_debug_evaluate, handle_debug_continue, handle_debug_step, handle_debug_terminate, handle_debug_set_variable, handle_debug_set_breakpoint, handle_debug_set_function_breakpoint, handle_debug_enable_breakpoint, handle_debug_remove_breakpoint, handle_debug_set_data_breakpoint, handle_debug_list_data_breakpoints, handle_debug_remove_data_breakpoint, handle_debug_watch, handle_debug_flash_program}
+use app.mcp.main_lazy_json.{LB, RB, jp, js}
+use std.common.debug.contracts_v1.{DebugSessionId}
+use std.common.debug.service_v1.{central_debug_service_v1_close}
+use std.spec.step
+
+fn debug_truth_configured_session() -> DapSession:
+    dap_create_session("build/unattached.elf", "openocd", "openocd_remote_bitbang", "riscv32", "rtl_sim", "generic", "", "", "localhost", "3333", "", "", "127.0.0.1", "5555", "", "true")
+
+fn debug_truth_request(session: DapSession, fields: text) -> text:
+    LB() + jp("session_id", js(session.id)) + fields + RB()
+
+fn debug_truth_expect_unavailable(response: text):
+    expect(response).to_contain("\"isError\":true")
+    expect(response).to_contain("unsupported")
+    expect(response).to_contain("receipt_id")
+    expect(response).to_contain("execution_changed")
+    expect(response.contains("success")).to_equal(false)
+
+describe "MCP refuses unobserved target results":
+    it "does not fabricate a frame or report empty locals as captured":
+        step("Register an unattached target and request actual handler observations")
+        val session = debug_truth_configured_session()
+        val body = debug_truth_request(session, "")
+        val stack = handle_debug_stack_trace("1", body)
+        val variables = handle_debug_get_variables("2", body)
+        debug_truth_expect_unavailable(stack)
+        debug_truth_expect_unavailable(variables)
+        expect(stack.contains("total_frames")).to_equal(false)
+        expect(stack.contains("frames")).to_equal(false)
+        expect(variables.contains("[]")).to_equal(false)
+        expect(dap_close_session(session.id)).to_equal(true)
+
+    it "does not echo an unevaluated expression as a value":
+        step("Evaluate through the handler without a target evaluator")
+        val session = debug_truth_configured_session()
+        val body = debug_truth_request(session, "," + jp("expression", js("dangerous_side_effect()")))
+        val response = handle_debug_evaluate("3", body)
+        debug_truth_expect_unavailable(response)
+        expect(response.contains("dangerous_side_effect()")).to_equal(false)
+        expect(dap_close_session(session.id)).to_equal(true)
+
+    it "refuses execution changes without changing the registered state":
+        step("Request continue, step, mutation and termination without transport")
+        val session = debug_truth_configured_session()
+        val body = debug_truth_request(session, "")
+        debug_truth_expect_unavailable(handle_debug_continue("4", body))
+        debug_truth_expect_unavailable(handle_debug_step("5", debug_truth_request(session, "," + jp("mode", js("over")))))
+        debug_truth_expect_unavailable(handle_debug_set_variable("6", debug_truth_request(session, "," + jp("name", js("x")) + "," + jp("value", js("9")))))
+        debug_truth_expect_unavailable(handle_debug_terminate("7", body))
+        val after = dap_find_session(session.id)
+        expect(after.state).to_equal(session.state)
+        expect(after.id).to_equal(session.id)
+        expect(dap_close_session(session.id)).to_equal(true)
+
+    it "does not turn breakpoint intentions into verified target breakpoints":
+        step("Request source, function and data breakpoints through actual handlers")
+        val session = debug_truth_configured_session()
+        val source = debug_truth_request(session, "," + jp("file", js("src/fixture.spl")) + "," + jp("line", "7"))
+        debug_truth_expect_unavailable(handle_debug_set_breakpoint("8", source))
+        debug_truth_expect_unavailable(handle_debug_set_function_breakpoint("9", debug_truth_request(session, "," + jp("function_name", js("work")))))
+        debug_truth_expect_unavailable(handle_debug_set_data_breakpoint("10", debug_truth_request(session, "," + jp("name", js("state")))))
+        debug_truth_expect_unavailable(handle_debug_enable_breakpoint("11", debug_truth_request(session, "," + jp("breakpoint_id", "1") + "," + jp("enabled", "true"))))
+        debug_truth_expect_unavailable(handle_debug_remove_breakpoint("12", debug_truth_request(session, "," + jp("breakpoint_id", "1"))))
+        debug_truth_expect_unavailable(handle_debug_list_data_breakpoints("13", debug_truth_request(session, "")))
+        debug_truth_expect_unavailable(handle_debug_remove_data_breakpoint("14", debug_truth_request(session, "," + jp("breakpoint_id", "1"))))
+        val after = dap_find_session(session.id)
+        expect(after.breakpoints.len()).to_equal(0)
+        expect(after.next_bp_id).to_equal(1)
+        expect(dap_close_session(session.id)).to_equal(true)
+
+    it "does not invent current or historical watch observations":
+        step("Request watch add, list and remove on an unattached session")
+        val session = debug_truth_configured_session()
+        for action in ["add", "list", "remove"]:
+            val body = debug_truth_request(session, "," + jp("action", js(action)) + "," + jp("expression", js("state")))
+            debug_truth_expect_unavailable(handle_debug_watch("15", body))
+        val after = dap_find_session(session.id)
+        expect(after.watches.len()).to_equal(0)
+        expect(dap_close_session(session.id)).to_equal(true)
+
+    it "labels hardware bootstrap metadata as a nonexecuted plan":
+        step("Request flash on a configured target without touching hardware")
+        val session = debug_truth_configured_session()
+        val body = debug_truth_request(session, "," + jp("elf_path", js("build/payload.elf")))
+        val response = handle_debug_flash_program("16", body)
+        debug_truth_expect_unavailable(response)
+        expect(response).to_contain("plan_only")
+        expect(response).to_contain("bootstrap_launch_command")
+        expect(dap_close_session(session.id)).to_equal(true)
+
+    it "keeps parameter errors separate from missing backend capability":
+        step("Inspect an unknown session and reject an invalid step mode")
+        val missing = LB() + jp("session_id", js("not-registered")) + RB()
+        val response = handle_debug_stack_trace("17", missing)
+        expect(response).to_contain("Session not found")
+        expect(response).to_contain("\"isError\":true")
+        val invalid = handle_debug_step("18", LB() + jp("session_id", js("not-registered")) + "," + jp("mode", js("sideways")) + RB())
+        expect(invalid).to_contain("Invalid step mode")
+
+    it "honors a closed central authority even when adapter metadata remains":
+        step("Close the shared authority and request control through stale metadata")
+        val session = debug_truth_configured_session()
+        val closed = central_debug_service_v1_close(DebugSessionId(value: session.debug_session_id))
+        expect(closed.is_ok()).to_equal(true)
+        val response = handle_debug_continue("19", debug_truth_request(session, ""))
+        expect(response).to_contain("denied")
+        expect(response).to_contain("\"isError\":true")
+        val after = dap_find_session(session.id)
+        expect(after.state).to_equal(session.state)
+        expect(dap_close_session(session.id)).to_equal(true)
