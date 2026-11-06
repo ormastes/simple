@@ -24,6 +24,7 @@ use compiler.backend.native.x86_64_avx512.{X86_ZMM0, X86_K0, encode_avx512_load_
 use compiler.backend.native.x86_64_avx512.{emit_avx512_vpermps_zmm, emit_avx512_vpermq, emit_avx512_vpermd, emit_avx512_vpermi2d, emit_avx512_vpermi2q, emit_avx512_vpmovsxdq_zmm_from_ymm, emit_avx512_vgatherdps_zmm, emit_avx512_vgatherdpd_zmm, emit_avx512_vpgatherdd_zmm}
 use compiler.backend.native.x86_64_avx512.{encode_avx512_loadu_zmm, encode_avx512_storeu_zmm, encode_avx512_loadu_ymm, encode_avx512_storeu_ymm}
 use compiler.backend.native.x86_64_avx512_ops.{X86_OP_AVX512_LOADU, X86_OP_AVX512_STOREU, X86_OP_AVX512_BINARY, X86_OP_AVX512_TERNARY, X86_OP_AVX512_UNARY, X86_OP_AVX512_COMPARE, X86_OP_AVX512_KLOAD, X86_OP_AVX512_KSTORE, X86_OP_AVX512_MASK, X86_OP_AVX512_SELECT, X86_OP_AVX512_SPLAT, X86_OP_AVX512_REDUCE, X86_OP_AVX512_COPY_LANE, X86_OP_AVX512_BOUNDS, X86_OP_AVX512_INDEXED, X86_OP_AVX512_BROADCAST_LANE, X86_OP_AVX512_MASK_CANONICAL, X86_OP_AVX512_PERMUTE, X86_OP_AVX512_GATHER, X86_OP_AVX512_SHUFFLE, X86_OP_AVX512_EXTRACT_I32}
+use compiler.backend.native.x86_64_avx512_scalar.{X86_OP_V512S_COPY, X86_OP_V512S_SPLAT, X86_OP_V512S_FBIN, X86_OP_V512S_IBIN, X86_OP_V512S_UNARY, X86_OP_V512S_CMP, X86_OP_V512S_SELECT, X86_OP_V512S_MASK, X86_OP_V512S_PERMUTE, X86_OP_V512S_BROADCAST, avx512_scalar_copy_bytes, avx512_scalar_splat_bytes, avx512_scalar_fbin_bytes, avx512_scalar_ibin_bytes, avx512_scalar_unary_bytes, avx512_scalar_cmp_bytes, avx512_scalar_select_bytes, avx512_scalar_mask_bytes, avx512_scalar_permute_bytes, avx512_scalar_broadcast_bytes}
 use compiler.backend.native.x86_64_avx512_ops.{avx512_select_bytes, avx512_binop_bytes, avx512_fma_bytes, avx512_unop_bytes, avx512_cmp_bytes, avx512_kmem_bytes, avx512_kop_bytes, avx512_kall_bytes, avx512_splat_bytes, avx512_reduce_bytes, avx512_scalar_mem, avx512_extract_i32_bytes, avx512_bound_bytes, avx512_indexed_bytes, avx512_broadcast_lane_bytes}
 use compiler.backend.native.encode_common.{encode_module_with}
 use compiler.backend.native.elf_writer.{ByteBuffer, new_byte_buffer, buf_len, buf_write_u8, buf_write_u32_le, buf_write_u64_le, buf_write_bytes}
@@ -183,7 +184,7 @@ fn encode_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
     var relocs = ectx.relocations
     var pending = ectx.pending_jumps
 
-    if inst.opcode >= X86_OP_AVX512_LOADU and inst.opcode <= X86_OP_AVX512_EXTRACT_I32:
+    if inst.opcode >= X86_OP_AVX512_LOADU and inst.opcode <= X86_OP_V512S_BROADCAST:
         var encoded: [i64] = []
         if inst.opcode == X86_OP_AVX512_LOADU:
             val width = get_imm_value(inst.operands[2])
@@ -254,6 +255,26 @@ fn encode_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
             else: panic("unsupported AVX-512 shuffle shape")
         elif inst.opcode == X86_OP_AVX512_EXTRACT_I32:
             encoded = avx512_extract_i32_bytes(get_phys_reg_id(inst.operands[0]), get_imm_value(inst.operands[1]))
+        elif inst.opcode == X86_OP_V512S_COPY:
+            encoded = avx512_scalar_copy_bytes(get_phys_reg_id(inst.operands[0]), get_mem_base_id(inst.operands[1]), get_mem_offset(inst.operands[1]), get_mem_base_id(inst.operands[2]), get_mem_offset(inst.operands[2]), get_imm_value(inst.operands[3]))
+        elif inst.opcode == X86_OP_V512S_SPLAT:
+            encoded = avx512_scalar_splat_bytes(get_phys_reg_id(inst.operands[0]), get_imm_value(inst.operands[1]), get_imm_value(inst.operands[2]), get_imm_value(inst.operands[3]))
+        elif inst.opcode == X86_OP_V512S_FBIN:
+            encoded = avx512_scalar_fbin_bytes(get_imm_value(inst.operands[0]), get_imm_value(inst.operands[1]), get_imm_value(inst.operands[2]), get_imm_value(inst.operands[3]), get_imm_value(inst.operands[4]))
+        elif inst.opcode == X86_OP_V512S_IBIN:
+            encoded = avx512_scalar_ibin_bytes(get_phys_reg_id(inst.operands[0]), get_imm_value(inst.operands[1]), get_imm_value(inst.operands[2]), get_imm_value(inst.operands[3]), get_imm_value(inst.operands[4]), get_imm_value(inst.operands[5]))
+        elif inst.opcode == X86_OP_V512S_UNARY:
+            encoded = avx512_scalar_unary_bytes(get_phys_reg_id(inst.operands[0]), get_imm_value(inst.operands[1]), get_imm_value(inst.operands[2]), get_imm_value(inst.operands[3]), get_imm_value(inst.operands[4]))
+        elif inst.opcode == X86_OP_V512S_CMP:
+            encoded = avx512_scalar_cmp_bytes(get_phys_reg_id(inst.operands[0]), get_phys_reg_id(inst.operands[1]), get_imm_value(inst.operands[2]), get_imm_value(inst.operands[3]), get_imm_value(inst.operands[4]), get_imm_value(inst.operands[5]), get_imm_value(inst.operands[6]))
+        elif inst.opcode == X86_OP_V512S_SELECT:
+            encoded = avx512_scalar_select_bytes(get_phys_reg_id(inst.operands[0]), get_phys_reg_id(inst.operands[1]), get_imm_value(inst.operands[2]), get_imm_value(inst.operands[3]), get_imm_value(inst.operands[4]), get_imm_value(inst.operands[5]), get_imm_value(inst.operands[6]))
+        elif inst.opcode == X86_OP_V512S_MASK:
+            encoded = avx512_scalar_mask_bytes(get_phys_reg_id(inst.operands[0]), get_imm_value(inst.operands[1]), get_imm_value(inst.operands[2]), get_imm_value(inst.operands[3]), get_imm_value(inst.operands[4]))
+        elif inst.opcode == X86_OP_V512S_PERMUTE:
+            encoded = avx512_scalar_permute_bytes(get_phys_reg_id(inst.operands[0]), get_phys_reg_id(inst.operands[1]), get_imm_value(inst.operands[2]), get_imm_value(inst.operands[3]), get_imm_value(inst.operands[4]), get_imm_value(inst.operands[5]))
+        elif inst.opcode == X86_OP_V512S_BROADCAST:
+            encoded = avx512_scalar_broadcast_bytes(get_phys_reg_id(inst.operands[0]), get_phys_reg_id(inst.operands[1]), get_imm_value(inst.operands[2]), get_imm_value(inst.operands[3]), get_imm_value(inst.operands[4]))
         else:
             panic("unsupported AVX-512 mask canonicalization reached x86 encoder")
         if encoded.len() == 0: panic("AVX-512 pseudo instruction encoded no bytes")
