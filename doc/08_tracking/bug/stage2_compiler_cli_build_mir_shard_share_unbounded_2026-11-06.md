@@ -210,3 +210,29 @@ Known limit (not handled): the policy does not read cgroup `memory.max`. Run 11'
 watchdog. The compiler's own effective shard budget (cgroup - headroom = 40 GiB)
 is unchanged; only the watchdog kill line moved. This does not fix the
 unbounded MIR share above; it buys ~8.5 GiB over the measured 51.5 GiB.
+
+## 2026-11-07: shard count back to 8 (reverts the #7352 raise to 12)
+
+#7352 raised the full-tool MIR shard count from 8 to 12 based on run 11,
+which ran under the old 52 GiB row cap. #7302 has since raised that cap to
+60 GiB. Run 13 (`5fdf9fa4fc0`, Stage 2 binary sha256 `ef163123d471887e...`)
+ran the row at 8 shards under the 60 GiB cap. All 8 shard workers finished
+MIR. Every run-process receipt reports `primary_status=complete`, and there
+was no rss-cap kill. The coordinator's tree RSS sample peaked at 57.06 GiB
+(the external sampler's process sum was 56.96 GiB), and the largest single
+process was 31.99 GiB. That peak came from the 2 `app.*` shards, which
+reached end-of-shard codegen (at 361/383 and 364/383). They failed on
+`export_list_static_visibility_not_lifted_2026-11-06`.
+**The 6 `compiler.*`/`lib.*`/`os.*` shards stopped on 498 MIR lowering
+errors before codegen** (`driver_aot_pipeline.spl` runs `compile_to_native`
+only at 0 errors). Their codegen memory headroom is therefore UNMEASURED.
+
+On wall time, the row took 10156 s against `task_timeout_seconds=14400`.
+With parallel=2, 8 shards run as 4 waves of about 2540 s each, and each
+wave repeats the ~19 min frontend. 12 shards run as 6 waves, projected at
+12400 s (frontend fixed, MIR scaled) to 15200 s (whole wave fixed). That
+reaches or passes the row timeout, and that is before the unmeasured codegen,
+which adds wall time at any shard count. No memory measurement requires 12.
+The pin goes back to 8. `phase-c-backend-commands-test.shs` now bounds it
+on both sides: >= 8 for memory (run 10) and <= 8 for wall time (run 13).
+This adds no new knob; `SIMPLE_MIR_SHARD_COUNT` from the caller still wins.
