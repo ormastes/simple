@@ -30,6 +30,9 @@ publication guard exists yet. Read the
 before extending it. Its spec and the projection spec executed GREEN on the
 Windows seed runner; the route spec was already 3/6 there before this slice
 (pre-existing, untouched). That is unit evidence, not runtime admission.
+The retained typecheck pass also stores the walker result per published
+module in `CompileContext.api_exposure`, cleared and replaced with the facts;
+a missing row is NotCollected. No consumer reads it yet.
 
 Read the [selected policy](../../../02_requirements/feature/extreme_typing_traceability.md),
 [architecture](../../../04_architecture/extreme_typing_traceability.md),

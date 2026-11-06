@@ -256,3 +256,13 @@ RED (missing module) then GREEN (6/6) on the seed runner, with a mutation
 (dropping Text from the rule) failing 2 cases. No diagnostic, named rule,
 CompileContext retention or engine admission is introduced; E1 remains
 incomplete on effective export closure, nominal members and generics.
+
+### Retained walker results (2026-11-06, follow-up)
+
+`publish_module_typecheck_receipt_v1` classifies exactly the facts it retains
+and stores the `ApiModuleExposureV1` row in `CompileContext.api_exposure`,
+keyed by module name. A module whose facts are not retained (budget,
+empty name) gets no row, so a missing row means NotCollected. Republishing a
+module replaces its row; `run_typecheck_warn_pass` entry and `compile()` entry
+clear the map together with the facts. Nothing consumes the rows yet: no
+diagnostic, named rule or admission decision is derived from them (E2).

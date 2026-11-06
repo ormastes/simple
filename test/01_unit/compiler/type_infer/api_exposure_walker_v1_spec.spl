@@ -13,6 +13,9 @@ use compiler.hir.hir_lowering.items.*
 use compiler.types.type_infer.api_exposure_walker_v1.{walk_api_exposure_v1}
 use compiler.driver.hir_typecheck_consumer_v1.{collect_module_typecheck_receipt_v1}
 use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_hir_pipeline_passes.{publish_module_typecheck_receipt_v1, run_typecheck_warn_pass}
 
 fn node(kind: ApiSignatureKindV1, parent: i64, ordinal: i64, reason: text = "") -> ApiSignatureNodeV1:
     ApiSignatureNodeV1(kind, parent, ordinal, 0, false, -1, "", "", reason)
@@ -168,3 +171,23 @@ describe "owned API exposure walker":
         expect(path_text(finding_for_leaf(exposure, 2).unwrap())).to_equal("0,2")
         expect(exposure.verdict).to_equal(ApiExposureVerdictV1.Violates)
         expect(exposure.unknown_reasons).to_contain("effective-export-closure-not-collected")
+
+    it "retains one exposure row per published module and clears it with the facts":
+        val parsed = parse_and_build_module("pub fn flag() -> bool:\n    true\n", "walker_owner.spl")
+        val lowering = HirLowering.with_filename("walker_owner.spl")
+        lowering.use_explicit_semantic_policy()
+        val module: HirModule = lowering.lower_module(parsed)
+        val collected = collect_module_typecheck_receipt_v1(module.name, module, TypecheckPassSeverity.Advisory, true)
+        val ctx = CompileContext.create(driver_core_compile_options_default())
+        val modules: Dict<text, HirModule> = {module.name: module}
+        run_typecheck_warn_pass(ctx, modules)
+        expect(ctx.api_exposure.len()).to_equal(1)
+        expect(ctx.api_exposure[module.name].verdict).to_equal(ApiExposureVerdictV1.Violates)
+        expect(ctx.api_exposure[module.name].callables[0].declaration_name).to_equal("flag")
+        publish_module_typecheck_receipt_v1(ctx, collected)
+        publish_module_typecheck_receipt_v1(ctx, collected)
+        expect(ctx.api_exposure.len()).to_equal(1)
+        expect(ctx.api_exposure.len()).to_equal(ctx.api_signature_facts.len())
+        val empty_modules: Dict<text, HirModule> = {}
+        run_typecheck_warn_pass(ctx, empty_modules)
+        expect(ctx.api_exposure.len()).to_equal(0)
