@@ -168,3 +168,23 @@ free strings it does not own. Needs a class-instance tag (codegen) first.
 Unverified: stage3 RSS on SymbolTable87 (no redeploy in this lane); the
 LLVM-side retention (`llvm_lib_backend.spl:139` `rt_bytes_from_raw` copy) in the
 pure native path is already dropped after `write_elf_bytes_to_file`.
+
+## 2026-11-06 re-scope (p1-item5): fix-implemented-verification-pending
+
+`item5_native_object_resource_growth_2026_10_14` premise is outdated. Both
+bounded routes named above are landed in source on release/1.0.0:
+
+- object bytes spool to disk (`ef16b141c4a`, `smf_object_spool_spec` 7/7);
+- the default native-build route is process-isolated: the per-file worker
+  pool (`native_build_main.spl` ~1413) and the ad-hoc MIR-shard default
+  (`native_build_main.spl:1268`) run each file/shard in a worker that exits,
+  returning its heap to the OS. The monolithic in-process retention described
+  in this bug now occurs only with `SIMPLE_MIR_SHARDING=0` or
+  `SIMPLE_BOOTSTRAP=1` (managed stages drive their own shards).
+
+The no-collector runtime retention itself is unchanged and is by design until
+class instances carry a runtime tag (separate feature). Remaining open item is
+qualification only: per-worker `peak_kib` (`SIMPLE_PHASE_RSS=1`) on a
+redeployed stage3. Attempted on `s3_fable52.exe` with the s3sanity c01 case:
+the harness cap killed the tree at 14 s (free_disk 5.4 GB), so no RSS number
+is claimed.
