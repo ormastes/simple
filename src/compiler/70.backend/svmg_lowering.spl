@@ -226,7 +226,7 @@ impl _Lowerer:
 
     # -- binary operator mapping ---------------------------------------------
 
-    fn binop_opcode(op: HirBinOp, is_float: bool) -> i64?:
+    fn binop_opcode(op: HirBinOp, is_float: bool, is_signed: bool = false) -> i64?:
         if is_float:
             match op:
                 case HirBinOp.Add: Some(OP_FADD)
@@ -257,7 +257,7 @@ impl _Lowerer:
                 case HirBinOp.BitOr: Some(OP_OR)
                 case HirBinOp.BitXor: Some(OP_XOR)
                 case HirBinOp.Shl: Some(OP_SHL)
-                case HirBinOp.Shr: Some(OP_SHR)
+                case HirBinOp.Shr: Some(if is_signed: OP_SAR else: OP_SHR)
                 case _: nil
 
     # `e` is float-typed if it's a float literal, a Binary expr with a
@@ -278,7 +278,14 @@ impl _Lowerer:
                 else:
                     false
 
-    fn assign_opcode(op: HirAssignOp, is_float: bool = false) -> i64?:
+    fn expr_is_signed_i32(e: HirExpr) -> bool:
+        if not e.has_type_:
+            return false
+        match e.type_.kind:
+            case HirTypeKind.Int(bits, signed_type): bits == 32 and signed_type
+            case _: false
+
+    fn assign_opcode(op: HirAssignOp, is_float: bool = false, is_signed: bool = false) -> i64?:
         if is_float:
             match op:
                 case HirAssignOp.Add: Some(OP_FADD)
@@ -297,7 +304,7 @@ impl _Lowerer:
                 case HirAssignOp.BitOr: Some(OP_OR)
                 case HirAssignOp.BitXor: Some(OP_XOR)
                 case HirAssignOp.Shl: Some(OP_SHL)
-                case HirAssignOp.Shr: Some(OP_SHR)
+                case HirAssignOp.Shr: Some(if is_signed: OP_SAR else: OP_SHR)
                 case _: nil
 
     # -- helper-fn lookup (linear scan; helper counts are tiny) --------------
@@ -330,7 +337,7 @@ impl _Lowerer:
                 self.load_local(symbol)
             case HirExprKind.Binary(op, left, right):
                 val is_float = self.expr_is_float(left) or self.expr_is_float(right)
-                val maybe_opcode = self.binop_opcode(op, is_float)
+                val maybe_opcode = self.binop_opcode(op, is_float, self.expr_is_signed_i32(left))
                 if val opcode = maybe_opcode:
                     self.lower_expr(left)
                     self.lower_expr(right)
@@ -684,7 +691,7 @@ impl _Lowerer:
                 if val sym = target_sym:
                     if val compound_op = op:
                         val is_float = self.expr_is_float(target) or self.expr_is_float(value)
-                        val maybe_opcode = self.assign_opcode(compound_op, is_float)
+                        val maybe_opcode = self.assign_opcode(compound_op, is_float, self.expr_is_signed_i32(target))
                         if val opcode = maybe_opcode:
                             self.compound_assign(sym, opcode, value)
                         elif is_float:
