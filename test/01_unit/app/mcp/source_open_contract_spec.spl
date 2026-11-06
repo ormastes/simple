@@ -2,16 +2,16 @@
 # These are handler/contract tests, not a real MCP process lifecycle receipt.
 use std.spec.step
 use app.mcp.main_dispatch.{dispatch_tool}
-use app.mcp.main_lazy_source_tools.{source_relative_path_valid_v1, source_projection_payload_v1, source_bounded_response_v1}
+use app.mcp.main_lazy_source_tools.{source_relative_path_valid_v1, source_projection_payload_v1, source_bounded_response_v1, source_rpc_id_valid_v1}
 use std.common.source.contracts.{SourceSnapshotV1}
 use std.nogc_sync_mut.source.projection.{source_project_raw_v1}
 use std.common.json.value.{json_parse_value_strict, json_value_field, json_value_text_or, json_value_items}
 
 describe "source_open public routing and truthful capabilities":
-    it "does not silently substitute raw text for requested outline":
-        step("request the default outline through the dispatcher")
-        val response = dispatch_tool("1", "source_open", "{\"path\":\"missing.spl\"}")
-        expect(response).to_contain("outline_provider_unavailable")
+    it "does not silently substitute raw text for an unsupported language outline":
+        step("request a default outline without an admitted language provider")
+        val response = dispatch_tool("1", "source_open", "{\"path\":\"test/fixture/source_view/unicode.txt\"}")
+        expect(response).to_contain("native_structure_provider_unavailable_for_language")
         expect(response).to_contain("unsupported")
         expect(response).to_contain("\"isError\":true")
 
@@ -74,3 +74,26 @@ describe "source_open public routing and truthful capabilities":
         var names: [text] = []
         for index in 0..171: names.push("한")
         expect(source_relative_path_valid_v1(names.join(""))).to_equal(false)
+
+    it "bounds oversized request IDs on both success and error paths":
+        step("reject an oversized ID without echoing it in fallback errors")
+        var pieces: [text] = []
+        for index in 0..6000: pieces.push("한")
+        val id = "\"" + pieces.join("") + "\""
+        val success_seam = source_bounded_response_v1(id, "small")
+        val error_seam = dispatch_tool(id, "source_open", "{\"mode\":\"invalid\"}")
+        expect(success_seam.byte_len()).to_be_less_than(1024)
+        expect(error_seam.byte_len()).to_be_less_than(1024)
+        expect(success_seam).to_contain("\"id\":null")
+        expect(error_seam).to_contain("\"id\":null")
+        expect(success_seam.contains("한")).to_equal(false)
+
+    it "retains canonical numeric IDs and refuses non-ID JSON values":
+        step("validate supported JSON-RPC ID kinds")
+        expect(source_rpc_id_valid_v1("1.5")).to_equal(true)
+        expect(source_rpc_id_valid_v1("42")).to_equal(true)
+        expect(source_rpc_id_valid_v1("\"request\"")).to_equal(true)
+        expect(source_rpc_id_valid_v1("null")).to_equal(true)
+        expect(source_rpc_id_valid_v1("true")).to_equal(false)
+        expect(source_rpc_id_valid_v1("[]")).to_equal(false)
+        expect(source_rpc_id_valid_v1("{}" )).to_equal(false)
