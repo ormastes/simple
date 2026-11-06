@@ -4347,6 +4347,43 @@ pub fn compile_call<M: Module>(
             }
         }
 
+        // Builtin `text` statics. Without this the call fell through with its
+        // dotted name, sanitized to `text_dot_from_char_code`, a legacy
+        // export deliberately absent from the static provider manifest: the
+        // JIT panicked "can't resolve symbol" (2026-09-04) and later died with
+        // SIGSEGV. Route to the canonical runtime ABI, as the LLVM backend
+        // (codegen/llvm/functions/calls.rs) and the pure-Simple backend do.
+        // doc/08_tracking/bug/seed_jit_cannot_resolve_text_dot_from_char_code_2026-09-04.md
+        let text_static = match func_name {
+            "text.from_char_code" => Some("rt_char_from_code"),
+            "text.from_bytes" => Some("rt_bytes_to_text"),
+            _ => None,
+        };
+        if let (Some(rt_name), [arg]) = (text_static, args) {
+            let func_id = if let Some(&id) = ctx.runtime_funcs.get(rt_name) {
+                id
+            } else if let Some(&id) = ctx.func_ids.get(rt_name) {
+                id
+            } else {
+                let mut sig = ctx.module.make_signature();
+                sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                let id = ctx
+                    .module
+                    .declare_function(rt_name, Linkage::Import, &sig)
+                    .map_err(|e| format!("declare {rt_name} for {func_name}: {e}"))?;
+                ctx.func_ids.insert(rt_name.to_string(), id);
+                id
+            };
+            let arg_val = get_vreg_or_default(ctx, builder, arg);
+            let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+            let call = adapted_call(builder, func_ref, &[arg_val]);
+            if let Some(d) = dest {
+                ctx.vreg_values.insert(*d, builder.inst_results(call)[0]);
+            }
+            return Ok(());
+        }
+
         // Before falling through to cross-module import, check if this is a qualified
         // builtin method call like "ALPHA_LOWER.contains" or "items.push".
         // The parser sometimes treats `val.method(args)` as a qualified function call
