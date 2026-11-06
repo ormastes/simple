@@ -1,0 +1,170 @@
+# REQ-EAPI-002/006 (AC-EAPI-002/003/007 rows): pure structural exposure walk over
+# retained signature facts. Classification only; no enforcement, no Safe module.
+use std.spec.{describe, it, expect}
+use compiler.common.api_signature_facts_v1.{ApiSignatureKindV1, ApiSignatureNodeV1,
+    ApiCallableFactV1, ApiSignatureFactsV1}
+use compiler.common.api_exposure_result_v1.{ApiExposureVerdictV1, ApiExposureFindingV1,
+    ApiModuleExposureV1}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.types.type_infer.api_exposure_walker_v1.{walk_api_exposure_v1}
+use compiler.driver.hir_typecheck_consumer_v1.{collect_module_typecheck_receipt_v1}
+use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity}
+
+fn node(kind: ApiSignatureKindV1, parent: i64, ordinal: i64, reason: text = "") -> ApiSignatureNodeV1:
+    ApiSignatureNodeV1(kind, parent, ordinal, 0, false, -1, "", "", reason)
+
+fn callable(name: text, root: i64) -> ApiCallableFactV1:
+    ApiCallableFactV1(root + 1000, "walker_owner", name, Visibility.Public, root)
+
+fn facts(callables: [ApiCallableFactV1], nodes: [ApiSignatureNodeV1], reasons: [text] = []) -> ApiSignatureFactsV1:
+    ApiSignatureFactsV1("walker_owner", "walker_owner.spl", callables, nodes, reasons, 0)
+
+fn path_text(finding: ApiExposureFindingV1) -> text:
+    var out = ""
+    for index in finding.path:
+        if out.len() > 0: out = out + ","
+        out = out + index.to_text()
+    out
+
+fn finding_for_leaf(exposure: ApiModuleExposureV1, leaf: i64) -> ApiExposureFindingV1?:
+    for finding in exposure.findings:
+        if finding.leaf == leaf: return Some(finding)
+    nil
+
+describe "owned API exposure walker":
+    it "flags bare builtins under containers, callbacks and ownership wrappers with their path":
+        val exposure = walk_api_exposure_v1(facts([callable("mixed", 0)], [
+            node(ApiSignatureKindV1.Function, -1, 0),
+            node(ApiSignatureKindV1.Optional, 0, -1),
+            node(ApiSignatureKindV1.Text, 1, 0),
+            node(ApiSignatureKindV1.Reference, 0, 0),
+            node(ApiSignatureKindV1.Tuple, 3, 0),
+            node(ApiSignatureKindV1.Nominal, 4, 0, "nominal-members-not-projected"),
+            node(ApiSignatureKindV1.Integer, 5, 0),
+            node(ApiSignatureKindV1.Function, 0, 1),
+            node(ApiSignatureKindV1.Bool, 7, -1),
+            node(ApiSignatureKindV1.Unit, 7, 0)]))
+        expect(exposure.callables.len()).to_equal(1)
+        expect(exposure.callables[0].verdict).to_equal(ApiExposureVerdictV1.Violates)
+        expect(exposure.callables[0].declaration_name).to_equal("mixed")
+        expect(exposure.callables[0].violations).to_equal(3)
+        expect(exposure.callables[0].unknowns).to_equal(1)
+        expect(exposure.verdict).to_equal(ApiExposureVerdictV1.Violates)
+        val returned = finding_for_leaf(exposure, 2).unwrap()
+        expect(returned.verdict).to_equal(ApiExposureVerdictV1.Violates)
+        expect(returned.leaf_kind).to_equal(ApiSignatureKindV1.Text)
+        expect(path_text(returned)).to_equal("0,1,2")
+        expect(returned.ordinals.len()).to_equal(2)
+        expect(returned.ordinals[0]).to_equal(-1)
+        val argument = finding_for_leaf(exposure, 6).unwrap()
+        expect(argument.verdict).to_equal(ApiExposureVerdictV1.Violates)
+        expect(path_text(argument)).to_equal("0,3,4,5,6")
+        val nominal = finding_for_leaf(exposure, 5).unwrap()
+        expect(nominal.verdict).to_equal(ApiExposureVerdictV1.Unknown)
+        expect(nominal.reason).to_equal("nominal-members-not-projected")
+        val callback = finding_for_leaf(exposure, 8).unwrap()
+        expect(callback.verdict).to_equal(ApiExposureVerdictV1.Violates)
+        expect(path_text(callback)).to_equal("0,7,8")
+        expect(finding_for_leaf(exposure, 9)).to_be_nil()
+        expect(exposure.findings.len()).to_equal(4)
+
+    it "keeps unsafe pointer and any exposure distinct from the primitive rule":
+        val exposure = walk_api_exposure_v1(facts([callable("raw", 0)], [
+            node(ApiSignatureKindV1.Function, -1, 0),
+            node(ApiSignatureKindV1.Pointer, 0, -1, "unsafe-pointer-exposure-unclassified"),
+            node(ApiSignatureKindV1.Unit, 1, 0),
+            node(ApiSignatureKindV1.Unknown, 0, 0, "unsafe-any-exposure-unclassified")]))
+        expect(exposure.callables[0].verdict).to_equal(ApiExposureVerdictV1.Unknown)
+        expect(exposure.callables[0].violations).to_equal(0)
+        expect(exposure.callables[0].unknowns).to_equal(2)
+        expect(finding_for_leaf(exposure, 1).unwrap().reason).to_equal("unsafe-pointer-exposure-unclassified")
+        expect(finding_for_leaf(exposure, 3).unwrap().reason).to_equal("unsafe-any-exposure-unclassified")
+        expect(exposure.verdict).to_equal(ApiExposureVerdictV1.Unknown)
+
+    it "never reports a Safe module while export closure is uncollected":
+        val exposure = walk_api_exposure_v1(facts([callable("unit", 0)], [
+            node(ApiSignatureKindV1.Function, -1, 0),
+            node(ApiSignatureKindV1.Unit, 0, -1)],
+            ["effective-export-closure-not-collected"]))
+        expect(exposure.callables[0].verdict).to_equal(ApiExposureVerdictV1.Safe)
+        expect(exposure.findings.len()).to_equal(0)
+        expect(exposure.verdict).to_equal(ApiExposureVerdictV1.Unknown)
+        expect(exposure.unknown_reasons).to_contain("effective-export-closure-not-collected")
+        val bare = walk_api_exposure_v1(facts([callable("unit", 0)], [
+            node(ApiSignatureKindV1.Function, -1, 0),
+            node(ApiSignatureKindV1.Unit, 0, -1)]))
+        expect(bare.verdict).to_equal(ApiExposureVerdictV1.Unknown)
+        expect(bare.unknown_reasons).to_contain("effective-export-closure-not-collected")
+
+    it "fails closed on malformed facts instead of reporting Safe":
+        val forward = walk_api_exposure_v1(facts([callable("forward", 0)], [
+            node(ApiSignatureKindV1.Function, -1, 0),
+            node(ApiSignatureKindV1.Unit, 2, -1),
+            node(ApiSignatureKindV1.Tuple, 0, 0)]))
+        expect(forward.callables[0].verdict).to_equal(ApiExposureVerdictV1.Unknown)
+        expect(forward.unknown_reasons).to_contain("facts-malformed")
+        val missing_root = walk_api_exposure_v1(facts([callable("missing", 7)], [
+            node(ApiSignatureKindV1.Function, -1, 0),
+            node(ApiSignatureKindV1.Unit, 0, -1)]))
+        expect(missing_root.callables[0].verdict).to_equal(ApiExposureVerdictV1.Unknown)
+        expect(missing_root.unknown_reasons).to_contain("facts-malformed")
+        val two_returns = walk_api_exposure_v1(facts([callable("twice", 0)], [
+            node(ApiSignatureKindV1.Function, -1, 0),
+            node(ApiSignatureKindV1.Unit, 0, -1),
+            node(ApiSignatureKindV1.Unit, 0, -1)]))
+        expect(two_returns.callables[0].verdict).to_equal(ApiExposureVerdictV1.Unknown)
+        val silent_unknown = walk_api_exposure_v1(facts([callable("silent", 0)], [
+            node(ApiSignatureKindV1.Function, -1, 0),
+            node(ApiSignatureKindV1.Unknown, 0, -1)]))
+        expect(silent_unknown.callables[0].verdict).to_equal(ApiExposureVerdictV1.Unknown)
+        expect(finding_for_leaf(silent_unknown, 1).unwrap().reason).to_equal("facts-malformed")
+        val shared_root = walk_api_exposure_v1(facts([callable("one", 0), callable("two", 0)], [
+            node(ApiSignatureKindV1.Function, -1, 0),
+            node(ApiSignatureKindV1.Unit, 0, -1)]))
+        expect(shared_root.callables[0].verdict).to_equal(ApiExposureVerdictV1.Unknown)
+        expect(shared_root.callables[1].verdict).to_equal(ApiExposureVerdictV1.Unknown)
+        val orphan = walk_api_exposure_v1(facts([callable("one", 0)], [
+            node(ApiSignatureKindV1.Function, -1, 0),
+            node(ApiSignatureKindV1.Unit, 0, -1),
+            node(ApiSignatureKindV1.Text, -1, 0)]))
+        expect(orphan.verdict).to_equal(ApiExposureVerdictV1.Unknown)
+        expect(orphan.unknown_reasons).to_contain("facts-malformed")
+
+    it "treats exhausted observation budgets as unknown without walking":
+        val budgeted = walk_api_exposure_v1(facts([callable("unit", 0)], [
+            node(ApiSignatureKindV1.Function, -1, 0),
+            node(ApiSignatureKindV1.Unit, 0, -1)], ["type-node-budget"]))
+        expect(budgeted.callables[0].verdict).to_equal(ApiExposureVerdictV1.Safe)
+        expect(budgeted.verdict).to_equal(ApiExposureVerdictV1.Unknown)
+        expect(budgeted.unknown_reasons).to_contain("type-node-budget")
+        var wide: [ApiSignatureNodeV1] = [node(ApiSignatureKindV1.Function, -1, 0), node(ApiSignatureKindV1.Unit, 0, -1)]
+        for index in 0..16384: wide.push(node(ApiSignatureKindV1.Text, 0, index))
+        val oversized = walk_api_exposure_v1(facts([callable("wide", 0)], wide))
+        expect(oversized.truncated).to_equal(true)
+        expect(oversized.callables.len()).to_equal(0)
+        expect(oversized.findings.len()).to_equal(0)
+        expect(oversized.verdict).to_equal(ApiExposureVerdictV1.Unknown)
+        expect(oversized.unknown_reasons).to_contain("type-node-budget")
+
+    it "classifies the production projection of a parsed module":
+        val parsed = parse_and_build_module("pub fn echo(value: text) -> text:\n    value\n", "walker_owner.spl")
+        val lowering = HirLowering.with_filename("walker_owner.spl")
+        lowering.use_explicit_semantic_policy()
+        val module: HirModule = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        val collected = collect_module_typecheck_receipt_v1(module.name, module, TypecheckPassSeverity.Advisory, true)
+        val exposure = walk_api_exposure_v1(collected.api_signatures.unwrap())
+        expect(exposure.module_name).to_equal(module.name)
+        expect(exposure.callables.len()).to_equal(1)
+        expect(exposure.callables[0].declaration_name).to_equal("echo")
+        expect(exposure.callables[0].declared_visibility).to_equal(Visibility.Public)
+        expect(exposure.callables[0].verdict).to_equal(ApiExposureVerdictV1.Violates)
+        expect(exposure.callables[0].violations).to_equal(2)
+        expect(path_text(finding_for_leaf(exposure, 1).unwrap())).to_equal("0,1")
+        expect(path_text(finding_for_leaf(exposure, 2).unwrap())).to_equal("0,2")
+        expect(exposure.verdict).to_equal(ApiExposureVerdictV1.Violates)
+        expect(exposure.unknown_reasons).to_contain("effective-export-closure-not-collected")

@@ -1,7 +1,31 @@
 # The seed's struct field-receiver guard is disabled by default, and its predicate is not linkable from the seed at all
 
 - **Date:** 2026-10-24
-- **Status:** OPEN
+- **Status:** OPEN — guard NOT enabled by default (2026-11-06); the link premise is
+  stale, the real blocker is allocator registration. Comment in `fields.rs` corrected.
+
+## Re-check 2026-11-06 (release/1.0.0 @ 475d1983381)
+
+- **Linkability is no longer the blocker.** `rt_struct_receiver_valid` (and
+  `rt_struct_alloc`) are defined in `src/runtime/runtime_memory.c:559`, which
+  `src/compiler_rust/runtime/build.rs:336` compiles into the seed runtime; the JIT
+  spec is `codegen/runtime_sffi.rs:852` and the runtime symbol table pairs both
+  (`runtime/src/lib.rs:676` test). With `SIMPLE_SEED_FIELD_GUARD=1` the freshly built
+  seed JIT-compiles and runs the guard call — no unresolved-symbol demotion.
+- **Enabling it breaks every struct.** The predicate accepts only pointers registered
+  by `rt_struct_alloc`, but seed codegen allocates with plain `rt_alloc`
+  (`codegen/instr/closures_structs.rs:572` `compile_struct_init`, `:685` struct copy,
+  `codegen/instr/memory.rs:206` GcAlloc). Probe:
+  `struct P: x: i64, y: i64` / `print "sum={P(x: 3, y: 4).x + ...}"`,
+  `SIMPLE_EXECUTION_MODE=jit`: default -> `sum=7` rc=0; `SIMPLE_SEED_FIELD_GUARD=1` ->
+  `runtime error: invalid field receiver`, rc=132 (SIGILL).
+- **Prerequisites to turn it on:** move every seed struct producer (struct init, copy,
+  GcAlloc, and any runtime-side object the JIT reads with FieldGet) to `rt_struct_alloc`
+  (whose blocks `rt_free` unregisters, `runtime_memory.c:684`), then measure the cost
+  of a locked hash lookup on every field load/store — the seed JIT compiles the whole
+  self-hosted compiler, so this is on the bootstrap hot path.
+- Done here: only the misleading "LOCAL BUILD NEUTRALIZATION (not committed) ... Revert
+  via /tmp/..." comment was replaced with an accurate one (behaviour unchanged).
 - **File:** `src/compiler_rust/compiler/src/codegen/instr/fields.rs`
 - **Severity:** a safety guard is off by default in the seed JIT/codegen; and the
   constraint behind it invalidates the recorded fix path for

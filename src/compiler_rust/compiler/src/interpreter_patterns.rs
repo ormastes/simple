@@ -58,6 +58,26 @@ fn warn_option_pattern_over_result(pattern_text: &str, value: &Value) -> bool {
 }
 
 /// Check if a pattern is a catch-all that covers any value.
+/// Raw i64 of an integer literal pattern (`0`, `42i32`, `0x300u64`).
+fn int_literal_bits(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Integer(i) | Expr::TypedInteger(i, _) => Some(*i),
+        _ => None,
+    }
+}
+
+/// Numeric value of an integer literal pattern, for comparing against an
+/// unsigned scrutinee. A `u64`-suffixed literal above i64::MAX is lexed as its
+/// bit pattern (`0xFFFF_FFFF_FFFF_FFFFu64` -> -1i64) and is read back as
+/// unsigned; every other literal keeps its signed value, so a negative literal
+/// never equals (and sits below) every `Value::UInt`.
+fn int_pattern_bound(expr: &Expr) -> Option<i128> {
+    match expr {
+        Expr::TypedInteger(i, simple_parser::NumericSuffix::U64) => Some(*i as u64 as i128),
+        _ => int_literal_bits(expr).map(i128::from),
+    }
+}
+
 pub(crate) fn is_catch_all_pattern(pattern: &Pattern) -> bool {
     match pattern {
         Pattern::Wildcard => true,
@@ -249,18 +269,21 @@ pub(crate) fn pattern_matches(
 
         Pattern::Literal(lit_expr) => {
             match lit_expr.as_ref() {
-                Expr::Integer(i) | Expr::TypedInteger(i, _) => {
-                    if let Value::Int(v) = value {
-                        Ok(*v == *i)
-                    } else {
-                        Ok(false)
+                Expr::Integer(_) | Expr::TypedInteger(_, _) => {
+                    match value {
+                        Value::Int(v) => Ok(int_literal_bits(lit_expr) == Some(*v)),
+                        // Sized unsigned scrutinees (`addr: u64`) carry `Value::UInt`:
+                        // compare by numeric VALUE, so a negative literal never
+                        // matches (u64::MAX is not `case -1`).
+                        Value::UInt { value: v, .. } => Ok(Some(*v as i128) == int_pattern_bound(lit_expr)),
+                        _ => Ok(false),
                     }
                 }
                 Expr::Float(f) | Expr::TypedFloat(f, _) => {
-                    if let Value::Float(v) = value {
-                        Ok((*v - *f).abs() < f64::EPSILON)
-                    } else {
-                        Ok(false)
+                    match value {
+                        Value::Float(v) => Ok((*v - *f).abs() < f64::EPSILON),
+                        Value::Float32(v) => Ok((*v as f64 - *f).abs() < f32::EPSILON as f64),
+                        _ => Ok(false),
                     }
                 }
                 Expr::String(s) => {
@@ -623,24 +646,29 @@ pub(crate) fn pattern_matches(
         }
 
         Pattern::Range { start, end, inclusive } => {
-            // Range patterns only work with integers
-            let Value::Int(val) = value else {
+            // Range patterns only work with integers. Signed and unsigned
+            // scrutinees compare by numeric value in i128, so a `Value::UInt`
+            // (`u: u64`, `x.to_u64()`) is in `1..=9` exactly when its value is.
+            // An `Int` scrutinee keeps the historical i64 comparison against
+            // the literal's raw bits.
+            // Bounds must be integer literals.
+            let (val, start_val, end_val) = match value {
+                Value::Int(v) => (
+                    *v as i128,
+                    int_literal_bits(start).map(i128::from),
+                    int_literal_bits(end).map(i128::from),
+                ),
+                Value::UInt { value: v, .. } => (*v as i128, int_pattern_bound(start), int_pattern_bound(end)),
+                _ => return Ok(false),
+            };
+            let (Some(start_val), Some(end_val)) = (start_val, end_val) else {
                 return Ok(false);
-            };
-            // Evaluate start and end expressions (must be integer literals)
-            let start_val = match start.as_ref() {
-                Expr::Integer(i) | Expr::TypedInteger(i, _) => *i,
-                _ => return Ok(false),
-            };
-            let end_val = match end.as_ref() {
-                Expr::Integer(i) | Expr::TypedInteger(i, _) => *i,
-                _ => return Ok(false),
             };
             // Check if value is in range
             if *inclusive {
-                Ok(*val >= start_val && *val <= end_val)
+                Ok(val >= start_val && val <= end_val)
             } else {
-                Ok(*val >= start_val && *val < end_val)
+                Ok(val >= start_val && val < end_val)
             }
         }
 
@@ -1791,5 +1819,62 @@ main = construct()
             "{BARE_PAYLOAD_ENUM}fn f(a: PK, b: PK) -> i64:\n    match a:\n        case Comb:\n            match b:\n                case Clocked: 5\n                case _: 6\n        case _: 9\nmain = f(PK.Comb(1), PK.Clocked(2)) + 10 * f(PK.Comb(1), PK.Idle) + 100 * f(PK.Idle, PK.Idle)\n"
         );
         assert_eq!(run(&src), 5 + 60 + 900);
+    }
+
+    // --- `Value::UInt` scrutinee vs integer literal / range patterns ---
+    // Bug: doc/08_tracking/bug/2026-10-30_seed_uint_scrutinee_never_matches_int_patterns.md
+
+    fn uint(v: u64) -> Value {
+        Value::UInt { value: v, width: 64 }
+    }
+
+    fn matches(pat: &Pattern, v: &Value) -> bool {
+        let mut bindings = HashMap::new();
+        pattern_matches(pat, v, &mut bindings, &HashMap::new(), &HashMap::new()).unwrap()
+    }
+
+    fn int_range(start: i64, end: i64, inclusive: bool) -> Pattern {
+        Pattern::Range {
+            start: Box::new(Expr::Integer(start)),
+            end: Box::new(Expr::Integer(end)),
+            inclusive,
+        }
+    }
+
+    #[test]
+    fn uint_scrutinee_matches_int_range_patterns_by_value() {
+        assert!(matches(&int_range(1, 9, true), &uint(5)));
+        assert!(matches(&int_range(1, 9, true), &uint(9)));
+        assert!(!matches(&int_range(1, 9, false), &uint(9)));
+        assert!(!matches(&int_range(1, 9, true), &uint(0)));
+        // A negative start bound is below every UInt; the value still counts.
+        assert!(matches(&int_range(-5, 5, true), &uint(3)));
+        // u64::MAX is not -1: it must not fall into a range around zero.
+        assert!(!matches(&int_range(-1, 0, true), &uint(u64::MAX)));
+    }
+
+    #[test]
+    fn uint_scrutinee_never_matches_a_negative_int_literal() {
+        let minus_one = Pattern::Literal(Box::new(Expr::Integer(-1)));
+        assert!(!matches(&minus_one, &uint(u64::MAX)));
+        let zero = Pattern::Literal(Box::new(Expr::Integer(0)));
+        assert!(matches(&zero, &uint(0)));
+        // A `u64`-suffixed literal above i64::MAX is lexed as its bit pattern
+        // (`0xFFFF_FFFF_FFFF_FFFFu64` -> -1i64) and must still match.
+        let max_u64 = Pattern::Literal(Box::new(Expr::TypedInteger(-1, simple_parser::NumericSuffix::U64)));
+        assert!(matches(&max_u64, &uint(u64::MAX)));
+    }
+
+    #[test]
+    fn uint_match_end_to_end_takes_the_right_arm() {
+        let src = "fn classify(u: u64) -> i64:
+    match u:
+        case 0: 1
+        case 1..=9: 2
+        case 10..100: 3
+        case _: 4
+main = classify(0) + 10 * classify(5) + 100 * classify(42) + 1000 * classify(1000)
+";
+        assert_eq!(run(src), 1 + 20 + 300 + 4000);
     }
 }

@@ -396,9 +396,22 @@ candidate_frontend_smoke_profile() (
     # cold init inside its 180 s bound and timed out (exit 124) on every fresh
     # Windows checkout before printing a line of compiler output.
     candidate_scv_cold_init=0
+    candidate_scv_prime=0
     if [ ! -e "$CANDIDATE_FRONTEND_ROOT/build/scv/source-inventory/CURRENT" ] &&
        [ ! -L "$CANDIDATE_FRONTEND_ROOT/build/scv/source-inventory/CURRENT" ]; then
         candidate_scv_cold_init=1
+        candidate_scv_prime=1
+    fi
+    # The first build by a NEW compiler identity also pays a one-time cost
+    # (~270 s measured on Windows, vs ~100 s warm, compile phases identical)
+    # even when an inventory already exists. Prime (warm, without the cold-init
+    # opt-in) whenever the candidate differs from the one that last primed this
+    # checkout, so the bounded p2_add probe never carries that cost.
+    # doc/08_tracking/bug/windows_stage2_sanity_scv_prime_skipped_and_msvc_link_fallback_2026-10-25.md §1
+    candidate_prime_marker=$CANDIDATE_FRONTEND_ROOT/build/scv/prime-compiler.sha256
+    candidate_prime_sha=$(candidate_frontend_hash_file "$candidate") || exit 1
+    if [ "$(cat "$candidate_prime_marker" 2>/dev/null)" != "$candidate_prime_sha" ]; then
+        candidate_scv_prime=1
     fi
     unset SIMPLE_SCV_INVENTORY_COLD_INIT
     build_log=${CANDIDATE_FRONTEND_LOG_PATH:-$probe_dir/build.log}
@@ -506,7 +519,7 @@ candidate_frontend_smoke_profile() (
         exit 126
     fi
     if [ "$candidate_profile" = full ]; then
-    if [ "$candidate_scv_cold_init" = 1 ]; then
+    if [ "$candidate_scv_prime" = 1 ]; then
         # scv_prime: the same p2_add native-build with the one-time cold-init
         # opt-in, under COMPILER_SCV_PRIME_TIMEOUT_SECONDS and its own cache
         # dir so the bounded p2_add probe below still builds from a cold
@@ -515,7 +528,10 @@ candidate_frontend_smoke_profile() (
         # module compiles); the p2_add probe reports the build verdict.
         prime_output=$(candidate_frontend_executable_path "$probe_dir/scv_prime")
         prime_build_status=0
-        SIMPLE_SCV_INVENTORY_COLD_INIT=1 \
+        if [ "$candidate_scv_cold_init" = 1 ]; then
+            SIMPLE_SCV_INVENTORY_COLD_INIT=1
+            export SIMPLE_SCV_INVENTORY_COLD_INIT
+        fi
         SIMPLE_BINARY="$candidate" \
         SIMPLE_BIN="$candidate" \
         SIMPLE_BOOTSTRAP_DRIVER="$candidate" \
@@ -533,6 +549,7 @@ candidate_frontend_smoke_profile() (
             --cache-dir "$probe_dir/prime-cache" \
             --mode one-binary \
             --output "$prime_output" || prime_build_status=$?
+        unset SIMPLE_SCV_INVENTORY_COLD_INIT
         scv_prime_raw_status=$prime_build_status
         if [ ! -e "$CANDIDATE_FRONTEND_ROOT/build/scv/source-inventory/CURRENT" ] &&
            [ ! -L "$CANDIDATE_FRONTEND_ROOT/build/scv/source-inventory/CURRENT" ]; then
@@ -540,6 +557,7 @@ candidate_frontend_smoke_profile() (
             echo "candidate_frontend_smoke: scv_prime left no source inventory in $CANDIDATE_FRONTEND_ROOT/build/scv (raw rc=$prime_build_status)" >&2
             candidate_frontend_fail scv-prime-inventory "$([ "$prime_build_status" -ne 0 ] && echo "$prime_build_status" || echo 1)"
         fi
+        printf '%s\n' "$candidate_prime_sha" >"$candidate_prime_marker" 2>/dev/null || :
     fi
     probe_output=$(candidate_frontend_executable_path "$probe_dir/p2_add")
     probe_build_status=0

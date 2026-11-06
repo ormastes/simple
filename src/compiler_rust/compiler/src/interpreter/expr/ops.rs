@@ -33,6 +33,29 @@ fn uint_wrap_width(left: &Value, right: &Value) -> Option<u8> {
     }
 }
 
+/// Width selection for `+ - *`. Like `uint_wrap_width`, but a plain `Int`
+/// operand that cannot be represented in the unsigned operand's width
+/// cannot have been a same-typed literal/value, so it is a wider signed
+/// operand (`u8 * i64`); the operation then stays in i64 instead of
+/// narrowing both sides to the u8 width (`18u8 * 65536` must not become 0).
+fn uint_arith_wrap_width(left: &Value, right: &Value) -> Option<u8> {
+    fn fits(width: u8, v: &Value) -> bool {
+        match (width, v) {
+            (64, _) => true,
+            (w, Value::Int(n)) if w < 64 => *n >= 0 && (*n as u64) < (1u64 << w),
+            _ => true,
+        }
+    }
+    match (left, right) {
+        (Value::UInt { width, .. }, other @ Value::Int(_)) | (other @ Value::Int(_), Value::UInt { width, .. })
+            if !fits(*width, other) =>
+        {
+            None
+        }
+        _ => uint_wrap_width(left, right),
+    }
+}
+
 /// Compare integer values without routing `u64` through signed `i64` storage.
 ///
 /// `Value::as_int()` intentionally exposes the raw machine word as `i64` for
@@ -122,6 +145,74 @@ fn division_by_zero_error(message: &'static str, help: &'static str) -> CompileE
         .with_help(help)
         .with_note("check that the divisor is not zero before the operation");
     CompileError::semantic_with_context(message.to_string(), ctx)
+}
+
+/// Static integer width of an expression, as the pure-Simple type checker
+/// assigns it: an untyped literal adopts the typed operand, so `m + 1` with
+/// `m: i32` is i32. `Value::Int` carries no width, so the interpreter reads
+/// it from the declaration (`Env::declared_int_width`), a cast, or a suffix.
+/// Bug: doc/08_tracking/bug/seed_i32_overflow_interp_vs_jit_divergence_2026-11-05.md
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum StaticIntWidth {
+    /// An unsuffixed integer literal: takes the other operand's width.
+    Literal,
+    /// A declared i8/i16/i32 value.
+    Narrow(u8),
+    /// i64, unknown, or not an integer: no narrowing.
+    Wide,
+}
+
+pub(crate) fn static_int_width(expr: &Expr, env: &Env) -> StaticIntWidth {
+    use simple_parser::NumericSuffix;
+    match expr {
+        Expr::Integer(_) => StaticIntWidth::Literal,
+        Expr::TypedInteger(_, NumericSuffix::I8) => StaticIntWidth::Narrow(8),
+        Expr::TypedInteger(_, NumericSuffix::I16) => StaticIntWidth::Narrow(16),
+        Expr::TypedInteger(_, NumericSuffix::I32) => StaticIntWidth::Narrow(32),
+        Expr::Identifier(name) => env
+            .declared_int_width(name)
+            .map_or(StaticIntWidth::Wide, StaticIntWidth::Narrow),
+        Expr::Cast { target_type, .. } => {
+            Env::narrow_signed_width_of(Some(target_type)).map_or(StaticIntWidth::Wide, StaticIntWidth::Narrow)
+        }
+        Expr::Unary {
+            op: UnaryOp::Neg | UnaryOp::BitNot,
+            operand,
+        } => static_int_width(operand, env),
+        // A shift has the type of its left operand.
+        Expr::Binary {
+            op: BinOp::ShiftLeft | BinOp::ShiftRight,
+            left,
+            ..
+        } => static_int_width(left, env),
+        Expr::Binary {
+            op:
+                BinOp::Add
+                | BinOp::Sub
+                | BinOp::Mul
+                | BinOp::Div
+                | BinOp::Mod
+                | BinOp::BitAnd
+                | BinOp::BitOr
+                | BinOp::BitXor,
+            left,
+            right,
+        } => match (static_int_width(left, env), static_int_width(right, env)) {
+            (StaticIntWidth::Literal, StaticIntWidth::Literal) => StaticIntWidth::Literal,
+            (StaticIntWidth::Narrow(w), StaticIntWidth::Literal)
+            | (StaticIntWidth::Literal, StaticIntWidth::Narrow(w)) => StaticIntWidth::Narrow(w),
+            (StaticIntWidth::Narrow(a), StaticIntWidth::Narrow(b)) if a == b => StaticIntWidth::Narrow(a),
+            _ => StaticIntWidth::Wide,
+        },
+        _ => StaticIntWidth::Wide,
+    }
+}
+
+/// Two's-complement wrap of `v` to a signed `width`-bit integer, sign-extended
+/// back to i64 (what a native `i32` add/sub/mul produces).
+pub(crate) fn wrap_signed(v: i64, width: u8) -> i64 {
+    let shift = 64 - u32::from(width);
+    (v << shift) >> shift
 }
 
 fn fast_int_binop(op: &BinOp, left: i64, right: i64) -> Result<Option<Value>, CompileError> {
@@ -744,6 +835,15 @@ pub(super) fn eval_op_expr(
             if newtype_wrap_class.is_none() {
                 if let (Value::Int(left), Value::Int(right)) = (&left_val, &right_val) {
                     if let Some(value) = fast_int_binop(op, *left, *right)? {
+                        // A result inside i8 is unchanged by any narrow wrap, so
+                        // the static width walk runs only off the hot small-int path.
+                        if let Value::Int(r) = value {
+                            if !(i8::MIN as i64..=i8::MAX as i64).contains(&r) {
+                                if let StaticIntWidth::Narrow(w) = static_int_width(expr, env) {
+                                    return Ok(Some(Value::Int(wrap_signed(r, w))));
+                                }
+                            }
+                        }
                         return Ok(Some(value));
                     }
                 }
@@ -832,7 +932,7 @@ pub(super) fn eval_op_expr(
                             impl_methods,
                         ) {
                             result
-                        } else if let Some(width) = uint_wrap_width(&left_val, &right_val) {
+                        } else if let Some(width) = uint_arith_wrap_width(&left_val, &right_val) {
                             // Unsigned wrap: u32/u16/u8/u64 + ... applies modulo-2^width.
                             let lhs = left_val.as_int()? as u64;
                             let rhs = right_val.as_int()? as u64;
@@ -869,7 +969,7 @@ pub(super) fn eval_op_expr(
                         impl_methods,
                     ) {
                         result
-                    } else if let Some(width) = uint_wrap_width(&left_val, &right_val) {
+                    } else if let Some(width) = uint_arith_wrap_width(&left_val, &right_val) {
                         // Unsigned wrap: 0u32 - 1u32 yields 0xFFFFFFFF, not -1.
                         let lhs = left_val.as_int()? as u64;
                         let rhs = right_val.as_int()? as u64;
@@ -920,7 +1020,7 @@ pub(super) fn eval_op_expr(
                                 impl_methods,
                             ) {
                                 result
-                            } else if let Some(width) = uint_wrap_width(&left_val, &right_val) {
+                            } else if let Some(width) = uint_arith_wrap_width(&left_val, &right_val) {
                                 let lhs = left_val.as_int()? as u64;
                                 let rhs = right_val.as_int()? as u64;
                                 Ok(wrap_uint(lhs.wrapping_mul(rhs), width))
@@ -2330,5 +2430,73 @@ mod is_condition_present_tests {
         let cond = Expr::Integer(0);
         assert!(!is_condition_present(&cond, &Value::Int(0)));
         assert!(is_condition_present(&cond, &Value::Int(1)));
+    }
+
+    // --- declared narrow signed width on arithmetic ---
+    // Bug: doc/08_tracking/bug/seed_i32_overflow_interp_vs_jit_divergence_2026-11-05.md
+    // `m + 1` with `m: i32` is typed i32 by the pure-Simple compiler (the
+    // literal adopts the typed operand), so native code wraps at 32 bits on
+    // BOTH edges. The interpreter promoted to i64 instead.
+
+    fn run_main(src: &str) -> i32 {
+        let module = simple_parser::Parser::new(src).parse().expect("parse");
+        crate::interpreter::evaluate_module(&module.items).expect("evaluate")
+    }
+
+    #[test]
+    fn i32_declared_arithmetic_wraps_on_both_edges() {
+        let src = "\
+fn probe() -> i64:
+    var r = 0
+    val m: i32 = 2147483647
+    if m + 1 == -2147483648:
+        r = r + 1
+    val k: i32 = -2147483648
+    if k - 1 == 2147483647:
+        r = r + 2
+    val n = m + 1
+    if n == -2147483648:
+        r = r + 4
+    if n - 1 == 2147483647:
+        r = r + 8
+    var c: i32 = 2147483647
+    c += 1
+    if c == -2147483648:
+        r = r + 16
+    val b: i8 = 127
+    if b + 1 == -128:
+        r = r + 32
+    if (m as i32) * 2 == -2:
+        r = r + 64
+    r
+main = probe()
+";
+        assert_eq!(run_main(src), 127);
+    }
+
+    #[test]
+    fn i32_param_arithmetic_wraps() {
+        let src = "fn inc(x: i32) -> i64:\n    x + 1\nfn probe() -> i64:\n    if inc(2147483647) == -2147483648:\n        return 1\n    0\nmain = probe()\n";
+        assert_eq!(run_main(src), 1);
+    }
+
+    #[test]
+    fn untyped_and_i64_arithmetic_still_promotes() {
+        let src = "\
+fn probe() -> i64:
+    var r = 0
+    val big = 2147483647
+    if big + 1 == 2147483648:
+        r = r + 1
+    val w: i64 = 2147483647
+    if w + 1 == 2147483648:
+        r = r + 2
+    val m: i32 = 2147483647
+    if (m as i64) + 1 == 2147483648:
+        r = r + 4
+    r
+main = probe()
+";
+        assert_eq!(run_main(src), 7);
     }
 }

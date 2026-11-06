@@ -78,3 +78,6 @@ stack is populated when `SIMPLE_DEBUG_FIELD_ACCESS=1`) prints the interpreted
 `.spl` call stack and pinned the failing function in a single 21 s run. That
 probe enhancement is worth landing in the seed; it is level-gated and default
 off.
+
+## 2026-11-06 round 8: FIXED
+Root cause: plain `name = value` ran the "also sync to MODULE_GLOBALS if it exists there" step by bare name even when `name` is a function-local that merely shares its name with a global, publishing the local into the flat global store. The four sync sites in `exec_assignment` now skip locals. Spec: test/01_unit/compiler/interpreter/local_shadows_module_global_spec.spl (RED on seed, GREEN after).

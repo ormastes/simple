@@ -52,3 +52,6 @@ machine) regardless of config spelling — the launch mechanism itself is fine
 - The `_info` comment on the `stitch` entry in `.kimi-code/mcp.json` records
   the measured behavior; `doc/07_guide/infra/model_providers/kimi.md` (MCP on
   Kimi Code) summarizes it.
+
+## Round 8 part 2 note 2026-11-06
+No `stitch` entry exists in the tracked `.kimi-code/mcp.json` or `.mcp.json`; the crash and the missing keys are in the user's host/Kimi configuration (node/npx resolution, ~/.security/env.sh), outside the repo. Not a repo defect on this tree.

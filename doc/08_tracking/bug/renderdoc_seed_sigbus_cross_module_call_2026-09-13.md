@@ -90,3 +90,6 @@ SIMPLE_SEED=<linux-seed> sh scripts/check/check-renderdoc-web-diff.shs --selftes
 ```
 
 If that PASSes on Linux, the defect is macOS/aarch64-specific in the seed's JIT.
+
+## Round-10 verdict note (2026-11-06)
+Verdict: host-blocked. macOS M4 seed codegen SIGBUS; the record itself asks for a Linux/x86_64 reproduction under a debugger. Repro: <seed> run src/app/ui/renderdoc_diff/main.spl <events a> <events b> --out /tmp/rdx, expect rc 0.
