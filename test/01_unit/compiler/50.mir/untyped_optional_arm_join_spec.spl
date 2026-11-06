@@ -1,0 +1,113 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Untyped if/match bindings join `T` / `T?` / `nil` arms to `T?`
+
+Bug untyped_optional_arm_join_typed_as_i64_2026-11-06 (P1). An untyped
+`val x = match ..: Some(S(..)) | _ => nil` or `var v = if c: T else: T?` left
+the merge slot with no Optional type and no option/runtime-value marks, so the
+raw Option word reached plain-T paths (`rt_value_int_wide` shifted the pointer
+left by 3; a raw word landed in a plain-T slot). Root fix: the MIR merge join
+(`join_untyped_optional_arms`) types the slot `T?` whenever any arm is `nil`
+or `T?` and every non-nil arm agrees on `T`, normalising bare-`T` arms into the
+canonical Option handle. An ambiguous join is a type error in robust mode.
+Site work-arounds this replaces: #7066, #7069, #7224, #7268.
+"""
+
+# @tag: unit, compiler, mir, optional
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{env_get, env_set}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val data_source = "pub struct Node:\n    v: i64\n\npub enum MC:\n    Int(v: i64)\n    Float(f: f64)\n    Zero\n\npub enum TT:\n    Int(bits: i64)\n    Float(bits: i64)\n    Other\n\npub enum Wrap:\n    One(node: Node)\n\npub enum Hold:\n    C(c: MC)\n\npub enum CR:\n    Success(text?)\n    Fail(text)\n\npub enum OS:\n    V(n: Node?)\n\npub enum Row:\n    Field(key: text, value: Node)\n\npub struct Ty:\n    kind: MC\n\npub struct Sym:\n    t: Ty?\n\npub struct Worker:\n    nodes: Dict<text, Node>\n\npub class Lw:\n    n: i64\n    fn mk(x: i64) -> MC?:\n        if x > 0: Some(MC.Int(x)) else: None\n\npub fn mk_free(x: i64) -> MC?:\n    if x > 0: Some(MC.Int(x)) else: None\n\npub fn mk_node(x: i64) -> Node:\n    Node(v: x)\n\npub fn opt_node(x: i64) -> Node?:\n    if x > 1: return Some(Node(v: x))\n    nil\n"
+
+var last_merge_callees = ""
+
+fn lower_consumer_errors(body: text) -> text:
+    val consumer_source = "use lib.data.*\n\n" + body
+    val log = Logger(level: 0)
+    val data_ast = parse_full_frontend(data_source, "lib/data.spl", "lib.data", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.data"] = data_ast
+    val sources = [SourceFile(path: "lib/data.spl", content: data_source, module_name: "lib.data")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var data_lowering = hirlowering_for_module("lib.data", surfaces)
+    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
+    val data_hir = data_lowering.lower_module(data_ast)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["data_hir"] = data_hir
+    prescan_mods["consumer_hir"] = consumer_hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "data_hir")
+    mir_lowering.prescan_module_struct_names(prescan_mods, "consumer_hir")
+    val _mir = mir_lowering.lower_module(consumer_hir, [data_hir, consumer_hir])
+    last_merge_callees = ""
+    for function in _mir.functions.values():
+        if function.name == "a" or function.name.ends_with(".a"):
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Call(_, callee, _):
+                            match callee.kind:
+                                case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                    last_merge_callees = last_merge_callees + name + ","
+                                case _: pass
+                        case _: pass
+    var out = ""
+    for e in consumer_lowering.errors:
+        out = out + "hir: " + e.message + "\n"
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    out
+
+fn merge_normalizes(body: text) -> bool:
+    val errors = lower_consumer_errors(body)
+    errors == "" and last_merge_callees.contains("rt_enum_id,")
+fn robust_errors(body: text) -> text:
+    val previous = env_get("SIMPLE_SAFETY_PROFILE")
+    env_set("SIMPLE_SAFETY_PROFILE", "robust")
+    val out = lower_consumer_errors(body)
+    env_set("SIMPLE_SAFETY_PROFILE", previous)
+    out
+
+describe "untyped optional arm join":
+    it "a Some-or-nil match value in safe code is a T? slot":
+        expect(lower_consumer_errors("fn a(o: Node?) -> OS:\n    val r = match o:\n        case Some(n): Some(mk_node(n.v))\n        case nil: nil\n    OS.V(r)\n")).to_equal("")
+
+    it "a struct-or-nil if value in safe code is a T? slot":
+        expect(lower_consumer_errors("fn a(x: i64) -> OS:\n    val r = if x > 0: mk_node(x) else: nil\n    OS.V(r)\n")).to_equal("")
+
+    it "mixed T and T? if arms join to T?":
+        expect(lower_consumer_errors("fn a(x: i64) -> OS:\n    var r = if x > 0: mk_node(x) else: opt_node(x)\n    OS.V(r)\n")).to_equal("")
+
+    it "mixed T? and T match arms join to T?":
+        expect(lower_consumer_errors("fn a(x: i64) -> OS:\n    val r = match x:\n        0 => opt_node(x)\n        1 => nil\n        _ => mk_node(x)\n    OS.V(r)\n")).to_equal("")
+
+    it "mixed T and T? if arms are normalised into the Option handle":
+        expect(merge_normalizes("fn a(x: i64) -> i64:\n    var r = if x > 0: mk_node(x) else: opt_node(x)\n    if val n = r:\n        return n.v\n    0\n")).to_equal(true)
+
+    it "mixed T? / nil / T match arms are normalised into the Option handle":
+        expect(merge_normalizes("fn a(x: i64) -> i64:\n    val r = match x:\n        0 => opt_node(x)\n        1 => nil\n        _ => mk_node(x)\n    if val n = r:\n        return n.v\n    0\n")).to_equal(true)
+
+    it "a scalar-or-nil join is a type error in robust mode":
+        val errors = robust_errors("fn a(x: i64) -> i64:\n    val r = if x > 0: x else: nil\n    0\n")
+        expect(errors.contains("E-OPT-JOIN")).to_equal(true)
+
+    it "disagreeing optional arms are a type error in robust mode":
+        val errors = robust_errors("fn a(x: i64) -> i64:\n    val r = if x > 0: opt_node(x) else: mk_free(x)\n    0\n")
+        expect(errors.contains("E-OPT-JOIN")).to_equal(true)
+
+    it "an unambiguous join is not a robust-mode error":
+        expect(robust_errors("fn a(x: i64) -> OS:\n    val r = if x > 0: mk_node(x) else: nil\n    OS.V(r)\n")).to_equal("")

@@ -1,0 +1,51 @@
+# @req REQ-SSPEC-COMPILER
+# Regression (Stage 2, E-BACKEND-LLVM-CONST-TYPE "integer constant cannot
+# define void" in nogc_sync_mut.io.buffer BufferedReader/BufferedWriter
+# .close/.is_open): `if val c = self.inner as Close` left `c` untyped, so the
+# if-val payload lowered as a unit slot. The `as` target must type the binder.
+use std.spec.*
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+
+fn lowered(src: text, name: text) -> HirLowering:
+    val parsed = parse_full_frontend(src, "testdata/{name}.spl", name, Logger(level: 0))
+    var lowering = HirLowering.with_filename("testdata/{name}.spl")
+    lowering.lower_module(parsed)
+    lowering
+
+# Name of the type a symbol called `name` is bound to: the Named owner's
+# symbol name, "i32" for a 32-bit int, else "untyped".
+fn binder_type_name(lowering: HirLowering, name: text) -> text:
+    var shape = "untyped"
+    for key in lowering.symbols.symbols.keys():
+        val sym = lowering.symbols.symbols[key]
+        if sym.name == name:
+            if val t = sym.type_:
+                match t.kind:
+                    case HirTypeKind.Named(owner, _):
+                        shape = lowering.symbols.symbol_name_scalar_raw(owner.id)
+                    case HirTypeKind.Int(32, _): shape = "i32"
+                    case _: ()
+    shape
+
+val SRC = "trait Shut:\n    fn is_open() -> bool\n\n" +
+    "trait Src:\n    fn id() -> i64\n\n" +
+    "class Wrap:\n    inner: Src\n\n" +
+    "    fn open_direct() -> bool:\n" +
+    "        if val probe = self.inner as Shut:\n" +
+    "            probe.is_open()\n" +
+    "        else:\n" +
+    "            true\n\n" +
+    "fn narrow(v: i64) -> i32:\n" +
+    "    val small = v as i32\n" +
+    "    small\n"
+
+describe "binder type transport through `as`":
+    it "types an `if val x = e as Trait` payload with the trait":
+        expect(binder_type_name(lowered(SRC, "trait_cast"), "probe")).to_equal("Shut")
+
+    it "types a plain `val x = e as T` binding with T":
+        expect(binder_type_name(lowered(SRC, "num_cast"), "small")).to_equal("i32")

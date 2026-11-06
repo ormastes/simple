@@ -1,0 +1,96 @@
+"""
+## Purpose and audience
+Purpose: Pin how the HIR re-export chase treats a facade's host-helper
+exports, and pin that the real `std.io` facade
+(src/lib/nogc_async_mut/io.spl) routes `file_exists` / `dir_exists` through
+an explicit `export use` instead of a bare `export` it never backs.
+Audience: compiler engineers maintaining HIR import/re-export materialization
+(src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl)
+and the stdlib I/O facades.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+A bare `export Name` that the facade neither declares nor imports resolves
+only through package-sibling inference, so its answer depends on which
+siblings the build closure happens to contain. The compiler is right to
+refuse it when no sibling declares the name; the facade must name the owner.
+See doc/08_tracking/bug/std_io_facade_bare_export_dir_exists_unbacked_2026-11-06.md
+# @manual: primary
+REQ-COMPILER-HIR-001
+"""
+# @req: REQ-COMPILER-HIR-001
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+
+fn aiof_unresolved_count(facade_source: text) -> i64:
+    # iofac.rt declares the helper; iofac.async.io is the facade under test;
+    # iofac.app.user imports the helper through the facade and calls it.
+    # iofac.env.paths declares an unrelated helper of the same short name, as
+    # src/lib/nogc_sync_mut/env/paths.spl does in the full compiler closure,
+    # so no unique-owner rescue can hide an unbacked bare export.
+    val other_source = "fn dir_exists(path: text) -> bool:\n    false"
+    val owner_source = "pub fn dir_exists(path: text) -> bool:\n    path.len() > 0"
+    val user_source = "use iofac.async.io.\{dir_exists\}\nfn probe() -> bool:\n    dir_exists(\"x\")"
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    modules["iofac.rt"] = parse_full_frontend(owner_source, "iofac.rt", "iofac.rt", log)
+    modules["iofac.env.paths"] = parse_full_frontend(other_source, "iofac.env.paths", "iofac.env.paths", log)
+    modules["iofac.async.io"] = parse_full_frontend(facade_source, "iofac.async.io", "iofac.async.io", log)
+    modules["iofac.app.user"] = parse_full_frontend(user_source, "iofac.app.user", "iofac.app.user", log)
+    val sources = [
+        SourceFile(path: "iofac/rt.spl", content: owner_source, module_name: "iofac.rt"),
+        SourceFile(path: "iofac/env/paths.spl", content: other_source, module_name: "iofac.env.paths"),
+        SourceFile(path: "iofac/async/io.spl", content: facade_source, module_name: "iofac.async.io"),
+        SourceFile(path: "iofac/app/user.spl", content: user_source, module_name: "iofac.app.user")
+    ]
+    val surfaces_result = module_surfaces_from_modules(modules, sources)
+    expect(surfaces_result.is_ok()).to_be_truthy()
+    var lowering = hirlowering_for_module("iofac.app.user", surfaces_result.unwrap())
+    val _hir = lowering.lower_module(modules["iofac.app.user"])
+    var unresolved = 0
+    for e in lowering.errors:
+        if e.message.contains("unresolved"):
+            unresolved = unresolved + 1
+    unresolved
+
+fn aiof_bare_export_lines_naming(source: text, name: text) -> i64:
+    # Count `export a, b, ...` lines (not `export use`) that list `name`.
+    var hits = 0
+    for raw in source.split("\n"):
+        val line = raw.trim()
+        if line.starts_with("export ") and not line.starts_with("export use "):
+            for item in line.substring(7).split(","):
+                if item.trim() == name:
+                    hits = hits + 1
+    hits
+
+describe("std.io facade host-helper re-export resolution"):
+    it("refuses an unbacked bare export when the short name has two owners"):
+        expect(aiof_unresolved_count("export dir_exists") > 0).to_equal(true)
+
+    it("resolves the same name through an explicit export use of one owner"):
+        expect(aiof_unresolved_count("export use iofac.rt.\{dir_exists\}")).to_equal(0)
+
+    it("routes file_exists and dir_exists in the real std.io facade through export use"):
+        val facade = file_read("src/lib/nogc_async_mut/io.spl")
+        expect(facade.len() > 0).to_equal(true)
+        expect(aiof_bare_export_lines_naming(facade, "file_exists")).to_equal(0)
+        expect(aiof_bare_export_lines_naming(facade, "dir_exists")).to_equal(0)
+        expect(facade.contains("export use std.nogc_sync_mut.io_runtime.\{dir_exists\}")).to_equal(true)
+
+    it("routes dir_exists in the async io package facade through its owner"):
+        val package_facade = file_read("src/lib/nogc_async_mut/io/__init__.spl")
+        expect(package_facade.contains("export use std.nogc_sync_mut.io_runtime.\{dir_exists\}")).to_equal(true)
+
+    it("reads Segment.name as a field in dependency resolution"):
+        val resolution = file_read("src/compiler/00.common/dependency/resolution.spl")
+        expect(resolution.contains("segs[i].name()")).to_equal(false)
+        expect(resolution.contains("path = path + segs[i].name")).to_equal(true)

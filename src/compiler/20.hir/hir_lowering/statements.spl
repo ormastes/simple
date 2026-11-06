@@ -1,5 +1,5 @@
 use compiler.hir.hir_lowering.concat_copy_v1.{hir_stmt_concat_copy_v1}
-use compiler.hir.hir_lowering.binding_types.{hir_binding_direct_call_return_kind, hir_binding_method_call_return_kind, hir_binding_transparent_kind}
+use compiler.hir.hir_lowering.binding_types.{hir_binding_direct_call_return_kind, hir_binding_method_call_return_kind, hir_binding_transparent_kind, hir_binding_try_payload, hir_const_type_settled}
 # HIR Lowering - Statement Lowering
 #
 # This module handles lowering of statements from AST to HIR.
@@ -59,19 +59,15 @@ impl HirLowering:
         if source_has_type:
             resolved = source.type_ ?? HirType(kind: HirTypeKind.Error, span: source.span)
         else:
-            val source_kind = hir_binding_transparent_kind(source.kind)
-            val symbol = _hir_expr_symbol_or_invalid(source_kind)
-            if symbol.is_valid():
-                if val definition = self.symbols.get_symbol_raw(symbol.id):
-                    if definition.type_ != nil:
-                        resolved = definition.type_ ?? HirType(kind: HirTypeKind.Error, span: source.span)
-            else:
-                # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=see hir_binding_direct_call_return_kind (pass the kind, never the HirExpr by value)
-                if val declared_return = hir_binding_direct_call_return_kind(source_kind, self.symbols):
-                    resolved = declared_return
-                else:
-                    if val method_return = hir_binding_method_call_return_kind(source_kind, self.symbols):
-                        resolved = method_return
+            # `if val x = e` desugars to `val x = e.?` with bind_optional_payload:
+            # the binder's type comes from `e` (then projected below). This is
+            # how `if val c = self.inner as Close` reaches the Cast arm.
+            var binding_kind = source.kind
+            if bind_optional_payload:
+                match source.kind:
+                    case HirExprKind.ExistsCheck(present_base): binding_kind = present_base.kind
+                    case _: ()
+            resolved = self.binding_kind_type(binding_kind, source.span)
         # Attribute and symbol lookup must share the same optional projection.
         # Unwrap exactly once so nested optionals retain their inner optional.
         if bind_optional_payload:
@@ -79,6 +75,38 @@ impl HirLowering:
                 case HirTypeKind.Optional(payload): return payload
                 case _: ()
         resolved
+
+    # Kind-only type transport for an untyped binding initializer (the frozen
+    # stage2 by-value HirExpr constraint above). `expr?` binds the Ok/Some
+    # payload of its operand's type: without it `val found = which(n)?` (which
+    # -> Result<text?, E>) stayed untyped and `if val p = found` bound a unit
+    # slot (E-BACKEND-LLVM-CONST-TYPE, sosix_spawn_checked).
+    fn binding_kind_type(raw_kind: HirExprKind, span: Span) -> HirType:
+        val unknown = HirType(kind: HirTypeKind.Error, span: span)
+        val source_kind = hir_binding_transparent_kind(raw_kind)
+        match source_kind:
+            case HirExprKind.Try(operand):
+                return hir_binding_try_payload(self.binding_kind_type(operand.kind, span)) ?? unknown
+            # `e as T` is typed `T` (a trait-to-trait downcast yields `T?` only
+            # under the `if val x = e as T` consumer, whose payload is `T`).
+            # Untyped, `if val c = self.inner as Close` bound a unit slot
+            # (E-BACKEND-LLVM-CONST-TYPE, nogc_sync_mut.io.buffer close/is_open).
+            case HirExprKind.Cast(_, target):
+                if hir_const_type_settled(target): return target
+                return unknown
+            case _: ()
+        val symbol = _hir_expr_symbol_or_invalid(source_kind)
+        if symbol.is_valid():
+            if val definition = self.symbols.get_symbol_raw(symbol.id):
+                if definition.type_ != nil:
+                    return definition.type_ ?? unknown
+            return unknown
+        # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=see hir_binding_direct_call_return_kind (pass the kind, never the HirExpr by value)
+        if val declared_return = hir_binding_direct_call_return_kind(source_kind, self.symbols):
+            return declared_return
+        if val method_return = hir_binding_method_call_return_kind(source_kind, self.symbols):
+            return method_return
+        unknown
 
     me check_char_condition(cond: HirExpr):
         """W-CHAR-CONDITION: a char used where a condition is expected (ADR-005).
