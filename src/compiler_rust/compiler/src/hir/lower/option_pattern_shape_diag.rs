@@ -47,12 +47,29 @@
 //! true fallout before any promotion. Do NOT make this quieter -- the silence is
 //! the bug.
 
+use crate::hir::lower::error::LowerError;
 use crate::hir::types::HirType;
 
-/// Is the default-off `SIMPLE_DIAG_OPTION_PATTERN_SHAPE` gate on?
-fn gate_on() -> bool {
-    std::env::var("SIMPLE_DIAG_OPTION_PATTERN_SHAPE").as_deref() == Ok("1")
+/// `SIMPLE_DIAG_OPTION_PATTERN_SHAPE`: unset/0 = off, `1`/`warn` = warn,
+/// `error` = hard error (stage-1 opt-in; the default flip is an owner decision).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShapeGate {
+    Off,
+    Warn,
+    Error,
 }
+
+pub(crate) fn shape_gate() -> ShapeGate {
+    match std::env::var("SIMPLE_DIAG_OPTION_PATTERN_SHAPE").as_deref() {
+        Ok("1") | Ok("warn") => ShapeGate::Warn,
+        Ok("error") | Ok("2") => ShapeGate::Error,
+        _ => ShapeGate::Off,
+    }
+}
+
+/// Marker shared with `driver/src/exec_core.rs::jit_failure_must_propagate` so the
+/// error is NOT demoted to an interpreter run.
+pub const SHAPE_ERROR_TAG: &str = "error[option-pattern-shape]";
 
 /// Static name for the subject type, or `None` when the type is one this check
 /// deliberately stays silent about.
@@ -120,22 +137,30 @@ pub(crate) fn report_if_never_option(
     subject_ty: Option<&HirType>,
     form: &str,
     location: DiagLocation<'_>,
-) {
+) -> Result<(), LowerError> {
     if !matches!(variant, "Some" | "None" | "Ok" | "Err") {
-        return;
+        return Ok(());
     }
-    if !gate_on() {
-        return;
+    let gate = shape_gate();
+    if gate == ShapeGate::Off {
+        return Ok(());
     }
-    let Some(ty) = subject_ty else { return };
+    let Some(ty) = subject_ty else { return Ok(()) };
     let Some(kind) = never_option_type_name(ty) else {
-        return;
+        return Ok(());
     };
     let at = location.render();
+    if gate == ShapeGate::Error {
+        return Err(LowerError::Unsupported(format!(
+            "{SHAPE_ERROR_TAG}: {at}: `{variant}(...)` pattern ({form}) tested against a \
+             scrutinee statically typed `{kind}`, which is never an Option/Result"
+        )));
+    }
     eprintln!(
         "warning[option-pattern-shape]: {at}: `{variant}(...)` pattern ({form}) tested against a \
          scrutinee statically typed `{kind}`, which is never an Option/Result; this pattern \
          can never legitimately match and the default (JIT) engine answers it silently by \
          taking the arm and binding a corrupt value"
     );
+    Ok(())
 }
