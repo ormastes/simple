@@ -618,6 +618,34 @@ fn flat_pool_validate_text(value: text, item: i64):
         _flat_pool_capture_poisoned = true
         print("[flat-pool] capture refused: invalid text handle site=text.value item={item} input_length={length}; cache store skipped")
 
+# Bug stage2_mir_shard_flat_pool_text_len_minus1_2026_10_22: a pool text
+# whose owner scope ended is a dangling handle (rt_string_len == -1). The
+# encoder used to hand it to flat_pool_escape BEFORE the append check, so the
+# escape read the freed bytes first. Every text element is now checked by
+# handle (O(1), no byte read) before any read of its contents.
+var _flat_pool_invalid_texts_skipped: i64 = 0
+
+pub fn flat_pool_text_handle_valid_v1(value: text) -> bool:
+    val length =
+        unsafe(capabilities: [ffi]):
+            rt_string_len(value)
+    length >= 0
+
+pub fn flat_pool_invalid_texts_skipped_v1() -> i64:
+    _flat_pool_invalid_texts_skipped
+
+# Sanitize/validate mode: poison the capture and skip the element (caller
+# reparses). Strict mode: the same fatal diagnostic the append check emits,
+# raised before the dangling bytes are read.
+fn flat_pool_reject_invalid_text(item: i64):
+    _flat_pool_invalid_texts_skipped = _flat_pool_invalid_texts_skipped + 1
+    if _flat_pool_sanitize_capture:
+        if not _flat_pool_capture_poisoned:
+            _flat_pool_capture_poisoned = true
+            print("[flat-pool] capture refused: invalid text handle site=text.value item={item} input_length=-1; cache store skipped")
+        return
+    panic("flat pool encoder string builder append failed site=text.value item={item} input_length=-1 result=0")
+
 fn flat_pool_builder_push(handle: i64, value: text, site: i64, item: i64):
     val appended =
         unsafe(capabilities: [ffi]):
@@ -694,6 +722,10 @@ fn flat_pool_enc_text_into(handle: i64, pool: [text]):
             print("[pooldbg] enc_text item={item} len={probe_len}")
             if probe_len >= 0 and probe_len < 48:
                 print("[pooldbg]   val='{v}'")
+        if not flat_pool_text_handle_valid_v1(v):
+            flat_pool_reject_invalid_text(item)
+            item = item + 1
+            continue
         flat_pool_builder_push(handle, flat_pool_escape(v), 3, item)
         flat_pool_builder_push(handle, "\n", 4, item)
         item = item + 1
