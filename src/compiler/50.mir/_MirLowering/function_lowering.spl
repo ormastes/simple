@@ -401,7 +401,40 @@ impl MirLowering:
         val is_gpu_kernel = attr.is_gpu_kernel or fn_.is_gpu_kernel
         val gpu_target = if attr.gpu_target != "": attr.gpu_target else: fn_.gpu_target
         val gpu_backend_order = if attr.gpu_backends != "": attr.gpu_backends else: fn_.gpu_backend_order
-        self.lower_function_with_gpu_metadata(fn_, is_gpu_kernel, gpu_target, gpu_backend_order)
+        self.lower_function_with_gpu_metadata(self.with_native_bounded_params(fn_), is_gpu_kernel, gpu_target, gpu_backend_order)
+
+    me with_native_bounded_params(fn_: HirFunction) -> HirFunction:
+        """A free function's trait-bounded erased parameters take the trait's
+        native object ABI (native_bounded_param_types); callers derive the
+        same list in resolved_call_hir_param_types. Methods keep their
+        declared types: method-call sites never apply the rewrite."""
+        if fn_.is_method or fn_.type_params.len() == 0:
+            return fn_
+        var declared: [HirType] = []
+        for param in fn_.params:
+            declared = declared.push(param.type_)
+        val rewritten_types = self.native_bounded_param_types(declared, fn_.return_type)
+        var changed = false
+        var params: [HirParam] = []
+        var index = 0
+        while index < fn_.params.len():
+            var param: HirParam = fn_.params[index]
+            val rewritten_type: HirType = rewritten_types[index]
+            match rewritten_type.kind:
+                case HirTypeKind.Named(_, _):
+                    match param.type_.kind:
+                        case HirTypeKind.TypeParam(_, _):
+                            param.type_ = rewritten_type
+                            changed = true
+                        case _: ()
+                case _: ()
+            params = params.push(param)
+            index = index + 1
+        if not changed:
+            return fn_
+        var rewritten: HirFunction = fn_
+        rewritten.params = params
+        rewritten
 
     me lower_function_with_gpu_metadata(fn_: HirFunction, is_gpu_kernel: bool, gpu_target: text, gpu_backend_order: text) -> MirFunction:
         """Lower HIR function to MIR."""

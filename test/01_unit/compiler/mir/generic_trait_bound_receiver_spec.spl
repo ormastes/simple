@@ -1,0 +1,144 @@
+# A method call on a generic receiver bounded by a trait (`fn f<R: Tr>(r: R)`
+# then `r.m()`) must resolve through trait dispatch. Mono is deleted: the
+# generic body is erased, so MIR has no concrete owner for `R`. A type
+# parameter whose only bound is a trait and that the signature uses only as
+# the direct type of parameters takes the trait's native object ABI, so the
+# call is one vtable dispatch. Before the fix the call fell to the const-0 +
+# rt_panic placeholder ("unresolved method call: read_tldr",
+# src/compiler/80.driver/cache/reader/tldr_table_fill_v1.spl:8, bootstrap run 10).
+# bug: mir_generic_trait_bound_receiver_unresolved_2026-11-06
+#
+# @cover src/compiler/50.mir/_MirLowering/native_trait_registration.spl
+# @cover src/compiler/50.mir/_MirLowering/function_lowering.spl
+use std.spec.*
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+
+val PRELUDE = "trait Reader:\n    fn read(path: text) -> text\n    fn update(path: text) -> text\n    fn read_twice(path: text) -> text:\n        self.read(path) + self.read(path)\n\nclass FileR with Reader:\n    root: text\n    fn read(path: text) -> text: self.root + path\n    fn update(path: text) -> text: \"\"\n\n"
+
+fn lower_probe_module(body: text) -> MirModule:
+    val source = PRELUDE + body
+    val parsed = parse_and_build_module(source, "generic_trait_bound_probe.spl")
+    var hir_lowering = HirLowering.with_filename("generic_trait_bound_probe.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new(hir.symbols)
+    lowering.trait_impl_closure_complete = true
+    lowering.lower_module(hir)
+
+fn is_fn(function: MirFunction, name: text) -> bool:
+    function.name == name or function.name.ends_with(".{name}")
+
+fn probe_row(body: text) -> text:
+    """`<errors>|<vtable CallIndirects in probe>|<rt_panic calls in probe>`
+    followed by every error message."""
+    val source = PRELUDE + body
+    val parsed = parse_and_build_module(source, "generic_trait_bound_probe.spl")
+    var hir_lowering = HirLowering.with_filename("generic_trait_bound_probe.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new(hir.symbols)
+    lowering.trait_impl_closure_complete = true
+    val mir = lowering.lower_module(hir)
+    var vtable_calls = 0
+    var panics = 0
+    for function in mir.functions.values():
+        if is_fn(function, "probe"):
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Call(_, callee, _):
+                            match callee.kind:
+                                case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                    if name == "rt_panic":
+                                        panics = panics + 1
+                                case _: ()
+                        case MirInstKind.CallIndirect(_, _, _, _):
+                            vtable_calls = vtable_calls + 1
+                        case _: ()
+    var messages = ""
+    for e in lowering.errors:
+        messages = messages + ";" + e.message
+    "{hir_lowering.errors.len() + lowering.errors.len()}|{vtable_calls}|{panics}{messages}"
+
+fn probe_first_param_abi(body: text) -> text:
+    """Shape of fn `probe`'s first MIR parameter type (mir_type_shape): an
+    erased tagged word is "i64"; a trait-typed parameter has its own shape."""
+    val mir = lower_probe_module(body)
+    for function in mir.functions.values():
+        if is_fn(function, "probe"):
+            return mir_type_shape(function.signature.params[0])
+    "missing"
+
+fn mir_type_shape(type_: MirType) -> text:
+    match type_.kind:
+        case MirTypeKind.Tuple(elements): "tuple{elements.len()}"
+        case MirTypeKind.I64: "i64"
+        case MirTypeKind.Ptr(inner, _): "ptr(" + mir_type_shape(inner) + ")"
+        case MirTypeKind.Ref(inner, _): "ref(" + mir_type_shape(inner) + ")"
+        case MirTypeKind.Array(inner, _): "array(" + mir_type_shape(inner) + ")"
+        case MirTypeKind.Slice(inner): "slice(" + mir_type_shape(inner) + ")"
+        case MirTypeKind.Struct(_): "struct"
+        case MirTypeKind.U8: "u8"
+        case _: "other"
+
+# A trait-object parameter is copied through its table on entry (one
+# CallIndirect), so dispatch counts are deltas over a body with no call.
+val COPY_ONLY = "fn probe<R: Reader>(reader: R, p: text) -> text:\n    p\n"
+
+fn dispatch_delta(body: text) -> text:
+    val base = probe_row(COPY_ONLY).split("|")
+    val row = probe_row(body).split("|")
+    "{row[0]}|{row[1].to_int() - base[1].to_int()}|{row[2]}"
+
+fn caller_object_locals(body: text) -> i64:
+    """Trait-object locals built in fn `caller` (a concrete argument
+    converted for an erased `R: Reader` parameter)."""
+    val mir = lower_probe_module(body)
+    var count = 0
+    for function in mir.functions.values():
+        if is_fn(function, "caller"):
+            for local in function.locals:
+                match local.type_.kind:
+                    case MirTypeKind.Tuple(_): count = count + 1
+                    case _: ()
+    count
+
+val SINGLE = "fn probe<R: Reader>(reader: R, p: text) -> text:\n    reader.read(p)\n"
+val TLDR_SHAPE = "fn probe<R: Reader>(reader: R, p: text) -> text:\n    var t = reader.read(p)\n    if t == \"\":\n        val error = reader.update(p)\n        if error != \"\":\n            return error\n        t = reader.read(p)\n    t\n"
+
+describe "generic receiver bounded by a trait in MIR":
+    it "dispatches a trait method on an `R: Trait` parameter through the vtable":
+        expect(dispatch_delta(SINGLE)).to_equal("0|1|0")
+
+    it "dispatches each call of the read/update/read shape of tldr_table_fill_v1":
+        expect(dispatch_delta(TLDR_SHAPE)).to_equal("0|3|0")
+
+    it "dispatches a default trait method through the bound":
+        expect(dispatch_delta("fn probe<R: Reader>(reader: R, p: text) -> text:\n    reader.read_twice(p)\n")).to_equal("0|1|0")
+
+    it "leaves an unbounded sibling type parameter alone":
+        expect(probe_row("fn probe<T, R: Reader>(x: T, reader: R) -> text:\n    reader.update(\"a\")\n")).to_equal(probe_row("fn probe<T>(x: T, reader: Reader) -> text:\n    reader.update(\"a\")\n"))
+
+    it "passes the bounded parameter with the trait-typed parameter's ABI":
+        expect(probe_first_param_abi(SINGLE)).to_equal(probe_first_param_abi("fn probe(reader: Reader, p: text) -> text:\n    reader.read(p)\n"))
+        expect(probe_first_param_abi(SINGLE) == "i64").to_equal(false)
+
+    it "keeps the erased word when the bound type parameter is also returned":
+        expect(probe_first_param_abi("fn probe<R: Reader>(reader: R) -> R:\n    reader\n")).to_equal("i64")
+
+    it "keeps the erased word when the bound type parameter is nested":
+        expect(probe_first_param_abi("fn probe<R: Reader>(readers: [R]) -> i64:\n    readers.len()\n")).to_equal("array(i64)")
+
+describe "callers of an erased trait-bounded function":
+    it "converts a concrete argument to the trait object":
+        val body = SINGLE + "fn caller() -> text:\n    val f = FileR(root: \"r/\")\n    probe(f, \"x\")\n"
+        expect(probe_row(body).split("|")[0]).to_equal("0")
+        expect(caller_object_locals(body) > 0).to_equal(true)
+
+    it "passes an erased bounded value through to another erased function":
+        val body = SINGLE + "fn outer<R: Reader>(reader: R) -> text:\n    probe(reader, \"y\")\n"
+        expect(probe_row(body)).to_equal(probe_row(SINGLE))

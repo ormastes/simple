@@ -166,6 +166,71 @@ impl MirLowering:
             case HirTypeKind.Optional(inner): self.native_trait_owner_for_type(inner) != ""
             case _: false
 
+    fn native_bounded_param_types(params: [HirType], return_type: HirType) -> [HirType]:
+        """Erased-generic parameter ABI (mono is deleted). A type parameter
+        `P` whose ONLY bound is a trait, and which the signature mentions ONLY
+        as the direct type of parameters, is passed as that trait's native
+        object: `fn f<R: Tr>(r: R)` gets the ABI of `fn f(r: Tr)`, and
+        `r.m()` dispatches through the trait's table (default methods
+        included). Every other occurrence -- return type, `[P]`, `P?`, a
+        wrapper or a type this walk does not model -- keeps the tagged-word
+        erasure, because a caller there holds a concrete value, never an
+        object. This is a pure function of the declared signature, so the
+        callee's own lowering and each caller derive the same ABI; the
+        caller's own type parameters never take part."""
+        var excluded: [text] = []
+        for param in params:
+            match param.kind:
+                case HirTypeKind.TypeParam(_, _): ()
+                case _: excluded = self.native_bound_mentions_into(param, excluded)
+        excluded = self.native_bound_mentions_into(return_type, excluded)
+        var rewritten: [HirType] = []
+        for param in params:
+            var next: HirType = param
+            match param.kind:
+                case HirTypeKind.TypeParam(name, bounds):
+                    if bounds.len() == 1 and not self.text_list_has(excluded, name) and not self.text_list_has(excluded, "*"):
+                        val bound: HirType = bounds[0]
+                        match bound.kind:
+                            case HirTypeKind.Named(_, bound_args):
+                                if bound_args.len() == 0 and self.native_trait_owner_for_kind(bound.kind) != "":
+                                    next = bound
+                            case _: ()
+                case _: ()
+            rewritten = rewritten.push(next)
+        rewritten
+
+    fn native_bound_mentions_into(type_: HirType, names: [text]) -> [text]:
+        """`names` plus every type parameter `type_` mentions. A kind this
+        walk does not descend adds "*", which disables the rewrite for the
+        whole signature (fail closed to today's erased ABI)."""
+        var out: [text] = names
+        match type_.kind:
+            case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char | HirTypeKind.Str | HirTypeKind.Unit | HirTypeKind.Never: ()
+            case HirTypeKind.TypeParam(name, _): out = out.push(name)
+            case HirTypeKind.Named(symbol, args):
+                if val present = self.symbols.get_symbol_raw(symbol.id):
+                    if present.kind == SymbolKind.TypeParam:
+                        out = out.push(present.name)
+                for arg in args:
+                    out = self.native_bound_mentions_into(arg, out)
+            case HirTypeKind.Array(element, _): out = self.native_bound_mentions_into(element, out)
+            case HirTypeKind.Slice(element): out = self.native_bound_mentions_into(element, out)
+            case HirTypeKind.Optional(inner): out = self.native_bound_mentions_into(inner, out)
+            case HirTypeKind.Dict(key, value):
+                out = self.native_bound_mentions_into(value, self.native_bound_mentions_into(key, out))
+            case HirTypeKind.Result(ok, err):
+                out = self.native_bound_mentions_into(err, self.native_bound_mentions_into(ok, out))
+            case HirTypeKind.Tuple(elements):
+                for element in elements:
+                    out = self.native_bound_mentions_into(element, out)
+            case HirTypeKind.Function(fn_params, ret, _):
+                for fn_param in fn_params:
+                    out = self.native_bound_mentions_into(fn_param, out)
+                out = self.native_bound_mentions_into(ret, out)
+            case _: out = out.push("*")
+        out
+
     me register_native_trait_declarations(module: HirModule):
         for declaration in module.traits.values():
             # Presence alone does not unwrap HirSymbol?: derive the owner from
