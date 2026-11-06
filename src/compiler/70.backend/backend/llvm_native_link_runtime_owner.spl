@@ -12,7 +12,7 @@
 
 use compiler.backend.linker.coff.coff_runtime_owner.{runtime_owner_select_v1, runtime_owner_object_definitions_v1, runtime_owner_cede_archive_file_v1, runtime_owner_cede_archive_file_for_machine_v1, runtime_owner_write_bytes_v1, runtime_owner_object_machine_v1}
 use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
-use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_hash_sha256, file_read_bytes, file_read, file_write, file_size_raw, dir_create_all, process_run}
+use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_hash_sha256_or_empty, file_read_bytes, file_read, file_write, file_size_raw, dir_create_all, process_run}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove}
 use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1, native_tool_absolute_v1}
@@ -76,12 +76,12 @@ pub fn llvm_runtime_owner_c_archive_v1(native_all: text, c_objects: [text],
     takes from the archive's own directory. An archive that is already
     single-owner (for example one prepared by
     scripts/bootstrap/prepare-runtime-owner.shs) is linked unchanged."""
-    val native_all_digest = file_hash_sha256(native_all)
+    val native_all_digest = file_hash_sha256_or_empty(native_all)
     if not _runtime_owner_digest_valid_v1(native_all_digest):
         return Err("runtime owner c: cannot hash native archive {native_all}")
     var identity = "runtime-owner-c-v1;{native_all_digest}"
     for object in c_objects:
-        val object_digest = file_hash_sha256(object)
+        val object_digest = file_hash_sha256_or_empty(object)
         if not _runtime_owner_digest_valid_v1(object_digest):
             return Err("runtime owner c: cannot hash C object {object}")
         identity = identity + ";{object_digest}"
@@ -139,7 +139,7 @@ pub fn llvm_runtime_owner_c_gnu_archive_v1(native_all: text, c_objects: [text],
     val machine = llvm_runtime_owner_gnu_machine_v1(target)
     if machine == 0: return Err("runtime owner c: unsupported GNU COFF target {target}")
     if c_objects.len() == 0: return Err("runtime owner c: GNU projection requires C objects")
-    val source_digest = file_hash_sha256(native_all)
+    val source_digest = file_hash_sha256_or_empty(native_all)
     if not _runtime_owner_digest_valid_v1(source_digest):
         return Err("runtime owner c: cannot hash GNU archive {native_all}")
     # Content compatibility excludes invocation-local paths (simple_rt_<PID>).
@@ -147,7 +147,7 @@ pub fn llvm_runtime_owner_c_gnu_archive_v1(native_all: text, c_objects: [text],
     var identity = "runtime-owner-gnu-c-v2;abi-v1;index=rDs;{target};{machine};{source_digest}"
     var objects: [[u8]] = []
     for object in c_objects:
-        val digest = file_hash_sha256(object)
+        val digest = file_hash_sha256_or_empty(object)
         val bytes = file_read_bytes(object)
         if not _runtime_owner_digest_valid_v1(digest) or sha256_u8_hex(bytes) != digest:
             return Err("runtime owner c: cannot bind C object {object}")
@@ -159,7 +159,7 @@ pub fn llvm_runtime_owner_c_gnu_archive_v1(native_all: text, c_objects: [text],
     val ceded = match runtime_owner_cede_archive_file_for_machine_v1(native_all, owned, machine):
         case Ok(result): result
         case Err(reason): return Err(reason)
-    if file_hash_sha256(native_all) != source_digest:
+    if file_hash_sha256_or_empty(native_all) != source_digest:
         return Err("runtime owner c: GNU source archive changed during projection")
     if ceded.parsed == 0:
         return Err("runtime owner c: no matching COFF members in GNU archive {native_all}")
@@ -175,7 +175,7 @@ pub fn llvm_runtime_owner_c_gnu_archive_v1(native_all: text, c_objects: [text],
     val archiver = _runtime_owner_dir_of(cc) + "/llvm-ar" + archiver_suffix
     if not file_exists(archiver):
         return Err("runtime owner c: selected Clang installation has no LLVM archiver")
-    val archiver_digest = file_hash_sha256(archiver)
+    val archiver_digest = file_hash_sha256_or_empty(archiver)
     if not _runtime_owner_digest_valid_v1(archiver_digest):
         return Err("runtime owner c: cannot bind GNU index archiver")
     identity = identity + ";" + archiver_digest
@@ -197,19 +197,19 @@ pub fn llvm_runtime_owner_c_gnu_archive_v1(native_all: text, c_objects: [text],
     val (index_out, index_err, index_code) = process_run(archiver, ["rDs", staged])
     if index_code != 0:
         return Err("runtime owner c: GNU index rebuild failed ({index_code}); retained {staged}: {index_err}{index_out}")
-    val digest = file_hash_sha256(staged)
+    val digest = file_hash_sha256_or_empty(staged)
     if not _runtime_owner_digest_valid_v1(digest):
         return Err("runtime owner c: cannot hash GNU projection {derived}")
     # Recompute from real inputs before trusting a cache hit: changing both
     # derived bytes and their local receipt cannot authorize a different owner.
     if file_exists(derived) and file_exists(seal):
-        if file_hash_sha256(derived) == digest and file_read(seal) == header + digest + "\n":
+        if file_hash_sha256_or_empty(derived) == digest and file_read(seal) == header + digest + "\n":
             file_delete(staged)
             dir_remove(staging)
             return Ok(derived)
     if not file_copy(staged, derived):
         return Err("runtime owner c: cannot write GNU projection {derived}")
-    if file_hash_sha256(derived) != digest or not file_write(seal, header + digest + "\n"):
+    if file_hash_sha256_or_empty(derived) != digest or not file_write(seal, header + digest + "\n"):
         return Err("runtime owner c: cannot seal GNU projection {derived}")
     file_delete(staged)
     dir_remove(staging)
