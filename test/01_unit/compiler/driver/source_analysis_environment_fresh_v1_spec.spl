@@ -1,0 +1,46 @@
+# Serial environment-owning regression; admitted compiler/ABI runtime required.
+# NOT_RUN in the source preparation session.
+use std.spec.*
+use std.nogc_sync_mut.io_runtime.{cwd_process, env_get_opt, env_set_process, env_remove_process}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use compiler.driver.driver_build.incremental.{native_build_compiler_identity, native_build_spl_tree_fingerprint}
+use compiler.driver.driver_source_analysis_v1.{source_analysis_current_environment_v1}
+
+describe "current canonical analysis environment authority":
+    it "observes same-process runtime replacement without resetting legacy memo state":
+        val root = secure_temp_dir(cwd_process(), "analysis-runtime-fresh").unwrap()
+        val path = root + "/provider.a"
+        val previous = env_get_opt("SIMPLE_RUNTIME_PATH")
+        val initial_write = file_write(path, "first-runtime-bytes")
+        val configured = env_set_process("SIMPLE_RUNTIME_PATH", path)
+        val cached_before = native_build_compiler_identity()
+        val before = source_analysis_current_environment_v1("")
+        val replacement_write = file_write(path, "other-runtime-bytes")
+        val after = source_analysis_current_environment_v1("")
+        val cached_after = native_build_compiler_identity()
+        val restored = if val original = previous:
+            env_set_process("SIMPLE_RUNTIME_PATH", original)
+        else:
+            env_remove_process("SIMPLE_RUNTIME_PATH")
+        val removed = dir_remove_all(root)
+        expect(initial_write and configured and replacement_write and restored).to_equal(true)
+        expect(before.is_ok()).to_equal(true)
+        expect(after.is_ok()).to_equal(true)
+        expect(cached_before.starts_with("uncacheable")).to_equal(false)
+        expect(cached_after).to_equal(cached_before)
+        expect(before.unwrap().config_digest).to_equal(after.unwrap().config_digest)
+        expect(before.unwrap().compiler_identity == after.unwrap().compiler_identity).to_equal(false)
+
+    it "observes source-tree byte replacement through the canonical uncached tree owner":
+        val root = secure_temp_dir(cwd_process(), "analysis-tree-fresh").unwrap()
+        val path = root + "/source.spl"
+        val initial_write = file_write(path, "fn value() -> i64: 1\n")
+        val before = native_build_spl_tree_fingerprint(root)
+        val replacement_write = file_write(path, "fn value() -> i64: 2\n")
+        val after = native_build_spl_tree_fingerprint(root)
+        val removed = dir_remove_all(root)
+        expect(initial_write and replacement_write).to_equal(true)
+        expect(before.starts_with("sha256")).to_equal(true)
+        expect(after.starts_with("sha256")).to_equal(true)
+        expect(before == after).to_equal(false)

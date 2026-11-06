@@ -1,0 +1,56 @@
+# NOT_RUN: requires admitted pure-Simple runtime. These are actual handler
+# dispatch targets; compiler worker execution is covered by its integration gate.
+use std.spec
+use std.spec.step
+use std.common.json.value.{JsonValue, json_value_object_from, json_value_serialize}
+use std.nogc_sync_mut.lsp.lsp_handlers.{lsp_handle_did_open, lsp_handle_did_change,
+    lsp_handle_did_close, lsp_handle_pull_diagnostic, lsp_set_async_analysis_available_v1, lsp_handle_initialize}
+use std.nogc_sync_mut.lsp.lsp_document_sync.{lsp_document_snapshot}
+
+fn analysis_dispatch_document(uri: text, version: i64, source: text) -> JsonValue:
+    json_value_object_from([("uri", JsonValue.Str(uri)), ("version", JsonValue.Int(version)), ("text", JsonValue.Str(source))])
+
+fn analysis_dispatch_message(method: text, params: JsonValue) -> text:
+    json_value_serialize(json_value_object_from([("jsonrpc", JsonValue.Str("2.0")),
+        ("method", JsonValue.Str(method)), ("params", params)]))
+
+describe "Live diagnostic handler routing":
+    it "queues unsaved nonexistent source without disk preflight and reports pending":
+        step("Dispatch didOpen and pull against editor-only bytes")
+        lsp_set_async_analysis_available_v1(true)
+        val uri = "file:///__editor_only_snapshot_dispatch__.spl"
+        val document = analysis_dispatch_document(uri, 11, "val unsaved = missing_name")
+        val params = json_value_object_from([("textDocument", document)])
+        lsp_handle_did_open(analysis_dispatch_message("textDocument/didOpen", params))
+        expect(lsp_document_snapshot(uri).unwrap().content).to_equal("val unsaved = missing_name")
+        val result = lsp_handle_pull_diagnostic("44", analysis_dispatch_message("textDocument/diagnostic", params))
+        expect(result).to_equal("")  # response is deferred until freshness admission
+        lsp_handle_did_close(analysis_dispatch_message("textDocument/didClose", params))
+        expect(lsp_document_snapshot(uri) == nil).to_equal(true)
+
+    it "routes full didChange to the same snapshot owner without clearing diagnostics":
+        step("Dispatch replacement and retain exact new editor version")
+        lsp_set_async_analysis_available_v1(true)
+        val uri = "file:///__editor_change_snapshot_dispatch__.spl"
+        val initial = json_value_object_from([("textDocument", analysis_dispatch_document(uri, 1, "old"))])
+        lsp_handle_did_open(analysis_dispatch_message("textDocument/didOpen", initial))
+        val change = json_value_object_from([("text", JsonValue.Str("new unsaved source"))])
+        val params = json_value_object_from([("textDocument", analysis_dispatch_document(uri, 3, "")),
+            ("contentChanges", JsonValue.Array([change]))])
+        lsp_handle_did_change(analysis_dispatch_message("textDocument/didChange", params))
+        val snapshot = lsp_document_snapshot(uri).unwrap()
+        expect(snapshot.version).to_equal(3)
+        expect(snapshot.content).to_equal("new unsaved source")
+        val result = lsp_handle_pull_diagnostic("45", analysis_dispatch_message("textDocument/diagnostic", params))
+        expect(result).to_equal("")  # no immediate cached/clean result
+        lsp_handle_did_close(analysis_dispatch_message("textDocument/didClose", params))
+
+    it "preserves navigation without advertising unavailable asynchronous diagnostics":
+        step("Select the explicit unsupported-polling compatibility profile")
+        lsp_set_async_analysis_available_v1(false)
+        val response = lsp_handle_initialize("1")
+        expect(response).to_contain("definitionProvider")
+        expect(response.contains("diagnosticProvider")).to_equal(false)
+        val params = json_value_object_from([("textDocument", analysis_dispatch_document("file:///basic.spl", 1, ""))])
+        expect(lsp_handle_pull_diagnostic("2", analysis_dispatch_message("textDocument/diagnostic", params))).to_contain("basic navigation profile")
+        lsp_set_async_analysis_available_v1(true)

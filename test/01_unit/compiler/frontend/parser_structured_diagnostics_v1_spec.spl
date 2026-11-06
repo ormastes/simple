@@ -1,0 +1,143 @@
+# Original producer facts, independent from printed compatibility receipts.
+# Runtime admission: NOT_RUN until an admitted self-hosted runtime exists.
+use std.spec.{describe, it, expect, step}
+use compiler.core.tokens.{TOK_IDENT, TOK_NEWLINE}
+use compiler.frontend.core.parser.{parser_init_with_path, parser_expect, parser_check,
+    parser_advance, parser_error_at, parser_get_diagnostics_v1, parser_record_diagnostic_v1,
+    parser_diagnostics_suppressed_set, parser_diagnostic_emit_count_get, parser_warn_print_if_needed,
+    parser_state_take, parser_state_install, flat_parser_state_dump, flat_parser_state_restore}
+use compiler.frontend.core.parser_diagnostic_snapshot_v1.{parser_diagnostics_dump_v1,
+    parser_diagnostics_restore_v1, parser_original_point_v1, flat_pool_dec_parser_diagnostics_v1}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, FLAT_POOL_CODEC_VERSION, flat_pool_enc_scalar_text, flat_pool_type_trace_arm_v1, flat_pool_type_trace_take_v1}
+use compiler.frontend.flat_ast_bridge.{flat_pools_restore_all}
+use compiler.driver.driver_parse_diagnostic.{driver_parse_diagnostics_v1, driver_parse_producer_observed_v1}
+use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1, DiagnosticFix, FixConfidence, MacroFrame}
+use compiler.common.diagnostics.span.{Span}
+
+fn skip_diagnostic_newlines_v1():
+    while parser_check(TOK_NEWLINE): parser_advance()
+
+describe "original structured parser diagnostics v1":
+    it "captures exact native token bytes after multibyte comments and CRLF under suppression":
+        step("Emit at the original token before any display formatting")
+        parser_init_with_path("# 한🙂\r\nfn item", "unicode.spl")
+        parser_diagnostics_suppressed_set(true)
+        skip_diagnostic_newlines_v1()
+        expect(parser_expect(TOK_IDENT)).to_equal(false)
+        val records = parser_get_diagnostics_v1()
+        expect(records.len()).to_equal(1)
+        expect(records[0].file.unwrap()).to_equal("unicode.spl")
+        expect(records[0].span.unwrap().start).to_equal(11)
+        expect(records[0].span.unwrap().end).to_equal(13)
+        expect(records[0].span.unwrap().line).to_equal(2)
+        expect(records[0].span.unwrap().col).to_equal(1)
+        expect(records[0].message).to_start_with("expected ")
+        expect(parser_diagnostic_emit_count_get()).to_equal(0)
+
+    it "maps a native token across blanked conditional lines to original source bytes":
+        step("Preserve byte attribution when preprocessing removes Unicode lines")
+        val prefix = "@when(false):\r\nval hidden = \"한🙂\"\r\n@end\r\n"
+        parser_init_with_path(prefix + "fn item", "conditional.spl")
+        parser_diagnostics_suppressed_set(true)
+        skip_diagnostic_newlines_v1()
+        expect(parser_expect(TOK_IDENT)).to_equal(false)
+        val point = parser_original_point_v1(prefix + "fn item", "conditional.spl", 4, 1).unwrap()
+        val span = parser_get_diagnostics_v1()[0].span.unwrap()
+        expect(span.start).to_equal(point.start)
+        expect(span.end).to_equal(point.start + 2)
+        expect(span.line).to_equal(4)
+
+    it "keeps supplied late coordinates as a point and excludes stale file receipts":
+        step("Record a late diagnostic without inventing a token extent")
+        parser_init_with_path("# 한🙂\r\nfn item", "late.spl")
+        parser_diagnostics_suppressed_set(true)
+        parser_error_at(1, 4, "late original reason")
+        val records = driver_parse_diagnostics_v1("late.spl")
+        expect(records[0].span.unwrap().start).to_equal(5)
+        expect(records[0].span.unwrap().end).to_equal(5)
+        expect(records[0].message).to_equal("late original reason")
+        expect(driver_parse_diagnostics_v1("different.spl").len()).to_equal(0)
+        parser_init_with_path("fn clean", "clean.spl")
+        expect(parser_get_diagnostics_v1().len()).to_equal(0)
+        expect(driver_parse_producer_observed_v1("clean.spl")).to_equal(true)
+        expect(driver_parse_producer_observed_v1("late.spl")).to_equal(false)
+
+    it "retains labels children notes macro frames and fixes through state and flat snapshot":
+        step("Round-trip rich original records without rebuilding from messages")
+        parser_init_with_path("fn item", "rich.spl")
+        val span = Span.new(0, 2, 1, 1)
+        val fix = DiagnosticFix.new("replace-fn", "replacement", FixConfidence.Likely).with_replacement("rich.spl", span, "fun")
+        var record = DiagnosticV1.error("EXACT", "original\nreason").with_file("rich.spl").with_span(span)
+        record = record.with_label("rich.spl", span, "primary").with_secondary_label("other.spl", span, "secondary")
+        record = record.with_note("note").with_help("help").with_child(DiagnosticV1.warning("CHILD", "child"))
+        record.fix = Some(fix)
+        record.macro_trace.push(MacroFrame.new("macro", span, "macro.spl"))
+        parser_record_diagnostic_v1(record, 99, 99)
+        val saved = parser_state_take()
+        expect(parser_get_diagnostics_v1().len()).to_equal(0)
+        parser_state_install(saved)
+        val blob = flat_parser_state_dump()
+        parser_init_with_path("fn next", "next.spl")
+        val reader = FlatPoolReader.new_canonical(blob)
+        expect(flat_parser_state_restore(reader)).to_equal(true)
+        expect(reader.finish_canonical_frame()).to_equal(true)
+        expect(parser_get_diagnostics_v1()[0].to_json()).to_equal(record.to_json())
+        expect(driver_parse_producer_observed_v1("rich.spl")).to_equal(true)
+
+    it "rejects incompatible snapshots and bounded recursive overflows":
+        step("Fail closed before old parser fields can be interpreted")
+        expect(FLAT_POOL_CODEC_VERSION).to_equal("spl-flatpool-v14-parser-diagnostics")
+        expect(flat_pools_restore_all("spl-flatpool-v13-unit-decl-pools\n")).to_equal(false)
+        var nested = DiagnosticV1.error("DEEP", "leaf")
+        for i in 0..65:
+            nested = DiagnosticV1.error("DEEP", "parent").with_child(nested)
+        val rejected = match parser_diagnostics_restore_v1(parser_diagnostics_dump_v1([nested])):
+            Ok(_): false
+            Err(_): true
+        expect(rejected).to_equal(true)
+        val malformed = match parser_diagnostics_restore_v1("parser-diagnostics-v1\n1\nerror\nE\nmsg\n2\n0\n0\n0\n0\n0\n0\n0\n"):
+            Ok(_): false
+            Err(_): true
+        expect(malformed).to_equal(true)
+
+    it "retains a multibyte token end and the warning producer code":
+        step("Capture native UTF-8 extent and original LOG001 severity")
+        parser_init_with_path("\"한🙂\"", "src/real.spl")
+        parser_diagnostics_suppressed_set(true)
+        expect(parser_expect(TOK_IDENT)).to_equal(false)
+        expect(parser_get_diagnostics_v1()[0].span.unwrap().end).to_equal(9)
+        parser_warn_print_if_needed()
+        val warning = parser_get_diagnostics_v1()[1]
+        expect(warning.code).to_equal("LOG001")
+        expect(warning.severity.name()).to_equal("warning")
+
+    it "does not leak nested diagnostic fields into packed parent trace slots":
+        step("Encode a nested frame as a single parent scalar")
+        flat_pool_type_trace_arm_v1()
+        val blob = parser_diagnostics_dump_v1([DiagnosticV1.error("TRACE", "record")])
+        val trace = flat_pool_type_trace_take_v1()
+        expect(trace.len()).to_equal(0)
+        val restored = match parser_diagnostics_restore_v1(blob):
+            Ok(records): records.len()
+            Err(_): -1
+        expect(restored).to_equal(1)
+
+    it "maps EOF beyond an excluded final line to the original end":
+        step("Do not attribute processed EOF to the start of a blanked original line")
+        parser_init_with_path("@when(false):\nval x = 1\n@end", "excluded_tail.spl")
+        parser_diagnostics_suppressed_set(true)
+        skip_diagnostic_newlines_v1()
+        expect(parser_expect(TOK_IDENT)).to_equal(false)
+        val span = parser_get_diagnostics_v1()[0].span.unwrap()
+        expect(span.start).to_equal(28)
+        expect(span.end).to_equal(28)
+        expect(span.line).to_equal(3)
+        expect(span.col).to_equal(5)
+
+    it "poisons the parent reader when the typed diagnostic frame is rejected":
+        step("An invalid nested frame cannot become a successful empty diagnostic collection")
+        val reader = FlatPoolReader.new_canonical(flat_pool_enc_scalar_text("invalid-version\n"))
+        val records = flat_pool_dec_parser_diagnostics_v1(reader)
+        expect(records.len()).to_equal(0)
+        expect(reader.ok).to_equal(false)
+        expect(reader.finish_canonical_frame()).to_equal(false)

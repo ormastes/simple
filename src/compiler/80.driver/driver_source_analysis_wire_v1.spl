@@ -1,0 +1,112 @@
+# SDN envelope with explicitly named canonical DiagnosticV1 JSON interoperability.
+use std.common.diagnostics.source_analysis_v1.*
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1, render_diagnostic_v1_json}
+use compiler.driver.driver_source_analysis_v1.{SourceAnalysisResultV1}
+
+fn analysis_environment_value_v1(environment: SourceAnalysisEnvironmentV1) -> SdnValue:
+    var features: [SdnValue] = []
+    for feature in environment.features: features.push(SdnValue.String(feature))
+    SdnValue.Dict({"compiler_identity": SdnValue.String(environment.compiler_identity),
+        "target": SdnValue.String(environment.target), "features": SdnValue.Array(features),
+        "config_digest": SdnValue.String(environment.config_digest)})
+
+pub fn source_analysis_environment_sdn_v1(environment: SourceAnalysisEnvironmentV1) -> Result<text, text>:
+    if environment.features.len() > 64: return Err("environment-feature-limit")
+    for field in [environment.compiler_identity, environment.target, environment.config_digest]:
+        if field.byte_len() > 4096: return Err("environment-field-limit")
+    for feature in environment.features:
+        if feature.byte_len() > 256: return Err("environment-feature-limit")
+    Ok(sdn_encode_canonical(SdnValue.Dict({"schema": SdnValue.String("source-analysis-environment-v1"),
+        "environment": analysis_environment_value_v1(environment)})))
+
+# Charge before traversing or rendering recursive diagnostics. This conservative
+# allocation preflight includes JSON punctuation/field overhead; escaping and
+# the final SDN encoding are separately size-checked.
+fn analysis_diagnostic_weight_v1(diagnostic: DiagnosticV1, remaining: i64, depth: i64) -> i64:
+    if depth > 32 or remaining < 512: return -1
+    var used: i64 = 512
+    for field in [diagnostic.code, diagnostic.message, diagnostic.file ?? ""]:
+        if field.byte_len() > remaining - used: return -1
+        used = used + field.byte_len()
+    if val span = diagnostic.span:
+        if span.file.byte_len() > remaining - used: return -1
+        used = used + span.file.byte_len()
+    if (diagnostic.labels.len() > 4096 or diagnostic.notes.len() > 4096 or
+            diagnostic.help.len() > 4096 or diagnostic.children.len() > 4096 or
+            diagnostic.macro_trace.len() > 4096): return -1
+    for label in diagnostic.labels:
+        for field in [label.file, label.span.file, label.message]:
+            if field.byte_len() + 128 > remaining - used: return -1
+            used = used + field.byte_len() + 128
+    for note in diagnostic.notes + diagnostic.help:
+        if note.byte_len() + 8 > remaining - used: return -1
+        used = used + note.byte_len() + 8
+    for frame in diagnostic.macro_trace:
+        for field in [frame.name, frame.file, frame.span.file]:
+            if field.byte_len() + 128 > remaining - used: return -1
+            used = used + field.byte_len() + 128
+    if val fix = diagnostic.fix:
+        for field in [fix.id, fix.description]:
+            if field.byte_len() + 128 > remaining - used: return -1
+            used = used + field.byte_len() + 128
+        if fix.replacements.len() > 4096: return -1
+        for replacement in fix.replacements:
+            for field in [replacement.file, replacement.span.file, replacement.new_text]:
+                if field.byte_len() + 128 > remaining - used: return -1
+                used = used + field.byte_len() + 128
+    for child in diagnostic.children:
+        val child_used = analysis_diagnostic_weight_v1(child, remaining - used, depth + 1)
+        if child_used < 0: return -1
+        used = used + child_used
+    used
+
+fn analysis_status_text_v1(status: SourceAnalysisStatusV1) -> text:
+    match status:
+        case SourceAnalysisStatusV1.Completed: "Completed"
+        case SourceAnalysisStatusV1.Rejected: "Rejected"
+        case SourceAnalysisStatusV1.Cancelled: "Cancelled"
+        case SourceAnalysisStatusV1.TimedOut: "TimedOut"
+        case SourceAnalysisStatusV1.Failed: "Failed"
+        case SourceAnalysisStatusV1.InvalidPayload: "InvalidPayload"
+
+pub fn source_analysis_result_sdn_v1(result: SourceAnalysisResultV1) -> Result<text, text>:
+    val receipt = result.receipt
+    if result.diagnostics.len() > 4096 or receipt.dependencies.len() > 4096:
+        return Err("analysis-response-count-limit")
+    var weight: i64 = 0
+    for diagnostic in result.diagnostics:
+        val used = analysis_diagnostic_weight_v1(diagnostic, 65536 - weight, 0)
+        if used < 0: return Err("analysis-diagnostic-render-budget")
+        weight = weight + used
+    var diagnostic_rows: [text] = []
+    for diagnostic in result.diagnostics:
+        diagnostic_rows.push(render_diagnostic_v1_json(diagnostic))
+    val diagnostic_json = "[" + diagnostic_rows.join(",") + "]"
+    if diagnostic_json.byte_len() > 262144: return Err("analysis-diagnostic-wire-limit")
+    var dependencies: [SdnValue] = []
+    var metadata: i64 = 0
+    for dependency in receipt.dependencies:
+        metadata = metadata + dependency.path.byte_len() + dependency.digest.byte_len() + 256
+        if metadata > 262144: return Err("analysis-dependency-wire-limit")
+        dependencies.push(SdnValue.Dict({"path": SdnValue.String(dependency.path),
+            "digest": SdnValue.String(dependency.digest), "byte_count": SdnValue.Int(dependency.byte_count),
+            "origin": SdnValue.String(dependency.origin), "document_version": SdnValue.Int(dependency.document_version)}))
+    for field in [receipt.reason, receipt.run_id, receipt.workspace_identity, receipt.owner_id,
+            receipt.request_digest, receipt.environment_digest, receipt.dependency_digest]:
+        if field.byte_len() > 4096: return Err("analysis-receipt-field-limit")
+    val value = SdnValue.Dict({"schema": SdnValue.String("source-analysis-response-v1"),
+        "receipt": SdnValue.Dict({"status": SdnValue.String(analysis_status_text_v1(receipt.status)),
+            "reason": SdnValue.String(receipt.reason), "run_id": SdnValue.String(receipt.run_id),
+            "workspace_identity": SdnValue.String(receipt.workspace_identity), "owner_id": SdnValue.String(receipt.owner_id),
+            "lifetime_generation": SdnValue.Int(receipt.lifetime_generation), "request_digest": SdnValue.String(receipt.request_digest),
+            "environment_digest": SdnValue.String(receipt.environment_digest), "dependencies": SdnValue.Array(dependencies),
+            "dependency_digest": SdnValue.String(receipt.dependency_digest),
+            "structured_diagnostics_complete": SdnValue.Bool(receipt.structured_diagnostics_complete)}),
+        "diagnostics_format": SdnValue.String("diagnostic-v1-json"), "diagnostics_json": SdnValue.String(diagnostic_json)})
+    val encoded = sdn_encode_canonical(value)
+    if encoded.byte_len() > 4194304: return Err("analysis-response-wire-limit")
+    Ok(encoded)
+
+export source_analysis_environment_sdn_v1, source_analysis_result_sdn_v1

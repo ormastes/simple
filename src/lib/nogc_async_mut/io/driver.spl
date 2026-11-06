@@ -1,3 +1,4 @@
+use std.nogc_async_mut.io.platform_event.{PlatformEvent}
 """
 # Async I/O Completion Driver — Pure Simple Implementation
 
@@ -46,6 +47,12 @@ val _OP_UDP_SEND: i64 = 13
 val _OP_UDP_BIND: i64 = 14
 val _OP_SEND_BYTES: i64 = 15
 
+pub fn io_driver_requires_network_authority_v1(operation: i64) -> bool:
+    (operation == _OP_ACCEPT or operation == _OP_RECV or operation == _OP_SEND or
+        operation == _OP_SEND_BYTES or operation == _OP_SENDFILE or
+        operation == _OP_CONNECT or operation == _OP_UDP_RECV or
+        operation == _OP_UDP_SEND or operation == _OP_UDP_BIND)
+
 @unsafe(reason: "raw accepted descriptor; negative sentinel conflates timeout and failure", capabilities: [ffi])
 extern fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64
 @unsafe(reason: "raw connected descriptor; negative sentinel conflates timeout and failure", capabilities: [ffi])
@@ -90,11 +97,9 @@ extern fn rt_io_udp_recv_from(fd: i64, size: i64) -> ([u8], text)?
 extern fn rt_io_udp_send_to(fd: i64, data: [u8], addr: text) -> i64
 
 extern fn rt_event_loop_create() -> i64
-extern fn rt_event_loop_register(loop_fd: i64, fd: i64, interest: i64, token: i64, edge: bool) -> bool
-extern fn rt_event_loop_deregister(loop_fd: i64, fd: i64) -> bool
-extern fn rt_event_loop_poll(loop_fd: i64, max_events: i64, timeout_ms: i64) -> i64
-extern fn rt_event_loop_poll_get_fd(index: i64) -> i64
-extern fn rt_event_loop_close(loop_fd: i64) -> bool
+extern fn rt_event_loop_register(loop_fd: i64, fd: i64, interest: i64, token: i64, edge: i64) -> i64
+extern fn rt_event_loop_deregister(loop_fd: i64, fd: i64) -> i64
+extern fn rt_event_loop_close(loop_fd: i64) -> i64
 
 struct IoCompletion:
     id: i64
@@ -274,7 +279,7 @@ class IoDriver:
                 if i < self._ev_registered_modes.len() and self._ev_registered_modes[i] == next_mode:
                     return
                 rt_event_loop_deregister(self._ev_fd, fd)
-                if not rt_event_loop_register(self._ev_fd, fd, next_mode, fd, false):
+                if rt_event_loop_register(self._ev_fd, fd, next_mode, fd, 0) != 1:
                     self._ev_registered = self._i64_list_without_value(self._ev_registered, fd)
                     if i < self._ev_registered_modes.len():
                         self._ev_registered_modes = self._i64_list_without_index(self._ev_registered_modes, i)
@@ -283,9 +288,9 @@ class IoDriver:
                     self._ev_registered_modes[i] = next_mode
                 return
             i = i + 1
-        if not rt_event_loop_register(self._ev_fd, fd, mode, fd, false):
+        if rt_event_loop_register(self._ev_fd, fd, mode, fd, 0) != 1:
             rt_event_loop_deregister(self._ev_fd, fd)
-            if not rt_event_loop_register(self._ev_fd, fd, mode, fd, false):
+            if rt_event_loop_register(self._ev_fd, fd, mode, fd, 0) != 1:
                 return
         self._ev_registered.push(fd)
         self._ev_registered_modes.push(mode)
@@ -324,7 +329,7 @@ class IoDriver:
             return
         if self._ev_fd < 0:
             return
-        if not rt_event_loop_register(self._ev_fd, fd, next_mode, fd, false):
+        if rt_event_loop_register(self._ev_fd, fd, next_mode, fd, 0) != 1:
             return
         self._ev_registered.push(fd)
         self._ev_registered_modes.push(next_mode)
@@ -483,6 +488,8 @@ class IoDriver:
 
     me poll(max: i64, timeout_ms: i64) -> [IoCompletion]:
         val count = self.poll_count(max, timeout_ms)
+        if count < 0:
+            panic("E-IO-DRIVER-UNSUPPORTED: bounded direction-aware network I/O unavailable")
         var result: [IoCompletion] = []
         var i = 0
         while i < count:
@@ -496,6 +503,13 @@ class IoDriver:
         result
 
     me poll_count(max: i64, timeout_ms: i64) -> i64:
+        # Admission precedes accept fast path, event polling and all I/O. The
+        # legacy native provider has no direction/WouldBlock receipt and can
+        # block even after an FD-only observation. Keep pending operations
+        # owned and cancellable; report unsupported rather than attempting I/O.
+        for operation in self._p_type:
+            if io_driver_requires_network_authority_v1(operation):
+                return ERR_UNSUPPORTED
         self._c_id = []
         self._c_result = []
         self._c_flags = []
@@ -559,14 +573,15 @@ class IoDriver:
         var has_ev = self._ev_fd >= 0
         var ev_has_results = false
         if has_ev:
-            val raw_count = rt_event_loop_poll(self._ev_fd, 64, timeout_ms)
-            var ri = 0
-            while ri < raw_count:
-                val ready_fd = rt_event_loop_poll_get_fd(ri)
-                if ready_fd >= 0:
-                    ready_fds.push(ready_fd)
-                    ev_has_results = true
-                ri = ri + 1
+            # All native poll + scratch reads share the canonical snapshot gate.
+            # Descriptor notification alone does not prove a read/write direction.
+            val wait_ms = if timeout_ms < 0 or timeout_ms > 25: 25 else: timeout_ms
+            val platform = PlatformEvent.new()
+            val observed = platform.poll_descriptors(self._ev_fd, 64, wait_ms)
+            if observed.is_err(): return -1
+            val snapshot = observed.unwrap()
+            ready_fds = snapshot.descriptors
+            ev_has_results = ready_fds.len() > 0
 
         var np_id: [i64] = []
         var np_type: [i64] = []

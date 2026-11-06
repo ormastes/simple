@@ -1,0 +1,141 @@
+# Canonical immutable Check entry. No temporary files and no legacy query checker.
+use std.common.diagnostics.source_analysis_v1.*
+use std.common.crypto.sha256.{sha256_text}
+use std.env.variables.{env_list_checked}
+use std.nogc_sync_mut.io_runtime.{cwd_process, env_get_opt, env_set_process, env_remove_process}
+use compiler.driver.driver_entry_closure_core.{driver_entry_scan_cache_release}
+use compiler.common.driver_core_types.{CompileMode, CompileResult, driver_core_compile_options_default}
+use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1}
+use compiler.driver.driver_snapshot_provider.*
+use compiler.driver.driver_build.incremental.{native_build_compiler_identity_fresh_v1}
+use compiler.driver.cache.native_build_environment_identity.{native_build_environment_fingerprint_v1}
+use compiler.driver.driver_admitted_epoch.{driver_admitted_epoch_active_v1}
+use lazy compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
+
+struct SourceAnalysisResultV1:
+    receipt: SourceAnalysisReceiptV1
+    diagnostics: [DiagnosticV1]
+
+pub fn source_analysis_current_environment_v1(target: text) -> Result<SourceAnalysisEnvironmentV1, text>:
+    if target.byte_len() > 256 or target.contains("\n"): return Err("analysis-target-invalid")
+    val observed = native_build_environment_fingerprint_v1()
+    if not observed.valid: return Err(observed.reason)
+    val compiler = native_build_compiler_identity_fresh_v1()
+    if compiler == "" or compiler.starts_with("uncacheable"):
+        return Err("analysis-compiler-identity-unavailable")
+    Ok(SourceAnalysisEnvironmentV1(compiler_identity: sha256_text(compiler), target: target,
+        features: [], config_digest: sha256_text("canonical-default-check-v1:{target.byte_len()}:" + target + observed.digest)))
+
+fn source_analysis_route_error_v1() -> text:
+    if driver_admitted_epoch_active_v1(): return "analysis-cannot-share-source-epoch"
+    match env_list_checked():
+        case Err(reason): return "analysis-environment-unavailable:" + reason
+        case Ok(rows):
+            for row in rows:
+                val (name, value) = row
+                if value == "" or value == "0": continue
+                for prefix in ["SIMPLE_BOOTSTRAP", "SIMPLE_NATIVE_BUILD", "SIMPLE_PACKAGE_INDEX",
+                        "SIMPLE_SCV_", "SIMPLE_HIR_SHARD", "SIMPLE_HIR_WORKER",
+                        "SIMPLE_COMPILE_DELEGATED", "SIMPLE_FRONTEND_PARALLEL",
+                        "SIMPLE_PARSE_SHARD", "SIMPLE_STREAMING", "SIMPLE_BUILD_SESSION",
+                        "SIMPLE_NATIVE_GROUP", "SIMPLE_DEMAND_COMPILE"]:
+                    if name.starts_with(prefix): return "analysis-alternate-route-unsupported:" + name
+    ""
+
+fn source_analysis_result_v1(request: SourceAnalysisRequestV1, status: SourceAnalysisStatusV1,
+        reason: text, dependencies: [SourceAnalysisDependencyV1], diagnostics: [DiagnosticV1],
+        complete: bool) -> SourceAnalysisResultV1:
+    SourceAnalysisResultV1(receipt: SourceAnalysisReceiptV1(status: status, reason: reason,
+        run_id: request.run_id, workspace_identity: request.workspace_identity,
+        owner_id: request.owner_id, lifetime_generation: request.lifetime_generation,
+        request_digest: source_analysis_request_digest_v1(request),
+        environment_digest: source_analysis_environment_digest_v1(request.environment),
+        dependencies: dependencies, dependency_digest: source_analysis_dependency_digest_v1(dependencies),
+        structured_diagnostics_complete: complete), diagnostics: diagnostics)
+
+pub fn check_snapshot_set_v1(request: SourceAnalysisRequestV1) -> SourceAnalysisResultV1:
+    # Admission precedes installation. The sole installed-owner region below
+    # has no early return; every ordinary outcome removes the provider once.
+    val admitted = driver_snapshot_provider_admit_v1(request)
+    if admitted.is_err():
+        # Invalid metadata is never hashed or echoed into an unbounded receipt.
+        val receipt = SourceAnalysisReceiptV1(status: SourceAnalysisStatusV1.InvalidPayload,
+            reason: admitted.unwrap_err(), run_id: "", workspace_identity: "", owner_id: "",
+            lifetime_generation: 0, request_digest: "", environment_digest: "", dependencies: [],
+            dependency_digest: "", structured_diagnostics_complete: false)
+        return SourceAnalysisResultV1(receipt: receipt, diagnostics: [])
+    val owner = admitted.unwrap()
+    if cwd_process() != request.workspace_root:
+        return source_analysis_result_v1(request, SourceAnalysisStatusV1.Rejected, "analysis-workspace-cwd-mismatch", [], [], false)
+    val route_error = source_analysis_route_error_v1()
+    if route_error != "":
+        return source_analysis_result_v1(request, SourceAnalysisStatusV1.Rejected, route_error, [], [], false)
+    val actual = source_analysis_current_environment_v1(request.environment.target)
+    if actual.is_err():
+        return source_analysis_result_v1(request, SourceAnalysisStatusV1.Failed, actual.unwrap_err(), [], [], false)
+    if source_analysis_environment_digest_v1(actual.unwrap()) != source_analysis_environment_digest_v1(request.environment):
+        return source_analysis_result_v1(request, SourceAnalysisStatusV1.Rejected, "analysis-environment-mismatch", [], [], false)
+    var options = driver_core_compile_options_default()
+    options.input_files = [request.entry_path]
+    options.mode = CompileMode.Check
+    options.native_target = request.environment.target
+    val driver = compiler_driver_create(options)
+    driver.ctx.config["compiler_source_entry"] = request.entry_path
+    driver.ctx.config["build-session-retain-products"] = "1"
+    driver.ctx.source_snapshot_provider_v1 = Some(owner)
+    driver.ctx.begin_structured_collection_v1()
+    if not driver_snapshot_install_v1(owner):
+        return source_analysis_result_v1(request, SourceAnalysisStatusV1.Rejected, "analysis-owner-busy", [], [], false)
+    # Canonical entry loading publishes this mode for frontend/HIR consumers.
+    # Own and restore that one derived environment value, including failure.
+    val closure_before = env_get_opt("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+    driver_entry_scan_cache_release()
+    val closure_ready = env_set_process("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+    val compiled = if closure_ready:
+        compiler_driver_run_compile(driver)
+    else:
+        CompileResult.RuntimeError("analysis-entry-mode-unavailable")
+    val closure_restored = if val original = closure_before:
+        env_set_process("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", original)
+    else:
+        env_remove_process("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+    driver_snapshot_remove_v1()
+    driver_entry_scan_cache_release()
+    var failure = owner.failure
+    if not closure_restored: failure = "analysis-entry-mode-restore-failed"
+    var source_result = false
+    var require_typecheck = true
+    match compiled:
+        case CompileResult.Success(_): source_result = true
+        case CompileResult.ParseError(_):
+            source_result = true
+            require_typecheck = false
+        case CompileResult.TypeError(_): source_result = true
+        case CompileResult.BlockError(_): source_result = true
+        case CompileResult.ResolveError(_): source_result = true
+        case CompileResult.BorrowError(_): source_result = true
+        case _: failure = "analysis-infrastructure-failed"
+    if owner.dependencies.len() == 0: failure = "analysis-consumed-source-missing"
+    if not owner.consumed.contains_key(request.entry_path): failure = "analysis-entry-not-consumed"
+    val paths = driver.ctx.source_paths_owner
+    val digests = driver.ctx.source_identities_owner
+    if paths.len() != digests.len(): failure = "analysis-source-owner-invalid"
+    if paths.len() == digests.len():
+        for index in 0..paths.len():
+            val key = owner.path_key(paths[index])
+            if not owner.consumed.contains_key(key):
+                failure = "analysis-unreceipted-source"
+            elif owner.digests[key] != digests[index]:
+                failure = "analysis-source-owner-mismatch"
+    val diagnostics = driver.ctx.structured_diagnostics_v1
+    if diagnostics.len() > request.bounds.max_diagnostics: failure = "analysis-diagnostic-limit"
+    if not driver.ctx.source_analysis_diagnostics_collected_v1(require_typecheck): failure = "analysis-structured-diagnostics-incomplete"
+    val after = source_analysis_current_environment_v1(request.environment.target)
+    if after.is_err(): failure = "analysis-environment-observation-failed"
+    elif source_analysis_environment_digest_v1(after.unwrap()) != source_analysis_environment_digest_v1(request.environment):
+        failure = "analysis-environment-changed"
+    if failure != "" or not source_result:
+        return source_analysis_result_v1(request, SourceAnalysisStatusV1.Failed, failure, owner.dependencies, [], false)
+    source_analysis_result_v1(request, SourceAnalysisStatusV1.Completed, "", owner.dependencies, diagnostics, true)
+
+export SourceAnalysisResultV1, check_snapshot_set_v1, source_analysis_current_environment_v1

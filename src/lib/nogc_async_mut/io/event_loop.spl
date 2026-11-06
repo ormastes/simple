@@ -1,12 +1,11 @@
 """
 # Event Loop
 
-Portable event loop using platform-native I/O notification mechanisms for
-efficient file descriptor readiness notification. Falls back to cooperative
-polling on unsupported platforms.
-
-Uses extern stubs (`rt_event_loop_*`) that delegate to the native backend.
-Until the Rust runtime implements those externs, the polling fallback is used.
+Legacy event-loop interface. Native providers currently expose descriptor-only
+observations, not the readiness/token triples required by this interface.
+`poll` and `poll_one` therefore return explicit errors. Use PlatformEvent's
+bounded `poll_descriptors` only when descriptor notification is sufficient.
+Full event semantics remain OPEN; see the event_loop_descriptor_abi bug record.
 
 ## Platform Backends
 
@@ -331,32 +330,16 @@ class EventLoop:
             Err(IoError(kind: IoErrorKind.Other, message: "failed to deregister fd {fd}", source: nil))
 
     fn poll(timeout_ms: i64) -> Result<[Event], IoError>:
-        """Wait for I/O events and return ready descriptors.
+        """Reject full-event polling unavailable from the current native ABI.
 
-        Calls the native poll extern which blocks up to timeout_ms.
-        Returns a flat [i64] array (fd, ready, token triples) that is
-        unpacked into Event structs here.
-
-        Args:
-            timeout_ms: Max wait time in ms (-1 for infinite, 0 for non-blocking)
-
-        Returns:
-            Result with array of ready Events
+        Returns IoError without calling the native poller. Use the explicitly
+        limited PlatformEvent.poll_descriptors for descriptor-only observations;
+        it does not provide actual readiness flags, tokens or timeout certainty.
         """
         if self._closed:
             return Err(IoError(kind: IoErrorKind.Other, message: "event loop closed", source: nil))
-        val max_events: i64 = 64
-        val raw = self._pe.poll(self.loop_fd, max_events, timeout_ms)
-        # raw is a flat array: [fd1, ready1, token1, fd2, ready2, token2, ...]
-        var events: [Event] = []
-        var i = 0
-        while i + 2 < raw.len():
-            val ev_fd = raw[i]
-            val ev_ready = _i64_to_interest(raw[i + 1])
-            val ev_token = raw[i + 2]
-            events.push(Event(fd: ev_fd, ready: ev_ready, token: ev_token))
-            i = i + 3
-        Ok(events)
+        Err(IoError(kind: IoErrorKind.Other,
+            message: "native event ABI has no readiness flags or tokens; use descriptor observation", source: nil))
 
     fn poll_one(timeout_ms: i64) -> Result<Event?, IoError>:
         """Poll for a single event.

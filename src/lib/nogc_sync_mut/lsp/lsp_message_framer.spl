@@ -1,0 +1,72 @@
+# Pure bounded framing state. The input owner supplies decoded complete UTF-8
+# chunks; message lengths remain UTF-8 byte counts.
+pub class LspMessageFramerV1:
+    pending: text
+    expected: i64
+    eof: bool
+
+    fn finished() -> bool:
+        self.eof and self.pending == "" and self.expected < 0
+
+    me feed(value: text) -> Result<bool, text>:
+        if self.eof: return Err("LSP input already finished")
+        if value.byte_len() > 8454144 - self.pending.byte_len(): return Err("LSP input buffer limit")
+        self.pending = self.pending + value
+        Ok(true)
+
+    me take_message() -> Result<text?, text>:
+        if self.expected < 0:
+            if self.pending.starts_with("{"):
+                val end = self.pending.index_of("\n")
+                if end < 0:
+                    if self.pending.byte_len() > 8388608: return Err("LSP message byte limit")
+                    if self.eof and self.pending != "":
+                        val message = self.pending
+                        self.pending = ""
+                        return Ok(Some(message))
+                    return Ok(nil)
+                if end > 8388608: return Err("LSP message byte limit")
+                val message = self.pending.substring(0, end)
+                self.pending = self.pending.substring(end + 1)
+                return Ok(Some(message))
+            val end = self.pending.index_of("\r\n\r\n")
+            if end < 0:
+                if self.pending.byte_len() > 8192: return Err("LSP header byte limit")
+                if self.eof and self.pending != "": return Err("truncated LSP header")
+                return Ok(nil)
+            if end > 8192: return Err("LSP header byte limit")
+            val header = self.pending.substring(0, end)
+            var length = -1
+            for line in header.split("\r\n"):
+                if line.starts_with("Content-Length:"):
+                    if length >= 0: return Err("duplicate LSP content length")
+                    val digits = line.substring(15).trim()
+                    if digits == "" or digits.byte_len() > 8: return Err("invalid LSP content length")
+                    length = 0
+                    var digit_index = 0
+                    while digit_index < digits.byte_len():
+                        val digit = digits.byte_at(digit_index)
+                        if digit < 48 or digit > 57: return Err("invalid LSP content length")
+                        length = length * 10 + digit - 48
+                        digit_index = digit_index + 1
+                    if length <= 0 or length > 8388608: return Err("LSP message byte limit")
+            if length < 0: return Err("missing LSP content length")
+            self.expected = length
+            self.pending = self.pending.substring(end + 4)
+        if self.pending.byte_len() < self.expected:
+            if self.eof: return Err("truncated LSP body")
+            return Ok(nil)
+        # UTF-8 decoder only emits complete scalars. An interior byte length is
+        # rejected before slicing; a peer cannot split a scalar across frames.
+        if self.expected < self.pending.byte_len():
+            val byte = self.pending.byte_at(self.expected)
+            if byte >= 128 and byte < 192: return Err("LSP frame splits UTF-8 scalar")
+        val message = self.pending.substring(0, self.expected)
+        self.pending = self.pending.substring(self.expected)
+        self.expected = -1
+        Ok(Some(message))
+
+pub fn lsp_message_framer_v1() -> LspMessageFramerV1:
+    LspMessageFramerV1(pending: "", expected: -1, eof: false)
+
+export LspMessageFramerV1, lsp_message_framer_v1

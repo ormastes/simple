@@ -1,0 +1,81 @@
+use std.nogc_async_mut.io.driver.{IoDriver, io_driver_requires_network_authority_v1}
+use std.nogc_sync_mut.concurrent.mutex.{mutex_new_gate, mutex_try_lock_gate, mutex_unlock_gate}
+use std.nogc_sync_mut.sffi.host.{event_loop_poll, event_loop_poll_get_fd}
+use std.spec.{describe, it, expect, step}
+use std.io.platform_event.{PlatformEvent, EventBackend, EventMode, descriptor_observation_v1}
+use std.io.event_loop.{EventLoop}
+
+describe "canonical descriptor observation ABI":
+    it "rejects pending receive and send before any poll or blocking operation":
+        step("Keep borrowed-descriptor operations pending until cancellation")
+        var driver = IoDriver.new()
+        val receive_id = driver.submit_recv(1, 16)
+        val send_id = driver.submit_send(1, "")
+        val queued_before = driver.flush()
+        val count = driver.poll_count(64, 0)
+        val queued_after_rejection = driver.flush()
+        driver.cancel_fd(1)
+        val queued_after_cancellation = driver.flush()
+        driver.close()
+        expect(receive_id != send_id).to_equal(true)
+        expect(count).to_equal(-38)
+        expect(queued_before).to_equal(2)
+        expect(queued_after_rejection).to_equal(2)
+        expect(queued_after_cancellation).to_equal(0)
+        for operation in [1, 2, 3, 4, 8, 12, 13, 14, 15]:
+            expect(io_driver_requires_network_authority_v1(operation)).to_equal(true)
+        expect(io_driver_requires_network_authority_v1(7)).to_equal(false)
+
+    it "uses a scalar nonblocking gate and rejects split scratch access":
+        val gate = mutex_new_gate(0)
+        val held = mutex_try_lock_gate(gate)
+        expect(held != nil).to_equal(true)
+        val contended = mutex_try_lock_gate(gate)
+        val released = mutex_unlock_gate(gate, 0)
+        expect(contended == nil).to_equal(true)
+        expect(released).to_equal(1)
+        expect(event_loop_poll(12, 1, 0).is_err()).to_equal(true)
+        expect(event_loop_poll_get_fd(0).is_err()).to_equal(true)
+
+    it "copies descriptor-only observations without inventing idle or direction":
+        step("Validate bounded owned receipt contents")
+        val empty = descriptor_observation_v1([]).unwrap()
+        expect(empty.status).to_equal("no_observation")
+        val observed = descriptor_observation_v1([0, 17]).unwrap()
+        expect(observed.status).to_equal("observed")
+        expect(observed.descriptors).to_equal([0, 17])
+        expect(descriptor_observation_v1([-1]).is_err()).to_equal(true)
+        var excessive: [i64] = []
+        for index in 0..257: excessive.push(index)
+        expect(descriptor_observation_v1(excessive).is_err()).to_equal(true)
+
+    it "rejects unavailable backends and invalid observation bounds":
+        val unsupported = PlatformEvent.with_backend(EventBackend.Poll)
+        expect(unsupported.poll(12, 1, 0).is_err()).to_equal(true)
+        expect(unsupported.create()).to_equal(-1)
+        expect(unsupported.register(12, 0, EventMode.Read)).to_equal(false)
+        expect(unsupported.poll_descriptors(12, 1, 25).is_err()).to_equal(true)
+        val platform = PlatformEvent.new()
+        expect(platform.poll_descriptors(-1, 1, 25).is_err()).to_equal(true)
+        expect(platform.poll_descriptors(12, 257, 25).is_err()).to_equal(true)
+        expect(platform.poll_descriptors(12, 1, 26).is_err()).to_equal(true)
+
+    it "uses native scalar count and zero-success close on an empty native queue":
+        step("Requires an admitted Linux macOS or FreeBSD native provider")
+        val platform = PlatformEvent.new()
+        val handle = platform.create()
+        expect(handle >= 0).to_equal(true)
+        val observed = platform.poll_descriptors(handle, 1, 0)
+        val closed = platform.close(handle)
+        expect(closed).to_equal(true)
+        expect(observed.is_ok()).to_equal(true)
+        val receipt = observed.unwrap()
+        expect(receipt.status).to_equal("no_observation")
+        expect(receipt.descriptors.len()).to_equal(0)
+
+    it "explicitly refuses legacy readiness triples unavailable from native ABI":
+        var event_loop = EventLoop.new().unwrap()
+        val observed = event_loop.poll(0)
+        val closed = event_loop.close()
+        expect(observed.is_err()).to_equal(true)
+        expect(closed.is_ok()).to_equal(true)

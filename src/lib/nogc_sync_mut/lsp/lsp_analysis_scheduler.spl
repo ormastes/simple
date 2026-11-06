@@ -1,0 +1,376 @@
+# One dispatch owner and one worker. Cached results retain provenance, but
+# every reuse requires a new pinned environment observation and exact disk
+# reconciliation. This temporary profile has no fast OS-watch authority.
+use std.common.diagnostics.source_analysis_v1.*
+use std.common.diagnostics.source_analysis_wire_v1.{source_analysis_environment_decode_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field,
+    json_value_text_or, json_value_object_from, json_value_serialize}
+use std.nogc_sync_mut.io_runtime.{cwd, time_now_monotonic_ms, time_now_unix_micros}
+use std.nogc_sync_mut.fs.host_path.{host_path_canonical}
+use std.nogc_sync_mut.lsp.lsp_document_sync.{lsp_document_uris_v1, lsp_document_generation_v1,
+    lsp_document_capture_v1, lsp_document_capture_matches_v1}
+use std.nogc_sync_mut.lsp.lsp_analysis_worker.{SourceAnalysisWorkerV1,
+    source_analysis_worker_start_v1, source_analysis_worker_start_environment_v1}
+use std.nogc_sync_mut.lsp.lsp_analysis_receipt.{lsp_analysis_response_decode_v1,
+    lsp_analysis_receipt_identity_matches_v1, lsp_analysis_receipt_matches_v1}
+use std.nogc_sync_mut.lsp.lsp_analysis_diagnostics.{lsp_analysis_publications_v1}
+use std.nogc_sync_mut.lsp.lsp_analysis_freshness.{LspAnalysisFreshnessV1, lsp_analysis_freshness_v1}
+use std.nogc_sync_mut.lsp.lsp_protocol.{lsp_write_notification, lsp_write_message}
+use std.nogc_sync_mut.lsp.lsp_json.{make_json_result, make_error}
+
+pub struct LspAnalysisCacheEntryV1:
+    uri: text
+    params: text
+    receipt: SourceAnalysisReceiptV1
+    environment: SourceAnalysisEnvironmentV1
+    entry_uri: text
+    retained_bytes: i64
+
+pub class LspAnalysisSchedulerV1:
+    binary: text
+    root: text
+    workspace_identity: text
+    owner_id: text
+    environment: SourceAnalysisEnvironmentV1?
+    worker: SourceAnalysisWorkerV1?
+    worker_purpose: text
+    external_generation: i64
+    active_external_generation: i64
+    worker_external_generation: i64
+    active: SourceAnalysisRequestV1?
+    candidate_receipt: SourceAnalysisReceiptV1?
+    candidate_params: [text]
+    freshness: LspAnalysisFreshnessV1?
+    queued: [text]
+    due_ms: i64
+    sequence: i64
+    stopped: bool
+    retirement_due_ms: i64
+    fatal_cleanup: text
+    failure: text
+    cached: [LspAnalysisCacheEntryV1]
+    pull_ids: [text]
+    pull_uris: [text]
+    pull_deadlines: [i64]
+
+    me clear_candidate():
+        self.active = nil
+        self.candidate_receipt = nil
+        self.candidate_params = []
+        self.freshness = nil
+
+    me changed():
+        if self.stopped: return
+        self.queued = lsp_document_uris_v1()
+        self.due_ms = time_now_monotonic_ms() + 150
+        self.failure = ""
+        # Old editor diagnostics remain on the client, but cannot authorize
+        # any new full/clean response after the owner epoch changes.
+        self.cached = []
+        var ids: [text] = []
+        var uris: [text] = []
+        var deadlines: [i64] = []
+        for index in 0..self.pull_ids.len():
+            if not self.queued.contains(self.pull_uris[index]):
+                lsp_write_message(make_error(self.pull_ids[index], -32801, "Editor snapshot closed"))
+            else:
+                ids.push(self.pull_ids[index])
+                uris.push(self.pull_uris[index])
+                deadlines.push(self.pull_deadlines[index])
+        self.pull_ids = ids
+        self.pull_uris = uris
+        self.pull_deadlines = deadlines
+
+    me external_changed():
+        # Client watch/config events are conservative invalidation hints only.
+        # They never certify freshness or replace exact reconciliation.
+        self.external_generation = self.external_generation + 1
+        self.environment = nil
+        self.changed()
+
+    me fail(reason: text):
+        self.failure = reason
+        lsp_write_notification("window/logMessage", json_value_serialize(json_value_object_from([
+            ("type", JsonValue.Int(1)), ("message", JsonValue.Str("Source analysis unavailable: " + reason))])))
+        for id in self.pull_ids: lsp_write_message(make_error(id, -32803, "Source analysis failed: " + reason))
+        self.pull_ids = []
+        self.pull_uris = []
+        self.pull_deadlines = []
+
+    me expire_pulls():
+        var ids: [text] = []
+        var uris: [text] = []
+        var deadlines: [i64] = []
+        val now = time_now_monotonic_ms()
+        for index in 0..self.pull_ids.len():
+            if now >= self.pull_deadlines[index]:
+                lsp_write_message(make_error(self.pull_ids[index], -32803, "Snapshot diagnostic request deadline"))
+            else:
+                ids.push(self.pull_ids[index])
+                uris.push(self.pull_uris[index])
+                deadlines.push(self.pull_deadlines[index])
+        self.pull_ids = ids
+        self.pull_uris = uris
+        self.pull_deadlines = deadlines
+
+    me invalidate_candidate(reason: text):
+        # A changed observation triggers new analysis, never a clean empty
+        # result. Existing pending pulls keep their original overall deadline.
+        self.cached = []
+        self.environment = nil
+        self.clear_candidate()
+        self.queued = lsp_document_uris_v1()
+        self.due_ms = time_now_monotonic_ms() + 150
+        self.failure = reason
+
+    me cache(params: text, request: SourceAnalysisRequestV1, receipt: SourceAnalysisReceiptV1):
+        val parsed = json_parse_value_strict(params)
+        if parsed.is_err(): return
+        val uri = json_value_text_or(json_value_field(parsed.unwrap(), "uri"), "")
+        var entry_uri = ""
+        for document in request.documents:
+            if document.path == request.entry_path: entry_uri = document.uri
+        var size = params.byte_len() + 1024 + receipt.run_id.byte_len() + receipt.owner_id.byte_len()
+        size = size + receipt.workspace_identity.byte_len() + receipt.reason.byte_len() + entry_uri.byte_len()
+        size = size + request.environment.compiler_identity.byte_len() + request.environment.config_digest.byte_len() + request.environment.target.byte_len()
+        for dependency in receipt.dependencies: size = size + dependency.path.byte_len() + dependency.digest.byte_len() + 128
+        for feature in request.environment.features: size = size + feature.byte_len() + 16
+        if size > 16777216: return
+        var entries: [LspAnalysisCacheEntryV1] = []
+        var bytes = size
+        for entry in self.cached:
+            if entry.uri == uri or entry.receipt.lifetime_generation != receipt.lifetime_generation: continue
+            if entry.retained_bytes > 16777216 - bytes or entries.len() >= 255: continue
+            bytes = bytes + entry.retained_bytes
+            entries.push(entry)
+        entries.push(LspAnalysisCacheEntryV1(uri: uri, params: params, receipt: receipt,
+            environment: request.environment, entry_uri: entry_uri, retained_bytes: size))
+        self.cached = entries
+
+    me commit_candidate():
+        if self.active == nil or self.candidate_receipt == nil or self.freshness == nil: return
+        if not self.freshness.unwrap().finished: return
+        val request = self.active.unwrap()
+        val receipt = self.candidate_receipt.unwrap()
+        if not lsp_analysis_receipt_matches_v1(request, receipt): return
+        if self.freshness.unwrap().receipt.dependency_digest != receipt.dependency_digest: return
+        if self.active_external_generation != self.external_generation or not lsp_document_capture_matches_v1(request):
+            self.invalidate_candidate("overlay-generation-changed")
+            return
+        self.failure = ""
+        for params in self.candidate_params:
+            self.cache(params, request, receipt)
+            lsp_write_notification("textDocument/publishDiagnostics", params)
+            val decoded = json_parse_value_strict(params).unwrap()
+            val uri = json_value_text_or(json_value_field(decoded, "uri"), "")
+            var ids: [text] = []
+            var uris: [text] = []
+            var deadlines: [i64] = []
+            for index in 0..self.pull_ids.len():
+                if self.pull_uris[index] == uri:
+                    val result = json_value_object_from([("kind", JsonValue.Str("full")),
+                        ("resultId", JsonValue.Str(receipt.request_digest + ":" + receipt.dependency_digest)),
+                        ("items", json_value_field(decoded, "diagnostics"))])
+                    lsp_write_message(make_json_result(self.pull_ids[index], json_value_serialize(result)))
+                else:
+                    ids.push(self.pull_ids[index])
+                    uris.push(self.pull_uris[index])
+                    deadlines.push(self.pull_deadlines[index])
+            self.pull_ids = ids
+            self.pull_uris = uris
+            self.pull_deadlines = deadlines
+            var queued: [text] = []
+            for pending in self.queued:
+                if pending != uri: queued.push(pending)
+            self.queued = queued
+        self.clear_candidate()
+
+    me begin_environment(purpose: text):
+        val target = if self.active != nil: self.active.unwrap().environment.target else: ""
+        val started = source_analysis_worker_start_environment_v1(self.binary, self.root, target)
+        if started.is_err():
+            self.queued = []
+            self.clear_candidate()
+            self.fail(started.unwrap_err())
+        else:
+            self.worker = Some(started.unwrap())
+            self.worker_purpose = purpose
+            self.worker_external_generation = self.external_generation
+
+    me worker_completed(wire: text):
+        if self.worker_purpose == "bootstrap" or self.worker_purpose == "freshness":
+            val observed = source_analysis_environment_decode_v1(wire)
+            if observed.is_err():
+                self.queued = []
+                self.clear_candidate()
+                self.fail(observed.unwrap_err())
+                return
+            if self.worker_purpose == "bootstrap":
+                self.environment = Some(observed.unwrap())
+                return
+            if self.active == nil or self.candidate_receipt == nil: return
+            if source_analysis_environment_digest_v1(observed.unwrap()) != self.candidate_receipt.unwrap().environment_digest:
+                self.invalidate_candidate("analysis-environment-changed")
+                return
+            val probe = lsp_analysis_freshness_v1(self.candidate_receipt.unwrap())
+            if probe.is_err():
+                self.clear_candidate()
+                self.fail(probe.unwrap_err())
+            else:
+                self.freshness = Some(probe.unwrap())
+            return
+        if self.active == nil: return
+        val response = lsp_analysis_response_decode_v1(wire)
+        if response.is_err():
+            self.clear_candidate()
+            self.fail(response.unwrap_err())
+            return
+        val request = self.active.unwrap()
+        if not lsp_analysis_receipt_identity_matches_v1(request, response.unwrap().receipt):
+            self.invalidate_candidate("analysis-receipt-identity-mismatch")
+            return
+        if response.unwrap().receipt.status != SourceAnalysisStatusV1.Completed:
+            val reason = response.unwrap().receipt.status.to_text() + ": " + response.unwrap().receipt.reason
+            self.environment = nil
+            self.clear_candidate()
+            self.fail(reason)
+            return
+        val projected = lsp_analysis_publications_v1(request, response.unwrap())
+        if projected.is_err():
+            self.clear_candidate()
+            self.fail(projected.unwrap_err())
+            return
+        self.candidate_receipt = Some(response.unwrap().receipt)
+        self.candidate_params = projected.unwrap()
+        # No emission here. Even a newly completed worker must pass parent
+        # freshness admission after its exit/cleanup and before publication.
+
+    me tick():
+        self.expire_pulls()
+        if self.fatal_cleanup != "": return
+        if self.worker != nil:
+            var worker = self.worker.unwrap()
+            if self.stopped or self.worker_external_generation != self.external_generation or (self.active != nil and not lsp_document_capture_matches_v1(self.active.unwrap())):
+                if not worker.cancelled:
+                    val _cancelled = worker.cancel()
+                if self.retirement_due_ms == 0: self.retirement_due_ms = time_now_monotonic_ms() + 3000
+            val event = worker.tick(0)
+            self.worker = Some(worker)
+            if event.cleanup_pending:
+                if event.status == "cleanup_failed" and self.retirement_due_ms == 0:
+                    self.retirement_due_ms = time_now_monotonic_ms() + 3000
+                if self.retirement_due_ms != 0 and time_now_monotonic_ms() >= self.retirement_due_ms:
+                    self.stopped = true
+                    self.queued = []
+                    self.fatal_cleanup = "cleanup_failed " + worker.cleanup_error_identity()
+                return
+            self.retirement_due_ms = 0
+            self.worker = nil
+            if event.status == "completed":
+                self.worker_completed(event.wire)
+            elif event.status == "cancelled":
+                self.clear_candidate()
+            else:
+                self.queued = []
+                self.clear_candidate()
+                self.fail(event.status + ": " + event.reason)
+            return
+        if self.stopped: return
+        if self.active != nil and (self.active_external_generation != self.external_generation or not lsp_document_capture_matches_v1(self.active.unwrap())):
+            self.invalidate_candidate("overlay-generation-changed")
+            return
+        if self.freshness != nil:
+            var probe = self.freshness.unwrap()
+            val status = probe.step()
+            self.freshness = Some(probe)
+            if status == "completed": self.commit_candidate()
+            elif status == "dependency-content-changed" or status == "dependency-validation-path-changed" or status == "overlay-generation-changed":
+                self.invalidate_candidate(status)
+            elif status != "pending":
+                self.clear_candidate()
+                self.cached = []
+                self.fail(status)
+            return
+        if self.candidate_receipt != nil:
+            self.begin_environment("freshness")
+            return
+        if self.queued.len() == 0 or time_now_monotonic_ms() < self.due_ms: return
+        val uri = self.queued[self.queued.len() - 1]
+        # Reconstruct the original captured request only for the same owner
+        # epoch. Cache storage retains identities, not 256 source-set copies.
+        for entry in self.cached:
+            if entry.uri != uri or entry.receipt.lifetime_generation != lsp_document_generation_v1(): continue
+            val request = lsp_document_capture_v1(entry.entry_uri, entry.receipt.run_id,
+                self.root, self.workspace_identity, self.owner_id, entry.environment)
+            if request.is_ok() and lsp_analysis_receipt_matches_v1(request.unwrap(), entry.receipt):
+                self.queued.pop()
+                self.active = Some(request.unwrap())
+                self.active_external_generation = self.external_generation
+                self.candidate_receipt = Some(entry.receipt)
+                self.candidate_params = [entry.params]
+                self.begin_environment("freshness")
+                return
+        if self.environment == nil:
+            self.begin_environment("bootstrap")
+            return
+        self.queued.pop()
+        self.sequence = self.sequence + 1
+        val request = lsp_document_capture_v1(uri, self.owner_id + ":" + str(self.sequence),
+            self.root, self.workspace_identity, self.owner_id, self.environment.unwrap())
+        if request.is_err():
+            self.fail(request.unwrap_err())
+            return
+        val started = source_analysis_worker_start_v1(request.unwrap(), self.binary)
+        if started.is_err():
+            self.fail(started.unwrap_err())
+            return
+        self.active = Some(request.unwrap())
+        self.active_external_generation = self.external_generation
+        self.worker_external_generation = self.external_generation
+        self.worker = Some(started.unwrap())
+        self.worker_purpose = "analysis"
+
+    me stop():
+        self.stopped = true
+        self.queued = []
+        self.freshness = nil
+        for id in self.pull_ids: lsp_write_message(make_error(id, -32800, "Source analysis cancelled"))
+        self.pull_ids = []
+        self.pull_uris = []
+        self.pull_deadlines = []
+        if self.worker != nil:
+            if self.retirement_due_ms == 0: self.retirement_due_ms = time_now_monotonic_ms() + 3000
+            var worker = self.worker.unwrap()
+            val _cancelled = worker.cancel()
+            self.worker = Some(worker)
+        else:
+            self.clear_candidate()
+
+    fn cleanup_pending() -> bool:
+        self.worker != nil
+
+    me pull(id: text, uri: text) -> text:
+        if self.stopped: return make_error(id, -32800, "Source analysis stopped")
+        if id.byte_len() > 4096 or self.pull_ids.len() >= 256: return make_error(id, -32803, "Pending diagnostic request limit")
+        if self.pull_ids.contains(id): return make_error(id, -32600, "Duplicate pending diagnostic request ID")
+        if not lsp_document_uris_v1().contains(uri): return make_error(id, -32803, "Open editor snapshot required")
+        self.pull_ids.push(id)
+        self.pull_uris.push(uri)
+        self.pull_deadlines.push(time_now_monotonic_ms() + 300000)
+        if not self.queued.contains(uri) and self.queued.len() < 256: self.queued.push(uri)
+        # Actual response is emitted only after asynchronous freshness admission.
+        ""
+
+pub fn lsp_analysis_scheduler_v1(binary: text) -> LspAnalysisSchedulerV1:
+    val root = host_path_canonical(cwd())
+    val workspace_identity = sha256_text(root)
+    val owner_id = sha256_text(root + ":" + str(time_now_unix_micros()) + ":" + str(time_now_monotonic_ms()))
+    LspAnalysisSchedulerV1(binary: binary, root: root, workspace_identity: workspace_identity,
+        owner_id: owner_id, environment: nil, worker: nil, worker_purpose: "",
+        external_generation: 0, active_external_generation: 0, worker_external_generation: 0, active: nil,
+        candidate_receipt: nil, candidate_params: [], freshness: nil, queued: [], due_ms: 0,
+        sequence: 0, stopped: false, retirement_due_ms: 0, fatal_cleanup: "", failure: "",
+        cached: [], pull_ids: [], pull_uris: [], pull_deadlines: [])
+
+export LspAnalysisCacheEntryV1, LspAnalysisSchedulerV1, lsp_analysis_scheduler_v1

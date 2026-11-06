@@ -1,0 +1,70 @@
+# One dispatch owner polls fd0 and incrementally frames bounded UTF-8 input.
+# No whole-message blocking read: worker deadlines advance while input is idle
+# or the peer has only supplied part of a header/scalar/body.
+use std.io.platform_event.{PlatformEvent, EventMode}
+use std.nogc_sync_mut.io.stdin_text_session.{StdinTextSession, stdin_text_session}
+use std.nogc_sync_mut.io.text_session.{utf8_text_session_codec}
+use std.nogc_sync_mut.lsp.lsp_message_framer.{LspMessageFramerV1, lsp_message_framer_v1}
+
+pub class LspEventInputV1:
+    events: PlatformEvent
+    event_handle: i64
+    input: StdinTextSession
+    framer: LspMessageFramerV1
+    closed: bool
+    failure: text
+
+    fn finished() -> bool:
+        self.framer.finished()
+
+    me poll() -> Result<text?, text>:
+        if self.closed: return Err("LSP input closed")
+        if self.failure != "": return Err(self.failure)
+        val ready_message = self.framer.take_message()?
+        if ready_message != nil: return Ok(ready_message)
+        if self.framer.eof:
+            if self.framer.pending != "" or self.framer.expected >= 0: return Err("truncated LSP frame")
+            return Ok(nil)
+        val observation = self.events.poll_descriptors(self.event_handle, 1, 25)?
+        if not observation.descriptors.contains(0): return Ok(nil)
+        val chunk = match self.input.read_chunk(65536):
+            case Ok(value): value
+            case Err(_): return Err("LSP UTF-8 input failed")
+        if chunk == nil:
+            self.framer.eof = true
+        else:
+            val value = chunk.unwrap()
+            val _accepted = self.framer.feed(value)?
+        self.framer.take_message()
+
+    me close() -> Result<bool, text>:
+        if self.closed: return Ok(true)
+        self.input.close()
+        if not self.events.close(self.event_handle):
+            self.failure = "LSP event handle cleanup failed; ownership retained"
+            return Err(self.failure)
+        self.closed = true
+        Ok(true)
+
+pub fn lsp_event_input_v1() -> Result<LspEventInputV1, text>:
+    # Admit the borrowed stdin session before acquiring the event handle.
+    val codec = match utf8_text_session_codec(65536, 65536):
+        case Ok(value): value
+        case Err(_): return Err("LSP UTF-8 codec admission failed")
+    var input = match stdin_text_session(codec):
+        case Ok(value): value
+        case Err(_): return Err("LSP checked stdin unavailable")
+    val events = PlatformEvent.new()
+    val handle = events.create()
+    if handle < 0:
+        input.close()
+        return Err("LSP descriptor polling unavailable")
+    var failure = ""
+    if not events.register(handle, 0, EventMode.Read):
+        failure = "LSP stdin readiness registration failed"
+    # Even a registration failure returns the acquired owner for explicit
+    # cleanup. poll reports failure; no constructor rollback loses a handle.
+    Ok(LspEventInputV1(events: events, event_handle: handle, input: input,
+        framer: lsp_message_framer_v1(), closed: false, failure: failure))
+
+export LspEventInputV1, lsp_event_input_v1

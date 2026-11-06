@@ -19,7 +19,7 @@ pub fn lsp_document_snapshot_matches(snapshot: DocumentInfo) -> bool:
     val current = lsp_document_snapshot(snapshot.uri)
     if current == nil: return false
     val value = current.unwrap()
-    value.version == snapshot.version and value.content == snapshot.content
+    value.lifetime_generation == snapshot.lifetime_generation and value.version == snapshot.version and value.content == snapshot.content
 
 pub fn lsp_document_sync_uri(body: text) -> text:
     val parsed = json_parse_value_strict(body)
@@ -77,3 +77,49 @@ pub fn lsp_document_sync_apply(method: text, body: text) -> bool:
             LSP_DOCUMENT_OWNER.invalidate_doc(uri, version)
             return false
     LSP_DOCUMENT_OWNER.update_doc(uri, version, source)
+
+# Capture the complete owner set: invalid imports must not silently fall back
+# to disk. This is an immutable value copy on the single LSP dispatch owner.
+use std.common.diagnostics.source_analysis_v1.*
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.lsp.lsp_file_uri.{lsp_file_uri_to_path}
+use std.nogc_sync_mut.fs.host_path.{host_path_canonical}
+
+pub fn lsp_document_generation_v1() -> i64:
+    LSP_DOCUMENT_OWNER.overlay_generation
+
+pub fn lsp_document_capture_v1(uri: text, run_id: text, workspace_root: text,
+        workspace_identity: text, owner_id: text, environment: SourceAnalysisEnvironmentV1) -> Result<SourceAnalysisRequestV1, text>:
+    if not LSP_DOCUMENT_OWNER.doc_is_synchronized(uri): return Err("entry overlay is not synchronized")
+    var documents: [SourceAnalysisDocumentV1] = []
+    var paths: [text] = []
+    var index = 0
+    while index < LSP_DOCUMENT_OWNER.doc_uris.len():
+        if not LSP_DOCUMENT_OWNER.doc_sync_valid[index]: return Err("overlay set contains an unsynchronized document")
+        val document_uri = LSP_DOCUMENT_OWNER.doc_uris[index]
+        if not document_uri.starts_with("file://"): return Err("overlay set contains unsupported URI")
+        val path = host_path_canonical(lsp_file_uri_to_path(document_uri))
+        if paths.contains(path): return Err("multiple overlay URIs resolve to one path")
+        paths.push(path)
+        val source = LSP_DOCUMENT_OWNER.doc_contents[index]
+        documents.push(SourceAnalysisDocumentV1(path: path, uri: document_uri,
+            version: LSP_DOCUMENT_OWNER.doc_versions[index], source: source, digest: sha256_text(source)))
+        index = index + 1
+    Ok(SourceAnalysisRequestV1(run_id: run_id, workspace_root: workspace_root,
+        workspace_identity: workspace_identity, owner_id: owner_id,
+        lifetime_generation: LSP_DOCUMENT_OWNER.overlay_generation,
+        entry_path: host_path_canonical(lsp_file_uri_to_path(uri)), documents: documents,
+        environment: environment, bounds: SourceAnalysisBoundsV1()))
+
+pub fn lsp_document_capture_matches_v1(request: SourceAnalysisRequestV1) -> bool:
+    if request.lifetime_generation != LSP_DOCUMENT_OWNER.overlay_generation: return false
+    if request.documents.len() != LSP_DOCUMENT_OWNER.doc_uris.len(): return false
+    for document in request.documents:
+        val current = lsp_document_snapshot(document.uri)
+        if current == nil: return false
+        val value = current.unwrap()
+        if value.version != document.version or value.content != document.source: return false
+    true
+
+pub fn lsp_document_uris_v1() -> [text]:
+    LSP_DOCUMENT_OWNER.doc_uris
