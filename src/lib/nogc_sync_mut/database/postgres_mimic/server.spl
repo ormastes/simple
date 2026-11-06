@@ -5,7 +5,8 @@ kept behind a later transport adapter so the database engine remains testable.
 """
 
 use std.database.pure_sql.{PureDatabase, pure_database_changes}
-use std.database.sql.types.{DbRow, DbError}
+use std.database.sql.types.{DbRow, DbError, DbValue}
+use nogc_sync_mut.database.pure_sql.database.{PureDatabaseBitmapReducerV1}
 
 enum PgSessionState:
     Starting
@@ -62,16 +63,34 @@ fn command_tag(sql: text, changes: i64) -> text:
         "ROLLBACK": "ROLLBACK"
         keyword: keyword
 
+# Boxed so the optional slot holds a record, not a bare trait object (native MIR
+# cannot lower Some(<trait value>) into Option<trait>; see pure_database.spl).
+# @workaround bug=puresql_native_mir_failures_2026_10_25 reason=see doc/08_tracking/bug/puresql_native_mir_failures_2026-10-25.md
+class PgBitmapReducerSlotV1:
+    reducer: PureDatabaseBitmapReducerV1
+
 class PostgresMimicServer:
     db: PureDatabase
     sessions: Dict<i64, PgSession>
     next_session_id: i64
+    # Opt-in RowBitmap AND reducer (an admitted vector provider). nil = the
+    # ordinary PureDatabase query path, which stays the default.
+    bitmap: PgBitmapReducerSlotV1?
+    bitmap_provider_queries: i64
+    bitmap_provider_and_calls: i64
+    bitmap_ordinary_queries: i64
+    bitmap_last_reason: text
 
     static fn memory() -> Result<PostgresMimicServer, DbError>:
-        Ok(PostgresMimicServer(db: PureDatabase.memory()?, sessions: {}, next_session_id: 1))
+        Ok(PostgresMimicServer.with_db(PureDatabase.memory()?))
 
     static fn open(path: text) -> Result<PostgresMimicServer, DbError>:
-        Ok(PostgresMimicServer(db: PureDatabase.open(path)?, sessions: {}, next_session_id: 1))
+        Ok(PostgresMimicServer.with_db(PureDatabase.open(path)?))
+
+    static fn with_db(db: PureDatabase) -> PostgresMimicServer:
+        PostgresMimicServer(db: db, sessions: {}, next_session_id: 1, bitmap: nil,
+            bitmap_provider_queries: 0, bitmap_provider_and_calls: 0,
+            bitmap_ordinary_queries: 0, bitmap_last_reason: "")
 
     me startup(user: text, database: text, application_name: text) -> Result<i64, text>:
         if user.trim() == "": return Err("user is required")
@@ -102,7 +121,7 @@ class PostgresMimicServer:
             return pg_error("25P02", "current transaction is aborted; issue ROLLBACK", "E")
 
         if keyword == "SELECT" or keyword == "WITH" or keyword == "VALUES":
-            val queried = self.db.query(sql, [])
+            val queried = if self.bitmap != nil: self._bitmap_query_v1(sql) else: self.db.query(sql, [])
             if queried.is_err():
                 if session.state == PgSessionState.InTransaction: session.state = PgSessionState.FailedTransaction
                 self.sessions[session_id] = session
@@ -122,6 +141,40 @@ class PostgresMimicServer:
         self.sessions[session_id] = session
         PgResponse(kind: PgResponseKind.CommandComplete, tag: command_tag(sql, pure_database_changes(self.db)), columns: [], rows: [],
             sqlstate: "", message: "", transaction_status: self.status_byte(session.state))
+
+    # SELECTs eligible for the two-term RowBitmap AND go through the installed
+    # reducer; PureDatabase falls back to its ordinary path for everything else
+    # and returns the reducer unchanged.
+    me _bitmap_query_v1(sql: text) -> Result<[DbRow], DbError>:
+        val slot = self.bitmap!
+        val owned = self.db.query_with_bitmap_reducer_owned_v1(sql, [], slot.reducer)
+        # A trait-typed field read passed to a constructor has no concrete
+        # owner; a match result carries one (same pattern as pure_database.spl).
+        # @workaround bug=puresql_native_mir_failures_2026_10_25 reason=see doc/08_tracking/bug/puresql_native_mir_failures_2026-10-25.md
+        val next_reducer = match Some(owned):
+            Some(value): value.reducer
+            nil: slot.reducer
+        self.bitmap = Some(PgBitmapReducerSlotV1(reducer: next_reducer))
+        if owned.provider_used:
+            self.bitmap_provider_queries = self.bitmap_provider_queries + 1
+        else:
+            self.bitmap_ordinary_queries = self.bitmap_ordinary_queries + 1
+        self.bitmap_provider_and_calls = self.bitmap_provider_and_calls + owned.provider_and_calls
+        self.bitmap_last_reason = owned.reason
+        owned.query
+
+    me install_bitmap_reducer_v1(reducer: PureDatabaseBitmapReducerV1):
+        self.bitmap = Some(PgBitmapReducerSlotV1(reducer: reducer))
+
+    # Closes and removes the reducer. Returns the close status (0 = ok or none).
+    me close_bitmap_reducer_v1() -> i32:
+        if self.bitmap == nil: return 0
+        val closed = self.bitmap!.reducer.close_owned_v1()
+        self.bitmap = nil
+        closed.status
+
+    fn bitmap_stats_v1() -> text:
+        "provider_queries={self.bitmap_provider_queries} provider_and_calls={self.bitmap_provider_and_calls} ordinary_queries={self.bitmap_ordinary_queries} last_reason={self.bitmap_last_reason}"
 
     me terminate(session_id: i64) -> bool:
         if not self.sessions.contains_key(session_id): return false
@@ -155,6 +208,24 @@ fn postgres_mimic_simple_query(server: PostgresMimicServer,
 fn postgres_mimic_close(server: PostgresMimicServer) -> Result<(), DbError>:
     server.close()
 
+fn postgres_mimic_open_memory() -> Result<PostgresMimicServer, DbError>:
+    PostgresMimicServer.memory()
+
+fn postgres_mimic_install_bitmap_reducer_v1(server: PostgresMimicServer,
+        reducer: PureDatabaseBitmapReducerV1):
+    server.install_bitmap_reducer_v1(reducer)
+
+fn postgres_mimic_close_bitmap_reducer_v1(server: PostgresMimicServer) -> i32:
+    server.close_bitmap_reducer_v1()
+
+fn postgres_mimic_bitmap_stats_v1(server: PostgresMimicServer) -> text:
+    server.bitmap_stats_v1()
+
+# Bulk row load without SQL parsing (server-owner seeding, e.g. benchmarks).
+fn postgres_mimic_put_row_v1(server: PostgresMimicServer, table: text,
+        values: [DbValue]) -> bool:
+    server.db.put(table, values).is_ok()
+
 fn postgres_mimic_join_text(values: [text], separator: text) -> text:
     var result = ""
     var i = 0
@@ -176,3 +247,6 @@ fn postgres_mimic_row_tsv(row: DbRow) -> text:
 export PgSessionState, PgResponseKind, PgResponse, PgSession, PostgresMimicServer
 export postgres_mimic_open, postgres_mimic_startup, postgres_mimic_simple_query
 export postgres_mimic_close, postgres_mimic_join_text, postgres_mimic_row_tsv
+export PgBitmapReducerSlotV1, postgres_mimic_open_memory, postgres_mimic_put_row_v1
+export postgres_mimic_install_bitmap_reducer_v1, postgres_mimic_close_bitmap_reducer_v1
+export postgres_mimic_bitmap_stats_v1
