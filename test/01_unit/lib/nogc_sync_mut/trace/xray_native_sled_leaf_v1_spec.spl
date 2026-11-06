@@ -62,6 +62,20 @@ impl XrayCodePatchPortV1 for FakePatchPortV1:
         self.log.push("close:{arena}")
         1
 
+# Fake native dispatcher: records the publication of the channel arena to
+# the resident trampoline handler (xray_native_runtime_aarch64.c).
+class FakeDispatchV1:
+    status: i64
+    log: [text]
+
+impl XrayNativeDispatchPortV1 for FakeDispatchV1:
+    me publish(module_instance: u64, arena: i64, generation: u64) -> i64:
+        self.log.push("publish:{module_instance}:{arena}:{generation}")
+        self.status
+
+fn fake_dispatch() -> FakeDispatchV1:
+    FakeDispatchV1(status: 1, log: [])
+
 # Image: [0,64) read-only map, [64,256) RX text holding one function at 64
 # (entry sled at 64, exit sled at 128) and the trampoline at 224.
 fn image_fixture() -> ([u8], TraceNativeMapV1):
@@ -175,7 +189,7 @@ describe "XRay native AArch64 sled leaf V1":
         val (bytes, _) = image_fixture()
         var port = port_from_image(bytes)
         var leaf = XrayNativeSledLeafV1.create(image_fixture().1, bytes, BASE, PAGE).unwrap()
-        var bound = XrayNativeBoundLeafV1(leaf: leaf, port: port)
+        var bound = XrayNativeBoundLeafV1(leaf: leaf, port: port, dispatch: fake_dispatch())
         var adapter = XrayLlvmAdapterV1.create_for_backend(1, TraceBackendV1.Simple)
         val prepared = adapter.prepare(bound, native_config(), selection([2])).unwrap()
         val session = adapter.start(bound, prepared, 4096).unwrap()
@@ -190,7 +204,7 @@ describe "XRay native AArch64 sled leaf V1":
         var port = port_from_image(bytes)
         port.fail_end_left = 100
         var leaf = XrayNativeSledLeafV1.create(image_fixture().1, bytes, BASE, PAGE).unwrap()
-        var bound = XrayNativeBoundLeafV1(leaf: leaf, port: port)
+        var bound = XrayNativeBoundLeafV1(leaf: leaf, port: port, dispatch: fake_dispatch())
         var adapter = XrayLlvmAdapterV1.create_for_backend(1, TraceBackendV1.Simple)
         val prepared = adapter.prepare(bound, native_config(), selection([1])).unwrap()
         expect(adapter.start(bound, prepared, 4096)).to_equal(Err(TraceFailureV1.BackendFailure))
@@ -201,6 +215,41 @@ describe "XRay native AArch64 sled leaf V1":
 
     it "keeps the LLVM backend default and rejects a backend mismatch":
         val (bytes, _) = image_fixture()
-        var bound = XrayNativeBoundLeafV1(leaf: leaf_fixture(), port: port_from_image(bytes))
+        var bound = XrayNativeBoundLeafV1(leaf: leaf_fixture(), port: port_from_image(bytes), dispatch: fake_dispatch())
         var llvm_adapter = XrayLlvmAdapterV1.create(1)
         expect(llvm_adapter.prepare(bound, native_config(), selection([1])).is_err()).to_equal(true)
+
+    it "publishes the channel to the native dispatcher before any sled is patched":
+        val (bytes, _) = image_fixture()
+        var leaf = XrayNativeSledLeafV1.create(image_fixture().1, bytes, BASE, PAGE).unwrap()
+        var bound = XrayNativeBoundLeafV1(leaf: leaf, port: port_from_image(bytes), dispatch: fake_dispatch())
+        var adapter = XrayLlvmAdapterV1.create_for_backend(1, TraceBackendV1.Simple)
+        val prepared = adapter.prepare(bound, native_config(), selection([1])).unwrap()
+        expect(adapter.start(bound, prepared, 4096).is_ok()).to_equal(true)
+        expect(bound.dispatch.log).to_equal(["publish:1:4096:1"])
+        expect(bound.port.log[0]).to_equal("begin:{BASE}:{PAGE}")
+
+    it "refuses to start when the dispatcher rejects the channel (nothing patched)":
+        val (bytes, _) = image_fixture()
+        var leaf = XrayNativeSledLeafV1.create(image_fixture().1, bytes, BASE, PAGE).unwrap()
+        var dispatch = fake_dispatch()
+        dispatch.status = 0
+        var bound = XrayNativeBoundLeafV1(leaf: leaf, port: port_from_image(bytes), dispatch: dispatch)
+        var adapter = XrayLlvmAdapterV1.create_for_backend(1, TraceBackendV1.Simple)
+        val prepared = adapter.prepare(bound, native_config(), selection([1])).unwrap()
+        expect(adapter.start(bound, prepared, 4096)).to_equal(Err(TraceFailureV1.BackendFailure))
+        expect(bound.port.log.len()).to_equal(0)
+        expect(bound.port.load_u32(BASE + 64)).to_equal(0x14000008)
+
+    it "agrees with the control plane and the emitter on the sled kind":
+        val (bytes, _) = image_fixture()
+        var bound = XrayNativeBoundLeafV1(leaf: leaf_fixture(), port: port_from_image(bytes), dispatch: fake_dispatch())
+        expect(bound.sled_kind()).to_equal(TraceBackendV1.Simple)
+        # Emitter template word 0 is the map's OFF word; the ON word is NOP.
+        val site = TraceNativeSiteV1(site_id: 1, function_id: 1, kind: TraceEventKindV1.Entry,
+            offset: 0, target_offset: 20, encoding: TraceNativeEncodingV1.Arm64Branch26)
+        val sled = trace_native_off_template_v1(site, 64).unwrap()
+        val word0 = (sled[0] as i64) | ((sled[1] as i64) << 8) | ((sled[2] as i64) << 16) | ((sled[3] as i64) << 24)
+        expect(word0).to_equal(XRAY_MAP_AARCH64_OFF_WORD_V1)
+        expect(XRAY_MAP_AARCH64_ON_WORD_V1).to_equal(0xD503201F)
+        expect(sled.len()).to_equal(XRAY_MAP_AARCH64_SLED_BYTES_V1)
