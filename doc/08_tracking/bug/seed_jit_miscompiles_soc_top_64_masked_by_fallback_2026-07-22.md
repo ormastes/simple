@@ -2,7 +2,7 @@
 
 - **ID:** seed_jit_miscompiles_soc_top_64_masked_by_fallback
 - **Date:** 2026-07-22
-- **Status:** OPEN (Rust seed JIT backend; deep, out of pure-Simple scope)
+- **Status:** OPEN, blocked: the repro probe no longer compiles on either engine (re-checked 2026-11-06, see "Re-check 2026-11-06")
 - **Severity:** high — it is the REAL blocker to the OpenSBI banner; supersedes the "lowering fallback" framing
 - **Component:** seed JIT codegen (`src/compiler_rust`), not symbol lowering
 
@@ -58,3 +58,24 @@ dispatch). Regression-gate with `SOC64 PROBE` under JIT.
 ## Cross-refs
 [[seed_jit_lsu64_load_lowering_forces_interpreter]] (the lowering symptom this
 supersedes) and [[rv64_opensbi_fw_platform_init_throughput_frontier]].
+
+## Re-check 2026-11-06
+
+Tried on a seed built from `origin/release/1.0.0` @ ecb705896a4 plus the
+`work/seed-jit-batch2-20261106` fixes (Windows x86_64). The divergence cannot
+be measured, because the probe fails identically on both engines before running a case:
+
+```
+SIMPLE_EXECUTION_MODE=interpret run test/01_unit/lib/hardware/soc_rtl/soc_top_64_probe.spl
+  -> error: semantic: class `RegFile64` has no field named `regs`   rc=1
+SIMPLE_EXECUTION_MODE=jit ...
+  -> [jit-fallback] HIR lowering error: Cannot infer field type: struct 'RegFile64'
+     field 'regs' (declared fields: reg_0, reg_1, ...) -> same interpreter error, rc=1
+```
+
+`src/lib/hardware/rv64gc_rtl/regfile.spl` now declares `reg_0..reg_31`. The
+probe chain still reads `.regs[...]`, for example `boot64_probe.spl:36` and
+`riscv_common/registers.spl:122`. Repairing those hardware sources is outside
+the seed-JIT lane. Once the probe runs on the interpreter again, re-measure JIT
+against the interpreter here. Until then this record cannot be closed or
+confirmed.
