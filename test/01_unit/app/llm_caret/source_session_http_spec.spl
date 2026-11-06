@@ -1,0 +1,256 @@
+# @req VIEW-01 VIEW-02 VIEW-03 VIEW-04 VIEW-05 VIEW-06 VIEW-07 SEC-01
+# Real HTTP operation adapter and real manager-owned native child fixture.
+# Requires SOURCE_SESSION_TEST_AGENT compiled from the admitted fixture source.
+# Missing fixture is a failure, never a skipped success. Listener/TLS separate.
+use std.spec.*
+use app.io.mod.{env_get, current_time_ms}
+use app.llm_caret.agent_plan.{AgentLaunchRequest}
+use app.llm_caret.multi_caret_manager.{MultiCaretManager, launch_multi_caret_manager, stop_multi_caret_manager}
+use app.llm_caret.messaging.adapter.server.auth.{AuthPrincipal}
+use app.llm_caret.messaging.adapter.server.source_session_auth.*
+use app.llm_caret.messaging.adapter.server.source_session_http.{source_session_http_v1}
+use app.llm_caret.messaging.adapter.server.source_session_supervisor.{source_supervisor_start_v1, source_supervisor_run_v1, source_supervisor_cleanup_complete_v1}
+use std.common.json.value.{json_parse_value_strict, json_value_field, json_value_text_or}
+use std.concurrent.thread.{thread_spawn_with_args, thread_sleep}
+
+var SOURCE_HTTP_TEST_MANAGER: MultiCaretManager? = nil
+
+fn source_http_owner_fixture(now: i64) -> AuthPrincipal:
+    AuthPrincipal(authenticated: true, identity_id: "owner", workspace_id: "workspace",
+        scopes: ["source:manage"], expires_at: now + 600000)
+
+fn source_http_manager_fixture(live: bool) -> MultiCaretManager:
+    if not live:
+        val stopped = stop_multi_caret_manager(SOURCE_HTTP_TEST_MANAGER.unwrap())
+        SOURCE_HTTP_TEST_MANAGER = stopped
+        return stopped
+    val command = env_get("SOURCE_SESSION_TEST_AGENT") ?? ""
+    expect(command.starts_with("/")).to_equal(true)
+    var requests: [AgentLaunchRequest] = []
+    for agent in ["parent", "child"]:
+        requests.push(AgentLaunchRequest(provider: "codex", agent_md_path: agent,
+            skill_path: "", task_desc: "bounded owned-process test fixture", model: "",
+            session_id: "", extra_args: []))
+    val manager = launch_multi_caret_manager("manager", requests, 2, "", command, "", "", "", true)
+    SOURCE_HTTP_TEST_MANAGER = manager
+    expect(manager.status).to_equal("running")
+    manager
+
+fn source_http_fixture(now: i64) -> AuthPrincipal:
+    val owner = source_http_owner_fixture(now)
+    expect(configure_source_session_authority_v1(owner).is_ok()).to_equal(true)
+    expect(source_session_publish_manager_v1(source_http_manager_fixture(true)).is_ok()).to_equal(true)
+    owner
+
+fn source_http_issue_fixture(owner: AuthPrincipal, agent: text, now: i64) -> text:
+    val body = "{\"manager_id\":\"manager\",\"agent_id\":\"" + agent + "\",\"ttl_ms\":60000}"
+    val result = source_session_http_v1("POST", "/v1/source/sessions", body, "", owner, now)
+    expect(result.status).to_equal(201)
+    val parsed = json_parse_value_strict(result.body).unwrap()
+    val token = json_value_text_or(json_value_field(parsed, "credential"), "")
+    expect(token.byte_len()).to_equal(64)
+    token
+
+fn source_http_open_fixture(token: text, now: i64) -> i64:
+    val response = source_session_http_v1("POST", "/v1/source/open",
+        "{\"mode\":\"raw\",\"path\":\"test/fixture/source_view/empty.txt\"}", token,
+        AuthPrincipal(authenticated: false, identity_id: "", workspace_id: "", scopes: [], expires_at: 0), now)
+    if response.status != 200: return -100
+    if response.body.contains("essential_help"): 1 else: 0
+
+describe "authenticated source HTTP owner":
+    after_each:
+        if SOURCE_HTTP_TEST_MANAGER != nil:
+            val stopped = stop_multi_caret_manager(SOURCE_HTTP_TEST_MANAGER.unwrap())
+            SOURCE_HTTP_TEST_MANAGER = nil
+            expect(stopped.status).to_equal("stopped")
+
+    it "denies issuance outside owner scope or outside the live manager registry":
+        step("Authenticate issuer separately from requested agent identifiers")
+        val now = current_time_ms()
+        val owner = source_http_fixture(now)
+        val stranger = AuthPrincipal(authenticated: true, identity_id: "stranger", workspace_id: "workspace", scopes: ["source:manage"], expires_at: now + 600000)
+        val wrong_owner = source_session_http_v1("POST", "/v1/source/sessions", "{\"manager_id\":\"manager\",\"agent_id\":\"parent\",\"ttl_ms\":60000}", "", stranger, now)
+        expect(wrong_owner.status).to_equal(403)
+        expect(wrong_owner.body).to_contain("source_issuer_denied")
+        val missing = source_session_http_v1("POST", "/v1/source/sessions", "{\"manager_id\":\"manager\",\"agent_id\":\"foreign\",\"ttl_ms\":60000}", "", owner, now)
+        expect(missing.body).to_contain("live_manager_agent_required")
+        expect(source_http_issue_fixture(owner, "parent", now).byte_len()).to_equal(64)
+
+    it "releases the owner lock on malformed and failed source requests":
+        step("Follow failures with a successful first open")
+        val now = current_time_ms()
+        val owner = source_http_fixture(now)
+        val token = source_http_issue_fixture(owner, "parent", now)
+        val malformed = source_session_http_v1("POST", "/v1/source/open", "{", token, owner, now)
+        expect(malformed.status).to_equal(400)
+        val missing = source_session_http_v1("POST", "/v1/source/open", "{\"mode\":\"raw\",\"path\":\"test/fixture/source_view/absent.txt\"}", token, owner, now)
+        expect(missing.status).to_equal(400)
+        expect(source_http_open_fixture(token, now)).to_equal(1)
+        expect(source_http_open_fixture(token, now)).to_equal(0)
+
+    it "serializes two simultaneous first opens to one help emission":
+        step("Call the real owner adapter from two OS threads")
+        val now = current_time_ms()
+        val owner = source_http_fixture(now)
+        val token = source_http_issue_fixture(owner, "parent", now)
+        var first = thread_spawn_with_args(token, now, \credential, time: source_http_open_fixture(credential, time))
+        var second = thread_spawn_with_args(token, now, \credential, time: source_http_open_fixture(credential, time))
+        expect(first.handle).to_be_greater_than(0)
+        expect(second.handle).to_be_greater_than(0)
+        val one = first.join().unwrap()
+        val two = second.join().unwrap()
+        expect(one + two).to_equal(1)
+
+    it "isolates preference replays and revokes credentials after owner publication":
+        step("Bind preferences to tokens rather than user-selected session IDs")
+        val now = current_time_ms()
+        val owner = source_http_fixture(now)
+        val parent = source_http_issue_fixture(owner, "parent", now)
+        val child = source_http_issue_fixture(owner, "child", now)
+        val update = "{\"request_sequence\":1,\"expected_version\":0,\"setting\":\"num\",\"desired\":\"true\"}"
+        val changed = source_session_http_v1("POST", "/v1/source/preferences", update, parent, owner, now)
+        expect(changed.status).to_equal(200)
+        val replay = source_session_http_v1("POST", "/v1/source/preferences", update, parent, owner, now)
+        expect(replay.body).to_equal(changed.body)
+        expect(source_http_open_fixture(child, now)).to_equal(1)
+        expect(source_session_publish_manager_v1(source_http_manager_fixture(false)).is_ok()).to_equal(true)
+        val revoked = source_session_http_v1("POST", "/v1/source/open", "{}", parent, owner, now)
+        expect(revoked.status).to_equal(401)
+        expect(revoked.body).to_contain("source_credential_invalid")
+
+    it "rejects expired and closed tokens and keeps failed auth from consuming help":
+        step("Refuse credential substitution and expire by server-owned time")
+        val now = current_time_ms()
+        val owner = source_http_fixture(now)
+        val token = source_http_issue_fixture(owner, "parent", now)
+        val denied = source_session_http_v1("POST", "/v1/source/open", "{}", "forged", owner, now)
+        expect(denied.status).to_equal(401)
+        expect(source_http_open_fixture(token, now)).to_equal(1)
+        # Pure owner seam admits deterministic future clock; public HTTP never
+        # trusts the pre-lock timestamp supplied by its caller.
+        expect(source_session_owner_lock_v1()).to_equal(true)
+        val expired = source_session_authority_get_v1().unwrap().verify(token, now + 60001)
+        expect(source_session_owner_unlock_v1()).to_equal(true)
+        expect(expired.is_err()).to_equal(true)
+        val closed = source_session_http_v1("POST", "/v1/source/close", "{}", token, owner, now)
+        expect(closed.status).to_equal(200)
+        val replay = source_session_http_v1("POST", "/v1/source/open", "{}", token, owner, now)
+        expect(replay.status).to_equal(401)
+        val replacement = source_http_issue_fixture(owner, "parent", now)
+        expect(replacement == token).to_equal(false)
+        expect(source_http_open_fixture(replacement, now)).to_equal(1)
+        val old = source_session_http_v1("POST", "/v1/source/open", "{}", token, owner, now)
+        expect(old.status).to_equal(401)
+
+    it "reclaims closed credentials across more than the bounded registry capacity":
+        step("Keep an active sibling while repeatedly closing and reissuing")
+        val now = current_time_ms()
+        val owner = source_http_fixture(now)
+        val sibling = source_http_issue_fixture(owner, "child", now)
+        var prior = ""
+        for index in 0..130:
+            val token = source_http_issue_fixture(owner, "parent", now)
+            expect(token == prior).to_equal(false)
+            val closed = source_session_http_v1("POST", "/v1/source/close", "{}", token, owner, now)
+            expect(closed.status).to_equal(200)
+            prior = token
+        expect(source_http_open_fixture(sibling, now)).to_equal(1)
+
+    it "checks authoritative expiry after waiting for the owner gate":
+        step("An expired queued close must not use its pre-lock timestamp")
+        val now = current_time_ms()
+        val owner = source_http_fixture(now)
+        val issued = source_session_http_v1("POST", "/v1/source/sessions",
+            "{\"manager_id\":\"manager\",\"agent_id\":\"parent\",\"ttl_ms\":100}", "", owner, now)
+        expect(issued.status).to_equal(201)
+        val token = json_value_text_or(json_value_field(json_parse_value_strict(issued.body).unwrap(), "credential"), "")
+        expect(source_session_owner_lock_v1()).to_equal(true)
+        var queued = thread_spawn_with_args(token, now, \credential, admitted_time:
+            source_session_http_v1("POST", "/v1/source/close", "{}", credential,
+                source_http_owner_fixture(admitted_time), admitted_time).status)
+        expect(queued.handle).to_be_greater_than(0)
+        thread_sleep(150)
+        expect(source_session_owner_unlock_v1()).to_equal(true)
+        expect(queued.join().unwrap()).to_equal(401)
+
+    it "reclaims retired logical registrations without reviving prior generations":
+        step("Publish 130 trusted owner snapshots while retaining an active sibling")
+        val now = current_time_ms()
+        val owner = source_http_fixture(now)
+        val sibling = source_http_issue_fixture(owner, "child", now)
+        var prior_token = ""
+        for index in 0..130:
+            var snapshot = SOURCE_HTTP_TEST_MANAGER.unwrap()
+            snapshot.team.processes[0].agent_id = "retired-" + index.to_text()
+            expect(source_session_publish_manager_v1(snapshot).is_ok()).to_equal(true)
+            val token = source_http_issue_fixture(owner, "retired-" + index.to_text(), now)
+            if prior_token != "":
+                expect(source_http_open_fixture(prior_token, now)).to_equal(-100)
+            prior_token = token
+        expect(source_http_open_fixture(sibling, now)).to_equal(1)
+
+    it "admits maximum byte identities through a bounded digest logical key":
+        step("Both manager and agent identifiers may contain 128 bytes")
+        val now = current_time_ms()
+        val owner = source_http_fixture(now)
+        var snapshot = SOURCE_HTTP_TEST_MANAGER.unwrap()
+        var identity = ""
+        for index in 0..128: identity = identity + "x"
+        snapshot.manager_id = identity
+        snapshot.team.processes[0].agent_id = identity
+        expect(source_session_publish_manager_v1(snapshot).is_ok()).to_equal(true)
+        val body = "{\"manager_id\":\"" + identity + "\",\"agent_id\":\"" + identity + "\",\"ttl_ms\":60000}"
+        val issued = source_session_http_v1("POST", "/v1/source/sessions", body, "", owner, now)
+        expect(issued.status).to_equal(201)
+        val logical = json_value_text_or(json_value_field(json_parse_value_strict(issued.body).unwrap(), "agent_session_id"), "")
+        expect(logical.byte_len()).to_be_less_than(256)
+
+    it "supervises and reaps an idle owned manager without any source requests":
+        step("A finite supervisor deadline revokes tokens before child cleanup")
+        val now = current_time_ms()
+        val owner = source_http_fixture(now)
+        val token = source_http_issue_fixture(owner, "parent", now)
+        expect(source_supervisor_start_v1(SOURCE_HTTP_TEST_MANAGER.unwrap())).to_equal(true)
+        var supervisor = thread_spawn_with_args(current_time_ms() + 100, 0,
+            \deadline, unused: source_supervisor_run_v1(deadline))
+        expect(supervisor.handle).to_be_greater_than(0)
+        val stopped = supervisor.join().unwrap()
+        expect(source_session_owner_lock_v1()).to_equal(true)
+        val authority = source_session_authority_get_v1().unwrap()
+        SOURCE_HTTP_TEST_MANAGER = authority.managed_owner
+        expect(source_session_owner_unlock_v1()).to_equal(true)
+        expect(stopped).to_equal(0)
+        expect(authority.managed_owner.unwrap().status).to_equal("stopped")
+        expect(source_http_open_fixture(token, now)).to_equal(-100)
+
+    it "never admits stop_failed or retained owners as complete supervisor cleanup":
+        step("Check the same cleanup predicate used by the supervisor exit")
+        val now = current_time_ms()
+        val owner = source_http_fixture(now)
+        var failed = SOURCE_HTTP_TEST_MANAGER.unwrap()
+        failed.status = "stop_failed"
+        expect(source_supervisor_cleanup_complete_v1(failed)).to_equal(false)
+        failed.status = "stopped"
+        expect(source_supervisor_cleanup_complete_v1(failed)).to_equal(false)
+        val stopped = stop_multi_caret_manager(SOURCE_HTTP_TEST_MANAGER.unwrap())
+        SOURCE_HTTP_TEST_MANAGER = stopped
+        expect(source_supervisor_cleanup_complete_v1(stopped)).to_equal(true)
+
+    it "revokes only the manager whose publication was rejected":
+        step("Reject ambiguous owner rows without clearing unrelated authority")
+        val now = current_time_ms()
+        val owner = source_http_fixture(now)
+        val prior = source_http_issue_fixture(owner, "parent", now)
+        var other = SOURCE_HTTP_TEST_MANAGER.unwrap()
+        other.manager_id = "other-manager"
+        expect(source_session_publish_manager_v1(other).is_ok()).to_equal(true)
+        val response = source_session_http_v1("POST", "/v1/source/sessions",
+            "{\"manager_id\":\"other-manager\",\"agent_id\":\"child\",\"ttl_ms\":60000}", "", owner, now)
+        expect(response.status).to_equal(201)
+        val retained = json_value_text_or(json_value_field(json_parse_value_strict(response.body).unwrap(), "credential"), "")
+        var ambiguous = SOURCE_HTTP_TEST_MANAGER.unwrap()
+        ambiguous.team.processes[1].agent_id = "parent"
+        expect(source_session_publish_manager_v1(ambiguous).is_err()).to_equal(true)
+        expect(source_http_open_fixture(prior, now)).to_equal(-100)
+        expect(source_http_open_fixture(retained, now)).to_equal(1)

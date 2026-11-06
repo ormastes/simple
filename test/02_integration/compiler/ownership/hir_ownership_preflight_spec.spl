@@ -1,0 +1,29 @@
+# @req AC-OWN-01
+# @req AC-OWN-05
+# @req AC-GATE-02
+# Set SIMPLE_OWNERSHIP_TEST_RUNTIME to the exact admitted full CLI under test.
+use std.spec.*
+use std.io_runtime.{env_get_opt}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
+
+fn ownership_test_runtime() -> text:
+    val runtime = env_get_opt("SIMPLE_OWNERSHIP_TEST_RUNTIME") ?? ""
+    if runtime == "":
+        fail("BLOCKED: SIMPLE_OWNERSHIP_TEST_RUNTIME must identify the admitted full pure-Simple CLI")
+    runtime
+
+describe "actual CLI interpreter ownership preflight":
+    it "rejects an invalid imported owner before emitting the entry side effect":
+        val runtime = ownership_test_runtime()
+        val (out, err, code) = process_run_timeout(runtime,
+            ["--interpret", "test/fixtures/compiler/hir_ownership_preflight/entry_bad.spl"], 30000)
+        expect(code == 0).to_equal(false)
+        expect(out.contains("OWNERSHIP-ENTRY-MUST-NOT-RUN")).to_equal(false)
+        expect((out + err).contains("Use of moved value")).to_equal(true)
+
+    it "accepts mutually exclusive ownership paths through the same CLI":
+        val runtime = ownership_test_runtime()
+        val (out, err, code) = process_run_timeout(runtime,
+            ["--interpret", "test/fixtures/compiler/hir_ownership_preflight/exclusive_good.spl"], 30000)
+        expect(code).to_equal(0)
+        expect((out + err).contains("NOGC-HIR-001")).to_equal(false)

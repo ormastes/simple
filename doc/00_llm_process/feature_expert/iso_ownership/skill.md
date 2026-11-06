@@ -107,3 +107,12 @@ successful typed HIR admission and survives HIR eviction; strict contexts reject
 diagnostic bypass. See `doc/07_guide/compiler/strict_nogc_ownership_gate.md`.
 The focused specs are authored but await an admitted full pure-Simple runtime;
 do not use the Rust seed or source inspection as production execution evidence.
+
+The next HIR interpreter slice uses `compiler.borrow.borrow_check.hir_ownership`
+with the unchanged OwnershipFlow solver. Preflight all retained modules before
+entry effects, preserve direct backend refusal, and test through the actual CLI
+with an invalid dependency/absent-side-effect oracle plus a valid exclusive-path
+control. Unsupported strict forms are errors; authored specs are NOT_EXECUTED
+until the admitted runtime supplies receipts. Core AST and SMF routes remain open.
+
+Formal companion: [ownership flow model evidence](../../../03_plan/release/1.0.0/ownership_flow_formal_refinement_2026-11-06.md) records the Lean model build and 28-root axiom audit, including Write. This is model-only evidence; the production refinement spec is NOT_RUN and the full FV obligations remain open.

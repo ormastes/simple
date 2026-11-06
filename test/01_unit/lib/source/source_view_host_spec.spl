@@ -1,0 +1,78 @@
+# @req VIEW-01 VIEW-02 VIEW-03 VIEW-04 VIEW-05 VIEW-06 VIEW-07
+# Pure owner transition tests. Actual authenticated ingress and concurrent
+# serialized execution require separate integration receipts.
+use std.spec.*
+use std.common.source.session_host_contracts.{SourceAgentBindingV1}
+use std.nogc_sync_mut.source.host.*
+
+fn source_test_binding(agent: text, principal: text = "owner") -> SourceAgentBindingV1:
+    SourceAgentBindingV1(workspace_id: "workspace", principal_id: principal,
+        agent_session_id: agent, session_generation: 1, host_epoch: "epoch", expires_at_ms: 1000)
+
+describe "source host preserves authenticated logical-session boundaries":
+    it "emits help once after successful open and preserves it on reconnect":
+        step("Register and commit failed then successful source views")
+        val binding = source_test_binding("agent-a")
+        val initial = source_view_host_new_v1("epoch", 4).unwrap()
+        val registered = source_view_host_register_v1(initial, binding, 10).unwrap()
+        val failed = source_view_host_commit_open_v1(registered, binding, 20, false).unwrap()
+        expect(failed.1).to_equal(false)
+        val first = source_view_host_commit_open_v1(failed.0, binding, 30, true).unwrap()
+        expect(first.1).to_equal(true)
+        val reconnected = source_view_host_register_v1(first.0, binding, 40).unwrap()
+        val second = source_view_host_commit_open_v1(reconnected, binding, 50, true).unwrap()
+        expect(second.1).to_equal(false)
+        expect(second.0.entries.len()).to_equal(1)
+
+    it "isolates preferences between parent and child and rejects replay mutation":
+        step("Apply desired preferences only to their bound agent")
+        val parent = source_test_binding("parent")
+        val child = source_test_binding("child")
+        var host = source_view_host_new_v1("epoch", 4).unwrap()
+        host = source_view_host_register_v1(host, parent, 10).unwrap()
+        host = source_view_host_register_v1(host, child, 10).unwrap()
+        host = source_view_host_preferences_v1(host, parent, 20, 1, 0, "num", "true").unwrap()
+        host = source_view_host_preferences_v1(host, parent, 20, 1, 0, "num", "true").unwrap()
+        expect(source_view_host_session_v1(host, parent, 30).unwrap().preferences_version).to_equal(1)
+        expect(source_view_host_session_v1(host, child, 30).unwrap().preferences.line_numbers).to_equal(false)
+        match source_view_host_preferences_v1(host, parent, 30, 1, 0, "num", "false"):
+            Ok(_): fail("changed replay payload admitted")
+            Err(reason): expect(reason).to_equal("request_payload_mismatch")
+
+    it "rejects another principal and a stale generation":
+        step("Validate complete identity instead of trusting the session name")
+        val binding = source_test_binding("agent-a")
+        val host = source_view_host_register_v1(source_view_host_new_v1("epoch", 4).unwrap(), binding, 10).unwrap()
+        val foreign = source_test_binding("agent-a", "other")
+        match source_view_host_session_v1(host, foreign, 20):
+            Ok(_): fail("another principal read agent state")
+            Err(reason): expect(reason).to_equal("session_principal_denied")
+        var stale = binding
+        stale.session_generation = 2
+        match source_view_host_session_v1(host, stale, 20):
+            Ok(_): fail("unregistered replacement generation read state")
+            Err(reason): expect(reason).to_equal("stale_session_generation")
+
+    it "expires closed and timed-out sessions and rejects host restart":
+        step("Refuse implicit resurrection after close or process restart")
+        val binding = source_test_binding("agent-a")
+        val host = source_view_host_register_v1(source_view_host_new_v1("epoch", 4).unwrap(), binding, 10).unwrap()
+        val closed = source_view_host_close_v1(host, binding, 20).unwrap()
+        match source_view_host_register_v1(closed, binding, 30):
+            Ok(_): fail("closed session silently resumed")
+            Err(reason): expect(reason).to_equal("session_expired")
+        match source_view_host_session_v1(host, binding, 1000):
+            Ok(_): fail("expired credential admitted")
+            Err(reason): expect(reason).to_equal("session_expired")
+        val restarted = source_view_host_new_v1("new-epoch", 4).unwrap()
+        match source_view_host_register_v1(restarted, binding, 30):
+            Ok(_): fail("old host credential admitted after restart")
+            Err(reason): expect(reason).to_equal("session_host_restarted")
+
+    it "fails closed at the configured session bound":
+        step("Reject new entries without evicting another live agent")
+        val initial = source_view_host_new_v1("epoch", 1).unwrap()
+        val full = source_view_host_register_v1(initial, source_test_binding("a"), 10).unwrap()
+        match source_view_host_register_v1(full, source_test_binding("b"), 10):
+            Ok(_): fail("host capacity exceeded")
+            Err(reason): expect(reason).to_equal("source_session_capacity_exceeded")

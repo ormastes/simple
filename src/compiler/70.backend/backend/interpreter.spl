@@ -14,6 +14,7 @@ use compiler.backend.env.{EvalContext, Environment}
 use compiler.backend.interpreter_calls.*
 use compiler.backend.interpreter_expr.*
 use compiler.backend.interpreter_binop.*
+use compiler.borrow.borrow_check.hir_ownership.{check_hir_ownership_module_v1, check_hir_ownership_with_live_providers_v1}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io_runtime.{env_get_opt}
 
@@ -123,9 +124,28 @@ impl InterpreterBackendImpl:
     # dispatches to the real body. See doc/08_tracking/bug/
     # stage4_codegen_compact_form_hazards_2026-07-02.md (Iteration 14).
     fn interpret_hir_module(module: HirModule) -> Result<BackendResult, BackendError>:
-        self.process_module(module)
+        self.process_direct_owned_module(module)
+
+    # Only the live driver closure preflight may supply this verified index.
+    pub(package) fn interpret_hir_module_with_live_providers(module: HirModule, providers: Dict<text, HirModule>) -> Result<BackendResult, BackendError>:
+        self.process_module_with_ownership_context(module, providers)
 
     fn process_module(module: HirModule) -> Result<BackendResult, BackendError>:
+        self.process_direct_owned_module(module)
+
+    fn process_direct_owned_module(module: HirModule) -> Result<BackendResult, BackendError>:
+        val ownership_errors = check_hir_ownership_module_v1(module)
+        if ownership_errors.len() != 0:
+            return Err(BackendError.compile_error(ownership_errors.join("\n"), nil))
+        self.process_verified_module(module)
+
+    fn process_module_with_ownership_context(module: HirModule, providers: Dict<text, HirModule>) -> Result<BackendResult, BackendError>:
+        val ownership_errors = check_hir_ownership_with_live_providers_v1(module, 1000000, providers)
+        if ownership_errors.len() > 0:
+            return Err(BackendError.compile_error(ownership_errors.join("\n"), nil))
+        self.process_verified_module(module)
+
+    fn process_verified_module(module: HirModule) -> Result<BackendResult, BackendError>:
         # Create evaluation context
         val env = Environment.new()
         # Build the id -> name map (bug doc iteration 21, target (a)). The

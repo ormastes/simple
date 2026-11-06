@@ -34,6 +34,9 @@ pub use compiler.driver.driver_riscv_gen2_product.{
 }
 
 use compiler.backend.interpreter.{InterpreterBackendImpl}
+use compiler.hir.hir_types.{HirModule}
+use compiler.borrow.borrow_check.hir_ownership.{check_hir_ownership_with_live_providers_v1}
+use compiler.semantics.param_effects.ownership_source_authority.{ownership_provider_index_v1}
 use compiler.backend.sdn.{SdnBackendImpl}
 use lazy compiler.backend.backend_types.{BackendResult}
 use compiler.driver.driver_types.{CompileContext}
@@ -110,6 +113,23 @@ impl CompilerDriver:
         if self.ctx.sources.len() == 0:
             return CompileResult.RuntimeError("No source file specified for interpret mode")
 
+        if self.ctx.has_errors():
+            return CompileResult.TypeError(self.ctx.errors)
+        # Validate the entire retained closure before any module can execute.
+        # The backend repeats bounded checks for direct callers until immutable
+        # checked-HIR authority can replace this defensive second validation.
+        var ownership_errors: [text] = []
+        var ownership_modules: [HirModule] = []
+        for module_name in self.ctx.hir_modules.keys():
+            ownership_modules.push(self.ctx.hir_modules[module_name])
+        val providers = ownership_provider_index_v1(ownership_modules, self.ctx.nogc_source_authorities, 10000000)
+        if providers.errors.len() != 0: return CompileResult.BorrowError(providers.errors)
+        for module_name in self.ctx.hir_modules.keys():
+            for error in check_hir_ownership_with_live_providers_v1(self.ctx.hir_modules[module_name], 1000000, providers.modules):
+                if ownership_errors.len() < 64: ownership_errors.push(error)
+        if ownership_errors.len() > 0:
+            return CompileResult.BorrowError(ownership_errors)
+
         log_debug("interpret: running {self.ctx.sources.len()} modules through compiler frontend output")
 
         # ponytail: bypass the BackendPort.run_fn closure for the interpreter
@@ -132,7 +152,7 @@ impl CompilerDriver:
                 src_idx = src_idx + 1
                 continue
 
-            match interp.interpret_hir_module(hir_module):
+            match interp.interpret_hir_module_with_live_providers(hir_module, providers.modules):
                 case Ok(_): pass
                 case Err(e):
                     return CompileResult.RuntimeError("Interpret error in {name}: {e.message}")

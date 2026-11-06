@@ -24,3 +24,37 @@ qualify public test/check/docgen or the deployed CLI.
 This rule closes the explicit checker-option bypass. It does not establish
 common HIR move/drop checking on every interpreter route, deterministic cleanup
 on every runtime, or completion of the no-GC recovery plan.
+
+## Typed HIR interpreter preflight (source implementation, not yet qualified)
+
+The pure CLI fallback is cli_run_file → interpret_file → CompilerDriver Interpret
+→ InterpreterBackendImpl. It now validates every retained module before the first
+execution, and direct backend calls validate before constructing Environment. The
+layer55 HIR adapter emits CFG Read/Move/Revive into the same OwnershipFlow solver
+used by MIR NLL. Contract, recursion and work failures reject strict execution.
+
+Supported flow includes assignment, return, aggregate construction, if/elif,
+while/loop, labeled exits and exact local parameter-effect call contracts. Forms
+without a complete adapter (including match/pattern binding, exception cleanup,
+async suspension, indirect calls and short local alias transfer) are explicitly
+refused in strict mode; this is incomplete language support, not acceptance.
+Legacy compatibility remains unchanged. No target MIR or second source parse is
+created. Driver/backend checks currently repeat bounded validation to protect
+direct callers until immutable checked-HIR authority can remove the repetition.
+
+For actual route evidence set SIMPLE_OWNERSHIP_TEST_RUNTIME to the exact admitted
+full CLI and run test/02_integration/compiler/ownership/hir_ownership_preflight_spec.spl.
+The negative fixture must fail with moved-use evidence and no entry marker; the
+exclusive-path positive must execute successfully. Both remain NOT_EXECUTED.
+
+The standalone core AST interpreter/inprocess probe, explicit bootstrap driver
+override, fork-mode Rust adapter and cached/direct SMF loaders are separate
+authorities. This change does not qualify those routes, cleanup or the full
+44-row recovery plan.
+
+The live imported-call path retains compact frozen source/body/effect receipts and
+verifies providers once before execution. Package-internal context must originate
+in canonical admission, never deserialized user metadata. The direct public
+backend refuses imported ownership without that context. Independent review is
+pending; the bounded encoder's recursive traversal behavior is under review, so
+no complete resource-bound claim is made for this draft.
