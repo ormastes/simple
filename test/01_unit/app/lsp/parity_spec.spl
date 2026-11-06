@@ -1,0 +1,91 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/app/lsp/symbol_identity_resolved_index.md
+#
+# Cross-interface parity (todo L7, design §5): for one fixture and one
+# snapshot the call-edge engine text, the in-process MCP adapter text and the
+# LSP handler JSON must agree on (name, file, def_line, site_line, site_col,
+# resolution). The one-shot child and stdio MCP are the same engine behind a
+# process boundary; the stdio path stays binary-gated
+# (`SIMPLE_LSP_MCP_TEST_BINARY`, test/02_integration/app/simple_lsp_mcp_stdio_spec.spl).
+
+use std.spec
+use std.spec.step
+use std.nogc_sync_mut.io.file_ops.{file_write, secure_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.common.json.parser.{json_parse}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.types.{json_to_number, json_to_string}
+use std.common.json.array_ops.{json_array_get, json_array_length}
+use std.nogc_sync_mut.lsp.lsp_call_edges.{lsp_call_edges_parse_output_v1}
+use std.nogc_sync_mut.lsp.lsp_call_hierarchy.{LSP_CALL_HIERARCHY_PARTIAL_NAME_V1}
+use std.nogc_sync_mut.lsp.lsp_file_uri.{lsp_file_uri_to_path}
+use std.nogc_sync_mut.lsp.lsp_handlers.{lsp_handle_outgoing_calls}
+use app.cli.query_call_edges.{engine_outgoing_calls_lines}
+use app.simple_lsp_mcp.lsp_query_inproc.{lsp_query_inproc_dispatch_v1}
+
+fn fixture_source_v1() -> text:
+    """fn lsp_parity_target_v1(value: i64) -> i64:
+    value
+
+fn lsp_parity_caller_v1() -> i64:
+    val x = lsp_parity_target_v1(7)
+    lsp_parity_other_v1(x)
+
+fn lsp_parity_other_v1(v: i64) -> i64:
+    v
+"""
+
+fn fixture_uri_v1(path: text) -> text:
+    val p = path.replace("\\", "/")
+    if p.starts_with("/"): return "file://" + p
+    "file:///" + p
+
+fn outgoing_body_v1(path: text, line: i64, column: i64) -> text:
+    val close = "}"
+    val pos = "{\"line\":" + str(line) + ",\"character\":" + str(column) + close
+    val range = "{\"start\":" + pos + ",\"end\":" + pos + close
+    val item = "{\"name\":\"x\",\"kind\":12,\"uri\":\"" + fixture_uri_v1(path) + "\",\"range\":" + range + ",\"selectionRange\":" + range + close
+    "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"callHierarchy/outgoingCalls\",\"params\":{\"item\":" + item + close + close
+
+fn norm_v1(p: text) -> text:
+    p.replace("\\", "/")
+
+describe "LSP / MCP / engine parity on one snapshot":
+    it "yields identical outgoing call edges across the three in-process surfaces":
+        # @req REQ-SSPEC-UNIT
+        val root = secure_temp_dir("/tmp", "simple-lsp-parity-v1-").unwrap()
+        val path = root + "/fixture.spl"
+        expect(file_write(path, fixture_source_v1())).to_equal(true)
+
+        step("engine text")
+        val (engine_lines, code) = engine_outgoing_calls_lines(path, "lsp_parity_caller_v1")
+        expect(code).to_equal(0)
+        val engine_edges = lsp_call_edges_parse_output_v1(engine_lines.join("\n"))
+        expect(engine_edges.len()).to_equal(2)
+
+        step("in-process MCP adapter text is byte-identical to the engine text")
+        val inproc = lsp_query_inproc_dispatch_v1("outgoing-calls", path, 4, 4)
+        expect(inproc.handled).to_equal(true)
+        expect(inproc.text).to_equal(engine_lines.join("\n"))
+
+        step("LSP handler JSON decodes to the same tuples")
+        val reply = json_parse(lsp_handle_outgoing_calls("9", outgoing_body_v1(path, 3, 3)))
+        dir_remove_all(root)
+        expect(json_object_get(reply, "error")).to_be_nil()
+        val result = json_object_get(reply, "result")
+        expect(json_array_length(result)).to_equal(engine_edges.len())
+        var i = 0
+        while i < engine_edges.len():
+            val e = engine_edges[i]
+            val entry = json_array_get(result, i)
+            val to = json_object_get(entry, "to")
+            expect(json_to_string(json_object_get(to, "name"))).to_equal(e.name)
+            expect(json_to_string(json_object_get(to, "name")) != LSP_CALL_HIERARCHY_PARTIAL_NAME_V1).to_equal(true)
+            expect(norm_v1(lsp_file_uri_to_path(json_to_string(json_object_get(to, "uri"))))).to_equal(norm_v1(e.file))
+            expect(json_to_string(json_object_get(to, "detail"))).to_equal("resolution: " + e.resolution)
+            expect(json_to_number(json_object_get(json_object_get(json_object_get(to, "range"), "start"), "line"))).to_equal((e.def_line - 1).to_f64())
+            val site = json_object_get(json_array_get(json_object_get(entry, "fromRanges"), 0), "start")
+            expect(json_to_number(json_object_get(site, "line"))).to_equal((e.site_line - 1).to_f64())
+            expect(json_to_number(json_object_get(site, "character"))).to_equal((e.site_col - 1).to_f64())
+            i = i + 1

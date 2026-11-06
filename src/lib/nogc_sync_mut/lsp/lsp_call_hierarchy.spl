@@ -7,7 +7,7 @@
 # textual match instead of presenting it as a proven call.
 
 use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_text_or, json_value_as_i64}
-use std.nogc_sync_mut.lsp.lsp_json.{LB, RB, SB_L, SB_R, js, jp, jo2}
+use std.nogc_sync_mut.lsp.lsp_json.{LB, RB, SB_L, SB_R, js, jp, jo1, jo2}
 use std.nogc_sync_mut.lsp.lsp_call_edges.{LspCallEdgeV1}
 
 struct LspCallHierarchyRequestItemV1:
@@ -36,8 +36,7 @@ fn _range_json(line0: i64, col0: i64) -> text:
     jo2(jp("start", jo2(jp("line", str(line0)), jp("character", str(col0)))),
         jp("end", jo2(jp("line", str(line0)), jp("character", str(col0)))))
 
-# CallHierarchyItem with kind 12 (Function); `detail` carries the resolution.
-pub fn lsp_call_hierarchy_item_json_v1(name: text, uri: text, line0: i64, col0: i64, detail: text) -> text:
+fn _item_json(name: text, uri: text, line0: i64, col0: i64, detail: text, data: text) -> text:
     val range = _range_json(line0, col0)
     var parts: [text] = []
     parts.push(jp("name", js(name)))
@@ -46,19 +45,52 @@ pub fn lsp_call_hierarchy_item_json_v1(name: text, uri: text, line0: i64, col0: 
     parts.push(jp("uri", js(uri)))
     parts.push(jp("range", range))
     parts.push(jp("selectionRange", range))
+    if data != "": parts.push(jp("data", data))
     LB() + parts.join(",") + RB()
+
+# CallHierarchyItem with kind 12 (Function); `detail` carries the resolution.
+pub fn lsp_call_hierarchy_item_json_v1(name: text, uri: text, line0: i64, col0: i64, detail: text) -> text:
+    _item_json(name, uri, line0, col0, detail, "")
+
+# Same, with a prebuilt JSON object for `data` (symbol key + locator, L11).
+pub fn lsp_call_hierarchy_item_with_data_json_v1(name: text, uri: text, line0: i64, col0: i64, detail: text, data: text) -> text:
+    _item_json(name, uri, line0, col0, detail, data)
+
+# Name of the sentinel entry appended when the engine's walk was truncated.
+# The protocol has no partial-result field on CallHierarchy* results, so the
+# truncation travels as one extra entry an editor shows in the tree: `detail`
+# holds the engine's note verbatim, `data.partial` is true for tooling, and
+# `fromRanges` is empty so nothing can jump to it as a call site.
+val LSP_CALL_HIERARCHY_PARTIAL_NAME_V1: text = "[partial result]"
+
+pub fn lsp_call_hierarchy_partial_marker_json_v1(uri: text, key: text, note: text) -> text:
+    val data = jo2(jp("partial", "true"), jp("note", js(note)))
+    val item = _item_json(LSP_CALL_HIERARCHY_PARTIAL_NAME_V1, uri, 0, 0, note, data)
+    jo2(jp(key, item), jp("fromRanges", SB_L() + SB_R()))
 
 # `key` is "from" (incoming) or "to" (outgoing); `uris[i]` is the file URI for
 # `edges[i].file`. Edges whose declaration is unknown (def_line 0) still name
 # the site file so the caller can jump to the call site.
 pub fn lsp_call_hierarchy_calls_json_v1(edges: [LspCallEdgeV1], uris: [text], key: text) -> text:
+    lsp_call_hierarchy_calls_with_note_json_v1(edges, uris, key, "", nil)
+
+# As above, plus the partial marker (last entry) when `note` is present. Every
+# edge item then also carries `data.partial = true`, so a client that filters
+# the sentinel out still sees that the set may be incomplete. `request_uri` is
+# the item the request was about; the marker is anchored there.
+pub fn lsp_call_hierarchy_calls_with_note_json_v1(edges: [LspCallEdgeV1], uris: [text], key: text,
+        request_uri: text, note: text?) -> text:
+    val partial = note != nil
     var items: [text] = []
     var i = 0
     while i < edges.len() and i < uris.len():
         val e = edges[i]
         var def_line0 = e.def_line - 1
         if def_line0 < 0: def_line0 = 0
-        val item = lsp_call_hierarchy_item_json_v1(e.name, uris[i], def_line0, 0, "resolution: " + e.resolution)
+        var data = jo1(jp("resolution", js(e.resolution)))
+        if partial:
+            data = jo2(jp("resolution", js(e.resolution)), jp("partial", "true"))
+        val item = _item_json(e.name, uris[i], def_line0, 0, "resolution: " + e.resolution, data)
         var site_line0 = e.site_line - 1
         if site_line0 < 0: site_line0 = 0
         var site_col0 = e.site_col - 1
@@ -66,7 +98,12 @@ pub fn lsp_call_hierarchy_calls_json_v1(edges: [LspCallEdgeV1], uris: [text], ke
         val from_ranges = SB_L() + _range_json(site_line0, site_col0) + SB_R()
         items.push(jo2(jp(key, item), jp("fromRanges", from_ranges)))
         i = i + 1
+    match note:
+        case Some(n): items.push(lsp_call_hierarchy_partial_marker_json_v1(request_uri, key, n))
+        case nil: pass
     SB_L() + items.join(",") + SB_R()
 
 export LspCallHierarchyRequestItemV1, lsp_call_hierarchy_request_item_v1
-export lsp_call_hierarchy_item_json_v1, lsp_call_hierarchy_calls_json_v1
+export lsp_call_hierarchy_item_json_v1, lsp_call_hierarchy_item_with_data_json_v1, lsp_call_hierarchy_calls_json_v1
+export LSP_CALL_HIERARCHY_PARTIAL_NAME_V1, lsp_call_hierarchy_partial_marker_json_v1
+export lsp_call_hierarchy_calls_with_note_json_v1
