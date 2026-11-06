@@ -3238,6 +3238,15 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_cache_host_publish_retained_noreplace_v2" => Some(&[1]),
         "rt_cache_host_quarantine_v1" => Some(&[2]),
 
+        // Host dynamic-library loader (runtime/src/value/wsffi_native.rs): the
+        // path and symbol name cross as (ptr, len). Absent here, the JIT passed
+        // the boxed text handle as path_ptr and `mode` as path_len, so every JIT
+        // `dynlib_open` returned 0 (`loader-failed`) while the interpreter
+        // loaded the same DLL. Twin: 50.mir/text_extern_abi.spl. See
+        // doc/08_tracking/bug/seed_jit_host_dynlib_open_text_arg_not_split_2026-11-06.md
+        "rt_host_dynlib_open" => Some(&[0]),
+        "rt_host_dynlib_symbol" => Some(&[1]),
+
         "rt_linux_group_available_capacity_v1" => Some(&[0]),
         "rt_linux_group_parent_acquire_v1" => Some(&[0, 1]),
         "rt_linux_group_parent_acquire_at_v2" => Some(&[0, 1, 2]),
