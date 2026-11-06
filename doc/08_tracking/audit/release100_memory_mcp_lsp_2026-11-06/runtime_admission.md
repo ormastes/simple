@@ -49,7 +49,9 @@ Use an admitted full runtime with isolated caches/logs. Run each unchanged accep
 
 Other open release PRs at observation: #7227 observability docs, #7223 UTF8/trace diagnostics, #7220 data-policy. Preserve those lanes.
 
-## Terminal campaign update
+## Terminal full-CLI child update
 
 A later live-process check found PID 25734 absent (terminal). Its retained log ends with phase 3 FAILED after 4577 sources: `src/app/traceability/query_main.spl:74:5: unresolved name: exit`; one poisoned module, no successful full CLI. This is no longer a verified wait.
 The release baseline already imports `std.io_runtime.{exit}` at line 13 and has newer trace-query changes; the campaign source in `/private/tmp/boot4-wt` lacks that import. Do not reapply an already-landed fix or restart the other owner's campaign from stale inputs. A new qualified campaign must consume the repaired source under its owner's immutable-lineage workflow. Full runtime-dependent verification remains blocked; independent source work continues.
+
+The outer verifier subsequently continued with standalone test-runner child PID 35155 (observed live). Only the full-CLI child is terminal; the campaign as a whole was not declared terminal. Standalone runner construction is not full CLI admission.
