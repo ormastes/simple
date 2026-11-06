@@ -220,6 +220,53 @@ fn coerce_binop_operands(
     }
 }
 
+/// `+ - *` whose static result type is u8/u16/u32 wraps modulo 2^width at the
+/// operation, not only at a typed store (matches the interpreter). The HIR types
+/// a binary op as its left operand, so the dest vreg type is the result width.
+/// The right operand must be the same narrow type, or an in-range integer
+/// literal; a wider non-literal operand (`b * s`, `s: i64`) or an out-of-range
+/// literal widens instead, as in the interpreter
+/// (`u8_times_wider_int_widens_spec`).
+pub(crate) fn wrap_narrow_unsigned_arith<M: Module>(
+    ctx: &InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    op: BinOp,
+    dest: VReg,
+    right: VReg,
+    rhs: cranelift_codegen::ir::Value,
+    val: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
+    if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) || builder.func.dfg.value_type(val) != types::I64 {
+        return val;
+    }
+    let dest_ty = ctx.vreg_types.get(&dest).copied();
+    let mask: i64 = match dest_ty {
+        Some(TypeId::U8) => 0xFF,
+        Some(TypeId::U16) => 0xFFFF,
+        Some(TypeId::U32) => 0xFFFF_FFFF,
+        _ => return val,
+    };
+    let same_width = ctx.vreg_types.get(&right).copied() == dest_ty;
+    let in_range_literal = || {
+        let dfg = &builder.func.dfg;
+        match dfg.value_def(rhs).inst().map(|i| dfg.insts[i]) {
+            Some(cranelift_codegen::ir::InstructionData::UnaryImm {
+                opcode: cranelift_codegen::ir::Opcode::Iconst,
+                imm,
+            }) => {
+                let n: i64 = imm.into();
+                (0..=mask).contains(&n)
+            }
+            _ => false,
+        }
+    };
+    if same_width || in_range_literal() {
+        builder.ins().band_imm(val, mask)
+    } else {
+        val
+    }
+}
+
 pub(crate) fn compile_binop<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,

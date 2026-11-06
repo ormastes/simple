@@ -40,3 +40,15 @@ whose HIR type is U8/U16/U32, and decide `uN op i64` promotion in HIR typing, wh
 needs a deliberate language-rule decision (left-type vs wider-type). That needs a
 seed rebuild and a JIT-vs-interpreter differential and was not done this round.
 Interpreter left unchanged: changing it would break the pinned specs above.
+
+## Update 2026-11-06: JIT fixed (codegen/instr/core.rs wrap_narrow_unsigned_arith)
+
+Cranelift BinOp `+ - *` now masks to the dest vreg's static width (u8/u16/u32) when the
+right operand is the same narrow type or an in-range integer literal. A wider non-literal
+operand (`b * s`, s: i64) or out-of-range literal (`a * 300`) is not masked, matching the
+interpreter (HIR types the op as the LEFT operand; no doc states a promotion rule, so it
+was not changed). Probe (`run`, SIMPLE_EXECUTION_MODE=interpreter vs jit) is now identical:
+u8 `4 116 224`, lit `44 144`, u16 `4464 15536 17920`, u32 `205032704 794967296 1321730048`,
+mixed `180 60000`. Note `simple test` runs specs in the interpreter regardless of the env
+var, so JIT proof is via `run` of a probe file. Cost: one `and` with immediate per narrow op.
+LLVM backend not changed.
