@@ -276,3 +276,12 @@ allocation requires an open generation via `checkpoint()`; UNSEALED pin added).
 Still open: `domain_arena_v1_spec` 3 failures (`write_byte` byte banks and
 `DOMAIN_ARENA_V1_MAX_QUOTA_BYTES` unimplemented in `domain_arena_v1.spl`). Seed results are
 development diagnostics, not pure-Simple release evidence.
+
+## Status 2026-11-06 (bug_db hardening outcomes)
+
+- `core_intensive_spec_tests_local_stubs_not_database_core_2026-08-04`: closed (PR #7079, a39c685717b).
+- `process_transfer_session_replay_identity_2026-08-12`: closed, premise outdated (session id is hmac_sha256 in `parent_commit_authenticated_session.spl`; covered by `parent_commit_authenticated_session_spec.spl`).
+- `test_only_functions_family_census_2026-08-04`: stays open; PR #7117 (merged) removed `eval_get_warnings`, but the census floor and unfiled class-(ii) items remain.
+- `provider_loader_path_digest_toctou_2026-08-16`, `tls_signature_positive_verification_blockers_2026-06-06`: fix in PR #7160 (open); status kept.
+- `direct_arch_imports_outside_arch_2026-08-11`: 2 named sites fixed via arch_adapt; remaining sites listed in the bug note.
+- `guard_wiring_optout_false_exemptions_2026-08-06`: PR #6345 wired the RTL audit only; still open.

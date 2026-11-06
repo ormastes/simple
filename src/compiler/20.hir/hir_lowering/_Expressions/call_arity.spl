@@ -81,13 +81,39 @@ impl HirLowering:
                 named.push(arg.name)
             else:
                 positional = positional + 1
+        # Positional args fill the params NOT bound by name, in order. MIR
+        # call lowering passes free-call arguments in SOURCE order (it does
+        # not reorder by name), so a positional whose bound param differs
+        # from its source slot would silently misbind: reject it.
+        var misbind = ""
+        var next_param = 0
+        var source_index = 0
+        for raw_arg in args:
+            val arg: HirCallArg = raw_arg
+            if not arg.has_name:
+                while next_param < total and named.contains(param_specs[next_param].replace("?", "")):
+                    next_param = next_param + 1
+                if next_param < total and next_param != source_index:
+                    val bound_spec: text = param_specs[next_param]
+                    misbind = "function '{fn_name}': positional argument {source_index + 1} would bind parameter {bound_spec.replace("?", "")} but is passed in slot {source_index + 1}; name it or reorder the call"
+                    break
+                next_param = next_param + 1
+            source_index = source_index + 1
         var missing: [text] = []
+        var positional_left = positional
         var param_index = 0
         while param_index < total:
             val spec: text = param_specs[param_index]
-            if not spec.starts_with("?"):
-                if param_index >= positional and not named.contains(spec):
+            val optional = spec.starts_with("?")
+            val param_name: text = if optional: spec.substring(1, spec.len()) else: spec
+            if not named.contains(param_name):
+                if positional_left > 0:
+                    positional_left = positional_left - 1
+                elif not optional:
                     missing.push(spec)
             param_index = param_index + 1
         if missing.len() > 0:
             self.error("function '{fn_name}' requires argument(s) {missing.join(", ")}, but {args.len()} were provided", span)
+            return
+        if misbind != "":
+            self.error(misbind, span)

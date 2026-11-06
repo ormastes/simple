@@ -292,7 +292,14 @@ impl Lowerer {
         operand: &Expr,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
-        let operand_hir = Box::new(self.lower_expr(operand, ctx)?);
+        // `not x.?` negates PRESENCE, as the interpreter does; negating the
+        // value-position payload made `not Some(0).?` true on the JIT
+        // (seed_jit_dotq_coalesce_parity_2026-11-06).
+        let operand_hir = if matches!(op, ast::UnaryOp::Not) && matches!(operand, Expr::ExistsCheck(_)) {
+            Box::new(self.lower_condition(operand, ctx)?)
+        } else {
+            Box::new(self.lower_expr(operand, ctx)?)
+        };
         let ty = match op {
             ast::UnaryOp::Not => TypeId::BOOL,
             ast::UnaryOp::Ref | ast::UnaryOp::RefMut => {

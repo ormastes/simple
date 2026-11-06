@@ -13328,12 +13328,17 @@ SPL_CORE_C_WEAK int64_t rt_time_now_seconds(void) {
 
 /* Weak mirror of runtime_timestamp.c's rt_time_now_seconds_f64 (not in the
  * seed core-C list). Same microsecond-wallclock body as the Windows arm there;
- * without it the seed->stage2 bootstrap_main link leaves it undefined. */
+ * without it the seed->stage2 bootstrap_main link leaves it undefined.
+ * A composition that links runtime_timestamp.c names it the owner with
+ * SIMPLE_RUNTIME_TIMESTAMP_OWNER; MSVC has no weak definition, so the mirror
+ * is compiled out there to keep exactly one definition. */
+#if !defined(SIMPLE_RUNTIME_TIMESTAMP_OWNER)
 int64_t rt_time_now_unix_micros(void);
 SPL_CORE_C_WEAK double rt_time_now_seconds_f64(void) {
     int64_t micros = rt_time_now_unix_micros();
     return micros < 0 ? -1.0 : (double)micros / 1000000.0;
 }
+#endif /* !SIMPLE_RUNTIME_TIMESTAMP_OWNER */
 
 #if defined(_WIN32)
 #include "platform/runtime_win_long_path.h"

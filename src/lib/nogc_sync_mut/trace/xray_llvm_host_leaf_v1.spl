@@ -1,0 +1,43 @@
+# Linux host binding of XrayLlvmLeafV1 over the C boundary
+# src/runtime/xray/xray_llvm_adapter_linux.c, which calls compiler-rt's XRay
+# runtime (libclang_rt.xray). Linked ONLY into binaries built with `--xray`
+# for a Linux x86_64/aarch64 target; importing this module elsewhere leaves the
+# externs unresolved, which is the intended fail-closed outcome.
+#
+# Names are `simple_xray_llvm_*`, not `rt_*`: this is a private stage-1 adapter
+# leaf, not a runtime primitive, and is not part of the core runtime archive.
+use std.nogc_sync_mut.trace.xray_llvm_adapter_v1.{XrayLlvmLeafV1}
+use std.nogc_sync_mut.trace.observer_native_channel_v1.{trace_native_channel_close_v1}
+
+@unsafe(reason: "reads compiler-rt's resident instrumentation map bound", capabilities: [ffi])
+extern fn simple_xray_llvm_max_function_id() -> i64
+@unsafe(reason: "publishes a loaned resident observer channel arena to the handler shim; arena must stay resident until exit", capabilities: [ffi])
+extern fn simple_xray_llvm_install(arena: i64, generation: i64, context: i64, module_instance: i64) -> i64
+@unsafe(reason: "rewrites executable sled bytes; caller guarantees quiescence of the selected function", capabilities: [ffi])
+extern fn simple_xray_llvm_patch_function(id: i64) -> i64
+@unsafe(reason: "rewrites executable sled bytes; caller guarantees quiescence of the selected function", capabilities: [ffi])
+extern fn simple_xray_llvm_unpatch_function(id: i64) -> i64
+
+# Stateless: all state is compiler-rt's resident map and the C shim's
+# published arena.
+pub class XrayLlvmHostLeafV1:
+    pass
+
+impl XrayLlvmLeafV1 for XrayLlvmHostLeafV1:
+    fn max_function_id() -> i64:
+        unsafe(capabilities: [ffi]): simple_xray_llvm_max_function_id()
+
+    me install(arena: i64, generation: u64, context: u64, module_instance: u64) -> i64:
+        unsafe(capabilities: [ffi]):
+            simple_xray_llvm_install(arena, generation as i64, context as i64, module_instance as i64)
+
+    me patch_function(id: i64) -> i64:
+        unsafe(capabilities: [ffi]): simple_xray_llvm_patch_function(id)
+
+    me unpatch_function(id: i64) -> i64:
+        unsafe(capabilities: [ffi]): simple_xray_llvm_unpatch_function(id)
+
+    # The arena is the Simple-owned resident channel; closing it is the
+    # Simple channel's own operation, not a C leaf.
+    me close(arena: i64) -> i64:
+        unsafe(capabilities: [ffi]): trace_native_channel_close_v1(arena)
