@@ -16,6 +16,7 @@ use compiler.backend.backend_helpers.{
     cranelift_compile_module_via_k1_v1
 }
 use compiler.backend.llvm_codegen_adapter.{llvm_compile_module_direct}
+use compiler.backend.aot_target_normalization.{backend_normalize_requested_aot_target}
 use compiler.backend.backend_plugin.target_context_v2.{
     BuiltinBackendTargetContextV2, builtin_backend_target_context_v2,
     builtin_backend_context_diagnostic_v2, builtin_backend_aot_context_diagnostic_v2
@@ -29,6 +30,14 @@ class BuiltinBackendCompileAdapter:
     kind: BackendKind
     target_context: BuiltinBackendTargetContextV2
 
+    fn cranelift_target_triple() -> text:
+        # LLVM models SimpleOS as its explicit OS component. Cranelift's
+        # target-ISA parser accepts the equivalent freestanding none-elf
+        # triples. Normalize only at this emission boundary so linking and
+        # receipt identity retain the original SimpleOS request.
+        backend_normalize_requested_aot_target(
+            self.target_context.llvm_config.triple.to_text())
+
     fn compile_module(module: MirModule) -> Result<CodegenOutput, CompileError>:
         val diagnostic = builtin_backend_context_diagnostic_v2(
             self.target_context, self.kind, self.target_context.cpu)
@@ -41,7 +50,7 @@ class BuiltinBackendCompileAdapter:
         # installed; an LLVM-only kernel refuses by name here instead of
         # carrying a static Cranelift reference into its link.
         cranelift_compile_module_via_k1_v1(self.target_context.options, module,
-            Some(self.target_context.llvm_config.triple.to_text()),
+            Some(self.cranelift_target_triple()),
             Some(self.target_context.cpu),
             self.target_context.requested_features)
 
@@ -63,7 +72,7 @@ class BuiltinBackendCompileAdapter:
             self.kind.to_text(), module, is_release, opt_level, target_cpu,
             storage_bindings, Some(self.target_context.options),
             Some(self.target_context.llvm_config),
-            Some(self.target_context.llvm_config.triple.to_text()),
+            Some(self.cranelift_target_triple()),
             Some(self.target_context.cpu), self.target_context.requested_features)
 
     fn compile_aot_into_path(
