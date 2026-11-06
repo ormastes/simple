@@ -118,6 +118,7 @@ stage3_abi_transfer_error() {
 abi_producer_sha=$(bootstrap_stage3_hash_file "$admitted") || stage3_abi_transfer_error
 [ "${#abi_receipt_sha}" -eq 64 ] && [ "${#abi_producer_sha}" -eq 64 ] || stage3_abi_transfer_error
 case "$abi_receipt_sha$abi_producer_sha" in *[!0-9a-f]*) stage3_abi_transfer_error ;; esac
+bootstrap_stage3_verify_requalification_commit "$abi_receipt" || stage3_abi_transfer_error
 [ "$abi_policy" = v1 ] && bootstrap_stage3_normalized_absolute "$abi_receipt" &&
   [ -f "$abi_receipt" ] && [ ! -L "$abi_receipt" ] &&
   [ "$(bootstrap_stage3_hash_file "$abi_receipt")" = "$abi_receipt_sha" ] &&
