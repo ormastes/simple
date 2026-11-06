@@ -1,0 +1,121 @@
+# XRay instrumentation policy — the single resolution point.
+#
+# Design: doc/04_architecture/compiler/xray/xray_compiler_structural_change_2026-11-06.md
+#
+# Two switches, never conflated:
+#   - static:  CompileOptions.xray_enabled (`--xray`). Off (default) = no sleds,
+#              no metadata, byte-identical output. On = sleds are emitted.
+#   - dynamic: aspect params (`simple.trace/observer-v1`) select at RUNTIME
+#              which existing sleds are patched on. They never decide whether
+#              sleds exist, so nothing here reads AspectParamsV1.
+#
+# There is no instruction threshold: with `--xray` on, every function except
+# the compiler-owned never-list gets sleds. A threshold may be re-added later
+# only if measured code-size overhead requires it.
+# ponytail: ceiling/upgrade path — threshold knob re-added only on measured need.
+
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_instruction_graph.{MirFunction, MirModule}
+use compiler.backend.backend_helpers.{get_effective_backend_name}
+
+val XRAY_MODE_NONE: i64 = 0
+val XRAY_MODE_ENTRY_EXIT: i64 = 1
+val XRAY_MODE_ENTRY_EXIT_TAIL: i64 = 2
+
+struct XrayBuildPolicy:
+    enabled: bool
+    include_tail_exit: bool
+
+impl XrayBuildPolicy:
+    static fn off() -> XrayBuildPolicy:
+        XrayBuildPolicy(enabled: false, include_tail_exit: true)
+
+    static fn on() -> XrayBuildPolicy:
+        XrayBuildPolicy(enabled: true, include_tail_exit: true)
+
+fn xray_unsupported(what: text) -> text:
+    "XRAY-E-UNSUPPORTED-TARGET: --xray is not supported {what}"
+
+# Resolve the static switch against the compile route. Off always resolves.
+# On is admitted only for AOT builds whose backend can carry sleds (LLVM XRay
+# or the pure-Simple native backend). Cranelift lowers through seed-owned
+# externs that cannot emit sleds; it is rejected in every stage.
+fn xray_policy_resolve(enabled: bool, compile_mode_text: text, backend: text, release: bool, output_format: text) -> Result<XrayBuildPolicy, text>:
+    if not enabled:
+        return Ok(XrayBuildPolicy.off())
+    val effective = get_effective_backend_name(backend, release)
+    if effective == "cranelift":
+        return Err(xray_unsupported("with the Cranelift backend (it cannot emit XRay sleds); use --backend=llvm or --backend=native"))
+    if compile_mode_text != "aot":
+        return Err(xray_unsupported("in '{compile_mode_text}' mode; XRay sleds exist only in AOT native builds"))
+    # SMF/self-contained outputs have no sled emitter; accepting them would
+    # carry sled intent that nothing emits (fail-open).
+    if output_format != "native":
+        return Err(xray_unsupported("for output format '{output_format}'; use --native"))
+    # get_effective_backend_name maps unknown names to "llvm", so the requested
+    # name must itself be a native-code backend before trusting that fallback.
+    val requested = backend.trim().lower()
+    val requested_native = requested == "" or requested == "auto" or requested == "llvm" or
+        requested == "llvm-lib" or requested == "llvmlib" or requested == "native"
+    if not requested_native:
+        return Err(xray_unsupported("with backend '{backend}'"))
+    Ok(XrayBuildPolicy.on())
+
+# Cache-key token. Empty when off so every existing cache identity is unchanged.
+fn xray_option_identity_suffix(enabled: bool) -> text:
+    if enabled: "|xray=on" else: ""
+
+# `rt_` also excludes user functions named rt_*: that prefix is the runtime ABI.
+val XRAY_NEVER_NAME_PREFIXES: [text] = ["__spl_", "__xray_", "__simple_xray", "simple_xray_", "rt_"]
+# Matched after stripping the `lib.` (module_logical_name_from_path of
+# src/lib/...) or `std.` (import spelling) root.
+val XRAY_NEVER_MODULE_PREFIXES: [text] = [
+    "common.trace.", "nogc_sync_mut.trace.",
+    "nogc_sync_mut.allocator", "nogc_async_mut.allocator",
+    "gc_sync_mut.allocator", "gc_async_mut.allocator"
+]
+
+fn xray_module_library_path(module_name: text) -> text:
+    if module_name.starts_with("lib.") or module_name.starts_with("std."):
+        return module_name.substring(4)
+    module_name
+
+# Compiler-owned never-list; not user-overridable. Runtime hooks, allocator,
+# the xray handler itself, naked/interrupt-style (custom section) functions,
+# GPU kernels, generic templates and forced-inline functions (no physical body).
+fn xray_function_never_instrumented(module_name: text, func: MirFunction) -> bool:
+    if func.is_naked or func.is_kernel or func.is_generic_template or func.is_inline:
+        return true
+    if func.section != "":
+        return true
+    for prefix in XRAY_NEVER_NAME_PREFIXES:
+        if func.name.starts_with(prefix):
+            return true
+    val library_path = xray_module_library_path(module_name)
+    for prefix in XRAY_NEVER_MODULE_PREFIXES:
+        if library_path.starts_with(prefix):
+            return true
+    false
+
+fn xray_policy_apply(module: MirModule, policy: XrayBuildPolicy) -> MirModule:
+    if not policy.enabled:
+        return module
+    val sled_mode = if policy.include_tail_exit: XRAY_MODE_ENTRY_EXIT_TAIL else: XRAY_MODE_ENTRY_EXIT
+    var functions: Dict<SymbolId, MirFunction> = {}
+    for symbol in module.functions.keys():
+        var func = module.functions[symbol]
+        func.xray_mode = if xray_function_never_instrumented(module.name, func): XRAY_MODE_NONE else: sled_mode
+        functions[symbol] = func
+    MirModule(
+        name: module.name,
+        functions: functions,
+        statics: module.statics,
+        constants: module.constants,
+        types: module.types,
+        external_layout_traces: module.external_layout_traces,
+        collection_plan_explanations: module.collection_plan_explanations,
+        enum_semantic_declarations: module.enum_semantic_declarations
+    )
+
+export XrayBuildPolicy, XRAY_MODE_NONE, XRAY_MODE_ENTRY_EXIT, XRAY_MODE_ENTRY_EXIT_TAIL
+export xray_policy_resolve, xray_policy_apply, xray_option_identity_suffix, xray_function_never_instrumented

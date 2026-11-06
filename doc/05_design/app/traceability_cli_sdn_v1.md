@@ -92,3 +92,66 @@ and one input-tolerance rule, each listed here so later slices align to it.
 Next slices (reverse references: which specs cover a requirement, bug <->
 file links) touch the query model (`TraceNodeQueryV1`/page result) and will
 get their own increment in this document before code lands.
+
+## Reverse references increment — 2026-11-06 (slice 2)
+
+No WP0-WP7 item names a reverse lookup on the query CLI (the architecture
+document's "reverse references" are file-dependency edges for invalidation).
+This increment defines one; it serves REQ-TRC-015 (details/source inspection
+over the shared graph) and reuses the REQ-TRC-021/023 query contract.
+
+**Honest data statement.** The registered declaration today carries 101
+authored `add` claims over `specifies` (20), `decomposes_to` (73),
+`implemented_by` (4), `described_by` (2) and `motivated_by` (2); it has no
+`verified_by`/`accepted_by` claims and 1 test definition, and every claim
+raises `TRACE-AUTHORITY-CONFLICT` (no registered edge). "Which specs verify
+requirement X" is therefore **not** answerable from this data; "which feature
+specifies X", "what X decomposes to", and what a node is `implemented_by` /
+`described_by` are. `implemented_by`/`described_by` targets
+(`source:trace-cli`, `design:traceability`, ...) are not in the declaration's
+`nodes` list, but the snapshot pipeline materializes them as `source_file` /
+document nodes from their locators, so they render with a kind and title. The
+row model still tolerates an endpoint with no node (kind and title rendered
+empty, never invented). Because the declaration locates documents and sources,
+not requirements, the other endpoint's declared paths are the usable
+requirement <-> file link and travel with each row as `other_paths`.
+
+1. **CLI surface.** `refs <kind> <id>` with exactly `show`'s argv shape
+   (singular kind accepted, `--limit 1..200`, `--format table|sdn`,
+   `--snapshot`, `--declaration`, `--path`; `--prefix` rejected; `--cursor`
+   only as a continuation). Exit codes as for `show`: 1 rendered-unverified or
+   `TRACE-QUERY-NOT-FOUND` (selected id absent or wrong kind), 2 invalid.
+   `trace --help`, the command registry usage string and this document are
+   updated together.
+
+2. **Library owner.** New pure module `std.common.traceability.query_refs_v1`
+   with `TraceReferenceQueryV1` (snapshot_id, kind, selected_id, limit, cursor)
+   and `TraceReferenceV1 {claim_id, direction: "outgoing"|"incoming",
+   relation, from_id, to_id, other_id, other_kind, other_title, operation,
+   origin_id, authority, other_paths: [text] (sorted declared locator paths of
+   the other endpoint)}` plus `TraceReferencePageV1 {snapshot_id,
+   references, total_count, next_cursor, complete, locators, diagnostics}`.
+   `query_nodes_v1` is unchanged except that its validator keeps rejecting
+   `refs` (the reference validator is a sibling, not an extension, so existing
+   one-hop pages keep their contract). Rows are every non-`suppress` claim
+   whose `from_id` or `to_id` equals the selected id, sorted by canonical claim
+   id, paged with the existing cursor scheme under a distinct schema string
+   `simple.trace.reference-cursor/v1` that also binds the selected id.
+   `authority` is `registered-edge` when a `graph.edges` row with the same
+   from/relation/to exists, else `authored-claim`. `locators` are the selected
+   node's own locator rows (where it is declared).
+
+3. **Rendering.** Table: the node-page header, one `Selected: <kind> <id>
+   <title>` line, `DIRECTION\tRELATION\tID\tKIND\tTITLE\tAUTHORITY\tPATHS` rows,
+   `Total references: N`, optional `Next cursor:`, `LOCATOR\tPATH` rows, then
+   diagnostics (same 200 cap). SDN: the node-page envelope keys plus
+   `operation: refs`, `selected: {id, kind, title}`, `references: [...]`,
+   `reference_count`, `locators`. Projection label stays "not a graph export".
+
+4. **Verification tiers.** Worktree preview runs on the seed; git/index routes
+   as in slice 1. Unit spec over a synthetic graph (both directions, suppress
+   excluded, non-node endpoint, registered-edge vs authored-claim, paging);
+   one system scenario through the direct entry on the worktree preview.
+
+Slice-1 wording fix: item 2 above should read "If neither variable is set the
+spec still fails explicitly; no fallback process result exists."

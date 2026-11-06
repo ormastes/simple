@@ -97,7 +97,7 @@ fn cli_print_shared_optimization_inventory(command: text):
         print "  - Release MIR/self-hosted builds normalize to standard unless --opt-level overrides it."
 
 # Pure Simple compiler implementation (no Rust SFFI dependency)
-fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool, opt_level: i64, profile: text, debug_trace_level: text, coverage_enabled: bool, mcdc_mode_text: text, mcdc_owner_bytes: i64, mcdc_global_bytes: i64) -> i64:
+fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool, opt_level: i64, profile: text, debug_trace_level: text, coverage_enabled: bool, mcdc_mode_text: text, mcdc_owner_bytes: i64, mcdc_global_bytes: i64, xray_enabled: bool = false) -> i64:
     var out = output_file
     if out == "":
         # Default output based on format
@@ -152,6 +152,7 @@ fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: 
     if debug_trace_level != "":
         options.debug_trace_level = debug_trace_level
     options.coverage_enabled = coverage_enabled
+    options.xray_enabled = xray_enabled
     options.mcdc_mode_text = mcdc_mode_text
     options.mcdc_owner_bytes = mcdc_owner_bytes
     options.mcdc_global_bytes = mcdc_global_bytes
@@ -213,6 +214,27 @@ fn cli_compile_dynamic_driver_library(source_file: text, output_file: text, back
         _cli_eprint("[driver-mode] dynamic driver library written: {out}")
     return 0
 
+# `--xray` admission for `simple compile`: "" when the route reaches the
+# pure-Simple driver for a native executable, else the rejection message.
+# Cranelift is let through so the driver reports its own UnsupportedTarget.
+# With --xray, `--native` builds go through the pure-Simple driver (not the
+# MIR->C route), so on/off comparisons must pin --backend explicitly.
+fn cli_xray_route_error(backend: text, target: text, emit: text, output_format: text, emit_c: bool, driver_mode: text) -> text:
+    val prefix = "XRAY-E-UNSUPPORTED-TARGET: --xray"
+    if emit_c or driver_mode != "":
+        return "{prefix} is not supported for C output or driver packaging"
+    if target.starts_with("baremetal-") or target.contains("simpleos") or _cli_is_wasm_target(target):
+        return "{prefix} is not supported for target '{target}'"
+    val native_backend = (backend == "" or backend == "auto" or backend == "llvm" or backend == "llvm-lib" or
+        backend == "llvmlib" or backend == "native" or backend == "cranelift")
+    if not native_backend:
+        return "{prefix} is not supported with backend '{backend}'"
+    if output_format != "" and output_format != "native":
+        return "{prefix} is not supported for output format '{output_format}'"
+    if emit != "native" and backend != "llvm" and backend != "llvm-lib" and backend != "llvmlib":
+        return "{prefix} requires a native executable build; add --native"
+    ""
+
 fn _cli_is_wasm_target(t: text) -> bool:
     t == "wasm32" or t == "wasm32-wasi" or t == "wasm64" or t.starts_with("wasm32-") or t.starts_with("wasm64-")
 
@@ -270,6 +292,7 @@ fn cli_compile(args: [text]) -> i64:
     var profile: text = "dev"
     var debug_trace_level: text = ""
     var coverage_enabled: bool = false
+    var xray_enabled: bool = false
     var mcdc_mode_text: text = ""
     var mcdc_owner_bytes: i64 = 0
     var mcdc_global_bytes: i64 = 0
@@ -297,6 +320,7 @@ fn cli_compile(args: [text]) -> i64:
             print "  --driver-mode=<mode>  Driver packaging mode: dynamic emits .lsm"
             print "  --emit-c              Emit C++20 source code (C backend)"
             print "  --coverage            Enable coverage instrumentation"
+            print "  --xray                Emit XRay sleds (static switch; off by default)"
             print "  --mcdc                Enable static MC/DC instrumentation"
             print "  --mcdc-mode=<mode>    MC/DC mode: static-off, static-on, dynamic-aspect"
             print "  --no-mcdc             Fully disable MC/DC instrumentation"
@@ -487,6 +511,8 @@ fn cli_compile(args: [text]) -> i64:
             pgo_use_path = arg.substring(10)
         elif arg == "--coverage":
             coverage_enabled = true
+        elif arg == "--xray":
+            xray_enabled = true
         elif arg == "--mcdc":
             mcdc_mode_text = "on"
         elif arg == "--no-mcdc":
@@ -572,6 +598,14 @@ fn cli_compile(args: [text]) -> i64:
     val mcdc_route_requested = cli_mcdc_route_requested(
         mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes)
 
+    # --xray is the XRay static switch. Only routes that reach the pure-Simple
+    # driver can carry it; the driver's policy resolution rejects Cranelift.
+    if xray_enabled:
+        val xray_error = cli_xray_route_error(backend, target, emit, output_format, emit_c, driver_mode)
+        if xray_error != "":
+            _cli_eprint("Error: {xray_error}")
+            return 1
+
     if driver_mode != "":
         if mcdc_route_requested:
             cli_reject_unsupported_mcdc_route("dynamic driver packaging", mcdc_mode_text)
@@ -626,9 +660,9 @@ fn cli_compile(args: [text]) -> i64:
         if out == "":
             out = source_file.replace(".spl", "")
         # Use Pure Simple compiler driver for all LLVM backends
-        if (backend == "llvm-lib" or backend == "llvmlib" or coverage_enabled or mcdc_mode_text != "" or
+        if (backend == "llvm-lib" or backend == "llvmlib" or coverage_enabled or xray_enabled or mcdc_mode_text != "" or
             mcdc_owner_bytes > 0 or mcdc_global_bytes > 0):
-            return cli_compile_pure_simple(source_file, out, output_format, backend, verbose, release, low_memory, opt_level, profile, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes)
+            return cli_compile_pure_simple(source_file, out, output_format, backend, verbose, release, low_memory, opt_level, profile, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes, xray_enabled)
         return compile_native(source_file, out, verbose, "", false, backend, release, opt_level, use_lto, march_target)
 
     if target.starts_with("baremetal-"):
@@ -673,7 +707,7 @@ fn cli_compile(args: [text]) -> i64:
         if not env_set("SIMPLE_NATIVE_BUILD_TARGET", target):
             _cli_eprint("Error: could not export SIMPLE_NATIVE_BUILD_TARGET={target}")
             return 1
-        val target_status = cli_compile_pure_simple(source_file, output_file, if output_format == "": "smf" else: output_format, backend, verbose, release, low_memory, opt_level, profile, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes)
+        val target_status = cli_compile_pure_simple(source_file, output_file, if output_format == "": "smf" else: output_format, backend, verbose, release, low_memory, opt_level, profile, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes, xray_enabled)
         env_set("SIMPLE_NATIVE_BUILD_TARGET", old_native_target)
         return target_status
 
@@ -681,7 +715,7 @@ fn cli_compile(args: [text]) -> i64:
     # or --format, `compile` emits an SMF module (the seed CLI's contract).
     if output_format == "":
         output_format = "smf"
-    return cli_compile_pure_simple(source_file, output_file, output_format, backend, verbose, release, low_memory, opt_level, profile, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes)
+    return cli_compile_pure_simple(source_file, output_file, output_format, backend, verbose, release, low_memory, opt_level, profile, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes, xray_enabled)
 
 fn compile_baremetal(source_file: text, target: text, emit: text, output_file: text, verbose: bool) -> i64:
     if verbose:
