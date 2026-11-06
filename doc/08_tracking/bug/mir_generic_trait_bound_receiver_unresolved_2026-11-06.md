@@ -72,6 +72,14 @@ type the walk does not model keeps the erased word (fail closed).
   defect: `src/compiler/10.frontend/core/parser_cli.spl:226` passes an `f64`
   (`fval.to_float()`) to `expr_float_lit(value: text, ...)`
   (E-BACKEND-CRANELIFT-CALL-ABI). Not addressed here.
+- Cross-module caller shape: the same fixed stage2 on entry
+  `src/compiler/80.driver/driver_build/file_fiber_v1.spl` (calls the imported
+  `tldr_table_fill_v1` with its own bounded `reader`) -> `[mir] 287/287`,
+  0 unresolved, 0 native-trait conversion errors. The one MIR module failure
+  there, `lib.nogc_async_mut.async_ring.simple_ring` ("field 'token' is absent
+  from exact value layout ...simple_ring.spl::RingResetReceipt"), reproduces
+  identically with the run-10 stage2 on the unfixed tree: pre-existing, not
+  filed before this record, unrelated to generics.
 - A full Stage 2 rerun (`compiler_cli_build` row) was not run: under a 24 GiB
   cgroup the Stage 2 sanity smoke refuses its worker pool.
 
