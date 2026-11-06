@@ -1,10 +1,18 @@
 # RV64 SSH alpha Ed25519 runtime/pure mismatch
 
 Date: 2026-06-12
-Status: open
+Status: open (re-scoped 2026-11-07: RV64-native-only; host pure-Simple Ed25519/SHA-512 is RFC 8032 clean; RV64 repro lane currently unbuildable)
 Area: SimpleOS RV64 SSH, crypto dual-backend alpha
 
 ## Summary
+
+**Re-scope 2026-11-07:** neither half of the title is a pure-Simple logic bug.
+The SHA-512 timeout stopped being the blocker in 2026-06 (host KAT spec: 3.3 s
+wall). The Ed25519 mismatch does not reproduce on host (RFC 8032 T1/T2/T3 +
+SHA(abc) byte-match). The open item is RV64 *native* execution of the pure
+path (indexed `[u64]`/`[u8]` stores / SHA-512 core under cranelift on
+`riscv64-unknown-none`), and the RV64 repro lane cannot currently be built.
+See the 2026-11-07 section at the end.
 
 The RV64 live OpenSSH gate reaches SSH KEXINIT parsing, Curve25519 ECDH, shared
 secret generation, exchange-hash generation, and now completes the pure-Simple
@@ -674,3 +682,49 @@ pins `[u64]` indexed store round-trip, 51-bit shift/mask carry, u64 wrap
 multiply, sparse 32-byte element-wise copy, and R||S 64-byte signature
 assembly. Run the same spec under RV64 native to localise the failing
 primitive. Status: OPEN (target-specific).
+
+## Re-scope 2026-11-07 (work/rv64-ed25519-20261107, aarch64 Linux host)
+
+Binary: `/home/yoon/dev/seed-try-target/release/simple` (Rust seed, sha256
+`87693d9e927f9bd5...`). The requested `/home/yoon/dev/cargo-rel100/simple-ref`
+does not exist on this host. Base `origin/release/1.0.0` @ `1965f658d45`.
+
+Host (interpreter, `systemd-run MemoryMax=16G timeout 900`):
+
+```text
+ed25519_rfc8032_spec.spl        outcome=OK passed=15 failed=0   wall 18.8 s
+sha512_direct_kat_spec.spl      outcome=OK passed=3  failed=0   wall  3.3 s
+ed25519_rv64_primitives_spec    outcome=OK passed=5  failed=0   wall  3.1 s
+```
+
+No host red exists, so no pure-Simple algorithm fix was made (third lane to
+confirm this). Timeout half: not reproduced; SHA-512 KATs run in 3.3 s.
+
+RV64 repro attempt (no bootstrap run):
+
+1. `os build --scenario rv64-x25519-probe` -> `phase=compiler-admission
+   FAILED: no admitted self-hosted compiler for cranelift`
+   (`src/os/_QemuRunner/os_build_run.spl:186`; `qemu_compiler_select_v1`
+   refuses the Rust seed by design and no deployed pure-Simple compiler exists
+   here).
+2. Direct seed `native-build --target riscv64-unknown-none` (June recipe):
+   - clang 23 / the local LLVM install have no RISC-V target; only
+     `/usr/lib/llvm-18/bin/clang` does.
+   - `examples/09_embedded/simple_os/arch/riscv64/boot/full_networking_runtime.c:1`
+     `#include`d an absolute path from another machine
+     (`/home/ormastes/dev/pub/simple/...`). **Fixed** to a repo-relative include.
+   - Still fails: `freestanding_runtime.c:3010-3013` calls undeclared
+     `rt_boot_tcp_registry_lookup` (and siblings); link has undefined
+     `rt_typed_words_u64_push`, `rt_array_new_with_cap_u64`, `rt_byte_array_new`,
+     `rt_string_new_literal`, `rt_to_int_dynamic`, `rt_pool_safepoint`, and the
+     entry symbol `m_09_embedded__simple_os__arch__riscv64__x25519_probe_entry__rv64_x25519_probe_boot_main`
+     (entry-name mangling mismatch).
+   - The Ed25519 probe entry (`ed25519_probe_entry.spl`) no longer exists.
+
+Needed to close: a deployed admitted self-hosted compiler (or a sanctioned seed
+lane) that links the riscv64 freestanding runtime, then an Ed25519 probe entry
+mirroring `ed25519_rv64_primitives_spec` (5 primitives) + RFC 8032 TV1 run under
+`qemu-system-riscv64 -bios default`, then the live SSH gate. Whether the fault
+is cranelift riscv64 lowering vs freestanding-runtime array helpers is
+UNVERIFIED; disassembling the indexed `[u64]` store site needs a built object.
+
