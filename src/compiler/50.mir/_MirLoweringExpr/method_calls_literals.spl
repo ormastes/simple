@@ -982,9 +982,18 @@ impl MirLowering:
                     result_type = MirType(kind: MirTypeKind.Char)
                     supported = true
             case HirTypeKind.Array(_, _):
-                if default_expr == nil:
-                    # The payload is already a runtime array handle. Keep its
-                    # word intact; element decoding happens on indexing.
+                # The payload is already a runtime array handle. Keep its
+                # word intact; element decoding happens on indexing. An
+                # `unwrap_or(default)` default must itself lower to a runtime
+                # array handle (checked on the mismatch edge below). A nil
+                # fallback (`.ok`/`.err` projection) is not an array and stays
+                # rejected: admitting it would tag a nil word as an array.
+                var nil_fallback = false
+                if val fallback_probe = default_expr:
+                    match fallback_probe.kind:
+                        case HirExprKind.NilLit: nil_fallback = true
+                        case _: ()
+                if not nil_fallback:
                     result_is_array = true
                     supported = true
             case HirTypeKind.Dict(_, _):
@@ -995,8 +1004,20 @@ impl MirLowering:
                     result_type = self.lower_type(payload_type)
                     result_is_dict = true
                     supported = true
-            case HirTypeKind.Int(bits, signed):
-                if bits == 64 and signed:
+            case HirTypeKind.Int(int_bits, int_signed):
+                # Every integer width uses the `?` decoder's contract
+                # (decode_declared_enum_payload_slot): enum_payload_value
+                # unboxes u64, other widths are the raw word narrowed below.
+                # A nil fallback (`.ok`/`.err` projection) keeps its historic
+                # signed-i64-only admission: a nil word copied into a u64 or
+                # narrowed into a small int would no longer read as absent.
+                var int_nil_fallback = false
+                if val int_fallback_probe = default_expr:
+                    match int_fallback_probe.kind:
+                        case HirExprKind.NilLit: int_nil_fallback = true
+                        case _: ()
+                if (int_bits == 64 and int_signed) or not int_nil_fallback:
+                    result_type = self.lower_type(payload_type)
                     supported = true
             case HirTypeKind.Float(bits):
                 if bits == 64:
@@ -1074,6 +1095,14 @@ impl MirLowering:
         if val payload_local = payload_res:
             payload_value = payload_local
         payload_value = self.enum_payload_value(payload_value, result_type)
+        match payload_type.kind:
+            case HirTypeKind.Int(_, _):
+                val decoded_type = self.local_mir_type_of(payload_value) ?? MirType.unit()
+                if decoded_type.kind != result_type.kind:
+                    var b_int = self.builder
+                    payload_value = b_int.emit_cast(mir_operand_copy(payload_value), result_type)
+                    self.builder = b_int
+            case _: ()
         if result_is_tuple:
             payload_value = self.recover_result_tuple_payload(payload_value, result_type)
         if is_text:
@@ -1096,9 +1125,27 @@ impl MirLowering:
         self.builder = b_err
         if default_expr != nil:
             val fallback_expr = default_expr ?? HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: receiver.span), span: receiver.span)
-            var fallback = self.lower_expr(fallback_expr)
+            var fallback = if result_is_array:
+                # Element context comes from the declared payload, so `[]`
+                # lowers as the same runtime array handle the Ok word carries.
+                self.lower_declared_enum_payload_expression(payload_type, fallback_expr)
+            else:
+                self.lower_expr(fallback_expr)
+            if result_is_array and not self.local_is_runtime_array(fallback):
+                self.error_fatal("Result unwrap_or array default is not a runtime array handle", Some(fallback_expr.span))
             if is_text and self.is_runtime_value_local(fallback.id):
                 fallback = self.decode_runtime_value(fallback, result_type)
+            match payload_type.kind:
+                case HirTypeKind.Int(_, _):
+                    # Same declared width on both merge edges as the Ok cast.
+                    # Signed i64 keeps its historic plain copy (incl. the
+                    # `.ok` nil word), so only the newly admitted widths cast.
+                    val fallback_type = self.local_mir_type_of(fallback) ?? MirType.unit()
+                    if result_type.kind != MirTypeKind.I64 and fallback_type.kind != result_type.kind:
+                        var b_fallback = self.builder
+                        fallback = b_fallback.emit_cast(mir_operand_copy(fallback), result_type)
+                        self.builder = b_fallback
+                case _: ()
             b_err = self.builder
             b_err.emit_copy(result_local, fallback)
             b_err.terminate_goto(merge_block)

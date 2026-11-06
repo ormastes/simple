@@ -165,7 +165,21 @@ impl MirLowering:
                 if slot_float_bits == 64: return Some(MirType.f64())
                 nil
             case HirTypeKind.Str: Some(self.lower_type(type_))
+            # `[[text]]`: each element is itself one runtime-array handle.
+            # Same unsized-only contract as the tuple slot itself. Array
+            # element context only (allow_struct): dictionary value projection
+            # of nested collections is not proven here.
+            case HirTypeKind.Array(inner, size):
+                if not allow_struct or size != nil: return nil
+                if val lowered_inner = self.result_try_tuple_collection_element(inner, true):
+                    Some(MirType(kind: MirTypeKind.Array(lowered_inner, 0)))
+                else: nil
             case HirTypeKind.Named(symbol, _):
+                # `[Enum]`: a proven native enum owner is one boxed
+                # rt_enum_new handle per element, exactly like the tuple slot's
+                # own enum arm. Array element context only, as above.
+                if allow_struct and self.result_try_tuple_nominal_owner(type_, false) != "":
+                    return Some(self.lower_type(type_))
                 if not self.symbols.symbols.has(symbol.id): return nil
                 val declaration: HirSymbol = self.symbols.symbols[symbol.id]
                 # Dict<Struct> currently loses its full owner in dictionary
