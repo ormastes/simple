@@ -1,0 +1,97 @@
+"""
+## Purpose and audience
+
+Driver-level guard for bug `typecheck_accepts_fn_value_for_text_param_2026-11-06`.
+The HM checker already reports a Mismatch when a function value reaches a
+data parameter, but the typecheck pass defaults to Advisory
+(SIMPLE_TYPECHECK_PROFILE unset), so the diagnostic was discarded and the
+native build passed a code pointer as `text` (runtime AV). This spec drives
+`collect_module_typecheck_receipt_v1` at Advisory severity and requires the
+E-TYPE-FN-VALUE class to land in `errors` regardless, while legit higher-order
+calls, ordinary mismatches (left at pass severity) and Named slots stay out.
+"""
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.types.type_infer_types.{HmInferContext}
+use compiler.types.type_infer.context.*
+use compiler.types.type_infer.core.*
+use compiler.types.type_infer.generalization.*
+use compiler.types.type_infer.inference.*
+use compiler.types.type_infer.inference_control.*
+use compiler.types.type_infer.inference_expr.*
+use compiler.types.type_infer.inference_expr_calls.*
+use compiler.types.type_infer.inference_expr_ops.*
+use compiler.types.type_infer.inference_effects.*
+use compiler.types.type_infer.traits.*
+use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity}
+use compiler.driver.hir_typecheck_consumer_v1.{collect_module_typecheck_receipt_v1}
+
+fn fvr_prelude() -> text:
+    "struct S:\n    a: i64\n\n" +
+    "fn f(s: text) -> i64:\n    0\n\n" +
+    "fn g(x: i64) -> i64:\n    x\n\n" +
+    "fn h(x: i64, s: text) -> i64:\n    x\n\n" +
+    "fn k(s: S) -> i64:\n    0\n\n" +
+    "fn fo(s: text?) -> i64:\n    0\n\n" +
+    "fn fl(xs: [i64]) -> i64:\n    0\n\n" +
+    "fn ap(c: fn(i64) -> i64) -> i64:\n    c(1)\n\n"
+
+# Number of E-TYPE-FN-VALUE errors in the receipt for `main` with `body`.
+fn fvr_count(body: text) -> i64:
+    val src = fvr_prelude() + "fn main():\n" + body
+    val module = parse_full_frontend(src, "fvr.spl", "fvr.spl", Logger(level: 0))
+    var hl = HirLowering.with_filename("fvr.spl")
+    val hir = hl.lower_module(module)
+    val receipt = collect_module_typecheck_receipt_v1("fvr", hir, TypecheckPassSeverity.Advisory)
+    var n = 0
+    for e in receipt.errors:
+        if e.contains("E-TYPE-FN-VALUE"):
+            n = n + 1
+    n
+
+fn fvr_error_total(body: text) -> i64:
+    val src = fvr_prelude() + "fn main():\n" + body
+    val module = parse_full_frontend(src, "fvr.spl", "fvr.spl", Logger(level: 0))
+    var hl = HirLowering.with_filename("fvr.spl")
+    val hir = hl.lower_module(module)
+    collect_module_typecheck_receipt_v1("fvr", hir, TypecheckPassSeverity.Advisory).errors.len()
+
+describe "E-TYPE-FN-VALUE: function value into a data slot is always an error":
+    # Reproducing case (incident shape: fn value reaches a text param).
+    it "fn name passed to a text param is an error at Advisory severity":
+        expect(fvr_count("    f(g)\n")).to_equal(1)
+
+    it "placeholder _1 reaching a text param is an error (incident shape)":
+        expect(fvr_count("    h(1, _1)\n")).to_equal(1)
+
+    # Similar-pattern prevention.
+    it "fn name passed to an i64 param is an error":
+        expect(fvr_count("    g(g)\n")).to_equal(1)
+
+    it "fn name passed as a named text arg is an error":
+        expect(fvr_count("    h(1, s: g)\n")).to_equal(1)
+
+    it "fn name passed to a text? param is an error":
+        expect(fvr_count("    fo(g)\n")).to_equal(1)
+
+    it "fn name passed to an [i64] param is an error":
+        expect(fvr_count("    fl(g)\n")).to_equal(1)
+
+    it "fn name bound to an annotated text local is an error":
+        expect(fvr_count("    val t: text = g\n")).to_equal(1)
+
+    # Coverage of the other arms: no false positives / no severity change.
+    it "legit higher-order callee taking a fn param is clean":
+        expect(fvr_error_total("    ap(g)\n")).to_equal(0)
+
+    it "text literal to a text param is clean":
+        expect(fvr_error_total("    f(\"x\")\n")).to_equal(0)
+
+    it "ordinary int-to-text mismatch stays at pass severity (Advisory: no error)":
+        expect(fvr_error_total("    f(1)\n")).to_equal(0)
+
+    it "fn value to a Named struct param stays at pass severity":
+        expect(fvr_count("    k(g)\n")).to_equal(0)
