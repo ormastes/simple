@@ -1,0 +1,127 @@
+# Cross-engine parity for `.?` (existence check) and `??` (coalesce).
+#
+# Owner decision 2026-11-06: "`.?` in the Rust seed interpreter must behave
+# exactly like pure Simple." Each case is evaluated twice:
+#   - seed:  the expression inline in this spec (run by the Rust seed
+#            interpreter), rendered with string interpolation;
+#   - pure:  the same source text through the pure-Simple core interpreter
+#            (`compiler.core.interpreter.mod.core_interpret`), rendered with
+#            `val_to_text`.
+# The two renderings must be identical.
+#
+# The pure core interpreter has no Option/Result prelude and resolves only the
+# qualified `Option.Some(x)` / `Result.Ok(x)` forms, so the pure side declares
+# both enums and uses the qualified spelling; the seed side uses the builtin
+# spelling. Contract: doc/07_guide/quick_reference/syntax_quick_reference.md
+# "Existence Check (`.?`) - Returns `T?`" and
+# doc/08_tracking/bug/error_path_27_some_nil_exists_check_red_by_contract_2026-10-31.md.
+use std.spec.{describe, it, expect}
+use compiler.core.interpreter.mod.{core_interpret}
+use compiler.core.interpreter.eval.{eval_has_error, eval_get_error}
+use compiler.core.interpreter.value.{val_to_text}
+
+val PURE_PRELUDE: text = "enum Option<T>:\n    Some(T)\n    None\nenum Result<T, E>:\n    Ok(T)\n    Err(E)\n"
+
+fn pure_eval(body: text) -> text:
+    val src = PURE_PRELUDE + "fn main():\n" + body
+    val res = core_interpret(src, "dotq_parity_case.spl")
+    if eval_has_error():
+        return "ERR:" + eval_get_error()
+    val_to_text(res)
+
+fn pure_dotq(expr: text) -> text:
+    pure_eval("    val x = " + expr + "\n    x.?\n")
+
+fn opt_nil_payload() -> i64?:
+    Some(nil)
+
+fn opt_zero() -> i64?:
+    Some(0)
+
+fn opt_none() -> i64?:
+    None
+
+fn res_ok_nil() -> Result<i64?, text>:
+    Ok(nil)
+
+fn res_err_nil() -> Result<i64, text?>:
+    Err(nil)
+
+describe "dotq cross-engine parity (seed interpreter vs pure Simple)":
+    it "Some(nil).? is absent on both engines (error_path scenario 27)":
+        val x = Some(nil)
+        expect("{x.?}").to_equal(pure_dotq("Option.Some(nil)"))
+        expect("{x.?}").to_equal("nil")
+
+    it "Some(0).? keeps the zero payload":
+        val x = Some(0)
+        expect("{x.?}").to_equal(pure_dotq("Option.Some(0)"))
+
+    it "Some(false).? keeps the false payload":
+        val x = Some(false)
+        expect("{x.?}").to_equal(pure_dotq("Option.Some(false)"))
+
+    it "Some(empty text).? is absent":
+        val x = Some("")
+        expect("{x.?}").to_equal(pure_dotq("Option.Some(\"\")"))
+
+    it "Some(1).? yields the payload":
+        val x = Some(1)
+        expect("{x.?}").to_equal(pure_dotq("Option.Some(1)"))
+
+    it "None.? is absent":
+        val x: i64? = None
+        expect("{x.?}").to_equal(pure_dotq("Option.None"))
+
+    it "plain scalars are always present, empty text and array absent":
+        val z = 0
+        val f = false
+        val s = ""
+        val e: [i64] = []
+        val one = [1]
+        expect("{z.?}").to_equal(pure_dotq("0"))
+        expect("{f.?}").to_equal(pure_dotq("false"))
+        expect("{s.?}").to_equal(pure_dotq("\"\""))
+        expect("{e.?}").to_equal(pure_dotq("[]"))
+        expect("{one.?}").to_equal(pure_dotq("[1]"))
+
+    it "nil.? is absent":
+        val n: i64? = nil
+        expect("{n.?}").to_equal(pure_dotq("nil"))
+
+describe "coalesce agrees with .? presence (Some(nil) is absence)":
+    # `x ?? d` is `x.?` falling back to `d`: a value `.?` reports absent must
+    # take the default. Pure Simple lowers `??` by Option presence on the
+    # payload-or-nil word (src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl
+    # `case NullCoalesce`), where Some(nil) is the nil word itself.
+    it "Some(nil) ?? 7 takes the default":
+        val c = opt_nil_payload()
+        val d = c ?? 7
+        expect(d).to_equal(7)
+
+    it "Some(nil) literal ?? 7 takes the default":
+        val d = Some(nil) ?? 7
+        expect(d).to_equal(7)
+
+    it "Some(0) ?? 7 keeps the zero payload":
+        val d = opt_zero() ?? 7
+        expect(d).to_equal(0)
+
+    it "None ?? 7 takes the default":
+        val d = opt_none() ?? 7
+        expect(d).to_equal(7)
+
+    it "Ok(nil) ?? 7 takes the default":
+        val d = res_ok_nil() ?? 7
+        expect(d).to_equal(7)
+
+    it "Err(nil) ?? 7 takes the default":
+        val d = res_err_nil() ?? 7
+        expect(d).to_equal(7)
+
+    it "?? and .? agree on every Option case":
+        val cases: [i64?] = [Some(nil), Some(0), None, Some(5)]
+        for c in cases:
+            val present = c.? != nil
+            val took_default = (c ?? -1) == -1
+            expect(present).to_equal(not took_default)
