@@ -266,3 +266,17 @@ empty name) gets no row, so a missing row means NotCollected. Republishing a
 module replaces its row; `run_typecheck_warn_pass` entry and `compile()` entry
 clear the map together with the facts. Nothing consumes the rows yet: no
 diagnostic, named rule or admission decision is derived from them (E2).
+
+### Route join defects fixed (2026-11-06)
+
+Executing the route spec exposed two production defects, fixed in code: (1)
+`module_surfaces_freeze` set `surface.frozen` and `export_origin_index.frozen`
+but never `declaration_authority_index.frozen`, so
+`module_surface_declaration_authority_lookup` could never find a row and the
+route projector reported every surface as `surface-index-malformed`; (2)
+`collect_module_typecheck_receipt_v1` retained facts under the parser's
+filename-derived `HirModule.name`, while the registry aliases, the driver's
+module map and the receipt's own diagnostics use the pass's logical module
+key, so no alias could join. Facts are now keyed by that logical name;
+`module_path` still carries the file path. Route spec 3/6 -> 7/7 on the seed.
+The production join inside a real `compile()` remains pending Phase 3.

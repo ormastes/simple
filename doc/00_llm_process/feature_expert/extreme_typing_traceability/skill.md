@@ -28,8 +28,14 @@ It classifies only; no named rule, severity, CompileContext retention or
 publication guard exists yet. Read the
 [walker status](../../../05_design/extreme_typing_traceability.md#e1-structural-exposure-walker-2026-11-06)
 before extending it. Its spec and the projection spec executed GREEN on the
-Windows seed runner; the route spec was already 3/6 there before this slice
-(pre-existing, untouched). That is unit evidence, not runtime admission.
+Windows seed runner. The route spec was 3/6 until 2026-11-06, when two
+production defects were fixed in code: the registry freeze never set
+`declaration_authority_index.frozen` (so the authority lookup and the route
+projector saw every surface as malformed), and retained facts were keyed by
+the filename-derived `HirModule.name` instead of the pass's logical module
+key, so registry aliases could not join. Now 7/7 on the seed. Seed GREEN is
+unit evidence, not runtime admission; the production join inside a real
+`compile()` is pending Phase 3.
 The retained typecheck pass also stores the walker result per published
 module in `CompileContext.api_exposure`, cleared and replaced with the facts;
 a missing row is NotCollected. No consumer reads it yet.
