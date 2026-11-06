@@ -1,0 +1,142 @@
+# Stage-2 pure-Simple sled patcher for the native AArch64 backend (XRay PR5).
+# Design: doc/04_architecture/compiler/xray/xray_compiler_structural_change_2026-11-06.md
+# C.2 (quiescent patch protocol) and C.5 (fail closed).
+#
+# This is a second implementation of the PR4 `XrayLlvmLeafV1` effect boundary,
+# NOT a new control plane: XrayLlvmAdapterV1 (create_for_backend Simple) keeps
+# the one state machine, admission close, rollback and Faulted/recover path.
+# The leaf maps a dense site id to exactly one sled and switches only its
+# aligned first word: B +32 (off) <-> NOP (on). Everything else in the sled
+# is immutable and was checked by trace_native_map_validate_v1 at admission.
+#
+# Per switch (quiescent: no thread may be executing the selected sled):
+#   1. read the current word; anything but the expected off/on word is a
+#      foreign owner -> FAILED, nothing touched;
+#   2. port.begin(page): RX -> RW (W^X; never RWX);
+#   3. port.store_u32: one aligned 32-bit store (single-copy atomic);
+#   4. port.end(page): RW -> RX plus I-cache maintenance for the range
+#      (DC CVAU / DSB ISH / IC IVAU / DSB ISH / ISB) - always attempted, even
+#      after a failed store, so protections are restored on every exit path;
+#   5. re-read and require the desired word.
+# A failed end leaves the page "dirty": later switches of any site on it
+# re-run end() before reporting success, so recover() can never report off
+# while a page is still writable. Lockless: one caller-owned control plane.
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_native_map_v1.{TraceNativeMapV1, TraceNativeEncodingV1, trace_native_map_validate_v1}
+use std.common.trace.xray_native_map_format_v1.{XRAY_MAP_AARCH64_OFF_WORD_V1, XRAY_MAP_AARCH64_ON_WORD_V1}
+use std.nogc_sync_mut.trace.xray_llvm_adapter_v1.{XrayLlvmLeafV1, XRAY_LLVM_STATUS_SUCCESS_V1, XRAY_LLVM_STATUS_FAILED_V1, XRAY_LLVM_STATUS_INVALID_ID_V1}
+
+# The executable-memory effect boundary. Host binding:
+# src/os/sosix/host/code_patch_adapter.spl (rt_mprotect / rt_ptr_*_i32);
+# specs inject failures through a fake. Addresses come only from a validated
+# manifest, never from a caller.
+pub trait XrayCodePatchPortV1:
+    # RX -> RW for [page, page+length). 0 on success; nonzero writes nothing.
+    me begin(page: i64, length: i64) -> i64
+    # One aligned 32-bit store. 0 on success.
+    me store_u32(addr: i64, value: i64) -> i64
+    # Current 32-bit word (unsigned), -1 if unreadable.
+    fn load_u32(addr: i64) -> i64
+    # RW -> RX plus instruction-cache synchronisation. 0 on success.
+    me end(page: i64, length: i64) -> i64
+    # Close admission on the resident observer channel (gate |= 2).
+    me close_channel(arena: i64) -> i64
+
+pub struct XrayNativeSledV1:
+    addr: i64
+    off_word: i64
+    on_word: i64
+
+pub class XrayNativeSledLeafV1:
+    page_size: i64
+    sites: [XrayNativeSledV1]
+    dirty_pages: [i64]
+    arena: i64
+
+impl XrayNativeSledLeafV1:
+    # Admission: the manifest must pass the V1 validator against the bounded
+    # copy of the loaded image, every site must be an AArch64 sled, and the
+    # image base must be page aligned. Any failure: no leaf, nothing patchable.
+    static fn create(manifest: TraceNativeMapV1, image: [u8], image_base: i64, page_size: i64
+            ) -> Result<XrayNativeSledLeafV1, TraceFailureV1>:
+        if page_size < 4096 or (page_size & (page_size - 1)) != 0:
+            return Err(TraceFailureV1.InvalidArgument)
+        if image_base <= 0 or image_base % page_size != 0:
+            return Err(TraceFailureV1.InvalidMap)
+        if (manifest.image_size as i64) < 0 or image_base > 9223372036854775807 - (manifest.image_size as i64):
+            return Err(TraceFailureV1.InvalidMap)
+        trace_native_map_validate_v1(manifest, image)?
+        var sites: [XrayNativeSledV1] = []
+        for site in manifest.sites:
+            match site.encoding:
+                case Arm64Branch26: ()
+                case X64Rel32: return Err(TraceFailureV1.UnsupportedTarget)
+            sites.push(XrayNativeSledV1(addr: image_base + (site.offset as i64),
+                off_word: XRAY_MAP_AARCH64_OFF_WORD_V1, on_word: XRAY_MAP_AARCH64_ON_WORD_V1))
+        Ok(XrayNativeSledLeafV1(page_size: page_size, sites: sites, dirty_pages: [], arena: 0))
+
+    fn max_function_id() -> i64:
+        self.sites.len()
+
+    me patch_site(port: XrayCodePatchPortV1, id: i64) -> i64:
+        self.switch_site(port, id, true)
+
+    me unpatch_site(port: XrayCodePatchPortV1, id: i64) -> i64:
+        self.switch_site(port, id, false)
+
+    me mark_page(page: i64, dirty: bool):
+        var kept: [i64] = []
+        for current in self.dirty_pages:
+            if current != page: kept.push(current)
+        if dirty: kept.push(page)
+        self.dirty_pages = kept
+
+    me switch_site(port: XrayCodePatchPortV1, id: i64, on: bool) -> i64:
+        if id < 1 or id > self.sites.len(): return XRAY_LLVM_STATUS_INVALID_ID_V1
+        val sled = self.sites[id - 1]
+        val want = if on: sled.on_word else: sled.off_word
+        val page = sled.addr - (sled.addr % self.page_size)
+        val current = port.load_u32(sled.addr)
+        if current != sled.off_word and current != sled.on_word:
+            return XRAY_LLVM_STATUS_FAILED_V1
+        if current == want:
+            if not self.dirty_pages.contains(page): return XRAY_LLVM_STATUS_SUCCESS_V1
+            # Word already right but the page never got back to RX: finish it.
+            if port.end(page, self.page_size) != 0: return XRAY_LLVM_STATUS_FAILED_V1
+            self.mark_page(page, false)
+            return XRAY_LLVM_STATUS_SUCCESS_V1
+        if port.begin(page, self.page_size) != 0: return XRAY_LLVM_STATUS_FAILED_V1
+        val stored = port.store_u32(sled.addr, want)
+        if port.end(page, self.page_size) != 0:
+            self.mark_page(page, true)
+            return XRAY_LLVM_STATUS_FAILED_V1
+        self.mark_page(page, false)
+        if stored != 0 or port.load_u32(sled.addr) != want: return XRAY_LLVM_STATUS_FAILED_V1
+        XRAY_LLVM_STATUS_SUCCESS_V1
+
+# The leaf bound to its port, as the PR4 control plane sees it.
+pub class XrayNativeBoundLeafV1:
+    leaf: XrayNativeSledLeafV1
+    port: XrayCodePatchPortV1
+
+impl XrayLlvmLeafV1 for XrayNativeBoundLeafV1:
+    fn max_function_id() -> i64:
+        self.leaf.max_function_id()
+
+    # Records the loaned resident channel arena for close(). The native
+    # trampoline that writes events into it (`__simple_xray_trampoline_v1`) is
+    # not part of PR5, so nothing else is published here.
+    me install(arena: i64, generation: u64, context: u64, module_instance: u64) -> i64:
+        if arena <= 0 or arena % 8 != 0 or generation == 0: return 0
+        self.leaf.arena = arena
+        1
+
+    me patch_function(id: i64) -> i64:
+        self.leaf.patch_site(self.port, id)
+
+    me unpatch_function(id: i64) -> i64:
+        self.leaf.unpatch_site(self.port, id)
+
+    me close(arena: i64) -> i64:
+        if arena <= 0 or arena != self.leaf.arena: return 0
+        self.port.close_channel(arena)

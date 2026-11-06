@@ -1,0 +1,245 @@
+# XRay native sled pass — AArch64 (XRay PR5).
+# Design: doc/04_architecture/compiler/xray/xray_compiler_structural_change_2026-11-06.md
+# A.5 (native emission) and B (static off).
+#
+# Runs AFTER regalloc_module_aarch64 (the prologue is final) and BEFORE
+# encoding: it inserts an A64_OP_XRAY_SLED pseudo-instruction as the first
+# instruction of an instrumented function (entry) and before every RET (exit).
+# The selector emits no tail calls on aarch64, so no tail-exit sled exists yet.
+# Branch offsets are resolved by the encoder after insertion, so no emitted
+# displacement is ever adjusted here.
+#
+# Sled bytes: the 32-byte Arm64Branch26 template owned by the V1 contract
+# (std.common.trace.observer_native_map_v1.trace_native_off_template_v1), which
+# the map validator checks byte for byte. Off word `B +32`, on word `NOP`; the
+# body saves x16/x17 and x0/x30, materialises the site id in w0 and `BL`s the
+# resident trampoline through an R_AARCH64_CALL26 relocation. Note: this is the
+# Simple-private sled (plan §10.3), NOT LLVM's `B #32 + 7xNOP` sled: llvm-xray
+# reads `xray_instr_map`, never `.simple_xray_map`, and the landed validator
+# rejects any other byte pattern.
+#
+# Off (no function with xray_mode > 0): every function here returns its input
+# unchanged and the caller takes the pre-PR5 path, so objects are byte-identical.
+# x86-64 (13-byte sled) is PR6 and is not handled here.
+use compiler.backend.native.mach_inst.{MachModule, MachFunction, MachBlock, MachInst, EncodedFunction, new_mach_inst, op_imm, A64_OP_RET, A64_OP_XRAY_SLED}
+use compiler.mir.mir_instruction_graph.{MirModule, mir_module_functions_sorted}
+use std.common.trace.observer_contract_v1.{TraceEventKindV1}
+use std.common.trace.observer_native_map_v1.{TraceNativeSiteV1, TraceNativeEncodingV1, trace_native_off_template_v1}
+use std.common.trace.xray_native_map_format_v1.{XrayMapV1, XrayMapFunctionV1, XrayMapSiteV1, xray_map_aarch64_site_v1, xray_map_encode_v1, XRAY_MAP_ISA_AARCH64_V1, XRAY_MAP_ABI_AARCH64_SIMPLE_V1, XRAY_MAP_SLED_ABI_V1, XRAY_MAP_KIND_ENTRY_V1, XRAY_MAP_KIND_EXIT_V1, XRAY_MAP_AARCH64_SLED_BYTES_V1}
+use std.common.hash.xxh3.{xxh3_128}
+
+# The single resident trampoline every sled calls; it dispatches on the site id
+# in w0. Its name is on the never-instrument list (driver_xray_policy.spl).
+pub val XRAY_TRAMPOLINE_SYMBOL_V1: text = "__simple_xray_trampoline_v1"
+pub val XRAY_MAP_SECTION_NAME_V1: text = ".simple_xray_map"
+# R_AARCH64_CALL26, byte offset of the BL inside the sled.
+val XRAY_SLED_CALL26_V1: i64 = 283
+val XRAY_SLED_BL_OFFSET_V1: i64 = 20
+
+pub struct XraySledSite:
+    function_name: text
+    function_id: i64
+    site_id: i64
+    kind: i64
+    # Byte offset of the sled inside its encoded function; -1 until located.
+    code_offset: i64
+
+pub struct XraySledPlan:
+    module: MachModule
+    sites: [XraySledSite]
+
+# Cheap off-path probe: unsorted scan, first hit wins.
+fn xray_module_has_sleds(mir_module: MirModule) -> bool:
+    for func in mir_module.functions.values():
+        if func.xray_mode > 0:
+            return true
+    false
+
+# Fail closed on a native target without a sled emitter (x86-64 is PR6;
+# RISC-V and Mach-O have none): never silently produce an unpatchable binary.
+fn xray_reject_unsupported_native(mir_module: MirModule, target: text):
+    if xray_module_has_sleds(mir_module):
+        panic("XRAY-E-UNSUPPORTED-TARGET: --xray native sleds are implemented only for aarch64 ELF, not {target}")
+
+# Names of the functions the driver policy marked for sleds (xray_mode > 0).
+fn xray_instrumented_function_names(mir_module: MirModule) -> [text]:
+    if not xray_module_has_sleds(mir_module):
+        return []
+    var names: [text] = []
+    for func in mir_module_functions_sorted(mir_module):
+        if func.xray_mode > 0:
+            names.push(func.name)
+    names
+
+# Template bytes for one sled, BL displacement 0 (the CALL26 relocation
+# supplies the trampoline). Panics only on an id the template cannot hold.
+fn xray_sled_template_aarch64(site_id: i64) -> [i64]:
+    val site = TraceNativeSiteV1(site_id: site_id as u32, function_id: 1, kind: TraceEventKindV1.Entry,
+        offset: 0, target_offset: XRAY_SLED_BL_OFFSET_V1 as u64, encoding: TraceNativeEncodingV1.Arm64Branch26)
+    match trace_native_off_template_v1(site, XRAY_MAP_AARCH64_SLED_BYTES_V1 as u64):
+        case Ok(bytes):
+            var out: [i64] = []
+            for byte in bytes:
+                out.push(byte as i64)
+            out
+        case Err(_):
+            panic("xray: aarch64 sled template rejected site id {site_id}")
+
+fn xray_sled_inst(site_id: i64, kind: i64) -> MachInst:
+    new_mach_inst(A64_OP_XRAY_SLED, [op_imm(site_id), op_imm(kind)])
+
+fn xray_function_with_sleds(func: MachFunction, function_id: i64, first_site_id: i64) -> (MachFunction, [XraySledSite]):
+    var sites: [XraySledSite] = []
+    var next_id = first_site_id
+    var blocks: [MachBlock] = []
+    for block_index in 0..func.blocks.len():
+        val block = func.blocks[block_index]
+        var insts: [MachInst] = []
+        if block_index == 0:
+            insts.push(xray_sled_inst(next_id, XRAY_MAP_KIND_ENTRY_V1))
+            sites.push(XraySledSite(function_name: func.name, function_id: function_id, site_id: next_id, kind: XRAY_MAP_KIND_ENTRY_V1, code_offset: -1))
+            next_id = next_id + 1
+        for inst in block.insts:
+            if inst.opcode == A64_OP_RET:
+                insts.push(xray_sled_inst(next_id, XRAY_MAP_KIND_EXIT_V1))
+                sites.push(XraySledSite(function_name: func.name, function_id: function_id, site_id: next_id, kind: XRAY_MAP_KIND_EXIT_V1, code_offset: -1))
+                next_id = next_id + 1
+            insts.push(inst)
+        blocks.push(MachBlock(label: block.label, insts: insts, block_id: block.block_id, offset: block.offset))
+    (MachFunction(name: func.name, blocks: blocks, frame_size: func.frame_size,
+        num_virtual_regs: func.num_virtual_regs, used_callee_saved: func.used_callee_saved,
+        outgoing_arg_size: func.outgoing_arg_size), sites)
+
+# Insert sleds into the named functions. Function ids are dense in module
+# order of the instrumented functions; site ids are dense across the module.
+fn xray_insert_sleds_aarch64(module: MachModule, instrumented: [text]) -> XraySledPlan:
+    if instrumented.len() == 0:
+        return XraySledPlan(module: module, sites: [])
+    var functions: [MachFunction] = []
+    var sites: [XraySledSite] = []
+    var function_id = 0
+    for func in module.functions:
+        if instrumented.contains(func.name) and func.blocks.len() > 0:
+            function_id = function_id + 1
+            val (rewritten, func_sites) = xray_function_with_sleds(func, function_id, sites.len() + 1)
+            functions.push(rewritten)
+            for site in func_sites:
+                sites.push(site)
+        else:
+            functions.push(func)
+    if sites.len() == 0:
+        return XraySledPlan(module: module, sites: [])
+    var externs = module.extern_symbols
+    if not externs.contains(XRAY_TRAMPOLINE_SYMBOL_V1):
+        externs.push(XRAY_TRAMPOLINE_SYMBOL_V1)
+    XraySledPlan(module: MachModule(name: module.name, functions: functions,
+        data_sections: module.data_sections, extern_symbols: externs), sites: sites)
+
+# Each sled's CALL26 relocation to the trampoline sits at sled+20, in emission
+# order, so the n-th such relocation of a function is its n-th planned sled.
+# Any count or byte mismatch fails closed: a map must never name a non-sled.
+fn xray_locate_sleds(encoded: [EncodedFunction], planned: [XraySledSite]) -> Result<[XraySledSite], text>:
+    var located: [XraySledSite] = []
+    for func in encoded:
+        var offsets: [i64] = []
+        for reloc in func.relocations:
+            if reloc.symbol_name == XRAY_TRAMPOLINE_SYMBOL_V1 and reloc.reloc_type == XRAY_SLED_CALL26_V1:
+                offsets.push(reloc.offset - XRAY_SLED_BL_OFFSET_V1)
+        var index = 0
+        for site in planned:
+            if site.function_name == func.name:
+                if index >= offsets.len():
+                    return Err("xray: sled {site.site_id} of '{func.name}' has no trampoline relocation")
+                val offset = offsets[index]
+                val template = xray_sled_template_aarch64(site.site_id)
+                if offset < 0 or offset % 4 != 0 or offset + template.len() > func.code.len():
+                    return Err("xray: sled {site.site_id} of '{func.name}' lies outside its function")
+                for byte_index in 0..template.len():
+                    if byte_index < XRAY_SLED_BL_OFFSET_V1 or byte_index >= XRAY_SLED_BL_OFFSET_V1 + 4:
+                        if func.code[offset + byte_index] != template[byte_index]:
+                            return Err("xray: sled {site.site_id} of '{func.name}' bytes differ from the V1 template")
+                located.push(XraySledSite(function_name: site.function_name, function_id: site.function_id,
+                    site_id: site.site_id, kind: site.kind, code_offset: offset))
+                index = index + 1
+        if index != offsets.len():
+            return Err("xray: '{func.name}' has {offsets.len()} trampoline relocations but {index} planned sleds")
+    if located.len() != planned.len():
+        return Err("xray: located {located.len()} of {planned.len()} planned sleds")
+    Ok(located)
+
+# Build the `.simple_xray_map` bytes once function placement in .text is known.
+# build_id = XXH3-128 of the final .text bytes (the map cannot hash itself).
+fn xray_map_section_bytes(sites: [XraySledSite], func_offsets: Dict<text, i64>, text_bytes: [i64]) -> [i64]:
+    var functions: [XrayMapFunctionV1] = []
+    var rows: [XrayMapSiteV1] = []
+    var current = ""
+    for site in sites:
+        if not func_offsets.contains(site.function_name):
+            panic("xray: sled function '{site.function_name}' was not placed in .text")
+        if site.function_name != current:
+            current = site.function_name
+            functions.push(XrayMapFunctionV1(local_fn_id: site.function_id as u32, first_site: site.site_id as u32, site_count: 0, name: site.function_name))
+        val last = functions.len() - 1
+        val row = functions[last]
+        functions[last] = XrayMapFunctionV1(local_fn_id: row.local_fn_id, first_site: row.first_site, site_count: row.site_count + 1, name: row.name)
+        rows.push(xray_map_aarch64_site_v1((func_offsets[site.function_name] + site.code_offset) as u64, site.function_id as u32, site.kind))
+    var text_u8: [u8] = []
+    for byte in text_bytes:
+        text_u8.push((byte & 255) as u8)
+    val digest = xxh3_128(text_u8)
+    var build_id: [u8] = []
+    for shift in 0..8:
+        build_id.push(((digest.low >> (shift * 8)) & 255u64) as u8)
+    for shift in 0..8:
+        build_id.push(((digest.high >> (shift * 8)) & 255u64) as u8)
+    val map = XrayMapV1(isa: XRAY_MAP_ISA_AARCH64_V1, abi_profile: XRAY_MAP_ABI_AARCH64_SIMPLE_V1,
+        sled_abi_version: XRAY_MAP_SLED_ABI_V1, build_id: build_id, text_base: 0,
+        functions: functions, sites: rows)
+    match xray_map_encode_v1(map):
+        case Ok(bytes):
+            var out: [i64] = []
+            for byte in bytes:
+                out.push(byte as i64)
+            out
+        case Err(_):
+            panic("xray: .simple_xray_map rows are inconsistent")
+
+fn xray_elf_u64(bytes: [i64], offset: i64, width: i64) -> i64:
+    var value = 0
+    for index in 0..width:
+        value = value | (bytes[offset + index] << (index * 8))
+    value
+
+# Read the `.simple_xray_map` section bytes back out of an ELF64 object
+# (object inspection for specs and the e2e check). Err when absent.
+fn xray_object_map_bytes(object: [i64]) -> Result<[u8], text>:
+    if object.len() < 64: return Err("xray: not an ELF64 object")
+    val shoff = xray_elf_u64(object, 40, 8)
+    val shentsize = xray_elf_u64(object, 58, 2)
+    val shnum = xray_elf_u64(object, 60, 2)
+    val shstrndx = xray_elf_u64(object, 62, 2)
+    if shentsize != 64 or shoff + shnum * 64 > object.len() or shstrndx >= shnum:
+        return Err("xray: malformed section header table")
+    val strtab_off = xray_elf_u64(object, shoff + shstrndx * 64 + 24, 8)
+    val wanted = XRAY_MAP_SECTION_NAME_V1.bytes()
+    for index in 0..shnum:
+        val header = shoff + index * 64
+        val name_at = strtab_off + xray_elf_u64(object, header, 4)
+        var same = name_at + wanted.len() < object.len() and object[name_at + wanted.len()] == 0
+        if same:
+            for k in 0..wanted.len():
+                if object[name_at + k] != (wanted[k] as i64):
+                    same = false
+        if same:
+            val offset = xray_elf_u64(object, header + 24, 8)
+            val size = xray_elf_u64(object, header + 32, 8)
+            if offset + size > object.len(): return Err("xray: map section out of bounds")
+            var out: [u8] = []
+            for k in 0..size:
+                out.push(object[offset + k] as u8)
+            return Ok(out)
+    Err("xray: no {XRAY_MAP_SECTION_NAME_V1} section")
+
+export XRAY_TRAMPOLINE_SYMBOL_V1, XRAY_MAP_SECTION_NAME_V1, XraySledSite, XraySledPlan
+export xray_module_has_sleds, xray_reject_unsupported_native, xray_instrumented_function_names, xray_sled_template_aarch64, xray_insert_sleds_aarch64
+export xray_locate_sleds, xray_map_section_bytes, xray_object_map_bytes

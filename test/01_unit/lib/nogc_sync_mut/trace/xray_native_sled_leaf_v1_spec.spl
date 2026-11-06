@@ -1,0 +1,188 @@
+# @cover src/lib/nogc_sync_mut/trace/xray_native_sled_leaf_v1.spl
+# @req REQ-XRAY-PR5-NATIVE-PATCHER
+"""
+# XRay PR5 — pure-Simple native sled patcher (stage-2 leaf)
+
+The patcher is a second `XrayLlvmLeafV1` implementation under the PR4 control
+plane (`XrayLlvmAdapterV1`): the state machine, admission, rollback and
+Faulted handling are reused, not duplicated. This spec drives it over a
+simulated code page (fake `XrayCodePatchPortV1`) so every protection, store
+and restore step can fail on demand (PATCH-02). Real-page evidence is
+`scripts/check/check-xray-native-aarch64-e2e.shs`.
+"""
+use std.spec.*
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_native_map_v1.*
+use std.common.trace.xray_native_map_format_v1.*
+use std.nogc_sync_mut.trace.xray_llvm_adapter_v1.*
+use std.nogc_sync_mut.trace.xray_native_sled_leaf_v1.*
+
+val BASE: i64 = 1048576
+val PAGE: i64 = 4096
+
+class FakePatchPortV1:
+    words: Dict<i64, i64>
+    writable: bool
+    fail_begin: bool
+    fail_store: bool
+    fail_end_left: i64
+    log: [text]
+
+impl XrayCodePatchPortV1 for FakePatchPortV1:
+    me begin(page: i64, length: i64) -> i64:
+        self.log.push("begin:{page}:{length}")
+        if self.fail_begin: return -1
+        self.writable = true
+        0
+
+    me store_u32(addr: i64, value: i64) -> i64:
+        self.log.push("store:{addr}:{value}")
+        if self.fail_store or not self.writable: return -1
+        self.words[addr] = value
+        0
+
+    fn load_u32(addr: i64) -> i64:
+        if self.words.contains(addr): self.words[addr] else: -1
+
+    me end(page: i64, length: i64) -> i64:
+        self.log.push("end:{page}:{length}")
+        if self.fail_end_left > 0:
+            self.fail_end_left = self.fail_end_left - 1
+            return -1
+        self.writable = false
+        0
+
+    me close_channel(arena: i64) -> i64:
+        self.log.push("close:{arena}")
+        1
+
+# Image: [0,64) read-only map, [64,256) RX text holding one function at 64
+# (entry sled at 64, exit sled at 128) and the trampoline at 224.
+fn image_fixture() -> ([u8], TraceNativeMapV1):
+    var bytes: [u8] = []
+    for index in 0..256: bytes.push(0u8)
+    val entry = TraceNativeSiteV1(site_id: 1, function_id: 1, kind: TraceEventKindV1.Entry,
+        offset: 64, target_offset: 224, encoding: TraceNativeEncodingV1.Arm64Branch26)
+    val exit = TraceNativeSiteV1(site_id: 2, function_id: 1, kind: TraceEventKindV1.Exit,
+        offset: 128, target_offset: 224, encoding: TraceNativeEncodingV1.Arm64Branch26)
+    for site in [entry, exit]:
+        val sled = trace_native_off_template_v1(site, 256).unwrap()
+        for index in 0..sled.len(): bytes[(site.offset as i64) + index] = sled[index]
+    val manifest = TraceNativeMapV1(schema: 1, module_instance: 1, manifest_incarnation: 1,
+        build_identity: "b", source_identity: "s", runtime_identity: "r",
+        target: "aarch64-unknown-linux-gnu", abi_profile: "simple-aarch64-sled-v1",
+        image_size: 256, map_offset: 0, map_size: 64,
+        ranges: [
+            TraceImageRangeV1(offset: 0, size: 64, readable: true, writable: false, executable: false),
+            TraceImageRangeV1(offset: 64, size: 192, readable: true, writable: false, executable: true)
+        ],
+        functions: [TraceNativeFunctionV1(function_id: 1, offset: 64, size: 128)],
+        sites: [entry, exit])
+    (bytes, manifest)
+
+fn port_from_image(bytes: [u8]) -> FakePatchPortV1:
+    var words: Dict<i64, i64> = {}
+    var offset = 0
+    while offset < bytes.len():
+        val word = (bytes[offset] as i64) | ((bytes[offset + 1] as i64) << 8) | ((bytes[offset + 2] as i64) << 16) | ((bytes[offset + 3] as i64) << 24)
+        words[BASE + offset] = word
+        offset = offset + 4
+    FakePatchPortV1(words: words, writable: false, fail_begin: false, fail_store: false, fail_end_left: 0, log: [])
+
+fn leaf_fixture() -> XrayNativeSledLeafV1:
+    val (bytes, manifest) = image_fixture()
+    XrayNativeSledLeafV1.create(manifest, bytes, BASE, PAGE).unwrap()
+
+fn native_config() -> TraceConfigV1:
+    TraceConfigV1(instrumentation: TraceInstrumentationV1.Dynamic,
+        backend: TraceBackendV1.Simple, consistency: TraceConsistencyV1.RawEdges,
+        patch_mode: TracePatchModeV1.Quiescent, abi_profile: "simple-aarch64-sled-v1",
+        event_mask: 7, buffer_bytes: 98304, max_contexts: 1, max_depth: 128,
+        max_resident_generations: 8)
+
+fn selection(sites: [u32]) -> TraceSelectionV1:
+    var out: [TraceSiteV1] = []
+    for site in sites: out.push(TraceSiteV1(module_instance: 1, site_id: site))
+    TraceSelectionV1(manifest_incarnation: 1, sites: out)
+
+describe "XRay native AArch64 sled leaf V1":
+    it "admits only a manifest the V1 validator accepts (fail closed)":
+        val (bytes, manifest) = image_fixture()
+        expect(XrayNativeSledLeafV1.create(manifest, bytes, BASE, PAGE).is_ok()).to_equal(true)
+        var corrupt = bytes
+        corrupt[64 + 12] = 0u8
+        expect(XrayNativeSledLeafV1.create(manifest, corrupt, BASE, PAGE).is_err()).to_equal(true)
+        expect(XrayNativeSledLeafV1.create(manifest, bytes, BASE + 1, PAGE).is_err()).to_equal(true)
+        expect(XrayNativeSledLeafV1.create(manifest, bytes, BASE, 3000).is_err()).to_equal(true)
+
+    it "patches only the aligned first word: B +32 -> NOP, and back":
+        val (bytes, _) = image_fixture()
+        var port = port_from_image(bytes)
+        var leaf = leaf_fixture()
+        expect(leaf.max_function_id()).to_equal(2)
+        expect(leaf.patch_site(port, 1)).to_equal(XRAY_LLVM_STATUS_SUCCESS_V1)
+        expect(port.load_u32(BASE + 64)).to_equal(0xD503201F)
+        expect(port.load_u32(BASE + 128)).to_equal(0x14000008)
+        expect(port.log).to_equal(["begin:{BASE}:{PAGE}", "store:{BASE + 64}:{0xD503201F}", "end:{BASE}:{PAGE}"])
+        expect(leaf.unpatch_site(port, 1)).to_equal(XRAY_LLVM_STATUS_SUCCESS_V1)
+        expect(port.load_u32(BASE + 64)).to_equal(0x14000008)
+        expect(leaf.patch_site(port, 3)).to_equal(XRAY_LLVM_STATUS_INVALID_ID_V1)
+        expect(leaf.patch_site(port, 0)).to_equal(XRAY_LLVM_STATUS_INVALID_ID_V1)
+
+    it "refuses a site whose current word is neither the off nor the on word":
+        val (bytes, _) = image_fixture()
+        var port = port_from_image(bytes)
+        port.words[BASE + 64] = 0xD4200000
+        var leaf = leaf_fixture()
+        expect(leaf.patch_site(port, 1)).to_equal(XRAY_LLVM_STATUS_FAILED_V1)
+        expect(port.log.len()).to_equal(0)
+
+    it "PATCH-02: a failed RX->RW transition writes nothing":
+        val (bytes, _) = image_fixture()
+        var port = port_from_image(bytes)
+        port.fail_begin = true
+        var leaf = leaf_fixture()
+        expect(leaf.patch_site(port, 1)).to_equal(XRAY_LLVM_STATUS_FAILED_V1)
+        expect(port.load_u32(BASE + 64)).to_equal(0x14000008)
+
+    it "PATCH-02: a failed store still restores RX and reports failure":
+        val (bytes, _) = image_fixture()
+        var port = port_from_image(bytes)
+        port.fail_store = true
+        var leaf = leaf_fixture()
+        expect(leaf.patch_site(port, 1)).to_equal(XRAY_LLVM_STATUS_FAILED_V1)
+        expect(port.log[2]).to_equal("end:{BASE}:{PAGE}")
+
+    it "drives the PR4 control plane: selected sites patched, stop restores off":
+        val (bytes, _) = image_fixture()
+        var port = port_from_image(bytes)
+        var leaf = XrayNativeSledLeafV1.create(image_fixture().1, bytes, BASE, PAGE).unwrap()
+        var bound = XrayNativeBoundLeafV1(leaf: leaf, port: port)
+        var adapter = XrayLlvmAdapterV1.create_for_backend(1, TraceBackendV1.Simple)
+        val prepared = adapter.prepare(bound, native_config(), selection([2])).unwrap()
+        val session = adapter.start(bound, prepared, 4096).unwrap()
+        expect(bound.port.load_u32(BASE + 128)).to_equal(0xD503201F)
+        expect(bound.port.load_u32(BASE + 64)).to_equal(0x14000008)
+        expect(adapter.request_stop(bound, session)).to_equal(Ok(TraceSessionStateV1.Drained))
+        expect(bound.port.load_u32(BASE + 128)).to_equal(0x14000008)
+        expect(bound.port.log.contains("close:4096")).to_equal(true)
+
+    it "PATCH-02: an RX restore that keeps failing leaves the session Faulted, never off":
+        val (bytes, _) = image_fixture()
+        var port = port_from_image(bytes)
+        port.fail_end_left = 100
+        var leaf = XrayNativeSledLeafV1.create(image_fixture().1, bytes, BASE, PAGE).unwrap()
+        var bound = XrayNativeBoundLeafV1(leaf: leaf, port: port)
+        var adapter = XrayLlvmAdapterV1.create_for_backend(1, TraceBackendV1.Simple)
+        val prepared = adapter.prepare(bound, native_config(), selection([1])).unwrap()
+        expect(adapter.start(bound, prepared, 4096)).to_equal(Err(TraceFailureV1.BackendFailure))
+        expect(adapter.state_code()).to_equal(XRAY_LLVM_STATE_FAULTED_V1)
+        bound.port.fail_end_left = 0
+        expect(adapter.recover(bound)).to_equal(Ok(true))
+        expect(bound.port.load_u32(BASE + 64)).to_equal(0x14000008)
+
+    it "keeps the LLVM backend default and rejects a backend mismatch":
+        val (bytes, _) = image_fixture()
+        var bound = XrayNativeBoundLeafV1(leaf: leaf_fixture(), port: port_from_image(bytes))
+        var llvm_adapter = XrayLlvmAdapterV1.create(1)
+        expect(llvm_adapter.prepare(bound, native_config(), selection([1])).is_err()).to_equal(true)

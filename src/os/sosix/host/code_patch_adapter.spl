@@ -1,0 +1,60 @@
+"""SOSIX POSIX code-patch leaf for the XRay stage-2 native patcher (PR5).
+
+Design: doc/04_architecture/compiler/xray/xray_compiler_structural_change_2026-11-06.md
+C.2 "Leaves (Linux)". A narrow page-range leaf, NOT an arbitrary-address API:
+its only caller is XrayNativeSledLeafV1, which derives every address from a
+manifest that passed trace_native_map_validate_v1.
+
+- begin: rt_mprotect(page, len, PROT_READ|PROT_WRITE) (RX -> RW, W^X; the
+  runtime rejects PROT_WRITE|PROT_EXEC outright).
+- store_u32: one aligned 32-bit store through rt_ptr_write_i32.
+- end: rt_mprotect(page, len, PROT_READ|PROT_EXEC). The C runtime
+  (platform/unix_common.h, runtime_legacy_core.c) follows every execute grant
+  with __builtin___clear_cache over the range - DC CVAU / DSB ISH / IC IVAU /
+  DSB ISH / ISB on AArch64 - and on sync failure drops the page to PROT_NONE
+  and returns -1, which the leaf reports as a fault, never as "off".
+
+Requires the C runtime. The Rust seed's interpreter refuses PROT_EXEC on
+aarch64 Linux (no cache-sync primitive wired there), so under the seed `end`
+returns -1 and the leaf fails closed.
+"""
+
+use std.nogc_sync_mut.trace.xray_native_sled_leaf_v1.{XrayCodePatchPortV1}
+use std.nogc_sync_mut.trace.observer_native_channel_v1.{trace_native_channel_close_v1}
+
+@unsafe(reason: "changes page protection of a manifest-validated code page", capabilities: [ffi])
+extern fn rt_mprotect(addr: i64, length: i64, prot: i64) -> i64
+@unsafe(reason: "aligned 32-bit store to a manifest-validated sled word on a page made RW by begin", capabilities: [ffi])
+extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32)
+@unsafe(reason: "reads a manifest-validated sled word", capabilities: [ffi])
+extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
+
+val SOSIX_PROT_READ_WRITE: i64 = 3
+val SOSIX_PROT_READ_EXEC: i64 = 5
+
+export SosixCodePatchAdapterV1
+
+pub class SosixCodePatchAdapterV1:
+    pass
+
+impl XrayCodePatchPortV1 for SosixCodePatchAdapterV1:
+    me begin(page: i64, length: i64) -> i64:
+        unsafe(capabilities: [ffi]): rt_mprotect(page, length, SOSIX_PROT_READ_WRITE)
+
+    me store_u32(addr: i64, value: i64) -> i64:
+        if addr <= 0 or addr % 4 != 0 or value < 0 or value > 4294967295: return -1
+        # Two's-complement reinterpretation, never a saturating cast.
+        val signed = if value > 2147483647: value - 4294967296 else: value
+        unsafe(capabilities: [ffi]): rt_ptr_write_i32(addr, 0, signed as i32)
+        0
+
+    fn load_u32(addr: i64) -> i64:
+        if addr <= 0 or addr % 4 != 0: return -1
+        val word = unsafe(capabilities: [ffi]): rt_ptr_read_i32(addr, 0)
+        (word as i64) & 4294967295
+
+    me end(page: i64, length: i64) -> i64:
+        unsafe(capabilities: [ffi]): rt_mprotect(page, length, SOSIX_PROT_READ_EXEC)
+
+    me close_channel(arena: i64) -> i64:
+        unsafe(capabilities: [ffi]): trace_native_channel_close_v1(arena)
