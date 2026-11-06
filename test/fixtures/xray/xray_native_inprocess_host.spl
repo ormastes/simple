@@ -1,0 +1,190 @@
+# XRay PR5b in-process end-to-end host (run under the Simple binary by
+# scripts/check/check-xray-native-inprocess-e2e.shs).
+#
+# Everything below runs in ONE process against the real code of a
+# `--xray` native AArch64 shared library:
+#   1. dlopen the module, locate + relocate its `.simple_xray_map`, admit it
+#      through trace_native_map_validate_v1 / XrayNativeSledLeafV1.create and
+#      register it with the module's resident runtime;
+#   2. call the traced functions with tracing off (baseline results);
+#   3. aspect params (observer config + pointcuts) -> TraceConfigV1 and a
+#      per-function selection -> PR4 control plane (XrayLlvmAdapterV1, backend
+#      Simple) over the real SOSIX code-patch port (rt_mprotect RW -> RX with
+#      I-cache sync) and the module's dispatcher -> sleds patched in place;
+#   4. call again: results unchanged, the resident trampoline + handler record
+#      entry/exit into the channel, the Simple consumer polls them;
+#   5. request_stop unpatches: sled words are OFF again, calls record nothing.
+# Two sessions with different pointcuts prove per-function runtime selection.
+# Output: one `E2E ...` line per fact, then `E2E-HOST-OK` or `E2E-HOST-ERROR`.
+use std.common.plugin.aspect_params.{AspectParamsV1, ASPECT_TRACE_OBSERVER_EXT_V1}
+use std.common.plugin.iface_id.{ParamExt}
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_aspect_config_v1.{trace_aspect_config_v1}
+use std.common.trace.observer_config_v1.{TRACE_CONFIG_SCHEMA_HASH_V1}
+use std.common.trace.xray_native_map_format_v1.*
+use std.common.trace.xray_native_selection_v1.*
+use std.nogc_sync_mut.trace.observer_native_channel_v1.*
+use std.nogc_sync_mut.trace.xray_llvm_adapter_v1.*
+use std.nogc_sync_mut.trace.xray_native_sled_leaf_v1.*
+use std.nogc_sync_mut.trace.xray_native_module_v1.*
+use os.sosix.host.code_patch_adapter.{SosixCodePatchAdapterV1}
+
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
+extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
+extern fn rt_call_ptr_1(addr: i64, arg1: i64) -> i64
+
+val PAGE: i64 = 4096
+val CAPACITY: i64 = 256
+
+fn fail(message: text):
+    print "E2E-HOST-ERROR: {message}"
+
+fn env(name: text) -> text:
+    rt_env_get(name) ?? ""
+
+fn config_payload() -> text:
+    "trace:\n    schema: 1\n    instrumentation: dynamic\n    backend: simple\n    consistency: raw_edges\n    patch_mode: quiescent\n    abi_profile: simple-aarch64-sled-v1\n    events: [entry, exit, tail_exit]\n"
+
+fn aspect_params(pointcuts: text) -> AspectParamsV1:
+    var params = AspectParamsV1.defaults()
+    params.ext.push(ParamExt(ASPECT_TRACE_OBSERVER_EXT_V1, 1, config_payload().bytes(), TRACE_CONFIG_SCHEMA_HASH_V1))
+    params.ext.push(ParamExt(ASPECT_TRACE_POINTCUTS_EXT_V1, 1, pointcuts.bytes(), TRACE_POINTCUTS_SCHEMA_V1))
+    params
+
+fn word_at(address: i64) -> i64:
+    (rt_ptr_read_i32(address, 0) as i64) & 4294967295
+
+fn sled_words(module: XrayNativeLoadedModuleV1) -> text:
+    var out = ""
+    for row in module.map.sites:
+        val word = word_at(module.text_address + (row.text_offset as i64))
+        out = out + (if word == XRAY_MAP_AARCH64_ON_WORD_V1: "N" else: (if word == XRAY_MAP_AARCH64_OFF_WORD_V1: "B" else: "?"))
+    out
+
+fn new_arena(generation: u64) -> i64:
+    val bytes = trace_native_channel_bytes_v1(CAPACITY)
+    val arena = rt_alloc(bytes + 8)
+    val aligned = arena + ((8 - (arena % 8)) % 8)
+    if trace_native_channel_initialize_v1(aligned, bytes, CAPACITY, generation, 1) != TRACE_NATIVE_CHANNEL_OK_V1:
+        return 0
+    aligned
+
+# Drain the channel through the Simple consumer: "kind:function:site" rows.
+fn drain(arena: i64) -> [text]:
+    val out_buf = rt_alloc(96 + 8)
+    val output = out_buf + ((8 - (out_buf % 8)) % 8)
+    var rows: [text] = []
+    while trace_native_channel_poll_into_v1(arena, output, 96) == TRACE_NATIVE_CHANNEL_OK_V1:
+        val header = rt_ptr_read_i64(output, 0)
+        val function_site = rt_ptr_read_i64(output, 24)
+        val kind = (header >> 32) & 65535
+        val function_id = function_site & 4294967295
+        val site_id = (function_site >> 32) & 4294967295
+        rows.push("{kind}:{function_id}:{site_id}")
+    rows
+
+fn call_all(entries: [i64], args: [i64]) -> text:
+    var out = ""
+    for entry in entries:
+        for arg in args:
+            out = out + "{rt_call_ptr_1(entry, arg)},"
+    out
+
+# XrayLlvmAdapterV1 is a struct (value): the updated control plane is returned
+# so the next session continues its incarnation sequence; None on failure.
+fn session(adapter_in: XrayLlvmAdapterV1, bound: XrayNativeBoundLeafV1, module: XrayNativeLoadedModuleV1,
+        label: text, pointcuts: text, entries: [i64], args: [i64], baseline: text) -> XrayLlvmAdapterV1?:
+    var adapter = adapter_in
+    val params = aspect_params(pointcuts)
+    val config = match trace_aspect_config_v1(params):
+        case Ok(Some(found)): found
+        case _:
+            fail("{label}: aspect params carry no valid observer config")
+            return None
+    val names = match trace_aspect_pointcuts_v1(params):
+        case Ok(found): found
+        case Err(_):
+            fail("{label}: malformed pointcuts")
+            return None
+    val selection = match xray_native_selection_v1(module.map, names, 1, 1):
+        case Ok(found): found
+        case Err(failure):
+            fail("{label}: selection rejected: {trace_failure_code_v1(failure)}")
+            return None
+    var selected: [i64] = []
+    for site in selection.sites: selected.push(site.site_id as i64)
+    val prepared = match adapter.prepare(bound, config, selection):
+        case Ok(found): found
+        case Err(failure):
+            fail("{label}: prepare rejected: {trace_failure_code_v1(failure)}")
+            return None
+    # The channel generation is the prepared incarnation (C.2 step 3).
+    val arena = new_arena(prepared.incarnation)
+    if arena == 0:
+        fail("{label}: channel init failed")
+        return None
+    val started = match adapter.start(bound, prepared, arena):
+        case Ok(found): found
+        case Err(failure):
+            fail("{label}: start rejected: {trace_failure_code_v1(failure)}")
+            return None
+    print "E2E {label} selected_sites={selected} words_on={sled_words(module)}"
+    val traced_results = call_all(entries, args)
+    print "E2E {label} results_on={traced_results} baseline={baseline}"
+    val records = drain(arena)
+    print "E2E {label} records={records}"
+    match adapter.request_stop(bound, started):
+        case Ok(_): ()
+        case Err(failure):
+            fail("{label}: request_stop rejected: {trace_failure_code_v1(failure)}")
+            return None
+    print "E2E {label} words_off={sled_words(module)}"
+    val after = call_all(entries, args)
+    val late = drain(arena)
+    print "E2E {label} results_off={after} records_after_stop={late.len()} lost={trace_native_channel_lost_v1(arena)}"
+    if traced_results != baseline or after != baseline:
+        fail("{label}: traced results differ from baseline")
+        return None
+    Some(adapter)
+
+fn main():
+    val lib = env("XRAY_E2E_LIB")
+    val functions = env("XRAY_E2E_FUNCTIONS").split(",")
+    if lib == "" or functions.len() == 0:
+        return fail("XRAY_E2E_LIB / XRAY_E2E_FUNCTIONS not set")
+    val args: [i64] = [0, 9, -5]
+    var dl = match XrayNativeDlModuleV1.open(lib):
+        case Ok(found): found
+        case Err(failure): return fail("dlopen/runtime symbols: {trace_failure_code_v1(failure)}")
+    val module = match xray_native_locate_module_v1(lib, 1, PAGE):
+        case Ok(found): found
+        case Err(failure): return fail("locate .simple_xray_map: {trace_failure_code_v1(failure)}")
+    var names: [text] = []
+    for function in module.map.functions: names.push(function.name)
+    print "E2E map functions={names} sites={module.map.sites.len()} text=0x{module.text_address} words={sled_words(module)}"
+    val leaf = match XrayNativeSledLeafV1.create(module.manifest, module.image, module.image_base, PAGE):
+        case Ok(found): found
+        case Err(failure): return fail("leaf admission: {trace_failure_code_v1(failure)}")
+    val slot = dl.register(module)
+    print "E2E registered slot={slot}"
+    if slot <= 0: return fail("resident runtime rejected the map")
+    var entries: [i64] = []
+    for name in functions:
+        val entry = dl.symbol(name)
+        if entry == 0: return fail("no symbol {name}")
+        entries.push(entry)
+    val baseline = call_all(entries, args)
+    print "E2E baseline={baseline}"
+    var bound = XrayNativeBoundLeafV1(leaf: leaf, port: SosixCodePatchAdapterV1(), dispatch: dl)
+    var adapter = XrayLlvmAdapterV1.create_for_backend(1, TraceBackendV1.Simple)
+    val after_s1 = match session(adapter, bound, module, "s1", env("XRAY_E2E_POINTCUTS_1"), entries, args, baseline):
+        case Some(next): next
+        case None: return
+    match session(after_s1, bound, module, "s2", env("XRAY_E2E_POINTCUTS_2"), entries, args, baseline):
+        case Some(_): ()
+        case None: return
+    print "E2E-HOST-OK"
+
+main()

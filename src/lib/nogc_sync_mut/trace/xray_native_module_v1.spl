@@ -1,0 +1,299 @@
+# Loaded-module registration for XRay native AArch64 sleds (PR5b).
+# Design: doc/04_architecture/compiler/xray/xray_compiler_structural_change_2026-11-06.md
+# A.5 (map + registration) and C.2 (quiescent protocol).
+#
+# Finds `.simple_xray_map` of a module mapped into THIS process (a dlopen'd
+# `--xray` shared library or the main executable), relocates it, and builds
+# the V1 manifest + bounded image copy that XrayNativeSledLeafV1.create admits:
+#   1. /proc/self/maps: the module's mappings (load bias from its offset-0
+#      mapping and the first PT_LOAD of the file) and its executable range;
+#   2. the module's ELF section table (read from the file, never trusted for
+#      bytes): `.simple_xray_map` sh_addr/sh_size -> runtime map address;
+#   3. the map's text_base field, relocated by the static linker
+#      (R_AARCH64_PREL64), gives the runtime address of the object's .text;
+#   4. every sled's BL target (the resident trampoline) is decoded from the
+#      loaded code so the validator can bind it to an executable range.
+# Registration with the resident runtime (simple_xray_native_register_module_v1
+# in src/runtime/xray/xray_native_runtime_aarch64.c) happens through
+# XrayNativeDlModuleV1, which is also the XrayNativeDispatchPortV1 binding.
+#
+# Deliberate deviation from A.5's init-array entry: registration is driven by
+# the Simple control plane after the module is mapped (startup or dlopen), so
+# `--xray` objects carry no constructor and no extra root symbol; the map is
+# located through the section table and relocated by its own PREL64 field.
+# Everything here is control plane: cold, may allocate, never called by a hook.
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_native_map_v1.*
+use std.common.trace.xray_native_map_format_v1.*
+use std.nogc_sync_mut.trace.xray_native_sled_leaf_v1.{XrayNativeDispatchPortV1, XrayNativeSledLeafV1}
+
+extern fn rt_file_read_text(path: text) -> text?
+extern fn rt_file_read_bytes(path: text) -> [u8]?
+@unsafe(reason: "reads a byte of a mapping /proc/self/maps reports readable", capabilities: [ffi])
+extern fn rt_ptr_read_u8(addr: i64, offset: i64) -> i64
+@unsafe(reason: "loads an --xray shared library into this process", capabilities: [ffi])
+extern fn rt_host_dynlib_open(path: text, mode: i64) -> i64
+@unsafe(reason: "resolves an exported symbol of a loaded module", capabilities: [ffi])
+extern fn rt_host_dynlib_symbol(handle: i64, name: text) -> i64
+@unsafe(reason: "calls a resolved native entry point with integer arguments", capabilities: [ffi])
+extern fn rt_call_ptr_2(addr: i64, arg1: i64, arg2: i64) -> i64
+@unsafe(reason: "calls a resolved native entry point with integer arguments", capabilities: [ffi])
+extern fn rt_call_ptr_3(addr: i64, arg1: i64, arg2: i64, arg3: i64) -> i64
+
+pub const XRAY_NATIVE_RUNTIME_IDENTITY_V1 = "simple-xray-native-runtime-aarch64-v1"
+pub const XRAY_NATIVE_ABI_PROFILE_V1 = "simple-aarch64-sled-v1"
+const XRAY_DLOPEN_NOW_V1: i64 = 2
+
+pub struct XrayProcMappingV1:
+    start: i64
+    end: i64
+    readable: bool
+    writable: bool
+    executable: bool
+    offset: i64
+    path: text
+
+pub struct XrayNativeLoadedModuleV1:
+    path: text
+    map_address: i64
+    map: XrayMapV1
+    text_address: i64
+    image_base: i64
+    manifest: TraceNativeMapV1
+    image: [u8]
+
+# -1 when `digits` is not 1..15 hex digits. Not `i64?` + `?`: under the seed
+# run engine `?` on an Option<i64> yields the tagged word (value * 8), see
+# doc/08_tracking/bug/seed_option_question_mark_returns_tagged_int_2026-11-06.md.
+fn xray_hex_v1(digits: text) -> i64:
+    if digits.len() == 0 or digits.len() > 15: return -1
+    var value = 0
+    for byte in digits.bytes():
+        val code = byte as i64
+        var nibble = -1
+        if code >= 48 and code <= 57: nibble = code - 48
+        if code >= 97 and code <= 102: nibble = code - 87
+        if code >= 65 and code <= 70: nibble = code - 55
+        if nibble < 0: return -1
+        value = (value << 4) | nibble
+    value
+
+# One /proc/self/maps line: "start-end perms offset dev inode [path]".
+pub fn xray_proc_maps_line_v1(line: text) -> XrayProcMappingV1?:
+    var fields: [text] = []
+    for part in line.split(" "):
+        if part != "": fields.push(part)
+    if fields.len() < 5: return None
+    val range = fields[0].split("-")
+    if range.len() != 2 or fields[1].len() < 3: return None
+    val start = xray_hex_v1(range[0])
+    val end = xray_hex_v1(range[1])
+    val offset = xray_hex_v1(fields[2])
+    if start < 0 or end < 0 or offset < 0 or end <= start: return None
+    var path = ""
+    if fields.len() >= 6:
+        path = fields[5]
+        for extra in 6..fields.len(): path = path + " " + fields[extra]
+    val perms = fields[1]
+    Some(XrayProcMappingV1(start: start, end: end, readable: perms[0] == "r",
+        writable: perms[1] == "w", executable: perms[2] == "x", offset: offset, path: path))
+
+fn xray_le_v1(bytes: [u8], offset: i64, width: i64) -> i64:
+    var value = 0
+    for index in 0..width:
+        value = value | ((bytes[offset + index] as i64) << (index * 8))
+    value
+
+# (sh_addr, sh_size) of the named section of an ELF64 little-endian file.
+pub fn xray_elf_section_v1(elf: [u8], name: text) -> (i64, i64)?:
+    if elf.len() < 64 or elf[0] != 127u8 or elf[4] != 2u8 or elf[5] != 1u8: return None
+    val shoff = xray_le_v1(elf, 40, 8)
+    val shentsize = xray_le_v1(elf, 58, 2)
+    val shnum = xray_le_v1(elf, 60, 2)
+    val shstrndx = xray_le_v1(elf, 62, 2)
+    if shentsize != 64 or shoff <= 0 or shoff + shnum * 64 > elf.len() or shstrndx >= shnum: return None
+    val strtab = xray_le_v1(elf, shoff + shstrndx * 64 + 24, 8)
+    val wanted = name.bytes()
+    for index in 0..shnum:
+        val header = shoff + index * 64
+        val at = strtab + xray_le_v1(elf, header, 4)
+        if at + wanted.len() >= elf.len(): continue
+        var same = elf[at + wanted.len()] == 0u8
+        for k in 0..wanted.len():
+            if elf[at + k] != wanted[k]: same = false
+        if same:
+            return Some((xray_le_v1(elf, header + 16, 8), xray_le_v1(elf, header + 32, 8)))
+    None
+
+# p_vaddr of the PT_LOAD segment that maps file offset 0.
+pub fn xray_elf_first_load_vaddr_v1(elf: [u8]) -> i64?:
+    if elf.len() < 64: return None
+    val phoff = xray_le_v1(elf, 32, 8)
+    val phentsize = xray_le_v1(elf, 54, 2)
+    val phnum = xray_le_v1(elf, 56, 2)
+    if phentsize != 56 or phoff <= 0 or phoff + phnum * 56 > elf.len(): return None
+    for index in 0..phnum:
+        val header = phoff + index * 56
+        if xray_le_v1(elf, header, 4) == 1 and xray_le_v1(elf, header + 8, 8) == 0:
+            return Some(xray_le_v1(elf, header + 16, 8))
+    None
+
+# Signed BL target of the instruction word `word` located at `at`.
+pub fn xray_a64_bl_target_v1(at: i64, word: i64) -> i64?:
+    if (word & 0xFC000000) != 0x94000000: return None
+    var imm = word & 0x3FFFFFF
+    if imm >= 0x2000000: imm = imm - 0x4000000
+    Some(at + imm * 4)
+
+fn xray_read_bytes_v1(address: i64, length: i64) -> [u8]:
+    var out: [u8] = []
+    unsafe(capabilities: [ffi]):
+        for index in 0..length:
+            out.push(rt_ptr_read_u8(address, index) as u8)
+    out
+
+fn xray_read_u32_v1(address: i64) -> i64:
+    val bytes = xray_read_bytes_v1(address, 4)
+    xray_le_v1(bytes, 0, 4)
+
+fn xray_mapping_containing_v1(mappings: [XrayProcMappingV1], address: i64, length: i64) -> XrayProcMappingV1?:
+    for mapping in mappings:
+        if address >= mapping.start and address + length <= mapping.end:
+            return Some(mapping)
+    None
+
+fn xray_kind_v1(code: i64) -> TraceEventKindV1:
+    if code == XRAY_MAP_KIND_ENTRY_V1: return TraceEventKindV1.Entry
+    if code == XRAY_MAP_KIND_EXIT_V1: return TraceEventKindV1.Exit
+    TraceEventKindV1.TailExit
+
+fn xray_build_identity_v1(build_id: [u8]) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    for byte in build_id:
+        val value = byte as i64
+        out = out + digits[value >> 4] + digits[value & 15]
+    out
+
+# Locate, relocate and describe the `.simple_xray_map` of the module mapped
+# from `path`. Err(InstrumentationAbsent) when the module has no map; any
+# inconsistency is Err(InvalidMap) and nothing is admitted.
+pub fn xray_native_locate_module_v1(path: text, module_instance: u64, page_size: i64
+        ) -> Result<XrayNativeLoadedModuleV1, TraceFailureV1>:
+    if module_instance == 0 or page_size < 4096 or (page_size & (page_size - 1)) != 0:
+        return Err(TraceFailureV1.InvalidArgument)
+    val maps_text = rt_file_read_text("/proc/self/maps") ?? ""
+    var mappings: [XrayProcMappingV1] = []
+    for line in maps_text.split("\n"):
+        match xray_proc_maps_line_v1(line):
+            case Some(mapping):
+                if mapping.path == path: mappings.push(mapping)
+            case None: ()
+    var base_mapping: XrayProcMappingV1? = None
+    for mapping in mappings:
+        if mapping.offset == 0 and base_mapping.is_none(): base_mapping = Some(mapping)
+    val first = match base_mapping:
+        case Some(mapping): mapping
+        case None: return Err(TraceFailureV1.InstrumentationAbsent)
+    val elf = rt_file_read_bytes(path) ?? []
+    val (section_addr, section_size) = match xray_elf_section_v1(elf, ".simple_xray_map"):
+        case Some(found): found
+        case None: return Err(TraceFailureV1.InstrumentationAbsent)
+    val first_vaddr = match xray_elf_first_load_vaddr_v1(elf):
+        case Some(vaddr): vaddr
+        case None: return Err(TraceFailureV1.InvalidMap)
+    val bias = first.start - (first_vaddr - (first_vaddr % page_size))
+    val map_address = bias + section_addr
+    if section_size < XRAY_MAP_HEADER_BYTES_V1: return Err(TraceFailureV1.InvalidMap)
+    val map_mapping = match xray_mapping_containing_v1(mappings, map_address, section_size):
+        case Some(mapping): mapping
+        case None: return Err(TraceFailureV1.InvalidMap)
+    if not map_mapping.readable or map_mapping.writable or map_mapping.executable:
+        return Err(TraceFailureV1.InvalidMap)
+    val map_bytes = xray_read_bytes_v1(map_address, section_size)
+    val map = xray_map_decode_v1(map_bytes)?
+    val text_address = xray_map_runtime_text_base_v1(map_address, map.text_base)
+    if map.sites.len() == 0 or map.functions.len() == 0: return Err(TraceFailureV1.InvalidMap)
+    val first_sled = text_address + (map.sites[0].text_offset as i64)
+    val code = match xray_mapping_containing_v1(mappings, first_sled, XRAY_MAP_AARCH64_SLED_BYTES_V1):
+        case Some(mapping): mapping
+        case None: return Err(TraceFailureV1.InvalidMap)
+    if not code.executable or code.writable: return Err(TraceFailureV1.InvalidMap)
+
+    val low = if map_address < code.start: map_address else: code.start
+    val image_base = low - (low % page_size)
+    val map_end = map_address + section_size
+    val image_end = if map_end > code.end: map_end else: code.end
+    val image_size = image_end - image_base
+    var image: [u8] = []
+    for index in 0..image_size: image.push(0u8)
+    for index in 0..section_size: image[map_address - image_base + index] = map_bytes[index]
+    val code_bytes = xray_read_bytes_v1(code.start, code.end - code.start)
+    for index in 0..code_bytes.len(): image[code.start - image_base + index] = code_bytes[index]
+
+    var sites: [TraceNativeSiteV1] = []
+    for index in 0..map.sites.len():
+        val row = map.sites[index]
+        val sled = text_address + (row.text_offset as i64)
+        if sled < code.start or sled + XRAY_MAP_AARCH64_SLED_BYTES_V1 > code.end:
+            return Err(TraceFailureV1.InvalidMap)
+        val target = match xray_a64_bl_target_v1(sled + 20, xray_read_u32_v1(sled + 20)):
+            case Some(found): found
+            case None: return Err(TraceFailureV1.InvalidMap)
+        sites.push(TraceNativeSiteV1(site_id: (index + 1) as u32, function_id: row.local_fn_id,
+            kind: xray_kind_v1(row.kind), offset: (sled - image_base) as u64,
+            target_offset: (target - image_base) as u64, encoding: TraceNativeEncodingV1.Arm64Branch26))
+    var functions: [TraceNativeFunctionV1] = []
+    for function in map.functions:
+        val first_site = map.sites[(function.first_site as i64) - 1]
+        val last_site = map.sites[(function.first_site as i64) + (function.site_count as i64) - 2]
+        val start = text_address + (first_site.text_offset as i64)
+        val end = text_address + (last_site.text_offset as i64) + XRAY_MAP_AARCH64_SLED_BYTES_V1
+        functions.push(TraceNativeFunctionV1(function_id: function.local_fn_id,
+            offset: (start - image_base) as u64, size: (end - start) as u64))
+    val manifest = TraceNativeMapV1(schema: 1, module_instance: module_instance, manifest_incarnation: 1,
+        build_identity: xray_build_identity_v1(map.build_id), source_identity: path,
+        runtime_identity: XRAY_NATIVE_RUNTIME_IDENTITY_V1, target: "aarch64-unknown-linux-gnu",
+        abi_profile: XRAY_NATIVE_ABI_PROFILE_V1, image_size: image_size as u64,
+        map_offset: (map_address - image_base) as u64, map_size: section_size as u64,
+        ranges: [
+            TraceImageRangeV1(offset: (map_mapping.start - image_base) as u64,
+                size: (map_mapping.end - map_mapping.start) as u64, readable: true, writable: false, executable: false),
+            TraceImageRangeV1(offset: (code.start - image_base) as u64,
+                size: (code.end - code.start) as u64, readable: true, writable: false, executable: true)
+        ],
+        functions: functions, sites: sites)
+    Ok(XrayNativeLoadedModuleV1(path: path, map_address: map_address, map: map,
+        text_address: text_address, image_base: image_base, manifest: manifest, image: image))
+
+# A dlopen'd `--xray` module and its resident runtime entry points. It is the
+# XrayNativeDispatchPortV1 binding for that module.
+pub class XrayNativeDlModuleV1:
+    handle: i64
+    register_entry: i64
+    install_entry: i64
+
+impl XrayNativeDlModuleV1:
+    # RTLD_NOW. Err(InstrumentationAbsent) when the module carries no resident
+    # runtime (it was not linked as an --xray native build).
+    static fn open(path: text) -> Result<XrayNativeDlModuleV1, TraceFailureV1>:
+        val handle = unsafe(capabilities: [ffi]): rt_host_dynlib_open(path, XRAY_DLOPEN_NOW_V1)
+        if handle == 0: return Err(TraceFailureV1.InvalidArgument)
+        val register_entry = unsafe(capabilities: [ffi]): rt_host_dynlib_symbol(handle, "simple_xray_native_register_module_v1")
+        val install_entry = unsafe(capabilities: [ffi]): rt_host_dynlib_symbol(handle, "simple_xray_native_install_v1")
+        if register_entry == 0 or install_entry == 0: return Err(TraceFailureV1.InstrumentationAbsent)
+        Ok(XrayNativeDlModuleV1(handle: handle, register_entry: register_entry, install_entry: install_entry))
+
+    fn symbol(name: text) -> i64:
+        unsafe(capabilities: [ffi]): rt_host_dynlib_symbol(self.handle, name)
+
+    # Register an admitted module's map with the resident runtime (control
+    # plane only). The runtime re-checks every row; 0 means rejected.
+    me register(module: XrayNativeLoadedModuleV1) -> i64:
+        unsafe(capabilities: [ffi]):
+            rt_call_ptr_2(self.register_entry, module.map_address, module.manifest.module_instance as i64)
+
+impl XrayNativeDispatchPortV1 for XrayNativeDlModuleV1:
+    me publish(module_instance: u64, arena: i64, generation: u64) -> i64:
+        unsafe(capabilities: [ffi]):
+            rt_call_ptr_3(self.install_entry, module_instance as i64, arena, generation as i64)
