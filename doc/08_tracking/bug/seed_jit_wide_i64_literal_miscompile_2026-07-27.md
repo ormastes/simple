@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** open
+**Status:** fixed (re-verified 2026-11-06; no longer reproduces, see "Re-verification 2026-11-06")
 **Found:** 2026-07-27 (Simple RISC-V hardening campaign, Lane J, while proving the
 `XlenConfig.mask` fix)
 **Area:** Rust seed JIT (cranelift lane) — constant materialization of wide i64
@@ -99,3 +99,17 @@ Probe `_scratch/p_int.spl`. `0x8000000000000000` was NOT probed (it is not
 expressible as a positive i64 literal in the probe), so the half of this record
 concerning that specific value is UNTESTED rather than disproven.
 
+
+## Re-verification 2026-11-06
+
+No longer reproduces on a seed built from `origin/release/1.0.0` @ ecb705896a4 (`cargo build --release --bin simple`, Windows x86_64 host). The fix is the int61 boxing / i64-boundary work
+(`doc/08_tracking/bug/int61_bit_truncation_jit_scalars_and_native_container_boxing_2026-08-09.md`,
+`jit_i64_boundary_constant_wraps_to_negative_2026-08-09.md`), pinned by
+`src/compiler_rust/compiler/tests/i64_boundary_jit.rs`.
+
+```
+val a: i64 = 0x7FFFFFFFFFFFFFFF; b = 0x8000000000000000; c = 9223372036854775807
+d = (1 << 63) - 1; e = 0xFFFFFFFFFFFFFFFF
+SIMPLE_EXECUTION_MODE=jit        -> 9223372036854775807 -9223372036854775808 9223372036854775807 9223372036854775807 -1
+SIMPLE_EXECUTION_MODE=interpret  -> identical
+```

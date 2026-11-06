@@ -3,12 +3,23 @@
 ## Compiler, interpreter, and BuildRunner design and implementation plan
 
 **Date:** 2026-11-06  
-**Revision:** 1.0 — consolidated final report for this conversation, including the expanded AoS/SoA and XRay request  
+**Revision:** 1.1 — 1.0 consolidated report, plus the 2026-11-06 review (stale-claim fixes, cross-plan unification, TDD/SSpec plan in §17)  
 **Repository:** `ormastes/simple`  
 **Current source-inspection pin:** `0e4d613ab46a3af12e2111c480b1c1db9f6dc513`  
 **Earlier inspection retained for comparison:** `97700b29e10675867891503f1e634b50a192356d`  
 **Status:** Accepted plan; implementation in progress  
 **Suggested repository destination:** `doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md` (proposed, not written to the repository).
+
+### Review notes (reviewed 2026-11-06 against `origin/release/1.0.0` @ `8991bc5067d`)
+
+What changed in revision 1.1; the 1.0 text is otherwise kept verbatim.
+
+- **XRay is partly landed.** PR1–PR4 (#7177 `--xray`/`MirFunction.xray_mode`, #7185 `TraceObserverV1` contract in `src/lib/common/trace/`, #7191 LLVM attrs + `trace.instrumentation` SDN key, #7205 Linux LLVM adapter) are merged. §10.1, §10.3, §12.2 and W5 now cite the landed names instead of a "planned facade"; "provider" means `TraceBackendV1 {Auto, Llvm, Simple, None}`.
+- **Owner decisions bound in (XRay doc §G):** no `@xray` attribute; `--xray` (+ `trace.instrumentation`) is the static switch, aspect params (`AspectParamsV1.ext["simple.trace/observer-v1"]`) are the runtime switch; Cranelift, interpreter, JIT, VHDL and GPU return `UnsupportedTarget`; no instruction threshold (never-list only). §8.3's `profiles.*.events` key was an SDN-side runtime selection and is removed.
+- **`.sprof` v2 already exists** as the collection-workload envelope: `sprof_loader.spl:190` accepts the `sprof-v2` version string, and the collection records are decoded by the sibling `src/app/optimize/sprof_collection_profile.spl`; the loader's own record validator still admits only function/block/edge (`:203`, `:339`, `:421`). W5 extends that envelope; it does not define a new session format (§13.3).
+- **Cross-plan unification** with [`adaptive_collections_profiling_switching_2026-09-16.md`](adaptive_collections_profiling_switching_2026-09-16.md): one resolver (W1; its `ResolvedCollectionPolicyV1` is the collection row of this plan's envelope), one site attribute (existing `@collection_algorithm` plus at most one site label), one switching-mode table (§11.1), one profile/session identity (`observer_session_v1.spl` + loader `run_id`/`workload_id`). Unified package order is in §17.4.
+- **Over-engineering cuts:** §7.2 candidates beyond linear / chained hash / AVL / sorted array are inventory, not backlog; W9 (general live migration) and W10 (Windows) are deferred behind W6 evidence; the adaptive plan's GPU package (C9) is blocked and not part of this program.
+- **TDD/SSpec plan added (§17):** first failing spec per package, `describe`/`it` names, RED evidence, GREEN gate, lane (interpreter / native build / hardware), and where `# @tag:in-development` applies. No spec files are created by the review itself.
 
 This report completes the attribute-support request and the subsequent request to make three data families consistent: **record collections with AoS/SoA layouts, adaptive sets/maps, and typed node trees**. It specifies one policy and profiling framework without pretending that their different physical choices are the same operation.
 
@@ -32,6 +43,7 @@ New API names, attributes, configuration keys, diagnostics, and test IDs below a
 14. [Implementation work packages](#14-implementation-work-packages)
 15. [Acceptance, performance, and formal verification](#15-acceptance-performance-and-formal-verification)
 16. [Sources and completion boundary](#16-sources-and-completion-boundary)
+17. [TDD and SSpec plan (reviewed 2026-11-06)](#17-tdd-and-sspec-plan-reviewed-2026-11-06)
 
 ## 1. Executive decisions and corrections
 
@@ -95,7 +107,7 @@ The later XRay plan's **resident provider/instrumentation policy** takes precede
 | Compiler layout lowering | Narrow typed raw-allocation projections and a compiler-private pilot exist. [R08] | This is not universal ordinary-array conversion. Source binding, writes, mixed fields, alias coverage and backend expansion need qualification. |
 | Set/map switching | Generic `AdaptiveMap` and `AdaptiveSet` have linear/hash/ordered selection and actual conversion code. [R09] | They are ordinary exclusively mutable containers, not a qualified lock-free shared cache or arbitrary region-migration engine. |
 | Actual map algorithms | Generic map uses bucketed separate chaining; ordered map uses an array-indexed AVL tree. [R10] | Do not call the existing ordered backend a B-tree or the hash backend a Swiss table. |
-| Source algorithm annotation | `@collection_algorithm` recognizes `auto`, `linear`, `hash`, `ordered` and routes attributed constructors with site/profile data. [R11] | General SDN/schema/layout unification and context isolation are additional work. |
+| Source algorithm annotation | `@collection_algorithm` recognizes `auto`, `linear`, `hash`, `ordered` (`_ParserDecls/fn_struct_decls.spl:1100`) and routes attributed constructors with site/profile data; site identity is `ast://{module_key}[/{owner}]/local/{name}#{source_hash}` (`collection_feedback.spl:50-52`). [R11] | General SDN/schema/layout unification is additional work. Context isolation is partial: `CollectionFeedbackState` take/install exists (`6578c2c1037`), but the catalog is still the process-global `_parser_collection_feedback` (`:15`). |
 | Typed collection selection | Shared semantic selection has proof/memory gates; a narrow fresh integer-dictionary membership consumer exists. [R12] | General adaptive-container MIR integration is incomplete; saying there is no executable consumer at all would also be wrong. |
 | Collection capture | Shared capture ABI and `.sprof` ingestion expose size, lookup, probe, materialization and loop/filter observations; emitter coverage and executable qualification vary by path. [R13] | Existing capture is not XRay; its active global-lock/string-key path cannot be assumed acceptable on a strict low-contention hot path. |
 | Field aspects | The current validator marks `get`/`set` as E1507-deferred; MIR generic assignment is not a typed property contract. Accepted `attr(...)` also lacks matching support in the inspected tokenized compiler/interpreter paths. [R14] | Add canonical logical attr events across parser, matcher, compiler, interpreter and tooling. |
@@ -396,6 +408,8 @@ Complexity below describes standard algorithm families, not measured Simple perf
 
 Do not implement all candidates before shipping the common contract. Start with the three real adaptive backends, then add sorted arrays and one measured hash alternative. Candidate registries must describe semantic guarantees, allocator/drop behavior, target support, migration recipe, concurrency/progress and measured cost provenance.
 
+*Review 2026-11-06:* only linear, chained hash, AVL (all existing) and sorted entry array appear in any work package (W4, then one C6 extension). Robin-Hood, Swiss, cuckoo, B-tree, direct index, bitset and perfect hash are inventory only; adding one is a separate measured proposal, never a line item of this plan.
+
 ### 7.3 Hard constraints precede cost
 
 Before considering a representation, require:
@@ -501,22 +515,21 @@ data_policy:
             lookup: "hash"
             occupancy: "sparse"
             application: "new_snapshot"
-    profiles:
-        compiler_data:
-            provider: "trace"
-            events: ["data_field", "collection", "node_traversal"]
-            sampling: "bounded"
-            raw_values: false
-            on_loss: "mark_incomplete"
+    # Review 2026-11-06: there is NO `profiles:` block. Which data sites and
+    # event kinds are observed is the RUNTIME switch and is carried only by
+    # aspect params (`AspectParamsV1.ext["simple.trace/observer-v1"]`,
+    # `src/lib/common/plugin/aspect_params.spl:10`); `profile_group` names
+    # that aspect-params entry. SDN carries only the STATIC switch below,
+    # mirroring `--xray` (XRay doc §G Q1/Q3).
     trace:
-        backend: "auto"
-        instrumentation: "dynamic"
-        consistency: "raw_edges"
+        backend: "auto"            # TraceBackendV1 {auto, llvm, simple, none}
+        instrumentation: "dynamic" # TraceInstrumentationV1 {off, dynamic, always_on}
+        consistency: "raw_edges"   # TraceConsistencyV1 {raw_edges, paired_spans}
 ```
 
 Schema-declared fields in this example may instead be declared in SPL. Identical dual declarations are reconciled; conflicting ones are errors. The selector `compiler.ast.*` is resolved to canonical owners/sites, not searched as a string in the hot path. A configuration-only declaration must have an explicit module/build owner and a generated-surface manifest; it cannot inject fields into an arbitrary external package without authority.
 
-The trace backend is a **build/config choice**, not hard-coded in data classes. Runtime selectors may enable prepared observers; they cannot manufacture missing instrumentation or change an admitted ABI profile.
+The trace backend is a **build/config choice**, not hard-coded in data classes. Aspect params enable prepared observers at runtime; they cannot manufacture missing instrumentation (static-off output is byte-identical, pinned by `scripts/check/check-xray-static-off-identity.shs`) or change an admitted ABI profile. There is no `@xray` attribute and no per-function threshold: with the static switch on, every function except the never-list carries sleds.
 
 ### 8.4 Conflict and precedence rules
 
@@ -598,6 +611,8 @@ Static semantics-changing advice, where separately supported, remains in the com
 
 Follow the staged XRay plan's public lifecycle: capabilities, prepare, start, request_stop, drain, poll, flush, stats, release. Applications, NodeStore, adaptive collections and optimizer clients do not call `__xray_*` directly. [D05]
 
+*Landed state (review 2026-11-06):* the facade is `trait TraceObserverV1` (`src/lib/common/trace/observer_contract_v1.spl:155`, PR #7185) with exactly that lifecycle; "provider" below means `TraceBackendV1 {Auto, Llvm, Simple, None}` (`:27`). Stage 1 (Linux LLVM through compiler-rt) landed as `src/lib/nogc_sync_mut/trace/xray_llvm_adapter_v1.spl` + `src/runtime/xray/xray_llvm_adapter_linux.c` (PR #7205); stage 2 (pure-Simple sleds, AArch64 first) is open as PR #7211. Owner decisions that bind every lane here: no `@xray` attribute (selection only through aspect params); `--xray` + `trace.instrumentation` is static and off by default; Cranelift, the interpreter, JIT, VHDL and GPU lanes reject `--xray` with `UnsupportedTarget`; no instruction threshold. Code, maps and dispatcher stay resident until process exit — release is never unload.
+
 | Provider stage | Scope | Data-system contract |
 |---|---|---|
 | 1: Linux LLVM XRay | Qualified hosted LLVM/compiler-rt path | Common data event extension; backend-private site map adapter |
@@ -637,7 +652,7 @@ Do not force every tiny getter to remain uninlined merely to make it visible as 
 
 ### 10.3 Shared event and profile identity
 
-Reuse the tracing facade's canonical header and reserve/declare the data-observation extension before freezing its deployed schema. If the base format is already frozen, use its advertised extension mechanism or an explicit negotiated new version; never reinterpret an old event ordinal.
+The base format is already frozen: `TraceEventV1` is a fixed 96-byte record (`TRACE_OBSERVER_EVENT_BYTES_V1`, PR #7185) and `TraceEventKindV1` has only function-edge, loss and span kinds — no data kind. A data observation is therefore a **separate versioned record family** carried through the same session/channel, declared as its own kind through the contract's versioned extension rule; it never reinterprets `payload0..2` or an old event ordinal.
 
 Cold capture manifest:
 
@@ -816,7 +831,7 @@ The Rust and Pure-Simple interpreters must consume the same resolved logical con
 
 Required parity covers receiver/RHS evaluation order, visibility, exact type errors, missing attributes, initialization, stale handles, nested-place updates, move semantics, successful/failing aspects and event count. A missing property must not inherit an unrelated legacy zero-default behavior.
 
-A managed reference AoS/SoA implementation can validate semantics in the interpreter; it is not proof of the same native ABI, SIMD behavior or speed. If an interpreter host cannot provide XRay, an explicitly selected counter/reference provider may still validate the observation contract, but the result must identify that provider and must not be labeled XRay-native evidence.
+A managed reference AoS/SoA implementation can validate semantics in the interpreter; it is not proof of the same native ABI, SIMD behavior or speed. The interpreter, JIT and Cranelift lanes reject `--xray` with `UnsupportedTarget` (owner decision Q2); on those lanes the existing `collection_capture` recorder is the only observation source, its evidence is labeled as such, and it is never presented as XRay-native evidence.
 
 ### 12.3 Compiler node-pool pilot
 
@@ -886,7 +901,7 @@ Encode logical IDs with their enclosing namespace/snapshot context; do not seria
 
 On decode, validate snapshot-local references and rebind them to fresh qualified runtime region/store/node identities. Loading an artifact twice creates independently valid runtime ownership; serialized generations or old ownership tokens cannot resurrect authority. Historical profile IDs remain attribution metadata, never dereferenceable runtime handles.
 
-Extend existing `.sprof` ownership/versioning for data observations; do not invent a separate profiler store for each family. Bound all decoder counts/lengths and reject unsupported versions, corrupt identities and impossible metric relationships. Preserve checksums/content-verification requirements of the existing cache; a fast noncryptographic lookup hash is not a substitute for its integrity contract.
+Extend existing `.sprof` ownership/versioning for data observations; do not invent a separate profiler store for each family. The extension point already exists: `sprof-v2` is the collection-workload envelope (`src/app/optimize/sprof_collection_profile.spl`, records `collection_size`, `lookup_count`, `distinct_key_count`, `loop_trip_count`, `collection_sample_limit`; the version string is accepted by `sprof_loader.spl:190`, while that loader's own record validator still admits only function/block/edge). W5 adds field/node record families to that envelope. Whether that is a v2 minor extension or `sprof-v3` is an owner question; the adaptive plan's `ProfileSessionV2` name is withdrawn because it collides with the shipped version string. Bound all decoder counts/lengths and reject unsupported versions, corrupt identities and impossible metric relationships. Preserve checksums/content-verification requirements of the existing cache; a fast noncryptographic lookup hash is not a substitute for its integrity contract.
 
 ## 14. Implementation work packages
 
@@ -901,12 +916,12 @@ All work packages below are **planned**, not completed implementation. Existing 
 | W2 — Typed access and construction | HIR/semantics plus both interpreters | Access-place IR; generated operations; whole-node finish/discard; no public tag/inheritance requirement | W1 |
 | W3 — Reference storage pilot | Existing AST owner accessors and managed reference adapters | One node family with direct/column access and a sparse hash-backed attribute; exact result and lifetime parity | W2 |
 | W4 — Collection policy adapter | AdaptiveMap/Set and semantic CollectionPlan | Current linear/chained-hash/AVL choices use the same resolved policy and explain rejections | W1; W2 for managed attributes |
-| W5 — Observation extension | Planned trace facade, existing capture and `.sprof` owners | Versioned field/collection/node records, admission, loss accounting and bounded aggregation | W0; XRay stage-1 prerequisites |
+| W5 — Observation extension | Landed `TraceObserverV1` facade (`src/lib/common/trace`), existing `collection_capture` and `sprof-v2` owners | Versioned field/collection/node records, admission, loss accounting and bounded aggregation | W0; XRay PR1–PR4 landed (#7177/#7185/#7191/#7205); blocked only on a data record kind, which `TraceEventKindV1` lacks |
 | W6 — Three-family integration slice | Compiler driver, node pilot, collection adapter and profiler | One workload captures all three families into one correlated profile and consumes a validated plan | W3–W5 |
 | W7 — Native layout/PGO expansion | Storage producer/projection, backend and LLVM/provider adapter | Qualified source bindings, reads/writes, field widths and backend combinations; next-build comparison | W2, W5; W6 reference result |
 | W8 — BuildRunner/cache adoption | Existing task owner, contexts, artifacts and cache contracts | Region/object mapping, frozen plans, receipts, semantic/physical invalidation and worker parity | W3–W6; existing cache/resource gates |
-| W9 — General live migration | Storage/container owner and reclamation layer | Transactional migration, budget/failure handling and lease tests; no callback migration | W6–W8 and admitted progress protocol |
-| W10 — Provider expansion and rollout | Staged XRay provider owners and platform CI | Linux Simple-owned, then Windows Simple-owned qualification under the same public contract | Established Linux LLVM contract; platform-specific evidence |
+| W9 — General live migration (deferred) | Storage/container owner and reclamation layer | Transactional migration, budget/failure handling and lease tests; no callback migration | W6–W8 and admitted progress protocol; not scheduled until W6 evidence exists |
+| W10 — Provider expansion and rollout (deferred) | Staged XRay backend owners and platform CI | Linux Simple-owned (PR #7211 onward), then Windows Simple-owned qualification under the same public contract | Established Linux LLVM contract (#7205); platform-specific evidence |
 
 W1/W4 and the provider work can proceed in parallel after contract ownership is agreed. W9 is not a prerequisite for useful offline PGO; do not hold basic source/config/accessor support hostage to universal live migration. Adding sorted-array or a new hash algorithm is a separate measured extension after W4, not a rewrite of the whole system.
 
@@ -1071,7 +1086,7 @@ For R18, also see the [merged PR #5962](https://github.com/ormastes/simple/pull/
 
 ### 16.3 Prior project plans reconciled
 
-- **D01 — [Adaptive collections design plan (2026-09-16)](https://chatgpt.com/library?file_id=libfile_5b7f757c91a8819188feab57dddc8e87&account_id=personal).**
+- **D01 — [Adaptive collections design plan (2026-09-16)](adaptive_collections_profiling_switching_2026-09-16.md)** (now in the repository beside this file; the chatgpt.com library link is retired).
 
 - **D02 — [Typed dataframe, collections and query optimizer design (2026-09-16)](https://chatgpt.com/library?file_id=libfile_fd90ee32b1ec8191b31d5fee9e1f8c2b&account_id=personal).**
 
@@ -1079,7 +1094,7 @@ For R18, also see the [merged PR #5962](https://github.com/ormastes/simple/pull/
 
 - **D04 — [Concurrent resources and runner plan (2026-10-27)](https://chatgpt.com/library?file_id=libfile_c92389142d90819183b450f05db04b21&account_id=personal).**
 
-- **D05 — [Staged XRay design (2026-11-03)](https://chatgpt.com/library?file_id=libfile_99e7b3800b0881918c682b6f3a9c19a1&account_id=personal).**
+- **D05 — [Staged XRay design (2026-11-03)](https://chatgpt.com/library?file_id=libfile_99e7b3800b0881918c682b6f3a9c19a1&account_id=personal)**, superseded in the repository by [`xray_compiler_structural_change_2026-11-06.md`](../../../04_architecture/compiler/xray/xray_compiler_structural_change_2026-11-06.md) (owner decisions §G, data cross-link §H).
 
 - **D06 — [Aspect and visibility improvement plan](https://chatgpt.com/library?file_id=libfile_e766d02fd61c8191bb792827af412970&account_id=personal).**
 
@@ -1134,6 +1149,65 @@ The deliverable of this task is this consolidated Markdown plan. Repository impl
 [E03]: https://abseil.io/docs/cpp/guides/container
 [E04]: https://eclipse.dev/aspectj/doc/released/progguide/semantics-joinPoints.html
 [E05]: https://mlir.llvm.org/docs/DefiningDialects/Operations/
+
+## 17. TDD and SSpec plan (reviewed 2026-11-06)
+
+Every package below starts with a **failing spec**, not with code. The §15.1 ID inventory is kept; this section maps it onto concrete spec files and says what RED looks like before the implementation exists. No spec file is created by the review; the paths are the canonical locations the implementer must use.
+
+### 17.1 Authoring rules (apply to every row)
+
+- **Canonical trees only:** `test/01_unit/`, `test/02_integration/`, `test/03_system/`. Never author into `test/unit/` or `test/integration/` — those are the shadow trees fenced by `scripts/check/check-test-tree-divergence.shs`, and a file that exists only there is a "mirror-only" offender (spec authored into the wrong tree). A new canonical spec with no shadow twin is the norm and passes the divergence gate.
+- **Modern SSpec shape** (`.claude/templates/spipe_template.spl`, `.claude/skills/spipe.md`): `"""## Purpose and audience ..."""` docstring, `# @cover <owner file>`, outcome-named `it`, `step("...")` prose before expectations, `# @req REQ-<id>` inside each `it` body (the tree's grep-parsed convention is the `REQ-` prefix; use the §15.1 IDs behind it, e.g. `# @req REQ-ATTR-02`), one adverse scenario per file, `# @manual_section:` when more than one scenario, numeric expectations annotated `# oracle: <source>`.
+- **RED is a real failing assertion or a missing promised symbol** — never `skip(`, `pending`, `pass_todo` (ORA-001 blocker). A spec that pins an interface that does not exist yet carries `# @tag:in-development` on **line 1** and `# Tracks: doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md §17 <Wn>` on line 2. When it goes GREEN the tag line is deleted in the same PR (`doc/07_guide/infra/testing.md` § `@tag:in-development`).
+- **Characterization specs are not tagged.** W0 and the COL-01..04 transition specs assert what the tree does today and must be GREEN on the first run; their job is to go RED on drift.
+- **Evidence:** record the binary identity with every RED/GREEN verdict (`readlink -f bin/simple`), because the deployed binary is replaced by other sessions. A whole-suite `bin/simple test` verdict counts only when the `SPEC FILE VERDICT:` line names the file; an interpreter-mode load-only pass is not GREEN.
+- **Every later bug fix ships two specs** (reproducer + neighbour generalization) under the same owner directory as the package spec (`.claude/rules/testing.md`).
+
+### 17.2 Lanes
+
+| Lane | How it runs | Packages / IDs |
+|---|---|---|
+| Interpreter | `bin/simple test <spec>` on the deployed binary, host only | W0, W1, W2, W3, W4, W5 (codec/loader half), W8, W9; ATTR-*, AOP-*, COL-*, CACHE-*, RUN-01..05, MIG-*, XR-02/04/05/06/07/10/12, LAY-01..06 (mapping + reference oracle) |
+| Native build | `native-build` artifact, Linux x86-64 (custom-native typed-storage lane) or Linux x86-64/aarch64 with LLVM (`--xray`); gated shell checks `check-xray-static-off-identity.shs`, `check-xray-llvm-adapter-e2e.shs` | W5 (e2e half), W6, W7; XR-01/03/08/09/11, LAY-07..09, RUN-06 stress, the AoS/SoA native pilot (§14.3 item 4) |
+| Hardware / platform | real AArch64 host (PR #7211 sleds), Windows x64/ARM64 runners (`xray-windows-native-verification.yml`) | W10 only. GPU/device execution is not part of this program (adaptive plan C9 is blocked) |
+
+Cranelift, JIT and interpreter lanes cannot run XR-* end to end: `--xray` returns `UnsupportedTarget` there by owner decision; those specs assert the rejection, not a trace.
+
+### 17.3 Per-package TDD sequence
+
+| Pkg | First failing spec (canonical path) | `describe` / first `it` | RED evidence expected | GREEN gate | Tag |
+|---|---|---|---|---|---|
+| W0 | `test/01_unit/compiler/data/data_authority_census_spec.spl` | `describe "Data authority census"` / `it "pins the current layout, collection, selector and trace names this plan builds on"` | None expected — GREEN on first run (asserts `StorageLayoutKind` has 8 variants, `@collection_algorithm` accepts exactly `auto/linear/hash/ordered`, `get(...)` validates to E1507, `TraceEventKindV1` has no data kind, loader accepts `sprof-v2`) | Stays GREEN; any later package that changes one of these names updates this spec in the same PR | none |
+| W1 | `test/01_unit/compiler/data/data_schema_resolver_spec.spl` | `describe "Shared SPL and SDN data schema resolver"` / `it "merges identical SPL and SDN declarations of one attribute into one canonical type"`; then `it "rejects a conflicting type and names both provenances"`, `it "keeps distinct nominal ids distinct over the same machine type"`, `it "rejects two equal-specificity rules instead of letting file order win"` | `use compiler.common.data_schema_contracts.*` unresolved — module missing | ATTR-01..06 GREEN; `SchemaDigest` deterministic across key order (§8.5) | in-development |
+| W2 | `test/01_unit/compiler/data/notinit_node_builder_spec.spl` and `test/01_unit/compiler/hir/attr_access_place_spec.spl` | `describe "Whole-node construction with NotInit"` / `it "refuses to finish a node whose required field was never initialized"`; `describe "Attribute access places"` / `it "evaluates receiver, index and right-hand side exactly once"` | `NotInit` / `AttrRead` symbols missing; the once-evaluation `it` counts a double receiver evaluation on the current path | ATTR-07..18 GREEN in both interpreters; `test/02_integration/compiler/data/attr_eval_order_parity_spec.spl` (ATTR-18) GREEN against seed and pure-Simple | in-development |
+| W3 | `test/02_integration/compiler/data/ast_node_pool_pilot_spec.spl` | `describe "AST node pool pilot"` / `it "returns the same source span through direct, column and sparse-hash storage"` | Generated `source_span` accessor missing on the pilot node family | ATTR-19..27 GREEN; stale-handle and reuse cases fail closed | in-development |
+| W4 | `test/01_unit/lib/collections/adaptive_policy_adapter_spec.spl` (beside `adaptive_set_filter_spec.spl`) | `describe "Adaptive collection policy adapter"` / `it "preserves exact keys and values across every directed linear, hash and ordered transition"` (COL-01, GREEN today — characterization); then `it "explains why an unsupported algorithm pin was rejected"` (COL-07, RED) | COL-07..09: no resolved-policy input on `AdaptiveMap`/`AdaptiveSet`; `me get` still promotes on a frozen lookup (COL-09) | COL-01..09 GREEN; `CollectionPlanAlgorithm` and the adapter read one `ResolvedCollectionPolicyV1` | COL-07..09 in-development; COL-01..06 untagged |
+| W5 | `test/01_unit/app/optimize/sprof_data_observation_spec.spl` (beside `sprof_collection_profile_spec.spl`) and `test/01_unit/lib/common/trace/observer_data_record_v1_spec.spl` (beside `observer_event_codec_v1_spec.spl`) | `describe "Data observation records in the sprof-v2 envelope"` / `it "loads a field read-write record with its site, schema and coverage status"`; `describe "Trace data record kind"` / `it "encodes a field observation as its own record kind, never inside payload0..2"` | `sprof_loader.spl`'s record validator (function/block/edge only, `:203`/`:339`/`:421`) rejects a `data_field` record and `sprof_collection_profile.spl` has no decoder for it (a real assertion on today's fail-closed path); no data kind in `TraceEventKindV1`, codec round-trip fails | XR-02/04/05/06/07/10/12 GREEN in the interpreter; XR-01/03 GREEN through `check-xray-static-off-identity.shs` on a native build | in-development |
+| W6 | `test/03_system/plan_acceptance/data_three_family_slice_spec.spl` | `describe "Three-family profile slice"` / `it "captures field, collection and traversal observations of one workload into one correlated profile"` | Native `--xray` build of the pilot workload produces no data records | §14.3 items 1–3, 5–6 GREEN on Linux LLVM lane; item 4 native pilot labeled separately | in-development |
+| W7 | `test/02_integration/compiler/storage_layout_native_field_rw_spec.spl` (beside `storage_layout_owned_view_compile_chain_spec.spl`); LAY-01..06 in `test/01_unit/lib/structural/storage_layout_oracle_spec.spl` | `describe "Native layout field access"` / `it "reads and writes the same field value through reference and native lanes"` | Native lane admits only the eight-byte-field raw-storage pilot; the source-bound ordinary-array case is rejected | LAY-01..09 GREEN on x86-64 custom-native; LLVM combination labeled until its own e2e exists | LAY-07..09 in-development |
+| W8 | `test/01_unit/lib/task_runner_data_region_spec.spl` (beside `task_runner_storage_spec.spl`) and `test/02_integration/compiler/cache/data_policy_cache_identity_spec.spl` | `describe "Task runner data regions"` / `it "rejects a stale attempt result before publication"`; `describe "Data policy cache identity"` / `it "changes the action key when an admitted profile changes the selected plan"` | No `RegionId`/`ObjId` on the task context; action key unchanged by a plan change | RUN-01..06, CACHE-01..09 GREEN | in-development |
+| W9 | `test/01_unit/lib/collections/representation_migration_spec.spl` | `describe "Transactional representation migration"` / `it "leaves the old root authoritative when validation fails before publish"` | Migration API missing | MIG-01..09 GREEN; deferred until W6 evidence | in-development |
+| W10 | existing `test/01_unit/lib/nogc_sync_mut/trace/xray_llvm_adapter_v1_spec.spl` pattern repeated per backend | `describe "Simple-owned trace backend"` / `it "reports the same capability set as the LLVM backend for raw edges"` | Backend absent → `UnsupportedTarget` | Platform CI evidence per stage; deferred | in-development |
+| AOP-* | `test/01_unit/compiler/frontend/aop_field_selector_spec.spl` (beside `aop_predicate_parser_spec.spl`) and `test/01_unit/compiler/backend/interpreter_aop_field_advice_spec.spl` | `describe "Field get and set selectors"` / `it "matches get(BinaryNode.left) once per logical read"` | `get(...)` validates to `E1507` today (`aop_predicate_parser.spl:83`); the existing parser spec asserts that and must flip in the same PR | AOP-01..09 GREEN; `attr(...)` still never claims field semantics | in-development |
+
+### 17.4 Unified dependency order with the adaptive plan (C0–C10)
+
+```text
+W0 ≡ C0  →  C1  →  W1 (⊇ C2)  →  W2 ∥ W4  →  W5 (≡ C3 + C4)  →  W3  →  C5
+  →  W6  →  C6  →  W7 (≡ C8)  →  C7 ∥ W8  →  W9 (⊇ C7 shared part) + C10  →  W10
+C9 (GPU/device): blocked, outside this program.
+```
+
+Blocking relations across the two plans: C1 (origin identity) blocks W1 because the resolver keys sites by `CollectionOriginV1`; C2 is the collection row of W1 and has no separate resolver; C3/C4 are W5 (one envelope, one record family set); C5 (report-only planner) needs W5 data and blocks W6; C6 (sorted array, creation-time specialization) follows W4 and must not precede W6's exact-result evidence; C7 and W9 share the migration contract — C7's exclusive-owner subset ships first, W9's shared safe-point part stays deferred; C8 is W7.
+
+**First five TDD steps across both plans:** (1) W0/C0 census spec, GREEN on first run; (2) C1/C2 `collection_site_attribute_spec` — RED: the site label is dropped between parser and HIR; (3) W1 `data_schema_resolver_spec` — RED: resolver module missing; (4) W5/C3 `sprof_data_observation_spec` — RED: `sprof_loader.spl`'s function/block/edge validator rejects a `data_field` record and the collection decoder has no such kind; (5) W5 `observer_data_record_v1_spec` — RED: no data variant in `TraceEventKindV1` and no aspect-param selection for a data site.
+
+### 17.5 Owner questions raised by the review
+
+1. `.sprof`: extend `sprof-v2` with data record families, or bump to `sprof-v3`?
+2. Site identity: is any user-facing site label wanted, given the existing `ast://…#source_hash` IDs? If yes, one scalar attribute (`@collection_site("...")`) — not the four-attribute family proposed in the adaptive plan.
+3. `NotInit<T>`: a struct (value, affine obligation checked statically) or a class (reference handle)? The plan's "retains the builder on failure" protocol reads as a value; confirm.
+
 ## Repository cross-links
 
 - Prior adaptive-collections plan (D01 above), now in the repository:

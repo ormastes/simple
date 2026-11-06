@@ -6,6 +6,16 @@
 **Pinned source revision:** `6a133cf2bd2589a6a62f6c83ec7f10f932084e64`  
 **Status:** proposed design grounded in a static source audit and primary-source research. No Simple build, test, benchmark, or device run was executed for this report. Existing implementation, existing plans, and new proposals are distinguished below. All new attribute names, configuration schemas, IR records, and command-line examples are proposals, not claims of currently supported interfaces.
 
+### Review notes (reviewed 2026-11-06 against `origin/release/1.0.0` @ `8991bc5067d`)
+
+This plan is older than its sibling [`data_attributes_layout_containers_xray_2026-11-06.md`](data_attributes_layout_containers_xray_2026-11-06.md) ("the data plan"); where the two overlap, the data plan is the owner. What changed in place:
+
+- **Stale since the pin:** `.sprof` already has a `sprof-v2` collection-workload envelope (`src/app/optimize/sprof_collection_profile.spl`; `sprof_loader.spl:190`), so "new collection records are not already accepted" is no longer true (§1, §11.1); the live CollectionPlan owners are `src/compiler/35.semantics/perf/collection_plan*.spl` and `src/compiler/60.mir_opt/mir_opt/{collection_plan_selection,collection_plan_explain,perf_facts}.spl` — there is no `20.hir/perf` and no `60.mir_opt/collection_plan/` (§1, §6.1, §17); `config/compiler/collection_operations.sdn` exists but is an empty `pending-admission-v1` snapshot; `AdaptiveMap` lookups still promote in place (`promote_if_useful`) with no lock.
+- **Owner decisions bound in:** generics are erased and Mono is deleted — the "monomorphize when known" sentence in §3.2 is removed; trace code is resident until process exit — §6.3's "provider unloading" is removed; collection telemetry modes (§10.1) are selected through aspect params, the runtime switch, never through a new SDN mode key (`--xray`/`trace.instrumentation` is the only static switch); lockless by default — §14.1's exclusive-owner transition is unique ownership, not a mutex.
+- **Unified with the data plan:** one resolver (`ResolvedCollectionPolicyV1` is the collection row of the data plan's W1 envelope, §5.2); the `@col`/`@col_site`/`@col_policy`/`@col_impl` quartet collapses onto the existing `@collection_algorithm` plus at most one site label (§4.1); one switching-mode table (data plan §11.1, referenced from §13); one session identity (`observer_session_v1.spl` + loader `run_id`/`workload_id`, §8.1/§11.1); `ProfileSessionV2` is withdrawn (name collides with the shipped `sprof-v2`).
+- **Out of scope / cuts:** §3.1 set literals and the §3.2 `col<T>` hierarchy are separate language proposals, not packages of this plan; §12.1 candidates beyond linear / chained hash / AVL / sorted flat are inventory; C9 (SIMD/GPU execution) is blocked and not part of this program; C10 is deferred behind C7.
+- **TDD/SSpec plan added (§21):** first failing spec per package C0–C10, mapped onto the §18.1 correctness matrix; unified order with W0–W10 lives in the data plan §17.4.
+
 ## Contents
 
 - [1. What the repository actually contains](#1-what-the-repository-actually-contains)
@@ -28,6 +38,7 @@
 - [18. Verification and benchmark plan](#18-verification-and-benchmark-plan)
 - [19. Developer workflow and inspectability](#19-developer-workflow-and-inspectability)
 - [20. Decisions, risks, and completion criteria](#20-decisions-risks-and-completion-criteria)
+- [21. TDD and SSpec plan (reviewed 2026-11-06)](#21-tdd-and-sspec-plan-reviewed-2026-11-06)
 
 ## Executive decision
 
@@ -54,13 +65,13 @@ The audit read selected source files at the pinned revision. It did not infer im
 
 | Area | Observed source or documented status | Consequence for this work |
 |---|---|---|
-| `.sprof` loading | `sprof_loader.spl` implements `sprof-v1`, module/workload identification, bounded diagnostics, saturating merge, and function/block/edge records. | Reuse it through a versioned migration. New collection records are **not already accepted**. [R1] |
+| `.sprof` loading | `sprof_loader.spl` implements `sprof-v1` (module/workload identification, bounded diagnostics, saturating merge, function/block/edge records) and, since the pin, accepts the `sprof-v2` version string (`:190`); the collection-workload records are decoded by the sibling `sprof_collection_profile.spl`, while the loader's own record validator still admits only function/block/edge (`collection_size`, `lookup_count`, `distinct_key_count`, `loop_trip_count`, `collection_sample_limit`). | *Review 2026-11-06:* collection records **are** accepted now. Field/node observation records are not; they are the data plan's W5 extension of this envelope. [R1] |
 | Native profile transport | `native_profile_counter_runtime.spl` maps counter slots and metadata to the same limited record families. | Extend the counter/metadata path and consolidate codecs; do not add another independent exporter. [R2] |
 | Region timing profiler | `90.tools/perf/profiler.spl` reads a monotonic clock and updates a text-keyed dictionary of counters; it exports JSON. | Preserve the API and add a shared-session adapter. This is too much work to perform around every collection lookup. [R3] |
 | Compiler-stage adapter | `85.mdsoc/.../profiler_adapter.spl` currently records completed-stage count and last stage. Its inspected implementation does not measure durations. | Keep compiler-stage events distinct from actual timing and from profiling the generated program. [R4] |
 | JIT profile consumer | `sprof_hotspot_bridge.spl` already reuses function counts for hotspot decisions and deliberately avoids a compiler-to-app import. | Preserve that dependency direction. Add typed collection-profile queries rather than importing the app loader into the optimizer. [R5] |
 | Optimizer integration | `optimizer_plugin.spl` has real descriptors for source/MIR scope, static/dynamic application, and cost classes. | Use its registry and activation discipline; a registered descriptor alone does not establish an active transform. [R6] |
-| Collection/performance program | The detailed design already proposes one typed-HIR collector, shared `PerfFacts`, logical/physical CollectionPlan, `.sperf`, optional `.sprof-v2`, and an operation registry. | Extend these planned owners; do not duplicate loops, effects, aliases, or collection cost models. These proposed modules are not all verified implemented. [R7] |
+| Collection/performance program | The detailed design already proposes one typed-HIR collector, shared `PerfFacts`, logical/physical CollectionPlan, `.sperf`, optional `.sprof-v2`, and an operation registry. | *Review 2026-11-06:* the landed owners are `src/compiler/35.semantics/perf/` (`collection_plan_selection.spl` with `CollectionPlanAlgorithm {Original, Linear, Hash, Ordered}`, `collection_plan_{analysis,explain,extractor,loop}.spl`) and `src/compiler/60.mir_opt/mir_opt/{collection_plan_selection,collection_plan_explain,perf_facts}.spl`; the only executable MIR consumer is `50.mir/_MirLoweringExpr/collection_literal_membership.spl`. Extend these; `20.hir/perf` and `60.mir_opt/collection_plan/` do not exist and are not to be created. [R7] |
 | Layout contract | `StorageLayoutPlanV1` and `StorageLayoutKind` exist, including AoS, SoA, AoSoA, Grouped, Tiled, Packed, FactoredIndex, and ExternalFixed. | Compose the frozen contract from the collection physical plan. [R8] |
 | Automatic layout heuristic | `storage_layout_plan_auto` already selects layouts using ABI pinning, field independence, SIMD width, and count. | Add calibrated profile/cost inputs through a versioned adapter; distinguish a selected enum from available lowering. [R9] |
 | Layout reachability | The storage-layout owner documents guarded typed-view/projection work and custom x86 native lowering, but public typed `T[]` binding, complete field rewriting, other backends, and PGO/view-cache integration remain incomplete. | No blanket claim that ordinary arrays can already switch layout. Start only with admitted typed storage and explicit backend capabilities. [R10] |
@@ -101,6 +112,8 @@ The relevant work spans collection specialization, data-structure synthesis, mem
 
 ## 3. Language surface: retain meaning, reduce spelling
 
+*Review 2026-11-06:* §3.1 (set literals) and §3.2 (the `col<T>` capability hierarchy) are **not packages of this plan**. Neither exists in the pure-Simple parser or stdlib today, neither is needed to profile or switch existing arrays, dictionaries, `AdaptiveMap`/`AdaptiveSet`, and each is a language-surface proposal that needs its own requirement and parser lane. They are retained as design intent only; no C-package depends on them.
+
 ### 3.1 Literal compatibility
 
 | Surface | Intended meaning | Migration rule |
@@ -136,7 +149,7 @@ Orthogonal capabilities:
 
 Sequence, Set, and Map are semantic families conforming to appropriate capabilities; a Map's traversed element is an entry/key-value pair. Do not place random access beside bidirectional access as unrelated alternatives. Do not assume every collection has constant-time `count`, integer indexes, mutable elements, or contiguous `T*` storage. [P8], [P8c]
 
-`col<T>` in a generic bound must not automatically imply boxing or a vtable. Monomorphize when the concrete type is known. Explicit type erasure remains a separate existing language mechanism. Avoid making `random`, `con`, or several new abbreviations mandatory; `col` is sufficient for this request. No claim that it is a single token in all LLM tokenizers is needed.
+`col<T>` in a generic bound must not be justified by a monomorphization promise: Simple generics are erased and there is no monomorphization pass (Mono is deleted), so a `col<T>` bound costs exactly the ordinary erased dispatch and nothing in this plan may assume otherwise. Avoid making `random`, `con`, or several new abbreviations mandatory; `col` is sufficient for this request. No claim that it is a single token in all LLM tokenizers is needed.
 
 ### 3.3 Representation freedom is constrained
 
@@ -172,6 +185,8 @@ var fixed_plan: {i64: i64} = {}
 ```
 
 `@col` holds workload/objective/switch-policy tags. `@col_site` provides an optional stable semantic label. `@col_policy` references a named SDN policy. `@col_impl` is an explicit physical pin. Existing layout attributes keep their own meaning and feed the existing layout resolver.
+
+*Review 2026-11-06 — the quartet above is collapsed; it is four spellings for one resolver input.* The physical pin already exists as `@collection_algorithm("auto"|"linear"|"hash"|"ordered")` (`src/compiler/10.frontend/core/_ParserDecls/fn_struct_decls.spl:1100`) and the creation site already has a stable identity (`ast://{module_key}[/{owner}]/local/{name}#{source_hash}`, `collection_feedback.spl:50-52`). V1 therefore ships: `@collection_algorithm` unchanged as the pin; **at most one** new scalar attribute, `@collection_site("...")`, and only if the owner wants a user-facing label at all (data plan §17.5 Q2); workload hints, objectives and named policies live in SDN rules keyed by site, with no source spelling in V1. `@col`, `@col_policy` and `@col_impl` are withdrawn. The example block above is kept as the pre-review proposal.
 
 Do not rely on unverified `@col(update = rare, ...)` named-argument grammar. A later spelling refinement can be implemented in the general attribute subsystem rather than adding collection-only parsing.
 
@@ -257,6 +272,8 @@ A second file can include the first. Relative paths resolve against the includin
 
 Resolve the include graph once before planning and publish an immutable policy snapshot. Store all content digests in dependency metadata. Reusing the shared SDN parser does not imply the composition behavior already exists. [R14]
 
+*Review 2026-11-06:* `simple.collection-policy.v1` is not a second schema with its own loader. It is the `rules.<name>` collection row of the data plan's `simple.data-policy/v1` envelope (data plan §8.3) and is loaded, digested and explained by that plan's W1 resolver; `ResolvedCollectionPolicyV1` is the typed result of that row. Include handling is the resolver's, not a collection-only feature.
+
 ### 5.3 Precedence is not one last-writer-wins list
 
 **Hard requirements intersect.** ABI/ownership/assurance constraints, existing semantic guarantees, and explicit physical pins must all hold. A conflict is an error, not a winner chosen by source order. A profile never defeats a source layout pin or a critical-mode allocation prohibition.
@@ -327,8 +344,8 @@ Field/device data --/
 | `CollectionSemanticContractV1` | Family, order, equality/hash, mutability, reference/index behavior, complexity promises | Shared collection operation/type contracts; not backend-local |
 | `CollectionOriginV1` | Source creation origin, generic specialization, operation sites, lineage | Existing typed-HIR performance collector and revision identities |
 | `ResolvedCollectionPolicyV1` | Normalize local attributes and SDN, provenance, constraints | Compiler policy layer using shared SDN infrastructure |
-| `CollectionProfileV1` and query view | Typed measurements, sampling metadata, confidence/missingness | Planned profile schema layer below app-only loading |
-| `PhysicalCollectionPlanV1` | Primary storage, indexes, layout reference, dispatch, transitions, cost evidence | Existing/planned `60.mir_opt/collection_plan` owner |
+| `CollectionProfileV1` and query view | Typed measurements, sampling metadata, confidence/missingness | The existing `sprof-v2` collection envelope (`src/app/optimize/sprof_collection_profile.spl`) plus the data plan's W5 record families; a typed query view factored below `app.optimize` |
+| `PhysicalCollectionPlanV1` | Primary storage, indexes, layout reference, dispatch, transitions, cost evidence | Existing `src/compiler/60.mir_opt/mir_opt/collection_plan_selection.spl` (MIR side) over `src/compiler/35.semantics/perf/collection_plan_selection.spl` (semantic side); no new directory |
 | Existing `StorageLayoutPlanV1` | Logical record layout and conversion policy | Existing `common/structural/storage_layout` owner, unchanged V1 [R8] |
 | `CollectionTransitionReceiptV1` | Generation, source/destination identity, ownership, bounds, completion | Runtime owner under compiler-approved transition contract |
 | Existing optimizer registry | Scheduling and activation of transforms | `optimizer_plugin.spl` [R6] |
@@ -363,7 +380,7 @@ Avoid the full Cartesian product of all candidates. Use legality pruning, backen
 
 Core owns semantic validity, the policy resolver, fallback contracts, identity, and transition admission. Optional providers supply candidate representations, cost functions, conversions, and kernels. Use existing plugin identity/version/selection mechanisms. No provider may claim unsupported field widths, safe aliasing, or a device completion fence that does not exist.
 
-Prefer static specialization and dead-code elimination for ordinary applications. Do not make every lookup call a dynamic plugin. Select a kernel once per operation batch or use a small admitted representation tag only where live switching is actually enabled. Provider unloading must wait for active objects, iterators, generated code, and device work to release its code/data generation.
+Prefer static specialization and dead-code elimination for ordinary applications. Do not make every lookup call a dynamic plugin. Select a kernel once per operation batch or use a small admitted representation tag only where live switching is actually enabled. Provider code, maps and dispatch tables are resident until process exit (XRay doc §C, data plan §1.3): releasing a profile session or a plan generation never unloads code, so no unload-wait protocol is designed here.
 
 ---
 
@@ -500,6 +517,8 @@ Do not increment a global counter for every field load. Enable detailed access t
 
 “Disabled at runtime” is not the same as “compiled out.” Measure dispatch/adaptation overhead separately from profile overhead. An adaptive representation may still need a tag even with telemetry off; that is not profiling overhead and should not be hidden.
 
+*Review 2026-11-06:* `off` is the static switch and is exactly `--xray` off / `trace.instrumentation: off` (byte-identical output, `check-xray-static-off-identity.shs`). `basic`, `sampled`, `deep` and `adaptive-runtime` are **runtime selections carried by aspect params** (`AspectParamsV1.ext["simple.trace/observer-v1"]`), not new SDN mode keys and not attributes; the native lane needs sleds to exist first, and the interpreter/JIT/Cranelift lanes reject `--xray` with `UnsupportedTarget`, where only the existing `collection_capture` counters remain.
+
 ### 10.2 Hot path
 
 Compile a known site to a numeric slot and a cached per-thread counter-block pointer. Increment locally without a global lock, text key lookup, file I/O, or timestamp. Allocate/register blocks on a cold first-touch path under a budget; cache the result. Merge at thread/task boundaries or scheduled safe points.
@@ -526,12 +545,14 @@ Compare the same workload and compiler plan in three builds: baseline without pr
 
 ### 11.1 Reuse the planned versioned extension
 
+*Review 2026-11-06:* the paragraph below is only partly true now. `sprof_loader.spl:190` accepts the `sprof-v2` version string and the collection-workload records are decoded by the sibling `sprof_collection_profile.spl`; the loader's **own** record validator still admits only function/block/edge (`:203`, `:339`, `:421`), so the paragraph remains true of that validator and false of the envelope as a whole. What is still missing is the field/node record families and a typed query view below `app.optimize` — the data plan's W5. The envelope sketch below is retained as the *target shape*; its name `ProfileSessionV2` is withdrawn because `sprof-v2` is already the shipped version string, and whether the additions are a v2 minor or `sprof-v3` is an owner question (data plan §17.5 Q1). Session identity fields (`run_id`, `subject_kind`, `workload_id`, …) are owned by `src/lib/common/trace/observer_session_v1.spl` and the loader's existing `run_id`/`workload_id`; they are referenced, not redefined.
+
 The inspected v1 validators reject all kinds except function/block/edge. Both the app loader and native extraction helpers encode these assumptions. Add a version-aware shared schema/codec and adapters; do not smuggle collection metrics into function names or append unsupported records and call them compatible. The existing detailed plan already names an optional extended-profile codec. [R1], [R2], [R7]
 
-Recommended envelope:
+Recommended envelope (target shape; name withdrawn, see above):
 
 ```text
-ProfileSessionV2
+ProfileSession (sprof-v2 envelope + W5 record families)
   schema_major / schema_minor
   run_id / subject_kind / subject_build_id
   workload_id / workload_weight
@@ -599,6 +620,8 @@ Profile data is untrusted optimizer input. It can change ranking among legal can
 
 Filter by semantics and backend evidence before using performance hints. For example, the existing layout heuristic can propose Grouped even while that physical mapping is documented incomplete; the combined planner must not lower an unavailable mapping. [R9], [R10]
 
+*Review 2026-11-06:* of the rows above only the existing linear / chained-hash / AVL backends and one **sorted flat** candidate (C6) are scheduled. MPHF, frozen hash, bitmap/chunked hybrids, base-plus-delta and all GPU-resident rows are inventory; each needs its own measured proposal and none is a dependency of any C-package.
+
 ### 12.2 Time objective
 
 For a candidate `p` and workload context `w`:
@@ -653,6 +676,8 @@ Switch only when a conservative savings estimate exceeds construction/conversion
 ---
 
 ## 13. Switching modes: separate them explicitly
+
+*Review 2026-11-06:* the authoritative application-mode table is the data plan's §11.1 (report only / next build / next instance / new snapshot / exclusive live switch / shared safe-point migration). The rows below map onto it: Static/AOT and Creation-time → next build / next instance; Growth and Phase/boundary transition → exclusive live switch; Online adaptation → exclusive live switch under §13.2 hysteresis; Temporary/cached view and JIT specialization are code or view changes, not storage application modes.
 
 | Mode | Decision point | Runtime cost and guard |
 |---|---|---|
@@ -801,16 +826,16 @@ Paths below are existing integration roots or proposed modules placed under the 
 | **C6: scalar specialization** | Admit compact/flat/direct-index/sorted candidates and existing generic interfaces; static and creation decisions first. Collection/runtime owner. | C5 | Differential operation traces and backend parity; no unexpected dispatch for static plan; measured build/lookup/scan/memory curves. |
 | **C7: guarded switching** | Growth promotion, exclusive boundary migration, receipts, rollback, COW/iterator/borrow gates, hysteresis. Ownership/runtime owner. | C6 | Fault injection, stale-generation rejection, alias tests, valid outlier fallback, no lost entries, bounded peak memory. |
 | **C8: layout integration** | Feed existing StorageLayoutPlan and typed-view admission; integrate logical field accesses and view versions. Existing storage-layout owner. | C2,C5 and existing typed-storage gates | Independent logical oracle plus conversion tests; admitted width/backend only; address pinning and cache identity verification. |
-| **C9: SIMD and device execution** | Batch kernels, target capabilities, residency, fences, allocation/device cost correlation. Existing backend/scheduler owners. | C6,C8 and device infrastructure | Real device execution, CPU reference parity, transfer-inclusive timing, cancellation/reclamation proof; unavailable devices remain blocked. |
-| **C10: online adaptation/advanced candidates** | Limited phase adaptation, base-plus-delta, chunk-local optimization, optional recursive-layout research. | C7–C9 as applicable | No oscillation regressions; bounded compile/runtime search; representative gains with a working disable/fallback path. |
+| **C9: SIMD and device execution — BLOCKED (review 2026-11-06)** | Not part of this program. GPU/device execution needs its own plan with real device evidence; nothing in C0–C8 or W0–W10 depends on it. | — | None scheduled. |
+| **C10: online adaptation/advanced candidates (deferred)** | Limited phase adaptation only; base-plus-delta, chunk-local optimization and recursive-layout research are inventory. | C7, and the data plan's W9 shared-migration contract | No oscillation regressions; bounded compile/runtime search; representative gains with a working disable/fallback path. |
 
 **Local attributes are in C2, not deferred until C10.** Profiling and explain-only planning are valuable deliverables before storage migration is enabled. A set-literal additive parser lane can run with C2, but should not block profiling existing arrays and dictionaries.
 
 ### Integration mapping
 
-- Extend the planned `20.hir/perf` collector and `config/compiler/collection_operations.sdn` authority.
-- Keep effect and alias knowledge with existing common effects, `55.borrow`, and shared MIR `PerfFacts`.
-- Place new physical planning under the existing/planned `60.mir_opt/collection_plan` root.
+- Extend the landed `src/compiler/35.semantics/perf/collection_plan_extractor.spl` collector and `config/compiler/collection_operations.sdn` (currently an empty `pending-admission-v1` snapshot that admits no operations; C1 fills it). There is no `20.hir/perf`.
+- Keep effect and alias knowledge with existing common effects, `55.borrow`, and shared MIR `PerfFacts` (`src/compiler/60.mir_opt/mir_opt/perf_facts.spl`).
+- Place new physical planning in the existing `src/compiler/60.mir_opt/mir_opt/collection_plan_selection.spl` / `collection_plan_explain.spl`; do not create a `60.mir_opt/collection_plan/` directory.
 - Reuse `60.mir_opt/optimizer_plugin.spl` for selection/activation and structured remarks.
 - Keep file operations in `app/optimize`; factor reusable profile DTO/codec/query parts below app-only dependencies.
 - Feed `95.interp/execution/sprof_hotspot_bridge.spl` through explicit typed adapters, not a new collection-only JIT.
@@ -902,6 +927,26 @@ The largest architecture risk is duplication: a second collection profiler, a se
 **Completion means:** existing programs retain meaning; local attributes and SDN produce the same policy; perf and collection records correlate correctly; at least one useful static specialization and one bounded switch pass independent logical tests and measured cost evaluation; unsupported layout/device routes remain explicit. It does not require every research candidate to be implemented at once.
 
 ---
+
+## 21. TDD and SSpec plan (reviewed 2026-11-06)
+
+Authoring rules, lanes and the unified W/C dependency order are in the data plan §17.1, §17.2 and §17.4 and are not repeated. This section gives the C-package rows and maps the §18.1 correctness matrix onto spec files. Paths are canonical (`test/01_unit|02_integration|03_system`, never the `test/unit` shadow tree); no spec file is created by the review. RED-by-design specs carry `# @tag:in-development` on line 1 and `# Tracks: doc/03_plan/compiler/data/adaptive_collections_profiling_switching_2026-09-16.md §21 <Cn>` on line 2.
+
+| Pkg | First failing spec (canonical path) | `describe` / first `it` | RED evidence expected | GREEN gate | Lane / tag |
+|---|---|---|---|---|---|
+| C0 | same file as W0: `test/01_unit/compiler/data/data_authority_census_spec.spl` (add the collection rows) | `it "pins AdaptiveMap's linear, hash and ordered backends and their 8/32 defaults"` (`# oracle: adaptive_text_set.spl:123-124`) | none — GREEN on first run | stays GREEN; a threshold change updates it in the same PR | interpreter / untagged |
+| C1 | `test/01_unit/compiler/semantics/collection_origin_identity_spec.spl` (beside `aspect_join_point_spec.spl`) | `describe "Collection origin identity"` / `it "keeps the same origin id across a whitespace-only edit of the enclosing function"`; then `it "rejects an ambiguous remap instead of guessing"` | RED today: the `ast://…#source_hash` id changes on any source edit, so the harmless-edit `it` fails with two different ids | §18.1 "Literal/attribute parity" + §8.1 stability; `collection_operations.sdn` carries reviewed rows (no longer `pending-admission-v1`) | interpreter / in-development |
+| C2 | `test/01_unit/compiler/frontend/collection_site_attribute_spec.spl` (beside `collection_feedback_state_take_install_spec.spl`); SDN side in the data plan's W1 `data_schema_resolver_spec.spl` plus `test/01_unit/compiler/config/collection_policy_includes_spec.spl` | `describe "Collection site attribute"` / `it "carries the site label from the declaration into HIR unchanged"`; `it "rejects an unknown collection tag instead of dropping it"`; includes spec: `it "fails on an include cycle and names the cycle"` | label absent from the HIR field record; unknown tag silently accepted; no include resolution | §18.1 "Policy" rows GREEN; source and SDN produce byte-identical `ResolvedCollectionPolicyV1` digests | interpreter / in-development |
+| C3 | ≡ W5 `test/01_unit/app/optimize/sprof_data_observation_spec.spl` | `it "reads an old sprof-v1 fixture unchanged"` (GREEN today); `it "rejects an unknown required record kind and skips an unknown optional one"`; `it "does not double-count a re-imported shard"` | optional/required distinction missing — unknown kinds all reject; re-import doubles counts | §18.1 "Profile integrity" GREEN | interpreter / in-development (except the v1 fixture `it`) |
+| C4 | `test/01_unit/lib/collections/collection_site_counters_spec.spl`; off-build proof through `scripts/check/check-xray-static-off-identity.shs` | `describe "Per-site collection counters"` / `it "matches an exact synthetic operation trace against the oracle"`; `it "records saturation instead of wrapping"` | counters are the text-keyed global `collection_capture` path; no numeric slot, no saturation flag | §18.1 "Accounting" GREEN; static-off native artifact byte-identical | interpreter + native build / in-development |
+| C5 | extend existing `test/01_unit/compiler/mir_opt/collection_plan_explain_spec.spl` and `test/01_unit/app/optimize/collection_plan_cli_spec.spl` | `it "reports a recommendation with its evidence digest, coverage and confidence"`; `it "retains the original representation when the profile is stale"` | explain output has no evidence/confidence fields; stale profile is not rejected | report-only planner GREEN; no semantic rewrite in any `it` | interpreter / in-development for the new `it`s |
+| C6 | `test/01_unit/lib/collections/sorted_array_backend_spec.spl` (beside `adaptive_set_loop_spec.spl`) | `describe "Sorted entry array backend"` / `it "answers the same lookups as the linear and hash backends on a randomized trace"` | backend missing | §18.1 "Container semantics" differential GREEN; memory/lookup curves recorded (§18.2) | interpreter / in-development |
+| C7 | ≡ exclusive-owner subset of W9 `test/01_unit/lib/collections/representation_migration_spec.spl` | `it "promotes on growth without losing an entry under forced allocation failure"`; `it "refuses to migrate while a borrow is live"` | no receipt, no allocation-failure path, no borrow gate | §18.1 "Switching" GREEN for exclusive transitions; shared safe-point part stays W9 | interpreter / in-development |
+| C8 | ≡ W7 (data plan §17.3) | — | — | — | native build (x86-64) |
+| C9 | none — blocked | — | — | — | hardware; not scheduled |
+| C10 | `test/01_unit/lib/collections/adaptation_hysteresis_spec.spl` | `it "does not oscillate between sorted and hash under a bursty trace"` | no hysteresis policy object | bounded transitions per policy | interpreter / in-development, deferred |
+
+§18.1 matrix → files: Literal/attribute parity → C2 spec (set-literal rows dropped, see §3); Policy → W1 + C2; Accounting → C4; Profile integrity → C3; Container semantics → W4 adapter spec + C6; Switching → C7/W9; Layout → W7; Device → none (C9 blocked); Compiler/JIT → `test/01_unit/compiler/interpreter/sprof_hotspot_bridge_spec.spl` (existing) plus a cache-key `it` in W8's `data_policy_cache_identity_spec.spl`.
 
 ## Appendix A. Repository evidence references
 

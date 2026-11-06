@@ -42,8 +42,16 @@ D:/dev/wt/seed/simple.exe run src/app/traceability/query_main.spl list features 
 D:/dev/wt/seed/simple.exe run src/app/traceability/query_main.spl show requirement req:REQ-TRC-001 --format=sdn 2>/dev/null
 ```
 
-Exit 1 = rendered, unverified (normal). The `TRACE-AUTHORITY-CONFLICT` lines
-are expected. Scope is the registered declaration plus, since 2026-11-06, the
+Arguments are the words after `simple trace`; a leading `trace` word is also
+accepted. Exit 0 = rendered over a complete graph (normal for the declaration;
+still unverified / admission-ineligible). Authority for the canonical
+declaration's claims comes from the policy-owned registry
+`trace_query_registered_authorities_v1`
+(`src/app/traceability/snapshot/query_scope_v1.spl`); a
+`TRACE-AUTHORITY-CONFLICT` (exit 1) now means a claim outside that registry,
+and a new registered declaration needs its own registry rows. Spec:
+`test/03_system/app/traceability/feature/trace_query_authority_spec.spl`.
+Scope is the registered declaration plus, since 2026-11-06, the
 legacy bug DB as a read-only **sidecar** (`doc/08_tracking/bug/bug_db.sdn`,
 2,687 rows, bug nodes + status/severity/file attributes, no graph claims):
 

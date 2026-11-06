@@ -1,6 +1,6 @@
 # Seed JIT: `text.to_i64()` / `.to_int()` return a FLOAT-tagged value — silent wrong results
 
-- **Status:** OPEN (pre-existing; found while landing an unrelated interpreter-lane fix)
+- **Status:** fixed (re-verified 2026-11-06, see "Re-verification 2026-11-06")
 - **Severity:** high — silent wrong values, not a crash. `"42".to_i64() == 42`
   evaluates to **false**.
 - **Lane:** Rust bootstrap seed, **JIT (cranelift) lane**. `bin/simple run` is
@@ -164,3 +164,13 @@ TO_I64=42   EQ42=yes      # jit
 ```
 
 Probe `_scratch/p_str.spl`. Not fixed by this session.
+
+## Re-verification 2026-11-06
+
+No longer reproduces on a seed built from `origin/release/1.0.0` @ ecb705896a4 (Windows x86_64 host). The record's exact program prints the same
+output on both engines, `SIMPLE_EXECUTION_MODE=jit` and `interpret`:
+`42`, `42`, `42`, `43`, `true`, `-5`. Before, `.to_i64()` printed
+`0.00000000000000000`, `v + 1` printed `<special:5>`, `v == 42` printed `false`,
+and `"-5".to_i64()` printed `<special:…>`. The `rt_string_to_int` result is
+now re-tagged as an integer at the method-call site. The related parity is
+pinned by `src/compiler_rust/compiler/tests/to_int_parity_jit.rs`.

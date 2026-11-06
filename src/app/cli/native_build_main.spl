@@ -84,7 +84,8 @@ use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKERS_ENV_
     NativeFileUnitInvokerV1, NATIVE_FILE_WORKER_UNIT_ENV_V1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_complete, HIR_SHARD_FORK_OWNER_MARK_V1}
 use compiler.driver.driver_build.native_file_unit_loop_v1.{native_file_unit_worker_loop_v1}
-use std.nogc_sync_mut.io_runtime.{thread_sleep, env_get_nullable}
+use std.nogc_sync_mut.io_runtime.{thread_sleep, env_get_nullable, file_hash_sha256_or_empty}
+use compiler.driver.cache.postbuild_coordinator_v1.{postbuild_record_v1}
 use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_error_reason_publish_v1, native_file_worker_error_reason_read_v1, native_file_worker_first_error_line_v1, native_file_worker_exit_receipt_publish_v1}
 use compiler.driver.driver_build.native_mir_fork_v1.{native_mir_fork_workers_of_v1}
 use compiler.driver.driver_build.native_file_worker_reuse_v1.{FILE_WORKER_REUSE_ENV_V1}
@@ -449,6 +450,22 @@ fn native_build_output_exists(path: text, worker_success: bool) -> bool:
     if path == "" or not file_exists(path):
         return false
     native_build_artifact_valid(true, file_size_raw(path), worker_success)
+
+# PostBuildCoordinatorV1 hook: after the build publishes (or fails to publish)
+# its output, record binary ready|failed for this build's generation (the frozen
+# source inventory digest). Best effort: a record problem warns, never fails the
+# build. Shard children exit before link and never settle the binary.
+fn native_build_record_postbuild_v1(published: bool, output_path: text):
+    val shard_child = (env_get("SIMPLE_PARSE_SHARD") ?? "") != "" or
+        (env_get("SIMPLE_HIR_SHARD") ?? "") != "" or (env_get("SIMPLE_MIR_SHARD") ?? "") != ""
+    val generation = env_get("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST") ?? ""
+    if shard_child or generation == "":
+        return
+    val state = if published: "ready" else: "failed"
+    val digest = if published: file_hash_sha256_or_empty(output_path) else: ""
+    val err = postbuild_record_v1(machine_cache_root(), generation, generation, "binary", state, digest)
+    if err != "":
+        stderr_write("warning: {err}\n")
 
 pub fn native_build_strict_stub_evidence(output: text) -> bool:
     output.contains("stub functions for unresolved symbols") or
@@ -2088,6 +2105,7 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
     if native_build_strict_stub_violation(strict_no_stub, stdout, stderr):
         if output_ok:
             file_delete(output_path)
+        native_build_record_postbuild_v1(false, output_path)
         env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
         stderr_write("error: SIMPLE_NO_STUB_FALLBACK=1 rejected native-build output containing unresolved-symbol stub evidence.\n")
         stderr_write("  The worker reported success, but strict mode forbids publishing or caching a fabricated binary.\n")
@@ -2099,6 +2117,7 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
     # there is not a failure (it marked every successful parse shard FAILED).
     val shard_child_run = (env_get("SIMPLE_PARSE_SHARD") ?? "") != "" or
         (env_get("SIMPLE_HIR_SHARD") ?? "") != "" or (env_get("SIMPLE_MIR_SHARD") ?? "") != ""
+    native_build_record_postbuild_v1(code == 0 and output_ok, output_path)
     if native_build_missing_output_is_failure_v1(code, output_path, output_ok, shard_child_run):
         # Parent-side belt-and-suspenders: never trust a bare exit code 0. If the
         # worker chain died in a way that still reports success (an early-exit

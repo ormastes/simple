@@ -1,0 +1,290 @@
+# @cover src/compiler/35.semantics/perf_facts/collection_contracts.spl
+"""
+## Purpose and audience
+Executable spec of the C1 collection contracts for the owners of
+`src/compiler/35.semantics/perf_facts`. It covers four things:
+- semantic contracts per resolved collection type;
+- mapping methods to semantic operation IDs;
+- creation origins, including stable IDs and remap rejection;
+- the operation-accounting oracle.
+## Operator workflow
+Run: `simple test test/01_unit/compiler/semantics/collection_origin_identity_spec.spl`.
+All inputs are plain text and records, so the spec needs no parser state, no
+capture externs and no profile file.
+## Compatibility and limitations
+Origins are built from the same site components as
+`compiler.frontend.core.collection_feedback`. The legacy `ast://` site ID is
+kept and checked, never replaced. Plan:
+`doc/03_plan/compiler/data/adaptive_collections_profiling_switching_2026-09-16.md` §21 (C1).
+## Verification guidance and troubleshooting
+- A stable-ID failure means whitespace or a comment changed the origin
+  fingerprint.
+- A remap failure means an ambiguous or lost origin was silently accepted.
+- An accounting failure names the counter that a duplicate insert, failed
+  erase, value replacement or resize reinsert moved wrongly.
+"""
+# @manual_section: collection-contracts
+
+use std.spec.*
+use compiler.semantics.perf_facts.collection_contracts.*
+use std.io_runtime.{hash_text}
+use compiler.frontend.core.collection_feedback.{
+    parser_collection_site_stem, parser_collection_site_reset,
+    parser_collection_local_site_id, parser_collection_field_site_id,
+    parser_collection_site_owner_push, parser_collection_site_owner_restore
+}
+
+val ADAPTIVE_MAP = "std.nogc_sync_mut.src.collections.adaptive_map.AdaptiveMap"
+val ADAPTIVE_SET = "std.nogc_sync_mut.src.collections.adaptive_set.AdaptiveSet"
+val GENERIC_MAP = "std.nogc_sync_mut.src.map.Map"
+val BUILTIN_DICT = "builtin.Dict"
+
+fn cc_op_name(op: CollectionSemanticOp?) -> text:
+    match op:
+        case Some(found): collection_semantic_op_name(found)
+        case None: "none"
+
+fn cc_origin(owner: text, name: text, kind: CollectionCreationKind, declaration: text,
+        type_args: [text]) -> CollectionOriginV1:
+    val field = kind == CollectionCreationKind.Field
+    val site = parser_collection_site_stem("app/probe.spl", owner, name, field) + "#{hash_text(declaration)}"
+    match collection_origin_v1(
+        site, "app/probe.spl", owner, name, kind,
+        declaration, collection_type_fingerprint_v1(ADAPTIVE_MAP, type_args)
+    ):
+        case Ok(origin): origin
+        case Err(message): panic("origin rejected: " + message)
+
+fn cc_local_origin(declaration: text) -> CollectionOriginV1:
+    cc_origin("main", "hot", CollectionCreationKind.Local, declaration, ["i64", "text"])
+
+fn cc_counts_after(start: CollectionOperationCountsV1, op: CollectionSemanticOp,
+        outcome: CollectionOpOutcome) -> CollectionOperationCountsV1:
+    match collection_counts_record(start, op, outcome):
+        case Ok(next): next
+        case Err(message): panic("accounting rejected: " + message)
+
+describe "collection semantic contracts":
+    it "describes adaptive maps as key-sorted maps that report insert outcomes":
+        val contract = collection_semantic_contract_v1(ADAPTIVE_MAP) ?? panic("no contract")
+        expect(contract.family == CollectionFamily.Map).to_equal(true)
+        expect(contract.order == CollectionIterationOrder.KeySortedElseInsertion).to_equal(true)
+        expect(contract.reports_insert_outcome).to_equal(true)
+        expect(contract.duplicates).to_equal(false)
+
+    it "marks builtin Dict iteration order as backend dependent":
+        val contract = collection_semantic_contract_v1(BUILTIN_DICT) ?? panic("no contract")
+        expect(contract.order == CollectionIterationOrder.BackendDependent).to_equal(true)
+        expect(contract.reports_insert_outcome).to_equal(false)
+        expect(contract.reports_erase_outcome).to_equal(false)
+
+    it "says generic Map reports erase but not insert outcomes":
+        val contract = collection_semantic_contract_v1(GENERIC_MAP) ?? panic("no contract")
+        expect(contract.reports_insert_outcome).to_equal(false)
+        expect(contract.reports_erase_outcome).to_equal(true)
+
+    it "has no contract for an unknown or same-named user type":
+        expect(collection_semantic_contract_v1("app.mine.AdaptiveMap").?).to_equal(false)
+
+describe "semantic operation IDs":
+    it "maps differently spelled inserts of every map family to one operation":
+        expect(cc_op_name(collection_semantic_op_v1(ADAPTIVE_MAP, "put"))).to_equal("insert_or_replace")
+        expect(cc_op_name(collection_semantic_op_v1(GENERIC_MAP, "insert"))).to_equal("insert_or_replace")
+        expect(cc_op_name(collection_semantic_op_v1(BUILTIN_DICT, "index_set"))).to_equal("insert_or_replace")
+        expect(cc_op_name(collection_semantic_op_v1(BUILTIN_DICT, "set"))).to_equal("insert_or_replace")
+
+    it "maps the same spelling to different operations on different families":
+        expect(cc_op_name(collection_semantic_op_v1(ADAPTIVE_SET, "insert"))).to_equal("insert_if_absent")
+        expect(cc_op_name(collection_semantic_op_v1(GENERIC_MAP, "insert"))).to_equal("insert_or_replace")
+
+    it "does not treat maintenance or unknown methods as semantic operations":
+        expect(cc_op_name(collection_semantic_op_v1(GENERIC_MAP, "rehash"))).to_equal("none")
+        expect(cc_op_name(collection_semantic_op_v1(ADAPTIVE_MAP, "promote_to_ordered"))).to_equal("none")
+        expect(cc_op_name(collection_semantic_op_v1("app.mine.Thing", "get"))).to_equal("none")
+
+    it "leaves compound bulk edits and internal readers unmapped":
+        expect(cc_op_name(collection_semantic_op_v1(GENERIC_MAP, "merge"))).to_equal("none")
+        expect(cc_op_name(collection_semantic_op_v1(BUILTIN_DICT, "extend"))).to_equal("none")
+        expect(cc_op_name(collection_semantic_op_v1(ADAPTIVE_MAP, "storage_get"))).to_equal("none")
+
+describe "collection site IDs":
+    it "keeps the exact legacy site ID strings":
+        expect(parser_collection_site_stem("app/probe.spl", "main", "hot", false)).to_equal("ast://app/probe.spl/main/local/hot")
+        expect(parser_collection_site_stem("app/probe.spl", "", "hot", false)).to_equal("ast://app/probe.spl/local/hot")
+        expect(parser_collection_site_stem("app/probe.spl", "Store", "values", true)).to_equal("ast://app/probe.spl/Store/values")
+        expect(parser_collection_site_stem("app/probe.spl", "", "values", true)).to_equal("ast://app/probe.spl/values")
+
+    it "numbers repeated local sites and leaves field sites unnumbered":
+        parser_collection_site_reset()
+        val previous = parser_collection_site_owner_push("main")
+        val first = parser_collection_local_site_id("app/probe.spl", "hot", 7)
+        val second = parser_collection_local_site_id("app/probe.spl", "hot", 7)
+        val field = parser_collection_field_site_id("app/probe.spl", "values", 9)
+        parser_collection_site_owner_restore(previous)
+        parser_collection_site_reset()
+        expect(first).to_equal("ast://app/probe.spl/main/local/hot#7")
+        expect(second).to_equal("ast://app/probe.spl/main/local/hot#7:1")
+        expect(field).to_equal("ast://app/probe.spl/main/values#9")
+
+describe "Collection origin identity":
+    it "keeps the same origin id across a whitespace-only edit of the enclosing function":
+        val a = cc_local_origin("var hot: AdaptiveMap<i64, text> = AdaptiveMap.new()")
+        val b = cc_local_origin("var  hot :AdaptiveMap<i64,text>   =  AdaptiveMap.new(  )  # hot path")
+        expect(a.origin_id).to_equal(b.origin_id)
+        expect(a.origin_id.starts_with("corigin-v1:")).to_equal(true)
+
+    it "changes the origin ID when the declaration's tokens change":
+        val a = cc_local_origin("var hot: AdaptiveMap<i64, text> = AdaptiveMap.new()")
+        val b = cc_local_origin("var hot: AdaptiveMap<i64, text> = AdaptiveMap.with_profile(p)")
+        expect(a.origin_id == b.origin_id).to_equal(false)
+
+    it "changes the origin ID when a string literal in the declaration changes":
+        val a = cc_local_origin("var hot = AdaptiveMap.with_site(\"a\")")
+        val b = cc_local_origin("var hot = AdaptiveMap.with_site(\"b\")")
+        expect(a.origin_id == b.origin_id).to_equal(false)
+
+    it "builds field origins distinct from local origins":
+        val declaration = "values: AdaptiveMap<i64, text> = AdaptiveMap.new()"
+        val field = cc_origin("Store", "values", CollectionCreationKind.Field, declaration, ["i64", "text"])
+        val local = cc_origin("Store", "values", CollectionCreationKind.Local, declaration, ["i64", "text"])
+        expect(field.legacy_site_id.starts_with("ast://app/probe.spl/Store/values#")).to_equal(true)
+        expect(field.origin_id == local.origin_id).to_equal(false)
+
+    it "rejects a site whose hash was not taken from this declaration":
+        val declaration = "var hot = AdaptiveMap.new()"
+        val site = parser_collection_site_stem("app/probe.spl", "main", "hot", false) + "#123"
+        val result = collection_origin_v1(site, "app/probe.spl", "main", "hot",
+            CollectionCreationKind.Local, declaration, "t")
+        expect(result.is_err()).to_equal(true)
+
+    it "accepts an ordinal suffix on a matching site hash":
+        val declaration = "var hot = AdaptiveMap.new()"
+        val site = parser_collection_site_stem("app/probe.spl", "main", "hot", false) + "#{hash_text(declaration)}:2"
+        val result = collection_origin_v1(site, "app/probe.spl", "main", "hot",
+            CollectionCreationKind.Local, declaration, "t")
+        expect(result.is_ok()).to_equal(true)
+
+    it "rejects a legacy site ID that does not belong to the declared components":
+        val result = collection_origin_v1(
+            "ast://app/other.spl/main/local/hot#123", "app/probe.spl", "main", "hot",
+            CollectionCreationKind.Local, "var hot = AdaptiveMap.new()", "t")
+        expect(result.is_err()).to_equal(true)
+
+    it "fingerprints generic specializations by canonical type arguments":
+        val a = collection_type_fingerprint_v1(ADAPTIVE_MAP, ["i64", "text"])
+        val b = collection_type_fingerprint_v1(ADAPTIVE_MAP, [" i64 ", "text "])
+        val swapped = collection_type_fingerprint_v1(ADAPTIVE_MAP, ["text", "i64"])
+        val other = collection_type_fingerprint_v1(GENERIC_MAP, ["i64", "text"])
+        expect(a).to_equal(b)
+        expect(a == swapped).to_equal(false)
+        expect(a == other).to_equal(false)
+
+    it "numbers identical origins in parse order":
+        val first = cc_local_origin("var hot = AdaptiveMap.new()")
+        val second = cc_local_origin("var hot = AdaptiveMap.new()")
+        val numbered = collection_origins_v1_number([first, second])
+        expect(numbered[0].origin_id == numbered[1].origin_id).to_equal(false)
+        expect(numbered[1].origin_id).to_equal(numbered[0].origin_id + ":1")
+
+describe "origin remapping":
+    it "keeps an exact match":
+        val old = cc_local_origin("var hot = AdaptiveMap.new()")
+        val result = collection_origin_remap_v1(old, [old], [old])
+        expect(collection_origin_remap_kind(result)).to_equal("exact")
+
+    it "remaps an edited declaration when exactly one candidate remains":
+        val old = cc_local_origin("var hot = AdaptiveMap.new()")
+        val edited = cc_local_origin("var hot = AdaptiveMap.with_profile(p)")
+        val result = collection_origin_remap_v1(old, [old], [edited])
+        expect(collection_origin_remap_kind(result)).to_equal("remapped")
+
+    it "rejects an ambiguous remap instead of guessing":
+        val old = cc_local_origin("var hot = AdaptiveMap.new()")
+        val edited = collection_origins_v1_number([
+            cc_local_origin("var hot = AdaptiveMap.with_profile(p)"),
+            cc_local_origin("var hot = AdaptiveMap.with_profile(q)")
+        ])
+        val result = collection_origin_remap_v1(old, [old], edited)
+        expect(collection_origin_remap_kind(result)).to_equal("ambiguous")
+
+    it "rejects an exact ID that appears twice":
+        val old = cc_local_origin("var hot = AdaptiveMap.new()")
+        val result = collection_origin_remap_v1(old, [old], [old, old])
+        expect(collection_origin_remap_kind(result)).to_equal("ambiguous")
+
+    it "reports a lost origin instead of guessing":
+        val old = cc_local_origin("var hot = AdaptiveMap.new()")
+        val result = collection_origin_remap_v1(old, [old], [])
+        expect(collection_origin_remap_kind(result)).to_equal("lost")
+
+    it "does not remap across owner, binding kind or type specialization":
+        val old = cc_local_origin("var hot = AdaptiveMap.new()")
+        val other_owner = cc_origin("helper", "hot", CollectionCreationKind.Local, "var hot = AdaptiveMap.with_profile(p)", ["i64", "text"])
+        val other_kind = cc_origin("main", "hot", CollectionCreationKind.Field, "hot = AdaptiveMap.with_profile(p)", ["i64", "text"])
+        val other_type = cc_origin("main", "hot", CollectionCreationKind.Local, "var hot = AdaptiveMap.with_profile(p)", ["text", "i64"])
+        expect(collection_origin_remap_kind(collection_origin_remap_v1(old, [old], [other_owner]))).to_equal("lost")
+        expect(collection_origin_remap_kind(collection_origin_remap_v1(old, [old], [other_kind]))).to_equal("lost")
+        expect(collection_origin_remap_kind(collection_origin_remap_v1(old, [old], [other_type]))).to_equal("lost")
+
+    it "does not give a deleted origin's identity to a surviving sibling":
+        val deleted = cc_local_origin("var hot = AdaptiveMap.new()")
+        val survivor = cc_local_origin("var hot = AdaptiveMap.with_profile(p)")
+        val result = collection_origin_remap_v1(deleted, [deleted, survivor], [survivor])
+        expect(collection_origin_remap_kind(result)).to_equal("lost")
+
+describe "operation accounting oracle":
+    it "counts membership hits and misses without changing cardinality":
+        var c = collection_counts_new()
+        c = cc_counts_after(c, CollectionSemanticOp.Contains, CollectionOpOutcome.Hit)
+        c = cc_counts_after(c, CollectionSemanticOp.Contains, CollectionOpOutcome.Miss)
+        expect(c.lookup_hit).to_equal(1)
+        expect(c.lookup_miss).to_equal(1)
+        expect(c.cardinality).to_equal(0)
+
+    it "does not count a duplicate insert as a new key":
+        var c = collection_counts_new()
+        c = cc_counts_after(c, CollectionSemanticOp.InsertIfAbsent, CollectionOpOutcome.NewKey)
+        c = cc_counts_after(c, CollectionSemanticOp.InsertIfAbsent, CollectionOpOutcome.Present)
+        expect(c.insert_attempt).to_equal(2)
+        expect(c.insert_new_key).to_equal(1)
+        expect(c.cardinality).to_equal(1)
+
+    it "does not decrement cardinality on a failed erase":
+        var c = collection_counts_new()
+        c = cc_counts_after(c, CollectionSemanticOp.InsertOrReplace, CollectionOpOutcome.NewKey)
+        c = cc_counts_after(c, CollectionSemanticOp.Erase, CollectionOpOutcome.Absent)
+        expect(c.erase_attempt).to_equal(1)
+        expect(c.erase_existing_key).to_equal(0)
+        expect(c.cardinality).to_equal(1)
+
+    it "counts a value replacement without changing cardinality":
+        var c = collection_counts_new()
+        c = cc_counts_after(c, CollectionSemanticOp.InsertOrReplace, CollectionOpOutcome.NewKey)
+        c = cc_counts_after(c, CollectionSemanticOp.InsertOrReplace, CollectionOpOutcome.Replaced)
+        expect(c.replace_value).to_equal(1)
+        expect(c.insert_new_key).to_equal(1)
+        expect(c.cardinality).to_equal(1)
+
+    it "records a resize reinsert as maintenance, not as user insertions":
+        var c = collection_counts_new()
+        c = cc_counts_after(c, CollectionSemanticOp.InsertOrReplace, CollectionOpOutcome.NewKey)
+        c = cc_counts_after(c, CollectionSemanticOp.InsertOrReplace, CollectionOpOutcome.NewKey)
+        val resized = collection_counts_record_maintenance(c, 2) ?? panic("maintenance rejected")
+        expect(resized.maintenance_events).to_equal(1)
+        expect(resized.maintenance_reinserted).to_equal(2)
+        expect(resized.insert_attempt).to_equal(2)
+        expect(resized.insert_new_key).to_equal(2)
+        expect(resized.cardinality).to_equal(2)
+
+    it "rejects a maintenance reinsert larger than the collection":
+        expect(collection_counts_record_maintenance(collection_counts_new(), 1).?).to_equal(false)
+
+    it "rejects an outcome that the operation cannot produce":
+        val result = collection_counts_record(collection_counts_new(),
+            CollectionSemanticOp.Erase, CollectionOpOutcome.NewKey)
+        expect(result.is_err()).to_equal(true)
+
+    it "rejects a successful erase from an empty collection":
+        val result = collection_counts_record(collection_counts_new(),
+            CollectionSemanticOp.Erase, CollectionOpOutcome.Removed)
+        expect(result.is_err()).to_equal(true)

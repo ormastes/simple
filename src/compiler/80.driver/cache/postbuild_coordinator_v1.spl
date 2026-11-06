@@ -1,0 +1,117 @@
+# PostBuildCoordinatorV1 (incremental_build_tldr_scv plan, stale-feature review
+# 2026-11-06, item 10). A durable queue, leases and max_attempts are superseded by
+# single-flight futures; what remains is pending vs settled state for the binary,
+# the TLDR and the tests of one build, kept as immutable per-generation records.
+#
+# Generation = the frozen source root digest of the build. Each settled kind is
+# one immutable SDN file `<root>/postbuild/<generation>/<kind>.sdn` published
+# through temp + atomic rename (tldr_publish_v1). A kind with no file is pending.
+# A settled file is never replaced: identical bytes are a no-op, different bytes
+# are refused. Kinds are independent files, so a late TLDR/test failure cannot
+# touch binary=ready. A job that carries a different generation than the one it
+# stamps is refused, and a file whose embedded generation is not the directory's
+# is ignored on load. Lockless: no globals.
+use compiler.driver.cache.tldr_layout_v1.{tldr_publish_v1}
+use std.io_runtime.{file_exists, file_read}
+
+pub val POSTBUILD_SCHEMA_V1: text = "simple.postbuild/1"
+
+pub struct PostbuildViewV1:
+    generation: text
+    binary: text
+    binary_digest: text
+    tldr: text
+    tests: text
+
+fn _postbuild_dir_name_v1(generation: text) -> text:
+    generation.replace(":", "-").replace("/", "-").replace("\\", "-")
+
+pub fn postbuild_path_v1(root: text, generation: text, kind: text) -> text:
+    root + "/postbuild/" + _postbuild_dir_name_v1(generation) + "/" + kind + ".sdn"
+
+fn _postbuild_state_ok_v1(kind: text, state: text) -> bool:
+    if kind == "binary":
+        return state == "ready" or state == "failed"
+    if kind == "tldr":
+        return state == "verified" or state == "stale" or state == "failed"
+    if kind == "tests":
+        return state == "passed" or state == "failed" or state == "not_requested"
+    false
+
+fn _postbuild_render_v1(generation: text, kind: text, state: text, digest: text) -> text:
+    "schema: " + POSTBUILD_SCHEMA_V1 + "\n" +
+        "generation: " + generation + "\n" +
+        "kind: " + kind + "\n" +
+        "state: " + state + "\n" +
+        "digest: " + digest + "\n"
+
+fn _postbuild_field_v1(sdn: text, key: text) -> text:
+    val prefix = key + ": "
+    for line in sdn.split("\n"):
+        if line.starts_with(prefix):
+            return line.substring(prefix.len()).trim()
+    ""
+
+# "" on success, otherwise the refusal reason. `current_generation` is the build
+# generation the coordinator owns; `job_generation` is what the reporting job was
+# started for. A mismatch is a stale job and writes nothing.
+pub fn postbuild_record_v1(root: text, current_generation: text, job_generation: text,
+        kind: text, state: text, digest: text) -> text:
+    if current_generation == "":
+        return "postbuild: empty generation"
+    if job_generation != current_generation:
+        return "postbuild: stale job generation {job_generation} refused for {current_generation}"
+    if not _postbuild_state_ok_v1(kind, state):
+        return "postbuild: invalid state {state} for kind {kind}"
+    val path = postbuild_path_v1(root, current_generation, kind)
+    val content = _postbuild_render_v1(current_generation, kind, state, digest)
+    if file_exists(path):
+        if file_read(path) == content:
+            return ""
+        return "postbuild: {path} is settled with different bytes"
+    if not tldr_publish_v1(path, content):
+        return "postbuild: publish failed: {path}"
+    ""
+
+# (state, digest) of one kind, "pending" when absent, foreign or malformed.
+fn _postbuild_read_kind_v1(root: text, generation: text, kind: text) -> (text, text):
+    val path = postbuild_path_v1(root, generation, kind)
+    if not file_exists(path):
+        return ("pending", "")
+    val sdn = file_read(path)
+    if _postbuild_field_v1(sdn, "schema") != POSTBUILD_SCHEMA_V1:
+        return ("pending", "")
+    if _postbuild_field_v1(sdn, "generation") != generation:
+        return ("pending", "")
+    if _postbuild_field_v1(sdn, "kind") != kind:
+        return ("pending", "")
+    val state = _postbuild_field_v1(sdn, "state")
+    if not _postbuild_state_ok_v1(kind, state):
+        return ("pending", "")
+    (state, _postbuild_field_v1(sdn, "digest"))
+
+pub fn postbuild_load_v1(root: text, generation: text) -> PostbuildViewV1:
+    val (b, bd) = _postbuild_read_kind_v1(root, generation, "binary")
+    val (t, _td) = _postbuild_read_kind_v1(root, generation, "tldr")
+    val (x, _xd) = _postbuild_read_kind_v1(root, generation, "tests")
+    PostbuildViewV1(generation: generation, binary: b, binary_digest: bd, tldr: t, tests: x)
+
+# Tiers: "binary" (binary ready), "verified" (+ tldr verified), "full" (+ tests
+# passed or not_requested). Pending, failed, stale, missing or an unknown tier is
+# not qualified.
+pub fn postbuild_wait_required_v1(root: text, generation: text, tier: text) -> bool:
+    if tier != "binary" and tier != "verified" and tier != "full":
+        return false
+    val v = postbuild_load_v1(root, generation)
+    if v.binary != "ready":
+        return false
+    if tier == "binary":
+        return true
+    if v.tldr != "verified":
+        return false
+    if tier == "verified":
+        return true
+    v.tests == "passed" or v.tests == "not_requested"
+
+export POSTBUILD_SCHEMA_V1, PostbuildViewV1
+export postbuild_path_v1, postbuild_record_v1, postbuild_load_v1, postbuild_wait_required_v1
