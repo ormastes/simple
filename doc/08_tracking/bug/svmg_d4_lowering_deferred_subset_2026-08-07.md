@@ -25,6 +25,15 @@ compiler/core/MCP verification and merged release PR remain pending. Historical
 results below retain their original producer/scope and are not current PASS
 evidence.
 
+The first producer invocation reached MIR with 123/124 modules successful,
+then rejected the driver at optional enum fields initialized with `nil`.
+The existing language rule introduced by `94aa0d6b8046` requires `None`
+in those safe enum payload slots; both the B60 producer and current source
+enforce it. The driver and canonical spec now use `None` for those exact
+optional fields. This corrects fixture syntax without changing the production
+lowerer or bypassing safety checks. The failed invocation and its immutable
+`81d2ba024e8` input remain retained; execution acceptance is still pending.
+
 ## Historical report and earlier qualification
 
 Original status: 2 open, in-subset-but-not-yet-implemented gaps remain in
