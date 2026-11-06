@@ -1,0 +1,81 @@
+# @req REQ-SSPEC-COMPILER
+# Contract: every bare `export NAME` in the async std.io facade must be bound
+# in the same file by a `use`/`export use` item or a declaration. A bare export
+# with no binding is resolved only by the HIR re-export chase's package-sibling
+# scan, which misses names siblings merely import (dir_exists, file_delete) or
+# never declare (ProcessResult) -- `use std.io.{dir_exists}` then failed with
+# `unresolved name` in the native self-host (compiler_cli_build,
+# compiler/00.common/dependency/resolution.spl:117).
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+val FACADE = "src/lib/nogc_async_mut/io.spl"
+
+fn ident_list(raw: text) -> [text]:
+    var out: [text] = []
+    var cleaned = raw.replace("{", " ").replace("}", " ").replace("\n", " ")
+    for part in cleaned.split(","):
+        val name = part.trim()
+        if name != "" and not name.contains(" ") and not name.contains("."):
+            out.push(name)
+    out
+
+# Bound names: items inside `use X.{...}` / `export use X.{...}` (possibly
+# multi-line) plus top-level fn/struct/class/enum/trait declarations.
+fn bound_names(src: text) -> [text]:
+    var bound: [text] = []
+    var lines = src.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        if (line.starts_with("use ") or line.starts_with("export use ")) and line.contains("{"):
+            var chunk = line.substring(line.index_of("{") + 1)
+            while not chunk.contains("}") and i + 1 < lines.len():
+                i = i + 1
+                chunk = chunk + "," + lines[i]
+            for name in ident_list(chunk.substring(0, chunk.index_of("}"))):
+                bound.push(name)
+        for kw in ["fn ", "pub fn ", "struct ", "class ", "enum ", "trait "]:
+            if line.starts_with(kw):
+                val rest = line.substring(kw.len())
+                var name = ""
+                for ch in rest.chars():
+                    if ch == "(" or ch == ":" or ch == "<" or ch == " ":
+                        break
+                    name = name + ch
+                if name != "": bound.push(name)
+        i = i + 1
+    bound
+
+# Bare `export a, b, c` lines (not `export use`), with indented continuation.
+fn bare_exports(src: text) -> [text]:
+    var names: [text] = []
+    var lines = src.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        if line.starts_with("export ") and not line.starts_with("export use "):
+            var chunk = line.substring(7)
+            while chunk.trim().ends_with(",") and i + 1 < lines.len():
+                i = i + 1
+                chunk = chunk + lines[i]
+            for name in ident_list(chunk):
+                names.push(name)
+        i = i + 1
+    names
+
+describe "async std.io facade export bindings":
+    it "binds every bare export in the same file":
+        val src = file_read(FACADE)
+        expect(src.len() > 0).to_equal(true)
+        val bound = bound_names(src)
+        var unbound: [text] = []
+        for name in bare_exports(src):
+            if not bound.contains(name):
+                unbound.push(name)
+        expect(unbound.join(", ")).to_equal("")
+
+    it "routes the host helpers that used to dangle":
+        val bound = bound_names(file_read(FACADE))
+        for name in ["dir_exists", "file_delete", "ProcessResult", "file_exists"]:
+            expect(bound.contains(name)).to_equal(true)
