@@ -1,0 +1,56 @@
+# @cover src/os/sosix/host/code_patch_adapter.spl
+# @req REQ-XRAY-PR5B-INPROCESS-PATCH
+"""
+# XRay PR5b — in-process patching through the real host port
+
+The PR5 patcher could not own a real RX page in-process: the Rust seed's
+interpreter `rt_mprotect` refused PROT_EXEC on aarch64 Linux. This spec runs
+the real `SosixCodePatchAdapterV1` (rt_mprotect RW -> RX with I-cache sync)
+against a code page of THIS process and executes it between patches, so a
+missing I-cache sync or a refused execute grant fails here, not in a replay.
+
+aarch64 Linux only: on any other host the spec asserts nothing executable and
+records why (the x86-64 sled is PR6).
+"""
+use std.spec.*
+use std.nogc_sync_mut.platform.{host_arch}
+use os.sosix.host.code_patch_adapter.{SosixCodePatchAdapterV1}
+
+extern fn rt_mmap_raw(addr: i64, length: i64, prot: i64, flags: i64, fd: i64, offset: i64) -> i64
+extern fn rt_munmap_raw(addr: i64, length: i64) -> i64
+extern fn rt_call_ptr_0(addr: i64) -> i64
+
+val PAGE: i64 = 4096
+val MAP_PRIVATE_ANON: i64 = 34
+val RET: i64 = 0xD65F03C0
+
+# movz w0, #imm16
+fn movz_w0(imm: i64) -> i64:
+    0x52800000 | ((imm & 65535) << 5)
+
+describe "XRay in-process patch through SosixCodePatchAdapterV1":
+    it "grants RX, executes, re-patches and executes the new word (aarch64 Linux)":
+        if host_arch() != "aarch64":
+            expect(host_arch() != "aarch64").to_equal(true)
+            return
+        val page = rt_mmap_raw(0, PAGE, 3, MAP_PRIVATE_ANON, -1, 0)
+        expect(page > 0).to_equal(true)
+        var port = SosixCodePatchAdapterV1()
+        expect(port.store_u32(page, movz_w0(42))).to_equal(0)
+        expect(port.store_u32(page + 4, RET)).to_equal(0)
+        # Never execute a page the port did not make RX: a refused grant
+        # must fail the spec, not SIGSEGV the runner.
+        val granted = port.end(page, PAGE)
+        expect(granted).to_equal(0)
+        if granted != 0:
+            return
+        expect(rt_call_ptr_0(page)).to_equal(42)
+        expect(port.begin(page, PAGE)).to_equal(0)
+        expect(port.store_u32(page, movz_w0(7))).to_equal(0)
+        val regranted = port.end(page, PAGE)
+        expect(regranted).to_equal(0)
+        if regranted != 0:
+            return
+        expect(port.load_u32(page)).to_equal(movz_w0(7))
+        expect(rt_call_ptr_0(page)).to_equal(7)
+        expect(rt_munmap_raw(page, PAGE)).to_equal(0)
