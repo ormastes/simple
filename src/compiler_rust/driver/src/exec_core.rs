@@ -1750,12 +1750,32 @@ fn source_is_lint_entry(path: &Path) -> bool {
 }
 
 fn should_prefer_interpreter_for_source(path: &Path, extension: &str, cli_args_backed: bool) -> bool {
+    // Coverage is instrumented only in the interpreter (function/line/decision
+    // hooks in interpreter_call + interpreter/coverage_helpers). The JIT lane
+    // records nothing, so `SIMPLE_COVERAGE=1 bin/simple run x.spl` used to
+    // write an artifact with 0 functions / 0 lines and exit 0. When coverage
+    // was requested, the interpreter lane is the only one that produces
+    // evidence. See doc/08_tracking/bug/coverage_tooling_does_not_instrument_spl_2026-08-07.md.
+    if let Some(reason) = coverage_preference_reason(simple_compiler::is_coverage_enabled()) {
+        jit_coverage_report(path, reason);
+        return true;
+    }
     match interpreter_preference_reason(path, extension, cli_args_backed) {
         Some(reason) => {
             jit_coverage_report(path, reason);
             true
         }
         None => false,
+    }
+}
+
+/// Coverage instrumentation forces the interpreter lane (the JIT has no
+/// coverage hooks). Pure so it is testable without the global collector.
+fn coverage_preference_reason(coverage_enabled: bool) -> Option<&'static str> {
+    if coverage_enabled {
+        Some("coverage-instrumentation")
+    } else {
+        None
     }
 }
 
@@ -1883,7 +1903,8 @@ fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        interpreter_preference_reason, panic_payload_to_string, should_force_interpreter_for_source,
+        coverage_preference_reason, interpreter_preference_reason, panic_payload_to_string,
+        should_force_interpreter_for_source,
         should_prefer_interpreter_for_source, source_uses_cli_args, source_uses_jit_unsafe_graphics_runtime,
     };
 
@@ -1930,6 +1951,12 @@ mod tests {
     /// The complement: a source with no gate trigger must take the JIT lane and
     /// report NO reason. A census that fired for everything would be as useless
     /// as one that fired for nothing.
+    #[test]
+    fn coverage_preference_reason_forces_interpreter_only_when_coverage_requested() {
+        assert_eq!(coverage_preference_reason(true), Some("coverage-instrumentation"));
+        assert_eq!(coverage_preference_reason(false), None);
+    }
+
     #[test]
     fn interpreter_preference_reason_is_none_for_an_ordinary_source() {
         let dir = tempdir().expect("tempdir");
