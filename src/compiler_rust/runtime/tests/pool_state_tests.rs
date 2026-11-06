@@ -1,6 +1,7 @@
 use crate::{
     rt_pool_state_close_v1, rt_pool_state_completed_v1, rt_pool_state_create_v1, rt_pool_state_destroy_v1,
-    rt_pool_state_join_idle_v1, rt_pool_state_outstanding_v1, rt_pool_state_try_submit_i64_v1,
+    rt_pool_state_join_idle_v1, rt_pool_state_outstanding_v1, rt_pool_state_try_submit_i64_kind_v1,
+    rt_pool_state_try_submit_i64_v1,
     rt_pool_task_join_i64_v1, rt_pool_task_release_i64_v1, rt_pool_task_status_i64_v1,
 };
 
@@ -16,8 +17,16 @@ extern "C" fn identity(input: i64) -> i64 {
 unsafe fn submit(state: i64, entry: extern "C" fn(i64) -> i64, input: i64) -> i64 {
     // Native Simple function values are two-word direct-function descriptors.
     // The runtime validates and copies this descriptor before submit returns.
+    // A Rust caller holds a machine address, so it declares kind ADDRESS.
     let descriptor = [entry as usize as i64, DIRECT_FUNCTION_MARKER];
-    unsafe { rt_pool_state_try_submit_i64_v1(state, descriptor.as_ptr() as usize as i64, input) }
+    unsafe {
+        rt_pool_state_try_submit_i64_kind_v1(
+            state,
+            crate::executor::RT_WORKER_CLOSURE_ADDRESS,
+            descriptor.as_ptr() as usize as i64,
+            input,
+        )
+    }
 }
 
 #[test]

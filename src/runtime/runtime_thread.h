@@ -81,6 +81,7 @@ int64_t rt_pool_busy_count(void);
 int64_t rt_pool_blocked_count(void);
 int64_t rt_pool_state_create_v1(int64_t capacity);
 int64_t rt_pool_state_try_submit_i64_v1(int64_t state_handle, int64_t entry_fn, int64_t input_i64);
+int64_t rt_pool_state_try_submit_i64_kind_v1(int64_t state_handle, int64_t kind, int64_t entry_fn, int64_t input_i64);
 int64_t rt_pool_task_status_i64_v1(int64_t task_handle);
 int64_t rt_pool_task_join_i64_v1(int64_t task_handle);
 int64_t rt_pool_task_release_i64_v1(int64_t task_handle);
