@@ -59,3 +59,12 @@ and spec obligations are in the design doc section "E1 effective export
 closure (design, 2026-11-06)". Code slice: `api_export_closure_facts_v1`,
 `api_export_closure_projection_v1`, `api_exposure_closure_v1`,
 `CompileContext.api_export_closure_facts`, stacked PR after this one.
+
+2026-11-06 (work/r11-xtype-closure-20261106, stacked on the design PR):
+closure IMPLEMENTED. Closure spec RED -> GREEN 5/5; guard 8/8 (unknown-root
+case flipped to deny on purpose); walker/route/signature collateral unchanged.
+Seed facts recorded: no origin row for an unresolved `export use` directory
+alias (closure reads raw exports -> Unknown); transitive re-export via the
+facade name joins to the terminal. Still open: nominal members (every
+Nominal export is an Unknown root, hence denied under the flag at robust),
+non-callable/generated surfaces, Phase 3 full compile() verification.

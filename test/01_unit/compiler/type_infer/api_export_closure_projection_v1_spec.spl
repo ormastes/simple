@@ -1,0 +1,142 @@
+# REQ-EAPI-001 (AC-EAPI-001/002 rows): effective export closure over the
+# frozen registry, and the module verdict after the closure is applied.
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.common.api_exposure_result_v1.{ApiExposureVerdictV1, ApiCallableExposureV1, ApiModuleExposureV1}
+use compiler.common.api_export_closure_facts_v1.{ApiExportClosureStatusV1, ApiExportClosureEntryV1,
+    ApiExportClosureFactsV1}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_hir_pipeline_passes.{run_typecheck_warn_pass}
+use compiler.hir.hir_lowering.api_export_closure_projection_v1.{project_api_export_closure_v1}
+
+struct ClosureFixtureV1:
+    registry: ModuleSurfacesByName
+    context: CompileContext
+
+# pkg.__init__ -> pkg.fixture.__init__ -> pkg.fixture.leaf, plus a facade-less
+# `solo` module. `flag` is re-exported by both facades (the outer one through
+# the middle facade), `plain` only by the nearest one, `secret` by the leaf
+# alone, and `hidden` by the outer facade through a directory alias the
+# registry does not carry (no origin row: unresolved, not absent).
+fn closure_fixture_v1() -> ClosureFixtureV1:
+    val logger = Logger(level: 0)
+    val names = ["pkg.fixture.leaf", "pkg.fixture.__init__", "pkg.__init__", "solo"]
+    val paths = ["pkg/fixture/leaf.spl", "pkg/fixture/__init__.spl", "pkg/__init__.spl", "solo.spl"]
+    val texts = [
+        "pub fn flag() -> bool:\n    true\npub fn hidden() -> i64:\n    1\npub fn secret() -> text:\n    \"s\"\npub fn plain() -> bool:\n    false\nexport flag\nexport hidden\nexport secret\nexport plain\n",
+        "export use pkg.fixture.leaf.\{flag, hidden, plain\}\n",
+        "export use pkg.fixture.__init__.\{flag\}\nexport use pkg.fixture.\{hidden\}\n",
+        "pub fn alone():\n    pass\nexport alone\n"]
+    var parsed: Dict<text, Module> = {}
+    var sources: [SourceFile] = []
+    var index = 0
+    while index < names.len():
+        parsed[names[index]] = parse_full_frontend(texts[index], paths[index], names[index], logger)
+        sources.push(SourceFile(path: paths[index], content: texts[index], module_name: names[index]))
+        index = index + 1
+    val surfaces_result = module_surfaces_from_modules(parsed, sources)
+    expect(surfaces_result.is_ok()).to_equal(true)
+    val registry = surfaces_result.unwrap()
+    var modules: Dict<text, HirModule> = {}
+    index = 0
+    while index < names.len():
+        var lowering = hirlowering_for_module(paths[index], registry)
+        modules[names[index]] = lowering.lower_module(parse_full_frontend(texts[index], paths[index], names[index], logger))
+        expect(lowering.errors.len()).to_equal(0)
+        index = index + 1
+    val context = CompileContext.create(driver_core_compile_options_default())
+    run_typecheck_warn_pass(context, modules, Some(registry))
+    ClosureFixtureV1(registry, context)
+
+fn entry_for(facts: ApiExportClosureFactsV1, module: text, name: text) -> ApiExportClosureEntryV1?:
+    for raw_entry in facts.entries:
+        val entry: ApiExportClosureEntryV1 = raw_entry
+        if entry.terminal_module == module and entry.declaration_name == name: return Some(entry)
+    nil
+
+fn row_for(exposure: ApiModuleExposureV1, name: text) -> ApiCallableExposureV1?:
+    for raw_row in exposure.callables:
+        val row: ApiCallableExposureV1 = raw_row
+        if row.declaration_name == name: return Some(row)
+    nil
+
+describe "effective export closure":
+    it "exports a callable only through every ancestor facade in the registry":
+        # @req REQ-EAPI-001
+        val fixture = closure_fixture_v1()
+        val facts = fixture.context.api_export_closure_facts.unwrap()
+        expect(facts.registry_generation).to_equal(fixture.registry.generation)
+        expect(facts.truncated).to_equal(false)
+        val flag = entry_for(facts, "pkg.fixture.leaf", "flag").unwrap()
+        expect(flag.status == ApiExportClosureStatusV1.Exported).to_equal(true)
+        expect(flag.root_exporter_module).to_equal("pkg.__init__")
+        expect(flag.chain_depth).to_equal(3)
+        expect(flag.reason).to_equal("")
+        val plain = entry_for(facts, "pkg.fixture.leaf", "plain").unwrap()
+        expect(plain.status == ApiExportClosureStatusV1.NotExported).to_equal(true)
+        expect(plain.reason).to_equal("not-exported-by:pkg.__init__")
+        val secret = entry_for(facts, "pkg.fixture.leaf", "secret").unwrap()
+        expect(secret.status == ApiExportClosureStatusV1.NotExported).to_equal(true)
+        expect(secret.reason).to_equal("not-exported-by:pkg.fixture.__init__")
+        # The outer facade spells `hidden` but the builder resolved no origin
+        # row for it: fail closed to Unknown, never NotExported.
+        val hidden = entry_for(facts, "pkg.fixture.leaf", "hidden").unwrap()
+        expect(hidden.status == ApiExportClosureStatusV1.Unknown).to_equal(true)
+        expect(hidden.reason).to_equal("export-origin-unresolved:pkg.__init__")
+        expect(facts.unknown_reasons).to_contain("export-origin-unresolved:pkg.__init__")
+
+    it "treats a module with no facade in the registry as its own root":
+        val fixture = closure_fixture_v1()
+        val facts = fixture.context.api_export_closure_facts.unwrap()
+        val alone = entry_for(facts, "solo", "alone").unwrap()
+        expect(alone.status == ApiExportClosureStatusV1.Exported).to_equal(true)
+        expect(alone.root_exporter_module).to_equal("solo")
+        expect(alone.chain_depth).to_equal(1)
+
+    it "makes Safe reachable and keeps NotExported callables out of the module verdict":
+        # @req REQ-EAPI-002
+        val fixture = closure_fixture_v1()
+        val solo = fixture.context.api_exposure["solo"]
+        expect(solo.verdict == ApiExposureVerdictV1.Safe).to_equal(true)
+        # Only the unconditional scope marker remains; it bounds the claim.
+        expect(solo.unknown_reasons).to_equal(["non-callable-and-generated-surfaces-not-collected"])
+        expect(row_for(solo, "alone").unwrap().export_status == ApiExportClosureStatusV1.Exported).to_equal(true)
+        val leaf = fixture.context.api_exposure["pkg.fixture.leaf"]
+        # `flag` is exported and exposes bool: the module violates. `plain` and
+        # `secret` still carry their findings but are NotExported.
+        expect(leaf.verdict == ApiExposureVerdictV1.Violates).to_equal(true)
+        var closure_reason_present = false
+        for reason in leaf.unknown_reasons:
+            if reason == "effective-export-closure-not-collected": closure_reason_present = true
+        expect(closure_reason_present).to_equal(false)
+        expect(row_for(leaf, "plain").unwrap().export_status == ApiExportClosureStatusV1.NotExported).to_equal(true)
+        expect(row_for(leaf, "hidden").unwrap().export_status == ApiExportClosureStatusV1.Unknown).to_equal(true)
+        expect(leaf.findings.len()).to_equal(4)
+        # A facade retains no callables: nothing exported, nothing unknown, Safe.
+        val facade = fixture.context.api_exposure["pkg.fixture.__init__"]
+        expect(facade.verdict == ApiExposureVerdictV1.Safe).to_equal(true)
+
+    it "yields no entries and an explicit reason without routes or a frozen registry":
+        val fixture = closure_fixture_v1()
+        val no_routes = project_api_export_closure_v1(fixture.registry, nil, fixture.context.api_signature_facts)
+        expect(no_routes.entries.len()).to_equal(0)
+        expect(no_routes.unknown_reasons).to_contain("export-routes-not-collected")
+        val unfrozen = ModuleSurfacesByName(surfaces: [], index_by_name: {}, ordered_names: [],
+            ordered_indices: [], generation: 0, frozen: false)
+        val no_registry = project_api_export_closure_v1(unfrozen, fixture.context.api_export_route_facts, {})
+        expect(no_registry.entries.len()).to_equal(0)
+        expect(no_registry.unknown_reasons).to_contain("registry-not-frozen")
+
+    it "is cleared by a later pass that omits the registry":
+        val fixture = closure_fixture_v1()
+        expect(fixture.context.api_export_closure_facts != nil).to_equal(true)
+        run_typecheck_warn_pass(fixture.context, {}, nil)
+        expect(fixture.context.api_export_closure_facts == nil).to_equal(true)
+        expect(fixture.context.api_exposure.len()).to_equal(0)

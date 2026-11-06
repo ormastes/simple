@@ -11,6 +11,8 @@ use compiler.common.api_exposure_result_v1.{ApiExposureVerdictV1, ApiExposureFin
     ApiCallableExposureV1, ApiModuleExposureV1}
 use compiler.common.api_export_route_facts_v1.{ApiExportJoinV1, ApiExportRouteFactV1,
     ApiExportRouteFactsV1}
+use compiler.common.api_export_closure_facts_v1.{ApiExportClosureStatusV1, ApiExportClosureEntryV1,
+    ApiExportClosureFactsV1}
 use compiler.common.api_publication_decision_v1.{ApiPublicationDispositionV1,
     api_publication_disposition_v1, decide_api_publication_v1}
 use compiler.common.api_publication_activation_v1.{extreme_public_api_active_v1,
@@ -42,6 +44,9 @@ fn joined_route(exporter: text, terminal: text, symbol: i64, status: ApiExportJo
 
 fn routes_of(routes: [ApiExportRouteFactV1]) -> ApiExportRouteFactsV1?:
     Some(ApiExportRouteFactsV1(1, routes, ["ancestor-visibility-not-collected"], false))
+
+fn closure_of(module: text, symbol: i64, status: ApiExportClosureStatusV1, reason: text) -> ApiExportClosureFactsV1?:
+    Some(ApiExportClosureFactsV1(1, [ApiExportClosureEntryV1(1, module, symbol, "flag", status, reason, 1, module, 1)], [], false))
 
 fn fixture_context() -> CompileContext:
     val logger = Logger(level: 0)
@@ -116,12 +121,49 @@ describe "extreme_public_api named rule":
         expect(joined.diagnostics.len()).to_equal(1)
         expect(joined.diagnostics[0].contains("helper")).to_equal(false)
 
-    it "records unknown roots and missing routes without denying":
+    it "excludes NotExported closure roots and keeps Unknown closure roots unknown":
+        # @req REQ-EAPI-001
+        val exposure = {"m": violating_module("m", 5, -1)}
+        val routes = routes_of([joined_route("m", "m", 5, ApiExportJoinV1.Joined)])
+        val excluded = decide_api_publication_v1(true, "robust", exposure, routes,
+            closure_of("m", 5, ApiExportClosureStatusV1.NotExported, "not-exported-by:facade"))
+        expect(excluded.excluded_roots).to_equal(1)
+        expect(excluded.checked_roots).to_equal(0)
+        expect(excluded.violating_roots).to_equal(0)
+        expect(excluded.allowed).to_equal(true)
+        val unknown = decide_api_publication_v1(true, "robust", exposure, routes,
+            closure_of("m", 5, ApiExportClosureStatusV1.Unknown, "export-origin-unresolved:facade"))
+        expect(unknown.checked_roots).to_equal(1)
+        expect(unknown.unknown_roots).to_equal(1)
+        expect(unknown.violating_roots).to_equal(0)
+        expect(unknown.unknown_reasons).to_contain("export-origin-unresolved:facade")
+        # Unknown roots are denied at robust (fail closed) and named.
+        expect(unknown.allowed).to_equal(false)
+        expect(unknown.diagnostics.len()).to_equal(1)
+        expect(unknown.diagnostics[0].contains("export-origin-unresolved:facade")).to_equal(true)
+        val unknown_strict = decide_api_publication_v1(true, "strict", exposure, routes,
+            closure_of("m", 5, ApiExportClosureStatusV1.Unknown, "export-origin-unresolved:facade"))
+        expect(unknown_strict.allowed).to_equal(true)
+        val exported = decide_api_publication_v1(true, "robust", exposure, routes,
+            closure_of("m", 5, ApiExportClosureStatusV1.Exported, ""))
+        expect(exported.violating_roots).to_equal(1)
+        expect(exported.allowed).to_equal(false)
+        val absent = decide_api_publication_v1(true, "robust", exposure, routes,
+            closure_of("other", 9, ApiExportClosureStatusV1.Exported, ""))
+        expect(absent.unknown_roots).to_equal(1)
+        expect(absent.unknown_reasons).to_contain("export-closure-entry-missing")
+
+    it "denies unknown roots at robust and records missing routes without a root":
+        # @req REQ-EAPI-003
         val missing = decide_api_publication_v1(true, "robust", {},
             routes_of([joined_route("m", "m", 5, ApiExportJoinV1.Joined)]))
-        expect(missing.allowed).to_equal(true)
+        expect(missing.allowed).to_equal(false)
         expect(missing.unknown_roots).to_equal(1)
         expect(missing.unknown_reasons).to_contain("exposure-not-collected")
+        expect(missing.diagnostics[0].contains("exposure-not-collected")).to_equal(true)
+        val missing_strict = decide_api_publication_v1(true, "strict", {},
+            routes_of([joined_route("m", "m", 5, ApiExportJoinV1.Joined)]))
+        expect(missing_strict.allowed).to_equal(true)
         val no_routes = decide_api_publication_v1(true, "robust", {"m": violating_module("m", 5, -1)}, nil)
         expect(no_routes.allowed).to_equal(true)
         expect(no_routes.checked_roots).to_equal(0)

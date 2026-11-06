@@ -75,6 +75,18 @@ records the AC-EAPI-005 finding: the publication guard runs before
 `weave_aop()`, so AOP/postmono-introduced exports are not rechecked
 (feature-sized follow-up, not closed).
 
+
+2026-11-06 E1 closure implemented: `compiler.hir.hir_lowering.api_export_closure_projection_v1`
+projects `CompileContext.api_export_closure_facts`;
+`compiler.types.type_infer.api_exposure_closure_v1` applies it so a module
+verdict can be `Safe` (callable surface only; the unconditional scope marker
+`non-callable-and-generated-surfaces-not-collected` stays listed and does not
+block). A facade that spells an export the builder could not resolve is
+`Unknown(export-origin-unresolved:...)`. The decision excludes `NotExported`
+roots and now denies Unknown roots at a denying profile under the explicit
+flag. See the
+[implemented note](../../../05_design/extreme_typing_traceability.md#implemented-2026-11-06-follow-up-to-the-design-above).
+
 Read the [selected policy](../../../02_requirements/feature/extreme_typing_traceability.md),
 [architecture](../../../04_architecture/extreme_typing_traceability.md),
 [implementation plan](../../../03_plan/agent_tasks/extreme_typing_traceability.md)
