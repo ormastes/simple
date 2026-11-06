@@ -448,7 +448,7 @@ static int rt_thread_data_release(RtThreadData* td) {
 static int rt_native_address_is_code(int64_t raw_addr);
 
 /* Pool-v1 scalar-task decoder only (rt_pool_v1_scalar_task_create); the
- * isolated-thread spawns use the explicit-kind rt_worker_closure_word. This
+ * isolated-thread spawns use the explicit-kind spl_worker_closure_word. This
  * value-based decode is tracked by
  * doc/08_tracking/bug/pool_native_function_payload_value_heuristic_2026-11-06.md. */
 static int64_t rt_native_closure_payload(int64_t raw) {
@@ -523,7 +523,7 @@ static int rt_native_address_is_code(int64_t raw_addr) {
 #define RT_WORKER_CLOSURE_ADDRESS 1
 #define RT_WORKER_CLOSURE_VALUE   2
 
-static int rt_worker_closure_word(int64_t kind, int64_t word, int64_t* payload, int* raw_worker_args) {
+static int spl_worker_closure_word(int64_t kind, int64_t word, int64_t* payload, int* raw_worker_args) {
     uint64_t value = (uint64_t)word;
     uint64_t decoded;
     int raw;
@@ -554,7 +554,7 @@ static int rt_worker_closure_word(int64_t kind, int64_t word, int64_t* payload, 
 /* 1 when two machine words at addr are committed and readable, 0 when they
  * provably are not, -1 when this host has no fault-free probe. Twin of
  * executor.rs native_words_readable. */
-static int rt_native_record_readable(int64_t addr) {
+static int spl_native_record_readable(int64_t addr) {
 #if defined(_WIN32) || defined(_WIN64)
     uintptr_t cur = (uintptr_t)addr;
     uintptr_t end = cur + 2 * sizeof(int64_t);
@@ -642,15 +642,15 @@ static DWORD WINAPI rt_isolated_wrapper_win(LPVOID raw) {
  * Known divergence: Rust deep-copies `data` (clone_for_isolated_thread); C
  * shares `data`. Both lanes decode the closure word by its declared kind and
  * honour the resulting raw-argument ABI for one- and two-argument workers. */
-static int rt_worker_callable(int64_t kind, int64_t word, int64_t* entry, int64_t* closure_ptr, int* raw) {
+static int spl_worker_callable(int64_t kind, int64_t word, int64_t* entry, int64_t* closure_ptr, int* raw) {
     int64_t payload = 0;
-    if (!rt_worker_closure_word(kind, word, &payload, raw)) return 0;
+    if (!spl_worker_closure_word(kind, word, &payload, raw)) return 0;
     *closure_ptr = 0;
     if (rt_native_address_is_code(payload) || ((uint64_t)payload & TAG_MASK) != 0) {
         *entry = payload;
         return 1;
     }
-    if (rt_native_record_readable(payload) == 0) return 0;
+    if (spl_native_record_readable(payload) == 0) return 0;
     int64_t record_entry = *(int64_t *)(intptr_t)payload;
     if (record_entry < 4096) return 0;
     int64_t marker = *(((int64_t *)(intptr_t)payload) + 1);
@@ -659,7 +659,7 @@ static int rt_worker_callable(int64_t kind, int64_t word, int64_t* entry, int64_
     return 1;
 }
 
-static int64_t rt_thread_start(RtThreadData* td) {
+static int64_t spl_thread_start(RtThreadData* td) {
     td->result      = 0;
     td->done        = 0;
     td->joined      = 0;
@@ -683,7 +683,7 @@ static int64_t rt_thread_start(RtThreadData* td) {
 int64_t rt_thread_spawn_isolated_kind(int64_t kind, int64_t closure, int64_t data) {
     int64_t entry = 0, closure_ptr = 0;
     int raw = 0;
-    if (!rt_worker_callable(kind, closure, &entry, &closure_ptr, &raw)) return 0;
+    if (!spl_worker_callable(kind, closure, &entry, &closure_ptr, &raw)) return 0;
 
     RtThreadData* td = (RtThreadData*)SPL_MALLOC(sizeof(RtThreadData), "rt_thread");
     if (!td) return 0;
@@ -695,7 +695,7 @@ int64_t rt_thread_spawn_isolated_kind(int64_t kind, int64_t closure, int64_t dat
     td->data2       = 0;
     td->raw_worker_args = raw;
     td->arity       = 1;
-    return rt_thread_start(td);
+    return spl_thread_start(td);
 }
 
 int64_t rt_thread_spawn_isolated(int64_t closure, int64_t data) {
@@ -709,7 +709,7 @@ int64_t rt_thread_spawn_isolated(int64_t closure, int64_t data) {
 int64_t rt_thread_spawn_isolated_with_args_kind(int64_t kind, int64_t fn_ptr, int64_t data1, int64_t data2) {
     int64_t entry = 0, closure_ptr = 0;
     int raw = 0;
-    if (!rt_worker_callable(kind, fn_ptr, &entry, &closure_ptr, &raw)) return 0;
+    if (!spl_worker_callable(kind, fn_ptr, &entry, &closure_ptr, &raw)) return 0;
 
     RtThreadData* td = (RtThreadData*)SPL_MALLOC(sizeof(RtThreadData), "rt_thread2");
     if (!td) return 0;
@@ -721,7 +721,7 @@ int64_t rt_thread_spawn_isolated_with_args_kind(int64_t kind, int64_t fn_ptr, in
     td->data2       = data2;
     td->raw_worker_args = raw;
     td->arity       = 2;
-    return rt_thread_start(td);
+    return spl_thread_start(td);
 }
 
 int64_t rt_thread_spawn_isolated_with_args(int64_t fn_ptr, int64_t data1, int64_t data2) {
