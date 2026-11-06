@@ -1,0 +1,76 @@
+# Cold-path canonical event codec. Never called by an instrumentation hook.
+use common.trace.observer_contract_v1.*
+
+fn trace_append_le_v1(bytes: [u8], value: u64, width: i64) -> [u8]:
+    var output = bytes
+    var index = 0
+    while index < width:
+        output.push(((value >> (index * 8)) & 255) as u8)
+        index = index + 1
+    output
+
+# Private caller checks the complete fixed record before any indexed read.
+fn trace_read_le_v1(bytes: [u8], offset: i64, width: i64) -> u64:
+    var value: u64 = 0
+    var index = 0
+    while index < width:
+        value = value | ((bytes[offset + index] as u64) << (index * 8))
+        index = index + 1
+    value
+
+pub fn trace_event_kind_from_code_v1(code: u64) -> Result<TraceEventKindV1, TraceFailureV1>:
+    match code:
+        case 1: Ok(TraceEventKindV1.Entry)
+        case 2: Ok(TraceEventKindV1.Exit)
+        case 3: Ok(TraceEventKindV1.TailExit)
+        case 4: Ok(TraceEventKindV1.Transition)
+        case 5: Ok(TraceEventKindV1.Loss)
+        case 6: Ok(TraceEventKindV1.UnmatchedEdge)
+        case 7: Ok(TraceEventKindV1.TruncatedSpan)
+        case 8: Ok(TraceEventKindV1.UnsupportedSite)
+        case 9: Ok(TraceEventKindV1.PairedSpan)
+        case 10: Ok(TraceEventKindV1.Completion)
+        case _: Err(TraceFailureV1.InvalidArgument)
+
+pub fn trace_event_encode_v1(event: TraceEventV1) -> [u8]:
+    var bytes: [u8] = []
+    bytes = trace_append_le_v1(bytes, 1, 2)
+    bytes = trace_append_le_v1(bytes, 96, 2)
+    bytes = trace_append_le_v1(bytes, trace_event_kind_code_v1(event.kind) as u64, 2)
+    bytes = trace_append_le_v1(bytes, event.flags as u64, 2)
+    bytes = trace_append_le_v1(bytes, event.generation, 8)
+    bytes = trace_append_le_v1(bytes, event.module_instance, 8)
+    bytes = trace_append_le_v1(bytes, event.function_id as u64, 4)
+    bytes = trace_append_le_v1(bytes, event.site_id as u64, 4)
+    bytes = trace_append_le_v1(bytes, event.context_id, 8)
+    bytes = trace_append_le_v1(bytes, event.sequence, 8)
+    bytes = trace_append_le_v1(bytes, event.timestamp, 8)
+    bytes = trace_append_le_v1(bytes, event.span_token, 8)
+    bytes = trace_append_le_v1(bytes, event.payload0, 8)
+    bytes = trace_append_le_v1(bytes, event.payload1, 8)
+    bytes = trace_append_le_v1(bytes, event.payload2, 8)
+    trace_append_le_v1(bytes, 0, 8)
+
+# Structural decoding cannot certify provider authority, exact spans, a clock
+# or complete coverage. Those come from the generation's admitted metadata.
+pub fn trace_event_decode_v1(bytes: [u8]) -> Result<TraceEventV1, TraceFailureV1>:
+    if bytes.len() != TRACE_OBSERVER_EVENT_BYTES_V1:
+        return Err(TraceFailureV1.InvalidArgument)
+    if trace_read_le_v1(bytes, 0, 2) != 1 or trace_read_le_v1(bytes, 2, 2) != 96:
+        return Err(TraceFailureV1.InvalidArgument)
+    if trace_read_le_v1(bytes, 88, 8) != 0:
+        return Err(TraceFailureV1.InvalidArgument)
+    val kind = trace_event_kind_from_code_v1(trace_read_le_v1(bytes, 4, 2))?
+    Ok(TraceEventV1(
+        kind: kind, flags: trace_read_le_v1(bytes, 6, 2) as u16,
+        generation: trace_read_le_v1(bytes, 8, 8),
+        module_instance: trace_read_le_v1(bytes, 16, 8),
+        function_id: trace_read_le_v1(bytes, 24, 4) as u32,
+        site_id: trace_read_le_v1(bytes, 28, 4) as u32,
+        context_id: trace_read_le_v1(bytes, 32, 8),
+        sequence: trace_read_le_v1(bytes, 40, 8),
+        timestamp: trace_read_le_v1(bytes, 48, 8),
+        span_token: trace_read_le_v1(bytes, 56, 8),
+        payload0: trace_read_le_v1(bytes, 64, 8),
+        payload1: trace_read_le_v1(bytes, 72, 8),
+        payload2: trace_read_le_v1(bytes, 80, 8)))

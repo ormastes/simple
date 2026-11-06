@@ -1,0 +1,231 @@
+# Serial-owner reference state machine; NOT a TraceObserverV1 provider.
+# All calls require the same external owner serialization. Hook leases model
+# admitted work, not OS-thread synchronization. No executable memory is touched
+# and these operations do not qualify any target, ABI profile, or native hook.
+# Production adapters must add map/profile admission and effectful activation.
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_config_v1.{trace_config_validate_v1}
+use std.common.trace.observer_collector_v1.*
+
+const TRACE_REFERENCE_MAX_RESIDENT_V1: u64 = 1024
+const TRACE_REFERENCE_MAX_SITES_V1: i64 = 4096
+const TRACE_REFERENCE_ID_MAX_V1: u64 = 18446744073709551615u64
+
+pub struct TraceReferenceLeaseV1:
+    session: TraceSessionV1
+    context_id: u64
+    lease_id: u64
+
+# Resident selection identities are never deleted, even on logical release.
+# They model retained bindings; they do not own or claim mapped native code.
+var _trv_resident: [TraceSelectionV1] = []
+var _trv_incarnation: u64 = 0
+var _trv_prepared: bool = false
+var _trv_live: bool = false
+var _trv_state: TraceSessionStateV1 = TraceSessionStateV1.Drained
+var _trv_collector: [TraceReferenceCollectorV1] = []
+var _trv_contexts: [u64] = []
+var _trv_leases: [u64] = []
+var _trv_next_lease: u64 = 1
+var _trv_context_limit: u64 = 0
+var _trv_event_mask: u64 = 0
+var _trv_last_now: u64 = 0
+
+fn _trv_valid(session: TraceSessionV1) -> bool:
+    (_trv_live and session.slot == 1 and session.incarnation == _trv_incarnation and
+        session.generation == _trv_incarnation)
+
+fn _trv_lease_index(lease: TraceReferenceLeaseV1) -> i64:
+    if not _trv_valid(lease.session): return -1
+    for index in 0.._trv_leases.len():
+        if (_trv_leases[index] == lease.lease_id and
+                _trv_contexts[index] == lease.context_id):
+            return index
+    -1
+
+pub fn trace_reference_resident_generations_v1() -> u64:
+    _trv_resident.len().to_u64()
+
+pub fn trace_reference_prepare_v1(config: TraceConfigV1, selection: TraceSelectionV1
+    ) -> Result<TracePreparedV1, TraceFailureV1>:
+    if _trv_live or _trv_prepared: return Err(TraceFailureV1.Busy)
+    trace_config_validate_v1(config)?
+    if config.instrumentation == TraceInstrumentationV1.Off:
+        return Err(TraceFailureV1.InstrumentationAbsent)
+    if (config.consistency != TraceConsistencyV1.RawEdges or (config.event_mask & 256u64) != 0 or
+            config.patch_mode != TracePatchModeV1.Quiescent):
+        return Err(TraceFailureV1.UnsupportedConsistency)
+    if (config.max_resident_generations > TRACE_REFERENCE_MAX_RESIDENT_V1 or
+            _trv_resident.len().to_u64() >= config.max_resident_generations or
+            config.buffer_bytes / TRACE_OBSERVER_EVENT_BYTES_V1 > TRACE_REFERENCE_MAX_RECORDS_V1.to_u64() or
+            config.max_contexts > TRACE_REFERENCE_MAX_CONTEXTS_V1.to_u64()):
+        return Err(TraceFailureV1.ResourceExhausted)
+    if (selection.manifest_incarnation == 0 or selection.sites.len() == 0 or
+            selection.sites.len() > TRACE_REFERENCE_MAX_SITES_V1):
+        return Err(TraceFailureV1.InvalidMap)
+    for index in 0..selection.sites.len():
+        val site = selection.sites[index]
+        if site.module_instance == 0 or site.site_id == 0:
+            return Err(TraceFailureV1.InvalidMap)
+        for earlier in 0..index:
+            val previous = selection.sites[earlier]
+            if previous.module_instance == site.module_instance and previous.site_id == site.site_id:
+                return Err(TraceFailureV1.InvalidMap)
+    if _trv_incarnation == TRACE_REFERENCE_ID_MAX_V1:
+        return Err(TraceFailureV1.ResourceExhausted)
+    val incarnation = _trv_incarnation + 1u64
+    val capacity = config.buffer_bytes / TRACE_OBSERVER_EVENT_BYTES_V1
+    val collector = TraceReferenceCollectorV1.create(incarnation,
+        capacity.to_i64(), config.max_contexts.to_i64())?
+    # Commit only after validation/allocation succeeds; no partial preparation.
+    _trv_collector = [collector]
+    _trv_resident.push(selection)
+    _trv_incarnation = incarnation
+    _trv_context_limit = config.max_contexts
+    _trv_event_mask = config.event_mask
+    _trv_contexts = []
+    _trv_leases = []
+    _trv_next_lease = 1
+    _trv_last_now = 0
+    _trv_prepared = true
+    Ok(TracePreparedV1(slot: 1, incarnation: incarnation))
+
+pub fn trace_reference_start_v1(prepared: TracePreparedV1
+    ) -> Result<TraceSessionV1, TraceFailureV1>:
+    if _trv_live: return Err(TraceFailureV1.Busy)
+    if not _trv_prepared or prepared.slot != 1 or prepared.incarnation != _trv_incarnation:
+        return Err(TraceFailureV1.InvalidHandle)
+    _trv_prepared = false
+    _trv_live = true
+    _trv_state = TraceSessionStateV1.Active
+    Ok(TraceSessionV1(slot: 1, incarnation: _trv_incarnation, generation: _trv_incarnation))
+
+pub fn trace_reference_begin_hook_v1(session: TraceSessionV1, context_id: u64
+    ) -> Result<TraceReferenceLeaseV1, TraceFailureV1>:
+    if not _trv_valid(session): return Err(TraceFailureV1.InvalidHandle)
+    if _trv_state != TraceSessionStateV1.Active: return Err(TraceFailureV1.Busy)
+    if context_id == 0: return Err(TraceFailureV1.InvalidArgument)
+    for current in _trv_contexts:
+        if current == context_id:
+            var collector = _trv_collector[0]
+            collector.count_loss()
+            _trv_collector[0] = collector
+            return Err(TraceFailureV1.Busy)
+    if (_trv_leases.len().to_u64() >= _trv_context_limit or
+            _trv_next_lease == TRACE_REFERENCE_ID_MAX_V1):
+        return Err(TraceFailureV1.ResourceExhausted)
+    val lease = TraceReferenceLeaseV1(session: session, context_id: context_id,
+        lease_id: _trv_next_lease)
+    _trv_next_lease = _trv_next_lease + 1u64
+    _trv_contexts.push(context_id)
+    _trv_leases.push(lease.lease_id)
+    Ok(lease)
+
+pub fn trace_reference_record_v1(lease: TraceReferenceLeaseV1, event: TraceEventV1
+    ) -> Result<bool, TraceFailureV1>:
+    if _trv_lease_index(lease) < 0: return Err(TraceFailureV1.InvalidHandle)
+    if _trv_state == TraceSessionStateV1.Faulted: return Err(TraceFailureV1.BackendFailure)
+    if event.context_id != lease.context_id or event.generation != lease.session.generation:
+        return Err(TraceFailureV1.InvalidArgument)
+    val selection = _trv_resident[_trv_resident.len() - 1]
+    var selected = false
+    for site in selection.sites:
+        if site.module_instance == event.module_instance and site.site_id == event.site_id:
+            selected = true
+            break
+    val code = trace_event_kind_code_v1(event.kind)
+    if code <= 3:
+        if not selected: return Err(TraceFailureV1.InvalidMap)
+        val bit = 1u64 << (code.to_u64() - 1u64)
+        if (_trv_event_mask & bit) == 0: return Ok(false)
+    var collector = _trv_collector[0]
+    val result = collector.record(event)
+    _trv_collector[0] = collector
+    result
+
+pub fn trace_reference_end_hook_v1(lease: TraceReferenceLeaseV1
+    ) -> Result<bool, TraceFailureV1>:
+    val index = _trv_lease_index(lease)
+    if index < 0: return Err(TraceFailureV1.InvalidHandle)
+    var contexts: [u64] = []
+    var leases: [u64] = []
+    for current in 0.._trv_leases.len():
+        if current != index:
+            contexts.push(_trv_contexts[current])
+            leases.push(_trv_leases[current])
+    _trv_contexts = contexts
+    _trv_leases = leases
+    Ok(true)
+
+pub fn trace_reference_request_stop_v1(session: TraceSessionV1
+    ) -> Result<TraceSessionStateV1, TraceFailureV1>:
+    if not _trv_valid(session): return Err(TraceFailureV1.InvalidHandle)
+    if _trv_state == TraceSessionStateV1.Active:
+        _trv_state = TraceSessionStateV1.Draining
+    Ok(_trv_state)
+
+pub fn trace_reference_poll_v1(session: TraceSessionV1, max_records: u32
+    ) -> Result<TraceBatchV1, TraceFailureV1>:
+    if not _trv_valid(session): return Err(TraceFailureV1.InvalidHandle)
+    var collector = _trv_collector[0]
+    val events = collector.poll(max_records)
+    _trv_collector[0] = collector
+    Ok(TraceBatchV1(events: events, state: _trv_state))
+
+# One bounded progress check with an injected monotonic clock. A production
+# drain waits/polls outside hooks; this reference never spins or sleeps. A
+# caller_context matching an issued hook is rejected before inspecting time.
+pub fn trace_reference_drain_once_v1(session: TraceSessionV1, caller_context: u64,
+        now_ns: u64, deadline_ns: u64) -> Result<TraceDrainV1, TraceFailureV1>:
+    if not _trv_valid(session): return Err(TraceFailureV1.InvalidHandle)
+    for context in _trv_contexts:
+        if context == caller_context: return Err(TraceFailureV1.Busy)
+    if _trv_state == TraceSessionStateV1.Faulted: return Err(TraceFailureV1.BackendFailure)
+    if _trv_state == TraceSessionStateV1.Active: return Err(TraceFailureV1.Busy)
+    if now_ns < _trv_last_now: return Err(TraceFailureV1.InvalidArgument)
+    _trv_last_now = now_ns
+    val collector = _trv_collector[0]
+    if _trv_leases.len() == 0 and collector.pending() == 0:
+        _trv_state = TraceSessionStateV1.Drained
+        return Ok(TraceDrainV1(state: _trv_state, stats: collector.stats()))
+    if now_ns >= deadline_ns: return Err(TraceFailureV1.TimedOut)
+    Ok(TraceDrainV1(state: TraceSessionStateV1.Draining, stats: collector.stats()))
+
+pub fn trace_reference_stats_v1(session: TraceSessionV1
+    ) -> Result<TraceStatsV1, TraceFailureV1>:
+    if not _trv_valid(session): return Err(TraceFailureV1.InvalidHandle)
+    val collector = _trv_collector[0]
+    Ok(collector.stats())
+
+# Delivery is performed by poll. This bounded flush check never discards queued
+# records and does not stop an active capture or manufacture delivery evidence.
+pub fn trace_reference_flush_once_v1(session: TraceSessionV1, caller_context: u64,
+        now_ns: u64, deadline_ns: u64) -> Result<TraceStatsV1, TraceFailureV1>:
+    if not _trv_valid(session): return Err(TraceFailureV1.InvalidHandle)
+    for context in _trv_contexts:
+        if context == caller_context: return Err(TraceFailureV1.Busy)
+    if _trv_state == TraceSessionStateV1.Faulted: return Err(TraceFailureV1.BackendFailure)
+    if now_ns < _trv_last_now: return Err(TraceFailureV1.InvalidArgument)
+    _trv_last_now = now_ns
+    val collector = _trv_collector[0]
+    if collector.pending() == 0: return Ok(collector.stats())
+    if now_ns >= deadline_ns: return Err(TraceFailureV1.TimedOut)
+    Err(TraceFailureV1.Busy)
+
+pub fn trace_reference_fault_v1(session: TraceSessionV1
+    ) -> Result<TraceSessionStateV1, TraceFailureV1>:
+    if not _trv_valid(session): return Err(TraceFailureV1.InvalidHandle)
+    _trv_state = TraceSessionStateV1.Faulted
+    var collector = _trv_collector[0]
+    collector.count_backend_error()
+    _trv_collector[0] = collector
+    Ok(_trv_state)
+
+pub fn trace_reference_release_v1(session: TraceSessionV1) -> Result<bool, TraceFailureV1>:
+    if not _trv_valid(session): return Err(TraceFailureV1.InvalidHandle)
+    if _trv_state != TraceSessionStateV1.Drained: return Err(TraceFailureV1.Busy)
+    _trv_live = false
+    # Only the delivered record buffer is freed. Resident identities remain;
+    # there is no provider/code/map unloading or generation-budget recycling.
+    _trv_collector = []
+    Ok(true)

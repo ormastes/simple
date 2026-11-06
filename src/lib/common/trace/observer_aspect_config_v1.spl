@@ -1,0 +1,27 @@
+# Cold AspectParams extension intake. Absence preserves the existing pipeline;
+# a present malformed or unsupported request is never silently ignored.
+use std.common.plugin.aspect_params.{AspectParamsV1, ASPECT_TRACE_OBSERVER_EXT_V1}
+use std.common.trace.observer_contract_v1.{TraceConfigV1, TraceFailureV1}
+use std.common.trace.observer_config_v1.{TRACE_CONFIG_SCHEMA_HASH_V1, trace_config_parse_sdn_v1}
+use std.common.text_bytes.{utf8_bytes_valid, bytes_to_text}
+
+pub const TRACE_CONFIG_MAX_PAYLOAD_BYTES_V1 = 4096
+
+pub fn trace_aspect_config_v1(params: AspectParamsV1) -> Result<TraceConfigV1?, TraceFailureV1>:
+    var seen = false
+    var selected: TraceConfigV1? = nil
+    for extension in params.ext:
+        if extension.ext_name != ASPECT_TRACE_OBSERVER_EXT_V1:
+            continue
+        if seen:
+            return Err(TraceFailureV1.InvalidArgument)
+        seen = true
+        if extension.ext_major != 1 or extension.payload_schema_hash != TRACE_CONFIG_SCHEMA_HASH_V1:
+            return Err(TraceFailureV1.InvalidArgument)
+        if extension.payload.len() == 0 or extension.payload.len() > TRACE_CONFIG_MAX_PAYLOAD_BYTES_V1:
+            return Err(TraceFailureV1.InvalidArgument)
+        if not utf8_bytes_valid(extension.payload):
+            return Err(TraceFailureV1.InvalidArgument)
+        val config = trace_config_parse_sdn_v1(bytes_to_text(extension.payload))?
+        selected = Some(config)
+    Ok(selected)
