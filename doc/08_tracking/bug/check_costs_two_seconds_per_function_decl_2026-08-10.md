@@ -120,3 +120,26 @@ fix. Leaving OPEN, no new attempt; commands.md's 2026-08-18 seed
 redeploy note (numbers improved but not fixed) still applies.
 
 
+
+## Re-measurement + partial fix 2026-11-06 (work/fx-check-diag-20261106)
+
+Binary: Rust seed `simple-ref`, `run src/app/check/main.spl --phase-profile`,
+files of N trivial 3-line fns. The original "2s/decl parse" is gone: parse is
+now ~0.5 ms/fn and the fixed cost is ~5s (import closure), not 15-25s.
+The live cost is **semantic**, quadratic in fn count: `infer_module` called
+`generalize_all` twice per fn, and each call rescanned the whole env
+(`env_free_var_ids`), while `infer_function` copied the whole env
+(`val saved_env = self.env`) per fn (also quadratic garbage -> scope_teardown
+mirrors semantic time, RSS grows ~N^2).
+
+| N fns | before semantic / wall / RSS | after semantic / wall / RSS |
+|---|---|---|
+| 50 | 97ms / 5.2s / 1.07GB | 48ms / 5.2s / 1.07GB |
+| 200 | 2185ms / 9.5s / 1.85GB | 822ms / 7.0s / 1.21GB |
+| 400 | 9998ms / 25.0s / 4.7GB | 3298ms / 12.1s / 2.16GB |
+
+Fix: cache module-level env free vars once per `infer_module` for top-level
+`generalize_all`; replace the per-fn env copy with an undo trail
+(`env_mark`/`env_unwind`). Still open: remaining super-linear term (semantic
+400/200 = 4x) not yet located (not env scans; candidates: substitution/subst
+growth, errors array copy).

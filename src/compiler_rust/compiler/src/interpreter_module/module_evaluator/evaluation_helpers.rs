@@ -539,6 +539,39 @@ pub(super) fn process_imports_and_assignments(
                             record_owned_global(module_path, &name, &value);
                         }
                     }
+                } else if let (Some(Type::Array { element, size: Some(size_expr) }), Some(name)) = (
+                    match (&stmt.ty, &stmt.pattern) {
+                        (Some(ty), _) => Some(ty),
+                        (None, Pattern::Typed { ty, .. }) => Some(ty),
+                        _ => None,
+                    },
+                    get_pattern_name(&stmt.pattern),
+                ) {
+                    // `var table: [T; N]` with no initializer is zero-filled
+                    // module state. Without a binding the name is invisible to
+                    // the module's own functions ("variable not found"), see
+                    // interpreter_fd_ownership_private_module_globals_not_linked_2026-08-12.
+                    if let Ok(Value::Int(n)) =
+                        evaluate_expr(&size_expr, env, local_functions, local_classes, local_enums, impl_methods)
+                    {
+                        if n >= 0 {
+                            let zero = match element.as_ref() {
+                                Type::Simple(t) if t == "bool" => Value::Bool(false),
+                                Type::Simple(t) if t.starts_with('i') || t.starts_with('u') => {
+                                    crate::interpreter::coerce_to_declared_type(Value::Int(0), Some(element.as_ref()))
+                                }
+                                Type::Simple(t) if t == "f64" || t == "f32" => Value::Float(0.0),
+                                _ => Value::Nil,
+                            };
+                            let value = Value::FixedSizeArray {
+                                size: n as usize,
+                                data: vec![zero; n as usize],
+                            };
+                            env.insert(name.clone(), value.clone());
+                            exports.insert(name.clone(), value.clone());
+                            record_owned_global(module_path, &name, &value);
+                        }
+                    }
                 }
             }
             Node::Const(stmt) => {

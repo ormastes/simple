@@ -648,6 +648,29 @@ enum PlaceMutation {
     Object(String, ResolvedMethod),
 }
 
+/// Resolve a pure field chain whose every holder is a `ClassInstance` to the
+/// innermost holder and the leaf field name. `None` for any other shape (index
+/// steps, struct/dict holders), which keeps those on their existing paths.
+fn class_hop_leaf(env: &Env, target: &super::super::place::Place) -> Option<(Arc<crate::value::ClassInstance>, String)> {
+    use super::super::place::Projection;
+    let mut cur = env.get(&target.root)?.clone();
+    let last = target.projections.len().checked_sub(1)?;
+    for (i, projection) in target.projections.iter().enumerate() {
+        let Projection::Field(name) = projection else {
+            return None;
+        };
+        let Value::ClassInstance(instance) = &cur else {
+            return None;
+        };
+        if i == last {
+            return Some((Arc::clone(instance), name.clone()));
+        }
+        let next = instance.field(name)?;
+        cur = next;
+    }
+    None
+}
+
 /// In-place mutation through an arbitrary PLACE receiver — the single kernel for
 /// every mutating call whose receiver is neither a bare identifier nor the
 /// one-hop `obj.field` array shape that `try_field_array_mutation_in_place` owns.
@@ -723,6 +746,35 @@ pub(crate) fn try_place_mutation_in_place(
     // module-global receiver, reject `const` bindings and handle packed bytes.
     if target.projections.is_empty() {
         return Ok(None);
+    }
+    // Field hops through reference-semantics `class` instances
+    // (`self.store.items.push(x)`): the place walk cannot step through a
+    // `ClassInstance` lock, so this shape used to fall to the copy path
+    // (read the array, mutate a copy, `write_place` it back) -- O(len) per push.
+    // Mutate the array where it lives, under the owning instance's lock, as the
+    // single-hop `try_field_array_mutation_in_place` does.
+    if method != "write_span" && ARRAY_MUTATING_METHODS.contains(&method) {
+        if let Some((instance, field)) = class_hop_leaf(env, &target) {
+            let is_array = instance.field_mut(&field, |v| matches!(v, Value::Array(_)));
+            if is_array == Some(true) {
+                let (item, idx, second) =
+                    eval_array_mutator_args(method, args, env, functions, classes, enums, impl_methods)?;
+                let mutated = instance.field_mut(&field, |v| match v {
+                    Value::Array(arc) => {
+                        let vec = Arc::make_mut(arc);
+                        Some(
+                            apply_array_mutation_in_place(method, vec, item, idx, second)
+                                .map(|popped| popped.unwrap_or_else(|| Value::Array(Arc::clone(arc)))),
+                        )
+                    }
+                    _ => None,
+                });
+                return match mutated {
+                    Some(Some(result)) => result.map(Some),
+                    _ => Ok(None),
+                };
+            }
+        }
     }
     // Decide the arm from a READ-ONLY peek: a peek that bails must not have paid
     // a copy-on-write isolation on the way in.

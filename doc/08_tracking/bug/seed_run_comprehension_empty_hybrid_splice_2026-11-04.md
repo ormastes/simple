@@ -32,3 +32,6 @@ and every AST-walking lint rule silently saw no expressions.
   `SIMPLE_EXECUTION_MODE=interpret` (`compiler.tools.fix.closure_runner`).
 Related: `seed_list_comprehension_join_and_empty_native_2026_10_21`
 (comprehensions lowering to nil on the native lane — same class, different engine).
+
+## 2026-11-06 FIXED in source (work/fx-seed-interp-20261106)
+Root cause: HIR lenient lowering (`hir/lower/expr/mod.rs` catch-all arm) turns `ListComprehension`/`DictComprehension` into `nil` on the JIT lane (`run_file_jit`); the hybrid splice was incidental. Fix: `FallbackReason::Comprehension` (compilability.rs) + `run_file_jit` (driver/src/exec_core.rs) drops the module to the interpreter when any function has a comprehension. RED on simple-ref: `[x*2 for x in [1,2,3]].len()` prints -1; GREEN: 3. Spec: test/01_unit/language/jit_list_comprehension_spec.spl (2/2; needs SIMPLE_BINARY). Cost: such modules run interpreted on `run` until HIR gets a real comprehension lowering.

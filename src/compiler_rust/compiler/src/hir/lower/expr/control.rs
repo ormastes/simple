@@ -2106,6 +2106,89 @@ impl Lowerer {
         })
     }
 
+    /// Desugar a list comprehension `[expr for pat in iterable if cond]` into a
+    /// do-block that builds the array and yields it:
+    ///
+    /// ```text
+    /// do:
+    ///     var __comp_N = []
+    ///     for pat in iterable:
+    ///         if cond:            # only when a filter is present
+    ///             __comp_N.push(expr)
+    ///     __comp_N
+    /// ```
+    ///
+    /// The loop variable lives in the `for` scope so it does not leak; nested
+    /// comprehensions get distinct temporaries from a global counter.
+    pub(super) fn lower_list_comprehension(
+        &mut self,
+        expr: &Expr,
+        pattern: &Pattern,
+        iterable: &Expr,
+        condition: Option<&Expr>,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let name = format!("__comp_{}", COMP_COUNTER.fetch_add(1, Ordering::Relaxed));
+        let span = ast::Span::new(0, 0, 0, 0);
+
+        let push = Expr::MethodCall {
+            receiver: Box::new(Expr::Identifier(name.clone())),
+            method: "push".to_string(),
+            args: vec![ast::Argument {
+                name: None,
+                value: expr.clone(),
+                span,
+                label: None,
+            }],
+            generic_args: vec![],
+        };
+        let push_stmt = ast::Node::Expression(push);
+        let body_stmts = match condition {
+            Some(cond) => vec![ast::Node::If(ast::IfStmt {
+                span,
+                let_pattern: None,
+                condition: cond.clone(),
+                then_block: ast::Block {
+                    span,
+                    statements: vec![push_stmt],
+                },
+                elif_branches: vec![],
+                else_block: None,
+                is_suspend: false,
+            })],
+            None => vec![push_stmt],
+        };
+        let stmts = vec![
+            ast::Node::Let(ast::LetStmt {
+                span,
+                pattern: Pattern::Identifier(name.clone()),
+                ty: None,
+                value: Some(Expr::Array(vec![])),
+                mutability: Mutability::Mutable,
+                storage_class: ast::StorageClass::Auto,
+                is_ghost: false,
+                is_suspend: false,
+            }),
+            ast::Node::For(ast::ForStmt {
+                span,
+                pattern: pattern.clone(),
+                iterable: iterable.clone(),
+                body: ast::Block {
+                    span,
+                    statements: body_stmts,
+                },
+                simd_requested: false,
+                is_suspend: false,
+                invariants: vec![],
+                label: None,
+            }),
+            ast::Node::Expression(Expr::Identifier(name)),
+        ];
+        self.lower_do_block(&stmts, ctx)
+    }
+
     /// Lower a lexical unsafe block without turning `return` or loop control
     /// into a tail value. The marker remains visible to HIR safety passes.
     pub(super) fn lower_unsafe_block(
@@ -2236,13 +2319,37 @@ impl Lowerer {
         // Only tagged `T?` slots take `rt_is_some` (`!rt_is_none`, i.e.
         // `is_nil()` for every non-enum word); raw scalar / raw-pointer
         // operands keep the sentinel compare, as in `lower_condition`.
-        let is_tagged_slot = matches!(
-            self.module.types.get(subject_ty),
-            Some(HirType::Pointer {
-                kind: PointerKind::Shared | PointerKind::Unique | PointerKind::Weak | PointerKind::Handle,
-                ..
-            })
-        );
+        // Explicit `Option<scalar>` enum subject: presence is `rt_is_some`
+        // (a real `None` is not the nil sentinel) and the coalesced value is the
+        // raw payload scalar (decoded in MIR by name + type).
+        let option_scalar_payload = match self.module.types.get(subject_ty) {
+            Some(HirType::Enum { name, .. }) if name == "Option" => self
+                .result_like_payload_type(subject_ty)
+                .filter(|p| {
+                    matches!(
+                        *p,
+                        TypeId::BOOL
+                            | TypeId::I8
+                            | TypeId::I16
+                            | TypeId::I32
+                            | TypeId::I64
+                            | TypeId::U8
+                            | TypeId::U16
+                            | TypeId::U32
+                            | TypeId::F32
+                            | TypeId::F64
+                    )
+                }),
+            _ => None,
+        };
+        let is_tagged_slot = option_scalar_payload.is_some()
+            || matches!(
+                self.module.types.get(subject_ty),
+                Some(HirType::Pointer {
+                    kind: PointerKind::Shared | PointerKind::Unique | PointerKind::Weak | PointerKind::Handle,
+                    ..
+                })
+            );
         let condition = if is_tagged_slot {
             HirExpr {
                 kind: HirExprKind::BuiltinCall {
@@ -2284,6 +2391,7 @@ impl Lowerer {
         // boxing, so both edges are raw and agree with the static type.
         // Bug: doc/08_tracking/bug/optional_i64_return_payload_corruption_2026-08-31.md
         let result_ty = self.optional_boxint_scalar_inner(result_ty).unwrap_or(result_ty);
+        let result_ty = option_scalar_payload.unwrap_or(result_ty);
         // Same for the non-BoxInt scalars (`bool?`, `f32?`, `f64?`): the
         // coalesced value is the raw inner scalar. Typed as the tagged `T?`,
         // `val b = maybe_bool() ?? false` kept a tagged word and

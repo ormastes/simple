@@ -10,6 +10,8 @@
 
 use compiler.core.types.{
     newunit_count, newunit_name_at, newunit_suffix_at, newunit_underlying_tag_at,
+    unit_decl_count, unit_decl_name_at, unit_decl_role_at, unit_decl_short_symbol_at,
+    unit_decl_underlying_tag_at, unit_decl_alias_of_at,
     type_tag_name
 }
 use std.common.units.model.world_units.{
@@ -32,6 +34,8 @@ struct UnitEntry:
     klass: UnitClass            # Linear | Affine | Logarithmic | Count | Currency | Calendar | ProcedureDefined
     base_factor: ExactRatio     # conversion factor to SI base unit
     expression: UnitExpression  # reused model type
+    role: text                  # nominal | alias | marker | measurement_family | refined
+    alias_of: text              # target full name for role "alias", else ""
 
 fn unit_entry(
     short_symbol: text,
@@ -40,7 +44,9 @@ fn unit_entry(
     kind: text,
     klass: UnitClass,
     base_factor: ExactRatio,
-    expression: UnitExpression
+    expression: UnitExpression,
+    role: text,
+    alias_of: text
 ) -> UnitEntry:
     UnitEntry(
         short_symbol: short_symbol,
@@ -49,7 +55,9 @@ fn unit_entry(
         kind: kind,
         klass: klass,
         base_factor: base_factor,
-        expression: expression
+        expression: expression,
+        role: role,
+        alias_of: alias_of
     )
 
 # ---------------------------------------------------------------------------
@@ -61,6 +69,7 @@ class UnitRegistry:
     by_full: {text: UnitEntry}          # "kilometre" -> entry
     by_path: {text: UnitEntry}          # "unit.simple-lang.length.km" -> entry
     composites: {text: UnitExpression}  # "kmph" -> folded UnitExpression
+    registered: i64                    # unique entries passed to register_entry
 
     pub static fn new() -> UnitRegistry:
         """Empty registry — use register_unit / register_composite / unit_registry_build to populate."""
@@ -68,7 +77,8 @@ class UnitRegistry:
             by_short: {},
             by_full: {},
             by_path: {},
-            composites: {}
+            composites: {},
+            registered: 0
         )
 
     pub me register_unit(name: text, expr: UnitExpression) -> UnitEntry:
@@ -83,18 +93,31 @@ class UnitRegistry:
             kind: "",
             klass: UnitClass.Linear,
             base_factor: exact_ratio(1, 1),
-            expression: expr
+            expression: expr,
+            role: "nominal",
+            alias_of: ""
         )
         self.register_entry(entry)
         entry
 
     pub me register_entry(entry: UnitEntry) -> unit:
-        """Register a fully-populated entry across all three indices."""
-        self.by_short[entry.short_symbol] = entry
+        """Register a fully-populated entry across all three indices.
+
+        Entries with an empty short_symbol (aliases and markers declared
+        without a suffix) are indexed by full name only — an empty string is
+        not a lookup key. `registered` counts each call once, so an entry
+        living in several indices still counts as one."""
+        if entry.short_symbol != "":
+            self.by_short[entry.short_symbol] = entry
         if entry.full_symbol != "" and entry.full_symbol != entry.short_symbol:
             self.by_full[entry.full_symbol] = entry
         if entry.module_path != "":
             self.by_path[entry.module_path] = entry
+        self.registered = self.registered + 1
+
+    pub me entry_count() -> i64:
+        """Total entries registered (each entry once, however many indices hold it)."""
+        self.registered
 
     pub me register_composite(name: text, expr: UnitExpression) -> unit:
         """Register a derived unit (e.g. kmph = km / h)."""
@@ -257,14 +280,16 @@ fn unit_registry_build() -> UnitRegistry:
     """Build the registry consumed at compile start (after parsing, before
     typecheck).
 
-    Source of truth: the parser-side newunit records in compiler.core.types
-    (`newunit Name: T as suffix` calls newunit_register at parse time; the
-    parser stores declarations as flat ids, so there is no Module AST value
-    to walk). Remaining gap: `unit.*` catalog modules with `unit`/`composite`
-    declarations — those decl forms are not parsed yet; extend this builder
-    once Track C pins their shapes."""
+    Source of truth: two parser-side pools in compiler.core.types — the
+    legacy newunit records (`newunit Name: T as suffix`, role "nominal") and
+    the canonical unit-declaration records (`unit` declarations with role
+    nominal/alias/marker/...). The parser stores declarations as flat ids, so
+    there is no Module AST value to walk. Remaining gap: `unit.*` catalog
+    modules with `unit`/`composite` declarations — those decl forms are not
+    parsed yet; extend this builder once Track C pins their shapes."""
     val reg = UnitRegistry.new()
     unit_registry_collect_newunits(reg)
+    unit_registry_collect_unit_decls(reg)
     reg
 
 fn unit_registry_collect_newunits(reg: UnitRegistry) -> i64:
@@ -272,7 +297,8 @@ fn unit_registry_collect_newunits(reg: UnitRegistry) -> i64:
 
     short_symbol = the literal suffix (what `10_uid` looks up),
     full_symbol  = the declared type name,
-    kind         = the underlying primitive's name (e.g. 'i64').
+    kind         = the underlying primitive's name (e.g. 'i64'),
+    role         = "nominal" — legacy spellings lower to the canonical role.
     Newunits are nominal 1:1 wrappers — Count class, unit base factor.
     Returns the number of entries registered."""
     var n = 0
@@ -287,7 +313,44 @@ fn unit_registry_collect_newunits(reg: UnitRegistry) -> i64:
             kind: type_tag_name(newunit_underlying_tag_at(i)),
             klass: UnitClass.Count,
             base_factor: exact_ratio(1, 1),
-            expression: unit_expression_from_base(suffix)
+            expression: unit_expression_from_base(suffix),
+            role: "nominal",
+            alias_of: ""
+        )
+        reg.register_entry(entry)
+        n = n + 1
+        i = i + 1
+    n
+
+fn unit_registry_collect_unit_decls(reg: UnitRegistry) -> i64:
+    """Register every canonical `unit` declaration into `reg`.
+
+    short_symbol = the declared suffix ("" for suffix-less declarations —
+    those stay full-name-only in the registry indices),
+    full_symbol  = the declared type name (the pool's identity key),
+    kind         = the underlying primitive's name ("" for zero-payload
+                   markers, whose underlying_type_tag is 0),
+    role/alias_of = preserved verbatim from the declaration; an alias names
+                   its target identity in alias_of, never a new one.
+    Returns the number of entries registered."""
+    var n = 0
+    var i = 0
+    while i < unit_decl_count():
+        val name = unit_decl_name_at(i)
+        val short = unit_decl_short_symbol_at(i)
+        val tag = unit_decl_underlying_tag_at(i)
+        val kind = if tag == 0: "" else: type_tag_name(tag)
+        val base = if short != "": short else: name
+        val entry = unit_entry(
+            short_symbol: short,
+            full_symbol: name,
+            module_path: "unit." + name,
+            kind: kind,
+            klass: UnitClass.Count,
+            base_factor: exact_ratio(1, 1),
+            expression: unit_expression_from_base(base),
+            role: unit_decl_role_at(i),
+            alias_of: unit_decl_alias_of_at(i)
         )
         reg.register_entry(entry)
         n = n + 1

@@ -59,3 +59,6 @@ Add a final Newton-Raphson iteration in the `f64` domain, or round the last
 step through the same correctly-rounded primitive the runtime uses. Any fix
 must be landed together with the spec update described above.
 
+
+## Fixed 2026-11-06 (round 8)
+`_sqrt_f64` now picks the best of g-ulp/g/g+ulp by exact Dekker residual. 3000-sample sweep vs rt_math_sqrt: 0 mismatches; 2.0/1.0e-10/2.5 now bit-exact. dual_run_shadow_spec sentinel replaced by bit-exact set (20/20).
