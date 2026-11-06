@@ -3413,3 +3413,45 @@ mod vec16u8_tests {
         assert!(format!("{error}").contains("missing field u8_"));
     }
 }
+
+/// Bugs: simd_f32x4_vec_field_boxed_float32_not_unwrapped_2026-07-20 and
+/// simd_lane_ops_reject_f32_cast_values_2026-08-25. A `Vec4f`/`Vec8f` lane
+/// built from an `f32` value (`x as f32`, a `Float32.value` field) is a
+/// `Value::Float32`; the f32 lane extractor must accept it, not reject it as
+/// "must be a float".
+#[cfg(test)]
+mod f32_lane_value_tests {
+    use super::{rt_simd_fma_f32x8, rt_simd_mul_f32x4, unpack_vec4f, unpack_vec8f};
+    use crate::value::Value;
+    use std::collections::HashMap;
+
+    fn vec_obj(class: &str, names: &[&str], lanes: &[f32]) -> Value {
+        let mut fields = HashMap::new();
+        for (n, v) in names.iter().zip(lanes) {
+            fields.insert((*n).to_string(), Value::Float32(*v));
+        }
+        Value::Object {
+            class: class.to_string(),
+            fields: std::sync::Arc::new(fields),
+        }
+    }
+
+    #[test]
+    fn f32x4_lane_ops_accept_float32_fields() {
+        let xyzw = ["x", "y", "z", "w"];
+        let a = vec_obj("Vec4f", &xyzw, &[1.0, 2.0, 1.0, 2.0]);
+        let b = vec_obj("Vec4f", &xyzw, &[2.0, 2.0, 2.0, 2.0]);
+        let r = rt_simd_mul_f32x4(&[a, b]).expect("Float32 lanes must be accepted");
+        assert_eq!(unpack_vec4f("r", &r).unwrap(), [2.0, 4.0, 2.0, 4.0]);
+    }
+
+    #[test]
+    fn f32x8_lane_ops_accept_float32_fields() {
+        let e = ["e0", "e1", "e2", "e3", "e4", "e5", "e6", "e7"];
+        let a = vec_obj("Vec8f", &e, &[1.0; 8]);
+        let b = vec_obj("Vec8f", &e, &[2.0; 8]);
+        let c = vec_obj("Vec8f", &e, &[0.5; 8]);
+        let r = rt_simd_fma_f32x8(&[a, b, c]).expect("Float32 lanes must be accepted");
+        assert_eq!(unpack_vec8f("r", &r).unwrap(), [2.5; 8]);
+    }
+}
