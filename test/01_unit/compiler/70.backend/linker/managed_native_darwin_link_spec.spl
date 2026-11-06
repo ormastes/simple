@@ -6,7 +6,7 @@
 # clang runs the admitted ld64 by absolute path (--ld-path), and the /usr/bin
 # xcrun trampoline is never accepted as a pinned linker.
 use std.spec.*
-use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_child_roles_v1}
+use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_child_roles_v1, native_tool_projection_decode_for_platform_v1}
 use compiler.backend.linker.managed_native_args_v1.{managed_native_cc_link_host_admitted_v1, managed_native_linker_selector_v1, managed_native_extra_args_error_v1}
 
 val XCODE_LD = "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld"
@@ -47,3 +47,18 @@ describe "managed native child tool roles":
     it "keeps ranlib on linux and windows":
         expect(native_tool_child_roles_v1("linux").contains("ranlib")).to_equal(true)
         expect(native_tool_child_roles_v1("windows").contains("ranlib")).to_equal(true)
+
+describe "managed tool projection decode is platform-aware":
+    fn row(role: text, path: text) -> text:
+        "managed-tool=" + role + "|path=" + path + "|sha256=0000000000000000000000000000000000000000000000000000000000000000\n"
+    fn seven() -> text:
+        "managed-native-tools-format=1\n" + row("cc", "/opt/llvm/bin/clang") + row("linker", "/opt/x/ld") +
+            row("ar", "/opt/llvm/bin/llvm-ar") + row("llc", "/opt/llvm/bin/llc") +
+            row("llvm-as", "/opt/llvm/bin/llvm-as") + row("opt", "/opt/llvm/bin/opt") + row("nm", "/opt/llvm/bin/llvm-nm")
+    it "accepts the darwin 7-role mint (no ranlib)":
+        val r = native_tool_projection_decode_for_platform_v1(seven(), "macos")
+        expect(r.is_ok()).to_equal(true)
+        expect(r.unwrap().len()).to_equal(7)
+    it "still requires ranlib on linux":
+        val r = native_tool_projection_decode_for_platform_v1(seven(), "linux")
+        expect(r.is_err()).to_equal(true)
