@@ -830,8 +830,9 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>, mode: Compilabil
             if let Some(cond) = condition {
                 analyze_expr(cond, reasons, mode);
             }
+            // List comprehensions are desugared to an array-building loop in HIR
+            // (`lower_list_comprehension`), so they no longer force a fallback.
             add_reason(reasons, FallbackReason::CollectionOps);
-            add_reason(reasons, FallbackReason::Comprehension);
         }
 
         Expr::DictComprehension {
