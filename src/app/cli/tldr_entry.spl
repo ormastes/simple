@@ -1,4 +1,5 @@
 # `simple tldr [status] --out <dir> <file.spl>... [--receipt <rev> <tree>]`
+# `simple tldr history [--out <dir>] [-n N]`
 #
 # Emits each module's TLDR companion and fills the full-AST parse caches from
 # the same single parse (compiler.driver.cache.module_artifacts_v1). The test
@@ -10,12 +11,24 @@
 # immutable freshness receipt after an update, only when the result is current.
 
 use std.cli.cli_util (get_cli_args)
+use app.io.mod.{env_get}
 use compiler.driver.cache.source_reader_v1.{file_source_reader_v1}
 use compiler.driver.cache.tldr_freshness_v1.{tldr_freshness_verify_v1, tldr_freshness_current_v1,
-    tldr_freshness_receipt_render_v1, tldr_freshness_receipt_publish_v1}
+    tldr_freshness_receipt_render_v1, tldr_freshness_receipt_publish_v1,
+    tldr_freshness_receipt_path_v1, tldr_note_attach_v1, tldr_history_collect_v1,
+    tldr_history_render_row_v1}
+
+fn tldr_history(out_root: text, n: i64) -> i64:
+    val rows = tldr_history_collect_v1(out_root, n)
+    if rows.len() == 0:
+        print "tldr: no git history available"
+        return 1
+    for r in rows:
+        print tldr_history_render_row_v1(r)
+    0
 
 fn tldr_usage() -> i64:
-    print "Usage: simple tldr [status] --out <dir> <file.spl> [more.spl...] [--receipt <rev> <tree>]"
+    print "Usage: simple tldr history [--out <dir>] [-n N] | simple tldr [status] --out <dir> <file.spl> [more.spl...] [--receipt <rev> <tree>]"
     1
 
 fn tldr_print_status(out_root: text, sources: [text]) -> i64:
@@ -35,6 +48,8 @@ fn main() -> i64:
     var out_root = ""
     var sources: [text] = []
     var status_only = false
+    var history_mode = false
+    var history_n = 10
     var receipt_rev = ""
     var receipt_tree = ""
     var i = 0
@@ -42,6 +57,14 @@ fn main() -> i64:
         val arg = all_args[i]
         if arg.ends_with("tldr_entry.spl") or arg == "tldr":
             i = i + 1
+            continue
+        if arg == "history":
+            history_mode = true
+            i = i + 1
+            continue
+        if arg == "-n" and i + 1 < all_args.len():
+            history_n = all_args[i + 1].to_int()
+            i = i + 2
             continue
         if arg == "status":
             status_only = true
@@ -63,6 +86,8 @@ fn main() -> i64:
         elif arg.ends_with(".spl"):
             sources.push(arg)
         i = i + 1
+    if history_mode:
+        return tldr_history(if out_root == "": (env_get("SIMPLE_TLDR_ROOT") ?? "build/tldr") else: out_root, history_n)
     if out_root == "" or sources.len() == 0:
         return tldr_usage()
     if status_only:
@@ -87,4 +112,7 @@ fn main() -> i64:
             print "error: tldr: {err}"
             return 1
         print "tldr: receipt published for tree {receipt_tree}"
+        val warn = tldr_note_attach_v1(receipt_rev, tldr_freshness_receipt_path_v1(out_root, receipt_tree))
+        if warn != "":
+            print "warning: tldr: {warn}"
     0

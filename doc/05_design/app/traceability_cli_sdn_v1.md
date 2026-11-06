@@ -315,3 +315,11 @@ no declaration registers but that owns sidecar rows renders a sidecar-only
 `refs` page labeled `(undeclared; sidecar references only)` with
 `total_count: 0`, exit 1 -- no node or claim is invented, and without sidecar
 rows the answer stays `TRACE-QUERY-NOT-FOUND`.
+
+Slice-5 amendments at implementation (2026-11-06): no cursor in this cut
+(`--limit` caps claim rows, `complete=false` when capped) instead of the
+union cursor schema; the selected node is the declared file node when one
+exists, else the captured artifact node, else a labeled placeholder
+`(not captured; sidecar references only)`; `LOCATOR` rows gain the entity id
+and `SIDECAR` rows the referring id (table trailing columns, SDN `from`), so
+the file page is readable without a second query.

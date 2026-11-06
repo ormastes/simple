@@ -1,0 +1,68 @@
+# @req REQ-TRC-015 REQ-TRC-021
+# `refs file <path>`: app composition of claims, locators and sidecar rows at one path.
+use std.spec.*
+use std.common.traceability.model.*
+use std.common.traceability.legacy_bugs_v1.{parse_legacy_bug_db_v1, legacy_bug_nodes_v1}
+use std.common.traceability.sidecar_v1.{legacy_bug_sidecar_source_v1, legacy_bug_sidecar_references_v1}
+use app.traceability.extract.snapshot_pipeline.{TraceSnapshotScope, build_snapshot_trace_graph_with_sidecar_v1}
+use app.traceability.query_file_refs_v1.{trace_query_file_refs_v1}
+use app.traceability.query_options_v1.{trace_query_options_parse_v1, TraceQueryOptionsV1}
+
+fn file_query(path: text, limit: i64) -> TraceQueryOptionsV1:
+    TraceQueryOptionsV1(operation: "refs", kind: "file", selected_id: path, limit: limit)
+
+fn file_refs_db() -> text:
+    "bugs_active |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n" +
+    "    alpha_2026-11-06, P1, open, \"Alpha\", src/app/parser.spl, 12, test/01_unit/app/parser_spec.spl, d, d, true\n" +
+    "    gamma_2026-11-06, P0, open, \"Gamma\", src/compiler/g.spl, 7, , d, d, true\n"
+
+fn file_refs_build() -> Result<TraceSnapshotBuild, text>:
+    val source = SnapshotArtifact(path: "src/app/parser.spl", blob_id: "blob:source", content: "fn parse(): 1", visibility: "selected_content")
+    val spec = SnapshotArtifact(path: "test/01_unit/app/parser_spec.spl", blob_id: "blob:test", content: "# fixture spec", visibility: "selected_content")
+    val snapshot = SnapshotInput(subject: SnapshotSubject(repository_id: "repo:fixture", snapshot_id: "snapshot:tree:a",
+        kind: "worktree_preview", revision_id: "", tree_id: "tree:a", object_format: "sha256"), artifacts: [source, spec], complete: true)
+    val policy = TracePolicy(id: "policy:fixture", authorities: [], max_nodes: 100, max_claims: 100,
+        conventions: [TraceConventionRule(id: "app-unit-v1", source_root: "src/app/", target_root: "test/01_unit/app/",
+            source_suffix: ".spl", target_suffix: "_spec.spl", relation: TraceRelation.Targets, version: "1")])
+    val db = parse_legacy_bug_db_v1(file_refs_db(), "doc/08_tracking/bug/bug_db.sdn", "sha256:fixture")
+    var build = build_snapshot_trace_graph_with_sidecar_v1(snapshot, policy,  [],
+        TraceSnapshotScope(selected_roots: ["src/app", "test/01_unit/app"], authority_id: "", closure_kind: "selected_scope"),
+        [legacy_bug_sidecar_source_v1(db)], legacy_bug_nodes_v1(db), [])?
+    build.legacy_bugs = db.rows
+    build.sidecar_references = legacy_bug_sidecar_references_v1(db.rows)
+    Ok(build)
+
+describe "File-centred references":
+    it "lists the registered convention edge, the file locator and sidecar rows for a captured source":
+        # @ac AC-TRC-041
+        val build = file_refs_build().unwrap()
+        val page = trace_query_file_refs_v1(build, file_query("src/app/parser.spl", 100)).unwrap()
+        expect(page.selected.kind).to_equal(TraceNodeKind.SourceFile)
+        expect(page.selected.title).to_equal("src/app/parser.spl")
+        expect(page.total_count).to_equal(1)
+        expect(page.references[0].relation).to_equal("targets")
+        expect(page.references[0].direction).to_equal("incoming")
+        expect(page.references[0].authority).to_equal("registered-edge")
+        expect(page.references[0].other_paths).to_equal(["test/01_unit/app/parser_spec.spl"])
+        expect(page.locators.len()).to_equal(1)
+        expect(page.complete).to_be(true)
+
+    it "answers an uncaptured path from sidecar rows alone and rejects an unknown one":
+        # @ac AC-TRC-041
+        val build = file_refs_build().unwrap()
+        val page = trace_query_file_refs_v1(build, file_query("src/compiler/g.spl", 100)).unwrap()
+        expect(page.total_count).to_equal(0)
+        expect(page.locators.len()).to_equal(0)
+        expect(page.selected.title).to_contain("not captured")
+        expect(trace_query_file_refs_v1(build, file_query("src/none.spl", 100)).is_err()).to_be(true)
+        val capped = trace_query_file_refs_v1(build, file_query("src/app/parser.spl", 1)).unwrap()
+        expect(capped.references.len()).to_equal(1)
+
+    it "parses refs file options as a path without prefix or cursor":
+        # @ac AC-TRC-041
+        val options = trace_query_options_parse_v1(["refs", "file", "src/app/parser.spl", "--limit", "5"]).unwrap()
+        expect(options.kind).to_equal("file")
+        expect(options.selected_id).to_equal("src/app/parser.spl")
+        expect(trace_query_options_parse_v1(["refs", "file", "/abs.spl"]).is_err()).to_be(true)
+        expect(trace_query_options_parse_v1(["refs", "file", "src/a.spl", "--cursor=x"]).is_err()).to_be(true)
+        expect(trace_query_options_parse_v1(["list", "file"]).is_err()).to_be(true)

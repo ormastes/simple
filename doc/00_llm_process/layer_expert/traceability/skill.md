@@ -47,3 +47,7 @@ the app scanner `snapshot/spec_annotations_v1` (`--spec-root`, `dir_walk`,
 whole-file no-follow reads, one source digest per root). The seed's
 `dir_walk` is correct and fast (2,171 specs in 31 ms); the bounded reader
 refuses over-bound files instead of truncating, so files are read whole.
+Slice 5 (`app.traceability.query_file_refs_v1`, `refs file <path>`) composes
+claims on the file node, locators at the path and sidecar rows at the path in
+the app layer over the unchanged shared graph; `artifact_trace_id` is now
+exported from `extract/snapshot_facts`.

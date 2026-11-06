@@ -1,0 +1,59 @@
+# XRay static-off identity driver for the pure-Simple native AArch64 backend
+# (XRay PR5, design section B). Lowers four integer fixtures through the real
+# frontend -> MIR -> native_compile_to_object(AArch64) with DEFAULT options
+# (no --xray, xray_mode stays 0) and writes each object as hex to
+# $XRAY_OFF_OUT/<name>.hex. No cross-function call fixture: under the Rust
+# seed's interpreter the native aarch64 path fails on one ("type mismatch:
+# cannot convert object to int", identical on the pre-PR5 base), and the
+# aarch64 selector emits no tail calls, so there is no tail sled to cover.
+#
+# Uses ONLY APIs that existed before PR5, so check-xray-static-off-identity.shs
+# runs this same file in the candidate tree and in a pre-PR5 baseline tree and
+# compares the objects byte for byte.
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.backend.native.mod.{native_compile_to_object}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_env_get(key: text) -> text?
+
+fn off_lower(name: text, src: text) -> MirModule:
+    val ast = parse_full_frontend(src, "{name}.spl", "{name}.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("{name}.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.lower_module(hir)
+
+fn off_hex(bytes: [i64]) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    for index in 0..bytes.len():
+        val byte = bytes[index] & 255
+        out = out + digits[byte >> 4] + digits[byte & 15]
+    out
+
+fn main():
+    val dir = rt_env_get("XRAY_OFF_OUT") ?? ""
+    if dir == "":
+        print "ERROR: XRAY_OFF_OUT is not set"
+        return
+    val names = ["hello", "multi_return", "recursion", "loop"]
+    val sources = [
+        "fn hello() -> i64:\n    42\n",
+        "fn pick(x: i64) -> i64:\n    if x > 10:\n        return 1\n    if x > 5:\n        return 2\n    3\n",
+        "fn fact(n: i64) -> i64:\n    if n <= 1:\n        return 1\n    n * fact(n - 1)\n",
+        "fn total(n: i64) -> i64:\n    var acc = 0\n    var i = 0\n    while i < n:\n        acc = acc + i\n        i = i + 1\n    acc\n"
+    ]
+    for index in 0..names.len():
+        val object = native_compile_to_object(off_lower(names[index], sources[index]), CodegenTarget.AArch64)
+        if not rt_file_write_text("{dir}/{names[index]}.hex", off_hex(object)):
+            print "ERROR: cannot write {names[index]}"
+            return
+        print "wrote {names[index]} {object.len()} bytes"
+
+main()

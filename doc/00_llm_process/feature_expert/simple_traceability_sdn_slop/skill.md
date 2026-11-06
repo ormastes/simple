@@ -63,6 +63,8 @@ $S run src/app/traceability/query_main.spl refs bug bug:<db-id> 2>/dev/null     
 $S run src/app/traceability/query_main.spl list features --bug-db=none 2>/dev/null        # declaration only
 # which spec claims a requirement (# @req header scan, opt-in root, <=4096 files):
 $S run src/app/traceability/query_main.spl refs requirement req:REQ-TRC-015 --spec-root=test/01_unit/app/traceability 2>/dev/null
+# everything touching one file (claims + declared entities + bug/req sidecar rows):
+$S run src/app/traceability/query_main.spl refs file src/app/traceability/main.spl --spec-root=test/01_unit/app/traceability 2>/dev/null
 ```
 
 Full output key reference and the spec driver

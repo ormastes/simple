@@ -723,7 +723,85 @@ pub(crate) fn compile_binop<M: Module>(
             return Err("Layer connect operator (~>) requires ML runtime support".to_string());
         }
     };
+    if !is_float {
+        if let Some((narrow_ty, signed)) = narrow_arith_width(ctx, builder, op, pre_lhs, pre_rhs, left_vreg, right_vreg)
+        {
+            let reduced = builder.ins().ireduce(narrow_ty, val);
+            return Ok(if signed {
+                builder.ins().sextend(types::I64, reduced)
+            } else {
+                builder.ins().uextend(types::I64, reduced)
+            });
+        }
+    }
     Ok(val)
+}
+
+/// Declared width a narrow integer `+ - * / <<` must wrap to, as
+/// `(cranelift type, signed)`, or `None` to keep the i64 result.
+///
+/// Every integer op above is computed in i64, so a narrow result only wrapped
+/// when it happened to pass through a narrowing `Store` into a typed local:
+/// `val n = m + 1` wrapped while `(k - 1).to_text()` did not
+/// (`i32::MIN - 1` printed `-2147483649`). This mirrors the interpreter's
+/// static-width rule (`interpreter/expr/ops.rs::static_int_width`): both
+/// operands share one narrow width, or one is narrow and the other is an
+/// untyped literal (an `iconst` here). For unsigned widths the literal must
+/// also fit, as in `uint_arith_wrap_width` (`18u8 * 65536` stays wide).
+/// doc/08_tracking/bug/seed_i32_overflow_interp_vs_jit_divergence_2026-11-05.md
+fn narrow_arith_width<M: Module>(
+    ctx: &InstrContext<'_, M>,
+    builder: &FunctionBuilder,
+    op: BinOp,
+    lhs: cranelift_codegen::ir::Value,
+    rhs: cranelift_codegen::ir::Value,
+    left_vreg: VReg,
+    right_vreg: VReg,
+) -> Option<(cranelift_codegen::ir::Type, bool)> {
+    let width_of = |vreg: VReg| -> Option<(cranelift_codegen::ir::Type, bool, u32)> {
+        match ctx.vreg_types.get(&vreg).copied()? {
+            TypeId::I8 => Some((types::I8, true, 8)),
+            TypeId::I16 => Some((types::I16, true, 16)),
+            TypeId::I32 => Some((types::I32, true, 32)),
+            TypeId::U8 => Some((types::I8, false, 8)),
+            TypeId::U16 => Some((types::I16, false, 16)),
+            TypeId::U32 => Some((types::I32, false, 32)),
+            _ => None,
+        }
+    };
+    let literal = |v: cranelift_codegen::ir::Value| -> Option<i64> {
+        let dfg = &builder.func.dfg;
+        let cranelift_codegen::ir::ValueDef::Result(inst, _) = dfg.value_def(v) else {
+            return None;
+        };
+        match dfg.insts[inst] {
+            cranelift_codegen::ir::InstructionData::UnaryImm {
+                opcode: cranelift_codegen::ir::Opcode::Iconst,
+                imm,
+            } => Some(imm.bits()),
+            _ => None,
+        }
+    };
+    let (narrow, other_vreg, other_value) = match op {
+        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => match (width_of(left_vreg), width_of(right_vreg)) {
+            (Some(l), Some(r)) => return (l == r).then_some((l.0, l.1)),
+            (Some(l), None) => (l, right_vreg, rhs),
+            (None, Some(r)) => (r, left_vreg, lhs),
+            (None, None) => return None,
+        },
+        // A shift has the type of its left operand; the count is any int.
+        BinOp::ShiftLeft => return width_of(left_vreg).map(|(ty, signed, _)| (ty, signed)),
+        _ => return None,
+    };
+    let (ty, signed, bits) = narrow;
+    if !matches!(ctx.vreg_types.get(&other_vreg).copied(), None | Some(TypeId::I64)) {
+        return None;
+    }
+    let imm = literal(other_value)?;
+    if !signed && !(imm >= 0 && (imm as u64) < (1u64 << bits)) {
+        return None;
+    }
+    Some((ty, signed))
 }
 
 /// Compile built-in I/O function calls (print, println, eprint, eprintln, etc.)

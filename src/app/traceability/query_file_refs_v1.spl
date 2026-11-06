@@ -1,0 +1,80 @@
+# File-centred summary (`refs file <path>`): graph claims on the captured
+# artifact node, entities declared at the path, and sidecar rows at the path.
+# App composition over the shared graph; no paging, no new graph semantics.
+use std.common.traceability.model.*
+use std.common.traceability.query_refs_v1.{TraceReferenceV1, TraceReferencePageV1}
+use std.common.traceability.sidecar_v1.{sidecar_references_at_path_v1}
+use app.traceability.extract.snapshot_pipeline.{TraceSnapshotBuild}
+use app.traceability.extract.snapshot_facts.{artifact_trace_id}
+use app.traceability.query_options_v1.{TraceQueryOptionsV1}
+
+pub fn trace_query_file_refs_v1(build: TraceSnapshotBuild, options: TraceQueryOptionsV1) -> Result<TraceReferencePageV1, text>:
+    val path = options.selected_id
+    val limit = options.limit
+    val graph = build.graph
+    val artifact_id = artifact_trace_id(path)
+    var by_id: Dict<text, TraceNode> = {}
+    for node in graph.nodes: by_id[node.id] = node
+    # The declared file node may carry its own id (source:x) instead of the artifact id.
+    var selected_id = artifact_id
+    var selected_title = path
+    var selected_kind = TraceNodeKind.Document
+    var declared_ids: Dict<text, bool> = {}
+    var locators: [TraceLocator] = []
+    for locator in graph.locators:
+        if locator.path != path: continue
+        locators.push(locator)
+        if locator.locator_kind == "file" and locator.locator == "" and by_id.contains_key(locator.entity_id):
+            val kind = by_id[locator.entity_id].kind
+            if kind == TraceNodeKind.SourceFile or kind == TraceNodeKind.TestSuite or kind == TraceNodeKind.Document:
+                declared_ids[locator.entity_id] = true
+    if by_id.contains_key(artifact_id):
+        declared_ids[artifact_id] = true
+        selected_kind = by_id[artifact_id].kind
+    for id in trace_sorted_ids(declared_ids.keys()):
+        if id != artifact_id:
+            selected_id = id
+            selected_title = by_id[id].title
+            selected_kind = by_id[id].kind
+    val sidecar = sidecar_references_at_path_v1(build.sidecar_references, path)
+    if declared_ids.len() == 0 and locators.len() == 0 and sidecar.len() == 0:
+        return Err("TRACE-QUERY-NOT-FOUND: path is neither captured, declared nor referenced in this scope")
+    if declared_ids.len() == 0: selected_title = path + " (not captured; sidecar references only)"
+    var registered: Dict<text, bool> = {}
+    for edge in graph.edges:
+        registered[edge.from_id + "\t" + relation_name(edge.relation) + "\t" + edge.to_id] = true
+    var paths_by_entity: Dict<text, [text]> = {}
+    for locator in graph.locators:
+        var paths: [text] = if paths_by_entity.contains_key(locator.entity_id): paths_by_entity[locator.entity_id] else: []
+        if not paths.contains(locator.path): paths.push(locator.path)
+        paths_by_entity[locator.entity_id] = paths
+    var claim_ids: [text] = []
+    var claims_by_id: Dict<text, TraceClaim> = {}
+    for claim in graph.claims:
+        if claim.operation == TraceClaimOperation.Suppress: continue
+        if not declared_ids.contains_key(claim.from_id) and not declared_ids.contains_key(claim.to_id): continue
+        claims_by_id[claim.id] = claim
+        claim_ids.push(claim.id)
+    claim_ids = trace_sorted_ids(claim_ids)
+    var references: [TraceReferenceV1] = []
+    for claim_id in claim_ids:
+        if references.len() >= limit: break
+        val claim = claims_by_id[claim_id]
+        val outgoing = declared_ids.contains_key(claim.from_id)
+        val other_id = if outgoing: claim.to_id else: claim.from_id
+        var other_kind = ""
+        var other_title = ""
+        if by_id.contains_key(other_id):
+            other_kind = node_kind_name(by_id[other_id].kind)
+            other_title = by_id[other_id].title
+        val key = claim.from_id + "\t" + relation_name(claim.relation) + "\t" + claim.to_id
+        references.push(TraceReferenceV1(claim_id: claim.id, direction: if outgoing: "outgoing" else: "incoming",
+            relation: relation_name(claim.relation), from_id: claim.from_id, to_id: claim.to_id,
+            other_id: other_id, other_kind: other_kind, other_title: other_title,
+            operation: claim_operation_name(claim.operation), origin_id: claim.origin_id,
+            authority: if registered.contains_key(key): "registered-edge" else: "authored-claim",
+            other_paths: if paths_by_entity.contains_key(other_id): trace_sorted_ids(paths_by_entity[other_id]) else: []))
+    Ok(TraceReferencePageV1(snapshot_id: graph.subject.snapshot_id,
+        selected: TraceNode(id: selected_id, kind: selected_kind, title: selected_title),
+        references: references, total_count: claim_ids.len(), next_cursor: "",
+        complete: references.len() == claim_ids.len(), locators: locators, diagnostics: graph.diagnostics))

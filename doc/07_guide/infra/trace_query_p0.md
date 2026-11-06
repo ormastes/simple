@@ -323,3 +323,28 @@ $S run src/app/traceability/query_main.spl refs requirement req:REQ-TRC-015 --sp
 - Cost on the seed: `test/01_unit/app` (2,171 specs) walks in ~30 ms; reads
   are runtime-backed. `--spec-root=test` (7k files) exceeds the 4,096 budget
   by design -- name the area.
+
+### One-command file summary: `refs file <path>` (slice 5, 2026-11-06)
+
+"What touches this file?" -- graph claims on the file's node, entities
+declared at the path, and every sidecar row at the path (bugs
+`located_in`/`reproducible_by`, requirements `verified_by`), in one page:
+
+```sh
+S=D:/dev/wt/seed/simple.exe
+$S run src/app/traceability/query_main.spl refs file src/app/traceability/main.spl 2>/dev/null
+$S run src/app/traceability/query_main.spl refs file src/compiler/40.mono/monomorphize/cycle_detector.spl 2>/dev/null
+$S run src/app/traceability/query_main.spl refs file test/01_unit/app/traceability/legacy_bugs_sidecar_spec.spl --spec-root=test/01_unit/app/traceability --format=sdn 2>/dev/null
+```
+
+- `Selected: <kind> <node id> <path>`: the declared file node (`source:trace-cli`)
+  or the captured artifact node (`artifact:<hex>`); a path that is neither
+  captured nor declared but has sidecar rows shows `(not captured; sidecar
+  references only)`. Nothing at all -> `TRACE-QUERY-NOT-FOUND`, exit 1.
+- Claim rows are exactly `refs` rows (`incoming implemented_by
+  feature:traceability ...`); `LOCATOR` rows now end with the declaring entity
+  id; `SIDECAR` rows now end with the referring id (`bug:2998`,
+  `req:REQ-TRC-015`). SDN adds `from` to each `sidecar_references` entry.
+- No cursor: `--limit` caps claim rows (`page complete: false` when capped).
+  Bugs use the exact `file` column, so pass the file path, not a directory;
+  for an area use `list bugs --file-prefix=<dir>/`.

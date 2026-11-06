@@ -3238,6 +3238,15 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_cache_host_publish_retained_noreplace_v2" => Some(&[1]),
         "rt_cache_host_quarantine_v1" => Some(&[2]),
 
+        // Host dynamic-library loader (runtime/src/value/wsffi_native.rs): the
+        // path and symbol name cross as (ptr, len). Absent here, the JIT passed
+        // the boxed text handle as path_ptr and `mode` as path_len, so every JIT
+        // `dynlib_open` returned 0 (`loader-failed`) while the interpreter
+        // loaded the same DLL. Twin: 50.mir/text_extern_abi.spl. See
+        // doc/08_tracking/bug/seed_jit_host_dynlib_open_text_arg_not_split_2026-11-06.md
+        "rt_host_dynlib_open" => Some(&[0]),
+        "rt_host_dynlib_symbol" => Some(&[1]),
+
         "rt_linux_group_available_capacity_v1" => Some(&[0]),
         "rt_linux_group_parent_acquire_v1" => Some(&[0, 1]),
         "rt_linux_group_parent_acquire_at_v2" => Some(&[0, 1, 2]),
@@ -3900,6 +3909,12 @@ pub fn is_inline_lowered_byte_accessor(name: &str) -> bool {
             | "rt_typed_words_u64_at"
             | "rt_typed_words_u32_unchecked"
             | "rt_typed_words_u64_unchecked"
+            // Float-bit reinterpretation intrinsics: a bare bitcast in
+            // `compile_simple_runtime_memory_intrinsic`. Unlisted, the driver spliced every
+            // caller through the interpreter bridge. See doc/08_tracking/bug/
+            // seed_jit_spl_f64_to_bits_miscompile_2026-07-23.md
+            | "spl_f64_to_bits"
+            | "spl_bits_to_f64"
     )
 }
 
@@ -4330,6 +4345,43 @@ pub fn compile_call<M: Module>(
             if compile_known_enum_constructor_call(ctx, builder, dest, enum_name, variant_name, args) {
                 return Ok(());
             }
+        }
+
+        // Builtin `text` statics. Without this the call fell through with its
+        // dotted name, sanitized to `text_dot_from_char_code`, a legacy
+        // export deliberately absent from the static provider manifest: the
+        // JIT panicked "can't resolve symbol" (2026-09-04) and later died with
+        // SIGSEGV. Route to the canonical runtime ABI, as the LLVM backend
+        // (codegen/llvm/functions/calls.rs) and the pure-Simple backend do.
+        // doc/08_tracking/bug/seed_jit_cannot_resolve_text_dot_from_char_code_2026-09-04.md
+        let text_static = match func_name {
+            "text.from_char_code" => Some("rt_char_from_code"),
+            "text.from_bytes" => Some("rt_bytes_to_text"),
+            _ => None,
+        };
+        if let (Some(rt_name), [arg]) = (text_static, args) {
+            let func_id = if let Some(&id) = ctx.runtime_funcs.get(rt_name) {
+                id
+            } else if let Some(&id) = ctx.func_ids.get(rt_name) {
+                id
+            } else {
+                let mut sig = ctx.module.make_signature();
+                sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+                let id = ctx
+                    .module
+                    .declare_function(rt_name, Linkage::Import, &sig)
+                    .map_err(|e| format!("declare {rt_name} for {func_name}: {e}"))?;
+                ctx.func_ids.insert(rt_name.to_string(), id);
+                id
+            };
+            let arg_val = get_vreg_or_default(ctx, builder, arg);
+            let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+            let call = adapted_call(builder, func_ref, &[arg_val]);
+            if let Some(d) = dest {
+                ctx.vreg_values.insert(*d, builder.inst_results(call)[0]);
+            }
+            return Ok(());
         }
 
         // Before falling through to cross-module import, check if this is a qualified
