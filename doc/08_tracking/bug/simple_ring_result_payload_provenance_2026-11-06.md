@@ -89,3 +89,16 @@ Spec: `test/01_unit/compiler/50.mir/result_payload_provenance_spec.spl` (case 1
 red before, green after). Case 2 pins defect 2's shape, which still does not
 reproduce in the seed-run harness. The two source workarounds stay until a
 redeployed Stage 2 compiler builds `simple_ring.spl` without them.
+
+## Re-scope (2026-11-07)
+- Defect 1: the source fix stands. `result_payload_provenance_spec` passes 2/2 on the seed run (2026-11-07,
+  base 07ed6359433).
+- Defect 2 is still not reproducible on the seed. Case 2 is green, and `result_variant_payload_type` already
+  answers `Err` from a `HirTypeKind.Result` subject. The stage2 trace (`remembered-miss`) means the binder
+  local got no `remember_local_hir_type`. In the current bind arm, that happens only when
+  `effective_payload_type` is nil, or on the `exact_err_record` branch (which never records a HIR type).
+  Telling these two apart needs a Stage 2 probe. No MIR probe slot was free (`.mir_slot.3` locked), so no
+  speculative edit was landed without a failing repro.
+- Next step: in a free probe slot, run the stage2 build of `simple_ring.spl` with the `cancel` workaround
+  reverted and `SIMPLE_ENUM_PAYLOAD_PATH_TRACE=1`, and log which branch the `Err` arm takes. Then write the
+  failing spec for that branch.
