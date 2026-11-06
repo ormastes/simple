@@ -8,6 +8,7 @@ use std.spec.*
 use std.io_runtime.{file_read}
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
 use compiler.hir.generated.hir_codec.{hc_dec_hir_expr_kind, hc_dec_asm_target_spec}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
 
 describe "HIR codec non-optional scalar decode":
     it "keeps required-scalar rejection and names the owning field":
@@ -81,3 +82,26 @@ describe "HIR codec Dict<_, bool> encode":
         expect(src.contains("        if dm9[dk9]:\n            w.put_bool(true)\n        else:\n            w.put_bool(false)\n")).to_equal(true)
         val gen = file_read("src/app/compiler_schema/codec_gen.spl")
         expect(gen.contains("w.put_bool(true)")).to_equal(true)
+
+# bug hir_codec_encodes_nil_non_optional_scalar_that_decode_refuses_2026-10-24:
+# the encoder wrote N into the same slots and reported success, producing a blob
+# its own decoder refuses. Required struct-field scalars now refuse at encode.
+describe "HIR codec non-optional scalar encode":
+    it "REPRO: a nil required i64 field refuses the writer and names the field":
+        var w = HirCodecWriter.create()
+        w.put_i64_field(nil, "LayoutAttr.explicit_align")
+        expect(w.ok).to_equal(false)
+        expect(w.unsupported).to_equal("nil_in_non_optional_scalar:LayoutAttr.explicit_align")
+
+    it "accepts 3, true and false (staged-native nil-compare hazards)":
+        var w = HirCodecWriter.create()
+        w.put_i64_field(3, "X.a")
+        w.put_bool_field(true, "X.b")
+        w.put_bool_field(false, "X.c")
+        expect(w.ok).to_equal(true)
+
+    it "the generated encoder uses the refusing writers for struct fields":
+        val src = file_read("src/compiler/20.hir/generated/hir_codec.spl")
+        expect(src.contains("w.put_bool_field(node.has_explicit_align, \"LayoutAttr.has_explicit_align\")")).to_equal(true)
+        expect(src.contains("\n    w.put_i64(node.")).to_equal(false)
+        expect(src.contains("\n    w.put_bool(node.")).to_equal(false)
