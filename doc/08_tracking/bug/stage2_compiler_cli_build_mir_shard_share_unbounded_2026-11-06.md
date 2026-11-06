@@ -70,7 +70,20 @@ Probe binary = `a720cb10557` + a retained-root dump (local only, not landed),
 full-tool rows (scoped to the call, like `SIMPLE_FILE_WORKERS=0`; an explicit
 caller value wins). Each worker then claims at most ~380 modules: about
 19.3 + 380 x 0.011 = 23.5 GiB, two concurrent workers about 47 GiB. Pinned by
-`scripts/bootstrap/tests/phase-c-backend-commands-test.shs`.
+`scripts/bootstrap/tests/phase-c-backend-commands-test.shs`. The coordinator
+prints the effective value in the row log as `[mir-shard] shards=<n> parallel=<p>`.
+
+Costs and margins (estimates from run 10, unverified until the next run):
+- Memory: ~47 GiB of the 52 GiB cap, a ~5 GiB margin. Workers claim
+  largest-first, so the first wave holds the heaviest modules; the 11 MiB
+  slope was measured on that same order.
+- Wall time: 4 waves of 2 workers instead of 1. Each worker repeats the
+  frontend (~13 min with the HIR cache warm in run 10) and lowers ~380
+  modules (~16 min at ~2.5 s each): ~2 h of MIR plus ~15 min of HIR shards,
+  against the 14400 s row timeout (3600 s x4 scale). Each worker's own timeout
+  starts at its spawn.
+- The pin covers all four tool rows (cli, test runner, MCP, LSP). Smaller
+  closures pay extra frontend passes; a closure-scaled count would avoid that.
 
 ## Not fixed
 
