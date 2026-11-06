@@ -48,12 +48,21 @@ The actual headroom TU cross-compiled with repository libc headers for all
 three baremetal architectures; symbol inventories contained exactly its two
 public headroom exports. These results do not qualify a baremetal image.
 
-Historical pointer mapping returned FAIL: ten Windows backslash paths mismatch
-the identical ten slash-normalized baseline rows. The checker correction landed
-separately in PR #7336; this receipt does not claim a corrected rerun.
-Unsafe-backlog returned FAIL with INCOMPLETE_INPUT_INVENTORY: sparse checkout
-omitted 26,229 tracked test Simple files. Its source-only inventory reported
-migration 3698/3546, but cannot establish the full-tree result. No modified file
-in this repair is a Simple inventory input. Neither baseline is changed here.
+Final attempt 6/6 used all 44,954 tracked owned `src/` and `test/` Simple files
+with zero missing, extra untracked, or ignored Simple inputs. Git path/mode/blob
+maps and both audit script blobs match release target
+`5dba5390b5892dafb363e670aed11acb7741480c` exactly. This repair edits no Simple
+audit input. The corrected pointer map passed: 265 edges, zero new findings.
+The full-input unsafe-backlog audit remains FAIL: source variants **400/399**
+and migration **3764/3546**. This is an unchanged release-input failure proven
+by metadata equality; no baseline was changed and no waiver is claimed.
+
+Historical first attempts remain retained: pointer mapping failed before the
+separate PR #7336 checker correction; unsafe-backlog failed with an incomplete
+inventory that omitted 26,229 test files. Those runs are superseded by the
+explicit final full-input results above. No passing scalar test was rerun.
 The host map and targeted C contract checks passed. The full native-all link,
 P2/SSpec, global compiler/lib/MCP checks, and bootstrap admission remain UNRUN.
+
+The candidate remains a draft with verification pending. The 6/6 bound is
+exhausted; no further source repair or audit retry is included.
