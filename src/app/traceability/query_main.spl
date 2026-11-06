@@ -1,11 +1,14 @@
 # Direct compiled CLI handler; capture and query never re-read source to render.
-use std.common.traceability.query_nodes_v1.{TraceNodeQueryV1, query_trace_nodes_v1}
+use std.common.traceability.query_nodes_v1.{TraceNodeQueryV1, query_trace_nodes_v1, trace_node_query_kind_v1}
 use app.traceability.query_options_v1.{trace_query_options_parse_v1, trace_query_help_v1, trace_query_sdn_requested_v1}
 use app.traceability.query_snapshot_v1.{trace_query_build_snapshot_v1}
 use app.traceability.query_render_v1.{trace_query_render_v1, trace_query_error_v1}
-use std.common.traceability.query_refs_v1.{TraceReferenceQueryV1, query_trace_references_v1}
+use std.common.traceability.query_refs_v1.{TraceReferenceQueryV1, TraceReferencePageV1, query_trace_references_v1}
+use std.common.traceability.sidecar_v1.{sidecar_references_from_v1}
 use app.traceability.query_render_refs_v1.{trace_query_render_refs_v1}
 use std.cli.cli_util.{get_cli_args}
+use std.common.traceability.model.{TraceNode, TraceNodeKind}
+use std.common.traceability.legacy_bugs_v1.{legacy_bug_row_matches_v1}
 use std.io_runtime.{exit}
 
 fn query_print_v1(output: text):
@@ -42,8 +45,19 @@ pub fn run_trace_query_v1(args: [text]) -> i64:
             selected_id: options.selected_id, limit: options.limit, cursor: options.cursor)):
             case Ok(value): value
             case Err(reason):
-                query_print_v1(trace_query_error_v1(reason, build.graph.subject.snapshot_id, options.format, true))
-                return trace_query_error_exit_v1(reason)
+                # An identity no declaration registers may still own sidecar rows
+                # (e.g. a requirement only spec headers name). Render those alone,
+                # labeled undeclared; never invent a node or a graph claim.
+                val sidecar = sidecar_references_from_v1(build.sidecar_references, options.selected_id)
+                if reason.starts_with("TRACE-QUERY-NOT-FOUND:") and sidecar.len() > 0 and options.cursor == "":
+                    val kind = trace_node_query_kind_v1(options.kind).unwrap()
+                    TraceReferencePageV1(snapshot_id: build.graph.subject.snapshot_id,
+                        selected: TraceNode(id: options.selected_id, kind: kind, title: "(undeclared; sidecar references only)"),
+                        references: [], total_count: 0, next_cursor: "", complete: true, locators: [],
+                        diagnostics: build.graph.diagnostics)
+                else:
+                    query_print_v1(trace_query_error_v1(reason, build.graph.subject.snapshot_id, options.format, true))
+                    return trace_query_error_exit_v1(reason)
         val refs_output = trace_query_render_refs_v1(build, refs, options)
         if refs_output.len() > 1048576:
             query_print_v1(trace_query_error_v1("TRACE-QUERY-BUDGET: response exceeds 1 MiB; narrow the page", build.graph.subject.snapshot_id, options.format, true))
@@ -51,10 +65,23 @@ pub fn run_trace_query_v1(args: [text]) -> i64:
         query_print_v1(refs_output)
         if not build.graph.complete: return 1
         return 0
-    val page = match query_trace_nodes_v1(build.graph, TraceNodeQueryV1(
+    # Sidecar filters narrow bug nodes before paging; the filter identity is
+    # folded into the visibility context so cursors bind it.
+    var graph = build.graph
+    var visibility = "local-selected-content/v1"
+    if options.status != "" or options.severity != "" or options.file_prefix != "":
+        visibility = visibility + ";status=" + options.status + ";severity=" + options.severity + ";file=" + options.file_prefix
+        var matching: Dict<text, bool> = {}
+        for row in build.legacy_bugs:
+            if legacy_bug_row_matches_v1(row, options.status, options.severity, options.file_prefix): matching[row.id] = true
+        var nodes: [TraceNode] = []
+        for node in graph.nodes:
+            if node.kind != TraceNodeKind.Bug or matching.contains_key(node.id): nodes.push(node)
+        graph.nodes = nodes
+    val page = match query_trace_nodes_v1(graph, TraceNodeQueryV1(
         snapshot_id: build.graph.subject.snapshot_id, operation: options.operation,
         kind: options.kind, selected_id: options.selected_id, id_prefix: options.id_prefix,
-        limit: options.limit, cursor: options.cursor)):
+        limit: options.limit, cursor: options.cursor, visibility_context: visibility)):
         case Ok(value): value
         case Err(reason):
             query_print_v1(trace_query_error_v1(reason, build.graph.subject.snapshot_id, options.format, true))

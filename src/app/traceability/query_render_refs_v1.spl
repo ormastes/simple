@@ -5,6 +5,8 @@ use std.common.sdn.value.{SdnValue}
 use std.common.sdn.encode.{sdn_encode_canonical}
 use app.traceability.query_options_v1.{TraceQueryOptionsV1}
 use app.traceability.extract.snapshot_pipeline.{TraceSnapshotBuild}
+use app.traceability.query_render_v1.{trace_query_ingestion_line_v1, trace_query_ingestion_sdn_v1}
+use std.common.traceability.sidecar_v1.{sidecar_references_from_v1}
 
 fn refs_table_text_v1(value: text) -> text:
     var out = ""
@@ -43,16 +45,24 @@ pub fn trace_query_render_refs_v1(build: TraceSnapshotBuild, page: TraceReferenc
         shown = shown + 1
     var scope: [SdnValue] = []
     for path in build.scope.selected_roots: scope.push(SdnValue.String(path))
+    val ingestion = trace_query_ingestion_sdn_v1(build)
+    val sidecar = sidecar_references_from_v1(build.sidecar_references, page.selected.id)
+    var sidecar_rows: [SdnValue] = []
+    for reference in sidecar:
+        sidecar_rows.push(SdnValue.Dict({"source_kind": SdnValue.String(reference.source_kind),
+            "relation": SdnValue.String(reference.relation), "path": SdnValue.String(reference.path),
+            "locator": SdnValue.String(reference.locator), "authority": SdnValue.String(reference.authority)}))
     if options.format == "sdn":
         return sdn_encode_canonical(SdnValue.Dict({
             "schema": SdnValue.String("simple.trace.reference-query/v1"),
+            "sidecar_references": SdnValue.Array(sidecar_rows), "sidecar_sources": ingestion["sidecar_sources"],
             "snapshot": SdnValue.String(graph.subject.snapshot_id),
             "snapshot_kind": SdnValue.String(graph.subject.kind), "capture": SdnValue.String(capture),
             "repository": SdnValue.String(graph.subject.repository_id),
             "revision": SdnValue.String(graph.subject.revision_id), "tree": SdnValue.String(graph.subject.tree_id),
             "generation": SdnValue.String(graph.generation_id), "input_manifest": SdnValue.String(graph.input_manifest_id),
-            "scope": SdnValue.Array(scope), "ingestion": SdnValue.String("registered-declarations-only"),
-            "legacy_database_ingestion": SdnValue.String("unavailable"),
+            "scope": SdnValue.Array(scope), "ingestion": ingestion["ingestion"],
+            "legacy_database_ingestion": ingestion["legacy_database_ingestion"],
             "qualification": SdnValue.String("unverified"), "admission_eligible": SdnValue.Bool(false),
             "operation": SdnValue.String("refs"), "kind": SdnValue.String(options.kind),
             "selected": SdnValue.Dict({"id": SdnValue.String(page.selected.id),
@@ -66,7 +76,7 @@ pub fn trace_query_render_refs_v1(build: TraceSnapshotBuild, page: TraceReferenc
             "diagnostics": SdnValue.Array(diagnostics), "diagnostic_count": SdnValue.Int(page.diagnostics.len()),
             "diagnostics_truncated": SdnValue.Bool(page.diagnostics.len() > shown)}))
     var output = "Snapshot: " + graph.subject.snapshot_id + "\nCapture: " + capture + "\n"
-    output = output + "Ingestion: registered declarations only; legacy database ingestion unavailable\n"
+    output = output + trace_query_ingestion_line_v1(build)
     output = output + "Graph complete: " + graph.complete.to_text() + "; page complete: " + page.complete.to_text() + "\n"
     output = output + "Qualification: unverified; admission eligible: false\n"
     output = output + "Generation: " + graph.generation_id + "\nInput manifest: " + graph.input_manifest_id + "\n"
@@ -82,6 +92,8 @@ pub fn trace_query_render_refs_v1(build: TraceSnapshotBuild, page: TraceReferenc
     if page.next_cursor != "": output = output + "Next cursor: " + page.next_cursor + "\n"
     for locator in page.locators:
         output = output + "LOCATOR\t" + refs_table_text_v1(locator.path) + "\t" + refs_table_text_v1(locator.locator_kind) + "\t" + refs_table_text_v1(locator.locator) + "\n"
+    for reference in sidecar:
+        output = output + "SIDECAR\t" + reference.relation + "\t" + refs_table_text_v1(reference.path) + "\t" + refs_table_text_v1(reference.locator) + "\t" + reference.authority + "\n"
     shown = 0
     for issue in page.diagnostics:
         if shown >= 200: break

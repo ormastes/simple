@@ -1,6 +1,6 @@
 # Pool native function-value decode guesses pointer vs int-tag by value
 
-Status: OPEN (P1)
+Status: fix-implemented-verification-pending (P1), branch work/pool-explicit-kind
 Date: 2026-11-06
 Found by: similar-pattern audit for
 `isolated_thread_raw_worker_argument_heuristic_flake_2026-08-12` (P0).
@@ -36,3 +36,16 @@ fixture that maps records at A and A << 3 (see
 
 The pool is a separate API with its own callers and tests. It was left
 unchanged so that the thread-spawn ABI change stays reviewable.
+
+## Fix (2026-11-06, work/pool-explicit-kind)
+
+- `rt_native_function_word_decode` in `src/runtime/runtime_value.h` is the one
+  pure decoder (no shared state, no probe) for thread spawn and pool submit.
+- `rt_pool_state_try_submit_i64_kind_v1(state, kind, fn, input)` in
+  `runtime_pool.c` and `runtime_thread.c`; the legacy
+  `rt_pool_state_try_submit_i64_v1` keeps its name and means kind VALUE.
+- Unknown kinds and non-INT/HEAP value tags return -3.
+- Regression: `executor_tests.rs` `test_pool_legacy_value_entry_stress_dual_decodable_word`
+  (1024 tasks, failed before: wrong record ran, 1001 vs 2) and
+  `test_pool_explicit_kind_stress_and_rejection`; C twin in
+  `rt_thread_owner_contract_selfcheck.c` (2048 tasks).

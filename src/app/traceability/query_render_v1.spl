@@ -4,6 +4,39 @@ use std.common.sdn.value.{SdnValue}
 use std.common.sdn.encode.{sdn_encode_canonical}
 use app.traceability.extract.snapshot_pipeline.{TraceSnapshotBuild}
 use app.traceability.query_options_v1.{TraceQueryOptionsV1}
+use std.common.traceability.legacy_bugs_v1.{LegacyBugRowV1}
+
+pub fn trace_query_ingestion_line_v1(build: TraceSnapshotBuild) -> text:
+    if build.sidecar_sources.len() == 0:
+        if build.graph.subject.kind != "worktree_preview":
+            return "Ingestion: registered declarations only; legacy database ingestion unavailable for snapshot kind\n"
+        return "Ingestion: registered declarations only; legacy database ingestion unavailable\n"
+    var line = "Ingestion: registered declarations"
+    for source in build.sidecar_sources:
+        line = line + " + sidecar " + source.kind + " " + query_table_text_v1(source.path) + " rows=" + source.row_count.to_text() + " " + source.content_sha256
+    line + "\n"
+
+pub fn trace_query_ingestion_sdn_v1(build: TraceSnapshotBuild) -> Dict<text, SdnValue>:
+    var sources: [SdnValue] = []
+    var legacy = "unavailable"
+    if build.graph.subject.kind != "worktree_preview": legacy = "unavailable-for-snapshot-kind"
+    for source in build.sidecar_sources:
+        if source.kind == "bug-db/v1": legacy = "bug-db/v1"
+        sources.push(SdnValue.Dict({"kind": SdnValue.String(source.kind), "path": SdnValue.String(source.path),
+            "sha256": SdnValue.String(source.content_sha256), "rows": SdnValue.Int(source.row_count)}))
+    {"ingestion": SdnValue.String(if build.sidecar_sources.len() == 0: "registered-declarations-only" else: "registered-declarations+sidecar"),
+        "legacy_database_ingestion": SdnValue.String(legacy), "sidecar_sources": SdnValue.Array(sources)}
+
+pub fn trace_query_legacy_rows_v1(build: TraceSnapshotBuild) -> Dict<text, LegacyBugRowV1>:
+    var rows: Dict<text, LegacyBugRowV1> = {}
+    for row in build.legacy_bugs: rows[row.id] = row
+    rows
+
+fn legacy_row_sdn_v1(row: LegacyBugRowV1) -> SdnValue:
+    SdnValue.Dict({"table": SdnValue.String(row.table), "status": SdnValue.String(row.status),
+        "severity": SdnValue.String(row.severity), "file": SdnValue.String(row.file), "line": SdnValue.Int(row.line),
+        "reproducible_by": SdnValue.String(row.reproducible_by), "valid": SdnValue.Bool(row.valid),
+        "created_at": SdnValue.String(row.created_at), "updated_at": SdnValue.String(row.updated_at)})
 
 fn query_table_text_v1(value: text) -> text:
     var safe = ""
@@ -32,12 +65,16 @@ pub fn trace_query_error_v1(message: text, snapshot: text, format: text, capture
 pub fn trace_query_render_v1(build: TraceSnapshotBuild, page: TraceQueryResult, options: TraceQueryOptionsV1) -> text:
     val graph = build.graph
     val capture = if graph.subject.kind == "worktree_preview": "non-atomic-sequential-preview" else: "immutable-git-tree"
+    val legacy_rows = trace_query_legacy_rows_v1(build)
     var rows: [SdnValue] = []
     var selected: Dict<text, bool> = {}
     for node in page.nodes:
         selected[node.id] = true
-        rows.push(SdnValue.Dict({"id": SdnValue.String(node.id),
-            "kind": SdnValue.String(node_kind_name(node.kind)), "title": SdnValue.String(node.title)}))
+        var fields: Dict<text, SdnValue> = {"id": SdnValue.String(node.id),
+            "kind": SdnValue.String(node_kind_name(node.kind)), "title": SdnValue.String(node.title)}
+        if legacy_rows.contains_key(node.id): fields["legacy"] = legacy_row_sdn_v1(legacy_rows[node.id])
+        rows.push(SdnValue.Dict(fields))
+    val ingestion = trace_query_ingestion_sdn_v1(build)
     var diagnostics: [SdnValue] = []
     var shown = 0
     for issue in page.diagnostics:
@@ -63,11 +100,14 @@ pub fn trace_query_render_v1(build: TraceSnapshotBuild, page: TraceQueryResult, 
             "repository": SdnValue.String(graph.subject.repository_id),
             "revision": SdnValue.String(graph.subject.revision_id), "tree": SdnValue.String(graph.subject.tree_id),
             "generation": SdnValue.String(graph.generation_id), "input_manifest": SdnValue.String(graph.input_manifest_id),
-            "scope": SdnValue.Array(scope), "ingestion": SdnValue.String("registered-declarations-only"),
-            "legacy_database_ingestion": SdnValue.String("unavailable"),
+            "scope": SdnValue.Array(scope), "ingestion": ingestion["ingestion"],
+            "legacy_database_ingestion": ingestion["legacy_database_ingestion"],
+            "sidecar_sources": ingestion["sidecar_sources"],
             "qualification": SdnValue.String("unverified"), "admission_eligible": SdnValue.Bool(false),
             "operation": SdnValue.String(options.operation), "kind": SdnValue.String(options.kind),
             "id_prefix": SdnValue.String(options.id_prefix), "limit": SdnValue.Int(options.limit),
+            "status": SdnValue.String(options.status), "severity": SdnValue.String(options.severity),
+            "file_prefix": SdnValue.String(options.file_prefix),
             "page_complete": SdnValue.Bool(page.complete), "graph_complete": SdnValue.Bool(graph.complete),
             "total_count": SdnValue.Int(page.total_count), "next_cursor": SdnValue.String(page.next_cursor),
             "projection": SdnValue.String("nodes-only; not a graph export"),
@@ -75,13 +115,25 @@ pub fn trace_query_render_v1(build: TraceSnapshotBuild, page: TraceQueryResult, 
             "diagnostics": SdnValue.Array(diagnostics), "diagnostic_count": SdnValue.Int(page.diagnostics.len()),
             "diagnostics_truncated": SdnValue.Bool(page.diagnostics.len() > shown)}))
     var output = "Snapshot: " + graph.subject.snapshot_id + "\nCapture: " + capture + "\n"
-    output = output + "Ingestion: registered declarations only; legacy database ingestion unavailable\n"
+    output = output + trace_query_ingestion_line_v1(build)
     output = output + "Graph complete: " + graph.complete.to_text() + "; page complete: " + page.complete.to_text() + "\n"
     output = output + "Qualification: unverified; admission eligible: false\n"
     output = output + "Generation: " + graph.generation_id + "\nInput manifest: " + graph.input_manifest_id + "\n"
-    output = output + "KIND\tID\tTITLE\n"
+    val bug_columns = options.kind == "bugs" and build.legacy_bugs.len() > 0
+    output = output + (if bug_columns: "KIND\tID\tTITLE\tSTATUS\tSEVERITY\tLOCATION\n" else: "KIND\tID\tTITLE\n")
     for node in page.nodes:
-        output = output + node_kind_name(node.kind) + "\t" + query_table_text_v1(node.id) + "\t" + query_table_text_v1(node.title) + "\n"
+        output = output + node_kind_name(node.kind) + "\t" + query_table_text_v1(node.id) + "\t" + query_table_text_v1(node.title)
+        if bug_columns:
+            var status = ""
+            var severity = ""
+            var location = ""
+            if legacy_rows.contains_key(node.id):
+                val row = legacy_rows[node.id]
+                status = row.status
+                severity = row.severity
+                location = if row.file == "": "" elif row.line > 0: row.file + ":" + row.line.to_text() else: row.file
+            output = output + "\t" + query_table_text_v1(status) + "\t" + query_table_text_v1(severity) + "\t" + query_table_text_v1(location)
+        output = output + "\n"
     output = output + "Total selected: " + page.total_count.to_text() + "\n"
     if page.next_cursor != "": output = output + "Next cursor: " + page.next_cursor + "\n"
     shown = 0

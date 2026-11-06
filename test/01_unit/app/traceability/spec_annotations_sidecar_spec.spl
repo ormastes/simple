@@ -1,0 +1,64 @@
+# @req REQ-TRC-015 REQ-TRC-021
+# `# @req` spec-header annotations as verified_by sidecar references (design slice 4).
+use std.spec.*
+use std.common.traceability.annotations_v1.{SpecHeaderDigestV1, parse_req_annotations_v1, annotation_sidecar_source_v1}
+use app.traceability.query_options_v1.{trace_query_options_parse_v1}
+
+fn header_fixture() -> text:
+    "# @tag:in-development\n" +
+    "# @req REQ-TRC-001 REQ-TRC-013  REQ-TRC-001\n" +
+    "#@req REQ-OTHER-9\n" +
+    "# @cover src/app/x.spl 80%\n" +
+    "\n" +
+    "use std.spec.*\n" +
+    "# @req REQ-BODY-1 (prose after the header; must be ignored)\n" +
+    "describe \"x\":\n" +
+    "    it \"quotes # @req REQ-QUOTED-2 in a string\":\n"
+
+describe "Spec header requirement annotations":
+    it "reads @req ids from the leading comment block only and dedupes per file":
+        # @ac AC-TRC-041
+        val references = parse_req_annotations_v1(header_fixture(), "test/01_unit/app/x_spec.spl")
+        expect(references.len()).to_equal(3)
+        expect(references[0].from_id).to_equal("req:REQ-TRC-001")
+        expect(references[1].from_id).to_equal("req:REQ-TRC-013")
+        expect(references[2].from_id).to_equal("req:REQ-OTHER-9")
+        for reference in references:
+            expect(reference.relation).to_equal("verified_by")
+            expect(reference.path).to_equal("test/01_unit/app/x_spec.spl")
+            expect(reference.locator).to_equal("header")
+            expect(reference.authority).to_equal("annotation-claim")
+            expect(reference.source_kind).to_equal("annotation-req/v1")
+
+    it "ignores files without a header block and rejects non-canonical ids":
+        # @ac AC-TRC-041
+        expect(parse_req_annotations_v1("use std.spec.*\n# @req REQ-LATE-1\n", "test/a_spec.spl").len()).to_equal(0)
+        expect(parse_req_annotations_v1("# @req REQ-OK-1 bad|id\n", "test/a_spec.spl").len()).to_equal(1)
+        expect(parse_req_annotations_v1("", "test/a_spec.spl").len()).to_equal(0)
+        # A leading docstring is part of the header (trace_node_query_spec's shape).
+        val doc = "\"\"\"P0 pages. Execution pending\nmore\"\"\"\n# @req REQ-TRC-021\nuse std.spec.*\n# @req REQ-LATE-2\n"
+        val after_doc = parse_req_annotations_v1(doc, "test/a_spec.spl")
+        expect(after_doc.len()).to_equal(1)
+        expect(after_doc[0].from_id).to_equal("req:REQ-TRC-021")
+
+    it "binds the scanned headers into one source identity per root":
+        # @ac AC-TRC-030
+        val a = SpecHeaderDigestV1(path: "test/x_spec.spl", content_sha256: "sha256:a")
+        val b = SpecHeaderDigestV1(path: "test/y_spec.spl", content_sha256: "sha256:b")
+        val first = annotation_sidecar_source_v1("test", [a, b])
+        val reordered = annotation_sidecar_source_v1("test", [b, a])
+        expect(first.kind).to_equal("annotation-req/v1")
+        expect(first.path).to_equal("test")
+        expect(first.row_count).to_equal(2)
+        expect(first.content_sha256).to_equal(reordered.content_sha256)
+        val changed = annotation_sidecar_source_v1("test", [a, SpecHeaderDigestV1(path: "test/y_spec.spl", content_sha256: "sha256:c")])
+        expect(changed.content_sha256 != first.content_sha256).to_be(true)
+        expect(annotation_sidecar_source_v1("other", [a, b]).content_sha256 != first.content_sha256).to_be(true)
+
+    it "accepts up to eight distinct safe spec roots":
+        # @ac AC-TRC-041
+        val options = trace_query_options_parse_v1(["refs", "requirement", "req:REQ-TRC-001", "--spec-root=test/01_unit/app/", "--spec-root", "test/02_integration"]).unwrap()
+        expect(options.spec_roots).to_equal(["test/01_unit/app", "test/02_integration"])
+        expect(trace_query_options_parse_v1(["list", "requirements", "--spec-root=test/a", "--spec-root=test/a"]).is_err()).to_be(true)
+        expect(trace_query_options_parse_v1(["list", "requirements", "--spec-root=../test"]).is_err()).to_be(true)
+        expect(trace_query_options_parse_v1(["list", "requirements", "--spec-root=/abs"]).is_err()).to_be(true)

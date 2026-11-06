@@ -626,3 +626,64 @@ queues; `.tldr` is written by the compiler (`update_tldr`) to an explicit
 (Windows kernel-mutex) explored in the 10-10 evidence rows above. It conflicts
 with the no-lock, fully-async rule and never landed in `src/`; its evidence
 rows are history only. Replacement: single-flight futures (design doc §6).
+
+## Stale-feature review — 2026-11-06
+
+Reviewed against the authoritative
+[`src_based_tldr_build_v1.md`](../../05_design/compiler/incremental_build/src_based_tldr_build_v1.md)
+(2026-10-24), together with the owner's standing rules: per-file src→obj jobs are the default, one
+process per file with no shard children, lockless by default, stale TLDR is replaced with a temp
+file plus atomic rename, SCV cache data is immutable, and HIR stays target-neutral while MIR picks
+the target. Inputs: the 2026-10-08 research design (§§4-13), this plan (REQ-001..028, WP0-WP11) and
+the acceptance matrix. Code reality at `release/1.0.0` `d3d524f8b4a`:
+
+- `src/lib/common/source_change/contracts_v1.spl` contains shape checks only. Its sole callers are
+  `test/01_unit/lib/source_change/contracts_v1_spec.spl` and the `test/fixtures/compiler/source_change_*`
+  probes.
+- `simple tldr` (`src/app/cli/tldr_entry.spl`) supports only `--out <dir> <file.spl>...`. There is no
+  `status` and no `history`.
+- No code exists for `TldrFreshness*`, `PostBuild*`, `SourceMetaStore*`, SMET or `refs/notes/simple-tldr`.
+- The per-file worker already reconciles by content digest
+  (`80.driver/driver_build/native_file_worker_incremental_io_v1.spl:85-110`, `source_changed`).
+
+Verdicts: **NEEDED** (in scope for 1.0.0), **SUPERSEDED** (replaced, with the replacement cited) and
+**NOT-NEEDED** (dropped for 1.0.0, with the reason given).
+
+| # | Item (origin) | Verdict | Reason / replacement |
+|---|---|---|---|
+| 1 | REQ-001 one shared service + standalone fallback | SUPERSEDED | `SourceReader` with `FileReader` (standalone) and `CacheReader` (shared) — design §3 |
+| 2 | REQ-003/WP1 common SourceChange types + validator | NEEDED (reduced) | becomes the *validated change* that the build path derives by reconciling bytes (content digest vs last receipt). Shape checks stay; the new code adds admission from bytes |
+| 3 | WP1 strict binary/SDN codec frames, SMET v1, `current.meta.sdn`, SourceMetaStoreV1 | NOT-NEEDED | rule 4: freshness is the content digest. An edit-event history is only a hint, and precedence step 3 (reconcile by bytes) is always correct and always available. A durable event store adds a second freshness authority |
+| 4 | Journal/WAL for change metadata (REQ-008, WP3) | NOT-NEEDED | every new artifact is one immutable whole file published by temp + atomic rename (design §5). No multi-record mutation needs a WAL. SCV keeps its existing WAL for its own DB |
+| 5 | WP2 IDE / Spipe / SCV-nvim adapters | NOT-NEEDED for 1.0.0 | they speed up a hint path only. The filesystem/Git reconcile by bytes covers every writer, including the ones adapters would miss. Revisit after 1.0.0 behind a measured gain |
+| 6 | WP3 SCV metadata schema v2 migration | NOT-NEEDED | it would only store item 3's batches. Its "one lease owner" gate contradicts design rule 2 (no process lease) |
+| 7 | WP4 complete TLDR freshness verifier (REQ-009/010) | NEEDED | first slice. It checks every expected module's `.tldr` companion against the source sha256 it embeds (`module_tldr_companion_fresh_v1`) over a complete inventory, conservatively |
+| 8 | WP5 receipt + `simple tldr status/history` (REQ-013/027) | NEEDED (local) | receipt = immutable SDN keyed by the commit/tree, published by temp+rename. The `refs/notes/simple-tldr` attach is a git-side adapter written from the same payload. Branch/time are hints only |
+| 9 | REQ-014 receipt writer serialization | SUPERSEDED | content-keyed immutable publish: identical bytes make the last rename harmless, and different bytes for the same key are quarantined (design §5 rule) |
+| 10 | WP6 PostBuildTaskV1 durable queue, leases, max_attempts | SUPERSEDED (reduced to NEEDED coordinator) | single-flight futures (§6) replace leases. What is kept is PostBuildCoordinatorV1 = pending vs settled state for binary / TLDR / tests, as immutable per-generation records |
+| 11 | WP7 authoritative incremental parser, byte-region reparse, retained parse tree | SUPERSEDED | design rule 6 + §4: a full per-file parse whose cache entry is the in-place immutable AST |
+| 12 | Synchronous native parse lease (Windows kernel mutex) | SUPERSEDED | single-flight futures (design §6, §13, §15) |
+| 13 | WP8 exact semantic read sets | SUPERSEDED | `cache/incremental_rebuild_plan_v1.spl` (changed src + imported iface digest + AOP pointcut set, design §11). The remaining work is wiring, tracked there |
+| 14 | WP9 hybrid/directory/packed SMF | NOT-NEEDED here | independent of freshness. Owned by the packed-AST / SMF lanes (`packed_binary_ast_v1.md`) |
+| 15 | WP10 selective bootstrap, captured physical projection | SUPERSEDED | per-file src→obj jobs (`true_per_file_pipeline_v1.md`). Projection authority belongs to the bootstrap lane |
+| 16 | WP11 remote cache, notes push, remote CAS transport | NOT-NEEDED for 1.0.0 | local vertical slice first (old design §13 step 6). Notes are not synced by default |
+| 17 | Asynchronous source commits (§7.4) | NOT-NEEDED | the old design already recommends off. Source commits stay synchronous user actions |
+| 18 | Receipt verifier signature / trust domain (§6.2 trust) | NOT-NEEDED for 1.0.0 | local-only receipts. CI re-runs the verifier rather than trusting a note |
+| 19 | Hash agility for receipt digests | NEEDED | design rule 7: receipt digests are written `algo:hex`, and an unknown algorithm is a miss |
+| 20 | HIR target-neutral, MIR picks target | NEEDED (constraint) | the TLDR/receipt key carries no target. Target identity enters only the object cache key |
+
+### Dead-code decision
+
+`contracts_v1.spl` is **not deleted**. Item 2 makes it live from the build path, so it has a
+replacement-free caller-to-be, and deleting it would be churn. Nothing else in this feature has zero
+callers and also a replacement.
+
+### Implementation order (NEEDED only)
+
+1. Verifier + receipt (items 7, 8, 19)
+2. Validated change / reconcile (item 2)
+3. Post-build coordinator (item 10)
+4. `simple tldr status/history` (item 8)
+
+The SCV v2 migration (item 6) was requested in the brief but is recorded NOT-NEEDED. It is left for an
+owner decision rather than implemented.

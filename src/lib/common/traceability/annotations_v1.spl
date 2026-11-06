@@ -1,0 +1,59 @@
+# Spec header annotations as sidecar references: `# @req REQ-X ...` lines in
+# a spec's leading comment block declare `req:REQ-X verified_by <spec path>`.
+# Declared by the spec author; never a graph claim, never "verified".
+# @req REQ-TRC-015 REQ-TRC-021
+use std.common.traceability.model.*
+use std.common.traceability.schema.{trace_id_valid}
+use std.common.traceability.sidecar_v1.{TraceSidecarReferenceV1, TraceSidecarSourceV1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+
+pub struct SpecHeaderDigestV1:
+    path: text
+    content_sha256: text
+
+# Only the leading header counts (`#` comment lines and a leading `"""`
+# docstring): the scan stops at the first other line, so an `@req` quoted in a
+# test body is prose.
+pub fn parse_req_annotations_v1(content: text, path: text) -> [TraceSidecarReferenceV1]:
+    var references: [TraceSidecarReferenceV1] = []
+    var seen: Dict<text, bool> = {}
+    val fence = "\"\"\""
+    var in_docstring = false
+    for raw in content.split("\n"):
+        val line = raw.trim()
+        if in_docstring:
+            if line.contains(fence): in_docstring = false
+            continue
+        if line == "": continue
+        if line.starts_with(fence):
+            if not line.substring(3, line.len()).contains(fence): in_docstring = true
+            continue
+        if not line.starts_with("#"): break
+        if not line.starts_with("# @req ") and not line.starts_with("#@req "): continue
+        val body = line.substring(line.index_of("@req ") ?? 0, line.len())
+        for token in body.substring(5, body.len()).split(" "):
+            val id = token.trim()
+            if id == "" or id.starts_with("#"): continue
+            val node_id = "req:" + id
+            if not trace_id_valid(node_id) or seen.contains_key(node_id): continue
+            seen[node_id] = true
+            references.push(TraceSidecarReferenceV1(source_kind: "annotation-req/v1", from_id: node_id,
+                relation: "verified_by", path: path, locator: "header", authority: "annotation-claim"))
+    references
+
+# One source per scanned root; its identity is the sorted (path, header digest) list.
+pub fn annotation_sidecar_source_v1(root: text, digests: [SpecHeaderDigestV1]) -> TraceSidecarSourceV1:
+    var keyed: Dict<text, text> = {}
+    var paths: [text] = []
+    for digest in digests:
+        keyed[digest.path] = digest.content_sha256
+        paths.push(digest.path)
+    var rows: [SdnValue] = []
+    for path in trace_sorted_ids(paths):
+        rows.push(SdnValue.Dict({"path": SdnValue.String(path), "content_sha256": SdnValue.String(keyed[path])}))
+    val identity = sdn_encode_canonical(SdnValue.Dict({"domain": SdnValue.String("simple.trace.annotation-req/v1"),
+        "root": SdnValue.String(root), "files": SdnValue.Array(rows)}))
+    TraceSidecarSourceV1(kind: "annotation-req/v1", path: root, content_sha256: "sha256:" + sha256_text(identity),
+        row_count: digests.len())

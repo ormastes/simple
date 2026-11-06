@@ -43,16 +43,32 @@ D:/dev/wt/seed/simple.exe run src/app/traceability/query_main.spl show requireme
 ```
 
 Arguments are the words after `simple trace`; a leading `trace` word is also
-accepted. Exit 0 = rendered over a complete graph (normal; still unverified /
-admission-ineligible). Authority for the canonical declaration's claims comes
-from the policy-owned registry `trace_query_registered_authorities_v1`
+accepted. Exit 0 = rendered over a complete graph (normal for the declaration;
+still unverified / admission-ineligible). Authority for the canonical
+declaration's claims comes from the policy-owned registry
+`trace_query_registered_authorities_v1`
 (`src/app/traceability/snapshot/query_scope_v1.spl`); a
 `TRACE-AUTHORITY-CONFLICT` (exit 1) now means a claim outside that registry,
 and a new registered declaration needs its own registry rows. Spec:
-`test/03_system/app/traceability/feature/trace_query_authority_spec.spl`. Scope is the registered declaration only (`list bugs` is empty
-by design until legacy DB ingestion lands). Full output key reference and the
-spec driver (`scripts/check/check-trace-query-p0.shs`):
-`doc/07_guide/infra/trace_query_p0.md` § "Running it today on the seed".
+`test/03_system/app/traceability/feature/trace_query_authority_spec.spl`.
+Scope is the registered declaration plus, since 2026-11-06, the
+legacy bug DB as a read-only **sidecar** (`doc/08_tracking/bug/bug_db.sdn`,
+2,687 rows, bug nodes + status/severity/file attributes, no graph claims):
+
+```sh
+S=D:/dev/wt/seed/simple.exe
+$S run src/app/traceability/query_main.spl list bugs --status=open --severity=P1 --file-prefix=src/compiler/ 2>/dev/null
+$S run src/app/traceability/query_main.spl show bug bug:<db-id> --format=sdn 2>/dev/null   # legacy: {...}
+$S run src/app/traceability/query_main.spl refs bug bug:<db-id> 2>/dev/null               # SIDECAR located_in / reproducible_by rows
+$S run src/app/traceability/query_main.spl list features --bug-db=none 2>/dev/null        # declaration only
+# which spec claims a requirement (# @req header scan, opt-in root, <=4096 files):
+$S run src/app/traceability/query_main.spl refs requirement req:REQ-TRC-015 --spec-root=test/01_unit/app/traceability 2>/dev/null
+```
+
+Full output key reference and the spec driver
+(`scripts/check/check-trace-query-p0.shs`):
+`doc/07_guide/infra/trace_query_p0.md` § "Running it today on the seed" and
+§ "Legacy bug DB sidecar".
 
 `refs requirement req:REQ-TRC-001` (or `refs feature <id>`) lists every authored
 claim from/to the identity with the other endpoint's declared file paths; see

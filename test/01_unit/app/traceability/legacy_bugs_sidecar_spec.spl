@@ -1,0 +1,157 @@
+# @req REQ-TRC-015 REQ-TRC-021 REQ-TRC-023
+# Legacy bug-DB sidecar: pure row parsing, sidecar references, identity binding
+# and the list-bugs filter fold. No file I/O; the real database is a system scenario.
+use std.spec.*
+use std.common.traceability.model.*
+use std.common.traceability.legacy_bugs_v1.{parse_legacy_bug_db_v1, legacy_row_fields_v1, legacy_bug_nodes_v1, legacy_bug_row_matches_v1}
+use std.common.traceability.sidecar_v1.{legacy_bug_sidecar_source_v1, legacy_bug_sidecar_references_v1, sidecar_references_from_v1, sidecar_references_at_path_v1}
+use std.common.traceability.query_nodes_v1.{TraceNodeQueryV1, query_trace_nodes_v1}
+use app.traceability.query_options_v1.{trace_query_options_parse_v1}
+use app.traceability.extract.snapshot_pipeline.{TraceSnapshotScope, build_snapshot_trace_graph, build_snapshot_trace_graph_with_sidecar_v1}
+
+fn fixture_db() -> text:
+    "strings |id, value|\n\n" +
+    "bugs_active |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n" +
+    "    alpha_2026-11-06, P1, open, \"Alpha, with comma and \\\"quote\\\" and \\$dollar\", src/app/x.spl, 12, test/01_unit/app/x_spec.spl, 2026-11-06, 2026-11-06, true\n" +
+    "    beta_2026-11-06, P2, fixed, \"Beta active\", doc/08_tracking/bug/beta_2026-11-06.md, 1, doc/08_tracking/bug/beta_2026-11-06.md, 2026-11-06, 2026-11-06, true\n" +
+    "    alpha_2026-11-06, P3, open, \"Alpha duplicate\", src/app/y.spl, 1, , 2026-11-06, 2026-11-06, true\n" +
+    "    broken_2026-11-06, P2, open, \"Broken\", src/app/z.spl, 1, extra, field, 2026-11-06, 2026-11-06, true\n" +
+    "    unsafe_2026-11-06, P2, open, \"Unsafe path\", C:\\\\abs\\\\path.spl, 3, , 2026-11-06, 2026-11-06, false\n" +
+    "\n" +
+    "bugs |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n" +
+    "    beta_2026-11-06, P2, closed, \"Beta archived twin\", src/app/old.spl, 9, , 2026-01-01, 2026-01-01, true\n" +
+    "    gamma_2026-11-06, P0, open, \"Gamma archived only\", src/compiler/50.mir/g.spl, 77, , 2026-11-06, 2026-11-06, true\n" +
+    "\n" +
+    "bug_scope |bug_id, scope, root_layer, note|\n" +
+    "    gamma_2026-11-06, lib, 20, \"not a bug row\"\n"
+
+fn sidecar_snapshot() -> SnapshotInput:
+    val source = SnapshotArtifact(path: "src/app/parser.spl", blob_id: "blob:source", content: "fn parse(): 1", visibility: "selected_content")
+    SnapshotInput(subject: SnapshotSubject(repository_id: "repo:fixture", snapshot_id: "snapshot:tree:a",
+        kind: "worktree_preview", revision_id: "", tree_id: "tree:a", object_format: "sha256"), artifacts: [source], complete: true)
+
+fn sidecar_policy() -> TracePolicy:
+    TracePolicy(id: "policy:fixture", authorities: [], max_nodes: 100, max_claims: 100, conventions: [])
+
+fn sidecar_scope() -> TraceSnapshotScope:
+    TraceSnapshotScope(selected_roots: ["src/app"], authority_id: "", closure_kind: "selected_scope")
+
+describe "Legacy bug-DB row parsing":
+    it "splits quoted fields with commas and writer escapes":
+        # @ac AC-TRC-041
+        val fields = legacy_row_fields_v1("a, P1, open, \"T, \\\"q\\\" \\$d\", src/x.spl, 1, , d, d, true")
+        expect(fields.len()).to_equal(10)
+        expect(fields[3]).to_equal("T, \"q\" $d")
+        expect(fields[6]).to_equal("")
+
+    it "ingests both tables with bugs_active precedence and reports bad rows without inventing links":
+        # @ac AC-TRC-041
+        val source = parse_legacy_bug_db_v1(fixture_db(), "doc/08_tracking/bug/bug_db.sdn", "sha256:fixture")
+        expect(source.rows.len()).to_equal(4)
+        expect(source.rows[0].id).to_equal("bug:alpha_2026-11-06")
+        expect(source.rows[0].title).to_equal("Alpha, with comma and \"quote\" and $dollar")
+        expect(source.rows[0].line).to_equal(12)
+        expect(source.rows[0].reproducible_by).to_equal("test/01_unit/app/x_spec.spl")
+        # Shared id: the active row wins over the archived twin.
+        expect(source.rows[1].status).to_equal("fixed")
+        expect(source.rows[1].table).to_equal("bugs_active")
+        # Unsafe file column is dropped, the row and its valid flag are kept.
+        expect(source.rows[2].id).to_equal("bug:unsafe_2026-11-06")
+        expect(source.rows[2].file).to_equal("")
+        expect(source.rows[2].valid).to_be(false)
+        expect(source.rows[3].id).to_equal("bug:gamma_2026-11-06")
+        expect(source.rows[3].table).to_equal("bugs")
+        # Diagnostics: duplicate inside bugs_active, 11-field row, unsafe path.
+        expect(source.diagnostics.len()).to_equal(3)
+        for issue in source.diagnostics:
+            expect(issue.code).to_equal("TRACE-LEGACY-ROW")
+            expect(issue.severity).to_equal("warning")
+        val nodes = legacy_bug_nodes_v1(source)
+        expect(nodes.len()).to_equal(4)
+        expect(nodes[3].kind).to_equal(TraceNodeKind.Bug)
+
+    it "derives labeled sidecar references and answers both directions":
+        # @ac AC-TRC-041
+        val source = parse_legacy_bug_db_v1(fixture_db(), "doc/08_tracking/bug/bug_db.sdn", "sha256:fixture")
+        val references = legacy_bug_sidecar_references_v1(source.rows)
+        # alpha: located_in + reproducible_by; beta: 2; unsafe: 0; gamma: 1.
+        expect(references.len()).to_equal(5)
+        val alpha = sidecar_references_from_v1(references, "bug:alpha_2026-11-06")
+        expect(alpha.len()).to_equal(2)
+        expect(alpha[0].relation).to_equal("located_in")
+        expect(alpha[0].locator).to_equal("line:12")
+        expect(alpha[0].authority).to_equal("legacy-row")
+        expect(alpha[1].relation).to_equal("reproducible_by")
+        val at_path = sidecar_references_at_path_v1(references, "src/compiler/50.mir/g.spl")
+        expect(at_path.len()).to_equal(1)
+        expect(at_path[0].from_id).to_equal("bug:gamma_2026-11-06")
+        val summary = legacy_bug_sidecar_source_v1(source)
+        expect(summary.kind).to_equal("bug-db/v1")
+        expect(summary.row_count).to_equal(4)
+
+    it "matches rows on exact status and severity and on a file prefix":
+        # @ac AC-TRC-044
+        val source = parse_legacy_bug_db_v1(fixture_db(), "doc/08_tracking/bug/bug_db.sdn", "sha256:fixture")
+        val gamma = source.rows[3]
+        expect(legacy_bug_row_matches_v1(gamma, "open", "P0", "src/compiler/")).to_be(true)
+        expect(legacy_bug_row_matches_v1(gamma, "fixed", "", "")).to_be(false)
+        expect(legacy_bug_row_matches_v1(gamma, "", "P1", "")).to_be(false)
+        expect(legacy_bug_row_matches_v1(gamma, "", "", "src/app/")).to_be(false)
+
+describe "Legacy bug-DB sidecar identity and paging":
+    it "binds sidecar sources into the input manifest and keeps the no-sidecar manifest unchanged":
+        # @ac AC-TRC-030
+        val source = parse_legacy_bug_db_v1(fixture_db(), "doc/08_tracking/bug/bug_db.sdn", "sha256:fixture")
+        val plain = build_snapshot_trace_graph(sidecar_snapshot(), sidecar_policy(), [], sidecar_scope()).unwrap()
+        val empty = build_snapshot_trace_graph_with_sidecar_v1(sidecar_snapshot(), sidecar_policy(), [], sidecar_scope(), [], [], []).unwrap()
+        expect(empty.graph.input_manifest_id).to_equal(plain.graph.input_manifest_id)
+        val with = build_snapshot_trace_graph_with_sidecar_v1(sidecar_snapshot(), sidecar_policy(), [], sidecar_scope(),
+            [legacy_bug_sidecar_source_v1(source)], legacy_bug_nodes_v1(source), source.diagnostics).unwrap()
+        expect(with.graph.input_manifest_id != plain.graph.input_manifest_id).to_be(true)
+        expect(with.graph.generation_id != plain.graph.generation_id).to_be(true)
+        expect(with.sidecar_sources.len()).to_equal(1)
+        # Nodes join the graph; nothing else does, and completeness is untouched.
+        expect(with.graph.nodes.len()).to_equal(plain.graph.nodes.len() + 4)
+        expect(with.graph.claims.len()).to_equal(plain.graph.claims.len())
+        expect(with.graph.locators.len()).to_equal(plain.graph.locators.len())
+        expect(with.graph.complete).to_equal(plain.graph.complete)
+        expect(with.graph.diagnostics.len()).to_equal(plain.graph.diagnostics.len() + 3)
+        var changed = source
+        changed.content_sha256 = "sha256:other"
+        val other = build_snapshot_trace_graph_with_sidecar_v1(sidecar_snapshot(), sidecar_policy(), [], sidecar_scope(),
+            [legacy_bug_sidecar_source_v1(changed)], legacy_bug_nodes_v1(changed), []).unwrap()
+        expect(other.graph.input_manifest_id != with.graph.input_manifest_id).to_be(true)
+
+    it "pages bug nodes by canonical id and binds a filter fold through the visibility context":
+        # @ac AC-TRC-044
+        val source = parse_legacy_bug_db_v1(fixture_db(), "doc/08_tracking/bug/bug_db.sdn", "sha256:fixture")
+        val build = build_snapshot_trace_graph_with_sidecar_v1(sidecar_snapshot(), sidecar_policy(), [], sidecar_scope(),
+            [legacy_bug_sidecar_source_v1(source)], legacy_bug_nodes_v1(source), []).unwrap()
+        val graph = build.graph
+        val page = query_trace_nodes_v1(graph, TraceNodeQueryV1(snapshot_id: graph.subject.snapshot_id,
+            operation: "list", kind: "bugs", limit: 2)).unwrap()
+        expect(page.total_count).to_equal(4)
+        expect(page.nodes[0].id).to_equal("bug:alpha_2026-11-06")
+        expect(page.next_cursor != "").to_be(true)
+        var folded = TraceNodeQueryV1(snapshot_id: graph.subject.snapshot_id, operation: "list", kind: "bugs", limit: 2,
+            visibility_context: "local-selected-content/v1;status=open;severity=;file=")
+        folded.cursor = page.next_cursor
+        expect(query_trace_nodes_v1(graph, folded).is_err()).to_be(true)
+
+describe "Legacy bug-DB sidecar options":
+    it "accepts --bug-db, directory file prefixes and list-bugs-only filters":
+        # @ac AC-TRC-041
+        val options = trace_query_options_parse_v1(["list", "bugs", "--status=open", "--severity", "P1", "--file-prefix=src/compiler/"]).unwrap()
+        expect(options.bug_db).to_equal("doc/08_tracking/bug/bug_db.sdn")
+        expect(options.bug_db_explicit).to_be(false)
+        expect(options.status).to_equal("open")
+        expect(options.severity).to_equal("P1")
+        expect(options.file_prefix).to_equal("src/compiler/")
+        val explicit = trace_query_options_parse_v1(["show", "bug", "bug:x", "--bug-db=build/fixture.sdn"]).unwrap()
+        expect(explicit.bug_db_explicit).to_be(true)
+        val off = trace_query_options_parse_v1(["list", "features", "--bug-db=none"]).unwrap()
+        expect(off.bug_db).to_equal("none")
+        expect(trace_query_options_parse_v1(["list", "features", "--status=open"]).is_err()).to_be(true)
+        expect(trace_query_options_parse_v1(["show", "bug", "bug:x", "--severity=P1"]).is_err()).to_be(true)
+        expect(trace_query_options_parse_v1(["list", "bugs", "--file-prefix=../x"]).is_err()).to_be(true)
+        expect(trace_query_options_parse_v1(["list", "bugs", "--bug-db=/abs.sdn"]).is_err()).to_be(true)
