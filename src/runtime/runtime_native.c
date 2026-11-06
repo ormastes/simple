@@ -7841,11 +7841,40 @@ SPL_WEAK const char* spl_get_arg(int64_t idx) {
  * (8ca87866c6, ~475 collisions). ELF/Mach-O extract a weak archive member
  * normally (unlike the Windows GNU case above), so keeping it weak there
  * costs nothing and avoids that risk. See the Windows bootstrap
- * rt_set_args unresolved-reference investigation, 2026-09-01. */
+ * rt_set_args unresolved-reference investigation, 2026-09-01.
+ *
+ * Exception, ELF only: the hosted bundle linked together with
+ * libsimple_native_all.a (host-gpu / auto native-build). Among HOSTED ELF
+ * composers it is the only one that passes SIMPLE_RUNTIME_MEMORY_OWNER without
+ * SIMPLE_CORE_C_STANDALONE (runtime_compiler.spl adds STANDALONE when
+ * `include_dynload or core_c_profile`, and its caller passes include_dynload =
+ * no native_all archive; tools.rs, the exact_stage4 lane above, always adds
+ * it). The freestanding SimpleOS sysroots also omit STANDALONE, but there
+ * simple_core/core_process.spl owns argv (see os/libc/simpleos_cli_args.c), so
+ * __simpleos__ / non-hosted builds keep the weak copies. The native_all link
+ * always carries --allow-multiple-definition and puts these objects before
+ * the archive. There, `-u
+ * rt_vulkan_provider_is_available` pulls the simple_runtime CGU that also
+ * defines rt_set_args/rt_get_args/sys_get_args/rt_get_argc STRONGLY, and a
+ * weak C copy loses to it: Rust rt_get_args built its array with the C
+ * rt_array_new and the Rust rt_array_push_grow, which rejects a C array, so
+ * compiled code read `sys_get_args().len()` as 0. The whole argv family is
+ * therefore strong here, so the first (C) definition wins and the C array
+ * owner settled for runtime.c (see rt_cli_get_args below) holds for the Rust
+ * archive too. Mach-O has no --allow-multiple-definition, so it is excluded.
+ * doc/08_tracking/bug/hosted_native_all_rust_argv_overrides_c_array_owner_2026-11-07.md */
+#if defined(__ELF__) && defined(SIMPLE_RUNTIME_MEMORY_OWNER) && \
+    !defined(SIMPLE_CORE_C_STANDALONE) && !defined(__simpleos__) && \
+    defined(__STDC_HOSTED__) && __STDC_HOSTED__
+#define SPL_ARGV_RUST_ARCHIVE_PEER 1
+#define SPL_ARGV_FAMILY_OWNER
+#else
+#define SPL_ARGV_FAMILY_OWNER SPL_WEAK
+#endif
 #if defined(_WIN32)
 void rt_set_args(int argc, char** argv) {
 #else
-SPL_WEAK void rt_set_args(int argc, char** argv) {
+SPL_ARGV_FAMILY_OWNER void rt_set_args(int argc, char** argv) {
 #endif
     spl_init_args(argc, argv);
 }
@@ -7893,11 +7922,11 @@ void rt_set_args_wide(int argc, const wchar_t** argv) {
 }
 #endif /* _WIN32 */
 
-SPL_WEAK int32_t rt_get_argc(void) {
+SPL_ARGV_FAMILY_OWNER int32_t rt_get_argc(void) {
     return (int32_t)spl_arg_count();
 }
 
-SPL_WEAK SplArray* rt_get_args(void) {
+SPL_ARGV_FAMILY_OWNER SplArray* rt_get_args(void) {
     return rt_cli_get_args();
 }
 
@@ -7905,7 +7934,7 @@ SPL_WEAK SplArray* rt_get_args(void) {
  * interpreter registers it on every lane). No native C definition existed, so
  * entry-closure binaries linked it as a silent 0-returning stub and
  * get_args() saw an empty array (native_sys_get_args_missing 2026-07-23). */
-SPL_WEAK SplArray* sys_get_args(void) {
+SPL_ARGV_FAMILY_OWNER SplArray* sys_get_args(void) {
     return rt_cli_get_args();
 }
 
@@ -7914,9 +7943,11 @@ SPL_WEAK SplArray* sys_get_args(void) {
  * whenever this file is in the bundle (SIMPLE_RUNTIME_MEMORY_OWNER; see the
  * matching guard in runtime.c), so on Windows this copy is then the only one
  * and must be strong: a lone weak external is not resolved there. ELF keeps
- * weak for the Rust-capsule coexistence reason given at rt_set_args above. */
-#if defined(_WIN32) && \
-    (defined(SIMPLE_CORE_C_STANDALONE) || defined(SIMPLE_RUNTIME_MEMORY_OWNER))
+ * weak for the Rust-capsule coexistence reason given at rt_set_args above,
+ * except beside the Rust archive (SPL_ARGV_RUST_ARCHIVE_PEER, same place). */
+#if (defined(_WIN32) && \
+    (defined(SIMPLE_CORE_C_STANDALONE) || defined(SIMPLE_RUNTIME_MEMORY_OWNER))) || \
+    defined(SPL_ARGV_RUST_ARCHIVE_PEER)
 #define SPL_CORE_ARGV_OWNER
 #else
 #define SPL_CORE_ARGV_OWNER SPL_WEAK
@@ -7947,6 +7978,8 @@ SPL_CORE_ARGV_OWNER int64_t rt_cli_arg_at(int64_t index) {
     return rt_string_new((const uint8_t*)arg, (uint64_t)strlen(arg));
 }
 #undef SPL_CORE_ARGV_OWNER
+#undef SPL_ARGV_FAMILY_OWNER
+#undef SPL_ARGV_RUST_ARCHIVE_PEER
 
 int64_t rt_file_preload_pages(int64_t path_value) {
 #if defined(_WIN32)
