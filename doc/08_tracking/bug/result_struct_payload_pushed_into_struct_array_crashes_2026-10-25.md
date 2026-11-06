@@ -59,3 +59,8 @@ shapes are native-compiled by Stage 2, so the default test lane does not reprodu
 
 ## Bug DB
 DB reconciliation pending: no `bug_db.sdn` row was added for this ID in this change.
+
+
+## Progress 2026-11-06 (hir2 P2 lane)
+
+Re-checked against origin/release/1.0.0: no fix commit for this bug id was found (git log --grep). The defect only shows up in code built natively by the Stage 2/Phase 3 producer. The interpreter-lane HIR specs cannot reproduce it, so a parse_full_frontend + HirLowering spec cannot prove the bug red and then green. No compiler change was made, the workaround tags stay, and the bug stays open until a rebuilt stage3 producer can run the repro.
