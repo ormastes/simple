@@ -89,5 +89,20 @@ live container could switch into is an error (pin instead). Open: nothing in
 production calls the adapter yet; `@collection_algorithm` still reaches the
 containers through `attributed_at_site`. Wiring the policy into construction
 is W6/C5 work. Spec:
-`test/01_unit/lib/collections/adaptive_policy_adapter_spec.spl` (5/6 on the
-seed; the populated-map `it` needs `spl_ordered_key_cmp`).
+`test/01_unit/lib/collections/adaptive_policy_adapter_spec.spl` (on the seed,
+the populated-map `it`s need `spl_ordered_key_cmp`).
+
+Added 2026-11-06 (data plan W4b): `frozen_lookup()` on `AdaptiveTextSet`,
+`AdaptiveMap` and `AdaptiveSet` returns a view type
+(`AdaptiveTextSetFrozenLookup`, `AdaptiveMapFrozenLookup`,
+`AdaptiveSetFrozenLookup`) with only `fn` methods, so a holder cannot promote,
+migrate or bump counters (COL-09). The ordinary `contains`/`get` still promote
+in place for the exclusive owner. Frozen reads are not profile-captured. The
+map view answers an ordered-storage probe without native order as absent
+instead of demoting. The text-set view holds the class reference (live reads);
+the map/set views hold a value copy (a snapshot). Seed: the text-set COL-02,
+COL-04 and COL-09 scenarios run; the populated-map ones need
+`spl_ordered_key_cmp`.
+Owner question (W4b): frozen reads are not captured, so a site read mostly
+through views reports few lookups and `auto` feedback never promotes its next
+instances. Capturing them needs the lockless capture runtime (adaptive lane).

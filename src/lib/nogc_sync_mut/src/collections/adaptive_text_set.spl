@@ -351,6 +351,21 @@ class AdaptiveTextSet:
             case AdaptiveSetAlgorithm.Ordered: return self.ordered_values.keys()
         []
 
+    fn storage_contains(value: text) -> bool:
+        """Membership in the active storage without counters, capture or promotion."""
+        if self.algorithm == AdaptiveSetAlgorithm.Hash:
+            return self.hash_values.contains(value)
+        if self.algorithm == AdaptiveSetAlgorithm.Ordered:
+            return self.ordered_values.contains_key(value)
+        for item in self.linear_values:
+            if item == value:
+                return true
+        false
+
+    fn frozen_lookup() -> AdaptiveTextSetFrozenLookup:
+        """Read-only lookup for shared readers; it never promotes or migrates (COL-09)."""
+        AdaptiveTextSetFrozenLookup(source: self)
+
     me contains(value: text) -> bool:
         self.observed_lookups = self.observed_lookups + 1
         self.lookups_since_switch = self.lookups_since_switch + 1
@@ -625,7 +640,21 @@ class AdaptiveTextSet:
         self.live_hash_lookups = 0
         self.live_high_collision_lookups = 0
 
+struct AdaptiveTextSetFrozenLookup:
+    """Read-only live view of one AdaptiveTextSet (a class reference, not a
+    snapshot: owner writes are visible, so it is race-free only while the owner
+    is quiescent). It exposes no `me` method, so a holder cannot promote,
+    migrate or count; reads are not profile-captured."""
+    source: AdaptiveTextSet
+
+    fn contains(value: text) -> bool:
+        self.source.storage_contains(value)
+
+    fn len() -> i64:
+        self.source.len()
+
 export AdaptiveSetAlgorithm
+export AdaptiveTextSetFrozenLookup
 export AdaptiveSetAttribute
 export AdaptiveSetProfile
 export AdaptiveSetObservation

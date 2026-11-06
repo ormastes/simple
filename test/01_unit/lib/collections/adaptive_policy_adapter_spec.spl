@@ -181,6 +181,11 @@ describe "Adaptive collection policy adapter":
         expect(adapter_algorithm_name(hashed.selected_algorithm())).to_equal("hash")
         expect(adapter_attribute_name(ordered.algorithm_attribute())).to_equal("ordered")
         expect(adapter_algorithm_name(ordered.selected_algorithm())).to_equal("ordered")
+        step("Verify a frozen lookup over the empty hashed map answers absent without moving it")
+        val hashed_view = hashed.frozen_lookup()
+        expect(hashed_view.contains_key("a")).to_equal(false)
+        expect(hashed_view.len()).to_equal(0)
+        expect(adapter_algorithm_name(hashed_view.selected_algorithm())).to_equal("hash")
 
     it "preserves exact map keys and present optional values across every directed transition":
         # @req REQ-COL-01
@@ -209,3 +214,86 @@ describe "Adaptive collection policy adapter":
                     expect(entries[0].value).to_equal(None)
                     expect(entries[1].value).to_equal(Some(1))
                     expect(entries[2].value).to_equal(Some(3))
+
+    it "keeps set uniqueness across every directed transition":
+        # @req REQ-COL-02
+        step("Move a text set between every pair of representations and re-insert its members")
+        val values = ["delta", "alpha", "charlie"]
+        val names = ["linear", "hash", "ordered"]
+        for from_name in names:
+            for to_name in names:
+                if from_name != to_name:
+                    var set = adapter_text_set_with(from_name, values)
+                    set = collection_policy_apply_text_set_v1(set,
+                        collection_policy_decide_v1(adapter_policy(to_name, adapter_all_three(), "exclusive_live"), set.profile).unwrap()).unwrap()
+                    step("Verify every duplicate insert is refused and the size is unchanged")
+                    for value in values:
+                        expect(set.insert(value)).to_equal(false)
+                    expect(set.len()).to_equal(3)  # oracle: three distinct members
+                    expect(set.snapshot_values().len()).to_equal(3)
+
+    it "returns the same update results and iteration order under every representation":
+        # @req REQ-COL-04
+        step("Run one insert, duplicate, remove and re-insert sequence on each pinned representation")
+        var results: [text] = []
+        for name in ["linear", "hash", "ordered"]:
+            var set = adapter_text_set_with(name, [])
+            var trace = ""
+            for value in ["m", "c", "x", "c", "a"]:
+                trace = trace + "{set.insert(value)},"
+            trace = trace + "{set.remove("x")},{set.remove("x")},{set.insert("x")},{set.insert("b")}|"
+            for value in set.snapshot_values():
+                trace = trace + value + ","
+            results.push(trace)
+        step("Verify the three traces are identical")
+        expect(results[0]).to_equal("true,true,true,false,true,true,false,true,true|a,b,c,m,x,")
+        expect(results[1]).to_equal(results[0])
+        expect(results[2]).to_equal(results[0])
+
+    it "never promotes or migrates on a frozen lookup":
+        # @req REQ-COL-09
+        step("Read an auto text set through its frozen lookup well past the promotion count")
+        var set = AdaptiveTextSet.new()
+        set = collection_policy_apply_text_set_v1(set,
+            collection_policy_decide_v1(adapter_policy("auto", adapter_all_three(), "next_instance"), set.profile).unwrap()).unwrap()
+        set.insert("a")
+        set.insert("b")
+        set.insert("c")
+        val frozen = set.frozen_lookup()
+        var hits = 0
+        for i in 0..40:
+            if frozen.contains("a") and not frozen.contains("z"):
+                hits = hits + 1
+        step("Verify the answers are exact and the storage and counters did not move")
+        expect(hits).to_equal(40)  # oracle: 40 reads, each a hit and a miss
+        expect(frozen.len()).to_equal(3)
+        expect(adapter_algorithm_name(set.selected_algorithm())).to_equal("linear")
+        expect(set.observation().lookups).to_equal(0)
+        step("Verify the ordinary owner lookup still promotes after the same number of reads")
+        for i in 0..40:
+            set.contains("a")
+        expect(adapter_algorithm_name(set.selected_algorithm())).to_equal("hash")
+        expect(set.frozen_lookup().contains("c")).to_equal(true)
+
+    it "answers frozen map lookups exactly without changing storage":
+        # @req REQ-COL-09
+        # @req REQ-COL-03
+        # Needs spl_ordered_key_cmp (AdaptiveMap.put); not runnable on the Rust seed interpreter.
+        step("Fill an auto map with a present None value and read it only through the frozen lookup")
+        var map: AdaptiveMap<text, i64?> = AdaptiveMap.new()
+        map.put("one", Some(1))
+        map.put("none", None)
+        val frozen = map.frozen_lookup()
+        for i in 0..40:
+            frozen.contains_key("one")
+        step("Verify present None, a value and an absent key stay distinct and storage did not move")
+        expect(frozen.contains_key("none")).to_equal(true)
+        expect(frozen.contains_key("absent")).to_equal(false)
+        expect(frozen.get("one").unwrap()).to_equal(Some(1))
+        expect(frozen.get("absent")).to_equal(None)
+        expect(adapter_algorithm_name(frozen.selected_algorithm())).to_equal("linear")
+        expect(frozen.len()).to_equal(2)
+        expect(adapter_algorithm_name(map.selected_algorithm())).to_equal("linear")
+        expect(map.observation().lookups).to_equal(0)
+        val set: AdaptiveSet<text> = AdaptiveSet.new()
+        expect(set.frozen_lookup().contains("a")).to_equal(false)
