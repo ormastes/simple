@@ -7,7 +7,7 @@
 
 use std.io_runtime.{hash_text}
 use compiler.core.lexer_struct.{make_core_lexer, core_lexer_next_token, core_lexer_token_text}
-use compiler.frontend.core.tokens.{TOK_EOF, TOK_NEWLINE, TOK_INDENT, TOK_DEDENT}
+use compiler.core.tokens.{TOK_EOF, TOK_NEWLINE, tok_kind_name}
 use compiler.frontend.core.collection_feedback.{parser_collection_site_stem}
 
 val COLLECTION_TYPE_ADAPTIVE_MAP: text = "std.nogc_sync_mut.src.collections.adaptive_map.AdaptiveMap"
@@ -77,7 +77,7 @@ fn collection_semantic_contract_v1(type_name: text) -> CollectionSemanticContrac
             CollectionIterationOrder.Unspecified, CollectionKeyContract.HashEq, false, true))
     if type_name == COLLECTION_TYPE_BUILTIN_DICT:
         return Some(_collection_contract(type_name, CollectionFamily.Map,
-            CollectionIterationOrder.BackendDependent, CollectionKeyContract.RuntimeKey, false, true))
+            CollectionIterationOrder.BackendDependent, CollectionKeyContract.RuntimeKey, false, false))
     None
 
 # ===== Semantic operation IDs =====
@@ -102,6 +102,12 @@ fn collection_semantic_op_name(op: CollectionSemanticOp) -> text:
         case CollectionSemanticOp.Clear: "clear"
         case CollectionSemanticOp.Len: "len"
         case CollectionSemanticOp.Iterate: "iterate"
+
+# Methods left unmapped on purpose: maintenance (`Map.rehash`, promotions),
+# unmeasured internal readers (`storage_get`, `storage_has_key`,
+# `storage_values`) and compound bulk edits (`Map.update`/`merge`, Dict
+# `merge`/`extend`/`update`/`fetch`/`dig`). A consumer must treat an unmapped
+# method as unknown and fail closed, never as "no operation".
 
 fn _collection_map_op(method: text) -> CollectionSemanticOp?:
     # AdaptiveMap and AdaptiveTextMap share one public surface.
@@ -131,7 +137,7 @@ fn _collection_generic_map_op(method: text) -> CollectionSemanticOp?:
     if method == "insert_if_absent": return Some(CollectionSemanticOp.InsertIfAbsent)
     if method == "remove": return Some(CollectionSemanticOp.Erase)
     if method == "clear": return Some(CollectionSemanticOp.Clear)
-    if method == "len": return Some(CollectionSemanticOp.Len)
+    if method == "len" or method == "is_empty": return Some(CollectionSemanticOp.Len)
     if method == "keys" or method == "values" or method == "entries" or method == "for_each":
         return Some(CollectionSemanticOp.Iterate)
     None
@@ -147,8 +153,10 @@ fn _collection_dict_op(method: text) -> CollectionSemanticOp?:
     if method == "setdefault": return Some(CollectionSemanticOp.InsertIfAbsent)
     if method == "remove" or method == "delete": return Some(CollectionSemanticOp.Erase)
     if method == "clear": return Some(CollectionSemanticOp.Clear)
-    if method == "len" or method == "length": return Some(CollectionSemanticOp.Len)
-    if method == "keys" or method == "values" or method == "entries" or method == "items":
+    if method == "len" or method == "length" or method == "is_empty":
+        return Some(CollectionSemanticOp.Len)
+    if method == "keys" or method == "values" or method == "entries" or method == "items" or
+            method == "for_each" or method == "each":
         return Some(CollectionSemanticOp.Iterate)
     None
 
@@ -182,7 +190,8 @@ struct CollectionOriginV1:
     owner_path: text
     binding_name: text
     creation_kind: CollectionCreationKind
-    # Hash of the declaration's tokens: whitespace and comments do not count.
+    # Hash of the declaration's tokens, by token name: spacing, line breaks
+    # and comments do not count; indentation structure does.
     token_fingerprint: text
     type_fingerprint: text
     origin_id: text
@@ -197,9 +206,9 @@ fn collection_declaration_token_fingerprint(declaration: text) -> text:
         lexer = scan[0]
         val kind = scan[1]
         if kind == TOK_EOF:
-            return "tok-fnv64:{hash_text(parts.join("\n"))}"
-        if kind != TOK_NEWLINE and kind != TOK_INDENT and kind != TOK_DEDENT:
-            parts.push("{kind}:{core_lexer_token_text(lexer)}")
+            return "tok-v1-fnv64:{hash_text(parts.join("\n"))}"
+        if kind != TOK_NEWLINE:
+            parts.push("{tok_kind_name(kind)}:{core_lexer_token_text(lexer)}")
         steps = steps + 1
     # A stream that never reaches EOF cannot give a stable fingerprint.
     "bytes-fnv64:{hash_text(declaration)}"
@@ -216,13 +225,19 @@ fn collection_origin_v1(legacy_site_id: text, module_key: text, owner_path: text
         declaration: text, type_fingerprint: text) -> Result<CollectionOriginV1, text>:
     """Build an origin for one collection_feedback site.
 
-    The site ID must have the shape collection_feedback produces for these
-    components; a site from another module, owner or binding is rejected.
+    The site ID must be the one collection_feedback produces for these
+    components and this declaration's bytes. A site from another module,
+    owner or binding, or one whose hash is not this declaration's, is rejected.
     """
     val field = creation_kind == CollectionCreationKind.Field
     val stem = parser_collection_site_stem(module_key, owner_path, binding_name, field) + "#"
     if not legacy_site_id.starts_with(stem):
         return Err("collection site {legacy_site_id} does not belong to {stem}")
+    val suffix = legacy_site_id.substring(stem.len())
+    # Drop the parse-order ordinal (`:1`, `:2`, ...) before comparing.
+    val hash_part = suffix.split(":")[0]
+    if hash_part != "{hash_text(declaration)}":
+        return Err("collection site {legacy_site_id} was not hashed from this declaration")
     if binding_name == "" or type_fingerprint == "":
         return Err("collection origin needs a binding name and a type fingerprint")
     val token_fingerprint = collection_declaration_token_fingerprint(declaration)
@@ -261,8 +276,14 @@ fn collection_origin_remap_kind(result: CollectionOriginRemapV1) -> text:
         case CollectionOriginRemapV1.Ambiguous(_, _): "ambiguous"
         case CollectionOriginRemapV1.Lost(_): "lost"
 
-fn collection_origin_remap_v1(old: CollectionOriginV1, current: [CollectionOriginV1]) -> CollectionOriginRemapV1:
-    """Find `old` among the current origins. More than one match is rejected."""
+fn collection_origin_remap_v1(old: CollectionOriginV1, previous: [CollectionOriginV1],
+        current: [CollectionOriginV1]) -> CollectionOriginRemapV1:
+    """Find `old` (one of `previous`) among the current origins.
+
+    More than one match is rejected. A current origin that exactly keeps
+    another previous origin's ID belongs to that origin, so a deleted
+    declaration never takes over a surviving sibling's identity.
+    """
     var exact: [text] = []
     for origin in current:
         if origin.origin_id == old.origin_id:
@@ -273,7 +294,13 @@ fn collection_origin_remap_v1(old: CollectionOriginV1, current: [CollectionOrigi
         return CollectionOriginRemapV1.Ambiguous(old_id: old.origin_id, candidates: exact)
     # The declaration text changed: match on everything except its tokens.
     var candidates: [text] = []
+    var claimed: Dict<text, bool> = {}
+    for prior in previous:
+        if prior.origin_id != old.origin_id:
+            claimed[prior.origin_id] = true
     for origin in current:
+        if claimed.contains_key(origin.origin_id):
+            continue
         if origin.module_key == old.module_key and origin.owner_path == old.owner_path and
                 origin.binding_name == old.binding_name and
                 origin.creation_kind == old.creation_kind and
