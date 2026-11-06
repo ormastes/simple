@@ -17,7 +17,7 @@ use compiler.frontend.core.string_interpolation_expand.{expand_string_interpolat
 use compiler.frontend.core.string_interpolation_expand.{si_stats_reset, si_stats_report}
 use compiler.frontend.desugar.placeholder_lambda.{transform_placeholder_call_args_after_interpolation_known_present}
 use compiler.semantics.layer_dag_checker.{LayerDagRegistry, check_layer_dag}
-use compiler.core.parser_decls.{parse_module_body, parser_enum_attributes_for}
+use compiler.core.parser_decls.{parse_module_body, parser_enum_attributes_for, parser_class_attributes_for}
 use compiler.core.parser_decls.{parser_enum_open_regions_for}
 use compiler.core.parser_decls.{parser_extend_targets, parser_extend_closures, parser_extend_ctor_counts}
 use compiler.core.parser_decls.{parser_extend_ctor_providers, parser_extend_ctor_names}
@@ -549,7 +549,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                         is_public: decl_get_visibility_text(idx) == "public",
                         has_doc_comment: false,
                         doc_comment: "",
-                        attributes: [],
+                        attributes: bridge_node_tree_attributes(parser_class_attributes_for(s_name), s_span),
                         span: s_span
                     )
                 else:
@@ -1962,3 +1962,18 @@ pub fn fab_capture_state_install(s: FabCaptureState):
     _fab_capture_arm_tag = s._fab_capture_arm_tag
 
 export FabCaptureState, fab_capture_state_take, fab_capture_state_install
+
+
+# Only `@node_tree("tree")` is forwarded onto a class (data plan W2b).
+# Other class decorators stay dropped on this path as before, so no existing
+# layout/export behavior changes by surfacing them here.
+fn bridge_node_tree_attributes(spellings: [text], span: Span) -> [Attribute]:
+    var out: [Attribute] = []
+    for spelling in spellings:
+        if spelling.starts_with("node_tree(") and spelling.ends_with(")"):
+            var arg = spelling.substring(10, spelling.len() - 1).trim()
+            if arg.len() >= 2 and arg.starts_with("\"") and arg.ends_with("\""):
+                arg = arg.substring(1, arg.len() - 1)
+            out.push(Attribute(name: "node_tree",
+                args: [Expr(kind: ExprKind.StringLit(arg, None), span: span)], span: span))
+    out

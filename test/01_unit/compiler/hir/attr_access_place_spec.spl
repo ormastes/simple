@@ -1,0 +1,131 @@
+# @cover src/compiler/20.hir/hir_lowering/attr_access_sites.spl 80%
+"""
+## Purpose and audience
+A class declared with `@node_tree("tree")` opts its fields into the logical
+attribute model: every read, write, compound update and constructor
+initializer of such a field is recorded with a stable site identity in a HIR
+side table (`HirModule.attr_sites`) that MIR carries unchanged. Code lowering
+itself does not change, so the same program with and without the attribute
+lowers to the same MIR. Readers are compiler authors building accessors,
+aspects and observations on top of these sites.
+Plan: doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md
+(W2b, sections 3.3, 3.6, 9.1, 9.3). Category: Language.
+## Operator workflow
+bin/simple test test/01_unit/compiler/hir/attr_access_place_spec.spl
+## Compatibility and limitations
+Sites are metadata only: no accessor is generated and no aspect or trace
+emission uses them yet. Classes without `@node_tree` record nothing.
+## Verification guidance and troubleshooting
+A RED on the MIR identity scenario means the opt-in changed code generation,
+which W2b forbids.
+"""
+# Lifecycle: doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md
+# @manual_section: Attribute access sites
+
+use std.spec.*
+use std.env.variables.{env_set}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+val NODE_SOURCE_BODY: text = "class BinaryNode:\n    left: i64\n    op: i64\n" +
+    "class Plain:\n    left: i64\n" +
+    "fn make() -> BinaryNode:\n    BinaryNode(left: 1, op: 2)\n" +
+    "fn read(n: BinaryNode) -> i64:\n    n.left\n" +
+    "fn write(n: BinaryNode):\n    n.left = 5\n" +
+    "fn bump(n: BinaryNode):\n    n.op += 2\n" +
+    "fn plain(p: Plain) -> i64:\n    p.left\n"
+
+fn lower_hir(source: text, name: text) -> HirModule:
+    val filename = "attr_sites_" + name + ".spl"
+    env_set("SIMPLE_BOOTSTRAP", "0")
+    val module = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    hir_lowering.lower_module(module)
+
+fn site_summary(sites: [HirAttrAccessV1]) -> [text]:
+    var out: [text] = []
+    for s in sites:
+        out.push(s.function + ":" + hir_attr_access_kind_name_v1(s.kind) + ":" + s.class_name + "." + s.attr)
+    out
+
+# Function name without the module prefix (the two modules differ in name).
+fn short_name(name: text) -> text:
+    val parts = name.split(".")
+    parts[parts.len() - 1]
+
+# Instruction-level fingerprint of every function, in name order.
+fn mir_fingerprint(mir: MirModule) -> text:
+    var names: [text] = []
+    for fn_ in mir.functions.values():
+        names.push(short_name(fn_.name))
+    var sorted: [text] = []
+    for n in names:
+        var i = sorted.len()
+        sorted.push(n)
+        while i > 0 and sorted[i] < sorted[i - 1]:
+            val t = sorted[i - 1]
+            sorted[i - 1] = sorted[i]
+            sorted[i] = t
+            i = i - 1
+    var out = ""
+    for n in sorted:
+        for fn_ in mir.functions.values():
+            if short_name(fn_.name) == n:
+                out = out + "fn " + n + "\n"
+                for block in fn_.blocks:
+                    out = out + " block\n"
+                    for inst in block.instructions:
+                        out = out + "  {inst.kind}\n"
+    out
+
+describe "Attribute access sites":
+    it "records reads, writes, compound updates and initializers of a node_tree class":
+        # @req REQ-ATTR-16
+        step("Lower a module whose BinaryNode class is declared @node_tree")
+        val hir = lower_hir("@node_tree(\"compiler.ast\")\n" + NODE_SOURCE_BODY, "opted")
+        val summary = site_summary(hir.attr_sites)
+        # @capture(exec): recorded attribute sites
+        step("Verify one site per logical access, with the tree, class and attribute")
+        expect(summary).to_contain("make:init:BinaryNode.left")
+        expect(summary).to_contain("make:init:BinaryNode.op")
+        expect(summary).to_contain("read:read:BinaryNode.left")
+        expect(summary).to_contain("write:write:BinaryNode.left")
+        expect(summary).to_contain("bump:read_modify_write:BinaryNode.op")
+        expect(summary.len()).to_equal(5)  # oracle: two initializers, one read, one write, one compound update
+        for s in hir.attr_sites:
+            expect(s.tree).to_equal("compiler.ast")
+            expect(s.site_id.len() > 0).to_equal(true)
+        var ids: [text] = []
+        for s in hir.attr_sites:
+            for seen in ids:
+                expect(seen == s.site_id).to_equal(false)
+            ids.push(s.site_id)
+
+    it "records nothing for a class without the opt-in":
+        # @req REQ-ATTR-15
+        step("Lower the same module without @node_tree")
+        val hir = lower_hir(NODE_SOURCE_BODY, "plain")
+        # @capture(exec): recorded attribute sites
+        step("Verify the side table stays empty")
+        expect(hir.attr_sites.len()).to_equal(0)  # oracle: no class opted in
+
+    it "carries the sites into MIR and lowers the same MIR with and without the opt-in":
+        # @req REQ-ATTR-15
+        step("Lower both modules to MIR")
+        val opted_hir = lower_hir("@node_tree(\"compiler.ast\")\n" + NODE_SOURCE_BODY, "opted_mir")
+        var opted_lowering = MirLowering.new(opted_hir.symbols)
+        val opted_mir = opted_lowering.lower_module(opted_hir)
+        val plain_hir = lower_hir(NODE_SOURCE_BODY, "plain_mir")
+        var plain_lowering = MirLowering.new(plain_hir.symbols)
+        val plain_mir = plain_lowering.lower_module(plain_hir)
+        # @capture(exec): MIR fingerprints and carried sites
+        step("Verify identical instructions and the same site table on the MIR module")
+        expect(mir_fingerprint(opted_mir)).to_equal(mir_fingerprint(plain_mir))
+        expect(mir_fingerprint(opted_mir).len() > 0).to_equal(true)
+        expect(opted_mir.attr_sites.len()).to_equal(opted_hir.attr_sites.len())
+        expect(plain_mir.attr_sites.len()).to_equal(0)  # oracle: nothing opted in

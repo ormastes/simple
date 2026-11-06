@@ -118,3 +118,10 @@ Pure-Simple `val_compound_op` maps both encodings (60..64 from the expression pa
 Seed traps:
 - A module-level `var` reassigned inside an `it` block is not seen by functions. Use a class instance for shared spec state.
 - `int.to_text()` does not exist in `core_interpret`.
+
+W2b access sites (2026-11-06).
+- **Recording:** a class marked `@node_tree("tree")` gets one `HirAttrAccessV1{site_id, kind: Read|Write|Init|ReadModifyWrite, tree, class_name, attr, function, span}` per logical field access. They go into `HirModule.attr_sites`, a defaulted last field, and `MirModule.attr_sites` copies them in `MirLowering.lower_module`. The collector is a post-pass over lowered HIR (`hir_lowering/attr_access_sites.spl`, via the generated `HirVisitor`), so lowering and MIR stay byte-identical with or without the opt-in. `attr_access_place_spec` pins that.
+- **Classifying an access:** an assignment target is a Write, or one ReadModifyWrite for `op=`, never also a Read. Constructor named arguments and struct literals are Init.
+- **Receiver class lookup:** the receiver's class comes from its HIR type or, when unset (the usual case at this stage), from the variable's declared symbol type.
+- **How the decorator travels:** the flat bridge used to drop every class decorator (`ParserClass.attributes: []`). Class decorators are now recorded in the `ENUM_ATTRIBUTES` pool under `class:<name>|...`, so the parse-cache blob format is unchanged, and only `node_tree(...)` is forwarded onto the class. `@repr`/`@layout` on classes stay dropped on this path, exactly as before.
+- **Caches:** the HIR codec was regenerated (`check-hir-codec-complete.shs` PASS). A MIR cache hit rebuilds `MirModule` without `attr_sites`; nothing reads them yet.
