@@ -197,6 +197,65 @@ Record explicitly states this is architectural and confirmed out of scope for a 
 
 **Revalidated 2026-11-02: still plausible because OPEN — ARCHITECTURAL, confirmed genuinely out of scope for a unilateral fix; no merged fix commit with a passing regression is cited in this doc.**
 
+## 2026-11-06 — writers converged on the 96-byte layout (fix-implemented, verification pending)
+
+Owner decision 2026-11-06: review whether shrinking the writers to the seed's 96-byte layout
+preserves extensibility and causes no problem; if so, implement. Verdict **SHRINK-OK**; implemented
+on `release/1.0.0` (this PR). Review basis, all re-read from source at `a39c685717b`:
+
+- **Dropped bytes:** `reserved[40]` @88..128 — 16 of them the compile-options slot, 24 never used.
+  No production writer ever populated the slot (`set_compile_options_bytes` had zero non-test
+  callers), so every on-disk artifact carried zeros and the three consumers already behaved as
+  "absent"; the options identity that actually invalidates caches is folded into the live object
+  cache key (`live_object_key.sdn` pos 16+). Nothing live is lost.
+- **Extensibility:** the header is never extended by policy (`smf_v1_2.sdn`, plan rule "allocate no
+  new fixed-header byte"). The 96-byte layout keeps version fields, 25 free flag bits and 7 free
+  reserved bytes; anything larger goes to the `.simple_meta` TLV section, now implemented
+  (`src/compiler/70.backend/linker/smf_meta.spl`). Padding bytes (20..24, 81, 93..96) carry no
+  meaning — the seed writes them by struct memcpy.
+- **Relocation:** compile-options hash = `.simple_meta` record kind 2 `compile_options_v1`
+  (16 bytes, the existing `compile_options_hash_to_bytes` encoding), emitted by both driver builder
+  paths from `SmfBuildOptions.compile_options_bytes`; consumed by `cache_validator`
+  (`SmfValidationSnapshot.compile_options_bytes`), `99.loader/smf_cache.validate_smf_options`
+  (mmap, section read) and `object_provider.prefer_backend`. Legacy packed bytes 88..104 remain a
+  read-only fallback for one release.
+- **Version bump:** writers stamp `version_minor = 3` (`SMF_VERSION_MINOR`); `>= 1.3` is an
+  unconditional layout discriminator in `smf_header_seed_shaped_at`, and the new shared locator
+  `smf_header_trailer_offset` applies one precedence (v1.3 @EOF-96, packed @EOF-128, Rust 1.1
+  @EOF-96) in every reader: `header_parser`, cache snapshot, `99.loader/smf_cache` (which #6928 had
+  missed and which decoded fields at offsets matching NEITHER layout), `launch_metadata`,
+  `aspect_pack_directory`, `smf_dynlib`. Five readers gated on exact minor values (`launch_metadata`,
+  `aspect_pack_directory`, `smf_dynlib` on `== 1`; `header_parser.read_relocations` and
+  `smf_group_batch_load` on `1|2`, the latter also hard-coding EOF-128); all now accept
+  `1..=SMF_VERSION_MINOR`. The minor doubles as the relocation-entry format (1 = reserved zero,
+  2 = `0xA2` source marker); v1.3 is a superset in which each reloc entry is self-describing by its
+  marker byte, so the `version_minor = 2` stamp is no longer needed.
+- **Writers:** `70.backend/linker/smf_writer.spl` (incl. the hand-rolled aspect-pack header, now
+  `SmfHeader.to_bytes()`), `80.driver/smf_writer.spl` (3 paths). The Rust seed is untouched and
+  reads v1.3 files byte-for-byte (it never gates on the minor version).
+- **Cache impact:** one-time supersession of packed-era artifacts; readers still accept them, so
+  nothing is misread. Native caches are already keyed by compiler fingerprint.
+- **Out of scope, recorded:** `src/os/kernel/loader/smf.spl` is a SimpleOS *envelope* reusing the
+  magic (role/arch/abi at 60..62 where the compiler header stores `module_hash`), produced by
+  `src/os/installer` / `src/os/port`; it gates on exactly 1.1 @EOF-128 and does not read
+  compiler-written SMFs. LSMF (`lib_smf*.spl`) and SWA are separate formats.
+- **Removal TODO (one release):** `SMF_PACKED_HEADER_SIZE`, `SmfHeader.to_packed_bytes`, the
+  heuristic branch of `smf_header_seed_shaped_at`, the packed fallbacks in
+  `smf_meta_compile_options_bytes` / `mapped_smf_compile_options_bytes`, and the packed fixtures in
+  the specs below.
+
+**Regression pin (TDD, red before the change — the spec could not even resolve `smf_meta`):**
+`src/compiler/70.backend/linker/test/smf_header_v1_3_default_layout_spec.spl` — 11 examples:
+size/version constants, repr(C) offsets, field round trip, v1.3 trailer location with zero
+sections, precedence over a coincidental packed magic, legacy packed read, both writers' output,
+and `.simple_meta` carriage/absence. Updated: `smf_layout_parity_spec.spl` (now pins identity),
+`smf_header_seed_layout_spec.spl`, `smf_header_writer_reader_roundtrip_spec.spl`,
+`smf_cache_validator_seed_layout_spec.spl`, `smf_integration_spec.spl`, and the three
+`test/01_unit` fixtures that spliced the hash into header bytes (`object_provider_spec`,
+`fixed_backend_success_spec`, `native_target_validation_spec`) now emit the section through
+`SmfBuildOptions`. Verification pending: a full `bin/simple test` run and a Rust-seed read of a
+Simple-written v1.3 artifact on a deployed binary.
+
 ---
 
 ## 2026-11-05 — premise re-checked; read-side compatibility landed (partial)

@@ -159,3 +159,21 @@ The four cluster specs pass: `test/01_unit/lib/gc_{async,sync}_immut/`
 Neither spec harness nor evaluator is at fault on this seed; the 2026-09-21
 Windows seed result is not carried over. Record stays open only for the
 native/pure-Simple callback-value regression named above.
+## 2026-11-06 — seed JIT root cause fixed (fix-implemented-verification-pending)
+
+Interpreter was already correct; the residual red was the seed **JIT**:
+`apply(_1 + 1, 4)` with `fn apply(f: fn(i64) -> i64, x)` printed 40 and
+`call_once(_1 + 1)` printed 88 (= tagged 11). Two causes:
+
+1. HIR `lower_call` never gave a lambda argument its callee's declared
+   callback param types, so placeholder params (`__p0`) defaulted to ANY while
+   the typed callee passed raw i64 (`hir/lower/expr/calls.rs`).
+2. `JitCompiler::first_unsupported_lambda` skipped every function that builds
+   no closure itself, so the untyped `IndirectCall` in `call_once` was never
+   refused (`codegen/jit.rs`); now every function is checked once the module
+   has a closure, and such modules defer to the interpreter.
+
+Regression: `src/compiler_rust/compiler/tests/placeholder_lambda_fn_param_jit.rs`
+(red pre-fix on both tests, green post-fix) and
+`test/01_unit/language/placeholder_lambda_fn_param_value_spec.spl` (7/7).
+Pending: seed redeploy + pure-Simple native requalification.
