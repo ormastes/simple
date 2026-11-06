@@ -1,5 +1,5 @@
 use compiler.hir.hir_lowering.concat_copy_v1.{hir_stmt_concat_copy_v1}
-use compiler.hir.hir_lowering.binding_types.{hir_binding_direct_call_return_kind, hir_binding_method_call_return_kind, hir_binding_transparent_kind, hir_binding_try_payload}
+use compiler.hir.hir_lowering.binding_types.{hir_binding_direct_call_return_kind, hir_binding_method_call_return_kind, hir_binding_transparent_kind, hir_binding_try_payload, hir_const_type_settled}
 # HIR Lowering - Statement Lowering
 #
 # This module handles lowering of statements from AST to HIR.
@@ -59,7 +59,15 @@ impl HirLowering:
         if source_has_type:
             resolved = source.type_ ?? HirType(kind: HirTypeKind.Error, span: source.span)
         else:
-            resolved = self.binding_kind_type(source.kind, source.span)
+            # `if val x = e` desugars to `val x = e.?` with bind_optional_payload:
+            # the binder's type comes from `e` (then projected below). This is
+            # how `if val c = self.inner as Close` reaches the Cast arm.
+            var binding_kind = source.kind
+            if bind_optional_payload:
+                match source.kind:
+                    case HirExprKind.ExistsCheck(present_base): binding_kind = present_base.kind
+                    case _: ()
+            resolved = self.binding_kind_type(binding_kind, source.span)
         # Attribute and symbol lookup must share the same optional projection.
         # Unwrap exactly once so nested optionals retain their inner optional.
         if bind_optional_payload:
@@ -79,6 +87,13 @@ impl HirLowering:
         match source_kind:
             case HirExprKind.Try(operand):
                 return hir_binding_try_payload(self.binding_kind_type(operand.kind, span)) ?? unknown
+            # `e as T` is typed `T` (a trait-to-trait downcast yields `T?` only
+            # under the `if val x = e as T` consumer, whose payload is `T`).
+            # Untyped, `if val c = self.inner as Close` bound a unit slot
+            # (E-BACKEND-LLVM-CONST-TYPE, nogc_sync_mut.io.buffer close/is_open).
+            case HirExprKind.Cast(_, target):
+                if hir_const_type_settled(target): return target
+                return unknown
             case _: ()
         val symbol = _hir_expr_symbol_or_invalid(source_kind)
         if symbol.is_valid():
