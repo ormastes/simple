@@ -179,7 +179,7 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
         // and `interpreter_helpers::collections` -- module-scope and
         // function-body for-loops must agree on dict iteration order.
         Value::FrozenDict(map) => {
-            let entries: Vec<Value> = crate::value::dict_entries_sorted(map)
+            let entries: Vec<Value> = crate::value::dict_entries_ordered(map)
                 .into_iter()
                 .map(|(k, v)| {
                     Value::Tuple(vec![
@@ -195,7 +195,7 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
             // value iterates its whole visible surface.
             let flat = crate::interpreter::module_dict_flat(map);
             let map = flat.as_ref().unwrap_or(map);
-            let entries: Vec<Value> = crate::value::dict_entries_sorted(map)
+            let entries: Vec<Value> = crate::value::dict_entries_ordered(map)
                 .into_iter()
                 .map(|(k, v)| {
                     Value::Tuple(vec![

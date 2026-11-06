@@ -9,7 +9,7 @@ use std::time::Instant;
 
 /// Helper: Create a dict Value with build result fields
 fn create_build_result(success: bool, exit_code: i64, stdout: String, stderr: String, duration_ms: i64) -> Value {
-    let mut fields = std::collections::HashMap::new();
+    let mut fields = crate::value::DictMap::new();
     fields.insert("success".to_string(), Value::Bool(success));
     fields.insert("exit_code".to_string(), Value::Int(exit_code));
     fields.insert("stdout".to_string(), Value::text(stdout));
@@ -28,7 +28,7 @@ fn create_test_result(
     tests_passed: i64,
     tests_failed: i64,
 ) -> Value {
-    let mut fields = std::collections::HashMap::new();
+    let mut fields = crate::value::DictMap::new();
     fields.insert("success".to_string(), Value::Bool(success));
     fields.insert("exit_code".to_string(), Value::Int(exit_code));
     fields.insert("stdout".to_string(), Value::text(stdout));

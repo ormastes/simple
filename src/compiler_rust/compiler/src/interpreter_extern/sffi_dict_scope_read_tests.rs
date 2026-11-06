@@ -70,6 +70,13 @@ fn scope_read_raw_handle_dispatch_preserves_order_utf8_and_wide_ids() {
         panic!("raw dict keys must remain raw");
     };
     let keys = RuntimeValue::from_raw(keys as u64);
+    // The slot view walks hash slots; `rt_dict_keys` is INSERTION order
+    // (doc/07_guide/language/dict_iteration_order.md). Each occupied slot must
+    // expose exactly one of the keys, matched by bytes.
+    let key_bytes: Vec<Vec<u8>> = (0..rt_array_len(keys))
+        .map(|i| unsafe { (*(rt_array_get(keys, i).as_heap_ptr() as *const RuntimeString)).as_bytes() }.to_vec())
+        .collect();
+    let mut seen = std::collections::HashSet::new();
     let mut ordinal = 0;
     let mut saw_wide_utf8 = false;
     for slot in 0..capacity {
@@ -78,16 +85,13 @@ fn scope_read_raw_handle_dispatch_preserves_order_utf8_and_wide_ids() {
         if occupancy == 0 {
             continue;
         }
-        let key = rt_array_get(keys, ordinal);
-        let text = unsafe { &*(key.as_heap_ptr() as *const RuntimeString) };
-        assert_eq!(scalar(SLOT, &[handle, owner, epoch, slot, 2, 0, fuel]), text.len as i64);
-        for (byte, expected) in unsafe { text.as_bytes() }.iter().enumerate() {
-            assert_eq!(
-                scalar(SLOT, &[handle, owner, epoch, slot, 3, byte as i64, fuel]),
-                *expected as i64
-            );
-        }
-        if unsafe { text.as_bytes() } == "café猫".as_bytes() {
+        let length = scalar(SLOT, &[handle, owner, epoch, slot, 2, 0, fuel]);
+        let projected: Vec<u8> = (0..length)
+            .map(|byte| scalar(SLOT, &[handle, owner, epoch, slot, 3, byte, fuel]) as u8)
+            .collect();
+        assert!(key_bytes.contains(&projected), "slot {slot} key must be one of rt_dict_keys");
+        assert!(seen.insert(projected.clone()), "slot {slot} key projected twice");
+        if projected == "café猫".as_bytes() {
             assert_eq!(scalar(SLOT, &[handle, owner, epoch, slot, 1, 0, fuel]), i64::MAX);
             saw_wide_utf8 = true;
         }
@@ -140,7 +144,7 @@ fn scope_read_dispatch_refuses_stale_invalid_and_nonint_values() {
 #[test]
 fn scope_read_dispatch_rich_dicts_refuse_without_heap_materialization_and_arity_errors() {
     let fuel = scalar(BOUND, &[]); // Initialize actual registered dispatch before measuring.
-    let map = Arc::new(HashMap::from([("binding".to_string(), Value::Int(42))]));
+    let map = Arc::new(crate::value::DictMap::from([("binding".to_string(), Value::Int(42))]));
     for rich in [Value::Dict(map.clone()), Value::FrozenDict(map.clone())] {
         for (name, arity) in [(OWNER, 2), (EPOCH, 3), (META, 5), (SLOT, 7)] {
             let mut args = vec![Value::Int(1); arity];

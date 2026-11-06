@@ -1,7 +1,7 @@
 //! Pattern matching and binding
 
 use crate::error::{codes, CompileError, ErrorContext};
-use crate::value::{Env, Value};
+use crate::value::{DictMap, Env, Value};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Pattern};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -404,7 +404,7 @@ fn eval_dict_mutator_args(
     classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
-) -> Result<(Option<Value>, Option<Value>, Option<Arc<HashMap<String, Value>>>), CompileError> {
+) -> Result<(Option<Value>, Option<Value>, Option<Arc<DictMap>>), CompileError> {
     let out = match method {
         "set" | "insert" => (
             Some(eval_arg(
@@ -447,7 +447,7 @@ fn eval_dict_mutator_args(
             let arg0 = eval_arg(
                 args,
                 0,
-                Value::Dict(Arc::new(HashMap::new())),
+                Value::Dict(Arc::new(crate::value::DictMap::new())),
                 env,
                 functions,
                 classes,
@@ -475,10 +475,10 @@ fn eval_dict_mutator_args(
 /// including `wrap_dict_entry` on the stored value.
 fn apply_dict_mutation_in_place(
     method: &str,
-    map: &mut HashMap<String, Value>,
+    map: &mut DictMap,
     key_val: Option<Value>,
     value: Option<Value>,
-    other: Option<Arc<HashMap<String, Value>>>,
+    other: Option<Arc<DictMap>>,
 ) {
     match method {
         "set" | "insert" => {
@@ -487,7 +487,7 @@ fn apply_dict_mutation_in_place(
             map.insert(key_val.to_key_string(), stored);
         }
         "remove" | "delete" => {
-            map.remove(&key_val.expect("remove/delete evaluated its key above").to_key_string());
+            map.shift_remove(&key_val.expect("remove/delete evaluated its key above").to_key_string());
         }
         "merge" | "extend" => {
             if let Some(other) = other {
@@ -2240,7 +2240,7 @@ fn handle_method_call_with_self_update_inner(
                             Some(eval_arg(
                                 args,
                                 0,
-                                Value::Dict(Arc::new(HashMap::new())),
+                                Value::Dict(Arc::new(crate::value::DictMap::new())),
                                 env,
                                 functions,
                                 classes,
@@ -2846,7 +2846,7 @@ mod cow_alias_mechanism_tests {
         // test/05_perf/interp/dict_mutator_scaling_spec.spl.
         const N: usize = 500;
         let mut env = Env::new();
-        env.insert("d".to_string(), Value::Dict(Arc::new(HashMap::new())));
+        env.insert("d".to_string(), Value::Dict(Arc::new(crate::value::DictMap::new())));
         let mut seen: HashSet<usize> = HashSet::new();
         for i in 0..N {
             let call = insert_call(ident("d"), &format!("k{i}"));
@@ -2872,7 +2872,7 @@ mod cow_alias_mechanism_tests {
         // Value semantics must survive the optimization, exactly as for arrays: a
         // second LIVE binding to the same Arc must not observe the mutation.
         let mut env = Env::new();
-        let mut seed: HashMap<String, Value> = HashMap::new();
+        let mut seed = crate::value::DictMap::new();
         seed.insert("a".to_string(), Value::Int(0));
         env.insert("d".to_string(), Value::Dict(Arc::new(seed)));
         let aliased = env.get("d").expect("d").clone();
@@ -2900,7 +2900,7 @@ mod cow_alias_mechanism_tests {
         // `apply_dict_mutation_in_place`, the same kernel `handle_dict_methods` uses,
         // so pin that the RESULT is unchanged.
         let mut env = Env::new();
-        let mut seed: HashMap<String, Value> = HashMap::new();
+        let mut seed = crate::value::DictMap::new();
         seed.insert("a".to_string(), Value::Int(1));
         seed.insert("b".to_string(), Value::Int(2));
         env.insert("d".to_string(), Value::Dict(Arc::new(seed)));
@@ -3159,7 +3159,7 @@ mod cow_alias_mechanism_tests {
         const N: usize = 2_000;
         let mut env = Env::new();
         let mut fields: HashMap<String, Value> = HashMap::new();
-        fields.insert("d".to_string(), Value::Dict(Arc::new(HashMap::new())));
+        fields.insert("d".to_string(), Value::Dict(Arc::new(crate::value::DictMap::new())));
         env.insert(
             "r".to_string(),
             Value::Object {
@@ -3350,7 +3350,7 @@ mod cow_alias_mechanism_tests {
     #[test]
     fn genuinely_aliased_field_dict_still_copies_on_write() {
         let mut env = Env::new();
-        let mut entries: HashMap<String, Value> = HashMap::new();
+        let mut entries = crate::value::DictMap::new();
         entries.insert("seed".to_string(), Value::Int(0));
         let mut fields: HashMap<String, Value> = HashMap::new();
         fields.insert("d".to_string(), Value::Dict(Arc::new(entries)));

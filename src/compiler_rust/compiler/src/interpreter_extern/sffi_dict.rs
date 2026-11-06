@@ -174,7 +174,7 @@ pub fn rt_dict_keys_fn(args: &[Value]) -> Result<Value, CompileError> {
     })?;
     if let Value::Dict(map) | Value::FrozenDict(map) = dict_value {
         return Ok(Value::array(
-            crate::value::dict_entries_sorted(map)
+            crate::value::dict_entries_ordered(map)
                 .into_iter()
                 .map(|(key, stored)| Value::dict_entry_key_for_iteration(stored, key))
                 .collect::<Vec<Value>>()));
@@ -194,10 +194,8 @@ pub fn rt_dict_values_fn(args: &[Value]) -> Result<Value, CompileError> {
         )
     })?;
     if let Value::Dict(map) | Value::FrozenDict(map) = dict_value {
-        let mut entries: Vec<_> = map.iter().collect();
-        entries.sort_by(|(left, _), (right, _)| left.cmp(right));
         return Ok(Value::array(
-            entries.into_iter().map(|(_, value)| Value::dict_entry_value_for_iteration(value)).collect::<Vec<Value>>(),
+            crate::value::dict_entries_ordered(map).into_iter().map(|(_, value)| Value::dict_entry_value_for_iteration(value)).collect::<Vec<Value>>(),
         ));
     }
 
@@ -293,7 +291,7 @@ mod tests {
     use std::sync::Arc;
 
     fn interpreter_dict() -> Value {
-        Value::Dict(Arc::new(HashMap::from([
+        Value::Dict(Arc::new(crate::value::DictMap::from([
             ("beta".to_string(), Value::Int(2)),
             ("alpha".to_string(), Value::Int(1)),
         ])))
@@ -314,11 +312,11 @@ mod tests {
         );
         assert_eq!(
             rt_dict_keys_fn(std::slice::from_ref(&dict)).unwrap(),
-            Value::array(vec![Value::text("alpha"), Value::text("beta")])
+            Value::array(vec![Value::text("beta"), Value::text("alpha")])
         );
         assert_eq!(
             rt_dict_values_fn(std::slice::from_ref(&dict)).unwrap(),
-            Value::array(vec![Value::Int(1), Value::Int(2)])
+            Value::array(vec![Value::Int(2), Value::Int(1)])
         );
     }
 }

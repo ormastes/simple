@@ -13,7 +13,7 @@ use simple_parser::ast::{ClassDef, EnumDef, ExportUseStmt, ImportTarget, UseStmt
 
 use crate::error::CompileError;
 use crate::interpreter::module_cache::module_exports_owner;
-use crate::value::Value;
+use crate::value::{DictMap, Value};
 
 use super::module_loader::load_and_merge_module;
 
@@ -27,14 +27,14 @@ pub fn load_export_source(
     functions: &mut HashMap<String, Arc<simple_parser::ast::FunctionDef>>,
     classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &mut Enums,
-) -> Result<(Arc<HashMap<String, Value>>, Option<Arc<str>>), CompileError> {
+) -> Result<(Arc<DictMap>, Option<Arc<str>>), CompileError> {
     trace!(path = ?export_stmt.path.segments, target = ?export_stmt.target, "Loading export source");
 
     // Skip if path is empty - this happens with bare exports like `export X`
     // which mark local symbols for export, not re-exports from other modules
     if export_stmt.path.segments.is_empty() {
         trace!("Skipping export with empty path (bare export)");
-        return Ok((Arc::new(HashMap::new()), None));
+        return Ok((Arc::new(DictMap::new()), None));
     }
 
     // Build a UseStmt to load the source module. This always loads the full
@@ -72,10 +72,10 @@ pub fn load_export_source(
             let Value::Dict(dict) = value else { unreachable!() };
             Ok((dict, owner))
         }
-        Ok(_) => Ok((Arc::new(HashMap::new()), None)),
+        Ok(_) => Ok((Arc::new(DictMap::new()), None)),
         Err(e) => {
             warn!(error = %e, "Failed to load export source");
-            Ok((Arc::new(HashMap::new()), None))
+            Ok((Arc::new(DictMap::new()), None))
         }
     }
 }

@@ -1092,7 +1092,7 @@ pub(crate) fn evaluate_call(
                 && matches!(module_name.as_str(), "Map" | "Dict" | "HashMap" | "BTreeMap")
                 && !classes.contains_key(module_name.as_str())
             {
-                return Ok(Value::Dict(std::sync::Arc::new(std::collections::HashMap::new())));
+                return Ok(Value::Dict(std::sync::Arc::new(crate::value::DictMap::new())));
             }
             // Check for static method call on a type: Type.method()
             // This handles calls like Set.new() or Set.from_array()
@@ -1612,10 +1612,10 @@ pub(crate) fn evaluate_call(
                     // site above): an imported `struct Map` must construct via
                     // its own statics, not be shadowed into a builtin dict.
                     "HashMap" | "BTreeMap" => {
-                        return Ok(Value::Dict(std::sync::Arc::new(std::collections::HashMap::new())))
+                        return Ok(Value::Dict(std::sync::Arc::new(crate::value::DictMap::new())))
                     }
                     "Map" | "Dict" if !classes.contains_key(type_name.as_str()) => {
-                        return Ok(Value::Dict(std::sync::Arc::new(std::collections::HashMap::new())))
+                        return Ok(Value::Dict(std::sync::Arc::new(crate::value::DictMap::new())))
                     }
                     "HashSet" | "BTreeSet" => return Ok(Value::array(Vec::new())),
                     "Device" => {
@@ -1639,7 +1639,7 @@ pub(crate) fn evaluate_call(
                             );
                         }
                         // Fallback for unknown types: return typed dict
-                        let mut fields = std::collections::HashMap::new();
+                        let mut fields = crate::value::DictMap::new();
                         fields.insert("__type__".to_string(), Value::text(type_name.to_string()));
                         for arg in args {
                             let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;

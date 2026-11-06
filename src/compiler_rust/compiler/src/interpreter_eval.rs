@@ -1793,7 +1793,7 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                 // Handle inline modules with a body
                 if let Some(body_items) = &mod_decl.body {
                     // Create a module dict to hold the module's exports
-                    let mut module_dict: HashMap<String, Value> = HashMap::new();
+                    let mut module_dict = crate::value::DictMap::new();
 
                     // Process items in the inline module body
                     for item in body_items {
