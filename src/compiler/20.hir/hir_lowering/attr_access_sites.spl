@@ -1,0 +1,187 @@
+# Attribute access-site collection (data plan W2b, doc/03_plan/compiler/data/
+# data_attributes_layout_containers_xray_2026-11-06.md sections 3.3, 3.6, 9.1).
+#
+# A post-pass over lowered HIR. A class opts in with `@node_tree("tree")`;
+# every logical access to one of its fields becomes one HirAttrAccessV1 row:
+#   - `n.f` read                  -> Read
+#   - `n.f = v`                   -> Write (the target is not also a Read)
+#   - `n.f op= v`                 -> ReadModifyWrite (one row, not two)
+#   - `T(f: v)` / struct literal  -> Init per named field
+# It only reads HIR, so lowering and MIR are unchanged by the opt-in.
+
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.generated.hir_visit.{hir_visit_block}
+use compiler.frontend.parser_types.*
+use compiler.common.attributes.{extract_string_arg}
+use compiler.common.diagnostics.span.{Span}
+
+# `@node_tree("tree")` on a parsed class; "" when absent or malformed.
+fn hir_node_tree_attr_v1(attributes: [Attribute]) -> text:
+    for attr in attributes:
+        if attr.name == "node_tree" and attr.args.len() == 1:
+            return extract_string_arg(attr.args[0])
+    ""
+
+class HirAttrSiteCollectorV1:
+    module_name: text
+    symbols: SymbolTable
+    function: text
+    function_key: text
+    tree_of_class: Dict<text, text>
+    class_of_symbol: Dict<i64, text>
+    fields_of_class: Dict<text, [text]>
+    skip_targets: [text]
+    sites: [HirAttrAccessV1]
+    ordinal: i64
+
+    fn span_key(span: Span) -> text:
+        "{span.start}:{span.end}:{span.line}:{span.col}"
+
+    fn class_of_type(ty: HirType) -> text:
+        match ty.kind:
+            case HirTypeKind.Named(symbol, _):
+                if self.class_of_symbol.contains_key(symbol.id): self.class_of_symbol[symbol.id] else: ""
+            case HirTypeKind.Optional(inner): self.class_of_type(inner)
+            case HirTypeKind.Ref(inner, _): self.class_of_type(inner)
+            case _: ""
+
+    # The receiver's class: its HIR type when lowering recorded one, else the
+    # declared type of the variable it names.
+    fn class_of(e: HirExpr) -> text:
+        if e.has_type_:
+            val typed = self.class_of_type(e.type_)
+            if typed.len() > 0:
+                return typed
+        val symbol_id = match e.kind:
+            case HirExprKind.Var(symbol): symbol.id
+            case HirExprKind.NamedVar(symbol, _): symbol.id
+            case _: -1
+        if symbol_id < 0:
+            return ""
+        match self.symbols.get_symbol_type_raw(symbol_id):
+            case Some(ty): self.class_of_type(ty)
+            case None: ""
+
+    fn opted_in(class_name: text) -> bool:
+        class_name.len() > 0 and self.tree_of_class.contains_key(class_name)
+
+    me add(kind: HirAttrAccessKindV1, class_name: text, attr: text, span: Span):
+        self.ordinal = self.ordinal + 1
+        self.sites.push(HirAttrAccessV1(
+            site_id: "{self.module_name}:{self.function_key}#{self.ordinal}",
+            kind: kind, tree: self.tree_of_class[class_name], class_name: class_name,
+            attr: attr, function: self.function, span: span))
+
+    me take_skip(span: Span) -> bool:
+        val key = self.span_key(span)
+        for i in 0..self.skip_targets.len():
+            if self.skip_targets[i] == key:
+                var kept: [text] = []
+                for j in 0..self.skip_targets.len():
+                    if j != i:
+                        kept.push(self.skip_targets[j])
+                self.skip_targets = kept
+                return true
+        false
+
+    me on_expr(node: HirExpr):
+        match node.kind:
+            case HirExprKind.Field(base, field, _):
+                if self.take_skip(node.span):
+                    return
+                val class_name = self.class_of(base)
+                if self.opted_in(class_name):
+                    self.add(HirAttrAccessKindV1.Read, class_name, field, node.span)
+            case HirExprKind.OptionalChain(base, field):
+                val chained = self.class_of(base)
+                if self.opted_in(chained):
+                    self.add(HirAttrAccessKindV1.Read, chained, field, node.span)
+            case HirExprKind.StructLit(type_, fields):
+                val class_name = self.class_of_type(type_)
+                if self.opted_in(class_name):
+                    for entry in fields:
+                        self.add(HirAttrAccessKindV1.Init, class_name, entry.0, node.span)
+            case HirExprKind.Call(callee, args, _):
+                val callee_id = match callee.kind:
+                    case HirExprKind.Var(symbol): symbol.id
+                    case HirExprKind.NamedVar(symbol, _): symbol.id
+                    case _: -1
+                if callee_id >= 0 and self.class_of_symbol.contains_key(callee_id):
+                    val class_name = self.class_of_symbol[callee_id]
+                    if self.opted_in(class_name):
+                        # Named arguments name the field; positional ones
+                        # initialize fields in declaration order.
+                        val order = self.fields_of_class[class_name]
+                        var position = 0
+                        for arg in args:
+                            if arg.has_name:
+                                self.add(HirAttrAccessKindV1.Init, class_name, arg.name, node.span)
+                            elif position < order.len():
+                                self.add(HirAttrAccessKindV1.Init, class_name, order[position], node.span)
+                            position = position + 1
+            case _: ()
+
+    me on_stmt(node: HirStmt):
+        match node.kind:
+            case HirStmtKind.Assign(target, op, _):
+                match target.kind:
+                    case HirExprKind.Field(base, field, _):
+                        val class_name = self.class_of(base)
+                        if self.opted_in(class_name):
+                            val kind = if op.?: HirAttrAccessKindV1.ReadModifyWrite else: HirAttrAccessKindV1.Write
+                            self.add(kind, class_name, field, target.span)
+                            self.skip_targets.push(self.span_key(target.span))
+                    case _: ()
+            case _: ()
+
+    me on_type(node: HirType):
+        ()
+
+    me on_pattern(node: HirPattern):
+        ()
+
+# Sites for every function of one module. Functions are visited in
+# (name, symbol id) order, so the table and its ordinals never depend on
+# dictionary iteration order; the symbol id in each site id separates
+# same-named methods of different classes. Module-level initializers are not
+# visited (no node_tree access there yet).
+fn hir_collect_attr_sites_v1(module_name: text, symbols: SymbolTable, parser_classes: Dict<text, ParserClass>,
+                             classes: Dict<SymbolId, HirClass>,
+                             functions: Dict<SymbolId, HirFunction>) -> [HirAttrAccessV1]:
+    var tree_of_class: Dict<text, text> = {}
+    for name in parser_classes.keys():
+        val tree = hir_node_tree_attr_v1(parser_classes[name].attributes)
+        if tree.len() > 0:
+            tree_of_class[name] = tree
+    if tree_of_class.len() == 0:
+        return []
+    var class_of_symbol: Dict<i64, text> = {}
+    var fields_of_class: Dict<text, [text]> = {}
+    for cls in classes.values():
+        class_of_symbol[cls.symbol.id] = cls.name
+    # Declaration order from the parsed class: HIR may reorder fields for layout.
+    for name in parser_classes.keys():
+        var names: [text] = []
+        for f in parser_classes[name].fields:
+            names.push(f.name)
+        fields_of_class[name] = names
+    var order: [HirFunction] = []
+    for f in functions.values():
+        var i = order.len()
+        order.push(f)
+        while i > 0 and (order[i].name < order[i - 1].name or
+                (order[i].name == order[i - 1].name and order[i].symbol.id < order[i - 1].symbol.id)):
+            val t = order[i - 1]
+            order[i - 1] = order[i]
+            order[i] = t
+            i = i - 1
+    var collector = HirAttrSiteCollectorV1(module_name: module_name, symbols: symbols, function: "",
+        function_key: "", tree_of_class: tree_of_class, class_of_symbol: class_of_symbol,
+        fields_of_class: fields_of_class, skip_targets: [], sites: [], ordinal: 0)
+    for f in order:
+        collector.function = f.name
+        collector.function_key = "{f.name}@{f.symbol.id}"
+        collector.ordinal = 0
+        hir_visit_block(f.body, collector)
+    collector.sites
