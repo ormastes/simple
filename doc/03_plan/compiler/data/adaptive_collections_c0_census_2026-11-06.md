@@ -189,3 +189,14 @@ executed** on this host. Executing them needs either interpreter extern
 backing for the capture and ordered-key SFFI, or a deployed self-hosted
 binary. C1 specs must exercise contract functions that do not cross those
 externs.
+
+## 7. Follow-up after the plan revision (PR #7218)
+
+C1 landed in PR #7219: `perf_facts/collection_contracts.spl`, spec
+`test/01_unit/compiler/semantics/collection_origin_identity_spec.spl`. The
+revised plan withdraws the `@col`/`@col_site`/`@col_policy`/`@col_impl`
+attributes. A collection site keeps `@collection_algorithm` plus at most one
+label; whether a label is wanted at all is owner question §17.5.2 of the data
+plan. `ResolvedCollectionPolicyV1` belongs to W1, so C2 waits for that
+resolver. C1's GREEN gate also needs reviewed rows in
+`config/compiler/collection_operations.sdn`, which is still empty.

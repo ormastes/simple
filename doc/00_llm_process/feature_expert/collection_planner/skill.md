@@ -39,7 +39,7 @@ re-run on 2026-10-25.
 Added 2026-11-06 (adaptive collections C1): semantic contracts, operation IDs,
 creation origins and the accounting oracle live in
 `src/compiler/35.semantics/perf_facts/collection_contracts.spl`, with the spec
-`test/01_unit/compiler/semantics/collection_contracts_spec.spl`. These records
+`test/01_unit/compiler/semantics/collection_origin_identity_spec.spl`. These records
 describe meaning only and authorize no rewrite.
 - Operation IDs are keyed by canonical type identity plus method. Maintenance
   methods such as `Map.rehash` stay unmapped on purpose.
