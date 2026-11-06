@@ -1,8 +1,9 @@
 # Status-3 shard transaction omits the durable archive its own contract says archive callers require
 
 - **Date:** 2026-10-24
-- **Status:** OPEN — blocks the full bootstrap on `release/1.0.0`
-- **Verdict:** **producer gap**, not an over-strict consumer
+- **Historical status (2026-10-24):** OPEN — blocks the full bootstrap on `release/1.0.0`
+- **Current source audit (2026-11-07):** historical compact-publication route removed; native qualification remains NOT_RUN. See the dated audit below.
+- **Historical verdict (withdrawn by the correction below):** **producer gap**, not an over-strict consumer
 - **Files:** `src/compiler/80.driver/driver_hir_pipeline_lowering.spl` (producer),
   `src/compiler/80.driver/driver_hir_archive_production_controller_v1.spl` (consumer)
 - **Upstream cause:** the codec refusal recorded in
@@ -217,3 +218,84 @@ nil. `_emit_nil_scalar_reject` and its two call sites are deleted as redundant.
 Wire format unchanged; the encoder is untouched. 290 reject sites after
 regeneration (231 plus 59 optional-inner scalars that previously yielded
 `Some(nil)`), and zero `== nil` tests on decoded scalars.
+
+## Source audit 2026-11-07 — historical route removed, not a native qualification
+
+Audited checkpoint: `b065ff00f44`, in an isolated campaign worktree. No compiler
+or generated binary was executed for this audit. The historical evidence and
+its 2026-10-24 correction above remain intact. In particular, the original
+producer-gap verdict was already withdrawn; it must not be used to justify
+inventing an archive after a codec refusal.
+
+The exact reported consumer no longer exists. Commit
+`ab9305d783e95d49e2d90ebb8efb01afed45c8f2` (2026-10-31),
+`refactor(compiler): remove every caller of the deleted 40.mono pass`, removed
+`driver_hir_archive_production_controller_v1.spl` with the mono archive
+production/replay journal and validation route. Its
+`bounded HIR real source transaction omitted compact publication` diagnostic
+is absent from current compiler sources. The current
+`DriverHirShardTransactionReceiptV1` contains status and optional archive; the
+historical declaration-registration field is gone.
+
+The remaining production call to
+`lower_streaming_hir_shard_receipt_transaction_v1` is the status-only wrapper
+`lower_streaming_hir_shard_transaction_v1`, which passes no archive selection.
+Direct additional call sites are unit controls in
+`test/01_unit/compiler/cache/driver_hir_shard_transaction_spec.spl`. The producer
+still attempts the separate body archive when an archive selection is supplied,
+including after primary-cache codec refusal. No live consumer was found that
+recreates the historical status-3-to-compact-journal contradiction.
+
+The current cold compiler publication surface is
+`src/compiler/80.driver/cache/cold_hir_compiler_publication_v1.spl`.
+`cold_hir_compiler_publish_full_v2` requires runtime/std baseline readback,
+published graph/index readback, and archive receipt readback before returning
+publication pins. `_cold_compiler_archive_receipts_v1` rejects absent or invalid
+package archive receipts. This is an independently checked current surface,
+not evidence that the removed mono-journal contract remains implemented.
+No publication barrier or codec rejection has been relaxed in this audit.
+
+The historical integer-3 decoder fix is also present at source level: generated
+required-scalar rejection tests the raw wire sentinel (`raw == "N"`), rather
+than comparing a decoded integer with nil. Existing decoder controls include
+real integer 3, true bool, valid nil text and invalid required-scalar nil.
+Source presence is not proof that a selected native producer executes them
+correctly. The separate encoder/optional-scalar campaign remains independent.
+
+### Existing regression plan — all commands NOT_RUN in this audit
+
+The runtime owner must first supply `HIR_ADMITTED_RUNTIME` as the exact admitted
+full CLI, with its producer/artifact receipt. Do not substitute an arbitrary
+`bin/simple`, the Rust seed, or an unqualified phase binary. Run from the audited
+repository root, using isolated outputs and the campaign's runtime limits.
+
+```sh
+: "${HIR_ADMITTED_RUNTIME:?runtime owner must select an admitted full CLI}"
+SIMPLE_LIB=src "$HIR_ADMITTED_RUNTIME" test test/01_unit/app/compiler_schema/hir_codec_nil_scalar_reject_spec.spl --mode=interpreter
+SIMPLE_LIB=src "$HIR_ADMITTED_RUNTIME" test test/01_unit/compiler/hir/hir_codec_integer_three_spec.spl --mode=interpreter
+SIMPLE_LIB=src "$HIR_ADMITTED_RUNTIME" test test/01_unit/compiler/cache/cold_hir_compiler_publication_v1_spec.spl --mode=interpreter
+SIMPLE_BIN="$HIR_ADMITTED_RUNTIME" BUILD_SOURCE=test/fixtures/hir_codec_integer_three BUILD_ENTRY=test/fixtures/hir_codec_integer_three/main.spl BUILD_TIMEOUT=120 sh scripts/check/check-hir-codec-roundtrip.shs
+HIR_AUDIT_WORK="${TMPDIR:-/tmp}/hir-archive-status-20261107-$$"
+mkdir -p "$HIR_AUDIT_WORK"
+SIMPLE_HIR_CODEC_ROUNDTRIP=1 SIMPLE_HIR_CACHE=0 SIMPLE_FRONTEND_CACHE_DIR="$HIR_AUDIT_WORK/fe" "$HIR_ADMITTED_RUNTIME" native-build --source test/fixtures/hir_codec_integer_three --entry-closure --threads 1 --timeout 120 --cache-dir "$HIR_AUDIT_WORK/cache" --entry test/fixtures/hir_codec_integer_three/main.spl --output "$HIR_AUDIT_WORK/count-three"
+"$HIR_AUDIT_WORK/count-three"
+```
+
+The existing roundtrip checker builds plain and decoded-HIR fixture variants,
+requires nonzero HIRROUNDTRIP evidence and byte-stable receipts, and compares
+outputs; its temporary work directory is removed on exit, so the campaign owner
+must retain the outer log and selected-runtime identity. The fixture's own
+behavior oracle is `count=3` with exit 0. The cold publication unit controls
+exercise receipt validation and rejected publication inputs; they do not replace
+an admitted full publication/readback integration run.
+
+A renewed report must identify a current producer/consumer pair and retain the
+actual refusal reason, status and missing artifact. Do not replay the deleted
+controller's old error as a current repro, skip publication, or synthesize absent
+compact receipts. No source repair was justified for this historical route.
+
+Audit outcome: **source contradiction retired with the removed route;
+NOT_RUN for native regression qualification, not blanket bug closure**.
+Archive repair verify/fix cycles used: **0 of 3**; this was read-only source
+analysis plus this documentation correction. The unrelated bounded-FS campaign
+remains stopped at its exhausted 6-cycle cap.
