@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN. Workaround shipped (table scan), filed per CLAUDE.md rule
+**Status:** fixed for the JIT (re-verified 2026-11-06, see "Re-verification 2026-11-06"). Workaround shipped (table scan), filed per CLAUDE.md rule
 "when a compact expression form fails ... record a concrete bug".
 
 ## Symptom
@@ -56,3 +56,20 @@ build/hal_fx/seed_after run build/hal_fx/probe_arms2.spl  # h1=false q4=false
 Minimise from `probe_sup2.spl` + the module import; suspect the JIT-fallback
 interpreter's u64 literal comparison in imported-module context.
 
+
+## Re-verification 2026-11-06
+
+On a seed built from `origin/release/1.0.0` @ ecb705896a4 (`cargo build --release --bin simple`, Windows x86_64 host), neither the standalone shape nor the module-context shape reproduces:
+
+- `csr_is_supported(0xF14)` / `(0x300)` imported from
+  `std.nogc_async_mut_noalloc.baremetal.riscv.csr`, plus a local 6-arm
+  `match addr: u64` in a file that imports that module: JIT and interpreter both
+  print `lib true true` / `local true true true true false` (all correct).
+- Standalone arms including `case 0x8000000000000000`: JIT
+  `true true true false` (correct).
+
+**Residual, interpreter-only (not a JIT defect, out of this lane):** the
+interpreter answers `false` for `sup(0x8000000000000000)` against a
+`case 0x8000000000000000` arm on a `u64` scrutinee (JIT: `true`). The literal
+arm is presumably compared as a signed i64 against a `Value::UInt`. This
+belongs to the seed-interpreter owner.
