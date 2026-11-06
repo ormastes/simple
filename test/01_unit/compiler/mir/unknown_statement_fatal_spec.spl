@@ -1,0 +1,40 @@
+"""Unknown HIR statement recovery must prevent publication of incomplete MIR."""
+use std.spec.*
+use std.spec.step
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolTable}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.driver.driver_mir_error_owner.{driver_mir_error_is_fatal_owned_v1}
+
+describe "Unknown MIR statements fail closed":
+    it "preserves the unknown discriminant and source span as a fatal diagnostic":
+        step("Invoke the actual statement-dispatch diagnostic owner")
+        var lowering = MirLowering.new(SymbolTable.new())
+        var source_span = Span.empty()
+        source_span.file = "unknown_statement.spl"
+        source_span.line = 9
+        source_span.col = 5
+        lowering.report_unknown_statement(127, source_span)
+        expect(lowering.errors.len()).to_equal(1)
+        val diagnostic = lowering.errors[0]
+        expect(diagnostic.fatal).to_equal(true)
+        expect(diagnostic.message).to_equal("E-MIR-STMT-Unknown: MIR lowering has no arm for this statement kind (discriminant 127); the statement would otherwise be silently dropped")
+        expect(diagnostic.span.?).to_equal(true)
+        if val recorded = diagnostic.span:
+            expect(recorded.file).to_equal("unknown_statement.spl")
+            expect(recorded.line).to_equal(9)
+            expect(recorded.col).to_equal(5)
+        expect(driver_mir_error_is_fatal_owned_v1(diagnostic)).to_equal(true)
+
+    it "keeps collecting subsequent failures and ordinary advisory diagnostics":
+        step("Recover after an unknown statement without losing fatality or promoting advisories")
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.report_unknown_statement(127, Span.empty())
+        lowering.error("advisory control", nil)
+        lowering.report_unknown_statement(128, Span.empty())
+        expect(lowering.errors.len()).to_equal(3)
+        expect(driver_mir_error_is_fatal_owned_v1(lowering.errors[0])).to_equal(true)
+        expect(lowering.errors[1].message).to_equal("advisory control")
+        expect(driver_mir_error_is_fatal_owned_v1(lowering.errors[1])).to_equal(false)
+        expect(driver_mir_error_is_fatal_owned_v1(lowering.errors[2])).to_equal(true)
+        expect(lowering.errors[2].message).to_contain("discriminant 128")

@@ -472,4 +472,32 @@ Status: **source repair implemented; executable verification pending**.
 The SSpec, compiler/core/MCP checks and native smokes are unrun pending a
 qualified self-hosted producer. No seed test is substituted, and the broader
 diagnostic family remains open.
+## Unknown statement follow-up, 2026-11-06
+
+The `E-MIR-STMT-Unknown` fallback in `mir_lowering_stmts.spl` still used
+`self.error`, despite documenting that the statement is dropped. Its message
+does not match any prefix in the current shared driver classifier,
+`driver_mir_legacy_message_is_fatal_v1`. Therefore the fallback recorded only
+an advisory and could allow publication of incomplete MIR. This is a distinct
+remaining instance of this diagnostic-severity family, discovered by reviewing
+the current producer and driver owners rather than assuming historical fixes
+covered newly added sites.
+
+The statement dispatcher now calls `report_unknown_statement`, which records
+the same code, discriminant, message and source span through `error_fatal`.
+Diagnostic collection still continues; the driver's existing fatal-error gate
+blocks publication. Well-formed statement arms and ordinary advisory severity
+are unchanged. No diagnostic-prefix rule is added.
+
+`test/01_unit/compiler/mir/unknown_statement_fatal_spec.spl` exercises this
+actual owner and the shared driver classifier, covering fatality, exact
+discriminant/message, source span, multiple collected failures, and an advisory
+negative control. It does not fabricate an invalid HIR enum handle merely to
+enter the dispatch wildcard.
+
+Status: **source repair implemented; executable verification pending**. No
+qualified self-hosted test runtime is currently available in this lane. The
+focused SSpec and compiler/core/MCP gates have not run; source review does not
+constitute native qualification. This follow-up does not close the whole
+diagnostic family or claim the other historical candidate sites are fixed.
 
