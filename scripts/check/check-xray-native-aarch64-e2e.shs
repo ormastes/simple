@@ -1,0 +1,181 @@
+#!/bin/sh
+# check-xray-native-aarch64-e2e.shs — XRay PR5: the pure-Simple native AArch64
+# backend emits sleds + `.simple_xray_map`, and the pure-Simple patcher's
+# decisions switch them on and off on a real code page.
+#
+# Design: doc/04_architecture/compiler/xray/xray_compiler_structural_change_2026-11-06.md
+# A.5, C.2 and the section F PR5 row.
+#
+# What it does
+#   1. Runs test/fixtures/xray/xray_native_e2e_driver.spl under the given
+#      Simple binary (the Rust seed today): real frontend -> MIR -> --xray
+#      policy -> native AArch64 object, the same module with xray OFF, image
+#      admission through trace_native_map_validate_v1 + XrayNativeSledLeafV1,
+#      and the PR4 control plane over a recording port (ops.txt).
+#   2. Object inspection with llvm-readelf / llvm-objdump: `.simple_xray_map`
+#      is SHF_ALLOC|SHF_LINK_ORDER linked to .text; one CALL26 to
+#      __simple_xray_trampoline_v1 per sled; every sled disassembles as
+#      b +0x20 / stp x16,x17 / stp x0,x30 / mov w0 / movk w0 / bl / ldp x0,x30 /
+#      ldp x16,x17. The OFF object has no xray section or symbol.
+#   3. aarch64 host only: builds test/fixtures/xray/xray_native_e2e_harness.c
+#      with clang and replays ops.txt on a real mmap'd page (RX<->RW, aligned
+#      word store, __builtin___clear_cache), executing the emitted function
+#      between sessions: hits/last-site/return value must match. A mutated
+#      ops file with the first patch store removed must FAIL (negative control).
+#
+# Not covered, stated plainly: the patcher does not run in the same process as
+# the patched page. The seed interpreter refuses PROT_EXEC on aarch64 Linux and
+# no pure-Simple compiler is deployed to build the driver natively, so the
+# harness replays the Simple patcher's recorded operations. No `--xray` binary
+# is linked (the resident trampoline and init-array registration are later work).
+#
+# Verdict (last stdout line):
+#   PASS — <n> check(s) (...)              exit 0
+#   FAIL — <reason>                        exit 1
+#   ERROR — nothing was checked (<reason>) exit 2
+# --selftest runs before every scan and is fatal.
+#
+# Usage
+#   sh scripts/check/check-xray-native-aarch64-e2e.shs --simple <bin> [--keep]
+#   sh scripts/check/check-xray-native-aarch64-e2e.shs --selftest
+# Env: CLANG, LLVM_OBJDUMP, LLVM_READELF, XRAY_E2E_TIMEOUT (s, 1500).
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+SIMPLE_BIN=${SIMPLE_BIN:-}
+KEEP=0
+SELFTEST_ONLY=0
+CC=${CLANG:-clang}
+OBJDUMP=${LLVM_OBJDUMP:-llvm-objdump}
+READELF=${LLVM_READELF:-llvm-readelf}
+STEP_TIMEOUT=${XRAY_E2E_TIMEOUT:-1500}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --simple) SIMPLE_BIN=${2:-}; shift 2 ;;
+        --keep) KEEP=1; shift ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+done
+
+# Classify harness output: 0 PASS with checks > 0, 1 FAIL, 2 ERROR.
+classify() {
+    last=$(printf '%s\n' "$1" | grep -E '^(PASS|FAIL) — ' | tail -1)
+    case "$last" in
+        "FAIL — "*) return 1 ;;
+        "PASS — "*)
+            n=$(printf '%s' "$last" | sed -n 's/^PASS — \([0-9][0-9]*\) check.*/\1/p')
+            [ -n "$n" ] && [ "$n" -gt 0 ] && return 0
+            return 2 ;;
+        *) return 2 ;;
+    esac
+}
+
+selftest() {
+    classify "PASS — 3 check(s)"; [ $? -eq 0 ] || return 1
+    classify "call(9) = 50
+FAIL — trampoline hits (got 0, want 2)"; [ $? -eq 1 ] || return 1
+    classify ""; [ $? -eq 2 ] || return 1
+    classify "PASS — 0 check(s)"; [ $? -eq 2 ] || return 1
+    classify "word +0 = 0xd503201f"; [ $? -eq 2 ] || return 1
+    return 0
+}
+
+if ! selftest; then
+    echo "ERROR — nothing was checked (selftest failed: classifier misjudged a fixture)"
+    exit 2
+fi
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 5 check(s) (selftest: classifier fixtures)"
+    exit 0
+fi
+
+[ -n "$SIMPLE_BIN" ] || { echo "ERROR — nothing was checked (no --simple binary)"; exit 2; }
+for tool in "$SIMPLE_BIN" "$OBJDUMP" "$READELF" xxd; do
+    command -v "$tool" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (missing tool: $tool)"; exit 2; }
+done
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/xray-native-e2e.XXXXXX") || {
+    echo "ERROR — nothing was checked (cannot create temp dir)"; exit 2; }
+cleanup() { [ "$KEEP" -eq 1 ] && echo "kept: $WORK" >&2 || rm -rf "$WORK"; }
+trap cleanup EXIT
+
+cd "$ROOT" || { echo "ERROR — nothing was checked (cannot cd to $ROOT)"; exit 2; }
+XRAY_E2E_OUT=$WORK timeout "$STEP_TIMEOUT" "$SIMPLE_BIN" run test/fixtures/xray/xray_native_e2e_driver.spl > "$WORK/driver.log" 2>&1
+driver_rc=$?
+if ! grep -q '^E2E-DRIVER-OK' "$WORK/driver.log"; then
+    reason=$(grep -E 'E2E-DRIVER-ERROR|error' "$WORK/driver.log" | head -1)
+    echo "FAIL — Simple driver did not complete (rc=$driver_rc): $reason"
+    exit 1
+fi
+sites=$(sed -n 's/^E2E-DRIVER-OK sites=\([0-9][0-9]*\).*/\1/p' "$WORK/driver.log")
+[ -n "$sites" ] && [ "$sites" -gt 0 ] || { echo "ERROR — nothing was checked (driver reported no sites)"; exit 2; }
+
+xxd -r -p "$WORK/on.hex" "$WORK/on.o" && xxd -r -p "$WORK/off.hex" "$WORK/off.o" || {
+    echo "ERROR — nothing was checked (cannot decode objects)"; exit 2; }
+
+checks=0
+expect_count() { # label actual expected
+    if [ "$2" -ne "$3" ]; then echo "FAIL — $1: $2 (want $3)"; exit 1; fi
+    checks=$((checks + 1))
+}
+
+"$READELF" -S -W "$WORK/on.o" > "$WORK/on.sections" 2>&1
+map_line=$(grep -E '\.simple_xray_map' "$WORK/on.sections")
+[ -n "$map_line" ] || { echo "FAIL — no .simple_xray_map section in the --xray object"; exit 1; }
+text_idx=$(sed -n 's/^ *\[ *\([0-9][0-9]*\)\] \.text .*/\1/p' "$WORK/on.sections" | head -1)
+flags_link=$(printf '%s\n' "$map_line" | awk '{print $(NF-3), $(NF-2)}')
+[ "$flags_link" = "AL $text_idx" ] || { echo "FAIL — .simple_xray_map flags/link '$flags_link' (want 'AL $text_idx')"; exit 1; }
+checks=$((checks + 1))
+
+"$READELF" -r -W "$WORK/on.o" > "$WORK/on.relocs" 2>&1
+expect_count "CALL26 relocations to __simple_xray_trampoline_v1" \
+    "$(grep -c 'R_AARCH64_CALL26.*__simple_xray_trampoline_v1' "$WORK/on.relocs")" "$sites"
+
+"$OBJDUMP" -d "$WORK/on.o" > "$WORK/on.dis" 2>&1
+expect_count "sled off word (b +0x20)" "$(grep -cE '^ *[0-9a-f]+: 14000008[[:space:]]+b[[:space:]]' "$WORK/on.dis")" "$sites"
+expect_count "stp x16, x17" "$(grep -cF 'stp	x16, x17, [sp, #-0x10]!' "$WORK/on.dis")" "$sites"
+expect_count "stp x0, x30" "$(grep -cF 'stp	x0, x30, [sp, #-0x10]!' "$WORK/on.dis")" "$sites"
+expect_count "mov w0, #site" "$(grep -cE '	mov	w0, #0x[0-9a-f]+' "$WORK/on.dis")" "$sites"
+expect_count "movk w0, lsl 16" "$(grep -cF 'movk	w0, #0x0, lsl #16' "$WORK/on.dis")" "$sites"
+expect_count "ldp x0, x30" "$(grep -cF 'ldp	x0, x30, [sp], #0x10' "$WORK/on.dis")" "$sites"
+expect_count "ldp x16, x17" "$(grep -cF 'ldp	x16, x17, [sp], #0x10' "$WORK/on.dis")" "$sites"
+
+"$READELF" -S -s -W "$WORK/off.o" > "$WORK/off.inspect" 2>&1
+expect_count "xray section/symbol in the OFF object" "$(grep -cE 'simple_xray|__xray_|xray_instr_map' "$WORK/off.inspect")" 0
+"$OBJDUMP" -d "$WORK/off.o" > "$WORK/off.dis" 2>&1
+expect_count "sled words in the OFF object" "$(grep -cE '^ *[0-9a-f]+: 14000008 ' "$WORK/off.dis")" 0
+object_checks=$checks
+
+if [ "$(uname -m)" != "aarch64" ] || [ "$(uname -s)" != "Linux" ]; then
+    echo "PASS — $checks check(s) (object inspection only; no aarch64 Linux host for the page replay)"
+    exit 0
+fi
+command -v "$CC" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (missing tool: $CC)"; exit 2; }
+"$CC" -O1 -Wall -o "$WORK/harness" "$ROOT/test/fixtures/xray/xray_native_e2e_harness.c" > "$WORK/cc.log" 2>&1 || {
+    echo "ERROR — nothing was checked (harness build failed: $(head -1 "$WORK/cc.log"))"; exit 2; }
+
+out=$(timeout 60 "$WORK/harness" "$WORK/image.hex" "$WORK/ops.txt" 2>&1)
+classify "$out"
+verdict=$?
+printf '%s\n' "$out" > "$WORK/harness.log"
+if [ "$verdict" -ne 0 ]; then
+    echo "FAIL — page replay: $(printf '%s\n' "$out" | tail -1)"
+    exit 1
+fi
+hw_checks=$(printf '%s\n' "$out" | sed -n 's/^PASS — \([0-9][0-9]*\) check.*/\1/p')
+
+# Negative control: drop the first patch store; the harness must notice.
+awk 'BEGIN{d=0} /^store /&&d==0{d=1;next} {print}' "$WORK/ops.txt" > "$WORK/ops_mutated.txt"
+mutated=$(timeout 60 "$WORK/harness" "$WORK/image.hex" "$WORK/ops_mutated.txt" 2>&1)
+classify "$mutated"
+if [ $? -ne 1 ]; then
+    echo "FAIL — negative control: a replay missing a patch store did not FAIL"
+    exit 1
+fi
+checks=$((checks + hw_checks + 1))
+echo "PASS — $checks check(s) (object: $object_checks, aarch64 page replay: $hw_checks, negative control: 1; sites=$sites)"
+exit 0

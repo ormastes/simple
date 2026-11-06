@@ -38,8 +38,18 @@
 # the absence scan from the byte comparison); two objects with different
 # .text must FAIL; an empty artifact set must ERROR.
 #
+# Native-emitter lane (PR5, design B; works with no deployed pure-Simple
+# compiler): --native-emitter-baseline <pre-change tree> --simple <bin> runs
+# test/fixtures/xray/xray_native_off_identity_driver.spl (frontend -> MIR ->
+# native_compile_to_object(AArch64), default options) twice in this tree and
+# once in the baseline tree, then applies the same scan: byte identity and no
+# `.simple_xray_map` / `__simple_xray*` in any object. The driver uses only
+# pre-PR5 APIs; it is copied into the baseline tree when absent there, so
+# pass a disposable worktree (`git worktree add --detach <dir> <base>`).
+#
 # Usage
 #   sh scripts/check/check-xray-static-off-identity.shs --compiler <pure-Simple bin> --baseline <pre-change bin> [--keep]
+#   sh scripts/check/check-xray-static-off-identity.shs --native-emitter-baseline <tree> --simple <bin> [--keep]
 #   sh scripts/check/check-xray-static-off-identity.shs --selftest
 # Env: LLVM_READELF, LLVM_NM, LLVM_OBJCOPY, CLANG (selftest), XRAY_GUARD_TIMEOUT (s, default 600).
 
@@ -48,6 +58,8 @@ set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 COMPILER=""
 BASELINE=""
+EMITTER_BASE=""
+SIMPLE_RUNNER=""
 KEEP=0
 SELFTEST_ONLY=0
 READELF=${LLVM_READELF:-llvm-readelf}
@@ -60,6 +72,8 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --compiler) COMPILER=${2:-}; shift 2 ;;
         --baseline) BASELINE=${2:-}; shift 2 ;;
+        --native-emitter-baseline) EMITTER_BASE=${2:-}; shift 2 ;;
+        --simple) SIMPLE_RUNNER=${2:-}; shift 2 ;;
         --keep) KEEP=1; shift ;;
         --selftest) SELFTEST_ONLY=1; shift ;;
         -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
@@ -200,6 +214,41 @@ if [ "$ST_RC" -ne 0 ]; then
 fi
 if [ "$SELFTEST_ONLY" = 1 ]; then
     echo "PASS — selftest: 5 fixtures (clean pair, xray section, xray symbol, .text difference, empty set) classified correctly"
+    exit 0
+fi
+
+if [ -n "$EMITTER_BASE" ]; then
+    _driver=test/fixtures/xray/xray_native_off_identity_driver.spl
+    if [ -z "$SIMPLE_RUNNER" ] || [ ! -x "$SIMPLE_RUNNER" ]; then
+        echo "ERROR — nothing was checked (--native-emitter-baseline needs an executable --simple <bin>)"; exit 2
+    fi
+    if [ ! -d "$EMITTER_BASE/src/compiler" ] || ! command -v xxd >/dev/null 2>&1; then
+        echo "ERROR — nothing was checked (baseline tree without src/compiler, or xxd missing)"; exit 2
+    fi
+    if [ ! -f "$EMITTER_BASE/$_driver" ]; then
+        mkdir -p "$EMITTER_BASE/test/fixtures/xray" && cp "$ROOT/$_driver" "$EMITTER_BASE/$_driver" || {
+            echo "ERROR — nothing was checked (cannot place the driver in the baseline tree)"; exit 2; }
+    fi
+    # emit_tree <tree> <outdir>: run the driver there, decode hex to objects.
+    emit_tree() {
+        mkdir -p "$2/hex" "$2/obj"
+        ( cd "$1" && XRAY_OFF_OUT="$2/hex" timeout "$STEP_TIMEOUT" "$SIMPLE_RUNNER" run "$_driver" ) >"$2/driver.log" 2>&1
+        for _h in "$2"/hex/*.hex; do
+            [ -f "$_h" ] || continue
+            xxd -r -p "$_h" "$2/obj/$(basename "$_h" .hex).o" || return 1
+        done
+        [ "$(ls "$2/obj" | wc -l)" -eq 4 ]
+    }
+    emit_tree "$ROOT" "$WORK/em1" || { echo "ERROR — nothing was checked (candidate emitter run failed: $(grep -m1 -i error "$WORK/em1/driver.log"))"; exit 2; }
+    emit_tree "$ROOT" "$WORK/em2" || { echo "ERROR — nothing was checked (candidate emitter rerun failed)"; exit 2; }
+    emit_tree "$EMITTER_BASE" "$WORK/emb" || { echo "ERROR — nothing was checked (baseline emitter run failed: $(grep -m1 -i error "$WORK/emb/driver.log"))"; exit 2; }
+    scan "$WORK/em1/obj" "$WORK/em2/obj"; RC=$?
+    if [ "$RC" -eq 2 ]; then echo "ERROR — nothing was checked (0 native objects produced)"; exit 2; fi
+    if [ "$RC" -ne 0 ]; then echo "FAIL — native emitter default objects carry XRay artifacts or are not reproducible"; exit 1; fi
+    DET_MODE=$SCAN_MODE
+    scan "$WORK/em1/obj" "$WORK/emb/obj"; RC=$?
+    if [ "$RC" -ne 0 ]; then echo "FAIL — native emitter default objects differ from the baseline tree's"; exit 1; fi
+    echo "PASS — $SCAN_COUNT native object(s) compared (run-to-run: $DET_MODE; vs baseline tree: $SCAN_MODE; 0 XRay sections/symbols; emitter lane, runner=$SIMPLE_RUNNER baseline=$EMITTER_BASE)"
     exit 0
 fi
 
