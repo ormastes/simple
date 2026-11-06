@@ -34,7 +34,7 @@ a `class Ring<Op, Cpl>` with `me take_retained(...) -> Result<Done<Cpl>?, RingEr
 if val completion = maybe: ... completion.token`, and `me reset(...) -> Result<Receipt, RingErr>:
 Ok(Receipt(...))` fails with `field 'token' is absent from exact value layout 'app.main::Receipt'`.
 The same shape as free functions lowers cleanly. Annotating `retained` makes the seed repro
-pass but NOT the Stage 2 build. A guard that skips the global fallback when the instantiated
+pass but NOT the Stage 2 build: with `retained` annotated the Ok payload type is the structural `RingCompletion<Cpl>?`, not a named record, so the bind arm still reaches the shared-registry fallback. A guard that skips the global fallback when the instantiated
 payload is known to be structural (`T?`, array, tuple, primitive) did not change the seed
 repro (the payload type is unknown there), so it was not landed.
 
@@ -52,12 +52,12 @@ remembered HIR type, no source type, and no usable MIR type, so the payload chec
 ## Workaround (landed)
 
 `simple_ring.spl`, both marked `@workaround bug=simple_ring_result_payload_provenance_2026-11-06`:
-- `take_completion`: `val typed_completion: RingCompletion<Cpl> = completion` and read
-  `typed_completion.token`.
+- `take_completion`: `val typed_completion: RingCompletion<Cpl> = completion`, read
+  `typed_completion.token` and return `Ok(typed_completion)`.
 - `cancel`: `val rejected: SimpleRingError = error` then `CancelRejected(rejected)`.
 
 Evidence on the run-10 Stage 2 compiler, same argv: before, the unchanged file failed 5 of 5
-(defect 2 every time, defect 1 in 2). After, 4 of 4 runs lower every module through MIR and
+(defect 2 every time, defect 1 in 2). After, 5 of 5 runs lower every module through MIR and
 codegen and stop only at the link (`undefined symbol: __simple_main`, expected for an entry
 with no `main`). Seed specs: `simple_ring_spec` 9/9, `mission_adapter_spec` 10/10,
 `simple_ring_rti004_wa_spec` 6/6 (its source-shape pin updated to the new `cancel` arm).
