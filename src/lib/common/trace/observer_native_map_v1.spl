@@ -1,0 +1,252 @@
+# Cold native-map validation. All addresses are loaded-image-relative offsets.
+# Passing these checks proves structural consistency only, NOT image registration,
+# read-only residency, ABI preservation, emitter correctness or patch permission.
+# The loader must supply bounded bytes from its resident image and retain code,
+# map and provider until process exit. Never read arbitrary pointers here.
+use std.common.trace.observer_contract_v1.*
+
+pub const TRACE_NATIVE_MAP_SCHEMA_V1 = 1
+
+pub enum TraceNativeEncodingV1:
+    X64Rel32
+    Arm64Branch26
+
+pub struct TraceImageRangeV1:
+    offset: u64
+    size: u64
+    readable: bool
+    writable: bool
+    executable: bool
+
+pub struct TraceNativeFunctionV1:
+    function_id: u32
+    offset: u64
+    size: u64
+
+pub struct TraceNativeSiteV1:
+    site_id: u32
+    function_id: u32
+    kind: TraceEventKindV1
+    offset: u64
+    target_offset: u64
+    encoding: TraceNativeEncodingV1
+
+pub struct TraceNativeMapV1:
+    schema: u32
+    module_instance: u64
+    manifest_incarnation: u64
+    build_identity: text
+    source_identity: text
+    runtime_identity: text
+    target: text
+    abi_profile: text
+    image_size: u64
+    map_offset: u64
+    map_size: u64
+    ranges: [TraceImageRangeV1]
+    functions: [TraceNativeFunctionV1]
+    sites: [TraceNativeSiteV1]
+
+# Subtraction before addition prevents wraparound even at the u64 boundary.
+pub fn trace_native_range_fits_v1(offset: u64, size: u64, bound: u64) -> bool:
+    size > 0 and offset <= bound and size <= bound - offset
+
+fn trace_native_range_contains_v1(outer: TraceImageRangeV1, offset: u64, size: u64) -> bool:
+    if offset < outer.offset or size == 0:
+        return false
+    val relative = offset - outer.offset
+    relative <= outer.size and size <= outer.size - relative
+
+fn trace_native_ranges_overlap_v1(left: TraceImageRangeV1, right: TraceImageRangeV1) -> bool:
+    if left.offset <= right.offset:
+        right.offset - left.offset < left.size
+    else:
+        left.offset - right.offset < right.size
+
+fn trace_native_executable_range_v1(ranges: [TraceImageRangeV1], offset: u64, size: u64) -> bool:
+    for section in ranges:
+        if section.readable and section.executable and not section.writable:
+            if trace_native_range_contains_v1(section, offset, size):
+                return true
+    false
+
+pub fn trace_native_site_size_v1(encoding: TraceNativeEncodingV1) -> u64:
+    match encoding:
+        case X64Rel32: 13
+        case Arm64Branch26: 32
+
+# Resolve a signed displacement without narrowing an address or wrapping.
+# Positive limit and negative limit differ by one for signed integers.
+fn trace_native_displacement_v1(origin: u64, target: u64, positive: u64, negative: u64) -> Result<i64, TraceFailureV1>:
+    if target >= origin:
+        val distance = target - origin
+        if distance > positive:
+            return Err(TraceFailureV1.InvalidMap)
+        return Ok(distance as i64)
+    val distance = origin - target
+    if distance > negative:
+        return Err(TraceFailureV1.InvalidMap)
+    Ok(0 - (distance as i64))
+
+pub fn trace_native_branch_displacement_v1(site: TraceNativeSiteV1, image_size: u64) -> Result<i64, TraceFailureV1>:
+    val size = trace_native_site_size_v1(site.encoding)
+    if not trace_native_range_fits_v1(site.offset, size, image_size):
+        return Err(TraceFailureV1.InvalidMap)
+    if site.target_offset >= image_size:
+        return Err(TraceFailureV1.InvalidMap)
+    match site.encoding:
+        case X64Rel32:
+            # CALL starts at +2, its return address is +7.
+            if site.offset % 2 != 0:
+                return Err(TraceFailureV1.InvalidMap)
+            trace_native_displacement_v1(site.offset + 7, site.target_offset, 2147483647, 2147483648)
+        case Arm64Branch26:
+            if site.offset % 4 != 0 or site.target_offset % 4 != 0:
+                return Err(TraceFailureV1.InvalidMap)
+            # BL is at +20; the encoded signed immediate is in instructions.
+            val distance = trace_native_displacement_v1(site.offset + 20, site.target_offset, 134217724, 134217728)?
+            Ok(distance / 4)
+
+fn trace_native_append_word_v1(bytes: [u8], word: u64) -> [u8]:
+    var result = bytes
+    for shift in [0, 8, 16, 24]:
+        result.push(((word >> shift) & 255) as u8)
+    result
+
+# Candidate template emitter and validator share one exact private encoding.
+# This does not schedule a hook in machine code or qualify either trampoline.
+pub fn trace_native_off_template_v1(site: TraceNativeSiteV1, image_size: u64) -> Result<[u8], TraceFailureV1>:
+    val displacement = trace_native_branch_displacement_v1(site, image_size)?
+    match site.encoding:
+        case X64Rel32:
+            var encoded = displacement
+            if encoded < 0:
+                encoded = encoded + 4294967296
+            var bytes: [u8] = [235, 11, 232]
+            bytes = trace_native_append_word_v1(bytes, encoded as u64)
+            bytes.push(235)
+            bytes.push(4)
+            bytes = trace_native_append_word_v1(bytes, site.site_id as u64)
+            Ok(bytes)
+        case Arm64Branch26:
+            var encoded = displacement
+            if encoded < 0:
+                encoded = encoded + 67108864
+            var bytes: [u8] = []
+            bytes = trace_native_append_word_v1(bytes, 335544328) # B +32
+            bytes = trace_native_append_word_v1(bytes, 2847885296) # STP x16,x17,[sp,#-16]!
+            bytes = trace_native_append_word_v1(bytes, 2847898592) # STP x0,x30,[sp,#-16]!
+            bytes = trace_native_append_word_v1(bytes, 1384120320 | (((site.site_id as u64) & 65535) << 5))
+            bytes = trace_native_append_word_v1(bytes, 1923088384 | ((((site.site_id as u64) >> 16) & 65535) << 5))
+            bytes = trace_native_append_word_v1(bytes, 2483027968 | (encoded as u64))
+            bytes = trace_native_append_word_v1(bytes, 2831252448) # LDP x0,x30,[sp],#16
+            bytes = trace_native_append_word_v1(bytes, 2831239152) # LDP x16,x17,[sp],#16
+            Ok(bytes)
+
+pub fn trace_native_map_validate_v1(manifest: TraceNativeMapV1, image: [u8]) -> Result<bool, TraceFailureV1>:
+    if manifest.schema != TRACE_NATIVE_MAP_SCHEMA_V1:
+        return Err(TraceFailureV1.InvalidMap)
+    if manifest.module_instance == 0 or manifest.manifest_incarnation == 0:
+        return Err(TraceFailureV1.InvalidMap)
+    if (manifest.build_identity.len() == 0 or manifest.source_identity.len() == 0 or
+        manifest.runtime_identity.len() == 0 or manifest.target.len() == 0 or manifest.abi_profile.len() == 0):
+        return Err(TraceFailureV1.InvalidMap)
+    if manifest.image_size != image.len() as u64:
+        return Err(TraceFailureV1.InvalidMap)
+    if not trace_native_range_fits_v1(manifest.map_offset, manifest.map_size, manifest.image_size):
+        return Err(TraceFailureV1.InvalidMap)
+    var map_readonly = false
+    for index in 0..manifest.ranges.len():
+        val section = manifest.ranges[index]
+        if not trace_native_range_fits_v1(section.offset, section.size, manifest.image_size):
+            return Err(TraceFailureV1.InvalidMap)
+        if section.writable and section.executable:
+            return Err(TraceFailureV1.InvalidMap)
+        # Reject ALL virtual range aliases before permission filtering. A later
+        # writable PT_LOAD cannot hide behind an earlier read-only match.
+        for earlier in 0..index:
+            if trace_native_ranges_overlap_v1(manifest.ranges[earlier], section):
+                return Err(TraceFailureV1.InvalidMap)
+        if section.readable and not section.writable and not section.executable:
+            if trace_native_range_contains_v1(section, manifest.map_offset, manifest.map_size):
+                map_readonly = true
+    if not map_readonly or manifest.functions.len() == 0 or manifest.sites.len() == 0:
+        return Err(TraceFailureV1.InvalidMap)
+    for index in 0..manifest.functions.len():
+        val function = manifest.functions[index]
+        if function.function_id as u64 != index as u64 + 1:
+            return Err(TraceFailureV1.InvalidMap)
+        if not trace_native_executable_range_v1(manifest.ranges, function.offset, function.size):
+            return Err(TraceFailureV1.InvalidMap)
+        val extent = TraceImageRangeV1(offset: function.offset, size: function.size, readable: true, writable: false, executable: true)
+        for earlier in 0..index:
+            val other = manifest.functions[earlier]
+            val other_extent = TraceImageRangeV1(offset: other.offset, size: other.size, readable: true, writable: false, executable: true)
+            if trace_native_ranges_overlap_v1(extent, other_extent):
+                return Err(TraceFailureV1.InvalidMap)
+    for index in 0..manifest.sites.len():
+        val site = manifest.sites[index]
+        match site.encoding:
+            case X64Rel32:
+                if not manifest.target.starts_with("x86_64-"):
+                    return Err(TraceFailureV1.InvalidMap)
+            case Arm64Branch26:
+                if not manifest.target.starts_with("aarch64-"):
+                    return Err(TraceFailureV1.InvalidMap)
+        if site.site_id as u64 != index as u64 + 1:
+            return Err(TraceFailureV1.InvalidMap)
+        if site.function_id == 0 or site.function_id as u64 > manifest.functions.len() as u64:
+            return Err(TraceFailureV1.InvalidMap)
+        match site.kind:
+            case Entry: ()
+            case Exit: ()
+            case TailExit: ()
+            case _: return Err(TraceFailureV1.InvalidMap)
+        val size = trace_native_site_size_v1(site.encoding)
+        val function = manifest.functions[(site.function_id - 1) as i64]
+        val extent = TraceImageRangeV1(offset: function.offset, size: function.size, readable: true, writable: false, executable: true)
+        if not trace_native_range_contains_v1(extent, site.offset, size):
+            return Err(TraceFailureV1.InvalidMap)
+        # Minimum entry instruction alignment/extent only. Production admission
+        # must bind the entire independently registered trampoline extent.
+        val target_entry_size: u64 = match site.encoding:
+            case X64Rel32: 1
+            case Arm64Branch26: 4
+        if not trace_native_executable_range_v1(manifest.ranges, site.target_offset, target_entry_size):
+            return Err(TraceFailureV1.InvalidMap)
+        # A resident trampoline must not itself be an instrumented function.
+        for instrumented in manifest.functions:
+            val instrumented_extent = TraceImageRangeV1(offset: instrumented.offset, size: instrumented.size, readable: true, writable: false, executable: true)
+            if trace_native_range_contains_v1(instrumented_extent, site.target_offset, 1):
+                return Err(TraceFailureV1.InvalidMap)
+        val site_extent = TraceImageRangeV1(offset: site.offset, size: size, readable: true, writable: false, executable: true)
+        for earlier in 0..index:
+            val other = manifest.sites[earlier]
+            val other_extent = TraceImageRangeV1(offset: other.offset, size: trace_native_site_size_v1(other.encoding), readable: true, writable: false, executable: true)
+            if trace_native_ranges_overlap_v1(site_extent, other_extent):
+                return Err(TraceFailureV1.InvalidMap)
+        val expected = trace_native_off_template_v1(site, manifest.image_size)?
+        for byte_index in 0..expected.len():
+            if image[(site.offset as i64) + byte_index] != expected[byte_index]:
+                return Err(TraceFailureV1.InvalidMap)
+    Ok(true)
+
+# Selection is bounded and must bind the exact manifest incarnation/module.
+# Returned indices are merely a cold plan, never patch handles or capability.
+pub fn trace_native_select_v1(manifest: TraceNativeMapV1, selection: TraceSelectionV1) -> Result<[u32], TraceFailureV1>:
+    if manifest.manifest_incarnation == 0 or selection.manifest_incarnation != manifest.manifest_incarnation:
+        return Err(TraceFailureV1.InvalidMap)
+    var indices: [u32] = []
+    for requested in selection.sites:
+        if requested.module_instance != manifest.module_instance or requested.site_id == 0:
+            return Err(TraceFailureV1.InvalidMap)
+        val index = requested.site_id - 1
+        if index as u64 >= manifest.sites.len() as u64:
+            return Err(TraceFailureV1.InvalidMap)
+        if manifest.sites[index as i64].site_id != requested.site_id:
+            return Err(TraceFailureV1.InvalidMap)
+        for previous in indices:
+            if previous == index:
+                return Err(TraceFailureV1.InvalidMap)
+        indices.push(index)
+    Ok(indices)

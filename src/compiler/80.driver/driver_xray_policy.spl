@@ -7,7 +7,9 @@
 #              no metadata, byte-identical output. On = sleds are emitted.
 #   - dynamic: aspect params (`simple.trace/observer-v1`) select at RUNTIME
 #              which existing sleds are patched on. They never decide whether
-#              sleds exist, so nothing here reads AspectParamsV1.
+#              sleds exist: xray_policy_resolve/apply never read AspectParamsV1.
+#              xray_observer_request_check is the ONE compile-time gate for that
+#              extension; it only rejects (fail-closed) and never changes sleds.
 #
 # There is no instruction threshold: with `--xray` on, every function except
 # the compiler-owned never-list gets sleds. A threshold may be re-added later
@@ -17,6 +19,10 @@
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_instruction_graph.{MirFunction, MirModule}
 use compiler.backend.backend_helpers.{get_effective_backend_name}
+use common.plugin.aspect_params.{AspectParamsV1}
+use common.trace.observer_contract_v1.{TraceFailureV1, trace_failure_code_v1}
+use common.trace.observer_aspect_config_v1.{trace_aspect_config_v1}
+use common.trace.observer_build_route_v1.{TraceBuildRouteKindV1, trace_build_route_v1}
 
 val XRAY_MODE_NONE: i64 = 0
 val XRAY_MODE_ENTRY_EXIT: i64 = 1
@@ -60,6 +66,27 @@ fn xray_policy_resolve(enabled: bool, compile_mode_text: text, backend: text, re
     if not requested_native:
         return Err(xray_unsupported("with backend '{backend}'"))
     Ok(XrayBuildPolicy.on())
+
+# The single compile-time gate for the `simple.trace/observer-v1` aspect-param
+# extension, decided once in CompileContext.create. Absent or explicit-Off is
+# admitted; a malformed request is rejected. Every non-Off route is rejected
+# until a backend adapter can honour it (no Feature receipt is fabricated from
+# config, target or map), so this stays static-off scaffolding.
+fn xray_observer_request_check(params: AspectParamsV1, target: text) -> Result<bool, TraceFailureV1>:
+    val requested = trace_aspect_config_v1(params)?
+    if val config = requested:
+        val route = trace_build_route_v1(target, config.instrumentation, config.backend)?
+        if route.kind != TraceBuildRouteKindV1.Off:
+            return Err(TraceFailureV1.UnsupportedProfile)
+    Ok(true)
+
+# "" when admitted, else the stable diagnostic stored as xray_config_error.
+fn xray_observer_request_error(params: AspectParamsV1, target: text) -> text:
+    match xray_observer_request_check(params, target):
+        case Err(failure):
+            "TRACE-E-REQUEST: observer V1 request rejected (status={trace_failure_code_v1(failure)})"
+        case Ok(_):
+            ""
 
 # Cache-key token. Empty when off so every existing cache identity is unchanged.
 fn xray_option_identity_suffix(enabled: bool) -> text:
@@ -119,3 +146,4 @@ fn xray_policy_apply(module: MirModule, policy: XrayBuildPolicy) -> MirModule:
 
 export XrayBuildPolicy, XRAY_MODE_NONE, XRAY_MODE_ENTRY_EXIT, XRAY_MODE_ENTRY_EXIT_TAIL
 export xray_policy_resolve, xray_policy_apply, xray_option_identity_suffix, xray_function_never_instrumented
+export xray_observer_request_check, xray_observer_request_error
