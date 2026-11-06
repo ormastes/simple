@@ -2,7 +2,7 @@
 
 - ID: hir_codec_present_flagged_attr_option_word_2026-11-05
 - Priority: P2
-- Status: open
+- Status: fixed (codec generator, work/hir-attrflag)
 - File: src/compiler/20.hir/generated/hir_codec.spl (hc_dec_hir_function, line 4795)
 
 ## Symptom
@@ -35,3 +35,18 @@ driver_manifest_attr / vhdl_metadata siblings).
 - File-worker hello canary on stage3 (same binary/settings/root), HIR/MIR/OBJ/link/run.
 - An @export function built through the same lane (copies HirFunction by value).
 - hir_cfg_select_codec_spec stays byte-identical.
+
+## Fix (2026-11-06)
+`src/app/compiler_schema/codec_gen.spl`: `_presence_flag_of` finds the `has_<field>`
+bool flag of a non-legacy NODE field; the encoder now writes the presence word
+from that flag (`if not node.has_x: w.put_i64(0) else: <payload>`), and the
+decoder reads such fields into bare placeholder locals. Applies to every
+flag-gated node field (HirFunction export_attr / driver_manifest_attr /
+vhdl_metadata, HirClass export_attr / layout_attr, asm spec/asm_body, pattern).
+Flagged scalar/text fields and legacy HirType/SymbolId/Span are unchanged.
+Codec regenerated. Specs (seed release100-7a0e6fe516f): 
+hir_codec_bare_struct_field_locals_spec 14/14, hir_codec_roundtrip_spec 4/4,
+hir_cfg_select_codec_spec 4/4 (byte-identical round-trip).
+Not verified: stage3 file-worker canary / @export by-value lane (needs bootstrap).
+Note: `bin/simple run src/app/compiler_schema/main.spl codec` fails on this seed
+("HirModule declared 0 times"); regenerated via generate_codec_into under the test runner.

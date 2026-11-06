@@ -628,15 +628,31 @@ fn bare_placeholder_literal_v1(u: CodecUniverse, type_text: text, depth: i64) ->
         parts.push(f.binder + ": " + lit)
     s.name + "(" + _join(parts, ", ") + ")"
 
-fn _field_is_bare(decl: CodecDecl, f: FieldDecl) -> bool:
-    """False when the owning struct carries a `has_<field>` presence flag for a
-    non-legacy type: absence is then a real in-memory state (HirFunction
-    export_attr / driver_manifest_attr / vhdl_metadata are nil under their has_*
-    flag), and decoding it to a placeholder would re-encode as present and break
-    the round-trip byte identity the HIR cache self-check relies on. Such
-    fields keep their `T?` local exactly as before. The legacy HirType /
-    SymbolId / Span literals are always bare (HirExpr.type_ keeps its has_type_
-    flag as the authority)."""
+fn _presence_flag_of(u: CodecUniverse, decl: CodecDecl, f: FieldDecl) -> text:
+    """The `has_<field>` bool flag binder that is the presence authority for a
+    non-legacy field, or "". HirFunction export_attr / driver_manifest_attr /
+    vhdl_metadata (and HirClass export_attr, ...) are absent under their flag.
+    The encoder writes the presence word from the FLAG, so the decoder can
+    store a bare placeholder for an absent value (no Option transport word in
+    the non-optional slot, bug hir_codec_present_flagged_attr_option_word_
+    2026-11-05) and the placeholder still re-encodes as absent. The legacy
+    HirType / SymbolId / Span literals keep their payload-word encoding
+    (HirExpr.type_ under has_type_)."""
+    if u.classify(f.type_text).cat != "node":
+        return ""
+    if bare_node_placeholder_v1(_strip_default(f.type_text).trim()) != "":
+        return ""
+    for g in decl.fields:
+        if g.binder == "has_" + f.binder and _strip_default(g.type_text).trim() == "bool":
+            return g.binder
+    ""
+
+fn _field_is_bare(u: CodecUniverse, decl: CodecDecl, f: FieldDecl) -> bool:
+    """False only for a has_*-flagged non-legacy field whose encoder still
+    writes the payload (non-node shapes): absence stays a real `nil` state
+    there. Flag-gated node fields (see _presence_flag_of) are bare."""
+    if _presence_flag_of(u, decl, f) != "":
+        return true
     if bare_node_placeholder_v1(_strip_default(f.type_text).trim()) != "":
         return true
     for g in decl.fields:
@@ -670,7 +686,7 @@ fn _bare_field_helper_types(u: CodecUniverse, order: [text]) -> [text]:
                     field_types.push(f.type_text)
         else:
             for f in decl.fields:
-                if _field_is_bare(decl, f):
+                if _field_is_bare(u, decl, f):
                     field_types.push(f.type_text)
         for ft in field_types:
             val shape = u.classify(ft)
@@ -889,7 +905,14 @@ fn _emit_enc_decl(u: CodecUniverse, decl: CodecDecl) -> text:
         # A function dictionary entry cannot represent an absent declaration.
         # Enforce in the actual presence branch, not a separate live-state read.
         val required_function_entry = decl.name == "HirModule" and f.binder == "functions"
-        body.push(_emit_enc(u, f.type_text, "node." + f.binder, "    ", c, required_function_entry))
+        val flag = _presence_flag_of(u, decl, f)
+        if flag != "":
+            body.push("    if not node." + flag + ":\n")
+            body.push("        w.put_i64(0)\n")
+            body.push("    else:\n")
+            body.push(_emit_enc(u, f.type_text, "node." + f.binder, "        ", c, required_function_entry))
+        else:
+            body.push(_emit_enc(u, f.type_text, "node." + f.binder, "    ", c, required_function_entry))
     if body.len() == 0:
         body.push("    val _leaf = 0\n")
     parts.join("") + body.join("")
@@ -962,7 +985,7 @@ fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
     var names: [text] = []
     for f in decl.fields:
         val required_function_entry = decl.name == "HirModule" and f.binder == "functions"
-        parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "    ", c, required_function_entry, _field_is_bare(decl, f)))
+        parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "    ", c, required_function_entry, _field_is_bare(u, decl, f)))
         parts.push(_emit_nil_scalar_reject(u, f.type_text, "f_" + f.binder, "    ", "raw{c.n - 1}",
             decl.name + "." + f.binder))
         names.push(f.binder + ": f_" + f.binder)
