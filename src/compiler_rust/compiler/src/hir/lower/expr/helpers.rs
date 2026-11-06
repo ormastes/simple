@@ -236,6 +236,47 @@ impl Lowerer {
         lowered: HirExpr,
         ctx: &mut FunctionContext,
     ) -> HirExpr {
+        // `d[k]` on a Dict with a scalar value type is typed as the bare `V`,
+        // so MIR unboxed `rt_index_get`'s result and `??` took the
+        // statically-non-nullable identity path: a miss leaked the nil
+        // sentinel as the integer 3 (`d[k] ?? -1` == 3) while `d.get(k) ?? -1`
+        // was correct. Retype the index to `V?`: MIR then keeps the tagged
+        // word (no unbox for a Pointer type), presence is the runtime tag
+        // (`rt_is_some`), and the payload is decoded by `rt_unwrap_or_self`.
+        // Bug: doc/08_tracking/bug/seed_dict_int_index_nil_coalesce_2026-10-31.md
+        if let HirExprKind::Index { receiver, .. } = &lowered.kind {
+            let value = match self.module.types.get(receiver.ty) {
+                Some(HirType::Dict { value, .. }) => *value,
+                _ => return lowered,
+            };
+            if lowered.ty != value
+                || !matches!(
+                    value,
+                    TypeId::I8
+                        | TypeId::I16
+                        | TypeId::I32
+                        | TypeId::I64
+                        | TypeId::U8
+                        | TypeId::U16
+                        | TypeId::U32
+                        | TypeId::U64
+                        | TypeId::BOOL
+                        | TypeId::F32
+                        | TypeId::F64
+                )
+            {
+                return lowered;
+            }
+            let optional_ty = self.module.types.register(HirType::Pointer {
+                kind: PointerKind::Shared,
+                capability: ast::ReferenceCapability::Shared,
+                inner: value,
+            });
+            return HirExpr {
+                kind: lowered.kind,
+                ty: optional_ty,
+            };
+        }
         let HirExprKind::MethodCall {
             receiver,
             method,
