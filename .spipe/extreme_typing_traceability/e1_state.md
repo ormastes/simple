@@ -51,3 +51,11 @@ expert updated. Next: retain walker results per module in CompileContext
 (observation only), then E2 named rule.
 Follow-up same day: walker results retained per module in
 `CompileContext.api_exposure` (observation only, cleared with the facts).
+
+2026-11-06 (work/r11-xtype-closure-design-20261106): effective export closure
+DESIGNED (docs-only PR first, per owner directive for structural changes).
+Definition, records, module-verdict conjunction, Unknown-denial consequence
+and spec obligations are in the design doc section "E1 effective export
+closure (design, 2026-11-06)". Code slice: `api_export_closure_facts_v1`,
+`api_export_closure_projection_v1`, `api_exposure_closure_v1`,
+`CompileContext.api_export_closure_facts`, stacked PR after this one.
