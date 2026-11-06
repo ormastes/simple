@@ -1,0 +1,74 @@
+"""Windows native link failures must name their cause, and the default
+Windows lane must link with the clang that compiled the runtime.
+
+Incident 2026-11-07 (avx_server_loadgen, admitted Windows Stage 2): every
+module compiled, then the visible stderr ended at
+`[LLVM-LINK] failed link inputs retained for replay (45 runtime objects)`.
+The cause -- `Windows GNU linking requires bootstrap-owned clang through CC`
+-- was returned as an Err but only reached the worker error text, glued to
+un-newlined trace output and outside the truncated tail. With CC set, the
+next cause was `undefined symbol: rt_io_tcp_drain_line` (no C definition)."""
+
+extern fn rt_file_read_text(path: text) -> text?
+
+use compiler.backend.linker.linker_wrapper.{native_windows_link_os_for_flavor, native_effective_link_os}
+use compiler.backend.linker._LinkerWrapper.shared_linking.{mingw_link_driver_select, mingw_link_driver_error}
+use compiler.backend.llvm_native_link_orchestrator.{llvm_native_link_failure_detail, llvm_native_link_failure_line}
+use testing.{describe, it, expect}
+
+describe "native link failure reporting":
+    it "passes a real linker payload through verbatim":
+        val payload = "Windows GNU Clang linking failed: ld.lld: error: undefined symbol: rt_x"
+        expect(llvm_native_link_failure_detail(payload)).to_equal(payload)
+
+    it "names an unusable payload instead of printing nil":
+        expect(llvm_native_link_failure_detail("nil")).to_contain("no error payload from link_to_native")
+        expect(llvm_native_link_failure_detail("")).to_contain("no error payload from link_to_native")
+
+    it "renders the stderr line on its own line with the full detail":
+        val line = llvm_native_link_failure_line("cause text")
+        expect(line.starts_with("\n")).to_equal(true)
+        expect(line).to_contain("error: link_to_native failed: cause text")
+
+    it "prints the failure before the orchestrator returns the Err":
+        val source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link_orchestrator.spl") ?? ""
+        val print_pos = source.index_of("eprint(llvm_native_link_failure_line(detail))") ?? -1
+        val return_pos = source.index_of("Err(\"Linking failed: \" + detail)") ?? -1
+        expect(print_pos).to_be_greater_than(-1)
+        expect(return_pos).to_be_greater_than(-1)
+        expect(print_pos).to_be_less_than(return_pos)
+
+describe "Windows GNU link driver selection":
+    it "uses CC when it names clang":
+        expect(mingw_link_driver_select("D:/t/bin/clang.exe", "")).to_equal("D:/t/bin/clang.exe")
+        expect(mingw_link_driver_select("C:\\t\\bin\\clang.exe", "D:/x/clang.exe")).to_equal("C:\\t\\bin\\clang.exe")
+
+    it "falls back to the discovered runtime compiler when CC is unset":
+        expect(mingw_link_driver_select("", "D:\\llvm-mingw\\bin\\clang.exe")).to_equal("D:\\llvm-mingw\\bin\\clang.exe")
+
+    it "never replaces a non-clang CC and rejects non-clang discovery":
+        expect(mingw_link_driver_select("gcc", "D:/t/bin/clang.exe")).to_equal("")
+        expect(mingw_link_driver_select("", "C:/mingw/bin/gcc.exe")).to_equal("")
+        expect(mingw_link_driver_select("", "")).to_equal("")
+
+    it "names both candidates in the error":
+        val err = mingw_link_driver_error("", "C:/mingw/bin/gcc.exe")
+        expect(err).to_contain("CC=''")
+        expect(err).to_contain("C:/mingw/bin/gcc.exe")
+
+describe "default Windows link lane":
+    it "resolves bare windows to the configured flavor":
+        expect(native_windows_link_os_for_flavor("windows", "gnu")).to_equal("windows-mingw")
+        expect(native_windows_link_os_for_flavor("windows", "msvc")).to_equal("windows-msvc")
+        expect(native_windows_link_os_for_flavor("windows", "")).to_equal("windows-mingw")
+
+    it "leaves explicit and non-Windows lanes alone":
+        expect(native_windows_link_os_for_flavor("windows-msvc", "gnu")).to_equal("windows-msvc")
+        expect(native_windows_link_os_for_flavor("linux", "")).to_equal("linux")
+
+    it "an unqualified Windows host link is the bare host before resolution":
+        expect(native_effective_link_os("windows", "", "")).to_equal("windows")
+
+    it "link_to_native applies the flavor resolution":
+        val source = rt_file_read_text("src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl") ?? ""
+        expect(source).to_contain("val os = native_windows_link_os_for_flavor(effective_os, windows_flavor)")
