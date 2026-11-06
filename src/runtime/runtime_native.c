@@ -19764,6 +19764,23 @@ int64_t rt_io_tcp_read_line(int64_t fd) {
     return rt_string_new((const uint8_t*)buf, (uint64_t)pos);
 }
 
+/* Consume one line (newline included) without materialising it. Mirrors the
+ * Rust runtime's rt_io_tcp_drain_line: bytes consumed (capped at 8192), or -1
+ * when nothing could be read. Declared by std nogc_sync_mut/sffi/net.spl;
+ * without a C definition every C-runtime native link of a TCP client failed
+ * with `undefined symbol: rt_io_tcp_drain_line`. */
+int64_t rt_io_tcp_drain_line(int64_t fd) {
+    int64_t total = 0;
+    char byte;
+    while (total < 8192) {
+        ssize_t n = read((int)fd, &byte, 1);
+        if (n <= 0) break;
+        total++;
+        if (byte == '\n') break;
+    }
+    return total > 0 ? total : -1;
+}
+
 /* A peer closing its read side must be a transport error, never a process
  * signal. Keep one send per call so partial progress and errno stay caller-owned. */
 static ssize_t rt_io_tcp_send_no_sigpipe(int fd, const void* data, size_t len) {
@@ -20087,6 +20104,7 @@ int64_t rt_io_tcp_connect(int64_t a) { (void)a; return -1; }
 int64_t rt_io_tcp_connect_timeout(int64_t a, int64_t m) { (void)a; (void)m; return -1; }
 int64_t rt_io_tcp_read(int64_t f, int64_t s) { (void)f; (void)s; return rt_core_nil(); }
 int64_t rt_io_tcp_read_line(int64_t f) { (void)f; return rt_core_nil(); }
+int64_t rt_io_tcp_drain_line(int64_t f) { (void)f; return -1; }
 int64_t rt_io_tcp_write(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
 int64_t rt_io_socket_send_nosigpipe(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
 int64_t rt_io_tcp_write_text(int64_t f, int64_t d) { (void)f; (void)d; return -1; }

@@ -47,6 +47,32 @@ reach stderr (`llvm_native_link_orchestrator.spl:708-719` prints only the
 retention line), then fix the revealed cause. Related:
 `windows_stage2_sanity_scv_prime_skipped_and_msvc_link_fallback_2026-10-25.md` §3.
 
+**Diagnosed 2026-11-07.** The Err was not lost: it reached the worker error
+text, but fused onto un-newlined `[bootstrap-error-count]` prints and outside
+the truncated stderr tail. Revealed causes, in order:
+
+1. `Linking failed: Windows GNU linking requires bootstrap-owned clang through CC`
+   — `_link_native_mingw` (`_LinkerWrapper/shared_linking.spl`) demanded `CC`,
+   while the runtime/entry objects had just been compiled with the verified
+   PATH clang from `find_c_compiler`. Only the bootstrap scripts export `CC`.
+   Fix: with `CC` unset, link with that same discovered clang
+   (`mingw_link_driver_select`); a non-clang `CC` is still refused.
+2. With `CC` set: `undefined symbol: rt_io_tcp_drain_line` — declared by
+   `std.nogc_sync_mut.sffi.net`, defined only in the Rust runtime. Fix: C
+   definition in `src/runtime/runtime_native.c` (+ `_WIN32` stub, header).
+   With this, the admitted Stage 2 builds `loadgen.exe` (rc 0, CC set).
+
+Also: the orchestrator now prints `[LLVM-LINK] error: link_to_native failed:
+<detail>` on its own line at the failure site, and `link_to_native` resolves a
+bare `windows` host to `windows-mingw`/`windows-msvc` from
+`windows_link_flavor_for_config` (default MinGW). Pinned by
+`test/01_unit/compiler/linker/windows_link_error_surface_spec.spl`.
+
+**Still open:** on `_WIN32` every C-runtime `rt_io_tcp_*` is a stub returning
+-1/nil (`runtime_native.c`, `#else /* _WIN32 stubs */`), so a C-runtime
+Windows loadgen links but cannot open a socket. The compiler-side CC fallback
+takes effect only once a Stage 2 containing it is admitted.
+
 ## 4. Full `simple_web_server` closure has many unrelated native gaps
 
 The `main.spl` entry pulls 577 modules (async SSR, GPU, skia). Native MIR errors
