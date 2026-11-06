@@ -157,8 +157,8 @@ impl HirLowering:
         # instance `set_x` exists (seed parity, REQ-SELFHOST-ACCESSOR-003).
         # `recv.x op= v` lowers to one getter read and one setter write, after
         # the right-hand side: `{ val t = v; recv.set_x(recv.get_x() op t) }`.
-        # `recv` is a pure receiver path (the caller checks), so naming it
-        # twice evaluates nothing twice. Bug:
+        # `recv` must be a bare variable, so naming it twice evaluates nothing
+        # twice. Bug:
         # doc/08_tracking/bug/compound_assign_through_property_setter_fails_seed_2026-11-06.md
         # Otherwise nil: the caller keeps the field write.
         var owner_id = self.field_owner_for_hir_expr(base)
@@ -181,6 +181,15 @@ impl HirLowering:
                 has_type_: false,
                 type_: unit_type,
                 span: span))
+        # Only a bare variable receiver: a dotted receiver segment may itself
+        # be a forwarded getter, which naming the receiver twice would run twice.
+        val base_is_variable = match base.kind:
+            case HirExprKind.Var(_): true
+            case HirExprKind.NamedVar(_, _): true
+            case _: false
+        if not base_is_variable:
+            self.error("compound assignment to accessor `{name}` needs a variable receiver; bind the receiver to a local first", span)
+            return nil
         val getter = self.lower_accessor_read(base, name, owner_id, span)
         if not getter.?:
             self.error("compound assignment to `{name}` needs a getter `get_{name}` or `is_{name}` next to `{setter}`", span)

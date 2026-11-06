@@ -2215,6 +2215,8 @@ impl MirLowering:
                 self.builder = b
                 if self.is_tagged_text_local(result.id):
                     self.mark_tagged_text_local(local.id)
+                    self.nil_locals = marker_map_without(self.nil_locals, local.id)
+                    self.option_value_locals = marker_map_without(self.option_value_locals, local.id)
                     return
                 self.unmark_runtime_value_local(local.id)
                 self.exists_collection_locals = marker_map_without(self.exists_collection_locals, local.id)
@@ -2828,17 +2830,28 @@ impl MirLowering:
         Keeping the combine in one helper is what guarantees the load and the
         store agree on the place and that the place is resolved exactly once.
 
-        `+=` is classified like binary `+` (lower_binary_expr): an array
-        operand extends `current` in place, a text operand concatenates, and
-        only the rest is arithmetic. The collection desugar no longer turns
+        `+=` is classified by operand type: text concatenates, an array (or a
+        non-numeric right-hand side) extends `current` in place, and a numeric
+        right-hand side is arithmetic, widened to f64 when either side is a
+        float. The collection desugar no longer turns
         `t += f()` into `t.merge(f())`, so this is the only place that keeps
         text and array `+=` from becoming an integer add of two handles. Bug:
         doc/08_tracking/bug/compound_plus_assign_call_rhs_rewritten_to_merge_2026-11-06.md"""
         val is_add = match op:
             case HirAssignOp.Add: true
             case _: false
-        if is_add:
-            if self.local_is_runtime_array(current) or self.local_is_runtime_array(rhs):
+        # Close to lower_unresolved_array_merge, which handled `t += <call>`
+        # before the desugar stopped rewriting it: text concatenates; an array
+        # operand, or a right-hand side that is not a plain numeric (an array
+        # whose type was not recovered, as in `buf += more_bytes()`), extends;
+        # a numeric right-hand side adds, so `x += 1` stays arithmetic even
+        # when the place's own MIR type is unknown.
+        val rhs_scalar = self.mir_type_is_scalar_numeric(self.local_mir_type_of(rhs)) and
+            not self.local_hir_type_is_any(rhs)
+        val is_text = self.local_is_str(current) or self.local_is_str(rhs) or
+            self.local_hir_type_is_str(current) or self.local_hir_type_is_str(rhs)
+        if is_add and not is_text:
+            if self.local_is_runtime_array(current) or self.local_is_runtime_array(rhs) or not rhs_scalar:
                 val extend_op = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str("rt_array_extend_i64"),
                     MirType(kind: MirTypeKind.FuncPtr(MirSignature(
@@ -2852,8 +2865,8 @@ impl MirLowering:
                 b_ext.emit_call(extend_op, [mir_operand_copy(current), mir_operand_copy(rhs), mir_operand_copy(extend_all)], MirType(kind: MirTypeKind.I8))
                 self.builder = b_ext
                 return current
-            if self.local_is_str(current) or self.local_is_str(rhs) or
-                    self.local_hir_type_is_str(current) or self.local_hir_type_is_str(rhs):
+        if is_add and is_text:
+            if true:
                 val cat_left = self.coerce_concat_operand(current)
                 val cat_right = self.coerce_concat_operand(rhs)
                 val cat_func = MirOperand(kind: MirOperandKind.Const(
@@ -2868,9 +2881,24 @@ impl MirLowering:
                     return cat_local
                 self.error_fatal("unable to emit text `+=` concatenation", nil)
                 return current
+        # A float operand makes the arithmetic f64 (same widening as the merge
+        # arm and binary `+`); the caller's slot type is i64 for an untyped local.
+        var left_op = mir_operand_copy(current)
+        var right_op = mir_operand_copy(rhs)
+        var op_type = type_
+        val current_float = self.local_is_float(current)
+        val rhs_float = self.local_is_float(rhs)
+        if current_float or rhs_float:
+            op_type = MirType.f64()
+            var b_widen = self.builder
+            if not current_float:
+                left_op = mir_operand_copy(b_widen.emit_cast(left_op, MirType.f64()))
+            if not rhs_float:
+                right_op = mir_operand_copy(b_widen.emit_cast(right_op, MirType.f64()))
+            self.builder = b_widen
         val mir_op = self.lower_assign_op(op)
         var b = self.builder
-        val result = b.emit_binop(mir_op, mir_operand_copy(current), mir_operand_copy(rhs), type_)
+        val result = b.emit_binop(mir_op, left_op, right_op, op_type)
         self.builder = b
         result
 

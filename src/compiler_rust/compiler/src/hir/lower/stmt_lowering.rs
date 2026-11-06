@@ -189,22 +189,20 @@ fn freeze_hir_place_at(expr: HirExpr, top: bool, ctx: &mut FunctionContext, prel
 /// are re-expressed as ordinary AST before lowering.
 fn compound_assign_ast_binop(op: ast::ast::AssignOp) -> Option<ast::ast::BinOp> {
     match op {
-        ast::ast::AssignOp::AddAssign => Some(ast::ast::BinOp::Add),
-        ast::ast::AssignOp::SubAssign => Some(ast::ast::BinOp::Sub),
-        ast::ast::AssignOp::MulAssign => Some(ast::ast::BinOp::Mul),
-        ast::ast::AssignOp::DivAssign => Some(ast::ast::BinOp::Div),
+        ast::ast::AssignOp::AddAssign | ast::ast::AssignOp::SuspendAddAssign => Some(ast::ast::BinOp::Add),
+        ast::ast::AssignOp::SubAssign | ast::ast::AssignOp::SuspendSubAssign => Some(ast::ast::BinOp::Sub),
+        ast::ast::AssignOp::MulAssign | ast::ast::AssignOp::SuspendMulAssign => Some(ast::ast::BinOp::Mul),
+        ast::ast::AssignOp::DivAssign | ast::ast::AssignOp::SuspendDivAssign => Some(ast::ast::BinOp::Div),
         ast::ast::AssignOp::ModAssign => Some(ast::ast::BinOp::Mod),
-        _ => None,
+        ast::ast::AssignOp::Assign | ast::ast::AssignOp::SuspendAssign => None,
     }
 }
 
-/// `a`, `a.b`, `a.b.c`: a receiver whose evaluation runs no user code.
+/// A bare variable receiver: naming it twice runs no user code. A dotted
+/// path is not accepted, because a segment may itself be a forwarded getter
+/// that would then run twice.
 fn ast_receiver_is_variable_path(expr: &ast::ast::Expr) -> bool {
-    match expr {
-        ast::ast::Expr::Identifier(_) => true,
-        ast::ast::Expr::FieldAccess { receiver, .. } => ast_receiver_is_variable_path(receiver),
-        _ => false,
-    }
+    matches!(expr, ast::ast::Expr::Identifier(_))
 }
 
 fn compound_assign_binop(op: ast::ast::AssignOp) -> Option<BinOp> {
@@ -807,7 +805,7 @@ impl Lowerer {
                         // `recv.prop op= v` through a getter/setter pair: the
                         // RHS into a temporary first, then one getter read and
                         // one setter write (owner contract 2026-11-06). Only a
-                        // variable path receiver qualifies, so naming it twice
+                        // bare variable receiver qualifies, so naming it twice
                         // evaluates nothing twice; the read re-uses the
                         // ordinary get_/is_ forwarding of `recv.prop`.
                         // Bug: doc/08_tracking/bug/compound_assign_through_property_setter_fails_seed_2026-11-06.md
