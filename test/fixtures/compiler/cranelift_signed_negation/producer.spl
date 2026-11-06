@@ -1,0 +1,42 @@
+# @req REQ-CRANELIFT-SIGNED-NEGATION
+# Build this producer with the immutable self-hosted compiler. It emits an
+# aarch64 object whose main returns the number of failed native comparisons.
+use compiler.backend.cranelift_integer_negation.{cranelift_negate_integer_i64}
+use std.nogc_sync_mut.sffi.codegen.*
+
+fn native_case(ctx: i64, failures: i64, input: i64, expected: i64, narrow: i64) -> i64:
+    val value = cranelift_iconst(ctx, 4, input)
+    val actual = cranelift_negate_integer_i64(ctx, value, narrow)
+    val wanted = cranelift_iconst(ctx, 4, expected)
+    val mismatch = cranelift_icmp(ctx, 1, actual, wanted)
+    cranelift_iadd(ctx, failures, mismatch)
+
+fn main() -> i64:
+    val module = cranelift_new_aot_module("signed_negation", "aarch64-unknown-linux-gnu")
+    if module == 0: return 91
+    val signature = cranelift_new_signature(-1)
+    cranelift_sig_set_return(signature, 4)
+    val ctx = cranelift_begin_function(module, "main", signature)
+    if ctx == 0: return 92
+    val entry = cranelift_create_block(ctx)
+    cranelift_switch_to_block(ctx, entry)
+    var failures = cranelift_iconst(ctx, 4, 0)
+    failures = native_case(ctx, failures, -128, -128, 1)
+    failures = native_case(ctx, failures, -32768, -32768, 2)
+    failures = native_case(ctx, failures, -2147483648, -2147483648, 3)
+    for narrow in [1, 2, 3]:
+        failures = native_case(ctx, failures, 7, -7, narrow)
+        failures = native_case(ctx, failures, -7, 7, narrow)
+        failures = native_case(ctx, failures, 0, 0, narrow)
+    failures = native_case(ctx, failures, -2147483648, 2147483648, 0)
+    failures = native_case(ctx, failures, -9223372036854775807 - 1, -9223372036854775807 - 1, 0)
+    cranelift_return(ctx, failures)
+    cranelift_seal_all_blocks(ctx)
+    val finished = cranelift_end_function(ctx)
+    if finished == 0: return 93
+    if not cranelift_aot_define_function(module, finished): return 94
+    val emitted = cranelift_emit_object(module, "build/cranelift-signed-negation/negation.o")
+    cranelift_free_module(module)
+    if not emitted: return 95
+    print("emitted 14 native signed-negation comparisons")
+    0
