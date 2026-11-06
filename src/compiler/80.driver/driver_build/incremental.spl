@@ -1,3 +1,6 @@
+use compiler.driver.cache.bounded_producer_fingerprint_v1.{ProducerFingerprintLimitsV1, producer_fingerprint_budget_v1,
+    producer_tree_fingerprint_bounded_v1, producer_runtime_fingerprint_bounded_v1}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 # Incremental Compilation
 #
 # Hash-based change detection for avoiding unnecessary recompilation.
@@ -635,32 +638,26 @@ fn native_build_uncacheable_abi_identity(reason: text) -> text:
     val reason_digest = sha256_text(reason).substring(0, 16)
     "uncacheable-abi-admission-{reason_digest}-{rt_getpid()}-{rt_time_now_unix_micros()}"
 
+fn _native_build_identity_from_components_v1(hash: text, src_fp: text, lib_fp: text,
+        runtime_fp: text, runtime_bundle: text, abi_policy: text, abi_receipt: text) -> text:
+    val compiler_only_fp = if src_fp == "": "embedded" else: src_fp
+    val compiler_fp = if lib_fp == "": compiler_only_fp else: "{compiler_only_fp}+stdlib:{lib_fp}"
+    val abi_version = rt_simple_abi_version()
+    val abi_deferred = rt_simple_abi_version_deferred() != 0
+    match native_build_admitted_abi_identity(abi_policy, abi_receipt, abi_version, abi_deferred, hash):
+        case Err(reason): native_build_uncacheable_abi_identity(reason)
+        case Ok(admission_identity):
+            native_build_producer_identity(hash, compiler_fp, runtime_fp,
+                runtime_bundle, abi_version, abi_deferred, abi_policy, admission_identity)
+
 fn native_build_compiler_identity() -> text:
-    _native_build_compiler_identity_observe_v1(false)
-
-# A current authority observation, not cache invalidation. Bypass all four
-# component memo owners without resetting or updating any live build memo.
-# Callers must serialize this with compilation; one observation performs one
-# canonical compiler/stdlib/runtime/executable pass. No retry is implicit.
-pub fn native_build_compiler_identity_fresh_v1() -> text:
-    _native_build_compiler_identity_observe_v1(true)
-
-fn _native_build_compiler_identity_observe_v1(fresh: bool) -> text:
-    val src_fp = if fresh: _native_build_compiler_source_fingerprint_uncached_v1() else: native_build_compiler_source_fingerprint()
-    val hash = if fresh: _native_build_compiler_executable_hash_uncached() else: native_build_compiler_executable_hash()
+    val src_fp = native_build_compiler_source_fingerprint()
+    val hash = native_build_compiler_executable_hash()
     if hash != "":
-        val lib_fp = if fresh: native_build_spl_tree_fingerprint("src/lib") else: native_build_stdlib_source_fingerprint()
-        if fresh and (src_fp.starts_with("unfingerprintable-") or lib_fp.starts_with("unfingerprintable-")):
-            return "uncacheable-source-observation-unavailable"
-        val compiler_only_fp = if src_fp == "": "embedded" else: src_fp
-        # stdlib is a compiler-behaviour input (src/lib is interpreted as
-        # source every run); "" outside a checkout keeps the identity unchanged.
-        val compiler_fp = if lib_fp == "": compiler_only_fp else: "{compiler_only_fp}+stdlib:{lib_fp}"
+        val lib_fp = native_build_stdlib_source_fingerprint()
         val runtime_path = sosix_env_get_nullable("SIMPLE_RUNTIME_PATH") ?? ""
         val runtime_bundle = sosix_env_get_nullable("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
-        val runtime_fp = if fresh: _native_build_runtime_provider_fingerprint_uncached(runtime_path) else: native_build_runtime_provider_fingerprint(runtime_path)
-        if fresh and (runtime_fp.starts_with("unfingerprintable-") or runtime_fp == "missing" or runtime_fp == "empty"):
-            return "uncacheable-runtime-observation-unavailable"
+        val runtime_fp = native_build_runtime_provider_fingerprint(runtime_path)
         val abi_policy = sosix_env_get_nullable("SIMPLE_ABI_POLICY") ?? ""
         val abi_receipt_path = sosix_env_get_nullable("SIMPLE_ABI_ADMISSION_RECEIPT") ?? ""
         if abi_policy == "" or abi_receipt_path == "":
@@ -668,18 +665,41 @@ fn _native_build_compiler_identity_observe_v1(fresh: bool) -> text:
         val abi_receipt = incremental_file_read_text(abi_receipt_path)
         if abi_receipt == nil:
             return native_build_uncacheable_abi_identity("receipt-unreadable:{abi_receipt_path}")
-        val abi_version = rt_simple_abi_version()
-        val abi_deferred = rt_simple_abi_version_deferred() != 0
-        match native_build_admitted_abi_identity(
-            abi_policy, abi_receipt.unwrap(), abi_version, abi_deferred, hash):
-            case Err(reason):
-                return native_build_uncacheable_abi_identity(reason)
-            case Ok(admission_identity):
-                return native_build_producer_identity(hash, compiler_fp, runtime_fp,
-                    runtime_bundle, abi_version, abi_deferred, abi_policy,
-                    admission_identity)
-    # Fail closed: an unknown compiler must not reuse another compiler's cache.
+        return _native_build_identity_from_components_v1(hash, src_fp, lib_fp, runtime_fp,
+            runtime_bundle, abi_policy, abi_receipt.unwrap())
     "uncacheable-{rt_getpid()}-{rt_time_now_unix_micros()}"
+
+# Current observation without memo reads/writes. Filesystem enumeration,
+# content reads and manifest construction are admitted BEFORE allocation/hash.
+# The executable digest is an explicit parent launch witness input, not child
+# self-attestation. Only the parent can match it to the pin used for spawn.
+fn _native_build_compiler_identity_bounded_v1(executable_digest: text) -> Result<text, text>:
+    if not incremental_fingerprint_digest_valid_v1(Some(executable_digest)):
+        return Err("parent-executable-digest-invalid")
+    val budget = producer_fingerprint_budget_v1(ProducerFingerprintLimitsV1())?
+    val src_fp = producer_tree_fingerprint_bounded_v1("src/compiler", budget)?
+    val lib_fp = producer_tree_fingerprint_bounded_v1("src/lib", budget)?
+    val hash = executable_digest
+    val runtime_path = sosix_env_get_nullable("SIMPLE_RUNTIME_PATH") ?? ""
+    val runtime_bundle = sosix_env_get_nullable("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
+    val abi_policy = sosix_env_get_nullable("SIMPLE_ABI_POLICY") ?? ""
+    val abi_receipt_path = sosix_env_get_nullable("SIMPLE_ABI_ADMISSION_RECEIPT") ?? ""
+    if runtime_bundle.byte_len() > 4096 or abi_policy.byte_len() > 4096:
+        return Err("producer-configuration-limit")
+    if abi_policy == "" or abi_receipt_path == "": return Err("explicit-policy-or-receipt-absent")
+    val runtime_fp = producer_runtime_fingerprint_bounded_v1(runtime_path, budget)?
+    val receipt_bytes = budget.file_bytes(abi_receipt_path, 65536)?
+    val receipt = validated_utf8_bytes_to_text_linear(receipt_bytes)?
+    Ok(_native_build_identity_from_components_v1(hash, src_fp, lib_fp, runtime_fp,
+        runtime_bundle, abi_policy, receipt))
+
+pub fn native_build_compiler_identity_fresh_v1(executable_digest: text) -> text:
+    native_build_compiler_identity_for_executable_fresh_v1(executable_digest)
+
+pub fn native_build_compiler_identity_for_executable_fresh_v1(executable_digest: text) -> text:
+    match _native_build_compiler_identity_bounded_v1(executable_digest):
+        case Ok(identity): identity
+        case Err(reason): "uncacheable-fresh:" + reason
 
 pub fn native_build_frontend_identity() -> text:
     """Identity of the interpreter and front-end sources that create .fpc data."""
@@ -2264,3 +2284,5 @@ pub fn build_cache_rebind_scv_snapshot_all_v1(cache: BuildCache, sources: [text]
 export build_cache_rebind_scv_snapshot_all_v1
 
 export native_build_compiler_identity_fresh_v1
+
+export native_build_compiler_identity_for_executable_fresh_v1

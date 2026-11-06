@@ -4258,3 +4258,16 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_bytes_to_text(int64_t bytes_value) {
     return spl_text_from_utf8_lossy(data, (size_t)len);
 }
 #endif
+
+/* Canonical bounded snapshot sibling; legacy readdir ABI stays unchanged. */
+#include "runtime_directory_bounded_v1.h"
+
+int64_t rt_directory_list_bounded_v1(int64_t path, int64_t entries, int64_t bytes) {
+    return spl_directory_list_bounded_v1(path, entries, bytes);
+}
+int64_t rt_directory_path_probe_v1(int64_t path) { return spl_directory_path_probe_v1(path); }
+int64_t rt_directory_list_count_v1(int64_t handle) { return spl_directory_list_count_v1(handle); }
+int64_t rt_directory_entry_name_v1(int64_t handle, int64_t index) { return spl_directory_entry_name_v1(handle, index); }
+int64_t rt_directory_entry_kind_v1(int64_t handle, int64_t index) { return spl_directory_entry_kind_v1(handle, index); }
+int64_t rt_directory_entry_size_v1(int64_t handle, int64_t index) { return spl_directory_entry_size_v1(handle, index); }
+int64_t rt_directory_list_free_v1(int64_t handle) { return spl_directory_list_free_v1(handle); }

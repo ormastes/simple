@@ -7,7 +7,7 @@ use compiler.driver.driver_entry_closure_core.{driver_entry_scan_cache_release}
 use compiler.common.driver_core_types.{CompileMode, CompileResult, driver_core_compile_options_default}
 use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1}
 use compiler.driver.driver_snapshot_provider.*
-use compiler.driver.driver_build.incremental.{native_build_compiler_identity_fresh_v1}
+use compiler.driver.driver_build.incremental.{native_build_compiler_identity_for_executable_fresh_v1}
 use compiler.driver.cache.native_build_environment_identity.{native_build_environment_fingerprint_v1}
 use compiler.driver.driver_admitted_epoch.{driver_admitted_epoch_active_v1}
 use lazy compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
@@ -15,15 +15,17 @@ use lazy compiler.driver.driver.{compiler_driver_create, compiler_driver_run_com
 struct SourceAnalysisResultV1:
     receipt: SourceAnalysisReceiptV1
     diagnostics: [DiagnosticV1]
+    parent_validation_required: bool = true
 
-pub fn source_analysis_current_environment_v1(target: text) -> Result<SourceAnalysisEnvironmentV1, text>:
+pub fn source_analysis_current_environment_v1(target: text, executable_digest: text) -> Result<SourceAnalysisEnvironmentV1, text>:
+    if executable_digest == "": return Err("analysis-parent-executable-witness-required")
     if target.byte_len() > 256 or target.contains("\n"): return Err("analysis-target-invalid")
     val observed = native_build_environment_fingerprint_v1()
     if not observed.valid: return Err(observed.reason)
-    val compiler = native_build_compiler_identity_fresh_v1()
+    val compiler = native_build_compiler_identity_for_executable_fresh_v1(executable_digest)
     if compiler == "" or compiler.starts_with("uncacheable"):
         return Err("analysis-compiler-identity-unavailable")
-    Ok(SourceAnalysisEnvironmentV1(compiler_identity: sha256_text(compiler), target: target,
+    Ok(SourceAnalysisEnvironmentV1(compiler_identity: sha256_text(compiler), executable_digest: executable_digest, target: target,
         features: [], config_digest: sha256_text("canonical-default-check-v1:{target.byte_len()}:" + target + observed.digest)))
 
 fn source_analysis_route_error_v1() -> text:
@@ -53,7 +55,10 @@ fn source_analysis_result_v1(request: SourceAnalysisRequestV1, status: SourceAna
         dependencies: dependencies, dependency_digest: source_analysis_dependency_digest_v1(dependencies),
         structured_diagnostics_complete: complete), diagnostics: diagnostics)
 
-pub fn check_snapshot_set_v1(request: SourceAnalysisRequestV1) -> SourceAnalysisResultV1:
+# Direct calls cannot establish which executable a parent actually launched.
+# Worker observations below require validation against that parent's retained
+# pin/control before their Completed result is admissible to an editor.
+pub fn check_snapshot_set_v1(request: SourceAnalysisRequestV1, executable_digest: text) -> SourceAnalysisResultV1:
     # Admission precedes installation. The sole installed-owner region below
     # has no early return; every ordinary outcome removes the provider once.
     val admitted = driver_snapshot_provider_admit_v1(request)
@@ -65,12 +70,14 @@ pub fn check_snapshot_set_v1(request: SourceAnalysisRequestV1) -> SourceAnalysis
             dependency_digest: "", structured_diagnostics_complete: false)
         return SourceAnalysisResultV1(receipt: receipt, diagnostics: [])
     val owner = admitted.unwrap()
+    if executable_digest == "" or executable_digest != request.environment.executable_digest:
+        return source_analysis_result_v1(request, SourceAnalysisStatusV1.Rejected, "analysis-parent-executable-mismatch", [], [], false)
     if cwd_process() != request.workspace_root:
         return source_analysis_result_v1(request, SourceAnalysisStatusV1.Rejected, "analysis-workspace-cwd-mismatch", [], [], false)
     val route_error = source_analysis_route_error_v1()
     if route_error != "":
         return source_analysis_result_v1(request, SourceAnalysisStatusV1.Rejected, route_error, [], [], false)
-    val actual = source_analysis_current_environment_v1(request.environment.target)
+    val actual = source_analysis_current_environment_v1(request.environment.target, executable_digest)
     if actual.is_err():
         return source_analysis_result_v1(request, SourceAnalysisStatusV1.Failed, actual.unwrap_err(), [], [], false)
     if source_analysis_environment_digest_v1(actual.unwrap()) != source_analysis_environment_digest_v1(request.environment):
@@ -130,7 +137,7 @@ pub fn check_snapshot_set_v1(request: SourceAnalysisRequestV1) -> SourceAnalysis
     val diagnostics = driver.ctx.structured_diagnostics_v1
     if diagnostics.len() > request.bounds.max_diagnostics: failure = "analysis-diagnostic-limit"
     if not driver.ctx.source_analysis_diagnostics_collected_v1(require_typecheck): failure = "analysis-structured-diagnostics-incomplete"
-    val after = source_analysis_current_environment_v1(request.environment.target)
+    val after = source_analysis_current_environment_v1(request.environment.target, executable_digest)
     if after.is_err(): failure = "analysis-environment-observation-failed"
     elif source_analysis_environment_digest_v1(after.unwrap()) != source_analysis_environment_digest_v1(request.environment):
         failure = "analysis-environment-changed"
@@ -139,3 +146,8 @@ pub fn check_snapshot_set_v1(request: SourceAnalysisRequestV1) -> SourceAnalysis
     source_analysis_result_v1(request, SourceAnalysisStatusV1.Completed, "", owner.dependencies, diagnostics, true)
 
 export SourceAnalysisResultV1, check_snapshot_set_v1, source_analysis_current_environment_v1
+
+pub fn check_snapshot_set_for_parent_v1(request: SourceAnalysisRequestV1, executable_digest: text) -> SourceAnalysisResultV1:
+    check_snapshot_set_v1(request, executable_digest)
+
+export check_snapshot_set_for_parent_v1

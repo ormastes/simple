@@ -2,6 +2,7 @@
 # request; it must retain this owner until cleanup_pending() is false.
 # Boundary input/output are bounded encoded copies, never shared source state.
 use std.common.diagnostics.source_analysis_v1.{SourceAnalysisRequestV1}
+use std.common.diagnostics.source_analysis_launch_v1.{source_analysis_pin_digest_hex_v1, source_analysis_launch_response_error_v1}
 use std.common.diagnostics.source_analysis_wire_v1.{source_analysis_request_encode_v1, source_analysis_environment_decode_v1}
 use std.common.process.observation_v4.*
 use std.common.crypto.sha256.{sha256_u8_hex}
@@ -26,6 +27,7 @@ pub struct SourceAnalysisWorkerEventV1:
 
 pub struct SourceAnalysisWorkerV1:
     run_id: text
+    executable_digest: text
     lease: ProcessInspectionLeaseV1?
     executable: OwnedExecutablePin?
     directory: OwnedCwdPinV4?
@@ -170,7 +172,17 @@ impl SourceAnalysisWorkerV1:
             self.reason = read.unwrap_err()
             return
         val wire = read.unwrap()
+        # This field was read from the SAME OwnedExecutablePin passed to the
+        # native launch owner, not from SIMPLE_BINARY or child self-report.
+        val launch_error = source_analysis_launch_response_error_v1(wire, artifact.control,
+            self.executable_digest, self.run_id)
+        if launch_error != "":
+            self.reason = launch_error
+            return
         if self.request != nil:
+            if self.request.unwrap().environment.executable_digest != self.executable_digest:
+                self.reason = "analysis_request_launch_digest_mismatch"
+                return
             val response = lsp_analysis_response_decode_v1(wire)
             if response.is_err():
                 self.reason = response.unwrap_err()
@@ -180,7 +192,7 @@ impl SourceAnalysisWorkerV1:
                 return
         else:
             val environment = source_analysis_environment_decode_v1(wire)
-            if environment.is_err() or environment.unwrap().target != self.target:
+            if environment.is_err() or environment.unwrap().target != self.target or environment.unwrap().executable_digest != self.executable_digest:
                 self.reason = "environment_artifact_identity_mismatch"
                 return
         self.wire = wire
@@ -217,7 +229,7 @@ fn source_analysis_worker_launch_v1(binary: text, root: text, args: [text],
         environment.push(ProcessObservationEnvironmentV4(key: key, value: value))
     # Allocate the owner before acquiring any resource. Once a pin exists,
     # failures return this owner for retryable cleanup instead of losing it.
-    var worker = SourceAnalysisWorkerV1(run_id: run_id, lease: nil,
+    var worker = SourceAnalysisWorkerV1(run_id: run_id, executable_digest: "", lease: nil,
         executable: nil, directory: nil, status: "pending", reason: "running",
         wire: "", cancelled: false, max_wait_ms: 25, artifact: nil, request: snapshot, target: target)
     if capabilities.max_caller_wait_ns / 1000000 < worker.max_wait_ms:
@@ -239,7 +251,19 @@ fn source_analysis_worker_launch_v1(binary: text, root: text, args: [text],
         worker.reason = "pin_digest_failed"
         worker.close_pins()
         return Ok(worker)
-    val created = source_analysis_artifact_create_v1(input_text)
+    val digest_text = source_analysis_pin_digest_hex_v1(executable_digest.unwrap())
+    if digest_text.is_err():
+        worker.status = "spawn_failed"
+        worker.reason = "launch_pin_digest_invalid"
+        worker.close_pins()
+        return Ok(worker)
+    worker.executable_digest = digest_text.unwrap()
+    if snapshot != nil and snapshot.unwrap().environment.executable_digest != worker.executable_digest:
+        worker.status = "invalid_payload"
+        worker.reason = "analysis_launch_executable_changed"
+        worker.close_pins()
+        return Ok(worker)
+    val created = source_analysis_artifact_create_v1(input_text, worker.executable_digest, run_id)
     if created.is_err():
         worker.status = "spawn_failed"
         worker.reason = created.unwrap_err()

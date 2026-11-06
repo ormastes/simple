@@ -321,3 +321,16 @@ int64_t rt_shell_output(int64_t cmd_value) {
 #undef RT_CORE_POPEN
 #undef RT_CORE_PCLOSE
 }
+
+/* Canonical bounded snapshot sibling; legacy readdir ABI stays unchanged. */
+#include "runtime_directory_bounded_v1.h"
+
+int64_t rt_directory_list_bounded_v1(int64_t path, int64_t entries, int64_t bytes) {
+    return spl_directory_list_bounded_v1(path, entries, bytes);
+}
+int64_t rt_directory_path_probe_v1(int64_t path) { return spl_directory_path_probe_v1(path); }
+int64_t rt_directory_list_count_v1(int64_t handle) { return spl_directory_list_count_v1(handle); }
+int64_t rt_directory_entry_name_v1(int64_t handle, int64_t index) { return spl_directory_entry_name_v1(handle, index); }
+int64_t rt_directory_entry_kind_v1(int64_t handle, int64_t index) { return spl_directory_entry_kind_v1(handle, index); }
+int64_t rt_directory_entry_size_v1(int64_t handle, int64_t index) { return spl_directory_entry_size_v1(handle, index); }
+int64_t rt_directory_list_free_v1(int64_t handle) { return spl_directory_list_free_v1(handle); }

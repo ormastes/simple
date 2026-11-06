@@ -8,6 +8,7 @@
 # terminal retirement -> bounded nofollow read -> process ack -> fixed-leaf
 # cleanup -> close pins -> remove empty directory. Any failure retains ownership.
 use std.common.sdn.value.{SdnValue}
+use std.common.diagnostics.source_analysis_v1.{source_analysis_executable_digest_valid_v1}
 use std.common.sdn.encode.{sdn_encode_canonical}
 use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
 use std.common.binary_inspect.{hex_to_bytes}
@@ -196,14 +197,17 @@ pub fn source_analysis_artifact_reserve_v1() -> Result<SourceAnalysisArtifactV1,
         # fresh path-only identity and delete a possible replacement.
     Ok(artifact)
 
-pub fn source_analysis_artifact_create_v1(input: text) -> Result<SourceAnalysisArtifactV1, text>:
+pub fn source_analysis_artifact_create_v1(input: text, executable_digest: text, run_id: text) -> Result<SourceAnalysisArtifactV1, text>:
+    if not source_analysis_executable_digest_valid_v1(executable_digest): return Err("artifact_launch_digest_invalid")
+    if run_id == "" or run_id.byte_len() > 4096: return Err("artifact_run_id_invalid")
     if input.byte_len() > 41943040: return Err("artifact_request_exceeds_wire_limit")
     var artifact = source_analysis_artifact_reserve_v1()?
     if artifact.error != "" or not artifact.admit_initial(): return Ok(artifact)
     val root = artifact.root
     val nonce = artifact.nonce
     artifact.control = sdn_encode_canonical(SdnValue.Dict({
-        "schema": SdnValue.String("source-analysis-ipc-v1"),
+        "schema": SdnValue.String("source-analysis-ipc-v2"),
+        "executable_digest": SdnValue.String(executable_digest), "run_id": SdnValue.String(run_id),
         "directory": SdnValue.String(root), "directory_identity": SdnValue.String(artifact.identity),
         "nonce": SdnValue.String(nonce), "request_bytes": SdnValue.Int(input.byte_len()),
         "request_sha256": SdnValue.String(sha256_text(input))}))
@@ -216,8 +220,12 @@ pub fn source_analysis_artifact_create_v1(input: text) -> Result<SourceAnalysisA
 
 pub fn source_analysis_artifact_open_v1(control: text) -> Result<SourceAnalysisArtifactV1, text>:
     val value = source_analysis_wire_parse_v1(control, 16384)?
-    if source_analysis_wire_text_v1(value, "schema")? != "source-analysis-ipc-v1":
+    if source_analysis_wire_text_v1(value, "schema")? != "source-analysis-ipc-v2":
         return Err("artifact_control_schema")
+    val executable_digest = source_analysis_wire_text_v1(value, "executable_digest")?
+    val run_id = source_analysis_wire_text_v1(value, "run_id")?
+    if not source_analysis_executable_digest_valid_v1(executable_digest) or run_id == "" or run_id.byte_len() > 4096:
+        return Err("artifact_launch_identity_invalid")
     val root = source_analysis_wire_text_v1(value, "directory")?
     val nonce = source_analysis_wire_text_v1(value, "nonce")?
     val identity = source_analysis_wire_text_v1(value, "directory_identity")?

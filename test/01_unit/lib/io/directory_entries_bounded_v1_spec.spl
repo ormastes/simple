@@ -1,0 +1,40 @@
+# AUTHORED / NOT_RUN: requires an admitted Simple native runtime.
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io.directory_entries_bounded_v1.{directory_entries_bounded_v1,
+    directory_path_probe_v1, directory_observation_error_v1}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_atomic_write}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.nogc_sync_mut.io_runtime.{file_delete}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+
+describe "bounded native directory snapshots":
+    it "distinguishes exact empty EOF from quota failure and missing paths":
+        step("Observe real files through the bounded canonical owner")
+        val root = secure_temp_dir(get_temp_dir(), "simple-bounded-spec-").unwrap()
+        val empty = directory_entries_bounded_v1(root, 0, 0)
+        val wrote = file_atomic_write(root + "/a", "abc")
+        val entries = directory_entries_bounded_v1(root, 1, 2)
+        val too_many = directory_entries_bounded_v1(root, 0, 2)
+        val too_long = directory_entries_bounded_v1(root, 1, 1)
+        val file = directory_path_probe_v1(root + "/a")
+        val missing = directory_path_probe_v1(root + "/missing")
+        val missing_listing = directory_entries_bounded_v1(root + "/missing", 1, 2)
+        val deleted = file_delete(root + "/a")
+        val removed = dir_remove(root, false)
+        expect(deleted and removed).to_equal(true)
+        expect(wrote).to_equal(true)
+        expect(empty.unwrap().len()).to_equal(0)
+        expect(entries.unwrap().len()).to_equal(1)
+        expect(entries.unwrap()[0].name).to_equal("a")
+        expect(file.unwrap().kind).to_equal(1)
+        expect(file.unwrap().size).to_equal(3)
+        expect(missing.unwrap().kind).to_equal(0)
+        expect(missing_listing.is_err()).to_equal(true)
+        expect(too_many.unwrap_err()).to_equal("directory_entry_budget_exceeded")
+        expect(too_long.unwrap_err()).to_equal("directory_name_budget_exceeded")
+
+    it "rejects requests beyond hard allocation ceilings":
+        expect(directory_entries_bounded_v1("/", 65537, 1).is_err()).to_equal(true)
+        expect(directory_entries_bounded_v1("/", 1, 16777217).is_err()).to_equal(true)
+        expect(directory_observation_error_v1(-5)).to_equal("directory_bounded_unsupported")
+        expect(directory_observation_error_v1(-9)).to_equal("directory_live_owner_budget_exceeded")

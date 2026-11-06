@@ -2300,6 +2300,14 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_secure_temp_dir_set_parent", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_secure_temp_dir_set_prefix", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_secure_temp_dir_make", &[], &[I64]),
+    // Bounded directory V1 uses tagged text, matching the native core owner.
+    RuntimeFuncSpec::new("rt_directory_list_bounded_v1", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_directory_path_probe_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_directory_list_count_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_directory_entry_name_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_directory_entry_kind_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_directory_entry_size_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_directory_list_free_v1", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_file_read_lines", &[I64, I64], &[I64]), // path -> RuntimeValue (array)
     RuntimeFuncSpec::new("rt_file_append_text", &[I64, I64, I64, I64], &[I8]), // path_ptr, path_len, content_ptr, content_len -> bool
     RuntimeFuncSpec::new("rt_file_read_bytes", &[I64, I64], &[I64]),           // path -> RuntimeValue (array)
