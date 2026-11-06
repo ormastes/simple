@@ -1804,7 +1804,11 @@ pub(super) fn eval_op_expr(
                         // whose magnitude 2^63 overflows i64) evaluate correctly
                         // instead of raising "integer negation overflow".
                         let int_value = val.as_int()?;
-                        Value::Int(int_value.wrapping_neg())
+                        let negated = int_value.wrapping_neg();
+                        Value::Int(match static_int_width(operand, env) {
+                            StaticIntWidth::Narrow(width) => wrap_signed(negated, width),
+                            _ => negated,
+                        })
                     }
                 }
                 UnaryOp::Not => Value::Bool(!is_condition_present(operand, &val)),

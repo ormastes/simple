@@ -320,7 +320,28 @@ pub fn compile_unary_op<M: Module>(
             if val_is_float {
                 builder.ins().fneg(val)
             } else {
-                builder.ins().ineg(val)
+                let negated = builder.ins().ineg(val);
+                // Narrow signed locals can arrive widened to i64, especially
+                // across blocks. Unary minus must wrap at the operand's
+                // declared width even when no narrowing Store follows it.
+                let declared = match ctx.vreg_types.get(&operand).copied() {
+                    Some(TypeId::I8) => Some(types::I8),
+                    Some(TypeId::I16) => Some(types::I16),
+                    Some(TypeId::I32) => Some(types::I32),
+                    _ => None,
+                };
+                if let Some(narrow) = declared {
+                    let wrapped = if narrow.bits() < val_type.bits() {
+                        builder.ins().ireduce(narrow, negated)
+                    } else {
+                        negated
+                    };
+                    // Normalize the signed result before the generic return
+                    // ABI can zero-extend a narrow parameter's negation.
+                    builder.ins().sextend(types::I64, wrapped)
+                } else {
+                    negated
+                }
             }
         }
         UnaryOp::Not => {
