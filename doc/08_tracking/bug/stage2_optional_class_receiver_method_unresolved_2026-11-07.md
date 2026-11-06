@@ -28,7 +28,11 @@ payload is a copy, so a `me` write would be dropped. A class that does not decla
 the method, and an optional primitive, are still rejected.
 
 Spec: `test/01_unit/compiler/50.mir/optional_class_receiver_method_spec.spl`.
-Before the fix: 3 passed, 4 failed. After the fix: 7 passed.
+Before the fix: 5 passed, 5 failed. After the fix: 10 passed. Cases: field, exists-check,
+alias, trait-impl method, panic path; negatives: undeclared method, optional
+primitive, struct payload, Option API name. Option API names (`expect`, `and_then`,
+`hash`, ...) stay Option-owned even when `C` declares them, and the unwrap is emitted
+only when the owner dispatch will resolve the method.
 
 ### 2. Two `RenderBackend` traits (source)
 
@@ -89,3 +93,19 @@ These stay with their owners or with sibling lanes:
 - **Owned by the payload-shape lane:** the four compositor errors "native optional
   trait conversion requires a matching declared payload".
 - **Not investigated:** `CompositorBackend` for `SharedMdiFramebufferBackend`.
+
+## Verification (run-13 Stage 2 binary, per-module `compile --format=smf`)
+
+The Stage 2 binary embeds the OLD MIR lowering, so it validates the source fixes
+only; the compiler fix (cause 1) is proven by the spec and takes effect on the next
+Stage 2. `engine.spl` closure: engine.spl itself 145 -> 3 MIR errors; 0 trait-object
+errors remain in the closure. The rest of the closure's errors (opencl_session 46,
+font_renderer 23, cuda_session 20) are cause-1 optional receivers.
+
+Remaining in engine.spl:
+- `cuda.draw_text_bg` -- the `Engine2DExtended for CudaBackend` impl lives in
+  `backend_cuda_ext.spl`, which engine.spl never imported (import added).
+- `vulkan.submit_batch_for_present()` -- `Engine2D.submit_batch_for_present` was added
+  in 8a87db7d9eb but `VulkanBackend.submit_batch_for_present` never landed in this
+  tree. Owner decision: implement the presenter-read receipt or delete the wrapper
+  (only `engine_branch_coverage_spec` calls it).

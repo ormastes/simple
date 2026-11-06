@@ -71,6 +71,14 @@ fn mir_conv_log_on() -> bool:
         mir_conv_log_state = if env_get_opt("SIMPLE_MIR_LOG_CONV") == Some("1"): 1 else: 0
     mir_conv_log_state == 1
 
+fn mir_option_api_method_name_v1(method: text) -> bool:
+    """Option's method surface (std Option + the MIR Option lowering)."""
+    val names = ["unwrap", "unwrap_or", "unwrap_or_else", "unwrap_or_default", "unwrap_err",
+        "expect", "is_some", "is_none", "map", "map_or", "map_or_else", "and_then", "or",
+        "or_else", "xor", "filter", "ok_or", "ok_or_else", "take", "replace", "zip", "flatten",
+        "get_or_insert", "get_or_insert_with", "iter", "hash", "to_text"]
+    names.contains(method)
+
 # ============================================================================
 # Expression Lowering
 # ============================================================================
@@ -2251,6 +2259,10 @@ impl MirLowering:
         and hand back the payload local tagged with `C`'s identity. Classes
         only: a struct payload is a copy, so a `me` write would be dropped.
         doc/08_tracking/bug/stage2_optional_class_receiver_method_unresolved_2026-11-07.md"""
+        # Option's own API stays Option-owned even when `C` declares a
+        # same-named method: an Option call the Option lowering does not
+        # cover must keep failing closed, not silently become `C.method`.
+        if mir_option_api_method_name_v1(method): return nil
         val found_type: HirType? = self.receiver_declared_or_result_type(receiver, receiver_local)
         if val receiver_type = found_type:
             match receiver_type.kind:
@@ -2264,8 +2276,16 @@ impl MirLowering:
                                 if identity == "": return nil
                                 val method_key = self.struct_owner_method_key(identity, method)
                                 self.provider_method_materialize_v1(method_key)
-                                if not self.struct_method_key_present_v1(method_key) and self.symbols.lookup_method_in_type(owner_id, method) == nil:
-                                    return nil
+                                # Admit only what the owner dispatch below will
+                                # resolve (struct_method_syms, else the name
+                                # lookup), so no unwrap is emitted for a call
+                                # that is then rejected anyway.
+                                var dispatchable = self.struct_method_key_present_v1(method_key)
+                                if not dispatchable:
+                                    val named_owner = self.symbols.lookup_or_invalid(identity)
+                                    if named_owner.is_valid():
+                                        dispatchable = self.symbols.lookup_method_in_type(named_owner, method) != nil
+                                if not dispatchable: return nil
                                 val no_args: [HirCallArg] = []
                                 val unwrapped_result = self.try_lower_option_method(receiver, "unwrap", no_args, nil, nil, true, receiver_local)
                                 if val unwrapped = unwrapped_result:
