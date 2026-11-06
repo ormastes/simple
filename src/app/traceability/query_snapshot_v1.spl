@@ -6,11 +6,14 @@ use app.traceability.snapshot.query_scope_v1.{trace_query_default_declarations_v
 use app.traceability.snapshot.worktree_query_v1.{trace_worktree_query_inputs_v1}
 use app.traceability.extract.snapshot_pipeline.{TraceSnapshotScope, TraceSnapshotBuild, build_snapshot_trace_graph_with_sidecar_v1}
 use app.traceability.snapshot.legacy_bug_db_v1.{trace_legacy_bug_db_capture_v1}
-use std.common.traceability.legacy_bugs_v1.{LegacyBugSourceV1, legacy_bug_nodes_v1}
-use std.common.traceability.sidecar_v1.{legacy_bug_sidecar_source_v1, legacy_bug_sidecar_references_v1}
+use app.traceability.snapshot.spec_annotations_v1.{trace_spec_annotations_capture_v1}
+use std.common.traceability.legacy_bugs_v1.{LegacyBugRowV1, legacy_bug_nodes_v1}
+use std.common.traceability.sidecar_v1.{TraceSidecarSourceV1, TraceSidecarReferenceV1, legacy_bug_sidecar_source_v1, legacy_bug_sidecar_references_v1}
 
 pub fn trace_query_build_snapshot_v1(options: TraceQueryOptionsV1) -> Result<TraceSnapshotBuild, text>:
     val declarations = if options.declarations.len() == 0: trace_query_default_declarations_v1() else: options.declarations
+    if options.snapshot != "worktree" and options.spec_roots.len() > 0:
+        return Err("TRACE-QUERY-UNAVAILABLE: spec-root scanning is a worktree-preview sidecar")
     var snapshot: SnapshotInput
     if options.snapshot == "worktree":
         snapshot = trace_worktree_query_inputs_v1(declarations, options.paths)?
@@ -32,15 +35,29 @@ pub fn trace_query_build_snapshot_v1(options: TraceQueryOptionsV1) -> Result<Tra
     val policy = TracePolicy(id: "policy:local-registered-query/v1", authorities: [],
         max_nodes: 40000, max_claims: 100000, conventions: [])
     val scope = TraceSnapshotScope(selected_roots: trace_sorted_ids(paths), authority_id: "", closure_kind: "selected_scope")
-    # Legacy bug DB sidecar: worktree preview only, read-only, identity-bound.
-    var legacy: LegacyBugSourceV1? = nil
-    if options.snapshot == "worktree" and options.bug_db != "none":
-        legacy = trace_legacy_bug_db_capture_v1(options.bug_db, options.bug_db_explicit)?
-    if not legacy.?:
-        return build_snapshot_trace_graph_with_sidecar_v1(snapshot, policy, declarations, scope, [], [], [])
-    val source = legacy.unwrap()
-    var build = build_snapshot_trace_graph_with_sidecar_v1(snapshot, policy, declarations, scope,
-        [legacy_bug_sidecar_source_v1(source)], legacy_bug_nodes_v1(source), source.diagnostics)?
-    build.legacy_bugs = source.rows
-    build.sidecar_references = legacy_bug_sidecar_references_v1(source.rows)
+    # Sidecars (worktree preview only, read-only, identity-bound): the legacy
+    # bug DB by default, `# @req` spec headers under explicit --spec-root dirs.
+    var sources: [TraceSidecarSourceV1] = []
+    var nodes: [TraceNode] = []
+    var diagnostics: [TraceDiagnostic] = []
+    var references: [TraceSidecarReferenceV1] = []
+    var rows: [LegacyBugRowV1] = []
+    if options.snapshot == "worktree":
+        if options.bug_db != "none":
+            val legacy = trace_legacy_bug_db_capture_v1(options.bug_db, options.bug_db_explicit)?
+            if legacy.?:
+                val source = legacy.unwrap()
+                sources.push(legacy_bug_sidecar_source_v1(source))
+                nodes = legacy_bug_nodes_v1(source)
+                diagnostics = source.diagnostics
+                rows = source.rows
+                references = legacy_bug_sidecar_references_v1(source.rows)
+        if options.spec_roots.len() > 0:
+            val scan = trace_spec_annotations_capture_v1(options.spec_roots)?
+            for source in scan.sources: sources.push(source)
+            for diagnostic in scan.diagnostics: diagnostics.push(diagnostic)
+            for reference in scan.references: references.push(reference)
+    var build = build_snapshot_trace_graph_with_sidecar_v1(snapshot, policy, declarations, scope, sources, nodes, diagnostics)?
+    build.legacy_bugs = rows
+    build.sidecar_references = references
     Ok(build)

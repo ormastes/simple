@@ -1,0 +1,53 @@
+# Bounded, opt-in scan of `*_spec.spl` headers under explicit roots.
+# Read-only; worktree preview only; every file is read whole through the
+# no-follow bounded reader (it refuses, not truncates, over-bound files).
+use std.common.traceability.model.*
+use std.common.traceability.schema.{trace_path_valid}
+use std.common.traceability.sidecar_v1.{TraceSidecarReferenceV1, TraceSidecarSourceV1}
+use std.common.traceability.annotations_v1.{SpecHeaderDigestV1, parse_req_annotations_v1, annotation_sidecar_source_v1}
+use std.common.string_core.{string_from_byte_array, text_validate_utf8}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded_bytes, file_size_raw, file_is_regular_no_follow}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow, dir_walk}
+
+pub struct SpecAnnotationCaptureV1:
+    sources: [TraceSidecarSourceV1]
+    references: [TraceSidecarReferenceV1]
+    diagnostics: [TraceDiagnostic]
+
+fn annotation_diagnostic(root: text, path: text, message: text) -> TraceDiagnostic:
+    TraceDiagnostic(code: "TRACE-ANNOTATION-SCAN", subject_id: root, rule_id: "annotation-req/v1",
+        entity_id: path, origin_id: "", message: message, severity: "warning")
+
+pub fn trace_spec_annotations_capture_v1(roots: [text]) -> Result<SpecAnnotationCaptureV1, text>:
+    var capture = SpecAnnotationCaptureV1(sources: [], references: [], diagnostics: [])
+    var total = 0
+    for root in roots:
+        if not trace_path_valid(root) or not dir_is_real_no_follow(root):
+            return Err("TRACE-ANNOTATION-CAPTURE: spec root must be a real repository-relative directory: " + root)
+        var digests: [SpecHeaderDigestV1] = []
+        for path in dir_walk(root):
+            if not path.ends_with("_spec.spl"): continue
+            if total >= 4096: return Err("TRACE-ANNOTATION-CAPTURE: spec file budget of 4096 exhausted")
+            total = total + 1
+            if not trace_path_valid(path) or not file_is_regular_no_follow(path):
+                capture.diagnostics.push(annotation_diagnostic(root, path, "spec path is unsafe or not a regular file; skipped"))
+                continue
+            val size = file_size_raw(path)
+            if size < 0 or size > 1048576:
+                capture.diagnostics.push(annotation_diagnostic(root, path, "spec exceeds the 1 MiB read bound; skipped"))
+                continue
+            val bytes = match file_read_regular_no_follow_bounded_bytes(path, if size == 0: 1 else: size):
+                case Ok(value): value
+                case Err(reason):
+                    capture.diagnostics.push(annotation_diagnostic(root, path, "spec read failed; skipped: " + reason))
+                    continue
+            val content = string_from_byte_array(bytes)
+            if not text_validate_utf8(content):
+                capture.diagnostics.push(annotation_diagnostic(root, path, "spec is not UTF-8; skipped"))
+                continue
+            digests.push(SpecHeaderDigestV1(path: path, content_sha256: "sha256:" + sha256_text(content)))
+            for reference in parse_req_annotations_v1(content, path):
+                capture.references.push(reference)
+        capture.sources.push(annotation_sidecar_source_v1(root, digests))
+    Ok(capture)
