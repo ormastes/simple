@@ -4903,7 +4903,11 @@ impl MirLowering:
                         # Scrutinee-instantiation-derived name: immune to the
                         # global-map collision above.
                         self.struct_value_syms[bound_payload.id] = scrutinee_payload_struct
-                    elif payload_struct != nil and payload_struct != "":
+                    elif payload_struct != nil and payload_struct != "" and not hir_payload_type_is_structural(result_payload_type):
+                        # The closure-global slot is only a guess for an
+                        # unknown payload. A known structural payload (`T?`,
+                        # array, tuple, primitive) is never a record value
+                        # (simple_ring_result_payload_provenance_2026-11-06).
                         self.struct_value_syms[bound_payload.id] = payload_struct ?? ""
                     else:
                         # Declared nominal payload (`case X86(caps)` with
@@ -9396,3 +9400,13 @@ impl MirLowering:
 # lowered to a const-0 placeholder in MIR. Bug: doc/08_tracking/bug/mir_unresolved_method_on_enum_payload_binding_2026-10-25.md
 fn wa_method_resolution_symbol_id(r: MethodResolution) -> SymbolId?:
     r.get_symbol_id()
+
+fn hir_payload_type_is_structural(payload: HirType?) -> bool:
+    """True when a known Result/Option payload type can never hold a record
+    value, so the closure-global payload-record slot must not be applied."""
+    if val found = payload:
+        match found.kind:
+            case HirTypeKind.Optional(_) | HirTypeKind.Array(_, _) | HirTypeKind.Slice(_) | HirTypeKind.Tuple(_) | HirTypeKind.Dict(_, _): return true
+            case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char | HirTypeKind.Str | HirTypeKind.Unit: return true
+            case _: return false
+    false
