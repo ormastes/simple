@@ -149,14 +149,15 @@ impl HirLowering:
                 has_type_: true, type_: unit_type, span: span))
         val hir_op: HirAssignOp? = self.lower_hir_assign_op_opt(op)
         # Setter forwarding (REQ-SELFHOST-ACCESSOR-003): `recv.x = v` with no
-        # real field `x` becomes `recv.set_x(v)`. Only an identifier receiver
-        # is probed, so re-lowering it for the ordinary path is side-effect free.
+        # real field `x` becomes `recv.set_x(v)`. Only a pure receiver path
+        # (`a` or `a.b.c`) is probed, so re-lowering it for the ordinary path is
+        # side-effect free.
         # Discriminant-gated: see the SEED PATTERN HAZARD note in expression_core.
         if hir_expr_kind_disc(target.kind) == hir_expr_kind_disc(ExprKind.Field(target, "")):
             match target.kind:
                 case ExprKind.Field(acc_base, acc_name):
                     val acc_base_e: Expr = acc_base
-                    if hir_expr_kind_disc(acc_base_e.kind) == hir_expr_kind_disc(ExprKind.Ident("")):
+                    if accessor_pure_receiver_path(acc_base_e):
                         val acc_hir_base = self.lower_hir_expr(acc_base_e)
                         val acc_rhs = self.lower_hir_expr(value)
                         if val acc_call = self.lower_accessor_write(acc_hir_base, acc_name, acc_rhs, op.?, span):
@@ -1056,3 +1057,17 @@ impl HirLowering:
                 ))
 
         HirStmt(kind: kind, span: s.span)
+
+
+# True for an identifier or a field chain over one (`a`, `a.b`, `a.b.c`): a
+# receiver whose lowering has no side effects, so it may be lowered twice.
+fn accessor_pure_receiver_path(e: Expr) -> bool:
+    if hir_expr_kind_disc(e.kind) == hir_expr_kind_disc(ExprKind.Ident("")):
+        return true
+    if hir_expr_kind_disc(e.kind) == hir_expr_kind_disc(ExprKind.Field(e, "")):
+        match e.kind:
+            case ExprKind.Field(inner, _):
+                val inner_e: Expr = inner
+                return accessor_pure_receiver_path(inner_e)
+            case _: ()
+    false
