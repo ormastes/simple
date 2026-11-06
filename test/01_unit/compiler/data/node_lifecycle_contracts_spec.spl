@@ -1,0 +1,139 @@
+# REQ-003: construction facts over the one canonical data-schema resolver.
+# These tests do not establish owned cleanup or compiler must-resolve enforcement.
+use std.spec
+use std.spec.step
+use compiler.common.data.data_schema_contracts.{
+    DataAttrDeclV1, DataSchemaSurfaceV1, DataDeclOriginV1, DataRequirednessV1,
+    data_attr_decl_v1, data_type_ref_v1, data_decl_provenance_v1, data_schema_authority_v1
+}
+use compiler.common.data.data_schema_resolver.{data_schema_resolve_v1}
+use compiler.common.data.node_lifecycle_contracts.*
+
+fn node_lifecycle_test_field(name: text, default_key: text) -> DataAttrDeclV1:
+    val requiredness = if default_key.len() == 0: DataRequirednessV1.Required else: DataRequirednessV1.Defaulted
+    data_attr_decl_v1("compiler.ast", "Binary", name, data_type_ref_v1("compiler.ExprRef", []),
+        requiredness, default_key, data_decl_provenance_v1(DataDeclOriginV1.Spl, "ast.spl", 1, "compiler.ast"))
+
+fn node_lifecycle_test_schema(default_left: text = "") -> DataSchemaSurfaceV1:
+    data_schema_resolve_v1(data_schema_authority_v1("compiler.ast", ["compiler.ast"]),
+        [node_lifecycle_test_field("left", default_left), node_lifecycle_test_field("right", "default_right")], []).unwrap()
+
+describe "Whole-node construction facts":
+    it "retains pending state and assigned slots when finish fails":
+        step("Build and finalize a typed node")
+        val schema = node_lifecycle_test_schema()
+        val begin = node_construction_begin_v1(schema, "Binary")
+        expect(begin.ok).to_equal(true)
+        val left = node_construction_record_initialized_v1(schema, begin.facts, 1)
+        expect(left.ok).to_equal(true)
+        expect(begin.facts.initialized[0]).to_equal(false)
+        val failed = node_construction_try_finish_v1(schema, left.facts)
+        expect(failed.ok).to_equal(false)
+        expect(failed.attribute_id).to_equal(2)
+        expect(failed.facts.initialized).to_equal([true, false])
+        expect(node_construction_state_code_v1(failed.facts.state)).to_equal(0)
+
+    it "does not treat a declared default as an executed initializer":
+        val schema = node_lifecycle_test_schema()
+        val begin = node_construction_begin_v1(schema, "Binary")
+        val left = node_construction_record_initialized_v1(schema, begin.facts, 1)
+        val failed = node_construction_try_finish_v1(schema, left.facts)
+        expect(failed.reason).to_contain("right")
+        val right = node_construction_record_initialized_v1(schema, failed.facts, 2)
+        expect(right.ok).to_equal(true)
+        val ready = node_construction_try_finish_v1(schema, right.facts)
+        expect(ready.ok).to_equal(true)
+        expect(node_construction_state_code_v1(ready.facts.state)).to_equal(1)
+        expect(node_construction_scope_exit_error_v1(ready.facts)).to_equal("")
+        expect(node_construction_record_discard_v1(schema, ready.facts).ok).to_equal(false)
+        expect(node_construction_record_initialized_v1(schema, ready.facts, 1).ok).to_equal(false)
+
+    it "rejects duplicate initialization before replacing an owned slot":
+        val schema = node_lifecycle_test_schema()
+        val begin = node_construction_begin_v1(schema, "Binary")
+        val first = node_construction_record_initialized_v1(schema, begin.facts, 1)
+        expect(node_construction_initializer_error_v1(schema, first.facts, 1)).to_contain("already initialized")
+        val duplicate = node_construction_record_initialized_v1(schema, first.facts, 1)
+        expect(duplicate.ok).to_equal(false)
+        expect(duplicate.facts.initialized).to_equal([true, false])
+
+    it "diagnoses unresolved drop and records explicit discard only once":
+        val schema = node_lifecycle_test_schema()
+        val pending = node_construction_begin_v1(schema, "Binary")
+        expect(node_construction_scope_exit_error_v1(pending.facts)).to_contain("explicitly discarded")
+        val discarded = node_construction_record_discard_v1(schema, pending.facts)
+        expect(discarded.ok).to_equal(true)
+        expect(node_construction_scope_exit_error_v1(discarded.facts)).to_equal("")
+        expect(node_construction_record_discard_v1(schema, discarded.facts).ok).to_equal(false)
+        expect(node_construction_try_finish_v1(schema, discarded.facts).ok).to_equal(false)
+
+    it "rejects a changed schema even when attribute counts match":
+        val schema = node_lifecycle_test_schema()
+        val pending = node_construction_begin_v1(schema, "Binary")
+        val other = node_lifecycle_test_schema("changed_default")
+        val result = node_construction_record_initialized_v1(other, pending.facts, 1)
+        expect(result.ok).to_equal(false)
+        expect(result.reason).to_equal("construction schema mismatch")
+
+    it "rejects zero and out-of-bounds canonical IDs and unknown views":
+        val schema = node_lifecycle_test_schema()
+        expect(node_construction_begin_v1(schema, "Missing").ok).to_equal(false)
+        val pending = node_construction_begin_v1(schema, "Binary")
+        expect(node_construction_record_initialized_v1(schema, pending.facts, 0).ok).to_equal(false)
+        expect(node_construction_record_initialized_v1(schema, pending.facts, -1).ok).to_equal(false)
+        expect(node_construction_record_initialized_v1(schema, pending.facts, 3).ok).to_equal(false)
+
+    it "rejects stale surface digests and unsupported versions":
+        var schema = node_lifecycle_test_schema()
+        schema.schema_digest = "stale"
+        val stale = node_construction_begin_v1(schema, "Binary")
+        expect(stale.ok).to_equal(false)
+        expect(stale.reason).to_contain("digest")
+        schema = node_lifecycle_test_schema()
+        schema.contract_version = 99
+        expect(node_construction_begin_v1(schema, "Binary").ok).to_equal(false)
+
+    it "does not invent a declared view for an empty V1 surface":
+        val schema = data_schema_resolve_v1(data_schema_authority_v1("compiler.ast", ["compiler.ast"]), [], []).unwrap()
+        val begin = node_construction_begin_v1(schema, "Empty")
+        expect(begin.ok).to_equal(false)
+        expect(begin.reason).to_contain("view is not declared")
+
+    it "checks applicability and finishes only the selected view":
+        val left = node_lifecycle_test_field("left", "")
+        var right = node_lifecycle_test_field("right", "")
+        right.view = "Unary"
+        val schema = data_schema_resolve_v1(data_schema_authority_v1("compiler.ast", ["compiler.ast"]), [left, right], []).unwrap()
+        val begin = node_construction_begin_v1(schema, "Binary")
+        expect(begin.ok).to_equal(true)
+        val wrong_view = node_construction_record_initialized_v1(schema, begin.facts, 2)
+        expect(wrong_view.ok).to_equal(false)
+        expect(wrong_view.reason).to_contain("not applicable")
+        val initialized = node_construction_record_initialized_v1(schema, begin.facts, 1)
+        val finished = node_construction_try_finish_v1(schema, initialized.facts)
+        expect(finished.ok).to_equal(true)
+        expect(finished.facts.initialized).to_equal([true, false])
+
+    it "requires an actual optional-absence initializer commit":
+        var field = node_lifecycle_test_field("left", "")
+        field.requiredness = DataRequirednessV1.Optional
+        val schema = data_schema_resolve_v1(data_schema_authority_v1("compiler.ast", ["compiler.ast"]), [field], []).unwrap()
+        val begin = node_construction_begin_v1(schema, "Binary")
+        expect(node_construction_try_finish_v1(schema, begin.facts).ok).to_equal(false)
+        val initialized = node_construction_record_initialized_v1(schema, begin.facts, 1)
+        expect(node_construction_try_finish_v1(schema, initialized.facts).ok).to_equal(true)
+
+    it "rejects noncanonical IDs and truncated initialization bitmaps":
+        var schema = node_lifecycle_test_schema()
+        var first = schema.attrs[0]
+        first.id.ordinal = 0
+        schema.attrs[0] = first
+        val malformed = node_construction_begin_v1(schema, "Binary")
+        expect(malformed.ok).to_equal(false)
+        expect(malformed.reason).to_contain("canonical attribute identities")
+        schema = node_lifecycle_test_schema()
+        var pending = node_construction_begin_v1(schema, "Binary").facts
+        pending.initialized = []
+        val truncated = node_construction_record_initialized_v1(schema, pending, 1)
+        expect(truncated.ok).to_equal(false)
+        expect(truncated.reason).to_equal("construction schema mismatch")
