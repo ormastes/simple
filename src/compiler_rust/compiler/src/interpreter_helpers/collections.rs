@@ -505,6 +505,12 @@ pub(crate) use interpreter_helpers_option_result::*;
 
 /// Convert a value to an iterable vector (for comprehensions)
 pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
+    // `List<T>` is a plain class whose payload is the `items` array.
+    if val.aggregate_class() == Some("List") {
+        if let Some(items @ (Value::Array(_) | Value::FrozenArray(_))) = val.aggregate_field("items") {
+            return iter_to_vec(&items);
+        }
+    }
     match val {
         Value::Array(arr) => Ok(arr.to_vec()),
         Value::FrozenArray(arr) => Ok(arr.to_vec()),

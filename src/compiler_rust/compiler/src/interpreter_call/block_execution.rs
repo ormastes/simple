@@ -161,6 +161,12 @@ fn inject_mixins(class_def: &ClassDef) -> ClassDef {
 }
 
 fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
+    // `List<T>` is a plain class whose payload is the `items` array.
+    if iterable.aggregate_class() == Some("List") {
+        if let Some(items @ (Value::Array(_) | Value::FrozenArray(_))) = iterable.aggregate_field("items") {
+            return get_iterator_values(&items);
+        }
+    }
     match iterable {
         Value::Array(arr) => Ok(arr.to_vec()),
         Value::FrozenArray(arr) => Ok(arr.to_vec()),

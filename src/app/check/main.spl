@@ -7,7 +7,6 @@ use compiler.core.parser.{parse_module, parser_has_errors, parser_get_errors}
 use compiler.core.ast.{ast_reset}
 use compiler.core.types.{reset_all_pools}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
-use std.nogc_sync_mut.io.file_discovery.{find_spl_files}
 use app.check.sspec_source.{check_sspec_guidance}
 use app.check.targets.{expand_check_targets}
 use app.check.check_options.{check_option_error}
@@ -18,6 +17,7 @@ use common.text.{escape_json}
 
 use std.io_runtime.{get_args}
 use std.io_runtime.{file_exists}
+use std.io_runtime.{dir_exists}
 use std.io_runtime.{read_file_text}
 @unsafe(reason: "raw transient heap scope ABI", capabilities: [ffi])
 extern fn rt_transient_array_scope_begin() -> bool
@@ -112,15 +112,9 @@ fn collect_files(args: [text]) -> [text]:
         elif is_log_option(arg):
             val _skip = 0
         elif not arg.starts_with("-"):
-            if file_exists(arg):
-                val discovered = find_spl_files(arg)
-                if discovered.len() == 0:
-                    files.push(arg)
-                else:
-                    for discovered_file in discovered:
-                        files.push(discovered_file)
-            else:
-                files.push(arg)
+            # Directory expansion belongs to expand_check_targets (recursive,
+            # dir-aware); expanding here re-joined a plain file path onto itself.
+            files.push(arg)
         i = i + 1
     files
 
@@ -132,6 +126,71 @@ fn import_line_has_symbol(trimmed: text, owner: text, symbol: text) -> bool:
     normalized = normalized.replace("{", ",")
     normalized = normalized.replace("}", ",")
     normalized.contains(",{symbol},")
+
+fn import_module_path(trimmed: text) -> text:
+    var rest = trimmed.slice(4, trimmed.len()).trim()
+    if rest.starts_with("lazy "):
+        rest = rest.slice(5, rest.len()).trim()
+    if rest.contains("{"):
+        rest = rest.split("{")[0]
+    if rest.contains(" as "):
+        rest = rest.split(" as ")[0]
+    if rest.ends_with(".*"):
+        rest = rest.slice(0, rest.len() - 2)
+    rest = rest.trim()
+    while rest.ends_with("."):
+        rest = rest.slice(0, rest.len() - 1)
+    rest
+
+fn import_root_exists(path: text, segment: text) -> bool:
+    if segment == "std" or segment == "lib" or segment == "super" or segment == "self" or segment == "crate" or segment == "":
+        return true
+    val path_parts = path.split("/")
+    var dir_part = ""
+    var pi = 0
+    while pi < path_parts.len() - 1:
+        dir_part = dir_part + path_parts[pi] + "/"
+        pi = pi + 1
+    var roots: [text] = ["", "src/", "src/lib/", "src/compiler/", dir_part]
+    val src_parts = path.split("/src/")
+    if src_parts.len() >= 2:
+        roots.push(src_parts[0] + "/src/")
+        roots.push(src_parts[0] + "/src/lib/")
+    for root in roots:
+        if dir_exists(root + segment) or file_exists(root + segment + ".spl"):
+            return true
+    false
+
+# W0410: cheap first-segment probe. A module whose top-level segment names no
+# directory or file under any known source root cannot resolve; deeper-segment
+# resolution stays with the module loader.
+fn unresolved_import_diagnostics(source: text, path: text) -> [CheckDiagnostic]:
+    var out: [CheckDiagnostic] = []
+    var line_no = 0
+    var in_triple = false
+    for line in source.split("\n"):
+        line_no = line_no + 1
+        val trimmed = line.trim()
+        val triple_count = line.split("\"\"\"").len() - 1
+        if in_triple:
+            if triple_count % 2 == 1:
+                in_triple = false
+            continue
+        if triple_count % 2 == 1:
+            in_triple = true
+            continue
+        if not trimmed.starts_with("use "):
+            continue
+        val module_path = import_module_path(trimmed)
+        if module_path == "":
+            continue
+        val first = module_path.split(".")[0]
+        if not import_root_exists(path, first):
+            out.push(CheckDiagnostic(path: path, code: "W0410", severity: "warning",
+                message: "unresolved import '{module_path}'",
+                line: line_no, column: 1,
+                help: "check the module path or add the source root with --source-root"))
+    out
 
 fn concurrency_import_error(owner: text, symbol: text, expected: text) -> text:
     "error[E-PAR-003]: {symbol} belongs to {expected}, not {owner}. import {symbol} from {expected}"
@@ -229,6 +288,11 @@ fn emit_check_message(path: text, message: text, as_json: bool):
     emit_check_diagnostic(CheckDiagnostic(path: path, code: "check", message: message), as_json)
 
 fn check_one_profiled(path: text, as_json: bool, phase_profile: bool, syntax_only: bool, done: i64, total: i64) -> i64:
+    val (failures, _warnings) = check_one_full(path, as_json, phase_profile, syntax_only, done, total)
+    failures
+
+fn check_one_full(path: text, as_json: bool, phase_profile: bool, syntax_only: bool, done: i64, total: i64) -> (i64, i64):
+    var warning_count = 0
     var file_started_us: i64 = 0
     var phase_started_us: i64 = 0
     if phase_profile:
@@ -240,12 +304,12 @@ fn check_one_profiled(path: text, as_json: bool, phase_profile: bool, syntax_onl
         emit_check_diagnostic(CheckDiagnostic(path: path, code: "E0001",
             message: "cannot read file: {path}",
             help: "check that the path exists and is readable"), as_json)
-        return 1
+        return (1, 0)
     if not checker_begin_file_scope():
         if phase_profile:
             val _marked = check_phase_mark(true, "scope_setup", phase_started_us, path, done, total, "failed")
         emit_check_message(path, "checker transient parse scope unavailable", as_json)
-        return 1
+        return (1, 0)
     if phase_profile:
         phase_started_us = check_phase_mark(true, "scope_setup", phase_started_us, path, done, total, "running")
 
@@ -274,7 +338,11 @@ fn check_one_profiled(path: text, as_json: bool, phase_profile: bool, syntax_onl
                 emit_check_message(path, "check failed", as_json)
             val total = errors.len() + concurrency_errors.len()
             failure_count = if total > 0: total else: 1
-        elif not syntax_only:
+        else:
+            for import_warning in unresolved_import_diagnostics(source, path):
+                emit_check_diagnostic(import_warning, as_json)
+                warning_count = warning_count + 1
+        if errors.len() == 0 and concurrency_errors.len() == 0 and not parser_has_errors() and not syntax_only:
             ast_reset()
             val semantic_result = simple_semantic_check_source(source, path)
             if phase_profile:
@@ -306,7 +374,7 @@ fn check_one_profiled(path: text, as_json: bool, phase_profile: bool, syntax_onl
         val terminal = if failure_count == 0: "succeeded" else: "failed"
         val _teardown_mark = check_phase_mark(true, "scope_teardown", phase_started_us, path, done, total, terminal)
         val _total_mark = check_phase_mark(true, "file_total", file_started_us, path, done, total, terminal)
-    failure_count
+    (failure_count, warning_count)
 
 fn main() -> i64:
     val args = get_cli_args()
@@ -338,17 +406,22 @@ fn main() -> i64:
     var checked = 0
     var errors = empty_directories.len()
     var files_with_errors = 0
+    var warnings_total = 0
+    var files_with_warnings = 0
     if not as_json:
         for directory in empty_directories:
             print "ERROR: {directory}: no Simple source files found"
     for file in files:
         checked = checked + 1
-        val failed = check_one_profiled(file, as_json, phase_profile, syntax_only, checked, files.len())
+        val (failed, file_warnings) = check_one_full(file, as_json, phase_profile, syntax_only, checked, files.len())
+        if file_warnings > 0:
+            warnings_total = warnings_total + file_warnings
+            files_with_warnings = files_with_warnings + 1
         if failed != 0:
             errors = errors + failed
             files_with_errors = files_with_errors + 1
 
-    val status = if errors == 0: "ok" else: "error"
+    val status = if errors > 0: "error" elif warnings_total > 0: "warning" else: "ok"
     if phase_profile:
         val _command_mark = check_phase_mark(true, "command_total", command_started_us, "all", checked, files.len(), status)
     if as_json:
@@ -356,6 +429,8 @@ fn main() -> i64:
         val semantic_complete = if syntax_only: "false" elif errors == 0: "true" else: "false"
         print "{\"command\":\"check\",\"status\":\"{status}\",\"coverage\":\"{coverage}\",\"semantic_complete\":{semantic_complete},\"checked\":{checked},\"files\":{files.len()},\"errors\":{errors},\"files_with_errors\":{files_with_errors}}"
     elif errors == 0:
+        if warnings_total > 0:
+            print "{warnings_total} warning(s) found in {files_with_warnings} file(s)"
         if syntax_only:
             print "Syntax-only check passed ({checked} file(s)); semantic coverage was not requested"
         else:

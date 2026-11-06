@@ -488,8 +488,13 @@ pub(crate) fn evaluate_expr(
                         // Empty collections are not present
                         Value::Array(arr) => !arr.is_empty(),
                         Value::Dict(dict) => !dict.is_empty() || crate::interpreter::module_dict_len(dict) != 0,
-                        // Empty strings are not present
-                        Value::Str(s) => !s.is_empty(),
+                        // Empty strings are not present, unless an explicit `Some("")`
+                        // wrapper says a text value exists (it just happens to be empty).
+                        Value::Str(s) => {
+                            !s.is_empty()
+                                || matches!(&val, Value::Enum { enum_name, variant, .. }
+                                    if enum_name == "Option" && variant == "Some")
+                        }
                         // Objects with class "Set" - check if inner items are empty
                         Value::Object { class, fields } if class == "Set" => {
                             // Set is typically stored with an "items" field containing a Dict

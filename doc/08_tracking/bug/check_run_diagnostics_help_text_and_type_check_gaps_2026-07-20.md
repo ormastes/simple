@@ -89,3 +89,8 @@ Both spec files are correct as written and left unmodified — the "never
 weaken an assertion" rule applies; these are real coverage/contract gaps,
 not stale test syntax.
 
+
+
+## Resolution 2026-11-06
+
+Fixed together with simple_check_diagnostics_contract_raw_parser_error_not_stable_format_2026-07-20 (see its Resolution): check_diagnostics_contract_spec 10/10.

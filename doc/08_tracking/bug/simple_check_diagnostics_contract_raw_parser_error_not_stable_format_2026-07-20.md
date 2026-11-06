@@ -84,3 +84,18 @@ a test-triage pass; would need per-diagnostic-kind investigation of
 `src/app/**` check-command code and `src/compiler/**` diagnostic emission to
 confirm whether the stable format exists anywhere in current source or needs
 building from scratch).
+
+
+## Resolution 2026-11-06 (work/fx-check-diag-20261106)
+
+Root causes: (1) `collect_files` (src/app/check/main.spl) expanded every existing
+path through `find_spl_files`, re-joining a plain file path onto itself
+(`/tmp/x.spl//tmp/x.spl` -> bogus E0001); directory expansion already belongs to
+`expand_check_targets`. (2) No W0410 unresolved-import warning, no `warning`
+severity / `status:"warning"` / "N warning(s) found" summary existed. (3) The spec
+hard-coded a deployed `bin/release/.../simple`; it now runs the working-tree
+`src/app/check/main.spl` under `$SIMPLE_BIN`. Fix: drop the redundant expansion,
+add `severity` to `CheckDiagnostic`, add first-segment W0410 probe + summary.
+Evidence: check_diagnostics_contract_spec 0/10 -> 10/10 (seed run). The type
+mismatch half of this record was already fixed by the E1003 inference path.
+Remaining: raw `[parser_error]` lines are still printed by the parser in addition to the E0002 form.

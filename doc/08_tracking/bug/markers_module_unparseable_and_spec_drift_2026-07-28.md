@@ -1,7 +1,7 @@
 # `os.kernel.log.markers` was unimportable; its spec had never run
 
 - **Date:** 2026-07-28
-- **Status:** PARTIALLY FIXED (3 source defects fixed, 2 discrepancies left open)
+- **Status:** FIXED 2026-11-06 (marker_wire_format_spec 8/8)
 - **Module:** `src/os/kernel/log/markers.spl`
 - **Spec:** `test/01_unit/os/kernel/logging/marker_wire_format_spec.spl` (mirror: `test/unit/...`)
 
@@ -51,3 +51,12 @@ marker wire-format spec had never run a single example.
 `markers.spl` has no production callers — nothing outside the spec imports it,
 which is unsurprising given it could not be imported. Whatever emits the real
 kernel boot markers does not route through this registry.
+
+## Resolution (2026-11-06)
+
+The 2026-07-28 source fixes had been lost in a tree restore; re-applied in
+`src/os/kernel/log/markers.spl`: field `namespace` -> `ns`, `validate()` uses
+`Err(...)`/`Ok(())`, and nil handling uses `.?` (no `is_nil`). Open items:
+- `NAMESPACE_BOOT` now defined (`= MarkerNamespace.Boot`).
+- Case: wire truth is `[BOOT]` (every real kernel producer emits `[BOOT] ...`),
+  so the spec's `[boot]` literals were stale and now say `[BOOT]`; module unchanged.

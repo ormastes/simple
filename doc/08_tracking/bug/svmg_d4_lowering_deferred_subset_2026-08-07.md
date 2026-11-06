@@ -101,3 +101,14 @@ separately as
 since root-causing it needs bisection beyond this pass's per-bug budget.
 Leaving this row OPEN as originally filed; the parse failure is tracked in
 the new sibling doc.
+
+## 2026-11-06 — spec drift: `svmg_lowering_spec` 9/17 -> 17/17
+
+The lowering was correct (it does emit "...on float operands..."). The spec's
+`expect_to_equal` helper built `HirExprKind.MethodCall(..., type_args: [])`, but
+`MethodCall` has only `receiver, method, args, resolution` in
+`hir_definitions.spl:635`. The extra field made the lowerer's
+`MethodCall(_, _, _, _)` patterns miss, so every `expect(..).to_equal(..)` body
+fell to the generic "unsupported expression construct" arm (also the cause of
+the "array index out of bounds" failures). Fixed in the spec helper only;
+no assertion changed.
