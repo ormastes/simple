@@ -118,3 +118,19 @@ scope for this sweep).
 
 Out of lane: needs interpreter support for function-pointer-to-u64 casts, an interpreter semantic gap, not a bounded local fix. No change made.
 
+
+## Update 2026-11-06 (work/fx-os-kernel-20261106)
+
+`syscall_shim_spec.spl` was 72/75. The "-1 where -22/-95/-14 expected" case
+("network shims bound copied buffers and reject unsupported address output")
+is FIXED: `spl_handle_net_accept/send_to/recv_from` ran the descriptor capability
+check first, so malformed arguments on an unauthorised caller returned EPERM (-1).
+New pure `portable_net_args_precheck_v1` (`src/os/kernel/ipc/syscall_net_portable_v1.spl`)
+validates size (EINVAL), unsupported address output (EOPNOTSUPP) and kernel-range
+buffer (EFAULT) before the authority check, matching bind's
+copy-errors-before-authorization policy. No caller memory is read, so authority
+semantics are unchanged. Now 73/75. Still open, seed-interpreter limits, not ABI:
+- "spl_handle_debug_write return type is i64": real `mmio_write8` recursion overflow.
+- "network shims reject null and short sockaddr inputs before MMIO":
+  `user_copyin_bytes` `[0u8; len]` with u64 len ("array repeat count must be an
+  integer, got u64", `src/os/kernel/memory/user_copy.spl:24`).

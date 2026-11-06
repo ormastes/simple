@@ -22,7 +22,7 @@ use std.common.convert.{safe_parse_int, i64_to_text}
 use std.hash.adler32.{adler32}
 use std.spec.step
 use lib.common.privilege.id_path.{id_path_intern}
-use lib.common.win_fs.window_record.{WindowRecord, WindowState, Rect, BufferRef}
+use lib.common.win_fs.window_record.{WindowRecord, WindowState, Rect, BufferRef, window_record_encode, window_mark_destroyed}
 use app.simple_process_manager.wm_spm_client.{WmSpmClient, encode_register_window}
 use app.simple_process_manager.transport_host.{SpmTransportHost}
 use app.simple_process_manager.transport_simpleos.{SpmTransportMock}
@@ -78,3 +78,24 @@ describe "wm_spm_client / RPC payload parity (merged from legacy copy)":
         val client = WmSpmClient.new(SpmTransportHost.mock_loopback())
         val via_client = client.test_encode_register(rec)
         expect direct.len() to_equal via_client.len()
+
+describe "window_record_encode / canonical wire bytes":
+    it "AC-3: encodes the record to the exact reference byte string":
+        val rec = WindowRecord(
+            wid: 42, generation: 1, app: "banking", title: "Acct",
+            state: WindowState.Normal,
+            geometry: Rect(x: 10, y: 20, w: 800, h: 600),
+            buffer_ref: BufferRef(kind: "shm", handle: 7, bytes: 4096),
+            acl_id_path: id_path_intern("id.user.banking.view"))
+        val expected = "wid=42;generation=1;app=banking;title=Acct;acl=id.user.banking.view;state=normal;x=10;y=20;w=800;h=600".bytes()
+        expect(window_record_encode(rec)).to_equal(expected)
+
+    it "AC-3: a different record encodes to different bytes":
+        val a = WindowRecord(
+            wid: 1, generation: 1, app: "a", title: "t",
+            state: WindowState.Hidden,
+            geometry: Rect(x: 0, y: 0, w: 1, h: 1),
+            buffer_ref: BufferRef(kind: "shm", handle: 1, bytes: 1),
+            acl_id_path: id_path_intern("id.user.a"))
+        val b = window_mark_destroyed(a)
+        expect(window_record_encode(a) == window_record_encode(b)).to_equal(false)

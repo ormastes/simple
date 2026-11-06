@@ -187,14 +187,22 @@ if [ "$plan_status" -eq 0 ]; then
     plan_workers=$(printf '%s\n' "$plan" | sed -n 's/^workers=//p')
     plan_cap=$(printf '%s\n' "$plan" | sed -n 's/^cap_kib=//p')
     plan_ceiling=$(printf '%s\n' "$plan" | sed -n 's/^ceiling_kib=//p')
-    [ "$plan_workers" -ge 1 ] && [ "$plan_workers" -le 8 ] &&
-        [ $((plan_cap / plan_workers)) -ge 16777216 ] ||
-        fail "whole-build plan does not price >= 16 GiB per worker: $plan"
+    plan_bound=$(printf '%s\n' "$plan" | sed -n 's/^bound=//p')
+    case "$plan_bound" in
+        small-host-one-worker*)
+            # Small-host mode: exactly one worker under the host budget.
+            [ "$plan_workers" -eq 1 ] && printf '%s\n' "$plan" | grep -Fq 'SMALL-HOST MODE' ||
+                fail "small-host plan is not one logged worker: $plan" ;;
+        *)
+            [ "$plan_workers" -ge 1 ] && [ "$plan_workers" -le 8 ] &&
+                [ $((plan_cap / plan_workers)) -ge 16777216 ] ||
+                fail "whole-build plan does not price >= 16 GiB per worker: $plan" ;;
+    esac
     plan_ceiling_arg=
     [ "$plan_ceiling" -eq 0 ] || plan_ceiling_arg=--compiler-ceiling-kib=$plan_ceiling
     plan_avail=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null || :)
     guard plan.env -- --compiler-jobs="$plan_workers" --max-rss-kib="$plan_cap" $plan_ceiling_arg \
-        --cap-source=phase-policy --cap-bound=worker-floor
+        --cap-source=phase-policy --cap-bound="${plan_bound:-worker-floor}"
     if [ "$guard_status" -eq 7 ]; then
         [ "$(field plan.env status)" = complete ] && [ "$(field plan.env rss_limit_kib)" = "$plan_cap" ] &&
             [ "$(field plan.env compiler_jobs)" = "$plan_workers" ] &&

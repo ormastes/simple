@@ -40,6 +40,7 @@ impl HmInferContext:
             narrowing: NarrowingContext.new(),
             mutable_symbols: {},
             current_function_effects: [],
+            current_function_effects_complete: true,
             current_return_type: nil,
             current_fn_name: "",
             symbol_names: {},
@@ -62,6 +63,7 @@ impl HmInferContext:
             narrowing: NarrowingContext.new(),
             mutable_symbols: {},
             current_function_effects: [],
+            current_function_effects_complete: true,
             current_return_type: nil,
             current_fn_name: "",
             symbol_names: {},
@@ -166,13 +168,40 @@ impl HmInferContext:
         """Register whether a symbol is mutable (var) or immutable (val)."""
         self.mutable_symbols[sym_id] = is_mutable
 
+    me env_mark() -> i64:
+        """Position in the env undo log; pass to env_unwind to restore."""
+        self.env_trail_names.len()
+
+    me env_unwind(mark: i64):
+        """Undo every env write made since `mark`, newest first."""
+        while self.env_trail_names.len() > mark:
+            val name = self.env_trail_names.pop()
+            val prev = self.env_trail_prev.pop()
+            val had = self.env_trail_had.pop()
+            if had:
+                self.env[name] = prev
+            else:
+                self.env.remove(name)
+
+    me env_set(name: text, scheme: TypeScheme):
+        val existing = self.env[name]
+        if existing.?:
+            self.env_trail_names.push(name)
+            self.env_trail_prev.push(existing ?? scheme)
+            self.env_trail_had.push(true)
+        else:
+            self.env_trail_names.push(name)
+            self.env_trail_prev.push(scheme)
+            self.env_trail_had.push(false)
+        self.env[name] = scheme
+
     me bind_mono(name: text, ty: HirType):
         """Bind a name to a monomorphic type (no generalization)."""
-        self.env[name] = TypeScheme.mono(ty)
+        self.env_set(name, TypeScheme.mono(ty))
 
     me bind_poly(name: text, scheme: TypeScheme):
         """Bind a name to a polymorphic type scheme."""
-        self.env[name] = scheme
+        self.env_set(name, scheme)
 
     me error(err: TypeInferError):
         """Record an error."""
