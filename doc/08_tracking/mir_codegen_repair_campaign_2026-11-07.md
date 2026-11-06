@@ -51,3 +51,38 @@ supported `SIMPLE_FILE_WORKERS=0` route, preserving the 4 GiB reserve, RSS
 enforcement and all admission checks. Its log is `bootstrap-attempt8.log` in the
 same qualification directory; attempt-7 sanity receipts were preserved first.
 This is a resource-route change, not a MIR fix or a successful test result.
+
+Attempt 8 also terminated unadmitted: the frontend observed 3,735 MiB free,
+below the 4,096 MiB reserve. Its preceding native build exited 0 with peak RSS
+1,691,848 KiB and peak job commit 1,855,132 KiB. With about 33 GiB free commit
+headroom, the final resource-policy retry selects a positive 2 GiB reserve;
+RSS enforcement and `SIMPLE_FILE_WORKERS=0` remain unchanged. Attempt 9 did not
+compile: it timed out on output ownership while attempt 8 was still cleaning
+up. After both wrappers terminated, attempt 10 started with the same intended
+policy. No further automatic reserve reduction is planned.
+
+## Broader ledger census and additional candidates
+
+A read-only census of ten-column `bugs_active`/`bugs` rows selected MIR,
+MIR-optimization and backend owner paths plus MIR/codegen IDs/titles, excluded
+identified seed-only/vendor defects and deduplicated IDs. It found 144 active
+candidates: 67 open, 74 source-fixed awaiting verification, two other
+verification-pending and one fixing at census time. Severity counts were two
+P0, 53 P1, 55 P2 and 34 P3. Nine non-ten-column lines were excluded. This is a
+bounded ledger inventory, not 144 reproduced defects or a complete semantic
+classification. Both P0 rows already record source repairs awaiting execution.
+
+Additional work:
+
+- Signed narrow Cranelift arithmetic now restores I8/I16/I32 sign extension
+  after ordinary BinOp operations, reusing the existing unary-negation rule.
+  The fifteen-check native fixture widens expressions directly so an annotated
+  narrowing Let cannot mask the regression. Execution remains pending.
+- Optional trait recovery now ignores only top-level Error/Infer placeholders;
+  Any, concrete declarations and nested unknown optionals retain authority.
+  Ten controlled metadata assertions are authored, not executed.
+- The optional-Bool if-val defect remains open. Its durable six-check fixture
+  covers None, false/true payloads and explicit Bool presence predicates.
+  Parser provenance must survive HIR without changing either contract.
+- Cross-module always-inline text-extern ABI expansion remains open; the
+  source workaround is not an inliner repair.

@@ -638,7 +638,9 @@ fn cl_translate_instruction(
             val a = cl_translate_operand(ctx, cl_module, left, value_map, slot_map, func)
             val b = cl_translate_operand(ctx, cl_module, right, value_map, slot_map, func)
             val raw_result = cl_translate_binop(ctx, cl_module, op, a, b, left, right, func)
-            val result = cl_canonicalize_unsigned_narrow(ctx, raw_result, local_type(dest.id, func))
+            val dest_type = local_type(dest.id, func)
+            val signed_result = cl_canonicalize_signed_narrow(ctx, raw_result, dest_type)
+            val result = cl_canonicalize_unsigned_narrow(ctx, signed_result, dest_type)
             value_map[dest.id] = result
             if slot_map.has(dest.id):
                 val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
@@ -1383,11 +1385,7 @@ fn cl_translate_unaryop(ctx: i64, op: MirUnaryOp, a: i64, operand: MirOperand, f
                 val zero = cranelift_iconst(ctx, CL_TYPE_I64, 0)
                 val negated = cranelift_isub(ctx, zero, a)
                 val neg_type = operand_type(operand, func)
-                match neg_type.kind:
-                    case I8 | I16 | I32:
-                        val narrow_cl = cl_cast_narrow_int_type(neg_type)
-                        cranelift_sextend(ctx, CL_TYPE_I64, cranelift_ireduce(ctx, narrow_cl, negated))
-                    case _: negated
+                cl_canonicalize_signed_narrow(ctx, negated, neg_type)
         case Not:
             # i64 mask, not i8: bool values (cmp results, bool locals, consts)
             # are uniformly i64 in this backend (see mir_type_to_cl).
@@ -1927,6 +1925,21 @@ fn type_is_text(ty: MirType) -> bool:
 # ============================================================================
 # Exports
 # ============================================================================
+
+fn cl_canonicalize_signed_narrow(ctx: i64, value: i64, dest_type: MirType) -> i64:
+    """Restore a signed narrow result's sign-extended I64 representation.
+
+    Ordinary BinOp arithmetic executes in I64, but its declared I8/I16/I32
+    result wraps at that width before a widening cast can expose it. Reuse
+    the unary-negation rule; do not narrow floats, pointers or Bool values.
+    CheckedBinOp has a separate overflow contract and does not use this path.
+    """
+    match dest_type.kind:
+        case I8 | I16 | I32:
+            val narrow_cl = cl_cast_narrow_int_type(dest_type)
+            val reduced = cranelift_ireduce(ctx, narrow_cl, value)
+            return cranelift_sextend(ctx, CL_TYPE_I64, reduced)
+        case _: return value
 
 fn cl_canonicalize_unsigned_narrow(ctx: i64, value: i64, dest_type: MirType) -> i64:
     """Re-establish the canonical zero-extended I64 form of a U8/U16/U32 result.
