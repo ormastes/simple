@@ -4869,17 +4869,11 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
         receiver_compare_status=$?
       fi
     fi
-    {
-      echo "schema=simple-bootstrap-stage2-receiver-evidence-v1"
-      echo "status=${receiver_status}"
-      echo "runtime_compare_status=${receiver_compare_status}"
-      echo "probe_exit=${stage2_receiver_status}"
-      echo "candidate_sha256_before=${stage2_receiver_sha_before}"
-      echo "candidate_sha256_after=${stage2_receiver_sha_after}"
-      echo "runtime_snapshot_sha256=$(bootstrap_stage3_hash_file "${runtime_admitted_snapshot}")"
-      echo "probe_log=${stage2_receiver_log}"
-      echo "probe_log_sha256=$(bootstrap_stage3_hash_file "${stage2_receiver_log}")"
-    } >"${stage2_receiver_evidence}"
+    bootstrap_stage3_write_receiver_evidence_receipt \
+      "${stage2_receiver_evidence}" "${receiver_status}" "${receiver_compare_status}" \
+      "${stage2_receiver_status}" "${stage2_receiver_sha_before}" "${stage2_receiver_sha_after}" \
+      "${runtime_admitted_snapshot}" "${stage2_receiver_log}"
+
     if [ "${receiver_status}" != pass ]; then
       if [ "${receiver_compare_status}" -gt 1 ]; then
         echo "error: Stage 2 receiver admission comparator infrastructure failed (status=${receiver_compare_status})" >&2

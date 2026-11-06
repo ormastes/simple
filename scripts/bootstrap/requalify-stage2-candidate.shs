@@ -1,0 +1,158 @@
+#!/bin/sh
+# Requalify preserved compiler bytes; never compile a replacement compiler.
+# Historical integrity permits only fresh qualification, never product work.
+set -eu
+umask 077
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+die() { echo "stage2-requalification: refusal: $1" >&2; exit 64; }
+candidate= historical= history= runtime= expected_candidate= expected_admission=
+expected_state= output= timeout= rss= backend= target= history_only=0 seen=' '
+for arg in "$@"; do
+    key=${arg%%=*}
+    case "$seen" in *" $key "*) die duplicate-argument ;; esac
+    seen="$seen$key "
+    case "$arg" in
+        --candidate=*) candidate=${arg#*=} ;;
+        --historical-receipt=*) historical=${arg#*=} ;;
+        --history-root=*) history=${arg#*=} ;;
+        --runtime-root=*) runtime=${arg#*=} ;;
+        --expected-candidate-sha256=*) expected_candidate=${arg#*=} ;;
+        --expected-admission-sha256=*) expected_admission=${arg#*=} ;;
+        --expected-producer-state-sha256=*) expected_state=${arg#*=} ;;
+        --output=*) output=${arg#*=} ;;
+        --timeout-seconds=*) timeout=${arg#*=} ;;
+        --max-rss-kib=*) rss=${arg#*=} ;;
+        --backend=*) backend=${arg#*=} ;;
+        --target=*) target=${arg#*=} ;;
+        --validate-history-only) history_only=1 ;;
+        *) die unknown-argument ;;
+    esac
+done
+for required in "$candidate" "$historical" "$history" "$runtime" \
+    "$expected_candidate" "$expected_admission" "$expected_state" "$output" "$timeout" "$rss"; do
+    [ -n "$required" ] || die missing-required-argument
+done
+for sha in "$expected_candidate" "$expected_admission" "$expected_state"; do
+    [ "${#sha}" = 64 ] || die invalid-sha256
+    case "$sha" in *[!0-9a-f]*) die invalid-sha256 ;; esac
+done
+case "$timeout" in ''|0*|*[!0-9]*) die invalid-timeout ;; esac
+case "$rss" in ''|0*|*[!0-9]*) die invalid-rss ;; esac
+[ "${#timeout}" -le 8 ] || die invalid-timeout
+[ "${#rss}" -le 12 ] || die invalid-rss
+BOOTSTRAP_STAGE3_FACADE_PATH=$root/scripts/check/lib/bootstrap-stage3-provenance.shs
+BOOTSTRAP_STAGE3_VERSION_ROOT=$root
+export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+SIMPLE_ABI_POLICY=$(awk '$1=="simple_abi_policy:" {n++; v=$2} END {if(n!=1)exit 1;print v}' \
+    "$root/doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn") || die canonical-policy-unavailable
+export SIMPLE_ABI_POLICY
+for input in "$candidate" "$historical" "$history/git-state-before.env"; do
+    bootstrap_stage3_sanity_safe_regular "$input" || die unsafe-path
+done
+for directory in "$history" "$runtime"; do
+    bootstrap_stage3_normalized_absolute "$directory" || die unsafe-path
+    [ -d "$directory" ] && [ ! -L "$directory" ] && \
+        [ "$(CDPATH= cd -- "$directory" && pwd -P)" = "$directory" ] || die unsafe-path
+done
+bootstrap_stage3_normalized_absolute "$output" || die unsafe-path
+[ ! -e "$output" ] && [ ! -L "$output" ] || die output-already-exists
+output_parent=$(dirname -- "$output")
+[ -d "$output_parent" ] && [ ! -L "$output_parent" ] && \
+    [ "$(CDPATH= cd -- "$output_parent" && pwd -P)" = "$output_parent" ] || die unsafe-path
+[ "$(bootstrap_stage3_hash_file "$candidate")" = "$expected_candidate" ] || die candidate-hash-mismatch
+[ "$(bootstrap_stage3_hash_file "$historical")" = "$expected_admission" ] || die admission-hash-mismatch
+[ "$(bootstrap_stage3_hash_file "$history/git-state-before.env")" = "$expected_state" ] || die producer-state-hash-mismatch
+bootstrap_stage3_git_state_schema_valid "$history/git-state-before.env" || die historical-chain-invalid
+field() { bootstrap_stage3_manifest_value "$1" "$historical"; }
+historical_chain() {
+    bootstrap_stage3_verify_stage2_historical_chain \
+        "$historical" "$(field admission_receipt_path)" \
+        "$candidate" "$(field candidate_path)" \
+        "$history/source-inputs-before.txt" "$(field source_snapshot_path)" \
+        "$history/runtime-admitted.txt" "$(field runtime_snapshot_path)" \
+        "$runtime" "$(field runtime_authority_path)" \
+        "$history/tool-authority-before.txt" "$(field tool_authority_path)" "$(field build_args_sha256)" \
+        "$history/stage2-sanity.env" "$(field sanity_evidence_path)" "$history" \
+        "$history/stage2-receiver.env" "$(field receiver_evidence_path)" \
+        "$history/stage2-receiver.log" "$(field receiver_log_path)" "$root"
+}
+historical_chain || die historical-chain-invalid
+if [ "$history_only" = 1 ]; then
+    echo historical_chain_valid=true
+    echo product_admission=false
+    exit 0
+fi
+case "$backend" in llvm|cranelift) ;; *) die invalid-backend ;; esac
+case "$target" in ''|*[!A-Za-z0-9_-]*) die invalid-target ;; esac
+# Refuse a target different from the original producer's recorded triple.
+original_target=$(basename -- "$(dirname -- "$(dirname -- "$(field candidate_path)")")")
+[ "$target" = "$original_target" ] || die target-mismatch
+
+# The whole recovery, including fingerprinting and control execution, has one
+# owned watchdog deadline. No partial result can trigger another attempt.
+mkdir "$output" || die output-already-exists
+control=$output/control
+mkdir "$control"
+cp -p "$0" "$control/entry.shs"
+chmod 400 "$control/entry.shs"
+entry_sha=$(bootstrap_stage3_hash_file "$0")
+helper=$root/scripts/bootstrap/lib/requalify-stage2-worker.shs
+helper_sha=$(bootstrap_stage3_hash_file "$helper")
+status=0
+started=$(date +%s)
+perl "$root/scripts/resource/process-tree-rss-watchdog.pl" \
+    --session-mode=new --rss-cap-mode=enforce --max-rss-kib="$rss" \
+    --timeout-seconds="$timeout" --term-grace-seconds=5 \
+    --receipt="$output/process.env" -- \
+    sh "$helper" "$root" "$candidate" "$historical" "$history" "$runtime" \
+    "$expected_candidate" "$expected_admission" "$expected_state" "$output" \
+    "$backend" "$target" "$entry_sha" "$helper_sha" >"$output/qualification.log" 2>&1 || status=$?
+printf 'qualification_exit: %s\n' "$status" >"$output/result.sdn"
+if [ "$status" -ne 0 ]; then
+    # A candidate emitted before interruption is not discoverable admission.
+    if [ -f "$output/admission.pending" ]; then
+        mv "$output/admission.pending" "$output/admission.failed"
+    fi
+    echo "stage2-requalification: qualification failed status=$status log=$output/qualification.log" >&2
+    exit "$status"
+fi
+# Publication happens outside the child only after watchdog-confirmed cleanup.
+[ "$(bootstrap_stage3_manifest_value status "$output/process.env")" = complete ] && \
+    [ "$(bootstrap_stage3_manifest_value exit_status "$output/process.env")" = 0 ] || die process-not-complete
+[ "$(bootstrap_stage3_hash_file "$0")" = "$entry_sha" ] && \
+    [ "$(bootstrap_stage3_hash_file "$helper")" = "$helper_sha" ] || die control-drift
+remaining=$((timeout - ($(date +%s) - started)))
+[ "$remaining" -gt 0 ] || die deadline-exhausted
+publication_status=0
+perl "$root/scripts/resource/process-tree-rss-watchdog.pl" \
+    --session-mode=new --rss-cap-mode=enforce --max-rss-kib="$rss" \
+    --timeout-seconds="$remaining" --term-grace-seconds=5 \
+    --receipt="$output/publication-process.env" -- \
+    sh "$helper" --publish "$root" "$output" "$target" \
+    "$expected_candidate" "$expected_admission" "$expected_state" \
+    >"$output/publication.log" 2>&1 || publication_status=$?
+if [ "$publication_status" -ne 0 ] ||
+    [ "$(bootstrap_stage3_manifest_value status "$output/publication-process.env")" != complete ] ||
+    [ "$(bootstrap_stage3_manifest_value exit_status "$output/publication-process.env")" != 0 ]; then
+    final=$output/stage3/$target/stage2-admitted/admission.env
+    if [ -f "$final" ]; then
+        chmod u+w "${final%/*}"
+        mv "$final" "$output/admission.failed"
+    fi
+    die final-replay-failed
+fi
+# The marker is the only authority commit point. All runtime preparation and
+# sealing completed before the publication watchdog returned successfully.
+final=$output/stage3/$target/stage2-admitted/admission.env
+marker=$output/requalification-commit.env
+[ ! -e "$marker" ] && [ ! -L "$marker" ] || die commit-already-exists
+{
+    echo schema=simple-stage2-requalification-commit-v1
+    echo "admission_sha256=$(bootstrap_stage3_hash_file "$final")"
+    echo "publication_receipt_path=$output/publication-process.env"
+    echo "publication_receipt_sha256=$(bootstrap_stage3_hash_file "$output/publication-process.env")"
+} >"$output/commit.pending"
+chmod 400 "$output/commit.pending"
+mv "$output/commit.pending" "$marker"
+echo "stage2-requalification: admitted $output/stage3/$target/stage2-admitted/simple"
