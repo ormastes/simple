@@ -27,3 +27,7 @@ The merged bug database was resealed through scripts/check/reseal-sdn-crc32.shs 
 - Compiler-only bootstrap attempt 7 completed HIR for 1600 modules but failed seven codegen shards; no compiler output, no Hello execution. No further bootstrap attempt was authorized.
 
 Do not represent narrow native checks or static hooks as full verification PASS. No original PR may be closed on the strength of this draft alone. Release tags/publication are outside scope.
+
+## Publication synchronization
+
+Merged live release target 53f7d4948b436092b543d95c32db7d756a455766 (three archive source-exclusion changes) without conflicts. The initial push incorrectly selected main as its range base; the six reported runtime-symbol removals are absent already on the pinned release base, and none are removed by this aggregate. Configured the owned branch upstream to release/1.0.0 so the normal hook queries and checks the intended live release authority. No hook was bypassed. Runtime admission remains blocked.
