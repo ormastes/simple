@@ -274,7 +274,7 @@ pub fn native_tool_strict_child_environment_v1() -> Result<[(text, text)], text>
     """Compose the canonical managed tool environment without inherited search paths."""
     var assignments = native_tool_strict_environment_v1()?
     var directories: [text] = []
-    for role in ["cc", "linker", "ar", "ranlib", "llc", "llvm-as", "opt", "nm"]:
+    for role in native_tool_child_roles_v1(platform_name()):
         # @workaround bug=stage2_try_unwrap_text_typed_as_i64_2026-11-02 reason=frozen stage2 ef0681fc0e1 decodes a `?`-unwrapped Result<text,_> payload as an i64 local (handle rendered as digits / compared as int); bind through a typed match
         val path: text = match native_tool_resolve_owned_v1(role):
             case Ok(v): v
@@ -303,7 +303,19 @@ pub fn native_tool_strict_child_environment_v1() -> Result<[(text, text)], text>
             "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "COMPILER_PATH", "GCC_EXEC_PREFIX",
             "SIMPLE_LINK_OBJECTS", "CCC_OVERRIDE_OPTIONS", "CL", "_CL_"]:
         assignments = assignments.push((name, ""))
+    # No admitted ranlib on darwin: never let an ambient one through.
+    if not native_tool_child_roles_v1(platform_name()).contains("ranlib"):
+        assignments = assignments.push(("RANLIB", ""))
     Ok(assignments)
+
+# Roles a strict child environment is composed from. Darwin admits no ranlib:
+# its only ranlibs are argv[0]-dispatched multicall binaries (ranlib ->
+# libtool, llvm-ranlib -> llvm-ar), which cannot be pinned as a no-follow
+# regular file that still behaves as ranlib; Apple ar writes the table itself.
+pub fn native_tool_child_roles_v1(platform: text) -> [text]:
+    if platform == "macos" or platform == "darwin":
+        return ["cc", "linker", "ar", "llc", "llvm-as", "opt", "nm"]
+    ["cc", "linker", "ar", "ranlib", "llc", "llvm-as", "opt", "nm"]
 
 # Absent digest (missing or unreadable file) is an explicit mismatch.
 fn _file_sha256_matches(path: text, expected: text) -> bool:

@@ -3089,8 +3089,16 @@ bootstrap_stage3_tool_authority_snapshot() (
             *-apple-darwin*:ld|*-apple-darwin*:ar|*-apple-darwin*:ranlib)
                 case "$bootstrap_stage3_tool_canonical" in
                     /usr/bin/*)
-                        bootstrap_stage3_tool_canonical=$(
+                        bootstrap_stage3_tool_located=$(
                             /usr/bin/xcrun --find "$bootstrap_stage3_tool_name"
+                        ) || return 1
+                        # xcrun returns the toolchain's own name, which may be
+                        # a symlink (ranlib -> libtool); the authority loader
+                        # opens pins no-follow, so bind the real file.
+                        bootstrap_stage3_tool_canonical=$(
+                            perl -MCwd=abs_path -e \
+                                'my $p = abs_path($ARGV[0]); defined($p) or exit 1; print $p' \
+                                "$bootstrap_stage3_tool_located"
                         ) || return 1
                         case "$bootstrap_stage3_tool_canonical" in
                             /usr/bin/*|'') return 1 ;;
@@ -3155,7 +3163,16 @@ bootstrap_stage3_tool_authority_snapshot() (
                 "$bootstrap_stage3_tool_c_name") bootstrap_stage3_managed_role=cc ;;
                 ld|lld-link) bootstrap_stage3_managed_role=linker ;;
                 ar|llvm-ar) bootstrap_stage3_managed_role=ar ;;
-                ranlib|llvm-ranlib) bootstrap_stage3_managed_role=ranlib ;;
+                ranlib|llvm-ranlib)
+                    # Every darwin ranlib is an argv[0]-dispatched multicall
+                    # binary (Xcode ranlib -> libtool, Homebrew llvm-ranlib ->
+                    # llvm-ar); its canonical file run by path is NOT ranlib.
+                    # Apple ar writes the archive table itself, so darwin
+                    # admits no ranlib role rather than pinning a wrong tool.
+                    case "$(bootstrap_stage3_host_platform)" in
+                        *-apple-darwin*) ;;
+                        *) bootstrap_stage3_managed_role=ranlib ;;
+                    esac ;;
                 llvm-nm) bootstrap_stage3_managed_role=nm ;;
                 llc|llvm-as|opt|llvm-readobj) bootstrap_stage3_managed_role=$bootstrap_stage3_tool_name ;;
             esac
