@@ -2,7 +2,29 @@
 
 Date: 2026-08-21
 Reporter: agent A5+Y2 (Any hardening)
-Status: OPEN
+Status: fix-implemented-verification-pending (2026-11-06)
+
+## Resolution (2026-11-06)
+
+- Block form (`unsafe(capabilities: [...]):`) was already carried on
+  release/1.0.0 via `HirBlock.unsafe_caps` (validated in
+  `expression_core.spl`, read by `any_escape/checker.spl`); the
+  `UnsafeBlock` variant shape was deliberately left unchanged, so none of its
+  match sites needed edits.
+- Declaration form (`@unsafe(reason:, capabilities:)`) now reaches HIR:
+  the parser records `UNSAFE_ANNOTATIONS` by flat decl INDEX (two classes'
+  same-named methods no longer collide), the flat-AST bridge rebuilds an
+  `unsafe` attribute, and lowering fills the new trailing
+  `HirFunction.unsafe_reason` / `unsafe_caps`, reporting unknown names via
+  `unknown_unsafe_capability_names`.
+- `any_escape` reads the function grant off `HirFunction.unsafe_caps`; the
+  profile list is kept for lanes still passing a textual grant (removing
+  `type_erasure_functions` / the census scrape is the remaining follow-up).
+- Codec regenerated (byte-equality spec passes); cache identities bumped:
+  `HIR_CODEC_VERSION` v15, `FLAT_POOL_CODEC_VERSION` v14.
+- Seed-verified: `test/01_unit/compiler/hir/hir_function_unsafe_caps_spec.spl`
+  4/4 (0/4 on the pre-fix tree). Pending: native/Stage-3 confirmation of the
+  cache-version bump.
 
 ## The gap
 
