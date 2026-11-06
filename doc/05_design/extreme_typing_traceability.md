@@ -280,3 +280,47 @@ module map and the receipt's own diagnostics use the pass's logical module
 key, so no alias could join. Facts are now keyed by that logical name;
 `module_path` still carries the file path. Route spec 3/6 -> 7/7 on the seed.
 The production join inside a real `compile()` remains pending Phase 3.
+
+## E2 named rule and publication guard (2026-11-06)
+
+`00.common/api_publication_decision_v1.spl` projects the resolved assurance
+strictness onto the named rule `extreme_public_api` (REQ-EAPI-003): advisory
+at moderate, warning at strict, denial at robust/critical/verified; an
+unrecognized profile name fails closed to denial. `decide_api_publication_v1`
+is pure over `CompileContext.api_exposure` and the frozen export routes. Its
+root set is every `Joined` route's terminal callable, deduplicated by
+(terminal module, local symbol). Unjoined callables, private locals and
+unresolved routes are neither Safe nor denied (REQ-EAPI-001). A joined root
+whose module has no exposure row, or whose symbol is missing or ambiguous,
+is an unknown root with an explicit reason.
+
+Denial applies only to `Violates` roots. **Unknown denial is deferred**: every
+module still carries `effective-export-closure-not-collected`, so denying
+Unknown would deny every build; this is recorded as an open E1 obligation,
+not a policy exception. Diagnostics name exporter, export, terminal callable,
+leaf kind and the return/argument path.
+
+`80.driver/driver_api_publication_guard_v1.spl` applies the disposition on
+its own rule code (errors at Deny, warnings at Warn, nothing at Advisory) and
+stores the decision in `CompileContext.api_publication_decision`, cleared with
+the facts. `driver_orchestration` evaluates it once at phase-5 mode dispatch
+before interpret/JIT/AOT and returns `TypeError` on denial, so no engine runs
+user code or emits an artifact. The typecheck pass's own warning policy is
+untouched (no global robust escalation).
+
+Activation is explicit: `SIMPLE_EXTREME_PUBLIC_API=1`. The stdlib is not yet
+migrated (E3), so an always-on robust denial would reject every robust build;
+activation order is migration policy (plan: "migration affects
+activation/order, not rule exceptions"). When active, the retained typecheck
+pass runs at every profile so advisory/warn rows have facts, and the native
+no-op admission and cached-SMF interpret route are refused at a denying
+profile rather than bypassed (owner audit step 4). Staged AOT flush / AOP
+recheck of generated exports (AC-EAPI-005) and REPL/dynload parity (E4) are
+not covered by this slice.
+
+Spec `test/01_unit/compiler/driver/api_publication_guard_v1_spec.spl` (7
+cases) covers the disposition ladder, inactivity, joined-root denial at
+robust/warn at strict, private-local exclusion, unknown roots, cached-admission
+refusal, and the production route fixture through the driver guard. It ran
+7/7 on the seed; a mutation disabling denial fails. The full `compile()`
+choke point is verification-pending on a self-hosted binary.

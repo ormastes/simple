@@ -1,0 +1,166 @@
+# REQ-EAPI-003/004 (AC-EAPI-004 rows): named rule `extreme_public_api` and the
+# publication guard over joined export roots. Driver-level full compile()
+# denial is verification-pending on a self-hosted binary.
+use std.spec.{describe, it, expect}
+use std.io_runtime.{env_set_process, env_remove_process}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.api_signature_facts_v1.{ApiSignatureKindV1}
+use compiler.common.api_exposure_result_v1.{ApiExposureVerdictV1, ApiExposureFindingV1,
+    ApiCallableExposureV1, ApiModuleExposureV1}
+use compiler.common.api_export_route_facts_v1.{ApiExportJoinV1, ApiExportRouteFactV1,
+    ApiExportRouteFactsV1}
+use compiler.common.api_publication_decision_v1.{ApiPublicationDispositionV1,
+    api_publication_disposition_v1, decide_api_publication_v1}
+use compiler.common.api_publication_activation_v1.{extreme_public_api_active_v1,
+    extreme_public_api_denies_cached_admission_v1}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_hir_pipeline_passes.{run_typecheck_warn_pass}
+use compiler.driver.driver_api_publication_guard_v1.{guard_api_publication_v1}
+
+fn violating_module(name: text, symbol: i64, extra_private: i64) -> ApiModuleExposureV1:
+    var callables: [ApiCallableExposureV1] = [
+        ApiCallableExposureV1(0, symbol, name, "flag", Visibility.Public, ApiExposureVerdictV1.Violates, 1, 0)]
+    var findings: [ApiExposureFindingV1] = [
+        ApiExposureFindingV1(0, ApiExposureVerdictV1.Violates, 1, ApiSignatureKindV1.Bool, [0, 1], [-1], "bare-builtin-exposed")]
+    if extra_private >= 0:
+        callables.push(ApiCallableExposureV1(1, extra_private, name, "helper", Visibility.Private, ApiExposureVerdictV1.Violates, 1, 0))
+        findings.push(ApiExposureFindingV1(1, ApiExposureVerdictV1.Violates, 3, ApiSignatureKindV1.Text, [2, 3], [0], "bare-builtin-exposed"))
+    ApiModuleExposureV1(name, name + ".spl", ApiExposureVerdictV1.Violates, callables, findings,
+        ["effective-export-closure-not-collected"], false)
+
+fn joined_route(exporter: text, terminal: text, symbol: i64, status: ApiExportJoinV1) -> ApiExportRouteFactV1:
+    ApiExportRouteFactV1(0, exporter + ".spl", exporter, "flag", 1, terminal + ".spl", terminal, "flag",
+        symbol, Visibility.Public, status, "ancestor-visibility-not-collected")
+
+fn routes_of(routes: [ApiExportRouteFactV1]) -> ApiExportRouteFactsV1?:
+    Some(ApiExportRouteFactsV1(1, routes, ["ancestor-visibility-not-collected"], false))
+
+fn fixture_context() -> CompileContext:
+    val logger = Logger(level: 0)
+    val leaf_path = "fixture/leaf.spl"
+    val facade_path = "fixture/__init__.spl"
+    val leaf_source = "pub fn flag() -> bool:\n    true\nexport flag\n"
+    val facade_source = "export use fixture.leaf.\{flag\}\n"
+    var parsed: Dict<text, Module> = {}
+    parsed["fixture.leaf"] = parse_full_frontend(leaf_source, leaf_path, "fixture.leaf", logger)
+    parsed["fixture.__init__"] = parse_full_frontend(facade_source, facade_path, "fixture.__init__", logger)
+    val sources: [SourceFile] = [
+        SourceFile(path: leaf_path, content: leaf_source, module_name: "fixture.leaf"),
+        SourceFile(path: facade_path, content: facade_source, module_name: "fixture.__init__")]
+    val registry = module_surfaces_from_modules(parsed, sources).unwrap()
+    var modules: Dict<text, HirModule> = {}
+    var leaf_lowering = hirlowering_for_module(leaf_path, registry)
+    modules["fixture.leaf"] = leaf_lowering.lower_module(parse_full_frontend(leaf_source, leaf_path, "fixture.leaf", logger))
+    var facade_lowering = hirlowering_for_module(facade_path, registry)
+    modules["fixture.__init__"] = facade_lowering.lower_module(parse_full_frontend(facade_source, facade_path, "fixture.__init__", logger))
+    val context = CompileContext.create(driver_core_compile_options_default())
+    run_typecheck_warn_pass(context, modules, Some(registry))
+    context
+
+describe "extreme_public_api named rule":
+    it "maps profiles to dispositions and fails closed on unknown names":
+        expect(api_publication_disposition_v1("moderate")).to_equal(ApiPublicationDispositionV1.Advisory)
+        expect(api_publication_disposition_v1("strict")).to_equal(ApiPublicationDispositionV1.Warn)
+        expect(api_publication_disposition_v1("robust")).to_equal(ApiPublicationDispositionV1.Deny)
+        expect(api_publication_disposition_v1("critical")).to_equal(ApiPublicationDispositionV1.Deny)
+        expect(api_publication_disposition_v1("verified")).to_equal(ApiPublicationDispositionV1.Deny)
+        expect(api_publication_disposition_v1("")).to_equal(ApiPublicationDispositionV1.Deny)
+        expect(api_publication_disposition_v1("bogus")).to_equal(ApiPublicationDispositionV1.Deny)
+
+    it "is inert while inactive":
+        val decision = decide_api_publication_v1(false, "robust", {"m": violating_module("m", 5, -1)},
+            routes_of([joined_route("m", "m", 5, ApiExportJoinV1.Joined)]))
+        expect(decision.allowed).to_equal(true)
+        expect(decision.checked_roots).to_equal(0)
+        expect(decision.diagnostics.len()).to_equal(0)
+        expect(decision.unknown_reasons).to_contain("rule-inactive")
+
+    it "denies a joined violating root at robust, warns at strict, advises at moderate":
+        val exposure = {"m": violating_module("m", 5, -1)}
+        val routes = routes_of([joined_route("m", "m", 5, ApiExportJoinV1.Joined),
+            joined_route("facade", "m", 5, ApiExportJoinV1.Joined)])
+        val robust = decide_api_publication_v1(true, "robust", exposure, routes)
+        expect(robust.allowed).to_equal(false)
+        expect(robust.checked_roots).to_equal(1)
+        expect(robust.violating_roots).to_equal(1)
+        expect(robust.diagnostics.len()).to_equal(1)
+        expect(robust.diagnostics[0].contains("[extreme_public_api]")).to_equal(true)
+        expect(robust.diagnostics[0].contains("bare builtin")).to_equal(true)
+        expect(robust.diagnostics[0].contains("return")).to_equal(true)
+        val strict = decide_api_publication_v1(true, "strict", exposure, routes)
+        expect(strict.allowed).to_equal(true)
+        expect(strict.disposition).to_equal(ApiPublicationDispositionV1.Warn)
+        expect(strict.diagnostics.len()).to_equal(1)
+        val moderate = decide_api_publication_v1(true, "moderate", exposure, routes)
+        expect(moderate.allowed).to_equal(true)
+        expect(moderate.violating_roots).to_equal(1)
+
+    it "checks only joined roots, never private locals or unresolved routes":
+        val exposure = {"m": violating_module("m", 5, 6)}
+        val unjoined = decide_api_publication_v1(true, "robust", exposure,
+            routes_of([joined_route("m", "m", 5, ApiExportJoinV1.Unknown)]))
+        expect(unjoined.checked_roots).to_equal(0)
+        expect(unjoined.allowed).to_equal(true)
+        val joined = decide_api_publication_v1(true, "robust", exposure,
+            routes_of([joined_route("m", "m", 5, ApiExportJoinV1.Joined)]))
+        expect(joined.checked_roots).to_equal(1)
+        expect(joined.violating_roots).to_equal(1)
+        expect(joined.diagnostics.len()).to_equal(1)
+        expect(joined.diagnostics[0].contains("helper")).to_equal(false)
+
+    it "records unknown roots and missing routes without denying":
+        val missing = decide_api_publication_v1(true, "robust", {},
+            routes_of([joined_route("m", "m", 5, ApiExportJoinV1.Joined)]))
+        expect(missing.allowed).to_equal(true)
+        expect(missing.unknown_roots).to_equal(1)
+        expect(missing.unknown_reasons).to_contain("exposure-not-collected")
+        val no_routes = decide_api_publication_v1(true, "robust", {"m": violating_module("m", 5, -1)}, nil)
+        expect(no_routes.allowed).to_equal(true)
+        expect(no_routes.checked_roots).to_equal(0)
+        expect(no_routes.unknown_reasons).to_contain("export-routes-not-collected")
+
+    it "refuses cached admission only when active at a denying profile":
+        env_remove_process("SIMPLE_EXTREME_PUBLIC_API")
+        env_set_process("SIMPLE_SAFETY_PROFILE", "robust")
+        expect(extreme_public_api_active_v1()).to_equal(false)
+        expect(extreme_public_api_denies_cached_admission_v1()).to_equal(false)
+        env_set_process("SIMPLE_EXTREME_PUBLIC_API", "1")
+        expect(extreme_public_api_denies_cached_admission_v1()).to_equal(true)
+        env_set_process("SIMPLE_SAFETY_PROFILE", "strict")
+        expect(extreme_public_api_denies_cached_admission_v1()).to_equal(false)
+        env_remove_process("SIMPLE_EXTREME_PUBLIC_API")
+        env_remove_process("SIMPLE_SAFETY_PROFILE")
+
+    it "denies the production fixture through the driver guard at robust and keeps strict/inactive allowed":
+        env_set_process("SIMPLE_EXTREME_PUBLIC_API", "1")
+        env_set_process("SIMPLE_SAFETY_PROFILE", "robust")
+        val denied_ctx = fixture_context()
+        val denied = guard_api_publication_v1(denied_ctx)
+        expect(denied.strictness).to_equal("robust")
+        expect(denied.checked_roots).to_be_greater_than(0)
+        expect(denied.violating_roots).to_be_greater_than(0)
+        expect(denied.allowed).to_equal(false)
+        expect(denied_ctx.has_errors()).to_equal(true)
+        expect(denied_ctx.api_publication_decision.unwrap().allowed).to_equal(false)
+        env_set_process("SIMPLE_SAFETY_PROFILE", "strict")
+        val warned_ctx = fixture_context()
+        val warned = guard_api_publication_v1(warned_ctx)
+        expect(warned.allowed).to_equal(true)
+        expect(warned.diagnostics.len()).to_be_greater_than(0)
+        expect(warned_ctx.has_errors()).to_equal(false)
+        env_remove_process("SIMPLE_EXTREME_PUBLIC_API")
+        env_set_process("SIMPLE_SAFETY_PROFILE", "robust")
+        val inactive_ctx = fixture_context()
+        val inactive = guard_api_publication_v1(inactive_ctx)
+        expect(inactive.allowed).to_equal(true)
+        expect(inactive.unknown_reasons).to_contain("rule-inactive")
+        expect(inactive_ctx.has_errors()).to_equal(false)
+        env_remove_process("SIMPLE_SAFETY_PROFILE")
