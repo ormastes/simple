@@ -89,7 +89,117 @@ pub fn agent_change_overlay_paths_v1(o: AgentChangeOverlayV1) -> [text]:
         paths.push(e.path)
     paths
 
+# --- committed / pushed (from `git diff --name-status <a>..<b>` text) --------
+#
+# The caller runs two diffs and hands over the text: `base..upstream` is the
+# pushed range, `upstream..head` the committed-but-unpushed range. No ancestry
+# is inferred here; a path present in both ranges is reported once as
+# `committed` (its latest change is not pushed yet).
+
+struct AgentCommittedChangeV1:
+    path: text
+    original_path: text   # rename/copy source, "" otherwise
+    status: text          # added|modified|deleted|renamed|copied|type_changed|unmerged|unknown
+    pushed: bool
+
+pub fn agent_committed_category_v1(c: AgentCommittedChangeV1) -> text:
+    if c.pushed: return "pushed"
+    "committed"
+
+fn _name_status_word(code: text) -> text:
+    if code == "A": return "added"
+    if code == "M": return "modified"
+    if code == "D": return "deleted"
+    if code == "R": return "renamed"
+    if code == "C": return "copied"
+    if code == "T": return "type_changed"
+    if code == "U": return "unmerged"
+    "unknown"
+
+# One `--name-status` line: `M\tpath` or `R100\told\tnew`. nil for non-entries.
+pub fn agent_committed_change_from_name_status_line_v1(line: text, pushed: bool) -> AgentCommittedChangeV1?:
+    val parts = line.replace("\r", "").split("\t")
+    if parts.len() < 2: return nil
+    val code = parts[0].trim()
+    if code == "": return nil
+    val status = _name_status_word(code.substring(0, 1))
+    if (status == "renamed" or status == "copied") and parts.len() >= 3:
+        return AgentCommittedChangeV1(path: _normalize_path(parts[2]), original_path: _normalize_path(parts[1]),
+            status: status, pushed: pushed)
+    if parts[1].trim() == "": return nil
+    AgentCommittedChangeV1(path: _normalize_path(parts[1]), original_path: "", status: status, pushed: pushed)
+
+pub fn agent_committed_changes_from_name_status_v1(stdout: text, pushed: bool) -> [AgentCommittedChangeV1]:
+    var out: [AgentCommittedChangeV1] = []
+    for raw in stdout.split("\n"):
+        match agent_committed_change_from_name_status_line_v1(raw, pushed):
+            case Some(c): out.push(c)
+            case nil: pass
+    out
+
+# Unpushed entries win over pushed ones for the same path.
+pub fn agent_committed_changes_v1(pushed_stdout: text, unpushed_stdout: text) -> [AgentCommittedChangeV1]:
+    var out: [AgentCommittedChangeV1] = []
+    var seen: [text] = []
+    for c in agent_committed_changes_from_name_status_v1(unpushed_stdout, false):
+        if not seen.contains(c.path):
+            seen.push(c.path)
+            out.push(c)
+    for c in agent_committed_changes_from_name_status_v1(pushed_stdout, true):
+        if not seen.contains(c.path):
+            seen.push(c.path)
+            out.push(c)
+    out
+
+# --- hunks (from unified diff text) -----------------------------------------
+
+struct AgentHunkV1:
+    path: text        # new-side path (`+++ b/...`), or the old side for a deletion
+    old_start: i64
+    old_len: i64
+    new_start: i64
+    new_len: i64
+
+fn _hunk_range(part: text) -> (i64, i64):
+    # `-12,3` / `+40` -> (start, len); a missing length means 1.
+    val body = part.substring(1)
+    val comma = body.index_of(",")
+    if comma < 0:
+        return (body.to_int() ?? 0, 1)
+    (body.substring(0, comma).to_int() ?? 0, body.substring(comma + 1).to_int() ?? 0)
+
+fn _diff_header_path(line: text) -> text:
+    # `+++ b/src/x.spl` / `--- a/src/x.spl` / `+++ /dev/null`; strips one a/ b/ prefix.
+    var p = line.substring(4).trim()
+    val tab = p.index_of("\t")
+    if tab >= 0: p = p.substring(0, tab)
+    if p.starts_with("a/") or p.starts_with("b/"): p = p.substring(2)
+    _normalize_path(p)
+
+pub fn agent_hunks_from_unified_diff_v1(stdout: text) -> [AgentHunkV1]:
+    var out: [AgentHunkV1] = []
+    var old_path = ""
+    var path = ""
+    for raw in stdout.split("\n"):
+        val line = raw.replace("\r", "")
+        if line.starts_with("--- "):
+            old_path = _diff_header_path(line)
+        elif line.starts_with("+++ "):
+            path = _diff_header_path(line)
+            if path == "/dev/null": path = old_path
+        elif line.starts_with("@@ ") and path != "":
+            val parts = line.split(" ")
+            if parts.len() >= 3:
+                val (os, ol) = _hunk_range(parts[1])
+                val (ns, nl) = _hunk_range(parts[2])
+                out.push(AgentHunkV1(path: path, old_start: os, old_len: ol, new_start: ns, new_len: nl))
+    out
+
 export AgentChangeEntryV1, AgentChangeOverlayV1
 export agent_change_overlay_key_v1, agent_change_category_v1
 export agent_change_entry_from_porcelain_line_v1, agent_change_entries_from_porcelain_v1
 export agent_change_overlay_from_porcelain_v1, agent_change_overlay_paths_v1
+export AgentCommittedChangeV1, agent_committed_category_v1
+export agent_committed_change_from_name_status_line_v1, agent_committed_changes_from_name_status_v1
+export agent_committed_changes_v1
+export AgentHunkV1, agent_hunks_from_unified_diff_v1
