@@ -1,0 +1,304 @@
+# ============================================================================
+# std.log typed application events -- vertical slice V1
+#
+# Plan: doc/03_plan/compiler/aspect_dynload/optimized_observability_aspects_2026-10-28.md
+# (D20 / section 18.1; also D3 build contracts, D4 resident-only acquisition,
+# D5 collection state, D9 lazy payload, D14 layers 1-3, OBS-001..004/013/022).
+#
+# One typed event (`LogEventV1`) travels through the REAL facade entrypoint
+# (`std.log.log_event_v1`) under three build contracts and a collection state
+# machine that is independent of residency:
+#
+#   contract  ERASED        -> site can never be enabled; payload never runs
+#             DYNAMIC_READY -> prepared site, OFF until activated
+#             STATIC_ON     -> always collecting
+#   state     RESIDENT_OFF -> ACTIVE -> DRAINING -> RESIDENT_OFF
+#             (`unloaded` is superseded: everything stays resident until exit)
+#
+# HOT PATH RULE (D2 / OBS-004): `log_event_v1` touches ONLY the index-keyed
+# tables `_g_site_mask` / `_g_site_kind_min` and the resident collector. It
+# never reads the name-keyed catalog, never reads an env var, never formats
+# text. The payload is a closure and is evaluated only after the site mask
+# admits the event (D9 lazy payload).
+#
+# CONTROL PLANE: register / activate / policy update / disable / drain. Each
+# validates fully before it writes (prepare, then commit), so a refused change
+# leaves the previous policy in force (OBS-013). Activation needs a RESIDENT
+# collector and returns an explicit `unavailable` otherwise -- it never
+# allocates one covertly (D4).
+#
+# Not in this slice (recorded in the plan's applied-status table): the
+# 96-byte wire codec, off-thread consumption, producer-path zero-alloc (D14),
+# redaction, per-stream overflow policy beyond drop-newest.
+# ============================================================================
+
+pub val LOG_SITE_ERASED: i64 = 0
+pub val LOG_SITE_DYNAMIC_READY: i64 = 1
+pub val LOG_SITE_STATIC_ON: i64 = 2
+
+pub val LOG_SITE_STATE_UNREGISTERED: i64 = 0
+pub val LOG_SITE_STATE_RESIDENT_OFF: i64 = 1
+pub val LOG_SITE_STATE_ACTIVE: i64 = 2
+pub val LOG_SITE_STATE_DRAINING: i64 = 3
+
+pub val LOG_EVENT_RECORD_VERSION: i64 = 1
+
+"""The one typed application event of the slice."""
+pub struct LogEventV1:
+    kind: i64
+    a: i64
+    b: i64
+
+"""Versioned, bounded collector record. `generation` is the activation/policy
+generation the event was captured under; a record stays decodable after the
+generation is replaced (OBS-022)."""
+pub struct LogEventRecordV1:
+    version: i64
+    generation: i64
+    site_id: i64
+    seq: i64
+    kind: i64
+    a: i64
+    b: i64
+
+struct _LogEventSite:
+    name: text
+    contract: i64
+    state: i64
+    kind_min: i64
+
+# --- control-plane catalog (name-keyed; never touched by the hot path) ------
+var _g_sites: [_LogEventSite] = []
+var _g_site_by_name: Dict<text, i64> = {}
+var _g_catalog_lookups: i64 = 0
+
+# --- hot-path tables (index-keyed) -------------------------------------------
+var _g_site_mask: [bool] = []
+var _g_site_kind_min: [i64] = []
+var _g_site_emitted: [i64] = []
+
+# --- resident collector ------------------------------------------------------
+var _g_collector_ready: bool = false
+var _g_collector_capacity: i64 = 0
+var _g_collector: [LogEventRecordV1] = []
+var _g_collector_dropped: i64 = 0
+var _g_seq: i64 = 0
+var _g_generation: i64 = 0
+
+"""Forget every site, policy and record. Spec/bootstrap use only."""
+pub fn log_event_reset_v1():
+    _g_sites = []
+    _g_site_by_name = {}
+    _g_catalog_lookups = 0
+    _g_site_mask = []
+    _g_site_kind_min = []
+    _g_site_emitted = []
+    _g_collector_ready = false
+    _g_collector_capacity = 0
+    _g_collector = []
+    _g_collector_dropped = 0
+    _g_seq = 0
+    _g_generation = 0
+
+# ----------------------------------------------------------------------------
+# Collector residency
+# ----------------------------------------------------------------------------
+pub fn log_event_collector_init_v1(capacity: i64) -> Result<i64, text>:
+    if capacity <= 0:
+        return Err("log event collector capacity must be positive, got {capacity}")
+    if _g_collector_ready:
+        return Err("log event collector already resident (capacity {_g_collector_capacity})")
+    _g_collector_capacity = capacity
+    _g_collector = []
+    _g_collector_dropped = 0
+    _g_collector_ready = true
+    Ok(capacity)
+
+pub fn log_event_collector_resident_v1() -> bool:
+    _g_collector_ready
+
+pub fn log_event_collector_pending_v1() -> i64:
+    _g_collector.len()
+
+pub fn log_event_collector_dropped_v1() -> i64:
+    _g_collector_dropped
+
+pub fn log_event_generation_v1() -> i64:
+    _g_generation
+
+pub fn log_event_catalog_lookups_v1() -> i64:
+    _g_catalog_lookups
+
+# ----------------------------------------------------------------------------
+# Site registration (build/load-time stand-in)
+# ----------------------------------------------------------------------------
+fn _site_known(site_id: i64) -> bool:
+    site_id >= 0 and site_id < _g_sites.len()
+
+pub fn log_event_site_register_v1(name: text, contract: i64) -> Result<i64, text>:
+    if name == "":
+        return Err("log event site name must not be empty")
+    if contract != LOG_SITE_ERASED and contract != LOG_SITE_DYNAMIC_READY and contract != LOG_SITE_STATIC_ON:
+        return Err("log event site '{name}' has unknown build contract {contract}")
+    if _g_site_by_name.has(name):
+        return Err("log event site already registered: {name}")
+    val site_id = _g_sites.len()
+    _g_sites.push(_LogEventSite(name: name, contract: contract, state: LOG_SITE_STATE_RESIDENT_OFF, kind_min: 0))
+    _g_site_by_name[name] = site_id
+    # STATIC_ON collects from the moment it exists; everything else is OFF.
+    _g_site_mask.push(contract == LOG_SITE_STATIC_ON)
+    _g_site_kind_min.push(0)
+    _g_site_emitted.push(0)
+    if contract == LOG_SITE_STATIC_ON:
+        _g_sites[site_id].state = LOG_SITE_STATE_ACTIVE
+    Ok(site_id)
+
+"""Name -> site id through the catalog. Control plane only; counted so a spec
+can prove the hot path never comes here (OBS-004)."""
+pub fn log_event_site_lookup_v1(name: text) -> i64?:
+    _g_catalog_lookups = _g_catalog_lookups + 1
+    if not _g_site_by_name.has(name):
+        return nil
+    _g_site_by_name[name]
+
+pub fn log_event_site_state_v1(site_id: i64) -> i64:
+    if not _site_known(site_id):
+        return LOG_SITE_STATE_UNREGISTERED
+    _g_sites[site_id].state
+
+pub fn log_event_site_contract_v1(site_id: i64) -> i64?:
+    if not _site_known(site_id):
+        return nil
+    _g_sites[site_id].contract
+
+pub fn log_event_site_kind_min_v1(site_id: i64) -> i64:
+    if not _site_known(site_id):
+        return -1
+    _g_sites[site_id].kind_min
+
+pub fn log_event_site_emitted_v1(site_id: i64) -> i64:
+    if not _site_known(site_id):
+        return -1
+    _g_site_emitted[site_id]
+
+# ----------------------------------------------------------------------------
+# Activation / policy / disable (prepare, then commit)
+# ----------------------------------------------------------------------------
+pub fn log_event_site_activate_v1(site_id: i64) -> Result<i64, text>:
+    if not _site_known(site_id):
+        return Err("log event site {site_id} is not registered")
+    val site = _g_sites[site_id]
+    if site.contract == LOG_SITE_ERASED:
+        return Err("log event site '{site.name}' is ERASED at build; it cannot be enabled")
+    if not _g_collector_ready:
+        return Err("log event collector unavailable: not resident (resident-only acquisition; nothing is loaded covertly)")
+    if site.state == LOG_SITE_STATE_DRAINING:
+        return Err("log event site '{site.name}' is draining; drain before re-activating")
+    if site.state == LOG_SITE_STATE_ACTIVE:
+        # Activate the delta only: already active is not a new generation.
+        return Ok(_g_generation)
+    _g_generation = _g_generation + 1
+    _g_sites[site_id].state = LOG_SITE_STATE_ACTIVE
+    _g_site_mask[site_id] = true
+    Ok(_g_generation)
+
+"""Runtime predicate (D14 layer 3): only events with `kind >= kind_min` are
+recorded. Validated before any write; a refused update keeps the old policy."""
+pub fn log_event_policy_update_v1(site_id: i64, kind_min: i64) -> Result<i64, text>:
+    if not _site_known(site_id):
+        return Err("log event site {site_id} is not registered")
+    val site = _g_sites[site_id]
+    if site.contract == LOG_SITE_ERASED:
+        return Err("log event site '{site.name}' is ERASED at build; it has no policy")
+    if kind_min < 0:
+        return Err("log event policy kind_min must be >= 0, got {kind_min}; previous policy ({site.kind_min}) kept")
+    if kind_min == site.kind_min:
+        return Ok(_g_generation)
+    _g_generation = _g_generation + 1
+    _g_sites[site_id].kind_min = kind_min
+    _g_site_kind_min[site_id] = kind_min
+    Ok(_g_generation)
+
+fn _site_has_pending(site_id: i64) -> bool:
+    var i = 0
+    while i < _g_collector.len():
+        if _g_collector[i].site_id == site_id:
+            return true
+        i = i + 1
+    false
+
+"""Disable: the mask drops immediately (no new capture); queued records stay
+until drained (drain policy, not cut). Disable is NOT unload: the site stays
+registered and resident and can be activated again."""
+pub fn log_event_site_disable_v1(site_id: i64) -> Result<i64, text>:
+    if not _site_known(site_id):
+        return Err("log event site {site_id} is not registered")
+    val site = _g_sites[site_id]
+    if site.contract == LOG_SITE_STATIC_ON:
+        return Err("log event site '{site.name}' is STATIC_ON; it cannot be disabled")
+    if site.state != LOG_SITE_STATE_ACTIVE:
+        return Err("log event site '{site.name}' is not active")
+    _g_site_mask[site_id] = false
+    if _site_has_pending(site_id):
+        _g_sites[site_id].state = LOG_SITE_STATE_DRAINING
+    else:
+        _g_sites[site_id].state = LOG_SITE_STATE_RESIDENT_OFF
+    Ok(_g_generation)
+
+fn _settle_drained_sites():
+    var i = 0
+    while i < _g_sites.len():
+        if _g_sites[i].state == LOG_SITE_STATE_DRAINING and not _site_has_pending(i):
+            _g_sites[i].state = LOG_SITE_STATE_RESIDENT_OFF
+        i = i + 1
+
+"""Consume up to `max` records in capture order. Draining sites whose
+records are all gone settle to RESIDENT_OFF."""
+pub fn log_event_drain_v1(max: i64) -> [LogEventRecordV1]:
+    var out: [LogEventRecordV1] = []
+    if max <= 0:
+        return out
+    var take = max
+    if take > _g_collector.len():
+        take = _g_collector.len()
+    var i = 0
+    while i < take:
+        out.push(_g_collector[i])
+        i = i + 1
+    var rest: [LogEventRecordV1] = []
+    while i < _g_collector.len():
+        rest.push(_g_collector[i])
+        i = i + 1
+    _g_collector = rest
+    _settle_drained_sites()
+    out
+
+# ----------------------------------------------------------------------------
+# Hot path -- the real entrypoint for a typed event
+# ----------------------------------------------------------------------------
+"""Emit one typed event at `site_id`. Returns true only when a record reached
+the collector. Reads nothing but the index-keyed mask/predicate tables; the
+payload closure runs only once the mask admits the site."""
+pub fn log_event_v1(site_id: i64, payload: fn() -> LogEventV1) -> bool:
+    if site_id < 0 or site_id >= _g_site_mask.len():
+        return false
+    if not _g_site_mask[site_id]:
+        return false
+    val ev = payload()
+    if ev.kind < _g_site_kind_min[site_id]:
+        return false
+    if _g_collector.len() >= _g_collector_capacity:
+        _g_collector_dropped = _g_collector_dropped + 1
+        return false
+    _g_seq = _g_seq + 1
+    _g_collector.push(LogEventRecordV1(
+        version: LOG_EVENT_RECORD_VERSION,
+        generation: _g_generation,
+        site_id: site_id,
+        seq: _g_seq,
+        kind: ev.kind,
+        a: ev.a,
+        b: ev.b
+    ))
+    _g_site_emitted[site_id] = _g_site_emitted[site_id] + 1
+    true
