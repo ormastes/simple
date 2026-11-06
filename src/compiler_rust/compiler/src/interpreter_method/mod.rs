@@ -2115,7 +2115,7 @@ pub(crate) fn evaluate_method_call_with_self_update(
             && matches!(module_name.as_str(), "Map" | "Dict" | "HashMap" | "BTreeMap")
             && !classes.contains_key(module_name.as_str())
         {
-            let value = Value::Dict(Arc::new(HashMap::new()));
+            let value = Value::Dict(Arc::new(crate::value::DictMap::new()));
             return Ok((value, None));
         }
         // User class shadowing the builtin alias: dispatch `Map.new()` to the

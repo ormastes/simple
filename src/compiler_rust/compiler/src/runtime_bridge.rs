@@ -540,7 +540,7 @@ fn runtime_to_value_inner(rv: RuntimeValue) -> Value {
 
                         let entries = rt_dict_entries(rv);
                         let len = rt_array_len(entries) as usize;
-                        let mut map = std::collections::HashMap::with_capacity(len);
+                        let mut map = crate::value::DictMap::with_capacity(len);
 
                         for i in 0..len {
                             let pair = rt_array_get(entries, i as i64);
@@ -892,7 +892,7 @@ mod tests {
         use std::collections::HashMap;
         use std::sync::Arc;
 
-        let mut map = HashMap::new();
+        let mut map = crate::value::DictMap::new();
         map.insert("k".to_string(), Value::Bool(true));
         let value = Value::FrozenDict(Arc::new(map));
 
@@ -927,7 +927,7 @@ mod tests {
                 ("tags", Value::array(vec![Value::Int(1), Value::Int(2)])),
                 (
                     "meta",
-                    Value::Dict(Arc::new(fields(vec![("k", Value::Int(9))]))),
+                    Value::Dict(Arc::new(fields(vec![("k", Value::Int(9))]).into_iter().collect())),
                 ),
             ])),
         };

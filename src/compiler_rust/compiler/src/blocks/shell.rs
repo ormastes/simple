@@ -78,8 +78,7 @@ fn parse_shell_script(payload: &str) -> Result<Value, CompileError> {
         commands
             .into_iter()
             .enumerate()
-            .map(|(i, cmd)| (i.to_string(), command_to_value(cmd)))
-            .collect(),
+            .map(|(i, cmd)| (i.to_string(), command_to_value(cmd))),
     ))
 }
 

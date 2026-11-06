@@ -339,7 +339,7 @@ where
 
 /// Dict map_values: apply lambda to each value
 pub(crate) fn eval_dict_map_values(
-    map: &HashMap<String, Value>,
+    map: &crate::value::DictMap,
     func: Value,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, Arc<ClassDef>>,
@@ -347,7 +347,7 @@ pub(crate) fn eval_dict_map_values(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     with_dict_lambda(func, "map_values", |params, body, captured| {
-        let mut new_map = HashMap::new();
+        let mut new_map = crate::value::DictMap::new();
         for (k, v) in map {
             crate::interpreter::check_execution_limit()?;
             let mut local_env = bind_lambda_param(captured, params, Value::dict_entry_value_ref(v));
@@ -360,7 +360,7 @@ pub(crate) fn eval_dict_map_values(
 
 /// Dict filter: keep entries where lambda returns truthy
 pub(crate) fn eval_dict_filter(
-    map: &HashMap<String, Value>,
+    map: &crate::value::DictMap,
     func: Value,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, Arc<ClassDef>>,
@@ -368,7 +368,7 @@ pub(crate) fn eval_dict_filter(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     with_dict_lambda(func, "filter", |params, body, captured| {
-        let mut new_map = HashMap::new();
+        let mut new_map = crate::value::DictMap::new();
         for (k, v) in map {
             crate::interpreter::check_execution_limit()?;
             let mut local_env = captured.clone();
@@ -391,7 +391,7 @@ pub(crate) fn eval_dict_filter(
 /// effects, discarding the result. Returns the receiver unchanged so the call
 /// can sit in expression position.
 ///
-/// Visits entries in `dict_entries_sorted` order — the SAME order as
+/// Visits entries in `dict_entries_ordered` order — the SAME order as
 /// `for (k, v) in dict`, `keys()`, `values()` and `entries()` — so a traversal
 /// written with `for_each` and one written with a `for` loop agree. Keys are
 /// recovered through `dict_entry_key_for_iteration`, so a composite
@@ -409,7 +409,7 @@ pub(crate) fn eval_dict_filter(
 /// it. Captured names the caller's scope does not already define are layered
 /// in temporarily and removed again, so a capture cannot leak out of the call.
 pub(crate) fn eval_dict_for_each(
-    map: &HashMap<String, Value>,
+    map: &crate::value::DictMap,
     func: Value,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
@@ -446,7 +446,7 @@ pub(crate) fn eval_dict_for_each(
     let saved: Vec<(String, Option<Value>)> = bound.iter().map(|n| (n.clone(), env.get(n).cloned())).collect();
 
     let result = (|| -> Result<(), CompileError> {
-        for (k, stored) in crate::value::dict_entries_sorted(map) {
+        for (k, stored) in crate::value::dict_entries_ordered(map) {
             crate::interpreter::check_execution_limit()?;
             // A two-param lambda takes (key, value); a one-param lambda takes
             // the value alone, matching `filter`/`map_values` above.
@@ -535,7 +535,7 @@ pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
             // A layered module value iterates its whole visible surface.
             let flat = crate::interpreter::module_dict_flat(map);
             let map = flat.as_ref().unwrap_or(map);
-            Ok(crate::value::dict_entries_sorted(map)
+            Ok(crate::value::dict_entries_ordered(map)
             .into_iter()
             .map(|(k, v)| {
                 Value::Tuple(vec![
@@ -545,7 +545,7 @@ pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
             })
             .collect())
         }
-        Value::FrozenDict(map) => Ok(crate::value::dict_entries_sorted(map)
+        Value::FrozenDict(map) => Ok(crate::value::dict_entries_ordered(map)
             .into_iter()
             .map(|(k, v)| {
                 Value::Tuple(vec![

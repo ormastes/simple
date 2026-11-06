@@ -690,7 +690,7 @@ if let Value::Str(ref s) = recv_val {
             let dict_val = eval_arg(
                 args,
                 0,
-                Value::Dict(std::sync::Arc::new(std::collections::HashMap::new())),
+                Value::Dict(std::sync::Arc::new(crate::value::DictMap::new())),
                 env,
                 functions,
                 classes,

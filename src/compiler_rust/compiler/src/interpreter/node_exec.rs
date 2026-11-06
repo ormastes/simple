@@ -3991,7 +3991,7 @@ mod nested_assignment_target_tests {
     #[test]
     fn nested_dict_under_indexed_struct_assignment_lands() {
         let mut env = Env::new();
-        let scope = obj("Scope", vec![("symbols", Value::Dict(Arc::new(HashMap::new())))]);
+        let scope = obj("Scope", vec![("symbols", Value::Dict(Arc::new(crate::value::DictMap::new())))]);
         env.insert("s".to_string(), obj("S", vec![("scopes", Value::array(vec![scope]))]));
         let target = index(
             field(index(field(ident("s"), "scopes"), Expr::Integer(0)), "symbols"),

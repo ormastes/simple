@@ -833,14 +833,14 @@ pub fn load_and_merge_module(
                 // Glob with empty path is invalid - can't do `import *` with no module
                 warn!("Glob import with empty path - skipping");
                 decrement_load_depth();
-                return Ok(Value::Dict(Arc::new(HashMap::new())));
+                return Ok(Value::Dict(Arc::new(crate::value::DictMap::new())));
             }
             ImportTarget::Group(items) => {
                 // Group import with empty path: import {X, Y, Z}
                 // This is invalid - need a module to import from
                 warn!("Group import with empty path - skipping");
                 decrement_load_depth();
-                return Ok(Value::Dict(Arc::new(HashMap::new())));
+                return Ok(Value::Dict(Arc::new(crate::value::DictMap::new())));
             }
         }
     } else {
@@ -886,7 +886,7 @@ pub fn load_and_merge_module(
             if super::path_resolution::is_unit_opaque_sentinel(&p) {
                 debug!(path = %parts.join("."), "unit.* opaque soft-accept");
                 decrement_load_depth();
-                return Ok(Value::Dict(Arc::new(HashMap::new())));
+                return Ok(Value::Dict(Arc::new(crate::value::DictMap::new())));
             }
             p
         }
@@ -1026,7 +1026,7 @@ pub fn load_and_merge_module(
         // Fallback to empty dict if no partial exports yet (module hasn't completed register_definitions)
         warn!(path = ?module_path, "Circular import detected, returning empty dict (no partial exports yet)");
         decrement_load_depth();
-        return Ok(Value::Dict(Arc::new(HashMap::new())));
+        return Ok(Value::Dict(Arc::new(crate::value::DictMap::new())));
     }
 
     // Check total module count limit to prevent OOM from loading too many modules
