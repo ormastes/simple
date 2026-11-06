@@ -1,0 +1,75 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+#
+# Regression: `_parse_location` split query output on ':' (so a Windows
+# `D:\x.spl:12:` path became file `D`), fed `int(" [fn] sig")` as the column
+# and reassigned a `val`, which failed semantic analysis and left
+# definition/references/implementation returning nothing.
+
+use std.spec
+use std.spec.step
+use std.nogc_sync_mut.lsp.lsp_location.{lsp_parse_query_location_v1, lsp_query_line_is_location_v1,
+    lsp_location_identifier_from_trailer_v1, lsp_location_word_column_v1, lsp_location_lsp_column_v1}
+
+describe "lsp_location query output parsing":
+    it "keeps a Windows drive prefix and anchors on the first :<line>: field":
+        # @req REQ-SSPEC-UNIT
+        step("drive-prefixed definition line")
+        val loc = lsp_parse_query_location_v1("D:\\dev\\x.spl:12: [fn] fn foo(a: i64) -> T:")
+        expect(loc != nil).to_equal(true)
+        val l = loc!
+        expect(l.file).to_equal("D:\\dev\\x.spl")
+        expect(l.line).to_equal(12)
+        expect(l.column == nil).to_equal(true)
+        expect(l.trailer).to_equal("[fn] fn foo(a: i64) -> T:")
+
+    it "parses posix file:line:col with a numeric column":
+        # @req REQ-SSPEC-UNIT
+        step("numeric column")
+        val l = lsp_parse_query_location_v1("/tmp/a.spl:3:7")!
+        expect(l.file).to_equal("/tmp/a.spl")
+        expect(l.line).to_equal(3)
+        expect(l.column!).to_equal(7)
+        expect(l.trailer).to_equal("")
+
+    it "keeps a references trailer that itself contains colons":
+        # @req REQ-SSPEC-UNIT
+        step("reference line trailer")
+        val l = lsp_parse_query_location_v1("src/a.spl:40:     val y: i64 = foo(1)")!
+        expect(l.line).to_equal(40)
+        expect(l.trailer).to_equal("val y: i64 = foo(1)")
+
+    it "rejects non-location lines":
+        # @req REQ-SSPEC-UNIT
+        step("non-location lines")
+        expect(lsp_parse_query_location_v1("No definition found for: foo") == nil).to_equal(true)
+        expect(lsp_parse_query_location_v1("Error: bad") == nil).to_equal(true)
+        expect(lsp_parse_query_location_v1("") == nil).to_equal(true)
+        expect(lsp_parse_query_location_v1("src/a.spl") == nil).to_equal(true)
+        expect(lsp_query_line_is_location_v1("Could not read file: x")).to_equal(false)
+
+describe "lsp_location column derivation":
+    it "extracts the identifier from definition and reference trailers":
+        # @req REQ-SSPEC-UNIT
+        step("identifier from trailer")
+        expect(lsp_location_identifier_from_trailer_v1("[fn] fn foo(a: i64) -> T:")).to_equal("foo")
+        expect(lsp_location_identifier_from_trailer_v1("[method] Owner.bar (forwarded: x)")).to_equal("bar")
+        expect(lsp_location_identifier_from_trailer_v1("val y: i64 = foo(1)")).to_equal("foo")
+        expect(lsp_location_identifier_from_trailer_v1("")).to_equal("")
+
+    it "finds the identifier as a whole word, skipping prefixed matches":
+        # @req REQ-SSPEC-UNIT
+        step("whole-word column")
+        expect(lsp_location_word_column_v1("fn foo(a: i64):", "foo")).to_equal(3)
+        expect(lsp_location_word_column_v1("val myfoo = foo(1)", "foo")).to_equal(12)
+        expect(lsp_location_word_column_v1("val bar = 1", "foo")).to_equal(-1)
+
+    it "prefers a printed column, else derives it, else zero":
+        # @req REQ-SSPEC-UNIT
+        step("column precedence")
+        val printed = lsp_parse_query_location_v1("a.spl:1:5")!
+        expect(lsp_location_lsp_column_v1(printed, "fn foo():")).to_equal(4)
+        val derived = lsp_parse_query_location_v1("a.spl:1: [fn] fn foo():")!
+        expect(lsp_location_lsp_column_v1(derived, "fn foo():")).to_equal(3)
+        expect(lsp_location_lsp_column_v1(derived, "")).to_equal(0)
