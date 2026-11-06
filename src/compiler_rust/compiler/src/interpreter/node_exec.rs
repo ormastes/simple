@@ -277,6 +277,48 @@ fn is_pure_place_expr(expr: &Expr) -> bool {
     }
 }
 
+/// Zero element for an initializer-less `[T; N]` declaration.
+pub(crate) fn fixed_array_zero_element(element: &Type) -> Value {
+    match element {
+        Type::Simple(t) if t == "bool" => Value::Bool(false),
+        Type::Simple(t) if t.starts_with('i') || t.starts_with('u') => {
+            coerce_to_declared_type(Value::Int(0), Some(element))
+        }
+        Type::Simple(t) if t == "f64" || t == "f32" => Value::Float(0.0),
+        _ => Value::Nil,
+    }
+}
+
+/// `var a: [T; N]` (no initializer) -> zero-filled `FixedSizeArray`, or `None`
+/// when the declaration is not a sized array.
+fn zero_filled_fixed_array_decl(
+    let_stmt: &simple_parser::ast::LetStmt,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Option<Value> {
+    let ty = match (&let_stmt.ty, &let_stmt.pattern) {
+        (Some(ty), _) => ty,
+        (None, simple_parser::ast::Pattern::Typed { ty, .. }) => ty,
+        _ => return None,
+    };
+    let Type::Array { element, size: Some(size_expr) } = ty else {
+        return None;
+    };
+    let Ok(Value::Int(n)) = evaluate_expr(size_expr, env, functions, classes, enums, impl_methods) else {
+        return None;
+    };
+    if n < 0 {
+        return None;
+    }
+    Some(Value::FixedSizeArray {
+        size: n as usize,
+        data: vec![fixed_array_zero_element(element); n as usize],
+    })
+}
+
 fn pack_u8_array(value: Value) -> Value {
     let Value::Array(data) = &value else {
         return value;
@@ -492,6 +534,17 @@ pub(crate) fn exec_node(
                 // (`CowEnv::declared_int_widths`). A `val w = x as i32` takes the
                 // cast's target; any other re-declaration clears the entry.
                 record_let_declared_width(let_stmt, env);
+                let is_mutable = let_stmt.mutability.is_mutable();
+                bind_pattern_value(&let_stmt.pattern, value, is_mutable, env);
+            } else if let Some(value) =
+                zero_filled_fixed_array_decl(let_stmt, env, functions, classes, enums, impl_methods)
+            {
+                // `var a: [T; N]` with no initializer is zero-filled storage, the
+                // same as the module evaluator's binding. Imported non-std
+                // modules are flattened into the entry program and reach their
+                // module-level `var`s here, so without this the name was never
+                // bound ("variable `q_active` not found",
+                // os_namespace_uninitialized_array_module_var_not_found_2026-08-02).
                 let is_mutable = let_stmt.mutability.is_mutable();
                 bind_pattern_value(&let_stmt.pattern, value, is_mutable, env);
             } else if strict_mem_enabled() {
@@ -4127,5 +4180,53 @@ mod indexed_field_receiver_tests {
             exec(target, Expr::Integer(1), &mut env).is_err(),
             "a call-result indexed field target is not a place and must be an error"
         );
+    }
+}
+
+/// os_namespace_uninitialized_array_module_var_not_found_2026-08-02: an
+/// initializer-less `var a: [T; N]` binds zero-filled storage through
+/// `exec_node` (the flattened-import path), matching the module evaluator.
+#[cfg(test)]
+mod uninit_fixed_array_let_tests {
+    use super::*;
+    use simple_parser::Parser;
+
+    fn exec_let(src: &str, env: &mut Env) {
+        let parsed = Parser::new(src).parse().expect("let fixture");
+        for node in &parsed.items {
+            exec_node(node, env, &mut HashMap::new(), &mut HashMap::new(), &HashMap::new(), &HashMap::new())
+                .expect("exec let");
+        }
+    }
+
+    #[test]
+    fn uninit_fixed_array_is_zero_filled() {
+        let cases: [(&str, Value); 3] = [
+            ("var q_active: [bool; 4]\n", Value::Bool(false)),
+            ("var q_count: [i64; 4]\n", Value::Int(0)),
+            ("var q_ratio: [f64; 4]\n", Value::Float(0.0)),
+        ];
+        for (src, zero) in cases {
+            let mut env = Env::new();
+            exec_let(src, &mut env);
+            let name = src.trim_start_matches("var ").split(':').next().unwrap();
+            match env.get(name) {
+                Some(Value::FixedSizeArray { size, data }) => {
+                    assert_eq!(*size, 4, "{src}");
+                    assert!(data.iter().all(|v| v == &zero), "{src}: {data:?}");
+                }
+                other => panic!("{src}: expected zero-filled FixedSizeArray, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn uninit_unsigned_fixed_array_is_zero() {
+        let mut env = Env::new();
+        exec_let("var q_ids: [u64; 2]\n", &mut env);
+        let Some(Value::FixedSizeArray { data, .. }) = env.get("q_ids") else {
+            panic!("expected FixedSizeArray");
+        };
+        assert!(data.iter().all(|v| v.as_int().ok() == Some(0)), "{data:?}");
     }
 }

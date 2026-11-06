@@ -368,7 +368,13 @@ impl<'a> Parser<'a> {
                         let stmt = self.parse_item()?;
                         Some(Box::new(Expr::DoBlock(vec![stmt])))
                     } else {
-                        Some(Box::new(self.parse_expression()?))
+                        // Same no-paren call grammar as the then-branch
+                        // (`parse_expression_or_assignment`): plain
+                        // `parse_expression` stopped at `print`, leaking the
+                        // argument (`"b"`) as a stray tail statement. See
+                        // doc/08_tracking/bug/seed_run_main_tail_if_print_coerced_to_exit_code_2026-11-06.md.
+                        let else_expr = self.parse_expression()?;
+                        Some(Box::new(self.parse_with_no_paren_calls(else_expr)?))
                     }
                 }
             } else {

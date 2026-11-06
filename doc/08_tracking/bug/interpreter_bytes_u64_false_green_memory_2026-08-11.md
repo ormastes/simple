@@ -34,3 +34,13 @@ without baseline subtraction. The admitted self-hosted memory row remains open.
 ## Triage 2026-09-13 (BUGFIX-7 lane)
 
 Out of lane: the fix surface is src/compiler_rust/compiler/src/value.rs (Rust interpreter byte-allocation path), needs a seed rebuild to verify any change. No change made.
+
+## 2026-11-06 fix (work/interp-p2-seed)
+Root cause of the garbage bytes: `runtime_bridge.rs` `value_to_runtime_inner` marshalled
+`Value::ByteArray` across the hybrid-interp-splice as one heap-boxed `UInt` RuntimeValue
+per byte; JIT `[u8]` reads took the pointer bits as the byte (`rt_bytes_alloc(8)` gave 49,..,
+checksum 126953776 for 1 MiB) and 1 MiB cost ~1M heap allocations. It now crosses as one packed
+runtime byte array (`rt_bytes_from_raw`). The bench also treated `env_get` "" as set; fixed.
+Test-only seed (not deployed): bench prints len=1048576/4194304/33554432, checksum=0, rc=0.
+Rust unit: `runtime_bridge::tests::test_value_to_runtime_byte_array_is_packed_bytes`.
+Spec: `test/01_unit/interpreter/bytes_alloc_zero_fill_spec.spl`. Verify on next seed deploy.

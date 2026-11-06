@@ -1,0 +1,105 @@
+# Serial-owner reference collector. This is cold, language-owned storage, not
+# the native hot-hook implementation: array assignment/allocation behavior is
+# deliberately not represented as a nonallocation or concurrency guarantee.
+use std.common.trace.observer_contract_v1.*
+
+pub const TRACE_REFERENCE_MAX_RECORDS_V1: i64 = 4096
+pub const TRACE_REFERENCE_MAX_CONTEXTS_V1: i64 = 1024
+const TRACE_REFERENCE_COUNTER_MAX_V1: u64 = 18446744073709551615u64
+
+pub fn trace_reference_next_counter_v1(value: u64) -> u64:
+    if value == TRACE_REFERENCE_COUNTER_MAX_V1: value else: value + 1u64
+
+pub fn trace_reference_empty_stats_v1(generation: u64) -> TraceStatsV1:
+    TraceStatsV1(generation: generation, recorded: 0, lost: 0,
+        transitions: 0, unsupported_sites: 0, queue_high_water: 0,
+        backend_errors: 0)
+
+pub class TraceReferenceCollectorV1:
+    generation: u64
+    capacity: i64
+    context_capacity: i64
+    records: [TraceEventV1]
+    head: i64
+    count: i64
+    contexts: [u64]
+    sequences: [u64]
+    counters: TraceStatsV1
+
+impl TraceReferenceCollectorV1:
+    static fn create(generation: u64, capacity: i64, context_capacity: i64
+        ) -> Result<TraceReferenceCollectorV1, TraceFailureV1>:
+        if (generation == 0 or capacity <= 0 or
+                capacity > TRACE_REFERENCE_MAX_RECORDS_V1 or context_capacity <= 0 or
+                context_capacity > TRACE_REFERENCE_MAX_CONTEXTS_V1):
+            return Err(TraceFailureV1.InvalidArgument)
+        val empty = TraceEventV1(kind: TraceEventKindV1.Entry, flags: 0,
+            generation: generation, module_instance: 0, function_id: 0, site_id: 0,
+            context_id: 0, sequence: 0, timestamp: 0, span_token: 0,
+            payload0: 0, payload1: 0, payload2: 0)
+        var records: [TraceEventV1] = []
+        for index in 0..capacity:
+            records.push(empty)
+        Ok(TraceReferenceCollectorV1(generation: generation, capacity: capacity,
+            context_capacity: context_capacity, records: records, head: 0, count: 0,
+            contexts: [], sequences: [], counters: trace_reference_empty_stats_v1(generation)))
+
+    # false means explicitly counted overflow. Sequence advances even when the
+    # queue is full, so later records retain the observable gap. Invalid input
+    # does not consume a sequence or a slot.
+    me record(event: TraceEventV1) -> Result<bool, TraceFailureV1>:
+        if (event.generation != self.generation or event.context_id == 0 or
+                event.sequence == 0 or event.span_token != 0 or
+                event.kind == TraceEventKindV1.PairedSpan):
+            return Err(TraceFailureV1.InvalidArgument)
+        if (trace_event_kind_code_v1(event.kind) <= 3 and
+                (event.module_instance == 0 or event.function_id == 0 or event.site_id == 0)):
+            return Err(TraceFailureV1.InvalidArgument)
+        var context_index: i64 = -1
+        for index in 0..self.contexts.len():
+            if self.contexts[index] == event.context_id:
+                context_index = index
+                break
+        if context_index < 0:
+            if self.contexts.len() == self.context_capacity:
+                self.counters.lost = trace_reference_next_counter_v1(self.counters.lost)
+                return Err(TraceFailureV1.ResourceExhausted)
+            context_index = self.contexts.len()
+            self.contexts.push(event.context_id)
+            self.sequences.push(0)
+        if event.sequence <= self.sequences[context_index]:
+            return Err(TraceFailureV1.InvalidArgument)
+        self.sequences[context_index] = event.sequence
+        if self.count == self.capacity:
+            self.counters.lost = trace_reference_next_counter_v1(self.counters.lost)
+            return Ok(false)
+        val tail = (self.head + self.count) % self.capacity
+        self.records[tail] = event
+        self.count = self.count + 1
+        self.counters.recorded = trace_reference_next_counter_v1(self.counters.recorded)
+        if event.kind == TraceEventKindV1.Transition:
+            self.counters.transitions = trace_reference_next_counter_v1(self.counters.transitions)
+        if event.kind == TraceEventKindV1.UnsupportedSite:
+            self.counters.unsupported_sites = trace_reference_next_counter_v1(self.counters.unsupported_sites)
+        if self.count.to_u64() > self.counters.queue_high_water:
+            self.counters.queue_high_water = self.count.to_u64()
+        Ok(true)
+
+    me poll(max_records: u32) -> [TraceEventV1]:
+        var output: [TraceEventV1] = []
+        var remaining = max_records.to_i64()
+        while remaining > 0 and self.count > 0:
+            output.push(self.records[self.head])
+            self.head = (self.head + 1) % self.capacity
+            self.count = self.count - 1
+            remaining = remaining - 1
+        output
+
+    me count_loss():
+        self.counters.lost = trace_reference_next_counter_v1(self.counters.lost)
+
+    me count_backend_error():
+        self.counters.backend_errors = trace_reference_next_counter_v1(self.counters.backend_errors)
+
+    fn pending() -> i64: self.count
+    fn stats() -> TraceStatsV1: self.counters

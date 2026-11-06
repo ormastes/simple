@@ -19,6 +19,8 @@ use std.nogc_sync_mut.composition.vector_kernel_contract.{
     SimpleVectorKernelRequestV1, SimpleVectorKernelResponseV1
 }
 use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.crypto.blake3.{blake3_hex}
+use std.nogc_sync_mut.sffi.file_bytes.{file_atomic_write_bytes_tagged_native}
 use std.nogc_sync_mut.composition.provider_contract.{
     SIMPLE_PROVIDER_OK, SimpleProviderQueryV1, SimpleProviderQueryResultV1,
     simple_provider_query_error_v1,
@@ -31,6 +33,8 @@ use std.nogc_sync_mut.composition.cli_command_wire.{CliCommandResultViewV1}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_bytes(path: text) -> [u8]?
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_env_get(key: text) -> text?
 
 val SIMPLE_PROVIDER_QUERY_V1_SYMBOL: text = "simple_provider_query_v1"
 val SIMPLE_CLI_COMMAND_INVOKE_V1_SYMBOL: text = "simple_cli_command_invoke_v1"
@@ -260,13 +264,36 @@ fn provider_admit_evidence_v1(request: ProviderAdmissionRequestV1, evidence: Pro
         return _provider_admission_result(PROVIDER_ADMISSION_NOT_PROCESS_CALLABLE, 0, policy.artifact_digest, false, "query-symbol-not-process-callable")
     _provider_admission_result(PROVIDER_ADMISSION_OK, evidence.query_symbol_address, policy.artifact_digest, true, "admitted")
 
-fn provider_admit_dynamic_v1(request: ProviderAdmissionRequestV1) -> ProviderDynamicAdmissionV1:
-    # Refuse path policy before filesystem reads, hashing, or dlopen. All
-    # remaining request-policy checks share the pure evidence helper below.
+class ProviderArtifactSnapshotV1:
+    """Hashed artifact bytes staged into a private, BLAKE3-named snapshot."""
+    status: i32
+    artifact_digest: text
+    load_path: text
+    reason: text
+
+fn provider_snapshot_dir_v1() -> text:
+    # Owner-private staging root; must not be writable by provider publishers.
+    val configured = rt_env_get("SIMPLE_PROVIDER_SNAPSHOT_DIR") ?? ""
+    if configured != "": configured else: ".simple/provider_snapshots"
+
+fn _provider_artifact_suffix_v1(path: text) -> text:
+    if path.ends_with(".dylib"): return ".dylib"
+    if path.ends_with(".dll"): return ".dll"
+    if path.ends_with(".smf"): return ".smf"
+    ".so"
+
+fn _provider_snapshot_refusal_v1(status: i32, digest: text, reason: text) -> ProviderArtifactSnapshotV1:
+    ProviderArtifactSnapshotV1(status: status, artifact_digest: digest, load_path: "", reason: reason)
+
+fn provider_stage_artifact_snapshot_v1(request: ProviderAdmissionRequestV1,
+        snapshot_dir: text) -> ProviderArtifactSnapshotV1:
+    # Read the declared path ONCE, check those bytes against the SHA-256 pin,
+    # then publish exactly those bytes to a content-addressed snapshot. The
+    # loader opens the snapshot, so a swap of the declared path after hashing
+    # cannot change the mapped image (bug provider_loader_path_digest_toctou).
     if not provider_artifact_path_allowed_v1(request.artifact_path, request.artifact_kind):
-        val path_policy = _provider_admission_policy_v1(request, false, "")
-        val path_denied = _provider_policy_refusal_v1(path_policy)
-        return ProviderDynamicAdmissionV1(admission: path_denied, session: _closed_provider_session(path_denied))
+        val denied = _provider_admission_policy_v1(request, false, "")
+        return _provider_snapshot_refusal_v1(denied.status, denied.artifact_digest, denied.reason)
     val exists = rt_file_exists(request.artifact_path)
     val first_read = if exists: rt_file_read_bytes(request.artifact_path) else: nil
     # An unreadable artifact has no digest ("" never matches a pin); it must not
@@ -274,23 +301,34 @@ fn provider_admit_dynamic_v1(request: ProviderAdmissionRequestV1) -> ProviderDyn
     val digest = if first_read == nil: "" else: provider_artifact_digest_v1(first_read ?? [])
     val policy = _provider_admission_policy_v1(request, exists, if exists: digest else: "")
     if policy.status != PROVIDER_ADMISSION_OK:
-        val refused = _provider_policy_refusal_v1(policy)
+        return _provider_snapshot_refusal_v1(policy.status, policy.artifact_digest, policy.reason)
+    if first_read == nil or snapshot_dir == "":
+        return _provider_snapshot_refusal_v1(PROVIDER_ADMISSION_DIGEST_UNSTABLE, digest, "snapshot-unavailable")
+    val bytes = first_read ?? []
+    val content_id = blake3_hex(bytes)
+    val snapshot_path = snapshot_dir + "/" + content_id + _provider_artifact_suffix_v1(request.artifact_path)
+    rt_dir_create(snapshot_dir, true)
+    # A pre-existing snapshot is reused only when its bytes match its name; a
+    # planted or corrupted one is atomically replaced by the hashed buffer.
+    val existing = rt_file_read_bytes(snapshot_path)
+    val reuse = existing != nil and blake3_hex(existing ?? []) == content_id
+    if not reuse and not file_atomic_write_bytes_tagged_native(snapshot_path, bytes):
+        return _provider_snapshot_refusal_v1(PROVIDER_ADMISSION_DIGEST_UNSTABLE, digest, "snapshot-write-failed")
+    val staged = rt_file_read_bytes(snapshot_path)
+    if staged == nil or blake3_hex(staged ?? []) != content_id:
+        return _provider_snapshot_refusal_v1(PROVIDER_ADMISSION_DIGEST_UNSTABLE, digest, "snapshot-digest-unstable")
+    ProviderArtifactSnapshotV1(status: PROVIDER_ADMISSION_OK, artifact_digest: digest,
+        load_path: snapshot_path, reason: "snapshot-staged")
+
+fn provider_admit_dynamic_v1(request: ProviderAdmissionRequestV1) -> ProviderDynamicAdmissionV1:
+    # Path policy, pin, and request policy are all checked on the single read
+    # inside staging, before any dlopen.
+    val staged = provider_stage_artifact_snapshot_v1(request, provider_snapshot_dir_v1())
+    if staged.status != PROVIDER_ADMISSION_OK:
+        val refused = _provider_admission_result(staged.status, 0, staged.artifact_digest, false, staged.reason)
         return ProviderDynamicAdmissionV1(admission: refused, session: _closed_provider_session(refused))
-    val library = dynlib_open(request.artifact_path, 2)
-    # This is cold admission work. Re-read after open and fail closed if the
-    # path changed. The library generation stays retained by the session.
-    # An unreadable re-read is a changed artifact, never an empty one.
-    val reread = rt_file_read_bytes(request.artifact_path)
-    val loaded_digest = if reread == nil: "" else: provider_artifact_digest_v1(reread ?? [])
-    if reread == nil or first_read == nil or loaded_digest != digest:
-        val unstable = _provider_admission_result(
-            PROVIDER_ADMISSION_DIGEST_UNSTABLE, 0, loaded_digest, false,
-            "artifact-digest-unstable"
-        )
-        return ProviderDynamicAdmissionV1(
-            admission: unstable,
-            session: _provider_rejection_session_v1(library, unstable),
-        )
+    val digest = staged.artifact_digest
+    val library = dynlib_open(staged.load_path, 2)
     val address = dynlib_symbol(library, SIMPLE_PROVIDER_QUERY_V1_SYMBOL)
     val cli_address = dynlib_symbol(library, SIMPLE_CLI_COMMAND_INVOKE_V1_SYMBOL)
     val admission = provider_admit_evidence_v1(request, ProviderCallableEvidenceV1(
@@ -624,7 +662,7 @@ export ProviderLoaderSessionV1, ProviderDynamicAdmissionV1, ProviderSessionQuery
 export ProviderSessionQueryOwnedResultV1, ProviderSessionReleaseOwnedResultV1
 export ProviderSessionCloseResultV1
 export ProviderSessionVectorCallV1, ProviderSessionVectorCallOwnedResultV1
-export provider_admission_outcome_v1, provider_artifact_digest_v1, provider_artifact_path_allowed_v1, provider_admit_evidence_v1, provider_admit_dynamic_v1
+export ProviderArtifactSnapshotV1, provider_stage_artifact_snapshot_v1, provider_snapshot_dir_v1, provider_admission_outcome_v1, provider_artifact_digest_v1, provider_artifact_path_allowed_v1, provider_admit_evidence_v1, provider_admit_dynamic_v1
 export provider_query_abi_validate_v1
 export provider_session_query_v1, provider_session_release_v1, provider_session_close_v1
 export provider_session_query_owned_v1, provider_session_release_owned_v1

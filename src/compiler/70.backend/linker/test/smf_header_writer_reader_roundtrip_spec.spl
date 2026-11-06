@@ -1,6 +1,7 @@
 # Writer/reader convergence for bug smf_header_wire_layout_diverges_rust_vs_simple_2026-08-10.
-# SmfHeader.to_seed_bytes() must be byte-identical to a hand-built Rust seed
-# repr(C) header and must be read back field-for-field by every reader.
+# SmfHeader.to_bytes() (the v1.3 default) must be byte-identical to a hand-built
+# Rust seed repr(C) header and must be read back field-for-field by every reader.
+# A 1.1-stamped header is used so the bytes equal what the seed itself writes.
 use std.spec.{describe, it, expect}
 use compiler.backend.linker.smf_header.{SmfHeader, smf_header_from_bytes, smf_header_field_shift, smf_header_size_at, smf_header_seed_trailer_offset}
 use compiler.backend.linker.smf_enums.{Platform, Arch}
@@ -86,10 +87,10 @@ fn with_body(hdr: [u8]) -> [u8]:
 
 describe "SMF seed-layout writer":
     it "emits exactly 96 bytes":
-        expect sample().to_seed_bytes().len() == 96
+        expect sample().to_bytes().len() == 96
 
     it "is byte-identical to a hand-built seed repr(C) header":
-        val got = sample().to_seed_bytes()
+        val got = sample().to_bytes()
         val want = hand_built_seed()
         var i = 0
         while i < 96:
@@ -97,13 +98,13 @@ describe "SMF seed-layout writer":
             i = i + 1
 
     it "keeps 4 zero padding bytes at 20..24 and zero trailing pad":
-        val got = sample().to_seed_bytes()
+        val got = sample().to_bytes()
         expect got[20] == 0 and got[21] == 0 and got[22] == 0 and got[23] == 0
         expect got[93] == 0 and got[94] == 0 and got[95] == 0
 
 describe "SMF seed writer -> readers":
     it "locator helper finds the seed trailer and reports shift 4 / size 96":
-        val img = with_body(sample().to_seed_bytes())
+        val img = with_body(sample().to_bytes())
         val start = smf_header_seed_trailer_offset(img)
         expect start == img.len() - 96
         expect smf_header_field_shift(img, start) == 4
@@ -111,7 +112,7 @@ describe "SMF seed writer -> readers":
 
     it "smf_header_from_bytes reads back identical fields":
         val h = sample()
-        val p = smf_header_from_bytes(with_body(h.to_seed_bytes())).unwrap()
+        val p = smf_header_from_bytes(with_body(h.to_bytes())).unwrap()
         expect p.flags == h.flags
         expect p.section_count == 3
         expect p.section_table_offset == 0x1000
@@ -130,12 +131,12 @@ describe "SMF seed writer -> readers":
         expect p.prefetch_file_count == 9
 
     it "cache validator reads the same header position and source hash":
-        val snap = SmfValidationSnapshot(data: with_body(sample().to_seed_bytes()))
+        val snap = SmfValidationSnapshot(data: with_body(sample().to_bytes()))
         expect snap.valid_header() == true
         expect snap.source_hash() == 0x0123456789ABCDEF
 
-    it "packed writer output is still read as shift 0 (no regression)":
-        val packed = sample().to_bytes()
+    it "legacy packed output is still read as shift 0 (one-release read path)":
+        val packed = sample().to_packed_bytes()
         expect smf_header_field_shift(packed, 0) == 0
         val p = smf_header_from_bytes(packed).unwrap()
         expect p.section_table_offset == 0x1000
@@ -143,13 +144,13 @@ describe "SMF seed writer -> readers":
 
 describe "SMF seed header rejection":
     it "rejects wrong magic":
-        var img = with_body(sample().to_seed_bytes())
+        var img = with_body(sample().to_bytes())
         img[img.len() - 96] = 88
         expect smf_header_seed_trailer_offset(img) == -1
         expect smf_header_from_bytes(img).is_err() == true
 
     it "rejects a truncated seed header":
-        val img = sample().to_seed_bytes()
+        val img = sample().to_bytes()
         var cut: [u8] = []
         var i = 0
         while i < 90:
@@ -160,4 +161,4 @@ describe "SMF seed header rejection":
     it "does not treat a seed header with no sections as seed-shaped":
         var h = sample()
         h.section_count = 0
-        expect smf_header_seed_trailer_offset(with_body(h.to_seed_bytes())) == -1
+        expect smf_header_seed_trailer_offset(with_body(h.to_bytes())) == -1
