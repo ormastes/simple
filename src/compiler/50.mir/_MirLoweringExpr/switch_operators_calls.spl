@@ -2768,7 +2768,10 @@ impl MirLowering:
                     match declared_field.kind:
                         case HirTypeKind.Named(field_owner, field_args):
                             val field_kind = enum_payload_nominal_kind(field_owner, self.symbols)
-                            if field_args.len() == 0 and (field_kind == 1 or field_kind == 2 or field_kind == 3):
+                            # A trait-typed field (kind 4) is a native trait
+                            # object; lower_method_call dispatches it through
+                            # the trait table only when this type is known.
+                            if field_args.len() == 0 and (field_kind == 1 or field_kind == 2 or field_kind == 3 or field_kind == 4):
                                 return Some(declared_field)
                         # A declared builtin `Result<..>` field
                         # (`owned.query.is_err()` with `query: Result<[Row], E>`)
@@ -2894,6 +2897,13 @@ impl MirLowering:
                         return found_rs.type_
             case Field(base, field_name, _):
                 return self.declared_field_hir_type(base, field_name)
+            # `opt!` names the declared payload (`self.bitmap!.reducer` with
+            # `bitmap: Slot?`). Without this the field chain behind a force
+            # unwrap lost its declared type and a trait-typed field below it
+            # fell to `unresolved method call ... route=runtime-fallback`.
+            case HirExprKind.Unwrap(unwrap_base):
+                if val wrapped = self.receiver_declared_type(unwrap_base):
+                    return enum_match_unwrap_inner_type(wrapped)
             case _: ()
         nil
 
