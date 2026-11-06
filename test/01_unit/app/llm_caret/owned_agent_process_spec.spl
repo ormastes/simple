@@ -1,0 +1,122 @@
+use std.spec.{describe, it, expect, step}
+use app.io.process_ops.{OwnedProcessResult}
+use app.io.mod.{env_get_opt}
+use app.llm_caret.agent_plan.{AgentLaunchPlan, AgentLaunchRequest}
+use app.llm_caret.agent_runtime.{AgentProcess, launch_agent_plan_with_all,
+    agent_process_status, stop_agent_process, launch_agent_team_with_all}
+use app.llm_caret.owned_agent_process.{owned_agent_launch_reason_v1,
+    owned_agent_lease_live_v1, OwnedAgentStateV1, owned_agent_collection_consumed_v1,
+    owned_agent_collection_result_v1, owned_agent_cleanup_pending_v1, owned_agent_stop_v1}
+use app.llm_caret.multi_caret_manager.{launch_multi_caret_manager,
+    poll_multi_caret_manager, stop_multi_caret_manager, list_multi_caret_agents}
+
+fn owned_agent_fixture_v1() -> text:
+    # Missing native fixture is a failing prerequisite, not a skipped test.
+    val path = env_get_opt("SOURCE_SESSION_TEST_AGENT") ?? ""
+    expect(path != "").to_equal(true)
+    path
+
+fn owned_agent_request_v1(provider: text, name: text) -> AgentLaunchRequest:
+    AgentLaunchRequest(provider: provider, agent_md_path: name, skill_path: "",
+        task_desc: "controlled native fixture", model: "", session_id: "", extra_args: [])
+
+fn owned_collection_receipt_v1(reaped: bool, error_code: i64) -> OwnedProcessResult:
+    OwnedProcessResult(version: 1, exit_code: 7, timed_out: false,
+        cancel_requested: false, term_sent: false, kill_sent: false,
+        identity_revalidated: true, reaped: reaped, stdout_truncated: false,
+        stderr_truncated: false, stdout_seen: 0, stderr_seen: 0,
+        stdout_kept: 0, stderr_kept: 0, runtime_error: error_code)
+
+describe "opaque manager-owned source agents":
+    it "matches canonical consumed and retryable collection receipts":
+        step("Classify receipts without constructing or discarding a real child lease")
+        expect(owned_agent_collection_consumed_v1(true, 0)).to_equal(true)
+        expect(owned_agent_collection_consumed_v1(true, 5)).to_equal(true)
+        expect(owned_agent_collection_consumed_v1(true, 11)).to_equal(false)
+        expect(owned_agent_collection_consumed_v1(true, 16)).to_equal(false)
+        expect(owned_agent_collection_consumed_v1(false, 0)).to_equal(false)
+        val empty = OwnedAgentStateV1(status: "running", reason: "receipt-control",
+            lease: nil, pin: nil, owner_identity: "receipt-control")
+        val failed = owned_agent_collection_result_v1(empty, owned_collection_receipt_v1(true, 5), true)
+        expect(failed.status).to_equal("error")
+        expect(failed.reason).to_equal("owned_process_collected_error:5")
+        expect(owned_agent_cleanup_pending_v1(failed.lease, failed.pin)).to_equal(false)
+        expect(owned_agent_stop_v1(failed).reason).to_equal(failed.reason)
+        for error_code in [11, 16]:
+            val retry = owned_agent_collection_result_v1(empty, owned_collection_receipt_v1(true, error_code), true)
+            expect(retry.status).to_equal("error")
+            expect(retry.reason).to_equal("owned_process_not_collected:" + error_code.to_text())
+        val clean = owned_agent_collection_result_v1(empty, owned_collection_receipt_v1(true, 0), true)
+        expect(clean.status).to_equal("stopped")
+
+    it "rejects missing providers and unbounded arguments before spawning":
+        step("Validate the configured executable and argument envelope")
+        expect(owned_agent_launch_reason_v1("", [])).to_equal("owned_provider_path_required")
+        expect(owned_agent_launch_reason_v1("provider-on-PATH", [])).to_equal("owned_provider_absolute_path_required")
+        var arguments: [text] = []
+        for index in 0..129: arguments.push("arg")
+        expect(owned_agent_launch_reason_v1(owned_agent_fixture_v1(), arguments)).to_equal("owned_provider_argument_count_exceeded")
+        expect(owned_agent_launch_reason_v1(owned_agent_fixture_v1(), ["bad\u0000arg"])).to_equal("owned_provider_argument_contains_nul")
+
+    it "cannot turn a PID or caller-shaped identity into lease authority":
+        step("Reject metadata without a process owner")
+        expect(owned_agent_lease_live_v1(nil, "claimed-owner")).to_equal(false)
+        val fake = AgentProcess(agent_id: "fake", status: "started",
+            reason: "fixture", pid: 4242, owner_identity: "claimed-owner")
+        expect(owned_agent_lease_live_v1(fake.owned_lease, fake.owner_identity)).to_equal(false)
+
+    it "runs a pinned controlled provider and retains its opaque cleanup owner":
+        step("Launch the supplied native fixture using the real provider plan path")
+        val plan = AgentLaunchPlan(provider: "codex", mode: "agent", prompt: "fixture",
+            argv: ["exec", "fixture"], summary: "fixture")
+        val started = launch_agent_plan_with_all("one", plan, "", owned_agent_fixture_v1(), "", "", "", true)
+        # Clean up before asserting, so a failed oracle cannot orphan the fixture.
+        val observed = agent_process_status(started)
+        val live = owned_agent_lease_live_v1(observed.owned_lease, observed.owner_identity)
+        val pending = owned_agent_cleanup_pending_v1(observed.owned_lease, observed.owned_pin)
+        val stopped = stop_agent_process(observed)
+        step("Check spawn, identity, live lease and complete cleanup receipts")
+        expect(started.status).to_equal("started")
+        expect(started.pid).to_equal(-1)
+        expect(started.owner_identity.byte_len()).to_equal(64)
+        expect(live).to_equal(true)
+        expect(pending).to_equal(true)
+        expect(owned_agent_cleanup_pending_v1(stopped.owned_lease, stopped.owned_pin)).to_equal(false)
+        expect(stopped.status).to_equal("stopped")
+        expect(stopped.owned_lease == nil).to_equal(true)
+        expect(stopped.owned_pin == nil).to_equal(true)
+        expect(owned_agent_lease_live_v1(started.owned_lease, started.owner_identity)).to_equal(false)
+
+    it "rolls back earlier owned children after a later provider refuses":
+        step("Launch a valid controlled fixture followed by an invalid provider")
+        val requests = [owned_agent_request_v1("codex", "one"),
+            owned_agent_request_v1("unknown-provider", "two")]
+        val team = launch_agent_team_with_all("partial", requests, "", owned_agent_fixture_v1(), "", "", "", true)
+        step("Verify no partially authorized team or retained cleanup resource")
+        expect(team.status == "started").to_equal(false)
+        expect(team.processes.len()).to_equal(2)
+        for process in team.processes:
+            expect(process.owned_lease == nil).to_equal(true)
+            expect(process.owned_pin == nil).to_equal(true)
+
+    it "publishes distinct live spawn identities and stops all manager-owned children":
+        val requests = [owned_agent_request_v1("codex", "one"),
+            owned_agent_request_v1("codex", "two")]
+        val launched = launch_multi_caret_manager("owned-manager", requests, 2,
+            "", owned_agent_fixture_v1(), "", "", "", true)
+        val current = poll_multi_caret_manager(launched)
+        val agents = list_multi_caret_agents(current)
+        val stopped = stop_multi_caret_manager(current)
+        expect(agents.len()).to_equal(2)
+        expect(agents[0].alive and agents[1].alive).to_equal(true)
+        expect(agents[0].pid).to_equal(-1)
+        expect(agents[0].owner_identity != agents[1].owner_identity).to_equal(true)
+        expect(stopped.status).to_equal("stopped")
+        for agent in list_multi_caret_agents(stopped): expect(agent.alive).to_equal(false)
+
+    it "preserves ordinary callers without granting source authority":
+        val legacy = AgentProcess(agent_id: "legacy", status: "not_running", reason: "fixture", pid: -1)
+        expect(legacy.owned_lease == nil).to_equal(true)
+        expect(legacy.owned_pin == nil).to_equal(true)
+        expect(legacy.owner_identity).to_equal("")
+        expect(owned_agent_lease_live_v1(legacy.owned_lease, legacy.owner_identity)).to_equal(false)

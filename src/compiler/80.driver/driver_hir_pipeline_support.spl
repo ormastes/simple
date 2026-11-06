@@ -1,6 +1,8 @@
 # Scalar support boundaries for the CompilerDriver HIR pipeline.
 
 use compiler.driver.driver_types.{CompileContext}
+use compiler.semantics.param_effects.ownership_source_authority.{OwnershipSourceAuthorityV1, ownership_source_authorities_create_v1}
+use compiler.common.driver_core_modes.{CompileMode}
 use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
 use compiler.driver.driver_mem_snapshot.{mem_snapshot_record, mem_snapshot_record_promotion}
 use compiler.hir.hir.*
@@ -504,6 +506,14 @@ pub fn driver_admit_nogc_param_effects_v1(ctx: CompileContext, surfaces: [Module
     if admission.errors.len() != 0:
         log_phase("phase3:hir:ownership_admission:failed")
         return
+    # Compact source/body receipts survive HIR-surface eviction. Build before
+    # publishing any checked generation; a failed receipt never grants trust.
+    var source_authorities: Dict<text, OwnershipSourceAuthorityV1> = {}
+    if ctx.options.mode == CompileMode.Interpret:
+        val authorities = ownership_source_authorities_create_v1(admission.modules, surfaces, 10000000)
+        for error in authorities.errors: ctx.add_error(error)
+        if authorities.errors.len() != 0: return
+        source_authorities = authorities.authorities
     var modules: Dict<text, HirModule> = ctx.hir_modules
     # Map identity -> every dict key (aliases) once, instead of rescanning
     # all keys per admitted module.
@@ -526,6 +536,8 @@ pub fn driver_admit_nogc_param_effects_v1(ctx: CompileContext, surfaces: [Module
                 ctx.bootstrap_entry_hir = actual
     ctx.hir_modules = modules
     ctx.validation_module_array = admission.modules
+    for name in source_authorities.keys():
+        ctx.nogc_source_authorities[name] = source_authorities[name]
     log_phase("phase3:hir:ownership_admission:done")
 
 # Bug native_build_hir_phase_scopes_2026_10_24: the closure-wide validators

@@ -2,12 +2,27 @@
 
 use app.io.mod.{process_spawn_async, process_spawn_async_env, process_is_running, process_kill}
 use app.llm_caret.agent_plan.{AgentLaunchPlan, AgentLaunchRequest, build_agent_launch_plan}
+use app.io.process_ops.{OwnedProcessLease, OwnedExecutablePin}
+use app.llm_caret.owned_agent_process.{OwnedAgentStateV1, owned_agent_start_v1,
+    owned_agent_poll_v1, owned_agent_stop_v1}
 
 struct AgentProcess:
     agent_id: text
     status: text
     reason: text
     pid: i64
+    owned_lease: OwnedProcessLease? = nil
+    owner_identity: text = ""
+    owned_pin: OwnedExecutablePin? = nil
+
+fn _agent_owned_state(proc: AgentProcess) -> OwnedAgentStateV1:
+    OwnedAgentStateV1(status: proc.status, reason: proc.reason,
+        lease: proc.owned_lease, pin: proc.owned_pin, owner_identity: proc.owner_identity)
+
+fn _agent_owned_process(agent_id: text, state: OwnedAgentStateV1) -> AgentProcess:
+    AgentProcess(agent_id: agent_id, status: state.status, reason: state.reason,
+        pid: -1, owned_lease: state.lease, owner_identity: state.owner_identity,
+        owned_pin: state.pin)
 
 struct AgentTeamProcess:
     team_id: text
@@ -81,7 +96,7 @@ pub fn launch_agent_plan_with_gemini(agent_id: text, plan: AgentLaunchPlan,
 
 pub fn launch_agent_plan_with_all(agent_id: text, plan: AgentLaunchPlan,
         claude_path: text, codex_path: text, gemini_path: text, kimi_path: text,
-        opencode_path: text) -> AgentProcess:
+        opencode_path: text, owned_source_sessions: bool = false) -> AgentProcess:
     if plan.provider == "team":
         return AgentProcess(agent_id: agent_id, status: "not_started", reason: "team_plan_not_executable", pid: -1)
     if not is_known_agent_provider(plan.provider):
@@ -89,6 +104,8 @@ pub fn launch_agent_plan_with_all(agent_id: text, plan: AgentLaunchPlan,
             reason: "unknown_provider:" + plan.provider, pid: -1)
     val cmd = agent_command_for_provider_with_all(plan.provider, claude_path,
         codex_path, gemini_path, kimi_path, opencode_path)
+    if owned_source_sessions:
+        return _agent_owned_process(agent_id, owned_agent_start_v1(cmd, plan.argv))
     val pid = process_spawn_async(cmd, plan.argv)
     if pid <= 0:
         return AgentProcess(agent_id: agent_id, status: "error", reason: "spawn_failed", pid: pid)
@@ -122,15 +139,18 @@ pub fn launch_messaging_agent_plan_with_all(agent_id: text, plan: AgentLaunchPla
 
 pub fn summarize_agent_team(team_id: text, processes: [AgentProcess]) -> AgentTeamProcess:
     var started = 0
+    var owned_pending = 0
     for proc in processes:
         if proc.status == "started" or proc.status == "running":
             started = started + 1
+        elif proc.owned_lease != nil or proc.owned_pin != nil:
+            owned_pending = owned_pending + 1
     var status = "error"
     if processes.len() == 0:
         status = "empty"
     elif started == processes.len():
         status = "started"
-    elif started > 0:
+    elif started > 0 or owned_pending > 0:
         status = "partial"
     AgentTeamProcess(team_id: team_id, status: status, reason: "started:" + started.to_text() + "/" + processes.len().to_text(), processes: processes)
 
@@ -145,7 +165,10 @@ pub fn launch_agent_team_with_gemini(team_id: text, requests: [AgentLaunchReques
 
 pub fn launch_agent_team_with_all(team_id: text, requests: [AgentLaunchRequest],
         claude_path: text, codex_path: text, gemini_path: text, kimi_path: text,
-        opencode_path: text) -> AgentTeamProcess:
+        opencode_path: text, owned_source_sessions: bool = false) -> AgentTeamProcess:
+    if owned_source_sessions and requests.len() > 16:
+        return AgentTeamProcess(team_id: team_id, status: "error",
+            reason: "owned_team_capacity_exceeded", processes: [])
     var processes: [AgentProcess] = []
     var seen_ids: [text] = []
     var idx = 0
@@ -159,7 +182,12 @@ pub fn launch_agent_team_with_all(team_id: text, requests: [AgentLaunchRequest],
                 aid = req.agent_md_path + "#" + idx.to_text()
         seen_ids = seen_ids + [req.agent_md_path]
         processes = processes + [launch_agent_plan_with_all(aid,
-            plan, claude_path, codex_path, gemini_path, kimi_path, opencode_path)]
+            plan, claude_path, codex_path, gemini_path, kimi_path, opencode_path,
+            owned_source_sessions)]
+        if owned_source_sessions and processes[processes.len() - 1].status != "started":
+            # Retain every failed cleanup owner in the returned table. The
+            # manager must not proceed with a partly authorized source team.
+            return stop_agent_team(summarize_agent_team(team_id, processes))
         idx = idx + 1
     summarize_agent_team(team_id, processes)
 
@@ -176,6 +204,8 @@ pub fn stop_agent_team(team: AgentTeamProcess) -> AgentTeamProcess:
     summarize_agent_team(team.team_id, processes)
 
 pub fn agent_process_status(proc: AgentProcess) -> AgentProcess:
+    if proc.owned_lease != nil or proc.owned_pin != nil or proc.owner_identity != "":
+        return _agent_owned_process(proc.agent_id, owned_agent_poll_v1(_agent_owned_state(proc)))
     if proc.pid <= 0:
         return AgentProcess(agent_id: proc.agent_id, status: "not_running", reason: "invalid_pid", pid: proc.pid)
     if process_is_running(proc.pid):
@@ -183,6 +213,8 @@ pub fn agent_process_status(proc: AgentProcess) -> AgentProcess:
     AgentProcess(agent_id: proc.agent_id, status: "not_running", reason: "process_exited", pid: proc.pid)
 
 pub fn stop_agent_process(proc: AgentProcess) -> AgentProcess:
+    if proc.owned_lease != nil or proc.owned_pin != nil or proc.owner_identity != "":
+        return _agent_owned_process(proc.agent_id, owned_agent_stop_v1(_agent_owned_state(proc)))
     if proc.pid <= 0:
         return AgentProcess(agent_id: proc.agent_id, status: "not_stopped", reason: "invalid_pid", pid: proc.pid)
     if process_kill(proc.pid):

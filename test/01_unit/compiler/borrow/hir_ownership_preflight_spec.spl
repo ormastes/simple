@@ -1,0 +1,258 @@
+# @req AC-OWN-01
+# @req AC-OWN-04
+# @req AC-OWN-05
+# @req AC-GATE-02
+# Authored source-to-HIR controls; execution requires an admitted full runtime.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_modes.{CompileMode}
+use compiler.common.driver_core_types.{SourceFile, CompileResult, driver_core_compile_options_default}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.borrow.borrow_check.hir_ownership_facts.{HirOwnershipFactsV1}
+use compiler.borrow.borrow_check.hir_ownership_expr.{hir_ownership_place_inputs_v1}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surface_from_owner, ModuleSurfaceParserOwner}
+use compiler.driver.driver_hir_pipeline_support.{driver_admit_nogc_param_effects_v1}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_pipeline.*
+use compiler.driver.driver.*
+use compiler.backend.interpreter.{InterpreterBackendImpl}
+use compiler.borrow.borrow_check.hir_ownership.{check_hir_ownership_module_v1, check_hir_ownership_with_live_providers_v1}
+use compiler.semantics.param_effects.ownership_source_authority.{ownership_provider_index_v1}
+use test.helpers.module_surface_owner_fixture.{module_surfaces_from_test_modules}
+
+fn ownership_source_context(body: text, strict: bool = true, name: text = "ownership_source") -> CompileContext:
+    val path = "testdata/{name}.spl"
+    val source = (if strict: "@no_gc(strict)\n" else: "") + body
+    val parsed = parse_full_frontend(source, path, name, Logger(level: 0))
+    expect(parsed.nogc_strict).to_equal(strict)
+    val row = SourceFile(path: path, content: source, module_name: name)
+    val surface = module_surface_from_owner(ModuleSurfaceParserOwner.new(parsed), row, 0).unwrap()
+    var lowering = HirLowering.with_filename(path)
+    val actual: HirModule = lowering.lower_module(parsed)
+    var options = driver_core_compile_options_default()
+    options.mode = CompileMode.Interpret
+    val ctx = CompileContext.create(options)
+    ctx.hir_modules[name] = actual
+    ctx.validation_module_array = [actual]
+    driver_admit_nogc_param_effects_v1(ctx, [surface])
+    expect(ctx.error_count_value).to_equal(0)
+    ctx
+
+fn ownership_source_module(body: text, strict: bool = true, name: text = "ownership_source") -> HirModule:
+    ownership_source_context(body, strict, name).hir_modules[name]
+
+fn ownership_import_context() -> CompileContext:
+    val provider_source = "@no_gc(strict)\npub fn inspect(values: [i64]) -> i64:\n    values[0]\n\npub fn update(values: [i64]):\n    values[0] = 8\n"
+    val consumer_source = "@no_gc(strict)\nuse provider.{inspect as renamed, update}\n\nfn main() -> i64:\n    var owner = [7]\n    val read = renamed(owner)\n    update(owner)\n    owner[0]\n"
+    val provider_parsed = parse_full_frontend(provider_source, "provider.spl", "provider", Logger(level: 0))
+    val consumer_parsed = parse_full_frontend(consumer_source, "consumer.spl", "consumer", Logger(level: 0))
+    val sources = [SourceFile(path: "provider.spl", content: provider_source, module_name: "provider"), SourceFile(path: "consumer.spl", content: consumer_source, module_name: "consumer")]
+    val registry = module_surfaces_from_test_modules({"provider": provider_parsed, "consumer": consumer_parsed}, sources).unwrap()
+    var provider_lowering = HirLowering.with_filename("provider.spl")
+    provider_lowering.module_surfaces = registry
+    val provider = provider_lowering.lower_module(provider_parsed)
+    var consumer_lowering = HirLowering.with_filename("consumer.spl")
+    consumer_lowering.module_surfaces = registry
+    val consumer = consumer_lowering.lower_module(consumer_parsed)
+    expect(provider_lowering.errors.len()).to_equal(0)
+    expect(consumer_lowering.errors.len()).to_equal(0)
+    var options = driver_core_compile_options_default()
+    options.mode = CompileMode.Interpret
+    val ctx = CompileContext.create(options)
+    ctx.hir_modules = {"provider": provider, "consumer": consumer}
+    ctx.validation_module_array = [provider, consumer]
+    driver_admit_nogc_param_effects_v1(ctx, registry.surfaces)
+    expect(ctx.error_count_value).to_equal(0)
+    ctx
+
+fn ownership_deep_type(base: HirType, mode: i64) -> HirType:
+    var type_ = base
+    var depth = 0
+    while depth < 256:
+        if mode == 0:
+            type_ = HirType(kind: HirTypeKind.Optional(type_), span: base.span)
+        elif mode == 1:
+            type_ = HirType(kind: HirTypeKind.Result(type_, base), span: base.span)
+        else:
+            type_ = HirType(kind: HirTypeKind.Tuple([type_]), span: base.span)
+        depth = depth + 1
+    type_
+
+fn moved_owner_source() -> text:
+    "fn main() -> i64:\n    val owner = [1, 2]\n    val moved = owner\n    owner[0]\n"
+
+describe "typed HIR ownership preflight":
+    it "rejects source use after an owning assignment before direct backend execution":
+        val module = ownership_source_module(moved_owner_source())
+        val errors = check_hir_ownership_module_v1(module)
+        expect(errors.join("\n")).to_contain("Use of moved value")
+        val backend = InterpreterBackendImpl.new()
+        match backend.interpret_hir_module(module):
+            case Err(error): expect(error.message).to_contain("Use of moved value")
+            case _: fail("invalid source must not enter interpreter evaluation")
+
+    it "accepts mutually exclusive moves that return before joining":
+        val module = ownership_source_module("fn main() -> i64:\n    val owner = [7]\n    if true:\n        val left = owner\n        return left[0]\n    else:\n        val right = owner\n        return right[0]\n")
+        expect(check_hir_ownership_module_v1(module).len()).to_equal(0)
+
+    it "rejects repeated moves through a loop backedge":
+        val module = ownership_source_module("fn main() -> i64:\n    val owner = [1]\n    var count = 0\n    while count < 2:\n        val moved = owner\n        count += 1\n    count\n")
+        expect(check_hir_ownership_module_v1(module).join("\n")).to_contain("Use of moved value")
+
+    it "accepts a dominating refill before each loop move":
+        val module = ownership_source_module("fn main() -> i64:\n    var owner = [1]\n    var count = 0\n    while count < 2:\n        owner = [count]\n        val moved = owner\n        count += 1\n    count\n")
+        expect(check_hir_ownership_module_v1(module).len()).to_equal(0)
+
+    it "does not turn a move followed by unconditional break into a backedge":
+        val module = ownership_source_module("fn main() -> i64:\n    val owner = [1]\n    loop:\n        val moved = owner\n        break\n    0\n")
+        expect(check_hir_ownership_module_v1(module).len()).to_equal(0)
+
+    it "preserves the owner across an admitted short call":
+        val module = ownership_source_module("fn inspect(values: [i64]) -> i64:\n    values[0]\n\nfn main() -> i64:\n    val owner = [7]\n    val result = inspect(owner)\n    owner[0]\n")
+        expect(check_hir_ownership_module_v1(module).len()).to_equal(0)
+
+    it "refuses missing contracts and exhausted budgets instead of unchecked success":
+        var module = ownership_source_module("fn main() -> i64:\n    7\n")
+        expect(check_hir_ownership_module_v1(module, 0).join("\n")).to_contain("budget exhausted")
+        module.nogc_param_effects_checked = false
+        expect(check_hir_ownership_module_v1(module).join("\n")).to_contain("lacks admitted")
+
+    it "leaves legacy module policy unchanged":
+        val module = ownership_source_module(moved_owner_source(), false)
+        expect(check_hir_ownership_module_v1(module).len()).to_equal(0)
+
+    it "preflights a strict dependency before a legacy entry can execute":
+        val entry = ownership_source_module("fn main() -> i64:\n    print \"OWNERSHIP-ENTRY-MUST-NOT-RUN\"\n    0\n", false, "entry")
+        val dependency_ctx = ownership_source_context(moved_owner_source(), true, "dependency")
+        val dependency = dependency_ctx.hir_modules["dependency"]
+        var driver = CompilerDriver.create(driver_core_compile_options_default())
+        driver.ctx.hir_modules["entry"] = entry
+        driver.ctx.hir_modules["dependency"] = dependency
+        driver.ctx.nogc_source_authorities = dependency_ctx.nogc_source_authorities
+        driver.ctx.sources = [SourceFile(path: "testdata/entry.spl", content: "", module_name: "entry"), SourceFile(path: "testdata/dependency.spl", content: "", module_name: "dependency")]
+        match driver.interpret_pipeline():
+            case CompileResult.BorrowError(errors):
+                expect(errors.join("\n")).to_contain("dependency")
+                expect(errors.join("\n")).to_contain("Use of moved value")
+            case _: fail("a strict invalid dependency must reject the entire execution closure")
+        # The native/integration harness must additionally assert that the
+        # observable OWNERSHIP-ENTRY-MUST-NOT-RUN marker is absent from stdout.
+
+    it "refuses a derived short argument whose alternative owners are not modeled":
+        val module = ownership_source_module("fn inspect(values: [i64]) -> i64:\n    values[0]\n\nfn main() -> i64:\n    val left = [1]\n    val right = [2]\n    inspect(if true: left else: right)\n")
+        expect(check_hir_ownership_module_v1(module).join("\n")).to_contain("derived view is not admitted")
+
+    it "refuses ownership-sensitive global reads and moves across calls":
+        val module = ownership_source_module("var GLOBAL = [1]\n\nfn take() -> i64:\n    val moved = GLOBAL\n    moved[0]\n\nfn main() -> i64:\n    val result = take()\n    GLOBAL[0]\n")
+        expect(check_hir_ownership_module_v1(module).join("\n")).to_contain("global/free place")
+
+    it "preserves scalar global access":
+        val module = ownership_source_module("var COUNT = 1\n\nfn main() -> i64:\n    COUNT\n")
+        expect(check_hir_ownership_module_v1(module).len()).to_equal(0)
+
+    it "preserves imported aliased short-read and mutate contracts from physical admitted owners":
+        val ctx = ownership_import_context()
+        val providers = ownership_provider_index_v1(ctx.validation_module_array, ctx.nogc_source_authorities, 1000000)
+        expect(providers.errors.len()).to_equal(0)
+        expect(check_hir_ownership_with_live_providers_v1(ctx.hir_modules["consumer"], 1000000, providers.modules).len()).to_equal(0)
+        expect(check_hir_ownership_module_v1(ctx.hir_modules["consumer"]).join("\n")).to_contain("lacks an exact admitted")
+
+    it "refuses missing and mismatched physical dependency authority":
+        val ctx = ownership_import_context()
+        expect(ownership_provider_index_v1(ctx.validation_module_array, {}, 1000000).errors.join("\n")).to_contain("missing live source authority")
+        var changed = ctx.hir_modules["provider"]
+        changed.path = "wrong/provider.spl"
+        expect(ownership_provider_index_v1([changed], ctx.nogc_source_authorities, 1000000).errors.join("\n")).to_contain("stale or incomplete")
+
+    it "refuses a checked row mutated after source admission":
+        val ctx = ownership_import_context()
+        var changed = ctx.hir_modules["provider"]
+        changed.nogc_param_effects = [["consume"], ["consume"]]
+        expect(ownership_provider_index_v1([changed], ctx.nogc_source_authorities, 1000000).errors.join("\n")).to_contain("stale or incomplete")
+
+    it "rejects an owning projection even when the global root is a copyable handle":
+        val module = ownership_source_module("fn main() -> i64:\n    0\n")
+        val span = Span(start: 0, end: 1, line: 1, col: 1, file: "projection.spl", length: 1)
+        val integer = HirType(kind: HirTypeKind.Int(64, true), span: span)
+        val owned = HirType(kind: HirTypeKind.Array(integer, Some(1)), span: span)
+        val tuple = HirType(kind: HirTypeKind.Tuple([owned]), span: span)
+        for kind in [HirTypeKind.Shared(tuple), HirTypeKind.Ref(tuple, false)]:
+            val root = HirExpr(kind: HirExprKind.Var(SymbolId(id: 77)), has_type_: true, type_: HirType(kind: kind, span: span), span: span)
+            val projection = HirExpr(kind: HirExprKind.TupleIndex(root, 0), has_type_: true, type_: owned, span: span)
+            val facts = HirOwnershipFactsV1.create(1000, {}, {}, module)
+            hir_ownership_place_inputs_v1(facts, projection)
+            expect(facts.errors.join("\n")).to_contain("global/free projection")
+
+    it "refuses resolver provenance mutated after physical admission":
+        val ctx = ownership_import_context()
+        var changed = ctx.hir_modules["consumer"]
+        var changed_symbol = false
+        for key in changed.symbols.symbols.keys():
+            var symbol = changed.symbols.symbols[key]
+            if (symbol.defining_module ?? "") == "provider":
+                symbol.defining_module = Some("different_provider")
+                changed.symbols.symbols[key] = symbol
+                changed_symbol = true
+        expect(changed_symbol).to_equal(true)
+        expect(ownership_provider_index_v1([changed], ctx.nogc_source_authorities, 1000000).errors.join("\n")).to_contain("stale or incomplete")
+
+    it "collapses aliases only when both match the same physical generation":
+        val ctx = ownership_import_context()
+        val provider = ctx.hir_modules["provider"]
+        val aliases = ownership_provider_index_v1([provider, provider], ctx.nogc_source_authorities, 1000000)
+        expect(aliases.errors.len()).to_equal(0)
+        expect(aliases.modules.len()).to_equal(1)
+
+    it "rejects locally forged short rows at the public direct backend":
+        var module = ownership_source_module("fn consume(values: &[i64]) -> &[i64]:\n    values\n\nfn main() -> i64:\n    0\n")
+        var changed = false
+        var row = 0
+        for id in module.nogc_param_effect_symbol_ids:
+            val declaration = module.functions[SymbolId(id: id)]
+            if declaration.name == "consume":
+                module.nogc_param_effects[row] = ["read-short"]
+                changed = true
+            row = row + 1
+        expect(changed).to_equal(true)
+        match InterpreterBackendImpl.new().interpret_hir_module(module):
+            case Err(error): expect(error.message).to_contain("disagree with canonical inference")
+            case _: fail("mutated checked rows cannot authorize direct strict execution")
+
+    it "bounds deep Optional Result and Tuple parameter types before classifiers":
+        for mode in [0, 1, 2]:
+            var module = ownership_source_module("fn inspect(value: i64) -> i64:\n    value\n")
+            val key = module.functions.keys()[0]
+            var function = module.functions[key]
+            var parameter = function.params[0]
+            parameter.type_ = ownership_deep_type(parameter.type_, mode)
+            function.params[0] = parameter
+            module.functions[key] = function
+            expect(check_hir_ownership_module_v1(module).join("\n")).to_contain("input exceeds depth/work bounds")
+            match InterpreterBackendImpl.new().interpret_hir_module(module):
+                case Err(error): expect(error.message).to_contain("input exceeds depth/work bounds")
+                case _: fail("deep parameter types must fail before inference or evaluation")
+
+    it "bounds projected expression types before the ownership classifier":
+        for mode in [0, 1, 2]:
+            var module = ownership_source_module("fn main() -> i64:\n    0\n")
+            val key = module.functions.keys()[0]
+            var function = module.functions[key]
+            val base = function.body.value.type_
+            val deep = ownership_deep_type(base, mode)
+            val root = HirExpr(kind: HirExprKind.Var(SymbolId(id: 77)), has_type_: true, type_: base, span: base.span)
+            val projection = HirExpr(kind: HirExprKind.TupleIndex(root, 0), has_type_: true, type_: deep, span: base.span)
+            function.body.value = projection
+            module.functions[key] = function
+            expect(check_hir_ownership_module_v1(module).join("\n")).to_contain("input exceeds depth/work bounds")
+            match InterpreterBackendImpl.new().interpret_hir_module(module):
+                case Err(error): expect(error.message).to_contain("input exceeds depth/work bounds")
+                case _: fail("deep projection must fail before CFG or evaluation")
+            val facts = HirOwnershipFactsV1.create(10000, {}, {}, module)
+            hir_ownership_place_inputs_v1(facts, projection)
+            expect(facts.errors.join("\n")).to_contain("type identity unsupported or type budget exhausted")

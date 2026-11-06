@@ -1,0 +1,240 @@
+# Canonical messaging auth owner for source-view credentials. Issuer and
+# verifier share this service instance; importing this module in another process
+# does not share its registry. The workbench publisher supplies parent-owned
+# manager observations, never request-shaped SessionView metadata.
+use app.llm_caret.messaging.adapter.server.auth.{AuthPrincipal, authorize}
+use app.llm_caret.multi_caret_manager.{MultiCaretManager, list_multi_caret_agents}
+use std.common.source.session_host_contracts.{SourceAgentBindingV1, SourceViewHostV1, SourceHostedSessionV1}
+use std.nogc_sync_mut.source.host.*
+use std.nogc_sync_mut.sosix.entropy.{sosix_random_hex}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.crypto.constant_time.{constant_time_compare}
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new_gate, mutex_lock_gate, mutex_unlock_gate}
+use app.io.mod.{cwd}
+use app.io.process_ops.{OwnedProcessLease}
+use app.llm_caret.owned_agent_process.{owned_agent_lease_live_v1}
+use app.io.file_ops.{path_absolute}
+
+pub struct SourceRegisteredAgentV1:
+    manager_id: text
+    agent_id: text
+    owned_lease: OwnedProcessLease?
+    owner_identity: text
+    generation: i64
+    live: bool
+
+pub struct SourceSessionCredentialV1:
+    token_digest: text
+    manager_id: text
+    agent_id: text
+    binding: SourceAgentBindingV1
+    revoked: bool
+
+pub class SourceSessionAuthorityV1:
+    owner: AuthPrincipal
+    workspace_root: text
+    host: SourceViewHostV1
+    agents: [SourceRegisteredAgentV1]
+    credentials: [SourceSessionCredentialV1]
+    next_generation: i64
+    supervising: bool
+    managed_owner: MultiCaretManager?
+
+    static fn create(owner: AuthPrincipal, host_epoch: text, workspace_root: text) -> Result<SourceSessionAuthorityV1, text>:
+        # Only the existing configured auth owner constructs this instance.
+        if not owner.authenticated or owner.identity_id == "" or owner.workspace_id == "" or workspace_root == "":
+            return Err("source_authority_identity_required")
+        val host = source_view_host_new_v1(host_epoch, 128)?
+        Ok(SourceSessionAuthorityV1(owner: owner, workspace_root: workspace_root, host: host, agents: [], credentials: [], next_generation: 1, supervising: false, managed_owner: nil))
+
+    me publish_manager(manager: MultiCaretManager) -> Result<(), text>:
+        if manager.manager_id == "" or manager.manager_id.byte_len() > 128:
+            return Err("invalid_manager_identity")
+        val observed = list_multi_caret_agents(manager)
+        if observed.len() > 16: return Err("manager_capacity_exceeded")
+        var seen: [text] = []
+        for agent in observed:
+            if agent.agent_id == "" or agent.agent_id.byte_len() > 128 or seen.contains(agent.agent_id):
+                return Err("manager_agent_identity_ambiguous")
+            seen.push(agent.agent_id)
+        # Retain only live rows. A host-wide monotone counter prevents a retired
+        # identity from ever regaining an old generation after bounded reclamation.
+        var updated: [SourceRegisteredAgentV1] = []
+        for previous in self.agents:
+            if previous.manager_id != manager.manager_id:
+                if owned_agent_lease_live_v1(previous.owned_lease, previous.owner_identity):
+                    updated.push(previous)
+        var generation = self.next_generation
+        for agent in observed:
+            val live = manager.status == "running" or manager.status == "degraded"
+            if not live or not owned_agent_lease_live_v1(agent.owned_lease, agent.owner_identity): continue
+            var assigned = 0
+            for previous in self.agents:
+                if previous.manager_id == manager.manager_id and previous.agent_id == agent.agent_id and previous.owner_identity == agent.owner_identity:
+                    assigned = previous.generation
+            if assigned == 0:
+                if generation == 9223372036854775807: return Err("session_generation_exhausted")
+                assigned = generation
+                generation = generation + 1
+            updated.push(SourceRegisteredAgentV1(manager_id: manager.manager_id,
+                agent_id: agent.agent_id, owned_lease: agent.owned_lease,
+                owner_identity: agent.owner_identity, generation: assigned, live: true))
+        if updated.len() > 128: return Err("source_agent_capacity_exceeded")
+        self.agents = updated
+        self.next_generation = generation
+        self.reclaim_credentials()
+        Ok(())
+
+    me reclaim_credentials():
+        var retained: [SourceSessionCredentialV1] = []
+        for credential in self.credentials:
+            var admitted = false
+            for agent in self.agents:
+                if agent.manager_id == credential.manager_id and agent.agent_id == credential.agent_id:
+                    admitted = agent.live and agent.generation == credential.binding.session_generation
+            if admitted and not credential.revoked: retained.push(credential)
+        self.credentials = retained
+        # Remove unreachable host sessions together with revoked credentials;
+        # otherwise historical sessions alone would exhaust the host capacity.
+        var entries: [SourceHostedSessionV1] = []
+        for entry in self.host.entries:
+            for credential in retained:
+                if entry.binding.agent_session_id == credential.binding.agent_session_id and entry.binding.session_generation == credential.binding.session_generation:
+                    entries.push(entry)
+        self.host.entries = entries
+
+    me issue(principal: AuthPrincipal, manager_id: text, agent_id: text,
+            now_ms: i64, ttl_ms: i64) -> Result<(text, SourceAgentBindingV1), text>:
+        val auth = authorize(principal, "source:manage", self.owner.workspace_id, now_ms)
+        if not auth.allowed: return Err(auth.error)
+        if principal.identity_id != self.owner.identity_id: return Err("source_issuer_denied")
+        if now_ms < 0 or ttl_ms <= 0 or ttl_ms > 3600000 or now_ms > 9223372036851175807:
+            return Err("source_credential_lifetime_invalid")
+        var selected = -1
+        var index = 0
+        while index < self.agents.len():
+            val agent = self.agents[index]
+            if agent.manager_id == manager_id and agent.agent_id == agent_id and agent.live:
+                selected = index
+            index = index + 1
+        if selected < 0: return Err("live_manager_agent_required")
+        var agent = self.agents[selected]
+        var retained: [SourceSessionCredentialV1] = []
+        for credential in self.credentials:
+            if not credential.revoked and credential.binding.expires_at_ms > now_ms:
+                if not credential.revoked and credential.manager_id == manager_id and credential.agent_id == agent_id and credential.binding.session_generation == agent.generation:
+                    return Err("source_session_already_issued")
+                retained.push(credential)
+        if retained.len() >= 128: return Err("source_credential_capacity_exceeded")
+        if not owned_agent_lease_live_v1(agent.owned_lease, agent.owner_identity): return Err("manager_agent_not_running")
+        if self.next_generation == 9223372036854775807: return Err("session_generation_exhausted")
+        agent.generation = self.next_generation
+        val random = sosix_random_hex(32)
+        if random == nil: return Err("source_credential_entropy_unavailable")
+        val token = sha256_text(self.host.host_epoch + ":" + agent.generation.to_text() + ":" + random.unwrap())
+        val token_digest = sha256_text(token)
+        for credential in retained:
+            if constant_time_compare(credential.token_digest, token_digest): return Err("source_credential_collision")
+        var expires_at = now_ms + ttl_ms
+        if principal.expires_at < expires_at: expires_at = principal.expires_at
+        if self.owner.expires_at < expires_at: expires_at = self.owner.expires_at
+        # Length framing keeps distinct manager/agent pairs distinct.
+        val framed = manager_id.byte_len().to_text() + ":" + manager_id + agent_id.byte_len().to_text() + ":" + agent_id
+        val logical = "manager-agent:" + sha256_text(framed)
+        val binding = SourceAgentBindingV1(workspace_id: self.owner.workspace_id,
+            principal_id: self.owner.identity_id, agent_session_id: logical,
+            session_generation: agent.generation, host_epoch: self.host.host_epoch,
+            expires_at_ms: expires_at)
+        val registered = source_view_host_register_v1(self.host, binding, now_ms)?
+        retained.push(SourceSessionCredentialV1(token_digest: token_digest,
+            manager_id: manager_id, agent_id: agent_id, binding: binding, revoked: false))
+        self.host = registered
+        self.agents[selected] = agent
+        self.next_generation = self.next_generation + 1
+        self.credentials = retained
+        Ok((token, binding))
+
+    fn verify(token: text, now_ms: i64) -> Result<SourceAgentBindingV1, text>:
+        if token.byte_len() != 64: return Err("source_credential_invalid")
+        if now_ms < 0 or self.owner.expires_at <= now_ms: return Err("source_authority_expired")
+        val digest = sha256_text(token)
+        for credential in self.credentials:
+            if constant_time_compare(credential.token_digest, digest):
+                if credential.revoked: return Err("source_credential_revoked")
+                if credential.binding.expires_at_ms <= now_ms: return Err("source_credential_expired")
+                var live = false
+                for agent in self.agents:
+                    if agent.manager_id == credential.manager_id and agent.agent_id == credential.agent_id:
+                        live = agent.live and agent.generation == credential.binding.session_generation and owned_agent_lease_live_v1(agent.owned_lease, agent.owner_identity)
+                if not live: return Err("source_agent_generation_stale")
+                val session = source_view_host_session_v1(self.host, credential.binding, now_ms)?
+                return Ok(credential.binding)
+        Err("source_credential_invalid")
+
+    me close(token: text, now_ms: i64) -> Result<(), text>:
+        val binding = self.verify(token, now_ms)?
+        self.host = source_view_host_close_v1(self.host, binding, now_ms)?
+        val digest = sha256_text(token)
+        var index = 0
+        while index < self.credentials.len():
+            if constant_time_compare(self.credentials[index].token_digest, digest):
+                self.credentials[index].revoked = true
+            index = index + 1
+        Ok(())
+
+# Explicit service owner. Canonical HTTP dispatch is threaded, therefore every
+# request and manager publication holds the same gate across state commit.
+var SOURCE_SESSION_AUTHORITY: SourceSessionAuthorityV1? = nil
+var SOURCE_SESSION_GATE: Mutex? = nil
+
+pub fn source_session_owner_lock_v1() -> bool:
+    if SOURCE_SESSION_GATE == nil: return false
+    mutex_lock_gate(SOURCE_SESSION_GATE.unwrap()) != nil
+
+pub fn source_session_owner_unlock_v1() -> bool:
+    if SOURCE_SESSION_GATE == nil: return false
+    mutex_unlock_gate(SOURCE_SESSION_GATE.unwrap(), 0) == 1
+
+pub fn source_session_authority_get_v1() -> SourceSessionAuthorityV1?:
+    SOURCE_SESSION_AUTHORITY
+
+pub fn source_session_authority_set_v1(authority: SourceSessionAuthorityV1):
+    SOURCE_SESSION_AUTHORITY = authority
+
+# Configuration is a startup-only composition-root action before accepting
+# connections. It is not exposed as an HTTP/tool operation.
+pub fn configure_source_session_authority_v1(owner: AuthPrincipal) -> Result<(), text>:
+    if SOURCE_SESSION_GATE == nil: SOURCE_SESSION_GATE = mutex_new_gate(0)
+    if not source_session_owner_lock_v1(): return Err("source_owner_lock_failed")
+    SOURCE_SESSION_AUTHORITY = nil
+    val epoch = sosix_random_hex(32)
+    var error = ""
+    if epoch == nil:
+        error = "source_host_entropy_unavailable"
+    else:
+        match SourceSessionAuthorityV1.create(owner, epoch.unwrap(), path_absolute(cwd())):
+            Ok(authority): SOURCE_SESSION_AUTHORITY = authority
+            Err(reason): error = reason
+    if not source_session_owner_unlock_v1(): return Err("source_owner_unlock_failed")
+    if error != "": return Err(error)
+    Ok(())
+
+pub fn source_session_publish_manager_v1(manager: MultiCaretManager) -> Result<(), text>:
+    if not source_session_owner_lock_v1(): return Err("source_authority_not_configured")
+    var result: Result<(), text> = Err("source_authority_not_configured")
+    if SOURCE_SESSION_AUTHORITY != nil:
+        var authority = SOURCE_SESSION_AUTHORITY.unwrap()
+        result = authority.publish_manager(manager)
+        if result.is_err():
+            # A rejected update cannot leave that manager's old grant live,
+            # and must not invalidate unrelated managers in the same service.
+            var retained: [SourceRegisteredAgentV1] = []
+            for agent in authority.agents:
+                if agent.manager_id != manager.manager_id: retained.push(agent)
+            authority.agents = retained
+            authority.reclaim_credentials()
+        SOURCE_SESSION_AUTHORITY = authority
+    if not source_session_owner_unlock_v1(): return Err("source_owner_unlock_failed")
+    result
+
+export SourceRegisteredAgentV1, SourceSessionCredentialV1, SourceSessionAuthorityV1

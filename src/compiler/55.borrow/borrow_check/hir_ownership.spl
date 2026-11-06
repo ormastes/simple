@@ -1,0 +1,90 @@
+# Target-independent typed HIR adapter to the common ownership CFG solver.
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.semantics.param_effects.imported_effect_receipts.{verified_imported_effect_contracts_v1}
+use compiler.semantics.param_effects.ownership_source_authority.{ownership_direct_effect_errors_v1, ownership_hir_input_work_v1}
+use compiler.hir.ownership_types.{hir_type_is_short_candidate}
+use compiler.borrow.borrow_check.hir_ownership_facts.{HirOwnershipFactsV1}
+use compiler.borrow.borrow_check.hir_ownership_cfg.{hir_ownership_block_v1}
+
+pub fn check_hir_ownership_module_v1(module: HirModule, work_limit: i64 = 1000000) -> [text]:
+    val errors = check_hir_ownership_with_live_providers_v1(module, work_limit, {})
+    if errors.len() != 0: return errors
+    ownership_direct_effect_errors_v1(module)
+
+# Precondition: providers come from ownership_provider_index_v1 for this live
+# checked generation. Never accept user or cache metadata at this internal seam.
+pub(package) fn check_hir_ownership_with_live_providers_v1(module: HirModule,
+        work_limit: i64, providers: Dict<text, HirModule>) -> [text]:
+    if not module.nogc_strict: return []
+    if work_limit <= 0:
+        return ["NOGC-HIR-001: ownership module budget exhausted; analysis incomplete"]
+    # Validate total typed-HIR traversal/depth before parameter classifiers,
+    # CFG capture, or any canonical parameter-effect recomputation.
+    val input_work = ownership_hir_input_work_v1(module, work_limit / 4)
+    if input_work < 0:
+        return ["NOGC-HIR-001: ownership HIR input exceeds depth/work bounds or is unsupported"]
+    val available_work = work_limit - input_work
+    if not module.nogc_param_effects_checked:
+        return ["NOGC-HIR-001: strict HIR lacks admitted parameter-effect contracts"]
+    if module.nogc_param_effect_symbol_ids.len() != module.nogc_param_effects.len():
+        return ["NOGC-HIR-001: ownership contract row cardinality mismatch"]
+    if module.functions.len() != module.nogc_param_effect_symbol_ids.len():
+        return ["NOGC-HIR-001: ownership contracts do not cover every local function"]
+    var effects: Dict<i64, [text]> = {}
+    var names: Dict<i64, [text]> = {}
+    var row = 0
+    while row < module.nogc_param_effect_symbol_ids.len():
+        if row >= available_work:
+            return ["NOGC-HIR-001: ownership contract budget exhausted"]
+        val symbol = module.nogc_param_effect_symbol_ids[row]
+        if effects.contains_key(symbol):
+            return ["NOGC-HIR-001: duplicate ownership contract identity"]
+        effects[symbol] = module.nogc_param_effects[row]
+        row = row + 1
+    var metadata_work = row
+    for raw_function in module.functions.values():
+        val function: HirFunction = raw_function
+        if not effects.contains_key(function.symbol.id):
+            return ["NOGC-HIR-001: missing exact function ownership contract"]
+        val declared = effects[function.symbol.id]
+        if declared.len() != function.params.len():
+            return ["NOGC-HIR-001: parameter-effect count disagrees with typed signature"]
+        var parameter_names: [text] = []
+        for param in function.params:
+            metadata_work = metadata_work + 1
+            if metadata_work >= available_work / 4:
+                return ["NOGC-HIR-001: ownership parameter metadata budget exhausted"]
+            parameter_names.push(param.name)
+        names[function.symbol.id] = parameter_names
+    val imports = verified_imported_effect_contracts_v1(module, providers, available_work / 4)
+    if imports.incomplete:
+        return ["NOGC-HIR-001: imported ownership contract budget exhausted; analysis incomplete"]
+    for contract in imports.contracts:
+        if effects.contains_key(contract.consumer_symbol):
+            return ["NOGC-HIR-001: imported ownership contract collides with a local identity"]
+        effects[contract.consumer_symbol] = contract.effects
+        names[contract.consumer_symbol] = contract.names
+    if module.functions.len() == 0: return []
+    # Divide the module quota across functions and between capture/solve.
+    # No function receives an unlimited allowance when the module is large.
+    val quota = (available_work - metadata_work - available_work / 4) / module.functions.len() / 3
+    if quota <= 0:
+        return ["NOGC-HIR-001: ownership function budget exhausted; analysis incomplete"]
+    var errors: [text] = []
+    for raw_function in module.functions.values():
+        val function: HirFunction = raw_function
+        if function.is_extern: continue
+        val facts = HirOwnershipFactsV1.create(quota, effects, names, module)
+        for param in function.params:
+            facts.locals[param.symbol.id] = true
+            if hir_type_is_short_candidate(param.type_):
+                facts.short_params[param.symbol.id] = true
+        hir_ownership_block_v1(facts, function.body, true)
+        for error in facts.errors:
+            if errors.len() < 64: errors.push("{module.path}:{function.name}: {error}")
+        if facts.errors.len() == 0:
+            for error in facts.flow.check(0, facts.points, facts.edges, quota):
+                if errors.len() < 64:
+                    errors.push("NOGC-HIR-001: {module.path}:{function.name}: point {error.point}: {error.message}")
+    errors

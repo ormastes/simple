@@ -1,0 +1,97 @@
+# Single-owner session hosting. The manager serializes transitions and commits
+# the returned host before replying. This module neither authenticates tool
+# arguments nor treats transport IDs, PIDs, or session metadata as credentials.
+use std.common.source.session_host_contracts.{SourceAgentBindingV1, SourceHostedSessionV1, SourceViewHostV1}
+use std.common.source.contracts.{SourceViewSessionV1}
+use std.nogc_sync_mut.source.session.{source_view_session_new_v1, source_view_set_preferences_v1, source_view_commit_open_v1}
+
+pub fn source_view_host_new_v1(host_epoch: text, capacity: i64) -> Result<SourceViewHostV1, text>:
+    if host_epoch == "" or host_epoch.byte_len() > 256: return Err("host_epoch_required")
+    if capacity <= 0 or capacity > 1024: return Err("host_capacity_out_of_range")
+    Ok(SourceViewHostV1(host_epoch: host_epoch, capacity: capacity, entries: []))
+
+fn source_host_binding_check_v1(host: SourceViewHostV1, binding: SourceAgentBindingV1, now_ms: i64) -> text:
+    if binding.host_epoch != host.host_epoch: return "session_host_restarted"
+    if now_ms < 0 or binding.expires_at_ms <= now_ms: return "session_expired"
+    if binding.session_generation <= 0: return "invalid_session_generation"
+    for identity in [binding.workspace_id, binding.principal_id, binding.agent_session_id]:
+        if identity == "" or identity.byte_len() > 256: return "invalid_session_binding"
+    ""
+
+fn source_host_same_key_v1(left: SourceAgentBindingV1, right: SourceAgentBindingV1) -> bool:
+    left.workspace_id == right.workspace_id and left.agent_session_id == right.agent_session_id
+
+fn source_host_binding_match_v1(expected: SourceAgentBindingV1, actual: SourceAgentBindingV1) -> text:
+    if expected.principal_id != actual.principal_id: return "session_principal_denied"
+    if expected.session_generation != actual.session_generation: return "stale_session_generation"
+    if expected.expires_at_ms != actual.expires_at_ms: return "session_binding_changed"
+    ""
+
+pub fn source_view_host_register_v1(host: SourceViewHostV1, binding: SourceAgentBindingV1,
+        now_ms: i64) -> Result<SourceViewHostV1, text>:
+    val error = source_host_binding_check_v1(host, binding, now_ms)
+    if error != "": return Err(error)
+    var retained: [SourceHostedSessionV1] = []
+    for entry in host.entries:
+        if entry.binding.expires_at_ms <= now_ms: continue
+        if source_host_same_key_v1(entry.binding, binding):
+            if binding.principal_id == entry.binding.principal_id and binding.session_generation > entry.binding.session_generation:
+                continue
+            val mismatch = source_host_binding_match_v1(entry.binding, binding)
+            if mismatch != "": return Err(mismatch)
+            if not entry.session.active: return Err("session_expired")
+            return Ok(host)
+        retained.push(entry)
+    if retained.len() >= host.capacity: return Err("source_session_capacity_exceeded")
+    val session = source_view_session_new_v1(binding.workspace_id, binding.agent_session_id)?
+    retained.push(SourceHostedSessionV1(binding: binding, session: session))
+    var updated = host
+    updated.entries = retained
+    Ok(updated)
+
+fn source_host_index_v1(host: SourceViewHostV1, binding: SourceAgentBindingV1,
+        now_ms: i64) -> Result<i64, text>:
+    val error = source_host_binding_check_v1(host, binding, now_ms)
+    if error != "": return Err(error)
+    var index = 0
+    while index < host.entries.len():
+        val entry = host.entries[index]
+        if source_host_same_key_v1(entry.binding, binding):
+            val mismatch = source_host_binding_match_v1(entry.binding, binding)
+            if mismatch != "": return Err(mismatch)
+            if not entry.session.active: return Err("session_expired")
+            return Ok(index)
+        index = index + 1
+    Err("session_not_registered")
+
+pub fn source_view_host_session_v1(host: SourceViewHostV1, binding: SourceAgentBindingV1,
+        now_ms: i64) -> Result<SourceViewSessionV1, text>:
+    val index = source_host_index_v1(host, binding, now_ms)?
+    Ok(host.entries[index].session)
+
+pub fn source_view_host_preferences_v1(host: SourceViewHostV1, binding: SourceAgentBindingV1,
+        now_ms: i64, request_sequence: i64, expected_version: i64,
+        setting: text, desired: text) -> Result<SourceViewHostV1, text>:
+    val index = source_host_index_v1(host, binding, now_ms)?
+    val session = source_view_set_preferences_v1(host.entries[index].session,
+        request_sequence, expected_version, setting, desired)?
+    var updated = host
+    updated.entries[index] = SourceHostedSessionV1(binding: binding, session: session)
+    Ok(updated)
+
+pub fn source_view_host_commit_open_v1(host: SourceViewHostV1, binding: SourceAgentBindingV1,
+        now_ms: i64, successful: bool) -> Result<(SourceViewHostV1, bool), text>:
+    val index = source_host_index_v1(host, binding, now_ms)?
+    val opened = source_view_commit_open_v1(host.entries[index].session, successful)?
+    var updated = host
+    updated.entries[index] = SourceHostedSessionV1(binding: binding, session: opened.0)
+    Ok((updated, opened.1))
+
+pub fn source_view_host_close_v1(host: SourceViewHostV1, binding: SourceAgentBindingV1,
+        now_ms: i64) -> Result<SourceViewHostV1, text>:
+    val index = source_host_index_v1(host, binding, now_ms)?
+    var session = host.entries[index].session
+    session.active = false
+    var updated = host
+    updated.entries[index] = SourceHostedSessionV1(binding: binding, session: session)
+    Ok(updated)
