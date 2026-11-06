@@ -2,7 +2,7 @@
 //!
 //! This module contains the Parser struct, constructor methods, and main parse entry point.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::ast::*;
 use crate::error::ParseError;
@@ -55,6 +55,7 @@ pub struct Parser<'a> {
     pub(crate) collection_module_path: String,
     pub(crate) collection_owner: String,
     pub(crate) collection_site_ordinals: HashMap<String, usize>,
+    pub(crate) collection_site_labels: HashSet<String>,
     /// Buffer for lookahead tokens (used for multi-token peek operations)
     pub(crate) pending_tokens: VecDeque<Token>,
     /// Parser mode (Normal or Strict)
@@ -180,6 +181,7 @@ impl<'a> Parser<'a> {
             collection_module_path: String::new(),
             collection_owner: String::new(),
             collection_site_ordinals: HashMap::new(),
+            collection_site_labels: HashSet::new(),
             pending_tokens: VecDeque::new(),
             mode: ParserMode::Normal,
             no_paren_depth: 0,
@@ -278,6 +280,7 @@ impl<'a> Parser<'a> {
             collection_module_path: String::new(),
             collection_owner: String::new(),
             collection_site_ordinals: HashMap::new(),
+            collection_site_labels: HashSet::new(),
             pending_tokens: VecDeque::new(),
             mode: ParserMode::Normal,
             no_paren_depth: 0,

@@ -500,7 +500,7 @@ impl<'a> Parser<'a> {
             None
         };
 
-        if let Some(algorithm) = collection_algorithm {
+        if let Some((algorithm, label)) = collection_algorithm {
             let value = default.take().ok_or_else(|| {
                 ParseError::contextual_error(
                     "collection algorithm",
@@ -512,7 +512,10 @@ impl<'a> Parser<'a> {
                 declaration_start, self.previous.span.end,
                 start_span.line, start_span.column,
             );
-            let site_id = self.collection_site_id(&name, declaration, true);
+            let site_id = match &label {
+                Some(label) => self.collection_label_site_id(label, start_span)?,
+                None => self.collection_site_id(&name, declaration, true),
+            };
             default = Some(self.collection_attributed_value(
                 value, &algorithm, &site_id, start_span, Some(&ty)
             )?);

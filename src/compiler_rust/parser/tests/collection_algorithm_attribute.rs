@@ -42,7 +42,8 @@ fn field_attribute_wraps_initialized_field() {
     );
     let Node::Class(class) = &module.items[0] else { panic!("expected class") };
     let site = assert_wrapped(class.fields[0].default.as_ref().unwrap(), "AdaptiveTextSet", "ordered");
-    assert_eq!(site, "ast://app/collection_probe.spl/Store/values#-555445139409988573");
+    // Same value as the pure-Simple parser (collection_algorithm_attribute_spec).
+    assert_eq!(site, "ast://app/collection_probe.spl/Store/values#n1.5053061337019949519");
 }
 
 #[test]
@@ -103,7 +104,7 @@ fn site_identity_survives_algorithm_switch_and_unrelated_line_insertion() {
     }
     let first = site("fn main():\n    @collection_algorithm(\"auto\")\n    var hot = AdaptiveTextSet.new()\n");
     // Canonical rt_hash_text/FNV-1a over the declaration without its attribute.
-    assert_eq!(first, "ast://app/collection_probe.spl/main/local/hot#-7095170762293803234");
+    assert_eq!(first, "ast://app/collection_probe.spl/main/local/hot#n1.3808762660471155820");
     let shifted = site("fn main():\n    # unrelated line\n    @collection_algorithm(\"auto\")\n    var hot = AdaptiveTextSet.new()\n");
     assert_eq!(first, shifted);
 
@@ -125,7 +126,7 @@ fn absolute_source_path_uses_the_same_project_relative_site() {
     let Node::Function(function) = &module.items[0] else { panic!("expected function") };
     let Node::Let(binding) = &function.body.statements[0] else { panic!("expected binding") };
     let site = assert_wrapped(binding.value.as_ref().unwrap(), "AdaptiveTextSet", "auto");
-    assert_eq!(site, "ast://app/collection_probe.spl/main/local/hot#-7095170762293803234");
+    assert_eq!(site, "ast://app/collection_probe.spl/main/local/hot#n1.3808762660471155820");
 }
 
 #[test]
@@ -168,4 +169,37 @@ fn malformed_or_unrelated_collection_attributes_fail_closed() {
     ] {
         assert!(Parser::new(source).parse().is_err(), "unexpected parse success: {source}");
     }
+}
+
+fn first_local_site(source: &str) -> String {
+    let module = parse(source);
+    let Node::Function(function) = &module.items[0] else { panic!("expected function") };
+    let Node::Let(binding) = &function.body.statements[0] else { panic!("expected binding") };
+    let Expr::MethodCall { args, .. } = binding.value.as_ref().unwrap() else { panic!("expected wrapper") };
+    let Expr::String(site) = &args[2].value else { panic!("expected site ID") };
+    site.clone()
+}
+
+#[test]
+fn local_site_matches_the_pure_simple_parser_and_ignores_whitespace() {
+    let plain = first_local_site("fn main():\n    @collection_algorithm(\"auto\")\n    var hot = AdaptiveTextSet.new()\n");
+    let spaced = first_local_site("fn main():\n    @collection_algorithm(\"auto\")\n    var  hot  =  AdaptiveTextSet.new( )   # hot path\n");
+    assert_eq!(plain, "ast://app/collection_probe.spl/main/local/hot#n1.3808762660471155820");
+    assert_eq!(spaced, plain);
+}
+
+#[test]
+fn site_label_replaces_the_declaration_hash() {
+    let site = first_local_site("fn main():\n    @collection_algorithm(\"hash\", \"parser.symbols\")\n    var hot = AdaptiveTextSet.new()\n");
+    assert_eq!(site, "ast://app/collection_probe.spl/label/parser.symbols");
+}
+
+#[test]
+fn duplicate_label_extra_argument_and_bad_label_are_rejected() {
+    let parse_result = |source: &str| {
+        Parser::new(source).with_collection_module_path("app/collection_probe.spl").parse()
+    };
+    assert!(parse_result("fn main():\n    @collection_algorithm(\"auto\", \"dup\")\n    var a = AdaptiveTextSet.new()\n    @collection_algorithm(\"auto\", \"dup\")\n    var b = AdaptiveTextSet.new()\n").is_err());
+    assert!(parse_result("fn main():\n    @collection_algorithm(\"auto\", \"a\", \"fast\")\n    var a = AdaptiveTextSet.new()\n").is_err());
+    assert!(parse_result("fn main():\n    @collection_algorithm(\"auto\", \"has space\")\n    var a = AdaptiveTextSet.new()\n").is_err());
 }
