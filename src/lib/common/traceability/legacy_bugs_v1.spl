@@ -1,0 +1,125 @@
+# Read-only legacy bug-DB sidecar: typed rows bound by content identity.
+# Rows become bug nodes and a sidecar reference inventory; never graph claims,
+# locators or edges (the graph schema needs pinned blobs and registered
+# authority, which the legacy database cannot supply). No writes, ever.
+# @req REQ-TRC-015 REQ-TRC-021
+use std.common.traceability.model.*
+use std.common.traceability.schema.{trace_id_valid, trace_path_valid}
+
+pub struct LegacyBugRowV1:
+    id: text
+    db_id: text
+    table: text
+    severity: text
+    status: text
+    title: text
+    file: text
+    line: i64
+    reproducible_by: text
+    created_at: text
+    updated_at: text
+    valid: bool
+
+pub struct LegacyBugSourceV1:
+    path: text
+    content_sha256: text
+    rows: [LegacyBugRowV1]
+    diagnostics: [TraceDiagnostic]
+
+fn legacy_diagnostic(path: text, entity: text, message: text) -> TraceDiagnostic:
+    TraceDiagnostic(code: "TRACE-LEGACY-ROW", subject_id: path, rule_id: "legacy-bug-db/v1",
+        entity_id: entity, origin_id: "", message: message, severity: "warning")
+
+# Split one SDN table row on top-level commas; quoted fields keep commas and
+# unescape \" \\ \$ exactly as the bug database writer emits them.
+pub fn legacy_row_fields_v1(line: text) -> [text]:
+    val quote = "\""
+    val backslash = "\\"
+    var fields: [text] = []
+    var current = ""
+    var in_quote = false
+    var escaped = false
+    var quoted = false
+    for ch in line.chars():
+        if in_quote:
+            if escaped:
+                if ch == "$" or ch == quote or ch == backslash: current = current + ch
+                else: current = current + backslash + ch
+                escaped = false
+            elif ch == backslash: escaped = true
+            elif ch == quote: in_quote = false
+            else: current = current + ch
+        elif ch == quote:
+            # Only separator whitespace may precede an opening quote.
+            current = current.trim()
+            in_quote = true
+            quoted = true
+        elif ch == ",":
+            fields.push(if quoted: current else: current.trim())
+            current = ""
+            quoted = false
+        else:
+            current = current + ch
+    fields.push(if quoted: current else: current.trim())
+    fields
+
+fn legacy_line_number_v1(value: text) -> i64:
+    if value == "" or value.len() > 9: return 0
+    for ch in value.chars():
+        if not "0123456789".contains(ch): return 0
+    value.to_int()
+
+# Table precedence: `bugs_active` rows win; a `bugs` row with an id already
+# seen is the archived twin and is skipped. Duplicates inside one table are
+# reported and the first row kept. Rows are never written back.
+pub fn parse_legacy_bug_db_v1(content: text, path: text, content_sha256: text) -> LegacyBugSourceV1:
+    var rows: [LegacyBugRowV1] = []
+    var diagnostics: [TraceDiagnostic] = []
+    var seen: Dict<text, bool> = {}
+    var table = ""
+    var count = 0
+    for line in content.split("\n"):
+        if line.starts_with("bugs_active |"): table = "bugs_active"
+        elif line.starts_with("bugs |"): table = "bugs"
+        elif line == "" or not line.starts_with("    "): table = ""
+        elif table != "":
+            if count >= 40000:
+                diagnostics.push(legacy_diagnostic(path, "", "legacy row budget of 40000 exhausted; remaining rows ignored"))
+                break
+            count = count + 1
+            val fields = legacy_row_fields_v1(line.substring(4, line.len()))
+            if fields.len() != 10:
+                diagnostics.push(legacy_diagnostic(path, table, "row has " + fields.len().to_text() + " fields, expected 10"))
+                continue
+            val db_id = fields[0]
+            val id = "bug:" + db_id
+            if db_id == "" or not trace_id_valid(id):
+                diagnostics.push(legacy_diagnostic(path, table, "row id is not a canonical identity"))
+                continue
+            if seen.contains_key(id):
+                if table == "bugs_active":
+                    diagnostics.push(legacy_diagnostic(path, id, "duplicate id inside bugs_active; first row kept"))
+                continue
+            seen[id] = true
+            var file = fields[4]
+            if file != "" and not trace_path_valid(file):
+                diagnostics.push(legacy_diagnostic(path, id, "file column is not a safe repository path; link dropped"))
+                file = ""
+            var reproducible = fields[6]
+            if reproducible != "" and not trace_path_valid(reproducible): reproducible = ""
+            rows.push(LegacyBugRowV1(id: id, db_id: db_id, table: table, severity: fields[1], status: fields[2],
+                title: fields[3], file: file, line: legacy_line_number_v1(fields[5]), reproducible_by: reproducible,
+                created_at: fields[7], updated_at: fields[8], valid: fields[9] == "true"))
+    LegacyBugSourceV1(path: path, content_sha256: content_sha256, rows: rows, diagnostics: diagnostics)
+
+pub fn legacy_bug_nodes_v1(source: LegacyBugSourceV1) -> [TraceNode]:
+    var nodes: [TraceNode] = []
+    for row in source.rows:
+        nodes.push(TraceNode(id: row.id, kind: TraceNodeKind.Bug, title: row.title))
+    nodes
+
+pub fn legacy_bug_row_matches_v1(row: LegacyBugRowV1, status: text, severity: text, file_prefix: text) -> bool:
+    if status != "" and row.status != status: return false
+    if severity != "" and row.severity != severity: return false
+    if file_prefix != "" and not row.file.starts_with(file_prefix): return false
+    true

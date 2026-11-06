@@ -1,0 +1,21 @@
+# Read-only capture of the legacy bug database as a sidecar source.
+# Bytes come from the no-follow bounded reader; decoding is runtime-backed
+# because the std text codec validates UTF-8 per byte in the interpreter
+# (measured 21 s for 3.67 MB on the seed versus 0.28 s here).
+use std.common.traceability.model.*
+use std.common.traceability.legacy_bugs_v1.{LegacyBugSourceV1, parse_legacy_bug_db_v1}
+use std.common.string_core.{string_from_byte_array, text_validate_utf8}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded_bytes, file_is_regular_no_follow}
+
+pub fn trace_legacy_bug_db_present_v1(path: text) -> bool:
+    file_is_regular_no_follow(path)
+
+pub fn trace_legacy_bug_db_capture_v1(path: text) -> Result<LegacyBugSourceV1, text>:
+    val bytes = match file_read_regular_no_follow_bounded_bytes(path, 16777216):
+        case Ok(value): value
+        case Err(reason): return Err("TRACE-LEGACY-CAPTURE: " + reason)
+    if bytes.len() == 0: return Err("TRACE-LEGACY-CAPTURE: legacy bug database is empty: " + path)
+    val content = string_from_byte_array(bytes)
+    if not text_validate_utf8(content): return Err("TRACE-LEGACY-CAPTURE: legacy bug database is not UTF-8: " + path)
+    Ok(parse_legacy_bug_db_v1(content, path, "sha256:" + sha256_text(content)))
