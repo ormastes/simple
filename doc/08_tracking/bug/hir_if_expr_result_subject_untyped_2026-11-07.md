@@ -2,7 +2,7 @@
 
 - **ID:** hir_if_expr_result_subject_untyped_2026-11-07
 - **Severity:** P2 (2 Stage 2 MIR errors in run 13)
-- **Status:** open
+- **Status:** fixed
 
 ## Symptom
 
@@ -35,3 +35,16 @@ match on a typed `Result<i64, text>` call result lowers clean.
 
 Type the if-expression from its branch tails (unify `Result<T, _>` /
 `Result<_, E>`), rather than accepting a guessed owner in MIR.
+
+## Fix (2026-11-07)
+
+`binding_kind_type` (`src/compiler/20.hir/hir_lowering/statements.spl`) types
+a binding from an `if` / `if-elif` expression with an else branch by the join
+of its branch tails. A tail that is a bare builtin `Ok(v)` / `Err(e)` call is
+`Result<typeof v, ?>` / `Result<?, typeof e>`; two Result shapes join arm by
+arm (two settled, different arms do not join). Anything that does not join
+stays untyped, so the match still fails closed. Arms neither branch settles
+keep the existing Error unknown sentinel; MIR only needs the Result owner.
+
+Spec `test/01_unit/compiler/50.mir/if_expr_result_join_subject_spec.spl`:
+2/4 pass before (the two fail-closed negative cases), 4/4 after.

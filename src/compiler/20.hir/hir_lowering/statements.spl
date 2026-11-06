@@ -1,4 +1,5 @@
 use compiler.hir.hir_lowering.concat_copy_v1.{hir_stmt_concat_copy_v1}
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.hir.hir_lowering.binding_types.{hir_binding_direct_call_return_kind, hir_binding_method_call_return_kind, hir_binding_transparent_kind, hir_binding_try_payload, hir_const_type_settled}
 # HIR Lowering - Statement Lowering
 #
@@ -94,6 +95,39 @@ impl HirLowering:
             case HirExprKind.Cast(_, target):
                 if hir_const_type_settled(target): return target
                 return unknown
+            # An `if` with an else branch is typed by the join of its branch
+            # tails. Untyped, `val r = if c: Ok(x) else: Err(y)` made a later
+            # bare `case Ok(..)` ambiguous whenever another enum declared `Ok`
+            # (bug hir_if_expr_result_subject_untyped_2026-11-07). Fields are
+            # read in place and only kinds cross a call (frozen-stage2
+            # by-value HirExpr hazard, see the workaround below).
+            case HirExprKind.If(_, then_, else_):
+                val else_opt: HirBlock? = else_
+                if val else_block = else_opt:
+                    if not then_.has or not else_block.has:
+                        return unknown
+                    # Read type_ only under has_type_ (frozen-stage2 placeholder
+                    # span hazard, bug stage2_struct_param_deep_copy_packed_span_2026-11-03).
+                    val then_declared: HirType = if then_.value.has_type_: then_.value.type_ else: unknown
+                    val else_declared: HirType = if else_block.value.has_type_: else_block.value.type_ else: unknown
+                    val joined: HirType = self.binding_join_type(self.binding_block_value_type(then_.value.kind, then_declared, span), self.binding_block_value_type(else_block.value.kind, else_declared, span), span)
+                    if self.binding_joined_result(joined): return joined
+                return unknown
+            case HirExprKind.IfChain(arms, chain_else):
+                val chain_else_opt: HirBlock? = chain_else
+                if val chain_else_block = chain_else_opt:
+                    if not chain_else_block.has:
+                        return unknown
+                    val chain_else_declared: HirType = if chain_else_block.value.has_type_: chain_else_block.value.type_ else: unknown
+                    var joined: HirType = self.binding_block_value_type(chain_else_block.value.kind, chain_else_declared, span)
+                    for arm in arms:
+                        val arm_value: HirIfArm = arm
+                        if not arm_value.then_.has:
+                            return unknown
+                        val arm_declared: HirType = if arm_value.then_.value.has_type_: arm_value.then_.value.type_ else: unknown
+                        joined = self.binding_join_type(self.binding_block_value_type(arm_value.then_.value.kind, arm_declared, span), joined, span)
+                    if self.binding_joined_result(joined): return joined
+                return unknown
             case _: ()
         val symbol = _hir_expr_symbol_or_invalid(source_kind)
         if symbol.is_valid():
@@ -106,6 +140,66 @@ impl HirLowering:
             return declared_return
         if val method_return = hir_binding_method_call_return_kind(source_kind, self.symbols):
             return method_return
+        unknown
+
+    # Branch tail type for the `if` join: a builtin `Ok(v)` / `Err(e)` call
+    # (symbol tagged by the unresolved-builtin fallback in expression_support;
+    # a user function named Ok/Err is not tagged) is a Result whose other arm
+    # is still open (the Error unknown sentinel, filled by the join when the
+    # other branch knows it); anything else is ordinary binding transport.
+    fn binding_block_value_type(tail_kind: HirExprKind, declared: HirType, span: Span) -> HirType:
+        val open_arm = HirType(kind: HirTypeKind.Error, span: span)
+        match tail_kind:
+            case HirExprKind.Call(callee, args, _):
+                if args.len() == 1:
+                    val ctor_symbol = _hir_expr_symbol_or_invalid(callee.kind)
+                    if ctor_symbol.is_valid():
+                        if val ctor = self.symbols.get_symbol_raw(ctor_symbol.id):
+                            val tag = ctor.builtin_method_tag
+                            if tag == BUILTIN_METHOD_RESULT_OK or tag == BUILTIN_METHOD_RESULT_ERR:
+                                val arg: HirCallArg = args[0]
+                                var payload: HirType = self.binding_kind_type(arg.value.kind, span)
+                                match payload.kind:
+                                    case HirTypeKind.Error:
+                                        if arg.value.has_type_:
+                                            payload = arg.value.type_
+                                    case _: ()
+                                if tag == BUILTIN_METHOD_RESULT_OK:
+                                    return HirType(kind: HirTypeKind.Result(payload, open_arm), span: span)
+                                return HirType(kind: HirTypeKind.Result(open_arm, payload), span: span)
+            case _: ()
+        val transported: HirType = self.binding_kind_type(tail_kind, span)
+        match transported.kind:
+            case HirTypeKind.Error: return declared
+            case _: ()
+        transported
+
+    fn binding_joined_result(joined: HirType) -> bool:
+        match joined.kind:
+            case HirTypeKind.Result(_, _): true
+            case _: false
+
+    # Join of two branch types. Only two Result shapes join (each arm takes
+    # the settled side; two settled, different arms do not join); anything
+    # else stays unknown so consumers fail closed instead of picking one
+    # branch's type. The joined owner is what bare Ok/Err arms need; an arm
+    # neither branch settles keeps the existing Error unknown sentinel.
+    fn binding_join_type(left: HirType, right: HirType, span: Span) -> HirType:
+        val unknown = HirType(kind: HirTypeKind.Error, span: span)
+        match left.kind:
+            case HirTypeKind.Result(left_ok, left_err):
+                match right.kind:
+                    case HirTypeKind.Result(right_ok, right_err):
+                        # Both arms settled and different: no join.
+                        if hir_const_type_settled(left_ok) and hir_const_type_settled(right_ok) and not hir_types_equal(left_ok, right_ok):
+                            return unknown
+                        if hir_const_type_settled(left_err) and hir_const_type_settled(right_err) and not hir_types_equal(left_err, right_err):
+                            return unknown
+                        val ok_arm = if hir_const_type_settled(left_ok): left_ok else: right_ok
+                        val err_arm = if hir_const_type_settled(left_err): left_err else: right_err
+                        return HirType(kind: HirTypeKind.Result(ok_arm, err_arm), span: span)
+                    case _: ()
+            case _: ()
         unknown
 
     me check_char_condition(cond: HirExpr):
