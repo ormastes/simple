@@ -33,6 +33,7 @@ use compiler.mir.mir_types.{MirLocal}
 use compiler.hir.hir_definitions.*
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at}
 use compiler.common.diagnostics.span.{Span}
+use compiler.hir.generated.hir_children.{HirNode, hir_children_of, hir_children_of_block}
 use compiler.blocks.value.BlockValue
 use compiler.types.type_layout.{compute_struct_layout, layoutattr_default_, FieldLayout}
 use compiler.core.types.{TYPE_BOOL, TYPE_I64, TYPE_F64}
@@ -405,36 +406,112 @@ impl MirLowering:
 
     me with_native_bounded_params(fn_: HirFunction) -> HirFunction:
         """A free function's trait-bounded erased parameters take the trait's
-        native object ABI (native_bounded_param_types); callers derive the
-        same list in resolved_call_hir_param_types. Methods keep their
-        declared types: method-call sites never apply the rewrite."""
+        native object ABI (native_bounded_param_types). Callers derive the
+        same list from the function SYMBOL's declared type in
+        resolved_call_hir_param_types, so the rewrite applies only when that
+        symbol carries one: HIR publishes a generic function's type only
+        when it declares a return type (declaration_lowering.spl, imported
+        surface path), and a caller of an untyped symbol has no parameter
+        list to convert against. Methods keep their declared types:
+        method-call sites never apply the rewrite."""
         if fn_.is_method or fn_.type_params.len() == 0:
+            return fn_
+        var symbol_typed = false
+        if val fn_symbol = self.symbols.get_symbol_raw(fn_.symbol.id):
+            if val fn_symbol_type = fn_symbol.type_:
+                match fn_symbol_type.kind:
+                    case HirTypeKind.Function(_, _, _): symbol_typed = true
+                    case _: ()
+        if not symbol_typed:
             return fn_
         var declared: [HirType] = []
         for param in fn_.params:
             declared = declared.push(param.type_)
         val rewritten_types = self.native_bounded_param_types(declared, fn_.return_type)
-        var changed = false
+        var object_symbols: [i64] = []
         var params: [HirParam] = []
         var index = 0
         while index < fn_.params.len():
             var param: HirParam = fn_.params[index]
-            val rewritten_type: HirType = rewritten_types[index]
-            match rewritten_type.kind:
-                case HirTypeKind.Named(_, _):
-                    match param.type_.kind:
-                        case HirTypeKind.TypeParam(_, _):
-                            param.type_ = rewritten_type
-                            changed = true
-                        case _: ()
+            match param.type_.kind:
+                case HirTypeKind.TypeParam(_, _):
+                    val rewritten_type: HirType = rewritten_types[index]
+                    if self.native_trait_owner_for_type(rewritten_type) != "":
+                        param.type_ = rewritten_type
+                        object_symbols = object_symbols.push(param.symbol.id)
                 case _: ()
             params = params.push(param)
             index = index + 1
-        if not changed:
+        if object_symbols.len() == 0:
             return fn_
+        # The ABI is fixed by the signature (callers cannot see the body), so
+        # a body that lets the object reach an erased-word slot is a compile
+        # error, never a silent two-word value in a one-word slot.
+        if val escape_span = self.native_bounded_param_escape(fn_.body, object_symbols):
+            self.error_fatal("erased trait-bounded parameter of {fn_.name} is used as a plain value; it may only be a method receiver or a direct argument to a parameter of the same trait (bug mir_generic_trait_bound_receiver_unresolved_2026-11-06)", Some(escape_span))
         var rewritten: HirFunction = fn_
         rewritten.params = params
         rewritten
+
+    me native_bounded_param_escape(body: HirBlock, object_symbols: [i64]) -> Span?:
+        """Span of the first use of an object-ABI bounded parameter that is
+        neither a method receiver (vtable dispatch) nor a positional argument
+        to a free function whose parameter at that slot is a native trait type
+        (the object passes through unchanged). Any other use -- a plain value,
+        a capture, a named argument, an argument to an erased slot -- would put
+        the two-word object where an erased word is expected."""
+        var work: [HirNode] = hir_children_of_block(body)
+        var index = 0
+        while index < work.len():
+            val node: HirNode = work[index]
+            index = index + 1
+            var descend = true
+            match node:
+                case HirNode.Expr(expr):
+                    match expr.kind:
+                        case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                            if self.native_bounded_param_listed(object_symbols, symbol.id):
+                                return Some(expr.span)
+                        case HirExprKind.Lambda(_, _, captures):
+                            for capture in captures:
+                                if self.native_bounded_param_listed(object_symbols, capture.id):
+                                    return Some(expr.span)
+                        case HirExprKind.MethodCall(receiver, _, args, _):
+                            if self.native_bounded_param_ref(receiver, object_symbols):
+                                descend = false
+                                for arg in args:
+                                    work = work.push(HirNode.Expr(arg.value))
+                        case HirExprKind.Call(callee, args, _):
+                            var slots: [HirType] = []
+                            match callee.kind:
+                                case HirExprKind.Var(callee_symbol) | HirExprKind.NamedVar(callee_symbol, _):
+                                    slots = self.resolved_call_hir_param_types(callee_symbol)
+                                case _: ()
+                            descend = false
+                            work = work.push(HirNode.Expr(callee))
+                            var position = 0
+                            for arg in args:
+                                val passes_object = not arg.has_name and position < slots.len() and self.native_bounded_param_ref(arg.value, object_symbols) and self.native_trait_owner_for_type(slots[position]) != ""
+                                if not passes_object:
+                                    work = work.push(HirNode.Expr(arg.value))
+                                position = position + 1
+                        case _: ()
+                case _: ()
+            if descend:
+                for child in hir_children_of(node):
+                    work = work.push(child)
+        nil
+
+    fn native_bounded_param_ref(expr: HirExpr, object_symbols: [i64]) -> bool:
+        match expr.kind:
+            case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                self.native_bounded_param_listed(object_symbols, symbol.id)
+            case _: false
+
+    fn native_bounded_param_listed(object_symbols: [i64], symbol_id: i64) -> bool:
+        for listed in object_symbols:
+            if listed == symbol_id: return true
+        false
 
     me lower_function_with_gpu_metadata(fn_: HirFunction, is_gpu_kernel: bool, gpu_target: text, gpu_backend_order: text) -> MirFunction:
         """Lower HIR function to MIR."""

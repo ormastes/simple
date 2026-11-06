@@ -133,6 +133,19 @@ describe "generic receiver bounded by a trait in MIR":
     it "keeps the erased word when the bound type parameter is nested":
         expect(probe_first_param_abi("fn probe<R: Reader>(readers: [R]) -> i64:\n    readers.len()\n")).to_equal("array(i64)")
 
+    it "keeps the erased word when the function declares no return type":
+        # HIR publishes no symbol type for such a generic, so callers would
+        # have no parameter list to convert against.
+        expect(probe_first_param_abi("fn probe<R: Reader>(reader: R, p: text):\n    reader.read(p)\n")).to_equal("i64")
+
+    it "keeps the erased word for a bound trait that is not object-safe":
+        val body = "trait Maker:\n    static fn make() -> i64\n    fn tag() -> text\n\nfn probe<M: Maker>(m: M) -> text:\n    \"\"\n"
+        expect(probe_first_param_abi(body)).to_equal("i64")
+
+    it "rejects a body that lets the object escape as a plain value":
+        val row = probe_row("fn keep<T>(x: T) -> T:\n    x\n\nfn probe<R: Reader>(reader: R, p: text) -> text:\n    keep(reader)\n    reader.read(p)\n")
+        expect(row.contains("erased trait-bounded parameter of probe is used as a plain value")).to_equal(true)
+
 describe "callers of an erased trait-bounded function":
     it "converts a concrete argument to the trait object":
         val body = SINGLE + "fn caller() -> text:\n    val f = FileR(root: \"r/\")\n    probe(f, \"x\")\n"
