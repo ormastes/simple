@@ -2,15 +2,18 @@
 # scripts/check/check-xray-native-inprocess-e2e.shs).
 #
 # Everything below runs in ONE process against the real code of a
-# `--xray` native AArch64 shared library:
+# `--xray` native shared library (AArch64, or x86-64 SysV for
+# scripts/check/check-xray-native-x86-64-inprocess-e2e.shs; the ISA, ABI
+# profile and sled words all come from the module's own map):
 #   1. dlopen the module, locate + relocate its `.simple_xray_map`, admit it
 #      through trace_native_map_validate_v1 / XrayNativeSledLeafV1.create and
 #      register it with the module's resident runtime;
 #   2. call the traced functions with tracing off (baseline results);
 #   3. aspect params (observer config + pointcuts) -> TraceConfigV1 and a
 #      per-function selection -> PR4 control plane (XrayLlvmAdapterV1, backend
-#      Simple) over the real SOSIX code-patch port (rt_mprotect RW -> RX with
-#      I-cache sync) and the module's dispatcher -> sleds patched in place;
+#      Simple) over the real SOSIX code-patch port (rt_mprotect RW -> RX, with
+#      an I-cache sync on AArch64) and the module's dispatcher -> sleds
+#      patched in place;
 #   4. call again: results unchanged, the resident trampoline + handler record
 #      entry/exit into the channel, the Simple consumer polls them;
 #   5. request_stop unpatches: sled words are OFF again, calls record nothing.
@@ -47,12 +50,13 @@ fn fail(message: text):
 fn env(name: text) -> text:
     rt_env_get(name) ?? ""
 
-fn config_payload() -> text:
-    "trace:\n    schema: 1\n    instrumentation: dynamic\n    backend: simple\n    consistency: raw_edges\n    patch_mode: quiescent\n    abi_profile: simple-aarch64-sled-v1\n    events: [entry, exit, tail_exit]\n"
+# `abi_profile` is the loaded module's own (manifest from its map's ISA).
+fn config_payload(abi_profile: text) -> text:
+    "trace:\n    schema: 1\n    instrumentation: dynamic\n    backend: simple\n    consistency: raw_edges\n    patch_mode: quiescent\n    abi_profile: {abi_profile}\n    events: [entry, exit, tail_exit]\n"
 
-fn aspect_params(pointcuts: text) -> AspectParamsV1:
+fn aspect_params(abi_profile: text, pointcuts: text) -> AspectParamsV1:
     var params = AspectParamsV1.defaults()
-    params.ext.push(ParamExt(ASPECT_TRACE_OBSERVER_EXT_V1, 1, config_payload().bytes(), TRACE_CONFIG_SCHEMA_HASH_V1))
+    params.ext.push(ParamExt(ASPECT_TRACE_OBSERVER_EXT_V1, 1, config_payload(abi_profile).bytes(), TRACE_CONFIG_SCHEMA_HASH_V1))
     params.ext.push(ParamExt(ASPECT_TRACE_POINTCUTS_EXT_V1, 1, pointcuts.bytes(), TRACE_POINTCUTS_SCHEMA_V1))
     params
 
@@ -75,14 +79,19 @@ fn canonical_list(module: XrayNativeLoadedModuleV1, suffixes: text) -> text:
         out = out + (if name == "": suffix else: name)
     out
 
-fn word_at(address: i64) -> i64:
-    (rt_ptr_read_i32(address, 0) as i64) & 4294967295
+# The activation word at a sled: 4 bytes on AArch64, the low 2 bytes on
+# x86-64 (a row's align is its activation-word width; the sled is longer, so
+# the 4-byte read stays inside it).
+fn word_at(address: i64, width: i64) -> i64:
+    val word = (rt_ptr_read_i32(address, 0) as i64) & 4294967295
+    if width == 2: word & 65535 else: word
 
+# One letter per site in map order: N = ON word, B = OFF word, ? = neither.
 fn sled_words(module: XrayNativeLoadedModuleV1) -> text:
     var out = ""
     for row in module.map.sites:
-        val word = word_at(module.text_address + (row.text_offset as i64))
-        out = out + (if word == XRAY_MAP_AARCH64_ON_WORD_V1: "N" else: (if word == XRAY_MAP_AARCH64_OFF_WORD_V1: "B" else: "?"))
+        val word = word_at(module.text_address + (row.text_offset as i64), row.align)
+        out = out + (if word == row.on_word: "N" else: (if word == row.off_word: "B" else: "?"))
     out
 
 fn new_arena(generation: u64) -> i64:
@@ -119,7 +128,7 @@ fn call_all(entries: [i64], args: [i64]) -> text:
 fn session(adapter_in: XrayLlvmAdapterV1, bound: XrayNativeBoundLeafV1, module: XrayNativeLoadedModuleV1,
         label: text, pointcuts: text, entries: [i64], args: [i64], baseline: text) -> XrayLlvmAdapterV1?:
     var adapter = adapter_in
-    val params = aspect_params(pointcuts)
+    val params = aspect_params(module.manifest.abi_profile, pointcuts)
     val config = match trace_aspect_config_v1(params):
         case Ok(Some(found)): found
         case _:
