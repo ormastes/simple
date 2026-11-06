@@ -367,6 +367,30 @@ fn import_bound_candidate(
     Some(target)
 }
 
+/// The extern an aliased import binds `name` to, if any: walk the calling
+/// module's `use m.{x as name}` binding (and re-export facades, bounded) to a
+/// source name that is a registered extern under a DIFFERENT name.
+fn aliased_extern_target(name: &str) -> Option<String> {
+    let current = CURRENT_EXEC_MODULE
+        .with(|cell| cell.borrow().clone())
+        .unwrap_or_else(|| Arc::from("<entry>"));
+    let (mut owner, mut source) =
+        crate::interpreter::owner_bindings(&current).and_then(|b| b.get(name).map(std::borrow::Cow::into_owned))?;
+    for _ in 0..8 {
+        if source != name && EXTERN_FUNCTIONS.with(|cell| cell.borrow().contains(source.as_str())) {
+            return Some(source);
+        }
+        let (next_owner, next_source) =
+            crate::interpreter::owner_bindings(&owner).and_then(|b| b.get(&source).map(std::borrow::Cow::into_owned))?;
+        if next_owner == owner && next_source == source {
+            return None;
+        }
+        owner = next_owner;
+        source = next_source;
+    }
+    None
+}
+
 /// True when `func`'s owning module matches the module of the function whose
 /// body is currently executing. False (never preferred) when either side is
 /// unknown, so callers with no module info behave exactly as before.
@@ -967,6 +991,14 @@ pub(crate) fn evaluate_call(
         let context_obj = CONTEXT_OBJECT.with(|cell| cell.borrow().clone());
         if let Some(ctx) = context_obj {
             return dispatch_context_method(&ctx, name, args, env, functions, classes, enums, impl_methods);
+        }
+
+        // An aliased import of an `extern fn` (`use m.{rt_x as y}`): externs are
+        // never module exports, so the alias bound nothing. Follow the calling
+        // module's recorded import binding to the extern it names.
+        // Bug: seed_interpreter_aliased_extern_import_not_found_2026_10_19.
+        if let Some(target) = aliased_extern_target(name) {
+            return call_extern_function(&target, args, env, functions, classes, enums, impl_methods);
         }
 
         // If we reach here with an identifier name, the function is not found
@@ -2105,5 +2137,26 @@ mod class_typed_overload_scoring_tests {
         }
         items.extend(Parser::new("main = render(RespA(code: 7))\n").parse().expect("parse main").items);
         assert_eq!(evaluate_module(&items).expect("evaluate"), 7);
+    }
+}
+
+#[cfg(test)]
+mod aliased_extern_import_tests {
+    //! seed_interpreter_aliased_extern_import_not_found_2026_10_19: a call
+    //! through `use m.{rt_x as y}` must reach the extern `rt_x`.
+    use crate::interpreter::{evaluate_module, record_owner_binding};
+    use simple_parser::Parser;
+    use std::sync::Arc;
+
+    #[test]
+    fn aliased_import_of_an_extern_calls_the_extern() {
+        record_owner_binding(
+            Arc::from("<entry>"),
+            "probe_alias_to_bytes".to_string(),
+            (Arc::from("/probe/alias_ext.spl"), "rt_text_to_bytes".to_string()),
+        );
+        let src = "extern fn rt_text_to_bytes(s: text) -> [u8]\nmain = probe_alias_to_bytes(\"abc\").len()\n";
+        let items = Parser::new(src).parse().expect("parse").items;
+        assert_eq!(evaluate_module(&items).expect("evaluate"), 3);
     }
 }
