@@ -39,3 +39,10 @@ hard error risks every seed-run spec and the bootstrap; it needs a census first.
 
 ## 2026-11-06 skipped (not attempted)
 Needs the warn-first census over the stdlib (~75k non-pub fns) described above; too large for a minimal seed change.
+
+## 2026-11-06 partial: warn-first step 1 landed (work/interp-p2-seed)
+`module_loader.rs`: a braced `use m.{name}` naming a top-level private `fn` of `m` (not
+re-exported) from a file outside `m`'s directory now prints one
+`[visibility-warning] ... private fn ...` per (module, name, importer). Calls still resolve
+(no behaviour change). Unit: `module_loader::private_fn_visibility_tests`. Remaining: glob
+imports, the census (step 2) and the flip to error (step 3).
