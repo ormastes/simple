@@ -277,6 +277,38 @@ a selection; per-function toggle = a new prepared selection (new generation).
   fails ⇒ session `Faulted`, never "off".
 - Unsupported profile/consistency ⇒ reject; never silently degrade to raw or off (plan §17).
 
+
+### C.6 Stage-2 resident runtime and registration (PR5b, AArch64)
+
+- **Trampoline** `__simple_xray_trampoline_v1` (asm in
+  `src/runtime/xray/xray_native_runtime_aarch64.c`, Simple twin
+  `std.common.trace.xray_native_trampoline_aarch64_v1`, compared word for word
+  by `check-xray-native-inprocess-e2e.shs`). Entry: `w0` = site id, `x30` =
+  sled + 24, sled already pushed x16/x17 and x0/x30. Saves x1-x15, x18,
+  x29/x30, NZCV, FPCR, FPSR, q0-q31; passes (site id, sled return) to an
+  allocation-free handler that finds the registered module by return address,
+  checks the map row names that sled, and calls the one C channel producer
+  (`xray_channel_producer_v1.h`, shared with PR4; twin
+  `trace_native_channel_record_words_v1`).
+- **Map base relocation:** the map header `text_base` field carries an
+  `R_AARCH64_PREL64` against the object's `.text`; runtime text base = field
+  address + signed(field). No dynamic relocation, valid in PIE and shared objects.
+- **Registration (deliberate deviation from A.5's init-array):** the Simple
+  control plane locates `.simple_xray_map` of a mapped module (`/proc/self/maps`
+  bias + ELF section table, `xray_native_module_v1.spl`), admits it through
+  `trace_native_map_validate_v1`, then registers it with the module's resident
+  runtime (`simple_xray_native_register_module_v1`, which re-checks every row).
+  `--xray` objects therefore carry no constructor or root symbol, and the same
+  path serves the main executable and dlopen'd modules. Each `--xray` module
+  links its own runtime with PROTECTED visibility (direct BL, no PLT veneer).
+- **Channel publication:** `XrayNativeBoundLeafV1.install` publishes the arena
+  through `XrayNativeDispatchPortV1` before any sled is patched (C.2 step 3).
+- **Sled-kind agreement:** `XrayLlvmLeafV1.sled_kind()`; `prepare` refuses a
+  leaf whose sled kind is not the adapter backend.
+- **Quiescent only:** `begin` drops execute permission for the whole page, so no
+  thread may execute code on that page during a switch; `Live` is refused.
+- **Selection:** aspect extension `simple.trace/observer-v1.pointcuts` names
+  canonical functions; each expands to all of its sleds (`xray_native_selection_v1`).
 ---
 
 ## D. Backend-neutral V1 contract placement and the draft branch
@@ -354,6 +386,7 @@ dependency diff, Linux-only paths, TDD (failing spec first).
 | 3 | `xray-llvm-attrs` | A.5 LLVM attrs; Linux triples only | `.ll` contains attrs only when on; `llvm-readelf` shows `xray_instr_map` only when on; off guard PASS |
 | 4 | `xray-llvm-adapter` | Private LLVM adapter + state-preserving handler shim + link of `clang_rt.xray` | Real Simple binary traced through facade on x86-64 + AArch64 Linux; ABI-01/02 (plan §16.2) |
 | 5 | `xray-native-aarch64` | `xray_sled_emit` AArch64, `.simple_xray_map`, `code_patch_adapter` POSIX, quiescent patch | Object inspection; MAP-01; PATCH-02 fault injection; differential vs PR4 |
+| 5b | `xray-aarch64-runtime` | Resident trampoline + handler, PREL64 map base, module registration, `--xray` link wiring, in-process quiescent patching, sled-kind agreement (C.6) | In-process e2e on a real `--xray` module; off identity |
 | 6 | `xray-native-x86_64` | 13-byte sled, SysV profile | Same + ABI-01/02 SysV |
 | 7 | `xray-native-live` | Qualified live patch per target | PATCH-01 stress |
 | 8+ | `xray-windows-*` | COFF map, Win32 leaf, x64 then ARM64 profiles | Native runners, MIT-01, plan §9 gates |

@@ -1,0 +1,203 @@
+#!/bin/sh
+# check-xray-native-inprocess-e2e.shs — XRay PR5b: a real `--xray` native
+# AArch64 module is traced IN-PROCESS by the pure-Simple patcher.
+#
+# Design: doc/04_architecture/compiler/xray/xray_compiler_structural_change_2026-11-06.md
+# C.2-C.6 and the section F PR5b row.
+#
+# What it does (aarch64 Linux host; anywhere else the verdict is ERROR)
+#   1. Builds test/fixtures/xray/xray_inprocess_prog.spl through the pure-Simple
+#      CLI entry `cli_compile` (`compile --native --backend=native [--xray]`,
+#      shared-library intent) run under the given Simple binary: once with
+#      --xray, once without.
+#   2. Object/link inspection: the --xray module has `.simple_xray_map`, a
+#      PROTECTED __simple_xray_trampoline_v1, the two runtime entry points, and
+#      every sled BL lands on the trampoline (no PLT veneer). The OFF module has
+#      no xray section or symbol.
+#   3. Trampoline twin: the words of __simple_xray_trampoline_v1 in the built
+#      runtime object equal xray_native_trampoline_words_aarch64_v1 (Simple),
+#      and the handler makes no call and touches no FP/SIMD register.
+#   4. Runs test/fixtures/xray/xray_native_inprocess_host.spl under the Simple
+#      binary: dlopen, map location + PREL64 relocation, leaf admission,
+#      registration, aspect params -> selection -> PR4 control plane -> real
+#      rt_mprotect RW/RX + I-cache sync on the module's own text. Two sessions
+#      with different pointcuts: only the selected functions' sleds turn on,
+#      the handler records entry/exit per call, results equal the untraced
+#      baseline, request_stop restores every sled word and records stop.
+#
+# The Simple binary must be able to grant PROT_EXEC on aarch64 Linux (a seed
+# built from PR5b or later; older seeds refuse and the host fails closed).
+#
+# Verdict (last stdout line):
+#   PASS — <n> check(s) (...)              exit 0
+#   FAIL — <reason>                        exit 1
+#   ERROR — nothing was checked (<reason>) exit 2
+# --selftest runs before every scan and is fatal.
+#
+# Usage
+#   sh scripts/check/check-xray-native-inprocess-e2e.shs --simple <bin> [--keep]
+#   sh scripts/check/check-xray-native-inprocess-e2e.shs --selftest
+# Env: CLANG, LLVM_OBJDUMP, LLVM_READELF, XRAY_E2E_TIMEOUT (s, 1500).
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+SIMPLE_BIN=${SIMPLE_BIN:-}
+KEEP=0
+SELFTEST_ONLY=0
+CC=${CLANG:-clang}
+OBJDUMP=${LLVM_OBJDUMP:-llvm-objdump}
+READELF=${LLVM_READELF:-llvm-readelf}
+STEP_TIMEOUT=${XRAY_E2E_TIMEOUT:-1500}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --simple) SIMPLE_BIN=${2:-}; shift 2 ;;
+        --keep) KEEP=1; shift ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+done
+
+# field <log> <session> <key>: value of "E2E <session> ... key=value".
+field() {
+    sed -n "s/^E2E $2 .*$3=\([^ ]*\).*/\1/p" "$1" | head -1
+}
+
+# Session verdict over a host log: 0 ok, 1 wrong.
+# session_ok <log> <label> <expected words_on> <expected record count>
+session_ok() {
+    [ "$(field "$1" "$2" words_on)" = "$3" ] || return 1
+    [ "$(field "$1" "$2" words_off | tr -d 'B')" = "" ] || return 1
+    [ -n "$(field "$1" "$2" words_off)" ] || return 1
+    on=$(field "$1" "$2" results_on); base=$(field "$1" "$2" baseline); off=$(field "$1" "$2" results_off)
+    [ -n "$base" ] && [ "$on" = "$base" ] && [ "$off" = "$base" ] || return 1
+    [ "$(field "$1" "$2" records_after_stop)" = "0" ] || return 1
+    n=$(sed -n "s/^E2E $2 records=\[\(.*\)\]$/\1/p" "$1" | tr ',' '\n' | grep -c ':')
+    [ "$n" -eq "$4" ] || return 1
+    return 0
+}
+
+selftest() {
+    t=$(mktemp "${TMPDIR:-/tmp}/xray-inproc-selftest.XXXXXX") || return 1
+    printf '%s\n' "E2E s1 selected_sites=[1, 2] words_on=NNB" \
+        "E2E s1 results_on=1,2, baseline=1,2," \
+        "E2E s1 records=[1:1:1, 2:1:2]" "E2E s1 words_off=BBB" \
+        "E2E s1 results_off=1,2, records_after_stop=0 lost=0" > "$t"
+    session_ok "$t" s1 NNB 2 || { rm -f "$t"; return 1; }
+    # each mutation must be rejected
+    sed 's/words_off=BBB/words_off=BNB/' "$t" > "$t.m"; session_ok "$t.m" s1 NNB 2 && { rm -f "$t" "$t.m"; return 1; }
+    sed 's/results_on=1,2,/results_on=1,3,/' "$t" > "$t.m"; session_ok "$t.m" s1 NNB 2 && { rm -f "$t" "$t.m"; return 1; }
+    sed 's/records_after_stop=0/records_after_stop=1/' "$t" > "$t.m"; session_ok "$t.m" s1 NNB 2 && { rm -f "$t" "$t.m"; return 1; }
+    session_ok "$t" s1 NNB 3 && { rm -f "$t" "$t.m"; return 1; }
+    session_ok "$t" s1 NNN 2 && { rm -f "$t" "$t.m"; return 1; }
+    : > "$t.m"; session_ok "$t.m" s1 NNB 2 && { rm -f "$t" "$t.m"; return 1; }
+    rm -f "$t" "$t.m"
+    return 0
+}
+
+if ! selftest; then
+    echo "ERROR — nothing was checked (selftest failed: session verdict misjudged a fixture)"
+    exit 2
+fi
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 7 check(s) (selftest: session verdict fixtures)"
+    exit 0
+fi
+
+[ -n "$SIMPLE_BIN" ] || { echo "ERROR — nothing was checked (no --simple binary)"; exit 2; }
+case "$SIMPLE_BIN" in /*) ;; */*) SIMPLE_BIN=$(cd "$(dirname "$SIMPLE_BIN")" && pwd)/$(basename "$SIMPLE_BIN") ;; esac
+if [ "$(uname -m)" != "aarch64" ] || [ "$(uname -s)" != "Linux" ]; then
+    echo "ERROR — nothing was checked (in-process patching needs an aarch64 Linux host)"
+    exit 2
+fi
+for tool in "$SIMPLE_BIN" "$CC" "$OBJDUMP" "$READELF"; do
+    command -v "$tool" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (missing tool: $tool)"; exit 2; }
+done
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/xray-inproc-e2e.XXXXXX") || {
+    echo "ERROR — nothing was checked (cannot create temp dir)"; exit 2; }
+cleanup() { [ "$KEEP" -eq 1 ] && echo "kept: $WORK" >&2 || rm -rf "$WORK"; }
+trap cleanup EXIT
+cd "$ROOT" || { echo "ERROR — nothing was checked (cannot cd to $ROOT)"; exit 2; }
+
+PROG=test/fixtures/xray/xray_inprocess_prog.spl
+STEM=xray_inprocess_prog
+checks=0
+
+# ---- 1. build ON and OFF modules through the CLI entry
+build() { # <out> <xray 0|1>
+    XR_SRC=$PROG XR_OUT=$1 XR_XRAY=$2 SIMPLE_NATIVE_BUILD_EMIT_OBJECT=shared \
+        timeout "$STEP_TIMEOUT" "$SIMPLE_BIN" run test/fixtures/xray/xray_native_cli_compile_driver.spl \
+        > "$1.log" 2>&1
+    grep -q '^CLI-COMPILE rc=0' "$1.log" && [ -s "$1" ]
+}
+build "$WORK/libon.so" 1 || { echo "FAIL — --xray build failed: $(grep -E 'error|CLI-COMPILE' "$WORK/libon.so.log" | head -1)"; exit 1; }
+build "$WORK/liboff.so" 0 || { echo "FAIL — OFF build failed: $(grep -E 'error|CLI-COMPILE' "$WORK/liboff.so.log" | head -1)"; exit 1; }
+
+# ---- 2. link inspection
+"$READELF" -S -W --dyn-syms "$WORK/libon.so" > "$WORK/on.inspect" 2>&1
+grep -qE '\] \.simple_xray_map ' "$WORK/on.inspect" || { echo "FAIL — --xray module has no .simple_xray_map"; exit 1; }
+for sym in __simple_xray_trampoline_v1 simple_xray_native_register_module_v1 simple_xray_native_install_v1; do
+    grep -qE "FUNC +GLOBAL +PROTECTED .* $sym\$" "$WORK/on.inspect" || { echo "FAIL — $sym is not a PROTECTED global function"; exit 1; }
+done
+checks=$((checks + 4))
+"$OBJDUMP" -d "$WORK/libon.so" > "$WORK/on.dis" 2>&1
+sleds=$(grep -cE '^ *[0-9a-f]+:\s+14000008\s+b\s' "$WORK/on.dis")
+bl_tramp=$(grep -cE '\sbl\s+0x[0-9a-f]+ <__simple_xray_trampoline_v1>' "$WORK/on.dis")
+[ "$sleds" -gt 0 ] && [ "$bl_tramp" -eq "$sleds" ] || { echo "FAIL — $sleds sled(s) but $bl_tramp direct BL(s) to the trampoline"; exit 1; }
+checks=$((checks + 1))
+"$READELF" -S -W -s "$WORK/liboff.so" > "$WORK/off.inspect" 2>&1
+[ "$(grep -cE 'simple_xray|__xray_' "$WORK/off.inspect")" -eq 0 ] || { echo "FAIL — OFF module carries XRay sections/symbols"; exit 1; }
+"$OBJDUMP" -d "$WORK/liboff.so" > "$WORK/off.dis" 2>&1
+[ "$(grep -cE '^ *[0-9a-f]+:\s+14000008\s+b\s' "$WORK/off.dis")" -eq 0 ] || { echo "FAIL — OFF module carries sled words"; exit 1; }
+checks=$((checks + 2))
+
+# ---- 3. trampoline twin + handler leaf rules
+"$CC" -O2 -fPIC -mgeneral-regs-only -mno-outline-atomics -c src/runtime/xray/xray_native_runtime_aarch64.c \
+    -o "$WORK/rt.o" > "$WORK/rt.log" 2>&1 || { echo "ERROR — nothing was checked (runtime TU does not compile)"; exit 2; }
+"$OBJDUMP" -d --disassemble-symbols=__simple_xray_trampoline_v1 "$WORK/rt.o" \
+    | sed -n 's/^ *[0-9a-f]*:\s*\([0-9a-f]\{8\}\)\s.*/\1/p' > "$WORK/tramp.words"
+bl_line=$(sed -n '36p' "$WORK/tramp.words")
+bl_disp=$(( 0x$bl_line & 0x3FFFFFF ))
+[ "$bl_disp" -ge 33554432 ] && bl_disp=$((bl_disp - 67108864))
+XRAY_TWIN_BL=$bl_disp timeout "$STEP_TIMEOUT" "$SIMPLE_BIN" run test/fixtures/xray/xray_native_trampoline_twin_dump.spl \
+    2>/dev/null | grep -E '^([0-9a-f]{8}|TWIN-OK .*)$' > "$WORK/twin.out"
+grep -q '^TWIN-OK 69$' "$WORK/twin.out" || { echo "ERROR — nothing was checked (Simple twin did not run)"; exit 2; }
+grep -vE '^TWIN' "$WORK/twin.out" > "$WORK/twin.words"
+cmp -s "$WORK/tramp.words" "$WORK/twin.words" || { echo "FAIL — trampoline words differ from the Simple twin"; exit 1; }
+"$OBJDUMP" -d --no-show-raw-insn --disassemble-symbols=simple_xray_native_handler_v1 "$WORK/rt.o" > "$WORK/handler.dis"
+grep -qE '<simple_xray_native_handler_v1>:' "$WORK/handler.dis" || { echo "ERROR — nothing was checked (handler not found)"; exit 2; }
+if grep -qE '\s(bl|blr|br)\s|\s[qdsvh][0-9]+\b' "$WORK/handler.dis"; then
+    echo "FAIL — handler calls out or touches FP/SIMD registers"; exit 1
+fi
+checks=$((checks + 2))
+
+# ---- 4. in-process sessions
+env XRAY_E2E_LIB="$WORK/libon.so" XRAY_E2E_FUNCTIONS="$STEM.traced,$STEM.scaled" \
+    XRAY_E2E_POINTCUTS_1="$STEM.traced" XRAY_E2E_POINTCUTS_2="$STEM.scaled" \
+    timeout "$STEP_TIMEOUT" "$SIMPLE_BIN" run test/fixtures/xray/xray_native_inprocess_host.spl > "$WORK/host.log" 2>&1
+host_rc=$?
+grep -E '^E2E' "$WORK/host.log" > "$WORK/host.e2e"
+if ! grep -q '^E2E-HOST-OK' "$WORK/host.e2e"; then
+    echo "FAIL — in-process host did not complete (rc=$host_rc): $(grep -E 'E2E-HOST-ERROR' "$WORK/host.e2e" | head -1)"
+    exit 1
+fi
+# Map order is module function order: add1, traced, scaled. Sites: add1 2,
+# traced 2, scaled 3 (two returns). Words in site order.
+fns=$(sed -n 's/^E2E map functions=\[\(.*\)\] sites=.*/\1/p' "$WORK/host.e2e")
+[ "$fns" = "$STEM.add1, $STEM.traced, $STEM.scaled" ] || { echo "FAIL — unexpected map functions: $fns"; exit 1; }
+checks=$((checks + 1))
+# s1 = traced: its 2 sleds on; 3 calls of traced -> 3 entry + 3 exit; scaled
+# untraced. add1 (called by traced) is not selected and records nothing.
+session_ok "$WORK/host.e2e" s1 BBNNBBB 6 || { echo "FAIL — session 1 (pointcut traced): $(grep '^E2E s1' "$WORK/host.e2e" | tr '\n' ' ')"; exit 1; }
+# s2 = scaled: its 3 sleds on; 3 calls -> 3 entries + 3 exits (one per return taken).
+session_ok "$WORK/host.e2e" s2 BBBBNNN 6 || { echo "FAIL — session 2 (pointcut scaled): $(grep '^E2E s2' "$WORK/host.e2e" | tr '\n' ' ')"; exit 1; }
+checks=$((checks + 2))
+s1_ids=$(sed -n 's/^E2E s1 records=\[\(.*\)\]$/\1/p' "$WORK/host.e2e" | tr ',' '\n' | sed 's/ //g' | cut -d: -f2 | sort -u | tr '\n' ' ')
+s2_ids=$(sed -n 's/^E2E s2 records=\[\(.*\)\]$/\1/p' "$WORK/host.e2e" | tr ',' '\n' | sed 's/ //g' | cut -d: -f2 | sort -u | tr '\n' ' ')
+[ "$s1_ids" = "2 " ] && [ "$s2_ids" = "3 " ] || { echo "FAIL — records name the wrong functions (s1: $s1_ids, s2: $s2_ids)"; exit 1; }
+checks=$((checks + 1))
+echo "PASS — $checks check(s) (link: 7, twin+handler: 2, in-process sessions: 4; sleds=$sleds)"
+exit 0
