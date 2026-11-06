@@ -121,14 +121,24 @@ describe "HIR codec generation: bare locals for non-optional struct and enum fie
 
 
 describe "HIR codec generation: presence-flagged fields keep absence":
-    it "prevention: HirFunction export_attr, driver_manifest_attr and vhdl_metadata (has_* flagged) keep their T? local":
-        # Absence is a real state under the has_* flag; a placeholder would
-        # re-encode as present and break round-trip byte identity
-        # (hir_cfg_select_codec_spec caught exactly that).
+    # Bug hir_codec_present_flagged_attr_option_word_2026-11-05: the has_*
+    # flagged attrs decoded into `T? = nil` locals, so a PRESENT attr stored the
+    # Option transport word into the non-optional HirFunction slot. The encoder
+    # now writes the presence word from the FLAG, so the decoder uses a bare
+    # placeholder and an absent placeholder still re-encodes as absent.
+    it "REPRO: HirFunction export_attr, driver_manifest_attr and vhdl_metadata decode into bare locals":
         val func = body_of(emit_codec_file(CodecUniverse.load(cwd())), "hc_dec_hir_function")
-        expect(func).to_contain("    var f_export_attr: ExportAttr? = nil\n")
-        expect(func).to_contain("    var f_driver_manifest_attr: DriverManifestAttr? = nil\n")
-        expect(func).to_contain("    var f_vhdl_metadata: VhdlHardwareMetadata? = nil\n")
+        expect(func.contains("var f_export_attr: ExportAttr? = nil")).to_be(false)
+        expect(func.contains("var f_driver_manifest_attr: DriverManifestAttr? = nil")).to_be(false)
+        expect(func.contains("var f_vhdl_metadata: VhdlHardwareMetadata? = nil")).to_be(false)
+        expect(func).to_contain("    var f_export_attr: ExportAttr = ")
+
+    it "prevention: the encoder gates each flagged payload on its has_* flag":
+        val generated = emit_codec_file(CodecUniverse.load(cwd()))
+        expect(generated).to_contain("    if not node.has_export_attr:\n        w.put_i64(0)\n    else:\n        val enc_node_v")
+        expect(generated).to_contain("    if not node.has_driver_manifest_attr:\n        w.put_i64(0)\n")
+        expect(generated).to_contain("    if not node.has_vhdl_metadata:\n        w.put_i64(0)\n")
+        expect(generated.contains("if not node.has_type_:")).to_be(false)
 
     it "prevention: HirExpr.type_ stays bare even though has_type_ exists (legacy HirType literal)":
         val generated = emit_codec_file(CodecUniverse.load(cwd()))
