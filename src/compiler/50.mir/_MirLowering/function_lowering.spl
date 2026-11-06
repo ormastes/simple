@@ -1091,7 +1091,16 @@ impl MirLowering:
         if bootstrap_trace:
             print "[mir-lower] real-lower:return {fn_.name}"
         var bldr2 = self.builder
-        if not bldr2.current_block_has_explicit_terminator():
+        # A tail `match`/`if` whose every arm returned leaves the builder on
+        # its merge block, which no edge reaches; the arm-less result there
+        # is an i64 placeholder. Returning it from a `-> f64` function failed
+        # the Cranelift verifier (return i64 vs signature f64) in
+        # app.office.sheets.chart._cell_number. A dead block keeps its
+        # Unreachable terminator instead of a typed return.
+        # doc/08_tracking/bug/mir_dead_tail_merge_returns_i64_placeholder_2026-11-06.md
+        if not bldr2.current_block_has_explicit_terminator() and bldr2.current_block_is_dead():
+            bldr2.terminate_unreachable()
+        elif not bldr2.current_block_has_explicit_terminator():
             if return_type.kind == MirTypeKind.Unit:
                 self.emit_pending_resource_drops(nil)
                 bldr2 = self.builder

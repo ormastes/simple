@@ -1,0 +1,147 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: f64 values from text, into `f64?`, and out of `if val`
+
+Four Stage 2 `compiler_cli_build` defects in one family, all about an f64
+crossing a representation boundary:
+
+- `text.to_f64()` on a proven text receiver cast the text HANDLE to f64
+  instead of parsing it (rt_string_to_float + rt_value_as_float).
+- A tail `match` whose every arm returns left the function returning the
+  merge block's i64 placeholder from a `-> f64` function (Cranelift verifier:
+  "return ... has type i64, must match function signature of f64").
+- An f64 local wrapped into `f64?` was classified at runtime through
+  rt_enum_id(i64) with an f64 operand when the local was an extern result.
+- `if val v = f64_opt` numerically cast the raw payload word to f64 and folded
+  `v != nil` to true, printing the IEEE bits of the payload as a number.
+
+See doc/08_tracking/bug/mir_text_to_f64_casts_text_handle_2026-11-06.md,
+mir_dead_tail_merge_returns_i64_placeholder_2026-11-06.md,
+mir_f64_into_optional_runtime_classified_2026-11-06.md and
+mir_if_val_float_binder_numeric_cast_2026-11-06.md.
+"""
+
+# @tag: unit, compiler, mir
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+struct FloatShape:
+    callees: [text]
+    float_casts: i64
+    float_bitcasts: i64
+    bad_returns: i64
+    errors: i64
+
+fn contains(lst: [text], item: text) -> bool:
+    for x in lst:
+        if x == item:
+            return true
+    false
+
+fn local_type_of(function: MirFunction, id: i64) -> MirType?:
+    for l in function.locals:
+        if l.id.id == id:
+            return Some(l.type_)
+    nil
+
+fn same_kind(a: MirType, b: MirType) -> bool:
+    "{a.kind}" == "{b.kind}"
+
+fn is_f64(t: MirType) -> bool:
+    match t.kind:
+        case MirTypeKind.F64: true
+        case _: false
+
+fn shape_of(src: text, target: text) -> FloatShape:
+    val file = "testdata/float_text_option_lowering_spec.spl"
+    val parsed = parse_full_frontend(src, file, "float_text_option_lowering_spec", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(hir)
+    var callees: [text] = []
+    var float_casts = 0
+    var float_bitcasts = 0
+    var bad_returns = 0
+    for function in mir.functions.values():
+        if not (function.name == target or function.name.ends_with("." + target)):
+            continue
+        val ret_ty = function.signature.return_type
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                callees = callees.push(name)
+                            case _: pass
+                    case MirInstKind.Cast(_, _, cast_ty):
+                        if is_f64(cast_ty): float_casts = float_casts + 1
+                    case MirInstKind.Bitcast(_, _, bit_ty):
+                        if is_f64(bit_ty): float_bitcasts = float_bitcasts + 1
+                    case _: pass
+            match block.terminator:
+                case MirTerminator.Ret(ret_value):
+                    if val op = ret_value:
+                        match op.kind:
+                            case MirOperandKind.Copy(ret_local):
+                                if val found = local_type_of(function, ret_local.id):
+                                    if not same_kind(found, ret_ty): bad_returns = bad_returns + 1
+                            case MirOperandKind.Move(moved_local):
+                                if val found = local_type_of(function, moved_local.id):
+                                    if not same_kind(found, ret_ty): bad_returns = bad_returns + 1
+                            case _: pass
+                case _: pass
+    FloatShape(callees: callees, float_casts: float_casts, float_bitcasts: float_bitcasts, bad_returns: bad_returns, errors: lowering.errors.len())
+
+val CHART_SRC = "enum CV:\n    NumberVal(value: f64)\n    FormulaVal(expr: text, cached_display: text)\n    Empty\n\nstruct Cell:\n    value: CV\n\nfn cn(cell: Cell) -> f64:\n    match cell.value:\n        CV.NumberVal(value):\n            return value\n        CV.FormulaVal(expr, cached_display):\n            val d = cached_display\n            if d.len() > 0:\n                val parsed = d.to_f64()\n                return parsed\n            return 0.0\n        _:\n            return 0.0\n"
+
+val IF_VAL_SRC = "fn parse_plain(s: text) -> f64:\n    if s == \"\": return 0.0\n    2.25\n\nfn parse_opt(s: text) -> f64?:\n    return parse_plain(s)\n\nfn main() -> i64:\n    if val v = parse_opt(\"x\"):\n        print(v)\n    0\n"
+
+describe "f64 across text, Option and if-val boundaries":
+    it "parses a proven text receiver of to_f64 instead of casting its handle":
+        step("lower `d.to_f64()` on a text parameter")
+        val shape = shape_of("fn cell_number(d: text) -> f64:\n    if d.len() > 0:\n        val parsed = d.to_f64()\n        return parsed\n    return 0.0\n", "cell_number")
+        expect(contains(shape.callees, "rt_string_to_float")).to_equal(true)
+        expect(contains(shape.callees, "rt_value_as_float")).to_equal(true)
+        expect(shape.float_casts).to_equal(0)
+        expect(shape.errors).to_equal(0)
+
+    it "keeps the numeric cast for an integer receiver of to_f64":
+        step("lower `n.to_f64()` on an i64 parameter")
+        val shape = shape_of("fn widen(n: i64) -> f64:\n    n.to_f64()\n", "widen")
+        expect(contains(shape.callees, "rt_string_to_float")).to_equal(false)
+        expect(shape.float_casts).to_equal(1)
+
+    it "returns only f64 values from a tail match whose arms all return":
+        step("lower the chart _cell_number shape")
+        val shape = shape_of(CHART_SRC, "cn")
+        expect(shape.bad_returns).to_equal(0)
+        expect(contains(shape.callees, "rt_string_to_float")).to_equal(true)
+        expect(shape.errors).to_equal(0)
+
+    it "returns only f64 values from a tail if/else whose arms both return":
+        step("lower an if/else tail with two returns")
+        val shape = shape_of("fn pick(x: bool) -> f64:\n    if x:\n        return 1.0\n    else:\n        return 2.0\n", "pick")
+        expect(shape.bad_returns).to_equal(0)
+
+    it "wraps an extern f64 result into f64? without runtime classification":
+        step("lower `return rt_math_sqrt(x)` from `-> f64?`")
+        val shape = shape_of("extern fn rt_math_sqrt(x: f64) -> f64\n\nfn root_opt(x: f64) -> f64?:\n    return rt_math_sqrt(x)\n", "root_opt")
+        expect(contains(shape.callees, "rt_enum_id")).to_equal(false)
+        expect(contains(shape.callees, "rt_enum_new")).to_equal(true)
+        expect(shape.errors).to_equal(0)
+
+    it "decodes an if-val f64 binder by bitcast after a real nil test":
+        step("lower `if val v = parse_opt(...)` with an f64? callee")
+        val shape = shape_of(IF_VAL_SRC, "main")
+        expect(shape.float_casts).to_equal(0)
+        expect(shape.float_bitcasts).to_equal(1)
+        expect(shape.errors).to_equal(0)
