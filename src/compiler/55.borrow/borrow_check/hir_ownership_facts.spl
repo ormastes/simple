@@ -1,0 +1,160 @@
+# Typed HIR ownership facts: the existing MIR OwnershipFlow is the sole solver.
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.hir.hir_types.{HirType, HirModule}
+use compiler.semantics.param_effects.imported_effect_receipts.{ownership_contract_type_identity_v1}
+use compiler.semantics.param_effects.ownership_contract_budget.{OwnershipContractBudgetV1}
+use compiler.hir.ownership_types.{hir_type_requires_move, hir_type_ownership_is_known}
+use compiler.borrow.borrow_check.borrow_graph.{Place, PlaceBase, PlaceElem, place_local, place_field, place_index, place_conflicts_with}
+use compiler.borrow.borrow_check.ownership_flow.{OwnershipFlow, OwnershipEvent}
+
+pub struct HirOwnershipLoopV1:
+    label: text
+    header: i64
+    exit: i64
+
+pub class HirOwnershipFactsV1:
+    module: HirModule
+    type_budget: OwnershipContractBudgetV1
+    flow: OwnershipFlow
+    points: Dict<i64, [i64]>
+    edges: Dict<i64, [i64]>
+    spans: Dict<i64, Span>
+    errors: [text]
+    current: i64
+    next_block: i64
+    next_point: i64
+    work: i64
+    limit: i64
+    depth: i64
+    loops: [HirOwnershipLoopV1]
+    fields: Dict<text, i64>
+    locals: Dict<i64, bool>
+    short_params: Dict<i64, bool>
+    active_loans: [Place]
+    exclusive_loans: [bool]
+    effects: Dict<i64, [text]>
+    parameter_names: Dict<i64, [text]>
+
+    static fn create(limit: i64, effects: Dict<i64, [text]>, names: Dict<i64, [text]>, module: HirModule) -> HirOwnershipFactsV1:
+        HirOwnershipFactsV1(module: module, type_budget: OwnershipContractBudgetV1(remaining: limit, exhausted: false), flow: OwnershipFlow.create(), points: {0: []}, edges: {0: []},
+            spans: {}, errors: [], current: 0, next_block: 1, next_point: 0,
+            work: 0, limit: limit, depth: 0, loops: [], fields: {}, locals: {}, short_params: {}, active_loans: [], exclusive_loans: [],
+            effects: effects, parameter_names: names)
+
+    me type_known(type_: HirType, span: Span) -> bool:
+        val identity = ownership_contract_type_identity_v1(self.module, type_, self.type_budget)
+        if identity == "":
+            self.reject(span, "ownership type identity unsupported or type budget exhausted")
+            return false
+        hir_type_ownership_is_known(type_)
+
+    me reject(span: Span, reason: text):
+        if self.errors.len() < 16:
+            self.errors.push("NOGC-HIR-001: {span.line}:{span.col}: {reason}")
+
+    me reserve(span: Span) -> bool:
+        if self.work >= self.limit:
+            self.reject(span, "ownership fact budget exhausted; analysis incomplete")
+            return false
+        self.work = self.work + 1
+        true
+
+    me new_block(span: Span) -> i64:
+        if not self.reserve(span): return -1
+        val block = self.next_block
+        self.next_block = block + 1
+        self.points[block] = []
+        self.edges[block] = []
+        block
+
+    me connect(source: i64, target: i64):
+        if source < 0 or target < 0: return
+        var successors: [i64] = self.edges[source]
+        if not successors.contains(target): successors.push(target)
+        self.edges[source] = successors
+
+    me record(event: OwnershipEvent, span: Span):
+        if self.current < 0 or not self.reserve(span): return
+        var loan_index = 0
+        while loan_index < self.active_loans.len():
+            if not self.reserve(span): return
+            val borrowed = self.active_loans[loan_index]
+            var conflict = false
+            match event:
+                case OwnershipEvent.Move(place) | OwnershipEvent.Revive(place) | OwnershipEvent.Write(place):
+                    conflict = place_conflicts_with(place, borrowed)
+                case OwnershipEvent.Read(place):
+                    conflict = self.exclusive_loans[loan_index] and place_conflicts_with(place, borrowed)
+            if conflict:
+                self.reject(span, "ownership access conflicts with an active call-local loan")
+                return
+            loan_index = loan_index + 1
+        val point = self.next_point
+        self.next_point = point + 1
+        var ordered: [i64] = self.points[self.current]
+        ordered.push(point)
+        self.points[self.current] = ordered
+        self.spans[point] = span
+        self.flow.record(point, event)
+
+    me begin_loan(place: Place, exclusive: bool, span: Span):
+        var index = 0
+        while index < self.active_loans.len():
+            if not self.reserve(span): return
+            if (exclusive or self.exclusive_loans[index]) and place_conflicts_with(place, self.active_loans[index]):
+                self.reject(span, "conflicting call-local argument loans")
+                return
+            index = index + 1
+        self.active_loans.push(place)
+        self.exclusive_loans.push(exclusive)
+
+    me field_index(name: text) -> i64:
+        if self.fields.contains_key(name): return self.fields[name]
+        val index = self.fields.len()
+        self.fields[name] = index
+        index
+
+pub fn hir_ownership_place_v1(facts: HirOwnershipFactsV1, expr: HirExpr, depth: i64 = 0) -> Place?:
+    if depth >= 512 or not facts.reserve(expr.span):
+        facts.reject(expr.span, "ownership place depth/work budget exhausted")
+        return nil
+    match expr.kind:
+        case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+            return Some(place_local(symbol.id))
+        case HirExprKind.Field(base, field, _):
+            if val place = hir_ownership_place_v1(facts, base, depth + 1):
+                return Some(place_field(place, facts.field_index(field)))
+        case HirExprKind.TupleIndex(base, index):
+            if val place = hir_ownership_place_v1(facts, base, depth + 1):
+                return Some(place_field(place, facts.field_index("#{index}")))
+        case HirExprKind.Index(base, index):
+            if val place = hir_ownership_place_v1(facts, base, depth + 1):
+                match index.kind:
+                    case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                        return Some(place_index(place, symbol.id))
+                    case HirExprKind.IntLit(value, _):
+                        var projections: [PlaceElem] = []
+                        for projection in place.projections: projections.push(projection)
+                        projections.push(PlaceElem.ConstantIndex(value))
+                        return Some(Place(base: place.base, projections: projections))
+                    case _: pass
+        case _: pass
+    nil
+
+pub fn hir_ownership_is_short_v1(facts: HirOwnershipFactsV1, place: Place) -> bool:
+    match place.base:
+        case PlaceBase.Local(symbol): return facts.short_params.contains_key(symbol)
+        case _: return false
+
+pub fn hir_ownership_read_v1(facts: HirOwnershipFactsV1, expr: HirExpr, place: Place, transfer: bool):
+    facts.record(OwnershipEvent.Read(place), expr.span)
+    if not transfer: return
+    if not expr.has_type_ or not facts.type_known(expr.type_, expr.span):
+        facts.reject(expr.span, "transfer has no resolved ownership type")
+        return
+    if hir_type_requires_move(expr.type_, true):
+        if hir_ownership_is_short_v1(facts, place):
+            facts.reject(expr.span, "short-view transfer requires admitted local-view provenance")
+        else:
+            facts.record(OwnershipEvent.Move(place), expr.span)

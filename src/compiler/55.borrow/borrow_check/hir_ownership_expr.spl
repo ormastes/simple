@@ -1,0 +1,238 @@
+# Ordered typed-HIR expression events. Unmodeled strict ownership fails closed.
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirCallArg, HirEnumPayload, HirIfArm}
+use compiler.hir.hir_types.{MethodResolution}
+use compiler.borrow.borrow_check.borrow_graph.{Place, PlaceBase}
+use compiler.hir.hir_operators.{HirBinOp, HirUnaryOp}
+use compiler.hir.ownership_types.{hir_type_requires_move, hir_type_ownership_is_known}
+use compiler.borrow.borrow_check.hir_ownership_facts.{HirOwnershipFactsV1, hir_ownership_place_v1, hir_ownership_read_v1}
+use compiler.borrow.borrow_check.hir_ownership_cfg.{hir_ownership_block_v1, hir_ownership_branch_v1, hir_ownership_loop_v1, hir_ownership_exit_v1}
+
+pub fn hir_ownership_place_inputs_v1(facts: HirOwnershipFactsV1, expr: HirExpr):
+    if facts.depth >= 256 or not facts.reserve(expr.span):
+        facts.reject(expr.span, "ownership place-input budget exhausted")
+        return
+    facts.depth = facts.depth + 1
+    hir_ownership_place_inputs_impl_v1(facts, expr)
+    facts.depth = facts.depth - 1
+
+fn hir_ownership_place_inputs_impl_v1(facts: HirOwnershipFactsV1, expr: HirExpr):
+    # A copyable global handle may project an owning field. Check the final
+    # typed place as well as the root; root type alone does not prove locality.
+    if expr.has_type_ and not facts.type_known(expr.type_, expr.span): return
+    if expr.has_type_ and hir_type_requires_move(expr.type_, true):
+        if val place = hir_ownership_place_v1(facts, expr):
+            match place.base:
+                case PlaceBase.Local(symbol):
+                    if not facts.locals.contains_key(symbol):
+                        facts.reject(expr.span, "ownership-sensitive global/free projection requires interprocedural effect admission")
+                case _:
+                    facts.reject(expr.span, "nonlocal owning projection requires interprocedural effect admission")
+    match expr.kind:
+        case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+            if not facts.locals.contains_key(symbol.id):
+                if not expr.has_type_ or not facts.type_known(expr.type_, expr.span) or hir_type_requires_move(expr.type_, true):
+                    facts.reject(expr.span, "ownership-sensitive global/free place requires interprocedural effect admission")
+        case HirExprKind.Field(base, _, _) | HirExprKind.TupleIndex(base, _):
+            hir_ownership_place_inputs_v1(facts, base)
+        case HirExprKind.Index(base, index):
+            hir_ownership_place_inputs_v1(facts, base)
+            hir_ownership_expr_v1(facts, index, false)
+        case _: pass
+
+fn hir_ownership_call_symbol_v1(expr: HirExpr) -> i64:
+    match expr.kind:
+        case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _): return symbol.id
+        case _: return -1
+
+fn hir_ownership_method_symbol_v1(resolution: MethodResolution) -> i64:
+    match resolution:
+        case MethodResolution.InstanceMethod(_, symbol) | MethodResolution.TraitMethod(_, symbol): return symbol.id
+        case MethodResolution.FreeFunction(symbol) | MethodResolution.StaticMethod(_, symbol): return symbol.id
+        case _: return -1
+
+fn hir_ownership_argument_v1(facts: HirOwnershipFactsV1, value: HirExpr, effect: text):
+    if not value.has_type_ or not facts.type_known(value.type_, value.span):
+        facts.reject(value.span, "call argument ownership is unresolved")
+        return
+    val owns = hir_type_requires_move(value.type_, true)
+    if effect == "consume":
+        hir_ownership_expr_v1(facts, value, true)
+    elif effect == "read-short" or effect == "mutate-short":
+        hir_ownership_expr_v1(facts, value, false)
+        if owns:
+            if val place = hir_ownership_place_v1(facts, value):
+                facts.begin_loan(place, effect == "mutate-short", value.span)
+            else:
+                match value.kind:
+                    case HirExprKind.ArrayLit(_, _) | HirExprKind.TupleLit(_) | HirExprKind.DictLit(_, _, _) | HirExprKind.SetLit(_, _) | HirExprKind.StructLit(_, _) | HirExprKind.EnumLit(_, _, _):
+                        # Fresh aggregate owns its moved elements. There is no
+                        # surviving source place for a later argument to move.
+                        pass
+                    case _:
+                        facts.reject(value.span, "short argument requires a resolved place or fresh aggregate; derived view is not admitted")
+    elif effect == "share-explicit":
+        if owns:
+            facts.reject(value.span, "unique ownership cannot implicitly become shared")
+        else:
+            hir_ownership_expr_v1(facts, value, false)
+    elif owns:
+        facts.reject(value.span, "owning call argument lacks an exact admitted parameter-effect contract")
+    else:
+        hir_ownership_expr_v1(facts, value, false)
+
+fn hir_ownership_call_args_v1(facts: HirOwnershipFactsV1, symbol: i64,
+        args: [HirCallArg], receiver: HirExpr?):
+    val saved_loans = facts.active_loans.len()
+    hir_ownership_call_args_impl_v1(facts, symbol, args, receiver)
+    var restored_places: [Place] = []
+    var restored_modes: [bool] = []
+    var index = 0
+    while index < saved_loans:
+        restored_places.push(facts.active_loans[index])
+        restored_modes.push(facts.exclusive_loans[index])
+        index = index + 1
+    facts.active_loans = restored_places
+    facts.exclusive_loans = restored_modes
+
+fn hir_ownership_call_args_impl_v1(facts: HirOwnershipFactsV1, symbol: i64,
+        args: [HirCallArg], receiver: HirExpr?):
+    var effects: [text] = []
+    var names: [text] = []
+    if facts.effects.contains_key(symbol): effects = facts.effects[symbol]
+    if facts.parameter_names.contains_key(symbol): names = facts.parameter_names[symbol]
+    var position = 0
+    if val value = receiver:
+        val effect = if effects.len() > 0: effects[0] else: ""
+        hir_ownership_argument_v1(facts, value, effect)
+        position = 1
+    var seen: Dict<i64, bool> = {}
+    for argument in args:
+        var slot = position
+        if argument.has_name:
+            slot = -1
+            var index = 0
+            while index < names.len():
+                if not facts.reserve(argument.value.span): return
+                if names[index] == argument.name: slot = index
+                index = index + 1
+        if slot < 0 or seen.contains_key(slot):
+            facts.reject(argument.value.span, "call argument cannot bind one exact ownership contract slot")
+            return
+        seen[slot] = true
+        val effect = if slot < effects.len(): effects[slot] else: ""
+        hir_ownership_argument_v1(facts, argument.value, effect)
+        position = position + 1
+
+pub fn hir_ownership_expr_v1(facts: HirOwnershipFactsV1, expr: HirExpr, transfer: bool):
+    if facts.current < 0 or facts.errors.len() > 0: return
+    if not facts.reserve(expr.span): return
+    if facts.depth >= 256:
+        facts.reject(expr.span, "ownership expression nesting budget exhausted")
+        return
+    facts.depth = facts.depth + 1
+    hir_ownership_expr_impl_v1(facts, expr, transfer)
+    facts.depth = facts.depth - 1
+
+fn hir_ownership_expr_impl_v1(facts: HirOwnershipFactsV1, expr: HirExpr, transfer: bool):
+    match expr.kind:
+        case HirExprKind.Var(_) | HirExprKind.NamedVar(_, _) | HirExprKind.Field(_, _, _) | HirExprKind.TupleIndex(_, _) | HirExprKind.Index(_, _):
+            hir_ownership_place_inputs_v1(facts, expr)
+            if val place = hir_ownership_place_v1(facts, expr):
+                hir_ownership_read_v1(facts, expr, place, transfer)
+            else:
+                facts.reject(expr.span, "read has no admitted ownership place")
+        case HirExprKind.IntLit(_, _) | HirExprKind.FloatLit(_, _) | HirExprKind.FloatLexeme(_, _) | HirExprKind.BoolLit(_) | HirExprKind.CharLit(_) | HirExprKind.UnitLit | HirExprKind.NilLit:
+            pass
+        case HirExprKind.StringLit(_, interpolations):
+            if val items = interpolations:
+                for item in items: hir_ownership_expr_v1(facts, item.expr, false)
+        case HirExprKind.ArrayLit(elements, _) | HirExprKind.TupleLit(elements) | HirExprKind.SetLit(elements, _):
+            for value in elements: hir_ownership_expr_v1(facts, value, true)
+        case HirExprKind.DictLit(entries, _, _):
+            for entry in entries:
+                hir_ownership_expr_v1(facts, entry.0, true)
+                hir_ownership_expr_v1(facts, entry.1, true)
+        case HirExprKind.ArrayRepeat(value, count, _):
+            if not value.has_type_ or not facts.type_known(value.type_, value.span) or hir_type_requires_move(value.type_, true):
+                facts.reject(expr.span, "array repetition cannot duplicate an owning value")
+            else:
+                hir_ownership_expr_v1(facts, value, false)
+                hir_ownership_expr_v1(facts, count, false)
+        case HirExprKind.StructLit(_, fields):
+            for field in fields: hir_ownership_expr_v1(facts, field.1, true)
+        case HirExprKind.EnumLit(_, _, payload):
+            if val data = payload:
+                match data:
+                    case HirEnumPayload.Tuple(values):
+                        for value in values: hir_ownership_expr_v1(facts, value, true)
+                    case HirEnumPayload.Struct(fields):
+                        for field in fields: hir_ownership_expr_v1(facts, field.1, true)
+        case HirExprKind.If(condition, then_, else_):
+            hir_ownership_branch_v1(facts, condition, then_, else_, transfer)
+        case HirExprKind.IfChain(arms, else_):
+            val join = facts.new_block(expr.span)
+            var continuing = false
+            for item in arms:
+                val arm: HirIfArm = item
+                hir_ownership_expr_v1(facts, arm.cond, false)
+                val predecessor = facts.current
+                val yes = facts.new_block(expr.span)
+                val no = facts.new_block(expr.span)
+                facts.connect(predecessor, yes)
+                facts.connect(predecessor, no)
+                facts.current = yes
+                hir_ownership_block_v1(facts, arm.then_, transfer)
+                if facts.current >= 0: continuing = true
+                facts.connect(facts.current, join)
+                facts.current = no
+            if val other = else_: hir_ownership_block_v1(facts, other, transfer)
+            if facts.current >= 0: continuing = true
+            facts.connect(facts.current, join)
+            facts.current = if continuing: join else: -1
+        case HirExprKind.While(condition, body, label):
+            hir_ownership_loop_v1(facts, Some(condition), body, label)
+        case HirExprKind.Loop(body, label):
+            hir_ownership_loop_v1(facts, nil, body, label)
+        case HirExprKind.Block(block): hir_ownership_block_v1(facts, block, transfer)
+        case HirExprKind.Return(value):
+            if val result = value: hir_ownership_expr_v1(facts, result, true)
+            facts.current = -1
+        case HirExprKind.Break(label, value):
+            if val result = value: hir_ownership_expr_v1(facts, result, true)
+            hir_ownership_exit_v1(facts, expr, label, true)
+        case HirExprKind.Continue(label): hir_ownership_exit_v1(facts, expr, label ?? "", false)
+        case HirExprKind.Binary(op, left, right):
+            hir_ownership_expr_v1(facts, left, false)
+            if op == HirBinOp.And or op == HirBinOp.Or:
+                val predecessor = facts.current
+                val rhs = facts.new_block(expr.span)
+                val join = facts.new_block(expr.span)
+                facts.connect(predecessor, rhs)
+                facts.connect(predecessor, join)
+                facts.current = rhs
+                hir_ownership_expr_v1(facts, right, false)
+                facts.connect(facts.current, join)
+                facts.current = join
+            else:
+                hir_ownership_expr_v1(facts, right, false)
+        case HirExprKind.Unary(op, value):
+            if op == HirUnaryOp.Ref or op == HirUnaryOp.RefMut or op == HirUnaryOp.Deref:
+                facts.reject(expr.span, "explicit pointer/loan operation lacks HIR event admission")
+            else:
+                hir_ownership_expr_v1(facts, value, false)
+        case HirExprKind.Call(callee, args, _):
+            val symbol = hir_ownership_call_symbol_v1(callee)
+            if symbol < 0:
+                facts.reject(expr.span, "indirect callable lacks checked ownership identity")
+            else:
+                hir_ownership_call_args_v1(facts, symbol, args, nil)
+        case HirExprKind.MethodCall(receiver, _, args, resolution):
+            hir_ownership_call_args_v1(facts, hir_ownership_method_symbol_v1(resolution), args, Some(receiver))
+        case HirExprKind.StaticCall(_, _, args, resolution):
+            hir_ownership_call_args_v1(facts, hir_ownership_method_symbol_v1(resolution), args, nil)
+        case HirExprKind.ExistsCheck(value) | HirExprKind.TypeTest(value, _):
+            hir_ownership_expr_v1(facts, value, false)
+        case HirExprKind.Cast(value, _) | HirExprKind.As(value, _) | HirExprKind.ConvertCall(value, _):
+            hir_ownership_expr_v1(facts, value, transfer)
+        case _:
+            facts.reject(expr.span, "HIR construct has no complete ownership CFG adapter; execution refused")
