@@ -1064,3 +1064,13 @@ a time): 29 OK / 1 ERROR — byte-identical diff to the 2026-11-04 after-sweep
 (four ERROR->OK from other landed commits; the single OK->ERROR,
 `aliased_param_writeback_spec` JIT-probe demotion, is `75bb3e73148`, not this
 change).
+
+## 2026-11-06 — seed JIT `text` receiver half fixed (row stays open)
+
+Seed JIT on `impl MarkerProbe for text` failed `Function 'str.probe' not
+found`: MIR qualified a STRING receiver with the builtin name `str` while the
+impl registered `text.probe`. `mir/lower/lowering_expr_method.rs` now prefers
+`text.m`/`String.m`/`string.m` when `str.m` is not a declared function.
+Regression: `src/compiler_rust/compiler/tests/primitive_text_trait_impl_jit.rs`.
+i64 impl already dispatched under JIT. Still OPEN: native (s3) crash on the
+b0_e probe, i32-collapses-to-i64 row.
