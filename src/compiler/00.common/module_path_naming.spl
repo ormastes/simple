@@ -272,3 +272,36 @@ fn _module_logical_name_from_path_uncached(path: text) -> text:
         _san_i = _san_i + 1
     mod_path = portable
     mod_path.replace("/", ".")
+
+fn _module_canonical_segment_is_tier(seg: text) -> bool:
+    """True for an all-digit dotted segment. An empty segment is NOT a tier."""
+    if seg.len() == 0:
+        return false
+    var i = 0
+    while i < seg.len():
+        val code = seg.char_code_at(i)
+        if code < 48 or code > 57:
+            return false
+        i = i + 1
+    true
+
+pub fn module_canonical_fold_name(module_name: text) -> text:
+    """Fold every dotted spelling of ONE physical file onto a single name:
+    drop all-digit (tier) segments and fold a leading `std.` to `lib.`.
+    Single owner for the driver's module canonicalization AND the native
+    entry predicate (`llvm_module_is_native_entry`): an entry whose path has a
+    dotted numeric directory (`test/s3sanity/dot.1/hello.spl`) is renamed by
+    the driver, so the predicate must compare folded names or no
+    `__simple_main` is emitted (bug
+    native_build_entry_main_undefined_when_source_path_has_dot_2026_10_20)."""
+    var segs: [text] = []
+    for seg in module_name.split("."):
+        if _module_canonical_segment_is_tier(seg):
+            continue
+        segs = segs.push(seg)
+    val canonical = segs.join(".")
+    if canonical == "std":
+        return "lib"
+    if canonical.starts_with("std."):
+        return "lib." + canonical.substring(4)
+    canonical
