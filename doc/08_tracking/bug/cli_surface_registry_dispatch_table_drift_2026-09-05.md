@@ -94,3 +94,6 @@ to regenerate the identity receipt. Do **not** hand-edit the sha256 constants in
 `help_surface_generated_data.spl` — the generation-id check
 (`_codegen_generation_id_v1`) binds them together and a hand-patched receipt
 would re-open exactly the fail-open this guard exists to prevent.
+
+## Round 8 part 2 note 2026-11-06
+Drift is gone: registry == dispatch table (133 commands, table-only [] / help-only []). The remaining block was the codegen check `dispatch-registry-drift`: 3 registry commands (`code`, `dist-build`, `tldr`) are table-dispatched, with no hardcoded `str_eq` handler. The check now requires hardcoded handlers to be a SUBSET of the registry (table parity is checked separately). Receipt regenerated with the sanctioned generator (`simple run src/app/cli/help_surface_codegen.spl --write` -> PASS). `cli_surface_completion_candidates_v1(.., "bu")` now returns candidates (bug-add, bug-gen, bug-resolve, build, build-progress). Stale oracles updated (count 127 -> derived from registry; plan spec list gains build-progress). startup_perf_plan C4 still has its other REMAINING clause (zero-rebuild sha256 proof).
