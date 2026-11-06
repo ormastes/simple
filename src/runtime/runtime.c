@@ -2739,8 +2739,22 @@ int64_t rt_shell_output(int64_t cmd_value) {
 
 /* Standalone core-C uses tagged, registered arrays and scalar words, whereas
  * these hosted helpers return legacy SplArray/SplValue layouts. Keep the
- * native core provider as the sole Windows standalone owner. */
-#if !defined(_WIN32) || !defined(SIMPLE_CORE_C_STANDALONE)
+ * native core provider as the sole Windows standalone owner.
+ *
+ * Also omitted whenever runtime_native.c is in the same bundle, on every
+ * platform. SIMPLE_RUNTIME_MEMORY_OWNER is the marker for that: every full
+ * bundle composer passes it and always lists runtime_native
+ * (70.backend/backend/runtime_compiler.spl, native_project/tools.rs,
+ * scripts/bootstrap/prepare-runtime-owner.shs); the C-backend lane that links
+ * runtime.c alone (80.driver/driver_api_project_build.spl) does not. On ELF
+ * both files' copies were weak, so the first object in the link won, and the
+ * hosted bundle lists runtime.c first: rt_cli_get_args then returned a legacy
+ * spl_array_new() array that runtime_native.c's rt_array_len rejects as
+ * "rejected invalid array handle", and rt_cli_arg_at returned a SplValue
+ * struct where compiled code expects a tagged text word. See
+ * doc/08_tracking/bug/hosted_bundle_legacy_cli_args_wins_weak_tie_2026-11-07.md */
+#if (!defined(_WIN32) || !defined(SIMPLE_CORE_C_STANDALONE)) && \
+    !defined(SIMPLE_RUNTIME_MEMORY_OWNER)
 SPL_CLI_ARGS_WEAK SplArray* rt_cli_get_args(void) {
     SplArray* arr = spl_array_new();
     for (int i = 0; i < g_argc; i++) {
