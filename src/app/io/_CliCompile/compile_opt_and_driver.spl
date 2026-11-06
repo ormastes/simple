@@ -214,15 +214,26 @@ fn cli_compile_dynamic_driver_library(source_file: text, output_file: text, back
         _cli_eprint("[driver-mode] dynamic driver library written: {out}")
     return 0
 
-# Routes that reach the pure-Simple driver with a native-code backend. Cranelift
-# is let through so the driver reports its own UnsupportedTarget reason.
-fn cli_xray_route_supported(backend: text, target: text, emit_c: bool, driver_mode: text) -> bool:
+# `--xray` admission for `simple compile`: "" when the route reaches the
+# pure-Simple driver for a native executable, else the rejection message.
+# Cranelift is let through so the driver reports its own UnsupportedTarget.
+# With --xray, `--native` builds go through the pure-Simple driver (not the
+# MIR->C route), so on/off comparisons must pin --backend explicitly.
+fn cli_xray_route_error(backend: text, target: text, emit: text, output_format: text, emit_c: bool, driver_mode: text) -> text:
+    val prefix = "XRAY-E-UNSUPPORTED-TARGET: --xray"
     if emit_c or driver_mode != "":
-        return false
+        return "{prefix} is not supported for C output or driver packaging"
     if target.starts_with("baremetal-") or target.contains("simpleos") or _cli_is_wasm_target(target):
-        return false
-    (backend == "" or backend == "auto" or backend == "llvm" or backend == "llvm-lib" or
+        return "{prefix} is not supported for target '{target}'"
+    val native_backend = (backend == "" or backend == "auto" or backend == "llvm" or backend == "llvm-lib" or
         backend == "llvmlib" or backend == "native" or backend == "cranelift")
+    if not native_backend:
+        return "{prefix} is not supported with backend '{backend}'"
+    if output_format != "" and output_format != "native":
+        return "{prefix} is not supported for output format '{output_format}'"
+    if emit != "native" and backend != "llvm" and backend != "llvm-lib" and backend != "llvmlib":
+        return "{prefix} requires a native executable build; add --native"
+    ""
 
 fn _cli_is_wasm_target(t: text) -> bool:
     t == "wasm32" or t == "wasm32-wasi" or t == "wasm64" or t.starts_with("wasm32-") or t.starts_with("wasm64-")
@@ -589,9 +600,11 @@ fn cli_compile(args: [text]) -> i64:
 
     # --xray is the XRay static switch. Only routes that reach the pure-Simple
     # driver can carry it; the driver's policy resolution rejects Cranelift.
-    if xray_enabled and not cli_xray_route_supported(backend, target, emit_c, driver_mode):
-        _cli_eprint("Error: XRAY-E-UNSUPPORTED-TARGET: --xray requires an AOT native build (--backend=llvm or --backend=native); backend='{backend}' target='{target}'")
-        return 1
+    if xray_enabled:
+        val xray_error = cli_xray_route_error(backend, target, emit, output_format, emit_c, driver_mode)
+        if xray_error != "":
+            _cli_eprint("Error: {xray_error}")
+            return 1
 
     if driver_mode != "":
         if mcdc_route_requested:

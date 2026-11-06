@@ -8,17 +8,19 @@
 #
 # What it does
 #   1. Generates four fixtures (hello, multi-return, tail call, recursion).
-#   2. Builds each with DEFAULT options (no --xray):
-#        <compiler> compile --native -o <out> <fixture>
-#      twice with the candidate compiler, and once with --baseline if given
-#      (a compiler built from the pre-change base). SMF output is not compared:
+#   2. Builds each with DEFAULT options (no --xray) through two routes:
+#        <compiler> compile --native -o <out> <fixture>                (default)
+#        <compiler> compile --native --backend=llvm -o <out> <fixture> (pure-Simple driver)
+#      twice with the candidate compiler and once with the baseline compiler
+#      (one built from the pre-change base). Both are REQUIRED: a run that
+#      cannot compare against a baseline proves nothing about identity. SMF output is not compared:
 #      measured 2026-11-06 the seed's SMF is not run-to-run deterministic
 #      (79 differing bytes on hello.spl) while its native executables were
 #      byte-identical across runs.
 #   3. Compares candidate-vs-candidate (run-to-run determinism) and
 #      candidate-vs-baseline. Whole-file `cmp` first; on a byte difference it
 #      falls back to a NORMALIZED comparison (section name/type/size list,
-#      sorted symbol names, .text bytes). The verdict names the mode used.
+#      sorted symbol names, .text/.data/.rodata bytes, DT_NEEDED). The verdict names the mode used.
 #   4. Asserts absence on every artifact: no section matching /xray/, no
 #      symbol matching ^(__xray_|__simple_xray|simple_xray_).
 #
@@ -37,14 +39,14 @@
 # .text must FAIL; an empty artifact set must ERROR.
 #
 # Usage
-#   sh scripts/check/check-xray-static-off-identity.shs [--compiler <path>] [--baseline <path>] [--keep]
+#   sh scripts/check/check-xray-static-off-identity.shs --compiler <pure-Simple bin> --baseline <pre-change bin> [--keep]
 #   sh scripts/check/check-xray-static-off-identity.shs --selftest
 # Env: LLVM_READELF, LLVM_NM, LLVM_OBJCOPY, CLANG (selftest), XRAY_GUARD_TIMEOUT (s, default 600).
 
 set -u
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-COMPILER="$ROOT/bin/simple"
+COMPILER=""
 BASELINE=""
 KEEP=0
 SELFTEST_ONLY=0
@@ -77,7 +79,9 @@ done
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/xray-static-off.XXXXXX") || {
     echo "ERROR — nothing was checked (cannot create temp dir)"; exit 2; }
 cleanup() { [ "$KEEP" = 1 ] || rm -rf "$WORK"; }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 # is_elf <file> -> 0 when the file is an ELF object/executable
 is_elf() {
@@ -104,9 +108,12 @@ normalized_digest() {
         "$READELF" -S --wide "$_f" 2>/dev/null |
             awk '/^ *\[ *[0-9]+\]/ { sub(/^ *\[ *[0-9]+\] */, ""); print $1, $2, $5 }' >>"$_o"
         "$NM" -a "$_f" 2>/dev/null | awk '{ print $NF }' | sort >>"$_o"
-        if "$OBJCOPY" -O binary --only-section=.text "$_f" "$WORK/text.bin" 2>/dev/null; then
-            od -An -tx1 "$WORK/text.bin" >>"$_o"
-        fi
+        for _sec in .text .data .rodata; do
+            if "$OBJCOPY" -O binary --only-section="$_sec" "$_f" "$WORK/sec.bin" 2>/dev/null; then
+                echo "$_sec" >>"$_o"; od -An -tx1 "$WORK/sec.bin" >>"$_o"
+            fi
+        done
+        "$READELF" -d "$_f" 2>/dev/null | awk '/NEEDED/ { print "needed", $NF }' >>"$_o"
     fi
 }
 
@@ -138,6 +145,12 @@ scan() {
             SCAN_MODE="normalized"
         else
             echo "$_name: differs (bytes and normalized sections/symbols/.text)"; _bad=1
+        fi
+    done
+    for _fb in "$_b"/*; do
+        [ -f "$_fb" ] || continue
+        if [ ! -f "$_a/$(basename "$_fb")" ]; then
+            echo "extra artifact: $(basename "$_fb")"; _bad=1
         fi
     done
     if [ "$SCAN_COUNT" -eq 0 ]; then return 2; fi
@@ -190,11 +203,15 @@ if [ "$SELFTEST_ONLY" = 1 ]; then
     exit 0
 fi
 
+if [ -z "$COMPILER" ] || [ -z "$BASELINE" ]; then
+    echo "ERROR — nothing was checked (--compiler and --baseline are both required)"
+    exit 2
+fi
 if [ ! -x "$COMPILER" ]; then
     echo "ERROR — nothing was checked (compiler not executable: $COMPILER)"
     exit 2
 fi
-if [ -n "$BASELINE" ] && [ ! -x "$BASELINE" ]; then
+if [ ! -x "$BASELINE" ]; then
     echo "ERROR — nothing was checked (baseline compiler not executable: $BASELINE)"
     exit 2
 fi
@@ -244,7 +261,12 @@ build_all() {
         if [ "$_rc" -ne 0 ] || [ ! -f "$_out/$_stem.native" ]; then
             echo "build failed ($_cc native $_stem rc=$_rc)" >&2; return 1
         fi
-        rm -f "$_out/$_stem.native.log"
+        (cd "$ROOT" && timeout "$STEP_TIMEOUT" "$_cc" compile --native --backend=llvm -o "$_out/$_stem.llvm" "$_fx") >"$_out/$_stem.llvm.log" 2>&1
+        _rc=$?
+        if [ "$_rc" -ne 0 ] || [ ! -f "$_out/$_stem.llvm" ]; then
+            echo "build failed ($_cc llvm $_stem rc=$_rc)" >&2; return 1
+        fi
+        rm -f "$_out/$_stem.native.log" "$_out/$_stem.llvm.log"
     done
     return 0
 }
@@ -261,16 +283,12 @@ TOTAL=$SCAN_COUNT; DET_MODE=$SCAN_MODE
 if [ "$RC" -eq 2 ]; then echo "ERROR — nothing was checked (0 artifacts produced)"; exit 2; fi
 if [ "$RC" -ne 0 ]; then echo "FAIL — candidate default build has XRay artifacts or is not reproducible run-to-run"; exit 1; fi
 
-BASE_NOTE="no baseline compiler given"
-if [ -n "$BASELINE" ]; then
-    if ! build_all "$BASELINE" "$WORK/base"; then
-        echo "ERROR — nothing was checked (baseline build failed; see stderr)"; exit 2
-    fi
-    scan "$WORK/run1" "$WORK/base"
-    RC=$?
-    TOTAL=$((TOTAL + SCAN_COUNT))
-    if [ "$RC" -ne 0 ]; then echo "FAIL — default build output differs from the baseline compiler's"; exit 1; fi
-    BASE_NOTE="vs baseline: $SCAN_MODE"
+if ! build_all "$BASELINE" "$WORK/base"; then
+    echo "ERROR — nothing was checked (baseline build failed; see stderr)"; exit 2
 fi
-echo "PASS — $TOTAL artifact(s) compared (run-to-run: $DET_MODE; $BASE_NOTE; 0 XRay sections/symbols; compiler=$COMPILER)"
+scan "$WORK/run1" "$WORK/base"
+RC=$?
+TOTAL=$((TOTAL + SCAN_COUNT))
+if [ "$RC" -ne 0 ]; then echo "FAIL — default build output differs from the baseline compiler's"; exit 1; fi
+echo "PASS — $TOTAL artifact(s) compared (run-to-run: $DET_MODE; vs baseline: $SCAN_MODE; 0 XRay sections/symbols; compiler=$COMPILER baseline=$BASELINE)"
 exit 0

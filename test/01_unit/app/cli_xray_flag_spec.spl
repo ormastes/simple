@@ -1,28 +1,32 @@
 """XRay structural PR1: `simple compile --xray` reaches only routes that can carry sleds."""
 use std.spec.*
-use app.io._CliCompile.compile_opt_and_driver.{cli_compile, cli_xray_route_supported}
+use app.io._CliCompile.compile_opt_and_driver.{cli_xray_route_error}
 
 describe "compile --xray route admission":
-    it "admits native-code backends that reach the pure-Simple driver":
-        expect(cli_xray_route_supported("", "", false, "")).to_equal(true)
-        expect(cli_xray_route_supported("auto", "", false, "")).to_equal(true)
-        expect(cli_xray_route_supported("llvm", "", false, "")).to_equal(true)
-        expect(cli_xray_route_supported("native", "", false, "")).to_equal(true)
-        expect(cli_xray_route_supported("llvm", "aarch64-unknown-linux-gnu", false, "")).to_equal(true)
+    it "admits native executable builds that reach the pure-Simple driver":
+        expect(cli_xray_route_error("", "", "native", "", false, "")).to_equal("")
+        expect(cli_xray_route_error("auto", "", "native", "native", false, "")).to_equal("")
+        expect(cli_xray_route_error("llvm", "", "", "", false, "")).to_equal("")
+        expect(cli_xray_route_error("native", "", "native", "", false, "")).to_equal("")
+        expect(cli_xray_route_error("llvm", "aarch64-unknown-linux-gnu", "native", "", false, "")).to_equal("")
 
     it "lets Cranelift through so the driver reports UnsupportedTarget":
-        expect(cli_xray_route_supported("cranelift", "", false, "")).to_equal(true)
+        expect(cli_xray_route_error("cranelift", "", "native", "", false, "")).to_equal("")
 
-    it "rejects routes that bypass the pure-Simple driver or emit non-native code":
-        expect(cli_xray_route_supported("vhdl", "", false, "")).to_equal(false)
-        expect(cli_xray_route_supported("cuda", "", false, "")).to_equal(false)
-        expect(cli_xray_route_supported("wasm", "", false, "")).to_equal(false)
-        expect(cli_xray_route_supported("vulkan", "", false, "")).to_equal(false)
-        expect(cli_xray_route_supported("c", "", true, "")).to_equal(false)
-        expect(cli_xray_route_supported("llvm", "baremetal-x86", false, "")).to_equal(false)
-        expect(cli_xray_route_supported("llvm", "x86_64-simpleos", false, "")).to_equal(false)
-        expect(cli_xray_route_supported("llvm", "", false, "dynamic")).to_equal(false)
+    it "rejects non-native backends by name":
+        for backend in ["vhdl", "cuda", "wasm", "vulkan", "opencl"]:
+            val message = cli_xray_route_error(backend, "", "native", "", false, "")
+            expect(message).to_contain("XRAY-E-UNSUPPORTED-TARGET")
+            expect(message).to_contain("backend '{backend}'")
 
-    it "fails the compile command before compiling when the route is unsupported":
-        val status = cli_compile(["test/01_unit/app/cli_xray_flag_spec.spl", "--xray", "--backend=vhdl"])
-        expect(status).to_equal(1)
+    it "rejects C output, driver packaging and bare-metal/SimpleOS/WASM targets":
+        expect(cli_xray_route_error("c", "", "", "", true, "")).to_contain("C output")
+        expect(cli_xray_route_error("llvm", "", "native", "", false, "dynamic")).to_contain("driver packaging")
+        expect(cli_xray_route_error("llvm", "baremetal-x86", "native", "", false, "")).to_contain("target 'baremetal-x86'")
+        expect(cli_xray_route_error("llvm", "x86_64-simpleos", "native", "", false, "")).to_contain("target 'x86_64-simpleos'")
+        expect(cli_xray_route_error("llvm", "wasm32", "native", "", false, "")).to_contain("target 'wasm32'")
+
+    it "rejects SMF output instead of silently carrying unemitted sled intent":
+        expect(cli_xray_route_error("auto", "", "", "", false, "")).to_contain("add --native")
+        expect(cli_xray_route_error("native", "", "", "", false, "")).to_contain("add --native")
+        expect(cli_xray_route_error("llvm", "", "native", "smf", false, "")).to_contain("output format 'smf'")

@@ -8,6 +8,7 @@ use compiler.mir.mir_instruction_graph.{MirFunction, MirModule}
 use compiler.common.driver_compile_options.{driver_core_compile_options_default, compileoptions_normalize_mir_optimization}
 use compiler.driver.cache.compile_options_hash.{compile_options_hash_compute}
 use compiler.driver.driver_xray_policy.*
+use compiler.common.module_path_naming.{module_logical_name_from_path}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.common.driver_core_modes.{CompileMode}
 
@@ -90,20 +91,27 @@ describe "xray_policy_apply":
         expect(xray_mode_of(applied, 2)).to_equal(0)
         expect(xray_mode_of(applied, 3)).to_equal(0)
 
-    it "never instruments trace and allocator library modules":
-        for module_name in ["std.common.trace.observer_contract_v1", "std.nogc_sync_mut.trace.channel",
-                "common.trace.session", "std.nogc_sync_mut.allocator"]:
+    it "never instruments trace and allocator library modules (real module names)":
+        for path in ["src/lib/common/trace/observer_contract_v1.spl", "src/lib/nogc_sync_mut/trace/channel.spl",
+                "src/lib/nogc_sync_mut/allocator.spl", "src/lib/gc_async_mut/allocator.spl"]:
+            val module_name = module_logical_name_from_path(path)
             val module = xray_module(module_name, [xray_fn(1, "work")])
             val applied = xray_policy_apply(module, XrayBuildPolicy.on())
             expect(xray_mode_of(applied, 1)).to_equal(0)
 
+    it "still instruments ordinary library and app modules":
+        for path in ["src/lib/common/text.spl", "src/app/cli/main.spl"]:
+            val module = xray_module(module_logical_name_from_path(path), [xray_fn(1, "work")])
+            val applied = xray_policy_apply(module, XrayBuildPolicy.on())
+            expect(xray_mode_of(applied, 1)).to_equal(XRAY_MODE_ENTRY_EXIT_TAIL)
+
 describe "xray_policy_resolve":
     it "accepts off on every backend, including Cranelift":
-        expect(xray_policy_resolve(false, "aot", "cranelift", false).is_ok()).to_equal(true)
-        expect(xray_policy_resolve(false, "jit", "auto", false).is_ok()).to_equal(true)
+        expect(xray_policy_resolve(false, "aot", "cranelift", false, "native").is_ok()).to_equal(true)
+        expect(xray_policy_resolve(false, "jit", "auto", false, "native").is_ok()).to_equal(true)
 
     it "rejects --xray with Cranelift as an unsupported target":
-        val result = xray_policy_resolve(true, "aot", "cranelift", false)
+        val result = xray_policy_resolve(true, "aot", "cranelift", false, "native")
         expect(result.is_err()).to_equal(true)
         match result:
             case Err(message):
@@ -113,15 +121,20 @@ describe "xray_policy_resolve":
                 expect(false).to_equal(true)
 
     it "rejects --xray outside AOT and on non-native backends":
-        expect(xray_policy_resolve(true, "jit", "llvm", false).is_err()).to_equal(true)
-        expect(xray_policy_resolve(true, "interpret", "llvm", false).is_err()).to_equal(true)
-        expect(xray_policy_resolve(true, "aot", "vhdl", false).is_err()).to_equal(true)
-        expect(xray_policy_resolve(true, "aot", "wasm", false).is_err()).to_equal(true)
+        expect(xray_policy_resolve(true, "jit", "llvm", false, "native").is_err()).to_equal(true)
+        expect(xray_policy_resolve(true, "interpret", "llvm", false, "native").is_err()).to_equal(true)
+        expect(xray_policy_resolve(true, "aot", "vhdl", false, "native").is_err()).to_equal(true)
+        expect(xray_policy_resolve(true, "aot", "wasm", false, "native").is_err()).to_equal(true)
+
+    it "rejects --xray for non-native output formats (no emitter for SMF)":
+        expect(xray_policy_resolve(true, "aot", "llvm", false, "smf").is_err()).to_equal(true)
+        expect(xray_policy_resolve(true, "aot", "llvm", false, "self-contained").is_err()).to_equal(true)
+        expect(xray_policy_resolve(false, "aot", "llvm", false, "smf").is_ok()).to_equal(true)
 
     it "accepts --xray for AOT LLVM and pure-Simple native":
-        expect(xray_policy_resolve(true, "aot", "llvm", false).is_ok()).to_equal(true)
-        expect(xray_policy_resolve(true, "aot", "auto", false).is_ok()).to_equal(true)
-        expect(xray_policy_resolve(true, "aot", "native", false).is_ok()).to_equal(true)
+        expect(xray_policy_resolve(true, "aot", "llvm", false, "native").is_ok()).to_equal(true)
+        expect(xray_policy_resolve(true, "aot", "auto", false, "native").is_ok()).to_equal(true)
+        expect(xray_policy_resolve(true, "aot", "native", false, "native").is_ok()).to_equal(true)
 
 describe "XRay driver gate (CompileContext.create)":
     it "records the Cranelift rejection before any pipeline runs":

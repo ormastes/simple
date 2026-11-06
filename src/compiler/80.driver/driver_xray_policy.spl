@@ -40,7 +40,7 @@ fn xray_unsupported(what: text) -> text:
 # On is admitted only for AOT builds whose backend can carry sleds (LLVM XRay
 # or the pure-Simple native backend). Cranelift lowers through seed-owned
 # externs that cannot emit sleds; it is rejected in every stage.
-fn xray_policy_resolve(enabled: bool, compile_mode_text: text, backend: text, release: bool) -> Result<XrayBuildPolicy, text>:
+fn xray_policy_resolve(enabled: bool, compile_mode_text: text, backend: text, release: bool, output_format: text) -> Result<XrayBuildPolicy, text>:
     if not enabled:
         return Ok(XrayBuildPolicy.off())
     val effective = get_effective_backend_name(backend, release)
@@ -48,6 +48,10 @@ fn xray_policy_resolve(enabled: bool, compile_mode_text: text, backend: text, re
         return Err(xray_unsupported("with the Cranelift backend (it cannot emit XRay sleds); use --backend=llvm or --backend=native"))
     if compile_mode_text != "aot":
         return Err(xray_unsupported("in '{compile_mode_text}' mode; XRay sleds exist only in AOT native builds"))
+    # SMF/self-contained outputs have no sled emitter; accepting them would
+    # carry sled intent that nothing emits (fail-open).
+    if output_format != "native":
+        return Err(xray_unsupported("for output format '{output_format}'; use --native"))
     # get_effective_backend_name maps unknown names to "llvm", so the requested
     # name must itself be a native-code backend before trusting that fallback.
     val requested = backend.trim().lower()
@@ -61,15 +65,20 @@ fn xray_policy_resolve(enabled: bool, compile_mode_text: text, backend: text, re
 fn xray_option_identity_suffix(enabled: bool) -> text:
     if enabled: "|xray=on" else: ""
 
+# `rt_` also excludes user functions named rt_*: that prefix is the runtime ABI.
 val XRAY_NEVER_NAME_PREFIXES: [text] = ["__spl_", "__xray_", "__simple_xray", "simple_xray_", "rt_"]
+# Matched after stripping the `lib.` (module_logical_name_from_path of
+# src/lib/...) or `std.` (import spelling) root.
 val XRAY_NEVER_MODULE_PREFIXES: [text] = [
-    "std.common.trace.", "common.trace.",
-    "std.nogc_sync_mut.trace.", "nogc_sync_mut.trace.",
-    "std.nogc_sync_mut.allocator", "nogc_sync_mut.allocator",
-    "std.nogc_async_mut.allocator", "nogc_async_mut.allocator",
-    "std.gc_sync_mut.allocator", "gc_sync_mut.allocator",
-    "std.gc_async_mut.allocator", "gc_async_mut.allocator"
+    "common.trace.", "nogc_sync_mut.trace.",
+    "nogc_sync_mut.allocator", "nogc_async_mut.allocator",
+    "gc_sync_mut.allocator", "gc_async_mut.allocator"
 ]
+
+fn xray_module_library_path(module_name: text) -> text:
+    if module_name.starts_with("lib.") or module_name.starts_with("std."):
+        return module_name.substring(4)
+    module_name
 
 # Compiler-owned never-list; not user-overridable. Runtime hooks, allocator,
 # the xray handler itself, naked/interrupt-style (custom section) functions,
@@ -82,8 +91,9 @@ fn xray_function_never_instrumented(module_name: text, func: MirFunction) -> boo
     for prefix in XRAY_NEVER_NAME_PREFIXES:
         if func.name.starts_with(prefix):
             return true
+    val library_path = xray_module_library_path(module_name)
     for prefix in XRAY_NEVER_MODULE_PREFIXES:
-        if module_name.starts_with(prefix):
+        if library_path.starts_with(prefix):
             return true
     false
 
