@@ -48,3 +48,5 @@ and walker specs executed GREEN on the Windows seed runner; the route spec was
 already 3/6 there (pre-existing, not touched); design/feature
 expert updated. Next: retain walker results per module in CompileContext
 (observation only), then E2 named rule.
+Follow-up same day: walker results retained per module in
+`CompileContext.api_exposure` (observation only, cleared with the facts).
