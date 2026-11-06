@@ -12,3 +12,6 @@
   single-hop `self.parts.push` (5.7 s -> 0.37 s per 20k ops).
 - **Repro:** `test/01_unit/compiler/interpreter/nested_class_field_array_mutation_spec.spl`
   (correctness); time a 20k-push loop through two class hops.
+
+## 2026-11-06 round 8: FIXED
+`try_place_mutation_in_place` now resolves a pure field chain whose holders are all `ClassInstance`s and mutates the array under the innermost instance lock (`class_hop_leaf`). 20k pushes through three class hops: 2923 ms -> 288 ms. Spec: test/01_unit/compiler/interpreter/nested_class_hop_array_push_spec.spl.

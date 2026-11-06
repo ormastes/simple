@@ -78,3 +78,6 @@ is lost and subsequent `tree.create_layer` returns colliding layer ids
 
 `examples/11_advanced/game3d_hud/main.spl` uses LayerTree only for ids +
 `z_paint_order`, and composites via a direct SoftwareBackend blit.
+
+## 2026-11-06 round 8: FIXED (interpreter lane)
+`iter_to_vec` / `get_iterator_values` now iterate a `List` class value over its `items` payload. Spec: test/01_unit/compiler/interpreter/for_over_list_class_spec.spl (RED on seed, GREEN after). The seed JIT lane (silent empty iteration) is NOT covered by this change.
