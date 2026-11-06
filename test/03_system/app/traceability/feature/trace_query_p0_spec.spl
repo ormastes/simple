@@ -1,12 +1,13 @@
 """Inspect registered trace facts through the real compiled CLI.
 
-Requires a source-matched CLI supplied by the external harness, either as
-SIMPLE_TRACE_QUERY_TEST_BINARY (an admitted Stage4 CLI; the spec runs
-`<binary> trace <args>`) or as SIMPLE_TRACE_QUERY_TEST_COMMAND (a whitespace
-separated command prefix that already routes to the trace query entry, e.g.
-`<seed> run src/app/traceability/query_main.spl`; the spec appends only
-`<args>`). Run from the repository root. Missing runtime fails explicitly; no
-fallback compiler or fake process result is used.
+Runs the query through a real process. By default that is the binary running
+this spec (SIMPLE_BINARY, exported by the runner) executing
+`run src/app/traceability/query_main.spl <args>` -- source-matched by
+construction. Overrides: SIMPLE_TRACE_QUERY_TEST_BINARY (an admitted Stage4
+CLI; the spec runs `<binary> trace <args>`) or SIMPLE_TRACE_QUERY_TEST_COMMAND
+(a whitespace separated command prefix that already routes to the query entry;
+the spec appends only `<args>`). Run from the repository root. No runtime at
+all fails explicitly; no fallback compiler or fake process result is used.
 The index scenario requires an externally prepared alternate GIT_INDEX_FILE
 under build/test-artifacts/trace_query_p0/ with a staged tree differing from HEAD.
 Its canonical declaration feature title must be "P0 staged feature title";
@@ -33,10 +34,16 @@ fn actual_query_cli(args: [text]) -> (text, text, i32):
             if part != "": parts.push(part)
         return process_run_timeout(parts[0], parts.slice(1, parts.len()) + args, 30000)
     val binary = env_get("SIMPLE_TRACE_QUERY_TEST_BINARY")
-    expect(binary != "").to_be(true)
-    if binary == "":
-        return ("", "admitted source-matched Stage4 CLI is required", 2)
-    process_run_timeout(binary, ["trace"] + args, 30000)
+    if binary != "":
+        return process_run_timeout(binary, ["trace"] + args, 30000)
+    # Default: the binary running this spec (exported as SIMPLE_BINARY by the
+    # runner) executes the query entry from source -- source-matched by
+    # construction. No fallback compiler or fake process result exists.
+    val runner = env_get("SIMPLE_BINARY")
+    expect(runner != "").to_be(true)
+    if runner == "":
+        return ("", "SIMPLE_BINARY, SIMPLE_TRACE_QUERY_TEST_COMMAND or SIMPLE_TRACE_QUERY_TEST_BINARY is required", 2)
+    process_run_timeout(runner, ["run", "src/app/traceability/query_main.spl"] + args, 30000)
 
 fn query_document(output: text) -> Dict<text, SdnValue>:
     val parsed = parse_with_spans_and_issues(output).unwrap()
