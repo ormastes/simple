@@ -1,6 +1,13 @@
 # HIR codec: decoding a module that declares a class returns None on the seed
 
-- Status: OPEN (not root-caused)
+- Status: NOT REPRODUCIBLE (2026-11-06) — guarded by regression cases
+  - `hir_codec_dict_decode_roundtrip_spec.spl` now round-trips a class-only and a
+    class-with-method module (decode is `Some`, re-encode is byte-identical).
+    5/5 pass on the deployed seed (`release100-7a0e6fe516f-20261031`) and on the
+    2026-11-04 seed, with both the current codec and the codec as of
+    `cf66e36cecc` (the last codec revision before this report). The original
+    None was therefore not a codec defect; no failing build is available to
+    prove the new cases red, which is stated rather than claimed.
 - Component: `src/compiler/20.hir/generated/hir_codec.spl` (`hir_module_decode`), Rust seed interpreter
 - Found while converting `hir_codec_dict_decode_not_nil_spec` to a behaviour spec (PR #5333 review, finding 4)
 
