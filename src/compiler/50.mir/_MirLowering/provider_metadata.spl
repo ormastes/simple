@@ -536,6 +536,42 @@ impl MirLowering:
                     return Some(HirEnumPayload.Struct(relocated_fields))
         nil
 
+    me remember_provider_default_constants_v1(provider_name: text, constants: [HirConst]):
+        """Record a provider's immutable literal constants so a provider
+        field default naming one relocates to its value (no foreign SymbolId,
+        no storage binding). Called before that provider's structs/classes
+        are registered."""
+        val owner = mir_layout_canonical_module_name(provider_name)
+        if owner == "" or self.provider_default_literal_owners_v1.has(owner): return
+        self.provider_default_literal_owners_v1[owner] = true
+        for raw_constant in constants:
+            val constant: HirConst = raw_constant
+            if constant.is_mutable: continue
+            var literal = false
+            match constant.value.kind:
+                case HirExprKind.IntLit(_, _) | HirExprKind.FloatLit(_, _) | HirExprKind.FloatLexeme(_, _) | HirExprKind.BoolLit(_) | HirExprKind.CharLit(_):
+                    literal = true
+                case HirExprKind.StringLit(_, interpolations):
+                    literal = interpolations == nil
+                # `val NEG: i32 = -1` / `~0`: a signed or inverted numeric
+                # literal folds like the bare literal (same admission as
+                # runtime_module_initializer_supported's Unary arm).
+                case HirExprKind.Unary(_, unary_operand):
+                    val unary_literal: HirExpr = unary_operand
+                    match unary_literal.kind:
+                        case HirExprKind.IntLit(_, _) | HirExprKind.FloatLit(_, _) | HirExprKind.FloatLexeme(_, _):
+                            literal = true
+                        case _: ()
+                case _: ()
+            if literal:
+                self.provider_default_literal_consts_v1["{owner}::{constant.name}"] = constant.value
+
+    me remember_provider_module_default_constants_v1(provider_module: HirModule):
+        # Check the per-owner memo before materializing constants.values().
+        val owner = mir_layout_canonical_module_name(provider_module.name)
+        if owner == "" or self.provider_default_literal_owners_v1.has(owner): return
+        self.remember_provider_default_constants_v1(provider_module.name, provider_module.constants.values())
+
     me relocate_provider_default(expr: HirExpr, provider: SymbolTable, links: Dict<i64, text>) -> HirExpr:
         # Same nested-access annotation as relocate_provider_type.
         val expr_kind: HirExprKind = expr.kind
@@ -588,6 +624,7 @@ impl MirLowering:
                     var class_identity = ""
                     var source_is_class = false
                     var source_is_struct = false
+                    var source_const_key = ""
                     if val present_source = optional_source:
                         val source: HirSymbol = present_source
                         source_name = source.name
@@ -596,7 +633,19 @@ impl MirLowering:
                             class_identity = mir_class_identity_raw(provider, id.id)
                         elif source.kind == SymbolKind.Struct:
                             source_is_struct = true
-                    if source_is_class:
+                        elif source.kind == SymbolKind.Const:
+                            source_const_key = "{mir_layout_canonical_module_name(source.defining_module ?? "")}::{source.name}"
+                    if source_const_key != "":
+                        # `field: i32 = OWNER_LOCAL_WEB`: an immutable literal
+                        # provider constant is its value. Anything else has no
+                        # consumer storage binding here and stays Error, which
+                        # the omitted-field fill reports as fatal.
+                        if self.provider_default_literal_consts_v1.has(source_const_key):
+                            val literal: HirExpr = self.provider_default_literal_consts_v1[source_const_key]
+                            literal.kind
+                        else:
+                            HirExprKind.Error
+                    elif source_is_class:
                         val target = self.relocate_provider_type_symbol(id, provider)
                         HirExprKind.NamedVar(target, class_identity)
                     elif source_is_struct:
