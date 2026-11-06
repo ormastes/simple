@@ -53,3 +53,8 @@ Construct with `export_attr: nil` / `driver_manifest_attr: nil`, then
 `if val p = opt: obj.field = p` (tagged
 `@workaround bug=optional_struct_stored_into_desugared_field_keeps_option_box_2026-10-25`).
 Regression spec: `test/01_unit/compiler/50.mir/optional_struct_into_desugared_field_spec.spl`.
+
+
+## Progress 2026-11-06 (hir2 P2 lane)
+
+Re-checked against origin/release/1.0.0: no fix commit for this bug id was found (git log --grep). The defect only shows up in code built natively by the Stage 2/Phase 3 producer. The interpreter-lane HIR specs cannot reproduce it, so a parse_full_frontend + HirLowering spec cannot prove the bug red and then green. No compiler change was made, the workaround tags stay, and the bug stays open until a rebuilt stage3 producer can run the repro.
