@@ -245,3 +245,48 @@ enough to initialize and places the exercised ordinary path beyond that limit.
 The bounded lane has only syntax evidence at this revision. A fresh one-case
 runtime run must retain the success receipt, elapsed and process-tree RSS
 measurements, and post-run fixture cleanup before this row can be closed.
+
+## 2026-11-07 explicit preflight budget lost at the environment boundary
+
+This is a separate routing regression; historical alias-admission findings
+above remain unchanged. The bug ledger reported the historical ID closed when
+queried for ownership, so this addendum does not claim to reopen or close it.
+
+Frozen source `6e03930143983a5c9861321f67aff300b07f16ed` on the Windows
+node-attribute bootstrap lane failed attempt 10 at preflight Git-state binding.
+The retained direct consumer probe exited 124 after approximately 331 seconds
+with the normal 300-second consumer budget and 30-second outer grace. A
+separate direct probe with the existing maximum 1,200,000 ms budget completed
+at 2026-11-06 22:17:17 UTC after approximately 14 minutes 43 seconds. These
+parent-owned observations qualify only the direct consumer, not a compiler or
+full bootstrap. The consumer's watchdog can exit 124 without a message, while
+the shell wrapper maps failure to 1, explaining the generic bind diagnostic.
+
+`run_rust_authority_env` forwarded the materialization receipt through `env -i`
+but omitted `BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS`. Consequently, an explicit
+caller budget could reach parent snapshots while preflight silently returned
+to its lower default. The narrow repair forwards a nonempty value only for
+Windows `bootstrap-preflight`; other Rust commands and non-Windows hosts do
+not inherit it. Existing native numeric validation, the 1,200,000 ms ceiling,
+watchdogs, source comparisons and receipt validation are unchanged.
+
+Executed verification: `scripts/bootstrap/tests/preflight-git-budget-env-test.shs`
+passed four cases using the actual extracted production function and real
+`env -i` child shells: Windows explicit value preserved, unset value absent,
+non-preflight command isolated, and Linux isolated. Bootstrap shell syntax and
+focused whitespace checks also passed. No compiler build or canonical
+preflight replay was performed by this patch's author.
+
+Applying this repair changes bootstrap script/source identity. Any restarted
+frozen build must bind its new revision, revalidate or regenerate the
+HEAD-bound materialized-link receipt, and recompute normal source/preflight
+receipts. A successful direct diagnostic must not be copied into canonical
+admission evidence; compatible caches remain subject to their existing keys.
+
+Release-base integration used `d21afc1bf024c08f476b744f8a8c2a606c501205`,
+whose environment owner additionally forwards MinGW encoded Rust flags. The
+isolated fixture therefore declares `PLATFORM_ABI=msvc` for its Windows cases
+and adds a GNU case proving both the timeout and existing
+`CARGO_ENCODED_RUSTFLAGS` survive together. All five cases passed against the
+current-base production function plus the timeout insertion in a tiny scratch
+tree; no compiler or full-checkout build was run for that integration.

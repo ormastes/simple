@@ -3601,6 +3601,12 @@ run_rust_authority_env() {
       [ -n "${SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT:-}" ]; then
     set -- "SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT=$SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT" "$@"
   fi
+  # Preserve an explicit bounded consumer budget through preflight's env -i.
+  # The native consumer still validates the value and enforces its ceiling.
+  if [ "$rust_env_log" = bootstrap-preflight ] && [ "${os}" = windows ] &&
+      [ -n "${BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS:-}" ]; then
+    set -- "BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS=$BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS" "$@"
+  fi
   if [ "${os}" != windows ] && [ "${CXX+x}" = x ]; then set -- "CXX=$CXX" "$@"; fi
   if [ "${AR+x}" = x ]; then set -- "AR=$AR" "$@"; fi
   if [ "${LD+x}" = x ]; then set -- "LD=$LD" "$@"; fi
