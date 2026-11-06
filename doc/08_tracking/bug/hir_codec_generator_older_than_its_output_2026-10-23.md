@@ -1,9 +1,16 @@
 # `codec_gen.spl` is older than its own generated output, so the HIR codec cannot be regenerated
 
 - **Date:** 2026-10-23
-- **Status:** OPEN — blocks the principled fix for
-  `stage2_sanity_module_path_naming_probe_segv_2026_10_22`, and therefore Stage 2
-  admission and any full bootstrap on `release/1.0.0`
+- **Status:** FIXED on `release/1.0.0` (verified 2026-11-06). All three blockers
+  below are resolved: `bin/simple run src/app/compiler_schema/main.spl codec`
+  generates `over 97 declaration(s)` and the output is byte-identical (`cmp`) to
+  the committed `src/compiler/20.hir/generated/hir_codec.spl` at `e4c8830efc7`.
+  Pinned by `test/01_unit/app/compiler_schema/hir_required_function_codec_generation_spec.spl`
+  (`expect(generated).to_equal(file_read(checked_path))`). Note: on the
+  deployed seed `release100-7a0e6fe516f-20261031` the command still fails with
+  "`HirModule` is declared 0 times" — that seed predates `89ffd34d223` (if-val
+  narrowing), so every JIT-lane `read_file_text` returns "" (see
+  `text_bytes_jit_concat_spec.spl`); a seed built from current source runs it.
 - **Files:** `src/app/compiler_schema/codec_gen.spl` (the generator),
   `src/compiler/20.hir/generated/hir_codec.spl` (its output, 8,807 lines)
 
