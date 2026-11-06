@@ -1,0 +1,53 @@
+# Parent-pinned launch witness protocol. Child fields are claims, not self-image
+# attestation. Only the parent retaining the actual native launch lease may
+# admit them after validating the pin, complete stdin, terminal receipt and IPC.
+use std.common.diagnostics.source_analysis_v1.{source_analysis_executable_digest_valid_v1}
+use std.common.diagnostics.source_analysis_wire_v1.{source_analysis_wire_parse_v1, source_analysis_wire_text_v1}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.binary_inspect.{byte_to_hex}
+
+pub fn source_analysis_pin_digest_hex_v1(digest: [u8]) -> Result<text, text>:
+    if digest.len() != 32: return Err("launch_pin_digest_size")
+    var parts: [text] = []
+    for byte in digest: parts.push(byte_to_hex(byte as i64))
+    Ok(parts.join(""))
+
+pub fn source_analysis_launch_response_v1(response: text, control: text) -> Result<text, text>:
+    val claim = source_analysis_wire_parse_v1(control, 16384)?
+    if source_analysis_wire_text_v1(claim, "schema")? != "source-analysis-ipc-v2": return Err("launch_control_schema")
+    val digest = source_analysis_wire_text_v1(claim, "executable_digest")?
+    if not source_analysis_executable_digest_valid_v1(digest): return Err("launch_executable_digest")
+    val run_id = source_analysis_wire_text_v1(claim, "run_id")?
+    if run_id == "" or run_id.byte_len() > 4096: return Err("launch_run_identity")
+    val value = source_analysis_wire_parse_v1(response, 4194304)?
+    var fields = match value:
+        case SdnValue.Dict(items): items
+        case _: return Err("launch_response_not_object")
+    fields["parent_validation_required"] = SdnValue.Bool(true)
+    fields["launch"] = SdnValue.Dict({"executable_digest": SdnValue.String(digest),
+        "run_id": SdnValue.String(run_id), "control_digest": SdnValue.String(sha256_text(control))})
+    val wire = sdn_encode_canonical(SdnValue.Dict(fields))
+    if wire.byte_len() > 4194304: return Err("launch_response_size")
+    Ok(wire)
+
+pub fn source_analysis_launch_response_error_v1(response: text, control: text,
+        executable_digest: text, run_id: text) -> text:
+    if not source_analysis_executable_digest_valid_v1(executable_digest): return "parent_launch_digest_invalid"
+    val parsed = source_analysis_wire_parse_v1(response, 4194304)
+    if parsed.is_err(): return "launch_response_invalid_sdn"
+    val value = parsed.unwrap()
+    match value.get("parent_validation_required"):
+        case Some(SdnValue.Bool(true)): pass
+        case _: return "launch_response_missing_parent_validation_requirement"
+    val launch = value.get("launch") ?? SdnValue.Null
+    val returned_digest = source_analysis_wire_text_v1(launch, "executable_digest")
+    val returned_run = source_analysis_wire_text_v1(launch, "run_id")
+    val returned_control = source_analysis_wire_text_v1(launch, "control_digest")
+    if returned_digest.is_err() or returned_digest.unwrap() != executable_digest: return "launch_executable_mismatch"
+    if returned_run.is_err() or returned_run.unwrap() != run_id: return "launch_run_mismatch"
+    if returned_control.is_err() or returned_control.unwrap() != sha256_text(control): return "launch_control_mismatch"
+    ""
+
+export source_analysis_pin_digest_hex_v1, source_analysis_launch_response_v1, source_analysis_launch_response_error_v1

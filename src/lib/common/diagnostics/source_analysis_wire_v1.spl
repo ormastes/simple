@@ -31,6 +31,7 @@ pub fn source_analysis_wire_parse_v1(wire: text, max_bytes: i64) -> Result<SdnVa
         case Err(issue): Err("invalid snapshot SDN: " + issue.code)
 
 fn source_analysis_request_metadata_error_v1(request: SourceAnalysisRequestV1) -> text:
+    if not source_analysis_executable_digest_valid_v1(request.environment.executable_digest): return "invalid parent executable digest"
     for value in [request.run_id, request.workspace_root, request.workspace_identity,
             request.owner_id, request.entry_path, request.environment.compiler_identity,
             request.environment.config_digest]:
@@ -51,7 +52,7 @@ fn source_analysis_request_encoded_bound_v1(request: SourceAnalysisRequestV1) ->
     var bound = 4096
     for value in [request.run_id, request.workspace_root, request.workspace_identity,
             request.owner_id, request.entry_path, request.environment.compiler_identity,
-            request.environment.config_digest, request.environment.target]:
+            request.environment.config_digest, request.environment.executable_digest, request.environment.target]:
         bound = bound + value.byte_len() * 2 + 2
     for feature in request.environment.features: bound = bound + feature.byte_len() * 2 + 4
     for document in request.documents:
@@ -81,7 +82,7 @@ pub fn source_analysis_request_encode_v1(request: SourceAnalysisRequestV1) -> Re
             "source": SdnValue.String(document.source), "digest": SdnValue.String(document.digest)}))
     var features: [SdnValue] = []
     for feature in request.environment.features: features.push(SdnValue.String(feature))
-    val environment = SdnValue.Dict({"compiler_identity": SdnValue.String(request.environment.compiler_identity),
+    val environment = SdnValue.Dict({"executable_digest": SdnValue.String(request.environment.executable_digest), "compiler_identity": SdnValue.String(request.environment.compiler_identity),
         "target": SdnValue.String(request.environment.target), "features": SdnValue.Array(features),
         "config_digest": SdnValue.String(request.environment.config_digest)})
     val bounds = SdnValue.Dict({"max_dependency_files": SdnValue.Int(request.bounds.max_dependency_files),
@@ -139,6 +140,7 @@ pub fn source_analysis_request_decode_v1(wire: text) -> Result<SourceAnalysisReq
         lifetime_generation: source_analysis_wire_int_v1(value, "lifetime_generation")?,
         entry_path: source_analysis_wire_text_v1(value, "entry_path")?, documents: documents,
         environment: SourceAnalysisEnvironmentV1(
+            executable_digest: source_analysis_wire_text_v1(environment, "executable_digest")?,
             compiler_identity: source_analysis_wire_text_v1(environment, "compiler_identity")?,
             target: source_analysis_wire_text_v1(environment, "target")?, features: features,
             config_digest: source_analysis_wire_text_v1(environment, "config_digest")?),
@@ -168,11 +170,13 @@ pub fn source_analysis_environment_decode_v1(wire: text) -> Result<SourceAnalysi
         match feature:
             case SdnValue.String(item): features.push(item)
             case _: return Err("invalid environment feature")
+    val executable_digest = source_analysis_wire_text_v1(row, "executable_digest")?
+    if not source_analysis_executable_digest_valid_v1(executable_digest): return Err("invalid parent executable digest")
     val compiler_identity = source_analysis_wire_text_v1(row, "compiler_identity")?
     val config_digest = source_analysis_wire_text_v1(row, "config_digest")?
     if compiler_identity.byte_len() != 64 or config_digest.byte_len() != 64:
         return Err("invalid environment identity")
-    Ok(SourceAnalysisEnvironmentV1(compiler_identity: compiler_identity,
+    Ok(SourceAnalysisEnvironmentV1(executable_digest: executable_digest, compiler_identity: compiler_identity,
         target: source_analysis_wire_text_v1(row, "target")?, features: features, config_digest: config_digest))
 
 export source_analysis_environment_decode_v1

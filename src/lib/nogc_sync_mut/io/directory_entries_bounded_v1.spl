@@ -1,0 +1,80 @@
+# Complete bounded native snapshots. Entry metadata is a nofollow observation,
+# not a retained file identity; callers must use bounded nofollow content reads.
+# Ancestors are trusted; the native open rejects a symlink final directory.
+use std.nogc_sync_mut.fs.host_path.{host_path_native}
+
+pub struct BoundedDirectoryEntryV1:
+    name: text
+    kind: i64
+    size: i64
+
+@unsafe(reason: "bounded complete native directory snapshot; positive generation owner or explicit negative failure", capabilities: [ffi])
+extern fn rt_directory_list_bounded_v1(path: text, max_entries: i64, max_name_bytes: i64) -> i64
+@unsafe(reason: "nofollow path observation in an owned generation-checked snapshot", capabilities: [ffi])
+extern fn rt_directory_path_probe_v1(path: text) -> i64
+@unsafe(reason: "validates retained bounded listing generation before count access", capabilities: [ffi])
+extern fn rt_directory_list_count_v1(handle: i64) -> i64
+@unsafe(reason: "copies name under listing registry lock; invalid owner yields empty name", capabilities: [ffi])
+extern fn rt_directory_entry_name_v1(handle: i64, index: i64) -> text
+@unsafe(reason: "validates retained bounded listing generation before kind access", capabilities: [ffi])
+extern fn rt_directory_entry_kind_v1(handle: i64, index: i64) -> i64
+@unsafe(reason: "validates retained bounded listing generation before size access", capabilities: [ffi])
+extern fn rt_directory_entry_size_v1(handle: i64, index: i64) -> i64
+@unsafe(reason: "consumes exactly one generation-checked listing owner; stale release rejected", capabilities: [ffi])
+extern fn rt_directory_list_free_v1(handle: i64) -> i64
+
+pub fn directory_observation_error_v1(code: i64) -> text:
+    if code == -1: return "directory_invalid_argument_or_owner"
+    if code == -2: return "directory_entry_budget_exceeded"
+    if code == -3: return "directory_name_budget_exceeded"
+    if code == -4: return "directory_io_failed"
+    if code == -5: return "directory_bounded_unsupported"
+    if code == -6: return "directory_allocation_failed"
+    if code == -7: return "directory_nofollow_or_type_rejected"
+    if code == -8: return "directory_name_not_utf8"
+    if code == -9: return "directory_live_owner_budget_exceeded"
+    "directory_invalid_native_receipt"
+
+fn directory_copy_snapshot_v1(handle: i64, max_entries: i64,
+        max_name_bytes: i64, probe: bool) -> Result<[BoundedDirectoryEntryV1], text>:
+    if handle <= 0: return Err(directory_observation_error_v1(handle))
+    var entries: [BoundedDirectoryEntryV1] = []
+    var error = ""
+    var name_bytes = 0
+    val count = unsafe(capabilities: [ffi]): rt_directory_list_count_v1(handle)
+    if count < 0 or count > max_entries: error = "directory_invalid_native_receipt"
+    if error == "":
+        for index in 0..count:
+            val kind = unsafe(capabilities: [ffi]): rt_directory_entry_kind_v1(handle, index)
+            val size = unsafe(capabilities: [ffi]): rt_directory_entry_size_v1(handle, index)
+            val name = unsafe(capabilities: [ffi]): rt_directory_entry_name_v1(handle, index)
+            if kind < 0 or kind > 4 or size < 0:
+                error = "directory_invalid_native_receipt"
+                break
+            if not probe:
+                if kind == 0 or name == "" or name == "." or name == ".." or name.contains("/") or name.contains("\u0000"):
+                    error = "directory_invalid_native_receipt"
+                    break
+                if name.byte_len() + 1 > max_name_bytes - name_bytes:
+                    error = "directory_name_budget_exceeded"
+                    break
+                name_bytes = name_bytes + name.byte_len() + 1
+            entries.push(BoundedDirectoryEntryV1(name: name, kind: kind, size: size))
+    val closed = unsafe(capabilities: [ffi]): rt_directory_list_free_v1(handle)
+    if closed != 1: return Err("directory_owner_release_failed")
+    if error != "": return Err(error)
+    Ok(entries)
+
+pub fn directory_entries_bounded_v1(path: text, max_entries: i64,
+        max_name_bytes: i64) -> Result<[BoundedDirectoryEntryV1], text>:
+    if max_entries < 0 or max_entries > 65536 or max_name_bytes < 0 or max_name_bytes > 16777216:
+        return Err("directory_invalid_argument_or_owner")
+    val handle = unsafe(capabilities: [ffi]):
+        rt_directory_list_bounded_v1(host_path_native(path), max_entries, max_name_bytes)
+    directory_copy_snapshot_v1(handle, max_entries, max_name_bytes, false)
+
+pub fn directory_path_probe_v1(path: text) -> Result<BoundedDirectoryEntryV1, text>:
+    val handle = unsafe(capabilities: [ffi]): rt_directory_path_probe_v1(host_path_native(path))
+    val entries = directory_copy_snapshot_v1(handle, 1, 0, true)?
+    if entries.len() != 1: return Err("directory_invalid_native_receipt")
+    Ok(entries[0])

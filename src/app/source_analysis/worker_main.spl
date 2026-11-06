@@ -4,7 +4,8 @@
 use std.nogc_sync_mut.io.pipe.{Stdin}
 use std.nogc_sync_mut.io.external_text_io.{io_text_decode}
 use std.common.encoding.external_text.{utf8_format}
-use std.common.diagnostics.source_analysis_wire_v1.{source_analysis_request_decode_v1}
+use std.common.diagnostics.source_analysis_wire_v1.{source_analysis_request_decode_v1, source_analysis_wire_parse_v1, source_analysis_wire_text_v1}
+use std.common.diagnostics.source_analysis_launch_v1.{source_analysis_launch_response_v1}
 use compiler.driver.driver_source_analysis_v1.{check_snapshot_set_v1, source_analysis_current_environment_v1}
 use compiler.driver.driver_source_analysis_wire_v1.{source_analysis_result_sdn_v1, source_analysis_environment_sdn_v1}
 use std.nogc_sync_mut.lsp.lsp_analysis_worker_artifact.{source_analysis_artifact_open_v1}
@@ -27,14 +28,22 @@ pub fn source_analysis_worker_read_v1() -> Result<text, text>:
         case Ok(value): Ok(value)
         case Err(_): Err("snapshot stdin is not UTF-8")
 
-fn source_analysis_worker_response_v1(args: [text], request: text) -> Result<text, text>:
+fn source_analysis_worker_response_v1(args: [text], request: text, control: text) -> Result<text, text>:
+    val launch = source_analysis_wire_parse_v1(control, 16384)?
+    val executable_digest = source_analysis_wire_text_v1(launch, "executable_digest")?
+    val run_id = source_analysis_wire_text_v1(launch, "run_id")?
     if args.len() == 2 and args[0] == "__source-analysis-environment-v1":
+        if run_id != "environment": return Err("environment_launch_run_mismatch")
         if request != "": return Err("environment_request_must_be_empty")
-        val environment = source_analysis_current_environment_v1(args[1])?
-        return source_analysis_environment_sdn_v1(environment)
+        val environment = source_analysis_current_environment_v1(args[1], executable_digest)?
+        val response = source_analysis_environment_sdn_v1(environment)?
+        return source_analysis_launch_response_v1(response, control)
     val decoded = source_analysis_request_decode_v1(request)?
-    val result = check_snapshot_set_v1(decoded)
-    source_analysis_result_sdn_v1(result)
+    if decoded.run_id != run_id or decoded.environment.executable_digest != executable_digest:
+        return Err("analysis_launch_claim_mismatch")
+    val result = check_snapshot_set_v1(decoded, executable_digest)
+    val response = source_analysis_result_sdn_v1(result)?
+    source_analysis_launch_response_v1(response, control)
 
 pub fn run_source_analysis_worker_v1(args: [text]) -> i64:
     val environment_mode = args.len() == 2 and args[0] == "__source-analysis-environment-v1"
@@ -49,7 +58,7 @@ pub fn run_source_analysis_worker_v1(args: [text]) -> i64:
     if request.is_err():
         val closed = artifact.close_pins()
         return 2
-    val response = source_analysis_worker_response_v1(args, request.unwrap())
+    val response = source_analysis_worker_response_v1(args, request.unwrap(), artifact.control)
     if response.is_err():
         val closed = artifact.close_pins()
         return 3

@@ -1,0 +1,78 @@
+# NOT_RUN. Controlled wire tests below do not prove native execution or loaded
+# image identity. The final POSIX case exercises actual pin observations only;
+# complete launch/stdin/terminal/response proof remains a native integration gate.
+use std.spec
+use std.spec.step
+use std.common.diagnostics.source_analysis_v1.*
+use std.common.diagnostics.source_analysis_launch_v1.*
+use std.common.diagnostics.source_analysis_wire_v1.{source_analysis_environment_decode_v1}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.lsp.lsp_analysis_worker_artifact.{source_analysis_artifact_open_v1}
+use std.nogc_sync_mut.io.process_ops.{OwnedExecutablePin}
+use std.nogc_sync_mut.io_runtime.{env_get_opt, env_set_process, env_remove_process}
+
+fn launch_control_fixture(digest: text, run_id: text, nonce: text) -> text:
+    sdn_encode_canonical(SdnValue.Dict({"schema": SdnValue.String("source-analysis-ipc-v2"),
+        "executable_digest": SdnValue.String(digest), "run_id": SdnValue.String(run_id),
+        "nonce": SdnValue.String(nonce)}))
+
+describe "Parent launch provenance wire contract":
+    it "encodes the native pin digest bytes directly without hashing them again":
+        step("Use a controlled raw digest with a known hexadecimal representation")
+        var digest: [u8] = []
+        for index in 0..32: digest.push(index as u8)
+        expect(source_analysis_pin_digest_hex_v1(digest).unwrap()).to_equal(
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+        digest.pop()
+        expect(source_analysis_pin_digest_hex_v1(digest).is_err()).to_equal(true)
+
+    it "rejects other executable, run or private-control claims despite valid response syntax":
+        step("Bind both handshake and analysis-shaped responses to the parent's controlled launch facts")
+        val actual = sha256_text("controlled executable B")
+        val unrelated = sha256_text("controlled executable A")
+        for schema in ["source-analysis-environment-v1", "source-analysis-response-v1"]:
+            val control = launch_control_fixture(actual, "run-1", "nonce-1")
+            val response = sdn_encode_canonical(SdnValue.Dict({"schema": SdnValue.String(schema)}))
+            val wire = source_analysis_launch_response_v1(response, control).unwrap()
+            expect(source_analysis_launch_response_error_v1(wire, control, actual, "run-1")).to_equal("")
+            expect(source_analysis_launch_response_error_v1(wire, control, unrelated, "run-1")).to_equal("launch_executable_mismatch")
+            expect(source_analysis_launch_response_error_v1(wire, control, actual, "run-2")).to_equal("launch_run_mismatch")
+            val replay_control = launch_control_fixture(actual, "run-1", "nonce-2")
+            expect(source_analysis_launch_response_error_v1(wire, replay_control, actual, "run-1")).to_equal("launch_control_mismatch")
+            expect(source_analysis_launch_response_error_v1(response, control, actual, "run-1")).to_equal("launch_response_missing_parent_validation_requirement")
+
+    it "binds executable digest into semantic environment identity and rejects legacy omission":
+        step("Keep compiler/configuration fields fixed while the launch pin changes")
+        var environment = SourceAnalysisEnvironmentV1(executable_digest: sha256_text("pin one"),
+            compiler_identity: sha256_text("compiler"), target: "", features: [], config_digest: sha256_text("config"))
+        val before = source_analysis_environment_digest_v1(environment)
+        environment.executable_digest = sha256_text("pin two")
+        expect(source_analysis_environment_digest_v1(environment) == before).to_equal(false)
+        val empty: [SdnValue] = []
+        val omitted = sdn_encode_canonical(SdnValue.Dict({"schema": SdnValue.String("source-analysis-environment-v1"),
+            "environment": SdnValue.Dict({"compiler_identity": SdnValue.String(environment.compiler_identity),
+                "target": SdnValue.String(""), "features": SdnValue.Array(empty), "config_digest": SdnValue.String(environment.config_digest)})}))
+        expect(source_analysis_environment_decode_v1(omitted).is_err()).to_equal(true)
+        expect(source_analysis_artifact_open_v1("{schema: source-analysis-ipc-v1}").is_err()).to_equal(true)
+
+    it "uses an actual selected POSIX executable pin even when SIMPLE_BINARY names another image":
+        step("Observe real /bin/true and /bin/false pins; this is not worker execution certification")
+        var first = OwnedExecutablePin.pin("/bin/true").unwrap()
+        var selected = OwnedExecutablePin.pin("/bin/false").unwrap()
+        val first_digest = source_analysis_pin_digest_hex_v1(first.digest().unwrap()).unwrap()
+        val selected_digest = source_analysis_pin_digest_hex_v1(selected.digest().unwrap()).unwrap()
+        val old = env_get_opt("SIMPLE_BINARY")
+        val changed = env_set_process("SIMPLE_BINARY", "/bin/true")
+        val selected_again = source_analysis_pin_digest_hex_v1(selected.digest().unwrap()).unwrap()
+        val restored = if val value = old:
+            env_set_process("SIMPLE_BINARY", value)
+        else:
+            env_remove_process("SIMPLE_BINARY")
+        val first_closed = first.close()
+        val selected_closed = selected.close()
+        expect(changed and restored).to_equal(true)
+        expect(first_closed.unwrap() and selected_closed.unwrap()).to_equal(true)
+        expect(first_digest == selected_digest).to_equal(false)
+        expect(selected_again).to_equal(selected_digest)

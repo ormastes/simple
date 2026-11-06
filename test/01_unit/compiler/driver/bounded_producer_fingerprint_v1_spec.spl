@@ -1,0 +1,87 @@
+# Native bounded directory provider required. Source obligations NOT_RUN.
+use std.spec.*
+use app.io.mod.{cwd, secure_temp_dir, dir_remove_all, dir_create_all, process_run}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use compiler.driver.cache.bounded_producer_fingerprint_v1.*
+use compiler.driver.driver_build.incremental.{native_build_spl_tree_fingerprint}
+
+fn producer_test_budget_v1() -> ProducerFingerprintBudgetV1:
+    producer_fingerprint_budget_v1(ProducerFingerprintLimitsV1()).unwrap()
+
+describe "bounded current producer fingerprint":
+    it "preserves canonical sorted breadth-first manifest identity for regular trees":
+        val root = secure_temp_dir(cwd(), "producer-regular").unwrap()
+        val created = dir_create_all(root + "/nested")
+        val write_z = file_write(root + "/z.spl", "fn z(): 7\n")
+        val write_a = file_write(root + "/a.spl", "fn a(): 1\n")
+        val write_child = file_write(root + "/nested/child.spl", "fn child(): 3\n")
+        val legacy = native_build_spl_tree_fingerprint(root)
+        val bounded = producer_tree_fingerprint_bounded_v1(root, producer_test_budget_v1())
+        val removed = dir_remove_all(root)
+        expect(created and write_z and write_a and write_child).to_equal(true)
+        expect(bounded.is_ok()).to_equal(true)
+        expect(bounded.unwrap()).to_equal(legacy)
+
+    it "rejects a symlink cycle without following it":
+        val root = secure_temp_dir(cwd(), "producer-cycle").unwrap()
+        val (out, err, code) = process_run("ln", ["-s", ".", root + "/self"])
+        val observed = producer_tree_fingerprint_bounded_v1(root, producer_test_budget_v1())
+        val removed = dir_remove_all(root)
+        expect(code).to_equal(0)
+        expect(observed.is_err()).to_equal(true)
+        expect(observed.unwrap_err()).to_equal("producer-symlink-unsupported")
+
+    it "refuses file bytes before hashing when per-file admission is exhausted":
+        val root = secure_temp_dir(cwd(), "producer-bytes").unwrap()
+        val written = file_write(root + "/large.spl", "0123456789")
+        var limits = ProducerFingerprintLimitsV1()
+        limits.max_file_bytes = 9
+        val budget = producer_fingerprint_budget_v1(limits).unwrap()
+        val observed = producer_tree_fingerprint_bounded_v1(root, budget)
+        val removed = dir_remove_all(root)
+        expect(written).to_equal(true)
+        expect(observed.is_err()).to_equal(true)
+        expect(observed.unwrap_err()).to_equal("producer-byte-limit")
+        expect(budget.source_bytes).to_equal(0)
+        expect(budget.files).to_equal(0)
+
+    it "bounds depth and total admitted listing entries":
+        val root = secure_temp_dir(cwd(), "producer-depth").unwrap()
+        val created = dir_create_all(root + "/child")
+        var limits = ProducerFingerprintLimitsV1()
+        limits.max_depth = 0
+        val depth = producer_tree_fingerprint_bounded_v1(root, producer_fingerprint_budget_v1(limits).unwrap())
+        val wrote_a = file_write(root + "/a.spl", "a")
+        val wrote_b = file_write(root + "/b.spl", "b")
+        limits = ProducerFingerprintLimitsV1()
+        limits.max_entries = 1
+        val entries = producer_tree_fingerprint_bounded_v1(root, producer_fingerprint_budget_v1(limits).unwrap())
+        val removed = dir_remove_all(root)
+        expect(created and wrote_a and wrote_b).to_equal(true)
+        expect(depth.unwrap_err()).to_equal("producer-depth-limit")
+        expect(entries.is_err()).to_equal(true)
+
+    it "observes equal-length source mutations in a fresh bounded owner":
+        val root = secure_temp_dir(cwd(), "producer-mutation").unwrap()
+        val before_write = file_write(root + "/value.spl", "fn value(): 1\n")
+        val before = producer_tree_fingerprint_bounded_v1(root, producer_test_budget_v1())
+        val after_write = file_write(root + "/value.spl", "fn value(): 2\n")
+        val after = producer_tree_fingerprint_bounded_v1(root, producer_test_budget_v1())
+        val removed = dir_remove_all(root)
+        expect(before_write and after_write).to_equal(true)
+        expect(before.is_ok() and after.is_ok()).to_equal(true)
+        expect(before.unwrap() == after.unwrap()).to_equal(false)
+
+    it "stops before the next file when shared file admission is exhausted":
+        val root = secure_temp_dir(cwd(), "producer-files").unwrap()
+        val wrote_a = file_write(root + "/a.spl", "a")
+        val wrote_b = file_write(root + "/b.spl", "b")
+        var limits = ProducerFingerprintLimitsV1()
+        limits.max_files = 1
+        val budget = producer_fingerprint_budget_v1(limits).unwrap()
+        val observed = producer_tree_fingerprint_bounded_v1(root, budget)
+        val removed = dir_remove_all(root)
+        expect(wrote_a and wrote_b).to_equal(true)
+        expect(observed.unwrap_err()).to_equal("producer-file-limit")
+        expect(budget.files).to_equal(1)
+        expect(budget.source_bytes).to_equal(1)

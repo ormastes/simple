@@ -4540,3 +4540,15 @@ fn errno_from_io_error(e: &std::io::Error) -> i64 {
         _ => 5, // EIO
     }
 }
+
+// The new bounded/nofollow snapshot is currently a native POSIX capability.
+// Never fall back to eager fs::read_dir or imply unsupported means empty EOF.
+pub fn rt_directory_bounded_unsupported_v1(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(-5))
+}
+pub fn rt_directory_bounded_invalid_owner_v1(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(-1))
+}
+pub fn rt_directory_bounded_invalid_name_v1(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::text(String::new()))
+}

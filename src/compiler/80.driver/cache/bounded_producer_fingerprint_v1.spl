@@ -1,0 +1,159 @@
+# Fresh authority only. Legacy build memoization remains in incremental.spl.
+# Canonical ordering and manifest bytes match the existing regular-tree owner.
+use std.nogc_sync_mut.io.directory_entries_bounded_v1.{BoundedDirectoryEntryV1, directory_entries_bounded_v1, directory_path_probe_v1}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded_bytes}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+
+struct ProducerFingerprintLimitsV1:
+    max_depth: i64 = 64
+    max_files: i64 = 20000
+    max_directories: i64 = 4096
+    max_entries: i64 = 50000
+    max_name_bytes: i64 = 16777216
+    max_manifest_bytes: i64 = 8388608
+    max_file_bytes: i64 = 67108864
+    max_total_bytes: i64 = 536870912
+
+class ProducerFingerprintBudgetV1:
+    limits: ProducerFingerprintLimitsV1
+    files: i64 = 0
+    directories: i64 = 0
+    entries: i64 = 0
+    name_bytes: i64 = 0
+    manifest_bytes: i64 = 0
+    source_bytes: i64 = 0
+
+    me file_bytes(path: text, requested_limit: i64 = 67108864) -> Result<[u8], text>:
+        if not producer_fingerprint_limits_valid_v1(self.limits): return Err("producer-limits-invalid")
+        if path.byte_len() > 4096 or self.files >= self.limits.max_files:
+            return Err("producer-file-limit")
+        val metadata = directory_path_probe_v1(path)?
+        if metadata.kind != 1: return Err("producer-file-not-regular")
+        val remaining = self.limits.max_total_bytes - self.source_bytes
+        val available = if self.limits.max_file_bytes < remaining: self.limits.max_file_bytes else: remaining
+        val bound = if requested_limit < available: requested_limit else: available
+        if bound < 0: return Err("producer-byte-limit")
+        if metadata.size < 0 or metadata.size > bound: return Err("producer-byte-limit")
+        self.files = self.files + 1
+        val bytes = file_read_regular_no_follow_bounded_bytes(path, bound)?
+        if bytes.len() != metadata.size: return Err("producer-file-size-changed")
+        self.source_bytes = self.source_bytes + bytes.len()
+        Ok(bytes)
+
+    me file_digest(path: text) -> Result<(text, i64), text>:
+        val bytes = self.file_bytes(path)?
+        val digest = sha256_u8_hex(bytes)
+        if digest.len() != 64: return Err("producer-hash-unavailable")
+        Ok((digest, bytes.len()))
+
+    me directory(path: text) -> Result<[BoundedDirectoryEntryV1], text>:
+        if not producer_fingerprint_limits_valid_v1(self.limits): return Err("producer-limits-invalid")
+        if path.byte_len() > 4096 or self.directories >= self.limits.max_directories:
+            return Err("producer-directory-limit")
+        val remaining_entries = self.limits.max_entries - self.entries
+        val remaining_names = self.limits.max_name_bytes - self.name_bytes
+        if remaining_entries <= 0 or remaining_names <= 0: return Err("producer-directory-work-limit")
+        val entry_bound = if remaining_entries < 4096: remaining_entries else: 4096
+        val name_bound = if remaining_names < 1048576: remaining_names else: 1048576
+        val entries = directory_entries_bounded_v1(path, entry_bound, name_bound)?
+        self.directories = self.directories + 1
+        self.entries = self.entries + entries.len()
+        for entry in entries:
+            self.name_bytes = self.name_bytes + entry.name.byte_len() + 1
+        if self.entries > self.limits.max_entries or self.name_bytes > self.limits.max_name_bytes:
+            return Err("producer-directory-owner-invalid")
+        Ok(entries)
+
+    me admit_manifest_row(path: text, size: i64, digest: text) -> Result<text, text>:
+        # Reserve conservative size/digest/separator overhead before concatenation.
+        val bound = path.byte_len() + 96
+        if bound > self.limits.max_manifest_bytes - self.manifest_bytes:
+            return Err("producer-manifest-limit")
+        self.manifest_bytes = self.manifest_bytes + bound
+        Ok("{path}|{size}|{digest}")
+
+fn producer_fingerprint_limits_valid_v1(limits: ProducerFingerprintLimitsV1) -> bool:
+    if (limits.max_depth < 0 or limits.max_depth > 64 or limits.max_files < 1 or limits.max_files > 20000 or
+            limits.max_directories < 1 or limits.max_directories > 4096 or limits.max_entries < 1 or limits.max_entries > 50000 or
+            limits.max_name_bytes < 1 or limits.max_name_bytes > 16777216 or limits.max_manifest_bytes < 1 or limits.max_manifest_bytes > 8388608 or
+            limits.max_file_bytes < 0 or limits.max_file_bytes > 67108864 or limits.max_total_bytes < 0 or limits.max_total_bytes > 536870912):
+        return false
+    true
+
+pub fn producer_fingerprint_budget_v1(limits: ProducerFingerprintLimitsV1) -> Result<ProducerFingerprintBudgetV1, text>:
+    if not producer_fingerprint_limits_valid_v1(limits): return Err("producer-limits-invalid")
+    Ok(ProducerFingerprintBudgetV1(limits: limits))
+
+fn producer_entry_names_v1(entries: [BoundedDirectoryEntryV1]) -> Result<([text], Dict<text, i64>), text>:
+    var names: [text] = []
+    var kinds: Dict<text, i64> = {}
+    for entry in entries:
+        if (entry.name == "" or entry.name == "." or entry.name == ".." or entry.name.byte_len() > 4096 or
+                entry.name.contains("/") or entry.name.contains("\\") or entry.name.contains("\0") or kinds.contains_key(entry.name)):
+            return Err("producer-directory-entry-invalid")
+        if entry.kind < 1 or entry.kind > 4: return Err("producer-directory-kind-invalid")
+        if entry.kind == 3: return Err("producer-symlink-unsupported")
+        names.push(entry.name)
+        kinds[entry.name] = entry.kind
+    Ok((canonical_identity_sort_texts(names), kinds))
+
+pub fn producer_tree_fingerprint_bounded_v1(root: text, budget: ProducerFingerprintBudgetV1) -> Result<text, text>:
+    if not producer_fingerprint_limits_valid_v1(budget.limits): return Err("producer-limits-invalid")
+    if root.byte_len() > 4096: return Err("producer-root-limit")
+    val metadata = directory_path_probe_v1(root)?
+    if metadata.kind == 0: return Ok("")
+    if metadata.kind != 2: return Err("producer-tree-root-not-directory")
+    var queue: [(text, i64)] = [(root, 0)]
+    var rows: [text] = []
+    var index = 0
+    while index < queue.len():
+        val (directory, depth) = queue[index]
+        index = index + 1
+        if depth > budget.limits.max_depth: return Err("producer-depth-limit")
+        val entries = budget.directory(directory)?
+        val (names, kinds) = producer_entry_names_v1(entries)?
+        for name in names:
+            if directory.byte_len() + name.byte_len() + 1 > 4096: return Err("producer-path-limit")
+            val path = directory + "/" + name
+            val kind = kinds[name]
+            if kind == 2:
+                if depth >= budget.limits.max_depth: return Err("producer-depth-limit")
+                if queue.len() >= budget.limits.max_directories: return Err("producer-directory-limit")
+                queue.push((path, depth + 1))
+            elif name.ends_with(".spl"):
+                if kind != 1: return Err("producer-source-not-regular")
+                val (digest, size) = budget.file_digest(path)?
+                rows.push(budget.admit_manifest_row(path, size, digest)?)
+    val digest = sha256_text(rows.join("\n"))
+    Ok("sha256:{digest}n{rows.len()}")
+
+fn producer_runtime_artifact_v1(path: text) -> bool:
+    path.ends_with(".a") or path.ends_with(".o") or path.ends_with(".so") or
+        path.ends_with(".dylib") or path.ends_with(".dll") or path.ends_with(".lib")
+
+pub fn producer_runtime_fingerprint_bounded_v1(path: text, budget: ProducerFingerprintBudgetV1) -> Result<text, text>:
+    if not producer_fingerprint_limits_valid_v1(budget.limits): return Err("producer-limits-invalid")
+    if path == "": return Ok("embedded")
+    if path.byte_len() > 4096: return Err("producer-root-limit")
+    val metadata = directory_path_probe_v1(path)?
+    if metadata.kind == 1:
+        val (digest, _) = budget.file_digest(path)?
+        return Ok("file-sha256:" + digest)
+    if metadata.kind != 2: return Err("producer-runtime-not-file-or-directory")
+    val entries = budget.directory(path)?
+    val (names, kinds) = producer_entry_names_v1(entries)?
+    var rows: [text] = []
+    for name in names:
+        if producer_runtime_artifact_v1(name):
+            if kinds[name] == 2: continue
+            if kinds[name] != 1: return Err("producer-runtime-not-regular")
+            if path.byte_len() + name.byte_len() + 1 > 4096: return Err("producer-path-limit")
+            val (digest, size) = budget.file_digest(path + "/" + name)?
+            rows.push(budget.admit_manifest_row(name, size, digest)?)
+    if rows.len() == 0: return Err("producer-runtime-empty")
+    val digest = sha256_text(rows.join("\n"))
+    Ok("dir-sha256:{digest}n{rows.len()}")
+
+export ProducerFingerprintLimitsV1, ProducerFingerprintBudgetV1, producer_fingerprint_budget_v1
+export producer_tree_fingerprint_bounded_v1, producer_runtime_fingerprint_bounded_v1
