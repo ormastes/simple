@@ -1,0 +1,58 @@
+# @req REQ-SSPEC-COMPILER
+# Bug nul_literal_double_box_constructor_2026_10_12 (reopened 2026-11-06).
+# The lexer must hand the parser a StringLit token whose text still holds the
+# authored NUL byte for every NUL spelling. On the self-hosted native compiler
+# "a\0b" lexed to "ab" (len 2) because char_from_code(0) returned "".
+# Probe sources are assembled with char_from_code so this file contains no
+# escape that could be mis-lexed while reading the spec itself.
+use std.spec.step
+use compiler.frontend.core.lexer_struct.{CoreLexer, make_core_lexer, core_lexer_next_token, core_lexer_token_text}
+use std.string_core.{char_from_code}
+
+describe "Lexer NUL escape token bytes":
+    fn bs() -> text:
+        return char_from_code(92)
+
+    fn q() -> text:
+        return char_from_code(34)
+
+    # Lex one string literal and return its first token text.
+    fn lex_first(body: text) -> text:
+        var lx: CoreLexer = make_core_lexer(q() + body + q())
+        val r = core_lexer_next_token(lx)
+        lx = r.0
+        return core_lexer_token_text(lx)
+
+    fn check_bytes(body: text, expected: [i64]):
+        val v = lex_first(body)
+        expect(v.len()).to_equal(expected.len())
+        var i = 0
+        while i < expected.len():
+            expect(v.byte_at(i) as i64).to_equal(expected[i])
+            i = i + 1
+
+    it "keeps backslash-0 in the middle":
+        step("a\0b")
+        check_bytes("a" + bs() + "0b", [97, 0, 98])
+
+    it "keeps backslash-x00":
+        step("a\x00b")
+        check_bytes("a" + bs() + "x00b", [97, 0, 98])
+
+    it "keeps a lone NUL":
+        step("\0")
+        check_bytes(bs() + "0", [0])
+
+    it "keeps a trailing and an interior NUL":
+        step("ab\0cd and ab\0")
+        check_bytes("ab" + bs() + "0cd", [97, 98, 0, 99, 100])
+        check_bytes("ab" + bs() + "0", [97, 98, 0])
+
+    it "keeps two NULs in one literal":
+        step("a\0\x00b")
+        check_bytes("a" + bs() + "0" + bs() + "x00b", [97, 0, 0, 98])
+
+    it "still decodes non-NUL escapes":
+        step("a\x01b a\x7fb")
+        check_bytes("a" + bs() + "x01b", [97, 1, 98])
+        check_bytes("a" + bs() + "x7fb", [97, 127, 98])

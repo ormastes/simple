@@ -12,7 +12,7 @@
 
 use compiler.core.tokens.{keyword_lookup, token_requires_rhs, token_can_end_expr}
 use compiler.core.lexer_chars.{is_digit, is_hex_digit, is_alpha, is_ident_char, is_space}
-use std.string_core.{char_code, char_from_code}
+use std.string_core.{char_code, char_from_code, bytes_to_text_counted}
 use std.nogc_sync_mut.io_runtime.{env_set, env_get_nullable}
 
 # Token text is immutable. Reuse common identifier/literal spellings before
@@ -962,6 +962,9 @@ impl CoreLexer:
         var parts: [text] = []
         var done: bool = false
         var has_nul: bool = false
+        # Indices in `parts` standing for one NUL byte (piece is "" on purpose:
+        # native char_from_code(0) is not trusted to return a 1-byte text).
+        var nul_slots: [i64] = []
 
         while true:
             if done:
@@ -1003,7 +1006,10 @@ impl CoreLexer:
                     if hn > 0:
                         if hv == 0:
                             has_nul = true
-                        parts.push(char_from_code(hv))
+                            nul_slots.push(parts.len())
+                            parts.push("")
+                        else:
+                            parts.push(char_from_code(hv))
                     else:
                         parts.push("\\")
                         parts.push("x")
@@ -1020,7 +1026,10 @@ impl CoreLexer:
                             self.advance()
                         if uv == 0:
                             has_nul = true
-                        parts.push(char_from_code(uv))
+                            nul_slots.push(parts.len())
+                            parts.push("")
+                        else:
+                            parts.push(char_from_code(uv))
                     else:
                         parts.push("\\")
                         parts.push("u")
@@ -1033,7 +1042,10 @@ impl CoreLexer:
                             self.advance()
                     if ov == 0:
                         has_nul = true
-                    parts.push(char_from_code(ov))
+                        nul_slots.push(parts.len())
+                        parts.push("")
+                    else:
+                        parts.push(char_from_code(ov))
                 else:
                     parts.push("\\")
                     parts.push(esc)
@@ -1106,7 +1118,26 @@ impl CoreLexer:
                     parts.push(self.advance())
             else:
                 parts.push(self.advance())
-        val result: text = parts.join("")
+        var result: text = parts.join("")
+        if has_nul:
+            # Rebuild from the full byte sequence in one counted constructor so
+            # interior NUL bytes survive (join drops the "" NUL slots).
+            var literal_bytes: [u8] = []
+            var slot_i: i64 = 0
+            var part_i: i64 = 0
+            while part_i < parts.len():
+                if slot_i < nul_slots.len() and nul_slots[slot_i] == part_i:
+                    literal_bytes.push(0 as u8)
+                    slot_i = slot_i + 1
+                else:
+                    val piece: text = parts[part_i]
+                    var byte_i: i64 = 0
+                    val piece_len: i64 = piece.len()
+                    while byte_i < piece_len:
+                        literal_bytes.push(piece.byte_at(byte_i) as u8)
+                        byte_i = byte_i + 1
+                part_i = part_i + 1
+            result = bytes_to_text_counted(literal_bytes)
 
         val string_suffix = self.scan_string_suffix()
         self.make_token(3, result, start_line, start_col)
