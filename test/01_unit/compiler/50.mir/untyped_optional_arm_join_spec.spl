@@ -54,11 +54,21 @@ fn lower_consumer_errors(body: text) -> text:
     mir_lowering.prescan_module_struct_names(prescan_mods, "consumer_hir")
     val _mir = mir_lowering.lower_module(consumer_hir, [data_hir, consumer_hir])
     last_merge_callees = ""
+    last_void_word_defs = 0
     for function in _mir.functions.values():
         if function.name == "a" or function.name.ends_with(".a"):
+            var unit_ids: Dict<i64, bool> = {}
+            for local in function.locals:
+                match local.type_.kind:
+                    case MirTypeKind.Unit: unit_ids[local.id.id] = true
+                    case _: pass
             for block in function.blocks:
                 for instruction in block.instructions:
                     match instruction.kind:
+                        case MirInstKind.Const(dest, _, _):
+                            if unit_ids.contains(dest.id): last_void_word_defs = last_void_word_defs + 1
+                        case MirInstKind.Copy(dest, _):
+                            if unit_ids.contains(dest.id): last_void_word_defs = last_void_word_defs + 1
                         case MirInstKind.Call(_, callee, _):
                             match callee.kind:
                                 case MirOperandKind.Const(MirConstValue.Str(name), _):
@@ -71,6 +81,15 @@ fn lower_consumer_errors(body: text) -> text:
     for e in mir_lowering.errors:
         out = out + "mir: " + e.message + "\n"
     out
+
+var last_void_word_defs = 0
+
+fn void_word_defs(body: text) -> i64:
+    """Lower `fn a` and count Const/Copy defs into a Unit-typed local (the
+    E-BACKEND-LLVM-CONST-TYPE "integer constant cannot define void" shape)."""
+    val errors = lower_consumer_errors(body)
+    if errors != "": return -1
+    last_void_word_defs
 
 fn merge_normalizes(body: text) -> bool:
     val errors = lower_consumer_errors(body)
@@ -111,3 +130,18 @@ describe "untyped optional arm join":
 
     it "an unambiguous join is not a robust-mode error":
         expect(robust_errors("fn a(x: i64) -> OS:\n    val r = if x > 0: mk_node(x) else: nil\n    OS.V(r)\n")).to_equal("")
+
+describe "untyped optional arm join: Some(ctor) / nil arms keep a word slot":
+    # s3 oj_* fixtures (2026-11-06): `Some(Node(..))` arm + `nil` arm with no
+    # binding type ICEd natively (E-BACKEND-LLVM-CONST-TYPE, void merge slot).
+    it "if-only Some(ctor)-or-nil value":
+        expect(void_word_defs("fn a(k: i64) -> i64:\n    val t = if k == 1: Some(Node(v: k)) else: nil\n    if val h = t:\n        return h.v\n    0\n")).to_equal(0)
+
+    it "match Some(ctor)-or-nil value":
+        expect(void_word_defs("fn a(k: i64) -> i64:\n    val t = match k:\n        1 => Some(Node(v: k))\n        _ => nil\n    if val h = t:\n        return h.v\n    0\n")).to_equal(0)
+
+    it "var if Some(ctor)-or-nil value":
+        expect(void_word_defs("fn a(k: i64) -> i64:\n    var t = if k == 1: Some(Node(v: k)) else: nil\n    if val h = t:\n        return h.v\n    0\n")).to_equal(0)
+
+    it "elif chain mixing Some(ctor), T? and nil":
+        expect(void_word_defs("fn a(k: i64) -> i64:\n    val t = if k == 1: Some(Node(v: k)) elif k == 2: opt_node(k) else: nil\n    if val h = t:\n        return h.v\n    0\n")).to_equal(0)
