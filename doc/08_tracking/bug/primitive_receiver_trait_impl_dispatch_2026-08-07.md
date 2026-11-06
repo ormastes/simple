@@ -1067,3 +1067,13 @@ change).
 
 ## 2026-11-06 re-verified: interpreter half PASSES on a seed built from current source
 primitive_receiver_trait_impl_dispatch_spec: simple-ref (stale, 2026-11-04 build) 8/15; seed built from release/1.0.0 (a89f4c436db) 15/15. No source change needed; JIT Defect A and native/pure-Simple Defect B remain as recorded above.
+
+## 2026-11-06 — seed JIT `text` receiver half fixed (row stays open)
+
+Seed JIT on `impl MarkerProbe for text` failed `Function 'str.probe' not
+found`: MIR qualified a STRING receiver with the builtin name `str` while the
+impl registered `text.probe`. `mir/lower/lowering_expr_method.rs` now prefers
+`text.m`/`String.m`/`string.m` when `str.m` is not a declared function.
+Regression: `src/compiler_rust/compiler/tests/primitive_text_trait_impl_jit.rs`.
+i64 impl already dispatched under JIT. Still OPEN: native (s3) crash on the
+b0_e probe, i32-collapses-to-i64 row.

@@ -51,6 +51,19 @@ is deferred to E1 export closure. Read the
 before extending; the full `compile()` denial is pending a self-hosted run.
 
 
+2026-11-06 E1 closure design: the
+[effective export closure](../../../05_design/extreme_typing_traceability.md#e1-effective-export-closure-design-2026-11-06)
+is defined over the frozen registry, route facts and retained signatures:
+`Exported` needs a `Joined` direct route plus a `Joined` route from every
+ancestor facade present in the registry (`export use` only; `pub mod` is not
+parsed by the compiler frontend; a bare `pub fn` without `export` is
+`NotExported`). Closure is relative to the compilation subject and follows
+`visibility.spl`, not `visibility_checker.spl` (which treats `Public` as
+everywhere). After the closure is applied a module can be `Safe`; `NotExported`
+callables never drive the verdict; Unknown denial may then activate under the
+explicit flag, which denies every `Nominal` export until members are projected.
+Design only; the code slice follows as its own PR.
+
 2026-11-06 P12: the
 [export hardening design](../../../05_design/extreme_typing_traceability.md#p12-export-hardening-design-2026-11-06)
 defines export scope, seven fail-closed invariants (explicit canonical

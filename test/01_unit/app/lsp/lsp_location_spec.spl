@@ -73,3 +73,20 @@ describe "lsp_location column derivation":
         val derived = lsp_parse_query_location_v1("a.spl:1: [fn] fn foo():")!
         expect(lsp_location_lsp_column_v1(derived, "fn foo():")).to_equal(3)
         expect(lsp_location_lsp_column_v1(derived, "")).to_equal(0)
+
+describe "lsp_location byte scan on non-ASCII paths (ADR-005)":
+    # Bug text_len_codepoint_switch_2026-11-03. The location
+    # scanner walks with byte_at, so its loop bounds were switched from len()
+    # to byte_len(). TODAY len() == byte_len() (both count bytes), so this spec
+    # passes before and after the switch; it pins the scan once len() moves to
+    # code points (len 6 / byte_len 9 for "héllo€"), when a len()-bounded walk
+    # would stop 3 bytes early and lose the :<line>:<col> fields.
+    it "parses line and column after multibyte path characters":
+        # @req REQ-SSPEC-UNIT
+        step("non-ASCII path")
+        val s = "héllo€"
+        expect(s.byte_len() + 0).to_equal(9)
+        val l = lsp_parse_query_location_v1("/tmp/héllo€.spl:3:7")!
+        expect(l.file).to_equal("/tmp/héllo€.spl")
+        expect(l.line).to_equal(3)
+        expect(l.column!).to_equal(7)

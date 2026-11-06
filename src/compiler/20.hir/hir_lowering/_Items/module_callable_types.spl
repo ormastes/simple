@@ -192,6 +192,13 @@ impl HirLowering:
             # resolve `make(3).len()` and lowers the body in value position.
             if val tail_bound = self.annotated_tail_identifier_type_v1(fn_decl):
                 return tail_bound
+            # Owner decision 2026-11-06: an untyped function infers its return
+            # type from its last expression when possible; when it cannot, the
+            # value is still returned (dynamically) and a diagnostic says so --
+            # never a silent Unit that drops the tail
+            # (native_untyped_return_fn_drops_tail_value_2026-09-13).
+            if val tail_value = self.tail_value_return_type_v1(fn_decl):
+                return tail_value
             return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
         if scan.ambiguous or scan.resolved_name == "":
             if self.ambient_bootstrap_enabled():
@@ -202,6 +209,79 @@ impl HirLowering:
                 self.error("untyped function returns a value: function '{fn_decl.name}' returns a value but declares no return type; add '-> T'", fn_decl.span)
             return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
         return HirType(kind: hir_type_kind_from_simple_name(scan.resolved_name), span: fn_decl.span)
+
+    me tail_value_return_type_v1(fn_decl: ParserFunction) -> HirType?:
+        """Return type implied by a value-only tail expression, or nil.
+
+        Only side-effect-free value shapes count (literals, locals, operators,
+        field/index reads, collection/struct literals, ...). Calls, method
+        calls, `if`/`match` and blocks may legitimately be Unit procedures, so
+        they keep the Unit default. A sole string literal is a docstring.
+        A value shape whose type cannot be resolved here returns Any and is
+        reported as W-RET-INFER-001.
+        """
+        val fn_body_stmts: [Stmt] = fn_decl.body.stmts
+        if fn_body_stmts.len() == 0:
+            return nil
+        val tail_index: i64 = fn_body_stmts.len() - 1
+        val tail_opt: Expr? = hir_ast_expr_statement_payload_v1(fn_body_stmts[tail_index].kind)
+        val fn_params: [Param] = fn_decl.params
+        if val tail_expr = tail_opt:
+            var value_shape = false
+            var type_name = ""
+            match tail_expr.kind:
+                case ExprKind.StringLit(_, _):
+                    if tail_index == 0:
+                        return nil
+                    value_shape = true
+                    type_name = "text"
+                case ExprKind.Ident(name):
+                    value_shape = true
+                    type_name = self.tail_binding_simple_type_name_v1(fn_body_stmts, tail_index, name, fn_params)
+                case ExprKind.IntLit(_) | ExprKind.FloatLit(_) | ExprKind.FloatLexeme(_) | ExprKind.BoolLit(_) | ExprKind.Binary(_, _, _) | ExprKind.Unary(_, _) | ExprKind.Cast(_, _):
+                    value_shape = true
+                    type_name = self.infer_simple_type_name_ast(tail_expr, fn_params) ?? ""
+                case ExprKind.ArrayLit(_) | ExprKind.ArrayRepeat(_, _) | ExprKind.TupleLit(_) | ExprKind.DictLit(_) | ExprKind.SetLit(_) | ExprKind.Field(_, _) | ExprKind.Index(_, _) | ExprKind.OptionalChain(_, _) | ExprKind.NullCoalesce(_, _) | ExprKind.ExistsCheck(_) | ExprKind.ForceUnwrap(_) | ExprKind.Range(_, _, _, _) | ExprKind.StructLit(_, _) | ExprKind.ListComprehension(_, _) | ExprKind.DictComprehension(_, _, _):
+                    value_shape = true
+                case _: ()
+            if not value_shape:
+                return nil
+            if type_name != "" and hir_simple_type_name_is_known(type_name):
+                return Some(HirType(kind: hir_type_kind_from_simple_name(type_name), span: fn_decl.span))
+            if not self.registering_import_symbols:
+                self.warning("[W-RET-INFER-001] untyped function '{fn_decl.name}' ends in a value whose type cannot be inferred; it is returned dynamically. Add '-> T'", fn_decl.span)
+            return Some(HirType(kind: HirTypeKind.Any, span: fn_decl.span))
+        nil
+
+    me tail_binding_simple_type_name_v1(stmts: [Stmt], tail_index: i64, name: text, params: [Param]) -> text:
+        """Simple type name of the newest top-level binding of `name` before
+        the tail (annotation-free initializer), or of a typed parameter."""
+        var found_binding = false
+        var found_name = ""
+        var si: i64 = 0
+        while si < tail_index:
+            match stmts[si].kind:
+                case StmtKind.Val(bound_name, _, init):
+                    if bound_name == name:
+                        found_binding = true
+                        val init_expr: Expr = init
+                        found_name = self.infer_simple_type_name_ast(init_expr, params) ?? ""
+                case StmtKind.Var(bound_name, _, init):
+                    if bound_name == name:
+                        found_binding = true
+                        found_name = ""
+                        val init_opt: Expr? = init
+                        if val init_e = init_opt:
+                            found_name = self.infer_simple_type_name_ast(init_e, params) ?? ""
+                case _: ()
+            si = si + 1
+        if found_binding:
+            return found_name
+        for raw_param in params:
+            val param: Param = raw_param
+            if param.name == name and param.has_type_:
+                return hir_type_simple_name(self.lower_type(param.type_)) ?? ""
+        ""
 
     me annotated_tail_identifier_type_v1(fn_decl: ParserFunction) -> HirType?:
         """Declared type of a bare-identifier tail statement, or nil.

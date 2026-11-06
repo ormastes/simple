@@ -17,7 +17,8 @@ use compiler.backend.linker.smf_enums.{Platform, Arch, CompressionType}
 # - Reads template bytes directly from mapped memory
 
 use compiler.backend.linker.smf_reader (SmfReaderImpl, SmfReaderHeader, SmfFlags)
-use compiler.backend.linker.smf_header (SMF_HEADER_SIZE)
+use compiler.backend.linker.smf_header (SMF_HEADER_SIZE, SMF_PACKED_HEADER_SIZE, smf_header_from_bytes, smf_header_trailer_offset, smf_header_size_at)
+use compiler.backend.linker.smf_meta.{smf_meta_find, SMF_META_SECTION_NAME, SMF_META_KIND_COMPILE_OPTIONS_V1, SMF_META_COMPILE_OPTIONS_V1_SIZE}
 use .smf_mmap_native.{native_mmap_file, native_munmap, native_mmap_read_bytes, native_mmap_read_string, native_madvise}
 use std.sdn.parser (parse)
 use std.sdn.value (SdnValue)
@@ -68,6 +69,8 @@ struct MappedSmf:
     section_count: i32
     template_section_offset: i64    # Offset to TemplateCode section
     section_table_offset: i64       # Cached section table offset (avoid trailer re-reads)
+    meta_section_offset: i64        # .simple_meta section offset (0 = none)
+    meta_section_size: i64          # .simple_meta section size (0 = none)
 
 impl MappedSmf:
     static fn open(path: text) -> Result<MappedSmf, text>:
@@ -88,23 +91,23 @@ impl MappedSmf:
         # Advise kernel about sequential access
         val _ = madvise(address, mapped_size, MADV_SEQUENTIAL)
 
-        # Read header from trailer (v1.1 format: last 128 bytes)
-        val header_offset = mapped_size - SMF_HEADER_SIZE
-        val header_bytes = mmap_read_bytes(address, header_offset, SMF_HEADER_SIZE)
-
-        # Parse header (simplified - full implementation would validate all fields)
-        # For now, create minimal header
+        # Read the trailer window: a v1.3 header is the last 96 bytes, a legacy
+        # packed header the last 128. The shared locator picks the layout.
+        val window_len = if mapped_size < SMF_PACKED_HEADER_SIZE: mapped_size else: SMF_PACKED_HEADER_SIZE
+        val window = mmap_read_bytes(address, mapped_size - window_len, window_len)
+        val header_start = smf_header_trailer_offset(window)
+        val header_bytes = if header_start > 0: window[header_start..window.len()] else: window
         val header: SmfReaderHeader = parse_header_minimal(header_bytes)
+        val parsed = smf_header_from_bytes(header_bytes)
+        val full_section_table_offset = if parsed.is_ok(): parsed.unwrap().section_table_offset as i64 else: 0
+        val num_sections = header.section_count
 
-        # Parse section table to find TemplateCode and note.sdn offsets
-        # Section table format: 64-byte entries starting at header.section_table_offset
-        # Each entry: name_offset(4) name_len(4) type(4) flags(4) offset(8) size(8) ...
-        val section_table_offset = bytes_to_u32(header_bytes[16..20]) as i64
-        val section_table_high = bytes_to_u32(header_bytes[20..24]) as i64
-        val full_section_table_offset = section_table_offset | (section_table_high << 32)
-        val num_sections = bytes_to_u32(header_bytes[12..16]) as i32
-
+        # Walk the section table (canonical 64-byte entries: type u8 @0,
+        # flags u32 @4, offset u64 @8, size u64 @16, name[16] @40).
         var template_offset = 0i64
+        var meta_offset = 0i64
+        var meta_size = 0i64
+        val meta_name = SMF_META_SECTION_NAME.bytes()
 
         if full_section_table_offset > 0 and full_section_table_offset < mapped_size:
             var si = 0
@@ -113,15 +116,15 @@ impl MappedSmf:
                 if entry_offset + 64 > mapped_size:
                     break
                 val entry_bytes = mmap_read_bytes(address, entry_offset, 64)
-                # Section type at offset 8 in entry
-                val sec_type = bytes_to_u32(entry_bytes[8..12])
-                # Section offset at entry offset 16 (8 bytes)
-                val sec_offset = bytes_to_u32(entry_bytes[16..20]) as i64
-                val sec_offset_high = bytes_to_u32(entry_bytes[20..24]) as i64
-                val full_sec_offset = sec_offset | (sec_offset_high << 32)
+                val sec_type = entry_bytes[0] as i64
+                val full_sec_offset = (bytes_to_u32(entry_bytes[8..12]) as i64) | ((bytes_to_u32(entry_bytes[12..16]) as i64) << 32)
+                val full_sec_size = (bytes_to_u32(entry_bytes[16..20]) as i64) | ((bytes_to_u32(entry_bytes[20..24]) as i64) << 32)
                 # Type 12 = TemplateCode (legacy; no writer emits it)
                 if sec_type == 12:
                     template_offset = full_sec_offset
+                if mapped_section_named(entry_bytes, meta_name):
+                    meta_offset = full_sec_offset
+                    meta_size = full_sec_size
                 si = si + 1
 
         Ok(MappedSmf(
@@ -131,7 +134,9 @@ impl MappedSmf:
             header: header,
             section_count: num_sections,
             template_section_offset: template_offset,
-            section_table_offset: full_section_table_offset
+            section_table_offset: full_section_table_offset,
+            meta_section_offset: meta_offset,
+            meta_section_size: meta_size
         ))
 
     fn close() -> bool:
@@ -327,31 +332,16 @@ impl SmfCache:
 # ============================================================================
 
 fn parse_header_minimal(bytes: [u8]) -> SmfReaderHeader:
-    """Parse SMF header from trailer bytes.
+    """Decode the SMF header in `bytes` (a whole image, or the header itself)
+    through the canonical decoder (compiler.backend.linker.smf_header), which
+    accepts the v1.3 96-byte layout, the Rust seed's 1.1 stamp of it, and the
+    legacy packed 128-byte layout.
 
-    SMF v1.1 trailer format (128 bytes, little-endian):
-      Offset  Size  Field
-      0       4     Magic: "SMF\0" (0x53, 0x4D, 0x46, 0x00)
-      4       1     Version major
-      5       1     Version minor
-      6       1     Platform (u8 enum)
-      7       1     Arch (u8 enum)
-      8       4     Flags (u32 bitfield)
-      12      4     Section count (u32)
-      16      8     Section table offset (u64)
-      24      4     Symbol count (u32)
-      28      8     Symbol table offset (u64)
-      36      4     Exported count (u32)
-      40      8     Entry point (u64)
-      48      4     Compression type (u32)
-      52      8     Stub size (u64)
-      60      8     SMF data offset (u64)
-      68-127  60    Reserved
-
-    ROBUSTNESS: Falls back to safe defaults if bytes are too short.
+    ROBUSTNESS: Falls back to safe defaults when no header is present.
     """
 
-    if bytes.len() < 128:
+    val parsed = smf_header_from_bytes(bytes)
+    if parsed.is_err():
         # Insufficient data - return minimal defaults
         return SmfReaderHeader(
             version: (1, 1),
@@ -373,45 +363,19 @@ fn parse_header_minimal(bytes: [u8]) -> SmfReaderHeader:
             compression: CompressionType.None_
         )
 
-    # Read magic and validate
-    val has_magic = (bytes[0] == 0x53 and bytes[1] == 0x4D and bytes[2] == 0x46 and bytes[3] == 0x00)
-    if not has_magic:
-        eprint("Warning: SMF header magic mismatch; using defaults")
-
-    # Read version
-    val version_major = bytes[4]
-    val version_minor = bytes[5]
-
-    # Read platform and arch
-    val platform = Platform.from_u8(bytes[6])
-    val arch = Arch.from_u8(bytes[7])
-
-    # Read flags (u32 at offset 8)
-    val flags_raw = bytes_to_u32(bytes[8..12])
+    val h = parsed.unwrap()
     val flags = SmfFlags(
-        executable: (flags_raw & 0x01) != 0,
-        reloadable: (flags_raw & 0x02) != 0,
-        debug_info: (flags_raw & 0x04) != 0,
-        pic: (flags_raw & 0x08) != 0,
-        has_stub: (flags_raw & 0x10) != 0,
-        aspect_pack: (flags_raw & 0x40) != 0
+        executable: h.is_executable(),
+        reloadable: h.is_reloadable(),
+        debug_info: h.has_debug_info(),
+        pic: h.is_pic(),
+        has_stub: h.has_stub(),
+        aspect_pack: h.is_aspect_pack()
     )
-
-    # Read section count (u32 at offset 12)
-    val section_count = bytes_to_u32(bytes[12..16]) as i32
-
-    # Read symbol count (u32 at offset 24)
-    val symbol_count = bytes_to_u32(bytes[24..28]) as i32
-
-    # Read entry point (u64 at offset 40, using lower 32 bits)
-    val entry_point = bytes_to_u32(bytes[40..44]) as i64
-
-    # Read compression type (u32 at offset 48)
-    val compression_raw = bytes_to_u32(bytes[48..52])
-    val compression = match compression_raw:
-        0: CompressionType.None_
-        1: CompressionType.Zstd
-        _: CompressionType.None_
+    val section_count = h.section_count as i32
+    val symbol_count = h.symbol_count as i32
+    val entry_point = h.entry_point as i64
+    val compression = h.get_compression()
 
     # Determine template/note.sdn presence by checking section count
     # Templates are present if section_count > 1 (more than just code section)
@@ -419,9 +383,9 @@ fn parse_header_minimal(bytes: [u8]) -> SmfReaderHeader:
     val has_note_sdn = section_count > 3
 
     SmfReaderHeader(
-        version: (version_major, version_minor),
-        platform: platform,
-        arch: arch,
+        version: (h.version_major, h.version_minor),
+        platform: Platform.from_u8(h.platform),
+        arch: Arch.from_u8(h.arch),
         flags: flags,
         section_count: section_count,
         symbol_count: symbol_count,
@@ -430,6 +394,44 @@ fn parse_header_minimal(bytes: [u8]) -> SmfReaderHeader:
         has_note_sdn: has_note_sdn,
         compression: compression
     )
+
+fn mapped_section_named(entry_bytes: [u8], want: [u8]) -> bool:
+    """True when a 64-byte section entry's NUL-padded name[16] equals `want`."""
+    if entry_bytes.len() < 56:
+        return false
+    var i = 0
+    while i < 16:
+        val b = if i < want.len(): want[i] else: 0
+        if entry_bytes[40 + i] != b:
+            return false
+        i = i + 1
+    true
+
+fn mapped_smf_compile_options_bytes(mapped: MappedSmf) -> [u8]:
+    """16-byte compile-options hash of a mapped SMF, or [] when absent.
+
+    v1.3: `.simple_meta` record kind 2. Legacy packed trailer: bytes 88..104
+    of the 128-byte header (read-only fallback, removed with the packed reader).
+    """
+    if mapped.meta_section_size > 0 and mapped.meta_section_offset >= 0 and mapped.meta_section_offset <= mapped.size - mapped.meta_section_size:
+        val section = mmap_read_bytes(mapped.address, mapped.meta_section_offset, mapped.meta_section_size)
+        val record = smf_meta_find(section, SMF_META_KIND_COMPILE_OPTIONS_V1)
+        if record.len() == SMF_META_COMPILE_OPTIONS_V1_SIZE:
+            return record
+    if mapped.size < SMF_PACKED_HEADER_SIZE:
+        return []
+    val trailer = mmap_read_bytes(mapped.address, mapped.size - SMF_PACKED_HEADER_SIZE, SMF_PACKED_HEADER_SIZE)
+    if trailer.len() != SMF_PACKED_HEADER_SIZE or smf_header_trailer_offset(trailer) != 0 or smf_header_size_at(trailer, 0) != SMF_PACKED_HEADER_SIZE:
+        return []
+    var legacy: [u8] = []
+    var nonzero = false
+    var i = 0
+    while i < SMF_META_COMPILE_OPTIONS_V1_SIZE:
+        if trailer[88 + i] != 0:
+            nonzero = true
+        legacy.push(trailer[88 + i])
+        i = i + 1
+    if nonzero: legacy else: []
 
 fn bytes_to_u32(bytes: [u8]) -> u32:
     """Convert 4 bytes (little-endian) to u32."""
@@ -516,7 +518,6 @@ use compiler.driver.cache.compile_options_hash.{
     compile_options_hash_from_bytes, compile_options_hash_validate
 }
 use compiler.driver.cache.cache_types.{CacheCheckResult, CACHE_FRESH}
-use compiler.driver.cache.cache_validator.{SmfValidationSnapshot}
 use compiler.driver.driver_api_compile_single.{smf_expected_compile_options_hash}
 
 fn validated_smf_load(smf_path: text, source_path: text, backend: text, opt_level: i64, release: bool, debug_info: bool, gc_off: bool, profile: text, allowed_families: [text], native_target: text = "") -> Result<MappedSmf, text>:
@@ -536,19 +537,14 @@ fn validated_smf_load(smf_path: text, source_path: text, backend: text, opt_leve
         case Err(_):
             return mapped_result
 
-    # Read compile options hash from header reserved bytes
-    # SmfReaderHeader is compact metadata and has no options-byte accessor.
-    # Reuse the canonical snapshot extractor on this same mapping's fixed-size
-    # trailer; do not reopen a replaceable path or copy the whole artifact.
+    # Read the compile-options hash: `.simple_meta` record kind 2 (legacy
+    # packed headers: trailer bytes 88..104). Read only the section and the
+    # trailer window from this same mapping; do not reopen a replaceable path
+    # or copy the whole artifact.
     if mapped.size < SMF_HEADER_SIZE:
         val _ = mapped.close()
         return Err("SMF mapped header is truncated")
-    val trailer = mmap_read_bytes(mapped.address, mapped.size - SMF_HEADER_SIZE, SMF_HEADER_SIZE)
-    if trailer.len() != SMF_HEADER_SIZE:
-        val _ = mapped.close()
-        return Err("SMF mapped header could not be read")
-    val snapshot = SmfValidationSnapshot(data: trailer)
-    val reserved_bytes = snapshot.reserved_bytes()
+    val reserved_bytes = mapped_smf_compile_options_bytes(mapped)
     val stored_hash = compile_options_hash_from_bytes(reserved_bytes)
 
     # NOTE: a zero stored hash (old-format SMF) is NOT accepted — validate

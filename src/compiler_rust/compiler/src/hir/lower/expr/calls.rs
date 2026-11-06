@@ -257,7 +257,42 @@ impl Lowerer {
         let proven_nonescaping = resolved_callee_symbol
             .is_some_and(|symbol| self.proven_nonescaping_functions.contains(symbol))
             && !self.is_reference_type(ret_ty);
-        let mut args_hir = if proven_nonescaping {
+        // A lambda passed positionally to a fn-typed parameter takes that
+        // parameter's declared callback param types. Without this, a
+        // placeholder lambda (`apply(_1 + 1, 4)`) defaulted its params to ANY
+        // while the callee invokes it with raw scalars, so the JIT computed on
+        // a tagged/raw mix (`apply(_1 + 1, 4)` returned 40, not 5).
+        let callee_fn_param_types: Vec<Option<Vec<TypeId>>> = match self.module.types.get(func_hir.ty) {
+            Some(HirType::Function { params, .. }) if args.iter().all(|a| a.name.is_none()) => params
+                .clone()
+                .into_iter()
+                .map(|p| match self.module.types.get(p) {
+                    Some(HirType::Function { params, .. }) => Some(params.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let has_typed_lambda_arg = args.iter().enumerate().any(|(i, a)| {
+            matches!(a.value, Expr::Lambda { .. }) && matches!(callee_fn_param_types.get(i), Some(Some(_)))
+        });
+        let mut args_hir = if has_typed_lambda_arg {
+            let capability_checkpoint = proven_nonescaping.then(|| self.capability_env.clone());
+            let mut out = Vec::with_capacity(args.len());
+            for (i, arg) in args.iter().enumerate() {
+                match (&arg.value, callee_fn_param_types.get(i)) {
+                    (Expr::Lambda { params, body, capture_all, .. }, Some(Some(param_tys))) => {
+                        let param_tys = param_tys.clone();
+                        out.push(self.lower_lambda_with_param_types(params, body, *capture_all, ctx, &param_tys)?);
+                    }
+                    _ => out.push(self.lower_expr(&arg.value, ctx)?),
+                }
+            }
+            if let Some(checkpoint) = capability_checkpoint {
+                self.capability_env = checkpoint;
+            }
+            out
+        } else if proven_nonescaping {
             self.lower_nonescaping_call_args(args, ctx)?
         } else if matches!(callee, Expr::Identifier(name) if name == "array_sort_by")
             && matches!(args, [_, ast::Argument { value: Expr::Lambda { .. }, .. }])

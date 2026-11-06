@@ -278,3 +278,24 @@ parse itself. End-to-end `native-build --threads 2 --entry-closure` on a
 worker read them back as `hits=3 misses=0 parses=0`. (That build then fails in
 MIR on `std.text` — `unresolved method call: index_of/chars/merge` — identically
 with `SIMPLE_PARSE_SHARDING=0`, so it is pre-existing and unrelated.)
+
+## 2026-11-06 re-measured on the Windows seed: the open env/export item is resolved
+
+Same reproduction (`SIMPLE_MEM_TRACE=1 simple lint src/compiler/80.driver/driver_types.spl`,
+seed `D:/dev/wt/seed/simple.exe`, release/1.0.0 tip):
+
+```
+[mem] phases: module_loads=341 source=4.4MB ast_items=9598
+      parse_retained=122.8MB eval_retained=82.2MB parse_bytes_per_source_byte=28.0
+      env_entries=9097 export_entries=9810
+[mem] globals census: flat=979 owners=174 owned_entries=982 module_envs=341 import_bindings=2569
+```
+
+Against the 2026-08-21 numbers (161 envs, 53,227 env entries, 48,646 import
+bindings, 156.5 MB eval-retained): with 2.1x more modules loaded, import
+bindings fell 19x and env entries 5.9x; eval-retained halved. Whole-surface
+imports now share one `Arc<ModuleTable>` per owner
+(`interpreter_state.rs:118 record_owner_binding_layer`, seed change of
+2026-10-20) instead of re-materialising bindings per importer. Parse retention
+(28 B/source byte) is the remaining term and is the AST/FunctionDef density
+cost the interpreter must keep.
