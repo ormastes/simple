@@ -32,6 +32,8 @@ use compiler.hir.hir_lowering.items.*
 use compiler.mir.mir.*
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir.mir_json.{serialize_mir_inst_kind}
+use compiler.mir_opt.simd_lowering.{run_simd_lowering}
+use std.env.variables.{env_get}
 
 val NODE_SOURCE_BODY: text = "class BinaryNode:\n    left: i64\n    op: i64\n" +
     "class Plain:\n    left: i64\n" +
@@ -46,10 +48,13 @@ val NODE_SOURCE_BODY: text = "class BinaryNode:\n    left: i64\n    op: i64\n" +
 
 fn lower_hir(source: text, name: text) -> HirModule:
     val filename = "attr_sites_" + name + ".spl"
+    val saved_bootstrap = env_get("SIMPLE_BOOTSTRAP")
     env_set("SIMPLE_BOOTSTRAP", "0")
     val module = parse_full_frontend(source, filename, filename, Logger(level: 0))
     var hir_lowering = HirLowering.with_filename(filename)
-    hir_lowering.lower_module(module)
+    val hir = hir_lowering.lower_module(module)
+    env_set("SIMPLE_BOOTSTRAP", saved_bootstrap)
+    hir
 
 fn site_summary(sites: [HirAttrAccessV1]) -> [text]:
     var out: [text] = []
@@ -57,10 +62,11 @@ fn site_summary(sites: [HirAttrAccessV1]) -> [text]:
         out.push(s.function + ":" + hir_attr_access_kind_name_v1(s.kind) + ":" + s.class_name + "." + s.attr)
     out
 
-# Function name without the module prefix (the two modules differ in name).
+# Function name without the module prefix (the two modules differ in name);
+# a method keeps its class qualifier.
 fn short_name(name: text) -> text:
-    val parts = name.split(".")
-    parts[parts.len() - 1]
+    val dot = name.index_of(".")
+    if dot < 0: name else: name.substring(dot + 1, name.len())
 
 # Instruction-level fingerprint of every function, in name order.
 fn mir_fingerprint(mir: MirModule) -> text:
@@ -146,3 +152,6 @@ describe "Attribute access sites":
         expect(mir_fingerprint(opted_mir).contains("fn bump")).to_equal(true)
         expect(opted_mir.attr_sites.len()).to_equal(opted_hir.attr_sites.len())
         expect(plain_mir.attr_sites.len()).to_equal(0)  # oracle: nothing opted in
+        step("Run a MIR pass that rebuilds the module")
+        val after_pass = run_simd_lowering(opted_mir)
+        expect(after_pass.attr_sites.len()).to_equal(opted_hir.attr_sites.len())
