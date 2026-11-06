@@ -675,12 +675,26 @@ fn log_dispatch_record(level: i64, subsys: i64, fmt_handle: i64, p0: i64, p1: i6
         log_ring_push(level, subsys, fmt_handle, p0, p1, 0)
     _dispatch_to_backends(level, subsys, p0)
 
+# Bootstrap skip switch, resolved ONCE per process. Plan D14 (producer-path
+# rules): the producer path performs no environment read -- `rt_env_get`
+# allocates a fresh text on every call and the switch is a process-lifetime
+# property set by the spawner. Unset == empty is intended: only an explicit
+# "1" skips dispatch. Pinned by test/01_unit/lib/log_producer_path_spec.spl.
+var _g_skip_dispatch_resolved: bool = false
+var _g_skip_dispatch: bool = false
+
+fn _skip_dispatch() -> bool:
+    if not _g_skip_dispatch_resolved:
+        val switch = rt_env_get("SIMPLE_BOOTSTRAP_SKIP_LOG_DISPATCH") ?? ""
+        _g_skip_dispatch = switch == "1"
+        _g_skip_dispatch_resolved = true
+    _g_skip_dispatch
+
 fn log_dispatch_text(level: i64, subsys: i64, msg: text):
-    # Unset == empty is intended: only an explicit "1" skips dispatch.
-    val skip_dispatch = rt_env_get("SIMPLE_BOOTSTRAP_SKIP_LOG_DISPATCH") ?? ""
-    if skip_dispatch == "1":
-        return
+    # Cheapest gate first: a below-level call costs one level compare.
     if not _level_passes(level, subsys):
+        return
+    if _skip_dispatch():
         return
     val handle = _text_intern(msg)
     _dispatch_to_backends(level, subsys, handle)
