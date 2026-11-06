@@ -42,10 +42,13 @@ fail closed.
 Value provenance prefers the module-qualified declaration layout key: the
 symbol-table path uses `struct_value_provenance_key`, and the canonical path
 folds `<module>::<Name>` through `declared_struct_layout_key`. The bare name
-is kept only when no unambiguous qualified layout is registered.
+is kept only when no unambiguous qualified layout is registered. The for-in
+element owner published from a declared `[Record]`/`Dict.values()` element
+type (`src/compiler/50.mir/mir_lowering_stmts.spl`, for-in setup) had the same
+bare-name defect and now uses `struct_value_provenance_key` for structs.
 
 Spec: `test/01_unit/compiler/50.mir/dict_read_struct_owner_provenance_spec.spl`
-(red 1/6 -> green 6/6 on the seed-hosted in-process harness, including a negative case: a field only the OTHER
+(before the fix 1/8 examples pass -- only the uncontested control -- after 8/8, seed-hosted in-process harness; including a negative case: a field only the OTHER
 same-named struct declares is rejected against the exact layout).
 
 ## Verification pending
