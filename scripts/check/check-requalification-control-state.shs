@@ -1,0 +1,76 @@
+#!/bin/sh
+# Cycle 9 fixture: no compiler and no repeated materialization/publication suite.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+temporary=$(mktemp -d "${TMPDIR:-/tmp}/qualification-state.XXXXXX")
+temporary=$(CDPATH= cd -- "$temporary" && pwd -P)
+trap 'chmod -R u+w "$temporary"; rm -rf "$temporary"' EXIT HUP INT TERM
+repository=$temporary/source
+git -c init.defaultBranch=fixture init --quiet --template= "$repository"
+mkdir -p "$repository/src" "$repository/.simple"
+printf 'committed source\n' >"$repository/src/input.spl"
+printf 'immutable config\n' >"$repository/.simple/config.sdn"
+printf '/build/\n/.simple/workarounds.d/\n' >"$repository/.gitignore"
+git -C "$repository" add .
+git -C "$repository" -c user.name=Fixture -c user.email=fixture@example.invalid \
+    -c commit.gpgsign=false -c core.hooksPath=/dev/null commit --quiet -m fixture
+commit=$(git -C "$repository" rev-parse HEAD)
+git -C "$repository" ls-files --stage >"$temporary/expected-index"
+cp "$repository/.git/index" "$temporary/source-index"
+cp "$repository/.git/HEAD" "$temporary/source-head"
+cp "$repository/.git/config" "$temporary/source-config"
+fixture=$temporary/controls
+sh "$root/scripts/bootstrap/lib/materialize-committed-controls.shs" "$repository" "$commit" "$fixture"
+sh "$root/scripts/bootstrap/lib/seal-requalification-controls.shs" "$fixture"
+checks=0
+check() { "$@" || { echo "FAIL: $*" >&2; exit 1; }; checks=$((checks + 1)); }
+check test "$(git -C "$fixture" --no-optional-locks rev-parse HEAD)" = "$commit"
+check test "$(cat "$fixture/.git/HEAD")" = "$commit"
+check test "$(git -C "$fixture" rev-parse --show-toplevel)" = "$fixture"
+git -C "$fixture" --no-optional-locks ls-files --stage >"$temporary/actual-index"
+check cmp "$temporary/expected-index" "$temporary/actual-index"
+cp "$fixture/.git/index" "$temporary/private-index"
+status=$(git -C "$fixture" --no-optional-locks status --porcelain=v1 -z --untracked-files=all)
+check test -z "$status"
+status=$(git -C "$fixture" status --porcelain=v1 -z --untracked-files=all)
+check test -z "$status"
+check cmp "$temporary/private-index" "$fixture/.git/index"
+# The workaround mkdir facade treats an existing directory as success.
+check mkdir -p "$fixture/.simple" "$fixture/.simple/workarounds.d"
+printf 'scv state\n' >"$fixture/build/scv/generated"
+printf 'fragment\n' >"$fixture/.simple/workarounds.d/.stage.tmp"
+mv "$fixture/.simple/workarounds.d/.stage.tmp" "$fixture/.simple/workarounds.d/fragment.sdn"
+check test -f "$fixture/build/scv/generated"
+check test -f "$fixture/.simple/workarounds.d/fragment.sdn"
+status=$(git -C "$fixture" --no-optional-locks status --porcelain=v1 -z --untracked-files=all)
+check test -z "$status"
+check cmp "$repository/.simple/config.sdn" "$fixture/.simple/config.sdn"
+check cmp "$repository/.git/index" "$temporary/source-index"
+check cmp "$repository/.git/HEAD" "$temporary/source-head"
+check cmp "$repository/.git/config" "$temporary/source-config"
+python3 - "$fixture" <<'PY'
+import pathlib,stat,sys
+root=pathlib.Path(sys.argv[1]); allowed={'build/scv','.simple/workarounds.d'}
+for p in [root,*root.rglob('*')]:
+    relative=p.relative_to(root).as_posix()
+    if relative.startswith('build/scv/') or relative.startswith('.simple/workarounds.d/'): continue
+    assert bool(p.stat().st_mode & stat.S_IWUSR)==(relative in allowed), relative
+print('PASS: authority modes sealed; only generated leaves writable')
+PY
+checks=$((checks + 1))
+for variant in symlink tracked; do
+    bad=$temporary/$variant
+    sh "$root/scripts/bootstrap/lib/materialize-committed-controls.shs" "$repository" "$commit" "$bad"
+    if [ "$variant" = symlink ]; then
+        ln -s ../src "$bad/.simple/workarounds.d"
+    else
+        mkdir "$bad/.simple/workarounds.d"
+        printf 'tracked\n' >"$bad/.simple/workarounds.d/owned.sdn"
+        git -C "$bad" add -f .simple/workarounds.d/owned.sdn
+    fi
+    if sh "$root/scripts/bootstrap/lib/seal-requalification-controls.shs" "$bad"; then
+        echo "FAIL: $variant generated authority accepted" >&2; exit 1
+    fi
+    checks=$((checks + 1))
+done
+echo "PASS: $checks qualification control-state assertions; no compiler executed"
