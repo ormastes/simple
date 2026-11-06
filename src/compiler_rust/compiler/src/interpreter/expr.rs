@@ -551,10 +551,13 @@ pub(crate) fn evaluate_expr(
         // Null coalescing: expr ?? default
         Expr::Coalesce { expr: inner, default } => {
             let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
-            if let Some(unwrapped) = try_unwrap_option_or_result(&val) {
-                Ok(unwrapped)
-            } else {
-                evaluate_expr(default, env, functions, classes, enums, impl_methods)
+            // Owner decision 2026-11-06: `??` must agree with pure Simple, where
+            // `x ?? d` takes `d` exactly when `x.?` is absent. A nil payload
+            // (`Some(nil)` / `Ok(nil)`) is absence -- nil is only ever `T?`
+            // absence -- so it falls back to the default instead of yielding nil.
+            match try_unwrap_option_or_result(&val) {
+                Some(unwrapped) if !matches!(unwrapped, Value::Nil) => Ok(unwrapped),
+                _ => evaluate_expr(default, env, functions, classes, enums, impl_methods),
             }
         }
         // Optional chaining: expr?.field / expr?.method(args).
