@@ -1207,6 +1207,12 @@ fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type
     # EXPLICIT returns: mixed-return/tail rule (see cl_translate_operand).
     match value:
         case Int(v):
+            # A float-typed Int const (e.g. an int literal widened to f64) is
+            # an f32const/f64const of the same numeric value: Cranelift's
+            # `iconst` only admits I8..I64 and its verifier hits
+            # `unreachable!()` (iconst_bounds) for an F32/F64 controlling type.
+            if cl_const_is_float(type_):
+                return cranelift_fconst(ctx, mir_type_to_cl(type_), v as f64)
             return cranelift_iconst(ctx, const_int_cl_type(type_), v)
         case FloatLexeme(v):
             return cranelift_fconst(ctx, mir_type_to_cl(type_), float_literal_scalar(v))
@@ -1254,6 +1260,10 @@ fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type
             val strnew_vreg = translate_runtime_import_call_i64(ctx, cl_module, "rt_string_new_literal", [ptr_val, len_val])
             return strnew_vreg
         case Zero:
+            # `x!` / `x.unwrap()` on an `f64?` emits Zero typed F64 on the nil
+            # (panic) arm; a float zero must be fconst, never iconst.f64.
+            if cl_const_is_float(type_):
+                return cranelift_fconst(ctx, mir_type_to_cl(type_), 0.0)
             return cranelift_iconst(ctx, mir_type_to_cl(type_), 0)
         case _:
             return cranelift_iconst(ctx, CL_TYPE_I64, 0)
@@ -1867,11 +1877,14 @@ fn cl_import_call_signature(callee_type: MirType, arg_count: i64) -> i64:
 fn const_int_cl_type(ty: MirType) -> i64:
     """Int consts emit as I64 regardless of declared width: the lane is
     uniformly i64 and sub-64 iconst types leaked i16 args into i64-signature
-    calls (probe_enum6 verifier reject)."""
+    calls (probe_enum6 verifier reject). Never a float type: `iconst` is integer-only (float consts go through
+    cl_const_is_float -> cranelift_fconst)."""
+    CL_TYPE_I64
+
+fn cl_const_is_float(ty: MirType) -> bool:
     match ty.kind:
-        case F32: return CL_TYPE_F32
-        case F64: return CL_TYPE_F64
-        case _: return CL_TYPE_I64
+        case F32 | F64: true
+        case _: false
 
 fn type_is_aggregate(ty: MirType) -> bool:
     match ty.kind:

@@ -1,0 +1,69 @@
+# @req: REQ-CRANELIFT-VERIFIER-TYPES-001
+# Regression: a float-typed MIR constant (Zero on the nil arm of `x.unwrap()`
+# / `x!` over an `f64?`, or an Int const typed F32/F64) was emitted as
+# Cranelift `iconst.f64`. iconst is integer-only, so the verifier's
+# iconst_bounds hit `unreachable!()` and aborted the whole native build
+# (pure_database codegen, Windows cranelift lane, 2026-11-07).
+use std.spec
+use std.spec.step
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.backend.cranelift_codegen_adapter.{const_int_cl_type, cl_const_is_float}
+
+@inline
+fn lower_float_const_fixture(source: text) -> MirModule:
+    val path = "cranelift_float_const_iconst.spl"
+    val ast = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(ast)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    expect(lowering.errors.len()).to_equal(0)
+    mir
+
+@inline
+fn float_typed_const_count(module: MirModule, fn_suffix: text) -> i64:
+    var count = 0
+    for function in module.functions.values():
+        if function.name.ends_with(fn_suffix):
+            for block in function.blocks:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case MirInstKind.Const(_, value, ty):
+                            match value:
+                                case MirConstValue.Zero:
+                                    if cl_const_is_float(ty):
+                                        count = count + 1
+                                case MirConstValue.Int(_):
+                                    if cl_const_is_float(ty):
+                                        count = count + 1
+                                case _: ()
+                        case _: ()
+    count
+
+describe "Cranelift float-typed constants never use iconst":
+    it "lowers f64? unwrap to a float-typed Zero const (the trigger shape)":
+        step("Lower `.unwrap()` and `!` over an f64? return")
+        val src = "fn maybe(b: bool) -> f64?:\n    if b:\n        return Some(1.5)\n    nil\n\nfn pick() -> f64:\n    val v = maybe(true).unwrap()\n    val w = maybe(true)!\n    v + w\n"
+        val mir = lower_float_const_fixture(src)
+        expect(float_typed_const_count(mir, "pick") > 0).to_equal(true)
+
+    it "classifies F32/F64 constants as fconst, integers as iconst":
+        step("cl_const_is_float routes float consts to cranelift_fconst")
+        expect(cl_const_is_float(MirType.f64())).to_equal(true)
+        expect(cl_const_is_float(MirType(kind: MirTypeKind.F32))).to_equal(true)
+        expect(cl_const_is_float(MirType.i64())).to_equal(false)
+        expect(cl_const_is_float(MirType(kind: MirTypeKind.Bool))).to_equal(false)
+        expect(cl_const_is_float(MirType(kind: MirTypeKind.U8))).to_equal(false)
+
+    it "never hands iconst a float controlling type":
+        step("const_int_cl_type is integer-only (CL_TYPE_I64 = 4)")
+        expect(const_int_cl_type(MirType.f64())).to_equal(4)
+        expect(const_int_cl_type(MirType(kind: MirTypeKind.F32))).to_equal(4)
+        expect(const_int_cl_type(MirType.i64())).to_equal(4)
+        expect(const_int_cl_type(MirType(kind: MirTypeKind.I16))).to_equal(4)
