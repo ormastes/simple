@@ -324,3 +324,103 @@ robust/warn at strict, private-local exclusion, unknown roots, cached-admission
 refusal, and the production route fixture through the driver guard. It ran
 7/7 on the seed; a mutation disabling denial fails. The full `compile()`
 choke point is verification-pending on a self-hosted binary.
+
+## P12 export hardening (design, 2026-11-06)
+
+Status: design handoff, docs only. Owner answer on "hardening" is both: (a)
+the fail-closed typing invariants already carried by E1/E2 (every gap is an
+explicit `Unknown` reason, never `Safe`), and (b) plan P12 "Export hardening,
+privacy and complete graph round-trip" (AC-TRC-052/053, REQ-TRC-031). This
+section scopes (b) and ties it to (a). No report projection (P6) exists yet
+in `src/app/traceability` (`structural_report_v1.spl` is the P0 lane's
+structural check, not a Markdown/HTML export), so the first code slice waits
+for the P6 projection seam; a pure admission module with no consumer would be
+dead code and is not authored here.
+
+### Scope
+
+An *export* is any projection that leaves the process as a file or stream for
+another reader: Markdown/HTML reports (P6), SDN graph dumps and their
+round-trip import, independent edge pages (P2/P12), and the typing facets the
+trace graph consumes from the compiler (T1: `api_*` facts, closure entries,
+publication decisions). Terminal tables and SDN on stdout are not exports
+unless written to an explicit destination. The CLI JSON adapter, when
+requested, is an export and follows the same rules.
+
+### Invariants (fail closed; each is a gate, not advice)
+
+1. **Explicit destination.** No export without an explicit path. The path is
+   canonicalized once; a symlink anywhere on it, a traversal segment, or a
+   destination that resolves outside the declared output root is refused
+   before any byte is written. Collision with an existing file is refused
+   unless the caller declared overwrite; a failed or partial write leaves the
+   previous output untouched (write to a sibling temp name, then rename).
+2. **Private material never renders.** Absolute filesystem locations,
+   prompts, credentials/tokens, environment values, and source text of
+   non-public declarations are filtered *before* the render stage, from the
+   projection record, not scrubbed from the rendered text. Paths render as
+   safe repo-relative spellings or are omitted with a `redacted` marker.
+3. **Untrusted content is data.** Every rendered name, message, URL or
+   snippet is escaped for its target (Markdown, HTML attribute/text, SDN
+   string). HTML is offline: no script, no automatic remote resource, no
+   inline event handler, `javascript:`/`data:` URLs rejected. Injected markup
+   in a declaration name or diagnostic must appear escaped or the export is
+   refused; it never executes or links out.
+4. **Deterministic and byte-identical.** The same subject at the same
+   snapshot renders byte-identical output across runs and hosts: stable
+   ordering, no timestamps/hostnames/pids, no locale-dependent formatting.
+5. **Visibility-safe counts.** An export never reveals nodes or counts the
+   reader's visibility scope excludes; totals are computed after filtering.
+   Truncation is explicit (`truncated: true` plus the bound), never silent.
+6. **Complete graph round-trip.** An SDN graph export re-imported yields an
+   identical graph (same node/edge identity, same unknown reasons); edge
+   pages are independently fetchable and together cover the edge set exactly
+   once. Lossy exports must say what they dropped.
+7. **Typing facets keep their reasons.** When trace consumes `api_*` facts,
+   the export carries every `unknown_reasons` entry, `export_status`,
+   `excluded_roots` and the decision disposition verbatim. An export may not
+   collapse `Unknown` into `Safe` or drop the scope marker
+   (`non-callable-and-generated-surfaces-not-collected`). This is the bridge
+   to hardening (a): trace never claims more than the compiler proved.
+
+### Gates (what the first slice must ship, and in what order)
+
+- Design first (this section), then a pure `00.common`-level admission record
+  (`ExportAdmissionV1`: destination verdict, redaction count, escaping
+  verdict, truncation, reasons) consumed by the P6 projection the day it
+  exists; an admission with any refused reason yields no file.
+- Executable specs under `test/` only, each with a real fixture: traversal
+  and symlink escape refused; collision/failed write preserves prior output;
+  injected `<script>`, `javascript:` URL and Markdown link injection appear
+  escaped; absolute path and prompt text never appear in output; repeated
+  export is byte-identical; filtered graph counts match the visible node set;
+  SDN round-trip equality; typing facet reasons preserved. No manual-only
+  evidence substitutes for these.
+- `check-*` push-tier rows are out of scope until the projection exists;
+  until then the admission spec is the gate.
+
+### Open questions for the owner
+
+- Output root policy: fixed `build/` or caller-declared root with the
+  refusal above? (Design assumes caller-declared root inside the worktree.)
+- Whether a redaction count above zero should be a warning in the report
+  header (visible honesty) or silent (privacy). Design assumes visible count,
+  never the redacted values.
+
+### AC-EAPI-005 generated-surface recheck (finding, 2026-11-06)
+
+Rechecked against the code: `guard_api_publication_v1` runs once at phase-5
+mode dispatch (`driver_orchestration.spl:394`) over facts collected by the
+retained typecheck pass, i.e. **before** `weave_aop()`
+(`driver_orchestration.spl:590`, AOT path after borrow check) and before
+native staged codegen / postmono specialization. Generated exports that the
+surface builder already sees (`generated-comment` export origins from
+generated files, `module_surface_declarations.spl:191`) do reach the route
+projection and the closure. Exports introduced *after* the guard by AOP
+weaving or specialization are not rechecked: the AC-EAPI-005 gap is
+confirmed, not closed. Closing it is feature-sized: a second evaluation of
+the guard after weave over post-weave HIR facts (re-running
+`collect_module_typecheck_receipt_v1` on the woven modules and re-projecting
+routes/closure), with a spec whose aspect introduces a `bool`-returning
+export. Recorded in the todo; no partial recheck is shipped, because a guard
+that runs only before weaving must not be described as covering it.
