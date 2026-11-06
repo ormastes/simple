@@ -84,6 +84,17 @@ outputs with Git Bash. Its outer wrapper now propagates the actual bootstrap
 exit status after restoring PATH. No further unchanged retry is authorized by
 the bounded-repair policy; inspect its actual terminal evidence first.
 
+Attempt 6 terminal result: **ABORTED, stage=stage2, exit=1**. The frontend sanity
+substep refused to build with 9,121 MiB RAM/commit headroom against the configured
+24,576 MiB `SIMPLE_BUILD_MEMORY_RESERVE_BYTES` reserve (substep exit 2). The
+diagnostic is in `stage3/x86_64-pc-windows-msvc/stage2-sanity.env.frontend-failure.log`
+under the frozen bootstrap output. No Stage 2/full-CLI/test-runner admission or
+lifecycle test execution resulted. The diagnostic check's PASS only means the
+failure had an explanation; it is not bootstrap success. Six bootstrap attempts
+are exhausted. Preserve artifacts and do not start a seventh attempt or lower
+the reserve implicitly. Further execution needs an admitted runtime supplied by
+another lane, or an explicit retry-policy change with adequate resource headroom.
+
 Execute the lifecycle spec with an admitted pure-Simple runtime, assess failure
 coverage, and complete applicable compiler/lib/MCP checks before marking this
 change qualified. Review the exact pushed diff and comments before landing.
