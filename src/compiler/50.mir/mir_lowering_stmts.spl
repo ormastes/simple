@@ -1423,7 +1423,17 @@ impl MirLowering:
                         val annotated_float = match mir_type.kind:
                             case MirTypeKind.F32 | MirTypeKind.F64: true
                             case _: false
-                        if let_type != nil and (annotated_narrow_int or annotated_float):
+                        # `if val v = opt` desugars to `v = opt.?` + `v != nil`.
+                        # The `.?` word of a float/bool payload is raw
+                        # payload-or-nil bits in an i64 slot; lower_if decodes
+                        # it on the present edge (has_if_val_scalar_binding).
+                        # A typed binder (`f64?` callee -> let_type f64) took
+                        # the numeric cast below instead: `if val v` printed
+                        # 4612248968380809216.0, the bits of 2.25 as a number,
+                        # and `v != nil` folded to true.
+                        # doc/08_tracking/bug/mir_if_val_float_binder_numeric_cast_2026-11-06.md
+                        val exists_raw_scalar_word = self.exists_scalar_word_locals.contains(init_local.id)
+                        if let_type != nil and (annotated_narrow_int or annotated_float) and not exists_raw_scalar_word:
                             var cast_builder = self.builder
                             init_local = cast_builder.emit_cast(mir_operand_copy(init_local), mir_type)
                             self.builder = cast_builder
@@ -1520,7 +1530,9 @@ impl MirLowering:
                             case MirTypeKind.Array(_, _): true
                             case MirTypeKind.Slice(_): true
                             case _: false
-                        val effective_type = if vulkan_u32_initializer:
+                        val effective_type = if exists_raw_scalar_word:
+                            MirType.i64()
+                        else if vulkan_u32_initializer:
                             init_mir_type_value
                         else if let_type != nil and annotated_is_dict_pre and not self.local_is_runtime_dict(init_local):
                             mir_type
@@ -1668,6 +1680,8 @@ impl MirLowering:
                                     self.extern_result_locals[local.id] = true
                                 if self.static_scalar_locals.contains(init_local.id):
                                     self.static_scalar_locals[local.id] = true
+                                if self.exists_scalar_word_locals.contains(init_local.id):
+                                    self.exists_scalar_word_locals[local.id] = true
                                 self.copy_optional_record_owner(init_local.id, local.id)
                                 self.copy_result_err_record_owner(init_local.id, local.id)
                                 val found_init_hir_type = self.find_local_hir_type(init_local.id)

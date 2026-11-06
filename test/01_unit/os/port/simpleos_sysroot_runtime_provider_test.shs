@@ -51,12 +51,21 @@ runtime_defs=$($nm_tool -g --defined-only "$runtime")
 libc_defs=$($nm_tool -g --defined-only "$libc")
 
 for symbol in rt_is_debug_mode_enabled spl_thread_cpu_count rt_getpid \
-    rt_thread_sleep spl_panic spl_strdup rt_is_dir spl_str_concat; do
+    rt_thread_sleep spl_panic spl_strdup rt_is_dir spl_str_concat \
+    rt_read_stdin_line rt_process_spawn_async; do
     if ! printf '%s\n' "$runtime_defs" | grep -Eq "[[:space:]]$symbol$"; then
         echo "FAIL: libsimple_runtime.a does not define $symbol" >&2
         exit 1
     fi
 done
+
+# SimpleOS libc has neither hosted FILE locks nor posix_spawn. Keep the
+# complete-line reader and fork/exec process path independent of those APIs.
+runtime_undefined=$($nm_tool -g --undefined-only "$runtime")
+if printf '%s\n' "$runtime_undefined" | grep -Eq '[[:space:]](flockfile|funlockfile|_lock_file|_unlock_file|posix_spawn[^[:space:]]*)$'; then
+    echo "FAIL: SimpleOS runtime imports hosted FILE locking or posix_spawn" >&2
+    exit 1
+fi
 
 if ! printf '%s\n' "$libc_defs" | grep -Eq '[[:space:]]sched_yield$'; then
     echo "FAIL: libsimpleos_c.a does not define sched_yield" >&2
@@ -71,4 +80,4 @@ fi
 # TODO(simpleos-qemu): after an admitted SimpleOS phase environment exists,
 # relink /usr/bin/simple from this sysroot and execute its compiler smoke in
 # scripts/check/check-simpleos-compiler-filesystem-qemu.shs.
-echo "PASS: SimpleOS sysroot provides the nine-symbol compiler payload closure"
+echo "PASS: SimpleOS sysroot provides the compiler payload, complete-line reader, and process provider without hosted-only APIs"

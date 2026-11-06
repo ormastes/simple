@@ -1,0 +1,380 @@
+#!/bin/sh
+# Contract fixtures only: no native compiler build or product qualification.
+# Reuse the canonical planner test's complete hash-bound admission fixture.
+set -eu
+mode=${1:-history}
+case "$mode" in history|--composition-only|--publication-only) ;; *) exit 64 ;; esac
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+owner="$root/scripts/bootstrap/requalify-stage2-candidate.shs"
+[ -f "$owner" ] || { echo 'ERROR: requalification owner missing'; exit 2; }
+work=$(mktemp -d "${TMPDIR:-/tmp}/stage2-requalification-contract.XXXXXX")
+work=$(CDPATH= cd -- "$work" && pwd -P)
+trap 'chmod -R u+w "$work" 2>/dev/null || true; rm -rf "$work"' EXIT HUP INT TERM
+checks=0
+fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+check() { checks=$((checks + 1)); "$@" || fail "$*"; }
+replace_in_file() {
+    sed "$1" "$2" >"$2.tmp" || return 1
+    mv "$2.tmp" "$2"
+}
+
+BOOTSTRAP_STAGE3_VERSION_ROOT=$root
+SIMPLE_ABI_POLICY=v1
+export BOOTSTRAP_STAGE3_VERSION_ROOT SIMPLE_ABI_POLICY
+. "$root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+. "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+. "$root/scripts/check/lib/bootstrap-stage3/sanity.shs"
+. "$root/scripts/check/lib/bootstrap-stage3/manifest-verify.shs"
+
+if [ "$mode" = --publication-only ]; then
+    # Metadata contract only. No compiler, full replay, or earlier suite runs.
+    guard=$root/scripts/check/check-stage2-publication-commit.shs
+    publication=$work/publication-process.env
+    receipt=$work/stage3/fixture-triple/stage2-admitted/admission.env
+    sanity=$work/stage3/fixture-triple/stage2-sanity.env
+    marker=$work/requalification-commit.env
+    executed=$work/consumer-executed
+    mkdir -p "${receipt%/*}"
+    publication_candidate=${receipt%/*}/simple
+    printf '#!/bin/sh\ntouch "%s"\n' "$executed" >"$publication_candidate"
+    chmod 500 "$publication_candidate"
+    printf 'schema=simple-bootstrap-sanity-requalification-v1\n' >"$sanity"
+    write_admission() {
+        {
+            echo schema=simple-bootstrap-stage2-admission-v2
+            echo status=admitted
+            echo "admission_receipt_path=$receipt"
+            echo "candidate_path=$publication_candidate"
+            echo "candidate_sha256=$(bootstrap_stage3_hash_file "$publication_candidate")"
+            echo "sanity_evidence_path=$sanity"
+            echo "sanity_evidence_sha256=$(bootstrap_stage3_hash_file "$sanity")"
+        } >"$receipt"
+    }
+    write_marker() {
+        {
+            echo schema=simple-stage2-requalification-commit-v1
+            echo "admission_sha256=$(bootstrap_stage3_hash_file "$receipt")"
+            echo "publication_receipt_path=$publication"
+            echo "publication_receipt_sha256=$(bootstrap_stage3_hash_file "$publication")"
+        } >"$marker"
+    }
+    rejected() {
+        # Exercise the same guard-before-exec ordering used by consumers.
+        if sh "$guard" "$receipt" >"$work/publication-refusal.log" 2>&1; then
+            : >"$executed"
+            fail "publication guard accepted $1"
+        fi
+        checks=$((checks + 1))
+        check test ! -e "$executed"
+    }
+    write_admission
+    rejected missing-marker
+    if sh "$root/scripts/bootstrap/phase2-runtime-binding.shs" resolve "$publication_candidate" "$root" "$work/consumer-output" >"$work/resolve-refusal.log" 2>&1; then
+        fail 'phase2 resolver accepted uncommitted admission'
+    fi
+    check grep -qi 'publication' "$work/resolve-refusal.log"
+    for placeholder in missing-source missing-runtime missing-tool; do
+        printf 'synthetic publication-guard fixture\n' >"$work/$placeholder"
+    done
+    if sh "$root/scripts/bootstrap/publish-stage2-parent-receipts.shs" \
+        "$publication_candidate" "$receipt" "$work/missing-source" "$work/missing-runtime" \
+        "$work/missing-tool" "$sanity" "$work/parent-provenance.env" \
+        admitted-pure-simple-runtime-stage2-trust-root >"$work/parent-refusal.log" 2>&1; then
+        fail 'parent publisher accepted uncommitted admission'
+    fi
+    check grep -qi 'publication' "$work/parent-refusal.log"
+    check test ! -e "$work/parent-provenance.env"
+    check test ! -e "$executed"
+    printf 'status=running\nexit_status=0\n' >"$publication"
+    write_marker
+    rejected incomplete-process
+    printf 'status=complete\nexit_status=1\n' >"$publication"
+    write_marker
+    rejected nonzero-process
+    printf 'status=complete\nexit_status=0\n' >"$publication"
+    write_marker
+    check sh "$guard" "$receipt"
+    replace_in_file 's/^admission_sha256=.*/admission_sha256=0000000000000000000000000000000000000000000000000000000000000000/' "$marker"
+    rejected wrong-admission-hash
+    write_marker
+    replace_in_file 's/^publication_receipt_sha256=.*/publication_receipt_sha256=0000000000000000000000000000000000000000000000000000000000000000/' "$marker"
+    rejected wrong-publication-hash
+    cp "$publication" "$work/other-process.env"
+    publication=$work/other-process.env
+    write_marker
+    rejected wrong-publication-path
+    publication=$work/publication-process.env
+    write_marker
+    printf 'schema=simple-bootstrap-sanity-evidence-v1\n' >"$sanity"
+    rejected tampered-sanity-legacy-bypass
+    # A genuinely bound legacy receipt retains its prior behavior.
+    rm "$marker"
+    for legacy_schema in simple-bootstrap-sanity-evidence-v1 simple-bootstrap-sanity-components-v1 simple-bootstrap-sanity-version-composition-v1 simple-bootstrap-sanity-frontend-continuation-v1 simple-bootstrap-sanity-control-composition-v1; do
+        printf 'schema=%s\n' "$legacy_schema" >"$sanity"
+        write_admission
+        check sh "$guard" "$receipt"
+    done
+    printf 'schema=unrecognized-sanity-schema\n' >"$sanity"
+    write_admission
+    rejected unknown-sanity-schema
+    check test ! -e "$executed"
+    printf 'PASS: %s publication assertions; metadata controls only; no candidate executed\n' "$checks"
+    exit 0
+fi
+
+# Extract the fixture function verbatim, never execute the broader test suite.
+awk '/^make_fixture\(\) \{/ { copying=1 }
+     copying && /^run_producer\(\)/ { exit }
+     copying { print }' \
+    "$root/scripts/check/check-bootstrap-planner-admission-producer.shs" \
+    >"$work/fixture.sh"
+check grep -q '^make_fixture() {' "$work/fixture.sh"
+. "$work/fixture.sh"
+make_fixture "$work/fixture" 'stage2-provenance: pure-simple' strict
+history=$mf_evidence_dir
+candidate=$mf_admitted
+receipt=$mf_admission
+runtime=$mf_runtime_authority
+execution_marker="$work/candidate-executed"
+
+# A mistakenly executed historical candidate leaves an observable marker.
+# These are synthetic test bytes, not a production compiler or admission.
+{
+    printf '#!/bin/sh\nprintf "executed\\n" >> "%s"\n' "$execution_marker"
+    cat "$candidate"
+} >"$work/instrumented-candidate"
+chmod 500 "$work/instrumented-candidate"
+chmod u+w "$candidate"
+mv "$work/instrumented-candidate" "$candidate"
+candidate_sha=$(bootstrap_stage3_hash_file "$candidate")
+for evidence in "$history/stage2-sanity.env" "$history/stage2-receiver.env"; do
+    replace_in_file "s/^candidate_sha256_before=.*/candidate_sha256_before=$candidate_sha/; s/^candidate_sha256_after=.*/candidate_sha256_after=$candidate_sha/" "$evidence"
+done
+# Use a real directory snapshot rather than a shape-only fixture string.
+bootstrap_stage3_directory_snapshot "$history/runtime-admitted.new" "$runtime"
+mv "$history/runtime-admitted.new" "$history/runtime-admitted.txt"
+runtime_sha=$(bootstrap_stage3_hash_file "$history/runtime-admitted.txt")
+replace_in_file "s/^runtime_snapshot_sha256=.*/runtime_snapshot_sha256=$runtime_sha/" \
+    "$history/stage2-receiver.env"
+printf 'head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ndirty_fingerprint=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n' \
+    >"$history/git-state-before.env"
+state_sha=$(bootstrap_stage3_hash_file "$history/git-state-before.env")
+sanity_evidence=$history/stage2-sanity.env
+
+admission_call() {
+    "$1" "$receipt" "$receipt" "$candidate" "$candidate" \
+        "$history/source-inputs-before.txt" "$history/source-inputs-before.txt" \
+        "$history/runtime-admitted.txt" "$history/runtime-admitted.txt" \
+        "$runtime" "$runtime" \
+        "$history/tool-authority-before.txt" "$history/tool-authority-before.txt" \
+        cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+        "$sanity_evidence" "$sanity_evidence" "$history" \
+        "$history/stage2-receiver.env" "$history/stage2-receiver.env" \
+        "$history/stage2-receiver.log" "$history/stage2-receiver.log" "$root"
+}
+chmod u+w "$receipt"
+rm "$receipt"
+admission_call bootstrap_stage3_write_stage2_admission_receipt
+admission_sha=$(bootstrap_stage3_hash_file "$receipt")
+if [ "$mode" = --composition-only ]; then
+    controls=$work/controls
+    control_root=$work/control-root
+    mkdir -p "$controls" "$control_root/release" "$control_root/src/app/cli" \
+        "$control_root/src/runtime" "$control_root/scripts/bootstrap"
+    for directory in src/compiler src/lib src/os src/package_ownership src/plugins src/compositions examples/10_tooling scripts/check/lib test/03_system/app/bootstrap_builder/feature test/fixtures/bootstrap_builder; do
+        mkdir -p "$control_root/$directory"
+    done
+    for file in VERSION release/version.sdn src/app/cli/bootstrap_identity.spl scripts/bootstrap/run-process-group-bounded-log-windows.py; do
+        cp "$root/$file" "$control_root/$file"
+    done
+    printf 'int fixture(void) { return 0; }\n' >"$control_root/src/runtime/fixture.c"
+    bootstrap_stage3_source_snapshot "$controls/source" "$control_root"
+    bootstrap_stage3_directory_snapshot "$controls/scripts" "$control_root/scripts"
+    bootstrap_stage3_directory_snapshot "$controls/runtime" "$control_root/src/runtime"
+    cp "$history/tool-authority-before.txt" "$controls/tools"
+    cp "$history/git-state-before.env" "$controls/state"
+    cp "$receipt" "$controls/historical.env"
+    sanity_evidence=$history/composed-sanity.env
+    {
+        echo schema=simple-bootstrap-sanity-requalification-v1
+        echo status=pass
+        for pair in "source:source-inputs-before.txt" "runtime:runtime-admitted.txt" "tool:tool-authority-before.txt"; do
+            echo "${pair%%:*}_snapshot_sha256=$(bootstrap_stage3_hash_file "$history/${pair#*:}")"
+        done
+        echo build_args_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+        for pair in "full_sanity:$history/stage2-sanity.env" "producer_state:$history/git-state-before.env" "historical_admission:$controls/historical.env"; do
+            echo "${pair%%:*}_path=${pair#*:}"
+            echo "${pair%%:*}_sha256=$(bootstrap_stage3_hash_file "${pair#*:}")"
+        done
+        echo "control_root=$control_root"
+        for role in source scripts runtime tools state; do
+            echo "control_${role}_path=$controls/$role"
+            echo "control_${role}_sha256=$(bootstrap_stage3_hash_file "$controls/$role")"
+        done
+    } >"$sanity_evidence"
+    rm "$receipt"
+    admission_call bootstrap_stage3_write_stage2_admission_receipt
+    composed_output=$(dirname "$(dirname "$(dirname "$(dirname "$receipt")")")")
+    printf 'status=complete\nexit_status=0\n' >"$composed_output/publication-process.env"
+    {
+        echo schema=simple-stage2-requalification-commit-v1
+        echo "admission_sha256=$(bootstrap_stage3_hash_file "$receipt")"
+        echo "publication_receipt_path=$composed_output/publication-process.env"
+        echo "publication_receipt_sha256=$(bootstrap_stage3_hash_file "$composed_output/publication-process.env")"
+    } >"$composed_output/requalification-commit.env"
+    check admission_call bootstrap_stage3_verify_stage2_admission_receipt
+    reject_composition() {
+        if admission_call bootstrap_stage3_verify_stage2_admission_receipt >"$work/composition-refusal.log" 2>&1; then
+            fail "composed admission accepted $1"
+        fi
+        checks=$((checks + 1))
+        check test ! -e "$execution_marker"
+    }
+    for file in "$history/git-state-before.env" "$controls/historical.env" "$controls/source" "$controls/scripts" "$controls/runtime" "$controls/tools" "$controls/state" "$control_root/src/app/cli/bootstrap_identity.spl" "$control_root/src/runtime/fixture.c" "$control_root/scripts/bootstrap/run-process-group-bounded-log-windows.py"; do
+        cp -p "$file" "$work/composition.saved"
+        chmod u+w "$file"
+        printf '\n# fixture mutation\n' >>"$file"
+        reject_composition "$file mutation"
+        cp -p "$work/composition.saved" "$file"
+        rm "$work/composition.saved"
+    done
+    for file in "$history/git-state-before.env" "$controls/state" "$controls/source" "$history/stage2-sanity.env.frontend-bootstrap-0.log.stage2-mir-retention"; do
+        mv "$file" "$work/composition-missing.saved"
+        reject_composition "$file absence"
+        mv "$work/composition-missing.saved" "$file"
+    done
+    check test ! -e "$execution_marker"
+    printf 'PASS: %s composition assertions; synthetic evidence only; no compiler executed\n' "$checks"
+    exit 0
+fi
+check admission_call bootstrap_stage3_verify_stage2_admission_receipt
+check test ! -e "$execution_marker"
+
+# The historical envelope stays byte-identical while one old execution log is
+# unavailable. This must continue to fail ordinary product admission replay.
+missing_log="$history/stage2-sanity.env.frontend-bootstrap-0.log.stage2-mir-retention"
+mv "$missing_log" "$work/missing-log.saved"
+if admission_call bootstrap_stage3_verify_stage2_admission_receipt >"$work/normal-replay.log" 2>&1; then
+    fail 'normal replay accepted missing MIR-retention companion'
+fi
+checks=$((checks + 1))
+check grep -q 'safe-regular-log' "$work/normal-replay.log"
+
+mkdir "$work/outputs"
+output="$work/outputs/history-only"
+expected_candidate=$candidate_sha
+expected_admission=$admission_sha
+expected_state=$state_sha
+timeout=120
+rss=2097152
+invoke() {
+    sh "$owner" --validate-history-only \
+        --candidate="$candidate" --historical-receipt="$receipt" \
+        --history-root="$history" --runtime-root="$runtime" \
+        --expected-candidate-sha256="$expected_candidate" \
+        --expected-admission-sha256="$expected_admission" \
+        --expected-producer-state-sha256="$expected_state" \
+        --output="$output" --timeout-seconds="$timeout" --max-rss-kib="$rss" "$@"
+}
+invoke >"$work/history-only.log" 2>&1 || {
+    cat "$work/history-only.log" >&2
+    fail 'bound historical precheck rejected its valid fixture'
+}
+check grep -qx 'historical_chain_valid=true' "$work/history-only.log"
+check grep -qx 'product_admission=false' "$work/history-only.log"
+check test ! -e "$output"
+check test ! -e "$execution_marker"
+
+refuse() {
+    case_name=$1 reason=$2
+    shift 2
+    result=0
+    invoke "$@" >"$work/$case_name.log" 2>&1 || result=$?
+    check test "$result" -ne 0
+    check grep -Fq "stage2-requalification: refusal: $reason" "$work/$case_name.log"
+    check test ! -e "$execution_marker"
+    if [ ! -e "$output" ] && [ ! -L "$output" ]; then
+        checks=$((checks + 1))
+    else
+        # Occupied-output cases must retain only their pre-existing sentinel.
+        check test ! -e "$output/admission.env"
+        check test ! -e "$output/stage2-admitted/admission.env"
+    fi
+}
+
+refuse unknown unknown-argument --unrecognized-mode
+refuse duplicate duplicate-argument --candidate="$candidate"
+expected_candidate=not-a-digest
+refuse malformed-hash invalid-sha256
+expected_candidate=$candidate_sha
+expected_admission=
+refuse empty-hash missing-required-argument
+expected_admission=$admission_sha
+timeout=0
+refuse zero-timeout invalid-timeout
+timeout=120
+rss=0
+refuse zero-rss invalid-rss
+rss=2097152
+
+mutate_refuse() {
+    path=$1 name=$2 reason=$3
+    cp -p "$path" "$work/mutation.saved"
+    chmod u+w "$path"
+    printf '\n# changed fixture bytes\n' >>"$path"
+    refuse "$name" "$reason"
+    cp -p "$work/mutation.saved" "$path"
+    rm "$work/mutation.saved"
+}
+mutate_refuse "$candidate" changed-candidate candidate-hash-mismatch
+mutate_refuse "$receipt" changed-admission admission-hash-mismatch
+mutate_refuse "$history/git-state-before.env" changed-state producer-state-hash-mismatch
+for name in source-inputs-before.txt runtime-admitted.txt tool-authority-before.txt stage2-sanity.env stage2-receiver.env stage2-receiver.log; do
+    mutate_refuse "$history/$name" "changed-$name" historical-chain-invalid
+done
+runtime_file="$runtime/deps/libspl_hosted_runtime-fixture.rlib"
+mutate_refuse "$runtime_file" changed-runtime-object historical-chain-invalid
+
+result=0
+sh "$owner" --validate-history-only \
+    --candidate="$candidate" --historical-receipt="$receipt" \
+    --history-root="$history" --runtime-root="$runtime" \
+    --expected-candidate-sha256="$candidate_sha" \
+    --expected-producer-state-sha256="$state_sha" \
+    --output="$output" --timeout-seconds=120 --max-rss-kib=2097152 \
+    >"$work/missing-hash.log" 2>&1 || result=$?
+check test "$result" -ne 0
+check grep -Fq 'stage2-requalification: refusal: missing-required-argument' "$work/missing-hash.log"
+check test ! -e "$output"
+check test ! -e "$execution_marker"
+
+original_candidate=$candidate
+candidate="$work/candidate-link"
+ln -s "$original_candidate" "$candidate"
+refuse symlink-candidate unsafe-path
+candidate=$original_candidate
+
+output="$work/outputs/occupied"
+mkdir "$output"
+printf 'preserve me\n' >"$output/sentinel"
+refuse occupied output-already-exists
+check grep -qx 'preserve me' "$output/sentinel"
+output="$work/outputs/symlink"
+ln -s "$work/outputs/occupied" "$output"
+result=0
+invoke >"$work/symlink.log" 2>&1 || result=$?
+check test "$result" -ne 0
+check grep -Eq 'stage2-requalification: refusal: (unsafe-path|output-already-exists)' "$work/symlink.log"
+check test -L "$output"
+check grep -qx 'preserve me' "$output/sentinel"
+check test ! -e "$execution_marker"
+
+# Validation-only success must not weaken ordinary replay afterward either.
+if admission_call bootstrap_stage3_verify_stage2_admission_receipt >"$work/normal-replay-after.log" 2>&1; then
+    fail 'historical validation changed ordinary admission behavior'
+fi
+checks=$((checks + 1))
+check test "$(bootstrap_stage3_hash_file "$receipt")" = "$admission_sha"
+check test "$checks" -gt 0
+printf 'PASS: %s contract assertions; historical validation is not product admission; no compiler executed\n' "$checks"

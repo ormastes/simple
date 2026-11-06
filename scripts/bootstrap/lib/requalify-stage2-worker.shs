@@ -1,0 +1,199 @@
+#!/bin/sh
+# Internal finite qualification worker. Historical integrity is not admission.
+set -eu
+umask 077
+publish=0
+if [ "${1:-}" = --publish ]; then
+    publish=1; shift
+    [ "$#" = 6 ] || exit 64
+    root=$1 output=$2 target=$3 expected_candidate=$4 expected_admission=$5 expected_state=$6
+else
+    [ "$#" = 13 ] || exit 64
+    root=$1 original=$2 historical=$3 history=$4 runtime=$5
+    expected_candidate=$6 expected_admission=$7 expected_state=$8
+    output=$9 backend=${10} target=${11} entry_sha=${12} helper_sha=${13}
+fi
+BOOTSTRAP_STAGE3_FACADE_PATH=$root/scripts/check/lib/bootstrap-stage3-provenance.shs
+BOOTSTRAP_STAGE3_VERSION_ROOT=$root
+export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+SIMPLE_ABI_POLICY=$(awk '$1=="simple_abi_policy:" {n++;v=$2} END {if(n!=1)exit 1;print v}' "$root/doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn")
+export SIMPLE_ABI_POLICY
+stage=$output/stage3/$target
+candidate=$stage/stage2-admitted/simple
+receipt=$stage/stage2-admitted/admission.env
+producer=$output/producer
+control=$output/control
+fixture=$control/source-root
+authority=$stage/stage2-runtime-authority
+sanity=$stage/stage2-sanity.env
+full_sanity=$stage/stage2-full-sanity.env
+receiver=$stage/stage2-receiver.env
+receiver_log=$stage/stage2-receiver.log
+args_sha=$(bootstrap_stage3_manifest_value build_args_sha256 "$producer/admission.env" 2>/dev/null || true)
+admission_operation() {
+    "$1" "$output/admission.pending" "$receipt" "$candidate" "$candidate" \
+        "$producer/source-inputs-before.txt" "$producer/source-inputs-before.txt" \
+        "$producer/runtime-admitted.txt" "$producer/runtime-admitted.txt" \
+        "$authority" "$authority" "$producer/tool-authority-before.txt" \
+        "$producer/tool-authority-before.txt" "$args_sha" "$sanity" "$sanity" "$stage" \
+        "$receiver" "$receiver" "$receiver_log" "$receiver_log" "$root"
+}
+historical_operation() {
+    field() { bootstrap_stage3_manifest_value "$1" "$producer/admission.env"; }
+    bootstrap_stage3_verify_stage2_historical_chain \
+        "$producer/admission.env" "$(field admission_receipt_path)" "$candidate" "$(field candidate_path)" \
+        "$producer/source-inputs-before.txt" "$(field source_snapshot_path)" \
+        "$producer/runtime-admitted.txt" "$(field runtime_snapshot_path)" "$authority" "$(field runtime_authority_path)" \
+        "$producer/tool-authority-before.txt" "$(field tool_authority_path)" "$args_sha" \
+        "$history/stage2-sanity.env" "$(field sanity_evidence_path)" "$history" \
+        "$history/stage2-receiver.env" "$(field receiver_evidence_path)" \
+        "$history/stage2-receiver.log" "$(field receiver_log_path)" "$root"
+}
+capture_controls() {
+    bootstrap_stage3_source_snapshot "$control/source-$1.txt" "$fixture"
+    bootstrap_stage3_directory_snapshot "$control/scripts-$1.txt" "$fixture/scripts"
+    bootstrap_stage3_directory_snapshot "$control/runtime-$1.txt" "$fixture/src/runtime"
+    bootstrap_stage3_git_state "$root" "$control/git-$1.env"
+    bootstrap_stage3_tool_authority_snapshot "$control/tools-$1.txt" "$PATH" "$fixture"
+}
+check_controls() {
+    capture_controls "$1"
+    bootstrap_stage3_directory_snapshot "$control/executing-scripts-$1.txt" "$root/scripts"
+    cmp "$control/scripts-before.txt" "$control/executing-scripts-$1.txt"
+    for name in source scripts runtime git tools; do
+        cmp "$control/$name-before.$([ "$name" = git ] && echo env || echo txt)" \
+            "$control/$name-$1.$([ "$name" = git ] && echo env || echo txt)"
+    done
+    bootstrap_stage3_directory_snapshot "$control/runtime-authority-$1.txt" "$authority"
+    cmp "$producer/runtime-admitted.txt" "$control/runtime-authority-$1.txt"
+}
+if [ "$publish" = 1 ]; then
+    # Called only after the entrypoint observed watchdog completion. Recheck it
+    # here too: invoking this internal helper directly cannot skip cleanup.
+    [ "$(bootstrap_stage3_manifest_value status "$output/process.env")" = complete ]
+    [ "$(bootstrap_stage3_manifest_value exit_status "$output/process.env")" = 0 ]
+    [ ! -e "$receipt" ] && [ ! -L "$receipt" ]
+    [ "$(bootstrap_stage3_hash_file "$candidate")" = "$expected_candidate" ]
+    [ "$(bootstrap_stage3_hash_file "$producer/admission.env")" = "$expected_admission" ]
+    [ "$(bootstrap_stage3_hash_file "$producer/git-state-before.env")" = "$expected_state" ]
+    check_controls published
+    admission_operation bootstrap_stage3_verify_stage2_admission_preparation
+    # The SDN record binds the original producer state independently of fresh
+    # controls. Existing admission.env remains its canonical wire protocol.
+    {
+        echo 'schema: simple-stage2-preserved-candidate-requalification-v1'
+        echo "candidate_sha256: $(bootstrap_stage3_hash_file "$candidate")"
+        echo "historical_admission_sha256: $(bootstrap_stage3_hash_file "$producer/admission.env")"
+        echo "producer_state_sha256: $(bootstrap_stage3_hash_file "$producer/git-state-before.env")"
+        echo "producer_source_sha256: $(bootstrap_stage3_hash_file "$producer/source-inputs-before.txt")"
+        echo "control_source_sha256: $(bootstrap_stage3_hash_file "$control/source-before.txt")"
+        echo "control_scripts_sha256: $(bootstrap_stage3_hash_file "$control/scripts-before.txt")"
+        echo "control_runtime_sha256: $(bootstrap_stage3_hash_file "$control/runtime-before.txt")"
+        echo "control_state_sha256: $(bootstrap_stage3_hash_file "$control/git-before.env")"
+        echo "control_tools_sha256: $(bootstrap_stage3_hash_file "$control/tools-before.txt")"
+        echo "process_receipt_sha256: $(bootstrap_stage3_hash_file "$output/process.env")"
+        echo "fresh_admission_sha256: $(bootstrap_stage3_hash_file "$output/admission.pending")"
+    } >"$output/requalification.sdn"
+    chmod 400 "$output/requalification.sdn" "$output/admission.pending"
+    mv "$output/admission.pending" "$receipt"
+    if ! sh "$fixture/scripts/bootstrap/phase2-runtime-binding.shs" publish "$candidate" "$authority" "$output/phase2-runtime-capsules"; then
+        mv "$receipt" "$output/admission.failed"
+        exit 1
+    fi
+    chmod -R a-w "$stage" "$producer" "$control"
+    exit 0
+fi
+mkdir -p "$stage/stage2-admitted" "$producer" "$output/home" "$output/tmp" "$output/cache"
+cp -p "$original" "$candidate"
+chmod 500 "$candidate"
+cp -Rp "$runtime" "$authority"
+cp -p "$historical" "$producer/admission.env"
+for name in source-inputs-before.txt runtime-admitted.txt tool-authority-before.txt git-state-before.env; do
+    cp -p "$history/$name" "$producer/$name"
+done
+args_sha=$(bootstrap_stage3_manifest_value build_args_sha256 "$producer/admission.env")
+[ "$(bootstrap_stage3_hash_file "$candidate")" = "$expected_candidate" ]
+[ "$(bootstrap_stage3_hash_file "$producer/admission.env")" = "$expected_admission" ]
+[ "$(bootstrap_stage3_hash_file "$producer/git-state-before.env")" = "$expected_state" ]
+chmod 400 "$producer/"*
+bootstrap_stage3_directory_snapshot "$control/runtime-authority-before.txt" "$authority"
+cmp "$producer/runtime-admitted.txt" "$control/runtime-authority-before.txt"
+historical_operation
+# Fresh controls must be a committed clean tree, never dirty files relabeled HEAD.
+[ -z "$(git -C "$root" status --porcelain --untracked-files=normal)" ]
+mkdir "$fixture"
+git -C "$root" archive --format=tar HEAD >"$control/source.tar"
+tar -xf "$control/source.tar" -C "$fixture"
+rm "$control/source.tar"
+mkdir -p "$fixture/build/scv"
+chmod -R a-w "$fixture"
+# Canonical sanity must cold-prime SCV. This generated-state directory is
+# isolated from every source authority and is sealed with the result later.
+chmod u+w "$fixture/build/scv"
+capture_controls before
+bootstrap_stage3_directory_snapshot "$control/executing-scripts-before.txt" "$root/scripts"
+cmp "$control/scripts-before.txt" "$control/executing-scripts-before.txt"
+# Extract the canonical function bodies verbatim; no separate sanity policy.
+# Keep the extraction itself bound by the control script snapshot above.
+owner=$fixture/scripts/bootstrap/bootstrap-from-scratch.sh
+awk '/^run_timeout\(\) \{/ {f=1} f {print} f && /^\}$/ {exit}' "$owner" >"$control/functions.shs"
+for function in bootstrap_stage2_sanity_output_preflight bootstrap_stage_sanity; do
+    awk -v name="$function" '$0 == name "() (" {f=1} f {print} f && /^\)$/ {exit}' "$owner" >>"$control/functions.shs"
+done
+. "$fixture/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
+. "$control/functions.shs"
+repo_root=$fixture
+llvm_features=preserved-pure-simple-candidate
+CANDIDATE_FRONTEND_ROOT=$fixture
+cd "$fixture"
+case "$(uname -s)" in Darwin) os=macos ;; Linux) os=linux ;; FreeBSD) os=freebsd ;; *) exit 64 ;; esac
+case "$os" in linux|freebsd) sh "$fixture/scripts/check/check-linked-tombstone-refs.shs" "$candidate" ;; esac
+SIMPLE_RT_OBJ_CACHE_DIR=$output/cache/rt-obj
+export SIMPLE_RT_OBJ_CACHE_DIR
+bootstrap_stage_sanity "$candidate" "$full_sanity" "$output/home" "$output/tmp" "$PATH"
+before=$(bootstrap_stage3_hash_file "$candidate")
+receiver_exit=0
+env HOME="$output/home" TMPDIR="$output/tmp" PATH="$PATH" LC_ALL=C LANG=C \
+    SIMPLE_BOOTSTRAP=1 SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+    sh "$fixture/scripts/check/check-bootstrap-stage2-struct-receiver.shs" \
+    "$candidate" "$authority" "$target" "$backend" >"$receiver_log" 2>&1 || receiver_exit=$?
+after=$(bootstrap_stage3_hash_file "$candidate")
+bootstrap_stage3_directory_snapshot "$control/runtime-authority-after.txt" "$authority"
+compare_exit=0
+cmp "$producer/runtime-admitted.txt" "$control/runtime-authority-after.txt" || compare_exit=$?
+receiver_status=fail
+if [ "$receiver_exit" = 0 ] && [ "$compare_exit" = 0 ] && [ "$before" = "$after" ]; then receiver_status=pass; fi
+bootstrap_stage3_write_receiver_evidence_receipt "$receiver" "$receiver_status" \
+    "$compare_exit" "$receiver_exit" "$before" "$after" "$producer/runtime-admitted.txt" "$receiver_log"
+[ "$receiver_status" = pass ]
+[ "$after" = "$expected_candidate" ]
+[ "$(bootstrap_stage3_hash_file "$original")" = "$expected_candidate" ]
+[ "$(bootstrap_stage3_hash_file "$historical")" = "$expected_admission" ]
+[ "$(bootstrap_stage3_hash_file "$history/git-state-before.env")" = "$expected_state" ]
+[ "$(bootstrap_stage3_hash_file "$root/scripts/bootstrap/requalify-stage2-candidate.shs")" = "$entry_sha" ]
+[ "$(bootstrap_stage3_hash_file "$0")" = "$helper_sha" ]
+check_controls after
+historical_operation
+{
+    echo schema=simple-bootstrap-sanity-requalification-v1
+    echo status=pass
+    echo "source_snapshot_sha256=$(bootstrap_stage3_hash_file "$producer/source-inputs-before.txt")"
+    echo "runtime_snapshot_sha256=$(bootstrap_stage3_hash_file "$producer/runtime-admitted.txt")"
+    echo "tool_snapshot_sha256=$(bootstrap_stage3_hash_file "$producer/tool-authority-before.txt")"
+    echo "build_args_sha256=$args_sha"
+    for pair in "full_sanity:$full_sanity" "producer_state:$producer/git-state-before.env" "historical_admission:$producer/admission.env"; do
+        role=${pair%%:*}; file=${pair#*:}
+        echo "${role}_path=$file"
+        echo "${role}_sha256=$(bootstrap_stage3_hash_file "$file")"
+    done
+    echo "control_root=$fixture"
+    for role in source scripts runtime tools state; do
+        file=$control/$role-before.txt
+        [ "$role" != state ] || file=$control/git-before.env
+        echo "control_${role}_path=$file"
+        echo "control_${role}_sha256=$(bootstrap_stage3_hash_file "$file")"
+    done
+} >"$sanity"
+admission_operation bootstrap_stage3_write_stage2_admission_receipt
+admission_operation bootstrap_stage3_verify_stage2_admission_preparation

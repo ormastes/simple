@@ -35,15 +35,16 @@
 #include <stddef.h>
 #include <stdlib.h>
 
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(__simpleos__)
 #define RT_MEM_GUARD_AVAILABLE 1
 #include <sys/mman.h>
 #include <signal.h>
 #include <unistd.h>
 #else
-/* No VirtualAlloc/VirtualProtect port yet -- sampling is a documented no-op
- * on Windows (rt_mem_guard_should_sample always returns 0), never a wrong
- * or crashing result. */
+/* No VirtualAlloc/VirtualProtect port yet, and SimpleOS does not expose the
+ * hosted siginfo_t/SA_ONSTACK signal ABI required by the fault handler.
+ * Sampling is a documented no-op on those targets, never a wrong or
+ * crashing result. */
 #define RT_MEM_GUARD_AVAILABLE 0
 #endif
 

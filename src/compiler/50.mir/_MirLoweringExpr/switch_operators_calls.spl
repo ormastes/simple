@@ -842,6 +842,16 @@ impl MirLowering:
         type is Int/Float/Bool/Char, or its MIR slot is a scalar type that is
         never used as an erased/handle slot (anything but I64/U64). An I64
         slot with no scalar HIR type is of unknown provenance and is not."""
+        # A float MIR slot can hold neither an Option handle nor the nil word,
+        # whatever produced it. An extern `-> f64` result (or any F64 local a
+        # registry lost track of) used to reach normalize_option_handle and
+        # call rt_enum_id(i64) with an f64 operand -- Cranelift
+        # E-BACKEND-CRANELIFT-CALL-ABI in app.office.sheets.spreadsheet._parse_f64.
+        # doc/08_tracking/bug/mir_f64_into_optional_runtime_classified_2026-11-06.md
+        if val float_slot = self.local_mir_type_of(local):
+            match float_slot.kind:
+                case MirTypeKind.F32 | MirTypeKind.F64: return true
+                case _: ()
         if self.is_runtime_value_local(local.id) or self.option_value_locals.has(local.id):
             return false
         # An extern's declared scalar return may be the raw nil word.
@@ -993,6 +1003,12 @@ impl MirLowering:
         is what makes `nil` a real, distinct value for scalar optionals:
         Some(3), Some(true) and Some(0) are heap handles, never the raw
         sentinel, and a handle is never wrapped twice."""
+        if val float_word_type = self.local_mir_type_of(local):
+            match float_word_type.kind:
+                case MirTypeKind.F32 | MirTypeKind.F64:
+                    self.error_fatal("internal: float local reached runtime Option classification; it is a statically present scalar", nil)
+                    return local
+                case _: ()
         var b = self.builder
         val enum_id_fn = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_enum_id"),
@@ -3246,8 +3262,15 @@ impl MirLowering:
                 if typed_value == nil and pat.has_type_:
                     match pat.type_.kind:
                         case HirTypeKind.Str:
-                            bound_value = self.decode_declared_enum_payload_slot(value_local, pat.type_)
-                            self.remember_local_hir_type(bound_value.id, pat.type_, 0, 0)
+                            # Rebuild a fresh scalar-kind HirType instead of
+                            # forwarding the pattern's aggregate `type_`: on
+                            # stage3 native its `span` word arrived as -1 and
+                            # remember_local_hir_type's struct copy faulted
+                            # (F3 test_runner_main AV, s3_fable51). Root class:
+                            # untyped_optional_arm_join_typed_as_i64.
+                            val str_type = HirType(kind: HirTypeKind.Str, span: pat.span)
+                            bound_value = self.decode_declared_enum_payload_slot(value_local, str_type)
+                            self.remember_local_hir_type(bound_value.id, str_type, 0, 0)
                         case _: ()
                 self.local_map[bind_sym.id] = bound_value
                 self.bind_local(bind_sym.id, bound_value)

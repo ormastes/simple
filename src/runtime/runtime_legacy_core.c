@@ -43,7 +43,10 @@ typedef int pid_t;
 #else
 #include <dirent.h>
 #include <signal.h>
+#if !defined(__simpleos__)
+/* SimpleOS uses the fork/exec path below and has no posix_spawn provider. */
 #include <spawn.h>
+#endif
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
