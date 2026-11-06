@@ -710,7 +710,15 @@ impl HirLowering:
                         return nil
                 return Some(HirType(kind: HirTypeKind.Tuple(slot_types), span: subject_span))
             case _: ()
-        nil
+        # A call / method call / `expr?` / unsafe-block subject carries its
+        # declared type through the same transport `val` bindings use. Without
+        # it `match read(): Ok(r): if val c = r` bound `r` untyped and the
+        # if-val payload as a unit slot (E-BACKEND-LLVM-CONST-TYPE,
+        # rt_hal_isolated_host.host_join_exact).
+        val transported = self.binding_kind_type(subject_kind, subject_span)
+        match transported.kind:
+            case HirTypeKind.Error: nil
+            case _: Some(transported)
 
     me lower_match_pattern(p: Pattern, subject_type: HirType?) -> HirPattern:
         # Standalone/nested subject positions own their description. The actual
@@ -812,6 +820,18 @@ impl HirLowering:
                                     if val nested_outer_slot = self.wrapper_slot_subject_v1(variant_name, subject_type):
                                         if val nested_lowered = self.lower_nested_wrapper_v1(wrapper_patterns[0], nested_outer_slot):
                                             return self.wrapper_pattern(variant_name, nested_lowered, p.span)
+                                # A plain binder `Ok(r)` / `Some(x)` / `Err(e)`
+                                # carries the subject's proven slot type, so a
+                                # later `if val c = r` binds `text`, not a unit
+                                # slot (E-BACKEND-LLVM-CONST-TYPE,
+                                # rt_hal_isolated_host.host_join_exact).
+                                if wrapper_patterns.len() == 1 and not self.pattern_names_unit_variant(wrapper_patterns[0]):
+                                    match wrapper_patterns[0].kind:
+                                        case PatternKind.Binding(_, _):
+                                            if val binder_slot = self.wrapper_slot_subject_v1(variant_name, subject_type):
+                                                if declared_pattern_slot_type_is_resolved(binder_slot):
+                                                    return self.wrapper_pattern(variant_name, self.lower_match_pattern(wrapper_patterns[0], Some(binder_slot)), p.span)
+                                        case _: ()
                                 # Only when the wrapped pattern names a possible
                                 # unit variant: a plain `Some(x)` keeps its
                                 # existing lowering untouched.
