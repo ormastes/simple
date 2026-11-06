@@ -94,6 +94,9 @@ Per function, first match wins:
    `is_generic_template`, interrupt handlers (`70.backend/interrupt.spl`),
    functions in `src/lib/common/trace/**`, `src/lib/nogc_sync_mut/trace/**`
    (the xray handler itself), and the allocator/runtime-hook set → `xray_mode = 0`.
+   Interrupt handlers are caught only when `@naked` or placed in a custom
+   section: a non-naked `@interrupt` fn carries no MIR flag yet. Bare-metal and
+   SimpleOS targets are rejected by `compile --xray` until that flag exists.
 3. `is_inline`/`alwaysinline` → no sleds (physical-function rule, plan §5.4).
 4. Every other function → sleds (`xray_mode = 1`, or `2` with tail-exit).
 
