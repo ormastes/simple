@@ -18,6 +18,7 @@ use std.spec.{step}
 use std.io.{file_write, dir_create_all, file_exists}
 use std.io.{env_get, env_set}
 use std.io_runtime.{getpid, time_now_unix_micros}
+use std.nogc_sync_mut.env.variables.{env_unset}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 
 val FIXTURE: text = "fn main():\n    var d: Dict<text, i64> = \{}\n    d[\"b\"] = 1\n    d[\"a\"] = 2\n    d[\"10\"] = 3\n    d[\"9\"] = 4\n    var ks = \"\"\n    for k in d.keys():\n        ks = ks + k + \",\"\n    print \"KEYS=\" + ks\n    var vs = \"\"\n    for v in d.values():\n        vs = vs + \"\{v},\"\n    print \"VALUES=\" + vs\n    var fl = \"\"\n    for (k, v) in d:\n        fl = fl + k + \"=\" + \"\{v},\"\n    print \"LOOP=\" + fl\n    d[\"a\"] = 20\n    d.remove(\"b\")\n    d[\"b\"] = 5\n    var rs = \"\"\n    for (k, v) in d.entries():\n        rs = rs + k + \"=\" + \"\{v},\"\n    print \"REORDER=\" + rs\n    var big: Dict<text, i64> = \{}\n    var i = 49\n    while i >= 0:\n        big[\"k\{i}\"] = i\n        i = i - 1\n    val bk = big.keys()\n    print \"GROW=\" + bk[0] + \",\" + bk[1] + \",\" + bk[49] + \",\" + \"\{big.len()}\"\n    var ik: Dict<i64, text> = \{}\n    ik[3] = \"c\"\n    ik[1] = \"a\"\n    ik[2] = \"b\"\n    var is = \"\"\n    for k in ik.keys():\n        is = is + \"\{k},\"\n    print \"INTKEYS=\" + is\n    print \"SHOW=\" + \"\{d}\"\n"
@@ -38,10 +39,14 @@ fn fixture_path() -> text:
     p
 
 fn run_in_mode(mode: text) -> text:
-    val previous = env_get("SIMPLE_EXECUTION_MODE") ?? ""
+    val previous = env_get("SIMPLE_EXECUTION_MODE")
     env_set("SIMPLE_EXECUTION_MODE", mode)
     val (out, err, code) = process_run_bounded(simple_binary(), ["run", fixture_path()], 240000, 1000000)
-    env_set("SIMPLE_EXECUTION_MODE", previous)
+    match previous:
+        case Some(value): env_set("SIMPLE_EXECUTION_MODE", value)
+        case None: env_unset("SIMPLE_EXECUTION_MODE")
+    if code != 0:
+        return "EXIT={code}\n{err}"
     out
 
 describe "Dict insertion order: interpreter and JIT agree":
