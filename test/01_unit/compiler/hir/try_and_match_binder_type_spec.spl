@@ -1,0 +1,64 @@
+# @req REQ-SSPEC-COMPILER
+# Regression (Stage 2 test_runner_build, E-BACKEND-LLVM-CONST-TYPE "integer
+# constant cannot define void"): two binding shapes left their binder untyped,
+# so a following `if val p = binder` bound its payload as a unit slot.
+#   1. `val found = which(n)?`        (sosix_spawn_checked / sosix_run_bounded_checked)
+#   2. `match rd(n): case Ok(r): ...` (rt_hal_isolated_host.host_join_exact)
+# Both must transport the declared `text?` to the binder and `text` to the
+# if-val payload.
+use std.spec.*
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+
+fn lowered(src: text, name: text) -> HirLowering:
+    val parsed = parse_full_frontend(src, "testdata/{name}.spl", name, Logger(level: 0))
+    var lowering = HirLowering.with_filename("testdata/{name}.spl")
+    lowering.lower_module(parsed)
+    lowering
+
+# "opt-text" when some symbol `name` is typed `text?`, "text" for `text`,
+# "untyped" otherwise.
+fn binder_shape(lowering: HirLowering, name: text) -> text:
+    var shape = "untyped"
+    for key in lowering.symbols.symbols.keys():
+        val sym = lowering.symbols.symbols[key]
+        if sym.name == name:
+            if val t = sym.type_:
+                match t.kind:
+                    case HirTypeKind.Str: shape = "text"
+                    case HirTypeKind.Optional(inner):
+                        if inner.kind == HirTypeKind.Str: shape = "opt-text"
+                    case _: ()
+    shape
+
+val HEAD = "fn which(n: text) -> Result<text?, text>:\n    Ok(Some(n))\n\n"
+
+describe "binder type transport for `?` and match-arm wrapper binders":
+    it "types a `val x = call()?` binding with the Ok payload":
+        val src = HEAD +
+            "fn a_try(n: text) -> Result<text, text>:\n" +
+            "    val found = which(n)?\n" +
+            "    if val path = found: return Ok(path)\n" +
+            "    Err(\"missing\")\n"
+        val l = lowered(src, "try_binding")
+        expect(binder_shape(l, "found")).to_equal("opt-text")
+        expect(binder_shape(l, "path")).to_equal("text")
+
+    it "types a plain `Ok(r)` binder over a call scrutinee":
+        val src = HEAD +
+            "fn b_arm(n: text) -> text:\n" +
+            "    var out = \"\"\n" +
+            "    match which(n):\n" +
+            "        case Ok(result):\n" +
+            "            if val chunk = result:\n" +
+            "                out = out + chunk\n" +
+            "        case Err(problem):\n" +
+            "            return problem\n" +
+            "    out\n"
+        val l = lowered(src, "arm_binding")
+        expect(binder_shape(l, "result")).to_equal("opt-text")
+        expect(binder_shape(l, "chunk")).to_equal("text")
+        expect(binder_shape(l, "problem")).to_equal("text")
