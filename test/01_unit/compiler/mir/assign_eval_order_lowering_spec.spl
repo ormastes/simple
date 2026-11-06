@@ -1,0 +1,98 @@
+# @cover src/compiler/50.mir/mir_lowering_stmts.spl
+"""
+## Purpose and audience
+Compiler lowering of assignment follows the same evaluation order as both
+interpreters: the right-hand side first, then the place (receiver, then index
+subexpressions outer to inner), each exactly once; compound assignment reads
+and writes the place it evaluated once. Readers are MIR and backend authors.
+Owner decision 2026-11-06 (option b). Plan:
+doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md
+(W2a; ATTR-16, ATTR-18). Category: Language.
+## Operator workflow
+bin/simple test test/01_unit/compiler/mir/assign_eval_order_lowering_spec.spl
+## Compatibility and limitations
+Characterization: compiler MIR lowering already followed this order when the
+contract was decided, so this spec was green on its first run. Checks the order of the side-effecting calls in the lowered MIR of `main`;
+it does not run native code.
+## Verification guidance and troubleshooting
+The call log lists `w2a_rhs`, `w2a_r`, `w2a_i` in emission order. A repeated
+name means the place or the right-hand side was lowered twice.
+"""
+# Lifecycle: doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md
+# @manual_section: Assignment evaluation order in MIR
+
+use std.spec.*
+use std.env.variables.{env_set}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn order_callee_name(func: MirOperand) -> text:
+    match func.kind:
+        case Const(value, _):
+            match value:
+                case Str(s):
+                    if s.contains("w2a_rhs"): return "rhs"
+                    if s.contains("w2a_r"): return "r"
+                    if s.contains("w2a_i"): return "i"
+                    ""
+                case _: ""
+        case _: ""
+
+# Lowers `stmt` inside main and returns the side-effecting call order.
+fn lowered_order(stmt: text, name: text) -> text:
+    val source = "class Box:\n    items: [i64]\n    x: i64\n" +
+        "fn w2a_r(v: i64) -> i64:\n    v\n" +
+        "fn w2a_i(v: i64) -> i64:\n    v\n" +
+        "fn w2a_rhs(v: i64) -> i64:\n    v\n" +
+        "fn main():\n    var arr = [0, 0]\n    var grid = [[0, 0], [0, 0]]\n" +
+        "    var boxes = [Box(items: [0, 0], x: 0)]\n    " + stmt + "\n"
+    val filename = "assign_order_" + name + ".spl"
+    env_set("SIMPLE_BOOTSTRAP", "0")
+    val module = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var order: [text] = []
+    for fn_ in mir.functions.values():
+        if fn_.name == "main" or fn_.name.ends_with(".main"):
+            for block in fn_.blocks:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case Call(_, func, _):
+                            val callee = order_callee_name(func)
+                            if callee != "":
+                                order.push(callee)
+                        case _: ()
+    order.join(",")
+
+describe "Assignment evaluation order in MIR":
+    it "lowers the right-hand side before an indexed and a nested place":
+        # @req REQ-ATTR-16
+        step("Lower plain assignments to an indexed element, a nested index and a field of an indexed element")
+        val indexed = lowered_order("arr[w2a_i(1)] = w2a_rhs(5)", "indexed")
+        val nested = lowered_order("grid[w2a_r(1)][w2a_i(0)] = w2a_rhs(7)", "nested")
+        val field = lowered_order("boxes[w2a_r(0)].x = w2a_rhs(1)", "field")
+        # @capture(exec): lowered call orders
+        step("Verify right-hand side, then receiver index, then inner index, each lowered once")
+        expect(indexed).to_equal("rhs,i")
+        expect(nested).to_equal("rhs,r,i")
+        expect(field).to_equal("rhs,r")
+
+    it "lowers compound assignment as one evaluation of the place after the right-hand side":
+        # @req REQ-ATTR-16
+        step("Lower compound assignments to an indexed element and a nested index")
+        # `-=`/`*=`: collection_desugar rewrites `t += <non-scalar>` to
+        # `t.merge(...)` before lowering (tracked in
+        # doc/08_tracking/bug/compound_plus_assign_call_rhs_rewritten_to_merge_2026-11-06.md).
+        val indexed = lowered_order("arr[w2a_i(0)] *= w2a_rhs(2)", "compound_indexed")
+        val nested = lowered_order("grid[w2a_r(1)][w2a_i(0)] -= w2a_rhs(4)", "compound_nested")
+        # @capture(exec): lowered call orders
+        step("Verify the place calls appear once each, after the right-hand side")
+        expect(indexed).to_equal("rhs,i")
+        expect(nested).to_equal("rhs,r,i")
+        expect(lowered_order("boxes[w2a_r(0)].x -= w2a_rhs(3)", "compound_field")).to_equal("rhs,r")

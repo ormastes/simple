@@ -178,6 +178,32 @@ bootstrap_deploy_tx_safe_name() {
   case "$1" in ''|.|..|*[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac
 }
 
+# The ONE sub-directory entry class: the content-addressed levelled vector
+# provider, providers/simple_vector_provider_levelled-<16 hex>.<dll|so|dylib>.
+# The deployed compiler's runtime admits only <exe_dir>/providers/<that file>
+# under a pin baked at build time (runtime_simd_utf8.c), so it must sit beside
+# the compiler inside the generation. Everything else stays a flat safe name.
+bootstrap_deploy_tx_provider_entry() {
+  case "$1" in
+    providers/simple_vector_provider_levelled-????????????????.dll|\
+    providers/simple_vector_provider_levelled-????????????????.so|\
+    providers/simple_vector_provider_levelled-????????????????.dylib) ;;
+    *) return 1 ;;
+  esac
+  bootstrap_deploy_tx_provider_hex=${1#providers/simple_vector_provider_levelled-}
+  bootstrap_deploy_tx_provider_hex=${bootstrap_deploy_tx_provider_hex%%.*}
+  case "$bootstrap_deploy_tx_provider_hex" in *[!0-9a-f]*) return 1 ;; esac
+}
+
+bootstrap_deploy_tx_entry_name_ok() {
+  bootstrap_deploy_tx_safe_name "$1" || bootstrap_deploy_tx_provider_entry "$1"
+}
+
+# Count (0 or 1) and name of the provider entry in a journal.
+bootstrap_deploy_tx_journal_providers() {
+  awk -F '|' 'index($1, "providers/") == 1 { count++; name = $1 } END { print count + 0; if (count) print name }' "$1"
+}
+
 bootstrap_deploy_tx_safe_text() {
   case "$1" in *'|'*|*'	'*|*'
 '*) return 1 ;; *) return 0 ;; esac
@@ -185,6 +211,7 @@ bootstrap_deploy_tx_safe_text() {
 
 bootstrap_deploy_tx_role_for_name() {
   case "$1" in
+    providers/*) bootstrap_deploy_tx_provider_entry "$1" || return 1; echo vector-provider ;;
     simple|simple.exe) echo compiler ;;
     simple_seed|simple_seed.exe) echo seed ;;
     simple_ui_backend|simple_ui_backend.exe) echo ui-backend ;;
@@ -202,7 +229,11 @@ bootstrap_deploy_tx_verify_full_closure() {
   journal=$1
   suffix=$2
   required="simple${suffix} simple_seed${suffix} simple_ui_backend${suffix} simple_mcp_server${suffix} simple_mcp_server${suffix}.sha256 simple_lsp_mcp_server${suffix} simple_lsp_mcp_server${suffix}.sha256 launcher.simple${suffix} launcher.simple_seed${suffix} launcher.simple_ui_backend${suffix} launcher.simple_mcp_server${suffix} launcher.simple_lsp_mcp_server${suffix} authority.stage4-provenance.env authority.stage3-acceptance.env authority.kernel-policy.sdn authority.phase7.env authority.phase7-candidates.env authority.performance-baseline.env authority.performance-measurement.env"
-  [ "$(wc -l <"$journal" | tr -d ' ')" -eq 19 ] || return 1
+  # 19 required entries, plus at most one content-addressed provider.
+  set -- $(bootstrap_deploy_tx_journal_providers "$journal")
+  [ "$1" -le 1 ] || return 1
+  [ "$1" -eq 0 ] || bootstrap_deploy_tx_provider_entry "$2" || return 1
+  [ "$(wc -l <"$journal" | tr -d ' ')" -eq $((19 + $1)) ] || return 1
   for name in $required; do
     [ "$(awk -F '|' -v name="$name" '$1 == name { count++ } END { print count + 0 }' "$journal")" -eq 1 ] || return 1
   done
@@ -718,17 +749,29 @@ bootstrap_deploy_tx_add() {
   bootstrap_deploy_tx_destination=$3
   bootstrap_deploy_tx_mode=$4
   bootstrap_deploy_tx_expected=$5
-  bootstrap_deploy_tx_safe_name "$bootstrap_deploy_tx_name" || return 1
+  bootstrap_deploy_tx_entry_name_ok "$bootstrap_deploy_tx_name" || return 1
   case "$bootstrap_deploy_tx_mode" in 644|755) ;; *) return 1 ;; esac
   bootstrap_deploy_tx_safe_text "$bootstrap_deploy_tx_source" || return 1
   bootstrap_deploy_tx_source=$(bootstrap_deploy_tx_canonical_file "$bootstrap_deploy_tx_source") || return 1
   bootstrap_deploy_tx_safe_text "$bootstrap_deploy_tx_destination" || return 1
-  bootstrap_deploy_tx_destination=$(bootstrap_deploy_tx_canonical_destination "$bootstrap_deploy_tx_destination") || return 1
+  if bootstrap_deploy_tx_provider_entry "$bootstrap_deploy_tx_name"; then
+    # <platform>/providers/<leaf>: canonicalize the providers dir as if it
+    # were a flat entry, then re-append the leaf.
+    bootstrap_deploy_tx_leaf=${bootstrap_deploy_tx_name#providers/}
+    [ "$(basename -- "$bootstrap_deploy_tx_destination")" = "$bootstrap_deploy_tx_leaf" ] || return 1
+    bootstrap_deploy_tx_destination=$(bootstrap_deploy_tx_canonical_destination "$(dirname -- "$bootstrap_deploy_tx_destination")") || return 1
+    bootstrap_deploy_tx_destination="$bootstrap_deploy_tx_destination/$bootstrap_deploy_tx_leaf"
+  else
+    bootstrap_deploy_tx_destination=$(bootstrap_deploy_tx_canonical_destination "$bootstrap_deploy_tx_destination") || return 1
+  fi
   [ "$bootstrap_deploy_tx_destination" = "$bootstrap_deploy_tx_platform_path/$bootstrap_deploy_tx_name" ] || return 1
   if awk -F '|' -v name="$bootstrap_deploy_tx_name" '$1 == name { found = 1 } END { exit !found }' "$bootstrap_deploy_tx_journal"; then
     return 1
   fi
   bootstrap_deploy_tx_stage="$bootstrap_deploy_tx_dir/$bootstrap_deploy_tx_name"
+  if bootstrap_deploy_tx_provider_entry "$bootstrap_deploy_tx_name"; then
+    mkdir -p "$bootstrap_deploy_tx_dir/providers" || return 1
+  fi
   install -m"$bootstrap_deploy_tx_mode" "$bootstrap_deploy_tx_source" "$bootstrap_deploy_tx_stage" || return 1
   bootstrap_deploy_tx_candidate_sha=$(bootstrap_deploy_tx_hash_file "$bootstrap_deploy_tx_stage") || return 1
   [ -z "$bootstrap_deploy_tx_expected" ] || [ "$bootstrap_deploy_tx_candidate_sha" = "$bootstrap_deploy_tx_expected" ] || return 1
@@ -792,7 +835,7 @@ bootstrap_deploy_tx_seal() {
   bootstrap_deploy_tx_expected_inventory="$bootstrap_deploy_tx_dir/.expected-inventory.$$"
   bootstrap_deploy_tx_actual_inventory="$bootstrap_deploy_tx_dir/.actual-inventory.$$"
   {
-    awk -F '|' '{ print $1 }' "$bootstrap_deploy_tx_journal"
+    awk -F '|' '{ sub("/.*", "", $1); print $1 }' "$bootstrap_deploy_tx_journal"
     printf '%s\n' entries.tsv receipt-entries.env bootstrap-generation.env bootstrap-deploy-receipt.env
   } | LC_ALL=C sort >"$bootstrap_deploy_tx_expected_inventory" || return 1
   find "$bootstrap_deploy_tx_dir" -mindepth 1 -maxdepth 1 \
@@ -803,6 +846,13 @@ bootstrap_deploy_tx_seal() {
     return 1
   }
   rm -f "$bootstrap_deploy_tx_expected_inventory" "$bootstrap_deploy_tx_actual_inventory" || return 1
+  # providers/ (when present) holds exactly the one journalled provider.
+  set -- $(bootstrap_deploy_tx_journal_providers "$bootstrap_deploy_tx_journal")
+  if [ "$1" -eq 1 ]; then
+    [ -d "$bootstrap_deploy_tx_dir/providers" ] && [ ! -L "$bootstrap_deploy_tx_dir/providers" ] || return 1
+    [ "$(find "$bootstrap_deploy_tx_dir/providers" -mindepth 1 | wc -l | tr -d ' ')" -eq 1 ] &&
+      [ -f "$bootstrap_deploy_tx_dir/$2" ] && [ ! -L "$bootstrap_deploy_tx_dir/$2" ] || return 1
+  fi
   while IFS='|' read -r bootstrap_deploy_tx_name bootstrap_deploy_tx_source bootstrap_deploy_tx_destination bootstrap_deploy_tx_mode bootstrap_deploy_tx_sha; do
     case "$bootstrap_deploy_tx_mode" in
       755) chmod 555 "$bootstrap_deploy_tx_dir/$bootstrap_deploy_tx_name" || return 1 ;;
@@ -814,6 +864,12 @@ bootstrap_deploy_tx_seal() {
     "$bootstrap_deploy_tx_dir/receipt-entries.env" \
     "$bootstrap_deploy_tx_dir/bootstrap-generation.env" \
     "$bootstrap_deploy_tx_dir/bootstrap-deploy-receipt.env" || return 1
+  if [ -d "$bootstrap_deploy_tx_dir/providers" ]; then
+    for bootstrap_deploy_tx_member in "$bootstrap_deploy_tx_dir"/providers/*; do
+      bootstrap_deploy_tx_sync "$bootstrap_deploy_tx_member" || return 1
+    done
+    chmod 555 "$bootstrap_deploy_tx_dir/providers" || return 1
+  fi
   for bootstrap_deploy_tx_member in "$bootstrap_deploy_tx_dir"/*; do
     bootstrap_deploy_tx_sync "$bootstrap_deploy_tx_member" || return 1
   done
@@ -897,6 +953,7 @@ bootstrap_deploy_tx_commit() {
 }
 
 bootstrap_deploy_tx_known_generation_entry() {
+  bootstrap_deploy_tx_provider_entry "$1" && return 0
   case "$1" in
     simple|simple.exe|simple_seed|simple_seed.exe|simple_ui_backend|simple_ui_backend.exe|\
     simple_mcp_server|simple_mcp_server.exe|simple_mcp_server.sha256|simple_mcp_server.exe.sha256|\
@@ -918,9 +975,10 @@ bootstrap_deploy_tx_validate_entries() {
   bootstrap_deploy_tx_validate_generation_dir=$2
   bootstrap_deploy_tx_validate_count=$(bootstrap_deploy_tx_value "$bootstrap_deploy_tx_validate_entries_file" entry_count) || return 1
   case "$bootstrap_deploy_tx_validate_count" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$bootstrap_deploy_tx_validate_count" -eq 19 ] || return 1
+  [ "$bootstrap_deploy_tx_validate_count" -eq 19 ] || [ "$bootstrap_deploy_tx_validate_count" -eq 20 ] || return 1
   bootstrap_deploy_tx_validate_index=1
   bootstrap_deploy_tx_validate_simple=0
+  bootstrap_deploy_tx_validate_providers=0
   while [ "$bootstrap_deploy_tx_validate_index" -le "$bootstrap_deploy_tx_validate_count" ]; do
     bootstrap_deploy_tx_validate_prefix="entry_$bootstrap_deploy_tx_validate_index"
     bootstrap_deploy_tx_validate_name=$(bootstrap_deploy_tx_value "$bootstrap_deploy_tx_validate_entries_file" "${bootstrap_deploy_tx_validate_prefix}_name") || return 1
@@ -935,8 +993,10 @@ bootstrap_deploy_tx_validate_entries() {
     [ "$(wc -c <"$bootstrap_deploy_tx_validate_path" | tr -d ' ')" = "$bootstrap_deploy_tx_validate_size" ] || return 1
     [ "$(find "$bootstrap_deploy_tx_validate_path" -links +1 -print | wc -l | tr -d ' ')" -eq 0 ] || return 1
     case "$bootstrap_deploy_tx_validate_name" in simple|simple.exe) bootstrap_deploy_tx_validate_simple=$((bootstrap_deploy_tx_validate_simple + 1)) ;; esac
+    case "$bootstrap_deploy_tx_validate_name" in providers/*) bootstrap_deploy_tx_validate_providers=$((bootstrap_deploy_tx_validate_providers + 1)) ;; esac
     bootstrap_deploy_tx_validate_index=$((bootstrap_deploy_tx_validate_index + 1))
   done
+  [ "$bootstrap_deploy_tx_validate_count" -eq $((19 + bootstrap_deploy_tx_validate_providers)) ] || return 1
   [ "$bootstrap_deploy_tx_validate_simple" -eq 1 ]
 }
 

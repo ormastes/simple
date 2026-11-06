@@ -270,6 +270,35 @@ extern SimdTextDispatch g_simd_text;
 
 void simd_text_init(void);
 
+/* Levelled text provider route (owner: runtime_simd_utf8.c). Text SIMD runs
+ * only inside the admitted per-CPU-level provider DSO; this binary keeps the
+ * scalar baseline. simd_text_provider_call returns 1 and stores the result
+ * when the provider ran the opcode (SIMPLE_VECTOR_TEXT_*), 0 when the caller
+ * must use its scalar path. Spans shorter than SIMD_TEXT_PROVIDER_MIN_BYTES
+ * stay scalar: the wire call costs more than the kernel saves there. */
+#define SIMD_TEXT_PROVIDER_MIN_BYTES 64u
+enum {
+    SIMD_TEXT_PROVIDER_ADMITTED = 0,
+    SIMD_TEXT_PROVIDER_NOT_CONFIGURED = 1,
+    SIMD_TEXT_PROVIDER_PATH_DENIED = 2,
+    SIMD_TEXT_PROVIDER_PIN_INVALID = 3,
+    SIMD_TEXT_PROVIDER_ARTIFACT_MISSING = 4,
+    SIMD_TEXT_PROVIDER_DIGEST_MISMATCH = 5,
+    SIMD_TEXT_PROVIDER_LOAD_FAILED = 6,
+    SIMD_TEXT_PROVIDER_DIGEST_UNSTABLE = 7,
+    SIMD_TEXT_PROVIDER_SYMBOL_MISSING = 8,
+    SIMD_TEXT_PROVIDER_QUERY_REFUSED = 9,
+    SIMD_TEXT_PROVIDER_NO_SIMD_LEVEL = 10,
+    SIMD_TEXT_PROVIDER_SELF_TEST_FAILED = 11,
+    SIMD_TEXT_PROVIDER_EXE_DIR_UNKNOWN = 12
+};
+int simd_text_provider_call(uint32_t op, const uint8_t* a, uint64_t n,
+                            const uint8_t* b, uint64_t bn, uint8_t* out,
+                            int64_t* result);
+/* Which route runs: admitted provider level (0 = scalar) and the reason. */
+int64_t simd_text_provider_level(void);
+int64_t simd_text_provider_status(void);
+
 /* ================================================================
  * SimdCryptoDispatch — function-pointer table for crypto operations
  *

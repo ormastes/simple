@@ -2,7 +2,7 @@
 
 - **Filed:** 2026-07-28
 - **Severity:** high — silently caps every downstream source-location feature
-- **Status:** open
+- **Status:** CLOSED 2026-11-06 — both `HirFunction(` sites in `_Items/declaration_lowering.spl` set `span` (`span: span` ~l.170, `span: fn_.span` ~l.624); guard spec `test/01_unit/compiler/hir/hir_function_span_populate_spec.spl`.
 - **Found via:** DS5 `mir-span-thread` lane, while proving MIR spans survive lowering
 
 ## Symptom

@@ -10123,3 +10123,33 @@ fn suffix_index_keeps_leading_underscore_of_private_helper() {
     // An erased-receiver `.to_u64()` must not bind to the private `_u64`.
     assert_eq!(resolve_by_suffix("to_u64", &index), None);
 }
+
+#[test]
+fn core_c_vector_provider_pin_is_validated_and_scoped_to_the_loader_tu() {
+    use super::tools::{
+        core_c_vector_provider_pin, core_c_vector_provider_pin_define,
+        core_c_vector_provider_pin_fingerprint,
+    };
+    let pin_a = "0e3f00aa11bb22cc33dd44ee55ff66aa77bb88cc99dd00ee11ff22aa33bb44cc";
+    let pin_b = "f".repeat(64);
+    assert_eq!(core_c_vector_provider_pin(None), Ok(None));
+    assert_eq!(core_c_vector_provider_pin(Some("")), Ok(None));
+    assert_eq!(core_c_vector_provider_pin(Some(pin_a)), Ok(Some(pin_a.to_string())));
+    assert!(core_c_vector_provider_pin(Some(&pin_a.to_uppercase())).is_err());
+    assert!(core_c_vector_provider_pin(Some(&pin_a[..63])).is_err());
+    assert!(core_c_vector_provider_pin(Some("x".repeat(64).as_str())).is_err());
+    // Define emitted only into runtime_simd_utf8.c, and only with a pin.
+    assert_eq!(
+        core_c_vector_provider_pin_define("runtime_simd_utf8.c", Some(pin_a)),
+        Some(format!("-DSIMPLE_VECTOR_PROVIDER_PIN_HEX={pin_a}"))
+    );
+    assert_eq!(core_c_vector_provider_pin_define("runtime_native.c", Some(pin_a)), None);
+    assert_eq!(core_c_vector_provider_pin_define("runtime_simd_utf8.c", None), None);
+    // Archive reuse key differs with / without / per pin.
+    let none = core_c_vector_provider_pin_fingerprint(None);
+    let a = core_c_vector_provider_pin_fingerprint(Some(pin_a));
+    let b = core_c_vector_provider_pin_fingerprint(Some(&pin_b));
+    assert_ne!(none, a);
+    assert_ne!(none, b);
+    assert_ne!(a, b);
+}

@@ -1,7 +1,7 @@
 # HIR codec encodes a nil non-optional scalar that its own decoder refuses
 
 - **Date:** 2026-10-24
-- **Status:** OPEN — the asymmetry is established from source; that this module
+- **Status:** FIXED (encode side, 2026-11-06, work/hir-nilscalar). Original: the asymmetry is established from source; that this module
   hits it is NOT established
 - **Files:** `src/compiler/20.hir/hir_codec_support.spl`,
   `src/compiler/20.hir/generated/hir_codec.spl`,
@@ -172,3 +172,18 @@ mechanism and should have been found from this one.** The decoder half is fixed
 by refusing the sentinel on the raw text before any typed local exists; see
 `hir_archive_status3_omits_durable_archive_for_archive_callers_2026-10-24.md`
 § CORRECTION for the full chain.
+
+## Fix (2026-11-06)
+Encoder now refuses at encode time. `HirCodecWriter.put_i64_field` /
+`put_bool_field` (`hir_codec_support.spl`) reject the entry with
+`nil_in_non_optional_scalar:<Owner.field>` (same rendered-text discriminator as
+put_i64/put_bool, so 3/true are safe) and the generator emits them for every
+non-optional struct-field i64/bool (`codec_gen.spl` `_emit_enc_decl`); codec
+regenerated. The refusal now names the field instead of surfacing later as an
+undifferentiated `reason=decode`/`unstable`.
+Specs: hir_codec_nil_scalar_reject_spec (i64 repro, 3/true/false accepted,
+generated-encoder shape), hir_codec_bare_struct_field_locals_spec 14/14,
+hir_codec_roundtrip_spec 4/4, hir_cfg_select_codec_spec 4/4.
+Limits: the interpreter coerces a nil passed to a `bool` param to false, so the
+bool nil case cannot be reproduced in a unit spec. Which module originally hit
+this in Stage 2 is still not established (needs bootstrap).

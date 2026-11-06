@@ -104,3 +104,17 @@ W5 (2026-11-06): per-worker aggregation lives in `src/lib/common/trace/data/data
 - Loader entry points: `sprof_load_data_observations` and `sprof_serialize_profile_with_data` in `src/app/optimize/sprof_loader.spl`. The counter loader still ignores `data_*` lines.
 
 Trap: `char.to_digit()` is not an int on the seed ("cannot convert enum to int"). Use `ch as i64`.
+
+W2a evaluation order (owner decision 2026-11-06, option b): every engine evaluates the right-hand side first, then the place (receiver, then index subexpressions outer to inner and left to right), each exactly once. Compound assignment is the RHS, then the place once, then one read and one write. Pinned by `test/02_integration/compiler/data/attr_eval_order_parity_spec.spl` (seed interpreter plus `core_interpret`) and `test/01_unit/compiler/mir/assign_eval_order_lowering_spec.spl` (MIR already conformed).
+
+Seed changes (`node_exec.rs`):
+- A place whose index subexpression may have effects (`index_may_have_effects`: anything but an identifier or a literal) routes through `place::resolve_place`/`write_place`. Side-effect-free paths keep their old route.
+- Augmented field targets beyond `obj.f`/`obj.a.f` go through `augmented_through_place`, which reads the old value with `place::place_read`. That read covers packed arrays and `ClassInstance` fields.
+
+Seed JIT, before the fix: compound assignment evaluated the place twice (`i,rhs,i`), because HIR lowering cloned the target into `Binary(target, rhs)`. Fix in `hir/lower/stmt_lowering.rs`: when an index on the place may have effects, hoist the RHS and those indexes into `$aug_*` locals, outer to inner. Measure the JIT with `SIMPLE_JIT_STRICT=1 simple run`; the spec runner takes the interpreter route. In the compiler path, `collection_desugar` rewrites `t += <call>` into `t.merge(...)`; see `doc/08_tracking/bug/compound_plus_assign_call_rhs_rewritten_to_merge_2026-11-06.md`.
+
+Pure-Simple `val_compound_op` maps both encodings (60..64 from the expression parser, 101..105 tokens). The parser must keep 60..64, because the flat-AST bridge's `flat_compound_assign_op` reads them.
+
+Seed traps:
+- A module-level `var` reassigned inside an `it` block is not seen by functions. Use a class instance for shared spec state.
+- `int.to_text()` does not exist in `core_interpret`.
