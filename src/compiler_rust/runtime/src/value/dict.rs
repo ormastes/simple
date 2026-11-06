@@ -51,13 +51,48 @@ pub struct RuntimeDict {
 }
 
 /// Bytes of one slot allocation: (key, value) pairs plus one stamp per slot.
-fn dict_slots_bytes(capacity: u64) -> usize {
+pub(super) fn dict_slots_bytes(capacity: u64) -> usize {
     capacity as usize * (2 * std::mem::size_of::<RuntimeValue>() + std::mem::size_of::<u64>())
 }
 
 /// Insertion stamps that trail the (key, value) pairs of a slot allocation.
 unsafe fn dict_seq(data: *mut RuntimeValue, capacity: u64) -> *mut u64 {
     data.add(capacity as usize * 2) as *mut u64
+}
+
+/// Occupied slot indices in INSERTION order (ascending stamp).
+///
+/// Fast path O(capacity): with no remove since the last clear/renumber the
+/// stamps are exactly `0..len`, so each slot goes straight to `out[stamp]`.
+/// Otherwise (removes left gaps) sort by stamp, O(n log n).
+unsafe fn dict_ordered_slots(data: *const RuntimeValue, capacity: u64, len: u64, next_seq: u64) -> Vec<usize> {
+    let seq = dict_seq(data as *mut RuntimeValue, capacity) as *const u64;
+    if next_seq == len {
+        let mut out = vec![usize::MAX; len as usize];
+        let mut dense = true;
+        for i in 0..capacity as usize {
+            if (*data.add(i * 2)).is_nil() {
+                continue;
+            }
+            let s = *seq.add(i) as usize;
+            if s >= out.len() || out[s] != usize::MAX {
+                dense = false;
+                break;
+            }
+            out[s] = i;
+        }
+        if dense && !out.contains(&usize::MAX) {
+            return out;
+        }
+    }
+    let mut order: Vec<(u64, usize)> = Vec::with_capacity(len as usize);
+    for i in 0..capacity as usize {
+        if !(*data.add(i * 2)).is_nil() {
+            order.push((*seq.add(i), i));
+        }
+    }
+    order.sort_unstable();
+    order.into_iter().map(|(_, i)| i).collect()
 }
 
 /// Allocate a NIL-initialized slot array for `capacity` entries.
@@ -99,9 +134,11 @@ unsafe fn dict_grow(d: *mut RuntimeDict) -> bool {
     if new_data.is_null() {
         return false;
     }
-    let old_seq = dict_seq(old_data, old_capacity);
+    // Re-insert in insertion order and renumber stamps to 0..len, so a dict
+    // that saw removes regains the O(n) ordered-view fast path.
+    let order = dict_ordered_slots(old_data, old_capacity, (*d).len, (*d).next_seq);
     let new_seq = dict_seq(new_data, new_capacity);
-    for i in 0..old_capacity as usize {
+    for (rank, &i) in order.iter().enumerate() {
         let k = *old_data.add(i * 2);
         if k.is_nil() {
             continue;
@@ -113,7 +150,7 @@ unsafe fn dict_grow(d: *mut RuntimeDict) -> bool {
             if (*new_data.add(idx * 2)).is_nil() {
                 *new_data.add(idx * 2) = k;
                 *new_data.add(idx * 2 + 1) = v;
-                *new_seq.add(idx) = *old_seq.add(i);
+                *new_seq.add(idx) = rank as u64;
                 break;
             }
         }
@@ -121,6 +158,7 @@ unsafe fn dict_grow(d: *mut RuntimeDict) -> bool {
     dict_free_slots(old_data, old_capacity);
     (*d).capacity = new_capacity;
     (*d).data = new_data;
+    (*d).next_seq = order.len() as u64;
     super::dict_scope_read::storage_replaced(d);
     true
 }
@@ -342,8 +380,9 @@ pub extern "C" fn rt_dict_clear(dict: RuntimeValue) -> bool {
 }
 
 /// Iterate over dictionary entries in INSERTION order (ascending stamp),
-/// collecting results with a transform function. O(n log n) per call;
-/// lookups and inserts stay O(1).
+/// collecting results with a transform function. O(n) when no remove
+/// happened since the last clear/grow, else O(n log n); lookups and inserts
+/// stay O(1).
 fn dict_collect<F>(dict: RuntimeValue, transform: F) -> RuntimeValue
 where
     F: Fn(*const RuntimeValue, usize) -> RuntimeValue,
@@ -360,15 +399,7 @@ where
         if data_ptr.is_null() {
             return result;
         }
-        let seq = dict_seq((*d).data, capacity) as *const u64;
-        let mut order: Vec<(u64, usize)> = Vec::with_capacity(len as usize);
-        for i in 0..capacity as usize {
-            if !(*data_ptr.add(i * 2)).is_nil() {
-                order.push((*seq.add(i), i));
-            }
-        }
-        order.sort_unstable();
-        for (_, i) in order {
+        for i in dict_ordered_slots(data_ptr, capacity, len, (*d).next_seq) {
             rt_array_push(result, transform(data_ptr, i));
         }
         result
@@ -744,5 +775,24 @@ mod dict_composite_key_tests {
         for &k in &kept {
             assert_eq!(rt_dict_get(d, RuntimeValue::from_int(k)).as_int(), k);
         }
+    }
+
+    #[test]
+    fn grow_after_removes_renumbers_stamps_and_keeps_order() {
+        let d = rt_dict_new(0);
+        for k in 0..6i64 {
+            rt_dict_set(d, RuntimeValue::from_int(k), RuntimeValue::from_int(k));
+        }
+        rt_dict_remove(d, RuntimeValue::from_int(2));
+        rt_dict_remove(d, RuntimeValue::from_int(4));
+        let ptr = get_typed_ptr::<RuntimeDict>(d, HeapObjectType::Dict).unwrap();
+        assert_ne!(unsafe { (*ptr).next_seq }, rt_dict_len(d) as u64, "removes leave stamp gaps");
+        let mut want = vec![0i64, 1, 3, 5];
+        for k in 100..140i64 {
+            rt_dict_set(d, RuntimeValue::from_int(k), RuntimeValue::from_int(k));
+            want.push(k);
+        }
+        assert_eq!(unsafe { (*ptr).next_seq }, rt_dict_len(d) as u64, "grow renumbers stamps densely");
+        assert_eq!(int_list(rt_dict_keys(d)), want);
     }
 }

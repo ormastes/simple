@@ -12856,8 +12856,12 @@ static void core_dict_read_advance(RtCoreDict* d) {
 static void rt_core_dict_resize(RtCoreDict* d, int64_t new_cap) {
     RtCoreDictEntry* old = d->entries;
     int64_t old_cap = d->cap;
+    /* Re-insert in insertion order and renumber stamps 0..len-1, so a dict
+     * that saw removes regains the ordered-view fast path. */
+    int64_t live = 0;
+    int64_t* order = rt_core_dict_ordered_slots(d, &live);
     RtCoreDictEntry* fresh = (RtCoreDictEntry*)rt_observed_calloc_v1((size_t)new_cap, sizeof(RtCoreDictEntry));
-    if (!fresh) return;
+    if (!fresh) { free(order); return; }
     core_dict_read_advance(d);
     if (d->read_backing == INT64_MAX) d->read_epoch = 0;
     else d->read_backing++;
@@ -12865,12 +12869,12 @@ static void rt_core_dict_resize(RtCoreDict* d, int64_t new_cap) {
     d->cap = new_cap;
     d->len = 0;
     d->tombstones = 0;
-    for (int64_t i = 0; i < old_cap; i++) {
-        if (old[i].occupied == 1) {
-            /* Keep each entry's insertion stamp: a resize must not reorder. */
-            rt_core_dict_put_seq(d, old[i].key, old[i].value, old[i].seq);
-        }
+    for (int64_t r = 0; r < live; r++) {
+        RtCoreDictEntry* e = &old[order[r]];
+        rt_core_dict_put_seq(d, e->key, e->value, r);
     }
+    d->next_seq = live;
+    free(order);
     free(old);
     core_aux_note_dict((new_cap - old_cap) * (int64_t)sizeof(RtCoreDictEntry));
 }
@@ -13148,7 +13152,7 @@ int64_t rt_dict_scope_read_meta_v1(int64_t dict, int64_t owner,
     if (!d || d->cap <= 0 || d->len < 0 || d->len > d->cap ||
         (uint64_t)d->cap > INT64_MAX / sizeof(RtCoreDictEntry)) return -1;
     switch (field) {
-        case 0: return 1; /* native hash-slot view (iteration order is insertion, see rt_dict_keys) */
+        case 0: return 1; /* provider kind (C core). Slot view is HASH order, not rt_dict_keys order */
         case 1: return d->len;
         case 2: case 3: return d->cap;
         case 4: return d->read_backing;
@@ -13205,26 +13209,50 @@ static int rt_core_dict_order_cmp(const void* a, const void* b) {
 
 /* Live slot indices in INSERTION order (ascending stamp). The one ordering
  * source for keys/values/entries/formatting. Caller frees; NULL with
- * *count = 0 when empty or on allocation failure. O(n log n) per call;
- * lookup and insert stay O(1). */
+ * *count = 0 only for an empty dict. Fast path O(cap): with no remove since
+ * the last clear/resize the stamps are exactly 0..len-1, so each slot lands
+ * at out[stamp]. Otherwise sort by stamp, O(n log n). Allocation failure is
+ * fatal: a non-empty dict must never read back as empty. */
+static void rt_core_dict_order_oom(int64_t len) {
+    fprintf(stderr, "rt_dict: out of memory building ordered view (len=%lld)\n", (long long)len);
+    fflush(stderr);
+    abort();
+}
+
 static int64_t* rt_core_dict_ordered_slots(RtCoreDict* d, int64_t* count) {
     *count = 0;
     if (!d || !d->entries || d->len <= 0) return NULL;
-    RtCoreDictOrderSlot* order = (RtCoreDictOrderSlot*)rt_observed_malloc_v1((size_t)d->len * sizeof(RtCoreDictOrderSlot));
-    if (!order) return NULL;
-    int64_t n = 0;
-    for (int64_t i = 0; i < d->cap && n < d->len; i++) {
+    int64_t n = d->len;
+    int64_t* slots = (int64_t*)rt_observed_malloc_v1((size_t)n * sizeof(int64_t));
+    if (!slots) rt_core_dict_order_oom(n);
+    if (d->next_seq == n) {
+        int dense = 1;
+        int64_t placed = 0;
+        for (int64_t i = 0; i < n; i++) slots[i] = -1;
+        for (int64_t i = 0; i < d->cap; i++) {
+            if (d->entries[i].occupied != 1) continue;
+            int64_t s = d->entries[i].seq;
+            if (s < 0 || s >= n || slots[s] != -1) { dense = 0; break; }
+            slots[s] = i;
+            placed++;
+        }
+        if (dense && placed == n) {
+            *count = n;
+            return slots;
+        }
+    }
+    RtCoreDictOrderSlot* order = (RtCoreDictOrderSlot*)rt_observed_malloc_v1((size_t)n * sizeof(RtCoreDictOrderSlot));
+    if (!order) rt_core_dict_order_oom(n);
+    int64_t m = 0;
+    for (int64_t i = 0; i < d->cap && m < n; i++) {
         if (d->entries[i].occupied != 1) continue;
-        order[n].seq = d->entries[i].seq;
-        order[n].slot = i;
-        n++;
+        order[m].seq = d->entries[i].seq;
+        order[m].slot = i;
+        m++;
     }
-    qsort(order, (size_t)n, sizeof(RtCoreDictOrderSlot), rt_core_dict_order_cmp);
-    int64_t* slots = (int64_t*)rt_observed_malloc_v1((size_t)(n > 0 ? n : 1) * sizeof(int64_t));
-    if (slots) {
-        for (int64_t i = 0; i < n; i++) slots[i] = order[i].slot;
-        *count = n;
-    }
+    qsort(order, (size_t)m, sizeof(RtCoreDictOrderSlot), rt_core_dict_order_cmp);
+    for (int64_t i = 0; i < m; i++) slots[i] = order[i].slot;
+    *count = m;
     free(order);
     return slots;
 }

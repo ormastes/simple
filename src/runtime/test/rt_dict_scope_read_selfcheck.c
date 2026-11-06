@@ -119,6 +119,28 @@ static void check_insertion_order(void) {
         assert(rt_dict_set(big, text_key(order[i]), rt_value_int(i)));
     }
     assert_key_order(big, order, 300);
+    /* Removes leave stamp gaps; the next resize renumbers 0..len-1 so the
+     * ordered view regains the O(n) fast path, without reordering. */
+    int64_t gap = rt_dict_new(0);
+    static char gnames[64][16];
+    const char* gorder[64];
+    int64_t gn = 0;
+    for (int i = 0; i < 6; i++) {
+        snprintf(gnames[i], sizeof gnames[i], "g%d", i);
+        assert(rt_dict_set(gap, text_key(gnames[i]), rt_value_int(i)));
+    }
+    assert(rt_dict_remove(gap, text_key("g2")));
+    assert(rt_dict_remove(gap, text_key("g4")));
+    RtCoreDict* gd = rt_core_as_dict(gap);
+    assert(gd->next_seq != gd->len);
+    for (int i = 0; i < 6; i++) if (i != 2 && i != 4) gorder[gn++] = gnames[i];
+    for (int i = 6; i < 64; i++) {
+        snprintf(gnames[i], sizeof gnames[i], "g%d", i);
+        assert(rt_dict_set(gap, text_key(gnames[i]), rt_value_int(i)));
+        gorder[gn++] = gnames[i];
+    }
+    assert(gd->next_seq == gd->len);
+    assert_key_order(gap, gorder, gn);
 }
 
 int main(void) {

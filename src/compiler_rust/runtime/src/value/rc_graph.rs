@@ -136,8 +136,7 @@ fn node_bytes(value: RuntimeValue, kind: HeapObjectType) -> i64 {
             }
             HeapObjectType::Dict => {
                 let d = &*(ptr as *const RuntimeDict);
-                // (key, value) pair + insertion stamp per slot (dict.rs).
-                let data = if d.data.is_null() { 0 } else { d.capacity * 24 };
+                let data = if d.data.is_null() { 0 } else { super::dict::dict_slots_bytes(d.capacity) as u64 };
                 (std::mem::size_of::<RuntimeDict>() as u64 + data) as i64
             }
             _ => (*(ptr as *const HeapHeader)).size as i64,
