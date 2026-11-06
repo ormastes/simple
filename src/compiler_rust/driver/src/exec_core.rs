@@ -1165,6 +1165,30 @@ impl ExecCore {
             }
         }
 
+        // HIR lowering has no list/dict comprehension form: under the lenient
+        // lowering used below it becomes `nil` (`[x*2 for x in xs].len()` prints
+        // -1). Only the interpreter evaluates comprehensions, so drop the whole
+        // module to it rather than miscompile.
+        // See doc/08_tracking/bug/seed_run_comprehension_empty_hybrid_splice_2026-11-04.md.
+        let comprehension_fn = simple_compiler::compilability::analyze_module(
+            &ast.items,
+            simple_compiler::compilability::CompilabilityMode::HybridJit,
+        )
+        .into_iter()
+        .find(|(_, status)| {
+            status
+                .reasons()
+                .contains(&simple_compiler::compilability::FallbackReason::Comprehension)
+        })
+        .map(|(name, _)| name);
+        if let Some(name) = comprehension_fn {
+            return Err(jit_strict_fallback_error_for(
+                "list/dict comprehension has no JIT lowering",
+                &format!("function `{name}`"),
+                Some(path),
+            ));
+        }
+
         // Lower to HIR with context so imported types (enums, classes) are resolved.
         // Lenient variant: aligns this lane's `Lowerer::with_module_resolver`
         // memory-safety strictness with the canonical native-build/compile lane
@@ -1216,6 +1240,7 @@ impl ExecCore {
         } else {
             std::collections::HashMap::new()
         };
+        let _ = hir::take_dropped_unsupported_exprs();
         let hir_module = match hir::lower_with_context_lenient_project_hint_and_duplicate_structs(
             &ast,
             path,
@@ -1225,6 +1250,16 @@ impl ExecCore {
             Ok(m) => m,
             Err(e) => return Err(jit_strict_fallback_error_for("HIR lowering error", &e, Some(path))),
         };
+        // The lenient lowering turns expressions HIR cannot lower (list/dict
+        // comprehensions) into `nil`; running that would silently compute the
+        // wrong value (`[for x in xs: x]` -> `[]`). Fall back to the interpreter.
+        let dropped = hir::take_dropped_unsupported_exprs();
+        if !dropped.is_empty() {
+            return Err(format!(
+                "HIR has no lowering for {}; falling back to interpreter",
+                dropped.join(",")
+            ));
+        }
 
         // Lower to MIR
         let mut mir_module = match lower_to_mir(&hir_module) {

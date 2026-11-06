@@ -149,3 +149,13 @@ parameter own the scope needs callee signature knowledge at parse time (not
 available in a single-pass parser) or a post-resolve desugar; that changes
 placeholder scoping semantics and needs an owner decision. Workaround: bind to
 a `val` first, or use an explicit lambda. Pure-Simple AST spec still passes.
+
+## Re-verification 2026-11-06 (Rust seed `simple-ref`, aarch64, release/1.0.0 a89f4c436db)
+NOT reproducible on this seed. Probe `apply(_1 + 1, 4)` (free fn calling its
+parameter) returns 5 bare, interpolated, and nested in `expect(...)`
+(`to_equal(5)`), same as the explicit-lambda control; `_1 * 3 + 0` gives 12.
+The four cluster specs pass: `test/01_unit/lib/gc_{async,sync}_immut/`
+`facade_resolution_spec` (2/2 each) and `native_combinators_spec` (1/1 each).
+Neither spec harness nor evaluator is at fault on this seed; the 2026-09-21
+Windows seed result is not carried over. Record stays open only for the
+native/pure-Simple callback-value regression named above.

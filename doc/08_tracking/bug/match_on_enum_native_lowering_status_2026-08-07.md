@@ -121,3 +121,6 @@ that require the interpreter". The doc status is accurate; no change made.
 Note: `compiler/src/codegen/**` and `compiler/src/mir/**` are owned by other
 workers in this pass, so no fix was attempted here.
 
+
+## 2026-11-05 — FIXED on the pure-Simple native lane (mirp2 family A)
+Premise (`--native` refuses payload-bearing match) is stale for the self-hosted producer. Native evidence: s3_fable44.exe (2026-11-05 15:15 build), s3sanity run_case `mirp2a_enum` (enum ==/!= on payload-free enums, list membership by ==, payload-variant match, bare payload-variant arms) -> `CHECKS=10`, rc=0. Durable spec: test/01_unit/compiler/50.mir/enum_eq_and_match_lowering_spec.spl (interpreter 3/3).

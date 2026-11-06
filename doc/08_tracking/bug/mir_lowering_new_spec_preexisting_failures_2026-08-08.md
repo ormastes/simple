@@ -70,3 +70,36 @@ and now points at this doc for the `mir_lowering_new_spec.spl` classification.
 34 total/15 passed/19 failed — 2 more examples, 5 more failures). Still
 reproduces and is still large-scope pre-existing MIR-lowering compiler work,
 well beyond this lane's per-bug budget. No change made.
+
+## Re-triage 2026-11-06 (lane fx-backend-borrow): 10/36 -> 27/36
+
+Seed run before: `36 total, 10 passed, 26 failed`; after: `36 total, 27 passed, 9 failed`.
+All 26 failures were source-text pins (the spec greps compiler source), so this was
+spec drift, not product bugs. Classification of the 17 fixed examples (coverage kept,
+each pin moved to the current documented form; assertions not weakened):
+
+- Moved file: native entry tracing (`driver.spl` -> `driver_source_parse_retained.spl`),
+  bootstrap flat block (`module_declarations_bootstrap.spl`), driver pipeline log
+  (`driver_pipeline_lowering.spl`), HIR module diag (`module_build.spl`).
+- Renamed state: `runtime_value_locals` map -> `mark_runtime_value_local` /
+  `runtime_value_local_ids`; `local_hir_types[...]` -> `remember_local_hir_type`.
+- Superseded workaround: hand-written `MirLowering(...)` driver literals were deleted
+  for the single `MirLowering.new_for_target` constructor (spec now pins both the
+  driver call sites and the canonical constructor's tracking-state init); parent-scope
+  walk now uses an exhaustive `match scope.parent` (no `.unwrap()`); let payload reads
+  go through `mir_hir_let_symbol/_init/_type` helpers; wildcard positions use
+  `bind_pos_row` declared slots; shift codegen pins the masked `shr_amount` /
+  `shr_amt` (stronger than the old raw `right_val`); indirect-call return comes from
+  the declared Function type (`indirect_return`).
+- Interpolation trap: `"...{name}..."` inside `to_contain("...")` is interpolated by
+  the spec; literals containing `{ident}` must be single-quoted.
+
+Still failing (9), all pins of the native-bootstrap `rt_enum_payload` /
+`compiler_value_tuple_at` / `rt_dict_*` extraction era whose code was reworked; each
+needs its own semantic mapping, not a literal swap: named bootstrap calls
+(`bootstrap_resolved_call_return_type`), native-safe indexed scans, predispatch match,
+match bindings before arm bodies, bootstrap enum/binding patterns, HIR dictionary
+views via runtime owners, LLVM known call return types, plus two more examples
+(not yet isolated: failures hidden by interpolated or split-scoped pins). No mono-specialization pins
+were found. Mirror copy `test/unit/compiler/mir/mir_lowering_new_spec.spl` already
+diverges (baselined) and was not touched.

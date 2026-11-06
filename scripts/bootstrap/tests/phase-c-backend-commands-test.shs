@@ -6,16 +6,29 @@ script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "$script_root/bootstrap-verification-resource-policy.shs"
 unset native_internal_timeout
 actual=""
-run_matrix_task() { actual="$*"; }
-bootstrap_phase_c_run_tool_build cranelift cli producer entry.spl output 8
-[ "$actual" = 'cli --verification-expect-executable=output producer native-build entry.spl --backend=cranelift --low-memory --threads 8 -o output' ]
-bootstrap_phase_c_run_tool_build llvm cli producer entry.spl output 8
-[ "$actual" = 'cli --verification-expect-executable=output producer native-build entry.spl --backend=llvm --low-memory --threads 8 -o output' ]
+run_matrix_task() { actual="fw=${SIMPLE_FILE_WORKERS:-unset} $*"; }
+bootstrap_phase_c_run_tool_build cranelift cli producer entry.spl output cache 8
+[ "$actual" = 'fw=0 cli --verification-expect-executable=output producer native-build entry.spl --backend=cranelift --low-memory --cache-dir cache --threads 8 -o output' ]
+bootstrap_phase_c_run_tool_build llvm cli producer entry.spl output cache 8
+[ "$actual" = 'fw=0 cli --verification-expect-executable=output producer native-build entry.spl --backend=llvm --low-memory --cache-dir cache --threads 8 -o output' ]
+# The SIMPLE_FILE_WORKERS=0 pin is scoped to the call: an unset caller stays
+# unset, a set caller gets its own value back, and the row status propagates.
+[ -z "${SIMPLE_FILE_WORKERS+x}" ] || { echo 'FAIL SIMPLE_FILE_WORKERS leaked past the tool build'; exit 1; }
+SIMPLE_FILE_WORKERS=3
+bootstrap_phase_c_run_tool_build llvm cli producer entry.spl output cache 8
+[ "${actual%% *}" = fw=0 ] && [ "$SIMPLE_FILE_WORKERS" = 3 ] || { echo 'FAIL SIMPLE_FILE_WORKERS not restored'; exit 1; }
+unset SIMPLE_FILE_WORKERS
+# argv[0] must be the compiler and argv[1] native-build once run_task strips
+# its --verification-* flags: an `env VAR=...` prefix bypassed the verifier's
+# Stage 2 block, the toolchain pin and the tree-RSS owner (run 6, 2026-11-06).
+set -- $actual
+shift 3
+[ "$1" = producer ] && [ "$2" = native-build ] || { echo "FAIL tool build argv[0..1] is '$1 $2', want 'producer native-build'"; exit 1; }
 for backend in llvm cranelift; do
     native_internal_timeout=600
     bootstrap_verification_resource_policy stage2 0 1800 120 "$native_internal_timeout" 20 1 1
-    bootstrap_phase_c_run_tool_build "$backend" cli producer entry.spl output 20
-    [ "$actual" = "cli --verification-expect-executable=output producer native-build entry.spl --backend=$backend --low-memory --timeout 600 --threads 20 -o output" ]
+    bootstrap_phase_c_run_tool_build "$backend" cli producer entry.spl output cache 20
+    [ "$actual" = "fw=0 cli --verification-expect-executable=output producer native-build entry.spl --backend=$backend --low-memory --cache-dir cache --timeout 600 --threads 20 -o output" ]
     native_internal_timeout=0
     if bootstrap_verification_resource_policy stage2 0 1800 120 "$native_internal_timeout" 20 1 1; then
         echo 'FAIL canonical verification accepted zero native timeout'
@@ -23,10 +36,10 @@ for backend in llvm cranelift; do
     fi
     bootstrap_verification_resource_policy stage2 1 1800 120 "$native_internal_timeout" 20 1 1
     [ "$verification_success_result" = DIAGNOSTIC_PASS ]
-    bootstrap_phase_c_run_tool_build "$backend" cli producer entry.spl output 20
-    [ "$actual" = "cli --verification-expect-executable=output producer native-build entry.spl --backend=$backend --low-memory --timeout 0 --threads 20 -o output" ]
+    bootstrap_phase_c_run_tool_build "$backend" cli producer entry.spl output cache 20
+    [ "$actual" = "fw=0 cli --verification-expect-executable=output producer native-build entry.spl --backend=$backend --low-memory --cache-dir cache --timeout 0 --threads 20 -o output" ]
 done
-if bootstrap_phase_c_run_tool_build invalid cli producer entry.spl output 8; then
+if bootstrap_phase_c_run_tool_build invalid cli producer entry.spl output cache 8; then
     echo 'FAIL invalid backend unexpectedly accepted'
     exit 1
 fi
@@ -34,6 +47,6 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/phase-c-module-target.XXXXXX")
 run_task() { actual="$*"; }
 for target_c_platform in aarch64-unknown-linux-gnu riscv64-unknown-linux-gnu; do
     bootstrap_phase_c_run_module_build llvm producer entry.spl output "$work" 1
-    [ "$actual" = "module_compile_object producer native-build entry.spl --emit-object --backend=llvm --target $target_c_platform --threads 1 -o output" ]
+    [ "$actual" = "module_compile_object producer native-build entry.spl --emit-object --backend=llvm --threads 1 -o output" ]
 done
-printf '%s\n' 'PASS explicit ARM64/RISC-V object argv; 7 Phase C backend argv contracts; canonical zero rejected, diagnostic zero forwarded'
+printf '%s\n' 'PASS ARM64/RISC-V object argv (target via SIMPLE_NATIVE_BUILD_TARGET); argv[0..1] + scoped SIMPLE_FILE_WORKERS pin; 7 Phase C backend argv contracts; canonical zero rejected, diagnostic zero forwarded'

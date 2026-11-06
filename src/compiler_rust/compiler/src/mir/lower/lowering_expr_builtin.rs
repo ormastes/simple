@@ -311,7 +311,7 @@ impl<'a> MirLowerer<'a> {
             && args.len() == 1
             && expr_ty == TypeId::BOOL
             && args[0].ty != TypeId::ANY
-            && self.slot_holds_tagged_value(args[0].ty)
+            && self.slot_holds_tagged_optional(args[0].ty)
         {
             let arg_reg = self.lower_expr(&args[0])?;
             return self.with_func(|func, current_block| {
@@ -346,7 +346,7 @@ impl<'a> MirLowerer<'a> {
         if name == "rt_unwrap_or_self"
             && args.len() == 1
             && args[0].ty != TypeId::ANY
-            && self.slot_holds_tagged_value(args[0].ty)
+            && self.slot_holds_tagged_optional(args[0].ty)
             && matches!(
                 expr_ty,
                 TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32
@@ -405,7 +405,7 @@ impl<'a> MirLowerer<'a> {
         if name == "rt_unwrap_or_self"
             && args.len() == 1
             && args[0].ty != TypeId::ANY
-            && self.slot_holds_tagged_value(args[0].ty)
+            && self.slot_holds_tagged_optional(args[0].ty)
             && matches!(expr_ty, TypeId::BOOL | TypeId::F32 | TypeId::F64 | TypeId::U64)
         {
             let arg_reg = self.lower_expr(&args[0])?;
