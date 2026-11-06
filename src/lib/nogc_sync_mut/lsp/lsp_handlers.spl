@@ -3,7 +3,11 @@
 # Only falls back to full query.spl for heavy operations (check/diagnostics).
 
 use std.io_runtime.{env_get, env_set_process, file_exists, read_file, write_file, file_delete, time_now_unix_micros, cwd}
-use std.nogc_sync_mut.lsp.lsp_location.{lsp_parse_query_location_v1, lsp_location_lsp_column_v1}
+use std.nogc_sync_mut.lsp.lsp_location.{lsp_parse_query_location_v1, lsp_location_lsp_column_v1,
+    lsp_location_identifier_from_trailer_v1}
+use std.nogc_sync_mut.lsp.lsp_call_edges.{lsp_call_edges_parse_output_v1}
+use std.nogc_sync_mut.lsp.lsp_call_hierarchy.{lsp_call_hierarchy_request_item_v1,
+    lsp_call_hierarchy_item_json_v1, lsp_call_hierarchy_calls_json_v1}
 use std.nogc_sync_mut.env.platform.{get_temp_dir}
 use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_text_or, json_value_as_bool,
     json_value_items, json_value_keys, json_value_object_from, json_value_object_set, json_value_serialize}
@@ -575,6 +579,10 @@ fn lsp_handle_semantic_tokens_range(id: text, body: text) -> text:
 
 # --- Call Hierarchy (fast path) ---
 
+# The item is the symbol's DECLARATION (resolved through the definition
+# query), so incoming/outgoing requests carry a position the call-edge engine
+# can anchor on. The trailer names the identifier; its column is derived from
+# the source line exactly as for textDocument/definition.
 fn lsp_handle_prepare_call_hierarchy(id: text, body: text) -> text:
     val uri = _extract_uri(body)
     val line = _extract_line(body)
@@ -582,29 +590,50 @@ fn lsp_handle_prepare_call_hierarchy(id: text, body: text) -> text:
     val file_path = _uri_to_path(uri)
     val query_line = str(int(line) + 1)
     val query_col = str(int(col) + 1)
-    var cmd = lsp_fast_query_command_v1(["hover", lsp_query_file_argument_v1(file_path), query_line, query_col])
+    var cmd = lsp_fast_query_command_v1(["definition", lsp_query_file_argument_v1(file_path), query_line, query_col])
     var out = ""
     var exit_code: i64 = 0
     (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
     if exit_code != 0 or out.trim() == "":
         return make_json_result(id=id, result=SB_L() + SB_R())
-    val first_line = out.split("\n")[0].trim()
-    if first_line == "":
-        return make_json_result(id=id, result=SB_L() + SB_R())
-    val lsp_line = str(int(line))
-    val range = jo2(
-        jp("start", jo2(jp("line", lsp_line), jp("character", col))),
-        jp("end", jo2(jp("line", lsp_line), jp("character", col)))
-    )
-    val item = jo4(jp("name", js(first_line)), jp("kind", "12"), jp("uri", js(uri)), jp("range", range)) + "," + jp("selectionRange", range)
-    val item_obj = LB() + item + RB()
-    make_json_result(id=id, result=SB_L() + item_obj + SB_R())
+    match lsp_parse_query_location_v1(out.split("\n")[0]):
+        case Some(loc):
+            val name = lsp_location_identifier_from_trailer_v1(loc.trailer)
+            if name == "":
+                return make_json_result(id=id, result=SB_L() + SB_R())
+            var line0 = loc.line - 1
+            if line0 < 0: line0 = 0
+            val col0 = lsp_location_lsp_column_v1(loc, _source_line_at(loc.file, loc.line))
+            val item = lsp_call_hierarchy_item_json_v1(name, _lsp_location_uri(loc.file), line0, col0, "")
+            make_json_result(id=id, result=SB_L() + item + SB_R())
+        case nil:
+            make_json_result(id=id, result=SB_L() + SB_R())
+
+fn _handle_call_hierarchy_direction(id: text, body: text, subcmd: text, key: text) -> text:
+    match lsp_call_hierarchy_request_item_v1(body):
+        case Some(item):
+            val file_path = _uri_to_path(item.uri)
+            val query_line = str(item.line + 1)
+            val query_col = str(item.character + 1)
+            var cmd = lsp_fast_query_command_v1([subcmd, lsp_query_file_argument_v1(file_path), query_line, query_col])
+            var out = ""
+            var exit_code: i64 = 0
+            (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
+            if exit_code != 0 or out.trim() == "":
+                return make_json_result(id=id, result=SB_L() + SB_R())
+            val edges = lsp_call_edges_parse_output_v1(out)
+            var uris: [text] = []
+            for e in edges:
+                uris.push(_lsp_location_uri(e.file))
+            make_json_result(id=id, result=lsp_call_hierarchy_calls_json_v1(edges, uris, key))
+        case nil:
+            make_json_result(id=id, result=SB_L() + SB_R())
 
 fn lsp_handle_incoming_calls(id: text, body: text) -> text:
-    make_json_result(id=id, result=SB_L() + SB_R())
+    _handle_call_hierarchy_direction(id, body, "incoming-calls", "from")
 
 fn lsp_handle_outgoing_calls(id: text, body: text) -> text:
-    make_json_result(id=id, result=SB_L() + SB_R())
+    _handle_call_hierarchy_direction(id, body, "outgoing-calls", "to")
 
 # --- Inlay Hints (heavy — calls query engine) ---
 

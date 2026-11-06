@@ -1,0 +1,194 @@
+# Pure call-edge analysis over source lines, plus the wire format shared by
+# the `call-hierarchy` query child, the in-process MCP adapter and the LSP
+# callHierarchy handlers.
+#
+# Every edge carries a `resolution` per the traceability design (§15.1):
+#   exact        callee/caller declaration found in the same file
+#   bounded_set  more than one candidate declaration found
+#   heuristic    one textual cross-file candidate (never reported as exact)
+#   unknown      no declaration found
+# A textual match is never promoted to `exact`; comments and string literals
+# are blanked before scanning so `# fake_call(` is not a call.
+
+struct LspCallEdgeV1:
+    name: text         # callee (outgoing) or caller (incoming) identifier
+    file: text         # file holding the declaration of `name`
+    def_line: i64      # 1-based declaration line, 0 when unknown
+    site_line: i64     # 1-based call-site line
+    site_col: i64      # 1-based call-site column of the identifier
+    resolution: text
+
+fn _is_ident_byte(b: i64) -> bool:
+    (b >= 48 and b <= 57) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or b == 95
+
+fn _is_ident_start(b: i64) -> bool:
+    (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or b == 95
+
+fn _is_call_keyword(name: text) -> bool:
+    name == "if" or name == "elif" or name == "while" or name == "for" or
+        name == "match" or name == "return" or name == "print" or name == "not" or
+        name == "and" or name == "or" or name == "in" or name == "fn" or
+        name == "Some" or name == "Ok" or name == "Err" or name == "None"
+
+# Blank string-literal bodies and `#` comments while preserving byte positions,
+# so columns computed afterwards point at the original source.
+pub fn lsp_call_edges_strip_code_v1(line: text) -> text:
+    var out = ""
+    var in_str = false
+    var i = 0
+    while i < line.len():
+        val ch = line.substring(i, i + 1)
+        if in_str:
+            if ch == "\\" and i + 1 < line.len():
+                out = out + "  "
+                i = i + 2
+                continue
+            if ch == "\"":
+                in_str = false
+                out = out + ch
+            else:
+                out = out + " "
+        elif ch == "\"":
+            in_str = true
+            out = out + ch
+        elif ch == "#":
+            while i < line.len():
+                out = out + " "
+                i = i + 1
+            break
+        else:
+            out = out + ch
+        i = i + 1
+    out
+
+# Identifiers immediately followed by `(` on this line, with 1-based columns.
+# Declarations (`fn name(`) are not calls.
+pub fn lsp_call_edges_call_names_v1(raw_line: text) -> [(text, i64)]:
+    val line = lsp_call_edges_strip_code_v1(raw_line)
+    var found: [(text, i64)] = []
+    var i = 0
+    while i < line.len():
+        val b = line.byte_at(i)
+        if _is_ident_start(b) and (i == 0 or not _is_ident_byte(line.byte_at(i - 1))):
+            var j = i + 1
+            while j < line.len() and _is_ident_byte(line.byte_at(j)):
+                j = j + 1
+            if j < line.len() and line.byte_at(j) == 40:
+                val name = line.substring(i, j)
+                # Skip spaces backwards; a preceding `fn` makes this a declaration.
+                var k = i
+                while k > 0 and line.byte_at(k - 1) == 32:
+                    k = k - 1
+                val is_decl = k >= 2 and line.substring(k - 2, k) == "fn" and
+                    (k == 2 or not _is_ident_byte(line.byte_at(k - 3)))
+                if not is_decl and not _is_call_keyword(name):
+                    found.push((name, i + 1))
+            i = j
+        else:
+            i = i + 1
+    found
+
+fn _indent_of(line: text) -> i64:
+    var n = 0
+    while n < line.len():
+        val b = line.byte_at(n)
+        if b != 32 and b != 9: break
+        n = n + 1
+    n
+
+# `fn NAME(` with optional pub/static/async/me prefixes; -1 when not a decl.
+pub fn lsp_call_edges_decl_name_v1(raw_line: text) -> text:
+    val t = lsp_call_edges_strip_code_v1(raw_line).trim()
+    val idx = t.index_of("fn ")
+    if idx < 0: return ""
+    val prefix = t.substring(0, idx).trim()
+    if prefix != "":
+        var ok = true
+        for word in prefix.split(" "):
+            if word != "pub" and word != "static" and word != "async" and word != "me" and word != "":
+                ok = false
+        if not ok: return ""
+    val rest = t.substring(idx + 3).trim()
+    var j = 0
+    while j < rest.len() and _is_ident_byte(rest.byte_at(j)):
+        j = j + 1
+    if j == 0 or j >= rest.len(): return ""
+    val after = rest.byte_at(j)
+    if after != 40 and after != 60 and after != 32: return ""
+    rest.substring(0, j)
+
+# 1-based line of `fn name(` in `lines`; 0 when absent. Returns the first hit
+# and the total count so a caller can distinguish exact from bounded_set.
+pub fn lsp_call_edges_decl_lines_v1(lines: [text], name: text) -> [i64]:
+    var hits: [i64] = []
+    var i = 0
+    while i < lines.len():
+        if lsp_call_edges_decl_name_v1(lines[i]) == name:
+            hits.push(i + 1)
+        i = i + 1
+    hits
+
+# 1-based inclusive body range of the declaration at `decl_line`: following
+# lines until a non-blank line indented no deeper than the declaration.
+pub fn lsp_call_edges_body_range_v1(lines: [text], decl_line: i64) -> (i64, i64):
+    if decl_line <= 0 or decl_line > lines.len(): return (0, 0)
+    val base = _indent_of(lines[decl_line - 1])
+    var last = decl_line
+    var i = decl_line
+    while i < lines.len():
+        val l = lines[i]
+        if l.trim() != "":
+            if _indent_of(l) <= base: break
+            last = i + 1
+        i = i + 1
+    (decl_line + 1, last)
+
+# Nearest declaration above `line_no` (1-based) that encloses it by indent.
+pub fn lsp_call_edges_enclosing_decl_v1(lines: [text], line_no: i64) -> (text, i64):
+    if line_no <= 0 or line_no > lines.len(): return ("", 0)
+    val target_indent = _indent_of(lines[line_no - 1])
+    var i = line_no - 1
+    while i > 0:
+        val candidate = lines[i - 1]
+        val name = lsp_call_edges_decl_name_v1(candidate)
+        if name != "" and _indent_of(candidate) < target_indent:
+            return (name, i)
+        i = i - 1
+    ("", 0)
+
+pub fn lsp_call_edges_resolution_for_hits_v1(hits: i64, same_file: bool) -> text:
+    if hits == 0: return "unknown"
+    if hits > 1: return "bounded_set"
+    if same_file: return "exact"
+    "heuristic"
+
+# --- wire format: name|file|def_line|site_line|site_col|resolution ---
+
+pub fn lsp_call_edge_format_v1(edge: LspCallEdgeV1) -> text:
+    edge.name + "|" + edge.file + "|" + str(edge.def_line) + "|" + str(edge.site_line) +
+        "|" + str(edge.site_col) + "|" + edge.resolution
+
+pub fn lsp_call_edge_parse_v1(raw: text) -> LspCallEdgeV1?:
+    val parts = raw.trim().split("|")
+    if parts.len() != 6: return nil
+    if parts[0] == "": return nil
+    val res = parts[5]
+    if res != "exact" and res != "bounded_set" and res != "heuristic" and res != "unknown": return nil
+    LspCallEdgeV1(
+        name: parts[0], file: parts[1],
+        def_line: parts[2].to_int() ?? 0, site_line: parts[3].to_int() ?? 0,
+        site_col: parts[4].to_int() ?? 0, resolution: res)
+
+pub fn lsp_call_edges_parse_output_v1(output: text) -> [LspCallEdgeV1]:
+    var edges: [LspCallEdgeV1] = []
+    for line in output.split("\n"):
+        match lsp_call_edge_parse_v1(line):
+            case Some(e): edges.push(e)
+            case nil: pass
+    edges
+
+export LspCallEdgeV1
+export lsp_call_edges_strip_code_v1, lsp_call_edges_call_names_v1, lsp_call_edges_decl_name_v1
+export lsp_call_edges_decl_lines_v1, lsp_call_edges_body_range_v1, lsp_call_edges_enclosing_decl_v1
+export lsp_call_edges_resolution_for_hits_v1
+export lsp_call_edge_format_v1, lsp_call_edge_parse_v1, lsp_call_edges_parse_output_v1

@@ -1,0 +1,105 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+#
+# Call-edge analysis behind callHierarchy/incomingCalls and outgoingCalls.
+# Acceptance case 2 of the traceability design: a comment containing
+# `fake_call(` is not a semantic call, and textual hits are never `exact`.
+
+use std.spec
+use std.spec.step
+use std.nogc_sync_mut.lsp.lsp_call_edges.{LspCallEdgeV1, lsp_call_edges_strip_code_v1,
+    lsp_call_edges_call_names_v1, lsp_call_edges_decl_name_v1, lsp_call_edges_decl_lines_v1,
+    lsp_call_edges_body_range_v1, lsp_call_edges_enclosing_decl_v1,
+    lsp_call_edges_resolution_for_hits_v1, lsp_call_edge_format_v1, lsp_call_edge_parse_v1,
+    lsp_call_edges_parse_output_v1}
+
+fn fixture_lines_v1() -> [text]:
+    [
+        "fn helper(a: i64) -> i64:",
+        "    a + 1",
+        "",
+        "pub fn caller() -> i64:",
+        "    val x = helper(1)  # fake_call(2)",
+        "    val s = \"helper(3)\"",
+        "    if other(x): print x",
+        "    x",
+        "",
+        "struct Box:",
+        "    static fn make() -> Box:",
+        "        Box()",
+    ]
+
+describe "lsp_call_edges scanning":
+    it "blanks comments and string bodies but keeps columns":
+        # @req REQ-SSPEC-UNIT
+        step("strip code")
+        val stripped = lsp_call_edges_strip_code_v1("f(\"a(b\") # c(")
+        expect(stripped.len()).to_equal("f(\"a(b\") # c(".len())
+        expect(stripped.starts_with("f(\"   \")")).to_equal(true)
+        expect(stripped.contains("c(")).to_equal(false)
+
+    it "reports call identifiers with 1-based columns, not comments, strings, keywords or decls":
+        # @req REQ-SSPEC-UNIT
+        step("call names")
+        val calls = lsp_call_edges_call_names_v1("    val x = helper(1)  # fake_call(2)")
+        expect(calls.len()).to_equal(1)
+        expect(calls[0].0).to_equal("helper")
+        expect(calls[0].1).to_equal(13)
+        expect(lsp_call_edges_call_names_v1("    val s = \"helper(3)\"").len()).to_equal(0)
+        val cond = lsp_call_edges_call_names_v1("    if other(x): print x")
+        expect(cond.len()).to_equal(1)
+        expect(cond[0].0).to_equal("other")
+        expect(lsp_call_edges_call_names_v1("fn helper(a: i64) -> i64:").len()).to_equal(0)
+        expect(lsp_call_edges_call_names_v1("    match Some(x):").len()).to_equal(0)
+
+    it "recognises declarations with pub/static prefixes only":
+        # @req REQ-SSPEC-UNIT
+        step("decl names")
+        expect(lsp_call_edges_decl_name_v1("pub fn caller() -> i64:")).to_equal("caller")
+        expect(lsp_call_edges_decl_name_v1("    static fn make() -> Box:")).to_equal("make")
+        expect(lsp_call_edges_decl_name_v1("    val f = fn x(): 1")).to_equal("")
+        expect(lsp_call_edges_decl_name_v1("# fn commented():")).to_equal("")
+        expect(lsp_call_edges_decl_lines_v1(fixture_lines_v1(), "helper")).to_equal([1])
+        expect(lsp_call_edges_decl_lines_v1(fixture_lines_v1(), "missing").len()).to_equal(0)
+
+    it "bounds a body by indentation and finds the enclosing declaration":
+        # @req REQ-SSPEC-UNIT
+        step("body range + enclosing")
+        val range = lsp_call_edges_body_range_v1(fixture_lines_v1(), 4)
+        expect(range.0).to_equal(5)
+        expect(range.1).to_equal(8)
+        val enc = lsp_call_edges_enclosing_decl_v1(fixture_lines_v1(), 5)
+        expect(enc.0).to_equal("caller")
+        expect(enc.1).to_equal(4)
+        val nested = lsp_call_edges_enclosing_decl_v1(fixture_lines_v1(), 12)
+        expect(nested.0).to_equal("make")
+        expect(lsp_call_edges_enclosing_decl_v1(fixture_lines_v1(), 1).0).to_equal("")
+
+    it "never promotes a textual hit to exact":
+        # @req REQ-SSPEC-UNIT
+        step("resolution labels")
+        expect(lsp_call_edges_resolution_for_hits_v1(1, true)).to_equal("exact")
+        expect(lsp_call_edges_resolution_for_hits_v1(1, false)).to_equal("heuristic")
+        expect(lsp_call_edges_resolution_for_hits_v1(2, true)).to_equal("bounded_set")
+        expect(lsp_call_edges_resolution_for_hits_v1(0, true)).to_equal("unknown")
+
+describe "lsp_call_edges wire format":
+    it "round-trips name|file|def_line|site_line|site_col|resolution":
+        # @req REQ-SSPEC-UNIT
+        step("round trip")
+        val edge = LspCallEdgeV1(name: "helper", file: "D:\\w\\a.spl", def_line: 1, site_line: 5, site_col: 13, resolution: "exact")
+        val wire = lsp_call_edge_format_v1(edge)
+        expect(wire).to_equal("helper|D:\\w\\a.spl|1|5|13|exact")
+        val back = lsp_call_edge_parse_v1(wire)!
+        expect(back.file).to_equal("D:\\w\\a.spl")
+        expect(back.site_col).to_equal(13)
+        expect(lsp_call_edge_parse_v1("No outgoing calls found from: x") == nil).to_equal(true)
+        expect(lsp_call_edge_parse_v1("a|b|1|2|3|guess") == nil).to_equal(true)
+
+    it "parses a multi-line child output, skipping notes":
+        # @req REQ-SSPEC-UNIT
+        step("parse output")
+        val edges = lsp_call_edges_parse_output_v1("x|a.spl|1|2|3|exact\n(bounded walk truncated)\ny|b.spl|0|4|5|unknown\n")
+        expect(edges.len()).to_equal(2)
+        expect(edges[1].resolution).to_equal("unknown")
