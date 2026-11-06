@@ -1,6 +1,6 @@
 # Seed runtime `rt_bytes_to_text` uses `from_utf8_lossy`, corrupting UTF-8 scalars split across input fragments
 
-Status: OPEN. Not a decoder defect: `os.apps.smux.client_input` is a byte-exact
+Status: FIXED in the seed INTERPRETER 2026-11-06 (see "Resolution"); the Rust native runtime half (`file_ops.rs`) is still open. Not a decoder defect: `os.apps.smux.client_input` is a byte-exact
 passthrough. The corruption happens one layer below it, in the Rust runtime's
 `[u8] -> text` conversion, which replaces malformed (truncated) UTF-8 with
 U+FFFD while every pure-Simple / C runtime lane preserves the bytes verbatim.
@@ -140,3 +140,32 @@ Prevention spec skeleton: `build/sweep/probes/utf8_split_prevention_spec.spl`
 every byte boundary of 2-, 3- and 4-byte chars, consecutive multibyte chars,
 mixed ASCII/multibyte, fragment boundary exactly at scalar edges, and the
 prefixed-binding split path.
+
+## Resolution (2026-11-06, interpreter half)
+
+`src/compiler_rust/compiler/src/interpreter_extern/conversion.rs`:
+
+- `rt_bytes_to_text_fn` (also registered as `rt_string_from_byte_array`)
+  now builds the text with `Value::text_from_bytes`: valid UTF-8 is a plain
+  `Str`; anything else stays `Value::StrBytes` (raw bytes, the existing
+  representation for split-scalar text slices) instead of U+FFFD.
+  Concatenation re-validates and collapses back to `Str`.
+- `rt_text_to_bytes_fn` returns the raw bytes of a `StrBytes` (it read only
+  `Str` and returned `[]` otherwise).
+
+Evidence:
+- `test/fixtures/seed_interp/bytes_to_text_split_scalar_repro.spl`,
+  interpreter mode. Before (seed built from `ecb705896a4`):
+  `frag0 efbfbd / frag1 efbfbdefbfbdefbfbd / frag2 efbfbdefbfbd / assembled false`.
+  After: `frag0 e7 / frag1 958cf09f / frag2 9880 / assembled true`.
+- Rust test
+  `interpreter_extern::conversion::tests::bytes_to_text_preserves_split_scalar_fragments`:
+  FAILED before (`left: [239, 191, 189], right: [231]`), ok after.
+- `test/03_system/tools/smux_client_input_spec.spl` passes 17/17 on both the
+  base and the fixed seed, so it no longer discriminates this defect.
+
+Still open: the Rust native runtime twin
+`src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs`
+(`String::from_utf8_lossy` in `rt_bytes_to_text`, pinned by
+`malformed_packed_and_boxed_bytes_become_valid_replacement_text`), used by
+the seed's JIT/native lane — outside the interpreter lane.
