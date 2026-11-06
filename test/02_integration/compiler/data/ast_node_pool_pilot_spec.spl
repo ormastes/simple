@@ -45,6 +45,9 @@ fn build_nodes() -> PilotInputs:
     val product = expr_binary(62, sum, c, 202)
     PilotInputs(nodes: [sum, product], spans: [201, 202], lefts: [a, sum], ops: [60, 62])
 
+fn binary_schema_with_accessor(accessor: text) -> text:
+    "data_policy:\n    declarations:\n        binary_expr:\n            tree: \"compiler.ast\"\n            view: \"compiler.ast.BinaryExprView\"\n            attributes:\n                left:\n                    type: \"i64\"\n                    required: true\nnode_views:\n    binary_expr:\n        class: \"BinaryExprView\"\n        owner_import: \"compiler.core.ast\"\n        accessors:\n            left: \"" + accessor + "\"\n"
+
 describe "AST node pool pilot":
     it "returns the same source span through direct, column and sparse-hash storage":
         # @req REQ-ATTR-25
@@ -84,6 +87,10 @@ describe "AST node pool pilot":
         expect(store.get(2).unwrap().is_none()).to_equal(true)
         expect(store.get(3).is_err()).to_equal(true)
         expect(store.len()).to_equal(2)  # oracle: two entries stored, the third absent
+        step("Overwrite a stored value with an explicit None")
+        store.set(1, None)
+        expect(store.get(1).unwrap().is_none()).to_equal(true)
+        expect(store.len()).to_equal(2)  # oracle: still two entries; the first is now an explicit None
 
     it "generates the committed view deterministically from the SPL+SDN schema":
         # @req REQ-ATTR-25
@@ -109,6 +116,11 @@ describe "AST node pool pilot":
         val outcome = node_view_generate_text(bad, "bad.sdn")
         expect(outcome.is_err()).to_equal(true)
         expect(outcome.unwrap_err()).to_contain("right")
+        step("Generate from a schema whose accessor is not an identifier")
+        val injected = binary_schema_with_accessor("expr_get_left(0) + 1")
+        val refused = node_view_generate_text(injected, "inject.sdn")
+        expect(refused.is_err()).to_equal(true)
+        expect(refused.unwrap_err()).to_contain("must name a function")
 
     it "leaves a semantic-artifact module alone in accessor cleanup":
         # @req REQ-ATTR-25
