@@ -40,6 +40,10 @@ use compiler.hir.hir_definitions.{HirStmtKind, HirExprKind}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.statements.*
 use compiler.frontend.core.collection_feedback.{parser_collection_declaration_hash}
+use compiler.common.data.data_schema_contracts.*
+use compiler.common.data.data_schema_resolver.*
+use compiler.semantics.perf_facts.collection_contracts.*
+use compiler.semantics.perf.resolved_collection_policy.*
 
 fn local_site(source: text) -> text:
     parser_init_with_path(source, "app/site_probe.spl")
@@ -138,3 +142,66 @@ describe "Collection site attribute":
         parser_init("@collection_algorithm(\"auto\", \"has space\")\nvar hot = AdaptiveTextSet.new()")
         parse_statement()
         expect(parser_first_error_get()).to_contain("site label must be a dotted name")
+
+fn labeled_site_and_algorithm() -> (text, text):
+    parser_init_with_path("fn main():\n    @collection_algorithm(\"hash\", \"parser.symbols\")\n    var symbols = AdaptiveTextSet.new()\n", "app/site_probe.spl")
+    parse_module_body()
+    val args = expr_get_args(stmt_get_expr(decl_get_body(module_get_decls()[0])[0]))
+    (expr_get_str(args[2]), expr_get_str(args[1]))
+
+fn labeled_origin(site: text) -> CollectionOriginV1:
+    collection_origin_v1(site, "app/site_probe.spl", "main", "symbols", CollectionCreationKind.Local,
+        "var symbols = AdaptiveTextSet.new()", collection_type_fingerprint_v1(COLLECTION_TYPE_ADAPTIVE_TEXT_SET, [])).unwrap()
+
+describe "Collection site policy":
+    it "resolves a labeled source attribute and the equivalent SDN rule to the same policy digest":
+        step("Parse the attribute and turn its site and algorithm into a source rule")
+        val (site, algorithm) = labeled_site_and_algorithm()
+        val source_rules = collection_source_rules_v1(site, algorithm, "app/site_probe.spl", 2, "app").unwrap()
+        step("Read the same pin from an SDN data_policy rule")
+        val sdn = "data_policy:\n    rules:\n        symbols:\n            site: \"ast://app/site_probe.spl/label/parser.symbols\"\n            algorithm: \"hash\"\n            pin: true\n"
+        val sdn_rules = data_policy_rules_from_sdn_v1(sdn, "config/data_policy.sdn", "app").unwrap()
+        step("Resolve the policy for the same origin from each")
+        val origin = labeled_origin(site)
+        val from_source = resolved_collection_policy_for_site_v1(origin, source_rules, "next_build").unwrap()
+        val from_sdn = resolved_collection_policy_for_site_v1(origin, sdn_rules, "next_build").unwrap()
+        expect(from_source.choice.choice).to_equal("hash")
+        expect(from_source.canonical_policy_digest).to_equal(from_sdn.canonical_policy_digest)
+
+    it "rejects a source pin that conflicts with an SDN pin for the same site":
+        val (site, algorithm) = labeled_site_and_algorithm()
+        val source_rules = collection_source_rules_v1(site, algorithm, "app/site_probe.spl", 2, "app").unwrap()
+        val sdn = "data_policy:\n    rules:\n        symbols:\n            site: \"ast://app/site_probe.spl/label/parser.symbols\"\n            algorithm: \"ordered\"\n            pin: true\n"
+        val sdn_rules = data_policy_rules_from_sdn_v1(sdn, "config/data_policy.sdn", "app").unwrap()
+        val result = resolved_collection_policy_for_site_v1(labeled_origin(site), source_rules + sdn_rules, "next_build")
+        match result:
+            case Ok(_): expect("conflict accepted").to_equal("pin conflict")
+            case Err(message): expect(message).to_contain("pin")
+
+    it "rejects a source pin that disagrees with a module-wide SDN pin":
+        val (site, algorithm) = labeled_site_and_algorithm()
+        val source_rules = collection_source_rules_v1(site, algorithm, "app/site_probe.spl", 2, "app").unwrap()
+        val sdn = "data_policy:\n    rules:\n        whole_module:\n            module: \"app/site_probe.spl\"\n            algorithm: \"linear\"\n            pin: true\n"
+        val sdn_rules = data_policy_rules_from_sdn_v1(sdn, "config/data_policy.sdn", "app").unwrap()
+        expect(resolved_collection_policy_for_site_v1(labeled_origin(site), source_rules + sdn_rules, "next_build").is_err()).to_equal(true)
+
+    it "binds an unlabeled hash site the same way":
+        parser_init_with_path("fn main():\n    @collection_algorithm(\"ordered\")\n    var plain = AdaptiveTextSet.new()\n", "app/site_probe.spl")
+        parse_module_body()
+        val args = expr_get_args(stmt_get_expr(decl_get_body(module_get_decls()[0])[0]))
+        val site = expr_get_str(args[2])
+        val origin = collection_origin_v1(site, "app/site_probe.spl", "main", "plain", CollectionCreationKind.Local,
+            "var plain = AdaptiveTextSet.new()", collection_type_fingerprint_v1(COLLECTION_TYPE_ADAPTIVE_TEXT_SET, [])).unwrap()
+        val rules = collection_source_rules_v1(site, expr_get_str(args[1]), "app/site_probe.spl", 2, "app").unwrap()
+        expect(resolved_collection_policy_for_site_v1(origin, rules, "next_build").unwrap().choice.choice).to_equal("ordered")
+
+    it "ignores rules for other sites and lets an auto attribute follow a module rule":
+        val (site, _) = labeled_site_and_algorithm()
+        val auto_rules = collection_source_rules_v1(site, "auto", "app/site_probe.spl", 2, "app").unwrap()
+        val sdn = "data_policy:\n    rules:\n        other:\n            site: \"ast://app/site_probe.spl/label/other\"\n            algorithm: \"linear\"\n            pin: true\n        module_default:\n            module: \"app/site_probe.spl\"\n            algorithm: \"ordered\"\n"
+        val sdn_rules = data_policy_rules_from_sdn_v1(sdn, "config/data_policy.sdn", "app").unwrap()
+        val policy = resolved_collection_policy_for_site_v1(labeled_origin(site), auto_rules + sdn_rules, "next_build").unwrap()
+        expect(policy.choice.choice).to_equal("ordered")
+
+    it "rejects an unknown algorithm in a source rule":
+        expect(collection_source_rules_v1("ast://app/x.spl/label/a", "fast", "app/x.spl", 1, "app").is_err()).to_equal(true)
