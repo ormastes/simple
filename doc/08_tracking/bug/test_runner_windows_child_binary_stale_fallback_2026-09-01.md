@@ -53,3 +53,6 @@ step 2 must stop being `/proc`-shaped on win32.
 Not fixed in this pass (kept scoped; runtime-extern additions have their own
 gates). Filed so the next false verdict is recognized in minutes, not
 sessions.
+
+## Round 8 note 2026-11-06 (already-fixed)
+`find_simple_binary()` (test_runner_single.spl) now resolves the invoking binary via `cli_current_exe_path()` and fails closed instead of falling back to `bin/simple`. Seed run of `test/01_unit/app/tooling/context_generate_spec.spl` prints `child binary: D:\dev\wt\seed\simple.exe` (the invoking binary), no mismatch warning.
