@@ -57,7 +57,13 @@ but the parent aborted on a lost shared-lock claim before self-hosted admission.
 A focused cross-runtime probe reproduced a live MSYS owner being classified dead
 from Git Bash; see [the lock bug](bug/portable_lock_cross_msys_namespace_false_dead_2026-11-06.md).
 Attempt 5 uses the same Git Bash runtime as the other active bootstrap while
-preserving compiled objects and ownership/receipt checks. This document does not
+preserving compiled objects and ownership/receipt checks. It passed receipt,
+native C admission and fingerprint/toolchain checks, then stopped at the shared
+cache ownership wait while the foreign owner (native PID 27876) remained live.
+Its bootstrap log records `ABORTED: stage=fingerprint exit=1`; the outer
+PowerShell wrapper returned 0 after restoring PATH, which is not build success.
+Do not retry the unchanged occupied-lock condition or remove the foreign claim.
+The cached successful Cargo outputs remain intact. This document does not
 prove current process liveness or successful bootstrap. Logs remain in the frozen worktree at
 `build/node-attributes-qualification/bootstrap-attempt4.log` and `bootstrap-attempt5.log`.
 
