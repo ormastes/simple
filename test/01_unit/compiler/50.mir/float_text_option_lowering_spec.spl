@@ -37,6 +37,7 @@ struct FloatShape:
     float_casts: i64
     float_bitcasts: i64
     bad_returns: i64
+    ne_compares: i64
     errors: i64
 
 fn contains(lst: [text], item: text) -> bool:
@@ -70,6 +71,7 @@ fn shape_of(src: text, target: text) -> FloatShape:
     var float_casts = 0
     var float_bitcasts = 0
     var bad_returns = 0
+    var ne_compares = 0
     for function in mir.functions.values():
         if not (function.name == target or function.name.ends_with("." + target)):
             continue
@@ -86,6 +88,8 @@ fn shape_of(src: text, target: text) -> FloatShape:
                         if is_f64(cast_ty): float_casts = float_casts + 1
                     case MirInstKind.Bitcast(_, _, bit_ty):
                         if is_f64(bit_ty): float_bitcasts = float_bitcasts + 1
+                    case MirInstKind.BinOp(_, MirBinOp.Ne, _, _):
+                        ne_compares = ne_compares + 1
                     case _: pass
             match block.terminator:
                 case MirTerminator.Ret(ret_value):
@@ -99,11 +103,13 @@ fn shape_of(src: text, target: text) -> FloatShape:
                                     if not same_kind(found, ret_ty): bad_returns = bad_returns + 1
                             case _: pass
                 case _: pass
-    FloatShape(callees: callees, float_casts: float_casts, float_bitcasts: float_bitcasts, bad_returns: bad_returns, errors: lowering.errors.len())
+    FloatShape(callees: callees, float_casts: float_casts, float_bitcasts: float_bitcasts, bad_returns: bad_returns, ne_compares: ne_compares, errors: lowering.errors.len())
 
 val CHART_SRC = "enum CV:\n    NumberVal(value: f64)\n    FormulaVal(expr: text, cached_display: text)\n    Empty\n\nstruct Cell:\n    value: CV\n\nfn cn(cell: Cell) -> f64:\n    match cell.value:\n        CV.NumberVal(value):\n            return value\n        CV.FormulaVal(expr, cached_display):\n            val d = cached_display\n            if d.len() > 0:\n                val parsed = d.to_f64()\n                return parsed\n            return 0.0\n        _:\n            return 0.0\n"
 
 val IF_VAL_SRC = "fn parse_plain(s: text) -> f64:\n    if s == \"\": return 0.0\n    2.25\n\nfn parse_opt(s: text) -> f64?:\n    return parse_plain(s)\n\nfn main() -> i64:\n    if val v = parse_opt(\"x\"):\n        print(v)\n    0\n"
+
+val IF_VAL_NIL_SRC = "fn parse_plain(s: text) -> f64:\n    2.25\n\nfn parse_opt(s: text) -> f64?:\n    if s == \"\": return nil\n    return parse_plain(s)\n\nfn main() -> i64:\n    if val v = parse_opt(\"\"):\n        print(v)\n    else:\n        print(\"none\")\n    0\n"
 
 describe "f64 across text, Option and if-val boundaries":
     it "parses a proven text receiver of to_f64 instead of casting its handle":
@@ -144,4 +150,36 @@ describe "f64 across text, Option and if-val boundaries":
         val shape = shape_of(IF_VAL_SRC, "main")
         expect(shape.float_casts).to_equal(0)
         expect(shape.float_bitcasts).to_equal(1)
+        expect(shape.ne_compares >= 1).to_equal(true)
+        expect(shape.errors).to_equal(0)
+
+    it "keeps a runtime nil test when the f64? callee can return nil":
+        step("lower `if val v = parse_opt(\"\")` where parse_opt returns nil for empty text")
+        val shape = shape_of(IF_VAL_NIL_SRC, "main")
+        expect(shape.ne_compares >= 1).to_equal(true)
+        expect(shape.float_casts).to_equal(0)
+        expect(shape.float_bitcasts).to_equal(1)
+        expect(shape.errors).to_equal(0)
+
+    it "parses a proven text receiver of to_f32":
+        step("lower `d.to_f32()` on a text parameter")
+        val shape = shape_of("fn narrow(d: text) -> f32:\n    d.to_f32()\n", "narrow")
+        expect(contains(shape.callees, "rt_string_to_float")).to_equal(true)
+        expect(contains(shape.callees, "rt_value_as_float")).to_equal(true)
+        expect(shape.errors).to_equal(0)
+
+    it "still dispatches a user-defined to_f64 method":
+        step("lower `m.to_f64()` on a struct with its own to_f64")
+        val shape = shape_of("struct Meters:\n    v: i64\n\nimpl Meters:\n    fn to_f64() -> f64:\n        2.0\n\nfn use_m(m: Meters) -> f64:\n    m.to_f64()\n", "use_m")
+        var user_method = false
+        for name in shape.callees:
+            if name.ends_with("to_f64"): user_method = true
+        expect(user_method).to_equal(true)
+        expect(contains(shape.callees, "rt_string_to_float")).to_equal(false)
+        expect(shape.float_casts).to_equal(0)
+
+    it "wraps a non-extern f64 local into f64? statically":
+        step("lower `return x` from `-> f64?` with an f64 parameter")
+        val shape = shape_of("fn wrap(x: f64) -> f64?:\n    return x\n", "wrap")
+        expect(contains(shape.callees, "rt_enum_id")).to_equal(false)
         expect(shape.errors).to_equal(0)
