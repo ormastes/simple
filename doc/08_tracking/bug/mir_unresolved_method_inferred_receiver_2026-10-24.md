@@ -74,3 +74,9 @@ Unverified: no compile run.
 | driver_source_pipeline_loading.spl:651 | `staged.result.is_err()` on field of untyped local | `match staged.result` -> bool (workaround) |
 | driver_source_pipeline_loading.spl:826 | `input_path.substring` (`driver_inputs[i]`, `[text]`, not Optional) inside `val loaded = if ..` expression | typed `text` local (workaround) |
 Unverified: no compile run.
+
+## 2026-11-06 note: generic receivers are a separate root cause
+Bootstrap run 10 failed on `unresolved method call: read_tldr` with `receiver_has_type=false` at
+`80.driver/cache/reader/tldr_table_fill_v1.spl:8`. That receiver is a trait-bounded ERASED generic
+parameter (`R: SourceReader`), not an inferred local, so it is tracked and fixed separately in
+`mir_generic_trait_bound_receiver_unresolved_2026-11-06.md`. The sites in this record are unchanged.
