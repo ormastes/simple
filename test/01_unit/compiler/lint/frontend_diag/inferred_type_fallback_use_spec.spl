@@ -60,6 +60,55 @@ fn lower_single(src: text) -> HirModule:
 fn infer_findings(hir: HirModule, code: text) -> [HirFrontendFinding]:
     hir_frontend_findings_with_code(run_hir_frontend_diagnostics(hir), code)
 
+# NOT_RUN: canonical lowering probes, not synthetic diagnostic receipts. The
+# exact callable return SymbolId must own a retained layout; a same-name type
+# or merely successful surface lookup is insufficient.
+fn imported_node_return_has_layout(hir: HirModule) -> bool:
+    for symbol in hir.symbols.symbols.values():
+        if symbol.name != "node_get" or not symbol.type_.?: continue
+        match symbol.type_.unwrap().kind:
+            case Function(_, result, _):
+                match result.kind:
+                    case Named(owner, _):
+                        if not hir.structs.contains_key(owner): return false
+                        val layout = hir.structs[owner]
+                        if layout.symbol.id != owner.id or layout.fields.len() != 1: return false
+                        val field = layout.fields[0]
+                        if field.name != "n": return false
+                        match field.type_.kind:
+                            case Int(bits, signed): return bits == 64 and signed
+                            case _: return false
+                    case _: return false
+            case _: return false
+    false
+
+describe "Canonical return-layout and annotation provenance controls":
+    it "retains the exact third-module return layout without a direct type import":
+        val source = "use lib.api.\{node_get\}\n\nfn f() -> i64:\n    val src = node_get(0)\n    src.n\n"
+        val hir = lower_consumer(source)
+        expect(imported_node_return_has_layout(hir)).to_equal(true)
+        expect(infer_findings(hir, "W-HIR-INFER-001").len()).to_equal(0)
+
+    it "retains the exact return layout when only the facade function is imported":
+        val source = "use lib.api.\{node_get\}\n\nfn f() -> i64:\n    val src = node_get(0)\n    src.n\n"
+        val hir = lower_consumer_with_api(source, facade_src)
+        expect(imported_node_return_has_layout(hir)).to_equal(true)
+        expect(infer_findings(hir, "W-HIR-INFER-001").len()).to_equal(0)
+
+    it "reports a genuinely untyped return used through an inferred receiver":
+        val hir = lower_single("fn unknown() -> Any:\n    []\n\nfn f() -> i64:\n    val src = unknown()\n    src.len()\n")
+        val found = infer_findings(hir, "W-HIR-INFER-001")
+        expect(found.len()).to_equal(1)
+        # Iterate so a missing finding remains an assertion failure rather
+        # than masking it with an out-of-bounds fixture crash.
+        for finding in found:
+            expect(finding.message).to_contain("callee `unknown`")
+            expect(finding.line).to_equal(5)
+
+    it "does not classify an explicitly annotated receiver as inferred":
+        val hir = lower_single("fn unknown() -> Any:\n    []\n\nfn f() -> i64:\n    val src: [i64] = unknown()\n    src.len()\n")
+        expect(infer_findings(hir, "W-HIR-INFER-001").len()).to_equal(0)
+
 describe "W-HIR-INFER-001 at the erased declaration":
     # PENDING (seed interpreter skips; compiled lanes still run and fail): doc/08_tracking/bug/hir_any_alias_and_inferred_fallback_diag_gaps_2026-10-30.md
     pending("names the binding, the callee and the `for` use when an imported fn returns a third-module struct [blocked: HIR cross-module inferred fallback gap]")
