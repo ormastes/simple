@@ -1,0 +1,38 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Nested Str binder must not forward the pattern's aggregate HirType
+
+stage3 (s3_fable51) AV'd building test_runner_main: emit_deep_subpattern's
+Str binder passed `pat.type_` to remember_local_hir_type, whose struct copy
+dereferenced the HirType `span` word = -1 (rip
+MirLowering.remember_local_hir_type+0xba, addr 0xffffffffffffffff).
+The site now rebuilds `HirType(kind: Str, span: pat.span)`. Root class is
+tracked as untyped_optional_arm_join_typed_as_i64. This is a source-shape
+guard: the fault only reproduces under stage3 native codegen.
+"""
+
+# @tag: unit, compiler, mir, enum
+
+use std.spec
+
+extern fn rt_file_read_text(path: text) -> text?
+
+val SITE_PATH = "src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl"
+
+fn site_source() -> text:
+    rt_file_read_text(SITE_PATH) ?? ""
+
+describe "emit_deep_subpattern Str binder":
+    it "does not forward pat.type_ into remember_local_hir_type":
+        val src = site_source()
+        expect(src.len() > 0).to_equal(true)
+        expect(src.contains("self.remember_local_hir_type(bound_value.id, pat.type_, 0, 0)")).to_equal(false)
+
+    it "does not forward pat.type_ into decode_declared_enum_payload_slot":
+        val src = site_source()
+        expect(src.contains("self.decode_declared_enum_payload_slot(value_local, pat.type_)")).to_equal(false)
+
+    it "records a freshly built Str HirType for the bound local":
+        val src = site_source()
+        expect(src.contains("val str_type = HirType(kind: HirTypeKind.Str, span: pat.span)")).to_equal(true)
+        expect(src.contains("self.remember_local_hir_type(bound_value.id, str_type, 0, 0)")).to_equal(true)
