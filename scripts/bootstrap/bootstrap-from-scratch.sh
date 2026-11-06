@@ -2783,6 +2783,65 @@ bootstrap_stage_sanity() (
   [ "${sanity_status}" = pass ]
 )
 
+# Levelled vector provider for this host (CPU-level SIMD text kernels live
+# only there; runtime_simd_utf8.c keeps a scalar baseline). Built once from
+# this checkout BEFORE the deployable compiler's runtime is compiled; its
+# SHA-256 is the pin Stage 4 bakes into runtime_simd_utf8.c
+# (SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256 -> -DSIMPLE_VECTOR_PROVIDER_PIN_HEX),
+# so the deployed compiler admits <exe_dir>/providers/<deploy name> with no
+# environment and the pin always comes from this build's own output.
+# Idempotent. A deploy refuses without it (scalar text = hot-path regression).
+bootstrap_vector_provider_pin=
+bootstrap_vector_provider_built=
+bootstrap_vector_provider_name=
+bootstrap_build_host_vector_provider() {
+  [ -z "${bootstrap_vector_provider_pin}" ] || return 0
+  bootstrap_vector_provider_dir="$(absolute_path "${output_dir}")/providers/${PLATFORM}"
+  mkdir -p "${bootstrap_vector_provider_dir}" || return 1
+  bootstrap_vector_provider_clang=
+  case "${cc_abs:-}" in *clang|*clang.exe|*-clang|*-clang.exe) bootstrap_vector_provider_clang=${cc_abs} ;; esac
+  bootstrap_vector_provider_out=$(CLANG="${bootstrap_vector_provider_clang:-clang}" \
+    sh "${repo_root}/scripts/bootstrap/build-vector-provider.shs" "${bootstrap_vector_provider_dir}" \
+    2>"${log_dir}/vector-provider-build.log" | tail -n 1) || bootstrap_vector_provider_out=
+  case "${bootstrap_vector_provider_out}" in
+    [0-9a-f]*) ;;
+    *) bootstrap_vector_provider_out= ;;
+  esac
+  if [ "${#bootstrap_vector_provider_out}" -ne 64 ]; then
+    if [ "${deploy}" -eq 1 ] && [ "${SIMPLE_BOOTSTRAP_ALLOW_SCALAR_TEXT:-0}" != 1 ]; then
+      echo "error: levelled vector provider build failed; a deploy without it would run scalar text kernels (see ${log_dir}/vector-provider-build.log)" >&2
+      return 1
+    fi
+    echo "warning: levelled vector provider not built; text kernels stay scalar (see ${log_dir}/vector-provider-build.log)" >&2
+    return 0
+  fi
+  for bootstrap_vector_provider_built in "${bootstrap_vector_provider_dir}"/simple_vector_provider_levelled.*; do
+    case "${bootstrap_vector_provider_built}" in *.sha256) continue ;; esac
+    break
+  done
+  [ -f "${bootstrap_vector_provider_built}" ] &&
+    [ "$(hash_file "${bootstrap_vector_provider_built}")" = "${bootstrap_vector_provider_out}" ] || {
+    echo "error: levelled vector provider artifact does not match its reported digest" >&2
+    return 1
+  }
+  bootstrap_vector_provider_pin=${bootstrap_vector_provider_out}
+  bootstrap_vector_provider_name="providers/simple_vector_provider_levelled-$(printf '%s' "${bootstrap_vector_provider_pin}" | cut -c1-16).${bootstrap_vector_provider_built##*.}"
+  echo "Levelled vector provider: ${bootstrap_vector_provider_built} sha256=${bootstrap_vector_provider_pin}"
+}
+
+# Stage the built provider at <dir>/<deploy name> next to a binary whose
+# runtime baked the same pin; refuse a binary that does not embed the pin.
+bootstrap_stage_vector_provider_beside() {
+  [ -n "${bootstrap_vector_provider_pin}" ] || return 0
+  grep -a -q "${bootstrap_vector_provider_pin}" "$1/simple${exe_suffix}" || {
+    echo "error: $1/simple${exe_suffix} does not embed the levelled vector provider pin ${bootstrap_vector_provider_pin}" >&2
+    return 1
+  }
+  mkdir -p "$1/providers" || return 1
+  install -m755 "${bootstrap_vector_provider_built}" "$1/${bootstrap_vector_provider_name}" || return 1
+  [ "$(hash_file "$1/${bootstrap_vector_provider_name}")" = "${bootstrap_vector_provider_pin}" ]
+}
+
 bootstrap_native_build_main() {
   # The focused Stage 4 capsule caps --source at six roots
   # (src/app/cli/bootstrap_focused_native_build.spl). Roots are NOT ignored:
@@ -2864,6 +2923,7 @@ bootstrap_native_build_main() {
     SIMPLE_NATIVE_BUILD_THREADS="${selfhost_jobs}" \
     SIMPLE_NATIVE_BUILD_CACHE_DIR="${native_cache_dir}" \
     SIMPLE_RUNTIME_PATH="${bootstrap_runtime_authority_path}" \
+    SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256="${bootstrap_vector_provider_pin:-}" \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
     SIMPLE_PACKAGE_INDEX_COLD_INIT=1 \
@@ -4236,6 +4296,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   fi
   bootstrap_cuda_source_snapshot_require "${stage3_source_before}" || exit 1
   bootstrap_step_mark source-inputs-before
+  bootstrap_build_host_vector_provider || exit 1
 
   # Stage 2: the admitted parent compiles bootstrap_main.spl.
   # Stage 2 uses the configured backend; LLVM is the default and Cranelift is
@@ -6089,6 +6150,7 @@ fi
 # ===========================================================================
 
 echo "Stage 4: compiling full CLI (main.spl) with bootstrap compiler..."
+bootstrap_build_host_vector_provider || exit 1
 bootstrap_progress_mark stage4-fingerprint ""
 full_dir="${output_dir}/full/${PLATFORM}"
 mkdir -p "${full_dir}"
@@ -6120,6 +6182,7 @@ if [ ! -x "${full_bin}" ]; then
   echo "error: failed to compile full CLI binary from main.spl" >&2
   exit 1
 fi
+bootstrap_stage_vector_provider_beside "${full_dir}" || exit 1
 
 bootstrap_progress_mark stage4-smoke "$(absolute_path "${log_dir}/stage4-native-build.log")"
 if [ -z "${resume_stage4_output}" ]; then
@@ -6643,6 +6706,22 @@ if [ "${deploy}" -eq 1 ]; then
     exit 1
   }
 
+  # Levelled vector provider beside the compiler: its runtime baked this pin
+  # (bootstrap_stage_vector_provider_beside verified the embedding).
+  if [ -n "${bootstrap_vector_provider_pin}" ]; then
+    bootstrap_deploy_tx_add "${bootstrap_vector_provider_name}" \
+      "${full_dir}/${bootstrap_vector_provider_name}" \
+      "${deploy_dir}/${bootstrap_vector_provider_name}" 755 \
+      "${bootstrap_vector_provider_pin}" || {
+      echo "ERROR: deploy refused - vector provider transaction admission failed" >&2
+      exit 1
+    }
+  elif [ "${SIMPLE_BOOTSTRAP_ALLOW_SCALAR_TEXT:-0}" != 1 ]; then
+    echo "ERROR: deploy refused - no levelled vector provider: the deployed compiler would run scalar text kernels (set SIMPLE_BOOTSTRAP_ALLOW_SCALAR_TEXT=1 to accept)" >&2
+    bootstrap_deploy_tx_abort || true
+    exit 1
+  fi
+
   # Canonical deployment is always a complete tooling generation. Resume and
   # --no-mcp lanes may build partial artifacts, but cannot publish them.
   [ -z "${resume_stage4_output}" ] || {
@@ -6883,6 +6962,24 @@ if [ "${deploy}" -eq 1 ]; then
   if [ "${os}" = windows ]; then
     stable_windows_bin="${bootstrap_deploy_tx_stable_path}"
     stable_windows_receipt="${repo_root}/bin/.simple-windows-stable-entrypoint.env"
+    # bin/simple.exe's own <exe_dir>/providers/ needs the provider too. The
+    # name is content-addressed by the pin, so it is published BEFORE the
+    # executable, never overwrites another generation's provider, and a
+    # rollback of bin/simple.exe needs no provider restore.
+    if [ -n "${bootstrap_vector_provider_pin}" ]; then
+      stable_windows_provider="$(dirname -- "${stable_windows_bin}")/${bootstrap_vector_provider_name}"
+      if [ "$(hash_file "${stable_windows_provider}" 2>/dev/null)" != "${bootstrap_vector_provider_pin}" ]; then
+        mkdir -p "$(dirname -- "${stable_windows_provider}")" &&
+          cp "${bootstrap_deploy_tx_final_dir}/${bootstrap_vector_provider_name}" "${stable_windows_provider}.tmp.$$" &&
+          [ "$(hash_file "${stable_windows_provider}.tmp.$$")" = "${bootstrap_vector_provider_pin}" ] &&
+          mv -f "${stable_windows_provider}.tmp.$$" "${stable_windows_provider}" || {
+            rm -f "${stable_windows_provider}.tmp.$$"
+            echo "ERROR: deploy refused - could not publish the vector provider beside bin/simple.exe" >&2
+            bootstrap_deploy_tx_abort || echo "ERROR: rollback incomplete; recovery journal retained" >&2
+            exit 1
+          }
+      fi
+    fi
     powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass \
       -File "${repo_root}/scripts/bootstrap/publish-windows-stable-entrypoint.ps1" \
       -Candidate "${bootstrap_deploy_tx_final_dir}/simple.exe" -Destination "${stable_windows_bin}" \

@@ -663,9 +663,20 @@ The static runtime keeps a portable scalar baseline and fails closed to it.
 - Gate: `check-vector-provider-levels.shs run` adds per-cap text parity
   (`vector_text_level_parity.c`) and `check-text-provider-route.shs`
   (baseline-only runtime objects, absent / refused / admitted routes).
-- Open: deployment must ship and pin the DSO, otherwise the runtime runs the
-  scalar baseline (about 2.8x slower than old AVX2 on 1 MiB ASCII validate);
-  aarch64/RVV text objects are compile-gated only on Windows hosts.
+- Deployment: the bootstrap builds the host DSO first
+  (`scripts/bootstrap/build-vector-provider.shs`, byte-identical to the gated
+  uncapped DSO) and passes its SHA-256 to Stage 4 as
+  `SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256`; `runtime_compiler.spl` and the
+  seed's core-C bundle bake it into `runtime_simd_utf8.c` only
+  (`-DSIMPLE_VECTOR_PROVIDER_PIN_HEX`, folded into the object-cache keys).
+  The DLL is deployed content-addressed as
+  `<exe_dir>/providers/simple_vector_provider_levelled-<pin16>.<ext>` (the
+  one sub-directory class the deploy transaction admits; Windows also
+  publishes it beside `bin/simple.exe`). A deploy without it is refused
+  unless `SIMPLE_BOOTSTRAP_ALLOW_SCALAR_TEXT=1`. Without a pin the runtime
+  runs the scalar baseline (about 2.8x slower than old AVX2 on 1 MiB ASCII
+  validate). aarch64/RVV text objects are compile-gated only on Windows
+  hosts.
 
 **Stage 2 — crypto (planned).** AES-NI, SHA-NI and PCLMUL (GHASH, CRC32) from
 `runtime_simd_dispatch.c` / `g_simd_crypto` become provider opcodes behind a
