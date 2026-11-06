@@ -42,6 +42,18 @@ fn ptx_mir_kind_to_primitive(kind: MirTypeKind) -> PrimitiveType:
         case Bool: PrimitiveType.Bool
         case _: PrimitiveType.Unit
 
+# PTX identifiers may not contain `.`, but MIR function names are
+# module-qualified (`mod.fn`). Kernel entries keep the bare function name: it
+# is the host launch ABI (`rt_cuda_launch_kernel(module, "fill", ...)`).
+# Device functions and their call sites use a `.`-free spelling of the full
+# qualified name so same-named helpers from different modules stay distinct.
+fn ptx_kernel_entry_name(name: text) -> text:
+    val parts = name.split(".")
+    parts[parts.len() - 1]
+
+fn ptx_device_symbol_name(name: text) -> text:
+    name.replace(".", "_")
+
 fn ptx_f32_hex(value: f64) -> text:
     format_zero_pad(format_hex_upper(f32_to_bits(value as f32) as i64), 8)
 
@@ -105,7 +117,7 @@ class PtxBuilder:
 
     me emit_kernel_entry(name: text, params: [MirLocal]):
         """Emit kernel entry point declaration."""
-        self.emit_line(".visible .entry {name}(")
+        self.emit_line(".visible .entry {ptx_kernel_entry_name(name)}(")
         self.indent_level = self.indent_level + 1
 
         var args: [MirLocal] = []
@@ -146,9 +158,9 @@ class PtxBuilder:
         val tm = self.type_mapper
         val ret = tm.ptx_type(ptx_mir_kind_to_primitive(ret_type.kind))
         if ret_type.kind == MirTypeKind.Unit:
-            self.emit_line(".visible .func {name}(")
+            self.emit_line(".visible .func {ptx_device_symbol_name(name)}(")
         else:
-            self.emit_line(".visible .func (.param {ret} retval) {name}(")
+            self.emit_line(".visible .func (.param {ret} retval) {ptx_device_symbol_name(name)}(")
         self.indent_level = self.indent_level + 1
 
         var args: [MirLocal] = []
@@ -504,7 +516,7 @@ class PtxBuilder:
             params = params.push(param)
         val retval = "__call_{call_id}_retval"
         self.emit_line(".param {ptx_ty} {retval};")
-        self.emit_line("call ({retval}), {func_name}, ({params.join(", ")});")
+        self.emit_line("call ({retval}), {ptx_device_symbol_name(func_name)}, ({params.join(", ")});")
         self.emit_line("ld.param{ptx_ty} {dest}, [{retval}];")
 
     me emit_call_void(func_name: text, args: [text], arg_types: [PrimitiveType]):
@@ -518,7 +530,7 @@ class PtxBuilder:
             self.emit_line(".param {arg_ty} {param};")
             self.emit_line("st.param{arg_ty} [{param}], {args[i]};")
             params = params.push(param)
-        self.emit_line("call {func_name}, ({params.join(", ")});")
+        self.emit_line("call {ptx_device_symbol_name(func_name)}, ({params.join(", ")});")
 
     # === Conversion ===
 
