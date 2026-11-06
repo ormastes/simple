@@ -43,10 +43,22 @@ D:/dev/wt/seed/simple.exe run src/app/traceability/query_main.spl show requireme
 ```
 
 Exit 1 = rendered, unverified (normal). The `TRACE-AUTHORITY-CONFLICT` lines
-are expected. Scope is the registered declaration only (`list bugs` is empty
-by design until legacy DB ingestion lands). Full output key reference and the
-spec driver (`scripts/check/check-trace-query-p0.shs`):
-`doc/07_guide/infra/trace_query_p0.md` § "Running it today on the seed".
+are expected. Scope is the registered declaration plus, since 2026-11-06, the
+legacy bug DB as a read-only **sidecar** (`doc/08_tracking/bug/bug_db.sdn`,
+2,687 rows, bug nodes + status/severity/file attributes, no graph claims):
+
+```sh
+S=D:/dev/wt/seed/simple.exe
+$S run src/app/traceability/query_main.spl list bugs --status=open --severity=P1 --file-prefix=src/compiler/ 2>/dev/null
+$S run src/app/traceability/query_main.spl show bug bug:<db-id> --format=sdn 2>/dev/null   # legacy: {...}
+$S run src/app/traceability/query_main.spl refs bug bug:<db-id> 2>/dev/null               # SIDECAR located_in / reproducible_by rows
+$S run src/app/traceability/query_main.spl list features --bug-db=none 2>/dev/null        # declaration only
+```
+
+Full output key reference and the spec driver
+(`scripts/check/check-trace-query-p0.shs`):
+`doc/07_guide/infra/trace_query_p0.md` § "Running it today on the seed" and
+§ "Legacy bug DB sidecar".
 
 `refs requirement req:REQ-TRC-001` (or `refs feature <id>`) lists every authored
 claim from/to the identity with the other endpoint's declared file paths; see

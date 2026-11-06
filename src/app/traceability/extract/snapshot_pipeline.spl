@@ -7,6 +7,8 @@ use std.common.sdn.value.{SdnValue}
 use std.common.sdn.encode.{sdn_encode_canonical}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use app.traceability.extract.snapshot_facts.{extract_snapshot_trace_facts}
+use std.common.traceability.sidecar_v1.{TraceSidecarSourceV1, TraceSidecarReferenceV1}
+use std.common.traceability.legacy_bugs_v1.{LegacyBugRowV1}
 
 pub struct TraceSnapshotScope:
     selected_roots: [text]
@@ -17,6 +19,10 @@ pub struct TraceSnapshotBuild:
     graph: TraceGraph
     scope: TraceSnapshotScope
     admission_eligible: bool
+    # Sidecar inventories: identity-bound, never graph claims/locators.
+    sidecar_sources: [TraceSidecarSourceV1] = []
+    sidecar_references: [TraceSidecarReferenceV1] = []
+    legacy_bugs: [LegacyBugRowV1] = []
 
 fn identity_texts(values: [text]) -> SdnValue:
     var items: [SdnValue] = []
@@ -56,6 +62,14 @@ fn scope_contains(roots: [text], path: text) -> bool:
 # turn its own scope label into an independently admitted repository closure.
 pub fn build_snapshot_trace_graph(snapshot: SnapshotInput, policy: TracePolicy,
     declarations: [text], scope: TraceSnapshotScope) -> Result<TraceSnapshotBuild, text>:
+    build_snapshot_trace_graph_with_sidecar_v1(snapshot, policy, declarations, scope, [], [], [])
+
+# Sidecar sources enter the input manifest (so generation and cursors bind
+# them); sidecar nodes join the facts before resolution; sidecar diagnostics
+# are warnings that never change completeness. No claim or locator is added.
+pub fn build_snapshot_trace_graph_with_sidecar_v1(snapshot: SnapshotInput, policy: TracePolicy,
+    declarations: [text], scope: TraceSnapshotScope, sources: [TraceSidecarSourceV1],
+    sidecar_nodes: [TraceNode], sidecar_diagnostics: [TraceDiagnostic]) -> Result<TraceSnapshotBuild, text>:
     if scope.closure_kind != "selected_scope" or scope.selected_roots.len() == 0 or scope.selected_roots.len() > 256:
         return Err("TRACE-SNAPSHOT-INCOMPLETE: explicit selected scope required")
     if not snapshot.complete or snapshot.subject.snapshot_id == "" or snapshot.subject.repository_id == "":
@@ -113,12 +127,34 @@ pub fn build_snapshot_trace_graph(snapshot: SnapshotInput, policy: TracePolicy,
     inputs["declarations"] = identity_texts(trace_sorted_ids(declarations))
     inputs["policy"] = SdnValue.Dict(policy_fields)
     inputs["artifacts"] = identity_rows(artifacts)
+    if sources.len() > 0:
+        if sources.len() > 64: return Err("TRACE-SNAPSHOT-INCOMPLETE: sidecar source budget exhausted")
+        var source_rows: [SdnValue] = []
+        for source in sources:
+            if not trace_path_valid(source.path) or source.content_sha256 == "" or source.kind == "":
+                return Err("TRACE-SNAPSHOT-INCOMPLETE: sidecar source needs kind, safe path and content identity")
+            var fields: Dict<text, SdnValue> = {}
+            fields["kind"] = SdnValue.String(source.kind)
+            fields["path"] = SdnValue.String(source.path)
+            fields["content_sha256"] = SdnValue.String(source.content_sha256)
+            fields["row_count"] = SdnValue.Int(source.row_count)
+            source_rows.push(SdnValue.Dict(fields))
+        inputs["sidecar_sources"] = identity_rows(source_rows)
     val manifest_id = "inputs:sha256:" + identity_digest(SdnValue.Dict(inputs))
     # Structural identity excludes the candidate tree, which may contain its
     # own generated page. Generation separately binds the entire exact subject.
     val generation = identity_record(["domain", "input_manifest_id", "snapshot_id", "kind", "revision_id", "tree_id"],
         ["simple.trace.graph-generation/v1", manifest_id, snapshot.subject.snapshot_id, snapshot.subject.kind, snapshot.subject.revision_id, snapshot.subject.tree_id])
     val generation_id = "generation:sha256:" + identity_digest(generation)
-    val facts = extract_snapshot_trace_facts(snapshot, policy, declarations, manifest_id, generation_id)
-    val graph = resolve_trace_graph(facts, policy)
-    Ok(TraceSnapshotBuild(graph: graph, scope: scope, admission_eligible: false))
+    var facts = extract_snapshot_trace_facts(snapshot, policy, declarations, manifest_id, generation_id)
+    if sidecar_nodes.len() > 0:
+        # A registered declaration keeps its node; the sidecar never overrides it.
+        var declared: Dict<text, bool> = {}
+        for node in facts.nodes: declared[node.id] = true
+        for node in sidecar_nodes:
+            if declared.contains_key(node.id): continue
+            declared[node.id] = true
+            facts.nodes.push(node)
+    var graph = resolve_trace_graph(facts, policy)
+    for diagnostic in sidecar_diagnostics: graph.diagnostics.push(diagnostic)
+    Ok(TraceSnapshotBuild(graph: graph, scope: scope, admission_eligible: false, sidecar_sources: sources))

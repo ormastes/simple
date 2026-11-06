@@ -178,12 +178,12 @@ How to read the output:
   locator_kind, locator}]` (where each selected node is declared),
   `diagnostics` (capped at 200, `diagnostics_truncated`). Parse with
   `std.common.sdn.parser.parse_with_spans_and_issues`.
-- Scope today is **the registered declaration only**
+- Scope is **the registered declaration**
   (`doc/08_tracking/trace/features/simple_traceability_sdn_slop.sdn`: 1
-  feature, 20 requirements, 0 bugs). `list bugs` returning `Total selected: 0`
-  means no bug is *declared* there, not that `bug_db.sdn` is empty; legacy DB
-  ingestion is a later WP. To query another declaration file pass
-  `--declaration=<path>`.
+  feature, 20 requirements, 0 declared bugs) **plus the legacy bug DB
+  sidecar** (below). With `--bug-db=none`, `list bugs` returns `Total
+  selected: 0` because no bug is *declared* in the registry. To query another
+  declaration file pass `--declaration=<path>`.
 - `--snapshot=git:<rev>` and `--snapshot index` need the owned-process v3
   adapter (`OwnedProcessLease`), which the seed interpreter does not provide
   (`TRACE-QUERY-INFRASTRUCTURE: owned process start: invalid 4-word receipt`).
@@ -225,3 +225,58 @@ the graph also carries it as an edge. The declaration has no
 answerable through `refs`; "which feature specifies X", decomposition and
 implemented_by/described_by are. `--prefix` is rejected; `--limit`/`--cursor`
 page exactly like `list`. Exit codes as for `show`.
+
+### Legacy bug DB sidecar: `list|show|refs bug` (slice 3, 2026-11-06)
+
+`doc/08_tracking/bug/bug_db.sdn` (2,687 rows: `bugs_active` wins over its
+archived twin in `bugs`) is ingested **read-only** on every worktree-preview
+query as a *sidecar*: bug nodes join the graph, the row attributes travel
+beside them, and nothing becomes a graph claim, edge or locator (the file is
+3.67 MB, over the capture caps, and its `file` column cannot be pinned or
+authorized). Design: `doc/05_design/app/traceability_cli_sdn_v1.md` slice 3.
+
+```sh
+S=D:/dev/wt/seed/simple.exe
+$S run src/app/traceability/query_main.spl list bugs --limit 20 2>/dev/null
+$S run src/app/traceability/query_main.spl list bugs --status=open --severity=P1 --file-prefix=src/compiler/ 2>/dev/null
+$S run src/app/traceability/query_main.spl show bug bug:2998 --format=sdn 2>/dev/null
+$S run src/app/traceability/query_main.spl refs bug bug:2998 2>/dev/null
+$S run src/app/traceability/query_main.spl list bugs --bug-db=build/other_db.sdn 2>/dev/null
+$S run src/app/traceability/query_main.spl list features --bug-db=none 2>/dev/null
+```
+
+How to read it:
+
+- Bug ids are `bug:<db id>` (the `id` column verbatim). `list bugs` rows carry
+  three extra columns: `bug<TAB>ID<TAB>TITLE<TAB>STATUS<TAB>SEVERITY<TAB>LOCATION`
+  where LOCATION is `file:line` from the row (often the bug's own `.md`
+  record, sometimes a source file -- the row is reported as written). Other
+  kinds keep `KIND<TAB>ID<TAB>TITLE`.
+- Filters `--status=<exact>`, `--severity=<exact>`, `--file-prefix=<path or
+  dir/>` are accepted only with `list bugs`, narrow *before* paging (so
+  `Total selected` is the filtered count) and are bound into the cursor; a
+  cursor from a filtered page is rejected without the same filters. Status
+  values are whatever the DB holds (`open`, `fixed`, `fixing`,
+  `fix-implemented-verification-pending`, `resolved-disappeared`, ...).
+- "Which bugs touch file X": `list bugs --file-prefix=<exact path>` (the
+  `file` column) -- `refs file <path>` is the planned one-command summary
+  (design slice 5). "What does this bug point at": `refs bug <id>` prints
+  `SIDECAR<TAB>located_in<TAB><file><TAB>line:N<TAB>legacy-row` and
+  `SIDECAR<TAB>reproducible_by<TAB><path><TAB><TAB>legacy-row` after the
+  `LOCATOR` rows; `Total references` still counts graph claims only (0 for a
+  bug no declaration mentions).
+- Header: `Ingestion: registered declarations + sidecar bug-db/v1 <path>
+  rows=<n> sha256:<hex>`. SDN: `legacy_database_ingestion: bug-db/v1`,
+  `sidecar_sources: [{kind, path, sha256, rows}]`, and each bug node has
+  `legacy: {table, status, severity, file, line, reproducible_by, valid,
+  created_at, updated_at}`; `refs` adds `sidecar_references: [{source_kind,
+  relation, path, locator, authority}]`. The source sha is part of the input
+  manifest, so every cursor invalidates when the DB changes.
+- `TRACE-LEGACY-ROW:` diagnostics (severity `warning`, 8 today -- rows with
+  11+ fields from unescaped commas) do not affect `Graph complete`.
+- Default is on when the default path exists; `--bug-db=none` turns it off and
+  restores the exact pre-slice-3 output; an explicit `--bug-db=<path>` that
+  cannot be read is `TRACE-LEGACY-CAPTURE` (exit 2). `git:`/`index` snapshots
+  never ingest it (`legacy_database_ingestion: unavailable-for-snapshot-kind`).
+- Cost on the seed: ~1 s on top of the ~4 s query (bytes via the no-follow
+  reader, runtime-backed decode; the std text codec would add ~21 s).

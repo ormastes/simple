@@ -16,6 +16,12 @@ pub struct TraceQueryOptionsV1:
     paths: [text] = []
     declarations: [text] = []
     help: bool = false
+    # Legacy bug-DB sidecar: "none" disables; default path ingested only when present.
+    bug_db: text = "doc/08_tracking/bug/bug_db.sdn"
+    bug_db_explicit: bool = false
+    status: text = ""
+    severity: text = ""
+    file_prefix: text = ""
 
 pub fn trace_query_options_parse_v1(args: [text]) -> Result<TraceQueryOptionsV1, text>:
     if args.len() > 512: return Err("TRACE-QUERY-INVALID: too many arguments")
@@ -81,8 +87,25 @@ pub fn trace_query_options_parse_v1(args: [text]) -> Result<TraceQueryOptionsV1,
                 else:
                     if options.declarations.contains(value): return Err("TRACE-QUERY-INVALID: duplicate declaration path")
                     options.declarations.push(value)
+            case "--bug-db":
+                if value != "none" and not trace_path_valid(value): return Err("TRACE-QUERY-INVALID: bug-db must be none or a safe repository-relative file")
+                options.bug_db = value
+                options.bug_db_explicit = value != "none"
+            case "--status" | "--severity" | "--file-prefix":
+                if value.len() > 256 or value.contains("\n") or value.contains("\t"):
+                    return Err("TRACE-QUERY-INVALID: filter value exceeds its bound")
+                if name == "--status": options.status = value
+                elif name == "--severity": options.severity = value
+                else:
+                    # A directory prefix may end with "/" (area filter); the path rules apply to the rest.
+                    val probe = if value.ends_with("/"): value.substring(0, value.len() - 1) else: value
+                    if not trace_path_valid(probe): return Err("TRACE-QUERY-INVALID: file-prefix must be a safe repository-relative prefix")
+                    options.file_prefix = value
             case _: return Err("TRACE-QUERY-INVALID: unknown option " + name)
         index = index + 1
+    if (options.status != "" or options.severity != "" or options.file_prefix != "") and
+        not (options.operation == "list" and options.kind == "bugs"):
+        return Err("TRACE-QUERY-INVALID: status, severity and file-prefix filters apply only to list bugs")
     if options.format != "table" and options.format != "sdn":
         return Err("TRACE-QUERY-INVALID: native formats are table and sdn")
     if options.snapshot != "worktree" and options.snapshot != "index" and
@@ -126,6 +149,10 @@ pub fn trace_query_help_v1() -> text:
     "  --limit=1..200 --prefix=<id-prefix> --cursor=<continuation>\n" +
     "  --declaration=<file>              Repeat to replace canonical defaults\n" +
     "  --path=<file>                     Add selected files to locator closure\n" +
+    "  --bug-db=<file>|none              Legacy bug DB sidecar (default doc/08_tracking/bug/bug_db.sdn\n" +
+    "                                    when present; worktree snapshots only; read-only)\n" +
+    "  --status=<s> --severity=<p> --file-prefix=<path>  list bugs filters (exact; prefix)\n" +
     "Options accept --name=value or --name value. Plural show kinds are aliases.\n" +
-    "Only registered declarations are indexed; no automatic legacy bug/feature DB ingestion.\n" +
+    "Registered declarations are indexed; bug DB rows are a labeled sidecar (nodes +\n" +
+    "attributes, no graph claims). No legacy feature DB ingestion.\n" +
     "Groups require P1. All output is structural, unverified and admission-ineligible.\n"

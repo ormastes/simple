@@ -28,3 +28,16 @@ comment lines (the SDN parser now skips leading comment lines for every
 top-level shape, not only block mappings). The git/index snapshot routes use
 `OwnedProcessLease` and need the native runtime provider; the worktree preview
 does not. Agent-facing reading guide: `doc/07_guide/infra/trace_query_p0.md`.
+
+Sidecar sources (2026-11-06, design slice 3 in
+`doc/05_design/app/traceability_cli_sdn_v1.md`): the legacy bug DB is too
+large for the capture caps (3.67 MB vs 1 MiB) and its rows cannot be pinned
+locators or authorized claims, so `std.common.traceability.legacy_bugs_v1`
+parses only the `bugs_active`/`bugs` sections (active wins), `sidecar_v1`
+turns rows into labeled `located_in`/`reproducible_by` references, and
+`build_snapshot_trace_graph_with_sidecar_v1` binds the source sha into the
+input manifest while adding only bug *nodes* to the graph. The app reads the
+file through the no-follow byte reader + runtime-backed decode: the std text
+codec's interpreted UTF-8 validation costs ~21 s for this file on the seed.
+`list bugs --status/--severity/--file-prefix` filter before paging and fold
+into `visibility_context`, so cursors bind the filter.
