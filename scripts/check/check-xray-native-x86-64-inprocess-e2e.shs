@@ -7,7 +7,7 @@
 # C.2-C.7 and the section F PR6 row. AArch64 counterpart:
 # scripts/check/check-xray-native-inprocess-e2e.shs; the ISA-neutral flow
 # (build, link inspection, in-process sessions, verdicts) is shared in
-# scripts/check/xray-inprocess-e2e-lib.shs. Object-level x86-64 evidence
+# scripts/check/lib/xray-inprocess-e2e-lib.shs. Object-level x86-64 evidence
 # without execution: scripts/check/check-xray-native-x86-64-objects.shs.
 #
 # What it does (x86_64 Linux host; anywhere else the verdict is ERROR)
@@ -58,12 +58,46 @@ xr_x86_bytes() {
     awk -F'\t' '/^ *[0-9a-f]+:/ { sub(/^ *[0-9a-f]+: */, "", $1); sub(/ *$/, "", $1); print $1 }'
 }
 
-# Sleds: `eb 0b jmp` on an even address, then `e8 rel32 call <trampoline>`,
-# then `eb 04 jmp`. Count them, and every trampoline call must be a sled's.
+# Sled shapes in an `objdump -d` file: `eb 0b jmp` on an even address, then
+# an `e8 rel32` call, then `eb 04 jmp`. <target> is the call's required
+# symbol, or "" for a call to anything (the OFF-module census).
+xr_x86_sled_count() { # <dis> <target>
+    call_re=':\s+e8( [0-9a-f]{2}){4}\s+callq?\s'
+    [ -n "$2" ] && call_re="$call_re+0x[0-9a-f]+ <$2>\$"
+    grep -A2 -E '^ *[0-9a-f]*[02468ace]:\s+eb 0b\s+jmp' "$1" | grep -A1 -E "$call_re" | grep -cE ':\s+eb 04\s+jmp'
+}
+
+# Handler leaf rule over `objdump -d --no-show-raw-insn` of the handler:
+# 0 leaf; 1 when it calls, jumps indirectly, jumps outside itself (tail call
+# or an unsymbolised target) or names an SSE/AVX register.
+xr_x86_handler_bad() { # <dis>
+    grep -qE '\scallq?\s|\sjmpq?\s+\*|%[xyz]mm[0-9]' "$1" && return 0
+    grep -E '^ *[0-9a-f]+:\s+j[a-z]+\s' "$1" | grep -vqE '<simple_xray_native_handler_v1(\+0x[0-9a-f]+)?>$' && return 0
+    return 1
+}
+
+# Classifier fixtures, run by the shared --selftest on every host.
+XR_ISA_SELFTEST_CHECKS=7
+xr_isa_selftest() {
+    t=$(mktemp "${TMPDIR:-/tmp}/xray-x86-selftest.XXXXXX") || return 1
+    T='<__simple_xray_trampoline_v1>'
+    printf '    13f0: eb 0b                \tjmp\t0x13fd <f+0xd>\n    13f2: e8 59 00 00 00       \tcallq\t0x1450 %s\n    13f7: eb 04                \tjmp\t0x13fd <f+0xd>\n' "$T" > "$t"
+    [ "$(xr_x86_sled_count "$t" __simple_xray_trampoline_v1)" -eq 1 ] || { rm -f "$t"; return 1; }
+    sed 's/13f0:/13f1:/' "$t" > "$t.m"; [ "$(xr_x86_sled_count "$t.m" __simple_xray_trampoline_v1)" -eq 0 ] || { rm -f "$t" "$t.m"; return 1; }
+    sed '/eb 04/d' "$t" > "$t.m"; [ "$(xr_x86_sled_count "$t.m" "")" -eq 0 ] || { rm -f "$t" "$t.m"; return 1; }
+    sed 's/__simple_xray_trampoline_v1>/__simple_xray_trampoline_v1@plt>/' "$t" > "$t.m"
+    [ "$(xr_x86_sled_count "$t.m" __simple_xray_trampoline_v1)" -eq 0 ] || { rm -f "$t" "$t.m"; return 1; }
+    printf '<simple_xray_native_handler_v1>:\n    1b00: \tmovl\t(%%rdi), %%eax\n    1b02: \tjne\t0x1b10 <simple_xray_native_handler_v1+0x10>\n    1b04: \tretq\n' > "$t"
+    xr_x86_handler_bad "$t" && { rm -f "$t" "$t.m"; return 1; }
+    sed 's/movl\t(%rdi), %eax/movdqu\t%xmm0, (%rsp)/' "$t" > "$t.m"; xr_x86_handler_bad "$t.m" || { rm -f "$t" "$t.m"; return 1; }
+    sed 's/<simple_xray_native_handler_v1+0x10>/<other>/' "$t" > "$t.m"; xr_x86_handler_bad "$t.m" || { rm -f "$t" "$t.m"; return 1; }
+    rm -f "$t" "$t.m"
+    return 0
+}
+
+# Every trampoline call must be a sled's, and no sled starts on an odd byte.
 xr_isa_sleds() {
-    sleds=$(grep -A2 -E '^ *[0-9a-f]*[02468ace]:\s+eb 0b\s+jmp' "$WORK/on.dis" \
-        | grep -A1 -E ':\s+e8( [0-9a-f]{2}){4}\s+callq?\s+0x[0-9a-f]+ <__simple_xray_trampoline_v1>$' \
-        | grep -cE ':\s+eb 04\s+jmp')
+    sleds=$(xr_x86_sled_count "$WORK/on.dis" __simple_xray_trampoline_v1)
     calls=$(grep -cE '\scallq?\s+0x[0-9a-f]+ <__simple_xray_trampoline_v1' "$WORK/on.dis")
     odd=$(grep -A1 -E '^ *[0-9a-f]*[13579bdf]:\s+eb 0b\s+jmp' "$WORK/on.dis" | grep -cE '<__simple_xray_trampoline_v1')
     [ "$sleds" -gt 0 ] && [ "$calls" -eq "$sleds" ] && [ "$odd" -eq 0 ] || {
@@ -72,7 +106,7 @@ xr_isa_sleds() {
 }
 
 xr_isa_off_sleds() {
-    grep -A1 -E ':\s+eb 0b\s+jmp' "$WORK/off.dis" | grep -cE ':\s+e8( [0-9a-f]{2}){4}\s+callq?\s'
+    xr_x86_sled_count "$WORK/off.dis" ""
 }
 
 xr_isa_twin() {
@@ -82,9 +116,11 @@ xr_isa_twin() {
     [ "$size" = 332 ] || { echo "linked trampoline st_size is '$size' (want 332)"; return 1; }
     xr_x86_bytes < "$WORK/tramp.dis" | tr ' ' '\n' | grep -E '^[0-9a-f]{2}$' | head -n "$size" > "$WORK/tramp.bytes"
     [ "$(wc -l < "$WORK/tramp.bytes")" -eq "$size" ] || { echo "linked trampoline disassembles to $(wc -l < "$WORK/tramp.bytes") bytes (want $size)"; return 1; }
+    grep -qE '\scallq?\s.*<simple_xray_native_handler_v1@plt>' "$WORK/tramp.dis" && {
+        echo "the trampoline reaches the handler through the PLT"; return 1; }
     call=$(grep -E '\scallq?\s+0x[0-9a-f]+ <simple_xray_native_handler_v1>$' "$WORK/tramp.dis" | xr_x86_bytes | head -1)
     set -- $call
-    [ $# -eq 5 ] && [ "$1" = e8 ] || { echo "no direct handler CALL rel32 in the linked trampoline"; return 2; }
+    [ $# -eq 5 ] && [ "$1" = e8 ] || { echo "no direct handler CALL rel32 in the linked trampoline"; return 1; }
     rel=$(printf '%d' "0x$5$4$3$2")
     [ "$rel" -ge 2147483648 ] && rel=$((rel - 4294967296))
     XRAY_TWIN_ISA=x86_64 XRAY_TWIN_REL32=$rel timeout "$STEP_TIMEOUT" "$SIMPLE_BIN" run \
@@ -95,14 +131,11 @@ xr_isa_twin() {
     cmp -s "$WORK/tramp.bytes" "$WORK/twin.bytes" || { echo "trampoline bytes differ from the Simple twin (rel32 $rel)"; return 1; }
     "$OBJDUMP" -d --no-show-raw-insn --disassemble-symbols=simple_xray_native_handler_v1 "$WORK/libon.so" > "$WORK/handler.dis"
     grep -qE '<simple_xray_native_handler_v1>:' "$WORK/handler.dis" || { echo "handler not found"; return 2; }
-    # Leaf: no call, no indirect jump, no jump to another symbol (tail call),
-    # no SSE/AVX register.
-    if grep -qE '\scallq?\s|\sjmpq?\s+\*|%[xyz]mm[0-9]' "$WORK/handler.dis" ||
-        grep -E '\sj[a-z]+\s+0x[0-9a-f]+ <' "$WORK/handler.dis" | grep -vqE '<simple_xray_native_handler_v1(\+0x[0-9a-f]+)?>$'; then
+    if xr_x86_handler_bad "$WORK/handler.dis"; then
         echo "handler calls or jumps out, or touches SSE/AVX registers"; return 1
     fi
     return 0
 }
 
-. "$(dirname "$0")/xray-inprocess-e2e-lib.shs"
+. "$(dirname "$0")/lib/xray-inprocess-e2e-lib.shs"
 xr_main "$@"

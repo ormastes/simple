@@ -46,13 +46,23 @@ jobs:
 
       - name: Build seed
         working-directory: src/compiler_rust
-        run: cargo +nightly build --profile bootstrap -p simple-driver
+        env:
+          # Repo rule: clang + lld, never GCC (cargo would link with `cc`).
+          # A wrapper, not RUSTFLAGS, so .cargo/config.toml's rustflags stay.
+          CC: clang
+          CXX: clang++
+        run: |
+          printf '#!/bin/sh\nexec clang -fuse-ld=lld "$@"\n' > "$RUNNER_TEMP/clang-lld"
+          chmod +x "$RUNNER_TEMP/clang-lld"
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="$RUNNER_TEMP/clang-lld" \
+            cargo +nightly build --profile bootstrap -p simple-driver
 
       - name: Host identity
         run: |
           uname -a
           grep -m1 'model name' /proc/cpuinfo
           src/compiler_rust/target/bootstrap/simple --version
+          readelf -p .comment src/compiler_rust/target/bootstrap/simple | grep -iE 'lld|clang|gcc' | head -5
           clang --version | head -1
 
       - name: XRay x86-64 in-process e2e
