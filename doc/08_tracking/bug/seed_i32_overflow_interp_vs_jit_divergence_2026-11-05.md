@@ -130,3 +130,17 @@ Known limit: a literal defined in another MIR block reaches codegen through a
 Cranelift variable rather than an `iconst`, so it is treated as a wide
 operand and the result is not narrowed. That is the old behaviour, not a new
 divergence.
+
+## Follow-up resolved (2026-11-06): out-of-range value bound to a declared `i32`
+
+`interpreter/node_exec.rs` `coerce_to_declared_signed`: a value bound to a
+declared `i8`/`i16`/`i32` (typed `val`, parameter) is wrapped to that width
+(two's complement), in the `Let` executor and in `coerce_to_declared_type`
+(parameter binding and the block-body `Let` path).
+
+Evidence: `test/fixtures/seed_interp/i32_out_of_range_binding_repro.spl`,
+interpreter mode. Before (seed built from `ecb705896a4`):
+`i32_bind 3000000000 3000000000`. After: `i32_bind -1294967296 -1294967296`,
+identical to JIT. Rust test
+`interpreter::node_exec::declared_signed_binding_tests::out_of_range_value_bound_to_declared_i32_wraps`:
+FAILED before (`left: 3000000, right: -1294967`), ok after.

@@ -79,6 +79,9 @@ pub(crate) fn coerce_to_declared_type(value: Value, ty: Option<&Type>) -> Value 
             Value::Int(i) => Value::Float32(i as f32),
             other => other,
         },
+        Some(Type::Simple(name)) if matches!(name.as_str(), "i8" | "i16" | "i32" | "i64") => {
+            coerce_to_declared_signed(value, name)
+        }
         Some(Type::Simple(_)) => coerce_to_declared_unsigned(value, ty),
         Some(Type::Array { element, size: None }) if matches!(element.as_ref(), Type::Simple(name) if name == "u8") => {
             pack_u8_array(value)
@@ -135,6 +138,28 @@ pub(crate) fn record_let_declared_width(let_stmt: &simple_parser::ast::LetStmt, 
 }
 
 /// Scalar half of [`coerce_to_declared_type`]: only the unsigned widths.
+/// Signed counterpart of [`coerce_to_declared_unsigned`]: a value bound to a
+/// declared `i8`/`i16`/`i32`/`i64` (parameter, typed `val`) takes that width's
+/// two's-complement value, as native lowering stores it. A `Value::UInt`
+/// argument bound to an `i64` parameter used to stay unsigned, so `x - 10`
+/// with `x = 5u64` wrapped to 18446744073709551611
+/// (follow-up of 2026-10-30_seed_uint_scrutinee_never_matches_int_patterns.md),
+/// and `val x: i32 = 3000000000` kept the i64
+/// (follow-up of seed_i32_overflow_interp_vs_jit_divergence_2026-11-05.md).
+pub(crate) fn coerce_to_declared_signed(value: Value, type_name: &str) -> Value {
+    let raw: i64 = match value {
+        Value::Int(i) => i,
+        Value::UInt { value, .. } => value as i64,
+        other => return other,
+    };
+    Value::Int(match type_name {
+        "i8" => raw as i8 as i64,
+        "i16" => raw as i16 as i64,
+        "i32" => raw as i32 as i64,
+        _ => raw,
+    })
+}
+
 pub(crate) fn coerce_to_declared_unsigned(value: Value, ty: Option<&Type>) -> Value {
     let Some(Type::Simple(type_name)) = ty else {
         return value;
@@ -453,6 +478,9 @@ pub(crate) fn exec_node(
                         if matches!(type_name.as_str(), "u8" | "u16" | "u32" | "u64") =>
                     {
                         coerce_to_declared_unsigned(value, Some(ty))
+                    }
+                    Some(Type::Simple(type_name)) if matches!(type_name.as_str(), "i8" | "i16" | "i32" | "i64") => {
+                        coerce_to_declared_signed(value, type_name)
                     }
                     // `[u8]` bindings get packed byte storage (see
                     // `coerce_to_declared_type`).
@@ -4228,5 +4256,37 @@ mod uninit_fixed_array_let_tests {
             panic!("expected FixedSizeArray");
         };
         assert!(data.iter().all(|v| v.as_int().ok() == Some(0)), "{data:?}");
+    }
+}
+
+#[cfg(test)]
+mod declared_signed_binding_tests {
+    //! A value bound to a declared signed width takes that width's
+    //! two's-complement value, as native lowering stores it. Follow-ups of
+    //! 2026-10-30_seed_uint_scrutinee_never_matches_int_patterns.md (UInt arg
+    //! into an `i64` param) and seed_i32_overflow_interp_vs_jit_divergence_2026-11-05.md
+    //! (out-of-range value bound to a declared `i32`).
+    use crate::interpreter::evaluate_module;
+    use simple_parser::Parser;
+
+    fn run(src: &str) -> i32 {
+        evaluate_module(&Parser::new(src).parse().expect("parse").items).expect("evaluate")
+    }
+
+    #[test]
+    fn uint_argument_bound_to_i64_param_is_signed() {
+        // `main` is truncated to i32, so compare inside the program: a UInt
+        // result 18446744073709551611 truncates to the same -5.
+        let src = "fn minus_ten(x: i64) -> i64:\n    x - 10\nfn probe() -> i64:\n    val u: u64 = 5\n    if minus_ten(u) < 0:\n        return 1\n    0\nmain = probe()\n";
+        assert_eq!(run(src), 1);
+    }
+
+    #[test]
+    fn out_of_range_value_bound_to_declared_i32_wraps() {
+        // Divide in-program: `main`'s own i32 truncation would hide the width.
+        let local = "fn probe() -> i64:\n    val x: i32 = 3000000000\n    x / 1000\nmain = probe()\n";
+        assert_eq!(run(local), -1294967);
+        let param = "fn echo32(x: i32) -> i64:\n    x / 1000\nmain = echo32(3000000000)\n";
+        assert_eq!(run(param), -1294967);
     }
 }
