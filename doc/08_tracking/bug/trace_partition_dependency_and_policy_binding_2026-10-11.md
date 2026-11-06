@@ -1,6 +1,6 @@
 # Pending trace partition dependency and policy binding repairs
 
-Status: open; independent source review, no native verification.
+Status: closed 2026-11-06 (interpreter-verified; no native verification).
 
 The pending semantic-partition implementation must not report a complete
 incremental closure while omitting owners affected by global identity or
@@ -25,3 +25,22 @@ Evidence: independent Astra review of the pending
 `src/app/traceability/extract/snapshot_partitions.spl` implementation and its
 relationship to `snapshot_facts.spl`. The implementation remains under repair;
 this issue records findings rather than claiming a tested regression or fix.
+
+## Resolution (2026-11-06)
+
+Fixed in `src/app/traceability/extract/snapshot_partitions.spl`:
+- invalidation unions base and candidate owners/dependency rows; identity
+  signatures include declared locators (declaration-only locator moves);
+  fallback identity add/delete and negative lookups flow through
+  `changed_identity_keys`; an incomplete dependency inventory yields
+  `full_rebuild: true, complete: false`.
+- `update_trace_snapshot_partitions` recomputes the policy binding from the
+  policy payload; duplicated rules produce a different binding.
+- composition keeps decoded owners to their declared rows only and emits the
+  registration diagnostics with the cold extractor's identity and order; the
+  unreachable extra budget diagnostic was removed.
+
+Evidence: `bin/simple.exe run test/01_unit/app/traceability/snapshot_partitions_spec.spl`
+-> 16 examples, 0 failures (6 new; 3 failed before the fix: locator move,
+incomplete report, cold diagnostic parity). Oracle covers malformed, missing
+declaration and node-budget branches against `extract_snapshot_trace_facts_cold`.
