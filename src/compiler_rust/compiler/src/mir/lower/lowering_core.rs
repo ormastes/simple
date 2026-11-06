@@ -1806,6 +1806,14 @@ impl<'a> MirLowerer<'a> {
         // Clone the defer stack so we can iterate without borrowing self
         let deferred: Vec<Vec<HirStmt>> = self.state.try_defer_stack()?.clone();
 
+        // Deferred code runs AFTER the scope's value is computed and must not
+        // replace it: the implicit-tail return reads `last_expr_value` after
+        // this call, and lowering a deferred `cleanup()` used to overwrite it,
+        // so `defer f(); r` returned f()'s result (nil -> 0, or a null struct
+        // handle). See doc/08_tracking/bug/
+        // seed_mir_defer_clobbers_implicit_tail_return_2026-11-06.md
+        let tail_value = self.last_expr_value;
+
         // Iterate in reverse (LIFO) order
         for body in deferred.iter().rev() {
             for stmt in body {
@@ -1813,6 +1821,7 @@ impl<'a> MirLowerer<'a> {
             }
         }
 
+        self.last_expr_value = tail_value;
         Ok(())
     }
 

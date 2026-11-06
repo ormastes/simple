@@ -6,7 +6,7 @@
   `C:/Users/ormas/dev/simple/bin/release/x86_64-pc-windows-msvc/simple.exe`
   (`Simple Language v1.0.0-rc.1`, seed banner)
 - **Severity:** crash (rc 139, SIGSEGV), nothing on stderr
-- **Status:** open (seed defect). Not fixable in `.spl` source: the crash
+- **Status:** fixed (landed; re-verified 2026-11-06, see "Re-verification 2026-11-06"). Original note: not fixable in `.spl` source; the crash
   happens on a one-line function with no body logic.
 
 ## Symptom
@@ -133,3 +133,9 @@ answers `rc=0` for both this doc's repro and
 `seed_jit_function_local_use_segfaults_2026-09-13.md`'s p6 repro).
 
 **Status: FIXED**, pending PR landing.
+
+## Re-verification 2026-11-06
+
+On a seed built from `origin/release/1.0.0` @ ecb705896a4 (`cargo build --release --bin simple`, Windows x86_64 host), the minimal repro (an `app.*` module exporting `pub fn triv0() -> i64: 42`,
+imported and called from a script in the tree) prints `n0 start` / `n1 42`
+at rc 0 under `SIMPLE_EXECUTION_MODE=jit`, with no demotion line. The fix has landed.

@@ -1,0 +1,232 @@
+# XRay PR5 end-to-end driver (run under the Rust seed by
+# scripts/check/check-xray-native-aarch64-e2e.shs).
+#
+# 1. Lowers a real Simple function through frontend -> MIR, applies the PR1
+#    `--xray` policy (xray_policy_apply), and compiles it with the pure-Simple
+#    native AArch64 backend: sleds + `.simple_xray_map` come from the emitter.
+#    Also compiles the same module with the policy OFF.
+# 2. Lays the emitted `.text` into a two-page image (page 0 RX: text plus a
+#    hand-assembled counting trampoline, page 1 R: the map), resolving each
+#    sled's CALL26 to the trampoline, then admits it through
+#    trace_native_map_validate_v1 and XrayNativeSledLeafV1.create.
+# 3. Drives the PR4 control plane (XrayLlvmAdapterV1, backend Simple) over the
+#    real leaf with a RECORDING port, writing every begin/store/end the Simple
+#    patcher decided, interleaved with call expectations, to ops.txt.
+# The C harness replays ops.txt verbatim on a real mmap'd RX page on this host.
+# Why replay and not in-process: the seed interpreter refuses PROT_EXEC on
+# aarch64 Linux, and no pure-Simple compiler is deployed to build this driver
+# natively, so the Simple patcher cannot own a real RX page in one process.
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.backend.native.mod.{native_compile_to_object}
+use compiler.backend.native.xray_sled_emit.{xray_object_map_bytes, xray_object_section_bytes}
+use compiler.driver.driver_xray_policy.{XrayBuildPolicy, xray_policy_apply}
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_native_map_v1.*
+use std.common.trace.xray_native_map_format_v1.*
+use std.nogc_sync_mut.trace.xray_llvm_adapter_v1.*
+use std.nogc_sync_mut.trace.xray_native_sled_leaf_v1.*
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_env_get(key: text) -> text?
+
+val E2E_BASE: i64 = 1073741824
+val E2E_PAGE: i64 = 4096
+val E2E_TRAMP: i64 = 3072
+val E2E_SOURCE: text = "fn traced(x: i64) -> i64:\n    x + 41\n"
+
+class RecordingPortV1:
+    words: Dict<i64, i64>
+    ops: [text]
+
+impl XrayCodePatchPortV1 for RecordingPortV1:
+    me begin(page: i64, length: i64) -> i64:
+        self.ops.push("begin {page - E2E_BASE} {length}")
+        0
+
+    me store_u32(addr: i64, value: i64) -> i64:
+        self.ops.push("store {addr - E2E_BASE} {value}")
+        self.words[addr] = value
+        0
+
+    fn load_u32(addr: i64) -> i64:
+        if self.words.contains(addr): self.words[addr] else: -1
+
+    me end(page: i64, length: i64) -> i64:
+        self.ops.push("end {page - E2E_BASE} {length}")
+        0
+
+    me close_channel(arena: i64) -> i64:
+        1
+
+fn e2e_lower(src: text) -> MirModule:
+    val ast = parse_full_frontend(src, "sled_e2e.spl", "sled_e2e.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("sled_e2e.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.lower_module(hir)
+
+fn e2e_hex(bytes: [i64]) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    for index in 0..bytes.len():
+        val byte = bytes[index] & 255
+        out = out + digits[byte >> 4] + digits[byte & 15]
+    out
+
+fn put_word(image: [u8], offset: i64, word: i64) -> [u8]:
+    var out = image
+    for k in 0..4:
+        out[offset + k] = ((word >> (k * 8)) & 255) as u8
+    out
+
+fn word_at(image: [u8], offset: i64) -> i64:
+    (image[offset] as i64) | ((image[offset + 1] as i64) << 8) | ((image[offset + 2] as i64) << 16) | ((image[offset + 3] as i64) << 24)
+
+fn kind_of(code: i64) -> TraceEventKindV1:
+    if code == XRAY_MAP_KIND_ENTRY_V1: return TraceEventKindV1.Entry
+    if code == XRAY_MAP_KIND_EXIT_V1: return TraceEventKindV1.Exit
+    TraceEventKindV1.TailExit
+
+fn config() -> TraceConfigV1:
+    TraceConfigV1(instrumentation: TraceInstrumentationV1.Dynamic,
+        backend: TraceBackendV1.Simple, consistency: TraceConsistencyV1.RawEdges,
+        patch_mode: TracePatchModeV1.Quiescent, abi_profile: "simple-aarch64-sled-v1",
+        event_mask: 7, buffer_bytes: 98304, max_contexts: 1, max_depth: 128,
+        max_resident_generations: 8)
+
+fn select(ids: [i64]) -> TraceSelectionV1:
+    var sites: [TraceSiteV1] = []
+    for id in ids:
+        sites.push(TraceSiteV1(module_instance: 1, site_id: id as u32))
+    TraceSelectionV1(manifest_incarnation: 1, sites: sites)
+
+fn fail(message: text):
+    print "E2E-DRIVER-ERROR: {message}"
+
+fn main():
+    val dir = rt_env_get("XRAY_E2E_OUT") ?? ""
+    if dir == "":
+        return fail("XRAY_E2E_OUT is not set")
+    val mir = e2e_lower(E2E_SOURCE)
+    val on_object = native_compile_to_object(xray_policy_apply(mir, XrayBuildPolicy.on()), CodegenTarget.AArch64)
+    val off_object = native_compile_to_object(xray_policy_apply(mir, XrayBuildPolicy.off()), CodegenTarget.AArch64)
+    rt_file_write_text("{dir}/on.hex", e2e_hex(on_object))
+    rt_file_write_text("{dir}/off.hex", e2e_hex(off_object))
+
+    val map_bytes = match xray_object_map_bytes(on_object):
+        case Ok(bytes): bytes
+        case Err(message): return fail(message)
+    val map = match xray_map_decode_v1(map_bytes):
+        case Ok(decoded): decoded
+        case Err(_): return fail("emitted .simple_xray_map does not decode")
+    val text_bytes = match xray_object_section_bytes(on_object, ".text"):
+        case Ok(bytes): bytes
+        case Err(message): return fail(message)
+    if text_bytes.len() + 64 > E2E_TRAMP:
+        return fail(".text too large for the fixture image")
+
+    # Page 0: .text, CALL26 resolved to the trampoline; page 1: the map.
+    var image: [u8] = []
+    for index in 0..(E2E_PAGE + map_bytes.len()):
+        image.push(0u8)
+    for index in 0..text_bytes.len():
+        image[index] = text_bytes[index]
+    for site in map.sites:
+        val bl_at = (site.text_offset as i64) + 20
+        image = put_word(image, bl_at, 0x94000000 | (((E2E_TRAMP - bl_at) / 4) & 0x3FFFFFF))
+    # Counting trampoline: x16/x17 and x0/x30 are saved by the sled.
+    #   ldr x16, #24 ; ldr x17,[x16] ; add x17,x17,#1 ; str x17,[x16]
+    #   str x0,[x16,#8] (site id) ; ret ; .quad <counter address, set by harness>
+    val tramp: [i64] = [0x580000D0, 0xF9400211, 0x91000631, 0xF9000211, 0xF9000600, 0xD65F03C0]
+    for index in 0..tramp.len():
+        image = put_word(image, E2E_TRAMP + index * 4, tramp[index])
+    for index in 0..map_bytes.len():
+        image[E2E_PAGE + index] = map_bytes[index]
+
+    var functions: [TraceNativeFunctionV1] = []
+    for function in map.functions:
+        val first = map.sites[(function.first_site as i64) - 1]
+        val last = map.sites[(function.first_site as i64) + (function.site_count as i64) - 2]
+        val start = first.text_offset
+        functions.push(TraceNativeFunctionV1(function_id: function.local_fn_id, offset: start,
+            size: last.text_offset + 36u64 - start))
+    var sites: [TraceNativeSiteV1] = []
+    for index in 0..map.sites.len():
+        val row = map.sites[index]
+        sites.push(TraceNativeSiteV1(site_id: (index + 1) as u32, function_id: row.local_fn_id,
+            kind: kind_of(row.kind), offset: row.text_offset, target_offset: E2E_TRAMP as u64,
+            encoding: TraceNativeEncodingV1.Arm64Branch26))
+    val manifest = TraceNativeMapV1(schema: 1, module_instance: 1, manifest_incarnation: 1,
+        build_identity: "xray-e2e", source_identity: "sled_e2e.spl", runtime_identity: "c-harness",
+        target: "aarch64-unknown-linux-gnu", abi_profile: "simple-aarch64-sled-v1",
+        image_size: image.len() as u64, map_offset: E2E_PAGE as u64, map_size: map_bytes.len() as u64,
+        ranges: [
+            TraceImageRangeV1(offset: 0, size: E2E_PAGE as u64, readable: true, writable: false, executable: true),
+            TraceImageRangeV1(offset: E2E_PAGE as u64, size: map_bytes.len() as u64, readable: true, writable: false, executable: false)
+        ],
+        functions: functions, sites: sites)
+    val leaf = match XrayNativeSledLeafV1.create(manifest, image, E2E_BASE, E2E_PAGE):
+        case Ok(admitted): admitted
+        case Err(failure): return fail("leaf admission rejected the emitted image: {trace_failure_code_v1(failure)}")
+
+    var words: Dict<i64, i64> = {}
+    var offset = 0
+    while offset + 4 <= E2E_PAGE:
+        words[E2E_BASE + offset] = word_at(image, offset)
+        offset = offset + 4
+    var port = RecordingPortV1(words: words, ops: [])
+    var bound = XrayNativeBoundLeafV1(leaf: leaf, port: port)
+    var adapter = XrayLlvmAdapterV1.create_for_backend(1, TraceBackendV1.Simple)
+    val entry_site = 1
+    val exit_site = map.sites.len()
+    val fn_off = map.sites[0].text_offset as i64
+    var lines: [text] = ["func {fn_off}", "tramp_lit {E2E_TRAMP + 24}", "sites {map.sites.len()}"]
+    for index in 0..map.sites.len():
+        lines.push("site {index + 1} {map.sites[index].text_offset} {map.sites[index].kind}")
+    lines.push("protect")
+    lines.push("call 9 50 0 0")
+
+    # Session 1: every site selected -> entry + exit fire on each call.
+    var all_ids: [i64] = []
+    for index in 0..map.sites.len(): all_ids.push(index + 1)
+    val p1 = adapter.prepare(bound, config(), select(all_ids))
+    if p1.is_err(): return fail("prepare 1 rejected")
+    val s1 = adapter.start(bound, p1.unwrap(), 4096)
+    if s1.is_err(): return fail("start 1 rejected")
+    for op in port.ops: lines.push(op)
+    port.ops = []
+    lines.push("word {map.sites[0].text_offset} {XRAY_MAP_AARCH64_ON_WORD_V1}")
+    lines.push("call 9 50 {map.sites.len()} {exit_site}")
+    if adapter.request_stop(bound, s1.unwrap()).is_err(): return fail("stop 1 rejected")
+    for op in port.ops: lines.push(op)
+    port.ops = []
+    lines.push("word {map.sites[0].text_offset} {XRAY_MAP_AARCH64_OFF_WORD_V1}")
+    lines.push("call 9 50 {map.sites.len()} {exit_site}")
+
+    # Session 2: entry only -> one event per call, the exit sled stays a branch.
+    val p2 = adapter.prepare(bound, config(), select([entry_site]))
+    if p2.is_err(): return fail("prepare 2 rejected")
+    val s2 = adapter.start(bound, p2.unwrap(), 4096)
+    if s2.is_err(): return fail("start 2 rejected")
+    for op in port.ops: lines.push(op)
+    port.ops = []
+    lines.push("call 9 50 {map.sites.len() + 1} {entry_site}")
+    if adapter.request_stop(bound, s2.unwrap()).is_err(): return fail("stop 2 rejected")
+    for op in port.ops: lines.push(op)
+    lines.push("call 9 50 {map.sites.len() + 1} {entry_site}")
+
+    var image_i64: [i64] = []
+    for byte in image: image_i64.push(byte as i64)
+    rt_file_write_text("{dir}/image.hex", e2e_hex(image_i64))
+    var ops_text = ""
+    for line in lines: ops_text = ops_text + line + "\n"
+    rt_file_write_text("{dir}/ops.txt", ops_text)
+    print "E2E-DRIVER-OK sites={map.sites.len()} functions={map.functions.len()}"
+
+main()

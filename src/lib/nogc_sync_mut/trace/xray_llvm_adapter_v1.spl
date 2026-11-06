@@ -44,7 +44,9 @@ const XRAY_LLVM_ID_MAX_V1: u64 = 18446744073709551615u64
 const XRAY_LLVM_ONGOING_RETRIES_V1: i64 = 8
 
 # The effect boundary. The host binding is xray_llvm_host_leaf_v1.spl over
-# src/runtime/xray/xray_llvm_adapter_linux.c; specs use a fake.
+# src/runtime/xray/xray_llvm_adapter_linux.c; specs use a fake. The stage-2
+# native leaf (xray_native_sled_leaf_v1.spl, PR5) implements the same trait
+# with Simple-owned sleds; its ids are dense native site ids.
 pub trait XrayLlvmLeafV1:
     # Highest LLVM function id in the process map; <= 0 means no sleds.
     fn max_function_id() -> i64
@@ -85,11 +87,21 @@ pub struct XrayLlvmAdapterV1:
     arena: i64
     # The arena close did not linearize (contended gate); recover retries it.
     close_pending: bool
+    # Which sled flavour the leaf patches: Llvm (compiler-rt) or Simple (PR5).
+    backend: TraceBackendV1
 
 impl XrayLlvmAdapterV1:
     static fn create(module_instance: u64) -> XrayLlvmAdapterV1:
+        XrayLlvmAdapterV1.create_for_backend(module_instance, TraceBackendV1.Llvm)
+
+    # backend must name the leaf's sled flavour; a config asking for the
+    # other one (or None) is UnsupportedTarget, Auto takes this one. The leaf
+    # trait does not report its flavour, so pairing an LLVM leaf with a Simple
+    # adapter (or the reverse) is the constructing caller's responsibility.
+    static fn create_for_backend(module_instance: u64, backend: TraceBackendV1) -> XrayLlvmAdapterV1:
         XrayLlvmAdapterV1(module_instance: module_instance, state: XRAY_LLVM_STATE_IDLE_V1,
-            incarnation: 0, planned: [], patched: [], context: 1, arena: 0, close_pending: false)
+            incarnation: 0, planned: [], patched: [], context: 1, arena: 0, close_pending: false,
+            backend: backend)
 
     fn state_code() -> i64:
         self.state
@@ -110,7 +122,9 @@ impl XrayLlvmAdapterV1:
         trace_config_validate_v1(config)?
         if config.instrumentation == TraceInstrumentationV1.Off:
             return Err(TraceFailureV1.InstrumentationAbsent)
-        if config.backend != TraceBackendV1.Llvm and config.backend != TraceBackendV1.Auto:
+        if config.backend != self.backend and config.backend != TraceBackendV1.Auto:
+            return Err(TraceFailureV1.UnsupportedTarget)
+        if self.backend != TraceBackendV1.Llvm and self.backend != TraceBackendV1.Simple:
             return Err(TraceFailureV1.UnsupportedTarget)
         if (config.consistency != TraceConsistencyV1.RawEdges or
                 config.patch_mode != TracePatchModeV1.Quiescent):

@@ -58,6 +58,7 @@ pub mod dl_compat;
 pub mod process;
 #[cfg(target_os = "macos")]
 pub mod process_observation_v4;
+pub mod process_owned_v3;
 pub mod pty;
 pub mod time;
 pub mod math;
@@ -1972,36 +1973,35 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_process_run_owned_observed_bounded_value",
         system::rt_process_run_owned_observed_bounded_value
     );
-    // The native V3 adapter keeps RtOwnedProcessTokenV2 private.  Register
-    // every name for deterministic interpreter resolution, but fail closed
-    // instead of fabricating an opaque lease or receipt projection.
+    // Opaque V3 lifecycle is marshalled to the C adapter (process_owned_v3.rs);
+    // pinned starts and the observation projection still fail closed below.
     insert_simple!(
         "rt_process_owned_v3_start_value",
-        system::rt_process_owned_v3_adapter_unavailable
+        process_owned_v3::start
     );
     insert_simple!(
         "rt_process_owned_v3_poll_value",
-        system::rt_process_owned_v3_adapter_unavailable
+        process_owned_v3::poll
     );
     insert_simple!(
         "rt_process_owned_v3_input_value",
-        system::rt_process_owned_v3_adapter_unavailable
+        process_owned_v3::input
     );
     insert_simple!(
         "rt_process_owned_v3_cancel_value",
-        system::rt_process_owned_v3_adapter_unavailable
+        process_owned_v3::cancel
     );
     insert_simple!(
         "rt_process_owned_v3_result_value",
-        system::rt_process_owned_v3_adapter_unavailable
+        process_owned_v3::result
     );
     insert_simple!(
         "rt_process_owned_v3_collect_value",
-        system::rt_process_owned_v3_adapter_unavailable
+        process_owned_v3::collect
     );
     insert_simple!(
         "rt_process_owned_v3_release_value",
-        system::rt_process_owned_v3_adapter_unavailable
+        process_owned_v3::release
     );
     insert_simple!(
         "rt_process_owned_v3_capabilities_value",
