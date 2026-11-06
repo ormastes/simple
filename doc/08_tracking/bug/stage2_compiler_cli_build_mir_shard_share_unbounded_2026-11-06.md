@@ -85,6 +85,48 @@ Costs and margins (estimates from run 10, unverified until the next run):
 - The pin covers all four tool rows (cli, test runner, MCP, LSP). Smaller
   closures pay extra frontend passes; a closure-scaled count would avoid that.
 
+## Run 11: 8 shards were not enough (2026-11-06)
+
+Run 11 (`build/bootstrap-opus-11`, carries #7274) logged
+`[mir-shard] shards=8 parallel=2` and still aborted with
+`rss-cap-exceeded`: tree peak 54,579,388 KiB (52.05 GiB) against the
+54,525,952 KiB (52.0 GiB) cap, the same cap as run 10. Top process
+26,437,356 KiB (25.2 GiB). Worker curve (MIR position: RSS MiB) 50: 19634,
+300: 21498, 500: 20974, 750: 22290. Both first-wave workers finished lowering
+their ~382 modules, ran `native_cache` 382/382 and were 12-20 modules into
+`native_compile` when the cap hit; RSS rose from ~22.4 to 25.2 GiB in those
+last minutes. So the peak is end-of-shard codegen, ~16 MiB per claimed module
+all-in (the 11 MiB run-10 slope was MIR only).
+
+The `[mir]` lines walk alphabetically (app.* first), not largest-first:
+wave 1 measured the lighter modules. The compiler.* / lib.* waves are not
+measured, so the per-module figure may be higher for them.
+
+### Pin raised to 12 (best value of an exhausted knob)
+
+ceil(3049/12) = 255 modules per worker: 19.6 + 255 x 16 MiB = ~23.6 GiB,
+~48 GiB for two plus the coordinator, a 2-4 GiB margin on the light modules.
+
+Wall time is the other side of the trade. Every shard worker repeats the
+frontend: run 11 coordinator HIR ~1,411 s, worker frontend ~1,160 s, worker
+MIR ~1,220 s for 382 modules. Six waves of 255 need about
+1,411 + 6 x (1,160 + ~815) = ~13,300 s before codegen, against the 14,400 s
+row timeout; codegen cost per wave is unknown (run 11 died 12-20 modules into
+it). Each worker's own `--timeout` (7200 s) starts at its spawn
+(`native_build_main.spl` shard pool), so it is not the binding limit; the row
+timeout is. 8 shards is proven OOM; 16 would certainly time out. No shard
+count meets both bounds while each worker rebuilds ~19.6 GiB of HIR: the
+structural fix is item 3 below.
+
+### Separate blocker in run 11 (not memory)
+
+5 cranelift AOT errors fail the row independently of memory:
+- `app.office.sheets.data_ops._compare_row_cells`: verifier error
+  `isub.i32 v167, v166` where `v166` is i64.
+- `app.office.sheets.spreadsheet._parse_f64`:
+  `E-BACKEND-CRANELIFT-CALL-ABI` call to `rt_enum_id` with an f64 argument
+  (callee declares i64).
+
 ## Not fixed
 
 1. **Fixed per-module retained floor (~955 KiB): relocated provider type
