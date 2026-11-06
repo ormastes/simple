@@ -26,10 +26,16 @@ declared width and sign-extended back, so negating the minimum wraps at that wid
 
 Fixture `test/fixtures/compiler/cranelift_narrow_negation/negate_narrow.spl`, phase-C argv
 (`native-build <entry> --backend=cranelift --low-memory`, `SIMPLE_FILE_WORKERS=0 SIMPLE_BOOTSTRAP=1`, 16G cgroup):
-- red, run-11 Stage 2: `isub.i32 v4, v3 ... arg 1 (v3) has type i64, expected i32`, exit 1.
-- green, Stage 2 rebuilt by the seed from this change (sha256 `1754656a...`): builds and prints
-  `-1 1 -1 -2147483648 7`, all as expected.
+- red, run-11 Stage 2: `isub.i32`/`isub.i16 0, v ... arg 1 has type i64`, exit 1.
+- green, Stage 2 rebuilt by the seed from this change (sha256 `a76e87bb...`): builds and prints
+  `-1 1 -1 -2147483648 7 -128 -32768 -300`, all as expected.
 - same rebuilt Stage 2: entries `data_ops.spl` and `query.spl` pass codegen (stop only at the link, no `main`).
 
 Same defect class as draft PR #7256 (`cranelift_signed_negation_uniform_i64_2026-11-06`, another
 session, not landed); this change is self-contained and does not depend on it.
+
+## Related open bug (review finding)
+
+`cranelift_signed_narrow_binop_no_wrap_2026-11-06` (P3, open): the BinOp call site canonicalizes
+only unsigned narrow results, so a signed i32 `add`/`sub`/`mul` overflow is not sign-wrapped.
+After this fix `-x` wraps at the declared width while `0 - x` does not. Not a bootstrap blocker.
