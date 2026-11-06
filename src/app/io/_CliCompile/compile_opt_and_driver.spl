@@ -16,6 +16,7 @@ use lazy app.compile.native (compile_native)
 use compiler.driver.driver_types (CompileOptions, CompileMode, CompileResult, OutputFormat)
 use compiler.common.driver_core_types (driver_core_compile_options_default, compileoptions_normalize_mir_optimization)
 use app.io.aspect_params_env.{aspect_params_from_env}
+use compiler.driver.driver_xray_policy.{xray_trace_instrumentation_enabled, xray_sdn_trace_instrumentation}
 use compiler.mir_opt.mir_opt_integration (mir_optimization_inventory_lines)
 use std.common.convert.{try_parse_int}
 use app.io._CliCompile.compile_llvm_ir_facade.{
@@ -597,6 +598,19 @@ fn cli_compile(args: [text]) -> i64:
 
     val mcdc_route_requested = cli_mcdc_route_requested(
         mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes)
+
+    # Project manifest `trace.instrumentation` (SDN, lowest precedence): only
+    # `dynamic` turns the static switch on; `--xray` on the CLI wins. Folded in
+    # here, before CompileOptions is built, so every cache identity sees it.
+    if _cli_file_exists_impl("simple.sdn"):
+        val sdn_instrumentation = xray_sdn_trace_instrumentation(_cli_file_read_impl("simple.sdn"))
+        if sdn_instrumentation != "":
+            match xray_trace_instrumentation_enabled(sdn_instrumentation):
+                case Ok(sdn_on):
+                    xray_enabled = xray_enabled or sdn_on
+                case Err(reason):
+                    _cli_eprint("Error: simple.sdn: {reason}")
+                    return 1
 
     # --xray is the XRay static switch. Only routes that reach the pure-Simple
     # driver can carry it; the driver's policy resolution rejects Cranelift.

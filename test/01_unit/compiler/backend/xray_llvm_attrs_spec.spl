@@ -1,0 +1,112 @@
+"""XRay PR3: LLVM function attributes from MirFunction.xray_mode.
+
+Design: doc/04_architecture/compiler/xray/xray_compiler_structural_change_2026-11-06.md
+A.5 (LLVM stage 1), B (static off), F row 3. No instruction threshold (Q5).
+"""
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_types.{MirSignature, MirType}
+use compiler.mir.mir_instruction_graph.{MirFunction, MirModule}
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.driver_compile_options.{driver_core_compile_options_default}
+use compiler.driver.driver_types.{compute_options_hash}
+use compiler.driver.cache.compile_options_hash.{compile_options_hash_compute}
+use compiler.driver.driver_xray_policy.{xray_trace_instrumentation_enabled, xray_sdn_trace_instrumentation}
+
+fn xray_attr_fn(id: i64, name: text, mode: i64) -> MirFunction:
+    var builder = MirBuilder.new()
+    builder.begin_function(SymbolId(id: id), name,
+        MirSignature(params: [], return_type: MirType.unit(), is_variadic: false), Span.empty())
+    builder.terminate_return(nil)
+    var func = builder.end_function()
+    func.xray_mode = mode
+    func
+
+fn xray_attr_module(functions: [MirFunction]) -> MirModule:
+    var table: Dict<SymbolId, MirFunction> = {}
+    for f in functions:
+        table[f.symbol] = f
+    MirModule(name: "probe.attrs", functions: table, statics: {}, constants: {}, types: {})
+
+fn xray_attr_ir(module: MirModule) -> text:
+    MirToLlvm.create_explicit_target_with_hardening(
+        "probe.attrs", CodegenTarget.X86_64, "x86_64", "unknown", "linux",
+        "", false, "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
+        false, "hosted").translate_module(module)
+
+# The `define` line of the function whose emitted symbol contains `name(`.
+fn xray_define_line(ir: text, name: text) -> text:
+    for line in ir.split("\n"):
+        if line.starts_with("define") and line.contains("{name}("):
+            return line
+    ""
+
+describe "XRay LLVM function attributes":
+    it "marks entry+exit+tail functions xray-always":
+        step("Translate a module with an xray_mode=2 function")
+        val ir = xray_attr_ir(xray_attr_module([xray_attr_fn(1, "xr_tail", 2), xray_attr_fn(2, "xr_never", 0)]))
+        val line = xray_define_line(ir, "xr_tail")
+        expect(line).to_contain("\"function-instrument\"=\"xray-always\"")
+        expect(line.contains("xray-skip-exit")).to_equal(false)
+        # A sled function keeps its physical body: no size-heuristic alwaysinline.
+        expect(line.contains("alwaysinline")).to_equal(false)
+
+    it "marks entry+exit functions xray-always":
+        step("Translate a module with an xray_mode=1 function")
+        val ir = xray_attr_ir(xray_attr_module([xray_attr_fn(1, "xr_exit", 1)]))
+        expect(xray_define_line(ir, "xr_exit")).to_contain("\"function-instrument\"=\"xray-always\"")
+
+    it "marks never-listed functions xray-never only when the module is instrumented":
+        step("Translate an instrumented module that also holds a never-listed function")
+        val ir = xray_attr_ir(xray_attr_module([xray_attr_fn(1, "xr_tail", 2), xray_attr_fn(2, "xr_never", 0)]))
+        val line = xray_define_line(ir, "xr_never")
+        expect(line).to_contain("\"function-instrument\"=\"xray-never\"")
+        expect(line.contains("xray-always")).to_equal(false)
+
+    it "never emits an instruction threshold":
+        step("The owner dropped the threshold: every non-never function gets sleds")
+        val ir = xray_attr_ir(xray_attr_module([xray_attr_fn(1, "xr_tail", 2), xray_attr_fn(2, "xr_never", 0)]))
+        expect(ir.contains("xray-instruction-threshold")).to_equal(false)
+
+    it "emits no XRay attribute at all when xray is off":
+        step("Static off: an all-zero module carries no function-instrument attribute")
+        val ir = xray_attr_ir(xray_attr_module([xray_attr_fn(1, "xr_a", 0), xray_attr_fn(2, "xr_b", 0)]))
+        expect(xray_define_line(ir, "xr_a") != "").to_equal(true)
+        expect(xray_define_line(ir, "xr_a")).to_contain(" alwaysinline")
+        expect(ir.contains("xray")).to_equal(false)
+        expect(ir.contains("function-instrument")).to_equal(false)
+
+describe "XRay compile options hash token":
+    it "keeps the off hash identical to the legacy encoding":
+        step("Default options hash equals the pre-xray compile_options_hash_compute")
+        val options = driver_core_compile_options_default()
+        val legacy = compile_options_hash_compute(options.backend, 0, options.release, options.debug_info,
+            options.gc_off, options.profile, options.allowed_families)
+        expect(compute_options_hash(options).hash).to_equal(legacy.hash)
+
+    it "changes the hash when xray is on":
+        step("--xray artifacts must never satisfy an off cache lookup")
+        val off = driver_core_compile_options_default()
+        var on = driver_core_compile_options_default()
+        on.xray_enabled = true
+        expect(compute_options_hash(on).hash == compute_options_hash(off).hash).to_equal(false)
+
+describe "XRay trace.instrumentation SDN key":
+    it "maps off and dynamic to the static switch":
+        expect(xray_trace_instrumentation_enabled("off")).to_equal(Ok(false))
+        expect(xray_trace_instrumentation_enabled("dynamic")).to_equal(Ok(true))
+
+    it "rejects unsupported and unknown values":
+        expect(xray_trace_instrumentation_enabled("always_on").is_err()).to_equal(true)
+        expect(xray_trace_instrumentation_enabled("on").is_err()).to_equal(true)
+
+    it "reads trace.instrumentation from a project manifest":
+        val manifest = "package:\n  name: demo\n\ntrace:\n  instrumentation: dynamic\n"
+        expect(xray_sdn_trace_instrumentation(manifest)).to_equal("dynamic")
+
+    it "returns empty when the manifest has no trace block":
+        val manifest = "package:\n  name: demo\nexecution:\n  instrumentation: dynamic\n"
+        expect(xray_sdn_trace_instrumentation(manifest)).to_equal("")

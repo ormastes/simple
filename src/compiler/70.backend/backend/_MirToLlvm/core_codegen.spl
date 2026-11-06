@@ -390,6 +390,22 @@ fn llvm_module_is_native_entry(module_name: text) -> bool:
         return true
     module_name == llvm_module_name_from_entry_path(native_entry)
 
+# XRay function attributes (design A.5, LLVM stage 1). xray_mode >= 1 ->
+# `xray-always`: LLVM's XRayInstrumentation pass then emits the entry sled,
+# a PATCHABLE_RET exit sled per return and a PATCHABLE_TAIL_CALL sled per tail
+# call. LLVM has no attribute that keeps exit sleds but drops tail sleds, so
+# modes 1 and 2 lower identically here; `xray-skip-exit` would also drop the
+# exit sleds both modes require and is never emitted. Never-listed functions
+# (xray_mode 0) get `xray-never` only when the module is instrumented, i.e.
+# `--xray` is on. No `xray-instruction-threshold` (owner decision Q5). Off
+# (module not instrumented) returns "" so the IR is byte-identical (B).
+fn llvm_xray_function_attrs(xray_mode: i64, module_instrumented: bool) -> text:
+    if xray_mode > 0:
+        return " \"function-instrument\"=\"xray-always\""
+    if module_instrumented:
+        return " \"function-instrument\"=\"xray-never\""
+    ""
+
 # ============================================================================
 # MIR to LLVM IR Translation
 # ============================================================================
@@ -478,6 +494,10 @@ impl MirTextCodegen for MirToLlvm:
                 # that instantiated it must spell the same symbol to dedupe.
                 if not fn_qualify.name.contains(".") and not fn_qualify.is_comdat:
                     self.module_qualified_symbol_names[fn_qualify.name] = "{module.name}.{fn_qualify.name}"
+        # XRay (design A.5/B): per-module state, reset so a reused translator
+        # never carries an earlier module's sled intent. Off leaves both empty.
+        self.fn_xray_mode = {}
+        self.xray_module_on = false
         for fn_owner in mir_module_functions_sorted(module):
             if mir_runtime_owned_call_name(fn_owner.name):
                 self.owned_name_has_local[fn_owner.name] = true
@@ -507,6 +527,11 @@ impl MirTextCodegen for MirToLlvm:
                 # __simple_main), so key by both the MIR name and the symbol.
                 self.fn_inline[fn_owner.name] = true
                 self.fn_inline[self.llvm_function_symbol_name(fn_owner.name)] = true
+            if fn_owner.xray_mode > 0:
+                # Keyed like fn_inline: translate_function gets the SYMBOL.
+                self.xray_module_on = true
+                self.fn_xray_mode[fn_owner.name] = fn_owner.xray_mode
+                self.fn_xray_mode[self.llvm_function_symbol_name(fn_owner.name)] = fn_owner.xray_mode
             if fn_owner.is_naked or fn_owner.section != "" or fn_owner.align > 0:
                 # translate_function receives the emitted SYMBOL, so key the
                 # placement tables by both the MIR name and that symbol.
@@ -1026,13 +1051,19 @@ impl MirTextCodegen for MirToLlvm:
                 _sffi_string_builder_push(ir_handle, comdat_decl)
             else:
                 self.builder.emit(comdat_decl)
+        # XRay (design A.5): emitters read only MirFunction.xray_mode. A sled
+        # function drops the size heuristic's alwaysinline (inlining would
+        # erase the physical function every call site observes); explicit
+        # @inline functions are never-listed (xray_mode 0) and keep it.
+        val xray_mode = if self.fn_xray_mode.has(name): self.fn_xray_mode[name] else: 0
+        var attrs = " nounwind" + placement_attrs
+        if is_readonly and not placement_naked:
+            attrs = attrs + " readonly"
+        if ((is_small and xray_mode == 0) or self.fn_inline.has(name)) and not placement_naked:
+            attrs = attrs + " alwaysinline"
+        attrs = attrs + llvm_xray_function_attrs(xray_mode, self.xray_module_on)
         if ir_handle >= 0 or placement_naked or placement_suffix != "" or placement_prefix != "define":
             val param_str = params.join(", ")
-            var attrs = " nounwind" + placement_attrs
-            if is_readonly and not placement_naked:
-                attrs = attrs + " readonly"
-            if (is_small or self.fn_inline.has(name)) and not placement_naked:
-                attrs = attrs + " alwaysinline"
             var dbg_suffix = ""
             match dbg_id:
                 Some(id): dbg_suffix = " !dbg !{id}"
@@ -1047,11 +1078,6 @@ impl MirTextCodegen for MirToLlvm:
                 self.builder.emit(opening)
         else:
             val param_str = params.join(", ")
-            var attrs = " nounwind" + placement_attrs
-            if is_readonly and not placement_naked:
-                attrs = attrs + " readonly"
-            if (is_small or self.fn_inline.has(name)) and not placement_naked:
-                attrs = attrs + " alwaysinline"
             var dbg_suffix = ""
             match dbg_id:
                 Some(id): dbg_suffix = " !dbg !{id}"
