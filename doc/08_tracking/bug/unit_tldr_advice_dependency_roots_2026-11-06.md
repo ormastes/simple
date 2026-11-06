@@ -129,3 +129,24 @@ assertion output; its exact cause is unresolved. No runtime PASS or complete
 repair is claimed. No seventh attempt or diagnostic rerun was performed.
 New owner API SSpec scenarios remain unexecuted. The source draft depends on
 PR #7292 and must not merge before this runtime failure and broad gates resolve.
+
+### Final attempt identity
+
+SHA256 values retained together in `after6/evidence-sha256.txt`:
+
+| Input/artifact | SHA256 |
+| --- | --- |
+| planner source | `67cb8b7932d5437548f07dd89d295596573c76560062e96746bd4335b59f9a68` |
+| streaming caller source | `07e6176b22b0ee156c51f897e814449b06092284e88627c0385ad98d2d7cf326` |
+| native fixture source | `9e1863f0da51fb0f462fb89f950824c04177f8edff43a6c9b443955aa81c4de0` |
+| build script | `53f00218dc686e2687fe48ca704878b0d56859b4c50c7bc41732b16624575489` |
+| run script | `e214b732878730acb5f70bfa097eac00edc88257bce50122043698a278d31fd6` |
+| run receipt | `1495d7b71d116c145c80ac096d84e0c70efe75411d1c64eeb261f780c95f1014` |
+
+A bounded read-only inspection found no core/backtrace file at the fixed
+worktree root or `after6/`; the host core handler is Apport. No new execution
+was enabled to collect a trace. The first review-branch push failed because
+its fallback compared an unrelated `1dc81da..ed5802` range. Fetching the current
+release objects enabled the hook's verified published-base selection; the
+unchanged push then passed the runtime API gate with 3,535 symbols checked and
+zero removals. No hook was skipped or policy exception applied.
