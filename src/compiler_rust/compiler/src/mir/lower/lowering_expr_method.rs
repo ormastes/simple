@@ -16,6 +16,18 @@ impl<'a> MirLowerer<'a> {
         // tagged (`any`/`T`/`T?`) params and UNBOX tagged words (erased field
         // reads, generic results) into raw scalar params. See
         // `coerce_args_for_param_slots` in lowering_expr_call.rs.
+        // A BARE `push`/`append` (erased receiver, e.g. `var b = bs[0]` from an
+        // `[Any]` slot) is always routed by codegen to the tag-dispatched
+        // builtin `rt_push` (`is_bare_builtin_collection_method`, checked
+        // before any name resolution), which stores its argument verbatim as a
+        // RuntimeValue. The typed-array path boxes native scalars before
+        // `rt_array_push`; this path did not, so a raw `99u8` was stored and
+        // later decoded as a tagged word (99 >> 3 == 12) under the JIT.
+        // Bug: doc/08_tracking/bug/seed_jit_untyped_to_u8_push_double_untag_2026-10-18.md
+        if matches!(func_name, "push" | "append") && args.len() == 1 && arg_regs.len() == 1 {
+            arg_regs[0] = self.box_arg_for_any_param(arg_regs[0], &args[0])?;
+            return Ok(());
+        }
         let params = self.function_param_types.get(func_name).cloned().unwrap_or_default();
         self.coerce_args_for_param_slots(&params, args, arg_regs, false)
     }
@@ -2427,6 +2439,47 @@ impl<'a> MirLowerer<'a> {
             }
             _ => func_name,
         };
+
+        // A numeric cast on an erased receiver that THIS lowering just boxed
+        // (`(crc & 255).to_u8()` with an untyped `crc`: the `&` is computed raw,
+        // then BoxInt'd because HIR types it `Any`) is a cast of a known raw
+        // integer. Codegen types every BoxInt dest as I64, so its erased-cast
+        // decode (`rt_any_to_int`, gated on an ANY/unknown vreg type) skipped
+        // it and narrowed the TAGGED word: gzip footer bytes came out as
+        // `(v << 3) & 0xff`. Cast the BoxInt's raw source as an `i64` instead.
+        // Bug: doc/08_tracking/bug/seed_jit_untyped_to_u8_push_double_untag_2026-10-18.md
+        let mut func_name = func_name;
+        if args.is_empty()
+            && !func_name.contains('.')
+            && matches!(
+                method,
+                "to_u8"
+                    | "to_u16"
+                    | "to_u32"
+                    | "to_u64"
+                    | "to_i8"
+                    | "to_i16"
+                    | "to_i32"
+                    | "to_i64"
+                    | "to_int"
+                    | "to_f32"
+                    | "to_f64"
+                    | "to_float"
+            )
+        {
+            let boxed_source = self.with_func(|func, current_block| {
+                func.block(current_block).and_then(|block| {
+                    block.instructions.iter().rev().find_map(|inst| match inst {
+                        MirInst::BoxInt { dest, value } if *dest == receiver_reg => Some(*value),
+                        _ => None,
+                    })
+                })
+            })?;
+            if let Some(raw) = boxed_source {
+                receiver_reg = raw;
+                func_name = format!("i64.{}", method);
+            }
+        }
 
         match dispatch {
             DispatchMode::Dynamic => {

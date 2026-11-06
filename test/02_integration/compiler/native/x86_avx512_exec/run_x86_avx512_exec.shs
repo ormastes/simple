@@ -1,0 +1,30 @@
+#!/usr/bin/env sh
+# Executes the AVX-512 frame-vector backend output (AVX-512 build and scalar
+# fallback build) and compares every byte with an independent C reference.
+#   SIMPLE_BIN=<simple test runner>  default: bin/simple
+#   CC=<C compiler with sysv_abi>    default: cc
+# Verdict is the harness SUMMARY line; exit 0 only when nothing differs.
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../../.." && pwd)
+here="$repo_root/test/02_integration/compiler/native/x86_avx512_exec"
+simple_bin=${SIMPLE_BIN:-$repo_root/bin/simple}
+cc_bin=${CC:-cc}
+work_dir=$(mktemp -d "${TMPDIR:-/tmp}/simple-avx512-exec.XXXXXX")
+trap 'rm -rf "$work_dir"' EXIT HUP INT TERM
+
+cd "$repo_root"
+SIMPLE_AVX512_EXEC_DUMP="$work_dir/dump.txt" "$simple_bin" test "$here/x86_avx512_exec_dump_spec.spl" > "$work_dir/spec.log" 2>&1
+spec_rc=$?
+if [ "$spec_rc" -ne 0 ] || [ ! -s "$work_dir/dump.txt" ]; then
+    tail -20 "$work_dir/spec.log"
+    echo "ERROR — dump spec failed (exit $spec_rc) or wrote no dump"
+    exit 2
+fi
+
+"$cc_bin" -std=gnu11 -O1 -ffp-contract=off "$here/x86_avx512_exec_harness.c" -lm -o "$work_dir/harness"
+set +e
+"$work_dir/harness" "$work_dir/dump.txt"
+harness_rc=$?
+set -e
+exit "$harness_rc"

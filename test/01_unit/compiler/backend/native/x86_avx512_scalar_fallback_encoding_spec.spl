@@ -1,0 +1,79 @@
+"""
+Byte-exact goldens for the AVX-512 scalar fallback (x86_64_avx512_scalar.spl).
+
+Every expected string is the .text of hand-written reference assembly
+assembled by LLVM 23.1.0:
+
+    sh test/01_unit/compiler/backend/native/x86_avx512_scalar_fallback_goldens.shs
+    # -> llvm-mc -triple=x86_64-pc-linux -mattr=+avx512f,+avx512bw,+avx512vl
+    #    -filetype=obj, then llvm-objcopy -O binary --only-section=.text
+
+The reference asm uses {rex} and {disp32} so the assembler makes the same
+encoding choices as the fallback encoder (a REX byte on every instruction,
+disp32 frame displacements). None of these sequences may contain an EVEX
+(0x62) prefix, a ZMM register, or a mask register.
+"""
+
+use std.spec.*
+use compiler.backend.native.x86_64_avx512_scalar.*
+use compiler.backend.native.x86_64_avx512_receipt.{x86_zmm_evidence}
+
+fn hex(bytes: [i64]) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    for b in bytes:
+        out = out + digits[(b >> 4) & 15] + digits[b & 15]
+    out
+
+describe "AVX-512 scalar fallback encoding (llvm-mc goldens)":
+    it "copies a 16-bit mask image and 8-byte vector chunks":
+        expect(hex(avx512_scalar_copy_bytes(9, 5, -64, 13, 0, 2))).to_equal("450fb78d000000006644898dc0ffffff")
+        expect(hex(avx512_scalar_copy_bytes(0, 7, 8, 5, -128, 16))).to_equal("488b8580ffffff48898708000000488b8588ffffff48898710000000")
+
+    it "splats 64-bit and 32-bit scalars into frame lanes":
+        expect(hex(avx512_scalar_splat_bytes(12, -64, 8, 2))).to_equal("4c89a5c0ffffff4c89a5c8ffffff")
+        expect(hex(avx512_scalar_splat_bytes(6, -32, 4, 2))).to_equal("4089b5e0ffffff4089b5e4ffffff")
+
+    it "lowers f32x16 Add and f64x8 Max lane by lane with SSE scalar ops":
+        expect(hex(avx512_scalar_fbin_bytes(-64, -128, -192, 1, 1))).to_equal("f3400f108580fffffff3400f588540fffffff3400f1185c0fffffff3400f108584fffffff3400f588544fffffff3400f1185c4fffffff3400f108588fffffff3400f588548fffffff3400f1185c8fffffff3400f10858cfffffff3400f58854cfffffff3400f1185ccfffffff3400f108590fffffff3400f588550fffffff3400f1185d0fffffff3400f108594fffffff3400f588554fffffff3400f1185d4fffffff3400f108598fffffff3400f588558fffffff3400f1185d8fffffff3400f10859cfffffff3400f58855cfffffff3400f1185dcfffffff3400f1085a0fffffff3400f588560fffffff3400f1185e0fffffff3400f1085a4fffffff3400f588564fffffff3400f1185e4fffffff3400f1085a8fffffff3400f588568fffffff3400f1185e8fffffff3400f1085acfffffff3400f58856cfffffff3400f1185ecfffffff3400f1085b0fffffff3400f588570fffffff3400f1185f0fffffff3400f1085b4fffffff3400f588574fffffff3400f1185f4fffffff3400f1085b8fffffff3400f588578fffffff3400f1185f8fffffff3400f1085bcfffffff3400f58857cfffffff3400f1185fcffffff")
+        expect(hex(avx512_scalar_fbin_bytes(-64, -128, -192, 2, 6))).to_equal("f2400f108580fffffff2400f5f8540fffffff2400f1185c0fffffff2400f108588fffffff2400f5f8548fffffff2400f1185c8fffffff2400f108590fffffff2400f5f8550fffffff2400f1185d0fffffff2400f108598fffffff2400f5f8558fffffff2400f1185d8fffffff2400f1085a0fffffff2400f5f8560fffffff2400f1185e0fffffff2400f1085a8fffffff2400f5f8568fffffff2400f1185e8fffffff2400f1085b0fffffff2400f5f8570fffffff2400f1185f0fffffff2400f1085b8fffffff2400f5f8578fffffff2400f1185f8ffffff")
+
+    it "lowers i32x16 Andnot, signed Min and arithmetic shift with GPR ops":
+        expect(hex(avx512_scalar_ibin_bytes(10, -64, -128, -192, 10, -256))).to_equal("448b9580ffffff41f7d244239540ffffff448995c0ffffff448b9584ffffff41f7d244239544ffffff448995c4ffffff448b9588ffffff41f7d244239548ffffff448995c8ffffff448b958cffffff41f7d24423954cffffff448995ccffffff448b9590ffffff41f7d244239550ffffff448995d0ffffff448b9594ffffff41f7d244239554ffffff448995d4ffffff448b9598ffffff41f7d244239558ffffff448995d8ffffff448b959cffffff41f7d24423955cffffff448995dcffffff448b95a0ffffff41f7d244239560ffffff448995e0ffffff448b95a4ffffff41f7d244239564ffffff448995e4ffffff448b95a8ffffff41f7d244239568ffffff448995e8ffffff448b95acffffff41f7d24423956cffffff448995ecffffff448b95b0ffffff41f7d244239570ffffff448995f0ffffff448b95b4ffffff41f7d244239574ffffff448995f4ffffff448b95b8ffffff41f7d244239578ffffff448995f8ffffff448b95bcffffff41f7d24423957cffffff448995fcffffff")
+        expect(hex(avx512_scalar_ibin_bytes(10, -64, -128, -192, 5, -256))).to_equal("448b9580ffffff443b9540ffffff440f4f9540ffffff448995c0ffffff448b9584ffffff443b9544ffffff440f4f9544ffffff448995c4ffffff448b9588ffffff443b9548ffffff440f4f9548ffffff448995c8ffffff448b958cffffff443b954cffffff440f4f954cffffff448995ccffffff448b9590ffffff443b9550ffffff440f4f9550ffffff448995d0ffffff448b9594ffffff443b9554ffffff440f4f9554ffffff448995d4ffffff448b9598ffffff443b9558ffffff440f4f9558ffffff448995d8ffffff448b959cffffff443b955cffffff440f4f955cffffff448995dcffffff448b95a0ffffff443b9560ffffff440f4f9560ffffff448995e0ffffff448b95a4ffffff443b9564ffffff440f4f9564ffffff448995e4ffffff448b95a8ffffff443b9568ffffff440f4f9568ffffff448995e8ffffff448b95acffffff443b956cffffff440f4f956cffffff448995ecffffff448b95b0ffffff443b9570ffffff440f4f9570ffffff448995f0ffffff448b95b4ffffff443b9574ffffff440f4f9574ffffff448995f4ffffff448b95b8ffffff443b9578ffffff440f4f9578ffffff448995f8ffffff448b95bcffffff443b957cffffff440f4f957cffffff448995fcffffff")
+        expect(hex(avx512_scalar_ibin_bytes(10, -64, -128, -192, 13, -256))).to_equal("448b9580ffffff44899500ffffff51408b8d40ffffff40d3bd00ffffff59448b9500ffffff448995c0ffffff448b9584ffffff44899500ffffff51408b8d44ffffff40d3bd00ffffff59448b9500ffffff448995c4ffffff448b9588ffffff44899500ffffff51408b8d48ffffff40d3bd00ffffff59448b9500ffffff448995c8ffffff448b958cffffff44899500ffffff51408b8d4cffffff40d3bd00ffffff59448b9500ffffff448995ccffffff448b9590ffffff44899500ffffff51408b8d50ffffff40d3bd00ffffff59448b9500ffffff448995d0ffffff448b9594ffffff44899500ffffff51408b8d54ffffff40d3bd00ffffff59448b9500ffffff448995d4ffffff448b9598ffffff44899500ffffff51408b8d58ffffff40d3bd00ffffff59448b9500ffffff448995d8ffffff448b959cffffff44899500ffffff51408b8d5cffffff40d3bd00ffffff59448b9500ffffff448995dcffffff448b95a0ffffff44899500ffffff51408b8d60ffffff40d3bd00ffffff59448b9500ffffff448995e0ffffff448b95a4ffffff44899500ffffff51408b8d64ffffff40d3bd00ffffff59448b9500ffffff448995e4ffffff448b95a8ffffff44899500ffffff51408b8d68ffffff40d3bd00ffffff59448b9500ffffff448995e8ffffff448b95acffffff44899500ffffff51408b8d6cffffff40d3bd00ffffff59448b9500ffffff448995ecffffff448b95b0ffffff44899500ffffff51408b8d70ffffff40d3bd00ffffff59448b9500ffffff448995f0ffffff448b95b4ffffff44899500ffffff51408b8d74ffffff40d3bd00ffffff59448b9500ffffff448995f4ffffff448b95b8ffffff44899500ffffff51408b8d78ffffff40d3bd00ffffff59448b9500ffffff448995f8ffffff448b95bcffffff44899500ffffff51408b8d7cffffff40d3bd00ffffff59448b9500ffffff448995fcffffff")
+
+    it "lowers sign, reciprocal and reciprocal-sqrt unary ops":
+        expect(hex(avx512_scalar_unary_bytes(3, -64, -128, 1, 1))).to_equal("408b9d80ffffff400fbafb1f40899dc0ffffff408b9d84ffffff400fbafb1f40899dc4ffffff408b9d88ffffff400fbafb1f40899dc8ffffff408b9d8cffffff400fbafb1f40899dccffffff408b9d90ffffff400fbafb1f40899dd0ffffff408b9d94ffffff400fbafb1f40899dd4ffffff408b9d98ffffff400fbafb1f40899dd8ffffff408b9d9cffffff400fbafb1f40899ddcffffff408b9da0ffffff400fbafb1f40899de0ffffff408b9da4ffffff400fbafb1f40899de4ffffff408b9da8ffffff400fbafb1f40899de8ffffff408b9dacffffff400fbafb1f40899decffffff408b9db0ffffff400fbafb1f40899df0ffffff408b9db4ffffff400fbafb1f40899df4ffffff408b9db8ffffff400fbafb1f40899df8ffffff408b9dbcffffff400fbafb1f40899dfcffffff")
+        expect(hex(avx512_scalar_unary_bytes(8, -64, -128, 2, 4))).to_equal("49b8000000000000f03f66490f6ec0f2400f5e8580fffffff2400f1185c0ffffff66490f6ec0f2400f5e8588fffffff2400f1185c8ffffff66490f6ec0f2400f5e8590fffffff2400f1185d0ffffff66490f6ec0f2400f5e8598fffffff2400f1185d8ffffff66490f6ec0f2400f5e85a0fffffff2400f1185e0ffffff66490f6ec0f2400f5e85a8fffffff2400f1185e8ffffff66490f6ec0f2400f5e85b0fffffff2400f1185f0ffffff66490f6ec0f2400f5e85b8fffffff2400f1185f8ffffff")
+        expect(hex(avx512_scalar_unary_bytes(0, -64, -128, 1, 6))).to_equal("40b80000803ff3400f518d80ffffff66400f6ec0f3400f5ec1f3400f1185c0fffffff3400f518d84ffffff66400f6ec0f3400f5ec1f3400f1185c4fffffff3400f518d88ffffff66400f6ec0f3400f5ec1f3400f1185c8fffffff3400f518d8cffffff66400f6ec0f3400f5ec1f3400f1185ccfffffff3400f518d90ffffff66400f6ec0f3400f5ec1f3400f1185d0fffffff3400f518d94ffffff66400f6ec0f3400f5ec1f3400f1185d4fffffff3400f518d98ffffff66400f6ec0f3400f5ec1f3400f1185d8fffffff3400f518d9cffffff66400f6ec0f3400f5ec1f3400f1185dcfffffff3400f518da0ffffff66400f6ec0f3400f5ec1f3400f1185e0fffffff3400f518da4ffffff66400f6ec0f3400f5ec1f3400f1185e4fffffff3400f518da8ffffff66400f6ec0f3400f5ec1f3400f1185e8fffffff3400f518dacffffff66400f6ec0f3400f5ec1f3400f1185ecfffffff3400f518db0ffffff66400f6ec0f3400f5ec1f3400f1185f0fffffff3400f518db4ffffff66400f6ec0f3400f5ec1f3400f1185f4fffffff3400f518db8ffffff66400f6ec0f3400f5ec1f3400f1185f8fffffff3400f518dbcffffff66400f6ec0f3400f5ec1f3400f1185fcffffff")
+        expect(hex(avx512_scalar_unary_bytes(15, -64, -128, 3, 1))).to_equal("448bbd80ffffff41f7df4489bdc0ffffff448bbd84ffffff41f7df4489bdc4ffffff448bbd88ffffff41f7df4489bdc8ffffff448bbd8cffffff41f7df4489bdccffffff448bbd90ffffff41f7df4489bdd0ffffff448bbd94ffffff41f7df4489bdd4ffffff448bbd98ffffff41f7df4489bdd8ffffff448bbd9cffffff41f7df4489bddcffffff448bbda0ffffff41f7df4489bde0ffffff448bbda4ffffff41f7df4489bde4ffffff448bbda8ffffff41f7df4489bde8ffffff448bbdacffffff41f7df4489bdecffffff448bbdb0ffffff41f7df4489bdf0ffffff448bbdb4ffffff41f7df4489bdf4ffffff448bbdb8ffffff41f7df4489bdf8ffffff448bbdbcffffff41f7df4489bdfcffffff")
+
+    it "builds the KMOVW mask image for float and signed integer predicates":
+        # Gt is LT_OS with swapped operands; byte registers need REX (SIL).
+        expect(hex(avx512_scalar_cmp_bytes(10, 6, -64, -128, -192, 1, 4))).to_equal("4531d2f3400f108540fffffff3400fc28580ffffff0166400f7ec64083e60140c1e6004109f2f3400f108544fffffff3400fc28584ffffff0166400f7ec64083e60140d1e64109f2f3400f108548fffffff3400fc28588ffffff0166400f7ec64083e60140c1e6024109f2f3400f10854cfffffff3400fc2858cffffff0166400f7ec64083e60140c1e6034109f2f3400f108550fffffff3400fc28590ffffff0166400f7ec64083e60140c1e6044109f2f3400f108554fffffff3400fc28594ffffff0166400f7ec64083e60140c1e6054109f2f3400f108558fffffff3400fc28598ffffff0166400f7ec64083e60140c1e6064109f2f3400f10855cfffffff3400fc2859cffffff0166400f7ec64083e60140c1e6074109f2f3400f108560fffffff3400fc285a0ffffff0166400f7ec64083e60140c1e6084109f2f3400f108564fffffff3400fc285a4ffffff0166400f7ec64083e60140c1e6094109f2f3400f108568fffffff3400fc285a8ffffff0166400f7ec64083e60140c1e60a4109f2f3400f10856cfffffff3400fc285acffffff0166400f7ec64083e60140c1e60b4109f2f3400f108570fffffff3400fc285b0ffffff0166400f7ec64083e60140c1e60c4109f2f3400f108574fffffff3400fc285b4ffffff0166400f7ec64083e60140c1e60d4109f2f3400f108578fffffff3400fc285b8ffffff0166400f7ec64083e60140c1e60e4109f2f3400f10857cfffffff3400fc285bcffffff0166400f7ec64083e60140c1e60f4109f266448995c0ffffff")
+        expect(hex(avx512_scalar_cmp_bytes(10, 6, -64, -128, -192, 3, 3))).to_equal("4531d2408bb580ffffff403bb540ffffff400f9ec6400fb6f640c1e6004109f2408bb584ffffff403bb544ffffff400f9ec6400fb6f640d1e64109f2408bb588ffffff403bb548ffffff400f9ec6400fb6f640c1e6024109f2408bb58cffffff403bb54cffffff400f9ec6400fb6f640c1e6034109f2408bb590ffffff403bb550ffffff400f9ec6400fb6f640c1e6044109f2408bb594ffffff403bb554ffffff400f9ec6400fb6f640c1e6054109f2408bb598ffffff403bb558ffffff400f9ec6400fb6f640c1e6064109f2408bb59cffffff403bb55cffffff400f9ec6400fb6f640c1e6074109f2408bb5a0ffffff403bb560ffffff400f9ec6400fb6f640c1e6084109f2408bb5a4ffffff403bb564ffffff400f9ec6400fb6f640c1e6094109f2408bb5a8ffffff403bb568ffffff400f9ec6400fb6f640c1e60a4109f2408bb5acffffff403bb56cffffff400f9ec6400fb6f640c1e60b4109f2408bb5b0ffffff403bb570ffffff400f9ec6400fb6f640c1e60c4109f2408bb5b4ffffff403bb574ffffff400f9ec6400fb6f640c1e60d4109f2408bb5b8ffffff403bb578ffffff400f9ec6400fb6f640c1e60e4109f2408bb5bcffffff403bb57cffffff400f9ec6400fb6f640c1e60f4109f266448995c0ffffff")
+
+    it "selects f64 lanes on mask bits with CMOVNE":
+        expect(hex(avx512_scalar_select_bytes(11, 2, -64, -256, -128, -192, 2))).to_equal("440fb79d00ffffff488b9540ffffff41f7c301000000480f459580ffffff488995c0ffffff488b9548ffffff41f7c302000000480f459588ffffff488995c8ffffff488b9550ffffff41f7c304000000480f459590ffffff488995d0ffffff488b9558ffffff41f7c308000000480f459598ffffff488995d8ffffff488b9560ffffff41f7c310000000480f4595a0ffffff488995e0ffffff488b9568ffffff41f7c320000000480f4595a8ffffff488995e8ffffff488b9570ffffff41f7c340000000480f4595b0ffffff488995f0ffffff488b9578ffffff41f7c380000000480f4595b8ffffff488995f8ffffff")
+
+    it "applies 16-bit mask logic":
+        expect(hex(avx512_scalar_mask_bytes(1, -64, -128, -192, 10))).to_equal("400fb78d80ffffff40f7d16640238d40ffffff6640898dc0ffffff")
+        expect(hex(avx512_scalar_mask_bytes(1, -64, -128, -128, 14))).to_equal("400fb78d80ffffff40f7d16640898dc0ffffff")
+
+    it "permutes through a SIB-indexed frame read and bounds-checks broadcast lanes":
+        expect(hex(avx512_scalar_permute_bytes(7, 9, -64, -300, -400, 2))).to_equal("4863bd70feffff4c8b8cfdd4feffff4c898dc0ffffff4863bd74feffff4c8b8cfdd4feffff4c898dc8ffffff4863bd78feffff4c8b8cfdd4feffff4c898dd0ffffff4863bd7cfeffff4c8b8cfdd4feffff4c898dd8ffffff4863bd80feffff4c8b8cfdd4feffff4c898de0ffffff4863bd84feffff4c8b8cfdd4feffff4c898de8ffffff4863bd88feffff4c8b8cfdd4feffff4c898df0ffffff4863bd8cfeffff4c8b8cfdd4feffff4c898df8ffffff")
+        expect(hex(avx512_scalar_broadcast_bytes(12, 0, -64, -128, 1))).to_equal("4983fc1072020f0b428b84a580ffffff408985c0ffffff408985c4ffffff408985c8ffffff408985ccffffff408985d0ffffff408985d4ffffff408985d8ffffff408985dcffffff408985e0ffffff408985e4ffffff408985e8ffffff408985ecffffff408985f0ffffff408985f4ffffff408985f8ffffff408985fcffffff")
+
+    it "decodes into whole instructions with no EVEX or ZMM instruction":
+        val all = avx512_scalar_cmp_bytes(10, 6, -64, -128, -192, 1, 4) + avx512_scalar_unary_bytes(8, -64, -128, 2, 4) + avx512_scalar_permute_bytes(7, 9, -64, -300, -400, 2) + avx512_scalar_broadcast_bytes(12, 0, -64, -128, 1) + avx512_scalar_ibin_bytes(10, -64, -128, -192, 11, -256)
+        val evidence = x86_zmm_evidence(all)
+        expect(evidence.decoded).to_equal(true)
+        expect(evidence.instructions).to_equal(98 + 25 + 24 + 20 + 128)
+        expect(evidence.evex_instructions).to_equal(0)
+        expect(evidence.zmm_instructions).to_equal(0)
+
+    it "keeps the fallback opcodes inside the AVX-512 frame band":
+        # regalloc applies the frame-vector spill discipline to 400..450.
+        expect(X86_OP_V512S_COPY).to_equal(437)
+        expect(X86_OP_V512S_BROADCAST).to_equal(446)

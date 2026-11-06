@@ -77,3 +77,6 @@ None of the three is Windows-only in *cause*; defect 3 is Windows-only in
 *symptom* (the root-relative path happens to be writable on Unix, so the
 diagnostics survive there and the bug is invisible).
 
+
+## Round-10 verdict note (2026-11-06)
+Defect 3 (root-relative stderr spill path): ALREADY-FIXED - src/app/cli/native_build_main.spl (spill_root) uses SIMPLE_NATIVE_BUILD_CACHE_DIR/diagnostics, TMPDIR, TEMP or TMP before /tmp. Defects 1 (lint closure unresolved import names) and 2 (MIR lacks tuple-literal assignment-target lowering) are feature-sized; each repro is ~30 min of native-build. Verification-pending command: Phase-3 binary native-build --entry src/app/cli/lint_entry.spl and src/app/mcp/main.spl.

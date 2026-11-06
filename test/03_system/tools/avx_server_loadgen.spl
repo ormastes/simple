@@ -1,0 +1,241 @@
+# Load generator for the AVX server system perf lane (test tool, not product).
+#
+# Drives N concurrent TCP clients against a running server and reports
+# throughput, p50/p99 latency, and an order-independent response digest so
+# the runner can prove responses are identical across provider modes.
+#
+#   http : POST /ingest to simple-web-server's single-owner lane. Each request
+#          carries 50 x 1500-byte X-Pad-NN headers and a 64 KiB body, so the
+#          per-line LF/CRLF scans the vector parser accelerates dominate.
+#   db   : `QUERY <sql>` to postgres-mimic-server --listen. Each query is a
+#          two-term AND full scan (`room_id = 'room-a' AND room_seq > T`) that
+#          is eligible for the PureDatabase RowBitmap AND reducer; T varies per
+#          request so the single-entry select-result cache never serves it.
+#
+# Usage: avx_server_loadgen.spl <http|db> <addr> <clients> <requests> <out_dir> [db_rows] [result_rows]
+# Output (last line): LOADGEN kind=.. ok=.. errors=.. elapsed_ms=.. rps=.. p50_us=.. p99_us=.. digest=..
+# Exit 0 only when every request succeeded and verified.
+
+use std.io_runtime.{time_now_unix_micros}
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_read_text}
+use std.nogc_sync_mut.concurrent.thread.{thread_spawn_with_args}
+use std.common.base_encoding.{text_to_bytes}
+use std.nogc_sync_mut.sffi.system.{args}
+
+val HTTP_PAD_HEADERS: i64 = 50
+val HTTP_PAD_BYTES: i64 = 1500
+val HTTP_BODY_BYTES: i64 = 65536
+val DIGEST_MOD: i64 = 1099511627776
+
+fn _repeat(unit: text, count: i64) -> text:
+    var out = ""
+    var chunk = unit
+    var left = count
+    while left > 0:
+        if left % 2 == 1:
+            out = out + chunk
+        chunk = chunk + chunk
+        left = left / 2
+    out
+
+fn _fnv(value: text) -> i64:
+    var h: i64 = 2166136261
+    for b in text_to_bytes(value):
+        h = ((h ^ (b as i64)) * 16777619) % 4294967296
+    h
+
+fn _field(cfg: [text], index: i64) -> text:
+    if index < cfg.len(): cfg[index] else: ""
+
+fn http_pad_block() -> text:
+    val value = _repeat("h", HTTP_PAD_BYTES)
+    var block = ""
+    var k = 0
+    while k < HTTP_PAD_HEADERS:
+        val name = if k < 10: "X-Pad-0{k}" else: "X-Pad-{k}"
+        block = block + name + ": " + value + "\r\n"
+        k = k + 1
+    block
+
+fn http_request(i: i64, pads: text, body: text) -> text:
+    "POST /ingest HTTP/1.1\r\nHost: loopback\r\nX-Req-Id: {i}\r\n" + pads +
+        "Content-Length: {body.len()}\r\nConnection: close\r\n\r\n" + body
+
+# Returns "" when the response verifies, else a reason.
+fn http_verify(i: i64, wire: text) -> text:
+    if not wire.starts_with("HTTP/1.1 200"): return "status"
+    if not wire.contains("req={i} "): return "req-id"
+    if not wire.contains("body_bytes={HTTP_BODY_BYTES} "): return "body-bytes"
+    if not wire.contains("pad_bytes={HTTP_PAD_HEADERS * HTTP_PAD_BYTES} "): return "pad-bytes"
+    if not wire.contains("headers={HTTP_PAD_HEADERS + 4} "): return "header-count"
+    ""
+
+fn db_threshold(i: i64, rows: i64, result_rows: i64) -> i64:
+    val t = rows - result_rows * 4 - (i % 97)
+    if t < 0: 0 else: t
+
+fn db_expected_rows(threshold: i64, rows: i64) -> i64:
+    # Seeded rows: room_seq = r + 1, room_id = 'room-a' iff r % 4 == 0.
+    var count = 0
+    var seq = threshold + 1
+    while seq <= rows:
+        if (seq - 1) % 4 == 0:
+            count = count + 1
+        seq = seq + 1
+    count
+
+fn db_request(threshold: i64) -> text:
+    "QUERY SELECT message_id, room_seq FROM bench WHERE room_id = 'room-a' AND room_seq > {threshold} ORDER BY room_seq\n"
+
+fn db_verify(expected: i64, wire: text) -> text:
+    if not wire.starts_with("ROWS {expected}\n"): return "row-count"
+    if not wire.ends_with("END\n"): return "terminator"
+    ""
+
+fn _payload(wire: text) -> text:
+    val split = wire.index_of("\r\n\r\n")
+    if split < 0: wire else: wire.slice(split + 4, wire.len())
+
+fn _exchange(addr: text, request: text) -> text:
+    match TcpStream.connect(addr):
+        Err(_): return ""
+        Ok(client):
+            var wire = ""
+            if client.write_text_status(request):
+                match client.read_text():
+                    Ok(value): wire = value
+                    Err(_): pass
+            val _ = client.close()
+            wire
+
+# One client: handles request ids i with i % clients == worker. Writes one
+# "latency_us digest reason" line per request to <out>/w<worker>.lat.
+fn loadgen_worker(cfg_text: text, worker: i64) -> i64:
+    val cfg = cfg_text.split("|")
+    val kind = _field(cfg, 0)
+    val addr = _field(cfg, 1)
+    val clients = _field(cfg, 2).to_int() ?? 1
+    val requests = _field(cfg, 3).to_int() ?? 0
+    val out = _field(cfg, 4)
+    val rows = _field(cfg, 5).to_int() ?? 0
+    val result_rows = _field(cfg, 6).to_int() ?? 16
+    val pads = if kind == "http": http_pad_block() else: ""
+    val body = if kind == "http": _repeat("abcdefgh", HTTP_BODY_BYTES / 8) else: ""
+    var lines = ""
+    var ok = 0
+    var i = worker
+    while i < requests:
+        var request = ""
+        var expected: i64 = 0
+        if kind == "http":
+            request = http_request(i, pads, body)
+        else:
+            val t = db_threshold(i, rows, result_rows)
+            expected = db_expected_rows(t, rows)
+            request = db_request(t)
+        val start = time_now_unix_micros()
+        val wire = _exchange(addr, request)
+        val latency = time_now_unix_micros() - start
+        var reason = if wire == "": "no-response" else: ""
+        if reason == "":
+            reason = if kind == "http": http_verify(i, wire) else: db_verify(expected, wire)
+        if reason == "":
+            ok = ok + 1
+            val digest = if kind == "http": _fnv(_payload(wire)) else: _fnv(wire)
+            lines = lines + "{latency} {digest} ok\n"
+        else:
+            lines = lines + "{latency} 0 {reason}:{i}\n"
+        i = i + clients
+    val _ = file_write("{out}/w{worker}.lat", lines)
+    ok
+
+fn _sorted(values: [i64]) -> [i64]:
+    var result = values
+    var gap = result.len() / 2
+    while gap > 0:
+        var i = gap
+        while i < result.len():
+            val tmp = result[i]
+            var k = i
+            while k >= gap and result[k - gap] > tmp:
+                result[k] = result[k - gap]
+                k = k - gap
+            result[k] = tmp
+            i = i + 1
+        gap = gap / 2
+    result
+
+fn _percentile(sorted: [i64], pct: i64) -> i64:
+    if sorted.len() == 0: return -1
+    var index = (sorted.len() * pct + 99) / 100 - 1
+    if index < 0: index = 0
+    if index >= sorted.len(): index = sorted.len() - 1
+    sorted[index]
+
+fn main() -> i32:
+    val argv = args()
+    # argv[0] is the tool path; positional arguments follow.
+    if argv.len() < 6:
+        print("usage: avx_server_loadgen.spl <http|db> <addr> <clients> <requests> <out_dir> [db_rows] [result_rows]")
+        return 2
+    val kind = argv[1]
+    if kind != "http" and kind != "db":
+        print("LOADGEN_FAIL unknown kind {kind}")
+        return 2
+    val clients = argv[3].to_int() ?? 0
+    val requests = argv[4].to_int() ?? 0
+    if clients <= 0 or requests <= 0:
+        print("LOADGEN_FAIL clients and requests must be positive")
+        return 2
+    val rows = if argv.len() > 6: argv[6] else: "0"
+    val result_rows = if argv.len() > 7: argv[7] else: "16"
+    if kind == "db" and (rows.to_int() ?? 0) <= 0:
+        print("LOADGEN_FAIL db mode needs db_rows")
+        return 2
+    val cfg = "{kind}|{argv[2]}|{clients}|{requests}|{argv[5]}|{rows}|{result_rows}"
+
+    val start = time_now_unix_micros()
+    if clients == 1:
+        val _ = loadgen_worker(cfg, 0)
+    else:
+        var handles = []
+        var w = 0
+        while w < clients:
+            var handle = thread_spawn_with_args(cfg, w, \c, k: loadgen_worker(c, k))
+            if handle.handle < 0:
+                val _ = loadgen_worker(cfg, w)
+            else:
+                handles.push(handle)
+            w = w + 1
+        for h in handles:
+            var owned = h
+            val _ = owned.join()
+    val elapsed_us = time_now_unix_micros() - start
+
+    var latencies: [i64] = []
+    var digest: i64 = 0
+    var errors = 0
+    var first_error = ""
+    var w2 = 0
+    while w2 < clients:
+        for line in file_read_text("{argv[5]}/w{w2}.lat").split("\n"):
+            if line == "": continue
+            val parts = line.split(" ")
+            if parts.len() < 3: continue
+            if parts[2] == "ok":
+                latencies.push(parts[0].to_int() ?? 0)
+                digest = (digest + (parts[1].to_int() ?? 0)) % DIGEST_MOD
+            else:
+                errors = errors + 1
+                if first_error == "": first_error = parts[2]
+        w2 = w2 + 1
+    val missing = requests - latencies.len() - errors
+    if missing > 0:
+        errors = errors + missing
+        if first_error == "": first_error = "missing-results"
+    val sorted = _sorted(latencies)
+    val elapsed_ms = elapsed_us / 1000
+    val rps_x100 = if elapsed_us > 0: latencies.len() * 100000000 / elapsed_us else: 0
+    print("LOADGEN kind={kind} clients={clients} requests={requests} ok={latencies.len()} errors={errors} first_error={first_error} elapsed_ms={elapsed_ms} rps_x100={rps_x100} p50_us={_percentile(sorted, 50)} p99_us={_percentile(sorted, 99)} digest={digest}")
+    if errors == 0: 0 else: 1

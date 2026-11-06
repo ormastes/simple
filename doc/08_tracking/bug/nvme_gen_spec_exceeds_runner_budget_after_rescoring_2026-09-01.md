@@ -76,3 +76,6 @@ Do not "fix" this by marking the cells pending. A pending cell asserts the
 ledger blocker text and would go GREEN, which would convert a real timeout into
 a false claim of an admitted gap — the exact failure the coverage guard and the
 generator's blocked-marker design exist to prevent.
+
+## Round-10 verdict note (2026-11-06)
+Verdict: feature-sized (generator change). Preferred fix is a run-once-per-suite cache keyed by evidence program path in the generator (src/app/nvme_spec_import); generated specs must not be hand-edited and coverage must not be unbound. Each file needs more than 900s on a loaded host, so RED/GREEN cannot be shown within a lane time-box.

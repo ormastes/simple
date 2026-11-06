@@ -68,6 +68,13 @@ requires a refreshed `mdsoc_only` route before implementation.
 - Gate: `sh scripts/check/check-vector-provider-levels.shs ABS_OUT [run|qemu|compile|all]`
   (Windows .dll native, Linux .so native, aarch64/riscv64 qemu-user, FreeBSD/macOS/
   Windows-ARM/SimpleOS compile-only). Bench: `src/runtime/test/vector_level_bench.c`.
+- 2026-11-06 hardening: `simple_vector_level_reason_v1(buf, size)` (additive export;
+  codes 0 max / 1 cpu-missing / 2 xcr0 / 3 cap / 4 os / 5 build) printed+asserted per
+  cap; `src/runtime/test/vector_level_parity_selftest.c` (guard pages, offsets 0..63,
+  lengths 0..131, 1 GiB max span, independent CPUID level oracle) runs per cap;
+  gate also rejects constructors/static-init/TLS in objects (llvm-readobj) and
+  checks linked init/TLS footprint == cap0, with must-reject fixtures. Note:
+  clang GlobalOpt folds a constant-store constructor, so a ctor fixture must call out.
 - Admission roots now include `/usr/local/lib/simple/providers/` (FreeBSD/macOS).
 - DB staging: exact-length inputs skip padded copy; readback via `raw_read_u32s`
   (seed DB probe 810 ms -> 2.1 ms/op).

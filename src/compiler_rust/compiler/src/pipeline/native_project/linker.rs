@@ -169,9 +169,43 @@ pub(super) fn archive_object_batches<'a>(
 
 fn generated_c_source_compiler(target: simple_common::target::Target) -> String {
     if target.os == simple_common::target::TargetOS::Windows {
-        target_c_compiler(target)
-    } else {
-        target_cxx_compiler(target)
+        return target_c_compiler(target);
+    }
+    // A hosted Linux cross target defaults to the GNU cross driver
+    // (`aarch64-linux-gnu-g++`, ...). When that driver is not installed, a
+    // clang on PATH can still emit the generated stubs for the target via
+    // `--target=<triple>` (see `generated_c_object_triple`), so prefer it over
+    // spawning a driver that does not exist.
+    if let Some(gnu) = super::tools::hosted_linux_cross_compiler(target, true) {
+        if !simple_common::platform::cc_detect::command_exists(gnu)
+            && simple_common::platform::cc_detect::command_exists("clang")
+        {
+            return "clang".to_string();
+        }
+    }
+    target_cxx_compiler(target)
+}
+
+/// Triple the generated C objects (`_main_stub.o`, `_init_all.o`) must be
+/// emitted for. `None` means the host: the compiler's default is correct.
+/// Without this, a hosted cross build (e.g. `--target x86_64-unknown-linux-gnu`
+/// on macOS arm64) emitted the stubs as host Mach-O next to target ELF module
+/// objects.
+pub(super) fn generated_c_object_triple(target: simple_common::target::Target) -> Option<&'static str> {
+    use simple_common::target::{TargetArch, TargetOS};
+    if target.is_host() {
+        return None;
+    }
+    if let Some(triple) = NativeProjectBuilder::freestanding_target_triple(target) {
+        return Some(triple);
+    }
+    match (target.arch, target.os) {
+        (TargetArch::X86_64, TargetOS::Linux) => Some("x86_64-unknown-linux-gnu"),
+        (TargetArch::Aarch64, TargetOS::Linux) => Some("aarch64-unknown-linux-gnu"),
+        (TargetArch::Riscv64, TargetOS::Linux) => Some("riscv64-unknown-linux-gnu"),
+        (TargetArch::Arm, TargetOS::Linux) => Some("armv7-unknown-linux-gnueabihf"),
+        (TargetArch::X86, TargetOS::Linux) => Some("i686-unknown-linux-gnu"),
+        _ => None,
     }
 }
 
@@ -1334,8 +1368,10 @@ int main(int argc, char** argv) {
         let argv: &[String] = if is_msvc { &clang_cl_args } else { &other_args };
         let mut cmd = std::process::Command::new(&cc);
         cmd.args(argv);
-        if let Some(flag) = windows_gnu_target_flag(target, &cc) {
-            cmd.arg(flag);
+        if !is_msvc {
+            if let Some(flag) = generated_c_target_flag(target, &cc, generated_c_object_triple(target)) {
+                cmd.arg(flag);
+            }
         }
         let output = cmd
             .output()
@@ -1411,11 +1447,7 @@ int main(int argc, char** argv) {
         let cc = generated_c_source_compiler(cross_target);
         let is_msvc = uses_msvc_flags(cross_target.linker_flavor());
         let use_llvm_backend = self.config.backend == "llvm";
-        let init_target_triple = if cross_target.is_host() {
-            None
-        } else {
-            Self::freestanding_target_triple(cross_target)
-        };
+        let init_target_triple = generated_c_object_triple(cross_target);
 
         let mut code = String::from("// Auto-generated: calls all __module_init_* functions\n");
         code.push_str("#ifdef __cplusplus\nextern \"C\" {\n#endif\n");
@@ -3922,6 +3954,50 @@ mod linker_tests {
             hosted_linux_cross_compiler(Target::new(TargetArch::Aarch64, TargetOS::None), false),
             None
         );
+    }
+
+    #[test]
+    fn generated_c_objects_target_hosted_cross_triples() {
+        let x86_linux = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let arm_linux = Target::new(TargetArch::Aarch64, TargetOS::Linux);
+        for (target, triple) in [(x86_linux, "x86_64-unknown-linux-gnu"), (arm_linux, "aarch64-unknown-linux-gnu")] {
+            if target.is_host() {
+                assert_eq!(generated_c_object_triple(target), None);
+                continue;
+            }
+            assert_eq!(generated_c_object_triple(target), Some(triple));
+            assert_eq!(
+                generated_c_target_flag(target, "clang", generated_c_object_triple(target)),
+                Some(format!("--target={triple}"))
+            );
+        }
+        assert_eq!(
+            generated_c_object_triple(Target::new(TargetArch::Riscv64, TargetOS::None)),
+            Some("riscv64-unknown-elf")
+        );
+    }
+
+    #[test]
+    fn hosted_cross_runtime_requires_sysroot_or_gnu_driver() {
+        use super::super::tools::hosted_cross_c_setup_with;
+        let target = if Target::new(TargetArch::X86_64, TargetOS::Linux).is_host() {
+            Target::new(TargetArch::Aarch64, TargetOS::Linux)
+        } else {
+            Target::new(TargetArch::X86_64, TargetOS::Linux)
+        };
+        let triple = generated_c_object_triple(target).unwrap();
+        let err = hosted_cross_c_setup_with(target, |_| false, None).unwrap_err();
+        assert!(err.contains("SIMPLE_CROSS_SYSROOT") && err.contains(triple), "{err}");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().display().to_string();
+        let (cc, flags) = hosted_cross_c_setup_with(target, |tool| tool == "clang", Some(root.clone()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(cc, "clang");
+        assert_eq!(flags, vec![format!("--target={triple}"), format!("--sysroot={root}")]);
+        if let Some(gnu) = super::super::tools::hosted_linux_cross_compiler(target, false) {
+            assert!(hosted_cross_c_setup_with(target, |tool| tool == gnu, None).unwrap().is_none());
+        }
     }
 
     #[test]
