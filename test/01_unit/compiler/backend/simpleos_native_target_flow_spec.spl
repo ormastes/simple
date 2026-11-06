@@ -4,7 +4,7 @@ use compiler.backend.backend_helpers.{backend_helper_native_target_for}
 use compiler.backend.llvm_native_link.{is_simpleos_x86_64_target, is_simpleos_arm64_target, is_simpleos_riscv64_target, is_simpleos_riscv32_target, is_simpleos_riscv32_link_for_target, simpleos_x86_64_user_link_inputs, prefer_module_init_aggregator, merge_module_init_symbol_groups}
 use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
 use compiler.backend.llvm_cross_target.{toolchain_for_target}
-use std.io_runtime.{file_read_raw}
+use std.io_runtime.{file_read_nullable}
 
 describe "SimpleOS native target flow":
     # @manual scenario evidence
@@ -23,7 +23,7 @@ describe "SimpleOS native target flow":
         expect(link_inputs[0]).to_equal("build/os/sysroot/lib/crt0.o")
         expect(link_inputs[1]).to_end_with("libsimple_runtime.a")
         expect(link_inputs[2]).to_equal("build/os/sysroot/lib/libsimpleos_c.a")
-        val link_source = file_read_raw("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
+        val link_source = file_read_nullable("src/compiler/70.backend/backend/simpleos_native_linkers.spl") ?? ""
         expect(link_source).to_contain("if target == \"simpleos\" or target == \"simpleos-x86_64\"")
 
     it "routes every canonical multi-architecture SimpleOS selector before hosted linking":
@@ -40,8 +40,8 @@ describe "SimpleOS native target flow":
         expect(is_simpleos_riscv32_target("riscv32imac-unknown-none-elf")).to_be(true)
 
     it "keeps the RV64 desktop on the explicit hard-float profile":
-        val targets = file_read_raw("src/os/_QemuRunner/scenario_disks.spl") ?? ""
-        val llvm_target = file_read_raw("src/compiler/70.backend/backend/llvm_target.spl") ?? ""
+        val targets = file_read_nullable("src/os/_QemuRunner/scenario_disks.spl") ?? ""
+        val llvm_target = file_read_nullable("src/compiler/70.backend/backend/llvm_target.spl") ?? ""
         expect(targets).to_contain("target_triple: \"riscv64gc-unknown-none\"")
         expect(llvm_target).to_contain("fn llvm_riscv64_hard_float_requested() -> bool")
         expect(llvm_target).to_contain("riscv_linux_target_contract_portable_numeric(target)")
@@ -77,10 +77,10 @@ describe "SimpleOS native target flow":
         expect(backend_helper_native_target_for("rv64")).to_equal(CodegenTarget.Riscv64)
 
     it "resolves an explicit SimpleOS target before probing the compiler host":
-        val source = file_read_raw("src/compiler/70.backend/backend/llvm_target.spl") ?? ""
-        val simpleos_guard = source.index_of("if target == CodegenTarget.SimpleOS_X86_64:")
-        val simpleos_return = source.index_of("return simpleos_triple")
-        val hosted_probe = source.index_of("val host_os = get_host_os()")
+        val source = file_read_nullable("src/compiler/70.backend/backend/llvm_target.spl") ?? ""
+        val simpleos_guard = source.index_of("val is_simpleos = requested_target.contains(\"simpleos\") or enum_is_simpleos")
+        val simpleos_return = source.index_of("return LlvmTargetTriple(arch: \"x86_64\", vendor: \"unknown\", os: \"simpleos\"")
+        val hosted_probe = source.index_of("val detected_host_os = host_os()")
         expect(simpleos_guard).to_be_greater_than(-1)
         expect(simpleos_return).to_be_greater_than(simpleos_guard)
         expect(hosted_probe).to_be_greater_than(simpleos_return)

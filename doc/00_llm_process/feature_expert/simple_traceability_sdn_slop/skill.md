@@ -47,3 +47,7 @@ are expected. Scope is the registered declaration only (`list bugs` is empty
 by design until legacy DB ingestion lands). Full output key reference and the
 spec driver (`scripts/check/check-trace-query-p0.shs`):
 `doc/07_guide/infra/trace_query_p0.md` § "Running it today on the seed".
+
+`refs requirement req:REQ-TRC-001` (or `refs feature <id>`) lists every authored
+claim from/to the identity with the other endpoint's declared file paths; see
+the guide's "Reverse references" subsection for how to read `authority`.

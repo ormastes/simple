@@ -176,11 +176,12 @@ describe "Stage4 localized runtime legacy compatibility provider":
         # @req REQ-SSPEC-COMPILER
         step("builds localizes admits and cleans only the dedicated compatibility archive")
         val source = compiler_native_link_source()
-        val strict_start = source.find("if stage4_requested:")
-        val strict_end = source.find("# Step 3: Combine all objects and link")
-        val strict_source = if strict_start >= 0 and strict_end > strict_start: source.substring(strict_start, strict_end) else: ""
+        val orchestrator = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link_orchestrator.spl") ?? ""
+        val strict_start = orchestrator.find("if stage4_requested:")
+        val strict_end = orchestrator.find("# Step 3: Combine all objects and link")
+        val strict_source = if strict_start >= 0 and strict_end > strict_start: orchestrator.substring(strict_start, strict_end) else: ""
         val build_pos = strict_source.find("llvm_stage4_build_runtime_legacy_compat_archive(runtime_objects, hosted_os, stage4_msvc_objects, stage4_msvc_linker, pid)") ?? -1
-        val labels_pos = strict_source.find("\"runtime_native\", \"runtime_legacy_compat\"") ?? -1
+        val labels_pos = strict_source.find("\"runtime_native\", \"runtime_contracts\", \"runtime_legacy_compat\"") ?? -1
         val paths_pos = strict_source.find("runtime_native_archive, runtime_legacy_compat_archive") ?? -1
         val owner_pos = strict_source.find("stage4_resolve_requested_archive_owners(stage4_requested_symbols, candidate_labels, candidate_scans, hosted_os == \"macos\")") ?? -1
         expect(source).to_contain("fn llvm_stage4_build_runtime_legacy_compat_archive")
@@ -190,13 +191,19 @@ describe "Stage4 localized runtime legacy compatibility provider":
         expect(labels_pos).to_be_greater_than(build_pos)
         expect(paths_pos).to_be_greater_than(build_pos)
         expect(owner_pos).to_be_greater_than(paths_pos)
-        expect(strict_source.split("file_delete(runtime_legacy_compat_archive)").len() - 1).to_be_greater_than(4)
-        expect(strict_source).to_not_contain("candidate_paths = candidate_paths.push(runtime_legacy_core")        expect(source).to_not_contain("llvm_stage4_build_single_object_provider_archive(runtime_objects, \"runtime_legacy_core\"")
+        # Per-site file_delete(runtime_legacy_compat_archive) calls became a shared
+        # path-list sweep plus llvm_stage4_cleanup_candidate_inputs in the split orchestrator.
+        expect(strict_source).to_contain("for path in [runtime_native_archive, runtime_legacy_compat_archive,")
+        expect(strict_source).to_contain("llvm_stage4_cleanup_candidate_inputs(candidate_paths")
+        expect(strict_source).to_not_contain("candidate_paths = candidate_paths.push(runtime_legacy_core")
+        expect(source).to_not_contain("llvm_stage4_build_single_object_provider_archive(runtime_objects, \"runtime_legacy_core\"")
     it "compiles a fresh legacy object but never admits its raw archive":
         # @req REQ-SSPEC-COMPILER
         step("compiles a fresh legacy object but never admits its raw archive")
         val compile_source = rt_file_read_text("src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
-        val link_source = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
-        expect(compile_source).to_contain("if include_stage4_legacy_compat:\n        sources = sources.push(\"runtime_legacy_core\")\n        objects = objects.push(\"{{object_prefix}}runtime_legacy_core{{ext}}\")")
+        val link_source = compiler_native_link_source()
+        expect(compile_source).to_contain("if include_stage4_legacy_compat:\n        sources = sources.push(\"runtime_legacy_core\")")
+        expect(compile_source).to_contain("val objects = runtime_object_paths_v1(sources, object_prefix, ext)")
         expect(link_source).to_contain("stage4_runtime_provider_object_matches(object, \"runtime_legacy_core\"")
-        expect(link_source).to_not_contain("candidate_labels = candidate_labels.push(\"runtime_legacy_core\")")        expect(link_source).to_not_contain("candidate_paths = candidate_paths.push(runtime_legacy_core_archive)")
+        expect(link_source).to_not_contain("candidate_labels = candidate_labels.push(\"runtime_legacy_core\")")
+        expect(link_source).to_not_contain("candidate_paths = candidate_paths.push(runtime_legacy_core_archive)")

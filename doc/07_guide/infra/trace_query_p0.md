@@ -195,3 +195,33 @@ alternate-index fixture under `build/test-artifacts/trace_query_p0/` (never the
 real index) and runs `test/03_system/app/traceability/feature/trace_query_p0_spec.spl`.
 On the seed the 5 worktree scenarios pass; the 3 git/index scenarios need the
 native process adapter (see above).
+
+### Reverse references: `refs <kind> <id>` (slice 2, 2026-11-06)
+
+"What points at this requirement, and what does it point to?" -- every authored
+claim whose from/to is the selected identity, plus the declared file paths of
+the other endpoint (the bug/requirement <-> file link):
+
+```sh
+$S run src/app/traceability/query_main.spl refs requirement req:REQ-TRC-001 2>/dev/null
+$S run src/app/traceability/query_main.spl refs feature feature:traceability --format=sdn 2>/dev/null
+```
+
+Table: header, `Selected: <kind> <id> <title>`, then
+`DIRECTION<TAB>RELATION<TAB>ID<TAB>KIND<TAB>TITLE<TAB>AUTHORITY<TAB>PATHS` rows
+sorted by claim id, `Total references: N`, `LOCATOR` rows for the selected
+node's own declaration sites, then diagnostics. `incoming specifies
+feature:traceability` answers "which feature specifies this requirement";
+`outgoing decomposes_to criterion:AC-TRC-001` lists its acceptance criteria;
+`outgoing implemented_by source:trace-cli ... src/app/traceability/main.spl`
+is the file link. SDN adds `selected: {id, kind, title}`, `references:
+[{claim, direction, relation, from, to, other, other_kind, other_title,
+other_paths, operation, origin, authority}]`, `reference_count`.
+
+Read `authority` honestly: `authored-claim` means the relation is only
+asserted in the declaration (today: all 101 claims); `registered-edge` means
+the graph also carries it as an edge. The declaration has no
+`verified_by`/`accepted_by` claims, so "which spec verifies X" is not yet
+answerable through `refs`; "which feature specifies X", decomposition and
+implemented_by/described_by are. `--prefix` is rejected; `--limit`/`--cursor`
+page exactly like `list`. Exit codes as for `show`.

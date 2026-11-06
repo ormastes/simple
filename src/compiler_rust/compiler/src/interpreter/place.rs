@@ -562,6 +562,22 @@ pub(crate) fn merge_subject_step(slot: &mut Value, steps: &[SubjectStep], bindin
             let field = Arc::make_mut(fields).get_mut(name).expect("field presence checked");
             merge_subject_step(field, rest, binding)
         }
+        // Reference-semantics class on the path: merge into the shared cell.
+        // The child is cloned out (not borrowed under the write lock) so a
+        // self-referencing chain cannot deadlock; a class child is a handle
+        // to its own cell and needs no store-back.
+        (Value::ClassInstance(instance), SubjectStep::Field(name)) => {
+            let Some(mut child) = instance.field(name) else {
+                return false;
+            };
+            if !merge_subject_step(&mut child, rest, binding) {
+                return false;
+            }
+            if !matches!(child, Value::ClassInstance(_)) {
+                instance.set_field(name.clone(), child);
+            }
+            true
+        }
         (Value::Array(items), SubjectStep::Index(index)) => {
             let Some(idx) = normalize_index(items.len(), &Value::Int(*index)) else {
                 return false;
