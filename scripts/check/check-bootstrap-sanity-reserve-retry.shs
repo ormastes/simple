@@ -1,0 +1,28 @@
+#!/bin/sh
+# Stage 2 sanity reserve-refusal classifier: a log holding only the compiler's
+# memory-reserve refusal is retryable; any real diagnostic is not.
+set -eu
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' 0
+awk '$0 == "bootstrap_sanity_failure_is_reserve_refusal() {" {f=1} f {print} f && /^}$/ {exit}' \
+  "$repo_root/scripts/bootstrap/bootstrap-from-scratch.sh" >"$work/fn.sh"
+. "$work/fn.sh"
+refusal='error: build refused: 11009 MiB of RAM/commit headroom free, below the 12288 MiB reserve (SIMPLE_BUILD_MEMORY_RESERVE_BYTES); wait for other builds to finish or lower the reserve'
+n=0
+expect() { # NAME WANT(0|1) CONTENT
+  n=$((n + 1))
+  printf '%s\n' "$3" >"$work/$1.log"
+  got=0; bootstrap_sanity_failure_is_reserve_refusal "$work/$1.log" || got=1
+  [ "$got" = "$2" ] || { echo "FAIL — $1: want $2 got $got"; exit 1; }
+}
+expect pure-refusal 0 "$refusal
+candidate_frontend_smoke: p2_add-build failed (raw rc=3)
+$refusal"
+expect real-error 1 "$refusal
+error: per-file worker pool refused (hir_workers=0)"
+expect sigsegv 1 "candidate_frontend_smoke: p2_add-build failed (raw rc=139)"
+expect empty 1 ""
+n=$((n + 1)); got=0; bootstrap_sanity_failure_is_reserve_refusal "$work/missing.log" || got=1
+[ "$got" = 1 ] || { echo "FAIL — missing log treated as refusal"; exit 1; }
+echo "PASS — $n reserve-refusal classifier case(s) checked"
