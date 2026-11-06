@@ -1,0 +1,90 @@
+# @cover src/lib/common/source_change/reconcile_v1.spl
+# Content-digest reconcile is the authority; edit events are only hints.
+use std.spec.*
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use std.common.source_change.contracts_v1.*
+use std.common.source_change.reconcile_v1.*
+use test.fixtures.compiler.source_change_contract_cases.*
+
+fn rec_limits() -> SourceChangeLimitsV1:
+    SourceChangeLimitsV1(max_path_bytes: 128, max_identity_bytes: 64,
+        max_metadata_bytes: 4096, max_capture_bytes: 1024, max_files: 16, max_edits: 16)
+
+fn rec_root() -> text:
+    sha256_text("root")
+
+fn rec_base() -> Dict<text, text>:
+    var m: Dict<text, text> = {}
+    m["src/a.spl"] = sha256_text("a1")
+    m["src/b.spl"] = sha256_text("b1")
+    m["src/c.spl"] = sha256_text("c1")
+    m
+
+describe "SourceChange reconcile":
+    it "no change gives an empty batch with equal roots":
+        step("Reconcile a map against itself")
+        val r = source_reconcile_v1(rec_root(), rec_base(), rec_base(), 1, rec_limits())
+        expect(r.batch.edits.len()).to_equal(0)
+        expect(r.batch.before_root_digest == r.batch.after_root_digest).to_equal(true)
+        expect(r.shape.valid).to_equal(true)
+
+    it "reports an add, a remove and a change with Fs origin":
+        step("Add d, remove b, change c")
+        var cur = rec_base()
+        cur["src/d.spl"] = sha256_text("d1")
+        cur.remove("src/b.spl")
+        cur["src/c.spl"] = sha256_text("c2")
+        val r = source_reconcile_v1(rec_root(), rec_base(), cur, 7, rec_limits())
+        expect(r.added).to_equal(["src/d.spl"])
+        expect(r.removed).to_equal(["src/b.spl"])
+        expect(r.changed).to_equal(["src/c.spl"])
+        expect(r.batch.edits.len()).to_equal(3)
+        expect(r.batch.edits[0].path).to_equal("src/b.spl")
+        expect(r.batch.edits[1].path).to_equal("src/c.spl")
+        expect(r.batch.edits[2].path).to_equal("src/d.spl")
+        var all_fs = true
+        for e in r.batch.edits:
+            match e.origin:
+                case Fs: pass
+                case _: all_fs = false
+        expect(all_fs).to_equal(true)
+        expect(r.batch.before_root_digest == r.batch.after_root_digest).to_equal(false)
+        expect(r.batch.sequence).to_equal(7)
+        expect(r.batch.complete).to_equal(true)
+
+    it "is independent of map insertion order":
+        step("Build the same maps in opposite order")
+        var fwd: Dict<text, text> = {}
+        fwd["src/a.spl"] = sha256_text("a1")
+        fwd["src/z.spl"] = sha256_text("z1")
+        fwd["src/m.spl"] = sha256_text("m1")
+        var rev: Dict<text, text> = {}
+        rev["src/m.spl"] = sha256_text("m1")
+        rev["src/z.spl"] = sha256_text("z1")
+        rev["src/a.spl"] = sha256_text("a1")
+        expect(source_root_digest_v1(fwd) == source_root_digest_v1(rev)).to_equal(true)
+        val empty: Dict<text, text> = {}
+        val r1 = source_reconcile_v1(rec_root(), empty, fwd, 1, rec_limits())
+        val r2 = source_reconcile_v1(rec_root(), empty, rev, 1, rec_limits())
+        expect(r1.added).to_equal(r2.added)
+        expect(r1.batch.after_root_digest == r2.batch.after_root_digest).to_equal(true)
+        expect(r1.added).to_equal(["src/a.spl", "src/m.spl", "src/z.spl"])
+
+    it "result passes the contracts shape check":
+        step("Re-run the shape check on a mixed batch")
+        var cur = rec_base()
+        cur["src/d.spl"] = sha256_text("d1")
+        cur.remove("src/a.spl")
+        val r = source_reconcile_v1(rec_root(), rec_base(), cur, 2, rec_limits())
+        val shape = source_change_batch_shape_v1(r.batch, rec_limits())
+        expect(shape.valid).to_equal(true)
+        expect(r.shape.reason).to_equal("well_formed_change_batch")
+
+    it "reports an unsafe path as an invalid shape instead of hiding it":
+        step("An absolute path cannot be a repository-relative edit")
+        var cur = rec_base()
+        cur["/abs/x.spl"] = sha256_text("x")
+        val r = source_reconcile_v1(rec_root(), rec_base(), cur, 3, rec_limits())
+        expect(r.shape.valid).to_equal(false)
+        expect(r.shape.reason).to_equal("invalid_path")

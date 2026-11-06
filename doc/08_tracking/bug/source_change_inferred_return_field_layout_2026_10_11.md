@@ -48,3 +48,17 @@ bin/simple native-build --entry test/fixtures/compiler/source_change_contract_na
 ```
 
 Expect SOURCE_CONTRACT_RETURN_INFERRED_OK and 16 SOURCE_CONTRACT_CASE_PASS. Source shape pinned by `bin/simple.exe test test/01_unit/compiler/80.driver/n88b_native_workaround_shapes_spec.spl`.
+
+## Re-qualified 2026-11-06 (WP2 reconcile lane)
+
+`source_change_contract_native.spl` native-built from current `release/1.0.0`
+with the seed (`bin/simple.exe native-build`, llc from `C:/msys64/clang64/bin`,
+`CC` = llvm-mingw clang) and ran clean: `SOURCE_CONTRACT_RETURN_INFERRED_OK`,
+16 x `SOURCE_CONTRACT_CASE_PASS`, `SOURCE_CONTRACT_RESULTS_PASS_16`, exit 0.
+The probe and `contracts_v1.spl` were correct; the historical failure was the
+frozen producer's old HIR codec (`put_i64` 3 encoded as nil), as the retained-HIR
+inspection above concluded. A fresh build on a sparse worktree additionally needs
+`llc` on PATH, `CC` set to the bootstrap clang, and `/tools/counterpart/` plus
+`/src/compositions/` checked out; without them the failures are `llc not found`,
+`Windows GNU linking requires bootstrap-owned clang through CC` and a missing
+`simple_counterpart_abi.h`, none of which are source-change defects.

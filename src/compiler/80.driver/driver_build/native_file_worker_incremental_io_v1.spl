@@ -3,6 +3,8 @@
 # native_file_worker_incremental_v1.spl (kept free of driver_aot_native_output
 # so its spec loads in the interpreter).
 use std.common.crypto.sha256.{sha256_text}
+use std.common.source_change.contracts_v1.{SourceChangeLimitsV1}
+use std.common.source_change.reconcile_v1.{source_reconcile_v1}
 use std.io_runtime.{file_exists, file_read, file_delete,
     dir_create_all, getpid, file_size_raw}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
@@ -101,6 +103,25 @@ pub fn file_worker_inc_prepare_v1(dir: text, producer: text, selected_scope_path
             else:
                 src[r.path] = source_digest
                 iface[r.path] = file_worker_inc_iface_digest_v1(r.path)
+    # Authority for "did any source change": a content-digest reconcile of the
+    # manifest's recorded digests against the selected digests. The loop above
+    # additionally re-hashes bytes on disk; either signal forces the conservative path.
+    var previous_digests: Dict<text, text> = {}
+    for r in prev:
+        previous_digests[r.path] = r.source_digest
+    var current_digests: Dict<text, text> = {}
+    # A selected scope that is a superset of the manifest is still reusable, so
+    # only the manifest's own paths are compared (adds are not invalidations).
+    for path in selected_scope_paths:
+        if previous_digests.contains_key(path) and selected_source_digests.contains_key(path):
+            current_digests[path] = selected_source_digests[path]
+    val reconcile_limits = SourceChangeLimitsV1(max_path_bytes: 4096, max_identity_bytes: 64,
+        max_metadata_bytes: 1073741824, max_capture_bytes: 1073741824,
+        max_files: 4294967295, max_edits: 4294967295)
+    val reconciled = source_reconcile_v1(sha256_text(producer), previous_digests,
+        current_digests, 1, reconcile_limits)
+    if reconciled.batch.edits.len() > 0 or not reconciled.shape.valid:
+        source_changed = true
     val sel = file_worker_inc_select_v1(prev, src, iface, [])
     # Macro candidates are not bound to the object generation. Any source or
     # selected-scope change therefore invalidates the whole prior source scope.
