@@ -580,8 +580,10 @@ and `<backend>_debug_profiler(...)`.
 
 **Not flagged: accessor pairing.** Building a group by pairing
 `session.debug()` with `session.profile()` is a *correctness* defect, not a
-policy question — classes are value types here, so the two halves are
-independent copies that diverge. That belongs to
+policy question when the halves are `struct` values (value types: two
+independent copies that diverge). Under the 2026-11-06 owner decision `class`
+values are reference types on every lane, and pairing two class handles no
+longer diverges. That belongs to
 `doc/08_tracking/bug/capability_group_from_unsound_under_value_semantics_2026-08-09.md`;
 reporting it as a DCA001 warning would imply it is merely discouraged.
 

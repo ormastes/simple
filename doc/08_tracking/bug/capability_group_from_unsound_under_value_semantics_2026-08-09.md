@@ -112,3 +112,15 @@ divergence belongs to the class-ref flip work, not this row). The corrected
 single-value group shape is sound under BOTH semantics, so no library change
 is needed. What remains is the P0 `.from()` desugar (feature work, owner
 decision on class semantics). Left OPEN, no code change.
+
+## 2026-11-06 — owner decision answers the 2026-11-04 QUESTION
+
+Owner decision 2026-11-06: `class` values are reference types everywhere,
+`struct` values stay value types. The interpreter now agrees with the JIT
+(`6c7b4db3d39`, default since 2026-11-04; residual write-back shapes
+commit "fix(interp): argument write-back through class reference chains"): `var b = a; a.bump()` prints `a=1 b=1` on both lanes. The
+"classes are value types" premise of this row is therefore obsolete on every
+lane; a `.from()` group over a **class** acquisition is sound. The hazard
+survives only for a group shaped around a **struct** value. Remaining item is
+unchanged: the P0 `.from()` desugar (feature work). Coordinator owns the
+bug_db status change.

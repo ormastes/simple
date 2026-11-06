@@ -1438,14 +1438,19 @@ Writing the group longhand — a trait listing every method of both members —
 remains valid and is what the landed
 `src/lib/common/debug/debug_profiler.spl` does.
 
-Two rules that go with groups and are *not* optional — classes are value types,
-so a mis-shaped group silently does nothing:
+Two rules that go with groups and are *not* optional. `class` values are
+**reference types** on every engine (owner decision 2026-11-06; the seed
+interpreter's shared `Value::ClassInstance` carrier is the default since
+2026-11-04); `struct` values are **value types** that copy on bind, store and
+read-back. A group shaped around a struct therefore silently does nothing:
 
 - A group is **one trait over one value**, acquired through a **single**
   accessor. Never a struct pairing two accessors (that holds two diverging
   copies).
-- Every mutating trait method must be `me`, not `fn`. A `fn` method receives a
-  **copy** and discards mutation with no diagnostic.
+- Every mutating trait method must be `me`, not `fn`. On a `struct` receiver a
+  `fn` method gets a **copy** and discards mutation with no diagnostic; on a
+  `class` receiver the mutation is visible, but `fn` still declares a
+  non-mutating contract.
 
 Full treatment, including the acquisition-position aliasing trap:
 [Authoring a capability library](../language/capability_library_authoring.md).
