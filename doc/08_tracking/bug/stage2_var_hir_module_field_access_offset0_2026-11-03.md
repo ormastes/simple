@@ -2,8 +2,18 @@
 
 - **ID:** stage2_var_hir_module_field_access_offset0_2026-11-03
 - **Priority:** P1 (phase 3: every stage3 built by the frozen stage2 dies in the HIR loop of the first module)
-- **Status:** open. Source workaround landed (typed accessors in
-  `src/compiler/80.driver/driver_hir_pipeline_lowering.spl`); the stage2 miscompile itself is not fixed.
+- **Status:** closed 2026-11-06 (premise is frozen-stage2-only). Source workaround landed (typed accessors in
+  `src/compiler/80.driver/driver_hir_pipeline_lowering.spl`); the frozen stage2 binary itself cannot be fixed.
+
+## Re-check 2026-11-06 (does not reproduce on the current compiler)
+Probe `C:/dev/p3new/s3sanity/root/test/s3sanity/s2var.spl` (annotated struct `var m: S = if ..: .. elif ..: .. else: ..`,
+reassigned from an if-expression inside a `while`, then `m.path` / `m.count` / `m.tag` at offsets 0/8/16) built with the
+newest stage3 `C:/dev/p3new/s3new/s3_fable52_p4.exe` through the s3sanity harness (`--runtime-bundle core-c-bootstrap`,
+llvm backend): `rc=0 stdout=[r1|22|tr1] (native exe)`, build 532 s. Field reads use real offsets, so the current compiler
+source types reassigned annotated vars; only the frozen phase-3 stage2 had the defect. Regression spec:
+`test/01_unit/compiler/driver/reassigned_annotated_var_field_access_spec.spl` (2/2 pass; could not be made to fail first
+because no current compiler reproduces). The accessors stay (tagged) while any lane still builds stage3 with the frozen
+stage2; inline them when that stage2 is retired.
 
 ## Symptom
 `C:/dev/p3new/s3new/s3.exe native-build --entry-closure --entry test/04_smoke/bootstrap_hello_world.spl ...`

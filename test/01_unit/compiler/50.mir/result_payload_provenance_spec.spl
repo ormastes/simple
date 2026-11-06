@@ -1,0 +1,102 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR: Ok binder of an untyped generic-method Result must not inherit the
+# closure-global `Result::Ok` record. See
+# doc/08_tracking/bug/simple_ring_result_payload_provenance_2026-11-06.md
+"""
+# @tag: unit, compiler, mir
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn field_src_of(lines: [text]) -> text:
+    var out = ""
+    for line in lines:
+        out = out + line + "\n"
+    out
+
+fn field_lower_errors(src: text) -> text:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(src, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: src, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("app.main", surfaces)
+    val hir = lowering.lower_module(ast)
+    var hir_modules: Dict<text, HirModule> = {}
+    hir_modules["app.main"] = hir
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.prescan_module_struct_names(hir_modules, "app.main")
+    val _mir = mir_lowering.lower_module(hir)
+    var errs = ""
+    for e in mir_lowering.errors:
+        errs = errs + e.message + "\n"
+    errs
+
+val RING_SRC = [
+    "struct Done<C>:",
+    "    token: i64",
+    "    value: C",
+    "struct Receipt:",
+    "    count: i64",
+    "enum RingErr:",
+    "    Bad",
+    "class Ring<Op, Cpl>:",
+    "    slot: Done<Cpl>?",
+    "    me take_retained(id: i64) -> Result<Done<Cpl>?, RingErr>:",
+    "        Ok(self.slot)",
+    "    me take(id: i64) -> i64:",
+    "        val retained = self.take_retained(id)",
+    "        match retained:",
+    "            case Ok(maybe):",
+    "                if val completion = maybe:",
+    "                    return completion.token",
+    "                return 0",
+    "            case Err(_):",
+    "                return -1",
+    "    me reset(n: i64) -> Result<Receipt, RingErr>:",
+    "        Ok(Receipt(count: n))",
+    ""
+]
+
+describe "Result payload binder provenance (simple_ring_result_payload_provenance_2026-11-06)":
+    it "binds an untyped method-call Result Ok payload without the closure-global record":
+        val errs = field_lower_errors(field_src_of(RING_SRC))
+        expect(errs.contains("is absent from exact value layout")).to_equal(false)
+
+val CANCEL_SRC = [
+    "enum RingErr:",
+    "    Bad(code: i64)",
+    "enum Outcome:",
+    "    Done",
+    "    Rejected(RingErr)",
+    "class Ring<Op>:",
+    "    n: i64",
+    "    me release(id: i64) -> Result<(), RingErr>:",
+    "        if id < 0:",
+    "            return Err(RingErr.Bad(code: id))",
+    "        Ok(())",
+    "    me cancel(id: i64) -> Outcome:",
+    "        val release_result: Result<(), RingErr> = self.release(id)",
+    "        match release_result:",
+    "            case Result.Ok(_):",
+    "                Outcome.Done",
+    "            case Result.Err(error):",
+    "                Outcome.Rejected(error)",
+    ""
+]
+
+describe "Result Err binder of an annotated Result (defect 2)":
+    it "types the Err binder from the declared Result":
+        val errs = field_lower_errors(field_src_of(CANCEL_SRC))
+        expect(errs.contains("payload type mismatch")).to_equal(false)
