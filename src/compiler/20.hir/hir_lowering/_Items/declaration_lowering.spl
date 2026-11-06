@@ -36,6 +36,8 @@ use compiler.core.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_
 use compiler.frontend.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_TEXT, custom_primitive_bind_symbol, custom_primitive_is_name}
 use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
 use compiler.core.{int_to_str}
+use compiler.core.parser_decls.{parser_unsafe_annotation_caps, parser_unsafe_annotation_reason}
+use compiler.common.assurance.unsafe_capabilities.{unknown_unsafe_capability_names, valid_unsafe_capability_names_help}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.hir.hir_lowering._Items.lowering_helpers.{PlatformAttrFields}
 
@@ -176,8 +178,17 @@ impl HirLowering:
             # above), so this tier is never a template. Named explicitly so
             # the construction stays fully named.
             is_generic_template: false,
-            extern_runtime_value_abi: 0
+            extern_runtime_value_abi: 0,
+            unsafe_reason: parser_unsafe_annotation_reason(decl_idx),
+            unsafe_caps: self.checked_unsafe_caps(parser_unsafe_annotation_caps(decl_idx), span)
         )
+
+    me checked_unsafe_caps(caps: [text], span: Span) -> [text]:
+        """Report unknown `@unsafe` capability names; never drop them silently."""
+        val unknown_caps = unknown_unsafe_capability_names(caps)
+        if unknown_caps.len() > 0:
+            self.error("unknown unsafe capability `" + unknown_caps[0] + "`; " + valid_unsafe_capability_names_help(), span)
+        caps
 
     me lower_function(fn_: ParserFunction) -> HirFunction:
         var jp_attr_names: [text] = []
@@ -587,6 +598,24 @@ impl HirLowering:
                 semantic_symbol.type_ = Some(HirType(kind: HirTypeKind.Function(semantic_params, semantic_return_type, initial_effects), span: fn_.span))
                 self.symbols.symbols[fn_symbol_id.id] = semantic_symbol
 
+        # Declaration-level `@unsafe(...)`, rebuilt by the flat-AST bridge as
+        # an `unsafe` attribute: args[0] is the reason, the rest capabilities.
+        var unsafe_attr_reason = ""
+        var unsafe_attr_caps: [text] = []
+        for unsafe_attr in fn_.attributes:
+            if unsafe_attr.name == "unsafe":
+                var unsafe_arg_index = 0
+                for unsafe_arg in unsafe_attr.args:
+                    match unsafe_arg.kind:
+                        case ExprKind.StringLit(reason_text, _):
+                            if unsafe_arg_index == 0:
+                                unsafe_attr_reason = reason_text
+                        case ExprKind.Ident(cap_name):
+                            unsafe_attr_caps.push(cap_name)
+                        case _:
+                            pass
+                    unsafe_arg_index = unsafe_arg_index + 1
+        unsafe_attr_caps = self.checked_unsafe_caps(unsafe_attr_caps, fn_.span)
         var hir_func = HirFunction(
             symbol: fn_symbol_id,
             name: fn_.name,
@@ -627,7 +656,9 @@ impl HirLowering:
             gpu_backend_order: fa.gpu_backends,
             verification_contract: verification_contract,
             is_generic_template: hir_generic_fn_is_template(fn_.name, type_params.len()),
-            extern_runtime_value_abi: 0
+            extern_runtime_value_abi: 0,
+            unsafe_reason: unsafe_attr_reason,
+            unsafe_caps: unsafe_attr_caps
         )
         if val present_export_attr = parsed_export_attr:
             hir_func.export_attr = present_export_attr

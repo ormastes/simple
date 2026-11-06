@@ -47,7 +47,7 @@ use compiler.core.parser.{parser_legacy_let_decl_ahead}
 use compiler.core.tokens.{TOK_KW_AS, TOK_KW_CE, TOK_PIPE, TOK_ASSIGN, tok_kind_name}
 use compiler.core.tokens.{TOK_KW_DYN, TOK_KW_EXTEND}
 use compiler.frontend.core._ParserDecls.extend_decls.{parse_extend_enum_decl, parser_reset_extend_enums}
-use compiler.core.tokens.{TOK_IDENT, TOK_COMMA, TOK_MINUS}
+use compiler.core.tokens.{TOK_IDENT, TOK_COMMA, TOK_MINUS, TOK_DOT}
 use compiler.frontend.core.flat_pool_codec.*
 use compiler.frontend.core.lock_level_parser.{lock_level_parse_attribute, lock_level_is_exception_attribute, lock_level_reject_non_function}
 use compiler.frontend.core.static_lock_level_metadata.{lock_level_metadata_promote}
@@ -160,6 +160,38 @@ fn parse_layer_decl(loop_index: i64) -> i64:
     args.push(expr_string_lit(uses_list.join(","), 0))
     val marker = expr_call(helper, args, 0)
     decl_val_binding("_expr_layer_" + int_to_str(loop_index), -1, marker, -1)
+
+# ===== `friend PKG` / `internal_export NAME` module access directives =====
+# Soft keywords (same lookahead as `layer`). Lowered to inert marker decls
+# (`__module_friend` / `__module_internal_export`, comma-joined names) that
+# module_assembly folds into ParserModule.friends / .internal_exports and
+# drops -- no flat-pool shape change. Consumed by HIR member visibility.
+fn parse_module_access_decl(loop_index: i64, helper_name: text) -> i64:
+    val keyword = par_text_get()
+    parser_advance()  # consume the directive keyword
+    var names: [text] = []
+    while true:
+        if par_kind_get() != TOK_IDENT:
+            parser_error("expected name after '" + keyword + "'")
+            break
+        var name = par_text_get()
+        parser_advance()
+        while par_kind_get() == TOK_DOT:
+            parser_advance()
+            if par_kind_get() != TOK_IDENT:
+                parser_error("expected name segment after '.' in '" + keyword + "'")
+                break
+            name = name + "." + par_text_get()
+            parser_advance()
+        names.push(name)
+        if par_kind_get() == TOK_COMMA:
+            parser_advance()
+            continue
+        break
+    var args: [i64] = []
+    args.push(expr_string_lit(names.join(","), 0))
+    val marker = expr_call(expr_ident(helper_name, 0), args, 0)
+    decl_val_binding("_expr_module_access_" + int_to_str(loop_index), -1, marker, -1)
 
 # ===== `macro NAME(params) -> (contract): body` declarations =====
 # "macro" is a soft keyword (an identifier elsewhere). The declaration emits no
@@ -753,15 +785,53 @@ use compiler.frontend.core.representation_declarations_v1.{representation_parse_
 var PENDING_UNSAFE: i64 = 0
 var PENDING_UNSAFE_REASON: text = ""
 var PENDING_UNSAFE_CAPS: [text] = []
-# One entry per annotated decl: "decl_name|reason|cap1,cap2". Reset per module.
+# One entry per annotated decl: "decl_idx|cap1,cap2|reason". Keyed by the
+# flat decl index, not the name, so two classes' same-named `@unsafe` methods
+# cannot collide. The reason is last because it is free text and may itself
+# contain `|`. Reset per module; carried through the parse cache with the
+# other declaration metadata.
 var UNSAFE_ANNOTATIONS: [text] = []
 
 fn parser_unsafe_annotations_get() -> [text]:
     UNSAFE_ANNOTATIONS
 
-fn parser_record_unsafe_annotation(decl_name: text):
-    if PENDING_UNSAFE == 1:
-        UNSAFE_ANNOTATIONS.push(decl_name + "|" + PENDING_UNSAFE_REASON + "|" + PENDING_UNSAFE_CAPS.join(","))
+fn parser_record_unsafe_annotation(decl_idx: i64):
+    if PENDING_UNSAFE == 1 and decl_idx >= 0:
+        UNSAFE_ANNOTATIONS.push("{decl_idx}|" + PENDING_UNSAFE_CAPS.join(",") + "|" + PENDING_UNSAFE_REASON)
+
+fn _unsafe_annotation_entry_for(decl_idx: i64) -> text:
+    val prefix = "{decl_idx}|"
+    for entry in UNSAFE_ANNOTATIONS:
+        if entry.starts_with(prefix):
+            return entry.substring(prefix.len(), entry.len())
+    ""
+
+fn parser_unsafe_annotation_present(decl_idx: i64) -> bool:
+    """True when the decl at `decl_idx` carried a declaration-level `@unsafe`."""
+    val prefix = "{decl_idx}|"
+    for entry in UNSAFE_ANNOTATIONS:
+        if entry.starts_with(prefix):
+            return true
+    false
+
+fn parser_unsafe_annotation_caps(decl_idx: i64) -> [text]:
+    """Capability names from `@unsafe(capabilities: [...])` on that decl."""
+    val rest = _unsafe_annotation_entry_for(decl_idx)
+    val bar = rest.find("|")
+    val caps_text = if bar >= 0: rest.substring(0, bar) else: rest
+    var caps: [text] = []
+    for cap in caps_text.split(","):
+        if cap != "":
+            caps.push(cap)
+    caps
+
+fn parser_unsafe_annotation_reason(decl_idx: i64) -> text:
+    """The `reason:` text from `@unsafe(...)` on that decl ("" when absent)."""
+    val rest = _unsafe_annotation_entry_for(decl_idx)
+    val bar = rest.find("|")
+    if bar < 0:
+        return ""
+    rest.substring(bar + 1, rest.len())
 
 fn parser_reset_pending_unsafe():
     """Clear the pending `@unsafe` slots after they have been attached.
@@ -961,6 +1031,17 @@ fn parser_record_enum_attributes(enum_name: text):
     if PENDING_DECL_ATTRS.len() > 0:
         ENUM_ATTRIBUTES.push(enum_name + "|" + PENDING_DECL_ATTRS.join("|"))
 
+# Class decorators share the ENUM_ATTRIBUTES pool (so the flat parse-cache
+# blob format is unchanged), keyed "class:<name>|...". "class:" cannot begin
+# an enum name, so the two key spaces never collide.
+fn parser_record_class_attributes(class_name: text):
+    if PENDING_DECL_ATTRS.len() > 0:
+        ENUM_ATTRIBUTES.push("class:" + class_name + "|" + PENDING_DECL_ATTRS.join("|"))
+
+fn parser_class_attributes_for(class_name: text) -> [text]:
+    """Raw decorator spellings recorded for class `class_name` in this module."""
+    parser_enum_attributes_for("class:" + class_name)
+
 fn parser_enum_attributes_for(enum_name: text) -> [text]:
     """Raw decorator spellings recorded for `enum_name` in this module."""
     var out: [text] = []
@@ -1135,7 +1216,7 @@ fn parse_module_body():
                     decl_set_clocked_args(visible_decl, PENDING_CLOCKED_ARGS)
                     decl_set_vhdl_generic_args(visible_decl, PENDING_VHDL_GENERIC_ARGS)
                     decl_set_flatten_struct_output(visible_decl, PENDING_FLATTEN_STRUCT_OUTPUT)
-                parser_record_unsafe_annotation(decl_get_name(visible_decl))
+                parser_record_unsafe_annotation(visible_decl)
                 module_add_decl(visible_decl)
                 parser_reset_pending_vhdl_decorators()
             continue
@@ -1170,7 +1251,7 @@ fn parse_module_body():
                 decl_set_clocked_args(d, PENDING_CLOCKED_ARGS)
                 decl_set_vhdl_generic_args(d, PENDING_VHDL_GENERIC_ARGS)
                 decl_set_flatten_struct_output(d, PENDING_FLATTEN_STRUCT_OUTPUT)
-            parser_record_unsafe_annotation(decl_get_name(d))
+            parser_record_unsafe_annotation(d)
             module_add_decl(d)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 34:
@@ -1363,6 +1444,12 @@ fn parse_module_body():
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 6 and par_text_get() == "macro" and current_ident_is_macro_decl():
             parse_macro_decl("private")
+            parser_reset_pending_vhdl_decorators()
+        elif par_kind_get() == 6 and (par_text_get() == "friend" or par_text_get() == "internal_export") and current_ident_is_layer_decl():
+            val access_helper = if par_text_get() == "friend": "__module_friend" else: "__module_internal_export"
+            val access_d = parse_module_access_decl(i, access_helper)
+            if access_d >= 0:
+                module_add_decl(access_d)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 6 and par_text_get() == "layer" and current_ident_is_layer_decl():
             # layer NAME / layer NAME uses A, B ("layer" is a soft keyword,
@@ -2284,7 +2371,7 @@ fn parse_module_body():
 
 # ===== Exports =====
 
-export parse_enum_decl, parse_module_body, parser_enum_attributes_for
+export parse_enum_decl, parse_module_body, parser_enum_attributes_for, parser_class_attributes_for, parser_record_class_attributes
 export parser_enum_open_regions_for
 
 # ===== Bitfield Declaration =====

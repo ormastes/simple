@@ -143,3 +143,8 @@ still FAIL; this is not a full pipeline PASS, cache admission, or production
 object donation. No fourth cycle was run.
 
 Update 2026-10-27: the two sites at `backend_api.spl` (`compile`) and `backend_helpers.spl` (compile_module call) now use a typed `Result<CodegenOutput, CompileError>` local again, tracked under `mir_bare_ok_imported_trait_method_return_2026_10_27`; their phase3 tags were removed. Method sites retained here: six -> four.
+
+
+## Progress 2026-11-06 (hir2 P2 lane)
+
+Re-checked against origin/release/1.0.0: no fix commit for this bug id was found (git log --grep). The defect only shows up in code built natively by the Stage 2/Phase 3 producer. The interpreter-lane HIR specs cannot reproduce it, so a parse_full_frontend + HirLowering spec cannot prove the bug red and then green. No compiler change was made, the workaround tags stay, and the bug stays open until a rebuilt stage3 producer can run the repro.

@@ -39,3 +39,22 @@ fn main() -> i64:
 "#;
     assert_eq!(run(source), 0);
 }
+
+/// Exact shape of `test/fixtures/seed_interp/text_from_bytes_static_repro.spl`:
+/// a `[u8]`-typed local passed to `text.from_bytes` and the result
+/// concatenated. Before `bfe4c8cb879` the call went through the unusable
+/// `text_dot_from_bytes` import and the debug seed died with
+/// `thread 'simple-main' has overflowed its stack` (rc 139).
+/// doc/08_tracking/bug/seed_jit_text_from_bytes_stack_overflow_2026-11-06.md
+#[test]
+fn text_from_bytes_of_typed_u8_local_concatenates() {
+    let source = r#"
+fn main() -> i64:
+    val b: [u8] = [97u8, 98u8, 99u8]
+    val s = "text_from_bytes " + text.from_bytes(b)
+    if s != "text_from_bytes abc":
+        return 1
+    0
+"#;
+    assert_eq!(run(source), 0);
+}

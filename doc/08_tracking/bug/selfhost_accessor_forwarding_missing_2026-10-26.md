@@ -57,3 +57,11 @@ Forwarding happens only when the owner field table lacks the name; a real field 
   (REQ-SELFHOST-ACCESSOR-003): 4/4 green.
 - Still open: non-identifier receivers (`a.b.x = v`), `alias Trait = field` (PR3/4),
   bootstrap flat path mirror.
+
+## Progress 2026-11-06: nested receivers
+- Setter forwarding now probes any pure receiver path (`a`, `a.b`, `a.b.c`) via
+  `accessor_pure_receiver_path` (`hir_lowering/statements.spl`), so
+  `h.inner.celsius = v` lowers to `h.inner.set_celsius(v)`.
+- Spec `accessor_setter_forwarding_spec.spl` 6/6 green; without the fix 5/6.
+- Still open: `alias Trait = field` (PR3/4), bootstrap flat path mirror,
+  receivers with calls/indexing (`f().x = v`, `a[i].x = v`).

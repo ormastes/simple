@@ -20,7 +20,9 @@ val DECLS = "class Temp:\n" +
     "    me set_level(v: i64):\n" +
     "        self.level = v + 1\n" +
     "    me set__hidden(v: i64):\n" +
-    "        self.level = v\n"
+    "        self.level = v\n" +
+    "class Holder:\n" +
+    "    inner: Temp\n"
 
 fn stmt_tag(s: HirStmt) -> text:
     match s.kind:
@@ -33,7 +35,7 @@ fn stmt_tag(s: HirStmt) -> text:
 
 fn probe_first(probe_body: text) -> [text]:
     # Returns [first statement tag, error count, joined diagnostics].
-    val src = DECLS + "\nfn probe(t: Temp) -> i64:\n    " + probe_body + "\n    0\n"
+    val src = DECLS + "\nfn probe(t: Temp, h: Holder) -> i64:\n    " + probe_body + "\n    0\n"
     val parsed = parse_full_frontend(src, "testdata/accessor_set.spl", "accessor_set", Logger(level: 0))
     var lowering = HirLowering.with_filename("testdata/accessor_set.spl")
     val hir = lowering.lower_module(parsed)
@@ -70,3 +72,14 @@ describe "HIR accessor forwarding for field writes":
         step("given set_celsius when writing t.celsius += 1 then lowering reports an error")
         val r = probe_first("t.celsius += 1")
         expect(r[1] == "0").to_equal(false)
+
+    it "forwards a nested receiver h.inner.celsius = v to set_celsius(v)":
+        step("given Holder.inner: Temp when writing h.inner.celsius = 5 then a set_celsius call is lowered")
+        val r = probe_first("h.inner.celsius = 5")
+        expect(r[0]).to_equal("method:set_celsius/1")
+        expect(r[1]).to_equal("0")
+
+    it "keeps a nested real field write as an assignment":
+        step("given Holder.inner.level when writing h.inner.level = 5 then the field is assigned")
+        val r = probe_first("h.inner.level = 5")
+        expect(r[0]).to_equal("assign")

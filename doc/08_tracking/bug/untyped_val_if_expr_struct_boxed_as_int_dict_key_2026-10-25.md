@@ -90,3 +90,10 @@ existing `if_merge_arm_types_spec` 5/5 and `untyped_if_struct_dict_key_spec`
 2/2 on the interpreter). Takes effect only once Phase 3 rebuilds the compiler,
 so the module_build.spl workaround stays until a rebuilt stage3 runs the
 unannotated form natively. Row stays open for that native evidence.
+
+## Progress 2026-11-06
+
+Compiler fix `398e4233163` is on release/1.0.0; bug_db status moved from
+`open` to `fix-implemented-verification-pending`. Removal of the
+module_build.spl workaround still waits on a rebuilt Stage 3 running the
+unannotated form natively.

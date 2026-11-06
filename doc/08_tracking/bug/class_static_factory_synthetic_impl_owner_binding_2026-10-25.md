@@ -44,3 +44,12 @@ retained under static-factory-owner-generics-postpatch-20261025-01. The original
 nested tests remain unchanged and failing; no runtime/SFFI gate was weakened.
 A separate scalar-only diagnostic is additional evidence, never a replacement
 for the original nested factory qualification.
+
+## Progress 2026-11-06
+
+The reviewed patch DID land: PR #4781 (merge `400930cbc9d`) carries the
+`monomorphize_integration.spl` change plus
+`mono_static_factory_synthetic_impl_spec.spl` and
+`mono_static_factory_scalar_diagnostic_spec.spl`. The bug had no bug_db row;
+one was added with status `fix-implemented-verification-pending`. Still
+outstanding: P3/native qualification of the original Future/Poll factories.
