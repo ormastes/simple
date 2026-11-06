@@ -452,3 +452,35 @@ entries and an explicit reason. `api_exposure_walker_v1_spec.spl`,
 `api_export_route_projection_v1_spec.spl`, `api_signature_projection_v1_spec.spl`
 stay collateral; `api_publication_guard_v1_spec.spl` gains the excluded-root
 and (separately) the Unknown-denial case.
+
+### Implemented (2026-11-06, follow-up to the design above)
+
+The code slice landed as designed with two refinements the seed run forced:
+
+- **Scope marker does not block Safe.** The projector publishes
+  `non-callable-and-generated-surfaces-not-collected` for every module
+  unconditionally. It bounds what the verdict claims (callable surface only;
+  types, constants and generated surfaces are still unobserved) and is kept in
+  `unknown_reasons`, but `apply_api_export_closure_v1` does not let it block
+  `Safe`. Every other module-level reason (budgets, malformed facts, binding
+  failures, generic bounds, effects) still does. A `Safe` module verdict is
+  therefore a *callable-surface* verdict.
+- **Unresolved facade spelling is Unknown, not NotExported.** The surface
+  builder creates no origin row for an `export use` it cannot resolve (seen
+  with a directory alias such as `export use pkg.fixture.{hidden}` when the
+  registry carries only `pkg.fixture.__init__`). The closure reads each
+  facade's raw `exports` items by last dotted segment: a facade that spells
+  the callable but has no route for it yields
+  `Unknown("export-origin-unresolved:<facade>")`. Re-export through a middle
+  facade spelled by its facade name (`export use pkg.fixture.__init__.{flag}`)
+  resolves transitively to the terminal and joins; the outer facade becomes
+  the root exporter at chain depth 3.
+
+Unknown denial is active under the explicit flag at a denying profile: every
+unknown root is named in the diagnostics with its reason. The spec lives at
+`test/01_unit/compiler/type_infer/api_export_closure_projection_v1_spec.spl`
+(beside the other E1 specs): RED (ERROR, 0 executed) -> GREEN 5/5 on the seed;
+`api_publication_guard_v1_spec.spl` 7/7 -> 8/8 with the unknown-root case
+intentionally flipped to deny; walker 7/7, route 7/7, signature projection
+7/7 unchanged. The full `compile()` choke point remains verification-pending
+on a self-hosted binary.
