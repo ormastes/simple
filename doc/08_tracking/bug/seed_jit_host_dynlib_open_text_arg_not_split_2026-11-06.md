@@ -72,3 +72,5 @@ Seed built from this branch (`cargo build --release --bin simple`, Windows host)
   `seed_mir_defer_clobbers_implicit_tail_return_2026-11-06.md`.
 - live probe under `SIMPLE_EXECUTION_MODE=interpret`:
   `HTTP_VECTOR_LIVE_SOCKET_PROBE_COMPLETE provider_used=true ...` rc=0
+- after the `defer` fix as well: live probe under JIT prints
+  `HTTP_VECTOR_LIVE_SOCKET_PROBE_COMPLETE provider_used=true ...` rc=0.
