@@ -98,12 +98,12 @@ These stay with their owners or with sibling lanes:
 
 The Stage 2 binary embeds the OLD MIR lowering, so it validates the source fixes
 only; the compiler fix (cause 1) is proven by the spec and takes effect on the next
-Stage 2. `engine.spl` closure: engine.spl itself 145 -> 3 MIR errors; 0 trait-object
+Stage 2. `engine.spl` closure: engine.spl itself 145 -> 1 MIR error; 0 trait-object
 errors remain in the closure. The rest of the closure's errors (opencl_session 46,
 font_renderer 23, cuda_session 20) are cause-1 optional receivers.
 
 Remaining in engine.spl:
-- `cuda.draw_text_bg` -- the `Engine2DExtended for CudaBackend` impl lives in
+- (fixed) `cuda.draw_text_bg` -- the `Engine2DExtended for CudaBackend` impl lives in
   `backend_cuda_ext.spl`, which engine.spl never imported (import added).
 - `vulkan.submit_batch_for_present()` -- `Engine2D.submit_batch_for_present` was added
   in 8a87db7d9eb but `VulkanBackend.submit_batch_for_present` never landed in this
