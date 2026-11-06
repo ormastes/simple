@@ -1,0 +1,122 @@
+"""Dynamic GPU dimensions must not publish MIR that silently selects X."""
+use std.spec.*
+use std.spec.step
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolKind, SymbolTable}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirCallArg}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_types.{MirType, MirSignature}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir._MirLoweringExpr.method_calls_literals.*
+use compiler.driver.driver_mir_error_owner.{driver_mir_error_is_fatal_owned_v1}
+
+fn gpu_dimension_span() -> Span:
+    var span = Span.empty()
+    span.file = "gpu_dimension.spl"
+    span.line = 12
+    span.col = 7
+    span
+
+fn gpu_dimension_argument(value: HirExpr) -> HirCallArg:
+    HirCallArg(has_name: false, name: "", value: value, span: value.span)
+
+fn gpu_dimension_lowering(symbols: SymbolTable, parameters: [MirType]) -> MirLowering:
+    var lowering = MirLowering.new(symbols)
+    var builder = lowering.builder
+    builder.begin_function(SymbolId(id: 100), "dimension_probe",
+        MirSignature(params: parameters, return_type: MirType.unit(), is_variadic: false), Span.empty())
+    lowering.builder = builder
+    lowering
+
+fn gpu_dimension_instruction_name(kind: MirInstKind) -> text:
+    match kind:
+        case GpuGlobalId(_, _): "gpu_global_id"
+        case GpuLocalId(_, _): "gpu_local_id"
+        case GpuBlockId(_, _): "gpu_block_id"
+        case GpuBlockDim(_, _): "gpu_block_dim"
+        case GpuGridDim(_, _): "gpu_grid_dim"
+        case _: ""
+
+fn gpu_dimension_instruction_value(kind: MirInstKind) -> i64:
+    match kind:
+        case GpuGlobalId(_, dimension) | GpuLocalId(_, dimension) | GpuBlockId(_, dimension) | GpuBlockDim(_, dimension) | GpuGridDim(_, dimension): dimension
+        case _: -1
+
+describe "GPU index dimensions fail closed":
+    it "rejects a dynamic HIR parameter through the actual driver fatal gate":
+        step("Lower a GPU global ID whose dimension is a real function parameter")
+        var symbols = SymbolTable.new()
+        val symbol = symbols.define("dimension", SymbolKind.Parameter, HirType.i64(),
+            Span.empty(), Visibility.Private, false, nil)
+        var lowering = gpu_dimension_lowering(symbols, [MirType.i64()])
+        val parameter = lowering.builder.locals[0].id
+        lowering.bind_local(symbol.id, parameter)
+        val dimension = HirExpr(kind: HirExprKind.NamedVar(symbol, "dimension"),
+            has_type_: true, type_: HirType.i64(), span: gpu_dimension_span())
+        lowering.lower_gpu_intrinsic_call("gpu_global_id", [gpu_dimension_argument(dimension)])
+        expect(lowering.errors.len()).to_equal(1)
+        val diagnostic = lowering.errors[0]
+        expect(diagnostic.message).to_equal("GPU thread-index dimension must be a compile-time constant")
+        expect(diagnostic.fatal).to_equal(true)
+        expect(driver_mir_error_is_fatal_owned_v1(diagnostic)).to_equal(true)
+        expect(diagnostic.span.?).to_equal(true)
+        if val span = diagnostic.span:
+            expect(span.file).to_equal("gpu_dimension.spl")
+            expect(span.line).to_equal(12)
+            expect(span.col).to_equal(7)
+
+    it "preserves literal X Y and Z dimensions for every index intrinsic":
+        step("Lower all five GPU index operations at literal dimensions zero one and two")
+        for name in ["gpu_global_id", "gpu_local_id", "gpu_block_id", "gpu_block_dim", "gpu_grid_dim"]:
+            for dimension in [0, 1, 2]:
+                var lowering = gpu_dimension_lowering(SymbolTable.new(), [])
+                val value = HirExpr(kind: HirExprKind.IntLit(dimension, nil),
+                    has_type_: true, type_: HirType.i64(), span: gpu_dimension_span())
+                lowering.lower_gpu_intrinsic_call(name, [gpu_dimension_argument(value)])
+                expect(lowering.errors.len()).to_equal(0)
+                expect(lowering.builder.instructions.len()).to_equal(1)
+                val instruction = lowering.builder.instructions[0]
+                expect(gpu_dimension_instruction_name(instruction.kind)).to_equal(name)
+                expect(gpu_dimension_instruction_value(instruction.kind)).to_equal(dimension)
+
+    it "preserves the omitted dimension default":
+        step("Lower a zero-argument GPU global ID as dimension zero")
+        var lowering = gpu_dimension_lowering(SymbolTable.new(), [])
+        lowering.lower_gpu_intrinsic_call("gpu_global_id", [])
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.builder.instructions.len()).to_equal(1)
+        val instruction = lowering.builder.instructions[0]
+        expect(gpu_dimension_instruction_name(instruction.kind)).to_equal("gpu_global_id")
+        expect(gpu_dimension_instruction_value(instruction.kind)).to_equal(0)
+
+    it "lowers a dimension expression once before rejecting its runtime value":
+        step("Retain dimension-call lowering order while preventing code publication")
+        var symbols = SymbolTable.new()
+        val signature = HirType(kind: HirTypeKind.Function([], HirType.i64(), []), span: Span.empty())
+        val symbol = symbols.define("dimension_effect", SymbolKind.Function, signature,
+            Span.empty(), Visibility.Public, false, nil)
+        var lowering = gpu_dimension_lowering(symbols, [])
+        lowering.current_function_names = ["dimension_effect"]
+        val callee = HirExpr(kind: HirExprKind.NamedVar(symbol, "dimension_effect"),
+            has_type_: true, type_: signature, span: gpu_dimension_span())
+        val dimension = HirExpr(kind: HirExprKind.Call(callee, [], []),
+            has_type_: true, type_: HirType.i64(), span: gpu_dimension_span())
+        lowering.lower_gpu_intrinsic_call("gpu_global_id", [gpu_dimension_argument(dimension)])
+        expect(lowering.errors.len()).to_equal(1)
+        expect(driver_mir_error_is_fatal_owned_v1(lowering.errors[0])).to_equal(true)
+        var calls = 0
+        var call_index = -1
+        var gpu_index = -1
+        var index = 0
+        for instruction in lowering.builder.instructions:
+            match instruction.kind:
+                case Call(_, _, _):
+                    calls = calls + 1
+                    call_index = index
+                case GpuGlobalId(_, _): gpu_index = index
+                case _: ()
+            index = index + 1
+        expect(calls).to_equal(1)
+        expect(call_index).to_be_greater_than(-1)
+        expect(gpu_index).to_be_greater_than(call_index)

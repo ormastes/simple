@@ -409,3 +409,38 @@ immediately afterward with no further gap between edit and commit, per the
 standing shared-WC guidance in `.claude/rules/vcs.md` and this repo's
 memory notes on write-tool/edit clobbering.
 
+## GPU dimension follow-up, 2026-11-06
+
+Source pin: release `fadd88059b3c376d709ef697318c6e609b885062`.
+`lower_gpu_intrinsic_call` in `method_calls_literals.spl` reported a
+non-literal index dimension with `self.error`, then substituted dimension0.
+The driver classifier in `driver_mir_error_owner.spl` does not recognize this
+message as fatal. A dynamic HIR parameter therefore emitted
+`GpuGlobalId(dest, 0)` without a blocking diagnostic. The CUDA backend passes
+that retained dimension directly to `compile_gpu_index`; it cannot recover
+the requested runtime dimension from the discarded expression result.
+
+The same diagnostic now uses `error_fatal` and retains the dimension
+expression's source span. Expression lowering remains in the same position
+and executes once during lowering. The recovery placeholder remains available
+for diagnostic collection, but the existing driver fatal-error gate rejects
+publication. Literal dimensions0/1/2 and the omitted-dimension default0 keep
+their original lowering. The misleading warning print is removed because the
+normal fatal diagnostic owns reporting.
+
+`test/01_unit/compiler/mir/gpu_dimension_fatal_spec.spl` exercises the actual
+lowering owner and driver classifier. Its primary rejection case declares and
+binds a real HIR function parameter. Positive controls cover all five GPU
+index intrinsics at each of dimensions0/1/2 plus the omitted default. A
+call-valued dimension checks that expression lowering emits one call before
+the recovery instruction while still recording a publication-blocking error.
+These are CPU-side compiler tests and require no GPU hardware.
+
+This repair does not implement dynamic-dimension selection or add constant
+expression evaluation. It does not cite `0 + 1` as a dynamic-value reproducer.
+No other diagnostic-family member is closed by this change.
+
+Status: **source repair implemented; executable verification pending**.
+The SSpec, compiler/core/MCP checks and native smoke gates remain unrun until
+a qualified self-hosted producer is available. No seed test is substituted.
+
