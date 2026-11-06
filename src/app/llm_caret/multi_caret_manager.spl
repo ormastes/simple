@@ -4,6 +4,8 @@ use app.llm_caret.agent_plan.{AgentLaunchRequest}
 use app.llm_caret.agent_runtime.{AgentTeamProcess, launch_agent_team_with_all,
     agent_team_status, stop_agent_team, summarize_agent_team}
 use app.llm_caret.agent_tmux.{AgentTmuxEmbed, build_agent_tmux_embed}
+use app.io.process_ops.{OwnedProcessLease}
+use app.llm_caret.owned_agent_process.{owned_agent_lease_live_v1, owned_agent_cleanup_pending_v1}
 
 struct MultiCaretManager:
     manager_id: text
@@ -18,11 +20,11 @@ fn _empty_team(manager_id: text) -> AgentTeamProcess:
 
 fn _leaked_processes(team: AgentTeamProcess) -> i64:
     # A child that was really spawned but whose kill failed is still ALIVE and
-    # unowned. `stop_agent_process` reports that as status "error"; a pid <= 0
-    # was never spawned and is not a leak.
+    # unsettled. Owned mode has no public PID: retained leases and failed
+    # pin-close owners also prevent falsely declaring clean teardown.
     var leaked = 0
     for proc in team.processes:
-        if proc.status == "error" and proc.pid > 0:
+        if proc.status == "error" and (proc.pid > 0 or owned_agent_cleanup_pending_v1(proc.owned_lease, proc.owned_pin)):
             leaked = leaked + 1
     leaked
 
@@ -38,7 +40,7 @@ fn _manager(manager_id: text, status: text, reason: text, capacity: i64,
 pub fn launch_multi_caret_manager(manager_id: text,
         requests: [AgentLaunchRequest], capacity: i64, claude_path: text,
         codex_path: text, gemini_path: text, kimi_path: text,
-        opencode_path: text) -> MultiCaretManager:
+        opencode_path: text, owned_source_sessions: bool = false) -> MultiCaretManager:
     if manager_id == "":
         return _manager(manager_id, "not_started", "manager_id_required",
             capacity, _empty_team(manager_id))
@@ -53,7 +55,8 @@ pub fn launch_multi_caret_manager(manager_id: text,
             capacity, _empty_team(manager_id))
 
     val launched = launch_agent_team_with_all(manager_id, requests,
-        claude_path, codex_path, gemini_path, kimi_path, opencode_path)
+        claude_path, codex_path, gemini_path, kimi_path, opencode_path,
+        owned_source_sessions)
     if launched.status != "started":
         # Fail closed: the parent tears down every child from a partial batch.
         val rolled_back = stop_agent_team(launched)
@@ -119,6 +122,8 @@ struct ManagedAgent:
     status: text
     reason: text
     alive: bool
+    owned_lease: OwnedProcessLease? = nil
+    owner_identity: text = ""
 
 pub fn list_multi_caret_agents(manager: MultiCaretManager) -> [ManagedAgent]:
     # The roster is derived from the parent-owned process table, never from a
@@ -128,9 +133,12 @@ pub fn list_multi_caret_agents(manager: MultiCaretManager) -> [ManagedAgent]:
     # exited -- an "error" status with a live pid is still running.
     var agents: [ManagedAgent] = []
     for proc in manager.team.processes:
-        val alive = proc.pid > 0 and proc.status != "stopped" and proc.status != "exited"
+        var alive = proc.pid > 0 and proc.status != "stopped" and proc.status != "exited"
+        if proc.owned_lease != nil or proc.owner_identity != "":
+            alive = owned_agent_lease_live_v1(proc.owned_lease, proc.owner_identity)
         agents.push(ManagedAgent(agent_id: proc.agent_id, pid: proc.pid,
-            status: proc.status, reason: proc.reason, alive: alive))
+            status: proc.status, reason: proc.reason, alive: alive,
+            owned_lease: proc.owned_lease, owner_identity: proc.owner_identity))
     agents
 
 pub fn render_multi_caret_agents(manager: MultiCaretManager) -> text:

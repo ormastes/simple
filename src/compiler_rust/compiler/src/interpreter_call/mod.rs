@@ -172,6 +172,14 @@ fn overload_score(func: &FunctionDef, values: &[Value]) -> Option<usize> {
         return None;
     }
 
+    // Imported/facade signatures can still contain source type spellings.
+    // Resolve them in the candidate's declaration scope, never the caller's.
+    struct RestoreSignatureOwner(Option<Arc<str>>);
+    impl Drop for RestoreSignatureOwner {
+        fn drop(&mut self) { CURRENT_EXEC_MODULE.with(|cell| *cell.borrow_mut() = self.0.take()); }
+    }
+    let owner = core::function_exec::function_module_owner(func).unwrap_or_else(|| Arc::from("<entry>"));
+    let _signature_owner = RestoreSignatureOwner(CURRENT_EXEC_MODULE.with(|cell| cell.replace(Some(owner))));
     let debug_overloads = debug_overload_select();
     let mut score = 0usize;
     for (param, value) in func.params.iter().zip(values.iter()) {
@@ -522,6 +530,8 @@ pub(crate) fn call_value_as_callable(
     }
 
     match val {
+        Value::EnumVariantConstructor { enum_name, variant_name } =>
+            construct_enum_variant(enum_name, variant_name, args, env, functions, classes, enums, impl_methods).map(Some),
         Value::Function { name: fn_name, def, captured_env } => {
             let mut captured_env_clone = Env::clone(&captured_env);
             // letrec: bind the function under its OWN name before running the body.
@@ -816,7 +826,7 @@ pub(crate) fn evaluate_call(
         // the local closure. Only frame/block locals qualify, so module
         // functions mirrored into the env keep the overload/import selection.
         // Bug: seed_test_typed_fn_local_shadowed_by_global_2026-10-04.
-        if env.is_local(name) && matches!(env.get(name), Some(Value::Function { .. } | Value::Lambda { .. })) {
+        if env.is_local(name) && matches!(env.get(name), Some(Value::Function { .. } | Value::Lambda { .. } | Value::EnumVariantConstructor { .. })) {
             if let Some(val) = env.get(name).cloned() {
                 if let Some(result) = call_value_as_callable(val, args, env, functions, classes, enums, impl_methods)? {
                     return Ok(result);
@@ -1170,7 +1180,7 @@ pub(crate) fn evaluate_call(
             // This handles calls like Result.Ok(42), Option.Some(x), etc.
 
             // Try local enums first, then GLOBAL_ENUMS fallback
-            let enum_def_opt = crate::interpreter::owner_module_enum(module_name).or_else(|| enums.get(module_name).cloned())
+            let enum_def_opt = crate::interpreter::owner_module_enum(module_name).or_else(|| enums.get(module_name).cloned()).or_else(|| crate::interpreter::unique_enum_definition(module_name))
                 .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(module_name).cloned()));
             if std::env::var("SCRATCH_WALL2_TRACE").is_ok() {
                 eprintln!(
@@ -1214,7 +1224,7 @@ pub(crate) fn evaluate_call(
                         &payload,
                     );
                     return Ok(Value::Enum {
-                        enum_name: module_name.clone(),
+                        enum_name: enum_def.name.clone(),
                         variant: field.clone(),
                         payload,
                     });
@@ -1255,7 +1265,7 @@ pub(crate) fn evaluate_call(
                         &payload,
                     );
                     return Ok(Value::Enum {
-                        enum_name: module_name.clone(),
+                        enum_name: enum_def.name.clone(),
                         variant: field.clone(),
                         payload,
                     });
@@ -1381,7 +1391,7 @@ pub(crate) fn evaluate_call(
             }
 
             // Check if it's an enum variant constructor (local enums + GLOBAL_ENUMS fallback)
-            let path_enum_def = crate::interpreter::owner_module_enum(type_name).or_else(|| enums.get(type_name).cloned())
+            let path_enum_def = crate::interpreter::owner_module_enum(type_name).or_else(|| enums.get(type_name).cloned()).or_else(|| crate::interpreter::unique_enum_definition(type_name))
                 .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(type_name).cloned()));
             if let Some(enum_def) = path_enum_def.as_ref() {
                 if enum_def.variants.iter().any(|v| &v.name == method_name) {
@@ -1414,7 +1424,7 @@ pub(crate) fn evaluate_call(
                         &payload,
                     );
                     return Ok(Value::Enum {
-                        enum_name: type_name.clone(),
+                        enum_name: enum_def.name.clone(),
                         variant: method_name.clone(),
                         payload,
                     });
@@ -1702,7 +1712,7 @@ pub(crate) fn evaluate_call(
             }
 
             // Try as enum variant constructor (for user-defined enums + GLOBAL_ENUMS fallback)
-            let tail_enum_def = crate::interpreter::owner_module_enum(type_name.as_str()).or_else(|| enums.get(type_name.as_str()).cloned())
+            let tail_enum_def = crate::interpreter::owner_module_enum(type_name.as_str()).or_else(|| enums.get(type_name.as_str()).cloned()).or_else(|| crate::interpreter::unique_enum_definition(type_name.as_str()))
                 .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(type_name.as_str()).cloned()));
             if let Some(enum_def) = tail_enum_def.as_ref() {
                 if enum_def.variants.iter().any(|v| v.name == *method_name) {
@@ -1735,7 +1745,7 @@ pub(crate) fn evaluate_call(
                         &payload,
                     );
                     return Ok(Value::Enum {
-                        enum_name: type_name.clone(),
+                        enum_name: enum_def.name.clone(),
                         variant: method_name.clone(),
                         payload,
                     });
@@ -1964,36 +1974,8 @@ pub(crate) fn evaluate_call(
         Value::Constructor { class_name } => {
             core::instantiate_class(&class_name, args, env, functions, classes, enums, impl_methods)
         }
-        Value::EnumVariantConstructor {
-            enum_name,
-            variant_name,
-        } => {
-            let enum_def = crate::interpreter::owner_module_enum(&enum_name)
-                .or_else(|| enums.get(&enum_name).cloned())
-                .or_else(|| crate::interpreter::BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(&enum_name).cloned()))
-                .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(&enum_name).cloned()));
-            if let Some(enum_def) = enum_def {
-                validate_enum_variant_arity(&enum_def, &variant_name, args.len())?;
-            }
-            let payload = if args.is_empty() {
-                None
-            } else if args.len() == 1 {
-                let val = evaluate_expr(&args[0].value, env, functions, classes, enums, impl_methods)?;
-                Some(Box::new(val))
-            } else {
-                // Multiple args - wrap in tuple
-                let vals: Result<Vec<Value>, _> = args
-                    .iter()
-                    .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
-                    .collect();
-                Some(Box::new(Value::Tuple(vals?)))
-            };
-            Ok(Value::Enum {
-                enum_name,
-                variant: variant_name,
-                payload,
-            })
-        }
+        Value::EnumVariantConstructor { enum_name, variant_name } =>
+            construct_enum_variant(enum_name, variant_name, args, env, functions, classes, enums, impl_methods),
         Value::Object { ref class, ref fields } => {
             // Support __call__ protocol: objects with __call__ method are callable
             let evaluated_args: Vec<Value> = args
@@ -2213,4 +2195,97 @@ mod local_callable_shadows_import_tests {
         items.extend(Parser::new(entry).parse().expect("parse entry").items);
         assert_eq!(evaluate_module(&items).expect("evaluate"), 3);
     }
+}
+
+#[cfg(test)]
+mod enum_facade_owner_score_tests {
+    use super::*;
+    use simple_parser::{ast::Node, Parser};
+
+    #[test]
+    fn separately_loaded_facade_signature_is_scored_in_its_declaring_scope() {
+        crate::interpreter::clear_module_cache();
+        crate::interpreter::clear_interpreter_state();
+        let root = tempfile::tempdir().unwrap();
+        let a = root.path().join("a.spl");
+        let facade = root.path().join("facade.spl");
+        let b = root.path().join("b.spl");
+        std::fs::write(&a, "enum Mode:\n    Alpha\n    Shared\n\nfn value_a() -> Mode:\n    Mode.Shared\n").unwrap();
+        std::fs::write(&facade, "use a.{Mode}\nfn accept(value: Mode) -> i64:\n    31\n").unwrap();
+        std::fs::write(&b, "enum Mode:\n    Beta\n    Shared\n\nfn value_b() -> Mode:\n    Mode.Shared\n").unwrap();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let mut enums = HashMap::new();
+        let mut facade_function = None;
+        for path in [&a, &facade, &b] {
+            let source = std::fs::read_to_string(path).unwrap();
+            let module = Parser::new(&source).parse().unwrap();
+            let (_, _, local, _, _) = crate::interpreter::interpreter_module::evaluate_module_exports(
+                &module.items, Some(path), &mut functions, &mut classes, &mut enums,
+            ).expect("separate module load");
+            if path == &facade { facade_function = local.get("accept").cloned(); }
+        }
+        let mut env = Env::new();
+        let mut values = Vec::new();
+        for source in ["value_a()\n", "value_b()\n"] {
+            let ast = Parser::new(source).parse().unwrap();
+            let Node::Expression(expr) = &ast.items[0] else { panic!("call expression"); };
+            values.push(evaluate_expr(expr, &mut env, &mut functions, &mut classes, &enums, &HashMap::new()).unwrap());
+        }
+        let caller = Arc::<str>::from(crate::interpreter::normalize_path_key(&b).to_string_lossy().as_ref());
+        struct Restore(Option<Arc<str>>);
+        impl Drop for Restore {
+            fn drop(&mut self) { CURRENT_EXEC_MODULE.with(|cell| *cell.borrow_mut() = self.0.take()); }
+        }
+        let _restore = Restore(CURRENT_EXEC_MODULE.with(|cell| cell.replace(Some(Arc::clone(&caller)))));
+        let candidate = facade_function.expect("facade exports accept");
+        assert!(overload_score(&candidate, &values[..1]).is_some(), "facade's imported A.Mode was rejected in B's caller scope");
+        assert!(overload_score(&candidate, &values[1..]).is_none(), "caller's B.Mode hijacked the facade annotation");
+        assert_eq!(CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone()).as_deref(), Some(caller.as_ref()));
+    }
+}
+
+
+fn construct_enum_variant(
+    enum_name: String, variant_name: String, args: &[Argument], env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>, enums: &Enums, impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+            let enum_def = enums.get(&enum_name).filter(|def| def.name == enum_name).cloned().or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(&enum_name).filter(|def| def.name == enum_name).cloned())).or_else(|| crate::interpreter::owner_module_enum(&enum_name))
+                .or_else(|| enums.get(&enum_name).cloned())
+                .or_else(|| crate::interpreter::BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(&enum_name).cloned()))
+                .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(&enum_name).cloned()));
+            let enum_def = enum_def.filter(|def| def.name == enum_name);
+            if let Some(enum_def) = enum_def {
+                validate_enum_variant_arity(&enum_def, &variant_name, args.len())?;
+            }
+            if matches!(enum_name.as_str(), "Option" | "Result") {
+                let expected = match (enum_name.as_str(), variant_name.as_str()) {
+                    ("Option", "None") => 0,
+                    ("Option", "Some") | ("Result", "Ok" | "Err") => 1,
+                    _ => return Err(CompileError::semantic("unknown canonical enum variant")),
+                };
+                if args.len() != expected {
+                    return Err(CompileError::semantic(format!("enum variant {enum_name}.{variant_name} expects {expected} arguments")));
+                }
+            }
+            let payload = if args.is_empty() {
+                None
+            } else if args.len() == 1 {
+                let val = evaluate_expr(&args[0].value, env, functions, classes, enums, impl_methods)?;
+                Some(Box::new(val))
+            } else {
+                // Multiple args - wrap in tuple
+                let vals: Result<Vec<Value>, _> = args
+                    .iter()
+                    .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                    .collect();
+                Some(Box::new(Value::Tuple(vals?)))
+            };
+            Ok(Value::Enum {
+                enum_name,
+                variant: variant_name,
+                payload,
+            })
+
 }

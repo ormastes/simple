@@ -32,6 +32,10 @@ impl<'a> MirLowerer<'a> {
     pub(super) fn lower_global_expr(&mut self, name: String, expr_ty: TypeId) -> MirLowerResult<VReg> {
         // Check if this is an enum variant (contains ::, ., or sanitized _dot_)
         if let Some((enum_name, variant)) = Self::split_enum_qualified_name(&name) {
+            let resolved_enum_name = self.type_registry.and_then(|types| types.get(expr_ty))
+                .and_then(|ty| match ty { crate::hir::HirType::Enum { name, .. } => Some(name.clone()), _ => None })
+                .unwrap_or_else(|| enum_name.to_owned());
+            let enum_name = resolved_enum_name.as_str();
             // Sanitized enum names from older frontend paths can lose exact variant metadata here.
             let variant_exists = self.is_known_enum_type_for_variant(enum_name, expr_ty);
 

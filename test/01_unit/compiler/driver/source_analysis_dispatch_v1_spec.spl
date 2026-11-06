@@ -1,0 +1,78 @@
+# These exercise compiler observations with an explicit executable digest.
+# They do not attest the loaded image; worker pin/control admission is separate.
+use compiler.driver.driver_build.incremental.{native_build_compiler_executable_hash}
+# Real canonical dispatch; no execution claim until an admitted runtime runs it.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.common.diagnostics.source_analysis_v1.*
+use std.nogc_sync_mut.io_runtime.{cwd_process}
+use compiler.driver.driver_source_analysis_v1.{check_snapshot_set_v1, source_analysis_current_environment_v1}
+
+fn dispatch_snapshot_v1(relative: text, source: text) -> SourceAnalysisRequestV1:
+    val root = cwd_process()
+    val path = root + "/test/fixtures/compiler/source_analysis/" + relative
+    SourceAnalysisRequestV1(run_id: "dispatch", workspace_root: root, workspace_identity: "fixture-workspace",
+        owner_id: "fixture-editor", lifetime_generation: 1, entry_path: path,
+        documents: [SourceAnalysisDocumentV1(path: path, uri: "file://" + path, version: 3,
+            source: source, digest: sha256_text(source))],
+        environment: source_analysis_current_environment_v1("", native_build_compiler_executable_hash()).unwrap(), bounds: SourceAnalysisBoundsV1())
+
+describe "canonical snapshot Check dispatch":
+    it "checks clean overlay instead of syntactically invalid disk":
+        val request = dispatch_snapshot_v1("invalid_disk.spl", "fn value() -> i64: 7\n")
+        val result = check_snapshot_set_v1(request, request.environment.executable_digest)
+        expect(result.parent_validation_required).to_equal(true)
+        expect(result.receipt.status).to_equal(SourceAnalysisStatusV1.Completed)
+        expect(result.receipt.structured_diagnostics_complete).to_equal(true)
+        expect(result.diagnostics.len()).to_equal(0)
+        expect(result.receipt.dependencies[0].digest).to_equal(request.documents[0].digest)
+        expect(result.receipt.dependencies[0].origin).to_equal("overlay")
+
+    it "reports original structured errors from invalid unsaved overlay over valid disk":
+        val request = dispatch_snapshot_v1("valid_disk.spl", "fn broken(\n")
+        val result = check_snapshot_set_v1(request, request.environment.executable_digest)
+        expect(result.parent_validation_required).to_equal(true)
+        expect(result.receipt.status).to_equal(SourceAnalysisStatusV1.Completed)
+        expect(result.diagnostics.len()).to_be_greater_than(0)
+        expect(result.receipt.dependencies[0].digest).to_equal(request.documents[0].digest)
+        expect(result.diagnostics[0].file).to_equal(Some(request.entry_path))
+        expect(result.diagnostics[0].span != nil).to_equal(true)
+
+    it "loads an imported module from unsaved immutable source":
+        var request = dispatch_snapshot_v1("valid_disk.spl", "use overlay_dependency.{value}\nfn main() -> i64: value()\n")
+        val path = request.workspace_root + "/test/fixtures/compiler/source_analysis/overlay_dependency.spl"
+        val source = "fn value() -> i64: 11\n"
+        request.documents.push(SourceAnalysisDocumentV1(path: path, uri: "file://" + path,
+            version: 9, source: source, digest: sha256_text(source)))
+        val result = check_snapshot_set_v1(request, request.environment.executable_digest)
+        expect(result.parent_validation_required).to_equal(true)
+        expect(result.receipt.status).to_equal(SourceAnalysisStatusV1.Completed)
+        var found = false
+        for dependency in result.receipt.dependencies:
+            if dependency.path == path:
+                found = dependency.origin == "overlay" and dependency.document_version == 9 and dependency.digest == sha256_text(source)
+        expect(found).to_equal(true)
+
+    it "rejects a changed semantic environment before compiling":
+        var request = dispatch_snapshot_v1("valid_disk.spl", "fn value() -> i64: 7\n")
+        request.environment.config_digest = sha256_text("other configuration")
+        val result = check_snapshot_set_v1(request, request.environment.executable_digest)
+        expect(result.receipt.status).to_equal(SourceAnalysisStatusV1.Rejected)
+        expect(result.receipt.reason).to_equal("analysis-environment-mismatch")
+        expect(result.receipt.dependencies.len()).to_equal(0)
+
+    it "retains an original parser warning on successful Check":
+        var request = dispatch_snapshot_v1("valid_disk.spl", "fn main():\n    print \"warning\"\n")
+        val path = request.workspace_root + "/src/source_analysis_warning.spl"
+        var document = request.documents[0]
+        document.path = path
+        document.uri = "file://" + path
+        request.entry_path = path
+        request.documents = [document]
+        val result = check_snapshot_set_v1(request, request.environment.executable_digest)
+        expect(result.parent_validation_required).to_equal(true)
+        expect(result.receipt.status).to_equal(SourceAnalysisStatusV1.Completed)
+        var warned = false
+        for diagnostic in result.diagnostics:
+            if diagnostic.code == "LOG001" and diagnostic.file == Some(path): warned = true
+        expect(warned).to_equal(true)

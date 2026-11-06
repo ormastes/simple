@@ -1,0 +1,182 @@
+# Strict internal SDN snapshot worker transport. JSON is only the explicitly
+# named DiagnosticV1 interoperability payload in a response.
+use std.common.diagnostics.source_analysis_v1.*
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.strict_v1.{sdn_parse_strict_v1}
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+use std.common.sdn.encode.{sdn_encode_canonical, sdn_encoded_text_size_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+pub fn source_analysis_wire_text_v1(value: SdnValue, key: text) -> Result<text, text>:
+    match value.get(key):
+        case Some(SdnValue.String(item)): Ok(item)
+        case _: Err("missing or non-text field: " + key)
+
+pub fn source_analysis_wire_int_v1(value: SdnValue, key: text) -> Result<i64, text>:
+    match value.get(key):
+        case Some(SdnValue.Int(item)): Ok(item)
+        case _: Err("missing or non-integer field: " + key)
+
+pub fn source_analysis_wire_array_v1(value: SdnValue, key: text) -> Result<[SdnValue], text>:
+    match value.get(key):
+        case Some(SdnValue.Array(items)): Ok(items)
+        case _: Err("missing or non-array field: " + key)
+
+pub fn source_analysis_wire_parse_v1(wire: text, max_bytes: i64) -> Result<SdnValue, text>:
+    if wire.byte_len() > max_bytes: return Err("snapshot wire exceeds byte limit")
+    val limits = SdnStrictLimitsV1(max_source_bytes: max_bytes, max_depth: 16,
+        max_nodes: 100000, max_rows: 0, max_cells: 0, max_columns: 0)
+    match sdn_parse_strict_v1(wire, limits):
+        case Ok(document): Ok(document.value)
+        case Err(issue): Err("invalid snapshot SDN: " + issue.code)
+
+fn source_analysis_request_metadata_error_v1(request: SourceAnalysisRequestV1) -> text:
+    if not source_analysis_executable_digest_valid_v1(request.environment.executable_digest): return "invalid parent executable digest"
+    for value in [request.run_id, request.workspace_root, request.workspace_identity,
+            request.owner_id, request.entry_path, request.environment.compiler_identity,
+            request.environment.config_digest]:
+        if value.byte_len() > 4096: return "snapshot metadata byte limit"
+    if request.environment.target.byte_len() > 256 or request.environment.features.len() > 256:
+        return "snapshot environment limit"
+    for feature in request.environment.features:
+        if feature.byte_len() > 256: return "snapshot feature byte limit"
+    for document in request.documents:
+        if document.path.byte_len() > 4096 or document.uri.byte_len() > 4096:
+            return "snapshot locator byte limit"
+    ""
+
+fn source_analysis_request_encoded_bound_v1(request: SourceAnalysisRequestV1) -> i64:
+    # Structural names, integer spellings and punctuation have a fixed bound.
+    # Preserve a conservative byte-based floor even on older text profiles
+    # where generic len() used by the shared serializer counts characters.
+    var bound = 4096
+    for value in [request.run_id, request.workspace_root, request.workspace_identity,
+            request.owner_id, request.entry_path, request.environment.compiler_identity,
+            request.environment.config_digest, request.environment.executable_digest, request.environment.target]:
+        bound = bound + value.byte_len() * 2 + 2
+    for feature in request.environment.features: bound = bound + feature.byte_len() * 2 + 4
+    for document in request.documents:
+        bound = bound + 256
+        for value in [document.path, document.uri, document.source, document.digest]:
+            val exact = sdn_encoded_text_size_v1(value)
+            val conservative = value.byte_len() * 2 + 2
+            bound = bound + (if exact > conservative: exact else: conservative)
+    bound
+
+pub fn source_analysis_request_encode_v1(request: SourceAnalysisRequestV1) -> Result<text, text>:
+    if request.documents.len() == 0 or request.documents.len() > 256: return Err("overlay document count limit")
+    val metadata_error = source_analysis_request_metadata_error_v1(request)
+    if metadata_error != "": return Err(metadata_error)
+    var bytes = 0
+    for document in request.documents:
+        bytes = bytes + document.source.byte_len()
+        if document.source.byte_len() > 1048576 or bytes > 16777216:
+            return Err("overlay source byte limit")
+        if sha256_text(document.source) != document.digest: return Err("overlay source digest mismatch")
+    if source_analysis_request_encoded_bound_v1(request) > 41943040:
+        return Err("encoded snapshot preflight exceeds wire byte limit")
+    var documents: [SdnValue] = []
+    for document in request.documents:
+        documents.push(SdnValue.Dict({"path": SdnValue.String(document.path),
+            "uri": SdnValue.String(document.uri), "version": SdnValue.Int(document.version),
+            "source": SdnValue.String(document.source), "digest": SdnValue.String(document.digest)}))
+    var features: [SdnValue] = []
+    for feature in request.environment.features: features.push(SdnValue.String(feature))
+    val environment = SdnValue.Dict({"executable_digest": SdnValue.String(request.environment.executable_digest), "compiler_identity": SdnValue.String(request.environment.compiler_identity),
+        "target": SdnValue.String(request.environment.target), "features": SdnValue.Array(features),
+        "config_digest": SdnValue.String(request.environment.config_digest)})
+    val bounds = SdnValue.Dict({"max_dependency_files": SdnValue.Int(request.bounds.max_dependency_files),
+        "max_dependency_bytes": SdnValue.Int(request.bounds.max_dependency_bytes),
+        "max_dependency_file_bytes": SdnValue.Int(request.bounds.max_dependency_file_bytes),
+        "max_source_reads": SdnValue.Int(request.bounds.max_source_reads),
+        "max_diagnostics": SdnValue.Int(request.bounds.max_diagnostics)})
+    val value = SdnValue.Dict({"schema": SdnValue.String("source-analysis-request-v1"),
+        "run_id": SdnValue.String(request.run_id), "workspace_root": SdnValue.String(request.workspace_root),
+        "workspace_identity": SdnValue.String(request.workspace_identity), "owner_id": SdnValue.String(request.owner_id),
+        "lifetime_generation": SdnValue.Int(request.lifetime_generation), "entry_path": SdnValue.String(request.entry_path),
+        "documents": SdnValue.Array(documents), "environment": environment, "bounds": bounds})
+    val wire = sdn_encode_canonical(value)
+    if wire.byte_len() > 41943040: return Err("encoded snapshot exceeds wire byte limit")
+    Ok(wire)
+
+pub fn source_analysis_request_decode_v1(wire: text) -> Result<SourceAnalysisRequestV1, text>:
+    val value = source_analysis_wire_parse_v1(wire, 41943040)?
+    if source_analysis_wire_text_v1(value, "schema")? != "source-analysis-request-v1":
+        return Err("wrong snapshot request schema")
+    val rows = source_analysis_wire_array_v1(value, "documents")?
+    if rows.len() == 0 or rows.len() > 256: return Err("overlay document count limit")
+    var documents: [SourceAnalysisDocumentV1] = []
+    var paths: [text] = []
+    var uris: [text] = []
+    var bytes = 0
+    for row in rows:
+        val path = source_analysis_wire_text_v1(row, "path")?
+        val uri = source_analysis_wire_text_v1(row, "uri")?
+        val source = source_analysis_wire_text_v1(row, "source")?
+        val digest = source_analysis_wire_text_v1(row, "digest")?
+        if path == "" or uri == "" or path.byte_len() > 4096 or uri.byte_len() > 4096:
+            return Err("invalid overlay locator")
+        if paths.contains(path) or uris.contains(uri): return Err("duplicate overlay locator")
+        paths.push(path)
+        uris.push(uri)
+        bytes = bytes + source.byte_len()
+        if source.byte_len() > 1048576 or bytes > 16777216: return Err("overlay source byte limit")
+        if digest != sha256_text(source): return Err("overlay source digest mismatch")
+        documents.push(SourceAnalysisDocumentV1(path: path, uri: uri,
+            version: source_analysis_wire_int_v1(row, "version")?, source: source, digest: digest))
+    val environment = value.get("environment") ?? SdnValue.Null
+    val feature_rows = source_analysis_wire_array_v1(environment, "features")?
+    if feature_rows.len() > 256: return Err("feature count limit")
+    var features: [text] = []
+    for feature in feature_rows:
+        match feature:
+            case SdnValue.String(item): features.push(item)
+            case _: return Err("non-text feature")
+    val bounds = value.get("bounds") ?? SdnValue.Null
+    val request = SourceAnalysisRequestV1(run_id: source_analysis_wire_text_v1(value, "run_id")?,
+        workspace_root: source_analysis_wire_text_v1(value, "workspace_root")?,
+        workspace_identity: source_analysis_wire_text_v1(value, "workspace_identity")?,
+        owner_id: source_analysis_wire_text_v1(value, "owner_id")?,
+        lifetime_generation: source_analysis_wire_int_v1(value, "lifetime_generation")?,
+        entry_path: source_analysis_wire_text_v1(value, "entry_path")?, documents: documents,
+        environment: SourceAnalysisEnvironmentV1(
+            executable_digest: source_analysis_wire_text_v1(environment, "executable_digest")?,
+            compiler_identity: source_analysis_wire_text_v1(environment, "compiler_identity")?,
+            target: source_analysis_wire_text_v1(environment, "target")?, features: features,
+            config_digest: source_analysis_wire_text_v1(environment, "config_digest")?),
+        bounds: SourceAnalysisBoundsV1(
+            max_dependency_files: source_analysis_wire_int_v1(bounds, "max_dependency_files")?,
+            max_dependency_bytes: source_analysis_wire_int_v1(bounds, "max_dependency_bytes")?,
+            max_dependency_file_bytes: source_analysis_wire_int_v1(bounds, "max_dependency_file_bytes")?,
+            max_source_reads: source_analysis_wire_int_v1(bounds, "max_source_reads")?,
+            max_diagnostics: source_analysis_wire_int_v1(bounds, "max_diagnostics")?))
+    val metadata_error = source_analysis_request_metadata_error_v1(request)
+    if metadata_error != "": return Err(metadata_error)
+    if not paths.contains(request.entry_path): return Err("entry missing from overlay set")
+    Ok(request)
+
+export source_analysis_wire_text_v1, source_analysis_wire_int_v1, source_analysis_wire_array_v1
+export source_analysis_wire_parse_v1, source_analysis_request_encode_v1, source_analysis_request_decode_v1
+
+pub fn source_analysis_environment_decode_v1(wire: text) -> Result<SourceAnalysisEnvironmentV1, text>:
+    val value = source_analysis_wire_parse_v1(wire, 65536)?
+    if source_analysis_wire_text_v1(value, "schema")? != "source-analysis-environment-v1":
+        return Err("wrong environment schema")
+    val row = value.get("environment") ?? SdnValue.Null
+    var features: [text] = []
+    val rows = source_analysis_wire_array_v1(row, "features")?
+    if rows.len() > 256: return Err("environment feature limit")
+    for feature in rows:
+        match feature:
+            case SdnValue.String(item): features.push(item)
+            case _: return Err("invalid environment feature")
+    val executable_digest = source_analysis_wire_text_v1(row, "executable_digest")?
+    if not source_analysis_executable_digest_valid_v1(executable_digest): return Err("invalid parent executable digest")
+    val compiler_identity = source_analysis_wire_text_v1(row, "compiler_identity")?
+    val config_digest = source_analysis_wire_text_v1(row, "config_digest")?
+    if compiler_identity.byte_len() != 64 or config_digest.byte_len() != 64:
+        return Err("invalid environment identity")
+    Ok(SourceAnalysisEnvironmentV1(executable_digest: executable_digest, compiler_identity: compiler_identity,
+        target: source_analysis_wire_text_v1(row, "target")?, features: features, config_digest: config_digest))
+
+export source_analysis_environment_decode_v1

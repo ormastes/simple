@@ -1,0 +1,181 @@
+# Parent-owned provider processes for authenticated source sessions.
+# The opaque lease is authority; an OS PID is never reconstructed or trusted.
+use app.io.process_ops.{OwnedExecutablePin, OwnedProcessLease, OwnedProcessResult}
+use app.io.file_ops.{path_absolute}
+use std.nogc_sync_mut.sosix.entropy.{sosix_random_hex}
+
+pub struct OwnedAgentStateV1:
+    status: text
+    reason: text
+    lease: OwnedProcessLease?
+    pin: OwnedExecutablePin?
+    owner_identity: text
+
+fn owned_agent_state_v1(status: text, reason: text,
+        lease: OwnedProcessLease?, pin: OwnedExecutablePin?, identity: text) -> OwnedAgentStateV1:
+    OwnedAgentStateV1(status: status, reason: reason, lease: lease,
+        pin: pin, owner_identity: identity)
+
+pub fn owned_agent_launch_reason_v1(command: text, args: [text]) -> text:
+    if command == "" or command.byte_len() > 4096 or command.contains("\u0000"):
+        return "owned_provider_path_required"
+    # The canonical host path owner handles platform spelling. No PATH or
+    # shell fallback may select a different executable after configuration.
+    if path_absolute(command) != command:
+        return "owned_provider_absolute_path_required"
+    if args.len() > 128: return "owned_provider_argument_count_exceeded"
+    var bytes: i64 = 0
+    for argument in args:
+        if argument.contains("\u0000"): return "owned_provider_argument_contains_nul"
+        if argument.byte_len() > 65536 - bytes:
+            return "owned_provider_argument_bytes_exceeded"
+        bytes = bytes + argument.byte_len()
+    ""
+
+pub fn owned_agent_lease_live_v1(lease: OwnedProcessLease?, owner_identity: text) -> bool:
+    if lease == nil or owner_identity == "": return false
+    val owner = lease.unwrap()
+    val observed = owner.poll(0, 0, 0)
+    if observed.is_err(): return false
+    val facts = observed.unwrap()
+    (facts.runtime_error == 0 and facts.live and not facts.terminal and
+        not facts.reaped and not facts.timed_out and not facts.cancel_requested)
+
+fn owned_agent_close_pin_v1(state: OwnedAgentStateV1) -> OwnedAgentStateV1:
+    if state.pin == nil: return state
+    var pin = state.pin.unwrap()
+    val closed = pin.close()
+    if closed.is_err() or not closed.unwrap():
+        return owned_agent_state_v1("error", state.reason + ":owned_executable_close_failed",
+            state.lease, Some(pin), state.owner_identity)
+    owned_agent_state_v1(state.status, state.reason, state.lease, nil,
+        state.owner_identity)
+
+# Mirrors OwnedProcessLease.collect's canonical handle-consumption rule.
+pub fn owned_agent_collection_consumed_v1(reaped: bool, runtime_error: i64) -> bool:
+    reaped and runtime_error != 11 and runtime_error != 16
+
+pub fn owned_agent_cleanup_pending_v1(lease: OwnedProcessLease?, pin: OwnedExecutablePin?) -> bool:
+    lease != nil or pin != nil
+
+# Receipts are accepted only after the canonical collect call has updated its
+# owner. This transition is also directly testable without forging a live lease.
+pub fn owned_agent_collection_result_v1(state: OwnedAgentStateV1,
+        result: OwnedProcessResult, stopped: bool) -> OwnedAgentStateV1:
+    if not owned_agent_collection_consumed_v1(result.reaped, result.runtime_error):
+        return owned_agent_state_v1("error", "owned_process_not_collected:" + result.runtime_error.to_text(),
+            state.lease, state.pin, state.owner_identity)
+    if result.runtime_error != 0:
+        return owned_agent_close_pin_v1(owned_agent_state_v1("error",
+            "owned_process_collected_error:" + result.runtime_error.to_text(),
+            nil, state.pin, state.owner_identity))
+    val status = if stopped: "stopped" else: "not_running"
+    val reason = if stopped: "owned_process_stopped" else: "owned_process_exited:" + result.exit_code.to_text()
+    owned_agent_close_pin_v1(owned_agent_state_v1(status, reason, nil,
+        state.pin, state.owner_identity))
+
+fn owned_agent_collect_v1(state: OwnedAgentStateV1, stopped: bool) -> OwnedAgentStateV1:
+    if state.lease == nil: return owned_agent_close_pin_v1(state)
+    var lease = state.lease.unwrap()
+    val collected = lease.collect()
+    if collected.is_err():
+        return owned_agent_state_v1("error", "owned_process_collect_failed",
+            Some(lease), state.pin, state.owner_identity)
+    val current = owned_agent_state_v1(state.status, state.reason, Some(lease),
+        state.pin, state.owner_identity)
+    owned_agent_collection_result_v1(current, collected.unwrap(), stopped)
+
+pub fn owned_agent_stop_v1(state: OwnedAgentStateV1) -> OwnedAgentStateV1:
+    if state.lease == nil:
+        if state.status == "error": return owned_agent_close_pin_v1(state)
+        return owned_agent_close_pin_v1(owned_agent_state_v1("stopped",
+            "owned_process_already_terminal", nil, state.pin, state.owner_identity))
+    val lease = state.lease.unwrap()
+    val before = lease.poll(0, 0, 0)
+    if before.is_ok():
+        val facts = before.unwrap()
+        if facts.runtime_error == 0 and facts.terminal and facts.reaped:
+            return owned_agent_collect_v1(state, true)
+    val cancelled = lease.cancel()
+    if cancelled.is_err():
+        return owned_agent_state_v1("error", "owned_process_cancel_failed",
+            state.lease, state.pin, state.owner_identity)
+    val receipt = cancelled.unwrap()
+    if not receipt.accepted or receipt.runtime_error != 0:
+        return owned_agent_state_v1("error", "owned_process_cancel_rejected",
+            state.lease, state.pin, state.owner_identity)
+    # One finite cleanup attempt: the native owner escalates after its 250ms
+    # grace. A missing terminal receipt never becomes a clean rollback.
+    var count = 0
+    while count < 20:
+        val observed = lease.poll(100, 0, 0)
+        if observed.is_err():
+            return owned_agent_state_v1("error", "owned_process_cleanup_poll_failed",
+                state.lease, state.pin, state.owner_identity)
+        val facts = observed.unwrap()
+        if facts.runtime_error != 0:
+            return owned_agent_state_v1("error", "owned_process_cleanup_runtime_error",
+                state.lease, state.pin, state.owner_identity)
+        if facts.terminal and facts.reaped: return owned_agent_collect_v1(state, true)
+        count = count + 1
+    owned_agent_state_v1("error", "owned_process_cleanup_deadline",
+        state.lease, state.pin, state.owner_identity)
+
+pub fn owned_agent_poll_v1(state: OwnedAgentStateV1) -> OwnedAgentStateV1:
+    if state.lease == nil: return owned_agent_close_pin_v1(state)
+    if state.owner_identity == "":
+        # A spawned child whose identity could not be admitted is cleanup
+        # work, never a running authorized agent on a later poll.
+        return owned_agent_stop_v1(state)
+    val lease = state.lease.unwrap()
+    val observed = lease.poll(0, 0, 0)
+    if observed.is_err():
+        return owned_agent_state_v1("error", "owned_process_poll_failed",
+            state.lease, state.pin, state.owner_identity)
+    val facts = observed.unwrap()
+    if facts.runtime_error != 0:
+        return owned_agent_state_v1("error", "owned_process_runtime_error",
+            state.lease, state.pin, state.owner_identity)
+    if facts.terminal and facts.reaped: return owned_agent_collect_v1(state, false)
+    if facts.live and not facts.cancel_requested and not facts.timed_out:
+        return owned_agent_state_v1("running", "owned_process_running",
+            state.lease, state.pin, state.owner_identity)
+    owned_agent_state_v1("stopping", "owned_process_cleanup_pending",
+        state.lease, state.pin, state.owner_identity)
+
+pub fn owned_agent_start_v1(command: text, args: [text]) -> OwnedAgentStateV1:
+    val denied = owned_agent_launch_reason_v1(command, args)
+    if denied != "": return owned_agent_state_v1("error", denied, nil, nil, "")
+    val pinned = OwnedExecutablePin.pin(command)
+    if pinned.is_err(): return owned_agent_state_v1("error", "owned_provider_pin_failed", nil, nil, "")
+    val pin = pinned.unwrap()
+    val digest = pin.digest()
+    if digest.is_err():
+        return owned_agent_close_pin_v1(owned_agent_state_v1("error",
+            "owned_provider_digest_failed", nil, Some(pin), ""))
+    val digest_bytes = digest.unwrap()
+    if digest_bytes.len() != 32:
+        return owned_agent_close_pin_v1(owned_agent_state_v1("error",
+            "owned_provider_digest_failed", nil, Some(pin), ""))
+    # AgentLaunchPlan already supplies its prompt and provider mode in argv.
+    # This explicit mode uses closed empty stdin and bounded capture, never a
+    # hidden interactive terminal, replacement shell, or message injection.
+    val started = pin.start(args, [], 3600000, 250, 4194304)
+    if started.is_err():
+        return owned_agent_close_pin_v1(owned_agent_state_v1("error",
+            "owned_provider_spawn_failed", nil, Some(pin), ""))
+    val receipt = started.unwrap()
+    val lease = receipt.lease()
+    if not receipt.accepted or receipt.runtime_error != 0:
+        val cleanup = owned_agent_stop_v1(owned_agent_state_v1("error",
+            "owned_provider_receipt_failed", Some(lease), Some(pin), ""))
+        return owned_agent_state_v1("error", "owned_provider_receipt_failed:" + receipt.runtime_error.to_text() + ":" + cleanup.reason,
+            cleanup.lease, cleanup.pin, "")
+    val entropy = sosix_random_hex(32)
+    if entropy == nil:
+        val cleanup = owned_agent_stop_v1(owned_agent_state_v1("error",
+            "owned_identity_entropy_failed", Some(lease), Some(pin), ""))
+        return owned_agent_state_v1("error", "owned_identity_entropy_failed:" + cleanup.reason,
+            cleanup.lease, cleanup.pin, "")
+    owned_agent_state_v1("started", "owned_process_spawned", Some(lease),
+        Some(pin), entropy.unwrap())

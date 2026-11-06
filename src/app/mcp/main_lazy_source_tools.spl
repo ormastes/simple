@@ -1,0 +1,45 @@
+# Thin MCP envelope adapter for the shared application source-view service.
+# This module remains loaded only by the request-family dispatcher.
+use .main_lazy_json.{make_tool_result_status, make_error}
+use std.common.json.value.{JsonValue, json_parse_value_strict}
+use std.common.source.contracts.{SourceViewSessionV1}
+use std.common.source.service_contracts.{SourceOpenResultV1}
+use app.source_view.service.{source_open_result_v1, source_open_bound_result_v1}
+export use app.source_view.service.{source_relative_path_valid_v1, source_projection_payload_v1}
+
+pub fn source_rpc_id_valid_v1(id: text) -> bool:
+    if id.byte_len() > 128: return false
+    match json_parse_value_strict(id):
+        Ok(value):
+            match value:
+                JsonValue.Null: true
+                JsonValue.Str(_): true
+                JsonValue.Int(_): true
+                JsonValue.Float(_): true
+                _: false
+        Err(_): false
+
+fn source_rpc_id_error_v1() -> text:
+    make_error("null", -32600, "Invalid or oversized source request id")
+
+fn source_wrap_result_v1(id: text, result: SourceOpenResultV1) -> text:
+    if not source_rpc_id_valid_v1(id): return source_rpc_id_error_v1()
+    val response = make_tool_result_status(id, result.payload, result.is_error)
+    if response.byte_len() > 16384:
+        # ID has already passed a 128-byte scalar admission, so this fallback
+        # error is bounded as well; never echo the oversized payload.
+        return make_tool_result_status(id, "serialized_response_exceeds_budget; reduce max_bytes or max_nodes", true)
+    response
+
+pub fn source_bounded_response_v1(id: text, payload: text) -> text:
+    source_wrap_result_v1(id, SourceOpenResultV1(payload, false))
+
+pub fn handle_source_open(id: text, body: text) -> text:
+    if not source_rpc_id_valid_v1(id): return source_rpc_id_error_v1()
+    source_wrap_result_v1(id, source_open_result_v1(body))
+
+# Compatibility adapter; authenticated HTTP uses the shared typed service
+# directly and owns the atomic success/first-help commit, not this envelope.
+pub fn handle_source_open_bound_v1(id: text, body: text, session: SourceViewSessionV1, workspace_root: text) -> text:
+    if not source_rpc_id_valid_v1(id): return source_rpc_id_error_v1()
+    source_wrap_result_v1(id, source_open_bound_result_v1(body, session, workspace_root))

@@ -1,0 +1,49 @@
+# Producer-side DiagnosticV1 conversion. This consumes original typed errors,
+# never the legacy formatted log envelope, and retains no HIR/type roots.
+use compiler.types.type_infer_types.{TypeInferError}
+use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1}
+use compiler.common.diagnostics.severity.{Severity}
+use compiler.common.diagnostics.span.{Span}
+
+pub fn type_diagnostic_location_v1(diagnostic: DiagnosticV1, path: text,
+        span: Span) -> DiagnosticV1:
+    var result = diagnostic
+    result.file = if span.file != "": Some(span.file) else: if path != "": Some(path) else: nil
+    if span.line > 0 and span.col > 0: result.span = Some(span)
+    result
+
+pub fn type_infer_diagnostic_v1(error: TypeInferError, path: text,
+        severity: Severity) -> DiagnosticV1:
+    var code = "E-TYPE-OTHER"
+    match error:
+        case TypeInferError.Mismatch(_, _, _): code = "E-TYPE-MISMATCH"
+        case TypeInferError.OccursCheck(_, _, _): code = "E-TYPE-OCCURS-CHECK"
+        case TypeInferError.Undefined(_, _): code = "E-TYPE-UNDEFINED"
+        case TypeInferError.TraitNotImplemented(_, _, _): code = "E-TYPE-TRAIT-NOT-IMPLEMENTED"
+        case TypeInferError.DimensionError(dimension): code = dimension.error_code
+        case _: pass
+    var diagnostic = type_diagnostic_location_v1(DiagnosticV1.new(severity, code, error.message()), path, error.span())
+    match error:
+        case TypeInferError.Mismatch(expected, found, at):
+            if expected.span.line > 0:
+                diagnostic = diagnostic.with_secondary_label(expected.span.file, expected.span, "expected type defined here")
+            if found.span.line > 0 and (found.span.file != at.file or found.span.start != at.start):
+                diagnostic = diagnostic.with_secondary_label(found.span.file, found.span, "found type originates here")
+        case TypeInferError.OccursCheck(_, ty, _):
+            if ty.span.line > 0:
+                diagnostic = diagnostic.with_secondary_label(ty.span.file, ty.span, "recursive type reference here")
+            diagnostic = diagnostic.with_help("break the recursive type by using an explicit type annotation")
+        case TypeInferError.TraitNotImplemented(ty, trait_name, _):
+            if ty.span.line > 0:
+                diagnostic = diagnostic.with_secondary_label(ty.span.file, ty.span, "type that needs to implement '" + trait_name + "'")
+            diagnostic = diagnostic.with_help("add an impl block: impl {trait_name} for {ty.kind}")
+        case TypeInferError.DimensionError(dimension):
+            for note in dimension.notes:
+                diagnostic = diagnostic.with_note(note.message)
+                if val at = note.span:
+                    diagnostic = diagnostic.with_secondary_label(at.file, at, note.message)
+            if val help = dimension.help: diagnostic = diagnostic.with_help(help)
+        case TypeInferError.Undefined(name, _):
+            diagnostic = diagnostic.with_help("check spelling or add an import for '" + name + "'")
+        case _: pass
+    diagnostic

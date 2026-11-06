@@ -1,0 +1,325 @@
+# One LSP-owned process lease. The LSP scheduler owns one replaceable latest
+# request; it must retain this owner until cleanup_pending() is false.
+# Boundary input/output are bounded encoded copies, never shared source state.
+use std.common.diagnostics.source_analysis_v1.{SourceAnalysisRequestV1}
+use std.common.diagnostics.source_analysis_launch_v1.{source_analysis_pin_digest_hex_v1, source_analysis_launch_response_error_v1}
+use std.common.diagnostics.source_analysis_wire_v1.{source_analysis_request_encode_v1, source_analysis_environment_decode_v1}
+use std.common.process.observation_v4.*
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.binary_inspect.{hex_to_bytes}
+use std.common.encoding.external_text.{utf8_format}
+use std.nogc_sync_mut.io.external_text_io.{io_text_encode}
+use std.nogc_sync_mut.lsp.lsp_analysis_worker_artifact.{SourceAnalysisArtifactV1, source_analysis_artifact_create_v1}
+use std.nogc_sync_mut.lsp.lsp_analysis_receipt.{lsp_analysis_response_decode_v1, lsp_analysis_receipt_identity_matches_v1}
+use std.nogc_sync_mut.io.process_inspection_v1.{
+    OwnedExecutablePin, OwnedCwdPinV4, ProcessInspectionLeaseV1,
+    process_inspection_start_pinned_v1}
+use std.nogc_sync_mut.io.process_observation_v4.{process_observation_capabilities_v4}
+use std.nogc_sync_mut.env.variables.{env_list_checked}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+
+pub struct SourceAnalysisWorkerEventV1:
+    status: text
+    reason: text
+    wire: text
+    run_id: text
+    cleanup_pending: bool
+
+pub struct SourceAnalysisWorkerV1:
+    run_id: text
+    executable_digest: text
+    lease: ProcessInspectionLeaseV1?
+    executable: OwnedExecutablePin?
+    directory: OwnedCwdPinV4?
+    status: text
+    reason: text
+    wire: text
+    cancelled: bool
+    max_wait_ms: i64
+    artifact: SourceAnalysisArtifactV1?
+    request: SourceAnalysisRequestV1?
+    target: text
+
+# Pure classification is deliberately separate from success certification.
+# A zero exit code alone never authorizes publication.
+pub fn source_analysis_worker_failure_v1(packet: ProcessObservationPacketV4) -> text:
+    if packet.failure_reason == ProcessObservationFailureReasonV4.ExecutionDeadline:
+        return "timed_out"
+    if packet.failure_reason == ProcessObservationFailureReasonV4.CleanupDeadline:
+        return "cleanup_failed"
+    if packet.stdout.seen_bytes != packet.stdout.retained_bytes or packet.stderr.seen_bytes != packet.stderr.retained_bytes:
+        return "truncated"
+    if packet.exec_state == ProcessObservationExecStateV4.Failed or packet.status == ProcessObservationStatusV4.Rejected:
+        return "spawn_failed"
+    if packet.exit_code != 0 or packet.signal_number != 0:
+        return "exit_failed"
+    if packet.failure_phase != ProcessObservationFailurePhaseV4.Unknown or packet.errno_value != 0:
+        return "cleanup_failed"
+    ""
+
+impl SourceAnalysisWorkerV1:
+    fn cleanup_pending() -> bool:
+        self.lease != nil or self.executable != nil or self.directory != nil or self.artifact != nil
+
+    fn cleanup_error_identity() -> text:
+        # No bearer, environment values, process handles or source bytes.
+        "run=" + self.run_id + ";status=" + self.status + ";reason=" + self.reason +
+            ";lease=" + (self.lease != nil).to_text() +
+            ";executable_pin=" + (self.executable != nil).to_text() +
+            ";workspace_pin=" + (self.directory != nil).to_text() +
+            ";artifact=" + (self.artifact != nil).to_text()
+
+    fn event() -> SourceAnalysisWorkerEventV1:
+        # Do not release even a valid payload until the native ticket is acked
+        # and both retained pins are closed. Retry errors keep the owner alive.
+        val payload = if self.cleanup_pending(): "" else: self.wire
+        SourceAnalysisWorkerEventV1(status: self.status, reason: self.reason,
+            wire: payload, run_id: self.run_id, cleanup_pending: self.cleanup_pending())
+
+    me close_pins():
+        if self.lease != nil: return
+        if self.artifact != nil:
+            var artifact = self.artifact.unwrap()
+            if artifact.cleanup(): self.artifact = nil
+            else:
+                self.artifact = Some(artifact)
+                self.status = "cleanup_failed"
+                self.reason = artifact.error
+                return
+        if self.directory != nil:
+            var directory = self.directory.unwrap()
+            val closed = directory.close()
+            if closed.is_ok() and closed.unwrap(): self.directory = nil
+            else:
+                self.status = "cleanup_failed"
+                self.reason = "workspace_pin_close_failed"
+        if self.executable != nil:
+            var executable = self.executable.unwrap()
+            val closed = executable.close()
+            if closed.is_ok() and closed.unwrap(): self.executable = nil
+            else:
+                self.status = "cleanup_failed"
+                self.reason = "executable_pin_close_failed"
+
+    me tick(wait_ms: i64) -> SourceAnalysisWorkerEventV1:
+        if self.lease == nil:
+            self.close_pins()
+            return self.event()
+        var wait = wait_ms
+        if wait < 0: wait = 0
+        if wait > self.max_wait_ms: wait = self.max_wait_ms
+        var lease = self.lease.unwrap()
+        val observed = lease.collect_observation(wait * 1000000)
+        if observed.is_err():
+            self.status = "cleanup_failed"
+            self.reason = "observation_failed:" + observed.unwrap_err()
+            val cancellation = lease.cancel(0)
+            self.lease = Some(lease)
+            return self.event()
+        val receipt = observed.unwrap()
+        val kind = receipt.packet.packet_kind
+        if kind != ProcessObservationPacketKindV4.Frozen and kind != ProcessObservationPacketKindV4.CleanupFrozen:
+            self.lease = Some(lease)
+            return self.event()
+        if self.cancelled and (kind == ProcessObservationPacketKindV4.CleanupFrozen or
+                receipt.packet.failure_reason == ProcessObservationFailureReasonV4.CleanupDeadline):
+            self.status = "cleanup_failed"
+            self.reason = "cancel_cleanup_incomplete"
+        elif self.cancelled:
+            self.status = "cancelled"
+            self.reason = "owner_cancelled"
+        elif self.status == "pending":
+            val failure = source_analysis_worker_failure_v1(receipt.packet)
+            if failure != "":
+                self.status = failure
+                self.reason = failure
+            elif kind == ProcessObservationPacketKindV4.CleanupFrozen:
+                self.status = "cleanup_failed"
+                self.reason = "cleanup_only_receipt"
+            else:
+                # This checks retained ticket identity, complete stdin, exact
+                # streams, successful exit and requested descendant retirement.
+                val certified = lease.terminal_capture(0)
+                if certified.is_err():
+                    self.status = "invalid_payload"
+                    self.reason = "terminal_capture_rejected:" + certified.unwrap_err()
+                elif certified.unwrap() == nil:
+                    self.status = "invalid_payload"
+                    self.reason = "terminal_capture_not_frozen"
+                else:
+                    # stdout/stderr are bounded logs ONLY. The response is one
+                    # atomic private artifact, read after complete retirement.
+                    self.accept_artifact()
+        val acknowledged = lease.acknowledge_current()
+        if acknowledged.is_err():
+            self.status = "cleanup_failed"
+            self.reason = "acknowledgement_failed:" + acknowledged.unwrap_err()
+            self.wire = ""
+            self.lease = Some(lease)
+            return self.event()
+        self.lease = nil
+        self.close_pins()
+        self.event()
+
+    me accept_artifact():
+        self.status = "invalid_payload"
+        self.reason = "response_artifact_missing"
+        if self.artifact == nil: return
+        var artifact = self.artifact.unwrap()
+        val read = artifact.read_leaf("response.sdn", 4194304)
+        self.artifact = Some(artifact)
+        if read.is_err():
+            self.reason = read.unwrap_err()
+            return
+        val wire = read.unwrap()
+        # This field was read from the SAME OwnedExecutablePin passed to the
+        # native launch owner, not from SIMPLE_BINARY or child self-report.
+        val launch_error = source_analysis_launch_response_error_v1(wire, artifact.control,
+            self.executable_digest, self.run_id)
+        if launch_error != "":
+            self.reason = launch_error
+            return
+        if self.request != nil:
+            if self.request.unwrap().environment.executable_digest != self.executable_digest:
+                self.reason = "analysis_request_launch_digest_mismatch"
+                return
+            val response = lsp_analysis_response_decode_v1(wire)
+            if response.is_err():
+                self.reason = response.unwrap_err()
+                return
+            if not lsp_analysis_receipt_identity_matches_v1(self.request.unwrap(), response.unwrap().receipt):
+                self.reason = "response_artifact_identity_mismatch"
+                return
+        else:
+            val environment = source_analysis_environment_decode_v1(wire)
+            if environment.is_err() or environment.unwrap().target != self.target or environment.unwrap().executable_digest != self.executable_digest:
+                self.reason = "environment_artifact_identity_mismatch"
+                return
+        self.wire = wire
+        self.status = "completed"
+        self.reason = "complete_artifact"
+
+    me cancel() -> SourceAnalysisWorkerEventV1:
+        self.cancelled = true
+        self.wire = ""
+        self.status = "cancelled"
+        self.reason = "owner_cancelled"
+        if self.lease != nil:
+            var lease = self.lease.unwrap()
+            val cancelled = lease.cancel(0)
+            if cancelled.is_err():
+                self.status = "cleanup_failed"
+                self.reason = "cancel_failed:" + cancelled.unwrap_err()
+            self.lease = Some(lease)
+        self.tick(0)
+
+fn source_analysis_worker_launch_v1(binary: text, root: text, args: [text],
+        input_text: text, run_id: text, timeout_ms: i64, snapshot: SourceAnalysisRequestV1?, target: text) -> Result<SourceAnalysisWorkerV1, text>:
+    if timeout_ms < 1 or timeout_ms > 300000: return Err("worker deadline outside 1..300000ms")
+    if binary == "" or path_absolute(binary) != binary or root == "" or path_absolute(root) != root:
+        return Err("worker requires absolute executable and workspace paths")
+    if input_text.byte_len() > 41943040: return Err("request exceeds worker artifact limit")
+    val capabilities = process_observation_capabilities_v4()?
+    val gap = process_observation_monitor_group_gap_v4(capabilities.capability_bits)
+    if not capabilities.available or capabilities.runtime_error != 0 or gap != "" or capabilities.max_capture_bytes < 4194304:
+        return Err("worker V4 capability unavailable:" + gap)
+    var environment: [ProcessObservationEnvironmentV4] = []
+    for pair in env_list_checked()?:
+        val (key, value) = pair
+        environment.push(ProcessObservationEnvironmentV4(key: key, value: value))
+    # Allocate the owner before acquiring any resource. Once a pin exists,
+    # failures return this owner for retryable cleanup instead of losing it.
+    var worker = SourceAnalysisWorkerV1(run_id: run_id, executable_digest: "", lease: nil,
+        executable: nil, directory: nil, status: "pending", reason: "running",
+        wire: "", cancelled: false, max_wait_ms: 25, artifact: nil, request: snapshot, target: target)
+    if capabilities.max_caller_wait_ns / 1000000 < worker.max_wait_ms:
+        worker.max_wait_ms = capabilities.max_caller_wait_ns / 1000000
+    val pinned = OwnedExecutablePin.pin(binary)?
+    worker.executable = Some(pinned)
+    val directory_result = OwnedCwdPinV4.pin(root)
+    if directory_result.is_err():
+        worker.status = "spawn_failed"
+        worker.reason = "workspace_pin_failed"
+        worker.close_pins()
+        return Ok(worker)
+    val directory = directory_result.unwrap()
+    worker.directory = Some(directory)
+    val executable_digest = pinned.digest()
+    val directory_digest = directory.digest()
+    if executable_digest.is_err() or directory_digest.is_err():
+        worker.status = "spawn_failed"
+        worker.reason = "pin_digest_failed"
+        worker.close_pins()
+        return Ok(worker)
+    val digest_text = source_analysis_pin_digest_hex_v1(executable_digest.unwrap())
+    if digest_text.is_err():
+        worker.status = "spawn_failed"
+        worker.reason = "launch_pin_digest_invalid"
+        worker.close_pins()
+        return Ok(worker)
+    worker.executable_digest = digest_text.unwrap()
+    if snapshot != nil and snapshot.unwrap().environment.executable_digest != worker.executable_digest:
+        worker.status = "invalid_payload"
+        worker.reason = "analysis_launch_executable_changed"
+        worker.close_pins()
+        return Ok(worker)
+    val created = source_analysis_artifact_create_v1(input_text, worker.executable_digest, run_id)
+    if created.is_err():
+        worker.status = "spawn_failed"
+        worker.reason = created.unwrap_err()
+        worker.close_pins()
+        return Ok(worker)
+    val artifact = created.unwrap()
+    worker.artifact = Some(artifact)
+    if artifact.error != "":
+        worker.status = "spawn_failed"
+        worker.reason = artifact.error
+        worker.close_pins()
+        return Ok(worker)
+    val encoded_control = io_text_encode(artifact.control, utf8_format())
+    if encoded_control.is_err():
+        worker.status = "spawn_failed"
+        worker.reason = "control_encoding_failed"
+        worker.close_pins()
+        return Ok(worker)
+    val input = encoded_control.unwrap()
+    var input_digest: [u8] = []
+    for byte in hex_to_bytes(sha256_u8_hex(input)): input_digest.push(byte as u8)
+    val request = ProcessObservationRequestV4(argv: [binary] + args,
+        environment: environment, canonical_cwd: root, canonical_pinned_directory: root,
+        executable_pin: 1, executable_digest: executable_digest.unwrap(),
+        cwd_pin_claim: 1, cwd_identity_digest: directory_digest.unwrap(),
+        capability_bits: capabilities.capability_bits,
+        wall_budget_ns: timeout_ms * 1000000, term_grace_ns: 250000000,
+        cleanup_budget_ns: 2000000000, stdout_limit_bytes: 4194304,
+        stderr_limit_bytes: 65536, memory_limit_bytes: 0,
+        enforcement_kind: ProcessObservationEnforcementKindV4.None,
+        descendant_policy: ProcessObservationDescendantPolicyV4.ProcessGroup,
+        max_clock_resolution_ns: 10000000)
+    val started = process_inspection_start_pinned_v1(pinned, directory, request, input, input_digest)
+    if started.is_err():
+        worker.status = "spawn_failed"
+        worker.reason = "inspection_start_failed:" + started.unwrap_err()
+        worker.close_pins()
+        return Ok(worker)
+    val start = started.unwrap()
+    if start.receipt.packet.status == ProcessObservationStatusV4.Rejected:
+        worker.status = "spawn_failed"
+        worker.reason = "inspection_start_rejected"
+        worker.close_pins()
+        return Ok(worker)
+    worker.lease = Some(start.lease)
+    Ok(worker)
+
+pub fn source_analysis_worker_start_v1(request: SourceAnalysisRequestV1,
+        binary: text, timeout_ms: i64 = 30000) -> Result<SourceAnalysisWorkerV1, text>:
+    # A preflighted 40MiB private request artifact covers 16MiB raw sources plus
+    # SDN escaping and bounded metadata; stdin carries only its 16KiB control.
+    val wire = source_analysis_request_encode_v1(request)?
+    source_analysis_worker_launch_v1(binary, request.workspace_root,
+        ["__source-analysis-worker-v1"], wire, request.run_id, timeout_ms, Some(request), "")
+
+pub fn source_analysis_worker_start_environment_v1(binary: text, workspace_root: text,
+        target: text, timeout_ms: i64 = 30000) -> Result<SourceAnalysisWorkerV1, text>:
+    source_analysis_worker_launch_v1(binary, workspace_root,
+        ["__source-analysis-environment-v1", target], "", "environment", timeout_ms, nil, target)

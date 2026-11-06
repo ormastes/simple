@@ -1,0 +1,79 @@
+# Same-process process-owner supervisor. Publication, lease polls and source
+# transactions share one gate; sleep and finite cancellation never hold it.
+use app.llm_caret.messaging.adapter.server.source_session_auth.*
+use app.llm_caret.multi_caret_manager.{MultiCaretManager, poll_multi_caret_manager, stop_multi_caret_manager}
+use app.io.mod.{current_time_ms}
+use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
+
+pub fn source_supervisor_start_v1(manager: MultiCaretManager) -> bool:
+    if not source_session_owner_lock_v1(): return false
+    val configured = source_session_authority_get_v1()
+    if configured != nil:
+        var authority = configured.unwrap()
+        authority.supervising = true
+        authority.managed_owner = manager
+        source_session_authority_set_v1(authority)
+    val unlocked = source_session_owner_unlock_v1()
+    configured != nil and unlocked
+
+pub fn source_supervisor_set_v1(running: bool) -> bool:
+    if not source_session_owner_lock_v1(): return false
+    val configured = source_session_authority_get_v1()
+    if configured != nil:
+        var authority = configured.unwrap()
+        authority.supervising = running
+        source_session_authority_set_v1(authority)
+    val unlocked = source_session_owner_unlock_v1()
+    configured != nil and unlocked
+
+pub fn source_supervisor_cleanup_complete_v1(manager: MultiCaretManager) -> bool:
+    if manager.status != "stopped": return false
+    for process in manager.team.processes:
+        if process.owned_lease != nil or process.owned_pin != nil: return false
+    true
+
+pub fn source_supervisor_cleanup_v1() -> i64:
+    if not source_session_owner_lock_v1(): return 1
+    val configured = source_session_authority_get_v1()
+    var manager: MultiCaretManager? = nil
+    if configured != nil:
+        var authority = configured.unwrap()
+        authority.supervising = false
+        manager = authority.managed_owner
+        authority.agents = []
+        authority.reclaim_credentials()
+        source_session_authority_set_v1(authority)
+    if not source_session_owner_unlock_v1(): return 1
+    if manager == nil: return 1
+    # Admission is already revoked before releasing the gate. No HTTP request
+    # may poll these handles while the canonical owner cancels and collects.
+    val stopped = stop_multi_caret_manager(manager.unwrap())
+    if not source_session_owner_lock_v1(): return 1
+    val after = source_session_authority_get_v1()
+    if after != nil:
+        var authority = after.unwrap()
+        authority.managed_owner = stopped
+        source_session_authority_set_v1(authority)
+    if not source_session_owner_unlock_v1(): return 1
+    if source_supervisor_cleanup_complete_v1(stopped): 0 else: 1
+
+pub fn source_supervisor_run_v1(deadline_ms: i64) -> i64:
+    while current_time_ms() < deadline_ms:
+        if not source_session_owner_lock_v1(): return 1
+        val configured = source_session_authority_get_v1()
+        var running = false
+        var failed = false
+        if configured != nil:
+            var authority = configured.unwrap()
+            running = authority.supervising
+            if running and authority.managed_owner != nil:
+                val polled = poll_multi_caret_manager(authority.managed_owner.unwrap())
+                authority.managed_owner = polled
+                val published = authority.publish_manager(polled)
+                failed = published.is_err()
+                running = polled.status == "running" or polled.status == "degraded"
+                source_session_authority_set_v1(authority)
+        if not source_session_owner_unlock_v1(): return 1
+        if not running or failed: return source_supervisor_cleanup_v1()
+        thread_sleep(100)
+    source_supervisor_cleanup_v1()

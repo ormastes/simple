@@ -1,0 +1,54 @@
+# NOT_RUN: runtime admission pending. Pure state used by the live polling loop.
+use std.spec
+use std.spec.step
+use std.nogc_sync_mut.lsp.lsp_message_framer.{lsp_message_framer_v1}
+
+describe "Incremental LSP message framing":
+    it "returns pending through partial headers and bodies without blocking":
+        step("Feed the same chunks consumed by the readiness-driven input owner")
+        var framer = lsp_message_framer_v1()
+        expect(framer.feed("Content-Len").is_ok()).to_equal(true)
+        expect(framer.take_message().unwrap() == nil).to_equal(true)
+        expect(framer.feed("gth: 4\r\n\r\n{").is_ok()).to_equal(true)
+        expect(framer.take_message().unwrap() == nil).to_equal(true)
+        expect(framer.feed("  }").is_ok()).to_equal(true)
+        expect(framer.take_message().unwrap().unwrap()).to_equal("{  }")
+        expect(framer.take_message().unwrap() == nil).to_equal(true)
+
+    it "counts Unicode wire bytes and keeps the next frame":
+        step("Decode two frames from one chunk with a four-byte scalar")
+        var framer = lsp_message_framer_v1()
+        expect(framer.feed("Content-Length: 4\r\n\r\n😀Content-Length: 2\r\n\r\n{}").is_ok()).to_equal(true)
+        expect(framer.take_message().unwrap().unwrap()).to_equal("😀")
+        expect(framer.take_message().unwrap().unwrap()).to_equal("{}")
+        expect(framer.take_message().unwrap() == nil).to_equal(true)
+
+    it "rejects duplicate length, scalar split and oversized frames":
+        step("Malformed framing never produces a protocol message")
+        for input in ["Content-Length: 2\r\nContent-Length: 2\r\n\r\n{}",
+                "Content-Length: 2\r\n\r\n😀", "Content-Length: 99999999\r\n\r\n"]:
+            var framer = lsp_message_framer_v1()
+            expect(framer.feed(input).is_ok()).to_equal(true)
+            expect(framer.take_message().is_err()).to_equal(true)
+
+    it "reports EOF truncation and emits a complete final JSON line":
+        step("EOF is distinct from pending idle input")
+        var broken = lsp_message_framer_v1()
+        expect(broken.feed("Content-Length: 5\r\n\r\n{}").is_ok()).to_equal(true)
+        broken.eof = true
+        expect(broken.take_message().is_err()).to_equal(true)
+        var complete = lsp_message_framer_v1()
+        expect(complete.feed("{}").is_ok()).to_equal(true)
+        complete.eof = true
+        expect(complete.take_message().unwrap().unwrap()).to_equal("{}")
+        expect(complete.finished()).to_equal(true)
+
+use std.nogc_sync_mut.lsp.lsp_json_limits.{lsp_json_payload_error_v1}
+
+describe "Bounded JSON parser admission":
+    it "rejects recursive payload bombs before typed decoding":
+        step("Apply the same preflight used by live dispatch and worker receipts")
+        val too_deep = "[".repeat(65) + "0" + "]".repeat(65)
+        expect(lsp_json_payload_error_v1(too_deep, 8388608)).to_equal("JSON nesting limit")
+        expect(lsp_json_payload_error_v1("[0,0]", 3)).to_equal("JSON byte limit")
+        expect(lsp_json_payload_error_v1("{\"text\":\"[{}]\"}", 64)).to_equal("")

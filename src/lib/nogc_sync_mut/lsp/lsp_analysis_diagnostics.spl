@@ -1,0 +1,164 @@
+# LSP projection preserves the entire canonical DiagnosticV1 in data.
+# Byte spans are translated only against admitted editor source bytes.
+use std.common.diagnostics.source_analysis_v1.*
+use std.common.json.value.{JsonValue, json_value_field, json_value_text_or,
+    json_value_object_from, json_value_serialize, json_value_has}
+use std.nogc_sync_mut.lsp.lsp_code_action.{lsp_edit_source_map, lsp_code_action_text_edit}
+use std.nogc_sync_mut.lsp.lsp_analysis_receipt.{LspAnalysisResponseV1, lsp_analysis_receipt_matches_v1}
+use std.nogc_sync_mut.lsp.lsp_document_sync.{lsp_document_capture_matches_v1}
+
+fn diagnostic_array_v1(value: JsonValue, key: text) -> bool:
+    match json_value_field(value, key):
+        case JsonValue.Array(_): true
+        case _: false
+
+fn diagnostic_span_valid_v1(value: JsonValue, nullable: bool) -> bool:
+    if nullable and value == JsonValue.Null: return true
+    for key in ["start", "end", "line", "col"]:
+        match json_value_field(value, key):
+            case JsonValue.Int(number):
+                if number < 0: return false
+            case _: return false
+    true
+
+fn diagnostic_valid_v1(value: JsonValue, depth: i64) -> bool:
+    if depth > 16: return false
+    for key in ["severity", "code", "message"]:
+        match json_value_field(value, key):
+            case JsonValue.Str(_): pass
+            case _: return false
+    if not json_value_has(value, "file") or not json_value_has(value, "span") or not json_value_has(value, "fix"): return false
+    match json_value_field(value, "file"):
+        case JsonValue.Str(_): pass
+        case JsonValue.Null: pass
+        case _: return false
+    if not diagnostic_span_valid_v1(json_value_field(value, "span"), true): return false
+    for key in ["labels", "notes", "help", "children", "macro_trace"]:
+        if not diagnostic_array_v1(value, key): return false
+    for key in ["notes", "help"]:
+        match json_value_field(value, key):
+            case JsonValue.Array(items):
+                for item in items:
+                    match item:
+                        case JsonValue.Str(_): pass
+                        case _: return false
+            case _: return false
+    for key in ["labels", "macro_trace"]:
+        match json_value_field(value, key):
+            case JsonValue.Array(items):
+                for item in items:
+                    match json_value_field(item, "file"):
+                        case JsonValue.Str(_): pass
+                        case _: return false
+                    if not diagnostic_span_valid_v1(json_value_field(item, "span"), false): return false
+                    val text_key = if key == "labels": "message" else: "name"
+                    match json_value_field(item, text_key):
+                        case JsonValue.Str(_): pass
+                        case _: return false
+                    if key == "labels":
+                        match json_value_field(item, "primary"):
+                            case JsonValue.Bool(_): pass
+                            case _: return false
+            case _: return false
+    val fix = json_value_field(value, "fix")
+    match fix:
+        case JsonValue.Null: pass
+        case _:
+            for key in ["id", "description", "confidence"]:
+                match json_value_field(fix, key):
+                    case JsonValue.Str(_): pass
+                    case _: return false
+            match json_value_field(fix, "replacements"):
+                case JsonValue.Array(items):
+                    for item in items:
+                        for key in ["file", "new_text"]:
+                            match json_value_field(item, key):
+                                case JsonValue.Str(_): pass
+                                case _: return false
+                        if not diagnostic_span_valid_v1(json_value_field(item, "span"), false): return false
+                case _: return false
+    match json_value_field(value, "children"):
+        case JsonValue.Array(children):
+            for child in children:
+                if not diagnostic_valid_v1(child, depth + 1): return false
+        case _: return false
+    true
+
+fn diagnostic_severity_v1(value: text) -> i64:
+    match value:
+        case "Error": 1
+        case "error": 1
+        case "Warning": 2
+        case "warning": 2
+        case "Note": 3
+        case "note": 3
+        case "Info": 3
+        case "info": 3
+        case "Help": 4
+        case "help": 4
+        case "Hint": 4
+        case "hint": 4
+        case _: 0
+
+pub fn lsp_analysis_publications_v1(request: SourceAnalysisRequestV1,
+        response: LspAnalysisResponseV1) -> Result<[text], text>:
+    if not lsp_analysis_receipt_matches_v1(request, response.receipt): return Err("analysis receipt not admitted")
+    if not lsp_document_capture_matches_v1(request): return Err("analysis overlay superseded")
+    if response.diagnostics.len() > request.bounds.max_diagnostics: return Err("diagnostic count limit")
+    for diagnostic in response.diagnostics:
+        if not diagnostic_valid_v1(diagnostic, 0): return Err("malformed DiagnosticV1 payload")
+    var publications: [text] = []
+    var publication_bytes = 0
+    for document in request.documents:
+        # Only documents actually analyzed may receive an empty result.
+        var analyzed = false
+        for dependency in response.receipt.dependencies:
+            if dependency.path == document.path and dependency.origin == "overlay": analyzed = true
+        if not analyzed: continue
+        val map = lsp_edit_source_map(document.source)
+        var diagnostics: [JsonValue] = []
+        for diagnostic in response.diagnostics:
+            val file = json_value_text_or(json_value_field(diagnostic, "file"), "")
+            var in_overlay = false
+            for other in request.documents:
+                if other.path == file: in_overlay = true
+            if file != document.path and (in_overlay or document.path != request.entry_path): continue
+            val severity = diagnostic_severity_v1(json_value_text_or(json_value_field(diagnostic, "severity"), ""))
+            if severity == 0: return Err("invalid diagnostic severity")
+            var start = 0
+            var end = 0
+            if file == document.path:
+                val span = json_value_field(diagnostic, "span")
+                match span:
+                    case JsonValue.Null: pass
+                    case _:
+                        match (json_value_field(span, "start"), json_value_field(span, "end")):
+                            case (JsonValue.Int(first), JsonValue.Int(last)):
+                                start = first
+                                end = last
+                            case _: return Err("invalid diagnostic byte span")
+            val edit = lsp_code_action_text_edit(map, start, end, "")
+            if edit == nil: return Err("diagnostic span does not map to source")
+            var message = json_value_text_or(json_value_field(diagnostic, "message"), "")
+            # Imported disk/global diagnostics have no editor range; retain
+            # their original file/labels/spans losslessly as explicit data.
+            if file != "" and file != document.path: message = file + ": " + message
+            val provenance = json_value_object_from([
+                ("runId", JsonValue.Str(request.run_id)), ("requestDigest", JsonValue.Str(response.receipt.request_digest)),
+                ("dependencyDigest", JsonValue.Str(response.receipt.dependency_digest)),
+                ("environmentDigest", JsonValue.Str(response.receipt.environment_digest)),
+                ("documentVersion", JsonValue.Int(document.version)),
+                ("sourceDigest", JsonValue.Str(document.digest)), ("diagnosticV1", diagnostic)])
+            diagnostics.push(json_value_object_from([
+                ("range", json_value_field(edit.unwrap(), "range")), ("severity", JsonValue.Int(severity)),
+                ("code", json_value_field(diagnostic, "code")), ("source", JsonValue.Str("simple")),
+                ("message", JsonValue.Str(message)), ("data", provenance)]))
+        val publication = json_value_serialize(json_value_object_from([
+            ("uri", JsonValue.Str(document.uri)), ("version", JsonValue.Int(document.version)),
+            ("diagnostics", JsonValue.Array(diagnostics))]))
+        publication_bytes = publication_bytes + publication.byte_len()
+        if publication_bytes > 16777216: return Err("diagnostic publication byte limit")
+        publications.push(publication)
+    Ok(publications)
+
+export lsp_analysis_publications_v1

@@ -7,7 +7,7 @@ runtime cleanup qualification require separate end-to-end fixtures.
 use std.spec
 use compiler.borrow.borrow_check.ownership_flow.{OwnershipFlow, OwnershipEvent}
 use compiler.borrow.borrow_check.nll.{BasicBlock, ControlFlowGraph, NLLChecker}
-use compiler.borrow.borrow_check.borrow_graph.{place_local, place_field}
+use compiler.borrow.borrow_check.borrow_graph.{place_local, place_field, place_index}
 
 fn ownership_block(id: i64, points: [i64], terminal: i64, successors: [i64]) -> BasicBlock:
     var block = BasicBlock.create(id)
@@ -122,3 +122,39 @@ describe "WP-02 NLL ownership facts":
         val errors = wrong.check(0, points, edges)
         expect(errors.len()).to_equal(1)
         expect(errors[0].point).to_equal(10)
+
+describe "ownership destination write validation":
+    it "permits refilling a moved field without reading its dead old payload":
+        val root = place_local(0)
+        val field = place_field(root, 0)
+        var flow = OwnershipFlow.create()
+        flow.record(0, OwnershipEvent.Move(field))
+        flow.record(1, OwnershipEvent.Write(field))
+        flow.record(2, OwnershipEvent.Revive(field))
+        flow.record(3, OwnershipEvent.Read(root))
+        expect(flow.check(0, {0: [0, 1, 2, 3]}, {0: []}).len()).to_equal(0)
+
+    it "rejects writing a field through a moved containing owner":
+        val root = place_local(0)
+        var flow = OwnershipFlow.create()
+        flow.record(0, OwnershipEvent.Move(root))
+        flow.record(1, OwnershipEvent.Write(place_field(root, 0)))
+        expect(flow.check(0, {0: [0, 1]}, {0: []})[0].message).to_contain("Write through moved owner")
+
+    it "does not require a live unrelated sibling to replace a field":
+        val root = place_local(0)
+        var flow = OwnershipFlow.create()
+        flow.record(0, OwnershipEvent.Move(place_field(root, 0)))
+        flow.record(1, OwnershipEvent.Write(place_field(root, 1)))
+        flow.record(2, OwnershipEvent.Revive(place_field(root, 1)))
+        flow.record(3, OwnershipEvent.Read(place_field(root, 1)))
+        expect(flow.check(0, {0: [0, 1, 2, 3]}, {0: []}).len()).to_equal(0)
+
+    it "does not use a symbolic-index write to prove an old element revived":
+        val indexed = place_index(place_local(0), 1)
+        var flow = OwnershipFlow.create()
+        flow.record(0, OwnershipEvent.Move(indexed))
+        flow.record(1, OwnershipEvent.Write(indexed))
+        flow.record(2, OwnershipEvent.Revive(indexed))
+        flow.record(3, OwnershipEvent.Read(indexed))
+        expect(flow.check(0, {0: [0, 1, 2, 3]}, {0: []})[0].message).to_contain("Use of moved value")

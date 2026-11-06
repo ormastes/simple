@@ -58,6 +58,14 @@ impl Lowerer {
         field: &str,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
+        if let Expr::Identifier(name) = receiver {
+            if !matches!(name.as_str(), "Option" | "Result")
+                && self.flatten_struct_owners.is_qualified_enum(name)
+                && self.module.types.scoped_name(name) == name
+                && self.module.types.lookup(name).is_none_or(|id| matches!(self.module.types.get(id), Some(HirType::Enum { .. }))) {
+                return Err(LowerError::Unsupported(format!("ambiguous enum namespace `{name}`; use an exact module import")));
+            }
+        }
         // Check for thread_group.id and thread_group.size before lowering receiver
         if let Expr::Identifier(recv_name) = receiver {
             if recv_name == "thread_group" {

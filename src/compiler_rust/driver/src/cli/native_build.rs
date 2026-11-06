@@ -701,6 +701,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         simple_compiler::pipeline::native_project::set_target_override(*t);
     }
 
+    let planned_output = output.clone();
     let mut builder = NativeProjectBuilder::new(project_root, output).config(config);
     if let Some(entry) = entry_file {
         builder = builder.entry_file(entry);
@@ -709,9 +710,11 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         builder = builder.source_dir(dir);
     }
 
+    let absent_output = AbsentOutputProof::capture(&planned_output);
     let build_start = std::time::SystemTime::now();
     match builder.build() {
         Ok(result) => {
+            let build_finish = std::time::SystemTime::now();
             println!(
                 "Build complete: {} compiled, {} cached, {} failed",
                 result.compiled, result.cached, result.failed
@@ -752,13 +755,13 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                 );
                 return 1;
             }
-            let freshness_floor = if result.link_time > std::time::Duration::ZERO {
-                Some(build_start)
-            } else {
-                None
-            };
-            if let ArtifactVerdict::Reject(why) =
-                verify_emitted_artifact(&result.output, freshness_floor)
+            if let ArtifactVerdict::Reject(why) = verify_build_artifact(
+                &result.output,
+                absent_output,
+                build_start,
+                build_finish,
+                result.link_time > std::time::Duration::ZERO,
+            )
             {
                 eprintln!("\nerror: native-build reported success but {}", why);
                 return 1;
@@ -882,6 +885,53 @@ fn elf64_code_census(buf: &[u8]) -> Option<(usize, u64, bool)> {
         }
     }
     Some((func_syms, text_bytes, saw_symtab))
+}
+
+/// One-use evidence that this exact planned output did not exist before build.
+/// Metadata errors and dangling symlinks are never treated as absence.
+struct AbsentOutputProof {
+    path: std::path::PathBuf,
+}
+
+impl AbsentOutputProof {
+    fn capture(path: &std::path::Path) -> Option<Self> {
+        let path = absolute_output_path(path)?;
+        match std::fs::symlink_metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Self { path }),
+            _ => None,
+        }
+    }
+}
+
+fn absolute_output_path(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    absolute.is_absolute().then_some(absolute)
+}
+
+/// A backwards wall clock cannot order a newly created output against start.
+/// Only a consumed absence proof for this exact path may waive that comparison;
+/// all existence, size and code-content checks remain in the artifact owner.
+fn verify_build_artifact(
+    path: &std::path::Path,
+    absent: Option<AbsentOutputProof>,
+    started: std::time::SystemTime,
+    finished: std::time::SystemTime,
+    link_ran: bool,
+) -> ArtifactVerdict {
+    let new_output_after_rollback = link_ran
+        && finished < started
+        && absolute_output_path(path)
+            .is_some_and(|actual| absent.is_some_and(|proof| proof.path == actual));
+    let floor = if link_ran && !new_output_after_rollback {
+        Some(started)
+    } else {
+        None
+    };
+    verify_emitted_artifact(path, floor)
 }
 
 /// Fail-closed check that a declared build artifact actually exists and is
@@ -1173,4 +1223,162 @@ fn print_help() {
     println!("  simple native-build --verbose --threads 4");
     println!("  simple native-build --clean --verbose");
     println!("  simple native-build --no-incremental");
+}
+
+#[cfg(test)]
+mod clock_freshness_contracts {
+    use super::*;
+    use std::{
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicUsize, Ordering},
+        time::{Duration, SystemTime},
+    };
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "simple-clock-proof-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&p).unwrap();
+            Self(p)
+        }
+        fn path(&self, n: &str) -> PathBuf {
+            self.0.join(n)
+        }
+        fn binary(&self, n: &str) -> PathBuf {
+            let p = self.path(n);
+            std::fs::copy(std::env::current_exe().unwrap(), &p).unwrap();
+            p
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            for e in std::fs::read_dir(&self.0).unwrap() {
+                let p = e.unwrap().path();
+                let _ = std::fs::remove_file(p);
+            }
+            let _ = std::fs::remove_dir(&self.0);
+        }
+    }
+    fn times(p: &Path) -> (SystemTime, SystemTime) {
+        let t = std::fs::metadata(p).unwrap().modified().unwrap();
+        (t + Duration::from_secs(3600), t - Duration::from_secs(3600))
+    }
+    fn rejected(v: ArtifactVerdict, reason: &str) {
+        match v {
+            ArtifactVerdict::Reject(s) => assert!(s.contains(reason), "{s}"),
+            ArtifactVerdict::Ok => panic!("expected rejection: {reason}"),
+        }
+    }
+    #[test]
+    fn new_exact_output_survives_observed_rollback_without_touching_mtime() {
+        let f = Fixture::new();
+        let p = f.path("fresh.exe");
+        let proof = AbsentOutputProof::capture(&p);
+        assert!(proof.is_some());
+        f.binary("fresh.exe");
+        let before = std::fs::metadata(&p).unwrap().modified().unwrap();
+        let (start, end) = times(&p);
+        assert_eq!(
+            verify_build_artifact(&p, proof, start, end, true),
+            ArtifactVerdict::Ok
+        );
+        assert_eq!(std::fs::metadata(&p).unwrap().modified().unwrap(), before);
+    }
+    #[test]
+    fn preexisting_valid_output_is_still_stale_during_rollback() {
+        let f = Fixture::new();
+        let p = f.binary("old.exe");
+        let proof = AbsentOutputProof::capture(&p);
+        assert!(proof.is_none());
+        let (start, end) = times(&p);
+        rejected(verify_build_artifact(&p, proof, start, end, true), "STALE");
+    }
+    #[test]
+    fn wrong_output_cannot_spend_another_paths_absence() {
+        let f = Fixture::new();
+        let proof = AbsentOutputProof::capture(&f.path("planned.exe"));
+        let p = f.binary("other.exe");
+        let (start, end) = times(&p);
+        rejected(verify_build_artifact(&p, proof, start, end, true), "STALE");
+    }
+    #[test]
+    fn normal_clock_preserves_mtime_floor_even_for_absent_output() {
+        let f = Fixture::new();
+        let p = f.path("new.exe");
+        let proof = AbsentOutputProof::capture(&p);
+        f.binary("new.exe");
+        let (start, _) = times(&p);
+        rejected(
+            verify_build_artifact(&p, proof, start, start + Duration::from_secs(1), true),
+            "STALE",
+        );
+    }
+    #[test]
+    fn cached_no_link_keeps_existing_no_freshness_claim() {
+        let f = Fixture::new();
+        let p = f.binary("cached.exe");
+        let (start, end) = times(&p);
+        assert_eq!(
+            verify_build_artifact(&p, None, start, end, false),
+            ArtifactVerdict::Ok
+        );
+    }
+    #[test]
+    fn absent_output_and_rollback_do_not_accept_missing_file() {
+        let f = Fixture::new();
+        let p = f.path("missing.exe");
+        let proof = AbsentOutputProof::capture(&p);
+        let t = SystemTime::now();
+        rejected(
+            verify_build_artifact(&p, proof, t, t - Duration::from_secs(1), true),
+            "does not exist",
+        );
+    }
+    #[test]
+    fn absent_output_and_rollback_do_not_accept_empty_file() {
+        let f = Fixture::new();
+        let p = f.path("empty.exe");
+        let proof = AbsentOutputProof::capture(&p);
+        std::fs::write(&p, []).unwrap();
+        let (start, end) = times(&p);
+        rejected(verify_build_artifact(&p, proof, start, end, true), "empty");
+    }
+    #[test]
+    fn metadata_error_is_not_an_absence_proof() {
+        let path = Path::new("\0invalid-output");
+        let err = std::fs::symlink_metadata(path).unwrap_err();
+        assert_ne!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(AbsentOutputProof::capture(path).is_none());
+    }
+    #[test]
+    fn relative_absence_is_anchored_to_current_absolute_directory() {
+        let name = format!(
+            "simple-absent-proof-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        let rel = Path::new(&name);
+        let proof = AbsentOutputProof::capture(rel).expect("unique absent relative path");
+        assert!(proof.path.is_absolute());
+        assert_eq!(proof.path, std::env::current_dir().unwrap().join(rel));
+    }
+    #[test]
+    fn rollback_does_not_bypass_real_functionless_elf_census() {
+        let f = Fixture::new();
+        let p = f.path("no-functions.elf");
+        let proof = AbsentOutputProof::capture(&p);
+        let mut b = vec![0u8; 192];
+        b[..6].copy_from_slice(b"\x7fELF\x02\x01");
+        b[0x28..0x30].copy_from_slice(&64u64.to_le_bytes());
+        b[0x3a..0x3c].copy_from_slice(&64u16.to_le_bytes());
+        b[0x3c..0x3e].copy_from_slice(&2u16.to_le_bytes());
+        b[128 + 4..128 + 8].copy_from_slice(&2u32.to_le_bytes());
+        std::fs::write(&p, b).unwrap();
+        let (start, end) = times(&p);
+        rejected(verify_build_artifact(&p, proof, start, end, true), "FUNC");
+    }
 }

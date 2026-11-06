@@ -1,0 +1,213 @@
+# Live compiler-owned admission receipts, never deserialized as trusted proofs.
+use compiler.hir.hir_types.{HirModule, SymbolId}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.generated.hir_codec.{hc_enc_hir_function, hc_enc_symbol_table, hc_enc_hir_module}
+use compiler.common.cache.canonical_identity.{canon_str, canon_nat}
+use compiler.semantics.param_effects.ownership_contract_budget.{OwnershipContractBudgetV1}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.semantics.param_effects.infer.{infer_param_effects}
+
+pub(package) struct OwnershipSourceAuthorityV1:
+    module_name: text
+    canonical_path: text
+    source_identity: text
+    resolver_identity: text
+    function_identities: Dict<i64, text>
+
+fn ownership_resolver_identity_v1(module: HirModule, budget: OwnershipContractBudgetV1) -> text:
+    if not budget.take(): return ""
+    var writer = HirCodecWriter.create_canonical_bounded(1048576, 8388608, budget.remaining)
+    hc_enc_symbol_table(writer, module.symbols)
+    budget.remaining = budget.remaining - writer.charged_work_units
+    if not writer.ok:
+        budget.exhausted = true
+        return ""
+    sha256_text("ownership-live-resolver-v1\n" + writer.finish())
+
+pub(package) fn ownership_function_identity_v1(function: HirFunction, effects: [text],
+        budget: OwnershipContractBudgetV1) -> text:
+    if not budget.take(): return ""
+    var writer = HirCodecWriter.create_canonical_bounded(1048576, 8388608, budget.remaining)
+    hc_enc_hir_function(writer, function)
+    budget.remaining = budget.remaining - writer.charged_work_units
+    if not writer.ok:
+        budget.exhausted = true
+        return ""
+    var encoded = writer.finish()
+    for effect in effects:
+        if not budget.take(): return ""
+        encoded = encoded + canon_str(effect)
+    sha256_text("ownership-live-function-v1\n" + encoded)
+
+pub(package) fn ownership_source_authority_create_v1(module: HirModule, surface: ModuleSurface,
+        budget: OwnershipContractBudgetV1) -> OwnershipSourceAuthorityV1?:
+    if not budget.take(): return nil
+    if not surface.frozen or not surface.semantic_cacheable or not surface.nogc_strict: return nil
+    if surface.module_name != module.name or surface.content_length < 0: return nil
+    if surface.canonical_path == "" or module_surface_canonical_path(surface.canonical_path) != surface.canonical_path: return nil
+    if module_surface_canonical_path(module.path) != surface.canonical_path: return nil
+    if not module.nogc_strict or not module.nogc_param_effects_checked: return nil
+    if module.nogc_param_effect_symbol_ids.len() != module.nogc_param_effects.len(): return nil
+    if module.nogc_param_effect_symbol_ids.len() != module.functions.len(): return nil
+    var rows: Dict<i64, [text]> = {}
+    var row = 0
+    for id in module.nogc_param_effect_symbol_ids:
+        if not budget.take() or rows.contains_key(id): return nil
+        rows[id] = module.nogc_param_effects[row]
+        row = row + 1
+    val resolver = ownership_resolver_identity_v1(module, budget)
+    if resolver == "": return nil
+    var identities: Dict<i64, text> = {}
+    for key in module.functions.keys():
+        if not budget.take() or not rows.contains_key(key.id): return nil
+        val function: HirFunction = module.functions[key]
+        if function.symbol.id != key.id: return nil
+        val identity = ownership_function_identity_v1(function, rows[key.id], budget)
+        if identity == "": return nil
+        identities[key.id] = identity
+    val source = canon_nat(surface.content_length) + canon_str("{surface.content_hash}") +
+        canon_str("{surface.semantic_hash0}") + canon_str("{surface.semantic_hash1}") +
+        canon_str("{surface.semantic_hash2}") + canon_str("{surface.semantic_hash3}")
+    Some(OwnershipSourceAuthorityV1(module.name, surface.canonical_path, source, resolver, identities))
+
+pub(package) fn ownership_source_authority_matches_v1(module: HirModule, authority: OwnershipSourceAuthorityV1,
+        budget: OwnershipContractBudgetV1) -> bool:
+    if not budget.take(): return false
+    if module.name != authority.module_name or authority.source_identity == "": return false
+    if module_surface_canonical_path(module.path) != authority.canonical_path: return false
+    if not module.nogc_strict or not module.nogc_param_effects_checked: return false
+    val resolver = ownership_resolver_identity_v1(module, budget)
+    if resolver == "" or resolver != authority.resolver_identity: return false
+    if module.functions.len() != authority.function_identities.len(): return false
+    if module.nogc_param_effect_symbol_ids.len() != module.nogc_param_effects.len(): return false
+    if module.nogc_param_effect_symbol_ids.len() != module.functions.len(): return false
+    var seen: Dict<i64, bool> = {}
+    var row = 0
+    for id in module.nogc_param_effect_symbol_ids:
+        if not budget.take() or seen.contains_key(id) or not authority.function_identities.contains_key(id): return false
+        seen[id] = true
+        val key = SymbolId(id: id)
+        if not module.functions.contains_key(key): return false
+        val function: HirFunction = module.functions[key]
+        if function.symbol.id != id: return false
+        val identity = ownership_function_identity_v1(function, module.nogc_param_effects[row], budget)
+        if identity == "" or identity != authority.function_identities[id]: return false
+        row = row + 1
+    true
+
+# Only the live compiler preflight constructs this index; it is not a wire proof.
+pub(package) struct OwnershipProviderIndexV1:
+    modules: Dict<text, HirModule>
+    errors: [text]
+
+pub(package) fn ownership_provider_index_v1(modules: [HirModule],
+        authorities: Dict<text, OwnershipSourceAuthorityV1>, work_limit: i64) -> OwnershipProviderIndexV1:
+    val budget = OwnershipContractBudgetV1(remaining: work_limit, exhausted: false)
+    var verified: Dict<text, HirModule> = {}
+    var errors: [text] = []
+    for module in modules:
+        if not budget.take(): break
+        if not module.nogc_strict: continue
+        # Alias keys may retain the same physical module. Each input must match
+        # the same admitted body/resolver receipt before collapsing its name.
+        if not authorities.contains_key(module.name):
+            errors.push("NOGC-HIR-001: missing live source authority for ownership provider")
+            break
+        if not ownership_source_authority_matches_v1(module, authorities[module.name], budget):
+            errors.push("NOGC-HIR-001: stale or incomplete ownership provider source authority")
+            break
+        verified[module.name] = module
+    if budget.exhausted: errors.push("NOGC-HIR-001: ownership provider verification budget exhausted")
+    if errors.len() != 0: verified = {}
+    OwnershipProviderIndexV1(verified, errors)
+
+pub(package) struct OwnershipSourceAuthoritiesV1:
+    authorities: Dict<text, OwnershipSourceAuthorityV1>
+    errors: [text]
+
+pub(package) fn ownership_source_authorities_create_v1(modules: [HirModule], surfaces: [ModuleSurface],
+        work_limit: i64) -> OwnershipSourceAuthoritiesV1:
+    val budget = OwnershipContractBudgetV1(remaining: work_limit, exhausted: false)
+    var positions: Dict<text, [i64]> = {}
+    var position = 0
+    for surface in surfaces:
+        if not budget.take(): break
+        var same: [i64] = []
+        if positions.contains_key(surface.module_name): same = positions[surface.module_name]
+        same.push(position)
+        positions[surface.module_name] = same
+        position = position + 1
+    var authorities: Dict<text, OwnershipSourceAuthorityV1> = {}
+    var errors: [text] = []
+    for module in modules:
+        if not budget.take(): break
+        if not module.nogc_strict: continue
+        if authorities.contains_key(module.name):
+            if ownership_source_authority_matches_v1(module, authorities[module.name], budget): continue
+            errors.push("NOGC-CONTRACT-002: conflicting physical ownership aliases")
+            break
+        if not positions.contains_key(module.name):
+            errors.push("NOGC-CONTRACT-002: missing physical ownership source")
+            break
+        val same: [i64] = positions[module.name]
+        if same.len() != 1:
+            errors.push("NOGC-CONTRACT-002: ambiguous frozen ownership source")
+            break
+        if val authority = ownership_source_authority_create_v1(module, surfaces[same[0]], budget):
+            authorities[module.name] = authority
+        else:
+            errors.push("NOGC-CONTRACT-002: incomplete ownership source/body authority")
+            break
+    if budget.exhausted: errors.push("NOGC-CONTRACT-002: ownership source authority budget exhausted")
+    if errors.len() != 0: authorities = {}
+    OwnershipSourceAuthoritiesV1(authorities, errors)
+
+# Every HIR ownership ingress validates the complete graph before recursive
+# classifiers. Return charged work so capture/solve share the caller's quota.
+pub(package) fn ownership_hir_input_work_v1(module: HirModule, work_limit: i64) -> i64:
+    if work_limit <= 0: return -1
+    var writer = HirCodecWriter.create_canonical_bounded(1048576, 8388608, work_limit)
+    hc_enc_hir_module(writer, module)
+    if not writer.ok: return -1
+    writer.charged_work_units
+
+# Public direct execution has no source receipt. Recompute the canonical local
+# effects over bounded typed HIR; supplied checked rows never grant authority.
+# Imported callback proofs are deliberately absent. The inference owner has an
+# eight-round convergence cap; this entry also caps encoded input/work/depth.
+pub(package) fn ownership_direct_effect_errors_v1(module: HirModule) -> [text]:
+    if not module.nogc_strict: return []
+    var writer = HirCodecWriter.create_canonical_bounded(65536, 1048576, 16384)
+    hc_enc_hir_module(writer, module)
+    if not writer.ok:
+        return ["NOGC-HIR-001: direct ownership inference input exceeds bounds or is unsupported"]
+    val report = infer_param_effects(module, {}, {}, {})
+    if report.diags.len() != 0:
+        return ["NOGC-HIR-001: direct canonical parameter-effect admission failed or imported proof unavailable"]
+    if report.functions.len() != module.functions.len() or module.nogc_param_effect_symbol_ids.len() != report.functions.len():
+        return ["NOGC-HIR-001: direct parameter-effect declaration coverage mismatch"]
+    if module.nogc_param_effects.len() != module.nogc_param_effect_symbol_ids.len():
+        return ["NOGC-HIR-001: direct parameter-effect row count mismatch"]
+    var rows: Dict<i64, [text]> = {}
+    var row = 0
+    for id in module.nogc_param_effect_symbol_ids:
+        if rows.contains_key(id): return ["NOGC-HIR-001: duplicate direct effect identity"]
+        rows[id] = module.nogc_param_effects[row]
+        row = row + 1
+    for checked in report.functions:
+        val key = SymbolId(id: checked.symbol_id)
+        if not module.functions.contains_key(key) or not rows.contains_key(key.id):
+            return ["NOGC-HIR-001: direct parameter-effect symbol mismatch"]
+        val declaration: HirFunction = module.functions[key]
+        val effects = rows[key.id]
+        if declaration.symbol.id != key.id or declaration.params.len() != checked.params.len() or effects.len() != checked.params.len():
+            return ["NOGC-HIR-001: direct parameter-effect signature mismatch"]
+        var slot = 0
+        for parameter in checked.params:
+            if parameter.name != declaration.params[slot].name or parameter.effect != effects[slot]:
+                return ["NOGC-HIR-001: direct parameter-effect rows disagree with canonical inference"]
+            slot = slot + 1
+    []

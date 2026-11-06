@@ -1,0 +1,271 @@
+# Parser-owned DiagnosticV1 snapshot, framed by canonical flat-pool v14.
+# Every field is retained. The canonical reader ledger bounds both walks;
+# poison terminates loops, and an over-budget encode is an un-restorable MISS.
+use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1, LabelV1, MacroFrame, DiagnosticFix, FixReplacement, FixConfidence}
+use compiler.common.diagnostics.severity.{Severity}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.core.flat_pool_codec.*
+use std.common.encoding.utf8.{text_byte_len}
+
+val PARSER_DIAGNOSTIC_MAX_BYTES_V1: i64 = 4194304
+
+# Coordinates from parser producers are one-based Unicode scalar columns.
+# Conditional preprocessing preserves line numbers while blanking excluded
+# lines; mapping against the original source preserves their original bytes.
+# CR is a scalar and byte in the original line; LF alone advances the line.
+pub fn parser_original_point_v1(source: text, path: text, line: i64, col: i64) -> Span?:
+    val lines = source.split("\n")
+    parser_original_point_indexed_v1(lines, parser_diagnostic_line_bytes_v1(lines), path, line, col)
+
+pub fn parser_diagnostic_line_bytes_v1(lines: [text]) -> [i64]:
+    var starts: [i64] = []
+    var offset = 0
+    for line in lines:
+        starts.push(offset)
+        offset = offset + text_byte_len(line) + 1
+    starts
+
+pub fn parser_original_point_indexed_v1(lines: [text], starts: [i64], path: text, line: i64, col: i64) -> Span?:
+    if line < 1 or line > lines.len() or line > starts.len() or col < 1: return nil
+    var offset = starts[line - 1]
+    var column = 1
+    for character in lines[line - 1]:
+        if column == col:
+            return Some(Span(start: offset, end: offset, line: line, col: col, file: path, length: 0))
+        offset = offset + text_byte_len(character)
+        column = column + 1
+    if column == col:
+        return Some(Span(start: offset, end: offset, line: line, col: col, file: path, length: 0))
+    nil
+
+# Preprocessing emits each retained line unchanged and blank lines for gates.
+# Binary search maps each native byte boundary to the corresponding ORIGINAL
+# line; UTF-8 widths within a retained line are unchanged, including CRLF.
+pub fn parser_original_byte_v1(processed: [i64], original: [i64], offset: i64) -> i64:
+    if offset < 0 or processed.len() == 0 or processed.len() != original.len(): return -1
+    var low = 0
+    var high = processed.len()
+    while low + 1 < high:
+        val middle = low + (high - low) / 2
+        if processed[middle] <= offset:
+            low = middle
+        else:
+            high = middle
+    original[low] + offset - processed[low]
+
+class ParserDiagnosticWriterV1:
+    parts: [text]
+    ledger: FlatPoolReader
+    output_bound: i64
+    static fn create() -> ParserDiagnosticWriterV1:
+        ParserDiagnosticWriterV1(parts: [], output_bound: 0, ledger: FlatPoolReader.new_bounded("\n", 1, 33554432, 4096, 64, 16777216))
+    me text(value: text):
+        if not self.ledger.ok: return
+        val size = text_byte_len(value)
+        if size > PARSER_DIAGNOSTIC_MAX_BYTES_V1:
+            self.ledger.reject_bounds("diagnostic_text_bytes")
+            return
+        if not self.ledger.charge_work(size + 1): return
+        val maximum_encoded = size * 2 + 1
+        if self.output_bound > PARSER_DIAGNOSTIC_MAX_BYTES_V1 - maximum_encoded:
+            self.ledger.reject_bounds("diagnostic_output_bytes")
+            return
+        self.output_bound = self.output_bound + maximum_encoded
+        # Charge worst-case escaped output BEFORE allocating it.
+        if not self.ledger.reserve(size * 2 + 64): return
+        # The nested frame is ONE scalar in its parent snapshot. Calling the
+        # tracing encoder here would publish phantom packed-pool type slots.
+        self.parts.push(flat_pool_escape(value) + "\n")
+    me number(value: i64):
+        self.text("{value}")
+    me flag(value: bool):
+        self.number(if value: 1 else: 0)
+    me count(value: i64):
+        if value < 0 or value > 4096:
+            self.ledger.reject_bounds("diagnostic_collection")
+            return
+        self.number(value)
+
+fn parser_diag_put_span_v1(w: ParserDiagnosticWriterV1, value: Span):
+    w.number(value.start)
+    w.number(value.end)
+    w.number(value.line)
+    w.number(value.col)
+    w.text(value.file)
+    w.number(value.length)
+
+fn parser_diag_get_span_v1(r: FlatPoolReader) -> Span:
+    val start = flat_pool_dec_scalar_i64(r)
+    val end = flat_pool_dec_scalar_i64(r)
+    val line = flat_pool_dec_scalar_i64(r)
+    val col = flat_pool_dec_scalar_i64(r)
+    val file = flat_pool_dec_scalar_text(r)
+    val length = flat_pool_dec_scalar_i64(r)
+    Span(start: start, end: end, line: line, col: col, file: file, length: length)
+
+fn parser_diag_put_v1(w: ParserDiagnosticWriterV1, value: DiagnosticV1):
+    if not w.ledger.enter_node(): return
+    w.text(value.severity.name())
+    w.text(value.code)
+    w.text(value.message)
+    w.flag(value.file != nil)
+    if value.file != nil: w.text(value.file.unwrap())
+    w.flag(value.span != nil)
+    if value.span != nil: parser_diag_put_span_v1(w, value.span.unwrap())
+    w.count(value.labels.len())
+    for label in value.labels:
+        if not w.ledger.ok: break
+        w.text(label.file)
+        parser_diag_put_span_v1(w, label.span)
+        w.text(label.message)
+        w.flag(label.primary)
+    w.count(value.notes.len())
+    for note in value.notes:
+        if not w.ledger.ok: break
+        w.text(note)
+    w.count(value.help.len())
+    for help in value.help:
+        if not w.ledger.ok: break
+        w.text(help)
+    w.count(value.children.len())
+    for child in value.children:
+        if not w.ledger.ok: break
+        parser_diag_put_v1(w, child)
+    w.count(value.macro_trace.len())
+    for frame in value.macro_trace:
+        if not w.ledger.ok: break
+        w.text(frame.name)
+        parser_diag_put_span_v1(w, frame.span)
+        w.text(frame.file)
+    w.flag(value.fix != nil)
+    if value.fix != nil:
+        val fix = value.fix.unwrap()
+        w.text(fix.id)
+        w.text(fix.description)
+        w.text(fix.confidence.name())
+        w.count(fix.replacements.len())
+        for replacement in fix.replacements:
+            if not w.ledger.ok: break
+            w.text(replacement.file)
+            parser_diag_put_span_v1(w, replacement.span)
+            w.text(replacement.new_text)
+    w.ledger.leave_node()
+
+fn parser_diag_flag_v1(r: FlatPoolReader) -> bool:
+    val value = flat_pool_dec_scalar_i64(r)
+    if value != 0 and value != 1:
+        r.reject_malformed("diagnostic_boolean")
+    value == 1
+
+fn parser_diag_count_v1(r: FlatPoolReader) -> i64:
+    val count = r.next_len()
+    if count > 4096:
+        r.reject_bounds("diagnostic_collection")
+        return 0
+    count
+
+fn parser_diag_get_v1(r: FlatPoolReader) -> DiagnosticV1:
+    if not r.enter_node(): return DiagnosticV1.error("PAR-CACHE", "invalid snapshot")
+    val severity_name = flat_pool_dec_scalar_text(r)
+    val severity = match severity_name:
+        "error": Severity.Error
+        "warning": Severity.Warning
+        "note": Severity.Note
+        "help": Severity.Help
+        "info": Severity.Info
+        _:
+            r.reject_malformed("diagnostic_severity")
+            Severity.Error
+    val code = flat_pool_dec_scalar_text(r)
+    val message = flat_pool_dec_scalar_text(r)
+    var value = DiagnosticV1.new(severity, code, message)
+    if parser_diag_flag_v1(r): value.file = Some(flat_pool_dec_scalar_text(r))
+    if parser_diag_flag_v1(r): value.span = Some(parser_diag_get_span_v1(r))
+    val labels = parser_diag_count_v1(r)
+    for i in 0..labels:
+        if not r.ok: break
+        val file = flat_pool_dec_scalar_text(r)
+        val span = parser_diag_get_span_v1(r)
+        val message = flat_pool_dec_scalar_text(r)
+        val primary = parser_diag_flag_v1(r)
+        value.labels.push(LabelV1(file: file, span: span, message: message, primary: primary))
+    val notes = parser_diag_count_v1(r)
+    for i in 0..notes:
+        if not r.ok: break
+        value.notes.push(flat_pool_dec_scalar_text(r))
+    val helps = parser_diag_count_v1(r)
+    for i in 0..helps:
+        if not r.ok: break
+        value.help.push(flat_pool_dec_scalar_text(r))
+    val children = parser_diag_count_v1(r)
+    for i in 0..children:
+        if not r.ok: break
+        value.children.push(parser_diag_get_v1(r))
+    val frames = parser_diag_count_v1(r)
+    for i in 0..frames:
+        if not r.ok: break
+        val name = flat_pool_dec_scalar_text(r)
+        val span = parser_diag_get_span_v1(r)
+        val file = flat_pool_dec_scalar_text(r)
+        value.macro_trace.push(MacroFrame(name: name, span: span, file: file))
+    if parser_diag_flag_v1(r):
+        val id = flat_pool_dec_scalar_text(r)
+        val description = flat_pool_dec_scalar_text(r)
+        val confidence_name = flat_pool_dec_scalar_text(r)
+        val confidence = match confidence_name:
+            "safe": FixConfidence.Safe
+            "likely": FixConfidence.Likely
+            "uncertain": FixConfidence.Uncertain
+            _:
+                r.reject_malformed("diagnostic_fix_confidence")
+                FixConfidence.Uncertain
+        var fix = DiagnosticFix.new(id, description, confidence)
+        val replacements = parser_diag_count_v1(r)
+        for i in 0..replacements:
+            if not r.ok: break
+            val file = flat_pool_dec_scalar_text(r)
+            val span = parser_diag_get_span_v1(r)
+            val new_text = flat_pool_dec_scalar_text(r)
+            fix.replacements.push(FixReplacement(file: file, span: span, new_text: new_text))
+        value.fix = Some(fix)
+    r.leave_node()
+    value
+
+pub fn parser_diagnostics_dump_v1(records: [DiagnosticV1]) -> text:
+    val w = ParserDiagnosticWriterV1.create()
+    w.text("parser-diagnostics-v1")
+    w.count(records.len())
+    for record in records:
+        if not w.ledger.ok: break
+        parser_diag_put_v1(w, record)
+    if not w.ledger.ok: return "diagnostic-snapshot-budget-exceeded\n"
+    val blob = w.parts.join("")
+    if text_byte_len(blob) > PARSER_DIAGNOSTIC_MAX_BYTES_V1:
+        return "diagnostic-snapshot-budget-exceeded\n"
+    blob
+
+pub fn parser_diagnostics_restore_v1(blob: text) -> Result<[DiagnosticV1], text>:
+    val r = FlatPoolReader.new_bounded(blob, PARSER_DIAGNOSTIC_MAX_BYTES_V1, 33554432, 4096, 64, 16777216)
+    if flat_pool_dec_scalar_text(r) != "parser-diagnostics-v1":
+        return Err("diagnostic_snapshot_version")
+    val count = parser_diag_count_v1(r)
+    var records: [DiagnosticV1] = []
+    for i in 0..count:
+        if not r.ok: break
+        records.push(parser_diag_get_v1(r))
+    if not r.finish_canonical_frame(): return Err("diagnostic_snapshot_invalid")
+    Ok(records)
+
+# Typed parent-pool adapters expose direct ownership to the canonical
+# completeness guard while preserving nested bounds and outer packed tracing.
+pub fn flat_pool_enc_parser_diagnostics_v1(records: [DiagnosticV1]) -> text:
+    flat_pool_enc_scalar_text(parser_diagnostics_dump_v1(records))
+
+pub fn flat_pool_dec_parser_diagnostics_v1(r: FlatPoolReader) -> [DiagnosticV1]:
+    val blob = flat_pool_dec_scalar_text(r)
+    if not r.ok: return []
+    match parser_diagnostics_restore_v1(blob):
+        Ok(records): records
+        Err(reason):
+            r.reject_malformed(reason)
+            []

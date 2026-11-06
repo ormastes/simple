@@ -1,0 +1,245 @@
+# TRUSTED-LOCAL IPC PROFILE, not a hostile same-UID filesystem sandbox.
+# The host's configured system-temp parent and same-UID processes are trusted
+# against concurrent ancestor replacement. No remote caller chooses paths.
+# mkdtemp owns a fresh 0700 directory; a pinned identity and unpredictable nonce
+# bind fixed leaves. Path operations are revalidated but are NOT anchored writes.
+# Lifecycle: parent create/marker/pin -> publish request+manifest -> child pin/validate
+# manifest -> exclusive response staging+noreplace publication -> parent waits
+# terminal retirement -> bounded nofollow read -> process ack -> fixed-leaf
+# cleanup -> close pins -> remove empty directory. Any failure retains ownership.
+use std.common.sdn.value.{SdnValue}
+use std.common.diagnostics.source_analysis_v1.{source_analysis_executable_digest_valid_v1}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.binary_inspect.{hex_to_bytes}
+use std.common.encoding.external_text.{utf8_format}
+use std.common.diagnostics.source_analysis_wire_v1.{source_analysis_wire_parse_v1,
+    source_analysis_wire_text_v1, source_analysis_wire_int_v1}
+use std.nogc_sync_mut.io.external_text_io.{io_text_decode}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive,
+    file_publish_noreplace, file_read_regular_no_follow_bounded_bytes, file_is_regular_no_follow}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow, dir_remove}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_entry_present}
+use std.nogc_sync_mut.io.process_inspection_v1.{OwnedCwdPinV4}
+use std.nogc_sync_mut.io_runtime.{file_delete}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.sosix.entropy.{sosix_random_hex}
+
+pub struct SourceAnalysisArtifactV1:
+    root: text
+    identity: text
+    nonce: text
+    control: text
+    pin: OwnedCwdPinV4?
+    probe: OwnedCwdPinV4?
+    error: text
+
+fn analysis_artifact_leaf_v1(leaf: text) -> bool:
+    leaf == "request.sdn" or leaf == "control.sdn" or leaf == "response.sdn"
+
+fn analysis_artifact_marker_v1(root: text, nonce: text) -> text:
+    sdn_encode_canonical(SdnValue.Dict({"schema": SdnValue.String("source-analysis-local-owner-v1"),
+        "nonce": SdnValue.String(nonce), "directory": SdnValue.String(root)}))
+
+impl SourceAnalysisArtifactV1:
+    me discard_initial_pin():
+        if self.pin == nil: return
+        var pin = self.pin.unwrap()
+        val closed = pin.close()
+        if closed.is_ok() and closed.unwrap(): self.pin = nil
+        else: self.error = "artifact_initial_pin_close_failed"
+
+    me admit_initial() -> bool:
+        if self.identity != "": return self.same_directory()
+        if self.root == "": return false
+        if self.pin == nil:
+            val pinned = OwnedCwdPinV4.pin(self.root)
+            if pinned.is_err():
+                self.error = "artifact_initial_pin_failed"
+                return false
+            self.pin = Some(pinned.unwrap())
+        # A missing/replaced directory must never be adopted on a later retry.
+        # This exclusive nonce marker was created before the first pin attempt.
+        # Under the stated trusted-local profile it is initial rollback authority;
+        # an empty replacement has no such authority and is left untouched.
+        val marker_bytes = file_read_regular_no_follow_bounded_bytes(self.root + "/owner.sdn", 16384)
+        var marker_ok = false
+        if marker_bytes.is_ok():
+            val marker = io_text_decode(marker_bytes.unwrap(), utf8_format())
+            marker_ok = marker.is_ok() and marker.unwrap() == analysis_artifact_marker_v1(self.root, self.nonce)
+        if not dir_is_real_no_follow(self.root) or not marker_ok:
+            self.error = "artifact_initial_owner_marker_mismatch"
+            self.discard_initial_pin()
+            return false
+        val pin = self.pin.unwrap()
+        val digest = pin.digest()
+        if digest.is_err():
+            self.error = "artifact_initial_digest_failed"
+            self.discard_initial_pin()
+            return false
+        self.identity = sha256_u8_hex(digest.unwrap())
+        if not self.same_directory(): return false
+        self.error = ""
+        true
+
+    me same_directory() -> bool:
+        if self.root == "" or self.identity == "" or not dir_is_real_no_follow(self.root):
+            self.error = "artifact_directory_identity_unavailable"
+            return false
+        if self.probe != nil:
+            var old = self.probe.unwrap()
+            val closed = old.close()
+            if closed.is_err() or not closed.unwrap():
+                self.error = "artifact_probe_close_failed"
+                return false
+            self.probe = nil
+        val observed = OwnedCwdPinV4.pin(self.root)
+        if observed.is_err():
+            self.error = "artifact_directory_pin_failed"
+            return false
+        var probe = observed.unwrap()
+        self.probe = Some(probe)
+        val digest = probe.digest()
+        val same = digest.is_ok() and sha256_u8_hex(digest.unwrap()) == self.identity
+        val closed = probe.close()
+        if closed.is_ok() and closed.unwrap(): self.probe = nil
+        else:
+            self.error = "artifact_probe_close_failed"
+            return false
+        if not same: self.error = "artifact_directory_replaced"
+        same
+
+    me read_leaf(leaf: text, limit: i64) -> Result<text, text>:
+        if not analysis_artifact_leaf_v1(leaf) or not self.same_directory():
+            return Err("artifact_read_identity_rejected")
+        val read = file_read_regular_no_follow_bounded_bytes(self.root + "/" + leaf, limit)
+        if not self.same_directory(): return Err("artifact_directory_replaced_during_read")
+        val bytes = read?
+        match io_text_decode(bytes, utf8_format()):
+            case Ok(value): Ok(value)
+            case Err(_): Err("artifact_not_utf8")
+
+    me publish(leaf: text, content: text, limit: i64) -> bool:
+        if not analysis_artifact_leaf_v1(leaf) or content.byte_len() > limit or not self.same_directory():
+            self.error = "artifact_publish_admission_failed"
+            return false
+        val staged = self.root + "/" + leaf + ".part"
+        if not file_create_exclusive(staged, content):
+            self.error = "artifact_exclusive_stage_failed"
+            return false
+        if not self.same_directory(): return false
+        val published = file_publish_noreplace(staged, self.root + "/" + leaf)
+        if published.is_err() or not published.unwrap():
+            self.error = "artifact_noreplace_publish_failed"
+            return false
+        self.same_directory()
+
+    me request() -> Result<text, text>:
+        if self.error != "": return Err(self.error)
+        val value = source_analysis_wire_parse_v1(self.control, 16384)?
+        val expected_bytes = source_analysis_wire_int_v1(value, "request_bytes")?
+        if expected_bytes < 0 or expected_bytes > 41943040: return Err("artifact_request_size")
+        val request = self.read_leaf("request.sdn", expected_bytes)?
+        if request.byte_len() != expected_bytes or sha256_text(request) != source_analysis_wire_text_v1(value, "request_sha256")?:
+            return Err("artifact_request_digest_mismatch")
+        Ok(request)
+
+    me close_pins() -> bool:
+        if self.probe != nil:
+            var probe = self.probe.unwrap()
+            val closed = probe.close()
+            if closed.is_err() or not closed.unwrap(): return false
+            self.probe = nil
+        if self.pin != nil:
+            var pin = self.pin.unwrap()
+            val closed = pin.close()
+            if closed.is_err() or not closed.unwrap(): return false
+            self.pin = nil
+        true
+
+    me cleanup() -> bool:
+        if self.root == "": return self.close_pins()
+        if self.identity == "" and not self.admit_initial(): return false
+        if not self.same_directory(): return false
+        # No recursive deletion, globbing or removal of caller-provided names.
+        for leaf in ["request.sdn", "request.sdn.part", "control.sdn", "control.sdn.part", "response.sdn", "response.sdn.part", "owner.sdn"]:
+            val path = self.root + "/" + leaf
+            val present = path_entry_present(path)
+            if present.is_err():
+                self.error = "artifact_cleanup_stat_failed"
+                return false
+            if present.unwrap():
+                if not file_is_regular_no_follow(path) or not self.same_directory() or not file_delete(path):
+                    self.error = "artifact_cleanup_leaf_failed"
+                    return false
+        if not self.same_directory() or not self.close_pins():
+            self.error = "artifact_cleanup_pin_failed"
+            return false
+        if not dir_remove(self.root, false):
+            self.error = "artifact_cleanup_directory_failed"
+            return false
+        self.root = ""
+        true
+
+pub fn source_analysis_artifact_reserve_v1() -> Result<SourceAnalysisArtifactV1, text>:
+    val parent = path_final_existing(get_temp_dir())?
+    val entropy = sosix_random_hex(32)
+    if entropy == nil: return Err("artifact_entropy_failed")
+    val nonce = entropy.unwrap()
+    val root = secure_temp_dir(parent.path, "simple-analysis-" + nonce)?
+    var artifact = SourceAnalysisArtifactV1(root: root, identity: "", nonce: nonce,
+        control: "", pin: nil, probe: nil, error: "")
+    if not file_create_exclusive(root + "/owner.sdn", analysis_artifact_marker_v1(root, nonce)):
+        artifact.error = "artifact_initial_marker_failed"
+        # A failed initial marker write may have left a complete marker, which
+        # admission can validate later. If not, creation returned no descriptor
+        # proving the original directory: retain that failure, never adopt a
+        # fresh path-only identity and delete a possible replacement.
+    Ok(artifact)
+
+pub fn source_analysis_artifact_create_v1(input: text, executable_digest: text, run_id: text) -> Result<SourceAnalysisArtifactV1, text>:
+    if not source_analysis_executable_digest_valid_v1(executable_digest): return Err("artifact_launch_digest_invalid")
+    if run_id == "" or run_id.byte_len() > 4096: return Err("artifact_run_id_invalid")
+    if input.byte_len() > 41943040: return Err("artifact_request_exceeds_wire_limit")
+    var artifact = source_analysis_artifact_reserve_v1()?
+    if artifact.error != "" or not artifact.admit_initial(): return Ok(artifact)
+    val root = artifact.root
+    val nonce = artifact.nonce
+    artifact.control = sdn_encode_canonical(SdnValue.Dict({
+        "schema": SdnValue.String("source-analysis-ipc-v2"),
+        "executable_digest": SdnValue.String(executable_digest), "run_id": SdnValue.String(run_id),
+        "directory": SdnValue.String(root), "directory_identity": SdnValue.String(artifact.identity),
+        "nonce": SdnValue.String(nonce), "request_bytes": SdnValue.Int(input.byte_len()),
+        "request_sha256": SdnValue.String(sha256_text(input))}))
+    if artifact.control.byte_len() > 16384:
+        artifact.error = "artifact_control_exceeds_limit"
+        return Ok(artifact)
+    if not artifact.publish("request.sdn", input, 41943040): return Ok(artifact)
+    val published = artifact.publish("control.sdn", artifact.control, 16384)
+    Ok(artifact)
+
+pub fn source_analysis_artifact_open_v1(control: text) -> Result<SourceAnalysisArtifactV1, text>:
+    val value = source_analysis_wire_parse_v1(control, 16384)?
+    if source_analysis_wire_text_v1(value, "schema")? != "source-analysis-ipc-v2":
+        return Err("artifact_control_schema")
+    val executable_digest = source_analysis_wire_text_v1(value, "executable_digest")?
+    val run_id = source_analysis_wire_text_v1(value, "run_id")?
+    if not source_analysis_executable_digest_valid_v1(executable_digest) or run_id == "" or run_id.byte_len() > 4096:
+        return Err("artifact_launch_identity_invalid")
+    val root = source_analysis_wire_text_v1(value, "directory")?
+    val nonce = source_analysis_wire_text_v1(value, "nonce")?
+    val identity = source_analysis_wire_text_v1(value, "directory_identity")?
+    val parent = path_final_existing(get_temp_dir())?
+    val prefix = parent.path + "/simple-analysis-" + nonce
+    if nonce.byte_len() != 64 or hex_to_bytes(nonce).len() != 32 or identity.byte_len() != 64 or not root.starts_with(prefix):
+        return Err("artifact_control_directory_rejected")
+    val suffix = root.substring(prefix.len(), root.len())
+    if suffix == "" or suffix.contains("/") or suffix.contains("\\") or suffix.contains("\u0000"):
+        return Err("artifact_control_directory_rejected")
+    val pin = OwnedCwdPinV4.pin(root)?
+    var artifact = SourceAnalysisArtifactV1(root: root, identity: identity, nonce: nonce,
+        control: control, pin: Some(pin), probe: nil, error: "")
+    val manifest = artifact.read_leaf("control.sdn", 16384)
+    if manifest.is_err() or manifest.unwrap() != control:
+        artifact.error = "artifact_manifest_mismatch"
+    Ok(artifact)

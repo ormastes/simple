@@ -97,6 +97,13 @@ use compiler.frontend.core.representation_declarations_v1.{representation_parser
 use compiler.frontend.core.static_lock_level_metadata.{lock_level_metadata_reset}
 use compiler.frontend.core.flat_pool_codec.*
 
+use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1}
+use compiler.common.diagnostics.severity.{Severity}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.core.parser_diagnostic_snapshot_v1.*
+use compiler.frontend.core.lexer.{lex_current_token_byte_span}
+use std.common.encoding.utf8.{text_byte_len}
+
 # ===== Parser State =====
 
 use compiler.frontend.core.parser_lexical_bindings.{ParserLexicalBindings}
@@ -109,6 +116,12 @@ use compiler.frontend.core.parser_lexical_bindings.{ParserLexicalBindings}
 pub struct ParserState:
     # Owned by this Parser lifecycle; unresolved outer names stay unresolved.
     par_lexical_bindings: ParserLexicalBindings
+    par_diagnostics_v1: [DiagnosticV1]
+    par_diagnostic_source_v1: text
+    par_diagnostic_path_v1: text
+    par_diagnostic_lines_v1: [text]
+    par_diagnostic_line_bytes_v1: [i64]
+    par_diagnostic_lex_line_bytes_v1: [i64]
     par_errors: [text]
     par_warnings: [text]
     par_struct_names: [text]
@@ -142,6 +155,12 @@ pub struct ParserState:
 fn parser_state_fresh() -> ParserState:
     ParserState(
         par_lexical_bindings: ParserLexicalBindings(authority: 0, scope_authorities: []),
+        par_diagnostics_v1: [],
+        par_diagnostic_source_v1: "",
+        par_diagnostic_path_v1: "",
+        par_diagnostic_lines_v1: [],
+        par_diagnostic_line_bytes_v1: [],
+        par_diagnostic_lex_line_bytes_v1: [],
         par_errors: [],
         par_warnings: [],
         par_struct_names: [],
@@ -216,6 +235,12 @@ pub fn parser_promote_transient_owners() -> bool:
         rt_transient_heap_promote(par_state.par_text_slot) and
         rt_transient_heap_promote(par_state.par_line_slot) and
         rt_transient_heap_promote(par_state.par_col_slot) and
+        rt_transient_heap_promote(par_state.par_diagnostics_v1) and
+        rt_transient_heap_promote(par_state.par_diagnostic_lines_v1) and
+        rt_transient_heap_promote(par_state.par_diagnostic_line_bytes_v1) and
+        rt_transient_heap_promote(par_state.par_diagnostic_lex_line_bytes_v1) and
+        rt_transient_heap_promote(par_state.par_diagnostic_source_v1) and
+        rt_transient_heap_promote(par_state.par_diagnostic_path_v1) and
         rt_transient_heap_promote(par_state.par_errors) and
         rt_transient_heap_promote(par_state.par_warnings) and
         rt_transient_heap_promote(par_state.par_struct_names) and
@@ -397,6 +422,9 @@ fn parser_init_with_path(source: text, path: text):
     # Assignment discards the stale owner before any read and makes this
     # file's scratch explicitly scope-local.
     par_state.par_lexical_bindings = ParserLexicalBindings(authority: 0, scope_authorities: [])
+    par_state.par_diagnostics_v1 = []
+    par_state.par_diagnostic_source_v1 = source
+    par_state.par_diagnostic_path_v1 = path
     par_state.par_errors = []
     par_state.par_warnings = []
     par_state.par_struct_names = []
@@ -461,7 +489,9 @@ fn parser_init_with_path(source: text, path: text):
     # flat-AST cache restore) and parse_module* all enter here. Preprocessing
     # is idempotent -- directive lines become blank, so source already
     # selected (e.g. by the target-receipted frontend) passes through intact.
-    lex_init_with_path(_pp_preprocess_conditionals(source), path)
+    val diagnostic_preprocessed_v1 = _pp_preprocess_conditionals(source)
+    parser_diagnostic_source_set_v1(source, path, diagnostic_preprocessed_v1)
+    lex_init_with_path(diagnostic_preprocessed_v1, path)
     parser_advance()
 
 # Parse-scoped timing policy (level-gated, DEFAULT OFF;
@@ -536,6 +566,7 @@ fn parser_expect(expected: i64) -> bool:
     if par_kind_get() == expected:
         parser_advance()
         return true
+    parser_record_current_diagnostic_v1(DiagnosticV1.error("PAR001", "expected " + tok_kind_name(expected) + ", got " + tok_kind_name(par_kind_get()) + " '" + par_text_get() + "'"))
     # Cross-module attribution: without the path prefix, this message is
     # indistinguishable from an error raised while parsing a DIFFERENT module
     # (e.g. in a full multi-module build, log readers wrongly blamed
@@ -553,6 +584,7 @@ fn parser_expect(expected: i64) -> bool:
     false
 
 fn parser_error(msg: text):
+    parser_record_current_diagnostic_v1(DiagnosticV1.error("PAR001", msg))
     val full = "line " + int_to_str(par_line_get()) + ":" + int_to_str(par_col_get()) + ": " + msg
     if not par_state.par_diagnostics_suppressed:
         print "[parser_error] {full}"
@@ -566,6 +598,7 @@ fn parser_error(msg: text):
 # A diagnostic found after the parse (a whole-module check), reported at the
 # position of the offending node instead of the parser's final token.
 fn parser_error_at(line: i64, col: i64, msg: text):
+    parser_record_diagnostic_v1(DiagnosticV1.error("PAR001", msg), line, col)
     val full = "line " + int_to_str(line) + ":" + int_to_str(col) + ": " + msg
     if not par_state.par_diagnostics_suppressed:
         print "[parser_error] {full}"
@@ -575,6 +608,55 @@ fn parser_error_at(line: i64, col: i64, msg: text):
     par_had_error_mirror_set()
     par_record_error(full)
     par_first_error_mirror_set(line, col, msg)
+
+# Capture before formatting; point-only producers never fabricate an extent.
+fn parser_diagnostic_source_set_v1(source: text, path: text, preprocessed: text):
+    par_state.par_diagnostic_source_v1 = source
+    par_state.par_diagnostic_path_v1 = path
+    par_state.par_diagnostic_lines_v1 = source.split("\n")
+    par_state.par_diagnostic_line_bytes_v1 = parser_diagnostic_line_bytes_v1(par_state.par_diagnostic_lines_v1)
+    par_state.par_diagnostic_lex_line_bytes_v1 = parser_diagnostic_line_bytes_v1(preprocessed.split("\n"))
+
+pub fn parser_diagnostic_source_path_v1() -> text:
+    par_state.par_diagnostic_path_v1
+
+fn parser_record_current_diagnostic_v1(record: DiagnosticV1):
+    val native = lex_current_token_byte_span(par_kind_get(), par_line_get(), par_col_get())
+    val start = parser_original_byte_v1(par_state.par_diagnostic_lex_line_bytes_v1,
+        par_state.par_diagnostic_line_bytes_v1, native.start)
+    val end = parser_original_byte_v1(par_state.par_diagnostic_lex_line_bytes_v1,
+        par_state.par_diagnostic_line_bytes_v1, native.end)
+    var captured = record
+    if par_kind_get() == TOK_EOF:
+        # A blanked final line has a shorter processed EOF column. EOF belongs
+        # after the ORIGINAL final byte, including excluded trailing text.
+        val original_end = text_byte_len(par_state.par_diagnostic_source_v1)
+        val original_line = par_state.par_diagnostic_lines_v1.len()
+        var original_col = 1
+        if original_line > 0:
+            for character in par_state.par_diagnostic_lines_v1[original_line - 1]:
+                original_col = original_col + 1
+        captured.span = Some(Span(start: original_end, end: original_end,
+            line: original_line, col: original_col, file: par_state.par_diagnostic_path_v1, length: 0))
+    elif start >= 0 and end >= start:
+        captured.span = Some(Span(start: start, end: end, line: par_line_get(), col: par_col_get(),
+            file: par_state.par_diagnostic_path_v1, length: end - start))
+    parser_record_diagnostic_v1(captured, par_line_get(), par_col_get())
+
+pub fn parser_record_diagnostic_v1(record: DiagnosticV1, line: i64, col: i64):
+    var captured = record
+    if captured.file == nil:
+        captured.file = Some(par_state.par_diagnostic_path_v1)
+    if captured.span == nil and captured.file.unwrap() == par_state.par_diagnostic_path_v1:
+        captured.span = parser_original_point_indexed_v1(par_state.par_diagnostic_lines_v1,
+            par_state.par_diagnostic_line_bytes_v1, par_state.par_diagnostic_path_v1, line, col)
+    if par_state.par_diagnostics_v1 == nil:
+        par_state.par_diagnostics_v1 = []
+    par_state.par_diagnostics_v1.push(captured)
+
+pub fn parser_get_diagnostics_v1() -> [DiagnosticV1]:
+    if par_state.par_diagnostics_v1 == nil: return []
+    par_state.par_diagnostics_v1
 
 # Append to the recorded-error list that backs parser_get_errors() and
 # parser_error_count(). `par_errors` was declared, replaced on init and exported,
@@ -641,6 +723,10 @@ fn parser_guarded_int_text(t: text) -> i64:
     acc
 
 fn parser_warn(msg: text):
+    parser_warn_with_code_v1("PARW001", msg)
+
+fn parser_warn_with_code_v1(code: text, msg: text):
+    parser_record_current_diagnostic_v1(DiagnosticV1.warning(code, msg))
     if par_state.par_warnings == nil:
         par_state.par_warnings = []
     val full = "line " + int_to_str(par_line_get()) + ":" + int_to_str(par_col_get()) + ": " + msg
@@ -665,7 +751,7 @@ fn parser_path_is_script(path: text) -> bool:
 fn parser_warn_print_if_needed():
     if parser_path_is_script(module_get_path()):
         return
-    parser_warn("LOG001: use log() instead of print() in non-script code")
+    parser_warn_with_code_v1("LOG001", "LOG001: use log() instead of print() in non-script code")
 
 fn parser_warnings_get() -> [text]:
     if par_state.par_warnings == nil:
@@ -673,6 +759,11 @@ fn parser_warnings_get() -> [text]:
     par_state.par_warnings
 
 fn parser_warnings_clear():
+    var retained: [DiagnosticV1] = []
+    for record in par_state.par_diagnostics_v1:
+        if record.severity != Severity.Warning:
+            retained.push(record)
+    par_state.par_diagnostics_v1 = retained
     if par_state.par_warnings != nil:
         par_state.par_warnings.clear()
 
@@ -1482,7 +1573,10 @@ fn parse_module_file(source: text, path: text):
     if par_state.par_struct_names == nil:
         par_state.par_struct_names = []
     par_state.par_had_error = false
+    par_state.par_diagnostic_source_v1 = source
+    par_state.par_diagnostic_path_v1 = path
     val preprocessed = _pp_preprocess_conditionals(source)
+    parser_diagnostic_source_set_v1(source, path, preprocessed)
     module_set_path(path)
     parser_collection_site_reset()
     lex_init_with_path(preprocessed, path)
@@ -1536,6 +1630,7 @@ export parser_init, parser_init_with_path, parser_advance, parser_check, parser_
 export parser_note_use_import
 export parser_has_errors, parser_get_errors, parser_error_count, parser_set_had_error
 export parser_error_at
+export parser_get_diagnostics_v1, parser_record_diagnostic_v1, parser_diagnostic_source_path_v1
 export parser_first_error_get
 export parser_initialization_generation_v1, parser_promote_transient_owners
 export parser_tok_save, parser_tok_restore
@@ -1587,7 +1682,7 @@ export parse_val_decl, parse_lazy_val_decl, parse_var_decl
 
 # --- flat-AST pool codec: parser diagnostics + token slots ------------------------------
 #
-# Dump/restore for this file's per-parse state, in a FIXED SORTED ORDER that
+# Dump/restore for this file's per-parse state, in a FIXED VERSIONED ORDER that
 # dump and restore share. Order is the whole contract: the blob carries no
 # names, so a reordering on one side silently pairs each item with its
 # neighbour's data.
@@ -1600,9 +1695,15 @@ pub fn flat_parser_state_dump() -> text:
     # Sub-blobs are collected and joined once. `out = out + <sub-blob>` across
     # ~165 pools re-copied the whole growing multi-megabyte blob on every pool,
     # which is quadratic in the pool count and paid on every cache-MISS store.
-    # The bytes emitted are unchanged: the same pieces, in the same order.
+    # V14 prefixes original diagnostic owners; legacy fields retain their order.
     # doc/08_tracking/bug/frontend_shard_and_cache_hit_cost_2026-08-21.md
     var parts: [text] = []
+    parts = parts.push(flat_pool_enc_text(par_state.par_diagnostic_lines_v1))
+    parts = parts.push(flat_pool_enc_i64(par_state.par_diagnostic_line_bytes_v1))
+    parts = parts.push(flat_pool_enc_i64(par_state.par_diagnostic_lex_line_bytes_v1))
+    parts = parts.push(flat_pool_enc_scalar_text(par_state.par_diagnostic_source_v1))
+    parts = parts.push(flat_pool_enc_scalar_text(par_state.par_diagnostic_path_v1))
+    parts = parts.push(flat_pool_enc_parser_diagnostics_v1(par_state.par_diagnostics_v1))
     parts = parts.push(flat_pool_enc_i64(par_state.par_col_slot))
     parts = parts.push(flat_pool_enc_scalar_i64(par_state.par_diagnostic_emit_count))
     parts = parts.push(flat_pool_enc_scalar_bool(par_state.par_diagnostics_suppressed))
@@ -1622,6 +1723,13 @@ pub fn flat_parser_state_dump() -> text:
 # Returns false when the blob ran short or was malformed; the caller must
 # treat that as a cache MISS and reparse, never as an empty parse.
 pub fn flat_parser_state_restore(r: FlatPoolReader) -> bool:
+    par_state.par_diagnostic_lines_v1 = flat_pool_dec_text(r)
+    par_state.par_diagnostic_line_bytes_v1 = flat_pool_dec_i64(r)
+    par_state.par_diagnostic_lex_line_bytes_v1 = flat_pool_dec_i64(r)
+    par_state.par_diagnostic_source_v1 = flat_pool_dec_scalar_text(r)
+    par_state.par_diagnostic_path_v1 = flat_pool_dec_scalar_text(r)
+    par_state.par_diagnostics_v1 = flat_pool_dec_parser_diagnostics_v1(r)
+    if not r.ok: return false
     par_state.par_col_slot = flat_pool_dec_i64_into(par_state.par_col_slot, r)
     par_state.par_diagnostic_emit_count = flat_pool_dec_scalar_i64(r)
     par_state.par_diagnostics_suppressed = flat_pool_dec_scalar_bool(r)

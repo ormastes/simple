@@ -1,0 +1,73 @@
+# Source regression obligations; execution requires an admitted runtime.
+use std.spec.*
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.generated.hir_codec.{hc_enc_span, hc_enc_hir_type, hc_enc_hir_type_kind}
+
+describe "HIR encoder traversal bounds":
+    it "preserves exact legacy scalar bytes through balanced bounded entry":
+        val span = Span(start: 1, end: 2, line: 3, col: 4, file: "x", length: 1)
+        var legacy = HirCodecWriter.create()
+        var bounded = HirCodecWriter.create_canonical_bounded(4096, 65536, 65536, 1)
+        hc_enc_span(legacy, span)
+        hc_enc_span(bounded, span)
+        expect(legacy.finish()).to_equal("1\n2\n3\n4\nx\n1\n")
+        expect(bounded.finish()).to_equal(legacy.finish())
+        expect(bounded.ok).to_equal(true)
+        expect(bounded.current_depth).to_equal(0)
+        expect(bounded.maximum_depth).to_equal(1)
+        expect(bounded.entered_nodes).to_equal(1)
+
+    it "rejects recursive input at the exact admitted depth and unwinds":
+        var node = HirType(kind: HirTypeKind.Unit, span: Span.empty())
+        for index in 0..12:
+            node = HirType(kind: HirTypeKind.Optional(node), span: Span.empty())
+        var bounded = HirCodecWriter.create_canonical_bounded(65536, 1048576, 1048576, 4)
+        hc_enc_hir_type(bounded, node)
+        expect(bounded.ok).to_equal(false)
+        expect(bounded.unsupported).to_equal("writer_depth")
+        expect(bounded.maximum_depth).to_equal(4)
+        expect(bounded.current_depth).to_equal(0)
+        expect(bounded.finish()).to_equal("")
+
+    it "stops a broad tuple after its work admission is exhausted":
+        var items: [HirType] = []
+        for index in 0..100:
+            items.push(HirType(kind: HirTypeKind.Unit, span: Span.empty()))
+        var bounded = HirCodecWriter.create_canonical_bounded(65536, 1048576, 100, 128)
+        hc_enc_hir_type_kind(bounded, HirTypeKind.Tuple(items))
+        expect(bounded.ok).to_equal(false)
+        expect(bounded.failure_kind).to_equal("bounds")
+        expect(bounded.entered_nodes).to_be_less_than(100)
+        expect(bounded.charged_work_units).to_be_less_than(101)
+        expect(bounded.current_depth).to_equal(0)
+
+    it "does not reenter or charge a previously poisoned writer":
+        var bounded = HirCodecWriter.create_canonical_bounded(0, 65536, 65536)
+        bounded.put_i64(1)
+        val charged = bounded.charged_work_units
+        hc_enc_span(bounded, Span.empty())
+        bounded.put_text("must not scan")
+        expect(bounded.entered_nodes).to_equal(0)
+        expect(bounded.charged_work_units).to_equal(charged)
+        expect(bounded.finish()).to_equal("")
+
+    it "refuses zero depth before encoding and accepts the compatible default":
+        var zero = HirCodecWriter.create_canonical_bounded(4096, 65536, 65536, 0)
+        hc_enc_span(zero, Span.empty())
+        expect(zero.unsupported).to_equal("writer_depth")
+        expect(zero.entered_nodes).to_equal(0)
+        expect(zero.current_depth).to_equal(0)
+        var normal = HirCodecWriter.create_canonical_bounded(4096, 65536, 65536)
+        hc_enc_span(normal, Span.empty())
+        expect(normal.ok).to_equal(true)
+        expect(normal.max_depth).to_equal(128)
+
+    it "rejects key materialization before allocation when admission is absent":
+        var bounded = HirCodecWriter.create_canonical_bounded(4096, 0, 65536)
+        expect(bounded.account_key_snapshot(10)).to_equal(false)
+        val charged = bounded.charged_work_units
+        expect(bounded.account_text_key_order(["long-key", "other-key"])).to_equal(false)
+        expect(bounded.charged_work_units).to_equal(charged)
+        expect(bounded.failure_kind).to_equal("bounds")

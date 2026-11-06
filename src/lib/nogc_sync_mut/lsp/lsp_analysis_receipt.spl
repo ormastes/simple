@@ -1,0 +1,99 @@
+# Exact snapshot worker response admission; arbitrary stdout is never scanned.
+use std.common.diagnostics.source_analysis_v1.*
+use std.common.diagnostics.source_analysis_wire_v1.*
+use std.common.sdn.value.{SdnValue}
+use std.common.json.value.{JsonValue, json_parse_value_strict}
+use std.nogc_sync_mut.lsp.lsp_json_limits.{lsp_json_payload_error_v1}
+
+pub struct LspAnalysisResponseV1:
+    receipt: SourceAnalysisReceiptV1
+    diagnostics: [JsonValue]
+
+fn analysis_status_v1(value: text) -> Result<SourceAnalysisStatusV1, text>:
+    match value:
+        case "Completed": Ok(SourceAnalysisStatusV1.Completed)
+        case "Rejected": Ok(SourceAnalysisStatusV1.Rejected)
+        case "Cancelled": Ok(SourceAnalysisStatusV1.Cancelled)
+        case "TimedOut": Ok(SourceAnalysisStatusV1.TimedOut)
+        case "Failed": Ok(SourceAnalysisStatusV1.Failed)
+        case "InvalidPayload": Ok(SourceAnalysisStatusV1.InvalidPayload)
+        case _: Err("unknown analysis status")
+
+pub fn lsp_analysis_response_decode_v1(wire: text) -> Result<LspAnalysisResponseV1, text>:
+    val value = source_analysis_wire_parse_v1(wire, 4194304)?
+    if source_analysis_wire_text_v1(value, "schema")? != "source-analysis-response-v1":
+        return Err("wrong analysis response schema")
+    if source_analysis_wire_text_v1(value, "diagnostics_format")? != "diagnostic-v1-json":
+        return Err("unsupported diagnostic payload format")
+    val row = value.get("receipt") ?? SdnValue.Null
+    val dependency_rows = source_analysis_wire_array_v1(row, "dependencies")?
+    if dependency_rows.len() > 4096: return Err("dependency count limit")
+    var dependencies: [SourceAnalysisDependencyV1] = []
+    var paths: [text] = []
+    var total = 0
+    for dependency in dependency_rows:
+        val path = source_analysis_wire_text_v1(dependency, "path")?
+        val digest = source_analysis_wire_text_v1(dependency, "digest")?
+        val origin = source_analysis_wire_text_v1(dependency, "origin")?
+        val size = source_analysis_wire_int_v1(dependency, "byte_count")?
+        val version = source_analysis_wire_int_v1(dependency, "document_version")?
+        if path == "" or path.byte_len() > 4096 or paths.contains(path): return Err("invalid dependency path")
+        if digest.byte_len() != 64 or size < 0 or size > 1048576: return Err("invalid dependency identity")
+        if origin != "overlay" and origin != "disk": return Err("invalid dependency origin")
+        if origin == "disk" and version != -1: return Err("disk dependency has editor version")
+        total = total + size
+        if total > 67108864: return Err("dependency byte limit")
+        paths.push(path)
+        dependencies.push(SourceAnalysisDependencyV1(path: path, digest: digest, byte_count: size,
+            origin: origin, document_version: version))
+    val complete = match row.get("structured_diagnostics_complete"):
+        case Some(SdnValue.Bool(item)): item
+        case _: return Err("missing structured diagnostic completion")
+    val receipt = SourceAnalysisReceiptV1(status: analysis_status_v1(source_analysis_wire_text_v1(row, "status")?)?,
+        reason: source_analysis_wire_text_v1(row, "reason")?, run_id: source_analysis_wire_text_v1(row, "run_id")?,
+        workspace_identity: source_analysis_wire_text_v1(row, "workspace_identity")?,
+        owner_id: source_analysis_wire_text_v1(row, "owner_id")?,
+        lifetime_generation: source_analysis_wire_int_v1(row, "lifetime_generation")?,
+        request_digest: source_analysis_wire_text_v1(row, "request_digest")?,
+        environment_digest: source_analysis_wire_text_v1(row, "environment_digest")?, dependencies: dependencies,
+        dependency_digest: source_analysis_wire_text_v1(row, "dependency_digest")?,
+        structured_diagnostics_complete: complete)
+    val payload = source_analysis_wire_text_v1(value, "diagnostics_json")?
+    val payload_error = lsp_json_payload_error_v1(payload, 4194304)
+    if payload_error != "": return Err(payload_error)
+    val parsed = json_parse_value_strict(payload)?
+    val diagnostics = match parsed:
+        case JsonValue.Array(items): items
+        case _: return Err("diagnostics payload must be an array")
+    if diagnostics.len() > 4096: return Err("diagnostic count limit")
+    Ok(LspAnalysisResponseV1(receipt: receipt, diagnostics: diagnostics))
+
+pub fn lsp_analysis_receipt_identity_matches_v1(request: SourceAnalysisRequestV1, receipt: SourceAnalysisReceiptV1) -> bool:
+    if receipt.run_id != request.run_id or receipt.owner_id != request.owner_id: return false
+    if receipt.workspace_identity != request.workspace_identity or receipt.lifetime_generation != request.lifetime_generation: return false
+    if receipt.request_digest != source_analysis_request_digest_v1(request): return false
+    receipt.environment_digest == source_analysis_environment_digest_v1(request.environment)
+
+pub fn lsp_analysis_receipt_matches_v1(request: SourceAnalysisRequestV1, receipt: SourceAnalysisReceiptV1) -> bool:
+    if receipt.status != SourceAnalysisStatusV1.Completed or not receipt.structured_diagnostics_complete: return false
+    if not lsp_analysis_receipt_identity_matches_v1(request, receipt): return false
+    if receipt.dependency_digest != source_analysis_dependency_digest_v1(receipt.dependencies): return false
+    if receipt.dependencies.len() > request.bounds.max_dependency_files: return false
+    var entry_found = false
+    var total = 0
+    for dependency in receipt.dependencies:
+        total = total + dependency.byte_count
+        if dependency.byte_count > request.bounds.max_dependency_file_bytes or total > request.bounds.max_dependency_bytes: return false
+        var overlay_found = false
+        for document in request.documents:
+            if document.path != dependency.path: continue
+            overlay_found = true
+            if dependency.origin != "overlay" or dependency.document_version != document.version: return false
+            if dependency.digest != document.digest or dependency.byte_count != document.source.byte_len(): return false
+        if dependency.origin == "overlay" and not overlay_found: return false
+        if dependency.path == request.entry_path: entry_found = overlay_found
+    entry_found
+
+export LspAnalysisResponseV1, lsp_analysis_response_decode_v1, lsp_analysis_receipt_matches_v1
+
+export lsp_analysis_receipt_identity_matches_v1

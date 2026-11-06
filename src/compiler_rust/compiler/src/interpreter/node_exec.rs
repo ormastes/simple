@@ -287,7 +287,7 @@ fn coerce_store_at_place(
             field_place.projections.pop();
             coerce_store_at_field_place(env, &field_place, true, value, classes)
         }
-        None => value,
+        Some(super::place::Projection::Unwrap) | None => value,
     }
 }
 
@@ -1267,31 +1267,6 @@ fn forward_field_setter(
     Ok(true)
 }
 
-/// Write `value` through a place whose call-result root was already bound by
-/// `place::bind_call_root`; the indices on the path are evaluated here, after
-/// the root.
-#[allow(clippy::too_many_arguments)]
-fn write_rebound_place(
-    target: &Expr,
-    value: Value,
-    env: &mut Env,
-    functions: &mut HashMap<String, Arc<FunctionDef>>,
-    classes: &mut HashMap<String, Arc<ClassDef>>,
-    enums: &Enums,
-    impl_methods: &ImplMethods,
-) -> Result<Control, CompileError> {
-    if let Some(place) = super::place::resolve_place(target, env, functions, classes, enums, impl_methods)? {
-        let value = coerce_store_at_place(env, &place, value, classes);
-        if super::place::write_place(env, &place, value) {
-            return Ok(Control::Next);
-        }
-    }
-    let ctx = ErrorContext::new()
-        .with_code(codes::INVALID_ASSIGNMENT)
-        .with_help("the indexed place does not exist or cannot be written");
-    Err(CompileError::semantic_with_context("invalid assignment: invalid index assignment", ctx))
-}
-
 pub(crate) fn exec_assignment(
     assign: &simple_parser::ast::AssignmentStmt,
     env: &mut Env,
@@ -1300,6 +1275,17 @@ pub(crate) fn exec_assignment(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
+    if super::place::is_temporary_assignment_place(&assign.target) {
+        let value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+        let (place, mut storage) = super::place::resolve_temporary_assignment_place(
+            &assign.target, env, functions, classes, enums, impl_methods,
+        )?;
+        let value = coerce_store_at_place(&storage, &place, value, classes);
+        if super::place::write_place(&mut storage, &place, value) {
+            return Ok(Control::Next);
+        }
+        return Err(CompileError::semantic("invalid assignment: temporary place write failed"));
+    }
     if let Expr::Identifier(name) = &assign.target {
         // Check if this is a first-time assignment (implicit declaration)
         let is_first_assignment = !env.contains_key(name);
@@ -1923,15 +1909,6 @@ pub(crate) fn exec_assignment(
     } else if let Expr::Index { receiver, index } = &assign.target {
         // Handle index assignment: arr[i] = value or dict["key"] = value or self.dict[key] = value
         let mut value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
-        // A call-result root (`get()[i()] = v`): evaluate the call once after
-        // the RHS, then the indices, and write through the bound result.
-        if let Some((target, binding)) =
-            super::place::bind_call_root(&assign.target, env, functions, classes, enums, impl_methods)?
-        {
-            let written = write_rebound_place(&target, value, env, functions, classes, enums, impl_methods);
-            super::place::unbind_call_root(env, binding);
-            return written;
-        }
         // Evaluation order contract (owner decision 2026-11-06, data plan W2a):
         // RHS first, then the place — receiver, then index subexpressions
         // outer to inner — each exactly once. A receiver whose path holds an
@@ -2899,6 +2876,16 @@ fn augmented_through_place(
     let Some(place) = super::place::resolve_place(&assign.target, env, functions, classes, enums, impl_methods)? else {
         return Ok(None);
     };
+    augmented_at_place(place, bin_op, rhs_value, env, functions, classes, enums, impl_methods)
+}
+
+fn augmented_at_place(
+    place: super::place::Place,
+    bin_op: Option<BinOp>, rhs_value: Value, env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums, impl_methods: &ImplMethods,
+) -> Result<Option<Control>, CompileError> {
     super::place::refresh_module_global_root(env, &place.root);
     let new_value = match bin_op {
         Some(op) => {
@@ -2911,27 +2898,7 @@ fn augmented_through_place(
                     ctx,
                 ));
             };
-            let old_temp = "__aug_place_old__".to_string();
-            let rhs_temp = "__aug_place_rhs__".to_string();
-            let saved_old = env.get(&old_temp).cloned();
-            let saved_rhs = env.get(&rhs_temp).cloned();
-            env.insert(old_temp.clone(), old_value);
-            env.insert(rhs_temp.clone(), rhs_value);
-            let binary = Expr::Binary {
-                op,
-                left: Box::new(Expr::Identifier(old_temp.clone())),
-                right: Box::new(Expr::Identifier(rhs_temp.clone())),
-            };
-            let result = evaluate_expr(&binary, env, functions, classes, enums, impl_methods);
-            match saved_old {
-                Some(v) => env.insert(old_temp, v),
-                None => env.remove(&old_temp),
-            };
-            match saved_rhs {
-                Some(v) => env.insert(rhs_temp, v),
-                None => env.remove(&rhs_temp),
-            };
-            result?
+            evaluate_augmented_values(op, old_value, rhs_value, env, functions, classes, enums, impl_methods)?
         }
         None => rhs_value,
     };
@@ -2980,6 +2947,26 @@ pub(crate) fn exec_augmented_assignment(
             ));
         }
     };
+
+    if super::place::is_temporary_assignment_place(&assign.target) {
+        let mut rhs_value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+        if is_suspend {
+            rhs_value = await_value(rhs_value)?;
+        }
+        let (place, mut storage) = super::place::resolve_temporary_assignment_place(
+            &assign.target, env, functions, classes, enums, impl_methods,
+        )?;
+        let new_value = match bin_op {
+            Some(op) => {
+                let old_value = super::place::place_read(&storage, &place).ok_or_else(||
+                    CompileError::semantic("invalid assignment: augmented assignment to a missing place"))?;
+                evaluate_augmented_values(op, old_value, rhs_value, env, functions, classes, enums, impl_methods)?
+            }
+            None => rhs_value,
+        };
+        return augmented_at_place(place, None, new_value, &mut storage, functions, classes, enums, impl_methods)
+            .map(|control| control.unwrap_or(Control::Next));
+    }
 
     // Handle identifier targets: x += 1 or x ~+= promise
     if let Expr::Identifier(name) = &assign.target {
@@ -3345,30 +3332,6 @@ pub(crate) fn exec_augmented_assignment(
         let mut rhs_value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
         if is_suspend {
             rhs_value = await_value(rhs_value)?;
-        }
-        // A call-result root (`get()[i()] += v`): the root call runs once,
-        // after the RHS and before the indices.
-        // Bug: doc/08_tracking/bug/seed_interp_call_root_place_order_2026-11-06.md
-        if let Some((target, binding)) =
-            super::place::bind_call_root(&assign.target, env, functions, classes, enums, impl_methods)?
-        {
-            let rebound = simple_parser::ast::AssignmentStmt {
-                span: assign.span,
-                target,
-                op: assign.op,
-                value: Expr::Nil,
-            };
-            let result = augmented_through_place(&rebound, bin_op, rhs_value, env, functions, classes, enums, impl_methods);
-            super::place::unbind_call_root(env, binding);
-            return match result? {
-                Some(control) => Ok(control),
-                None => {
-                    let ctx = ErrorContext::new()
-                        .with_code(codes::INVALID_ASSIGNMENT)
-                        .with_help("the indexed place does not exist or cannot be written");
-                    Err(CompileError::semantic_with_context("invalid assignment: invalid index assignment", ctx))
-                }
-            };
         }
         if index_may_have_effects(receiver) {
             if let Some(control) =
@@ -4382,5 +4345,189 @@ mod declared_signed_binding_tests {
         assert_eq!(run(local), -1294967);
         let param = "fn echo32(x: i32) -> i64:\n    x / 1000\nmain = echo32(3000000000)\n";
         assert_eq!(run(param), -1294967);
+    }
+}
+
+
+/// Binary operator dispatch retains the real caller context (default arguments,
+/// operator methods and global publication). Restore internal operand slots on
+/// both normal errors and unwinding; temporary-place storage stays separate.
+fn evaluate_augmented_values(
+    op: BinOp, old_value: Value, rhs_value: Value, env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums, impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    let old_temp = "__aug_place_old__".to_string();
+    let rhs_temp = "__aug_place_rhs__".to_string();
+    let saved_old = env.get(&old_temp).cloned();
+    let saved_rhs = env.get(&rhs_temp).cloned();
+    env.insert(old_temp.clone(), old_value);
+    env.insert(rhs_temp.clone(), rhs_value);
+    let binary = Expr::Binary {
+        op,
+        left: Box::new(Expr::Identifier(old_temp.clone())),
+        right: Box::new(Expr::Identifier(rhs_temp.clone())),
+    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+        evaluate_expr(&binary, env, functions, classes, enums, impl_methods)));
+    match saved_old {
+        Some(value) => env.insert(old_temp, value),
+        None => env.remove(&old_temp),
+    };
+    match saved_rhs {
+        Some(value) => env.insert(rhs_temp, value),
+        None => env.remove(&rhs_temp),
+    };
+    match result {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+/// Real AST execution controls for call-root assignments, not a Place mirror.
+#[cfg(test)]
+mod call_root_assignment_tests {
+    use super::*;
+    use simple_parser::Parser;
+
+    fn run(source: &str) -> Result<i32, CompileError> {
+        crate::interpreter::clear_module_cache();
+        crate::interpreter::clear_interpreter_state();
+        let module = Parser::new(source).parse().expect("real source grammar");
+        crate::interpreter::evaluate_module(&module.items)
+    }
+
+    const ARRAY: &str = "var trace = \"\"\nfn get_arr() -> [i64]:\n    trace = trace + \"R\"\n    [1]\nfn idx() -> i64:\n    trace = trace + \"I\"\n    0\nfn rhs() -> i64:\n    trace = trace + \"V\"\n    2\n";
+
+    #[test]
+    fn plain_and_compound_call_root_index_execute_rhs_receiver_index_once() {
+        for operator in ["=", "+="] {
+            let source = format!("{ARRAY}fn main() -> i64:\n    get_arr()[idx()] {operator} rhs()\n    if trace != \"VRI\": return 1\n    return 0\n");
+            assert_eq!(run(&source).expect("temporary array write executes"), 0, "{operator}");
+        }
+    }
+
+    #[test]
+    fn temporary_array_preserves_existing_value_cow() {
+        let source = "var original = [1]\nfn get_arr() -> [i64]:\n    original\nfn main() -> i64:\n    get_arr()[0] += 2\n    if original[0] != 1: return 1\n    return 0\n";
+        assert_eq!(run(source).expect("temporary value write executes"), 0);
+    }
+
+    #[test]
+    fn method_call_result_is_also_a_temporary_root() {
+        let source = "class Factory:\n    n: i64\nimpl Factory:\n    fn values(self) -> [i64]:\n        [self.n]\nfn main() -> i64:\n    val factory = Factory(n: 1)\n    factory.values()[0] += 2\n    if factory.n != 1: return 1\n    return 0\n";
+        assert_eq!(run(source).expect("method-result array write"), 0);
+    }
+
+    #[test]
+    fn call_root_class_alias_field_and_nested_index_write_shared_instance() {
+        let source = "class Counter:\n    n: i64\n    rows: [i64]\nvar shared = Counter(n: 5, rows: [1])\nvar trace = \"\"\nfn get_counter() -> Counter:\n    trace = trace + \"R\"\n    shared\nfn idx() -> i64:\n    trace = trace + \"I\"\n    0\nfn rhs() -> i64:\n    trace = trace + \"V\"\n    2\nfn main() -> i64:\n    val alias = shared\n    get_counter().n += rhs()\n    if trace != \"VR\": return 1\n    if alias.n != 7: return 2\n    trace = \"\"\n    get_counter().rows[idx()] = rhs()\n    if trace != \"VRI\": return 3\n    if alias.rows[0] != 2: return 4\n    return 0\n";
+        assert_eq!(run(source).expect("class alias write executes"), 0);
+    }
+
+    #[test]
+    fn force_unwrapped_call_root_succeeds_and_nil_prevents_index_side_effects() {
+        let good = "fn values() -> [i64]?:\n    [1]\nfn main() -> i64:\n    values()![0] += 2\n    return 0\n";
+        assert_eq!(run(good).expect("present optional temporary"), 0);
+        let bad = "var trace = \"\"\nfn values() -> [i64]?:\n    nil\nfn idx() -> i64:\n    trace = trace + \"I\"\n    0\nfn main() -> i64:\n    values()![idx()] = 2\n    return 0\n";
+        let error = run(bad).expect_err("nil unwrap must fail before index");
+        assert!(error.to_string().contains("force unwrap failed"), "{error}");
+        MODULE_GLOBALS.with(|globals| {
+            assert_eq!(globals.borrow().get("trace"), Some(&Value::text("")));
+        });
+    }
+
+    #[test]
+    fn index_error_leaves_caller_environment_free_of_hidden_slots() {
+        let source = "fn values() -> [i64]:\n    [1]\nvalues()[missing_index()] += 2\n";
+        let module = Parser::new(source).parse().expect("failure fixture grammar");
+        let mut functions = HashMap::new();
+        let mut assignment = None;
+        for node in module.items {
+            match node {
+                Node::Function(def) => { functions.insert(def.name.clone(), Arc::new(def)); }
+                Node::Assignment(stmt) => assignment = Some(stmt),
+                _ => {}
+            }
+        }
+        let mut env = Env::new();
+        env.insert("sentinel".into(), Value::Int(17));
+        let before = env.clone();
+        let result = exec_augmented_assignment(&assignment.unwrap(), &mut env, &mut functions,
+            &mut HashMap::new(), &HashMap::new(), &HashMap::new());
+        assert!(result.is_err());
+        assert_eq!(env, before, "temporary slots must never enter caller env");
+    }
+
+    #[test]
+    fn compound_operation_error_cannot_leak_arithmetic_or_root_slots() {
+        let source = "fn values() -> [i64]:\n    [1]\nvalues()[0] /= 0\n";
+        let module = Parser::new(source).parse().expect("arithmetic failure grammar");
+        let mut functions = HashMap::new();
+        let mut assignment = None;
+        for node in module.items {
+            match node {
+                Node::Function(def) => { functions.insert(def.name.clone(), Arc::new(def)); }
+                Node::Assignment(stmt) => assignment = Some(stmt),
+                _ => {}
+            }
+        }
+        let mut env = Env::new();
+        env.insert("sentinel".into(), Value::Int(17));
+        let before = env.clone();
+        let result = exec_augmented_assignment(&assignment.unwrap(), &mut env, &mut functions,
+            &mut HashMap::new(), &HashMap::new(), &HashMap::new());
+        assert!(result.is_err());
+        assert_eq!(env, before, "scoped arithmetic must not affect caller locals");
+    }
+
+    #[test]
+    fn missing_intermediate_field_fails_before_later_index_effects() {
+        for operator in ["=", "+="] {
+            let source = format!("{ARRAY}fn main() -> i64:\n    get_arr().missing[idx()] {operator} rhs()\n    return 0\n");
+            let error = run(&source).expect_err("missing intermediate receiver");
+            assert!(error.to_string().contains("missing temporary receiver"), "{error}");
+            MODULE_GLOBALS.with(|globals| {
+                assert_eq!(globals.borrow().get("trace"), Some(&Value::text("VR")),
+                    "RHS and receiver run once; later index must not run");
+            });
+        }
+    }
+
+    #[test]
+    fn temporary_compound_operator_defaults_use_original_caller_context() {
+        crate::interpreter::clear_module_cache();
+        crate::interpreter::clear_interpreter_state();
+        let source = "class Adder:\n    n: i64\n    fn __add__(self, other: i64, bonus: i64 = caller_bias) -> i64:\n        self.n + other + bonus\nroot()[0] += 2\n";
+        let module = Parser::new(source).parse().expect("operator fixture grammar");
+        let mut classes = HashMap::new();
+        let mut assignment = None;
+        for node in module.items {
+            match node {
+                Node::Class(def) => { classes.insert(def.name.clone(), Arc::new(def)); }
+                Node::Assignment(stmt) => assignment = Some(stmt),
+                _ => {}
+            }
+        }
+        let left = Value::Object {
+            class: "Adder".into(),
+            fields: Arc::new(HashMap::from([("n".into(), Value::Int(1))])),
+        };
+        let mut captured = Env::new();
+        captured.insert("values".into(), Value::array(vec![left]));
+        let mut env = Env::new();
+        env.insert("caller_bias".into(), Value::Int(39));
+        env.mark_local("caller_bias");
+        env.insert("root".into(), Value::Lambda {
+            params: vec![], body: Box::new(Expr::Identifier("values".into())),
+            env: Arc::new(captured),
+        });
+        env.mark_local("root");
+        let before = env.clone();
+        let result = exec_augmented_assignment(&assignment.unwrap(), &mut env, &mut HashMap::new(),
+            &mut classes, &HashMap::new(), &HashMap::new());
+        assert!(result.is_ok(), "operator default must resolve the local caller_bias");
+        assert_eq!(env, before, "operator operand slots must be restored");
     }
 }

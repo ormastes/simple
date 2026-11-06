@@ -118,6 +118,14 @@ pub fn publish_module_typecheck_receipt_v1(ctx: CompileContext, receipt: HirType
         ctx.add_warning(message)
     for message in receipt.errors:
         ctx.add_error(message)
+    ctx.capture_diagnostics_v1(receipt.diagnostics, receipt.captured_errors, receipt.captured_warnings)
+    if ctx.structured_collection_enabled_v1 and receipt.producer_identity != "" and not ctx.structured_typecheck_completed_v1.contains(receipt.producer_identity):
+        ctx.structured_typecheck_completed_v1.push(receipt.producer_identity)
+    # Advisory-only producers may emit messages without adding an error/warning.
+    # They also need original records before a complete snapshot can be claimed.
+    if receipt.messages.len() > receipt.diagnostics.len():
+        ctx.structured_diagnostic_capture_invalid_v1 = true
+        ctx.unstructured_diagnostic_count_v1 = ctx.unstructured_diagnostic_count_v1 + receipt.messages.len() - receipt.diagnostics.len()
 
 pub fn run_typecheck_warn_pass(
     ctx: CompileContext,
@@ -147,6 +155,10 @@ pub fn run_typecheck_warn_pass(
     only after a census.
     """
     # Keep module iteration, severity, diagnostic order, and feature policy.
+    if ctx.structured_collection_enabled_v1:
+        ctx.structured_typecheck_started_v1 = true
+        ctx.structured_typecheck_expected_v1 = hir_modules.keys()
+        ctx.structured_typecheck_completed_v1 = []
     val severity = typecheck_pass_severity()
     # A fresh pass replaces the prior observation generation, including failed
     # and budget-limited runs. Absent modules never inherit previous facts.

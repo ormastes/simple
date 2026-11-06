@@ -307,6 +307,16 @@ int         rt_file_fsync_cached(const uint8_t* path_ptr, uint64_t path_len);
 /* Nullable tagged RuntimeValue: nil on failure, owned byte array on success. */
 int64_t     rt_file_mmap_read_bytes(const uint8_t* path_ptr, uint64_t path_len);
 
+/* Bounded directory snapshot V1: tagged text path, generation-checked owner.
+ * Positive handles are complete snapshots, negative values explicit failures. */
+int64_t rt_directory_list_bounded_v1(int64_t path_value, int64_t max_entries, int64_t max_name_bytes);
+int64_t rt_directory_path_probe_v1(int64_t path_value);
+int64_t rt_directory_list_count_v1(int64_t handle);
+int64_t rt_directory_entry_name_v1(int64_t handle, int64_t index);
+int64_t rt_directory_entry_kind_v1(int64_t handle, int64_t index);
+int64_t rt_directory_entry_size_v1(int64_t handle, int64_t index);
+int64_t rt_directory_list_free_v1(int64_t handle);
+
 /* ===== Memory-Mapped File I/O ===== */
 
 /* ABI: rt_mmap/rt_munmap/rt_madvise/rt_msync are ABSENT from text_arg_indices

@@ -1571,6 +1571,16 @@ impl Lowerer {
             return Ok(None);
         };
         self.flatten_struct_owners = owners;
+        // The common enum pass may expand uniquely resolved glob/facade
+        // bindings. Body type overlays must use those same exact bindings.
+        for item in &module.items {
+            if let Node::Const(c) = item {
+                if let Some((owner, local, source, name)) = crate::interpreter::decode_import_binding_marker(&c.name) {
+                    self.flatten_owner_import_bindings.entry(owner.to_owned()).or_default()
+                        .insert(local.to_owned(), (source.to_owned(), name.to_owned()));
+                }
+            }
+        }
         Ok(Some(module))
     }
 

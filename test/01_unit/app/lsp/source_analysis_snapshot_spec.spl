@@ -1,0 +1,182 @@
+# NOT_RUN: requires the admitted rebuilt pure-Simple runtime.
+# Exercises actual document sync, wire admission and publication owner paths.
+# @req DIAG-01 DIAG-02 FIX-07
+use std.spec
+use std.spec.step
+use std.common.diagnostics.source_analysis_v1.*
+use std.common.diagnostics.source_analysis_wire_v1.*
+use std.common.json.value.{JsonValue, json_value_object_from, json_value_serialize,
+    json_parse_value_strict, json_value_field, json_value_text_or}
+use std.nogc_sync_mut.lsp.lsp_document_sync.{lsp_document_sync_apply,
+    lsp_document_capture_v1, lsp_document_capture_matches_v1}
+use std.nogc_sync_mut.lsp.lsp_analysis_receipt.{LspAnalysisResponseV1,
+    lsp_analysis_response_decode_v1, lsp_analysis_receipt_matches_v1}
+use std.nogc_sync_mut.lsp.lsp_analysis_diagnostics.{lsp_analysis_publications_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn overlay_message(uri: text, version: i64, source: text) -> text:
+    json_value_serialize(json_value_object_from([("textDocument", json_value_object_from([
+        ("uri", JsonValue.Str(uri)), ("version", JsonValue.Int(version)), ("text", JsonValue.Str(source))]))]))
+
+fn analysis_fixture(uri: text) -> SourceAnalysisRequestV1:
+    val environment = SourceAnalysisEnvironmentV1(executable_digest: "e".repeat(64), compiler_identity: sha256_text("test compiler"),
+        target: "", features: [], config_digest: sha256_text("test configuration"))
+    lsp_document_capture_v1(uri, "test-run", "/", "test-workspace", "test-owner", environment).unwrap()
+
+fn completed_fixture(request: SourceAnalysisRequestV1, diagnostics: [JsonValue]) -> LspAnalysisResponseV1:
+    var dependencies: [SourceAnalysisDependencyV1] = []
+    for document in request.documents:
+        dependencies.push(SourceAnalysisDependencyV1(path: document.path, digest: document.digest,
+            byte_count: document.source.byte_len(), origin: "overlay", document_version: document.version))
+    val receipt = SourceAnalysisReceiptV1(status: SourceAnalysisStatusV1.Completed, reason: "",
+        run_id: request.run_id, workspace_identity: request.workspace_identity, owner_id: request.owner_id,
+        lifetime_generation: request.lifetime_generation, request_digest: source_analysis_request_digest_v1(request),
+        environment_digest: source_analysis_environment_digest_v1(request.environment), dependencies: dependencies,
+        dependency_digest: source_analysis_dependency_digest_v1(dependencies), structured_diagnostics_complete: true)
+    LspAnalysisResponseV1(receipt: receipt, diagnostics: diagnostics)
+
+fn warning_fixture(path: text, start: i64, end: i64) -> JsonValue:
+    val span = json_value_object_from([("start", JsonValue.Int(start)), ("end", JsonValue.Int(end)),
+        ("line", JsonValue.Int(1)), ("col", JsonValue.Int(1))])
+    val empty: [JsonValue] = []
+    json_value_object_from([("severity", JsonValue.Str("warning")), ("code", JsonValue.Str("TEST-WARNING")),
+        ("message", JsonValue.Str("warning from exact supplied source")), ("file", JsonValue.Str(path)),
+        ("span", span), ("labels", JsonValue.Array(empty)), ("notes", JsonValue.Array([JsonValue.Str("retained note")])),
+        ("help", JsonValue.Array(empty)), ("children", JsonValue.Array(empty)),
+        ("macro_trace", JsonValue.Array(empty)), ("fix", JsonValue.Null)])
+
+describe "Snapshot analysis publication authority":
+    it "round trips empty and Unicode overlays with distinct versions through strict SDN":
+        step("Capture actual opened unsaved buffers and encode the admitted complete set")
+        val first = "file:///snapshot-wire-first.spl"
+        val second = "file:///snapshot-wire-second.spl"
+        expect(lsp_document_sync_apply("textDocument/didOpen", overlay_message(first, 2, ""))).to_equal(true)
+        expect(lsp_document_sync_apply("textDocument/didOpen", overlay_message(second, 19, "val x = \"😀\"\r\n"))).to_equal(true)
+        val request = analysis_fixture(first)
+        val wire = source_analysis_request_encode_v1(request).unwrap()
+        val decoded = source_analysis_request_decode_v1(wire).unwrap()
+        expect(source_analysis_request_digest_v1(decoded)).to_equal(source_analysis_request_digest_v1(request))
+        expect(decoded.documents.len()).to_equal(2)
+        expect(decoded.documents[0].source).to_equal("")
+        expect(decoded.documents[1].version).to_equal(19)
+        expect(decoded.documents[1].source).to_equal("val x = \"😀\"\r\n")
+        expect(source_analysis_request_decode_v1(wire + " trailing-garbage").is_err()).to_equal(true)
+        expect(lsp_document_sync_apply("textDocument/didClose", overlay_message(first, 2, ""))).to_equal(true)
+        expect(lsp_document_sync_apply("textDocument/didClose", overlay_message(second, 19, ""))).to_equal(true)
+
+    it "publishes warning spans in UTF16 with document version and full provenance":
+        step("Project a completed warning against unsaved Unicode source")
+        val uri = "file:///snapshot-warning.spl"
+        expect(lsp_document_sync_apply("textDocument/didOpen", overlay_message(uri, 7, "😀x\r\n"))).to_equal(true)
+        val request = analysis_fixture(uri)
+        val response = completed_fixture(request, [warning_fixture(request.entry_path, 4, 5)])
+        val publications = lsp_analysis_publications_v1(request, response).unwrap()
+        expect(publications.len()).to_equal(1)
+        val params = json_parse_value_strict(publications[0]).unwrap()
+        expect(json_value_field(params, "version")).to_equal(JsonValue.Int(7))
+        expect(publications[0]).to_contain("retained note")
+        expect(publications[0]).to_contain("diagnosticV1")
+        expect(publications[0]).to_contain("sourceDigest")
+        match json_value_field(params, "diagnostics"):
+            case JsonValue.Array(items):
+                expect(items.len()).to_equal(1)
+                expect(json_value_field(items[0], "severity")).to_equal(JsonValue.Int(2))
+                val range = json_value_field(items[0], "range")
+                expect(json_value_field(json_value_field(range, "start"), "character")).to_equal(JsonValue.Int(2))
+                expect(json_value_field(json_value_field(range, "end"), "character")).to_equal(JsonValue.Int(3))
+            case _: expect(false).to_equal(true)
+        expect(lsp_document_sync_apply("textDocument/didClose", overlay_message(uri, 7, ""))).to_equal(true)
+
+    it "allows completed empty but rejects every failure and incomplete diagnostics":
+        step("Failure statuses cannot turn into clean empty publications")
+        val uri = "file:///snapshot-failure.spl"
+        expect(lsp_document_sync_apply("textDocument/didOpen", overlay_message(uri, 1, ""))).to_equal(true)
+        val request = analysis_fixture(uri)
+        var response = completed_fixture(request, [])
+        expect(lsp_analysis_publications_v1(request, response).unwrap().len()).to_equal(1)
+        for status in [SourceAnalysisStatusV1.Rejected, SourceAnalysisStatusV1.Cancelled,
+                SourceAnalysisStatusV1.TimedOut, SourceAnalysisStatusV1.Failed, SourceAnalysisStatusV1.InvalidPayload]:
+            response.receipt.status = status
+            expect(lsp_analysis_publications_v1(request, response).is_err()).to_equal(true)
+        response.receipt.status = SourceAnalysisStatusV1.Completed
+        response.receipt.structured_diagnostics_complete = false
+        expect(lsp_analysis_publications_v1(request, response).is_err()).to_equal(true)
+        response.receipt.structured_diagnostics_complete = true
+        response.diagnostics = [json_value_object_from([("message", JsonValue.Str("truncated record"))])]
+        expect(lsp_analysis_publications_v1(request, response).is_err()).to_equal(true)
+        expect(lsp_analysis_response_decode_v1("compiler log only").is_err()).to_equal(true)
+        expect(lsp_document_sync_apply("textDocument/didClose", overlay_message(uri, 1, ""))).to_equal(true)
+
+    it "invalidates a complete result on imported overlay edit and identical reopen":
+        step("Change an imported document after capturing the entire owner set")
+        val uri = "file:///snapshot-entry.spl"
+        val imported = "file:///snapshot-import.spl"
+        expect(lsp_document_sync_apply("textDocument/didOpen", overlay_message(uri, 1, "use dependency"))).to_equal(true)
+        expect(lsp_document_sync_apply("textDocument/didOpen", overlay_message(imported, 5, "val x = 1"))).to_equal(true)
+        val request = analysis_fixture(uri)
+        val response = completed_fixture(request, [])
+        expect(lsp_document_capture_matches_v1(request)).to_equal(true)
+        expect(lsp_document_sync_apply("textDocument/didClose", overlay_message(imported, 5, ""))).to_equal(true)
+        expect(lsp_document_sync_apply("textDocument/didOpen", overlay_message(imported, 5, "val x = 1"))).to_equal(true)
+        expect(lsp_document_capture_matches_v1(request)).to_equal(false)
+        expect(lsp_analysis_publications_v1(request, response).is_err()).to_equal(true)
+        expect(lsp_document_sync_apply("textDocument/didClose", overlay_message(uri, 1, ""))).to_equal(true)
+        expect(lsp_document_sync_apply("textDocument/didClose", overlay_message(imported, 5, ""))).to_equal(true)
+
+    it "rejects disk substitution and different owner or environment receipts":
+        step("Tamper individual authorities even when the entry version matches")
+        val uri = "file:///snapshot-authority.spl"
+        expect(lsp_document_sync_apply("textDocument/didOpen", overlay_message(uri, 8, "val x = 2"))).to_equal(true)
+        val request = analysis_fixture(uri)
+        var response = completed_fixture(request, [])
+        response.receipt.owner_id = "other editor"
+        expect(lsp_analysis_receipt_matches_v1(request, response.receipt)).to_equal(false)
+        response = completed_fixture(request, [])
+        response.receipt.environment_digest = sha256_text("other configuration")
+        expect(lsp_analysis_receipt_matches_v1(request, response.receipt)).to_equal(false)
+        response = completed_fixture(request, [])
+        var dependency = response.receipt.dependencies[0]
+        dependency.origin = "disk"
+        dependency.document_version = -1
+        response.receipt.dependencies = [dependency]
+        response.receipt.dependency_digest = source_analysis_dependency_digest_v1(response.receipt.dependencies)
+        expect(lsp_analysis_receipt_matches_v1(request, response.receipt)).to_equal(false)
+        expect(lsp_document_sync_apply("textDocument/didClose", overlay_message(uri, 8, ""))).to_equal(true)
+
+use std.common.sdn.strict_v1.{sdn_parse_strict_v1, sdn_strict_limits_valid_v1}
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+
+describe "Explicit snapshot wire size profile":
+    it "admits the full escaped sixteen MiB source quota within forty MiB wire":
+        step("Round trip maximum raw source quota with worst-case quote escaping")
+        val source = "\"".repeat(1048576)
+        val digest = sha256_text(source)
+        var documents: [SourceAnalysisDocumentV1] = []
+        for index in 0..16:
+            documents.push(SourceAnalysisDocumentV1(path: "/escaped-{index}.spl",
+                uri: "file:///escaped-{index}.spl", version: index, source: source, digest: digest))
+        var request = SourceAnalysisRequestV1(run_id: "escaped", workspace_root: "/",
+            workspace_identity: "workspace", owner_id: "owner", lifetime_generation: 1,
+            entry_path: "/escaped-0.spl", documents: documents,
+            environment: SourceAnalysisEnvironmentV1(executable_digest: "e".repeat(64), compiler_identity: sha256_text("compiler"),
+                target: "", features: [], config_digest: sha256_text("config")), bounds: SourceAnalysisBoundsV1())
+        val wire = source_analysis_request_encode_v1(request).unwrap()
+        expect(wire.byte_len()).to_be_greater_than(16777216)
+        expect(wire.byte_len()).to_be_less_than(41943040)
+        val decoded = source_analysis_request_decode_v1(wire).unwrap()
+        expect(decoded.documents.len()).to_equal(16)
+        expect(decoded.documents[15].source).to_equal(source)
+        request.documents.push(SourceAnalysisDocumentV1(path: "/overflow.spl", uri: "file:///overflow.spl",
+            version: 1, source: "x", digest: sha256_text("x")))
+        expect(source_analysis_request_encode_v1(request).is_err()).to_equal(true)
+
+    it "keeps default one MiB and rejects profiles beyond the explicit forty MiB ceiling":
+        step("Validate opt-in boundary without widening the default parser profile")
+        val defaults = SdnStrictLimitsV1()
+        expect(defaults.max_source_bytes).to_equal(1048576)
+        expect(sdn_parse_strict_v1("x".repeat(1048577), defaults).is_err()).to_equal(true)
+        var limits = SdnStrictLimitsV1(max_source_bytes: 41943040)
+        expect(sdn_strict_limits_valid_v1(limits)).to_equal(true)
+        limits.max_source_bytes = 41943041
+        expect(sdn_strict_limits_valid_v1(limits)).to_equal(false)
+        expect(sdn_parse_strict_v1("x", limits).is_err()).to_equal(true)

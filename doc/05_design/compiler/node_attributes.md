@@ -6,6 +6,16 @@ See [architecture](../../04_architecture/compiler/node_attributes.md),
 [source plan](../../03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md).
 All new names below are proposed contracts until implementation and admission.
 
+Implementation ownership update (owner review on PR #7241): #7220 already landed
+the canonical `compiler.common.data.data_schema_contracts` and
+`data_schema_resolver`. Use `DataAttrDeclV1`, `DataResolvedAttrV1`,
+`DataSchemaSurfaceV1` and its `schema_digest`; the conceptual inventory below is
+not authorization to create competing NodeAttribute schema/resolver types.
+Lifecycle facts live beside that compiler-common owner in
+`data/node_lifecycle_contracts.spl`. Canonical AttrId ordinals are one-based.
+Explicit empty views, computed/forwarded policies, visibility/effects and qualified
+type details must extend the canonical contract before those features are admitted.
+
 ## Shared contract inventory
 
 | Contract | Contents and owner |
@@ -56,6 +66,19 @@ Cold resolution uses sorted declaration groups and indexed dependency validation
 Ready access uses bound numeric IDs and a qualified projection. No text-key lookup
 or SDN parsing is added to field-access hot paths. Re-resolution occurs only when
 the exact semantic inputs change, not once per field or request.
+
+The full design requires explicit declared views, including empty node views,
+and bounded dependency validation. The current canonical V1 surface infers views
+from stored attributes and does not yet encode computed dependencies. Extend its
+owner for these requirements. Construction facts bind the canonical schema digest
+so a changed default/type with the same field count cannot reuse an old obligation.
+
+Restricted visibility requires an explicit canonical owner: a type/
+owner identity for owner visibility or a module identity for module visibility.
+Public visibility carries no restriction key. The future canonical extension must compare and encode
+this key as semantic input; it never infers access authority from the selected
+declaration's provenance. Name/type resolution must establish these keys before
+calling the structural resolver, just as it establishes the field's type key.
 
 ## Construction and retirement state machine
 

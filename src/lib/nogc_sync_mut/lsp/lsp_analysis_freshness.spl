@@ -1,0 +1,73 @@
+# Temporary exact-content reconciliation, not an OS-watch generation claim.
+# One canonical bounded disk read per idle turn; never mtime-based reuse.
+use std.common.diagnostics.source_analysis_v1.*
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_identity_same}
+use std.nogc_sync_mut.io_runtime.{time_now_monotonic_ms}
+use std.nogc_sync_mut.lsp.lsp_document_sync.{lsp_document_generation_v1}
+
+pub class LspAnalysisFreshnessV1:
+    receipt: SourceAnalysisReceiptV1
+    index: i64
+    observed_bytes: i64
+    deadline_ms: i64
+    failure: text
+    finished: bool
+
+    me step() -> text:
+        if self.failure != "": return self.failure
+        if self.finished: return "completed"
+        if self.receipt.lifetime_generation != lsp_document_generation_v1():
+            self.failure = "overlay-generation-changed"
+            return self.failure
+        if time_now_monotonic_ms() >= self.deadline_ms:
+            self.failure = "dependency-validation-deadline"
+            return self.failure
+        while self.index < self.receipt.dependencies.len():
+            val dependency = self.receipt.dependencies[self.index]
+            self.index = self.index + 1
+            if dependency.origin != "disk": continue
+            if dependency.byte_count < 0 or dependency.byte_count > 1048576:
+                self.failure = "dependency-validation-size"
+                return self.failure
+            val before = path_final_existing(dependency.path)
+            if before.is_err() or before.unwrap().path != dependency.path:
+                self.failure = "dependency-validation-path-unavailable"
+                return self.failure
+            val content = file_read_regular_no_follow_bounded(dependency.path, 1048576)
+            if content.is_err():
+                self.failure = "dependency-validation-read-failed"
+                return self.failure
+            val after = path_final_existing(dependency.path)
+            if after.is_err() or not path_identity_same(before.unwrap(), after.unwrap()):
+                self.failure = "dependency-validation-path-changed"
+                return self.failure
+            val bytes = content.unwrap().byte_len()
+            self.observed_bytes = self.observed_bytes + bytes
+            if self.observed_bytes > 67108864:
+                self.failure = "dependency-validation-byte-limit"
+                return self.failure
+            if bytes != dependency.byte_count or sha256_text(content.unwrap()) != dependency.digest:
+                self.failure = "dependency-content-changed"
+                return self.failure
+            # File identity is only a path/alias check. Content SHA256, not
+            # an unchanged path or mtime, certifies this observed dependency.
+            # Do not create an extra idle-turn gap after the last read.
+            while self.index < self.receipt.dependencies.len() and self.receipt.dependencies[self.index].origin != "disk":
+                self.index = self.index + 1
+            if self.index < self.receipt.dependencies.len(): return "pending"
+        if self.receipt.lifetime_generation != lsp_document_generation_v1():
+            self.failure = "overlay-generation-changed"
+            return self.failure
+        self.finished = true
+        "completed"
+
+pub fn lsp_analysis_freshness_v1(receipt: SourceAnalysisReceiptV1) -> Result<LspAnalysisFreshnessV1, text>:
+    if receipt.status != SourceAnalysisStatusV1.Completed or not receipt.structured_diagnostics_complete:
+        return Err("incomplete-analysis-cannot-be-revalidated")
+    if receipt.dependencies.len() > 4096: return Err("dependency-validation-count-limit")
+    Ok(LspAnalysisFreshnessV1(receipt: receipt, index: 0, observed_bytes: 0,
+        deadline_ms: time_now_monotonic_ms() + 120000, failure: "", finished: false))
+
+export LspAnalysisFreshnessV1, lsp_analysis_freshness_v1

@@ -20,7 +20,7 @@ pub use memory_warning::{MemoryWarning, MemoryWarningCode, MemoryWarningCollecto
 pub use lowerer::Lowerer;
 pub use module_lowering::module_with_hoisted_defs;
 pub(crate) use module_lowering::dynamic_module_initializer_name;
-pub(crate) use module_lowering::block_uses_self;
+pub(crate) use module_lowering::{block_uses_self, qualify_interpreter_enum_items};
 
 use super::lifetime::LifetimeViolation;
 use super::types::HirModule;

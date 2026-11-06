@@ -58,6 +58,10 @@ pub fn evaluate_module_exports_with_preloaded(
     global_enums: &mut Enums,
     preloaded_env: Option<&HashMap<String, Value>>,
 ) -> Result<ModuleExports, CompileError> {
+    let owner = module_path.map(|path| normalize_path_key(path).to_string_lossy().into_owned());
+    let qualified = crate::hir::lower::qualify_interpreter_enum_items(items, owner.as_deref())
+        .map_err(|name| CompileError::semantic(format!("ambiguous enum/type alias: {name}")))?;
+    let items = qualified.as_deref().unwrap_or(items);
     let mut env: Env = Env::new();
     let mut exports = ExportTable::new();
     let mut local_functions: HashMap<String, Arc<FunctionDef>> = HashMap::new();

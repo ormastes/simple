@@ -1,0 +1,148 @@
+# Construction facts shared by semantic analysis and generated storage owners.
+# These are NOT user-owned payloads or mintable runtime authority. The owner must
+# commit/clean up actual values before recording the corresponding transition.
+# A fact transition alone never allocates, publishes, drops or retires a node.
+
+use compiler.common.data.data_schema_contracts.{
+    DATA_SCHEMA_CONTRACT_V1, DataSchemaSurfaceV1
+}
+use compiler.common.data.data_schema_resolver.{data_schema_digest_v1}
+
+fn node_lifecycle_view_contains_v1(views: [text], name: text) -> bool:
+    for view in views:
+        if view == name: return true
+    false
+
+fn node_lifecycle_view_known_v1(schema: DataSchemaSurfaceV1, view: text) -> bool:
+    for attribute in schema.attrs:
+        if node_lifecycle_view_contains_v1(attribute.views, view): return true
+    false
+
+# Cold construction-fact validation only. The canonical V1 surface currently
+# describes stored attributes and infers views from them; it cannot represent a
+# fieldless view or computed-property initialization policy. Do not invent these.
+fn node_lifecycle_schema_error_v1(schema: DataSchemaSurfaceV1) -> text:
+    if schema.contract_version != DATA_SCHEMA_CONTRACT_V1 or schema.tree.len() == 0
+        or schema.schema_digest.len() == 0:
+        return "construction needs a valid schema surface"
+    var ordinal: i64 = 1
+    var previous = ""
+    for attribute in schema.attrs:
+        if attribute.id.tree != schema.tree or attribute.id.ordinal != ordinal
+            or attribute.name.len() == 0 or (ordinal > 1 and attribute.name <= previous):
+            return "construction needs canonical attribute identities"
+        previous = attribute.name
+        ordinal = ordinal + 1
+    if data_schema_digest_v1(schema.tree, schema.attrs) != schema.schema_digest:
+        return "construction schema digest does not match its surface"
+    ""
+
+pub enum NodeConstructionStateV1:
+    Pending
+    Ready
+    Discarded
+
+pub struct NodeConstructionFactsV1:
+    schema_digest: text
+    view_name: text
+    state: NodeConstructionStateV1
+    initialized: [bool]
+
+pub struct NodeConstructionTransitionV1:
+    ok: bool
+    facts: NodeConstructionFactsV1
+    reason: text
+    attribute_id: i64
+
+pub fn node_construction_state_code_v1(state: NodeConstructionStateV1) -> i64:
+    match state:
+        case NodeConstructionStateV1.Pending: 0
+        case NodeConstructionStateV1.Ready: 1
+        case NodeConstructionStateV1.Discarded: 2
+
+fn node_construction_failure_v1(facts: NodeConstructionFactsV1, reason: text,
+                               attribute_id: i64) -> NodeConstructionTransitionV1:
+    NodeConstructionTransitionV1(ok: false, facts: facts, reason: reason, attribute_id: attribute_id)
+
+fn node_construction_context_error_v1(schema: DataSchemaSurfaceV1,
+                                     facts: NodeConstructionFactsV1) -> text:
+    val schema_error = node_lifecycle_schema_error_v1(schema)
+    if schema_error.len() != 0: return schema_error
+    if facts.schema_digest != schema.schema_digest or facts.initialized.len() != schema.attrs.len():
+        return "construction schema mismatch"
+    if not node_lifecycle_view_known_v1(schema, facts.view_name):
+        return "construction view is not declared in schema"
+    if node_construction_state_code_v1(facts.state) != 0:
+        return "construction obligation is already resolved"
+    ""
+
+pub fn node_construction_begin_v1(schema: DataSchemaSurfaceV1, view_name: text) -> NodeConstructionTransitionV1:
+    """Create facts before the storage owner reserves/publishes any resources."""
+    val invalid = NodeConstructionFactsV1(schema_digest: "", view_name: view_name,
+        state: NodeConstructionStateV1.Discarded, initialized: [])
+    val schema_error = node_lifecycle_schema_error_v1(schema)
+    if schema_error.len() != 0:
+        return node_construction_failure_v1(invalid, schema_error, -1)
+    val view_found = node_lifecycle_view_known_v1(schema, view_name)
+    if not view_found:
+        return node_construction_failure_v1(invalid, "view is not declared in schema", -1)
+    var initialized: [bool] = []
+    for attribute in schema.attrs:
+        initialized.push(false)
+    val facts = NodeConstructionFactsV1(schema_digest: schema.schema_digest, view_name: view_name,
+        state: NodeConstructionStateV1.Pending, initialized: initialized)
+    NodeConstructionTransitionV1(ok: true, facts: facts, reason: "", attribute_id: -1)
+
+pub fn node_construction_initializer_error_v1(schema: DataSchemaSurfaceV1,
+    facts: NodeConstructionFactsV1, attribute_id: i64) -> text:
+    """Check before evaluating/committing a new initializer into an owned slot."""
+    val context_error = node_construction_context_error_v1(schema, facts)
+    if context_error.len() != 0: return context_error
+    if attribute_id < 1 or attribute_id > schema.attrs.len():
+        return "initializer attribute is out of bounds"
+    val attribute = schema.attrs[attribute_id - 1]
+    if not node_lifecycle_view_contains_v1(attribute.views, facts.view_name):
+        return "initializer attribute is not applicable to this view"
+    if facts.initialized[attribute_id - 1]: return "attribute is already initialized"
+    ""
+
+pub fn node_construction_record_initialized_v1(schema: DataSchemaSurfaceV1,
+    facts: NodeConstructionFactsV1, attribute_id: i64) -> NodeConstructionTransitionV1:
+    """Record a successful owner commit. Failure preserves the original facts."""
+    val error = node_construction_initializer_error_v1(schema, facts, attribute_id)
+    if error.len() != 0: return node_construction_failure_v1(facts, error, attribute_id)
+    var updated = facts
+    updated.initialized[attribute_id - 1] = true
+    NodeConstructionTransitionV1(ok: true, facts: updated, reason: "", attribute_id: attribute_id)
+
+pub fn node_construction_try_finish_v1(schema: DataSchemaSurfaceV1,
+    facts: NodeConstructionFactsV1) -> NodeConstructionTransitionV1:
+    """Validate completeness; the owner still validates topology before publish.
+
+    Defaults are actual initializer commits, never inferred from a default key.
+    A retained failure therefore cannot rerun a successfully recorded default.
+    """
+    val context_error = node_construction_context_error_v1(schema, facts)
+    if context_error.len() != 0: return node_construction_failure_v1(facts, context_error, -1)
+    for attribute in schema.attrs:
+        if not node_lifecycle_view_contains_v1(attribute.views, facts.view_name): continue
+        if not facts.initialized[attribute.id.ordinal - 1]:
+            return node_construction_failure_v1(facts,
+                "stored attribute is not initialized: {attribute.name}", attribute.id.ordinal)
+    var updated = facts
+    updated.state = NodeConstructionStateV1.Ready
+    NodeConstructionTransitionV1(ok: true, facts: updated, reason: "", attribute_id: -1)
+
+pub fn node_construction_record_discard_v1(schema: DataSchemaSurfaceV1,
+    facts: NodeConstructionFactsV1) -> NodeConstructionTransitionV1:
+    """Record explicit owner cleanup; cannot turn a ready node into a builder."""
+    val error = node_construction_context_error_v1(schema, facts)
+    if error.len() != 0: return node_construction_failure_v1(facts, error, -1)
+    var updated = facts
+    updated.state = NodeConstructionStateV1.Discarded
+    NodeConstructionTransitionV1(ok: true, facts: updated, reason: "", attribute_id: -1)
+
+pub fn node_construction_scope_exit_error_v1(facts: NodeConstructionFactsV1) -> text:
+    if node_construction_state_code_v1(facts.state) == 0:
+        return "pending node must be finished or explicitly discarded"
+    ""

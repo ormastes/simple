@@ -2181,6 +2181,15 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_readdir_entry", file_io::rt_readdir_entry);
     insert_simple!("rt_readdir", file_io::rt_readdir);
     insert_simple!("rt_readdir_free", file_io::rt_readdir_free);
+    // Explicitly unavailable in this interpreter; do not emulate unbounded I/O.
+    insert_simple!("rt_directory_list_bounded_v1", file_io::rt_directory_bounded_unsupported_v1);
+    insert_simple!("rt_directory_path_probe_v1", file_io::rt_directory_bounded_unsupported_v1);
+    insert_simple!("rt_directory_list_count_v1", file_io::rt_directory_bounded_invalid_owner_v1);
+    insert_simple!("rt_directory_entry_kind_v1", file_io::rt_directory_bounded_invalid_owner_v1);
+    insert_simple!("rt_directory_entry_size_v1", file_io::rt_directory_bounded_invalid_owner_v1);
+    insert_simple!("rt_directory_list_free_v1", file_io::rt_directory_bounded_invalid_owner_v1);
+    insert_simple!("rt_directory_entry_name_v1", file_io::rt_directory_bounded_invalid_name_v1);
+
     insert_simple!("rt_remove", file_io::rt_remove);
     insert_simple!("rt_rsa_pss_sha256_verify", signatures::rt_rsa_pss_sha256_verify);
     insert_simple!(

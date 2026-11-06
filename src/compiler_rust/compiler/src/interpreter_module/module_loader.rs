@@ -591,8 +591,18 @@ fn warn_unprovided_use_names(
     let Some(provided) = provided.as_ref() else {
         return; // opaque surface — not checkable
     };
+    if matches!(&use_stmt.target, ImportTarget::Glob) {
+        // Preserve the warn-first contract for the private surface exposed by
+        // glob imports too. Stable order keeps diagnostics deterministic.
+        let mut private_names: Vec<_> = provided.private_fns.iter().collect();
+        private_names.sort();
+        for name in private_names {
+            warn_private_use_name(name, current_file, module_path, module_label, provided);
+        }
+        return;
+    }
     let Some(requested) = requested_group_import_names(use_stmt) else {
-        return; // not a `{...}` group import
+        return; // neither a glob nor a `{...}` group import
     };
     for name in requested {
         if provided.contains(&name) {
@@ -972,6 +982,16 @@ pub fn load_and_merge_module(
     }
     record_module_visit(&module_path, depth);
 
+    let selected_builtin_module = |stem: &str| {
+        let parts = vec!["std".to_owned(), "core".to_owned(), stem.to_owned()];
+        resolve_module_path(&parts, base_dir).ok()
+    };
+    if let Err(error) = crate::interpreter::check_cached_builtin_enum_origins(
+        &module_path, base_dir, selected_builtin_module,
+    ) {
+        decrement_load_depth();
+        return Err(error);
+    }
     // Check cache first - if we've already loaded this module, return cached exports
     if let Some(cached_exports) = get_cached_module_exports(&module_path) {
         loader_trace!("cache-hit", "{}", module_path.display());
@@ -1156,6 +1176,9 @@ pub fn load_and_merge_module(
     // the full module so runtime evaluation remains correct.
     // Move instead of clone — `module` is not used after this point.
     let mut filtered_items: Vec<Node> = module.items;
+    crate::interpreter::mark_selected_builtin_enum_origins(
+        &mut filtered_items, &module_path, selected_builtin_module,
+    );
     // Drop wrong-arch @cfg(<arch>) fn variants before evaluating/registering
     // the module: interpreted code executes on the HOST, and registration is
     // order-driven (multivariant misdispatch, see pipeline::cfg_strip).

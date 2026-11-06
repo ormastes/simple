@@ -465,6 +465,11 @@ impl ModuleItems<'_> {
 }
 
 fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileError> {
+    let module_items = match crate::hir::lower::qualify_interpreter_enum_items(module_items.as_slice(), None)
+        .map_err(|name| CompileError::semantic(format!("ambiguous enum/type alias: {name}")))? {
+        Some(items) => { drop(module_items); ModuleItems::Owned(items) },
+        None => module_items,
+    };
     let items = module_items.as_slice();
     if crate::interpreter::is_coverage_enabled() {
         // Coverage denominator: every decision/condition site of the entry
@@ -600,7 +605,7 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                     .find_map(|a| {
                         a.name
                             .strip_prefix(FLATTEN_MODULE_OWNER_ATTR_PREFIX)
-                            .map(|raw| Arc::from(normalize_path_key(Path::new(raw)).to_string_lossy().as_ref()))
+                            .map(|raw| if raw == "<entry>" { Arc::from(raw) } else { Arc::from(normalize_path_key(Path::new(raw)).to_string_lossy().as_ref()) })
                     })
                     .unwrap_or_else(|| Arc::from("<entry>"));
                 FUNCTION_MODULE_OWNER.with(|cell| {
@@ -1256,8 +1261,9 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                             },
                         );
                         resolved = true;
-                    } else if enums.contains_key(tgt) {
-                        env.insert(t.name.clone(), Value::Nil);
+                    } else if let Some(enum_def) = enums.get(tgt).cloned() {
+                        enums.insert(t.name.clone(), Arc::clone(&enum_def));
+                        env.insert(t.name.clone(), Value::EnumType { enum_name: enum_def.name.clone() });
                         resolved = true;
                     }
                 }

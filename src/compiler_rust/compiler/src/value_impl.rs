@@ -541,9 +541,9 @@ impl Value {
                 payload,
             } => {
                 if let Some(val) = payload {
-                    format!("{}::{}({})", enum_name, variant, val.to_display_string())
+                    format!("{}::{}({})", crate::interpreter::enum_display_name(enum_name), variant, val.to_display_string())
                 } else {
-                    format!("{}::{}", enum_name, variant)
+                    format!("{}::{}", crate::interpreter::enum_display_name(enum_name), variant)
                 }
             }
             Value::Block { kind, payload, result } => {
@@ -557,7 +557,7 @@ impl Value {
             Value::BlockClosure { .. } => "<block_closure>".into(),
             Value::Function { name, .. } => format!("<fn:{}>", name),
             Value::Constructor { class_name } => format!("<constructor:{}>", class_name),
-            Value::EnumType { enum_name } => format!("<enum:{}>", enum_name),
+            Value::EnumType { enum_name } => format!("<enum:{}>", crate::interpreter::enum_display_name(enum_name)),
             Value::EnumVariantConstructor { .. } => "<enum_variant_constructor>".into(),
             Value::TraitType { .. } => "<trait_type>".into(),
             Value::TraitObject { .. } => "<trait_object>".into(),
@@ -595,9 +595,9 @@ impl Value {
                 payload,
             } => {
                 if let Some(val) = payload {
-                    format!("{}::{}({})", enum_name, variant, val.to_debug_string())
+                    format!("{}::{}({})", crate::interpreter::enum_display_name(enum_name), variant, val.to_debug_string())
                 } else {
-                    format!("{}::{}", enum_name, variant)
+                    format!("{}::{}", crate::interpreter::enum_display_name(enum_name), variant)
                 }
             }
             Value::Block { kind, payload, .. } => {
@@ -781,7 +781,9 @@ impl Value {
                 if let Some(class) = self.aggregate_class() {
                     class == type_name
                 } else if let Value::Enum { enum_name, .. } = self {
-                    enum_name == type_name
+                    crate::interpreter::owner_module_enum(type_name)
+                        .or_else(|| crate::interpreter::unique_enum_definition(type_name))
+                        .map_or_else(|| enum_name == type_name, |def| def.name == *enum_name)
                 } else if matches!(self, Value::NativeFunction(_)) {
                     type_name == "function" || type_name == "Function"
                 } else if let Value::Unit { suffix, .. } = self {

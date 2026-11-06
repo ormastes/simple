@@ -1,0 +1,111 @@
+# The canonical HTTP adapter calls this only for /v1/source/*.
+# One runtime mutex serializes credentials, preferences and successful-open
+# commits. Plain stdio MCP is not implicitly granted this HTTP identity.
+use app.llm_caret.messaging.adapter.server.auth.{AuthPrincipal}
+use app.llm_caret.messaging.adapter.server.source_session_auth.*
+use app.io.mod.{current_time_ms}
+use app.source_view.service.{source_open_bound_result_v1}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field,
+    json_value_text_or, json_value_object_from, json_value_serialize}
+use std.nogc_sync_mut.source.host.{source_view_host_session_v1,
+    source_view_host_preferences_v1, source_view_host_commit_open_v1}
+
+pub struct SourceSessionHttpResultV1:
+    status: i64
+    body: text
+
+fn source_http_result_v1(status: i64, state: text, reason: text) -> SourceSessionHttpResultV1:
+    SourceSessionHttpResultV1(status: status, body: json_value_serialize(json_value_object_from([
+        ("status", JsonValue.Str(state)), ("reason", JsonValue.Str(reason))])))
+
+fn source_http_integer_v1(value: JsonValue, key: text) -> Result<i64, text>:
+    match json_value_field(value, key):
+        JsonValue.Int(number): Ok(number)
+        _: Err("integer_required:" + key)
+
+fn source_http_locked_v1(path: text, body: text, bearer: text,
+        principal: AuthPrincipal, now_ms: i64) -> SourceSessionHttpResultV1:
+    if body.byte_len() > 4096: return source_http_result_v1(413, "error", "request_too_large")
+    val args = match json_parse_value_strict(body):
+        Ok(value): value
+        Err(_): return source_http_result_v1(400, "error", "invalid_json_arguments")
+    val configured = source_session_authority_get_v1()
+    if configured == nil: return source_http_result_v1(503, "unavailable", "source_authority_not_configured")
+    var authority = configured.unwrap()
+    if path == "/v1/source/sessions":
+        val manager_id = json_value_text_or(json_value_field(args, "manager_id"), "")
+        val agent_id = json_value_text_or(json_value_field(args, "agent_id"), "")
+        val ttl = match source_http_integer_v1(args, "ttl_ms"):
+            Ok(value): value
+            Err(reason): return source_http_result_v1(400, "error", reason)
+        val issued = match authority.issue(principal, manager_id, agent_id, current_time_ms(), ttl):
+            Ok(value): value
+            Err(reason): return source_http_result_v1(403, "denied", reason)
+        source_session_authority_set_v1(authority)
+        # Secret is returned only to the authenticated owner over its existing
+        # protected transport. Never publish it in a log, resource or registry.
+        return SourceSessionHttpResultV1(status: 201, body: json_value_serialize(json_value_object_from([
+            ("status", JsonValue.Str("created")), ("credential", JsonValue.Str(issued.0)),
+            ("agent_session_id", JsonValue.Str(issued.1.agent_session_id)),
+            ("session_generation", JsonValue.Int(issued.1.session_generation)),
+            ("expires_at_ms", JsonValue.Int(issued.1.expires_at_ms))])))
+    val binding = match authority.verify(bearer, now_ms):
+        Ok(value): value
+        Err(reason): return source_http_result_v1(401, "denied", reason)
+    if path == "/v1/source/open":
+        val session = match source_view_host_session_v1(authority.host, binding, now_ms):
+            Ok(value): value
+            Err(reason): return source_http_result_v1(409, "stale", reason)
+        val response = source_open_bound_result_v1(body, session, authority.workspace_root)
+        val success = not response.is_error
+        val commit_time = current_time_ms()
+        match authority.verify(bearer, commit_time):
+            Ok(_): pass
+            Err(reason): return source_http_result_v1(401, "denied", reason)
+        val committed = match source_view_host_commit_open_v1(authority.host, binding, commit_time, success):
+            Ok(value): value
+            Err(reason): return source_http_result_v1(409, "stale", reason)
+        authority.host = committed.0
+        source_session_authority_set_v1(authority)
+        return SourceSessionHttpResultV1(status: if success: 200 else: 400, body: response.payload)
+    if path == "/v1/source/preferences":
+        val sequence = match source_http_integer_v1(args, "request_sequence"):
+            Ok(value): value
+            Err(reason): return source_http_result_v1(400, "error", reason)
+        val version = match source_http_integer_v1(args, "expected_version"):
+            Ok(value): value
+            Err(reason): return source_http_result_v1(400, "error", reason)
+        val setting = json_value_text_or(json_value_field(args, "setting"), "")
+        val desired = json_value_text_or(json_value_field(args, "desired"), "")
+        val commit_time = current_time_ms()
+        match authority.verify(bearer, commit_time):
+            Ok(_): pass
+            Err(reason): return source_http_result_v1(401, "denied", reason)
+        val updated = match source_view_host_preferences_v1(authority.host, binding, commit_time, sequence, version, setting, desired):
+            Ok(value): value
+            Err(reason): return source_http_result_v1(409, "conflict", reason)
+        authority.host = updated
+        val session = source_view_host_session_v1(authority.host, binding, commit_time).unwrap()
+        source_session_authority_set_v1(authority)
+        return SourceSessionHttpResultV1(status: 200, body: json_value_serialize(json_value_object_from([
+            ("status", JsonValue.Str("ok")), ("preferences_version", JsonValue.Int(session.preferences_version)),
+            ("line_numbers", JsonValue.Bool(session.preferences.line_numbers)),
+            ("inline_info", JsonValue.Str(session.preferences.inline_info)),
+            ("virtual_hints", JsonValue.Bool(session.preferences.virtual_hints))])))
+    if path == "/v1/source/close":
+        match authority.close(bearer, current_time_ms()):
+            Ok(_):
+                source_session_authority_set_v1(authority)
+                return source_http_result_v1(200, "closed", "")
+            Err(reason): return source_http_result_v1(409, "stale", reason)
+    source_http_result_v1(404, "error", "source_route_not_found")
+
+pub fn source_session_http_v1(method: text, path: text, body: text, bearer: text,
+        principal: AuthPrincipal, now_ms: i64) -> SourceSessionHttpResultV1:
+    if method != "POST": return source_http_result_v1(405, "error", "post_required")
+    if not source_session_owner_lock_v1(): return source_http_result_v1(503, "unavailable", "source_owner_unavailable")
+    # now_ms is ingress observation only; queued requests cannot preserve an
+    # expired grant by carrying a pre-lock timestamp into authority mutation.
+    val result = source_http_locked_v1(path, body, bearer, principal, current_time_ms())
+    if not source_session_owner_unlock_v1(): return source_http_result_v1(500, "error", "source_owner_unlock_failed")
+    result

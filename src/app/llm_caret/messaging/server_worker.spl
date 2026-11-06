@@ -5,6 +5,12 @@ use app.io.mod.{env_get, current_time_ms}
 use std.io_runtime.{mkdir_p, env_get_opt}
 use app.llm_caret.messaging.adapter.server.http_server.{configure_primitive_http_server,
     run_primitive_http_server}
+use app.llm_caret.agent_plan.{AgentLaunchRequest}
+use app.llm_caret.multi_caret_manager.{MultiCaretManager, launch_multi_caret_manager, stop_multi_caret_manager}
+use app.llm_caret.messaging.adapter.server.source_session_auth.{source_session_publish_manager_v1}
+use app.io.file_ops.{path_absolute}
+use app.llm_caret.messaging.adapter.server.source_session_supervisor.{source_supervisor_start_v1, source_supervisor_set_v1, source_supervisor_run_v1}
+use std.nogc_sync_mut.concurrent.thread.{ThreadHandle, thread_spawn_with_args}
 
 fn option(args: [text], prefix: text, fallback: text) -> text:
     for arg in args:
@@ -23,12 +29,65 @@ fn main() -> i64:
     val workspace = env_get_opt("LLM_CARET_MESSAGING_WORKSPACE") ?? "default"
     val slash = database.last_index_of("/")
     if slash > 0: mkdir_p(database.substring(0, slash))
-    configure_primitive_http_server(database, token, identity, workspace,
-        ["room:read", "room:write", "room:manage", "profile:read", "dm:write",
-            "agent:control", "task:approve", "transport:manage", "admin:invite"],
+    var requests: [AgentLaunchRequest] = []
+    var agent_ids: [text] = []
+    for arg in args:
+        if arg.starts_with("--source-agent="):
+            val agent = arg.substring(15, arg.len())
+            if agent == "" or agent.byte_len() > 128 or agent_ids.contains(agent) or requests.len() >= 16:
+                print "ERROR source agent identities must be unique, bounded and nonempty"
+                return 2
+            agent_ids.push(agent)
+            requests.push(AgentLaunchRequest(provider: "codex", agent_md_path: agent,
+                skill_path: "", task_desc: "Serve the configured source workspace task",
+                model: "", session_id: "", extra_args: []))
+    val command = option(args, "--source-agent-cmd=", "")
+    if (requests.len() > 0 and (command == "" or path_absolute(command) != command)) or (requests.len() == 0 and command != ""):
+        print "ERROR source mode requires agents and an absolute trusted provider executable"
+        return 2
+    var scopes = ["room:read", "room:write", "room:manage", "profile:read", "dm:write",
+        "agent:control", "task:approve", "transport:manage", "admin:invite"]
+    if requests.len() > 0: scopes.push("source:manage")
+    configure_primitive_http_server(database, token, identity, workspace, scopes,
         current_time_ms() + 86400000)
-    match run_primitive_http_server("127.0.0.1", port):
+    var source_manager: MultiCaretManager? = nil
+    var supervisor: ThreadHandle? = nil
+    if requests.len() > 0:
+        val manager = launch_multi_caret_manager("source-http", requests, 16,
+            "", command, "", "", "", true)
+        if manager.status != "running":
+            val stopped = stop_multi_caret_manager(manager)
+            print "ERROR owned source manager launch failed: " + manager.reason + "; cleanup=" + stopped.status
+            return 2
+        source_manager = manager
+        if source_session_publish_manager_v1(manager).is_err():
+            val stopped = stop_multi_caret_manager(manager)
+            print "ERROR source manager publication failed; cleanup=" + stopped.status
+            return 2
+    if source_manager != nil:
+        if not source_supervisor_start_v1(source_manager.unwrap()):
+            val stopped = stop_multi_caret_manager(source_manager.unwrap())
+            print "ERROR source supervisor initialization failed; cleanup=" + stopped.status
+            return 2
+        val started = thread_spawn_with_args(current_time_ms() + 3600000, 0,
+            \deadline, unused: source_supervisor_run_v1(deadline))
+        if started.handle <= 0:
+            val disabled = source_supervisor_set_v1(false)
+            val stopped = stop_multi_caret_manager(source_manager.unwrap())
+            print "ERROR source supervisor startup failed; cleanup=" + stopped.status
+            return 2
+        supervisor = started
+    var result = match run_primitive_http_server("127.0.0.1", port):
         Err(e):
             print "ERROR messaging server startup failed: {e}"
             2
         Ok(_): 0
+    # Same-process ownership: no library-global sharing across executables.
+    # Normal-return cleanup is explicit. Abrupt host termination is not claimed
+    # to run this path; the canonical lease lifetime remains bounded.
+    if supervisor != nil:
+        val disabled = source_supervisor_set_v1(false)
+        var running = supervisor.unwrap()
+        val joined = running.join()
+        if not disabled or joined == nil or joined.unwrap() != 0: result = 2
+    result
