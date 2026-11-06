@@ -1,0 +1,92 @@
+"""Reverse references through the real trace query process on the worktree preview.
+
+Same harness contract as trace_query_p0_spec: by default the binary running
+this spec (SIMPLE_BINARY) executes `run src/app/traceability/query_main.spl`;
+SIMPLE_TRACE_QUERY_TEST_COMMAND (command prefix routed to the query entry) or
+SIMPLE_TRACE_QUERY_TEST_BINARY (`<binary> trace`) override it. Run from the
+repository root; scripts/check/check-trace-query-p0.shs also runs it.
+Worktree preview only; no git/index route is needed.
+"""
+# @req REQ-TRC-015 REQ-TRC-021 REQ-TRC-023
+use std.spec.*
+use std.spec.step
+use app.io.minimal_runtime_ops.{env_get, process_run_timeout}
+use std.common.sdn.parser.{parse_with_spans_and_issues}
+use std.common.sdn.value.{SdnValue}
+
+fn actual_query_cli(args: [text]) -> (text, text, i32):
+    val command = env_get("SIMPLE_TRACE_QUERY_TEST_COMMAND")
+    if command.trim() != "":
+        var parts: [text] = []
+        for part in command.split(" "):
+            if part != "": parts.push(part)
+        return process_run_timeout(parts[0], parts.slice(1, parts.len()) + args, 30000)
+    val binary = env_get("SIMPLE_TRACE_QUERY_TEST_BINARY")
+    if binary != "":
+        return process_run_timeout(binary, ["trace"] + args, 30000)
+    # Default: the binary running this spec (SIMPLE_BINARY) runs the query entry.
+    val runner = env_get("SIMPLE_BINARY")
+    expect(runner != "").to_be(true)
+    if runner == "":
+        return ("", "SIMPLE_BINARY, SIMPLE_TRACE_QUERY_TEST_COMMAND or SIMPLE_TRACE_QUERY_TEST_BINARY is required", 2)
+    process_run_timeout(runner, ["run", "src/app/traceability/query_main.spl"] + args, 30000)
+
+fn query_document(output: text) -> Dict<text, SdnValue>:
+    val parsed = parse_with_spans_and_issues(output).unwrap()
+    expect(parsed.2.len()).to_equal(0)
+    match parsed.0:
+        case SdnValue.Dict(fields): fields
+        case _:
+            expect(output).to_equal("a structured query dictionary was required")
+            {}
+
+describe "Reverse references through the CLI":
+    it "lists which feature specifies a requirement and what it decomposes to":
+        # @ac AC-TRC-041
+        step("Ask for the references of one registered requirement")
+        val (output, errors, status) = actual_query_cli(["refs", "requirement", "req:REQ-TRC-001", "--format=sdn"])
+        expect(status).to_equal(1)
+        val fields = query_document(output)
+        expect(fields["schema"]).to_equal(SdnValue.String("simple.trace.reference-query/v1"))
+        expect(fields["operation"]).to_equal(SdnValue.String("refs"))
+        expect(fields["snapshot_kind"]).to_equal(SdnValue.String("worktree_preview"))
+        expect(fields["admission_eligible"]).to_equal(SdnValue.Bool(false))
+        match fields["selected"]:
+            case SdnValue.Dict(selected): expect(selected["kind"]).to_equal(SdnValue.String("requirement"))
+            case _: fail("Expected a selected node dictionary")
+        match fields["references"]:
+            case SdnValue.Array(references):
+                expect(references.len() >= 1).to_be(true)
+                var incoming_from_feature = false
+                for row in references:
+                    match row:
+                        case SdnValue.Dict(reference):
+                            expect(reference["authority"]).to_equal(SdnValue.String("authored-claim"))
+                            if reference["direction"] == SdnValue.String("incoming") and reference["other"] == SdnValue.String("feature:traceability"):
+                                expect(reference["relation"]).to_equal(SdnValue.String("specifies"))
+                                incoming_from_feature = true
+                        case _: fail("Expected a structured reference row")
+                expect(incoming_from_feature).to_be(true)
+            case _: fail("Expected a structured reference array")
+        # The registered declaration locates documents and sources, not requirements.
+        match fields["locators"]:
+            case SdnValue.Array(locators): expect(locators.len()).to_equal(0)
+            case _: fail("Expected a structured locator array")
+
+    it "renders a table with direction, relation, authority and declared paths":
+        val (output, errors, status) = actual_query_cli(["refs", "feature", "feature:traceability"])
+        expect(status).to_equal(1)
+        expect(output).to_contain("Selected: feature feature:traceability")
+        expect(output).to_contain("DIRECTION\tRELATION\tID\tKIND\tTITLE\tAUTHORITY\tPATHS")
+        expect(output).to_contain("outgoing\tspecifies\treq:REQ-TRC-001\trequirement\t")
+        # implemented_by endpoints materialize as source_file nodes whose declared path is the file link.
+        expect(output).to_contain("outgoing\timplemented_by\tsource:trace-cli\tsource_file\tsrc/app/traceability/main.spl\tauthored-claim\tsrc/app/traceability/main.spl")
+        expect(output).to_contain("Total references: ")
+
+    it "rejects a prefix, reports an absent identity, and keeps errors structured":
+        val (bad, bad_errors, bad_status) = actual_query_cli(["refs", "feature", "feature:traceability", "--prefix=req:", "--format=sdn"])
+        expect(bad_status).to_equal(2)
+        expect(query_document(bad)["code"]).to_equal(SdnValue.String("TRACE-QUERY-INVALID"))
+        val (missing, errors, status) = actual_query_cli(["refs", "feature", "feature:absent", "--format=sdn"])
+        expect(status).to_equal(1)
+        expect(query_document(missing)["code"]).to_equal(SdnValue.String("TRACE-QUERY-NOT-FOUND"))

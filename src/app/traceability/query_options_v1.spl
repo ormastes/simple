@@ -1,5 +1,6 @@
 # Strict P0 query options; validate before any filesystem or Git operation.
 use std.common.traceability.query_nodes_v1.{TraceNodeQueryV1, trace_node_query_validate_v1}
+use std.common.traceability.query_refs_v1.{TraceReferenceQueryV1, trace_reference_query_validate_v1}
 use std.common.traceability.schema.{trace_path_valid}
 use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 
@@ -28,12 +29,12 @@ pub fn trace_query_options_parse_v1(args: [text]) -> Result<TraceQueryOptionsV1,
     if args.len() == 1 and (args[0] == "--help" or args[0] == "-h"):
         options.help = true
         return Ok(options)
-    if args.len() < 2: return Err("TRACE-QUERY-INVALID: expected list|show and a kind; use trace --help")
+    if args.len() < 2: return Err("TRACE-QUERY-INVALID: expected list|show|refs and a kind; use trace --help")
     options.operation = args[0]
     options.kind = args[1]
     var index = 2
-    if options.operation == "show":
-        if args.len() < 3: return Err("TRACE-QUERY-INVALID: show requires a canonical identity")
+    if options.operation == "show" or options.operation == "refs":
+        if args.len() < 3: return Err("TRACE-QUERY-INVALID: " + options.operation + " requires a canonical identity")
         options.selected_id = args[2]
         if options.kind == "feature": options.kind = "features"
         elif options.kind == "requirement": options.kind = "requirements"
@@ -89,6 +90,11 @@ pub fn trace_query_options_parse_v1(args: [text]) -> Result<TraceQueryOptionsV1,
         return Err("TRACE-QUERY-INVALID: snapshot must be worktree, index or git:REV")
     if options.paths.len() > 128 or options.declarations.len() > 32:
         return Err("TRACE-QUERY-BUDGET: too many selected files or declarations")
+    if options.operation == "refs":
+        if options.id_prefix != "": return Err("TRACE-QUERY-INVALID: refs accepts no prefix")
+        trace_reference_query_validate_v1(TraceReferenceQueryV1(snapshot_id: "", kind: options.kind,
+            selected_id: options.selected_id, limit: options.limit, cursor: options.cursor))?
+        return Ok(options)
     trace_node_query_validate_v1(TraceNodeQueryV1(snapshot_id: "", operation: options.operation,
         kind: options.kind, selected_id: options.selected_id, id_prefix: options.id_prefix,
         limit: options.limit, cursor: options.cursor))?
@@ -112,6 +118,9 @@ pub fn trace_query_sdn_requested_v1(args: [text]) -> bool:
 pub fn trace_query_help_v1() -> text:
     "Usage: simple trace list features|requirements|bugs [options]\n" +
     "       simple trace show feature|requirement|bug <canonical-id> [options]\n" +
+    "       simple trace refs feature|requirement|bug <canonical-id> [options]\n" +
+    "  refs lists every authored claim from/to the identity (direction, relation,\n" +
+    "  other id/kind/title, authority) plus where the identity is declared.\n" +
     "  --snapshot=worktree|index|git:REV  Default: worktree preview\n" +
     "  --format=table|sdn                Human table or structured SDN\n" +
     "  --limit=1..200 --prefix=<id-prefix> --cursor=<continuation>\n" +
