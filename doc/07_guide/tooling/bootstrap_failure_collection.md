@@ -395,6 +395,15 @@ policy exception in its own attempt; never bypass guards to publish admission.
 
 ## Preserve truthful terminal results
 
+Watchdog receipts retain `status` and `exit_status` as the final admission
+verdict. `primary_status` and `primary_exit_status` preserve the initiating
+Unix workload or watchdog outcome before grace and cleanup can replace it.
+For example, an RSS breach can retain `rss-cap-exceeded`/88 as its primary
+cause while the final result is `rss-containment-unverified`/89. Diagnose the
+primary cause and cleanup failure separately; primary success never overrides
+a failing final verdict. Other receipt paths default primary fields to their
+final outcome, and historical receipts may omit them.
+
 When using the Rust seed for bootstrap with `--runtime-bundle core-c-bootstrap`,
 the runtime source checkout takes precedence over a prebuilt `--runtime-path`.
 The current source resolver searches the working directory's ancestors, then
