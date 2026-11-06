@@ -42,8 +42,8 @@ Type the if-expression from its branch tails (unify `Result<T, _>` /
 a binding from an `if` / `if-elif` expression with an else branch by the join
 of its branch tails (`binding_branch_join`), but only when the join is a fully
 known Result. Branch tails are typed by `binding_block_value_type`: a bare
-builtin `Ok(v)` / `Err(e)` is a Result with the other arm unknown, unsuffixed
-literals have their literal type, `base.field` uses the declared field type,
+builtin `Ok(v)` / `Err(e)` is a Result with the other arm unknown, string and
+bool literals have their literal type, `base.field` uses the declared field type,
 and a nested `if` is joined recursively. Two Results join arm by arm (an
 unknown arm takes the other side, otherwise the arms must be equal); other
 types join only when identical. A partial join (an arm neither branch knows)
@@ -57,5 +57,9 @@ arms (`Ok(t: T)` vs `Ok(u: U)`) joined silently. Both are fixed and pinned by
 the spec (it also fails on any `HirTypeKind.Error` MIR advisory).
 
 Spec `test/01_unit/compiler/50.mir/if_expr_result_join_subject_spec.spl`:
-before 3/6 (only the three fail-closed negatives pass), after 6/6, including
-the exact `jit_instantiator.spl:419` shape (struct-field payloads, nested if).
+before 4/8 (only the four guard cases pass), after 8/8, including
+the exact `jit_instantiator.spl:419` shape (struct-field payloads, nested if),
+also with a local array-literal construction. A second review found
+`binding_field_type` read the bare-name field table that construction-site
+array literals rewrite to `[i64]`; it now reads only the declaration-written
+module-qualified key. Numeric literals are not pinned (width from context).

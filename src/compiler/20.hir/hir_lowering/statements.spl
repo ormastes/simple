@@ -138,7 +138,8 @@ impl HirLowering:
     # - a builtin `Ok(v)` / `Err(e)` call (symbol tagged by the
     #   unresolved-builtin fallback in expression_support; a user function
     #   named Ok/Err is not tagged) is a Result with the other arm unknown;
-    # - an unsuffixed literal has its literal type;
+    # - a string / bool literal has its literal type (numeric literals stay
+    #   unknown: their width comes from context);
     # - a nested `if` is the join of its own branches;
     # - anything else is ordinary binding transport, then `declared`.
     fn binding_block_value_type(tail_kind: HirExprKind, declared: HirType, span: Span) -> HirType:
@@ -159,10 +160,6 @@ impl HirLowering:
                                 if tag == BUILTIN_METHOD_RESULT_OK:
                                     return HirType(kind: HirTypeKind.Result(payload, unknown), span: span)
                                 return HirType(kind: HirTypeKind.Result(unknown, payload), span: span)
-            case HirExprKind.IntLit(_, int_suffix):
-                if int_suffix == nil: return HirType(kind: HirTypeKind.Int(64, true), span: span)
-            case HirExprKind.FloatLit(_, float_suffix):
-                if float_suffix == nil: return HirType(kind: HirTypeKind.Float(64), span: span)
             case HirExprKind.StringLit(_, _):
                 return HirType(kind: HirTypeKind.Str, span: span)
             case HirExprKind.BoolLit(_):
@@ -178,31 +175,36 @@ impl HirLowering:
             return declared
         transported
 
-    # Declared type of `base.field` when `base` is a binding whose struct is
-    # known (a local registered by try_register_local_struct_type, or a
-    # binding typed Named(struct)). Same tables as field_type_for_base_raw /
-    # field_type_for_owner_raw (canonical `module.Name` key first).
+    # Declared type of `base.field` when `base` is a binding typed
+    # Named(struct). Only the module-qualified `module.Name` key of
+    # struct_field_types_by_name is read: it is written from declarations and
+    # imports only, while the bare-name key is also rewritten from
+    # construction-site array literals (try_register_local_struct_type maps a
+    # `[]` argument to `[i64]`), which would hand back a wrong but settled type.
     fn binding_field_type(base_kind: HirExprKind, field_name: text, span: Span) -> HirType:
         val unknown = HirType(kind: HirTypeKind.Error, span: span)
-        val base_symbol = _hir_expr_symbol_or_invalid(base_kind)
-        if base_symbol.is_valid() and self.local_struct_types.has(base_symbol.id):
-            val local_struct_name = self.local_struct_types[base_symbol.id]
-            if self.struct_field_types_by_name.has(local_struct_name):
-                val local_fields = self.struct_field_types_by_name[local_struct_name]
-                if local_fields.has(field_name): return local_fields[field_name]
+        var owner_raw: i64 = -1
         val base_type: HirType = self.binding_kind_type(base_kind, span)
         match base_type.kind:
-            case HirTypeKind.Named(owner_id, _):
-                if val owner = self.symbols.get_symbol_raw(owner_id.id):
-                    if val owner_module = owner.defining_module:
-                        val canonical_name: text = owner_module + "." + owner.name
-                        if self.struct_field_types_by_name.has(canonical_name):
-                            val canonical_fields = self.struct_field_types_by_name[canonical_name]
-                            if canonical_fields.has(field_name): return canonical_fields[field_name]
-                    if self.struct_field_types_by_name.has(owner.name):
-                        val owner_fields = self.struct_field_types_by_name[owner.name]
-                        if owner_fields.has(field_name): return owner_fields[field_name]
+            case HirTypeKind.Named(owner_id, _): owner_raw = owner_id.id
             case _: ()
+        if owner_raw < 0:
+            # A local built by a struct constructor call records only the
+            # struct NAME (local_struct_types); resolve it to its declaration.
+            val base_symbol = _hir_expr_symbol_or_invalid(base_kind)
+            if base_symbol.is_valid() and self.local_struct_types.has(base_symbol.id):
+                val struct_symbol = self.symbols.lookup_or_invalid(self.local_struct_types[base_symbol.id])
+                if struct_symbol.is_valid(): owner_raw = struct_symbol.id
+        if owner_raw < 0:
+            return unknown
+        if val owner = self.symbols.get_symbol_raw(owner_raw):
+            if owner.kind != SymbolKind.Struct and owner.kind != SymbolKind.Class:
+                return unknown
+            if val owner_module = owner.defining_module:
+                val canonical_name: text = owner_module + "." + owner.name
+                if self.struct_field_types_by_name.has(canonical_name):
+                    val canonical_fields = self.struct_field_types_by_name[canonical_name]
+                    if canonical_fields.has(field_name): return canonical_fields[field_name]
         unknown
 
     # Join of every branch tail of an `if` / `if-elif` with an else branch
