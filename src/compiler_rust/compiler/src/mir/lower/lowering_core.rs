@@ -1561,6 +1561,19 @@ impl<'a> MirLowerer<'a> {
         )
     }
 
+    /// `slot_holds_tagged_value`, plus the generic-enum optional form
+    /// `Option<T>` (an explicit annotation on a local/field/return resolves to
+    /// `HirType::Enum { name: "Option", .. }` rather than the `T?` Pointer
+    /// form). Both hold a BoxInt-tagged payload, so `rt_unwrap_or_self` results
+    /// typed as a raw scalar must be unboxed for either representation.
+    pub(super) fn slot_holds_tagged_optional(&self, ty: TypeId) -> bool {
+        self.slot_holds_tagged_value(ty)
+            || matches!(
+                self.type_registry.and_then(|tr| tr.get(ty)),
+                Some(crate::hir::HirType::Enum { name, .. }) if name.as_str() == "Option"
+            )
+    }
+
     /// Primitive types whose machine representation is a raw (untagged) word.
     pub(super) fn is_raw_scalar_type(ty: TypeId) -> bool {
         matches!(

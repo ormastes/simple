@@ -1,6 +1,6 @@
 # Windows Stage 2 sanity: SCV prime skipped after a compiler change; unhinted link flavor is MSVC
 
-Status: OPEN. Found 2026-10-25 on DESKTOP-5A4V03J (MinGW clang default lane,
+Status: §1 FIXED 2026-11-06 (prime keyed on compiler identity); §2 FIXED by b8319ff3387 (unhinted flavor = gnu); §3-§4 tracked separately. Found 2026-10-25 on DESKTOP-5A4V03J (MinGW clang default lane,
 `--backend=cranelift`). Related:
 [windows_gnu_stage2_qualification_cli_timeout_and_empty_module_cc_2026-10-25.md](windows_gnu_stage2_qualification_cli_timeout_and_empty_module_cc_2026-10-25.md).
 

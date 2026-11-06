@@ -2,7 +2,7 @@
 
 - **ID:** seed_jit_lsu64_load_lowering_forces_interpreter
 - **Date:** 2026-07-22
-- **Status:** OPEN (Rust seed-side; cannot be fixed in pure Simple)
+- **Status:** STALE for the lsu64_load symptom (2026-11-06); JIT still falls back for a different reason (see Re-verification)
 - **Severity:** high — it is the throughput blocker to the OpenSBI banner / Linux-on-SoC bring-up
 - **Component:** seed JIT HIR lowering (`src/compiler_rust`), not the .spl compiler
 
@@ -56,3 +56,13 @@ banner bytes.
 ## Cross-refs
 [[rv64_opensbi_fw_platform_init_throughput_frontier]] — the banner frontier doc
 whose CORRECTION section this bug now anchors.
+
+## Re-verification (2026-11-06)
+
+Ran the repro (`run test/01_unit/lib/hardware/rv64gc_rtl/core64_probe.spl`) on
+the Rust seed (`simple-ref`, release/1.0.0): no `Unknown variable: lsu64_load`
+anywhere. The interpreter fallback still occurs but with a different error:
+`HIR lowering error: Cannot infer field type: struct 'RegFile64' field 'regs'
+(declared fields: reg_0, reg_1, ...)`. The lsu64_load symptom is stale; the
+throughput blocker should be re-filed against the RegFile64 `regs` field
+lowering error.

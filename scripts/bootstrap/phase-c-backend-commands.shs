@@ -57,7 +57,14 @@ bootstrap_phase_c_run_tool_build() {
   # BOOTSTRAP_VERIFY_TEST_WORKERS=2 provides (the per-row tree budget is the
   # session cap divided by concurrent test workers). This is the documented
   # per-invocation opt-out, not a script-global default.
-  set -- "env" "SIMPLE_FILE_WORKERS=0" "$@"
+  # The pin travels in the ENVIRONMENT (exported around run_matrix_task and
+  # restored after), never as an `env VAR=...` argv prefix: every owner keys
+  # on argv[0]=compiler / argv[1]=native-build -- the verifier's Stage 2
+  # managed-tool block (bootstrap-phase-verification.shs), the toolchain pin
+  # (bootstrap-phase-toolchain.shs) and the tree-RSS owner
+  # (run-process-group-timeout.shs). Run 6 (2026-11-06) proved the prefix
+  # bypassed all three: the owner stripped the published phase-policy cap and
+  # ceiling and killed the full-CLI build at the 13 GiB default budget.
   # --cache-dir is mandatory: without it both concurrent tool workers
   # (cli + runner) share the ambient native cache root and race each other
   # (HIR ledger creation failed, parse shards SIGSEGV'd, 2026-11-05). The
@@ -69,8 +76,19 @@ bootstrap_phase_c_run_tool_build() {
   if [ -n "${native_internal_timeout:-}" ]; then
     set -- "$@" --timeout "$native_internal_timeout"
   fi
+  pcb_fw_was_set=${SIMPLE_FILE_WORKERS+x}
+  pcb_fw_previous=${SIMPLE_FILE_WORKERS-}
+  SIMPLE_FILE_WORKERS=0
+  export SIMPLE_FILE_WORKERS
+  pcb_status=0
   run_matrix_task "$pcb_task" --verification-expect-executable="$pcb_output" \
-    "$@" --threads "$pcb_threads" -o "$pcb_output"
+    "$@" --threads "$pcb_threads" -o "$pcb_output" || pcb_status=$?
+  if [ -n "$pcb_fw_was_set" ]; then
+    SIMPLE_FILE_WORKERS=$pcb_fw_previous
+  else
+    unset SIMPLE_FILE_WORKERS
+  fi
+  return "$pcb_status"
 }
 
 bootstrap_phase_c_run_module_build() {

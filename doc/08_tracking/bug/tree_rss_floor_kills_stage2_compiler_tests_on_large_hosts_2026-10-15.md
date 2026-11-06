@@ -307,3 +307,74 @@ honour: `BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT=7200
 BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS=28800` (env) plus `--timeout-seconds=14400` (the old
 admit script does not read `BOOTSTRAP_VERIFY_TIMEOUT_SECONDS`); that receipt is
 a manual-budget re-test and carries no `timeout_source`.
+
+## Run 6 (2026-11-06, release/1.0.0 `a89f4c436db`, Linux aarch64 121 GiB): tool-build rows lost the phase cap
+
+Includes #6736 (whole-build plan) and #7022 (timeout scaling). The Stage 2
+compiler-tests banner showed the plan (`cap 54525952 KiB, build-threads=2 ...
+timeout scale x4`), but both tool-build rows were killed by their own
+row-owner receipt at the 13 GiB default budget:
+
+| row | status | rss_limit_kib | peak_rss_kib | killed in | elapsed |
+|---|---|---|---|---|---|
+| `compiler_cli_build` | rss-cap-exceeded, exit 88 | 13631488 | 13672048 | after `source_closure` | 185 s |
+| `test_runner_build` | rss-cap-exceeded, exit 88 | 13631488 | — | `smf_package` | 868 s |
+
+Receipt: `cap_source=default cap_bound=budget compiler_ceiling_admission=default
+compiler_available_kib=0 compiler_available_source=unknown budget_scope=compiler
+compiler_jobs=2`. Run 4 (before #7037) ran the same rows under the phase cap
+(compiler_cli_build peaked at 23 GiB inside it).
+
+Root cause: PR #7037 (merge `251caca1e88`) pinned the tool builds to the
+two-pass route with an argv prefix in `scripts/bootstrap/phase-c-backend-commands.shs`
+(`set -- "env" "SIMPLE_FILE_WORKERS=0" "$@"`). Every owner identifies a
+native-build row by argv[0]=compiler / argv[1]=`native-build`, so all three
+silently took their non-build branch:
+
+- `run-process-group-timeout.shs:55-58`: with
+  `SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB` set and `$2 != native-build` it
+  unsets BOTH the elevated ceiling and the published
+  `SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB`, so `bootstrap_tree_rss_resolve`
+  priced the row from the default budget (`cap_source=default`). Worker count
+  came from `SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS`, not `--threads` (`:22`).
+- `compiler_available_kib=0` is the same cause, not a separate bug:
+  `bootstrap_tree_rss_admit_ceiling` returns before probing headroom when no
+  ceiling is requested, leaving `available=0 source=unknown admission=default`.
+- `bootstrap-phase-verification.shs:1016-1019`: the Stage 2 managed-tool block
+  (managed native-tool/runtime authority, private cache dirs,
+  `SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP=1`, `bootstrap_phase_c_apply_frontend_policy`)
+  was skipped: `verification_frontend_policy` lines in `compiler_cli_build.log`
+  are 0 in run 6 vs 4 in run 4.
+- `bootstrap-phase-toolchain.shs:69`: the native toolchain pin was skipped.
+
+`scripts/bootstrap/tests/phase-c-backend-commands-test.shs` had been red since
+#7037 (`7: parameter not set`), because #7037 added a `cache` parameter and
+never updated the test.
+
+Fix: the `SIMPLE_FILE_WORKERS=0` pin now travels in the environment, exported
+around `run_matrix_task` and restored afterwards. argv[0] is the compiler
+again. The per-file default and #7037's two-pass pin for these rows are both
+kept. Still fail closed: a row that goes over the phase cap is still killed,
+an explicit user cap still wins (`explicit-env`), and a malformed attribution
+is still refused.
+
+Tests: `tree-rss-cap-policy-test.shs` section 2e drives the real argv builder
+through the real owner and watchdog. It checks four cases: published pair ->
+`cap_source=phase-policy` with the row cap equal to the phase cap; nothing
+published -> `default`; user cap -> `explicit-env`; and a run-6 replay using
+the host's real elevated pair, which must never fall back to `default`. It
+also asserts that `SIMPLE_FILE_WORKERS=0` reaches the compiler. On the
+pre-fix builder the section fails (`compiler_jobs=0`, pin lost).
+`phase-c-backend-commands-test.shs` asserts argv[0..1] and the env-scoped pin.
+Its module-object block still expected `--target` in argv, but
+`677b77f2907` (2026-10-16) moved the target into `SIMPLE_NATIVE_BUILD_TARGET`.
+The stale expectation was corrected so that the file runs green.
+
+Re-gate: `phase-c-backend-commands.shs` is listed in run 6's admitted source
+snapshot (`stage3/<plat>/source-inputs-before.txt`, sha `5ee66cfb...`). The
+verifier only records that sha (`bootstrap-phase-verification.shs:1648`), so
+`admit-built-stage2-compiler-tests.shs --source-root=<fixed tree>` can run.
+However, managed Stage 3 resume recomputes the source snapshot
+(`check-stage3-recovery-authority.shs:353-436`) and will not match. On the
+frozen run-6 tree no env override repairs the argv. The sanctioned path is a
+fresh bootstrap from a tree that has this fix.
