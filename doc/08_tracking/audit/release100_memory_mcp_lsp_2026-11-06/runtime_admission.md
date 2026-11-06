@@ -55,3 +55,13 @@ A later live-process check found PID 25734 absent (terminal). Its retained log e
 The release baseline already imports `std.io_runtime.{exit}` at line 13 and has newer trace-query changes; the campaign source in `/private/tmp/boot4-wt` lacks that import. Do not reapply an already-landed fix or restart the other owner's campaign from stale inputs. A new qualified campaign must consume the repaired source under its owner's immutable-lineage workflow. Full runtime-dependent verification remains blocked; independent source work continues.
 
 The outer verifier subsequently continued with standalone test-runner child PID 35155 (observed live). Only the full-CLI child is terminal; the campaign as a whole was not declared terminal. Standalone runner construction is not full CLI admission.
+
+## Verified no-seed recovery route
+
+The canonical producer's `--validate-parent-only` check succeeded for `/private/tmp/boot4-out/s2/stage2/aarch64-apple-darwin/simple`, with `SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT=/private/tmp`. Freeze the reviewed lane source before a new owned build. Use this actual stage2 parent location, not the copied stage2-admitted location, because parent validation checks the stage layout.
+
+```text
+SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT=/private/tmp SIMPLE_BUILD_COMPILER=/private/tmp/boot4-out/s2/stage2/aarch64-apple-darwin/simple sh scripts/bootstrap/bootstrap-from-scratch.sh --stop-after-stage2 --jobs=1 --produce-managed-receipt=release-trust-verification --output=/private/tmp/release100-hardening-bootstrap
+```
+
+This refresh preserves the admitted parent's runtime authority and does not request `--full-bootstrap` or the Rust seed. Only after successful fresh admission, resume managed qualification using the emitted `managed-stage4-planner-admission-v2.env` and `--resume-managed-from-admitted=<new-output>`. Verify exact receipt names and identities before execution. A standalone runner cannot authenticate suite evidence without the required CLI/runner owner receipt. The observed old CLI attempt took 2650 seconds and roughly 10 GiB maximum RSS; full cold qualification is an hours-scale prerequisite, not a completed check.
