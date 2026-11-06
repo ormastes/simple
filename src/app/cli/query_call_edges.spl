@@ -3,9 +3,9 @@
 # Same contract as `query_engine`: each `engine_*_lines` RETURNS its lines so
 # the in-process MCP adapter and the one-shot child print byte-identical text.
 # Wire format per edge: `name|file|def_line|site_line|site_col|resolution`
-# (see std.nogc_sync_mut.lsp.lsp_call_edges). Resolution is honest: same-file
-# declaration -> exact; several candidates -> bounded_set; one cross-file
-# textual candidate -> heuristic; none -> unknown. Grep is never truth.
+# (see std.nogc_sync_mut.lsp.lsp_call_edges). Resolution is honest: every
+# edge here is textual -- one candidate -> heuristic, several -> bounded_set,
+# none -> unknown; `exact` is reserved for the resolved index (todo L5).
 
 use app.cli.query_rich_common.{query_file_read_rich}
 use app.cli.query_engine.{engine_find_definition_lines}
@@ -46,7 +46,7 @@ fn _resolve_callee(file: text, lines: [text], name: text, site_line: i64, site_c
     val local = lsp_call_edges_decl_lines_v1(lines, name)
     if local.len() > 0:
         return LspCallEdgeV1(name: name, file: file, def_line: local[0], site_line: site_line,
-            site_col: site_col, resolution: lsp_call_edges_resolution_for_hits_v1(local.len(), true))
+            site_col: site_col, resolution: lsp_call_edges_resolution_for_hits_v1(local.len()))
     # Cross-file: the definition engine's candidates (imports first, then the
     # bounded walk). One candidate is still textual -> heuristic.
     val (def_lines, _code) = engine_find_definition_lines(file, name)
@@ -62,17 +62,16 @@ fn _resolve_callee(file: text, lines: [text], name: text, site_line: i64, site_c
                 hits = hits + 1
             case nil: pass
     LspCallEdgeV1(name: name, file: target_file, def_line: target_line, site_line: site_line,
-        site_col: site_col, resolution: lsp_call_edges_resolution_for_hits_v1(hits, false))
+        site_col: site_col, resolution: lsp_call_edges_resolution_for_hits_v1(hits))
 
 # Incoming: call sites of `symbol` across the bounded `src/` walk plus `file`
 # itself; the caller is the enclosing declaration at each site. Every hit is a
-# textual word match, so the label is heuristic (exact only when the site file
-# is the declaring file itself).
+# textual word match, so the label is heuristic everywhere.
 fn engine_incoming_calls_lines(file: text, symbol: text) -> ([text], i64):
     var out: [text] = []
     val own = query_file_read_rich(file)
     if own != "":
-        for l in _collect_sites(file, own.split("\n"), symbol, true, _MAX_EDGES):
+        for l in _collect_sites(file, own.split("\n"), symbol, _MAX_EDGES):
             out.push(l)
     val found = lsp_bounded_search_word_v1("src", ".spl", symbol, lsp_bounded_search_budget_default_v1())
     var by_file: [text] = []
@@ -86,7 +85,7 @@ fn engine_incoming_calls_lines(file: text, symbol: text) -> ([text], i64):
         if out.len() >= _MAX_EDGES: break
         val content = query_file_read_rich(other)
         if content == "": continue
-        for l in _collect_sites(other, content.split("\n"), symbol, false, _MAX_EDGES - out.len()):
+        for l in _collect_sites(other, content.split("\n"), symbol, _MAX_EDGES - out.len()):
             out.push(l)
     val note = lsp_bounded_search_truncation_note_v1(found)
     if out.len() == 0:
@@ -97,7 +96,7 @@ fn engine_incoming_calls_lines(file: text, symbol: text) -> ([text], i64):
     (out, 0)
 
 # One edge per call-site line (the first occurrence on the line).
-fn _collect_sites(site_file: text, lines: [text], symbol: text, same_file: bool, budget: i64) -> [text]:
+fn _collect_sites(site_file: text, lines: [text], symbol: text, budget: i64) -> [text]:
     var out: [text] = []
     var li = 1
     while li <= lines.len() and out.len() < budget:
@@ -112,7 +111,7 @@ fn _collect_sites(site_file: text, lines: [text], symbol: text, same_file: bool,
                 if caller != "":
                     out.push(lsp_call_edge_format_v1(LspCallEdgeV1(name: caller, file: site_file,
                         def_line: caller_line, site_line: li, site_col: site_col,
-                        resolution: lsp_call_edges_resolution_for_hits_v1(1, same_file))))
+                        resolution: lsp_call_edges_resolution_for_hits_v1(1))))
         li = li + 1
     out
 
