@@ -118,7 +118,7 @@ decision on class semantics). Left OPEN, no code change.
 Owner decision 2026-11-06: `class` values are reference types everywhere,
 `struct` values stay value types. The interpreter now agrees with the JIT
 (`6c7b4db3d39`, default since 2026-11-04; residual write-back shapes
-`5d841fb13bc`): `var b = a; a.bump()` prints `a=1 b=1` on both lanes. The
+commit "fix(interp): argument write-back through class reference chains"): `var b = a; a.bump()` prints `a=1 b=1` on both lanes. The
 "classes are value types" premise of this row is therefore obsolete on every
 lane; a `.from()` group over a **class** acquisition is sound. The hazard
 survives only for a group shaped around a **struct** value. Remaining item is

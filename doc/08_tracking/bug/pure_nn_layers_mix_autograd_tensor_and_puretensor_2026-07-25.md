@@ -4,7 +4,7 @@
 - **Area:** `src/lib/gc_async_mut/pure/nn.spl` /
   `src/lib/gc_async_mut/pure/autograd.spl`
 - **Severity:** high — `Linear.forward()` cannot be called at all.
-- **Status:** OPEN. Newly *visible* (not newly introduced): it was masked until
+- **Status:** FIXED 2026-11-06 (see re-verification at end; was OPEN). Newly *visible* (not newly introduced): it was masked until
   2026-07-25 by the `src/lib/pure/*` stub facades, which meant nothing could
   reach these layers to begin with. See
   `doc/08_tracking/bug/pure_module_stub_facades_shadow_real_impl_2026-07-25.md`.
@@ -128,7 +128,7 @@ What the first real run of `pure/test/nn_spec.spl` showed:
    `std.pure.*`; recorded here so the parked suites are not re-diagnosed from
    scratch.
 
-Status: remains OPEN. Sum/Mean backward broadcast fixed; leaf-gradient
+Status (at that date): remains OPEN — superseded, FIXED 2026-11-06 (see below). Sum/Mean backward broadcast fixed; leaf-gradient
 propagation blocked on runtime shared-reference semantics.
 
 ## 2026-11-06 re-verification (lane fx-ml-db)

@@ -54,7 +54,7 @@ Verification needs a rebuilt seed (not allowed from this lane) -> verification-p
 - Owner decision 2026-11-06: `class` = reference type on every lane, `struct` = value type
   (copy on bind/store/read-back). This doc's Rule is the contract, not an experiment.
 - Flag-on regressions the 2026-11-04 comparison missed (found via
-  `engine_divergence_mutation_class_spec`, 0/2 on vs 2/2 off) fixed in `5d841fb13bc`:
+  `engine_divergence_mutation_class_spec`, 0/2 on vs 2/2 off) fixed in commit "fix(interp): argument write-back through class reference chains":
   `set_nested_path` and `place::merge_subject_step` gained `ClassInstance` arms (child cloned
   out of the cell, never recursed under the write lock, so a self-referencing chain cannot
   deadlock), and a `mut` class parameter is recorded in `mut_written` up front so a sibling
@@ -64,7 +64,7 @@ Verification needs a rebuilt seed (not allowed from this lane) -> verification-p
   objects, so no deep-copy API needed preserving. `Arc<ClassInstance>` cycles leak (no cycle
   collector) — accepted for the seed.
 - Step 4 (drop the path-based write-back for classes) still open; behaviour is correct without it.
-- Evidence 2026-11-06 (seed `f1390d48254` vs +`5d841fb13bc`): `test/01_unit/compiler/interpreter/`
+- Evidence 2026-11-06 (seed `f1390d48254` vs +commit "fix(interp): argument write-back through class reference chains"): `test/01_unit/compiler/interpreter/`
   165 files 155→156 PASS, `test/01_unit/language/` 57 files 54→55 PASS, zero pass→fail. Perf,
   3M-iteration interpreter loop: class field updates 2.73 s / 33 MB (flag on) vs 2.93 s (flag off);
   struct loop 2.90 s / 33 MB on every combination — the fix is perf-neutral.

@@ -25,7 +25,7 @@ Residual the flip exposed: three argument write-back shapes through class
 chains (`f(x, x.items)` with `mut b: Box`, `f(o.h.items)` into a `mut`
 param, `f(o.h.cfg)` non-mut struct) lost mutation with the flag ON —
 `engine_divergence_mutation_class_spec` was 0/2 on, 2/2 off. Fixed in
-`5d841fb13bc` (ClassInstance arms in `set_nested_path` /
+commit "fix(interp): argument write-back through class reference chains" (ClassInstance arms in `set_nested_path` /
 `merge_subject_step`, mut-class-param clobber guard); pinned by
 `class_ref/class_ref_arg_writeback_spec.spl` (1/6 before, 6/6 after).
 Coordinator owns the bug_db status change.
