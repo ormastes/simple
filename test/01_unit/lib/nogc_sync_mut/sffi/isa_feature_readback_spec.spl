@@ -1,0 +1,88 @@
+use std.spec
+use std.spec.step
+use std.nogc_sync_mut.sffi.codegen.{cranelift_new_aot_module_config_v2, cranelift_aot_isa_feature_v2, cranelift_aot_opt_level_v2, cranelift_free_module}
+use std.nogc_sync_mut.sffi.cpu.{cpu_is_x86_64, cpuid, xgetbv}
+use std.nogc_sync_mut.simd.profile.{has_sse, has_avx, has_avx2}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(key: text) -> text?
+
+"""
+## Purpose and audience
+
+Bug `codegen_isa_sffi_text_abi_misexpansion_2026_10_22`. The Cranelift ISA
+wrappers in `std.nogc_sync_mut.sffi.codegen` hand-expand text to (ptr, len).
+Under the seed's hybrid JIT those externs are interp-splices, and an untyped
+call-result i64 reached `rt_interp_call` unboxed: the configured module was
+rejected (0) and every feature readback returned 0 instead of 1 / 0 / -1.
+`use std.spec` demotes this file to the tree-walk interpreter, which never
+reaches the splice, so the first group shells out to `simple run` on a fixture
+(precedent: `test/01_unit/compiler/codegen/erased_receiver_index_of_bind_spec.spl`).
+Measured 2026-11-06 on the Windows seed: unfixed prints `module_ok=false` and
+`sse4.2=0 avx=0 avx2=0 fma=0 bogus=0`; fixed prints the values asserted below.
+This spec pins the readback contract and checks the host CPU readback paths
+(`sffi.cpu` CPUID/XGETBV and `simd.profile`) against each other. Audience:
+SFFI, Cranelift backend and SIMD-dispatch maintainers.
+"""
+
+fn bit(value: i32, n: i32) -> bool:
+    ((value >> n) & 1) == 1
+
+val JIT_FIXTURE = "test/01_unit/lib/nogc_sync_mut/sffi/fixtures/isa_feature_readback_jit.spl"
+
+fn compiler_bin() -> text:
+    """Binary under test; `SIMPLE_SPEC_COMPILER` overrides it (A/B a candidate)."""
+    val override = rt_env_get("SIMPLE_SPEC_COMPILER") ?? ""
+    if override != "":
+        return override
+    return "bin/release/simple"
+
+describe "Cranelift ISA feature readback through the hybrid-JIT splice":
+    it "reads back the requested features under `simple run`":
+        # The runner exports SIMPLE_EXECUTION_MODE=interpret / SIMPLE_RUNTIME_MODE=interpreter;
+        # a child that inherits them never takes the JIT splice and passes vacuously.
+        val result = rt_process_run("env", ["-u", "SIMPLE_EXECUTION_MODE", "-u", "SIMPLE_RUNTIME_MODE", compiler_bin(), "run", JIT_FIXTURE])
+        expect(result.2).to_equal(0)
+        expect(result.0.contains("module_ok=true opt=2")).to_equal(true)
+        expect(result.0.contains("sse4.2=1 avx=1 avx2=1 fma=0 bogus=-1")).to_equal(true)
+
+describe "Cranelift ISA feature readback":
+    it "reads back exactly the requested x86_64 features":
+        step("Configure an x86_64 module requesting sse4.2 and avx2")
+        val module = cranelift_new_aot_module_config_v2("isa_probe", "x86_64-unknown-linux-gnu", "generic", 2, ["sse4.2", "avx2"])
+        expect(module != 0).to_equal(true)
+        step("Optimization mode reads back unchanged")
+        expect(cranelift_aot_opt_level_v2(module)).to_equal(2)
+        step("Requested and implied features read back as enabled")
+        expect(cranelift_aot_isa_feature_v2(module, "sse4.2")).to_equal(1)
+        expect(cranelift_aot_isa_feature_v2(module, "avx")).to_equal(1)
+        expect(cranelift_aot_isa_feature_v2(module, "avx2")).to_equal(1)
+        step("An unrequested feature reads back disabled; an unknown name is invalid")
+        expect(cranelift_aot_isa_feature_v2(module, "fma")).to_equal(0)
+        expect(cranelift_aot_isa_feature_v2(module, "not_a_feature")).to_equal(-1)
+        cranelift_free_module(module)
+
+    it "reads back a featureless module as baseline":
+        val module = cranelift_new_aot_module_config_v2("isa_base", "x86_64-unknown-linux-gnu", "generic", 0, [])
+        expect(module != 0).to_equal(true)
+        expect(cranelift_aot_isa_feature_v2(module, "avx")).to_equal(0)
+        expect(cranelift_aot_isa_feature_v2(module, "sse4.1")).to_equal(0)
+        cranelift_free_module(module)
+
+describe "host CPU feature readback":
+    it "simd.profile predicates equal the CPUID/XGETBV decode":
+        if cpu_is_x86_64() != 1:
+            skip("simd.profile predicates equal the CPUID/XGETBV decode", "not an x86_64 host; no CPUID truth")
+            return
+        val (_a1, _b1, c1, d1) = cpuid(1, 0)
+        val (_a7, b7, _c7, _d7) = cpuid(7, 0)
+        val osxsave = bit(c1, 26) and bit(c1, 27)
+        val xcr0 = if osxsave: xgetbv(0) else: 0
+        val os_avx = osxsave and (xcr0 & 6) == 6
+        val want_avx = bit(c1, 28) and os_avx
+        step("SSE matches CPUID.1:EDX[25]")
+        expect(has_sse()).to_equal(bit(d1, 25))
+        step("AVX matches CPUID.1:ECX[28] with OS YMM state")
+        expect(has_avx()).to_equal(want_avx)
+        step("AVX2 matches CPUID.7.0:EBX[5] gated on AVX")
+        expect(has_avx2()).to_equal(want_avx and bit(b7, 5))

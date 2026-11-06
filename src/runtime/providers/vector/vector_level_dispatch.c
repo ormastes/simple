@@ -42,57 +42,90 @@ static int darwin_flag(const char *name) {
 }
 #endif
 
-static int probe_level(void) {
+/* Why the admitted level is what it is (simple_vector_level_reason). Packed
+ * as code (bits 0..7) | detail << 8 and stored before the level's release
+ * store, so any reader that observed the level observes its reason. */
+static atomic_ullong selected_reason;
+#define DENY(level, code, detail) do { \
+    *reason = (unsigned long long)(code) | ((unsigned long long)(detail) << 8); \
+    return (level); } while (0)
+/* Non-x86 details (cpu-missing / os:) — small integers, x86 features are >= 256. */
+enum { A64_ASIMD = 1, A64_SVE, A64_SVE2, RV_V };
+enum { OS_OSXSAVE_OFF = 1, OS_DARWIN_AVX512_OFF, OS_SVE_UNPROBED, OS_NO_HWCAP,
+    OS_RVV_OFF, OS_UNSUPPORTED_ARCH };
+
+#if defined(__x86_64__)
+/* cpu-missing detail = (register tag << 8) | bit; named by feature_name(). */
+enum { X86_C1 = 1, X86_B7 = 2, X86_CE = 3 };
+#define X86_FEATURE(reg, bit) ((unsigned long long)(reg) << 8 | (bit))
+static int x86_missing(unsigned int have, unsigned int need, int reg, unsigned long long *detail) {
+    const unsigned int gap = need & ~have;
+    if (!gap) return 0;
+    *detail = X86_FEATURE(reg, (unsigned)__builtin_ctz(gap));
+    return 1;
+}
+#endif
+
+static int probe_level(unsigned long long *reason) {
 #if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
     unsigned int a = 0, b = 0, c1 = 0, d = 0, b7 = 0, c7 = 0, ce = 0;
-    if (!__get_cpuid(1, &a, &b, &c1, &d)) return 0;
+    unsigned long long gap = 0;
+    if (!__get_cpuid(1, &a, &b, &c1, &d)) DENY(0, SIMPLE_VECTOR_REASON_CPU_MISSING, 0);
     if (__get_cpuid_max(0, 0) >= 7) __cpuid_count(7, 0, a, b7, c7, d);
     if (__get_cpuid_max(0x80000000u, 0) >= 0x80000001u) __cpuid(0x80000001u, a, b, ce, d);
-    int level = 1; /* SSE2 is architectural on x86-64. */
+    /* Level 1: SSE2 is architectural on x86-64. */
     const unsigned int v2_c1 = (1u << 0) | (1u << 9) | (1u << 13) | (1u << 19) | (1u << 20) | (1u << 23);
-    if ((c1 & v2_c1) != v2_c1 || !(ce & 1u)) return level;
-    level = 2;
-    /* FMA MOVBE XSAVE OSXSAVE AVX F16C; OSXSAVE gates the xgetbv below. */
-    const unsigned int v3_c1 = (1u << 12) | (1u << 22) | (1u << 26) | (1u << 27) | (1u << 28) | (1u << 29);
+    if (x86_missing(c1, v2_c1, X86_C1, &gap) || x86_missing(ce, 1u, X86_CE, &gap))
+        DENY(1, SIMPLE_VECTOR_REASON_CPU_MISSING, gap);
+    /* OSXSAVE gates the xgetbv below; it mirrors CR4.OSXSAVE, an OS decision. */
+    if (!(c1 & (1u << 27))) DENY(2, SIMPLE_VECTOR_REASON_OS, OS_OSXSAVE_OFF);
+    /* FMA MOVBE XSAVE AVX F16C; BMI1 AVX2 BMI2; LZCNT. */
+    const unsigned int v3_c1 = (1u << 12) | (1u << 22) | (1u << 26) | (1u << 28) | (1u << 29);
     const unsigned int v3_b7 = (1u << 3) | (1u << 5) | (1u << 8);
-    if ((c1 & v3_c1) != v3_c1 || (b7 & v3_b7) != v3_b7 || !(ce & (1u << 5))) return level;
+    if (x86_missing(c1, v3_c1, X86_C1, &gap) || x86_missing(b7, v3_b7, X86_B7, &gap) ||
+            x86_missing(ce, 1u << 5, X86_CE, &gap))
+        DENY(2, SIMPLE_VECTOR_REASON_CPU_MISSING, gap);
     unsigned int xlo = 0, xhi = 0;
     __asm__ volatile("xgetbv" : "=a"(xlo), "=d"(xhi) : "c"(0));
     const unsigned long long xcr0 = ((unsigned long long)xhi << 32) | xlo;
-    if ((xcr0 & 0x6u) != 0x6u) return level; /* OS saves XMM+YMM */
-    level = 3;
+    if ((xcr0 & 0x6u) != 0x6u) DENY(2, SIMPLE_VECTOR_REASON_XCR0, 0x6u & ~xcr0); /* XMM+YMM */
     const unsigned int v4_b7 = (1u << 16) | (1u << 17) | (1u << 28) | (1u << 30) | (1u << 31);
-    if ((b7 & v4_b7) != v4_b7) return level;
+    if (x86_missing(b7, v4_b7, X86_B7, &gap)) DENY(3, SIMPLE_VECTOR_REASON_CPU_MISSING, gap);
 #if defined(__APPLE__)
     if (!darwin_flag("hw.optional.avx512f") || !darwin_flag("hw.optional.avx512bw") ||
             !darwin_flag("hw.optional.avx512dq") || !darwin_flag("hw.optional.avx512vl") ||
-            !darwin_flag("hw.optional.avx512cd")) return level;
+            !darwin_flag("hw.optional.avx512cd"))
+        DENY(3, SIMPLE_VECTOR_REASON_OS, OS_DARWIN_AVX512_OFF);
 #else
-    if ((xcr0 & 0xe6u) != 0xe6u) return level; /* opmask + ZMM_Hi256 + Hi16_ZMM */
+    if ((xcr0 & 0xe6u) != 0xe6u) /* opmask + ZMM_Hi256 + Hi16_ZMM */
+        DENY(3, SIMPLE_VECTOR_REASON_XCR0, 0xe6u & ~xcr0);
 #endif
-    return 4;
+    DENY(4, SIMPLE_VECTOR_REASON_MAX, 0);
 #elif defined(__aarch64__)
 #if defined(SIMPLE_VECTOR_HAVE_HWCAP)
     const unsigned long h = hwcap(0), h2 = hwcap(1);
-    if (!(h & (1ul << 1))) return 0;          /* HWCAP_ASIMD */
-    if (!(h & (1ul << 22))) return 1;         /* HWCAP_SVE */
-    return (h2 & (1ul << 1)) ? 3 : 2;         /* HWCAP2_SVE2 */
+    if (!(h & (1ul << 1))) DENY(0, SIMPLE_VECTOR_REASON_CPU_MISSING, A64_ASIMD);   /* HWCAP_ASIMD */
+    if (!(h & (1ul << 22))) DENY(1, SIMPLE_VECTOR_REASON_CPU_MISSING, A64_SVE);    /* HWCAP_SVE */
+    if (!(h2 & (1ul << 1))) DENY(2, SIMPLE_VECTOR_REASON_CPU_MISSING, A64_SVE2);   /* HWCAP2_SVE2 */
+    DENY(3, SIMPLE_VECTOR_REASON_MAX, 0);
 #elif defined(__APPLE__) || defined(_WIN32) || defined(__simpleos__)
-    return 1;
+    DENY(1, SIMPLE_VECTOR_REASON_OS, OS_SVE_UNPROBED);
 #else
-    return 0;
+    DENY(0, SIMPLE_VECTOR_REASON_OS, OS_NO_HWCAP);
 #endif
 #elif defined(__riscv) && __riscv_xlen == 64 && defined(SIMPLE_VECTOR_HAVE_HWCAP)
-    if (!(hwcap(0) & (1ul << ('V' - 'A')))) return 0;
+    if (!(hwcap(0) & (1ul << ('V' - 'A')))) DENY(0, SIMPLE_VECTOR_REASON_CPU_MISSING, RV_V);
 #if defined(__linux__)
     /* Linux >= 6.5 may disable V per process: PR_RISCV_V_GET_CONTROL (70),
      * current-state field 1 = OFF. Older kernels (-1) predate the control. */
     const int control = prctl(70, 0, 0, 0, 0);
-    if (control >= 0 && (control & 3) == 1) return 0;
+    if (control >= 0 && (control & 3) == 1) DENY(0, SIMPLE_VECTOR_REASON_OS, OS_RVV_OFF);
 #endif
-    return 1;
+    DENY(1, SIMPLE_VECTOR_REASON_MAX, 0);
+#elif defined(__riscv) && __riscv_xlen == 64
+    DENY(0, SIMPLE_VECTOR_REASON_OS, OS_NO_HWCAP);
 #else
-    return 0;
+    DENY(0, SIMPLE_VECTOR_REASON_OS, OS_UNSUPPORTED_ARCH);
 #endif
 }
 
@@ -101,13 +134,96 @@ static atomic_int selected_level = -1;
 int simple_vector_selected_level(void) {
     int level = atomic_load_explicit(&selected_level, memory_order_acquire);
     if (level >= 0) return level;
-    level = probe_level();
+    unsigned long long reason = 0;
+    level = probe_level(&reason);
 #if defined(SIMPLE_VECTOR_FORCE_NO_AVX512) && defined(__x86_64__)
-    if (level > 3) level = 3;
+    if (level > 3) { level = 3; reason = SIMPLE_VECTOR_REASON_BUILD; }
 #endif
-    if (level > SIMPLE_VECTOR_MAX_LEVEL) level = SIMPLE_VECTOR_MAX_LEVEL;
+    if (level > SIMPLE_VECTOR_MAX_LEVEL) {
+        level = SIMPLE_VECTOR_MAX_LEVEL;
+        reason = SIMPLE_VECTOR_REASON_CAP | (unsigned long long)SIMPLE_VECTOR_MAX_LEVEL << 8;
+    }
+    atomic_store_explicit(&selected_reason, reason, memory_order_relaxed);
     atomic_store_explicit(&selected_level, level, memory_order_release);
     return level;
+}
+
+/* Bounded, libc-free text: keeps buf NUL-terminated within size. */
+struct reason_text { char *buf; size_t size, len; };
+static void put_str(struct reason_text *t, const char *s) {
+    for (; *s; ++s, ++t->len)
+        if (t->len + 1 < t->size) { t->buf[t->len] = *s; t->buf[t->len + 1] = 0; }
+}
+static void put_num(struct reason_text *t, unsigned long long v, unsigned base) {
+    char digits[24], one[2] = {0, 0};
+    int n = 0;
+    do { digits[n++] = "0123456789abcdef"[v % base]; v /= base; } while (v);
+    if (base == 16) put_str(t, "0x");
+    while (n) { one[0] = digits[--n]; put_str(t, one); }
+}
+
+static const char *feature_name(unsigned long long detail) {
+    switch (detail) {
+#if defined(__x86_64__)
+    case 0: return "cpuid";
+    case X86_FEATURE(X86_C1, 0): return "sse3";
+    case X86_FEATURE(X86_C1, 9): return "ssse3";
+    case X86_FEATURE(X86_C1, 12): return "fma";
+    case X86_FEATURE(X86_C1, 13): return "cx16";
+    case X86_FEATURE(X86_C1, 19): return "sse4.1";
+    case X86_FEATURE(X86_C1, 20): return "sse4.2";
+    case X86_FEATURE(X86_C1, 22): return "movbe";
+    case X86_FEATURE(X86_C1, 23): return "popcnt";
+    case X86_FEATURE(X86_C1, 26): return "xsave";
+    case X86_FEATURE(X86_C1, 28): return "avx";
+    case X86_FEATURE(X86_C1, 29): return "f16c";
+    case X86_FEATURE(X86_B7, 3): return "bmi1";
+    case X86_FEATURE(X86_B7, 5): return "avx2";
+    case X86_FEATURE(X86_B7, 8): return "bmi2";
+    case X86_FEATURE(X86_B7, 16): return "avx512f";
+    case X86_FEATURE(X86_B7, 17): return "avx512dq";
+    case X86_FEATURE(X86_B7, 28): return "avx512cd";
+    case X86_FEATURE(X86_B7, 30): return "avx512bw";
+    case X86_FEATURE(X86_B7, 31): return "avx512vl";
+    case X86_FEATURE(X86_CE, 0): return "lahf-sahf";
+    case X86_FEATURE(X86_CE, 5): return "lzcnt";
+#endif
+    case A64_ASIMD: return "asimd";
+    case A64_SVE: return "sve";
+    case A64_SVE2: return "sve2";
+    case RV_V: return "v";
+    }
+    return "unknown";
+}
+
+static const char *os_name(unsigned long long detail) {
+    switch (detail) {
+    case OS_OSXSAVE_OFF: return "osxsave-off";
+    case OS_DARWIN_AVX512_OFF: return "darwin-avx512-sysctl-off";
+    case OS_SVE_UNPROBED: return "sve-unprobed";
+    case OS_NO_HWCAP: return "no-hwcap-probe";
+    case OS_RVV_OFF: return "rvv-disabled-prctl";
+    case OS_UNSUPPORTED_ARCH: return "unsupported-arch";
+    }
+    return "unknown";
+}
+
+int simple_vector_level_reason(char *buf, size_t size) {
+    (void)simple_vector_selected_level();
+    const unsigned long long packed = atomic_load_explicit(&selected_reason, memory_order_relaxed);
+    const int code = (int)(packed & 0xffu);
+    const unsigned long long detail = packed >> 8;
+    struct reason_text t = { buf, buf ? size : 0, 0 };
+    if (t.size) buf[0] = 0;
+    switch (code) {
+    case SIMPLE_VECTOR_REASON_MAX: put_str(&t, "max"); break;
+    case SIMPLE_VECTOR_REASON_CPU_MISSING: put_str(&t, "cpu-missing:"); put_str(&t, feature_name(detail)); break;
+    case SIMPLE_VECTOR_REASON_XCR0: put_str(&t, "xcr0:"); put_num(&t, detail, 16); break;
+    case SIMPLE_VECTOR_REASON_CAP: put_str(&t, "cap:"); put_num(&t, detail, 10); break;
+    case SIMPLE_VECTOR_REASON_OS: put_str(&t, "os:"); put_str(&t, os_name(detail)); break;
+    case SIMPLE_VECTOR_REASON_BUILD: put_str(&t, "build:force-no-avx512"); break;
+    }
+    return code;
 }
 
 /* Only levels <= SIMPLE_VECTOR_MAX_LEVEL are referenced, so a capped DSO links

@@ -29,29 +29,55 @@ extern fn rt_cranelift_finalize_module(module: i64) -> i64
 @unsafe(reason: "raw Cranelift ABI; zero/false sentinel or ignored operation means invalid input", capabilities: [ffi, raw_ptr])
 extern fn rt_cranelift_free_module(module: i64)
 
+# Seed hybrid-JIT note (bug codegen_isa_sffi_text_abi_misexpansion_2026_10_22,
+# confirmed 2026-11-06): under the Rust seed's `run`, every rt_cranelift_* /
+# spl_cranelift_* extern is an interp-splice (MirInst::InterpCall). The seed's
+# compile_interp_call boxes an i64 argument only when its vreg carries a type,
+# and a direct call's result vreg carries none, so an inline
+# `f(rt_string_data(x), rt_string_len(x))` hands the raw pointer/length to
+# rt_interp_call as if they were tagged RuntimeValues; the bridge then rejects
+# them ("argument N must be an integer") and the call reads back 0.
+# Binding each expansion to a typed `i64` local first gives the vreg a type,
+# so the splice boxes it. Native (non-splice) lowering is unaffected.
+
+# @workaround bug=codegen_isa_sffi_text_abi_misexpansion_2026_10_22 reason=seed InterpCall passes untyped call-result i64 args unboxed; typed locals force boxing
 @unsafe(reason: "minimal direct Cranelift provider call", capabilities: [ffi, raw_ptr])
 fn cranelift_new_module(name: text, target: i64) -> i64:
-    rt_cranelift_new_module(rt_string_data(name), rt_string_len(name), target)
+    val name_ptr: i64 = rt_string_data(name)
+    val name_len: i64 = rt_string_len(name)
+    rt_cranelift_new_module(name_ptr, name_len, target)
 
-# @workaround bug=codegen_isa_sffi_text_abi_misexpansion_2026_10_22 reason=same text-ABI mis-expansion class as the ISA readback; module constructed under garbage name/target in seed-built binaries
+# @workaround bug=codegen_isa_sffi_text_abi_misexpansion_2026_10_22 reason=seed InterpCall passes untyped call-result i64 args unboxed; typed locals force boxing
 @unsafe(reason: "minimal direct Cranelift provider call", capabilities: [ffi, raw_ptr])
 fn cranelift_new_aot_module(name: text, target: text) -> i64:
-    rt_cranelift_new_aot_module_triple(rt_string_data(name), rt_string_len(name), rt_string_data(target), rt_string_len(target))
+    val name_ptr: i64 = rt_string_data(name)
+    val name_len: i64 = rt_string_len(name)
+    val target_ptr: i64 = rt_string_data(target)
+    val target_len: i64 = rt_string_len(target)
+    rt_cranelift_new_aot_module_triple(name_ptr, name_len, target_ptr, target_len)
 
-# @workaround bug=codegen_isa_sffi_text_abi_misexpansion_2026_10_22 reason=same text-ABI mis-expansion class; configured module names/targets/CPU/features are garbage in seed-built binaries
+# @workaround bug=codegen_isa_sffi_text_abi_misexpansion_2026_10_22 reason=seed InterpCall passes untyped call-result i64 args unboxed; typed locals force boxing
 @unsafe(reason: "minimal versioned Cranelift ISA provider call", capabilities: [ffi, raw_ptr])
 fn cranelift_new_aot_module_config_v2(name: text, target: text, cpu: text, opt_level: i64, features: [text]) -> i64:
     val encoded_features = features.join(",")
+    val name_ptr: i64 = rt_string_data(name)
+    val name_len: i64 = rt_string_len(name)
+    val target_ptr: i64 = rt_string_data(target)
+    val target_len: i64 = rt_string_len(target)
+    val cpu_ptr: i64 = rt_string_data(cpu)
+    val cpu_len: i64 = rt_string_len(cpu)
+    val features_ptr: i64 = rt_string_data(encoded_features)
+    val features_len: i64 = rt_string_len(encoded_features)
     spl_cranelift_new_aot_module_config_v2(
-        rt_string_data(name), rt_string_len(name),
-        rt_string_data(target), rt_string_len(target),
-        rt_string_data(cpu), rt_string_len(cpu),
-        opt_level, rt_string_data(encoded_features), rt_string_len(encoded_features))
+        name_ptr, name_len, target_ptr, target_len, cpu_ptr, cpu_len,
+        opt_level, features_ptr, features_len)
 
-# @workaround bug=codegen_isa_sffi_text_abi_misexpansion_2026_10_22 reason=manual rt_string_data/rt_string_len expansion re-expands the extracted pointer under seed-built native lowering; ISA-feature readback returns garbage until the externs are declared in text form
+# @workaround bug=codegen_isa_sffi_text_abi_misexpansion_2026_10_22 reason=seed InterpCall passes untyped call-result i64 args unboxed; typed locals force boxing
 @unsafe(reason: "minimal versioned Cranelift ISA provider readback", capabilities: [ffi, raw_ptr])
 fn cranelift_aot_isa_feature_v2(module: i64, feature: text) -> i64:
-    spl_cranelift_aot_isa_feature_v2(module, rt_string_data(feature), rt_string_len(feature))
+    val feature_ptr: i64 = rt_string_data(feature)
+    val feature_len: i64 = rt_string_len(feature)
+    spl_cranelift_aot_isa_feature_v2(module, feature_ptr, feature_len)
 
 @unsafe(reason: "minimal versioned Cranelift optimization readback", capabilities: [ffi, raw_ptr])
 fn cranelift_aot_opt_level_v2(module: i64) -> i64:
@@ -83,15 +109,21 @@ extern fn rt_cranelift_function_addr_in_func(ctx: i64, name_ptr: i64, name_len: 
 
 @unsafe(reason: "minimal direct Cranelift provider call", capabilities: [ffi, raw_ptr])
 fn cranelift_declare_string_data(module: i64, s: text) -> i64:
-    rt_cranelift_declare_string_data(module, rt_string_data(s), rt_string_len(s))
+    val s_ptr: i64 = rt_string_data(s)
+    val s_len: i64 = rt_string_len(s)
+    rt_cranelift_declare_string_data(module, s_ptr, s_len)
 
 @unsafe(reason: "minimal direct Cranelift provider call", capabilities: [ffi, raw_ptr])
 fn cranelift_declare_global_data(module: i64, name: text, type_: i64, initial_bits: i64) -> i64:
-    rt_cranelift_declare_global_data(module, rt_string_data(name), rt_string_len(name), type_, initial_bits)
+    val name_ptr: i64 = rt_string_data(name)
+    val name_len: i64 = rt_string_len(name)
+    rt_cranelift_declare_global_data(module, name_ptr, name_len, type_, initial_bits)
 
 @unsafe(reason: "minimal direct Cranelift provider call", capabilities: [ffi, raw_ptr])
 fn cranelift_declare_global_data_with_metadata(module: i64, name: text, type_: i64, initial_bits: i64, linkage: i64, alignment: i64) -> i64:
-    rt_cranelift_declare_global_data_v2(module, rt_string_data(name), rt_string_len(name), type_, initial_bits, linkage, alignment)
+    val name_ptr: i64 = rt_string_data(name)
+    val name_len: i64 = rt_string_len(name)
+    rt_cranelift_declare_global_data_v2(module, name_ptr, name_len, type_, initial_bits, linkage, alignment)
 
 @unsafe(reason: "minimal direct Cranelift provider call", capabilities: [ffi, raw_ptr])
 fn cranelift_data_addr_in_func(ctx: i64, data_id: i64) -> i64:
@@ -99,7 +131,9 @@ fn cranelift_data_addr_in_func(ctx: i64, data_id: i64) -> i64:
 
 @unsafe(reason: "minimal direct Cranelift provider call", capabilities: [ffi, raw_ptr])
 fn cranelift_function_addr_in_func(ctx: i64, name: text) -> i64:
-    rt_cranelift_function_addr_in_func(ctx, rt_string_data(name), rt_string_len(name))
+    val name_ptr: i64 = rt_string_data(name)
+    val name_len: i64 = rt_string_len(name)
+    rt_cranelift_function_addr_in_func(ctx, name_ptr, name_len)
 
 # ============================================================================
 # Function Building
@@ -114,7 +148,9 @@ extern fn rt_cranelift_define_function(module: i64, func_id: i64, ctx: i64) -> b
 
 @unsafe(reason: "minimal direct Cranelift provider call", capabilities: [ffi, raw_ptr])
 fn cranelift_begin_function(module: i64, name: text, sig: i64) -> i64:
-    rt_cranelift_begin_function(module, rt_string_data(name), rt_string_len(name), sig)
+    val name_ptr: i64 = rt_string_data(name)
+    val name_len: i64 = rt_string_len(name)
+    rt_cranelift_begin_function(module, name_ptr, name_len, sig)
 
 @unsafe(reason: "minimal direct Cranelift provider call", capabilities: [ffi, raw_ptr])
 fn cranelift_begin_declared_function(module: i64, func_handle: i64, sig: i64) -> i64:
@@ -472,7 +508,9 @@ extern fn rt_cranelift_call_function_ptr(ptr: i64, args_ptr: i64, args_len: i64)
 
 @unsafe(reason: "minimal direct Cranelift provider call", capabilities: [ffi, raw_ptr])
 fn cranelift_get_function_ptr(module: i64, name: text) -> i64:
-    rt_cranelift_get_function_ptr(module, rt_string_data(name), rt_string_len(name))
+    val name_ptr: i64 = rt_string_data(name)
+    val name_len: i64 = rt_string_len(name)
+    rt_cranelift_get_function_ptr(module, name_ptr, name_len)
 
 @unsafe(reason: "minimal direct Cranelift provider call", capabilities: [ffi, raw_ptr])
 fn cranelift_call_function_ptr(ptr: i64, args_ptr: i64, args_len: i64) -> i64:
@@ -492,7 +530,9 @@ extern fn rt_cranelift_append_func_params(ctx: i64, block: i64)
 
 @unsafe(reason: "minimal direct Cranelift provider call", capabilities: [ffi, raw_ptr])
 fn cranelift_declare_function(module: i64, name: text, sig: i64, linkage: i64) -> i64:
-    rt_cranelift_declare_function(module, rt_string_data(name), rt_string_len(name), sig, linkage)
+    val name_ptr: i64 = rt_string_data(name)
+    val name_len: i64 = rt_string_len(name)
+    rt_cranelift_declare_function(module, name_ptr, name_len, sig, linkage)
 
 @unsafe(reason: "minimal direct Cranelift provider call", capabilities: [ffi, raw_ptr])
 fn cranelift_import_function(ctx: i64, func_handle: i64) -> i64:
@@ -513,7 +553,9 @@ extern fn rt_cranelift_aot_define_function(module: i64, name_ptr: i64, name_len:
 
 @unsafe(reason: "minimal direct Cranelift provider call", capabilities: [ffi, raw_ptr])
 fn cranelift_emit_object(module: i64, path: text) -> bool:
-    rt_cranelift_emit_object_raw(module, rt_string_data(path), rt_string_len(path))
+    val path_ptr: i64 = rt_string_data(path)
+    val path_len: i64 = rt_string_len(path)
+    rt_cranelift_emit_object_raw(module, path_ptr, path_len)
 
 @unsafe(reason: "minimal direct Cranelift provider call", capabilities: [ffi, raw_ptr])
 fn cranelift_aot_define_function(module: i64, ctx: i64) -> bool:

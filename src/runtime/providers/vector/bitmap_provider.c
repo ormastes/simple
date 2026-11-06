@@ -104,6 +104,12 @@ EXPORT uint64_t simple_vector_executed_iterations_v1(void) {
 EXPORT int32_t simple_vector_selected_level_v1(void) {
     return (int32_t)simple_vector_selected_level();
 }
+/* Diagnostic: why that level (code, see vector_level_private.h) plus text such
+ * as "max", "cap:3", "cpu-missing:avx512bw", "xcr0:0xe0", "os:sve-unprobed"
+ * written NUL-terminated into buf (truncated to size; buf may be NULL). */
+EXPORT int32_t simple_vector_level_reason_v1(char *buf,uint64_t size) {
+    return (int32_t)simple_vector_level_reason(buf,(size_t)size);
+}
 #endif
 EXPORT int32_t simple_provider_query_v1(uint64_t req,uint64_t res) {
     const uint8_t *q=(const uint8_t *)(uintptr_t)req;
