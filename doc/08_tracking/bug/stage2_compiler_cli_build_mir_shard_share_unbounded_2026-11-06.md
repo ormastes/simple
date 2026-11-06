@@ -1,7 +1,11 @@
 # Stage 2 `compiler_cli_build` hits the tree RSS cap during MIR (2026-11-06)
 
-Status: mitigated (shard-count pin in `scripts/bootstrap/phase-c-backend-commands.shs`).
-Root retention in the MIR shard worker remains open; see "Not fixed" below.
+Status (2026-11-07): mitigated, verification pending. 8 MIR shards
+(`scripts/bootstrap/phase-c-backend-commands.shs`, #7274; #7352's 12 reverted
+by #7354) under the 60 GiB `compiler_cli_build` row cap (#7302). Run 13
+finished MIR with no rss-cap kill; codegen headroom of the `compiler.*` /
+`lib.*` / `os.*` shards is still unmeasured (see the 2026-11-07 section). Root
+retention in the MIR shard worker remains open; see "Not fixed" below.
 
 ## Symptom
 
@@ -118,7 +122,10 @@ timeout is. 8 shards is proven OOM; 16 would certainly time out. No shard
 count meets both bounds while each worker rebuilds ~19.6 GiB of HIR: the
 structural fix is item 3 below.
 
-### Separate blocker in run 11 (not memory)
+### Separate blocker in run 11 (not memory) - fixed
+
+Fixed by #7301 (`64026e63fe6`, cranelift narrow-integer negate in the I64
+lane) and #7308 (`fadd88059b3`, MIR f64 across text parse). Kept for history:
 
 5 cranelift AOT errors fail the row independently of memory:
 - `app.office.sheets.data_ops._compare_row_cells`: verifier error
