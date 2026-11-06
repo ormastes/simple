@@ -87,10 +87,34 @@ Costs and margins (estimates from run 10, unverified until the next run):
 
 ## Not fixed
 
-1. The ~955 KiB fixed per-module retained floor (closure-sized provider
-   tables surviving each module's transient scope).
-2. RSS growing ~6x faster than runtime heap_live (untracked or fragmented
-   bytes after scope end).
+1. **Fixed per-module retained floor (~955 KiB): relocated provider type
+   symbols.** `relocate_provider_type_symbol`
+   (`src/compiler/50.mir/_MirLowering/provider_metadata.spl`, the
+   `self.symbols.define_with_binding(allocation_name, ...)` call) copies every
+   provider class/struct/enum/trait the consumer reaches into the consumer's
+   own HIR `SymbolTable`, which is persistent HIR, so the copies survive the
+   module's transient scope. Probe (`[symtab]` pre/post each
+   `lower_module_transient_scoped`, 104 modules of the `bootstrap_main`
+   closure): the consumer table grows by avg 833 symbols per module, min 725
+   (one-line facades such as `bootstrap_k1_selected.spl`), max 870. Not
+   rolled back here: lowered MIR keeps those ids (`MirType.Struct(symbol:
+   SymbolId)` / `Enum(symbol:)`, `src/compiler/50.mir/mir_types.spl`) and
+   the shard worker runs codegen after all lowering, so truncating the table
+   at scope end would leave ids the later passes may resolve. A fix needs
+   either a per-worker shared relocation table (one copy per provider type,
+   not per consumer) or proof that no post-lowering reader in 60/70/80
+   dereferences a relocated id.
+2. **RSS grows faster than runtime heap_live, by a varying factor.** In
+   process, `bootstrap_main` closure: heap_live +1.4 MiB/module throughout;
+   RSS +1.7 MiB/module over modules 25-100 (probe2-a) but +8.8 MiB/module
+   over modules 100-300 (probe-bm0). Whether the excess is untracked live
+   bytes or freed-but-resident pages is not established: a glibc `mallinfo2`
+   sampler (LD_PRELOAD) never reached the worker, because the native-build
+   coordinator replaces the worker's environment.
+2a. **~2.5 s per module even for facades** (run 10 `[mir-slow]` floor): a
+   one-line module allocates ~12 MiB in the provider sections (p5a provider
+   loop 6.4 MiB, p5 layouts 2.1 MiB, p6 trait impls 1.4 MiB, p1 native traits
+   1.0 MiB), because they walk the whole provider closure per consumer.
 3. The 19.3 GiB per-worker HIR floor: every MIR shard worker rebuilds the
    whole HIR before claiming a module.
 4. A single cold MIR shard worker (`--threads 1`, no HIR shards) SIGSEGVs
