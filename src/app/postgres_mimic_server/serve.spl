@@ -1,0 +1,107 @@
+"""Line-protocol TCP transport for postgres-mimic-server (`--listen`).
+
+One command per connection, then the server closes it:
+
+    QUERY <sql>\n   ->  ROWS <n>\n<columns TSV>\n<n row TSV lines>\nEND\n
+                        TAG <command tag>\nEND\n
+                        ERROR <sqlstate> <message>\nEND\n
+    STATS\n         ->  STATS <counters>\nEND\n
+
+A single owner accepts and serves connections in order (the database and the
+optional vector reducer are owned values). This is a benchmark/dev transport
+on loopback, not the PostgreSQL wire protocol.
+"""
+
+use std.database.postgres_mimic.{PgResponseKind, PostgresMimicServer,
+    postgres_mimic_simple_query, postgres_mimic_join_text, postgres_mimic_row_tsv,
+    postgres_mimic_put_row_v1, postgres_mimic_bitmap_stats_v1,
+    postgres_mimic_close_bitmap_reducer_v1}
+use std.database.sql.types.{DbValue}
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+
+val PG_LINE_MAX_BYTES: i64 = 1048576
+val PG_LINE_READ_TIMEOUT_MS: i64 = 15000
+
+class PgServeConfig:
+    listen_addr: text
+    max_requests: i64
+    provider_level: i64
+    parser_name: text
+
+# Seeds `bench (message_id INTEGER, room_id TEXT, room_seq INTEGER)` with
+# room_seq = r + 1 and room_id = 'room-a' iff r % 4 == 0 (the shape of the
+# vector_provider PureDatabase integration fixture).
+fn pg_seed_bench_rows(server: PostgresMimicServer, session: i64, rows: i64) -> text:
+    val created = postgres_mimic_simple_query(server, session,
+        "CREATE TABLE bench (message_id INTEGER, room_id TEXT, room_seq INTEGER)")
+    if created.kind == PgResponseKind.ErrorResponse:
+        return "create failed: {created.message}"
+    var r = 0
+    while r < rows:
+        val room = if r % 4 == 0: "room-a" else: "room-b"
+        if not postgres_mimic_put_row_v1(server, "bench",
+                [DbValue.Integer(r + 1), DbValue.Text(room), DbValue.Integer(r + 1)]):
+            return "put failed at row {r}"
+        r = r + 1
+    ""
+
+fn _pg_trim_line(line: text) -> text:
+    var out = line
+    while out.ends_with("\n") or out.ends_with("\r"):
+        out = out.slice(0, out.len() - 1)
+    out
+
+fn pg_line_response(server: PostgresMimicServer, session: i64, line: text, cfg: PgServeConfig) -> text:
+    if line == "STATS":
+        return "STATS parser={cfg.parser_name} level={cfg.provider_level} {postgres_mimic_bitmap_stats_v1(server)}\nEND\n"
+    if not line.starts_with("QUERY "):
+        return "ERROR 08P01 unknown command\nEND\n"
+    val sql = line.slice(6, line.len())
+    val response = postgres_mimic_simple_query(server, session, sql)
+    if response.kind == PgResponseKind.ErrorResponse:
+        return "ERROR {response.sqlstate} {response.message}\nEND\n"
+    if response.kind == PgResponseKind.RowSet:
+        var out = "ROWS {response.rows.len()}\n" + postgres_mimic_join_text(response.columns, "\t") + "\n"
+        for row in response.rows:
+            out = out + postgres_mimic_row_tsv(row) + "\n"
+        return out + "END\n"
+    "TAG {response.tag}\nEND\n"
+
+fn _pg_serve_one(server: PostgresMimicServer, session: i64, stream: TcpStream, cfg: PgServeConfig):
+    if not stream.set_read_timeout_status(PG_LINE_READ_TIMEOUT_MS):
+        val _ = stream.close()
+        return
+    val reply = match stream.read_line_bounded(PG_LINE_MAX_BYTES):
+        Ok(line): pg_line_response(server, session, _pg_trim_line(line), cfg)
+        Err(_): "ERROR 08P01 unreadable command\nEND\n"
+    val _ = stream.write_text_status(reply)
+    val _ = stream.close()
+
+# Serves until max_requests connections were handled (0 = forever).
+fn pg_line_serve(server: PostgresMimicServer, session: i64, cfg: PgServeConfig) -> i64:
+    val listener = match TcpListener.bind(cfg.listen_addr):
+        Ok(value): value
+        Err(error):
+            print "error: bind {cfg.listen_addr}: {error}"
+            return 1
+    print "POSTGRES_MIMIC_SERVER_READY parser={cfg.parser_name} level={cfg.provider_level} addr={cfg.listen_addr}"
+    var served = 0
+    var consecutive_errors = 0
+    while cfg.max_requests == 0 or served < cfg.max_requests:
+        match listener.accept():
+            Ok(stream):
+                consecutive_errors = 0
+                _pg_serve_one(server, session, stream, cfg)
+                served = served + 1
+            Err(error):
+                consecutive_errors = consecutive_errors + 1
+                print "error: accept: {error}"
+                if consecutive_errors >= 100:
+                    break
+    val _ = listener.close()
+    val stats = postgres_mimic_bitmap_stats_v1(server)
+    val close_status = postgres_mimic_close_bitmap_reducer_v1(server)
+    print "POSTGRES_MIMIC_SERVER_STATS parser={cfg.parser_name} level={cfg.provider_level} requests={served} {stats} provider_close={close_status}"
+    0
+
+export PgServeConfig, pg_seed_bench_rows, pg_line_response, pg_line_serve

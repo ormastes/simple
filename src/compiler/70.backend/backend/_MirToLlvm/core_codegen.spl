@@ -2690,9 +2690,9 @@ impl MirTextCodegen for MirToLlvm:
             var arg_ty = self.valid_llvm_type(maybe_arg_ty)
             match arg.kind:
                 case Copy(local) | Move(local):
-                    if self.bool_locals.has(local.id):
+                    if self.bool_locals.has(self.local_id_value(local)):
                         arg_ty = "i1"
-                    if self.ptr_locals.has(local.id):
+                    if self.ptr_locals.has(self.local_id_value(local)):
                         arg_ty = "ptr"
                 case _:
                     ()
@@ -2825,8 +2825,13 @@ impl MirTextCodegen for MirToLlvm:
     me translate_operand_at(operands: [MirOperand], index: i64) -> text:
         val operand = operands[index]
         match operand.kind:
-            case Copy(local) | Move(local):
-                self.local_value_text(local.id)
+            # Split arms + local_id_value (translate_operand's form): the or-pattern
+            # binding read a packed word as LocalId.id on the stage-native lane, so every
+            # struct field stored the same undefined %l<0x1400000004> (F3 repro, Q_b2).
+            case Copy(local):
+                self.local_value_text(self.local_id_value(local))
+            case Move(local):
+                self.local_value_text(self.local_id_value(local))
             case Const(const_val, const_ty):
                 match const_ty.kind:
                     case FuncPtr(signature):
@@ -2868,7 +2873,8 @@ impl MirTextCodegen for MirToLlvm:
     me get_operand_type_at(operands: [MirOperand], index: i64) -> text:
         val operand = operands[index]
         match operand.kind:
-            case Copy(local) | Move(local): self.get_local_type(local.id)
+            case Copy(local): self.get_local_type(self.local_id_value(local))
+            case Move(local): self.get_local_type(self.local_id_value(local))
             case Const(_, const_ty):
                 val types: [MirType] = [const_ty]
                 self.llvm_type_text_at(types, 0)
@@ -2878,7 +2884,7 @@ impl MirTextCodegen for MirToLlvm:
         val operand = operands[index]
         match operand.kind:
             case Copy(local) | Move(local):
-                if self.unsigned_locals.contains_key(local.id): self.unsigned_locals[local.id] else: false
+                if self.unsigned_locals.contains_key(self.local_id_value(local)): self.unsigned_locals[self.local_id_value(local)] else: false
             case Const(_, type_):
                 match type_.kind:
                     case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64: true

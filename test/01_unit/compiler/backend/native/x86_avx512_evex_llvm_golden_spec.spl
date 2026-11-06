@@ -1,0 +1,105 @@
+"""
+Byte-exact EVEX/VEX goldens for the instruction forms the AVX-512 frame
+owner actually emits (pseudo-op encoders in x86_64_avx512_ops.spl and the
+_X8664Avx512 encoders reached from encode_x86_64.spl).
+
+Every expected string was produced by LLVM 23.1.0 from reference asm:
+
+    sh test/01_unit/compiler/backend/native/x86_avx512_evex_goldens.shs
+    # -> llvm-mc -triple=x86_64-pc-linux -mattr=+avx512f,+avx512bw,+avx512vl
+    #    -filetype=obj, then llvm-objcopy -O binary --only-section=.text
+
+Two of these were wrong before this spec existed and were caught by
+executing the backend output: VPBLENDMD/Q was emitted in map 0F3A (mm=3,
+#UD on every select) and VPMOVSXDQ with an F3 prefix (VPMOVSQD, corrupting
+every f64x8 permute/shuffle index).
+
+Not covered because the backend never emits them: byte-granular compares
+(VPCMPB/VPCMPEQB), KORTEST, and VMOVDQU8/VMOVDQU64 (the frame owner moves
+whole vectors with VMOVUPS).
+"""
+
+use std.spec.*
+use compiler.backend.native.x86_64_avx512_ops.*
+use compiler.backend.native.x86_64_avx512.{encode_avx512_loadu_zmm, encode_avx512_storeu_zmm}
+
+fn hex(bytes: [i64]) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    for b in bytes:
+        out = out + digits[(b >> 4) & 15] + digits[b & 15]
+    out
+
+describe "AVX-512 frame owner EVEX encoding (llvm-mc goldens)":
+    it "encodes f32x16 and f64x8 arithmetic, min and max":
+        expect(hex(avx512_binop_bytes(0, 0, 1, 1, 1))).to_equal("62f17c4858c1")
+        expect(hex(avx512_binop_bytes(0, 0, 1, 1, 2))).to_equal("62f17c485cc1")
+        expect(hex(avx512_binop_bytes(0, 0, 1, 1, 3))).to_equal("62f17c4859c1")
+        expect(hex(avx512_binop_bytes(0, 0, 1, 1, 4))).to_equal("62f17c485ec1")
+        expect(hex(avx512_binop_bytes(0, 0, 1, 1, 5))).to_equal("62f17c485dc1")
+        expect(hex(avx512_binop_bytes(0, 0, 1, 1, 6))).to_equal("62f17c485fc1")
+        expect(hex(avx512_binop_bytes(2, 3, 1, 2, 1))).to_equal("62f1e54858d1")
+        expect(hex(avx512_binop_bytes(2, 3, 1, 2, 2))).to_equal("62f1e5485cd1")
+        expect(hex(avx512_binop_bytes(2, 3, 1, 2, 3))).to_equal("62f1e54859d1")
+        expect(hex(avx512_binop_bytes(2, 3, 1, 2, 4))).to_equal("62f1e5485ed1")
+        expect(hex(avx512_binop_bytes(2, 3, 1, 2, 5))).to_equal("62f1e5485dd1")
+        expect(hex(avx512_binop_bytes(2, 3, 1, 2, 6))).to_equal("62f1e5485fd1")
+
+    it "encodes i32x16 arithmetic, bitwise VPANDD/VPORD/VPXORD/VPANDND and variable shifts":
+        expect(hex(avx512_binop_bytes(0, 0, 1, 3, 1))).to_equal("62f17d48fec1")
+        expect(hex(avx512_binop_bytes(0, 0, 1, 3, 2))).to_equal("62f17d48fac1")
+        expect(hex(avx512_binop_bytes(0, 0, 1, 3, 3))).to_equal("62f27d4840c1")
+        expect(hex(avx512_binop_bytes(0, 0, 1, 3, 5))).to_equal("62f27d4839c1")
+        expect(hex(avx512_binop_bytes(0, 0, 1, 3, 6))).to_equal("62f27d483dc1")
+        expect(hex(avx512_binop_bytes(0, 0, 1, 3, 7))).to_equal("62f17d48dbc1")
+        expect(hex(avx512_binop_bytes(2, 3, 1, 3, 8))).to_equal("62f16548ebd1")
+        expect(hex(avx512_binop_bytes(0, 0, 1, 3, 9))).to_equal("62f17d48efc1")
+        expect(hex(avx512_binop_bytes(0, 0, 1, 3, 10))).to_equal("62f17d48dfc1")
+        expect(hex(avx512_binop_bytes(0, 0, 1, 3, 11))).to_equal("62f27d4847c1")
+        expect(hex(avx512_binop_bytes(0, 0, 1, 3, 12))).to_equal("62f27d4845c1")
+        expect(hex(avx512_binop_bytes(0, 0, 1, 3, 13))).to_equal("62f27d4846c1")
+
+    it "builds unary ops from VPTERNLOGD all-ones, immediate shifts and logic":
+        expect(hex(avx512_unop_bytes(0, 0, 1, 1))).to_equal("62f3654825dbff62f1654872f31f62f17d48efc3")
+        expect(hex(avx512_unop_bytes(0, 0, 2, 2))).to_equal("62f3654825dbff62f1e54873d30162f17d48dbc3")
+        expect(hex(avx512_unop_bytes(0, 0, 1, 5))).to_equal("62f17c4851c0")
+        expect(hex(avx512_unop_bytes(0, 0, 2, 6))).to_equal("62f3654825dbff62f1e54873d33662f1e54873f33462f1fd4851c062f1e5485ec0")
+        expect(hex(avx512_unop_bytes(0, 0, 3, 3))).to_equal("62f3654825dbff62f17d48efc3")
+        expect(hex(avx512_unop_bytes(0, 0, 3, 1))).to_equal("62f16548efdb62f16548fac0")
+
+    it "encodes the 213 FMA forms":
+        expect(hex(avx512_fma_bytes(0, 1, 2, 1, false))).to_equal("62f27548a8c2")
+        expect(hex(avx512_fma_bytes(0, 1, 2, 2, true))).to_equal("62f2f548acc2")
+
+    it "compares into k1 with VPCMPD / VCMPPS / VCMPPD predicates":
+        expect(hex(avx512_cmp_bytes(1, 0, 1, 3, 2))).to_equal("62f37d481fc901")
+        expect(hex(avx512_cmp_bytes(1, 0, 1, 3, 4))).to_equal("62f37d481fc906")
+        expect(hex(avx512_cmp_bytes(1, 0, 1, 1, 0))).to_equal("62f17c48c2c900")
+        expect(hex(avx512_cmp_bytes(1, 0, 1, 2, 5))).to_equal("62f1fd48c2c90d")
+
+    it "blends under k1 with VPBLENDMD / VPBLENDMQ in map 0F38":
+        expect(hex(avx512_select_bytes(0, 1, 1, 3))).to_equal("62f27d4964c1")
+        expect(hex(avx512_select_bytes(0, 1, 1, 2))).to_equal("62f2fd4964c1")
+
+    it "moves masks with KMOVW and combines them with K*W ops":
+        expect(hex(avx512_kmem_bytes(1, 5, -216, false))).to_equal("c5f8908d28ffffff")
+        expect(hex(avx512_kmem_bytes(2, 13, -8, true))).to_equal("c4c1789195f8ffffff")
+        expect(hex(avx512_kop_bytes(1, 1, 2, 7))).to_equal("c5f441ca")
+        expect(hex(avx512_kop_bytes(1, 1, 2, 8))).to_equal("c5f445ca")
+        expect(hex(avx512_kop_bytes(1, 1, 2, 9))).to_equal("c5f447ca")
+        expect(hex(avx512_kop_bytes(1, 1, 2, 10))).to_equal("c5f442ca")
+        expect(hex(avx512_kop_bytes(1, 1, 1, 14))).to_equal("c5f844c9")
+        expect(hex(avx512_kall_bytes(1))).to_equal("c5f446c9")
+
+    it "broadcasts scalars from frame memory":
+        expect(hex(avx512_splat_bytes(0, 5, -72, 1))).to_equal("62f27d481885b8ffffff")
+        expect(hex(avx512_splat_bytes(0, 5, -72, 2))).to_equal("62f2fd481985b8ffffff")
+        expect(hex(avx512_splat_bytes(0, 12, 16, 3))).to_equal("62d27d4858842410000000")
+
+    it "loads and stores whole and masked ZMM values with VMOVUPS":
+        expect(hex(encode_avx512_loadu_zmm(48, 5, -88, 80, false))).to_equal("62f17c481085a8ffffff")
+        expect(hex(encode_avx512_loadu_zmm(49, 3, 64, 81, true))).to_equal("62f17cc9104b01")
+        expect(hex(encode_avx512_storeu_zmm(50, 13, 0, 82))).to_equal("62d17c4a115500")
+
+    it "extracts the i32 reduction result with MOVD and MOVSXD":
+        expect(hex(avx512_extract_i32_bytes(3, 0))).to_equal("66400f7ec34863db")

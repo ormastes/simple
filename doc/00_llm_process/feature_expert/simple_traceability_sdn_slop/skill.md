@@ -31,3 +31,23 @@ frozen intent, while `std.nogc_sync_mut.test_runner.trace_transport` checks miss
 per-file carriers. Runner persistence precedes docgen. None of these source
 changes has native execution evidence yet. Persistent pre-dispatch plans,
 provenance admission, complete reports and trusted gates remain open.
+
+## Querying features / requirements / bugs today (2026-11-06)
+
+The P0 query runs on any `simple` that can `run`, seed included, from the
+repository root -- no Stage4 CLI, no build:
+
+```sh
+D:/dev/wt/seed/simple.exe run src/app/traceability/query_main.spl list features 2>/dev/null
+D:/dev/wt/seed/simple.exe run src/app/traceability/query_main.spl show requirement req:REQ-TRC-001 --format=sdn 2>/dev/null
+```
+
+Exit 1 = rendered, unverified (normal). The `TRACE-AUTHORITY-CONFLICT` lines
+are expected. Scope is the registered declaration only (`list bugs` is empty
+by design until legacy DB ingestion lands). Full output key reference and the
+spec driver (`scripts/check/check-trace-query-p0.shs`):
+`doc/07_guide/infra/trace_query_p0.md` § "Running it today on the seed".
+
+`refs requirement req:REQ-TRC-001` (or `refs feature <id>`) lists every authored
+claim from/to the identity with the other endpoint's declared file paths; see
+the guide's "Reverse references" subsection for how to read `authority`.

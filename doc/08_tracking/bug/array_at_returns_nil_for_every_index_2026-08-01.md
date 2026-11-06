@@ -425,3 +425,6 @@ close this bug. Native must be verified by `simple compile --native` plus
 running the produced binary, and JIT by a default `simple foo.spl` run, as done
 in the transcripts above.
 
+
+## 2026-11-06 native verified (p1w5)
+`test/fixtures/compiler/array_at_native_regression/main.spl` was built natively with s3_fable46_w5. It exits rc=0 and prints `array_at: PASS`, covering indexes 0, 2, 3 and -1 plus a `[text]` array. Status: fixed.

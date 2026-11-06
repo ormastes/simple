@@ -1,0 +1,71 @@
+#!/bin/sh
+# check-trace-query-p0.shs
+#
+# Runs test/03_system/app/traceability/feature/trace_query_p0_spec.spl against
+# a real trace-query process on THIS host, with the one fixture the spec
+# cannot build for itself: an alternate Git index whose staged declaration
+# differs from HEAD (its feature title must be "P0 staged feature title").
+#
+# The spec never edits the user's index or worktree, and neither does this
+# script: the fixture is a private index file under build/test-artifacts/
+# (gitignored), filled by `git read-tree HEAD` plus one `update-index
+# --cacheinfo` of a modified blob. `write-tree` under that index may add
+# immutable objects to the object store; it changes no ref, no staged entry
+# of the real index, and no worktree file.
+#
+# Usage (from the repository root):
+#   sh scripts/check/check-trace-query-p0.shs [simple-binary]
+#     simple-binary defaults to $SIMPLE_BIN, then bin/simple.
+#   SIMPLE_TRACE_QUERY_TEST_COMMAND, if already set, is used as-is.
+#
+# Exit: the spec runner's status. Verdict is the runner's own summary line.
+set -u
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
+    echo "check-trace-query-p0: not inside a git worktree" >&2
+    exit 2
+}
+cd "$repo_root" || exit 2
+
+simple_bin=${1:-${SIMPLE_BIN:-bin/simple}}
+if [ ! -x "$simple_bin" ] && ! command -v "$simple_bin" >/dev/null 2>&1; then
+    echo "check-trace-query-p0: simple binary not found: $simple_bin" >&2
+    exit 2
+fi
+
+declaration=doc/08_tracking/trace/features/simple_traceability_sdn_slop.sdn
+fixture_dir=$repo_root/build/test-artifacts/trace_query_p0
+mkdir -p "$fixture_dir" || exit 2
+index_file=$fixture_dir/index
+rm -f "$index_file"
+
+# 1. Private index = HEAD tree, then one staged entry replaced.
+GIT_INDEX_FILE=$index_file git read-tree HEAD || exit 2
+staged_blob=$(sed 's/title: "Simple traceability, SDN evidence and Slop"/title: "P0 staged feature title"/' "$declaration" \
+    | git hash-object -w --stdin) || exit 2
+GIT_INDEX_FILE=$index_file git update-index --cacheinfo "100644,$staged_blob,$declaration" || exit 2
+
+# 2. The fixture must actually differ from HEAD, or scenario 4 is vacuous.
+staged_tree=$(GIT_INDEX_FILE=$index_file git write-tree) || exit 2
+head_tree=$(git rev-parse --verify 'HEAD^{tree}') || exit 2
+if [ "$staged_tree" = "$head_tree" ]; then
+    echo "check-trace-query-p0: fixture index is identical to HEAD (title substitution failed?)" >&2
+    exit 2
+fi
+echo "check-trace-query-p0: fixture index $index_file tree=$staged_tree (HEAD tree $head_tree)"
+
+# 3. Run the spec. The query entry is the pure-Simple module run as a program;
+#    it takes the same args and returns the same exit codes as `simple trace`.
+if [ -z "${SIMPLE_TRACE_QUERY_TEST_COMMAND:-}" ]; then
+    SIMPLE_TRACE_QUERY_TEST_COMMAND="$simple_bin run src/app/traceability/query_main.spl"
+fi
+export SIMPLE_TRACE_QUERY_TEST_COMMAND
+GIT_INDEX_FILE=$index_file
+export GIT_INDEX_FILE
+echo "check-trace-query-p0: SIMPLE_TRACE_QUERY_TEST_COMMAND=$SIMPLE_TRACE_QUERY_TEST_COMMAND"
+"$simple_bin" test test/03_system/app/traceability/feature/trace_query_p0_spec.spl
+p0_status=$?
+"$simple_bin" test test/03_system/app/traceability/feature/trace_query_refs_spec.spl
+refs_status=$?
+if [ "$p0_status" -ne 0 ]; then exit "$p0_status"; fi
+exit "$refs_status"
