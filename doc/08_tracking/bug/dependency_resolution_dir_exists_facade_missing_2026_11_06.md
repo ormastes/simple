@@ -105,7 +105,27 @@ the final expected NotFound branch. The focused SSpec now has real assertions
 instead of the prior `pending_reason` length checks. Its manual is an authored,
 unrun projection; neither SSpec execution nor docgen is claimed.
 
-Shared cycle6 remains NOT STARTED pending immutable-source review and explicit
-resource coordination. The cause ceiling is6, including all prior attempts;
-changing source revisions or worktrees does not reset it. Full original HIR,
-core/MCP, SPipe execution and broader compiler qualification remain pending.
+Shared cycle6 completed with a focused native fixture PASS on immutable commit
+`1b32471340f83cfefa67993671b7bee58a8d8b6e`: native build exit0, fixture exit0,
+empty stderr, and exactly `dependency resolution filesystem probes OK\n` on
+stdout. All52 modules completed native compilation;48 were rebuilt and0 reused.
+The executable SHA-256 is
+`197ee328512f3c0536b6ee7f6477cf4d097b46c3eea370675097e391aa9797f5`.
+Peak cgroup memory was8334311424 bytes; there was no OOM.
+
+The trace wrapper observed only a compiler version query. Read-only inspection
+found no retained archive/response-file manifest or ELF string that establishes
+the actual linked runtime identity. Target-runtime selection remains UNKNOWN;
+the checked-out runtime tree is not proof that it was linked. This PASS proves
+only the exact owner fixture, not current-runtime admission.
+
+Release commit `efd8e0479fb69235d1691fc265b8bfee10893a7e` independently landed
+the `Segment.name` field correction and the broader I/O facade repair. Those
+are credited to that change. Our remaining semantic correction is the shared
+path builder and its file/initializer suffixes; the importer retains the
+existing explicit runtime facade. Rebase onto release `7cec6a54ea8a2e0f1be4bbc215685fb688f802d2`
+preserved the qualified owner, fixture, active SSpec and manual contents.
+
+The six-cycle ceiling is exhausted; no further retry is authorized. SSpec and
+docgen execution, the original1593-module HIR build, core/MCP checks and broader
+compiler qualification remain UNRUN. No overall verify PASS is claimed.
