@@ -35,3 +35,22 @@ literal-membership plans (`97b13f9eb09`); general lowering, cross-engine
 execution and NFR certification remain unfinished. Re-verify the
 "integration spec" blockers above before quoting them; they were not
 re-run on 2026-10-25.
+
+Added 2026-11-06 (adaptive collections C1): semantic contracts, operation IDs,
+creation origins and the accounting oracle live in
+`src/compiler/35.semantics/perf_facts/collection_contracts.spl`, with the spec
+`test/01_unit/compiler/semantics/collection_contracts_spec.spl`. These records
+describe meaning only and authorize no rewrite.
+- Operation IDs are keyed by canonical type identity plus method. Maintenance
+  methods such as `Map.rehash` stay unmapped on purpose.
+- `CollectionOriginV1` keeps the exact `ast://` feedback site ID, so existing
+  `.sprof` feedback still binds. It adds a token fingerprint that ignores
+  whitespace and comments, and both are built from
+  `parser_collection_site_stem` in `collection_feedback.spl`. Do not build a
+  second site formula.
+- Remapping rejects ambiguous candidates instead of guessing.
+- Trap: on the Rust seed most `adaptive_*` lib specs fail because the
+  interpreter has no `spl_collection_capture_*` or `spl_ordered_key_cmp`
+  externs. Compare against a baseline; do not read those failures as a
+  regression. Census:
+  `doc/03_plan/compiler/data/adaptive_collections_c0_census_2026-11-06.md`.
