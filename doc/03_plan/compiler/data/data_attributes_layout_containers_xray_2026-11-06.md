@@ -1134,3 +1134,11 @@ The deliverable of this task is this consolidated Markdown plan. Repository impl
 [E03]: https://abseil.io/docs/cpp/guides/container
 [E04]: https://eclipse.dev/aspectj/doc/released/progguide/semantics-joinPoints.html
 [E05]: https://mlir.llvm.org/docs/DefiningDialects/Operations/
+## Repository cross-links
+
+- Prior adaptive-collections plan (D01 above), now in the repository:
+  [`adaptive_collections_profiling_switching_2026-09-16.md`](adaptive_collections_profiling_switching_2026-09-16.md).
+  Its collection policy tags and summary records build on this plan's shared
+  SPL+SDN resolver (W1) and versioned observation / `.sprof` extension (W5).
+- XRay structural change and owner decisions:
+  [`xray_compiler_structural_change_2026-11-06.md`](../../../04_architecture/compiler/xray/xray_compiler_structural_change_2026-11-06.md) (section H).
