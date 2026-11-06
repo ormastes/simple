@@ -885,11 +885,18 @@ static int spl_topo_find(LOGICAL_PROCESSOR_RELATIONSHIP rel, WORD group, BYTE nu
                 }
                 index++;
             } else if (rel == RelationNumaNode) {
+#if defined(__MINGW32__)
+                /* MinGW-w64 exposes the original one-group NUMA layout. */
+                GROUP_AFFINITY* a = &e->NumaNode.GroupMask;
+                if (a->Group == group && (a->Mask >> number) & 1)
+                    result = (int)e->NumaNode.NodeNumber;
+#else
                 WORD count = e->NumaNode.GroupCount ? e->NumaNode.GroupCount : 1;
                 for (WORD g = 0; g < count; g++) {
                     GROUP_AFFINITY* a = &e->NumaNode.GroupMasks[g];
                     if (a->Group == group && (a->Mask >> number) & 1) result = (int)e->NumaNode.NodeNumber;
                 }
+#endif
             }
             off += e->Size;
         }

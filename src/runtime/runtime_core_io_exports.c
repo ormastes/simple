@@ -99,6 +99,13 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #undef max
+#if !defined(_MSC_VER)
+/* MinGW has _lock_file but its configured CRT does not expose
+ * _fflush_nolock. Serialize this runtime's complete flush+WriteFile
+ * transaction independently; unrelated direct stdio users retain their CRT
+ * ordering contract but cannot be made atomic with borrowed-handle writes. */
+static SRWLOCK core_io_stdout_write_lock = SRWLOCK_INIT;
+#endif
 #else
 #include <dirent.h>
 #include <fcntl.h>
@@ -257,12 +264,20 @@ int64_t rt_term_write(int64_t text_value) {
     if (!data) return 0;
 #ifdef _WIN32
     if ((uint64_t)len > (uint64_t)SIZE_MAX) return 0;
-    /* Keep redirected stdout byte-exact without changing global CRT mode.
-     * This locks only the existing C FILE owner, not Rust std::io buffers. */
+    /* Keep redirected stdout byte-exact without changing global CRT mode. */
     int64_t written = 0;
+#if defined(_MSC_VER)
+    /* MSVC exposes the no-lock flush used while this FILE lock is held. */
     _lock_file(stdout);
     int fd = _fileno(stdout);
     if (fd >= 0 && _fflush_nolock(stdout) == 0) {
+#else
+    /* MinGW's ordinary fflush owns its FILE lock. The SRW lock preserves
+     * atomic rt_term_write transactions without recursively taking it. */
+    AcquireSRWLockExclusive(&core_io_stdout_write_lock);
+    int fd = _fileno(stdout);
+    if (fd >= 0 && fflush(stdout) == 0) {
+#endif
         intptr_t raw_handle = _get_osfhandle(fd); /* borrowed: never close */
         if (raw_handle != -1 && raw_handle != -2) {
             while (written < len) {
@@ -275,7 +290,11 @@ int64_t rt_term_write(int64_t text_value) {
             }
         }
     }
+#if defined(_MSC_VER)
     _unlock_file(stdout);
+#else
+    ReleaseSRWLockExclusive(&core_io_stdout_write_lock);
+#endif
     return written;
 #else
     size_t written = fwrite(data, 1, (size_t)len, stdout);
