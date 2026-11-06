@@ -22,6 +22,8 @@ my $probe = <<'PROBE';
     *quiesce = sub { return $main::test_quiet };
     *stop_observer = sub { };
     *reap = sub { };
+    *snapshot = sub { die 'grace observation failed' if $main::test_grace_failure; return {} };
+    *signal_verified = sub { };
 }
 my @cases = (
     ['rss-cap-exceeded', 88, 0, 0, 'rss-containment-unverified', 89, 'rss-cap-exceeded', 88],
@@ -30,11 +32,15 @@ my @cases = (
     ['rss-cap-exceeded', 88, 1, 0, 'rss-cap-exceeded', 88, 'rss-cap-exceeded', 88],
     ['complete', 0, 1, 7 << 8, 'complete', 7, 'complete', 7],
     ['complete', 0, 1, 0, 'complete', 0, 'complete', 0],
+    ['timeout', 124, 1, 0, 'rss-measurement-failed', 89, 'timeout', 124, 1],
+    ['complete', 0, 0, 7 << 8, 'rss-containment-unverified', 89, 'complete', 7],
 );
 for my $case (@cases) {
     my ($status, $code) = @$case;
     $main::test_quiet = $case->[2];
     $child_status = $case->[3];
+    $main::test_grace_failure = $case->[8] // 0;
+    $opt{'term-grace-seconds'} = 0;
 PROBE
 $probe .= $finalize;
 $probe .= <<'PROBE';
@@ -46,7 +52,7 @@ $probe .= <<'PROBE';
     }
     $code == $case->[5] or die 'process verdict changed';
 }
-print "PASS: 6 primary-failure receipt cases; containment remains fail-closed\n";
+print "PASS: 8 primary-failure receipt cases; containment remains fail-closed\n";
 PROBE
 my $error;
 {

@@ -1754,6 +1754,9 @@ while (1) {
     sleep($remaining) if $remaining > 0;
 }
 close $gate_write unless $released || $freebsd;
+# Cleanup may fail closed after an RSS breach or timeout. Preserve the cause
+# that triggered cleanup so its final containment verdict cannot erase it.
+my ($primary_status, $primary_code) = $status eq 'complete' ? () : ($status, $code);
 if ($code == 124 || $interrupted) {
     # Preserve the timeout wrapper's TERM/grace contract for artifact flushing.
     # RSS breaches use immediate STOP/KILL because allocations must stop.
@@ -1775,14 +1778,12 @@ if ($code == 124 || $interrupted) {
         sleep 0.02;
     }
 }
-# Cleanup may fail closed after an RSS breach or timeout. Preserve the cause
-# that triggered cleanup so its final containment verdict cannot erase it.
-my ($primary_status, $primary_code) = $status eq 'complete' ? () : ($status, $code);
 my $quiet = quiesce();
 stop_observer();
 for (1..100) { reap(); last if defined $child_status; sleep 0.02 }
 if ($status eq 'complete' && defined $child_status) {
     $code = ($child_status & 127) ? 128 + ($child_status & 127) : $child_status >> 8;
+    ($primary_status, $primary_code) = ($status, $code);
 }
 $quiet = 0 unless defined $child_status;
 if (!$quiet && $code != 89) { ($status, $code) = ('rss-containment-unverified', 89) }
