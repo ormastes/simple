@@ -52,6 +52,29 @@ use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.hir.hir_function_order.{hir_function_symbol_order}
 
+# A module `var` named in its owner's `export` list is public API (exported
+# symbols are Public by default). Lift only an undeclared (Private) mutable
+# static: the owner then emits the native accessor and every importer binds it,
+# instead of the importer's backend refusing an "imported non-public module
+# static". Explicit scoped visibility is kept, and immutable values keep the
+# private inline-literal import path unchanged.
+fn hir_module_exported_names(module: ParserModule) -> Dict<text, bool>:
+    var names: Dict<text, bool> = {}
+    for exp in module.exports:
+        for item in exp.items:
+            names[item] = true
+    names
+
+fn hir_const_with_export_visibility(hir_const: HirConst, exported: Dict<text, bool>) -> HirConst:
+    if not hir_const.is_mutable or hir_const.visibility != Visibility.Private or not exported.has(hir_const.name):
+        return hir_const
+    var lifted = hir_const
+    lifted.visibility = Visibility.Public
+    # Keep the ABI/interface digest (keyed on is_public) in step with the
+    # linkage change so cached importers rebuild instead of missing the accessor.
+    lifted.is_public = true
+    lifted
+
 impl HirLowering:
     me lower_parser_module_unstub(module: ParserModule, is_entry: bool) -> HirModule:
         # Trap D (iteration 17): env-GATED eprint probes are mute in the
@@ -80,9 +103,10 @@ impl HirLowering:
             lowered_module.constants = recovered_constants
         elif lowered_module.constants.keys().len() == 0 and parser_constants.len() > 0:
             var recovered_constants: Dict<SymbolId, HirConst> = {}
+            val recovered_exported_names = hir_module_exported_names(module)
             var const_idx = 0
             while const_idx < parser_constants.len():
-                val hir_const = self.lower_hir_const_decl(parser_constants[const_idx])
+                val hir_const = hir_const_with_export_visibility(self.lower_hir_const_decl(parser_constants[const_idx]), recovered_exported_names)
                 recovered_constants[SymbolId(id: const_idx)] = hir_const
                 const_idx = const_idx + 1
             lowered_module.constants = recovered_constants
@@ -772,10 +796,11 @@ impl HirLowering:
             lower_idx = lower_idx + 1
 
         val lower_const_names = module.constants.keys()
+        val exported_names = hir_module_exported_names(module)
         lower_idx = 0
         while lower_idx < lower_const_names.len():
             val const_: ParserConst = module.constants[lower_const_names[lower_idx]]
-            val hir_const = self.lower_hir_const_decl(const_)
+            val hir_const = hir_const_with_export_visibility(self.lower_hir_const_decl(const_), exported_names)
             constants[SymbolId(id: lower_idx)] = hir_const
             lower_idx = lower_idx + 1
 
