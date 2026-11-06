@@ -64,3 +64,26 @@ c:`) is evaluated correctly on both paths.
 ## Fix
 
 In the Rust seed (bootstrap-only). Not attempted here.
+
+## Localized (2026-11-06) — HIR lowering, not the interpreter
+
+Re-measured on a seed built from `release/1.0.0` @ `ecb705896a4` with
+`test/fixtures/seed_interp/wildcard_arm_guard_repro.spl`:
+
+| lane | output |
+|---|---|
+| `SIMPLE_EXECUTION_MODE=interpret` | `d1 3 4` / `d2 3 4` / `d3 3 4` (correct) |
+| `SIMPLE_EXECUTION_MODE=jit` | `d1 3 3` / `d2 3 4` / `d3 3 3` |
+| default `run` | `d1 3 3` / `d2 3 4` / `d3 3 3` |
+
+The tree-walk interpreter is correct. The defect is in the seed's HIR
+lowering of statement-position `match`:
+`src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs` ~2912,
+`lower_match_arms_stmt`, short-circuits `Pattern::Wildcard` to its body
+(`return self.lower_block(&arm.body, ctx)`) without consulting `arm.guard`,
+so `case _ if c:` behaves as `case _:` and every later arm is dropped. A
+binding arm (`case x if c:`) takes the normal path through
+`lower_match_guard`, which is why `d2` is correct. Fix direction: take the
+shortcut only when `arm.guard.is_none()`; a guarded wildcard should lower
+through `lower_match_guard` with a constant-true pattern condition.
+Owner: seed HIR/JIT lane (`hir/lower/**`), not the interpreter lane.
