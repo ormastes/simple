@@ -13,6 +13,7 @@ class FakeXrayLeafV1:
     fail_patch_status: i64
     fail_unpatch_id: i64
     ongoing_left: i64
+    close_busy_left: i64
     log: [text]
     patched: [i64]
 
@@ -44,12 +45,15 @@ impl XrayLlvmLeafV1 for FakeXrayLeafV1:
 
     me close(arena: i64) -> i64:
         self.log.push("close:{arena}")
+        if self.close_busy_left > 0:
+            self.close_busy_left = self.close_busy_left - 1
+            return -2
         1
 
 fn fake_leaf_v1(max_id: i64) -> FakeXrayLeafV1:
     FakeXrayLeafV1(max_id: max_id, install_status: 1, fail_patch_id: 0,
         fail_patch_status: XRAY_LLVM_STATUS_FAILED_V1, fail_unpatch_id: 0,
-        ongoing_left: 0, log: [], patched: [])
+        ongoing_left: 0, close_busy_left: 0, log: [], patched: [])
 
 fn dynamic_config_v1() -> TraceConfigV1:
     TraceConfigV1(instrumentation: TraceInstrumentationV1.Dynamic,
@@ -238,3 +242,31 @@ describe "Linux LLVM XRay adapter V1 (stage 1 control plane)":
         val second = adapter.prepare(leaf, dynamic_config_v1(), selection_v1([1])).unwrap()
         expect(adapter.start(leaf, first, 8192).is_err()).to_equal(true)
         expect(adapter.start(leaf, second, 8192).is_ok()).to_equal(true)
+
+    it "keeps an unlinearized close pending and recover retries it first":
+        var leaf = fake_leaf_v1(4)
+        leaf.fail_patch_id = 2
+        leaf.fail_unpatch_id = 1
+        leaf.close_busy_left = 100
+        var adapter = XrayLlvmAdapterV1.create(1)
+        val prepared = adapter.prepare(leaf, dynamic_config_v1(), selection_v1([1, 2])).unwrap()
+        expect(adapter.start(leaf, prepared, 4096).is_err()).to_equal(true)
+        expect(adapter.state_code()).to_equal(XRAY_LLVM_STATE_FAULTED_V1)
+        # Close still contended: recover refuses before touching sites.
+        match adapter.recover(leaf):
+            case Ok(_): expect("recovered").to_equal("busy")
+            case Err(failure): expect(trace_failure_code_v1(failure)).to_equal(6)
+        leaf.close_busy_left = 0
+        leaf.fail_unpatch_id = 0
+        expect(adapter.recover(leaf).unwrap()).to_equal(true)
+        expect(adapter.patched_ids().len()).to_equal(0)
+
+    it "faults when a FAILED patch cannot be unpatched either":
+        var leaf = fake_leaf_v1(4)
+        leaf.fail_patch_id = 1
+        leaf.fail_unpatch_id = 1
+        var adapter = XrayLlvmAdapterV1.create(1)
+        val prepared = adapter.prepare(leaf, dynamic_config_v1(), selection_v1([1])).unwrap()
+        expect(adapter.start(leaf, prepared, 4096).is_err()).to_equal(true)
+        expect(adapter.state_code()).to_equal(XRAY_LLVM_STATE_FAULTED_V1)
+        expect(adapter.patched_ids()[0]).to_equal(1)

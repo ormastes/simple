@@ -38,7 +38,9 @@ pub const XRAY_LLVM_STATE_FAULTED_V1: i64 = 3
 const XRAY_LLVM_MAX_SITES_V1: i64 = 4096
 const XRAY_LLVM_ID_MAX_V1: u64 = 18446744073709551615u64
 # compiler-rt reports ONGOING while another patch/unpatch is in flight. It is
-# transient: retried a bounded number of times, never spun on.
+# transient: retried a bounded number of times back to back, without yielding,
+# so a genuinely concurrent patcher usually outlasts it and the caller gets
+# Busy. That is the intended quiescent-mode answer, not an error.
 const XRAY_LLVM_ONGOING_RETRIES_V1: i64 = 8
 
 # The effect boundary. The host binding is xray_llvm_host_leaf_v1.spl over
@@ -81,11 +83,13 @@ pub struct XrayLlvmAdapterV1:
     patched: [i64]
     context: u64
     arena: i64
+    # The arena close did not linearize (contended gate); recover retries it.
+    close_pending: bool
 
 impl XrayLlvmAdapterV1:
     static fn create(module_instance: u64) -> XrayLlvmAdapterV1:
         XrayLlvmAdapterV1(module_instance: module_instance, state: XRAY_LLVM_STATE_IDLE_V1,
-            incarnation: 0, planned: [], patched: [], context: 1, arena: 0)
+            incarnation: 0, planned: [], patched: [], context: 1, arena: 0, close_pending: false)
 
     fn state_code() -> i64:
         self.state
@@ -142,16 +146,20 @@ impl XrayLlvmAdapterV1:
             self.state = XRAY_LLVM_STATE_IDLE_V1
             return Err(TraceFailureV1.BackendFailure)
         self.arena = arena
+        self.close_pending = false
         for id in self.planned:
             val status = self.patch_retrying(leaf, id)
             if status != XRAY_LLVM_STATUS_SUCCESS_V1:
                 val failure = xray_llvm_status_failure_v1(status)
                 # Close admission first (design C.5), then roll back.
-                leaf.close(self.arena)
+                self.close_admission(leaf)
                 # compiler-rt's FAILED for a failed mprotect writes no byte, so
-                # the id is NOT recorded as patched. A best-effort unpatch
-                # covers any other FAILED path; its outcome is not a site state.
-                if status == XRAY_LLVM_STATUS_FAILED_V1: self.unpatch_retrying(leaf, id)
+                # the id is not recorded as patched when unpatching it succeeds.
+                # Other FAILED paths may have written part of the sled; if the
+                # unpatch fails too, the id is recorded and the adapter faults.
+                if status == XRAY_LLVM_STATUS_FAILED_V1:
+                    if self.unpatch_retrying(leaf, id) != XRAY_LLVM_STATUS_SUCCESS_V1:
+                        self.patched.push(id)
                 if self.unpatch_all(leaf):
                     self.state = XRAY_LLVM_STATE_IDLE_V1
                 else:
@@ -174,6 +182,13 @@ impl XrayLlvmAdapterV1:
         self.patched = remaining
         remaining.len() == 0
 
+    me close_admission(leaf: XrayLlvmLeafV1):
+        for attempt in 0..8:
+            if leaf.close(self.arena) == 1:
+                self.close_pending = false
+                return
+        self.close_pending = true
+
     me patch_retrying(leaf: XrayLlvmLeafV1, id: i64) -> i64:
         var status = leaf.patch_function(id)
         var attempt = 1
@@ -195,6 +210,8 @@ impl XrayLlvmAdapterV1:
     # be prepared, failure stays Faulted (never reported as off).
     me recover(leaf: XrayLlvmLeafV1) -> Result<bool, TraceFailureV1>:
         if self.state != XRAY_LLVM_STATE_FAULTED_V1: return Err(TraceFailureV1.InvalidHandle)
+        if self.close_pending: self.close_admission(leaf)
+        if self.close_pending: return Err(TraceFailureV1.Busy)
         if not self.unpatch_all(leaf): return Err(TraceFailureV1.BackendFailure)
         self.state = XRAY_LLVM_STATE_IDLE_V1
         Ok(true)
@@ -209,10 +226,10 @@ impl XrayLlvmAdapterV1:
             return Ok(TraceSessionStateV1.Drained)
         if self.state == XRAY_LLVM_STATE_FAULTED_V1: return Err(TraceFailureV1.BackendFailure)
         if not self.valid(session): return Err(TraceFailureV1.InvalidHandle)
-        # Defense in depth: once quiescent unpatch completes no sled reaches the
-        # handler, so a close that did not linearize (contended gate) is not a
-        # fault; a failed unpatch is.
-        leaf.close(self.arena)
+        # Once quiescent unpatch completes no sled reaches the handler, so a
+        # close that did not linearize only matters if the unpatch fails; it is
+        # then kept pending and retried by recover.
+        self.close_admission(leaf)
         if not self.unpatch_all(leaf):
             self.state = XRAY_LLVM_STATE_FAULTED_V1
             return Err(TraceFailureV1.BackendFailure)
