@@ -17,8 +17,9 @@ use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field,
 use std.nogc_sync_mut.lsp.lsp_json.*
 use std.nogc_sync_mut.lsp.lsp_protocol.{lsp_write_notification}
 use std.nogc_sync_mut.lsp.lsp_file_uri.{lsp_file_uri_to_path, lsp_query_file_argument_v1}
-use std.nogc_sync_mut.lsp.lsp_code_action.{lsp_code_actions_convert_output,
-    lsp_code_action_request, lsp_code_action_query_args}
+use std.nogc_sync_mut.lsp.lsp_code_action.{lsp_code_actions_convert_output}
+use std.nogc_sync_mut.lsp.lsp_code_action_handler.{lsp_code_action_response}
+use std.nogc_sync_mut.lsp.lsp_document_sync.{lsp_document_sync_apply, lsp_document_snapshot, lsp_document_sync_uri, lsp_read_analyzed_source}
 use std.nogc_sync_mut.lsp.lsp_query_command.{lsp_fast_query_command_v1, lsp_code_query_command_v1,
     lsp_heavy_query_command_v1, lsp_visibility_query_command_v1, lsp_run_query_command_v1}
 
@@ -147,26 +148,31 @@ fn lsp_handle_initialize_with_body(id: text, body: text) -> text:
 # --- Document sync ---
 
 fn lsp_handle_did_open(body: text):
-    # Diagnostics require full compiler (slow) — run async in background
-    val uri = _extract_uri(body)
-    val file_path = _uri_to_path(uri)
-    if uri != "" and file_path != "":
-        _publish_diagnostics(uri=uri, file_path=file_path)
+    if not lsp_document_sync_apply("textDocument/didOpen", body): return
+    _publish_synced_disk_diagnostics(body)
 
 fn lsp_handle_did_change(body: text):
-    val _x = 0
+    lsp_document_sync_apply("textDocument/didChange", body)
 
 fn lsp_handle_did_close(body: text):
-    val uri = _extract_uri(body)
+    if not lsp_document_sync_apply("textDocument/didClose", body): return
+    val uri = lsp_document_sync_uri(body)
     if uri != "":
         val params = jo2(jp("uri", js(uri)), jp("diagnostics", SB_L() + SB_R()))
         lsp_write_notification(method="textDocument/publishDiagnostics", params=params)
 
 fn lsp_handle_did_save(body: text):
-    val uri = _extract_uri(body)
-    val file_path = _uri_to_path(uri)
-    if uri != "" and file_path != "":
-        _publish_diagnostics(uri=uri, file_path=file_path)
+    _publish_synced_disk_diagnostics(body)
+
+fn _publish_synced_disk_diagnostics(body: text):
+    val uri = lsp_document_sync_uri(body)
+    val snapshot = lsp_document_snapshot(uri)
+    val path = _uri_to_path(uri)
+    if snapshot == nil or path == "": return
+    val disk = lsp_read_analyzed_source(path)
+    # Never publish disk diagnostics as observations of an unsaved overlay.
+    if disk.is_err() or disk.unwrap() != snapshot.unwrap().content: return
+    _publish_diagnostics(uri=uri, file_path=path)
 
 # --- Diagnostics (heavy — uses full query.spl with compiler) ---
 
@@ -727,23 +733,7 @@ fn _parse_inlay_hint(line: text) -> text:
 # --- Code Action (heavy — calls query engine) ---
 
 fn lsp_handle_code_action(id: text, body: text) -> text:
-    val request = lsp_code_action_request(body)
-    if request == nil:
-        return make_json_result(id=id, result=SB_L() + SB_R())
-    val actual = request.unwrap()
-    val uri = actual.uri
-    val file_path = _uri_to_path(uri)
-    val line = actual.line
-    if file_path == "":
-        return make_json_result(id=id, result=SB_L() + SB_R())
-    val query_args = lsp_code_action_query_args(lsp_query_file_argument_v1(file_path), line)
-    var cmd = lsp_heavy_query_command_v1(query_args)
-    var out = ""
-    var exit_code: i64 = 0
-    (out, exit_code) = lsp_run_query_command_v1(_find_simple_binary(), cmd)
-    if exit_code != 0 or out.trim() == "":
-        return make_json_result(id=id, result=SB_L() + SB_R())
-    make_json_result(id=id, result=lsp_code_actions_from_query_output(out, uri))
+    lsp_code_action_response(id, body, _find_simple_binary())
 
 fn lsp_code_actions_from_query_output(out: text, uri: text) -> text:
     lsp_code_actions_convert_output(out, uri)
