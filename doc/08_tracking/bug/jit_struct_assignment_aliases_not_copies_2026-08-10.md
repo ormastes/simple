@@ -233,3 +233,11 @@ under both engines: identical output
 deep-copy fix still holds. Residual item 2 (`m[1][0] = 9` divergence) not
 re-tested this pass (Rust-seed interpreter/JIT lvalue-lowering divergence,
 out of scope for a pure-Simple lane). Left OPEN for that residual item.
+
+## 2026-11-05 mirp2-E3 closure (execution, C:/dev/simple/bin/simple.exe (Rust seed, deployed 2026-11-04))
+
+Residual 2 (`m[1][0] = 9`) now agrees: JIT and interpret both print
+`m10=9`; struct copy `var q = p; q.a = 5.0` leaves `p.a=1.0` on both.
+Residual 3 is the seed AOT/native lane, which is not a bootstrap lane (seed is
+bootstrap-only; AOT struct semantics are owned by the pure-Simple backend).
+CLOSED.

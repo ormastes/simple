@@ -379,3 +379,10 @@ exists; the correct next step is a native-linked (not `run`-based) harness.
 
 **DIAGNOSIS ONLY.** No edit made to either parity spec: changing an honest,
 explicitly-scoped-out spec would make it worse, not better.
+
+## 2026-11-05 mirp2-E3 closure
+
+Resolution already appended 2026-08-09 (Defect A registration fixed, both
+parity specs green, interpreter `_native` residual a stale-binary artifact,
+natively-linked-backend coverage explicitly scoped out). Nothing seed-side
+remains. CLOSED.
