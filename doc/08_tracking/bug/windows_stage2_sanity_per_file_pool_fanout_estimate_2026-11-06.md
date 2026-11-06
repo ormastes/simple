@@ -49,3 +49,27 @@ Make the pool headroom default host-scaled like the start guard
 `build_memory_reserve_default_kib_v1(total)`), so other 32 GiB hosts need no
 per-host override. Compiler change; needs a Stage 2 rebuild to take effect in
 the sanity probes.
+
+## Second fix 2026-11-06: single-process probes on Windows
+
+With the 3000000 KiB estimate the MIR pool admitted 3 workers but the HIR pool
+still admitted 0: it sizes from a declared tree budget (none on Windows) and,
+when one is declared, spends only part of it after reserving the coordinator
+peak (~1.3 GiB), clamped again to free - reserve. Declaring 6000000 KiB still
+gave `hir_workers=0`. Windows policy pins ONE frontend, so the probes now set
+`SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` (the explicit single-process build the
+refusal itself names; the shape that passed before 88f86fd749b).
+
+The probe's compiler also does not see `config/host/<hostname>.sdn` (it runs
+from an isolated temp root), so the start guard fell back to min(24 GiB,
+RAM/2) = 16208 MiB. The host's `mem_reserve_free_mib` is therefore forwarded
+through the sanctioned `SIMPLE_BUILD_MEMORY_RESERVE_BYTES` at bootstrap
+invocation (`$(host-env.shs --get mem_reserve_free_mib) * 1 MiB`).
+
+Result, release `060ecf462c5` + this change: Stage 2 sanity `status=pass`
+(p2_add, scv_prime, hello_world_positional all rc 0); admitted
+`stage2-admitted/simple.exe` sha256 4a2a5d2d67425b962731ba97bda607de2c03ce06b50ec34657e67e349908e981.
+
+Open follow-ups (compiler): pool headroom default host-scaled like the start
+guard; host config lookup reachable from the probe's isolated root; Windows
+HIR pool should accept the single-frontend policy without whole-program.
