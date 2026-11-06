@@ -1,0 +1,277 @@
+# NOT_RUN: exact-content reconciliation and scheduler cache tests. No synthetic
+# completion fixture is claimed as compiler/native integration evidence.
+use std.spec
+use std.spec.step
+use std.common.diagnostics.source_analysis_v1.*
+use std.common.crypto.sha256.{sha256_text}
+use std.common.json.value.{JsonValue, json_value_object_from, json_value_serialize}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.nogc_sync_mut.lsp.lsp_document_sync.{lsp_document_generation_v1,
+    lsp_document_sync_apply, lsp_document_capture_v1}
+use std.nogc_sync_mut.lsp.lsp_analysis_freshness.{lsp_analysis_freshness_v1}
+use std.nogc_sync_mut.lsp.lsp_analysis_scheduler.{lsp_analysis_scheduler_v1}
+use std.nogc_sync_mut.io.file_ops.{file_write, secure_temp_dir}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.io_runtime.{file_delete, dir_remove}
+
+fn freshness_receipt(path: text, source: text) -> SourceAnalysisReceiptV1:
+    val dependency = SourceAnalysisDependencyV1(path: path, digest: sha256_text(source),
+        byte_count: source.byte_len(), origin: "disk", document_version: -1)
+    SourceAnalysisReceiptV1(status: SourceAnalysisStatusV1.Completed, reason: "",
+        run_id: "fixture", workspace_identity: "workspace", owner_id: "owner",
+        lifetime_generation: lsp_document_generation_v1(), request_digest: "fixture",
+        environment_digest: "fixture", dependencies: [dependency],
+        dependency_digest: source_analysis_dependency_digest_v1([dependency]), structured_diagnostics_complete: true)
+
+fn freshness_open(uri: text) -> text:
+    json_value_serialize(json_value_object_from([("textDocument", json_value_object_from([
+        ("uri", JsonValue.Str(uri)), ("version", JsonValue.Int(1)), ("text", JsonValue.Str(""))]))]))
+
+fn freshness_environment(compiler: text) -> SourceAnalysisEnvironmentV1:
+    SourceAnalysisEnvironmentV1(compiler_identity: sha256_text(compiler), target: "",
+        features: [], config_digest: sha256_text("config"))
+
+fn freshness_environment_wire(environment: SourceAnalysisEnvironmentV1) -> text:
+    val features: [SdnValue] = []
+    sdn_encode_canonical(SdnValue.Dict({"schema": SdnValue.String("source-analysis-environment-v1"),
+        "environment": SdnValue.Dict({"compiler_identity": SdnValue.String(environment.compiler_identity),
+            "target": SdnValue.String(environment.target), "features": SdnValue.Array(features),
+            "config_digest": SdnValue.String(environment.config_digest)})}))
+
+describe "Parent diagnostic freshness admission":
+    it "detects a disk import changed after worker completion before publication":
+        step("Change exact bytes without changing any editor version")
+        val raw = secure_temp_dir(get_temp_dir(), "lsp-freshness-").unwrap()
+        val root = path_final_existing(raw).unwrap().path
+        val path = root + "/dependency.spl"
+        expect(file_write(path, "one")).to_equal(true)
+        val receipt = freshness_receipt(path, "one")
+        expect(file_write(path, "two")).to_equal(true)
+        var probe = lsp_analysis_freshness_v1(receipt).unwrap()
+        expect(probe.step()).to_equal("dependency-content-changed")
+        expect(probe.finished).to_equal(false)
+        val _deleted = file_delete(path)
+        val _removed = dir_remove(root)
+
+    it "detects a changed import after a previously clean cache admission":
+        step("Reconcile the same retained receipt again after an external write")
+        val raw = secure_temp_dir(get_temp_dir(), "lsp-freshness-cache-").unwrap()
+        val root = path_final_existing(raw).unwrap().path
+        val path = root + "/dependency.spl"
+        expect(file_write(path, "before")).to_equal(true)
+        val receipt = freshness_receipt(path, "before")
+        var first = lsp_analysis_freshness_v1(receipt).unwrap()
+        expect(first.step()).to_equal("completed")
+        expect(first.step()).to_equal("completed")
+        expect(file_write(path, "after!")).to_equal(true)
+        var next = lsp_analysis_freshness_v1(receipt).unwrap()
+        expect(next.step()).to_equal("dependency-content-changed")
+        val _deleted = file_delete(path)
+        val _removed = dir_remove(root)
+
+    it "does not turn missing provider input or validation deadline into clean":
+        step("Delete the import, then expire an independent validator")
+        val raw = secure_temp_dir(get_temp_dir(), "lsp-freshness-failure-").unwrap()
+        val root = path_final_existing(raw).unwrap().path
+        val path = root + "/dependency.spl"
+        expect(file_write(path, "x")).to_equal(true)
+        val receipt = freshness_receipt(path, "x")
+        val _deleted = file_delete(path)
+        var missing = lsp_analysis_freshness_v1(receipt).unwrap()
+        expect(missing.step()).to_equal("dependency-validation-path-unavailable")
+        var expired = lsp_analysis_freshness_v1(receipt).unwrap()
+        expired.deadline_ms = 0
+        expect(expired.step()).to_equal("dependency-validation-deadline")
+        val _removed = dir_remove(root)
+
+    it "never serves a cached clean result synchronously and retains full provenance":
+        step("Pull a cached diagnostic set without launching a worker in this unit test")
+        val uri = "file:///freshness-cached-entry.spl"
+        expect(lsp_document_sync_apply("textDocument/didOpen", freshness_open(uri))).to_equal(true)
+        val environment = freshness_environment("compiler")
+        val request = lsp_document_capture_v1(uri, "run", "/", "workspace", "owner", environment).unwrap()
+        var receipt = freshness_receipt("/dependency.spl", "source")
+        receipt.run_id = request.run_id
+        receipt.request_digest = source_analysis_request_digest_v1(request)
+        receipt.environment_digest = source_analysis_environment_digest_v1(environment)
+        val items: [JsonValue] = []
+        val params = json_value_serialize(json_value_object_from([("uri", JsonValue.Str(uri)),
+            ("version", JsonValue.Int(1)), ("diagnostics", JsonValue.Array(items))]))
+        var scheduler = lsp_analysis_scheduler_v1("/must-not-launch")
+        scheduler.cache(params, request, receipt)
+        expect(scheduler.cached.len()).to_equal(1)
+        expect(scheduler.cached[0].receipt.dependencies[0].digest).to_equal(sha256_text("source"))
+        expect(scheduler.cached[0].environment.compiler_identity).to_equal(environment.compiler_identity)
+        expect(scheduler.pull("91", uri)).to_equal("")
+        expect(scheduler.pull_ids).to_equal(["91"])
+        expect(scheduler.queued).to_equal([uri])
+        expect(lsp_document_sync_apply("textDocument/didClose", freshness_open(uri))).to_equal(true)
+
+    it "invalidates a candidate when a fresh worker observes different compiler environment":
+        step("Feed a new pinned-worker environment observation to the actual coordinator")
+        val uri = "file:///freshness-environment-entry.spl"
+        expect(lsp_document_sync_apply("textDocument/didOpen", freshness_open(uri))).to_equal(true)
+        val original = freshness_environment("compiler one")
+        val request = lsp_document_capture_v1(uri, "run", "/", "workspace", "owner", original).unwrap()
+        var receipt = freshness_receipt("/dependency.spl", "source")
+        receipt.environment_digest = source_analysis_environment_digest_v1(original)
+        var scheduler = lsp_analysis_scheduler_v1("/must-not-launch")
+        scheduler.active = Some(request)
+        scheduler.candidate_receipt = Some(receipt)
+        scheduler.candidate_params = ["must not publish"]
+        scheduler.worker_purpose = "freshness"
+        scheduler.worker_completed(freshness_environment_wire(freshness_environment("compiler two")))
+        expect(scheduler.active == nil).to_equal(true)
+        expect(scheduler.candidate_params.len()).to_equal(0)
+        expect(scheduler.environment == nil).to_equal(true)
+        expect(scheduler.queued).to_equal([uri])
+        expect(scheduler.failure).to_equal("analysis-environment-changed")
+        expect(lsp_document_sync_apply("textDocument/didClose", freshness_open(uri))).to_equal(true)
+
+use std.nogc_sync_mut.lsp.lsp_analysis_scheduler.{LspAnalysisSchedulerV1}
+use std.nogc_sync_mut.lsp.lsp_analysis_worker.{SourceAnalysisWorkerV1}
+use std.nogc_sync_mut.io_runtime.{time_now_monotonic_ms}
+
+fn freshness_terminal_environment_event(environment: SourceAnalysisEnvironmentV1) -> SourceAnalysisWorkerV1:
+    # Controlled already-retired owner event, not a fabricated native-process
+    # success assertion. The scheduler still executes its real cancellation,
+    # event delivery, strict environment decode and commit transitions.
+    SourceAnalysisWorkerV1(run_id: "environment", lease: nil, executable: nil,
+        directory: nil, status: "completed", reason: "controlled terminal event",
+        wire: freshness_environment_wire(environment), cancelled: false, max_wait_ms: 25,
+        artifact: nil, request: nil, target: "")
+
+fn freshness_candidate_scheduler(uri: text, disk: [SourceAnalysisDependencyV1]) -> LspAnalysisSchedulerV1:
+    var scheduler = lsp_analysis_scheduler_v1("/must-not-launch-in-transition-spec")
+    val environment = freshness_environment("controlled compiler")
+    val request = lsp_document_capture_v1(uri, "controlled-run", scheduler.root,
+        scheduler.workspace_identity, scheduler.owner_id, environment).unwrap()
+    var dependencies: [SourceAnalysisDependencyV1] = []
+    for document in request.documents:
+        dependencies.push(SourceAnalysisDependencyV1(path: document.path,
+            digest: document.digest, byte_count: document.source.byte_len(),
+            origin: "overlay", document_version: document.version))
+    for dependency in disk: dependencies.push(dependency)
+    val receipt = SourceAnalysisReceiptV1(status: SourceAnalysisStatusV1.Completed,
+        reason: "controlled typed analysis", run_id: request.run_id,
+        workspace_identity: request.workspace_identity, owner_id: request.owner_id,
+        lifetime_generation: request.lifetime_generation,
+        request_digest: source_analysis_request_digest_v1(request),
+        environment_digest: source_analysis_environment_digest_v1(environment),
+        dependencies: dependencies, dependency_digest: source_analysis_dependency_digest_v1(dependencies),
+        structured_diagnostics_complete: true)
+    val empty: [JsonValue] = []
+    val params = json_value_serialize(json_value_object_from([("uri", JsonValue.Str(uri)),
+        ("version", JsonValue.Int(1)), ("diagnostics", JsonValue.Array(empty))]))
+    scheduler.active = Some(request)
+    scheduler.candidate_receipt = Some(receipt)
+    scheduler.candidate_params = [params]
+    scheduler.freshness = Some(lsp_analysis_freshness_v1(receipt).unwrap())
+    scheduler.environment = Some(environment)
+    scheduler
+
+describe "Actual scheduler transitions with controlled owner events":
+    it "discards a completed handshake when an external hint arrives before delivery":
+        step("Deliver the same terminal owner event with and without an intervening hint")
+        val observed = freshness_environment("new compiler")
+        var control = lsp_analysis_scheduler_v1("/must-not-launch")
+        control.worker_purpose = "bootstrap"
+        control.worker = Some(freshness_terminal_environment_event(observed))
+        control.tick()
+        expect(control.environment.unwrap().compiler_identity).to_equal(observed.compiler_identity)
+        var stale = lsp_analysis_scheduler_v1("/must-not-launch")
+        stale.worker_purpose = "bootstrap"
+        stale.worker = Some(freshness_terminal_environment_event(observed))
+        stale.external_changed()
+        stale.tick()
+        expect(stale.environment == nil).to_equal(true)
+        expect(stale.worker == nil).to_equal(true)
+        expect(stale.cached.len()).to_equal(0)
+
+    it "cancels a disk probe when the editor changes or closes between idle turns":
+        step("Validate one real import, then mutate the actual document owner before the next read")
+        val raw = secure_temp_dir(get_temp_dir(), "lsp-transition-probe-").unwrap()
+        val root = path_final_existing(raw).unwrap().path
+        val first = root + "/first.spl"
+        val second = root + "/second.spl"
+        expect(file_write(first, "a")).to_equal(true)
+        expect(file_write(second, "b")).to_equal(true)
+        val dependencies = [SourceAnalysisDependencyV1(path: first, digest: sha256_text("a"),
+            byte_count: 1, origin: "disk", document_version: -1),
+            SourceAnalysisDependencyV1(path: second, digest: sha256_text("b"),
+                byte_count: 1, origin: "disk", document_version: -1)]
+        for action in ["edit", "close"]:
+            val uri = "file://" + root + "/" + action + ".spl"
+            expect(lsp_document_sync_apply("textDocument/didOpen", freshness_open(uri))).to_equal(true)
+            var scheduler = freshness_candidate_scheduler(uri, dependencies)
+            scheduler.tick()
+            expect(scheduler.freshness.unwrap().observed_bytes).to_equal(1)
+            expect(scheduler.cached.len()).to_equal(0)
+            if action == "edit":
+                val change = json_value_object_from([("text", JsonValue.Str("changed"))])
+                val message = json_value_serialize(json_value_object_from([
+                    ("textDocument", json_value_object_from([("uri", JsonValue.Str(uri)), ("version", JsonValue.Int(2))])),
+                    ("contentChanges", JsonValue.Array([change]))]))
+                expect(lsp_document_sync_apply("textDocument/didChange", message)).to_equal(true)
+            else:
+                expect(lsp_document_sync_apply("textDocument/didClose", freshness_open(uri))).to_equal(true)
+            scheduler.tick()
+            expect(scheduler.active == nil).to_equal(true)
+            expect(scheduler.freshness == nil).to_equal(true)
+            expect(scheduler.cached.len()).to_equal(0)
+            expect(scheduler.failure).to_equal("overlay-generation-changed")
+            if action == "edit":
+                expect(lsp_document_sync_apply("textDocument/didClose", freshness_open(uri))).to_equal(true)
+        val _first_deleted = file_delete(first)
+        val _second_deleted = file_delete(second)
+        val _removed = dir_remove(root)
+
+    it "completes a deferred pull only after the real scheduler freshness transition":
+        step("Retain the pull, advance an admitted overlay-only probe, and commit its versioned set")
+        val uri = "file:///transition-complete.spl"
+        expect(lsp_document_sync_apply("textDocument/didOpen", freshness_open(uri))).to_equal(true)
+        var scheduler = freshness_candidate_scheduler(uri, [])
+        expect(scheduler.pull("310", uri)).to_equal("")
+        expect(scheduler.pull_ids.len()).to_equal(1)
+        expect(scheduler.cached.len()).to_equal(0)
+        scheduler.tick()
+        expect(scheduler.pull_ids.len()).to_equal(0)
+        expect(scheduler.cached.len()).to_equal(1)
+        expect(scheduler.cached[0].uri).to_equal(uri)
+        expect(scheduler.cached[0].receipt.dependency_digest).to_equal(
+            source_analysis_dependency_digest_v1(scheduler.cached[0].receipt.dependencies))
+        expect(scheduler.active == nil).to_equal(true)
+        expect(scheduler.queued.len()).to_equal(0)
+        expect(lsp_document_sync_apply("textDocument/didClose", freshness_open(uri))).to_equal(true)
+
+    it "expires deferred pulls without emitting or caching an empty success":
+        step("Expire the actual scheduler request deadline before any worker starts")
+        val uri = "file:///transition-expire.spl"
+        expect(lsp_document_sync_apply("textDocument/didOpen", freshness_open(uri))).to_equal(true)
+        var scheduler = lsp_analysis_scheduler_v1("/must-not-launch")
+        expect(scheduler.pull("311", uri)).to_equal("")
+        scheduler.pull_deadlines[0] = 0
+        scheduler.due_ms = time_now_monotonic_ms() + 60000
+        scheduler.tick()
+        expect(scheduler.pull_ids.len()).to_equal(0)
+        expect(scheduler.cached.len()).to_equal(0)
+        expect(scheduler.worker == nil).to_equal(true)
+        expect(lsp_document_sync_apply("textDocument/didClose", freshness_open(uri))).to_equal(true)
+
+    it "shutdown retires an active validator and cancels its deferred requests":
+        step("Stop before an otherwise admissible candidate can commit")
+        val uri = "file:///transition-shutdown.spl"
+        expect(lsp_document_sync_apply("textDocument/didOpen", freshness_open(uri))).to_equal(true)
+        var scheduler = freshness_candidate_scheduler(uri, [])
+        expect(scheduler.pull("312", uri)).to_equal("")
+        scheduler.stop()
+        scheduler.tick()
+        expect(scheduler.stopped).to_equal(true)
+        expect(scheduler.pull_ids.len()).to_equal(0)
+        expect(scheduler.freshness == nil).to_equal(true)
+        expect(scheduler.active == nil).to_equal(true)
+        expect(scheduler.cached.len()).to_equal(0)
+        expect(scheduler.cleanup_pending()).to_equal(false)
+        expect(lsp_document_sync_apply("textDocument/didClose", freshness_open(uri))).to_equal(true)

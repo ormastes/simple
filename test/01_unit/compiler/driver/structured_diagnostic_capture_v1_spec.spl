@@ -1,0 +1,120 @@
+# Original producer values, never reconstructed log text. Authored NOT_RUN.
+use std.spec.{describe, it, expect, step}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1, DiagnosticFix, FixConfidence, render_diagnostic_v1_json}
+use compiler.common.diagnostics.severity.{Severity}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.types.type_infer_types.{TypeInferError}
+use compiler.types.type_infer.diagnostic_v1.{type_infer_diagnostic_v1}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.core.ast.{ast_reset}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.driver.hir_typecheck_consumer_v1.{HirTypecheckReceiptV1, collect_module_typecheck_receipt_v1}
+use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity}
+use compiler.driver.driver_hir_pipeline_passes.{publish_module_typecheck_receipt_v1}
+
+fn diagnostic_span_fixture_v1(path: text, start: i64, end: i64, line: i64, col: i64) -> Span:
+    Span(start: start, end: end, line: line, col: col, file: path, length: end - start)
+
+describe "original structured compiler diagnostics":
+    it "retains nested labels children macro trace and fix without text reconstruction":
+        step("Store the actual DiagnosticV1 value beside compatibility text")
+        var ctx = CompileContext.create(driver_core_compile_options_default())
+        ctx.begin_structured_collection_v1()
+        val at = diagnostic_span_fixture_v1("entry.spl", 9, 14, 2, 4)
+        val related = diagnostic_span_fixture_v1("types.spl", 40, 46, 6, 3)
+        val fix = DiagnosticFix.new("fix-1", "replace value", FixConfidence.Safe).with_replacement("entry.spl", at, "false")
+        val original = DiagnosticV1.error("E-TEST", "literal |||RELATED: remains message text").with_file("entry.spl").with_span(at).with_secondary_label("types.spl", related, "declared here").with_note("note").with_help("help").with_child(DiagnosticV1.new(Severity.Note, "N-TEST", "nested")).with_macro_frame("expand", related, "types.spl").with_fix(fix)
+        ctx.add_error("compatibility text is deliberately different")
+        expect(ctx.diagnostic_record_coverage_complete_v1()).to_equal(false)
+        ctx.capture_diagnostics_v1([original], 1, 0)
+        expect(ctx.diagnostic_record_coverage_complete_v1()).to_equal(true)
+        val retained = ctx.structured_diagnostics_v1[0]
+        expect(render_diagnostic_v1_json(retained)).to_equal(render_diagnostic_v1_json(original))
+        expect(retained.span.unwrap().start).to_equal(9)
+        expect(retained.labels[0].file).to_equal("types.spl")
+        expect(retained.children[0].message).to_equal("nested")
+        expect(retained.fix.unwrap().replacements[0].new_text).to_equal("false")
+
+    it "refuses completion for uncaptured legacy errors and directly appended warnings":
+        step("An empty structured collection is not proof of a clean check")
+        var ctx = CompileContext.create(driver_core_compile_options_default())
+        ctx.begin_structured_collection_v1()
+        ctx.add_error("legacy error")
+        ctx.warnings.push("direct legacy warning")
+        ctx.capture_diagnostics_v1([DiagnosticV1.error("E-TEST", "captured error")], 1, 0)
+        expect(ctx.diagnostic_record_coverage_complete_v1()).to_equal(false)
+        ctx.capture_diagnostics_v1([DiagnosticV1.warning("W-TEST", "captured warning")], 0, 1)
+        expect(ctx.diagnostic_record_coverage_complete_v1()).to_equal(true)
+        ctx.add_error("later producer remains uncollected")
+        expect(ctx.diagnostic_record_coverage_complete_v1()).to_equal(false)
+
+    it "rejects invalid coverage rather than treating absent records as complete":
+        var ctx = CompileContext.create(driver_core_compile_options_default())
+        ctx.begin_structured_collection_v1()
+        ctx.add_error("missing producer")
+        ctx.capture_diagnostics_v1([], 1, 0)
+        expect(ctx.structured_diagnostic_capture_invalid_v1).to_equal(true)
+        expect(ctx.diagnostic_record_coverage_complete_v1()).to_equal(false)
+
+    it "preserves original HM byte spans and cross-file related type labels":
+        step("Convert a typed mismatch before formatting compatibility strings")
+        val expected_at = diagnostic_span_fixture_v1("expected.spl", 17, 21, 3, 2)
+        val found_at = diagnostic_span_fixture_v1("found.spl", 30, 35, 5, 1)
+        val use_at = diagnostic_span_fixture_v1("use.spl", 90, 94, 8, 6)
+        val expected = HirType(kind: HirTypeKind.Bool, span: expected_at)
+        val found = HirType(kind: HirTypeKind.Int(64, true), span: found_at)
+        val diagnostic = type_infer_diagnostic_v1(TypeInferError.Mismatch(expected, found, use_at), "fallback.spl", Severity.Warning)
+        expect(diagnostic.severity.is_warning()).to_equal(true)
+        expect(diagnostic.span.unwrap().start).to_equal(90)
+        expect(diagnostic.span.unwrap().end).to_equal(94)
+        expect(diagnostic.file.unwrap()).to_equal("use.spl")
+        expect(diagnostic.labels.len()).to_equal(2)
+        expect(diagnostic.labels[0].file).to_equal("expected.spl")
+        expect(diagnostic.labels[1].span.start).to_equal(30)
+
+    it "runs the real HM consumer and preserves warning policy in the driver receipt":
+        step("Parse and lower a mismatched return then consume its original HM errors")
+        ast_reset()
+        val parsed = parse_and_build_module("fn answer() -> bool:\n    42\n", "typed-warning.spl")
+        var lowering = HirLowering.with_filename("typed-warning.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        val receipt = collect_module_typecheck_receipt_v1("typed-warning", hir, TypecheckPassSeverity.Warn)
+        expect(receipt.warnings.len()).to_be_greater_than(0)
+        expect(receipt.errors.len()).to_equal(0)
+        expect(receipt.captured_warnings).to_equal(receipt.warnings.len())
+        var ctx = CompileContext.create(driver_core_compile_options_default())
+        ctx.begin_structured_collection_v1()
+        publish_module_typecheck_receipt_v1(ctx, receipt)
+        expect(ctx.diagnostic_record_coverage_complete_v1()).to_equal(true)
+        expect(ctx.structured_diagnostics_v1[0].severity.is_warning()).to_equal(true)
+
+    it "does not silently drop advisory-only legacy producer messages":
+        var ctx = CompileContext.create(driver_core_compile_options_default())
+        ctx.begin_structured_collection_v1()
+        val receipt = HirTypecheckReceiptV1(messages: ["uncaptured advisory"], warnings: [], errors: [])
+        publish_module_typecheck_receipt_v1(ctx, receipt)
+        expect(ctx.error_count_value).to_equal(0)
+        expect(ctx.warnings.len()).to_equal(0)
+        expect(ctx.diagnostic_record_coverage_complete_v1()).to_equal(false)
+
+    it "requires actual producer completion even for zero diagnostics":
+        var ctx = CompileContext.create(driver_core_compile_options_default())
+        ctx.source_paths_owner = ["entry.spl"]
+        expect(ctx.source_analysis_diagnostics_collected_v1()).to_equal(false)
+        ctx.begin_structured_collection_v1()
+        expect(ctx.source_analysis_diagnostics_collected_v1()).to_equal(false)
+        ctx.record_parser_diagnostic_producer_v1("entry.spl")
+        expect(ctx.source_analysis_diagnostics_collected_v1()).to_equal(false)
+        expect(ctx.source_analysis_diagnostics_collected_v1(false)).to_equal(true)
+        ctx.structured_typecheck_started_v1 = true
+        ctx.structured_typecheck_expected_v1 = ["entry"]
+        expect(ctx.source_analysis_diagnostics_collected_v1()).to_equal(false)
+        ctx.structured_typecheck_completed_v1 = ["other"]
+        expect(ctx.source_analysis_diagnostics_collected_v1()).to_equal(false)
+        ctx.structured_typecheck_completed_v1 = ["entry"]
+        expect(ctx.source_analysis_diagnostics_collected_v1()).to_equal(true)

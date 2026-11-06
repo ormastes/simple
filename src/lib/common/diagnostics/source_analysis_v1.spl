@@ -1,0 +1,102 @@
+# Immutable request/receipt contract. DiagnosticV1 stays in its compiler owner;
+# this shared module must never depend on compiler implementation types.
+struct SourceAnalysisDocumentV1:
+    path: text
+    uri: text
+    version: i64
+    source: text
+    digest: text
+
+struct SourceAnalysisEnvironmentV1:
+    compiler_identity: text
+    target: text
+    features: [text]
+    config_digest: text
+
+struct SourceAnalysisBoundsV1:
+    max_dependency_files: i64 = 4096
+    max_dependency_bytes: i64 = 67108864
+    max_dependency_file_bytes: i64 = 1048576
+    max_source_reads: i64 = 8192
+    max_diagnostics: i64 = 4096
+
+struct SourceAnalysisRequestV1:
+    run_id: text
+    workspace_root: text
+    workspace_identity: text
+    owner_id: text
+    lifetime_generation: i64
+    entry_path: text
+    documents: [SourceAnalysisDocumentV1]
+    environment: SourceAnalysisEnvironmentV1
+    bounds: SourceAnalysisBoundsV1
+
+struct SourceAnalysisDependencyV1:
+    path: text
+    digest: text
+    byte_count: i64
+    origin: text  # overlay or disk; every consumed byte belongs to this receipt
+    document_version: i64  # -1 for disk
+
+enum SourceAnalysisStatusV1:
+    Completed
+    Rejected
+    Cancelled
+    TimedOut
+    Failed
+    InvalidPayload
+
+struct SourceAnalysisReceiptV1:
+    status: SourceAnalysisStatusV1
+    reason: text
+    run_id: text
+    workspace_identity: text
+    owner_id: text
+    lifetime_generation: i64
+    request_digest: text
+    environment_digest: text
+    dependencies: [SourceAnalysisDependencyV1]
+    dependency_digest: text
+    structured_diagnostics_complete: bool
+
+export SourceAnalysisDocumentV1, SourceAnalysisEnvironmentV1, SourceAnalysisBoundsV1
+export SourceAnalysisRequestV1, SourceAnalysisDependencyV1, SourceAnalysisStatusV1, SourceAnalysisReceiptV1
+
+use std.common.crypto.sha256.{sha256_text}
+
+fn source_analysis_frame_v1(value: text) -> text:
+    "{value.byte_len()}:" + value
+
+pub fn source_analysis_environment_digest_v1(environment: SourceAnalysisEnvironmentV1) -> text:
+    var framed = "source-analysis-environment-v1" + source_analysis_frame_v1(environment.compiler_identity)
+    framed = framed + source_analysis_frame_v1(environment.target) + source_analysis_frame_v1(environment.config_digest)
+    framed = framed + "{environment.features.len()}:"
+    for feature in environment.features:
+        framed = framed + source_analysis_frame_v1(feature)
+    sha256_text(framed)
+
+pub fn source_analysis_request_digest_v1(request: SourceAnalysisRequestV1) -> text:
+    var framed = "source-analysis-request-v1"
+    for value in [request.run_id, request.workspace_root, request.workspace_identity,
+            request.owner_id, "{request.lifetime_generation}", request.entry_path,
+            source_analysis_environment_digest_v1(request.environment)]:
+        framed = framed + source_analysis_frame_v1(value)
+    framed = framed + "{request.documents.len()}:"
+    for document in request.documents:
+        for value in [document.path, document.uri, "{document.version}", document.digest]:
+            framed = framed + source_analysis_frame_v1(value)
+    for limit in [request.bounds.max_dependency_files, request.bounds.max_dependency_bytes,
+            request.bounds.max_dependency_file_bytes, request.bounds.max_source_reads,
+            request.bounds.max_diagnostics]:
+        framed = framed + source_analysis_frame_v1("{limit}")
+    sha256_text(framed)
+
+pub fn source_analysis_dependency_digest_v1(dependencies: [SourceAnalysisDependencyV1]) -> text:
+    var framed = "source-analysis-dependencies-v1:{dependencies.len()}:"
+    for dependency in dependencies:
+        for value in [dependency.path, dependency.digest, "{dependency.byte_count}",
+                dependency.origin, "{dependency.document_version}"]:
+            framed = framed + source_analysis_frame_v1(value)
+    sha256_text(framed)
+
+export source_analysis_environment_digest_v1, source_analysis_request_digest_v1, source_analysis_dependency_digest_v1

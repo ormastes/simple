@@ -1,0 +1,53 @@
+use std.spec.*
+use std.common.diagnostics.source_analysis_v1.*
+use std.common.diagnostics.source_analysis_wire_v1.{source_analysis_wire_parse_v1, source_analysis_wire_text_v1}
+use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1, LabelV1, MacroFrame, DiagnosticFix, FixConfidence, FixReplacement}
+use compiler.common.diagnostics.span.{Span}
+use compiler.driver.driver_source_analysis_v1.{SourceAnalysisResultV1}
+use compiler.driver.driver_source_analysis_wire_v1.{source_analysis_result_sdn_v1}
+
+fn wire_receipt_v1() -> SourceAnalysisReceiptV1:
+    SourceAnalysisReceiptV1(status: SourceAnalysisStatusV1.Completed, reason: "", run_id: "run",
+        workspace_identity: "workspace", owner_id: "editor", lifetime_generation: 2,
+        request_digest: "request", environment_digest: "environment", dependencies: [],
+        dependency_digest: source_analysis_dependency_digest_v1([]), structured_diagnostics_complete: true)
+
+describe "lossless snapshot diagnostic wire":
+    it "preserves labels notes help children macro traces and empty replacement text":
+        var diagnostic = DiagnosticV1.warning("W-OVERLAY", "original warning")
+        diagnostic.file = Some("/workspace/main.spl")
+        diagnostic.span = Some(Span.empty())
+        diagnostic.labels = [LabelV1.secondary("/workspace/import.spl", Span.empty(), "related original")]
+        diagnostic.notes = ["original note"]
+        diagnostic.help = ["original help"]
+        diagnostic.children = [DiagnosticV1.error("E-CHILD", "original child")]
+        diagnostic.macro_trace = [MacroFrame.new("original_macro", Span.empty(), "/workspace/macro.spl")]
+        diagnostic.fix = Some(DiagnosticFix(id: "delete", description: "remove original", confidence: FixConfidence.Safe,
+            replacements: [FixReplacement.new("/workspace/main.spl", Span.empty(), "")]))
+        val wire = source_analysis_result_sdn_v1(SourceAnalysisResultV1(receipt: wire_receipt_v1(), diagnostics: [diagnostic])).unwrap()
+        val envelope = source_analysis_wire_parse_v1(wire, 4194304).unwrap()
+        expect(source_analysis_wire_text_v1(envelope, "diagnostics_format").unwrap()).to_equal("diagnostic-v1-json")
+        val json = source_analysis_wire_text_v1(envelope, "diagnostics_json").unwrap()
+        for original in ["W-OVERLAY", "related original", "original note", "original help", "E-CHILD", "original_macro", "remove original"]:
+            expect(json).to_contain(original)
+        expect(json).to_contain("\"new_text\":\"\"")
+
+    it "rejects deep recursive diagnostics before canonical rendering":
+        var diagnostic = DiagnosticV1.error("E-DEEP", "leaf")
+        for index in 0..40:
+            var parent = DiagnosticV1.error("E-PARENT", "parent")
+            parent.children = [diagnostic]
+            diagnostic = parent
+        val result = source_analysis_result_sdn_v1(SourceAnalysisResultV1(receipt: wire_receipt_v1(), diagnostics: [diagnostic]))
+        expect(result.is_err()).to_equal(true)
+
+    it "retains explicit completed empty separately from failure":
+        val completed = source_analysis_result_sdn_v1(SourceAnalysisResultV1(receipt: wire_receipt_v1(), diagnostics: [])).unwrap()
+        var failed_receipt = wire_receipt_v1()
+        failed_receipt.status = SourceAnalysisStatusV1.Failed
+        failed_receipt.reason = "analysis-structured-diagnostics-incomplete"
+        failed_receipt.structured_diagnostics_complete = false
+        val failed = source_analysis_result_sdn_v1(SourceAnalysisResultV1(receipt: failed_receipt, diagnostics: [])).unwrap()
+        expect(completed).to_contain("Completed")
+        expect(failed).to_contain("Failed")
+        expect(failed).to_contain("analysis-structured-diagnostics-incomplete")

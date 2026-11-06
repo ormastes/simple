@@ -1,3 +1,4 @@
+use compiler.driver.driver_snapshot_provider.{driver_snapshot_active_v1, driver_snapshot_read_v1, driver_snapshot_declares_v1, driver_snapshot_reject_v1, driver_snapshot_directory_v1, driver_snapshot_allow_probe_v1}
 # Shared source loading and entry-closure core. One owner for source scan
 # caches, resolver state and admitted-epoch reads; diagnostics stay in the facade.
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
@@ -261,7 +262,13 @@ fn _driver_text_index_of(value: text, needle: text) -> i64:
         return -1
     value.split(needle)[0].len()
 
+fn _driver_snapshot_dir_exists_v1(path: text) -> bool:
+    if not driver_snapshot_allow_probe_v1(): return false
+    driver_snapshot_directory_v1(path) or dir_exists(path)
+
 fn _driver_resolver_path_exists_v1(path: text) -> bool:
+    if not driver_snapshot_allow_probe_v1(): return false
+    if driver_snapshot_declares_v1(path): return true
     # A declared dependency remains a required read after deletion; do not let
     # filesystem probing silently resolve it to a different parent module.
     if driver_admitted_epoch_declares_path_v1(path): return true
@@ -943,6 +950,7 @@ pub fn _driver_cached_entry_source_scan(path: text) -> (text, [text], [text], bo
     # requested read, including cache hits, and parse the returned buffer.
     # Task scan caches may be reset without discarding the epoch row map.
     val epoch_active = driver_admitted_epoch_active_v1()
+    val snapshot_active = driver_snapshot_active_v1()
     var epoch_content = ""
     if epoch_active:
         match driver_admitted_epoch_read_v1(path, key):
@@ -950,7 +958,7 @@ pub fn _driver_cached_entry_source_scan(path: text) -> (text, [text], [text], bo
             case Err(epoch_error):
                 eprint("[epoch-read-fail] path={path} key={key} reason={epoch_error}")
                 return ("", [], [], false)
-    if not epoch_active and _g_entry_scan_content_by_path.contains_key(key):
+    if not epoch_active and not snapshot_active and _g_entry_scan_content_by_path.contains_key(key):
         _g_entry_scan_hit_count = _g_entry_scan_hit_count + 1
         driver_closure_scan_phase_trace("cached_scan:hit", path)
         return (
@@ -960,7 +968,12 @@ pub fn _driver_cached_entry_source_scan(path: text) -> (text, [text], [text], bo
             true)
     var content = ""
     driver_closure_scan_phase_trace("read:start", path)
-    content = if epoch_active: epoch_content else: file_read_nullable(path) ?? ""
+    if snapshot_active:
+        match driver_snapshot_read_v1(path):
+            case Ok(value): content = value
+            case Err(_): return ("", [], [], false)
+    else:
+        content = if epoch_active: epoch_content else: file_read_nullable(path) ?? ""
     if _g_spec_prelude_entry_key != "" and key == _g_spec_prelude_entry_key:
         content = driver_spec_prelude_source(content)
     _g_entry_scan_read_count = _g_entry_scan_read_count + 1
@@ -1059,7 +1072,31 @@ pub fn _driver_entry_sibling_module_paths(content: text) -> [text]:
             result = result.push(sibling)
     result
 
+# The canonical numbering grammar has exactly 1110 legal 1..3-digit
+# spellings. Probe that finite universe in snapshot mode instead of allocating
+# an unbounded directory listing; every probe consumes the provider work cap.
+fn _driver_snapshot_numbered_child_dir_v1(parent: text, segment: text) -> SourceRootResolutionV1:
+    if not _driver_snapshot_dir_exists_v1(parent): return SourceRootResolutionV1.Missing
+    var matched = SourceRootResolutionV1.Missing
+    for number in 0..1000:
+        var prefixes: [text] = ["{number}"]
+        if number < 10:
+            prefixes.push("0{number}")
+            prefixes.push("00{number}")
+        elif number < 100:
+            prefixes.push("0{number}")
+        for prefix in prefixes:
+            if not driver_snapshot_allow_probe_v1(): return SourceRootResolutionV1.Missing
+            val candidate = parent + "/" + prefix + "." + segment
+            if _driver_snapshot_dir_exists_v1(candidate):
+                matched = source_root_numbered_match_v1(matched, candidate, parent + "/" + segment)
+                match matched:
+                    case SourceRootResolutionV1.Ambiguous(_): return matched
+                    case _: ()
+    matched
+
 fn _driver_numbered_child_dir(parent: text, segment: text) -> SourceRootResolutionV1:
+    if driver_snapshot_active_v1(): return _driver_snapshot_numbered_child_dir_v1(parent, segment)
     if parent == "": return SourceRootResolutionV1.Missing
     var parent_exists = false
     unsafe(capabilities: [ffi]):
@@ -1072,7 +1109,7 @@ fn _driver_numbered_child_dir(parent: text, segment: text) -> SourceRootResoluti
         for entry in entries_opt.unwrap():
             if source_root_numbered_candidate_v1(entry, segment):
                 val candidate = parent + "/" + entry
-                if dir_exists(candidate):
+                if _driver_snapshot_dir_exists_v1(candidate):
                     matched = source_root_numbered_match_v1(matched, candidate, parent + "/" + segment)
                     match matched:
                         case SourceRootResolutionV1.Ambiguous(_): return matched
@@ -1087,7 +1124,7 @@ pub fn _driver_try_numbered_entry_import_rel_checked_v1(root: text, rel: text) -
     var i = 0
     while i + 1 < parts.len():
         val direct = if current == "": parts[i] else: current + "/" + parts[i]
-        if dir_exists(direct):
+        if _driver_snapshot_dir_exists_v1(direct):
             current = direct
         else:
             match _driver_numbered_child_dir(current, parts[i]):
@@ -1102,7 +1139,7 @@ pub fn _driver_try_numbered_entry_import_rel_checked_v1(root: text, rel: text) -
         spl_exists = _driver_resolver_path_exists_v1(spl_path)
     if spl_exists: return SourceRootResolutionV1.Found(spl_path)
     var module_dir = base
-    if not dir_exists(module_dir):
+    if not _driver_snapshot_dir_exists_v1(module_dir):
         match _driver_numbered_child_dir(current, parts[parts.len() - 1]):
             case SourceRootResolutionV1.Found(path): module_dir = path
             case SourceRootResolutionV1.Missing: return SourceRootResolutionV1.Missing
@@ -1687,7 +1724,7 @@ fn _driver_file_natively_owns_v1(path: text, module_name: text) -> bool:
     # The scan publishes content/import/sibling caches. Complete it before
     # owning scratch; these process-retained values must outlive this lookup.
     val (content, _, _, _) = _driver_cached_entry_source_scan(path)
-    if content == "":
+    if content == "" and not driver_snapshot_active_v1():
         eprint("[explicit-source] empty content path={path}")
         return false
     val _platform = host_is_windows_host()
@@ -1885,7 +1922,7 @@ pub fn _driver_collect_explicit_compiler_source(p: text) -> [SourceFile]:
         eprint("[explicit-source] rejected non-spl path={p}")
         return []
     val (content, _, _, _) = _driver_cached_entry_source_scan(p)
-    if content == "":
+    if content == "" and not driver_snapshot_active_v1():
         eprint("[explicit-source] empty content path={p}")
         return []
     val aliases = _driver_module_aliases_with_closure(
@@ -1897,6 +1934,9 @@ pub fn _driver_collect_explicit_compiler_source(p: text) -> [SourceFile]:
 pub fn _driver_collect_frozen_compiler_source_v1(
     path: text, expected_digest: text, expected_bytes: i64
 ) -> Result<[SourceFile], text>:
+    if driver_snapshot_active_v1():
+        driver_snapshot_reject_v1("snapshot-frozen-inventory-route-unsupported")
+        return Err("snapshot-frozen-inventory-route-unsupported")
     # The full-inventory cold route cannot use the scanner's following read:
     # it must prove the exact no-follow frozen bytes selected by SCV.
     if not path.ends_with(".spl") or expected_digest.len() != 64 or
@@ -1956,7 +1996,7 @@ fn _driver_collect_entry_import_source_untimed(
     if normalized.contains("/test/") or normalized.contains("/tests/") or normalized.contains("/testdata/") or is_repository_doc or normalized.contains("/verification/"):
         return result
     val (content, _, _, _) = _driver_cached_entry_source_scan(p)
-    if content == "":
+    if content == "" and not driver_snapshot_active_v1():
         return result
     _driver_module_aliases_with_closure(
         p, content, _driver_module_name_from_path(p), entry_closure)
@@ -1987,12 +2027,12 @@ fn _driver_bulk_source_candidate_allowed(path: text) -> bool:
 
 fn _driver_load_bulk_source_file(path: text, native_entry_active: bool) -> [SourceFile]:
     var content = ""
-    if native_entry_active or driver_admitted_epoch_active_v1():
+    if native_entry_active or driver_admitted_epoch_active_v1() or driver_snapshot_active_v1():
         val (cached_content, _, _, _) = _driver_cached_entry_source_scan(path)
         content = cached_content
     else:
         content = file_read_nullable(path) ?? ""
-    if content == "":
+    if content == "" and not driver_snapshot_active_v1():
         return []
     _driver_module_aliases(path, content, _driver_module_name_from_path(path))
 
@@ -2050,14 +2090,14 @@ pub fn _driver_collect_sources(p: text) -> [SourceFile]:
         var content = ""
         var native_entry = ""
         native_entry = sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
-        if native_entry != "" or driver_admitted_epoch_active_v1():
+        if native_entry != "" or driver_admitted_epoch_active_v1() or driver_snapshot_active_v1():
             val (cached_content, _, _, _) = _driver_cached_entry_source_scan(p)
             content = cached_content
         else:
             content = file_read_nullable(p) ?? ""
         if _driver_source_trace_enabled():
             print "[collect_sources] content_len {content.len()}"
-        if content != "":
+        if content != "" or driver_snapshot_active_v1():
             val module_name = _driver_module_name_from_path(p)
             val aliases = _driver_module_aliases(p, content, module_name)
             if _driver_source_trace_enabled():

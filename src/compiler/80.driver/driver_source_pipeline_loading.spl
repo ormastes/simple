@@ -1,3 +1,4 @@
+use compiler.driver.driver_snapshot_provider.{driver_snapshot_active_v1, driver_snapshot_read_v1, driver_snapshot_reject_v1}
 # CompilerDriver phase-1 source loading.
 #
 # The main driver retains parsing, HIR, and later compilation phases.
@@ -116,6 +117,10 @@ extern fn rt_hash_text(data: text) -> i64
 
 @always_inline
 fn _pipeline_source_read_raw(path: text) -> text?:
+    if driver_snapshot_active_v1():
+        match driver_snapshot_read_v1(path):
+            case Ok(content): return Some(content)
+            case Err(_): return nil
     if driver_admitted_epoch_active_v1():
         val (content, _, _, _) = _driver_cached_entry_source_scan(path)
         if driver_admitted_epoch_error_v1() != "": return nil
@@ -194,6 +199,9 @@ impl CompilerDriver:
         true
 
     me parse_bootstrap_default_root(root: text) -> bool:
+        if driver_snapshot_active_v1():
+            driver_snapshot_reject_v1("snapshot-bootstrap-default-route-unsupported")
+            return false
         if root.ends_with(".spl"):
             return self.parse_bootstrap_default_file(root)
         val cmd = "find {root} -type f -name '*.spl' 2>/dev/null"
@@ -211,6 +219,10 @@ impl CompilerDriver:
         true
 
     me load_sources_impl(preclosed: NativeEntryClosureRequestV1? = nil) -> (CompileContext, bool):
+        if driver_snapshot_active_v1() and (preclosed != nil or self.ctx.options.mode != CompileMode.Check or
+                self.ctx.runtime_std_full_inventory_selection != nil):
+            driver_snapshot_reject_v1("snapshot-alternate-source-inventory-unsupported")
+            return (self.ctx, false)
         val library_error = library_mode_options_error_v1(self.ctx.options.library_mode,
             self.ctx.options.gc_off, self.ctx.options.allowed_families)
         if library_error != "":
@@ -840,6 +852,9 @@ impl CompilerDriver:
             log_phase(
                 "phase1:load_sources:input:start index={i} path={input_path}")
             if input_path.starts_with("simple-summary://"):
+                if driver_snapshot_active_v1():
+                    driver_snapshot_reject_v1("snapshot-virtual-summary-route-unsupported")
+                    return (self.ctx, false)
                 val virtual = compiler_virtual_source_read_registered_v1(input_path, 65536)
                 if virtual.status == VirtualSourceRegistrationStatusV1.Unavailable:
                     self.ctx.add_error("virtual summary cache unavailable for '{input_path}'")

@@ -1,0 +1,91 @@
+# Executable source obligations; admitted runtime execution remains NOT_RUN.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.common.diagnostics.source_analysis_v1.*
+use compiler.driver.driver_snapshot_provider.*
+use compiler.driver.driver_entry_closure_core.{_driver_try_numbered_entry_import_rel_checked_v1}
+use compiler.common.source_root_resolution.{SourceRootResolutionV1}
+
+fn snapshot_request_v1(source: text) -> SourceAnalysisRequestV1:
+    SourceAnalysisRequestV1(run_id: "run", workspace_root: "/workspace", workspace_identity: "workspace",
+        owner_id: "editor", lifetime_generation: 1, entry_path: "/workspace/new/main.spl",
+        documents: [SourceAnalysisDocumentV1(path: "/workspace/new/main.spl", uri: "file:///workspace/new/main.spl",
+            version: 7, source: source, digest: sha256_text(source))],
+        environment: SourceAnalysisEnvironmentV1(compiler_identity: "compiler", target: "", features: [], config_digest: "config"),
+        bounds: SourceAnalysisBoundsV1())
+
+describe "immutable canonical source provider":
+    it "reads an unsaved entry without requiring a disk file":
+        val owner = driver_snapshot_provider_admit_v1(snapshot_request_v1("val value = 9\n")).unwrap()
+        expect(owner.read("/workspace/new/main.spl").unwrap()).to_equal("val value = 9\n")
+        expect(owner.dependencies.len()).to_equal(1)
+        expect(owner.dependencies[0].origin).to_equal("overlay")
+        expect(owner.dependencies[0].document_version).to_equal(7)
+        expect(owner.dependencies[0].digest).to_equal(sha256_text("val value = 9\n"))
+        expect(owner.read("new/main.spl").unwrap()).to_equal("val value = 9\n")
+        expect(owner.dependencies.len()).to_equal(1)
+
+    it "rejects supplied digest authority and duplicate documents":
+        var request = snapshot_request_v1("val value = 1\n")
+        var document = request.documents[0]
+        document.digest = sha256_text("different bytes")
+        request.documents = [document]
+        expect(driver_snapshot_provider_admit_v1(request).is_err()).to_equal(true)
+        request = snapshot_request_v1("")
+        request.documents = [request.documents[0], request.documents[0]]
+        expect(driver_snapshot_provider_admit_v1(request).is_err()).to_equal(true)
+
+    it "rejects traversal and bounded dependency work exhaustion":
+        var request = snapshot_request_v1("")
+        request.bounds.max_source_reads = 1
+        val owner = driver_snapshot_provider_admit_v1(request).unwrap()
+        expect(owner.read("new/main.spl").unwrap()).to_equal("")
+        expect(owner.read("new/main.spl").is_err()).to_equal(true)
+        expect(owner.failure).to_equal("source-read-work-limit")
+        val other = driver_snapshot_provider_admit_v1(snapshot_request_v1("")).unwrap()
+        expect(other.read("../outside.spl").is_err()).to_equal(true)
+        expect(other.dependencies.len()).to_equal(0)
+
+    it "makes missing overlay directories visible and clears owner authority":
+        val owner = driver_snapshot_provider_admit_v1(snapshot_request_v1("")).unwrap()
+        expect(driver_snapshot_install_v1(owner)).to_equal(true)
+        val declared = driver_snapshot_declares_v1("/workspace/new/main.spl")
+        val directory = driver_snapshot_directory_v1("/workspace/new")
+        val overlap = driver_snapshot_install_v1(owner)
+        driver_snapshot_remove_v1()
+        expect(declared).to_equal(true)
+        expect(directory).to_equal(true)
+        expect(overlap).to_equal(false)
+        expect(driver_snapshot_active_v1()).to_equal(false)
+        expect(driver_snapshot_read_v1("/workspace/new/main.spl").is_err()).to_equal(true)
+
+    it "binds lifetime versions bytes and environment to distinct request identities":
+        val original = snapshot_request_v1("val value = 1\n")
+        var reopened = original
+        reopened.lifetime_generation = 2
+        expect(source_analysis_request_digest_v1(original) == source_analysis_request_digest_v1(reopened)).to_equal(false)
+        var changed = snapshot_request_v1("val value = 2\n")
+        expect(source_analysis_request_digest_v1(original) == source_analysis_request_digest_v1(changed)).to_equal(false)
+        changed = original
+        changed.environment.target = "different-target"
+        expect(source_analysis_request_digest_v1(original) == source_analysis_request_digest_v1(changed)).to_equal(false)
+
+    it "refuses caller increases above the hard dependency maxima":
+        var request = snapshot_request_v1("")
+        request.bounds.max_dependency_bytes = 67108865
+        expect(driver_snapshot_provider_admit_v1(request).is_err()).to_equal(true)
+
+    it "resolves a virtual numbered import directory without unbounded disk listing":
+        var request = snapshot_request_v1("")
+        val path = "/workspace/55.foo/bar.spl"
+        request.documents.push(SourceAnalysisDocumentV1(path: path, uri: "file://" + path,
+            version: 1, source: "", digest: sha256_text("")))
+        val owner = driver_snapshot_provider_admit_v1(request).unwrap()
+        expect(driver_snapshot_install_v1(owner)).to_equal(true)
+        val resolved = _driver_try_numbered_entry_import_rel_checked_v1("/workspace", "foo/bar")
+        driver_snapshot_remove_v1()
+        val actual = match resolved:
+            case SourceRootResolutionV1.Found(found): found
+            case _: "unresolved"
+        expect(actual).to_equal(path)
+        expect(owner.reads).to_be_less_than(8193)

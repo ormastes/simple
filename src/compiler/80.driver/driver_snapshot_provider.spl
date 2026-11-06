@@ -1,0 +1,186 @@
+# Serial check-worker source owner. Only admitted bytes can reach canonical
+# parsing while this owner is active; a disk dependency is frozen on first read.
+use std.common.diagnostics.source_analysis_v1.*
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_identity_same}
+
+class DriverSnapshotProviderV1:
+    request: SourceAnalysisRequestV1
+    contents: Dict<text, text>
+    digests: Dict<text, text>
+    documents: Dict<text, SourceAnalysisDocumentV1>
+    dependencies: [SourceAnalysisDependencyV1]
+    consumed: Dict<text, bool>
+    directories: Dict<text, bool>
+    dependency_bytes: i64
+    reads: i64
+    failure: text
+
+    me reject(reason: text):
+        if self.failure == "": self.failure = reason
+
+    fn path_key(path: text) -> text:
+        if path.byte_len() > 4096 or path.contains("\0"): return ""
+        var candidate = path
+        if candidate.starts_with("./"): candidate = candidate.substring(2)
+        if not candidate.starts_with("/"):
+            candidate = self.request.workspace_root + "/" + candidate
+        if (candidate.byte_len() > 4096 or candidate.contains("\\") or
+                candidate.contains("/../") or candidate.contains("/./") or
+                candidate.contains("//") or candidate.ends_with("/..") or
+                not candidate.starts_with(self.request.workspace_root + "/")):
+            return ""
+        candidate
+
+    me read(path: text) -> Result<text, text>:
+        if self.failure != "": return Err(self.failure)
+        if self.reads >= self.request.bounds.max_source_reads:
+            self.reject("source-read-work-limit")
+            return Err(self.failure)
+        self.reads = self.reads + 1
+        val key = self.path_key(path)
+        if key == "":
+            self.reject("source-path-outside-snapshot")
+            return Err(self.failure)
+        if self.consumed.contains_key(key): return Ok(self.contents[key])
+        if self.dependencies.len() >= self.request.bounds.max_dependency_files:
+            self.reject("dependency-file-limit")
+            return Err(self.failure)
+        var content = ""
+        var origin = "disk"
+        var version: i64 = -1
+        if self.documents.contains_key(key):
+            val document = self.documents[key]
+            content = document.source
+            origin = "overlay"
+            version = document.version
+        else:
+            val before = path_final_existing(key)
+            if before.is_err() or before.unwrap().path != key:
+                self.reject("dependency-path-alias-unsupported:" + key)
+                return Err(self.failure)
+            match file_read_regular_no_follow_bounded(key, self.request.bounds.max_dependency_file_bytes):
+                case Err(_):
+                    self.reject("dependency-read-failed:" + key)
+                    return Err(self.failure)
+                case Ok(value): content = value
+            val after = path_final_existing(key)
+            if after.is_err() or not path_identity_same(before.unwrap(), after.unwrap()):
+                self.reject("dependency-path-identity-changed:" + key)
+                return Err(self.failure)
+        val bytes = content.byte_len()
+        if bytes > self.request.bounds.max_dependency_bytes - self.dependency_bytes:
+            self.reject("dependency-byte-limit")
+            return Err(self.failure)
+        self.dependency_bytes = self.dependency_bytes + bytes
+        self.contents[key] = content
+        self.consumed[key] = true
+        self.digests[key] = sha256_text(content)
+        self.dependencies.push(SourceAnalysisDependencyV1(path: key,
+            digest: self.digests[key], byte_count: bytes, origin: origin,
+            document_version: version))
+        Ok(content)
+
+pub fn driver_snapshot_provider_admit_v1(request: SourceAnalysisRequestV1) -> Result<DriverSnapshotProviderV1, text>:
+    if (request.run_id == "" or request.owner_id == "" or request.workspace_identity == "" or
+            request.lifetime_generation < 0 or not request.workspace_root.starts_with("/") or
+            request.workspace_root.ends_with("/") or request.documents.len() > 256):
+        return Err("snapshot-request-invalid")
+    for value in [request.run_id, request.owner_id, request.workspace_identity,
+            request.workspace_root, request.entry_path, request.environment.compiler_identity,
+            request.environment.config_digest, request.environment.target]:
+        if value.byte_len() > 4096 or value.contains("\0"):
+            return Err("snapshot-metadata-limit")
+    if request.environment.features.len() > 64: return Err("snapshot-feature-limit")
+    for feature in request.environment.features:
+        if feature.byte_len() > 256: return Err("snapshot-feature-limit")
+    val bounds = request.bounds
+    if (bounds.max_dependency_files < 1 or bounds.max_dependency_files > 4096 or
+            bounds.max_dependency_bytes < 1 or bounds.max_dependency_bytes > 67108864 or
+            bounds.max_dependency_file_bytes < 1 or bounds.max_dependency_file_bytes > 1048576 or
+            bounds.max_source_reads < 1 or bounds.max_source_reads > 8192 or
+            bounds.max_diagnostics < 1 or bounds.max_diagnostics > 4096):
+        return Err("snapshot-bounds-invalid")
+    var owner = DriverSnapshotProviderV1(request: request, contents: {}, digests: {}, documents: {},
+        dependencies: [], consumed: {}, directories: {}, dependency_bytes: 0, reads: 0, failure: "")
+    var total: i64 = 0
+    var directory_metadata: i64 = 0
+    for document in request.documents:
+        val key = owner.path_key(document.path)
+        val bytes = document.source.byte_len()
+        if (key == "" or key != document.path or document.uri == "" or
+                document.uri.byte_len() > 4096 or document.uri.contains("\0") or
+                document.digest.byte_len() != 64 or document.version < 0 or owner.documents.contains_key(key) or
+                bytes > 1048576 or bytes > 16777216 - total or
+                document.digest != sha256_text(document.source)):
+            return Err("snapshot-document-invalid")
+        val physical = path_final_existing(key)
+        if physical.is_ok() and physical.unwrap().path != key:
+            return Err("overlay-path-alias-unsupported")
+        total = total + bytes
+        owner.documents[key] = document
+        var parent = ""
+        val components = key.split("/")
+        if components.len() > 64: return Err("overlay-path-depth-limit")
+        var component_index = 1
+        while component_index < components.len() - 1:
+            parent = parent + "/" + components[component_index]
+            if not owner.directories.contains_key(parent):
+                directory_metadata = directory_metadata + parent.byte_len() + 64
+                if directory_metadata > 1048576: return Err("overlay-directory-metadata-limit")
+                owner.directories[parent] = true
+            component_index = component_index + 1
+    if owner.path_key(request.entry_path) != request.entry_path:
+        return Err("snapshot-entry-invalid")
+    Ok(owner)
+
+var _snapshot_provider_v1: DriverSnapshotProviderV1? = nil
+
+pub fn driver_snapshot_active_v1() -> bool:
+    _snapshot_provider_v1 != nil
+
+pub fn driver_snapshot_install_v1(owner: DriverSnapshotProviderV1) -> bool:
+    if driver_snapshot_active_v1(): return false
+    _snapshot_provider_v1 = Some(owner)
+    true
+
+pub fn driver_snapshot_remove_v1():
+    _snapshot_provider_v1 = nil
+
+pub fn driver_snapshot_read_v1(path: text) -> Result<text, text>:
+    if val owner = _snapshot_provider_v1: return owner.read(path)
+    Err("snapshot-owner-unavailable")
+
+pub fn driver_snapshot_declares_v1(path: text) -> bool:
+    if val owner = _snapshot_provider_v1:
+        val key = owner.path_key(path)
+        return owner.documents.contains_key(key) or owner.consumed.contains_key(key)
+    false
+
+pub fn driver_snapshot_reject_v1(reason: text):
+    if val owner = _snapshot_provider_v1: owner.reject(reason)
+
+export DriverSnapshotProviderV1, driver_snapshot_provider_admit_v1
+export driver_snapshot_active_v1, driver_snapshot_install_v1, driver_snapshot_remove_v1
+export driver_snapshot_read_v1, driver_snapshot_declares_v1, driver_snapshot_reject_v1
+
+pub fn driver_snapshot_directory_v1(path: text) -> bool:
+    if val owner = _snapshot_provider_v1:
+        if path == owner.request.workspace_root or path == ".": return true
+        val key = owner.path_key(path)
+        return owner.directories.contains_key(key)
+    false
+
+export driver_snapshot_directory_v1
+
+pub fn driver_snapshot_allow_probe_v1() -> bool:
+    if val owner = _snapshot_provider_v1:
+        if owner.failure != "": return false
+        if owner.reads >= owner.request.bounds.max_source_reads:
+            owner.reject("source-resolution-work-limit")
+            return false
+        owner.reads = owner.reads + 1
+    true
+
+export driver_snapshot_allow_probe_v1

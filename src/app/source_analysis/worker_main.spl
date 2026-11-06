@@ -1,0 +1,61 @@
+# Internal compiled worker protocol: exactly one complete private SDN artifact.
+# Compiler diagnostics remain original DiagnosticV1 records in the explicit
+# diagnostics_json field of the SDN envelope. stdout/stderr are logs only.
+use std.nogc_sync_mut.io.pipe.{Stdin}
+use std.nogc_sync_mut.io.external_text_io.{io_text_decode}
+use std.common.encoding.external_text.{utf8_format}
+use std.common.diagnostics.source_analysis_wire_v1.{source_analysis_request_decode_v1}
+use compiler.driver.driver_source_analysis_v1.{check_snapshot_set_v1, source_analysis_current_environment_v1}
+use compiler.driver.driver_source_analysis_wire_v1.{source_analysis_result_sdn_v1, source_analysis_environment_sdn_v1}
+use std.nogc_sync_mut.lsp.lsp_analysis_worker_artifact.{source_analysis_artifact_open_v1}
+
+pub fn source_analysis_worker_read_v1() -> Result<text, text>:
+    val input = Stdin.new()
+    var bytes: [u8] = []
+    while true:
+        # Read one extra byte at the boundary to distinguish exact-size EOF
+        # from oversized input. Never use the unbounded read_all operation.
+        var count = 16385 - bytes.len()
+        if count > 4096: count = 4096
+        val read = input.read(count)
+        if read.is_err(): return Err("snapshot stdin read failed")
+        val chunk = read.unwrap()
+        if chunk.len() == 0: break
+        for byte in chunk: bytes.push(byte)
+        if bytes.len() > 16384: return Err("snapshot control stdin exceeds limit")
+    match io_text_decode(bytes, utf8_format()):
+        case Ok(value): Ok(value)
+        case Err(_): Err("snapshot stdin is not UTF-8")
+
+fn source_analysis_worker_response_v1(args: [text], request: text) -> Result<text, text>:
+    if args.len() == 2 and args[0] == "__source-analysis-environment-v1":
+        if request != "": return Err("environment_request_must_be_empty")
+        val environment = source_analysis_current_environment_v1(args[1])?
+        return source_analysis_environment_sdn_v1(environment)
+    val decoded = source_analysis_request_decode_v1(request)?
+    val result = check_snapshot_set_v1(decoded)
+    source_analysis_result_sdn_v1(result)
+
+pub fn run_source_analysis_worker_v1(args: [text]) -> i64:
+    val environment_mode = args.len() == 2 and args[0] == "__source-analysis-environment-v1"
+    val analysis_mode = args.len() == 1 and args[0] == "__source-analysis-worker-v1"
+    if not environment_mode and not analysis_mode: return 2
+    val control = source_analysis_worker_read_v1()
+    if control.is_err(): return 2
+    val opened = source_analysis_artifact_open_v1(control.unwrap())
+    if opened.is_err(): return 2
+    var artifact = opened.unwrap()
+    val request = artifact.request()
+    if request.is_err():
+        val closed = artifact.close_pins()
+        return 2
+    val response = source_analysis_worker_response_v1(args, request.unwrap())
+    if response.is_err():
+        val closed = artifact.close_pins()
+        return 3
+    # Only the fixed leaf in the validated parent-owned directory can be
+    # published. Arbitrary CLI output paths and replacement writes are absent.
+    val published = artifact.publish("response.sdn", response.unwrap(), 4194304)
+    val closed = artifact.close_pins()
+    if not published or not closed: return 4
+    0

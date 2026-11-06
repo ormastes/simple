@@ -1,3 +1,4 @@
+use compiler.driver.driver_snapshot_provider.{DriverSnapshotProviderV1}
 # Driver Types - heavyweight driver-only types and context wiring.
 #
 # Lightweight public types now live in driver_core_types.spl so external
@@ -6,6 +7,7 @@
 
 export use compiler.common.driver_core_types.*
 use compiler.common.driver_compile_options.{CompileOptions}
+use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1}
 use compiler.common.assurance.representation_context_v1.{RepresentationSourceContextV1, representation_contexts_identity_v1}
 use compiler.driver.native_aot_artifacts.{native_aot_object_path_v1}
 use compiler.driver.cache.native_object_source_key_v1.{native_object_source_key_v1}
@@ -401,6 +403,7 @@ class CompileContext:
     backend: BackendPort       # Typed port: visible contract, replaces extensions.resolve("Backend")
     extensions: DiContainer    # Dynamic extension point for plugins (Feature 5)
     logger: BootLogger
+    source_snapshot_provider_v1: DriverSnapshotProviderV1? = nil
     sources: [SourceFile]
     # Scalar owner projection of sources. Native value-record lowering can
     # invalidate SourceFile field handles across transient parser scopes; these
@@ -499,6 +502,17 @@ class CompileContext:
     bootstrap_entry_mir_name: text
     errors: [text]
     error_count_value: i64
+    # Original producer records; legacy text remains the CLI compatibility view.
+    structured_diagnostics_v1: [DiagnosticV1]
+    structured_error_count_v1: i64
+    structured_warning_count_v1: i64
+    unstructured_diagnostic_count_v1: i64
+    structured_diagnostic_capture_invalid_v1: bool
+    structured_collection_enabled_v1: bool
+    structured_parser_sources_v1: [text]
+    structured_typecheck_started_v1: bool
+    structured_typecheck_expected_v1: [text]
+    structured_typecheck_completed_v1: [text]
     warnings: [text]
     visibility_warnings: [text]  # Visibility warnings (W0401)
     # Modules whose own diagnostics made their lowered aggregate unusable.
@@ -724,6 +738,16 @@ class CompileContext:
             bootstrap_entry_mir_name: "",
             errors: [],
             error_count_value: 0,
+            structured_diagnostics_v1: [],
+            structured_error_count_v1: 0,
+            structured_warning_count_v1: 0,
+            unstructured_diagnostic_count_v1: 0,
+            structured_diagnostic_capture_invalid_v1: false,
+            structured_collection_enabled_v1: false,
+            structured_parser_sources_v1: [],
+            structured_typecheck_started_v1: false,
+            structured_typecheck_expected_v1: [],
+            structured_typecheck_completed_v1: [],
             warnings: [],
             visibility_warnings: [],
             poisoned_modules: [],
@@ -1259,12 +1283,67 @@ class CompileContext:
             eprint("[first-compile-error] {message}")
         self.errors.push(message)
         self.error_count_value = self.error_count_value + 1
+        self.unstructured_diagnostic_count_v1 = self.unstructured_diagnostic_count_v1 + 1
 
     me add_warning(message: text):
         self.warnings.push(message)
+        self.unstructured_diagnostic_count_v1 = self.unstructured_diagnostic_count_v1 + 1
 
     me add_visibility_warning(message: text):
         self.visibility_warnings.push(message)
+        self.unstructured_diagnostic_count_v1 = self.unstructured_diagnostic_count_v1 + 1
+
+    me capture_diagnostics_v1(records: [DiagnosticV1], covered_errors: i64,
+            covered_warnings: i64):
+        if not self.structured_collection_enabled_v1: return
+        # Coverage counts describe existing compatibility entries, not fabricated
+        # diagnostics. A parser may emit several records for one module error.
+        var errors = 0
+        var warnings = 0
+        for record in records:
+            if record.severity.is_error(): errors = errors + 1
+            if record.severity.is_warning(): warnings = warnings + 1
+        if covered_errors < 0 or covered_warnings < 0 or covered_errors > errors or covered_warnings > warnings or records.len() > 8192 - self.structured_diagnostics_v1.len():
+            self.structured_diagnostic_capture_invalid_v1 = true
+            return
+        for record in records: self.structured_diagnostics_v1.push(record)
+        self.structured_error_count_v1 = self.structured_error_count_v1 + covered_errors
+        self.structured_warning_count_v1 = self.structured_warning_count_v1 + covered_warnings
+        val covered = covered_errors + covered_warnings
+        if covered <= self.unstructured_diagnostic_count_v1:
+            self.unstructured_diagnostic_count_v1 = self.unstructured_diagnostic_count_v1 - covered
+        else:
+            # Direct legacy array pushes do not increment the scalar. Final
+            # comparison below still requires exact compatibility-array totals.
+            self.unstructured_diagnostic_count_v1 = 0
+
+    fn diagnostic_record_coverage_complete_v1() -> bool:
+        not self.structured_diagnostic_capture_invalid_v1 and
+            self.unstructured_diagnostic_count_v1 == 0 and
+            self.errors.len() == self.error_count_value and
+            self.structured_error_count_v1 == self.error_count_value and
+            self.structured_warning_count_v1 == self.warnings.len() + self.visibility_warnings.len()
+
+    me begin_structured_collection_v1():
+        # The snapshot API enables collection before canonical source admission.
+        # Completion still requires actual parser and HM producer receipts.
+        self.structured_collection_enabled_v1 = true
+
+    me record_parser_diagnostic_producer_v1(source_path: text):
+        if self.structured_collection_enabled_v1 and not self.structured_parser_sources_v1.contains(source_path):
+            self.structured_parser_sources_v1.push(source_path)
+
+    fn source_analysis_diagnostics_collected_v1(require_typecheck: bool = true) -> bool:
+        if not self.structured_collection_enabled_v1 or not self.diagnostic_record_coverage_complete_v1(): return false
+        if self.source_paths_owner.len() == 0: return false
+        for path in self.source_paths_owner:
+            if not self.structured_parser_sources_v1.contains(path): return false
+        if require_typecheck:
+            if not self.structured_typecheck_started_v1: return false
+            if self.structured_typecheck_expected_v1.len() != self.structured_typecheck_completed_v1.len(): return false
+            for identity in self.structured_typecheck_expected_v1:
+                if not self.structured_typecheck_completed_v1.contains(identity): return false
+        true
 
     fn has_errors() -> bool:
         self.error_count_value > 0

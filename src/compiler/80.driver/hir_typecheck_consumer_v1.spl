@@ -6,6 +6,9 @@ use compiler.types.type_infer_types.{HmInferContext, TypeInferError}
 use compiler.hir.hir.{HirType, HirTypeKind}
 use compiler.types.type_infer.*
 use compiler.types.type_infer.format_error.{format_type_infer_error_v1}
+use compiler.types.type_infer.diagnostic_v1.{type_infer_diagnostic_v1, type_diagnostic_location_v1}
+use compiler.common.diagnostics.diagnostic_v1.{DiagnosticV1}
+use compiler.common.diagnostics.severity.{Severity}
 use compiler.semantics.visibility_integration.{check_module_visibility}
 use compiler.semantics.lint.hir_frontend_diagnostics.{run_hir_frontend_diagnostics, frontend_diag_enabled}
 use compiler.types.cfg_decl_check.{cfg_decl_check_module}
@@ -17,6 +20,10 @@ struct HirTypecheckReceiptV1:
     messages: [text]
     warnings: [text]
     errors: [text]
+    diagnostics: [DiagnosticV1] = []
+    captured_errors: i64 = 0
+    captured_warnings: i64 = 0
+    producer_identity: text = ""
     # Retained path only; archive leases keep their existing diagnostic payload.
     # Owned flat observations, never HIR/type/symbol roots or admission evidence.
     api_signatures: ApiSignatureFactsV1? = nil
@@ -70,6 +77,13 @@ pub fn collect_module_typecheck_receipt_v1(
     var warnings: [text] = []
     var errors: [text] = []
     var out: [text] = []
+    var diagnostics: [DiagnosticV1] = []
+    var captured_errors = 0
+    var captured_warnings = 0
+    val diagnostic_severity = match severity:
+        case TypecheckPassSeverity.Advisory: Severity.Info
+        case TypecheckPassSeverity.Warn: Severity.Warning
+        case TypecheckPassSeverity.Deny: Severity.Error
     # Type inference diagnostics (unification / occurs-check / mismatch),
     # including declared-vs-actual return type mismatches.
     var ictx = HmInferContext.with_builtins()
@@ -91,11 +105,17 @@ pub fn collect_module_typecheck_receipt_v1(
                 "|||HELP:a function value cannot be passed where a data value is expected; call it, or check placeholder `_1` scoping"
             out = out.push(fmsg)
             errors.push(fmsg)
+            var diagnostic = type_infer_diagnostic_v1(ierr, m.path, Severity.Error)
+            diagnostic.code = "E-TYPE-FN-VALUE"
+            diagnostic = diagnostic.with_help("a function value cannot be passed where a data value is expected; call it, or check placeholder `_1` scoping")
+            diagnostics.push(diagnostic)
+            captured_errors = captured_errors + 1
             e_idx = e_idx + 1
             continue
         val msg = "[typecheck] {name}: " +
             format_type_infer_error_v1(ierr)
         out = out.push(msg)
+        diagnostics.push(type_infer_diagnostic_v1(ierr, m.path, diagnostic_severity))
         # E-TYPE-NIL-COMPARE rides this list at the pass's own severity:
         # a non-optional-vs-nil comparison was a unification ERROR here
         # before the rule named it, so under Deny it stays an error (an
@@ -105,8 +125,10 @@ pub fn collect_module_typecheck_receipt_v1(
                 val _ = 0
             case TypecheckPassSeverity.Warn:
                 warnings.push(msg)
+                captured_warnings = captured_warnings + 1
             case TypecheckPassSeverity.Deny:
                 errors.push(msg)
+                captured_errors = captured_errors + 1
         e_idx = e_idx + 1
     # HIR frontend rules (MEXH007/008/009, W-HIR-INFER-00x): read-only over
     # the lowered module, always warn-first -> never add_error.
@@ -115,11 +137,20 @@ pub fn collect_module_typecheck_receipt_v1(
         for finding in run_hir_frontend_diagnostics(m):
             val fmsg = "[frontend {finding.code}] {name}: {finding.line}:{finding.col}: in `{finding.function_name}`: {finding.message}"
             out = out.push(fmsg)
+            val level = if severity == TypecheckPassSeverity.Advisory: Severity.Info else: Severity.Warning
+            var diagnostic = DiagnosticV1.new(level, finding.code, finding.message)
+            if val at = finding.span:
+                diagnostic = type_diagnostic_location_v1(diagnostic, m.path, at)
+            elif m.path != "":
+                diagnostic.file = Some(m.path)
+            diagnostic = diagnostic.with_note("in function `" + finding.function_name + "`")
+            diagnostics.push(diagnostic)
             match severity:
                 case TypecheckPassSeverity.Advisory:
                     val _ = 0
                 case _:
                     warnings.push(fmsg)
+                    captured_warnings = captured_warnings + 1
     # Visibility diagnostics (cross-module private/friend/package access).
     val vwarnings = check_module_visibility(m, name)
     var v_idx = 0
@@ -127,13 +158,16 @@ pub fn collect_module_typecheck_receipt_v1(
         val vw = vwarnings[v_idx]
         val vmsg = "[visibility {vw.code}] {name}: {vw.message}"
         out = out.push(vmsg)
+        diagnostics.push(type_diagnostic_location_v1(DiagnosticV1.new(diagnostic_severity, vw.code, vw.message), m.path, vw.span))
         match severity:
             case TypecheckPassSeverity.Advisory:
                 val _ = 0
             case TypecheckPassSeverity.Warn:
                 warnings.push(vmsg)
+                captured_warnings = captured_warnings + 1
             case TypecheckPassSeverity.Deny:
                 errors.push(vmsg)
+                captured_errors = captured_errors + 1
         v_idx = v_idx + 1
     # Decl-level @cfg coherence (E-CFG-*): real errors at every severity, since
     # an overlapping or non-exhaustive guarded declaration is ill-formed, not
@@ -143,4 +177,5 @@ pub fn collect_module_typecheck_receipt_v1(
         out = out.push(cmsg)
         errors.push(cmsg)
     HirTypecheckReceiptV1(messages: out, warnings: warnings, errors: errors,
-        api_signatures: signature_facts)
+        api_signatures: signature_facts, diagnostics: diagnostics,
+        captured_errors: captured_errors, captured_warnings: captured_warnings, producer_identity: name)

@@ -101,7 +101,7 @@ EXCLUDE_RE='^(ast_reset_seq|par_prof_enabled_cached|par_initialization_generatio
 # plus the three names parse_module_body clears inline at its own top.
 # Names are matched case-INSENSITIVELY: EXTEND_TARGETS is uppercase, and the
 # original lowercase-only regex is exactly why it was missed.
-RESET_FNS='reset_all_pools|ast_reset|decl_metadata_pools_reset|macro_facts_reset|stmt_reset|expr_reset|parser_init_with_path|parser_reset_extend_enums|parser_reset_pending_vhdl_decorators|parser_reset_pending_sffi|lock_level_metadata_reset'
+RESET_FNS='reset_all_pools|ast_reset|decl_metadata_pools_reset|macro_facts_reset|stmt_reset|expr_reset|parser_init_with_path|parser_diagnostic_source_set_v1|parser_reset_extend_enums|parser_reset_pending_vhdl_decorators|parser_reset_pending_sffi|lock_level_metadata_reset'
 
 # Cleared inline at the top of parse_module_body rather than in a named reset
 # function, so the body scan below cannot find them generically.
@@ -118,6 +118,10 @@ extract_pools() {
         if [ "$#" -gt 0 ]; then
             awk -v fns="$RESET_FNS" '
                 FNR == 1 { inbody = 0 }
+                # ParserState owns the formerly module-global par_* pools.
+                # Only the exact canonical owner at an expression boundary is
+                # normalized; other_state.field remains outside this rule.
+                { gsub(/\(par_state\./, "("); gsub(/[ \t]par_state\./, " "); sub(/^par_state\./, "") }
                 /^(pub )?fn [a-zA-Z_0-9]+\(/ {
                     inbody = 0
                     name = $0
@@ -154,6 +158,10 @@ extract_inplace_pools() {
     [ "$#" -gt 0 ] || return 0
     awk -v fns="$RESET_FNS" '
             FNR == 1 { inbody = 0 }
+                # ParserState owns the formerly module-global par_* pools.
+                # Only the exact canonical owner at an expression boundary is
+                # normalized; other_state.field remains outside this rule.
+                { gsub(/\(par_state\./, "("); gsub(/[ \t]par_state\./, " "); sub(/^par_state\./, "") }
             /^(pub )?fn [a-zA-Z_0-9]+\(/ {
                 inbody = 0
                 name = $0
@@ -185,6 +193,10 @@ extract_codec_assignments() {
     [ "$#" -gt 0 ] || return 0
     awk '
             FNR == 1 { inbody = 0 }
+                # ParserState owns the formerly module-global par_* pools.
+                # Only the exact canonical owner at an expression boundary is
+                # normalized; other_state.field remains outside this rule.
+                { gsub(/\(par_state\./, "("); gsub(/[ \t]par_state\./, " "); sub(/^par_state\./, "") }
             /^(pub )?fn [a-zA-Z_0-9]+\(/ {
                 inbody = 0
                 name = $0
@@ -217,6 +229,7 @@ extract_encoded_pool_aliases() {
     [ "$#" -gt 0 ] || return 0
     awk '
             FNR == 1 { in_dump = 0; stage = 0 }
+            { gsub(/\(par_state\./, "("); gsub(/[ \t]par_state\./, " "); sub(/^par_state\./, "") }
             /^(pub )?fn [a-zA-Z_0-9]+\(/ {
                 in_dump = ($0 ~ /fn flat_[a-z_0-9]*_dump\(/)
                 stage = 0
@@ -273,7 +286,12 @@ run_scan() {
         printf '%s\n' "$_inplace" | sed 's/^/I/'
         printf '%s\n' "$_codec_assigns" | sed 's/^/A/'
         printf '%s\n' "$_encoded_aliases" | sed 's/^/E/'
-        [ "$#" -eq 0 ] || sed 's/^/C/' "$@"
+        [ "$#" -eq 0 ] || awk '{
+            gsub(/\(par_state\./, "(")
+            gsub(/[ \t]par_state\./, " ")
+            sub(/^par_state\./, "")
+            print "C" $0
+        }' "$@"
     } | awk -v exclusions="$EXCLUDE_RE" '
         {
             kind = substr($0, 1, 1)
@@ -467,7 +485,7 @@ ALIAS_FIXTURE
         esac
     done
     # No association may cross a function boundary with a reused local name.
-    sed '/parts = parts.push(flat_pool_enc_i64_list(local_copy))/i\fn flat_other_pools_dump():' "$_tmp/g/codec.spl" > "$_tmp/g/bad.spl"
+    awk 'index($0, "parts = parts.push(flat_pool_enc_i64_list(local_copy))") { print "fn flat_other_pools_dump():" } { print }' "$_tmp/g/codec.spl" > "$_tmp/g/bad.spl"
     run_scan "$_tmp/g/pools.spl" "$_tmp/g/bad.spl"
     case "$SCAN_MISSING" in
         *payload\(not-encoded\)*) : ;;
@@ -487,6 +505,35 @@ ALIAS_FIXTURE
         _fail=1
     fi
 
+    # Fixture I: ParserState fields remain real pools after owner migration.
+    # The lexical stack is still live and intentionally classified parse-only.
+    mkdir -p "$_tmp/i"
+    printf 'fn parser_init_with_path():\n    par_state.par_lexical_bindings = fresh()\n    par_state.qualified_pool = []\nfn parser_diagnostic_source_set_v1():\n    par_state.source_map = []\n' > "$_tmp/i/pools.spl"
+    printf 'fn flat_parser_state_dump():\n    out = flat_pool_enc_parser_diagnostics_v1(par_state.qualified_pool)\n    out = flat_pool_enc_i64(par_state.source_map)\nfn flat_parser_state_restore():\n    par_state.qualified_pool = flat_pool_dec_parser_diagnostics_v1(r)\n    par_state.source_map = flat_pool_dec_i64(r)\n' > "$_tmp/i/codec.spl"
+    run_scan "$_tmp/i/pools.spl" "$_tmp/i/codec.spl"
+    if [ "$SCAN_CHECKED" -ne 2 ] || [ -n "$SCAN_MISSING" ]; then
+        echo "selftest: qualified ParserState owners must be checked (checked=$SCAN_CHECKED missing=$SCAN_MISSING)"
+        _fail=1
+    fi
+    sed '/out = flat_pool_enc_parser_diagnostics_v1/d' "$_tmp/i/codec.spl" > "$_tmp/i/no_encode.spl"
+    run_scan "$_tmp/i/pools.spl" "$_tmp/i/no_encode.spl"
+    if [ "$SCAN_MISSING" != " qualified_pool(not-encoded)" ]; then
+        echo "selftest: qualified owner missing encoder must fail (missing=$SCAN_MISSING)"
+        _fail=1
+    fi
+    sed '/par_state.qualified_pool = flat_pool_dec_parser_diagnostics_v1/d' "$_tmp/i/codec.spl" > "$_tmp/i/no_decode.spl"
+    run_scan "$_tmp/i/pools.spl" "$_tmp/i/no_decode.spl"
+    if [ "$SCAN_MISSING" != " qualified_pool(not-decoded)" ]; then
+        echo "selftest: qualified owner missing decoder must fail (missing=$SCAN_MISSING)"
+        _fail=1
+    fi
+    sed 's/par_state\./other_state./g' "$_tmp/i/codec.spl" > "$_tmp/i/other_owner.spl"
+    run_scan "$_tmp/i/pools.spl" "$_tmp/i/other_owner.spl"
+    if [ "$SCAN_MISSING" != " qualified_pool(not-encoded,not-decoded) source_map(not-encoded,not-decoded)" ]; then
+        echo "selftest: another owner must not satisfy ParserState codec coverage (missing=$SCAN_MISSING)"
+        _fail=1
+    fi
+
     rm -rf "$_tmp"
     if [ "$_fail" -ne 0 ]; then
         echo "ERROR — nothing was checked (selftest failed)"
@@ -497,7 +544,7 @@ ALIAS_FIXTURE
 case "${1:-}" in
     --selftest)
         selftest
-        echo "PASS — 8 selftest fixture(s) checked, all behaved as specified"
+        echo "PASS — 9 selftest fixture(s) checked, all behaved as specified"
         exit 0
         ;;
 esac

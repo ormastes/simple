@@ -20,11 +20,15 @@ use std.io_runtime.{process_run}
 use std.io_runtime.{env_get}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{get_args}
+use std.nogc_sync_mut.io_runtime.{thread_sleep}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.lsp.lsp_event_input.{LspEventInputV1, lsp_event_input_v1}
 
 use std.nogc_sync_mut.lsp.lsp_json.*
 use std.nogc_sync_mut.lsp.lsp_protocol.*
 use std.nogc_sync_mut.lsp.lsp_handlers.*
 use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field}
+use std.nogc_sync_mut.lsp.lsp_json_limits.{lsp_json_payload_error_v1}
 
 # Server state
 var LSP_INITIALIZED: bool = false
@@ -40,27 +44,79 @@ fn _extract_method(body: text) -> text:
         case JsonValue.Str(method): method
         case _: "<unknown>"
 
-fn lsp_main():
+fn lsp_main() -> i64:
     val args = get_args()
 
     # Check for help/version flags
     for arg in args:
         if arg == "--help" or arg == "-h":
             print_usage()
-            return
+            return 0
         if arg == "--version" or arg == "-v":
             print "simple-lsp 0.1.0"
-            return
+            return 0
 
-    # Start LSP server loop
-    var running = true
-    for _iter in range(0, 999999):
-        if not running:
-            return
-        var line = lsp_read_message()
-        if line == "":
-            running = false
+    val admitted = lsp_event_input_v1()
+    var input: LspEventInputV1? = nil
+    if admitted.is_ok():
+        var acquired = admitted.unwrap()
+        if acquired.failure == "":
+            input = Some(acquired)
         else:
+            val closed = acquired.close()
+            if closed.is_err():
+                eprint(closed.unwrap_err())
+                return 1
+    lsp_set_async_analysis_available_v1(input != nil)
+    if input == nil:
+        # Preserve the existing navigation transport on unsupported platforms.
+        # This explicit profile never advertises asynchronous diagnostics.
+        eprint("LSP basic navigation profile: asynchronous snapshot diagnostics unavailable")
+    var running = true
+    var exit_status = 0
+    while running or lsp_analysis_cleanup_pending_v1():
+        # Descriptor polling and worker retirement both progress while the
+        # peer is idle, including partial frames and shutdown cleanup.
+        lsp_analysis_tick_v1()
+        val fatal = lsp_analysis_fatal_v1()
+        if fatal != "":
+            eprint(fatal)
+            if input != nil:
+                var acquired = input.unwrap()
+                val closed = acquired.close()
+                if closed.is_err(): eprint(closed.unwrap_err())
+                input = Some(acquired)
+            return 1
+        if not running:
+            thread_sleep(10)
+            continue
+        var line = ""
+        if input == nil:
+            line = lsp_read_message()
+            if line == "":
+                running = false
+                continue
+        else:
+            var acquired = input.unwrap()
+            val polled = acquired.poll()
+            input = Some(acquired)
+            if polled.is_err():
+                eprint(polled.unwrap_err())
+                exit_status = 1
+                lsp_analysis_stop_v1()
+                running = false
+                continue
+            if polled.unwrap() == nil and acquired.finished():
+                lsp_analysis_stop_v1()
+                running = false
+                continue
+            if polled.unwrap() == nil: continue
+            line = polled.unwrap().unwrap()
+        if line != "":
+            val payload_error = lsp_json_payload_error_v1(line, 8388608)
+            if payload_error != "":
+                lsp_write_message(make_error("null", -32700, payload_error))
+                continue
             val id = extract_id(line)
             # Decode the top-level method once. Ordinary JSON whitespace and
             # nested params.method fields cannot change request dispatch.
@@ -72,15 +128,19 @@ fn lsp_main():
                 LSP_INITIALIZED = true
             elif method == "shutdown":
                 LSP_SHUTDOWN = true
+                lsp_analysis_stop_v1()
                 val response = make_json_result(id, "null")
                 lsp_write_message(response)
             elif method == "exit":
+                lsp_analysis_stop_v1()
                 running = false
             elif not LSP_INITIALIZED:
                 # Reject requests before initialization (JSON-RPC -32002)
                 if id != "null" and id != "":
                     val response = make_error(id, -32002, "Server not initialized")
                     lsp_write_message(response)
+            elif method == "workspace/didChangeWatchedFiles" or method == "workspace/didChangeConfiguration":
+                lsp_analysis_external_changed_v1()
             elif method == "textDocument/didOpen":
                 lsp_handle_did_open(line)
             elif method == "textDocument/didChange":
@@ -149,11 +209,20 @@ fn lsp_main():
                     val response = make_error(id, -32601, "Method not found: " + method)
                     lsp_write_message(response)
 
+    if input != nil:
+        var acquired = input.unwrap()
+        val closed = acquired.close()
+        input = Some(acquired)
+        if closed.is_err():
+            # Owner remains live through the error report until process exit.
+            eprint(closed.unwrap_err())
+            return 1
+    exit_status
+
 # Explicit entry keeps importing the protocol loop free of stdio side effects.
 # Direct execution of this library file retains its existing server behavior.
 fn main() -> i64:
     lsp_main()
-    0
 
 fn print_usage():
     print "Simple Language Server (LSP)"
