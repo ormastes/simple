@@ -66,3 +66,6 @@ A phase2/stage4 binary that native-builds `build/nb/hello.spl`; then
 `native-build build/nb/sspec_score_min.spl` (the analyzer-only entry) is the
 proof that `simple sspec-maintain scan` can be built here. Sibling record from the same day, other lane: `stale_deployed_binaries_reject_current_language_sspec_scorer_unrunnable_2026-09-05.md`.
 
+
+## Round-10 verdict note (2026-11-06)
+Verdict: host-blocked. Needs the macOS aarch64 phase2 binary; not reproducible on this Windows host. Re-test the struct-generic SEGV on a Phase-3 stage binary: simple compile --format=smf build/nb/gen.spl

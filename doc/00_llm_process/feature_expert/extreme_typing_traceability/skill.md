@@ -20,6 +20,20 @@ Ancestor/effective external visibility is still Unknown. Read the
 [route status](../../../05_design/extreme_typing_traceability.md#e1-frozen-export-route-join-candidate-2026-11-03)
 before consuming these records. Tests/performance remain unexecuted.
 
+2026-11-06 adds the pure structural exposure walker
+`compiler.types.type_infer.api_exposure_walker_v1` over the retained facts,
+returning `compiler.common.api_exposure_result_v1` records (Safe / Violates /
+Unknown per callable, export-root-to-leaf paths, fail-closed module verdict).
+It classifies only; no named rule, severity, CompileContext retention or
+publication guard exists yet. Read the
+[walker status](../../../05_design/extreme_typing_traceability.md#e1-structural-exposure-walker-2026-11-06)
+before extending it. Its spec and the projection spec executed GREEN on the
+Windows seed runner; the route spec was already 3/6 there before this slice
+(pre-existing, untouched). That is unit evidence, not runtime admission.
+The retained typecheck pass also stores the walker result per published
+module in `CompileContext.api_exposure`, cleared and replaced with the facts;
+a missing row is NotCollected. No consumer reads it yet.
+
 Read the [selected policy](../../../02_requirements/feature/extreme_typing_traceability.md),
 [architecture](../../../04_architecture/extreme_typing_traceability.md),
 [implementation plan](../../../03_plan/agent_tasks/extreme_typing_traceability.md)
