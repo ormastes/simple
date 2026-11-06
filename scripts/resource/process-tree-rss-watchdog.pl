@@ -1556,7 +1556,9 @@ sub phys_footprint_receipt {
 }
 
 sub receipt {
-    my ($status, $code, $quiet) = @_;
+    my ($status, $code, $quiet, $primary_status, $primary_code) = @_;
+    $primary_status //= $status;
+    $primary_code //= $code;
     if ($freebsd) {
         $extra_receipt .= "reaper_pid=$leader\nreaper_birth=$reaper_identity\n" .
             "payload_pid=$reaper_payload\ncross_session_owned_peak=$reaper_cross_session\n" .
@@ -1564,6 +1566,7 @@ sub receipt {
             "reaper_owner_wait_status=$reaper_owner_wait_status\n";
     }
     my $body = "status=$status\nexit_status=$code\nroot_pid=$leader\n" .
+        "primary_status=$primary_status\nprimary_exit_status=$primary_code\n" .
         "max_rss_kib=$opt{'max-rss-kib'}\npeak_rss_kib=$peak\nsamples=$samples\n" .
         phys_footprint_receipt() .
         "budget_scope=$opt{'budget-scope'}\nbudget_ceiling_kib=$budget_ceiling_kib\n" .
@@ -1772,6 +1775,9 @@ if ($code == 124 || $interrupted) {
         sleep 0.02;
     }
 }
+# Cleanup may fail closed after an RSS breach or timeout. Preserve the cause
+# that triggered cleanup so its final containment verdict cannot erase it.
+my ($primary_status, $primary_code) = $status eq 'complete' ? () : ($status, $code);
 my $quiet = quiesce();
 stop_observer();
 for (1..100) { reap(); last if defined $child_status; sleep 0.02 }
@@ -1786,5 +1792,5 @@ if ($opt{'observation-failure-mode'} eq 'diagnostic') {
     elsif ($independent_oom_kills && !$code) { ($status, $code) = ('independent-memory-oom', 137) }
     elsif ($status eq 'complete' && $sample_budget_exceeded) { $status = 'diagnostic-incomplete' }
 }
-receipt($status, $code, $quiet);
+receipt($status, $code, $quiet, $primary_status, $primary_code);
 exit $code;
