@@ -307,6 +307,34 @@ fn host_object_extension() -> &'static str {
     }
 }
 
+/// Build-time pin of the levelled vector provider the bootstrap built for this
+/// host (`SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256`, 64 lowercase hex). Unset or
+/// empty => `Ok(None)` (scalar default unchanged); malformed => `Err`, so a pin
+/// that can never match is never baked. Mirrors
+/// `runtime_vector_provider_pin_from_env_v1` in runtime_compiler.spl.
+pub(crate) fn core_c_vector_provider_pin(raw: Option<&str>) -> Result<Option<String>, String> {
+    match raw {
+        None | Some("") => Ok(None),
+        Some(pin) if pin.len() == 64 && pin.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) => {
+            Ok(Some(pin.to_string()))
+        }
+        Some(_) => Err("SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256 must be 64 lowercase hex digits".to_string()),
+    }
+}
+
+/// The pin define, emitted only for the TU that owns the provider loader.
+pub(crate) fn core_c_vector_provider_pin_define(source: &str, pin: Option<&str>) -> Option<String> {
+    match pin {
+        Some(pin) if source == "runtime_simd_utf8.c" => Some(format!("-DSIMPLE_VECTOR_PROVIDER_PIN_HEX={pin}")),
+        _ => None,
+    }
+}
+
+/// Archive-reuse fingerprint term: a different or absent pin never reuses.
+pub(crate) fn core_c_vector_provider_pin_fingerprint(pin: Option<&str>) -> String {
+    format!("vector_pin={}", pin.unwrap_or("none"))
+}
+
 pub(crate) fn core_c_target_flags(
     target: simple_common::target::Target,
     compiler: &str,
@@ -675,8 +703,18 @@ fn build_c_runtime_library(
         target.os == simple_common::target::TargetOS::Windows,
     ));
 
-    let fingerprint = format!("{};no_rust_array_packing={no_rust_array_packing}",
-        runtime_inputs_fingerprint(&runtime_root, &runtime_inputs)?);
+    let vector_pin = match core_c_vector_provider_pin(
+        std::env::var("SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256").ok().as_deref(),
+    ) {
+        Ok(pin) => pin,
+        Err(error) => {
+            eprintln!("native-build: {error}");
+            return None;
+        }
+    };
+    let fingerprint = format!("{};no_rust_array_packing={no_rust_array_packing};{}",
+        runtime_inputs_fingerprint(&runtime_root, &runtime_inputs)?,
+        core_c_vector_provider_pin_fingerprint(vector_pin.as_deref()));
     let fingerprint_path = build_dir.join(format!("{}.inputs.fingerprint", host_archive_name()));
 
     if has_nonempty_archive_payload(&archive)
@@ -783,6 +821,7 @@ fn build_c_runtime_library(
                     // 16 names.  Mirrors runtime_compiler.spl:545 in the pure-Simple lane.
                     .arg("-DSIMPLE_RUNTIME_MEMORY_OWNER=1")
                     .args(core_c_target_flags(target, &cc, source, riscv_vector))
+                    .args(core_c_vector_provider_pin_define(source, vector_pin.as_deref()))
                     .args(&cross_flags)
                     .arg(format!("-I{}", runtime_root.display()))
                     .arg(format!("-I{}", runtime_root.join("platform").display()))

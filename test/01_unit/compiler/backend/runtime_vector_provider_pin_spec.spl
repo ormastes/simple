@@ -1,0 +1,38 @@
+use std.spec.*
+use compiler.backend.runtime_compiler.{
+    runtime_vector_provider_pin_defines_v1,
+    runtime_vector_provider_pin_cache_sig_v1
+}
+use std.io_runtime.{file_read_nullable}
+
+val PIN_A = "0e3f00aa11bb22cc33dd44ee55ff66aa77bb88cc99dd00ee11ff22aa33bb44cc"
+val PIN_B = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+
+describe "levelled vector provider pin baked into the runtime build":
+    it "emits the pin define only for the loader-owning runtime TU":
+        expect(runtime_vector_provider_pin_defines_v1("runtime_simd_utf8", PIN_A, false)).to_equal(
+            ["-DSIMPLE_VECTOR_PROVIDER_PIN_HEX=" + PIN_A])
+        expect(runtime_vector_provider_pin_defines_v1("runtime_simd_utf8", PIN_A, true)).to_equal(
+            ["/DSIMPLE_VECTOR_PROVIDER_PIN_HEX=" + PIN_A])
+        expect(runtime_vector_provider_pin_defines_v1("runtime_native", PIN_A, false).len()).to_equal(0)
+        expect(runtime_vector_provider_pin_defines_v1("runtime_simd_case", PIN_A, false).len()).to_equal(0)
+
+    it "emits nothing without a pin, keeping today's scalar default":
+        expect(runtime_vector_provider_pin_defines_v1("runtime_simd_utf8", "", false).len()).to_equal(0)
+        expect(runtime_vector_provider_pin_defines_v1("runtime_simd_utf8", "", true).len()).to_equal(0)
+
+    it "gives a distinct object-cache key term with, without, and per pin":
+        val none = runtime_vector_provider_pin_cache_sig_v1("")
+        val a = runtime_vector_provider_pin_cache_sig_v1(PIN_A)
+        val b = runtime_vector_provider_pin_cache_sig_v1(PIN_B)
+        expect(none).to_equal("vector_pin=none")
+        expect(a == none).to_equal(false)
+        expect(b == none).to_equal(false)
+        expect(a == b).to_equal(false)
+
+    it "wires the pin into the compile args and the POSIX cache key, failing closed":
+        val source = file_read_nullable("src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
+        expect(source).to_contain("runtime_vector_provider_pin_cache_sig_v1(vector_pin)")
+        expect(source).to_contain("for pin_define in runtime_vector_provider_pin_defines_v1(name, vector_pin, use_msvc):")
+        expect(source).to_contain("val vector_pin_result = runtime_vector_provider_pin_from_env_v1()\n    if vector_pin_result.is_err():\n        return Err(vector_pin_result.unwrap_err())")
+        expect(source).to_contain("if not sha256_lower_hex_valid(pin):")
