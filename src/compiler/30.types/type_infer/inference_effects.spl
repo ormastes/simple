@@ -106,7 +106,13 @@ impl HmInferContext:
                 match self.synthesize_expr(callee):
                     case Ok(callee_ty):
                         effects = self.merge_effects(effects, self.get_function_effects(callee_ty))
-                    case _: pass
+                    case _:
+                        # Callee type unavailable (e.g. undefined symbol). The
+                        # type error itself surfaces through normal inference;
+                        # here the row must not read as a complete proof, so
+                        # record an Unknown marker instead of staying silent.
+                        effects = effects.push(Effect(kind: EffectKind.Unknown, span: expr.span))
+                        self.current_function_effects_complete = false
 
                 effects
 
@@ -143,7 +149,10 @@ impl HmInferContext:
                                 has_declared_effect_row = true
                             case _: pass
                 if not has_declared_effect_row:
+                    # Partial fact only: the IO fallback keeps the analysis
+                    # conservative, but the row is not a complete proof.
                     effects = effects.push(Effect(kind: EffectKind.IO, span: expr.span))
+                    self.current_function_effects_complete = false
                 effects
 
             # Closures - effects of the body.
@@ -188,8 +197,11 @@ impl HmInferContext:
                 effects
 
             case _:
-                # Unknown expression kind - conservatively assume no effects
-                []
+                # Unhandled expression kind: fail closed. The Unknown marker
+                # keeps the row honest and flags it as an incomplete proof
+                # instead of silently claiming purity.
+                self.current_function_effects_complete = false
+                [Effect(kind: EffectKind.Unknown, span: expr.span)]
 
     me infer_block_effects(block: HirBlock) -> [Effect]:
         """Infer effects of a block."""
@@ -306,3 +318,20 @@ impl HmInferContext:
                 break
         if not found:
             self.current_function_effects = self.current_function_effects.push(effect)
+
+    me get_current_function_effects() -> [Effect]:
+        """Effect row accumulated for the function currently being inferred.
+
+        De-duplicated by the same `effects_match` rule `merge_effects` uses.
+        """
+        self.current_function_effects
+
+    me get_current_function_effects_complete() -> bool:
+        """Whether the accumulated row is a complete analysis.
+
+        False once inference met a construct it could not classify (callee
+        synthesis failure, unresolved method, unhandled expression kind): the
+        row then carries Unknown markers and must not satisfy required-effect
+        bounds nor be published as a purity proof.
+        """
+        self.current_function_effects_complete

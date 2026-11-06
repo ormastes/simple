@@ -1,0 +1,161 @@
+# @cover src/compiler/30.types/units/unit_registry.spl 80%
+# @cover src/compiler/10.frontend/core/types.spl 60%
+"""
+## Purpose and audience
+Executable contract for the unified `unit` declaration surface (stronger
+types, wave 1): canonical declaration records for nominal IDs, aliases, and
+zero-payload state markers must land in the compile-start unit registry with
+their role preserved; legacy newunit records must produce identical nominal
+facts; and the registry must scale well past the retired 16-entry helper cap.
+For compiler engineers touching src/compiler/10.frontend and
+src/compiler/30.types/units.
+## Operator workflow
+bin/simple test test/03_system/app/compiler/feature/stronger_types_unified_unit_spec.spl
+## Compatibility and limitations
+Registration functions are called the way the parser calls them; end-to-end
+parse-level coverage of the `unit` keyword grammar arrives in wave 2 with the
+parser branch and its compile-pass/compile-fail specs. Measurement-family and
+refined-value roles register through the same path and are exercised by their
+own unit specs.
+## Verification guidance and troubleshooting
+Rerun with the command above. A role mismatch means the canonical path lost a
+declaration-role fact; a missing entry past index 16 means a fixed-cap
+registry crept back in; a legacy/canonical entry-shape difference means the
+migration equivalence contract broke. File bugs, never soften scenarios.
+"""
+# Lifecycle: doc/01_research/local/stronger_types_unified_unit.md ;
+# doc/02_requirements/feature/stronger_types_unified_unit.md ;
+# doc/03_plan/sys_test/stronger_types_unified_unit.md ;
+# doc/04_architecture/stronger_types_unified_unit.md ;
+# doc/05_design/stronger_types_unified_unit.md
+
+use std.spec
+
+fn spec_digit(d: i64) -> text:
+    if d == 0: return "0"
+    if d == 1: return "1"
+    if d == 2: return "2"
+    if d == 3: return "3"
+    if d == 4: return "4"
+    if d == 5: return "5"
+    if d == 6: return "6"
+    if d == 7: return "7"
+    if d == 8: return "8"
+    "9"
+
+fn spec_index_text(i: i64) -> text:
+    spec_digit(i / 10) + spec_digit(i - (i / 10) * 10)
+
+# @manual_section: unified unit declarations
+describe "Unified unit declarations":
+    describe "REQ-UNIT-01: canonical nominal role":
+        it "a unit nominal declaration is recorded with its role and suffix":
+            # @req REQ-UNIT-01
+            # @capture(statistics): registry entry fields for a canonical nominal unit declaration
+            step("register a canonical nominal unit declaration the way the parser does")
+            step("rebuild the compile-start registry and look the entry up")
+            val idx = unit_decl_register("StUserId", "nominal", "stuid", TYPE_I64, "")
+            assert_true(idx >= 0)
+            val reg = unit_registry_build()
+            match reg.lookup_entry("stuid"):
+                case Some(entry):
+                    expect(entry.role).to_equal("nominal")
+                    expect(entry.short_symbol).to_equal("stuid")
+                    expect(entry.full_symbol).to_equal("StUserId")
+                    expect(entry.kind).to_equal("i64")
+                    expect(entry.klass).to_equal(UnitClass.Count)
+                    # nominal wrappers carry an identity base factor (1/1)
+                    expect(entry.base_factor.numerator).to_equal(1)  # oracle: identity factor numerator is exactly 1
+                    expect(entry.base_factor.denominator).to_equal(1)  # oracle: identity factor denominator is exactly 1
+                case None:
+                    assert_true(false)
+
+    describe "REQ-UNIT-01: alias role":
+        it "a unit alias declaration resolves to the target identity":
+            # @req REQ-UNIT-01
+            # @req REQ-UNIT-03
+            # @capture(statistics): alias entry role and resolved target symbol
+            step("register a nominal target, then a unit alias of it")
+            val target_idx = unit_decl_register("StByteCount", "nominal", "", TYPE_U64, "")
+            assert_true(target_idx >= 0)
+            val alias_idx = unit_decl_register("StCountAlias", "alias", "", TYPE_U64, "StByteCount")
+            assert_true(alias_idx >= 0)
+            val reg = unit_registry_build()
+            match reg.lookup_entry("StCountAlias"):
+                case Some(entry):
+                    expect(entry.role).to_equal("alias")
+                    expect(entry.alias_of).to_equal("StByteCount")  # oracle: an alias names its target identity, never a new one
+                case None:
+                    assert_true(false)
+
+    describe "REQ-UNIT-01: marker role":
+        it "a zero-payload state marker declaration records role marker":
+            # @req REQ-UNIT-01
+            # @capture(statistics): marker entry role and empty underlying kind
+            step("register a zero-payload marker declaration")
+            val idx = unit_decl_register("StReady", "marker", "", 0, "")
+            assert_true(idx >= 0)
+            val reg = unit_registry_build()
+            match reg.lookup_entry("StReady"):
+                case Some(entry):
+                    expect(entry.role).to_equal("marker")
+                    expect(entry.kind).to_equal("")  # oracle: a marker carries no underlying representation
+                case None:
+                    assert_true(false)
+
+    describe "REQ-UNIT-03: distinct nominal identities":
+        it "same-representation nominals are not interchangeable":
+            # @req REQ-UNIT-03
+            # @capture(statistics): two same-underlying nominal entries and their identity separation
+            step("register two nominal declarations over the same underlying representation")
+            val a_idx = unit_decl_register("StOrderId", "nominal", "stoid", TYPE_U32, "")
+            val b_idx = unit_decl_register("StUserId32", "nominal", "stuid32", TYPE_U32, "")
+            assert_true(a_idx >= 0)
+            assert_true(b_idx >= 0)
+            val reg = unit_registry_build()
+            match reg.lookup_entry("stoid"):
+                case Some(entry):
+                    expect(entry.full_symbol).to_equal("StOrderId")
+                    expect(entry.full_symbol).to_not_equal("StUserId32")  # oracle: identical representation does not merge nominal identity
+                case None:
+                    assert_true(false)
+
+    describe "REQ-UNIT-02: legacy equivalence":
+        it "a legacy newunit record produces identical nominal facts":
+            # @req REQ-UNIT-02
+            # @capture(statistics): legacy newunit entry role and shape versus canonical nominal
+            step("register a legacy newunit record")
+            step("rebuild the registry and compare its facts to the canonical nominal shape")
+            val legacy_idx = newunit_register("StLegacyId", "stleg", TYPE_I64)
+            assert_true(legacy_idx >= 0)
+            val reg = unit_registry_build()
+            match reg.lookup_entry("stleg"):
+                case Some(entry):
+                    expect(entry.role).to_equal("nominal")  # oracle: legacy spellings lower to the same canonical role
+                    expect(entry.full_symbol).to_equal("StLegacyId")
+                    expect(entry.kind).to_equal("i64")
+                    expect(entry.klass).to_equal(UnitClass.Count)
+                    expect(entry.base_factor.numerator).to_equal(1)
+                    expect(entry.base_factor.denominator).to_equal(1)
+                case None:
+                    assert_true(false)
+
+    describe "REQ-UNIT-06: registry scales past the retired 16-slot cap":
+        it "forty distinct declarations all remain retrievable":
+            # @req REQ-UNIT-06
+            # @capture(statistics): registry size and last-entry retrieval after 40 registrations
+            step("measure the baseline registry size, then register forty distinct nominal declarations")
+            val baseline = unit_registry_build().entry_count()
+            var i = 0
+            while i < 40:
+                val suffix = "scale" + spec_index_text(i)
+                val idx = unit_decl_register("ScaleId" + spec_index_text(i), "nominal", suffix, TYPE_I64, "")
+                assert_true(idx >= 0)
+                i = i + 1
+            val reg = unit_registry_build()
+            expect(reg.entry_count()).to_equal(baseline + 40)  # oracle: every declared unit is present; the count is not capped at 16
+            match reg.lookup_entry("scale39"):
+                case Some(entry):
+                    expect(entry.full_symbol).to_equal("ScaleId39")
+                case None:
+                    assert_true(false)

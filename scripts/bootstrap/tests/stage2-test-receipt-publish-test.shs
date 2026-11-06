@@ -2,8 +2,13 @@
 # Adversarial publisher fixtures use real source snapshot and JSON validators.
 set -eu
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
-fixture=$(mktemp -d)
+fixture=$(CDPATH= cd -- "$(mktemp -d)" && pwd -P)  # physical path: macOS /var is a symlink
 trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+# Portable in-place edit: BSD/macOS `sed -i 's/..' f` takes the script as the
+# backup suffix, so GNU `sed -i` silently failed every mutation on Darwin.
+sed_in_place() {
+  sed "$1" "$2" >"$2.sed-tmp" && mv "$2.sed-tmp" "$2"
+}
 source_root="$fixture/frozen"
 output="$fixture/output"
 platform=x86_64-unknown-linux-gnu
@@ -85,14 +90,14 @@ reject() {
 for mutation in zero missing duplicate failed wrong-phase wrong-sha owner-before count-mismatch; do
   cp "$fixture/summary.saved" "$summary"
   case "$mutation" in
-    zero) sed -i 's/executed=1/executed=0/g' "$summary" ;;
-    missing) sed -i '/task=loader_interpreter_tests/d' "$summary" ;;
+    zero) sed_in_place 's/executed=1/executed=0/g' "$summary" ;;
+    missing) sed_in_place '/task=loader_interpreter_tests/d' "$summary" ;;
     duplicate) printf 'phase=stage2\n' >>"$summary" ;;
-    failed) sed -i 's/terminal_failures=0/terminal_failures=1/' "$summary" ;;
-    wrong-phase) sed -i 's/phase=stage2/phase=stage4/' "$summary" ;;
-    wrong-sha) sed -i 's/actual_compiler_sha256=.*/actual_compiler_sha256=bad/' "$summary" ;;
-    count-mismatch) sed -i 's/passed=1/passed=2/' "$summary" ;;
-    owner-before) sed -i 's/command_owner_before=PASS/command_owner_before=mismatch/' "$summary" ;;
+    failed) sed_in_place 's/terminal_failures=0/terminal_failures=1/' "$summary" ;;
+    wrong-phase) sed_in_place 's/phase=stage2/phase=stage4/' "$summary" ;;
+    wrong-sha) sed_in_place 's/actual_compiler_sha256=.*/actual_compiler_sha256=bad/' "$summary" ;;
+    count-mismatch) sed_in_place 's/passed=1/passed=2/' "$summary" ;;
+    owner-before) sed_in_place 's/command_owner_before=PASS/command_owner_before=mismatch/' "$summary" ;;
   esac
   reject
 done
@@ -108,7 +113,7 @@ if sh "$repo/scripts/bootstrap/lib/verify-stage2-compiler-tests.shs" --publish "
 printf 'changed\n' >>"$tests_root/verification/mcp_server"; reject
 cp "$candidate" "$tests_root/verification/mcp_server"
 printf 'changed\n' >>"$source_root/src/main.spl"; reject
-sed -i '$d' "$source_root/src/main.spl"
+sed_in_place '$d' "$source_root/src/main.spl"
 printf 'changed\n' >>"$tests_root/verification/test_runner"; reject
 cp "$candidate" "$tests_root/verification/test_runner"
 cp "$tests_root/verification/compiler_bootstrap_tests.log" "$fixture/test-log.saved"

@@ -1,0 +1,40 @@
+# Bug: seed_run_comprehension_empty_hybrid_splice_2026-11-04
+#
+# `bin/simple run` (default JIT lane) lowered a list comprehension to `nil`
+# (`[x*2 for x in xs].len()` printed -1). The sspec runner forces the
+# interpreter, so each case runs a fixture through the compiler binary in JIT
+# mode and asserts stdout. The binary is `SIMPLE_BINARY` or `bin/simple`.
+use std.spec
+use std.io_runtime.{process_run, file_write, dir_create_all, env_get, env_set}
+
+fn work_dir() -> text:
+    val tmp = env_get("TMPDIR")
+    val root = if tmp != "": tmp else: "/tmp"
+    val dir = root + "/simple-spec-jit-list-comprehension"
+    dir_create_all(dir)
+    dir
+
+fn run_jit(name: text, source: text) -> text:
+    val path = work_dir() + "/" + name + ".spl"
+    assert_true(file_write(path, source))
+    env_set("SIMPLE_EXECUTION_MODE", "jit")
+    env_set("SIMPLE_RUST_SEED_WARNING", "0")
+    val configured = env_get("SIMPLE_BINARY")
+    val bin = if configured == "": "bin/simple" else: configured
+    val ran = process_run(bin, ["run", path])
+    ran[0].trim()
+
+describe "list comprehension on the default run lane":
+    it "keeps the length of an inline comprehension":
+        val out = run_jit("inline_len", """fn main():
+    print("{[x * 2 for x in [1, 2, 3]].len()}")
+""")
+        assert_equal(out, "3")
+
+    it "keeps the filtered elements of a comprehension":
+        val out = run_jit("filtered", """fn filt(xs: [i64]) -> [i64]:
+    [for x in xs if x >= 0: x]
+fn main():
+    print("{filt([3, -1, 7]).len()}")
+""")
+        assert_equal(out, "2")

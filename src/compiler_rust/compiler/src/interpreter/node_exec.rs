@@ -1194,7 +1194,7 @@ pub(crate) fn exec_assignment(
                                 // and this path runs on EVERY local assignment. Until 2026-08-21
                                 // that made each intra-module call rebuild its env (~5 ms in a
                                 // driver module) -- see bootstrap_main_native_build_stalls_after_source_closure_2026-08-21.md
-                                if !cell.borrow().contains_key(name) {
+                                if env.is_local(name) || !cell.borrow().contains_key(name) {
                                     return;
                                 }
                                 if let Some(v) = env.get(name) {
@@ -1227,7 +1227,7 @@ pub(crate) fn exec_assignment(
                                     // and this path runs on EVERY local assignment. Until 2026-08-21
                                     // that made each intra-module call rebuild its env (~5 ms in a
                                     // driver module) -- see bootstrap_main_native_build_stalls_after_source_closure_2026-08-21.md
-                                    if !cell.borrow().contains_key(name) {
+                                    if env.is_local(name) || !cell.borrow().contains_key(name) {
                                         return;
                                     }
                                     if let Some(v) = env.get(name) {
@@ -1258,7 +1258,7 @@ pub(crate) fn exec_assignment(
                                     // and this path runs on EVERY local assignment. Until 2026-08-21
                                     // that made each intra-module call rebuild its env (~5 ms in a
                                     // driver module) -- see bootstrap_main_native_build_stalls_after_source_closure_2026-08-21.md
-                                    if !cell.borrow().contains_key(name) {
+                                    if env.is_local(name) || !cell.borrow().contains_key(name) {
                                         return;
                                     }
                                     if let Some(v) = env.get(name) {
@@ -1323,7 +1323,7 @@ pub(crate) fn exec_assignment(
                 MODULE_GLOBALS.with(|cell| {
                     // Peek first (see the note above): an unconditional borrow_mut here
                     // bumped the globals generation on every local assignment.
-                    if !cell.borrow().contains_key(name) {
+                    if env.is_local(name) || !cell.borrow().contains_key(name) {
                         return;
                     }
                     cell.borrow_mut().insert(name.clone(), env.get(name).unwrap().clone());
@@ -1832,6 +1832,27 @@ pub(crate) fn exec_assignment(
                         let idx = index_val.as_int()? as usize;
                         arr.assign_index(idx, value);
                         Value::Array(arc)
+                    }
+                    // Fixed-size array module state (`var t: [T; N]`): in-bounds
+                    // element write only; the size is part of the type.
+                    Value::FixedSizeArray { size, mut data } => {
+                        let idx = index_val.as_int()? as usize;
+                        if idx >= data.len() {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                                .with_help(format!("fixed-size array has {} element(s)", data.len()))
+                                .with_note(format!("index {} is out of bounds", idx));
+                            return Err(CompileError::semantic_with_context(
+                                format!(
+                                    "index out of bounds: array index {} out of bounds (len={})",
+                                    idx,
+                                    data.len()
+                                ),
+                                ctx,
+                            ));
+                        }
+                        data[idx] = value;
+                        Value::FixedSizeArray { size, data }
                     }
                     // `rt_bytes_alloc` / `rt_byte_array_new` hand back a packed
                     // `Value::ByteArray`; `var buf = rt_bytes_alloc(n); buf[i] = b`

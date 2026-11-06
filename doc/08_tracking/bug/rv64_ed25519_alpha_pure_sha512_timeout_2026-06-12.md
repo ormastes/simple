@@ -651,3 +651,26 @@ The pure-Simple crypto paths are clean on host. The recorded blocker is RV64
 (`rv64_ssh_live_login_in_qemu_spec.spl` with `SIMPLEOS_RV64_SSH_LIVE=1`) was
 not re-run this pass (multi-minute RV64 native-build + QEMU + OpenSSH lane).
 Status: OPEN; host-side oracles green, live RV64 lane still required to close.
+
+## Host repro 2026-11-06 (work/fx-rv64-ed25519-20261106, aarch64 Rust seed)
+
+Same pure-Simple path (`os.crypto.ed25519` + `os.crypto.sha512`), host interpreter:
+
+```text
+test/01_unit/lib/crypto/ed25519_rfc8032_spec.spl      15/15 passed (RFC 8032 TV1..)
+test/01_unit/os/crypto/sha512_direct_kat_spec.spl      3/3 passed
+```
+
+Host signature and SHA-512 are correct, so there is no pure-Simple logic bug:
+the zero signature is RV64 native codegen/runtime only. The record's own
+evidence (X25519 serializer fixed by replacing indexed `[u64]` stores with
+locals; `r_enc`/`sig` arrays reading back zero or partial after push/copy;
+SHA-512 seed hash wrong in the live lane) points at array element store/read
+and u64 arithmetic lowering on RV64, not at the algorithm. No RV64 codegen fix
+attempted in this lane.
+
+Added `test/01_unit/os/crypto/ed25519_rv64_primitives_spec.spl` (5/5 on host):
+pins `[u64]` indexed store round-trip, 51-bit shift/mask carry, u64 wrap
+multiply, sparse 32-byte element-wise copy, and R||S 64-byte signature
+assembly. Run the same spec under RV64 native to localise the failing
+primitive. Status: OPEN (target-specific).
