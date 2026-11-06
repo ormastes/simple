@@ -52,10 +52,14 @@ The separate canonical Windows LLVM bootstrap remains pinned to release commit
 `6e03930143983a5c9861321f67aff300b07f16ed`. It uses
 `bootstrap-windows.sh --msvc --strategy=normal --full-bootstrap --stop-after-stage2
 --backend=llvm --jobs=1`. Attempt 4 passed materialization verification and native
-C admission and entered seed compilation; the supervised Cargo process spawned
-successive rustc processes. This document does not prove current process liveness
-or successful bootstrap. Logs remain in the frozen worktree at
-`build/node-attributes-qualification/bootstrap-attempt4.log`.
+C admission. Seed and native-all compilation then completed with native exit 0,
+but the parent aborted on a lost shared-lock claim before self-hosted admission.
+A focused cross-runtime probe reproduced a live MSYS owner being classified dead
+from Git Bash; see [the lock bug](bug/portable_lock_cross_msys_namespace_false_dead_2026-11-06.md).
+Attempt 5 uses the same Git Bash runtime as the other active bootstrap while
+preserving compiled objects and ownership/receipt checks. This document does not
+prove current process liveness or successful bootstrap. Logs remain in the frozen worktree at
+`build/node-attributes-qualification/bootstrap-attempt4.log` and `bootstrap-attempt5.log`.
 
 Earlier attempts established environment failures: MSYS Python was incompatible
 with the native supervisor; a restricted PATH lacked PowerShell; Git-for-Windows
