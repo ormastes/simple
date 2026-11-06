@@ -50,3 +50,20 @@ exports it at `:778`. The import is legitimate.
 
 Rerun the Stage 2 `compiler_cli_build` with `SIMPLE_BOOTSTRAP_DIAG=1` and the HIR cache disabled; if `exit`
 resolves, hand to cluster B (codec). Do not patch `query_main.spl`.
+
+## Follow-up (2026-11-06, static)
+
+- Cluster B ruled out the HIR cache: query_main was freshly lowered (`cached=0`, log 36843-36844), and
+  `hir_cache_key` hashes source sha256. Suspect 1 above is withdrawn.
+- The `[hir-reexport-chase-unresolved]` receipts just before the fatal (`facade=app.io.__init__`
+  `item=rt_file_rename|rt_timestamp_now`) all have `importer=src/app/io/cli_*.spl`. No receipt in the log names
+  `importer=.../traceability/...` or `item=exit`. query_main does not import `exit` via `app.io` or
+  `nogc_async_mut.io` (its only `exit` source is `use std.io_runtime.{exit}`), so those chase misses do not
+  explain a missing binding in query_main.
+- Span: no tracked file has `    exit` at line 74 col 5, and there is only one `query_main.spl`. Line 119 minus
+  (16 comment + 5 blank) lines is not 74, and there are no docstrings. So the line is mis-mapped, not
+  stale source. Mapping not found statically.
+- Remaining suspects: (a) the `std.io_runtime` import is silently skipped (empty module key) only in the full
+  graph; (b) a surface or registry-generation mismatch, which takes the `reexport-root-reject` paths. Those only
+  print under `SIMPLE_BOOTSTRAP_DIAG=1`, and that was off for this run. Next run: set `SIMPLE_BOOTSTRAP_DIAG=1`
+  and grep `reexport-root-reject|reexport-chase\] .*wanted=exit`.
