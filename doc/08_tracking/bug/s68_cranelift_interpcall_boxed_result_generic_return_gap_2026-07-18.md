@@ -114,3 +114,15 @@ options A/B applied at the right layer:
   no longer adds `FallbackReason::CollectionLiteral`), plus regression tests in
   `compiler/src/compilability.rs` and `compiler/src/mir/hybrid.rs`.
 
+
+## 2026-11-05 mirp2-E3 re-scope
+
+`compilability.rs::return_type_keeps_boxed` now covers Tuple, Array, text,
+Option, Result (and Optional/Capability wrappers). Dict / user structs fall
+to the final `else` of `compile_interp_call` (core.rs ~972), which keeps
+the tagged RuntimeValue unless the dest vreg is f64/native scalar, i.e. the
+correct handle. JIT probe (Dict-, struct- and Option-returning fns with
+`match` bodies) prints identical results to the interpreter
+(`len=3 has=true b=2 / px=20 / o=5`). The remaining lane is seed
+`--native --backend=cranelift` hybrid AOT, which is not a bootstrap lane.
+Re-scoped to P3 non-bootstrap; close when that lane is retired.

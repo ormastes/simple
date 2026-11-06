@@ -1,8 +1,11 @@
-"""Regression coverage for the fail-closed AVX-512 x86 spill boundary."""
+"""AVX-512 frame functions spill GPRs through their own rewriter instead of
+panicking: spill slots sit below the isel frame, R10/R11 are reserved scratch,
+and a third spilled operand borrows a register with push/pop."""
 
 use std.spec.*
-use compiler.backend.native.regalloc.{function_has_x86_avx512, x86_avx512_spill_admitted, regalloc_module}
-use compiler.backend.native.mach_inst.{new_mach_inst, new_mach_block, mach_block_add_inst, new_mach_function, mach_func_add_block, new_mach_module, mach_module_add_func}
+use compiler.backend.native.regalloc.{function_has_x86_avx512, regalloc_module, regalloc_function, rewrite_inst_x86_avx512_spill, RegAllocResult}
+use compiler.backend.native.mach_inst.*
+use compiler.backend.native.x86_64_avx512_ops.{X86_OP_AVX512_INDEXED, X86_OP_AVX512_BOUNDS}
 
 extern fn rt_file_read_text(path: text) -> text?
 
@@ -13,27 +16,124 @@ fn opcode_fixture(opcode: i64):
     function = mach_func_add_block(function, block)
     function
 
-describe "x86 AVX-512 regalloc spill guard":
+fn vreg(id: i64) -> Operand:
+    op_reg(virtual_reg(id))
+
+fn pressure_fixture(frame_size: i64) -> MachFunction:
+    """20 GPR values live across one AVX-512 frame instruction."""
+    var prologue = new_mach_block("prologue", -1)
+    prologue = mach_block_add_inst(prologue, new_mach_inst(X86_OP_PUSH, [op_phys(X86_RBP)]))
+    prologue = mach_block_add_inst(prologue, new_mach_inst(X86_OP_MOV_REG_REG, [op_phys(X86_RBP), op_phys(X86_RSP)]))
+    prologue = mach_block_add_inst(prologue, new_mach_inst(X86_OP_SUB_IMM, [op_phys(X86_RSP), op_imm(0)]))
+    var body = new_mach_block("entry", 0)
+    for id in 1000..1020:
+        body = mach_block_add_inst(body, new_mach_inst(X86_OP_MOV_REG_IMM, [vreg(id), op_imm(id)]))
+    body = mach_block_add_inst(body, new_mach_inst(X86_OP_AVX512_BOUNDS, [vreg(1020), op_mem(physical_reg(X86_RBP), -64), op_imm(16), op_imm(32)]))
+    for id in 1001..1020:
+        body = mach_block_add_inst(body, new_mach_inst(X86_OP_ADD, [vreg(1000), vreg(id)]))
+    body = mach_block_add_inst(body, new_mach_inst(X86_OP_MOV_REG_REG, [op_phys(X86_RAX), vreg(1000)]))
+    body = mach_block_add_inst(body, new_mach_inst(X86_OP_MOV_REG_REG, [op_phys(X86_RSP), op_phys(X86_RBP)]))
+    body = mach_block_add_inst(body, new_mach_inst(X86_OP_POP, [op_phys(X86_RBP)]))
+    body = mach_block_add_inst(body, new_mach_inst(X86_OP_RET, []))
+    var function = new_mach_function("avx512_pressure")
+    function = mach_func_add_block(function, prologue)
+    function = mach_func_add_block(function, body)
+    mach_func_set_frame_size(function, frame_size)
+
+fn has_virtual(inst: MachInst) -> bool:
+    for operand in inst.operands:
+        match operand.kind:
+            case Reg(reg):
+                match reg.kind:
+                    case Virtual(_): return true
+                    case _: ()
+            case Mem(base, _):
+                match base.kind:
+                    case Virtual(_): return true
+                    case _: ()
+            case _: ()
+    false
+
+fn rbp_offset(operand: Operand) -> i64:
+    match operand.kind:
+        case Mem(base, offset):
+            if reg_id(base) == X86_RBP: return offset
+            0
+        case _: 0
+
+describe "x86 AVX-512 regalloc spill path":
     it "classifies the complete reserved AVX-512 opcode interval":
         expect(function_has_x86_avx512(opcode_fixture(399))).to_be_false()
         expect(function_has_x86_avx512(opcode_fixture(400))).to_be_true()
         expect(function_has_x86_avx512(opcode_fixture(450))).to_be_true()
         expect(function_has_x86_avx512(opcode_fixture(451))).to_be_false()
 
-    it "admits AVX-512 only when generic allocation has no spills":
-        expect(x86_avx512_spill_admitted(false, 3)).to_be_true()
-        expect(x86_avx512_spill_admitted(true, 0)).to_be_true()
-        expect(x86_avx512_spill_admitted(true, 1)).to_be_false()
-
-    it "preserves an admitted physical AVX-512 instruction":
+    it "preserves a physical AVX-512 instruction":
         var module = new_mach_module("avx512_regalloc")
         module = mach_module_add_func(module, opcode_fixture(400))
         val allocated = regalloc_module(module)
         expect(allocated.functions.len()).to_equal(1)
         expect(allocated.functions[0].blocks[0].insts[0].opcode).to_equal(400)
 
-    it "keeps the panic and no-spill rewrite wired into x86 allocation":
+    it "spills under GPR pressure below the isel frame instead of panicking":
+        val allocated = regalloc_function(pressure_fixture(128))
+        var spill_loads = 0
+        var frame_overlaps = 0
+        var virtual_left = 0
+        var r10_r11_defs = 0
+        var r10_r11_unsaved = 0
+        for block in allocated.blocks:
+            for index in 0..block.insts.len():
+                val inst = block.insts[index]
+                if has_virtual(inst): virtual_left = virtual_left + 1
+                if inst.opcode == X86_OP_MOV_REG_MEM:
+                    val offset = rbp_offset(inst.operands[1])
+                    if offset < 0:
+                        spill_loads = spill_loads + 1
+                        # Spill slots start at rbp-(frame_size+8).
+                        if offset > 0 - 136: frame_overlaps = frame_overlaps + 1
+                if inst.opcode == X86_OP_MOV_REG_IMM:
+                    val dest = reg_id(operand_get_reg(inst.operands[0]))
+                    if dest == X86_R10 or dest == X86_R11:
+                        r10_r11_defs = r10_r11_defs + 1
+                        # A scratch definition is stored to its spill slot at once.
+                        val next = block.insts[index + 1]
+                        if next.opcode != X86_OP_MOV_MEM_REG or reg_id(operand_get_reg(next.operands[1])) != dest: r10_r11_unsaved = r10_r11_unsaved + 1
+        expect(virtual_left).to_equal(0)
+        expect(spill_loads > 0).to_equal(true)
+        expect(frame_overlaps).to_equal(0)
+        # Values only reach R10/R11 as spill scratch, immediately stored back.
+        expect(r10_r11_defs > 0).to_equal(true)
+        expect(r10_r11_unsaved).to_equal(0)
+        expect(allocated.frame_size > 128).to_equal(true)
+
+    it "borrows a third scratch register with push/pop":
+        var assignments: Dict<i64, i64> = {}
+        assignments[7] = X86_RBX
+        var spills: Dict<i64, i64> = {}
+        spills[1] = 0
+        spills[2] = 1
+        spills[3] = 2
+        assignments[1] = -1
+        assignments[2] = -1
+        assignments[3] = -1
+        val result = RegAllocResult(assignments: assignments, spills: spills, frame_size_addition: 24, used_callee_saved: [])
+        val inst = new_mach_inst(X86_OP_AVX512_INDEXED, [vreg(1), vreg(2), vreg(3), op_imm(-64), op_imm(-128), op_imm(0), op_imm(3), op_imm(0)])
+        val out = rewrite_inst_x86_avx512_spill(inst, result, 256)
+        expect(out.len()).to_equal(9)
+        expect(out[0].opcode).to_equal(X86_OP_PUSH)
+        val borrowed = reg_id(operand_get_reg(out[0].operands[0]))
+        expect(borrowed != X86_R10 and borrowed != X86_R11 and borrowed != X86_RAX).to_equal(true)
+        expect(rbp_offset(out[1].operands[1])).to_equal(0 - (256 + 8))
+        expect(rbp_offset(out[3].operands[1])).to_equal(0 - (256 + 24))
+        expect(out[4].opcode).to_equal(X86_OP_AVX512_INDEXED)
+        expect(reg_id(operand_get_reg(out[4].operands[0]))).to_equal(X86_R11)
+        expect(reg_id(operand_get_reg(out[4].operands[1]))).to_equal(X86_R10)
+        expect(reg_id(operand_get_reg(out[4].operands[2]))).to_equal(borrowed)
+        expect(out[8].opcode).to_equal(X86_OP_POP)
+        expect(reg_id(operand_get_reg(out[8].operands[0]))).to_equal(borrowed)
+
+    it "keeps the frame-vector spill rewriter wired into x86 allocation":
         val source = rt_file_read_text("src/compiler/70.backend/backend/native/regalloc.spl") ?? ""
-        expect(source.contains("if not x86_avx512_spill_admitted(has_avx512, result.spills.len()):")).to_be_true()
-        expect(source.contains("x86-avx512 native GPR pressure requires")).to_be_true()
-        expect(source.contains("[rewrite_inst_no_spill(inst, result, \"x86-avx512\")]")).to_be_true()
+        expect(source.contains("rewrite_inst_x86_avx512_spill(inst, result, func.frame_size)")).to_be_true()
+        expect(source.contains("generic x86 spill rewriting is unsafe for AVX-512 functions")).to_be_false()

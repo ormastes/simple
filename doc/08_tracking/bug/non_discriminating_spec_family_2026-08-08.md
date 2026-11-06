@@ -439,3 +439,41 @@ Remediation needs an owner decision (port the TypeId surface to
 `src/compiler/20.hir` and rewrite the spec with real assertions, or delete the
 spec as covering a nonexistent module). No spec was changed in this slice.
 The family remediation remains OPEN.
+
+## 2026-11-06 owner decision — port TypeId, rewrite hir_types_spec (headline finding remediated)
+
+**Decision (2026-11-06, owner decision):** port the TypeId surface used by
+`hir_types_spec.spl` into the Simple sources and rewrite the spec's 86
+`expect true` placeholders as real, discriminating assertions (rather than
+deleting the spec).
+
+Done on branch `work/hir-typeid-port`:
+
+- Ported the HIR type model (`TypeId`, `BinOp`, `UnaryOp`, `DispatchMode`,
+  `CaptureMode`, `LocalVar`, `CapturedVar`, `HirExprKind`, `HirStmtKind`,
+  `HirPatternKind`, `HirLiteral`, `HirExprNode`, `HirStmtNode`) from
+  `src/compiler_rust/lib/std/src/hir/types.spl` to
+  `src/lib/common/hir/types.spl` (`use std.common.hir.types.{...}`); it is pure,
+  allocation-free and panic-free (total `match`es, no indexing).
+- Rewrote `test/01_unit/compiler/hir/hir_types_spec.spl`: 0 `expect true`, no
+  `skip` tags, live import, and every predicate case pairs the positive with a
+  negative/neighbour case. 96 examples.
+- Evidence (seed `bin/simple.exe test`, Windows): RED before the port —
+  `outcome=ERROR declared>=96 executed=0`; GREEN after —
+  `outcome=OK executed=96 passed=96 failed=0`. Mutation check: forcing
+  `TypeId.is_void()` to `true` turns it to `passed=95 failed=1`.
+  `check-vacuous-specs.shs --root <dir>`: old spec `86 flagged`, new spec
+  `0 flagged`.
+- **Real defect the rewritten spec found (would have stayed hidden under
+  `expect true`):** `TypeId.name()` returned `type_0`/`type_1`/... for every
+  primitive in the spec lane. Root cause: the seed interpreter's literal
+  pattern matcher (`src/compiler_rust/compiler/src/interpreter_patterns.rs`,
+  `Pattern::Literal` → `Expr::Integer` arm) only matches `Value::Int`, so a
+  `u32`-typed subject (field or `val x: u32`) never hits an integer arm in the
+  spec lane, even when passed through an `i64` parameter (`bin/simple.exe run`
+  does not reproduce it). Worked around in the port with `match self.id as
+  i64`; the seed matcher gap itself remains open and is recorded here as a
+  concrete seed bug (unsigned-int subject vs integer literal pattern).
+
+The family (other flagged specs) remains OPEN; only the headline
+`hir_types_spec` finding is remediated.

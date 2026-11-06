@@ -434,6 +434,13 @@ s.char_at(99)                       # "" (char_at keeps its over-run policy)
   literal and stays text; grapheme handling is a separate API.
 - `s[i]` indexes by code point; `.len()` counts code points (staged);
   `.byte_len()` / `byte_at` are byte-level.
+- **Two explicit length functions (owner decision 2026-11-06):** `s.byte_len()`
+  = UTF-8 bytes, `s.char_count()` = code points (`s.chars().len()` is the O(n)
+  equivalent). Prefer these over `len()`, which is ambiguous today (bytes in
+  both engines; `s[i]` is bounded by `char_count()`, not `len()`). Known gap:
+  under `simple run` (JIT) `s.byte_len()` yields an untagged int (prints
+  `<invalid-heap:0x9>`, `byte_len() == len()` is false) - `+ 0` first.
+  Spec: `test/01_unit/lib/text/text_len_units_spec.spl`.
 - A `char` is not a condition: `if c:` / `while c:` is a type error. Write
   `c != '\0'`.
 - Staged warnings (non-exhaustive match, `Any` outside `unsafe:`, char used as
@@ -1431,14 +1438,19 @@ Writing the group longhand — a trait listing every method of both members —
 remains valid and is what the landed
 `src/lib/common/debug/debug_profiler.spl` does.
 
-Two rules that go with groups and are *not* optional — classes are value types,
-so a mis-shaped group silently does nothing:
+Two rules that go with groups and are *not* optional. `class` values are
+**reference types** on every engine (owner decision 2026-11-06; the seed
+interpreter's shared `Value::ClassInstance` carrier is the default since
+2026-11-04); `struct` values are **value types** that copy on bind, store and
+read-back. A group shaped around a struct therefore silently does nothing:
 
 - A group is **one trait over one value**, acquired through a **single**
   accessor. Never a struct pairing two accessors (that holds two diverging
   copies).
-- Every mutating trait method must be `me`, not `fn`. A `fn` method receives a
-  **copy** and discards mutation with no diagnostic.
+- Every mutating trait method must be `me`, not `fn`. On a `struct` receiver a
+  `fn` method gets a **copy** and discards mutation with no diagnostic; on a
+  `class` receiver the mutation is visible, but `fn` still declares a
+  non-mutating contract.
 
 Full treatment, including the acquisition-position aliasing trap:
 [Authoring a capability library](../language/capability_library_authoring.md).
