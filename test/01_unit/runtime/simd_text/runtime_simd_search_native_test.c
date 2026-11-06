@@ -1,6 +1,8 @@
 /* Include the implementation first: this also checks its feature-test
  * macro ordering without help from the test or compiler command line. */
 #include "runtime_simd_search.c"
+/* Owner of simd_text_init and the levelled text provider route. */
+#include "runtime_simd_utf8.c"
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -26,7 +28,6 @@ int main(void) {
     const uint8_t binary_needle[] = {0, 0x80};
     uint8_t haystack[96];
     const uint8_t needle[] = {0x80, 0, 0xff};
-    local_dispatch_init();
     check_search(text, 0, text, 0, 0);
     check_search(text, 5, text, 0, 0);
     check_search(text, 0, text, 1, -1);
@@ -46,6 +47,6 @@ int main(void) {
         check_search(haystack, sizeof(haystack), needle, sizeof(needle), (int64_t)offset);
         check_search(haystack, offset + sizeof(needle) - 1, needle, sizeof(needle), -1);
     }
-    printf("PASS: %u scalar and selected SIMD search cases\n", checks);
+    printf("PASS: %u scalar and selected-route search cases\n", checks);
     return 0;
 }

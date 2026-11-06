@@ -109,10 +109,17 @@ build_target() {
         if [ "$f2" != - ]; then
             c "$cc" $tf $warn $mflags $ren -c "$src/$f2" -o "$d/l$lv-http.o" || fail "$t L$lv $f2 compile"
         fi
+        # Text kernels take the level's -march; the x86-64 L4 row builds its
+        # bitmap/http TUs with target attributes, so text gets x86-64-v4 there.
+        tm=$mflags; [ "$(arch_of "$t"):$lv" = x86_64:4 ] && tm=-march=x86-64-v4
+        c "$cc" $tf $warn $tm -Dsimple_text_kernel=simple_text_kernel_l$lv -c "$src/text_level_kernels.c" -o "$d/l$lv-text.o" \
+            || fail "$t L$lv text_level_kernels.c compile"
     done <"$d/levels.txt"
     for cap in 0 1 2 3 4; do
         c "$cc" $tf $warn $base $novec -DSIMPLE_VECTOR_MAX_LEVEL=$cap -c "$src/vector_level_dispatch.c" -o "$d/dispatch-cap$cap.o" \
             || { fail "$t dispatcher cap$cap compile"; return; }
+        c "$cc" $tf $warn $base $novec -DSIMPLE_VECTOR_MAX_LEVEL=$cap -c "$src/text_level_dispatch.c" -o "$d/textdispatch-cap$cap.o" \
+            || { fail "$t text dispatcher cap$cap compile"; return; }
         [ "$link" = yes ] || continue
         # The cap changes behaviour, so it is part of the implementation identity.
         mkdir -p "$d/id$cap"
@@ -134,10 +141,10 @@ build_target() {
         case $t in
             *windows*)
                 printf 'EXPORTS\nsimple_provider_query_v1\nsimple_vector_apply_v1\nsimple_vector_executed_iterations_v1\nsimple_vector_selected_level_v1\nsimple_vector_level_reason_v1\n' >"$d/provider.def"
-                c "$cc" $tf -shared -fuse-ld=lld -Wl,--no-insert-timestamp "$d/provider-cap$cap.o" "$d/dispatch-cap$cap.o" $objs "$d/provider.def" -o "$d/$name.dll" \
+                c "$cc" $tf -shared -fuse-ld=lld -Wl,--no-insert-timestamp "$d/provider-cap$cap.o" "$d/dispatch-cap$cap.o" "$d/textdispatch-cap$cap.o" $objs "$d/provider.def" -o "$d/$name.dll" \
                     || { fail "$t link $name"; continue; } ;;
             *)
-                c "$cc" $tf -shared -fuse-ld=lld "$d/provider-cap$cap.o" "$d/dispatch-cap$cap.o" $objs -o "$d/$name.so" \
+                c "$cc" $tf -shared -fuse-ld=lld "$d/provider-cap$cap.o" "$d/dispatch-cap$cap.o" "$d/textdispatch-cap$cap.o" $objs -o "$d/$name.so" \
                     || { fail "$t link $name"; continue; } ;;
         esac
     done
@@ -146,6 +153,9 @@ build_target() {
         || fail "$t bench harness compile"
     c "$cc" $tf -std=c11 -O2 -Wall -Wextra -Werror -fuse-ld=lld "$parity" -o "${exe%vector_level_bench*}vector_level_parity_selftest${exe##*vector_level_bench}" \
         $( case $t in *windows*) ;; *) echo -ldl;; esac ) || fail "$t parity selftest compile"
+    c "$cc" $tf -std=c11 -O2 -Wall -Wextra -Werror -fuse-ld=lld "$root/src/runtime/test/vector_text_level_parity.c" \
+        -o "${exe%vector_level_bench*}vector_text_level_parity${exe##*vector_level_bench}" $( case $t in *windows*) ;; *) echo -ldl;; esac ) \
+        || fail "$t text parity harness compile"
     gate_images "$t" "$d"
     (cd "$d" && sha256sum ./*.dll ./*.so 2>/dev/null) >"$d/artifacts.sha256"
     ok "$t built $(wc -l <"$d/artifacts.sha256") levelled DSO(s)"
@@ -175,7 +185,7 @@ isa_selftest() { # isa_selftest LABEL LEVEL DISASSEMBLY EXPECTED_VERDICT
 
 gate_isa() {
     t=$1 d=$2 a=$(arch_of "$1")
-    for f in "$d"/dispatch-cap4.o "$d"/provider-cap4.o; do
+    for f in "$d"/dispatch-cap4.o "$d"/textdispatch-cap4.o "$d"/provider-cap4.o; do
         [ -f "$f" ] || continue
         "$objdump" -d "$f" >"$f.dis" 2>&1
         case $a in
@@ -312,6 +322,9 @@ run_caps() { # run_caps DIR HOSTLEVEL HOSTREASON RUNNER... ; caps at/above host 
             if [ "$truth" = "$host" ]; then ok "$(basename "$d") uncapped L$host = CPUID-decoded L$truth"
             else fail "$(basename "$d") uncapped L$host != CPUID-decoded L$truth"; fi
         fi
+        par=$(ls "$d"/vector_text_level_parity.exe "$d"/vector_text_level_parity 2>/dev/null | head -1)
+        line=$("$@" "$par" "$dso" "$expect" "${TEXT_CASES:-20000}" 2>&1); rc=$?
+        if [ $rc -eq 0 ]; then ok "$(basename "$d") cap$cap text: $line"; else fail "$(basename "$d") cap$cap text rc=$rc: $line"; fi
     done
 }
 
@@ -329,6 +342,13 @@ case $lanes in all|run)
         host=$(printf '%s\n' "$probe" | sed -n 's/.*level=\([0-9]\).*/\1/p')
         hreason=$(printf '%s\n' "$probe" | sed -n 's/.*reason=\([^ ]*\).*/\1/p')
         if [ -n "$host" ] && [ -n "$hreason" ]; then note "host $t admits L$host (reason=$hreason)"; run_caps "$out/$t" "$host" "$hreason"; else fail "$t host level probe did not run: $probe"; fi
+        # Runtime text route: static runtime is baseline-only, admission
+        # outcomes (absent / refused / admitted per cap) never change answers.
+        if [ -n "$host" ]; then
+            sh "$root/scripts/check/check-text-provider-route.shs" "$out/$t" "$t" "$host" >"$out/$t/text_route.log" 2>&1
+            line=$(tail -1 "$out/$t/text_route.log")
+            case $line in PASS*) ok "$t text route: $line";; *) fail "$t text route: $line (log: $out/$t/text_route.log)";; esac
+        fi
     else skip "run lane: unsupported host $(uname -s)"; fi
 ;; esac
 case $lanes in all|qemu)

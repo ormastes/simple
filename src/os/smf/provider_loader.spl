@@ -233,6 +233,34 @@ fn provider_artifact_path_allowed_v1(path: text, kind: text) -> bool:
         return path.ends_with(".so") or path.ends_with(".dylib") or path.ends_with(".dll")
     false
 
+fn _provider_native_extension_v1(path: text) -> bool:
+    path.ends_with(".so") or path.ends_with(".dylib") or path.ends_with(".dll")
+
+fn provider_artifact_path_allowed_for_exe_v1(path: text, kind: text, exe_dir: text) -> bool:
+    """The fixed roots, plus ONE native file directly inside <exe_dir>/providers/.
+
+    `exe_dir` is the running executable's own directory as the process
+    resolved it ('/'-separated, no trailing '/'), never caller-chosen text. It
+    lets a deployed compiler admit the provider staged next to it (with a pin
+    baked at build time); any other directory, and any deeper path under
+    providers/, stays denied. The C runtime loader (runtime_simd_utf8.c,
+    text_provider_path_allowed) mirrors this rule.
+    """
+    if provider_artifact_path_allowed_v1(path, kind):
+        return true
+    if kind != "native" or exe_dir == "" or path == "":
+        return false
+    for bad in ["..", "//", "\\"]:
+        if path.contains(bad) or exe_dir.contains(bad):
+            return false
+    if exe_dir.ends_with("/"):
+        return false
+    val root = exe_dir + "/providers/"
+    if not path.starts_with(root):
+        return false
+    val leaf = path.substring(root.len(), path.len())
+    leaf != "" and not leaf.contains("/") and _provider_native_extension_v1(leaf)
+
 fn _provider_admission_policy_v1(request: ProviderAdmissionRequestV1,
         artifact_exists: bool, artifact_digest: text) -> ProviderAdmissionPolicyV1:
     if not provider_artifact_path_allowed_v1(request.artifact_path, request.artifact_kind):
@@ -662,7 +690,7 @@ export ProviderLoaderSessionV1, ProviderDynamicAdmissionV1, ProviderSessionQuery
 export ProviderSessionQueryOwnedResultV1, ProviderSessionReleaseOwnedResultV1
 export ProviderSessionCloseResultV1
 export ProviderSessionVectorCallV1, ProviderSessionVectorCallOwnedResultV1
-export ProviderArtifactSnapshotV1, provider_stage_artifact_snapshot_v1, provider_snapshot_dir_v1, provider_admission_outcome_v1, provider_artifact_digest_v1, provider_artifact_path_allowed_v1, provider_admit_evidence_v1, provider_admit_dynamic_v1
+export ProviderArtifactSnapshotV1, provider_stage_artifact_snapshot_v1, provider_snapshot_dir_v1, provider_admission_outcome_v1, provider_artifact_digest_v1, provider_artifact_path_allowed_v1, provider_artifact_path_allowed_for_exe_v1, provider_admit_evidence_v1, provider_admit_dynamic_v1
 export provider_query_abi_validate_v1
 export provider_session_query_v1, provider_session_release_v1, provider_session_close_v1
 export provider_session_query_owned_v1, provider_session_release_owned_v1
