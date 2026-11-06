@@ -324,3 +324,131 @@ robust/warn at strict, private-local exclusion, unknown roots, cached-admission
 refusal, and the production route fixture through the driver guard. It ran
 7/7 on the seed; a mutation disabling denial fails. The full `compile()`
 choke point is verification-pending on a self-hosted binary.
+
+## E1 effective export closure (design, 2026-11-06)
+
+Status: design handoff for the next code slice; nothing below is implemented
+by this section. It defines the one structural fact E2 still lacks: which
+retained callables are *effectively exported* from the compilation subject, so
+that a module verdict can become `Safe` and Unknown denial can activate.
+
+### Subject and model of record
+
+The closure is computed over the frozen `ModuleSurfacesByName` registry of
+one compile together with the retained signature facts and the frozen
+export-route facts. It is relative to that compilation subject: a facade that
+is not part of the compile is unseen, and the result says so rather than
+guessing. The visibility model of record is
+`00.common/dependency/visibility.spl` (Lean `VisibilityExport`): a declaration
+must be explicitly exported to be visible externally (`must_be_exported`), and
+nothing inside a child file can be more public than its directory manifest
+allows (`private_module_restricts`). Two facts about the current compiler
+bound what the closure can observe:
+
+- Export-origin rows exist only for explicit `export` / `export use` items
+  (`module_surface_export_index.spl` iterates `surface.exports`). A bare
+  `pub fn` with no export statement has no route and is therefore
+  `NotExported`; `pub` alone is a declaration shortcut, not publication.
+- The compiler frontend (`10.frontend/ast.spl`, `parser_types.spl`) has no
+  `mod` / `pub mod` node; only the interpreter loader's manifest reader
+  (`99.loader/module_resolver/manifest.spl`) parses them. A facade therefore
+  publishes through `export use` only; `pub mod` is not observable from the
+  frozen surface and is recorded as a model gap, not emulated.
+
+`35.semantics/visibility_checker.spl` treats `Visibility.Public` as visible
+everywhere and knows no ancestor chain. The closure follows the model of
+record, not the checker; it changes no W04xx diagnostic. The divergence is
+named here so that nobody reads a `NotExported` closure entry as a visibility
+error or a `Public` declaration as closure membership.
+
+### Definition
+
+For a retained module `M` bound to physical surface `p`, the *ancestor facade
+chain* is, for every proper dotted prefix `P` of `M`'s logical name (for a
+facade `X.__init__` the prefixes are those strictly shorter than `X`), the
+registry surface aliased by `P.__init__` (or by `P` when that alias resolves
+to a surface whose canonical path ends in `__init__.spl`), nearest first. A
+prefix with no facade surface in the registry is not a boundary and does not
+restrict, exactly as `checker_nearest_boundary_dir` treats a directory without
+`__init__.spl`; `src/lib` has no `__init__.spl`, so stdlib leaves publish by
+their own `export` list.
+
+A retained callable `(p, local_symbol, name)` has exactly one closure status:
+
+| Status | Rule |
+|---|---|
+| `Exported` | `M` has a `Joined` direct route (exporter `p`, terminal `p`, source `name`) **and** every facade in the ancestor chain has a `Joined` route whose terminal is `(p, name)`. The outermost such exporter is the *root exporter*. |
+| `NotExported` | No direct route for `name` exists, or some ancestor facade has no route whose terminal is `(p, name)`. The first missing exporter is recorded. |
+| `Unknown(reason)` | The direct route or an ancestor route exists but is not `Joined`; the route's own unknown reason is carried. Also when `M` has no retained facts, no surface binding, or the registry/route facts are missing, budget-truncated or malformed. |
+
+Routes are looked up once by `(exporter index, terminal index, source name)`
+over the bounded route array (4096 routes, 256 modules, 128 callables per
+module, chain depth bounded by 32 prefix segments). No HIR, symbol table or
+filesystem is consulted; no new registry pass is introduced. An outer facade
+whose re-export resolves to a middle facade instead of the terminal is
+`Unknown` with that route's reason (`export-authority-mismatch`), never
+`NotExported`.
+
+### Records and placement
+
+- `00.common/api_export_closure_facts_v1.spl`: `ApiExportClosureStatusV1
+  {Exported, NotExported, Unknown}`; `ApiExportClosureEntryV1` (terminal
+  physical index, terminal module, local symbol, declaration name, status,
+  reason, root exporter index/module, chain depth); `ApiExportClosureFactsV1`
+  (registry generation, entries, `unknown_reasons`, `truncated`,
+  `format_version`). Flat scalars only.
+- `20.hir/hir_lowering/api_export_closure_projection_v1.spl`:
+  `project_api_export_closure_v1(registry, routes, signatures) ->
+  ApiExportClosureFactsV1`, pure.
+- `30.types/type_infer/api_exposure_closure_v1.spl`:
+  `apply_api_export_closure_v1(exposure, closure) -> ApiModuleExposureV1`,
+  pure. `walk_api_exposure_v1` and `project_api_export_routes_v1` are not
+  edited; their specs stay collateral. `ApiCallableExposureV1` gains a
+  defaulted `export_status` field (`NotCollected` until applied).
+- `CompileContext.api_export_closure_facts: ApiExportClosureFactsV1?`,
+  computed in `run_typecheck_warn_pass` right after the route projection and
+  applied to every retained exposure row; cleared at pass entry and compile
+  entry together with the route facts; kept by the retain-products path.
+
+### Module verdict after closure
+
+`apply_api_export_closure_v1` replaces
+`effective-export-closure-not-collected` only when every retained callable of
+the module has a closure entry; otherwise the reason stays and
+`export-closure-incomplete` is added. The module verdict is then:
+
+- `Violates` iff some `Exported` callable walks `Violates`;
+- else `Unknown` iff any module-level unknown reason remains (budgets,
+  malformed facts, binding failures), any `Exported` callable walks `Unknown`,
+  or any callable's closure status is `Unknown`;
+- else `Safe`. An empty exported set with no unknowns is `Safe`: the module
+  publishes nothing.
+
+`NotExported` callables never drive the module verdict; their findings are
+retained for the explain path. This is a deliberate behaviour change for E2:
+a leaf `export`ed callable that its facade does not re-export is no longer a
+denied root, because it is not part of the effective public API
+(REQ-EAPI-001). The decision counts such roots as `excluded_roots`.
+
+### Unknown denial
+
+With the closure collected, `decide_api_publication_v1` may deny `Unknown`
+roots at a `Deny` disposition (REQ-EAPI-003 fail-closed) under the existing
+explicit activation. Consequence to state, not hide: every export whose
+signature carries a `Nominal` node is `Unknown("nominal-members-not-projected")`
+until nominal members are projected, so active robust builds of real code are
+denied for that reason. The switch therefore lands as its own commit with the
+publication-guard spec's "unknown roots" case flipped RED->GREEN on purpose,
+and the activation default stays an open owner question.
+
+### Spec obligations for the code slice
+
+`test/01_unit/compiler/hir_lowering/api_export_closure_projection_v1_spec.spl`
+(RED: module missing): facade re-export is `Exported` with the facade as root
+exporter; direct-only leaf export under a facade is `NotExported` naming the
+facade; a module with no facade in the registry is its own root; a route with
+an unknown reason propagates to `Unknown`; missing registry/routes yield no
+entries and an explicit reason. `api_exposure_walker_v1_spec.spl`,
+`api_export_route_projection_v1_spec.spl`, `api_signature_projection_v1_spec.spl`
+stay collateral; `api_publication_guard_v1_spec.spl` gains the excluded-root
+and (separately) the Unknown-denial case.
