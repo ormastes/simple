@@ -108,7 +108,7 @@ pub(crate) mod place;
 mod node_exec;
 pub(crate) use node_exec::{
     coerce_to_declared_field_of, coerce_to_declared_type, coerce_let_value, coerce_to_declared_unsigned, exec_assignment,
-    exec_augmented_assignment, exec_node, record_let_declared_width,
+    exec_augmented_assignment, exec_node, fixed_array_zero_element, record_let_declared_width,
 };
 
 // Block execution
