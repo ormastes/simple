@@ -938,23 +938,35 @@ impl MirLowering:
     # That is what left `for f in d.values()` with no element struct name and
     # collapsed every field read to offset 0 (see the bug comment in
     # _MirLoweringExpr/method_calls_literals.spl's values/keys arm). Try the
-    # real symbol table first, then use the canonical inverse, returning the
-    # bare name (the segment after the last '.') because that is the form
-    # `struct_value_syms` / `resolve_field_index` are keyed on.
+    # real symbol table first, then use the canonical inverse.
+    #
+    # The result is VALUE PROVENANCE (struct_value_syms /
+    # array_element_struct_syms), so a struct prefers its module-qualified
+    # declaration layout key, exactly like struct_value_provenance_key:
+    # resolve_field_index skips a bare name with conflicting field lists, so a
+    # bare result made `val x = DICT[k]; x.f` fail closed whenever ANY other
+    # module declared a same-named struct (Stage 2 run 13: 116 errors on the
+    # module-private DynSmfLoadedLibrary / LoadedModule). The bare segment is
+    # kept only when no unambiguous qualified layout is registered.
     me mir_struct_symbol_name(symbol: SymbolId) -> text:
         match self.symbols.get_symbol_raw(symbol.id):
             case Some(info):
                 if info != nil and info.name != "":
                     if info.kind == SymbolKind.Class: return mir_class_identity_raw(self.symbols, symbol.id)
+                    if info.kind == SymbolKind.Struct: return self.struct_value_provenance_key(info)
                     return info.name
             case None: ()
         val canonical_key = self.canonical_mir_type_key_v1(symbol.id)
         if canonical_key == "": return ""
         if self.class_type_names.has(canonical_key):
             return canonical_key
-        val canonical_parts = canonical_key.split(".")
-        if canonical_parts.len() == 0: return canonical_key
-        canonical_parts[canonical_parts.len() - 1]
+        val separator = canonical_key.rfind(".")
+        if separator <= 0: return canonical_key
+        val bare = canonical_key.substring(separator + 1)
+        val qualified = self.declared_struct_layout_key("{canonical_key.substring(0, separator)}::{bare}")
+        if qualified != bare and self.struct_field_order.has(qualified) and not self.struct_field_order_conflict_warned.contains(qualified):
+            return qualified
+        bare
 
     me canonical_mir_type_key_v1(symbol_id: i64) -> text:
         if val indexed_key = self.canonical_type_symbol_names.get(symbol_id):
