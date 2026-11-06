@@ -554,6 +554,7 @@ pub fn clear_module_cache() {
     MODULE_CLASSES_CACHE.with(|cache| cache.borrow_mut().clear());
     MODULE_FUNCTIONS_CACHE.with(|cache| cache.borrow_mut().clear());
     MODULE_ENUMS_CACHE.with(|cache| cache.borrow_mut().clear());
+    FLATTEN_OWNER_ENUMS.with(|table| table.borrow_mut().clear());
     MODULE_GLOBALS.with(|cache| cache.borrow_mut().clear());
     MODULE_GLOBALS_BY_OWNER.with(|cache| *cache.borrow_mut() = Arc::new(HashMap::new()));
     MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cache| cache.borrow_mut().clear());
@@ -607,6 +608,7 @@ pub fn clear_module_cache_selective() {
     MODULE_CLASSES_CACHE.with(|cache| cache.borrow_mut().retain(|k, _| is_stdlib(k)));
     MODULE_FUNCTIONS_CACHE.with(|cache| cache.borrow_mut().retain(|k, _| is_stdlib(k)));
     MODULE_ENUMS_CACHE.with(|cache| cache.borrow_mut().retain(|k, _| is_stdlib(k)));
+    FLATTEN_OWNER_ENUMS.with(|table| table.borrow_mut().retain_stdlib());
     MODULE_GLOBALS.with(|cache| cache.borrow_mut().clear());
     FUNCTION_OVERLOADS.with(|cache| cache.borrow_mut().clear());
     MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cache| {
@@ -1657,12 +1659,43 @@ mod tests {
 /// enum beats the cross-module `GLOBAL_ENUMS` last-registration-wins entry.
 /// See bug `seed_enum_variant_bare_name_last_registration_wins_2026_10_19`.
 pub fn owner_module_enum(name: &str) -> Option<Arc<EnumDef>> {
-    owner_module_def(name, |owner, name| {
+    // A first-class enum type/constructor already carries an exact identity;
+    // it must not be re-bound by the module in which it is later used.
+    if name.starts_with(crate::interpreter::FLATTEN_OWNER_SYMBOL_PREFIX) {
+        return crate::interpreter::GLOBAL_ENUMS.with(|t| t.borrow().get(name).cloned());
+    }
+    let owned = owner_module_def(name, |owner, name| {
         FLATTEN_OWNER_ENUMS
             .with(|t| t.borrow().get(owner).and_then(|m| m.get(name).cloned()))
             .or_else(|| {
                 MODULE_ENUMS_CACHE.with(|cache| cache.borrow().get(Path::new(owner)).and_then(|m| m.get(name).cloned()))
             })
+    });
+    owned
+}
+
+/// Existing source-name census fallback, separate from the owner-only API.
+pub(crate) fn unique_enum_definition(name: &str) -> Option<Arc<EnumDef>> {
+    // Canonical builtins have no source declaration qualification.
+    if matches!(name, "Option" | "Result") {
+        if let Some(builtin) = crate::interpreter::GLOBAL_ENUMS.with(|t| t.borrow().get(name).cloned()) {
+            return Some(builtin);
+        }
+    }
+    // Legacy/global lookup is allowed only for a unique declaration. More
+    // than one identity never becomes a first/last-registration winner.
+    FLATTEN_OWNER_ENUMS.with(|table| table.borrow().unique_names.get(name).and_then(|entry| entry.clone()))
+}
+
+pub(crate) fn enum_source_name(def: &EnumDef) -> &str {
+    def.attributes.iter().find_map(|a| a.name.strip_prefix(crate::interpreter::FLATTEN_ENUM_SOURCE_NAME_ATTR_PREFIX))
+        .unwrap_or(&def.name)
+}
+
+pub(crate) fn enum_display_name(identity: &str) -> String {
+    crate::interpreter::GLOBAL_ENUMS.with(|table| {
+        table.borrow().get(identity).map(|def| enum_source_name(def).to_owned())
+            .unwrap_or_else(|| identity.to_owned())
     })
 }
 
@@ -1693,8 +1726,46 @@ thread_local! {
     /// Flattened-lane enum table keyed by declaring module (owner path key);
     /// the flat `enums`/`GLOBAL_ENUMS` maps are last-registration-wins by bare
     /// name. See bug seed_enum_variant_bare_name_last_registration_wins_2026_10_19.
-    static FLATTEN_OWNER_ENUMS: RefCell<HashMap<Arc<str>, HashMap<String, Arc<EnumDef>>>> =
-        RefCell::new(HashMap::new());
+    static FLATTEN_OWNER_ENUMS: RefCell<OwnerEnumTable> = RefCell::new(OwnerEnumTable::default());
+}
+
+#[derive(Default)]
+struct OwnerEnumTable {
+    declarations: HashMap<Arc<str>, HashMap<String, Arc<EnumDef>>>,
+    // Derived index of the existing owner census, never an independent ID
+    // allocator. None records ambiguity; resolution remains O(1) on hot paths.
+    unique_names: HashMap<String, Option<Arc<EnumDef>>>,
+}
+
+impl std::ops::Deref for OwnerEnumTable {
+    type Target = HashMap<Arc<str>, HashMap<String, Arc<EnumDef>>>;
+    fn deref(&self) -> &Self::Target { &self.declarations }
+}
+impl std::ops::DerefMut for OwnerEnumTable {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.declarations }
+}
+impl OwnerEnumTable {
+    fn index(index: &mut HashMap<String, Option<Arc<EnumDef>>>, def: &Arc<EnumDef>) {
+        index.entry(enum_source_name(def).to_owned()).and_modify(|known| {
+            if known.as_ref().is_some_and(|prior| prior.name != def.name ||
+                prior.attributes.iter().find_map(|a| a.name.strip_prefix(crate::interpreter::FLATTEN_MODULE_OWNER_ATTR_PREFIX)) !=
+                def.attributes.iter().find_map(|a| a.name.strip_prefix(crate::interpreter::FLATTEN_MODULE_OWNER_ATTR_PREFIX))) {
+                *known = None;
+            } else if known.is_some() {
+                // Re-registration of one declaration must refresh methods,
+                // payload fields and variants rather than retain the old Arc.
+                *known = Some(Arc::clone(def));
+            }
+        }).or_insert_with(|| Some(Arc::clone(def)));
+    }
+    fn clear(&mut self) { self.declarations.clear(); self.unique_names.clear(); }
+    fn retain_stdlib(&mut self) {
+        self.declarations.retain(|owner, _| owner.contains("src/lib/") || owner.contains("src\\lib\\"));
+        self.unique_names.clear();
+        for declarations in self.declarations.values() {
+            for def in declarations.values() { Self::index(&mut self.unique_names, def); }
+        }
+    }
 }
 
 /// Record a flattened enum under its declaring module, read from the owner
@@ -1703,16 +1774,16 @@ thread_local! {
 /// non-flattened run) are not recorded.
 pub fn record_flattened_owner_enum(enum_def: &Arc<EnumDef>) {
     let owner = enum_def.attributes.iter().find_map(|a| {
-        a.name
-            .strip_prefix(crate::interpreter::FLATTEN_MODULE_OWNER_ATTR_PREFIX)
-            .map(|raw| Arc::<str>::from(normalize_path_key(Path::new(raw)).to_string_lossy().as_ref()))
+        a.name.strip_prefix(crate::interpreter::FLATTEN_MODULE_OWNER_ATTR_PREFIX)
+            .map(|raw| if raw == "<entry>" { Arc::<str>::from(raw) }
+                else { Arc::<str>::from(normalize_path_key(Path::new(raw)).to_string_lossy().as_ref()) })
     });
     if let Some(owner) = owner {
         FLATTEN_OWNER_ENUMS.with(|t| {
-            t.borrow_mut()
-                .entry(owner)
-                .or_default()
-                .insert(enum_def.name.clone(), Arc::clone(enum_def));
+            let mut table = t.borrow_mut();
+            table.entry(owner).or_default()
+                .insert(enum_source_name(enum_def).to_owned(), Arc::clone(enum_def));
+            OwnerEnumTable::index(&mut table.unique_names, enum_def);
         });
     }
 }
@@ -1960,5 +2031,248 @@ mod enum_owner_collision_tests {
         // Explicitly importing the same name lets it win.
         let named = vec!["Mode".to_string()];
         assert!(unimported_def_collisions(Some(&named), &incoming, &scope).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod owner_identity_lifecycle_tests {
+    use super::*;
+    use simple_parser::{ast::{Attribute, Node}, Parser};
+
+    fn definition(owner: &str, source: &str) -> Arc<EnumDef> {
+        let mut def = Parser::new(source).parse().unwrap().items.into_iter().find_map(|node| match node {
+            Node::Enum(def) => Some(def), _ => None,
+        }).unwrap();
+        let original = def.name.clone();
+        def.name = crate::interpreter::flatten_owner_mangled_name(owner, &original);
+        def.attributes.extend([
+            Attribute { span: def.span, name: format!("{}{owner}", crate::interpreter::FLATTEN_MODULE_OWNER_ATTR_PREFIX), value: None, args: None, named_args: None },
+            Attribute { span: def.span, name: format!("{}{original}", crate::interpreter::FLATTEN_ENUM_SOURCE_NAME_ATTR_PREFIX), value: None, args: None, named_args: None },
+        ]);
+        Arc::new(def)
+    }
+
+    #[test]
+    fn same_identity_reregistration_refreshes_unique_lookup_metadata() {
+        clear_module_cache();
+        let old = definition("/probe/warm_reload.spl", "enum WarmReloadMode:\n    Old\n");
+        let fresh = definition("/probe/warm_reload.spl", "enum WarmReloadMode:\n    New(value: i64)\n    fn fresh_method(self) -> i64:\n        7\n");
+        record_flattened_owner_enum(&old);
+        record_flattened_owner_enum(&fresh);
+        let resolved = unique_enum_definition("WarmReloadMode").expect("unique refreshed declaration");
+        assert!(Arc::ptr_eq(&resolved, &fresh), "index retained the previous definition Arc");
+        assert_eq!(resolved.variants[0].name, "New");
+        assert_eq!(resolved.variants[0].fields.as_ref().unwrap().len(), 1);
+        assert!(resolved.methods.iter().any(|method| method.name == "fresh_method"));
+        clear_module_cache();
+        assert!(unique_enum_definition("WarmReloadMode").is_none());
+    }
+
+    #[test]
+    fn selective_cache_clear_rebuilds_uniqueness_after_user_owner_removal() {
+        clear_module_cache();
+        let standard = definition("/probe/src/lib/common/warm_mode.spl", "enum RetainedMode:\n    Standard\n");
+        let application = definition("/probe/app/warm_mode.spl", "enum RetainedMode:\n    Application\n");
+        record_flattened_owner_enum(&standard);
+        record_flattened_owner_enum(&application);
+        assert!(unique_enum_definition("RetainedMode").is_none(), "two owners must remain ambiguous");
+        clear_module_cache_selective();
+        let resolved = unique_enum_definition("RetainedMode").expect("stdlib owner retained");
+        assert!(Arc::ptr_eq(&resolved, &standard));
+        clear_module_cache();
+        assert!(unique_enum_definition("RetainedMode").is_none());
+    }
+
+    #[test]
+    fn actual_stdlib_module_loading_exports_canonical_family_names() {
+        clear_module_cache();
+        crate::interpreter::clear_interpreter_state();
+        let core = Path::new(env!("CARGO_MANIFEST_DIR")).join("../lib/std/src/core");
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let mut enums = HashMap::new();
+        for (file, name, expected_id) in [("option.spl", "Option", 1), ("result.spl", "Result", 0)] {
+            let path = core.join(file).canonicalize().expect("actual stdlib provider");
+            let source = std::fs::read_to_string(&path).expect("actual stdlib source");
+            let mut ast = Parser::new(&source).parse().expect("actual stdlib grammar");
+            mark_selected_builtin_enum_origins(&mut ast.items, &path, |_| Some(path.clone()));
+            let (_, exports, _, _, _) = crate::interpreter::interpreter_module::evaluate_module_exports(
+                &ast.items, Some(&path), &mut functions, &mut classes, &mut enums,
+            ).expect("actual stdlib module evaluation");
+            let Some(Value::EnumType { enum_name }) = exports.get(name) else {
+                panic!("stdlib module did not export its enum type {name}");
+            };
+            assert_eq!(enum_name, name, "actual stdlib family was treated as a user nominal type");
+            assert_eq!(crate::codegen::shared::enum_runtime_type_id(enum_name), expected_id);
+        }
+        clear_module_cache();
+        crate::interpreter::clear_interpreter_state();
+    }
+}
+
+
+/// This name is not source syntax: Attribute.name is parsed as an identifier,
+/// which cannot contain NUL. Parsed AST caches are populated before stamping.
+pub(crate) const SELECTED_BUILTIN_ENUM_ORIGIN: &str = "\0simple_selected_builtin_enum_origin=";
+
+pub(crate) fn builtin_enum_shape(def: &EnumDef, source_name: &str) -> bool {
+    let (params, expected): (usize, &[(&str, usize)]) = match source_name {
+        "Option" => (1, &[("Some", 1), ("None", 0)]),
+        "Result" => (2, &[("Ok", 1), ("Err", 1)]),
+        _ => return false,
+    };
+    def.generic_params.len() == params && def.variants.len() == expected.len()
+        && expected.iter().all(|(name, arity)| def.variants.iter().any(|variant|
+            variant.name == *name && variant.fields.as_ref().map_or(0, Vec::len) == *arity))
+}
+
+/// Mark only the physical module's own declarations after actual resolution.
+/// `selected` is supplied by the SAME importing loader and importer context.
+pub(crate) fn mark_selected_builtin_enum_origins(
+    items: &mut [simple_parser::ast::Node], module_path: &Path,
+    mut selected: impl FnMut(&str) -> Option<PathBuf>,
+) {
+    let physical = normalize_path_key(module_path);
+    let owner = physical.to_string_lossy();
+    for item in items {
+        let simple_parser::ast::Node::Enum(def) = item else { continue; };
+        let stem = match def.name.as_str() { "Option" => "option", "Result" => "result", _ => continue };
+        // An imported/flattened nested declaration belongs to its real owner.
+        if def.attributes.iter().filter_map(|a| a.name.strip_prefix(crate::interpreter::FLATTEN_MODULE_OWNER_ATTR_PREFIX))
+            .any(|declared| normalize_path_key(Path::new(declared)) != physical) { continue; }
+        // Reclassification is performed on an unshared owned AST, never values.
+        def.attributes.retain(|a| !a.name.starts_with(SELECTED_BUILTIN_ENUM_ORIGIN));
+        if selected(stem).is_some_and(|path| normalize_path_key(&path) == physical) {
+            def.attributes.push(simple_parser::ast::Attribute {
+                span: def.span, name: format!("{SELECTED_BUILTIN_ENUM_ORIGIN}{owner}"),
+                value: None, args: None, named_args: None,
+            });
+        }
+    }
+}
+
+/// Existing module caches are physical-path keyed. Refuse a second provider
+/// election that would silently change the meaning of already live values.
+pub(crate) fn check_cached_builtin_enum_origins(
+    module_path: &Path, importer: &Path,
+    mut selected: impl FnMut(&str) -> Option<PathBuf>,
+) -> Result<(), crate::error::CompileError> {
+    let Some(definitions) = cached_module_enums(module_path) else { return Ok(()); };
+    let physical = normalize_path_key(module_path);
+    for def in definitions.values() {
+        // Module export caches may retain imported/re-exported definitions.
+        // Their family election belongs to their declaring physical module,
+        // never to the facade/cache-container path.
+        let declared_owner = def.attributes.iter().find_map(|a|
+            a.name.strip_prefix(SELECTED_BUILTIN_ENUM_ORIGIN)
+                .or_else(|| a.name.strip_prefix(crate::interpreter::FLATTEN_MODULE_OWNER_ATTR_PREFIX)));
+        if declared_owner.is_none_or(|owner| normalize_path_key(Path::new(owner)) != physical) { continue; }
+        let name = enum_source_name(def);
+        let stem = match name { "Option" => "option", "Result" => "result", _ => continue };
+        let elected = selected(stem);
+        let expected = builtin_enum_shape(def, name)
+            && elected.as_ref().is_some_and(|path| normalize_path_key(path) == physical);
+        let actual = def.name == name;
+        if expected != actual {
+            return Err(crate::error::CompileError::Runtime(format!(
+                "builtin enum provider conflict for {} imported from {}: selected {:?}; cached family {}; use a fresh isolated module context",
+                physical.display(), importer.display(), elected, def.name,
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod selected_builtin_provider_tests {
+    use super::*;
+    use simple_parser::{Parser, ast::Node};
+
+    const OPTION: &str = "enum Option<T>:\n    Some(value: T)\n    None\n";
+
+    fn load_type(import: &str, caller: &Path) -> String {
+        let statement = Parser::new(import).parse().unwrap().items.into_iter().find_map(|node| match node {
+            Node::UseStmt(statement) => Some(statement), _ => None,
+        }).expect("use fixture");
+        let value = crate::interpreter::interpreter_module::load_and_merge_module(
+            &statement, Some(caller), &mut HashMap::new(), &mut HashMap::new(), &mut HashMap::new(),
+        ).expect("actual loader route");
+        let Value::EnumType { enum_name } = value else { panic!("import did not return enum type") };
+        enum_name
+    }
+
+    #[test]
+    fn actual_loader_elects_selected_provider_and_rejects_suffix_impostor() {
+        clear_module_cache();
+        crate::interpreter::clear_interpreter_state();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let standard = root.join("src/lib/core/option.spl");
+        let application = root.join("app/fake/src/lib/core/option.spl");
+        for path in [&standard, &application] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, OPTION).unwrap();
+        }
+        let caller = root.join("src/main.spl");
+        std::fs::write(&caller, "# importer\n").unwrap();
+        assert_eq!(load_type("use std.core.option.Option\n", &caller), "Option");
+        let custom = load_type("use app.fake.src.lib.core.option.Option\n", &caller);
+        assert!(custom.starts_with(crate::interpreter::FLATTEN_OWNER_SYMBOL_PREFIX));
+        assert!(crate::codegen::shared::enum_runtime_type_id(&custom) > 1);
+        clear_module_cache();
+        crate::interpreter::clear_interpreter_state();
+    }
+
+    #[test]
+    fn actual_loader_elects_displaced_family_provider_without_suffix_inference() {
+        clear_module_cache();
+        crate::interpreter::clear_interpreter_state();
+        let temp = tempfile::tempdir().unwrap();
+        let provider = temp.path().join("src/lib/common/core/option.spl");
+        std::fs::create_dir_all(provider.parent().unwrap()).unwrap();
+        std::fs::write(&provider, OPTION).unwrap();
+        let caller = temp.path().join("src/main.spl");
+        std::fs::write(&caller, "# importer\n").unwrap();
+        assert_eq!(load_type("use std.core.option.Option\n", &caller), "Option");
+        clear_module_cache();
+        crate::interpreter::clear_interpreter_state();
+    }
+
+    #[test]
+    fn warm_module_provider_conflict_is_rejected_before_registry_merge() {
+        clear_module_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("option.spl");
+        std::fs::write(&path, OPTION).unwrap();
+        let mut ast = Parser::new(OPTION).parse().unwrap();
+        mark_selected_builtin_enum_origins(&mut ast.items, &path, |_| Some(path.clone()));
+        let def = ast.items.into_iter().find_map(|node| match node { Node::Enum(def) => Some(Arc::new(def)), _ => None }).unwrap();
+        let definitions = HashMap::from([("Option".into(), Arc::clone(&def))]);
+        cache_module_definitions(&path, &HashMap::new(), &HashMap::new(), &definitions);
+        assert!(check_cached_builtin_enum_origins(&path, Path::new("/provider-a/main.spl"), |_| Some(path.clone())).is_ok());
+        let error = check_cached_builtin_enum_origins(&path, Path::new("/provider-b/main.spl"), |_| None).unwrap_err();
+        assert!(error.to_string().contains("provider conflict"));
+        assert!(Arc::ptr_eq(cached_module_enums(&path).unwrap().get("Option").unwrap(), &def));
+        let facade = temp.path().join("facade.spl");
+        std::fs::write(&facade, "# facade\n").unwrap();
+        cache_module_definitions(&facade, &HashMap::new(), &HashMap::new(), &definitions);
+        assert!(check_cached_builtin_enum_origins(&facade, Path::new("/provider-b/main.spl"), |_| None).is_ok(),
+            "a facade cache container must not re-elect its imported enum's provider");
+        clear_module_cache();
+    }
+
+    #[test]
+    fn source_attribute_identifier_cannot_spell_trusted_nul_marker() {
+        let ast = Parser::new("@simple_selected_builtin_enum_origin\nenum Option<T>:\n    Some(value: T)\n    None\n").parse();
+        // Source decorators may be rejected on enums; if accepted, their
+        // identifier remains ordinary source spelling and cannot elect origin.
+        if let Ok(ast) = ast {
+            for node in ast.items {
+                if let Node::Enum(def) = node {
+                    assert!(def.attributes.iter().all(|a| !a.name.starts_with(SELECTED_BUILTIN_ENUM_ORIGIN)));
+                }
+            }
+        }
+        assert!(SELECTED_BUILTIN_ENUM_ORIGIN.starts_with('\0'));
     }
 }

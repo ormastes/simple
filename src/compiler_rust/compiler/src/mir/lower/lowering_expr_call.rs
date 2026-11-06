@@ -664,6 +664,10 @@ impl<'a> MirLowerer<'a> {
 
             // Check if this is an enum variant constructor (e.g., "Color::Blue" or "Color.Blue")
             if let Some((enum_name, variant_name)) = Self::split_enum_qualified_name(name) {
+                let resolved_enum_name = self.type_registry.and_then(|types| types.get(callee.ty))
+                    .and_then(|ty| match ty { crate::hir::HirType::Enum { name, .. } => Some(name.clone()), _ => None })
+                    .unwrap_or_else(|| enum_name.to_owned());
+                let enum_name = resolved_enum_name.as_str();
                 if arg_regs.len() == 1 {
                     let receiver = args.first();
                     match variant_name {

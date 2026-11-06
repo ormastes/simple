@@ -45,6 +45,8 @@ pub(crate) enum Projection {
     Field(String),
     /// `[expr]` — the index/key already evaluated to a value.
     Index(Value),
+    /// A checked Option/Result payload projection for temporary assignment chains.
+    Unwrap,
 }
 
 /// A resolved lvalue: a variable slot in `env` plus the projections that lead
@@ -135,78 +137,83 @@ pub(crate) fn resolve_place(
     }
 }
 
-/// A call-result root bound by [`bind_call_root`]: the hidden binding name and
-/// whatever that name held before, restored by [`unbind_call_root`].
-pub(crate) struct CallRootBinding {
-    name: String,
-    saved: Option<Value>,
+
+/// Assignment projection chains rooted at a call are scoped temporaries, not
+/// caller variables. Inspecting this shape executes no user code.
+pub(crate) fn is_temporary_assignment_place(expr: &Expr) -> bool {
+    fn call_root(expr: &Expr) -> bool {
+        match expr {
+            Expr::Call { .. } | Expr::MethodCall { .. } => true,
+            Expr::FieldAccess { receiver, .. } | Expr::Index { receiver, .. } => call_root(receiver),
+            Expr::ForceUnwrap(inner) => call_root(inner),
+            _ => false,
+        }
+    }
+    match expr {
+        Expr::FieldAccess { receiver, .. } | Expr::Index { receiver, .. } => call_root(receiver),
+        _ => false,
+    }
 }
 
-/// For a projection place rooted at a call result (`get()[i()]`,
-/// `make().items[k]`), evaluate the call once, bind the value to a hidden
-/// local and return the place rewritten onto that local. `resolve_place` then
-/// evaluates the index subexpressions after the root, which is the owner
-/// contract of 2026-11-06: RHS first, then the root, then indices outer to
-/// inner, each once. Returns `None` when the root is not a call; such places
-/// keep their existing handling. The write lands in the bound value, so a
-/// value-typed result (an array) is a temporary and the write is not visible
-/// afterwards, while a shared class instance observes it.
-/// Bug: doc/08_tracking/bug/seed_interp_call_root_place_order_2026-11-06.md
-pub(crate) fn bind_call_root(
+/// Resolve the call and projection indices in caller context, exactly once.
+/// Storage is private to this assignment, so every return/error/unwind drops it
+/// without introducing hidden locals into the caller or a global registry.
+pub(crate) fn resolve_temporary_assignment_place(
     expr: &Expr,
     env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
     classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
-) -> Result<Option<(Expr, CallRootBinding)>, CompileError> {
-    fn root_of(expr: &Expr) -> &Expr {
+) -> Result<(Place, Env), CompileError> {
+    fn receiver_value(root: &Value, projections: &[Projection]) -> Result<Value, CompileError> {
+        let key = "\0assignment-receiver".to_string();
+        let mut storage = Env::new();
+        storage.insert(key.clone(), root.clone());
+        place_read(&storage, &Place { root: key, projections: projections.to_vec() })
+            .ok_or_else(|| CompileError::semantic("invalid assignment: missing temporary receiver"))
+    }
+    fn resolve(
+        expr: &Expr, env: &mut Env,
+        functions: &mut HashMap<String, Arc<FunctionDef>>,
+        classes: &mut HashMap<String, Arc<ClassDef>>,
+        enums: &Enums, impl_methods: &ImplMethods,
+    ) -> Result<(Value, Vec<Projection>), CompileError> {
         match expr {
-            Expr::FieldAccess { receiver, .. } | Expr::Index { receiver, .. } => root_of(receiver),
-            Expr::ForceUnwrap(inner) => root_of(inner),
-            other => other,
+            Expr::FieldAccess { receiver, field } => {
+                let (root, mut projections) = resolve(receiver, env, functions, classes, enums, impl_methods)?;
+                receiver_value(&root, &projections)?;
+                projections.push(Projection::Field(field.clone()));
+                Ok((root, projections))
+            }
+            Expr::Index { receiver, index } => {
+                let (root, mut projections) = resolve(receiver, env, functions, classes, enums, impl_methods)?;
+                // A missing intermediate receiver fails before the next index
+                // can run user code. Final field insertion remains unchanged.
+                receiver_value(&root, &projections)?;
+                let key = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
+                projections.push(Projection::Index(key));
+                Ok((root, projections))
+            }
+            Expr::ForceUnwrap(inner) => {
+                let (root, mut projections) = resolve(inner, env, functions, classes, enums, impl_methods)?;
+                let current = receiver_value(&root, &projections)?;
+                if super::expr::try_unwrap_option_or_result(&current).is_none() {
+                    return Err(CompileError::semantic(format!(
+                        "force unwrap failed: expected Some or Ok, got {}", current.to_display_string(),
+                    )));
+                }
+                projections.push(Projection::Unwrap);
+                Ok((root, projections))
+            }
+            _ => Ok((evaluate_expr(expr, env, functions, classes, enums, impl_methods)?, Vec::new())),
         }
     }
-    fn replace_root(expr: &Expr, name: &str) -> Expr {
-        match expr {
-            Expr::FieldAccess { receiver, field } => Expr::FieldAccess {
-                receiver: Box::new(replace_root(receiver, name)),
-                field: field.clone(),
-            },
-            Expr::Index { receiver, index } => Expr::Index {
-                receiver: Box::new(replace_root(receiver, name)),
-                index: index.clone(),
-            },
-            Expr::ForceUnwrap(inner) => Expr::ForceUnwrap(Box::new(replace_root(inner, name))),
-            _ => Expr::Identifier(name.to_string()),
-        }
-    }
-    if !matches!(expr, Expr::FieldAccess { .. } | Expr::Index { .. }) {
-        return Ok(None);
-    }
-    let root = root_of(expr);
-    if !matches!(root, Expr::Call { .. } | Expr::MethodCall { .. }) {
-        return Ok(None);
-    }
-    let root_value = evaluate_expr(root, env, functions, classes, enums, impl_methods)?;
-    // NUL-prefixed: no Simple program can spell (and so clobber) this binding.
-    let name = "\u{0}place_call_root".to_string();
-    let saved = env.get(&name).cloned();
-    env.insert(name.clone(), root_value);
-    let rewritten = replace_root(expr, &name);
-    Ok(Some((rewritten, CallRootBinding { name, saved })))
-}
-
-/// Restore the hidden binding that [`bind_call_root`] replaced.
-pub(crate) fn unbind_call_root(env: &mut Env, binding: CallRootBinding) {
-    match binding.saved {
-        Some(value) => {
-            env.insert(binding.name, value);
-        }
-        None => {
-            env.remove(&binding.name);
-        }
-    }
+    let (value, projections) = resolve(expr, env, functions, classes, enums, impl_methods)?;
+    let root = "\0assignment-root".to_string();
+    let mut storage = Env::new();
+    storage.insert(root.clone(), value);
+    Ok((Place { root, projections }, storage))
 }
 
 /// Normalize a possibly-negative index against a container length.
@@ -235,6 +242,22 @@ fn value_as_u8(value: &Value) -> Option<u8> {
 /// storage. `Arc::make_mut` keeps copy-on-write semantics: unique containers
 /// mutate in place, shared ones deep-copy first.
 fn step_mut<'a>(slot: &'a mut Value, projection: &Projection) -> Option<&'a mut Value> {
+    if matches!(projection, Projection::Unwrap) {
+        let special = match &*slot {
+            Value::Enum { enum_name, variant, .. } => match crate::value::SpecialEnumType::from_name(enum_name) {
+                Some(crate::value::SpecialEnumType::Option) => Some(variant == "Some"),
+                Some(crate::value::SpecialEnumType::Result) => Some(variant == "Ok"),
+                None => None,
+            },
+            Value::Nil => Some(false),
+            _ => None,
+        };
+        return match special {
+            Some(true) => match slot { Value::Enum { payload, .. } => payload.as_deref_mut(), _ => None },
+            Some(false) => None,
+            None => Some(slot),
+        };
+    }
     match (slot, projection) {
         (Value::Object { fields, .. }, Projection::Field(name)) => Arc::make_mut(fields).get_mut(name),
         (Value::Dict(entries), Projection::Field(name)) => crate::interpreter::module_dict_make_mut(entries).get_mut(name),
@@ -356,6 +379,12 @@ fn write_through(slot: &mut Value, projections: &[Projection], value: Value) -> 
 /// not exist yet creates it, matching what the existing one- and two-level
 /// field-assignment paths do with `HashMap::insert`.
 fn store_last(container: &mut Value, projection: &Projection, value: Value) -> bool {
+    if matches!(projection, Projection::Unwrap) {
+        return match step_mut(container, projection) {
+            Some(slot) => { *slot = value; true }
+            None => false,
+        };
+    }
     match (container, projection) {
         (Value::Object { fields, .. }, Projection::Field(name)) => {
             Arc::make_mut(fields).insert(name.clone(), value);
@@ -565,6 +594,17 @@ pub(crate) fn place_read(env: &Env, place: &Place) -> Option<Value> {
 
 /// Read-only counterpart of `step_mut`.
 fn step_ref<'a>(slot: &'a Value, projection: &Projection) -> Option<&'a Value> {
+    if matches!(projection, Projection::Unwrap) {
+        return match slot {
+            Value::Enum { enum_name, variant, payload } => match crate::value::SpecialEnumType::from_name(enum_name) {
+                Some(crate::value::SpecialEnumType::Option) => if variant == "Some" { payload.as_deref() } else { None },
+                Some(crate::value::SpecialEnumType::Result) => if variant == "Ok" { payload.as_deref() } else { None },
+                None => Some(slot),
+            },
+            Value::Nil => None,
+            other => Some(other),
+        };
+    }
     match (slot, projection) {
         (Value::Object { fields, .. }, Projection::Field(name)) => fields.get(name),
         (Value::Dict(entries), Projection::Field(name)) => entries.get(name),

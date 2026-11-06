@@ -793,6 +793,9 @@ impl Lowerer {
     }
 
     fn static_enum_variant_type(&self, type_name: &str, member: &str) -> Option<TypeId> {
+        if !matches!(type_name, "Option" | "Result")
+            && self.flatten_struct_owners.is_qualified_enum(type_name)
+            && self.module.types.scoped_name(type_name) == type_name { return None; }
         let type_id = self
             .module
             .types
@@ -867,6 +870,12 @@ impl Lowerer {
         // Same-named flattened struct/class: bind `Type.member` to the
         // declaration the current owner sees (flatten_struct_owner.rs).
         let scoped_type_name = self.module.types.scoped_name(type_name).to_string();
+        if !matches!(type_name, "Option" | "Result")
+            && self.flatten_struct_owners.is_qualified_enum(type_name)
+            && scoped_type_name == type_name
+            && self.module.types.lookup(type_name).is_none_or(|id| matches!(self.module.types.get(id), Some(HirType::Enum { .. }))) {
+            return Err(LowerError::Unsupported(format!("ambiguous enum namespace `{type_name}`; use an exact module import")));
+        }
         let type_name = scoped_type_name.as_str();
         if let Some(type_id) = self.static_enum_variant_type(type_name, member) {
             return self.lower_static_enum_variant_call(type_name, member, type_id, args, ctx);

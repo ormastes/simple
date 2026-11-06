@@ -683,7 +683,7 @@ fn tag_node_function_owners(node: &mut Node, owner: &str) {
     }
 }
 
-fn import_binding_marker_name(importer: &str, local: &str, source_owner: &str, source_name: &str) -> String {
+pub(crate) fn import_binding_marker_name(importer: &str, local: &str, source_owner: &str, source_name: &str) -> String {
     format!(
         "{FLATTEN_IMPORT_BINDING_MARKER_PREFIX}{}:{importer}{}:{local}{}:{source_owner}{}:{source_name}",
         importer.len(),
@@ -791,12 +791,13 @@ fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
                 items.push(Node::Function(function));
                 next_global_already_tagged = false;
             }
-            declaration @ (Node::Let(_) | Node::Const(_) | Node::Static(_)) => {
+            declaration @ (Node::Let(_) | Node::Const(_) | Node::Static(_) | Node::TypeAlias(_)) => {
                 if !next_global_already_tagged {
                     let span = match &declaration {
                         Node::Let(stmt) => stmt.span,
                         Node::Const(stmt) => stmt.span,
                         Node::Static(stmt) => stmt.span,
+                        Node::TypeAlias(alias) => alias.span,
                         _ => unreachable!(),
                     };
                     items.push(Node::Const(ConstStmt {
@@ -2521,6 +2522,8 @@ fn load_module_with_imports_internal(
 
                     // Add imported items for flattened access (functions/classes in global scope)
                     if flatten_this_import {
+                        let mut imported = imported;
+                        mark_pipeline_builtin_enum_origins(&mut imported, &resolved, path.parent().unwrap_or(Path::new(".")));
                         items.extend(strip_flattened_import_nodes(imported, &resolved).items);
                     }
                 }
@@ -2579,6 +2582,8 @@ fn load_module_with_imports_internal(
                     }
 
                     if flatten_this_import {
+                        let mut imported = imported;
+                        mark_pipeline_builtin_enum_origins(&mut imported, &resolved, path.parent().unwrap_or(Path::new(".")));
                         items.extend(strip_flattened_import_nodes(imported, &resolved).items);
                     }
                 }
@@ -2630,6 +2635,8 @@ fn load_module_with_imports_internal(
                     }
 
                     if flatten_this_import {
+                        let mut imported = imported;
+                        mark_pipeline_builtin_enum_origins(&mut imported, &resolved, path.parent().unwrap_or(Path::new(".")));
                         items.extend(strip_flattened_import_nodes(imported, &resolved).items);
                     }
                 }
@@ -2686,7 +2693,9 @@ fn load_module_with_imports_internal(
 
                         // Add imported items for flattened access
                         if flatten_this_import {
-                            items.extend(strip_flattened_import_nodes(imported, &resolved).items);
+                            let mut imported = imported;
+                        mark_pipeline_builtin_enum_origins(&mut imported, &resolved, path.parent().unwrap_or(Path::new(".")));
+                        items.extend(strip_flattened_import_nodes(imported, &resolved).items);
                         }
                     }
                 }
@@ -4212,5 +4221,45 @@ impl Wrapper:
         let s = super::render_same_signature_summary(&many).unwrap();
         assert!(s.contains("40 function name(s)") && s.contains("and 28 more"));
         assert!(!s.contains("`f20`"), "summary must stay compact");
+    }
+}
+
+
+fn mark_pipeline_builtin_enum_origins(module: &mut Module, path: &Path, importer: &Path) {
+    crate::interpreter::mark_selected_builtin_enum_origins(&mut module.items, path, |stem| {
+        let canonical = UseStmt {
+            span: simple_parser::token::Span::new(0, 0, 0, 0),
+            path: simple_parser::ast::ModulePath::new(vec!["std".into(), "core".into(), stem.into()]),
+            target: ImportTarget::Glob, is_type_only: false, is_lazy: false,
+        };
+        resolve_use_to_path(&canonical, importer)
+    });
+}
+
+
+#[cfg(test)]
+mod selected_builtin_pipeline_tests {
+    use super::*;
+
+    #[test]
+    fn actual_pipeline_resolution_marks_only_selected_option_provider() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = "enum Option<T>:\n    Some(value: T)\n    None\n";
+        let standard = temp.path().join("src/lib/core/option.spl");
+        let custom = temp.path().join("app/fake/src/lib/core/option.spl");
+        for path in [&standard, &custom] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, source).unwrap();
+        }
+        let importer = temp.path().join("src");
+        for (path, expected) in [(&standard, true), (&custom, false)] {
+            let mut module = simple_parser::Parser::new(source).parse().unwrap();
+            mark_pipeline_builtin_enum_origins(&mut module, path, &importer);
+            let marked = module.items.iter().any(|node| match node {
+                Node::Enum(def) => def.attributes.iter().any(|a| a.name.starts_with(crate::interpreter::SELECTED_BUILTIN_ENUM_ORIGIN)),
+                _ => false,
+            });
+            assert_eq!(marked, expected, "provider election mismatch for {}", path.display());
+        }
     }
 }

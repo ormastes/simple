@@ -393,6 +393,7 @@ pub(super) fn register_definitions(
                 let mut enum_def = e.clone();
                 tag_methods_owner(&mut enum_def.methods, module_ident.as_ref());
                 let arc_e = Arc::new(enum_def);
+                crate::interpreter::record_flattened_owner_enum(&arc_e);
                 local_enums.insert(e.name.clone(), Arc::clone(&arc_e));
                 warn_on_ambiguous_bare_enum_name(global_enums.get(&e.name), &arc_e);
                 global_enums.insert(e.name.clone(), Arc::clone(&arc_e));
@@ -400,9 +401,9 @@ pub(super) fn register_definitions(
                 let enum_type = Value::EnumType {
                     enum_name: e.name.clone(),
                 };
-                exports.insert(e.name.clone(), enum_type.clone());
+                exports.insert(crate::interpreter::enum_source_name(&arc_e).to_owned(), enum_type.clone());
                 // CRITICAL FIX: Also add to env so it's available in closures
-                env.insert(e.name.clone(), enum_type);
+                env.insert(crate::interpreter::enum_source_name(&arc_e).to_owned(), enum_type);
                 // Register enum static methods as mangled free functions
                 for method in &arc_e.methods {
                     let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");

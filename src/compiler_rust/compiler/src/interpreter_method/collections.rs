@@ -329,6 +329,40 @@ pub(crate) fn array_push_value(arr: &[Value], item: Value) -> Value {
     Value::array(result)
 }
 
+/// Stable merge sort with a fallible comparator. Sort a private snapshot so a
+/// failed callback cannot publish a partially reordered receiver. Unlike
+/// `slice::sort_by`, comparator failures propagate without inventing an order.
+fn array_sort_by_result(
+    arr: &[Value],
+    mut compare: impl FnMut(&Value, &Value) -> Result<std::cmp::Ordering, CompileError>,
+) -> Result<Vec<Value>, CompileError> {
+    let mut values = arr.to_vec();
+    let mut scratch = values.clone();
+    let mut width = 1usize;
+    while width < values.len() {
+        for start in (0..values.len()).step_by(width.saturating_mul(2)) {
+            let middle = start.saturating_add(width).min(values.len());
+            let end = middle.saturating_add(width).min(values.len());
+            let (mut left, mut right) = (start, middle);
+            for slot in &mut scratch[start..end] {
+                // Equality takes the left element to preserve input order.
+                if right == end
+                    || (left < middle && compare(&values[left], &values[right])? != std::cmp::Ordering::Greater)
+                {
+                    *slot = values[left].clone();
+                    left += 1;
+                } else {
+                    *slot = values[right].clone();
+                    right += 1;
+                }
+            }
+        }
+        std::mem::swap(&mut values, &mut scratch);
+        width = width.saturating_mul(2);
+    }
+    Ok(values)
+}
+
 /// Handle Array methods
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn handle_array_methods(
@@ -637,6 +671,40 @@ pub fn handle_array_methods(
                 }
             }
             Value::Int(-1)
+        }
+        "sort_by" => {
+            if args.len() != 1 {
+                return Err(CompileError::semantic("sort_by expects exactly one comparator argument"));
+            }
+            let comparator = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let arity = match &comparator {
+                Value::Lambda { params, .. } => params.len(),
+                Value::Function { def, .. } => def.params.len(),
+                _ => return Err(CompileError::semantic("sort_by expects a two-argument lambda or named function")),
+            };
+            if arity != 2 {
+                return Err(CompileError::semantic("sort_by expects a two-argument lambda or named function"));
+            }
+            let sorted = array_sort_by_result(arr, |left, right| {
+                // Reuse the existing two-value callback path: captured scopes,
+                // named functions, multiline lambda forcing and callback errors
+                // must agree with the other collection operations.
+                let ordering = eval_array_reduce(
+                    std::slice::from_ref(right),
+                    left.clone(),
+                    comparator.clone(),
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
+                match ordering {
+                    Value::Int(value) => Ok(value.cmp(&0)),
+                    _ => Err(CompileError::semantic("sort_by comparator must return an integer")),
+                }
+            })?;
+            // The existing mutator allow-list performs the receiver writeback.
+            Value::array(sorted)
         }
         "sort" => {
             let mut new_arr = arr.to_vec();
@@ -1971,5 +2039,123 @@ mod keys_materialization_tests {
                 "hoisted .keys() must stay at 1 materialization for a {size}-entry dict"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod array_sort_by_tests {
+    use super::*;
+    use crate::interpreter::evaluate_module;
+    use simple_parser::Parser;
+
+    fn run(source: &str) -> Result<i32, CompileError> {
+        let module = Parser::new(source).parse().expect("parse sort_by regression");
+        evaluate_module(&module.items)
+    }
+
+    #[test]
+    fn comparator_lambda_captures_scope_and_writes_back_receiver() {
+        let result = run(
+            r#"
+val direction = -1
+var xs = [3, 1, 2]
+val snapshot = xs
+xs.sort_by(\a, b: direction * (a - b))
+main = xs[0] * 1000 + xs[1] * 100 + xs[2] * 10 + snapshot[1]
+"#,
+        );
+        assert_eq!(result.expect("sort captured lambda"), 3211);
+    }
+
+    #[test]
+    fn comparator_named_function_sorts_ascending() {
+        let result = run(
+            r#"
+fn compare(a: i64, b: i64) -> i64:
+    return a - b
+var xs = [3, 1, 2]
+xs.sort_by(compare)
+main = xs[0] * 100 + xs[1] * 10 + xs[2]
+"#,
+        );
+        assert_eq!(result.expect("sort named comparator"), 123);
+    }
+
+    #[test]
+    fn equal_comparisons_preserve_input_order() {
+        let result = run(
+            r#"
+var xs = [22, 21, 12, 11]
+xs.sort_by(\a, b: a % 10 - b % 10)
+main = xs[0] * 1000000 + xs[1] * 10000 + xs[2] * 100 + xs[3]
+"#,
+        );
+        assert_eq!(result.expect("stable comparator ordering"), 21112212);
+    }
+
+    #[test]
+    fn empty_and_single_element_arrays_do_not_call_comparator() {
+        let result = run(
+            r#"
+var empty: [i64] = []
+var one = [7]
+empty.sort_by(\a, b: 1 / 0)
+one.sort_by(\a, b: 1 / 0)
+main = empty.len() * 10 + one[0]
+"#,
+        );
+        assert_eq!(result.expect("no comparisons needed"), 7);
+    }
+
+    #[test]
+    fn comparator_execution_errors_are_propagated() {
+        let error = run(
+            r#"
+var xs = [2, 1]
+xs.sort_by(\a, b: missing_comparator_value)
+main = 0
+"#,
+        )
+        .expect_err("callback failure must fail the sort");
+        assert!(format!("{error}").contains("missing_comparator_value"));
+    }
+
+    #[test]
+    fn non_integer_comparator_results_are_errors() {
+        let error = run(
+            r#"
+var xs = [2, 1]
+xs.sort_by(\a, b: "not an ordering")
+main = 0
+"#,
+        )
+        .expect_err("comparator result must not silently become equality");
+        assert!(format!("{error}").contains("sort_by comparator must return an integer"));
+    }
+
+    #[test]
+    fn malformed_comparators_fail_even_on_empty_arrays() {
+        for call in ["xs.sort_by(42)", "xs.sort_by(\\a: a)", "xs.sort_by()"] {
+            let source = format!("var xs: [i64] = []\n{call}\nmain = 0\n");
+            let error = run(&source).expect_err("invalid comparator cannot be accepted as a no-op");
+            assert!(format!("{error}").contains("sort_by expects"), "{call}: {error}");
+        }
+    }
+
+    #[test]
+    fn failed_sort_does_not_reorder_input_snapshot() {
+        let input = vec![Value::Int(3), Value::Int(2), Value::Int(1)];
+        let snapshot = input.clone();
+        let mut comparisons = 0;
+        let result = array_sort_by_result(&input, |left, right| {
+            comparisons += 1;
+            if comparisons == 2 {
+                return Err(CompileError::semantic("comparator stopped"));
+            }
+            Ok(left.as_int()?.cmp(&right.as_int()?))
+        });
+        assert!(result.is_err());
+        assert_eq!(comparisons, 2, "stop invoking the comparator after its first error");
+        assert_eq!(input, snapshot);
     }
 }

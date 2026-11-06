@@ -239,6 +239,8 @@ pub(crate) fn decode_import_binding_marker(marker: &str) -> Option<(&str, &str, 
 /// owner IDENTITY, not a `module__name` qualifier: codegen must never bind a
 /// bare name to it by suffix (the bare name denotes the default owner).
 pub(crate) const FLATTEN_OWNER_SYMBOL_PREFIX: &str = "__spl_flat_";
+/// Source spelling retained when an enum declaration receives its owner key.
+pub(crate) const FLATTEN_ENUM_SOURCE_NAME_ATTR_PREFIX: &str = "__simple_flatten_enum_source_name__=";
 
 pub(crate) fn flatten_owner_mangled_name(owner: &str, name: &str) -> String {
     // FNV-1a over the owner path: deterministic, no external dependency, and
