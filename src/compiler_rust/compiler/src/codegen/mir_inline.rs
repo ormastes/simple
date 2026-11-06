@@ -281,17 +281,25 @@ fn remap_param_load(
     let Some(arg) = call_args.get(*local_index).copied() else {
         return None;
     };
-    // A float parameter must be read back from its slot (the entry `Store`
-    // above converts the argument to the parameter's float width). Forwarding
+    // A narrow signed or float parameter must be read back from its slot:
+    // the entry `Store` converts the argument to its declared width. Forwarding
     // the caller vreg directly made it cross into the inlined blocks as an
     // i64-coerced Variable (f64 bits), which a later float->int `Cast` read as
     // an integer: `floor(-0.41)` gave -1610612736 and bitmap text_bg glyphs
     // lost most of their coverage under the JIT.
     // doc/08_tracking/bug/jit_inlined_float_param_cast_reads_f64_bits_as_int_2026-10-05.md
-    if callee_params
-        .get(*local_index)
-        .is_some_and(|param| matches!(param.ty, crate::hir::TypeId::F32 | crate::hir::TypeId::F64))
-    {
+    // Forwarding an i64 caller argument also loses an i8/i16/i32 parameter's
+    // declared width, so arithmetic such as unary negation stops wrapping.
+    if callee_params.get(*local_index).is_some_and(|param| {
+        matches!(
+            param.ty,
+            crate::hir::TypeId::I8
+                | crate::hir::TypeId::I16
+                | crate::hir::TypeId::I32
+                | crate::hir::TypeId::F32
+                | crate::hir::TypeId::F64
+        )
+    }) {
         return None;
     }
     let MirInst::Load {
