@@ -1,3 +1,13 @@
+# Dashboard CLI surface stubs (migrated to simple-ide) plus the dashboard table
+# model that dashboard_collectors / dashboard_export_runtime import from here.
+# Table model restored from 2ee3fed72cd8e6538646983b84765c4787fc175a.
+
+use std.cli.cli_util.{parse_csv_fields}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_write}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.process_ops.{shell_output_trimmed}
+use std.text.{to_int_or}
+
 fn _dashboard_surface_result(args: [text]) -> text:
     "status=migrated target=simple-ide args=" + args.join(" ")
 
@@ -9,6 +19,223 @@ fn _run_gui_result(args: [text]) -> text:
 
 fn _run_agents_result(args: [text]) -> text:
     _dashboard_surface_result(args)
+
+val DASHBOARD_DIR = "doc/10_metrics/dashboard"
+val DASHBOARD_TABLE_DIR = "doc/10_metrics/dashboard/tables"
+val DASHBOARD_HISTORY_DIR = "doc/10_metrics/dashboard/history"
+val DASHBOARD_CACHE_PATH = "doc/10_metrics/dashboard/dashboard_db.cache.sdn"
+
+val TABLE_NAMES = [
+    "features", "spipe_tests", "todos", "coverage", "duplication",
+    "test_status", "verification", "vcs_state", "build_times",
+    "dependencies", "plans"
+]
+
+val TABLE_COUNT = 11
+
+val TABLE_HEADERS = [
+    ["id", "category", "name", "status", "test_coverage", "last_updated"],
+    ["id", "file", "title", "category", "difficulty", "status", "total_tests", "passed", "failed", "duration_ms", "has_docs", "last_run"],
+    ["id", "keyword", "area", "priority", "description", "file", "line", "issue", "blocked", "status", "age_days", "assigned", "last_updated"],
+    ["id", "level", "crate", "file", "lines_total", "lines_covered", "lines_percent", "branches_covered", "branches_percent", "timestamp"],
+    ["id", "file1", "file2", "lines", "tokens", "percentage", "timestamp"],
+    ["id", "mode", "suite", "total", "passed", "failed", "skipped", "duration_ms", "timestamp"],
+    ["id", "module", "property", "status", "proof_lines", "timestamp"],
+    ["bookmark", "commit_id", "commit_message", "uncommitted_files", "untracked_files", "timestamp"],
+    ["id", "timestamp", "target", "mode", "duration_ms", "crates_compiled", "incremental", "commit_id"],
+    ["id", "crate_name", "current_version", "latest_version", "outdated", "has_security_issue", "last_checked"],
+    ["id", "file", "title", "status", "created", "last_updated", "total_steps", "completed_steps", "blocked"]
+]
+
+fn today_date() -> text:
+    shell_output_trimmed("date +%Y-%m-%d", "")
+
+fn current_month() -> text:
+    shell_output_trimmed("date +%Y-%m", "")
+
+struct Table:
+    name: text
+    headers: [text]
+    rows: [[text]]
+
+fn parse_header(line: text) -> (text, [text]):
+    val pipe = line.index_of("|") ?? -1
+    val last_pipe = line.last_index_of("|") ?? -1
+    if pipe < 0 or last_pipe <= pipe:
+        return ("", [])
+    val name = line[0:pipe].trim()
+    val header_str = line[pipe + 1:last_pipe].trim()
+    val headers = parse_dashboard_fields(header_str)
+    (name, headers)
+
+fn normalize_dashboard_field_line(line: text) -> text:
+    var normalized = line.replace("—", "-")
+    normalized = normalized.replace("–", "-")
+    normalized = normalized.replace("’", "'")
+    normalized = normalized.replace("“", "\"")
+    normalized = normalized.replace("”", "\"")
+    normalized
+
+fn parse_dashboard_fields(line: text) -> [text]:
+    parse_csv_fields(normalize_dashboard_field_line(line))
+
+fn load_table(path: text) -> Table:
+    if not file_exists(path):
+        return Table(name: "", headers: [], rows: [])
+
+    val content = file_read(path)
+    val lines = content.split("\n")
+    var table_name = ""
+    var headers: [text] = []
+    var rows: [[text]] = []
+    var in_table = false
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        if not in_table and trimmed.contains("|"):
+            val (name, hdrs) = parse_header(trimmed)
+            if name != "":
+                table_name = name
+                headers = hdrs
+                in_table = true
+            continue
+        if in_table:
+            if line.starts_with("    "):
+                val fields = parse_dashboard_fields(trimmed)
+                if fields.len() > 0:
+                    rows.push(fields)
+            elif trimmed.contains("|"):
+                break
+    Table(name: table_name, headers: headers, rows: rows)
+
+fn load_table_named(path: text, name: text) -> Table:
+    if not file_exists(path):
+        return Table(name: name, headers: [], rows: [])
+
+    val content = file_read(path)
+    val lines = content.split("\n")
+    var headers: [text] = []
+    var rows: [[text]] = []
+    var in_table = false
+    var found = false
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        if trimmed.contains("|"):
+            val (tname, hdrs) = parse_header(trimmed)
+            if tname == name:
+                headers = hdrs
+                in_table = true
+                found = true
+                continue
+            elif in_table:
+                break
+            else:
+                continue
+        if in_table and line.starts_with("    "):
+            val fields = parse_dashboard_fields(trimmed)
+            if fields.len() > 0:
+                rows.push(fields)
+    if not found:
+        Table(name: name, headers: [], rows: [])
+    else:
+        Table(name: name, headers: headers, rows: rows)
+
+fn header_index(headers: [text]) -> Dict<text, i64>:
+    var idx = {}
+    var i = 0
+    for h in headers:
+        idx[h] = i
+        i = i + 1
+    idx
+
+fn get_field(row: [text], idx: Dict<text, i64>, key: text) -> text:
+    if not idx.has(key):
+        return ""
+    val pos = idx[key]
+    if pos < 0 or pos >= row.len():
+        return ""
+    row[pos]
+
+fn count_eq(rows: [[text]], idx: Dict<text, i64>, key: text, value: text) -> i64:
+    if not idx.has(key):
+        return 0
+    val pos = idx[key]
+    var count = 0
+    for row in rows:
+        if pos < row.len() and row[pos] == value:
+            count = count + 1
+    count
+
+fn sum_int(rows: [[text]], idx: Dict<text, i64>, key: text) -> i64:
+    if not idx.has(key):
+        return 0
+    val pos = idx[key]
+    var total = 0
+    for row in rows:
+        if pos < row.len():
+            total = total + to_int_or(row[pos], 0)
+    total
+
+fn count_nonempty(rows: [[text]], idx: Dict<text, i64>, key: text) -> i64:
+    if not idx.has(key):
+        return 0
+    val pos = idx[key]
+    var count = 0
+    for row in rows:
+        if pos < row.len() and row[pos].trim() != "":
+            count = count + 1
+    count
+
+fn is_numeric(value: text) -> bool:
+    if value.len() == 0:
+        return false
+    var i = 0
+    var saw_dot = false
+    if value.starts_with("-") and value.len() > 1:
+        i = 1
+    while i < value.len():
+        val ch = value[i]
+        if ch == ".":
+            if saw_dot:
+                return false
+            saw_dot = true
+        elif ch < "0" or ch > "9":
+            return false
+        i = i + 1
+    true
+
+fn itos(value: i64) -> text:
+    "{value}"
+
+fn format_field(value: text) -> text:
+    if value == "":
+        "\"\""
+    elif is_numeric(value):
+        value
+    else:
+        val escaped = value.replace("\"", "'")
+        "\"{escaped}\""
+
+fn write_table(path: text, name: text, headers: [text], rows: [[text]]) -> bool:
+    var lines: [text] = []
+    lines.push("{name} |{headers.join(', ')}|")
+    for row in rows:
+        var parts: [text] = []
+        for cell in row:
+            parts.push(format_field(cell))
+        lines.push("    {parts.join(', ')}")
+    val content = lines.join("\n") + "\n"
+    file_write(path, content)
+
+fn ensure_dirs():
+    dir_create_all(DASHBOARD_DIR)
+    dir_create_all(DASHBOARD_TABLE_DIR)
+    dir_create_all(DASHBOARD_HISTORY_DIR)
 
 fn main() -> i64:
     0

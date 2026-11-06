@@ -130,3 +130,16 @@ What the first real run of `pure/test/nn_spec.spl` showed:
 
 Status: remains OPEN. Sum/Mean backward broadcast fixed; leaf-gradient
 propagation blocked on runtime shared-reference semantics.
+
+## 2026-11-06 re-verification (lane fx-ml-db)
+
+Seed `simple-ref`: `nn_spec` still 2/7. `nn.spl` already uses autograd `Tensor`
+uniformly (no type mixing remains), so there is no layer-side change left to
+make. Re-probed the 5 failures: class values stored in an array literal,
+`push`, a class field, or an `Option` payload are copies (`val l = [a];
+l[0].inc()` leaves `a` unchanged; direct parameter passing aliases). Hence
+`tensor_linear`'s `inputs = [x, weight]` holds copies and
+`propagate_linear_grads` writes grads to throwaways (`x.grad`/`weight.grad`
+stay nil). No std-lib-only fix preserves the spec's `input.grad` contract;
+needs runtime shared-reference semantics for stored class values. Status: OPEN,
+runtime-blocked. Related: interp_list_class_element_read_returns_copy_mutation_loss_2026-08-17.md.

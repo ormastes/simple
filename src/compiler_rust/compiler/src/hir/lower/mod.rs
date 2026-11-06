@@ -215,6 +215,28 @@ pub fn lower_with_context_lenient_project_hint_and_duplicate_structs(
     lowerer.lower_module(module)
 }
 
+static DROPPED_UNSUPPORTED_EXPRS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Record an expression the lenient lowering replaced with `nil` because HIR
+/// has no lowering for it (e.g. list comprehensions).
+pub(crate) fn record_dropped_unsupported_expr(kind: &str) {
+    if let Ok(mut v) = DROPPED_UNSUPPORTED_EXPRS.lock() {
+        if !v.iter().any(|k| k == kind) {
+            v.push(kind.to_string());
+        }
+    }
+}
+
+/// Drain the kinds of expression the lenient lowering silently replaced with
+/// `nil` since the last call. A non-empty result means compiled code would
+/// compute the wrong value, so the caller must fall back to the interpreter.
+pub fn take_dropped_unsupported_exprs() -> Vec<String> {
+    DROPPED_UNSUPPORTED_EXPRS
+        .lock()
+        .map(|mut v| std::mem::take(&mut *v))
+        .unwrap_or_default()
+}
+
 /// Cached lookup for the `SIMPLE_TRACE_FIELD_GET` debug-trace gate.
 /// Reads the environment variable once per process instead of on every
 /// ANY-typed field access / pattern binding (hot path in HIR lowering).

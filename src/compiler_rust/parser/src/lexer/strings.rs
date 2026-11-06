@@ -339,6 +339,8 @@ impl<'a> super::Lexer<'a> {
                 let mut paren_depth = 0; // Track () and [] nesting for format spec detection
                 let mut in_string: Option<char> = None; // Track if inside string and which quote
                 let mut expr_failed = false;
+                // True once an unescaped `"` opened a nested string inside the hole.
+                let mut opened_nested_quote = false;
                 // Track the byte offset of the last top-level ':' for format spec splitting.
                 // A top-level ':' means: brace_depth==1, paren_depth==0, not in a string.
                 let mut last_top_colon: Option<usize> = None;
@@ -428,6 +430,7 @@ impl<'a> super::Lexer<'a> {
                             break;
                         } else {
                             in_string = Some(c); // Start of string
+                            opened_nested_quote = true;
                         }
                         expr.push(c);
                         self.advance();
@@ -484,6 +487,22 @@ impl<'a> super::Lexer<'a> {
                     }
                     expr.push(c);
                     self.advance();
+                }
+                // A hole that swallowed an unescaped `"` must be a complete
+                // expression; otherwise the `"` was really the outer literal's
+                // closing quote and the `{` a literal brace (`"{x (" + v + ")} y"`
+                // must not absorb the concatenation as literal text).
+                if !expr_failed && brace_depth == 0 && opened_nested_quote {
+                    let body = match last_top_colon {
+                        Some(pos) if Self::is_format_spec(&expr[pos + 1..]) => &expr[..pos],
+                        _ => expr.as_str(),
+                    };
+                    let mut probe = crate::parser_impl::core::Parser::new_expression(body);
+                    let parses = matches!(probe.parse_expression(), Ok(_))
+                        && (probe.is_at_end() || matches!(probe.current.kind, TokenKind::Eof));
+                    if !parses {
+                        expr_failed = true;
+                    }
                 }
                 // If expression scanning failed or braces unmatched, backtrack
                 // and treat the { as a literal character

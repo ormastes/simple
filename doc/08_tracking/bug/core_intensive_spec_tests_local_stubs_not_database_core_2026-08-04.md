@@ -148,3 +148,10 @@ The SdnRow/SdnTable stubs were deleted; the spec now imports the product
 * "handles empty string" remains red for a seed bug, not the spec or lib:
   see option_some_empty_text_dot_question_false_2026-11-06.md.
 Status: spec fixed; one example blocked on that seed bug.
+
+## 2026-11-06 re-verification (lane fx-ml-db)
+There is no duplicate `SdnTable`: `grep` over `src/lib` finds a single
+definition (`nogc_sync_mut/database/core.spl:216`) and the spec defines no local
+classes. The "`SdnRow.has_column` not found" symptom was the spec-local stub
+(fixed above). Seed run: 31/32; the sole failure is the Some("") `.?` seed bug.
+No library change needed.

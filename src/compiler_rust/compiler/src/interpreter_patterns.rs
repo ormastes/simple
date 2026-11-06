@@ -250,17 +250,19 @@ pub(crate) fn pattern_matches(
         Pattern::Literal(lit_expr) => {
             match lit_expr.as_ref() {
                 Expr::Integer(i) | Expr::TypedInteger(i, _) => {
-                    if let Value::Int(v) = value {
-                        Ok(*v == *i)
-                    } else {
-                        Ok(false)
+                    match value {
+                        Value::Int(v) => Ok(*v == *i),
+                        // Sized unsigned scrutinees (`addr: u64`) carry `Value::UInt`;
+                        // compare by bit pattern so `case 0x300u64` can match.
+                        Value::UInt { value: v, .. } => Ok(*v as i64 == *i),
+                        _ => Ok(false),
                     }
                 }
                 Expr::Float(f) | Expr::TypedFloat(f, _) => {
-                    if let Value::Float(v) = value {
-                        Ok((*v - *f).abs() < f64::EPSILON)
-                    } else {
-                        Ok(false)
+                    match value {
+                        Value::Float(v) => Ok((*v - *f).abs() < f64::EPSILON),
+                        Value::Float32(v) => Ok((*v as f64 - *f).abs() < f32::EPSILON as f64),
+                        _ => Ok(false),
                     }
                 }
                 Expr::String(s) => {

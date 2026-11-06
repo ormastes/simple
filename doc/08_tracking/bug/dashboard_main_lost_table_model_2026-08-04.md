@@ -1,6 +1,6 @@
 # BUG: `app.dashboard.main` no longer defines the table model its own siblings import
 
-Status: OPEN (P2)
+Status: FIXED 2026-11-06 (table model restored in main.spl; see Resolution)
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 is now 3,094 bytes (grown from the originally-reported 382-byte stub, so the
 CLI entry-point work continued), but still defines none of the ten table-model
@@ -126,3 +126,17 @@ development with a live session. The truncation may be deliberate localization
 rather than an accident. This entry deliberately stops at recording the
 recovery path; the decision to restore belongs to the owner of that lane.
 
+
+## Resolution (2026-11-06)
+
+Evidence: the stub in `main.spl` (`status=migrated target=simple-ide`) was a
+deliberate CLI-surface migration, but the sibling imports of the table model
+were never updated, so the model was LOST, not redesigned. Restored the
+table-model section (consts, `Table`, load/write helpers, aggregates, `itos`,
+`ensure_dirs`, `today_date`, `current_month`) from blob `2ee3fed7...` into
+`src/app/dashboard/main.spl`, reusing the current stdlib imports; unused
+cache helpers from the old blob were left out. New spec
+`test/01_unit/app/dashboard/dashboard_table_model_spec.spl`: RED 0/5 -> GREEN
+5/5. Regression: dashboard_serve 6/6, dashboard_framework_policy 9/9 unchanged.
+`dashboard_log_modes_spec` stays 0/5 (separate bug:
+`dashboard_cli_stub_no_log_mode_support_2026-07-20`; the stub has no log-mode CLI).
