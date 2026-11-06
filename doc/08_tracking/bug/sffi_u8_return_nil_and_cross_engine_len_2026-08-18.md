@@ -71,3 +71,9 @@ Root cause is in the extern return marshalling, and the two engines disagree,
 so a one-engine patch would paper over Defect B. Left open rather than
 half-fixed.
 
+
+## 2026-11-06 note (round 10, owner decision)
+Defect A resolved by declaration: every `rt_file_read_bytes` declaration is already `[u8]?`
+(pinned by `test/01_unit/lib/contract/fs_extern_optional_spec.spl`). The remaining nil-returning
+`rt_io_tcp_read` declarations (`http_baremetal.spl`, `_SshTool/run.spl`, `_SshTool/transport.spl`)
+are now `[u8]?` with explicit absence handling. `rt_io_file_read` returns empty (documented), not nil.
