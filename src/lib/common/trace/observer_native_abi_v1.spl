@@ -1,0 +1,243 @@
+# DRAFT copied-buffer transport owner. These are explicit little-endian bytes,
+# NOT generated native struct layouts or a qualified C entrypoint. A host leaf
+# must copy/lease real caller memory before invoking this cold-path code. No
+# integer here is dereferenced as a pointer and no caller claim grants memory
+# access, handle issuance, clock authority or backend/profile qualification.
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_config_v1.{trace_config_parse_sdn_v1}
+use std.common.trace.observer_event_codec_v1.{trace_event_encode_v1}
+use std.common.text_bytes.{utf8_bytes_valid, bytes_to_text}
+
+pub const TRACE_COPIED_REQUEST_BYTES_V1 = 144
+pub const TRACE_COPIED_RESPONSE_BYTES_V1 = 64
+pub const TRACE_COPIED_SELECTION_BYTES_V1 = 16
+pub const TRACE_COPIED_STATS_BYTES_V1 = 56
+pub const TRACE_COPIED_MAX_SITES_V1 = 4096
+pub const TRACE_COPIED_MAX_RECORDS_V1 = 4096
+pub const TRACE_COPIED_MAX_BUFFER_BYTES_V1 = 1048576
+
+# Opcodes 1..9: capabilities, prepare, start, request_stop, drain, poll,
+# flush, stats, release. Request offsets:
+# 0 schema:u16, 2 size:u16, 4 opcode:u16, 6 reserved:u16;
+# 8 slot:u64, 16 incarnation:u64, 24 generation:u64, 32 deadline_ns:u64;
+# 40 config_offset:u64, 48 config_length:u64, 56 selection_offset:u64;
+# 64 selection_count:u32, 68 max_records:u32, 72 output_offset:u64;
+# 80 output_capacity:u64, 88 manifest_incarnation:u64;
+# 96 config schema SHA256:32 raw bytes, 128 reserved:16 zero bytes.
+pub struct TraceCopiedRequestV1:
+    opcode: u16
+    slot: u64
+    incarnation: u64
+    generation: u64
+    deadline_ns: u64
+    config_offset: u64
+    config_length: u64
+    selection_offset: u64
+    selection_count: u32
+    max_records: u32
+    output_offset: u64
+    output_capacity: u64
+    manifest_incarnation: u64
+    config_schema_hash: [u8]
+
+# Raw bytes of TRACE_CONFIG_SCHEMA_HASH_V1; checked against that owner in tests.
+pub fn trace_copied_config_schema_digest_v1() -> [u8]:
+    [50, 17, 59, 11, 31, 107, 51, 108, 106, 107, 134, 19, 56, 92, 24, 62,
+        120, 71, 37, 90, 158, 50, 97, 97, 183, 198, 209, 89, 135, 147, 241, 248]
+
+fn trace_copied_read_v1(bytes: [u8], offset: i64, width: i64) -> u64:
+    var value: u64 = 0
+    for index in 0..width:
+        value = value | ((bytes[offset + index] as u64) << (index * 8))
+    value
+
+fn trace_copied_write_v1(bytes: [u8], offset: i64, width: i64, value: u64) -> [u8]:
+    var output = bytes
+    for index in 0..width:
+        output[offset + index] = ((value >> (index * 8)) & 255u64) as u8
+    output
+
+# Subtraction before addition/multiplication avoids unsigned wraparound.
+pub fn trace_copied_range_valid_v1(offset: u64, length: u64, actual_length: u64,
+    alignment: u64) -> bool:
+    if alignment == 0: return false
+    if offset % alignment != 0 or offset > actual_length: return false
+    length <= actual_length - offset
+
+fn trace_copied_request_validate_v1(request: TraceCopiedRequestV1,
+    input: [u8], output: [u8]) -> Result<bool, TraceFailureV1>:
+    # Bound copied output storage independently of a caller's requested slice.
+    if input.len() > TRACE_COPIED_MAX_BUFFER_BYTES_V1 or output.len() > TRACE_COPIED_MAX_BUFFER_BYTES_V1:
+        return Err(TraceFailureV1.ResourceExhausted)
+    if request.opcode < 1 or request.opcode > 9:
+        return Err(TraceFailureV1.InvalidArgument)
+    if request.config_schema_hash.len() != 32:
+        return Err(TraceFailureV1.InvalidArgument)
+    if not trace_copied_range_valid_v1(request.output_offset, request.output_capacity,
+            output.len() as u64, 8):
+        return Err(TraceFailureV1.InvalidArgument)
+    if request.opcode == 2:
+        if (request.slot != 0 or request.incarnation != 0 or request.generation != 0 or
+                request.deadline_ns != 0 or request.max_records != 0 or
+                request.output_offset != 0 or request.output_capacity != 0):
+            return Err(TraceFailureV1.InvalidArgument)
+        if (request.manifest_incarnation == 0 or request.selection_count == 0 or
+                request.selection_count > TRACE_COPIED_MAX_SITES_V1):
+            return Err(TraceFailureV1.InvalidMap)
+        if request.config_length == 0 or request.config_length > 4096:
+            return Err(TraceFailureV1.InvalidArgument)
+        if request.config_schema_hash != trace_copied_config_schema_digest_v1():
+            return Err(TraceFailureV1.InvalidArgument)
+        val selection_bytes = (request.selection_count as u64) * 16u64
+        if (not trace_copied_range_valid_v1(request.config_offset, request.config_length,
+                input.len() as u64, 8) or
+                not trace_copied_range_valid_v1(request.selection_offset, selection_bytes,
+                input.len() as u64, 8)):
+            return Err(TraceFailureV1.InvalidArgument)
+        # Both ends are safe after range checks. Disallow config/selector alias.
+        if (request.config_offset < request.selection_offset + selection_bytes and
+                request.selection_offset < request.config_offset + request.config_length):
+            return Err(TraceFailureV1.InvalidArgument)
+    else:
+        if (request.config_offset != 0 or request.config_length != 0 or
+                request.selection_offset != 0 or request.selection_count != 0 or
+                request.manifest_incarnation != 0 or input.len() != 0):
+            return Err(TraceFailureV1.InvalidArgument)
+        for byte in request.config_schema_hash:
+            if byte != 0: return Err(TraceFailureV1.InvalidArgument)
+        if request.opcode == 1:
+            if request.slot != 0 or request.incarnation != 0 or request.generation != 0:
+                return Err(TraceFailureV1.InvalidHandle)
+        elif request.opcode == 3:
+            if request.slot == 0 or request.incarnation == 0 or request.generation != 0:
+                return Err(TraceFailureV1.InvalidHandle)
+        else:
+            if request.slot == 0 or request.incarnation == 0 or request.generation == 0:
+                return Err(TraceFailureV1.InvalidHandle)
+        if request.opcode != 5 and request.opcode != 7 and request.deadline_ns != 0:
+            return Err(TraceFailureV1.InvalidArgument)
+        if request.opcode == 6:
+            if (request.max_records == 0 or request.max_records > TRACE_COPIED_MAX_RECORDS_V1 or
+                    (request.max_records as u64) > request.output_capacity / 96u64):
+                return Err(TraceFailureV1.InvalidArgument)
+        elif request.max_records != 0:
+            return Err(TraceFailureV1.InvalidArgument)
+        if request.opcode == 5 or request.opcode == 7 or request.opcode == 8:
+            if request.output_capacity < 56: return Err(TraceFailureV1.InvalidArgument)
+        elif request.opcode != 1 and request.opcode != 6:
+            if request.output_offset != 0 or request.output_capacity != 0:
+                return Err(TraceFailureV1.InvalidArgument)
+    Ok(true)
+
+# Validate output BEFORE calling a provider operation that consumes events or
+# mutates lifecycle state. Handle shape validation is never issuance proof:
+# provider methods must still reject stale/foreign prepared/session handles.
+pub fn trace_copied_request_decode_v1(bytes: [u8], input: [u8], output: [u8]
+    ) -> Result<TraceCopiedRequestV1, TraceFailureV1>:
+    if bytes.len() != TRACE_COPIED_REQUEST_BYTES_V1:
+        return Err(TraceFailureV1.InvalidArgument)
+    if (trace_copied_read_v1(bytes, 0, 2) != 1 or
+            trace_copied_read_v1(bytes, 2, 2) != TRACE_COPIED_REQUEST_BYTES_V1 or
+            trace_copied_read_v1(bytes, 6, 2) != 0):
+        return Err(TraceFailureV1.InvalidArgument)
+    for index in 128..144:
+        if bytes[index] != 0: return Err(TraceFailureV1.InvalidArgument)
+    var digest: [u8] = []
+    for index in 96..128: digest.push(bytes[index])
+    val request = TraceCopiedRequestV1(opcode: trace_copied_read_v1(bytes, 4, 2) as u16,
+        slot: trace_copied_read_v1(bytes, 8, 8), incarnation: trace_copied_read_v1(bytes, 16, 8),
+        generation: trace_copied_read_v1(bytes, 24, 8), deadline_ns: trace_copied_read_v1(bytes, 32, 8),
+        config_offset: trace_copied_read_v1(bytes, 40, 8), config_length: trace_copied_read_v1(bytes, 48, 8),
+        selection_offset: trace_copied_read_v1(bytes, 56, 8),
+        selection_count: trace_copied_read_v1(bytes, 64, 4) as u32,
+        max_records: trace_copied_read_v1(bytes, 68, 4) as u32,
+        output_offset: trace_copied_read_v1(bytes, 72, 8), output_capacity: trace_copied_read_v1(bytes, 80, 8),
+        manifest_incarnation: trace_copied_read_v1(bytes, 88, 8), config_schema_hash: digest)
+    trace_copied_request_validate_v1(request, input, output)?
+    Ok(request)
+
+pub fn trace_copied_prepare_decode_v1(request: TraceCopiedRequestV1, input: [u8]
+    ) -> Result<(TraceConfigV1, TraceSelectionV1), TraceFailureV1>:
+    if request.opcode != 2: return Err(TraceFailureV1.InvalidArgument)
+    val empty: [u8] = []
+    trace_copied_request_validate_v1(request, input, empty)?
+    var config_bytes: [u8] = []
+    for index in 0..(request.config_length as i64):
+        config_bytes.push(input[(request.config_offset as i64) + index])
+    if not utf8_bytes_valid(config_bytes): return Err(TraceFailureV1.InvalidArgument)
+    val config = trace_config_parse_sdn_v1(bytes_to_text(config_bytes))?
+    var sites: [TraceSiteV1] = []
+    for index in 0..(request.selection_count as i64):
+        val offset = (request.selection_offset as i64) + index * 16
+        val module_instance = trace_copied_read_v1(input, offset, 8)
+        val site_id = trace_copied_read_v1(input, offset + 8, 4) as u32
+        if module_instance == 0 or site_id == 0 or trace_copied_read_v1(input, offset + 12, 4) != 0:
+            return Err(TraceFailureV1.InvalidMap)
+        for previous in sites:
+            if previous.module_instance == module_instance and previous.site_id == site_id:
+                return Err(TraceFailureV1.InvalidMap)
+        sites.push(TraceSiteV1(module_instance: module_instance, site_id: site_id))
+    Ok((config, TraceSelectionV1(manifest_incarnation: request.manifest_incarnation, sites: sites)))
+
+# Returns a copied language buffer. It does not write through a native address.
+pub fn trace_copied_poll_output_v1(request: TraceCopiedRequestV1, events: [TraceEventV1],
+    destination: [u8]) -> Result<[u8], TraceFailureV1>:
+    if request.opcode != 6: return Err(TraceFailureV1.InvalidArgument)
+    val empty: [u8] = []
+    trace_copied_request_validate_v1(request, empty, destination)?
+    if events.len() > (request.max_records as i64): return Err(TraceFailureV1.InvalidArgument)
+    for event in events:
+        if event.generation != request.generation: return Err(TraceFailureV1.InvalidHandle)
+    var output: [u8] = []
+    for byte in destination: output.push(byte)
+    for index in 0..events.len():
+        val encoded = trace_event_encode_v1(events[index])
+        val offset = (request.output_offset as i64) + index * 96
+        for byte_index in 0..96: output[offset + byte_index] = encoded[byte_index]
+    Ok(output)
+
+pub fn trace_copied_stats_output_v1(request: TraceCopiedRequestV1, stats: TraceStatsV1,
+    destination: [u8]) -> Result<[u8], TraceFailureV1>:
+    if request.opcode != 5 and request.opcode != 7 and request.opcode != 8:
+        return Err(TraceFailureV1.InvalidArgument)
+    val empty: [u8] = []
+    trace_copied_request_validate_v1(request, empty, destination)?
+    if stats.generation != request.generation: return Err(TraceFailureV1.InvalidHandle)
+    var output: [u8] = []
+    for byte in destination: output.push(byte)
+    val fields = [stats.generation, stats.recorded, stats.lost, stats.transitions,
+        stats.unsupported_sites, stats.queue_high_water, stats.backend_errors]
+    for index in 0..7:
+        output = trace_copied_write_v1(output, (request.output_offset as i64) + index * 8, 8, fields[index])
+    Ok(output)
+
+pub fn trace_copied_state_code_v1(state: TraceSessionStateV1) -> u32:
+    match state:
+        case Active: 1
+        case Draining: 2
+        case Drained: 3
+        case Faulted: 4
+
+# Response: schema:u16@0,size:u16@2,status:u32@4,state:u32@8,reserved:u32@12,
+# slot:u64@16,incarnation:u64@24,generation:u64@32,records:u64@40,
+# required_bytes:u64@48,reserved:u64@56. Status0=success; 1..11 are the
+# existing trace_failure_code_v1 values. State0 means no session state.
+pub fn trace_copied_response_encode_v1(status: u32, state: u32, slot: u64,
+    incarnation: u64, generation: u64, records: u64, required_bytes: u64
+    ) -> Result<[u8], TraceFailureV1>:
+    if status > 11 or state > 4: return Err(TraceFailureV1.InvalidArgument)
+    if (slot == 0) != (incarnation == 0): return Err(TraceFailureV1.InvalidHandle)
+    if generation != 0 and slot == 0: return Err(TraceFailureV1.InvalidHandle)
+    if state != 0 and generation == 0: return Err(TraceFailureV1.InvalidHandle)
+    if status != 0 and records != 0: return Err(TraceFailureV1.InvalidArgument)
+    var output: [u8] = []
+    for index in 0..64: output.push(0)
+    output = trace_copied_write_v1(output, 0, 2, 1)
+    output = trace_copied_write_v1(output, 2, 2, 64)
+    output = trace_copied_write_v1(output, 4, 4, status as u64)
+    output = trace_copied_write_v1(output, 8, 4, state as u64)
+    output = trace_copied_write_v1(output, 16, 8, slot)
+    output = trace_copied_write_v1(output, 24, 8, incarnation)
+    output = trace_copied_write_v1(output, 32, 8, generation)
+    output = trace_copied_write_v1(output, 40, 8, records)
+    trace_copied_write_v1(output, 48, 8, required_bytes)

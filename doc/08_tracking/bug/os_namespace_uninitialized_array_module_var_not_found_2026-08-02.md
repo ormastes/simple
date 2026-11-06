@@ -136,3 +136,13 @@ the kernel IPC layer sat behind one uninvoked function.
 2. Re-run `os_storage_spec` wired up and confirm its 21 assertions pass.
 3. Do not mass-add initializers as a substitute for the fix.
 
+
+## 2026-11-06 fix (work/interp-p2-seed)
+Not os-specific: any non-std import (also `app.*`) is flattened into the entry program and its
+module-level `var a: [T; N]` runs through `exec_node`'s `Node::Let`, which bound nothing without
+an initializer (the module evaluator, used for `std.*`, already zero-filled). `exec_node` now
+binds the same zero-filled `FixedSizeArray` (shared `fixed_array_zero_element`). Struct /
+fn-pointer element types still get `nil` slots (pre-existing evaluator behaviour).
+Rust unit: `node_exec::uninit_fixed_array_let_tests`. Spec:
+`test/01_unit/interpreter/uninit_fixed_array_module_var_spec.spl` (RED on deployed seed, GREEN on
+test-only seed). Verify on next seed deploy.

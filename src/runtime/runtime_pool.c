@@ -101,19 +101,19 @@ static void spl_pool_task_free(RtPoolTask* task) {
     free(task);
 }
 
-/* Native Simple function values can arrive as a tagged heap record. A
- * direct-function record's entry is copied at submit. A registered closure is
- * NOT retained: the task keeps the caller's closure handle, so the closure
- * must outlive the task (join before releasing it). Zero-capture function
- * values never read their closure. */
-static int64_t rt_pool_native_function_payload(int64_t raw) {
-    uint64_t value = (uint64_t)raw;
-    if (value < 4096ULL) return 0;
-    if (rt_native_word_exceeds_user_va(value)) return (int64_t)(value >> 3);
-    /* Unlike runtime_thread.c, no code-address test: the pool accepts only
-     * a direct-function record (a data pointer), never a raw code address. */
-    if ((value & TAG_MASK) == TAG_HEAP) return (int64_t)(value & ~TAG_MASK);
-    return raw;
+/* A function value is decoded by the submitter's declared kind
+ * (RT_WORKER_CLOSURE_*, rt_native_function_word_decode in runtime_value.h),
+ * never by the word's value: an 8-aligned word below the user-VA ceiling is
+ * both a record address and the int-tagged form of another one
+ * (pool_native_function_payload_value_heuristic_2026-11-06). The pool accepts
+ * only a direct-function record (a data pointer) or a registered closure,
+ * never a raw code address. Returns 0 for an unknown kind or tag. */
+static int64_t rt_pool_native_function_payload(int64_t kind, int64_t word) {
+    int64_t payload = 0;
+    int raw_record = 0;
+    if (!rt_native_function_word_decode(kind, word, &payload, &raw_record)) return 0;
+    (void)raw_record; /* both encodings name the same task ABI: (i64) -> i64 */
+    return payload;
 }
 
 struct RtPoolState {
@@ -877,8 +877,8 @@ static RtPoolTask* rt_pool_task_create(int64_t arg0, int64_t arg1) {
     return task;
 }
 
-static RtPoolTask* rt_pool_scalar_task_create(int64_t function_value, int64_t input_i64) {
-    int64_t payload = rt_pool_native_function_payload(function_value);
+static RtPoolTask* rt_pool_scalar_task_create(int64_t kind, int64_t function_value, int64_t input_i64) {
+    int64_t payload = rt_pool_native_function_payload(kind, function_value);
     if (payload == 0) return NULL;
     const int64_t* descriptor = (const int64_t*)(intptr_t)payload;
     int is_direct = descriptor[0] != 0 && descriptor[1] == RT_POOL_DIRECT_FUNCTION_MARKER;
@@ -1009,10 +1009,14 @@ int64_t rt_pool_state_create_v1(int64_t capacity) {
     return handle;
 }
 
-int64_t rt_pool_state_try_submit_i64_v1(int64_t state_handle, int64_t arg0, int64_t arg1) {
+/* Pool submit with an explicit function-value kind (RT_WORKER_CLOSURE_*),
+ * chosen by the submitter: ADDRESS for a machine-address record (runtime and
+ * test callers), VALUE for a tagged Simple function value. Unknown kinds and
+ * tags are rejected (-3). Twin of runtime_thread.c. */
+int64_t rt_pool_state_try_submit_i64_kind_v1(int64_t state_handle, int64_t kind, int64_t arg0, int64_t arg1) {
     RtPoolState* state = rt_pool_state_handle_get(state_handle);
     if (state == NULL) return -3;
-    RtPoolTask* task = rt_pool_scalar_task_create(arg0, arg1);
+    RtPoolTask* task = rt_pool_scalar_task_create(kind, arg0, arg1);
     if (task == NULL) { rt_pool_state_handle_put(state_handle); return -3; }
 #ifdef RT_POOL_PTHREAD
     pthread_mutex_lock(&state->lock);
@@ -1100,6 +1104,12 @@ int64_t rt_pool_state_try_submit_i64_v1(int64_t state_handle, int64_t arg0, int6
     }
     rt_pool_state_handle_put(state_handle);
     return task_handle;
+}
+
+/* Simple-facing legacy entry (extern name kept for deployed binaries): the
+ * Simple pool facade passes a tagged function value, so the kind is VALUE. */
+int64_t rt_pool_state_try_submit_i64_v1(int64_t state_handle, int64_t arg0, int64_t arg1) {
+    return rt_pool_state_try_submit_i64_kind_v1(state_handle, RT_WORKER_CLOSURE_VALUE, arg0, arg1);
 }
 
 int64_t rt_pool_task_status_i64_v1(int64_t task_handle) {

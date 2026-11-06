@@ -24,6 +24,8 @@
 extern int64_t rt_pool_set_parallelism(int64_t workers);
 extern int64_t rt_pool_state_create_v1(int64_t capacity);
 extern int64_t rt_pool_state_try_submit_i64_v1(int64_t state, int64_t entry, int64_t input);
+extern int64_t rt_pool_state_try_submit_i64_kind_v1(int64_t state, int64_t kind, int64_t entry, int64_t input);
+#define POOL_KIND_ADDRESS 1 /* RT_WORKER_CLOSURE_ADDRESS: blocker is a machine address */
 extern int64_t rt_pool_task_join_i64_v1(int64_t task);
 extern int64_t rt_pool_task_release_i64_v1(int64_t task);
 extern int64_t rt_pool_state_close_v1(int64_t state);
@@ -69,7 +71,7 @@ int main(void) {
     int64_t state = rt_pool_state_create_v1(2);
     CHECK(state != 0);
 
-    int64_t block_task = rt_pool_state_try_submit_i64_v1(state, (int64_t)(uintptr_t)blocker, 1);
+    int64_t block_task = rt_pool_state_try_submit_i64_kind_v1(state, POOL_KIND_ADDRESS, (int64_t)(uintptr_t)blocker, 1);
     CHECK(block_task > 0);
     /* Wait until the only worker is inside the blocker, so the closure task
      * cannot run before the submitter's scope ends. */

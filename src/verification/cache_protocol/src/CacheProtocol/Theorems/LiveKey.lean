@@ -71,4 +71,16 @@ theorem library_mode_default_vs_explicit_visible (legacy explicit : LiveKey)
   intro heq
   exact hexplicit (heq.symm.trans hlegacy)
 
+/-- The optional XRay component (`--xray`) uses the empty model value for the
+    off encoding, which appends no component and so keeps every historical
+    key. An instrumented build always carries a nonempty value, so a sled
+    artifact can never satisfy an off lookup (or the reverse).
+    Source framing/digest assumptions remain those of Generated.LiveKey. -/
+theorem xray_off_vs_on_visible (plain instrumented : LiveKey)
+    (hoff : plain .opts_xray = [])
+    (hon : instrumented .opts_xray ≠ []) : enc plain ≠ enc instrumented := by
+  apply opts_xray_live_change_visible
+  intro heq
+  exact hon (heq.symm.trans hoff)
+
 end CacheProtocol.Live

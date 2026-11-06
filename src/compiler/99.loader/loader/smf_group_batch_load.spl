@@ -18,6 +18,7 @@ use compiler.backend.linker.smf_reader.{SmfReaderImpl}
 use compiler.backend.linker.smf_reader_memory.{SmfRelocEntry}
 use compiler.backend.linker.obj_taker.{SmfSymbol, SymbolType, SymbolBinding}
 use compiler.backend.linker.smf_enums.{Platform, Arch, CompressionType}
+use compiler.backend.linker.smf_header.{SMF_HEADER_SIZE, SMF_VERSION_MINOR, smf_header_size_at}
 use std.platform.{get_host_os, get_host_arch}
 
 struct NativeGroupBatchImageV1:
@@ -60,9 +61,10 @@ fn native_group_batch_validate_sections(bytes: [u8],
             header.compression != CompressionType.None_:
         return Err("native group SMF target or executable status is unproven")
     val (major, minor) = header.version
-    if major != 1 or (minor != 1 and minor != 2):
-        return Err("native group SMF requires format v1.1 or v1.2")
-    if header.header_offset != bytes.len() - 128 or
+    if major != 1 or minor < 1 or minor > SMF_VERSION_MINOR:
+        return Err("native group SMF requires format v1.1 to v1.3")
+    # Trailer: 96 bytes for the v1.3 / Rust seed layout, 128 for legacy packed.
+    if header.header_offset != bytes.len() - smf_header_size_at(bytes, header.header_offset) or
             bytes[header.header_offset + 12] != 0:
         return Err("native group SMF requires an uncompressed trailer header")
     val sym_count = header.symbol_count as i64
@@ -121,7 +123,7 @@ fn native_group_batch_preflight(path: text,
         host: Platform) -> Result<NativeGroupBatchImageV1, text>:
     val reader = SmfReaderImpl.open(path)?
     val bytes = reader.sffi.mem.data
-    if bytes.len() < 128 or bytes.len() > 134217728:
+    if bytes.len() < SMF_HEADER_SIZE or bytes.len() > 134217728:
         return Err("native group SMF byte size is invalid: {path}")
     val sections = native_group_batch_validate_sections(bytes, reader, host)?
     val symbols = reader.sffi.mem.symbols_in_table_order()?

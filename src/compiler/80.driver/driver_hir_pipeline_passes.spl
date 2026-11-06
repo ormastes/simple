@@ -14,6 +14,8 @@ use compiler.driver.driver_types.{CompileContext}
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName}
 use compiler.hir.hir_lowering.api_export_route_projection_v1.{bind_api_signature_surface_v1, project_api_export_routes_v1}
 use compiler.types.type_infer.api_exposure_walker_v1.{walk_api_exposure_v1}
+use compiler.types.type_infer.api_exposure_closure_v1.{apply_api_export_closure_v1}
+use compiler.hir.hir_lowering.api_export_closure_projection_v1.{project_api_export_closure_v1}
 use compiler.hir.hir.*
 use compiler.driver.driver_log_helpers.{log_debug, log_phase}
 use compiler.semantics.resolve.{resolve_methods, resolve_methods_quiet, resolve_methods_module_owner}
@@ -152,6 +154,7 @@ pub fn run_typecheck_warn_pass(
     ctx.api_signature_node_count = 0
     ctx.api_signature_retention_exhausted = false
     ctx.api_export_route_facts = nil
+    ctx.api_export_closure_facts = nil
     ctx.api_exposure = {}
     ctx.api_publication_decision = nil
     var out: [text] = []
@@ -166,6 +169,12 @@ pub fn run_typecheck_warn_pass(
         publish_module_typecheck_receipt_v1(ctx, receipt)
     if val registry = surfaces:
         ctx.api_export_route_facts = Some(project_api_export_routes_v1(registry, ctx.api_signature_facts))
+        # Effective export closure over the frozen routes, applied to every
+        # retained exposure row so a module verdict can become Safe.
+        val closure = project_api_export_closure_v1(registry, ctx.api_export_route_facts, ctx.api_signature_facts)
+        ctx.api_export_closure_facts = Some(closure)
+        for module_name in ctx.api_exposure.keys():
+            ctx.api_exposure[module_name] = apply_api_export_closure_v1(ctx.api_exposure[module_name], closure)
     out
 
 pub fn run_safety_warn_pass(ctx: CompileContext,

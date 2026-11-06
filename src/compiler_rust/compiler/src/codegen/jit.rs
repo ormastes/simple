@@ -285,12 +285,22 @@ impl JitCompiler {
     fn first_unsupported_lambda(mir: &MirModule) -> Option<(String, String)> {
         use crate::mir::MirInst;
 
+        // A closure built in one function is called back in ANOTHER
+        // (`fn call_once(f): return f(10)` fed `_1 + 1`): that callee has no
+        // `ClosureCreate`, but its `IndirectCall` boundary is just as
+        // untyped. Skipping it let `call_once(_1 + 1)` return the tagged 11
+        // (88) as a raw int. So once ANY function in the module builds a
+        // closure, every function's indirect-call boundary is checked.
+        let module_has_closure = mir
+            .functions
+            .iter()
+            .any(|f| !crate::mir::closure_call_types::closure_value_regs(f).is_empty());
+        if !module_has_closure {
+            return None;
+        }
         for func in &mir.functions {
             // Registers holding a closure built in THIS function.
             let closure_regs = crate::mir::closure_call_types::closure_value_regs(func);
-            if closure_regs.is_empty() {
-                continue;
-            }
 
             // A closure register may only be consumed as an `IndirectCall`
             // callee (case 1) or stored/loaded through a local — the shape a

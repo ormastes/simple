@@ -1,0 +1,126 @@
+"""XRay PR2: the single compile-time gate for the `simple.trace/observer-v1`
+aspect-param extension. Aspect params are the dynamic (runtime) selection only;
+this gate validates a present request fail-closed and never changes sleds.
+It is decided once in CompileContext.create (beside xray_policy_resolve) and
+surfaced by the existing xray_config_error consumers."""
+use std.spec.*
+use std.common.plugin.aspect_params.*
+use std.common.plugin.iface_id.{ParamExt}
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_config_v1.*
+use std.common.text_bytes.{text_to_bytes}
+use compiler.common.driver_compile_options.{driver_core_compile_options_default}
+use compiler.common.driver_core_modes.{CompileMode}
+use compiler.common.driver_core_types.{CompileResult}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_orchestration.*
+use compiler.driver.driver_pipeline_aop.*
+use compiler.driver.driver_xray_policy.{xray_observer_request_check, xray_observer_request_error}
+
+fn observer_request_params_v1(config: TraceConfigV1) -> AspectParamsV1:
+    var params = AspectParamsV1.defaults()
+    val source = trace_config_format_sdn_v1(config).unwrap()
+    params.ext.push(ParamExt(ASPECT_TRACE_OBSERVER_EXT_V1, 1,
+        text_to_bytes(source), TRACE_CONFIG_SCHEMA_HASH_V1))
+    params
+
+fn dynamic_request_params_v1() -> AspectParamsV1:
+    var config = trace_config_defaults_v1()
+    config.instrumentation = TraceInstrumentationV1.Dynamic
+    config.abi_profile = "scalar-v1"
+    observer_request_params_v1(config)
+
+describe "observer extension request check (pure predicate)":
+    it "leaves old parameters valid without a target or observer extension":
+        expect(xray_observer_request_check(AspectParamsV1.defaults(), "")).to_equal(Ok(true))
+
+    it "accepts explicit off on Windows without resolving a Linux backend":
+        var config = trace_config_defaults_v1()
+        config.backend = TraceBackendV1.Llvm
+        val params = observer_request_params_v1(config)
+        expect(xray_observer_request_check(params, "aarch64-pc-windows-msvc")).to_equal(Ok(true))
+
+    it "rejects a requested Windows route and an unqualified Linux profile":
+        val params = dynamic_request_params_v1()
+        expect(xray_observer_request_check(params, "x86_64-pc-windows-msvc")).to_equal(Err(TraceFailureV1.UnsupportedTarget))
+        expect(xray_observer_request_check(params, "x86_64-unknown-linux-gnu")).to_equal(Err(TraceFailureV1.UnsupportedProfile))
+
+    it "rejects duplicate observer extensions even when both are off":
+        var params = observer_request_params_v1(trace_config_defaults_v1())
+        params.ext.push(params.ext[1])
+        expect(xray_observer_request_check(params, "")).to_equal(Err(TraceFailureV1.InvalidArgument))
+
+    it "rejects incompatible extension major and schema hash before parsing":
+        val payload = text_to_bytes("trace:\n    schema: 1\n")
+        var wrong_major = AspectParamsV1.defaults()
+        wrong_major.ext.push(ParamExt(ASPECT_TRACE_OBSERVER_EXT_V1, 2, payload, TRACE_CONFIG_SCHEMA_HASH_V1))
+        expect(xray_observer_request_check(wrong_major, "")).to_equal(Err(TraceFailureV1.InvalidArgument))
+        var wrong_schema = AspectParamsV1.defaults()
+        wrong_schema.ext.push(ParamExt(ASPECT_TRACE_OBSERVER_EXT_V1, 1, payload, "stale"))
+        expect(xray_observer_request_check(wrong_schema, "")).to_equal(Err(TraceFailureV1.InvalidArgument))
+
+    it "rejects malformed UTF8 and empty payloads instead of lossy decoding":
+        var malformed = AspectParamsV1.defaults()
+        malformed.ext.push(ParamExt(ASPECT_TRACE_OBSERVER_EXT_V1, 1, [192, 175], TRACE_CONFIG_SCHEMA_HASH_V1))
+        expect(xray_observer_request_check(malformed, "")).to_equal(Err(TraceFailureV1.InvalidArgument))
+        var empty = AspectParamsV1.defaults()
+        empty.ext.push(ParamExt(ASPECT_TRACE_OBSERVER_EXT_V1, 1, [], TRACE_CONFIG_SCHEMA_HASH_V1))
+        expect(xray_observer_request_check(empty, "")).to_equal(Err(TraceFailureV1.InvalidArgument))
+
+    it "ignores unrelated extension payloads and preserves their existing owner":
+        var params = AspectParamsV1.defaults()
+        params.ext.push(ParamExt("other-owner", 99, [255], "other-schema"))
+        expect(xray_observer_request_check(params, "")).to_equal(Ok(true))
+
+    it "formats a stable TRACE-E-REQUEST error, empty when admitted":
+        expect(xray_observer_request_error(AspectParamsV1.defaults(), "")).to_equal("")
+        expect(xray_observer_request_error(dynamic_request_params_v1(), "x86_64-pc-windows-msvc"))
+            .to_equal("TRACE-E-REQUEST: observer V1 request rejected (status=1)")
+
+describe "observer request gate (single decision point, CompileContext.create)":
+    it "records a rejected observer request as xray_config_error":
+        var options = driver_core_compile_options_default()
+        options.native_target = "x86_64-unknown-linux-gnu"
+        options.aspect_params = dynamic_request_params_v1()
+        val ctx = CompileContext.create(options)
+        expect(ctx.config["xray_config_error"] ?? "").to_equal("TRACE-E-REQUEST: observer V1 request rejected (status=2)")
+
+    it "writes no key for absent or explicit-off requests, with --xray off":
+        var options = driver_core_compile_options_default()
+        val absent = CompileContext.create(options)
+        expect(absent.config.contains_key("xray_config_error")).to_equal(false)
+        options.aspect_params = observer_request_params_v1(trace_config_defaults_v1())
+        options.native_target = "x86_64-pc-windows-msvc"
+        val off = CompileContext.create(options)
+        expect(off.config.contains_key("xray_config_error")).to_equal(false)
+        expect(off.config.contains_key("xray")).to_equal(false)
+
+    it "never turns sleds on: an admitted request leaves the static switch off":
+        var options = driver_core_compile_options_default()
+        options.aspect_params = observer_request_params_v1(trace_config_defaults_v1())
+        val ctx = CompileContext.create(options)
+        expect(ctx.config.contains_key("xray")).to_equal(false)
+
+    it "compile() rejects before loading any source":
+        var options = driver_core_compile_options_default()
+        options.input_files = ["test/fixtures/observer-intentionally-absent-input.spl"]
+        options.native_target = "x86_64-pc-windows-msvc"
+        options.mode = CompileMode.Check
+        options.backend = "check"
+        options.aspect_params = dynamic_request_params_v1()
+        var driver = CompilerDriver.create(options)
+        match driver.compile():
+            case CompileResult.CodegenError(message):
+                expect(message).to_equal("TRACE-E-REQUEST: observer V1 request rejected (status=1)")
+            case _:
+                fail("observer request must fail before source loading")
+        expect(driver.ctx.sources.len()).to_equal(0)
+
+    it "the shared instrumentation stage surfaces it even with --xray off":
+        var options = driver_core_compile_options_default()
+        options.native_target = "x86_64-pc-windows-msvc"
+        options.aspect_params = dynamic_request_params_v1()
+        var driver = CompilerDriver.create(options)
+        driver.apply_debug_trace()
+        expect(driver.ctx.has_errors()).to_equal(true)

@@ -1,0 +1,127 @@
+# Stable symbol identity (todo L11; doc/05_design/app/lsp/symbol_identity_resolved_index.md §2).
+#
+#   key = kind:module_path:qualified_name[:signature_digest]
+#
+# `kind` is the declaration keyword, `module_path` the repo-relative file with
+# `/` -> `.` and `.spl` dropped, `qualified_name` the declared name (members
+# are `Owner.name` when the caller supplies the owner), `signature_digest` the
+# first 12 hex chars of sha256 over the normalised declaration line. The key
+# survives line moves and comment edits; it changes on rename, move, kind or
+# signature change. A key is paired with a snapshot-bound locator
+# `{snapshot_id, path, blob_id, line, col}` and both travel in
+# `CallHierarchyItem.data` — never by widening the 6-field edge wire line.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.lsp.lsp_call_edges.{lsp_call_edges_strip_code_v1, lsp_call_edges_decl_name_v1}
+use std.nogc_sync_mut.lsp.lsp_json.{js, jp, jo2, jo5}
+
+struct LspSymbolKeyV1:
+    kind: text
+    module_path: text
+    qualified_name: text
+    signature_digest: text
+
+fn _is_ident_byte(b: i64) -> bool:
+    (b >= 48 and b <= 57) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or b == 95
+
+fn _has_drive_prefix(s: text) -> bool:
+    if s.len() < 3: return false
+    val b0 = s.byte_at(0)
+    val alpha = (b0 >= 65 and b0 <= 90) or (b0 >= 97 and b0 <= 122)
+    alpha and s.byte_at(1) == 58 and (s.byte_at(2) == 47 or s.byte_at(2) == 92)
+
+# Repo-relative module path: `D:\w\src\lib\x.spl` -> `src.lib.x`. An absolute
+# path is cut at its first `src/`, `test/`, `examples/` or `doc/` segment;
+# otherwise the whole path (drive stripped) is used.
+pub fn lsp_symbol_module_path_v1(path: text) -> text:
+    var p = path.replace("\\", "/")
+    if _has_drive_prefix(p): p = p.substring(2)
+    for root in ["src/", "test/", "examples/", "doc/"]:
+        val idx = p.index_of("/" + root)
+        if idx >= 0:
+            p = p.substring(idx + 1)
+            break
+    while p.starts_with("/") or p.starts_with("./"):
+        if p.starts_with("/"):
+            p = p.substring(1)
+        else:
+            p = p.substring(2)
+    if p.ends_with(".spl"): p = p.substring(0, p.len() - 4)
+    p.replace("/", ".")
+
+# Declaration kind of a line: fn | struct | class | enum | trait | val | var; "" otherwise.
+pub fn lsp_symbol_decl_kind_v1(raw_line: text) -> text:
+    val t = lsp_call_edges_strip_code_v1(raw_line).trim()
+    if lsp_call_edges_decl_name_v1(raw_line) != "": return "fn"
+    var rest = t
+    var guard = 0
+    while guard < 4:
+        guard = guard + 1
+        val sp = rest.index_of(" ")
+        if sp < 0: return ""
+        val word = rest.substring(0, sp)
+        if word == "pub" or word == "static" or word == "async":
+            rest = rest.substring(sp + 1).trim()
+            continue
+        if word == "struct" or word == "class" or word == "enum" or word == "trait" or word == "val" or word == "var":
+            return word
+        return ""
+    ""
+
+# The declared name for non-fn kinds: the identifier after the keyword.
+pub fn lsp_symbol_decl_name_v1(raw_line: text) -> text:
+    val kind = lsp_symbol_decl_kind_v1(raw_line)
+    if kind == "": return ""
+    if kind == "fn": return lsp_call_edges_decl_name_v1(raw_line)
+    val t = lsp_call_edges_strip_code_v1(raw_line).trim()
+    val at = t.index_of(kind + " ")
+    if at < 0: return ""
+    val rest = t.substring(at + kind.len() + 1).trim()
+    var j = 0
+    while j < rest.len() and _is_ident_byte(rest.byte_at(j)):
+        j = j + 1
+    rest.substring(0, j)
+
+# Normalised declaration line: comments/strings blanked, whitespace runs
+# collapsed, trailing `:` removed. Digest = first 12 hex chars of sha256.
+pub fn lsp_symbol_signature_digest_v1(raw_line: text) -> text:
+    var collapsed = ""
+    var last_space = true
+    val stripped = lsp_call_edges_strip_code_v1(raw_line).trim()
+    for ch in stripped.chars():
+        if ch == " " or ch == "\t":
+            if not last_space: collapsed = collapsed + " "
+            last_space = true
+        else:
+            collapsed = collapsed + ch
+            last_space = false
+    var norm = collapsed.trim()
+    if norm.ends_with(":"): norm = norm.substring(0, norm.len() - 1).trim()
+    sha256_text(norm).substring(0, 12)
+
+# nil when `decl_line` is not a declaration. `owner` ("" for top level)
+# qualifies members as `Owner.name`.
+pub fn lsp_symbol_key_v1(path: text, decl_line: text, owner: text) -> LspSymbolKeyV1?:
+    val kind = lsp_symbol_decl_kind_v1(decl_line)
+    if kind == "": return nil
+    val name = lsp_symbol_decl_name_v1(decl_line)
+    if name == "": return nil
+    var qualified = name
+    if owner != "": qualified = owner + "." + name
+    LspSymbolKeyV1(kind: kind, module_path: lsp_symbol_module_path_v1(path),
+        qualified_name: qualified, signature_digest: lsp_symbol_signature_digest_v1(decl_line))
+
+pub fn lsp_symbol_key_text_v1(k: LspSymbolKeyV1) -> text:
+    k.kind + ":" + k.module_path + ":" + k.qualified_name + ":" + k.signature_digest
+
+# `{"symbolKey": "...", "locator": {snapshot_id, path, blob_id, line, col}}`
+# for `CallHierarchyItem.data`. `snapshot_id` / `blob_id` are "" when the
+# caller has no snapshot (worktree state); `line`/`col` are 1-based.
+pub fn lsp_symbol_data_json_v1(k: LspSymbolKeyV1, snapshot_id: text, path: text, blob_id: text, line: i64, col: i64) -> text:
+    val locator = jo5(jp("snapshot_id", js(snapshot_id)), jp("path", js(path.replace("\\", "/"))),
+        jp("blob_id", js(blob_id)), jp("line", str(line)), jp("col", str(col)))
+    jo2(jp("symbolKey", js(lsp_symbol_key_text_v1(k))), jp("locator", locator))
+
+export LspSymbolKeyV1
+export lsp_symbol_module_path_v1, lsp_symbol_decl_kind_v1, lsp_symbol_decl_name_v1
+export lsp_symbol_signature_digest_v1, lsp_symbol_key_v1, lsp_symbol_key_text_v1, lsp_symbol_data_json_v1

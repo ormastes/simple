@@ -5,8 +5,7 @@ Evidence class: authored host fixture, UNRUN; no executable mapping success is c
 # @req: REQ-GENERIC-CONFIG-TARGET-002
 use std.spec
 use std.spec.step
-use compiler.backend.linker.smf_header.{SmfHeader, smf_header_from_bytes}
-use compiler.backend.linker.smf_enums.{Platform, Arch}
+use compiler.backend.linker.smf_header.{smf_header_from_bytes}
 use compiler.backend.linker.smf_reader.{SmfReaderImpl}
 use compiler.driver.cache.compile_options_hash.{compile_options_hash_compute, compile_options_hash_to_bytes}
 use compiler.driver.smf_writer.{SmfBuildOptions, SmfDependencyEntry, Target, generate_smf_with_raw_code_options}
@@ -24,10 +23,12 @@ fn target_fixture_options(target: text):
     compile_options_hash_compute("cranelift", 0, false, false, false, "dev", [], [], [], [], "moderate", -1, target)
 
 fn target_fixture_write(path: text, source: text, target: text):
-    var header = SmfHeader.new_v1_1(Platform.Linux, Arch.X86_64)
-    header.source_hash = hash_text(source)
-    header.set_compile_options_bytes(compile_options_hash_to_bytes(target_fixture_options(target)))
-    expect(file_write_bytes(path, header.to_bytes())).to_equal(true)
+    # The compile-options hash is a .simple_meta record, so the fixture is a
+    # canonical writer image (empty code section) rather than a bare header.
+    var build_options = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
+    build_options.source_hash = hash_text(source)
+    build_options.compile_options_bytes = compile_options_hash_to_bytes(target_fixture_options(target))
+    expect(file_write_bytes(path, generate_smf_with_raw_code_options([], build_options))).to_equal(true)
 
 # A real canonical writer fixture with a live dependency receipt. The code
 # section is never executed; this exercises artifact acceptance, not codegen.
@@ -40,21 +41,20 @@ fn target_fixture_optimized_acceptance(requested_release: bool):
     val dependency = "fn dependency() -> i64: 2\n"
     expect(file_write(source_path, source)).to_equal(true)
     expect(file_write(dependency_path, dependency)).to_equal(true)
+    val opts = smf_compile_options(source_path, smf_path, "cranelift", 2,
+        requested_release, false, false, "dev", [], "x86_64-unknown-linux-gnu").unwrap()
+    expect(opts.release).to_equal(true)
     var build_options = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
     build_options.source_hash = hash_text(source)
     val dep_hash = hash_text(dependency)
     build_options.deps = [SmfDependencyEntry(module_path: dependency_path,
         content_hash: if dep_hash == 0: 1 else: dep_hash)]
-    var bytes = generate_smf_with_raw_code_options([], build_options)
-    expect(bytes.len()).to_be_greater_than(128)
-    val opts = smf_compile_options(source_path, smf_path, "cranelift", 2,
-        requested_release, false, false, "dev", [], "x86_64-unknown-linux-gnu").unwrap()
-    expect(opts.release).to_equal(true)
-    var header = smf_header_from_bytes(bytes).unwrap()
-    header.set_compile_options_bytes(compile_options_hash_to_bytes(compute_options_hash(opts)))
-    val trailer = header.to_bytes()
-    for i in 0..128:
-        bytes[bytes.len() - 128 + i] = trailer[i]
+    # The compile-options hash travels as a .simple_meta record, written by
+    # the canonical writer (never spliced into the 96-byte header).
+    build_options.compile_options_bytes = compile_options_hash_to_bytes(compute_options_hash(opts))
+    val bytes = generate_smf_with_raw_code_options([], build_options)
+    expect(bytes.len()).to_be_greater_than(96)
+    expect(smf_header_from_bytes(bytes).unwrap().version_minor).to_equal(3)
     expect(file_write_bytes(smf_path, bytes)).to_equal(true)
     val expected = smf_expected_compile_options_hash("cranelift", 2, requested_release,
         false, false, "dev", [], "x86_64-unknown-linux-gnu").unwrap()

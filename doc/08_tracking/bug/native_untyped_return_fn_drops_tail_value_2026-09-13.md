@@ -1,5 +1,5 @@
 # A function with no declared return type returns 0 in native codegen
-## Open 2026-09-16 — needs owner triage
+## Fix implemented 2026-11-06 — verification pending (pure-Simple native e2e)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -97,3 +97,39 @@ tree, it needs the full differential harness
 (`scripts/check/check-native-interp-differential.shs`) run before and after, not
 a spot check.
 
+
+## Decision (2026-11-06, owner decision)
+
+A function without `-> T` infers its return type from its last expression when
+possible. When inference is impossible the compiler emits a diagnostic, never a
+silent Unit. In robust mode a missing return type on a value-returning function
+is a compile error.
+
+- **Robust mode selection:** the resolved assurance policy
+  (`ctx.assurance_policy.strictness >= Robust`; project `lints: profile:`, CLI
+  flag, or `SIMPLE_SAFETY_PROFILE` for child processes — raise-only, see
+  `src/compiler/00.common/assurance/policy.spl`). The driver passes it per
+  invocation as `HirLowering.require_declared_return_type`
+  (`driver_hir_requires_declared_return_type`, all five HIR lowering sites);
+  the lowering default stays `false`. The HIR source-body cache identity folds
+  the flag so robust and default lowerings never share an entry.
+- **Pure-Simple compiler** (`infer_untyped_return_type` ->
+  `tail_value_return_type_v1`, signature pass, so callers see the type): a
+  side-effect-free value tail (literal, local, operator, cast, field/index,
+  collection/struct literal, `??`, `?.`, comprehension) promotes the return
+  type. A resolvable scalar (`i64`/`f64`/`text`/`bool`/...) is used directly,
+  including through an unannotated binding initializer (`val x = 5; x`). An
+  un-inferrable value tail (the bug's `var c = []; ...; c`) returns `Any`
+  dynamically and reports `[W-RET-INFER-001]`. Calls, method calls,
+  `if`/`match` and blocks keep the Unit default (they may be procedures); a
+  sole string literal is a docstring. Robust mode reports `[E-RET-DECL-001]`.
+- **Rust seed** (interpreter, JIT, cranelift native-build): already returns the
+  tail (`body_produces_value` -> `TypeId::ANY`,
+  `hir/lower/module_lowering/function.rs`). Re-verified 2026-11-06 on Windows:
+  the reproducer above prints `untyped val=[7] len=1` under interpreter, JIT
+  and `native-build --backend cranelift --mode dynload`. The seed is
+  bootstrap-only, so robust-mode enforcement lives in the pure-Simple driver.
+- **Evidence:** `test/01_unit/compiler/hir/untyped_tail_return_infer_spec.spl`
+  (14/14; red before the change). Neighbouring untyped-return specs stay green.
+- **Pending:** pure-Simple native end-to-end on a deployed self-hosted binary,
+  and the differential harness run requested above.

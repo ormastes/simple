@@ -1,0 +1,60 @@
+# Negative fixture (bug stage2_mir_shard_flat_pool_text_len_minus1_2026_10_22), run by flat_pool_invalid_text_guard_spec.spl.
+# An invalid text handle (rt_string_len == -1) reaching a SANITIZE-armed
+# capture encode must poison the capture and be skipped BEFORE any read of
+# its bytes (flat_pool_escape) — never panic, never crash. Covers the plain
+# text pool, the nested text_list pool and the text_list_list pool, plus the
+# validate-only arm. The invalid value is the provider's NIL word for an
+# absent element, as in flat_pool_append_rejected_text.spl.
+use compiler.frontend.core.flat_pool_codec.{flat_pool_enc_text, flat_pool_enc_text_list, flat_pool_enc_text_list_list, flat_pool_capture_sanitize_arm_v1, flat_pool_capture_sanitize_disarm_v1, flat_pool_capture_poisoned_v1, flat_pool_validate_texts_arm_v1, flat_pool_validate_texts_disarm_v1, flat_pool_text_handle_valid_v1, flat_pool_invalid_texts_skipped_v1}
+
+extern fn rt_array_get_text(values: [text], index: i64) -> text
+
+fn main() -> i32:
+    val empty: [text] = []
+    val invalid = rt_array_get_text(empty, 0)
+    if flat_pool_text_handle_valid_v1(invalid):
+        return 40
+    if not flat_pool_text_handle_valid_v1("ok"):
+        return 41
+    val skipped0 = flat_pool_invalid_texts_skipped_v1()
+
+    flat_pool_capture_sanitize_arm_v1()
+    val a = flat_pool_enc_text(["valid", invalid, "x"])
+    val pa = flat_pool_capture_poisoned_v1()
+    flat_pool_capture_sanitize_disarm_v1()
+    if not pa:
+        return 42
+
+    flat_pool_capture_sanitize_arm_v1()
+    val b = flat_pool_enc_text_list([["v"], [invalid]])
+    val pb = flat_pool_capture_poisoned_v1()
+    flat_pool_capture_sanitize_disarm_v1()
+    if not pb:
+        return 43
+
+    flat_pool_capture_sanitize_arm_v1()
+    val c = flat_pool_enc_text_list_list([[["v"]], [[invalid]]])
+    val pc = flat_pool_capture_poisoned_v1()
+    flat_pool_capture_sanitize_disarm_v1()
+    if not pc:
+        return 44
+    # The three sanitize encodes must reject the handle BEFORE escaping it.
+    if flat_pool_invalid_texts_skipped_v1() - skipped0 != 3:
+        return 47
+
+    flat_pool_validate_texts_arm_v1()
+    val d = flat_pool_enc_text([invalid])
+    val pd = flat_pool_capture_poisoned_v1()
+    flat_pool_validate_texts_disarm_v1()
+    if not pd:
+        return 45
+
+    # Clean pools after disarm still encode exactly.
+    flat_pool_capture_sanitize_arm_v1()
+    val e = flat_pool_enc_text(["", "a\nb"])
+    val pe = flat_pool_capture_poisoned_v1()
+    flat_pool_capture_sanitize_disarm_v1()
+    if pe or e != "2\n\na\\nb\n":
+        return 46
+    print "sanitize-invalid-text-ok {a.len() >= 0} {b.len() >= 0} {c.len() >= 0} {d.len() >= 0}"
+    0

@@ -50,6 +50,43 @@ is deferred to E1 export closure. Read the
 [E2 status](../../../05_design/extreme_typing_traceability.md#e2-named-rule-and-publication-guard-2026-11-06)
 before extending; the full `compile()` denial is pending a self-hosted run.
 
+
+2026-11-06 E1 closure design: the
+[effective export closure](../../../05_design/extreme_typing_traceability.md#e1-effective-export-closure-design-2026-11-06)
+is defined over the frozen registry, route facts and retained signatures:
+`Exported` needs a `Joined` direct route plus a `Joined` route from every
+ancestor facade present in the registry (`export use` only; `pub mod` is not
+parsed by the compiler frontend; a bare `pub fn` without `export` is
+`NotExported`). Closure is relative to the compilation subject and follows
+`visibility.spl`, not `visibility_checker.spl` (which treats `Public` as
+everywhere). After the closure is applied a module can be `Safe`; `NotExported`
+callables never drive the verdict; Unknown denial may then activate under the
+explicit flag, which denies every `Nominal` export until members are projected.
+Design only; the code slice follows as its own PR.
+
+2026-11-06 P12: the
+[export hardening design](../../../05_design/extreme_typing_traceability.md#p12-export-hardening-design-2026-11-06)
+defines export scope, seven fail-closed invariants (explicit canonical
+destination, private material filtered before render, escaped offline
+content, byte-identical output, visibility-safe counts, complete SDN
+round-trip, typing facets keep every unknown reason) and the spec gates for
+the first slice, which waits for the P6 projection seam. The same section
+records the AC-EAPI-005 finding: the publication guard runs before
+`weave_aop()`, so AOP/postmono-introduced exports are not rechecked
+(feature-sized follow-up, not closed).
+
+
+2026-11-06 E1 closure implemented: `compiler.hir.hir_lowering.api_export_closure_projection_v1`
+projects `CompileContext.api_export_closure_facts`;
+`compiler.types.type_infer.api_exposure_closure_v1` applies it so a module
+verdict can be `Safe` (callable surface only; the unconditional scope marker
+`non-callable-and-generated-surfaces-not-collected` stays listed and does not
+block). A facade that spells an export the builder could not resolve is
+`Unknown(export-origin-unresolved:...)`. The decision excludes `NotExported`
+roots and now denies Unknown roots at a denying profile under the explicit
+flag. See the
+[implemented note](../../../05_design/extreme_typing_traceability.md#implemented-2026-11-06-follow-up-to-the-design-above).
+
 Read the [selected policy](../../../02_requirements/feature/extreme_typing_traceability.md),
 [architecture](../../../04_architecture/extreme_typing_traceability.md),
 [implementation plan](../../../03_plan/agent_tasks/extreme_typing_traceability.md)

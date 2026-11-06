@@ -1,0 +1,231 @@
+#!/bin/sh
+# check-xray-llvm-adapter-e2e.shs — XRay PR4: the Linux LLVM runtime adapter
+# patches and unpatches real LLVM sleds, and the handler fires for patched
+# functions only.
+#
+# Design: doc/04_architecture/compiler/xray/xray_compiler_structural_change_2026-11-06.md
+# section C and the section F PR4 row. Stage 1 delegates patching to
+# compiler-rt (libclang_rt.xray) behind src/runtime/xray/xray_llvm_adapter_linux.c;
+# the control plane is src/lib/nogc_sync_mut/trace/xray_llvm_adapter_v1.spl
+# (spec: test/01_unit/lib/nogc_sync_mut/trace/xray_llvm_adapter_v1_spec.spl).
+#
+# What it does
+#   HOST arch (native, x86_64 or aarch64 Linux):
+#     1. Builds the adapter TU WITHOUT -fxray-instrument, with
+#        -mgeneral-regs-only (and -mno-outline-atomics on aarch64), then
+#        disassembles the handler shim: it must make no call at all and touch
+#        no FP/vector register (the upstream trampoline saves only q0-q7 /
+#        xmm0-xmm7 + argument GPRs; verified from its disassembly).
+#     2. Builds test/fixtures/xray/xray_adapter_targets.ll — the exact
+#        "function-instrument"="xray-always"/"xray-never" attributes PR3 emits.
+#     3. Links the harness test/fixtures/xray/xray_adapter_e2e_main.c with
+#        `clang -fxray-instrument -fuse-ld=lld -Wl,--wrap=mprotect` and runs
+#        it with XRAY_OPTIONS=patch_premain=false (quiescent start). The
+#        harness covers: quiescent no-fire, selected-only firing, unpatch,
+#        re-patch, unknown ids 0 / max+1, injected mprotect failure, ABI-01
+#        (8 int + 8 FP args, FP return, sret) and ABI-02 (adversarial handler),
+#        generation re-install, closed-channel admission, ring-full loss
+#        accounting and two-thread producer contention.
+#   OTHER arch (object-only; no cross compiler-rt/sysroot is assumed):
+#     4. Compiles the targets and adapter for the other Linux triple and checks
+#        xray_instr_map is present in targets, absent from the adapter, and the
+#        adapter defines the four simple_xray_llvm_* entry points.
+#
+# Not covered here, stated plainly: a binary produced by
+# `simple compile --xray --native` (no deployed pure-Simple compiler can emit
+# one), and the driver link step that adds -fxray-instrument for such builds.
+#
+# Verdict (last stdout line):
+#   PASS — <n> check(s) (...)              exit 0
+#   FAIL — <reason>                        exit 1
+#   ERROR — nothing was checked (<reason>) exit 2
+# --selftest runs before every scan and is fatal: it proves the harness-output
+# classifier FAILs a FAIL line, ERRORs on empty output and on a missing
+# verdict, and PASSes only a clean PASS verdict with checks > 0.
+#
+# Usage
+#   sh scripts/check/check-xray-llvm-adapter-e2e.shs [--keep]
+#   sh scripts/check/check-xray-llvm-adapter-e2e.shs --selftest
+# Env: CLANG (default clang; source scripts/setup/llvm-toolchain-env.shs for
+# clang-23), LLVM_OBJDUMP, LLVM_READELF, LLVM_NM, XRAY_E2E_TIMEOUT (s, 120).
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+KEEP=0
+SELFTEST_ONLY=0
+CC=${CLANG:-clang}
+OBJDUMP=${LLVM_OBJDUMP:-llvm-objdump}
+READELF=${LLVM_READELF:-llvm-readelf}
+NM=${LLVM_NM:-llvm-nm}
+STEP_TIMEOUT=${XRAY_E2E_TIMEOUT:-120}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --keep) KEEP=1 ;;
+        --selftest) SELFTEST_ONLY=1 ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+    shift
+done
+
+# classify <harness-output-file> <exit-code> -> prints verdict, returns 0/1/2
+classify() {
+    cl_out=$1
+    cl_rc=$2
+    if [ ! -s "$cl_out" ]; then
+        echo "ERROR — nothing was checked (harness produced no output, exit $cl_rc)"
+        return 2
+    fi
+    cl_fail=$(grep -c '^FAIL ' "$cl_out")
+    cl_pass=$(grep '^PASS ' "$cl_out" | grep -vc '^PASS — ')
+    cl_last=$(tail -n 1 "$cl_out")
+    if [ "$cl_fail" -gt 0 ]; then
+        echo "FAIL — harness: $(grep '^FAIL ' "$cl_out" | head -3 | tr '\n' ';')"
+        return 1
+    fi
+    case "$cl_last" in
+        "PASS — "*) ;;
+        *)
+            echo "ERROR — nothing was checked (no harness verdict, exit $cl_rc)"
+            return 2 ;;
+    esac
+    if [ "$cl_rc" -ne 0 ] || [ "$cl_pass" -eq 0 ]; then
+        echo "FAIL — harness exit $cl_rc with $cl_pass check(s)"
+        return 1
+    fi
+    echo "harness: $cl_pass check(s) passed"
+    return 0
+}
+
+selftest() {
+    st_dir=$(mktemp -d "${TMPDIR:-/tmp}/xray-e2e-selftest.XXXXXX")
+    st_ok=1
+    printf 'PASS a\nFAIL b\nFAIL — 1 of 2\n' > "$st_dir/f"
+    classify "$st_dir/f" 1 >/dev/null; [ $? -eq 1 ] || st_ok=0
+    : > "$st_dir/e"
+    classify "$st_dir/e" 0 >/dev/null; [ $? -eq 2 ] || st_ok=0
+    printf 'PASS a\nsegfault\n' > "$st_dir/n"
+    classify "$st_dir/n" 139 >/dev/null; [ $? -eq 2 ] || st_ok=0
+    printf 'PASS a\nPASS — 1 check(s)\n' > "$st_dir/p"
+    classify "$st_dir/p" 0 >/dev/null; [ $? -eq 0 ] || st_ok=0
+    printf 'PASS — 0 check(s)\n' > "$st_dir/z"
+    classify "$st_dir/z" 0 >/dev/null; [ $? -eq 1 ] || st_ok=0
+    rm -rf "$st_dir"
+    if [ "$st_ok" -ne 1 ]; then
+        echo "ERROR — nothing was checked (selftest failed: classifier misjudged a fixture)"
+        exit 2
+    fi
+    echo "selftest: 5 classifier fixtures OK"
+}
+
+selftest
+[ "$SELFTEST_ONLY" -eq 1 ] && { echo "PASS — 5 selftest fixture(s) checked"; exit 0; }
+
+for tool in "$CC" "$OBJDUMP" "$READELF" "$NM"; do
+    command -v "$tool" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (missing tool: $tool)"; exit 2; }
+done
+[ "$(uname -s)" = "Linux" ] || { echo "ERROR — nothing was checked (Linux host required)"; exit 2; }
+case "$(uname -m)" in
+    aarch64|arm64) HOST=aarch64; OTHER=x86_64 ;;
+    x86_64|amd64) HOST=x86_64; OTHER=aarch64 ;;
+    *) echo "ERROR — nothing was checked (unsupported host arch $(uname -m))"; exit 2 ;;
+esac
+HOST_T=$HOST-unknown-linux-gnu
+OTHER_T=$OTHER-unknown-linux-gnu
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/xray-e2e.XXXXXX")
+cleanup() { [ "$KEEP" -eq 1 ] && echo "kept: $WORK" || rm -rf "$WORK"; }
+trap cleanup EXIT
+
+ADAPTER=$ROOT/src/runtime/xray/xray_llvm_adapter_linux.c
+TARGETS=$ROOT/test/fixtures/xray/xray_adapter_targets.ll
+HARNESS=$ROOT/test/fixtures/xray/xray_adapter_e2e_main.c
+for f in "$ADAPTER" "$TARGETS" "$HARNESS"; do
+    [ -f "$f" ] || { echo "FAIL — missing input: $f"; exit 1; }
+done
+
+adapter_flags() {
+    if [ "$1" = aarch64 ]; then echo "-mgeneral-regs-only -mno-outline-atomics"; else echo "-mgeneral-regs-only"; fi
+}
+
+CHECKS=0
+
+# ---- 1. adapter build + handler shim discipline (host)
+# shellcheck disable=SC2046
+"$CC" --target="$HOST_T" -O2 -Wall -Wextra -Werror $(adapter_flags "$HOST") \
+    -c "$ADAPTER" -o "$WORK/adapter.o" 2> "$WORK/adapter.err"
+rc=$?
+[ "$rc" -eq 0 ] || { echo "FAIL — adapter does not compile for $HOST_T: $(head -3 "$WORK/adapter.err" | tr '\n' ' ')"; exit 1; }
+"$OBJDUMP" -d --disassemble-symbols=simple_xray_handler "$WORK/adapter.o" > "$WORK/handler.dis" 2>&1
+grep -qE '^[[:space:]]+[0-9a-f]+:' "$WORK/handler.dis" || { echo "ERROR — nothing was checked (handler shim not found in adapter object)"; exit 2; }
+# A call or tail call out shows as a branch relocation inside the handler
+# (aarch64 CALL26/JUMP26, x86_64 PLT32/PC32 on a call/jmp) or an indirect
+# branch; local branches carry no relocation.
+"$OBJDUMP" -dr --disassemble-symbols=simple_xray_handler "$WORK/adapter.o" > "$WORK/handler.rel" 2>&1
+if grep -qE 'R_AARCH64_(CALL26|JUMP26)|R_X86_64_PLT32' "$WORK/handler.rel" \
+        || grep -E '^[[:space:]]+[0-9a-f]+:' "$WORK/handler.dis" | cut -f2- \
+            | grep -qE '^(bl|blr|br|call|callq)[[:space:]]|^(jmp|jmpq)[[:space:]]+\*'; then
+    echo "FAIL — handler shim calls or branches out: $(grep -E 'R_AARCH64_(CALL26|JUMP26)|R_X86_64_PLT32' "$WORK/handler.rel" | head -2 | tr '\n' ' ')"
+    exit 1
+fi
+# A direct branch to a static function in the same section has no relocation:
+# every direct branch target objdump names must lie inside the handler.
+if grep -E '^[[:space:]]+[0-9a-f]+:' "$WORK/handler.dis" | cut -f2- \
+        | grep -E '^(b|b\.[a-z]+|cbz|cbnz|tbz|tbnz|jmp|jmpq|j[a-z]+)[[:space:]]' \
+        | grep '<' | grep -qv '<simple_xray_handler[+>]'; then
+    echo "FAIL — handler shim branches to another function (tail call)"
+    exit 1
+fi
+if "$READELF" -S "$WORK/adapter.o" | grep -q xray_instr_map; then
+    echo "FAIL — adapter object carries sleds (must be built without -fxray-instrument)"
+    exit 1
+fi
+if grep -E '^[[:space:]]+[0-9a-f]+:' "$WORK/handler.dis" | cut -f2- \
+        | grep -qE '(^|[^[:alnum:]_])(%?[qvdsh][0-9]+|%?[xyz]mm[0-9]+)([^[:alnum:]_]|$)'; then
+    echo "FAIL — handler shim touches an FP/vector register"
+    exit 1
+fi
+CHECKS=$((CHECKS + 1))
+echo "handler shim: no calls, no FP/vector registers ($HOST)"
+
+# ---- 2-3. targets, harness, link, run (host)
+"$CC" --target="$HOST_T" -O2 -Wno-override-module -c "$TARGETS" -o "$WORK/targets.o" 2> "$WORK/targets.err"
+rc=$?
+[ "$rc" -eq 0 ] || { echo "FAIL — targets .ll does not compile: $(head -3 "$WORK/targets.err" | tr '\n' ' ')"; exit 1; }
+"$READELF" -S "$WORK/targets.o" | grep -q xray_instr_map || { echo "FAIL — targets object has no xray_instr_map ($HOST)"; exit 1; }
+CHECKS=$((CHECKS + 1))
+"$CC" --target="$HOST_T" -O1 -Wall -pthread -c "$HARNESS" -o "$WORK/harness.o" 2> "$WORK/harness.err"
+rc=$?
+[ "$rc" -eq 0 ] || { echo "ERROR — nothing was checked (harness does not compile: $(head -3 "$WORK/harness.err" | tr '\n' ' '))"; exit 2; }
+"$CC" --target="$HOST_T" -fxray-instrument -fuse-ld=lld -pthread -Wl,--wrap=mprotect \
+    "$WORK/harness.o" "$WORK/targets.o" "$WORK/adapter.o" -o "$WORK/xray_e2e" 2> "$WORK/link.err"
+rc=$?
+[ "$rc" -eq 0 ] || { echo "ERROR — nothing was checked (link with compiler-rt xray failed: $(head -3 "$WORK/link.err" | tr '\n' ' '))"; exit 2; }
+XRAY_OPTIONS=patch_premain=false timeout "$STEP_TIMEOUT" "$WORK/xray_e2e" > "$WORK/run.out" 2> "$WORK/run.err"
+rc=$?
+cat "$WORK/run.out"
+classify "$WORK/run.out" "$rc"
+rc=$?
+[ "$rc" -eq 0 ] || exit "$rc"
+CHECKS=$((CHECKS + $(grep '^PASS ' "$WORK/run.out" | grep -vc '^PASS — ')))
+
+# ---- 4. other arch, object-only
+"$CC" --target="$OTHER_T" -O2 -Wno-override-module -c "$TARGETS" -o "$WORK/targets_other.o" 2> "$WORK/to.err" \
+    || { echo "FAIL — targets .ll does not compile for $OTHER_T"; exit 1; }
+"$READELF" -S "$WORK/targets_other.o" | grep -q xray_instr_map || { echo "FAIL — no xray_instr_map for $OTHER_T"; exit 1; }
+# shellcheck disable=SC2046
+"$CC" --target="$OTHER_T" -O2 -ffreestanding -Wall -Wextra -Werror $(adapter_flags "$OTHER") \
+    -c "$ADAPTER" -o "$WORK/adapter_other.o" 2> "$WORK/ao.err" \
+    || { echo "FAIL — adapter does not compile for $OTHER_T: $(head -3 "$WORK/ao.err" | tr '\n' ' ')"; exit 1; }
+if "$READELF" -S "$WORK/adapter_other.o" | grep -q xray_instr_map; then
+    echo "FAIL — adapter object for $OTHER_T carries sleds (must be built without -fxray-instrument)"
+    exit 1
+fi
+n=$("$NM" "$WORK/adapter_other.o" | grep -cE ' T simple_xray_llvm_(max_function_id|install|patch_function|unpatch_function)$')
+[ "$n" -eq 4 ] || { echo "FAIL — adapter for $OTHER_T defines $n of 4 entry points"; exit 1; }
+CHECKS=$((CHECKS + 1))
+echo "object-only: $OTHER_T targets carry xray_instr_map, adapter defines 4 entry points"
+
+echo "PASS — $CHECKS check(s) (native $HOST run through compiler-rt xray; $OTHER object-only)"
+exit 0

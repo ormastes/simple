@@ -53,6 +53,8 @@ bool spl_thread_join(spl_thread_handle handle);
 
 int64_t rt_thread_spawn_isolated(int64_t fn_ptr, int64_t env_ptr);
 int64_t rt_thread_spawn_isolated_with_args(int64_t fn_ptr, int64_t data1, int64_t data2);
+int64_t rt_thread_spawn_isolated_kind(int64_t kind, int64_t closure, int64_t data);
+int64_t rt_thread_spawn_isolated_with_args_kind(int64_t kind, int64_t fn_ptr, int64_t data1, int64_t data2);
 int64_t rt_thread_join(int64_t handle);
 int64_t rt_thread_is_done(int64_t handle);
 int64_t rt_thread_id(int64_t handle);
@@ -79,6 +81,7 @@ int64_t rt_pool_busy_count(void);
 int64_t rt_pool_blocked_count(void);
 int64_t rt_pool_state_create_v1(int64_t capacity);
 int64_t rt_pool_state_try_submit_i64_v1(int64_t state_handle, int64_t entry_fn, int64_t input_i64);
+int64_t rt_pool_state_try_submit_i64_kind_v1(int64_t state_handle, int64_t kind, int64_t entry_fn, int64_t input_i64);
 int64_t rt_pool_task_status_i64_v1(int64_t task_handle);
 int64_t rt_pool_task_join_i64_v1(int64_t task_handle);
 int64_t rt_pool_task_release_i64_v1(int64_t task_handle);
