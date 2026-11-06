@@ -1,0 +1,41 @@
+#!/bin/sh
+# Environment-routing regression, not a bootstrap or compiler admission test.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/preflight-git-budget.XXXXXX")
+trap 'rm -f -- "$tmp/probe.sh" "$tmp/function.sh"; rmdir -- "$tmp"' EXIT HUP INT TERM
+awk '
+  /^run_rust_authority_env\(\) \{/ { copying=1 }
+  copying && /^run_rust_authority_cargo\(\) \{/ { finished=1; exit }
+  copying { print }
+  END { if (!finished) exit 2 }
+' "$root/scripts/bootstrap/bootstrap-from-scratch.sh" >"$tmp/function.sh"
+. "$tmp/function.sh"
+cat >"$tmp/probe.sh" <<'PROBE'
+set -eu
+[ "${BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS+x}" = "$EXPECTED_SET" ]
+[ "${BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS:-}" = "$EXPECTED_VALUE" ]
+[ "${CARGO_ENCODED_RUSTFLAGS:-}" = "${EXPECTED_CARGO_FLAGS:-}" ]
+PROBE
+run_logged() {
+  [ "$1" = "$expected_label" ]
+  shift
+  "$@"
+}
+rust_shared_cache_root=
+unset SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT CXX AR LD LLVM_CONFIG RUSTFLAGS
+os=windows PLATFORM_ABI=msvc expected_label=bootstrap-preflight
+export BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS=1200000
+run_rust_authority_env "$expected_label" EXPECTED_SET=x EXPECTED_VALUE=1200000 /usr/bin/sh "$tmp/probe.sh"
+unset BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS
+run_rust_authority_env "$expected_label" EXPECTED_SET= EXPECTED_VALUE= /usr/bin/sh "$tmp/probe.sh"
+export BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS=1200000
+expected_label=rust-seed-build
+run_rust_authority_env "$expected_label" EXPECTED_SET= EXPECTED_VALUE= /usr/bin/sh "$tmp/probe.sh"
+os=linux expected_label=bootstrap-preflight
+run_rust_authority_env "$expected_label" EXPECTED_SET= EXPECTED_VALUE= /usr/bin/sh "$tmp/probe.sh"
+os=windows PLATFORM_ABI=gnu
+mingw_encoded_rustflags='-Ctarget-feature=+crt-static'
+run_rust_authority_env "$expected_label" EXPECTED_SET=x EXPECTED_VALUE=1200000 \
+  "EXPECTED_CARGO_FLAGS=$mingw_encoded_rustflags" /usr/bin/sh "$tmp/probe.sh"
+echo 'PASS: 5 preflight Git-budget environment routing cases'
