@@ -206,3 +206,22 @@ describe "lifted trait dispatch":
         # `callback(s)` call through the fn value in `invoke`.
         expect(lowered.indirect_calls).to_equal(6)
         expect(ml.devirtualized_calls).to_equal(0)
+
+# Bug avx_server_system_perf_native_blockers_2026-11-07 items 1 and 2.
+val PARSER_SRC = "class ParseResult:\n    status: i64\n    parser: Parser?\n\ntrait Parser:\n    fn parse(n: i64) -> ParseResult\n\nclass Server:\n    request_parser: Parser?\n    me step(n: i64) -> i64:\n        if self.request_parser != nil:\n            val parsed = self.request_parser!.parse(n)\n            if parsed.parser != nil:\n                self.request_parser = parsed.parser\n            return parsed.status\n        -1\n\nfn main() -> i64:\n    0\n"
+val SLOT_SRC = "class CloseResult:\n    status: i64\n\ntrait Reducer:\n    fn close_owned_v1() -> CloseResult\n\nclass ReducerSlot:\n    reducer: Reducer\n\nclass Holder:\n    bitmap: ReducerSlot?\n    me close() -> i64:\n        if self.bitmap == nil: return 0\n        val closed = self.bitmap!.reducer.close_owned_v1()\n        self.bitmap = nil\n        closed.status\n\nfn main() -> i64:\n    0\n"
+
+describe "trait-object values that are already trait-typed":
+    it "stores an Optional trait field read into an Optional trait field without an impl search":
+        val lowered = lower_source(PARSER_SRC, true)
+        expect(count_matching(lowered.errors, "missing native trait implementation")).to_equal(0)
+        expect(lowered.errors.len()).to_equal(0)
+
+    it "dispatches a trait method on a field reached through a force-unwrapped Optional record":
+        val lowered = lower_source(SLOT_SRC, true)
+        expect(count_matching(lowered.errors, "unresolved method call")).to_equal(0)
+        expect(lowered.errors.len()).to_equal(0)
+        # The receiver loads a trait-table slot (before the fix: 0 indirect
+        # calls and an `unresolved method call` runtime fallback). The one
+        # rt_panic left is the `!` nil trap, not a dispatch fallback.
+        expect(lowered.indirect_calls).to_equal(1)
