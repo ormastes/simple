@@ -1,6 +1,6 @@
 # Frozen-array in-place mutation silently no-ops under the seed interpreter (2026-10-23)
 
-Status: OPEN — seed-runtime defect; no fix landed. Worked around in
+Status: FIXED (already, verified 2026-11-06) — see "Resolution". Was worked around in
 `test/01_unit/lib/database/codec/sqlcipher4_page_spec.spl` (copy-based
 `_flip` helper, PR #4190) — revert that helper to the in-place form as the
 fix's verification.
@@ -65,3 +65,25 @@ runtime.
    in-place form; the 25/25 suite must stay green AND the tamper vectors
    must remain non-vacuous (assert the flipped byte read-back inside the
    helper itself so vacuity is caught by construction).
+
+## Resolution (verified 2026-11-06)
+
+No longer reproduces on a seed built from `release/1.0.0` @ `ecb705896a4`
+(debug, interpreter):
+
+- `test/fixtures/seed_interp/frozen_array_param_store_repro.spl` (`run`,
+  interpreter mode) prints `flip 254 copy 254 i64 99`: the indexed store
+  lands through a `[u8]` parameter, through a `var out = data` copy, and
+  through an `[i64]` parameter.
+- A `simple test` spec probe with spec-file-level `_flip(data: [u8], i)`
+  over a literal argument, a returned fixture, and `text_to_bytes` output:
+  4/4 passed.
+- The prescribed verification: `_flip` in
+  `test/01_unit/lib/database/codec/sqlcipher4_page_spec.spl` is reverted to
+  the in-place form (`page[idx] = ...; page`). The spec passes 25/25 under
+  the seed's `simple test`. This is not vacuous: every tamper vector
+  asserts `Err(AuthenticationFailed)`, and an un-tampered page decodes to
+  `Ok` (the round-trip examples in the same file), so a lost store fails
+  `fail("tampered ciphertext must not release plaintext")`.
+
+No code change in this pass; the copy-based workaround is removed.
