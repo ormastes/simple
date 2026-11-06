@@ -8,6 +8,12 @@
 #undef _WIN32_WINNT
 #define _WIN32_WINNT 0x0602
 #endif
+#if defined(_WIN32)
+/* Winsock 2 for the TCP/UDP section. It must precede every transitive
+ * <windows.h> (runtime_win_long_path.h pulls one in below). */
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#endif
 #include "runtime_alloc_observer.h"
 #if defined(SIMPLE_ALLOC_OBSERVER_V1) && SIMPLE_ALLOC_OBSERVER_V1
 const volatile int rt_alloc_observer_native_owner_v1 = 1;
@@ -19595,7 +19601,80 @@ int64_t rt_event_ports_close(int64_t h) { (void)h; return -1; }
  * text = int64_t tagged heap pointer; extract via rt_core_as_string()
  * ================================================================ */
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+/* Winsock compat shim: the POSIX bodies below compile and run unchanged on
+ * Windows through these definitions. Every macro is #undef'd at the end of the
+ * socket section so file I/O elsewhere keeps the CRT read/close.
+ * A SOCKET is a kernel HANDLE, and Windows guarantees handle values fit in 32
+ * bits, so the existing (int)fd narrowing is lossless. */
+static INIT_ONCE ws_compat_init_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK ws_compat_init_cb(PINIT_ONCE once, PVOID param, PVOID* context) {
+    (void)once; (void)param; (void)context;
+    WSADATA data;
+    return WSAStartup(MAKEWORD(2, 2), &data) == 0;
+}
+
+/* Every descriptor this section owns starts here, so WSAStartup runs once
+ * before first use (a failed startup is retried on the next call). */
+static int ws_compat_socket(int af, int type, int protocol) {
+    if (!InitOnceExecuteOnce(&ws_compat_init_once, ws_compat_init_cb, NULL, NULL)) return -1;
+    SOCKET s = socket(af, type, protocol);
+    return s == INVALID_SOCKET ? -1 : (int)s;
+}
+
+/* Winsock reports failure through WSAGetLastError, not errno; map the one
+ * code the nonblocking connect path inspects. */
+static int ws_compat_connect(SOCKET s, const struct sockaddr* address, int length) {
+    if (connect(s, address, length) == 0) return 0;
+    errno = WSAGetLastError() == WSAEWOULDBLOCK ? EINPROGRESS : EIO;
+    return -1;
+}
+
+/* Winsock takes char* option buffers, and SO_RCVTIMEO/SO_SNDTIMEO as a DWORD
+ * of milliseconds instead of a struct timeval (0 = no timeout on both). */
+static int ws_compat_setsockopt(SOCKET s, int level, int name, const void* value, int length) {
+    if (level == SOL_SOCKET && (name == SO_RCVTIMEO || name == SO_SNDTIMEO) &&
+        length == (int)sizeof(struct timeval)) {
+        const struct timeval* tv = (const struct timeval*)value;
+        if (tv->tv_sec < 0 || tv->tv_usec < 0) { WSASetLastError(WSAEINVAL); return -1; }
+        DWORD ms = (DWORD)tv->tv_sec * 1000u + (DWORD)((tv->tv_usec + 999) / 1000);
+        return setsockopt(s, level, name, (const char*)&ms, (int)sizeof(ms));
+    }
+    return setsockopt(s, level, name, (const char*)value, length);
+}
+
+static int ws_compat_getsockopt(SOCKET s, int level, int name, void* value, socklen_t* length) {
+    return getsockopt(s, level, name, (char*)value, length);
+}
+
+/* Winsock cannot query FIONBIO, so F_GETFL reports no flags. Both callers set
+ * or clear O_NONBLOCK explicitly afterwards, and connect_timeout's "restore"
+ * targets a socket it just created (always blocking), so nothing is lost. */
+#define WS_COMPAT_F_GETFL 3
+#define WS_COMPAT_F_SETFL 4
+#define WS_COMPAT_O_NONBLOCK 0x4000
+static int ws_compat_fcntl(SOCKET s, int command, int argument) {
+    if (command == WS_COMPAT_F_GETFL) return 0;
+    if (command != WS_COMPAT_F_SETFL) return -1;
+    u_long mode = (argument & WS_COMPAT_O_NONBLOCK) ? 1 : 0;
+    return ioctlsocket(s, FIONBIO, &mode) == 0 ? 0 : -1;
+}
+
+#define F_GETFL WS_COMPAT_F_GETFL
+#define F_SETFL WS_COMPAT_F_SETFL
+#define O_NONBLOCK WS_COMPAT_O_NONBLOCK
+#define fcntl ws_compat_fcntl
+#define socket ws_compat_socket
+#define connect ws_compat_connect
+#define setsockopt ws_compat_setsockopt
+#define getsockopt ws_compat_getsockopt
+#define close(fd) closesocket(fd)
+#define read(fd, buffer, length) recv((fd), (char*)(buffer), (int)(length), 0)
+#define poll(fds, count, timeout) WSAPoll((fds), (ULONG)(count), (timeout))
+/* Windows has no SIGPIPE: a send to a closed peer is already just an error. */
+#define MSG_NOSIGNAL 0
+#endif /* _WIN32 */
 
 static const char* rt_extract_cstr(int64_t text_val) {
     RtCoreString* s = rt_core_as_string(text_val);
@@ -20093,48 +20172,20 @@ int64_t rt_io_udp_recv_from(int64_t fd, int64_t size) {
     return tuple;
 }
 
-#else /* _WIN32 stubs */
-int64_t rt_io_tcp_socket_create(int64_t f) { (void)f; return -1; }
-int64_t rt_io_tcp_bind(int64_t a) { (void)a; return -1; }
-bool rt_io_tcp_bind_fd(int64_t f, int64_t a) { (void)f; (void)a; return false; }
-bool rt_io_tcp_listen(int64_t f, int64_t b) { (void)f; (void)b; return false; }
-int64_t rt_io_tcp_accept(int64_t f) { (void)f; return -1; }
-int64_t rt_io_tcp_accept_timeout(int64_t f, int64_t m) { (void)f; (void)m; return -1; }
-int64_t rt_io_tcp_connect(int64_t a) { (void)a; return -1; }
-int64_t rt_io_tcp_connect_timeout(int64_t a, int64_t m) { (void)a; (void)m; return -1; }
-int64_t rt_io_tcp_read(int64_t f, int64_t s) { (void)f; (void)s; return rt_core_nil(); }
-int64_t rt_io_tcp_read_line(int64_t f) { (void)f; return rt_core_nil(); }
-int64_t rt_io_tcp_drain_line(int64_t f) { (void)f; return -1; }
-int64_t rt_io_tcp_write(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
-int64_t rt_io_socket_send_nosigpipe(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
-int64_t rt_io_tcp_write_text(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
-int64_t rt_io_tcp_write_bytes(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
-bool rt_io_tcp_flush(int64_t f) { (void)f; return false; }
-bool rt_io_tcp_close(int64_t f) { (void)f; return false; }
-int64_t rt_io_tcp_local_addr(int64_t f) { (void)f; return rt_core_nil(); }
-int64_t rt_io_tcp_peer_addr(int64_t f) { (void)f; return rt_core_nil(); }
-bool rt_io_tcp_set_nonblocking(int64_t f, bool e) { (void)f; (void)e; return false; }
-bool rt_io_tcp_set_nodelay(int64_t f, bool e) { (void)f; (void)e; return false; }
-bool rt_io_tcp_set_reuseport(int64_t f, bool e) { (void)f; (void)e; return false; }
-bool rt_io_tcp_set_reuseaddr(int64_t f, bool e) { (void)f; (void)e; return false; }
-bool rt_io_tcp_set_read_timeout(int64_t f, int64_t m) { (void)f; (void)m; return false; }
-bool rt_io_tcp_set_write_timeout(int64_t f, int64_t m) { (void)f; (void)m; return false; }
-bool rt_io_tcp_shutdown(int64_t f, int64_t h) { (void)f; (void)h; return false; }
-int64_t rt_io_udp_bind(int64_t a) { (void)a; return -1; }
-int64_t rt_io_udp_send_to(int64_t f, int64_t d, int64_t a) { (void)f; (void)d; (void)a; return -1; }
-int64_t rt_io_udp_send(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
-int64_t rt_io_udp_recv(int64_t f, int64_t s) { (void)f; (void)s; return rt_core_nil(); }
-bool rt_io_udp_connect(int64_t f, int64_t a) { (void)f; (void)a; return false; }
-int64_t rt_io_udp_local_addr(int64_t f) { (void)f; return rt_core_nil(); }
-bool rt_io_udp_set_broadcast(int64_t f, bool e) { (void)f; (void)e; return false; }
-bool rt_io_udp_set_read_timeout(int64_t f, int64_t m) { (void)f; (void)m; return false; }
-bool rt_io_udp_close(int64_t f) { (void)f; return false; }
-bool rt_io_udp_set_nonblocking(int64_t f, bool e) { (void)f; (void)e; return false; }
-bool rt_io_udp_set_multicast_loop(int64_t f, bool e) { (void)f; (void)e; return false; }
-bool rt_io_udp_join_multicast(int64_t f, int64_t a) { (void)f; (void)a; return false; }
-bool rt_io_udp_leave_multicast(int64_t f, int64_t a) { (void)f; (void)a; return false; }
-int64_t rt_io_udp_recv_from(int64_t f, int64_t s) { (void)f; (void)s; return rt_core_nil(); }
-#endif /* !_WIN32 */
+#if defined(_WIN32)
+#undef F_GETFL
+#undef F_SETFL
+#undef O_NONBLOCK
+#undef fcntl
+#undef socket
+#undef connect
+#undef setsockopt
+#undef getsockopt
+#undef close
+#undef read
+#undef poll
+#undef MSG_NOSIGNAL
+#endif /* _WIN32 */
 
 /* ================================================================
  * Channel Functions (simple mutex-based queue)
