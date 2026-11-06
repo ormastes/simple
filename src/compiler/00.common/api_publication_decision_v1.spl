@@ -5,6 +5,8 @@ use compiler.common.api_exposure_result_v1.{ApiExposureVerdictV1, ApiCallableExp
     ApiExposureFindingV1, ApiModuleExposureV1}
 use compiler.common.api_export_route_facts_v1.{ApiExportJoinV1, ApiExportRouteFactV1,
     ApiExportRouteFactsV1}
+use compiler.common.api_export_closure_facts_v1.{ApiExportClosureStatusV1, ApiExportClosureEntryV1,
+    ApiExportClosureFactsV1}
 use compiler.common.assurance.policy_names.{normalize_profile_name}
 
 val EXTREME_PUBLIC_API_RULE_V1: text = "extreme_public_api"
@@ -27,6 +29,9 @@ struct ApiPublicationDecisionV1:
     diagnostics: [text]
     unknown_reasons: [text]
     format_version: i64 = 1
+    # Joined roots the effective export closure marks NotExported: not part of
+    # the public API, so neither checked nor denied.
+    excluded_roots: i64 = 0
 
 # REQ-EAPI-003: advisory at moderate, warning at strict, fatal at robust,
 # critical and verified. Unknown profile names fail closed to Deny.
@@ -52,9 +57,19 @@ fn finding_path_text(finding: ApiExposureFindingV1) -> text:
         else: out = out + "arg{ordinal}"
     out
 
+fn closure_status_for_root_v1(closure: ApiExportClosureFactsV1?, module: text,
+        symbol: i64) -> ApiExportClosureEntryV1?:
+    var facts: ApiExportClosureFactsV1? = closure
+    if facts == nil: return nil
+    for raw_entry in facts.unwrap().entries:
+        val entry: ApiExportClosureEntryV1 = raw_entry
+        if entry.terminal_module == module and entry.local_symbol == symbol: return Some(entry)
+    nil
+
 pub fn decide_api_publication_v1(active: bool, strictness_name: text,
         exposure: Dict<text, ApiModuleExposureV1>,
-        routes: ApiExportRouteFactsV1?) -> ApiPublicationDecisionV1:
+        routes: ApiExportRouteFactsV1?,
+        closure: ApiExportClosureFactsV1? = nil) -> ApiPublicationDecisionV1:
     val disposition = api_publication_disposition_v1(strictness_name)
     var decision = ApiPublicationDecisionV1(EXTREME_PUBLIC_API_RULE_V1, active,
         normalize_profile_name(strictness_name), disposition, true, 0, 0, 0, [], [])
@@ -80,6 +95,24 @@ pub fn decide_api_publication_v1(active: bool, strictness_name: text,
         val root_key = "{route.terminal_module}:{route.local_symbol}"
         if seen.has(root_key): continue
         seen[root_key] = true
+        # Effective export closure: a NotExported root is outside the public
+        # API; an Unknown closure entry keeps the root unknown with its reason.
+        if closure != nil:
+            val entry_opt = closure_status_for_root_v1(closure, route.terminal_module, route.local_symbol)
+            if entry_opt == nil:
+                decision.checked_roots = decision.checked_roots + 1
+                decision.unknown_roots = decision.unknown_roots + 1
+                decision.unknown_reasons = with_unique(decision.unknown_reasons, "export-closure-entry-missing")
+                continue
+            val entry: ApiExportClosureEntryV1 = entry_opt.unwrap()
+            if entry.status == ApiExportClosureStatusV1.NotExported:
+                decision.excluded_roots = decision.excluded_roots + 1
+                continue
+            if entry.status != ApiExportClosureStatusV1.Exported:
+                decision.checked_roots = decision.checked_roots + 1
+                decision.unknown_roots = decision.unknown_roots + 1
+                decision.unknown_reasons = with_unique(decision.unknown_reasons, entry.reason)
+                continue
         decision.checked_roots = decision.checked_roots + 1
         if not exposure.has(route.terminal_module):
             decision.unknown_roots = decision.unknown_roots + 1
