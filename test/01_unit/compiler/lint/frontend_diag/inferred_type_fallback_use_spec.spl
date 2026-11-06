@@ -25,6 +25,7 @@ use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
 use compiler.hir.hir_types.*
+use compiler.hir.binding_annotation_provenance.{hir_local_annotation_state, hir_local_annotation_copy}
 use compiler.semantics.lint.hir_frontend_diagnostics.{run_hir_frontend_diagnostics, hir_frontend_findings_with_code, HirFrontendFinding}
 use compiler.tools.lint._LintMain.config_and_model.{build_default_levels}
 
@@ -107,6 +108,49 @@ describe "Canonical return-layout and annotation provenance controls":
 
     it "does not classify an explicitly annotated receiver as inferred":
         val hir = lower_single("fn unknown() -> Any:\n    []\n\nfn f() -> i64:\n    val src: [i64] = unknown()\n    src.len()\n")
+        expect(infer_findings(hir, "W-HIR-INFER-001").len()).to_equal(0)
+
+    it "keeps shadowed binding annotations separate by exact symbol identity":
+        val hir = lower_single("fn unknown() -> Any:\n    []\n\nfn f() -> i64:\n    val src = unknown()\n    if true:\n        val src: [i64] = unknown()\n        src.len()\n    src.len()\n")
+        var explicit_count = 0
+        var inferred_count = 0
+        for symbol in hir.symbols.symbols.values():
+            if symbol.name != "src": continue
+            val state = hir_local_annotation_state(hir, symbol.id)
+            if state == 1: explicit_count = explicit_count + 1
+            if state == 0: inferred_count = inferred_count + 1
+        expect(explicit_count).to_equal(1)
+        expect(inferred_count).to_equal(1)
+        val found = infer_findings(hir, "W-HIR-INFER-001")
+        expect(found.len()).to_equal(1)
+        for finding in found:
+            expect(finding.line).to_equal(5)
+
+    it "records var declarations without treating false as missing provenance":
+        val hir = lower_single("fn unknown() -> Any:\n    []\n\nfn f() -> i64:\n    var src = unknown()\n    var typed: [i64] = unknown()\n    src.len()\n")
+        var inferred_count = 0
+        var explicit_count = 0
+        for symbol in hir.symbols.symbols.values():
+            if symbol.name == "src" and hir_local_annotation_state(hir, symbol.id) == 0:
+                inferred_count = inferred_count + 1
+            if symbol.name == "typed" and hir_local_annotation_state(hir, symbol.id) == 1:
+                explicit_count = explicit_count + 1
+        expect(inferred_count).to_equal(1)
+        expect(explicit_count).to_equal(1)
+        expect(infer_findings(hir, "W-HIR-INFER-001").len()).to_equal(1)
+
+    it "keeps legacy unknown provenance conservative and isolates copied maps":
+        var hir = lower_single("fn unknown() -> Any:\n    []\n\nfn f() -> i64:\n    val src = unknown()\n    src.len()\n")
+        var selected = SymbolId(id: -1)
+        for symbol in hir.symbols.symbols.values():
+            if symbol.name == "src": selected = symbol.id
+        expect(selected.id).to_be_greater_than(-1)
+        expect(hir_local_annotation_state(hir, selected)).to_equal(0)
+        var copied = hir_local_annotation_copy(hir.local_annotation_provenance)
+        copied[selected.id] = true
+        expect(hir_local_annotation_state(hir, selected)).to_equal(0)
+        hir.local_annotation_provenance = {}
+        expect(hir_local_annotation_state(hir, selected)).to_equal(-1)
         expect(infer_findings(hir, "W-HIR-INFER-001").len()).to_equal(0)
 
 describe "W-HIR-INFER-001 at the erased declaration":

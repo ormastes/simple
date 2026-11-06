@@ -28,6 +28,35 @@ foreign-layout controls. Removing the annotation guard alone would regress
 the annotated-binding exclusion. No HIR schema or codec change is included in
 this narrow repair.
 
+### Annotation provenance follow-up (authored, NOT_RUN)
+
+The approved follow-up retains `local_annotation_provenance: Dict<i64, bool>`
+on `HirModule`, keyed by the canonical local `SymbolId.id`. True means an
+explicit AST annotation, false means an inferred declaration, and absence is
+unknown. `hir_local_annotation_state` returns 1/0/-1 respectively. No module
+completeness flag is asserted. The four ordinary val/var lowering branches
+record their actual `has_annotation` decision after symbol definition;
+synthetic and destructured binders without a proven receipt remain unknown.
+The map resets at module lowering entry, is copied into both module-build
+outputs, and is copied independently by method resolution and the finite HM
+typed-module owner. Synthetic empty/layout-only modules default to unknown.
+The codec owner separately updates both formats and their cache admission
+versions; old-cache absence is not evidence of an inferred declaration.
+
+`note_let` now classifies only proven inferred declarations, and local Any
+alias handling uses the same exact metadata. The pre-existing written-Any
+scanner remains a presentation/suggestion input, not local binding authority.
+Qualified retained struct/class/enum layouts now establish known return types
+even when the caller does not directly import the type's defining module.
+
+Enabled tests cover the exact foreign return symbol/layout, genuine Any-return
+fallback, explicit annotations, shadowed same-name locals, var producers,
+unknown legacy metadata, and independent map copies. Historical pending
+third-module warning cases are left intact pending executable confirmation of
+their now-conflicting expectations; they are not counted as passing evidence.
+This source repair and its metadata/codec integration require the admitted
+runner before the bug can be closed.
+
 ## Symptom
 
 - `test/01_unit/compiler/lint/frontend_diag/any_warn_rules_acceptance_spec.spl`, example "flags an
