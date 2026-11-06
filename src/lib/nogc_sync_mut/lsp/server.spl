@@ -1,8 +1,6 @@
 # LSP Server Implementation
 # Handles LSP requests and maintains server state
 
-use compiler.treesitter.{TreeSitter, OutlineModule}
-
 # Server state
 enum ServerState:
     Uninitialized
@@ -21,6 +19,9 @@ class LspServer:
     doc_uris: [text]
     doc_versions: [i64]
     doc_contents: [text]
+    doc_sync_valid: [bool]
+    doc_observed_versions: [i64]
+    retained_bytes: i64
     project_root: text
 
     static fn create() -> LspServer:
@@ -29,6 +30,9 @@ class LspServer:
             doc_uris: [],
             doc_versions: [],
             doc_contents: [],
+            doc_sync_valid: [],
+            doc_observed_versions: [],
+            retained_bytes: 0,
             project_root: ""
         )
 
@@ -48,37 +52,80 @@ class LspServer:
             return DocumentInfo(uri: self.doc_uris[idx], version: self.doc_versions[idx], content: self.doc_contents[idx])
         DocumentInfo(uri: uri, version: 0, content: "")
 
-    me open_doc(uri: text, version: i64, content: text):
-        """Open/cache a document"""
+    fn doc_is_synchronized(self, uri: text) -> bool:
         val idx = self.find_doc(uri)
+        idx >= 0 and self.doc_sync_valid[idx]
+
+    me invalidate_doc(uri: text, observed_version: i64):
+        val idx = self.find_doc(uri)
+        if idx < 0 or observed_version <= self.doc_versions[idx]: return
+        if observed_version > self.doc_observed_versions[idx]:
+            self.doc_observed_versions[idx] = observed_version
+        self.doc_sync_valid[idx] = false
+
+    me invalidate_doc_unknown_version(uri: text):
+        val idx = self.find_doc(uri)
+        if idx >= 0: self.doc_sync_valid[idx] = false
+
+    me open_doc(uri: text, version: i64, content: text) -> bool:
+        """Bounded retained editor state; duplicate opens cannot rewind it."""
+        val idx = self.find_doc(uri)
+        if uri == "" or uri.byte_len() > 4096: return false
         if idx >= 0:
-            self.doc_versions[idx] = version
-            self.doc_contents[idx] = content
-        else:
-            self.doc_uris.push(uri)
-            self.doc_versions.push(version)
-            self.doc_contents.push(content)
+            val same = self.doc_versions[idx] == version and self.doc_contents[idx] == content
+            if not same:
+                if version == self.doc_versions[idx]:
+                    self.invalidate_doc_unknown_version(uri)
+                else:
+                    self.invalidate_doc(uri, version)
+            return same and self.doc_sync_valid[idx]
+        if self.doc_uris.len() >= 256 or content.byte_len() > 1048576: return false
+        if content.byte_len() > 16777216 - self.retained_bytes: return false
+        self.doc_uris.push(uri)
+        self.doc_versions.push(version)
+        self.doc_contents.push(content)
+        self.doc_sync_valid.push(true)
+        self.doc_observed_versions.push(version)
+        self.retained_bytes = self.retained_bytes + content.byte_len()
+        true
 
     me close_doc(uri: text):
-        """Remove document from cache"""
+        """Evict document contents, synchronization authority and budget."""
         val idx = self.find_doc(uri)
         if idx >= 0:
-            # Remove by replacing with last element
+            self.retained_bytes = self.retained_bytes - self.doc_contents[idx].byte_len()
             val last = self.doc_uris.len() - 1
             if idx != last:
                 self.doc_uris[idx] = self.doc_uris[last]
                 self.doc_versions[idx] = self.doc_versions[last]
                 self.doc_contents[idx] = self.doc_contents[last]
+                self.doc_sync_valid[idx] = self.doc_sync_valid[last]
+                self.doc_observed_versions[idx] = self.doc_observed_versions[last]
             self.doc_uris.pop()
             self.doc_versions.pop()
             self.doc_contents.pop()
+            self.doc_sync_valid.pop()
+            self.doc_observed_versions.pop()
 
-    me update_doc(uri: text, version: i64, content: text):
-        """Update document content"""
+    me update_doc(uri: text, version: i64, content: text) -> bool:
+        """Full sync restores authority only at/after the newest observed version."""
         val idx = self.find_doc(uri)
-        if idx >= 0:
-            self.doc_versions[idx] = version
-            self.doc_contents[idx] = content
+        if idx < 0: return false
+        if version <= self.doc_versions[idx]:
+            if version == self.doc_versions[idx] and content != self.doc_contents[idx]:
+                self.invalidate_doc_unknown_version(uri)
+            return false
+        if version < self.doc_observed_versions[idx]: return false
+        val without_old = self.retained_bytes - self.doc_contents[idx].byte_len()
+        if content.byte_len() > 1048576 or content.byte_len() > 16777216 - without_old:
+            self.invalidate_doc(uri, version)
+            return false
+        self.doc_versions[idx] = version
+        self.doc_contents[idx] = content
+        self.doc_observed_versions[idx] = version
+        self.doc_sync_valid[idx] = true
+        self.retained_bytes = without_old + content.byte_len()
+        true
 
 # Helper: Convert URI to file path
 fn uri_to_file_path(uri: text) -> text:

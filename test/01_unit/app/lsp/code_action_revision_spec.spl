@@ -1,0 +1,168 @@
+# @req REQ-LSP-CODEACTION-REVISION-001
+# Real serializer/converter boundary; no filesystem writer or synthetic pass.
+use std.spec
+use std.spec.step
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_has, json_value_items, json_value_object_from, json_value_object_set, json_value_serialize}
+use std.nogc_sync_mut.lsp.lsp_code_action.{LspCodeActionRevision, lsp_edit_source_map, lsp_code_action_text_edit, lsp_query_code_action, lsp_code_actions_convert_with_revisions}
+use std.tooling.easy_fix.snapshot.{snapshot_version}
+use std.nogc_sync_mut.lsp.lsp_code_action_handler.{lsp_code_action_output_error}
+
+fn revision_fixture(uri: text, path: text, version: i64, source: text) -> LspCodeActionRevision:
+    LspCodeActionRevision(uri: uri, source_path: path, version: version, source: source)
+
+fn revision_convert(action: JsonValue, revisions: [LspCodeActionRevision]) -> JsonValue:
+    val wire = lsp_code_actions_convert_with_revisions(json_value_serialize(JsonValue.Array([action])), "file:///source.spl", revisions)
+    val parsed = json_parse_value_strict(wire).unwrap()
+    val rows = json_value_items(parsed)
+    expect(rows.len()).to_equal(1)
+    rows[0]
+
+fn revision_expect_disabled(action: JsonValue):
+    expect(json_value_has(action, "disabled")).to_equal(true)
+    expect(json_value_has(action, "edit")).to_equal(false)
+    expect(json_value_has(action, "command")).to_equal(false)
+    expect(json_value_field(action, "isPreferred")).to_equal(JsonValue.Bool(false))
+
+fn revision_change(uri: text, version: JsonValue, edits: [JsonValue]) -> JsonValue:
+    val doc = json_value_object_from([("uri", JsonValue.Str(uri)), ("version", version)])
+    json_value_object_from([("textDocument", doc), ("edits", JsonValue.Array(edits))])
+
+fn revision_stamp(path: text, source: text) -> JsonValue:
+    json_value_object_from([("file", JsonValue.Str(path)), ("version", JsonValue.Str(snapshot_version(source)))])
+
+fn revision_action(documents: [JsonValue], stamps: [JsonValue]) -> JsonValue:
+    val workspace = json_value_object_from([("documentChanges", JsonValue.Array(documents))])
+    val data = json_value_object_from([("simpleSourceSnapshots", JsonValue.Array(stamps))])
+    json_value_object_from([("title", JsonValue.Str("Repair")), ("edit", workspace), ("data", data)])
+
+describe "Code action revision authority":
+    it "preserves deletion and every nonoverlapping edit at the exact editor revision":
+        step("Bind exact analyzed bytes to versioned edits")
+        val source = "abcdef"
+        val map = lsp_edit_source_map(source)
+        val first = lsp_code_action_text_edit(map, 0, 1, "").unwrap()
+        val last = lsp_code_action_text_edit(map, 4, 6, "end").unwrap()
+        val query = lsp_query_code_action("Repair", "quickfix", true, "/source.spl", [first, last], map.source_version)
+        val action = revision_convert(query, [revision_fixture("file:///source.spl", "/source.spl", 17, source)])
+        val documents = json_value_items(json_value_field(json_value_field(action, "edit"), "documentChanges"))
+        expect(documents.len()).to_equal(1)
+        expect(json_value_field(json_value_field(documents[0], "textDocument"), "version")).to_equal(JsonValue.Int(17))
+        val edits = json_value_items(json_value_field(documents[0], "edits"))
+        expect(edits).to_equal([first, last])
+        expect(json_value_field(edits[0], "newText")).to_equal(JsonValue.Str(""))
+
+    it "rejects changed analyzed bytes even when positions and editor version fit":
+        step("Inject a mismatched child source stamp")
+        val map = lsp_edit_source_map("old")
+        val edit = lsp_code_action_text_edit(map, 0, 1, "").unwrap()
+        val action = lsp_query_code_action("Repair", "quickfix", true, "/source.spl", [edit], map.source_version)
+        revision_expect_disabled(revision_convert(action, [revision_fixture("file:///source.spl", "/source.spl", 1, "new")]))
+
+    it "refuses unstamped legacy edits instead of assigning current versions blindly":
+        step("Reject a provider result without analyzed-source identity")
+        val edit = lsp_code_action_text_edit(lsp_edit_source_map("x"), 0, 1, "").unwrap()
+        val action = lsp_query_code_action("Repair", "quickfix", true, "/source.spl", [edit])
+        revision_expect_disabled(revision_convert(action, [revision_fixture("file:///source.spl", "/source.spl", 1, "x")]))
+
+    it "binds each URI in a multi-file action to its own revision":
+        step("Retain two target identities and their independent editor versions")
+        val edit = lsp_code_action_text_edit(lsp_edit_source_map("x"), 0, 1, "").unwrap()
+        val docs = [revision_change("file:///one.spl", JsonValue.Null, [edit]), revision_change("file:///two.spl", JsonValue.Int(8), [edit])]
+        val query = revision_action(docs, [revision_stamp("/one.spl", "x"), revision_stamp("/two.spl", "x")])
+        val revisions = [revision_fixture("file:///one.spl", "/one.spl", 3, "x"), revision_fixture("file:///two.spl", "/two.spl", 8, "x")]
+        val action = revision_convert(query, revisions)
+        val actual = json_value_items(json_value_field(json_value_field(action, "edit"), "documentChanges"))
+        expect(actual.len()).to_equal(2)
+        expect(json_value_field(json_value_field(actual[0], "textDocument"), "version")).to_equal(JsonValue.Int(3))
+        expect(json_value_field(json_value_field(actual[1], "textDocument"), "version")).to_equal(JsonValue.Int(8))
+        revision_expect_disabled(revision_convert(query, [revisions[0]]))
+
+    it "rejects stale producer document versions and duplicate document edits":
+        step("Refuse stale and ambiguous multi-document transactions atomically")
+        val edit = lsp_code_action_text_edit(lsp_edit_source_map("x"), 0, 1, "").unwrap()
+        val stale = revision_change("file:///source.spl", JsonValue.Int(2), [edit])
+        val stamp = revision_stamp("/source.spl", "x")
+        val revisions = [revision_fixture("file:///source.spl", "/source.spl", 3, "x")]
+        revision_expect_disabled(revision_convert(revision_action([stale], [stamp]), revisions))
+        val fresh = revision_change("file:///source.spl", JsonValue.Int(3), [edit])
+        revision_expect_disabled(revision_convert(revision_action([fresh, fresh], [stamp]), revisions))
+
+    it "rejects overlaps and shared insertion points without retaining a command":
+        step("Reject conflicting edits including their follow-up command")
+        val map = lsp_edit_source_map("abcd")
+        val replace = lsp_code_action_text_edit(map, 0, 3, "").unwrap()
+        val overlap = lsp_code_action_text_edit(map, 2, 4, "x").unwrap()
+        val insert = lsp_code_action_text_edit(map, 0, 0, "a").unwrap()
+        for edits in [[replace, overlap], [insert, insert]]:
+            var query = lsp_query_code_action("Repair", "quickfix", true, "/source.spl", edits, map.source_version)
+            query = json_value_object_set(query, "command", json_value_object_from([("command", JsonValue.Str("must.not.run"))]))
+            revision_expect_disabled(revision_convert(query, [revision_fixture("file:///source.spl", "/source.spl", 3, "abcd")]))
+
+    it "rejects a malformed later replacement instead of emitting a partial fix":
+        step("Validate every replacement before returning any actionable edit")
+        val map = lsp_edit_source_map("abc")
+        val valid = lsp_code_action_text_edit(map, 0, 1, "").unwrap()
+        val invalid = json_value_object_set(valid, "newText", JsonValue.Null)
+        val action = lsp_query_code_action("Repair", "quickfix", true, "/source.spl", [valid, invalid], map.source_version)
+        revision_expect_disabled(revision_convert(action, [revision_fixture("file:///source.spl", "/source.spl", 1, "abc")]))
+
+    it "rejects a UTF16 position that splits a supplementary character":
+        step("Validate protocol positions against exact Unicode snapshot bytes")
+        val source = "😀"
+        val start = json_value_object_from([("line", JsonValue.Int(0)), ("character", JsonValue.Int(1))])
+        val end = json_value_object_from([("line", JsonValue.Int(0)), ("character", JsonValue.Int(2))])
+        val range = json_value_object_from([("start", start), ("end", end)])
+        val edit = json_value_object_from([("range", range), ("newText", JsonValue.Str(""))])
+        val action = lsp_query_code_action("Repair", "quickfix", true, "/source.spl", [edit], snapshot_version(source))
+        revision_expect_disabled(revision_convert(action, [revision_fixture("file:///source.spl", "/source.spl", 1, source)]))
+
+    it "bounds total actions before converting their edit arrays":
+        step("Refuse an oversized action set before replacement validation")
+        val source = "x"
+        val map = lsp_edit_source_map(source)
+        val edit = lsp_code_action_text_edit(map, 0, 1, "").unwrap()
+        val action = lsp_query_code_action("Repair", "quickfix", true, "/source.spl", [edit], map.source_version)
+        var actions: [JsonValue] = []
+        for i in 0..129: actions.push(action)
+        val wire = json_value_serialize(JsonValue.Array(actions))
+        val revisions = [revision_fixture("file:///source.spl", "/source.spl", 1, source)]
+        expect(lsp_code_actions_convert_with_revisions(wire, "file:///source.spl", revisions)).to_equal("[]")
+
+    it "rejects conflicting edit representations and unrelated raw paths":
+        step("Preserve source target identity before URI rebinding")
+        val source = "x"
+        val map = lsp_edit_source_map(source)
+        val edit = lsp_code_action_text_edit(map, 0, 1, "").unwrap()
+        val revisions = [revision_fixture("file:///source.spl", "/source.spl", 1, source)]
+        var query = lsp_query_code_action("Repair", "quickfix", true, "/source.spl", [edit], map.source_version)
+        val workspace = json_value_field(query, "edit")
+        val both = json_value_object_set(workspace, "documentChanges", JsonValue.Array([revision_change("file:///source.spl", JsonValue.Int(1), [edit])]))
+        query = json_value_object_set(query, "edit", both)
+        revision_expect_disabled(revision_convert(query, revisions))
+        var wrong = lsp_query_code_action("Repair", "quickfix", true, "/unrelated.spl", [edit], map.source_version)
+        val data = json_value_object_from([("simpleSourceSnapshots", JsonValue.Array([revision_stamp("/source.spl", source)]))])
+        wrong = json_value_object_set(wrong, "data", data)
+        revision_expect_disabled(revision_convert(wrong, revisions))
+
+    it "distinguishes valid empty analysis from malformed or titleless rows":
+        step("Exercise the live analyzer result admission helper")
+        expect(lsp_code_action_output_error("[]")).to_equal("")
+        expect(lsp_code_action_output_error("[null]")).to_contain("malformed action row")
+        val titleless = json_value_object_from([("edit", JsonValue.Null)])
+        expect(lsp_code_action_output_error(json_value_serialize(JsonValue.Array([titleless])))).to_contain("malformed action row")
+        expect(lsp_code_action_output_error("[malformed]")).to_contain("invalid action array")
+        expect(lsp_code_action_output_error("warning: child failed")).to_contain("invalid action array")
+
+    it "admits a complete CRLF span but rejects a position inside its line ending":
+        step("Pin CRLF boundaries to the exact source snapshot")
+        val source = "x\r\ny"
+        val map = lsp_edit_source_map(source)
+        val revisions = [revision_fixture("file:///source.spl", "/source.spl", 1, source)]
+        val complete = lsp_code_action_text_edit(map, 1, 3, "").unwrap()
+        val accepted = revision_convert(lsp_query_code_action("Repair", "quickfix", true, "/source.spl", [complete], map.source_version), revisions)
+        expect(json_value_has(accepted, "edit")).to_equal(true)
+        val start = json_value_object_from([("line", JsonValue.Int(0)), ("character", JsonValue.Int(2))])
+        val end = json_value_object_from([("line", JsonValue.Int(1)), ("character", JsonValue.Int(0))])
+        val range = json_value_object_from([("start", start), ("end", end)])
+        val invalid = json_value_object_from([("range", range), ("newText", JsonValue.Str(""))])
+        revision_expect_disabled(revision_convert(lsp_query_code_action("Repair", "quickfix", true, "/source.spl", [invalid], map.source_version), revisions))
