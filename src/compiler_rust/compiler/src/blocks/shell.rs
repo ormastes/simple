@@ -129,7 +129,7 @@ fn parse_command(line: &str) -> Result<ShellCommand, CompileError> {
 fn command_to_value(cmd: ShellCommand) -> Value {
     match cmd {
         ShellCommand::Simple { command, args } => {
-            let mut fields = HashMap::new();
+            let mut fields = crate::value::DictMap::new();
             fields.insert("type".to_string(), Value::text("simple".to_string()));
             fields.insert("command".to_string(), Value::text(command));
             fields.insert(
@@ -139,7 +139,7 @@ fn command_to_value(cmd: ShellCommand) -> Value {
             Value::dict(fields)
         }
         ShellCommand::Pipeline(cmds) => {
-            let mut fields = HashMap::new();
+            let mut fields = crate::value::DictMap::new();
             fields.insert("type".to_string(), Value::text("pipeline".to_string()));
             fields.insert(
                 "commands".to_string(),
@@ -148,14 +148,14 @@ fn command_to_value(cmd: ShellCommand) -> Value {
             Value::dict(fields)
         }
         ShellCommand::Assignment { name, value } => {
-            let mut fields = HashMap::new();
+            let mut fields = crate::value::DictMap::new();
             fields.insert("type".to_string(), Value::text("assignment".to_string()));
             fields.insert("name".to_string(), Value::text(name));
             fields.insert("value".to_string(), Value::text(value));
             Value::dict(fields)
         }
         ShellCommand::Sequence(cmds) => {
-            let mut fields = HashMap::new();
+            let mut fields = crate::value::DictMap::new();
             fields.insert("type".to_string(), Value::text("sequence".to_string()));
             fields.insert(
                 "commands".to_string(),

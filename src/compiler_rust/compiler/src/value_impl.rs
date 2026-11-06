@@ -244,6 +244,14 @@ impl Value {
                 let parts: Vec<String> = items.iter().map(u8::to_string).collect();
                 format!("[{}]", parts.join(","))
             }
+            // A dict used as a key: canonical, order-INDEPENDENT form (sorted
+            // entries), since `==` on dicts ignores insertion order.
+            Value::Dict(map) | Value::FrozenDict(map) => {
+                let mut parts: Vec<String> =
+                    map.iter().map(|(k, v)| format!("{}:{}", k, v.to_key_string())).collect();
+                parts.sort();
+                format!("{{{}}}", parts.join(","))
+            }
             other => format!("{other:?}"),
         }
     }
@@ -1044,5 +1052,22 @@ mod dict_insertion_order_tests {
         map.shift_remove("b");
         map.insert("b".to_string(), Value::Int(5));
         assert_eq!(keys_of(&map), vec!["a", "c", "b"]);
+    }
+}
+
+#[cfg(test)]
+mod dict_key_string_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn dict_key_string_ignores_insertion_order() {
+        let mut ab = DictMap::new();
+        ab.insert("a".to_string(), Value::Int(1));
+        ab.insert("b".to_string(), Value::Int(2));
+        let mut ba = DictMap::new();
+        ba.insert("b".to_string(), Value::Int(2));
+        ba.insert("a".to_string(), Value::Int(1));
+        assert_eq!(Value::Dict(Arc::new(ab)).to_key_string(), Value::Dict(Arc::new(ba)).to_key_string());
     }
 }
