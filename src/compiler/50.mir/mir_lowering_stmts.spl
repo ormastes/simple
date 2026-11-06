@@ -177,6 +177,12 @@ fn mir_for_elem_trace_on() -> bool:
             mir_for_elem_trace_state = 0
     mir_for_elem_trace_state == 1
 
+fn mir_optional_join_strict() -> bool:
+    """Robust/critical safety profile (set by the CLI as SIMPLE_SAFETY_PROFILE):
+    an ambiguous untyped optional arm join is a type error, not a guess."""
+    val profile = env_get_opt("SIMPLE_SAFETY_PROFILE") ?? ""
+    profile == "robust" or profile == "critical"
+
 fn mir_elem_type_is_unspecific(t: MirType) -> bool:
     """True when an array/slice element type carries no real element info.
 
@@ -3612,14 +3618,11 @@ impl MirLowering:
         plain `T` that is text or a non-generic class/struct/enum -- the
         plain-nullable heap word. A scalar `T` stays unknown: its raw word
         could equal the nil sentinel 3."""
+        # `nil` is the canonical `T?` absence literal in safe code (ERR-01
+        # rev 3, 2026-11-04); the old unsafe-only gate here left safe
+        # Some-or-nil joins untyped (untyped_optional_arm_join_typed_as_i64).
         if self.find_local_hir_type(dest.id) != nil:
             return
-        if self.unsafe_depth == 0:
-            # A `nil` arm may widen the slot to `T?` only inside unsafe; safe
-            # code spells the absent arm `None`.
-            for nil_probe in arm_locals:
-                if self.nil_locals.contains(nil_probe.id):
-                    return
         var first_index = -1
         var arm_i = 0
         while arm_i < arm_locals.len():
@@ -3648,6 +3651,106 @@ impl MirLowering:
                     if shared_args.len() == 0 and (shared_kind == 1 or shared_kind == 2 or shared_kind == 3):
                         self.remember_local_hir_type(dest.id, HirType(kind: HirTypeKind.Optional(shared), span: shared.span), 0, 0)
                 case _: ()
+
+    me optional_join_bare_payload_ok(payload: HirType) -> bool:
+        """A bare `T` arm can be normalised into `T?` at runtime only when its
+        raw word can never equal the nil sentinel 3: text or a non-generic
+        class/struct/enum heap handle. A scalar `T` cannot."""
+        match payload.kind:
+            case HirTypeKind.Str: true
+            case HirTypeKind.Named(owner, args):
+                val kind = enum_payload_nominal_kind(owner, self.symbols)
+                args.len() == 0 and (kind == 1 or kind == 2 or kind == 3)
+            case _: false
+
+    me join_untyped_optional_arms(dest: LocalId, arm_locals: [LocalId]) -> LocalId:
+        """Join the arms of an UNTYPED value-position if/elif/match to `T?`.
+
+        Bug untyped_optional_arm_join_typed_as_i64_2026-11-06 (P1): when any
+        arm is `nil` or `T?`, the merge slot must be `T?` -- the Option of the
+        non-nil arms' shared payload `T` -- never i64, a bare `T`, or erased.
+        Before this join the slot kept only the first arm's MIR type and no
+        option / runtime-value marks, so `if val h = x` + `push(h)` boxed the
+        raw handle through `rt_value_int_wide` (pointer << 3, int-tagged) and
+        raw Option words reached plain-`T` slots (#7066/#7069/#7224/#7268).
+
+        Arms already `T?` (canonical handle) and `nil` (the sentinel) need no
+        conversion; when a bare `T` arm is present the merged word is
+        normalised at runtime (`normalize_option_handle`: handle unchanged,
+        sentinel -> None, other word -> Some). An ambiguous join (untyped arm,
+        disagreeing payloads, bare scalar arm) keeps the old behaviour and is
+        a type error under the robust/critical safety profile."""
+        if arm_locals.len() == 0:
+            return dest
+        var saw_absent = false
+        var saw_optional = false
+        var saw_bare = false
+        var payload_index = -1
+        var payload_from_optional = false
+        var ambiguous = ""
+        var arm_i = 0
+        while arm_i < arm_locals.len():
+            val arm_local: LocalId = arm_locals[arm_i]
+            if self.nil_locals.contains(arm_local.id) or self.option_none_locals.contains(arm_local.id):
+                saw_absent = true
+            elif val arm_type = self.find_local_hir_type(arm_local.id):
+                var arm_is_optional = false
+                var arm_payload = arm_type
+                match arm_type.kind:
+                    case HirTypeKind.Optional(inner):
+                        arm_is_optional = true
+                        arm_payload = inner
+                    case _: ()
+                if arm_is_optional:
+                    saw_optional = true
+                else:
+                    saw_bare = true
+                    if not self.optional_join_bare_payload_ok(arm_payload):
+                        ambiguous = "bare scalar or generic arm"
+                if payload_index < 0:
+                    payload_index = arm_i
+                    payload_from_optional = arm_is_optional
+                elif val first_type = self.find_local_hir_type(arm_locals[payload_index].id):
+                    var first_payload = first_type
+                    if payload_from_optional:
+                        match first_type.kind:
+                            case HirTypeKind.Optional(first_inner): first_payload = first_inner
+                            case _: ()
+                    if not hir_types_equal(first_payload, arm_payload):
+                        ambiguous = "arms disagree on the payload type"
+            else:
+                ambiguous = "an arm has no type"
+            arm_i = arm_i + 1
+        if not saw_absent and not saw_optional:
+            return dest
+        if ambiguous != "":
+            if mir_optional_join_strict():
+                self.error_fatal("E-OPT-JOIN: untyped if/match binding joins nil / T / T? arms ambiguously ({ambiguous}); annotate the binding as `T?`", nil)
+            return dest
+        if payload_index < 0:
+            # Only absent arms: nothing names T.
+            return dest
+        if val first_type = self.find_local_hir_type(arm_locals[payload_index].id):
+            var payload = first_type
+            if payload_from_optional:
+                match first_type.kind:
+                    case HirTypeKind.Optional(first_inner): payload = first_inner
+                    case _: ()
+            val opt_type = HirType(kind: HirTypeKind.Optional(payload), span: first_type.span)
+            # An Optional is one i64 word (handle or nil sentinel). The merge
+            # temp otherwise keeps the FIRST arm's MIR type -- a struct, or
+            # void for a Some(..) ctor arm, which failed natively as
+            # E-BACKEND-LLVM-CONST-TYPE "integer constant cannot define void".
+            self.builder.set_local_type(dest, MirType.i64())
+            if not saw_bare:
+                # Every value arm is already the canonical handle and `nil`
+                # is the sentinel: type + mark the slot, no conversion.
+                self.remember_local_hir_type(dest.id, opt_type, 0, 0)
+                self.option_value_locals[dest.id] = true
+                self.mark_runtime_value_local(dest.id)
+                return dest
+            return self.normalize_option_handle(dest, opt_type)
+        dest
 
     fn present_collection_binding(cond: HirExpr) -> (i64, LocalId):
         """Recognize the existing desugared present test, using declared payload
@@ -3896,8 +3999,10 @@ impl MirLowering:
         if inferred_known:
             self.builder.set_local_type(result, inferred_ty)
 
+        var joined_result = result
         if expected_type == nil and else_ != nil:
             self.remember_merged_arm_identity(result, merged_arm_locals)
+            joined_result = self.join_untyped_optional_arms(result, merged_arm_locals)
         if val found_expected = expected_type:
             self.remember_local_hir_type(result.id, found_expected, 0, 0)
             match found_expected.kind:
@@ -3907,7 +4012,7 @@ impl MirLowering:
                 case _:
                     ()
 
-        result
+        joined_result
 
     me lower_if_chain(arms: [HirIfArm], else_: HirBlock?, expected_type: HirType?) -> LocalId:
         """Lower a flat ordered if/elif chain to one CFG merge.
@@ -4063,8 +4168,11 @@ impl MirLowering:
         if inferred_known and chain_has_else:
             self.builder.set_local_type(result, inferred_ty)
 
+        var joined_result = result
         if expected_type == nil:
             self.remember_merged_arm_identity(result, merged_arm_locals)
+            if chain_has_else:
+                joined_result = self.join_untyped_optional_arms(result, merged_arm_locals)
         if val found_expected = expected_type:
             self.remember_local_hir_type(result.id, found_expected, 0, 0)
             match found_expected.kind:
@@ -4073,7 +4181,7 @@ impl MirLowering:
                     self.mark_runtime_value_local(result.id)
                 case _:
                     ()
-        result
+        joined_result
 
     me lower_loop(body: HirBlock) -> LocalId:
         """Lower loop expression."""
