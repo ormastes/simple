@@ -7911,8 +7911,12 @@ SPL_WEAK SplArray* sys_get_args(void) {
 
 /* A COFF archive needs a strong standalone owner. The hosted runtime.c argv
  * implementation uses incompatible legacy array/value layouts and is omitted
- * for this lane. Preserve its existing ownership for hosted and Unix builds. */
-#if defined(_WIN32) && defined(SIMPLE_CORE_C_STANDALONE)
+ * whenever this file is in the bundle (SIMPLE_RUNTIME_MEMORY_OWNER; see the
+ * matching guard in runtime.c), so on Windows this copy is then the only one
+ * and must be strong: a lone weak external is not resolved there. ELF keeps
+ * weak for the Rust-capsule coexistence reason given at rt_set_args above. */
+#if defined(_WIN32) && \
+    (defined(SIMPLE_CORE_C_STANDALONE) || defined(SIMPLE_RUNTIME_MEMORY_OWNER))
 #define SPL_CORE_ARGV_OWNER
 #else
 #define SPL_CORE_ARGV_OWNER SPL_WEAK
