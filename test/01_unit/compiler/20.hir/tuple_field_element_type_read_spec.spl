@@ -1,0 +1,36 @@
+# Static source assertion (the runtime repro is the stage3-native AV at
+# HirLowering.lower_hir_expr+0x495e, s3_fable46 batches q0002/q0011; the
+# interpreter does not reproduce it).
+# field_tuple_element_type read the class-field dict `self.local_tuple_types`
+# ({i64: [HirType]}) with a bracket read -- the documented native-codegen
+# class-field array-value bracket-read gap (dict_native_pitfalls.md) -- and
+# returned the array element by value into HirType?. The caller then unwrapped
+# a garbage pointer while building HirType(kind: found.kind, span: e.span).
+# Pins the fix: `.get()` into an annotated local and a re-rooted HirType.
+use std.spec
+
+extern fn rt_file_read_text(path: text) -> text?
+
+val ES_PATH = "src/compiler/20.hir/hir_lowering/_Expressions/expression_support.spl"
+
+fn ftet_body() -> text:
+    val src = rt_file_read_text(ES_PATH) ?? ""
+    val start = src.index_of("me field_tuple_element_type(") ?? -1
+    if start < 0: return ""
+    val rest = src.substring(start, src.len())
+    val stop = rest.index_of("me field_type_for_owner(") ?? rest.len()
+    rest.substring(0, stop)
+
+describe "field_tuple_element_type native-safe read":
+    it "does not bracket-read the class-field array dict":
+        val body = ftet_body()
+        expect(body.len() > 0).to_equal(true)
+        expect(body.contains("self.local_tuple_types[")).to_equal(false)
+    it "reads via get into an annotated array local":
+        val body = ftet_body()
+        expect(body.contains("val element_types: [HirType] = self.local_tuple_types.get(")).to_equal(true)
+    it "returns a re-rooted HirType, not the array element by value":
+        val body = ftet_body()
+        expect(body.contains("return element_types[index]")).to_equal(false)
+        expect(body.contains("val element_type: HirType = element_types[index]")).to_equal(true)
+        expect(body.contains("return HirType(kind: element_type.kind, span: element_type.span)")).to_equal(true)

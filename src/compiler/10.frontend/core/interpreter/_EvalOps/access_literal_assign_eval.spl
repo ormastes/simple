@@ -6,7 +6,7 @@ use compiler.core.ast.{decl_fn, expr_get}
 use compiler.core.ast_expr.{EXPR_FIELD_ACCESS, EXPR_IDENT, EXPR_INDEX, EXPR_RANGE, expr_owner_int, expr_owner_int_set}
 use compiler.core.ast_stmt.{stmt_expr_stmt}
 use compiler.core.interpreter.eval.{coverage_owner_file, eval_current_decl_id, eval_expr, eval_had_error, eval_return_value}
-use compiler.core.interpreter.eval.{eval_returning, eval_set_error}
+use compiler.core.interpreter.eval.{eval_option_binding_value, eval_returning, eval_set_error}
 use compiler.core.interpreter.eval_tables.{decl_owner_file_set, enum_table_lookup, func_table_lookup, func_table_register}
 use compiler.frontend.core.interpreter.eval_ops.*
 # Core Interpreter — Complex Expression Evaluators
@@ -902,8 +902,18 @@ fn eval_null_coalesce(eid: i64) -> i64:
     val e_node = expr_get(eid)
     val left = eval_expr(e_node.left)
     if eval_had_error: return -1
-    if val_is_nil(left) == false: return left
-    eval_expr(e_node.right)
+    if val_is_nil(left): return eval_expr(e_node.right)
+    # Constructed `Option::*` / `Result::*` structs: None/Err (and a nil
+    # Some/Ok payload) take the fallback, Some/Ok unwrap — same as the seed.
+    # Kept identical to eval_access.spl (this copy wins the co-compiled
+    # name collision). core_interp_option_coalesce_and_presence_gaps_2026-11-06
+    if val_is_struct(left):
+        val variant_name = val_get_struct_name(left)
+        if variant_name.starts_with("Option::") or variant_name.starts_with("Result::"):
+            val unwrapped = eval_option_binding_value(left)
+            if val_is_nil(unwrapped): return eval_expr(e_node.right)
+            return unwrapped
+    left
 
 # ===== Enum Variant Construction =====
 

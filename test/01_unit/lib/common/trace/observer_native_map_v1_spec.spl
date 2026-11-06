@@ -1,0 +1,133 @@
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_native_map_v1.*
+
+fn trace_map_site_fixture_v1() -> TraceNativeSiteV1:
+    TraceNativeSiteV1(site_id: 1, function_id: 1, kind: TraceEventKindV1.Entry,
+        offset: 64, target_offset: 192, encoding: TraceNativeEncodingV1.X64Rel32)
+
+fn trace_map_fixture_v1() -> TraceNativeMapV1:
+    TraceNativeMapV1(schema: 1, module_instance: 7, manifest_incarnation: 9,
+        build_identity: "fixture-build", source_identity: "fixture-source",
+        runtime_identity: "fixture-runtime", target: "x86_64-linux-gnu",
+        abi_profile: "unqualified-fixture", image_size: 256, map_offset: 0, map_size: 64,
+        ranges: [
+            TraceImageRangeV1(offset: 0, size: 64, readable: true, writable: false, executable: false),
+            TraceImageRangeV1(offset: 64, size: 192, readable: true, writable: false, executable: true)
+        ],
+        functions: [TraceNativeFunctionV1(function_id: 1, offset: 64, size: 64)],
+        sites: [trace_map_site_fixture_v1()])
+
+fn trace_map_image_fixture_v1() -> [u8]:
+    var bytes: [u8] = []
+    for index in 0..256:
+        bytes.push(0)
+    # Independent x64 golden: CALL +121 from offset 71 to offset 192.
+    val sled: [u8] = [235, 11, 232, 121, 0, 0, 0, 235, 4, 1, 0, 0, 0]
+    for index in 0..sled.len():
+        bytes[64 + index] = sled[index]
+    bytes
+
+describe "native observer map V1 structural validation":
+    it "MAP-01 rejects a truncated ARM64 target instruction in executable storage":
+        val original = trace_map_fixture_v1()
+        val site = TraceNativeSiteV1(..trace_map_site_fixture_v1(), encoding: TraceNativeEncodingV1.Arm64Branch26)
+        var image = trace_map_image_fixture_v1()
+        val sled = trace_native_off_template_v1(site, 256).unwrap()
+        for index in 0..sled.len():
+            image[64 + index] = sled[index]
+        val arm = TraceNativeMapV1(..original, target: "aarch64-unknown-linux-gnu", sites: [site])
+        expect(trace_native_map_validate_v1(arm, image)).to_equal(Ok(true))
+        var ranges = original.ranges
+        ranges[1] = TraceImageRangeV1(..ranges[1], size: 130)
+        expect(trace_native_map_validate_v1(TraceNativeMapV1(..arm, ranges: ranges), image)).to_equal(Err(TraceFailureV1.InvalidMap))
+
+    it "MAP-01 accepts a dense bounded read-only manifest and exact off template":
+        expect(trace_native_map_validate_v1(trace_map_fixture_v1(), trace_map_image_fixture_v1()).unwrap()).to_equal(true)
+        val emitted = trace_native_off_template_v1(trace_map_site_fixture_v1(), 256).unwrap()
+        expect(emitted).to_equal([235, 11, 232, 121, 0, 0, 0, 235, 4, 1, 0, 0, 0])
+
+    it "MAP-01 rejects a writable alias even after a read-only map range":
+        val original = trace_map_fixture_v1()
+        var ranges = original.ranges
+        ranges.push(TraceImageRangeV1(offset: 16, size: 16, readable: true, writable: true, executable: false))
+        val aliased = TraceNativeMapV1(..original, ranges: ranges)
+        expect(trace_native_map_validate_v1(aliased, trace_map_image_fixture_v1()).is_err()).to_equal(true)
+
+    it "MAP-01 rejects writable metadata and writable executable ownership":
+        val original = trace_map_fixture_v1()
+        for index in [0, 1]:
+            var ranges = original.ranges
+            ranges[index] = TraceImageRangeV1(..ranges[index], writable: true)
+            expect(trace_native_map_validate_v1(TraceNativeMapV1(..original, ranges: ranges), trace_map_image_fixture_v1()).is_err()).to_equal(true)
+
+    it "MAP-01 rejects size overflow zero extents and truncated image":
+        expect(trace_native_range_fits_v1(18446744073709551615, 1, 18446744073709551615)).to_equal(false)
+        expect(trace_native_range_fits_v1(64, 0, 256)).to_equal(false)
+        expect(trace_native_range_fits_v1(257, 1, 256)).to_equal(false)
+        expect(trace_native_range_fits_v1(255, 1, 256)).to_equal(true)
+        expect(trace_native_map_validate_v1(trace_map_fixture_v1(), []).is_err()).to_equal(true)
+
+    it "MAP-01 rejects duplicate physical sites and non-dense site identities":
+        val original = trace_map_fixture_v1()
+        val first = trace_map_site_fixture_v1()
+        val duplicate = TraceNativeSiteV1(..first, site_id: 2)
+        expect(trace_native_map_validate_v1(TraceNativeMapV1(..original, sites: [first, duplicate]), trace_map_image_fixture_v1()).is_err()).to_equal(true)
+        expect(trace_native_map_validate_v1(TraceNativeMapV1(..original, sites: [duplicate]), trace_map_image_fixture_v1()).is_err()).to_equal(true)
+
+    it "MAP-01 rejects unknown owner misalignment and mutated immutable payload":
+        val original = trace_map_fixture_v1()
+        val first = trace_map_site_fixture_v1()
+        for bad in [TraceNativeSiteV1(..first, function_id: 0), TraceNativeSiteV1(..first, offset: 65)]:
+            expect(trace_native_map_validate_v1(TraceNativeMapV1(..original, sites: [bad]), trace_map_image_fixture_v1()).is_err()).to_equal(true)
+        var bytes = trace_map_image_fixture_v1()
+        bytes[73] = 2
+        expect(trace_native_map_validate_v1(original, bytes).is_err()).to_equal(true)
+
+    it "MAP-01 rejects targets outside executable ranges and sites outside owner":
+        val original = trace_map_fixture_v1()
+        val first = trace_map_site_fixture_v1()
+        for bad in [TraceNativeSiteV1(..first, target_offset: 32), TraceNativeSiteV1(..first, offset: 124)]:
+            expect(trace_native_map_validate_v1(TraceNativeMapV1(..original, sites: [bad]), trace_map_image_fixture_v1()).is_err()).to_equal(true)
+
+    it "MAP-01 rejects recursive trampoline ownership and wrong architecture":
+        val original = trace_map_fixture_v1()
+        val first = trace_map_site_fixture_v1()
+        val recursive = TraceNativeSiteV1(..first, target_offset: 96)
+        expect(trace_native_map_validate_v1(TraceNativeMapV1(..original, sites: [recursive]), trace_map_image_fixture_v1()).is_err()).to_equal(true)
+        expect(trace_native_map_validate_v1(TraceNativeMapV1(..original, target: "aarch64-linux-gnu"), trace_map_image_fixture_v1()).is_err()).to_equal(true)
+
+    it "MAP-01 rejects anonymous provenance and mismatched schema":
+        val original = trace_map_fixture_v1()
+        expect(trace_native_map_validate_v1(TraceNativeMapV1(..original, schema: 2), trace_map_image_fixture_v1()).is_err()).to_equal(true)
+        expect(trace_native_map_validate_v1(TraceNativeMapV1(..original, build_identity: ""), trace_map_image_fixture_v1()).is_err()).to_equal(true)
+        expect(trace_native_map_validate_v1(TraceNativeMapV1(..original, manifest_incarnation: 0), trace_map_image_fixture_v1()).is_err()).to_equal(true)
+
+    it "MAP-01 range checks both signed rel32 boundaries without truncation":
+        val first = trace_map_site_fixture_v1()
+        val high = TraceNativeSiteV1(..first, target_offset: 2147483718)
+        expect(trace_native_branch_displacement_v1(high, 4294967296).unwrap()).to_equal(2147483647)
+        expect(trace_native_branch_displacement_v1(TraceNativeSiteV1(..high, target_offset: 2147483719), 4294967296).is_err()).to_equal(true)
+        val low = TraceNativeSiteV1(..first, offset: 2147483642, target_offset: 1)
+        expect(trace_native_branch_displacement_v1(low, 4294967296).unwrap()).to_equal(-2147483648)
+        expect(trace_native_branch_displacement_v1(TraceNativeSiteV1(..low, target_offset: 0), 4294967296).is_err()).to_equal(true)
+
+    it "MAP-01 emits ARM64 save ID branch and restore instructions from independent golden bytes":
+        val arm = TraceNativeSiteV1(..trace_map_site_fixture_v1(), encoding: TraceNativeEncodingV1.Arm64Branch26)
+        val bytes = trace_native_off_template_v1(arm, 256).unwrap()
+        expect(bytes).to_equal([8, 0, 0, 20, 240, 71, 191, 169, 224, 123, 191, 169,
+            32, 0, 128, 82, 0, 0, 160, 114, 27, 0, 0, 148,
+            224, 123, 193, 168, 240, 71, 193, 168])
+        expect(trace_native_branch_displacement_v1(TraceNativeSiteV1(..arm, target_offset: 193), 256).is_err()).to_equal(true)
+        val last_forward = TraceNativeSiteV1(..arm, target_offset: 134217808)
+        expect(trace_native_branch_displacement_v1(last_forward, 268435456).unwrap()).to_equal(33554431)
+        expect(trace_native_branch_displacement_v1(TraceNativeSiteV1(..last_forward, target_offset: 134217812), 268435456).is_err()).to_equal(true)
+
+    it "MAP-01 binds selection to manifest incarnation module and unique site IDs":
+        val manifest = trace_map_fixture_v1()
+        val selected = TraceSiteV1(module_instance: 7, site_id: 1)
+        val selection = TraceSelectionV1(manifest_incarnation: 9, sites: [selected])
+        expect(trace_native_select_v1(manifest, selection).unwrap()).to_equal([0])
+        expect(trace_native_select_v1(manifest, TraceSelectionV1(..selection, manifest_incarnation: 10)).is_err()).to_equal(true)
+        expect(trace_native_select_v1(manifest, TraceSelectionV1(..selection, sites: [selected, selected])).is_err()).to_equal(true)
+        expect(trace_native_select_v1(manifest, TraceSelectionV1(..selection, sites: [TraceSiteV1(module_instance: 8, site_id: 1)])).is_err()).to_equal(true)
+        expect(trace_native_select_v1(manifest, TraceSelectionV1(..selection, sites: [TraceSiteV1(module_instance: 7, site_id: 2)])).is_err()).to_equal(true)

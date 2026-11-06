@@ -1,13 +1,7 @@
-# Diagnostic reproducer: provider_admit_dynamic_v1 hashes the declared path,
-# then independently opens that path with dynlib_open. The digest is therefore
-# not bound to the image that was made process-callable.
-#
-# A post-open pathname re-read does not close this race: an attacker can swap
-# the path between either operation, including an A->B->A replacement. Exact
-# admission requires an immutable opened handle that is both hashed and loaded
-# (or a platform-equivalent identity-preserving primitive). That primitive is
-# not available in the current dynlib facade, so this file is diagnostic
-# developing evidence only, never an admission acceptance result.
+# Regression: provider_admit_dynamic_v1 must not hash the declared path and then
+# independently dlopen that same mutable path. Admission now stages the hashed
+# buffer into a BLAKE3-named private snapshot and opens the snapshot
+# (see provider_loader_snapshot_binding_spec.spl for the adversarial cases).
 
 extern fn rt_file_read_text(path: text) -> text?
 
@@ -29,7 +23,7 @@ fn segment_after(body: text, marker: text) -> text:
         return ""
     parts[1]
 
-describe "provider_admit_dynamic_v1 immutable-handle identity blocker":
+describe "provider_admit_dynamic_v1 snapshot identity binding":
     it "reads the loader source used by this repository":
         # @req REQ-SSPEC-UNIT
         step("reads the loader source used by this repository")
@@ -37,17 +31,17 @@ describe "provider_admit_dynamic_v1 immutable-handle identity blocker":
         expect(src.len() > 0).to_be(true)
         expect(src.contains("fn provider_admit_dynamic_v1")).to_be(true)
 
-    it "diagnoses path hashing before a separate path open":
+    it "stages the hashed bytes before any dlopen and opens the snapshot":
         val body = fn_body(loader_source(), "provider_admit_dynamic_v1")
         expect(body.len() > 0).to_be(true)
         val before_open = body.split("dynlib_open(")[0]
-        expect(before_open.contains("provider_artifact_digest_v1(")).to_be(true)
+        expect(before_open.contains("provider_stage_artifact_snapshot_v1(")).to_be(true)
+        expect(body.contains("dynlib_open(request.artifact_path")).to_be(false)
 
-    it "does not mistake a pathname re-read for immutable image identity":
+    it "does not rely on a pathname re-read after open":
         val body = fn_body(loader_source(), "provider_admit_dynamic_v1")
         val after_open = segment_after(body, "dynlib_open(")
-        expect(after_open.contains("provider_artifact_digest_v1(")).to_be(false)
-        expect(after_open.contains("PROVIDER_ADMISSION_DIGEST_UNSTABLE")).to_be(false)
+        expect(after_open.contains("rt_file_read_bytes(")).to_be(false)
 
     it "retains a valid library when close reports failure":
         val body = fn_body(loader_source(), "provider_session_close_v1")

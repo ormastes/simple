@@ -1,6 +1,6 @@
 # Isolated-thread raw worker argument heuristic is test-order dependent
 
-Status: OPEN (P0 — owner decision 2026-11-06)
+Status: fix-implemented-verification-pending (P0 — owner decision 2026-11-06); see "Explicit worker-closure kind" below
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 2026-08-12.
 
@@ -108,3 +108,83 @@ filter 15/15 x3 runs, `executor` 27/27, `thread` 30/30. New specs in
   point, not by word; parity not claimed.
 - The durable end state remains an explicit ABI marker in the callable record
   emitted by codegen, consumed by both runtimes.
+
+## Explicit worker-closure kind: heuristic removed (2026-11-06, Opus)
+
+Status: **fix-implemented-verification-pending**. Seed and C runtime changed.
+Board and Linux runs are pending.
+
+**Root cause, final.** One entry point took two encodings of the closure word
+and had no tag to tell them apart. Runtime and test callers passed a machine
+address; generated Simple code passed a tagged RuntimeValue (`addr << 3`, or
+`addr | 1`). Every classifier (VA ceiling, then the #7112 dual-validation
+probe) guessed from the value. A word that is valid under both decodings
+cannot be decided from its value. Fixture: committed records at
+A = `0x10030000` and A << 3 = `0x80180000`. Before this change the #7112
+resolver rejected that word (spawn returned 0).
+
+**Design.** The spawner states the kind; the runtime never infers it.
+Lockless: pure functions with no shared state; the only probe is fault-free
+`VirtualQuery`, which only rejects unreadable records.
+- `RT_WORKER_CLOSURE_ADDRESS = 1`: the word is a machine address of a code
+  entry or a closure record. Worker args pass unchanged. A word above user VA
+  is rejected.
+- `RT_WORKER_CLOSURE_VALUE = 2`: the word is a tagged Simple value, decoded by
+  its own tag. `TAG_INT` (`addr << 3`) means a raw native record and raw i64
+  args. `TAG_HEAP` (`addr | 1`) means a heap record and RuntimeValue args.
+  Every other tag is rejected.
+- Unknown kinds are rejected (spawn returns 0).
+- New twins `rt_thread_spawn_isolated_kind(kind, closure, data)` and
+  `rt_thread_spawn_isolated_with_args_kind(kind, closure, d1, d2)` exist in both
+  `executor.rs` and `runtime_thread.c`, and are renamed under
+  `SIMPLE_RUNTIME_THREAD_RUST_OWNER`.
+- The unsuffixed Simple-facing entries (and Rust `rt_thread_spawn_limited*`)
+  are fixed to kind VALUE. Their Simple extern names are unchanged, so deployed
+  interpreters keep working. The contract is documented at the externs in
+  `concurrent/thread.spl` and `sffi/concurrent.spl`.
+- Removed: `native_closure_payload`, `native_resolve_ambiguous_word`,
+  `native_candidate_is_callable`, and `NativeWordForm` from Rust, and the
+  spawn-path use of `rt_native_closure_payload` from C.
+- C parity: the single-argument C worker now honours the raw-argument ABI, as
+  Rust does. Before, C passed tagged args to raw workers: the probe returned
+  280 instead of 42.
+
+**TDD evidence (Windows x86_64, clang-cl, own CARGO_TARGET_DIR, --release --lib).**
+- Before (old `executor.rs` with the new legacy-entry fixtures): both tests
+  FAILED, every time. `test_before_dual_decodable_value_word` failed with
+  "VALUE spawn of dual-decodable word 0x80180000 rejected". The legacy-entry
+  stress (16 x 64 = 1024 spawns) also failed: 8 spawners rejected that word.
+- After: `executor|thread|worker_closure` 37/37. `isolated_thread|worker_closure`
+  passed 17/17 on 20 of 20 runs. Each run has two 1024-spawn stress specs, so
+  that is 40,960 stress spawns with 0 failures. Full `--lib`: 1394 passed. The
+  2 failures are `pty` ConPTY resize and symlink canonicalize, which do not
+  touch the executor.
+- C lane: `windows_thread_code_dispatch_test.c` passed 200/200 and
+  `rt_thread_owner_contract_selfcheck.c` passed 200/200 (clang + lld). Both are
+  linked directly against `runtime_thread.c`. The script lane
+  `check-rt-thread-owner-contract.shs` fails at link on a duplicate
+  `rt_time_now_seconds_f64` that already exists on the base. That failure
+  happens before this change, and the change did not cause it.
+- New specs: `test_worker_closure_kind_decode_is_explicit` covers every
+  kind/tag branch at the bug site. Also added:
+  `..._value_int_tagged_record_selects_raw_abi_at_any_address`,
+  `..._value_heap_tagged_record_keeps_runtime_value_abi`,
+  `..._classifier_follows_kind_not_value`,
+  `..._dual_decodable_word_follows_declared_kind`,
+  `..._explicit_kind_stress_concurrent_spawners`,
+  `..._legacy_value_entry_stress_concurrent_spawners`, and
+  `..._unmapped_word_fails_closed`.
+
+**Similar-pattern audit.** The grep covered `src/runtime` and
+`src/compiler_rust/runtime/src`, looking for VA ceilings, `>= 4096 && & 7 == 0`,
+and "looks like a pointer" logic.
+- Pool function-value decode (`runtime_pool.c` and pool-v1 in
+  `runtime_thread.c`) uses the same value-based rule. Filed as
+  `pool_native_function_payload_value_heuristic_2026-11-06`.
+- `value/core.rs:595` checks `is_registered_heap_ptr`, a registry lookup
+  rather than a guess. No change needed.
+
+**Still pending verification:** Linux and aarch64 runs, the board run, and a
+native-compiled Simple `thread_spawn_with_args` smoke
+(`check-thread-spawn-with-args-native.shs`). That smoke needs a seed that can
+link native binaries on this host.

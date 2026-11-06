@@ -1,0 +1,138 @@
+# SMF `.simple_meta` section — TLV metadata records.
+#
+# Normative layout: src/spec/artifact/smf_v1_2.sdn `v1_2.meta_section`. The
+# fixed SMF header is never extended (plan rule: allocate no new header byte);
+# metadata that does not fit the header lives in a section named ".simple_meta"
+# listed in the ordinary section table. Its payload is a stream of packed
+# little-endian records:
+#
+#   kind u16 @0 | version u8 @2 | flags u8 @3 | payload_length u32 @4 | payload @8
+#
+# Unknown kinds are skipped by length; a record whose payload runs past the
+# stream end rejects the whole stream. Two `.simple_meta` sections in one image
+# are corruption, never a hit.
+
+use compiler.backend.linker.smf_header.{SMF_PACKED_HEADER_SIZE, smf_header_from_bytes, smf_header_locate, smf_header_size_at, u16_to_bytes, u32_to_bytes}
+
+pub val SMF_META_SECTION_NAME: text = ".simple_meta"
+val SMF_META_RECORD_HEADER_SIZE: i64 = 8
+val SMF_SECTION_ENTRY_SIZE: i64 = 64
+
+# Record kinds (smf_v1_2.sdn `records`).
+pub val SMF_META_KIND_INTERFACE_COMPATIBILITY_V1: i64 = 1
+pub val SMF_META_KIND_COMPILE_OPTIONS_V1: i64 = 2
+# compile_options_v1 payload: compile_options_hash_to_bytes() encoding.
+pub val SMF_META_COMPILE_OPTIONS_V1_SIZE: i64 = 16
+
+"""Encode one TLV record (record version 1, flags 0)."""
+pub fn smf_meta_record(kind: i64, payload: [u8]) -> [u8]:
+    var out: [u8] = []
+    out = out + u16_to_bytes(kind as u16)
+    out.push(1)
+    out.push(0)
+    out = out + u32_to_bytes(payload.len() as u32)
+    out + payload
+
+"""Encode the compile_options_v1 record from a 16-byte compile-options hash."""
+pub fn smf_meta_compile_options_record(options_bytes: [u8]) -> [u8]:
+    smf_meta_record(SMF_META_KIND_COMPILE_OPTIONS_V1, options_bytes)
+
+"""Payload of the first record of `kind` in a TLV stream, or [] when absent."""
+pub fn smf_meta_find(stream: [u8], kind: i64) -> [u8]:
+    var at = 0
+    while at + SMF_META_RECORD_HEADER_SIZE <= stream.len():
+        val rec_kind = (stream[at] as i64) | ((stream[at + 1] as i64) << 8)
+        val len = smf_meta_u32_at(stream, at + 4)
+        val payload_at = at + SMF_META_RECORD_HEADER_SIZE
+        if len < 0 or len > stream.len() - payload_at:
+            return []
+        if rec_kind == kind:
+            var payload: [u8] = []
+            var i = 0
+            while i < len:
+                payload.push(stream[payload_at + i])
+                i = i + 1
+            return payload
+        at = payload_at + len
+    []
+
+"""Bytes of the single `.simple_meta` section of a complete SMF image, or []."""
+pub fn smf_meta_section_bytes(image: [u8]) -> [u8]:
+    val header_result = smf_header_from_bytes(image)
+    if header_result.is_err():
+        return []
+    val header = header_result.unwrap()
+    val count = header.section_count as i64
+    val table = header.section_table_offset as i64
+    if count <= 0 or table < 0 or table > image.len():
+        return []
+    if count > (image.len() - table) / SMF_SECTION_ENTRY_SIZE:
+        return []
+    val want = SMF_META_SECTION_NAME.bytes()
+    var found: [u8] = []
+    var matches = 0
+    var i = 0
+    while i < count:
+        val entry = table + i * SMF_SECTION_ENTRY_SIZE
+        if smf_meta_entry_named(image, entry, want):
+            matches = matches + 1
+            if matches > 1:
+                return []
+            val offset = smf_meta_u64_at(image, entry + 8)
+            val size = smf_meta_u64_at(image, entry + 16)
+            if size <= 0 or offset < 0 or offset > image.len() or size > image.len() - offset:
+                return []
+            var bytes: [u8] = []
+            var k = 0
+            while k < size:
+                bytes.push(image[offset + k])
+                k = k + 1
+            found = bytes
+        i = i + 1
+    found
+
+"""The 16-byte compile-options hash carried by an SMF image, or [] when absent.
+
+v1.3 images carry it as `.simple_meta` record kind 2. Legacy packed 128-byte
+headers carried it in header bytes 88..104; that fallback is read-only.
+TODO(smf_header_wire_layout_diverges_rust_vs_simple_2026-08-10): remove the
+packed fallback together with the packed reader after one release.
+"""
+pub fn smf_meta_compile_options_bytes(image: [u8]) -> [u8]:
+    val record = smf_meta_find(smf_meta_section_bytes(image), SMF_META_KIND_COMPILE_OPTIONS_V1)
+    if record.len() == SMF_META_COMPILE_OPTIONS_V1_SIZE:
+        return record
+    val start = smf_header_locate(image)
+    if start < 0 or smf_header_size_at(image, start) != SMF_PACKED_HEADER_SIZE:
+        return []
+    if start + SMF_PACKED_HEADER_SIZE > image.len():
+        return []
+    var legacy: [u8] = []
+    var nonzero = false
+    var i = 0
+    while i < SMF_META_COMPILE_OPTIONS_V1_SIZE:
+        val b = image[start + 88 + i]
+        if b != 0:
+            nonzero = true
+        legacy.push(b)
+        i = i + 1
+    if nonzero: legacy else: []
+
+fn smf_meta_entry_named(image: [u8], entry: i64, want: [u8]) -> bool:
+    if entry < 0 or entry + SMF_SECTION_ENTRY_SIZE > image.len():
+        return false
+    var i = 0
+    while i < 16:
+        val b = if i < want.len(): want[i] else: 0
+        if image[entry + 40 + i] != b:
+            return false
+        i = i + 1
+    true
+
+fn smf_meta_u32_at(bytes: [u8], at: i64) -> i64:
+    (bytes[at] as i64) | ((bytes[at + 1] as i64) << 8) | ((bytes[at + 2] as i64) << 16) | ((bytes[at + 3] as i64) << 24)
+
+fn smf_meta_u64_at(bytes: [u8], at: i64) -> i64:
+    if at < 0 or at + 8 > bytes.len():
+        return -1
+    smf_meta_u32_at(bytes, at) | (smf_meta_u32_at(bytes, at + 4) << 32)

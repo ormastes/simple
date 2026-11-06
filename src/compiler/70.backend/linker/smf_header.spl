@@ -1,22 +1,31 @@
-# SMF Header - Complete 128-byte header structure for SMF format
+# SMF Header - 96-byte header structure for SMF format (v1.3 wire layout)
 use compiler.hir.hir_types.{Effect}
 #
-# This module defines the SmfHeader struct which represents the complete
-# 128-byte header used in Simple Module Format (SMF) v1.1.
+# This module defines the SmfHeader struct used by Simple Module Format (SMF).
 #
-# The header is laid out in a C-compatible repr(C) format with exactly
-# 128 bytes, designed to be written as a trailer at EOF-128 in v1.1 files.
+# Since v1.3 the wire layout is byte-identical to the Rust seed's #[repr(C)]
+# `SmfHeader` (src/compiler_rust/common/src/smf/header.rs): exactly 96 bytes,
+# written as a trailer at EOF-96. Normative schema: src/spec/artifact/smf_v1_2.sdn.
 #
-# Layout (128 bytes total):
-# - Identification (8 bytes): magic, version, platform, arch
-# - Flags (20 bytes): flags, compression, section info
-# - Symbols (16 bytes): symbol table metadata
-# - Execution (16 bytes): entry point, stub info
-# - Hashing (16 bytes): module and source hashes
-# - Hints (12 bytes): app type, window hints, prefetch
-# - Reserved (40 bytes): padding to 128 bytes
+# Layout (96 bytes total, little-endian):
+# - Identification (8): magic, version, platform, arch
+# - Flags (8): flags, compression, compression_level, reserved_compression[2]
+# - section_count u32 @16, 4 alignment padding bytes @20..24
+# - section_table_offset u64 @24, symbol_table_offset u64 @32,
+#   symbol_count u32 @40, exported_count u32 @44
+# - entry_point u64 @48, stub_size u32 @56, smf_data_offset u32 @60
+# - module_hash u64 @64, source_hash u64 @72
+# - app_type u8 @80, (pad @81), window_width u16 @82, window_height u16 @84,
+#   prefetch_hint u8 @86, prefetch_file_count u8 @87, reserved_hints[5] @88
+# - 3 tail padding bytes @93..96
 #
-# Ported from: rust/runtime/src/loader/smf/header.rs
+# The header is never extended: metadata that does not fit lives in the
+# `.simple_meta` section (compiler.backend.linker.smf_meta). Versions 1.0-1.2
+# used a packed 128-byte layout (trailer at EOF-128) whose bytes 88..104 held
+# the compile-options hash; readers still accept it for one release.
+# TODO(smf_header_wire_layout_diverges_rust_vs_simple_2026-08-10): remove the
+# packed 128-byte read path (SMF_PACKED_HEADER_SIZE, to_packed_bytes,
+# smf_header_seed_shaped_at's heuristic branch) after one release.
 
 use compiler.backend.linker.smf_enums (Platform, Arch, CompressionType, SmfAppType)
 
@@ -25,7 +34,11 @@ use compiler.backend.linker.smf_enums (Platform, Arch, CompressionType, SmfAppTy
 # ============================================================================
 
 val SMF_MAGIC: [u8] = [83, 77, 70, 0]  # "SMF\0"
-pub val SMF_HEADER_SIZE: i64 = 128
+pub val SMF_VERSION_MAJOR: u8 = 1
+pub val SMF_VERSION_MINOR: u8 = 3      # v1.3: 96-byte repr(C) wire layout
+pub val SMF_HEADER_SIZE: i64 = 96
+# Legacy v1.0-v1.2 packed layout, accepted on read only.
+pub val SMF_PACKED_HEADER_SIZE: i64 = 128
 
 # Flag constants
 val SMF_FLAG_EXECUTABLE: u32 = 0x0001
@@ -38,27 +51,20 @@ val SMF_FLAG_HAS_STUB: u32 = 0x0010  # v1.1: File has executable stub
 # Bit 5 (0x20) is already the v1.1 note.sdn feature bit used by both driver and
 # reader, so aspect packs use the next version-compatible extension bit.
 pub val SMF_FLAG_ASPECT_PACK: u32 = 0x0040
+# v1.3: relocation entries carry the 0xA2 source-section marker (the v1.2
+# entry form). Replaces the v1.2 "version_minor = 2" stamp, since the minor
+# now names the header layout.
+pub val SMF_FLAG_SOURCE_RELOCS: u32 = 0x0080
 
 # ============================================================================
 # SmfHeader Struct
 # ============================================================================
 
-"""Complete SMF header structure (128 bytes).
+"""Complete SMF header structure (96 bytes on the wire).
 
-The SmfHeader represents the complete header layout for SMF v1.1 files.
-In v1.1, the header is written at EOF-128 as a trailer, allowing for
-executable stubs to be prepended to SMF files.
-
-Structure (128 bytes total):
-- Identification (8): magic[4], version_major, version_minor, platform, arch
-- Flags (20): flags, compression, compression_level, reserved_compression[2],
-              section_count, section_table_offset
-- Symbols (16): symbol_table_offset, symbol_count, exported_count
-- Execution (16): entry_point, stub_size, smf_data_offset
-- Hashing (16): module_hash, source_hash
-- Hints (12): app_type, window_width, window_height, prefetch_hint,
-              prefetch_file_count, reserved[5]
-- Reserved (40): padding to reach 128 bytes
+The header is written at EOF-96 as a trailer, allowing executable stubs to
+be prepended to SMF files. Field order matches the Rust seed struct; the
+serializers in this impl add the repr(C) alignment padding.
 """
 struct SmfHeader:
     # Identification (8 bytes)
@@ -96,17 +102,20 @@ struct SmfHeader:
     window_height: u16        # Window height hint (GUI apps)
     prefetch_hint: u8         # Prefetch hint: 0=no, 1=yes
     prefetch_file_count: u8   # Expected number of files to prefetch
-    reserved_hints: [u8]      # 5 bytes reserved
-
-    # Reserved (40 bytes) - padding to 128 bytes total
-    reserved: [u8]            # 40 bytes reserved for future use
+    reserved_hints: [u8]      # 5 bytes reserved (Rust: reserved[5])
 
 impl SmfHeader:
     # ========================================================================
     # Constructors
     # ========================================================================
 
-    """Create a new SMF v1.1 header with default values.
+    """Create a header stamped with the current format version (1.3)."""
+    static fn new_v1_3(platform: Platform, arch: Arch) -> SmfHeader:
+        var h = SmfHeader.new_v1_1(platform, arch)
+        h.version_minor = SMF_VERSION_MINOR
+        h
+
+    """Create a header stamped v1.1 (legacy fixtures and the Rust seed's stamp).
 
     Args:
         platform: Target platform
@@ -118,7 +127,7 @@ impl SmfHeader:
     static fn new_v1_1(platform: Platform, arch: Arch) -> SmfHeader:
         SmfHeader(
             magic: SMF_MAGIC,
-            version_major: 1,
+            version_major: SMF_VERSION_MAJOR,
             version_minor: 1,
             platform: platform.to_u8(),
             arch: arch.to_u8(),
@@ -141,9 +150,7 @@ impl SmfHeader:
             window_height: 720,
             prefetch_hint: 0,
             prefetch_file_count: 0,
-            reserved_hints: [0, 0, 0, 0, 0],
-            reserved: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+            reserved_hints: [0, 0, 0, 0, 0]
         )
 
     # ========================================================================
@@ -231,6 +238,20 @@ impl SmfHeader:
             self.flags = self.flags & (~SMF_FLAG_PIC)
 
     """Mark this image as an aspect-pack SMF."""
+    """Check if the file carries an aspect-pack directory (provider container)."""
+    fn is_aspect_pack() -> bool:
+        (self.flags & SMF_FLAG_ASPECT_PACK) != 0
+
+    """Check if relocation entries carry the 0xA2 source-section marker (v1.3)."""
+    fn has_source_relocs() -> bool:
+        (self.flags & SMF_FLAG_SOURCE_RELOCS) != 0
+
+    me set_source_relocs(value: bool):
+        if value:
+            self.flags = self.flags | SMF_FLAG_SOURCE_RELOCS
+        else:
+            self.flags = self.flags & (~SMF_FLAG_SOURCE_RELOCS)
+
     me set_aspect_pack(value: bool):
         if value:
             self.flags = self.flags | SMF_FLAG_ASPECT_PACK
@@ -330,139 +351,79 @@ impl SmfHeader:
         self.prefetch_file_count as i64
 
     # ========================================================================
-    # Compile Options Hash (stored in reserved[0..16])
-    # ========================================================================
-
-    """Get the compile options hash from reserved bytes.
-
-    Returns 16 bytes from reserved[0..16] that encode the CompileOptionsHash.
-    Returns all zeros if no options hash was stored (backward-compatible).
-    """
-    fn get_compile_options_bytes() -> [u8]:
-        var bytes: [u8] = []
-        var i = 0
-        while i < 16:
-            if i < self.reserved.len():
-                bytes.push(self.reserved[i])
-            else:
-                bytes.push(0)
-            i = i + 1
-        bytes
-
-    """Store compile options hash into reserved[0..16].
-
-    Args:
-        bytes: 16-byte array from compile_options_hash_to_bytes()
-    """
-    me set_compile_options_bytes(bytes: [u8]):
-        var i = 0
-        while i < 16 and i < bytes.len() and i < self.reserved.len():
-            self.reserved[i] = bytes[i]
-            i = i + 1
-
-    """Check if this header has a stored compile options hash (non-zero)."""
-    fn has_compile_options_hash() -> bool:
-        var i = 0
-        while i < 16 and i < self.reserved.len():
-            if self.reserved[i] != 0:
-                return true
-            i = i + 1
-        false
-
-    # ========================================================================
     # Serialization Methods
     # ========================================================================
 
-    """Serialize the header to bytes (exactly 128 bytes).
+    """Serialize the header in the v1.3 wire layout (exactly 96 bytes).
 
-    Returns:
-        Byte array containing the serialized header (128 bytes)
+    Byte-identical to the Rust seed's #[repr(C)] struct: 4 zero padding bytes
+    follow section_count (section_table_offset at 24), the hint block is
+    re-aligned (app_type@80, window_width@82, window_height@84,
+    prefetch_hint@86, prefetch_file_count@87, reserved_hints[5]@88) and the
+    struct is zero padded to 96.
     """
     fn to_bytes() -> [u8]:
-        var bytes: [u8] = []
-
-        # Identification (8 bytes)
-        bytes = bytes + (self.magic)
-        bytes.push(self.version_major)
-        bytes.push(self.version_minor)
-        bytes.push(self.platform)
-        bytes.push(self.arch)
-
-        # Flags and counts (20 bytes)
-        bytes = bytes + (u32_to_bytes(self.flags))
-        bytes.push(self.compression)
-        bytes.push(self.compression_level)
-        bytes = bytes + (self.reserved_compression)
-        bytes = bytes + (u32_to_bytes(self.section_count))
-        bytes = bytes + (u64_to_bytes(self.section_table_offset))
-
-        # Symbol table (16 bytes)
-        bytes = bytes + (u64_to_bytes(self.symbol_table_offset))
-        bytes = bytes + (u32_to_bytes(self.symbol_count))
-        bytes = bytes + (u32_to_bytes(self.exported_count))
-
-        # Execution (16 bytes)
-        bytes = bytes + (u64_to_bytes(self.entry_point))
-        bytes = bytes + (u32_to_bytes(self.stub_size))
-        bytes = bytes + (u32_to_bytes(self.smf_data_offset))
-
-        # Hashing (16 bytes)
-        bytes = bytes + (u64_to_bytes(self.module_hash))
-        bytes = bytes + (u64_to_bytes(self.source_hash))
-
-        # Hints (12 bytes)
-        bytes.push(self.app_type)
-        bytes = bytes + (u16_to_bytes(self.window_width))
-        bytes = bytes + (u16_to_bytes(self.window_height))
-        bytes.push(self.prefetch_hint)
-        bytes.push(self.prefetch_file_count)
-        bytes = bytes + (self.reserved_hints)
-
-        # Reserved (40 bytes)
-        bytes = bytes + (self.reserved)
-
-        bytes
-
-    """Serialize the header in the Rust seed's #[repr(C)] layout (exactly 96 bytes).
-
-    4 zero padding bytes follow section_count (section_table_offset at 24), the
-    hint block is re-aligned (app_type@80, window_width@82, window_height@84,
-    prefetch_hint@86, prefetch_file_count@87, reserved[5]@88) and the struct is
-    zero padded to 96. The compile-options area (`reserved`) does not exist in
-    this layout and is dropped. Readers detect it via `smf_header_field_shift`.
-    """
-    fn to_seed_bytes() -> [u8]:
-        var bytes: [u8] = []
-        bytes = bytes + (self.magic)
-        bytes.push(self.version_major)
-        bytes.push(self.version_minor)
-        bytes.push(self.platform)
-        bytes.push(self.arch)
-        bytes = bytes + (u32_to_bytes(self.flags))
-        bytes.push(self.compression)
-        bytes.push(self.compression_level)
-        bytes = bytes + (self.reserved_compression)
-        bytes = bytes + (u32_to_bytes(self.section_count))
+        var bytes: [u8] = self.leading_bytes()
         bytes = bytes + ([0, 0, 0, 0])
-        bytes = bytes + (u64_to_bytes(self.section_table_offset))
-        bytes = bytes + (u64_to_bytes(self.symbol_table_offset))
-        bytes = bytes + (u32_to_bytes(self.symbol_count))
-        bytes = bytes + (u32_to_bytes(self.exported_count))
-        bytes = bytes + (u64_to_bytes(self.entry_point))
-        bytes = bytes + (u32_to_bytes(self.stub_size))
-        bytes = bytes + (u32_to_bytes(self.smf_data_offset))
-        bytes = bytes + (u64_to_bytes(self.module_hash))
-        bytes = bytes + (u64_to_bytes(self.source_hash))
+        bytes = bytes + (self.offset_bytes())
         bytes.push(self.app_type)
         bytes.push(0)
+        bytes = bytes + (self.hint_bytes())
+        while bytes.len() < SMF_HEADER_SIZE:
+            bytes.push(0)
+        bytes
+
+    """Serialize in the legacy v1.0-v1.2 packed layout (exactly 128 bytes).
+
+    Read-only fixtures for the packed reader; no writer emits this layout.
+    Bytes 88..128 (the old reserved area, including the compile-options
+    slot at 88..104) are zero. TODO(smf_header_wire_layout_diverges_rust_vs_simple_2026-08-10):
+    delete with the packed reader after one release.
+    """
+    fn to_packed_bytes() -> [u8]:
+        var bytes: [u8] = self.leading_bytes()
+        bytes = bytes + (self.offset_bytes())
+        bytes.push(self.app_type)
+        bytes = bytes + (self.hint_bytes())
+        while bytes.len() < SMF_PACKED_HEADER_SIZE:
+            bytes.push(0)
+        bytes
+
+    # Bytes 0..20: layout-independent prefix.
+    fn leading_bytes() -> [u8]:
+        var bytes: [u8] = []
+        bytes = bytes + (self.magic)
+        bytes.push(self.version_major)
+        bytes.push(self.version_minor)
+        bytes.push(self.platform)
+        bytes.push(self.arch)
+        bytes = bytes + (u32_to_bytes(self.flags))
+        bytes.push(self.compression)
+        bytes.push(self.compression_level)
+        bytes = bytes + (self.reserved_compression)
+        bytes + (u32_to_bytes(self.section_count))
+
+    # section_table_offset .. source_hash (56 bytes, same order in both layouts).
+    fn offset_bytes() -> [u8]:
+        var bytes: [u8] = []
+        bytes = bytes + (u64_to_bytes(self.section_table_offset))
+        bytes = bytes + (u64_to_bytes(self.symbol_table_offset))
+        bytes = bytes + (u32_to_bytes(self.symbol_count))
+        bytes = bytes + (u32_to_bytes(self.exported_count))
+        bytes = bytes + (u64_to_bytes(self.entry_point))
+        bytes = bytes + (u32_to_bytes(self.stub_size))
+        bytes = bytes + (u32_to_bytes(self.smf_data_offset))
+        bytes = bytes + (u64_to_bytes(self.module_hash))
+        bytes + (u64_to_bytes(self.source_hash))
+
+    # window_width .. reserved_hints (11 bytes, follows app_type).
+    fn hint_bytes() -> [u8]:
+        var bytes: [u8] = []
         bytes = bytes + (u16_to_bytes(self.window_width))
         bytes = bytes + (u16_to_bytes(self.window_height))
         bytes.push(self.prefetch_hint)
         bytes.push(self.prefetch_file_count)
-        bytes = bytes + (self.reserved_hints)
-        while bytes.len() < 96:
-            bytes.push(0)
-        bytes
+        bytes + (self.reserved_hints)
 
 # ============================================================================
 # Helper Functions
@@ -497,72 +458,95 @@ fn u64_to_bytes(value: u64) -> [u8]:
 fn smf_header_has_magic_at(bytes: [u8], start: i64) -> bool:
     start >= 0 and bytes.len() >= start + 4 and bytes[start] == 83 and bytes[start + 1] == 77 and bytes[start + 2] == 70 and bytes[start + 3] == 0
 
-"""Size of the Rust seed's #[repr(C)] SmfHeader (src/compiler_rust/common/src/smf/header.rs).
+"""Size of the 96-byte repr(C) layout; alias of SMF_HEADER_SIZE kept for the
+readers converged in #6907/#6928 (src/compiler_rust/common/src/smf/header.rs)."""
+pub val SMF_SEED_HEADER_SIZE: i64 = SMF_HEADER_SIZE
 
-The seed writes the header as raw struct bytes: 4 alignment-padding bytes after
-section_count shift every later field by +4, the hint block is re-aligned, and
-the struct is 96 bytes with no compile-options reserved area. Readers accept
-both layouts; the packed 128-byte layout remains the only one Simple writes.
+"""True when the header at `start` uses the 96-byte repr(C) layout.
+
+A v1.3 (or later) stamp is authoritative: no packed-layout file ever carried
+version_minor >= 3. Rust-seed-written files are stamped 1.1 and are told apart
+from legacy packed files by shape: the seed's 20..24 is alignment padding
+(zero) with section_table_offset (>= header size) at 24, while the packed
+layout puts section_table_offset's low word at 20.
 """
-pub val SMF_SEED_HEADER_SIZE: i64 = 96
-
 fn smf_header_seed_shaped_at(bytes: [u8], start: i64) -> bool:
-    if not smf_header_has_magic_at(bytes, start) or bytes.len() < start + SMF_SEED_HEADER_SIZE:
+    if not smf_header_has_magic_at(bytes, start) or bytes.len() < start + SMF_HEADER_SIZE:
         return false
+    if (bytes[start + 4] as i64) == (SMF_VERSION_MAJOR as i64) and (bytes[start + 5] as i64) >= (SMF_VERSION_MINOR as i64):
+        return true
+    # TODO(smf_header_wire_layout_diverges_rust_vs_simple_2026-08-10): the rest
+    # of this function is the packed-vs-seed heuristic; delete it with the
+    # packed reader after one release (keep only the version stamp).
     # A header whose packed 128-byte extent ends exactly at EOF is the packed
     # trailer; a seed trailer sits at EOF-96. Without this, a packed header whose
     # section_table_offset is 0 (padding word 0) is mistaken for a seed header.
-    if start + SMF_HEADER_SIZE == bytes.len():
+    if start + SMF_PACKED_HEADER_SIZE == bytes.len():
         return false
     val section_count = bytes_to_u32_le_header(bytes, start + 16)
     val padding = bytes_to_u32_le_header(bytes, start + 20)
     val seed_section_table = bytes_to_u64_le_header(bytes, start + 24)
-    # Packed layout puts section_table_offset's low word at 20, which is
-    # non-zero for any file below 4 GiB that has sections. The seed's 20..24 is
-    # always zero padding with section_table_offset (>= header size) at 24.
     section_count > 0 and padding == 0 and seed_section_table != 0
 
-"""Field shift of the header at `start`: 4 for the Rust seed repr(C) layout, 0 for packed."""
+"""Field shift of the header at `start`: 4 for the 96-byte repr(C) layout, 0 for legacy packed."""
 pub fn smf_header_field_shift(bytes: [u8], start: i64) -> i64:
     if smf_header_seed_shaped_at(bytes, start):
         return 4
     0
 
-"""Header byte size of the header at `start`: 96 for the seed layout, 128 for packed."""
+"""Header byte size of the header at `start`: 96 for the repr(C) layout, 128 for legacy packed."""
 pub fn smf_header_size_at(bytes: [u8], start: i64) -> i64:
     if smf_header_seed_shaped_at(bytes, start):
-        return SMF_SEED_HEADER_SIZE
-    SMF_HEADER_SIZE
+        return SMF_HEADER_SIZE
+    SMF_PACKED_HEADER_SIZE
 
-"""Start of a seed-layout trailer header at EOF-96, or -1.
-
-Standalone readers that locate the packed EOF-128 trailer themselves call this
-as the fallback, then add `smf_header_field_shift(bytes, start)` to every field
-offset >= 20 and use `smf_header_size_at` for header-overlap checks.
-"""
+"""Start of a 96-byte-layout trailer header at EOF-96, or -1 (no precedence)."""
 pub fn smf_header_seed_trailer_offset(bytes: [u8]) -> i64:
-    if bytes.len() < SMF_SEED_HEADER_SIZE:
+    if bytes.len() < SMF_HEADER_SIZE:
         return -1
-    val start = bytes.len() - SMF_SEED_HEADER_SIZE
+    val start = bytes.len() - SMF_HEADER_SIZE
     if smf_header_seed_shaped_at(bytes, start):
         return start
     -1
 
-fn smf_header_offset(bytes: [u8]) -> Result<i64, text>:
-    if bytes.len() < SMF_SEED_HEADER_SIZE:
-        return Err("Not enough data for SMF header")
+"""Start of the trailer header, or -1. One precedence for every reader:
+
+1. a v1.3-stamped header at EOF-96 (unambiguous: the current writers' layout);
+2. legacy packed magic at EOF-128;
+3. a seed-shaped (Rust-written 1.1) header at EOF-96.
+
+Readers add `smf_header_field_shift(bytes, start)` to every field offset >= 20
+and use `smf_header_size_at` for header-overlap checks.
+"""
+pub fn smf_header_trailer_offset(bytes: [u8]) -> i64:
+    if bytes.len() < SMF_HEADER_SIZE:
+        return -1
+    val seed = bytes.len() - SMF_HEADER_SIZE
+    if smf_header_has_magic_at(bytes, seed) and (bytes[seed + 4] as i64) == (SMF_VERSION_MAJOR as i64) and (bytes[seed + 5] as i64) >= (SMF_VERSION_MINOR as i64):
+        return seed
+    if bytes.len() >= SMF_PACKED_HEADER_SIZE and smf_header_has_magic_at(bytes, bytes.len() - SMF_PACKED_HEADER_SIZE):
+        return bytes.len() - SMF_PACKED_HEADER_SIZE
+    smf_header_seed_trailer_offset(bytes)
+
+"""Start of the header: a leading header at 0, else the trailer; -1 when none."""
+pub fn smf_header_locate(bytes: [u8]) -> i64:
+    if bytes.len() < SMF_HEADER_SIZE:
+        return -1
     if smf_header_has_magic_at(bytes, 0):
-        if bytes.len() >= SMF_HEADER_SIZE or smf_header_seed_shaped_at(bytes, 0):
-            return Ok(0)
+        if bytes.len() >= SMF_PACKED_HEADER_SIZE or smf_header_seed_shaped_at(bytes, 0):
+            return 0
+        return -1
+    smf_header_trailer_offset(bytes)
+
+fn smf_header_offset(bytes: [u8]) -> Result<i64, text>:
+    if bytes.len() < SMF_HEADER_SIZE:
         return Err("Not enough data for SMF header")
-    if bytes.len() >= SMF_HEADER_SIZE:
-        val trailer_offset = bytes.len() - SMF_HEADER_SIZE
-        if smf_header_has_magic_at(bytes, trailer_offset):
-            return Ok(trailer_offset)
-    val seed_trailer = bytes.len() - SMF_SEED_HEADER_SIZE
-    if smf_header_seed_shaped_at(bytes, seed_trailer):
-        return Ok(seed_trailer)
-    Err("Invalid SMF magic: expected 'SMF\0'")
+    val start = smf_header_locate(bytes)
+    if start < 0:
+        if smf_header_has_magic_at(bytes, 0):
+            return Err("Not enough data for SMF header")
+        return Err("Invalid SMF magic: expected 'SMF\0'")
+    Ok(start)
 
 fn bytes_to_u16_le(bytes: [u8], start: i64) -> u16:
     ((bytes[start] as u16) | ((bytes[start + 1] as u16) << 8))
@@ -586,18 +570,9 @@ fn bytes_to_u64_le_header(bytes: [u8], start: i64) -> u64:
 fn smf_header_from_bytes(bytes: [u8]) -> Result<SmfHeader, text>:
     val offset = smf_header_offset(bytes)?
     val shift = smf_header_field_shift(bytes, offset)
-    var reserved: [u8] = []
-    var i = 0
-    while i < 40:
-        # The seed header has no compile-options/reserved area: read as zeros.
-        if shift == 0:
-            reserved.push(bytes[offset + 88 + i])
-        else:
-            reserved.push(0)
-        i = i + 1
     val o = offset + shift
-    # Hint block: packed app_type@76 ww@77 wh@79 ph@81 pfc@82 hints[5]@83;
-    # seed repr(C) app_type@80 ww@82 wh@84 ph@86 pfc@87 reserved[5]@88.
+    # Hint block: legacy packed app_type@76 ww@77 wh@79 ph@81 pfc@82 hints[5]@83;
+    # repr(C) app_type@80 ww@82 wh@84 ph@86 pfc@87 reserved[5]@88.
     val h_app = if shift == 0: offset + 76 else: offset + 80
     val h_ww = if shift == 0: offset + 77 else: offset + 82
     val h_wh = if shift == 0: offset + 79 else: offset + 84
@@ -629,10 +604,9 @@ fn smf_header_from_bytes(bytes: [u8]) -> Result<SmfHeader, text>:
         window_height: bytes_to_u16_le(bytes, h_wh),
         prefetch_hint: bytes[h_ph],
         prefetch_file_count: bytes[h_pfc],
-        reserved_hints: [bytes[h_res], bytes[h_res + 1], bytes[h_res + 2], bytes[h_res + 3], bytes[h_res + 4]],
-        reserved: reserved
+        reserved_hints: [bytes[h_res], bytes[h_res + 1], bytes[h_res + 2], bytes[h_res + 3], bytes[h_res + 4]]
     ))
 
-export SMF_MAGIC, SMF_HEADER_SIZE, SMF_SEED_HEADER_SIZE
-export SMF_FLAG_EXECUTABLE, SMF_FLAG_RELOADABLE, SMF_FLAG_DEBUG_INFO, SMF_FLAG_PIC, SMF_FLAG_HAS_STUB, SMF_FLAG_ASPECT_PACK
-export u16_to_bytes, u32_to_bytes, u64_to_bytes, smf_header_from_bytes, smf_header_field_shift, smf_header_size_at, smf_header_seed_trailer_offset
+export SMF_MAGIC, SMF_HEADER_SIZE, SMF_PACKED_HEADER_SIZE, SMF_SEED_HEADER_SIZE, SMF_VERSION_MAJOR, SMF_VERSION_MINOR
+export SMF_FLAG_EXECUTABLE, SMF_FLAG_RELOADABLE, SMF_FLAG_DEBUG_INFO, SMF_FLAG_PIC, SMF_FLAG_HAS_STUB, SMF_FLAG_ASPECT_PACK, SMF_FLAG_SOURCE_RELOCS
+export u16_to_bytes, u32_to_bytes, u64_to_bytes, smf_header_from_bytes, smf_header_field_shift, smf_header_size_at, smf_header_seed_trailer_offset, smf_header_trailer_offset, smf_header_locate

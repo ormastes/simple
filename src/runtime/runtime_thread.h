@@ -53,6 +53,8 @@ bool spl_thread_join(spl_thread_handle handle);
 
 int64_t rt_thread_spawn_isolated(int64_t fn_ptr, int64_t env_ptr);
 int64_t rt_thread_spawn_isolated_with_args(int64_t fn_ptr, int64_t data1, int64_t data2);
+int64_t rt_thread_spawn_isolated_kind(int64_t kind, int64_t closure, int64_t data);
+int64_t rt_thread_spawn_isolated_with_args_kind(int64_t kind, int64_t fn_ptr, int64_t data1, int64_t data2);
 int64_t rt_thread_join(int64_t handle);
 int64_t rt_thread_is_done(int64_t handle);
 int64_t rt_thread_id(int64_t handle);
