@@ -1,0 +1,76 @@
+"""Reverse references over authored claims: both directions, suppress excluded,
+non-node endpoints tolerated, registered-edge vs authored-claim, paging."""
+# @req REQ-TRC-015 REQ-TRC-021 REQ-TRC-023
+use std.spec.*
+use std.common.traceability.model.*
+use std.common.traceability.query_refs_v1.*
+
+fn refs_graph() -> TraceGraph:
+    val subject = SnapshotSubject(repository_id: "simple", snapshot_id: "snapshot:r", kind: "git_tree", revision_id: "commit:r", tree_id: "tree:r", object_format: "sha256")
+    val nodes = [TraceNode(id: "feature:f", kind: TraceNodeKind.Feature, title: "F"),
+        TraceNode(id: "req:R-1", kind: TraceNodeKind.Requirement, title: "R one"),
+        TraceNode(id: "req:R-2", kind: TraceNodeKind.Requirement, title: "R two")]
+    val claims = [
+        TraceClaim(id: "claim:c-1", from_id: "feature:f", relation: TraceRelation.Specifies, to_id: "req:R-1", origin_id: "intent:f", operation: TraceClaimOperation.Add, rule_id: "authoring-v1", scope_id: "feature:f"),
+        TraceClaim(id: "claim:c-2", from_id: "req:R-1", relation: TraceRelation.DecomposesTo, to_id: "req:R-2", origin_id: "intent:f", operation: TraceClaimOperation.Add, rule_id: "authoring-v1", scope_id: "feature:f"),
+        TraceClaim(id: "claim:c-3", from_id: "req:R-1", relation: TraceRelation.ImplementedBy, to_id: "source:not-a-node", origin_id: "intent:f", operation: TraceClaimOperation.Add, rule_id: "authoring-v1", scope_id: "feature:f"),
+        TraceClaim(id: "claim:c-4", from_id: "req:R-1", relation: TraceRelation.DescribedBy, to_id: "doc:x", origin_id: "intent:f", operation: TraceClaimOperation.Suppress, rule_id: "authoring-v1", scope_id: "feature:f"),
+        TraceClaim(id: "claim:c-5", from_id: "feature:f", relation: TraceRelation.Specifies, to_id: "req:R-2", origin_id: "intent:f", operation: TraceClaimOperation.Add, rule_id: "authoring-v1", scope_id: "feature:f")]
+    val edges = [TraceEdge(id: "edge:e-1", from_id: "feature:f", relation: TraceRelation.Specifies, to_id: "req:R-1")]
+    val locators = [TraceLocator(entity_id: "req:R-1", path: "doc/decl.sdn", locator_kind: "sdn-node", locator: "nodes[1]", blob_id: "blob:d"),
+        TraceLocator(entity_id: "feature:f", path: "doc/decl.sdn", locator_kind: "sdn-node", locator: "nodes[0]", blob_id: "blob:d"),
+        TraceLocator(entity_id: "source:not-a-node", path: "src/b.spl", locator_kind: "file", locator: "", blob_id: ""),
+        TraceLocator(entity_id: "source:not-a-node", path: "src/a.spl", locator_kind: "file", locator: "", blob_id: "")]
+    TraceGraph(subject: subject, input_manifest_id: "inputs:r", nodes: nodes, test_definitions: [], claims: claims,
+        edges: edges, edge_origins: [], origins: [], locators: locators, diagnostics: [], generation_id: "generation:r", complete: false)
+
+fn refs_query(kind: text, id: text) -> TraceReferenceQueryV1:
+    TraceReferenceQueryV1(snapshot_id: "snapshot:r", kind: kind, selected_id: id)
+
+describe "Reverse references":
+    it "lists both directions for a requirement, skips suppress, tolerates non-node endpoints":
+        val page = query_trace_references_v1(refs_graph(), refs_query("requirements", "req:R-1")).unwrap()
+        expect(page.selected.title).to_equal("R one")
+        expect(page.total_count).to_equal(3)
+        expect(page.references.len()).to_equal(3)
+        expect(page.references[0].claim_id).to_equal("claim:c-1")
+        expect(page.references[0].direction).to_equal("incoming")
+        expect(page.references[0].relation).to_equal("specifies")
+        expect(page.references[0].other_id).to_equal("feature:f")
+        expect(page.references[0].other_kind).to_equal("feature")
+        expect(page.references[0].other_title).to_equal("F")
+        expect(page.references[0].authority).to_equal("registered-edge")
+        expect(page.references[1].direction).to_equal("outgoing")
+        expect(page.references[1].other_id).to_equal("req:R-2")
+        expect(page.references[1].authority).to_equal("authored-claim")
+        expect(page.references[2].other_id).to_equal("source:not-a-node")
+        expect(page.references[2].other_kind).to_equal("")
+        expect(page.references[2].other_title).to_equal("")
+        expect(page.references[2].other_paths).to_equal(["src/a.spl", "src/b.spl"])
+        expect(page.references[0].other_paths).to_equal(["doc/decl.sdn"])
+        expect(page.references[1].other_paths.len()).to_equal(0)
+        expect(page.locators.len()).to_equal(1)
+        expect(page.locators[0].path).to_equal("doc/decl.sdn")
+        expect(page.complete).to_be(true)
+
+    it "pages by canonical claim id and continues with the returned cursor":
+        val first = query_trace_references_v1(refs_graph(), TraceReferenceQueryV1(snapshot_id: "snapshot:r", kind: "features", selected_id: "feature:f", limit: 1)).unwrap()
+        expect(first.total_count).to_equal(2)
+        expect(first.references.len()).to_equal(1)
+        expect(first.references[0].claim_id).to_equal("claim:c-1")
+        expect(first.complete).to_be(false)
+        expect(first.next_cursor.starts_with("tr1:")).to_be(true)
+        val second = query_trace_references_v1(refs_graph(), TraceReferenceQueryV1(snapshot_id: "snapshot:r", kind: "features", selected_id: "feature:f", limit: 1, cursor: first.next_cursor)).unwrap()
+        expect(second.references[0].claim_id).to_equal("claim:c-5")
+        expect(second.complete).to_be(true)
+
+    it "reports not-found for an absent or wrong-kind identity and invalid for a bad query":
+        val absent = query_trace_references_v1(refs_graph(), refs_query("requirements", "req:R-9"))
+        expect(absent.is_err()).to_be(true)
+        expect(absent.unwrap_err().starts_with("TRACE-QUERY-NOT-FOUND")).to_be(true)
+        val wrong = query_trace_references_v1(refs_graph(), refs_query("features", "req:R-1"))
+        expect(wrong.unwrap_err().starts_with("TRACE-QUERY-NOT-FOUND")).to_be(true)
+        val invalid = query_trace_references_v1(refs_graph(), TraceReferenceQueryV1(snapshot_id: "snapshot:r", kind: "requirements", selected_id: "req:R-1", limit: 0))
+        expect(invalid.unwrap_err().starts_with("TRACE-QUERY-INVALID")).to_be(true)
+        val stale = query_trace_references_v1(refs_graph(), TraceReferenceQueryV1(snapshot_id: "snapshot:other", kind: "requirements", selected_id: "req:R-1"))
+        expect(stale.unwrap_err().starts_with("TRACE-QUERY-INVALID")).to_be(true)
