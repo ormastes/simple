@@ -14,15 +14,21 @@
 #   string table: NUL-terminated canonical function names.
 # Site ids are implicit and dense (row index + 1), matching TraceNativeSiteV1.
 #
-# text_offset is relative to the start of the object's `.text`; text_base is 0
-# in an object. Relocating it (R_AARCH64_ABS64) and module registration through
-# an init-array entry are NOT part of v1-PR5: a consumer must supply the loaded
-# `.text` base itself. Decoding proves structure only, never residency or
-# patch permission (that is trace_native_map_validate_v1's job).
+# text_offset is relative to the start of THIS object's input `.text` section.
+# text_base (u64 at header +36) is 0 in an object and carries one
+# R_AARCH64_PREL64 relocation (`.rela.simple_xray_map`) against the `.text`
+# section symbol, addend 0. After linking the field holds the signed 64-bit
+# two's-complement distance `.text(input) - &text_base`, so a loaded image has
+#   runtime_text_base = address_of_field + signed(field)
+# (see xray_map_runtime_text_base_v1). Module registration through an
+# init-array entry is NOT part of v1. Decoding proves structure only, never
+# residency or patch permission (that is trace_native_map_validate_v1's job).
 use std.common.trace.observer_contract_v1.{TraceFailureV1}
 use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
 
 pub const XRAY_MAP_HEADER_BYTES_V1 = 48
+# Byte offset of the PREL64-relocated u64 text_base field in the header.
+pub const XRAY_MAP_TEXT_BASE_OFFSET_V1 = 36
 pub const XRAY_MAP_FUNCTION_ROW_BYTES_V1 = 16
 pub const XRAY_MAP_SITE_ROW_BYTES_V1 = 24
 pub const XRAY_MAP_FORMAT_V1 = 1
@@ -68,6 +74,11 @@ pub fn xray_map_aarch64_site_v1(text_offset: u64, local_fn_id: u32, kind: i64) -
     XrayMapSiteV1(text_offset: text_offset, local_fn_id: local_fn_id, kind: kind,
         len: XRAY_MAP_AARCH64_SLED_BYTES_V1, align: 4,
         off_word: XRAY_MAP_AARCH64_OFF_WORD_V1, on_word: XRAY_MAP_AARCH64_ON_WORD_V1)
+
+# Runtime address of the object's input `.text` from a linked map: the field
+# lives at map_address + 36 and holds a PC-relative signed 64-bit offset.
+pub fn xray_map_runtime_text_base_v1(map_address: i64, text_base_field: u64) -> i64:
+    map_address + XRAY_MAP_TEXT_BASE_OFFSET_V1 + (text_base_field as i64)
 
 fn xray_map_put_v1(bytes: [u8], value: u64, width: i64) -> [u8]:
     var output = bytes

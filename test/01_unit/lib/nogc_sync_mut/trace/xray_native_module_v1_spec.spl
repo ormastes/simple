@@ -1,0 +1,37 @@
+# @cover src/lib/nogc_sync_mut/trace/xray_native_module_v1.spl
+# @req REQ-XRAY-PR5B-MODULE-REGISTRATION
+"""
+# XRay PR5b — locating a loaded module's `.simple_xray_map`
+
+The parsers the control plane uses to find a module in this process: one
+`/proc/self/maps` row and the AArch64 BL that ties a sled to the resident
+trampoline. The full path (dlopen, section table, PREL64 text base, manifest
+admission, in-process patching) is exercised end to end by
+`scripts/check/check-xray-native-inprocess-e2e.shs`.
+"""
+use std.spec.*
+use std.nogc_sync_mut.trace.xray_native_module_v1.*
+
+describe "XRay native loaded-module discovery":
+    it "parses a /proc/self/maps row with its path and permissions":
+        val row = xray_proc_maps_line_v1("ffff8a3c0000-ffff8a3d1000 r-xp 00010000 103:02 4211 /tmp/x/libprog.so").unwrap()
+        expect(row.start).to_equal(0xFFFF8A3C0000)
+        expect(row.end).to_equal(0xFFFF8A3D1000)
+        expect(row.readable).to_equal(true)
+        expect(row.writable).to_equal(false)
+        expect(row.executable).to_equal(true)
+        expect(row.offset).to_equal(0x10000)
+        expect(row.path).to_equal("/tmp/x/libprog.so")
+        val anon = xray_proc_maps_line_v1("ffff8a3c0000-ffff8a3d1000 rw-p 00000000 00:00 0").unwrap()
+        expect(anon.path).to_equal("")
+        expect(anon.writable).to_equal(true)
+
+    it "rejects a malformed or inverted row":
+        expect(xray_proc_maps_line_v1("").is_none()).to_equal(true)
+        expect(xray_proc_maps_line_v1("zz-10 r-xp 0 0:0 0").is_none()).to_equal(true)
+        expect(xray_proc_maps_line_v1("2000-1000 r-xp 00000000 00:00 0").is_none()).to_equal(true)
+
+    it "decodes the sled BL to the trampoline, forward and backward":
+        expect(xray_a64_bl_target_v1(0x107C4, 0x9400001C)).to_equal(Some(0x10834))
+        expect(xray_a64_bl_target_v1(0x2000, 0x97FFFFFF)).to_equal(Some(0x1FFC))
+        expect(xray_a64_bl_target_v1(0x2000, 0xD503201F)).to_equal(None)

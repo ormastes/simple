@@ -1211,13 +1211,36 @@ pub fn rt_mprotect(args: &[Value]) -> Result<Value, CompileError> {
     if addr <= 0 || length <= 0 || (prot & write_exec) == write_exec {
         return Ok(Value::Int(-1));
     }
-    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64", target_os = "macos")))]
+    #[cfg(not(any(
+        target_arch = "x86",
+        target_arch = "x86_64",
+        target_os = "macos",
+        all(target_os = "linux", target_arch = "aarch64")
+    )))]
     if (prot & i64::from(libc::PROT_EXEC)) != 0 {
         // No verified cache-sync primitive is wired for this host in this lane.
         // Fail before granting execute permission on non-coherent targets.
         return Ok(Value::Int(-1));
     }
+    // aarch64 Linux: the cache maintenance below reads the range (DC CVAU needs
+    // read permission at EL0), so execute-only would SIGSEGV instead of
+    // failing closed. Refuse it.
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    if (prot & i64::from(libc::PROT_EXEC)) != 0 && (prot & i64::from(libc::PROT_READ)) == 0 {
+        return Ok(Value::Int(-1));
+    }
     let result = unsafe { libc::mprotect(addr as usize as *mut libc::c_void, length as usize, prot as i32) };
+    // aarch64 Linux: same contract as runtime_legacy_core.c rt_mprotect
+    // (__builtin___clear_cache after an execute grant). On a sync failure the
+    // range is made inaccessible and -1 returned: fail closed, never RX over
+    // stale instructions.
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    if result == 0 && (prot & i64::from(libc::PROT_EXEC)) != 0 {
+        if !aarch64_sync_instruction_cache(addr as usize, length as usize) {
+            unsafe { libc::mprotect(addr as usize as *mut libc::c_void, length as usize, libc::PROT_NONE) };
+            return Ok(Value::Int(-1));
+        }
+    }
     // Mirror runtime unix_common.h rt_mprotect: an execute grant must be
     // followed by an instruction-cache sync on non-coherent targets (Apple
     // Silicon). macOS exports `sys_icache_invalidate` from libSystem.
@@ -1229,6 +1252,33 @@ pub fn rt_mprotect(args: &[Value]) -> Result<Value, CompileError> {
         unsafe { sys_icache_invalidate(addr as usize as *mut libc::c_void, length as usize) };
     }
     Ok(Value::Int(i64::from(result)))
+}
+
+/// AArch64 user-mode I-cache maintenance for `[start, start + len)`:
+/// DC CVAU per D-line, DSB ISH, IC IVAU per I-line, DSB ISH, ISB. Line sizes
+/// come from CTR_EL0 (readable at EL0 on Linux). Returns false on overflow.
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+fn aarch64_sync_instruction_cache(start: usize, len: usize) -> bool {
+    let Some(end) = start.checked_add(len) else {
+        return false;
+    };
+    let ctr: u64;
+    unsafe { core::arch::asm!("mrs {0}, ctr_el0", out(reg) ctr, options(nomem, nostack)) };
+    let dline = 4usize << ((ctr >> 16) & 0xF);
+    let iline = 4usize << (ctr & 0xF);
+    let mut addr = start & !(dline - 1);
+    while addr < end {
+        unsafe { core::arch::asm!("dc cvau, {0}", in(reg) addr, options(nostack)) };
+        addr += dline;
+    }
+    unsafe { core::arch::asm!("dsb ish", options(nostack)) };
+    let mut addr = start & !(iline - 1);
+    while addr < end {
+        unsafe { core::arch::asm!("ic ivau, {0}", in(reg) addr, options(nostack)) };
+        addr += iline;
+    }
+    unsafe { core::arch::asm!("dsb ish", "isb", options(nostack)) };
+    true
 }
 
 /// Windows `rt_mprotect`: POSIX `PROT_*` bits (1 read, 2 write, 4 exec) mapped
@@ -1548,9 +1598,11 @@ mod ptr_read_u8_tests {
     /// Regression: on Apple Silicon the interpreter refused every execute
     /// grant (no cache-sync primitive was wired), so the loader's RW->RX
     /// transition failed and no SMF/JIT symbol could be mapped on macOS arm64.
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    /// Same regression on aarch64 Linux (XRay in-process patching): the seed
+    /// refused PROT_EXEC there too; it now syncs the I-cache like the C runtime.
+    #[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")))]
     #[test]
-    fn macos_arm64_mprotect_grants_rx_and_executes() {
+    fn arm64_mprotect_grants_rx_and_executes() {
         let rw = rt_mmap_raw(&[
             Value::Int(0),
             Value::Int(4096),

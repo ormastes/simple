@@ -53,6 +53,16 @@ pub trait XrayCodePatchPortV1:
     # Close admission on the resident observer channel (gate |= 2).
     me close_channel(arena: i64) -> i64
 
+# Publication of the loaned resident channel to the native trampoline handler
+# (src/runtime/xray/xray_native_runtime_aarch64.c simple_xray_native_install_v1).
+# Host binding for a loaded module: XrayNativeDlModuleV1 in
+# xray_native_module_v1.spl; specs use a fake.
+pub trait XrayNativeDispatchPortV1:
+    # Publish `arena` (initialized, open, generation `generation`) for the
+    # registered module `module_instance`. 1 on success; anything else means
+    # nothing was published and no sled may be patched.
+    me publish(module_instance: u64, arena: i64, generation: u64) -> i64
+
 pub struct XrayNativeSledV1:
     addr: i64
     off_word: i64
@@ -124,20 +134,25 @@ impl XrayNativeSledLeafV1:
         if stored != 0 or port.load_u32(sled.addr) != want: return XRAY_LLVM_STATUS_FAILED_V1
         XRAY_LLVM_STATUS_SUCCESS_V1
 
-# The leaf bound to its port, as the PR4 control plane sees it.
+# The leaf bound to its ports, as the PR4 control plane sees it.
 pub class XrayNativeBoundLeafV1:
     leaf: XrayNativeSledLeafV1
     port: XrayCodePatchPortV1
+    dispatch: XrayNativeDispatchPortV1
 
 impl XrayLlvmLeafV1 for XrayNativeBoundLeafV1:
+    fn sled_kind() -> TraceBackendV1:
+        TraceBackendV1.Simple
+
     fn max_function_id() -> i64:
         self.leaf.max_function_id()
 
-    # Records the loaned resident channel arena for close(). The native
-    # trampoline that writes events into it (`__simple_xray_trampoline_v1`) is
-    # not part of PR5, so nothing else is published here.
+    # Publishes the loaned resident channel arena to the native trampoline
+    # handler (design C.2 step 3: before any selected sled can reach it) and
+    # records it for close(). A refused publication patches nothing.
     me install(arena: i64, generation: u64, context: u64, module_instance: u64) -> i64:
         if arena <= 0 or arena % 8 != 0 or generation == 0: return 0
+        if self.dispatch.publish(module_instance, arena, generation) != 1: return 0
         self.leaf.arena = arena
         1
 

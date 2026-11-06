@@ -1,0 +1,89 @@
+# XRay PR5b link wiring: the resident native runtime joins ONLY --xray builds.
+#
+# Design: doc/04_architecture/compiler/xray/xray_compiler_structural_change_2026-11-06.md
+# (A.5, C.2-C.5). The pure-Simple native AArch64 backend emits sleds whose BL
+# targets `__simple_xray_trampoline_v1`; that symbol, the module registry and
+# the installer live in src/runtime/xray/xray_native_runtime_aarch64.c, which
+# is deliberately NOT in the core runtime archive. The driver calls this module
+# only inside `if ctx.options.xray_enabled:`, so an OFF build never reaches it.
+#
+# The LLVM --xray link (compiler-rt) is out of scope here: a non-native backend
+# keeps its object list unchanged.
+
+use std.nogc_sync_mut.io_runtime.{dir_create_all, is_file, process_run_timeout, getpid}
+use compiler.driver.driver_build.native_link_receipt_v1.{native_link_cc_driver_path_v1}
+
+export xray_link_runtime_needed_v1, xray_link_objects_v1, xray_native_runtime_object_v1
+export xray_link_with_runtime_v1
+
+val XRAY_NATIVE_RUNTIME_SOURCE_V1: text = "src/runtime/xray/xray_native_runtime_aarch64.c"
+val XRAY_NATIVE_RUNTIME_OBJECT_DIR_V1: text = "build/xray"
+
+fn _xray_target_is_aarch64_linux_v1(target: text) -> bool:
+    (target.starts_with("aarch64-") or target.starts_with("arm64-")) and target.contains("-linux")
+
+# Pure: does this link need the resident runtime object? Off and non-native
+# backends never do; a native target without a sled emitter fails closed (an
+# empty target is unresolved, never a host guess).
+pub fn xray_link_runtime_needed_v1(xray_enabled: bool, backend: text, target: text) -> Result<bool, text>:
+    if not xray_enabled:
+        return Ok(false)
+    if backend != "native":
+        return Ok(false)
+    if _xray_target_is_aarch64_linux_v1(target):
+        return Ok(true)
+    val shown = if target == "": "<unresolved>" else: target
+    Err("XRAY-E-UNSUPPORTED-TARGET: --xray native link runtime exists only for aarch64 Linux ELF, not {shown}")
+
+# Pure: the link inputs for this build. Off -> `objects` unchanged.
+pub fn xray_link_objects_v1(objects: [text], xray_enabled: bool, backend: text, target: text,
+        runtime_object: text) -> Result<[text], text>:
+    match xray_link_runtime_needed_v1(xray_enabled, backend, target):
+        case Ok(needed):
+            if not needed:
+                return Ok(objects)
+            var linked: [text] = []
+            for obj in objects:
+                linked.push(obj)
+            linked.push(runtime_object)
+            Ok(linked)
+        case Err(e): Err(e)
+
+fn _xray_cc_is_clang_v1(cc: text) -> bool:
+    val parts = cc.split("/")
+    val base = parts[parts.len() - 1]
+    base == "clang" or base.starts_with("clang-") or base == "clang.exe"
+
+# Effectful: compile the resident runtime TU for `target` with the same C
+# driver the native link resolves. Never GCC: a non-clang driver is refused.
+# The object path is private to this process, so concurrent --xray builds in
+# one checkout never link each other's half-written object.
+pub fn xray_native_runtime_object_v1(target: text) -> Result<text, text>:
+    if not is_file(XRAY_NATIVE_RUNTIME_SOURCE_V1):
+        return Err("XRAY-E-RUNTIME-SOURCE: {XRAY_NATIVE_RUNTIME_SOURCE_V1} not found (run from the repository root)")
+    val cc = native_link_cc_driver_path_v1()
+    if cc == "" or not _xray_cc_is_clang_v1(cc):
+        return Err("XRAY-E-RUNTIME-CC: --xray native runtime needs clang, found '{cc}'")
+    if not dir_create_all(XRAY_NATIVE_RUNTIME_OBJECT_DIR_V1):
+        return Err("XRAY-E-RUNTIME-CC: cannot create {XRAY_NATIVE_RUNTIME_OBJECT_DIR_V1}")
+    val object = "{XRAY_NATIVE_RUNTIME_OBJECT_DIR_V1}/xray_native_runtime_aarch64.{getpid()}.o"
+    val (_out, err, code) = process_run_timeout(cc, ["--target={target}", "-O2", "-fPIC",
+        "-mgeneral-regs-only", "-mno-outline-atomics", "-c", XRAY_NATIVE_RUNTIME_SOURCE_V1, "-o",
+        object], 120000)
+    if code != 0 or not is_file(object):
+        return Err("XRAY-E-RUNTIME-CC: {cc} failed ({code}): {err}")
+    Ok(object)
+
+# Effectful wrapper used by the driver right before a native link.
+pub fn xray_link_with_runtime_v1(objects: [text], xray_enabled: bool, backend: text,
+        target: text) -> Result<[text], text>:
+    match xray_link_runtime_needed_v1(xray_enabled, backend, target):
+        case Ok(needed):
+            if not needed:
+                return Ok(objects)
+        case Err(e):
+            return Err(e)
+    match xray_native_runtime_object_v1(target):
+        case Ok(runtime_object):
+            xray_link_objects_v1(objects, xray_enabled, backend, target, runtime_object)
+        case Err(e): Err(e)

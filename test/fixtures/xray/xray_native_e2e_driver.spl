@@ -13,9 +13,9 @@
 #    real leaf with a RECORDING port, writing every begin/store/end the Simple
 #    patcher decided, interleaved with call expectations, to ops.txt.
 # The C harness replays ops.txt verbatim on a real mmap'd RX page on this host.
-# Why replay and not in-process: the seed interpreter refuses PROT_EXEC on
-# aarch64 Linux, and no pure-Simple compiler is deployed to build this driver
-# natively, so the Simple patcher cannot own a real RX page in one process.
+# In-process patching of a linked module is covered separately by
+# test/fixtures/xray/xray_native_inprocess_host.spl (PR5b); this driver keeps
+# the replay lane.
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
@@ -62,6 +62,15 @@ impl XrayCodePatchPortV1 for RecordingPortV1:
         0
 
     me close_channel(arena: i64) -> i64:
+        1
+
+# The replay harness has its own counting trampoline, so publication is a no-op.
+class RecordingDispatchV1:
+    published: i64
+
+impl XrayNativeDispatchPortV1 for RecordingDispatchV1:
+    me publish(module_instance: u64, arena: i64, generation: u64) -> i64:
+        self.published = self.published + 1
         1
 
 fn e2e_lower(src: text) -> MirModule:
@@ -181,7 +190,7 @@ fn main():
         words[E2E_BASE + offset] = word_at(image, offset)
         offset = offset + 4
     var port = RecordingPortV1(words: words, ops: [])
-    var bound = XrayNativeBoundLeafV1(leaf: leaf, port: port)
+    var bound = XrayNativeBoundLeafV1(leaf: leaf, port: port, dispatch: RecordingDispatchV1(published: 0))
     var adapter = XrayLlvmAdapterV1.create_for_backend(1, TraceBackendV1.Simple)
     val entry_site = 1
     val exit_site = map.sites.len()

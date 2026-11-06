@@ -14,10 +14,14 @@ class FakeXrayLeafV1:
     fail_unpatch_id: i64
     ongoing_left: i64
     close_busy_left: i64
+    sled_kind: TraceBackendV1
     log: [text]
     patched: [i64]
 
 impl XrayLlvmLeafV1 for FakeXrayLeafV1:
+    fn sled_kind() -> TraceBackendV1:
+        self.sled_kind
+
     fn max_function_id() -> i64:
         self.max_id
 
@@ -53,7 +57,7 @@ impl XrayLlvmLeafV1 for FakeXrayLeafV1:
 fn fake_leaf_v1(max_id: i64) -> FakeXrayLeafV1:
     FakeXrayLeafV1(max_id: max_id, install_status: 1, fail_patch_id: 0,
         fail_patch_status: XRAY_LLVM_STATUS_FAILED_V1, fail_unpatch_id: 0,
-        ongoing_left: 0, close_busy_left: 0, log: [], patched: [])
+        ongoing_left: 0, close_busy_left: 0, sled_kind: TraceBackendV1.Llvm, log: [], patched: [])
 
 fn dynamic_config_v1() -> TraceConfigV1:
     TraceConfigV1(instrumentation: TraceInstrumentationV1.Dynamic,
@@ -111,6 +115,23 @@ describe "Linux LLVM XRay adapter V1 (stage 1 control plane)":
         var paired = dynamic_config_v1()
         paired.consistency = TraceConsistencyV1.PairedSpans
         expect(failure_code_v1(adapter.prepare(fake_leaf_v1(3), paired, selection_v1([1])))).to_equal(3)
+
+    it "refuses a leaf whose sled kind differs from the adapter backend (fail closed)":
+        # A Simple-sled adapter must never drive compiler-rt sleds, nor the
+        # reverse: the patcher and the control plane agree on the sled kind.
+        var simple_adapter = XrayLlvmAdapterV1.create_for_backend(1, TraceBackendV1.Simple)
+        var simple_config = dynamic_config_v1()
+        simple_config.backend = TraceBackendV1.Simple
+        val llvm_leaf = fake_leaf_v1(3)
+        expect(failure_code_v1(simple_adapter.prepare(llvm_leaf, simple_config, selection_v1([1])))).to_equal(1)
+        expect(llvm_leaf.log.len()).to_equal(0)
+        expect(simple_adapter.state_code()).to_equal(XRAY_LLVM_STATE_IDLE_V1)
+        var llvm_adapter = XrayLlvmAdapterV1.create(1)
+        var simple_leaf = fake_leaf_v1(3)
+        simple_leaf.sled_kind = TraceBackendV1.Simple
+        expect(failure_code_v1(llvm_adapter.prepare(simple_leaf, dynamic_config_v1(), selection_v1([1])))).to_equal(1)
+        simple_leaf.sled_kind = TraceBackendV1.Llvm
+        expect(failure_code_v1(llvm_adapter.prepare(simple_leaf, dynamic_config_v1(), selection_v1([1])))).to_equal(0)
 
     it "installs the handler before patching only the selected functions":
         val leaf = fake_leaf_v1(4)

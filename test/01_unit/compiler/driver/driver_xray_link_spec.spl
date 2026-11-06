@@ -1,0 +1,40 @@
+"""XRay PR5b link wiring: the resident aarch64 runtime object joins ONLY --xray native builds."""
+use std.spec.*
+use compiler.driver.driver_xray_link.{xray_link_runtime_needed_v1, xray_link_objects_v1}
+
+val RT_OBJ: text = "build/xray/xray_native_runtime_aarch64.o"
+val AARCH64_LINUX: text = "aarch64-unknown-linux-gnu"
+
+describe "XRay link inputs (driver_xray_link)":
+    it "returns the object list unchanged when --xray is off":
+        val objects = ["a.o", "b.o"]
+        val result = xray_link_objects_v1(objects, false, "native", AARCH64_LINUX, RT_OBJ)
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap()).to_equal(["a.o", "b.o"])
+
+    it "does not even classify the target when --xray is off":
+        val result = xray_link_objects_v1(["a.o"], false, "native", "x86_64-unknown-linux-gnu", RT_OBJ)
+        expect(result.unwrap()).to_equal(["a.o"])
+
+    it "appends the resident runtime object for native aarch64 Linux":
+        val result = xray_link_objects_v1(["a.o", "b.o"], true, "native", AARCH64_LINUX, RT_OBJ)
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap()).to_equal(["a.o", "b.o", RT_OBJ])
+
+    it "leaves LLVM --xray links unchanged (compiler-rt link is out of scope)":
+        val result = xray_link_objects_v1(["a.o"], true, "llvm", AARCH64_LINUX, RT_OBJ)
+        expect(result.unwrap()).to_equal(["a.o"])
+        expect(xray_link_runtime_needed_v1(true, "llvm", AARCH64_LINUX).unwrap()).to_equal(false)
+
+    it "fails closed for a native x86_64 --xray link":
+        val result = xray_link_objects_v1(["a.o"], true, "native", "x86_64-unknown-linux-gnu", RT_OBJ)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err().starts_with("XRAY-E-UNSUPPORTED-TARGET")).to_equal(true)
+
+    it "fails closed for an unresolved (empty) native target instead of guessing the host":
+        val result = xray_link_objects_v1(["a.o"], true, "native", "", RT_OBJ)
+        expect(result.is_err()).to_equal(true)
+
+    it "fails closed for a non-Linux aarch64 native target":
+        val result = xray_link_objects_v1(["a.o"], true, "native", "aarch64-apple-darwin", RT_OBJ)
+        expect(result.is_err()).to_equal(true)

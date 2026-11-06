@@ -78,6 +78,38 @@ fn contains_text(bytes: [i64], needle: text) -> bool:
         start = start + 1
     false
 
+fn le_u8(bytes: [u8], offset: i64, width: i64) -> i64:
+    var value = 0
+    for index in 0..width:
+        value = value | ((bytes[offset + index] as i64) << (index * 8))
+    value
+
+fn le_i64(bytes: [i64], offset: i64, width: i64) -> i64:
+    var value = 0
+    for index in 0..width:
+        value = value | (bytes[offset + index] << (index * 8))
+    value
+
+# Section header table index of `name`, or -1.
+fn section_index(object: [i64], name: text) -> i64:
+    val shoff = le_i64(object, 40, 8)
+    val shnum = le_i64(object, 60, 2)
+    val shstrndx = le_i64(object, 62, 2)
+    val strtab_off = le_i64(object, shoff + shstrndx * 64 + 24, 8)
+    val wanted = name.bytes()
+    for index in 0..shnum:
+        val name_at = strtab_off + le_i64(object, shoff + index * 64, 4)
+        var same = object[name_at + wanted.len()] == 0
+        if same:
+            for k in 0..wanted.len():
+                if object[name_at + k] != (wanted[k] as i64):
+                    same = false
+        if same: return index
+    -1
+
+fn shdr_field(object: [i64], index: i64, field_offset: i64, width: i64) -> i64:
+    le_i64(object, le_i64(object, 40, 8) + index * 64 + field_offset, width)
+
 describe "XRay PR5 native AArch64 sled emission":
     it "encodes the sled pseudo-instruction as the V1 contract template plus a CALL26 trampoline reloc":
         val inst = new_mach_inst(A64_OP_XRAY_SLED, [op_imm(3), op_imm(XRAY_MAP_KIND_ENTRY_V1)])
@@ -119,6 +151,8 @@ describe "XRay PR5 native AArch64 sled emission":
         val with_empty = emit_elf_aarch64_xray(encoded, module, empty_mir_module("xray_fixture"), [])
         expect(with_empty).to_equal(off)
         expect(contains_text(off, ".simple_xray_map")).to_equal(false)
+        expect(section_index(off, ".rela.simple_xray_map")).to_equal(-1)
+        expect(xray_object_section_bytes(off, ".rela.simple_xray_map").is_err()).to_equal(true)
 
     it "locates every emitted sled from its trampoline relocation":
         val planned = xray_insert_sleds_aarch64(fixture_module(), ["traced"])
@@ -151,3 +185,33 @@ describe "XRay PR5 native AArch64 sled emission":
         expect(map.sites[0].off_word).to_equal(0x14000008)
         expect(map.sites[0].on_word).to_equal(0xD503201F)
         expect(map.build_id.len()).to_equal(16)
+
+    it "relocates the map header text_base with one R_AARCH64_PREL64 against the .text section symbol":
+        val planned = xray_insert_sleds_aarch64(fixture_module(), ["traced"])
+        val encoded = encode_module_aarch64(planned.module)
+        val sites = xray_locate_sleds(encoded, planned.sites).unwrap()
+        val object = emit_elf_aarch64_xray(encoded, planned.module, empty_mir_module("xray_fixture"), sites)
+        val text_idx = section_index(object, ".text")
+        val map_idx = section_index(object, ".simple_xray_map")
+        val symtab_idx = section_index(object, ".symtab")
+        val rela_idx = section_index(object, ".rela.simple_xray_map")
+        expect(rela_idx > 0).to_equal(true)
+        # SHT_RELA, SHF_INFO_LINK, sh_link = .symtab, sh_info = map, entsize 24
+        expect(shdr_field(object, rela_idx, 4, 4)).to_equal(4)
+        expect(shdr_field(object, rela_idx, 8, 8)).to_equal(64)
+        expect(shdr_field(object, rela_idx, 40, 4)).to_equal(symtab_idx)
+        expect(shdr_field(object, rela_idx, 44, 4)).to_equal(map_idx)
+        expect(shdr_field(object, rela_idx, 56, 8)).to_equal(24)
+        val rela = xray_object_section_bytes(object, ".rela.simple_xray_map").unwrap()
+        expect(rela.len()).to_equal(24)
+        expect(le_u8(rela, 0, 8)).to_equal(36)
+        expect(le_u8(rela, 8, 4)).to_equal(260)
+        expect(le_u8(rela, 16, 8)).to_equal(0)
+        val sym = le_u8(rela, 12, 4)
+        val symtab = xray_object_section_bytes(object, ".symtab").unwrap()
+        # STB_LOCAL | STT_SECTION, st_shndx = .text
+        expect(le_u8(symtab, sym * 24 + 4, 1)).to_equal(3)
+        expect(le_u8(symtab, sym * 24 + 6, 2)).to_equal(text_idx)
+        # the field itself stays 0 in the object (RELA: the addend carries it)
+        val map_bytes = xray_object_map_bytes(object).unwrap()
+        expect(le_u8(map_bytes, 36, 8)).to_equal(0)
