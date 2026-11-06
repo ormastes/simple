@@ -1,0 +1,72 @@
+# Pure LSP callHierarchy wire helpers: decode the `params.item` of an
+# incomingCalls/outgoingCalls request and encode CallHierarchyItem /
+# CallHierarchyIncomingCall / CallHierarchyOutgoingCall results from the
+# `name|file|def_line|site_line|site_col|resolution` edges the query child
+# prints. The resolution label travels in `detail` (the protocol has no field
+# for provenance) so an editor shows `resolution: heuristic` next to a
+# textual match instead of presenting it as a proven call.
+
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_text_or, json_value_as_i64}
+use std.nogc_sync_mut.lsp.lsp_json.{LB, RB, SB_L, SB_R, js, jp, jo2}
+use std.nogc_sync_mut.lsp.lsp_call_edges.{LspCallEdgeV1}
+
+struct LspCallHierarchyRequestItemV1:
+    uri: text
+    line: i64      # 0-based selectionRange.start.line
+    character: i64 # 0-based selectionRange.start.character
+    name: text
+
+# `params.item.{uri,name,selectionRange.start}`; falls back to `range.start`.
+# Returns nil when the body carries no item uri.
+pub fn lsp_call_hierarchy_request_item_v1(body: text) -> LspCallHierarchyRequestItemV1?:
+    val parsed = json_parse_value_strict(body)
+    if parsed.is_err(): return nil
+    val item = json_value_field(json_value_field(parsed.unwrap(), "params"), "item")
+    val uri = json_value_text_or(json_value_field(item, "uri"), "")
+    if uri == "": return nil
+    var start = json_value_field(json_value_field(item, "selectionRange"), "start")
+    if json_value_as_i64(json_value_field(start, "line")) == nil:
+        start = json_value_field(json_value_field(item, "range"), "start")
+    val line = json_value_as_i64(json_value_field(start, "line")) ?? 0
+    val ch = json_value_as_i64(json_value_field(start, "character")) ?? 0
+    LspCallHierarchyRequestItemV1(uri: uri, line: line, character: ch,
+        name: json_value_text_or(json_value_field(item, "name"), ""))
+
+fn _range_json(line0: i64, col0: i64) -> text:
+    jo2(jp("start", jo2(jp("line", str(line0)), jp("character", str(col0)))),
+        jp("end", jo2(jp("line", str(line0)), jp("character", str(col0)))))
+
+# CallHierarchyItem with kind 12 (Function); `detail` carries the resolution.
+pub fn lsp_call_hierarchy_item_json_v1(name: text, uri: text, line0: i64, col0: i64, detail: text) -> text:
+    val range = _range_json(line0, col0)
+    var parts: [text] = []
+    parts.push(jp("name", js(name)))
+    parts.push(jp("kind", "12"))
+    if detail != "": parts.push(jp("detail", js(detail)))
+    parts.push(jp("uri", js(uri)))
+    parts.push(jp("range", range))
+    parts.push(jp("selectionRange", range))
+    LB() + parts.join(",") + RB()
+
+# `key` is "from" (incoming) or "to" (outgoing); `uris[i]` is the file URI for
+# `edges[i].file`. Edges whose declaration is unknown (def_line 0) still name
+# the site file so the caller can jump to the call site.
+pub fn lsp_call_hierarchy_calls_json_v1(edges: [LspCallEdgeV1], uris: [text], key: text) -> text:
+    var items: [text] = []
+    var i = 0
+    while i < edges.len() and i < uris.len():
+        val e = edges[i]
+        var def_line0 = e.def_line - 1
+        if def_line0 < 0: def_line0 = 0
+        val item = lsp_call_hierarchy_item_json_v1(e.name, uris[i], def_line0, 0, "resolution: " + e.resolution)
+        var site_line0 = e.site_line - 1
+        if site_line0 < 0: site_line0 = 0
+        var site_col0 = e.site_col - 1
+        if site_col0 < 0: site_col0 = 0
+        val from_ranges = SB_L() + _range_json(site_line0, site_col0) + SB_R()
+        items.push(jo2(jp(key, item), jp("fromRanges", from_ranges)))
+        i = i + 1
+    SB_L() + items.join(",") + SB_R()
+
+export LspCallHierarchyRequestItemV1, lsp_call_hierarchy_request_item_v1
+export lsp_call_hierarchy_item_json_v1, lsp_call_hierarchy_calls_json_v1

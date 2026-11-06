@@ -1,0 +1,125 @@
+# Call-edge query cores for `call-hierarchy` (LSP callHierarchy/*, MCP).
+#
+# Same contract as `query_engine`: each `engine_*_lines` RETURNS its lines so
+# the in-process MCP adapter and the one-shot child print byte-identical text.
+# Wire format per edge: `name|file|def_line|site_line|site_col|resolution`
+# (see std.nogc_sync_mut.lsp.lsp_call_edges). Resolution is honest: every
+# edge here is textual -- one candidate -> heuristic, several -> bounded_set,
+# none -> unknown; `exact` is reserved for the resolved index (todo L5).
+
+use app.cli.query_rich_common.{query_file_read_rich}
+use app.cli.query_engine.{engine_find_definition_lines}
+use std.nogc_sync_mut.lsp.lsp_location.{lsp_parse_query_location_v1}
+use std.nogc_sync_mut.lsp.lsp_call_edges.{LspCallEdgeV1, lsp_call_edges_call_names_v1,
+    lsp_call_edges_decl_lines_v1, lsp_call_edges_body_range_v1, lsp_call_edges_enclosing_decl_v1,
+    lsp_call_edges_decl_name_v1, lsp_call_edges_resolution_for_hits_v1, lsp_call_edge_format_v1}
+use std.nogc_sync_mut.lsp.lsp_bounded_search.{lsp_bounded_search_budget_default_v1,
+    lsp_bounded_search_word_v1, lsp_bounded_search_truncation_note_v1}
+
+val _MAX_EDGES: i64 = 100
+
+# Outgoing: calls made inside the body of `symbol` declared in `file`.
+fn engine_outgoing_calls_lines(file: text, symbol: text) -> ([text], i64):
+    val content = query_file_read_rich(file)
+    if content == "":
+        return (["Could not read file: {file}"], 1)
+    val lines = content.split("\n")
+    val decls = lsp_call_edges_decl_lines_v1(lines, symbol)
+    if decls.len() == 0:
+        return (["Could not find function body for: {symbol}"], 1)
+    val (body_start, body_end) = lsp_call_edges_body_range_v1(lines, decls[0])
+    var out: [text] = []
+    var seen: [text] = []
+    var li = body_start
+    while li <= body_end and out.len() < _MAX_EDGES:
+        for (name, col) in lsp_call_edges_call_names_v1(lines[li - 1]):
+            if seen.contains(name):
+                continue
+            seen.push(name)
+            out.push(lsp_call_edge_format_v1(_resolve_callee(file, lines, name, li, col)))
+        li = li + 1
+    if out.len() == 0:
+        return (["No outgoing calls found from: {symbol}"], 0)
+    (out, 0)
+
+fn _resolve_callee(file: text, lines: [text], name: text, site_line: i64, site_col: i64) -> LspCallEdgeV1:
+    val local = lsp_call_edges_decl_lines_v1(lines, name)
+    if local.len() > 0:
+        return LspCallEdgeV1(name: name, file: file, def_line: local[0], site_line: site_line,
+            site_col: site_col, resolution: lsp_call_edges_resolution_for_hits_v1(local.len()))
+    # Cross-file: the definition engine's candidates (imports first, then the
+    # bounded walk). One candidate is still textual -> heuristic.
+    val (def_lines, _code) = engine_find_definition_lines(file, name)
+    var target_file = ""
+    var target_line = 0
+    var hits = 0
+    for raw in def_lines:
+        match lsp_parse_query_location_v1(raw):
+            case Some(loc):
+                if hits == 0:
+                    target_file = loc.file
+                    target_line = loc.line
+                hits = hits + 1
+            case nil: pass
+    LspCallEdgeV1(name: name, file: target_file, def_line: target_line, site_line: site_line,
+        site_col: site_col, resolution: lsp_call_edges_resolution_for_hits_v1(hits))
+
+# Incoming: call sites of `symbol` across the bounded `src/` walk plus `file`
+# itself; the caller is the enclosing declaration at each site. Every hit is a
+# textual word match, so the label is heuristic everywhere.
+fn engine_incoming_calls_lines(file: text, symbol: text) -> ([text], i64):
+    var out: [text] = []
+    val own = query_file_read_rich(file)
+    if own != "":
+        for l in _collect_sites(file, own.split("\n"), symbol, _MAX_EDGES):
+            out.push(l)
+    val found = lsp_bounded_search_word_v1("src", ".spl", symbol, lsp_bounded_search_budget_default_v1())
+    var by_file: [text] = []
+    for hit in found.lines:
+        match lsp_parse_query_location_v1(hit):
+            case Some(loc):
+                if loc.file != file and not by_file.contains(loc.file):
+                    by_file.push(loc.file)
+            case nil: pass
+    for other in by_file:
+        if out.len() >= _MAX_EDGES: break
+        val content = query_file_read_rich(other)
+        if content == "": continue
+        for l in _collect_sites(other, content.split("\n"), symbol, _MAX_EDGES - out.len()):
+            out.push(l)
+    val note = lsp_bounded_search_truncation_note_v1(found)
+    if out.len() == 0:
+        var empty = ["No incoming calls found for: {symbol}"]
+        if note != "": empty.push(note)
+        return (empty, 0)
+    if note != "": out.push(note)
+    (out, 0)
+
+# One edge per call-site line (the first occurrence on the line).
+fn _collect_sites(site_file: text, lines: [text], symbol: text, budget: i64) -> [text]:
+    var out: [text] = []
+    var li = 1
+    while li <= lines.len() and out.len() < budget:
+        val line = lines[li - 1]
+        if lsp_call_edges_decl_name_v1(line) != symbol:
+            var site_col = 0
+            for (name, col) in lsp_call_edges_call_names_v1(line):
+                if name == symbol and site_col == 0:
+                    site_col = col
+            if site_col > 0:
+                val (caller, caller_line) = lsp_call_edges_enclosing_decl_v1(lines, li)
+                if caller != "":
+                    out.push(lsp_call_edge_format_v1(LspCallEdgeV1(name: caller, file: site_file,
+                        def_line: caller_line, site_line: li, site_col: site_col,
+                        resolution: lsp_call_edges_resolution_for_hits_v1(1))))
+        li = li + 1
+    out
+
+fn engine_call_hierarchy_lines(file: text, symbol: text, direction: text) -> ([text], i64):
+    if direction == "outgoing":
+        return engine_outgoing_calls_lines(file, symbol)
+    if direction == "incoming":
+        return engine_incoming_calls_lines(file, symbol)
+    (["Error: --direction must be 'incoming' or 'outgoing'"], 1)
+
+export engine_outgoing_calls_lines, engine_incoming_calls_lines, engine_call_hierarchy_lines

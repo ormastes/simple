@@ -1,0 +1,152 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+#
+# callHierarchy/incomingCalls and outgoingCalls used to return `[]`
+# unconditionally and prepareCallHierarchy faked its item from hover text.
+# Now: the item is the resolved declaration, edges come from the call-edge
+# engine and every edge carries a resolution label in `detail`.
+
+use std.spec
+use std.spec.step
+use std.nogc_sync_mut.io.file_ops.{file_write, secure_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.common.json.parser.{json_parse}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.types.{json_get_type, json_to_number, json_to_string}
+use std.common.json.array_ops.{json_array_get, json_array_length}
+use std.nogc_sync_mut.lsp.lsp_call_edges.{LspCallEdgeV1}
+use std.nogc_sync_mut.lsp.lsp_call_hierarchy.{lsp_call_hierarchy_request_item_v1,
+    lsp_call_hierarchy_item_json_v1, lsp_call_hierarchy_calls_json_v1}
+use std.nogc_sync_mut.lsp.lsp_handlers.{lsp_handle_prepare_call_hierarchy, lsp_handle_outgoing_calls,
+    lsp_handle_incoming_calls}
+use app.cli.query_call_edges.{engine_outgoing_calls_lines, engine_incoming_calls_lines}
+
+fn fixture_source_v1() -> text:
+    """fn lsp_ch_fixture_target_v1(value: i64) -> i64:
+    value
+
+fn lsp_ch_fixture_caller_v1() -> i64:
+    val x = lsp_ch_fixture_target_v1(7)  # lsp_ch_fixture_target_v1(0) in a comment
+    lsp_ch_fixture_other_v1(x)
+
+fn lsp_ch_fixture_other_v1(v: i64) -> i64:
+    v
+"""
+
+fn write_fixture_v1() -> (text, text):
+    val root = secure_temp_dir("/tmp", "simple-lsp-callhier-v1-").unwrap()
+    val path = root + "/fixture.spl"
+    expect(file_write(path, fixture_source_v1())).to_equal(true)
+    (root, path)
+
+# Editors send RFC file URIs: `file:///D:/tmp/x.spl`, never raw backslashes
+# (which a JSON decoder would read as escapes).
+fn fixture_uri_v1(path: text) -> text:
+    val p = path.replace("\\", "/")
+    if p.starts_with("/"): return "file://" + p
+    "file:///" + p
+
+fn item_request_body_v1(path: text, line: i64, column: i64) -> text:
+    # Built by concatenation: a `}}` inside a Simple string literal is an
+    # escape for one `}`, which would silently unbalance a nested JSON body.
+    val close = "}"
+    val pos = "{\"line\":" + str(line) + ",\"character\":" + str(column) + close
+    val range = "{\"start\":" + pos + ",\"end\":" + pos + close
+    val item = "{\"name\":\"x\",\"kind\":12,\"uri\":\"" + fixture_uri_v1(path) + "\",\"range\":" + range + ",\"selectionRange\":" + range + close
+    "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"callHierarchy/outgoingCalls\",\"params\":{\"item\":" + item + close + close
+
+fn prepare_request_body_v1(path: text, line: i64, column: i64) -> text:
+    val close = "}"
+    val pos = "{\"line\":" + str(line) + ",\"character\":" + str(column) + close
+    "{\"textDocument\":{\"uri\":\"" + fixture_uri_v1(path) + "\"},\"position\":" + pos + close
+
+fn result_of_v1(reply: text) -> any:
+    val response = json_parse(reply)
+    expect(response != nil).to_equal(true)
+    expect(json_object_get(response, "error")).to_be_nil()
+    json_object_get(response, "result")
+
+describe "lsp_call_hierarchy wire helpers":
+    it "decodes params.item from an incoming/outgoing request":
+        # @req REQ-SSPEC-UNIT
+        step("request item")
+        val item = lsp_call_hierarchy_request_item_v1(item_request_body_v1("/w/a.spl", 3, 4))!
+        expect(item.uri).to_equal("file:///w/a.spl")
+        expect(item.line).to_equal(3)
+        expect(item.character).to_equal(4)
+        expect(lsp_call_hierarchy_request_item_v1("{\"params\":[]}") == nil).to_equal(true)
+
+    it "encodes items and call lists with the resolution in detail":
+        # @req REQ-SSPEC-UNIT
+        step("encode")
+        val item = json_parse(lsp_call_hierarchy_item_json_v1("f", "file:///a.spl", 2, 3, "resolution: exact"))
+        expect(json_to_number(json_object_get(item, "kind"))).to_equal(12.0)
+        expect(json_to_string(json_object_get(item, "detail"))).to_equal("resolution: exact")
+        val edge = LspCallEdgeV1(name: "g", file: "/b.spl", def_line: 10, site_line: 12, site_col: 5, resolution: "heuristic")
+        val calls = json_parse(lsp_call_hierarchy_calls_json_v1([edge], ["file:///b.spl"], "from"))
+        expect(json_array_length(calls)).to_equal(1)
+        val first = json_array_get(calls, 0)
+        val from = json_object_get(first, "from")
+        expect(json_to_string(json_object_get(from, "name"))).to_equal("g")
+        expect(json_to_string(json_object_get(from, "detail"))).to_equal("resolution: heuristic")
+        expect(json_to_number(json_object_get(json_object_get(json_object_get(from, "range"), "start"), "line"))).to_equal(9.0)
+        val site = json_object_get(json_array_get(json_object_get(first, "fromRanges"), 0), "start")
+        expect(json_to_number(json_object_get(site, "line"))).to_equal(11.0)
+        expect(json_to_number(json_object_get(site, "character"))).to_equal(4.0)
+
+describe "call-edge engine over a real file":
+    it "lists outgoing calls of a function, labelled heuristic (textual)":
+        # @req REQ-SSPEC-UNIT
+        step("outgoing")
+        val (root, path) = write_fixture_v1()
+        val (lines, code) = engine_outgoing_calls_lines(path, "lsp_ch_fixture_caller_v1")
+        dir_remove_all(root)
+        expect(code).to_equal(0)
+        expect(lines.len()).to_equal(2)
+        expect(lines[0]).to_equal("lsp_ch_fixture_target_v1|" + path + "|1|5|13|heuristic")
+        expect(lines[1]).to_equal("lsp_ch_fixture_other_v1|" + path + "|8|6|5|heuristic")
+
+    it "lists incoming call sites, skipping the declaration and comments":
+        # @req REQ-SSPEC-UNIT
+        step("incoming")
+        val (root, path) = write_fixture_v1()
+        val (lines, code) = engine_incoming_calls_lines(path, "lsp_ch_fixture_target_v1")
+        dir_remove_all(root)
+        expect(code).to_equal(0)
+        # The bounded `src/` walk may append its truncation note; that note is
+        # not an edge and the wire parser skips it.
+        expect(lines.len() >= 1).to_equal(true)
+        expect(lines[0]).to_equal("lsp_ch_fixture_caller_v1|" + path + "|4|5|13|heuristic")
+        var extra_edges = 0
+        for l in lines:
+            if not l.starts_with("[") and l != lines[0]: extra_edges = extra_edges + 1
+        expect(extra_edges).to_equal(0)
+
+describe "LSP callHierarchy handlers":
+    it "prepares the declaration item and answers outgoing/incoming calls":
+        # @req REQ-SSPEC-UNIT
+        step("prepare -> outgoing -> incoming through the query child")
+        val (root, path) = write_fixture_v1()
+        val prepared = result_of_v1(lsp_handle_prepare_call_hierarchy("1", prepare_request_body_v1(path, 4, 14)))
+        expect(json_array_length(prepared)).to_equal(1)
+        val item = json_array_get(prepared, 0)
+        expect(json_to_string(json_object_get(item, "name"))).to_equal("lsp_ch_fixture_target_v1")
+        val sel = json_object_get(json_object_get(item, "selectionRange"), "start")
+        expect(json_to_number(json_object_get(sel, "line"))).to_equal(0.0)
+        expect(json_to_number(json_object_get(sel, "character"))).to_equal(3.0)
+
+        val outgoing = result_of_v1(lsp_handle_outgoing_calls("2", item_request_body_v1(path, 3, 3)))
+        expect(json_array_length(outgoing)).to_equal(2)
+        val to = json_object_get(json_array_get(outgoing, 0), "to")
+        expect(json_to_string(json_object_get(to, "name"))).to_equal("lsp_ch_fixture_target_v1")
+        expect(json_to_string(json_object_get(to, "detail"))).to_equal("resolution: heuristic")
+
+        val incoming = result_of_v1(lsp_handle_incoming_calls("3", item_request_body_v1(path, 0, 3)))
+        dir_remove_all(root)
+        expect(json_array_length(incoming)).to_equal(1)
+        val from = json_object_get(json_array_get(incoming, 0), "from")
+        expect(json_to_string(json_object_get(from, "name"))).to_equal("lsp_ch_fixture_caller_v1")
+        val site = json_object_get(json_array_get(json_object_get(json_array_get(incoming, 0), "fromRanges"), 0), "start")
+        expect(json_to_number(json_object_get(site, "line"))).to_equal(4.0)
+        expect(json_to_number(json_object_get(site, "character"))).to_equal(12.0)
