@@ -1,0 +1,76 @@
+# @req VIEW-08 VIEW-13 VIEW-14 VIEW-15 VIEW-16 PROTO-02 SEC-01 SEC-02
+# These are handler/contract tests, not a real MCP process lifecycle receipt.
+use std.spec.step
+use app.mcp.main_dispatch.{dispatch_tool}
+use app.mcp.main_lazy_source_tools.{source_relative_path_valid_v1, source_projection_payload_v1, source_bounded_response_v1}
+use std.common.source.contracts.{SourceSnapshotV1}
+use std.nogc_sync_mut.source.projection.{source_project_raw_v1}
+use std.common.json.value.{json_parse_value_strict, json_value_field, json_value_text_or, json_value_items}
+
+describe "source_open public routing and truthful capabilities":
+    it "does not silently substitute raw text for requested outline":
+        step("request the default outline through the dispatcher")
+        val response = dispatch_tool("1", "source_open", "{\"path\":\"missing.spl\"}")
+        expect(response).to_contain("outline_provider_unavailable")
+        expect(response).to_contain("unsupported")
+        expect(response).to_contain("\"isError\":true")
+
+    it "denies traversal absolute paths and control characters":
+        step("validate the workspace-relative path contract")
+        expect(source_relative_path_valid_v1("src/example.spl")).to_equal(true)
+        expect(source_relative_path_valid_v1("../secret")).to_equal(false)
+        expect(source_relative_path_valid_v1("src/../../secret")).to_equal(false)
+        expect(source_relative_path_valid_v1("/etc/passwd")).to_equal(false)
+        expect(source_relative_path_valid_v1("C:\\secret")).to_equal(false)
+        expect(source_relative_path_valid_v1("src/\u001Bname")).to_equal(false)
+
+    it "rejects duplicate JSON keys before file access":
+        step("reject ambiguous structured arguments")
+        val response = dispatch_tool("2", "source_open", "{\"mode\":\"raw\",\"path\":\"a\",\"path\":\"b\"}")
+        expect(response).to_contain("invalid_json_arguments")
+        expect(response).to_contain("\"isError\":true")
+
+    it "opens an actual empty file through the registered raw route":
+        step("read the empty file fixture through source_open")
+        val response = dispatch_tool("3", "source_open", "{\"mode\":\"raw\",\"path\":\"test/fixture/source_view/empty.txt\"}")
+        val wire = json_parse_value_strict(response).unwrap()
+        val result = json_value_field(wire, "result")
+        val content = json_value_items(json_value_field(result, "content"))
+        val payload_text = json_value_text_or(json_value_field(content[0], "text"), "")
+        val payload = json_parse_value_strict(payload_text).unwrap()
+        expect(json_value_text_or(json_value_field(payload, "status"), "bad")).to_equal("ok")
+        expect(json_value_text_or(json_value_field(payload, "completeness"), "bad")).to_equal("complete")
+        expect(json_value_text_or(json_value_field(payload, "source_text"), "bad")).to_equal("")
+
+    it "refuses stale or unbound continuation before returning source":
+        step("reject source paging without matching full-content identity")
+        val path = "test/fixture/source_view/unicode.txt"
+        val missing = dispatch_tool("4", "source_open", "{\"mode\":\"raw\",\"path\":\"" + path + "\",\"start_byte\":10}")
+        expect(missing).to_contain("continuation_requires_snapshot_id")
+        val stale = dispatch_tool("5", "source_open", "{\"mode\":\"raw\",\"path\":\"" + path + "\",\"start_byte\":10,\"snapshot_id\":\"wrong\"}")
+        expect(stale).to_contain("source_snapshot_changed")
+        expect(stale).to_contain("\"isError\":true")
+
+    it "round trips source controls as data and retains explicit limitations":
+        step("serialize raw source without interpreting decorations")
+        val source = "한😀 | ▌ /* */\t\u001B\u202E\r\n"
+        val page = source_project_raw_v1(SourceSnapshotV1("digest", "fixture", source), 0, 256).unwrap()
+        val encoded = source_projection_payload_v1("fixture", page)
+        val decoded = json_parse_value_strict(encoded).unwrap()
+        expect(json_value_text_or(json_value_field(decoded, "source_text"), "bad")).to_equal(source)
+        expect(encoded.contains("\u001B")).to_equal(false)
+        expect(encoded.contains("\u202E")).to_equal(false)
+        expect(encoded).to_contain("authenticated_agent_session_binding_unavailable")
+        expect(encoded).to_contain("disk_snapshot_not_editor_overlay")
+
+    it "measures serialized response and path budgets in UTF8 bytes":
+        step("reject multibyte data exceeding byte ceilings")
+        var pieces: [text] = []
+        for index in 0..6000: pieces.push("한")
+        val large = pieces.join("")
+        val response = source_bounded_response_v1("6", large)
+        expect(response).to_contain("serialized_response_exceeds_budget")
+        expect(response).to_contain("\"isError\":true")
+        var names: [text] = []
+        for index in 0..171: names.push("한")
+        expect(source_relative_path_valid_v1(names.join(""))).to_equal(false)

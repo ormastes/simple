@@ -1,0 +1,52 @@
+# MCP reader diagnostics preserve path coordinates and successful warnings.
+# @req DIAG-01 DIAG-02 DIAG-03 VIEW-15
+use std.spec.step
+use app.mcp.main_lazy_diag_tools.{parse_diag_text_line, format_new_diagnostics_block, diagnostic_check_status, diagnostic_check_details, diagnostic_check_summary}
+
+describe "MCP diagnostic truth":
+    it "retains Windows drive path diagnostics":
+        step("Parse a warning from a Windows drive path")
+        val observed = parse_diag_text_line("C:/work/test.spl:10:5: warning: unused")
+        expect(observed).to_contain("Warning (line 10, col 5): unused")
+
+    it "retains colon-containing POSIX path diagnostics":
+        step("Parse an error from a colon-containing path")
+        val observed = parse_diag_text_line("/work/a:b/test.spl:9:2: error: missing")
+        expect(observed).to_contain("Error (line 9, col 2): missing")
+
+    it "rejects invalid column coordinates":
+        step("Reject malformed location rather than invent column zero")
+        expect(parse_diag_text_line("test.spl:10:no: warning: unused")).to_equal("")
+
+    it "preserves warnings even when check succeeds":
+        step("Render completed analysis with a warning")
+        val output = "test.spl:10:2: warning: unused binding"
+        expect(diagnostic_check_status(output, 0)).to_equal("has diagnostics")
+        expect(diagnostic_check_details("test.spl", output, 0)).to_contain("Warning (line 10, col 2): unused binding")
+
+    it "keeps timeout distinct from a diagnostic":
+        step("Retain a timeout even when partial diagnostics were emitted")
+        val output = "test.spl:10:2: warning: unused binding"
+        expect(diagnostic_check_status(output, 124)).to_equal("analysis timed out")
+        expect(diagnostic_check_details("test.spl", output, 124)).to_contain("analysis timed out")
+
+    it "does not claim clean after a failed producer":
+        step("Classify failed analyzer without findings")
+        expect(diagnostic_check_status("process crashed", 139)).to_equal("analysis failed")
+        expect(diagnostic_check_status("", -1)).to_equal("analysis failed")
+        expect(diagnostic_check_status("invalid option", 2)).to_equal("analysis failed")
+
+    it "does not admit empty or unstructured successful output":
+        step("Keep absent diagnostic evidence explicit")
+        expect(diagnostic_check_status("", 0)).to_equal("analysis output unavailable")
+        expect(diagnostic_check_status("unexpected payload", 0)).to_equal("check completed; diagnostic completeness unverified")
+
+    it "does not confuse a severity prefix with a diagnostic":
+        step("Reject a word that only starts with a severity name")
+        expect(parse_diag_text_line("test.spl:10:2: informationXYZ")).to_equal("")
+
+    it "retains producer failure in a partial-diagnostics summary":
+        step("Summarize a crashed producer after it emitted a warning")
+        val output = "test.spl:10:2: warning: unused binding"
+        expect(diagnostic_check_summary("test.spl", output, 139, 1)).to_equal("analysis failed for test.spl; found 1 diagnostic(s)")
+        expect(diagnostic_check_summary("test.spl", output, 124, 1)).to_equal("analysis timed out for test.spl; found 1 diagnostic(s)")

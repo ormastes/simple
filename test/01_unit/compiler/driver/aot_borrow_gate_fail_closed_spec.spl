@@ -78,6 +78,29 @@ fn _expect_real_borrow_rejection(bootstrap: text, whole_program: text, stage4: t
             fail("use-after-move MIR must fail the real AOT borrow gate")
 
 describe "AOT mandatory borrow gate":
+    it "rejects the explicit bypass after strict HIR policy survives eviction":
+        for invalid_move in [false, true]:
+            var driver = _driver_with_borrow_gate_mir(invalid_move)
+            driver.ctx.nogc_ownership_required = true
+            driver.ctx.options.no_borrow_check = true
+            val result = _emit_borrow_gate_in_environment(driver, "1", "1", "0")
+            match result:
+                case CompileResult.BorrowError(errors):
+                    expect(errors.join("\n")).to_contain("NOGC-POLICY-002")
+                case _:
+                    fail("strict no-GC policy must reject an unchecked AOT request")
+            expect(driver.ctx.hir_modules.len()).to_equal(0)
+            expect(driver.ctx.nogc_ownership_required).to_equal(true)
+
+    it "checks clean and conflicting MIR when strict checking remains enabled":
+        var clean = _driver_with_borrow_gate_mir(false)
+        clean.ctx.nogc_ownership_required = true
+        expect(clean.borrow_check()).to_equal(true)
+        var conflicting = _driver_with_borrow_gate_mir(true)
+        conflicting.ctx.nogc_ownership_required = true
+        expect(conflicting.borrow_check()).to_equal(false)
+        expect(conflicting.ctx.has_errors()).to_equal(true)
+
     it "p2_p3_bug_reproduction":
         step("Reproduce the exact failure")
         # Previously the explicit whole-program bootstrap branch bypassed NLL.
