@@ -1,6 +1,6 @@
 # untyped_optional_arm_join_typed_as_i64_2026-11-06 (P1)
 
-Status: open (P1)
+Status: fix-implemented-verification-pending (native re-run pending a rebuilt stage3)
 
 ## Bug
 An UNTYPED value-position `if`/`elif`/`match` binding whose arms mix `nil`,
