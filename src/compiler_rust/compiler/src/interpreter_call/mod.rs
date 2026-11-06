@@ -809,6 +809,21 @@ pub(crate) fn evaluate_call(
             return Ok(result);
         }
 
+        // Priority 3.9: a LEXICAL local bound to a callable (`val resolve =
+        // loader.resolve_fn`, a fn-typed parameter) shadows every module-level
+        // and imported function of the same name. Priority 4's import binding
+        // used to win here, so `resolve(..)` ran `std.path.resolve` instead of
+        // the local closure. Only frame/block locals qualify, so module
+        // functions mirrored into the env keep the overload/import selection.
+        // Bug: seed_test_typed_fn_local_shadowed_by_global_2026-10-04.
+        if env.is_local(name) && matches!(env.get(name), Some(Value::Function { .. } | Value::Lambda { .. })) {
+            if let Some(val) = env.get(name).cloned() {
+                if let Some(result) = call_value_as_callable(val, args, env, functions, classes, enums, impl_methods)? {
+                    return Ok(result);
+                }
+            }
+        }
+
         // Priority 4: Check overloaded regular functions before the flat map fallback.
         let overloads = FUNCTION_OVERLOADS.with(|cell| cell.borrow().get(name).cloned());
         if let Some(overloads) = overloads {
@@ -2157,6 +2172,45 @@ mod aliased_extern_import_tests {
         );
         let src = "extern fn rt_text_to_bytes(s: text) -> [u8]\nmain = probe_alias_to_bytes(\"abc\").len()\n";
         let items = Parser::new(src).parse().expect("parse").items;
+        assert_eq!(evaluate_module(&items).expect("evaluate"), 3);
+    }
+}
+
+#[cfg(test)]
+mod local_callable_shadows_import_tests {
+    //! seed_test_typed_fn_local_shadowed_by_global_2026-10-04: a fn-valued
+    //! LOCAL must win over a same-named function the module imports.
+    use crate::interpreter::{evaluate_module, record_owner_binding, tag_function_module_owner};
+    use simple_parser::ast::Node;
+    use simple_parser::Parser;
+    use std::sync::Arc;
+
+    #[test]
+    fn fn_valued_local_wins_over_an_import_bound_function() {
+        let mut items = Vec::new();
+        // Two co-loaded `pick` definitions, so the call reaches the overload /
+        // import-binding selection (Priority 4).
+        for (src, owner) in [
+            ("fn pick(a: i64, b: i64) -> i64:\n    a * 100 + b\n", "/probe/shadow_lib_a.spl"),
+            ("fn pick(a: i64, b: i64) -> i64:\n    a * 1000 + b\n", "/probe/shadow_lib_b.spl"),
+        ] {
+            for node in Parser::new(src).parse().expect("parse").items {
+                items.push(match node {
+                    Node::Function(mut f) => {
+                        tag_function_module_owner(&mut f, owner);
+                        Node::Function(f)
+                    }
+                    other => other,
+                });
+            }
+        }
+        record_owner_binding(
+            Arc::from("<entry>"),
+            "pick".to_string(),
+            (Arc::from("/probe/shadow_lib_a.spl"), "pick".to_string()),
+        );
+        let entry = "fn second(a: i64, b: i64) -> i64:\n    b\nfn probe() -> i64:\n    val pick = second\n    pick(7, 3)\nmain = probe()\n";
+        items.extend(Parser::new(entry).parse().expect("parse entry").items);
         assert_eq!(evaluate_module(&items).expect("evaluate"), 3);
     }
 }
