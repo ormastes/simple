@@ -1,0 +1,57 @@
+# @cover src/compiler/80.driver/driver_hir_recovery.spl
+# REQ-HIR-UNIT-001: post-load unit completion never publishes a second terminal.
+# REQ-HIR-UNIT-002: normal shard completion retains strict claim ownership.
+use std.spec
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim,
+    hir_shard_recovery_terminal, hir_shard_recovery_loaded_complete_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{dir_create_all, file_exists, file_read, getpid}
+
+fn unit_terminal_queue(label: text) -> text:
+    val queue = "build/test_output/hir_unit_terminal/{getpid()}-{label}"
+    expect(dir_create_all(queue)).to_equal(true)
+    queue
+
+describe "HIR unit post-load terminal ownership":
+    it "loads an unclaimed dependency without inventing a receipt":
+        val queue = unit_terminal_queue("dependency")
+        val path = "/fixture/dependency.spl"
+        val base = "{queue}/{sha256_text(path)}"
+        expect(hir_shard_recovery_terminal(queue, "unit", path, "PASS", true)).to_equal(false)
+        expect(hir_shard_recovery_loaded_complete_v1(queue, "unit", path, true, true)).to_equal(true)
+        expect(file_exists("{base}.claim")).to_equal(false)
+        expect(file_exists("{base}.terminal")).to_equal(false)
+
+    it "does not terminalize a dependency claimed by another owner":
+        val queue = unit_terminal_queue("foreign")
+        val path = "/fixture/foreign.spl"
+        expect(hir_shard_recovery_claim(queue, "other", path, "key")).to_equal(1)
+        expect(hir_shard_recovery_loaded_complete_v1(queue, "unit", path, true, true)).to_equal(true)
+        expect(file_exists("{queue}/{sha256_text(path)}.terminal")).to_equal(false)
+
+    it "preserves the original unit transaction cache evidence":
+        val queue = unit_terminal_queue("reload")
+        val path = "/fixture/target.spl"
+        val terminal = "{queue}/{sha256_text(path)}.terminal"
+        expect(hir_shard_recovery_claim(queue, "unit", path, "key")).to_equal(1)
+        expect(hir_shard_recovery_terminal(queue, "unit", path, "PASS", false)).to_equal(true)
+        val original = file_read(terminal)
+        expect(original.ends_with("UNCACHED\n")).to_equal(true)
+        expect(hir_shard_recovery_loaded_complete_v1(queue, "unit", path, true, true)).to_equal(true)
+        expect(file_read(terminal)).to_equal(original)
+
+    it "publishes an owned normal shard completion idempotently":
+        val queue = unit_terminal_queue("normal")
+        val path = "/fixture/normal.spl"
+        expect(hir_shard_recovery_claim(queue, "normal", path, "key")).to_equal(1)
+        expect(hir_shard_recovery_loaded_complete_v1(queue, "normal", path, true, false)).to_equal(true)
+        expect(hir_shard_recovery_loaded_complete_v1(queue, "normal", path, true, false)).to_equal(true)
+        expect(file_read("{queue}/{sha256_text(path)}.terminal").ends_with("CACHE_STORED\n")).to_equal(true)
+
+    it "rejects foreign and conflicting normal shard completion":
+        val queue = unit_terminal_queue("conflict")
+        val path = "/fixture/conflict.spl"
+        expect(hir_shard_recovery_claim(queue, "normal", path, "key")).to_equal(1)
+        expect(hir_shard_recovery_loaded_complete_v1(queue, "other", path, true, false)).to_equal(false)
+        expect(hir_shard_recovery_loaded_complete_v1(queue, "normal", path, true, false)).to_equal(true)
+        expect(hir_shard_recovery_loaded_complete_v1(queue, "normal", path, false, false)).to_equal(false)

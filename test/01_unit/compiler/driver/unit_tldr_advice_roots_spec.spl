@@ -1,0 +1,52 @@
+use std.spec
+use compiler.driver.driver_unit_tldr_plan_v1.{unit_tldr_plan_v1, unit_tldr_needed_flags_v1, unit_tldr_surface_for_v1}
+use compiler.driver.driver_worker_surface_graph_v1.{worker_surface_import_ids_v1, worker_surface_ready_v1}
+use std.io_runtime.{file_read, getpid}
+
+# REQ-AP-01: advice dependencies become ready without widening unit ownership.
+# Fixture a is the target; z declares real advice, importing h -> q. u is unrelated.
+describe "unit TLDR advice dependency roots":
+    it "plans advice imports transitively while preserving picked targets":
+        step("Build the target and advice surfaces from their declared source dependencies")
+        val root = "test/fixtures/bootstrap/unit_advice_plan/"
+        val names = ["pkg.a", "pkg.z", "pkg.h", "pkg.q", "pkg.u"]
+        var paths: [text] = []
+        var modules: Dict<text, text> = {}
+        for name in names:
+            val path = root + name.replace(".", "/") + ".spl"
+            paths.push(path)
+            modules[name] = path
+        val picked = [paths[0]]
+        val advice_paths = [paths[1], paths[1]]
+        val cache = "build/test_tmp/unit-advice-plan-" + getpid().to_text()
+        val plan = unit_tldr_plan_v1("advice-readiness", cache, picked, modules, advice_paths)
+        val parsed = unit_tldr_needed_flags_v1(plan, paths, advice_paths)
+        var built: [bool] = []
+        var edges: [[i64]] = []
+        var index = 0
+        while index < paths.len():
+            built.push(parsed[index] or unit_tldr_surface_for_v1(plan, names[index]).?)
+            val imports = worker_surface_import_ids_v1(file_read(paths[index]))
+            var targets: [i64] = []
+            var target_index = 0
+            while target_index < names.len():
+                if imports.contains(names[target_index]): targets.push(target_index)
+                target_index = target_index + 1
+            edges.push(targets)
+            index = index + 1
+        val ready = worker_surface_ready_v1(built, edges)
+        expect(ready[0]).to_equal(true)
+        expect(ready[1]).to_equal(true)
+        expect(ready[2]).to_equal(true)
+        expect(ready[3]).to_equal(true)
+        expect(ready[4]).to_equal(false)
+        expect(plan.picked.len()).to_equal(1)
+        expect(plan.picked[0]).to_equal(paths[0])
+        expect(parsed[1]).to_equal(true)
+        expect(plan.parse_paths.len()).to_equal(2)
+        expect(plan.surfaces.len()).to_equal(2)
+        expect(unit_tldr_surface_for_v1(plan, "pkg.u").?).to_equal(false)
+        # REQ-AP-02: an existing four-argument caller keeps its original scope.
+        val ordinary = unit_tldr_plan_v1("ordinary", cache + "-ordinary", picked, modules)
+        expect(ordinary.parse_paths.len()).to_equal(1)
+        expect(ordinary.surfaces.len()).to_equal(0)

@@ -1,0 +1,152 @@
+# Unit TLDR planning omitted advice dependency roots
+
+Status: source repair draft; baseline reproduced four expected failures with five healthy controls, but fixed executable crashed before assertions. Six-attempt budget exhausted; full producer verification pending.
+
+The root qualification attempt retained under
+`/home/yoon/dev/simple-bootstrap-qualification-20261106/build/bootstrap-qualification/`
+failed with `FILE-WORKER-E-CLOSURE-INCOMPLETE: aop advice outside import closure`.
+The advice classifier had independent false positives, repaired in a separate
+owner. Even genuine advice has a second problem: the PM3 plan walked imports
+only from `mir_targets`, while parsing advice through a later extra-path flag.
+An advice module could therefore have an unbuilt dependency surface.
+
+## Requirement and repair
+
+REQ-AP-01: a picked target and a genuine advice root must have their dependency
+surfaces available to the existing readiness consumer. REQ-AP-02: advice roots
+do not become picked targets, and existing four-argument plan calls retain
+scope and behavior.
+
+`driver_unit_tldr_plan_v1.spl` owns the staging-independent planner; the old
+`driver_unit_tldr_imports_v1.spl` facade reexports its public API and retains
+CompilerDriver lowering. `unit_tldr_plan_v1` now accepts an optional advice-path list. It parses the
+union of picked and deduplicated advice roots and traverses their import
+frontier through the existing summary/fallback machinery. The streaming
+caller supplies `mir_advice_paths`. Returned `plan.picked`, per-unit claims,
+MIR output ownership, readiness refusal and AOP weaving gates are unchanged.
+This does not load every inventory module.
+
+## Focused regression and limitations
+
+The fixture at `test/fixtures/bootstrap/unit_advice_plan/` contains target a,
+genuine advice z, z importing h, h importing q, and unrelated u. The regression
+uses the production import-edge scanner and surface-readiness consumer against
+real planner parse/surface availability. It also checks picked ownership,
+duplicate advice roots, unrelated-module exclusion and the old API default.
+
+## Retained attempts and next proof
+
+Attempt 1: `/home/yoon/dev/simple-bootstrap-advice-plan-20261106/build/bootstrap-advice-plan/`.
+The staging-coupled fixture selected 1163 modules. Its native cache argument did
+not override the pre-existing default HIR cache. The owner cancelled only
+process group 1608437 with TERM; exec status 143. Captured PIDs 1608437,
+1608448, 1616314 and 1658187 were confirmed absent, and a scoped process audit
+found no survivors. `isolation-rejected.sdn` and `cleanup-audit.sdn` retain the
+classification. Shared cache data was not removed. Zero assertions ran.
+
+Attempt 2: `/home/yoon/dev/simple-bootstrap-advice-plan-fix-20261106/build/bootstrap-advice-plan/baseline2/`.
+The actual production planner was separated from staging with original
+four-argument behavior for the baseline. This reduced selected modules from
+1163 to 323. Explicit private frontend, HIR and native paths were supplied;
+the HIR log confirms the private path. Compilation reached native codegen,
+then failed with exit 1 and `all_stopped=true`:
+
+`E-BACKEND-CRANELIFT-CALL-ABI`: `parser_cli.parse_cli_option_value` passes f64 to
+`_AstExpr.nodes.expr_float_lit`, while its text parameter is represented as
+i64 in the native ABI. See `build.log` lines 4848–4854 and `result.sdn`. Zero assertions ran.
+This exposed a source caller defect: `expr_float_lit` expects the original text
+lexeme, while `parser_cli` passed `fval.to_float()`. PR #7269, merge
+`457e9c7b7f7a48bfa7280fa901ed6776d46da613`, corrected the caller to pass `fval`.
+This compilation failure was not an advice-regression result.
+
+Both attempts used immutable opus10 Phase 2 SHA256
+`43f9a6fc68ac232fcb3d28b0a28ada8fba5b04f5e16326e8f122d09208671c5f`, its matching
+runtime capsule, Cranelift and explicit whole-program fixture mode. Neither
+produced a valid executable assertion result. No further old-producer build
+was launched. Count these as attempts 1 and 2; changing worktrees does not
+reset the repair budget.
+
+The actual advice-union fix and streaming caller are restored in the fix
+worktree. The native fixture now has nine intended checks, including the
+existing four-argument default. Its after invocation explicitly supplies advice
+roots; do not call the before/after fixture invocations identical.
+
+A newer producer has separate Hello build/run evidence: SHA256
+`ffe83fd87c69573a1ca93e24134e46bbe754be7dff2de2f0eeefc4cf60c9037a` at
+`/home/yoon/dev/simple-advice-lexical-scan-20261106/build/mirgen2-probe/authority/simple`,
+with runtime sibling `authority/runtime`. Parent recorded normal per-file
+Cranelift Hello build/run exits 0, both quiescent. That is a candidate for the
+next isolated baseline and repair fixture, not full admission or an advice PASS.
+
+Attempt 3 was a guard preflight refusal: interval 250 ms exceeded the supported
+1–100 ms range. No compiler launched; `guard-preflight-rejected.log` is retained
+under the before worktree `build/bootstrap-advice-plan-new/before/`.
+Attempt 4 uses the established canonical timeout guard with default 100 ms,
+enforced 24 GiB ceiling, 1200 s timeout and 10 s grace. The isolated before
+worktree includes the merged parser caller fix on release base
+`f50693b310067c6e3a4db5b24dc633676d8a7f87`; frontend, HIR, native and temporary
+paths are private. It uses the newer producer above, Cranelift, explicit
+whole-program fixture mode and disabled TLDR staging switches; the fixture
+still invokes the actual production planner/readiness owners. It terminated with exit 1, `quiescent=1`, and peak RSS 10,549,924 KiB.
+Native codegen completed 284 modules plus 37 cache hits, with two failures:
+`extend_decls` imports non-public `enum_module_body.PENDING_CLOCKED_ARGS`;
+`parser_decls_use` imports non-public `fn_struct_decls.file_generic_constraint_modes`.
+Cranelift requires visibility-preserving accessor support for these statics.
+The exact logs, `build.sh`, `build.env` and native AOT diagnostics are retained
+at `/home/yoon/dev/simple-bootstrap-advice-plan-before-20261106/build/bootstrap-advice-plan-new/before/`.
+No assertion executable was produced. Attempt 5 (after) was not launched;
+the next scoped verification needs these caller/visibility boundaries repaired
+or a qualified producer that supports them. Four attempts have been consumed.
+
+Full woven advice execution and helper-object scheduling remain next-producer
+qualification gates. Summary readiness alone does not establish a complete
+linked program or admit Phase 3. Existing compiler/core/library/MCP runtime
+checks also remain pending the qualified full CLI.
+
+## Final bounded comparison
+
+Prerequisite owner repair `277911aa0e5` moves pending-array promotion and
+constraint registration into their state-owning modules. It is applied equally
+to the new baseline and fixed snapshots; the attempt-4 snapshot remains frozen.
+Before launch, both native fixtures were changed identically to aggregate all
+nine existing predicates into named results and a failure count. No predicate
+was weakened. The baseline still uses the old four-argument planner while the
+fixed invocation supplies advice roots. Baseline attempt 5 built with exit 0, quiescent 1 and peak RSS 14,477,972 KiB.
+Its executable completed all nine assertions: four expected failures
+(advice readiness, target/dependency readiness, parse-root count, surface count)
+and five healthy controls (unrelated readiness, picked ownership, advice parsed,
+unrelated surface exclusion and four-argument API). Run exit 4, quiescent 1.
+Evidence: `/home/yoon/dev/simple-bootstrap-advice-plan-before5-20261106/build/bootstrap-advice-plan-new/before5/`.
+
+Final attempt 6 built with exit 0, quiescent 1 and peak RSS 14,213,068 KiB.
+The fixed executable then exited 139 (SIGSEGV), quiescent 1, peak RSS 8,884 KiB,
+with an empty run log: zero printed assertions. Its SHA256 is
+`536c65d8738d0fd405f696e0d3f94213a108b43df239bfe3194a8452c6ee9227`.
+Evidence: `/home/yoon/dev/simple-bootstrap-advice-plan-fix-20261106/build/bootstrap-advice-plan-new/after6/`;
+`build.sh`, `build.env`, `build.log`, `run.sh`, `run.env`, `run.log` and `probe`
+are retained. The crash occurred on the fixed advice traversal path before
+assertion output; its exact cause is unresolved. No runtime PASS or complete
+repair is claimed. No seventh attempt or diagnostic rerun was performed.
+New owner API SSpec scenarios remain unexecuted. The source draft depends on
+PR #7292 and must not merge before this runtime failure and broad gates resolve.
+
+### Final attempt identity
+
+SHA256 values retained together in `after6/evidence-sha256.txt`:
+
+| Input/artifact | SHA256 |
+| --- | --- |
+| planner source | `67cb8b7932d5437548f07dd89d295596573c76560062e96746bd4335b59f9a68` |
+| streaming caller source | `07e6176b22b0ee156c51f897e814449b06092284e88627c0385ad98d2d7cf326` |
+| native fixture source | `9e1863f0da51fb0f462fb89f950824c04177f8edff43a6c9b443955aa81c4de0` |
+| build script | `53f00218dc686e2687fe48ca704878b0d56859b4c50c7bc41732b16624575489` |
+| run script | `e214b732878730acb5f70bfa097eac00edc88257bce50122043698a278d31fd6` |
+| run receipt | `1495d7b71d116c145c80ac096d84e0c70efe75411d1c64eeb261f780c95f1014` |
+
+A bounded read-only inspection found no core/backtrace file at the fixed
+worktree root or `after6/`; the host core handler is Apport. No new execution
+was enabled to collect a trace. The first review-branch push failed because
+its fallback compared an unrelated `1dc81da..ed5802` range. Fetching the current
+release objects enabled the hook's verified published-base selection; the
+unchanged push then passed the runtime API gate with 3,535 symbols checked and
+zero removals. No hook was skipped or policy exception applied.

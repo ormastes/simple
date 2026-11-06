@@ -1,0 +1,40 @@
+# Use the parser's streaming lexer: text in comments/literals is not advice.
+use compiler.frontend.core.lexer_struct.{make_core_lexer, core_lexer_next_token,
+    core_token_slot_state_take, core_token_slot_state_install,
+    core_token_env_save_enabled, core_token_env_save_set}
+
+fn advice_source_tokens_may_declare_v1(source: text) -> bool:
+    var lexer = make_core_lexer(source)
+    while true:
+        # Keep imported instance dispatch in the lexer declaration owner.
+        val (updated, kind) = core_lexer_next_token(lexer)
+        lexer = updated
+        if kind == 190: return false
+        # A failed lexical scan cannot prove the absence of a declaration.
+        if kind == 0 or kind == 191: return true
+        if kind != 6 or lexer.cur_text != "on": continue
+        # Match current_ident_is_on_advice_decl exactly: at least one inline
+        # space/tab, followed immediately by the pointcut name and opening brace.
+        var pos = lexer.pos
+        val end = lexer.source_chars.len()
+        while pos < end:
+            val ch = lexer.source_chars[pos]
+            if ch != " " and ch != "\t": break
+            pos = pos + 1
+        if pos == lexer.pos or pos + 2 >= end: continue
+        if lexer.source_chars[pos] == "p" and lexer.source_chars[pos + 1] == "c" and
+                lexer.source_chars[pos + 2] == "{":
+            return true
+    false
+
+pub fn advice_source_may_declare_v1(source: text) -> bool:
+    # This length-aware cheap filter avoids lexing files with no candidate.
+    # It is only a filter: the marker inside this string is not a declaration.
+    if not source.contains("pc{"): return false
+    val saved_slots = core_token_slot_state_take()
+    val saved_env = core_token_env_save_enabled()
+    core_token_env_save_set(false)
+    val found = advice_source_tokens_may_declare_v1(source)
+    core_token_slot_state_install(saved_slots)
+    core_token_env_save_set(saved_env)
+    found

@@ -1,0 +1,41 @@
+use std.spec
+use compiler.core.parser_decls.{parser_generic_constraints_reset}
+use compiler.frontend.core._ParserDecls.fn_struct_decls.{parser_register_file_generic_constraint, fn_struct_generic_constraint_state_take, fn_struct_generic_constraint_state_install}
+use compiler.frontend.core._ParserDecls.enum_module_body.{pending_decl_attr_state_take, pending_decl_attr_state_install, parser_pending_metadata_promote_transient_owner}
+
+describe "parser private state owner APIs":
+    it "registers both constraint fields and preserves file reset semantics":
+        step("Register through the owner and inspect a real state snapshot")
+        val saved = fn_struct_generic_constraint_state_take()
+        parser_register_file_generic_constraint("T", ["i64", "f64"], "candidate")
+        val registered = fn_struct_generic_constraint_state_take()
+        expect(registered.file_generic_constraints["T"]).to_equal(["i64", "f64"])
+        expect(registered.file_generic_constraint_modes["T"]).to_equal("candidate")
+        fn_struct_generic_constraint_state_install(registered)
+        parser_generic_constraints_reset()
+        val cleared = fn_struct_generic_constraint_state_take()
+        expect(cleared.file_generic_constraints.len()).to_equal(0)
+        expect(cleared.file_generic_constraint_modes.len()).to_equal(0)
+        fn_struct_generic_constraint_state_install(saved)
+
+    it "promotes all pending array owners without changing their values":
+        step("Install populated metadata, promote through its owner, and take it back")
+        val saved = pending_decl_attr_state_take()
+        var populated = pending_decl_attr_state_take()
+        populated.PENDING_SFFI_KEYS = ["abi"]
+        populated.PENDING_SFFI_VALUES = ["C"]
+        populated.PENDING_CLOCKED_ARGS = ["clock"]
+        populated.PENDING_VHDL_GENERIC_ARGS = [17]
+        populated.PENDING_UNSAFE_CAPS = ["memory"]
+        populated.PENDING_DECL_ATTRS = ["inline"]
+        pending_decl_attr_state_install(populated)
+        val promoted = parser_pending_metadata_promote_transient_owner()
+        val observed = pending_decl_attr_state_take()
+        expect(promoted).to_equal(true)
+        expect(observed.PENDING_SFFI_KEYS).to_equal(["abi"])
+        expect(observed.PENDING_SFFI_VALUES).to_equal(["C"])
+        expect(observed.PENDING_CLOCKED_ARGS).to_equal(["clock"])
+        expect(observed.PENDING_VHDL_GENERIC_ARGS).to_equal([17])
+        expect(observed.PENDING_UNSAFE_CAPS).to_equal(["memory"])
+        expect(observed.PENDING_DECL_ATTRS).to_equal(["inline"])
+        pending_decl_attr_state_install(saved)
