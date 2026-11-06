@@ -256,6 +256,84 @@ row bad.env SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE='Phase Policy' SIMPLE_B
     fail "malformed attribution was not refused by the row owner (exit $row_status)"
 ok
 
+# 2e. Phase C tool-build rows (compiler_cli_build / test_runner_build) through
+#     the REAL argv builder (phase-c-backend-commands.shs) and the REAL owner.
+#     Run 6 (2026-11-06, release/1.0.0 a89f4c436db): PR #7037 prefixed the
+#     argv with `env SIMPLE_FILE_WORKERS=0`, so the owner no longer saw
+#     argv[1]=native-build, unset the published cap+ceiling pair and killed
+#     the full-CLI build at the default budget (cap_source=default
+#     cap_bound=budget rss_limit_kib=13631488) under a 54525952 KiB phase plan.
+#     published pair -> row cap = phase cap, cap_source=phase-policy;
+#     nothing published -> default; user cap without the pair -> explicit-env.
+#     The SIMPLE_FILE_WORKERS=0 pin must still reach the compiler.
+printf '#!/bin/sh\nprintf "%%s\\n" "${SIMPLE_FILE_WORKERS:-unset}" >"%s"\nexit 7\n' \
+    "$scratch/fakec.fw" >"$scratch/fakec"
+chmod +x "$scratch/fakec"
+tool_row() { # RECEIPT [ENV=VALUE ...] -> tool_status (subshell keeps env local)
+    tool_receipt=$1; shift
+    rm -f "$scratch/fakec.fw"
+    tool_status=0
+    (
+        unset SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB SIMPLE_FILE_WORKERS native_internal_timeout
+        for tool_kv in "$@"; do export "$tool_kv"; done
+        . "$root/scripts/bootstrap/phase-c-backend-commands.shs"
+        run_matrix_task() {
+            shift 2 # task, --verification-expect-executable=
+            SIMPLE_PROCESS_TREE_RSS_RECEIPT="$scratch/$tool_receipt" \
+                sh "$root/scripts/bootstrap/run-process-group-timeout.shs" 30 2 "$@"
+        }
+        bootstrap_phase_c_run_tool_build llvm compiler_cli_build "$scratch/fakec" entry.spl \
+            "$scratch/out" "$scratch/cache" 2
+    ) >"$scratch/$tool_receipt.out" 2>&1 || tool_status=$?
+}
+tool_row tool-policy.env SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=5859375 \
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=worker-floor
+[ "$tool_status" -eq 7 ] && [ "$(field tool-policy.env cap_source)" = phase-policy ] &&
+    [ "$(field tool-policy.env cap_bound)" = worker-floor ] &&
+    [ "$(field tool-policy.env rss_limit_kib)" = 5859375 ] &&
+    [ "$(field tool-policy.env compiler_jobs)" = 2 ] &&
+    [ "$(cat "$scratch/fakec.fw" 2>/dev/null)" = 0 ] ||
+    fail "tool-build row did not inherit the published phase-policy cap (exit $tool_status): $(grep -E '^(cap_|rss_limit|compiler_jobs)' "$scratch/tool-policy.env" 2>/dev/null | tr '\n' ' ') $(tail -2 "$scratch/tool-policy.env.out")"
+ok
+tool_row tool-default.env
+[ "$tool_status" -eq 7 ] && [ "$(field tool-default.env cap_source)" = default ] &&
+    [ "$(field tool-default.env compiler_jobs)" = 2 ] ||
+    fail "tool-build row without a published cap is not default (exit $tool_status): $(tail -2 "$scratch/tool-default.env.out")"
+ok
+tool_row tool-explicit.env SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=5859375
+[ "$tool_status" -eq 7 ] && [ "$(field tool-explicit.env cap_source)" = explicit-env ] &&
+    [ "$(field tool-explicit.env cap_bound)" = explicit ] &&
+    [ "$(field tool-explicit.env rss_limit_kib)" = 5859375 ] ||
+    fail "tool-build row user cap not attributed explicit-env (exit $tool_status): $(tail -2 "$scratch/tool-explicit.env.out")"
+ok
+# Run-6 replay with the real elevated pair for 2 build threads. Admitted ->
+# the row runs at the plan cap under the elevated ceiling; refused -> only for
+# real headroom (125). Never the default budget.
+if replay_plan=$(sh "$policy" --whole-build-plan 2 "" 2>/dev/null); then
+    replay_cap=$(printf '%s\n' "$replay_plan" | sed -n 's/^cap_kib=//p')
+    replay_ceiling=$(printf '%s\n' "$replay_plan" | sed -n 's/^ceiling_kib=//p')
+    replay_bound=$(printf '%s\n' "$replay_plan" | sed -n 's/^bound=//p')
+    replay_ceiling_kv=SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy
+    [ "$replay_ceiling" -eq 0 ] || replay_ceiling_kv=SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=$replay_ceiling
+    tool_row tool-replay.env SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB="$replay_cap" "$replay_ceiling_kv" \
+        SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND="${replay_bound:-worker-floor}"
+    [ "$(field tool-replay.env cap_source)" != default ] ||
+        fail "run-6 replay: tool-build row fell back to the default budget: $(cat "$scratch/tool-replay.env")"
+    if [ "$tool_status" -eq 7 ]; then
+        [ "$(field tool-replay.env cap_source)" = phase-policy ] &&
+            [ "$(field tool-replay.env rss_limit_kib)" = "$replay_cap" ] ||
+            fail "run-6 replay: row cap is not the phase cap $replay_cap: $(grep -E '^(cap_|rss_limit)' "$scratch/tool-replay.env" | tr '\n' ' ')"
+        [ "$replay_ceiling" -eq 0 ] || [ "$(field tool-replay.env compiler_ceiling_admission)" = elevated ] ||
+            fail "run-6 replay: elevated ceiling $replay_ceiling not admitted: $(cat "$scratch/tool-replay.env")"
+    else
+        [ "$tool_status" -eq 125 ] && grep -Fq 'available_bound=' "$scratch/tool-replay.env.out" ||
+            fail "run-6 replay refused for a non-headroom reason (exit $tool_status): $(tail -3 "$scratch/tool-replay.env.out")"
+    fi
+else
+    : # host too small for one full-CLI worker: 2c already pins that refusal
+fi
+ok
+
 # 3. Transcribed runner: an over-ceiling explicit cap is refused BEFORE
 #    execution with the reason in <log>.refusal and on stderr (it was silent).
 . "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
