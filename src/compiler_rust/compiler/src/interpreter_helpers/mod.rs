@@ -41,6 +41,6 @@ pub(crate) use patterns::{
 };
 
 pub(crate) use utilities::{
-    comprehension_iterate, control_to_value, normalize_index, slice_collection, spawn_future_with_callable,
+    comprehension_for_each, control_to_value, normalize_index, slice_collection, spawn_future_with_callable,
     spawn_future_with_callable_and_env, spawn_future_with_expr, with_effect_context,
 };
