@@ -9,3 +9,7 @@ Missing capabilities are deliberate explicit unsupported states, not completed p
 The relative-path ancestor checks in `source_workspace_file_v1` are not atomic with the no-follow leaf open. A hostile directory replacement race needs a root-relative descriptor traversal facility in the canonical IO owner. Until then the handler reports `workspace_ancestor_checks_not_race_proof_sandbox`; do not classify SEC-01 as complete.
 
 Authored tests: `test/01_unit/lib/source/source_view_foundations_spec.spl`, `test/01_unit/app/mcp/source_open_contract_spec.spl`. Static diff review is not execution. Required resume commands use the admitted runtime: `test <spec> --mode=interpreter`, `spipe-docgen <spec> --output doc/06_spec --no-index`, and `sspec-maintain scan <spec>`. Preserve explicit blocked rows until receipts exist.
+
+## Native structure follow-up
+
+The next isolated lane now authors native Simple default outline/focused projection, canonical inline-body repair, shared app/source_view/service and thin MCP/Caret adapters. Default Simple outline is no longer deliberately unsupported in source; actual execution/deployment remains unverified. SDN/SHS prerequisites are retained in source_outline_sdn_shs_provider_gaps_2026-11-06.md. Real authenticated host evidence belongs to its separate lane. All previously listed full-plan/runtime/performance/security acceptance remains open unless supported by a specific new receipt.

@@ -1,7 +1,9 @@
 # Source-services layer knowledge
 
-Common source contracts carry values only. Projection and session policy live in the synchronous no-GC library; protocol adapters may consume them but must not duplicate range, replay or snapshot rules. Syntax providers own outline selection; raw text cannot claim semantic resolution. Runtime control remains owned by the shared debugger.
+Common contracts contain values only. Synchronous no-GC projection/session policy consumes provider values without compiler imports. The native compiler-tools adapter owns conversion from canonical token syntax. Public app/source_view/service composes filesystem, native provider and pure projections; MCP and HTTP add envelopes and enforce transport budgets.
 
-UTF-8 byte offsets and negotiated editor positions are distinct. Use explicit byte counts for all resource limits. No provider process belongs on raw reads. The current bounded disk reread is not a shared cache; retain that limitation until an admitted immutable store and authenticated session host exist.
+Keep source bytes, structured ranges and display labels separate. Stable node indices are snapshot-local. Syntax names are not semantic symbol identities. Cursor identity includes snapshot and query settings. Raw/startup paths must not instantiate the native parser or launch external processes.
 
-Runtime admission is open. See the feature guide and source-view admission record before advertising the new route.
+Auth host, not renderer, owns live principal/agent/workspace checks and atomic first-help commits. Rendering cannot authenticate user-supplied IDs. Current bounded reread/reparse is not shared-cache reuse; SDN/SHS exact spans remain blocked at their canonical owners.
+
+Runtime/manual admission remains open. Consult the architecture and guide before advertising capability or closing full-plan rows.
