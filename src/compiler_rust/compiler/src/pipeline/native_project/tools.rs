@@ -666,6 +666,7 @@ fn build_c_runtime_library(
         "runtime_value.h",
         "runtime.h",
         "runtime_core_intrinsics_impl.h",
+        "runtime_pow_private.h",
         "runtime_shared_parse_cell_private.h",
         "runtime_packed_span.h",
         "runtime_fork.h",
