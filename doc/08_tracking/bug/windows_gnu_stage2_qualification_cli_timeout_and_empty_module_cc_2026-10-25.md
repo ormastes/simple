@@ -1,6 +1,6 @@
 # Windows GNU Stage 2 qualification: full-CLI build timeout and empty-module C compiler ICE
 
-Status: OPEN. Found 2026-10-25 on DESKTOP-5A4V03J (Xeon W-2135, 32 GB), MinGW
+Status: §1 FIXED 2026-11-06 (see "§1 fix" below); §2 OPEN. Found 2026-10-25 on DESKTOP-5A4V03J (Xeon W-2135, 32 GB), MinGW
 clang default lane (llvm-mingw 20260922, Rust host `x86_64-pc-windows-gnullvm`,
 `--backend=cranelift`), `origin/release/1.0.0` @ `a853ac75861` plus
 `a3f9a50d853` (sffi time fix).
@@ -51,3 +51,37 @@ Stage 2 is usable as an explicitly-admitted compiler for focused native builds
 (`native-build --runtime-bundle core-c-bootstrap --entry-closure`), which is how
 the SIMD DB/web probes are built. It is not a qualified phase: no full CLI, no
 test runner, and Stage 3/4 remain blocked on this host.
+
+## §1 fix 2026-11-06: direct COFF empty object, writer preferred over C discovery
+
+Root cause: `driver_empty_object_supported` (`src/compiler/80.driver/driver_empty_object.spl`)
+admitted only ELF targets, and `_compile_selected_module`
+(`src/compiler/80.driver/driver_aot_native_output.spl`, empty-MIR branch) only
+reached the direct writer after `find_c_compiler()` returned "" — and then keyed
+it on `SIMPLE_NATIVE_BUILD_TARGET` alone, which is unset for host builds. On the
+Windows GNU lane both conditions fail, so every empty module ICE'd.
+
+Fix:
+- `driver_empty_object_bytes(target, symbol)` now also emits a minimal COFF
+  relocatable for `x86_64-*-windows*` (machine 0x8664) and `aarch64-*-windows*`
+  (0xAA64): one 4-byte `.data` section and one `IMAGE_SYM_CLASS_EXTERNAL`
+  symbol `simple_empty_module_<name>` (long name via string table) — the same
+  shape `int <symbol> = 0;` compiles to. 110 bytes for a 23-char symbol.
+- `driver_empty_object_target(explicit, host_os, host_arch)` falls back to the
+  compiler host when no build target is set.
+- The empty-MIR branch now tries the direct writer FIRST (ELF and COFF) and
+  only falls back to the C stub + `find_c_compiler()` for unsupported targets
+  (Mach-O).
+
+Evidence (Windows host, llvm-mingw 20260922):
+- `llvm-objdump -t -h` on the produced x86_64 object: `file format coff-x86-64`,
+  `.data 00000004 DATA`, `[ 0](sec 1)(fl 0x00)(ty 0)(scl 2) (nx 0) 0x00000000
+  simple_empty_module_a_b`; aarch64 object reads as `coff-arm64` with the same
+  symbol.
+- `clang -fuse-ld=lld main.o empty.o` with `main` reading
+  `extern int simple_empty_module_a_b` links (rc=0) and runs (rc=0); the same
+  link without the empty object fails with `ld.lld: error: undefined symbol`.
+- `test/01_unit/compiler/80.driver/driver_empty_object_spec.spl`: 7/7 pass
+  (3 new COFF/target `it`s), seed
+  `simple-simdseed-20261106/.../bootstrap/simple.exe`.
+- Not yet re-run: the Stage 2 `test_runner_build` matrix itself.

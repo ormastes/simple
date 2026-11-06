@@ -81,3 +81,6 @@ is lost and subsequent `tree.create_layer` returns colliding layer ids
 
 ## 2026-11-06 round 8: FIXED (interpreter lane)
 `iter_to_vec` / `get_iterator_values` now iterate a `List` class value over its `items` payload. Spec: test/01_unit/compiler/interpreter/for_over_list_class_spec.spl (RED on seed, GREEN after). The seed JIT lane (silent empty iteration) is NOT covered by this change.
+
+## 2026-11-06 round 9: FIXED (seed JIT/native lane)
+MIR `for` lowering (`mir/lower/lowering_stmt.rs`) fed the `List<T>` object handle to `rt_for_iterable` as if it were an array, so the loop ran zero times silently. It now iterates the `items` payload. Spec: test/01_unit/compiler/interpreter/for_over_list_class_jit_spec.spl (probe run under interpreter and jit; RED on seed JIT: FOR_LIST_SUM=0, GREEN: 7).

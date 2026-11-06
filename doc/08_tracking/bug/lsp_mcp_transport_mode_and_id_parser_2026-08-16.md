@@ -32,3 +32,6 @@ and no stub fallback. The one permitted direct smoke exited cleanly but emitted
 only one `Content-Length` response: numeric ID `17` was preserved and the
 second response for string ID `request-alpha` was absent. No runtime PASS or
 deployment claim is made; the lane stopped without a retry as required.
+
+## Round 8 part 2 note 2026-11-06 (fix-implemented-verification-pending)
+Seed run of `test/02_integration/app/simple_lsp_mcp_stdio_spec.spl` fails 7/7 because it needs a built server via `SIMPLE_LSP_MCP_TEST_BINARY` (not available on this host). Verify with an admitted pure-Simple build: `SIMPLE_LSP_MCP_TEST_BINARY=<built simple_lsp_mcp_server> bin/simple test test/02_integration/app/simple_lsp_mcp_stdio_spec.spl`.
