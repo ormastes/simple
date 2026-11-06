@@ -13,9 +13,15 @@ use simple_parser::ast::{Expr, FStringPart, Pattern, Type};
 use super::{Classes, Enums, ImplMethods, BLOCK_SCOPED_ENUMS, MODULE_GLOBALS};
 
 fn pattern_enum_name_matches(pattern_name: &str, value_name: &str) -> bool {
-    if pattern_name == "_" || pattern_name == value_name || matches!(pattern_name, "Option" | "Result") {
-        return true;
+    if pattern_name == "_" { return true; }
+    if let Some(def) = crate::interpreter::owner_module_enum(pattern_name)
+        .or_else(|| crate::interpreter::unique_enum_definition(pattern_name)) {
+        if def.name == value_name { return true; }
+        // An explicit nominal source declaration must not fall through to
+        // builtin shorthand rules merely because it is named Result/Option.
+        if def.name != pattern_name { return false; }
     }
+    if pattern_name == value_name || matches!(pattern_name, "Option" | "Result") { return true; }
 
     MODULE_GLOBALS.with(|cell| {
         matches!(

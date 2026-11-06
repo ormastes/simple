@@ -632,7 +632,8 @@ pub(super) fn eval_call_expr(
                         })));
                     }
                     // Special handling for built-in Option and Result enum variants
-                    if module_name == "Option" && (field == "Some" || field == "None") {
+                    if module_name == "Option" && (field == "Some" || field == "None") && crate::interpreter::owner_module_enum(module_name)
+                        .is_none_or(|def| def.name == "Option") {
                         // Return a constructor function for the variant
                         // When called, it will create the enum value
                         // For None, just return the enum value directly since it has no payload
@@ -648,7 +649,8 @@ pub(super) fn eval_call_expr(
                         // But to match Rust/Scala style, let's return a special marker.
                         // Actually, this won't work well. Let me reconsider.
                     }
-                    if module_name == "Result" && (field == "Ok" || field == "Err") {
+                    if module_name == "Result" && (field == "Ok" || field == "Err")
+                        && crate::interpreter::owner_module_enum(module_name).is_none_or(|def| def.name == "Result") {
                         // Similar issue - Result variants need arguments, so field access doesn't work
                     }
 
@@ -886,7 +888,7 @@ pub(super) fn eval_call_expr(
                         //   2. `BLOCK_SCOPED_ENUMS` (block-local definitions)
                         //   3. `GLOBAL_ENUMS` (cross-module enum registry)
                         {
-                            let enum_def = crate::interpreter::owner_module_enum(class_name).or_else(|| enums.get(class_name).cloned())
+                            let enum_def = crate::interpreter::owner_module_enum(class_name).or_else(|| enums.get(class_name).cloned()).or_else(|| crate::interpreter::unique_enum_definition(class_name))
                                 .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(class_name).cloned()))
                                 .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(class_name).cloned()));
                             if let Some(enum_def) = enum_def {
@@ -894,13 +896,13 @@ pub(super) fn eval_call_expr(
                                     let has_fields = variant.fields.as_ref().is_some_and(|f| !f.is_empty());
                                     if !has_fields {
                                         return Ok(Some(Value::Enum {
-                                            enum_name: class_name.clone(),
+                                            enum_name: enum_def.name.clone(),
                                             variant: field.clone(),
                                             payload: None,
                                         }));
                                     } else {
                                         return Ok(Some(Value::EnumVariantConstructor {
-                                            enum_name: class_name.clone(),
+                                            enum_name: enum_def.name.clone(),
                                             variant_name: field.clone(),
                                         }));
                                     }
@@ -965,13 +967,27 @@ pub(super) fn eval_call_expr(
                 // Enum type field access - construct enum variants
                 // EnumName.VariantName syntax
                 Value::EnumType { ref enum_name } => {
+                    if matches!(enum_name.as_str(), "Option" | "Result") {
+                        let payload_variant = matches!((enum_name.as_str(), field.as_str()),
+                            ("Option", "Some") | ("Result", "Ok" | "Err"));
+                        let unit_variant = enum_name == "Option" && field == "None";
+                        if payload_variant {
+                            return Ok(Some(Value::EnumVariantConstructor {
+                                enum_name: enum_name.clone(), variant_name: field.clone(),
+                            }));
+                        }
+                        if unit_variant {
+                            return Ok(Some(Value::Enum { enum_name: enum_name.clone(),
+                                variant: field.clone(), payload: None }));
+                        }
+                    }
                     // Check module-level enums, block-scoped enums, and the cross-module
                     // GLOBAL_ENUMS registry. Without the GLOBAL_ENUMS fallback an
                     // enum whose name is never imported into the local scope (e.g.
                     // `Architecture` from `os.kernel.arch.arch_context` when a spec
                     // only imports the `std.spec.arch.Architecture` struct) fails
                     // to resolve its variants.
-                    let enum_def = crate::interpreter::owner_module_enum(enum_name).or_else(|| enums.get(enum_name).cloned())
+                    let enum_def = enums.get(enum_name).filter(|def| def.name == *enum_name).cloned().or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(enum_name).filter(|def| def.name == *enum_name).cloned())).or_else(|| crate::interpreter::owner_module_enum(enum_name)).or_else(|| enums.get(enum_name).cloned())
                         .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()))
                         .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()));
                     if let Some(enum_def) = enum_def {
@@ -983,14 +999,14 @@ pub(super) fn eval_call_expr(
                             let has_fields = variant.fields.as_ref().is_some_and(|f| !f.is_empty());
                             if !has_fields {
                                 Ok(Value::Enum {
-                                    enum_name: enum_name.clone(),
+                                    enum_name: enum_def.name.clone(),
                                     variant: field.clone(),
                                     payload: None,
                                 })
                             } else {
                                 // Return a constructor-like callable for variants with data
                                 Ok(Value::EnumVariantConstructor {
-                                    enum_name: enum_name.clone(),
+                                    enum_name: enum_def.name.clone(),
                                     variant_name: field.clone(),
                                 })
                             }

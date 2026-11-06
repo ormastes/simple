@@ -127,7 +127,7 @@ pub(crate) fn validate_sffi_return_contract(
     }
 }
 
-fn function_module_owner(func: &FunctionDef) -> Option<Arc<str>> {
+pub(crate) fn function_module_owner(func: &FunctionDef) -> Option<Arc<str>> {
     let key = func as *const FunctionDef as usize;
     FUNCTION_MODULE_OWNER
         .with(|cell| cell.borrow().get(&key).cloned())
@@ -137,6 +137,7 @@ fn function_module_owner(func: &FunctionDef) -> Option<Arc<str>> {
                     .name
                     .strip_prefix(crate::interpreter::FLATTEN_MODULE_OWNER_ATTR_PREFIX)
                     .map(|raw| {
+                        if raw == "<entry>" { return Arc::from(raw); }
                         Arc::from(
                             crate::interpreter::normalize_path_key(Path::new(raw))
                                 .to_string_lossy()

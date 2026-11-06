@@ -297,6 +297,11 @@ pub(super) fn eval_literal_expr(
             }
             // Imported globals can change during a nested call, so refresh only
             // bindings with exact owner provenance at the point of each read.
+            if !env.is_local(name) && matches!(env.get(name), None | Some(Value::EnumType { .. })) {
+                if let Some(def) = crate::interpreter::owner_module_enum(name) {
+                    return Ok(Some(Value::EnumType { enum_name: def.name.clone() }));
+                }
+            }
             if let Some(val) = env.get(name) {
                 if !env.is_local(name) && env.is_refreshed_global(name) {
                     if let Some((owner, source_name)) = env.global_binding(name) {
@@ -373,10 +378,10 @@ pub(super) fn eval_literal_expr(
                 }));
             }
             // Check enums - return as EnumType for variant construction (EnumName.Variant)
-            if enums.contains_key(name) || GLOBAL_ENUMS.with(|cell| cell.borrow().contains_key(name)) {
-                return Ok(Some(Value::EnumType {
-                    enum_name: name.clone(),
-                }));
+            if let Some(def) = crate::interpreter::owner_module_enum(name)
+                .or_else(|| enums.get(name).cloned())
+                .or_else(|| crate::interpreter::unique_enum_definition(name)) {
+                return Ok(Some(Value::EnumType { enum_name: def.name.clone() }));
             }
             // Check module-level globals (for functions accessing module-level let mut variables)
             let global_val = MODULE_GLOBALS.with(|cell| cell.borrow().get(name).cloned());

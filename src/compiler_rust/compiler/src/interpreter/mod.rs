@@ -182,6 +182,8 @@ use interpreter_call::{
 mod module_cache;
 pub use module_cache::{owner_module_class, owner_module_enum, record_flattened_owner_class, record_flattened_owner_enum, resolve_class};
 pub use module_cache::clear_module_cache;
+pub(crate) use module_cache::{enum_source_name, enum_display_name, unique_enum_definition};
+pub(crate) use interpreter_state::FLATTEN_ENUM_SOURCE_NAME_ATTR_PREFIX;
 pub use module_cache::{clear_probe_source_cache, probe_source_cached};
 pub use module_cache::{
     clear_parsed_source_cache, parsed_source_cache_len, shared_source, shared_source_for_target,
@@ -261,3 +263,8 @@ pub use interpreter_extern::env_sffi::clear_env_sffi_registry;
 pub use interpreter_extern::error_sffi::clear_error_sffi_registry;
 pub use interpreter_extern::span_sffi::clear_span_sffi_registry;
 pub use interpreter_extern::concurrency::clear_concurrency_registries;
+
+pub(crate) use module_cache::{
+    SELECTED_BUILTIN_ENUM_ORIGIN, builtin_enum_shape,
+    mark_selected_builtin_enum_origins, check_cached_builtin_enum_origins,
+};

@@ -1354,7 +1354,7 @@ pub(crate) fn evaluate_method_call(
             // Methods defined directly in the enum body (or merged from impl blocks).
             // Try the local `enums` map first, then fall back to GLOBAL_ENUMS so
             // that methods on cross-module enums stored as struct fields are found.
-            let enum_def_opt = crate::interpreter::owner_module_enum(enum_name).or_else(|| enums.get(enum_name).cloned())
+            let enum_def_opt = crate::interpreter::owner_module_enum(enum_name).or_else(|| enums.get(enum_name).cloned()).or_else(|| crate::interpreter::unique_enum_definition(enum_name))
                 .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()));
             if let Some(enum_def) = enum_def_opt {
                 for m in &enum_def.methods {
@@ -1414,10 +1414,27 @@ pub(crate) fn evaluate_method_call(
         // EnumType method call = variant constructor call
         // EnumName.VariantName(args) -> create enum with payload
         Value::EnumType { enum_name } => {
-            // Check module-local, block-scoped, and imported enums.
-            let enum_def = crate::interpreter::owner_module_enum(enum_name).or_else(|| enums.get(enum_name).cloned())
-                .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()))
-                .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()));
+            // The receiver is already a first-class type identity. Canonical
+            // constructors also exist without a source EnumDef; dispatch them
+            // through the same exact-identity/arity helper as captured ctors.
+            // A custom same-spelled declaration carries its qualified owner
+            // key and can never enter this reserved-family branch.
+            if matches!((enum_name.as_str(), method),
+                ("Option", "Some" | "None") | ("Result", "Ok" | "Err")) {
+                return super::interpreter_call::call_value_as_callable(
+                    Value::EnumVariantConstructor {
+                        enum_name: enum_name.clone(), variant_name: method.to_owned(),
+                    }, args, env, functions, classes, enums, impl_methods,
+                )?.ok_or_else(|| CompileError::semantic("enum variant constructor was not callable"));
+            }
+            // Source namespaces were resolved while evaluating the receiver.
+            // Never reinterpret a carried key as the current module's bare
+            // source spelling, including custom Option/Result declarations.
+            let enum_def = enums.get(enum_name).filter(|def| def.name == *enum_name).cloned()
+                .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).filter(|def| def.name == *enum_name).cloned()))
+                .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(enum_name).filter(|def| def.name == *enum_name).cloned()))
+                .or_else(|| crate::interpreter::owner_module_enum(enum_name).filter(|def| def.name == *enum_name))
+                .or_else(|| crate::interpreter::unique_enum_definition(enum_name).filter(|def| def.name == *enum_name));
             if let Some(enum_def) = enum_def {
                 // Check if the method name is a variant name
                 let variant_opt = enum_def.variants.iter().find(|v| v.name == method);
