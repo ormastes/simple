@@ -189,6 +189,11 @@ untouched.
 for `off` would invalidate every existing prelower/object cache entry — a
 measurable perf regression on every build. Same rule for `object_cache_key`
 and `native_build_cache_scope_key`.
+PR1 applies it to the prelower option identity, native no-op admission and
+capsule function identity. `compile_options_hash_compute` is formally bound
+(`src/verification/cache_protocol/source_bindings.txt`); its xray component
+lands in PR3 together with the LiveKey model field and re-pin review (today
+only SMF/spec callers reach it, and `--xray` rejects SMF output).
 
 **Guard test (PR1, kept forever): `scripts/check/check-xray-static-off-identity.shs`**
 1. Build fixtures (`hello`, multi-return, tail call, recursion) with the **same**
