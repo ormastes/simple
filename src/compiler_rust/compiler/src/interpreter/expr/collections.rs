@@ -258,7 +258,7 @@ pub(super) fn eval_collection_expr(
             Ok(Some(result?))
         }
         Expr::Dict(entries) => {
-            let mut map = HashMap::new();
+            let mut map = crate::value::DictMap::new();
             for (k, v) in entries {
                 // Handle dict spread: **expr
                 if let Expr::DictSpread(inner) = k {
@@ -842,7 +842,7 @@ pub(super) fn eval_collection_expr(
             condition,
         } => {
             let iter_val = evaluate_expr(iterable, env, functions, classes, enums, impl_methods)?;
-            let mut result = HashMap::new();
+            let mut result = crate::value::DictMap::new();
             comprehension_for_each(
                 &iter_val,
                 pattern,

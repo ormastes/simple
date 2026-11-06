@@ -872,7 +872,7 @@ pub fn handle_array_methods(
         }
         "group_by" => {
             let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            let mut groups: HashMap<String, (Value, Vec<Value>)> = HashMap::new();
+            let mut groups: indexmap::IndexMap<String, (Value, Vec<Value>)> = indexmap::IndexMap::new();
             if let Value::Lambda {
                 params,
                 body,
@@ -892,7 +892,7 @@ pub fn handle_array_methods(
                         .push(item.clone());
                 }
             }
-            let result: HashMap<String, Value> = groups
+            let result: crate::value::DictMap = groups
                 .into_iter()
                 .map(|(k, (key, v))| (k, Value::wrap_dict_entry(&key, Value::array(v))))
                 .collect();
@@ -1257,6 +1257,13 @@ pub fn handle_byte_array_methods(
         match method {
             "len" | "length" => return Ok(Some(Value::Int(bytes.len() as i64))),
             "is_empty" => return Ok(Some(Value::Bool(bytes.is_empty()))),
+            // The packed payload, as `rt_array_data_ptr` returns it. Widening
+            // first (below) answered with the `Vec<Value>` cell pointer, so FFI
+            // consumers read tagged value cells instead of the bytes
+            // (seed_interp_mut_out_param_writeback_and_u8_data_ptr_2026-08-31, gap 2).
+            // `bytes` borrows the value's shared `Arc<Vec<u8>>`, so the pointer
+            // stays valid while the caller retains the array.
+            "ptr" | "data_ptr" => return Ok(Some(Value::Int(bytes.as_ptr() as i64))),
             _ => {}
         }
     }
@@ -1346,6 +1353,28 @@ mod byte_array_metadata_fast_path_tests {
         }
     }
 
+    /// seed_interp_mut_out_param_writeback_and_u8_data_ptr_2026-08-31 gap 2:
+    /// `[u8].data_ptr()` must address the packed bytes, not widened value cells.
+    #[test]
+    fn byte_array_data_ptr_addresses_the_packed_payload() {
+        for value in [
+            Value::byte_array(vec![1, 2, 3, 4]),
+            Value::frozen_byte_array(vec![1, 2, 3, 4]),
+        ] {
+            for method in ["data_ptr", "ptr"] {
+                let ptr = call_value(value.clone(), method, &[])
+                    .expect("data_ptr")
+                    .as_int()
+                    .expect("int pointer");
+                let (Value::ByteArray(bytes) | Value::FrozenByteArray(bytes)) = &value else { unreachable!() };
+                assert_eq!(ptr, bytes.as_ptr() as i64, "{method} must return the packed byte pointer");
+                // SAFETY: `ptr` addresses `bytes`, which `value` keeps alive here.
+                let word = unsafe { std::ptr::read_unaligned(ptr as *const u32) };
+                assert_eq!(word, 0x0403_0201);
+            }
+        }
+    }
+
     #[test]
     fn bytes_evidence_byte_array_fallback_and_mutation_contracts_are_unchanged() {
         let bogus_arg = [Argument::new(None, Expr::Integer(99))];
@@ -1403,7 +1432,7 @@ pub fn handle_fixed_size_array_methods(
 /// Handle FrozenDict methods (read-only operations only)
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn handle_frozen_dict_methods(
-    map: &std::sync::Arc<HashMap<String, Value>>,
+    map: &std::sync::Arc<crate::value::DictMap>,
     method: &str,
     args: &[Argument],
     env: &mut Env,
@@ -1454,7 +1483,7 @@ pub fn handle_frozen_dict_methods(
 /// has always raised.
 pub(crate) fn apply_dict_mutation_in_place(
     method: &str,
-    map: &mut HashMap<String, Value>,
+    map: &mut crate::value::DictMap,
     key: Option<Value>,
     value: Option<Value>,
 ) -> Result<(), CompileError> {
@@ -1465,7 +1494,7 @@ pub(crate) fn apply_dict_mutation_in_place(
             map.insert(key_str, Value::wrap_dict_entry(&key_val, value.unwrap_or(Value::Nil)));
         }
         "remove" | "delete" => {
-            map.remove(&key.unwrap_or(Value::Nil).to_key_string());
+            map.shift_remove(&key.unwrap_or(Value::Nil).to_key_string());
         }
         "merge" | "extend" => match value {
             Some(Value::Dict(other)) => {
@@ -1487,7 +1516,7 @@ pub(crate) fn apply_dict_mutation_in_place(
 /// Handle Dict methods
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn handle_dict_methods(
-    map: &HashMap<String, Value>,
+    map: &crate::value::DictMap,
     method: &str,
     args: &[Argument],
     env: &mut Env,
@@ -1511,13 +1540,12 @@ pub fn handle_dict_methods(
                 .map(|stored| Value::unwrap_dict_entry(&key_val, stored))
                 .unwrap_or(Value::Nil)
         }
-        // `keys`/`values`/`entries` all iterate in the canonical sorted-by-key
-        // order (`dict_entries_sorted`) so that `keys()[i]` and `values()[i]`
-        // describe the SAME entry. `values` must not use `map.values()`: that
-        // is raw HashMap order and would desync from the sorted `keys()`.
+        // `keys`/`values`/`entries` all iterate in INSERTION order through
+        // `dict_entries_ordered`, so `keys()[i]` and `values()[i]` describe
+        // the SAME entry (doc/07_guide/language/dict_iteration_order.md).
         "keys" => {
             note_keys_materialization();
-            let keys: Vec<Value> = crate::value::dict_entries_sorted(map)
+            let keys: Vec<Value> = crate::value::dict_entries_ordered(map)
                 .into_iter()
                 .map(|(k, v)| Value::dict_entry_key_for_iteration(v, k))
                 .collect();
@@ -1525,7 +1553,7 @@ pub fn handle_dict_methods(
         }
         "values" => {
             note_keys_materialization();
-            let vals: Vec<Value> = crate::value::dict_entries_sorted(map)
+            let vals: Vec<Value> = crate::value::dict_entries_ordered(map)
                 .into_iter()
                 .map(|(_, v)| Value::dict_entry_value_for_iteration(v))
                 .collect();
@@ -1554,7 +1582,7 @@ pub fn handle_dict_methods(
             let other = eval_arg(
                 args,
                 0,
-                Value::Dict(Arc::new(HashMap::new())),
+                Value::Dict(Arc::new(crate::value::DictMap::new())),
                 env,
                 functions,
                 classes,
@@ -1571,7 +1599,7 @@ pub fn handle_dict_methods(
         // equivalent used by the identifier fast path.
         "clear" => {
             // Return empty dict (functional style - original is not modified)
-            Value::Dict(Arc::new(HashMap::new()))
+            Value::Dict(Arc::new(crate::value::DictMap::new()))
         }
         "clone" | "copy" => {
             // Return a shallow copy of the dict
@@ -1587,7 +1615,7 @@ pub fn handle_dict_methods(
                 .unwrap_or(default)
         }
         "entries" | "items" => {
-            let entries: Vec<Value> = crate::value::dict_entries_sorted(map)
+            let entries: Vec<Value> = crate::value::dict_entries_ordered(map)
                 .into_iter()
                 .map(|(k, v)| {
                     Value::Tuple(vec![
@@ -1639,7 +1667,7 @@ pub fn handle_dict_methods(
         }
         "compact" => {
             // Remove nil/None entries, unwrap Some values
-            let result: HashMap<String, Value> = map
+            let result: crate::value::DictMap = map
                 .iter()
                 .filter_map(|(k, stored)| match Value::dict_entry_value_ref(stored) {
                     Value::Nil => None,
@@ -1825,7 +1853,7 @@ mod keys_materialization_tests {
     }
 
     fn dict_of(n: usize) -> Value {
-        let mut map = HashMap::new();
+        let mut map = crate::value::DictMap::new();
         for i in 0..n {
             map.insert(format!("k{i}"), Value::Int(i as i64));
         }

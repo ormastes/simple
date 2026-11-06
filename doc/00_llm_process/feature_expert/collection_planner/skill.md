@@ -68,3 +68,26 @@ duplicate is a parse error. Profiles recorded with the old byte-hash IDs no
 longer bind; the owner accepted that. Spec:
 `test/01_unit/compiler/frontend/collection_site_attribute_spec.spl`.
 Wiring the label to `ResolvedCollectionPolicyV1` waits for W1 (#7220).
+
+Added 2026-11-06 (data plan W4a): the one collection policy adapter is
+`src/compiler/35.semantics/perf/collection_policy_adapter.spl`. It sits above
+both `ResolvedCollectionPolicyV1` and the adaptive containers; the containers
+must never import the policy layer. `collection_policy_decide_v1(policy,
+profile)` returns a decision in the `CollectionPlanDecision` explain shape
+(selected plus one reason per candidate) or an `Err` for a pin the container
+cannot honour (COL-07: no panic). `auto` returns `selected=Original,
+applied=false` and the apply helpers then do nothing (COL-08). Trap:
+`set_attribute(Auto)` is not a no-op; it demotes small containers, so never
+route `auto` through it. Admitted switch modes are `report_only`,
+`next_instance` and `exclusive_live`; the rest are errors. `report_only`
+explains an ineligible pin instead of failing. The apply helpers return
+`Result`: they re-check the container's own profile, refuse to rebuild a
+populated container under `next_instance` (existing instances keep their
+storage, plan 11.1), and refuse an ordered pin when a held map key has no
+native order. Decision: `auto` over a policy that forbids a representation the
+live container could switch into is an error (pin instead). Open: nothing in
+production calls the adapter yet; `@collection_algorithm` still reaches the
+containers through `attributed_at_site`. Wiring the policy into construction
+is W6/C5 work. Spec:
+`test/01_unit/lib/collections/adaptive_policy_adapter_spec.spl` (5/6 on the
+seed; the populated-map `it` needs `spl_ordered_key_cmp`).

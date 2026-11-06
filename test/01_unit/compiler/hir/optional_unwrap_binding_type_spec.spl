@@ -1,0 +1,42 @@
+# @req REQ-SSPEC-COMPILER
+# Regression: `val xs = parsed.unwrap()` where `parsed: [Ob]?` must bind `xs`
+# as `[Ob]`. Untyped, native codegen read `xs[i].f` as a raw word (wrong value)
+# and inside loops failed with "unsupported LLVM value conversion from i64 to
+# void" (test_runner_mcdc_report.test_runner_build_mcdc_evidence).
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolTable, SymbolId, SymbolKind}
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, MethodResolution}
+use compiler.hir.hir_lowering.binding_types.{hir_binding_method_call_return_kind}
+
+fn ty(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn untyped(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, type_: nil, span: Span.empty())
+
+fn method_on(receiver: SymbolId, method: text) -> HirExprKind:
+    HirExprKind.MethodCall(untyped(HirExprKind.Var(receiver)), method, [], MethodResolution.Unresolved)
+
+describe "binding type transport through Optional.unwrap":
+    it "binds the payload type of a declared optional receiver":
+        val table = SymbolTable.new()
+        val payload = ty(HirTypeKind.Array(ty(HirTypeKind.Str), nil))
+        val parsed = table.define("parsed", SymbolKind.Variable,
+            ty(HirTypeKind.Optional(payload)), Span.empty(), Visibility.Private, false, nil)
+        val found = hir_binding_method_call_return_kind(method_on(parsed, "unwrap"), table)
+        expect(found != nil).to_equal(true)
+        match found.unwrap().kind:
+            case HirTypeKind.Array(elem, _): expect(elem.kind).to_equal(HirTypeKind.Str)
+            case _: panic("unwrap lost the payload type")
+
+    it "does not invent a type for other optional methods or unsettled payloads":
+        val table = SymbolTable.new()
+        val parsed = table.define("parsed", SymbolKind.Variable,
+            ty(HirTypeKind.Optional(ty(HirTypeKind.Str))), Span.empty(), Visibility.Private, false, nil)
+        expect(hir_binding_method_call_return_kind(method_on(parsed, "is_some"), table) == nil).to_equal(true)
+        val open = table.define("open", SymbolKind.Variable,
+            ty(HirTypeKind.Optional(ty(HirTypeKind.Infer(0, 0)))), Span.empty(), Visibility.Private, false, nil)
+        expect(hir_binding_method_call_return_kind(method_on(open, "unwrap"), table) == nil).to_equal(true)

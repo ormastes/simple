@@ -1,0 +1,46 @@
+use std.spec.{describe, it, expect}
+use std.common.string_core.{str_len}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.io_runtime.{file_write, file_write_bytes, file_read_result, read_file_text_result, dir_create_all, time_now_unix_micros}
+
+# Bug text_codec_utf8_validation_per_byte_interpreted_2026-11-06: a multi-MB
+# file read must validate UTF-8 in bulk, not with an interpreted per-byte loop
+# (3.67 MB took ~21 s that way versus ~0.3 s in bulk). The budget is coarse
+# (10x headroom over measured) so it only trips on a per-byte regression.
+
+fn build_multibyte(min_bytes: i64) -> text:
+    var content = "row é€😀 payload|0123456789\n"
+    while str_len(content) < min_bytes:
+        content = content + content
+    content
+
+describe "UTF-8 file read stays on the bulk validator":
+    it "reads a multi-MB multi-byte file within the time budget":
+        val dir = "build/utf8_file_read_time_budget"
+        expect(dir_create_all(dir)).to_be(true)
+        val content = build_multibyte(3500000)
+        val path = dir + "/big.txt"
+        expect(file_write(path, content)).to_be(true)
+        val t0 = time_now_unix_micros()
+        val a = read_file_text_result(path)
+        val b = file_read_regular_no_follow_bounded(path, 100000000)
+        val elapsed_s = (time_now_unix_micros() - t0) / 1000000
+        expect(a.is_ok()).to_be(true)
+        expect(a.unwrap() == content).to_be(true)
+        expect(b.unwrap() == content).to_be(true)
+        expect(elapsed_s < 10).to_be(true)
+
+    it "rejects invalid UTF-8 in a large file and accepts an empty file":
+        val dir = "build/utf8_file_read_time_budget"
+        expect(dir_create_all(dir)).to_be(true)
+        val path = dir + "/bad.txt"
+        var bytes = text_to_utf8_bytes(build_multibyte(70000))
+        bytes.push(0xC3u8)
+        bytes.push(0x28u8)
+        expect(file_write_bytes(path, bytes)).to_be(true)
+        expect(file_read_result(path).is_err()).to_be(true)
+        expect(file_read_regular_no_follow_bounded(path, 100000000).is_err()).to_be(true)
+        val empty = dir + "/empty.txt"
+        expect(file_write(empty, "")).to_be(true)
+        expect(file_read_result(empty).unwrap()).to_equal("")

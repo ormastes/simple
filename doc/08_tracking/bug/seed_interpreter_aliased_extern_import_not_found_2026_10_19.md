@@ -1,6 +1,6 @@
 # Seed interpreter: an aliased import of an `extern fn` is "function not found"
 
-- Status: OPEN
+- Status: FIXED 2026-11-06 (branch `work/seed-interp-batch2-20261106`) — see "Resolution"
 - Date: 2026-10-19
 - Lane: Rust seed tree-walk interpreter (`bin/simple test` on the seed)
 - Impact: SOSIX cannot expose a runtime extern as a zero-cost `export use
@@ -37,3 +37,31 @@ declared (not merely a coincidental runtime-manifest symbol), record
 `alias -> name` in a thread-local map, add `alias` to `EXTERN_FUNCTIONS`, and
 resolve the map at the top of `call_extern_function_with_values`; clear it with
 the other interpreter state.
+
+## Resolution (2026-11-06)
+
+Fixed at the call site rather than at every `ImportTarget::Aliased` arm:
+both lanes already RECORD the import as an owner binding
+(`importer: alias -> (source_owner, rt_x)`); the call just never consulted
+it for an extern, because externs are not in `functions`/exports.
+`interpreter_call/mod.rs` `aliased_extern_target` walks the calling
+module's binding for the name (bounded, through `export use` facades) to a
+source name registered in `EXTERN_FUNCTIONS` under a different name, and
+`evaluate_call` dispatches it through `call_extern_function` just before
+reporting E1002. A non-aliased call and any name that resolves earlier are
+untouched.
+
+Evidence (seed built from `release/1.0.0` @ `ecb705896a4` vs this branch):
+- `test/fixtures/seed_interp/aliased_extern_import/main.spl` (`run`,
+  interpreter): before ``error[E1002]: function `to_bytes_alias` not found``;
+  after `aliased_extern 3`.
+- `test/fixtures/seed_interp/aliased_extern_import/aliased_extern_test_lane_repro.spl`
+  (`simple test`, one-hop alias and a two-hop `export use ... as` facade):
+  before 0/2 (`function ... not found`), after 2/2.
+- Rust test
+  `interpreter_call::aliased_extern_import_tests::aliased_import_of_an_extern_calls_the_extern`:
+  FAILED before (`function probe_alias_to_bytes not found`), ok after.
+
+The SOSIX `@always_inline` facades in `secure_temp_dir` are left as they
+are (they are a working API, not a marked workaround); they may now be
+replaced by `export use ... as` if wanted.

@@ -28,6 +28,12 @@ use crate::error::{codes, CompileError, ErrorContext};
 
 pub type SharedText = Arc<String>;
 
+/// Backing map of `Value::Dict` / `Value::FrozenDict`. Insertion-ordered:
+/// `Dict` iterates in insertion order on every engine
+/// (`doc/07_guide/language/dict_iteration_order.md`). Remove with
+/// `shift_remove` -- `swap_remove` (and the deprecated `remove`) reorder.
+pub type DictMap = indexmap::IndexMap<String, Value>;
+
 /// Frequently-used enum type and variant names as constants.
 /// Eliminates repeated string allocation at hot paths and establishes
 /// a single source of truth for these names.
@@ -390,13 +396,13 @@ impl<V> NameMemo<V> {
 /// closure. Immutable once built.
 pub struct ModuleTable {
     id: u32,
-    own: Arc<HashMap<String, Value>>,
+    own: Arc<DictMap>,
     layers: Vec<Arc<ModuleTable>>,
     /// Ids of every table reachable through `layers`, plus `id` itself.
     reach: SparseIdSet,
     /// `own` with `filter_functions_from_value` applied per entry, built on
     /// first use (the captured-env-stripped view a module env holds).
-    filtered_own: OnceLock<Arc<HashMap<String, Value>>>,
+    filtered_own: OnceLock<Arc<DictMap>>,
 }
 
 impl fmt::Debug for ModuleTable {
@@ -462,7 +468,7 @@ impl SparseIdSet {
 }
 
 impl ModuleTable {
-    pub fn new(own: Arc<HashMap<String, Value>>, layers: Vec<Arc<ModuleTable>>) -> Self {
+    pub fn new(own: Arc<DictMap>, layers: Vec<Arc<ModuleTable>>) -> Self {
         let id = NEXT_TABLE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut reach = SparseIdSet::single(id);
         for layer in &layers {
@@ -484,11 +490,11 @@ impl ModuleTable {
     }
 
     /// A table with no layers: exactly the given dict.
-    pub fn leaf(own: Arc<HashMap<String, Value>>) -> Self {
+    pub fn leaf(own: Arc<DictMap>) -> Self {
         Self::new(own, Vec::new())
     }
 
-    pub fn own(&self) -> &Arc<HashMap<String, Value>> {
+    pub fn own(&self) -> &Arc<DictMap> {
         &self.own
     }
 
@@ -497,7 +503,7 @@ impl ModuleTable {
     }
 
     /// `own` with every entry passed through `filter`, built once.
-    pub fn filtered_own(&self, filter: impl Fn(&Value) -> Value) -> &Arc<HashMap<String, Value>> {
+    pub fn filtered_own(&self, filter: impl Fn(&Value) -> Value) -> &Arc<DictMap> {
         self.filtered_own.get_or_init(|| {
             Arc::new(
                 self.own
@@ -651,7 +657,7 @@ impl TableView {
 /// A module export table under construction (see [`ModuleTable`]).
 #[derive(Debug, Default, Clone)]
 pub struct ExportTable {
-    own: HashMap<String, Value>,
+    own: DictMap,
     layers: Vec<Arc<ModuleTable>>,
 }
 
@@ -687,7 +693,7 @@ impl ExportTable {
     }
 
     /// Own entries only (the partial-export snapshot taken before imports).
-    pub fn own_snapshot(&self) -> HashMap<String, Value> {
+    pub fn own_snapshot(&self) -> DictMap {
         self.own.clone()
     }
 
@@ -3087,10 +3093,10 @@ pub enum Value {
         labels: Vec<String>,
         values: Vec<Value>,
     },
-    /// Mutable dict (default for dict literals)
-    Dict(Arc<HashMap<String, Value>>),
+    /// Mutable dict (default for dict literals). Insertion-ordered.
+    Dict(Arc<DictMap>),
     /// Immutable frozen dict (created via freeze(), copy-on-freeze semantics)
-    FrozenDict(Arc<HashMap<String, Value>>),
+    FrozenDict(Arc<DictMap>),
     Lambda {
         params: Vec<String>,
         body: Box<Expr>,
@@ -3341,13 +3347,13 @@ impl Value {
     }
 
     /// Create a new mutable dict value (default for dict literals)
-    pub fn dict(map: HashMap<String, Value>) -> Self {
-        Value::Dict(Arc::new(map))
+    pub fn dict<M: IntoIterator<Item = (String, Value)>>(map: M) -> Self {
+        Value::Dict(Arc::new(map.into_iter().collect()))
     }
 
     /// Create a new frozen (immutable) dict value
-    pub fn frozen_dict(map: HashMap<String, Value>) -> Self {
-        Value::FrozenDict(Arc::new(map))
+    pub fn frozen_dict<M: IntoIterator<Item = (String, Value)>>(map: M) -> Self {
+        Value::FrozenDict(Arc::new(map.into_iter().collect()))
     }
 
     /// True if this value is "nil-like": either the bare `nil` literal

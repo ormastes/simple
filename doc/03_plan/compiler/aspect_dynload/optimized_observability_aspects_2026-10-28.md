@@ -145,3 +145,15 @@ to the repo root; `trace/` = `src/lib/common/trace/`.
 Native-only or concurrency items (OBS-007 LTO rows, OBS-009, OBS-011,
 OBS-012) report UNAVAILABLE or verification-pending with the exact stage3 /
 native command; they are never marked PASS from a seed run.
+
+## 6. Delivered after this audit (same day, separate PRs; table in §4 is the pre-implementation state)
+
+| PR | Item | Spec evidence (seed) |
+|---|---|---|
+| #7231 | D15 / OBS-021: `joinpoint_slots.spl` non-executable data table, atomic xchg/load publication, `JoinpointSlotGeometry` from the host, retired-target retention gated on reader pins | `joinpoint_patchpoint_spec.spl` RED 11/16 -> 15/16 (1 pre-existing unrelated failure) |
+| #7236 | D20 vertical slice: `std.log.log_event_v1` + control plane; OBS-001/002/003/004 and OBS-013/022 in slice scope | `log_event_v1_spec.spl` RED -> 10/10 |
+| #7238 | D14 first rule: skip switch resolved once, level gate first on the text producer path | `log_producer_path_spec.spl` RED -> 1/1 |
+
+Native (stage3) verification of all three is pending:
+`bootstrap/stage3/simple test <spec>`; the C runtime has no `rt_page_size`
+definition, so #7231 cannot be qualified natively until that lands.

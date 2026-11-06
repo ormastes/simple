@@ -938,13 +938,9 @@ impl<'a> MirLowerer<'a> {
         // (codegen/runtime_sffi.rs) or wired to a dispatch arm, so it fell
         // through to `rt_method_not_found`. Returns a fresh array pointer —
         // no unboxing needed, matching the existing `"items" | "entries" =>
-        // Some(TypeId::ANY)` table entry in hir/lower/expr/mod.rs. Known
-        // divergence, documented not fixed: the interpreter's `entries`
-        // iterates in canonical sorted-by-key order
-        // (`dict_entries_sorted`); `rt_dict_entries` returns raw hashmap
-        // order (the SAME already-known `dict.keys()`/`dict.values()`
-        // ordering gap the audit doc calls out separately) — the result SET
-        // matches, the SEQUENCE does not.
+        // Some(TypeId::ANY)` table entry in hir/lower/expr/mod.rs. Both
+        // engines return entries in INSERTION order (`dict_entries_ordered` /
+        // `RuntimeDict` insertion stamps).
         // `items` was originally left out of this `if` (only `entries` was
         // checked) even though the HIR type-inference table above already
         // treats them as aliases — that gap is

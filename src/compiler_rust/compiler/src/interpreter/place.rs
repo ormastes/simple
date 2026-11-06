@@ -728,7 +728,7 @@ mod tests {
     #[test]
     fn write_through_dict_value_class_instance_is_shared() {
         let (inst, value) = class_instance("Inner", vec![("v", Value::Int(0))]);
-        let dict: HashMap<String, Value> = [("k".to_string(), value)].into_iter().collect();
+        let dict: crate::value::DictMap = [("k".to_string(), value)].into_iter().collect();
         let mut env = Env::new();
         env.insert("d".into(), Value::Dict(Arc::new(dict)));
 

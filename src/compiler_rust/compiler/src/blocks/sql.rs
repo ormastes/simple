@@ -81,7 +81,7 @@ fn parse_sql_query(payload: &str) -> Result<Value, CompileError> {
     validate_sql(payload)?;
 
     // Build result structure
-    let mut result = HashMap::new();
+    let mut result = crate::value::DictMap::new();
     result.insert("query_type".to_string(), Value::text(query_type.as_str().to_string()));
     result.insert("raw_query".to_string(), Value::text(payload.to_string()));
     result.insert(

@@ -108,10 +108,10 @@ fn value_type_matches_name(value: &Value, expected: &str) -> bool {
         // Without it, EVERY overloaded free function with a trait-typed
         // parameter failed overload scoring with "no caller-authorized
         // overload ... matches the supplied arguments".
-        || match value {
-            Value::Object { class, .. } => TRAIT_IMPLS
-                .with(|cell| cell.borrow().contains_key(&(expected.to_string(), class.clone()))),
-            _ => false,
+        || match value.aggregate_class() {
+            Some(class) => TRAIT_IMPLS
+                .with(|cell| cell.borrow().contains_key(&(expected.to_string(), class.to_string()))),
+            None => false,
         };
     if debug_overload_select() {
         println!(
@@ -365,6 +365,30 @@ fn import_bound_candidate(
     }
     overload_score(&target, values)?;
     Some(target)
+}
+
+/// The extern an aliased import binds `name` to, if any: walk the calling
+/// module's `use m.{x as name}` binding (and re-export facades, bounded) to a
+/// source name that is a registered extern under a DIFFERENT name.
+fn aliased_extern_target(name: &str) -> Option<String> {
+    let current = CURRENT_EXEC_MODULE
+        .with(|cell| cell.borrow().clone())
+        .unwrap_or_else(|| Arc::from("<entry>"));
+    let (mut owner, mut source) =
+        crate::interpreter::owner_bindings(&current).and_then(|b| b.get(name).map(std::borrow::Cow::into_owned))?;
+    for _ in 0..8 {
+        if source != name && EXTERN_FUNCTIONS.with(|cell| cell.borrow().contains(source.as_str())) {
+            return Some(source);
+        }
+        let (next_owner, next_source) =
+            crate::interpreter::owner_bindings(&owner).and_then(|b| b.get(&source).map(std::borrow::Cow::into_owned))?;
+        if next_owner == owner && next_source == source {
+            return None;
+        }
+        owner = next_owner;
+        source = next_source;
+    }
+    None
 }
 
 /// True when `func`'s owning module matches the module of the function whose
@@ -785,6 +809,21 @@ pub(crate) fn evaluate_call(
             return Ok(result);
         }
 
+        // Priority 3.9: a LEXICAL local bound to a callable (`val resolve =
+        // loader.resolve_fn`, a fn-typed parameter) shadows every module-level
+        // and imported function of the same name. Priority 4's import binding
+        // used to win here, so `resolve(..)` ran `std.path.resolve` instead of
+        // the local closure. Only frame/block locals qualify, so module
+        // functions mirrored into the env keep the overload/import selection.
+        // Bug: seed_test_typed_fn_local_shadowed_by_global_2026-10-04.
+        if env.is_local(name) && matches!(env.get(name), Some(Value::Function { .. } | Value::Lambda { .. })) {
+            if let Some(val) = env.get(name).cloned() {
+                if let Some(result) = call_value_as_callable(val, args, env, functions, classes, enums, impl_methods)? {
+                    return Ok(result);
+                }
+            }
+        }
+
         // Priority 4: Check overloaded regular functions before the flat map fallback.
         let overloads = FUNCTION_OVERLOADS.with(|cell| cell.borrow().get(name).cloned());
         if let Some(overloads) = overloads {
@@ -808,7 +847,19 @@ pub(crate) fn evaluate_call(
                         impl_methods,
                     );
                 }
-                if let Some(func) = select_overload(&overloads, &evaluated_args) {
+                // When no candidate scores (untyped/erased argument values), the
+                // flat map below is last-registration-wins across modules; the
+                // calling module's own definition is what native lowering binds.
+                let selected = select_overload(&overloads, &evaluated_args).or_else(|| {
+                    let current = CURRENT_EXEC_MODULE
+                        .with(|cell| cell.borrow().clone())
+                        .unwrap_or_else(|| Arc::from("<entry>"));
+                    candidate_declared_by(&current, name, functions).filter(|own| {
+                        let required = own.params.iter().filter(|p| p.default.is_none()).count();
+                        (required..=own.params.len()).contains(&evaluated_args.len())
+                    })
+                });
+                if let Some(func) = selected {
                     if debug_dupdispatch() {
                         eprintln!(
                             "[dupdispatch] P4-overload name={name} owner={:?} current={:?}",
@@ -957,6 +1008,14 @@ pub(crate) fn evaluate_call(
             return dispatch_context_method(&ctx, name, args, env, functions, classes, enums, impl_methods);
         }
 
+        // An aliased import of an `extern fn` (`use m.{rt_x as y}`): externs are
+        // never module exports, so the alias bound nothing. Follow the calling
+        // module's recorded import binding to the extern it names.
+        // Bug: seed_interpreter_aliased_extern_import_not_found_2026_10_19.
+        if let Some(target) = aliased_extern_target(name) {
+            return call_extern_function(&target, args, env, functions, classes, enums, impl_methods);
+        }
+
         // If we reach here with an identifier name, the function is not found
         // E1002 - Undefined Function
         let known_names: Vec<&str> = functions.keys().map(|s| s.as_str()).collect();
@@ -1033,7 +1092,7 @@ pub(crate) fn evaluate_call(
                 && matches!(module_name.as_str(), "Map" | "Dict" | "HashMap" | "BTreeMap")
                 && !classes.contains_key(module_name.as_str())
             {
-                return Ok(Value::Dict(std::sync::Arc::new(std::collections::HashMap::new())));
+                return Ok(Value::Dict(std::sync::Arc::new(crate::value::DictMap::new())));
             }
             // Check for static method call on a type: Type.method()
             // This handles calls like Set.new() or Set.from_array()
@@ -1553,10 +1612,10 @@ pub(crate) fn evaluate_call(
                     // site above): an imported `struct Map` must construct via
                     // its own statics, not be shadowed into a builtin dict.
                     "HashMap" | "BTreeMap" => {
-                        return Ok(Value::Dict(std::sync::Arc::new(std::collections::HashMap::new())))
+                        return Ok(Value::Dict(std::sync::Arc::new(crate::value::DictMap::new())))
                     }
                     "Map" | "Dict" if !classes.contains_key(type_name.as_str()) => {
-                        return Ok(Value::Dict(std::sync::Arc::new(std::collections::HashMap::new())))
+                        return Ok(Value::Dict(std::sync::Arc::new(crate::value::DictMap::new())))
                     }
                     "HashSet" | "BTreeSet" => return Ok(Value::array(Vec::new())),
                     "Device" => {
@@ -1580,7 +1639,7 @@ pub(crate) fn evaluate_call(
                             );
                         }
                         // Fallback for unknown types: return typed dict
-                        let mut fields = std::collections::HashMap::new();
+                        let mut fields = crate::value::DictMap::new();
                         fields.insert("__type__".to_string(), Value::text(type_name.to_string()));
                         for arg in args {
                             let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
@@ -2024,5 +2083,134 @@ mod deprecated_new_dispatch_tests {
             Value::Dict(map) => assert_eq!(map.len(), 0, "Map.new() must not contain a phantom __type__ entry"),
             other => panic!("Map.new() must return a Value::Dict, got {:?}", other),
         }
+    }
+}
+
+#[cfg(test)]
+mod cross_module_free_fn_collision_tests {
+    //! seed_interp_cross_module_free_fn_collision_2026_11_06: two co-loaded
+    //! modules each declare `render`, over different classes. Each module's
+    //! unqualified call must run its OWN `render`, not the last-registered one.
+    use crate::interpreter::{evaluate_module, tag_function_module_owner};
+    use simple_parser::ast::Node;
+    use simple_parser::Parser;
+
+    fn owned_items(src: &str, owner: &str) -> Vec<Node> {
+        let module = Parser::new(src).parse().expect("parse fixture");
+        module
+            .items
+            .into_iter()
+            .map(|node| match node {
+                Node::Function(mut f) => {
+                    tag_function_module_owner(&mut f, owner);
+                    Node::Function(f)
+                }
+                other => other,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn same_named_free_fn_resolves_to_the_calling_modules_definition() {
+        let a = "class RespA:\n    code: i64\n\nfn render(r: RespA) -> i64:\n    r.code\n\nfn a_entry() -> i64:\n    render(RespA(code: 1))\n";
+        let b = "class RespB:\n    code: i64\n    reason: text\n\nfn render(r: RespB) -> i64:\n    r.code + r.reason.len()\n\nfn b_entry() -> i64:\n    render(RespB(code: 2, reason: \"!\"))\n";
+        let mut items = owned_items(a, "/probe/collision_a.spl");
+        items.extend(owned_items(b, "/probe/collision_b.spl"));
+        items.extend(Parser::new("main = a_entry() * 10 + b_entry()\n").parse().expect("parse main").items);
+        assert_eq!(evaluate_module(&items).expect("evaluate"), 13);
+    }
+}
+
+#[cfg(test)]
+mod class_typed_overload_scoring_tests {
+    //! seed_interp_cross_module_free_fn_collision_2026_11_06: a class argument
+    //! (`Value::ClassInstance`) must score against a parameter typed with its
+    //! class, so an entry-level call picks the matching same-named overload.
+    use crate::interpreter::{evaluate_module, tag_function_module_owner};
+    use simple_parser::ast::Node;
+    use simple_parser::Parser;
+
+    #[test]
+    fn class_argument_selects_the_overload_typed_with_its_class() {
+        let mut items = Vec::new();
+        for (src, owner) in [
+            ("class RespA:\n    code: i64\n\nfn render(r: RespA) -> i64:\n    r.code\n", "/probe/score_a.spl"),
+            (
+                "class RespB:\n    code: i64\n    reason: text\n\nfn render(r: RespB) -> i64:\n    r.code + r.reason.len()\n",
+                "/probe/score_b.spl",
+            ),
+        ] {
+            for node in Parser::new(src).parse().expect("parse").items {
+                items.push(match node {
+                    Node::Function(mut f) => {
+                        tag_function_module_owner(&mut f, owner);
+                        Node::Function(f)
+                    }
+                    other => other,
+                });
+            }
+        }
+        items.extend(Parser::new("main = render(RespA(code: 7))\n").parse().expect("parse main").items);
+        assert_eq!(evaluate_module(&items).expect("evaluate"), 7);
+    }
+}
+
+#[cfg(test)]
+mod aliased_extern_import_tests {
+    //! seed_interpreter_aliased_extern_import_not_found_2026_10_19: a call
+    //! through `use m.{rt_x as y}` must reach the extern `rt_x`.
+    use crate::interpreter::{evaluate_module, record_owner_binding};
+    use simple_parser::Parser;
+    use std::sync::Arc;
+
+    #[test]
+    fn aliased_import_of_an_extern_calls_the_extern() {
+        record_owner_binding(
+            Arc::from("<entry>"),
+            "probe_alias_to_bytes".to_string(),
+            (Arc::from("/probe/alias_ext.spl"), "rt_text_to_bytes".to_string()),
+        );
+        let src = "extern fn rt_text_to_bytes(s: text) -> [u8]\nmain = probe_alias_to_bytes(\"abc\").len()\n";
+        let items = Parser::new(src).parse().expect("parse").items;
+        assert_eq!(evaluate_module(&items).expect("evaluate"), 3);
+    }
+}
+
+#[cfg(test)]
+mod local_callable_shadows_import_tests {
+    //! seed_test_typed_fn_local_shadowed_by_global_2026-10-04: a fn-valued
+    //! LOCAL must win over a same-named function the module imports.
+    use crate::interpreter::{evaluate_module, record_owner_binding, tag_function_module_owner};
+    use simple_parser::ast::Node;
+    use simple_parser::Parser;
+    use std::sync::Arc;
+
+    #[test]
+    fn fn_valued_local_wins_over_an_import_bound_function() {
+        let mut items = Vec::new();
+        // Two co-loaded `pick` definitions, so the call reaches the overload /
+        // import-binding selection (Priority 4).
+        for (src, owner) in [
+            ("fn pick(a: i64, b: i64) -> i64:\n    a * 100 + b\n", "/probe/shadow_lib_a.spl"),
+            ("fn pick(a: i64, b: i64) -> i64:\n    a * 1000 + b\n", "/probe/shadow_lib_b.spl"),
+        ] {
+            for node in Parser::new(src).parse().expect("parse").items {
+                items.push(match node {
+                    Node::Function(mut f) => {
+                        tag_function_module_owner(&mut f, owner);
+                        Node::Function(f)
+                    }
+                    other => other,
+                });
+            }
+        }
+        record_owner_binding(
+            Arc::from("<entry>"),
+            "pick".to_string(),
+            (Arc::from("/probe/shadow_lib_a.spl"), "pick".to_string()),
+        );
+        let entry = "fn second(a: i64, b: i64) -> i64:\n    b\nfn probe() -> i64:\n    val pick = second\n    pick(7, 3)\nmain = probe()\n";
+        items.extend(Parser::new(entry).parse().expect("parse entry").items);
+        assert_eq!(evaluate_module(&items).expect("evaluate"), 3);
     }
 }

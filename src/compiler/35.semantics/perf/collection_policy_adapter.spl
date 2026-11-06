@@ -1,0 +1,185 @@
+# Collection policy adapter — W4 of the data-attributes plan (§7.4, §14).
+#
+# The one place where a resolved ResolvedCollectionPolicyV1 chooses the
+# linear, chained-hash or AVL storage of AdaptiveTextSet, AdaptiveMap and
+# AdaptiveSet. It sits above both the policy record and the containers so the
+# containers never import the policy layer.
+#
+# decide() checks the policy against the container profile and returns a
+# decision that names the reason for every candidate it did not select
+# (the CollectionPlanDecision explain shape). An explicit pin the container
+# cannot honour is an Err, never a panic (COL-07). `auto` keeps the container's
+# original representation: the adapter does not call set_attribute(Auto),
+# which would itself demote (COL-08). Profile evidence still reaches `auto`
+# containers through the existing feedback catalog at attributed_at_site.
+#
+# decide() cannot see key values, so an ordered pin over keys without native
+# order is checked by the map apply helper against the held keys (Err), and
+# by AdaptiveMap itself at a later put. The apply helpers re-check the
+# container's own profile, so a decision made against another profile cannot
+# reach a container panic. `next_instance` applies only to an empty container;
+# a populated one keeps its storage (data plan 11.1) and the helper errs.
+#
+# Policy: `auto` over a policy that forbids a representation the live container
+# could switch into is an error (the owner must pin), not a silent restriction.
+
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveTextSet, AdaptiveSetAttribute, AdaptiveSetProfile, adaptive_set_attribute_supported}
+use std.nogc_sync_mut.sffi.ordered_key_cmp.{ordered_key_native_usable}
+use std.nogc_sync_mut.src.collections.adaptive_map.AdaptiveMap
+use std.nogc_sync_mut.src.collections.adaptive_set.AdaptiveSet
+use compiler.semantics.perf.collection_plan_selection.{CollectionPlanAlgorithm}
+use compiler.semantics.perf.resolved_data_policy.{resolved_collection_token_v1}
+use compiler.semantics.perf.resolved_collection_policy.{ResolvedCollectionPolicyV1, RESOLVED_COLLECTION_POLICY_CONTRACT_V1}
+
+pub struct CollectionPolicyAdapterDecisionV1:
+    policy_digest: text
+    switch_policy: text
+    # The representation the policy asks for; Original when it asks for none.
+    recommended: CollectionPlanAlgorithm
+    # The representation the adapter installs; Original leaves the container as is.
+    selected: CollectionPlanAlgorithm
+    applied: bool
+    reason: text
+    linear_rejection: text
+    hash_rejection: text
+    ordered_rejection: text
+
+fn collection_policy_allowed_v1(policy: ResolvedCollectionPolicyV1, token: text) -> bool:
+    for algorithm in policy.allowed_representations:
+        if resolved_collection_token_v1(algorithm) == token:
+            return true
+    false
+
+# Hard eligibility of one candidate for this policy and container profile;
+# "" when eligible.
+fn collection_policy_hard_rejection_v1(policy: ResolvedCollectionPolicyV1, profile: AdaptiveSetProfile,
+                                       token: text) -> text:
+    if not collection_policy_allowed_v1(policy, token):
+        return "not-allowed-by-policy"
+    if token == "hash" and not profile.allow_hash:
+        return "hash-disabled-by-container-profile"
+    ""
+
+fn collection_policy_algorithm_of_v1(token: text) -> CollectionPlanAlgorithm:
+    if token == "linear":
+        return CollectionPlanAlgorithm.Linear
+    if token == "hash":
+        return CollectionPlanAlgorithm.Hash
+    if token == "ordered":
+        return CollectionPlanAlgorithm.Ordered
+    CollectionPlanAlgorithm.Original
+
+fn collection_policy_reasons_text_v1(linear: text, hash: text, ordered: text) -> text:
+    "linear: {linear}; hash: {hash}; ordered: {ordered}"
+
+pub fn collection_policy_explain_v1(decision: CollectionPolicyAdapterDecisionV1) -> text:
+    "selected={resolved_collection_token_v1(decision.selected)} recommended={resolved_collection_token_v1(decision.recommended)} " +
+        "applied={decision.applied} switch={decision.switch_policy} reason={decision.reason}; " +
+        collection_policy_reasons_text_v1(linear: decision.linear_rejection, hash: decision.hash_rejection,
+            ordered: decision.ordered_rejection) +
+        " policy={decision.policy_digest}"
+
+pub fn collection_policy_decide_v1(policy: ResolvedCollectionPolicyV1,
+                                   profile: AdaptiveSetProfile) -> Result<CollectionPolicyAdapterDecisionV1, text>:
+    if policy.contract_version != RESOLVED_COLLECTION_POLICY_CONTRACT_V1:
+        return Err("collection policy contract {policy.contract_version} is not supported")
+    val mode = policy.switch_policy
+    val report_only = mode == "report_only"
+    if not report_only and mode != "next_instance" and mode != "exclusive_live":
+        return Err("switch-policy-not-admitted: adaptive containers apply only report_only, next_instance or exclusive_live, not '{mode}'")
+    val linear = collection_policy_hard_rejection_v1(policy, profile, "linear")
+    val hash = collection_policy_hard_rejection_v1(policy, profile, "hash")
+    val ordered = collection_policy_hard_rejection_v1(policy, profile, "ordered")
+    val choice = policy.choice.choice
+    if choice == "original":
+        return Ok(CollectionPolicyAdapterDecisionV1(policy_digest: policy.canonical_policy_digest,
+            switch_policy: mode, recommended: CollectionPlanAlgorithm.Original,
+            selected: CollectionPlanAlgorithm.Original, applied: false, reason: "original-pinned",
+            linear_rejection: "not-selected-original-pin", hash_rejection: "not-selected-original-pin",
+            ordered_rejection: "not-selected-original-pin"))
+    if choice == "auto":
+        # A live auto container starts linear and may switch to hash (when its
+        # profile allows) or ordered; a policy that forbids one of those cannot
+        # be honoured by live switching, so it must pin instead.
+        if linear != "" or ordered != "" or (profile.allow_hash and hash != ""):
+            return Err("collection-policy-rejected: auto cannot restrict a live adaptive container; " +
+                collection_policy_reasons_text_v1(linear: linear, hash: hash, ordered: ordered))
+        return Ok(CollectionPolicyAdapterDecisionV1(policy_digest: policy.canonical_policy_digest,
+            switch_policy: mode, recommended: CollectionPlanAlgorithm.Original,
+            selected: CollectionPlanAlgorithm.Original, applied: false, reason: "auto-no-admitted-evidence",
+            linear_rejection: "auto-retains-original", hash_rejection: "auto-retains-original",
+            ordered_rejection: "auto-retains-original"))
+    # resolved_collection_policy_v1 already admits only allowed tokens here.
+    val requested = collection_policy_algorithm_of_v1(choice)
+    val other = "not-selected-explicit-pin"
+    val linear_reason = if choice == "linear": linear else: (if linear == "": other else: linear)
+    val hash_reason = if choice == "hash": hash else: (if hash == "": other else: hash)
+    val ordered_reason = if choice == "ordered": ordered else: (if ordered == "": other else: ordered)
+    val own = if choice == "linear": linear else: (if choice == "hash": hash else: ordered)
+    if own != "" and report_only:
+        # Report mode changes nothing; it explains the rejection instead of failing.
+        return Ok(CollectionPolicyAdapterDecisionV1(policy_digest: policy.canonical_policy_digest,
+            switch_policy: mode, recommended: requested, selected: CollectionPlanAlgorithm.Original,
+            applied: false, reason: "report-only-rejected", linear_rejection: linear_reason,
+            hash_rejection: hash_reason, ordered_rejection: ordered_reason))
+    if own != "":
+        return Err("collection-policy-rejected: requested {choice}; " +
+            collection_policy_reasons_text_v1(linear: linear_reason, hash: hash_reason, ordered: ordered_reason))
+    if report_only:
+        return Ok(CollectionPolicyAdapterDecisionV1(policy_digest: policy.canonical_policy_digest,
+            switch_policy: mode, recommended: requested, selected: CollectionPlanAlgorithm.Original,
+            applied: false, reason: "report-only", linear_rejection: linear_reason,
+            hash_rejection: hash_reason, ordered_rejection: ordered_reason))
+    Ok(CollectionPolicyAdapterDecisionV1(policy_digest: policy.canonical_policy_digest,
+        switch_policy: mode, recommended: requested, selected: requested, applied: true,
+        reason: "explicit-pin", linear_rejection: linear_reason, hash_rejection: hash_reason,
+        ordered_rejection: ordered_reason))
+
+fn collection_policy_attribute_v1(algorithm: CollectionPlanAlgorithm) -> AdaptiveSetAttribute:
+    val token = resolved_collection_token_v1(algorithm)
+    if token == "linear":
+        return AdaptiveSetAttribute.Linear
+    if token == "hash":
+        return AdaptiveSetAttribute.Hash
+    if token == "ordered":
+        return AdaptiveSetAttribute.Ordered
+    AdaptiveSetAttribute.Auto
+
+# Shared apply admission: Ok(false) leaves the container as is, Ok(true) lets
+# the helper call set_attribute, Err explains why it cannot.
+fn collection_policy_apply_gate_v1(decision: CollectionPolicyAdapterDecisionV1, profile: AdaptiveSetProfile,
+                                   size: i64) -> Result<bool, text>:
+    if not decision.applied:
+        return Ok(false)
+    val token = resolved_collection_token_v1(decision.selected)
+    if decision.switch_policy == "next_instance" and size > 0:
+        return Err("next-instance-not-live: container already holds {size} entries; it keeps its storage, use exclusive_live to rebuild it")
+    if not adaptive_set_attribute_supported(profile, collection_policy_attribute_v1(decision.selected)):
+        return Err("collection-policy-rejected: requested {token}; hash: hash-disabled-by-container-profile")
+    Ok(true)
+
+# Apply a decision from collection_policy_decide_v1 to an exclusively owned
+# container. An unapplied decision returns the container unchanged.
+pub fn collection_policy_apply_text_set_v1(set: AdaptiveTextSet,
+                                           decision: CollectionPolicyAdapterDecisionV1) -> Result<AdaptiveTextSet, text>:
+    var out = set
+    if collection_policy_apply_gate_v1(decision, out.profile, out.len())?:
+        out.set_attribute(collection_policy_attribute_v1(decision.selected))
+    Ok(out)
+
+pub fn collection_policy_apply_map_v1<K, V>(map: AdaptiveMap<K, V>,
+                                            decision: CollectionPolicyAdapterDecisionV1) -> Result<AdaptiveMap<K, V>, text>:
+    var out = map
+    if collection_policy_apply_gate_v1(decision, out.profile, out.len())?:
+        if resolved_collection_token_v1(decision.selected) == "ordered":
+            for entry in out.storage_entries():
+                if not ordered_key_native_usable(entry.key):
+                    return Err("collection-policy-rejected: requested ordered; ordered: key-without-native-order")
+        out.set_attribute(collection_policy_attribute_v1(decision.selected))
+    Ok(out)
+
+pub fn collection_policy_apply_set_v1<K>(set: AdaptiveSet<K>,
+                                         decision: CollectionPolicyAdapterDecisionV1) -> Result<AdaptiveSet<K>, text>:
+    var out = set
+    out.inner = collection_policy_apply_map_v1(out.inner, decision)?
+    Ok(out)

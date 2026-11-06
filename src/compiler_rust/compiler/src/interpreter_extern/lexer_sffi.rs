@@ -166,7 +166,7 @@ pub fn simple_lexer_tokenize(args: &[Value]) -> Result<Value, CompileError> {
     let token_values: Vec<Value> = tokens
         .into_iter()
         .map(|token| {
-            let mut fields = HashMap::new();
+            let mut fields = crate::value::DictMap::new();
             fields.insert("kind".to_string(), Value::text(token.kind));
             fields.insert("text".to_string(), Value::text(token.text));
 

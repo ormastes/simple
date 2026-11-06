@@ -15,7 +15,7 @@ use crate::interpreter::{
 };
 
 use crate::bounded_cache::{limit_from_env, BoundedCache, CacheStats};
-use crate::value::{Env, ModuleTable, TableView, Value};
+use crate::value::{DictMap, Env, ModuleTable, TableView, Value};
 use simple_parser::ast::{ClassDef, EnumDef, FunctionDef};
 
 // ---------------------------------------------------------------------------
@@ -100,7 +100,7 @@ fn filtered_dict_cache_max() -> usize {
 /// can outlive the cache entry in an importer's env. In both cases the
 /// allocation survives eviction anyway, so evicting would free nothing and only
 /// cost a rebuild.
-fn filtered_dict_pinned(value: &(Arc<HashMap<String, Value>>, Arc<HashMap<String, Value>>)) -> bool {
+fn filtered_dict_pinned(value: &(Arc<DictMap>, Arc<DictMap>)) -> bool {
     Arc::strong_count(&value.0) > 1 || Arc::strong_count(&value.1) > 1
 }
 
@@ -517,7 +517,7 @@ thread_local! {
     /// whose source or filtered map is still referenced elsewhere is pinned --
     /// which is also the case where eviction would free nothing, since the
     /// allocation stays alive through the other reference.
-    static FILTERED_DICT_CACHE: RefCell<BoundedCache<usize, (Arc<HashMap<String, Value>>, Arc<HashMap<String, Value>>)>> =
+    static FILTERED_DICT_CACHE: RefCell<BoundedCache<usize, (Arc<DictMap>, Arc<DictMap>)>> =
         RefCell::new(BoundedCache::new(filtered_dict_cache_max(), filtered_dict_pinned));
     static LOADER_STATS: RefCell<LoaderStats> = RefCell::new(LoaderStats::default());
 }
@@ -873,7 +873,7 @@ pub fn get_cached_module_exports(path: &Path) -> Option<Value> {
 // rule). Process-wide, not thread-local: a module value can cross threads.
 // ---------------------------------------------------------------------------
 
-type ModuleDictRegistry = HashMap<usize, (Arc<HashMap<String, Value>>, TableView)>;
+type ModuleDictRegistry = HashMap<usize, (Arc<DictMap>, TableView)>;
 
 fn module_dict_tables() -> &'static parking_lot::RwLock<ModuleDictRegistry> {
     static TABLES: OnceLock<parking_lot::RwLock<ModuleDictRegistry>> = OnceLock::new();
@@ -901,7 +901,7 @@ fn maybe_registered(addr: usize) -> bool {
     REGISTRY_FILTER[word].load(std::sync::atomic::Ordering::Acquire) & mask != 0
 }
 
-fn register_module_dict(dict: &Arc<HashMap<String, Value>>, view: TableView) {
+fn register_module_dict(dict: &Arc<DictMap>, view: TableView) {
     let (word, mask) = registry_filter_bit(Arc::as_ptr(dict) as usize);
     REGISTRY_FILTER[word].fetch_or(mask, std::sync::atomic::Ordering::Release);
     module_dict_tables()
@@ -919,7 +919,7 @@ fn sweep_module_dict_tables() {
 
 /// The registered view of `dict`, if it is a finished module's export dict
 /// (or the filtered copy of one).
-pub fn module_dict_view(dict: &Arc<HashMap<String, Value>>) -> Option<TableView> {
+pub fn module_dict_view(dict: &Arc<DictMap>) -> Option<TableView> {
     if !maybe_registered(Arc::as_ptr(dict) as usize) {
         return None;
     }
@@ -931,13 +931,13 @@ pub fn module_dict_view(dict: &Arc<HashMap<String, Value>>) -> Option<TableView>
 
 /// The registered view of `dict` when it resolves anything beyond `dict`
 /// itself; `None` for plain dicts and modules that imported nothing whole.
-pub fn layered_view(dict: &Arc<HashMap<String, Value>>) -> Option<TableView> {
+pub fn layered_view(dict: &Arc<DictMap>) -> Option<TableView> {
     module_dict_view(dict).filter(|view| !view.table.layers().is_empty())
 }
 
 /// `dict`'s view for layering into an importer: the registered table, or a
 /// leaf table that is exactly `dict` (partial / cycle / empty dicts).
-pub fn module_table_for(dict: &Arc<HashMap<String, Value>>) -> TableView {
+pub fn module_table_for(dict: &Arc<DictMap>) -> TableView {
     match module_dict_view(dict) {
         Some(view) if !view.filtered => view,
         _ => TableView::raw(Arc::new(ModuleTable::leaf(Arc::clone(dict)))),
@@ -945,21 +945,21 @@ pub fn module_table_for(dict: &Arc<HashMap<String, Value>>) -> TableView {
 }
 
 /// `dict[key]` as the module's flat export table would have answered it.
-pub fn module_dict_get(dict: &Arc<HashMap<String, Value>>, key: &str) -> Option<Value> {
+pub fn module_dict_get(dict: &Arc<DictMap>, key: &str) -> Option<Value> {
     if let Some(value) = dict.get(key) {
         return Some(value.clone());
     }
     layered_view(dict).and_then(|view| view.get(key).cloned())
 }
 
-pub fn module_dict_contains(dict: &Arc<HashMap<String, Value>>, key: &str) -> bool {
+pub fn module_dict_contains(dict: &Arc<DictMap>, key: &str) -> bool {
     dict.contains_key(key) || layered_view(dict).is_some_and(|view| view.contains_key(key))
 }
 
 /// `Arc::make_mut` for a dict that may be a layered module value: a write
 /// first materializes the flat surface, so the written copy still carries
 /// every name the module value resolved.
-pub fn module_dict_make_mut(dict: &mut Arc<HashMap<String, Value>>) -> &mut HashMap<String, Value> {
+pub fn module_dict_make_mut(dict: &mut Arc<DictMap>) -> &mut DictMap {
     if let Some(flat) = module_dict_flat(dict) {
         *dict = flat;
     }
@@ -967,7 +967,7 @@ pub fn module_dict_make_mut(dict: &mut Arc<HashMap<String, Value>>) -> &mut Hash
 }
 
 /// Every visible (name, value) of `dict`, each name once.
-pub fn module_dict_for_each_visible(dict: &Arc<HashMap<String, Value>>, mut f: impl FnMut(&String, &Value)) {
+pub fn module_dict_for_each_visible(dict: &Arc<DictMap>, mut f: impl FnMut(&String, &Value)) {
     match layered_view(dict) {
         Some(view) => view.for_each_visible(|name, value| f(name, value)),
         None => {
@@ -981,9 +981,9 @@ pub fn module_dict_for_each_visible(dict: &Arc<HashMap<String, Value>>, mut f: i
 /// The flat map a layered module dict stands for (a fresh copy), or `None`
 /// when `dict` is already flat. For collection operations applied to a
 /// module value (`len`, `keys`, iteration, ...).
-pub fn module_dict_flat(dict: &Arc<HashMap<String, Value>>) -> Option<Arc<HashMap<String, Value>>> {
+pub fn module_dict_flat(dict: &Arc<DictMap>) -> Option<Arc<DictMap>> {
     let view = layered_view(dict)?;
-    let mut flat = HashMap::new();
+    let mut flat = DictMap::new();
     view.for_each_visible(|name, value| {
         flat.insert(name.clone(), value.clone());
     });
@@ -991,7 +991,7 @@ pub fn module_dict_flat(dict: &Arc<HashMap<String, Value>>) -> Option<Arc<HashMa
 }
 
 /// Number of visible names of `dict`.
-pub fn module_dict_len(dict: &Arc<HashMap<String, Value>>) -> usize {
+pub fn module_dict_len(dict: &Arc<DictMap>) -> usize {
     match layered_view(dict) {
         Some(view) => {
             let mut n = 0;
@@ -1295,7 +1295,7 @@ pub fn filter_functions_from_value(value: &Value) -> Value {
                 return Value::Dict(hit);
             }
             crate::perf_counters::bump(&crate::perf_counters::FILTERED_DICT_BUILDS, 1);
-            let filtered: Arc<HashMap<String, Value>> = Arc::new(
+            let filtered: Arc<DictMap> = Arc::new(
                 dict.iter()
                     .map(|(k, v)| (k.clone(), filter_functions_from_value(v)))
                     .collect(),
@@ -1514,7 +1514,7 @@ mod tests {
         // below would then be measuring nothing.
         let expect_body = |i: usize| (format!("k{i}"), i as i64);
         for i in 0..8usize {
-            let mut map = HashMap::new();
+            let mut map = crate::value::DictMap::new();
             let (k, v) = expect_body(i);
             map.insert(k, Value::Int(v));
             let dict = Arc::new(map);
@@ -1541,7 +1541,7 @@ mod tests {
         // re-check in `filter_functions_from_value` is what makes that a miss
         // and a rebuild instead of a false hit.
         for i in 0..8usize {
-            let mut map = HashMap::new();
+            let mut map = crate::value::DictMap::new();
             let (k, v) = expect_body(i);
             map.insert(k.clone(), Value::Int(v));
             let dict = Arc::new(map);

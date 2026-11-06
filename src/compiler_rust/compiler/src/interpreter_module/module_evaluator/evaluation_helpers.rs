@@ -796,7 +796,7 @@ fn process_use_stmt(
         }
         Err(_e) => {
             // Module loading failed - use empty dict
-            env.insert(binding_name.clone(), Value::Dict(Arc::new(HashMap::new())));
+            env.insert(binding_name.clone(), Value::Dict(Arc::new(crate::value::DictMap::new())));
         }
     }
     Ok(())

@@ -10,31 +10,20 @@ fn is_dict_entry_marker(items: &[Value]) -> bool {
     items.len() == 3 && matches!(&items[0], Value::Symbol(s) if s == DICT_ENTRY_MARKER)
 }
 
-/// Canonical dict iteration order: **sorted by the internal key string**.
+/// The single iteration-order helper for `Value::Dict` / `Value::FrozenDict`.
 ///
-/// `Value::Dict` is backed by `std::collections::HashMap`, whose `RandomState`
-/// hasher is seeded per PROCESS. Iterating it directly therefore produced a
-/// DIFFERENT key order on every run of the same binary over the same input --
-/// `{"a":1,"b":2,"c":3,"d":4}.keys()` yielded 15 distinct orderings across 20
-/// runs. That made any spec asserting key order inherently flaky (green
-/// locally, red in CI, with no code change).
+/// **Contract: `Dict` iterates in INSERTION order on every engine** (owner
+/// decision 2026-11-06, `doc/07_guide/language/dict_iteration_order.md`). A new
+/// key is appended; replacing a value keeps the key's position; removing a key
+/// (`shift_remove`) drops it, and re-adding appends it at the end.
 ///
 /// Every order-visible dict boundary -- `keys()`, `values()`, `entries()` /
 /// `items()`, `for (k, v) in dict`, and dict `to_display_string` /
-/// `to_debug_string` -- MUST route through this function so they agree with
-/// each other. Sorting one of them alone would desync `keys()[i]` from
-/// `values()[i]`.
-///
-/// Sorted (rather than insertion) order is the contract because it is a pure
-/// function of key content, so it can be reproduced identically by every
-/// backend without sharing a container: the interpreter's `HashMap`, the JIT,
-/// and the compiled runtime's open-addressing `RuntimeDict` (which is
-/// FNV-bucket ordered and cannot preserve insertion order without being
-/// rewritten). See `doc/07_guide/language/dict_iteration_order.md`.
-pub fn dict_entries_sorted(map: &HashMap<String, Value>) -> Vec<(&String, &Value)> {
-    let mut entries: Vec<(&String, &Value)> = map.iter().collect();
-    entries.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
-    entries
+/// `to_debug_string` -- routes through this function so they agree with each
+/// other and with the compiled runtime's `RuntimeDict` (insertion stamps,
+/// `runtime/src/value/dict.rs`) and the C runtime's `RtCoreDict`.
+pub fn dict_entries_ordered(map: &DictMap) -> Vec<(&String, &Value)> {
+    map.iter().collect()
 }
 
 /// Whether a rendered float came out looking like a plain integer (`1`, `-3`,
@@ -254,6 +243,14 @@ impl Value {
             Value::ByteArray(items) | Value::FrozenByteArray(items) => {
                 let parts: Vec<String> = items.iter().map(u8::to_string).collect();
                 format!("[{}]", parts.join(","))
+            }
+            // A dict used as a key: canonical, order-INDEPENDENT form (sorted
+            // entries), since `==` on dicts ignores insertion order.
+            Value::Dict(map) | Value::FrozenDict(map) => {
+                let mut parts: Vec<String> =
+                    map.iter().map(|(k, v)| format!("{}:{}", k, v.to_key_string())).collect();
+                parts.sort();
+                format!("{{{}}}", parts.join(","))
             }
             other => format!("{other:?}"),
         }
@@ -487,14 +484,14 @@ impl Value {
             // Sorted-by-key canonical order: printing a dict must be a stable
             // function of its contents, not of the per-process hash seed.
             Value::Dict(map) => {
-                let parts: Vec<String> = dict_entries_sorted(map)
+                let parts: Vec<String> = dict_entries_ordered(map)
                     .into_iter()
                     .map(|(k, v)| format!("{}: {}", k, Value::dict_entry_value_ref(v).to_display_string()))
                     .collect();
                 format!("{{{}}}", parts.join(", "))
             }
             Value::FrozenDict(map) => {
-                let parts: Vec<String> = dict_entries_sorted(map)
+                let parts: Vec<String> = dict_entries_ordered(map)
                     .into_iter()
                     .map(|(k, v)| format!("{}: {}", k, Value::dict_entry_value_ref(v).to_display_string()))
                     .collect();
@@ -611,7 +608,7 @@ impl Value {
                 format!("[{}]", parts.join(", "))
             }
             Value::Dict(map) => {
-                let parts: Vec<String> = dict_entries_sorted(map)
+                let parts: Vec<String> = dict_entries_ordered(map)
                     .into_iter()
                     .map(|(k, v)| format!("{}: {}", k, Value::dict_entry_value_ref(v).to_debug_string()))
                     .collect();
@@ -776,7 +773,12 @@ impl Value {
             "unit" | "Unit" => matches!(self, Value::Unit { .. }),
             // Check for object class name, enum name, or unit suffix
             _ => {
-                if let Value::Object { class, .. } = self {
+                // Reference classes are `Value::ClassInstance`, not `Value::Object`;
+                // matching only `Object` made every class-typed overload candidate
+                // fail scoring, so a bare call fell through to the last-registered
+                // same-named function of another module
+                // (seed_interp_cross_module_free_fn_collision_2026_11_06).
+                if let Some(class) = self.aggregate_class() {
                     class == type_name
                 } else if let Value::Enum { enum_name, .. } = self {
                     enum_name == type_name
@@ -1017,5 +1019,55 @@ mod dict_composite_key_tests {
                 "scalar key {key:?} must not be wrapped in a __dict_entry__ marker tuple"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod dict_insertion_order_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn keys_of(map: &DictMap) -> Vec<String> {
+        dict_entries_ordered(map).into_iter().map(|(k, _)| k.clone()).collect()
+    }
+
+    #[test]
+    fn entries_iterate_in_insertion_order_not_sorted_order() {
+        let mut map = DictMap::new();
+        for (k, v) in [("b", 1), ("a", 2), ("10", 3), ("9", 4)] {
+            map.insert(k.to_string(), Value::Int(v));
+        }
+        assert_eq!(keys_of(&map), vec!["b", "a", "10", "9"]);
+        assert_eq!(Value::Dict(Arc::new(map)).to_display_string(), "{b: 1, a: 2, 10: 3, 9: 4}");
+    }
+
+    #[test]
+    fn replace_keeps_position_and_shift_remove_then_readd_appends() {
+        let mut map = DictMap::new();
+        for (k, v) in [("b", 1), ("a", 2), ("c", 3)] {
+            map.insert(k.to_string(), Value::Int(v));
+        }
+        map.insert("a".to_string(), Value::Int(20));
+        assert_eq!(keys_of(&map), vec!["b", "a", "c"]);
+        map.shift_remove("b");
+        map.insert("b".to_string(), Value::Int(5));
+        assert_eq!(keys_of(&map), vec!["a", "c", "b"]);
+    }
+}
+
+#[cfg(test)]
+mod dict_key_string_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn dict_key_string_ignores_insertion_order() {
+        let mut ab = DictMap::new();
+        ab.insert("a".to_string(), Value::Int(1));
+        ab.insert("b".to_string(), Value::Int(2));
+        let mut ba = DictMap::new();
+        ba.insert("b".to_string(), Value::Int(2));
+        ba.insert("a".to_string(), Value::Int(1));
+        assert_eq!(Value::Dict(Arc::new(ab)).to_key_string(), Value::Dict(Arc::new(ba)).to_key_string());
     }
 }

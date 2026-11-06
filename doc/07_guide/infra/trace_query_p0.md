@@ -178,9 +178,11 @@ How to read the output:
 - Table format: 7 header lines (`Snapshot:`, `Capture:`, `Ingestion:`,
   `Graph complete:`, `Qualification:`, `Generation:`, `Input manifest:`), then
   `KIND<TAB>ID<TAB>TITLE` rows, `Total selected: N`, optional `Next cursor:`,
-  then diagnostics (none for the default preview; a
-  `TRACE-AUTHORITY-CONFLICT` line means a claim outside the authority
-  registry and is a real finding). Grep the rows out with `grep -P '^\w+\t'`.
+  then (when any exist) one summary line `Diagnostics: N (details on stderr)`;
+  the per-row diagnostics go to **stderr** (SDN keeps them inside its document).
+  For the default preview there should be none; a `TRACE-AUTHORITY-CONFLICT`
+  line means a claim outside the authority registry and is a real finding.
+  Grep the rows out with `grep -P '^\w+\t'`.
 - `--format=sdn`: one inline SDN dictionary on one line. Keys agents use:
   `nodes: [{id, kind, title}]`, `total_count`, `next_cursor`, `page_complete`,
   `graph_complete`, `snapshot_kind` (`worktree_preview` | `git_commit` |
