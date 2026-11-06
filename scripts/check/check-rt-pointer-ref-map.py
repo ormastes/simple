@@ -238,7 +238,7 @@ def scan(root):
     for top in ('src/compiler', 'src/lib', 'src/app', 'src/os'):
         for path in walk(root, top, ('.spl',)):
             src = read(path)
-            rel = os.path.relpath(path, root)
+            rel = os.path.relpath(path, root).replace(os.sep, '/')
             for m in EXT.finditer(src):
                 if m[1] in sigs:
                     pedges += 1
@@ -248,7 +248,7 @@ def scan(root):
                     continue
                 edges += 1
                 ty = (m[3] or 'void').strip()
-                key = '%s:%s:%s' % (os.path.relpath(path, root), m[1], ty)
+                key = '%s:%s:%s' % (rel, m[1], ty)
                 if ty.rstrip('?') in NARROW:
                     narrow.add(key)
                 elif ty.rstrip('?') in ('i64', 'u64', 'usize', 'isize', 'void'):
