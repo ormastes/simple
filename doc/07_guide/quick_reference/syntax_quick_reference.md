@@ -434,6 +434,13 @@ s.char_at(99)                       # "" (char_at keeps its over-run policy)
   literal and stays text; grapheme handling is a separate API.
 - `s[i]` indexes by code point; `.len()` counts code points (staged);
   `.byte_len()` / `byte_at` are byte-level.
+- **Two explicit length functions (owner decision 2026-11-06):** `s.byte_len()`
+  = UTF-8 bytes, `s.char_count()` = code points (`s.chars().len()` is the O(n)
+  equivalent). Prefer these over `len()`, which is ambiguous today (bytes in
+  both engines; `s[i]` is bounded by `char_count()`, not `len()`). Known gap:
+  under `simple run` (JIT) `s.byte_len()` yields an untagged int (prints
+  `<invalid-heap:0x9>`, `byte_len() == len()` is false) - `+ 0` first.
+  Spec: `test/01_unit/lib/text/text_len_units_spec.spl`.
 - A `char` is not a condition: `if c:` / `while c:` is a type error. Write
   `c != '\0'`.
 - Staged warnings (non-exhaustive match, `Any` outside `unsafe:`, char used as

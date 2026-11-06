@@ -7,6 +7,8 @@ use std.spec.*
 
 use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserResponse}
 use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.web.browser_session_loading.*
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{DomIdentityIndex, DomNodeRoute}
 use std.gc_async_mut.gpu.browser_engine.web_render_backend.{WebRenderBackend}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_debug_layout_by_id,
@@ -16,6 +18,16 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_event_identity, be_dom_find_by_tag, be_dom_find_path_to_id,
     be_dom_get_attr, be_dom_get_text_content, be_dom_has_attr
 }
+
+fn _dom_input_index(session: BrowserSession) -> DomIdentityIndex:
+    match session.current_dom_identity_index():
+        Some(index): index
+        nil: fail("Expected BrowserSession document identity index")
+
+fn _dom_input_route(session: BrowserSession, author_id: text) -> DomNodeRoute:
+    match _dom_input_index(session).route_for_author_id(author_id):
+        Some(route): route
+        nil: fail("Expected indexed route for #{author_id}")
 
 fn _count_dom_input_color(pixels: [u32], color: u32) -> i64:
     var count: i64 = 0
@@ -129,7 +141,9 @@ describe "BrowserSession live DOM input":
         val before = session.render_to_pixels(64, 48)
         expect(_count_dom_input_color(before.pixel_data, 0xFFEF4444u32)).to_be_greater_than(0)
 
-        val dispatch = session.dispatch_dom_event("accept", "click", true, true)
+        val dispatch = session.dispatch_dom_event_route(
+            _dom_input_route(session, "accept"), "click", true, true
+        ).unwrap()
         expect(dispatch.default_action).to_equal("input-checkbox-toggle")
         expect(dispatch.default_action_allowed).to_equal(true)
         expect(session.current_title).to_contain("checked=\"checked\"")
@@ -148,7 +162,9 @@ describe "BrowserSession live DOM input":
             "<html><body><a id='blocked' href='/next' onclick='prevent-default'>Next</a></body></html>"
         )
 
-        val dispatch = session.dispatch_dom_event("blocked", "click", true, true)
+        val dispatch = session.dispatch_dom_event_route(
+            _dom_input_route(session, "blocked"), "click", true, true
+        ).unwrap()
 
         expect(dispatch.event.default_prevented).to_equal(true)
         expect(dispatch.default_action_allowed).to_equal(false)
@@ -164,9 +180,9 @@ describe "BrowserSession live DOM input":
             "<html><head><title>Initial</title></head><body><input id='accept' type='checkbox' onclick='prevent-default' oninput=\"document.title='input'\" onchange=\"document.title='change'\"></body></html>"
         )
 
-        val dispatch = session.dispatch_dom_event(
-            "accept", "click", true, true
-        )
+        val dispatch = session.dispatch_dom_event_route(
+            _dom_input_route(session, "accept"), "click", true, true
+        ).unwrap()
 
         expect(dispatch.event.default_prevented).to_equal(true)
         expect(session.current_body_html.contains("checked=")).to_equal(false)
@@ -181,7 +197,9 @@ describe "BrowserSession live DOM input":
             "<html><body><a id='next' href='/next'>Next</a></body></html>"
         )
 
-        val dispatch = session.dispatch_dom_event("next", "click", true, true)
+        val dispatch = session.dispatch_dom_event_route(
+            _dom_input_route(session, "next"), "click", true, true
+        ).unwrap()
 
         expect(dispatch.default_action_allowed).to_equal(true)
         match session.take_pending_request():
@@ -202,9 +220,12 @@ describe "BrowserSession live DOM input":
         val buttons = be_dom_find_by_tag(session.dom_root(), "button")
         expect(buttons.len()).to_equal(1)
 
-        val dispatch = session.dispatch_dom_event(
-            be_dom_event_identity(buttons[0]), "click", true, true
-        )
+        val dispatch = session.dispatch_dom_event_route(
+            DomNodeRoute(
+                generation: _dom_input_index(session).generation,
+                node_id: buttons[0].node_id
+            ), "click", true, true
+        ).unwrap()
 
         expect(dispatch.default_action).to_equal("button-activate")
         expect(session.current_body_html).to_contain("data-activated=\"true\"")
@@ -218,7 +239,9 @@ describe "BrowserSession live DOM input":
             "<html><body><form id='profile' onsubmit='prevent-default'><button id='save'>Save</button></form></body></html>"
         )
 
-        val dispatch = session.dispatch_dom_event("save", "click", true, true)
+        val dispatch = session.dispatch_dom_event_route(
+            _dom_input_route(session, "save"), "click", true, true
+        ).unwrap()
 
         expect(dispatch.default_action_allowed).to_equal(true)
         expect(session.current_body_html).to_contain("data-activated=\"true\"")
@@ -256,9 +279,9 @@ describe "BrowserSession live DOM input":
             nil:
                 fail("Expected sandbox form document request")
 
-        val dispatch = session.dispatch_dom_event(
-            "save", "click", true, true
-        )
+        val dispatch = session.dispatch_dom_event_route(
+            _dom_input_route(session, "save"), "click", true, true
+        ).unwrap()
         expect(dispatch.default_action).to_equal("button-activate")
         expect(session.has_pending_requests()).to_be(false)
         expect(session.warnings.join("|")).to_contain(
@@ -389,9 +412,9 @@ describe "BrowserSession live DOM input":
         expect(be_dom_default_submitter_id(
             session.dom_root(), "profile"
         )).to_equal("save")
-        val dispatch = session.dispatch_dom_event(
-            "save", "click", true, true
-        )
+        val dispatch = session.dispatch_dom_event_route(
+            _dom_input_route(session, "save"), "click", true, true
+        ).unwrap()
 
         expect(dispatch.default_action).to_equal("button-activate")
         match session.take_pending_request():
@@ -411,9 +434,9 @@ describe "BrowserSession live DOM input":
             "<html><body><form action='/save' method='post'><button id='save' type='wat' onclick='prevent-default'>Save</button></form></body></html>"
         )
 
-        val dispatch = session.dispatch_dom_event(
-            "save", "click", true, true
-        )
+        val dispatch = session.dispatch_dom_event_route(
+            _dom_input_route(session, "save"), "click", true, true
+        ).unwrap()
 
         expect(dispatch.default_action_allowed).to_equal(false)
         expect(session.has_pending_requests()).to_equal(false)
@@ -427,9 +450,9 @@ describe "BrowserSession live DOM input":
             "<html><body><form action='/save' method='post'><button id='save' type='button'>Save</button></form></body></html>"
         )
 
-        val dispatch = session.dispatch_dom_event(
-            "save", "click", true, true
-        )
+        val dispatch = session.dispatch_dom_event_route(
+            _dom_input_route(session, "save"), "click", true, true
+        ).unwrap()
 
         expect(dispatch.default_action).to_equal("button-activate")
         expect(session.has_pending_requests()).to_equal(false)
@@ -444,14 +467,16 @@ describe "BrowserSession live DOM input":
         )
         val initial = session.render_to_pixels(128, 180).pixel_data
 
-        expect(session.set_dom_text_input("name", "changed").is_ok()).to_equal(true)
-        expect(session.set_dom_text_input("notes", "changed").is_ok()).to_equal(true)
-        val _ = session.dispatch_dom_event("flag", "click", true, true)
-        expect(session.set_dom_select_value("choice", "two").is_ok()).to_equal(true)
+        expect(session.set_dom_text_input_route(_dom_input_route(session, "name"), "changed").is_ok()).to_equal(true)
+        expect(session.set_dom_text_input_route(_dom_input_route(session, "notes"), "changed").is_ok()).to_equal(true)
+        val _ = session.dispatch_dom_event_route(
+            _dom_input_route(session, "flag"), "click", true, true
+        ).unwrap()
+        expect(session.set_dom_select_value_route(_dom_input_route(session, "choice"), "two").is_ok()).to_equal(true)
         val callbacks_before_reset = session.dom_callback_count
-        val reset = session.dispatch_dom_event(
-            "restore", "click", true, true
-        )
+        val reset = session.dispatch_dom_event_route(
+            _dom_input_route(session, "restore"), "click", true, true
+        ).unwrap()
 
         expect(reset.default_action).to_equal("form-reset")
         expect(session.dom_callback_count).to_equal(
@@ -476,13 +501,13 @@ describe "BrowserSession live DOM input":
             initial, session.render_to_pixels(128, 180).pixel_data
         )).to_equal(true)
 
-        expect(session.set_dom_text_input("kept", "changed").is_ok()).to_equal(true)
+        expect(session.set_dom_text_input_route(_dom_input_route(session, "kept"), "changed").is_ok()).to_equal(true)
         session.clear_dom_focus()
         val prevented_before = session.render_to_pixels(128, 180).pixel_data
         val callbacks_before_prevented = session.dom_callback_count
-        val prevented = session.dispatch_dom_event(
-            "blocked-reset", "click", true, true
-        )
+        val prevented = session.dispatch_dom_event_route(
+            _dom_input_route(session, "blocked-reset"), "click", true, true
+        ).unwrap()
         expect(prevented.default_action).to_equal("form-reset")
         expect(session.dom_callback_count).to_equal(
             callbacks_before_prevented + 1
@@ -505,9 +530,11 @@ describe "BrowserSession live DOM input":
             "https://example.test/form",
             "<html><body><form id='profile' action='/save' method='post'><input id='name' name='name' value='old'><button id='save' name='commit' value='yes'>Save</button></form></body></html>"
         )
-        expect(session.set_dom_text_input("name", "Ada & Bob").is_ok()).to_equal(true)
+        expect(session.set_dom_text_input_route(_dom_input_route(session, "name"), "Ada & Bob").is_ok()).to_equal(true)
 
-        val dispatch = session.dispatch_dom_event("save", "click", true, true)
+        val dispatch = session.dispatch_dom_event_route(
+            _dom_input_route(session, "save"), "click", true, true
+        ).unwrap()
 
         expect(dispatch.default_action_allowed).to_equal(true)
         match session.take_pending_request():
@@ -796,7 +823,7 @@ describe "BrowserSession live DOM input":
             "<html><body><input id='name' oninput=\"document.title='Typing'\"></body></html>"
         )
 
-        val updated = session.set_dom_text_input("name", "Ada & Bob")
+        val updated = session.set_dom_text_input_route(_dom_input_route(session, "name"), "Ada & Bob")
 
         expect(updated.is_ok()).to_equal(true)
         expect(session.current_title).to_equal("Typing")
@@ -811,12 +838,12 @@ describe "BrowserSession live DOM input":
             "<html><body><input id='first' onfocus=\"document.title='Focused'\"><input id='second'></body></html>"
         )
 
-        expect(session.set_dom_text_input("first", "Ada").is_ok()).to_equal(true)
+        expect(session.set_dom_text_input_route(_dom_input_route(session, "first"), "Ada").is_ok()).to_equal(true)
         expect(session.current_title).to_equal("Focused")
         val callbacks_after_focus = session.dom_callback_count
-        expect(session.set_dom_text_input("first", "Ada Lovelace").is_ok()).to_equal(true)
+        expect(session.set_dom_text_input_route(_dom_input_route(session, "first"), "Ada Lovelace").is_ok()).to_equal(true)
         expect(session.dom_callback_count).to_equal(callbacks_after_focus)
-        expect(session.set_dom_text_input("second", "Bob").is_ok()).to_equal(true)
+        expect(session.set_dom_text_input_route(_dom_input_route(session, "second"), "Bob").is_ok()).to_equal(true)
         val inputs = be_dom_find_by_tag(session.dom_root(), "input")
         expect(be_dom_get_attr(inputs[0], "data-focused")).to_equal("")
         expect(be_dom_get_attr(inputs[1], "data-focused")).to_equal("true")
@@ -832,9 +859,9 @@ describe "BrowserSession live DOM input":
         ).is_ok()).to_equal(true)
 
         step("Focus the first control, then move focus to the second")
-        expect(session.set_dom_text_input("first", "Ada").is_ok()).to_equal(true)
+        expect(session.set_dom_text_input_route(_dom_input_route(session, "first"), "Ada").is_ok()).to_equal(true)
         expect(session.eval_script("document.title=''").is_ok()).to_equal(true)
-        expect(session.set_dom_text_input("second", "Bob").is_ok()).to_equal(true)
+        expect(session.set_dom_text_input_route(_dom_input_route(session, "second"), "Bob").is_ok()).to_equal(true)
 
         step("Require blur-before-focus state through DOM, Draw IR, and pixels")
         expect(session.current_title).to_equal("blur>focus>")
