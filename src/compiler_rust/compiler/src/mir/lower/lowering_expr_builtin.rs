@@ -418,6 +418,13 @@ impl<'a> MirLowerer<'a> {
                 });
                 dest
             })?;
+            // `u64` payloads (BoxInt or `rt_value_u64`-tagged) are decoded by
+            // `rt_value_as_u64`. The explicit `Option<u64>` enum slot is not
+            // `slot_holds_tagged_value`, so `unbox_scalar_for_raw_slot` would
+            // skip the decode and leave the tagged word (5 printed as 40).
+            if expr_ty == TypeId::U64 {
+                return self.unbox_u64_runtime_value(raw_result);
+            }
             return self.unbox_scalar_for_raw_slot(expr_ty, args[0].ty, raw_result);
         }
 

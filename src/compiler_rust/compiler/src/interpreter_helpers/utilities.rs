@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use super::super::{evaluate_expr, exec_block, exec_function, Control, Enums, ImplMethods};
 use super::collections::iter_to_vec;
-use super::patterns::bind_pattern;
+use super::patterns::{bind_pattern, collect_pattern_binding_names};
 
 /// Trust `.?`'s own presence decision instead of re-testing the payload's
 /// truthiness. `expr.?` (`Expr::ExistsCheck`) already evaluates to "the
@@ -93,11 +93,17 @@ pub(crate) fn control_to_value(result: Result<Control, CompileError>) -> Result<
     }
 }
 
-/// Iterate over items with pattern binding and optional condition filtering.
-/// Returns a vector of environments for items that match the pattern and pass the condition.
-/// This is used by both ListComprehension and DictComprehension to avoid code duplication.
+/// Iterate over items with pattern binding and optional condition filtering,
+/// running `body` on each accepted item's scope BEFORE the next item is bound
+/// or filtered (per-item order: filter(1), body(1), filter(2), body(2), ...),
+/// matching the pure-Simple desugar and the JIT. Used by both ListComprehension
+/// and DictComprehension. Each item gets a child env clone, so the loop
+/// variable never leaks, and its names are marked local so they shadow a
+/// same-named module global (the identifier read otherwise prefers
+/// MODULE_GLOBALS for non-local names).
+/// Bug: doc/08_tracking/bug/seed_interp_list_comprehension_eval_order_and_shadow_2026-11-06.md
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
-pub(crate) fn comprehension_iterate(
+pub(crate) fn comprehension_for_each<F>(
     iterable: &Value,
     pattern: &Pattern,
     condition: &Option<Box<Expr>>,
@@ -106,15 +112,27 @@ pub(crate) fn comprehension_iterate(
     classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
-) -> Result<Vec<Env>, CompileError> {
+    mut body: F,
+) -> Result<(), CompileError>
+where
+    F: FnMut(
+        &mut Env,
+        &mut HashMap<String, Arc<FunctionDef>>,
+        &mut HashMap<String, Arc<ClassDef>>,
+    ) -> Result<(), CompileError>,
+{
     let items = iter_to_vec(iterable)?;
-    let mut result = Vec::new();
+    let mut names = Vec::new();
+    collect_pattern_binding_names(pattern, &mut names);
 
     for item in items {
         // Create a new scope with the pattern binding
         let mut inner_env = env.clone();
         if !bind_pattern(pattern, &item, &mut inner_env) {
             continue;
+        }
+        for name in &names {
+            inner_env.mark_local(name.clone());
         }
 
         // Check condition if present
@@ -125,10 +143,10 @@ pub(crate) fn comprehension_iterate(
             }
         }
 
-        result.push(inner_env);
+        body(&mut inner_env, functions, classes)?;
     }
 
-    Ok(result)
+    Ok(())
 }
 
 // ============================================================================
