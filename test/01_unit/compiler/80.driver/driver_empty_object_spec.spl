@@ -1,11 +1,11 @@
 use std.spec
-use compiler.driver.driver_empty_object.{driver_empty_object_bytes, driver_empty_object_supported}
+use compiler.driver.driver_empty_object.{driver_empty_object_bytes, driver_empty_object_supported, driver_empty_object_target}
 
 # Repro for stage2_matrix_test_runner_build_no_c_compiler_for_empty_module_object:
 # empty-module objects must not need a C compiler on ELF targets.
 describe "driver_empty_object":
     it "emits a 208 byte ELF64 ET_REL for aarch64 linux":
-        val bytes = driver_empty_object_bytes("aarch64-unknown-linux-gnu")
+        val bytes = driver_empty_object_bytes("aarch64-unknown-linux-gnu", "simple_empty_module_m")
         expect(bytes != nil).to_equal(true)
         val b = bytes!
         expect(b.len()).to_equal(208)
@@ -17,15 +17,42 @@ describe "driver_empty_object":
         expect(b[60]).to_equal(2)
 
     it "uses the x86_64 machine id":
-        val b = driver_empty_object_bytes("x86_64-unknown-linux-gnu")!
+        val b = driver_empty_object_bytes("x86_64-unknown-linux-gnu", "simple_empty_module_m")!
         expect(b[18]).to_equal(62)
 
     it "section header table fits the file":
-        val b = driver_empty_object_bytes("x86_64-unknown-linux-gnu")!
+        val b = driver_empty_object_bytes("x86_64-unknown-linux-gnu", "simple_empty_module_m")!
         expect(b[40]).to_equal(80)
         expect(80 + 2 * 64).to_equal(b.len())
 
-    it "declines non-ELF targets so the C path stays in charge":
-        expect(driver_empty_object_supported("x86_64-pc-windows-gnu")).to_equal(false)
+    it "declines Mach-O targets so the C path stays in charge":
         expect(driver_empty_object_supported("aarch64-apple-darwin")).to_equal(false)
-        expect(driver_empty_object_bytes("x86_64-pc-windows-gnu") == nil).to_equal(true)
+        expect(driver_empty_object_bytes("aarch64-apple-darwin", "simple_empty_module_m") == nil).to_equal(true)
+
+    it "emits a COFF object with one external data symbol for windows":
+        expect(driver_empty_object_supported("x86_64-pc-windows-gnu")).to_equal(true)
+        val b = driver_empty_object_bytes("x86_64-pc-windows-gnu", "simple_empty_module_a_b")!
+        # 20 header + 40 section + 4 data + 18 symbol + 4 strtab size + 23 name + NUL
+        expect(b.len()).to_equal(110)
+        expect(b[0]).to_equal(100)    # 0x8664 little-endian
+        expect(b[1]).to_equal(134)
+        expect(b[2]).to_equal(1)      # one section
+        expect(b[8]).to_equal(64)     # symbol table at 64
+        expect(b[12]).to_equal(1)     # one symbol
+        expect(b[20]).to_equal(46)    # ".data"
+        expect(b[40]).to_equal(60)    # raw data at 60
+        expect(b[76]).to_equal(1)     # symbol in section 1
+        expect(b[80]).to_equal(2)     # IMAGE_SYM_CLASS_EXTERNAL
+        expect(b[82]).to_equal(28)    # string table size
+        expect(b[86]).to_equal(115)   # 's'
+        expect(b[109]).to_equal(0)
+
+    it "uses the arm64 COFF machine id":
+        val b = driver_empty_object_bytes("aarch64-pc-windows-msvc", "simple_empty_module_m")!
+        expect(b[0]).to_equal(100)    # 0xAA64
+        expect(b[1]).to_equal(170)
+
+    it "falls back to the host target when no build target is set":
+        expect(driver_empty_object_target("", "windows", "x86_64")).to_equal("x86_64-pc-windows-gnu")
+        expect(driver_empty_object_target("", "linux", "aarch64")).to_equal("aarch64-unknown-linux-gnu")
+        expect(driver_empty_object_target("riscv64-unknown-linux-gnu", "windows", "x86_64")).to_equal("riscv64-unknown-linux-gnu")

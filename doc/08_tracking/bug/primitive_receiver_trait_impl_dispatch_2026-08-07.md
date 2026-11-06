@@ -1064,3 +1064,6 @@ a time): 29 OK / 1 ERROR — byte-identical diff to the 2026-11-04 after-sweep
 (four ERROR->OK from other landed commits; the single OK->ERROR,
 `aliased_param_writeback_spec` JIT-probe demotion, is `75bb3e73148`, not this
 change).
+
+## 2026-11-06 re-verified: interpreter half PASSES on a seed built from current source
+primitive_receiver_trait_impl_dispatch_spec: simple-ref (stale, 2026-11-04 build) 8/15; seed built from release/1.0.0 (a89f4c436db) 15/15. No source change needed; JIT Defect A and native/pure-Simple Defect B remain as recorded above.

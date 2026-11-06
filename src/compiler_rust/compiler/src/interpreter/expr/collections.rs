@@ -8,7 +8,7 @@ use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 
 use super::super::{
-    comprehension_iterate, create_range_object_opt, normalize_index, shared_text_is_ascii, slice_collection,
+    comprehension_for_each, create_range_object_opt, normalize_index, shared_text_is_ascii, slice_collection,
     ClassDef, Enums, Env, FunctionDef, ImplMethods,
 };
 
@@ -817,7 +817,8 @@ pub(super) fn eval_collection_expr(
             condition,
         } => {
             let iter_val = evaluate_expr(iterable, env, functions, classes, enums, impl_methods)?;
-            let envs = comprehension_iterate(
+            let mut result = Vec::new();
+            comprehension_for_each(
                 &iter_val,
                 pattern,
                 condition,
@@ -826,13 +827,11 @@ pub(super) fn eval_collection_expr(
                 classes,
                 enums,
                 impl_methods,
+                |inner_env, functions, classes| {
+                    result.push(evaluate_expr(expr, inner_env, functions, classes, enums, impl_methods)?);
+                    Ok(())
+                },
             )?;
-
-            let mut result = Vec::new();
-            for mut inner_env in envs {
-                let val = evaluate_expr(expr, &mut inner_env, functions, classes, enums, impl_methods)?;
-                result.push(val);
-            }
             Ok(Some(Value::array(result)))
         }
         Expr::DictComprehension {
@@ -843,7 +842,8 @@ pub(super) fn eval_collection_expr(
             condition,
         } => {
             let iter_val = evaluate_expr(iterable, env, functions, classes, enums, impl_methods)?;
-            let envs = comprehension_iterate(
+            let mut result = HashMap::new();
+            comprehension_for_each(
                 &iter_val,
                 pattern,
                 condition,
@@ -852,14 +852,13 @@ pub(super) fn eval_collection_expr(
                 classes,
                 enums,
                 impl_methods,
+                |inner_env, functions, classes| {
+                    let k = evaluate_expr(key, inner_env, functions, classes, enums, impl_methods)?;
+                    let v = evaluate_expr(value, inner_env, functions, classes, enums, impl_methods)?;
+                    result.insert(k.to_key_string(), Value::wrap_dict_entry(&k, v));
+                    Ok(())
+                },
             )?;
-
-            let mut result = HashMap::new();
-            for mut inner_env in envs {
-                let k = evaluate_expr(key, &mut inner_env, functions, classes, enums, impl_methods)?;
-                let v = evaluate_expr(value, &mut inner_env, functions, classes, enums, impl_methods)?;
-                result.insert(k.to_key_string(), Value::wrap_dict_entry(&k, v));
-            }
             Ok(Some(Value::Dict(Arc::new(result))))
         }
         Expr::Slice {
