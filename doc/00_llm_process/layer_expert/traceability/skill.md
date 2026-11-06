@@ -41,3 +41,9 @@ file through the no-follow byte reader + runtime-backed decode: the std text
 codec's interpreted UTF-8 validation costs ~21 s for this file on the seed.
 `list bugs --status/--severity/--file-prefix` filter before paging and fold
 into `visibility_context`, so cursors bind the filter.
+Slice 4 adds `std.common.traceability.annotations_v1` (`# @req` header lines
+-> `req:X verified_by <spec>` sidecar rows, authority `annotation-claim`) and
+the app scanner `snapshot/spec_annotations_v1` (`--spec-root`, `dir_walk`,
+whole-file no-follow reads, one source digest per root). The seed's
+`dir_walk` is correct and fast (2,171 specs in 31 ms); the bounded reader
+refuses over-bound files instead of truncating, so files are read whole.
