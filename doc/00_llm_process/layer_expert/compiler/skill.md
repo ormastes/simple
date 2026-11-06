@@ -123,3 +123,20 @@ Focused route cases and evidence are in
 `test/01_unit/app/cli/bootstrap_source_authority_refresh_spec.spl` and
 `doc/08_tracking/bug/bootstrap_refresh_source_authority_route_2026_10_30.md`.
 Native execution requires a rebuilt producer; seed diagnostics do not qualify it.
+
+## Exported module `var` visibility (2026-11-06)
+
+`[cranelift] imported non-public module static ... requires visibility-preserving
+accessor support` means the provider's HirConst is Private. Owner MirStatic
+(`module_lowering.spl`) and importer external MirStatic (`provider_globals.spl`)
+both read that HirConst visibility, so fix visibility in HIR, never by exporting
+private data addresses from the backend. `module_build.spl`
+`hir_const_with_export_visibility` lifts a Private `var` named in the `export`
+list to Public; immutable literals keep the private inline path. A `var`
+imported by a sibling but neither exported nor `pub` must be declared `pub var`.
+`declare_module_statics` reports only the FIRST refused static per unit —
+enumerate the import lists before claiming a unit is fixed. The seed's
+`cranelift: function address missing declaration` stderr line is a recovered
+first-probe miss, not a failure (fatal form: `Cranelift function address missing
+declaration:` panic). Bugs: `export_list_static_visibility_not_lifted_2026-11-06`,
+`cranelift_function_addr_probe_miss_diagnostic_2026-11-06`.
