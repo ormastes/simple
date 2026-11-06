@@ -103,3 +103,34 @@ source/SDN declaration binding, generated places, real builders and cleanup,
 lifetimes/topology, storage layouts, engine parity, AOP, tracing, cache/LSP and
 Simple/BuildRunner adoption remain required. W2c should build on this lifecycle
 contract and the canonical resolver, not a new resolver.
+
+## Explicit continuation and MIR/codegen scope (2026-11-07)
+
+The user authorized another twelve hours of work and requested all MIR/codegen
+bugs be addressed. This extends the exhausted bootstrap retry budget; it does
+not waive execution or admission requirements. Attempt 7 uses the same frozen
+source, compatible caches, one worker and the existing enforced process-tree
+RSS limit, with an explicit 4 GiB free-memory reserve instead of the default
+24 GiB. Initial available physical memory was approximately 5.7 GiB. The
+attempt-6 rejected binary and sanity receipts were copied to
+`build/node-attributes-qualification/attempt6-preserved` before continuation.
+The new log is `build/node-attributes-qualification/bootstrap-attempt7.log`.
+At this update the attempt is running; no admission or test pass is claimed.
+
+MIR triage separates existing source repairs from unresolved native failures.
+The nested-array push AV already has source repair `83c17508b4a`; its native
+fixture now checks sibling-row integrity and remains unexecuted. Result Err
+binding has an additional standalone generic-method fixture exercising actual
+success/error payload values without the typed-alias workaround. Native trait
+field assignment and dispatch are being investigated in their existing owners.
+The peer build's 555 reported failures comprise one worker timeout and 554
+unattempted operations, not 555 independently demonstrated MIR defects.
+
+Subsequent bootstrap status: attempts 7 and 8 terminated unadmitted on inner
+worker-policy and free-memory reserve gates respectively. Attempt 9 timed out
+on output ownership while attempt 8 completed cleanup; it did not compile.
+After both wrappers exited, attempt 10 started with the supported two-pass
+route (`SIMPLE_FILE_WORKERS=0`) and a positive 2 GiB reserve, retaining the RSS
+guard and normal admission checks. This is the final planned automatic reserve
+adjustment. See [the MIR campaign](mir_codegen_repair_campaign_2026-11-07.md)
+for retained measurements, added source candidates and unresolved failures.
