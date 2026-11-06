@@ -1281,6 +1281,7 @@ fn write_rebound_place(
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
     if let Some(place) = super::place::resolve_place(target, env, functions, classes, enums, impl_methods)? {
+        super::place::refuse_shared_call_root(env, &place)?;
         let value = coerce_store_at_place(env, &place, value, classes);
         if super::place::write_place(env, &place, value) {
             return Ok(Control::Next);
@@ -2899,6 +2900,7 @@ fn augmented_through_place(
     let Some(place) = super::place::resolve_place(&assign.target, env, functions, classes, enums, impl_methods)? else {
         return Ok(None);
     };
+    super::place::refuse_shared_call_root(env, &place)?;
     super::place::refresh_module_global_root(env, &place.root);
     let new_value = match bin_op {
         Some(op) => {
