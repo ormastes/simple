@@ -33,6 +33,29 @@ fn uint_wrap_width(left: &Value, right: &Value) -> Option<u8> {
     }
 }
 
+/// Width selection for `+ - *`. Like `uint_wrap_width`, but a plain `Int`
+/// operand that cannot be represented in the unsigned operand's width
+/// cannot have been a same-typed literal/value, so it is a wider signed
+/// operand (`u8 * i64`); the operation then stays in i64 instead of
+/// narrowing both sides to the u8 width (`18u8 * 65536` must not become 0).
+fn uint_arith_wrap_width(left: &Value, right: &Value) -> Option<u8> {
+    fn fits(width: u8, v: &Value) -> bool {
+        match (width, v) {
+            (64, _) => true,
+            (w, Value::Int(n)) if w < 64 => *n >= 0 && (*n as u64) < (1u64 << w),
+            _ => true,
+        }
+    }
+    match (left, right) {
+        (Value::UInt { width, .. }, other @ Value::Int(_)) | (other @ Value::Int(_), Value::UInt { width, .. })
+            if !fits(*width, other) =>
+        {
+            None
+        }
+        _ => uint_wrap_width(left, right),
+    }
+}
+
 /// Compare integer values without routing `u64` through signed `i64` storage.
 ///
 /// `Value::as_int()` intentionally exposes the raw machine word as `i64` for
@@ -832,7 +855,7 @@ pub(super) fn eval_op_expr(
                             impl_methods,
                         ) {
                             result
-                        } else if let Some(width) = uint_wrap_width(&left_val, &right_val) {
+                        } else if let Some(width) = uint_arith_wrap_width(&left_val, &right_val) {
                             // Unsigned wrap: u32/u16/u8/u64 + ... applies modulo-2^width.
                             let lhs = left_val.as_int()? as u64;
                             let rhs = right_val.as_int()? as u64;
@@ -869,7 +892,7 @@ pub(super) fn eval_op_expr(
                         impl_methods,
                     ) {
                         result
-                    } else if let Some(width) = uint_wrap_width(&left_val, &right_val) {
+                    } else if let Some(width) = uint_arith_wrap_width(&left_val, &right_val) {
                         // Unsigned wrap: 0u32 - 1u32 yields 0xFFFFFFFF, not -1.
                         let lhs = left_val.as_int()? as u64;
                         let rhs = right_val.as_int()? as u64;
@@ -920,7 +943,7 @@ pub(super) fn eval_op_expr(
                                 impl_methods,
                             ) {
                                 result
-                            } else if let Some(width) = uint_wrap_width(&left_val, &right_val) {
+                            } else if let Some(width) = uint_arith_wrap_width(&left_val, &right_val) {
                                 let lhs = left_val.as_int()? as u64;
                                 let rhs = right_val.as_int()? as u64;
                                 Ok(wrap_uint(lhs.wrapping_mul(rhs), width))

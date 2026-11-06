@@ -1937,7 +1937,35 @@ impl<'a> MirLowerer<'a> {
                 // 3. Loop: check index < len, get element, execute body, increment index
 
                 // Lower the iterable expression
-                let collection_reg = self.lower_expr(iterable)?;
+                //
+                // A `List<T>` class value (std.common.core.collections.List) is
+                // not an array: its elements live in the `items` field. Iterate
+                // that payload, matching the interpreter
+                // (interp_for_over_list_generic_2026-07-02). Without this the
+                // loop treated the object handle as an empty array and ran
+                // ZERO times, silently.
+                let list_items_field = self
+                    .type_registry
+                    .and_then(|registry| registry.get(iterable.ty))
+                    .and_then(|ty| match ty {
+                        HirType::Struct { name, fields, .. } if name == "List" || name.starts_with("List<") => fields
+                            .iter()
+                            .position(|(fname, _)| fname == "items")
+                            .map(|idx| (idx, fields[idx].1)),
+                        _ => None,
+                    });
+                let collection_reg = if let Some((field_index, field_ty)) = list_items_field {
+                    let items_expr = crate::hir::HirExpr {
+                        kind: HirExprKind::FieldAccess {
+                            receiver: Box::new(iterable.clone()),
+                            field_index,
+                        },
+                        ty: field_ty,
+                    };
+                    self.lower_expr(&items_expr)?
+                } else {
+                    self.lower_expr(iterable)?
+                };
 
                 // Text iterables must yield one UTF-8 CODEPOINT per step, not
                 // one byte. `rt_for_iterable` cannot do this for us here: its

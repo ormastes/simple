@@ -64,7 +64,7 @@ pub(crate) fn restore_pattern_scope(saved: Vec<(String, Option<Value>)>, env: &m
     }
 }
 
-fn collect_pattern_binding_names(pattern: &Pattern, out: &mut Vec<String>) {
+pub(crate) fn collect_pattern_binding_names(pattern: &Pattern, out: &mut Vec<String>) {
     match pattern {
         Pattern::Identifier(name) | Pattern::MutIdentifier(name) | Pattern::MoveIdentifier(name) => {
             out.push(name.clone())
