@@ -108,3 +108,46 @@ pub fn resolved_collection_policy_v1(origin: CollectionOriginV1, choice: DataPol
         hard_constraints: constraints, workload_hints: hints, switch_policy: switch_policy,
         layout_policy_ref: layout_policy_ref, provenances: choice.provenances,
         canonical_policy_digest: sha256_text(canonical)))
+
+# ---------------------------------------------------------------------------
+# Source binding (adaptive plan C2). One `@collection_algorithm(algo[, label])`
+# becomes one exact-site W1 rule keyed by the parser's site ID: the label site
+# `ast://<module>/label/<label>` or the `#n1.` hash site. "auto" states no
+# preference, so it yields no rule and module/project rules still apply; any
+# other algorithm is a binding source pin, so a conflicting SDN pin is a hard
+# error rather than a silent winner.
+# ---------------------------------------------------------------------------
+pub fn collection_source_rules_v1(site_id: text, algorithm: text, path: text, line: i64,
+                                  owner: text) -> Result<[DataPolicyRuleV1], text>:
+    if algorithm != "auto" and algorithm != "linear" and algorithm != "hash" and algorithm != "ordered":
+        return Err("unknown collection algorithm: {algorithm}")
+    if not site_id.starts_with("ast://"):
+        return Err("collection site '{site_id}' is not a parser site ID")
+    if algorithm == "auto":
+        return Ok([])
+    Ok([data_policy_rule_v1(DataPolicyKindV1.Collection, site_id, DataRuleSpecificityV1.ExactSite,
+        DataRuleStrengthV1.Pin, algorithm, false, data_decl_provenance_v1(DataDeclOriginV1.Spl, path, line, owner))])
+
+fn collection_rule_applies_v1(origin: CollectionOriginV1, rule: DataPolicyRuleV1) -> bool:
+    if data_policy_kind_code_v1(rule.kind) != data_policy_kind_code_v1(DataPolicyKindV1.Collection):
+        return false
+    match rule.specificity:
+        case DataRuleSpecificityV1.ExactSite: rule.subject == origin.legacy_site_id
+        case DataRuleSpecificityV1.Module: rule.subject == origin.module_key
+        case DataRuleSpecificityV1.ProjectDefault: true
+        # No owning-type collection subject is defined yet; never guess one.
+        case DataRuleSpecificityV1.OwningType: false
+
+pub fn resolved_collection_policy_for_site_v1(origin: CollectionOriginV1, rules: [DataPolicyRuleV1],
+                                              switch_policy: text) -> Result<ResolvedCollectionPolicyV1, text>:
+    """Resolve the source and SDN rules that apply to one creation origin."""
+    var applicable: [DataPolicyRuleV1] = []
+    for rule in rules:
+        if collection_rule_applies_v1(origin, rule):
+            applicable.push(rule)
+    val choice = match data_policy_resolve_rules_v1(DataPolicyKindV1.Collection, applicable, "auto"):
+        case Ok(c): c
+        case Err(diagnostic): return Err(diagnostic.message)
+    resolved_collection_policy_v1(origin, choice,
+        [CollectionPlanAlgorithm.Linear, CollectionPlanAlgorithm.Hash, CollectionPlanAlgorithm.Ordered],
+        [], [], switch_policy, "")
