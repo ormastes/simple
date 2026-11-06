@@ -174,7 +174,26 @@ describe "Collection site policy":
         val sdn = "data_policy:\n    rules:\n        symbols:\n            site: \"ast://app/site_probe.spl/label/parser.symbols\"\n            algorithm: \"ordered\"\n            pin: true\n"
         val sdn_rules = data_policy_rules_from_sdn_v1(sdn, "config/data_policy.sdn", "app").unwrap()
         val result = resolved_collection_policy_for_site_v1(labeled_origin(site), source_rules + sdn_rules, "next_build")
-        expect(result.is_err()).to_equal(true)
+        match result:
+            case Ok(_): expect("conflict accepted").to_equal("pin conflict")
+            case Err(message): expect(message).to_contain("pin")
+
+    it "rejects a source pin that disagrees with a module-wide SDN pin":
+        val (site, algorithm) = labeled_site_and_algorithm()
+        val source_rules = collection_source_rules_v1(site, algorithm, "app/site_probe.spl", 2, "app").unwrap()
+        val sdn = "data_policy:\n    rules:\n        whole_module:\n            module: \"app/site_probe.spl\"\n            algorithm: \"linear\"\n            pin: true\n"
+        val sdn_rules = data_policy_rules_from_sdn_v1(sdn, "config/data_policy.sdn", "app").unwrap()
+        expect(resolved_collection_policy_for_site_v1(labeled_origin(site), source_rules + sdn_rules, "next_build").is_err()).to_equal(true)
+
+    it "binds an unlabeled hash site the same way":
+        parser_init_with_path("fn main():\n    @collection_algorithm(\"ordered\")\n    var plain = AdaptiveTextSet.new()\n", "app/site_probe.spl")
+        parse_module_body()
+        val args = expr_get_args(stmt_get_expr(decl_get_body(module_get_decls()[0])[0]))
+        val site = expr_get_str(args[2])
+        val origin = collection_origin_v1(site, "app/site_probe.spl", "main", "plain", CollectionCreationKind.Local,
+            "var plain = AdaptiveTextSet.new()", collection_type_fingerprint_v1(COLLECTION_TYPE_ADAPTIVE_TEXT_SET, [])).unwrap()
+        val rules = collection_source_rules_v1(site, expr_get_str(args[1]), "app/site_probe.spl", 2, "app").unwrap()
+        expect(resolved_collection_policy_for_site_v1(origin, rules, "next_build").unwrap().choice.choice).to_equal("ordered")
 
     it "ignores rules for other sites and lets an auto attribute follow a module rule":
         val (site, _) = labeled_site_and_algorithm()
