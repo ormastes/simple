@@ -37,9 +37,115 @@ use super::io_capture::{
 };
 use crate::value::collections::RuntimeString;
 use crate::value::core::RuntimeValue;
-use crate::value::heap::{get_typed_ptr, HeapObjectType};
+use crate::value::heap::{get_typed_ptr, with_typed_ptr, HeapObjectType};
 use crate::value::tags;
-use std::io::Write;
+use std::io::{Read, Write};
+
+const STDIN_READ_MAX_BYTES_V1: usize = 16 * 1024 * 1024;
+
+fn stdin_read_bytes_v1<R: Read>(reader: &mut R, size: i64) -> Vec<u8> {
+    if size <= 0 {
+        return Vec::new();
+    }
+    let requested = (size as u64).min(STDIN_READ_MAX_BYTES_V1 as u64) as usize;
+    let mut bytes = Vec::new();
+    if bytes.try_reserve_exact(requested).is_err() {
+        return bytes;
+    }
+    bytes.resize(requested, 0);
+    loop {
+        match reader.read(&mut bytes) {
+            Ok(count) => {
+                bytes.truncate(count);
+                return bytes;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return Vec::new(),
+        }
+    }
+}
+
+fn stdin_read_all_bytes_v1<R: Read>(reader: &mut R) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        // Reserve before reading: allocation failure must not discard bytes
+        // already consumed from stdin. Vec retains its previous prefix.
+        if bytes.try_reserve(chunk.len()).is_err() {
+            return bytes;
+        }
+        match reader.read(&mut chunk) {
+            Ok(0) => return bytes,
+            Ok(count) => bytes.extend_from_slice(&chunk[..count]),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return bytes,
+        }
+    }
+}
+
+fn term_write_bytes_v1<W: Write>(writer: &mut W, bytes: &[u8]) -> i64 {
+    let mut written = 0;
+    while written < bytes.len() {
+        match writer.write(&bytes[written..]) {
+            Ok(0) => break,
+            Ok(count) => written += count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    written as i64
+}
+
+fn term_flush_status_v1<W: Write>(writer: &mut W) -> i32 {
+    match writer.flush() {
+        Ok(()) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// Read one possibly partial binary stdin chunk, capped at 16 MiB.
+#[no_mangle]
+pub extern "C" fn rt_stdin_read(size: i64) -> RuntimeValue {
+    let bytes = if size <= 0 {
+        Vec::new()
+    } else {
+        stdin_read_bytes_v1(&mut std::io::stdin().lock(), size)
+    };
+    // The shared Rust allocator copies into an owned packed-byte array before
+    // this temporary Vec is dropped; no C allocation or raw free is involved.
+    unsafe { super::file_io::file_ops::bytes_to_runtime_array(&bytes) }
+}
+
+/// Read binary stdin to EOF, retaining the prefix on read or growth failure.
+#[no_mangle]
+pub extern "C" fn rt_stdin_read_all() -> RuntimeValue {
+    let bytes = stdin_read_all_bytes_v1(&mut std::io::stdin().lock());
+    unsafe { super::file_io::file_ops::bytes_to_runtime_array(&bytes) }
+}
+
+/// Write typed text through the existing Rust stdout/capture cohort.
+#[no_mangle]
+pub extern "C" fn rt_term_write(value: RuntimeValue) -> i64 {
+    // Copy while the registry lock prevents a concurrent free. Release that
+    // lock before capture or potentially blocking stdout I/O.
+    let Some(text) = with_typed_ptr::<RuntimeString, _>(value, HeapObjectType::String, |text| {
+        std::str::from_utf8(unsafe { (*text).as_bytes() }).ok().map(str::to_owned)
+    }).flatten() else {
+        return 0;
+    };
+    if is_stdout_capturing() {
+        append_stdout(&text);
+        text.len() as i64
+    } else {
+        term_write_bytes_v1(&mut std::io::stdout().lock(), text.as_bytes())
+    }
+}
+
+/// Flush the Rust stdout owner, preserving its success/failure status.
+#[no_mangle]
+pub extern "C" fn rt_term_flush() -> i32 {
+    term_flush_status_v1(&mut std::io::stdout().lock())
+}
 
 #[derive(Clone, Copy)]
 struct FormatSpec {
@@ -907,6 +1013,222 @@ mod tests {
     use crate::value::sffi::io_capture::{
         rt_capture_stdout_start, rt_capture_stdout_stop, rt_capture_stderr_start, rt_capture_stderr_stop, rt_set_stdin,
     };
+
+    struct StdioTestReader {
+        steps: std::collections::VecDeque<Result<Vec<u8>, std::io::ErrorKind>>,
+        calls: usize,
+        maximum_request: usize,
+    }
+
+    impl StdioTestReader {
+        fn new(steps: Vec<Result<Vec<u8>, std::io::ErrorKind>>) -> Self {
+            Self { steps: steps.into(), calls: 0, maximum_request: 0 }
+        }
+    }
+
+    impl Read for StdioTestReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.calls += 1;
+            self.maximum_request = self.maximum_request.max(buffer.len());
+            match self.steps.pop_front().unwrap_or_else(|| Ok(Vec::new())) {
+                Ok(bytes) => {
+                    assert!(bytes.len() <= buffer.len(), "invalid injected Read step");
+                    buffer[..bytes.len()].copy_from_slice(&bytes);
+                    Ok(bytes.len())
+                }
+                Err(kind) => Err(kind.into()),
+            }
+        }
+    }
+
+    struct StdioTestWriter {
+        steps: std::collections::VecDeque<Result<usize, std::io::ErrorKind>>,
+        bytes: Vec<u8>,
+        calls: usize,
+        flush_calls: usize,
+        flush_error: Option<std::io::ErrorKind>,
+    }
+
+    impl StdioTestWriter {
+        fn new(steps: Vec<Result<usize, std::io::ErrorKind>>) -> Self {
+            Self { steps: steps.into(), bytes: Vec::new(), calls: 0, flush_calls: 0, flush_error: None }
+        }
+    }
+
+    impl Write for StdioTestWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.calls += 1;
+            match self.steps.pop_front().unwrap_or(Ok(buffer.len())) {
+                Ok(count) => {
+                    assert!(count <= buffer.len(), "invalid injected Write step");
+                    self.bytes.extend_from_slice(&buffer[..count]);
+                    Ok(count)
+                }
+                Err(kind) => Err(kind.into()),
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flush_calls += 1;
+            match self.flush_error.take() {
+                Some(kind) => Err(kind.into()),
+                None => Ok(()),
+            }
+        }
+    }
+
+    #[test]
+    fn nativeall_stdio_physical_abi() {
+        let _: extern "C" fn(i64) -> RuntimeValue = rt_stdin_read;
+        let _: extern "C" fn() -> RuntimeValue = rt_stdin_read_all;
+        let _: extern "C" fn(RuntimeValue) -> i64 = rt_term_write;
+        let _: extern "C" fn() -> i32 = rt_term_flush;
+        assert_eq!(std::mem::size_of::<RuntimeValue>(), 8);
+        assert_eq!(std::mem::align_of::<RuntimeValue>(), std::mem::align_of::<u64>());
+    }
+
+    #[test]
+    fn nativeall_stdio_read_once_size_cap_and_nonpositive() {
+        for size in [i64::MIN, -1, 0] {
+            let mut reader = StdioTestReader::new(Vec::new());
+            assert!(stdin_read_bytes_v1(&mut reader, size).is_empty());
+            assert_eq!(reader.calls, 0);
+        }
+        let mut reader = StdioTestReader::new(Vec::new());
+        assert!(stdin_read_bytes_v1(&mut reader, i64::MAX).is_empty());
+        assert_eq!(reader.calls, 1);
+        assert_eq!(reader.maximum_request, 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn nativeall_stdio_read_once_partial_and_interrupted() {
+        use std::io::ErrorKind;
+        let mut reader = StdioTestReader::new(vec![
+            Err(ErrorKind::Interrupted), Ok(vec![0xff, 0, b'\r']), Ok(vec![b'\n']),
+        ]);
+        let bytes = stdin_read_bytes_v1(&mut reader, 8);
+        assert_eq!(bytes, [0xff, 0, b'\r']);
+        assert_eq!(reader.calls, 2, "one successful partial read must stop");
+        assert_eq!(reader.steps.len(), 1);
+        let owned = unsafe { super::super::file_io::file_ops::bytes_to_runtime_array(&bytes) };
+        drop(bytes);
+        assert_eq!(crate::value::collections::byte_array_bytes(owned), Some(vec![0xff, 0, b'\r']));
+        crate::value::collections::rt_array_free(owned);
+        let mut failed = StdioTestReader::new(vec![Err(ErrorKind::BrokenPipe)]);
+        assert!(stdin_read_bytes_v1(&mut failed, 8).is_empty());
+        assert_eq!(failed.calls, 1);
+    }
+
+    #[test]
+    fn nativeall_stdio_read_all_retains_prefix_after_error() {
+        use std::io::ErrorKind;
+        let mut reader = StdioTestReader::new(vec![
+            Ok(vec![b'a', b'b']), Err(ErrorKind::Interrupted),
+            Ok(vec![0, 0xff]), Err(ErrorKind::BrokenPipe),
+        ]);
+        assert_eq!(stdin_read_all_bytes_v1(&mut reader), [b'a', b'b', 0, 0xff]);
+        assert_eq!(reader.calls, 4);
+        let mut eof = std::io::Cursor::new(vec![0xff, b'\r', b'\n', 0x1a]);
+        assert_eq!(stdin_read_all_bytes_v1(&mut eof), [0xff, b'\r', b'\n', 0x1a]);
+    }
+
+    #[test]
+    fn nativeall_stdio_read_all_exceeds_single_read_cap() {
+        let length = 16 * 1024 * 1024 + 7;
+        let mut reader = std::io::repeat(0xa5).take(length as u64);
+        let bytes = stdin_read_all_bytes_v1(&mut reader);
+        assert_eq!(bytes.len(), length);
+        assert!(bytes.iter().all(|byte| *byte == 0xa5));
+    }
+
+    #[test]
+    fn nativeall_stdio_write_counts_partial_and_interrupted() {
+        use std::io::ErrorKind;
+        let mut writer = StdioTestWriter::new(vec![
+            Err(ErrorKind::Interrupted), Ok(2), Ok(1), Err(ErrorKind::BrokenPipe),
+        ]);
+        assert_eq!(term_write_bytes_v1(&mut writer, "é\0\r\n".as_bytes()), 3);
+        assert_eq!(writer.bytes, "é\0".as_bytes());
+        assert_eq!(writer.calls, 4);
+    }
+
+    #[test]
+    fn nativeall_stdio_write_zero_and_flush_status() {
+        let mut writer = StdioTestWriter::new(vec![Ok(0)]);
+        assert_eq!(term_write_bytes_v1(&mut writer, b"unwritten"), 0);
+        assert_eq!(writer.calls, 1);
+        assert!(writer.bytes.is_empty());
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        assert_eq!(term_write_bytes_v1(&mut cursor, "é\0\r\n".as_bytes()), 5);
+        assert_eq!(cursor.into_inner(), "é\0\r\n".as_bytes());
+        writer.flush_error = Some(std::io::ErrorKind::Interrupted);
+        assert_eq!(term_flush_status_v1(&mut writer), -1);
+        assert_eq!(writer.flush_calls, 1, "flush errors must not be hidden or retried");
+        assert_eq!(term_flush_status_v1(&mut writer), 0);
+        assert_eq!(writer.flush_calls, 2);
+    }
+
+    #[test]
+    fn nativeall_stdio_terminal_capture_and_invalid_text() {
+        let bytes = "é\0\r\n".as_bytes();
+        let text = crate::value::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64);
+        rt_capture_stdout_start();
+        let written = rt_term_write(text);
+        let nil = rt_term_write(RuntimeValue::NIL);
+        let integer = rt_term_write(RuntimeValue::from_int(7));
+        let forged = rt_term_write(RuntimeValue::from_raw(0x1001));
+        let array_value = crate::value::collections::rt_byte_array_new(0);
+        let array = rt_term_write(array_value);
+        let captured = rt_capture_stdout_stop();
+        assert_eq!(written, 5, "count UTF-8 bytes, including NUL, not characters");
+        assert_eq!((nil, integer, forged, array), (0, 0, 0, 0));
+        assert_eq!(captured.as_bytes(), bytes);
+        crate::value::collections::rt_array_free(array_value);
+        assert_eq!(crate::value::collections::rt_string_free(text), 1);
+    }
+
+    #[test]
+    fn nativeall_stdio_binary_pipe() {
+        const CHILD_ENV: &str = "SIMPLE_NATIVEALL_STDIO_PIPE_CHILD_V1";
+        const FRAME: &[u8] = b"\x02nativeall-stdio:\xc3\xa9\0\r\n\x03";
+        if let Some(mode) = std::env::var_os(CHILD_ENV) {
+            assert_eq!(mode, "1");
+            let owned_bytes = |value| {
+                let bytes = crate::value::collections::byte_array_bytes(value);
+                crate::value::collections::rt_array_free(value);
+                bytes
+            };
+            assert_eq!(owned_bytes(rt_stdin_read(0)), Some(Vec::new()));
+            assert_eq!(owned_bytes(rt_stdin_read(-1)), Some(Vec::new()));
+            assert_eq!(owned_bytes(rt_stdin_read(1)), Some(vec![0xff]));
+            assert_eq!(super::super::env_process::rt_stdin_read_byte(), b'\r' as i64);
+            assert_eq!(owned_bytes(rt_stdin_read_all()), Some(vec![b'\n', 0x1a, 0, 0xc3, 0xa9, 0xfe]));
+            assert_eq!(owned_bytes(rt_stdin_read(1)), Some(Vec::new()));
+            assert_eq!(owned_bytes(rt_stdin_read_all()), Some(Vec::new()));
+            assert_eq!(super::super::env_process::rt_stdin_read_byte(), -1);
+            let text = crate::value::collections::rt_string_new(FRAME.as_ptr(), FRAME.len() as u64);
+            assert_eq!(rt_term_write(text), FRAME.len() as i64);
+            assert_eq!(rt_term_flush(), 0);
+            assert_eq!(crate::value::collections::rt_string_free(text), 1);
+        } else {
+            use std::process::{Command, Stdio};
+            let mut child = Command::new(std::env::current_exe().expect("current Rust test binary"))
+                .args(["--exact", "value::sffi::io_print::tests::nativeall_stdio_binary_pipe", "--nocapture", "--test-threads=1"])
+                .env(CHILD_ENV, "1")
+                .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+                .spawn().expect("start real binary-pipe child");
+            {
+                let mut stdin = child.stdin.take().expect("piped child stdin");
+                stdin.write_all(&[0xff, b'\r', b'\n', 0x1a, 0, 0xc3, 0xa9, 0xfe])
+                    .expect("write exact binary stdin bytes");
+            }
+            let output = child.wait_with_output().expect("wait for real binary-pipe child");
+            assert!(output.status.success(), "child failed: {}", String::from_utf8_lossy(&output.stderr));
+            assert!(output.stderr.is_empty(), "unexpected child stderr: {:?}", output.stderr);
+            assert_eq!(output.stdout.windows(FRAME.len()).filter(|window| *window == FRAME).count(), 1,
+                "stdout must contain the exact UTF-8/NUL/CRLF frame once: {:?}", output.stdout);
+        }
+    }
 
     #[test]
     fn test_print_str_basic() {
