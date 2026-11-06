@@ -3909,6 +3909,12 @@ pub fn is_inline_lowered_byte_accessor(name: &str) -> bool {
             | "rt_typed_words_u64_at"
             | "rt_typed_words_u32_unchecked"
             | "rt_typed_words_u64_unchecked"
+            // Float-bit reinterpretation intrinsics: a bare bitcast in
+            // `compile_simple_runtime_memory_intrinsic`. Unlisted, the driver spliced every
+            // caller through the interpreter bridge. See doc/08_tracking/bug/
+            // seed_jit_spl_f64_to_bits_miscompile_2026-07-23.md
+            | "spl_f64_to_bits"
+            | "spl_bits_to_f64"
     )
 }
 
