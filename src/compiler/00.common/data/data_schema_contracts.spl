@@ -1,0 +1,191 @@
+# ============================================================================
+# compiler/00.common/data/data_schema_contracts.spl — frozen v1 logical
+# data-schema vocabulary (plan W0, doc/03_plan/compiler/data/
+# data_attributes_layout_containers_xray_2026-11-06.md sections 3, 8).
+#
+# Logical meaning only. Physical layout stays in StorageLayoutPlanV1 and lookup
+# representation in the CollectionPlan owner; this file adds no layout enum.
+# Pure values: no file I/O, no OS imports, no `any`/`nil`.
+# ============================================================================
+
+pub const DATA_SCHEMA_CONTRACT_V1: i64 = 1
+pub const DATA_SCHEMA_DIGEST_DOMAIN_V1: text = "simple.data-schema/v1"
+
+# Where a declaration came from. Both enter the same resolver.
+pub enum DataDeclOriginV1:
+    Spl
+    Sdn
+
+pub fn data_decl_origin_code_v1(origin: DataDeclOriginV1) -> i64:
+    match origin:
+        case DataDeclOriginV1.Spl: 1
+        case DataDeclOriginV1.Sdn: 2
+
+# `owner` is the module/build owner that authored the declaration; the resolver
+# checks it against the tree's authority list (no silent external injection).
+pub struct DataDeclProvenanceV1:
+    origin: DataDeclOriginV1
+    path: text
+    line: i64
+    owner: text
+
+pub fn data_decl_provenance_v1(origin: DataDeclOriginV1, path: text, line: i64, owner: text) -> DataDeclProvenanceV1:
+    DataDeclProvenanceV1(origin: origin, path: path, line: line, owner: owner)
+
+pub fn data_decl_provenance_text_v1(p: DataDeclProvenanceV1) -> text:
+    val kind = if data_decl_origin_code_v1(p.origin) == 1: "spl" else: "sdn"
+    "{kind}:{p.path}:{p.line}"
+
+# Nominal type reference. `path` is the canonical nominal name; args are
+# canonical texts of generic arguments. Representation (e.g. u64) is never part
+# of identity, so RegionId and ObjId never unify.
+pub struct DataTypeRefV1:
+    path: text
+    args: [text]
+
+pub fn data_type_ref_v1(path: text, args: [text]) -> DataTypeRefV1:
+    DataTypeRefV1(path: path, args: args)
+
+# An explicitly declared alias resolves to its target before comparison.
+pub struct DataTypeAliasV1:
+    alias: text
+    target: text
+
+pub fn data_type_alias_v1(alias: text, target: text) -> DataTypeAliasV1:
+    DataTypeAliasV1(alias: alias, target: target)
+
+pub enum DataRequirednessV1:
+    Required
+    Optional
+    Defaulted
+
+pub fn data_requiredness_code_v1(value: DataRequirednessV1) -> i64:
+    match value:
+        case DataRequirednessV1.Required: 1
+        case DataRequirednessV1.Optional: 2
+        case DataRequirednessV1.Defaulted: 3
+
+# One declaration of one attribute on one typed node view.
+pub struct DataAttrDeclV1:
+    tree: text
+    view: text
+    name: text
+    type_ref: DataTypeRefV1
+    requiredness: DataRequirednessV1
+    default_value: text
+    provenance: DataDeclProvenanceV1
+
+pub fn data_attr_decl_v1(tree: text, view: text, name: text, type_ref: DataTypeRefV1,
+                         requiredness: DataRequirednessV1, default_value: text,
+                         provenance: DataDeclProvenanceV1) -> DataAttrDeclV1:
+    DataAttrDeclV1(tree: tree, view: view, name: name, type_ref: type_ref,
+                   requiredness: requiredness, default_value: default_value,
+                   provenance: provenance)
+
+# AttrId is (TreeSchemaId, ordinal). Ordinals are 1-based in canonical-name
+# order within one resolved surface; never compare ordinals across digests.
+pub struct DataAttrIdV1:
+    tree: text
+    ordinal: i64
+
+pub struct DataResolvedAttrV1:
+    id: DataAttrIdV1
+    name: text
+    type_canonical: text
+    requiredness: DataRequirednessV1
+    default_value: text
+    views: [text]
+    provenances: [DataDeclProvenanceV1]
+
+pub struct DataSchemaSurfaceV1:
+    contract_version: i64
+    tree: text
+    attrs: [DataResolvedAttrV1]
+    schema_digest: text
+
+# Owners allowed to declare attributes for one tree schema.
+pub struct DataSchemaAuthorityV1:
+    tree: text
+    owners: [text]
+
+pub fn data_schema_authority_v1(tree: text, owners: [text]) -> DataSchemaAuthorityV1:
+    DataSchemaAuthorityV1(tree: tree, owners: owners)
+
+pub enum DataSchemaErrorKindV1:
+    TypeConflict
+    RequirednessConflict
+    DefaultConflict
+    UnauthorizedInjection
+    PinConflict
+    AmbiguousRule
+    InvalidDeclaration
+
+pub struct DataSchemaDiagnosticV1:
+    kind: DataSchemaErrorKindV1
+    subject: text
+    first: DataDeclProvenanceV1
+    second: DataDeclProvenanceV1
+    message: text
+
+pub fn data_schema_diagnostic_v1(kind: DataSchemaErrorKindV1, subject: text,
+                                 first: DataDeclProvenanceV1, second: DataDeclProvenanceV1,
+                                 message: text) -> DataSchemaDiagnosticV1:
+    DataSchemaDiagnosticV1(kind: kind, subject: subject, first: first, second: second, message: message)
+
+# ---------------------------------------------------------------------------
+# Policy rules (plan 8.4). The kind discriminator keeps each policy family's
+# rules separate; Collection is the slot for ResolvedCollectionPolicyV1
+# (@col / @col_policy / @col_impl / @col_site). Choices are owner-defined
+# tokens validated by that family's owner, not a new layout/algorithm enum.
+# ---------------------------------------------------------------------------
+pub enum DataPolicyKindV1:
+    Layout
+    Collection
+
+pub fn data_policy_kind_code_v1(kind: DataPolicyKindV1) -> i64:
+    match kind:
+        case DataPolicyKindV1.Layout: 1
+        case DataPolicyKindV1.Collection: 2
+
+# Deterministic specificity, highest wins: exact site, owning type, module,
+# project default.
+pub enum DataRuleSpecificityV1:
+    ProjectDefault
+    Module
+    OwningType
+    ExactSite
+
+pub fn data_rule_specificity_rank_v1(value: DataRuleSpecificityV1) -> i64:
+    match value:
+        case DataRuleSpecificityV1.ProjectDefault: 0
+        case DataRuleSpecificityV1.Module: 1
+        case DataRuleSpecificityV1.OwningType: 2
+        case DataRuleSpecificityV1.ExactSite: 3
+
+# Pin = explicit physical pin (binding); Hint = performance hint (refinable).
+# Profile preferences rank remaining `auto` candidates in the family owner and
+# are not rules here.
+pub enum DataRuleStrengthV1:
+    Pin
+    Hint
+
+pub struct DataPolicyRuleV1:
+    kind: DataPolicyKindV1
+    subject: text
+    specificity: DataRuleSpecificityV1
+    strength: DataRuleStrengthV1
+    choice: text
+    overridable: bool
+    provenance: DataDeclProvenanceV1
+
+pub fn data_policy_rule_v1(kind: DataPolicyKindV1, subject: text, specificity: DataRuleSpecificityV1,
+                           strength: DataRuleStrengthV1, choice: text, overridable: bool,
+                           provenance: DataDeclProvenanceV1) -> DataPolicyRuleV1:
+    DataPolicyRuleV1(kind: kind, subject: subject, specificity: specificity, strength: strength,
+                     choice: choice, overridable: overridable, provenance: provenance)
+
+pub struct DataPolicyChoiceV1:
+    kind: DataPolicyKindV1
+    choice: text
+    from_default: bool
+    provenances: [DataDeclProvenanceV1]

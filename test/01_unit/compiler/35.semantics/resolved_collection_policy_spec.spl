@@ -1,0 +1,98 @@
+# @cover src/compiler/35.semantics/perf/resolved_collection_policy.spl 80%
+"""
+## Purpose and audience
+ResolvedCollectionPolicyV1 is the collection row of the W1 data-policy
+envelope: one immutable record per collection creation origin that both the
+source `@collection_algorithm` attribute and an SDN `data_policy.rules` row
+lower to. Readers are compiler and adaptive-collection authors who consume the
+record instead of re-reading attributes or configuration.
+Plans: doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md (W1),
+doc/03_plan/compiler/data/adaptive_collections_profiling_switching_2026-09-16.md (5.1, C2).
+Category: Infrastructure.
+## Operator workflow
+bin/simple test test/01_unit/compiler/35.semantics/resolved_collection_policy_spec.spl
+## Compatibility and limitations
+The record is built from an already resolved rule choice; parsing the site
+label from source is C2 and the adaptive container adapter is W4.
+## Verification guidance and troubleshooting
+If the source/SDN digest scenario goes RED, provenance has leaked into the
+canonical digest; provenance belongs in the separate provenance list.
+"""
+# Lifecycle: doc/03_plan/compiler/data/adaptive_collections_profiling_switching_2026-09-16.md
+# @manual_section: Resolved collection policy
+
+use std.spec.*
+use compiler.common.data.data_schema_contracts.*
+use compiler.common.data.data_schema_resolver.*
+use compiler.semantics.perf.collection_plan_selection.{CollectionPlanAlgorithm}
+use compiler.semantics.perf_facts.collection_contracts.{CollectionOriginV1, CollectionCreationKind}
+use compiler.semantics.perf.resolved_collection_policy.*
+
+fn symbols_origin() -> CollectionOriginV1:
+    CollectionOriginV1(legacy_site_id: "ast://compiler/resolve#symbols#1", module_key: "compiler.resolve",
+        owner_path: "resolve", binding_name: "symbols", creation_kind: CollectionCreationKind.Local,
+        token_fingerprint: "tok-v1-fnv64:1", type_fingerprint: "ctype-fnv64:2", origin_id: "corigin-v1:77")
+
+fn rule_from(prov: DataDeclProvenanceV1, choice: text) -> DataPolicyChoiceV1:
+    val rule = data_policy_rule_v1(DataPolicyKindV1.Collection, "compiler.resolve.symbols", DataRuleSpecificityV1.ExactSite,
+        DataRuleStrengthV1.Pin, choice, false, prov)
+    data_policy_resolve_rules_v1(DataPolicyKindV1.Collection, [rule], "auto").unwrap()
+
+fn all_three() -> [CollectionPlanAlgorithm]:
+    [CollectionPlanAlgorithm.Linear, CollectionPlanAlgorithm.Hash, CollectionPlanAlgorithm.Ordered]
+
+describe "Resolved collection policy":
+    it "gives a source attribute and an equivalent SDN rule the same canonical digest":
+        # @req REQ-ATTR-04
+        step("Resolve a hash pin for the symbols map once from source and once from SDN")
+        val from_source = rule_from(data_decl_provenance_v1(DataDeclOriginV1.Spl, "src/compiler/resolve.spl", 12, "compiler.resolve"), "hash")
+        val sdn = "data_policy:\n    rules:\n        symbol_map:\n            site: \"compiler.resolve.symbols\"\n            algorithm: \"hash\"\n            pin: true\n"
+        val rows = data_policy_rules_from_sdn_v1(sdn, "config/data_policy.sdn", "compiler.resolve").unwrap()
+        val from_sdn = data_policy_resolve_rules_v1(DataPolicyKindV1.Collection, rows, "auto").unwrap()
+        step("Build the collection policy record for the same creation origin from each")
+        val a = resolved_collection_policy_v1(symbols_origin(), from_source, all_three(), [], ["lookup=heavy"], "next_instance", "").unwrap()
+        val b = resolved_collection_policy_v1(symbols_origin(), from_sdn, all_three(), [], ["lookup=heavy"], "next_instance", "").unwrap()
+        # @capture(exec): both records
+        step("Verify the canonical digests match while each record keeps its own provenance")
+        expect(a.canonical_policy_digest).to_equal(b.canonical_policy_digest)
+        expect(a.canonical_policy_digest.len()).to_equal(64)  # oracle: SHA-256 lower hex
+        expect(a.provenances[0].path).to_equal("src/compiler/resolve.spl")
+        expect(b.provenances[0].path).to_equal("config/data_policy.sdn")
+        expect(a.origin.origin_id).to_equal("corigin-v1:77")
+
+    it "rejects a choice outside the allowed representations or of the wrong policy kind":
+        # @req REQ-ATTR-05
+        step("Pin ordered while only linear and hash are allowed")
+        val ordered = rule_from(data_decl_provenance_v1(DataDeclOriginV1.Sdn, "c.sdn", 3, "compiler.resolve"), "ordered")
+        val narrow = resolved_collection_policy_v1(symbols_origin(), ordered,
+            [CollectionPlanAlgorithm.Linear, CollectionPlanAlgorithm.Hash], [], [], "next_instance", "")
+        step("Offer a layout choice, an unknown switching mode, an empty and a duplicated representation list")
+        val layout_rule = data_policy_rule_v1(DataPolicyKindV1.Layout, "compiler.ast", DataRuleSpecificityV1.Module,
+            DataRuleStrengthV1.Hint, "soa", false, data_decl_provenance_v1(DataDeclOriginV1.Spl, "a.spl", 1, "compiler.ast"))
+        val layout_choice = data_policy_resolve_rules_v1(DataPolicyKindV1.Layout, [layout_rule], "auto").unwrap()
+        val auto = data_policy_resolve_rules_v1(DataPolicyKindV1.Collection, [], "auto").unwrap()
+        # @capture(exec): rejection messages
+        step("Verify each record is refused and auto stays admissible")
+        expect(narrow.is_err()).to_equal(true)
+        expect(resolved_collection_policy_v1(symbols_origin(), layout_choice, all_three(), [], [], "next_instance", "").is_err()).to_equal(true)
+        expect(resolved_collection_policy_v1(symbols_origin(), auto, all_three(), [], [], "whenever", "").is_err()).to_equal(true)
+        expect(resolved_collection_policy_v1(symbols_origin(), auto, [], [], [], "next_instance", "").is_err()).to_equal(true)
+        expect(resolved_collection_policy_v1(symbols_origin(), auto,
+            [CollectionPlanAlgorithm.Hash, CollectionPlanAlgorithm.Hash], [], [], "next_instance", "").is_err()).to_equal(true)
+        expect(resolved_collection_policy_v1(symbols_origin(), auto, all_three(), [], [], "report_only", "").is_ok()).to_equal(true)
+        expect(resolved_collection_policy_v1(symbols_origin(), auto, all_three(), ["no_ffi", "no_ffi"], [], "next_instance", "").is_err()).to_equal(true)
+        expect(resolved_collection_policy_v1(symbols_origin(), auto, all_three(), [], ["lookup=heavy", "lookup=heavy"], "next_instance", "").is_err()).to_equal(true)
+
+    it "changes the digest for a semantic edit and not for hint order":
+        # @req REQ-ATTR-04
+        step("Build records that differ only in hint order, and one with a different origin")
+        val auto = data_policy_resolve_rules_v1(DataPolicyKindV1.Collection, [], "auto").unwrap()
+        val a = resolved_collection_policy_v1(symbols_origin(), auto, all_three(), ["no_ffi"], ["lookup=heavy", "update=rare"], "next_build", "").unwrap()
+        val b = resolved_collection_policy_v1(symbols_origin(), auto, all_three(), ["no_ffi"], ["update=rare", "lookup=heavy"], "next_build", "").unwrap()
+        var moved = symbols_origin()
+        moved.origin_id = "corigin-v1:78"
+        val c = resolved_collection_policy_v1(moved, auto, all_three(), ["no_ffi"], ["lookup=heavy", "update=rare"], "next_build", "").unwrap()
+        # @capture(exec): three digests
+        step("Verify hint order is canonicalized and a different origin is a different policy")
+        expect(a.canonical_policy_digest).to_equal(b.canonical_policy_digest)
+        expect(a.canonical_policy_digest == c.canonical_policy_digest).to_equal(false)
