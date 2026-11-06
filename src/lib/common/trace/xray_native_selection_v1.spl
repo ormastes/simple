@@ -1,0 +1,67 @@
+# Aspect-param pointcuts -> native sled selection (XRay PR5b).
+# Design: doc/04_architecture/compiler/xray/xray_compiler_structural_change_2026-11-06.md
+# A.2 / A.4 / C.4: there is no `@xray` attribute; the static `--xray` switch
+# decides whether sleds exist, and at runtime aspect params choose which of
+# them are patched, through prepare(config, selection).
+#
+# The observer config (`simple.trace/observer-v1`, observer_aspect_config_v1)
+# carries modes only. The function set travels beside it in its own aspect
+# extension so the config schema hash stays unchanged:
+#   ext_name  simple.trace/observer-v1.pointcuts, ext_major 1
+#   payload   UTF-8 canonical function names separated by ',' or newlines
+# A pointcut expands to every sled (entry + exits) of that function in the
+# admitted map. Unknown, duplicate or malformed pointcuts fail closed: a
+# selection is never silently narrower than what was asked.
+use std.common.plugin.aspect_params.{AspectParamsV1}
+use std.common.trace.observer_contract_v1.{TraceFailureV1, TraceSelectionV1, TraceSiteV1}
+use std.common.trace.xray_native_map_format_v1.{XrayMapV1}
+use std.common.text_bytes.{utf8_bytes_valid, bytes_to_text}
+
+pub const ASPECT_TRACE_POINTCUTS_EXT_V1 = "simple.trace/observer-v1.pointcuts"
+pub const TRACE_POINTCUTS_SCHEMA_V1 = "simple.trace.observer.pointcuts.v1"
+const TRACE_POINTCUTS_MAX_BYTES_V1 = 4096
+
+# The pointcut names in params; Ok([]) when no pointcut extension is present.
+pub fn trace_aspect_pointcuts_v1(params: AspectParamsV1) -> Result<[text], TraceFailureV1>:
+    var seen = false
+    var names: [text] = []
+    for extension in params.ext:
+        if extension.ext_name != ASPECT_TRACE_POINTCUTS_EXT_V1:
+            continue
+        if seen or extension.ext_major != 1 or extension.payload_schema_hash != TRACE_POINTCUTS_SCHEMA_V1:
+            return Err(TraceFailureV1.InvalidArgument)
+        seen = true
+        if extension.payload.len() == 0 or extension.payload.len() > TRACE_POINTCUTS_MAX_BYTES_V1:
+            return Err(TraceFailureV1.InvalidArgument)
+        if not utf8_bytes_valid(extension.payload):
+            return Err(TraceFailureV1.InvalidArgument)
+        for line in bytes_to_text(extension.payload).replace("\n", ",").split(","):
+            val name = line.trim()
+            if name == "":
+                continue
+            if names.contains(name):
+                return Err(TraceFailureV1.InvalidArgument)
+            names.push(name)
+        if names.len() == 0:
+            return Err(TraceFailureV1.InvalidArgument)
+    Ok(names)
+
+# Every sled of every named function, in map order, as a V1 selection.
+pub fn xray_native_selection_v1(map: XrayMapV1, names: [text], module_instance: u64,
+        manifest_incarnation: u64) -> Result<TraceSelectionV1, TraceFailureV1>:
+    if names.len() == 0 or module_instance == 0 or manifest_incarnation == 0:
+        return Err(TraceFailureV1.InvalidArgument)
+    var sites: [TraceSiteV1] = []
+    for name in names:
+        var found = false
+        for function in map.functions:
+            if function.name == name:
+                if found:
+                    return Err(TraceFailureV1.InvalidMap)
+                found = true
+                for offset in 0..(function.site_count as i64):
+                    sites.push(TraceSiteV1(module_instance: module_instance,
+                        site_id: function.first_site + (offset as u32)))
+        if not found:
+            return Err(TraceFailureV1.InvalidArgument)
+    Ok(TraceSelectionV1(manifest_incarnation: manifest_incarnation, sites: sites))
