@@ -27,8 +27,10 @@ class HirAttrSiteCollectorV1:
     module_name: text
     symbols: SymbolTable
     function: text
+    function_key: text
     tree_of_class: Dict<text, text>
     class_of_symbol: Dict<i64, text>
+    fields_of_class: Dict<text, [text]>
     skip_targets: [text]
     sites: [HirAttrAccessV1]
     ordinal: i64
@@ -40,13 +42,17 @@ class HirAttrSiteCollectorV1:
         match ty.kind:
             case HirTypeKind.Named(symbol, _):
                 if self.class_of_symbol.contains_key(symbol.id): self.class_of_symbol[symbol.id] else: ""
+            case HirTypeKind.Optional(inner): self.class_of_type(inner)
+            case HirTypeKind.Ref(inner, _): self.class_of_type(inner)
             case _: ""
 
     # The receiver's class: its HIR type when lowering recorded one, else the
     # declared type of the variable it names.
     fn class_of(e: HirExpr) -> text:
         if e.has_type_:
-            return self.class_of_type(e.type_)
+            val typed = self.class_of_type(e.type_)
+            if typed.len() > 0:
+                return typed
         val symbol_id = match e.kind:
             case HirExprKind.Var(symbol): symbol.id
             case HirExprKind.NamedVar(symbol, _): symbol.id
@@ -63,7 +69,7 @@ class HirAttrSiteCollectorV1:
     me add(kind: HirAttrAccessKindV1, class_name: text, attr: text, span: Span):
         self.ordinal = self.ordinal + 1
         self.sites.push(HirAttrAccessV1(
-            site_id: "{self.module_name}:{self.function}#{self.ordinal}",
+            site_id: "{self.module_name}:{self.function_key}#{self.ordinal}",
             kind: kind, tree: self.tree_of_class[class_name], class_name: class_name,
             attr: attr, function: self.function, span: span))
 
@@ -87,6 +93,10 @@ class HirAttrSiteCollectorV1:
                 val class_name = self.class_of(base)
                 if self.opted_in(class_name):
                     self.add(HirAttrAccessKindV1.Read, class_name, field, node.span)
+            case HirExprKind.OptionalChain(base, field):
+                val chained = self.class_of(base)
+                if self.opted_in(chained):
+                    self.add(HirAttrAccessKindV1.Read, chained, field, node.span)
             case HirExprKind.StructLit(type_, fields):
                 val class_name = self.class_of_type(type_)
                 if self.opted_in(class_name):
@@ -100,9 +110,16 @@ class HirAttrSiteCollectorV1:
                 if callee_id >= 0 and self.class_of_symbol.contains_key(callee_id):
                     val class_name = self.class_of_symbol[callee_id]
                     if self.opted_in(class_name):
+                        # Named arguments name the field; positional ones
+                        # initialize fields in declaration order.
+                        val order = self.fields_of_class[class_name]
+                        var position = 0
                         for arg in args:
                             if arg.has_name:
                                 self.add(HirAttrAccessKindV1.Init, class_name, arg.name, node.span)
+                            elif position < order.len():
+                                self.add(HirAttrAccessKindV1.Init, class_name, order[position], node.span)
+                            position = position + 1
             case _: ()
 
     me on_stmt(node: HirStmt):
@@ -124,8 +141,11 @@ class HirAttrSiteCollectorV1:
     me on_pattern(node: HirPattern):
         ()
 
-# Sites for every function of one module, in function-name order so the
-# table (and its ordinals) does not depend on dictionary iteration order.
+# Sites for every function of one module. Functions are visited in
+# (name, symbol id) order, so the table and its ordinals never depend on
+# dictionary iteration order; the symbol id in each site id separates
+# same-named methods of different classes. Module-level initializers are not
+# visited (no node_tree access there yet).
 fn hir_collect_attr_sites_v1(module_name: text, symbols: SymbolTable, parser_classes: Dict<text, ParserClass>,
                              classes: Dict<SymbolId, HirClass>,
                              functions: Dict<SymbolId, HirFunction>) -> [HirAttrAccessV1]:
@@ -137,32 +157,31 @@ fn hir_collect_attr_sites_v1(module_name: text, symbols: SymbolTable, parser_cla
     if tree_of_class.len() == 0:
         return []
     var class_of_symbol: Dict<i64, text> = {}
+    var fields_of_class: Dict<text, [text]> = {}
     for cls in classes.values():
         class_of_symbol[cls.symbol.id] = cls.name
-    var names: [text] = []
+    # Declaration order from the parsed class: HIR may reorder fields for layout.
+    for name in parser_classes.keys():
+        var names: [text] = []
+        for f in parser_classes[name].fields:
+            names.push(f.name)
+        fields_of_class[name] = names
+    var order: [HirFunction] = []
     for f in functions.values():
-        var i = names.len()
-        names.push(f.name)
-        while i > 0 and names[i] < names[i - 1]:
-            val t = names[i - 1]
-            names[i - 1] = names[i]
-            names[i] = t
+        var i = order.len()
+        order.push(f)
+        while i > 0 and (order[i].name < order[i - 1].name or
+                (order[i].name == order[i - 1].name and order[i].symbol.id < order[i - 1].symbol.id)):
+            val t = order[i - 1]
+            order[i - 1] = order[i]
+            order[i] = t
             i = i - 1
     var collector = HirAttrSiteCollectorV1(module_name: module_name, symbols: symbols, function: "",
-        tree_of_class: tree_of_class, class_of_symbol: class_of_symbol,
-        skip_targets: [], sites: [], ordinal: 0)
-    var done: [text] = []
-    for name in names:
-        var seen = false
-        for d in done:
-            if d == name:
-                seen = true
-        if seen:
-            continue
-        done.push(name)
-        collector.function = name
+        function_key: "", tree_of_class: tree_of_class, class_of_symbol: class_of_symbol,
+        fields_of_class: fields_of_class, skip_targets: [], sites: [], ordinal: 0)
+    for f in order:
+        collector.function = f.name
+        collector.function_key = "{f.name}@{f.symbol.id}"
         collector.ordinal = 0
-        for f in functions.values():
-            if f.name == name:
-                hir_visit_block(f.body, collector)
+        hir_visit_block(f.body, collector)
     collector.sites

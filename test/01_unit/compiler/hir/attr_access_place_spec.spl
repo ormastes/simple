@@ -31,6 +31,7 @@ use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 use compiler.mir.mir.*
 use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_json.{serialize_mir_inst_kind}
 
 val NODE_SOURCE_BODY: text = "class BinaryNode:\n    left: i64\n    op: i64\n" +
     "class Plain:\n    left: i64\n" +
@@ -38,7 +39,10 @@ val NODE_SOURCE_BODY: text = "class BinaryNode:\n    left: i64\n    op: i64\n" +
     "fn read(n: BinaryNode) -> i64:\n    n.left\n" +
     "fn write(n: BinaryNode):\n    n.left = 5\n" +
     "fn bump(n: BinaryNode):\n    n.op += 2\n" +
-    "fn plain(p: Plain) -> i64:\n    p.left\n"
+    "fn plain(p: Plain) -> i64:\n    p.left\n" +
+    "impl BinaryNode:\n    fn total() -> i64:\n        self.left + self.op\n" +
+    "impl Plain:\n    fn total() -> i64:\n        self.left\n" +
+    "fn make_positional() -> BinaryNode:\n    BinaryNode(1, 2)\n"
 
 fn lower_hir(source: text, name: text) -> HirModule:
     val filename = "attr_sites_" + name + ".spl"
@@ -80,7 +84,7 @@ fn mir_fingerprint(mir: MirModule) -> text:
                 for block in fn_.blocks:
                     out = out + " block\n"
                     for inst in block.instructions:
-                        out = out + "  {inst.kind}\n"
+                        out = out + "  " + serialize_mir_inst_kind(inst.kind) + "\n"
     out
 
 describe "Attribute access sites":
@@ -96,7 +100,12 @@ describe "Attribute access sites":
         expect(summary).to_contain("read:read:BinaryNode.left")
         expect(summary).to_contain("write:write:BinaryNode.left")
         expect(summary).to_contain("bump:read_modify_write:BinaryNode.op")
-        expect(summary.len()).to_equal(5)  # oracle: two initializers, one read, one write, one compound update
+        expect(summary).to_contain("total:read:BinaryNode.left")
+        expect(summary).to_contain("total:read:BinaryNode.op")
+        expect(summary).to_contain("make_positional:init:BinaryNode.left")
+        expect(summary).to_contain("make_positional:init:BinaryNode.op")
+        # The write target is not also a read; Plain (and Plain.total) record nothing.
+        expect(summary.len()).to_equal(9)  # oracle: 2 named + 2 positional inits, 1 read, 2 method reads, 1 write, 1 read-modify-write
         for s in hir.attr_sites:
             expect(s.tree).to_equal("compiler.ast")
             expect(s.site_id.len() > 0).to_equal(true)
@@ -105,6 +114,14 @@ describe "Attribute access sites":
             for seen in ids:
                 expect(seen == s.site_id).to_equal(false)
             ids.push(s.site_id)
+
+    it "records a node_tree class declared pub":
+        # @req REQ-ATTR-15
+        step("Lower a module whose opted-in class is declared with pub")
+        val hir = lower_hir("@node_tree(\"compiler.ast\")\npub class PubNode:\n    v: i64\nfn readp(p: PubNode) -> i64:\n    p.v\n", "pub_class")
+        # @capture(exec): recorded attribute sites
+        step("Verify the decorator survived the pub path")
+        expect(site_summary(hir.attr_sites)).to_equal(["readp:read:PubNode.v"])
 
     it "records nothing for a class without the opt-in":
         # @req REQ-ATTR-15
@@ -126,6 +143,6 @@ describe "Attribute access sites":
         # @capture(exec): MIR fingerprints and carried sites
         step("Verify identical instructions and the same site table on the MIR module")
         expect(mir_fingerprint(opted_mir)).to_equal(mir_fingerprint(plain_mir))
-        expect(mir_fingerprint(opted_mir).len() > 0).to_equal(true)
+        expect(mir_fingerprint(opted_mir).contains("fn bump")).to_equal(true)
         expect(opted_mir.attr_sites.len()).to_equal(opted_hir.attr_sites.len())
         expect(plain_mir.attr_sites.len()).to_equal(0)  # oracle: nothing opted in
