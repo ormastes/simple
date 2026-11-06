@@ -552,8 +552,10 @@ impl Lowerer {
         let arm = &arms[0];
         let remaining_arms = &arms[1..];
 
-        // Check if this is a wildcard pattern (always matches)
-        if matches!(&arm.pattern, Pattern::Wildcard) {
+        // Only an UNGUARDED wildcard always matches (later arms are dead).
+        // `case _ if c:` must fall through to the remaining arms when `c` is
+        // false. doc/08_tracking/bug/seed_run_wildcard_arm_guard_ignored_2026-10-10.md
+        if matches!(&arm.pattern, Pattern::Wildcard) && arm.guard.is_none() {
             return self.lower_match_arm_body(&arm.body, ctx);
         }
 
