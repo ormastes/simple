@@ -705,3 +705,152 @@ fn test_thread_yield() {
     // Just verify it doesn't panic
     rt_thread_yield();
 }
+
+// ========================================================================
+// Pool function-value kind (pool_native_function_payload_value_heuristic_2026-11-06)
+// ========================================================================
+
+const POOL_DIRECT_FUNCTION_MARKER: usize = 0x5344_4952_4543_5446;
+
+extern "C" fn pool_plus_one(input: i64) -> i64 {
+    input + 1
+}
+
+extern "C" fn pool_plus_thousand(input: i64) -> i64 {
+    input + 1000
+}
+
+// Direct-function records at A and A << 3. The word A << 3 is both the
+// int-tagged Simple value of the record at A and the machine address of the
+// record at A << 3; only the submitter knows which one it means.
+struct PoolDualFixture {
+    low: usize,
+    high: usize,
+}
+
+impl PoolDualFixture {
+    fn new() -> Self {
+        for shift in [29u32, 31, 33, 35, 37, 39] {
+            for slot in 1..8usize {
+                let low = (slot << shift) + 0x10000 * 5;
+                let high = low << 3;
+                unsafe {
+                    if !map_fixed_page(low) {
+                        continue;
+                    }
+                    if !map_fixed_page(high) {
+                        unmap_page(low);
+                        continue;
+                    }
+                    *(low as *mut [usize; 2]) = [pool_plus_one as *const () as usize, POOL_DIRECT_FUNCTION_MARKER];
+                    *(high as *mut [usize; 2]) =
+                        [pool_plus_thousand as *const () as usize, POOL_DIRECT_FUNCTION_MARKER];
+                }
+                return PoolDualFixture { low, high };
+            }
+        }
+        panic!("could not map a pool dual-decode fixture page pair");
+    }
+}
+
+impl Drop for PoolDualFixture {
+    fn drop(&mut self) {
+        unsafe {
+            unmap_page(self.low);
+            unmap_page(self.high);
+        }
+    }
+}
+
+fn pool_direct_record(func: extern "C" fn(i64) -> i64) -> Box<[usize; 2]> {
+    Box::new([func as *const () as usize, POOL_DIRECT_FUNCTION_MARKER])
+}
+
+fn pool_run(state: i64, submit: impl Fn(i64) -> i64) -> i64 {
+    let task = submit(state);
+    assert!(task > 0, "pool submit rejected: {}", task);
+    let result = unsafe { crate::rt_pool_task_join_i64_v1(task) };
+    assert_eq!(unsafe { crate::rt_pool_task_release_i64_v1(task) }, 1);
+    result
+}
+
+#[test]
+fn test_pool_legacy_value_entry_stress_dual_decodable_word() {
+    // The legacy entry is the Simple facade's: kind VALUE. 8 submitters x 128
+    // = 1024 tasks mixing the dual-decodable word (int-tagged record at A,
+    // must run pool_plus_one) and heap-tagged direct records.
+    let fx = std::sync::Arc::new(PoolDualFixture::new());
+    assert!(!native_word_exceeds_user_va(fx.high as u64));
+    let state = unsafe { crate::rt_pool_state_create_v1(64) };
+    assert!(state != 0);
+    let submitters: Vec<_> = (0..8i64)
+        .map(|s| {
+            let fx = fx.clone();
+            thread::spawn(move || {
+                for i in 0..128i64 {
+                    let rec = pool_direct_record(pool_plus_one);
+                    let word = if (s + i) % 2 == 0 { fx.high as i64 } else { (rec.as_ptr() as i64) | 1 };
+                    let r = pool_run(state, |st| unsafe { crate::rt_pool_state_try_submit_i64_v1(st, word, i) });
+                    assert_eq!(r, i + 1, "submitter {} iter {} word {:#x}", s, i, word);
+                }
+            })
+        })
+        .collect();
+    for s in submitters {
+        s.join().expect("submitter panicked");
+    }
+    unsafe {
+        crate::rt_pool_state_close_v1(state);
+        crate::rt_pool_state_destroy_v1(state);
+    }
+}
+
+#[test]
+fn test_pool_explicit_kind_stress_and_rejection() {
+    // 8 submitters x 128 = 1024 tasks through the kind entry, interleaving
+    // ADDRESS records, VALUE int-tagged and heap-tagged records, and the
+    // dual-decodable word under both kinds (A -> +1, A << 3 -> +1000).
+    let fx = std::sync::Arc::new(PoolDualFixture::new());
+    let state = unsafe { crate::rt_pool_state_create_v1(64) };
+    assert!(state != 0);
+    let submitters: Vec<_> = (0..8i64)
+        .map(|s| {
+            let fx = fx.clone();
+            thread::spawn(move || {
+                for i in 0..128i64 {
+                    let rec = pool_direct_record(pool_plus_one);
+                    let addr = rec.as_ptr() as i64;
+                    let (kind, word, want) = match (s + i) % 5 {
+                        0 => (RT_WORKER_CLOSURE_ADDRESS, addr, i + 1),
+                        1 => (RT_WORKER_CLOSURE_VALUE, addr << 3, i + 1),
+                        2 => (RT_WORKER_CLOSURE_VALUE, addr | 1, i + 1),
+                        3 => (RT_WORKER_CLOSURE_VALUE, fx.high as i64, i + 1),
+                        _ => (RT_WORKER_CLOSURE_ADDRESS, fx.high as i64, i + 1000),
+                    };
+                    let r = pool_run(state, |st| unsafe {
+                        crate::rt_pool_state_try_submit_i64_kind_v1(st, kind, word, i)
+                    });
+                    assert_eq!(r, want, "submitter {} iter {} kind {} word {:#x}", s, i, kind, word);
+                }
+            })
+        })
+        .collect();
+    for s in submitters {
+        s.join().expect("submitter panicked");
+    }
+    // Unknown kinds and non-int/heap tags are rejected, never guessed.
+    let rec = pool_direct_record(pool_plus_one);
+    let addr = rec.as_ptr() as i64;
+    for (kind, word) in [(0, addr), (3, addr), (-1, addr << 3), (RT_WORKER_CLOSURE_VALUE, addr | 2)] {
+        assert_eq!(unsafe { crate::rt_pool_state_try_submit_i64_kind_v1(state, kind, word, 1) }, -3);
+    }
+    // ADDRESS above the user-VA ceiling is no address.
+    assert_eq!(
+        unsafe { crate::rt_pool_state_try_submit_i64_kind_v1(state, RT_WORKER_CLOSURE_ADDRESS, addr << 20, 1) },
+        -3
+    );
+    unsafe {
+        crate::rt_pool_state_close_v1(state);
+        crate::rt_pool_state_destroy_v1(state);
+    }
+}

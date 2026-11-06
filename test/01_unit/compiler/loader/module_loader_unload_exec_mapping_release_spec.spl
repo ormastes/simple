@@ -1,0 +1,91 @@
+"""Compat ModuleLoader.unload must release the module's executable mappings.
+
+Bug: compat_loader_unload_leaks_exec_mappings_2026-11-03.
+Budget: after N load/unload (reload) cycles `native_exec_memory_count()` and
+`native_exec_memory_total()` are back at their pre-load values. The first
+load must add at least one mapping, so the assertion is not vacuous.
+"""
+
+use compiler.driver.smf_writer.{build_smf_with_relocations, SmfBuildOptions, Target}
+use compiler.loader.*
+use compiler.loader.smf_mmap_native.{native_exec_memory_count, native_exec_memory_total}
+use std.io_runtime.{file_read_bytes}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+fn run_sh(command: text) -> (text, text, i64):
+    rt_process_run("/bin/sh", ["-c", command])
+
+fn cleanup_tmpdir(tmpdir: text):
+    _ = run_sh("rm -rf '{tmpdir}' >/dev/null 2>&1 || true")
+
+fn build_fixture_smf(tmpdir: text) -> text:
+    val src_path = "{tmpdir}/ul_fixture.c"
+    val obj_path = "{tmpdir}/ul_fixture.o"
+    val smf_path = "{tmpdir}/ul_fixture.smf"
+    val source = "long main(void) { return 42; }\n"
+    expect(rt_file_write_text(src_path, source)).to_equal(true)
+    val (so, se, sc) = run_sh("clang --target=x86_64-unknown-linux-gnu -c -O0 -fno-pic -fno-pie -o '{obj_path}' '{src_path}' 2>&1")
+    if sc != 0:
+        cleanup_tmpdir(tmpdir)
+        fail("clang failed: {so}{se}")
+    val object_bytes = file_read_bytes(obj_path).unwrap()
+    val smf_bytes = build_smf_with_relocations(object_bytes, SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu()))
+    expect(rt_file_write_bytes(smf_path, smf_bytes)).to_equal(true)
+    smf_path
+
+fn expect_loaded(result: LoadResult, what: text):
+    match result:
+        case LoadResult.Success(_): pass
+        case LoadResult.Error(message):
+            fail("{what} failed: {message}")
+
+describe "Compat loader unload releases executable mappings":
+    it "returns exec mapping count and bytes to baseline after load/unload cycles":
+        val (tmp_stdout, _e, _c) = run_sh("d=$(mktemp -d) && (cygpath -m \"$d\" 2>/dev/null || printf \"%s\n\" \"$d\")")
+        val tmpdir = tmp_stdout.trim()
+        if tmpdir == "":
+            fail("failed to create a temporary directory")
+        val smf_path = build_fixture_smf(tmpdir)
+
+        val maps_before = native_exec_memory_count()
+        val bytes_before = native_exec_memory_total()
+        var loader = ModuleLoader.with_defaults()
+        val syms_before = loader.stats().symbol_count
+
+        expect_loaded(loader.load(smf_path), "initial load")
+        # Non-vacuity: the fixture really maps executable code.
+        val maps_loaded = native_exec_memory_count()
+        val bytes_loaded = native_exec_memory_total()
+        expect(maps_loaded).to_be_greater_than(maps_before)
+        expect(bytes_loaded).to_be_greater_than(bytes_before)
+        expect(loader.stats().symbol_count).to_be_greater_than(syms_before)
+
+        loader.unload(smf_path)
+        expect(loader.is_loaded(smf_path)).to_equal(false)
+        expect(native_exec_memory_count()).to_equal(maps_before)
+        expect(native_exec_memory_total()).to_equal(bytes_before)
+        expect(loader.stats().symbol_count).to_equal(syms_before)
+
+        # Repeated load/unload and reload must not accumulate mappings.
+        var cycle = 0
+        while cycle < 4:
+            expect_loaded(loader.load(smf_path), "cycle load")
+            expect(native_exec_memory_count()).to_equal(maps_loaded)
+            expect(native_exec_memory_total()).to_equal(bytes_loaded)
+            loader.unload(smf_path)
+            expect(native_exec_memory_count()).to_equal(maps_before)
+            expect(native_exec_memory_total()).to_equal(bytes_before)
+            cycle = cycle + 1
+        expect_loaded(loader.load(smf_path), "pre-reload load")
+        expect_loaded(loader.reload(smf_path), "reload")
+        expect(native_exec_memory_count()).to_equal(maps_loaded)
+        expect(native_exec_memory_total()).to_equal(bytes_loaded)
+        loader.unload(smf_path)
+        # Unloading an already-unloaded path is a no-op (no double unmap).
+        loader.unload(smf_path)
+        cleanup_tmpdir(tmpdir)
+        expect(native_exec_memory_count()).to_equal(maps_before)
+        expect(native_exec_memory_total()).to_equal(bytes_before)

@@ -63,6 +63,33 @@ static int64_t direct_entry(int64_t data) {
     return data + 8;
 }
 
+extern int64_t rt_pool_state_create_v1(int64_t capacity);
+extern int64_t rt_pool_state_try_submit_i64_v1(int64_t state, int64_t entry, int64_t input);
+extern int64_t rt_pool_state_try_submit_i64_kind_v1(int64_t state, int64_t kind, int64_t entry, int64_t input);
+extern int64_t rt_pool_task_join_i64_v1(int64_t task);
+extern int64_t rt_pool_task_release_i64_v1(int64_t task);
+extern int64_t rt_pool_state_close_v1(int64_t state);
+extern int64_t rt_pool_state_destroy_v1(int64_t state);
+
+static int64_t pool_plus_one(int64_t input) { return input + 1; }
+static int64_t pool_plus_thousand(int64_t input) { return input + 1000; }
+
+#ifdef _WIN32
+static int map_fixed_page(uintptr_t addr) {
+    return (uintptr_t)VirtualAlloc((void*)addr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) == addr;
+}
+static void unmap_page(uintptr_t addr) { VirtualFree((void*)addr, 0, MEM_RELEASE); }
+#else
+#include <sys/mman.h>
+static int map_fixed_page(uintptr_t addr) {
+    void* p = mmap((void*)addr, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) return 0;
+    if ((uintptr_t)p != addr) { munmap(p, 4096); return 0; }
+    return 1;
+}
+static void unmap_page(uintptr_t addr) { munmap((void*)addr, 4096); }
+#endif
+
 int main(void) {
     static int64_t record[2];
     static int64_t direct[2];
@@ -162,6 +189,55 @@ int main(void) {
     assert(rt_thread_spawn_isolated_kind(KIND_VALUE, 4095 << 3, NIL) == 0);
     assert(rt_thread_spawn_isolated_kind(KIND_ADDRESS, (int64_t)(UINT64_C(0x00ff000000000000)), NIL) == 0);
     assert(rt_thread_spawn_isolated_with_args_kind(7, (int64_t)(intptr_t)direct2, 1, 2) == 0);
+
+    /* Pool v1 function values follow the submitter's declared kind
+     * (pool_native_function_payload_value_heuristic_2026-11-06). Records at
+     * A and A << 3: the word A << 3 is both the int-tagged value of the
+     * record at A and the address of the record at A << 3. */
+    {
+        uintptr_t low = 0, high = 0;
+        for (uintptr_t base = 0x10030000u; base < 0x70000000u && !high; base += 0x01000000u) {
+            if (!map_fixed_page(base)) continue;
+            if (!map_fixed_page(base << 3)) { unmap_page(base); continue; }
+            low = base;
+            high = base << 3;
+        }
+        assert(high != 0);
+        ((int64_t*)low)[0] = (int64_t)(intptr_t)pool_plus_one;
+        ((int64_t*)low)[1] = DIRECT_MARKER;
+        ((int64_t*)high)[0] = (int64_t)(intptr_t)pool_plus_thousand;
+        ((int64_t*)high)[1] = DIRECT_MARKER;
+        static int64_t heap_rec[2];
+        heap_rec[0] = (int64_t)(intptr_t)pool_plus_one;
+        heap_rec[1] = DIRECT_MARKER;
+        int64_t ps = rt_pool_state_create_v1(64);
+        assert(ps != 0);
+        /* 1024 tasks through the legacy (VALUE) entry and 1024 through the
+         * kind entry, mixing the dual-decodable word with ordinary records. */
+        for (int64_t i = 0; i < 1024; i++) {
+            int64_t word = (i % 2) ? (int64_t)high : ((int64_t)(intptr_t)heap_rec | 1);
+            int64_t t = rt_pool_state_try_submit_i64_v1(ps, word, i);
+            assert(t > 0);
+            assert(rt_pool_task_join_i64_v1(t) == i + 1);
+            assert(rt_pool_task_release_i64_v1(t) == 1);
+        }
+        for (int64_t i = 0; i < 1024; i++) {
+            int64_t kind = (i % 3 == 2) ? KIND_ADDRESS : KIND_VALUE;
+            int64_t word = (i % 3 == 0) ? ((int64_t)(intptr_t)heap_rec << 3) : (int64_t)high;
+            int64_t want = (i % 3 == 2) ? i + 1000 : i + 1;
+            int64_t t = rt_pool_state_try_submit_i64_kind_v1(ps, kind, word, i);
+            assert(t > 0);
+            assert(rt_pool_task_join_i64_v1(t) == want);
+            assert(rt_pool_task_release_i64_v1(t) == 1);
+        }
+        assert(rt_pool_state_try_submit_i64_kind_v1(ps, 0, (int64_t)high, 1) == -3);
+        assert(rt_pool_state_try_submit_i64_kind_v1(ps, 3, (int64_t)high, 1) == -3);
+        assert(rt_pool_state_try_submit_i64_kind_v1(ps, KIND_VALUE, (int64_t)(intptr_t)heap_rec | 2, 1) == -3);
+        assert(rt_pool_state_close_v1(ps) >= 0);
+        assert(rt_pool_state_destroy_v1(ps) >= 0);
+        unmap_page(low);
+        unmap_page(high);
+    }
 
     puts("rt_thread_owner_contract_selfcheck: ok");
     return 0;

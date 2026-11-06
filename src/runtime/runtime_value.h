@@ -75,6 +75,48 @@ static inline int rt_native_word_exceeds_user_va(uint64_t word) {
     return (word & ~RT_NATIVE_PTR_TAG_BITS) > RT_NATIVE_USER_VA_MAX;
 }
 
+/* Explicit function-value ABI kind, chosen by the CALLER (thread spawner or
+ * pool submitter) from the static type of what it passes; never inferred
+ * from the word's value. Twin of executor.rs RT_WORKER_CLOSURE_* /
+ * native_worker_closure_word.
+ *   ADDRESS  machine address of a code entry or record; raw = 0.
+ *   VALUE    tagged Simple RuntimeValue, decoded by its own tag:
+ *            TAG_INT  (addr << 3) -> raw native record/entry, raw = 1;
+ *            TAG_HEAP (addr | 1)  -> heap record, raw = 0;
+ *            any other tag is rejected.
+ * Any other kind, and any decoded word below 4096, is rejected (returns 0).
+ * Pure: no shared state, no probe, so it is lockless by construction. */
+#define RT_WORKER_CLOSURE_ADDRESS 1
+#define RT_WORKER_CLOSURE_VALUE   2
+
+static inline int rt_native_function_word_decode(int64_t kind, int64_t word, int64_t* payload, int* raw) {
+    uint64_t value = (uint64_t)word;
+    uint64_t decoded;
+    int is_raw;
+    if (kind == RT_WORKER_CLOSURE_ADDRESS) {
+        /* Validity, not a guess: above the user-VA ceiling is no address. */
+        if (rt_native_word_exceeds_user_va(value)) return 0;
+        decoded = value;
+        is_raw = 0;
+    } else if (kind == RT_WORKER_CLOSURE_VALUE) {
+        if ((value & TAG_MASK) == TAG_INT) {
+            decoded = value >> 3;
+            is_raw = 1;
+        } else if ((value & TAG_MASK) == TAG_HEAP) {
+            decoded = value & ~(uint64_t)TAG_MASK;
+            is_raw = 0;
+        } else {
+            return 0;
+        }
+    } else {
+        return 0;
+    }
+    if (decoded < 4096ULL) return 0;
+    *payload = (int64_t)decoded;
+    *raw = is_raw;
+    return 1;
+}
+
 static inline uint64_t rv_tag(RuntimeValue v) { return v & TAG_MASK; }
 static inline uint64_t rv_payload(RuntimeValue v) { return v >> 3; }
 static inline RuntimeValue rv_from_tag_payload(uint64_t tag, uint64_t payload) {
