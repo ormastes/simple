@@ -1,0 +1,513 @@
+# Owner-local declaration facts retained against exact artifact and rule inputs.
+# Cross-file identities and locators are resolved only after all partitions merge.
+# @req REQ-TRC-017
+use std.common.traceability.model.*
+use std.common.traceability.incremental.*
+use std.common.traceability.schema.{trace_path_valid}
+use std.common.traceability.sdn_codec.{decode_trace_declarations}
+use std.common.traceability.conventions.{convention_target_path}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.traceability.resolve.{resolve_trace_graph}
+
+pub struct TraceSnapshotPartition:
+    artifact: SnapshotArtifact
+    declaration_registered: bool
+    facts: TraceFacts
+    content_sha256: text
+    facts_fingerprint: text
+
+pub struct TraceSnapshotPartitionSet:
+    subject: SnapshotSubject
+    extractor_id: text
+    schema_id: text
+    policy_binding_id: text
+    configuration_id: text
+    declaration_paths: [text]
+    partitions: [TraceSnapshotPartition]
+    facts: TraceFacts
+    facts_fingerprint: text
+    dependencies: [TraceDependency]
+    dependency_fingerprint: text
+    dependency_inventory_complete: bool
+
+pub struct TraceSnapshotPartitionUpdate:
+    partition_set: TraceSnapshotPartitionSet
+    facts: TraceFacts
+    graph: TraceGraph
+    invalidation: TraceInvalidation
+    reused_paths: [text]
+
+fn partition_digest(value: text) -> text:
+    var bytes: [u8] = []
+    for byte in value.bytes(): bytes.push(byte)
+    "sha256:" + sha256_u8_hex(bytes)
+
+fn partition_record(names: [text], values: [text]) -> SdnValue:
+    var fields: Dict<text, SdnValue> = {}
+    for i in 0..names.len(): fields[names[i]] = SdnValue.String(values[i])
+    SdnValue.Dict(fields)
+
+fn partition_sdn_record(names: [text], values: [SdnValue]) -> SdnValue:
+    var fields: Dict<text, SdnValue> = {}
+    for i in 0..names.len(): fields[names[i]] = values[i]
+    SdnValue.Dict(fields)
+
+fn partition_sdn_strings(names: [text], values: [text]) -> SdnValue:
+    var items: [SdnValue] = []
+    for value in values: items.push(SdnValue.String(value))
+    partition_sdn_record(names, items)
+
+fn partition_fact_digest(facts: TraceFacts) -> text:
+    var nodes: [SdnValue] = []
+    for node in facts.nodes: nodes.push(partition_sdn_strings(["id", "kind", "title"], [node.id, node_kind_name(node.kind), node.title]))
+    var definitions: [SdnValue] = []
+    for item in facts.test_definitions: definitions.push(partition_sdn_strings(["node_id", "kind", "definition_id", "parameter_digest", "definition_digest"], [item.node_id, test_kind_name(item.kind), item.definition_id, item.parameter_digest, item.definition_digest]))
+    var claims: [SdnValue] = []
+    for item in facts.claims: claims.push(partition_sdn_strings(["id", "from_id", "relation", "to_id", "origin_id", "operation", "rule_id", "scope_id"], [item.id, item.from_id, relation_name(item.relation), item.to_id, item.origin_id, claim_operation_name(item.operation), item.rule_id, item.scope_id]))
+    var origins: [SdnValue] = []
+    for item in facts.origins: origins.push(partition_sdn_strings(["id", "kind", "owner_path", "locator", "rule_version"], [item.id, origin_kind_name(item.kind), item.owner_path, item.locator, item.rule_version]))
+    var locators: [SdnValue] = []
+    for item in facts.locators: locators.push(partition_sdn_strings(["entity_id", "path", "locator_kind", "locator", "blob_id"], [item.entity_id, item.path, item.locator_kind, item.locator, item.blob_id]))
+    var diagnostics: [SdnValue] = []
+    for item in facts.diagnostics: diagnostics.push(partition_sdn_strings(["code", "subject_id", "rule_id", "entity_id", "origin_id", "message", "severity"], [item.code, item.subject_id, item.rule_id, item.entity_id, item.origin_id, item.message, item.severity]))
+    var fields: Dict<text, SdnValue> = {}
+    fields["complete"] = SdnValue.Bool(facts.complete)
+    fields["input_manifest_id"] = SdnValue.String(facts.input_manifest_id)
+    fields["generation_id"] = SdnValue.String(facts.generation_id)
+    fields["subject"] = partition_sdn_strings(["repository_id", "snapshot_id", "kind", "revision_id", "tree_id", "object_format"],
+        [facts.subject.repository_id, facts.subject.snapshot_id, facts.subject.kind, facts.subject.revision_id, facts.subject.tree_id, facts.subject.object_format])
+    fields["nodes"] = SdnValue.Array(nodes)
+    fields["test_definitions"] = SdnValue.Array(definitions)
+    fields["claims"] = SdnValue.Array(claims)
+    fields["origins"] = SdnValue.Array(origins)
+    fields["locators"] = SdnValue.Array(locators)
+    fields["diagnostics"] = SdnValue.Array(diagnostics)
+    partition_digest(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+fn dependency_fingerprint(dependencies: [TraceDependency]) -> text:
+    var rows: [SdnValue] = []
+    for dependency in dependencies:
+        var kind = "artifact"
+        match dependency.kind:
+            case TraceDependencyKind.ExistingIdentity: kind = "existing_identity"
+            case TraceDependencyKind.MissingIdentity: kind = "missing_identity"
+            case TraceDependencyKind.UniqueIdentity: kind = "unique_identity"
+            case TraceDependencyKind.Membership: kind = "membership"
+            case TraceDependencyKind.Configuration: kind = "configuration"
+            case _: ()
+        rows.push(partition_sdn_strings(["owner_path", "kind", "key"], [dependency.owner_path, kind, dependency.key]))
+    partition_digest(sdn_encode_canonical(partition_sorted_rows(rows)))
+
+fn partition_sorted_rows(rows: [SdnValue]) -> SdnValue:
+    # Preserve duplicates: duplicate policy rows affect authority and resolver
+    # behavior. Input-order changes conservatively produce a new binding.
+    SdnValue.Array(rows)
+
+pub fn trace_snapshot_policy_binding(policy: TracePolicy) -> text:
+    var rules: [SdnValue] = []
+    for rule in policy.conventions:
+        rules.push(partition_record(["id", "source_root", "target_root", "source_suffix", "target_suffix", "relation", "version"],
+            [rule.id, rule.source_root, rule.target_root, rule.source_suffix, rule.target_suffix, relation_name(rule.relation), rule.version]))
+    var authorities: [SdnValue] = []
+    for authority in policy.authorities:
+        var row: Dict<text, SdnValue> = {}
+        row["declaration"] = partition_record(["origin_id", "relation", "scope_id", "owner_path", "review_id", "reason", "expires_snapshot_id"],
+            [authority.origin_id, relation_name(authority.relation), authority.scope_id, authority.owner_path, authority.review_id, authority.reason, authority.expires_snapshot_id])
+        row["allow_override"] = SdnValue.Bool(authority.allow_override)
+        authorities.push(SdnValue.Dict(row))
+    var fields: Dict<text, SdnValue> = {}
+    fields["schema"] = SdnValue.String("simple.trace.policy-binding/v1")
+    fields["id"] = SdnValue.String(policy.id)
+    fields["max_nodes"] = SdnValue.Int(policy.max_nodes)
+    fields["max_claims"] = SdnValue.Int(policy.max_claims)
+    fields["conventions"] = partition_sorted_rows(rules)
+    fields["authorities"] = partition_sorted_rows(authorities)
+    partition_digest(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+fn partition_artifact_equal(left: SnapshotArtifact, right: SnapshotArtifact) -> bool:
+    left.path == right.path and left.blob_id == right.blob_id and
+        left.content == right.content and left.visibility == right.visibility
+
+fn partition_empty_facts(subject: SnapshotSubject, artifact: SnapshotArtifact) -> TraceFacts:
+    val identity = "file:" + artifact.path + ":" + artifact.blob_id
+    TraceFacts(subject: subject, input_manifest_id: identity, nodes: [], test_definitions: [],
+        claims: [], origins: [], locators: [], diagnostics: [], generation_id: identity, complete: true)
+
+fn partition_artifact_node_id(path: text) -> text:
+    val digits = "0123456789abcdef"
+    var encoded = "artifact:"
+    for byte in path.bytes():
+        val value = byte.to_i64()
+        encoded = encoded + digits.substring(value / 16, value / 16 + 1) + digits.substring(value % 16, value % 16 + 1)
+    encoded
+
+fn make_partition(subject: SnapshotSubject, artifact: SnapshotArtifact,
+    declaration_registered: bool) -> TraceSnapshotPartition:
+    var facts = partition_empty_facts(subject, artifact)
+    if declaration_registered:
+        match decode_trace_declarations(artifact.content, subject, artifact.path, artifact.blob_id):
+            case Err(diagnostics):
+                facts.complete = false
+                facts.diagnostics = diagnostics
+            case Ok(decoded):
+                # The cold extractor consumes only the declared rows of a
+                # decoded owner; keep exactly that payload so composition
+                # cannot gain diagnostics or completeness bits it lacks.
+                facts.nodes = decoded.nodes
+                facts.test_definitions = decoded.test_definitions
+                facts.claims = decoded.claims
+                facts.origins = decoded.origins
+                facts.locators = decoded.locators
+    TraceSnapshotPartition(artifact: artifact, declaration_registered: declaration_registered,
+        facts: facts, content_sha256: partition_digest(artifact.content), facts_fingerprint: partition_fact_digest(facts))
+
+fn rebind_partition(partition: TraceSnapshotPartition, subject: SnapshotSubject) -> TraceSnapshotPartition:
+    var diagnostics: [TraceDiagnostic] = []
+    for diagnostic in partition.facts.diagnostics:
+        diagnostics.push(TraceDiagnostic(code: diagnostic.code, subject_id: subject.snapshot_id,
+            rule_id: diagnostic.rule_id, entity_id: diagnostic.entity_id, origin_id: diagnostic.origin_id,
+            message: diagnostic.message, severity: diagnostic.severity))
+    val facts = TraceFacts(subject: subject, input_manifest_id: partition.facts.input_manifest_id,
+        nodes: partition.facts.nodes, test_definitions: partition.facts.test_definitions,
+        claims: partition.facts.claims, origins: partition.facts.origins, locators: partition.facts.locators,
+        diagnostics: diagnostics, generation_id: partition.facts.generation_id, complete: partition.facts.complete)
+    TraceSnapshotPartition(artifact: partition.artifact, declaration_registered: partition.declaration_registered,
+        facts: facts, content_sha256: partition.content_sha256, facts_fingerprint: partition_fact_digest(facts))
+
+fn declaration_path_valid(paths: [text]) -> bool:
+    var seen: Dict<text, bool> = {}
+    for path in paths:
+        if not trace_path_valid(path) or seen.contains_key(path): return false
+        seen[path] = true
+    true
+
+fn partition_by_path(partitions: [TraceSnapshotPartition]) -> Dict<text, TraceSnapshotPartition>:
+    var result: Dict<text, TraceSnapshotPartition> = {}
+    for partition in partitions: result[partition.artifact.path] = partition
+    result
+
+fn identity_signature(facts: TraceFacts, identity: text) -> [text]:
+    var rows: [text] = []
+    for node in facts.nodes:
+        if node.id == identity:
+            rows.push(sdn_encode_canonical(partition_sdn_strings(["kind", "title"], [node_kind_name(node.kind), node.title])))
+    # Declaration-only locator moves change what an identity resolves to even
+    # when its node rows are byte-identical.
+    for locator in facts.locators:
+        if locator.entity_id == identity:
+            rows.push(sdn_encode_canonical(partition_sdn_strings(["path", "locator_kind", "locator"], [locator.path, locator.locator_kind, locator.locator])))
+    trace_sorted_ids(rows)
+
+fn changed_identity_keys(before: TraceFacts, after: TraceFacts) -> [text]:
+    var identities: [text] = []
+    for node in before.nodes:
+        if not identities.contains(node.id): identities.push(node.id)
+    for node in after.nodes:
+        if not identities.contains(node.id): identities.push(node.id)
+    var changed: [text] = []
+    for identity in identities:
+        val left = identity_signature(before, identity)
+        val right = identity_signature(after, identity)
+        if left.len() != right.len():
+            changed.push(identity)
+        else:
+            var equal = true
+            for i in 0..left.len():
+                if left[i] != right[i]: equal = false
+            if not equal: changed.push(identity)
+    changed
+
+fn locator_membership(facts: TraceFacts, path: text) -> [text]:
+    var entities: [text] = []
+    for locator in facts.locators:
+        if locator.path != path: continue
+        for node in facts.nodes:
+            if node.id == locator.entity_id:
+                val signature = node.id + "|" + node_kind_name(node.kind)
+                if not entities.contains(signature): entities.push(signature)
+    trace_sorted_ids(entities)
+
+fn changed_membership_keys(before: TraceFacts, after: TraceFacts) -> [text]:
+    var paths: [text] = []
+    for locator in before.locators:
+        if not paths.contains(locator.path): paths.push(locator.path)
+    for locator in after.locators:
+        if not paths.contains(locator.path): paths.push(locator.path)
+    var changed: [text] = []
+    for path in paths:
+        val left = locator_membership(before, path)
+        val right = locator_membership(after, path)
+        if left.len() != right.len(): changed.push(path)
+        else:
+            var equal = true
+            for i in 0..left.len():
+                if left[i] != right[i]: equal = false
+            if not equal: changed.push(path)
+    var roles_before: [text] = []
+    var roles_after: [text] = []
+    for definition in before.test_definitions:
+        val key = "test-role:" + definition.node_id + "|" + test_kind_name(definition.kind)
+        if not roles_before.contains(key): roles_before.push(key)
+    for definition in after.test_definitions:
+        val key = "test-role:" + definition.node_id + "|" + test_kind_name(definition.kind)
+        if not roles_after.contains(key): roles_after.push(key)
+    var role_keys: [text] = []
+    for key in roles_before: role_keys.push(key)
+    for key in roles_after:
+        if not role_keys.contains(key): role_keys.push(key)
+    for key in role_keys:
+        if roles_before.contains(key) != roles_after.contains(key): changed.push(key)
+    changed
+
+fn append_facts(target: TraceFacts, source: TraceFacts) -> TraceFacts:
+    var nodes: [TraceNode] = []
+    for node in target.nodes: nodes.push(node)
+    for node in source.nodes: nodes.push(node)
+    var definitions: [TraceTestDefinition] = []
+    for definition in target.test_definitions: definitions.push(definition)
+    for definition in source.test_definitions: definitions.push(definition)
+    var claims: [TraceClaim] = []
+    for claim in target.claims: claims.push(claim)
+    for claim in source.claims: claims.push(claim)
+    var origins: [TraceOrigin] = []
+    for origin in target.origins: origins.push(origin)
+    for origin in source.origins: origins.push(origin)
+    var locators: [TraceLocator] = []
+    for locator in target.locators: locators.push(locator)
+    for locator in source.locators: locators.push(locator)
+    var diagnostics: [TraceDiagnostic] = []
+    for diagnostic in target.diagnostics: diagnostics.push(diagnostic)
+    for diagnostic in source.diagnostics: diagnostics.push(diagnostic)
+    TraceFacts(subject: target.subject, input_manifest_id: target.input_manifest_id,
+        nodes: nodes, test_definitions: definitions, claims: claims, origins: origins,
+        locators: locators, diagnostics: diagnostics, generation_id: target.generation_id,
+        complete: target.complete and source.complete)
+
+fn compose_partition_facts(subject: SnapshotSubject, artifacts: [SnapshotArtifact],
+    partitions: [TraceSnapshotPartition], declarations: [text], manifest_id: text,
+    generation_id: text, policy: TracePolicy) -> TraceFacts:
+    var facts = TraceFacts(subject: subject, input_manifest_id: manifest_id, nodes: [],
+        test_definitions: [], claims: [], origins: [], locators: [], diagnostics: [],
+        generation_id: generation_id, complete: true)
+    if policy.max_nodes < 1 or policy.max_claims < 1:
+        facts.complete = false
+        facts.diagnostics.push(TraceDiagnostic(code: "TRACE-SNAPSHOT-INCOMPLETE", subject_id: subject.snapshot_id,
+            rule_id: "snapshot-extraction-v1", entity_id: "", origin_id: "",
+            message: "invalid policy extraction budgets", severity: "error"))
+        return facts
+    var artifact_by_path: Dict<text, SnapshotArtifact> = {}
+    for artifact in artifacts: artifact_by_path[artifact.path] = artifact
+    for partition in partitions:
+        facts = append_facts(facts, partition.facts)
+        if facts.nodes.len() > policy.max_nodes or facts.claims.len() > policy.max_claims:
+            facts.complete = false
+            facts.diagnostics.push(TraceDiagnostic(code: "TRACE-SNAPSHOT-INCOMPLETE", subject_id: subject.snapshot_id,
+                rule_id: "snapshot-extraction-v1", entity_id: partition.artifact.path, origin_id: "",
+                message: "extraction policy budget exhausted", severity: "error"))
+            return facts
+        if partition.declaration_registered != declarations.contains(partition.artifact.path):
+            facts.complete = false
+            facts.diagnostics.push(TraceDiagnostic(code: "TRACE-SNAPSHOT-INCOMPLETE", subject_id: subject.snapshot_id,
+                rule_id: "declarations", entity_id: partition.artifact.path, origin_id: "",
+                message: "partition declaration membership differs from frozen registration", severity: "error"))
+    # Same per-path diagnostic identity and order as extract_snapshot_trace_facts_cold.
+    var registered: [text] = []
+    for path in declarations:
+        if registered.contains(path) or not trace_path_valid(path):
+            facts.complete = false
+            facts.diagnostics.push(TraceDiagnostic(code: "TRACE-AUTHORITY-CONFLICT", subject_id: subject.snapshot_id,
+                rule_id: "snapshot-extraction-v1", entity_id: path, origin_id: "", message: "invalid or repeated declaration registration", severity: "error"))
+        registered.push(path)
+        if not artifact_by_path.contains_key(path):
+            facts.complete = false
+            facts.diagnostics.push(TraceDiagnostic(code: "TRACE-MISSING-ENDPOINT", subject_id: subject.snapshot_id,
+                rule_id: "snapshot-extraction-v1", entity_id: path, origin_id: "", message: "registered declaration is absent from exact snapshot", severity: "error"))
+    var declared_kinds: Dict<text, TraceNodeKind> = {}
+    for node in facts.nodes: declared_kinds[node.id] = node.kind
+    var declared_files: Dict<text, bool> = {}
+    for locator in facts.locators:
+        if locator.locator_kind == "file" and declared_kinds.contains_key(locator.entity_id):
+            val kind = declared_kinds[locator.entity_id]
+            if kind == TraceNodeKind.SourceFile or kind == TraceNodeKind.TestSuite or kind == TraceNodeKind.Document:
+                declared_files[locator.path] = true
+    for artifact in artifacts:
+        if declared_files.contains_key(artifact.path): continue
+        var kind = TraceNodeKind.Document
+        if artifact.path.starts_with("src/") and artifact.path.ends_with(".spl"): kind = TraceNodeKind.SourceFile
+        elif artifact.path.starts_with("test/") and artifact.path.ends_with(".spl"): kind = TraceNodeKind.TestSuite
+        val node_id = partition_artifact_node_id(artifact.path)
+        facts.nodes.push(TraceNode(id: node_id, kind: kind, title: artifact.path))
+        facts.locators.push(TraceLocator(entity_id: node_id, path: artifact.path, locator_kind: "file", locator: "", blob_id: artifact.blob_id))
+        if facts.nodes.len() > policy.max_nodes:
+            facts.complete = false
+            facts.diagnostics.push(TraceDiagnostic(code: "TRACE-SNAPSHOT-INCOMPLETE", subject_id: subject.snapshot_id,
+                rule_id: "snapshot-extraction-v1", entity_id: artifact.path, origin_id: "",
+                message: "inventory node budget exhausted", severity: "error"))
+            return facts
+    var pinned: [TraceLocator] = []
+    for locator in facts.locators:
+        if not artifact_by_path.contains_key(locator.path):
+            facts.complete = false
+            facts.diagnostics.push(TraceDiagnostic(code: "TRACE-MISSING-ENDPOINT", subject_id: subject.snapshot_id,
+                rule_id: "snapshot-extraction-v1", entity_id: locator.path, origin_id: "", message: "locator path is absent from exact snapshot", severity: "error"))
+            continue
+        val artifact = artifact_by_path[locator.path]
+        if locator.blob_id != "" and locator.blob_id != artifact.blob_id:
+            facts.complete = false
+            facts.diagnostics.push(TraceDiagnostic(code: "TRACE-MISSING-ENDPOINT", subject_id: subject.snapshot_id,
+                rule_id: "snapshot-extraction-v1", entity_id: locator.path, origin_id: "", message: "declared locator blob differs from snapshot", severity: "error"))
+        if locator.locator_kind != "file":
+            facts.complete = false
+            facts.diagnostics.push(TraceDiagnostic(code: "TRACE-SNAPSHOT-INCOMPLETE", subject_id: subject.snapshot_id,
+                rule_id: "snapshot-extraction-v1", entity_id: locator.path, origin_id: "", message: "non-file locator requires an admitted symbol/section extractor", severity: "error"))
+        pinned.push(TraceLocator(entity_id: locator.entity_id, path: locator.path, locator_kind: locator.locator_kind,
+            locator: locator.locator, blob_id: artifact.blob_id))
+    facts.locators = pinned
+    facts
+
+fn retained_dependencies(facts: TraceFacts, partitions: [TraceSnapshotPartition],
+    policy: TracePolicy, policy_binding_id: text, extractor_id: text, schema_id: text, configuration_id: text) -> [TraceDependency]:
+    var dependencies: [TraceDependency] = []
+    var counts: Dict<text, i64> = {}
+    for node in facts.nodes:
+        var count = 0
+        if counts.contains_key(node.id): count = counts[node.id]
+        counts[node.id] = count + 1
+    for partition in partitions:
+        for locator in partition.facts.locators:
+            dependencies.push(TraceDependency(owner_path: partition.artifact.path, kind: TraceDependencyKind.Artifact, key: locator.path))
+        for claim in partition.facts.claims:
+            dependencies.push(TraceDependency(owner_path: partition.artifact.path, kind: TraceDependencyKind.Configuration, key: policy_binding_id))
+            if claim.relation == TraceRelation.AcceptedBy:
+                dependencies.push(TraceDependency(owner_path: partition.artifact.path, kind: TraceDependencyKind.Membership, key: "test-role:" + claim.to_id + "|acceptance"))
+            elif claim.relation == TraceRelation.VerifiedBy:
+                for role in ["unit", "integration", "component", "system", "performance"]:
+                    dependencies.push(TraceDependency(owner_path: partition.artifact.path, kind: TraceDependencyKind.Membership, key: "test-role:" + claim.to_id + "|" + role))
+            for identity in [claim.from_id, claim.to_id]:
+                if identity == "": continue
+                var kind = TraceDependencyKind.MissingIdentity
+                if counts.contains_key(identity):
+                    kind = TraceDependencyKind.ExistingIdentity
+                    if counts[identity] == 1: dependencies.push(TraceDependency(owner_path: partition.artifact.path, kind: TraceDependencyKind.UniqueIdentity, key: identity))
+                dependencies.push(TraceDependency(owner_path: partition.artifact.path, kind: kind, key: identity))
+    for partition in partitions:
+        dependencies.push(TraceDependency(owner_path: partition.artifact.path, kind: TraceDependencyKind.Configuration, key: extractor_id))
+        dependencies.push(TraceDependency(owner_path: partition.artifact.path, kind: TraceDependencyKind.Configuration, key: schema_id))
+        dependencies.push(TraceDependency(owner_path: partition.artifact.path, kind: TraceDependencyKind.Configuration, key: configuration_id))
+        for rule in policy.conventions:
+            val target = convention_target_path(partition.artifact.path, rule)
+            if target != "": dependencies.push(TraceDependency(owner_path: partition.artifact.path, kind: TraceDependencyKind.Membership, key: target))
+    dependencies
+
+pub fn build_trace_snapshot_partition_set(snapshot: SnapshotInput, declaration_paths: [text],
+    extractor_id: text, schema_id: text, policy: TracePolicy, policy_binding_id: text, configuration_id: text,
+    manifest_id: text, generation_id: text) -> Result<TraceSnapshotPartitionSet, text>:
+    if not snapshot.complete or snapshot.subject.snapshot_id == "" or extractor_id == "" or schema_id == "" or policy_binding_id == "" or configuration_id == "" or manifest_id == "" or generation_id == "":
+        return Err("TRACE-PARTITIONS-INCOMPLETE: complete snapshot and version bindings required")
+    if policy_binding_id != trace_snapshot_policy_binding(policy):
+        return Err("TRACE-PARTITIONS-INCOMPLETE: supplied policy binding does not match exact policy contents")
+    if snapshot.artifacts.len() > 40000 or not declaration_path_valid(declaration_paths):
+        return Err("TRACE-PARTITIONS-INCOMPLETE: artifact or declaration inventory invalid")
+    var seen: Dict<text, bool> = {}
+    var partitions: [TraceSnapshotPartition] = []
+    for artifact in snapshot.artifacts:
+        if not trace_path_valid(artifact.path) or artifact.blob_id == "" or artifact.visibility == "" or seen.contains_key(artifact.path):
+            return Err("TRACE-PARTITIONS-INCOMPLETE: invalid or duplicate artifact identity")
+        seen[artifact.path] = true
+        partitions.push(make_partition(snapshot.subject, artifact, declaration_paths.contains(artifact.path)))
+    val facts = compose_partition_facts(snapshot.subject, snapshot.artifacts, partitions, declaration_paths, manifest_id, generation_id, policy)
+    val dependencies = retained_dependencies(facts, partitions, policy, policy_binding_id, extractor_id, schema_id, configuration_id)
+    Ok(TraceSnapshotPartitionSet(subject: snapshot.subject, extractor_id: extractor_id, schema_id: schema_id,
+        policy_binding_id: policy_binding_id, configuration_id: configuration_id, declaration_paths: declaration_paths,
+        partitions: partitions, facts: facts, facts_fingerprint: partition_fact_digest(facts), dependencies: dependencies,
+        dependency_fingerprint: dependency_fingerprint(dependencies), dependency_inventory_complete: facts.complete))
+
+# Plans over the union of both generations: owners and dependency rows of the
+# retained base and of the composed candidate. An inventory that cannot be
+# classified is a full rebuild reported incomplete, never a complete closure.
+fn trace_partition_invalidation(base: TraceSnapshotPartitionSet, candidate: TraceSnapshotPartitionSet,
+    changed_paths: [text], changed_identities: [text], changed_memberships: [text],
+    changed_configurations: [text], dependency_inventory_complete: bool, policy_changed: bool, extractor_changed: bool,
+    schema_changed: bool, limit: i64) -> TraceInvalidation:
+    var known: [text] = []
+    for partition in base.partitions: known.push(partition.artifact.path)
+    for partition in candidate.partitions:
+        if not known.contains(partition.artifact.path): known.push(partition.artifact.path)
+    var plan = plan_trace_invalidation(TraceInvalidationInput(known_paths: known, changed_paths: changed_paths,
+        changed_identities: changed_identities, changed_memberships: changed_memberships,
+        changed_configurations: changed_configurations, dependencies: base.dependencies + candidate.dependencies,
+        dependency_inventory_complete: dependency_inventory_complete, policy_changed: policy_changed,
+        extractor_changed: extractor_changed, schema_changed: schema_changed, max_affected: limit))
+    if not dependency_inventory_complete:
+        plan.full_rebuild = true
+        plan.complete = false
+    plan
+
+# Reuses only owner-local decoded partitions whose exact artifact and all
+# extractor/schema/policy/config bindings match. Cross-file resolution is rebuilt.
+pub fn update_trace_snapshot_partitions(base: TraceSnapshotPartitionSet, candidate: SnapshotInput,
+    declaration_paths: [text], extractor_id: text, schema_id: text, policy: TracePolicy, policy_binding_id: text,
+    configuration_id: text, manifest_id: text, generation_id: text,
+    changed_identities: [text], changed_memberships: [text], changed_configurations: [text],
+    limit: i64) -> Result<TraceSnapshotPartitionUpdate, text>:
+    if not candidate.complete or candidate.subject.repository_id != base.subject.repository_id or candidate.subject.object_format != base.subject.object_format:
+        return Err("TRACE-PARTITIONS-INCOMPLETE: candidate subject is incompatible with retained base")
+    if not declaration_path_valid(declaration_paths) or candidate.artifacts.len() > 40000:
+        return Err("TRACE-PARTITIONS-INCOMPLETE: candidate inventory invalid")
+    # The binding is recomputed from the policy payload; the caller label is
+    # only checked against it and never trusted on its own.
+    val computed_binding = trace_snapshot_policy_binding(policy)
+    if policy_binding_id != computed_binding:
+        return Err("TRACE-PARTITIONS-INCOMPLETE: supplied policy binding does not match exact policy contents")
+    val policy_changed = base.policy_binding_id != computed_binding
+    val extractor_changed = base.extractor_id != extractor_id
+    val schema_changed = base.schema_id != schema_id
+    val config_changed = base.configuration_id != configuration_id
+    val bindings_match = not policy_changed and not extractor_changed and not schema_changed and not config_changed
+    val old = partition_by_path(base.partitions)
+    var partition_rows_valid = true
+    for old_partition in base.partitions:
+        if old_partition.content_sha256 != partition_digest(old_partition.artifact.content) or old_partition.facts_fingerprint != partition_fact_digest(old_partition.facts):
+            partition_rows_valid = false
+    var seen: Dict<text, bool> = {}
+    var partitions: [TraceSnapshotPartition] = []
+    var changed_paths: [text] = []
+    var reused: [text] = []
+    for artifact in candidate.artifacts:
+        if not trace_path_valid(artifact.path) or artifact.blob_id == "" or artifact.visibility == "" or seen.contains_key(artifact.path):
+            return Err("TRACE-PARTITIONS-INCOMPLETE: invalid or duplicate candidate artifact")
+        seen[artifact.path] = true
+        val registered = declaration_paths.contains(artifact.path)
+        if bindings_match and old.contains_key(artifact.path) and old[artifact.path].declaration_registered == registered and partition_artifact_equal(old[artifact.path].artifact, artifact) and old[artifact.path].content_sha256 == partition_digest(artifact.content) and old[artifact.path].facts_fingerprint == partition_fact_digest(old[artifact.path].facts):
+            partitions.push(rebind_partition(old[artifact.path], candidate.subject))
+            reused.push(artifact.path)
+        else:
+            partitions.push(make_partition(candidate.subject, artifact, registered))
+            changed_paths.push(artifact.path)
+    for partition in base.partitions:
+        if not seen.contains_key(partition.artifact.path): changed_paths.push(partition.artifact.path)
+    val dependency_rows_valid = base.dependency_fingerprint == dependency_fingerprint(base.dependencies)
+    val base_facts_valid = base.facts_fingerprint == partition_fact_digest(base.facts)
+    val complete_deps = base.dependency_inventory_complete and bindings_match and dependency_rows_valid and base_facts_valid and partition_rows_valid
+    val updated = TraceSnapshotPartitionSet(subject: candidate.subject, extractor_id: extractor_id,
+        schema_id: schema_id, policy_binding_id: policy_binding_id, configuration_id: configuration_id,
+        declaration_paths: declaration_paths, partitions: partitions, facts: TraceFacts(subject: candidate.subject,
+            input_manifest_id: manifest_id, nodes: [], test_definitions: [], claims: [], origins: [], locators: [],
+            diagnostics: [], generation_id: generation_id, complete: false), dependencies: [], dependency_fingerprint: "",
+        facts_fingerprint: "", dependency_inventory_complete: complete_deps)
+    val facts = compose_partition_facts(candidate.subject, candidate.artifacts, partitions, declaration_paths, manifest_id, generation_id, policy)
+    updated.facts = facts
+    updated.facts_fingerprint = partition_fact_digest(facts)
+    updated.dependencies = retained_dependencies(facts, partitions, policy, policy_binding_id, extractor_id, schema_id, configuration_id)
+    updated.dependency_fingerprint = dependency_fingerprint(updated.dependencies)
+    if not facts.complete: updated.dependency_inventory_complete = false
+    var identity_changes = changed_identities + changed_identity_keys(base.facts, facts)
+    var membership_changes = changed_memberships + changed_paths + changed_membership_keys(base.facts, facts)
+    val invalidation = trace_partition_invalidation(base, updated, changed_paths, identity_changes,
+        membership_changes, changed_configurations + (if config_changed: [base.configuration_id] + [configuration_id] else: []),
+        complete_deps and facts.complete, policy_changed, extractor_changed, schema_changed, limit)
+    val graph = resolve_trace_graph(facts, policy)
+    Ok(TraceSnapshotPartitionUpdate(partition_set: updated, facts: facts,
+        graph: graph, invalidation: invalidation, reused_paths: reused))
