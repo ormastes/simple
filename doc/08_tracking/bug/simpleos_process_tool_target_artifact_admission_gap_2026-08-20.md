@@ -28,3 +28,6 @@ truthfully keeps the process row `Blocked`.
   failure behavior from FAT32, DBFS, and NVFS.
 - Retain target/runtime receipts and representative latency/RSS evidence.
 
+
+## Round-10 verdict note (2026-11-06)
+RELEASE BLOCKER reviewed in depth. Verdict: host-blocked (not closable by code in this lane). src/os/services/launcher/launcher_process_tool_gate.spl is correctly fail-closed: it returns PROCESS_TOOL_TARGET_ARTIFACT_TOKEN_UNAVAILABLE because the package digest and receipt id name no real bytes. Closure needs (1) target-native /usr/bin/ps for x86_64, AArch64 and RV64 built by the image pipeline, (2) independently computed digests bound by a loader-owned token with no public mint seam, (3) help/version/list/filter/malformed/task-list-failure runs from FAT32, DBFS and NVFS under real-firmware QEMU plus the board path (board-runnable rule), (4) latency/RSS receipts. Minting a token or flipping the manifest row from Blocked without those bytes would fake admission. The blocked contract is pinned by test/01_unit/os/process_tool_artifact_contract_spec.spl. Owner decision: ship with ps Blocked and documented, or hold for the QEMU artifact lane.
