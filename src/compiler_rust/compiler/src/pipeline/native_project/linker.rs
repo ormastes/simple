@@ -837,7 +837,7 @@ impl NativeProjectBuilder {
         let mut undefined = HashSet::new();
         for obj in object_paths.iter().chain(boot_objects.iter()) {
             for (kind, name) in Self::read_global_symbol_types(obj)? {
-                if kind == "U" {
+                if matches!(kind.as_str(), "U" | "w" | "v") {
                     undefined.insert(name);
                 } else {
                     defined.insert(name);
