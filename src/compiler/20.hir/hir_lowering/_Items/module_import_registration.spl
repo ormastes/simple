@@ -29,6 +29,8 @@ use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
 use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.dependency.{member_access_scope_for_modules, member_visibility_allows, aggregate_constructor_visibility_allows}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_package_name, module_surface_package_name_from_name}
 use compiler.common.module_path_naming.{module_logical_name_from_path, module_relative_name_from_path}
 use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
 use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
@@ -500,6 +502,24 @@ impl HirLowering:
             return self.name_index_positions_values[slot]
         -1
 
+    me record_imported_member_visibility(imported_mod: ModuleSurface, composite: ModuleSurfaceComposite, canonical_name: text, local_name: text):
+        # One scope verdict per imported composite; only denials are stored.
+        val requester_package = module_surface_package_name_from_name(module_logical_name_from_path(self.module_filename))
+        val scope = member_access_scope_for_modules(
+            self.module_filename, requester_package, imported_mod.canonical_path,
+            module_surface_package_name(imported_mod), imported_mod.friends,
+            imported_mod.internal_exports.contains(composite.name))
+        var visibilities: [Visibility] = []
+        for raw_field in composite.fields:
+            val field: ModuleSurfaceField = raw_field
+            visibilities = visibilities.push(field.visibility)
+            if not member_visibility_allows(field.visibility, scope):
+                self.member_field_denied["{canonical_name}#{field.name}"] = true
+                self.member_field_denied["{local_name}#{field.name}"] = true
+        if not aggregate_constructor_visibility_allows(visibilities, scope):
+            self.member_ctor_denied[canonical_name] = true
+            self.member_ctor_denied[local_name] = true
+
     me register_imported_symbol_inner(imported_index: i64, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span, materialize_enum: bool):
         val imported_mod: ModuleSurface = self.module_surfaces.surfaces[imported_index]
         hir_phase_profile_count_imported_symbol()
@@ -725,6 +745,8 @@ impl HirLowering:
             self.prescan_type_parameters = saved_parameters
             val canonical_composite_name = imported_mod.module_name + "." + imported_name
             self.struct_field_types_by_name[canonical_composite_name] = imported_field_types
+            if self.enforce_member_visibility:
+                self.record_imported_member_visibility(imported_mod, composite, canonical_composite_name, local_name)
             # Positional patterns need the same ordered fields as local records.
             # Key by the proven declaration identity; aliases/contested bare
             # spellings are resolved by the symbol owner at the use site.

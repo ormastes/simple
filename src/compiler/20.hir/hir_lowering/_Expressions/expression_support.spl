@@ -154,6 +154,16 @@ fn bootstrap_builtin_return_type(name: text, span: Span) -> HirType:
 fn bootstrap_builtin_signature(name: text, span: Span) -> HirType:
     HirType(kind: HirTypeKind.Function([], bootstrap_builtin_return_type(name, span), []), span: span)
 
+fn hir_dotted_callee_path(callee: Expr) -> text:
+    match callee.kind:
+        case ExprKind.Ident(name): return name
+        case ExprKind.Field(base, field):
+            val prefix = hir_dotted_callee_path(base)
+            if prefix != "":
+                return "{prefix}.{field}"
+        case _: ()
+    ""
+
 fn _hir_expr_symbol_or_invalid(kind: HirExprKind) -> SymbolId:
     match kind:
         case HirExprKind.Var(symbol): symbol
@@ -228,6 +238,57 @@ impl HirLowering:
                         val element_type: HirType = element_types[index]
                         return HirType(kind: element_type.kind, span: element_type.span)
         nil
+
+    me member_owner_key_for_hir_base(base: HirExpr) -> text:
+        # Same owner authorities as field_type_for_hir_base: local struct
+        # binding first, then the proven nominal owner of the expression.
+        val base_symbol = _hir_expr_symbol_or_invalid(base.kind)
+        if base_symbol.is_valid() and self.local_struct_types.has(base_symbol.id):
+            return self.local_struct_types[base_symbol.id]
+        val owner_id = self.field_owner_for_hir_expr(base)
+        if owner_id >= 0:
+            if val owner_symbol = self.symbols.get_symbol_raw(owner_id):
+                if val owner_module = owner_symbol.defining_module:
+                    return "{owner_module}.{owner_symbol.name}"
+                return owner_symbol.name
+        ""
+
+    me check_member_field_visible(base: HirExpr, field_name: text, span: Span):
+        if not self.enforce_member_visibility or self.member_field_denied.len() == 0:
+            return
+        val owner_key = self.member_owner_key_for_hir_base(base)
+        if owner_key != "" and self.member_field_denied.has("{owner_key}#{field_name}"):
+            self.error("field `{field_name}` is not visible from this module", span)
+
+    me check_aggregate_constructor_visible(callee: Expr, lowered_callee: HirExpr, span: Span):
+        if not self.enforce_member_visibility or self.member_ctor_denied.len() == 0:
+            return
+        var spelling = ""
+        match callee.kind:
+            case ExprKind.Ident(name): spelling = name
+            case ExprKind.Field(_, field): spelling = field
+            case _: return
+        var denied = false
+        val callee_symbol = _hir_expr_symbol_or_invalid(lowered_callee.kind)
+        if callee_symbol.is_valid():
+            if val callee_owner = self.symbols.get_symbol_raw(callee_symbol.id):
+                if val callee_module = callee_owner.defining_module:
+                    denied = self.member_ctor_denied.has("{callee_module}.{callee_owner.name}")
+        if not denied:
+            # Bare/alias spelling, or a module-qualified `pkg.mod.Type` path.
+            val qualified = hir_dotted_callee_path(callee)
+            if qualified != "":
+                denied = self.member_ctor_denied.has(qualified)
+        if denied:
+            self.error("aggregate constructor `{spelling}` is not visible from this module", span)
+
+    me check_qualified_constructor_visible(receiver: Expr, type_name: text, span: Span):
+        # `pkg.mod.Type(...)` parses as MethodCall(pkg.mod, Type, args).
+        if not self.enforce_member_visibility or self.member_ctor_denied.len() == 0:
+            return
+        val module_path = hir_dotted_callee_path(receiver)
+        if module_path != "" and self.member_ctor_denied.has("{module_path}.{type_name}"):
+            self.error("aggregate constructor `{type_name}` is not visible from this module", span)
 
     me field_type_for_owner(owner_symbol_id: SymbolId, field_name: text) -> HirType?:
         val found = self.field_type_for_owner_raw(owner_symbol_id.id, field_name)

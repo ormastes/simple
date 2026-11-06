@@ -35,6 +35,7 @@ fn lower_consumer_errors(
         return ["surface error: " + surfaces_result.unwrap_err()]
     val surfaces: ModuleSurfacesByName = surfaces_result.unwrap()
     var lowering = hirlowering_for_module(consumer_path, surfaces)
+    lowering.enforce_member_visibility = true
     lowering.lower_module(consumer)
     lowering.diagnostic_messages
 
@@ -62,6 +63,7 @@ fn lower_reexport_consumer_errors() -> [text]:
         return ["surface error: " + surfaces_result.unwrap_err()]
     var lowering = hirlowering_for_module(
         "src/client/consumer.spl", surfaces_result.unwrap())
+    lowering.enforce_member_visibility = true
     val consumer = parse_full_frontend(
         consumer_source, "src/client/consumer.spl", "client.consumer", log)
     lowering.lower_module(consumer)
@@ -125,10 +127,10 @@ describe "HIR member and aggregate constructor visibility enforcement":
     it "compile-rejects an SFFI authority carrier with private state":
         step("given SFFI struct with private state when constructing aggregate then construction is rejected")
         val errors = lower_consumer_errors(
-            "std.sffi.provider", "src/lib/nogc_sync_mut/sffi/provider.spl",
+            "lib.nogc_sync_mut.sffi.provider", "src/lib/nogc_sync_mut/sffi/provider.spl",
             "pub struct AdmissionToken:\n    generation: i64\n\nimpl AdmissionToken:\n    pub fn generation_value() -> i64:\n        self.generation",
             "app.plugin", "src/app/plugin.spl",
-            "use std.sffi.provider.\{AdmissionToken\}\nfn forge() -> AdmissionToken:\n    AdmissionToken(generation: 1)")
+            "use lib.nogc_sync_mut.sffi.provider.\{AdmissionToken\}\nfn forge() -> AdmissionToken:\n    AdmissionToken(generation: 1)")
         expect(messages_contain(
             errors, "aggregate constructor `AdmissionToken` is not visible")).to_be(true)
 
@@ -171,19 +173,19 @@ describe "HIR member and aggregate constructor visibility enforcement":
     it "compile-allows peer fields at the same logical path in another compiler layer":
         step("given pub(peer) field in different layer at same logical path when accessing then access is allowed")
         val errors = lower_consumer_errors(
-            "compiler.10.frontend.shared.node", "src/compiler/10.frontend/shared/node.spl",
+            "compiler.frontend.shared.node", "src/compiler/10.frontend/shared/node.spl",
             "pub struct PeerRecord:\n    pub(peer) value: i64",
-            "compiler.20.hir.shared.node", "src/compiler/20.hir/shared/node.spl",
-            "use compiler.10.frontend.shared.node.\{PeerRecord\}\nfn read(v: PeerRecord) -> i64:\n    v.value")
+            "compiler.hir.shared.node", "src/compiler/20.hir/shared/node.spl",
+            "use compiler.frontend.shared.node.\{PeerRecord\}\nfn read(v: PeerRecord) -> i64:\n    v.value")
         expect(messages_contain(errors, "is not visible")).to_be(false)
 
     it "compile-rejects peer fields at a different logical path":
         step("given pub(peer) field at different logical path when accessing then field access is rejected")
         val errors = lower_consumer_errors(
-            "compiler.10.frontend.shared.node", "src/compiler/10.frontend/shared/node.spl",
+            "compiler.frontend.shared.node", "src/compiler/10.frontend/shared/node.spl",
             "pub struct PeerRecord:\n    pub(peer) value: i64",
-            "compiler.20.hir.other.node", "src/compiler/20.hir/other/node.spl",
-            "use compiler.10.frontend.shared.node.\{PeerRecord\}\nfn read(v: PeerRecord) -> i64:\n    v.value")
+            "compiler.hir.other.node", "src/compiler/20.hir/other/node.spl",
+            "use compiler.frontend.shared.node.\{PeerRecord\}\nfn read(v: PeerRecord) -> i64:\n    v.value")
         expect(messages_contain(errors, "field `value` is not visible")).to_be(true)
 
     it "compile-rejects a private field on a nominal function-call result":
@@ -217,3 +219,20 @@ describe "HIR member and aggregate constructor visibility enforcement":
         step("given private field accessed through re-export chain when reading then access is rejected")
         val errors = lower_reexport_consumer_errors()
         expect(messages_contain(errors, "field `secret` is not visible")).to_be(true)
+
+    it "keeps enforcement opt-in when the lowering flag is not set":
+        step("given a private imported field when enforcement is off then no visibility diagnostic is emitted")
+        val log = Logger(level: 0)
+        val provider_source = "pub struct Vault:\n    secret: i64"
+        var modules: Dict<text, ParserModule> = {}
+        modules["vault.provider"] = parse_full_frontend(
+            provider_source, "src/vault/provider.spl", "vault.provider", log)
+        val surfaces = module_surfaces_from_modules(modules, [
+            SourceFile(path: "src/vault/provider.spl", content: provider_source, module_name: "vault.provider")
+        ]).unwrap()
+        var lowering = hirlowering_for_module("src/client/consumer.spl", surfaces)
+        lowering.enforce_member_visibility = false
+        lowering.lower_module(parse_full_frontend(
+            "use vault.provider.\{Vault\}\nfn steal(v: Vault) -> i64:\n    v.secret",
+            "src/client/consumer.spl", "client.consumer", log))
+        expect(messages_contain(lowering.diagnostic_messages, "is not visible")).to_be(false)

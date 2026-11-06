@@ -47,7 +47,7 @@ use compiler.core.parser.{parser_legacy_let_decl_ahead}
 use compiler.core.tokens.{TOK_KW_AS, TOK_KW_CE, TOK_PIPE, TOK_ASSIGN, tok_kind_name}
 use compiler.core.tokens.{TOK_KW_DYN, TOK_KW_EXTEND}
 use compiler.frontend.core._ParserDecls.extend_decls.{parse_extend_enum_decl, parser_reset_extend_enums}
-use compiler.core.tokens.{TOK_IDENT, TOK_COMMA, TOK_MINUS}
+use compiler.core.tokens.{TOK_IDENT, TOK_COMMA, TOK_MINUS, TOK_DOT}
 use compiler.frontend.core.flat_pool_codec.*
 use compiler.frontend.core.lock_level_parser.{lock_level_parse_attribute, lock_level_is_exception_attribute, lock_level_reject_non_function}
 use compiler.frontend.core.static_lock_level_metadata.{lock_level_metadata_promote}
@@ -160,6 +160,38 @@ fn parse_layer_decl(loop_index: i64) -> i64:
     args.push(expr_string_lit(uses_list.join(","), 0))
     val marker = expr_call(helper, args, 0)
     decl_val_binding("_expr_layer_" + int_to_str(loop_index), -1, marker, -1)
+
+# ===== `friend PKG` / `internal_export NAME` module access directives =====
+# Soft keywords (same lookahead as `layer`). Lowered to inert marker decls
+# (`__module_friend` / `__module_internal_export`, comma-joined names) that
+# module_assembly folds into ParserModule.friends / .internal_exports and
+# drops -- no flat-pool shape change. Consumed by HIR member visibility.
+fn parse_module_access_decl(loop_index: i64, helper_name: text) -> i64:
+    val keyword = par_text_get()
+    parser_advance()  # consume the directive keyword
+    var names: [text] = []
+    while true:
+        if par_kind_get() != TOK_IDENT:
+            parser_error("expected name after '" + keyword + "'")
+            break
+        var name = par_text_get()
+        parser_advance()
+        while par_kind_get() == TOK_DOT:
+            parser_advance()
+            if par_kind_get() != TOK_IDENT:
+                parser_error("expected name segment after '.' in '" + keyword + "'")
+                break
+            name = name + "." + par_text_get()
+            parser_advance()
+        names.push(name)
+        if par_kind_get() == TOK_COMMA:
+            parser_advance()
+            continue
+        break
+    var args: [i64] = []
+    args.push(expr_string_lit(names.join(","), 0))
+    val marker = expr_call(expr_ident(helper_name, 0), args, 0)
+    decl_val_binding("_expr_module_access_" + int_to_str(loop_index), -1, marker, -1)
 
 # ===== `macro NAME(params) -> (contract): body` declarations =====
 # "macro" is a soft keyword (an identifier elsewhere). The declaration emits no
@@ -1363,6 +1395,12 @@ fn parse_module_body():
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 6 and par_text_get() == "macro" and current_ident_is_macro_decl():
             parse_macro_decl("private")
+            parser_reset_pending_vhdl_decorators()
+        elif par_kind_get() == 6 and (par_text_get() == "friend" or par_text_get() == "internal_export") and current_ident_is_layer_decl():
+            val access_helper = if par_text_get() == "friend": "__module_friend" else: "__module_internal_export"
+            val access_d = parse_module_access_decl(i, access_helper)
+            if access_d >= 0:
+                module_add_decl(access_d)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 6 and par_text_get() == "layer" and current_ident_is_layer_decl():
             # layer NAME / layer NAME uses A, B ("layer" is a soft keyword,

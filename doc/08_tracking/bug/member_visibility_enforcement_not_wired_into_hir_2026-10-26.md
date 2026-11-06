@@ -77,3 +77,23 @@ so enabling enforcement unconditionally will reject self-hosted sources; needs a
   dependency/member_visibility_spec 10/10 -> 10/10; flat_pool_codec_roundtrip 18/18; flat_pool_truncation 13/13.
   Pre-existing and unchanged: facet_flat_decl_codec 0/2, frontend_shared_parse_cas_v1 2/4, flat_ast_if_else_bridge executed=0.
 - Remaining: HIR enforcement behind opt-in switch, then bulk `pub` migration / ratchet baseline.
+
+## Resolution 2026-11-06 - wired behind opt-in (enforcement default OFF)
+- HIR: import registration records per-composite denials
+  (`record_imported_member_visibility`, `member_access_scope_for_modules` once per
+  imported composite); field reads (`check_member_field_visible`), constructor calls
+  (`check_aggregate_constructor_visible`, bare/alias/qualified spellings) and
+  `pkg.mod.Type(...)` method-call form (`check_qualified_constructor_visible`) emit
+  "field `x` is not visible from this module" / "aggregate constructor `X` is not visible from this module".
+- Parser: `friend PKG` and `internal_export NAME` module directives were never parsed by the
+  core parser (ParserModule.friends/internal_exports always empty); now lowered to inert
+  markers folded by module_assembly. No flat-pool shape change.
+- Opt-in: `HirLowering.enforce_member_visibility`, set by `SIMPLE_HIR_ENFORCE_MEMBER_VISIBILITY=1`.
+  Default stays OFF because the self-hosted tree declares most cross-module fields without
+  `pub`; turning it on by default needs the `pub` migration / ratchet (separate work).
+- Spec fixtures fixed: peer/SFFI cases used module names disagreeing with path derivation
+  (`compiler.10.frontend...`, `std.sffi.provider`), so the surface builder errored and the
+  peer allow-case passed vacuously. Use-path IntLit parsing is therefore not required.
+- Evidence: member_visibility_enforcement_spec 6/17 before (release/1.0.0) -> 18/18;
+  dependency/member_visibility_spec 10/10; flat_pool_field_visibility_spec 3/4 unchanged
+  (pre-existing codec-version pin failure, same before/after).
