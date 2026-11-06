@@ -1561,6 +1561,22 @@ impl<'a> MirLowerer<'a> {
         )
     }
 
+    /// Subject of an `rt_unwrap_or_self` whose payload comes back as a tagged
+    /// `RuntimeValue`: the `T?` Pointer form (`slot_holds_tagged_value`) OR the
+    /// generic-enum form `Option<T>` (`HirType::Enum { name: "Option" }`) that
+    /// an explicit `Option<T>` annotation resolves to. Enum `Some(x)` scalar
+    /// payloads are BoxInt'd at construction, so the same decode applies.
+    /// Without the enum arm `if val c = o` with `val o: Option<i64>` bound the
+    /// tagged word (`Some(5)` -> 41).
+    /// Bug: seed_if_val_typed_option_class_binds_option_or_segv_2026-11-03
+    pub(super) fn unwrap_subject_payload_is_tagged(&self, ty: TypeId) -> bool {
+        self.slot_holds_tagged_value(ty)
+            || matches!(
+                self.type_registry.and_then(|tr| tr.get(ty)),
+                Some(crate::hir::HirType::Enum { name, .. }) if name.as_str() == "Option"
+            )
+    }
+
     /// Primitive types whose machine representation is a raw (untagged) word.
     pub(super) fn is_raw_scalar_type(ty: TypeId) -> bool {
         matches!(
