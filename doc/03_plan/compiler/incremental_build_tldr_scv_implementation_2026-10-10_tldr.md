@@ -109,3 +109,15 @@ Reviewed successor checkpoint — 2026-10-11 (supersedes older status):
   crash recovery, safe edit hooks, source-bound formal evidence, measured cold/warm
   latency/RSS and modern SSpec regression coverage. No 0.1-second claim.
 - Exact SIMD/GPU/Sosix 2026-10-10 document unavailable; conflicts NOT_ASSESSED.
+
+**2026-11-06 status (stale-feature review; supersedes conflicting items above):**
+NEEDED for 1.0.0 — complete TLDR freshness verifier + local immutable receipt
+(git note adapter), byte-reconciled validated change (live `contracts_v1`),
+PostBuildCoordinatorV1 pending/settled records, `simple tldr status/history`.
+NOT-NEEDED — SMET/codec frames, SourceMetaStoreV1, change WAL/journal (temp +
+atomic rename suffices), IDE/Spipe/SCV-nvim adapters, SCV metadata v2 migration,
+remote notes/CAS transport, async source commits, receipt signatures.
+SUPERSEDED — region reparse/retained parse tree (in-place AST, design rule 6),
+sync parse lease and job leases (single-flight §6), WP8 read sets
+(`incremental_rebuild_plan_v1`), WP10 projection (per-file pipeline).
+Full table: implementation plan § "Stale-feature review — 2026-11-06".

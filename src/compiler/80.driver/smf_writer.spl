@@ -21,6 +21,7 @@ use compiler.driver.smf_binary_helpers.{smf_u32_to_bytes, smf_u64_to_bytes, text
 extern fn rt_text_to_bytes(s: text) -> [u8]
 use compiler.driver.smf_elf_parser.{extract_code_from_object, extract_elf_relocations, elf_reloc_type_to_smf, ElfRelocEntry, ElfSymEntry}
 use compiler.backend.linker.smf_writer.{smf_build_aspect_pack_image}
+use compiler.backend.linker.smf_meta.{smf_meta_compile_options_record, SMF_META_SECTION_NAME}
 
 # Target platform information
 struct Target:
@@ -44,6 +45,7 @@ struct SmfBuildOptions:
     deps: [SmfDependencyEntry]  # Dependency content hashes for staleness checking
     driver_manifest_bytes: [u8] # Concatenated DRVS records from @driver/@native_lib
     launch_metadata_bytes: [u8] # SDN launch metadata for startup policy
+    compile_options_bytes: [u8] # 16-byte compile-options hash -> .simple_meta record kind 2 (empty = absent)
     source_hash: i64
 
 impl SmfBuildOptions:
@@ -53,11 +55,12 @@ impl SmfBuildOptions:
             deps: [],
             driver_manifest_bytes: [],
             launch_metadata_bytes: [],
+            compile_options_bytes: [],
             source_hash: 0
         )
 
     fn has_any_sections() -> bool:
-        self.deps.len() > 0 or self.driver_manifest_bytes.len() > 0 or self.launch_metadata_bytes.len() > 0
+        self.deps.len() > 0 or self.driver_manifest_bytes.len() > 0 or self.launch_metadata_bytes.len() > 0 or self.compile_options_bytes.len() > 0
 
 # ============================================================================
 # Dependency Tracking for SMF Staleness
@@ -194,6 +197,13 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
     val has_deps = not deps_bytes.is_empty()
     val has_driver_manifest = options.driver_manifest_bytes.len() > 0
     val has_launch_metadata = options.launch_metadata_bytes.len() > 0
+    # .simple_meta TLV section (smf_v1_2.sdn): the compile-options hash lives
+    # here since v1.3; the 96-byte header has no reserved area for it.
+    val meta_bytes = if options.compile_options_bytes.len() > 0:
+        smf_meta_compile_options_record(options.compile_options_bytes)
+    else:
+        []
+    val has_meta = meta_bytes.len() > 0
 
     # Calculate section count
     var section_count = 1  # Code section
@@ -203,15 +213,17 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
         section_count = section_count + 1  # .drv_manifest section
     if has_launch_metadata:
         section_count = section_count + 1  # .launch_meta section
+    if has_meta:
+        section_count = section_count + 1  # .simple_meta section
 
-    # Calculate offsets (sections come FIRST now, not after header)
-    val header_size = 128  # SmfHeader::SIZE (written at END)
+    # Calculate offsets (sections come FIRST; the header is the EOF-96 trailer)
     val section_entry_size = 64  # SmfSection size
     val code_offset = 0  # Code starts at offset 0 (no header at start)
     val deps_offset = code_offset + code_bytes.len()
     val driver_manifest_offset = deps_offset + deps_bytes.len()
     val launch_metadata_offset = driver_manifest_offset + options.driver_manifest_bytes.len()
-    val section_table_offset = launch_metadata_offset + options.launch_metadata_bytes.len()
+    val meta_offset = launch_metadata_offset + options.launch_metadata_bytes.len()
+    val section_table_offset = meta_offset + meta_bytes.len()
     val section_table_size = section_count * section_entry_size
     val symbol_table_offset = section_table_offset + section_table_size
     val string_table_offset = symbol_table_offset + 56  # One symbol
@@ -235,6 +247,11 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
     if has_launch_metadata:
         # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
         buf = bytes_concat_copy_v1(buf, options.launch_metadata_bytes)
+
+    # Write .simple_meta section payload
+    if has_meta:
+        # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
+        buf = bytes_concat_copy_v1(buf, meta_bytes)
 
     # 2. Write section table
 
@@ -281,6 +298,17 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
             name: ".launch_meta"
         ))
 
+    # .simple_meta section (TLV metadata records)
+    if has_meta:
+        # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
+        buf = bytes_concat_copy_v1(buf, build_section_entry(
+            section_type: 7,  # SectionType::Note
+            flags: 0x01,  # READ
+            offset: meta_offset,
+            size: meta_bytes.len(),
+            name: SMF_META_SECTION_NAME
+        ))
+
     # 3. Write symbol table
     # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
     buf = bytes_concat_copy_v1(buf, build_symbol_entry("main", 0, code_bytes.len()))
@@ -295,7 +323,7 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
     # Create header using SmfHeader struct
     val platform = text_to_platform(options.target.os)
     val arch = text_to_arch(options.target.arch)
-    var header: SmfHeader = SmfHeader.new_v1_1(platform, arch)
+    var header: SmfHeader = SmfHeader.new_v1_3(platform, arch)
     header.source_hash = options.source_hash as u64
 
     # Set flags
@@ -329,6 +357,7 @@ fn smf_name_bytes(name: text) -> [u8]:
         "note.deps": [110, 111, 116, 101, 46, 100, 101, 112, 115]
         ".drv_manifest": [46, 100, 114, 118, 95, 109, 97, 110, 105, 102, 101, 115, 116]
         ".launch_meta": [46, 108, 97, 117, 110, 99, 104, 95, 109, 101, 116, 97]
+        ".simple_meta": [46, 115, 105, 109, 112, 108, 101, 95, 109, 101, 116, 97]
         _: []
 
 fn smf_name_hash(name: text) -> i32:
@@ -450,14 +479,7 @@ fn build_symbol_entry(name: text, value: i32, size: i32) -> [u8]:
 # Build an SMF module with the given code bytes for a specific target architecture
 fn build_smf_with_code_for_target(code_bytes: [u8], target: Target) -> [u8]:
     # Delegate to simple SMF builder
-    val options = SmfBuildOptions(
-        target: target,
-        deps: [],
-        driver_manifest_bytes: [],
-        launch_metadata_bytes: [],
-        source_hash: 0
-    )
-    build_smf_with_templates_internal(code_bytes, options)
+    build_smf_with_templates_internal(code_bytes, SmfBuildOptions.create(target))
 
 # Helper to convert code bytes to a minimal object format
 fn code_bytes_to_object(code: [u8]) -> [u8]:
@@ -500,6 +522,11 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
     val has_deps = deps_bytes.len() > 0
     val has_driver_manifest = options.driver_manifest_bytes.len() > 0
     val has_launch_metadata = options.launch_metadata_bytes.len() > 0
+    val meta_bytes = if options.compile_options_bytes.len() > 0:
+        smf_meta_compile_options_record(options.compile_options_bytes)
+    else:
+        []
+    val has_meta = meta_bytes.len() > 0
 
     # Build SMF with Code + Reloc sections
     var buf: [u8] = []
@@ -508,7 +535,8 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
     val deps_offset = reloc_offset + reloc_bytes.len()
     val driver_manifest_offset = deps_offset + deps_bytes.len()
     val launch_metadata_offset = driver_manifest_offset + options.driver_manifest_bytes.len()
-    val section_table_offset = launch_metadata_offset + options.launch_metadata_bytes.len()
+    val meta_offset = launch_metadata_offset + options.launch_metadata_bytes.len()
+    val section_table_offset = meta_offset + meta_bytes.len()
 
     var section_count = 2  # Code + Reloc
     if has_deps:
@@ -516,6 +544,8 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
     if has_driver_manifest:
         section_count = section_count + 1
     if has_launch_metadata:
+        section_count = section_count + 1
+    if has_meta:
         section_count = section_count + 1
 
     val section_entry_size = 64
@@ -538,6 +568,9 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
 
     if has_launch_metadata:
         buf = buf + (options.launch_metadata_bytes)
+
+    if has_meta:
+        buf = buf + (meta_bytes)
 
     # Write section table - Code section
     buf = buf + (build_section_entry(
@@ -584,6 +617,15 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
             name: ".launch_meta"
         ))
 
+    if has_meta:
+        buf = buf + (build_section_entry(
+            section_type: 7,
+            flags: 0x01,
+            offset: meta_offset,
+            size: meta_bytes.len(),
+            name: SMF_META_SECTION_NAME
+        ))
+
     # Write symbol table
     buf = buf + (build_symbol_entry("main", 0, code_bytes.len()))
 
@@ -593,7 +635,7 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
     # Write HEADER as trailer
     val platform = text_to_platform(options.target.os)
     val arch = text_to_arch(options.target.arch)
-    var header: SmfHeader = SmfHeader.new_v1_1(platform, arch)
+    var header: SmfHeader = SmfHeader.new_v1_3(platform, arch)
     header.source_hash = options.source_hash as u64
     header.set_executable(true)
     header.section_count = section_count
@@ -654,7 +696,7 @@ fn build_smf_with_elf_embedded(object_code: [u8], target: Target) -> [u8]:
     # Write HEADER as trailer
     val platform = text_to_platform(target.os)
     val arch = text_to_arch(target.arch)
-    var header: SmfHeader = SmfHeader.new_v1_1(platform, arch)
+    var header: SmfHeader = SmfHeader.new_v1_3(platform, arch)
     header.set_executable(true)
     header.section_count = section_count
     header.section_table_offset = section_table_offset

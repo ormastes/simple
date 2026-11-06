@@ -1,0 +1,237 @@
+# Private Linux LLVM-XRay adapter, stage 1 (design
+# doc/04_architecture/compiler/xray/xray_compiler_structural_change_2026-11-06.md
+# section C, PR4). Dynamic ON/OFF is delegated to compiler-rt
+# (`__xray_patch_function` / `__xray_unpatch_function` / `__xray_set_handler`)
+# through the XrayLlvmLeafV1 port; the stage-2 Simple-owned patcher (PR5)
+# replaces the leaf, not this control plane.
+#
+# The `--xray` build option only decides whether sleds exist. WHICH functions
+# fire is the dynamic switch: the selection resolved from the
+# `simple.trace/observer-v1` aspect params. Only selected functions are patched;
+# every other sled stays a taken branch over the call.
+#
+# Concurrency: this value is caller-owned, so whoever holds the `var` adapter is
+# the one serialized control-plane owner (a conflicting request is `Busy`). It
+# takes no lock and is never callable from a hook. The hot path is the C
+# handler shim alone, which writes the resident observer channel
+# (observer_native_channel_v1) with the same lockless CAS protocol.
+#
+# Patch mode is quiescent only: the caller starts/stops while no selected
+# function is executing (startup, or SOSIX-established quiescence). compiler-rt
+# patches whole functions, so live mode is UnsupportedConsistency here.
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_config_v1.{trace_config_validate_v1}
+
+# compiler-rt XRayPatchingStatus values, plus the adapter leaf's own
+# out-of-map rejection (raised before compiler-rt is ever called).
+pub const XRAY_LLVM_STATUS_NOT_INITIALIZED_V1: i64 = 0
+pub const XRAY_LLVM_STATUS_SUCCESS_V1: i64 = 1
+pub const XRAY_LLVM_STATUS_ONGOING_V1: i64 = 2
+pub const XRAY_LLVM_STATUS_FAILED_V1: i64 = 3
+pub const XRAY_LLVM_STATUS_INVALID_ID_V1: i64 = -1
+
+pub const XRAY_LLVM_STATE_IDLE_V1: i64 = 0
+pub const XRAY_LLVM_STATE_PREPARED_V1: i64 = 1
+pub const XRAY_LLVM_STATE_ACTIVE_V1: i64 = 2
+pub const XRAY_LLVM_STATE_FAULTED_V1: i64 = 3
+
+const XRAY_LLVM_MAX_SITES_V1: i64 = 4096
+const XRAY_LLVM_ID_MAX_V1: u64 = 18446744073709551615u64
+# compiler-rt reports ONGOING while another patch/unpatch is in flight. It is
+# transient: retried a bounded number of times back to back, without yielding,
+# so a genuinely concurrent patcher usually outlasts it and the caller gets
+# Busy. That is the intended quiescent-mode answer, not an error.
+const XRAY_LLVM_ONGOING_RETRIES_V1: i64 = 8
+
+# The effect boundary. The host binding is xray_llvm_host_leaf_v1.spl over
+# src/runtime/xray/xray_llvm_adapter_linux.c; specs use a fake.
+pub trait XrayLlvmLeafV1:
+    # Highest LLVM function id in the process map; <= 0 means no sleds.
+    fn max_function_id() -> i64
+    # Publish the loaned resident channel arena, then register the handler
+    # shim. 1 on success; anything else means nothing was published.
+    me install(arena: i64, generation: u64, context: u64, module_instance: u64) -> i64
+    me patch_function(id: i64) -> i64
+    me unpatch_function(id: i64) -> i64
+    # Close admission on the published arena (gate |= 2): a sled still patched
+    # after this records nothing. 1 closed, anything else did not linearize.
+    me close(arena: i64) -> i64
+
+pub fn xray_llvm_status_failure_v1(status: i64) -> TraceFailureV1:
+    if status == XRAY_LLVM_STATUS_NOT_INITIALIZED_V1: return TraceFailureV1.InstrumentationAbsent
+    if status == XRAY_LLVM_STATUS_ONGOING_V1: return TraceFailureV1.Busy
+    if status == XRAY_LLVM_STATUS_INVALID_ID_V1: return TraceFailureV1.InvalidMap
+    TraceFailureV1.BackendFailure
+
+# The single site -> LLVM id translation. Stage 1 has one instrumented image
+# (the main executable): its dense site ids ARE the LLVM function ids, checked
+# against the live map bound. LLVM ids never leave this adapter.
+pub fn xray_llvm_site_id_v1(site: TraceSiteV1, module_instance: u64, max_id: i64
+        ) -> Result<i64, TraceFailureV1>:
+    if site.module_instance != module_instance: return Err(TraceFailureV1.InvalidMap)
+    val id = site.site_id as i64
+    if id < 1 or id > max_id: return Err(TraceFailureV1.InvalidMap)
+    Ok(id)
+
+pub struct XrayLlvmAdapterV1:
+    module_instance: u64
+    state: i64
+    incarnation: u64
+    planned: [i64]
+    # Exact per-site state: every id compiler-rt reported patched and that has
+    # not been reported unpatched since. Survives a fault for diagnosis.
+    patched: [i64]
+    context: u64
+    arena: i64
+    # The arena close did not linearize (contended gate); recover retries it.
+    close_pending: bool
+
+impl XrayLlvmAdapterV1:
+    static fn create(module_instance: u64) -> XrayLlvmAdapterV1:
+        XrayLlvmAdapterV1(module_instance: module_instance, state: XRAY_LLVM_STATE_IDLE_V1,
+            incarnation: 0, planned: [], patched: [], context: 1, arena: 0, close_pending: false)
+
+    fn state_code() -> i64:
+        self.state
+
+    fn patched_ids() -> [i64]:
+        self.patched
+
+    fn valid(session: TraceSessionV1) -> bool:
+        (self.state == XRAY_LLVM_STATE_ACTIVE_V1 and session.slot == 1 and
+            session.incarnation == self.incarnation and session.generation == self.incarnation)
+
+    # Validate and resolve the whole selection; nothing is patched and no leaf
+    # effect happens here. Failure leaves the adapter exactly as it was.
+    me prepare(leaf: XrayLlvmLeafV1, config: TraceConfigV1, selection: TraceSelectionV1
+            ) -> Result<TracePreparedV1, TraceFailureV1>:
+        if self.state == XRAY_LLVM_STATE_FAULTED_V1: return Err(TraceFailureV1.BackendFailure)
+        if self.state != XRAY_LLVM_STATE_IDLE_V1: return Err(TraceFailureV1.Busy)
+        trace_config_validate_v1(config)?
+        if config.instrumentation == TraceInstrumentationV1.Off:
+            return Err(TraceFailureV1.InstrumentationAbsent)
+        if config.backend != TraceBackendV1.Llvm and config.backend != TraceBackendV1.Auto:
+            return Err(TraceFailureV1.UnsupportedTarget)
+        if (config.consistency != TraceConsistencyV1.RawEdges or
+                config.patch_mode != TracePatchModeV1.Quiescent):
+            return Err(TraceFailureV1.UnsupportedConsistency)
+        val max_id = leaf.max_function_id()
+        if max_id <= 0: return Err(TraceFailureV1.InstrumentationAbsent)
+        if (selection.manifest_incarnation == 0 or selection.sites.len() == 0 or
+                selection.sites.len() > XRAY_LLVM_MAX_SITES_V1):
+            return Err(TraceFailureV1.InvalidMap)
+        var planned: [i64] = []
+        for site in selection.sites:
+            val id = xray_llvm_site_id_v1(site, self.module_instance, max_id)?
+            if planned.contains(id): return Err(TraceFailureV1.InvalidMap)
+            planned.push(id)
+        if self.incarnation == XRAY_LLVM_ID_MAX_V1: return Err(TraceFailureV1.ResourceExhausted)
+        self.incarnation = self.incarnation + 1u64
+        self.planned = planned
+        self.state = XRAY_LLVM_STATE_PREPARED_V1
+        Ok(TracePreparedV1(slot: 1, incarnation: self.incarnation))
+
+    # Quiescent activation (design C.2): the channel arena and handler are
+    # published BEFORE any selected sled can reach them, then each selected
+    # function is patched. A failed patch rolls back what this call patched.
+    me start(leaf: XrayLlvmLeafV1, prepared: TracePreparedV1, arena: i64
+            ) -> Result<TraceSessionV1, TraceFailureV1>:
+        if self.state != XRAY_LLVM_STATE_PREPARED_V1 or prepared.slot != 1 or
+                prepared.incarnation != self.incarnation:
+            return Err(TraceFailureV1.InvalidHandle)
+        if arena <= 0 or arena % 8 != 0:
+            self.state = XRAY_LLVM_STATE_IDLE_V1
+            return Err(TraceFailureV1.InvalidArgument)
+        if leaf.install(arena, self.incarnation, self.context, self.module_instance) != 1:
+            self.state = XRAY_LLVM_STATE_IDLE_V1
+            return Err(TraceFailureV1.BackendFailure)
+        self.arena = arena
+        self.close_pending = false
+        for id in self.planned:
+            val status = self.patch_retrying(leaf, id)
+            if status != XRAY_LLVM_STATUS_SUCCESS_V1:
+                val failure = xray_llvm_status_failure_v1(status)
+                # Close admission first (design C.5), then roll back.
+                self.close_admission(leaf)
+                # compiler-rt's FAILED for a failed mprotect writes no byte, so
+                # the id is not recorded as patched when unpatching it succeeds.
+                # Other FAILED paths may have written part of the sled; if the
+                # unpatch fails too, the id is recorded and the adapter faults.
+                if status == XRAY_LLVM_STATUS_FAILED_V1:
+                    if self.unpatch_retrying(leaf, id) != XRAY_LLVM_STATUS_SUCCESS_V1:
+                        self.patched.push(id)
+                if self.unpatch_all(leaf):
+                    self.state = XRAY_LLVM_STATE_IDLE_V1
+                else:
+                    self.state = XRAY_LLVM_STATE_FAULTED_V1
+                return Err(failure)
+            self.patched.push(id)
+        self.state = XRAY_LLVM_STATE_ACTIVE_V1
+        Ok(TraceSessionV1(slot: 1, incarnation: self.incarnation, generation: self.incarnation))
+
+    # Unpatch in reverse order, attempting every site even after a failure so
+    # the recorded per-site state is exact. true only if all were unpatched.
+    me unpatch_all(leaf: XrayLlvmLeafV1) -> bool:
+        var remaining: [i64] = []
+        var index = self.patched.len() - 1
+        while index >= 0:
+            val id = self.patched[index]
+            if self.unpatch_retrying(leaf, id) != XRAY_LLVM_STATUS_SUCCESS_V1:
+                remaining.push(id)
+            index = index - 1
+        self.patched = remaining
+        remaining.len() == 0
+
+    me close_admission(leaf: XrayLlvmLeafV1):
+        for attempt in 0..8:
+            if leaf.close(self.arena) == 1:
+                self.close_pending = false
+                return
+        self.close_pending = true
+
+    me patch_retrying(leaf: XrayLlvmLeafV1, id: i64) -> i64:
+        var status = leaf.patch_function(id)
+        var attempt = 1
+        while status == XRAY_LLVM_STATUS_ONGOING_V1 and attempt < XRAY_LLVM_ONGOING_RETRIES_V1:
+            status = leaf.patch_function(id)
+            attempt = attempt + 1
+        status
+
+    me unpatch_retrying(leaf: XrayLlvmLeafV1, id: i64) -> i64:
+        var status = leaf.unpatch_function(id)
+        var attempt = 1
+        while status == XRAY_LLVM_STATUS_ONGOING_V1 and attempt < XRAY_LLVM_ONGOING_RETRIES_V1:
+            status = leaf.unpatch_function(id)
+            attempt = attempt + 1
+        status
+
+    # The only way out of Faulted: retry unpatching the exact recorded sites.
+    # Admission stays closed; success returns to Idle so a new generation can
+    # be prepared, failure stays Faulted (never reported as off).
+    me recover(leaf: XrayLlvmLeafV1) -> Result<bool, TraceFailureV1>:
+        if self.state != XRAY_LLVM_STATE_FAULTED_V1: return Err(TraceFailureV1.InvalidHandle)
+        if self.close_pending: self.close_admission(leaf)
+        if self.close_pending: return Err(TraceFailureV1.Busy)
+        if not self.unpatch_all(leaf): return Err(TraceFailureV1.BackendFailure)
+        self.state = XRAY_LLVM_STATE_IDLE_V1
+        Ok(true)
+
+    # Quiescent stop: admission closes, then every selected sled returns to its
+    # taken branch. The handler and arena stay resident (no unload); a late
+    # callback past the sled sees a closed gate and records nothing. Idempotent.
+    me request_stop(leaf: XrayLlvmLeafV1, session: TraceSessionV1
+            ) -> Result<TraceSessionStateV1, TraceFailureV1>:
+        if (self.state == XRAY_LLVM_STATE_IDLE_V1 and session.slot == 1 and
+                session.incarnation == self.incarnation and session.generation == self.incarnation):
+            return Ok(TraceSessionStateV1.Drained)
+        if self.state == XRAY_LLVM_STATE_FAULTED_V1: return Err(TraceFailureV1.BackendFailure)
+        if not self.valid(session): return Err(TraceFailureV1.InvalidHandle)
+        # Once quiescent unpatch completes no sled reaches the handler, so a
+        # close that did not linearize only matters if the unpatch fails; it is
+        # then kept pending and retried by recover.
+        self.close_admission(leaf)
+        if not self.unpatch_all(leaf):
+            self.state = XRAY_LLVM_STATE_FAULTED_V1
+            return Err(TraceFailureV1.BackendFailure)
+        self.state = XRAY_LLVM_STATE_IDLE_V1
+        Ok(TraceSessionStateV1.Drained)

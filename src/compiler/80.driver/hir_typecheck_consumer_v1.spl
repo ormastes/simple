@@ -2,7 +2,8 @@
 # driver and owned archive leases. No CompileContext/driver orchestration.
 use compiler.hir.hir_types.{HirModule}
 use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity}
-use compiler.types.type_infer_types.{HmInferContext}
+use compiler.types.type_infer_types.{HmInferContext, TypeInferError}
+use compiler.hir.hir.{HirType, HirTypeKind}
 use compiler.types.type_infer.*
 use compiler.types.type_infer.format_error.{format_type_infer_error_v1}
 use compiler.semantics.visibility_integration.{check_module_visibility}
@@ -23,6 +24,45 @@ struct HirTypecheckReceiptV1:
 export HirTypecheckReceiptV1, collect_module_typecheck_receipt_v1
 
 # Shared actual-body consumer. Policy is resolved by the caller outside scratch.
+# E-TYPE-FN-VALUE (bug typecheck_accepts_fn_value_for_text_param_2026-11-06).
+# A function value (fn name, lambda, `_1` placeholder lambda) unified against a
+# plain DATA slot (scalar, text, collection, tuple) is never a representation
+# the backend can carry: natively the slot receives a code pointer and the
+# callee reads it as text/int (real AV: builder.build(... _1), fixed at the call
+# site by 45fb9585333). The HM checker already reports the Mismatch; this makes
+# that one class an error at every SIMPLE_TYPECHECK_PROFILE, like cfg-check.
+# Named/TypeParam/Infer/Any-like slots stay at pass severity (an alias or a
+# generic may legitimately be function-typed).
+fn typecheck_type_is_fn_v1(t: HirType) -> bool:
+    match t.kind:
+        case HirTypeKind.Function(_, _, _): true
+        case _: false
+
+fn typecheck_type_is_plain_data_v1(t: HirType) -> bool:
+    match t.kind:
+        case HirTypeKind.Int(_, _): true
+        case HirTypeKind.Float(_): true
+        case HirTypeKind.Bool: true
+        case HirTypeKind.Char: true
+        case HirTypeKind.Str: true
+        case HirTypeKind.Array(_, _): true
+        case HirTypeKind.Slice(_): true
+        case HirTypeKind.Dict(_, _): true
+        case HirTypeKind.Tuple(_): true
+        case HirTypeKind.Optional(inner):
+            typecheck_type_is_plain_data_v1(inner)
+        case _: false
+
+pub fn typecheck_error_is_fn_value_into_data_slot_v1(ictx: HmInferContext, err: TypeInferError) -> bool:
+    match err:
+        case TypeInferError.Mismatch(expected, found, _):
+            val e = ictx.resolve(expected)
+            val f = ictx.resolve(found)
+            if typecheck_type_is_fn_v1(f) and typecheck_type_is_plain_data_v1(e):
+                return true
+            typecheck_type_is_fn_v1(e) and typecheck_type_is_plain_data_v1(f)
+        case _: false
+
 pub fn collect_module_typecheck_receipt_v1(
     name: text, m: HirModule, severity: TypecheckPassSeverity,
     collect_api_signatures: bool = false
@@ -44,8 +84,17 @@ pub fn collect_module_typecheck_receipt_v1(
         signature_facts = Some(projected)
     var e_idx = 0
     while e_idx < ictx.errors.len():
+        val ierr = ictx.errors[e_idx]
+        if typecheck_error_is_fn_value_into_data_slot_v1(ictx, ierr):
+            val fmsg = "[typecheck] {name}: E-TYPE-FN-VALUE: " +
+                format_type_infer_error_v1(ierr) +
+                "|||HELP:a function value cannot be passed where a data value is expected; call it, or check placeholder `_1` scoping"
+            out = out.push(fmsg)
+            errors.push(fmsg)
+            e_idx = e_idx + 1
+            continue
         val msg = "[typecheck] {name}: " +
-            format_type_infer_error_v1(ictx.errors[e_idx])
+            format_type_infer_error_v1(ierr)
         out = out.push(msg)
         # E-TYPE-NIL-COMPARE rides this list at the pass's own severity:
         # a non-optional-vs-nil comparison was a unification ERROR here

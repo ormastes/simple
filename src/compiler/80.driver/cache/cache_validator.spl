@@ -11,7 +11,8 @@
 #   4. Dependencies — did any imported module's interface change?
 
 
-use compiler.backend.linker.smf_header.{smf_header_field_shift, smf_header_seed_trailer_offset}
+use compiler.backend.linker.smf_header.{smf_header_field_shift, smf_header_trailer_offset}
+use compiler.backend.linker.smf_meta.{smf_meta_compile_options_bytes}
 use std.common.string_core.{bytes_to_text}
 use compiler.driver.cache.cache_types.{
     CacheCheckResult,
@@ -157,10 +158,12 @@ fn validate_smf_with_deps(source_path: text, smf_path: text, options_hash: Compi
     # the replacement normally.
     var smf_snapshot = SmfValidationSnapshot.open(smf_path)
 
-    # Read SMF header for source_hash and options_hash
-    val header_bytes = smf_snapshot.reserved_bytes()
-    if header_bytes.len() == 0:
+    # Locate the SMF header (source_hash) and the compile-options record.
+    if not smf_snapshot.valid_header():
         return cache_check_result_error("failed to read SMF header: {smf_path}")
+    # Absent options (no .simple_meta record, or a legacy all-zero slot) decode
+    # to the zero hash, which compile_options_hash_validate reports as stale.
+    val header_bytes = smf_snapshot.compile_options_bytes()
 
     # Check source hash (Level 1)
     val smf_source_hash = smf_snapshot.source_hash()
@@ -254,37 +257,24 @@ class SmfValidationSnapshot:
         self.header_start() >= 0
 
     fn header_start() -> i64:
-        # Packed v1.1 trailer at EOF-128 (the only layout Simple writes); the
-        # Rust seed's repr(C) trailer at EOF-96 is the fallback when no packed
-        # magic is there (canonical decoder: compiler.backend.linker.smf_header).
-        val len = self.data.len()
-        val packed = if len >= 128: len - 128 else: -1
-        val packed_magic = packed >= 0 and self.data[packed] == 83 and self.data[packed + 1] == 77 and self.data[packed + 2] == 70 and self.data[packed + 3] == 0
-        if packed_magic:
-            return packed
-        val seed = smf_header_seed_trailer_offset(self.data)
-        if seed >= 0:
-            return seed
-        packed
+        # Trailer precedence shared with every reader (v1.3 at EOF-96, legacy
+        # packed at EOF-128, Rust seed 1.1 at EOF-96); canonical decoder:
+        # compiler.backend.linker.smf_header.
+        smf_header_trailer_offset(self.data)
 
-    # 4 for a Rust seed repr(C) header, 0 for packed; added to every field offset >= 20.
+    # 4 for a 96-byte repr(C) header, 0 for legacy packed; added to every field offset >= 20.
     fn field_shift() -> i64:
         val start = self.header_start()
         if start < 0:
             return 0
         smf_header_field_shift(self.data, start)
 
-    fn reserved_bytes() -> [u8]:
-        val start = self.header_start()
-        # Seed headers have no compile-options reserved area: treat as empty.
-        if start < 0 or self.field_shift() != 0:
+    # 16-byte compile-options hash from the `.simple_meta` section (legacy
+    # packed headers: bytes 88..104), or [] when absent.
+    fn compile_options_bytes() -> [u8]:
+        if self.header_start() < 0:
             return []
-        var out: [u8] = []
-        var i = 0
-        while i < 16:
-            out.push(self.data[start + 88 + i])
-            i = i + 1
-        out
+        smf_meta_compile_options_bytes(self.data)
 
     fn u32_at(offset: i64) -> i64:
         if offset < 0 or self.data.len() < 4 or offset > self.data.len() - 4:
@@ -361,10 +351,6 @@ class SmfValidationSnapshot:
 
     me release():
         self.data = []
-
-fn read_smf_reserved_bytes(smf_path: text) -> [u8]:
-    val snapshot = SmfValidationSnapshot.open(smf_path)
-    snapshot.reserved_bytes()
 
 fn read_smf_source_hash(smf_path: text) -> i64:
     val snapshot = SmfValidationSnapshot.open(smf_path)

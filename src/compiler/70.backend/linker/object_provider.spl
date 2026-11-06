@@ -5,11 +5,12 @@ use compiler.hir.hir_types.{Effect}
 # module bytes, and exported code units from SMF files and libraries.
 
 use std.io_runtime.{file_exists, file_read_bytes}
-use compiler.backend.linker.smf_header.{SmfHeader, smf_header_from_bytes}
+use compiler.backend.linker.smf_header.{SmfHeader, SMF_HEADER_SIZE, smf_header_from_bytes}
 use compiler.backend.linker.smf_getter.{SmfGetter, SmfLocation, SmfSourceType}
 use compiler.backend.linker.lib_smf_reader.{LibSmfReader}
 use compiler.backend.linker.smf_reader.{SmfReaderImpl}
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
+use compiler.backend.linker.smf_meta.{smf_meta_compile_options_bytes}
 use compiler.backend.linker.object_code_unit.{ObjectCodeUnit}
 
 struct ObjectProviderConfig:
@@ -88,18 +89,21 @@ fn objectprovider_load_object_bytes(self: ObjectProvider, module_name: text) -> 
             return lib_object
     object_result
 
-fn objectprovider_validate_preference(self: ObjectProvider, module_name: text, header: SmfHeader) -> Result<(), text>:
+fn objectprovider_validate_preference(self: ObjectProvider, module_name: text, header: SmfHeader, image: [u8]) -> Result<(), text>:
     val prefer_backend = objectprovider_normalize_backend_name(self.config.prefer_backend)
     if prefer_backend == "":
         return Ok(())
 
-    if not header.has_compile_options_hash():
+    # The compile-options hash is a `.simple_meta` record (legacy packed
+    # headers: bytes 88..104), never a field of the 96-byte header.
+    val options_bytes = smf_meta_compile_options_bytes(image)
+    if options_bytes.len() == 0:
         return Err("ObjectProvider prefer_backend={prefer_backend} rejected {module_name}: missing compile options hash")
 
     if not header.is_pic():
         return Err("ObjectProvider prefer_backend={prefer_backend} rejected {module_name}: module is not PIC")
 
-    val compile_backend = objectprovider_extract_backend_kind(header.get_compile_options_bytes())
+    val compile_backend = objectprovider_extract_backend_kind(options_bytes)
     val requested_backend = objectprovider_backend_text_to_kind(prefer_backend)
     if requested_backend == 0:
         return Err("ObjectProvider prefer_backend={prefer_backend} rejected {module_name}: unsupported backend preference")
@@ -163,7 +167,7 @@ impl ObjectProvider:
             return Err(header_result.unwrap_err())
 
         val header = header_result.unwrap()
-        val preference_result = objectprovider_validate_preference(self, module_name, header)
+        val preference_result = objectprovider_validate_preference(self, module_name, header, source_bytes)
         if preference_result.is_err():
             return Err(preference_result.unwrap_err())
 
@@ -191,7 +195,7 @@ impl ObjectProvider:
             return Err(data_result.unwrap_err())
 
         val data = data_result.unwrap()
-        if data.len() < 128:
+        if data.len() < SMF_HEADER_SIZE:
             val code_unit = ObjectCodeUnit(
                 name: module_name,
                 bytes: data,
@@ -204,7 +208,7 @@ impl ObjectProvider:
             return Err(header_result.unwrap_err())
 
         val header = header_result.unwrap()
-        val preference_result = objectprovider_validate_preference(self, module_name, header)
+        val preference_result = objectprovider_validate_preference(self, module_name, header, data)
         if preference_result.is_err():
             return Err(preference_result.unwrap_err())
 

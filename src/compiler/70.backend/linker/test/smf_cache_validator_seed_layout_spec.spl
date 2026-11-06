@@ -1,11 +1,13 @@
 # Bug smf_header_wire_layout_diverges_rust_vs_simple_2026-08-10: the cache
-# validator's SMF snapshot must locate the header and source_hash on a
-# Rust-seed repr(C) (96 B, +4) trailer.
+# validator's SMF snapshot must locate the header and source_hash on the v1.3
+# 96-byte trailer (the writers' default), the Rust seed's 1.1 stamp of it, and
+# the legacy packed 128-byte trailer.
 use std.spec.{describe, it, expect}
 use compiler.driver.cache.cache_validator.{SmfValidationSnapshot}
+use compiler.backend.linker.smf_header.{SMF_HEADER_SIZE, SMF_PACKED_HEADER_SIZE, smf_header_from_bytes}
 use compiler.backend.linker.smf_writer.{SmfWriter}
 
-fn packed_artifact() -> [u8]:
+fn v13_artifact() -> [u8]:
     var writer = SmfWriter.create()
     val code: [i64] = [195]
     writer.add_code_section("code", code)
@@ -15,48 +17,62 @@ fn packed_artifact() -> [u8]:
     var b: [u8] = []
     for word in built.unwrap():
         b.push(word as u8)
-    val hs = b.len() - 128
+    # source_hash at repr(C) offset 72
+    val hs = b.len() - SMF_HEADER_SIZE
     var i = 0
     while i < 8:
-        b[hs + 68 + i] = (0x11 + i) as u8
+        b[hs + 72 + i] = (0x11 + i) as u8
         i = i + 1
     b
 
-fn to_seed_trailer(packed: [u8]) -> [u8]:
-    # Rewrite the packed 128-byte trailer as the Rust seed repr(C) 96-byte one:
-    # 0..20 unchanged, 4 zero padding bytes at 20..24, packed 20..92 moved to 24..96.
-    val hs = packed.len() - 128
+fn body_of(image: [u8]) -> [u8]:
     var out: [u8] = []
     var i = 0
-    while i < hs:
-        out.push(packed[i])
-        i = i + 1
-    i = 0
-    while i < 96:
-        if i < 20:
-            out.push(packed[hs + i])
-        else:
-            if i < 24:
-                out.push(0)
-            else:
-                out.push(packed[hs + i - 4])
+    while i < image.len() - SMF_HEADER_SIZE:
+        out.push(image[i])
         i = i + 1
     out
+
+# The Rust seed stamps 1.1 on the same 96-byte layout.
+fn to_seed_stamp(image: [u8]) -> [u8]:
+    var out = image
+    out[out.len() - SMF_HEADER_SIZE + 5] = 1
+    out
+
+# Legacy packed 128-byte trailer (v1.1) built from the same header fields.
+fn to_packed_trailer(image: [u8]) -> [u8]:
+    var header = smf_header_from_bytes(image).unwrap()
+    header.version_minor = 1
+    val packed = header.to_packed_bytes()
+    var out = body_of(image)
+    var i = 0
+    while i < SMF_PACKED_HEADER_SIZE:
+        out.push(packed[i])
+        i = i + 1
+    out
+
 describe "cache validator SMF snapshot header layouts":
-    it "reads the packed trailer at EOF-128 with source_hash at +68":
-        val packed = packed_artifact()
+    it "reads the v1.3 trailer at EOF-96 with source_hash at +72":
+        val img = v13_artifact()
+        val snap = SmfValidationSnapshot(data: img)
+        expect(snap.valid_header()).to_equal(true)
+        expect(snap.header_start()).to_equal(img.len() - 96)
+        expect(snap.source_hash()).to_equal(0x1817161514131211)
+
+    it "reads the legacy packed trailer at EOF-128 with source_hash at +68":
+        val packed = to_packed_trailer(v13_artifact())
         val snap = SmfValidationSnapshot(data: packed)
         expect(snap.valid_header()).to_equal(true)
         expect(snap.header_start()).to_equal(packed.len() - 128)
         expect(snap.source_hash()).to_equal(0x1817161514131211)
 
     it "reads the Rust seed trailer at EOF-96 with source_hash at +72":
-        val seed = to_seed_trailer(packed_artifact())
+        val seed = to_seed_stamp(v13_artifact())
         val snap = SmfValidationSnapshot(data: seed)
         expect(snap.valid_header()).to_equal(true)
         expect(snap.header_start()).to_equal(seed.len() - 96)
         expect(snap.source_hash()).to_equal(0x1817161514131211)
 
-    it "treats the missing compile-options area of a seed header as empty":
-        val seed = to_seed_trailer(packed_artifact())
-        expect(SmfValidationSnapshot(data: seed).reserved_bytes().len()).to_equal(0)
+    it "reports no compile-options bytes when no .simple_meta record exists":
+        expect(SmfValidationSnapshot(data: v13_artifact()).compile_options_bytes().len()).to_equal(0)
+        expect(SmfValidationSnapshot(data: to_seed_stamp(v13_artifact())).compile_options_bytes().len()).to_equal(0)
