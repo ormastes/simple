@@ -167,8 +167,10 @@ How to read the output:
 - Table format: 7 header lines (`Snapshot:`, `Capture:`, `Ingestion:`,
   `Graph complete:`, `Qualification:`, `Generation:`, `Input manifest:`), then
   `KIND<TAB>ID<TAB>TITLE` rows, `Total selected: N`, optional `Next cursor:`,
-  then diagnostics. The ~100 `TRACE-AUTHORITY-CONFLICT: claim lacks unique
-  registered authority ...` lines are **expected** today (every authored claim
+  then (when any exist) one summary line `Diagnostics: N (details on stderr)`;
+  the per-row diagnostics go to **stderr** (SDN keeps them inside its document).
+  The ~100 `TRACE-AUTHORITY-CONFLICT: claim lacks unique
+  registered authority ...` diagnostics are **expected** today (every authored claim
   in the registered declaration lacks an independent authority); they are not
   a failure of your query. Grep the rows out with `grep -P '^\w+\t'`.
 - `--format=sdn`: one inline SDN dictionary on one line. Keys agents use:
