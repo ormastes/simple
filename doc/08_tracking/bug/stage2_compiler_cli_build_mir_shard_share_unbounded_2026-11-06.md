@@ -120,3 +120,51 @@ Costs and margins (estimates from run 10, unverified until the next run):
 4. A single cold MIR shard worker (`--threads 1`, no HIR shards) SIGSEGVs
    during in-process HIR at `compiler.common.error_codes` (2868/3060),
    `status=CRASH exit=-139`, on the run-10 Stage 2 binary `43f9a6fc68ac`.
+
+## Run 11: row killed at the 52 GiB phase cap with 8 MIR shards; row cap 60 GiB
+
+Run 11 (2026-11-06, base `e4c8830efc7`, Stage 2 binary sha256
+`7daae12809221236454e78afb4d7a3cb4cf68e3394b188180bbbbcb840638702`,
+121 GiB aarch64 host, `SIMPLE_MIR_SHARD_COUNT=8`) aborted `compiler_cli_build`
+with `primary_status=rss-cap-exceeded`: `rss_limit_kib=54525952` (52 GiB,
+`cap_source=phase-policy`, `cap_bound=worker-floor-elevated`: base 4194304 +
+worker floor 16777216 x 150% x 2), `peak_rss_kib=54579388`. Two MIR shard
+workers sampled at 24.0 and 25.2 GiB plus a ~1.1 GiB coordinator, in
+`native_compile` of shard 1 (20/382). Host budget 63800400 KiB (50% of
+127600812); host MemAvailable never fell below 35 GiB during the run.
+
+How the cap reached the row: `bootstrap_tree_rss_whole_build_export` publishes
+ONE pair (`SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB` + elevated ceiling) that
+both the campaign watchdog (`bootstrap-verification-campaign.shs`, wrapping
+every row) and each row owner (`run-process-group-timeout.shs`) read. Stage 2
+tool builds run serially (`BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1`), so
+`compiler_cli_build` and `test_runner_build` never share the cap at the same
+time; the kill came from the campaign receipt.
+
+Owner decision: price the `compiler_cli_build` row at 60 GiB (62914560 KiB),
+keep 8 MIR shards, keep every other row's cap. Implemented in the policy owner
+(`scripts/bootstrap/lib/tree-rss-policy.shs`,
+`BOOTSTRAP_TREE_RSS_PHASE_CLI_ROW_CAP_KIB`): the whole-build plan computes a
+separate row cap (only with >= 2 workers, above the plan cap and within the
+host budget), the export publishes it
+(`SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_{CAP_KIB,CEILING_KIB,BOUND}`, enforce mode
+only) and re-admits it before the phase starts; `bootstrap_tree_rss_row_cap_enter`
+scopes it around that one row (receipt `cap_bound=cli-row-mir-shards`), and
+`bootstrap_tree_rss_campaign_envelope` raises the campaign envelope to the
+largest row cap (its receipt keeps the phase bound). The phase cap itself stays
+54525952 for every other row. A higher worker FLOOR was not used because it
+would re-price every full-CLI row.
+
+Fail-closed rules (review follow-up): a host budget that holds the 2-worker
+plan but not 62914560 KiB is refused up front ("compiler_cli_build row needs
+62914560 KiB ..."), never run at the 52 GiB cap run 11 died at; one build
+thread (one MIR worker) and small hosts keep the plan cap. Because the
+campaign envelope is the max row cap, not a sum, the row cap also requires
+`BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1` (both Stage 2 entry points pin it);
+anything else is refused at plan time and at row entry.
+
+Known limit (not handled): the policy does not read cgroup `memory.max`. Run 11's `[hir-shard]` line reports a cgroup `memory.max` of 67108864 KiB
+(64 GiB); a 60 GiB tree leaves ~4 GiB before the kernel OOM-kills ahead of the
+watchdog. The compiler's own effective shard budget (cgroup - headroom = 40 GiB)
+is unchanged; only the watchdog kill line moved. This does not fix the
+unbounded MIR share above; it buys ~8.5 GiB over the measured 51.5 GiB.
