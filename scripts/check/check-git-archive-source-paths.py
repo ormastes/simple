@@ -27,7 +27,10 @@ def check(attributes, git):
             target = folder / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
-        run('-c', 'core.autocrlf=false', 'add', '--all')
+        run('-c', 'core.autocrlf=false', 'add', '--force', '--all')
+        tracked = set(run('ls-files', '-z').decode().split('\0'))
+        if not set(kept).union(excluded).issubset(tracked):
+            raise RuntimeError('archive controls were not tracked in the fixture')
         run('-c', 'user.name=Archive regression', '-c', 'user.email=archive@example.invalid',
             '-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'archive fixture')
         with tarfile.open(fileobj=io.BytesIO(run('archive', '--format=tar', 'HEAD'))) as archive:
