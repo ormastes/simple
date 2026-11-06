@@ -155,3 +155,153 @@ requirement <-> file link and travel with each row as `other_paths`.
 
 Slice-1 wording fix: item 2 above should read "If neither variable is set the
 spec still fails explicitly; no fallback process result exists."
+
+## Legacy bug-DB sidecar increment — 2026-11-06 (slice 3)
+
+Problem: `trace list bugs` answers `Total selected: 0` because the registered
+declaration declares no bug and `doc/08_tracking/bug/bug_db.sdn` is not
+ingested. Agents need "which bugs touch file X" and "which bugs are open in
+area Y" from the same query entry, read-only.
+
+**Measured constraints that fix the shape.** (a) `bug_db.sdn` is 3.67 MB;
+the capture adapters admit <=1 MiB per file and <=2 MiB per closure
+(`worktree_query_v1`, `GitSnapshotRequest`), so it can never be a
+`SnapshotArtifact` without changing every snapshot route. (b) The graph
+schema requires a locator to be pinned (`blob_id != ""`) to a captured
+artifact and `extract_snapshot_trace_facts` marks any locator path outside
+the inventory `TRACE-MISSING-ENDPOINT` + incomplete; the bug `file` column
+names hundreds of files that are not (and cannot be, see a) in the closure.
+(c) Every graph claim without a registered authority raises
+`TRACE-AUTHORITY-CONFLICT` (101 today); ~2,700 bug rows as claims would make
+the diagnostics stream useless. (d) `TraceNode` carries id/kind/title only;
+status/severity have no graph slot. (e) The database has two overlapping
+tables: `bugs_active` 1,292 rows, `bugs` 1,741 rows, 982 active ids absent
+from `bugs`, 310 ids in both, 0 duplicates inside `bugs`. (f) Reading it
+through the std text codecs costs ~21 s on the seed (the UTF-8 validator is
+an interpreted per-byte loop; measured `read_ms=21532`); the no-follow byte
+reader plus the runtime-backed `string_from_byte_array` +
+`text_validate_utf8` costs 0.28 s, and the row parser 0.7 s.
+
+**Decision: a read-only sidecar, bound by identity, not a graph source.**
+
+1. **Library owner.** New pure module `std.common.traceability.legacy_bugs_v1`:
+   `LegacyBugRowV1 {id ("bug:" + db id), db_id, table, severity, status,
+   title, file, line, reproducible_by, created_at, updated_at, valid}`,
+   `LegacyBugSourceV1 {path, content_sha256, rows, diagnostics}`,
+   `parse_legacy_bug_db_v1(content, path, sha)` (line scanner over exactly the
+   `bugs_active` and `bugs` table sections; quoted fields unescape `\" \\ \$`;
+   never the full SDN document parser), `legacy_bug_nodes_v1`,
+   `legacy_bug_row_matches_v1(row, status, severity, file_prefix)`. Rules:
+   `bugs_active` wins over `bugs` for a shared id; a second row with the same
+   id inside `bugs_active` is reported (`TRACE-LEGACY-ROW`, severity
+   `warning`) and the first kept; a row whose field count is not 10 or whose
+   id is not a canonical identity is reported and skipped; a `file` or
+   `reproducible_by` value that fails `trace_path_valid` is dropped to `""`
+   (the row stays, the link is never invented); `valid=false` rows are kept
+   with `valid: false` so they are visible and filterable; a 40,000-row
+   budget ends the scan with a diagnostic. The module never writes.
+   New pure module `std.common.traceability.sidecar_v1`:
+   `TraceSidecarReferenceV1 {source_kind, from_id, relation, path, locator,
+   authority}` and `TraceSidecarSourceV1 {kind, path, content_sha256,
+   row_count}`. Legacy rows yield sidecar references `located_in` (the
+   `file` column, locator `line:N`, authority `legacy-row`) and
+   `reproducible_by` (same authority). The `file` column is often the bug's
+   own `.md` record rather than a source file; the reference reports what
+   the row says and labels it `legacy-row`, nothing more.
+
+2. **What enters the graph.** Only bug *nodes* (`TraceNode {id, Bug,
+   title}`), appended to the extracted facts before `resolve_trace_graph`,
+   so node-identity validation, the 40,000-node budget and `list/show/refs`
+   paging apply unchanged. A bug already declared by a registered
+   declaration keeps the declaration's node; the legacy row still attaches
+   its attributes. No claim, edge, locator or origin is synthesized from the
+   database (constraints b, c). Legacy diagnostics are appended with
+   severity `warning` and do not change `graph.complete`.
+
+3. **Identity.** `build_snapshot_trace_graph` gains a sibling
+   `build_snapshot_trace_graph_with_sidecar_v1(snapshot, policy,
+   declarations, scope, sources: [TraceSidecarSourceV1], nodes)`; the old
+   entry calls it with none. When `sources` is empty the input manifest is
+   byte-identical to today's (the key is absent); otherwise
+   `inputs["sidecar_sources"] = [{kind, path, content_sha256, row_count}]`
+   sorted by path, so generation ids and every cursor invalidate when the
+   database changes. `TraceSnapshotBuild` gains `legacy_bugs:
+   [LegacyBugRowV1]`, `sidecar_references: [TraceSidecarReferenceV1]` and
+   `sidecar_sources` (defaults empty).
+
+4. **Capture.** Worktree preview only in this increment: the app reads the
+   database with the existing no-follow bounded byte reader (<=16 MiB) after
+   the snapshot capture, decodes with the runtime-backed converter and
+   validates UTF-8 (constraint f), hashes it, parses. `--bug-db=<path>`
+   selects the file (`trace_path_valid`), `--bug-db=none` disables; the
+   default is `doc/08_tracking/bug/bug_db.sdn` *when it exists*, otherwise
+   nothing is ingested and output is unchanged. An explicit path that cannot
+   be read is `TRACE-LEGACY-CAPTURE` (exit 2). `git:`/`index` snapshots do
+   not ingest (the git provider's blob cap is 1 MiB and the worktree file
+   is not the committed one); they report
+   `legacy_database_ingestion: unavailable-for-snapshot-kind`. Default-on is
+   justified by the measurement: ~1 s on the seed.
+
+5. **Filters for `list bugs`.** `--status=<text>`, `--severity=<text>`,
+   `--file-prefix=<path-prefix>` (each once, only with `list bugs`, exact
+   match on the row attribute / `starts_with` on `file`). They apply before
+   paging: the app queries a graph copy whose bug nodes are those whose row
+   matches, and folds the filter into `TraceNodeQueryV1.visibility_context`
+   (`local-selected-content/v1;status=..;severity=..;file=..`), which is
+   already part of the cursor prefix, so a cursor from a filtered page is
+   rejected unfiltered and vice versa. `query_nodes_v1` is unchanged.
+
+6. **Rendering.** Header line becomes `Ingestion: registered declarations +
+   sidecar bug-db/v1 <path> rows=<n> sha256:<hex>` when a source was
+   ingested (unchanged text otherwise). Bug rows get three appended columns
+   `STATUS\tSEVERITY\tLOCATION` (`file:line`, empty when no safe file); the
+   header row for `bugs` is `KIND\tID\tTITLE\tSTATUS\tSEVERITY\tLOCATION`,
+   other kinds keep `KIND\tID\tTITLE`. SDN: `legacy_database_ingestion`
+   becomes `"bug-db/v1"`, `sidecar_sources: [{kind, path, sha256, rows}]`,
+   each bug node gains `legacy: {table, status, severity, file, line,
+   reproducible_by, valid, created_at, updated_at}`. `refs bug <id>` adds
+   `SIDECAR\t<relation>\t<path>\t<locator>\t<authority>` rows after the
+   `LOCATOR` rows (SDN `sidecar_references`), still `Total references: 0`
+   for a bug with no authored claims -- that number counts graph claims only.
+   String consumers updated together: `trace_query_p0_spec` (1 assertion on
+   the ingestion line) and `query_render_refs_v1` (2).
+
+7. **Verification.** Unit spec on a synthetic database text (both tables,
+   overlap precedence, 11-field row, unsafe path, `valid=false`, quoted
+   commas and escapes) and on the filter/visibility fold; system scenario
+   through the direct entry on the worktree preview: BEFORE `Total
+   selected: 0` -> AFTER `Total selected: N>0`, plus `show bug` and
+   `--status=open`. Runs on the seed.
+
+## Annotation coverage increment — 2026-11-06 (slice 4, design only)
+
+"Which spec verifies requirement X." The registered declaration has no
+`verified_by` claims; the test tree carries `# @req REQ-XXX-NNN ...` header
+lines in 7,041 `*_spec.spl` files (`@cover` lines are file-coverage
+percentages, not requirement links, and are ignored). Scanning 7k files per
+query is not viable on the seed, so the scan is **opt-in and bounded**:
+`--spec-root=<dir>` (repeatable, <=8, `trace_path_valid`, real non-symlink
+directory). The app enumerates `*_spec.spl` under each root (recursive,
+<=4,096 files total, sorted), reads each file's first 8 KiB with the
+no-follow bounded byte reader, and takes `# @req` lines from the leading
+comment block only. Each id becomes a sidecar reference
+`req:<ID> verified_by <path>` (authority `annotation-claim`, source kind
+`annotation-req/v1`); one `TraceSidecarSourceV1` per root whose
+`content_sha256` hashes the sorted `(path, header_sha256)` list, so the
+manifest and cursors bind the scanned headers. No graph claim is created
+(constraint c above); `refs requirement <id>` renders them as `SIDECAR`
+rows, `refs file <path>` lists the requirements a spec claims. Authority
+wording stays "declared by the spec header", never "verified".
+
+## File-centred summary increment — 2026-11-06 (slice 5, design only)
+
+`refs file <path>`: the selected identity is a repository-relative path.
+The page lists (1) graph claims whose endpoint is the captured artifact node
+of that path (`artifact:<hex>`), rendered exactly as `refs` rows; (2)
+`LOCATOR` rows for every entity declared at that path; (3) `SIDECAR` rows
+for every sidecar reference whose `path` equals it (bugs `located_in` /
+`reproducible_by`, requirements `verified_by`). A path that is neither
+captured nor referenced is `TRACE-QUERY-NOT-FOUND`. `--limit`/`--cursor`
+page the union in a fixed order (claims, locators, sidecar) under schema
+`simple.trace.file-refs-cursor/v1`. "Bugs open in area Y" stays
+`list bugs --status=open --file-prefix=<dir>/`.
