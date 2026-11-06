@@ -254,6 +254,10 @@ impl VirtioGpuDriver:
         self = r.driver
         Ok(true)
 
+    me set_kernel_dma_available(value: bool):
+        """Opt in to kernel-managed DMA (syscalls 84/86/87); kernel-hosted callers only."""
+        self.kernel_dma_available = value
+
     me set_notification_id(value: u64):
         self.notif_id = value
 
@@ -400,6 +404,7 @@ impl VirtioGpuDriver:
         self.ctrl_used_virt = used_dma.unwrap_virt()
         self.ctrl_used_phys = used_dma.unwrap_device()
         self.ctrl_used_allocation_id = used_dma.unwrap_allocation_id()
+        # Ring left unsynced: kernel maps DMA uncached (VM_CACHE_DISABLE), so no 86/87 needed.
 
         var i: u16 = 0
         while i < qsize - 1:
@@ -507,6 +512,7 @@ impl VirtioGpuDriver:
         val ring_virt = ring_dma.unwrap_virt()
         val ring_phys = ring_dma.unwrap_device()
         self.ctrl_ring_allocation_id = ring_dma.unwrap_allocation_id()
+        # Ring left unsynced: kernel maps DMA uncached (VM_CACHE_DISABLE), so no 86/87 needed.
 
         # Compute sub-region offsets
         self.ctrl_desc_virt = ring_virt
@@ -718,11 +724,13 @@ impl VirtioGpuDriver:
             log_info("[virtio] " + "[virtio-gpu] send_command complete used_idx={used_idx}")
         else:
             log_info("[virtio] " + "[virtio-gpu] send_command timeout")
+            _ = self._sync_allocation_for_cpu(self.resp_buf_allocation_id)
+            _ = self._sync_allocation_for_cpu(self.cmd_buf_allocation_id)
             return 0
 
-        if not self._sync_allocation_for_cpu(self.resp_buf_allocation_id):
-            return 0
-        if not self._sync_allocation_for_cpu(self.cmd_buf_allocation_id):
+        val resp_cpu_ok = self._sync_allocation_for_cpu(self.resp_buf_allocation_id)
+        val cmd_cpu_ok = self._sync_allocation_for_cpu(self.cmd_buf_allocation_id)
+        if not resp_cpu_ok or not cmd_cpu_ok:
             return 0
 
         # Acknowledge ISR
