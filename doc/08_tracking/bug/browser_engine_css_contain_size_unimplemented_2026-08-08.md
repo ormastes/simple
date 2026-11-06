@@ -114,3 +114,9 @@ TDD evidence (seed binary
   fix stashed, verified via `git stash` re-run):
   containment_contain_spec.spl (2/3), web_css_positioning_spec.spl (4/6),
   web_css_table_replaced_forms_spec.spl (5/6).
+
+## Update 2026-11-06 — verified FIXED
+
+`contain: size` / `contain-intrinsic-size` were implemented in `8e82eb3ee52`
+("honor CSS contain:size in sizing"); `web_css_visibility_containment_spec.spl`
+is 7/7 on the Rust seed on release/1.0.0. Status: FIXED.

@@ -18,7 +18,7 @@ use std.gc_async_mut.gpu.browser_engine.script.storage_api.{BrowserStorage}
 use std.gc_async_mut.gpu.browser_engine.script.clipboard_api.{BrowserClipboard}
 use std.gc_async_mut.gpu.browser_engine.script.location_api.{BrowserLocation, BrowserHistory}
 use std.gc_async_mut.gpu.browser_engine.script.js_transpiler.{js_is_javascript}
-use std.js.engine.runtime.{js_runtime_with_default_logger}
+use std.js.engine.runtime.{JsRuntime, js_runtime_with_default_logger}
 use std.js.types.js_types.{JsValue}
 
 # =========================================================================
@@ -134,11 +134,45 @@ pub fn run_script_with_type(runner: ScriptRunner, source: text, script_type: tex
                 return "js-error: " + e.message
     run_script(runner, source)
 
+fn _bind_minimal_bom_globals(rt: JsRuntime) -> JsRuntime:
+    """Bind window/self/globalThis, navigator and location on a page-script
+    engine (bug js_engine_no_dom_bom_globals_2026-07-11). Document and storage
+    stay BrowserSession-owned."""
+    var runtime = rt
+    val location_id = runtime.create_host_object()
+    runtime.set_host_property(location_id, "href", JsValue.String(v: "about:blank"))
+    runtime.set_host_property(location_id, "protocol", JsValue.String(v: "about:"))
+    runtime.set_host_property(location_id, "host", JsValue.String(v: ""))
+    runtime.set_host_property(location_id, "pathname", JsValue.String(v: "blank"))
+    runtime.set_host_property(location_id, "search", JsValue.String(v: ""))
+    runtime.set_host_property(location_id, "hash", JsValue.String(v: ""))
+    val navigator_id = runtime.create_host_object()
+    runtime.set_host_property(navigator_id, "userAgent", JsValue.String(v: "Mozilla/5.0 (compatible; SimpleBrowser)"))
+    runtime.set_host_property(navigator_id, "language", JsValue.String(v: "en-US"))
+    runtime.set_host_property(navigator_id, "platform", JsValue.String(v: ""))
+    val window_id = runtime.create_host_object()
+    runtime.set_host_property(window_id, "window", JsValue.Object(id: window_id))
+    runtime.set_host_property(window_id, "self", JsValue.Object(id: window_id))
+    runtime.set_host_property(window_id, "globalThis", JsValue.Object(id: window_id))
+    runtime.set_host_property(window_id, "location", JsValue.Object(id: location_id))
+    runtime.set_host_property(window_id, "navigator", JsValue.Object(id: navigator_id))
+    runtime.interpreter.define_global_value("window", JsValue.Object(id: window_id))
+    runtime.interpreter.define_global_value("self", JsValue.Object(id: window_id))
+    runtime.interpreter.define_global_value("globalThis", JsValue.Object(id: window_id))
+    runtime.interpreter.define_global_value("location", JsValue.Object(id: location_id))
+    runtime.interpreter.define_global_value("navigator", JsValue.Object(id: navigator_id))
+    var interpreter = runtime.interpreter
+    interpreter.host_window_id = window_id
+    interpreter.host_location_id = location_id
+    interpreter.host_navigator_id = navigator_id
+    runtime.interpreter = interpreter
+    runtime
+
 pub fn run_page_scripts(scripts: [text]) -> [text]:
     """Execute all of a page's <script> sources on ONE JS engine so globals
     built up by earlier tags (e.g. window.google) are visible to later tags.
     Returns one result per script: eval result text or "js-error: ..."."""
-    var rt = js_runtime_with_default_logger("page-scripts")
+    var rt = _bind_minimal_bom_globals(js_runtime_with_default_logger("page-scripts"))
     var out: [text] = []
     for source in scripts:
         if source.trim().len() == 0:
