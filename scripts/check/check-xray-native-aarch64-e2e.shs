@@ -126,7 +126,8 @@ expect_count() { # label actual expected
 }
 
 "$READELF" -S -W "$WORK/on.o" > "$WORK/on.sections" 2>&1
-map_line=$(grep -E '\.simple_xray_map' "$WORK/on.sections")
+# Exact name: `.rela.simple_xray_map` (text_base relocation) must not match.
+map_line=$(grep -E '\] \.simple_xray_map ' "$WORK/on.sections")
 [ -n "$map_line" ] || { echo "FAIL — no .simple_xray_map section in the --xray object"; exit 1; }
 text_idx=$(sed -n 's/^ *\[ *\([0-9][0-9]*\)\] \.text .*/\1/p' "$WORK/on.sections" | head -1)
 flags_link=$(printf '%s\n' "$map_line" | awk '{print $(NF-3), $(NF-2)}')
@@ -136,6 +137,9 @@ checks=$((checks + 1))
 "$READELF" -r -W "$WORK/on.o" > "$WORK/on.relocs" 2>&1
 expect_count "CALL26 relocations to __simple_xray_trampoline_v1" \
     "$(grep -c 'R_AARCH64_CALL26.*__simple_xray_trampoline_v1' "$WORK/on.relocs")" "$sites"
+# The map header's text_base (+0x24) is PC-relative to the .text section symbol.
+expect_count "PREL64 text_base relocation" \
+    "$(grep -A3 "Relocation section '.rela.simple_xray_map'" "$WORK/on.relocs" | grep -cE '^0+24 .*R_AARCH64_PREL64 .* \.text \+ 0$')" 1
 
 "$OBJDUMP" -d "$WORK/on.o" > "$WORK/on.dis" 2>&1
 expect_count "sled off word (b +0x20)" "$(grep -cE '^ *[0-9a-f]+: 14000008[[:space:]]+b[[:space:]]' "$WORK/on.dis")" "$sites"
