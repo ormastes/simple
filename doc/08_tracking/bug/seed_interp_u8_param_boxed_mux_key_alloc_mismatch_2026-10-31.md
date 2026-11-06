@@ -1,6 +1,6 @@
 # Seed interpreter: `[u8]` parameter stays boxed, so every mux key-encode admission is refused
 
-Status: OPEN. Not a stdlib defect: the smux codec's size computation is exact.
+Status: FIXED (already, verified 2026-11-06) — see "Resolution". Not a stdlib defect: the smux codec's size computation is exact.
 This is the known OPEN gap #4 of
 [seed_u64_signed_compare_and_u8_data_ptr_2026-10-19.md](seed_u64_signed_compare_and_u8_data_ptr_2026-10-19.md)
 (`[u8]` params/returns not yet coerced to packed `ByteArray` in the seed
@@ -104,3 +104,19 @@ Prevention spec skeleton: `build/sweep/probes/mux_key_alloc_prevention_spec.spl`
 (`# authored-unexecuted: pending runner lane`) — scenarios: minimal fixed
 key, modifier combinations, F-keys 1-24, Unicode boundaries, exact-max
 payload, over-budget rejection.
+
+## Resolution (verified 2026-11-06)
+
+No longer reproduces. On a seed built from `release/1.0.0` @ `ecb705896a4`
+(debug), `simple test` lane:
+
+- `test/01_unit/os/apps/smux/core_mux_key_codec_spec.spl`:
+  `Results: 19 total, 19 passed, 0 failed` (was 3/19).
+- `test/fixtures/seed_interp/u8_param_packed_test_lane_repro.spl`: a literal
+  `[97u8]` bound to a `[u8]` parameter has `rt_array_data_ptr != 0`, and both
+  `text_byte_extraction_checked(1, [97u8])` and
+  `core_mux_key_bytes_checked_v1(1, [97u8])` are `Ok` — 3/3 passed.
+
+`[u8]` parameters now go through `coerce_to_declared_type`
+(`interpreter_call/core/arg_binding.rs`, "A bare literal bound to `[u8]`
+packs like every other typed binding"). No code change in this pass.
