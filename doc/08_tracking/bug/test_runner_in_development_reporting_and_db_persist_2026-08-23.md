@@ -140,3 +140,6 @@ D2 PARTIAL: `Results: 2 total, 1 passed, 1 failed, 1 skipped` - total is passed+
 (test_runner_output.spl:638-640); the in-dev file shows only as `skipped`. No `States:` line seen on
 this run. D4 (test_db.sdn never persisted) NOT re-verified. Remains OPEN: next step is to add
 in-development to `total` (or print it as its own addend) in test_runner_output.spl and verify D4.
+
+## Round 8 part 2 note 2026-11-06
+Seed re-probe (3-file fixture, Windows): D4 FIXED - test_db.sdn is rewritten and test_result.md shows `In Development | 1`. D2: `Results:` keeps example semantics; added a separate `In development: N file(s) expected to fail ...` line (`in_development_files_line`, test_runner_output.spl). Spec: test/01_unit/app/test_runner_new/in_development_files_line_spec.spl 2/2.

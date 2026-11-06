@@ -1,0 +1,49 @@
+# Dashboard table model contract (bug: dashboard_main_lost_table_model_2026-08-04)
+#
+# dashboard_collectors.spl and dashboard_export_runtime.spl import the table
+# model from app.dashboard.main; this pins that contract.
+
+use app.dashboard.main.{Table, load_table, load_table_named, header_index, get_field, count_eq, sum_int, count_nonempty, write_table, itos, TABLE_NAMES, TABLE_HEADERS, TABLE_COUNT, DASHBOARD_TABLE_DIR, DASHBOARD_HISTORY_DIR, DASHBOARD_CACHE_PATH, today_date, current_month, ensure_dirs}
+
+describe "dashboard table model":
+    it "keeps names and headers in lockstep":
+        expect(TABLE_NAMES.len()).to_equal(TABLE_COUNT)
+        expect(TABLE_HEADERS.len()).to_equal(TABLE_COUNT)
+        expect(DASHBOARD_TABLE_DIR).to_start_with("doc/10_metrics/dashboard")
+        expect(DASHBOARD_HISTORY_DIR).to_start_with("doc/10_metrics/dashboard")
+        expect(DASHBOARD_CACHE_PATH).to_end_with(".cache.sdn")
+
+    it "round-trips a table through write_table and load_table_named":
+        val path = "/tmp/fxd/roundtrip_table.sdn"
+        val ok = write_table(path, "todos", ["id", "status", "n"], [["a", "open", "3"], ["b", "done", "4"]])
+        expect(ok).to_equal(true)
+        val t = load_table_named(path, "todos")
+        expect(t.name).to_equal("todos")
+        expect(t.headers.len()).to_equal(3)
+        expect(t.rows.len()).to_equal(2)
+        val loaded = load_table(path)
+        expect(loaded.name).to_equal("todos")
+        expect(loaded.rows.len()).to_equal(2)
+
+    it "returns an empty table for a missing file or table name":
+        val missing = load_table_named("/tmp/fxd/does_not_exist.sdn", "x")
+        expect(missing.name).to_equal("x")
+        expect(missing.rows.len()).to_equal(0)
+        val path = "/tmp/fxd/roundtrip_other.sdn"
+        write_table(path, "todos", ["id"], [["a"]])
+        val other = load_table_named(path, "nope")
+        expect(other.headers.len()).to_equal(0)
+
+    it "computes column aggregates":
+        val idx = header_index(["id", "status", "n"])
+        val rows = [["a", "open", "3"], ["b", "done", "4"], ["c", "open", ""]]
+        expect(get_field(rows[0], idx, "status")).to_equal("open")
+        expect(get_field(rows[0], idx, "missing")).to_equal("")
+        expect(count_eq(rows, idx, "status", "open")).to_equal(2)
+        expect(sum_int(rows, idx, "n")).to_equal(7)
+        expect(count_nonempty(rows, idx, "n")).to_equal(2)
+        expect(itos(42)).to_equal("42")
+
+    it "reports dates":
+        expect(today_date().len()).to_equal(10)
+        expect(current_month().len()).to_equal(7)

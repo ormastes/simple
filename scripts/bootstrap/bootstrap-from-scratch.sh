@@ -2423,6 +2423,14 @@ bootstrap_stage_sanity() (
   # the no-scope HIR trace env must survive the scrub or the instrumented
   # candidate prints nothing during the failing probe.
   sanity_nscope_hir_trace=${SIMPLE_NSCOPE_HIR_TRACE:-}
+  # Documented per-invocation route opt-out (SIMPLE_FILE_WORKERS=0 two-pass
+  # shards, 1 per-file pool; 6e0e2049000). The scrub dropped it, so the smoke
+  # build always took the per-file pool, which on a 24 GiB host refuses even
+  # p2_add (needs >= 30 GB free for 2 x 9 GB workers). Only 0|1 survive.
+  case "${SIMPLE_FILE_WORKERS:-}" in
+    0|1) sanity_file_workers=${SIMPLE_FILE_WORKERS} ;;
+    *) sanity_file_workers= ;;
+  esac
   sanity_probe_timeout=${COMPILER_PROBE_TIMEOUT_SECONDS}
   sanity_kill_grace=${COMPILER_CHECK_KILL_GRACE_SECONDS}
   sanity_max_log_bytes=${CANDIDATE_FRONTEND_MAX_LOG_BYTES}
@@ -2485,6 +2493,10 @@ bootstrap_stage_sanity() (
   if [ -n "${sanity_nscope_hir_trace}" ]; then
     SIMPLE_NSCOPE_HIR_TRACE=${sanity_nscope_hir_trace}
     export SIMPLE_NSCOPE_HIR_TRACE
+  fi
+  if [ -n "${sanity_file_workers}" ]; then
+    SIMPLE_FILE_WORKERS=${sanity_file_workers}
+    export SIMPLE_FILE_WORKERS
   fi
   CANDIDATE_FRONTEND_MAX_LOG_BYTES=${sanity_max_log_bytes}
   CANDIDATE_FRONTEND_ROOT=${sanity_frontend_root}

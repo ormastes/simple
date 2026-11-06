@@ -129,3 +129,6 @@ outside a hang fix. Nothing was changed; this is filed with the reproducer and e
   involvement cannot be ablated the same way — but the fd evidence already rules the daemon out.
 - rc 143/144 is unverified, never a failure, on this host (earlyoom). Neither run here hit that:
   run A's 124 is `timeout`'s SIGTERM at exactly its 1800s deadline, run B exited by itself.
+
+## Round 8 part 2 note 2026-11-06 (not reproduced on Windows seed)
+`generate_test_result_md` on the current 4904-line test_db.sdn: load 90 ms, generate 448 ms. A 3-file directory run with the DB phase enabled exits normally. The Linux-seed 780 s report generation / non-exit is not reproducible here; stays OPEN for a Linux re-probe (`timeout 1800 bin/simple test test/fixtures/_accept_run --unstable`).

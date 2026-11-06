@@ -1856,7 +1856,7 @@ impl Lowerer {
                             kind: PointerKind::Shared,
                             inner,
                             ..
-                        }) if matches!(*inner, TypeId::BOOL | TypeId::U64) => *inner,
+                        }) if matches!(*inner, TypeId::BOOL | TypeId::U64 | TypeId::F32 | TypeId::F64) => *inner,
                         _ => self
                             .optional_reference_payload_inner(subject_ty)
                             .or_else(|| self.optional_enum_payload_inner(subject_ty))
@@ -1905,9 +1905,10 @@ impl Lowerer {
     /// (`HirType::Enum { name: "Option", variants: [Some(T), None] }`), the
     /// representation an explicit `Option<T>` annotation resolves to. Applies
     /// the same payload policy as the `T?` Pointer form — BoxInt-family
-    /// scalars, `bool`, and reference payloads (array/text/struct/enum) are
-    /// bound as the raw inner; anything else (an unresolved `Option<ANY>`,
-    /// floats, `u64`) keeps the subject type so the value is not retyped on a
+    /// scalars, `bool`, `f32`, `f64`, `u64` and reference payloads
+    /// (array/text/struct/enum) are bound as the raw inner (MIR decodes the
+    /// tagged word by name + type); anything else (an unresolved
+    /// `Option<ANY>`) keeps the subject type so the value is not retyped on a
     /// guess. `None` for any subject that is not this Option form.
     fn optional_enum_payload_inner(&self, subject_ty: TypeId) -> Option<TypeId> {
         let Some(HirType::Enum { name, variants, .. }) = self.module.types.get(subject_ty) else {
@@ -1933,6 +1934,9 @@ impl Lowerer {
                 | TypeId::U16
                 | TypeId::U32
                 | TypeId::BOOL
+                | TypeId::F32
+                | TypeId::F64
+                | TypeId::U64
         ) {
             return Some(inner);
         }
