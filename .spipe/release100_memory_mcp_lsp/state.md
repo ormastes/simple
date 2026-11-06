@@ -41,4 +41,4 @@ dev-done
 - debug_truth owns shared-debug routing/fabrication removal after file-scope review.
 - traceability owns the release100_memory_mcp_lsp requirement/design/plan documents.
 - Root owns integration, final review and PR landing. Existing root checkout dirty work is outside scope.
-- Release verification is pending an admitted full pure-Simple CLI. Stage2 admission permits only scoped compiler probes. Its live full-CLI campaign is not Stage4 qualification.
+- Release verification is pending an admitted full pure-Simple CLI. Stage2 admission permits only scoped compiler probes. Its full-CLI child failed on old source; the outer verifier continued standalone runner work. Neither establishes Stage4 qualification.
