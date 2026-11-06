@@ -1,7 +1,9 @@
 # Purpose and audience: executable evidence for self-hosted compiler engineers
 # that HIR lowering forwards a field write `recv.x = v` with no real field `x`
 # to recv.set_x(v), that a real field write stays a field assignment, and that
-# a compound write through a forwarded name is a hard error (seed parity).
+# a compound write `recv.x op= v` lowers to one getter read and one setter
+# write after the right-hand side (owner decision 2026-11-06), and is a hard
+# error when no getter exists.
 # @req REQ-SELFHOST-ACCESSOR-003
 # requirements: doc/02_requirements/compiler/mdsoc_matrix_visibility_requirements.md
 
@@ -21,6 +23,10 @@ val DECLS = "class Temp:\n" +
     "        self.level = v + 1\n" +
     "    me set__hidden(v: i64):\n" +
     "        self.level = v\n" +
+    "    fn get_kelvin() -> i64:\n" +
+    "        self.level\n" +
+    "    me set_kelvin(v: i64):\n" +
+    "        self.level = v\n" +
     "class Holder:\n" +
     "    inner: Temp\n"
 
@@ -31,6 +37,12 @@ fn stmt_tag(s: HirStmt) -> text:
                 case HirExprKind.MethodCall(_, method, args, _): "method:{method}/{args.len()}"
                 case _: "expr"
         case HirStmtKind.Assign(_, _, _): "assign"
+        case HirStmtKind.Let(_, _, _): "let"
+        case HirStmtKind.Block(b):
+            var inner: [text] = []
+            for st in b.stmts:
+                inner.push(stmt_tag(st))
+            "block[" + inner.join(",") + "]"
         case _: "other"
 
 fn probe_first(probe_body: text) -> [text]:
@@ -68,9 +80,21 @@ describe "HIR accessor forwarding for field writes":
         val r = probe_first("t._hidden = 5")
         expect(r[0]).to_equal("assign")
 
-    it "rejects compound assignment through a forwarded name":
-        step("given set_celsius when writing t.celsius += 1 then lowering reports an error")
+    it "rejects compound assignment through a forwarded name with no getter":
+        step("given set_celsius and no getter when writing t.celsius += 1 then lowering reports an error")
         val r = probe_first("t.celsius += 1")
+        expect(r[1] == "0").to_equal(false)
+
+    it "lowers compound assignment through a getter/setter pair to rhs, get, set":
+        step("given get_kelvin and set_kelvin when writing t.kelvin += 1 then the rhs is bound first and set_kelvin is called once")
+        # Bug: doc/08_tracking/bug/compound_assign_through_property_setter_fails_seed_2026-11-06.md
+        val r = probe_first("t.kelvin += 1")
+        expect(r[0]).to_equal("block[let,method:set_kelvin/1]")
+        expect(r[1]).to_equal("0")
+
+    it "rejects compound assignment through an accessor on a dotted receiver":
+        step("given Holder.inner: Temp when writing h.inner.kelvin += 1 then lowering reports an error instead of naming the receiver twice")
+        val r = probe_first("h.inner.kelvin += 1")
         expect(r[1] == "0").to_equal(false)
 
     it "forwards a nested receiver h.inner.celsius = v to set_celsius(v)":

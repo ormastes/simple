@@ -135,6 +135,80 @@ pub(crate) fn resolve_place(
     }
 }
 
+/// A call-result root bound by [`bind_call_root`]: the hidden binding name and
+/// whatever that name held before, restored by [`unbind_call_root`].
+pub(crate) struct CallRootBinding {
+    name: String,
+    saved: Option<Value>,
+}
+
+/// For a projection place rooted at a call result (`get()[i()]`,
+/// `make().items[k]`), evaluate the call once, bind the value to a hidden
+/// local and return the place rewritten onto that local. `resolve_place` then
+/// evaluates the index subexpressions after the root, which is the owner
+/// contract of 2026-11-06: RHS first, then the root, then indices outer to
+/// inner, each once. Returns `None` when the root is not a call; such places
+/// keep their existing handling. The write lands in the bound value, so a
+/// value-typed result (an array) is a temporary and the write is not visible
+/// afterwards, while a shared class instance observes it.
+/// Bug: doc/08_tracking/bug/seed_interp_call_root_place_order_2026-11-06.md
+pub(crate) fn bind_call_root(
+    expr: &Expr,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<(Expr, CallRootBinding)>, CompileError> {
+    fn root_of(expr: &Expr) -> &Expr {
+        match expr {
+            Expr::FieldAccess { receiver, .. } | Expr::Index { receiver, .. } => root_of(receiver),
+            Expr::ForceUnwrap(inner) => root_of(inner),
+            other => other,
+        }
+    }
+    fn replace_root(expr: &Expr, name: &str) -> Expr {
+        match expr {
+            Expr::FieldAccess { receiver, field } => Expr::FieldAccess {
+                receiver: Box::new(replace_root(receiver, name)),
+                field: field.clone(),
+            },
+            Expr::Index { receiver, index } => Expr::Index {
+                receiver: Box::new(replace_root(receiver, name)),
+                index: index.clone(),
+            },
+            Expr::ForceUnwrap(inner) => Expr::ForceUnwrap(Box::new(replace_root(inner, name))),
+            _ => Expr::Identifier(name.to_string()),
+        }
+    }
+    if !matches!(expr, Expr::FieldAccess { .. } | Expr::Index { .. }) {
+        return Ok(None);
+    }
+    let root = root_of(expr);
+    if !matches!(root, Expr::Call { .. } | Expr::MethodCall { .. }) {
+        return Ok(None);
+    }
+    let root_value = evaluate_expr(root, env, functions, classes, enums, impl_methods)?;
+    // NUL-prefixed: no Simple program can spell (and so clobber) this binding.
+    let name = "\u{0}place_call_root".to_string();
+    let saved = env.get(&name).cloned();
+    env.insert(name.clone(), root_value);
+    let rewritten = replace_root(expr, &name);
+    Ok(Some((rewritten, CallRootBinding { name, saved })))
+}
+
+/// Restore the hidden binding that [`bind_call_root`] replaced.
+pub(crate) fn unbind_call_root(env: &mut Env, binding: CallRootBinding) {
+    match binding.saved {
+        Some(value) => {
+            env.insert(binding.name, value);
+        }
+        None => {
+            env.remove(&binding.name);
+        }
+    }
+}
+
 /// Normalize a possibly-negative index against a container length.
 fn normalize_index(len: usize, index: &Value) -> Option<usize> {
     let raw = match index {

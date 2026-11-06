@@ -5,6 +5,7 @@
 # fall-through is a W-HIR-FIELD-001 warning (REQ-SELFHOST-ACCESSOR-002).
 
 use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_lowering.types.{HirLowering}
@@ -151,11 +152,15 @@ impl HirLowering:
                     case _: ()
         false
 
-    me lower_accessor_write(base: HirExpr, name: text, rhs: HirExpr, compound: bool, span: Span) -> HirStmtKind?:
+    me lower_accessor_write(base: HirExpr, name: text, rhs: HirExpr, op: HirAssignOp?, span: Span) -> HirStmtKind?:
         # `recv.x = v` with no real field `x` lowers to `recv.set_x(v)` when an
         # instance `set_x` exists (seed parity, REQ-SELFHOST-ACCESSOR-003).
-        # A compound write (`recv.x += v`) through a forwarded name is a hard
-        # error, as in the seed. Otherwise nil: the caller keeps the field write.
+        # `recv.x op= v` lowers to one getter read and one setter write, after
+        # the right-hand side: `{ val t = v; recv.set_x(recv.get_x() op t) }`.
+        # `recv` must be a bare variable, so naming it twice evaluates nothing
+        # twice. Bug:
+        # doc/08_tracking/bug/compound_assign_through_property_setter_fails_seed_2026-11-06.md
+        # Otherwise nil: the caller keeps the field write.
         var owner_id = self.field_owner_for_hir_expr(base)
         if owner_id < 0:
             val base_sym = _hir_expr_symbol_or_invalid(base.kind)
@@ -168,12 +173,54 @@ impl HirLowering:
         val setter = "set_" + name
         if not self.accessor_is_instance_method(owner_id, setter):
             return nil
-        if compound:
-            self.error("compound assignment to forwarded accessor `{name}` is unsupported; write `{setter}(...)` explicitly", span)
+        val unit_type = HirType(kind: HirTypeKind.Unit, span: span)
+        if not op.?:
+            val arg = HirCallArg(has_name: false, name: "", value: rhs, span: span)
+            return HirStmtKind.Expr(HirExpr(
+                kind: HirExprKind.MethodCall(base, setter, [arg], MethodResolution.Unresolved),
+                has_type_: false,
+                type_: unit_type,
+                span: span))
+        # Only a bare variable receiver: a dotted receiver segment may itself
+        # be a forwarded getter, which naming the receiver twice would run twice.
+        val base_is_variable = match base.kind:
+            case HirExprKind.Var(_): true
+            case HirExprKind.NamedVar(_, _): true
+            case _: false
+        if not base_is_variable:
+            self.error("compound assignment to accessor `{name}` needs a variable receiver; bind the receiver to a local first", span)
             return nil
-        val arg = HirCallArg(has_name: false, name: "", value: rhs, span: span)
-        HirStmtKind.Expr(HirExpr(
-            kind: HirExprKind.MethodCall(base, setter, [arg], MethodResolution.Unresolved),
-            has_type_: false,
-            type_: HirType(kind: HirTypeKind.Unit, span: span),
+        val getter = self.lower_accessor_read(base, name, owner_id, span)
+        if not getter.?:
+            self.error("compound assignment to `{name}` needs a getter `get_{name}` or `is_{name}` next to `{setter}`", span)
+            return nil
+        val rhs_type = self.binding_payload_type(rhs)
+        val rhs_sym = self.symbols.define("__accessor_rhs", SymbolKind.Variable, rhs_type, span, Visibility.Private, false, nil)
+        val rhs_ref = HirExpr(kind: HirExprKind.Var(rhs_sym), has_type_: rhs.has_type_, type_: rhs.type_, span: span)
+        val combined = HirExpr(
+            kind: HirExprKind.Binary(accessor_compound_bin_op(op.unwrap()), getter.unwrap(), rhs_ref),
+            has_type_: false, type_: HirType(kind: HirTypeKind.Infer(0, 0), span: span), span: span)
+        val set_arg = HirCallArg(has_name: false, name: "", value: combined, span: span)
+        val set_call = HirExpr(
+            kind: HirExprKind.MethodCall(base, setter, [set_arg], MethodResolution.Unresolved),
+            has_type_: false, type_: unit_type, span: span)
+        val stmts = [
+            HirStmt(kind: HirStmtKind.Let(rhs_sym, rhs_type, rhs), span: span),
+            HirStmt(kind: HirStmtKind.Expr(set_call), span: span)
+        ]
+        HirStmtKind.Block(HirBlock(stmts: stmts, has: false,
+            value: HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: unit_type, span: span),
             span: span))
+
+fn accessor_compound_bin_op(op: HirAssignOp) -> HirBinOp:
+    match op:
+        case HirAssignOp.Add: HirBinOp.Add
+        case HirAssignOp.Sub: HirBinOp.Sub
+        case HirAssignOp.Mul: HirBinOp.Mul
+        case HirAssignOp.Div: HirBinOp.Div
+        case HirAssignOp.Mod: HirBinOp.Mod
+        case HirAssignOp.BitAnd: HirBinOp.BitAnd
+        case HirAssignOp.BitOr: HirBinOp.BitOr
+        case HirAssignOp.BitXor: HirBinOp.BitXor
+        case HirAssignOp.Shl: HirBinOp.Shl
+        case HirAssignOp.Shr: HirBinOp.Shr
