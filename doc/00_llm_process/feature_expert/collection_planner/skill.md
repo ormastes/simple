@@ -54,3 +54,17 @@ describe meaning only and authorize no rewrite.
   externs. Compare against a baseline; do not read those failures as a
   regression. Census:
   `doc/03_plan/compiler/data/adaptive_collections_c0_census_2026-11-06.md`.
+
+Added 2026-11-06 (owner decision, C2 site part): collection site IDs use a
+versioned `#n1.<fnv>` hash of the normalized declaration, with comments and
+insignificant whitespace removed. The pure-Simple
+`parser_collection_normalize_declaration` and the seed's
+`normalize_collection_declaration` (`parser_impl/attributes.rs`) are twins.
+Both parser tests pin the same values (`hot#n1.3808762660471155820`,
+`values#n1.5053061337019949519`), so change both together or neither.
+`@collection_algorithm("algo", "a.label")` replaces the hash with
+`ast://<module>/label/<label>`; labels are unique per module, and a
+duplicate is a parse error. Profiles recorded with the old byte-hash IDs no
+longer bind; the owner accepted that. Spec:
+`test/01_unit/compiler/frontend/collection_site_attribute_spec.spl`.
+Wiring the label to `ResolvedCollectionPolicyV1` waits for W1 (#7220).

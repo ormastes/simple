@@ -85,10 +85,11 @@ use compiler.frontend.core.parser_decls_use.*
 use compiler.core.parser_cli.{parse_cli_decl}
 use compiler.frontend.core._Ast.decl_nodes.{decl_set_param_muts}
 use compiler.frontend.layer_eq_registry.{layer_field_pending_set}
-use std.io_runtime.{hash_text}
 use compiler.frontend.core.collection_feedback.{
     parser_collection_attributed_expr, parser_collection_site_owner_push,
     parser_collection_site_owner_restore, parser_collection_field_site_id,
+    parser_collection_declaration_hash, parser_collection_label_valid,
+    parser_collection_label_site_id,
     parser_collection_module_key
 }
 
@@ -1048,6 +1049,7 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
     var layer_field_saw_any = false
     var layer_field_next = ""
     var collection_algorithm_next = ""
+    var collection_label_next = ""
 
     while true:
         parser_skip_newlines()
@@ -1094,9 +1096,23 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
                     continue
                 val algorithm = par_text_get()
                 parser_advance()
-                if not parser_expect(TOK_RPAREN):
+                var label = ""
+                if par_kind_get() == TOK_COMMA:
+                    parser_advance()
+                    if par_kind_get() != TOK_RPAREN:
+                        if par_kind_get() != TOK_STRING_LIT or not parser_collection_label_valid(par_text_get()):
+                            parser_error("@collection_algorithm site label must be a dotted name of letters, digits, '_', '-' or '.'")
+                            collection_attribute_recover_member()
+                            continue
+                        label = par_text_get()
+                        parser_advance()
+                        if par_kind_get() == TOK_COMMA:
+                            parser_advance()
+                if par_kind_get() != TOK_RPAREN:
+                    parser_error("@collection_algorithm takes an algorithm name and at most one site label")
                     collection_attribute_recover_member()
                     continue
+                parser_advance()
                 if algorithm != "auto" and algorithm != "linear" and algorithm != "hash" and algorithm != "ordered":
                     parser_error("unknown collection algorithm: " + algorithm)
                     collection_attribute_recover_member()
@@ -1104,6 +1120,7 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
                 if collection_algorithm_next != "":
                     parser_error("duplicate @collection_algorithm on one field")
                 collection_algorithm_next = algorithm
+                collection_label_next = label
                 parser_skip_newlines_and_semicolons()
                 continue
             val lf_is_layer_field: bool = par_kind_get() == 6 and par_text_get() == "layer_field"
@@ -1296,17 +1313,25 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
                 # An attribute changes the physical algorithm, not the site
                 # whose workload was measured in an earlier profile.
                 val field_text = lex_source_slice(field_declaration_start, lex_token_start_get())
-                val field_hash = hash_text(field_text)
                 val module_key = parser_collection_module_key(module_get_path())
-                val site_id = parser_collection_field_site_id(module_key, fname, field_hash)
-                val attributed = parser_collection_attributed_expr(
-                    fdefault, collection_algorithm_next, site_id, declared_collection_family
-                )
-                if attributed < 0:
-                    parser_error("@collection_algorithm requires an adaptive set or map initializer with a known family")
+                var site_id = ""
+                if collection_label_next != "":
+                    site_id = parser_collection_label_site_id(module_key, collection_label_next)
+                    if site_id == "":
+                        parser_error("duplicate collection site label in this module: " + collection_label_next)
                 else:
-                    fdefault = attributed
+                    site_id = parser_collection_field_site_id(module_key, fname,
+                        parser_collection_declaration_hash(field_text))
+                if site_id != "":
+                    val attributed = parser_collection_attributed_expr(
+                        fdefault, collection_algorithm_next, site_id, declared_collection_family
+                    )
+                    if attributed < 0:
+                        parser_error("@collection_algorithm requires an adaptive set or map initializer with a known family")
+                    else:
+                        fdefault = attributed
             collection_algorithm_next = ""
+            collection_label_next = ""
         field_defaults.push(fdefault)
         field_bits.push(fbits)
         parser_skip_newlines_and_semicolons()

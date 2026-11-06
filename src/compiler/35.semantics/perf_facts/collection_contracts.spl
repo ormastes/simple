@@ -8,7 +8,7 @@
 use std.io_runtime.{hash_text}
 use compiler.core.lexer_struct.{make_core_lexer, core_lexer_next_token, core_lexer_token_text}
 use compiler.core.tokens.{TOK_EOF, TOK_NEWLINE, tok_kind_name}
-use compiler.frontend.core.collection_feedback.{parser_collection_site_stem}
+use compiler.frontend.core.collection_feedback.{parser_collection_site_stem, parser_collection_declaration_hash, parser_collection_label_valid}
 
 val COLLECTION_TYPE_ADAPTIVE_MAP: text = "std.nogc_sync_mut.src.collections.adaptive_map.AdaptiveMap"
 val COLLECTION_TYPE_ADAPTIVE_SET: text = "std.nogc_sync_mut.src.collections.adaptive_set.AdaptiveSet"
@@ -229,6 +229,20 @@ fn collection_origin_v1(legacy_site_id: text, module_key: text, owner_path: text
     components and this declaration's bytes. A site from another module,
     owner or binding, or one whose hash is not this declaration's, is rejected.
     """
+    if binding_name == "" or type_fingerprint == "":
+        return Err("collection origin needs a binding name and a type fingerprint")
+    val label_prefix = "ast://{module_key}/label/"
+    if legacy_site_id.starts_with(label_prefix):
+        # A user label is the identity: it survives any edit of the declaration.
+        val label = legacy_site_id.substring(label_prefix.len())
+        if not parser_collection_label_valid(label):
+            return Err("collection site {legacy_site_id} has an invalid label")
+        return Ok(CollectionOriginV1(
+            legacy_site_id: legacy_site_id, module_key: module_key, owner_path: owner_path,
+            binding_name: binding_name, creation_kind: creation_kind,
+            token_fingerprint: collection_declaration_token_fingerprint(declaration),
+            type_fingerprint: type_fingerprint,
+            origin_id: "corigin-v1:label:{hash_text(module_key + "\n" + label)}"))
     val field = creation_kind == CollectionCreationKind.Field
     val stem = parser_collection_site_stem(module_key, owner_path, binding_name, field) + "#"
     if not legacy_site_id.starts_with(stem):
@@ -236,10 +250,8 @@ fn collection_origin_v1(legacy_site_id: text, module_key: text, owner_path: text
     val suffix = legacy_site_id.substring(stem.len())
     # Drop the parse-order ordinal (`:1`, `:2`, ...) before comparing.
     val hash_part = suffix.split(":")[0]
-    if hash_part != "{hash_text(declaration)}":
+    if hash_part != parser_collection_declaration_hash(declaration):
         return Err("collection site {legacy_site_id} was not hashed from this declaration")
-    if binding_name == "" or type_fingerprint == "":
-        return Err("collection origin needs a binding name and a type fingerprint")
     val token_fingerprint = collection_declaration_token_fingerprint(declaration)
     val key = [module_key, owner_path, binding_name,
         _collection_creation_kind_name(creation_kind), token_fingerprint, type_fingerprint].join("\n")

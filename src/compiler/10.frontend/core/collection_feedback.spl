@@ -2,7 +2,7 @@
 # The CLI installs a target-specific catalog before parsing, then clears it.
 
 use std.nogc_sync_mut.src.collections.hashmap.{HashMap}
-use std.io_runtime.{cwd_process}
+use std.io_runtime.{cwd_process, hash_text}
 use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveSetWorkloadProfile}
 use compiler.core.ast.{expr_method_call, expr_ident, expr_string_lit, expr_int_lit}
 use compiler.core.ast.{expr_get_tag, expr_get_left, expr_get_str, expr_get_args, EXPR_METHOD_CALL, EXPR_IDENT, EXPR_STRING_LIT}
@@ -15,11 +15,13 @@ struct ParserCollectionFeedbackCatalog:
 var _parser_collection_feedback: ParserCollectionFeedbackCatalog? = nil
 var _parser_collection_site_ordinals: HashMap? = nil
 var _parser_collection_site_owner: text = ""
+var _parser_collection_site_labels: HashMap? = None
 
 fn parser_collection_site_reset():
     # Parser state is process-global, so a second parse must start at ordinal 0.
     _parser_collection_site_ordinals = nil
     _parser_collection_site_owner = ""
+    _parser_collection_site_labels = None
 
 fn parser_collection_site_owner_push(name: text) -> text:
     """Enter a lexical declaration owner and return the prior owner."""
@@ -50,9 +52,97 @@ fn parser_collection_site_stem(module_key: text, owner: text, name: text, field:
         return "ast://{scope}/{name}"
     "ast://{scope}/local/{name}"
 
-fn parser_collection_local_site_id(module_key: text, name: text, source_hash: i64) -> text:
+fn _collection_is_word_char(code: i64) -> bool:
+    (code >= 48 and code <= 57) or (code >= 65 and code <= 90) or
+        (code >= 97 and code <= 122) or code == 95 or code >= 128
+
+fn parser_collection_normalize_declaration(source: text) -> text:
+    """Drop comments and insignificant whitespace; keep string contents.
+
+    One space survives only between two word characters. The Rust seed
+    (`normalize_collection_declaration`) implements the same rules.
+    """
+    var out: [text] = []
+    var quote: i64 = 0
+    var raw = false
+    var escaped = false
+    var prev_code: i64 = 0
+    var prev_prev_word = false
+    var in_comment = false
+    var pending_space = false
+    var last_word = false
+    for ch in source.chars():
+        val code = ch.ord()
+        if in_comment:
+            if code == 10:
+                in_comment = false
+                pending_space = true
+            continue
+        if quote != 0:
+            out.push(ch.to_text())
+            if escaped:
+                escaped = false
+            elif code == 92 and not raw:
+                escaped = true
+            elif code == quote:
+                quote = 0
+                prev_code = code
+            continue
+        if code == 35:
+            in_comment = true
+            prev_code = 32
+            continue
+        if code == 32 or code == 9 or code == 10 or code == 13:
+            pending_space = true
+            prev_code = 32
+            continue
+        val word = _collection_is_word_char(code)
+        if pending_space and word and last_word:
+            out.push(" ")
+        # `r"..."` is raw only when the `r` stands alone, right before the quote.
+        val raw_prefix = not pending_space and prev_code == 114 and not prev_prev_word
+        pending_space = false
+        out.push(ch.to_text())
+        if code == 34 or code == 39:
+            quote = code
+            raw = code == 34 and raw_prefix
+            last_word = false
+        else:
+            last_word = word
+        prev_prev_word = prev_code != 0 and _collection_is_word_char(prev_code)
+        prev_code = code
+    out.join("")
+
+fn parser_collection_declaration_hash(declaration: text) -> text:
+    """Versioned site hash: `n1.` plus FNV-1a of the normalized declaration."""
+    "n1.{hash_text(parser_collection_normalize_declaration(declaration))}"
+
+fn parser_collection_label_valid(label: text) -> bool:
+    if label == "" or label.len() > 128:
+        return false
+    for ch in label.chars():
+        val code = ch.ord()
+        if not (_collection_is_word_char(code) and code < 128) and code != 46 and code != 45:
+            return false
+    true
+
+fn parser_collection_label_site_id(module_key: text, label: text) -> text:
+    """Site ID for a user label, or "" when the label is invalid or already
+    used in this module. Labels share one namespace per module."""
+    if not parser_collection_label_valid(label):
+        return ""
+    var labels: HashMap = if val existing = _parser_collection_site_labels:
+        existing
+    else:
+        HashMap.new()
+    if not labels.insert_if_absent(label, "1"):
+        return ""
+    _parser_collection_site_labels = Some(labels)
+    "ast://{module_key}/label/{label}"
+
+fn parser_collection_local_site_id(module_key: text, name: text, site_hash: text) -> text:
     """Name identical local declarations without depending on byte positions."""
-    val stem = parser_collection_site_stem(module_key, _parser_collection_site_owner, name, false) + "#{source_hash}"
+    val stem = parser_collection_site_stem(module_key, _parser_collection_site_owner, name, false) + "#{site_hash}"
     var ordinals: HashMap = if val existing = _parser_collection_site_ordinals:
         existing
     else:
@@ -64,9 +154,9 @@ fn parser_collection_local_site_id(module_key: text, name: text, source_hash: i6
         return stem
     "{stem}:{ordinal}"
 
-fn parser_collection_field_site_id(module_key: text, name: text, source_hash: i64) -> text:
+fn parser_collection_field_site_id(module_key: text, name: text, site_hash: text) -> text:
     """Use the complete lexical class/struct owner, matching bootstrap parsing."""
-    parser_collection_site_stem(module_key, _parser_collection_site_owner, name, true) + "#{source_hash}"
+    parser_collection_site_stem(module_key, _parser_collection_site_owner, name, true) + "#{site_hash}"
 
 fn parser_collection_feedback_clear():
     _parser_collection_feedback = nil
@@ -195,6 +285,8 @@ export parser_collection_feedback_install, parser_collection_feedback_for_site
 export parser_collection_attributed_expr
 export parser_collection_site_reset, parser_collection_local_site_id
 export parser_collection_field_site_id, parser_collection_site_stem
+export parser_collection_normalize_declaration, parser_collection_declaration_hash
+export parser_collection_label_valid, parser_collection_label_site_id
 export parser_collection_site_owner_push, parser_collection_site_owner_restore
 export parser_collection_module_key
 export collection_project_relative_path
@@ -207,21 +299,25 @@ pub struct CollectionFeedbackState:
     _parser_collection_feedback: ParserCollectionFeedbackCatalog?
     _parser_collection_site_ordinals: HashMap?
     _parser_collection_site_owner: text
+    _parser_collection_site_labels: HashMap?
 
 pub fn collection_feedback_state_take() -> CollectionFeedbackState:
     val s = CollectionFeedbackState(
         _parser_collection_feedback: _parser_collection_feedback,
         _parser_collection_site_ordinals: _parser_collection_site_ordinals,
-        _parser_collection_site_owner: _parser_collection_site_owner
+        _parser_collection_site_owner: _parser_collection_site_owner,
+        _parser_collection_site_labels: _parser_collection_site_labels
     )
     _parser_collection_feedback = nil
     _parser_collection_site_ordinals = nil
     _parser_collection_site_owner = ""
+    _parser_collection_site_labels = None
     s
 
 pub fn collection_feedback_state_install(s: CollectionFeedbackState):
     _parser_collection_feedback = s._parser_collection_feedback
     _parser_collection_site_ordinals = s._parser_collection_site_ordinals
     _parser_collection_site_owner = s._parser_collection_site_owner
+    _parser_collection_site_labels = s._parser_collection_site_labels
 
 export CollectionFeedbackState, collection_feedback_state_take, collection_feedback_state_install

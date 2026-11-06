@@ -57,8 +57,8 @@ use compiler.frontend.desugar.placeholder_lambda.{set_placeholder_transform_supp
 use compiler.frontend.core.lexer.{lex_token_start_get, lex_token_end_get, lex_source_char_at}
 use compiler.frontend.core.lexer.{lex_source_len}
 use compiler.frontend.core.lexer.{lex_source_slice}
-use std.io_runtime.{hash_text}
 use compiler.frontend.core.collection_feedback.{parser_collection_attributed_expr, parser_collection_local_site_id, parser_collection_module_key}
+use compiler.frontend.core.collection_feedback.{parser_collection_declaration_hash, parser_collection_label_valid, parser_collection_label_site_id}
 use compiler.frontend.core.collection_feedback.{parser_collection_site_owner_push, parser_collection_site_owner_restore}
 use compiler.frontend.core._ParserStmt.match_type_pattern.{parse_match_type_pattern}
 use compiler.frontend.core.lexer.{lex_pop_indent, lex_enable_forced_indentation, lex_disable_forced_indentation}
@@ -773,8 +773,25 @@ fn try_parse_collection_algorithm_stmt() -> i64:
         return collection_attribute_error_stmt()
     val algorithm = par_text_get()
     parser_advance()
-    if not parser_expect(TOK_RPAREN):
+    var label = ""
+    # Optional `, "label"`; a trailing comma is accepted, as in the seed parser.
+    if par_kind_get() == TOK_COMMA:
+        parser_advance()
+        if par_kind_get() != TOK_RPAREN:
+            if par_kind_get() != TOK_STRING_LIT:
+                parser_error("@collection_algorithm site label must be a string")
+                return collection_attribute_error_stmt()
+            label = par_text_get()
+            parser_advance()
+            if not parser_collection_label_valid(label):
+                parser_error("@collection_algorithm site label must be a dotted name of letters, digits, '_', '-' or '.': " + label)
+                return collection_attribute_error_stmt()
+            if par_kind_get() == TOK_COMMA:
+                parser_advance()
+    if par_kind_get() != TOK_RPAREN:
+        parser_error("@collection_algorithm takes an algorithm name and at most one site label")
         return collection_attribute_error_stmt()
+    parser_advance()
     if algorithm != "auto" and algorithm != "linear" and algorithm != "hash" and algorithm != "ordered":
         parser_error("unknown collection algorithm: " + algorithm)
         return collection_attribute_error_stmt()
@@ -810,9 +827,16 @@ fn try_parse_collection_algorithm_stmt() -> i64:
     # physical algorithm must retain this site's previously measured workload.
     # A parse-local ordinal still distinguishes identical declarations.
     val declaration_text = lex_source_slice(declaration_start, lex_token_start_get())
-    val source_hash = hash_text(declaration_text)
     val module_key = parser_collection_module_key(module_get_path())
-    val site_id = parser_collection_local_site_id(module_key, stmt_get_name(decl), source_hash)
+    var site_id = ""
+    if label != "":
+        site_id = parser_collection_label_site_id(module_key, label)
+        if site_id == "":
+            parser_error("duplicate collection site label in this module: " + label)
+            return decl
+    else:
+        site_id = parser_collection_local_site_id(module_key, stmt_get_name(decl),
+            parser_collection_declaration_hash(declaration_text))
     # The typed static method checks the container family; an explicit site or
     # target from the initializer retains precedence over this generated site.
     val call = parser_collection_attributed_expr(initializer, algorithm, site_id, declared_family)
