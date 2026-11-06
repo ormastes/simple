@@ -15,7 +15,7 @@
 #      every sled BL lands on the trampoline (no PLT veneer). The OFF module has
 #      no xray section or symbol.
 #   3. Trampoline twin: the words of __simple_xray_trampoline_v1 in the built
-#      runtime object equal xray_native_trampoline_words_aarch64_v1 (Simple),
+#      --xray module equal xray_native_trampoline_words_aarch64_v1 (Simple),
 #      and the handler makes no call and touches no FP/SIMD register.
 #   4. Runs test/fixtures/xray/xray_native_inprocess_host.spl under the Simple
 #      binary: dlopen, map location + PREL64 relocation, leaf admission,
@@ -163,9 +163,8 @@ checks=$((checks + 1))
 checks=$((checks + 2))
 
 # ---- 3. trampoline twin + handler leaf rules
-"$CC" -O2 -fPIC -mgeneral-regs-only -mno-outline-atomics -c src/runtime/xray/xray_native_runtime_aarch64.c \
-    -o "$WORK/rt.o" > "$WORK/rt.log" 2>&1 || { echo "ERROR — nothing was checked (runtime TU does not compile)"; exit 2; }
-"$OBJDUMP" -d --disassemble-symbols=__simple_xray_trampoline_v1 "$WORK/rt.o" \
+# Read from the module the driver actually linked, not a fresh build.
+"$OBJDUMP" -d --disassemble-symbols=__simple_xray_trampoline_v1 "$WORK/libon.so" \
     | sed -n 's/^ *[0-9a-f]*:\s*\([0-9a-f]\{8\}\)\s.*/\1/p' > "$WORK/tramp.words"
 bl_line=$(sed -n '36p' "$WORK/tramp.words")
 bl_disp=$(( 0x$bl_line & 0x3FFFFFF ))
@@ -175,7 +174,7 @@ XRAY_TWIN_BL=$bl_disp timeout "$STEP_TIMEOUT" "$SIMPLE_BIN" run test/fixtures/xr
 grep -q '^TWIN-OK 69$' "$WORK/twin.out" || { echo "ERROR — nothing was checked (Simple twin did not run)"; exit 2; }
 grep -vE '^TWIN' "$WORK/twin.out" > "$WORK/twin.words"
 cmp -s "$WORK/tramp.words" "$WORK/twin.words" || { echo "FAIL — trampoline words differ from the Simple twin"; exit 1; }
-"$OBJDUMP" -d --no-show-raw-insn --disassemble-symbols=simple_xray_native_handler_v1 "$WORK/rt.o" > "$WORK/handler.dis"
+"$OBJDUMP" -d --no-show-raw-insn --disassemble-symbols=simple_xray_native_handler_v1 "$WORK/libon.so" > "$WORK/handler.dis"
 grep -qE '<simple_xray_native_handler_v1>:' "$WORK/handler.dis" || { echo "ERROR — nothing was checked (handler not found)"; exit 2; }
 if grep -qE '\s(bl|blr|br)\s|\s[qdsvh][0-9]+\b' "$WORK/handler.dis"; then
     echo "FAIL — handler calls out or touches FP/SIMD registers"; exit 1

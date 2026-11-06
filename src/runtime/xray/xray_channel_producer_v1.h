@@ -99,8 +99,10 @@ SIMPLE_XRAY_NEVER_INSTRUMENT static inline void simple_xray_channel_produce_v1(
         __atomic_add_fetch(&base[CH_GATE], -1, __ATOMIC_SEQ_CST);
         return;
     }
-    /* Taken only after admission, so drops leave no gaps. Process-wide and
-     * monotonic across generations; per-context order is the V1 guarantee. */
+    /* Taken only after admission, so drops leave no gaps. Monotonic per
+     * sequence cell across generations (the stage-1 handler: one per process;
+     * stage 2: one per --xray module runtime); per-context order is the V1
+     * guarantee. */
     uint64_t sequence = __atomic_add_fetch(sequence_cell, 1, __ATOMIC_RELAXED);
     int64_t *slot = base + CH_HEADER_WORDS + (write % capacity) * CH_RECORD_WORDS;
     slot[0] = (int64_t)(CH_RECORD_HEADER | (kind << 32));

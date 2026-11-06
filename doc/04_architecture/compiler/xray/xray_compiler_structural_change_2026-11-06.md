@@ -298,8 +298,13 @@ a selection; per-function toggle = a new prepared selection (new generation).
   bias + ELF section table, `xray_native_module_v1.spl`), admits it through
   `trace_native_map_validate_v1`, then registers it with the module's resident
   runtime (`simple_xray_native_register_module_v1`, which re-checks every row).
-  `--xray` objects therefore carry no constructor or root symbol, and the same
-  path serves the main executable and dlopen'd modules. Each `--xray` module
+  `--xray` objects therefore carry no constructor or root symbol. Implemented
+  and tested for dlopen'd modules (`XrayNativeDlModuleV1`). Locating works by
+  path for any mapped image, but registering the MAIN EXECUTABLE needs a
+  binding without dlopen (the runtime ABI has no `dlopen(NULL)`): it belongs to
+  the in-binary control plane, which waits on a deployed pure-Simple compiler.
+  One map per module: a link of several `--xray` objects concatenates their
+  maps and is rejected (InvalidMap) until multi-map walking lands. Each `--xray` module
   links its own runtime with PROTECTED visibility (direct BL, no PLT veneer).
 - **Channel publication:** `XrayNativeBoundLeafV1.install` publishes the arena
   through `XrayNativeDispatchPortV1` before any sled is patched (C.2 step 3).

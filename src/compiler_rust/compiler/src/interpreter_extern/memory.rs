@@ -1222,6 +1222,13 @@ pub fn rt_mprotect(args: &[Value]) -> Result<Value, CompileError> {
         // Fail before granting execute permission on non-coherent targets.
         return Ok(Value::Int(-1));
     }
+    // aarch64 Linux: the cache maintenance below reads the range (DC CVAU needs
+    // read permission at EL0), so execute-only would SIGSEGV instead of
+    // failing closed. Refuse it.
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    if (prot & i64::from(libc::PROT_EXEC)) != 0 && (prot & i64::from(libc::PROT_READ)) == 0 {
+        return Ok(Value::Int(-1));
+    }
     let result = unsafe { libc::mprotect(addr as usize as *mut libc::c_void, length as usize, prot as i32) };
     // aarch64 Linux: same contract as runtime_legacy_core.c rt_mprotect
     // (__builtin___clear_cache after an execute grant). On a sync failure the

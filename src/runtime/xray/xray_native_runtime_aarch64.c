@@ -76,6 +76,9 @@ struct simple_xray_native_module {
 
 static struct simple_xray_native_module g_modules[SIMPLE_XRAY_NATIVE_MAX_MODULES];
 static uint32_t g_module_count; /* release-published; entries are immutable after */
+/* Per runtime instance (each --xray module links its own copy): sequence
+ * numbers are monotonic per module, and an arena is published to exactly one
+ * module (install keys it by module instance). */
 static uint64_t g_sequence;
 
 static inline uint32_t xmap_u16(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8); }
@@ -87,6 +90,8 @@ static inline uint64_t xmap_u64(const uint8_t *p) {
 }
 
 #ifdef SIMPLE_XRAY_NATIVE_SUPPORTED
+
+extern void __simple_xray_trampoline_v1(void);
 
 /* Hot path. Never blocks, allocates or calls out. A return address outside
  * every registered module, an out-of-range id, or a row whose sled is not the
@@ -226,6 +231,13 @@ SIMPLE_XRAY_API int64_t simple_xray_native_register_module_v1(int64_t map_addres
             return 0;
         uint32_t word = __atomic_load_n((const uint32_t *)sled, __ATOMIC_RELAXED);
         if (word != XMAP_OFF_WORD && word != XMAP_ON_WORD) return 0;
+        /* The sled must call THIS runtime instance: a map registered with
+         * another module's runtime would patch ON and record nowhere. */
+        uint32_t bl = __atomic_load_n((const uint32_t *)(sled + 20), __ATOMIC_RELAXED);
+        if ((bl & 0xFC000000u) != 0x94000000u) return 0;
+        int64_t imm = (int64_t)(bl & 0x3FFFFFFu);
+        if (imm >= 0x2000000) imm -= 0x4000000;
+        if (sled + 20 + (uintptr_t)(imm * 4) != (uintptr_t)&__simple_xray_trampoline_v1) return 0;
         if (sled < lo) lo = sled;
         if (sled + XMAP_SLED_BYTES > hi) hi = sled + XMAP_SLED_BYTES;
     }
