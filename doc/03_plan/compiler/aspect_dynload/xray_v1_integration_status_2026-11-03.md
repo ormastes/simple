@@ -25,6 +25,10 @@ W0 is NOT complete: the event/config codecs, generated native ABI caller-buffer 
 
 Re-rooted on `release/1.0.0` (not merged/rebased from the draft branch): `src/lib/common/trace/observer_{contract,config,event_codec,session,collector,native_map,native_abi,build_route,aspect_config}_v1.spl`, `src/lib/nogc_sync_mut/trace/observer_native_channel_v1.spl` (producer release uses the seed+C backed `rt_par_atomic_add_i64(-1)`), and the `simple.trace/observer-v1` constant in `aspect_params.spl`. The 9 draft lib specs now RUN green on the Rust seed (65 examples; the session reference model is a caller-owned value, no module globals). Compile-time intake is ONE gate, `xray_observer_request_check` in `80.driver/driver_xray_policy.spl`, decided once in `CompileContext.create` and stored as `xray_config_error` (the five draft entry-point calls and the `weave_aop` call are gone). It only rejects; it never changes `xray_mode`. Not ported: the `has_errors` early return (Q9, own PR), `observer_llvm_adapter_v1` + hosted-linux fixture (PR4), `mir_observer_site_intent_v1` (superseded), `observer_llvm_host_shim_v1` (PR3).
 
+## PR3 `xray-llvm-attrs` (2026-11-06)
+
+`MirFunction.xray_mode` now reaches LLVM IR as `"function-instrument"="xray-always"` (never-list: `xray-never`, only in instrumented modules; no threshold). `trace.instrumentation` SDN key and the `xray-v1` CompileOptionsHash component (LiveKey pos 49) landed with it. Not yet: `clang_rt.xray` link and the handler shim (PR4), so a `--xray` LLVM binary carries unpatched sleds only.
+
 ## Ordered remaining work
 
 1. W0: implement/review codecs, native ABI and golden fixtures; validate with admitted self-hosted tooling; then freeze the contract.

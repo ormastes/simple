@@ -541,3 +541,9 @@ as a feature request naming the 50 affected identifiers.
 Reconfirmed: `exit` fenced already; the general hazard (50 other prelude
 names shadowable) remains, needing Rust-seed interpreter_call resolution
 work. Left as PARTIALLY FIXED / OPEN for the remainder, no code change.
+
+## 2026-11-06 partial (work/interp-p2-seed)
+`dprint` added to `PRELUDE_UNSHADOWABLE` (zero `fn dprint` definitions in Simple source, so
+behaviour-preserving). Spec `test/01_unit/interpreter/prelude_dprint_unshadowable_spec.spl`
+(RED on deployed seed, GREEN on test-only seed). Remaining: the other 49 prelude names keep
+warn-only shadowing per the 2026-08-10 policy; 22 of them have real `src/**` definitions.

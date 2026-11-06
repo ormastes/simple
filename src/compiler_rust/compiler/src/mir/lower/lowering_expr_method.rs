@@ -2439,6 +2439,21 @@ impl<'a> MirLowerer<'a> {
             }
             _ => func_name,
         };
+        // `impl Trait for text` registers its methods as `text.m` (or the
+        // `String`/`string` spelling), but the builtin receiver name for
+        // TypeId::STRING is `str`, so `s.m()` emitted `str.m` and the JIT
+        // failed with "Function 'str.m' not found". Prefer the user impl
+        // when `str.m` itself is not a declared function.
+        let func_name = match func_name.split_once('.') {
+            Some(("str", bare)) if bare == method && !self.function_param_types.contains_key(&func_name) => {
+                ["text", "String", "string"]
+                    .iter()
+                    .map(|owner| format!("{}.{}", owner, method))
+                    .find(|candidate| self.function_param_types.contains_key(candidate))
+                    .unwrap_or(func_name)
+            }
+            _ => func_name,
+        };
 
         // A numeric cast on an erased receiver that THIS lowering just boxed
         // (`(crc & 255).to_u8()` with an untyped `crc`: the `&` is computed raw,
