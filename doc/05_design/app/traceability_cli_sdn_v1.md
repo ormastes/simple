@@ -41,3 +41,9 @@ qualify concrete worktree-provider properties. See the CLI TDD report for
 source-stage boundaries, owned inputs and P2 oracle limitations. Direct Unicode
 selection is proven; find transport of that filename remains open. All20REQ/40AC
 remain required; no full runtime or protected admission PASS is claimed.
+
+Amendment (slice 2 code, 2026-11-06): each `TraceReferenceV1` row also carries
+`other_paths` -- the sorted declared locator paths of the other endpoint --
+because the registered declaration locates documents and sources (not
+requirements), so the endpoint's paths are the usable bug/requirement <-> file
+link; table column `PATHS`, SDN key `other_paths`.
