@@ -259,6 +259,11 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
             sorted.put(entry.key, entry.value)
         sorted.entries()
 
+    fn frozen_lookup() -> AdaptiveMapFrozenLookup<K, V>:
+        """Read-only snapshot for shared readers; it never promotes or migrates (COL-09).
+        Copies the map: take it once per snapshot, not per read."""
+        AdaptiveMapFrozenLookup(source: self)
+
     me get(key: K) -> V?:
         self.observed_lookups = self.observed_lookups + 1
         self.lookups_since_switch = self.lookups_since_switch + 1
@@ -634,4 +639,34 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
         self.live_hash_lookups = 0
         self.live_high_collision_lookups = 0
 
+struct AdaptiveMapFrozenLookup<K, V> where K: Hash + Eq + Ord:
+    """Read-only snapshot of one AdaptiveMap value (a struct copy: later owner
+    writes are not visible). It exposes no `me` method, so a holder cannot
+    promote, migrate or count; reads are not profile-captured. Taking the view
+    copies the map, so take it once per snapshot, never per read."""
+    source: AdaptiveMap<K, V>
+
+    fn get(key: K) -> V?:
+        """The stored value; use contains_key to tell a present None from absence."""
+        if not self.ordered_probe_usable(key):
+            return None
+        self.source.storage_get(key)
+
+    fn contains_key(key: K) -> bool:
+        if not self.ordered_probe_usable(key):
+            return false
+        self.source.storage_has_key(key)
+
+    fn ordered_probe_usable(key: K) -> bool:
+        # Ordered storage only holds keys with native order, so a probe without
+        # one is absent. The owner path demotes (auto) or panics (pin); a frozen read does neither.
+        self.source.algorithm != AdaptiveSetAlgorithm.Ordered or ordered_key_native_usable(key)
+
+    fn len() -> i64:
+        self.source.len()
+
+    fn selected_algorithm() -> AdaptiveSetAlgorithm:
+        self.source.algorithm
+
 export AdaptiveMap
+export AdaptiveMapFrozenLookup
