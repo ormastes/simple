@@ -10,7 +10,7 @@ use std.spec
 use std.spec.step
 use app.llm_caret.agent_plan.{AgentFileChangeSet}
 use app.llm_caret.agent_overlap.{agent_overlaps_v1, agent_overlaps_for_v1,
-    agent_overlap_report_md_v1, AGENT_OVERLAP_NOT_A_MERGE_VERDICT_V1}
+    agent_overlap_report_md_v1, agent_review_export_md_v1, AGENT_OVERLAP_NOT_A_MERGE_VERDICT_V1}
 
 fn sets_v1() -> [AgentFileChangeSet]:
     [
@@ -48,3 +48,17 @@ describe "agent overlap detection":
         expect(md.contains("| agent-a | agent-b | `src/y.spl` | same_file | weak |")).to_equal(true)
         expect(md.contains("conflict:")).to_equal(false)
         expect(agent_overlap_report_md_v1([]).contains("No overlapping files")).to_equal(true)
+
+    it "redacts secret-looking tokens in the exported review":
+        # @req REQ-SSPEC-UNIT
+        step("export passes through the caret redactor")
+        val leaky = [
+            AgentFileChangeSet(agent_id: "agent-a", changed_files: ["tmp/ghp_abcdefghijklmnopqrstuvwxyz0123456789.txt"]),
+            AgentFileChangeSet(agent_id: "agent-b", changed_files: ["tmp/ghp_abcdefghijklmnopqrstuvwxyz0123456789.txt"]),
+        ]
+        val plain = agent_overlap_report_md_v1(agent_overlaps_v1(leaky))
+        val exported = agent_review_export_md_v1(agent_overlaps_v1(leaky))
+        expect(plain.contains("ghp_abcdefghijklmnopqrstuvwxyz")).to_equal(true)
+        expect(exported.contains("ghp_abcdefghijklmnopqrstuvwxyz")).to_equal(false)
+        expect(exported.contains("[REDACTED:")).to_equal(true)
+        expect(exported.contains(AGENT_OVERLAP_NOT_A_MERGE_VERDICT_V1)).to_equal(true)

@@ -67,3 +67,13 @@ Root owns source/request review, runtime launch and scoped PR landing. Astra com
 Stop rules: at most three verify/fix cycles per feature; preparation failures consume a cycle. Do not rerun unchanged passing criteria or restart a process merely because its observer timed out. Preserve explicit terminal status, unknown counts, source/request hashes, process closure and resource observations. Whole-goal completion requires all supported requested tests and Phase 4 products verified; missing or indirect evidence remains incomplete.
 
 The separate SIMD/GPU/Sosix design is still unavailable at its supplied path. Obtain the exact document before mapping or implementing it; do not substitute unrelated SIMD requirements.
+
+## Status — 2026-11-06
+
+Scenarios for items recorded NOT-NEEDED or SUPERSEDED in the implementation
+plan's "Stale-feature review — 2026-11-06" (SMET/codec frames, change WAL,
+editor/Spipe/SCV-nvim adapters, SCV metadata v2, incremental region parser,
+parse lease, remote transport) are retired for 1.0.0, not failed. Remaining
+acceptance: complete-inventory verifier (absent/stale companion = not current),
+receipt bound to commit + tree, byte-reconciled change batch, post-build
+pending→settled with binary retained on late failure, `simple tldr status`.

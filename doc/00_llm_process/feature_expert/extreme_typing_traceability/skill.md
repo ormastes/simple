@@ -64,6 +64,17 @@ callables never drive the verdict; Unknown denial may then activate under the
 explicit flag, which denies every `Nominal` export until members are projected.
 Design only; the code slice follows as its own PR.
 
+2026-11-06 P12: the
+[export hardening design](../../../05_design/extreme_typing_traceability.md#p12-export-hardening-design-2026-11-06)
+defines export scope, seven fail-closed invariants (explicit canonical
+destination, private material filtered before render, escaped offline
+content, byte-identical output, visibility-safe counts, complete SDN
+round-trip, typing facets keep every unknown reason) and the spec gates for
+the first slice, which waits for the P6 projection seam. The same section
+records the AC-EAPI-005 finding: the publication guard runs before
+`weave_aop()`, so AOP/postmono-introduced exports are not rechecked
+(feature-sized follow-up, not closed).
+
 Read the [selected policy](../../../02_requirements/feature/extreme_typing_traceability.md),
 [architecture](../../../04_architecture/extreme_typing_traceability.md),
 [implementation plan](../../../03_plan/agent_tasks/extreme_typing_traceability.md)
