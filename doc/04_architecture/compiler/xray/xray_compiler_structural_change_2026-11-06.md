@@ -63,8 +63,9 @@ xray_mode: i64 = 0   # 0 = no sleds (default; static off), 1 = entry+exit sleds,
   MirFunction gains fields — spread operator fails cross-module") must copy the
   field, else every MIR rewrite silently drops it. PR1 test asserts survival
   through `with_blocks` and through each `60.mir_opt` pass that rebuilds functions.
-- `mir_serialization.spl` / `mir_json.spl`: serialize the field **only when non-zero**
-  so off-path MIR dumps/caches are byte-identical.
+- MIR serialization does not carry function attributes today, so off-path MIR
+  dumps are unchanged by construction; the native capsule function identity
+  appends `|xray=N` only when non-zero.
 
 ### A.4 Instrumentation policy (who decides)
 
@@ -77,10 +78,11 @@ Two switches, never conflated:
   Aspect params never decide whether sleds exist.
 
 New file `src/compiler/80.driver/driver_xray_policy.spl` (one resolution point),
-run once after MIR lowering, before `60.mir_opt`:
+run once per compile **after** `60.mir_opt`, at the instrumentation stage
+(`apply_debug_trace` in `driver_pipeline_aop.spl`, reached by every pipeline):
 
 ```
-struct XrayBuildPolicy:        # in 00.common/driver_compile_options.spl
+struct XrayBuildPolicy:        # resolved value, in 80.driver/driver_xray_policy.spl
     enabled: bool = false      # static switch; false = no sleds anywhere
     include_tail_exit: bool = true
 fn xray_policy_apply(module: MirModule, policy: XrayBuildPolicy) -> MirModule
@@ -92,6 +94,9 @@ Per function, first match wins:
    `is_generic_template`, interrupt handlers (`70.backend/interrupt.spl`),
    functions in `src/lib/common/trace/**`, `src/lib/nogc_sync_mut/trace/**`
    (the xray handler itself), and the allocator/runtime-hook set → `xray_mode = 0`.
+   Interrupt handlers are caught only when `@naked` or placed in a custom
+   section: a non-naked `@interrupt` fn carries no MIR flag yet. Bare-metal and
+   SimpleOS targets are rejected by `compile --xray` until that flag exists.
 3. `is_inline`/`alwaysinline` → no sleds (physical-function rule, plan §5.4).
 4. Every other function → sleds (`xray_mode = 1`, or `2` with tail-exit).
 
@@ -150,14 +155,17 @@ untouched.
 ### A.6 Driver and config plumbing
 
 - `00.common/driver_compile_options.spl` (next to `coverage_enabled`, `:52` region):
-  `xray: XrayBuildPolicy = XrayBuildPolicy()` — default is static off.
+  scalar `xray_enabled: bool = false` (scalar like `mcdc_mode_text`: by-value
+  aggregate copies of `CompileOptions` have corrupted nested fields before).
 - CLI: `--xray` (boolean). The sled flavour (LLVM XRay vs Simple native) follows
   the selected backend; there is no separate backend knob.
 - SDN: `trace.instrumentation: off|dynamic` (plan §5.3), mapped in
   `80.driver/driver_types.spl` next to the `coverage` mapping. `off` (default) ⇒
   `enabled=false`.
-- Single gate: `xray_policy_resolve(options, target, backend) -> Result<XrayBuildPolicy, TraceFailureV1>`
-  called **once** in the driver; emitters read only `MirFunction.xray_mode`.
+- Single gate: `xray_policy_resolve(enabled, compile_mode, backend, release) -> Result<XrayBuildPolicy, text>`
+  called **once** in `CompileContext.create`; an `Err` (`XRAY-E-UNSUPPORTED-TARGET`)
+  fails the compile before any pipeline runs, like the MC/DC config error.
+  Emitters read only `MirFunction.xray_mode`. The SDN key lands with PR3.
 
 ---
 
@@ -181,6 +189,11 @@ untouched.
 for `off` would invalidate every existing prelower/object cache entry — a
 measurable perf regression on every build. Same rule for `object_cache_key`
 and `native_build_cache_scope_key`.
+PR1 applies it to the prelower option identity, native no-op admission and
+capsule function identity. `compile_options_hash_compute` is formally bound
+(`src/verification/cache_protocol/source_bindings.txt`); its xray component
+lands in PR3 together with the LiveKey model field and re-pin review (today
+only SMF/spec callers reach it, and `--xray` rejects SMF output).
 
 **Guard test (PR1, kept forever): `scripts/check/check-xray-static-off-identity.shs`**
 1. Build fixtures (`hello`, multi-return, tail call, recursion) with the **same**
@@ -336,7 +349,7 @@ dependency diff, Linux-only paths, TDD (failing spec first).
 
 | # | PR | Content | Acceptance |
 |---|---|---|---|
-| 1 | `xray-structure` | `XrayBuildPolicy` option + `--xray` CLI flag, `MirFunction.xray_mode` (+`with_blocks`, conditional serialization), `driver_xray_policy.spl` resolve+apply (never-list), cache-key token only when on, Cranelift rejection, `check-xray-static-off-identity.shs` | Field survives `with_blocks`/mir_opt; never-list spec; Cranelift + `--xray` rejected; off guard PASS; no emitter yet |
+| 1 | `xray-structure` | `XrayBuildPolicy` option + `--xray` CLI flag, `MirFunction.xray_mode` (+`with_blocks`), `driver_xray_policy.spl` resolve+apply (never-list), cache-key token only when on, Cranelift rejection, `check-xray-static-off-identity.shs` | Field survives `with_blocks`/mir_opt; never-list spec; Cranelift + `--xray` rejected; off guard PASS; no emitter yet |
 | 2 | `xray-v1-contract` | Re-rooted draft `src/lib/common/trace/**` + channel; no driver gate duplication | Draft specs run green; contract golden bytes; no OS import in common (import-graph check) |
 | 3 | `xray-llvm-attrs` | A.5 LLVM attrs; Linux triples only | `.ll` contains attrs only when on; `llvm-readelf` shows `xray_instr_map` only when on; off guard PASS |
 | 4 | `xray-llvm-adapter` | Private LLVM adapter + state-preserving handler shim + link of `clang_rt.xray` | Real Simple binary traced through facade on x86-64 + AArch64 Linux; ABI-01/02 (plan §16.2) |

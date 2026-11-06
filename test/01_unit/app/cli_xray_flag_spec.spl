@@ -1,0 +1,32 @@
+"""XRay structural PR1: `simple compile --xray` reaches only routes that can carry sleds."""
+use std.spec.*
+use app.io._CliCompile.compile_opt_and_driver.{cli_xray_route_error}
+
+describe "compile --xray route admission":
+    it "admits native executable builds that reach the pure-Simple driver":
+        expect(cli_xray_route_error("", "", "native", "", false, "")).to_equal("")
+        expect(cli_xray_route_error("auto", "", "native", "native", false, "")).to_equal("")
+        expect(cli_xray_route_error("llvm", "", "", "", false, "")).to_equal("")
+        expect(cli_xray_route_error("native", "", "native", "", false, "")).to_equal("")
+        expect(cli_xray_route_error("llvm", "aarch64-unknown-linux-gnu", "native", "", false, "")).to_equal("")
+
+    it "lets Cranelift through so the driver reports UnsupportedTarget":
+        expect(cli_xray_route_error("cranelift", "", "native", "", false, "")).to_equal("")
+
+    it "rejects non-native backends by name":
+        for backend in ["vhdl", "cuda", "wasm", "vulkan", "opencl"]:
+            val message = cli_xray_route_error(backend, "", "native", "", false, "")
+            expect(message).to_contain("XRAY-E-UNSUPPORTED-TARGET")
+            expect(message).to_contain("backend '{backend}'")
+
+    it "rejects C output, driver packaging and bare-metal/SimpleOS/WASM targets":
+        expect(cli_xray_route_error("c", "", "", "", true, "")).to_contain("C output")
+        expect(cli_xray_route_error("llvm", "", "native", "", false, "dynamic")).to_contain("driver packaging")
+        expect(cli_xray_route_error("llvm", "baremetal-x86", "native", "", false, "")).to_contain("target 'baremetal-x86'")
+        expect(cli_xray_route_error("llvm", "x86_64-simpleos", "native", "", false, "")).to_contain("target 'x86_64-simpleos'")
+        expect(cli_xray_route_error("llvm", "wasm32", "native", "", false, "")).to_contain("target 'wasm32'")
+
+    it "rejects SMF output instead of silently carrying unemitted sled intent":
+        expect(cli_xray_route_error("auto", "", "", "", false, "")).to_contain("add --native")
+        expect(cli_xray_route_error("native", "", "", "", false, "")).to_contain("add --native")
+        expect(cli_xray_route_error("llvm", "", "native", "smf", false, "")).to_contain("output format 'smf'")
