@@ -1,0 +1,295 @@
+# @cover src/compiler/00.common/data/data_schema_resolver.spl 80%
+"""
+## Purpose and audience
+The shared data schema resolver turns attribute declarations written in SPL
+source and in SDN build configuration into one typed logical surface, and
+resolves layout and collection policy rules with the plan's fixed precedence.
+Readers are compiler and build-configuration authors who need to know when two
+declarations merge, when they conflict, and which rule wins.
+Plan: doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md
+(W1, sections 3.2, 8.3-8.5; acceptance ATTR-01..06). Category: Infrastructure.
+## Operator workflow
+bin/simple test test/01_unit/compiler/data/data_schema_resolver_spec.spl
+## Compatibility and limitations
+SPL declarations are given as constructed declaration lists; the frontend
+`@node_tree` adapter that produces them from parsed classes is W2. No accessor
+is generated and nothing is lowered. Interpreter lane only.
+## Verification guidance and troubleshooting
+A RED on the digest scenarios means the canonical form changed: review whether
+the change is semantic before updating any expected digest relationship.
+"""
+# Lifecycle: doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md ;
+# doc/03_plan/compiler/data/adaptive_collections_profiling_switching_2026-09-16.md
+# @manual_section: Shared SPL and SDN data schema resolver
+
+use std.spec.*
+use compiler.common.data.data_schema_contracts.*
+use compiler.common.data.data_schema_resolver.*
+
+fn spl_at(line: i64) -> DataDeclProvenanceV1:
+    data_decl_provenance_v1(DataDeclOriginV1.Spl, "src/compiler/10.frontend/core/ast_nodes.spl", line, "compiler.ast")
+
+fn sdn_at(line: i64) -> DataDeclProvenanceV1:
+    data_decl_provenance_v1(DataDeclOriginV1.Sdn, "config/data_policy.sdn", line, "compiler.ast")
+
+fn attr(view: text, name: text, type_path: text, req: DataRequirednessV1, prov: DataDeclProvenanceV1) -> DataAttrDeclV1:
+    data_attr_decl_v1("compiler.ast", view, name, data_type_ref_v1(type_path, []), req, "", prov)
+
+fn ast_authority() -> DataSchemaAuthorityV1:
+    data_schema_authority_v1("compiler.ast", ["compiler.ast"])
+
+fn binary_node_spl() -> [DataAttrDeclV1]:
+    [attr("compiler.ast.BinaryNode", "source_span", "compiler.SourceSpan", DataRequirednessV1.Required, spl_at(2)),
+     attr("compiler.ast.BinaryNode", "left", "compiler.ast.ExprRef", DataRequirednessV1.Required, spl_at(3)),
+     attr("compiler.ast.BinaryNode", "right", "compiler.ast.ExprRef", DataRequirednessV1.Required, spl_at(4)),
+     attr("compiler.ast.BinaryNode", "operator", "compiler.ast.BinaryOp", DataRequirednessV1.Required, spl_at(5))]
+
+fn binary_node_sdn_text() -> text:
+    "data_policy:\n" +
+    "    schema: \"simple.data-policy/v1\"\n" +
+    "    declarations:\n" +
+    "        binary_node:\n" +
+    "            tree: \"compiler.ast\"\n" +
+    "            view: \"compiler.ast.BinaryNode\"\n" +
+    "            attributes:\n" +
+    "                source_span:\n" +
+    "                    type: \"compiler.SourceSpan\"\n" +
+    "                    required: true\n" +
+    "                left:\n" +
+    "                    type: \"compiler.ast.ExprRef\"\n" +
+    "                    required: true\n" +
+    "                right:\n" +
+    "                    type: \"compiler.ast.ExprRef\"\n" +
+    "                    required: true\n" +
+    "                operator:\n" +
+    "                    type: \"compiler.ast.BinaryOp\"\n" +
+    "                    required: true\n"
+
+fn sdn_node(body: text) -> text:
+    "data_policy:\n    declarations:\n        n:\n" + body
+
+fn first_diag(result: Result<DataSchemaSurfaceV1, [DataSchemaDiagnosticV1]>) -> DataSchemaDiagnosticV1:
+    match result:
+        case Ok(_): data_schema_diagnostic_v1(DataSchemaErrorKindV1.InvalidDeclaration, "unexpected-ok", spl_at(0), spl_at(0), "")
+        case Err(diags): diags[0]
+
+fn resolve(decls: [DataAttrDeclV1]) -> Result<DataSchemaSurfaceV1, [DataSchemaDiagnosticV1]>:
+    data_schema_resolve_v1(ast_authority(), decls, [])
+
+fn layout_rule(subject: text, spec: DataRuleSpecificityV1, strength: DataRuleStrengthV1, choice: text,
+               overridable: bool, prov: DataDeclProvenanceV1) -> DataPolicyRuleV1:
+    data_policy_rule_v1(DataPolicyKindV1.Layout, subject, spec, strength, choice, overridable, prov)
+
+fn layout_choice(rules: [DataPolicyRuleV1]) -> Result<DataPolicyChoiceV1, DataSchemaDiagnosticV1>:
+    data_policy_resolve_rules_v1(DataPolicyKindV1.Layout, rules, "auto")
+
+describe "Shared SPL and SDN data schema resolver":
+    it "merges identical SPL and SDN declarations of one attribute into one canonical type":
+        # @req REQ-ATTR-01
+        # @req REQ-ATTR-04
+        step("Declare BinaryNode in SPL, and again in an equivalent SDN document")
+        val spl_surface = resolve(binary_node_spl()).unwrap()
+        val sdn_decls = data_schema_decls_from_sdn_v1(binary_node_sdn_text(), "config/data_policy.sdn", "compiler.ast").unwrap()
+        val sdn_surface = resolve(sdn_decls).unwrap()
+        step("Resolve both declarations together as one schema")
+        var both = binary_node_spl()
+        for d in sdn_decls:
+            both.push(d)
+        val dual = resolve(both).unwrap()
+        # @capture(exec): resolved surfaces and schema digests
+        step("Verify one canonical type per attribute, both provenances kept, and one digest for every origin")
+        expect(spl_surface.attrs.len()).to_equal(4)  # oracle: four attributes declared on BinaryNode
+        expect(dual.attrs.len()).to_equal(4)  # oracle: SPL and SDN name the same four attributes
+        expect(dual.attrs[0].name).to_equal("left")
+        expect(dual.attrs[0].type_canonical).to_equal("compiler.ast.ExprRef")
+        expect(dual.attrs[0].provenances.len()).to_equal(2)  # oracle: one SPL and one SDN declaration of `left`
+        expect(dual.attrs[0].id.ordinal).to_equal(1)  # oracle: ordinals follow canonical-name order; `left` sorts first
+        expect(sdn_decls[0].provenance.line).to_equal(11)  # oracle: `left:` is line 11 of binary_node_sdn_text
+        expect(sdn_surface.schema_digest).to_equal(spl_surface.schema_digest)
+        expect(dual.schema_digest).to_equal(spl_surface.schema_digest)
+        expect(spl_surface.schema_digest.len()).to_equal(64)  # oracle: SHA-256 lower hex
+
+    it "rejects a conflicting type and names both provenances":
+        # @req REQ-ATTR-02
+        step("Declare source_span as SourceSpan in SPL and as text in SDN")
+        val diag = first_diag(resolve([
+            attr("compiler.ast.BinaryNode", "source_span", "compiler.SourceSpan", DataRequirednessV1.Required, spl_at(2)),
+            attr("compiler.ast.BinaryNode", "source_span", "text", DataRequirednessV1.Required, sdn_at(9))]))
+        step("Declare a generic qualifier difference and a requiredness difference")
+        val qualifier = first_diag(resolve([
+            attr("compiler.ast.BinaryNode", "span", "compiler.SourceSpan", DataRequirednessV1.Required, spl_at(2)),
+            data_attr_decl_v1("compiler.ast", "compiler.ast.UnaryNode", "span",
+                data_type_ref_v1("Option", ["compiler.SourceSpan"]), DataRequirednessV1.Required, "", sdn_at(4))]))
+        val req = first_diag(resolve([
+            attr("compiler.ast.BinaryNode", "note", "text", DataRequirednessV1.Required, spl_at(2)),
+            attr("compiler.ast.BinaryNode", "note", "text", DataRequirednessV1.Optional, sdn_at(3))]))
+        step("Declare two different defaults for one attribute")
+        val defaults = first_diag(resolve([
+            data_attr_decl_v1("compiler.ast", "compiler.ast.N", "depth", data_type_ref_v1("i64", []), DataRequirednessV1.Defaulted, "0", spl_at(2)),
+            data_attr_decl_v1("compiler.ast", "compiler.ast.M", "depth", data_type_ref_v1("i64", []), DataRequirednessV1.Defaulted, "1", sdn_at(6))]))
+        # @capture(exec): conflict diagnostics
+        step("Verify each conflict is an error that names both declaration sites")
+        expect(diag.kind == DataSchemaErrorKindV1.TypeConflict).to_equal(true)
+        expect(diag.subject).to_equal("source_span")
+        expect(diag.message.contains("src/compiler/10.frontend/core/ast_nodes.spl:2")).to_equal(true)
+        expect(diag.message.contains("config/data_policy.sdn:9")).to_equal(true)
+        expect(qualifier.kind == DataSchemaErrorKindV1.TypeConflict).to_equal(true)
+        expect(req.kind == DataSchemaErrorKindV1.RequirednessConflict).to_equal(true)
+        expect(defaults.kind == DataSchemaErrorKindV1.DefaultConflict).to_equal(true)
+
+    it "keeps distinct nominal ids distinct over the same machine type":
+        # @req REQ-ATTR-03
+        step("Declare owner as RegionId on one view and as ObjId on another")
+        val diag = first_diag(resolve([
+            attr("compiler.ast.RegionNode", "owner", "compiler.RegionId", DataRequirednessV1.Required, spl_at(2)),
+            attr("compiler.ast.ObjectNode", "owner", "compiler.ObjId", DataRequirednessV1.Required, spl_at(7))]))
+        step("Declare left through an explicit alias, then through a malformed alias table")
+        val aliased = [attr("compiler.ast.BinaryNode", "left", "compiler.ast.ExprRef", DataRequirednessV1.Required, spl_at(3)),
+                       attr("compiler.ast.CallNode", "left", "compiler.ast.ExprHandle", DataRequirednessV1.Required, sdn_at(5))]
+        val surface = data_schema_resolve_v1(ast_authority(), aliased,
+            [data_type_alias_v1("compiler.ast.ExprHandle", "compiler.ast.ExprRef")]).unwrap()
+        val two_targets = data_schema_resolve_v1(ast_authority(), aliased,
+            [data_type_alias_v1("compiler.ast.ExprHandle", "compiler.ast.ExprRef"),
+             data_type_alias_v1("compiler.ast.ExprHandle", "compiler.ObjId")])
+        val cycle = data_schema_resolve_v1(ast_authority(), aliased,
+            [data_type_alias_v1("compiler.A", "compiler.B"), data_type_alias_v1("compiler.B", "compiler.A")])
+        # @capture(exec): nominal conflict and alias outcomes
+        step("Verify distinct nominal IDs conflict, a declared alias merges, and a bad alias table is refused")
+        expect(diag.kind == DataSchemaErrorKindV1.TypeConflict).to_equal(true)
+        expect(surface.attrs[0].type_canonical).to_equal("compiler.ast.ExprRef")
+        expect(two_targets.is_err()).to_equal(true)
+        expect(cycle.is_err()).to_equal(true)
+
+    it "rejects two equal-specificity rules instead of letting file order win":
+        # @req REQ-ATTR-05
+        step("Write two build hints at the same specificity that disagree")
+        val hint_a = layout_rule("compiler.ast.BinaryNode", DataRuleSpecificityV1.OwningType, DataRuleStrengthV1.Hint, "soa", false, sdn_at(3))
+        val hint_b = layout_rule("compiler.ast.BinaryNode", DataRuleSpecificityV1.OwningType, DataRuleStrengthV1.Hint, "aosoa", false, sdn_at(9))
+        val forward = layout_choice([hint_a, hint_b])
+        val backward = layout_choice([hint_b, hint_a])
+        step("Write a source pin and a build pin that disagree")
+        val src_pin = layout_rule("compiler.ast.BinaryNode", DataRuleSpecificityV1.ExactSite, DataRuleStrengthV1.Pin, "aos", false, spl_at(1))
+        val build_pin = layout_rule("compiler.ast.BinaryNode", DataRuleSpecificityV1.ExactSite, DataRuleStrengthV1.Pin, "soa", false, sdn_at(20))
+        val module_soa = layout_rule("compiler.ast", DataRuleSpecificityV1.Module, DataRuleStrengthV1.Pin, "soa", false, sdn_at(41))
+        # @capture(exec): rule-resolution diagnostics
+        step("Verify both orders fail the same way, and any build pin contradicting a binding source pin fails")
+        expect(forward.unwrap_err().kind == DataSchemaErrorKindV1.AmbiguousRule).to_equal(true)
+        expect(backward.unwrap_err().kind == DataSchemaErrorKindV1.AmbiguousRule).to_equal(true)
+        expect(layout_choice([src_pin, build_pin]).unwrap_err().kind == DataSchemaErrorKindV1.PinConflict).to_equal(true)
+        expect(layout_choice([src_pin, module_soa]).unwrap_err().kind == DataSchemaErrorKindV1.PinConflict).to_equal(true)
+
+    it "applies plan 8.4 precedence: pins over hints, specific over general, build refining source":
+        # @req REQ-ATTR-05
+        step("Combine pins, hints and defaults of different specificity and origin")
+        val soft_src = layout_rule("compiler.ast.BinaryNode", DataRuleSpecificityV1.ExactSite, DataRuleStrengthV1.Pin, "aos", true, spl_at(1))
+        val build_pin = layout_rule("compiler.ast.BinaryNode", DataRuleSpecificityV1.ExactSite, DataRuleStrengthV1.Pin, "soa", false, sdn_at(20))
+        val module_pin = layout_rule("compiler.ast", DataRuleSpecificityV1.Module, DataRuleStrengthV1.Pin, "aos", false, sdn_at(40))
+        val module_hint = layout_rule("compiler.ast", DataRuleSpecificityV1.Module, DataRuleStrengthV1.Hint, "aos", false, spl_at(1))
+        val type_hint = layout_rule("compiler.ast.BinaryNode", DataRuleSpecificityV1.OwningType, DataRuleStrengthV1.Hint, "soa", false, sdn_at(3))
+        val source_type_hint = layout_rule("compiler.ast.BinaryNode", DataRuleSpecificityV1.OwningType, DataRuleStrengthV1.Hint, "aos", false, spl_at(8))
+        val col = data_policy_rule_v1(DataPolicyKindV1.Collection, "compiler.resolve.symbols", DataRuleSpecificityV1.ExactSite,
+            DataRuleStrengthV1.Pin, "hash", false, sdn_at(30))
+        # @capture(exec): resolved choices
+        step("Verify each winner and the versioned default when no rule applies")
+        expect(layout_choice([soft_src, build_pin]).unwrap().choice).to_equal("soa")
+        expect(layout_choice([module_pin, build_pin]).unwrap().choice).to_equal("soa")
+        expect(layout_choice([module_hint, type_hint]).unwrap().choice).to_equal("soa")
+        expect(layout_choice([source_type_hint, type_hint]).unwrap().choice).to_equal("soa")
+        expect(layout_choice([type_hint, soft_src]).unwrap().choice).to_equal("aos")
+        val fallback = layout_choice([col]).unwrap()
+        expect(fallback.choice).to_equal("auto")
+        expect(fallback.from_default).to_equal(true)
+        expect(data_policy_resolve_rules_v1(DataPolicyKindV1.Collection, [col, build_pin], "auto").unwrap().choice).to_equal("hash")
+
+    it "resolves SDN collection and layout rule rows to the same rules as SPL":
+        # @req REQ-ATTR-04
+        step("Write a collection pin and a layout hint as SDN rule rows")
+        val sdn = "data_policy:\n    rules:\n        symbol_map:\n            site: \"compiler.resolve.symbols\"\n            algorithm: \"hash\"\n            pin: true\n        compiler_nodes:\n            module: \"compiler.ast\"\n            layout: \"soa\"\n"
+        val rules = data_policy_rules_from_sdn_v1(sdn, "config/data_policy.sdn", "compiler.ast").unwrap()
+        # @capture(exec): parsed rule rows
+        step("Verify each row keeps its policy kind, specificity, strength and choice")
+        expect(rules.len()).to_equal(2)  # oracle: two rule rows in the document
+        val col = data_policy_resolve_rules_v1(DataPolicyKindV1.Collection, rules, "auto").unwrap()
+        val lay = data_policy_resolve_rules_v1(DataPolicyKindV1.Layout, rules, "auto").unwrap()
+        expect(col.choice).to_equal("hash")
+        expect(lay.choice).to_equal("soa")
+        expect(data_rule_specificity_rank_v1(rules[0].specificity)).to_equal(1)  # oracle: rows sort by name; compiler_nodes is a module rule
+
+    it "rejects SDN that is malformed, duplicated, or selects trace events at runtime":
+        # @req REQ-ATTR-04
+        step("Load SDN with a duplicate key, a missing type, a missing tree and a non-boolean required")
+        val dup = sdn_node("            tree: \"compiler.ast\"\n            view: \"compiler.ast.N\"\n            attributes:\n                a:\n                    type: \"text\"\n                    required: true\n                a:\n                    type: \"i64\"\n                    required: true\n")
+        val no_type = sdn_node("            tree: \"compiler.ast\"\n            view: \"compiler.ast.N\"\n            attributes:\n                a:\n                    required: true\n")
+        val no_tree = sdn_node("            view: \"compiler.ast.N\"\n            attributes:\n                a:\n                    type: \"text\"\n")
+        val bad_required = sdn_node("            tree: \"compiler.ast\"\n            view: \"compiler.ast.N\"\n            attributes:\n                a:\n                    type: \"text\"\n                    required: \"yes\"\n")
+        step("Load SDN that tries to select trace events through profiles")
+        val events = "data_policy:\n    profiles:\n        compiler_data:\n            events: [\"data_field\"]\n"
+        val profiles_any = "data_policy:\n    profiles:\n        compiler_data:\n            sampling: \"bounded\"\n"
+        step("Load a scalar default")
+        val int_default = sdn_node("            tree: \"compiler.ast\"\n            view: \"compiler.ast.N\"\n            attributes:\n                depth:\n                    type: \"i64\"\n                    default: 0\n")
+        # @capture(exec): SDN diagnostics
+        step("Verify every malformed document is a diagnostic and a scalar default is kept as text")
+        val dup_diags = data_schema_decls_from_sdn_v1(dup, "config/dup.sdn", "compiler.ast").unwrap_err()
+        expect(dup_diags[0].kind == DataSchemaErrorKindV1.InvalidDeclaration).to_equal(true)
+        expect(dup_diags[0].message.contains("duplicate")).to_equal(true)
+        expect(data_schema_decls_from_sdn_v1(no_type, "c.sdn", "compiler.ast").is_err()).to_equal(true)
+        expect(data_schema_decls_from_sdn_v1(no_tree, "c.sdn", "compiler.ast").is_err()).to_equal(true)
+        expect(data_schema_decls_from_sdn_v1(bad_required, "c.sdn", "compiler.ast").is_err()).to_equal(true)
+        val event_diags = data_policy_rules_from_sdn_v1(events, "c.sdn", "compiler.ast").unwrap_err()
+        expect(event_diags[0].message.contains("aspect params")).to_equal(true)
+        expect(data_schema_decls_from_sdn_v1(events, "c.sdn", "compiler.ast").is_err()).to_equal(true)
+        expect(data_policy_rules_from_sdn_v1(profiles_any, "c.sdn", "compiler.ast").is_err()).to_equal(true)
+        step("Load rule rows with two subjects, two choices, a non-boolean pin, an unsupported key, and a non-mapping rules value")
+        val rule_head = "data_policy:\n    rules:\n        r:\n"
+        val two_subjects = rule_head + "            site: \"a\"\n            module: \"b\"\n            layout: \"soa\"\n"
+        val two_choices = rule_head + "            site: \"a\"\n            layout: \"soa\"\n            algorithm: \"hash\"\n"
+        val bad_pin = rule_head + "            site: \"a\"\n            layout: \"soa\"\n            pin: \"yes\"\n"
+        val unsupported = rule_head + "            site: \"a\"\n            algorithm: \"auto\"\n            implementations: [\"linear\", \"avl\"]\n"
+        val overridable = rule_head + "            site: \"a\"\n            layout: \"soa\"\n            pin: true\n            overridable: true\n"
+        val flat_rules = "data_policy:\n    rules: 3\n"
+        expect(data_policy_rules_from_sdn_v1(two_subjects, "c.sdn", "compiler.ast").is_err()).to_equal(true)
+        expect(data_policy_rules_from_sdn_v1(two_choices, "c.sdn", "compiler.ast").is_err()).to_equal(true)
+        expect(data_policy_rules_from_sdn_v1(bad_pin, "c.sdn", "compiler.ast").is_err()).to_equal(true)
+        val unsupported_diags = data_policy_rules_from_sdn_v1(unsupported, "c.sdn", "compiler.ast").unwrap_err()
+        expect(unsupported_diags[0].message.contains("implementations")).to_equal(true)
+        expect(data_policy_rules_from_sdn_v1(overridable, "c.sdn", "compiler.ast").is_err()).to_equal(true)
+        expect(data_policy_rules_from_sdn_v1(flat_rules, "c.sdn", "compiler.ast").is_err()).to_equal(true)
+        val defaulted = data_schema_decls_from_sdn_v1(int_default, "c.sdn", "compiler.ast").unwrap()
+        expect(data_requiredness_code_v1(defaulted[0].requiredness)).to_equal(3)  # oracle: Defaulted code
+        expect(defaulted[0].default_value).to_equal("0")
+
+    it "keeps the schema digest stable under reordering and changes it for a semantic edit":
+        # @req REQ-ATTR-04
+        step("Resolve BinaryNode forwards, backwards, and with one attribute made optional")
+        val forward = binary_node_spl()
+        val a = resolve(forward).unwrap()
+        val b = resolve([forward[3], forward[2], forward[1], forward[0]]).unwrap()
+        var changed = binary_node_spl()
+        changed[3] = attr("compiler.ast.BinaryNode", "operator", "compiler.ast.BinaryOp", DataRequirednessV1.Optional, spl_at(5))
+        val c = resolve(changed).unwrap()
+        # @capture(exec): three schema digests
+        step("Verify reordering keeps the digest and the semantic edit changes it")
+        expect(a.schema_digest).to_equal(b.schema_digest)
+        expect(c.schema_digest == a.schema_digest).to_equal(false)
+
+    it "refuses inconsistent requiredness, nested generic text and schema injection without authority":
+        # @req REQ-ATTR-06
+        step("Declare a required attribute with a default, and a nested generic argument")
+        val required_with_default = data_attr_decl_v1("compiler.ast", "compiler.ast.N", "depth", data_type_ref_v1("i64", []),
+            DataRequirednessV1.Required, "0", spl_at(2))
+        val nested = data_attr_decl_v1("compiler.ast", "compiler.ast.N", "x", data_type_ref_v1("Option", ["Option<text>"]),
+            DataRequirednessV1.Required, "", spl_at(2))
+        step("Inject an attribute from an outside owner and from another tree")
+        val outsider = data_decl_provenance_v1(DataDeclOriginV1.Sdn, "vendor/pkg/policy.sdn", 4, "vendor.pkg")
+        val injected = first_diag(resolve([
+            attr("compiler.ast.BinaryNode", "left", "compiler.ast.ExprRef", DataRequirednessV1.Required, spl_at(3)),
+            attr("compiler.ast.BinaryNode", "secret", "text", DataRequirednessV1.Optional, outsider)]))
+        val other_tree = first_diag(resolve([data_attr_decl_v1("compiler.hir", "compiler.hir.X", "left",
+            data_type_ref_v1("compiler.ast.ExprRef", []), DataRequirednessV1.Required, "", spl_at(3))]))
+        # @capture(exec): refusal diagnostics
+        step("Verify each declaration is refused with its reason and location")
+        expect(first_diag(resolve([required_with_default])).kind == DataSchemaErrorKindV1.InvalidDeclaration).to_equal(true)
+        expect(first_diag(resolve([nested])).kind == DataSchemaErrorKindV1.InvalidDeclaration).to_equal(true)
+        expect(injected.kind == DataSchemaErrorKindV1.UnauthorizedInjection).to_equal(true)
+        expect(injected.message.contains("vendor/pkg/policy.sdn:4")).to_equal(true)
+        expect(other_tree.kind == DataSchemaErrorKindV1.UnauthorizedInjection).to_equal(true)

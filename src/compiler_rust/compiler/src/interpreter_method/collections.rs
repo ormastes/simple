@@ -1257,6 +1257,13 @@ pub fn handle_byte_array_methods(
         match method {
             "len" | "length" => return Ok(Some(Value::Int(bytes.len() as i64))),
             "is_empty" => return Ok(Some(Value::Bool(bytes.is_empty()))),
+            // The packed payload, as `rt_array_data_ptr` returns it. Widening
+            // first (below) answered with the `Vec<Value>` cell pointer, so FFI
+            // consumers read tagged value cells instead of the bytes
+            // (seed_interp_mut_out_param_writeback_and_u8_data_ptr_2026-08-31, gap 2).
+            // `bytes` borrows the value's shared `Arc<Vec<u8>>`, so the pointer
+            // stays valid while the caller retains the array.
+            "ptr" | "data_ptr" => return Ok(Some(Value::Int(bytes.as_ptr() as i64))),
             _ => {}
         }
     }
@@ -1343,6 +1350,28 @@ mod byte_array_metadata_fast_path_tests {
             let expected_empty = values.is_empty();
             assert_metadata_without_widening(Value::array(values.clone()), expected_len, expected_empty);
             assert_metadata_without_widening(Value::frozen_array(values), expected_len, expected_empty);
+        }
+    }
+
+    /// seed_interp_mut_out_param_writeback_and_u8_data_ptr_2026-08-31 gap 2:
+    /// `[u8].data_ptr()` must address the packed bytes, not widened value cells.
+    #[test]
+    fn byte_array_data_ptr_addresses_the_packed_payload() {
+        for value in [
+            Value::byte_array(vec![1, 2, 3, 4]),
+            Value::frozen_byte_array(vec![1, 2, 3, 4]),
+        ] {
+            for method in ["data_ptr", "ptr"] {
+                let ptr = call_value(value.clone(), method, &[])
+                    .expect("data_ptr")
+                    .as_int()
+                    .expect("int pointer");
+                let (Value::ByteArray(bytes) | Value::FrozenByteArray(bytes)) = &value else { unreachable!() };
+                assert_eq!(ptr, bytes.as_ptr() as i64, "{method} must return the packed byte pointer");
+                // SAFETY: `ptr` addresses `bytes`, which `value` keeps alive here.
+                let word = unsafe { std::ptr::read_unaligned(ptr as *const u32) };
+                assert_eq!(word, 0x0403_0201);
+            }
         }
     }
 

@@ -1,0 +1,277 @@
+# ============================================================================
+# common/trace/data/data_observation_contracts.spl — versioned data-observation
+# extension of the V1 trace contract (plan W0/W5, doc/03_plan/compiler/data/
+# data_attributes_layout_containers_xray_2026-11-06.md sections 10.3-10.5).
+#
+# Does not reinterpret any TraceEventV1 ordinal or byte. Data records are a
+# separate typed record family with their own header, bound to a V1 session by
+# generation and to V1 selection by (module_instance, site_id). Hot records
+# carry compact numeric indices only: no raw keys, values, text or pointers.
+# Pure values and a cold codec: no file I/O, no OS imports.
+# ============================================================================
+
+pub const DATA_OBSERVATION_SCHEMA_V1: i64 = 1
+pub const DATA_OBSERVATION_RECORD_BYTES_V1: i64 = 64
+pub const DATA_RECORD_HEADER_BYTES_V1: i64 = 8
+# Frame magic ("SD" little-endian). Never 1, the V1 trace event schema value.
+pub const DATA_RECORD_FRAME_MAGIC_V1: i64 = 17491
+pub const DATA_RECORD_MAX_BYTES_V1: i64 = 4096
+
+# Record tag registry. 1 = DataObservationV1 aggregate. 256..511 is reserved
+# for optional typed records owned by the adaptive-collections plan
+# (CollectionSummaryV1, size histograms, phase windows); readers that do not
+# know such a record frame-skip it. Any other tag fails closed.
+pub const DATA_RECORD_TAG_OBSERVATION_V1: i64 = 1
+pub const DATA_RECORD_TAG_OPTIONAL_MIN_V1: i64 = 256
+pub const DATA_RECORD_TAG_OPTIONAL_MAX_V1: i64 = 511
+
+pub enum DataObservationKindV1:
+    FieldRead
+    FieldWrite
+    FieldInit
+    CollectionOp
+    NodeCreate
+    NodeFinish
+    NodeDiscard
+    NodeRemove
+    RepresentationTransition
+
+pub fn data_observation_kind_code_v1(kind: DataObservationKindV1) -> i64:
+    match kind:
+        case DataObservationKindV1.FieldRead: 1
+        case DataObservationKindV1.FieldWrite: 2
+        case DataObservationKindV1.FieldInit: 3
+        case DataObservationKindV1.CollectionOp: 4
+        case DataObservationKindV1.NodeCreate: 5
+        case DataObservationKindV1.NodeFinish: 6
+        case DataObservationKindV1.NodeDiscard: 7
+        case DataObservationKindV1.NodeRemove: 8
+        case DataObservationKindV1.RepresentationTransition: 9
+
+pub fn data_observation_kind_from_code_v1(code: i64) -> Result<DataObservationKindV1, text>:
+    match code:
+        case 1: Ok(DataObservationKindV1.FieldRead)
+        case 2: Ok(DataObservationKindV1.FieldWrite)
+        case 3: Ok(DataObservationKindV1.FieldInit)
+        case 4: Ok(DataObservationKindV1.CollectionOp)
+        case 5: Ok(DataObservationKindV1.NodeCreate)
+        case 6: Ok(DataObservationKindV1.NodeFinish)
+        case 7: Ok(DataObservationKindV1.NodeDiscard)
+        case 8: Ok(DataObservationKindV1.NodeRemove)
+        case 9: Ok(DataObservationKindV1.RepresentationTransition)
+        case _: Err("unknown data observation kind {code}")
+
+pub enum DataCollectionOpV1:
+    None
+    Lookup
+    Insert
+    Remove
+    Iterate
+    Resize
+
+pub fn data_collection_op_code_v1(op: DataCollectionOpV1) -> i64:
+    match op:
+        case DataCollectionOpV1.None: 0
+        case DataCollectionOpV1.Lookup: 1
+        case DataCollectionOpV1.Insert: 2
+        case DataCollectionOpV1.Remove: 3
+        case DataCollectionOpV1.Iterate: 4
+        case DataCollectionOpV1.Resize: 5
+
+pub fn data_collection_op_from_code_v1(code: i64) -> Result<DataCollectionOpV1, text>:
+    match code:
+        case 0: Ok(DataCollectionOpV1.None)
+        case 1: Ok(DataCollectionOpV1.Lookup)
+        case 2: Ok(DataCollectionOpV1.Insert)
+        case 3: Ok(DataCollectionOpV1.Remove)
+        case 4: Ok(DataCollectionOpV1.Iterate)
+        case 5: Ok(DataCollectionOpV1.Resize)
+        case _: Err("unknown collection op {code}")
+
+# Zero is a measurement. NotMeasured, Unsupported, Dropped and Overflowed are
+# not, and carry value 0 only as a canonical encoding that readers must never
+# interpret as a count.
+pub enum DataMetricStateV1:
+    Measured
+    NotMeasured
+    Unsupported
+    Dropped
+    Overflowed
+
+pub fn data_metric_state_code_v1(state: DataMetricStateV1) -> i64:
+    match state:
+        case DataMetricStateV1.Measured: 1
+        case DataMetricStateV1.NotMeasured: 2
+        case DataMetricStateV1.Unsupported: 3
+        case DataMetricStateV1.Dropped: 4
+        case DataMetricStateV1.Overflowed: 5
+
+pub fn data_metric_state_from_code_v1(code: i64) -> Result<DataMetricStateV1, text>:
+    match code:
+        case 1: Ok(DataMetricStateV1.Measured)
+        case 2: Ok(DataMetricStateV1.NotMeasured)
+        case 3: Ok(DataMetricStateV1.Unsupported)
+        case 4: Ok(DataMetricStateV1.Dropped)
+        case 5: Ok(DataMetricStateV1.Overflowed)
+        case _: Err("unknown metric state {code}")
+
+pub struct DataMetricV1:
+    state: DataMetricStateV1
+    value: u64
+
+pub fn data_metric_measured_v1(value: u64) -> DataMetricV1:
+    DataMetricV1(state: DataMetricStateV1.Measured, value: value)
+
+pub fn data_metric_not_measured_v1() -> DataMetricV1:
+    DataMetricV1(state: DataMetricStateV1.NotMeasured, value: 0)
+
+pub fn data_metric_unsupported_v1() -> DataMetricV1:
+    DataMetricV1(state: DataMetricStateV1.Unsupported, value: 0)
+
+pub fn data_metric_dropped_v1() -> DataMetricV1:
+    DataMetricV1(state: DataMetricStateV1.Dropped, value: 0)
+
+pub fn data_metric_overflowed_v1() -> DataMetricV1:
+    DataMetricV1(state: DataMetricStateV1.Overflowed, value: 0)
+
+# The only way to read a count: anything but Measured is an error, never 0.
+pub fn data_metric_value_v1(metric: DataMetricV1) -> Result<u64, text>:
+    match metric.state:
+        case DataMetricStateV1.Measured: Ok(metric.value)
+        case _: Err("metric state {data_metric_state_code_v1(metric.state)} is not a measurement")
+
+# One aggregate observation for one selected logical site. `schema_index` and
+# `attr_ordinal` index the cold capture manifest (tree schema / AttrId);
+# `representation_epoch` names the physical view, never node identity.
+pub struct DataObservationV1:
+    kind: DataObservationKindV1
+    generation: u64
+    module_instance: u64
+    site_id: u32
+    schema_index: u32
+    attr_ordinal: u32
+    op: DataCollectionOpV1
+    count: DataMetricV1
+    aux: DataMetricV1
+    representation_epoch: u32
+
+pub fn data_observation_valid_v1(o: DataObservationV1) -> bool:
+    if o.generation == 0 or o.module_instance == 0 or o.site_id == 0:
+        return false
+    val kind = data_observation_kind_code_v1(o.kind)
+    val op = data_collection_op_code_v1(o.op)
+    if kind <= 3:
+        return o.attr_ordinal > 0 and o.schema_index > 0 and op == 0
+    if kind == 4:
+        return op > 0 and o.attr_ordinal == 0
+    # Node lifecycle and representation transitions are per schema, not per field.
+    o.schema_index > 0 and o.attr_ordinal == 0 and op == 0
+
+fn data_append_le_v1(bytes: [u8], value: u64, width: i64) -> [u8]:
+    var output = bytes
+    var index = 0
+    while index < width:
+        output.push(((value >> (index * 8)) & 255) as u8)
+        index = index + 1
+    output
+
+# Caller checks the full fixed record length before any indexed read.
+fn data_read_le_v1(bytes: [u8], offset: i64, width: i64) -> u64:
+    var value: u64 = 0
+    var index = 0
+    while index < width:
+        value = value | ((bytes[offset + index] as u64) << (index * 8))
+        index = index + 1
+    value
+
+fn data_metric_canonical_v1(metric: DataMetricV1) -> bool:
+    data_metric_state_code_v1(metric.state) == 1 or metric.value == 0
+
+# Layout (little-endian, 64 bytes): frame magic u16@0, size u16@2, tag u16@4,
+# record version u16@6, generation u64@8, module u64@16, site u32@24,
+# attr u32@28, schema_index u32@32, kind u16@36, op u16@38, count_state u8@40,
+# aux_state u8@41, reserved-zero u16@42, epoch u32@44, count u64@48, aux u64@56.
+# The frame magic is never 1, so a data frame can never be read as a
+# TraceEventV1 (whose schema u16@0 is 1) or the reverse.
+pub fn data_observation_encode_v1(o: DataObservationV1) -> Result<[u8], text>:
+    if not data_observation_valid_v1(o):
+        return Err("invalid data observation identity")
+    if not data_metric_canonical_v1(o.count) or not data_metric_canonical_v1(o.aux):
+        return Err("non-measured metric carries a value")
+    var b: [u8] = []
+    b = data_append_le_v1(b, DATA_RECORD_FRAME_MAGIC_V1 as u64, 2)
+    b = data_append_le_v1(b, DATA_OBSERVATION_RECORD_BYTES_V1 as u64, 2)
+    b = data_append_le_v1(b, DATA_RECORD_TAG_OBSERVATION_V1 as u64, 2)
+    b = data_append_le_v1(b, DATA_OBSERVATION_SCHEMA_V1 as u64, 2)
+    b = data_append_le_v1(b, o.generation, 8)
+    b = data_append_le_v1(b, o.module_instance, 8)
+    b = data_append_le_v1(b, o.site_id as u64, 4)
+    b = data_append_le_v1(b, o.attr_ordinal as u64, 4)
+    b = data_append_le_v1(b, o.schema_index as u64, 4)
+    b = data_append_le_v1(b, data_observation_kind_code_v1(o.kind) as u64, 2)
+    b = data_append_le_v1(b, data_collection_op_code_v1(o.op) as u64, 2)
+    b = data_append_le_v1(b, data_metric_state_code_v1(o.count.state) as u64, 1)
+    b = data_append_le_v1(b, data_metric_state_code_v1(o.aux.state) as u64, 1)
+    b = data_append_le_v1(b, 0, 2)
+    b = data_append_le_v1(b, o.representation_epoch as u64, 4)
+    b = data_append_le_v1(b, o.count.value, 8)
+    Ok(data_append_le_v1(b, o.aux.value, 8))
+
+fn data_metric_decode_v1(state_code: u64, value: u64) -> Result<DataMetricV1, text>:
+    val state = data_metric_state_from_code_v1(state_code as i64)?
+    val metric = DataMetricV1(state: state, value: value)
+    if not data_metric_canonical_v1(metric):
+        return Err("non-measured metric carries a value")
+    Ok(metric)
+
+pub fn data_observation_decode_v1(bytes: [u8]) -> Result<DataObservationV1, text>:
+    val frame = data_record_frame_peek_v1(bytes)?
+    if frame.tag != DATA_RECORD_TAG_OBSERVATION_V1 or bytes.len() != DATA_OBSERVATION_RECORD_BYTES_V1:
+        return Err("not a single data observation record")
+    if data_read_le_v1(bytes, 42, 2) != 0:
+        return Err("reserved bytes must be zero")
+    val kind = data_observation_kind_from_code_v1(data_read_le_v1(bytes, 36, 2) as i64)?
+    val op = data_collection_op_from_code_v1(data_read_le_v1(bytes, 38, 2) as i64)?
+    val count = data_metric_decode_v1(data_read_le_v1(bytes, 40, 1), data_read_le_v1(bytes, 48, 8))?
+    val aux = data_metric_decode_v1(data_read_le_v1(bytes, 41, 1), data_read_le_v1(bytes, 56, 8))?
+    val o = DataObservationV1(kind: kind,
+        generation: data_read_le_v1(bytes, 8, 8),
+        module_instance: data_read_le_v1(bytes, 16, 8),
+        site_id: data_read_le_v1(bytes, 24, 4) as u32,
+        attr_ordinal: data_read_le_v1(bytes, 28, 4) as u32,
+        schema_index: data_read_le_v1(bytes, 32, 4) as u32,
+        op: op, count: count, aux: aux,
+        representation_epoch: data_read_le_v1(bytes, 44, 4) as u32)
+    if not data_observation_valid_v1(o):
+        return Err("invalid data observation identity")
+    Ok(o)
+
+pub struct DataRecordFrameV1:
+    tag: i64
+    version: i64
+    size: i64
+    known: bool
+
+pub fn data_record_tag_is_optional_v1(tag: i64) -> bool:
+    tag >= DATA_RECORD_TAG_OPTIONAL_MIN_V1 and tag <= DATA_RECORD_TAG_OPTIONAL_MAX_V1
+
+# Reads only the 8-byte frame header at the start of `bytes`. The frame
+# (magic/size/tag/version) is versioned separately from each record body, so
+# optional records keep framing when the observation record moves to v2.
+pub fn data_record_frame_peek_v1(bytes: [u8]) -> Result<DataRecordFrameV1, text>:
+    if bytes.len() < DATA_RECORD_HEADER_BYTES_V1:
+        return Err("truncated record header")
+    if data_read_le_v1(bytes, 0, 2) != DATA_RECORD_FRAME_MAGIC_V1 as u64:
+        return Err("not a data record frame")
+    val size = data_read_le_v1(bytes, 2, 2) as i64
+    val tag = data_read_le_v1(bytes, 4, 2) as i64
+    val version = data_read_le_v1(bytes, 6, 2) as i64
+    if size < DATA_RECORD_HEADER_BYTES_V1 or size > DATA_RECORD_MAX_BYTES_V1 or size > bytes.len():
+        return Err("record size out of bounds")
+    if tag == DATA_RECORD_TAG_OBSERVATION_V1:
+        if version != DATA_OBSERVATION_SCHEMA_V1 or size != DATA_OBSERVATION_RECORD_BYTES_V1:
+            return Err("unsupported data observation version or size")
+        return Ok(DataRecordFrameV1(tag: tag, version: version, size: size, known: true))
+    if data_record_tag_is_optional_v1(tag):
+        return Ok(DataRecordFrameV1(tag: tag, version: version, size: size, known: false))
+    Err("unknown record tag {tag}")

@@ -178,9 +178,11 @@ How to read the output:
 - Table format: 7 header lines (`Snapshot:`, `Capture:`, `Ingestion:`,
   `Graph complete:`, `Qualification:`, `Generation:`, `Input manifest:`), then
   `KIND<TAB>ID<TAB>TITLE` rows, `Total selected: N`, optional `Next cursor:`,
-  then diagnostics (none for the default preview; a
-  `TRACE-AUTHORITY-CONFLICT` line means a claim outside the authority
-  registry and is a real finding). Grep the rows out with `grep -P '^\w+\t'`.
+  then (when any exist) one summary line `Diagnostics: N (details on stderr)`;
+  the per-row diagnostics go to **stderr** (SDN keeps them inside its document).
+  For the default preview there should be none; a `TRACE-AUTHORITY-CONFLICT`
+  line means a claim outside the authority registry and is a real finding.
+  Grep the rows out with `grep -P '^\w+\t'`.
 - `--format=sdn`: one inline SDN dictionary on one line. Keys agents use:
   `nodes: [{id, kind, title}]`, `total_count`, `next_cursor`, `page_complete`,
   `graph_complete`, `snapshot_kind` (`worktree_preview` | `git_commit` |
@@ -348,3 +350,22 @@ $S run src/app/traceability/query_main.spl refs file test/01_unit/app/traceabili
 - No cursor: `--limit` caps claim rows (`page complete: false` when capped).
   Bugs use the exact `file` column, so pass the file path, not a directory;
   for an area use `list bugs --file-prefix=<dir>/`.
+
+## Spec driver fallback and exit semantics (2026-11-06)
+
+- `scripts/check/check-trace-query-p0.shs` runs each spec through `simple test`;
+  when that binary produces no `SPEC FILE VERDICT:` line (the seed refuses
+  `test`) it falls back to `simple run <spec>`, which emits the same verdict
+  line and exit status. A genuine spec failure keeps its own verdict and is
+  never retried. Fixture steps are unchanged.
+- Query exit 1 means "rendered, but the graph is incomplete"; a complete graph
+  exits 0 even when sidecar warnings (e.g. `TRACE-LEGACY-ROW`) are present. The
+  spec derives its expected status from the page's `Graph complete:` line.
+- Requirement-to-spec links are sidecar references (`# @req` headers under
+  `--spec-root`, rendered as `SIDECAR verified_by`), deliberately not graph
+  claims: they carry no pinned blob or registered authority, so promoting them
+  would raise TRACE-AUTHORITY-CONFLICT. Spec-to-test-case edges need the
+  native-only `extract_sspec_inventory_single_owner` provider and are not
+  ingested by the lightweight query path.
+- Seed state: with a seed lacking the #7214 owned-process fix the three git/index
+  scenarios fail with `owned process start: invalid 4-word receipt` (7/10 pass).

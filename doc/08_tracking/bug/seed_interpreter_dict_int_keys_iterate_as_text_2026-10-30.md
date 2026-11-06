@@ -1,6 +1,6 @@
 # Seed interpreter: integer dict keys come back as text from `keys()` / iteration (2026-10-30)
 
-Status: open
+Status: FIXED (by `2babf02208f`, verified 2026-11-06) — see "Resolution"
 Area: Rust seed interpreter, `src/compiler_rust/compiler/src/value_impl.rs` (dict entry helpers)
 Found by: `test/01_unit/compiler/type_inference/generic_active_bound_inference_spec.spl`
 
@@ -92,3 +92,18 @@ A cheaper alternative needs a design decision: a typed key enum in place of
 Side note: `dict_entries_sorted` orders by the string key, so int keys iterate
 as `"10" < "9"`. Any fix that makes keys typed should decide whether that order
 also changes.
+
+## Resolution (verified 2026-11-06)
+
+Fixed by `2babf02208f` ("fix(seed-interp): Dict keeps non-text keys typed
+through iteration"): numbers and bools now use the `wrap_dict_entry`
+storage (`dict_key_is_scalar` renamed `dict_key_round_trips`) and the raw
+readers listed above (display, `for` over a dict, `runtime_bridge`,
+`sffi_dict`) unwrap it.
+
+Evidence on a seed built from `release/1.0.0` @ `ecb705896a4`, interpreter
+mode: `test/fixtures/seed_interp/dict_int_keys_iterate_repro.spl` prints
+`dict_int_keys 7 true 1`; an additional probe over an untyped `{}`, a
+class field `Dict<i64, text>`, a literal `{3: "a"}` and `entries()` gives
+`key + 1 == 8`, `key != 7` false, and `key == "7"` false — the key is an
+`i64`, not text.

@@ -442,6 +442,7 @@ pub fn compile_instruction<M: Module>(
             // FR-DRIVER-0002b: pass VRegs through so compile_binop can read
             // operand signedness from `ctx.vreg_types` for sshr/ushr dispatch.
             let val = compile_binop(ctx, builder, *op, lhs, rhs, *left, *right)?;
+            let val = core::wrap_narrow_unsigned_arith(ctx, builder, *op, *dest, *right, rhs, val);
             ctx.vreg_values.insert(*dest, val);
         }
 

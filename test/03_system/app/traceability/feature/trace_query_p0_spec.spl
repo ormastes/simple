@@ -45,6 +45,12 @@ fn actual_query_cli(args: [text]) -> (text, text, i32):
         return ("", "SIMPLE_BINARY, SIMPLE_TRACE_QUERY_TEST_COMMAND or SIMPLE_TRACE_QUERY_TEST_BINARY is required", 2)
     process_run_timeout(runner, ["run", "src/app/traceability/query_main.spl"] + args, 30000)
 
+# Exit 1 means "rendered, but the graph is incomplete"; a complete graph exits 0.
+# The page states which it is, so the expectation does not depend on how many
+# diagnostics a given checkout happens to carry.
+fn complete_graph_status(page: text) -> i32:
+    if page.contains("Graph complete: true"): 0 else: 1
+
 fn query_document(output: text) -> Dict<text, SdnValue>:
     val parsed = parse_with_spans_and_issues(output).unwrap()
     expect(parsed.2.len()).to_equal(0)
@@ -91,6 +97,15 @@ describe "Inspect registered facts from captured source":
         expect(fields["admission_eligible"]).to_equal(SdnValue.Bool(false))
         expect(fields["graph_complete"]).to_equal(SdnValue.Bool(true))
         expect(output).not_to_contain("TRACE-AUTHORITY-CONFLICT")
+
+    it "keeps table diagnostics on stderr and a single summary count on stdout":
+        step("Run the table form of list features")
+        val (table, table_errors, table_status) = actual_query_cli(["list", "features", "--bug-db=none"])
+        expect(table_status).to_equal(1)
+        expect(table).to_contain("Total selected:")
+        expect(table).to_contain("details on stderr)")
+        expect(table.contains("TRACE-AUTHORITY-CONFLICT")).to_be(false)
+        expect(table_errors).to_contain("TRACE-AUTHORITY-CONFLICT")
 
     it "answers list bugs from the legacy bug-DB sidecar without writing or claiming authority":
         # @ac AC-TRC-041
@@ -140,12 +155,12 @@ describe "Inspect registered facts from captured source":
         expect(absent).to_contain("TRACE-QUERY-NOT-FOUND")
         step("refs file summarizes one path: claims, declared entities and sidecar rows")
         val (file_page, file_errors, file_status) = actual_query_cli(["refs", "file", "src/app/traceability/main.spl"])
-        expect(file_status).to_equal(1)
+        expect(file_status).to_equal(complete_graph_status(file_page))
         expect(file_page).to_contain("Selected: source_file source:trace-cli src/app/traceability/main.spl")
         expect(file_page).to_contain("incoming\timplemented_by\tfeature:traceability\t")
         expect(file_page).to_contain("LOCATOR\tsrc/app/traceability/main.spl\tfile\t\tsource:trace-cli\n")
         val (spec_page, spec_errors, spec_status) = actual_query_cli(["refs", "file", "test/01_unit/app/traceability/legacy_bugs_sidecar_spec.spl", "--spec-root=test/01_unit/app/traceability"])
-        expect(spec_status).to_equal(1)
+        expect(spec_status).to_equal(complete_graph_status(spec_page))
         expect(spec_page).to_contain("SIDECAR\tverified_by\ttest/01_unit/app/traceability/legacy_bugs_sidecar_spec.spl\theader\tannotation-claim\treq:REQ-TRC-015\n")
         val (none_page, none_errors, none_status) = actual_query_cli(["refs", "file", "src/app/does_not_exist.spl", "--bug-db=none"])
         expect(none_status).to_equal(1)

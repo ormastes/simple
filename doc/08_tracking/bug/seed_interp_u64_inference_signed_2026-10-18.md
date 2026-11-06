@@ -1,5 +1,7 @@
 # Seed interpreter: unannotated `val` from u64 extern results is treated as signed i64
 
+Status: FIXED (already, verified 2026-11-06) — see "Resolution".
+
 Date: 2026-10-18. Scope: Rust seed interpreter only (bin/local/seed_simple, sha256 prefix 9c45d2bf601ab93e).
 The self-hosted compiler was NOT checked: no pure-Simple CLI is deployed on this host. JIT is unaffected.
 
@@ -26,3 +28,18 @@ Needs the xor of two values produced by the extern-backed function.
 
 ## Workaround
 Annotate u64 locals explicitly (`val x: u64 = ...`); done throughout xxh3.spl.
+
+## Resolution (verified 2026-11-06)
+
+No longer reproduces. A seed built from `release/1.0.0` @ `ecb705896a4`
+(debug, interpreter mode, `SIMPLE_EXECUTION_MODE=interpret`) prints for
+`test/fixtures/compiler/seed_interp_u64_inference_repro/main.spl`:
+
+```
+inferred  hi=2942932839
+annotated hi=2942932839
+```
+
+identical to JIT. No code change was needed in this pass; the u64 extern
+result is kept `Value::UInt` through the unannotated binding and the xor.
+The `xxh3.spl` annotations are harmless and may be dropped at leisure.

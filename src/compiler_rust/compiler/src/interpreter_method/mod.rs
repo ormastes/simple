@@ -472,6 +472,15 @@ pub(crate) fn evaluate_method_call(
                 .collect::<Result<Vec<_>, _>>()?;
             return char_from_code(&evaluated_args);
         }
+        // `text.from_bytes(b)`: native routes it to `rt_bytes_to_text`
+        // (seed_interp_text_from_bytes_static_2026-11-06).
+        if module_name == "text" && method == "from_bytes" {
+            let evaluated_args: Vec<Value> = args
+                .iter()
+                .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                .collect::<Result<Vec<_>, _>>()?;
+            return crate::interpreter::interpreter_extern::conversion::rt_bytes_to_text_fn(&evaluated_args);
+        }
         if module_name == "text" && method == "from_char_code" {
             let evaluated_args: Vec<Value> = args
                 .iter()
@@ -2145,6 +2154,13 @@ pub(crate) fn evaluate_method_call_with_self_update(
                 .collect::<Result<Vec<_>, _>>()?;
             return Ok((char_from_code(&evaluated_args)?, None));
         }
+        if module_name == "text" && method == "from_bytes" {
+            let evaluated_args: Vec<Value> = args
+                .iter()
+                .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok((crate::interpreter::interpreter_extern::conversion::rt_bytes_to_text_fn(&evaluated_args)?, None));
+        }
         if module_name == "text" && method == "from_char_code" {
             let evaluated_args: Vec<Value> = args
                 .iter()
@@ -2637,5 +2653,19 @@ main = c.double_add()
             ),
             Some(Ordering::Less),
         );
+    }
+}
+
+#[cfg(test)]
+mod text_from_bytes_static_tests {
+    //! seed_interp_text_from_bytes_static_2026-11-06: `text.from_bytes(b)` is
+    //! a builtin static (native: `rt_bytes_to_text`), not a variable lookup.
+    use crate::interpreter::evaluate_module;
+    use simple_parser::Parser;
+
+    #[test]
+    fn text_from_bytes_builds_text_from_a_byte_array() {
+        let src = "fn probe() -> i64:\n    val b: [u8] = [97u8, 98u8, 99u8]\n    val t = text.from_bytes(b)\n    if t == \"abc\":\n        return 1\n    0\nmain = probe()\n";
+        assert_eq!(evaluate_module(&Parser::new(src).parse().expect("parse").items).expect("evaluate"), 1);
     }
 }

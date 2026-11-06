@@ -605,7 +605,7 @@ impl<'a> Parser<'a> {
             TokenKind::Var | TokenKind::Val => {
                 let algorithm = self.collection_algorithm_attribute(&attributes)?;
                 let mut node = self.parse_item()?;
-                if let Some(algorithm) = algorithm {
+                if let Some((algorithm, label)) = algorithm {
                     let Node::Let(ref mut binding) = node else {
                         return Err(ParseError::contextual_error(
                             "collection algorithm",
@@ -636,7 +636,10 @@ impl<'a> Parser<'a> {
                             binding.span,
                         )),
                     };
-                    let site_id = self.collection_site_id(name, binding.span, false);
+                    let site_id = match &label {
+                        Some(label) => self.collection_label_site_id(label, binding.span)?,
+                        None => self.collection_site_id(name, binding.span, false),
+                    };
                     binding.value = Some(self.collection_attributed_value(
                         value, &algorithm, &site_id, binding.span, declared_type.as_ref()
                     )?);

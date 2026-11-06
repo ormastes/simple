@@ -83,3 +83,24 @@ bin/simple test test/01_unit/common/structural/storage_layout_contract_spec.spl 
 bin/simple test test/01_unit/compiler/backend/native/storage_layout_native_projection_spec.spl --mode=interpreter
 bin/simple test test/01_unit/compiler/mir_opt/typed_storage_view_declaration_spec.spl --mode=interpreter
 ```
+
+## Data-policy envelope (2026-11-06)
+
+`src/compiler/35.semantics/perf/resolved_data_policy.spl` binds a `StorageLayoutPlanV1` to a resolved rule choice (`aos`/`soa`/... tokens from `resolved_layout_token_v1`, or `auto`) plus the schema digest. It refuses a well-formed plan that contradicts an explicit pin. It adds no layout enum; the planner stays the authority. Rule precedence follows plan section 8.4: `data_policy_resolve_rules_v1` in `src/compiler/00.common/data/data_schema_resolver.spl`.
+
+Data plan W0/W1 (2026-11-06, `doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md`): data observations are a SEPARATE versioned record family in `src/lib/common/trace/data/data_observation_contracts.spl` (64-byte LE record; its frame header is magic 0x4453/size/tag/version, so it can never parse as a V1 event whose schema u16 is 1; tag 1 = `DataObservationV1`, tags 256..511 reserved for optional adaptive-collection records such as `CollectionSummaryV1`, frame-skipped by readers that do not know them). They never reuse a `TraceEventKindV1` ordinal and bind to a V1 session by generation and to V1 selection by `(module_instance, site_id)`. `DataMetricV1` carries `Measured|NotMeasured|Unsupported|Dropped|Overflowed`; read counts only through `data_metric_value_v1`, which errors for every non-measured state. A subdirectory is used because `src/lib/common/trace/` reaches the 10-file limit once PR5's `xray_native_map_format_v1.spl` lands. Schema and policy resolution: `src/compiler/00.common/data/` (one SPL+SDN resolver; the SDN path uses `parse_with_spans_and_issues`, so duplicate keys fail instead of last-writer-wins) and `src/compiler/35.semantics/perf/resolved_data_policy.spl`, which composes `StorageLayoutPlanV1` and `CollectionPlanDecision` under `DataPolicyKindV1`. `ResolvedCollectionPolicyV1` (`resolved_collection_policy.spl`) is the collection row: it is keyed by `CollectionOriginV1`, and its digest excludes provenance, so equal source and SDN declarations give byte-identical digests. SDN `data_policy.profiles.*.events` is refused, because runtime selection goes only through aspect params. Trap: the 2026-11-04 seed interpreter mis-matches `case N:` on a `u64` scrutinee (fixed in-tree by `e36e4e9dfa4`). Take an i64 code in decoders, or assert through the enum-to-code direction.
+
+W5 (2026-11-06): per-worker aggregation lives in `src/lib/common/trace/data/data_observation_aggregator_v1.spl`. It is the aggregation and lifecycle contract only: no compiled hook calls `record` until W2 generates data sites and a provider adapter owns one aggregator per worker. Its `site_id -> slot` Dict keeps `record` O(1). In a merge, one measured side plus one unmeasured side gives Dropped (partial coverage), never a complete-looking sum.
+- It follows the V1 lifecycle: `prepare(config, selection)` → `start(gen)` → `record`/`record_dropped`/`stop`/`resume`/`reselect` (only while stopped) → `drain`.
+- Data sites exist only when a data-site manifest exists: no manifest means InstrumentationAbsent. The aspect-param `TraceSelectionV1` chooses which sites record. PairedSpans is refused.
+- An unselected site produces no record. A selected site that never fired is `Measured(0)`. Saturation gives `Overflowed` and a refused observation gives `Dropped` plus loss. Any stop/resume marks the drain incomplete.
+- Merging records from different workers is deterministic: Overflowed > Dropped > Unsupported > summed Measured.
+- Aggregates do not use the 96-byte native edge channel. Its admission gate, and the C twin of that gate, accept V1 kinds 1..10 only.
+
+`.sprof`: data records are a minor extension of `sprof-v2` (owner decision; no sprof-v3).
+- A profile announces them with `ext;data_minor=1`. Record lines are `data_field;…`, `data_collection;…` and `data_node;…`. Metric tokens are state-tagged (`m:<n>|n|u|d|o`), and a bare or missing count is a diagnostic.
+- `data_opt;tag=256..511` lines are counted and skipped.
+- The envelope name is the single constant `DATA_SPROF_ENVELOPE_V1` in `data_sprof_v1.spl`.
+- Loader entry points: `sprof_load_data_observations` and `sprof_serialize_profile_with_data` in `src/app/optimize/sprof_loader.spl`. The counter loader still ignores `data_*` lines.
+
+Trap: `char.to_digit()` is not an int on the seed ("cannot convert enum to int"). Use `ch as i64`.

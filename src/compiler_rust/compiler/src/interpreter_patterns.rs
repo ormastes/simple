@@ -272,9 +272,19 @@ pub(crate) fn pattern_matches(
                 Expr::Integer(_) | Expr::TypedInteger(_, _) => {
                     match value {
                         Value::Int(v) => Ok(int_literal_bits(lit_expr) == Some(*v)),
-                        // Sized unsigned scrutinees (`addr: u64`) carry `Value::UInt`:
-                        // compare by numeric VALUE, so a negative literal never
-                        // matches (u64::MAX is not `case -1`).
+                        // An unsuffixed literal above i64::MAX (`0x8000000000000000`)
+                        // is lexed as its i64 bit pattern, indistinguishable in the
+                        // AST from `case -N`. Against a 64-bit unsigned scrutinee
+                        // compare the 64-bit pattern, as JIT/native do; otherwise
+                        // `case 0x8000000000000000` never matched
+                        // (seed_interp_u64_high_bit_literal_pattern_2026-11-06).
+                        Value::UInt { value: v, width: 64 }
+                            if matches!(lit_expr.as_ref(), Expr::Integer(i) if *i < 0) =>
+                        {
+                            Ok(int_literal_bits(lit_expr) == Some(*v as i64))
+                        }
+                        // Narrower unsigned scrutinees (`b: u8`) compare by numeric
+                        // VALUE, so a negative literal never matches.
                         Value::UInt { value: v, .. } => Ok(Some(*v as i128) == int_pattern_bound(lit_expr)),
                         _ => Ok(false),
                     }
@@ -1856,13 +1866,27 @@ main = construct()
     #[test]
     fn uint_scrutinee_never_matches_a_negative_int_literal() {
         let minus_one = Pattern::Literal(Box::new(Expr::Integer(-1)));
-        assert!(!matches(&minus_one, &uint(u64::MAX)));
+        // A narrower unsigned scrutinee never matches a negative literal. (A
+        // 64-bit one compares bit patterns: see
+        // `u64_scrutinee_matches_an_over_i64_max_unsuffixed_literal`.)
+        assert!(!matches(&minus_one, &Value::UInt { value: 255, width: 8 }));
         let zero = Pattern::Literal(Box::new(Expr::Integer(0)));
         assert!(matches(&zero, &uint(0)));
         // A `u64`-suffixed literal above i64::MAX is lexed as its bit pattern
         // (`0xFFFF_FFFF_FFFF_FFFFu64` -> -1i64) and must still match.
         let max_u64 = Pattern::Literal(Box::new(Expr::TypedInteger(-1, simple_parser::NumericSuffix::U64)));
         assert!(matches(&max_u64, &uint(u64::MAX)));
+    }
+
+    /// seed_interp_u64_high_bit_literal_pattern_2026-11-06: `case
+    /// 0x8000000000000000` is lexed as i64::MIN and must match that u64.
+    #[test]
+    fn u64_scrutinee_matches_an_over_i64_max_unsuffixed_literal() {
+        let high_bit = Pattern::Literal(Box::new(Expr::Integer(i64::MIN)));
+        assert!(matches(&high_bit, &uint(0x8000_0000_0000_0000)));
+        assert!(!matches(&high_bit, &uint(5)));
+        let src = "fn classify(u: u64) -> i64:\n    match u:\n        case 0x8000000000000000: 1\n        case _: 2\nfn probe() -> i64:\n    val s: u64 = 0x8000000000000000\n    classify(s) * 10 + classify(5)\nmain = probe()\n";
+        assert_eq!(run(src), 12);
     }
 
     #[test]

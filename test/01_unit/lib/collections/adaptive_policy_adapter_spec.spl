@@ -1,0 +1,211 @@
+# @cover src/compiler/35.semantics/perf/collection_policy_adapter.spl 80%
+"""
+## Purpose and audience
+The collection policy adapter is the one place where a resolved
+`ResolvedCollectionPolicyV1` (W1) chooses the linear, chained-hash or AVL
+storage of `AdaptiveTextSet`, `AdaptiveMap` and `AdaptiveSet`. It explains
+every rejected candidate, fails an unsupported explicit pin with an error
+instead of a panic, and keeps the container's original representation when
+`auto` has no admitted evidence. Readers are compiler and adaptive-collection
+authors. Plans: doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md
+(§7.4, §14 W4, §17 W4); doc/03_plan/compiler/data/adaptive_collections_profiling_switching_2026-09-16.md (§21).
+Category: Infrastructure.
+## Operator workflow
+bin/simple test test/01_unit/lib/collections/adaptive_policy_adapter_spec.spl
+## Compatibility and limitations
+`AdaptiveMap` and `AdaptiveSet` call the `spl_ordered_key_cmp` and
+`spl_collection_capture_*` externs once they hold entries; the Rust seed
+interpreter has no backing for them, so the populated map scenario runs only on
+a runtime that links those externs. The text-set scenarios use no site id and
+reach no extern. An ordered pin on a key type without native order is still a
+runtime check at the first insert; the adapter cannot see key values.
+## Verification guidance and troubleshooting
+If the transition scenario goes RED, a directed representation change lost or
+rewrote a value. If the unsupported-pin scenario panics instead of failing, the
+adapter stopped checking the container profile before `set_attribute`.
+"""
+# Lifecycle: doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md
+# @manual_section: Adaptive collection policy adapter
+
+use std.spec.*
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveTextSet, AdaptiveSetAlgorithm, AdaptiveSetAttribute, AdaptiveSetProfile, adaptive_set_default_profile}
+use std.nogc_sync_mut.src.collections.adaptive_map.AdaptiveMap
+use std.nogc_sync_mut.src.collections.adaptive_set.AdaptiveSet
+use compiler.common.data.data_schema_contracts.*
+use compiler.common.data.data_schema_resolver.*
+use compiler.semantics.perf.collection_plan_selection.{CollectionPlanAlgorithm}
+use compiler.semantics.perf_facts.collection_contracts.{CollectionOriginV1, CollectionCreationKind}
+use compiler.semantics.perf.resolved_collection_policy.*
+use compiler.semantics.perf.collection_policy_adapter.*
+
+fn adapter_origin() -> CollectionOriginV1:
+    CollectionOriginV1(legacy_site_id: "ast://compiler/resolve#symbols#1", module_key: "compiler.resolve",
+        owner_path: "resolve", binding_name: "symbols", creation_kind: CollectionCreationKind.Local,
+        token_fingerprint: "tok-v1-fnv64:1", type_fingerprint: "ctype-fnv64:2", origin_id: "corigin-v1:77")
+
+fn adapter_all_three() -> [CollectionPlanAlgorithm]:
+    [CollectionPlanAlgorithm.Linear, CollectionPlanAlgorithm.Hash, CollectionPlanAlgorithm.Ordered]
+
+fn adapter_policy(choice: text, allowed: [CollectionPlanAlgorithm], switch_policy: text) -> ResolvedCollectionPolicyV1:
+    val prov = data_decl_provenance_v1(DataDeclOriginV1.Spl, "src/compiler/resolve.spl", 12, "compiler.resolve")
+    val rule = data_policy_rule_v1(DataPolicyKindV1.Collection, "compiler.resolve.symbols", DataRuleSpecificityV1.ExactSite,
+        DataRuleStrengthV1.Pin, choice, false, prov)
+    val resolved = data_policy_resolve_rules_v1(DataPolicyKindV1.Collection, [rule], "auto").unwrap()
+    resolved_collection_policy_v1(adapter_origin(), resolved, allowed, [], [], switch_policy, "").unwrap()
+
+fn adapter_algorithm_name(algorithm: AdaptiveSetAlgorithm) -> text:
+    match algorithm:
+        case AdaptiveSetAlgorithm.Linear: "linear"
+        case AdaptiveSetAlgorithm.Hash: "hash"
+        case AdaptiveSetAlgorithm.Ordered: "ordered"
+
+fn adapter_attribute_name(attribute: AdaptiveSetAttribute) -> text:
+    match attribute:
+        case AdaptiveSetAttribute.Auto: "auto"
+        case AdaptiveSetAttribute.Linear: "linear"
+        case AdaptiveSetAttribute.Hash: "hash"
+        case AdaptiveSetAttribute.Ordered: "ordered"
+
+fn adapter_text_set_with(start: text, values: [text]) -> AdaptiveTextSet:
+    val start_set = AdaptiveTextSet.new()
+    var set = collection_policy_apply_text_set_v1(start_set,
+        collection_policy_decide_v1(adapter_policy(start, adapter_all_three(), "next_instance"), start_set.profile).unwrap()).unwrap()
+    for value in values:
+        set.insert(value)
+    set
+
+describe "Adaptive collection policy adapter":
+    it "preserves exact keys and values across every directed linear, hash and ordered transition":
+        # @req REQ-COL-01
+        step("Build a text set in each starting representation through the adapter and move it to each other one")
+        val values = ["delta", "alpha", "charlie", "bravo", "echo"]
+        val names = ["linear", "hash", "ordered"]
+        var transitions = 0
+        for from_name in names:
+            for to_name in names:
+                if from_name != to_name:
+                    var set = adapter_text_set_with(from_name, values)
+                    expect(adapter_algorithm_name(set.selected_algorithm())).to_equal(from_name)
+                    set = collection_policy_apply_text_set_v1(set,
+                        collection_policy_decide_v1(adapter_policy(to_name, adapter_all_three(), "exclusive_live"), set.profile).unwrap()).unwrap()
+                    step("Verify the moved set holds exactly the original members and nothing else")
+                    expect(adapter_algorithm_name(set.selected_algorithm())).to_equal(to_name)
+                    expect(set.len()).to_equal(5)  # oracle: five distinct inserted members
+                    expect(set.snapshot_values()).to_equal(["alpha", "bravo", "charlie", "delta", "echo"])
+                    for value in values:
+                        expect(set.contains(value)).to_equal(true)
+                    expect(set.contains("foxtrot")).to_equal(false)
+                    transitions = transitions + 1
+        expect(transitions).to_equal(6)  # oracle: 3 x 2 directed pairs
+
+    it "explains why an unsupported algorithm pin was rejected":
+        # @req REQ-COL-07
+        step("Pin hash on a container whose profile disables hash storage")
+        val no_hash = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 32, allow_hash: false)
+        val rejected = collection_policy_decide_v1(adapter_policy("hash", adapter_all_three(), "next_instance"), no_hash)
+        # @capture(exec): the rejection text
+        step("Verify the pin fails as an error that names every candidate and its reason")
+        expect(rejected.is_err()).to_equal(true)
+        val message = rejected.unwrap_err()
+        expect(message).to_contain("requested hash")
+        expect(message).to_contain("hash: hash-disabled-by-container-profile")
+        expect(message).to_contain("linear: not-selected-explicit-pin")
+        expect(message).to_contain("ordered: not-selected-explicit-pin")
+        step("Verify a switching mode adaptive containers cannot honour is also an error")
+        val shared = collection_policy_decide_v1(adapter_policy("linear", adapter_all_three(), "shared_safe_point"), adaptive_set_default_profile())
+        expect(shared.is_err()).to_equal(true)
+        expect(shared.unwrap_err()).to_contain("switch-policy-not-admitted")
+        step("Verify applying a decision made for another profile, or rebuilding a populated next-instance container, errs")
+        val hash_default = collection_policy_decide_v1(adapter_policy("hash", adapter_all_three(), "next_instance"), adaptive_set_default_profile()).unwrap()
+        val wrong_profile = collection_policy_apply_text_set_v1(AdaptiveTextSet.with_profile(no_hash), hash_default)
+        expect(wrong_profile.unwrap_err()).to_contain("hash-disabled-by-container-profile")
+        var populated = AdaptiveTextSet.new()
+        populated.insert("a")
+        val late = collection_policy_apply_text_set_v1(populated, hash_default)
+        expect(late.unwrap_err()).to_contain("next-instance-not-live")
+        expect(adapter_algorithm_name(populated.selected_algorithm())).to_equal("linear")
+        step("Verify report-only explains the same rejected pin instead of failing")
+        val explained = collection_policy_decide_v1(adapter_policy("hash", adapter_all_three(), "report_only"), no_hash).unwrap()
+        expect(explained.applied).to_equal(false)
+        expect(explained.reason).to_equal("report-only-rejected")
+        expect(explained.hash_rejection).to_equal("hash-disabled-by-container-profile")
+
+    it "keeps the original representation when auto has no admitted evidence":
+        # @req REQ-COL-08
+        step("Construct a hash-attributed text set and apply an auto policy to it")
+        var set = AdaptiveTextSet.with_attribute(adaptive_set_default_profile(), "", "", AdaptiveSetAttribute.Hash)
+        set.insert("b")
+        set.insert("a")
+        val decision = collection_policy_decide_v1(adapter_policy("auto", adapter_all_three(), "next_instance"), set.profile).unwrap()
+        set = collection_policy_apply_text_set_v1(set, decision).unwrap()
+        step("Verify nothing changed and the decision says why each candidate was not chosen")
+        expect(adapter_attribute_name(set.algorithm_attribute())).to_equal("hash")
+        expect(adapter_algorithm_name(set.selected_algorithm())).to_equal("hash")
+        expect(set.snapshot_values()).to_equal(["a", "b"])
+        expect(decision.applied).to_equal(false)
+        expect(decision.reason).to_equal("auto-no-admitted-evidence")
+        expect(decision.linear_rejection).to_equal("auto-retains-original")
+        expect(decision.hash_rejection).to_equal("auto-retains-original")
+        expect(decision.ordered_rejection).to_equal("auto-retains-original")
+        expect(collection_policy_explain_v1(decision)).to_contain("selected=original")
+
+    it "reports a pin without applying it under report-only and rejects auto over a restricted set":
+        # @req REQ-COL-08
+        step("Ask for ordered in report-only mode")
+        var set = AdaptiveTextSet.with_attribute(adaptive_set_default_profile(), "", "", AdaptiveSetAttribute.Linear)
+        set.insert("x")
+        val report = collection_policy_decide_v1(adapter_policy("ordered", adapter_all_three(), "report_only"), set.profile).unwrap()
+        set = collection_policy_apply_text_set_v1(set, report).unwrap()
+        step("Verify the recommendation is explained but the storage is untouched")
+        expect(report.applied).to_equal(false)
+        expect(report.reason).to_equal("report-only")
+        expect(collection_policy_explain_v1(report)).to_contain("recommended=ordered")
+        expect(adapter_algorithm_name(set.selected_algorithm())).to_equal("linear")
+        step("Verify auto fails when policy forbids a representation the live container can switch into")
+        val narrow = collection_policy_decide_v1(adapter_policy("auto",
+            [CollectionPlanAlgorithm.Linear, CollectionPlanAlgorithm.Hash], "next_instance"), adaptive_set_default_profile())
+        expect(narrow.is_err()).to_equal(true)
+        expect(narrow.unwrap_err()).to_contain("ordered: not-allowed-by-policy")
+
+    it "applies the same decision to empty generic maps and sets":
+        # @req REQ-COL-07
+        step("Apply a hash pin and an ordered pin to empty AdaptiveMap and AdaptiveSet instances")
+        val hash_pin = collection_policy_decide_v1(adapter_policy("hash", adapter_all_three(), "next_instance"), adaptive_set_default_profile()).unwrap()
+        val ordered_pin = collection_policy_decide_v1(adapter_policy("ordered", adapter_all_three(), "next_instance"), adaptive_set_default_profile()).unwrap()
+        val map: AdaptiveMap<text, i64> = AdaptiveMap.new()
+        val set: AdaptiveSet<text> = AdaptiveSet.new()
+        val hashed = collection_policy_apply_map_v1(map, hash_pin).unwrap()
+        val ordered = collection_policy_apply_set_v1(set, ordered_pin).unwrap()
+        step("Verify each container reports the pinned attribute and storage")
+        expect(adapter_attribute_name(hashed.algorithm_attribute())).to_equal("hash")
+        expect(adapter_algorithm_name(hashed.selected_algorithm())).to_equal("hash")
+        expect(adapter_attribute_name(ordered.algorithm_attribute())).to_equal("ordered")
+        expect(adapter_algorithm_name(ordered.selected_algorithm())).to_equal("ordered")
+
+    it "preserves exact map keys and present optional values across every directed transition":
+        # @req REQ-COL-01
+        # @req REQ-COL-03
+        # Needs spl_ordered_key_cmp (AdaptiveMap.put); not runnable on the Rust seed interpreter.
+        step("Fill a map from each starting representation, including a present key whose value is None")
+        val names = ["linear", "hash", "ordered"]
+        for from_name in names:
+            for to_name in names:
+                if from_name != to_name:
+                    val empty: AdaptiveMap<text, i64?> = AdaptiveMap.new()
+                    var map = collection_policy_apply_map_v1(empty,
+                        collection_policy_decide_v1(adapter_policy(from_name, adapter_all_three(), "next_instance"), adaptive_set_default_profile()).unwrap()).unwrap()
+                    map.put("one", Some(1))
+                    map.put("none", None)
+                    map.put("three", Some(3))
+                    map = collection_policy_apply_map_v1(map,
+                        collection_policy_decide_v1(adapter_policy(to_name, adapter_all_three(), "exclusive_live"), adaptive_set_default_profile()).unwrap()).unwrap()
+                    step("Verify exact values, the present None and an absent key stay distinct")
+                    expect(adapter_algorithm_name(map.selected_algorithm())).to_equal(to_name)
+                    expect(map.len()).to_equal(3)  # oracle: three distinct keys put
+                    expect(map.contains_key("none")).to_equal(true)
+                    expect(map.contains_key("absent")).to_equal(false)
+                    expect(map.keys()).to_equal(["none", "one", "three"])
+                    val entries = map.entries()
+                    expect(entries[0].value).to_equal(None)
+                    expect(entries[1].value).to_equal(Some(1))
+                    expect(entries[2].value).to_equal(Some(3))

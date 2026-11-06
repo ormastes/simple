@@ -1,0 +1,140 @@
+# @cover src/compiler/10.frontend/core/collection_feedback.spl
+"""
+## Purpose and audience
+Executable manual for the collection site attribute, for people who tune
+adaptive collections and for owners of the frontend and of profile feedback.
+`@collection_algorithm("auto", "parser.symbols")` names the algorithm and,
+optionally, one stable site label. The site ID is what binds `.sprof`
+collection feedback to a declaration, so it must survive harmless edits and
+must reach HIR unchanged.
+## Operator workflow
+Run: `simple test test/01_unit/compiler/frontend/collection_site_attribute_spec.spl`.
+## Compatibility and limitations
+- Site IDs use the versioned `n1.` declaration hash: comments and
+  insignificant whitespace are ignored. The Rust seed parser computes the
+  same value, which `src/compiler_rust/parser/tests/collection_algorithm_attribute.rs`
+  pins.
+- A label replaces the hash. It is unique within its module.
+- Profiles recorded before `n1.` do not bind any more (owner decision,
+  2026-11-06).
+- Plan: `doc/03_plan/compiler/data/adaptive_collections_profiling_switching_2026-09-16.md` §21 (C2).
+## Verification guidance and troubleshooting
+- A label missing from HIR means the parser rewrite or the flat-AST bridge
+  dropped the site argument.
+- A whitespace failure means the declaration hash went back to raw bytes.
+- An accepted extra argument means attribute arguments are being dropped
+  silently.
+"""
+# @manual_section: collection-site-attribute
+
+use std.spec.*
+use compiler.core.parser.{parser_init, parser_init_with_path, parser_has_errors, parser_first_error_get}
+use compiler.core.parser_stmts.{parse_statement}
+use compiler.core.parser_decls.{parse_module_body}
+use compiler.core.ast.{stmt_get_expr, expr_get_str, expr_get_args, module_get_decls, decl_get_body, decl_get_field_defaults}
+use compiler.frontend.flat_ast_bridge.{convert_flat_stmt}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{SymbolKind}
+use compiler.hir.hir_definitions.{HirStmtKind, HirExprKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.statements.*
+use compiler.frontend.core.collection_feedback.{parser_collection_declaration_hash}
+
+fn local_site(source: text) -> text:
+    parser_init_with_path(source, "app/site_probe.spl")
+    parse_module_body()
+    expect(parser_has_errors()).to_be(false)
+    val body = decl_get_body(module_get_decls()[0])
+    expr_get_str(expr_get_args(stmt_get_expr(body[0]))[2])
+
+fn hir_site(lowered_kind: HirStmtKind) -> text:
+    match lowered_kind:
+        case HirStmtKind.Let(_, _, initializer):
+            match initializer.kind:
+                case HirExprKind.MethodCall(_, method, args, _):
+                    if method != "attributed_at_site" or args.len() != 3:
+                        return "wrong wrapper: " + method
+                    match args[2].value.kind:
+                        case HirExprKind.StringLit(site, _): return site
+                        case _: return "site argument is not a string"
+                case _: return "initializer is not the attributed wrapper"
+        case _: return "declaration is not a let"
+
+describe "Collection site attribute":
+    it "carries the site label from the declaration into HIR unchanged":
+        step("Write one adaptive set with an algorithm and a site label")
+        parser_init_with_path("@collection_algorithm(\"hash\", \"parser.symbols\")\nval symbols: AdaptiveTextSet = make_set()", "app/site_probe.spl")
+        val parsed = convert_flat_stmt(parse_statement())
+        expect(parser_has_errors()).to_be(false)
+        step("Lower the parsed declaration to HIR")
+        val span = Span.empty()
+        var lowering = HirLowering.new()
+        lowering.symbols.define("AdaptiveTextSet", SymbolKind.Struct, nil, span,
+            Visibility.Private, false, Some("lib.nogc_sync_mut.src.collections.adaptive_text_set"))
+        val lowered = lowering.lower_hir_stmt(parsed)
+        step("Read the site argument of the attributed wrapper in HIR")
+        expect(hir_site(lowered.kind)).to_equal("ast://app/site_probe.spl/label/parser.symbols")
+
+    it "keeps the same site ID across a whitespace and comment edit of the declaration":
+        val plain = local_site("fn main():\n    @collection_algorithm(\"auto\")\n    var hot = AdaptiveTextSet.new()\n")
+        val spaced = local_site("fn main():\n    @collection_algorithm(\"auto\")\n    var  hot  =  AdaptiveTextSet.new( )   # hot path\n")
+        expect(spaced).to_equal(plain)
+        expect(plain).to_contain("/main/local/hot#n1.")
+
+    it "ignores statements that follow the declaration":
+        val alone = local_site("fn main():\n    @collection_algorithm(\"auto\")\n    var hot = AdaptiveTextSet.new()\n")
+        val followed = local_site("fn main():\n    @collection_algorithm(\"auto\")\n    var hot = AdaptiveTextSet.new()\n    val other = 1\n")
+        expect(followed).to_equal(alone)
+
+    it "hashes the same text the Rust seed parser hashes for a public field":
+        parser_init_with_path("class Store:\n    @collection_algorithm(\"ordered\")\n    pub values: AdaptiveTextSet = AdaptiveTextSet.new()\n", "app/collection_probe.spl")
+        parse_module_body()
+        expect(parser_has_errors()).to_be(false)
+        val defaults = decl_get_field_defaults(module_get_decls()[0])
+        # oracle: src/compiler_rust/parser/tests/collection_algorithm_attribute.rs public_field_site_matches_the_pure_simple_parser
+        expect(expr_get_str(expr_get_args(defaults[0])[2])).to_equal("ast://app/collection_probe.spl/Store/values#n1.5053061337019949519")
+
+    it "changes the site ID when a string inside the declaration changes":
+        val a = local_site("fn main():\n    @collection_algorithm(\"auto\")\n    var hot: AdaptiveTextSet = make(\"a b\")\n")
+        val b = local_site("fn main():\n    @collection_algorithm(\"auto\")\n    var hot: AdaptiveTextSet = make(\"a  b\")\n")
+        expect(a == b).to_equal(false)
+
+    it "hashes a normalized declaration with a versioned prefix":
+        expect(parser_collection_declaration_hash("var  hot = x  # c")).to_equal(parser_collection_declaration_hash("var hot=x"))
+        expect(parser_collection_declaration_hash("var hot = x").starts_with("n1.")).to_equal(true)
+        expect(parser_collection_declaration_hash("var hot = ab") == parser_collection_declaration_hash("var hot = a b")).to_equal(false)
+        step("A raw string ending in a backslash does not swallow a later comment")
+        expect(parser_collection_declaration_hash("var p = r\"a\\\"  # c")).to_equal(parser_collection_declaration_hash("var p = r\"a\\\""))
+
+    it "labels a field site in the same module namespace":
+        parser_init_with_path("class Store:\n    @collection_algorithm(\"ordered\", \"store.values\")\n    values: AdaptiveTextSet = AdaptiveTextSet.new()\n", "app/site_probe.spl")
+        parse_module_body()
+        expect(parser_has_errors()).to_be(false)
+        val defaults = decl_get_field_defaults(module_get_decls()[0])
+        expect(expr_get_str(expr_get_args(defaults[0])[2])).to_equal("ast://app/site_probe.spl/label/store.values")
+
+    it "rejects a duplicate site label in one module":
+        parser_init_with_path("fn main():\n    @collection_algorithm(\"auto\", \"dup\")\n    var a = AdaptiveTextSet.new()\n    @collection_algorithm(\"auto\", \"dup\")\n    var b = AdaptiveTextSet.new()\n", "app/site_probe.spl")
+        parse_module_body()
+        expect(parser_first_error_get()).to_contain("duplicate collection site label")
+
+    it "shares one label namespace between fields and locals":
+        parser_init_with_path("class Store:\n    @collection_algorithm(\"auto\", \"dup\")\n    values: AdaptiveTextSet = AdaptiveTextSet.new()\nfn main():\n    @collection_algorithm(\"auto\", \"dup\")\n    var b = AdaptiveTextSet.new()\n", "app/site_probe.spl")
+        parse_module_body()
+        expect(parser_first_error_get()).to_contain("duplicate collection site label")
+
+    it "accepts a trailing comma after the label":
+        parser_init_with_path("fn main():\n    @collection_algorithm(\"auto\", \"t.c\",)\n    var hot = AdaptiveTextSet.new()\n", "app/site_probe.spl")
+        parse_module_body()
+        expect(parser_has_errors()).to_be(false)
+
+    it "rejects an unknown extra argument instead of dropping it":
+        parser_init("@collection_algorithm(\"auto\", \"site.a\", \"fast\")\nvar hot = AdaptiveTextSet.new()")
+        parse_statement()
+        expect(parser_first_error_get()).to_contain("at most one site label")
+
+    it "rejects a label that is not a plain dotted name":
+        parser_init("@collection_algorithm(\"auto\", \"has space\")\nvar hot = AdaptiveTextSet.new()")
+        parse_statement()
+        expect(parser_first_error_get()).to_contain("site label must be a dotted name")

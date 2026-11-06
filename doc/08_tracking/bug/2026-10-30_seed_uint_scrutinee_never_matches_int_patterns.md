@@ -56,3 +56,25 @@ Evidence:
   `uint_scrutinee_never_matches_a_negative_int_literal`,
   `uint_match_end_to_end_takes_the_right_arm`: FAILED before (e.g. end-to-end
   `left: 4441, right: 4321`), ok after.
+
+## Follow-up resolved (2026-11-06): UInt argument bound to an `i64` parameter
+
+`interpreter/node_exec.rs` `coerce_to_declared_signed` (called from
+`coerce_to_declared_type`, which both `arg_binding.rs` binders and typed
+`val`/`var` bindings use) converts a `Value::UInt` bound to a declared
+`i64` to `Value::Int` (bit pattern, as native stores it).
+
+Evidence: `test/fixtures/seed_interp/uint_arg_to_i64_param_repro.spl`,
+interpreter mode. Before (seed built from `ecb705896a4`):
+`uint_to_i64 18446744073709551611 false`. After: `uint_to_i64 -5 true`,
+identical to JIT. Rust test
+`interpreter::node_exec::declared_signed_binding_tests::uint_argument_bound_to_i64_param_is_signed`:
+FAILED before (`left: 0, right: 1`), ok after.
+
+## Amended (2026-11-06): 64-bit scrutinee vs over-i64::MAX literals
+
+"A negative literal never matches" made `case 0x8000000000000000` dead for a
+`u64` (the lexer stores it as i64::MIN, indistinguishable from `case -N`).
+For a 64-bit `UInt` scrutinee an unsuffixed negative literal now compares by
+bit pattern, like JIT/native; narrower widths keep the rule. See
+`seed_interp_u64_high_bit_literal_pattern_2026-11-06.md`.

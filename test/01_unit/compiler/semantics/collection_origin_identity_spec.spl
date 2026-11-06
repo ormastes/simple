@@ -27,11 +27,11 @@ kept and checked, never replaced. Plan:
 
 use std.spec.*
 use compiler.semantics.perf_facts.collection_contracts.*
-use std.io_runtime.{hash_text}
 use compiler.frontend.core.collection_feedback.{
     parser_collection_site_stem, parser_collection_site_reset,
     parser_collection_local_site_id, parser_collection_field_site_id,
-    parser_collection_site_owner_push, parser_collection_site_owner_restore
+    parser_collection_site_owner_push, parser_collection_site_owner_restore,
+    parser_collection_declaration_hash
 }
 
 val ADAPTIVE_MAP = "std.nogc_sync_mut.src.collections.adaptive_map.AdaptiveMap"
@@ -47,7 +47,7 @@ fn cc_op_name(op: CollectionSemanticOp?) -> text:
 fn cc_origin(owner: text, name: text, kind: CollectionCreationKind, declaration: text,
         type_args: [text]) -> CollectionOriginV1:
     val field = kind == CollectionCreationKind.Field
-    val site = parser_collection_site_stem("app/probe.spl", owner, name, field) + "#{hash_text(declaration)}"
+    val site = parser_collection_site_stem("app/probe.spl", owner, name, field) + "#{parser_collection_declaration_hash(declaration)}"
     match collection_origin_v1(
         site, "app/probe.spl", owner, name, kind,
         declaration, collection_type_fingerprint_v1(ADAPTIVE_MAP, type_args)
@@ -117,9 +117,9 @@ describe "collection site IDs":
     it "numbers repeated local sites and leaves field sites unnumbered":
         parser_collection_site_reset()
         val previous = parser_collection_site_owner_push("main")
-        val first = parser_collection_local_site_id("app/probe.spl", "hot", 7)
-        val second = parser_collection_local_site_id("app/probe.spl", "hot", 7)
-        val field = parser_collection_field_site_id("app/probe.spl", "values", 9)
+        val first = parser_collection_local_site_id("app/probe.spl", "hot", "7")
+        val second = parser_collection_local_site_id("app/probe.spl", "hot", "7")
+        val field = parser_collection_field_site_id("app/probe.spl", "values", "9")
         parser_collection_site_owner_restore(previous)
         parser_collection_site_reset()
         expect(first).to_equal("ast://app/probe.spl/main/local/hot#7")
@@ -159,10 +159,22 @@ describe "Collection origin identity":
 
     it "accepts an ordinal suffix on a matching site hash":
         val declaration = "var hot = AdaptiveMap.new()"
-        val site = parser_collection_site_stem("app/probe.spl", "main", "hot", false) + "#{hash_text(declaration)}:2"
+        val site = parser_collection_site_stem("app/probe.spl", "main", "hot", false) + "#{parser_collection_declaration_hash(declaration)}:2"
         val result = collection_origin_v1(site, "app/probe.spl", "main", "hot",
             CollectionCreationKind.Local, declaration, "t")
         expect(result.is_ok()).to_equal(true)
+
+    it "keeps a labeled origin across any edit of the declaration":
+        val before = collection_origin_v1("ast://app/probe.spl/label/parser.symbols", "app/probe.spl",
+            "main", "hot", CollectionCreationKind.Local, "var hot = AdaptiveMap.new()", "t")
+        val after = collection_origin_v1("ast://app/probe.spl/label/parser.symbols", "app/probe.spl",
+            "main", "hot", CollectionCreationKind.Local, "var hot = AdaptiveMap.with_profile(p)", "t")
+        match before:
+            case Ok(a):
+                match after:
+                    case Ok(b): expect(a.origin_id).to_equal(b.origin_id)
+                    case Err(message): expect(message).to_equal("edited labeled origin accepted")
+            case Err(message): expect(message).to_equal("labeled origin accepted")
 
     it "rejects a legacy site ID that does not belong to the declared components":
         val result = collection_origin_v1(

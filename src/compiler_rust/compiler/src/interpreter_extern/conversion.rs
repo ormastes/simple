@@ -113,11 +113,9 @@ pub fn rt_hash_text(args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Callable from Simple as: `rt_text_to_bytes(text)`
 pub fn rt_text_to_bytes_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let text = match args.first() {
-        Some(Value::Str(s)) => s.as_str(),
-        _ => "",
-    };
-    Ok(Value::byte_array(text.as_bytes().to_vec()))
+    // `StrBytes` (raw, non-UTF-8 text) yields its bytes verbatim.
+    let bytes = args.first().and_then(Value::text_bytes_view).unwrap_or_default();
+    Ok(Value::byte_array(bytes.to_vec()))
 }
 
 /// Read the raw BYTE at a BYTE index of `text`.
@@ -189,8 +187,11 @@ pub fn rt_bytes_to_text_fn(args: &[Value]) -> Result<Value, CompileError> {
             let Some(bytes) = value.try_array_bytes() else {
                 return Ok(Value::text(String::new()));
             };
-            let text = String::from_utf8_lossy(&bytes).into_owned();
-            Ok(Value::text(text))
+            // Byte-preserving, like the C and pure-Simple runtimes: invalid
+            // UTF-8 (a scalar split across read fragments) stays `StrBytes`
+            // instead of becoming U+FFFD, and re-validates on concatenation
+            // (seed_rt_bytes_to_text_lossy_utf8_split_scalar_2026-10-31).
+            Ok(Value::text_from_bytes(bytes))
         }
         _ => Ok(Value::text(String::new())),
     }
@@ -558,6 +559,27 @@ fn glyph_5x7_ascii(ch: u8) -> [u8; 7] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// seed_rt_bytes_to_text_lossy_utf8_split_scalar_2026-10-31: fragments of a
+    /// split UTF-8 scalar must round-trip byte-exactly and reassemble.
+    #[test]
+    fn bytes_to_text_preserves_split_scalar_fragments() {
+        let original = "界😀".as_bytes().to_vec();
+        let mut assembled = Vec::new();
+        for fragment in [&original[0..1], &original[1..5], &original[5..]] {
+            let text = rt_bytes_to_text_fn(&[Value::byte_array(fragment.to_vec())]).unwrap();
+            let back = rt_text_to_bytes_fn(&[text]).unwrap();
+            let back = back.try_array_bytes().expect("byte array");
+            assert_eq!(back, fragment, "fragment must round-trip byte-exactly");
+            assembled.extend(back);
+        }
+        assert_eq!(assembled, original);
+        assert_eq!(
+            rt_bytes_to_text_fn(&[Value::byte_array("ok".as_bytes().to_vec())]).unwrap(),
+            Value::text("ok"),
+            "valid UTF-8 stays plain text"
+        );
+    }
 
     #[test]
     fn test_to_string() {

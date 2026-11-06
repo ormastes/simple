@@ -1,0 +1,110 @@
+# ResolvedCollectionPolicyV1 — the collection row of the W1 data-policy
+# envelope (data plan W1; adaptive collections plan 5.1/5.2, C2).
+#
+# One immutable record per collection creation origin. Source attributes
+# (`@collection_algorithm` plus at most one site label) and SDN
+# `data_policy.rules` rows both lower to it through the one W1 resolver.
+# The canonical digest excludes provenance, so equivalent source and SDN
+# declarations give byte-identical digests; provenance is kept alongside.
+# Representation choices reuse CollectionPlanAlgorithm; no new enum.
+#
+# Deferred from the adaptive plan 5.1 sketch until a consumer needs them (W4/
+# C5): semantic_contract_ref (CollectionSemanticContractV1 digest),
+# objective_and_resource_budgets, named_policy_dependencies and per-field
+# provenance. The record carries rule-level provenance only.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.data.data_schema_contracts.*
+use compiler.semantics.perf.collection_plan_selection.{CollectionPlanAlgorithm}
+use compiler.semantics.perf.resolved_data_policy.{resolved_collection_token_v1}
+use compiler.semantics.perf_facts.collection_contracts.{CollectionOriginV1}
+
+pub const RESOLVED_COLLECTION_POLICY_CONTRACT_V1: i64 = 1
+pub const RESOLVED_COLLECTION_POLICY_DIGEST_DOMAIN_V1: text = "simple.collection-policy/v1"
+
+pub struct ResolvedCollectionPolicyV1:
+    contract_version: i64
+    origin: CollectionOriginV1
+    choice: DataPolicyChoiceV1
+    allowed_representations: [CollectionPlanAlgorithm]
+    # Opaque references to hard constraints owned elsewhere (ABI, ownership,
+    # progress); sorted. A profile can never remove one.
+    hard_constraints: [text]
+    # `key=value` workload hints; sorted.
+    workload_hints: [text]
+    # One of the data plan 11.1 application modes.
+    switch_policy: text
+    # resolved_policy_digest of the composed layout policy, or "".
+    layout_policy_ref: text
+    provenances: [DataDeclProvenanceV1]
+    canonical_policy_digest: text
+
+fn collection_sorted_v1(items: [text]) -> [text]:
+    var out: [text] = []
+    for item in items:
+        var index = out.len()
+        out.push(item)
+        while index > 0 and out[index] < out[index - 1]:
+            val swap = out[index - 1]
+            out[index - 1] = out[index]
+            out[index] = swap
+            index = index - 1
+    out
+
+pub fn resolved_collection_switch_policy_valid_v1(mode: text) -> bool:
+    mode == "report_only" or mode == "next_build" or mode == "next_instance" or
+        mode == "new_snapshot" or mode == "exclusive_live" or mode == "shared_safe_point"
+
+fn collection_lp_v1(value: text) -> text:
+    "{value.len()}:{value}"
+
+pub fn resolved_collection_policy_v1(origin: CollectionOriginV1, choice: DataPolicyChoiceV1,
+                                     allowed: [CollectionPlanAlgorithm], hard_constraints: [text],
+                                     workload_hints: [text], switch_policy: text,
+                                     layout_policy_ref: text) -> Result<ResolvedCollectionPolicyV1, text>:
+    if origin.origin_id.len() == 0:
+        return Err("collection policy needs a creation origin")
+    if data_policy_kind_code_v1(choice.kind) != data_policy_kind_code_v1(DataPolicyKindV1.Collection):
+        return Err("choice is not a collection policy")
+    if allowed.len() == 0:
+        return Err("no allowed collection representation")
+    var tokens: [text] = []
+    for algorithm in allowed:
+        val token = resolved_collection_token_v1(algorithm)
+        for seen in tokens:
+            if seen == token:
+                return Err("representation '{token}' listed twice")
+        tokens.push(token)
+    if choice.choice != "auto":
+        var admitted = false
+        for token in tokens:
+            if token == choice.choice:
+                admitted = true
+        if not admitted:
+            return Err("choice '{choice.choice}' is not an allowed representation")
+    if not resolved_collection_switch_policy_valid_v1(switch_policy):
+        return Err("unknown switch policy '{switch_policy}'")
+    val constraints = collection_sorted_v1(hard_constraints)
+    val hints = collection_sorted_v1(workload_hints)
+    for i in 1..constraints.len():
+        if constraints[i] == constraints[i - 1]:
+            return Err("hard constraint '{constraints[i]}' listed twice")
+    for i in 1..hints.len():
+        if hints[i] == hints[i - 1]:
+            return Err("workload hint '{hints[i]}' listed twice")
+    var canonical = RESOLVED_COLLECTION_POLICY_DIGEST_DOMAIN_V1 + "\norigin=" + collection_lp_v1(origin.origin_id) +
+        "\nchoice=" + collection_lp_v1(choice.choice) + "\ndefault={choice.from_default}\nallowed="
+    for token in collection_sorted_v1(tokens):
+        canonical = canonical + collection_lp_v1(token)
+    canonical = canonical + "\nconstraints="
+    for c in constraints:
+        canonical = canonical + collection_lp_v1(c)
+    canonical = canonical + "\nhints="
+    for h in hints:
+        canonical = canonical + collection_lp_v1(h)
+    canonical = canonical + "\nswitch=" + collection_lp_v1(switch_policy) + "\nlayout=" + collection_lp_v1(layout_policy_ref) + "\n"
+    Ok(ResolvedCollectionPolicyV1(contract_version: RESOLVED_COLLECTION_POLICY_CONTRACT_V1,
+        origin: origin, choice: choice, allowed_representations: allowed,
+        hard_constraints: constraints, workload_hints: hints, switch_policy: switch_policy,
+        layout_policy_ref: layout_policy_ref, provenances: choice.provenances,
+        canonical_policy_digest: sha256_text(canonical)))
