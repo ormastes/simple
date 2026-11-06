@@ -1,6 +1,14 @@
 # Seed interpreter: `(dict[k] ?? 0) + 1` on a missing key yields 4, not 1
 
-Status: OPEN — reproduced 2026-10-10 on `C:/dev/simple-bootstrap-storage/seed-head/simple.exe`
+Status: FIXED 2026-11-06 — same root cause as
+`seed_dict_int_index_nil_coalesce_2026-10-31.md` (fix described there). The defect is
+in the seed JIT, not the interpreter: `SIMPLE_EXECUTION_MODE=interpreter` already printed
+`prev=0 got=1`. Repro `test/fixtures/compiler/seed_jit_miscompiles/dict_miss_coalesce_increment.spl`
+under `SIMPLE_EXECUTION_MODE=jit`: old seed `prev=nil got=4 miss_is_nil=true`, fixed seed
+`prev=0 got=1 miss_is_nil=true`. Rust test: `compiler/tests/dict_index_coalesce_jit.rs`
+`text_key_int_value_miss_coalesces_and_counts`.
+
+Originally: OPEN — reproduced 2026-10-10 on `C:/dev/simple-bootstrap-storage/seed-head/simple.exe`
 (Rust seed, Windows) against `release/1.0` @ 0c0b130f737. Pure-Simple self-hosted
 behaviour not measured on this host.
 
