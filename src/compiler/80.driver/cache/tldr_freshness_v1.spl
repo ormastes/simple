@@ -1,0 +1,103 @@
+# TLDR freshness verifier + receipt (incremental_build_tldr_scv plan, stale-feature
+# review 2026-11-06, items 7/8/19).
+#
+# Verifier: every expected source must have a `.tldr` companion that is fresh
+# (`module_tldr_companion_fresh_v1`: the embedded algorithm-tagged source digest
+# equals the source bytes). State is "verified" only when the inventory is
+# non-empty and EVERY module is fresh; an empty inventory is "unverified".
+#
+# Receipt: immutable SDN `<out_root>/receipts/<tree>.sdn`, schema
+# simple.tldr-freshness/1, with the manifest digest written `sha256:<hex>`
+# (design rule 7: an unknown algorithm is a miss). Published through temp +
+# atomic rename; identical bytes for the same key are a harmless no-op, different
+# bytes for the same key are refused (never overwritten). Lockless: no globals.
+use compiler.driver.cache.module_artifacts_v1.{module_tldr_companion_path_v1,
+    module_tldr_companion_fresh_v1}
+use compiler.driver.cache.tldr_layout_v1.{tldr_publish_v1}
+use compiler.driver.cache.hash_digest_v1.{digest_v1_of_text}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{digest_v1_text, HASH_ALGO_SHA256_V1}
+use std.io_runtime.{file_exists, file_read}
+
+pub val TLDR_FRESHNESS_SCHEMA_V1: text = "simple.tldr-freshness/1"
+
+pub struct TldrFreshnessV1:
+    state: text
+    expected: i64
+    verified: i64
+    stale: [text]
+    missing: [text]
+    manifest_digest: text
+
+fn _freshness_digest_v1(data: text) -> text:
+    match digest_v1_of_text(HASH_ALGO_SHA256_V1, data):
+        case Some(d): digest_v1_text(d)
+        case None: ""
+
+# Sorted copy (insertion sort) so the manifest does not depend on input order.
+fn _sorted_text_v1(items: [text]) -> [text]:
+    var out: [text] = []
+    for item in items:
+        var i = out.len()
+        out.push(item)
+        while i > 0 and out[i - 1] > item:
+            out[i] = out[i - 1]
+            i = i - 1
+        out[i] = item
+    out
+
+pub fn tldr_freshness_verify_v1(out_root: text, sources: [text]) -> TldrFreshnessV1:
+    var stale: [text] = []
+    var missing: [text] = []
+    var lines: [text] = []
+    var verified = 0
+    for path in sources:
+        if not file_exists(path):
+            missing.push(path)
+            lines.push(path + "\t<no-source>")
+            continue
+        val src = file_read(path)
+        lines.push(path + "\t" + _freshness_digest_v1(src))
+        val companion = module_tldr_companion_path_v1(out_root, path)
+        if not file_exists(companion):
+            missing.push(path)
+        elif module_tldr_companion_fresh_v1(companion, src):
+            verified = verified + 1
+        else:
+            stale.push(path)
+    val expected = sources.len()
+    val state = if expected > 0 and verified == expected: "verified" else: "unverified"
+    TldrFreshnessV1(state: state, expected: expected, verified: verified, stale: stale,
+        missing: missing, manifest_digest: _freshness_digest_v1(_sorted_text_v1(lines).join("\n")))
+
+pub fn tldr_freshness_current_v1(r: TldrFreshnessV1) -> bool:
+    r.state == "verified"
+
+pub fn tldr_freshness_receipt_render_v1(r: TldrFreshnessV1, source_revision: text,
+        source_git_tree: text) -> text:
+    "schema: " + TLDR_FRESHNESS_SCHEMA_V1 + "\n" +
+        "source_revision: " + source_revision + "\n" +
+        "source_git_tree: " + source_git_tree + "\n" +
+        "state: " + r.state + "\n" +
+        "expected: {r.expected}\n" +
+        "verified: {r.verified}\n" +
+        "manifest_digest: " + r.manifest_digest + "\n"
+
+pub fn tldr_freshness_receipt_path_v1(out_root: text, source_git_tree: text) -> text:
+    out_root + "/receipts/" + source_git_tree + ".sdn"
+
+# "" on success. An existing receipt for the key is never replaced.
+pub fn tldr_freshness_receipt_publish_v1(out_root: text, source_git_tree: text,
+        content: text) -> text:
+    val path = tldr_freshness_receipt_path_v1(out_root, source_git_tree)
+    if file_exists(path):
+        if file_read(path) == content:
+            return ""
+        return "receipt conflict: {path} exists with different bytes"
+    if not tldr_publish_v1(path, content):
+        return "receipt publish failed: {path}"
+    ""
+
+export TLDR_FRESHNESS_SCHEMA_V1, TldrFreshnessV1
+export tldr_freshness_verify_v1, tldr_freshness_current_v1
+export tldr_freshness_receipt_render_v1, tldr_freshness_receipt_path_v1
+export tldr_freshness_receipt_publish_v1
