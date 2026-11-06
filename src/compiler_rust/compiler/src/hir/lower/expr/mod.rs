@@ -349,6 +349,13 @@ impl Lowerer {
             Expr::Match { subject, arms } => self.lower_match(subject, arms, ctx),
             // Do block: do: statements... (block as expression)
             Expr::DoBlock(statements) => self.lower_do_block(statements, ctx),
+            // List comprehension: desugared to array-building loop
+            Expr::ListComprehension {
+                expr,
+                pattern,
+                iterable,
+                condition,
+            } => self.lower_list_comprehension(expr, pattern, iterable, condition.as_deref(), ctx),
             Expr::UnsafeBlock(statements, capabilities) => self.lower_unsafe_block(statements, capabilities, ctx),
             // Null coalescing: expr ?? default
             Expr::Coalesce { expr, default } => self.lower_coalesce(expr, default, ctx),

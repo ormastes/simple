@@ -2106,6 +2106,89 @@ impl Lowerer {
         })
     }
 
+    /// Desugar a list comprehension `[expr for pat in iterable if cond]` into a
+    /// do-block that builds the array and yields it:
+    ///
+    /// ```text
+    /// do:
+    ///     var __comp_N = []
+    ///     for pat in iterable:
+    ///         if cond:            # only when a filter is present
+    ///             __comp_N.push(expr)
+    ///     __comp_N
+    /// ```
+    ///
+    /// The loop variable lives in the `for` scope so it does not leak; nested
+    /// comprehensions get distinct temporaries from a global counter.
+    pub(super) fn lower_list_comprehension(
+        &mut self,
+        expr: &Expr,
+        pattern: &Pattern,
+        iterable: &Expr,
+        condition: Option<&Expr>,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let name = format!("__comp_{}", COMP_COUNTER.fetch_add(1, Ordering::Relaxed));
+        let span = ast::Span::new(0, 0, 0, 0);
+
+        let push = Expr::MethodCall {
+            receiver: Box::new(Expr::Identifier(name.clone())),
+            method: "push".to_string(),
+            args: vec![ast::Argument {
+                name: None,
+                value: expr.clone(),
+                span,
+                label: None,
+            }],
+            generic_args: vec![],
+        };
+        let push_stmt = ast::Node::Expression(push);
+        let body_stmts = match condition {
+            Some(cond) => vec![ast::Node::If(ast::IfStmt {
+                span,
+                let_pattern: None,
+                condition: cond.clone(),
+                then_block: ast::Block {
+                    span,
+                    statements: vec![push_stmt],
+                },
+                elif_branches: vec![],
+                else_block: None,
+                is_suspend: false,
+            })],
+            None => vec![push_stmt],
+        };
+        let stmts = vec![
+            ast::Node::Let(ast::LetStmt {
+                span,
+                pattern: Pattern::Identifier(name.clone()),
+                ty: None,
+                value: Some(Expr::Array(vec![])),
+                mutability: Mutability::Mutable,
+                storage_class: ast::StorageClass::Auto,
+                is_ghost: false,
+                is_suspend: false,
+            }),
+            ast::Node::For(ast::ForStmt {
+                span,
+                pattern: pattern.clone(),
+                iterable: iterable.clone(),
+                body: ast::Block {
+                    span,
+                    statements: body_stmts,
+                },
+                simd_requested: false,
+                is_suspend: false,
+                invariants: vec![],
+                label: None,
+            }),
+            ast::Node::Expression(Expr::Identifier(name)),
+        ];
+        self.lower_do_block(&stmts, ctx)
+    }
+
     /// Lower a lexical unsafe block without turning `return` or loop control
     /// into a tail value. The marker remains visible to HIR safety passes.
     pub(super) fn lower_unsafe_block(
