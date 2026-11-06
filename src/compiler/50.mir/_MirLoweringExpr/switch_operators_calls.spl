@@ -4598,6 +4598,9 @@ impl MirLowering:
         if self.enum_semantic_capture_enabled and self.enum_semantic_capture_error != "":
             return result
         var result_defined = false
+        # Reachability is independent of value production: unit arms also
+        # contribute a live edge, while returning arms contribute none.
+        var merge_has_incoming = false
         # Canonical verification witness state. It stays disabled unless the
         # source match is exactly exhaustive Result.Ok/Result.Err with one
         # shallow bound payload in each arm and no wildcard/default path.
@@ -5119,6 +5122,7 @@ impl MirLowering:
                             inferred_known = true
                             inferred_ty = arm_ty_found
                 b_arm2.terminate_goto(merge_block)
+                merge_has_incoming = true
             self.builder = b_arm2
             self.enum_semantic_arm_exit_v1(enum_semantic_capture, semantic_arm, b_arm2.current_block)
             var b_n = self.builder
@@ -5178,6 +5182,7 @@ impl MirLowering:
                             inferred_known = true
                             inferred_ty = gd_ty
                 b_gd2.terminate_goto(merge_block)
+                merge_has_incoming = true
             self.enum_semantic_arm_exit_v1(enum_semantic_capture, semantic_default_arm, b_gd2.current_block)
             b_gd2.switch_to_block(gd_fail)
             self.builder = b_gd2
@@ -5451,10 +5456,17 @@ impl MirLowering:
         var b_end = self.builder
         if not b_end.current_block_has_explicit_terminator():
             b_end.terminate_goto(merge_block)
+            merge_has_incoming = true
         self.builder = b_end
         self.enum_semantic_arm_exit_v1(enum_semantic_capture, semantic_final_default, b_end.current_block)
         self.enum_semantic_finish_v1(enum_semantic_capture)
 
+        # Keep the final Ret/Abort current when every path diverged. Switching
+        # to the unused merge would fabricate an i64 tail in a typed function.
+        # Unreachable is also the builder's unfinished-block sentinel, so do
+        # not switch and then attempt to mark that placeholder unreachable.
+        if not merge_has_incoming and self.builder.current_block_has_explicit_terminator():
+            return result
         self.builder.switch_to_block(merge_block)
         if result_match_candidate and result_ok_arm.id >= 0 and result_err_arm.id >= 0 and result_ok_payload.id >= 0 and result_err_payload.id >= 0:
             self.builder.emit(MirInst(kind: MirInstKind.ResultMatchSemantic(
