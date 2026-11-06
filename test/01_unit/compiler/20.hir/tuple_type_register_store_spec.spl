@@ -1,0 +1,33 @@
+# Static source assertion (runtime repro: stage3-native AV at
+# HirLowering.field_tuple_element_type+0x160, s3_fable50 batches q0002/q0011;
+# the interpreter does not reproduce it).
+# try_register_local_tuple_type bound each element type through an untyped
+# `val elem_hir_type = match ... Some(HirType(...)) / nil` plus `if val`.
+# Native codegen typed the binding as i64 and pushed the HirType pointer
+# through rt_value_int_wide (ptr<<3, int tag), so the reader later
+# dereferenced 0x10bd8275ef00 (= heap ptr 0x217b04ebde0 << 3).
+# Pins the fix: no Option round-trip; a typed HirTypeKind and a direct push.
+use std.spec
+
+extern fn rt_file_read_text(path: text) -> text?
+
+val ST_PATH = "src/compiler/20.hir/hir_lowering/statements.spl"
+
+fn reg_body() -> text:
+    val src = rt_file_read_text(ST_PATH) ?? ""
+    val start = src.index_of("me try_register_local_tuple_type(") ?? -1
+    if start < 0: return ""
+    val rest = src.substring(start, src.len())
+    val stop = rest.index_of("fn lower_hir_assign_op(") ?? rest.len()
+    rest.substring(0, stop)
+
+describe "try_register_local_tuple_type native-safe store":
+    it "does not route element types through an untyped Option binding":
+        val body = reg_body()
+        expect(body.len() > 0).to_equal(true)
+        expect(body.contains("val elem_hir_type = match")).to_equal(false)
+        expect(body.contains("if val known_elem_type")).to_equal(false)
+    it "pushes a HirType built from an annotated HirTypeKind":
+        val body = reg_body()
+        expect(body.contains("val elem_kind: HirTypeKind = match elem.kind:")).to_equal(true)
+        expect(body.contains("elem_types = elem_types.push(HirType(kind: elem_kind, span: elem.span))")).to_equal(true)

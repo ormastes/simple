@@ -2687,6 +2687,26 @@ impl MirLowering:
                             return self.builder.emit_const_int(0)
                         case _: ()
                 case _: ()
+        # `.?` flowing into a DECLARED `bool` slot (annotated binding, call
+        # argument, parameter default, return) is the PRESENCE predicate, not
+        # the payload-or-nil word that `lower_expr`'s ExistsCheck arm
+        # produces for value position. Lowered as a value, the slot received
+        # the raw RT_NIL word 3 (absent) or the payload handle (present), so
+        # `val hm: bool = mp.?` with `mp: text? = nil` compared and printed a
+        # nil word / text pointer as a bool and crashed natively
+        # (0xC0000005). This is the seed's rule (present_value_as_bool_arg in
+        # interpreter_call/core/arg_binding.rs, mirrored by the seed MIR in
+        # mir/lower/lowering_expr_call.rs); an UNTYPED `val got = a.?` keeps
+        # `T?` (syntax_quick_reference.md "Existence Check (.?) - Returns T?").
+        # doc/08_tracking/bug/stage2_dotq_presence_value_is_nil_sentinel_2026-11-03
+        if value != nil and declared != nil:
+            match declared.kind:
+                case HirTypeKind.Bool:
+                    match value.kind:
+                        case HirExprKind.ExistsCheck(_):
+                            return self.lower_cond_operand(value)
+                        case _: ()
+                case _: ()
         var scalar_optional_slot = false
         if value != nil and declared != nil:
             match declared.kind:
