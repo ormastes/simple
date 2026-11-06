@@ -548,16 +548,14 @@ fn heap_value_to_display_string(v: RuntimeValue) -> String {
         }
         HeapObjectType::Dict => {
             // Match the interpreter's `Value::Dict`/`Value::FrozenDict` display
-            // format exactly (see `to_display_string` and `dict_entries_sorted`
+            // format exactly (see `to_display_string` and `dict_entries_ordered`
             // in src/compiler_rust/compiler/src/value_impl.rs): entries are
             // rendered `key: value` with `, ` separators, wrapped in `{}`, keys
             // bare (unquoted -- `to_key_string()` on a text/int/bool/float/nil
             // key is the same bare rendering `value_to_display_string` already
-            // produces for those types), and sorted by the key's STRING form
-            // (not insertion order, not numeric order for int keys, and not
-            // `RuntimeDict`'s FNV-bucket storage order) -- this is a pure
-            // function of contents so the JIT/native path can reproduce it
-            // without sharing the interpreter's per-process HashMap seed.
+            // produces for those types), in INSERTION order -- the order
+            // `rt_dict_keys`/`rt_dict_values` already return
+            // (doc/07_guide/language/dict_iteration_order.md).
             let keys_arr = crate::value::dict::rt_dict_keys(v);
             let values_arr = crate::value::dict::rt_dict_values(v);
             let len = crate::value::collections::rt_array_len(keys_arr);
@@ -570,7 +568,6 @@ fn heap_value_to_display_string(v: RuntimeValue) -> String {
                     let val = crate::value::collections::rt_array_get(values_arr, i);
                     parts.push((value_to_display_string(k), value_to_display_string(val)));
                 }
-                parts.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
                 let rendered: Vec<String> = parts.into_iter().map(|(k, val)| format!("{k}: {val}")).collect();
                 format!("{{{}}}", rendered.join(", "))
             }

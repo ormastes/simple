@@ -46,6 +46,23 @@ static int64_t slot(int64_t d, int64_t o, int64_t e, int64_t s, int64_t f, int64
     return rt_dict_scope_read_slot_v1(d, o, e, s, f, b, rt_dict_scope_read_bound_v1());
 }
 
+/* The slot view walks hash slots; rt_dict_keys is INSERTION order. Each
+ * occupied slot must expose exactly one key of rt_dict_keys (matched by
+ * bytes), and the counts must agree. */
+static int64_t key_for_slot(int64_t keys, int64_t d, int64_t o, int64_t e, int64_t s) {
+    int64_t len = slot(d, o, e, s, 2, 0);
+    int64_t n = rt_array_len((SplArray*)(uintptr_t)keys);
+    for (int64_t i = 0; i < n; i++) {
+        int64_t k = rt_array_get((SplArray*)(uintptr_t)keys, i);
+        RtCoreString* key = rt_core_as_string(k);
+        if (!key || (int64_t)key->len != len) continue;
+        uint64_t b = 0;
+        while (b < key->len && slot(d, o, e, s, 3, b) == (uint8_t)key->data[b]) b++;
+        if (b == key->len) return k;
+    }
+    return 0;
+}
+
 static void compare_keys(int64_t d) {
     int64_t keys = rt_dict_keys(d);
     int64_t o = owner_of(d), e = epoch_of(d, o), ordinal = 0;
@@ -54,7 +71,8 @@ static void compare_keys(int64_t d) {
         int64_t occupied = slot(d, o, e, s, 0, 0);
         assert(occupied == 0 || occupied == 1);
         if (!occupied) continue;
-        int64_t k = rt_array_get((SplArray*)(uintptr_t)keys, ordinal++);
+        ordinal++;
+        int64_t k = key_for_slot(keys, d, o, e, s);
         RtCoreString* key = rt_core_as_string(k);
         assert(key);
         assert(slot(d, o, e, s, 2, 0) == (int64_t)key->len);
@@ -68,7 +86,43 @@ static void compare_keys(int64_t d) {
     assert(meta(d, o, e, 6) == meta(d, o, e, 2) * sizeof(RtCoreDictEntry));
 }
 
+static void assert_key_order(int64_t d, const char* const* want, int64_t n) {
+    int64_t keys = rt_dict_keys(d);
+    int64_t values = rt_dict_values(d);
+    assert(rt_array_len((SplArray*)(uintptr_t)keys) == n);
+    for (int64_t i = 0; i < n; i++) {
+        RtCoreString* key = rt_core_as_string(rt_array_get((SplArray*)(uintptr_t)keys, i));
+        assert(key && key->len == strlen(want[i]) && memcmp(key->data, want[i], key->len) == 0);
+        assert(rt_array_get((SplArray*)(uintptr_t)values, i) == rt_dict_get(d, text_key(want[i])));
+    }
+}
+
+/* Dict iterates in INSERTION order: replace keeps position, remove drops,
+ * re-add appends, and order survives resizes. */
+static void check_insertion_order(void) {
+    int64_t d = rt_dict_new(0);
+    const char* first[] = {"b", "a", "10", "9"};
+    for (int i = 0; i < 4; i++) assert(rt_dict_set(d, text_key(first[i]), rt_value_int(i)));
+    assert_key_order(d, first, 4);
+    assert(rt_dict_set(d, text_key("a"), rt_value_int(20)));
+    assert_key_order(d, first, 4);
+    assert(rt_dict_remove(d, text_key("b")));
+    assert(rt_dict_set(d, text_key("b"), rt_value_int(5)));
+    const char* readd[] = {"a", "10", "9", "b"};
+    assert_key_order(d, readd, 4);
+    int64_t big = rt_dict_new(0);
+    static char names[300][16];
+    const char* order[300];
+    for (int i = 0; i < 300; i++) {
+        snprintf(names[i], sizeof names[i], "k%d", 299 - i);
+        order[i] = names[i];
+        assert(rt_dict_set(big, text_key(order[i]), rt_value_int(i)));
+    }
+    assert_key_order(big, order, 300);
+}
+
 int main(void) {
+    check_insertion_order();
     int64_t d = rt_dict_new(0), o = owner_of(d), e = epoch_of(d, o);
     assert(o > 0 && e > 0 && meta(d, o, e, 1) == 0);
     compare_keys(d);

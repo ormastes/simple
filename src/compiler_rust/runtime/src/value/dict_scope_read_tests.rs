@@ -58,23 +58,30 @@ fn assert_canonical_projection(dict: RuntimeValue) {
     let (owner, epoch) = view(dict);
     let keys = rt_dict_keys(dict);
     let capacity = rt_dict_scope_read_meta_v1(dict, owner, epoch, 3, READ_BOUND);
-    let mut ordinal = 0;
+    // The slot view walks hash slots; `rt_dict_keys` is INSERTION order
+    // (doc/07_guide/language/dict_iteration_order.md). The projection must
+    // expose exactly the same key bytes, so compare them as sorted sets.
+    let mut projected: Vec<Vec<u8>> = Vec::new();
     for index in 0..capacity {
         let occupancy = slot(dict, owner, epoch, index, 0, 0);
         assert!((0..=1).contains(&occupancy));
         if occupancy == 0 {
             continue;
         }
-        let canonical = rt_array_get(keys, ordinal);
-        let canonical = unsafe { &*(canonical.as_heap_ptr() as *const RuntimeString) };
         let length = slot(dict, owner, epoch, index, 2, 0);
-        assert_eq!(length, canonical.len as i64);
-        for (byte, expected) in unsafe { canonical.as_bytes() }.iter().enumerate() {
-            assert_eq!(slot(dict, owner, epoch, index, 3, byte as i64), *expected as i64);
-        }
-        ordinal += 1;
+        assert!(length >= 0);
+        projected.push((0..length).map(|byte| slot(dict, owner, epoch, index, 3, byte) as u8).collect());
     }
-    assert_eq!(ordinal, rt_array_len(keys));
+    let mut canonical: Vec<Vec<u8>> = (0..rt_array_len(keys))
+        .map(|ordinal| {
+            let key = rt_array_get(keys, ordinal);
+            let key = unsafe { &*(key.as_heap_ptr() as *const RuntimeString) };
+            unsafe { key.as_bytes() }.to_vec()
+        })
+        .collect();
+    projected.sort();
+    canonical.sort();
+    assert_eq!(projected, canonical);
 }
 
 #[test]
