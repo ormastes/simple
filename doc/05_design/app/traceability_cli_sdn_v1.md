@@ -41,3 +41,117 @@ qualify concrete worktree-provider properties. See the CLI TDD report for
 source-stage boundaries, owned inputs and P2 oracle limitations. Direct Unicode
 selection is proven; find transport of that filename remains open. All20REQ/40AC
 remain required; no full runtime or protected admission PASS is claimed.
+
+## Query entry and harness surface increment — 2026-11-06 (slice 1)
+
+Scope statement: slice 1 ("P0 query usable on seed") changes **no module or
+layer boundary, no data model, no graph schema and no SDN document shape**.
+`std.common.traceability` stays the pure owner; app adapters keep snapshots,
+processes and rendering. The increment adds one entry route, one harness knob
+and one input-tolerance rule, each listed here so later slices align to it.
+
+1. **Direct program entry for the query CLI.** `src/app/traceability/query_main.spl`
+   exposes `fn main() -> i64` that forwards `get_cli_args()` to
+   `run_trace_query_v1` and exits with its status. `<simple> run
+   src/app/traceability/query_main.spl <args>` therefore has exactly the argv
+   contract and exit codes of `simple trace <args>` (0 help/complete, 1
+   rendered-but-unverified or `TRACE-QUERY-NOT-FOUND`, 2 error). Rationale: no
+   admitted Stage4 CLI dispatches `trace`, and the Rust seed dispatches none of
+   the pure-Simple commands; program-run is the delivery route on any binary
+   that can `run`. The `simple trace` registration (command_registry) is
+   unchanged and remains the eventual surface; `main` is additive. The
+   traceability-check entry (`main.spl`) already follows this shape.
+
+2. **Harness contract.** `trace_query_p0_spec` accepts
+   `SIMPLE_TRACE_QUERY_TEST_COMMAND` -- a whitespace-split command prefix that
+   already routes to the query entry (the spec appends only query args) -- as an
+   alternative to `SIMPLE_TRACE_QUERY_TEST_BINARY` (`<binary> trace <args>`).
+   Neither set is still an explicit failure; no fallback process result exists.
+   `scripts/check/check-trace-query-p0.shs` is the single owner of the
+   alternate-index fixture (`build/test-artifacts/trace_query_p0/index`, built
+   with `git read-tree HEAD` + one `update-index --cacheinfo` of a modified
+   declaration blob; never the real index or worktree) and exports
+   `GIT_INDEX_FILE` only for the spec process.
+
+3. **Declaration input tolerance.** Registered declaration files
+   (`doc/08_tracking/trace/features/*.sdn`) may begin with `#` comment lines.
+   This is satisfied in the shared SDN parser (`std.common.sdn.parser.parse`
+   skips leading full-line comments before every top-level shape dispatch,
+   matching what the block-mapping route already did), not in the trace codec;
+   `decode_trace_declarations` and the `simple.trace.declarations/1` schema are
+   unchanged.
+
+4. **Snapshot adapter tiers (stated, not changed).** `worktree_preview` reads
+   files in-process and runs on the interpreter. `git_commit` and `git_index`
+   go through `OwnedProcessLease` (owned-process v3), which the Rust seed
+   interpreter deliberately reports as unavailable (`rt_process_owned_v3_adapter_unavailable`);
+   those two routes and the mislabeled-tree rejection verify only on a native
+   runtime provider (self-hosted/native `bin/simple`). Specs that need them are
+   therefore Phase-3 verification, not seed-fixable defects.
+
+Next slices (reverse references: which specs cover a requirement, bug <->
+file links) touch the query model (`TraceNodeQueryV1`/page result) and will
+get their own increment in this document before code lands.
+
+## Reverse references increment — 2026-11-06 (slice 2)
+
+No WP0-WP7 item names a reverse lookup on the query CLI (the architecture
+document's "reverse references" are file-dependency edges for invalidation).
+This increment defines one; it serves REQ-TRC-015 (details/source inspection
+over the shared graph) and reuses the REQ-TRC-021/023 query contract.
+
+**Honest data statement.** The registered declaration today carries 101
+authored `add` claims over `specifies` (20), `decomposes_to` (73),
+`implemented_by` (4), `described_by` (2) and `motivated_by` (2); it has no
+`verified_by`/`accepted_by` claims and 1 test definition, and every claim
+raises `TRACE-AUTHORITY-CONFLICT` (no registered edge). "Which specs verify
+requirement X" is therefore **not** answerable from this data; "which feature
+specifies X", "what X decomposes to", and what a node is `implemented_by` /
+`described_by` are. `implemented_by`/`described_by` targets
+(`source:trace-cli`, `design:traceability`, ...) are not in the declaration's
+`nodes` list, but the snapshot pipeline materializes them as `source_file` /
+document nodes from their locators, so they render with a kind and title. The
+row model still tolerates an endpoint with no node (kind and title rendered
+empty, never invented). Because the declaration locates documents and sources,
+not requirements, the other endpoint's declared paths are the usable
+requirement <-> file link and travel with each row as `other_paths`.
+
+1. **CLI surface.** `refs <kind> <id>` with exactly `show`'s argv shape
+   (singular kind accepted, `--limit 1..200`, `--format table|sdn`,
+   `--snapshot`, `--declaration`, `--path`; `--prefix` rejected; `--cursor`
+   only as a continuation). Exit codes as for `show`: 1 rendered-unverified or
+   `TRACE-QUERY-NOT-FOUND` (selected id absent or wrong kind), 2 invalid.
+   `trace --help`, the command registry usage string and this document are
+   updated together.
+
+2. **Library owner.** New pure module `std.common.traceability.query_refs_v1`
+   with `TraceReferenceQueryV1` (snapshot_id, kind, selected_id, limit, cursor)
+   and `TraceReferenceV1 {claim_id, direction: "outgoing"|"incoming",
+   relation, from_id, to_id, other_id, other_kind, other_title, operation,
+   origin_id, authority, other_paths: [text] (sorted declared locator paths of
+   the other endpoint)}` plus `TraceReferencePageV1 {snapshot_id,
+   references, total_count, next_cursor, complete, locators, diagnostics}`.
+   `query_nodes_v1` is unchanged except that its validator keeps rejecting
+   `refs` (the reference validator is a sibling, not an extension, so existing
+   one-hop pages keep their contract). Rows are every non-`suppress` claim
+   whose `from_id` or `to_id` equals the selected id, sorted by canonical claim
+   id, paged with the existing cursor scheme under a distinct schema string
+   `simple.trace.reference-cursor/v1` that also binds the selected id.
+   `authority` is `registered-edge` when a `graph.edges` row with the same
+   from/relation/to exists, else `authored-claim`. `locators` are the selected
+   node's own locator rows (where it is declared).
+
+3. **Rendering.** Table: the node-page header, one `Selected: <kind> <id>
+   <title>` line, `DIRECTION\tRELATION\tID\tKIND\tTITLE\tAUTHORITY\tPATHS` rows,
+   `Total references: N`, optional `Next cursor:`, `LOCATOR\tPATH` rows, then
+   diagnostics (same 200 cap). SDN: the node-page envelope keys plus
+   `operation: refs`, `selected: {id, kind, title}`, `references: [...]`,
+   `reference_count`, `locators`. Projection label stays "not a graph export".
+
+4. **Verification tiers.** Worktree preview runs on the seed; git/index routes
+   as in slice 1. Unit spec over a synthetic graph (both directions, suppress
+   excluded, non-node endpoint, registered-edge vs authored-claim, paging);
+   one system scenario through the direct entry on the worktree preview.
+
+Slice-1 wording fix: item 2 above should read "If neither variable is set the
+spec still fails explicitly; no fallback process result exists."

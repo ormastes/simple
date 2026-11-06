@@ -304,3 +304,11 @@ modules (or, per the scale/depth theory above, any other module whose own
 
 - `doc/08_tracking/bug/interp_lint_main_then_frontend_dict_to_int_2026-07-28.md`
 - `reference_interpreter_dict_and_value_quirks` (session memory)
+
+## 2026-11-05 mirp2-E3 re-scope
+
+Not a seed JIT/cranelift defect: it is an interpreter semantic error on a
+wildcard import. The module moved to `plugins.backend_c.c_backend_stubs`
+(`src/compiler/70.backend/backend/c_backend_stubs.spl` no longer exists;
+`backend_capability_spec.spl:12` imports the new path). Re-scoped to the
+interpreter / C-backend plugin family; left open there.

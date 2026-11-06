@@ -22,7 +22,7 @@ use compiler.backend.common.ascii_utils.{char_to_ascii}
 use compiler.backend.native.native_avx2_capability.{NativeAvx2CapabilityV1, native_avx2_denied_v1}
 use compiler.backend.native.native_avx512_capability.{NativeAvx512CapabilityV1, native_avx512_denied_v1}
 use compiler.backend.native.x86_64_avx512_isel.{X86Avx512FunctionPlanV1, x86_function_has_avx512_fixed, x86_plan_avx512_fixed}
-use compiler.backend.native.x86_64_avx512_lower.{x86_avx512_handles, isel_avx512_frame_inst, x86_avx512_allocate_scratch_slots}
+use compiler.backend.native.x86_64_avx512_lower.{X86Avx512FrameV1, x86_avx512_frame_none, x86_avx512_handles, isel_avx512_frame_inst, x86_avx512_allocate_scratch_slots, x86_avx512_is_frame_vector, x86_avx512_vector_arg_insts, x86_avx512_save_result_pointer_insts, x86_avx512_frame_address, x86_avx512_vector_return_insts}
 use compiler.mir_opt.storage_projection_lowering.{MIR_STORAGE_PROJECT_ADDRESS_V1}
 use compiler.common.diagnostics.span.{Span}
 extern fn rt_enum_discriminant(value: MirInstKind) -> i64
@@ -185,14 +185,17 @@ fn isel_function_with_avx2_capability(ctx: ISelContext, func: MirFunction, capab
 fn isel_function_with_x86_simd_capability(ctx: ISelContext, func: MirFunction, capability: NativeAvx2CapabilityV1, avx512_capability: NativeAvx512CapabilityV1) -> ISelFuncResult:
     var simd_registers: Dict<i64, i64> = {}
     var avx512_shapes: Dict<i64, text> = {}
+    var avx512_frame = x86_avx512_frame_none()
     val has_avx512 = x86_function_has_avx512_fixed(func)
     if has_avx512:
         val avx512_plan = x86_plan_avx512_fixed(func)
         if not avx512_plan.ok:
             panic("x86_64 SIMD selection rejected: {avx512_plan.reason}")
-        if avx512_plan.shapes.len() > 0 and not avx512_capability.avx512f_admitted:
-            panic("x86_64 SIMD selection rejected: {avx512_capability.reason}")
         avx512_shapes = avx512_plan.shapes
+        # A denied capability no longer rejects the function: the same frame
+        # plan is lowered lane by lane with scalar GPR/SSE code, so explicit
+        # 512-bit MIR still compiles and never reaches a ZMM encoder.
+        avx512_frame = X86Avx512FrameV1(shapes: avx512_plan.shapes, scalar_fallback: not avx512_capability.avx512f_admitted, return_shape: avx512_plan.return_shape)
     val avx2_plan = x86_plan_avx2_f32x8(func, has_avx512)
     if not avx2_plan.ok:
         panic("x86_64 SIMD selection rejected: {avx2_plan.reason}")
@@ -225,7 +228,7 @@ fn isel_function_with_x86_simd_capability(ctx: ISelContext, func: MirFunction, c
         val size = local.type_.size_bytes()
         local_ctx = isel_alloc_frame_slot(local_ctx, local.id.id, size)
     if avx512_shapes.len() > 0:
-        local_ctx = x86_avx512_allocate_scratch_slots(local_ctx)
+        local_ctx = x86_avx512_allocate_scratch_slots(local_ctx, avx512_frame)
 
     # Generate prologue block
     var prologue_block = new_mach_block("prologue", -1)
@@ -234,14 +237,29 @@ fn isel_function_with_x86_simd_capability(ctx: ISelContext, func: MirFunction, c
     # Frame size placeholder - will be patched after we know total frame size
     prologue_block = mach_block_add_inst(prologue_block, new_mach_inst(X86_OP_SUB_IMM, [op_phys(X86_RSP), op_imm(0)]))
 
-    # Move arguments from ABI registers to virtual registers
+    # Move arguments from ABI registers to virtual registers. Under the
+    # frame-vector ABI a vector result takes a hidden pointer in the first
+    # slot, and each vector argument arrives as a pointer whose value is
+    # copied into the callee frame slot here.
+    val abi_shift = if avx512_frame.return_shape != "": 1 else: 0
+    if abi_shift == 1:
+        val saved = x86_avx512_save_result_pointer_insts(local_ctx, avx512_frame, X86_ARG_REGS[0])
+        for mi in saved.insts:
+            prologue_block = mach_block_add_inst(prologue_block, mi)
     var arg_idx = 0
     for local in func.locals:
         match local.kind:
             case Arg(index):
-                if index < X86_ARG_REG_COUNT:
-                    val arg_reg = X86_ARG_REGS[index]
-                    prologue_block = mach_block_add_inst(prologue_block, new_mach_inst(X86_OP_MOV_REG_REG, [local_vreg_op(local.id.id), op_phys(arg_reg)]))
+                val abi_index = index + abi_shift
+                if abi_index < X86_ARG_REG_COUNT:
+                    val arg_reg = X86_ARG_REGS[abi_index]
+                    if x86_avx512_is_frame_vector(avx512_frame, local.id.id):
+                        val copied = x86_avx512_vector_arg_insts(local_ctx, avx512_frame, local.id.id, arg_reg)
+                        local_ctx = copied.ctx
+                        for mi in copied.insts:
+                            prologue_block = mach_block_add_inst(prologue_block, mi)
+                    else:
+                        prologue_block = mach_block_add_inst(prologue_block, new_mach_inst(X86_OP_MOV_REG_REG, [local_vreg_op(local.id.id), op_phys(arg_reg)]))
                 arg_idx = arg_idx + 1
             case _: ()
 
@@ -262,7 +280,7 @@ fn isel_function_with_x86_simd_capability(ctx: ISelContext, func: MirFunction, c
                 trampoline_tag_dest = tag_dest.id
                 trampoline_target = unwind.id
             case _: ()
-        var result = isel_block_with_x86_simd(local_ctx, block, simd_registers, avx512_shapes, trampoline_id, simd_plan_active)
+        var result = isel_block_with_x86_simd(local_ctx, block, simd_registers, avx512_frame, trampoline_id, simd_plan_active)
         local_ctx = result.ctx
         mach_func = mach_func_add_block(mach_func, result.block)
         var deferred_unit_ret = false
@@ -308,19 +326,19 @@ fn isel_function_with_x86_simd_capability(ctx: ISelContext, func: MirFunction, c
     ISelFuncResult(func: mach_func, ctx: out_ctx)
 
 fn isel_block(ctx: ISelContext, block: MirBlock) -> ISelBlockResult:
-    isel_block_with_x86_simd(ctx, block, {}, {}, -1, false)
+    isel_block_with_x86_simd(ctx, block, {}, x86_avx512_frame_none(), -1, false)
 
 fn isel_block_with_simd(ctx: ISelContext, block: MirBlock, simd_regs: Dict<i64, i64>, unwind_trampoline_id: i64) -> ISelBlockResult:
-    isel_block_with_x86_simd(ctx, block, simd_regs, {}, unwind_trampoline_id, false)
+    isel_block_with_x86_simd(ctx, block, simd_regs, x86_avx512_frame_none(), unwind_trampoline_id, false)
 
-fn isel_block_with_x86_simd(ctx: ISelContext, block: MirBlock, simd_regs: Dict<i64, i64>, avx512_shapes: Dict<i64, text>, unwind_trampoline_id: i64, defer_unit_ret: bool) -> ISelBlockResult:
+fn isel_block_with_x86_simd(ctx: ISelContext, block: MirBlock, simd_regs: Dict<i64, i64>, avx512_frame: X86Avx512FrameV1, unwind_trampoline_id: i64, defer_unit_ret: bool) -> ISelBlockResult:
     val label = if block.label.?: block.label.unwrap() else: "bb{block.id.id}"
     var mach_block = new_mach_block(label, block.id.id)
     var current_ctx = ctx
 
     # Lower instructions
     for inst in block.instructions:
-        var result = if x86_avx512_handles(inst, avx512_shapes): isel_avx512_frame_inst(current_ctx, inst, avx512_shapes) else: isel_inst_with_simd(current_ctx, inst, simd_regs)
+        var result = if x86_avx512_handles(inst, avx512_frame.shapes): isel_avx512_frame_inst(current_ctx, inst, avx512_frame) else: isel_x86_inst_with_frame_vectors(current_ctx, inst, simd_regs, avx512_frame)
         current_ctx = result.ctx
         for mi in result.insts:
             mach_block = mach_block_add_inst(mach_block, mi)
@@ -330,11 +348,21 @@ fn isel_block_with_x86_simd(ctx: ISelContext, block: MirBlock, simd_regs: Dict<i
     # selected body block contains only its machine instructions and falls
     # through into the return block.
     var defer_this_ret = false
+    var vector_ret = false
     match block.terminator:
-        case Ret(None):
-            defer_this_ret = defer_unit_ret
+        case Ret(value):
+            # Top-level Option test, not a nested `Some(..)` sub-pattern: a
+            # nested enum sub-pattern does not bind on the native lanes.
+            if not value.?:
+                defer_this_ret = defer_unit_ret
+            elif avx512_frame.return_shape != "":
+                vector_ret = true
+                val returned = x86_avx512_vector_return_insts(current_ctx, avx512_frame, value.unwrap())
+                current_ctx = returned.ctx
+                for mi in returned.insts:
+                    mach_block = mach_block_add_inst(mach_block, mi)
         case _: ()
-    if not defer_this_ret:
+    if not defer_this_ret and not vector_ret:
         var term_result = isel_terminator(current_ctx, block.terminator, unwind_trampoline_id)
         current_ctx = term_result.ctx
         for mi in term_result.insts:
@@ -682,7 +710,10 @@ fn x86_plan_avx2_f32x8(func: MirFunction, shares_function_with_avx512: bool = fa
         for inst in block.instructions:
             match inst.kind:
                 case MirSimdLoad(_, _, _, vec_type):
-                    if simd_vec_kind == nil and vec_type.kind != MirTypeKind.Vec16f and vec_type.kind != MirTypeKind.Vec8d and vec_type.kind != MirTypeKind.Vec16i:
+                    # i32x8 index vectors of f64x8 permute/gather/scatter belong to
+                    # the AVX-512 frame plan, not to the YMM register plan.
+                    val avx512_index = shares_function_with_avx512 and vec_type.kind == MirTypeKind.Vec8i
+                    if simd_vec_kind == nil and not avx512_index and vec_type.kind != MirTypeKind.Vec16f and vec_type.kind != MirTypeKind.Vec8d and vec_type.kind != MirTypeKind.Vec16i:
                         simd_vec_kind = Some(vec_type.kind)
                 case _: ()
     var avx2_locals: Dict<i64, bool> = {}
@@ -1067,22 +1098,49 @@ fn isel_store(ctx: ISelContext, ptr: MirOperand, value: MirOperand) -> ISelInstR
     insts.push(new_mach_inst(X86_OP_MOV_MEM_REG, [op_mem(operand_get_reg(ptr_low.result), 0), val_low.result]))
     ISelInstResult(insts: insts, ctx: val_low.ctx)
 
+fn isel_x86_inst_with_frame_vectors(ctx: ISelContext, inst: MirInst, simd_regs: Dict<i64, i64>, frame: X86Avx512FrameV1) -> ISelInstResult:
+    """Calls in an AVX-512 frame function follow the frame-vector ABI."""
+    if frame.shapes.len() > 0:
+        match inst.kind:
+            case Call(dest, func_op, args): return isel_call_with_frame(ctx, dest, func_op, args, frame)
+            case _: ()
+    isel_inst_with_simd(ctx, inst, simd_regs)
+
 fn isel_call(ctx: ISelContext, dest: LocalId?, func_op: MirOperand, args: [MirOperand]) -> ISelInstResult:
+    isel_call_with_frame(ctx, dest, func_op, args, x86_avx512_frame_none())
+
+fn isel_call_with_frame(ctx: ISelContext, dest: LocalId?, func_op: MirOperand, args: [MirOperand], frame: X86Avx512FrameV1) -> ISelInstResult:
     var insts: [MachInst] = []
     var current_ctx = ctx
 
-    # Lower arguments into ABI registers
+    # Frame-vector ABI: a vector result is written by the callee through a
+    # hidden pointer to the destination slot (first argument), and a vector
+    # argument is passed as the address of its frame slot.
+    var vector_dest = false
+    var arg_values: [Operand] = []
+    if dest.? and x86_avx512_is_frame_vector(frame, dest.unwrap().id):
+        vector_dest = true
+        val result_pointer = x86_avx512_frame_address(current_ctx, frame, dest.unwrap().id)
+        current_ctx = result_pointer.ctx
+        for ai in result_pointer.insts:
+            insts.push(ai)
+        arg_values.push(result_pointer.result)
     for i in 0..args.len():
-        val arg_low = lower_operand(current_ctx, args[i])
+        val local = x86_simd_operand_local(args[i])
+        val arg_low = if local >= 0 and x86_avx512_is_frame_vector(frame, local): x86_avx512_frame_address(current_ctx, frame, local) else: lower_operand(current_ctx, args[i])
         current_ctx = arg_low.ctx
         for ai in arg_low.insts:
             insts.push(ai)
+        arg_values.push(arg_low.result)
+
+    # Lower arguments into ABI registers
+    for i in 0..arg_values.len():
         if i < X86_ARG_REG_COUNT:
             val arg_reg = X86_ARG_REGS[i]
-            insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [op_phys(arg_reg), arg_low.result]))
+            insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [op_phys(arg_reg), arg_values[i]]))
         else:
             # Stack argument
-            insts.push(new_mach_inst(X86_OP_PUSH, [arg_low.result]))
+            insts.push(new_mach_inst(X86_OP_PUSH, [arg_values[i]]))
 
     # Emit call
     match func_op.kind:
@@ -1115,13 +1173,14 @@ fn isel_call(ctx: ISelContext, dest: LocalId?, func_op: MirOperand, args: [MirOp
     # MirTerminator.CallTerminator both declare `dest: LocalId?`): a void call
     # has no destination, and reading `.id` off a nil dest would write rax into
     # a bogus vreg.
+    # A frame-vector result was already written through the hidden pointer.
     match dest:
         case Some(d):
-            insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [local_vreg_op(d.id), op_phys(X86_RAX)]))
+            if not vector_dest: insts.push(new_mach_inst(X86_OP_MOV_REG_REG, [local_vreg_op(d.id), op_phys(X86_RAX)]))
         case None: ()
 
     # Clean up stack args
-    val stack_args = if args.len() > X86_ARG_REG_COUNT: args.len() - X86_ARG_REG_COUNT else: 0
+    val stack_args = if arg_values.len() > X86_ARG_REG_COUNT: arg_values.len() - X86_ARG_REG_COUNT else: 0
     if stack_args > 0:
         insts.push(new_mach_inst(X86_OP_ADD_IMM, [op_phys(X86_RSP), op_imm(stack_args * 8)]))
 

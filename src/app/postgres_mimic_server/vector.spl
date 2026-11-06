@@ -1,0 +1,63 @@
+"""Opt-in admission of the RowBitmap vector provider for postgres-mimic-server.
+
+Importing the provider adapter is confined to this module so the default
+query path keeps no dependency on dynamic loading. Admission failure is never
+fatal: the reason is returned and the server keeps the ordinary scalar path.
+"""
+
+use nogc_sync_mut.database.pure_sql.bitmap_provider_v1.{
+    pure_database_vector_bitmap_reducer_open_owned_v1
+}
+use nogc_sync_mut.composition.vector_kernel_contract.{SIMPLE_VECTOR_CAP_BITMAP_AND_U32}
+use os.smf.provider_loader.{ProviderAdmissionRequestV1, PROVIDER_SESSION_OK}
+use os.posix.dynlib.{dynlib_open, dynlib_symbol, dynlib_close, dynlib_is_valid}
+use std.database.postgres_mimic.{PostgresMimicServer, postgres_mimic_install_bitmap_reducer_v1}
+
+# Levelled providers export `simple_vector_selected_level_v1() -> i32`
+# (1=SSE2, 2=x86-64-v2, 3=AVX2, 4=AVX-512); legacy providers lack it (-1).
+extern fn rt_call_ptr_0(fn_ptr: i64) -> i64
+
+class PgVectorAdmission:
+    admitted: bool
+    level: i64
+    reason: text
+
+# The reducer owner exposes only the provider-neutral trait, so the level is
+# read through a second reference to the already admitted (digest-checked)
+# module; the loader refcounts it and the reference is dropped at once.
+fn _pg_vector_selected_level(path: text) -> i64:
+    val lib = dynlib_open(path, 2)
+    if not dynlib_is_valid(lib):
+        return -1
+    val ptr = dynlib_symbol(lib, "simple_vector_selected_level_v1")
+    val level = if ptr > 0: rt_call_ptr_0(ptr) else: -1
+    val _ = dynlib_close(lib)
+    level
+
+fn pg_vector_level_name(level: i64) -> text:
+    match level:
+        1: "sse2"
+        2: "x86-64-v2"
+        3: "avx2"
+        4: "avx512"
+        _: "unknown"
+
+# Admission is digest-pinned and path-policed by the provider loader (only
+# relative build/providers/ paths are accepted).
+fn pg_vector_admit(server: PostgresMimicServer, path: text, sha256: text) -> PgVectorAdmission:
+    val opened = pure_database_vector_bitmap_reducer_open_owned_v1(ProviderAdmissionRequestV1(
+        artifact_path: path, artifact_kind: "native",
+        expected_artifact_digest: sha256,
+        granted_capability_bits: SIMPLE_VECTOR_CAP_BITMAP_AND_U32,
+        required_capability_bits: SIMPLE_VECTOR_CAP_BITMAP_AND_U32,
+        host_abi: 1, minimum_host_abi: 1, maximum_host_abi: 1,
+        requested_interface_major: 1, requested_interface_minor: 0,
+        provided_interface_major: 1, provided_interface_minor: 0))
+    if opened.status != PROVIDER_SESSION_OK:
+        val why = if opened.reason == "": "status {opened.status}" else: opened.reason
+        return PgVectorAdmission(admitted: false, level: -1, reason: why)
+    val level = _pg_vector_selected_level(path)
+    postgres_mimic_install_bitmap_reducer_v1(server, opened.reducer)
+    PgVectorAdmission(admitted: true, level: level, reason: "admitted")
+
+export PgVectorAdmission, pg_vector_admit, pg_vector_level_name

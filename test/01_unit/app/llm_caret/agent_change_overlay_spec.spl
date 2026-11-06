@@ -1,0 +1,57 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+#
+# Caret per-agent change overlay (design §18.1): Git-aware categories from
+# `git status --porcelain=v1` with rename sources, keyed by the registered
+# (workspace, agent, worktree, base, head, index generation) identity.
+
+use std.spec
+use std.spec.step
+use app.llm_caret.agent_change_overlay.{agent_change_entry_from_porcelain_line_v1,
+    agent_change_entries_from_porcelain_v1, agent_change_overlay_from_porcelain_v1,
+    agent_change_overlay_key_v1, agent_change_category_v1, agent_change_overlay_paths_v1}
+
+fn porcelain_fixture_v1() -> text:
+    "?? new/untracked.spl\n M src/lib/a.spl\nM  src/lib/b.spl\nMM src/lib/c.spl\nR  old/name.spl -> new/name.spl\n!! build/ignored.o\n\n"
+
+describe "agent change overlay porcelain parsing":
+    it "classifies untracked, unstaged, staged and mixed entries":
+        # @req REQ-SSPEC-UNIT
+        step("categories")
+        val entries = agent_change_entries_from_porcelain_v1(porcelain_fixture_v1())
+        expect(entries.len()).to_equal(5)
+        expect(entries[0].path).to_equal("new/untracked.spl")
+        expect(agent_change_category_v1(entries[0])).to_equal("untracked")
+        expect(agent_change_category_v1(entries[1])).to_equal("unstaged")
+        expect(agent_change_category_v1(entries[2])).to_equal("staged")
+        expect(agent_change_category_v1(entries[3])).to_equal("staged+unstaged")
+
+    it "keeps the original path of a rename and drops ignored files":
+        # @req REQ-SSPEC-UNIT
+        step("rename + ignored")
+        val entries = agent_change_entries_from_porcelain_v1(porcelain_fixture_v1())
+        expect(entries[4].path).to_equal("new/name.spl")
+        expect(entries[4].original_path).to_equal("old/name.spl")
+        expect(entries[4].staged).to_equal(true)
+        var has_ignored = false
+        for e in entries:
+            if e.path.contains("ignored"): has_ignored = true
+        expect(has_ignored).to_equal(false)
+        expect(agent_change_entry_from_porcelain_line_v1("") == nil).to_equal(true)
+        expect(agent_change_entry_from_porcelain_line_v1("abc") == nil).to_equal(true)
+
+    it "normalises backslashes and quoted paths":
+        # @req REQ-SSPEC-UNIT
+        step("path normalisation")
+        val e = agent_change_entry_from_porcelain_line_v1(" M \"src\\dir\\x y.spl\"")!
+        expect(e.path).to_equal("src/dir/x y.spl")
+
+describe "agent change overlay identity":
+    it "is keyed by workspace, agent, worktree, base, head and generation":
+        # @req REQ-SSPEC-UNIT
+        step("overlay key")
+        val o = agent_change_overlay_from_porcelain_v1("ws1", "agent-a", "wt-7", "abc123", "def456", 3, porcelain_fixture_v1())
+        expect(agent_change_overlay_key_v1(o)).to_equal("ws1/agent-a/wt-7@abc123..def456#3")
+        expect(o.entries.len()).to_equal(5)
+        expect(agent_change_overlay_paths_v1(o)).to_equal(["new/untracked.spl", "src/lib/a.spl", "src/lib/b.spl", "src/lib/c.spl", "new/name.spl"])

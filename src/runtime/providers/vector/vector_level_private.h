@@ -25,4 +25,19 @@ SIMPLE_VECTOR_LEVEL_DECL(1)
 /* Highest level the CPU and OS both enable, capped by SIMPLE_VECTOR_MAX_LEVEL.
  * Computed once; never executes a wide instruction itself. */
 int simple_vector_selected_level(void);
+/* Why that level and not the architecture maximum (stable codes, exported as
+ * simple_vector_level_reason_v1). Text forms:
+ *   0 max                 admitted the architecture's top level
+ *   1 cpu-missing:<feat>  first CPUID/hwcap feature of the next level absent
+ *   2 xcr0:<0xbits>       XCR0 state bits the OS has not enabled
+ *   3 cap:<N>             SIMPLE_VECTOR_MAX_LEVEL build cap
+ *   4 os:<reason>         OS-owned state or no probe on this OS
+ *   5 build:<reason>      build-time switch (SIMPLE_VECTOR_FORCE_NO_AVX512) */
+enum simple_vector_level_reason_code {
+    SIMPLE_VECTOR_REASON_MAX = 0, SIMPLE_VECTOR_REASON_CPU_MISSING = 1,
+    SIMPLE_VECTOR_REASON_XCR0 = 2, SIMPLE_VECTOR_REASON_CAP = 3,
+    SIMPLE_VECTOR_REASON_OS = 4, SIMPLE_VECTOR_REASON_BUILD = 5 };
+/* Writes NUL-terminated text into buf (truncated to size, untouched when
+ * size == 0) and returns the code. Probes first if nothing has yet. */
+int simple_vector_level_reason(char *buf, size_t size);
 #endif
