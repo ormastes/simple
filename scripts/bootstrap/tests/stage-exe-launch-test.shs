@@ -17,7 +17,7 @@ check_diag() {
     case "$err" in *"$3"*) ;; *) echo "FAIL: $1 diagnostic lacks $3"; fail=1;; esac
     case "$err" in *"$4"*) echo "FAIL: $1 diagnostic wrongly names $4"; fail=1;; esac
 }
-check_diag f127 127 0xC0000139 0xC0000135
+check_diag f127 127 ambiguous STATUS_ENTRYPOINT_NOT_FOUND
 # 32-bit NTSTATUS values cannot be real exit codes of a POSIX fake, so use --classify
 classify() {
     n=$((n + 1))
@@ -30,7 +30,7 @@ classify -1073741515 0xC0000135 0xC0000139
 classify 3221225785 0xC0000139 0xC0000135
 classify -1073741511 0xC0000139 0xC0000135
 n=$((n + 1)); err=$(sh "$launch" "$tmp/f127" 2>&1 >/dev/null)
-case "$err" in *libLLVM-23.dll*) ;; *) echo "FAIL: 127 lacks DLL-clash cause"; fail=1;; esac
+case "$err" in *"native process/timeout receipt"*) ;; *) echo "FAIL: 127 lacks evidence guidance"; fail=1;; esac
 n=$((n + 1)); err=$(sh "$launch" "$tmp/absent" 2>&1); rc=$?
 [ "$rc" = 127 ] || { echo "FAIL: missing exe rc $rc != 127"; fail=1; }
 case "$err" in *"does not exist"*) ;; *) echo "FAIL: missing exe not named"; fail=1;; esac
@@ -39,5 +39,11 @@ n=$((n + 1)); err=$(sh "$launch" "$tmp/ok" 2>&1); rc=$?
 [ "$rc" = 0 ] && [ -z "$err" ] || { echo "FAIL: ok run not silent"; fail=1; }
 n=$((n + 1)); err=$(sh "$launch" "$tmp/f3" 2>&1); rc=$?
 [ "$rc" = 3 ] && [ -z "$err" ] || { echo "FAIL: other rc must pass through silently"; fail=1; }
+n=$((n + 1))
+printf '#!/bin/sh\nprintf "lowered 464 modules\\n"\nexit 127\n' > "$tmp/progress127"
+chmod +x "$tmp/progress127"
+sh "$launch" "$tmp/progress127" >"$tmp/progress.out" 2>"$tmp/progress.err"; rc=$?
+[ "$rc" = 127 ] && [ "$(cat "$tmp/progress.out")" = 'lowered 464 modules' ] || { echo 'FAIL: running program output/status changed'; fail=1; }
+case "$(cat "$tmp/progress.err")" in *STATUS_ENTRYPOINT_NOT_FOUND*|*0xC0000139*) echo 'FAIL: post-start exit classified as native loader failure'; fail=1;; esac
 if [ "$fail" = 0 ]; then echo "PASS - $n launcher cases checked"; exit 0; fi
 echo "FAIL"; exit 1
