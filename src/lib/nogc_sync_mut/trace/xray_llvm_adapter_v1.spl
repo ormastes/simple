@@ -37,6 +37,9 @@ pub const XRAY_LLVM_STATE_FAULTED_V1: i64 = 3
 
 const XRAY_LLVM_MAX_SITES_V1: i64 = 4096
 const XRAY_LLVM_ID_MAX_V1: u64 = 18446744073709551615u64
+# compiler-rt reports ONGOING while another patch/unpatch is in flight. It is
+# transient: retried a bounded number of times, never spun on.
+const XRAY_LLVM_ONGOING_RETRIES_V1: i64 = 8
 
 # The effect boundary. The host binding is xray_llvm_host_leaf_v1.spl over
 # src/runtime/xray/xray_llvm_adapter_linux.c; specs use a fake.
@@ -48,6 +51,9 @@ pub trait XrayLlvmLeafV1:
     me install(arena: i64, generation: u64, context: u64, module_instance: u64) -> i64
     me patch_function(id: i64) -> i64
     me unpatch_function(id: i64) -> i64
+    # Close admission on the published arena (gate |= 2): a sled still patched
+    # after this records nothing. 1 closed, anything else did not linearize.
+    me close(arena: i64) -> i64
 
 pub fn xray_llvm_status_failure_v1(status: i64) -> TraceFailureV1:
     if status == XRAY_LLVM_STATUS_NOT_INITIALIZED_V1: return TraceFailureV1.InstrumentationAbsent
@@ -74,11 +80,12 @@ pub struct XrayLlvmAdapterV1:
     # not been reported unpatched since. Survives a fault for diagnosis.
     patched: [i64]
     context: u64
+    arena: i64
 
 impl XrayLlvmAdapterV1:
     static fn create(module_instance: u64) -> XrayLlvmAdapterV1:
         XrayLlvmAdapterV1(module_instance: module_instance, state: XRAY_LLVM_STATE_IDLE_V1,
-            incarnation: 0, planned: [], patched: [], context: 1)
+            incarnation: 0, planned: [], patched: [], context: 1, arena: 0)
 
     fn state_code() -> i64:
         self.state
@@ -134,13 +141,17 @@ impl XrayLlvmAdapterV1:
         if leaf.install(arena, self.incarnation, self.context, self.module_instance) != 1:
             self.state = XRAY_LLVM_STATE_IDLE_V1
             return Err(TraceFailureV1.BackendFailure)
+        self.arena = arena
         for id in self.planned:
-            val status = leaf.patch_function(id)
+            val status = self.patch_retrying(leaf, id)
             if status != XRAY_LLVM_STATUS_SUCCESS_V1:
                 val failure = xray_llvm_status_failure_v1(status)
-                # FAILED may leave this function's sleds partly written;
-                # unpatch rewrites the original bytes, so roll it back too.
-                if status == XRAY_LLVM_STATUS_FAILED_V1: self.patched.push(id)
+                # Close admission first (design C.5), then roll back.
+                leaf.close(self.arena)
+                # compiler-rt's FAILED for a failed mprotect writes no byte, so
+                # the id is NOT recorded as patched. A best-effort unpatch
+                # covers any other FAILED path; its outcome is not a site state.
+                if status == XRAY_LLVM_STATUS_FAILED_V1: self.unpatch_retrying(leaf, id)
                 if self.unpatch_all(leaf):
                     self.state = XRAY_LLVM_STATE_IDLE_V1
                 else:
@@ -157,15 +168,40 @@ impl XrayLlvmAdapterV1:
         var index = self.patched.len() - 1
         while index >= 0:
             val id = self.patched[index]
-            if leaf.unpatch_function(id) != XRAY_LLVM_STATUS_SUCCESS_V1:
+            if self.unpatch_retrying(leaf, id) != XRAY_LLVM_STATUS_SUCCESS_V1:
                 remaining.push(id)
             index = index - 1
         self.patched = remaining
         remaining.len() == 0
 
-    # Quiescent stop: every selected sled returns to its taken branch. The
-    # handler and arena stay resident (no unload); a late callback that was
-    # already past the sled still writes a valid resident channel. Idempotent.
+    me patch_retrying(leaf: XrayLlvmLeafV1, id: i64) -> i64:
+        var status = leaf.patch_function(id)
+        var attempt = 1
+        while status == XRAY_LLVM_STATUS_ONGOING_V1 and attempt < XRAY_LLVM_ONGOING_RETRIES_V1:
+            status = leaf.patch_function(id)
+            attempt = attempt + 1
+        status
+
+    me unpatch_retrying(leaf: XrayLlvmLeafV1, id: i64) -> i64:
+        var status = leaf.unpatch_function(id)
+        var attempt = 1
+        while status == XRAY_LLVM_STATUS_ONGOING_V1 and attempt < XRAY_LLVM_ONGOING_RETRIES_V1:
+            status = leaf.unpatch_function(id)
+            attempt = attempt + 1
+        status
+
+    # The only way out of Faulted: retry unpatching the exact recorded sites.
+    # Admission stays closed; success returns to Idle so a new generation can
+    # be prepared, failure stays Faulted (never reported as off).
+    me recover(leaf: XrayLlvmLeafV1) -> Result<bool, TraceFailureV1>:
+        if self.state != XRAY_LLVM_STATE_FAULTED_V1: return Err(TraceFailureV1.InvalidHandle)
+        if not self.unpatch_all(leaf): return Err(TraceFailureV1.BackendFailure)
+        self.state = XRAY_LLVM_STATE_IDLE_V1
+        Ok(true)
+
+    # Quiescent stop: admission closes, then every selected sled returns to its
+    # taken branch. The handler and arena stay resident (no unload); a late
+    # callback past the sled sees a closed gate and records nothing. Idempotent.
     me request_stop(leaf: XrayLlvmLeafV1, session: TraceSessionV1
             ) -> Result<TraceSessionStateV1, TraceFailureV1>:
         if (self.state == XRAY_LLVM_STATE_IDLE_V1 and session.slot == 1 and
@@ -173,6 +209,10 @@ impl XrayLlvmAdapterV1:
             return Ok(TraceSessionStateV1.Drained)
         if self.state == XRAY_LLVM_STATE_FAULTED_V1: return Err(TraceFailureV1.BackendFailure)
         if not self.valid(session): return Err(TraceFailureV1.InvalidHandle)
+        # Defense in depth: once quiescent unpatch completes no sled reaches the
+        # handler, so a close that did not linearize (contended gate) is not a
+        # fault; a failed unpatch is.
+        leaf.close(self.arena)
         if not self.unpatch_all(leaf):
             self.state = XRAY_LLVM_STATE_FAULTED_V1
             return Err(TraceFailureV1.BackendFailure)

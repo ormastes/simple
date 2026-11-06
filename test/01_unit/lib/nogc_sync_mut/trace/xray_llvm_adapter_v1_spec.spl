@@ -12,6 +12,7 @@ class FakeXrayLeafV1:
     fail_patch_id: i64
     fail_patch_status: i64
     fail_unpatch_id: i64
+    ongoing_left: i64
     log: [text]
     patched: [i64]
 
@@ -25,6 +26,9 @@ impl XrayLlvmLeafV1 for FakeXrayLeafV1:
 
     me patch_function(id: i64) -> i64:
         self.log.push("patch:{id}")
+        if self.ongoing_left > 0:
+            self.ongoing_left = self.ongoing_left - 1
+            return XRAY_LLVM_STATUS_ONGOING_V1
         if id == self.fail_patch_id: return self.fail_patch_status
         self.patched.push(id)
         XRAY_LLVM_STATUS_SUCCESS_V1
@@ -38,10 +42,14 @@ impl XrayLlvmLeafV1 for FakeXrayLeafV1:
         self.patched = kept
         XRAY_LLVM_STATUS_SUCCESS_V1
 
+    me close(arena: i64) -> i64:
+        self.log.push("close:{arena}")
+        1
+
 fn fake_leaf_v1(max_id: i64) -> FakeXrayLeafV1:
     FakeXrayLeafV1(max_id: max_id, install_status: 1, fail_patch_id: 0,
         fail_patch_status: XRAY_LLVM_STATUS_FAILED_V1, fail_unpatch_id: 0,
-        log: [], patched: [])
+        ongoing_left: 0, log: [], patched: [])
 
 fn dynamic_config_v1() -> TraceConfigV1:
     TraceConfigV1(instrumentation: TraceInstrumentationV1.Dynamic,
@@ -146,6 +154,8 @@ describe "Linux LLVM XRay adapter V1 (stage 1 control plane)":
         expect(leaf.log.contains("patch:4")).to_equal(false)
         expect(leaf.log.contains("unpatch:2")).to_equal(true)
         expect(leaf.log.contains("unpatch:1")).to_equal(true)
+        # Admission closed before the rollback started.
+        expect(leaf.log.index_of("close:4096").unwrap() < leaf.log.index_of("unpatch:2").unwrap()).to_equal(true)
         expect(adapter.state_code()).to_equal(XRAY_LLVM_STATE_IDLE_V1)
 
     it "faults closed when rollback itself fails and never reports off":
@@ -159,6 +169,13 @@ describe "Linux LLVM XRay adapter V1 (stage 1 control plane)":
         expect(adapter.patched_ids().len()).to_equal(1)
         expect(adapter.patched_ids()[0]).to_equal(1)
         expect(failure_code_v1(adapter.prepare(leaf, dynamic_config_v1(), selection_v1([2])))).to_equal(9)
+        # recover retries the exact recorded sites; success returns to Idle.
+        expect(adapter.recover(leaf).is_err()).to_equal(true)
+        leaf.fail_unpatch_id = 0
+        expect(adapter.recover(leaf).unwrap()).to_equal(true)
+        expect(adapter.state_code()).to_equal(XRAY_LLVM_STATE_IDLE_V1)
+        expect(adapter.patched_ids().len()).to_equal(0)
+        expect(adapter.recover(leaf).is_err()).to_equal(true)
 
     it "refuses to start when the handler cannot be installed":
         var leaf = fake_leaf_v1(4)
@@ -180,3 +197,44 @@ describe "Linux LLVM XRay adapter V1 (stage 1 control plane)":
         expect(adapter.state_code()).to_equal(XRAY_LLVM_STATE_FAULTED_V1)
         expect(adapter.patched_ids().len()).to_equal(1)
         expect(adapter.patched_ids()[0]).to_equal(2)
+
+    it "retries a transient ONGOING status a bounded number of times":
+        var leaf = fake_leaf_v1(4)
+        leaf.ongoing_left = 2
+        var adapter = XrayLlvmAdapterV1.create(1)
+        val prepared = adapter.prepare(leaf, dynamic_config_v1(), selection_v1([1])).unwrap()
+        expect(adapter.start(leaf, prepared, 4096).is_ok()).to_equal(true)
+        expect(adapter.patched_ids().len()).to_equal(1)
+        var stuck = fake_leaf_v1(4)
+        stuck.ongoing_left = 100
+        var other = XrayLlvmAdapterV1.create(1)
+        val again = other.prepare(stuck, dynamic_config_v1(), selection_v1([1])).unwrap()
+        match other.start(stuck, again, 4096):
+            case Ok(_): expect("started").to_equal("busy")
+            case Err(failure): expect(trace_failure_code_v1(failure)).to_equal(6)
+        expect(stuck.patched.len()).to_equal(0)
+        expect(other.patched_ids().len()).to_equal(0)
+        expect(other.state_code()).to_equal(XRAY_LLVM_STATE_IDLE_V1)
+
+    it "never records an id compiler-rt did not patch":
+        var leaf = fake_leaf_v1(4)
+        leaf.fail_patch_id = 2
+        leaf.fail_patch_status = XRAY_LLVM_STATUS_INVALID_ID_V1
+        var adapter = XrayLlvmAdapterV1.create(1)
+        val prepared = adapter.prepare(leaf, dynamic_config_v1(), selection_v1([2])).unwrap()
+        expect(adapter.start(leaf, prepared, 4096).is_err()).to_equal(true)
+        expect(leaf.log.contains("unpatch:2")).to_equal(false)
+        expect(adapter.patched_ids().len()).to_equal(0)
+        expect(adapter.state_code()).to_equal(XRAY_LLVM_STATE_IDLE_V1)
+
+    it "rejects a stale prepared handle and closes admission on stop":
+        val leaf = fake_leaf_v1(4)
+        var adapter = XrayLlvmAdapterV1.create(1)
+        val first = adapter.prepare(leaf, dynamic_config_v1(), selection_v1([1])).unwrap()
+        val session = adapter.start(leaf, first, 4096).unwrap()
+        expect(adapter.start(leaf, first, 4096).is_err()).to_equal(true)
+        expect(adapter.request_stop(leaf, session).is_ok()).to_equal(true)
+        expect(leaf.log.index_of("close:4096").unwrap() < leaf.log.index_of("unpatch:1").unwrap()).to_equal(true)
+        val second = adapter.prepare(leaf, dynamic_config_v1(), selection_v1([1])).unwrap()
+        expect(adapter.start(leaf, first, 8192).is_err()).to_equal(true)
+        expect(adapter.start(leaf, second, 8192).is_ok()).to_equal(true)

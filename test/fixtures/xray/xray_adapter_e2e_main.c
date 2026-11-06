@@ -16,6 +16,7 @@
  * Output: one "PASS <name>" / "FAIL <name>" per check, then a verdict line.
  */
 #include <errno.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -144,6 +145,13 @@ __attribute__((xray_never_instrument, noinline)) static void adversarial_handler
 #endif
 }
 
+#define HAMMER_CALLS 20000
+static void *hammer(void *arg) {
+    (void)arg;
+    for (int i = 0; i < HAMMER_CALLS; i++) xray_target_a(i);
+    return NULL;
+}
+
 static double mix_call(void) {
     return xray_abi_mix(1, 2, 3, 4, 5, 6, 7, 8, 0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5);
 }
@@ -168,11 +176,6 @@ int main(void) {
     const double mix_expect = mix_call();
     int64_t *gen1 = arena_new(1, 1);
 
-    /* Quiescent: no install, no patch -> sleds are taken branches. */
-    xray_target_a(1);
-    xray_target_b(1);
-    check(drain(gen1, id_a, 1).entry == 0, "nothing fires before the adapter starts");
-
     /* Fail closed on bad arenas, unknown ids. */
     int64_t *wrong = arena_new(9, 1);
     check(simple_xray_llvm_install((int64_t)(intptr_t)wrong, 1, 1, 1) == 0,
@@ -182,6 +185,13 @@ int main(void) {
     check(simple_xray_llvm_unpatch_function(max_id + 1) == -1, "unpatch id max+1 rejected");
 
     check(simple_xray_llvm_install((int64_t)(intptr_t)gen1, 1, 1, 1) == 1, "install generation 1");
+    /* Quiescent start: handler and arena published, nothing patched yet
+     * (XRAY_OPTIONS=patch_premain=false) -> every sled is a taken branch. */
+    xray_target_a(1);
+    xray_target_b(1);
+    counts_t cq = drain(gen1, id_a, 1);
+    check(cq.entry == 0 && cq.exit == 0 && cq.other == 0,
+          "installed but unpatched: nothing fires");
     check(simple_xray_llvm_patch_function(id_a) == 1, "patch A only (aspect-selected)");
     for (int i = 0; i < 3; i++) {
         xray_target_a(i);
@@ -250,10 +260,46 @@ int main(void) {
 
     /* Closed channel: a late callback after close is not recorded. */
     check(simple_xray_llvm_patch_function(id_a) == 1, "patch A for close test");
+    xray_target_a(1);
+    counts_t co = drain(gen2, id_a, 2);
+    check(co.entry == 1 && co.exit == 1, "patched A records while the channel is open");
     __atomic_store_n(&gen2[0], 2, __ATOMIC_SEQ_CST);
     xray_target_a(1);
     counts_t cc = drain(gen2, id_a, 2);
     check(cc.entry == 0 && cc.exit == 0 && gen2[7] == 0, "closed channel admits nothing, no loss");
+    simple_xray_llvm_unpatch_function(id_a);
+
+    /* Full ring: bounded, counts loss, never overwrites unread records. */
+    int64_t *gen3 = arena_new(3, 1);
+    check(simple_xray_llvm_install((int64_t)(intptr_t)gen3, 3, 1, 1) == 1, "install generation 3");
+    check(simple_xray_llvm_patch_function(id_a) == 1, "patch A for ring-full test");
+    for (int i = 0; i < 200; i++) xray_target_a(i);
+    counts_t cf = drain(gen3, id_a, 3);
+    printf("INFO ring-full: recorded=%lld lost=%lld inexact=%lld\n", (long long)(cf.entry + cf.exit),
+           (long long)gen3[7], (long long)gen3[8]);
+    check(cf.entry + cf.exit == CAPACITY && gen3[7] == 400 - CAPACITY && gen3[8] == 0,
+          "ring full: capacity records kept, exact loss for the rest");
+    simple_xray_llvm_unpatch_function(id_a);
+
+    /* Two producers on one channel: the gate CAS admits one at a time; a
+     * contended producer counts loss. Every edge is recorded or counted. */
+    int64_t *gen4 = arena_new(4, 1);
+    check(simple_xray_llvm_install((int64_t)(intptr_t)gen4, 4, 1, 1) == 1, "install generation 4");
+    check(simple_xray_llvm_patch_function(id_a) == 1, "patch A for contention test");
+    pthread_t t1, t2;
+    pthread_create(&t1, NULL, hammer, NULL);
+    pthread_create(&t2, NULL, hammer, NULL);
+    pthread_join(t1, NULL);
+    pthread_join(t2, NULL);
+    counts_t ct = drain(gen4, id_a, 4);
+    long long edges = 2LL * 2 * HAMMER_CALLS;
+    printf("INFO contention: recorded=%lld lost=%lld inexact=%lld edges=%lld\n",
+           (long long)(ct.entry + ct.exit), (long long)gen4[7], (long long)gen4[8], edges);
+    check(ct.bad == 0 && ct.other == 0 &&
+              (gen4[8] != 0 ? ct.entry + ct.exit + gen4[7] <= edges
+                            : ct.entry + ct.exit + gen4[7] == edges),
+          "contention: every edge recorded or counted lost, no torn record");
+    check(gen4[0] == 0, "contention: gate released (no producer left holding it)");
     simple_xray_llvm_unpatch_function(id_a);
 
     if (g_fail == 0)

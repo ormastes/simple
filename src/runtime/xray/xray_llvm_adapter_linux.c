@@ -17,8 +17,12 @@
  * Hot path rules (plan section 7 "Handler policy"): no lock, no allocation, no
  * libc call, no syscall, no floating-point/vector register use. It is
  * excluded from instrumentation. Build this TU WITHOUT -fxray-instrument and
- * with -mgeneral-regs-only so the compiler cannot spill through vector state
- * the upstream trampoline may not preserve.
+ * with -mgeneral-regs-only (+ -mno-outline-atomics on aarch64) so the compiler
+ * cannot touch vector state the upstream trampoline does not save, nor call
+ * out-of-line atomic helpers. Not an #error guard: the C-runtime syntax gate
+ * compiles every src/runtime TU with default flags. The flags are enforced on
+ * the produced object by scripts/check/check-xray-llvm-adapter-e2e.shs
+ * (handler disassembly: no call/branch out, no FP/vector register).
  *
  * Not part of the core runtime archive: linked only into `--xray` binaries.
  * Not `rt_*`: a private adapter leaf, not a runtime primitive.
@@ -69,6 +73,9 @@ extern size_t __xray_max_function_id(void);
 #define CH_RECORD_WORDS 12
 #define CH_MAX_RECORDS 4096
 #define CH_RECORD_HEADER 6291457u /* schema 1 | record size 96 << 16 */
+/* compiler-rt packs ids as 24-bit function | 8-bit object (XRayNFnBits=24);
+ * object 0 is the main executable, the only stage-1 image. */
+#define XRAY_MAIN_OBJECT_MAX_ID ((1 << 24) - 1)
 
 static int64_t *g_simple_xray_arena;
 static uint64_t g_simple_xray_module_instance;
@@ -106,13 +113,12 @@ __attribute__((xray_never_instrument)) static uint64_t simple_xray_timestamp(voi
 __attribute__((xray_never_instrument, used)) static void simple_xray_handler(int32_t fid,
                                                                      enum XRayEntryType type) {
     int64_t *base = __atomic_load_n(&g_simple_xray_arena, __ATOMIC_ACQUIRE);
-    if (base == NULL || fid <= 0) return;
+    if (base == NULL || fid <= 0 || fid > XRAY_MAIN_OBJECT_MAX_ID) return; /* DSO ids: not ours */
     uint64_t kind;
     if (type == ENTRY) kind = 1;
     else if (type == EXIT) kind = 2;
     else if (type == TAIL) kind = 3;
     else return;
-    uint64_t sequence = __atomic_add_fetch(&g_simple_xray_sequence, 1, __ATOMIC_RELAXED);
     int64_t state = simple_xray_cas(&base[CH_GATE], 0, 1);
     if ((state & 2) != 0) return; /* closed: not loss, admission is over */
     if (state != 0) {
@@ -137,11 +143,14 @@ __attribute__((xray_never_instrument, used)) static void simple_xray_handler(int
         __atomic_add_fetch(&base[CH_GATE], -1, __ATOMIC_SEQ_CST);
         return;
     }
+    /* Taken only after admission, so drops leave no gaps. Process-wide and
+     * monotonic across generations; per-context order is the V1 guarantee. */
+    uint64_t sequence = __atomic_add_fetch(&g_simple_xray_sequence, 1, __ATOMIC_RELAXED);
     int64_t *slot = base + CH_HEADER_WORDS + (write % capacity) * CH_RECORD_WORDS;
     uint64_t id = (uint64_t)(uint32_t)fid;
     slot[0] = (int64_t)(CH_RECORD_HEADER | (kind << 32));
     slot[1] = base[CH_GENERATION];
-    slot[2] = (int64_t)g_simple_xray_module_instance;
+    slot[2] = (int64_t)__atomic_load_n(&g_simple_xray_module_instance, __ATOMIC_RELAXED);
     /* Stage 1: dense site id == LLVM function id (one image). */
     slot[3] = (int64_t)(id | (id << 32));
     slot[4] = base[CH_CONTEXT];
@@ -158,7 +167,7 @@ __attribute__((xray_never_instrument, used)) static void simple_xray_handler(int
 
 int64_t simple_xray_llvm_max_function_id(void) {
     size_t max_id = __xray_max_function_id();
-    if (max_id > (size_t)INT32_MAX) return 0; /* not addressable as an int32 id */
+    if (max_id > (size_t)XRAY_MAIN_OBJECT_MAX_ID) return 0; /* would alias a DSO object id */
     return (int64_t)max_id;
 }
 
@@ -170,8 +179,8 @@ int64_t simple_xray_llvm_install(int64_t arena, int64_t generation, int64_t cont
                                  int64_t module_instance) {
     if (arena <= 0 || (arena % 8) != 0 || generation <= 0 || context <= 0 || module_instance <= 0)
         return 0;
-    if (g_simple_xray_module_instance != 0 &&
-        g_simple_xray_module_instance != (uint64_t)module_instance)
+    uint64_t previous_module = __atomic_load_n(&g_simple_xray_module_instance, __ATOMIC_RELAXED);
+    if (previous_module != 0 && previous_module != (uint64_t)module_instance)
         return 0; /* stage 1 has exactly one instrumented image */
     int64_t *base = (int64_t *)(intptr_t)arena;
     int64_t capacity = base[CH_CAPACITY];
@@ -180,10 +189,11 @@ int64_t simple_xray_llvm_install(int64_t arena, int64_t generation, int64_t cont
     if (base[CH_ARENA_BYTES] != (CH_HEADER_WORDS + capacity * CH_RECORD_WORDS) * 8) return 0;
     if (__atomic_load_n(&base[CH_GATE], __ATOMIC_SEQ_CST) != 0) return 0;
     int64_t *previous = __atomic_load_n(&g_simple_xray_arena, __ATOMIC_ACQUIRE);
-    g_simple_xray_module_instance = (uint64_t)module_instance;
+    __atomic_store_n(&g_simple_xray_module_instance, (uint64_t)module_instance, __ATOMIC_RELAXED);
     __atomic_store_n(&g_simple_xray_arena, base, __ATOMIC_RELEASE);
     if (__xray_set_handler(simple_xray_handler) != 1) {
         __atomic_store_n(&g_simple_xray_arena, previous, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_simple_xray_module_instance, previous_module, __ATOMIC_RELAXED);
         return 0;
     }
     return 1;

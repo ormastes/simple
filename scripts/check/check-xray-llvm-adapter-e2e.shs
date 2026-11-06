@@ -24,7 +24,8 @@
 #        harness covers: quiescent no-fire, selected-only firing, unpatch,
 #        re-patch, unknown ids 0 / max+1, injected mprotect failure, ABI-01
 #        (8 int + 8 FP args, FP return, sret) and ABI-02 (adversarial handler),
-#        generation re-install and closed-channel admission.
+#        generation re-install, closed-channel admission, ring-full loss
+#        accounting and two-thread producer contention.
 #   OTHER arch (object-only; no cross compiler-rt/sysroot is assumed):
 #     4. Compiles the targets and adapter for the other Linux triple and checks
 #        xray_instr_map is present in targets, absent from the adapter, and the
@@ -158,8 +159,18 @@ rc=$?
 [ "$rc" -eq 0 ] || { echo "FAIL — adapter does not compile for $HOST_T: $(head -3 "$WORK/adapter.err" | tr '\n' ' ')"; exit 1; }
 "$OBJDUMP" -d --disassemble-symbols=simple_xray_handler "$WORK/adapter.o" > "$WORK/handler.dis" 2>&1
 grep -qE '^[[:space:]]+[0-9a-f]+:' "$WORK/handler.dis" || { echo "ERROR — nothing was checked (handler shim not found in adapter object)"; exit 2; }
-if grep -qE '[[:space:]](bl|blr|call|callq)[[:space:]]' "$WORK/handler.dis"; then
-    echo "FAIL — handler shim makes a call: $(grep -E '[[:space:]](bl|blr|call|callq)[[:space:]]' "$WORK/handler.dis" | head -2 | tr '\n' ' ')"
+# A call or tail call out shows as a branch relocation inside the handler
+# (aarch64 CALL26/JUMP26, x86_64 PLT32/PC32 on a call/jmp) or an indirect
+# branch; local branches carry no relocation.
+"$OBJDUMP" -dr --disassemble-symbols=simple_xray_handler "$WORK/adapter.o" > "$WORK/handler.rel" 2>&1
+if grep -qE 'R_AARCH64_(CALL26|JUMP26)|R_X86_64_PLT32' "$WORK/handler.rel" \
+        || grep -E '^[[:space:]]+[0-9a-f]+:' "$WORK/handler.dis" | cut -f2- \
+            | grep -qE '^(bl|blr|br|call|callq)[[:space:]]|^(jmp|jmpq)[[:space:]]+\*'; then
+    echo "FAIL — handler shim calls or branches out: $(grep -E 'R_AARCH64_(CALL26|JUMP26)|R_X86_64_PLT32' "$WORK/handler.rel" | head -2 | tr '\n' ' ')"
+    exit 1
+fi
+if "$READELF" -S "$WORK/adapter.o" | grep -q xray_instr_map; then
+    echo "FAIL — adapter object carries sleds (must be built without -fxray-instrument)"
     exit 1
 fi
 if grep -E '^[[:space:]]+[0-9a-f]+:' "$WORK/handler.dis" | cut -f2- \
@@ -176,10 +187,10 @@ rc=$?
 [ "$rc" -eq 0 ] || { echo "FAIL — targets .ll does not compile: $(head -3 "$WORK/targets.err" | tr '\n' ' ')"; exit 1; }
 "$READELF" -S "$WORK/targets.o" | grep -q xray_instr_map || { echo "FAIL — targets object has no xray_instr_map ($HOST)"; exit 1; }
 CHECKS=$((CHECKS + 1))
-"$CC" --target="$HOST_T" -O1 -Wall -c "$HARNESS" -o "$WORK/harness.o" 2> "$WORK/harness.err"
+"$CC" --target="$HOST_T" -O1 -Wall -pthread -c "$HARNESS" -o "$WORK/harness.o" 2> "$WORK/harness.err"
 rc=$?
 [ "$rc" -eq 0 ] || { echo "ERROR — nothing was checked (harness does not compile: $(head -3 "$WORK/harness.err" | tr '\n' ' '))"; exit 2; }
-"$CC" --target="$HOST_T" -fxray-instrument -fuse-ld=lld -Wl,--wrap=mprotect \
+"$CC" --target="$HOST_T" -fxray-instrument -fuse-ld=lld -pthread -Wl,--wrap=mprotect \
     "$WORK/harness.o" "$WORK/targets.o" "$WORK/adapter.o" -o "$WORK/xray_e2e" 2> "$WORK/link.err"
 rc=$?
 [ "$rc" -eq 0 ] || { echo "ERROR — nothing was checked (link with compiler-rt xray failed: $(head -3 "$WORK/link.err" | tr '\n' ' '))"; exit 2; }
