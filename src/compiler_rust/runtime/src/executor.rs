@@ -703,14 +703,124 @@ unsafe fn native_address_is_code(addr: usize) -> bool {
     libc::dladdr(addr as *const libc::c_void, &mut info) != 0 && !info.dli_fname.is_null()
 }
 
-#[cfg(not(unix))]
+// Windows: committed, executable pages. VirtualQuery never faults on any
+// address and takes no lock of ours, so the classifier stays lockless.
+#[cfg(windows)]
+unsafe fn native_address_is_code(addr: usize) -> bool {
+    use windows_sys::Win32::System::Memory::{
+        PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY, PAGE_GUARD,
+    };
+    match native_query_region(addr) {
+        Some((_, protect)) => {
+            protect & PAGE_GUARD == 0
+                && protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY) != 0
+        }
+        None => false,
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 unsafe fn native_address_is_code(_addr: usize) -> bool {
     false
 }
 
+// (region end, protection) of the committed region containing `addr`.
+#[cfg(windows)]
+fn native_query_region(addr: usize) -> Option<(usize, u32)> {
+    use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT};
+    let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<MEMORY_BASIC_INFORMATION>();
+    let n = unsafe { VirtualQuery(addr as *const std::ffi::c_void, &mut info, size) };
+    if n == 0 || info.State != MEM_COMMIT {
+        return None;
+    }
+    let end = (info.BaseAddress as usize).checked_add(info.RegionSize)?;
+    if end <= addr {
+        return None;
+    }
+    Some((end, info.Protect))
+}
+
+// Some(true) when `words` machine words at `addr` are committed and readable,
+// Some(false) when they provably are not, None when this host has no
+// fault-free probe (the classifier then keeps the VA-ceiling rule only).
+#[cfg(windows)]
+fn native_words_readable(addr: usize, words: usize) -> Option<bool> {
+    use windows_sys::Win32::System::Memory::{PAGE_GUARD, PAGE_NOACCESS};
+    let Some(end) = addr.checked_add(words * std::mem::size_of::<usize>()) else {
+        return Some(false);
+    };
+    let mut cur = addr;
+    while cur < end {
+        match native_query_region(cur) {
+            Some((region_end, protect)) if protect != 0 && protect & (PAGE_GUARD | PAGE_NOACCESS) == 0 => {
+                cur = region_end;
+            }
+            _ => return Some(false),
+        }
+    }
+    Some(true)
+}
+
+#[cfg(not(windows))]
+fn native_words_readable(_addr: usize, _words: usize) -> Option<bool> {
+    None
+}
+
+// A decoding candidate is valid when it is a code address, or an aligned,
+// readable two-word record whose entry word is a code address.
+unsafe fn native_candidate_is_callable(candidate: u64) -> Option<bool> {
+    if candidate < 4096 {
+        return Some(false);
+    }
+    let addr = candidate as usize;
+    if native_address_is_code(addr) {
+        return Some(true);
+    }
+    if candidate & 0x7 != 0 {
+        return Some(false);
+    }
+    if !native_words_readable(addr, 2)? {
+        return Some(false);
+    }
+    Some(native_address_is_code(*(addr as *const usize)))
+}
+
+// Below the VA ceiling an 8-aligned word is ambiguous: it is either a record
+// address (RuntimeValue ABI) or the int-tagged `addr << 3` of one (raw ABI);
+// a Windows heap at ~2^40 keeps the tagged form under the ceiling. Validate
+// both decodings; exactly one valid one decides, otherwise fail closed.
+// Returns None when the host cannot probe (keep the legacy rule).
+enum NativeWordForm {
+    Address,
+    Tagged,
+    Reject,
+}
+
+unsafe fn native_resolve_ambiguous_word(word: u64) -> Option<NativeWordForm> {
+    let as_address = native_candidate_is_callable(word)?;
+    let as_tagged = native_candidate_is_callable(word >> 3)?;
+    Some(match (as_address, as_tagged) {
+        (true, false) => NativeWordForm::Address,
+        (false, true) => NativeWordForm::Tagged,
+        _ => NativeWordForm::Reject,
+    })
+}
+
 unsafe fn native_callable(closure_arg: u64) -> Option<NativeCallable> {
-    let raw_worker_args = native_word_exceeds_user_va(closure_arg);
-    let payload = native_closure_payload(closure_arg)?;
+    let mut raw_worker_args = native_word_exceeds_user_va(closure_arg);
+    let payload = if !raw_worker_args && closure_arg >= 4096 && closure_arg & 0x7 == 0 {
+        match native_resolve_ambiguous_word(closure_arg) {
+            Some(NativeWordForm::Tagged) => {
+                raw_worker_args = true;
+                closure_arg >> 3
+            }
+            Some(NativeWordForm::Reject) => return None,
+            Some(NativeWordForm::Address) | None => native_closure_payload(closure_arg)?,
+        }
+    } else {
+        native_closure_payload(closure_arg)?
+    };
     if payload < 4096 {
         return None;
     }

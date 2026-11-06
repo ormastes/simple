@@ -121,10 +121,16 @@ pub(crate) fn record_let_declared_width(let_stmt: &simple_parser::ast::LetStmt, 
             _ => None,
         },
     };
-    let width = Env::narrow_signed_width_of(annotation).or_else(|| match &let_stmt.value {
-        Some(simple_parser::ast::Expr::Cast { target_type, .. }) => Env::narrow_signed_width_of(Some(target_type)),
-        _ => None,
-    });
+    // Unannotated: the initializer's static width (`val w = x as i32`,
+    // `val n = m + 1` with `m: i32`), so later arithmetic on `w`/`n` wraps
+    // at the same width the pure-Simple compiler types it with.
+    let width = match annotation {
+        Some(_) => Env::narrow_signed_width_of(annotation),
+        None => match let_stmt.value.as_ref().map(|v| super::expr::static_int_width(v, env)) {
+            Some(super::expr::StaticIntWidth::Narrow(w)) => Some(w),
+            _ => None,
+        },
+    };
     env.set_declared_int_width(name, width);
 }
 
@@ -2770,7 +2776,13 @@ pub(crate) fn exec_augmented_assignment(
             };
             let result = evaluate_expr(&binary_expr, env, functions, classes, enums, impl_methods)?;
             env.remove(&temp_name);
-            result
+            // `x op= rhs` has the type of `x`: wrap to its declared narrow
+            // signed width (the RHS temp hides it from the binary-op wrap).
+            // Bug: seed_i32_overflow_interp_vs_jit_divergence_2026-11-05.
+            match (result, env.declared_int_width(name)) {
+                (Value::Int(r), Some(w)) => Value::Int(super::expr::wrap_signed(r, w)),
+                (other, _) => other,
+            }
         } else {
             // Simple ~= assignment
             rhs_value

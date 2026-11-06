@@ -119,3 +119,6 @@ Until those gates pass, the stage4 full-CLI closure diagnosis in
 report identifies source-level resolver/probe candidates; it does not claim
 their timing contribution, or that resolver work is the sole Stage 4
 bottleneck.
+
+## Round-10 verdict note (2026-11-06)
+Verdict: feature-sized / verification-pending, no patch. The record forbids a speculative rewrite until measured. Needs a manifest-attested full CLI (Phase 3): SIMPLE_NATIVE_BUILD_TRACE_CLOSURE=1 <stage binary> native-build --entry-closure --entry src/app/cli/main.spl, bounded at 10s and 30s.

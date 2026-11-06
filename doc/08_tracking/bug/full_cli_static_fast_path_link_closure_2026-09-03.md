@@ -24,3 +24,6 @@ Acceptance requires a producer-authenticated rebuilt arm64 full CLI and at
 least 30 before/after process samples reporting p50, p95, max RSS, binary
 segments, linked images, binary digest, and output parity.
 
+
+## Round-10 verdict note (2026-11-06)
+Verdict: host-blocked + feature-sized. macOS arm64 link-closure optimisation; acceptance needs a producer-authenticated arm64 full CLI and 30 before/after samples. Not reproducible on Windows.

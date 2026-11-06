@@ -327,6 +327,52 @@ pub(crate) fn core_c_target_flags(
     flags
 }
 
+/// Compiler + flags for C sources of a hosted Linux cross target (e.g.
+/// `--target x86_64-unknown-linux-gnu` on macOS). `Ok(None)`: not a hosted
+/// cross build, or its GNU cross driver is installed and owns its sysroot.
+/// Otherwise clang is driven with `--target`/`--sysroot`; without a sysroot
+/// the build fails up front instead of compiling host headers/sources.
+pub(crate) fn hosted_cross_c_setup(
+    target: simple_common::target::Target,
+) -> Result<Option<(String, Vec<String>)>, String> {
+    hosted_cross_c_setup_with(
+        target,
+        simple_common::platform::cc_detect::command_exists,
+        std::env::var("SIMPLE_CROSS_SYSROOT").ok(),
+    )
+}
+
+pub(crate) fn hosted_cross_c_setup_with(
+    target: simple_common::target::Target,
+    exists: impl Fn(&str) -> bool,
+    sysroot: Option<String>,
+) -> Result<Option<(String, Vec<String>)>, String> {
+    if target.os != simple_common::target::TargetOS::Linux || target.is_host() {
+        return Ok(None);
+    }
+    let gnu = hosted_linux_cross_compiler(target, false);
+    if gnu.is_some_and(|tool| exists(tool)) {
+        return Ok(None);
+    }
+    let Some(triple) = super::linker::generated_c_object_triple(target) else {
+        return Ok(None);
+    };
+    let alternative = gnu.map(|tool| format!("install `{tool}` or ")).unwrap_or_default();
+    let sysroot = sysroot.filter(|dir| !dir.trim().is_empty()).ok_or_else(|| {
+        format!(
+            "cross target {triple} needs a target C sysroot for the runtime: {alternative}set \
+             SIMPLE_CROSS_SYSROOT=<dir> (used as clang --target={triple} --sysroot=<dir>)"
+        )
+    })?;
+    if !std::path::Path::new(&sysroot).is_dir() {
+        return Err(format!("SIMPLE_CROSS_SYSROOT={sysroot} is not a directory (cross target {triple})"));
+    }
+    if !exists("clang") {
+        return Err(format!("cross target {triple} needs clang on PATH ({alternative}install clang)"));
+    }
+    Ok(Some(("clang".to_string(), vec![format!("--target={triple}"), format!("--sysroot={sysroot}")])))
+}
+
 pub(crate) fn windows_gnu_target_flag(
     target: simple_common::target::Target,
     compiler: &str,
@@ -656,7 +702,18 @@ fn build_c_runtime_library(
     #[cfg(not(unix))]
     let build_dir_ino_before: u64 = 0;
 
-    let cc = target_c_compiler(target);
+    let mut cc = target_c_compiler(target);
+    let cross_flags = match hosted_cross_c_setup(target) {
+        Ok(Some((cross_cc, flags))) => {
+            cc = cross_cc;
+            flags
+        }
+        Ok(None) => Vec::new(),
+        Err(error) => {
+            eprintln!("native-build: {error}");
+            return None;
+        }
+    };
     let ar = find_archive_tool().map_err(|error| {
         eprintln!("native-build: core-C archive tool discovery failed: {error}");
     }).ok()?;
@@ -720,6 +777,7 @@ fn build_c_runtime_library(
                     // 16 names.  Mirrors runtime_compiler.spl:545 in the pure-Simple lane.
                     .arg("-DSIMPLE_RUNTIME_MEMORY_OWNER=1")
                     .args(core_c_target_flags(target, &cc, source, riscv_vector))
+                    .args(&cross_flags)
                     .arg(format!("-I{}", runtime_root.display()))
                     .arg(format!("-I{}", runtime_root.join("platform").display()))
                     .arg(runtime_root.join(source))
