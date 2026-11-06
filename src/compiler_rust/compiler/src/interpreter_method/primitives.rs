@@ -282,6 +282,8 @@ pub fn handle_float_methods(
         "to_int" | "truncate" => Value::Int(f.trunc() as i64),
         "to_f64" => Value::Float(f),
         "to_f32" => Value::Float32(f as f32),
+        // HIR types `to_u64()` as U64 for every receiver (see method_dispatch.rs).
+        "to_u64" => Value::UInt { value: f as u64, width: 64 },
         "to_i8" | "to_i16" | "to_i32" | "to_i64" | "to_u8" | "to_u16" | "to_u32" | "to_u64" => {
             let tname = &method[3..];
             let nt = NumericType::from_name(tname).expect("handled by match arm above");
