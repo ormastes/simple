@@ -636,3 +636,42 @@ selection order is unchanged, the number is recorded.
 | Non-deterministic PE digest | `-Wl,--no-insert-timestamp`, lld, explicit `.def` exports (done) |
 | AVX-512 downclock makes L4 slower on short/bandwidth-bound spans | measured and recorded; selection stays safety-ordered; cap is the only override |
 | Linux-only `<asm/hwcap.h>` on FreeBSD | numeric aux keys, no headers (done) |
+
+## CPU-level SIMD out of the static runtime — staged (2026-11-06)
+
+Owner directive: SIMD code that is CPU-version specific (including what the
+compiler/runtime itself uses) is loaded from the per-level provider DSO above,
+never compiled into the binary with `target(...)` + in-process CPUID dispatch.
+The static runtime keeps a portable scalar baseline and fails closed to it.
+
+**Stage 1 — text kernels (landed on `work/text-simd-to-levelled-dll-20261106`).**
+- ABI: additive opcodes 5..12 (`SIMPLE_VECTOR_TEXT_*`: UTF-8 validate /
+  find-invalid / count, ASCII check / upper / lower, find / find-last), caps
+  `0xFF0`. The v1 description and digest are unchanged; a host requests the
+  text caps at query time and an older provider answers status 5.
+- Provider: `providers/vector/text_level_kernels.c` (one object per level,
+  `-march` selects SSE2 / AVX2 / AVX-512BW / NEON(+SVE count/ascii) / portable
+  for RVV), `text_level_dispatch.c` (baseline dispatcher + `simple_text_apply_v1`,
+  reached from `simple_vector_apply_v1`).
+- Runtime: `runtime_simd_{utf8,case,search}.c` hold scalar code only; first
+  use admits the provider once (path policy and SHA-256 pin as
+  `provider_loader.spl`, re-hash after open, interface + ABI digest + text caps,
+  level > 0, known-answer self-test), then routes spans >= 64 bytes.
+  `SIMPLE_VECTOR_PROVIDER_PATH` / `_SHA256` (or the build-time
+  `SIMPLE_VECTOR_PROVIDER_DEFAULT_*` pair) configure it;
+  `simd_text_provider_level()` / `_status()` report the route.
+- Gate: `check-vector-provider-levels.shs run` adds per-cap text parity
+  (`vector_text_level_parity.c`) and `check-text-provider-route.shs`
+  (baseline-only runtime objects, absent / refused / admitted routes).
+- Open: deployment must ship and pin the DSO, otherwise the runtime runs the
+  scalar baseline (about 2.8x slower than old AVX2 on 1 MiB ASCII validate);
+  aarch64/RVV text objects are compile-gated only on Windows hosts.
+
+**Stage 2 — crypto (planned).** AES-NI, SHA-NI and PCLMUL (GHASH, CRC32) from
+`runtime_simd_dispatch.c` / `g_simd_crypto` become provider opcodes behind a
+separate capability block; constant-time scalar stays static.
+
+**Stage 3 — ML-KEM NTT and parser lexical mask (planned).** The AVX2/NEON/RVV
+NTT batch (`rt_mlkem_ntt_simd_*`) and `rt_parser_*mask_call_u8x32` move the
+same way; the parser mask needs a batched wire op so per-token calls do not
+pay the ABI cost.
