@@ -30,6 +30,7 @@ use compiler.frontend.core.aop_predicate_parser.{
     validate_advice_form
 }
 use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_xray_policy.{XrayBuildPolicy, xray_policy_apply}
 use compiler.driver.driver_log_helpers.{log_debug, log_build_progress}
 use common.plugin.aspect_params.{AspectParamsV1, aspect_coverage_cutover_state_v1, aspect_log_level_to_text}
 
@@ -134,6 +135,8 @@ impl CompilerDriver:
         log_build_progress("aop_weave", "modules", self.ctx.mir_modules.len(), self.ctx.mir_modules.len(), "all", 1, 1, 0, 0, "complete")
 
     me apply_debug_trace():
+        # Post-mir_opt instrumentation stage; every pipeline reaches it once.
+        self.apply_xray_policy()
         val level = self.ctx.options.debug_trace_level
         if level == "" or level == "none":
             return
@@ -142,4 +145,17 @@ impl CompilerDriver:
         for name in self.ctx.mir_modules.keys():
             self.ctx.mir_modules[name] = inject_debug_trace(
                 self.ctx.mir_modules[name], level)
+
+    me apply_xray_policy():
+        # Static off (default): no traversal, no allocation, MIR untouched.
+        if not self.ctx.options.xray_enabled:
+            return
+        # compile() rejects an unresolvable policy before any pipeline runs;
+        # routes that bypass that gate (VHDL-only, source->LLVM IR) fail here.
+        if self.ctx.config.contains_key("xray_config_error"):
+            self.ctx.add_error(self.ctx.config["xray_config_error"] ?? "invalid XRay configuration")
+            return
+        for name in self.ctx.mir_modules.keys():
+            self.ctx.mir_modules[name] = xray_policy_apply(
+                self.ctx.mir_modules[name], XrayBuildPolicy.on())
 use compiler.common.diagnostics.span.{Span}

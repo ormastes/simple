@@ -1,0 +1,276 @@
+#!/bin/sh
+# check-xray-static-off-identity.shs — XRay static OFF must be byte-identical.
+#
+# Design: doc/04_architecture/compiler/xray/xray_compiler_structural_change_2026-11-06.md
+# section B. `--xray` is the static switch and is OFF by default: a default
+# build must carry zero sleds, no XRay sections, no XRay symbols, and must be
+# identical to what the compiler produced before XRay existed.
+#
+# What it does
+#   1. Generates four fixtures (hello, multi-return, tail call, recursion).
+#   2. Builds each with DEFAULT options (no --xray):
+#        <compiler> compile --native -o <out> <fixture>
+#      twice with the candidate compiler, and once with --baseline if given
+#      (a compiler built from the pre-change base). SMF output is not compared:
+#      measured 2026-11-06 the seed's SMF is not run-to-run deterministic
+#      (79 differing bytes on hello.spl) while its native executables were
+#      byte-identical across runs.
+#   3. Compares candidate-vs-candidate (run-to-run determinism) and
+#      candidate-vs-baseline. Whole-file `cmp` first; on a byte difference it
+#      falls back to a NORMALIZED comparison (section name/type/size list,
+#      sorted symbol names, .text bytes). The verdict names the mode used.
+#   4. Asserts absence on every artifact: no section matching /xray/, no
+#      symbol matching ^(__xray_|__simple_xray|simple_xray_).
+#
+# Verdict (last stdout line):
+#   PASS — <n> artifact(s) compared (...)            exit 0
+#   FAIL — <reason>                                  exit 1
+#   ERROR — nothing was checked (<reason>)           exit 2
+# A run that compared 0 artifacts is ERROR, never a pass. A missing compiler
+# or missing LLVM inspection tool is ERROR.
+#
+# --selftest runs before every scan and is fatal. Its fixtures are real ELF
+# objects built with clang and inspected by the SAME scanner: identical clean
+# pair must PASS; an identical pair carrying an `xray_instr_map` section must
+# FAIL; an identical pair defining `__xray_FunctionEntry` must FAIL (both isolate
+# the absence scan from the byte comparison); two objects with different
+# .text must FAIL; an empty artifact set must ERROR.
+#
+# Usage
+#   sh scripts/check/check-xray-static-off-identity.shs [--compiler <path>] [--baseline <path>] [--keep]
+#   sh scripts/check/check-xray-static-off-identity.shs --selftest
+# Env: LLVM_READELF, LLVM_NM, LLVM_OBJCOPY, CLANG (selftest), XRAY_GUARD_TIMEOUT (s, default 600).
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+COMPILER="$ROOT/bin/simple"
+BASELINE=""
+KEEP=0
+SELFTEST_ONLY=0
+READELF=${LLVM_READELF:-llvm-readelf}
+NM=${LLVM_NM:-llvm-nm}
+OBJCOPY=${LLVM_OBJCOPY:-llvm-objcopy}
+CC_FOR_SELFTEST=${CLANG:-clang}
+STEP_TIMEOUT=${XRAY_GUARD_TIMEOUT:-600}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --compiler) COMPILER=${2:-}; shift 2 ;;
+        --baseline) BASELINE=${2:-}; shift 2 ;;
+        --keep) KEEP=1; shift ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+done
+
+have_tool() { command -v "$1" >/dev/null 2>&1; }
+
+for tool in "$READELF" "$NM" "$OBJCOPY"; do
+    if ! have_tool "$tool"; then
+        echo "ERROR — nothing was checked (missing inspection tool: $tool)"
+        exit 2
+    fi
+done
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/xray-static-off.XXXXXX") || {
+    echo "ERROR — nothing was checked (cannot create temp dir)"; exit 2; }
+cleanup() { [ "$KEEP" = 1 ] || rm -rf "$WORK"; }
+trap cleanup EXIT INT TERM
+
+# is_elf <file> -> 0 when the file is an ELF object/executable
+is_elf() {
+    _magic=$(head -c 4 "$1" 2>/dev/null | od -An -c 2>/dev/null | tr -d ' \n')
+    [ "$_magic" = "177ELF" ]
+}
+
+# absence_offences <file> -> prints offending sections/symbols, one per line
+absence_offences() {
+    _f=$1
+    if is_elf "$_f"; then
+        "$READELF" -S --wide "$_f" 2>/dev/null | awk '/\]/ { for (i = 1; i <= NF; i++) if ($i ~ /xray/) print "section " $i }'
+        "$NM" -a "$_f" 2>/dev/null | awk '{ n = $NF; if (n ~ /^(__xray_|__simple_xray|simple_xray_)/) print "symbol " n }'
+    else
+        echo "not an ELF artifact"
+    fi
+}
+
+# normalized_digest <file> <out> -> writes a normalized description of an artifact
+normalized_digest() {
+    _f=$1; _o=$2
+    : >"$_o"
+    if is_elf "$_f"; then
+        "$READELF" -S --wide "$_f" 2>/dev/null |
+            awk '/^ *\[ *[0-9]+\]/ { sub(/^ *\[ *[0-9]+\] */, ""); print $1, $2, $5 }' >>"$_o"
+        "$NM" -a "$_f" 2>/dev/null | awk '{ print $NF }' | sort >>"$_o"
+        if "$OBJCOPY" -O binary --only-section=.text "$_f" "$WORK/text.bin" 2>/dev/null; then
+            od -An -tx1 "$WORK/text.bin" >>"$_o"
+        fi
+    fi
+}
+
+# scan <dirA> <dirB> -> compares every artifact name in dirA with dirB, checks
+# absence in both; sets SCAN_COUNT, SCAN_MODE; prints offences; returns 0/1/2
+scan() {
+    _a=$1; _b=$2
+    SCAN_COUNT=0; SCAN_MODE="byte-identical"; _bad=0
+    for _fa in "$_a"/*; do
+        [ -f "$_fa" ] || continue
+        _name=$(basename "$_fa")
+        _fb="$_b/$_name"
+        if [ ! -f "$_fb" ]; then
+            echo "missing counterpart: $_name"; _bad=1; continue
+        fi
+        SCAN_COUNT=$((SCAN_COUNT + 1))
+        for _f in "$_fa" "$_fb"; do
+            absence_offences "$_f" >"$WORK/off.txt"
+            if [ -s "$WORK/off.txt" ]; then
+                sed "s|^|$_name: |" "$WORK/off.txt"; _bad=1
+            fi
+        done
+        if cmp -s "$_fa" "$_fb"; then
+            continue
+        fi
+        normalized_digest "$_fa" "$WORK/na.txt"
+        normalized_digest "$_fb" "$WORK/nb.txt"
+        if cmp -s "$WORK/na.txt" "$WORK/nb.txt"; then
+            SCAN_MODE="normalized"
+        else
+            echo "$_name: differs (bytes and normalized sections/symbols/.text)"; _bad=1
+        fi
+    done
+    if [ "$SCAN_COUNT" -eq 0 ]; then return 2; fi
+    if [ "$_bad" -ne 0 ]; then return 1; fi
+    return 0
+}
+
+selftest() {
+    if ! have_tool "$CC_FOR_SELFTEST"; then
+        echo "selftest: missing C compiler $CC_FOR_SELFTEST" >&2; return 2
+    fi
+    _st="$WORK/selftest"; mkdir -p "$_st/src"
+    printf 'int add(int a, int b) { return a + b; }\n' >"$_st/src/clean.c"
+    printf 'int add(int a, int b) { return a - b; }\n' >"$_st/src/other.c"
+    printf '__attribute__((section("xray_instr_map"))) int map_row = 1;\nint add(int a, int b) { return a + b; }\n' >"$_st/src/section.c"
+    printf 'void __xray_FunctionEntry(void) {}\nint add(int a, int b) { return a + b; }\n' >"$_st/src/symbol.c"
+    for _c in clean other section symbol; do
+        "$CC_FOR_SELFTEST" -c -O1 -o "$_st/src/$_c.o" "$_st/src/$_c.c" 2>"$_st/cc.err"
+        _rc=$?
+        if [ "$_rc" -ne 0 ]; then echo "selftest: cannot build $_c.o" >&2; return 2; fi
+    done
+    # case: name expected_rc fileA fileB
+    _fail=0
+    for _case in "clean-pair 0 clean clean" "xray-section 1 section section" "xray-symbol 1 symbol symbol" "text-differs 1 clean other"; do
+        set -- $_case
+        mkdir -p "$_st/$1/a" "$_st/$1/b"
+        cp "$_st/src/$3.o" "$_st/$1/a/fx.o"; cp "$_st/src/$4.o" "$_st/$1/b/fx.o"
+        scan "$_st/$1/a" "$_st/$1/b" >"$_st/$1.out"
+        _rc=$?
+        if [ "$_rc" -ne "$2" ]; then
+            echo "selftest: case $1 expected rc=$2 got rc=$_rc" >&2; _fail=1
+        fi
+    done
+    mkdir -p "$_st/empty/a" "$_st/empty/b"
+    scan "$_st/empty/a" "$_st/empty/b" >"$_st/empty.out"
+    _rc=$?
+    if [ "$_rc" -ne 2 ]; then echo "selftest: case empty expected rc=2 got rc=$_rc" >&2; _fail=1; fi
+    [ "$_fail" -eq 0 ] || return 1
+    return 0
+}
+
+selftest
+ST_RC=$?
+if [ "$ST_RC" -ne 0 ]; then
+    echo "ERROR — nothing was checked (selftest failed rc=$ST_RC)"
+    exit 2
+fi
+if [ "$SELFTEST_ONLY" = 1 ]; then
+    echo "PASS — selftest: 5 fixtures (clean pair, xray section, xray symbol, .text difference, empty set) classified correctly"
+    exit 0
+fi
+
+if [ ! -x "$COMPILER" ]; then
+    echo "ERROR — nothing was checked (compiler not executable: $COMPILER)"
+    exit 2
+fi
+if [ -n "$BASELINE" ] && [ ! -x "$BASELINE" ]; then
+    echo "ERROR — nothing was checked (baseline compiler not executable: $BASELINE)"
+    exit 2
+fi
+
+FX="$WORK/fixtures"; mkdir -p "$FX"
+cat >"$FX/hello.spl" <<'EOF'
+fn main():
+    print "hello"
+EOF
+cat >"$FX/multi_return.spl" <<'EOF'
+fn classify(n: i64) -> i64:
+    if n < 0:
+        return -1
+    if n == 0:
+        return 0
+    1
+
+fn main():
+    print "{classify(-3)} {classify(0)} {classify(9)}"
+EOF
+cat >"$FX/tail_call.spl" <<'EOF'
+fn count_down(n: i64, acc: i64) -> i64:
+    if n == 0:
+        return acc
+    count_down(n - 1, acc + n)
+
+fn main():
+    print "{count_down(100, 0)}"
+EOF
+cat >"$FX/recursion.spl" <<'EOF'
+fn fib(n: i64) -> i64:
+    if n < 2:
+        return n
+    fib(n - 1) + fib(n - 2)
+
+fn main():
+    print "{fib(15)}"
+EOF
+
+# build_all <compiler> <outdir> -> 0 when every artifact was produced
+build_all() {
+    _cc=$1; _out=$2; mkdir -p "$_out"
+    for _fx in "$FX"/*.spl; do
+        _stem=$(basename "$_fx" .spl)
+        (cd "$ROOT" && timeout "$STEP_TIMEOUT" "$_cc" compile --native -o "$_out/$_stem.native" "$_fx") >"$_out/$_stem.native.log" 2>&1
+        _rc=$?
+        if [ "$_rc" -ne 0 ] || [ ! -f "$_out/$_stem.native" ]; then
+            echo "build failed ($_cc native $_stem rc=$_rc)" >&2; return 1
+        fi
+        rm -f "$_out/$_stem.native.log"
+    done
+    return 0
+}
+
+if ! build_all "$COMPILER" "$WORK/run1"; then
+    echo "ERROR — nothing was checked (candidate build failed; see stderr)"; exit 2
+fi
+if ! build_all "$COMPILER" "$WORK/run2"; then
+    echo "ERROR — nothing was checked (candidate rebuild failed; see stderr)"; exit 2
+fi
+scan "$WORK/run1" "$WORK/run2"
+RC=$?
+TOTAL=$SCAN_COUNT; DET_MODE=$SCAN_MODE
+if [ "$RC" -eq 2 ]; then echo "ERROR — nothing was checked (0 artifacts produced)"; exit 2; fi
+if [ "$RC" -ne 0 ]; then echo "FAIL — candidate default build has XRay artifacts or is not reproducible run-to-run"; exit 1; fi
+
+BASE_NOTE="no baseline compiler given"
+if [ -n "$BASELINE" ]; then
+    if ! build_all "$BASELINE" "$WORK/base"; then
+        echo "ERROR — nothing was checked (baseline build failed; see stderr)"; exit 2
+    fi
+    scan "$WORK/run1" "$WORK/base"
+    RC=$?
+    TOTAL=$((TOTAL + SCAN_COUNT))
+    if [ "$RC" -ne 0 ]; then echo "FAIL — default build output differs from the baseline compiler's"; exit 1; fi
+    BASE_NOTE="vs baseline: $SCAN_MODE"
+fi
+echo "PASS — $TOTAL artifact(s) compared (run-to-run: $DET_MODE; $BASE_NOTE; 0 XRay sections/symbols; compiler=$COMPILER)"
+exit 0

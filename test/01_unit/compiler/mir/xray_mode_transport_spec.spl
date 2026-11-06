@@ -1,0 +1,36 @@
+"""XRay structural PR1: MirFunction.xray_mode is defaulted and survives MIR rewrites."""
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_types.{MirSignature, MirType}
+use compiler.mir.mir_instruction_graph.{MirFunction}
+use compiler.mir.mir_instruction_support.{mir_operand_copy}
+use compiler.mir_opt.dce.*
+
+fn xray_fixture_function() -> MirFunction:
+    var builder = MirBuilder.new()
+    builder.begin_function(SymbolId(id: 41), "xray_fixture",
+        MirSignature(params: [], return_type: MirType.i64(), is_variadic: false), Span.empty())
+    val value = builder.emit_const_int(7)
+    val dead = builder.emit_const_int(9)
+    builder.terminate_return(Some(mir_operand_copy(value)))
+    builder.end_function()
+
+describe "MirFunction.xray_mode transport":
+    it "defaults to 0 (static off) for an ordinary built function":
+        val function = xray_fixture_function()
+        expect(function.xray_mode).to_equal(0)
+
+    it "is preserved by MirFunction.with_blocks":
+        var function = xray_fixture_function()
+        function.xray_mode = 2
+        val rewritten = MirFunction.with_blocks(function, function.blocks)
+        expect(rewritten.xray_mode).to_equal(2)
+
+    it "survives a real mir_opt pass that rebuilds the function (DCE)":
+        var function = xray_fixture_function()
+        function.xray_mode = 1
+        var pass_ = DeadCodeElimination.new()
+        val optimized = pass_.run_on_function(function)
+        expect(optimized.xray_mode).to_equal(1)
