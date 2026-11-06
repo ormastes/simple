@@ -17,6 +17,7 @@ use compiler.driver.driver_types (CompileOptions, CompileMode, CompileResult, Ou
 use compiler.common.driver_core_types (driver_core_compile_options_default, compileoptions_normalize_mir_optimization)
 use app.io.aspect_params_env.{aspect_params_from_env}
 use compiler.driver.driver_xray_policy.{xray_trace_instrumentation_enabled, xray_sdn_trace_instrumentation}
+use std.platform.{host_os, host_arch}
 use compiler.mir_opt.mir_opt_integration (mir_optimization_inventory_lines)
 use std.common.convert.{try_parse_int}
 use app.io._CliCompile.compile_llvm_ir_facade.{
@@ -98,7 +99,7 @@ fn cli_print_shared_optimization_inventory(command: text):
         print "  - Release MIR/self-hosted builds normalize to standard unless --opt-level overrides it."
 
 # Pure Simple compiler implementation (no Rust SFFI dependency)
-fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool, opt_level: i64, profile: text, debug_trace_level: text, coverage_enabled: bool, mcdc_mode_text: text, mcdc_owner_bytes: i64, mcdc_global_bytes: i64, xray_enabled: bool = false) -> i64:
+fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool, opt_level: i64, profile: text, debug_trace_level: text, coverage_enabled: bool, mcdc_mode_text: text, mcdc_owner_bytes: i64, mcdc_global_bytes: i64, xray_enabled: bool = false, native_target: text = "") -> i64:
     var out = output_file
     if out == "":
         # Default output based on format
@@ -154,6 +155,16 @@ fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: 
         options.debug_trace_level = debug_trace_level
     options.coverage_enabled = coverage_enabled
     options.xray_enabled = xray_enabled
+    if xray_enabled:
+        # Parity with the standalone compiler (80.driver/main.spl sets
+        # cli_mode_text): without it the positional input is not an AOT
+        # input and MIR lowering emits an empty stub module
+        # (driver_pipeline_lowering.spl native_entry_closure_mir), so the
+        # native object had zero functions. Gated on --xray so every
+        # non-xray route through this function is unchanged.
+        options.cli_mode_text = "aot"
+    if native_target != "":
+        options.native_target = native_target
     options.mcdc_mode_text = mcdc_mode_text
     options.mcdc_owner_bytes = mcdc_owner_bytes
     options.mcdc_global_bytes = mcdc_global_bytes
@@ -239,6 +250,28 @@ fn cli_xray_route_error(backend: text, target: text, emit: text, output_format: 
     if emit != "native" and backend != "llvm" and backend != "llvm-lib" and backend != "llvmlib":
         return "{prefix} requires a native executable build; add --native"
     ""
+
+# `--native --backend=native --xray`: the pure-Simple native backend reads
+# its codegen target from SIMPLE_NATIVE_BUILD_TARGET (backend_helpers), and
+# an empty one selects the stub emitter. Export the explicit --target, or the
+# Linux host triple, for this compile only (same save/restore as the
+# --target route below).
+fn cli_xray_native_target(target: text) -> text:
+    if target != "":
+        return target
+    if host_os() == "linux":
+        return "{host_arch()}-unknown-linux-gnu"
+    ""
+
+fn cli_compile_xray_native(source_file: text, out: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool, opt_level: i64, profile: text, debug_trace_level: text, coverage_enabled: bool, mcdc_mode_text: text, mcdc_owner_bytes: i64, mcdc_global_bytes: i64, target: text) -> i64:
+    val native_target = cli_xray_native_target(target)
+    val old_native_target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    if native_target != "" and not env_set("SIMPLE_NATIVE_BUILD_TARGET", native_target):
+        _cli_eprint("Error: could not export SIMPLE_NATIVE_BUILD_TARGET={native_target}")
+        return 1
+    val status = cli_compile_pure_simple(source_file, out, output_format, backend, verbose, release, low_memory, opt_level, profile, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes, true, native_target)
+    env_set("SIMPLE_NATIVE_BUILD_TARGET", old_native_target)
+    status
 
 fn _cli_is_wasm_target(t: text) -> bool:
     t == "wasm32" or t == "wasm32-wasi" or t == "wasm64" or t.starts_with("wasm32-") or t.starts_with("wasm64-")
@@ -685,6 +718,8 @@ fn cli_compile(args: [text]) -> i64:
         # Use Pure Simple compiler driver for all LLVM backends
         if (backend == "llvm-lib" or backend == "llvmlib" or coverage_enabled or xray_enabled or mcdc_mode_text != "" or
             mcdc_owner_bytes > 0 or mcdc_global_bytes > 0):
+            if xray_enabled and backend == "native":
+                return cli_compile_xray_native(source_file, out, output_format, backend, verbose, release, low_memory, opt_level, profile, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes, target)
             return cli_compile_pure_simple(source_file, out, output_format, backend, verbose, release, low_memory, opt_level, profile, debug_trace_level, coverage_enabled, mcdc_mode_text, mcdc_owner_bytes, mcdc_global_bytes, xray_enabled)
         return compile_native(source_file, out, verbose, "", false, backend, release, opt_level, use_lto, march_target)
 

@@ -15,6 +15,9 @@
 #      entry/exit into the channel, the Simple consumer polls them;
 #   5. request_stop unpatches: sled words are OFF again, calls record nothing.
 # Two sessions with different pointcuts prove per-function runtime selection.
+# XRAY_E2E_FUNCTIONS and XRAY_E2E_POINTCUTS_{1,2} name functions by suffix
+# (`traced`); they are resolved to canonical map names before the aspect
+# params are built, so the pointcuts the control plane sees are canonical.
 # Output: one `E2E ...` line per fact, then `E2E-HOST-OK` or `E2E-HOST-ERROR`.
 use std.common.plugin.aspect_params.{AspectParamsV1, ASPECT_TRACE_OBSERVER_EXT_V1}
 use std.common.plugin.iface_id.{ParamExt}
@@ -52,6 +55,25 @@ fn aspect_params(pointcuts: text) -> AspectParamsV1:
     params.ext.push(ParamExt(ASPECT_TRACE_OBSERVER_EXT_V1, 1, config_payload().bytes(), TRACE_CONFIG_SCHEMA_HASH_V1))
     params.ext.push(ParamExt(ASPECT_TRACE_POINTCUTS_EXT_V1, 1, pointcuts.bytes(), TRACE_POINTCUTS_SCHEMA_V1))
     params
+
+# The canonical map name ending in ".<suffix>" (module prefixes are the
+# dotted source path), "" unless exactly one function matches.
+fn canonical(module: XrayNativeLoadedModuleV1, suffix: text) -> text:
+    var found = ""
+    for function in module.map.functions:
+        if function.name.ends_with(".{suffix}"):
+            if found != "": return ""
+            found = function.name
+    found
+
+# Comma-separated suffixes -> comma-separated canonical pointcuts.
+fn canonical_list(module: XrayNativeLoadedModuleV1, suffixes: text) -> text:
+    var out = ""
+    for suffix in suffixes.split(","):
+        val name = canonical(module, suffix)
+        if out != "": out = out + ","
+        out = out + (if name == "": suffix else: name)
+    out
 
 fn word_at(address: i64) -> i64:
     (rt_ptr_read_i32(address, 0) as i64) & 4294967295
@@ -171,7 +193,9 @@ fn main():
     print "E2E registered slot={slot}"
     if slot <= 0: return fail("resident runtime rejected the map")
     var entries: [i64] = []
-    for name in functions:
+    for suffix in functions:
+        val name = canonical(module, suffix)
+        if name == "": return fail("no unique map function ending in .{suffix}")
         val entry = dl.symbol(name)
         if entry == 0: return fail("no symbol {name}")
         entries.push(entry)
@@ -179,10 +203,10 @@ fn main():
     print "E2E baseline={baseline}"
     var bound = XrayNativeBoundLeafV1(leaf: leaf, port: SosixCodePatchAdapterV1(), dispatch: dl)
     var adapter = XrayLlvmAdapterV1.create_for_backend(1, TraceBackendV1.Simple)
-    val after_s1 = match session(adapter, bound, module, "s1", env("XRAY_E2E_POINTCUTS_1"), entries, args, baseline):
+    val after_s1 = match session(adapter, bound, module, "s1", canonical_list(module, env("XRAY_E2E_POINTCUTS_1")), entries, args, baseline):
         case Some(next): next
         case None: return
-    match session(after_s1, bound, module, "s2", env("XRAY_E2E_POINTCUTS_2"), entries, args, baseline):
+    match session(after_s1, bound, module, "s2", canonical_list(module, env("XRAY_E2E_POINTCUTS_2")), entries, args, baseline):
         case Some(_): ()
         case None: return
     print "E2E-HOST-OK"
