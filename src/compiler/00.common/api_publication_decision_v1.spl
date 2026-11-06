@@ -21,7 +21,8 @@ struct ApiPublicationDecisionV1:
     active: bool
     strictness: text
     disposition: ApiPublicationDispositionV1
-    # False only when the disposition is Deny and a joined root violates.
+    # False only when the disposition is Deny and an effective root violates
+    # or is Unknown (fail closed; the closure makes Safe reachable).
     allowed: bool
     checked_roots: i64
     violating_roots: i64
@@ -66,6 +67,14 @@ fn closure_status_for_root_v1(closure: ApiExportClosureFactsV1?, module: text,
         if entry.terminal_module == module and entry.local_symbol == symbol: return Some(entry)
     nil
 
+fn note_unknown_root_v1(decision: ApiPublicationDecisionV1, route: ApiExportRouteFactV1,
+        declaration_name: text, reason: text) -> ApiPublicationDecisionV1:
+    var out = decision
+    out.unknown_roots = out.unknown_roots + 1
+    out.unknown_reasons = with_unique(out.unknown_reasons, reason)
+    out.diagnostics.push("[{EXTREME_PUBLIC_API_RULE_V1}] {route.exporter_module}: export `{route.export_name}` -> {route.terminal_module}.{declaration_name} is Unknown ({reason})")
+    out
+
 pub fn decide_api_publication_v1(active: bool, strictness_name: text,
         exposure: Dict<text, ApiModuleExposureV1>,
         routes: ApiExportRouteFactsV1?,
@@ -101,8 +110,7 @@ pub fn decide_api_publication_v1(active: bool, strictness_name: text,
             val entry_opt = closure_status_for_root_v1(closure, route.terminal_module, route.local_symbol)
             if entry_opt == nil:
                 decision.checked_roots = decision.checked_roots + 1
-                decision.unknown_roots = decision.unknown_roots + 1
-                decision.unknown_reasons = with_unique(decision.unknown_reasons, "export-closure-entry-missing")
+                decision = note_unknown_root_v1(decision, route, route.source_name, "export-closure-entry-missing")
                 continue
             val entry: ApiExportClosureEntryV1 = entry_opt.unwrap()
             if entry.status == ApiExportClosureStatusV1.NotExported:
@@ -110,13 +118,11 @@ pub fn decide_api_publication_v1(active: bool, strictness_name: text,
                 continue
             if entry.status != ApiExportClosureStatusV1.Exported:
                 decision.checked_roots = decision.checked_roots + 1
-                decision.unknown_roots = decision.unknown_roots + 1
-                decision.unknown_reasons = with_unique(decision.unknown_reasons, entry.reason)
+                decision = note_unknown_root_v1(decision, route, route.source_name, entry.reason)
                 continue
         decision.checked_roots = decision.checked_roots + 1
         if not exposure.has(route.terminal_module):
-            decision.unknown_roots = decision.unknown_roots + 1
-            decision.unknown_reasons = with_unique(decision.unknown_reasons, "exposure-not-collected")
+            decision = note_unknown_root_v1(decision, route, route.source_name, "exposure-not-collected")
             continue
         val module_exposure: ApiModuleExposureV1 = exposure[route.terminal_module]
         var callable: ApiCallableExposureV1? = nil
@@ -128,8 +134,7 @@ pub fn decide_api_publication_v1(active: bool, strictness_name: text,
                     break
                 callable = Some(row)
         if callable == nil:
-            decision.unknown_roots = decision.unknown_roots + 1
-            decision.unknown_reasons = with_unique(decision.unknown_reasons, "root-callable-unresolved")
+            decision = note_unknown_root_v1(decision, route, route.source_name, "root-callable-unresolved")
             continue
         val row: ApiCallableExposureV1 = callable.unwrap()
         match row.verdict:
@@ -140,10 +145,17 @@ pub fn decide_api_publication_v1(active: bool, strictness_name: text,
                     if finding.callable != row.callable or finding.verdict != ApiExposureVerdictV1.Violates: continue
                     decision.diagnostics.push("[{EXTREME_PUBLIC_API_RULE_V1}] {route.exporter_module}: export `{route.export_name}` -> {route.terminal_module}.{row.declaration_name} exposes bare builtin {finding.leaf_kind} at {finding_path_text(finding)}")
             case ApiExposureVerdictV1.Unknown:
-                # Unknown denial is deferred until E1 collects effective export
-                # closure; today every module carries that reason.
-                decision.unknown_roots = decision.unknown_roots + 1
+                var reason = "callable-unknown"
+                for raw_finding in module_exposure.findings:
+                    val finding: ApiExposureFindingV1 = raw_finding
+                    if finding.callable == row.callable and finding.verdict == ApiExposureVerdictV1.Unknown:
+                        reason = "{finding.reason} at {finding_path_text(finding)}"
+                        break
+                decision = note_unknown_root_v1(decision, route, row.declaration_name, reason)
             case _: ()
-    if disposition == ApiPublicationDispositionV1.Deny and decision.violating_roots > 0:
+    # Unknown roots are denied too: with the export closure collected a root
+    # is Unknown only for a real gap (nominal members not projected, unresolved
+    # export origin, missing exposure), never for a blanket reason.
+    if disposition == ApiPublicationDispositionV1.Deny and (decision.violating_roots > 0 or decision.unknown_roots > 0):
         decision.allowed = false
     decision
