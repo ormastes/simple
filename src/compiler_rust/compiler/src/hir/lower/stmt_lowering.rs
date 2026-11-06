@@ -97,6 +97,94 @@ pub(crate) fn is_known_asm_clobber(name: &str) -> bool {
         || name.starts_with("st")
 }
 
+/// True when evaluating the place twice could repeat user code: an index on
+/// the path that is not a local or a literal, or a root under a field/index
+/// that is not a variable (a call result). The top-level target itself is
+/// never treated as a value to hoist: a zero-argument `MethodCall` target is a
+/// property the backend writes back through its receiver.
+fn hir_place_index_has_effects(expr: &HirExpr) -> bool {
+    hir_place_effects_at(expr, true)
+}
+
+fn hir_index_is_effect_free(index: &HirExpr) -> bool {
+    matches!(
+        index.kind,
+        HirExprKind::Local(_) | HirExprKind::Integer(_) | HirExprKind::String(_) | HirExprKind::Bool(_)
+    )
+}
+
+fn hir_place_effects_at(expr: &HirExpr, top: bool) -> bool {
+    match &expr.kind {
+        HirExprKind::FieldAccess { receiver, .. } => hir_place_effects_at(receiver, false),
+        HirExprKind::Index { receiver, index } => !hir_index_is_effect_free(index) || hir_place_effects_at(receiver, false),
+        HirExprKind::MethodCall { receiver, args, .. } if args.is_empty() => hir_place_effects_at(receiver, false),
+        HirExprKind::Local(_) | HirExprKind::Global(_) => false,
+        _ => !top,
+    }
+}
+
+fn hir_expr_is_stable_operand(expr: &HirExpr) -> bool {
+    matches!(
+        expr.kind,
+        HirExprKind::Local(_)
+            | HirExprKind::Integer(_)
+            | HirExprKind::Float(_)
+            | HirExprKind::String(_)
+            | HirExprKind::Bool(_)
+            | HirExprKind::Nil
+    )
+}
+
+/// Rebuild the place with every effectful index (and a non-variable root
+/// under a field/index) bound to a temporary, receiver first so outer
+/// indexes are evaluated before inner ones.
+fn freeze_hir_place_indices(expr: HirExpr, ctx: &mut FunctionContext, prelude: &mut Vec<HirStmt>) -> HirExpr {
+    freeze_hir_place_at(expr, true, ctx, prelude)
+}
+
+fn freeze_hir_place_at(expr: HirExpr, top: bool, ctx: &mut FunctionContext, prelude: &mut Vec<HirStmt>) -> HirExpr {
+    let ty = expr.ty;
+    match expr.kind {
+        HirExprKind::FieldAccess { receiver, field_index } => HirExpr {
+            ty,
+            kind: HirExprKind::FieldAccess {
+                receiver: Box::new(freeze_hir_place_at(*receiver, false, ctx, prelude)),
+                field_index,
+            },
+        },
+        HirExprKind::Index { receiver, index } => {
+            let receiver = freeze_hir_place_at(*receiver, false, ctx, prelude);
+            let index = if hir_index_is_effect_free(&index) {
+                *index
+            } else {
+                let index_ty = index.ty;
+                let local = ctx.add_local(format!("$aug_idx_{}", ctx.locals.len()), index_ty, Mutability::Immutable);
+                prelude.push(HirStmt::Let { local_index: local, ty: index_ty, value: Some(*index) });
+                HirExpr { ty: index_ty, kind: HirExprKind::Local(local) }
+            };
+            HirExpr { ty, kind: HirExprKind::Index { receiver: Box::new(receiver), index: Box::new(index) } }
+        }
+        HirExprKind::MethodCall { receiver, method, args, dispatch } if args.is_empty() => HirExpr {
+            ty,
+            kind: HirExprKind::MethodCall {
+                receiver: Box::new(freeze_hir_place_at(*receiver, false, ctx, prelude)),
+                method,
+                args,
+                dispatch,
+            },
+        },
+        HirExprKind::Local(_) | HirExprKind::Global(_) => HirExpr { ty, kind: expr.kind },
+        other if top => HirExpr { ty, kind: other },
+        other => {
+            // A non-variable root (a call result) under a field/index is
+            // evaluated once into a temporary that the read and the write use.
+            let local = ctx.add_local(format!("$aug_root_{}", ctx.locals.len()), ty, Mutability::Immutable);
+            prelude.push(HirStmt::Let { local_index: local, ty, value: Some(HirExpr { ty, kind: other }) });
+            HirExpr { ty, kind: HirExprKind::Local(local) }
+        }
+    }
+}
+
 fn compound_assign_binop(op: ast::ast::AssignOp) -> Option<BinOp> {
     match op {
         ast::ast::AssignOp::AddAssign | ast::ast::AssignOp::SuspendAddAssign => Some(BinOp::Add),
@@ -775,19 +863,47 @@ impl Lowerer {
                 //
                 // Applied after the checks above so every existing diagnostic still sees
                 // the user-written right-hand side rather than the synthesized binary op.
-                let value = match compound_assign_binop(assign.op) {
-                    Some(op) => HirExpr {
-                        ty: target.ty,
-                        kind: HirExprKind::Binary {
-                            op,
-                            left: Box::new(target.clone()),
-                            right: Box::new(value),
-                        },
-                    },
-                    None => value,
+                // Evaluation order contract (owner decision 2026-11-06, data plan
+                // W2a): RHS first, then the place once, then one read and one
+                // write. A non-trivial RHS is hoisted into a temporary first;
+                // when the place's root or an index on its path may run user
+                // code, those are hoisted too (outer to inner) so the read and
+                // the write reuse them instead of re-evaluating the place.
+                let mut prelude: Vec<HirStmt> = Vec::new();
+                let (target, value) = match compound_assign_binop(assign.op) {
+                    Some(op) => {
+                        let value = if hir_expr_is_stable_operand(&value) {
+                            value
+                        } else {
+                            let rhs_ty = value.ty;
+                            let rhs_local = ctx.add_local(
+                                format!("$aug_rhs_{}", ctx.locals.len()),
+                                rhs_ty,
+                                Mutability::Immutable,
+                            );
+                            prelude.push(HirStmt::Let { local_index: rhs_local, ty: rhs_ty, value: Some(value) });
+                            HirExpr { ty: rhs_ty, kind: HirExprKind::Local(rhs_local) }
+                        };
+                        let target = if hir_place_index_has_effects(&target) {
+                            freeze_hir_place_indices(target, ctx, &mut prelude)
+                        } else {
+                            target
+                        };
+                        let combined = HirExpr {
+                            ty: target.ty,
+                            kind: HirExprKind::Binary {
+                                op,
+                                left: Box::new(target.clone()),
+                                right: Box::new(value),
+                            },
+                        };
+                        (target, combined)
+                    }
+                    None => (target, value),
                 };
 
-                Ok(vec![HirStmt::Assign { target, value }])
+                prelude.push(HirStmt::Assign { target, value });
+                Ok(prelude)
             }
 
             Node::Return(ret) => {

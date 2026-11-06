@@ -449,6 +449,46 @@ pub(crate) fn place_slot_mut<'a>(env: &'a mut Env, place: &Place) -> Option<&'a 
     project_mut(root_slot, &place.projections)
 }
 
+/// Before writing through a place that user code (an RHS or an index) has
+/// just run against, reload a module-global root from MODULE_GLOBALS, which is
+/// authoritative for non-local bindings, so a write cannot publish a stale
+/// env snapshot over the user code's update.
+pub(crate) fn refresh_module_global_root(env: &mut Env, root: &str) {
+    if env.is_local(root) {
+        return;
+    }
+    // A global with owner provenance reads through its owner's store, the
+    // same store `sync_module_global` publishes to.
+    if let Some((owner, source_name)) = env.global_binding(root) {
+        if let Some(current) = super::interpreter_state::owned_global(&owner, &source_name) {
+            env.insert(root.to_string(), current);
+        }
+        return;
+    }
+    if let Some(current) = MODULE_GLOBALS.with(|cell| cell.borrow().get(root).cloned()) {
+        env.insert(root.to_string(), current);
+    }
+}
+
+/// Owned read of the value the place designates. Unlike `place_slot_ref` it
+/// also reads packed array elements and `ClassInstance` fields (neither has a
+/// `&Value` to lend). Used by `place op= rhs`, which needs the old value once.
+pub(crate) fn place_read(env: &Env, place: &Place) -> Option<Value> {
+    let mut current = env.get(&place.root)?.clone();
+    for projection in &place.projections {
+        current = match (&current, projection) {
+            (Value::ClassInstance(instance), Projection::Field(name)) => instance.field(name)?,
+            (Value::Array(items), Projection::Index(index)) => items.get_value(normalize_index(items.len(), index)?)?,
+            (Value::ByteArray(bytes), Projection::Index(index)) => {
+                let idx = normalize_index(bytes.len(), index)?;
+                Value::UInt { value: u64::from(bytes[idx]), width: 8 }
+            }
+            _ => step_ref(&current, projection)?.clone(),
+        };
+    }
+    Some(current)
+}
+
 /// Read-only counterpart of `step_mut`.
 fn step_ref<'a>(slot: &'a Value, projection: &Projection) -> Option<&'a Value> {
     match (slot, projection) {

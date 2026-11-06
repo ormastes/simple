@@ -302,6 +302,23 @@ fn is_pure_place_expr(expr: &Expr) -> bool {
     }
 }
 
+/// True when some index subexpression on the place path may run user code
+/// (anything but an identifier or a literal). Only such places need the
+/// receiver-first place route; side-effect-free paths keep their old route.
+fn index_may_have_effects(expr: &Expr) -> bool {
+    fn effect_free(index: &Expr) -> bool {
+        matches!(
+            index,
+            Expr::Identifier(_) | Expr::Integer(_) | Expr::TypedInteger(..) | Expr::String(_) | Expr::Bool(_)
+        )
+    }
+    match expr {
+        Expr::FieldAccess { receiver, .. } => index_may_have_effects(receiver),
+        Expr::Index { receiver, index } => !effect_free(index) || index_may_have_effects(receiver),
+        _ => false,
+    }
+}
+
 /// Zero element for an initializer-less `[T; N]` declaration.
 pub(crate) fn fixed_array_zero_element(element: &Type) -> Value {
     match element {
@@ -1816,6 +1833,25 @@ pub(crate) fn exec_assignment(
     } else if let Expr::Index { receiver, index } = &assign.target {
         // Handle index assignment: arr[i] = value or dict["key"] = value or self.dict[key] = value
         let mut value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+        // Evaluation order contract (owner decision 2026-11-06, data plan W2a):
+        // RHS first, then the place — receiver, then index subexpressions
+        // outer to inner — each exactly once. A receiver whose path holds an
+        // index subexpression (`boxes[r()].items[i()]`, `grid[r()][i()]`) is
+        // resolved as a place so its indices run before this one.
+        if index_may_have_effects(receiver) {
+            if let Some(place) =
+                super::place::resolve_place(&assign.target, env, functions, classes, enums, impl_methods)?
+            {
+                super::place::refresh_module_global_root(env, &place.root);
+                if super::place::write_place(env, &place, value) {
+                    return Ok(Control::Next);
+                }
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_ASSIGNMENT)
+                    .with_help("the indexed place does not exist or cannot be written");
+                return Err(CompileError::semantic_with_context("invalid assignment: invalid index assignment", ctx));
+            }
+        }
         let index_val = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
 
         // `o.f[i] = v` / `a.b.f[i] = v` where `f` is declared `[uN]`: coerce the
@@ -2747,6 +2783,68 @@ fn try_string_append_in_place(
 }
 
 // Helper function for augmented assignment
+/// `place op= rhs` through the general place model: the RHS (already
+/// evaluated) first, then the place resolved once (receiver, then index
+/// subexpressions outer to inner), then one read and one write. Returns
+/// `Ok(None)` when the target is not a place, so the caller keeps its error.
+fn augmented_through_place(
+    assign: &simple_parser::ast::AssignmentStmt,
+    bin_op: Option<BinOp>,
+    rhs_value: Value,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Control>, CompileError> {
+    let Some(place) = super::place::resolve_place(&assign.target, env, functions, classes, enums, impl_methods)? else {
+        return Ok(None);
+    };
+    super::place::refresh_module_global_root(env, &place.root);
+    let new_value = match bin_op {
+        Some(op) => {
+            let Some(old_value) = super::place::place_read(env, &place) else {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_ASSIGNMENT)
+                    .with_help("the place must exist before an augmented assignment");
+                return Err(CompileError::semantic_with_context(
+                    "invalid assignment: augmented assignment to a missing place",
+                    ctx,
+                ));
+            };
+            let old_temp = "__aug_place_old__".to_string();
+            let rhs_temp = "__aug_place_rhs__".to_string();
+            let saved_old = env.get(&old_temp).cloned();
+            let saved_rhs = env.get(&rhs_temp).cloned();
+            env.insert(old_temp.clone(), old_value);
+            env.insert(rhs_temp.clone(), rhs_value);
+            let binary = Expr::Binary {
+                op,
+                left: Box::new(Expr::Identifier(old_temp.clone())),
+                right: Box::new(Expr::Identifier(rhs_temp.clone())),
+            };
+            let result = evaluate_expr(&binary, env, functions, classes, enums, impl_methods);
+            match saved_old {
+                Some(v) => env.insert(old_temp, v),
+                None => env.remove(&old_temp),
+            };
+            match saved_rhs {
+                Some(v) => env.insert(rhs_temp, v),
+                None => env.remove(&rhs_temp),
+            };
+            result?
+        }
+        None => rhs_value,
+    };
+    if super::place::write_place(env, &place, new_value) {
+        return Ok(Some(Control::Next));
+    }
+    let ctx = ErrorContext::new()
+        .with_code(codes::INVALID_ASSIGNMENT)
+        .with_help("the place does not exist or cannot be written");
+    Err(CompileError::semantic_with_context("invalid assignment: augmented place write failed", ctx))
+}
+
 pub(crate) fn exec_augmented_assignment(
     assign: &simple_parser::ast::AssignmentStmt,
     env: &mut Env,
@@ -3042,225 +3140,76 @@ pub(crate) fn exec_augmented_assignment(
         // Case 2: Nested field access: obj.inner.field += value
         else if let Expr::FieldAccess {
             receiver: inner_receiver,
-            field: inner_field,
+            field: _,
         } = receiver.as_ref()
         {
             if let Expr::Identifier(obj_name) = inner_receiver.as_ref() {
-                if let Some(obj_val) = env.get(obj_name).cloned() {
-                    match obj_val {
-                        Value::Object { class, fields } => {
-                            let mut fields = fields;
-                            // Get the inner object
-                            if let Some(inner_val) = fields.get(inner_field).cloned() {
-                                match inner_val {
-                                    Value::Object {
-                                        class: inner_class,
-                                        fields: inner_fields,
-                                    } => {
-                                        let mut inner_fields = inner_fields;
-                                        // Evaluate the RHS
-                                        let mut rhs_value =
-                                            evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
-
-                                        // If suspension, await the value
-                                        if is_suspend {
-                                            rhs_value = await_value(rhs_value)?;
-                                        }
-
-                                        // If compound assignment, combine with current value
-                                        let new_value = if let Some(op) = bin_op {
-                                            let current = inner_fields
-                                                .get(field)
-                                                .cloned()
-                                                .ok_or_else(|| crate::error::factory::undefined_field(field))?;
-                                            let temp_lhs = "__lhs_temp__".to_string();
-                                            let temp_rhs = "__rhs_temp__".to_string();
-                                            env.insert(temp_lhs.clone(), current);
-                                            env.insert(temp_rhs.clone(), rhs_value);
-                                            let binary_expr = Expr::Binary {
-                                                op,
-                                                left: Box::new(Expr::Identifier(temp_lhs.clone())),
-                                                right: Box::new(Expr::Identifier(temp_rhs.clone())),
-                                            };
-                                            let result = evaluate_expr(
-                                                &binary_expr,
-                                                env,
-                                                functions,
-                                                classes,
-                                                enums,
-                                                impl_methods,
-                                            )?;
-                                            env.remove(&temp_lhs);
-                                            env.remove(&temp_rhs);
-                                            result
-                                        } else {
-                                            rhs_value
-                                        };
-
-                                        // Set the field on the inner object
-                                        Arc::make_mut(&mut inner_fields).insert(field.clone(), new_value);
-                                        // Update the inner object in the outer object
-                                        Arc::make_mut(&mut fields).insert(
-                                            inner_field.clone(),
-                                            Value::Object {
-                                                class: inner_class,
-                                                fields: inner_fields,
-                                            },
-                                        );
-                                        // Update the outer object in env
-                                        env.insert(obj_name.clone(), Value::Object { class, fields });
-                                        Ok(Control::Next)
-                                    }
-                                    _ => {
-                                        let ctx = ErrorContext::new().with_code(codes::INVALID_ASSIGNMENT).with_help(
-                                            "nested augmented field assignment requires inner value to be an object",
-                                        );
-                                        Err(CompileError::semantic_with_context(
-                                            format!(
-                                                "invalid assignment: cannot use augmented assignment on field '{}' of non-object field '{}'",
-                                                field, inner_field
-                                            ),
-                                            ctx,
-                                        ))
-                                    }
-                                }
-                            } else {
-                                let ctx = ErrorContext::new()
-                                    .with_code(codes::UNDEFINED_FIELD)
-                                    .with_help("check the field name");
-                                Err(CompileError::semantic_with_context(
-                                    format!("field '{}' not found on object", inner_field),
-                                    ctx,
-                                ))
-                            }
-                        }
-                        Value::ClassInstance(instance) => {
-                            let inner_val = instance.field(inner_field);
-                            let mut rhs_value =
-                                evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
-                            if is_suspend {
-                                rhs_value = await_value(rhs_value)?;
-                            }
-                            match inner_val {
-                                Some(Value::ClassInstance(inner_inst)) => {
-                                    let current = inner_inst
-                                        .field(field)
-                                        .ok_or_else(|| crate::error::factory::undefined_field(field))?;
-                                    let new_value = if let Some(op) = bin_op {
-                                        let temp_lhs = "__lhs_temp__".to_string();
-                                        let temp_rhs = "__rhs_temp__".to_string();
-                                        env.insert(temp_lhs.clone(), current);
-                                        env.insert(temp_rhs.clone(), rhs_value);
-                                        let binary_expr = Expr::Binary {
-                                            op,
-                                            left: Box::new(Expr::Identifier(temp_lhs.clone())),
-                                            right: Box::new(Expr::Identifier(temp_rhs.clone())),
-                                        };
-                                        let result =
-                                            evaluate_expr(&binary_expr, env, functions, classes, enums, impl_methods)?;
-                                        env.remove(&temp_lhs);
-                                        env.remove(&temp_rhs);
-                                        result
-                                    } else {
-                                        rhs_value
-                                    };
-                                    inner_inst.set_field(field.clone(), new_value);
-                                    Ok(Control::Next)
-                                }
-                                Some(Value::Object {
-                                    class: inner_class,
-                                    fields: inner_fields,
-                                }) => {
-                                    let mut inner_fields = inner_fields;
-                                    let current = inner_fields
-                                        .get(field)
-                                        .cloned()
-                                        .ok_or_else(|| crate::error::factory::undefined_field(field))?;
-                                    let new_value = if let Some(op) = bin_op {
-                                        let temp_lhs = "__lhs_temp__".to_string();
-                                        let temp_rhs = "__rhs_temp__".to_string();
-                                        env.insert(temp_lhs.clone(), current);
-                                        env.insert(temp_rhs.clone(), rhs_value);
-                                        let binary_expr = Expr::Binary {
-                                            op,
-                                            left: Box::new(Expr::Identifier(temp_lhs.clone())),
-                                            right: Box::new(Expr::Identifier(temp_rhs.clone())),
-                                        };
-                                        let result =
-                                            evaluate_expr(&binary_expr, env, functions, classes, enums, impl_methods)?;
-                                        env.remove(&temp_lhs);
-                                        env.remove(&temp_rhs);
-                                        result
-                                    } else {
-                                        rhs_value
-                                    };
-                                    Arc::make_mut(&mut inner_fields).insert(field.clone(), new_value);
-                                    instance.set_field(
-                                        inner_field.clone(),
-                                        Value::Object {
-                                            class: inner_class,
-                                            fields: inner_fields,
-                                        },
-                                    );
-                                    Ok(Control::Next)
-                                }
-                                Some(_) => {
-                                    let ctx = ErrorContext::new().with_code(codes::INVALID_ASSIGNMENT).with_help(
-                                        "nested augmented field assignment requires inner value to be an object",
-                                    );
-                                    Err(CompileError::semantic_with_context(
-                                        format!(
-                                            "invalid assignment: cannot use augmented assignment on field '{}' of non-object field '{}'",
-                                            field, inner_field
-                                        ),
-                                        ctx,
-                                    ))
-                                }
-                                None => {
-                                    let ctx = ErrorContext::new()
-                                        .with_code(codes::UNDEFINED_FIELD)
-                                        .with_help("check the field name");
-                                    Err(CompileError::semantic_with_context(
-                                        format!("field '{}' not found on object", inner_field),
-                                        ctx,
-                                    ))
-                                }
-                            }
-                        }
-                        _ => {
-                            let ctx = ErrorContext::new()
-                                .with_code(codes::INVALID_ASSIGNMENT)
-                                .with_help("nested augmented field assignment requires an object");
-                            Err(CompileError::semantic_with_context(
-                                "invalid assignment: cannot use augmented assignment on non-object value",
-                                ctx,
-                            ))
-                        }
-                    }
-                } else {
+                // `obj.inner.field op= rhs`: RHS first, then the place once,
+                // through the general place model (a snapshot taken before the
+                // RHS would drop any write the RHS makes to `obj`).
+                if !env.contains_key(obj_name) {
                     let ctx = ErrorContext::new()
                         .with_code(codes::UNDEFINED_VARIABLE)
                         .with_help("check that the variable is defined and in scope");
-                    Err(CompileError::semantic_with_context(
+                    return Err(CompileError::semantic_with_context(
                         format!("variable '{}' not found", obj_name),
                         ctx,
-                    ))
+                    ));
                 }
-            } else {
+                let mut rhs_value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+                if is_suspend {
+                    rhs_value = await_value(rhs_value)?;
+                }
+                if let Some(control) =
+                    augmented_through_place(assign, bin_op, rhs_value, env, functions, classes, enums, impl_methods)?
+                {
+                    return Ok(control);
+                }
                 let ctx = ErrorContext::new()
                     .with_code(codes::INVALID_ASSIGNMENT)
-                    .with_help("deeply nested augmented field assignment (more than 2 levels) is not supported");
+                    .with_help("nested augmented field assignment requires an object");
                 Err(CompileError::semantic_with_context(
-                    "invalid assignment: deeply nested augmented field access requires intermediate variables",
+                    "invalid assignment: nested augmented field assignment requires inner value to be an object",
+                    ctx,
+                ))
+            } else {
+                // Deeper field paths (`a.b.c.x += 1`): RHS first, then the
+                // place once, through the general place model (pure-Simple
+                // accepts any depth).
+                let mut rhs_value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+                if is_suspend {
+                    rhs_value = await_value(rhs_value)?;
+                }
+                if let Some(control) =
+                    augmented_through_place(assign, bin_op, rhs_value, env, functions, classes, enums, impl_methods)?
+                {
+                    return Ok(control);
+                }
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_ASSIGNMENT)
+                    .with_help("augmented field assignment requires a place: a variable or a path of fields and indexes from one");
+                Err(CompileError::semantic_with_context(
+                    "invalid assignment: augmented field assignment target is not a place",
                     ctx,
                 ))
             }
         } else {
+            // Any other field place (`boxes[r()].x += v`): RHS first, then the
+            // place once, through the general place model.
+            let mut rhs_value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+            if is_suspend {
+                rhs_value = await_value(rhs_value)?;
+            }
+            if let Some(control) =
+                augmented_through_place(assign, bin_op, rhs_value, env, functions, classes, enums, impl_methods)?
+            {
+                return Ok(control);
+            }
             let ctx = ErrorContext::new().with_code(codes::INVALID_ASSIGNMENT).with_help(
-                "augmented field assignment requires an identifier or simple nested field access as the object",
+                "augmented field assignment requires a place: a variable or a path of fields and indexes from one",
             );
             Err(CompileError::semantic_with_context(
-                "invalid assignment: augmented field assignment requires identifier or simple nested field access as object",
+                "invalid assignment: augmented field assignment target is not a place",
                 ctx,
             ))
         }
@@ -3278,14 +3227,21 @@ pub(crate) fn exec_augmented_assignment(
     // is evaluated exactly ONCE into a temp binding so that side-effecting
     // subscripts (`arr[next()] += 1`) do not run twice.
     else if let Expr::Index { receiver, index } = &assign.target {
-        let idx_value = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
-        let idx_temp = "__aug_idx_temp__".to_string();
-        let rhs_temp = "__aug_rhs_temp__".to_string();
-
+        // Evaluation order contract: RHS first, then the place once.
         let mut rhs_value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
         if is_suspend {
             rhs_value = await_value(rhs_value)?;
         }
+        if index_may_have_effects(receiver) {
+            if let Some(control) =
+                augmented_through_place(assign, bin_op, rhs_value.clone(), env, functions, classes, enums, impl_methods)?
+            {
+                return Ok(control);
+            }
+        }
+        let idx_value = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
+        let idx_temp = "__aug_idx_temp__".to_string();
+        let rhs_temp = "__aug_rhs_temp__".to_string();
 
         // Save/restore any shadowed bindings so the temps never leak.
         let saved_idx = env.get(&idx_temp).cloned();
