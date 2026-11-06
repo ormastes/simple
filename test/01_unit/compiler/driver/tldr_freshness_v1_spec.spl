@@ -3,7 +3,8 @@ use compiler.driver.cache.module_artifacts_v1.{module_tldr_companion_path_v1,
     module_tldr_companion_render_v1, module_artifact_publish_atomic_v1}
 use compiler.driver.cache.tldr_freshness_v1.{tldr_freshness_verify_v1, tldr_freshness_current_v1,
     tldr_freshness_receipt_render_v1, tldr_freshness_receipt_path_v1,
-    tldr_freshness_receipt_publish_v1}
+    tldr_freshness_receipt_publish_v1, tldr_receipt_state_v1, tldr_history_parse_log_v1,
+    tldr_history_annotate_v1, tldr_history_render_row_v1, tldr_history_receipt_text_v1}
 use std.io_runtime.{file_write, file_exists, file_read}
 use std.nogc_sync_mut.io_runtime.{dir_create_all}
 
@@ -68,3 +69,55 @@ describe "tldr freshness verifier v1":
         expect(tldr_freshness_receipt_publish_v1(d + "/out", "tree1", t1)).to_equal("")
         expect(file_read(tldr_freshness_receipt_path_v1(d + "/out", "tree1"))).to_equal(t1)
         expect(tldr_freshness_receipt_publish_v1(d + "/out", "tree1", t1 + "x") != "").to_equal(true)
+
+val LOG_SEP: text = "\t"
+
+fn _rcpt(state: text, expected: i64, verified: i64) -> text:
+    "schema: simple.tldr-freshness/1\nsource_revision: r\nsource_git_tree: t\nstate: {state}\nexpected: {expected}\nverified: {verified}\nmanifest_digest: sha256:ab\n"
+
+describe "tldr receipt state parse v1":
+    it "maps a fully verified receipt to verified":
+        expect(tldr_receipt_state_v1(_rcpt("verified", 3, 3))).to_equal("verified")
+
+    it "maps a partly verified receipt to partial":
+        expect(tldr_receipt_state_v1(_rcpt("unverified", 3, 1))).to_equal("partial")
+
+    it "maps empty, foreign-schema and zero-verified receipts to none":
+        expect(tldr_receipt_state_v1("")).to_equal("none")
+        expect(tldr_receipt_state_v1("schema: other/1\nstate: verified\nexpected: 1\nverified: 1\n")).to_equal("none")
+        expect(tldr_receipt_state_v1(_rcpt("unverified", 3, 0))).to_equal("none")
+
+    it "does not trust a state line that contradicts the counts":
+        expect(tldr_receipt_state_v1(_rcpt("verified", 3, 2))).to_equal("partial")
+        expect(tldr_receipt_state_v1(_rcpt("verified", 0, 0))).to_equal("none")
+
+describe "tldr history annotation v1":
+    it "parses git log rows":
+        val rows = tldr_history_parse_log_v1("aaa" + LOG_SEP + "t1" + LOG_SEP + "2026-11-06T10:00:00Z" + LOG_SEP + "HEAD -> main\nbbb" + LOG_SEP + "t2" + LOG_SEP + "2026-11-05T10:00:00Z" + LOG_SEP + "\n")
+        expect(rows.len()).to_equal(2)
+        expect(rows[0].rev).to_equal("aaa")
+        expect(rows[0].tree).to_equal("t1")
+        expect(rows[0].refs).to_equal("HEAD -> main")
+        expect(rows[1].time).to_equal("2026-11-05T10:00:00Z")
+        expect(rows[1].state).to_equal("none")
+
+    it "marks the first verified commit as TLDR-current":
+        val log = "c1" + LOG_SEP + "t1" + LOG_SEP + "x" + LOG_SEP + "\nc2" + LOG_SEP + "t2" + LOG_SEP + "x" + LOG_SEP + "\nc3" + LOG_SEP + "t3" + LOG_SEP + "x" + LOG_SEP + "\nc4" + LOG_SEP + "t4" + LOG_SEP + "x" + LOG_SEP + "\n"
+        val rows = tldr_history_annotate_v1(tldr_history_parse_log_v1(log),
+            ["", _rcpt("unverified", 2, 1), _rcpt("verified", 2, 2), _rcpt("verified", 2, 2)])
+        expect(rows[0].state).to_equal("none")
+        expect(rows[1].state).to_equal("partial")
+        expect(rows[2].state).to_equal("verified")
+        expect(rows[2].current).to_equal(true)
+        expect(rows[3].current).to_equal(false)
+        expect(tldr_history_render_row_v1(rows[2]).contains("TLDR-current")).to_equal(true)
+        expect(tldr_history_render_row_v1(rows[3]).contains("TLDR-current")).to_equal(false)
+
+    it "reads a receipt from the local file when no note exists":
+        val d = ROOT + "/hist"
+        val a = _seed(d, "a", SRC_A, true)
+        val r = tldr_freshness_verify_v1(d + "/out", [a])
+        val _p = tldr_freshness_receipt_publish_v1(d + "/out", "treeH", tldr_freshness_receipt_render_v1(r, "revH", "treeH"))
+        expect(tldr_history_receipt_text_v1(d + "/out", "treeH", "")).to_equal(file_read(tldr_freshness_receipt_path_v1(d + "/out", "treeH")))
+        expect(tldr_history_receipt_text_v1(d + "/out", "treeH", "note-bytes")).to_equal("note-bytes")
+        expect(tldr_history_receipt_text_v1(d + "/out", "absent", "")).to_equal("")
