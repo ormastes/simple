@@ -776,7 +776,12 @@ impl Value {
             "unit" | "Unit" => matches!(self, Value::Unit { .. }),
             // Check for object class name, enum name, or unit suffix
             _ => {
-                if let Value::Object { class, .. } = self {
+                // Reference classes are `Value::ClassInstance`, not `Value::Object`;
+                // matching only `Object` made every class-typed overload candidate
+                // fail scoring, so a bare call fell through to the last-registered
+                // same-named function of another module
+                // (seed_interp_cross_module_free_fn_collision_2026_11_06).
+                if let Some(class) = self.aggregate_class() {
                     class == type_name
                 } else if let Value::Enum { enum_name, .. } = self {
                     enum_name == type_name

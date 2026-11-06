@@ -108,10 +108,10 @@ fn value_type_matches_name(value: &Value, expected: &str) -> bool {
         // Without it, EVERY overloaded free function with a trait-typed
         // parameter failed overload scoring with "no caller-authorized
         // overload ... matches the supplied arguments".
-        || match value {
-            Value::Object { class, .. } => TRAIT_IMPLS
-                .with(|cell| cell.borrow().contains_key(&(expected.to_string(), class.clone()))),
-            _ => false,
+        || match value.aggregate_class() {
+            Some(class) => TRAIT_IMPLS
+                .with(|cell| cell.borrow().contains_key(&(expected.to_string(), class.to_string()))),
+            None => false,
         };
     if debug_overload_select() {
         println!(
@@ -808,7 +808,19 @@ pub(crate) fn evaluate_call(
                         impl_methods,
                     );
                 }
-                if let Some(func) = select_overload(&overloads, &evaluated_args) {
+                // When no candidate scores (untyped/erased argument values), the
+                // flat map below is last-registration-wins across modules; the
+                // calling module's own definition is what native lowering binds.
+                let selected = select_overload(&overloads, &evaluated_args).or_else(|| {
+                    let current = CURRENT_EXEC_MODULE
+                        .with(|cell| cell.borrow().clone())
+                        .unwrap_or_else(|| Arc::from("<entry>"));
+                    candidate_declared_by(&current, name, functions).filter(|own| {
+                        let required = own.params.iter().filter(|p| p.default.is_none()).count();
+                        (required..=own.params.len()).contains(&evaluated_args.len())
+                    })
+                });
+                if let Some(func) = selected {
                     if debug_dupdispatch() {
                         eprintln!(
                             "[dupdispatch] P4-overload name={name} owner={:?} current={:?}",
@@ -2024,5 +2036,74 @@ mod deprecated_new_dispatch_tests {
             Value::Dict(map) => assert_eq!(map.len(), 0, "Map.new() must not contain a phantom __type__ entry"),
             other => panic!("Map.new() must return a Value::Dict, got {:?}", other),
         }
+    }
+}
+
+#[cfg(test)]
+mod cross_module_free_fn_collision_tests {
+    //! seed_interp_cross_module_free_fn_collision_2026_11_06: two co-loaded
+    //! modules each declare `render`, over different classes. Each module's
+    //! unqualified call must run its OWN `render`, not the last-registered one.
+    use crate::interpreter::{evaluate_module, tag_function_module_owner};
+    use simple_parser::ast::Node;
+    use simple_parser::Parser;
+
+    fn owned_items(src: &str, owner: &str) -> Vec<Node> {
+        let module = Parser::new(src).parse().expect("parse fixture");
+        module
+            .items
+            .into_iter()
+            .map(|node| match node {
+                Node::Function(mut f) => {
+                    tag_function_module_owner(&mut f, owner);
+                    Node::Function(f)
+                }
+                other => other,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn same_named_free_fn_resolves_to_the_calling_modules_definition() {
+        let a = "class RespA:\n    code: i64\n\nfn render(r: RespA) -> i64:\n    r.code\n\nfn a_entry() -> i64:\n    render(RespA(code: 1))\n";
+        let b = "class RespB:\n    code: i64\n    reason: text\n\nfn render(r: RespB) -> i64:\n    r.code + r.reason.len()\n\nfn b_entry() -> i64:\n    render(RespB(code: 2, reason: \"!\"))\n";
+        let mut items = owned_items(a, "/probe/collision_a.spl");
+        items.extend(owned_items(b, "/probe/collision_b.spl"));
+        items.extend(Parser::new("main = a_entry() * 10 + b_entry()\n").parse().expect("parse main").items);
+        assert_eq!(evaluate_module(&items).expect("evaluate"), 13);
+    }
+}
+
+#[cfg(test)]
+mod class_typed_overload_scoring_tests {
+    //! seed_interp_cross_module_free_fn_collision_2026_11_06: a class argument
+    //! (`Value::ClassInstance`) must score against a parameter typed with its
+    //! class, so an entry-level call picks the matching same-named overload.
+    use crate::interpreter::{evaluate_module, tag_function_module_owner};
+    use simple_parser::ast::Node;
+    use simple_parser::Parser;
+
+    #[test]
+    fn class_argument_selects_the_overload_typed_with_its_class() {
+        let mut items = Vec::new();
+        for (src, owner) in [
+            ("class RespA:\n    code: i64\n\nfn render(r: RespA) -> i64:\n    r.code\n", "/probe/score_a.spl"),
+            (
+                "class RespB:\n    code: i64\n    reason: text\n\nfn render(r: RespB) -> i64:\n    r.code + r.reason.len()\n",
+                "/probe/score_b.spl",
+            ),
+        ] {
+            for node in Parser::new(src).parse().expect("parse").items {
+                items.push(match node {
+                    Node::Function(mut f) => {
+                        tag_function_module_owner(&mut f, owner);
+                        Node::Function(f)
+                    }
+                    other => other,
+                });
+            }
+        }
+        items.extend(Parser::new("main = render(RespA(code: 7))\n").parse().expect("parse main").items);
+        assert_eq!(evaluate_module(&items).expect("evaluate"), 7);
     }
 }
