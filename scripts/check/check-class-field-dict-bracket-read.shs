@@ -1,0 +1,50 @@
+#!/bin/sh
+# Ratchet: class-field `self.<f>[k]` bracket READS where <f> is declared
+# `Dict<K, [V]>` (array-valued) anywhere under src/compiler. Native codegen
+# mis-reads these (doc/07_guide/language/dict_native_pitfalls.md; AVs fixed by
+# #7170 and work/mir-dict-get-ifval-decode). The safe form is
+#   val xs: [V] = self.<f>.get(k) ?? []
+# Fails when the count of such reads grows above the recorded baseline, or
+# when the baseline is stale (count dropped: lower it in the same change).
+# Usage: sh scripts/check/check-class-field-dict-bracket-read.shs [--list] [--root DIR]
+# Verdict (last stdout line): PASS/FAIL/ERROR, exit 0/1/2.
+set -u
+root="."
+list=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --list) list=1 ;;
+        --root) shift; root="$1" ;;
+        *) echo "ERROR — nothing was checked (unknown arg $1)"; exit 2 ;;
+    esac
+    shift
+done
+src="$root/src/compiler"
+base_file="$root/scripts/check/class_field_dict_bracket_read_baseline.txt"
+if [ ! -d "$src" ] || [ ! -f "$base_file" ]; then
+    echo "ERROR — nothing was checked (missing $src or $base_file)"
+    exit 2
+fi
+fields=$(grep -rhoE "^    [a-z_][a-z0-9_]*: Dict<[^,]+, *\[[^]]+\]>" "$src" --include=*.spl \
+    | sed -E 's/^    ([a-z0-9_]+):.*/\1/' | sort -u | tr '\n' '|' | sed 's/|$//')
+if [ -z "$fields" ]; then
+    echo "ERROR — nothing was checked (no array-valued Dict fields found)"
+    exit 2
+fi
+nfields=$(printf '%s' "$fields" | tr '|' '\n' | wc -l | tr -d ' ')
+hits=$(grep -rnE "self\.($fields)\[[^]]+\]" "$src" --include=*.spl \
+    | grep -vE "self\.($fields)\[[^]]+\] *(=[^=]|\+=)" \
+    | grep -vE "^[^:]+:[0-9]+: *#")
+count=$(printf '%s' "$hits" | grep -c . )
+baseline=$(tr -d ' \r\n' < "$base_file")
+[ "$list" = 1 ] && printf '%s\n' "$hits"
+if [ "$count" -gt "$baseline" ]; then
+    echo "FAIL — $count class-field array-dict bracket read(s) across $nfields field(s), baseline $baseline: use .get(k) ?? [] (run --list)"
+    exit 1
+fi
+if [ "$count" -lt "$baseline" ]; then
+    echo "FAIL — stale baseline: $count read(s) < baseline $baseline; lower $base_file to $count"
+    exit 1
+fi
+echo "PASS — $nfields field(s) checked, $count read(s) (baseline $baseline)"
+exit 0
