@@ -27,3 +27,4 @@ MIR shape): red 1/6 -> green 6/6. Native probe `build/probe/p1.spl` on run-11 St
 (sha256 7daae128…): `207130714919617.0`; see green below.
 
 Fixed Stage 2 built from commit 46f26dec9d6 (sha256 773a9ee4f2f6af44…, seed native-build of bootstrap_main.spl): chart.spl compiles with 0 AOT errors (link stops only on `__simple_main`, chart.spl has no main); p1 prints `2.5`; p3 prints `2.25`; pb prints `2.5`.
+Review follow-up a9b2178923b (nil-compare fold keyed on ExistsCheck provenance), Stage 2 8fd94bdcb4c53977…: chart.spl, p1 `2.5`, p3 `2.25`, pb `2.5`, p4 nil-returning `f64?` prints `f64 none` (run-11 printed `f64 present 3.0`); parser_cli.spl and simple_ring.spl show the same output as run-11 (no new MIR/verifier/ABI errors). Spec 10/10.
