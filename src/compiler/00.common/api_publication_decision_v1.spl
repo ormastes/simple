@@ -1,0 +1,116 @@
+# Named rule `extreme_public_api`: a pure projection of the resolved assurance
+# strictness over joined export roots and their walker verdicts. No engine,
+# cache or filesystem state; the driver applies the disposition.
+use compiler.common.api_exposure_result_v1.{ApiExposureVerdictV1, ApiCallableExposureV1,
+    ApiExposureFindingV1, ApiModuleExposureV1}
+use compiler.common.api_export_route_facts_v1.{ApiExportJoinV1, ApiExportRouteFactV1,
+    ApiExportRouteFactsV1}
+use compiler.common.assurance.policy_names.{normalize_profile_name}
+
+val EXTREME_PUBLIC_API_RULE_V1: text = "extreme_public_api"
+
+enum ApiPublicationDispositionV1:
+    Advisory
+    Warn
+    Deny
+
+struct ApiPublicationDecisionV1:
+    rule: text
+    active: bool
+    strictness: text
+    disposition: ApiPublicationDispositionV1
+    # False only when the disposition is Deny and a joined root violates.
+    allowed: bool
+    checked_roots: i64
+    violating_roots: i64
+    unknown_roots: i64
+    diagnostics: [text]
+    unknown_reasons: [text]
+    format_version: i64 = 1
+
+# REQ-EAPI-003: advisory at moderate, warning at strict, fatal at robust,
+# critical and verified. Unknown profile names fail closed to Deny.
+pub fn api_publication_disposition_v1(strictness_name: text) -> ApiPublicationDispositionV1:
+    val canonical = normalize_profile_name(strictness_name)
+    if canonical == "moderate": return ApiPublicationDispositionV1.Advisory
+    if canonical == "strict": return ApiPublicationDispositionV1.Warn
+    ApiPublicationDispositionV1.Deny
+
+fn with_unique(reasons: [text], reason: text) -> [text]:
+    var out: [text] = []
+    for existing in reasons:
+        if existing == reason: return reasons
+        out.push(existing)
+    out.push(reason)
+    out
+
+fn finding_path_text(finding: ApiExposureFindingV1) -> text:
+    var out = ""
+    for ordinal in finding.ordinals:
+        if out.len() > 0: out = out + "/"
+        if ordinal == -1: out = out + "return"
+        else: out = out + "arg{ordinal}"
+    out
+
+pub fn decide_api_publication_v1(active: bool, strictness_name: text,
+        exposure: Dict<text, ApiModuleExposureV1>,
+        routes: ApiExportRouteFactsV1?) -> ApiPublicationDecisionV1:
+    val disposition = api_publication_disposition_v1(strictness_name)
+    var decision = ApiPublicationDecisionV1(EXTREME_PUBLIC_API_RULE_V1, active,
+        normalize_profile_name(strictness_name), disposition, true, 0, 0, 0, [], [])
+    if not active:
+        decision.unknown_reasons = with_unique(decision.unknown_reasons, "rule-inactive")
+        return decision
+    # The root set is the effective export surface as far as E1 observes it:
+    # frozen export routes joined to a retained callable. Unjoined callables
+    # (private locals, unresolved routes) are neither Safe nor denied here.
+    var route_facts: ApiExportRouteFactsV1? = routes
+    if route_facts == nil:
+        decision.unknown_reasons = with_unique(decision.unknown_reasons, "export-routes-not-collected")
+        return decision
+    val facts: ApiExportRouteFactsV1 = route_facts.unwrap()
+    for reason in facts.unknown_reasons:
+        decision.unknown_reasons = with_unique(decision.unknown_reasons, reason)
+    if facts.truncated:
+        decision.unknown_reasons = with_unique(decision.unknown_reasons, "export-routes-truncated")
+    var seen: Dict<text, bool> = {}
+    for raw_route in facts.routes:
+        val route: ApiExportRouteFactV1 = raw_route
+        if route.join_status != ApiExportJoinV1.Joined: continue
+        val root_key = "{route.terminal_module}:{route.local_symbol}"
+        if seen.has(root_key): continue
+        seen[root_key] = true
+        decision.checked_roots = decision.checked_roots + 1
+        if not exposure.has(route.terminal_module):
+            decision.unknown_roots = decision.unknown_roots + 1
+            decision.unknown_reasons = with_unique(decision.unknown_reasons, "exposure-not-collected")
+            continue
+        val module_exposure: ApiModuleExposureV1 = exposure[route.terminal_module]
+        var callable: ApiCallableExposureV1? = nil
+        for raw_row in module_exposure.callables:
+            val row: ApiCallableExposureV1 = raw_row
+            if row.local_symbol == route.local_symbol:
+                if callable != nil:
+                    callable = nil
+                    break
+                callable = Some(row)
+        if callable == nil:
+            decision.unknown_roots = decision.unknown_roots + 1
+            decision.unknown_reasons = with_unique(decision.unknown_reasons, "root-callable-unresolved")
+            continue
+        val row: ApiCallableExposureV1 = callable.unwrap()
+        match row.verdict:
+            case ApiExposureVerdictV1.Violates:
+                decision.violating_roots = decision.violating_roots + 1
+                for raw_finding in module_exposure.findings:
+                    val finding: ApiExposureFindingV1 = raw_finding
+                    if finding.callable != row.callable or finding.verdict != ApiExposureVerdictV1.Violates: continue
+                    decision.diagnostics.push("[{EXTREME_PUBLIC_API_RULE_V1}] {route.exporter_module}: export `{route.export_name}` -> {route.terminal_module}.{row.declaration_name} exposes bare builtin {finding.leaf_kind} at {finding_path_text(finding)}")
+            case ApiExposureVerdictV1.Unknown:
+                # Unknown denial is deferred until E1 collects effective export
+                # closure; today every module carries that reason.
+                decision.unknown_roots = decision.unknown_roots + 1
+            case _: ()
+    if disposition == ApiPublicationDispositionV1.Deny and decision.violating_roots > 0:
+        decision.allowed = false
+    decision

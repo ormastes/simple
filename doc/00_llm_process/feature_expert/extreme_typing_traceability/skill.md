@@ -38,7 +38,17 @@ unit evidence, not runtime admission; the production join inside a real
 `compile()` is pending Phase 3.
 The retained typecheck pass also stores the walker result per published
 module in `CompileContext.api_exposure`, cleared and replaced with the facts;
-a missing row is NotCollected. No consumer reads it yet.
+a missing row is NotCollected.
+
+2026-11-06 E2: the named rule `extreme_public_api`
+(`compiler.common.api_publication_decision_v1`) and the driver guard
+(`compiler.driver.driver_api_publication_guard_v1`) deny a joined violating
+export root at robust/critical/verified, warn at strict, advise at moderate,
+at one phase-5 choke point before interpret/JIT/AOT. Activation is explicit
+(`SIMPLE_EXTREME_PUBLIC_API=1`) until the stdlib is migrated; Unknown denial
+is deferred to E1 export closure. Read the
+[E2 status](../../../05_design/extreme_typing_traceability.md#e2-named-rule-and-publication-guard-2026-11-06)
+before extending; the full `compile()` denial is pending a self-hosted run.
 
 Read the [selected policy](../../../02_requirements/feature/extreme_typing_traceability.md),
 [architecture](../../../04_architecture/extreme_typing_traceability.md),
