@@ -3080,6 +3080,26 @@ bootstrap_stage3_tool_authority_snapshot() (
                 "$bootstrap_stage3_tool_requested"
         ) || return 1
         [ -f "$bootstrap_stage3_tool_canonical" ] || return 1
+        # macOS /usr/bin/{ld,ar,ranlib} are one xcrun trampoline binary (same
+        # sha256 for all three) that dispatches through xcode-select or
+        # DEVELOPER_DIR at run time, so pinning it pins no linker. Bind the
+        # managed archive/link roles to the real toolchain executable the
+        # trampoline would run, located once via the documented xcrun locator.
+        case "$(bootstrap_stage3_host_platform):$bootstrap_stage3_tool_name" in
+            *-apple-darwin*:ld|*-apple-darwin*:ar|*-apple-darwin*:ranlib)
+                case "$bootstrap_stage3_tool_canonical" in
+                    /usr/bin/*)
+                        bootstrap_stage3_tool_canonical=$(
+                            /usr/bin/xcrun --find "$bootstrap_stage3_tool_name"
+                        ) || return 1
+                        case "$bootstrap_stage3_tool_canonical" in
+                            /usr/bin/*|'') return 1 ;;
+                            /*) ;;
+                            *) return 1 ;;
+                        esac
+                        [ -f "$bootstrap_stage3_tool_canonical" ] || return 1 ;;
+                esac ;;
+        esac
         # BSD userland tools such as macOS sed(1) and ld(1) do not implement
         # GNU-style --version.  The executable bytes remain authoritative; bind
         # the probe status and first diagnostic line without requiring success.

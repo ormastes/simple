@@ -53,7 +53,7 @@ use std.common.crypto.sha256.{sha256_text}
 # directly instead of a second, disagreeing detector.
 use std.log.{debug, info}
 use std.string_builder.{StringBuilder}
-use compiler.backend.linker.managed_native_args_v1.{managed_native_extra_args_error_v1, managed_native_input_args_error_v1}
+use compiler.backend.linker.managed_native_args_v1.{managed_native_extra_args_error_v1, managed_native_input_args_error_v1, managed_native_cc_link_host_admitted_v1, managed_native_linker_selector_v1}
 use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1, native_tool_strict_resolve_v1, native_tool_strict_revalidate_v1}
 use std.nogc_sync_mut.io.native_runtime_authority_v1.{native_runtime_strict_archives_v1, native_runtime_strict_revalidate_v1, native_runtime_strict_generated_inputs_v1}
 use compiler.backend.linker._LinkerWrapper.native_all_support.{native_all_msvc_llvm_link_inputs, native_all_input_present, native_all_input_dir}
@@ -2227,7 +2227,7 @@ fn cc_requested_fuse_ld_flag(os_name: text, hosted_cross: bool) -> Result<text, 
         val path: text = match native_tool_strict_resolve_v1("linker"):
             case Ok(v): v
             case Err(e): return Err(e)
-        return Ok("-fuse-ld=" + path)
+        return managed_native_linker_selector_v1(host_os(), path)
     val requested = requested_linker_override()
     if requested == "":
         return Ok("")
@@ -2244,8 +2244,8 @@ fn cc_requested_fuse_ld_flag(os_name: text, hosted_cross: bool) -> Result<text, 
 # @workaround bug=rti007_any_return_rows_2026-11-01 reason=bare Result return is Any in interface row (E-RTI-007); spell Result<text, text>
 fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) -> Result<text, text>:
     if native_tool_strict_requested_v1():
-        if host_os() != "linux" and host_os() != "windows":
-            return Err("managed native C-driver linking is admitted only for Linux and Windows")
+        if not managed_native_cc_link_host_admitted_v1(host_os()):
+            return Err("managed native C-driver linking is admitted only for Linux, Windows and macOS")
         val argument_error = managed_native_extra_args_error_v1(config.extra_flags)
         if argument_error != "": return Err(argument_error)
         val path_argument_error = managed_native_input_args_error_v1(object_files + [output] + config.library_paths + config.libraries)
@@ -2329,6 +2329,10 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         # generated entry shim). Passing only obj0 dropped the entry-point
         # object -> "Undefined symbols: _main" on Mach-O.
         var args = native_retained_symbol_cc_args(config.retained_symbols, link_os)
+        # Strict mode: --ld-path=<admitted ld64>, so the clang driver runs the
+        # pinned linker instead of whatever `ld` it finds itself.
+        if requested_fuse_ld != "":
+            args.push(requested_fuse_ld)
         for target_arg in hosted_cross_c_target_args(target, os_name, arch_name):
             args.push(target_arg)
         for obj in cc_fallback_object_args(object_files):
