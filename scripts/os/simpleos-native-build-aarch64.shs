@@ -27,6 +27,17 @@ ENTRY="src/app/simpleos_tool/main.spl"
 BACKEND="${SIMPLE_NATIVE_BACKEND:-cranelift}"
 TARGET_RUNTIME="build/os/simple-core-simpleos-aarch64/libsimple_runtime.a"
 
+SIMPLE_ABI_POLICY=${SIMPLE_ABI_POLICY:-v1}
+case "$SIMPLE_ABI_POLICY" in
+  v1) ;;
+  *) echo "error: SIMPLE_ABI_POLICY must be canonical v1" >&2; exit 1 ;;
+esac
+export SIMPLE_ABI_POLICY
+
+sha256_file() {
+  sha256sum "$1" | awk '{print $1}'
+}
+
 # Was: COMPILER="${SIMPLE_BUILD_COMPILER:-bin/release/simple}" followed by a bare
 # `[ -x "$COMPILER" ]`. That is the weakest form of this family's defect: no seed
 # check and no capability probe at all, so it would silently build the aarch64
@@ -39,6 +50,14 @@ COMPILER="$(simple_compiler_select --root "$REPO_ROOT" --builder-target "$TARGET
   echo "error: no Simple compiler passed the native-build capability probe for $TARGET" >&2
   exit 1
 }
+COMPILER="$(realpath "$COMPILER")"
+BUILDER_ADMISSION_RECEIPT="${SIMPLE_BUILD_COMPILER_ADMISSION_RECEIPT:-$(dirname -- "$COMPILER")/admission.env}"
+sh scripts/os/provision_simpleos_guest_simple_fs.shs --validate-builder \
+  "$COMPILER" "$BUILDER_ADMISSION_RECEIPT" >/dev/null || {
+  echo "error: selected compiler lacks canonical Stage2 admission authority" >&2
+  exit 1
+}
+receipt_value() { awk -F= -v key="$1" '$1 == key { n++; v=substr($0,length(key)+2) } END { if (n == 1) print v; else exit 1 }' "$BUILDER_ADMISSION_RECEIPT"; }
 
 # CC wrapper carries the merged libc + real Simple C runtime + simple-core
 # runtime archive (libsimpleos_all.a) through the -print-libgcc-file-name
@@ -80,6 +99,19 @@ case "$FILE_INFO" in
   *ELF*aarch64*"statically linked"*) ;;
   *) echo "FAILED: expected a static aarch64 ELF, got: $FILE_INFO" >&2; exit 1 ;;
 esac
+command -v readelf >/dev/null 2>&1 || { echo "FAILED: readelf is required" >&2; exit 1; }
+readelf -h "$OUTPUT" | grep -Eq 'Class:[[:space:]]+ELF64' || {
+  echo "FAILED: ELF header is not 64-bit" >&2
+  exit 1
+}
+readelf -h "$OUTPUT" | grep -Eq 'Machine:[[:space:]]+AArch64' || {
+  echo "FAILED: ELF header is not AArch64" >&2
+  exit 1
+}
+if readelf -l "$OUTPUT" | grep -q 'INTERP'; then
+  echo "FAILED: expected a static ELF without an interpreter segment" >&2
+  exit 1
+fi
 
 cat > "${OUTPUT}.build_stamp" <<EOF
 target=${TARGET}
@@ -90,6 +122,12 @@ runtime_bundle=simple-core
 runtime_archive=${TARGET_RUNTIME} (14 parts, cranelift --emit-archive --no-mangle)
 linker_script=${SYSROOT}/share/simpleos/simpleos.ld (base 0x50000000)
 compiler=${COMPILER}
+builder_sha256=$(sha256_file "$COMPILER")
+builder_admission_receipt=$BUILDER_ADMISSION_RECEIPT
+builder_admission_receipt_sha256=$(sha256_file "$BUILDER_ADMISSION_RECEIPT")
+builder_admission_identity=$(receipt_value admission_identity)
+source_revision_sha256=$(receipt_value source_snapshot_sha256)
+artifact_sha256=$(sha256_file "$OUTPUT")
 built=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 size=$(wc -c < "$OUTPUT")
 EOF
