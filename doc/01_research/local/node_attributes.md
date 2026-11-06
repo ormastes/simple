@@ -50,3 +50,26 @@ The supplied report already contains domain research, pinned sources, and prior
 plan reconciliation. This audit adds current local evidence; it does not claim to
 have revalidated external references or CI results. Full integration is **not
 already implemented**, while substantial storage and compiler infrastructure is.
+
+## Release branch follow-up
+
+The user subsequently selected `release/1.0.0` as the implementation/landing base.
+The release inspection pin is `e2ce7042552176e9a8fd8f79505faec2e4f06f14`.
+Its AST owner has additional changes, which are preserved. The field-selector
+validator still explicitly rejects get/set with E1507, and targeted searches of
+compiler common/frontend and structural owners found no managed-node schema or
+whole-node builder implementation.
+
+This branch already contains `src/lib/common/trace/observer_contract_v1.spl`
+(`TraceObserverV1`), session/config/codec/map owners and LLVM/native leaves under
+`src/lib/nogc_sync_mut/trace/`. Integration must extend these existing contracts
+through their version/capability mechanism, not introduce the facade from scratch
+or renumber existing events. Their source presence is not executed node-event
+qualification. The main-branch audit above remains historical evidence.
+
+An additional installed executable at
+`C:/Users/ormas/dev/simple/bin/release/x86_64-pc-windows-msvc/simple.exe` was
+inspected with `--version`. SHA-256:
+`6094dcae291aa984973ccd681f956e67a7a60543ab99f76a29313fbbfdee96d1`.
+It explicitly reports a Rust bootstrap-seed warning. No feature tests were run
+with it; the release-directory name does not establish self-hosted admission.

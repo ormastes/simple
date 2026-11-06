@@ -3,6 +3,9 @@
 Date: 2026-11-06. Scope: full implementation, applied to Simple.
 
 The primary Codex agent owns the integration branch, exact-head review and merge.
+The implementation and PR base is `release/1.0.0`, as subsequently requested.
+The architecture/design is carried from its main PR into the release branch
+before structural implementation; unrelated release changes are preserved.
 Lower-model sidecars: **N/A**; no parallel agent work has been requested. Final
 review is by the primary normal-capability agent against source-matched evidence,
 not acceptance of generated plans or test counts alone.

@@ -5,6 +5,9 @@ Scope: [selected full requirements](../../02_requirements/feature/node_attribute
 Evidence: [current source audit](../../01_research/local/node_attributes.md).
 Authority: [consolidated design](../../03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md).
 
+Implementation and PR base: `release/1.0.0`, per subsequent user direction.
+The release-specific source additions are recorded in the audit follow-up.
+
 ## Decision
 
 Introduce one opt-in logical node schema and access-place contract, shared by
@@ -138,6 +141,11 @@ are rejected. No raw XRay API in node owners, no schema lookup or strings in hot
 callbacks, no migration in observers. Default application is next build, instance
 or immutable snapshot. General shared live migration stays separately capability
 gated under the source plan's transactional and progress requirements.
+
+On the release baseline the shared trace facade already exists as `TraceObserverV1`
+in `src/lib/common/trace/observer_contract_v1.spl`, alongside its session/config,
+codec and map owners. Reuse that surface and its provider leaves; add data events
+through an explicitly versioned extension without changing existing event codes.
 
 ## Simple adoption and completion
 
