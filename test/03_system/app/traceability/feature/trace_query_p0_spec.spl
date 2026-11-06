@@ -80,7 +80,8 @@ describe "Inspect registered facts from captured source":
     it "executes real CLI dispatch and keeps structured stdout separate from qualification":
         # @ac AC-TRC-041
         step("Run simple trace list features through the admitted CLI")
-        val (output, errors, status) = actual_query_cli(["list", "features", "--format=sdn"])
+        # --bug-db=none keeps this scenario on the registered-declaration contract alone.
+        val (output, errors, status) = actual_query_cli(["list", "features", "--format=sdn", "--bug-db=none"])
         expect(status).to_equal(1)
         val fields = query_document(output)
         expect(fields["snapshot_kind"]).to_equal(SdnValue.String("worktree_preview"))
@@ -90,6 +91,34 @@ describe "Inspect registered facts from captured source":
         expect(fields["admission_eligible"]).to_equal(SdnValue.Bool(false))
         expect(fields["graph_complete"]).to_equal(SdnValue.Bool(false))
         expect(output).to_contain("TRACE-AUTHORITY-CONFLICT")
+
+    it "answers list bugs from the legacy bug-DB sidecar without writing or claiming authority":
+        # @ac AC-TRC-041
+        step("List bugs through the CLI with the default sidecar (doc/08_tracking/bug/bug_db.sdn)")
+        val (output, errors, status) = actual_query_cli(["list", "bugs", "--format=sdn", "--limit", "2"])
+        expect(status).to_equal(1)
+        val fields = query_document(output)
+        expect(fields["legacy_database_ingestion"]).to_equal(SdnValue.String("bug-db/v1"))
+        expect(fields["ingestion"]).to_equal(SdnValue.String("registered-declarations+sidecar"))
+        expect(fields["admission_eligible"]).to_equal(SdnValue.Bool(false))
+        match fields["total_count"]:
+            case SdnValue.Int(count): expect(count > 0).to_be(true)
+            case _: fail("total_count must be an integer")
+        match fields["sidecar_sources"]:
+            case SdnValue.Array(sources): expect(sources.len()).to_equal(1)
+            case _: fail("sidecar_sources must be an array")
+        expect(output).to_contain("legacy: {")
+        step("The same page without the sidecar is empty: declarations declare no bug")
+        val (bare, bare_errors, bare_status) = actual_query_cli(["list", "bugs", "--format=sdn", "--bug-db=none"])
+        expect(bare_status).to_equal(1)
+        expect(query_document(bare)["total_count"]).to_equal(SdnValue.Int(0))
+        step("A status filter narrows before paging and is rejected outside list bugs")
+        val (filtered, filtered_errors, filtered_status) = actual_query_cli(["list", "bugs", "--status=open", "--limit", "1"])
+        expect(filtered_status).to_equal(1)
+        expect(filtered).to_contain("KIND\tID\tTITLE\tSTATUS\tSEVERITY\tLOCATION\n")
+        val (rejected, rejected_errors, rejected_status) = actual_query_cli(["list", "features", "--status=open"])
+        expect(rejected_status).to_equal(2)
+        expect(rejected).to_contain("TRACE-QUERY-INVALID")
 
     it "uses the selected immutable Git subject for requirement pages":
         # @ac AC-TRC-041 AC-TRC-044
