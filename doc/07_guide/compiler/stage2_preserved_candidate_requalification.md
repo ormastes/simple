@@ -1,4 +1,4 @@
-> **CYCLE 8 / CANDIDATE UNQUALIFIED:** Cycle 7 publication protections passed independent review and 27 focused controls. Qualification attempt 2 then stopped before candidate sanity because `git archive` omitted tracked controls marked `export-ignore`. The user-authorized cycle 8 source-materialization repair passed 15 focused assertions and independent source review. Actual candidate qualification remains unperformed; no fresh candidate admission exists. Earlier attempts remain counted and preserved.
+> **CYCLE 9 / SOURCE REPAIR PASS / CANDIDATE UNQUALIFIED:** Qualification attempt 4 refused controls without Git metadata and reported an unavailable workaround-state directory. The ninth repair passed independent review, static checks and 18 focused assertions. The initial fixture run stopped on a macOS path spelling mismatch (`/var` versus `/private/var`); an explicitly authorized harness-only correction/retry passed with production unchanged. Both records remain preserved and the cycle count has not reset. Actual candidate qualification remains unperformed; no fresh candidate admission exists.
 
 # Preserved Stage 2 candidate requalification
 
@@ -45,7 +45,13 @@ exact HEAD with `git archive` into `control/source-root`, using private Git
 metadata whose highest-priority attributes disable `export-ignore` and
 `export-subst`. This preserves committed bytes, executable modes and symlinks
 without reading dirty files or changing shared Git attributes. It removes write access,
-and executes the canonical fixtures there. Uncommitted qualification repairs
+retains private Git metadata with detached HEAD and an index at that exact commit,
+and opens only `build/scv` and `.simple/workarounds.d` for generated state. These
+leaves must contain no tracked files and cannot be symlinks. The `.simple` parent,
+tracked configuration, source files and private Git metadata remain sealed. Object
+alternates allow read-only access to committed objects; source Git metadata is
+never shared for writes. The canonical fixtures execute in this isolated tree.
+Uncommitted qualification repairs
 must be committed before launch; they are never silently excluded or relabeled.
 
 ## Required inputs
