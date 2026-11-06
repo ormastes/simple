@@ -428,6 +428,8 @@ type ProvidedNames = Option<Arc<ProvidedSet>>;
 struct ProvidedSet {
     exports: Arc<ModuleTable>,
     extra: std::collections::HashSet<String>,
+    /// Top-level `fn`s declared without `pub` and not re-exported.
+    private_fns: std::collections::HashSet<String>,
 }
 
 impl ProvidedSet {
@@ -519,7 +521,58 @@ fn collect_provided_names(
     Some(Arc::new(ProvidedSet {
         exports: Arc::clone(exports),
         extra: provided,
+        private_fns: private_top_level_fn_names(items),
     }))
+}
+
+/// Top-level `fn` names with private (default) visibility that no `export`
+/// statement in the module re-exposes.
+fn private_top_level_fn_names(items: &[Node]) -> std::collections::HashSet<String> {
+    let mut exported: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for item in items {
+        if let Node::ExportUseStmt(export_stmt) = item {
+            exported.extend(export_target_names(&export_stmt.target));
+        }
+    }
+    items
+        .iter()
+        .filter_map(|item| match item {
+            Node::Function(f) if matches!(f.visibility, simple_parser::ast::Visibility::Private) => {
+                Some(f.name.clone())
+            }
+            _ => None,
+        })
+        .filter(|name| !exported.contains(name))
+        .collect()
+}
+
+/// Warn-first visibility check (interp_private_names_leak_across_modules_2026-11-05):
+/// a braced `use m.{name}` that names a private `fn` of `m` from a file outside
+/// `m`'s directory. Same-directory siblings stay in compatibility mode.
+fn warn_private_use_name(
+    name: &str,
+    current_file: Option<&Path>,
+    module_path: &Path,
+    module_label: &str,
+    provided: &ProvidedSet,
+) {
+    if !provided.private_fns.contains(name) {
+        return;
+    }
+    let Some(importer) = current_file else {
+        return;
+    };
+    if importer.parent() == module_path.parent() {
+        return;
+    }
+    if use_warning_seen(format!("priv\u{1}{}\u{1}{}\u{1}{}", module_path.display(), name, importer.display())) {
+        return;
+    }
+    eprintln!(
+        "[visibility-warning] '{name}' is a private fn of module '{module_label}' ({}); mark it `pub` or `export` it (imported from {})",
+        module_path.display(),
+        importer.display()
+    );
 }
 
 /// Report braced `use` names the resolved module does not provide.
@@ -543,6 +596,7 @@ fn warn_unprovided_use_names(
     };
     for name in requested {
         if provided.contains(&name) {
+            warn_private_use_name(&name, current_file, module_path, module_label, provided);
             continue;
         }
         let importer = current_file
@@ -2482,5 +2536,31 @@ mod cross_lane_parsed_source_tests {
         assert_eq!(bindings_retained(N - 1), bindings_retained(1));
         assert!(bindings_retained(N - 1) <= 1, "one layer, no per-name copies");
         clear_module_cache();
+    }
+}
+
+/// interp_private_names_leak_across_modules_2026-11-05 (warn-first step).
+#[cfg(test)]
+mod private_fn_visibility_tests {
+    use super::private_top_level_fn_names;
+    use simple_parser::Parser;
+
+    fn private_names(src: &str) -> Vec<String> {
+        let parsed = Parser::new(src).parse().expect("fixture");
+        let mut names: Vec<String> = private_top_level_fn_names(&parsed.items).into_iter().collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn bare_fn_is_private_pub_fn_is_not() {
+        let src = "fn secret_helper() -> i64:\n    42\npub fn open_api() -> i64:\n    secret_helper()\n";
+        assert_eq!(private_names(src), vec!["secret_helper".to_string()]);
+    }
+
+    #[test]
+    fn exported_bare_fn_is_not_private() {
+        let src = "fn helper() -> i64:\n    1\nfn hidden() -> i64:\n    2\nexport helper\n";
+        assert_eq!(private_names(src), vec!["hidden".to_string()]);
     }
 }
