@@ -137,3 +137,14 @@ Not repaired here. Un-commenting :5-6 makes the spec depend on
 `std.database.core` and `test.lib.database_fixtures`; whether those resolve is a
 separate question from this lane`s slice, and a failed un-comment would leave
 the file unloadable rather than merely vacuous. Recorded as verified-live.
+
+## Fixed 2026-11-06 (spec side)
+The SdnRow/SdnTable stubs were deleted; the spec now imports the product
+`SdnRow`/`SdnTable`/`StringInterner` from `std.database.core` (row builders use
+`SdnRow.empty()`, `table.columns`). RED 29/32 -> 31/32 on the seed.
+* "duplicate ID prevention" asserted the STUB's dedupe; product `add_row`
+  appends (upsert is `update_row`), so the example now asserts that contract
+  (2 rows, `get_row` finds the first).
+* "handles empty string" remains red for a seed bug, not the spec or lib:
+  see option_some_empty_text_dot_question_false_2026-11-06.md.
+Status: spec fixed; one example blocked on that seed bug.
