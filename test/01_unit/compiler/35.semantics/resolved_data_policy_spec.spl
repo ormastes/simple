@@ -1,0 +1,114 @@
+# @cover src/compiler/35.semantics/perf/resolved_data_policy.spl 80%
+"""
+## Purpose and audience
+The resolved data-policy envelope binds an existing physical plan to the rule
+choice that selected it: a StorageLayoutPlanV1 for layout policies or a
+CollectionPlanDecision for collection policies, under one versioned
+policy-kind discriminator. Readers are planner authors who must not let a plan
+contradict an explicit pin. Plan: doc/03_plan/compiler/data/
+data_attributes_layout_containers_xray_2026-11-06.md (W0, sections 8.1, 8.5).
+Category: Infrastructure.
+## Operator workflow
+bin/simple test test/01_unit/compiler/35.semantics/resolved_data_policy_spec.spl
+## Compatibility and limitations
+The family owners produce the plans; this envelope only validates and digests.
+## Verification guidance and troubleshooting
+A RED on the contradiction scenarios means an envelope admitted a plan that
+an explicit pin forbids.
+"""
+# Lifecycle: doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md
+# @manual_section: Resolved data policy envelope
+
+use std.spec.*
+use std.common.structural.storage_layout.storage_layout_contracts.*
+use compiler.common.data.data_schema_contracts.*
+use compiler.common.data.data_schema_resolver.*
+use compiler.semantics.perf.collection_plan_selection.{CollectionPlanAlgorithm, CollectionPlanDecision}
+use compiler.semantics.perf.resolved_data_policy.*
+
+fn prov() -> DataDeclProvenanceV1:
+    data_decl_provenance_v1(DataDeclOriginV1.Sdn, "config/data_policy.sdn", 12, "compiler.ast")
+
+fn soa_plan() -> StorageLayoutPlanV1:
+    storage_layout_plan_v1(41, StorageLayoutKind.SoA, 1, 8, false, StorageConversionPolicy.OnDemand, "policy-h", "rule")
+
+fn hash_decision() -> CollectionPlanDecision:
+    CollectionPlanDecision(selected: CollectionPlanAlgorithm.Hash, evidence: "e", reason: "r",
+        linear_rejection: "", hash_rejection: "", ordered_rejection: "")
+
+fn schema_d1() -> text:
+    "1111111111111111111111111111111111111111111111111111111111111111"
+
+fn schema_d2() -> text:
+    "2222222222222222222222222222222222222222222222222222222222222222"
+
+fn layout_rule(choice: text) -> DataPolicyRuleV1:
+    data_policy_rule_v1(DataPolicyKindV1.Layout, "compiler.ast.BinaryNode", DataRuleSpecificityV1.ExactSite,
+        DataRuleStrengthV1.Pin, choice, false, prov())
+
+describe "Resolved data policy envelope":
+    it "composes a layout plan only when the resolved layout choice admits it":
+        # @req REQ-ATTR-05
+        step("Resolve a soa pin and bind the layout planner's plan to it")
+        # @capture(exec): envelope or refusal per combination
+        val choice = data_policy_resolve_rules_v1(DataPolicyKindV1.Layout, [layout_rule("soa")], "auto").unwrap()
+        val policy = resolved_data_policy_layout_v1("compiler.ast.BinaryNode", schema_d1(), choice, soa_plan()).unwrap()
+        expect(resolved_data_policy_well_formed_v1(policy)).to_equal(true)
+        expect(policy.policy_kind == DataPolicyKindV1.Layout).to_equal(true)
+        expect(policy.collection.is_some()).to_equal(false)
+        expect(policy.resolved_policy_digest.len()).to_equal(64)  # oracle: SHA-256 lower hex
+        val aos = data_policy_resolve_rules_v1(DataPolicyKindV1.Layout, [layout_rule("aos")], "auto").unwrap()
+        expect(resolved_data_policy_layout_v1("compiler.ast.BinaryNode", schema_d1(), aos, soa_plan()).is_err()).to_equal(true)
+        val auto = data_policy_resolve_rules_v1(DataPolicyKindV1.Layout, [], "auto").unwrap()
+        expect(resolved_data_policy_layout_v1("compiler.ast.BinaryNode", schema_d1(), auto, soa_plan()).is_ok()).to_equal(true)
+        val bad_plan = storage_layout_plan_v1(41, StorageLayoutKind.SoA, 4, 8, false, StorageConversionPolicy.OnDemand, "policy-h", "rule")
+        expect(resolved_data_policy_layout_v1("compiler.ast.BinaryNode", schema_d1(), choice, bad_plan).is_err()).to_equal(true)
+
+    it "composes a CollectionPlan decision as the collection policy kind":
+        # @req REQ-ATTR-05
+        step("Resolve a hash hint and bind the CollectionPlan decision to it")
+        # @capture(exec): envelope or refusal per combination
+        val rule = data_policy_rule_v1(DataPolicyKindV1.Collection, "compiler.resolve.symbols", DataRuleSpecificityV1.ExactSite,
+            DataRuleStrengthV1.Hint, "hash", false, prov())
+        val choice = data_policy_resolve_rules_v1(DataPolicyKindV1.Collection, [rule], "auto").unwrap()
+        val policy = resolved_data_policy_collection_v1("compiler.resolve.symbols", schema_d1(), choice, hash_decision()).unwrap()
+        expect(resolved_data_policy_well_formed_v1(policy)).to_equal(true)
+        expect(policy.layout.is_some()).to_equal(false)
+        val linear = data_policy_rule_v1(DataPolicyKindV1.Collection, "compiler.resolve.symbols", DataRuleSpecificityV1.ExactSite,
+            DataRuleStrengthV1.Hint, "linear", false, prov())
+        val mismatch = data_policy_resolve_rules_v1(DataPolicyKindV1.Collection, [linear], "auto").unwrap()
+        expect(resolved_data_policy_collection_v1("compiler.resolve.symbols", schema_d1(), mismatch, hash_decision()).is_err()).to_equal(true)
+        # A choice of the wrong policy kind is rejected, never coerced.
+        val layout_choice = data_policy_resolve_rules_v1(DataPolicyKindV1.Layout, [layout_rule("soa")], "auto").unwrap()
+        expect(resolved_data_policy_collection_v1("compiler.resolve.symbols", schema_d1(), layout_choice, hash_decision()).is_err()).to_equal(true)
+
+    it "gives an equivalent source rule and SDN rule one policy digest and distinct provenance receipts":
+        # @req REQ-ATTR-04
+        step("Pin soa once in SPL source and once as an SDN rule row")
+        val spl_rule = data_policy_rule_v1(DataPolicyKindV1.Layout, "compiler.ast.BinaryNode", DataRuleSpecificityV1.ExactSite,
+            DataRuleStrengthV1.Pin, "soa", false, data_decl_provenance_v1(DataDeclOriginV1.Spl, "src/compiler/ast.spl", 7, "compiler.ast"))
+        val sdn = "data_policy:\n    rules:\n        binary_layout:\n            site: \"compiler.ast.BinaryNode\"\n            layout: \"soa\"\n            pin: true\n"
+        val sdn_rules = data_policy_rules_from_sdn_v1(sdn, "config/data_policy.sdn", "compiler.ast").unwrap()
+        step("Bind the same layout plan to each resolved choice")
+        val from_spl = resolved_data_policy_layout_v1("compiler.ast.BinaryNode", schema_d1(),
+            data_policy_resolve_rules_v1(DataPolicyKindV1.Layout, [spl_rule], "auto").unwrap(), soa_plan()).unwrap()
+        val from_sdn = resolved_data_policy_layout_v1("compiler.ast.BinaryNode", schema_d1(),
+            data_policy_resolve_rules_v1(DataPolicyKindV1.Layout, sdn_rules, "auto").unwrap(), soa_plan()).unwrap()
+        # @capture(exec): policy digests and provenance receipts
+        step("Verify the semantic digest matches and the provenance receipt tells the inputs apart")
+        expect(from_spl.resolved_policy_digest).to_equal(from_sdn.resolved_policy_digest)
+        expect(from_spl.provenance_receipt_digest == from_sdn.provenance_receipt_digest).to_equal(false)
+        expect(resolved_data_policy_well_formed_v1(from_sdn)).to_equal(true)
+
+    it "digests deterministically over kind, subject, schema digest and composed plan":
+        # @req REQ-ATTR-04
+        step("Build the same envelope twice, then vary the schema digest and the deciding rule")
+        # @capture(exec): resolved policy digests
+        val choice = data_policy_resolve_rules_v1(DataPolicyKindV1.Layout, [layout_rule("soa")], "auto").unwrap()
+        val a = resolved_data_policy_layout_v1("compiler.ast.BinaryNode", schema_d1(), choice, soa_plan()).unwrap()
+        val b = resolved_data_policy_layout_v1("compiler.ast.BinaryNode", schema_d1(), choice, soa_plan()).unwrap()
+        val c = resolved_data_policy_layout_v1("compiler.ast.BinaryNode", schema_d2(), choice, soa_plan()).unwrap()
+        expect(a.resolved_policy_digest).to_equal(b.resolved_policy_digest)
+        expect(a.resolved_policy_digest == c.resolved_policy_digest).to_equal(false)
+        # A non-digest schema identity is rejected.
+        expect(resolved_data_policy_layout_v1("compiler.ast.BinaryNode", "d1", choice, soa_plan()).is_err()).to_equal(true)
