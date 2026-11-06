@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include "../../common/boot/freestanding_bool_abi.h"
 #include <stddef.h>
 
 #include "embedded_ssh_host_rsa.h"
@@ -8523,7 +8524,8 @@ void _start(void)
  *
  * Cranelift emits raw i64 values.  These operate on tagged RuntimeValues:
  * integer args are ENCODE_INT(n) = n<<3, results likewise.
- * Comparison results are raw 1 or 0 (Cranelift boolean convention).
+ * Comparison and logical results are tagged RuntimeValue booleans (11/19),
+ * distinct from internal Cranelift/MIR bools (raw 1/0).
  */
 
 RuntimeValue rt_add(RuntimeValue a, RuntimeValue b)
@@ -8602,17 +8604,17 @@ RuntimeValue rt_ge(RuntimeValue a, RuntimeValue b)
 
 RuntimeValue rt_and(RuntimeValue a, RuntimeValue b)
 {
-    return (DECODE_INT(a) && DECODE_INT(b)) ? TRUE_VALUE : FALSE_VALUE;
+    return (simpleos_bool_or_integer_truthy((uint64_t)a) && simpleos_bool_or_integer_truthy((uint64_t)b)) ? TRUE_VALUE : FALSE_VALUE;
 }
 
 RuntimeValue rt_or(RuntimeValue a, RuntimeValue b)
 {
-    return (DECODE_INT(a) || DECODE_INT(b)) ? TRUE_VALUE : FALSE_VALUE;
+    return (simpleos_bool_or_integer_truthy((uint64_t)a) || simpleos_bool_or_integer_truthy((uint64_t)b)) ? TRUE_VALUE : FALSE_VALUE;
 }
 
 RuntimeValue rt_not(RuntimeValue a)
 {
-    return DECODE_INT(a) ? FALSE_VALUE : TRUE_VALUE;
+    return simpleos_bool_or_integer_truthy((uint64_t)a) ? FALSE_VALUE : TRUE_VALUE;
 }
 
 RuntimeValue rt_shl(RuntimeValue a, RuntimeValue b)
@@ -8698,10 +8700,8 @@ RuntimeValue rt_is_string(RuntimeValue val)
 
 RuntimeValue rt_is_bool(RuntimeValue val)
 {
-    /* Booleans are encoded as ENCODE_INT(0) or ENCODE_INT(1) */
-    if (!IS_INT(val)) return 0;
-    int64_t v = DECODE_INT(val);
-    return (v == 0 || v == 1) ? 1 : 0;
+    /* Compatibility predicate ABI: raw 0/1, not a tagged RuntimeValue bool. */
+    return (val == TRUE_VALUE || val == FALSE_VALUE) ? 1 : 0;
 }
 
 RuntimeValue rt_is_array(RuntimeValue val)
@@ -8760,6 +8760,7 @@ RuntimeValue rt_to_string(RuntimeValue val)
 /* rt_to_bool: convert to boolean */
 RuntimeValue rt_to_bool(RuntimeValue val)
 {
+    if (val == TRUE_VALUE || val == FALSE_VALUE) return val;
     if (IS_NIL(val)) return FALSE_VALUE;
     if (IS_INT(val)) return DECODE_INT(val) ? TRUE_VALUE : FALSE_VALUE;
     if (IS_HEAP(val)) {
