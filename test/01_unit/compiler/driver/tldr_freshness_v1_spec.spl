@@ -1,0 +1,70 @@
+use std.spec
+use compiler.driver.cache.module_artifacts_v1.{module_tldr_companion_path_v1,
+    module_tldr_companion_render_v1, module_artifact_publish_atomic_v1}
+use compiler.driver.cache.tldr_freshness_v1.{tldr_freshness_verify_v1, tldr_freshness_current_v1,
+    tldr_freshness_receipt_render_v1, tldr_freshness_receipt_path_v1,
+    tldr_freshness_receipt_publish_v1}
+use std.io_runtime.{file_write, file_exists, file_read}
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+
+val SRC_A: text = "pub fn add(a: i64, b: i64) -> i64:\n    a + b\n"
+val SRC_B: text = "pub fn sub(a: i64, b: i64) -> i64:\n    a - b\n"
+val ROOT: text = "build/test_tmp/tldr_freshness_v1"
+
+fn _seed(dir: text, name: text, src: text, emit: bool) -> text:
+    val path = "{dir}/{name}.spl"
+    val _d = dir_create_all(dir)
+    val _w = file_write(path, src)
+    if emit:
+        val comp = module_tldr_companion_path_v1(dir + "/out", path)
+        val _p = module_artifact_publish_atomic_v1(comp, module_tldr_companion_render_v1(name, src))
+    path
+
+describe "tldr freshness verifier v1":
+    it "is verified when every companion is fresh":
+        val d = ROOT + "/fresh"
+        val a = _seed(d, "a", SRC_A, true)
+        val b = _seed(d, "b", SRC_B, true)
+        val r = tldr_freshness_verify_v1(d + "/out", [a, b])
+        expect(r.state).to_equal("verified")
+        expect(r.expected).to_equal(2)
+        expect(r.verified).to_equal(2)
+        expect(tldr_freshness_current_v1(r)).to_equal(true)
+
+    it "is not current when a companion is missing":
+        val d = ROOT + "/missing"
+        val a = _seed(d, "a", SRC_A, true)
+        val b = _seed(d, "b", SRC_B, false)
+        val r = tldr_freshness_verify_v1(d + "/out", [a, b])
+        expect(tldr_freshness_current_v1(r)).to_equal(false)
+        expect(r.verified).to_equal(1)
+        expect(r.missing.len()).to_equal(1)
+
+    it "is not current after a source edit":
+        val d = ROOT + "/stale"
+        val a = _seed(d, "a", SRC_A, true)
+        val _e = file_write(a, SRC_B)
+        val r = tldr_freshness_verify_v1(d + "/out", [a])
+        expect(tldr_freshness_current_v1(r)).to_equal(false)
+        expect(r.stale.len()).to_equal(1)
+
+    it "is not verified for an empty inventory":
+        val r = tldr_freshness_verify_v1(ROOT + "/none/out", [])
+        expect(r.state).to_equal("unverified")
+        expect(tldr_freshness_current_v1(r)).to_equal(false)
+
+    it "renders deterministic receipt bytes and publishes immutably":
+        val d = ROOT + "/receipt"
+        val a = _seed(d, "a", SRC_A, true)
+        val b = _seed(d, "b", SRC_B, true)
+        val r1 = tldr_freshness_verify_v1(d + "/out", [a, b])
+        val r2 = tldr_freshness_verify_v1(d + "/out", [b, a])
+        val t1 = tldr_freshness_receipt_render_v1(r1, "rev1", "tree1")
+        expect(t1).to_equal(tldr_freshness_receipt_render_v1(r2, "rev1", "tree1"))
+        expect(t1.contains("schema: simple.tldr-freshness/1")).to_equal(true)
+        expect(t1.contains("source_git_tree: tree1")).to_equal(true)
+        expect(t1.contains("manifest_digest: sha256:")).to_equal(true)
+        expect(tldr_freshness_receipt_publish_v1(d + "/out", "tree1", t1)).to_equal("")
+        expect(tldr_freshness_receipt_publish_v1(d + "/out", "tree1", t1)).to_equal("")
+        expect(file_read(tldr_freshness_receipt_path_v1(d + "/out", "tree1"))).to_equal(t1)
+        expect(tldr_freshness_receipt_publish_v1(d + "/out", "tree1", t1 + "x") != "").to_equal(true)
