@@ -23,6 +23,25 @@ pub fn hir_binding_type_or_infer(initializer: HirExpr, bind_optional_payload: bo
         return source_type
     HirType(kind: HirTypeKind.Infer(0, 0), span: initializer.span)
 
+# `unsafe(capabilities: [...]):` and `nograd:` are value-transparent wrappers:
+# the block's value IS its tail expression. Binding-type transport must look
+# through them, or `val x = unsafe(...): maybe()` registers `x` with no type
+# while `val x = maybe()` registers `text?`, and a later `if val p = x` binds
+# its payload with the wrong (unit) slot type -- E-BACKEND-LLVM-CONST-TYPE
+# "integer constant cannot define void" at native codegen. Kind in, kind out
+# (same frozen-stage2 by-value HirExpr constraint as the helpers below).
+pub fn hir_binding_transparent_kind(kind: HirExprKind) -> HirExprKind:
+    match kind:
+        case HirExprKind.UnsafeBlock(body):
+            if body.has:
+                return hir_binding_transparent_kind(body.value.kind)
+            kind
+        case HirExprKind.NogradBlock(body):
+            if body.has:
+                return hir_binding_transparent_kind(body.value.kind)
+            kind
+        case _: kind
+
 # A direct call carries its declaration's return type in the caller symbol
 # table even when the expression itself is not yet attributed. This is type
 # transport, not generic inference or a leaf-name callable search.

@@ -436,3 +436,22 @@ interpreted fallback), belonging to family E (seed JIT/cranelift). Left OPEN.
 Next step: in `cranelift_emitter.rs` `emit_global_load` fn-ref branch, box the
 `func_addr` into an `rt_closure_new(addr, nil-env)` value so indirect calls go
 through the same closure ABI as lambdas, then drop the module-wide refusal.
+
+## 2026-11-05 mirp2-E3 re-verification (execution, C:/dev/simple/bin/simple.exe (Rust seed, deployed 2026-11-04))
+
+Proposed fix (wrap fn address via rt_closure_new in GlobalLoad) is ALREADY
+LANDED: `codegen/instr/mod.rs` GlobalLoad arm wraps `name$boxed` in
+`rt_closure_new` (closure_boxed_entry.rs `named_fn_value_targets` /
+`imported_fn_value_targets`), and `compile_indirect_call` goes through
+`rt_closure_func_ptr`. `cranelift_emitter.rs::emit_global_load` is not on
+the JIT path (only `dispatch_instruction` users: LLVM, mir_interpreter).
+Fixture sweep (`SIMPLE_JIT_TRACE=1 bin/simple run`):
+f01-f07, f09 JIT, correct (f06 named fn as value = 42, no fallback).
+Residuals, both LOUD and correct (no silent miscompile):
+- f08: closure returned from an ANY-returning fn -> refused
+  (jit.rs `first_unsupported_lambda`, "return slot boxes the handle").
+- f10: extern fn as value -> refused; tracked separately in
+  jit_extern_fn_as_value_still_miscompiles_2026-08-08.md.
+Defect 2 (silent wrong answer) is CLOSED. Row re-scoped to the f08 residual
+(P3); next step: give ANY-typed return slots a closure-handle passthrough in
+the return boxing so f08 can JIT.

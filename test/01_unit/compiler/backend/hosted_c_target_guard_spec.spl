@@ -1,6 +1,6 @@
 use std.spec.*
 use compiler.backend.llvm_native_link.{hosted_c_target_matches_host}
-use compiler.backend.runtime_compiler.{hosted_c_compiler_plan, hosted_cross_c_compiler_name}
+use compiler.backend.runtime_compiler.{hosted_c_compiler_plan, hosted_cross_c_compiler_name, hosted_cross_c_target_args}
 use compiler.backend.linker.linker_wrapper.{hosted_native_link_arch_supported, hosted_cross_cc_required}
 use compiler.backend.llvm_cross_target.{toolchain_for_target, toolchain_x86_64_native, toolchain_aarch64, toolchain_armv7, toolchain_riscv64}
 use compiler.backend.backend.backend_types.{CodegenTarget}
@@ -332,3 +332,32 @@ describe "hosted C target guard":
         expect(arch_guard).to_be_greater_than(os_guard)
         expect(bundle_dispatch).to_be_greater_than(arch_guard)
         expect(platform_dispatch).to_be_greater_than(bundle_dispatch)
+
+describe "Windows llvm-mingw cross targets (bug cross_target_link_no_runtime_2026_10_26)":
+    it "plans i686-w64-mingw32 on x86_64-windows as a clang --target cross":
+        # @req REQ-SSPEC-COMPILER
+        step("i686-w64-mingw32 from x86_64 Windows uses multi-target llvm-mingw clang")
+        val plan = hosted_c_compiler_plan("i686-w64-mingw32", "windows", "x86_64")
+        expect(plan.supported).to_be(true)
+        expect(plan.requires_cross).to_be(true)
+        expect(plan.command).to_equal("clang")
+        expect(hosted_cross_c_target_args("i686-w64-mingw32", "windows", "x86_64")).to_equal(["--target=i686-w64-mingw32"])
+
+    it "plans other mingw arches and the -pc-windows-gnu spelling the same way":
+        # @req REQ-SSPEC-COMPILER
+        step("aarch64/i686 mingw spellings are clang --target crosses on Windows")
+        val a = hosted_c_compiler_plan("aarch64-w64-mingw32", "windows", "x86_64")
+        expect(a.supported).to_be(true)
+        expect(a.requires_cross).to_be(true)
+        val g = hosted_c_compiler_plan("i686-pc-windows-gnu", "windows", "x86_64")
+        expect(g.supported).to_be(true)
+        expect(hosted_cross_c_target_args("i686-pc-windows-gnu", "windows", "x86_64")).to_equal(["--target=i686-pc-windows-gnu"])
+
+    it "keeps the host mingw target native and still refuses msvc crosses":
+        # @req REQ-SSPEC-COMPILER
+        step("x86_64-w64-mingw32 on x86_64 Windows is native; i686 msvc stays unsupported")
+        val n = hosted_c_compiler_plan("x86_64-w64-mingw32", "windows", "x86_64")
+        expect(n.supported).to_be(true)
+        expect(n.requires_cross).to_be(false)
+        expect(hosted_c_compiler_plan("i686-pc-windows-msvc", "windows", "x86_64").supported).to_be(false)
+        expect(hosted_cross_c_target_args("x86_64-w64-mingw32", "windows", "x86_64")).to_equal([])
