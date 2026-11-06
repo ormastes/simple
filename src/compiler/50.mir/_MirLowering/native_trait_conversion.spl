@@ -38,7 +38,7 @@ impl MirLowering:
                     match value.kind:
                         case HirExprKind.NilLit: return self.ensure_option_handle(local, expected)
                         case _: ()
-                    if val existing = self.find_local_hir_type(local.id):
+                    if val existing = self.native_trait_declared_source_type(local, value):
                         match existing.kind:
                             case HirTypeKind.Optional(existing_inner):
                                 if self.native_trait_owner_for_type(existing_inner) == self.native_trait_owner_for_type(inner):
@@ -60,14 +60,11 @@ impl MirLowering:
         if self.local_hir_type_resource_state(local.id) != 0:
             self.error_fatal("native trait resource conversion requires a concrete drop slot", Some(value.span))
             return local
-        if val existing = self.find_local_hir_type(local.id):
+        # An already trait-typed source (typed local, declared field chain,
+        # declared container read) is this trait's object: move the existing
+        # (data, table) value. Only a concrete source searches for an impl.
+        if val existing = self.native_trait_declared_source_type(local, value):
             if self.native_trait_owner_for_kind(existing.kind) == owner: return local
-        # A read out of a declared trait-object container (`self.blocks[kind]`
-        # on Dict<text, BlockDefinition>) is already this trait's object; its
-        # index-result local just carries no HIR type. Re-wrapping it searched
-        # for a concrete implementation of '' and failed.
-        if val declared_source = self.declared_container_read_type(value):
-            if self.native_trait_owner_for_kind(declared_source.kind) == owner: return local
         val layout_index = self.native_trait_layout_index(owner)
         if layout_index < 0:
             self.error_fatal("native trait conversion lacks canonical declaration: {owner}", Some(value.span))
@@ -129,6 +126,24 @@ impl MirLowering:
         val resource_state = self.local_hir_type_resource_state(local.id)
         self.remember_local_hir_type(object.id, expected, isolation_state, resource_state)
         object
+
+    me native_trait_declared_source_type(local: LocalId, value: HirExpr) -> HirType?:
+        """Static type of a conversion source without lowering anything: the
+        local's remembered HIR type, then the expression's own type, then the
+        declared type of a binding/field chain (`parsed.parser` with
+        `parser: Trait?` -- its field-load local carries no HIR type), then a
+        declared container read (`self.blocks[kind]` on Dict<text, Trait>).
+        A missing answer leaves the concrete-implementation search in charge."""
+        if val local_type = self.find_local_hir_type(local.id):
+            return Some(local_type)
+        if value.has_type_ and value.type_ != nil:
+            val expression_type = value.type_ ?? HirType(kind: HirTypeKind.Error, span: value.span)
+            match expression_type.kind:
+                case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Unit: ()
+                case _: return Some(expression_type)
+        if val declared = self.receiver_declared_type(value):
+            return Some(declared)
+        self.declared_container_read_type(value)
 
     me emit_native_trait_object_for(implementation: NativeTraitImplementation,
             layout: NativeTraitLayout, data: LocalId, cast_name: text) -> LocalId:
