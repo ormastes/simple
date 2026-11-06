@@ -348,3 +348,22 @@ $S run src/app/traceability/query_main.spl refs file test/01_unit/app/traceabili
 - No cursor: `--limit` caps claim rows (`page complete: false` when capped).
   Bugs use the exact `file` column, so pass the file path, not a directory;
   for an area use `list bugs --file-prefix=<dir>/`.
+
+## Spec driver fallback and exit semantics (2026-11-06)
+
+- `scripts/check/check-trace-query-p0.shs` runs each spec through `simple test`;
+  when that binary produces no `SPEC FILE VERDICT:` line (the seed refuses
+  `test`) it falls back to `simple run <spec>`, which emits the same verdict
+  line and exit status. A genuine spec failure keeps its own verdict and is
+  never retried. Fixture steps are unchanged.
+- Query exit 1 means "rendered, but the graph is incomplete"; a complete graph
+  exits 0 even when sidecar warnings (e.g. `TRACE-LEGACY-ROW`) are present. The
+  spec derives its expected status from the page's `Graph complete:` line.
+- Requirement-to-spec links are sidecar references (`# @req` headers under
+  `--spec-root`, rendered as `SIDECAR verified_by`), deliberately not graph
+  claims: they carry no pinned blob or registered authority, so promoting them
+  would raise TRACE-AUTHORITY-CONFLICT. Spec-to-test-case edges need the
+  native-only `extract_sspec_inventory_single_owner` provider and are not
+  ingested by the lightweight query path.
+- Seed state: with a seed lacking the #7214 owned-process fix the three git/index
+  scenarios fail with `owned process start: invalid 4-word receipt` (7/10 pass).
