@@ -1,0 +1,76 @@
+# Cross-agent overlap detection (traceability design §18.1, item C5).
+#
+# Pure: given each agent's changed-file set, report pairs of agents touching
+# the same file. The label is a conflict STRENGTH, not a merge verdict: a
+# same-file overlap is "weak" — two agents editing one file may merge cleanly.
+# Symbol- and cell-level overlaps need the resolved symbol index (todo C3/L5)
+# and are not claimed here. Nothing in this module runs git or declares a
+# merge conflict; that requires an actual Git merge analysis.
+
+use app.llm_caret.agent_plan.{AgentFileChangeSet}
+
+struct AgentOverlapV1:
+    agent_a: text
+    agent_b: text
+    path: text
+    kind: text      # "same_file"
+    strength: text  # "weak"
+
+val AGENT_OVERLAP_NOT_A_MERGE_VERDICT_V1: text =
+    "overlap strength is not a Git merge verdict; run a merge analysis before claiming a conflict"
+
+fn _norm(p: text) -> text:
+    p.trim().replace("\\", "/")
+
+# Pairwise, in input order (a before b), one row per shared path, no
+# self-pairs, deterministic for a fixed input.
+pub fn agent_overlaps_v1(sets: [AgentFileChangeSet]) -> [AgentOverlapV1]:
+    var out: [AgentOverlapV1] = []
+    var i = 0
+    while i < sets.len():
+        var j = i + 1
+        while j < sets.len():
+            val a = sets[i]
+            val b = sets[j]
+            if a.agent_id != b.agent_id:
+                var b_paths: [text] = []
+                for p in b.changed_files:
+                    b_paths.push(_norm(p))
+                var reported: [text] = []
+                for p in a.changed_files:
+                    val np = _norm(p)
+                    if np != "" and b_paths.contains(np) and not reported.contains(np):
+                        reported.push(np)
+                        out.push(AgentOverlapV1(agent_a: a.agent_id, agent_b: b.agent_id,
+                            path: np, kind: "same_file", strength: "weak"))
+            j = j + 1
+        i = i + 1
+    out
+
+# Overlaps involving one agent (either side).
+pub fn agent_overlaps_for_v1(overlaps: [AgentOverlapV1], agent_id: text) -> [AgentOverlapV1]:
+    var out: [AgentOverlapV1] = []
+    for o in overlaps:
+        if o.agent_a == agent_id or o.agent_b == agent_id:
+            out.push(o)
+    out
+
+# Deterministic Markdown table (design §19.2 caret-agent-review); paths are
+# repository-relative as supplied, never absolute.
+pub fn agent_overlap_report_md_v1(overlaps: [AgentOverlapV1]) -> text:
+    var lines: [text] = []
+    lines.push("## Agent overlaps")
+    lines.push("")
+    lines.push("_" + AGENT_OVERLAP_NOT_A_MERGE_VERDICT_V1 + "_")
+    lines.push("")
+    if overlaps.len() == 0:
+        lines.push("No overlapping files between agents.")
+        return lines.join("\n") + "\n"
+    lines.push("| agent A | agent B | path | kind | strength |")
+    lines.push("|---|---|---|---|---|")
+    for o in overlaps:
+        lines.push("| " + o.agent_a + " | " + o.agent_b + " | `" + o.path + "` | " + o.kind + " | " + o.strength + " |")
+    lines.join("\n") + "\n"
+
+export AgentOverlapV1, AGENT_OVERLAP_NOT_A_MERGE_VERDICT_V1
+export agent_overlaps_v1, agent_overlaps_for_v1, agent_overlap_report_md_v1
