@@ -110,6 +110,15 @@ fn compile_native_aarch64(module: MirModule) -> [i64]:
     val xray_functions = xray_instrumented_function_names(module)
     if xray_functions.len() > 0:
         val plan = xray_insert_sleds_aarch64(allocated, xray_functions)
+        # Every function the policy marked must carry at least its entry sled;
+        # a marked name the selector never produced is a dropped request.
+        for name in xray_functions:
+            var found = false
+            for site in plan.sites:
+                if site.function_name == name:
+                    found = true
+            if not found:
+                panic("XRAY-E-SLED-MISSING: '{name}' is marked for sleds but none were emitted")
         val xray_encoded = encode_module_aarch64(plan.module)
         match xray_locate_sleds(xray_encoded, plan.sites):
             case Ok(sites):
@@ -255,6 +264,7 @@ fn emit_elf32_riscv32(encoded_funcs: [EncodedFunction]) -> [i64]:
     elf
 
 fn compile_native_stub(module: MirModule, arch: text) -> [i64]:
+    xray_reject_unsupported_native(module, arch)
     # Stub for unsupported architectures - returns empty ELF
     var writer = elf_writer_x86_64()
     val text_section = new_text_section([0xc3])  # Just a ret

@@ -26,6 +26,7 @@ class FakePatchPortV1:
     fail_begin: bool
     fail_store: bool
     fail_end_left: i64
+    none: bool
     log: [text]
 
 impl XrayCodePatchPortV1 for FakePatchPortV1:
@@ -42,14 +43,19 @@ impl XrayCodePatchPortV1 for FakePatchPortV1:
         0
 
     fn load_u32(addr: i64) -> i64:
+        # A real read of a PROT_NONE page faults; the fake records it.
+        if self.none: return -2
         if self.words.contains(addr): self.words[addr] else: -1
 
     me end(page: i64, length: i64) -> i64:
         self.log.push("end:{page}:{length}")
         if self.fail_end_left > 0:
             self.fail_end_left = self.fail_end_left - 1
+            # rt_mprotect drops the page to PROT_NONE on a failed cache sync.
+            self.none = true
             return -1
         self.writable = false
+        self.none = false
         0
 
     me close_channel(arena: i64) -> i64:
@@ -87,7 +93,7 @@ fn port_from_image(bytes: [u8]) -> FakePatchPortV1:
         val word = (bytes[offset] as i64) | ((bytes[offset + 1] as i64) << 8) | ((bytes[offset + 2] as i64) << 16) | ((bytes[offset + 3] as i64) << 24)
         words[BASE + offset] = word
         offset = offset + 4
-    FakePatchPortV1(words: words, writable: false, fail_begin: false, fail_store: false, fail_end_left: 0, log: [])
+    FakePatchPortV1(words: words, writable: false, fail_begin: false, fail_store: false, fail_end_left: 0, none: false, log: [])
 
 fn leaf_fixture() -> XrayNativeSledLeafV1:
     val (bytes, manifest) = image_fixture()
@@ -152,6 +158,18 @@ describe "XRay native AArch64 sled leaf V1":
         var leaf = leaf_fixture()
         expect(leaf.patch_site(port, 1)).to_equal(XRAY_LLVM_STATUS_FAILED_V1)
         expect(port.log[2]).to_equal("end:{BASE}:{PAGE}")
+
+    it "PATCH-02: restores a dirty (PROT_NONE) page before reading any sled word on it":
+        val (bytes, _) = image_fixture()
+        var port = port_from_image(bytes)
+        port.fail_end_left = 1
+        var leaf = leaf_fixture()
+        expect(leaf.patch_site(port, 1)).to_equal(XRAY_LLVM_STATUS_FAILED_V1)
+        expect(port.none).to_equal(true)
+        port.log = []
+        expect(leaf.unpatch_site(port, 1)).to_equal(XRAY_LLVM_STATUS_SUCCESS_V1)
+        expect(port.log[0]).to_equal("end:{BASE}:{PAGE}")
+        expect(port.load_u32(BASE + 64)).to_equal(0x14000008)
 
     it "drives the PR4 control plane: selected sites patched, stop restores off":
         val (bytes, _) = image_fixture()

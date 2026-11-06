@@ -17,7 +17,7 @@
 #      __simple_xray_trampoline_v1 per sled; every sled disassembles as
 #      b +0x20 / stp x16,x17 / stp x0,x30 / mov w0 / movk w0 / bl / ldp x0,x30 /
 #      ldp x16,x17. The OFF object has no xray section or symbol.
-#   3. aarch64 host only: builds test/fixtures/xray/xray_native_e2e_harness.c
+#   3. aarch64 Linux host only (elsewhere the verdict is ERROR, never PASS): builds test/fixtures/xray/xray_native_e2e_harness.c
 #      with clang and replays ops.txt on a real mmap'd page (RX<->RW, aligned
 #      word store, __builtin___clear_cache), executing the emitted function
 #      between sessions: hits/last-site/return value must match. A mutated
@@ -94,6 +94,7 @@ if [ "$SELFTEST_ONLY" -eq 1 ]; then
 fi
 
 [ -n "$SIMPLE_BIN" ] || { echo "ERROR — nothing was checked (no --simple binary)"; exit 2; }
+case "$SIMPLE_BIN" in /*) ;; */*) SIMPLE_BIN=$(cd "$(dirname "$SIMPLE_BIN")" && pwd)/$(basename "$SIMPLE_BIN") ;; esac
 for tool in "$SIMPLE_BIN" "$OBJDUMP" "$READELF" xxd; do
     command -v "$tool" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (missing tool: $tool)"; exit 2; }
 done
@@ -119,6 +120,7 @@ xxd -r -p "$WORK/on.hex" "$WORK/on.o" && xxd -r -p "$WORK/off.hex" "$WORK/off.o"
 
 checks=0
 expect_count() { # label actual expected
+    case "$2" in ''|*[!0-9]*) echo "ERROR — nothing was checked ($1: no count)"; exit 2 ;; esac
     if [ "$2" -ne "$3" ]; then echo "FAIL — $1: $2 (want $3)"; exit 1; fi
     checks=$((checks + 1))
 }
@@ -139,7 +141,8 @@ expect_count "CALL26 relocations to __simple_xray_trampoline_v1" \
 expect_count "sled off word (b +0x20)" "$(grep -cE '^ *[0-9a-f]+: 14000008[[:space:]]+b[[:space:]]' "$WORK/on.dis")" "$sites"
 expect_count "stp x16, x17" "$(grep -cF 'stp	x16, x17, [sp, #-0x10]!' "$WORK/on.dis")" "$sites"
 expect_count "stp x0, x30" "$(grep -cF 'stp	x0, x30, [sp, #-0x10]!' "$WORK/on.dis")" "$sites"
-expect_count "mov w0, #site" "$(grep -cE '	mov	w0, #0x[0-9a-f]+' "$WORK/on.dis")" "$sites"
+# The site-id word follows the sled's stp x0,x30 directly (grep -A1).
+expect_count "mov w0, #site" "$(grep -A1 -F 'stp	x0, x30, [sp, #-0x10]!' "$WORK/on.dis" | grep -cE '	mov	w0, #0x[0-9a-f]+')" "$sites"
 expect_count "movk w0, lsl 16" "$(grep -cF 'movk	w0, #0x0, lsl #16' "$WORK/on.dis")" "$sites"
 expect_count "ldp x0, x30" "$(grep -cF 'ldp	x0, x30, [sp], #0x10' "$WORK/on.dis")" "$sites"
 expect_count "ldp x16, x17" "$(grep -cF 'ldp	x16, x17, [sp], #0x10' "$WORK/on.dis")" "$sites"
@@ -151,8 +154,9 @@ expect_count "sled words in the OFF object" "$(grep -cE '^ *[0-9a-f]+: 14000008 
 object_checks=$checks
 
 if [ "$(uname -m)" != "aarch64" ] || [ "$(uname -s)" != "Linux" ]; then
-    echo "PASS — $checks check(s) (object inspection only; no aarch64 Linux host for the page replay)"
-    exit 0
+    # The page replay is the core claim; without it this is not a PASS.
+    echo "ERROR — nothing was checked (page replay needs an aarch64 Linux host; $checks object check(s) passed)"
+    exit 2
 fi
 command -v "$CC" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (missing tool: $CC)"; exit 2; }
 "$CC" -O1 -Wall -o "$WORK/harness" "$ROOT/test/fixtures/xray/xray_native_e2e_harness.c" > "$WORK/cc.log" 2>&1 || {

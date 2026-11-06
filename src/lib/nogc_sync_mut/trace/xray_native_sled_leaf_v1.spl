@@ -9,11 +9,22 @@
 # aligned first word: B +32 (off) <-> NOP (on). Everything else in the sled
 # is immutable and was checked by trace_native_map_validate_v1 at admission.
 #
-# Per switch (quiescent: no thread may be executing the selected sled):
+# Per switch. Quiescence is PAGE-wide, not site-wide: begin() drops execute
+# permission for the whole page, so no thread may execute ANY code on the
+# sled's page during the switch (startup or SOSIX-established quiescence; the
+# adapter only admits patch_mode Quiescent and cannot itself prove it). The
+# page is restored to RX, the only protection a validated text page may have
+# (the validator rejects writable executable ranges).
+#   0. a page left dirty by an earlier failed end() is restored FIRST - the
+#      runtime drops it to PROT_NONE on a failed cache sync, so reading the
+#      word before restoring would fault;
 #   1. read the current word; anything but the expected off/on word is a
 #      foreign owner -> FAILED, nothing touched;
 #   2. port.begin(page): RX -> RW (W^X; never RWX);
-#   3. port.store_u32: one aligned 32-bit store (single-copy atomic);
+#   3. port.store_u32: one aligned 32-bit store. The host leaf uses the
+#      runtime's plain aligned int32 store (one STR W in practice, not a
+#      C-language atomicity guarantee); step 5 re-reads it. Quiescence, not
+#      store atomicity, is what this stage relies on;
 #   4. port.end(page): RW -> RX plus I-cache maintenance for the range
 #      (DC CVAU / DSB ISH / IC IVAU / DSB ISH / ISB) - always attempted, even
 #      after a failed store, so protections are restored on every exit path;
@@ -96,15 +107,14 @@ impl XrayNativeSledLeafV1:
         val sled = self.sites[id - 1]
         val want = if on: sled.on_word else: sled.off_word
         val page = sled.addr - (sled.addr % self.page_size)
+        if self.dirty_pages.contains(page):
+            # Never read a page whose protection is unknown (maybe PROT_NONE).
+            if port.end(page, self.page_size) != 0: return XRAY_LLVM_STATUS_FAILED_V1
+            self.mark_page(page, false)
         val current = port.load_u32(sled.addr)
         if current != sled.off_word and current != sled.on_word:
             return XRAY_LLVM_STATUS_FAILED_V1
-        if current == want:
-            if not self.dirty_pages.contains(page): return XRAY_LLVM_STATUS_SUCCESS_V1
-            # Word already right but the page never got back to RX: finish it.
-            if port.end(page, self.page_size) != 0: return XRAY_LLVM_STATUS_FAILED_V1
-            self.mark_page(page, false)
-            return XRAY_LLVM_STATUS_SUCCESS_V1
+        if current == want: return XRAY_LLVM_STATUS_SUCCESS_V1
         if port.begin(page, self.page_size) != 0: return XRAY_LLVM_STATUS_FAILED_V1
         val stored = port.store_u32(sled.addr, want)
         if port.end(page, self.page_size) != 0:
