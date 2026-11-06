@@ -390,15 +390,17 @@ fn llvm_module_is_native_entry(module_name: text) -> bool:
         return true
     module_name == llvm_module_name_from_entry_path(native_entry)
 
-# XRay function attributes (design A.5, LLVM stage 1). xray_mode >= 1 ->
+# XRay function attributes (design A.5, LLVM stage 1). xray_mode 2 ->
 # `xray-always`: LLVM's XRayInstrumentation pass then emits the entry sled,
 # a PATCHABLE_RET exit sled per return and a PATCHABLE_TAIL_CALL sled per tail
 # call. LLVM has no attribute that keeps exit sleds but drops tail sleds, so
-# modes 1 and 2 lower identically here; `xray-skip-exit` would also drop the
-# exit sleds both modes require and is never emitted. Never-listed functions
-# (xray_mode 0) get `xray-never` only when the module is instrumented, i.e.
-# `--xray` is on. No `xray-instruction-threshold` (owner decision Q5). Off
-# (module not instrumented) returns "" so the IR is byte-identical (B).
+# mode 1 is rejected by translate_module (fail closed), and `xray-skip-exit`
+# (which would drop the exit sleds too) is never emitted. Never-listed
+# functions (xray_mode 0) get `xray-never` only in an instrumented module (one
+# that has a sled function); a module whose functions are all never-listed
+# gets none, which is equivalent because no threshold is emitted. No
+# `xray-instruction-threshold` (owner decision Q5). Off returns "" so the IR is
+# byte-identical (B).
 fn llvm_xray_function_attrs(xray_mode: i64, module_instrumented: bool) -> text:
     if xray_mode > 0:
         return " \"function-instrument\"=\"xray-always\""
@@ -494,8 +496,8 @@ impl MirTextCodegen for MirToLlvm:
                 # that instantiated it must spell the same symbol to dedupe.
                 if not fn_qualify.name.contains(".") and not fn_qualify.is_comdat:
                     self.module_qualified_symbol_names[fn_qualify.name] = "{module.name}.{fn_qualify.name}"
-        # XRay (design A.5/B): per-module state, reset so a reused translator
-        # never carries an earlier module's sled intent. Off leaves both empty.
+        # XRay (design A.5/B): per-module state, derived only from this
+        # module's functions. Off leaves both empty.
         self.fn_xray_mode = {}
         self.xray_module_on = false
         for fn_owner in mir_module_functions_sorted(module):
@@ -545,6 +547,18 @@ impl MirTextCodegen for MirToLlvm:
                 if fn_owner.align > 0:
                     self.fn_align[fn_owner.name] = fn_owner.align
                     self.fn_align[placement_symbol] = fn_owner.align
+        # XRay fail-closed admission (design A.5): LLVM sleds are admitted for
+        # Linux triples only; mode 1 (exit sleds without tail-exit sleds) has
+        # no LLVM spelling; the debug-only bootstrap function table is not
+        # keyed by this module's functions.
+        if self.xray_module_on:
+            if self.target_os != "linux":
+                self.codegen_error("XRAY-E-UNSUPPORTED-TARGET: LLVM XRay sleds are admitted for Linux triples only (target os '{self.target_os}')")
+            if self.bootstrap_string_globals_active:
+                self.codegen_error("XRAY-E-UNSUPPORTED-TARGET: LLVM XRay is not supported on the bootstrap translation path")
+            for fn_mode in mir_module_functions_sorted(module):
+                if fn_mode.xray_mode == 1:
+                    self.codegen_error("XRAY-E-UNSUPPORTED-MODE: LLVM cannot emit exit sleds without tail-exit sleds (xray_mode 1 in '{fn_mode.name}')")
 
         # mutglobal lane (module-level `var` mutation storage, see
         # scratchpad/mutglobal_plan.md): emit real LLVM `@name = global ...`
@@ -1052,9 +1066,11 @@ impl MirTextCodegen for MirToLlvm:
             else:
                 self.builder.emit(comdat_decl)
         # XRay (design A.5): emitters read only MirFunction.xray_mode. A sled
-        # function drops the size heuristic's alwaysinline (inlining would
-        # erase the physical function every call site observes); explicit
-        # @inline functions are never-listed (xray_mode 0) and keep it.
+        # function drops the size heuristic's FORCED inlining (alwaysinline is
+        # honoured even at -O0). The regular inliner may still inline it at
+        # -O2; per plan §5.4 the observable entity is the physical function and
+        # an inlined call site has no boundary (reported, not forced with
+        # noinline). Explicit @inline functions are never-listed (mode 0).
         val xray_mode = if self.fn_xray_mode.has(name): self.fn_xray_mode[name] else: 0
         var attrs = " nounwind" + placement_attrs
         if is_readonly and not placement_naked:

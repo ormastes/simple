@@ -97,18 +97,43 @@ fn xray_trace_instrumentation_enabled(value: text) -> Result<bool, text>:
         case "dynamic": Ok(true)
         case _: Err("XRAY-E-CONFIG: trace.instrumentation '{value}' is not supported (expected off or dynamic)")
 
-# `instrumentation:` under the top-level `trace:` block of a project manifest
-# (simple.sdn); "" when absent. Line-based like the CLI's run-config reader.
+fn xray_sdn_strip_comment(value: text) -> text:
+    if value.contains(" #"):
+        return value.split(" #")[0].trim()
+    value.trim()
+
+fn xray_sdn_indent(line: text) -> i64:
+    var count = 0
+    while count < line.len() and (line[count:count + 1] == " " or line[count:count + 1] == "\t"):
+        count = count + 1
+    count
+
+# `instrumentation:` as a DIRECT child of the top-level `trace:` block of a
+# project manifest (simple.sdn); "" when absent. Trailing ` # comments` are
+# stripped. An inline `trace: {...}` is returned verbatim so the caller
+# rejects it instead of silently ignoring a requested switch.
 fn xray_sdn_trace_instrumentation(content: text) -> text:
     var in_trace = false
+    var child_indent = -1
     for line in content.split("\n"):
-        val trimmed = line.trim()
+        val trimmed = xray_sdn_strip_comment(line)
         if trimmed == "" or trimmed.starts_with("#"):
             continue
-        if not line.starts_with(" ") and not line.starts_with("\t"):
-            in_trace = trimmed == "trace:"
+        val indent = xray_sdn_indent(line)
+        if indent == 0:
+            in_trace = false
+            if trimmed.starts_with("trace:"):
+                val inline = trimmed.substring(6).trim()
+                if inline != "":
+                    return inline
+                in_trace = true
+                child_indent = -1
             continue
-        if in_trace and trimmed.starts_with("instrumentation:"):
+        if not in_trace:
+            continue
+        if child_indent < 0:
+            child_indent = indent
+        if indent == child_indent and trimmed.starts_with("instrumentation:"):
             var value = trimmed.substring(16).trim()
             if value.len() >= 2 and ((value.starts_with("\"") and value.ends_with("\"")) or (value.starts_with("'") and value.ends_with("'"))):
                 value = value.substring(1, value.len() - 1)

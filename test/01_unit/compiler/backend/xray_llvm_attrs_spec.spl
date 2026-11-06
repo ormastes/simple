@@ -31,11 +31,14 @@ fn xray_attr_module(functions: [MirFunction]) -> MirModule:
         table[f.symbol] = f
     MirModule(name: "probe.attrs", functions: table, statics: {}, constants: {}, types: {})
 
-fn xray_attr_ir(module: MirModule) -> text:
+fn xray_attr_translator(target_os: text) -> MirToLlvm:
     MirToLlvm.create_explicit_target_with_hardening(
-        "probe.attrs", CodegenTarget.X86_64, "x86_64", "unknown", "linux",
+        "probe.attrs", CodegenTarget.X86_64, "x86_64", "unknown", target_os,
         "", false, "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
-        false, "hosted").translate_module(module)
+        false, "hosted")
+
+fn xray_attr_ir(module: MirModule) -> text:
+    xray_attr_translator("linux").translate_module(module)
 
 # The `define` line of the function whose emitted symbol contains `name(`.
 fn xray_define_line(ir: text, name: text) -> text:
@@ -51,13 +54,33 @@ describe "XRay LLVM function attributes":
         val line = xray_define_line(ir, "xr_tail")
         expect(line).to_contain("\"function-instrument\"=\"xray-always\"")
         expect(line.contains("xray-skip-exit")).to_equal(false)
-        # A sled function keeps its physical body: no size-heuristic alwaysinline.
+        # A sled function is not FORCED inline: no size-heuristic alwaysinline.
         expect(line.contains("alwaysinline")).to_equal(false)
 
-    it "marks entry+exit functions xray-always":
-        step("Translate a module with an xray_mode=1 function")
+    it "rejects entry+exit-only mode, which LLVM cannot spell":
+        step("xray_mode=1 would silently gain tail-exit sleds; fail closed")
         val ir = xray_attr_ir(xray_attr_module([xray_attr_fn(1, "xr_exit", 1)]))
-        expect(xray_define_line(ir, "xr_exit")).to_contain("\"function-instrument\"=\"xray-always\"")
+        expect(ir).to_contain("XRAY-E-UNSUPPORTED-MODE")
+        expect(ir).to_contain("simple_llvm_codegen_error")
+
+    it "rejects non-Linux targets":
+        step("A.5: LLVM XRay sleds are admitted for Linux triples only")
+        val ir = xray_attr_translator("darwin").translate_module(xray_attr_module([xray_attr_fn(1, "xr_tail", 2)]))
+        expect(ir).to_contain("XRAY-E-UNSUPPORTED-TARGET")
+
+    it "keys the attribute by the emitted symbol":
+        step("main is emitted as __simple_main; its sled intent must follow")
+        val ir = xray_attr_ir(xray_attr_module([xray_attr_fn(1, "main", 2)]))
+        expect(xray_define_line(ir, "__simple_main")).to_contain("\"function-instrument\"=\"xray-always\"")
+
+    it "keeps alwaysinline on a never-listed @inline function":
+        step("Explicit @inline is never-listed (mode 0): forced inlining stays, xray-never added")
+        var inline_fn = xray_attr_fn(2, "xr_inline", 0)
+        inline_fn.is_inline = true
+        val ir = xray_attr_ir(xray_attr_module([xray_attr_fn(1, "xr_tail", 2), inline_fn]))
+        val line = xray_define_line(ir, "xr_inline")
+        expect(line).to_contain(" alwaysinline")
+        expect(line).to_contain("\"function-instrument\"=\"xray-never\"")
 
     it "marks never-listed functions xray-never only when the module is instrumented":
         step("Translate an instrumented module that also holds a never-listed function")
@@ -86,6 +109,9 @@ describe "XRay compile options hash token":
         val legacy = compile_options_hash_compute(options.backend, 0, options.release, options.debug_info,
             options.gc_off, options.profile, options.allowed_families)
         expect(compute_options_hash(options).hash).to_equal(legacy.hash)
+        # Golden: the default-options hash computed by the pre-xray base
+        # (release/1.0.0 671d5545201) on the Rust seed. Off bytes unchanged.
+        expect(compute_options_hash(options).hash).to_equal(-3158762152945444553)
 
     it "changes the hash when xray is on":
         step("--xray artifacts must never satisfy an off cache lookup")
@@ -106,6 +132,16 @@ describe "XRay trace.instrumentation SDN key":
     it "reads trace.instrumentation from a project manifest":
         val manifest = "package:\n  name: demo\n\ntrace:\n  instrumentation: dynamic\n"
         expect(xray_sdn_trace_instrumentation(manifest)).to_equal("dynamic")
+
+    it "strips comments and quotes and reads only direct children of trace":
+        expect(xray_sdn_trace_instrumentation("trace:  # observer\n  instrumentation: dynamic  # on\n")).to_equal("dynamic")
+        expect(xray_sdn_trace_instrumentation("trace:\n  instrumentation: \"off\"\n")).to_equal("off")
+        expect(xray_sdn_trace_instrumentation("trace:\n  sub:\n    instrumentation: dynamic\n")).to_equal("")
+
+    it "surfaces an inline trace map so it is rejected, never ignored":
+        val value = xray_sdn_trace_instrumentation("trace: {instrumentation: dynamic}\n")
+        expect(value != "").to_equal(true)
+        expect(xray_trace_instrumentation_enabled(value).is_err()).to_equal(true)
 
     it "returns empty when the manifest has no trace block":
         val manifest = "package:\n  name: demo\nexecution:\n  instrumentation: dynamic\n"
