@@ -16,6 +16,7 @@ use os.kernel.socket_compat.{
     posix_bound_port_for_fd, posix_server_port_for_fd
 }
 use os.kernel.memory.vmm.{vmm_copy_bytes_result_ok}
+use os.kernel.memory.vmm_core.{VMM_KERNEL_SPACE_START}
 use os.kernel.memory.user_copy.{user_copyin_bytes, user_copyout_bytes}
 
 val PORTABLE_NET_SOCKADDR_IN_LEN_V1: u64 = 16u64
@@ -62,6 +63,36 @@ pub fn portable_net_bind_args_checked_v1(
         Err(errno): SyscallResult(value: errno)
         Ok(addr): portable_net_dispatch_bind_checked_v1(
             args.arg0 as i32, addr, scheduler, ipc)
+
+pub fn portable_net_args_precheck_v1(args: SyscallArgs) -> i64:
+    """Reject malformed accept/send/recv arguments before the authority check.
+
+    Pure argument validation: no caller memory is read, no socket state is
+    touched and no descriptor is resolved, so running it first leaks nothing.
+    Mirrors the copy-errors-before-authorization policy of bind. Returns 0 when
+    the arguments are well formed, otherwise a negative errno.
+    """
+    if args.id == 74u64:
+        if args.arg1 != 0u64 or args.arg2 != 0u64:
+            return PORTABLE_NET_EOPNOTSUPP_V1
+        return 0
+    if args.id != 75u64 and args.id != 76u64:
+        return 0
+    if args.arg2 > PORTABLE_NET_MAX_IO_V1:
+        return PORTABLE_NET_EINVAL_V1
+    if args.arg3 != 0u64 or args.arg4 != 0u64:
+        return PORTABLE_NET_EOPNOTSUPP_V1
+    if args.id == 75u64 and args.arg2 != 0u64 and not portable_net_user_range_v1(args.arg1, args.arg2):
+        return PORTABLE_NET_EFAULT_V1
+    0
+
+fn portable_net_user_range_v1(ptr: u64, len: u64) -> bool:
+    if ptr == 0u64 or len == 0u64:
+        return false
+    val end = ptr + len - 1u64
+    if end < ptr:
+        return false
+    ptr < VMM_KERNEL_SPACE_START and end < VMM_KERNEL_SPACE_START
 
 pub fn portable_net_capability_allowed_v1(
     args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager
@@ -155,4 +186,4 @@ pub fn portable_net_close_v1(fd: i64) -> SyscallResult:
 
 export portable_net_copy_sockaddr_in_v1, portable_net_capability_allowed_v1
 export portable_net_dispatch_bind_checked_v1, portable_net_bind_args_checked_v1
-export portable_net_dispatch_v1, portable_net_close_v1
+export portable_net_dispatch_v1, portable_net_close_v1, portable_net_args_precheck_v1

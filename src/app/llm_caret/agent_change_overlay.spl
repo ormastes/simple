@@ -1,0 +1,95 @@
+# Per-agent change overlay (traceability design §18.1, items C1/C2).
+#
+# Pure: parses `git status --porcelain=v1` text into Git-aware categories
+# (untracked / unstaged / staged, with the original path of a rename) and
+# wraps them in an overlay record keyed by
+# (workspace_id, agent_id, worktree_id, base_commit, head_commit, index_generation).
+# Nothing here runs git, touches a worktree or infers an agent from a path or
+# author — the caller supplies the registered identity. `committed` / `pushed`
+# categories need `git log` lineage and are not produced by this parser.
+
+struct AgentChangeEntryV1:
+    path: text
+    original_path: text   # rename/copy source, "" otherwise
+    untracked: bool
+    staged: bool
+    unstaged: bool
+
+struct AgentChangeOverlayV1:
+    workspace_id: text
+    agent_id: text
+    worktree_id: text
+    base_commit: text
+    head_commit: text
+    index_generation: i64
+    entries: [AgentChangeEntryV1]
+
+pub fn agent_change_overlay_key_v1(o: AgentChangeOverlayV1) -> text:
+    o.workspace_id + "/" + o.agent_id + "/" + o.worktree_id + "@" + o.base_commit + ".." +
+        o.head_commit + "#" + str(o.index_generation)
+
+# "untracked" | "staged" | "unstaged" | "staged+unstaged"
+pub fn agent_change_category_v1(e: AgentChangeEntryV1) -> text:
+    if e.untracked: return "untracked"
+    if e.staged and e.unstaged: return "staged+unstaged"
+    if e.staged: return "staged"
+    "unstaged"
+
+fn _normalize_path(p: text) -> text:
+    var t = p.trim()
+    if t.len() >= 2 and t.starts_with("\"") and t.ends_with("\""):
+        t = t.substring(1, t.len() - 1)
+    t.replace("\\", "/")
+
+# One porcelain v1 line: `XY path` or `XY orig -> new`. Returns nil for lines
+# that are not status entries (blank, too short).
+pub fn agent_change_entry_from_porcelain_line_v1(line: text) -> AgentChangeEntryV1?:
+    if line.len() < 4: return nil
+    val x = line.substring(0, 1)
+    val y = line.substring(1, 2)
+    if line.substring(2, 3) != " ": return nil
+    var rest = line.substring(3)
+    if rest.trim() == "": return nil
+    if x == "?" and y == "?":
+        return AgentChangeEntryV1(path: _normalize_path(rest), original_path: "",
+            untracked: true, staged: false, unstaged: false)
+    if x == "!" and y == "!": return nil   # ignored files are not changes
+    var original = ""
+    val arrow = rest.index_of(" -> ")
+    if arrow >= 0:
+        original = _normalize_path(rest.substring(0, arrow))
+        rest = rest.substring(arrow + 4)
+    AgentChangeEntryV1(path: _normalize_path(rest), original_path: original,
+        untracked: false, staged: x != " ", unstaged: y != " ")
+
+pub fn agent_change_entries_from_porcelain_v1(stdout: text) -> [AgentChangeEntryV1]:
+    var entries: [AgentChangeEntryV1] = []
+    var seen: [text] = []
+    for raw in stdout.split("\n"):
+        val line = raw.replace("\r", "")
+        match agent_change_entry_from_porcelain_line_v1(line):
+            case Some(e):
+                if not seen.contains(e.path):
+                    seen.push(e.path)
+                    entries.push(e)
+            case nil: pass
+    entries
+
+pub fn agent_change_overlay_from_porcelain_v1(
+    workspace_id: text, agent_id: text, worktree_id: text,
+    base_commit: text, head_commit: text, index_generation: i64, stdout: text,
+) -> AgentChangeOverlayV1:
+    AgentChangeOverlayV1(workspace_id: workspace_id, agent_id: agent_id, worktree_id: worktree_id,
+        base_commit: base_commit, head_commit: head_commit, index_generation: index_generation,
+        entries: agent_change_entries_from_porcelain_v1(stdout))
+
+pub fn agent_change_overlay_paths_v1(o: AgentChangeOverlayV1) -> [text]:
+    var paths: [text] = []
+    for e in o.entries:
+        paths.push(e.path)
+    paths
+
+export AgentChangeEntryV1, AgentChangeOverlayV1
+export agent_change_overlay_key_v1, agent_change_category_v1
+export agent_change_entry_from_porcelain_line_v1, agent_change_entries_from_porcelain_v1
+export agent_change_overlay_from_porcelain_v1, agent_change_overlay_paths_v1

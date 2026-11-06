@@ -1465,6 +1465,26 @@ fn set_nested_path(root: &mut Value, steps: &[FieldStep], new: Value) -> bool {
                 }
             }
         }
+        // Reference-semantics class on the path (`o.h.items` with `o`/`h`
+        // classes): write into the shared cell so every handle sees it. The
+        // child is cloned out rather than recursed into under the write lock,
+        // so a self-referencing chain cannot deadlock.
+        (FieldStep::Field(name), Value::ClassInstance(instance)) => {
+            if rest.is_empty() {
+                instance.set_field(name.clone(), new);
+                return true;
+            }
+            let Some(mut child) = instance.field(name) else {
+                return false;
+            };
+            if !set_nested_path(&mut child, rest, new) {
+                return false;
+            }
+            if !matches!(child, Value::ClassInstance(_)) {
+                instance.set_field(name.clone(), child);
+            }
+            true
+        }
         (FieldStep::Index(idx), Value::Array(items)) => {
             let raw = if *idx < 0 { *idx + items.len() as i64 } else { *idx };
             if raw < 0 || raw as usize >= items.len() {
@@ -1859,6 +1879,19 @@ fn write_back_mutable_arguments(
                 .or_default()
                 .push((param_name.clone(), param_is_mut));
         }
+        // A `mut` class parameter mutated the caller's object through the
+        // shared cell. Record it up front, before any argument is written
+        // back, so a non-`mut` `obj.field` sibling holding the pre-call
+        // snapshot cannot clobber it regardless of argument order
+        // (`f(x, x.items)` and `f(x.items, x)` alike).
+        for (caller_name, members) in &groups {
+            let class_mutated = members.iter().any(|(param_name, is_mut)| {
+                *is_mut && matches!(local_env.get(param_name.as_str()), Some(Value::ClassInstance(_)))
+            });
+            if class_mutated {
+                mut_written.insert(caller_name.clone());
+            }
+        }
         for (caller_name, members) in &groups {
             if members.len() < 2 || !members.iter().all(|(_, is_mut)| *is_mut) {
                 continue;
@@ -2017,6 +2050,13 @@ fn write_back_mutable_arguments(
                     );
                 }
                 if let Some(callee_val) = local_env.get(&param_name) {
+                    // A `mut` class parameter mutated the caller's object through
+                    // the shared cell (recorded in `mut_written` by the pre-pass):
+                    // nothing to write back.
+                    if param_is_mut && matches!(callee_val, Value::ClassInstance(_)) {
+                        mut_written.insert(caller_name.clone());
+                        continue;
+                    }
                     // Value-type structs (task #91) keep VALUE semantics: never
                     // write callee mutations back to the caller's binding, unless the
                     // parameter is an explicit `mut` one (then full write-back).
@@ -2111,6 +2151,9 @@ fn write_back_mutable_arguments(
                                 }
                             }
                         }
+                        continue;
+                    }
+                    if mut_written.contains(&obj_name) {
                         continue;
                     }
                     if let Some(callee_val) = callee_val {

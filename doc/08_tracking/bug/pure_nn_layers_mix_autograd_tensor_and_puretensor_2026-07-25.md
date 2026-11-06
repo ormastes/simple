@@ -4,7 +4,7 @@
 - **Area:** `src/lib/gc_async_mut/pure/nn.spl` /
   `src/lib/gc_async_mut/pure/autograd.spl`
 - **Severity:** high — `Linear.forward()` cannot be called at all.
-- **Status:** OPEN. Newly *visible* (not newly introduced): it was masked until
+- **Status:** FIXED 2026-11-06 (see re-verification at end; was OPEN). Newly *visible* (not newly introduced): it was masked until
   2026-07-25 by the `src/lib/pure/*` stub facades, which meant nothing could
   reach these layers to begin with. See
   `doc/08_tracking/bug/pure_module_stub_facades_shadow_real_impl_2026-07-25.md`.
@@ -128,5 +128,31 @@ What the first real run of `pure/test/nn_spec.spl` showed:
    `std.pure.*`; recorded here so the parked suites are not re-diagnosed from
    scratch.
 
-Status: remains OPEN. Sum/Mean backward broadcast fixed; leaf-gradient
+Status (at that date): remains OPEN — superseded, FIXED 2026-11-06 (see below). Sum/Mean backward broadcast fixed; leaf-gradient
 propagation blocked on runtime shared-reference semantics.
+
+## 2026-11-06 re-verification (lane fx-ml-db)
+
+Seed `simple-ref`: `nn_spec` still 2/7. `nn.spl` already uses autograd `Tensor`
+uniformly (no type mixing remains), so there is no layer-side change left to
+make. Re-probed the 5 failures: class values stored in an array literal,
+`push`, a class field, or an `Option` payload are copies (`val l = [a];
+l[0].inc()` leaves `a` unchanged; direct parameter passing aliases). Hence
+`tensor_linear`'s `inputs = [x, weight]` holds copies and
+`propagate_linear_grads` writes grads to throwaways (`x.grad`/`weight.grad`
+stay nil). No std-lib-only fix preserves the spec's `input.grad` contract;
+needs runtime shared-reference semantics for stored class values. Status: OPEN,
+runtime-blocked. Related: interp_list_class_element_read_returns_copy_mutation_loss_2026-08-17.md.
+
+## 2026-11-06 re-verification (seed-class-reference lane): 7/7, runtime gap closed
+
+Seed built from `origin/release/1.0.0` `f1390d48254` (worktree
+`simple-seed-class-reference`): `src/lib/gc_async_mut/pure/test/nn_spec.spl`
+is **7 passed / 0 failed** by default, and 2/7 (the 5 `unwrap() on None`
+gradient cases) with `SIMPLE_INTERP_CLASS_REF=0`. The runtime shared-reference
+semantics this record waited on landed as `6c7b4db3d39` ("fix(interp): class
+reference semantics by default", merged to release/1.0.0 2026-11-04 via
+`7e3b0244cc3`); the `simple-ref` binary used for the earlier 2026-11-06 note
+predates it. `training_spec` 1 pass / 1 skip either way. No library change.
+Owner decision 2026-11-06: classes are reference types everywhere, structs
+are value types. Coordinator owns the bug_db status change.

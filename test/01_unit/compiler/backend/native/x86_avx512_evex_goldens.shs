@@ -1,0 +1,72 @@
+#!/bin/sh
+# Regenerates the byte goldens of x86_avx512_evex_llvm_golden_spec.spl: the
+# EVEX/VEX forms the AVX-512 frame owner's pseudo-op encoders emit
+# (x86_64_avx512_ops.spl, _X8664Avx512/*). Each case is reference asm
+# assembled by llvm-mc and printed as "<name> <hex>". {disp32} pins the
+# frame displacement form the encoder uses where EVEX disp8*N would fit.
+#   LLVM_BIN=C:/llvm/install/bin sh x86_avx512_evex_goldens.shs
+set -eu
+LLVM_BIN=${LLVM_BIN:-C:/llvm/install/bin}
+MC=$LLVM_BIN/llvm-mc
+work=$(mktemp -d "${TMPDIR:-/tmp}/avx512-evex-goldens.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+asm() {
+  name=$1; shift
+  printf '%s\n' ".intel_syntax noprefix" "$@" > "$work/g.s"
+  "$MC" -triple=x86_64-pc-linux -mattr=+avx512f,+avx512bw,+avx512vl -filetype=obj -o "$work/g.o" "$work/g.s"
+  "$LLVM_BIN/llvm-objcopy" -O binary --only-section=.text "$work/g.o" "$work/g.bin"
+  printf '%s ' "$name"; od -An -v -tx1 "$work/g.bin" | tr -d ' \n'; echo
+}
+
+for op in add sub mul div min max; do
+  asm "f32_$op" "v${op}ps zmm0, zmm0, zmm1"
+  asm "f64_$op" "v${op}pd zmm2, zmm3, zmm1"
+done
+asm i32_add "vpaddd zmm0, zmm0, zmm1"
+asm i32_sub "vpsubd zmm0, zmm0, zmm1"
+asm i32_mul "vpmulld zmm0, zmm0, zmm1"
+asm i32_min "vpminsd zmm0, zmm0, zmm1"
+asm i32_max "vpmaxsd zmm0, zmm0, zmm1"
+asm i32_and "vpandd zmm0, zmm0, zmm1"
+asm i32_or "vpord zmm2, zmm3, zmm1"
+asm i32_xor "vpxord zmm0, zmm0, zmm1"
+asm i32_andn "vpandnd zmm0, zmm0, zmm1"
+asm i32_shl "vpsllvd zmm0, zmm0, zmm1"
+asm i32_shr "vpsrlvd zmm0, zmm0, zmm1"
+asm i32_sar "vpsravd zmm0, zmm0, zmm1"
+
+asm un_neg_f32 "vpternlogd zmm3, zmm3, zmm3, 255" "vpslld zmm3, zmm3, 31" "vpxord zmm0, zmm0, zmm3"
+asm un_abs_f64 "vpternlogd zmm3, zmm3, zmm3, 255" "vpsrlq zmm3, zmm3, 1" "vpandd zmm0, zmm0, zmm3"
+asm un_sqrt_f32 "vsqrtps zmm0, zmm0"
+asm un_rsqrt_f64 "vpternlogd zmm3, zmm3, zmm3, 255" "vpsrlq zmm3, zmm3, 54" "vpsllq zmm3, zmm3, 52" "vsqrtpd zmm0, zmm0" "vdivpd zmm0, zmm3, zmm0"
+asm un_not_i32 "vpternlogd zmm3, zmm3, zmm3, 255" "vpxord zmm0, zmm0, zmm3"
+asm un_neg_i32 "vpxord zmm3, zmm3, zmm3" "vpsubd zmm0, zmm3, zmm0"
+
+asm fma_f32 "vfmadd213ps zmm0, zmm1, zmm2"
+asm fnma_f64 "vfnmadd213pd zmm0, zmm1, zmm2"
+
+asm cmp_lt_i32 "vpcmpd k1, zmm0, zmm1, 1"
+asm cmp_gt_i32 "vpcmpd k1, zmm0, zmm1, 6"
+asm cmp_eq_f32 "vcmpps k1, zmm0, zmm1, 0"
+asm cmp_ge_f64 "vcmppd k1, zmm0, zmm1, 13"
+
+asm select_i32 "vpblendmd zmm0 {k1}, zmm0, zmm1"
+asm select_f64 "vpblendmq zmm0 {k1}, zmm0, zmm1"
+
+asm kload "{disp32} kmovw k1, word ptr [rbp - 216]"
+asm kstore_r13 "{disp32} kmovw word ptr [r13 - 8], k2"
+asm kand "kandw k1, k1, k2"
+asm kor "korw k1, k1, k2"
+asm kxor "kxorw k1, k1, k2"
+asm kandn "kandnw k1, k1, k2"
+asm knot "knotw k1, k1"
+asm kall "kxnorw k1, k1, k1"
+
+asm splat_f32 "{disp32} vbroadcastss zmm0, dword ptr [rbp - 72]"
+asm splat_f64 "{disp32} vbroadcastsd zmm0, qword ptr [rbp - 72]"
+asm splat_i32_r12 "{disp32} vpbroadcastd zmm0, dword ptr [r12 + 16]"
+
+asm loadu "vmovups zmm0, zmmword ptr [rbp - 88]"
+asm loadu_masked_zero "vmovups zmm1 {k1} {z}, zmmword ptr [rbx + 64]"
+asm storeu_masked_r13 "vmovups zmmword ptr [r13] {k2}, zmm2"
+asm extract_i32 "{rex} movd ebx, xmm0" "movsxd rbx, ebx"

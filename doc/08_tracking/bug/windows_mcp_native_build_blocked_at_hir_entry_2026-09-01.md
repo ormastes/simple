@@ -98,3 +98,6 @@ that the child command succeeds standalone.
    run and the error count becomes measurable for the first time.
 2. Independently, fix the Windows worker-wrapper spawn so `native-build` is
    usable without hand-assembling the worker invocation.
+
+## Round-10 verdict note (2026-11-06)
+Verdict: verification-pending. The repro takes ~28 min; the HIR-entry error (undefined field symbols on bool) is separately owned and was not re-run here. Command: the SIMPLE_NATIVE_BUILD_WORKER=1 native_build_worker.spl invocation from the Reproduction section, using D:/dev/wt/seed/simple.exe.

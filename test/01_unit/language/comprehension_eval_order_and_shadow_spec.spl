@@ -1,0 +1,50 @@
+# @tag:in-development
+# FIXED in source 2026-11-06 (interpreter_helpers/utilities.rs comprehension_for_each); stays tagged until a seed carrying it is deployed.
+# Bug: seed_interp_list_comprehension_eval_order_and_shadow_2026-11-06
+#
+# The seed interpreter evaluated EVERY comprehension filter before any element
+# expression (`f1,f2,f3,f4,g2,g4`), unlike pure-Simple and the JIT desugar
+# (per item: `f1,f2,g2,f3,f4,g4`), and a top-level `val x = 99` was not shadowed
+# by the loop variable `x` (`[x * 2 for x in [1, 2, 3]]` gave [198,198,198]).
+use std.spec
+
+var order_log: [text] = []
+
+fn keep(n: i64) -> bool:
+    order_log.push("f{n}")
+    n != 1 and n != 3
+
+fn twice(n: i64) -> i64:
+    order_log.push("g{n}")
+    n * 2
+
+val outer_x = 99
+val shadow_x = 99
+
+describe "list comprehension evaluation order and scoping":
+    it "runs filter then element expression per item":
+        order_log = []
+        val r = [twice(x) for x in [1, 2, 3, 4] if keep(x)]
+        assert_equal(r, [4, 8])
+        assert_equal(order_log, ["f1", "f2", "g2", "f3", "f4", "g4"])
+
+    it "runs key then value expressions per item in a dict comprehension":
+        order_log = []
+        val d = {x: twice(x) for x in [1, 2, 3, 4] if keep(x)}
+        assert_equal(d[2], 4)
+        assert_equal(d[4], 8)
+        assert_equal(order_log, ["f1", "f2", "g2", "f3", "f4", "g4"])
+
+    it "shadows a top-level val with the loop variable":
+        val r = [shadow_x * 2 for shadow_x in [1, 2, 3]]
+        assert_equal(r, [2, 4, 6])
+
+    it "does not leak the loop variable after the comprehension":
+        val r = [outer_x + 0 for outer_x in [1, 2]]
+        assert_equal(r, [1, 2])
+        assert_equal(outer_x, 99)
+
+    it "shadows with a tuple pattern":
+        val r = [outer_x + shadow_x for (outer_x, shadow_x) in [(1, 2), (3, 4)]]
+        assert_equal(r, [3, 7])
+        assert_equal(shadow_x, 99)

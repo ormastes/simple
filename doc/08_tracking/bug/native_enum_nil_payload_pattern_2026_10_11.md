@@ -43,3 +43,6 @@ Status: fix-implemented-verification-pending. Verifying needs a stage3 rebuilt f
 
 ## Verification note 2026-11-05 (r-enumnil)
 Baseline on `s3_fable43.exe` (24416768 B): fixture `result_optional_payload_text_binding` builds, prints `hello canary`, exits rc=1 (check 1). Native PASS not yet measured: host commit free 25 GB blocked a private leaf; fold into leaf 46 requested (`_out/leaf_enumnil.ps1` / `relink_enumnil.ps1` in the lane worktree). Spec `test/01_unit/compiler/mir/nested_wrapper_text_binder_spec.spl`: 7/7 on branch, 5/7 on origin sources. The `Err(nil)`/`Some(nil)` MIR error is `match_nil_subpattern_requires_declared_optional_slot_2026-10-24`.
+
+## 2026-11-06 native verified (p1w5)
+PR #6943 is merged. `enumnil_r` (the same cases as `result_optional_payload_text_binding`) was built natively with s3_fable46_w5. It exits rc=0 and prints `result_optional_payload_text_binding: PASS`. Status: fixed.

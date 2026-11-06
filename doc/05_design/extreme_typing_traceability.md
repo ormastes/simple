@@ -219,3 +219,64 @@ Authored route specs exercise real parser/surface/inference owners and negative
 identity cases. Execution and measured performance remain pending the admitted
 runtime. This slice does not complete effective export closure, E1, enforcement,
 generated-surface coverage or cross-engine parity.
+
+## E1 structural exposure walker (2026-11-06)
+
+`30.types/type_infer/api_exposure_walker_v1.spl` adds `walk_api_exposure_v1`,
+a pure function over one retained `ApiSignatureFactsV1` that returns the
+`00.common/api_exposure_result_v1.spl` records. It consults no HIR, symbol
+table or substitution and makes one O(n) pass. Retained facts are trees by
+construction (every parent precedes its child), so no SCC/memo table is built
+until nominal members are projected; that is stated, not deferred silently.
+
+Per callable: every reachable Integer/Float/Bool/Text/Char leaf is `Violates`
+with the full node path and ordinals (return is -1), including leaves under
+Optional/Result/Tuple/Union/Array/Slice/Dict, callback parameters and returns,
+and Reference/Unique/Shared/Weak/Isolated wrappers. A node carrying any
+projector reason (nominal members, generic guarantee, pointer/any exposure,
+unresolved inference, cycles, budgets, effects) is `Unknown` with that reason;
+Pointer and Any stay a separate unsafe class and are never folded into the
+primitive rule. Nominal generic arguments are still walked. Findings are
+unique by (callable, leaf, path) because each node is visited once.
+
+Fail-closed invariants: a parent index at or after its child, an out-of-range
+or shared signature root, a root that is not a Function, an unclaimed root, a
+callable without exactly one return slot, a path deeper than 64, or an
+Unknown/Pointer/Nominal node with no reason all yield `facts-malformed`; every
+callable in that module becomes Unknown and no finding is emitted from
+poisoned facts. More than 16384 nodes returns a truncated Unknown result
+without walking. The module verdict is `Violates` when any callable violates
+and otherwise `Unknown`; `Safe` is unreachable because
+`effective-export-closure-not-collected` is always recorded. `declared_visibility`
+is carried for consumers and never used to skip a callable.
+
+Spec `test/01_unit/compiler/type_infer/api_exposure_walker_v1_spec.spl` covers
+hand-built facts and the production projection of a parsed module; it was
+RED (missing module) then GREEN (6/6) on the seed runner, with a mutation
+(dropping Text from the rule) failing 2 cases. No diagnostic, named rule,
+CompileContext retention or engine admission is introduced; E1 remains
+incomplete on effective export closure, nominal members and generics.
+
+### Retained walker results (2026-11-06, follow-up)
+
+`publish_module_typecheck_receipt_v1` classifies exactly the facts it retains
+and stores the `ApiModuleExposureV1` row in `CompileContext.api_exposure`,
+keyed by module name. A module whose facts are not retained (budget,
+empty name) gets no row, so a missing row means NotCollected. Republishing a
+module replaces its row; `run_typecheck_warn_pass` entry and `compile()` entry
+clear the map together with the facts. Nothing consumes the rows yet: no
+diagnostic, named rule or admission decision is derived from them (E2).
+
+### Route join defects fixed (2026-11-06)
+
+Executing the route spec exposed two production defects, fixed in code: (1)
+`module_surfaces_freeze` set `surface.frozen` and `export_origin_index.frozen`
+but never `declaration_authority_index.frozen`, so
+`module_surface_declaration_authority_lookup` could never find a row and the
+route projector reported every surface as `surface-index-malformed`; (2)
+`collect_module_typecheck_receipt_v1` retained facts under the parser's
+filename-derived `HirModule.name`, while the registry aliases, the driver's
+module map and the receipt's own diagnostics use the pass's logical module
+key, so no alias could join. Facts are now keyed by that logical name;
+`module_path` still carries the file path. Route spec 3/6 -> 7/7 on the seed.
+The production join inside a real `compile()` remains pending Phase 3.

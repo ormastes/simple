@@ -312,3 +312,35 @@ Acceptance evidence (seed rebuilt from this branch, NO dylib preload):
   `retained=true` (previously: failure on the first file event), and the
   build proceeds into the compiler phases — the JIT resolves every runtime
   symbol from the executable's own current twins.
+
+## Windows re-verification 2026-11-06: does not reproduce; no pure-Simple fix needed
+
+Status: RESOLVED (root cause was seed-side linkage, fixed by the macOS
+`-export_dynamic` cargo-config change above; no defect in
+`src/app/compiler_entrypoint/inventory_scratch.spl` or the transient-scope SFFI).
+
+Host: Windows 11, x86_64-pc-windows-gnullvm seed built 2026-11-06 from
+`ab9559d4922` (`simple-simdseed-20261106/.../bootstrap/simple.exe`, copied
+before use). Tree: `origin/release/1.0.0` @ `475d1983381`, fresh worktree, no
+inventory cursor. Command: the record's repro (`SIMPLE_SCV_INVENTORY_COLD_INIT=1
+SIMPLE_SCV_FILE_EVENT_DEBUG=1 ... run src/app/cli/native_build_main.spl
+native-build --entry src/app/sdn_diff_repro/main.spl --emit-object
+--backend=cranelift --threads 1 --mode dynload --runtime-path build/seedrt`),
+with no runtime-DLL preload.
+
+Result:
+- 44,895 `[file-event] enter` lines, 44,895 `done ... retained=true ended=true`,
+  0 `retained=false`, 0 `SCV-E`.
+- `inventory-trace-v1 phase=2 query_status=0 query_bytes=6341551 events=44895`;
+  `phase=4 reached=3 valid=true generation=1 published=true` (before: the
+  record's `phase=4 reached=1 valid=false reason_sha=3ea349...`).
+- The run then stayed in the interpreted compiler phases until the 1500 s
+  probe timeout (rc=124). That is the known interpreted native_build_main cost,
+  not an admission failure.
+
+Regression test: `test/01_unit/app/compiler_inventory_checked_read_spec.spl`
+"retains consecutive file events across back-to-back transient scopes" (three
+back-to-back file events, each must be retained with its exact digest): 3/3
+pass on the same seed. Limit: `simple test` runs the spec on the seed's
+interpreter/hybrid path, so this pins the scope sequence contract but is not by
+itself a JIT-lane differential; the cold-init run above is the JIT-lane evidence.

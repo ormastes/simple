@@ -1,6 +1,6 @@
 # Isolated-thread raw worker argument heuristic is test-order dependent
 
-Status: OPEN (P2)
+Status: OPEN (P0 — owner decision 2026-11-06)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 2026-08-12.
 
@@ -66,3 +66,45 @@ second marker word `NATIVE_RAW_ARGS_RECORD_MARKER` emitted by LLVM/Cranelift
 codegen for natively compiled lambdas), consumed identically by Rust
 `native_callable` and C `rt_native_closure_payload`; then drop the VA-ceiling
 inference and add the tagged-word fixture back as a passing test.
+
+## Owner decision 2026-11-06: stays P0
+
+Owner decision (2026-11-06): this bug stays **P0** (bug_db row raised from P2
+to P0). Recorded at the owner's direction; not a triage reassessment.
+
+## Windows-heap wrong-guess: root cause + Rust seed fix (2026-11-06, Opus)
+
+**Root cause.** Below the user-VA ceiling an 8-aligned closure word is
+ambiguous: it is either a record address (RuntimeValue worker ABI) or the
+int-tagged `addr << 3` of one (raw worker ABI). On Windows the heap sits near
+2^40, so `addr << 3` (~2^43) stays under the 2^47 ceiling;
+`native_callable` took it as the record address and dereferenced it
+(`STATUS_ACCESS_VIOLATION`, or a wrong ABI when the shifted address happened
+to be mapped). Compounding it, the Windows `native_address_is_code` was a
+constant `false`, so no structural validation was possible there.
+
+**Fix (`src/compiler_rust/runtime/src/executor.rs`).** Lockless and pure: no
+shared state, only `VirtualQuery` (fault-free, takes no lock of ours).
+- Windows `native_address_is_code` = committed + `PAGE_EXECUTE*` region.
+- `native_words_readable` (Windows) probes committed, readable, non-guard
+  pages; returns `None` on hosts without a fault-free probe.
+- `native_resolve_ambiguous_word` validates BOTH decodings (code address, or
+  aligned readable two-word record whose entry is code). Exactly one valid
+  decides the form; neither or both fails closed (spawn returns 0, never a
+  guess, never a dereference). Above the ceiling the old unambiguous rule holds.
+
+**TDD evidence (Windows x86_64, clang-cl, own target dir).** Red on the old
+executor: all three new fixtures died with `0xc0000005`. Green: `isolated_thread`
+filter 15/15 x3 runs, `executor` 27/27, `thread` 30/30. New specs in
+`executor_tests.rs`: `..._tagged_word_below_va_ceiling_selects_raw_abi`,
+`..._classifier_decodes_both_word_forms` (prevention: raw/tagged/direct),
+`..._unmapped_word_fails_closed`, and the stress spec
+`..._tagged_and_raw_words_stress_concurrent_spawners` (16 x 32, interleaved).
+
+**Still open (why the bug stays open):**
+- Non-Windows hosts have no fault-free readability probe here, so a low
+  (non-PIE `brk`, < 2^44) Unix heap keeps the VA-ceiling rule alone.
+- C twin `src/runtime/runtime_thread.c` still sets `raw_worker_args` by entry
+  point, not by word; parity not claimed.
+- The durable end state remains an explicit ABI marker in the callable record
+  emitted by codegen, consumed by both runtimes.

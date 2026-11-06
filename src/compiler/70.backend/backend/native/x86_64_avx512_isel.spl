@@ -7,6 +7,8 @@ struct X86Avx512FunctionPlanV1:
     ok: bool
     shapes: Dict<i64, text>
     reason: text
+    # Shape returned through the frame-vector ABI hidden result pointer.
+    return_shape: text = ""
 
 fn x86_avx512_operand_local(operand: MirOperand) -> i64:
     match operand.kind:
@@ -73,19 +75,24 @@ fn x86_avx512_instruction_owned(inst: MirInst, shapes: Dict<i64, text>) -> bool:
 
 fn x86_plan_avx512_fixed(func: MirFunction) -> X86Avx512FunctionPlanV1:
     var shapes: Dict<i64, text> = {}
-    var lower_width_vectors: Dict<i64, bool> = {}
+    var declared_shapes: Dict<i64, text> = {}
     for local in func.locals:
         val shape = x86_avx512_load_shape(local.type_.kind)
         if shape != "":
             shapes[local.id.id] = shape
-            match local.kind:
-                case Arg(_): return x86_avx512_reject("vector-argument-ABI-unavailable-use-pointer-kernel")
-                case _: ()
-        match local.type_.kind:
-            case MirTypeKind.Vec4f | MirTypeKind.Vec8f | MirTypeKind.Vec4d | MirTypeKind.Vec4i: lower_width_vectors[local.id.id] = true
+            declared_shapes[local.id.id] = shape
+    # Vector arguments and results use the frame-vector ABI (by pointer and a
+    # hidden result pointer; see x86_64_avx512_lower.spl). Only register-slot
+    # arguments are loaded by the x86 prologue, so a vector argument that would
+    # land on the stack is refused instead of being read as garbage.
+    val return_shape = x86_avx512_load_shape(func.signature.return_type.kind)
+    val hidden = if return_shape != "": 1 else: 0
+    for local in func.locals:
+        match local.kind:
+            case Arg(index):
+                if index + hidden >= 6 and (hidden == 1 or declared_shapes.contains_key(local.id.id)):
+                    return x86_avx512_reject("vector-abi-argument-beyond-register-slots")
             case _: ()
-    if x86_avx512_load_shape(func.signature.return_type.kind) != "":
-        return x86_avx512_reject("vector-return-ABI-unavailable-use-pointer-kernel")
     # MIR has no first-class mask type. Recover mask lane count from its
     # defining comparison, then propagate it through copies and mask operations.
     for round in 0..(func.locals.len() + 1):
@@ -106,7 +113,12 @@ fn x86_plan_avx512_fixed(func: MirFunction) -> X86Avx512FunctionPlanV1:
                         dest = id.id
                         inferred = x86_avx512_shape(shapes, source.id)
                         if inferred != "":
-                            if lower_width_vectors.contains_key(dest): return x86_avx512_reject("copy-move-cross-width")
+                            # The destination must itself be declared as an AVX-512
+                            # frame vector. A narrower (AVX2/SSE) or unreadable
+                            # destination kind has no 64-byte slot: refuse rather
+                            # than store a whole ZMM into it. Mask placeholders are
+                            # declared as 512-bit vectors, so they pass this check.
+                            if x86_avx512_shape(declared_shapes, dest) == "": return x86_avx512_reject("copy-move-cross-width")
                             val declared = x86_avx512_shape(shapes, dest)
                             # Masks use vector placeholders because MIR has no
                             # mask type; copies must carry their inferred shape.
@@ -121,6 +133,29 @@ fn x86_plan_avx512_fixed(func: MirFunction) -> X86Avx512FunctionPlanV1:
                         shapes[dest] = inferred
                         changed = true
         if not changed: break
+    for block in func.blocks:
+        match block.terminator:
+            case CallTerminator(dest, _, args, _, _, _, _):
+                if dest.? and declared_shapes.contains_key(dest.unwrap().id): return x86_avx512_reject("vector-abi-call-terminator-unsupported")
+                for arg in args:
+                    if x86_avx512_source_shape(shapes, arg) != "": return x86_avx512_reject("vector-abi-call-terminator-unsupported")
+            case Ret(value):
+                if value.?:
+                    if return_shape != "" and x86_avx512_source_shape(shapes, value.unwrap()) != return_shape: return x86_avx512_reject("vector-return-shape-mismatch")
+            case _: ()
+        for inst in block.instructions:
+            match inst.kind:
+                case Call(dest, _, args):
+                    var slot = 0
+                    if dest.? and declared_shapes.contains_key(dest.unwrap().id): slot = 1
+                    for arg in args:
+                        if x86_avx512_source_shape(shapes, arg) != "" and slot >= 6: return x86_avx512_reject("vector-abi-argument-beyond-register-slots")
+                        slot = slot + 1
+                case CallIndirect(dest, _, args, _):
+                    if dest.? and declared_shapes.contains_key(dest.unwrap().id): return x86_avx512_reject("vector-abi-indirect-call-unsupported")
+                    for arg in args:
+                        if x86_avx512_source_shape(shapes, arg) != "": return x86_avx512_reject("vector-abi-indirect-call-unsupported")
+                case _: ()
     for block in func.blocks:
         for inst in block.instructions:
             var reason = ""
@@ -186,4 +221,4 @@ fn x86_plan_avx512_fixed(func: MirFunction) -> X86Avx512FunctionPlanV1:
                     if x86_avx512_source_shape(shapes, indices) != (if shape == "f64x8": "i32x8" else: "i32x16"):
                         return x86_avx512_reject("gather-indices-require-matching-i32-lanes")
                 case _: ()
-    X86Avx512FunctionPlanV1(ok: true, shapes: shapes, reason: "avx512-frame-values-planned")
+    X86Avx512FunctionPlanV1(ok: true, shapes: shapes, reason: "avx512-frame-values-planned", return_shape: return_shape)

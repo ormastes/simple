@@ -144,3 +144,10 @@ Per-item at `f26970e9d93`:
 
 Net: record stays OPEN (items #1 and #3 unresolved, both out of scope for a
 shard triage pass); item #4 is stale and can be dropped from future re-checks.
+
+## Re-check 2026-11-06 (work/x86-simd-bugs)
+
+Not run: this Windows host has no Vulkan ICD (GPU NVIDIA GT 705, Fermi, no
+Vulkan; no `HKLM\SOFTWARE\Khronos\Vulkan\Drivers` entries), so item #1 cannot
+be reproduced here; item #3 is a Rust-seed module-limit issue. Stays OPEN for
+#1 and #3 on a Linux lavapipe host.
