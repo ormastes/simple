@@ -36,20 +36,28 @@ generate() {
 }
 
 selftest() {
-    # Fixture 1: a clean copy of the committed schema reproduces the committed module.
-    _fx="$TMP/selftest-clean"
-    mkdir -p "$_fx/$(dirname "$SCHEMA_REL")"
-    cp "$ROOT/$SCHEMA_REL" "$_fx/$SCHEMA_REL"
-    if ! generate "$_fx" "$_fx/gen.log"; then
-        echo "selftest: clean fixture failed to generate"; tail -5 "$_fx/gen.log"; return 1
+    # Fixture 1: two independent generations from the committed schema are
+    # byte-identical and carry the semantic-artifact header (determinism).
+    # The comparison with the committed module is the live check below, so a
+    # stale module is reported as FAIL, not as a selftest ERROR.
+    _a="$TMP/selftest-a"; _b="$TMP/selftest-b"
+    for _d in "$_a" "$_b"; do
+        mkdir -p "$_d/$(dirname "$SCHEMA_REL")"
+        cp "$ROOT/$SCHEMA_REL" "$_d/$SCHEMA_REL"
+        if ! generate "$_d" "$_d/gen.log"; then
+            echo "selftest: clean fixture failed to generate"; tail -5 "$_d/gen.log"; return 1
+        fi
+    done
+    if ! cmp -s "$_a/$GEN_REL" "$_b/$GEN_REL"; then
+        echo "selftest: two generations differ (generator is not deterministic)"; return 1
     fi
-    if ! cmp -s "$_fx/$GEN_REL" "$ROOT/$GEN_REL"; then
-        echo "selftest: clean fixture generated different bytes from $GEN_REL"; return 1
+    if ! grep -q '^# @semantic_artifact node_tree ' "$_a/$GEN_REL" || ! grep -q '^# schema_digest ' "$_a/$GEN_REL"; then
+        echo "selftest: generated module lacks the semantic-artifact header"; return 1
     fi
     # Fixture 2: an accessor for an undeclared attribute must FAIL generation.
     _bad="$TMP/selftest-bad"
     mkdir -p "$_bad/$(dirname "$SCHEMA_REL")"
-    sed 's/^            op: "expr_get_int"$/            op: "expr_get_int"\n            right: "expr_get_right"/' \
+    awk '{ print } /^            op: "expr_get_int"$/ { print "            right: \"expr_get_right\"" }' \
         "$ROOT/$SCHEMA_REL" > "$_bad/$SCHEMA_REL"
     if generate "$_bad" "$_bad/gen.log"; then
         echo "selftest: an undeclared accessor did NOT fail generation"; return 1

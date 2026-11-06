@@ -12,11 +12,9 @@
 
 use std.common.sdn.parser.{parse}
 use std.common.sdn.value.{SdnValue}
-use std.nogc_sync_mut.io.file_ops.{file_read}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_write}
 use compiler.common.data.data_schema_contracts.*
 use compiler.common.data.data_schema_resolver.*
-
-extern fn rt_file_write_text(path: text, content: text) -> bool
 
 val NODE_VIEW_SCHEMA_PATH: text = "config/data_policy/compiler_ast_binary_expr.sdn"
 val NODE_VIEW_OUTPUT_PATH: text = "src/compiler/10.frontend/generated/binary_expr_view.spl"
@@ -33,6 +31,31 @@ fn nv_sorted(items: [text]) -> [text]:
             out[i] = t
             i = i - 1
     out
+
+fn nv_is_ident(name: text) -> bool:
+    if name.len() == 0:
+        return false
+    var first = true
+    for ch in name.chars():
+        val code = ch as i64
+        val alpha = (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or code == 95
+        val digit = code >= 48 and code <= 57
+        if not alpha and not (digit and not first):
+            return false
+        first = false
+    true
+
+# A dotted path of identifiers (`compiler.core.ast`, a tree name).
+fn nv_is_path(name: text) -> bool:
+    if name.len() == 0:
+        return false
+    for part in name.split("."):
+        if not nv_is_ident(part):
+            return false
+    true
+
+fn nv_first_error(diags: [DataSchemaDiagnosticV1]) -> text:
+    if diags.len() == 0: "schema: unknown error" else: "schema: " + diags[0].message
 
 fn nv_keys(value: SdnValue) -> [text]:
     match value.as_dict():
@@ -77,7 +100,7 @@ fn nv_option_element(type_canonical: text) -> text:
 fn node_view_generate_text(schema_text: text, origin: text) -> Result<text, text>:
     val decls_result = data_schema_decls_from_sdn_v1(schema_text, origin, NODE_VIEW_OWNER)
     if decls_result.is_err():
-        return Err("schema: " + decls_result.unwrap_err()[0].message)
+        return Err(nv_first_error(decls_result.unwrap_err()))
     val decls = decls_result.unwrap()
     val root = match parse(schema_text):
         case Ok(v): v
@@ -89,8 +112,8 @@ fn node_view_generate_text(schema_text: text, origin: text) -> Result<text, text
     val view = nv_section(views, view_keys[0])
     val class_name = nv_text(view, "class")
     val owner_import = nv_text(view, "owner_import")
-    if class_name.len() == 0 or owner_import.len() == 0:
-        return Err("node view '{view_keys[0]}' needs class and owner_import")
+    if not nv_is_ident(class_name) or not nv_is_path(owner_import):
+        return Err("node view '{view_keys[0]}' needs an identifier class and a dotted owner_import")
     var view_decls: [DataAttrDeclV1] = []
     var tree = ""
     for d in decls:
@@ -101,8 +124,11 @@ fn node_view_generate_text(schema_text: text, origin: text) -> Result<text, text
         return Err("no declaration names view class '{class_name}'")
     val resolved = data_schema_resolve_v1(data_schema_authority_v1(tree, [NODE_VIEW_OWNER]), view_decls, [])
     if resolved.is_err():
-        return Err("schema: " + resolved.unwrap_err()[0].message)
+        return Err(nv_first_error(resolved.unwrap_err()))
     val surface = resolved.unwrap()
+    # Every emitted name lands in code: identifiers and dotted paths only.
+    if not nv_is_path(tree):
+        return Err("tree '{tree}' must be a dotted identifier path")
     val accessors = nv_section(view, "accessors")
     val sparse = nv_section(view, "sparse")
     for key in nv_keys(accessors):
@@ -111,7 +137,15 @@ fn node_view_generate_text(schema_text: text, origin: text) -> Result<text, text
     for key in nv_keys(sparse):
         if not nv_attr(surface, key).?:
             return Err("sparse store names undeclared attribute '{key}'")
+    for key in nv_keys(accessors):
+        if not nv_is_ident(nv_text(accessors, key)):
+            return Err("accessor for '{key}' must name a function")
+    for key in nv_keys(sparse):
+        if not nv_is_ident(nv_text(sparse, key)):
+            return Err("sparse store for '{key}' must name a class")
     for a in surface.attrs:
+        if not nv_is_ident(a.name) or not nv_is_path(nv_option_element(a.type_canonical)) and not nv_is_path(a.type_canonical):
+            return Err("attribute '{a.name}' has a name or type that is not an identifier path")
         val stored = nv_text(accessors, a.name).len() > 0
         val is_sparse = nv_text(sparse, a.name).len() > 0
         if stored == is_sparse:
@@ -174,6 +208,7 @@ fn node_view_generate_text(schema_text: text, origin: text) -> Result<text, text
         lines.push("                self.values[node] = v")
         lines.push("            case None:")
         lines.push("                self.present[node] = false")
+        lines.push("                self.values.remove(node)")
         lines.push("")
         lines.push("    fn get(node: i64) -> Result<" + element + "?, text>:")
         lines.push("        if not self.present.contains_key(node):")
@@ -191,7 +226,7 @@ fn node_view_generate_into(root: text) -> Result<text, text>:
     val schema_path = root + "/" + NODE_VIEW_SCHEMA_PATH
     val output_path = root + "/" + NODE_VIEW_OUTPUT_PATH
     val generated = node_view_generate_text(file_read(schema_path), NODE_VIEW_SCHEMA_PATH)?
-    if not rt_file_write_text(output_path, generated):
+    if not file_write(output_path, generated):
         return Err("cannot write " + output_path)
     Ok(output_path)
 

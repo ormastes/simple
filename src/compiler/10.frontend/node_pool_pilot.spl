@@ -4,12 +4,11 @@
 #
 # The direct store is the generated `BinaryExprView` over the existing AST
 # pool owner accessors. These two adapters hold the same logical attributes in
-# a column (SoA) layout and in a hash-keyed row layout, so parity can be
-# checked through one logical surface. They are reference adapters for the
-# pilot, not production storage, and own no node identity: a node id is the
-# AST pool index.
-
-use compiler.frontend.generated.binary_expr_view.{BinaryExprView}
+# a column (SoA) layout and in a hash-keyed row layout. Each is filled from
+# the attribute values directly, never by reading the view, so agreement with
+# the view is a real parity result. They are reference adapters for the pilot,
+# not production storage, and own no node identity: a node id is the AST pool
+# index.
 
 # Columns (SoA): one array per attribute, indexed by position in `nodes`.
 class BinaryExprColumnsV1:
@@ -28,16 +27,10 @@ impl BinaryExprColumnsV1:
     fn op(position: i64) -> i64:
         self.ops[position]
 
-fn binary_expr_columns_from_pool(nodes: [i64]) -> BinaryExprColumnsV1:
-    var spans: [i64] = []
-    var lefts: [i64] = []
-    var ops: [i64] = []
-    for node in nodes:
-        val view = BinaryExprView(node: node)
-        spans.push(view.source_span())
-        lefts.push(view.left())
-        ops.push(view.op())
-    BinaryExprColumnsV1(nodes: nodes, spans: spans, lefts: lefts, ops: ops)
+fn binary_expr_columns_v1(nodes: [i64], spans: [i64], lefts: [i64], ops: [i64]) -> Result<BinaryExprColumnsV1, text>:
+    if spans.len() != nodes.len() or lefts.len() != nodes.len() or ops.len() != nodes.len():
+        return Err("every column needs one entry per node")
+    Ok(BinaryExprColumnsV1(nodes: nodes, spans: spans, lefts: lefts, ops: ops))
 
 # Rows keyed by node id in a hash map. A missing row is an error, never zero.
 struct BinaryExprRowV1:
@@ -55,20 +48,27 @@ impl BinaryExprRowsV1:
         Ok(self.rows[node])
 
     fn source_span(node: i64) -> Result<i64, text>:
-        Ok(self.row(node)?.source_span)
+        match self.row(node):
+            case Ok(row): Ok(row.source_span)
+            case Err(e): Err(e)
 
     fn left(node: i64) -> Result<i64, text>:
-        Ok(self.row(node)?.left)
+        match self.row(node):
+            case Ok(row): Ok(row.left)
+            case Err(e): Err(e)
 
     fn op(node: i64) -> Result<i64, text>:
-        Ok(self.row(node)?.op)
+        match self.row(node):
+            case Ok(row): Ok(row.op)
+            case Err(e): Err(e)
 
-fn binary_expr_rows_from_pool(nodes: [i64]) -> BinaryExprRowsV1:
+fn binary_expr_rows_v1(nodes: [i64], spans: [i64], lefts: [i64], ops: [i64]) -> Result<BinaryExprRowsV1, text>:
+    if spans.len() != nodes.len() or lefts.len() != nodes.len() or ops.len() != nodes.len():
+        return Err("every row needs one entry per attribute")
     var rows: Dict<i64, BinaryExprRowV1> = {}
-    for node in nodes:
-        val view = BinaryExprView(node: node)
-        rows[node] = BinaryExprRowV1(source_span: view.source_span(), left: view.left(), op: view.op())
-    BinaryExprRowsV1(rows: rows)
+    for i in 0..nodes.len():
+        rows[nodes[i]] = BinaryExprRowV1(source_span: spans[i], left: lefts[i], op: ops[i])
+    Ok(BinaryExprRowsV1(rows: rows))
 
 export BinaryExprColumnsV1, BinaryExprRowV1, BinaryExprRowsV1
-export binary_expr_columns_from_pool, binary_expr_rows_from_pool
+export binary_expr_columns_v1, binary_expr_rows_v1
