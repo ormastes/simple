@@ -46,3 +46,14 @@ ordinary calls). Plus spec wiring.
 
 ## PR1 update (review of #4997)
 Forwarding happens only when the owner field table lacks the name; a real field whose type fails to lower stays a field read. `_` names are skipped. Only instance methods (SymbolKind.Method) are used, and the return type is carried. accessor_getter_forwarding_spec is 9/9; with the guard disabled it drops to 8/9, which shows the guard is the cause. Residual risk: 3 fields have a same-name twin type that lacks the field, so they could be hijacked if the canonical key misses. Mixin fields are not in the prescan table.
+
+## Progress 2026-11-06: PR2 (setter forwarding) implemented
+- `lower_accessor_write` (`_Expressions/accessor_forwarding.spl`) hooked in
+  `lower_hir_assignment_kind` (`hir_lowering/statements.spl`): `recv.x = v` with no
+  real field `x` and an instance `set_x` lowers to `recv.set_x(v)`. Identifier
+  receivers only (re-lowering an ident is side-effect free); `_` names skipped;
+  `recv.x += v` through a forwarded name is a hard error (seed parity).
+- Spec `test/01_unit/compiler/hir/accessor_setter_forwarding_spec.spl`
+  (REQ-SELFHOST-ACCESSOR-003): 4/4 green.
+- Still open: non-identifier receivers (`a.b.x = v`), `alias Trait = field` (PR3/4),
+  bootstrap flat path mirror.
