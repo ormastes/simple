@@ -1,0 +1,68 @@
+"""AC-4 x86 SIMD public-interface probe for ML-KEM NTT lane arithmetic.
+
+Recreates the probe named by
+doc/08_tracking/bug/mlkem_ntt_simd_public_interface_probe_crashes_not_pass_2026-08-05.md
+(it was reported PASS but never committed). Drives the PUBLIC std simd
+i32x8 entry points (rt_simd_{add,sub,mul}_i32x8, AVX2 lane on x86_64) over
+ML-KEM NTT values and checks byte identity against a scalar i32 reference.
+Repeated over many fresh Vec8i values so heap-placement-dependent
+misalignment (the original SIGABRT/SIGSEGV) is exercised.
+Prints one verdict line: ac4_x86_simd_public_interface_verdict=PASS|FAIL.
+"""
+
+use std.nogc_sync_mut.simd.{Vec8i, simd_add_i32x8, simd_sub_i32x8, simd_mul_i32x8}
+
+val MLKEM_Q = 3329
+val ZETAS = [1, 1729, 2580, 3289, 2642, 630, 1897, 848, 1062, 1919, 193, 797, 2786, 3260, 569, 1746]
+
+fn wrap_i32(x: i64) -> i64:
+    val m = 4294967296
+    var r = (x + 2147483648) % m
+    if r < 0:
+        r = r + m
+    r - 2147483648
+
+fn lanes(v: Vec8i) -> [i64]:
+    [v.e0.to_i64(), v.e1.to_i64(), v.e2.to_i64(), v.e3.to_i64(),
+     v.e4.to_i64(), v.e5.to_i64(), v.e6.to_i64(), v.e7.to_i64()]
+
+fn make(xs: [i64]) -> Vec8i:
+    Vec8i(e0: xs[0].to_i32(), e1: xs[1].to_i32(), e2: xs[2].to_i32(), e3: xs[3].to_i32(),
+          e4: xs[4].to_i32(), e5: xs[5].to_i32(), e6: xs[6].to_i32(), e7: xs[7].to_i32())
+
+fn main():
+    var checks = 0
+    var failed = 0
+    var round = 0
+    while round < 64:
+        var a: [i64] = []
+        var b: [i64] = []
+        var i = 0
+        while i < 8:
+            a = a.push((round * 131 + i * 977) % MLKEM_Q)
+            b = b.push(ZETAS[(round + i) % 16])
+            i = i + 1
+        # Every 8th round uses large operands so the i32 product wraps.
+        if round % 8 == 7:
+            a[0] = 2147483647
+            b[0] = 3
+            a[1] = -2147483648
+            b[1] = -1
+        val va = make(a)
+        val vb = make(b)
+        val got_mul = lanes(simd_mul_i32x8(va, vb))
+        val got_add = lanes(simd_add_i32x8(va, vb))
+        val got_sub = lanes(simd_sub_i32x8(va, vb))
+        var j = 0
+        while j < 8:
+            checks = checks + 3
+            if got_mul[j] != wrap_i32(a[j] * b[j]):
+                failed = failed + 1
+            if got_add[j] != wrap_i32(a[j] + b[j]):
+                failed = failed + 1
+            if got_sub[j] != wrap_i32(a[j] - b[j]):
+                failed = failed + 1
+            j = j + 1
+        round = round + 1
+    val verdict = if failed == 0 and checks == 1536: "PASS" else: "FAIL"
+    print "ac4_x86_simd_public_interface_verdict={verdict} checks={checks} checks_failed={failed}"

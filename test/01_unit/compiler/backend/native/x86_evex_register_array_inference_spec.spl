@@ -1,0 +1,95 @@
+"""
+Purpose: BUG-X86-EVEX-STATIC-ARRAY-INFERENCE-20261017 regression. The two
+register-ID arrays in `_X8664Avx512/evex_encoding.spl` (X86_ZMM_ALLOCATABLE,
+X86_K_ALLOCATABLE) once needed a `@workaround` `: [i64]` annotation because
+producer 0015 could not derive a module-static type from an array of
+untyped `val` register constants. The declarations now carry the explicit
+`[i64]` type as their intended form, and this spec pins that the MIR
+module-static inference ALSO accepts the original unannotated form, taken
+verbatim from the real source file with only the annotation stripped.
+Audience: compiler engineers maintaining the x86 AVX-512 backend and MIR
+module statics.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.{HirModule, HirTypeKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.backend.native.x86_64_avx512.{X86_ZMM_ALLOCATABLE, X86_K_ALLOCATABLE}
+
+val EVEX_SOURCE = "src/compiler/70.backend/backend/native/_X8664Avx512/evex_encoding.spl"
+
+fn lower_hir(src: text) -> HirModule:
+    val filename = "evex_register_arrays.spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    hir_lowering.lower_module(module)
+
+fn static_type_errors(src: text) -> i64:
+    val hir = lower_hir(src)
+    var lowering = MirLowering.new(hir.symbols)
+    val _mir = lowering.lower_module(hir)
+    var count = 0
+    for error in lowering.errors:
+        if error.message.contains("module static type"): count = count + 1
+    count
+
+fn element_type(src: text, name: text) -> text:
+    val hir = lower_hir(src)
+    for constant in hir.constants.values():
+        if constant.name == name:
+            match constant.type_.kind:
+                case HirTypeKind.Array(element, _):
+                    match element.kind:
+                        case HirTypeKind.Int(bits, signed):
+                            if signed: return "i{bits}"
+                            return "u{bits}"
+                        case _: return "noninteger-array"
+                case HirTypeKind.Infer(_, _): return "infer"
+                case _: return "other"
+    "missing"
+
+fn unannotated_register_arrays() -> text:
+    """The register constants and both arrays from the real file, with the
+    explicit `: [i64]` removed so the original producer-0015 shape is tested."""
+    val source = file_read(EVEX_SOURCE)
+    var out = ""
+    var in_array = false
+    for line in source.split("\n"):
+        val is_register = line.starts_with("val X86_ZMM") or line.starts_with("val X86_K")
+        if in_array:
+            out = out + line + "\n"
+            if line.contains("]"): in_array = false
+        elif is_register:
+            val stripped = line.replace("_ALLOCATABLE: [i64] = ", "_ALLOCATABLE = ")
+            out = out + stripped + "\n"
+            if stripped.contains("[") and not stripped.contains("]"): in_array = true
+    out
+
+describe "x86 EVEX register-ID array declarations":
+    it "keep explicit i64 element types and the complete register order":
+        expect(X86_ZMM_ALLOCATABLE.len()).to_equal(32)
+        expect(X86_ZMM_ALLOCATABLE[0]).to_equal(48)
+        expect(X86_ZMM_ALLOCATABLE[31]).to_equal(79)
+        expect(X86_K_ALLOCATABLE.len()).to_equal(7)
+        expect(X86_K_ALLOCATABLE[0]).to_equal(81)
+        expect(X86_K_ALLOCATABLE[6]).to_equal(87)
+
+    it "keep the explicit [i64] declarations while native verification is pending":
+        val source = file_read(EVEX_SOURCE)
+        expect(source.contains("val X86_ZMM_ALLOCATABLE: [i64] = [")).to_equal(true)
+        expect(source.contains("val X86_K_ALLOCATABLE: [i64] = [")).to_equal(true)
+
+    it "infer i64 for the original unannotated arrays of untyped register constants":
+        val source = unannotated_register_arrays()
+        expect(source.contains("val X86_ZMM_ALLOCATABLE = [")).to_equal(true)
+        expect(source.contains("val X86_K_ALLOCATABLE = [")).to_equal(true)
+        expect(source.contains(": [i64]")).to_equal(false)
+        expect(element_type(source, "X86_ZMM_ALLOCATABLE")).to_equal("i64")
+        expect(element_type(source, "X86_K_ALLOCATABLE")).to_equal("i64")
+        expect(static_type_errors(source)).to_equal(0)

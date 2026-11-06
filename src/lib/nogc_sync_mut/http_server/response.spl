@@ -11,7 +11,7 @@ use std.nogc_sync_mut.http_server.types.{
 use std.common.string_core.{string_char_code_at}
 
 fn write_response(stream: TcpStream, resp: HttpResponse) -> bool:
-    _write_response_wire(stream, serialize_response(resp))
+    _write_response_wire(stream, _serialize_sync_response(resp))
 
 # Canonical bounded writer used by the production listener.  It builds at
 # most one complete wire response and then uses write_all, so an oversized
@@ -163,6 +163,15 @@ fn _serialize_response_head(resp: HttpResponse) -> text:
     _serialize_response_head_with_body_length(resp, resp.body.len())
 
 fn serialize_response(resp: HttpResponse) -> text:
+    _serialize_sync_response(resp)
+
+# Internal callers use this uniquely named body: the async stacks also define a
+# free `serialize_response` (over HttpResponseData), and the Rust-seed
+# interpreter resolves same-named free functions process-wide, so a program
+# that loads both stacks (simple-web-server) dispatched the sync writer into
+# the async serializer.
+# @workaround bug=seed_interp_cross_module_free_fn_collision_2026_11_06 reason=see doc/08_tracking/bug/seed_interp_cross_module_free_fn_collision_2026-11-06.md
+fn _serialize_sync_response(resp: HttpResponse) -> text:
     val head = _serialize_response_head(resp)
     if _response_status_forbids_body(resp.status):
         return head
@@ -195,13 +204,13 @@ fn response_wire_parts_fit(head_len: u64, body_len: u64, max_response_bytes: u64
 # the connection without emitting a partial response.
 fn bounded_response_wire(resp: HttpResponse, max_response_bytes: i64) -> text:
     if response_wire_fits(resp, max_response_bytes):
-        return serialize_response(resp)
+        return _serialize_sync_response(resp)
     val fallback = with_default_security_headers(
         HttpResponse.error(HttpStatus.InternalError, "response exceeds configured byte limit"),
         false
     )
     if response_wire_fits(fallback, max_response_bytes):
-        return serialize_response(fallback)
+        return _serialize_sync_response(fallback)
     ""
 
 fn write_error(stream: TcpStream, status: HttpStatus, message: text) -> bool:

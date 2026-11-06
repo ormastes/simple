@@ -137,6 +137,7 @@ mod collections;
 mod control;
 mod literals;
 mod ops;
+pub(crate) use ops::{static_int_width, wrap_signed, StaticIntWidth};
 
 mod casting;
 mod units;

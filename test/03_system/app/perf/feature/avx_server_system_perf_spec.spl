@@ -1,0 +1,126 @@
+# @tag:system, slow, perf
+# @cover src/app/simple_web_server/vector_lane.spl 60%
+# @cover src/app/postgres_mimic_server/vector.spl 60%
+"""
+## Purpose and audience
+System-level evidence that the real Simple web server (`simple-web-server`
+single-owner lane) and the real PureDatabase server (`postgres-mimic-server
+--listen`) serve identical responses with and without the levelled SIMD
+vector provider, that the provider is actually used at the admitted CPU
+level, and that the AVX-512 build is not slower than scalar. Audience: the
+vector-provider lane owner qualifying a Stage 2+ compiler on an AVX-512 host.
+
+## Operator workflow
+1. Build the provider levels: `sh scripts/check/check-vector-provider-levels.shs <LEVELS_OUT> run`.
+2. Produce evidence: `sh scripts/check/check-avx-server-system-perf.shs <OUT> <COMPILER> <RUNTIME_PATH> <LEVELS_OUT>`
+   (`MODE=interpret` with the seed driver is a correctness-only dry run).
+3. Run this spec against it: `SIMPLE_AVX_SERVER_PERF_OUT=<OUT> bin/simple test --only-slow test/03_system/app/perf/feature/avx_server_system_perf_spec.spl`.
+
+## Compatibility and limitations
+Every scenario is `slow_it`, so default test runs skip the file. The perf
+scenario passes only for `MODE=native` evidence; an interpreter dry run
+proves correctness and provider use, never throughput. x86_64 Windows
+(llvm-mingw, `SIMPLE_WINDOWS_ABI=gnu`) and Linux only.
+
+## Verification guidance and troubleshooting
+`<OUT>/results.txt` holds per-mode rps, p50/p99, digest, parser and level;
+`<OUT>/<kind>.<mode>.server.log` holds the server's admission line and
+provider counters. A digest mismatch means a parser or reducer changed
+responses; `parser=scalar` in cap3/full means admission was refused (the
+server logs the loader reason and keeps serving scalar).
+"""
+# Lifecycle: doc/08_tracking/bug/seed_interp_cross_module_free_fn_collision_2026-11-06.md
+# @manual_section: primary
+
+use std.spec.{describe, slow_it, expect, step}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+use app.simple_web_server.vector_lane.{hosted_vector_admit}
+use app.simple_web_server.config.{parse_hosted_web_cli}
+
+fn _summary() -> [text]:
+    val dir = env_get("SIMPLE_AVX_SERVER_PERF_OUT")
+    if dir == "": return []
+    file_read_text("{dir}/summary.txt").split("\n")
+
+fn _line(lines: [text], prefix: text) -> text:
+    for line in lines:
+        if line.starts_with(prefix): return line
+    ""
+
+fn _field(line: text, key: text) -> text:
+    val marker = " {key}="
+    val at = line.index_of(marker)
+    if at < 0: return ""
+    val rest = line.slice(at + marker.len(), line.len())
+    val end = rest.index_of(" ")
+    if end < 0: rest else: rest.slice(0, end)
+
+fn _value(lines: [text], key: text) -> text:
+    val line = _line(lines, key + " ")
+    if line == "": "" else: line.slice(key.len() + 1, line.len())
+
+describe "AVX-512 web and DB server system perf":
+    slow_it "serves identical responses in scalar, AVX2-capped and full provider modes":
+        # @req: REQ-AVXSYS-001
+        step("Read the evidence produced by check-avx-server-system-perf.shs")
+        val lines = _summary()
+        expect(lines.len() > 0).to_equal(true)
+        # @capture(file:summary.txt)
+        step("Compare the load generator's response digest across the three modes")
+        for kind in ["http", "db"]:
+            val scalar = _line(lines, "{kind} scalar ")
+            val cap3 = _line(lines, "{kind} cap3 ")
+            val full = _line(lines, "{kind} full ")
+            expect(_field(scalar, "errors")).to_equal("0")  # oracle: load generator verified every response
+            expect(_field(full, "errors")).to_equal("0")  # oracle: load generator verified every response
+            expect(_field(scalar, "digest") != "").to_equal(true)
+            expect(_field(cap3, "digest")).to_equal(_field(scalar, "digest"))
+            expect(_field(full, "digest")).to_equal(_field(scalar, "digest"))
+
+    slow_it "uses the provider at the host's admitted level and never in scalar mode":
+        # @req: REQ-AVXSYS-002
+        step("Read the evidence produced by check-avx-server-system-perf.shs")
+        val lines = _summary()
+        val host_level = _value(lines, "host_level")
+        expect(host_level != "").to_equal(true)
+        # @capture(file:summary.txt)
+        step("Check each server's admitted parser and level and its provider counters")
+        for kind in ["http", "db"]:
+            val used_key = if kind == "http": "provider_requests" else: "provider_queries"
+            val scalar = _line(lines, "{kind} scalar ")
+            val cap3 = _line(lines, "{kind} cap3 ")
+            val full = _line(lines, "{kind} full ")
+            expect(_field(scalar, "parser")).to_equal("scalar")
+            expect(_field(scalar, used_key)).to_equal("0")  # oracle: scalar mode installs no provider
+            expect(_field(cap3, "parser")).to_equal("vector")
+            expect(_field(cap3, "level")).to_equal("3")  # oracle: cap3 DSO is capped at AVX2 (L3)
+            expect(_field(full, "parser")).to_equal("vector")
+            expect(_field(full, "level")).to_equal(host_level)
+            expect((_field(full, used_key).to_int() ?? 0) > 0).to_equal(true)
+
+    slow_it "AVX-512 throughput meets the recorded bound over scalar":
+        # @req: REQ-AVXSYS-003
+        step("Read the evidence produced by check-avx-server-system-perf.shs")
+        val lines = _summary()
+        # @capture(file:summary.txt)
+        step("Require native evidence and compare full-provider throughput with scalar")
+        expect(_value(lines, "mode")).to_equal("native")  # oracle: interpreter timings are not perf evidence
+        for kind in ["http", "db"]:
+            val ratio = _line(lines, "ratio {kind} ")
+            val full_x100 = _field(ratio, "full_x100").to_int() ?? 0
+            val min_x100 = _field(ratio, "min_x100").to_int() ?? 1000000
+            expect(full_x100 >= min_x100).to_equal(true)
+        expect(_value(lines, "verdict")).to_equal("PASS")
+
+    slow_it "rejects a provider outside build/providers and keeps the scalar parser":
+        # @req: REQ-AVXSYS-004
+        step("Ask the web server's admission for a provider outside the approved root")
+        # @capture(stdout)
+        step("Confirm the refusal reason and that the CLI rejects a provider without its digest")
+        val refused = hosted_vector_admit("D:/elsewhere/provider.dll",
+            "0000000000000000000000000000000000000000000000000000000000000000")
+        expect(refused.admitted).to_equal(false)
+        expect(refused.reason).to_equal("path-denied")  # oracle: provider_loader path policy
+        val parsed = parse_hosted_web_cli(["--vector-provider", "build/providers/x.dll"])
+        expect(parsed.error).to_equal("--vector-provider and --vector-provider-sha256 must be supplied together")
