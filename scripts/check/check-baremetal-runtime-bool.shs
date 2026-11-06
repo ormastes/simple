@@ -1,0 +1,112 @@
+#!/bin/sh
+# Compile and execute each definition's tagged bool boundary, not a tree-wide
+# grep that can mistake a repaired sibling for the definition actually linked.
+set -eu
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+work_dir=$(mktemp -d)
+trap 'rm -rf "$work_dir"' EXIT INT TERM
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        repo_root=$(cygpath -m "$repo_root")
+        work_native=$(cygpath -m "$work_dir") ;;
+    *) work_native=$work_dir ;;
+esac
+export SIMPLEOS_BOOL_TEST_ROOT="$repo_root" SIMPLEOS_BOOL_TEST_TMP="$work_native"
+export SIMPLEOS_BOOL_TEST_CC="${CC:-clang}"
+# Optional baseline revision proves the regression against old real bodies.
+export SIMPLEOS_BOOL_TEST_BASELINE="${1:-}"
+python3 - <<'PY'
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+root = Path(os.environ['SIMPLEOS_BOOL_TEST_ROOT'])
+tmp = Path(os.environ['SIMPLEOS_BOOL_TEST_TMP'])
+cc = os.environ['SIMPLEOS_BOOL_TEST_CC']
+baseline = os.environ['SIMPLEOS_BOOL_TEST_BASELINE']
+arch_root = Path('examples/09_embedded/simple_os/arch')
+owners = [arch_root / 'common/baremetal_runtime.h'] + [
+    arch_root / arch / 'boot/baremetal_stubs.c'
+    for arch in ('arm32', 'arm64', 'riscv64', 'x86_32', 'x86_64')
+] + [arch_root / 'riscv64/boot/baremetal_runtime_core.inc.c']
+macro_names = {
+    'TAG_MASK', 'TAG_INT', 'TAG_HEAP', 'TAG_FLOAT', 'TAG_SPECIAL',
+    'ENCODE_INT', 'DECODE_INT', 'DECODE_PTR', 'IS_INT', 'IS_HEAP', 'IS_FLOAT', 'IS_NIL',
+    'NIL_VALUE', 'TRUE_VALUE', 'FALSE_VALUE', 'TAGGED_BOOL_TRUE',
+    'TAGGED_BOOL_FALSE', 'HEAP_STRING', 'HEAP_ARRAY'
+}
+logical_names = ('rt_and', 'rt_or', 'rt_not', 'rt_to_bool', 'rt_is_bool')
+
+def function_body(source, name):
+    match = re.search(r'^RuntimeValue\s+' + name + r'\([^;{}]*\)\s*\{',
+                      source, re.M)
+    if not match:
+        raise ValueError('missing real definition: ' + name)
+    start = match.start()
+    pos = match.end()
+    depth = 1
+    while depth and pos < len(source):
+        depth += (source[pos] == '{') - (source[pos] == '}')
+        pos += 1
+    if depth:
+        raise ValueError('unterminated definition: ' + name)
+    return source[start:pos]
+
+def struct_definition(source, name):
+    end = re.search(r'\}\s*' + name + r'\s*;', source)
+    if not end:
+        raise ValueError('missing real type: ' + name)
+    start = source.rfind('typedef struct', 0, end.start())
+    if start < 0:
+        raise ValueError('missing typedef: ' + name)
+    return source[start:end.end()]
+
+failed = []
+logical_checked = 0
+for index, owner in enumerate(owners):
+    label = owner.as_posix()
+    if baseline:
+        source = subprocess.check_output(
+            ['git', '-C', str(root), 'show', baseline + ':' + label], text=True)
+    else:
+        source = (root / owner).read_text(encoding='utf-8')
+    logical = owner.parts[-3] in ('arm64', 'x86_64')
+    work = tmp / str(index)
+    work.mkdir()
+    chunks = ['#include <stdint.h>\n#include <stddef.h>',
+              '#include "examples/09_embedded/simple_os/arch/common/boot/freestanding_bool_abi.h"']
+    value_type = re.search(r'^typedef\s+\w+\s+RuntimeValue;', source, re.M)
+    if not value_type:
+        raise ValueError('missing RuntimeValue typedef: ' + label)
+    chunks.append(value_type.group())
+    for line in source.splitlines():
+        macro = re.match(r'^#define\s+(\w+)', line)
+        if macro and macro.group(1) in macro_names:
+            chunks.append(line)
+    if logical:
+        chunks.extend(struct_definition(source, name)
+                      for name in ('HeapHeader', 'RuntimeString', 'RuntimeArray'))
+        chunks.extend(function_body(source, name) for name in logical_names)
+        logical_checked += 1
+    chunks.append('#define SIMPLEOS_BOOL_HAS_LOGICAL ' + str(int(logical)))
+    (work / 'owner_bool.inc').write_text('\n'.join(chunks) + '\n', encoding='utf-8')
+    exe = work / ('bool.exe' if os.name == 'nt' else 'bool')
+    command = [cc, '-std=c11', '-Wall', '-Wextra', '-Werror', '-I', str(root),
+               '-I', str(work), str(root / 'test/01_unit/os/libc/simpleos_baremetal_runtime_bool_test.c'),
+               '-o', str(exe)]
+    result = subprocess.run(command)
+    if result.returncode == 0:
+        result = subprocess.run([str(exe)])
+    verdict = 'PASS' if result.returncode == 0 else 'FAIL'
+    print(verdict + ': ' + label, flush=True)
+    if result.returncode:
+        failed.append(label)
+
+if len(owners) != 7 or logical_checked != 2:
+    sys.exit('ERROR: expected seven constant owners and two logical owners')
+if failed:
+    sys.exit('FAIL: ' + str(len(failed)) + ' owner(s) failed')
+print('PASS: 7 constant owners; 2 real logical/conversion/predicate owners executed')
+PY

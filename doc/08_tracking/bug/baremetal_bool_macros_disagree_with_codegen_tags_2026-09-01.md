@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN
+- Status: FIX-IMPLEMENTED-VERIFICATION-PENDING (2026-11-06; tagged consumers repaired, self-hosted/device acceptance pending)
 - Date: 2026-09-01
 - Scope: `examples/09_embedded/simple_os/arch/common/baremetal_runtime.h`
 - Found while root-causing
@@ -103,3 +103,52 @@ Verified (aarch64 Linux host, source-level + host cc only):
 Not verified here (no hardware/semihosting on this host): actual baremetal
 boot on any target; the change is ABI-visible only at runtime<->codegen bool
 boundaries, which is exactly the defect.
+
+## Remaining tagged-bool consumers — 2026-11-06
+
+The producer repair `2593c5da5b4` is present in release/1.0.0. Revalidation at
+`bbfe33dd9f1d` found a remaining consumer defect in the real ARM64 and x86_64
+`baremetal_stubs.c` definitions:
+
+- `rt_and`, `rt_or`, and `rt_not` decoded tagged `false` (19) as integer 2,
+  so it was truthy; e.g. `rt_not(19)` returned false instead of true.
+- `rt_to_bool(11)` fell through the nil/int/heap cases and returned false.
+- `rt_is_bool` accepted encoded integers 0/8 while rejecting booleans 11/19.
+
+The repair recognizes tagged booleans before preserving the logical helpers'
+existing encoded-integer truthiness. The shared helper uses unsigned shifting,
+so negative encoded integers stay truthy without adding a signed-shift
+assumption. `rt_to_bool` preserves an existing tagged bool. `rt_is_bool` now
+recognizes exactly the tagged pair, retaining its existing raw 0/1 result ABI.
+No registered compiler caller or Simple declaration of that compatibility
+predicate was found; this change does not invent a tagged return contract for
+the surrounding `rt_is_*` family or implement other architectures' placeholders.
+The seven producer definitions and their static assertions are unchanged.
+
+Native owner regression:
+
+```sh
+sh scripts/check/check-baremetal-runtime-bool.shs bbfe33dd9f1d  # baseline: exit 1
+sh scripts/check/check-baremetal-runtime-bool.shs       # repaired: exit 0
+```
+
+The check compiles the real macros for all seven owners and extracts the real
+types and five function bodies from each of the two logical owners. Both old
+owners fail on `rt_to_bool(tagged_true)`; the repaired owners pass tagged
+true/false, encoded integer zero/one/negative/two, nil and raw zero, including
+all 64 ordered pairs for `rt_and`/`rt_or`, negation, conversion, and the raw
+predicate. Five constant-only owners remain green. This is native C execution
+of the selected definitions, not execution of an ARM64 image or a Simple
+compiler fixture. Clang SHA-256:
+`20ba1856942744291a6aaaf9f2c94f6d0cd7cac5aa9557fce96471dc7ef25d6f`.
+
+Full touched translation units also pass freestanding syntax checks for
+`aarch64-none-elf` and `x86_64-unknown-elf`. ARM64 retains an unrelated existing
+negative-shift warning in `baremetal_stubs.c:6720`, its wide-integer range check.
+
+Remaining acceptance: an admitted self-hosted producer executes the tagged-bool
+runtime boundary in a baremetal/attested native fixture. Pure-Simple Cranelift
+internal `MirConstValue.Bool` is raw 1/0 (`cranelift_codegen_adapter.spl`,
+`cl_translate_const`); that internal representation is distinct from the tagged
+RuntimeValue boundary tested here. No device, bootstrap, or end-to-end
+self-hosted acceptance is claimed by this repair.
