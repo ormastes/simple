@@ -50,10 +50,17 @@ is incomplete or a requested identity/kind is absent. Exit 2: invalid request,
 unavailable group/provider, capture failure, stale cursor or exhausted budget.
 Original `traceability-check` remains a separate SDN structural checker.
 
-The current canonical manifest contains authored claims without independent
-authority registration in this preview policy. Its nodes remain inspectable,
-but it reports `TRACE-AUTHORITY-CONFLICT`, `graph_complete: false` and exit 1.
-The command does not authorize those claims merely to obtain a successful exit.
+Authority for the canonical declaration's authored claims is owned by the
+query policy, not by the declaration: `trace_query_registered_authorities_v1`
+(`src/app/traceability/snapshot/query_scope_v1.spl`) grants origin
+`intent:traceability`, owner path = the registered declaration, scope
+`feature:traceability`, add-only, exactly the relations it authors
+(`specifies`, `decomposes_to`, `implemented_by`, `described_by`,
+`motivated_by`). The default preview therefore resolves with
+`graph_complete: true` and exit 0. A claim with any other relation, origin,
+owner or scope (including any `--declaration` file not in the registry) still
+raises `TRACE-AUTHORITY-CONFLICT` and exits 1. A new registered declaration
+needs its own registry rows in the same change.
 
 Execution plan: run the focused unit and
 `test/03_system/app/traceability/feature/trace_query_p0_spec.spl` scenarios with
@@ -138,7 +145,10 @@ program; run it from the repository root with any `simple` binary that can
 `run` (the Rust seed included). The seed's own CLI does **not** dispatch
 `simple trace` (it prints main help or `file not found: trace`), and the full
 pure-Simple CLI (`run src/app/cli/main.spl trace ...`) takes ~60 s and writes
-nothing on the seed, so use the direct module route:
+nothing on the seed, so use the direct module route. Its arguments are the
+words after `simple trace`; a pasted leading `trace` word is also accepted, so
+`... query_main.spl trace list features` and `... query_main.spl list features`
+are identical:
 
 ```sh
 S=D:/dev/wt/seed/simple.exe          # any simple binary that can `run`
@@ -156,10 +166,11 @@ document is stdout only.
 
 How to read the output:
 
-- **Exit status 1 is the normal success code** for the default worktree
-  preview: the page rendered, but the graph is `complete: false` and
-  `admission eligible: false` because authored claims have no registered
-  authority. Status 0 only ever appears for `--help` or a complete graph.
+- **Exit status 0** is the normal result for the default worktree preview:
+  the page rendered and the graph is `complete: true`. It is still
+  `admission eligible: false` / `unverified` (a worktree preview is never
+  admission evidence). Status 1 means the page rendered over an incomplete
+  graph (diagnostics listed).
   Status 2 is a real error (`TRACE-QUERY-INVALID`, `-UNAVAILABLE`,
   `-DECLARATION`, `-INFRASTRUCTURE`); status 1 with `code:
   TRACE-QUERY-NOT-FOUND` means the snapshot was fine but the id/kind did not
@@ -167,10 +178,9 @@ How to read the output:
 - Table format: 7 header lines (`Snapshot:`, `Capture:`, `Ingestion:`,
   `Graph complete:`, `Qualification:`, `Generation:`, `Input manifest:`), then
   `KIND<TAB>ID<TAB>TITLE` rows, `Total selected: N`, optional `Next cursor:`,
-  then diagnostics. The ~100 `TRACE-AUTHORITY-CONFLICT: claim lacks unique
-  registered authority ...` lines are **expected** today (every authored claim
-  in the registered declaration lacks an independent authority); they are not
-  a failure of your query. Grep the rows out with `grep -P '^\w+\t'`.
+  then diagnostics (none for the default preview; a
+  `TRACE-AUTHORITY-CONFLICT` line means a claim outside the authority
+  registry and is a real finding). Grep the rows out with `grep -P '^\w+\t'`.
 - `--format=sdn`: one inline SDN dictionary on one line. Keys agents use:
   `nodes: [{id, kind, title}]`, `total_count`, `next_cursor`, `page_complete`,
   `graph_complete`, `snapshot_kind` (`worktree_preview` | `git_commit` |
@@ -219,8 +229,9 @@ is the file link. SDN adds `selected: {id, kind, title}`, `references:
 other_paths, operation, origin, authority}]`, `reference_count`.
 
 Read `authority` honestly: `authored-claim` means the relation is only
-asserted in the declaration (today: all 101 claims); `registered-edge` means
-the graph also carries it as an edge. The declaration has no
+asserted in the declaration (no registered authority admitted it);
+`registered-edge` means the graph also carries it as an edge (today: all 101
+default claims). The declaration has no
 `verified_by`/`accepted_by` claims, so "which spec verifies X" is not yet
 answerable through `refs`; "which feature specifies X", decomposition and
 implemented_by/described_by are. `--prefix` is rejected; `--limit`/`--cursor`

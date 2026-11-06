@@ -104,7 +104,7 @@ over the shared graph) and reuses the REQ-TRC-021/023 query contract.
 authored `add` claims over `specifies` (20), `decomposes_to` (73),
 `implemented_by` (4), `described_by` (2) and `motivated_by` (2); it has no
 `verified_by`/`accepted_by` claims and 1 test definition, and every claim
-raises `TRACE-AUTHORITY-CONFLICT` (no registered edge). "Which specs verify
+raised `TRACE-AUTHORITY-CONFLICT` until 2026-11-06 (query policy had `authorities: []`; now the policy-owned `trace_query_registered_authorities_v1` admits them as registered edges). "Which specs verify
 requirement X" is therefore **not** answerable from this data; "which feature
 specifies X", "what X decomposes to", and what a node is `implemented_by` /
 `described_by` are. `implemented_by`/`described_by` targets

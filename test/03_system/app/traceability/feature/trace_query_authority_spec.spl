@@ -1,0 +1,71 @@
+"""Registered declarations resolve against a policy-owned authority registry.
+
+Regression for the 101 TRACE-AUTHORITY-CONFLICT diagnostics: the query policy
+carried `authorities: []`, so no authored claim of the registered declaration
+could ever match `claim_authorized`. Authorities are owned by the query policy
+(app.traceability.snapshot.query_scope_v1), never by the declaration itself.
+Run from the repository root (worktree preview; no git/index route).
+"""
+# @req REQ-TRC-002 REQ-TRC-021
+use std.spec.*
+use std.spec.step
+use std.common.traceability.model.*
+use std.common.traceability.resolve.{resolve_trace_graph}
+use app.traceability.query_options_v1.{trace_query_options_parse_v1}
+use app.traceability.query_snapshot_v1.{trace_query_build_snapshot_v1}
+use app.traceability.query_main.{trace_query_direct_args_v1}
+use app.traceability.snapshot.query_scope_v1.{trace_query_registered_authorities_v1, trace_query_default_declarations_v1}
+
+fn authority_conflicts(graph: TraceGraph) -> i64:
+    var count = 0
+    for issue in graph.diagnostics:
+        if issue.code == "TRACE-AUTHORITY-CONFLICT": count = count + 1
+    count
+
+describe "Registered query authority":
+    it "resolves the canonical declaration with no authority conflict":
+        # @ac AC-TRC-041
+        step("Build the default worktree preview through the production composition")
+        val build = trace_query_build_snapshot_v1(trace_query_options_parse_v1(["list", "features"]).unwrap()).unwrap()
+        expect(authority_conflicts(build.graph)).to_equal(0)
+        expect(build.graph.diagnostics.len()).to_equal(0)
+        expect(build.graph.complete).to_be(true)
+        expect(build.graph.edges.len() > 0).to_be(true)
+        # A worktree preview is still never admission evidence.
+        expect(build.admission_eligible).to_be(false)
+
+    it "registers every authority to a registered declaration owner and add-only use":
+        # Prevention: authority may not be self-asserted by an unregistered path,
+        # and the registry grants no override (replace/suppress) rights.
+        step("Check every registry row against the registered declaration set")
+        val declarations = trace_query_default_declarations_v1()
+        val authorities = trace_query_registered_authorities_v1()
+        expect(authorities.len() > 0).to_be(true)
+        for authority in authorities:
+            expect(declarations.contains(authority.owner_path)).to_be(true)
+            expect(authority.allow_override).to_be(false)
+            expect(authority.expires_snapshot_id).to_equal("")
+
+    it "still rejects a claim whose relation the registry does not grant":
+        step("Resolve one verified_by claim from the registered origin")
+        val build = trace_query_build_snapshot_v1(trace_query_options_parse_v1(["list", "features"]).unwrap()).unwrap()
+        val origin_id = "intent:traceability"
+        val node = build.graph.nodes[0]
+        val facts = TraceFacts(subject: build.graph.subject, input_manifest_id: build.graph.input_manifest_id,
+            nodes: build.graph.nodes, test_definitions: build.graph.test_definitions,
+            claims: [TraceClaim(id: "claim:unregistered", from_id: node.id, relation: TraceRelation.VerifiedBy,
+                to_id: node.id, origin_id: origin_id, operation: TraceClaimOperation.Add,
+                rule_id: "authoring-v1", scope_id: "feature:traceability")],
+            origins: build.graph.origins, locators: build.graph.locators, diagnostics: [],
+            generation_id: build.graph.generation_id, complete: true)
+        val policy = TracePolicy(id: "policy:local-registered-query/v1", conventions: [],
+            authorities: trace_query_registered_authorities_v1(), max_nodes: 40000, max_claims: 100000)
+        val graph = resolve_trace_graph(facts, policy)
+        expect(authority_conflicts(graph)).to_equal(1)
+        expect(graph.complete).to_be(false)
+
+describe "Direct query entry argument form":
+    it "accepts the documented `trace <op>` form and the bare form identically":
+        expect(trace_query_direct_args_v1(["trace", "list", "features"])).to_equal(["list", "features"])
+        expect(trace_query_direct_args_v1(["list", "features"])).to_equal(["list", "features"])
+        expect(trace_query_options_parse_v1(trace_query_direct_args_v1(["trace", "list", "features"])).is_ok()).to_be(true)
