@@ -53,6 +53,8 @@ $S run src/app/traceability/query_main.spl list bugs --status=open --severity=P1
 $S run src/app/traceability/query_main.spl show bug bug:<db-id> --format=sdn 2>/dev/null   # legacy: {...}
 $S run src/app/traceability/query_main.spl refs bug bug:<db-id> 2>/dev/null               # SIDECAR located_in / reproducible_by rows
 $S run src/app/traceability/query_main.spl list features --bug-db=none 2>/dev/null        # declaration only
+# which spec claims a requirement (# @req header scan, opt-in root, <=4096 files):
+$S run src/app/traceability/query_main.spl refs requirement req:REQ-TRC-015 --spec-root=test/01_unit/app/traceability 2>/dev/null
 ```
 
 Full output key reference and the spec driver

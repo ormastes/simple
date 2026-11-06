@@ -305,3 +305,13 @@ captured nor referenced is `TRACE-QUERY-NOT-FOUND`. `--limit`/`--cursor`
 page the union in a fixed order (claims, locators, sidecar) under schema
 `simple.trace.file-refs-cursor/v1`. "Bugs open in area Y" stays
 `list bugs --status=open --file-prefix=<dir>/`.
+
+Slice-4 amendments at implementation (2026-11-06): (1) the header is the
+leading `#` comment block *or* a leading `"""` docstring followed by comment
+lines (`trace_node_query_spec.spl` has that shape); (2) the bounded reader
+refuses, rather than truncates, an over-bound file, so each spec is read whole
+(<=1 MiB, larger files skipped with `TRACE-ANNOTATION-SCAN`); (3) an id that
+no declaration registers but that owns sidecar rows renders a sidecar-only
+`refs` page labeled `(undeclared; sidecar references only)` with
+`total_count: 0`, exit 1 -- no node or claim is invented, and without sidecar
+rows the answer stays `TRACE-QUERY-NOT-FOUND`.

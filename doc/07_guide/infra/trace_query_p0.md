@@ -280,3 +280,35 @@ How to read it:
   never ingest it (`legacy_database_ingestion: unavailable-for-snapshot-kind`).
 - Cost on the seed: ~1 s on top of the ~4 s query (bytes via the no-follow
   reader, runtime-backed decode; the std text codec would add ~21 s).
+
+### Which spec claims a requirement: `--spec-root` (slice 4, 2026-11-06)
+
+The registered declaration has no `verified_by` claims, but 7,041 spec files
+carry `# @req REQ-X ...` header lines. Scanning all of them per query is not
+viable on the seed, so the scan is **opt-in and bounded** to the roots you
+name (`--spec-root=<dir>`, repeat up to 8, <=4,096 spec files, worktree
+preview only; `@cover`/`@ac` lines are ignored):
+
+```sh
+S=D:/dev/wt/seed/simple.exe
+$S run src/app/traceability/query_main.spl refs requirement req:REQ-TRC-015 --spec-root=test/01_unit/app/traceability 2>/dev/null
+$S run src/app/traceability/query_main.spl refs requirement req:REQ-TRC-021 --spec-root=test/01_unit/app/traceability --format=sdn 2>/dev/null
+$S run src/app/traceability/query_main.spl refs requirement req:REQ-TRC-015 --spec-root=test/01_unit/app --spec-root=test/03_system/app 2>/dev/null
+```
+
+- Rows: `SIDECAR<TAB>verified_by<TAB><spec path><TAB>header<TAB>annotation-claim`
+  after the `LOCATOR` rows (SDN `sidecar_references`). `annotation-claim`
+  means the spec header *declares* it; nothing here ran or verified the spec.
+- Only the leading header is read (`#` comment lines and a leading `"""`
+  docstring); an `@req` in a test body or a string is prose.
+- A requirement that no declaration registers (today `REQ-TRC-021/023`)
+  still renders: `Selected: requirement req:X (undeclared; sidecar references
+  only)`, `Total references: 0`, exit 1, SIDECAR rows. Without a matching
+  sidecar row it stays `TRACE-QUERY-NOT-FOUND`. No node is invented.
+- Header shows one `+ sidecar annotation-req/v1 <root> rows=<files>
+  sha256:...` per root; the digest covers every scanned file's content, so
+  cursors invalidate when any header changes. `TRACE-ANNOTATION-SCAN`
+  warnings name skipped files (unsafe path, >1 MiB, not UTF-8).
+- Cost on the seed: `test/01_unit/app` (2,171 specs) walks in ~30 ms; reads
+  are runtime-backed. `--spec-root=test` (7k files) exceeds the 4,096 budget
+  by design -- name the area.

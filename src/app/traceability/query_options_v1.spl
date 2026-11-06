@@ -22,6 +22,8 @@ pub struct TraceQueryOptionsV1:
     status: text = ""
     severity: text = ""
     file_prefix: text = ""
+    # Opt-in `# @req` header scan roots (worktree snapshots only).
+    spec_roots: [text] = []
 
 pub fn trace_query_options_parse_v1(args: [text]) -> Result<TraceQueryOptionsV1, text>:
     if args.len() > 512: return Err("TRACE-QUERY-INVALID: too many arguments")
@@ -66,7 +68,7 @@ pub fn trace_query_options_parse_v1(args: [text]) -> Result<TraceQueryOptionsV1,
             index = index + 1
             value = args[index]
         if value == "": return Err("TRACE-QUERY-INVALID: option value is empty")
-        if name != "--path" and name != "--declaration":
+        if name != "--path" and name != "--declaration" and name != "--spec-root":
             if seen.contains_key(name): return Err("TRACE-QUERY-INVALID: repeated option")
             seen[name] = true
         match name:
@@ -87,6 +89,12 @@ pub fn trace_query_options_parse_v1(args: [text]) -> Result<TraceQueryOptionsV1,
                 else:
                     if options.declarations.contains(value): return Err("TRACE-QUERY-INVALID: duplicate declaration path")
                     options.declarations.push(value)
+            case "--spec-root":
+                val root = if value.ends_with("/") and value.len() > 1: value.substring(0, value.len() - 1) else: value
+                if not trace_path_valid(root): return Err("TRACE-QUERY-INVALID: spec-root must be a safe repository-relative directory")
+                if options.spec_roots.contains(root): return Err("TRACE-QUERY-INVALID: duplicate spec root")
+                if options.spec_roots.len() >= 8: return Err("TRACE-QUERY-BUDGET: at most 8 spec roots")
+                options.spec_roots.push(root)
             case "--bug-db":
                 if value != "none" and not trace_path_valid(value): return Err("TRACE-QUERY-INVALID: bug-db must be none or a safe repository-relative file")
                 options.bug_db = value
@@ -152,6 +160,8 @@ pub fn trace_query_help_v1() -> text:
     "  --bug-db=<file>|none              Legacy bug DB sidecar (default doc/08_tracking/bug/bug_db.sdn\n" +
     "                                    when present; worktree snapshots only; read-only)\n" +
     "  --status=<s> --severity=<p> --file-prefix=<path>  list bugs filters (exact; prefix)\n" +
+    "  --spec-root=<dir>                 Repeat (<=8): scan *_spec.spl headers for `# @req`\n" +
+    "                                    -> req:<id> verified_by <spec> sidecar rows (worktree only)\n" +
     "Options accept --name=value or --name value. Plural show kinds are aliases.\n" +
     "Registered declarations are indexed; bug DB rows are a labeled sidecar (nodes +\n" +
     "attributes, no graph claims). No legacy feature DB ingestion.\n" +
