@@ -2936,8 +2936,12 @@ pub fn rt_opencl_release_context_fn(args: &[Value]) -> Result<Value, CompileErro
 }
 
 /// WebGPU surface stubs — no surface is available in interpreter mode.
+///
+/// `create_surface` must return the documented invalid handle (`-1`, see
+/// `WEBGPU_INVALID_HANDLE` in `src/runtime/hosted/webgpu.rs`), never `0`: `0`
+/// is indistinguishable from a live handle at the Simple call site.
 pub fn rt_webgpu_create_surface_fn(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(0))
+    Ok(Value::Int(-1))
 }
 
 pub fn rt_webgpu_destroy_surface_fn(_args: &[Value]) -> Result<Value, CompileError> {
@@ -6055,5 +6059,11 @@ mod foreign_text_tests {
     fn null_foreign_text_is_a_contract_error() {
         let error = c_ptr_to_string(std::ptr::null(), "rt_metal_device_name").unwrap_err();
         assert!(format!("{error:?}").contains("foreign text contract returned null"));
+    }
+
+    #[test]
+    fn webgpu_create_surface_returns_invalid_handle_not_zero() {
+        let handle = rt_webgpu_create_surface_fn(&[]).expect("surface stub must not raise");
+        assert!(matches!(handle, Value::Int(-1)), "got {handle:?}");
     }
 }
