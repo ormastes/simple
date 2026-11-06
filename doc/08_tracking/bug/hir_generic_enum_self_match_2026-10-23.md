@@ -1,6 +1,6 @@
 # HIR: `match self:` inside a generic enum's own method is rejected (2026-10-23)
 
-**Status:** open
+**Status:** FIXED in-tree (e7b5c93ba65, `own_params_only` at `expression_components.spl:609`; spec `test/01_unit/compiler/20.hir/generic_enum_self_match_spec.spl`, PR #6584). Remaining: Stage 2 redeploy before retiring the remaining lib workarounds.
 
 Symptom: Stage 2 full-CLI build fails on `src/lib/nogc_async_mut/failsafe/core.spl`:
 `generic enum pattern requires concrete declaration-ordered type arguments`, then

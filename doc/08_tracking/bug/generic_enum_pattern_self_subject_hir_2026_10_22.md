@@ -1,6 +1,6 @@
 # Self-hosted HIR rejects generic enum patterns on self/field subjects (2026-10-22)
 
-Status: WORKED AROUND in `poll.spl` / `future.spl` (bind the subject to a
+Status: FIXED in-tree by e7b5c93ba65 (see hir_generic_enum_self_match_2026-10-23); previously WORKED AROUND in `poll.spl` / `future.spl` (bind the subject to a
 typed local, or delegate to a module-scope free function taking the value as a
 parameter). The underlying self-hosted HIR limitation remains open.
 
