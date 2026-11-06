@@ -75,6 +75,15 @@ seed test evidence is not pure-Simple qualification of this lifecycle adapter.
 
 ## Remaining landing and feature gates
 
+Resume evidence (2026-11-07): the foreign bootstrap terminated at Stage 2 with
+a 300-second `driver_aot_pipeline.spl` worker timeout and released its claim.
+It produced no admitted test runner. PR #7241 was rebased onto release commit
+`3c63201ea63`; its canonical data-schema owner is unchanged. Attempt 6, the final
+attempt under the six-cycle limit, reuses the frozen source and cached Cargo
+outputs with Git Bash. Its outer wrapper now propagates the actual bootstrap
+exit status after restoring PATH. No further unchanged retry is authorized by
+the bounded-repair policy; inspect its actual terminal evidence first.
+
 Execute the lifecycle spec with an admitted pure-Simple runtime, assess failure
 coverage, and complete applicable compiler/lib/MCP checks before marking this
 change qualified. Review the exact pushed diff and comments before landing.
