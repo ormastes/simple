@@ -3,6 +3,7 @@
 use std.common.traceability.model.*
 use std.common.traceability.schema.{trace_path_valid}
 use std.common.traceability.sdn_codec.{decode_trace_declarations}
+use app.traceability.extract.snapshot_partitions.{build_trace_snapshot_partition_set, trace_snapshot_policy_binding}
 
 pub fn artifact_trace_id(path: text) -> text:
     # A reversible path encoding keeps non-ASCII/space paths distinct without
@@ -27,7 +28,7 @@ fn empty_trace_facts(snapshot: SnapshotInput, manifest_id: text, generation_id: 
 
 # Registered paths come from admitted policy/ownership, never from a generated
 # document or a candidate's request to become an authoritative declaration.
-pub fn extract_snapshot_trace_facts(snapshot: SnapshotInput, policy: TracePolicy,
+pub fn extract_snapshot_trace_facts_cold(snapshot: SnapshotInput, policy: TracePolicy,
     declaration_paths: [text], input_manifest_id: text, generation_id: text) -> TraceFacts:
     var facts = empty_trace_facts(snapshot, input_manifest_id, generation_id)
     if input_manifest_id == "" or generation_id == "" or snapshot.subject.snapshot_id == "":
@@ -131,3 +132,17 @@ pub fn extract_snapshot_trace_facts(snapshot: SnapshotInput, policy: TracePolicy
             locator_kind: locator.locator_kind, locator: locator.locator, blob_id: artifact.blob_id))
     facts.locators = pinned
     facts
+
+# Production extraction now shares the same owner-local partition composer
+# used by the pure delta updater. The retained API remains in-memory only;
+# callers must persist and verify its bindings before claiming durable reuse.
+pub fn extract_snapshot_trace_facts(snapshot: SnapshotInput, policy: TracePolicy,
+    declaration_paths: [text], input_manifest_id: text, generation_id: text) -> TraceFacts:
+    match build_trace_snapshot_partition_set(snapshot, declaration_paths,
+        "snapshot-declarations-files/v1", "simple.trace.declarations+graph/v1",
+        policy, trace_snapshot_policy_binding(policy), "trace-structural-default/v1",
+        input_manifest_id, generation_id):
+        case Ok(partition_set): partition_set.facts
+        # Preserve the established malformed-input diagnostics from the cold
+        # oracle. That extractor itself marks invalid inventories incomplete.
+        case Err(_): extract_snapshot_trace_facts_cold(snapshot, policy, declaration_paths, input_manifest_id, generation_id)

@@ -32,6 +32,13 @@ fn write_elf64(writer: ElfWriter) -> [i64]:
     shstrtab = strtab_add(shstrtab, ".strtab")
     shstrtab = strtab_add(shstrtab, ".shstrtab")
     shstrtab = strtab_add(shstrtab, ".rela.text")
+    # XRay map name is added ONLY when the section exists, so every object
+    # without native sleds keeps its pre-PR5 bytes (design B, static off).
+    for section in writer.sections:
+        match section.kind:
+            case XrayMap:
+                shstrtab = strtab_add(shstrtab, ".simple_xray_map")
+            case _: ()
 
     # Add symbol names to strtab
     for sym in writer.symbols:
@@ -52,6 +59,7 @@ fn write_elf64(writer: ElfWriter) -> [i64]:
     var has_rodata = false
     var has_bss = false
     var has_rela_text = false
+    var has_xray_map = false
 
     var text_data: [i64] = []
     var data_data: [i64] = []
@@ -60,6 +68,7 @@ fn write_elf64(writer: ElfWriter) -> [i64]:
     var data_alignment = 8
     var rodata_alignment = 8
     var text_relocs: [ElfReloc] = []
+    var xray_map_data: [i64] = []
 
     for section in writer.sections:
         match section.kind:
@@ -80,6 +89,9 @@ fn write_elf64(writer: ElfWriter) -> [i64]:
             case Bss:
                 has_bss = true
                 bss_size = section.data.len()
+            case XrayMap:
+                has_xray_map = true
+                xray_map_data = section.data
 
     # Section indices
     # 0: null
@@ -88,6 +100,7 @@ fn write_elf64(writer: ElfWriter) -> [i64]:
     var data_shndx = 0
     var rodata_shndx = 0
     var bss_shndx = 0
+    var xray_map_shndx = 0
     var symtab_shndx = 0
     var strtab_shndx = 0
     var rela_text_shndx = 0
@@ -104,6 +117,9 @@ fn write_elf64(writer: ElfWriter) -> [i64]:
         next_shndx = next_shndx + 1
     if has_bss:
         bss_shndx = next_shndx
+        next_shndx = next_shndx + 1
+    if has_xray_map:
+        xray_map_shndx = next_shndx
         next_shndx = next_shndx + 1
     symtab_shndx = next_shndx
     next_shndx = next_shndx + 1
@@ -187,6 +203,12 @@ fn write_elf64(writer: ElfWriter) -> [i64]:
         rodata_offset = offset
         offset = offset + rodata_data.len()
 
+    var xray_map_offset = 0
+    if has_xray_map:
+        offset = align_offset(offset, 8)
+        xray_map_offset = offset
+        offset = offset + xray_map_data.len()
+
     # BSS has no file data
     var bss_offset = 0
     if has_bss:
@@ -261,6 +283,10 @@ fn write_elf64(writer: ElfWriter) -> [i64]:
         buf = pad_to(buf, rodata_offset)
         buf = buf_write_bytes(buf, rodata_data)
 
+    if has_xray_map:
+        buf = pad_to(buf, xray_map_offset)
+        buf = buf_write_bytes(buf, xray_map_data)
+
     # Symtab
     buf = pad_to(buf, symtab_offset)
     buf = buf_write_bytes(buf, symtab_buf.bytes)
@@ -303,6 +329,12 @@ fn write_elf64(writer: ElfWriter) -> [i64]:
     if has_bss:
         val bss_name_off = strtab_get_offset(shstrtab, ".bss")
         buf = write_shdr(buf, bss_name_off, SHT_NOBITS, SHF_ALLOC + SHF_WRITE, 0, bss_offset, bss_size, 0, 0, 8, 0)
+
+    # .simple_xray_map section header (no section symbol: nothing relocates
+    # against it; SHF_LINK_ORDER ties its lifetime to .text for --gc-sections)
+    if has_xray_map:
+        val xray_name_off = strtab_get_offset(shstrtab, ".simple_xray_map")
+        buf = write_shdr(buf, xray_name_off, SHT_PROGBITS, SHF_ALLOC + SHF_LINK_ORDER, 0, xray_map_offset, xray_map_data.len(), text_shndx, 0, 8, 0)
 
     # .symtab section header
     val symtab_name_off = strtab_get_offset(shstrtab, ".symtab")

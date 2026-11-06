@@ -92,6 +92,7 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
         // FR-DRIVER-0002b: pass VRegs so compile_binop can dispatch sshr/ushr
         // and sextend/uextend from `ctx.vreg_types` signedness.
         let val = super::instr::core::compile_binop(self.ctx, self.builder, op, lhs, rhs, left, right)?;
+        let val = super::instr::core::wrap_narrow_unsigned_arith(self.ctx, self.builder, op, dest, right, rhs, val);
         self.ctx.vreg_values.insert(dest, val);
         Ok(())
     }

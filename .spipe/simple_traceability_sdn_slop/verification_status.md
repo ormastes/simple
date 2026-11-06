@@ -67,6 +67,12 @@ different-source build is not candidate test evidence; it was not restarted.
 - Production graph persistence/invalidation, trusted admission integration,
   runner plan/provenance admission and complete viewer interactions remain
   implementation work. All 40 acceptance criteria remain unexecuted.
+- An in-development snapshot partition updater now retains owner-local decoded
+  declaration facts in memory when exact artifact and extractor/schema/policy/
+  configuration bindings match. Cross-file composition and graph resolution
+  are recomputed; no persisted partition codec, atomic publication, or trusted
+  origin seal exists. Cold-oracle parity and invalidation fixtures are authored
+  but unrun, including malformed and policy-budget diagnostic parity.
 - Generated-manual completeness and NFR measurements have no accepted
   execution evidence. No verification PASS is claimed.
 - The optional native AST inventory provider and compiler SSpec span repair

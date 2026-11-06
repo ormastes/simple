@@ -45,6 +45,12 @@ fn actual_query_cli(args: [text]) -> (text, text, i32):
         return ("", "SIMPLE_BINARY, SIMPLE_TRACE_QUERY_TEST_COMMAND or SIMPLE_TRACE_QUERY_TEST_BINARY is required", 2)
     process_run_timeout(runner, ["run", "src/app/traceability/query_main.spl"] + args, 30000)
 
+# Exit 1 means "rendered, but the graph is incomplete"; a complete graph exits 0.
+# The page states which it is, so the expectation does not depend on how many
+# diagnostics a given checkout happens to carry.
+fn complete_graph_status(page: text) -> i32:
+    if page.contains("Graph complete: true"): 0 else: 1
+
 fn query_document(output: text) -> Dict<text, SdnValue>:
     val parsed = parse_with_spans_and_issues(output).unwrap()
     expect(parsed.2.len()).to_equal(0)
@@ -69,8 +75,8 @@ describe "Inspect registered facts from captured source":
         val build = trace_query_build_snapshot_v1(trace_query_options_parse_v1(["list", "features"]).unwrap()).unwrap()
         expect(build.graph.subject.kind).to_equal("worktree_preview")
         expect(build.graph.subject.snapshot_id).to_start_with("worktree:sha256:")
-        # Default authored claims have no independently registered authority.
-        expect(build.graph.complete).to_be(false)
+        # Default authored claims resolve against the policy-owned authority registry.
+        expect(build.graph.complete).to_be(true)
         expect(build.admission_eligible).to_be(false)
         val page = query_trace_nodes_v1(build.graph, TraceNodeQueryV1(snapshot_id: build.graph.subject.snapshot_id,
             operation: "show", kind: "features", selected_id: "feature:traceability")).unwrap()
@@ -82,15 +88,15 @@ describe "Inspect registered facts from captured source":
         step("Run simple trace list features through the admitted CLI")
         # --bug-db=none keeps this scenario on the registered-declaration contract alone.
         val (output, errors, status) = actual_query_cli(["list", "features", "--format=sdn", "--bug-db=none"])
-        expect(status).to_equal(1)
+        expect(status).to_equal(0)
         val fields = query_document(output)
         expect(fields["snapshot_kind"]).to_equal(SdnValue.String("worktree_preview"))
         expect(fields["ingestion"]).to_equal(SdnValue.String("registered-declarations-only"))
         expect(fields["legacy_database_ingestion"]).to_equal(SdnValue.String("unavailable"))
         expect(fields["qualification"]).to_equal(SdnValue.String("unverified"))
         expect(fields["admission_eligible"]).to_equal(SdnValue.Bool(false))
-        expect(fields["graph_complete"]).to_equal(SdnValue.Bool(false))
-        expect(output).to_contain("TRACE-AUTHORITY-CONFLICT")
+        expect(fields["graph_complete"]).to_equal(SdnValue.Bool(true))
+        expect(output).not_to_contain("TRACE-AUTHORITY-CONFLICT")
 
     it "keeps table diagnostics on stderr and a single summary count on stdout":
         step("Run the table form of list features")
@@ -105,7 +111,7 @@ describe "Inspect registered facts from captured source":
         # @ac AC-TRC-041
         step("List bugs through the CLI with the default sidecar (doc/08_tracking/bug/bug_db.sdn)")
         val (output, errors, status) = actual_query_cli(["list", "bugs", "--format=sdn", "--limit", "2"])
-        expect(status).to_equal(1)
+        expect(status).to_equal(0)
         val fields = query_document(output)
         expect(fields["legacy_database_ingestion"]).to_equal(SdnValue.String("bug-db/v1"))
         expect(fields["ingestion"]).to_equal(SdnValue.String("registered-declarations+sidecar"))
@@ -119,11 +125,11 @@ describe "Inspect registered facts from captured source":
         expect(output).to_contain("legacy: {")
         step("The same page without the sidecar is empty: declarations declare no bug")
         val (bare, bare_errors, bare_status) = actual_query_cli(["list", "bugs", "--format=sdn", "--bug-db=none"])
-        expect(bare_status).to_equal(1)
+        expect(bare_status).to_equal(0)
         expect(query_document(bare)["total_count"]).to_equal(SdnValue.Int(0))
         step("A status filter narrows before paging and is rejected outside list bugs")
         val (filtered, filtered_errors, filtered_status) = actual_query_cli(["list", "bugs", "--status=open", "--limit", "1"])
-        expect(filtered_status).to_equal(1)
+        expect(filtered_status).to_equal(0)
         expect(filtered).to_contain("KIND\tID\tTITLE\tSTATUS\tSEVERITY\tLOCATION\n")
         val (rejected, rejected_errors, rejected_status) = actual_query_cli(["list", "features", "--status=open"])
         expect(rejected_status).to_equal(2)
@@ -133,13 +139,13 @@ describe "Inspect registered facts from captured source":
         # @ac AC-TRC-041
         step("Scan this feature's own unit spec root and read a declared requirement's references")
         val (output, errors, status) = actual_query_cli(["refs", "requirement", "req:REQ-TRC-015", "--spec-root=test/01_unit/app/traceability"])
-        expect(status).to_equal(1)
+        expect(status).to_equal(0)
         expect(output).to_contain("Selected: requirement req:REQ-TRC-015 ")
         expect(output).to_contain("SIDECAR\tverified_by\ttest/01_unit/app/traceability/legacy_bugs_sidecar_spec.spl\theader\tannotation-claim\treq:REQ-TRC-015\n")
         expect(output).to_contain("sidecar annotation-req/v1 test/01_unit/app/traceability rows=")
         step("A requirement only spec headers name renders sidecar rows and no invented node")
         val (undeclared, undeclared_errors, undeclared_status) = actual_query_cli(["refs", "requirement", "req:REQ-TRC-021", "--spec-root=test/01_unit/app/traceability", "--format=sdn"])
-        expect(undeclared_status).to_equal(1)
+        expect(undeclared_status).to_equal(0)
         val fields = query_document(undeclared)
         expect(fields["total_count"]).to_equal(SdnValue.Int(0))
         expect(undeclared).to_contain("undeclared; sidecar references only")
@@ -149,12 +155,12 @@ describe "Inspect registered facts from captured source":
         expect(absent).to_contain("TRACE-QUERY-NOT-FOUND")
         step("refs file summarizes one path: claims, declared entities and sidecar rows")
         val (file_page, file_errors, file_status) = actual_query_cli(["refs", "file", "src/app/traceability/main.spl"])
-        expect(file_status).to_equal(1)
+        expect(file_status).to_equal(complete_graph_status(file_page))
         expect(file_page).to_contain("Selected: source_file source:trace-cli src/app/traceability/main.spl")
         expect(file_page).to_contain("incoming\timplemented_by\tfeature:traceability\t")
         expect(file_page).to_contain("LOCATOR\tsrc/app/traceability/main.spl\tfile\t\tsource:trace-cli\n")
         val (spec_page, spec_errors, spec_status) = actual_query_cli(["refs", "file", "test/01_unit/app/traceability/legacy_bugs_sidecar_spec.spl", "--spec-root=test/01_unit/app/traceability"])
-        expect(spec_status).to_equal(1)
+        expect(spec_status).to_equal(complete_graph_status(spec_page))
         expect(spec_page).to_contain("SIDECAR\tverified_by\ttest/01_unit/app/traceability/legacy_bugs_sidecar_spec.spl\theader\tannotation-claim\treq:REQ-TRC-015\n")
         val (none_page, none_errors, none_status) = actual_query_cli(["refs", "file", "src/app/does_not_exist.spl", "--bug-db=none"])
         expect(none_status).to_equal(1)
@@ -171,7 +177,7 @@ describe "Inspect registered facts from captured source":
         val tree = git_object_oracle(["rev-parse", "--verify", commit + "^\{tree\}"])
         step("Read one requirement page from that exact commit through the CLI")
         val (output, errors, status) = actual_query_cli(["list", "requirements", "--snapshot=git:" + commit, "--limit", "1", "--format=sdn"])
-        expect(status).to_equal(1)
+        expect(status).to_equal(0)
         val fields = query_document(output)
         expect(fields["snapshot_kind"]).to_equal(SdnValue.String("git_commit"))
         expect(fields["revision"]).to_equal(SdnValue.String(commit))
@@ -192,7 +198,7 @@ describe "Inspect registered facts from captured source":
             fail("The owned index fixture must differ from HEAD")
         step("Show the independently staged feature title through the CLI index route")
         val (output, errors, status) = actual_query_cli(["show", "feature", "feature:traceability", "--snapshot", "index", "--format=sdn"])
-        expect(status).to_equal(1)
+        expect(status).to_equal(0)
         val fields = query_document(output)
         expect(fields["snapshot_kind"]).to_equal(SdnValue.String("git_index"))
         expect(fields["revision"]).to_equal(SdnValue.String(""))

@@ -1,0 +1,194 @@
+# @cover src/lib/common/trace/data/data_observation_aggregator_v1.spl 80%
+"""
+## Purpose and audience
+Each worker aggregates data observations (field accesses, collection
+operations, node lifecycle) in a bounded numeric table that follows the V1
+trace facade lifecycle: prepare with a configuration and an aspect-param
+selection, start under a session generation, record, stop/resume, drain.
+Readers are trace-provider and runtime authors.
+Plan: doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md
+(W5, sections 10.3-10.7; XR-01, XR-02, XR-04, XR-05, XR-06). Category: Infrastructure.
+## Operator workflow
+bin/simple test test/01_unit/lib/common/trace/data/data_observation_aggregator_v1_spec.spl
+## Compatibility and limitations
+Interpreter lane. No compiler emits data sites yet (W2 AttrRead/AttrWrite), so
+the data-site manifest is constructed here; native capture and the static-off
+artifact check (XR-01 native half, XR-03) need a native `--xray` build.
+## Verification guidance and troubleshooting
+A RED that shows a zero where a state was expected means an unmeasured value
+leaked into a count; fix the aggregator, never the expectation.
+"""
+# Lifecycle: doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md ;
+# doc/04_architecture/compiler/xray/xray_compiler_structural_change_2026-11-06.md
+# @manual_section: Data observation aggregation
+
+use std.spec.*
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.data.data_observation_contracts.*
+use std.common.trace.data.data_observation_aggregator_v1.*
+
+fn sites() -> [DataSiteV1]:
+    [DataSiteV1(site_id: 11, kind: DataObservationKindV1.FieldRead, schema_index: 2, attr_ordinal: 4, op: DataCollectionOpV1.None),
+     DataSiteV1(site_id: 12, kind: DataObservationKindV1.CollectionOp, schema_index: 0, attr_ordinal: 0, op: DataCollectionOpV1.Lookup),
+     DataSiteV1(site_id: 13, kind: DataObservationKindV1.NodeFinish, schema_index: 2, attr_ordinal: 0, op: DataCollectionOpV1.None)]
+
+fn raw_config() -> TraceConfigV1:
+    TraceConfigV1(instrumentation: TraceInstrumentationV1.Dynamic, backend: TraceBackendV1.Simple,
+        consistency: TraceConsistencyV1.RawEdges, patch_mode: TracePatchModeV1.Quiescent,
+        abi_profile: "", event_mask: 7, buffer_bytes: 4096, max_contexts: 4, max_depth: 8,
+        max_resident_generations: 2)
+
+fn select(ids: [u32]) -> TraceSelectionV1:
+    var chosen: [TraceSiteV1] = []
+    for id in ids:
+        chosen.push(TraceSiteV1(module_instance: 3, site_id: id))
+    TraceSelectionV1(manifest_incarnation: 5, sites: chosen)
+
+fn bound(ids: [u32]) -> DataObservationAggregatorV1:
+    var agg = DataObservationAggregatorV1.create(DataSiteManifestV1(module_instance: 3, manifest_incarnation: 5, sites: sites())).unwrap()
+    agg.prepare(raw_config(), select(ids)).unwrap()
+    agg.start(7).unwrap()
+    agg
+
+fn find(records: [DataObservationV1], site: u32) -> DataObservationV1:
+    for r in records:
+        if r.site_id == site:
+            return r
+    fail("no drained record for site {site}")
+    records[0]
+
+describe "Data observation aggregation":
+    it "XR-01 fails closed on a wrong manifest, unknown data sites and absent instrumentation":
+        # @req REQ-XR-01
+        step("Prepare against a stale manifest, an unknown site, an empty manifest and a foreign module")
+        # @capture(exec): aggregator outcomes
+        var agg = DataObservationAggregatorV1.create(DataSiteManifestV1(module_instance: 3, manifest_incarnation: 5, sites: sites())).unwrap()
+        val stale = TraceSelectionV1(manifest_incarnation: 4, sites: [TraceSiteV1(module_instance: 3, site_id: 11)])
+        expect(agg.prepare(raw_config(), stale).unwrap_err() == TraceFailureV1.InvalidMap).to_equal(true)
+        expect(agg.prepare(raw_config(), select([11, 99])).unwrap_err() == TraceFailureV1.InvalidMap).to_equal(true)
+        var empty = DataObservationAggregatorV1.create(DataSiteManifestV1(module_instance: 3, manifest_incarnation: 5, sites: [])).unwrap()
+        expect(empty.prepare(raw_config(), select([11])).unwrap_err() == TraceFailureV1.InstrumentationAbsent).to_equal(true)
+        expect(DataObservationAggregatorV1.create(DataSiteManifestV1(module_instance: 0, manifest_incarnation: 5, sites: sites())).is_err()).to_equal(true)
+        # Sites of another module in the selection are not this aggregator's to admit.
+        val foreign = TraceSelectionV1(manifest_incarnation: 5, sites: [TraceSiteV1(module_instance: 9, site_id: 11)])
+        expect(agg.prepare(raw_config(), foreign).unwrap_err() == TraceFailureV1.InvalidMap).to_equal(true)
+
+    it "XR-02 binds records to the session generation and rejects merges across generations":
+        # @req REQ-XR-02
+        step("Drain workers started under the same and under a different generation")
+        # @capture(exec): aggregator outcomes
+        var a = bound([11])
+        a.record(11, 2)
+        val first = a.drain().unwrap()
+        expect(first.records[0].generation).to_equal(7)
+        var b = bound([11])
+        b.record(11, 1)
+        val second = b.drain().unwrap()
+        expect(data_observation_merge_v1(first.records[0], second.records[0]).is_ok()).to_equal(true)
+        var c = DataObservationAggregatorV1.create(DataSiteManifestV1(module_instance: 3, manifest_incarnation: 5, sites: sites())).unwrap()
+        c.prepare(raw_config(), select([11])).unwrap()
+        c.start(8).unwrap()
+        c.record(11, 1)
+        val third = c.drain().unwrap()
+        expect(data_observation_merge_v1(first.records[0], third.records[0]).is_err()).to_equal(true)
+        expect(c.start(0).is_err()).to_equal(true)
+
+    it "XR-04 marks dropped observations and activation gaps instead of hiding them":
+        # @req REQ-XR-04
+        step("Record, drop one observation, stop, record while stopped, resume and drain")
+        # @capture(exec): aggregator outcomes
+        var agg = bound([11, 12])
+        agg.record(11, 3)
+        agg.record_dropped(12)
+        agg.stop()
+        expect(agg.record(11, 5)).to_equal(false)
+        agg.resume().unwrap()
+        agg.record(11, 1)
+        val out = agg.drain().unwrap()
+        expect(data_metric_value_v1(find(out.records, 11).count).unwrap()).to_equal(4)
+        expect(data_metric_state_code_v1(find(out.records, 12).count.state)).to_equal(4)
+        expect(out.stats.lost).to_equal(1)
+        expect(out.stats.transitions).to_equal(2)
+        expect(out.complete).to_equal(false)
+
+    it "XR-05 rejects paired-span consistency, which data aggregation cannot provide":
+        # @req REQ-XR-05
+        step("Prepare with paired spans and with instrumentation off")
+        # @capture(exec): aggregator outcomes
+        var agg = DataObservationAggregatorV1.create(DataSiteManifestV1(module_instance: 3, manifest_incarnation: 5, sites: sites())).unwrap()
+        var paired = raw_config()
+        paired.consistency = TraceConsistencyV1.PairedSpans
+        expect(agg.prepare(paired, select([11])).unwrap_err() == TraceFailureV1.UnsupportedConsistency).to_equal(true)
+        var off = raw_config()
+        off.instrumentation = TraceInstrumentationV1.Off
+        expect(agg.prepare(off, select([11])).unwrap_err() == TraceFailureV1.InstrumentationAbsent).to_equal(true)
+
+    it "XR-06 keeps unselected, unfired, saturated and unsupported distinct from zero":
+        # @req REQ-XR-06
+        step("Saturate one site, leave one unfired and one unselected, and mark an aux metric unsupported")
+        # @capture(exec): aggregator outcomes
+        var agg = bound([11, 12])
+        agg.record(12, 18446744073709551615u64)
+        agg.record(12, 1)
+        agg.record_aux_unsupported(12)
+        val out = agg.drain().unwrap()
+        # Selected but never fired: a measured zero.
+        expect(data_metric_value_v1(find(out.records, 11).count).unwrap()).to_equal(0)
+        # Unselected site 13 produces no record at all, never a zero.
+        var has13 = false
+        for r in out.records:
+            if r.site_id == 13:
+                has13 = true
+        expect(has13).to_equal(false)
+        expect(data_metric_state_code_v1(find(out.records, 12).count.state)).to_equal(5)
+        expect(data_metric_value_v1(find(out.records, 12).count).is_err()).to_equal(true)
+        expect(data_metric_state_code_v1(find(out.records, 12).aux.state)).to_equal(3)
+        expect(out.stats.unsupported_sites).to_equal(1)  # oracle: site 12 aux marked unsupported
+        # Recording an unselected site is not admitted and not counted.
+        var again = bound([11])
+        expect(again.record(13, 1)).to_equal(false)
+        expect(again.drain().unwrap().records.len()).to_equal(1)
+
+    it "aspect-param selection switches data sites at runtime without new instrumentation":
+        # @req REQ-W5-01
+        step("Select one site, then reselect another while stopped")
+        # @capture(exec): aggregator outcomes
+        var agg = bound([11])
+        expect(agg.record(12, 1)).to_equal(false)
+        agg.stop()
+        agg.reselect(select([12])).unwrap()
+        agg.resume().unwrap()
+        expect(agg.record(12, 2)).to_equal(true)
+        expect(agg.record(11, 2)).to_equal(false)
+        val out = agg.drain().unwrap()
+        expect(data_metric_value_v1(find(out.records, 12).count).unwrap()).to_equal(2)
+        # A live reselect is refused: selection changes only while stopped.
+        var live = bound([11])
+        expect(live.reselect(select([12])).unwrap_err() == TraceFailureV1.Busy).to_equal(true)
+
+    it "merges per-worker aggregates deterministically with incompleteness dominating":
+        # @req REQ-XR-04
+        step("Drain two workers and merge their records in both orders")
+        # @capture(exec): aggregator outcomes
+        var w1 = bound([11, 12])
+        var w2 = bound([11, 12])
+        w1.record(11, 2)
+        w2.record(11, 5)
+        w2.record_dropped(12)
+        val a = w1.drain().unwrap()
+        val b = w2.drain().unwrap()
+        val m11 = data_observation_merge_v1(find(a.records, 11), find(b.records, 11)).unwrap()
+        expect(data_metric_value_v1(m11.count).unwrap()).to_equal(7)
+        val m12 = data_observation_merge_v1(find(a.records, 12), find(b.records, 12)).unwrap()
+        expect(data_metric_state_code_v1(m12.count.state)).to_equal(4)
+        val swapped = data_observation_merge_v1(find(b.records, 12), find(a.records, 12)).unwrap()
+        expect(data_metric_state_code_v1(swapped.count.state)).to_equal(4)
+        # One worker measured aux and the other did not: partial coverage, not a sum.
+        var w3 = bound([11])
+        var w4 = bound([11])
+        w3.record_aux(11, 3)
+        val p3 = w3.drain().unwrap()
+        val p4 = w4.drain().unwrap()
+        val partial = data_observation_merge_v1(find(p3.records, 11), find(p4.records, 11)).unwrap()
+        expect(data_metric_state_code_v1(partial.aux.state)).to_equal(4)  # oracle: Dropped marks partial coverage
+        expect(data_metric_value_v1(partial.aux).is_err()).to_equal(true)

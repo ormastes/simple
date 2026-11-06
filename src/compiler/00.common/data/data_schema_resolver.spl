@@ -1,0 +1,509 @@
+# ============================================================================
+# compiler/00.common/data/data_schema_resolver.spl — the one SPL+SDN
+# schema resolver (plan W1, sections 3.2, 8.3-8.5).
+#
+# SPL declarations arrive as DataAttrDeclV1 lists (the frontend adapter is W2);
+# SDN declarations are read with the shared std.common.sdn parser. Both go
+# through data_schema_resolve_v1, so a declaration's origin can never change
+# the resolved surface or its digest. Never last-writer-wins; malformed input
+# is a diagnostic, never a silently dropped or defaulted field.
+# ============================================================================
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.sdn.value.{SdnValue, SdnSpan, sdn_value_to_text}
+use std.common.sdn.parser.{parse_with_spans_and_issues}
+use compiler.common.data.data_schema_contracts.*
+
+fn data_sort_texts_v1(items: [text]) -> [text]:
+    var out: [text] = []
+    for item in items:
+        var index = out.len()
+        out.push(item)
+        while index > 0 and out[index] < out[index - 1]:
+            val swap = out[index - 1]
+            out[index - 1] = out[index]
+            out[index] = swap
+            index = index - 1
+    out
+
+fn data_texts_contain_v1(items: [text], value: text) -> bool:
+    for item in items:
+        if item == value:
+            return true
+    false
+
+fn data_join_v1(items: [text], sep: text) -> text:
+    var out = ""
+    var first = true
+    for item in items:
+        if not first:
+            out = out + sep
+        out = out + item
+        first = false
+    out
+
+# Length-prefixed field so separators inside values cannot alias.
+fn data_lp_v1(value: text) -> text:
+    "{value.len()}:{value}"
+
+fn data_invalid_v1(subject: text, at: DataDeclProvenanceV1, what: text) -> DataSchemaDiagnosticV1:
+    data_schema_diagnostic_v1(DataSchemaErrorKindV1.InvalidDeclaration, subject, at, at,
+        "{what} at {data_decl_provenance_text_v1(at)}")
+
+# The alias table must be a function: one target per alias name, no cycles.
+pub fn data_alias_table_check_v1(aliases: [DataTypeAliasV1]) -> Result<bool, text>:
+    for a in aliases:
+        if a.alias.len() == 0 or a.target.len() == 0 or a.alias.contains("<") or a.target.contains("<"):
+            return Err("alias '{a.alias}' -> '{a.target}' must name two nominal types")
+        for b in aliases:
+            if a.alias == b.alias and a.target != b.target:
+                return Err("alias '{a.alias}' has two targets '{a.target}' and '{b.target}'")
+    for a in aliases:
+        var current = a.target
+        var steps = 0
+        var moved = true
+        while moved:
+            moved = false
+            for b in aliases:
+                if b.alias == current:
+                    current = b.target
+                    moved = true
+                    break
+            if current == a.alias or steps > aliases.len():
+                return Err("alias cycle through '{a.alias}'")
+            steps = steps + 1
+    Ok(true)
+
+# Callers resolve only after data_alias_table_check_v1; the step bound keeps
+# a direct call with an unchecked cyclic table terminating.
+pub fn data_resolve_alias_v1(name: text, aliases: [DataTypeAliasV1]) -> text:
+    var current = name
+    var moved = true
+    var steps = 0
+    while moved and steps <= aliases.len():
+        steps = steps + 1
+        moved = false
+        for alias in aliases:
+            if alias.alias == current:
+                current = alias.target
+                moved = true
+                break
+    current
+
+# Generic arguments are flat nominal names in V1; nested generic text is
+# rejected by the resolver instead of being compared unresolved.
+pub fn data_type_canonical_v1(type_ref: DataTypeRefV1, aliases: [DataTypeAliasV1]) -> text:
+    val path = data_resolve_alias_v1(type_ref.path, aliases)
+    if type_ref.args.len() == 0:
+        return path
+    var args: [text] = []
+    for arg in type_ref.args:
+        args.push(data_resolve_alias_v1(arg, aliases))
+    path + "<" + data_join_v1(args, ",") + ">"
+
+fn data_conflict_v1(kind: DataSchemaErrorKindV1, subject: text, label: text, left: text,
+                    p0: DataDeclProvenanceV1, right: text, p1: DataDeclProvenanceV1) -> DataSchemaDiagnosticV1:
+    val message = "{label} '{subject}': '{left}' at {data_decl_provenance_text_v1(p0)} conflicts with '{right}' at {data_decl_provenance_text_v1(p1)}"
+    data_schema_diagnostic_v1(kind, subject, p0, p1, message)
+
+fn data_requiredness_name_v1(value: DataRequirednessV1) -> text:
+    match value:
+        case DataRequirednessV1.Required: "required"
+        case DataRequirednessV1.Optional: "optional"
+        case DataRequirednessV1.Defaulted: "defaulted"
+
+fn data_decl_shape_error_v1(decl: DataAttrDeclV1) -> text:
+    if decl.tree.len() == 0 or decl.view.len() == 0 or decl.name.len() == 0 or decl.type_ref.path.len() == 0:
+        return "incomplete attribute declaration"
+    if decl.type_ref.path.contains("<"):
+        return "type path must be nominal; put generic arguments in args"
+    for arg in decl.type_ref.args:
+        if arg.len() == 0 or arg.contains("<"):
+            return "generic arguments must be flat nominal names"
+    val defaulted = data_requiredness_code_v1(decl.requiredness) == data_requiredness_code_v1(DataRequirednessV1.Defaulted)
+    if defaulted and decl.default_value.len() == 0:
+        return "defaulted attribute has no default"
+    if not defaulted and decl.default_value.len() > 0:
+        return "default given for a non-defaulted attribute"
+    ""
+
+pub fn data_schema_resolve_v1(authority: DataSchemaAuthorityV1, decls: [DataAttrDeclV1],
+                              aliases: [DataTypeAliasV1]) -> Result<DataSchemaSurfaceV1, [DataSchemaDiagnosticV1]>:
+    var diags: [DataSchemaDiagnosticV1] = []
+    match data_alias_table_check_v1(aliases):
+        case Err(message):
+            val none = data_decl_provenance_v1(DataDeclOriginV1.Spl, "", 0, "")
+            return Err([data_schema_diagnostic_v1(DataSchemaErrorKindV1.InvalidDeclaration, "", none, none, message)])
+        case Ok(_): pass
+    var names: [text] = []
+    for decl in decls:
+        val where = data_decl_provenance_text_v1(decl.provenance)
+        val shape = data_decl_shape_error_v1(decl)
+        if shape.len() > 0:
+            diags.push(data_invalid_v1(decl.name, decl.provenance, shape))
+        elif decl.tree != authority.tree or not data_texts_contain_v1(authority.owners, decl.provenance.owner):
+            diags.push(data_schema_diagnostic_v1(DataSchemaErrorKindV1.UnauthorizedInjection, decl.name,
+                decl.provenance, decl.provenance,
+                "owner '{decl.provenance.owner}' has no authority over tree '{decl.tree}' (schema '{authority.tree}') at {where}"))
+        elif not data_texts_contain_v1(names, decl.name):
+            names.push(decl.name)
+    if diags.len() > 0:
+        return Err(diags)
+    var attrs: [DataResolvedAttrV1] = []
+    var ordinal = 0
+    for name in data_sort_texts_v1(names):
+        var has_first = false
+        var first = decls[0]
+        var first_type = ""
+        var views: [text] = []
+        var provenances: [DataDeclProvenanceV1] = []
+        for decl in decls:
+            if decl.name == name:
+                val canonical = data_type_canonical_v1(decl.type_ref, aliases)
+                if not has_first:
+                    has_first = true
+                    first = decl
+                    first_type = canonical
+                elif canonical != first_type:
+                    diags.push(data_conflict_v1(DataSchemaErrorKindV1.TypeConflict, name, "attribute type",
+                        first_type, first.provenance, canonical, decl.provenance))
+                elif data_requiredness_code_v1(decl.requiredness) != data_requiredness_code_v1(first.requiredness):
+                    diags.push(data_conflict_v1(DataSchemaErrorKindV1.RequirednessConflict, name, "attribute requiredness",
+                        data_requiredness_name_v1(first.requiredness), first.provenance,
+                        data_requiredness_name_v1(decl.requiredness), decl.provenance))
+                elif decl.default_value != first.default_value:
+                    diags.push(data_conflict_v1(DataSchemaErrorKindV1.DefaultConflict, name, "attribute default",
+                        first.default_value, first.provenance, decl.default_value, decl.provenance))
+                if not data_texts_contain_v1(views, decl.view):
+                    views.push(decl.view)
+                provenances.push(decl.provenance)
+        ordinal = ordinal + 1
+        attrs.push(DataResolvedAttrV1(id: DataAttrIdV1(tree: authority.tree, ordinal: ordinal),
+            name: name, type_canonical: first_type, requiredness: first.requiredness,
+            default_value: first.default_value, views: data_sort_texts_v1(views),
+            provenances: provenances))
+    if diags.len() > 0:
+        return Err(diags)
+    Ok(DataSchemaSurfaceV1(contract_version: DATA_SCHEMA_CONTRACT_V1, tree: authority.tree,
+        attrs: attrs, schema_digest: data_schema_digest_v1(authority.tree, attrs)))
+
+# SchemaDigest covers types, applicability, requiredness and defaults. It
+# deliberately excludes provenance, so equivalent SPL and SDN declarations
+# produce the same digest; provenance is retained on the surface instead.
+pub fn data_schema_digest_v1(tree: text, attrs: [DataResolvedAttrV1]) -> text:
+    var canonical = DATA_SCHEMA_DIGEST_DOMAIN_V1 + "\ntree=" + data_lp_v1(tree) + "\n"
+    for a in attrs:
+        var views = ""
+        for v in a.views:
+            views = views + data_lp_v1(v)
+        canonical = canonical + "attr={a.id.ordinal}|" + data_lp_v1(a.name) + data_lp_v1(a.type_canonical) +
+            "{data_requiredness_code_v1(a.requiredness)}|" + data_lp_v1(a.default_value) + "views=" + views + "\n"
+    sha256_text(canonical)
+
+# ---------------------------------------------------------------------------
+# SDN adapter: data_policy.declarations.<decl>.{tree, view, attributes.<attr>.
+# {type, args?, required?, default?}}. Duplicate keys and wrong value shapes
+# are diagnostics. A scalar default is kept as its canonical SDN text.
+# ---------------------------------------------------------------------------
+fn data_sdn_keys_v1(value: SdnValue) -> [text]:
+    match value.as_dict():
+        case Some(d):
+            var keys: [text] = []
+            for k in d.keys():
+                keys.push(k)
+            data_sort_texts_v1(keys)
+        case None: []
+
+fn data_sdn_line_v1(spans: Dict<text, SdnSpan>, path: text) -> i64:
+    if spans.contains_key(path): spans[path].line else: 0
+
+# "" means absent; a present non-text value is an error.
+fn data_sdn_text_field_v1(value: SdnValue, key: text) -> Result<text, text>:
+    match value.get(key):
+        case None: Ok("")
+        case Some(v):
+            match v.as_str():
+                case Some(s): Ok(s)
+                case None: Err("'{key}' must be text")
+
+fn data_sdn_dict_v1(value: SdnValue, what: text) -> Result<SdnValue, text>:
+    if value.is_dict(): Ok(value) else: Err("'{what}' must be a mapping")
+
+fn data_sdn_attr_v1(spec: SdnValue, tree: text, view: text, attr_key: text,
+                    at: DataDeclProvenanceV1) -> Result<DataAttrDeclV1, text>:
+    data_sdn_dict_v1(spec, attr_key)?
+    val type_path = data_sdn_text_field_v1(spec, "type")?
+    if type_path.len() == 0:
+        return Err("attribute '{attr_key}' has no type")
+    var args: [text] = []
+    match spec.get("args"):
+        case Some(v):
+            match v.as_array():
+                case Some(items):
+                    for item in items:
+                        match item.as_str():
+                            case Some(s): args.push(s)
+                            case None: return Err("'args' of '{attr_key}' must hold text")
+                case None: return Err("'args' of '{attr_key}' must be a list")
+        case None: pass
+    var default_value = ""
+    match spec.get("default"):
+        case Some(v):
+            match v.as_str():
+                case Some(s):
+                    if s.len() == 0:
+                        return Err("'default' of '{attr_key}' is empty")
+                    default_value = s
+                case None:
+                    if v.is_number() or v.is_bool():
+                        default_value = sdn_value_to_text(v)
+                    else:
+                        return Err("'default' of '{attr_key}' must be a scalar")
+        case None: pass
+    var required = false
+    match spec.get("required"):
+        case Some(v):
+            match v.as_bool():
+                case Some(b): required = b
+                case None: return Err("'required' of '{attr_key}' must be true or false")
+        case None: pass
+    if required and default_value.len() > 0:
+        return Err("attribute '{attr_key}' is both required and defaulted")
+    var requiredness = DataRequirednessV1.Optional
+    if required:
+        requiredness = DataRequirednessV1.Required
+    elif default_value.len() > 0:
+        requiredness = DataRequirednessV1.Defaulted
+    Ok(data_attr_decl_v1(tree, view, attr_key, data_type_ref_v1(type_path, args),
+        requiredness, default_value, at))
+
+# Parse one data-policy document. Duplicate keys and wrong shapes are
+# diagnostics. Runtime trace-event selection is refused here: data sites are
+# selected only through aspect params (`simple.trace/observer-v1`); a
+# build-config `profiles` block (plan 8.3 draft) is rejected outright.
+fn data_sdn_document_v1(source: text, path: text, owner: text) -> Result<(SdnValue, Dict<text, SdnSpan>), [DataSchemaDiagnosticV1]>:
+    val here = data_decl_provenance_v1(DataDeclOriginV1.Sdn, path, 0, owner)
+    match parse_with_spans_and_issues(source):
+        case Err(e):
+            return Err([data_invalid_v1("", here, "SDN parse error: {e}")])
+        case Ok(parsed):
+            var diags: [DataSchemaDiagnosticV1] = []
+            for issue in parsed.2:
+                val at = data_decl_provenance_v1(DataDeclOriginV1.Sdn, path, issue.line, owner)
+                diags.push(data_invalid_v1(issue.path, at, "SDN {issue.kind} '{issue.path}'"))
+            match parsed.0.get_path("data_policy.profiles"):
+                case Some(_):
+                    val at = data_decl_provenance_v1(DataDeclOriginV1.Sdn, path,
+                        data_sdn_line_v1(parsed.1, "data_policy.profiles"), owner)
+                    diags.push(data_invalid_v1("profiles", at,
+                        "'data_policy.profiles' is not allowed: data sites are selected at runtime through aspect params"))
+                case None: pass
+            if diags.len() > 0:
+                return Err(diags)
+            Ok((parsed.0, parsed.1))
+
+pub fn data_schema_decls_from_sdn_v1(source: text, path: text, owner: text) -> Result<[DataAttrDeclV1], [DataSchemaDiagnosticV1]>:
+    val here = data_decl_provenance_v1(DataDeclOriginV1.Sdn, path, 0, owner)
+    val document = data_sdn_document_v1(source, path, owner)?
+    val root = document.0
+    val spans = document.1
+    var diags: [DataSchemaDiagnosticV1] = []
+    var decls: [DataAttrDeclV1] = []
+    val declarations = match root.get_path("data_policy.declarations"):
+        case Some(v): v
+        case None: return Ok(decls)
+    if not declarations.is_dict():
+        return Err([data_invalid_v1("declarations", here, "'data_policy.declarations' must be a mapping")])
+    for decl_key in data_sdn_keys_v1(declarations):
+        val node = declarations.get(decl_key).unwrap()
+        val node_at = data_decl_provenance_v1(DataDeclOriginV1.Sdn, path,
+            data_sdn_line_v1(spans, "data_policy.declarations.{decl_key}"), owner)
+        if not node.is_dict():
+            diags.push(data_invalid_v1(decl_key, node_at, "declaration '{decl_key}' must be a mapping"))
+            continue
+        val tree = match data_sdn_text_field_v1(node, "tree"):
+            case Ok(t): t
+            case Err(m):
+                diags.push(data_invalid_v1(decl_key, node_at, m))
+                continue
+        val view = match data_sdn_text_field_v1(node, "view"):
+            case Ok(t): t
+            case Err(m):
+                diags.push(data_invalid_v1(decl_key, node_at, m))
+                continue
+        if tree.len() == 0 or view.len() == 0:
+            diags.push(data_invalid_v1(decl_key, node_at, "declaration '{decl_key}' needs tree and view"))
+            continue
+        val attributes = match node.get("attributes"):
+            case Some(v): v
+            case None: SdnValue.Null
+        if not attributes.is_dict():
+            diags.push(data_invalid_v1(decl_key, node_at, "'attributes' of '{decl_key}' must be a mapping"))
+            continue
+        for attr_key in data_sdn_keys_v1(attributes):
+            val base = "data_policy.declarations.{decl_key}.attributes.{attr_key}"
+            val at = data_decl_provenance_v1(DataDeclOriginV1.Sdn, path, data_sdn_line_v1(spans, base), owner)
+            match data_sdn_attr_v1(attributes.get(attr_key).unwrap(), tree, view, attr_key, at):
+                case Ok(d): decls.push(d)
+                case Err(m): diags.push(data_invalid_v1(attr_key, at, m))
+    if diags.len() > 0:
+        return Err(diags)
+    Ok(decls)
+
+# ---------------------------------------------------------------------------
+# Policy rule precedence (plan 8.4). The caller passes only the rules that
+# apply to one subject (canonical site/type/module chain); rules of other
+# policy kinds are ignored. Within a rule group the highest specificity wins;
+# at equal specificity a build-config (SDN) rule refines a source (SPL) rule,
+# and same-origin disagreement is an error.
+#   1. Non-overridable source pins bind; a disagreeing build pin is an error.
+#   2. Otherwise build pins, then overridable source pins.
+#   3. Otherwise hints.
+#   4. Otherwise the versioned compiler default.
+# ---------------------------------------------------------------------------
+fn data_rules_top_v1(kind: DataPolicyKindV1, rules: [DataPolicyRuleV1], conflict: DataSchemaErrorKindV1,
+                     label: text) -> Result<DataPolicyChoiceV1, DataSchemaDiagnosticV1>:
+    var best = -1
+    for rule in rules:
+        val rank = data_rule_specificity_rank_v1(rule.specificity)
+        if rank > best:
+            best = rank
+    var build: [DataPolicyRuleV1] = []
+    var source: [DataPolicyRuleV1] = []
+    for rule in rules:
+        if data_rule_specificity_rank_v1(rule.specificity) == best:
+            if data_decl_origin_code_v1(rule.provenance.origin) == 2:
+                build.push(rule)
+            else:
+                source.push(rule)
+    val group = if build.len() > 0: build else: source
+    var provenances: [DataDeclProvenanceV1] = []
+    for rule in group:
+        if rule.choice != group[0].choice:
+            return Err(data_conflict_v1(conflict, rule.subject, label,
+                group[0].choice, group[0].provenance, rule.choice, rule.provenance))
+        provenances.push(rule.provenance)
+    Ok(DataPolicyChoiceV1(kind: kind, choice: group[0].choice, from_default: false, provenances: provenances))
+
+pub fn data_policy_resolve_rules_v1(kind: DataPolicyKindV1, rules: [DataPolicyRuleV1],
+                                    default_choice: text) -> Result<DataPolicyChoiceV1, DataSchemaDiagnosticV1>:
+    val wanted = data_policy_kind_code_v1(kind)
+    var hard_source: [DataPolicyRuleV1] = []
+    var build_pins: [DataPolicyRuleV1] = []
+    var soft_source: [DataPolicyRuleV1] = []
+    var hints: [DataPolicyRuleV1] = []
+    for rule in rules:
+        if data_policy_kind_code_v1(rule.kind) == wanted:
+            match rule.strength:
+                case DataRuleStrengthV1.Pin:
+                    if data_decl_origin_code_v1(rule.provenance.origin) == 2:
+                        build_pins.push(rule)
+                    elif rule.overridable:
+                        soft_source.push(rule)
+                    else:
+                        hard_source.push(rule)
+                case DataRuleStrengthV1.Hint:
+                    hints.push(rule)
+    if hard_source.len() > 0:
+        # Every non-overridable source pin binds, at any specificity, and every
+        # build pin must agree with it.
+        var provenances: [DataDeclProvenanceV1] = []
+        for rule in hard_source:
+            if rule.choice != hard_source[0].choice:
+                return Err(data_conflict_v1(DataSchemaErrorKindV1.PinConflict, rule.subject, "source pin",
+                    hard_source[0].choice, hard_source[0].provenance, rule.choice, rule.provenance))
+            provenances.push(rule.provenance)
+        for rule in build_pins:
+            if rule.choice != hard_source[0].choice:
+                return Err(data_conflict_v1(DataSchemaErrorKindV1.PinConflict, rule.subject, "build pin vs source pin",
+                    hard_source[0].choice, hard_source[0].provenance, rule.choice, rule.provenance))
+        return Ok(DataPolicyChoiceV1(kind: kind, choice: hard_source[0].choice, from_default: false, provenances: provenances))
+    if build_pins.len() > 0:
+        return data_rules_top_v1(kind, build_pins, DataSchemaErrorKindV1.PinConflict, "build pin")
+    if soft_source.len() > 0:
+        return data_rules_top_v1(kind, soft_source, DataSchemaErrorKindV1.PinConflict, "source pin")
+    if hints.len() > 0:
+        return data_rules_top_v1(kind, hints, DataSchemaErrorKindV1.AmbiguousRule, "hint")
+    Ok(DataPolicyChoiceV1(kind: kind, choice: default_choice, from_default: true, provenances: []))
+
+# ---------------------------------------------------------------------------
+# SDN rule rows: data_policy.rules.<name> with exactly one subject key
+# (site | type | module | project) and exactly one choice key (layout ->
+# Layout kind, algorithm -> Collection kind). `pin: true` makes it a pin.
+# Rows sort by name.
+# ---------------------------------------------------------------------------
+fn data_sdn_bool_field_v1(value: SdnValue, key: text) -> Result<bool, text>:
+    match value.get(key):
+        case None: Ok(false)
+        case Some(v):
+            match v.as_bool():
+                case Some(b): Ok(b)
+                case None: Err("'{key}' must be true or false")
+
+# V1 rule-row keys. Anything else (plan 8.3 draft keys such as
+# implementations, application, occupancy, profile_group, selector,
+# attribute, lookup) is refused by name rather than silently dropped.
+# `overridable` is a source-pin property; build rows cannot carry it.
+fn data_sdn_rule_key_allowed_v1(key: text) -> bool:
+    key == "site" or key == "type" or key == "module" or key == "project" or
+        key == "layout" or key == "algorithm" or key == "pin"
+
+fn data_sdn_rule_v1(row: SdnValue, name: text, at: DataDeclProvenanceV1) -> Result<DataPolicyRuleV1, text>:
+    data_sdn_dict_v1(row, name)?
+    for key in data_sdn_keys_v1(row):
+        if not data_sdn_rule_key_allowed_v1(key):
+            return Err("rule '{name}': key '{key}' is not supported by the V1 resolver")
+    var subject = ""
+    var subjects = 0
+    var specificity = DataRuleSpecificityV1.ProjectDefault
+    val site = data_sdn_text_field_v1(row, "site")?
+    val owning = data_sdn_text_field_v1(row, "type")?
+    val module = data_sdn_text_field_v1(row, "module")?
+    val project = data_sdn_text_field_v1(row, "project")?
+    if site.len() > 0:
+        subject = site
+        specificity = DataRuleSpecificityV1.ExactSite
+        subjects = subjects + 1
+    if owning.len() > 0:
+        subject = owning
+        specificity = DataRuleSpecificityV1.OwningType
+        subjects = subjects + 1
+    if module.len() > 0:
+        subject = module
+        specificity = DataRuleSpecificityV1.Module
+        subjects = subjects + 1
+    if project.len() > 0:
+        subject = project
+        specificity = DataRuleSpecificityV1.ProjectDefault
+        subjects = subjects + 1
+    if subjects != 1:
+        return Err("rule '{name}' needs exactly one of site, type, module or project")
+    val layout = data_sdn_text_field_v1(row, "layout")?
+    val algorithm = data_sdn_text_field_v1(row, "algorithm")?
+    if (layout.len() > 0) == (algorithm.len() > 0):
+        return Err("rule '{name}' needs exactly one of layout or algorithm")
+    val kind = if layout.len() > 0: DataPolicyKindV1.Layout else: DataPolicyKindV1.Collection
+    val choice = if layout.len() > 0: layout else: algorithm
+    val pin = data_sdn_bool_field_v1(row, "pin")?
+    val strength = if pin: DataRuleStrengthV1.Pin else: DataRuleStrengthV1.Hint
+    Ok(data_policy_rule_v1(kind, subject, specificity, strength, choice, false, at))
+
+pub fn data_policy_rules_from_sdn_v1(source: text, path: text, owner: text) -> Result<[DataPolicyRuleV1], [DataSchemaDiagnosticV1]>:
+    val here = data_decl_provenance_v1(DataDeclOriginV1.Sdn, path, 0, owner)
+    val document = data_sdn_document_v1(source, path, owner)?
+    var rules: [DataPolicyRuleV1] = []
+    val table = match document.0.get_path("data_policy.rules"):
+        case Some(v): v
+        case None: return Ok(rules)
+    if not table.is_dict():
+        return Err([data_invalid_v1("rules", here, "'data_policy.rules' must be a mapping")])
+    var diags: [DataSchemaDiagnosticV1] = []
+    for name in data_sdn_keys_v1(table):
+        val at = data_decl_provenance_v1(DataDeclOriginV1.Sdn, path,
+            data_sdn_line_v1(document.1, "data_policy.rules.{name}"), owner)
+        match data_sdn_rule_v1(table.get(name).unwrap(), name, at):
+            case Ok(rule): rules.push(rule)
+            case Err(m): diags.push(data_invalid_v1(name, at, m))
+    if diags.len() > 0:
+        return Err(diags)
+    Ok(rules)

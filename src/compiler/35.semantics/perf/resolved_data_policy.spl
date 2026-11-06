@@ -1,0 +1,132 @@
+# Resolved data-policy envelope (plan W0, doc/03_plan/compiler/data/
+# data_attributes_layout_containers_xray_2026-11-06.md sections 8.1, 8.5).
+#
+# Composes the existing owners: StorageLayoutPlanV1 for physical layout and
+# the CollectionPlan decision for lookup representation. It adds no layout or
+# algorithm enum and is not a second planner: the family owner produces the
+# plan; this envelope binds it to the resolved rule choice, the schema digest
+# and provenance, and refuses a plan that contradicts an explicit choice.
+# Lives in 35.semantics because CollectionPlanDecision is owned here.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.structural.storage_layout.storage_layout_contracts.*
+use compiler.common.data.data_schema_contracts.*
+use std.common.structural.digest.hash256.{hash256_hex_valid}
+use compiler.semantics.perf.collection_plan_selection.{CollectionPlanAlgorithm, CollectionPlanDecision}
+
+pub const RESOLVED_DATA_POLICY_CONTRACT_V1: i64 = 1
+pub const RESOLVED_DATA_POLICY_DIGEST_DOMAIN_V1: text = "simple.resolved-data-policy/v1"
+
+# Exactly one composed slot is present, selected by policy_kind. The
+# Collection slot is where ResolvedCollectionPolicyV1 attaches its decision.
+pub struct ResolvedDataPolicyV1:
+    contract_version: i64
+    policy_kind: DataPolicyKindV1
+    subject: text
+    schema_digest: text
+    choice: DataPolicyChoiceV1
+    layout: StorageLayoutPlanV1?
+    collection: CollectionPlanDecision?
+    # Semantic identity (plan 8.5): equivalent source and SDN rules match.
+    resolved_policy_digest: text
+    # Exact input receipt: which rule sites produced the choice. Kept apart
+    # from the semantic digest so provenance never forks identity.
+    provenance_receipt_digest: text
+
+# Owner tokens of the existing enums, used to compare a rule's choice with the
+# owner's plan. "auto" admits any plan the owner produced.
+pub fn resolved_layout_token_v1(kind: StorageLayoutKind) -> text:
+    match kind:
+        case StorageLayoutKind.AoS: "aos"
+        case StorageLayoutKind.SoA: "soa"
+        case StorageLayoutKind.AoSoA: "aosoa"
+        case StorageLayoutKind.Grouped: "grouped"
+        case StorageLayoutKind.Tiled: "tiled"
+        case StorageLayoutKind.Packed: "packed"
+        case StorageLayoutKind.FactoredIndex: "factored_index"
+        case StorageLayoutKind.ExternalFixed: "external_fixed"
+
+pub fn resolved_collection_token_v1(algorithm: CollectionPlanAlgorithm) -> text:
+    match algorithm:
+        case CollectionPlanAlgorithm.Original: "original"
+        case CollectionPlanAlgorithm.Linear: "linear"
+        case CollectionPlanAlgorithm.Hash: "hash"
+        case CollectionPlanAlgorithm.Ordered: "ordered"
+
+# ResolvedPolicyDigest (plan 8.5): kind, subject, schema, choice and the
+# composed plan, normalized so logically equivalent configuration digests the
+# same. Provenance and free-text reasons are excluded.
+fn resolved_policy_digest_v1(kind: DataPolicyKindV1, subject: text, schema_digest: text,
+                             choice: DataPolicyChoiceV1, plan_text: text) -> text:
+    sha256_text(RESOLVED_DATA_POLICY_DIGEST_DOMAIN_V1 + "\nkind={data_policy_kind_code_v1(kind)}\nsubject={subject.len()}:" +
+        subject + "\nschema=" + schema_digest + "\nchoice={choice.choice.len()}:" + choice.choice +
+        "\ndefault={choice.from_default}\nplan=" + plan_text + "\n")
+
+# Provenance receipt: the exact rule sites (origin, path, line, owner),
+# sorted so the receipt does not depend on rule input order.
+pub fn resolved_provenance_receipt_v1(choice: DataPolicyChoiceV1) -> text:
+    var entries: [text] = []
+    for p in choice.provenances:
+        val entry = "{data_decl_origin_code_v1(p.origin)}|{p.path.len()}:{p.path}|{p.line}|{p.owner.len()}:{p.owner}"
+        var index = entries.len()
+        entries.push(entry)
+        while index > 0 and entries[index] < entries[index - 1]:
+            val swap = entries[index - 1]
+            entries[index - 1] = entries[index]
+            entries[index] = swap
+            index = index - 1
+    var receipt = RESOLVED_DATA_POLICY_DIGEST_DOMAIN_V1 + "/provenance\n"
+    for e in entries:
+        receipt = receipt + e + "\n"
+    sha256_text(receipt)
+
+fn resolved_layout_plan_text_v1(plan: StorageLayoutPlanV1) -> text:
+    "v{plan.contract_version}|t{plan.logical_type_id}|{resolved_layout_token_v1(plan.layout)}|b{plan.block_width}|a{plan.alignment}|p{plan.abi_pinned}|c{storage_conversion_policy_to_u8(plan.conversion)}|{plan.policy_hash}"
+
+pub fn resolved_data_policy_layout_v1(subject: text, schema_digest: text, choice: DataPolicyChoiceV1,
+                                      plan: StorageLayoutPlanV1) -> Result<ResolvedDataPolicyV1, text>:
+    if subject.len() == 0 or not hash256_hex_valid(schema_digest):
+        return Err("subject and a 64-hex schema digest are required")
+    if data_policy_kind_code_v1(choice.kind) != data_policy_kind_code_v1(DataPolicyKindV1.Layout):
+        return Err("choice is not a layout policy")
+    if not storage_layout_plan_v1_well_formed(plan):
+        return Err("layout plan is not well formed")
+    val token = resolved_layout_token_v1(plan.layout)
+    if choice.choice != "auto" and choice.choice != token:
+        return Err("layout plan '{token}' contradicts resolved choice '{choice.choice}'")
+    Ok(ResolvedDataPolicyV1(contract_version: RESOLVED_DATA_POLICY_CONTRACT_V1,
+        policy_kind: DataPolicyKindV1.Layout, subject: subject, schema_digest: schema_digest,
+        choice: choice, layout: Some(plan), collection: None,
+        resolved_policy_digest: resolved_policy_digest_v1(DataPolicyKindV1.Layout, subject, schema_digest,
+            choice, resolved_layout_plan_text_v1(plan)),
+        provenance_receipt_digest: resolved_provenance_receipt_v1(choice)))
+
+pub fn resolved_data_policy_collection_v1(subject: text, schema_digest: text, choice: DataPolicyChoiceV1,
+                                          decision: CollectionPlanDecision) -> Result<ResolvedDataPolicyV1, text>:
+    if subject.len() == 0 or not hash256_hex_valid(schema_digest):
+        return Err("subject and a 64-hex schema digest are required")
+    if data_policy_kind_code_v1(choice.kind) != data_policy_kind_code_v1(DataPolicyKindV1.Collection):
+        return Err("choice is not a collection policy")
+    val token = resolved_collection_token_v1(decision.selected)
+    if choice.choice != "auto" and choice.choice != token:
+        return Err("collection decision '{token}' contradicts resolved choice '{choice.choice}'")
+    Ok(ResolvedDataPolicyV1(contract_version: RESOLVED_DATA_POLICY_CONTRACT_V1,
+        policy_kind: DataPolicyKindV1.Collection, subject: subject, schema_digest: schema_digest,
+        choice: choice, layout: None, collection: Some(decision),
+        resolved_policy_digest: resolved_policy_digest_v1(DataPolicyKindV1.Collection, subject, schema_digest,
+            choice, token),
+        provenance_receipt_digest: resolved_provenance_receipt_v1(choice)))
+
+pub fn resolved_data_policy_well_formed_v1(policy: ResolvedDataPolicyV1) -> bool:
+    if policy.contract_version != RESOLVED_DATA_POLICY_CONTRACT_V1:
+        return false
+    if policy.subject.len() == 0 or not hash256_hex_valid(policy.schema_digest) or not hash256_hex_valid(policy.resolved_policy_digest) or
+            not hash256_hex_valid(policy.provenance_receipt_digest):
+        return false
+    if data_policy_kind_code_v1(policy.choice.kind) != data_policy_kind_code_v1(policy.policy_kind):
+        return false
+    match policy.policy_kind:
+        case DataPolicyKindV1.Layout:
+            policy.collection.is_none() and policy.layout.is_some() and storage_layout_plan_v1_well_formed(policy.layout.unwrap())
+        case DataPolicyKindV1.Collection:
+            policy.layout.is_none() and policy.collection.is_some()

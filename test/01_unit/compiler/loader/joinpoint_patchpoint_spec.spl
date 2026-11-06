@@ -17,8 +17,11 @@
 use std.spec.step
 
 use std.spec.{describe, it, assert_true, assert_false, assert_eq, assert_contains}
-use compiler.loader.joinpoint_slots.{JoinpointSlotTable, joinpoint_key}
+use compiler.loader.joinpoint_slots.{JoinpointSlotTable, JoinpointSlotGeometry, joinpoint_key}
 use compiler.loader.advice_binding_registry.{AdviceBindingRegistry}
+
+@unsafe(reason: "spec oracle for the host page size", capabilities: [ffi])
+extern fn rt_page_size() -> i64
 use std.common.aspect_pack.{
     apk_loader_new, apk_activation_advance_v1,
     APK_AS_CATALOGUED, APK_AS_INDEX_MAPPED, APK_AS_RESOLVING,
@@ -94,18 +97,81 @@ describe "join-point slot table", fn():
         assert_eq(ok_i64(table.read_cell_raw(s1)), UNADVISED)
         _ = table.free()
 
-    it "keeps the mapping executable after a patch (W^X round trip)", fn():
+    it "never makes the pointer table executable (D15: data stays RW, no protection flips)", fn():
         # @req REQ-SSPEC-UNIT
-        step("keeps the mapping executable after a patch (W^X round trip)")
+        # Inverts the pre-D15 "W^X round trip" case, which REQUIRED an RX
+        # seal plus an RX->RW->RX patch window (two transitions per patch).
+        # A pointer table is data: sealing and patching must leave the
+        # mapping's protection untouched and the value must still land in
+        # the mapped page.
+        step("never makes the pointer table executable")
         var table = ok_table(2)
         val k = joinpoint_key("mod.a", "f", 0)
         val s = ok_i64(table.reserve(k, UNADVISED))
         _ = table.seal()
-        val before = table.protection_transitions
         _ = table.patch_cell(s, ADVICE_A)
-        # A patch is exactly two transitions: RX->RW and RW->RX. An
-        # implementation that left the page RW would record one.
-        assert_eq(table.protection_transitions - before, 2)
+        _ = table.patch_cell(s, ADVICE_B)
+        assert_eq(table.protection_transitions, 0)
+        assert_eq(ok_i64(table.read_cell_raw(s)), ADVICE_B)
+        assert_eq(ok_i64(table.dispatch_target(s)), ADVICE_B)
+        _ = table.free()
+
+    it "takes pointer width and page size from the host, explicitly (OBS-021)", fn():
+        # @req REQ-SSPEC-UNIT
+        step("geometry is explicit and host-derived")
+        var table = ok_table(3)
+        assert_eq(table.geometry.page_size, rt_page_size())
+        assert_true(table.geometry.page_size > 0)
+        assert_eq(table.geometry.page_size & (table.geometry.page_size - 1), 0)
+        val s0 = ok_i64(table.reserve(joinpoint_key("mod.g", "a", 0), UNADVISED))
+        val s1 = ok_i64(table.reserve(joinpoint_key("mod.g", "b", 0), UNADVISED))
+        # Cell stride IS the pointer width, nothing hard-coded.
+        assert_eq(table.cell_address(s1) - table.cell_address(s0), table.geometry.pointer_width)
+        assert_eq(table.cell_address(s0) % table.geometry.pointer_width, 0)
+        _ = table.free()
+
+    it "refuses a geometry the atomic publication primitive cannot cover", fn():
+        # @req REQ-SSPEC-UNIT
+        step("refuses unsupported geometry")
+        match JoinpointSlotGeometry.validate(4, 4096):
+            case Ok(_):
+                assert_true(false)
+            case Err(e):
+                assert_contains(e, "atomic")
+        match JoinpointSlotGeometry.validate(8, 3000):
+            case Ok(_):
+                assert_true(false)
+            case Err(e):
+                assert_contains(e, "power of two")
+        match JoinpointSlotTable.alloc_with_geometry(2, JoinpointSlotGeometry(pointer_width: 4, page_size: 4096)):
+            case Ok(t):
+                var t2 = t
+                _ = t2.free()
+                assert_true(false)
+            case Err(e):
+                assert_contains(e, "atomic")
+
+    it "retains a replaced target until readers quiesce (D15 generation retention)", fn():
+        # @req REQ-SSPEC-UNIT
+        step("retired targets survive while a reader is pinned")
+        var table = ok_table(2)
+        val s = ok_i64(table.reserve(joinpoint_key("mod.r", "f", 0), UNADVISED))
+        _ = table.seal()
+        val g0 = table.generation
+        val pinned = table.pin_reader()
+        assert_eq(pinned, g0)
+        _ = table.patch_cell(s, ADVICE_A)
+        assert_eq(table.generation, g0 + 1)
+        assert_eq(table.retired_count(), 1)
+        # A pinned reader may still be dispatching to UNADVISED: refuse to drop it.
+        assert_true(is_err_i64(table.drain_retired()))
+        assert_contains(err_text(table.drain_retired()), "pinned")
+        assert_eq(table.retired_count(), 1)
+        _ = table.unpin_reader()
+        assert_eq(ok_i64(table.drain_retired()), 1)
+        assert_eq(table.retired_count(), 0)
+        # An unbalanced release is refused, not ignored.
+        assert_true(is_err_i64(table.unpin_reader()))
         _ = table.free()
 
 describe "AdviceBindingRegistry", fn():

@@ -32,6 +32,16 @@ per-file carriers. Runner persistence precedes docgen. None of these source
 changes has native execution evidence yet. Persistent pre-dispatch plans,
 provenance admission, complete reports and trusted gates remain open.
 
+Owner-local partitions (`app.traceability.extract.snapshot_partitions`, rescued
+2026-11-06): invalidation plans over the union of both generations' owners and
+dependency rows; identity signatures include declared locators, so a
+declaration-only locator move invalidates consumers; an unclassifiable
+dependency inventory is a full rebuild reported `complete: false`. The policy
+binding is recomputed from the payload (duplicate rules change it); the caller
+label is only checked. Composition keeps cold-extractor diagnostic identity,
+order, budgets and early returns — oracle in
+`test/01_unit/app/traceability/snapshot_partitions_spec.spl` (interpreter run).
+
 ## Querying features / requirements / bugs today (2026-11-06)
 
 The P0 query runs on any `simple` that can `run`, seed included, from the
@@ -42,8 +52,16 @@ D:/dev/wt/seed/simple.exe run src/app/traceability/query_main.spl list features 
 D:/dev/wt/seed/simple.exe run src/app/traceability/query_main.spl show requirement req:REQ-TRC-001 --format=sdn 2>/dev/null
 ```
 
-Exit 1 = rendered, unverified (normal). The `TRACE-AUTHORITY-CONFLICT` lines
-are expected. Scope is the registered declaration plus, since 2026-11-06, the
+Arguments are the words after `simple trace`; a leading `trace` word is also
+accepted. Exit 0 = rendered over a complete graph (normal for the declaration;
+still unverified / admission-ineligible). Authority for the canonical
+declaration's claims comes from the policy-owned registry
+`trace_query_registered_authorities_v1`
+(`src/app/traceability/snapshot/query_scope_v1.spl`); a
+`TRACE-AUTHORITY-CONFLICT` (exit 1) now means a claim outside that registry,
+and a new registered declaration needs its own registry rows. Spec:
+`test/03_system/app/traceability/feature/trace_query_authority_spec.spl`.
+Scope is the registered declaration plus, since 2026-11-06, the
 legacy bug DB as a read-only **sidecar** (`doc/08_tracking/bug/bug_db.sdn`,
 2,687 rows, bug nodes + status/severity/file attributes, no graph claims):
 
@@ -67,3 +85,11 @@ Full output key reference and the spec driver
 `refs requirement req:REQ-TRC-001` (or `refs feature <id>`) lists every authored
 claim from/to the identity with the other endpoint's declared file paths; see
 the guide's "Reverse references" subsection for how to read `authority`.
+
+## Spec driver and links (2026-11-06)
+
+`check-trace-query-p0.shs` falls back from `test` to `run <spec>` when `test`
+yields no `SPEC FILE VERDICT:` line. Query exit 1 = incomplete graph only (sidecar
+warnings do not change it). req->spec is a sidecar `verified_by` row (`--spec-root`),
+never a graph claim; spec->test-case edges are not ingested (native-only
+`sspec_inventory`). See `doc/07_guide/infra/trace_query_p0.md`.
