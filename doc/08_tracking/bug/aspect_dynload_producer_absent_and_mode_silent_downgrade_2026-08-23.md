@@ -125,3 +125,6 @@ An unlanded lane exists at `/dev/shm/aspect-loader-operational-seal`
 that does not exist on main. The library-layer half of that work — the
 `apk_loader_seal_operational_state` API — **did** land
 (`src/lib/common/aspect_pack.spl:1378`); the loader half did not.
+
+## Round 8 part 2 note 2026-11-06
+Defect B (silent downgrade) is implemented in the pure-Simple worker: `cli_native_build_dynload_pack_notice` emits `W-NATIVE-BUILD-DYNLOAD-ASPECT-PACK-NOT-PRODUCED` on the success path. Added the missing spec `test/01_unit/app/cli/native_build_dynload_notice_spec.spl` (4/4 on seed). Automatic pack packaging stays OPEN (TODO(dynload-visible-skip) kept until a real emission count exists).
