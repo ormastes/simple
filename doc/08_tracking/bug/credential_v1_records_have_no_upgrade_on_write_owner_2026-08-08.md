@@ -1,6 +1,7 @@
 # v1 credential records are never rewritten: no config writer owns the upgrade
 
 Status: OPEN (P3)
+Update 2026-11-06: persist spec 11/12 -> 12/12; spec declared unregistered extern rt_ensure_dir, replaced by std.io_runtime dir_create_all.
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 
 - **Filed:** 2026-08-08

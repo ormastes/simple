@@ -15,3 +15,6 @@ Impact: `StringInterner.lookup(id)` for an interned `""` reports no value, so
 (`check(lookup.?)`) fails. The lib returns the right `Some("")`
 (`lookup(id)? == ""` is true). The spec is correct; do not weaken it.
 Fix lives in the seed `.?` / Option presence test (src/compiler_rust interpreter).
+
+## 2026-11-06 FIXED in seed source
+Root cause: `Expr::ExistsCheck` (interpreter/expr.rs) treated any empty `Value::Str` as absent after unwrapping. Now an empty text inside an explicit `Some` is present (returned as the payload, per `.?` contract); bare `""` stays absent. Spec: test/01_unit/language/exists_check_some_empty_text_spec.spl RED 2/3 on simple-ref, GREEN 3/3.

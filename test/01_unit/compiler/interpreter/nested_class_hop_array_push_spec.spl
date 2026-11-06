@@ -1,0 +1,45 @@
+# Array mutation behind two or more class-instance hops mutates in place
+# (interp_nested_class_field_array_push_copies_per_call_2026-11-05).
+
+class HopStore:
+    items: [i64]
+
+class HopMid:
+    store: HopStore
+
+class HopOuter:
+    mid: HopMid
+
+    me add(x: i64):
+        self.mid.store.items.push(x)
+
+    me drop_last() -> i64:
+        self.mid.store.items.pop()
+
+    me set0(x: i64):
+        self.mid.store.items[0] = x
+
+describe "array mutation behind class hops":
+    it "push through three class hops persists":
+        val o = HopOuter(mid: HopMid(store: HopStore(items: [])))
+        var i = 0
+        while i < 2000:
+            o.add(i)
+            i = i + 1
+        expect(o.mid.store.items.len()).to_equal(2000)
+        expect(o.mid.store.items[1999]).to_equal(1999)
+
+    it "pop returns the element and shrinks the array":
+        val o = HopOuter(mid: HopMid(store: HopStore(items: [])))
+        o.add(5)
+        o.add(6)
+        expect(o.drop_last()).to_equal(6)
+        expect(o.mid.store.items.len()).to_equal(1)
+
+    it "index write persists and a second handle to the store sees it":
+        val store = HopStore(items: [1, 2])
+        val o = HopOuter(mid: HopMid(store: store))
+        o.set0(9)
+        o.add(3)
+        expect(store.items[0]).to_equal(9)
+        expect(store.items.len()).to_equal(3)

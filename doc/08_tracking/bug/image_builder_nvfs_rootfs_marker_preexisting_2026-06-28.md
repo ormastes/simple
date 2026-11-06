@@ -83,3 +83,17 @@ returns before writing), so the nvfs marker file is empty in block 3.
   2. FAT32 generation (`refusing non-bootable descriptor fallback`) and the spec's
      `/bin/sh` `_reset_dir` need a Linux host; unverifiable on this Windows seed.
 - No source change made: choosing the new minimum needs a measured staged-size budget on Linux.
+
+## Update 2026-11-06 (work/fx-os-kernel-20261106)
+
+Verdict: SPEC DRIFT, not a marker regression. `image_rootfs_markers_spec` passes
+7/7. Block 3 of `image_builder_artifact_spec` failed because
+`build_install_image_with_rootfs` returned `Err("SimpleOS staged rootfs metadata
+reserve exceeds root partition capacity")` (`src/os/installer/image_builder.spl:1991`):
+at `MIN_IMAGE_SIZE_MB_V1` = 67 MB `_compute_layout` leaves a 1 MB root partition,
+below the 4 MB `_IMAGE_ROOTFS_METADATA_MIN_BYTES_V1`, and the staged rootfs now
+carries ~50 MB of fonts under `SYS/FONTS`. The budget guard is correct; the spec
+now builds with a 128 MB image (`_FULL_ROOTFS_IMAGE_MB`); assertions unchanged.
+Block 3 passes: artifact spec 1/3 -> 2/3. Remaining failure ("writes
+installer-media staging for non-x86 architectures", arm64 ISO) builds Ok at 128 MB
+but one output/contents-path expectation is false; separate, still open.

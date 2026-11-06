@@ -50,8 +50,15 @@ describe "Mir Lowering New":
         expect(parts.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
         val helper = parts[1].split("me remember_field_projection_provenance")[0]
 
-        expect(helper).to_contain("compiler_value_discriminant(item.type_.kind) == compiler_value_discriminant(MirTypeKind.Dict(MirType.i64(), MirType.i64()))")
+        # The discriminant test lives in runtime_dict_value_mir_type (which also
+        # unwraps a borrowed Ref<Dict>); local_is_runtime_dict delegates to it.
+        expect(helper).to_contain("self.runtime_dict_value_mir_type(type_) != nil")
         expect(helper.contains("case MirTypeKind.Dict(_, _): true")).to_equal(false)
+        val view_parts = source.split("fn runtime_dict_value_mir_type(container_type: MirType) -> MirType?:")
+        expect(view_parts.len()).to_equal(2)  # oracle: 2 — one helper definition
+        val view = view_parts[1].split("fn runtime_dict_value_hir_type")[0]
+        expect(view).to_contain("_sffi_enum_discriminant<MirTypeKind>(dict_type.kind) == _sffi_enum_discriminant<MirTypeKind>(MirTypeKind.Dict(MirType.i64(), MirType.i64()))")
+        expect(view.contains("case MirTypeKind.Dict(_, _): true")).to_equal(false)
 
     it "keeps chr text tagged until length-bearing runtime calls":
         # @req REQ-SSPEC-COMPILER
@@ -59,34 +66,33 @@ describe "Mir Lowering New":
         val source = read_mir_source("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
         val dispatch = read_mir_source("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
 
-        expect(source).to_contain("self.runtime_value_locals.contains(value_local.id) and self.local_is_str(value_local)")
+        expect(source).to_contain("(self.is_runtime_value_local(value_local.id) or self.is_tagged_text_local(value_local.id)) and self.local_is_str(value_local)")
         expect(source).to_contain("len_symbol = \"rt_string_len\"")
-        expect(source).to_contain("self.runtime_value_locals[chr_text.id] = true")
-        expect(source).to_contain("self.local_hir_types[chr_text.id] = HirType(kind: HirTypeKind.Str, span: receiver.span)")
+        expect(source).to_contain("self.mark_runtime_value_local(chr_text.id)")
+        expect(source).to_contain("self.remember_local_hir_type(chr_text.id, HirType(kind: HirTypeKind.Str, span: receiver.span), 2, 0)")
         expect(source.contains("return self.decode_runtime_value(chr_local, chr_text_type)")).to_equal(false)
         expect(dispatch).to_contain("var len_func_name = \"rt_string_len\"")
         expect(dispatch).to_contain("var fa_len_func_name = \"rt_string_len\"")
 
-    it "initializes runtime tracking maps in manual MirLowering constructors":
+    it "initializes runtime tracking maps in the single canonical MirLowering constructor":
         # @req REQ-SSPEC-COMPILER
-        step("initializes runtime tracking maps in manual MirLowering constructors")
-        val source = read_mir_source(
-            "src/compiler/80.driver/driver_pipeline_lowering.spl")
+        step("initializes runtime tracking maps in the single canonical MirLowering constructor")
+        # Hand-duplicated MirLowering(...) literals in the driver drifted behind
+        # the class and were removed; every driver path now goes through the
+        # canonical constructor, which owns the tracking-state initialization.
+        val driver = read_mir_source("src/compiler/80.driver/driver_pipeline_lowering.spl")
+        val ctor_source = read_mir_source("src/compiler/50.mir/_MirLowering/module_lowering.spl")
 
-        val direct_parts = source.split("var direct_lowering = MirLowering(")
-        expect(direct_parts.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
-        val direct_body = direct_parts[1].split("current_has_vhdl_metadata: false")[0]
-        expect(direct_body).to_contain("runtime_value_locals: {},")
-        expect(direct_body).to_contain("local_hir_types: {},")
-        expect(direct_body).to_contain("nil_locals: {},")
-        expect(direct_body).to_contain("struct_method_ambiguous: {},")
-        val fallback_parts = source.split("var lowering = MirLowering(")
-        expect(fallback_parts.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
-        val fallback_body = fallback_parts[1].split("current_has_vhdl_metadata: false")[0]
-        expect(fallback_body).to_contain("runtime_value_locals: {},")
-        expect(fallback_body).to_contain("local_hir_types: {},")
-        expect(fallback_body).to_contain("nil_locals: {},")
-        expect(fallback_body).to_contain("struct_method_ambiguous: {},")
+        expect(driver.contains("= MirLowering(")).to_equal(false)
+        expect(driver).to_contain("var direct_lowering = MirLowering.new_for_target(SymbolTable.new(), collection_target)")
+        expect(driver).to_contain("var lowering = MirLowering.new_for_target(SymbolTable.new(), collection_target)")
+        val ctor_parts = ctor_source.split("static fn new_for_target(symbols: SymbolTable, target_context: MirTargetContext) -> MirLowering:")
+        expect(ctor_parts.len()).to_equal(2)  # oracle: 2 — one constructor definition
+        val ctor_body = ctor_parts[1].split("me use_explicit_semantic_policy")[0]
+        expect(ctor_body).to_contain("runtime_value_local_ids: [],")
+        expect(ctor_body).to_contain("local_hir_type_ids: [],")
+        expect(ctor_body).to_contain("nil_locals: {},")
+        expect(ctor_body).to_contain("struct_method_ambiguous: {},")
 
     it "keeps named bootstrap calls from becoming unknown symbol calls":
         # @req REQ-SSPEC-COMPILER
@@ -130,8 +136,9 @@ describe "Mir Lowering New":
         step("keeps indirect call result metadata on the function return type")
         val source = read_mir_source("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl")
 
-        expect(source).to_contain("if val callee_type = callee.type_:")
-        expect(source).to_contain("ret_type = self.lower_type(callee_type)")
+        expect(source).to_contain("case HirTypeKind.Function(typed_params, typed_return, _):")
+        expect(source).to_contain("indirect_return = Some(typed_return)")
+        expect(source).to_contain("indirect function call has an unresolved ABI type")
 
     it "keeps MIR type lowering from reading kind on nil":
         # @req REQ-SSPEC-COMPILER
@@ -150,8 +157,7 @@ describe "Mir Lowering New":
         val mir_source = read_mir_source("src/compiler/50.mir/_MirLowering/function_lowering.spl")
         val interpreter_source = read_mir_source("src/compiler/70.backend/backend/interpreter_calls.spl")
 
-        expect(hir_source).to_contain("if p.has_default:")
-        expect(hir_source).to_contain("has_default: p.has_default")
+        expect(hir_source).to_contain("has_default: false")
         expect(hir_source).to_contain("kind: HirExprKind.NilLit")
         expect(hir_source.contains("if p.default.?:")).to_equal(false)
         expect(mir_source).to_contain("val param_symbol_id = param.symbol.id")
@@ -187,8 +193,9 @@ describe "Mir Lowering New":
         step("keeps MIR expression lowering from passing nil HIR types to lower_type")
         val source = read_mir_source("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
 
-        expect(source).to_contain("val maybe_receiver_type_for_call: HirType? = if receiver.has_type_: receiver.type_ else: nil")
-        expect(source).to_contain("if found_receiver_type != nil:")
+        expect(source).to_contain("if receiver.has_type_:")
+        expect(source).to_contain("val found_receiver_type = receiver.type_")
+        expect(source).to_contain("if hir_type_kind_discriminant(found_receiver_type.kind) >= 0:")
         expect(source).to_contain("receiver_type = self.lower_type(found_receiver_type)")
         expect(source).to_contain("len_symbol = self.len_runtime_symbol_for_hir_type(found_receiver_type)")
         expect(source.contains("val maybe_receiver_type_for_call = receiver.type_")).to_be(false)
@@ -213,9 +220,11 @@ describe "Mir Lowering New":
         step("preserves enum payload positions across wildcard patterns")
         val source = read_mir_source("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl")
 
-        expect(source).to_contain("out.push(SymbolId.new(-1))")
-        expect(source).to_contain("if bind_syms[0].id >= 0:")
-        expect(source).to_contain("if bind_syms[fi].id >= 0:")
+        # Current contract: each bound symbol reads its DECLARED payload slot
+        # (bind_pos_row), so a wildcard before a binding never shifts positions.
+        expect(source).to_contain("self.enum_semantic_child_v1(enum_semantic_capture, semantic_pattern_root, bind_pos_row[fi])")
+        expect(source).to_contain("# Declared slot (skips wildcards), NOT bind index.")
+        expect(source).to_contain("val idx_local = bg.emit_const_int(bind_pos_row[fi])")
         expect(source).to_contain("rt_tuple_get")
 
     it "uses native-safe indexed scans for MIR locals and enum constructors":
@@ -288,7 +297,7 @@ describe "Mir Lowering New":
         expect(types).to_contain("fn find_local(symbol_id: i64) -> LocalId:")
         expect(functions).to_contain("self.bind_local(param_symbol_id, local)")
         expect(statements.contains("self.local_map[")).to_equal(false)
-        expect(calls).to_contain("self.bind_local(bind_syms[fi].id, gl)")
+        expect(calls).to_contain("self.bind_local(bind_sym.id, bound_value)")
 
     it "predispatches match expressions before native pattern extraction":
         # @req REQ-SSPEC-COMPILER
@@ -410,17 +419,20 @@ describe "Mir Lowering New":
         step("walks parent scopes without native Option pattern destructuring")
         val source = read_mir_source("src/compiler/20.hir/hir_types.spl")
 
-        expect(source).to_contain("if scope.parent.?:")
-        expect(source).to_contain("scope_id = scope.parent.unwrap()")
-        expect(source).to_contain("self.current_scope = scope.parent.unwrap()")
-        expect(source.contains("match scope.parent:")).to_equal(false)
+        # Current contract: the parent walk matches the Option exhaustively
+        # (Some/None) and never unwraps a possibly-nil parent.
+        expect(source).to_contain("match scope.parent:")
+        expect(source).to_contain("case Some(parent):")
+        expect(source).to_contain("self.current_scope = parent")
+        expect(source.contains("scope.parent.unwrap()")).to_equal(false)
 
     it "keeps bootstrap diagnostics contextual and opt-in":
         # @req REQ-SSPEC-COMPILER
         step("keeps bootstrap diagnostics contextual and opt-in")
         val driver_log = read_mir_source("src/compiler/80.driver/driver_log_helpers.spl")
-        val driver_pipeline = read_mir_source("src/compiler/80.driver/driver_pipeline.spl")
+        val driver_pipeline = read_mir_source("src/compiler/80.driver/driver_pipeline_lowering.spl")
         val hir_module = read_mir_source("src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl")
+        val hir_build = read_mir_source("src/compiler/20.hir/hir_lowering/_Items/module_build.spl")
         val hir_decl = read_mir_source("src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl")
         val mir_module = read_mir_source("src/compiler/50.mir/_MirLowering/module_lowering.spl")
         val mir_function = read_mir_source("src/compiler/50.mir/_MirLowering/function_lowering.spl")
@@ -428,13 +440,14 @@ describe "Mir Lowering New":
         val rust_calls = read_mir_source("src/compiler_rust/compiler/src/interpreter/expr/calls.rs")
 
         expect(driver_log).to_contain("SIMPLE_COMPILER_PHASE_PROFILE")
-        expect(driver_pipeline).to_contain("MIR lowering missing HIR module for {name_direct} ({src_direct.path})")
-        expect(driver_pipeline).to_contain("aot:lower_to_mir:module:start idx={direct_idx} module={name_direct} path={src_direct.path}")
+        expect(driver_pipeline).to_contain('MIR lowering missing HIR module for {name_direct} ({src_direct.path})')
+        expect(driver_pipeline).to_contain('aot:lower_to_mir:module:start idx={direct_idx} module={name_direct} path={src_direct.path}')
         expect(hir_module).to_contain("fn hir_module_diag_enabled() -> bool:")
-        expect(hir_module).to_contain("lower_module:start module={module.name} path={module.path}")
+        expect(hir_build).to_contain('[hir-lower] lower_module:start module={module.name}')
         expect(hir_decl).to_contain("fn hir_lower_diag_enabled() -> bool:")
-        expect(mir_module).to_contain("lower_module:start module={module.name} functions={module.functions.len()}")
-        expect(mir_function).to_contain("SIMPLE_BOOTSTRAP_DIAG")
+        expect(mir_module).to_contain("if bootstrap_trace:")
+        expect(mir_module).to_contain('lower_module:start module={module.name} functions={module.functions.keys().len()}')
+        expect(mir_function).to_contain("SIMPLE_BOOTSTRAP_REAL_LOWER")
         expect(rust_state).to_contain("OnceLock<bool>")
         expect(rust_state).to_contain("fn field_access_debug_enabled() -> bool")
         expect(rust_calls).to_contain("field_access_debug_enabled()")
@@ -449,25 +462,26 @@ describe "Mir Lowering New":
         expect(source.contains("var let_type: HirType? = nil")).to_equal(false)
         expect(source.contains("var let_init = HirExpr")).to_equal(false)
         expect(source.contains("if val symbol_value = let_symbol")).to_equal(false)
-        expect(source).to_contain("val let_symbol = match stmt_kind_value")
-        expect(source).to_contain("val let_type = match stmt_kind_value")
-        expect(source).to_contain("val let_init = match stmt_kind_value")
+        # Each payload is read by its own compiled helper (one match per SSA scope).
+        expect(source).to_contain("val let_symbol_value = mir_hir_let_symbol(stmt_kind_value)")
+        expect(source).to_contain("val let_init: HirExpr = mir_hir_let_init(stmt_kind_value, fallback_expr)")
+        expect(source).to_contain("fn mir_hir_let_type(k: HirStmtKind, fallback: HirType) -> HirType:")
 
     it "keeps LLVM indirect call return and argument types explicit":
         # @req REQ-SSPEC-COMPILER
         step("keeps LLVM indirect call return and argument types explicit")
         val source = read_mir_source("src/compiler/70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl")
 
-        expect(source).to_contain("case Some(dest_local): self.valid_llvm_type(self.get_local_type(self.local_id_value(dest_local)))")
+        expect(source).to_contain("self.valid_llvm_type(self.get_local_type(self.local_id_value(dest ?? LocalId(id: 0))))")
         expect(source).to_contain("if sig.return_type == nil:\n            \"void\"\n        else:\n            self.valid_llvm_type(self.llvm_type_text(sig.return_type))")
         expect(source).to_contain("if arg_i < sig.params.len():")
         expect(source).to_contain("arg_ty = self.valid_llvm_type(self.llvm_type_text(param_ty))")
-        expect(source).to_contain('arg_vals = arg_vals.push("{arg_ty} {self.translate_operand(arg)}")')
+        expect(source).to_contain('arg_vals = arg_vals.push("{arg_ty} {arg_val}")')
 
     it "keeps native entry parse tracing and missing-entry diagnostics":
         # @req REQ-SSPEC-COMPILER
         step("keeps native entry parse tracing and missing-entry diagnostics")
-        val source = read_mir_source("src/compiler/80.driver/driver.spl")
+        val source = read_mir_source("src/compiler/80.driver/driver_source_parse_retained.spl")
 
         expect(source).to_contain("phase2:parse:entry")
         expect(source).to_contain("phase2:parse:entry:done")
@@ -531,7 +545,7 @@ describe "Mir Lowering New":
     it "keeps bootstrap flat block tail value state explicit":
         # @req REQ-SSPEC-COMPILER
         step("keeps bootstrap flat block tail value state explicit")
-        val source = read_mir_source("src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl")
+        val source = read_mir_source("src/compiler/20.hir/hir_lowering/_Items/module_declarations_bootstrap.spl")
 
         expect(source).to_contain("var has_value = false")
         expect(source).to_contain("has_value = true")
@@ -550,9 +564,9 @@ describe "Mir Lowering New":
 
         expect(source).to_contain("[frontend] parse_and_build:start")
         expect(source).to_contain("[frontend] parse_and_build:done")
-        expect(bridge).to_contain("[flat-bridge] parser_init:start")
-        expect(bridge).to_contain("[flat-bridge] parse_module_body:start")
-        expect(bridge).to_contain("[flat-bridge] flat_ast_to_module:start")
+        expect(bridge).to_contain('[flat-bridge] building frontend module path={path}')
+        expect(bridge).to_contain('[flat-bridge] built frontend module path={path}')
+        expect(bridge).to_contain('[flat-bridge] decl:start {di} tag {tag_text}')
         expect(parser_module).to_contain("[parser-module] decl:start")
         expect(parser_stmts).to_contain("[parser-block] stmt:start")
         expect(parser_stmts).to_contain("[parser-block] expr-branch:start")
@@ -576,15 +590,15 @@ describe "Mir Lowering New":
         expect(textual_llvm).to_contain("self.builder.emit_urem(dest_name, ty, left_val, right_val)")
         expect(textual_llvm).to_contain("self.builder.emit_rem(dest_name, ty, left_val, right_val)")
         expect(textual_llvm).to_contain("if left_unsigned:")
-        expect(textual_llvm).to_contain("self.builder.emit_lshr(dest_name, ty, left_val, right_val)")
-        expect(textual_llvm).to_contain("self.builder.emit_ashr(dest_name, ty, left_val, right_val)")
+        expect(textual_llvm).to_contain("self.builder.emit_lshr(dest_name, ty, left_val, shr_amount)")
+        expect(textual_llvm).to_contain("self.builder.emit_ashr(dest_name, ty, left_val, shr_amount)")
 
         expect(llvm_api).to_contain("elif is_unsigned: llvm_build_udiv(builder, lhs, rhs, \"div\")")
         expect(llvm_api).to_contain("else: llvm_build_sdiv(builder, lhs, rhs, \"div\")")
         expect(llvm_api).to_contain("elif is_unsigned: llvm_build_urem(builder, lhs, rhs, \"rem\")")
         expect(llvm_api).to_contain("else: llvm_build_srem(builder, lhs, rhs, \"rem\")")
-        expect(llvm_api).to_contain("if left_is_unsigned: llvm_build_lshr(builder, lhs, rhs, \"shr\")")
-        expect(llvm_api).to_contain("else: llvm_build_ashr(builder, lhs, rhs, \"shr\")")
+        expect(llvm_api).to_contain("if left_is_unsigned: llvm_build_lshr(builder, lhs, shr_amt, \"shr\")")
+        expect(llvm_api).to_contain("else: llvm_build_ashr(builder, lhs, shr_amt, \"shr\")")
 
         expect(cranelift).to_contain("elif is_unsigned: cranelift_udiv(ctx, a, b) else: cranelift_sdiv(ctx, a, b)")
         expect(cranelift).to_contain("if is_unsigned: cranelift_urem(ctx, a, b) else: cranelift_srem(ctx, a, b)")
@@ -668,8 +682,9 @@ describe "Mir Lowering New":
         expect(module).to_contain("self.symbols = module.symbols")
         expect(module).to_contain("self.symbols.get_symbol_raw(symbol.id)")
         expect(module.contains("self.symbols.get_symbol(symbol)")).to_be(false)
-        expect(module).to_contain("case Some(info):\n                if info == nil: return symbol\n                val defining_module")
-        expect(module).to_contain("val key = \"{defining_module}.{info.name}\"")
+        expect(module).to_contain("case Some(info):\n                if info == nil: return symbol")
+        expect(module).to_contain("val defining_module = mir_layout_canonical_module_name(raw_defining_module)")
+        expect(module).to_contain('val key = "{defining_module}.{info.name}"')
         expect(function).to_contain("self.canonical_mir_type_symbol(symbol)")
         expect(calls).to_contain("self.canonical_mir_type_symbol(nested_symbol)")
         expect(methods).to_contain("self.canonical_mir_type_symbol(")

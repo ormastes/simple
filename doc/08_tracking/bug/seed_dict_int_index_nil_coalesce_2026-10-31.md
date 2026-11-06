@@ -1,6 +1,30 @@
 # Seed: `dict[k] ?? default` on an integer-valued Dict returns the raw nil tag
 
-- **Status:** OPEN for the Rust seed. Worked around in `monomorphize_integration.spl` (array constraint maps).
+- **Status:** FIXED in the Rust seed 2026-11-06 (branch `work/seed-jit-miscompiles-20261106`). The `monomorphize_integration.spl` workaround and the `\] ?? ` audit below are no longer required for seed correctness but were not reverted here.
+
+## Fix (2026-11-06)
+
+Root cause: `lower_coalesce` (`src/compiler_rust/compiler/src/hir/lower/expr/control.rs:2189`)
+treats an operand typed as a bare scalar (`I64`, `BOOL`, `F64`, ...) as statically
+non-nullable and lowers `a ?? d` to `a`. `d[k]` on a `Dict<K, V>` is typed `V`, and MIR
+(`lower_index_expr`) unboxes `rt_index_get`'s result, so a miss turned the nil sentinel
+into the integer `3` (or printed `nil` for a text key). `d.get(k)` escaped because
+`get` is on the optional-accessor list.
+
+Fix: `optionalize_array_accessor` (`hir/lower/expr/helpers.rs`, reached through
+`lower_optional_subject` for `??`, `if val`, `match Some/None`) now retypes a
+Dict index with a scalar value type to `V?` (`HirType::Pointer`). MIR then keeps the
+tagged word, `??` tests presence with `rt_is_some`, and the payload is decoded by
+`rt_unwrap_or_self` — the same lane the `[T].first/get` accessors use.
+
+Evidence:
+- Rust test `compiler/tests/dict_index_coalesce_jit.rs`: before the fix 3 of 4 FAIL
+  (`int_key_int_value_miss_coalesces_to_default`, `text_key_int_value_miss_coalesces_and_counts`,
+  `bool_and_float_values_miss_coalesce`); after, 4/4 pass. `list_optional_accessors_jit`
+  (8) and `coalesce_single_evaluation` (3) still pass.
+- `test/fixtures/compiler/dict_int_missing_key_coalesce_native.spl`, `SIMPLE_EXECUTION_MODE=jit`:
+  old seed (`target/bootstrap/simple.exe`, 2026-10-05) `i64idx=3 i64get=-1 textidx=dflt textkey=nil`;
+  fixed seed `i64idx=-1 i64get=-1 textidx=dflt textkey=-7` (= interpreter).
 - **Found by:** the Phase 3 bootstrap on macOS aarch64, 2026-10-31. Stage 3, which is the stage2 binary compiling `bootstrap_main.spl`, hit `SIGSEGV` (`EXC_BAD_ACCESS`, address 0) in `MonomorphizationPass.constrain_array_element_v1+280`. That was right after HIR completed, on the main thread, with no deep recursion: frame 25 is `run_monomorphization_with_report`.
 
 ## Mechanism
