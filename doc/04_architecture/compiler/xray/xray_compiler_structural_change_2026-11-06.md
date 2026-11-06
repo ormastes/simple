@@ -384,3 +384,16 @@ Split out separately (own PR + review, any time): the `weave_aop` `has_errors` e
 | Q7 | `knowledge_selection.sdn` | Decided: default (owner may revisit) — driver policy over MIR (A.4), not a host capability. |
 | Q8 | Stage order | Decided: default (owner may revisit) — AArch64 first, then x86-64, for pure-Simple stages. |
 | Q9 | Draft `has_errors` early-return | Decided: default (owner may revisit) — split out to its own PR + review, not part of XRay. |
+
+---
+
+## H. Data observations (cross-link)
+
+Typed data observations — field read/write, collection operations and node
+lifecycle — are **work package W5** of
+[`doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md`](../../../03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md)
+(§10 shared XRay profiling architecture, §15.1 XR-01..12). They extend the V1
+trace contract in `src/lib/common/trace` through a versioned record extension
+and the existing facade/channel; they add no `@xray` attribute, keep the
+`--xray` static-off identity guard authoritative, and select data sites only
+through aspect params (section G, Q1/Q3).
