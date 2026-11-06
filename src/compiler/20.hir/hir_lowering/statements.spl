@@ -148,6 +148,22 @@ impl HirLowering:
             return HirStmtKind.Expr(HirExpr(kind: HirExprKind.Block(discard_block),
                 has_type_: true, type_: unit_type, span: span))
         val hir_op: HirAssignOp? = self.lower_hir_assign_op_opt(op)
+        # Setter forwarding (REQ-SELFHOST-ACCESSOR-003): `recv.x = v` with no
+        # real field `x` becomes `recv.set_x(v)`. Only an identifier receiver
+        # is probed, so re-lowering it for the ordinary path is side-effect free.
+        # Discriminant-gated: see the SEED PATTERN HAZARD note in expression_core.
+        if hir_expr_kind_disc(target.kind) == hir_expr_kind_disc(ExprKind.Field(target, "")):
+            match target.kind:
+                case ExprKind.Field(acc_base, acc_name):
+                    val acc_base_e: Expr = acc_base
+                    if hir_expr_kind_disc(acc_base_e.kind) == hir_expr_kind_disc(ExprKind.Ident("")):
+                        val acc_hir_base = self.lower_hir_expr(acc_base_e)
+                        val acc_rhs = self.lower_hir_expr(value)
+                        if val acc_call = self.lower_accessor_write(acc_hir_base, acc_name, acc_rhs, op.?, span):
+                            return acc_call
+                        val acc_lhs = self.lower_hir_expr(target)
+                        return HirStmtKind.Assign(acc_lhs, hir_op, acc_rhs)
+                case _: ()
         val lhs = self.lower_hir_expr(target)
         val rhs = self.lower_hir_expr(value)
         # Preserve the optional operator through the declared optional slot:

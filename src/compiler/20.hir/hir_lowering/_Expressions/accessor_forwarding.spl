@@ -8,6 +8,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering._Expressions.expression_support.{_hir_expr_symbol_or_invalid}
 use std.nogc_sync_mut.io_runtime.{env_get_opt}
 
 # @workaround bug=strict-field-forwarding-opt-in-20261027 reason=src-compiler-has-undefined-field-reads
@@ -149,3 +150,30 @@ impl HirLowering:
                     case SymbolKind.Method: return true
                     case _: ()
         false
+
+    me lower_accessor_write(base: HirExpr, name: text, rhs: HirExpr, compound: bool, span: Span) -> HirStmtKind?:
+        # `recv.x = v` with no real field `x` lowers to `recv.set_x(v)` when an
+        # instance `set_x` exists (seed parity, REQ-SELFHOST-ACCESSOR-003).
+        # A compound write (`recv.x += v`) through a forwarded name is a hard
+        # error, as in the seed. Otherwise nil: the caller keeps the field write.
+        var owner_id = self.field_owner_for_hir_expr(base)
+        if owner_id < 0:
+            val base_sym = _hir_expr_symbol_or_invalid(base.kind)
+            if base_sym.is_valid():
+                owner_id = self.owner_type_id_for_base_raw(base_sym.id)
+        if owner_id < 0 or name.starts_with("_"):
+            return nil
+        if not self.owner_field_table_lacks(owner_id, name):
+            return nil
+        val setter = "set_" + name
+        if not self.accessor_is_instance_method(owner_id, setter):
+            return nil
+        if compound:
+            self.error("compound assignment to forwarded accessor `{name}` is unsupported; write `{setter}(...)` explicitly", span)
+            return nil
+        val arg = HirCallArg(has_name: false, name: "", value: rhs, span: span)
+        HirStmtKind.Expr(HirExpr(
+            kind: HirExprKind.MethodCall(base, setter, [arg], MethodResolution.Unresolved),
+            has_type_: false,
+            type_: HirType(kind: HirTypeKind.Unit, span: span),
+            span: span))

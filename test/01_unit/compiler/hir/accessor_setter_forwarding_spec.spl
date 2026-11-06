@@ -1,0 +1,72 @@
+# Purpose and audience: executable evidence for self-hosted compiler engineers
+# that HIR lowering forwards a field write `recv.x = v` with no real field `x`
+# to recv.set_x(v), that a real field write stays a field assignment, and that
+# a compound write through a forwarded name is a hard error (seed parity).
+# @req REQ-SELFHOST-ACCESSOR-003
+# requirements: doc/02_requirements/compiler/mdsoc_matrix_visibility_requirements.md
+
+use std.spec
+use std.spec.step
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.*
+
+val DECLS = "class Temp:\n" +
+    "    level: i64\n" +
+    "    me set_celsius(v: i64):\n" +
+    "        self.level = v\n" +
+    "    me set_level(v: i64):\n" +
+    "        self.level = v + 1\n" +
+    "    me set__hidden(v: i64):\n" +
+    "        self.level = v\n"
+
+fn stmt_tag(s: HirStmt) -> text:
+    match s.kind:
+        case HirStmtKind.Expr(ex):
+            match ex.kind:
+                case HirExprKind.MethodCall(_, method, args, _): "method:{method}/{args.len()}"
+                case _: "expr"
+        case HirStmtKind.Assign(_, _, _): "assign"
+        case _: "other"
+
+fn probe_first(probe_body: text) -> [text]:
+    # Returns [first statement tag, error count, joined diagnostics].
+    val src = DECLS + "\nfn probe(t: Temp) -> i64:\n    " + probe_body + "\n    0\n"
+    val parsed = parse_full_frontend(src, "testdata/accessor_set.spl", "accessor_set", Logger(level: 0))
+    var lowering = HirLowering.with_filename("testdata/accessor_set.spl")
+    val hir = lowering.lower_module(parsed)
+    var tag = "missing"
+    for fn_ in hir.functions.values():
+        if fn_.name == "probe":
+            tag = "empty"
+            if fn_.body.stmts.len() > 0:
+                tag = stmt_tag(fn_.body.stmts[0])
+    var msgs = ""
+    for m in lowering.diagnostic_messages:
+        msgs = msgs + m + ";"
+    [tag, "{lowering.errors.len()}", msgs]
+
+describe "HIR accessor forwarding for field writes":
+    it "forwards recv.celsius = v to set_celsius(v)":
+        step("given no field celsius but set_celsius when writing t.celsius = 5 then a set_celsius call is lowered")
+        val r = probe_first("t.celsius = 5")
+        expect(r[0]).to_equal("method:set_celsius/1")
+        expect(r[2]).to_equal("")
+        expect(r[1]).to_equal("0")
+
+    it "keeps a real field write as an assignment":
+        step("given a real field level and set_level when writing t.level = 5 then the field is assigned")
+        val r = probe_first("t.level = 5")
+        expect(r[0]).to_equal("assign")
+
+    it "does not forward underscore-prefixed names":
+        step("given set__hidden when writing t._hidden = 5 then no setter call is lowered")
+        val r = probe_first("t._hidden = 5")
+        expect(r[0]).to_equal("assign")
+
+    it "rejects compound assignment through a forwarded name":
+        step("given set_celsius when writing t.celsius += 1 then lowering reports an error")
+        val r = probe_first("t.celsius += 1")
+        expect(r[1] == "0").to_equal(false)
