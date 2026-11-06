@@ -2724,12 +2724,38 @@ impl MirLowering:
         # mir/lower/lowering_expr_call.rs); an UNTYPED `val got = a.?` keeps
         # `T?` (syntax_quick_reference.md "Existence Check (.?) - Returns T?").
         # doc/08_tracking/bug/stage2_dotq_presence_value_is_nil_sentinel_2026-11-03
+        #
+        # NOT when the `.?` operand is itself `bool?`: a bool slot fed by a
+        # bool-payload `.?` is the `if val v = bool_opt` binder (desugared to
+        # `val v = e.?` + `v != nil`, binder typed by the payload). Presence
+        # there made `v` the presence bit and folded `v != nil` to true. The
+        # value-position ExistsCheck keeps the payload-or-nil word, marked
+        # in exists_scalar_word_locals so the nil test stays real.
+        # doc/08_tracking/bug/mir_if_val_bool_binder_is_presence_predicate_2026-11-06.md
         if value != nil and declared != nil:
             match declared.kind:
                 case HirTypeKind.Bool:
                     match value.kind:
-                        case HirExprKind.ExistsCheck(_):
-                            return self.lower_cond_operand(value)
+                        case HirExprKind.ExistsCheck(exists_base):
+                            # Read has_type_/type_ in place (no by-value HirExpr
+                            # helper hop: stage2_struct_param_deep_copy_packed_span).
+                            var bool_payload = false
+                            if exists_base.has_type_:
+                                match exists_base.type_.kind:
+                                    case HirTypeKind.Optional(base_payload):
+                                        match base_payload.kind:
+                                            case HirTypeKind.Bool: bool_payload = true
+                                            case _: ()
+                                    case _: ()
+                            if value.has_type_:
+                                match value.type_.kind:
+                                    case HirTypeKind.Optional(exists_payload):
+                                        match exists_payload.kind:
+                                            case HirTypeKind.Bool: bool_payload = true
+                                            case _: ()
+                                    case _: ()
+                            if not bool_payload:
+                                return self.lower_cond_operand(value)
                         case _: ()
                 case _: ()
         var scalar_optional_slot = false
