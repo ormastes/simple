@@ -1,0 +1,88 @@
+# @req REQ-PURE-LLVM-FLOAT-UNSIGNED
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.mir.mir_data.*
+
+fn numeric_cast_ir(value: MirConstValue, source: MirTypeKind, target: MirTypeKind) -> text:
+    val translator = MirToLlvm.create("test.llvm.float_unsigned_cast", CodegenTarget.X86_64, nil)
+    val operand = MirOperand(kind: MirOperandKind.Const(value, MirType(kind: source)))
+    translator.translate_cast_dispatch(LocalId(id: 0), operand, MirType(kind: target))
+    translator.builder.build()
+
+describe "Pure-Simple LLVM explicit unsigned float casts":
+    it "converts an unsigned-valid F64 signed-boundary value to U32":
+        step("Emit the real explicit F64 to U32 cast")
+        val ir = numeric_cast_ir(MirConstValue.Float(2147483648.0), MirTypeKind.F64, MirTypeKind.U32)
+        expect(ir).to_contain(" = fptoui double ")
+        expect(ir).to_contain(" to i32")
+        expect(ir.contains("fptosi")).to_equal(false)
+
+    it "converts an unsigned-valid F64 signed-boundary value to U64":
+        step("Emit the real explicit F64 to U64 cast")
+        val ir = numeric_cast_ir(MirConstValue.Float(9223372036854775808.0), MirTypeKind.F64, MirTypeKind.U64)
+        expect(ir).to_contain(" = fptoui double ")
+        expect(ir).to_contain(" to i64")
+        expect(ir.contains("fptosi")).to_equal(false)
+
+    it "preserves the signed F64 to I32 conversion":
+        step("Emit the signed I32 destination control")
+        val ir = numeric_cast_ir(MirConstValue.Float(-3.75), MirTypeKind.F64, MirTypeKind.I32)
+        expect(ir).to_contain(" = fptosi double ")
+        expect(ir).to_contain(" to i32")
+        expect(ir.contains("fptoui")).to_equal(false)
+
+    it "preserves the signed F64 to I64 conversion":
+        step("Emit the signed I64 destination control")
+        val ir = numeric_cast_ir(MirConstValue.Float(-3.75), MirTypeKind.F64, MirTypeKind.I64)
+        expect(ir).to_contain(" = fptosi double ")
+        expect(ir).to_contain(" to i64")
+        expect(ir.contains("fptoui")).to_equal(false)
+
+    it "preserves the unsigned U32 to F64 conversion":
+        step("Emit the U32 source control")
+        val ir = numeric_cast_ir(MirConstValue.Int(4294967295), MirTypeKind.U32, MirTypeKind.F64)
+        expect(ir).to_contain(" = uitofp i32 ")
+        expect(ir).to_contain(" to double")
+        expect(ir.contains("sitofp")).to_equal(false)
+
+    it "preserves the unsigned U64 to F64 conversion":
+        step("Emit a U64 source with its high bit set")
+        val high_bit = -9223372036854775807 - 1
+        val ir = numeric_cast_ir(MirConstValue.Int(high_bit), MirTypeKind.U64, MirTypeKind.F64)
+        expect(ir).to_contain(" = uitofp i64 ")
+        expect(ir).to_contain(" to double")
+        expect(ir.contains("sitofp")).to_equal(false)
+
+    it "preserves the signed I32 to F64 conversion":
+        step("Emit the signed I32 source control")
+        val ir = numeric_cast_ir(MirConstValue.Int(-3), MirTypeKind.I32, MirTypeKind.F64)
+        expect(ir).to_contain(" = sitofp i32 ")
+        expect(ir.contains("uitofp")).to_equal(false)
+
+    it "preserves the signed I64 to F64 conversion":
+        step("Emit the signed I64 source control")
+        val ir = numeric_cast_ir(MirConstValue.Int(-3), MirTypeKind.I64, MirTypeKind.F64)
+        expect(ir).to_contain(" = sitofp i64 ")
+        expect(ir.contains("uitofp")).to_equal(false)
+
+    it "uses the value-types source override before choosing the cast":
+        step("Convert an SSA value whose authoritative source type is F64")
+        val translator = MirToLlvm.create("test.llvm.cast_source_override", CodegenTarget.X86_64, nil)
+        translator.value_types["%source"] = "double"
+        val result = translator.value_as_type_signed("%source", "i64", "i32", false, true)
+        val ir = translator.builder.build()
+        expect(ir).to_contain(" = fptoui double %source to i32")
+        expect(result.starts_with("%")).to_equal(true)
+        expect(ir.contains("trunc i64")).to_equal(false)
+
+    it "preserves the zero shortcut and the default signed destination":
+        step("Exercise existing helper calls with and without target unsignedness")
+        val translator = MirToLlvm.create("test.llvm.cast_compatibility", CodegenTarget.X86_64, nil)
+        val zero = translator.value_as_type_signed("0", "double", "i32", false, true)
+        expect(zero).to_equal("0")
+        expect(translator.builder.build().contains("fptoui")).to_equal(false)
+        val signed = translator.value_as_type_signed("%source", "double", "i32", false)
+        expect(signed.starts_with("%")).to_equal(true)
+        expect(translator.builder.build()).to_contain(" = fptosi double %source to i32")
