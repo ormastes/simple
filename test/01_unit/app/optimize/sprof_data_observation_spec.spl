@@ -1,0 +1,107 @@
+# @cover src/app/optimize/sprof_loader.spl
+"""
+## Purpose and audience
+Data observation records (field accesses, collection operations and node
+lifecycle) are stored in the existing `sprof-v2` profile envelope as a minor
+extension announced by `ext;data_minor=1`. Readers are profile-tooling and
+optimizer authors who load these records next to the function/block/edge
+counters without breaking older readers.
+Plan: doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md
+(W5, sections 10.4-10.5, 13.3). Owner decision 2026-11-06: sprof-v2 minor, no sprof-v3.
+Category: Tooling.
+## Operator workflow
+bin/simple test test/01_unit/app/optimize/sprof_data_observation_spec.spl
+## Compatibility and limitations
+The envelope name lives in one constant (`DATA_SPROF_ENVELOPE_V1`) so a later
+switch to a new major version is a one-line change. Older readers ignore
+every `data_*` line.
+## Verification guidance and troubleshooting
+A missing or untagged count is a diagnostic, never a zero. Diagnostics are
+bounded to eight entries.
+"""
+# Lifecycle: doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md
+# @manual_section: Data observation records in the sprof-v2 envelope
+
+use std.spec.*
+use std.common.trace.data.data_observation_contracts.*
+use std.common.trace.data.data_sprof_v1.*
+use app.optimize.sprof_loader.{sprof_load_profile_text, sprof_load_data_observations, sprof_serialize_profile_with_data}
+
+fn field_write() -> DataObservationV1:
+    DataObservationV1(kind: DataObservationKindV1.FieldWrite, generation: 7, module_instance: 3,
+        site_id: 11, schema_index: 2, attr_ordinal: 4, op: DataCollectionOpV1.None,
+        count: data_metric_measured_v1(5), aux: data_metric_not_measured_v1(), representation_epoch: 1)
+
+fn lookups() -> DataObservationV1:
+    DataObservationV1(kind: DataObservationKindV1.CollectionOp, generation: 7, module_instance: 3,
+        site_id: 12, schema_index: 0, attr_ordinal: 0, op: DataCollectionOpV1.Lookup,
+        count: data_metric_dropped_v1(), aux: data_metric_measured_v1(9), representation_epoch: 1)
+
+describe "Data observation records in the sprof-v2 envelope":
+    it "loads a field read-write record with its site, schema and coverage status":
+        # @req REQ-XR-02
+        step("Write a sprof-v2 profile that carries a field write and a collection lookup")
+        val text = sprof_serialize_profile_with_data("mod", "work", [], [field_write(), lookups()]).unwrap()
+        step("Load the data records and, separately, the ordinary counters")
+        val data = sprof_load_data_observations(text)
+        val counters = sprof_load_profile_text(text, "mod", "work")
+        # @capture(exec): profile text and loaded records
+        step("Verify the records round-trip with their coverage states and older readers are unaffected")
+        expect(text).to_contain("header;schema=sprof-v2")
+        expect(text).to_contain("ext;data_minor=1")
+        expect(text).to_contain("data_field;")
+        expect(data.diagnostics.len()).to_equal(0)  # oracle: well-formed profile
+        expect(data.records.len()).to_equal(2)  # oracle: two records written
+        expect(data.records[0].site_id).to_equal(11)  # oracle: field_write() site
+        expect(data.records[0].schema_index).to_equal(2)  # oracle: field_write() schema
+        expect(data.records[0].attr_ordinal).to_equal(4)  # oracle: field_write() attribute
+        expect(data_metric_value_v1(data.records[0].count).unwrap()).to_equal(5)  # oracle: field_write() count
+        expect(data_metric_state_code_v1(data.records[1].count.state)).to_equal(4)  # oracle: Dropped
+        expect(data_metric_value_v1(data.records[1].aux).unwrap()).to_equal(9)  # oracle: lookups() aux
+        step("Write and reload a collection record whose schema index is set")
+        var with_schema = lookups()
+        with_schema.schema_index = 2
+        val again = sprof_load_data_observations(sprof_serialize_profile_with_data("mod", "work", [], [with_schema]).unwrap())
+        expect(again.records[0].schema_index).to_equal(2)  # oracle: collection schema index survives the round trip
+        expect(data_sprof_record_line_v1(again.records[0]).unwrap()).to_equal(data_sprof_record_line_v1(with_schema).unwrap())
+        expect(counters.schema_version).to_equal("sprof-v2")
+        expect(counters.diagnostic_count).to_equal(0)  # oracle: data lines are invisible to the counter loader
+
+    it "rejects missing extensions, unknown minors, untagged counts and the wrong envelope":
+        # @req REQ-XR-06
+        step("Load data lines without the extension line, with a newer minor, with a bare count and under sprof-v1")
+        val line = data_sprof_record_line_v1(field_write()).unwrap()
+        val no_ext = sprof_load_data_observations("header;schema=sprof-v2;module=m;workload=w\n" + line)
+        val newer = sprof_load_data_observations("header;schema=sprof-v2;module=m;workload=w\next;data_minor=2\n" + line)
+        val bare = sprof_load_data_observations("header;schema=sprof-v2;module=m;workload=w\next;data_minor=1\n" + line.replace("count=m:5", "count=5"))
+        val missing = sprof_load_data_observations("header;schema=sprof-v2;module=m;workload=w\next;data_minor=1\n" + line.replace(";count=m:5", ""))
+        val v1 = sprof_load_data_observations("header;schema=sprof-v1;module=m;workload=w\next;data_minor=1\n" + line)
+        # @capture(exec): diagnostics
+        step("Verify every case yields no record and a diagnostic instead of a zero")
+        expect(no_ext.records.len()).to_equal(0)  # oracle: extension line required
+        expect(no_ext.diagnostics.len() > 0).to_equal(true)
+        expect(newer.records.len()).to_equal(0)  # oracle: minor 2 unsupported
+        expect(newer.minor).to_equal(-1)  # oracle: unsupported minor is reported as -1
+        expect(newer.diagnostics.len() > 0).to_equal(true)
+        expect(bare.records.len()).to_equal(0)  # oracle: untagged count refused
+        expect(bare.diagnostics.len() > 0).to_equal(true)
+        expect(missing.records.len()).to_equal(0)  # oracle: missing count refused
+        expect(missing.diagnostics.len() > 0).to_equal(true)
+        val huge = sprof_load_data_observations("header;schema=sprof-v2;module=m;workload=w\next;data_minor=18446744073709551615\n" + line)
+        expect(huge.records.len()).to_equal(0)  # oracle: a u64-max minor never wraps into an accepted one
+        val twice = sprof_load_data_observations("header;schema=sprof-v2;module=m;workload=w\next;data_minor=1\n" + line + ";site=12")
+        expect(twice.records.len()).to_equal(0)  # oracle: a repeated key is refused, not first-wins
+        expect(v1.records.len()).to_equal(0)  # oracle: data records need sprof-v2
+        expect(v1.diagnostics[0]).to_contain("sprof-v2")
+
+    it "skips reserved optional typed records and refuses tags outside the reserved range":
+        # @req REQ-XR-02
+        step("Load a profile with a collection summary record and one out-of-range optional record")
+        val head = "header;schema=sprof-v2;module=m;workload=w\next;data_minor=1\n"
+        val loaded = sprof_load_data_observations(head + "data_opt;tag=256;kind=collection_summary\n" + data_sprof_record_line_v1(field_write()).unwrap())
+        val bad = sprof_load_data_observations(head + "data_opt;tag=9;kind=x\n")
+        # @capture(exec): skip count and diagnostics
+        step("Verify the summary is skipped and counted while the bad tag is a diagnostic")
+        expect(loaded.skipped_optional).to_equal(1)  # oracle: one data_opt line in range
+        expect(loaded.records.len()).to_equal(1)  # oracle: one data_field line
+        expect(bad.diagnostics.len()).to_equal(1)  # oracle: tag 9 outside 256..511

@@ -1,0 +1,251 @@
+# ============================================================================
+# common/trace/data/data_sprof_v1.spl — data observation records inside the
+# existing `sprof-v2` profile envelope, as a MINOR extension (owner decision
+# 2026-11-06: no sprof-v3). Pure line codec; file I/O stays in app/optimize.
+#
+# A profile that carries data records announces `ext;data_minor=1` after its
+# header. Records:
+#   data_field;gen=;module=;site=;schema=;attr=;access=read|write|init;epoch=;count=;aux=
+#   data_collection;gen=;module=;site=;schema=;op=lookup|insert|remove|iterate|resize;epoch=;count=;aux=
+#   data_node;gen=;module=;site=;schema=;event=create|finish|discard|remove|transition;epoch=;count=;aux=
+#   data_opt;tag=<256..511>;...   optional typed records (e.g. CollectionSummaryV1)
+# Metric tokens are state-tagged: m:<u64> measured, n not measured,
+# u unsupported, d dropped, o overflowed. A bare or missing count is an error,
+# never zero. Readers without the extension ignore every data_* line.
+# ============================================================================
+
+use std.common.trace.data.data_observation_contracts.*
+
+# The one place to switch the envelope (e.g. to "sprof-v3") if the owner
+# later decides data records need a major version.
+pub const DATA_SPROF_ENVELOPE_V1: text = "sprof-v2"
+pub const DATA_SPROF_MINOR_V1: i64 = 1
+pub const DATA_SPROF_EXT_LINE_V1: text = "ext;data_minor=1"
+pub const DATA_SPROF_MAX_RECORDS_V1: i64 = 65536
+pub const DATA_SPROF_MAX_DIAGNOSTICS_V1: i64 = 8
+
+pub struct DataSprofLoadV1:
+    envelope: text
+    # Announced data_minor; 0 = absent, -1 = an unsupported (newer) minor.
+    minor: i64
+    records: [DataObservationV1]
+    skipped_optional: i64
+    diagnostics: [text]
+    # Diagnostics beyond the cap are counted here, never silently lost.
+    diagnostics_dropped: i64
+
+fn data_sprof_field_v1(line: text, key: text) -> text:
+    for part in line.split(";"):
+        val eq = part.index_of("=")
+        if eq > 0 and part.slice(0, eq) == key:
+            return part.slice(eq + 1, part.len())
+    ""
+
+# A record line may name each key once; a repeated key is never first-wins.
+fn data_sprof_duplicate_key_v1(line: text) -> text:
+    var seen: [text] = []
+    for part in line.split(";"):
+        val eq = part.index_of("=")
+        if eq > 0:
+            val key = part.slice(0, eq)
+            for k in seen:
+                if k == key:
+                    return key
+            seen.push(key)
+    ""
+
+fn data_sprof_u64_v1(token: text) -> Result<u64, text>:
+    if token.len() == 0 or token.len() > 20:
+        return Err("missing or oversized number")
+    var value: u64 = 0
+    for ch in token.chars():
+        val code = ch as i64
+        if code < 48 or code > 57:
+            return Err("not a decimal number: {token}")
+        val d = (code - 48) as u64
+        if value > (18446744073709551615u64 - d) / 10u64:
+            return Err("number overflows u64: {token}")
+        value = value * 10u64 + d
+    Ok(value)
+
+pub fn data_sprof_metric_token_v1(metric: DataMetricV1) -> text:
+    match metric.state:
+        case DataMetricStateV1.Measured: "m:{metric.value}"
+        case DataMetricStateV1.NotMeasured: "n"
+        case DataMetricStateV1.Unsupported: "u"
+        case DataMetricStateV1.Dropped: "d"
+        case DataMetricStateV1.Overflowed: "o"
+
+pub fn data_sprof_metric_parse_v1(token: text) -> Result<DataMetricV1, text>:
+    if token == "n": return Ok(data_metric_not_measured_v1())
+    if token == "u": return Ok(data_metric_unsupported_v1())
+    if token == "d": return Ok(data_metric_dropped_v1())
+    if token == "o": return Ok(data_metric_overflowed_v1())
+    if token.starts_with("m:"):
+        return Ok(data_metric_measured_v1(data_sprof_u64_v1(token.slice(2, token.len()))?))
+    Err("metric token '{token}' is not state-tagged")
+
+fn data_sprof_access_v1(kind: DataObservationKindV1) -> text:
+    match kind:
+        case DataObservationKindV1.FieldRead: "read"
+        case DataObservationKindV1.FieldWrite: "write"
+        case DataObservationKindV1.FieldInit: "init"
+        case DataObservationKindV1.NodeCreate: "create"
+        case DataObservationKindV1.NodeFinish: "finish"
+        case DataObservationKindV1.NodeDiscard: "discard"
+        case DataObservationKindV1.NodeRemove: "remove"
+        case DataObservationKindV1.RepresentationTransition: "transition"
+        case DataObservationKindV1.CollectionOp: "op"
+
+fn data_sprof_op_name_v1(op: DataCollectionOpV1) -> text:
+    match op:
+        case DataCollectionOpV1.None: "none"
+        case DataCollectionOpV1.Lookup: "lookup"
+        case DataCollectionOpV1.Insert: "insert"
+        case DataCollectionOpV1.Remove: "remove"
+        case DataCollectionOpV1.Iterate: "iterate"
+        case DataCollectionOpV1.Resize: "resize"
+
+pub fn data_sprof_record_line_v1(o: DataObservationV1) -> Result<text, text>:
+    # Encoding validates identity and metric canonical form; reuse it.
+    data_observation_encode_v1(o)?
+    val common = "gen={o.generation};module={o.module_instance};site={o.site_id}"
+    val tail = "epoch={o.representation_epoch};count={data_sprof_metric_token_v1(o.count)};aux={data_sprof_metric_token_v1(o.aux)}"
+    val code = data_observation_kind_code_v1(o.kind)
+    if code <= 3:
+        return Ok("data_field;{common};schema={o.schema_index};attr={o.attr_ordinal};access={data_sprof_access_v1(o.kind)};{tail}")
+    if code == 4:
+        return Ok("data_collection;{common};schema={o.schema_index};op={data_sprof_op_name_v1(o.op)};{tail}")
+    Ok("data_node;{common};schema={o.schema_index};event={data_sprof_access_v1(o.kind)};{tail}")
+
+fn data_sprof_kind_from_name_v1(family: text, name: text) -> Result<DataObservationKindV1, text>:
+    if family == "data_field":
+        if name == "read": return Ok(DataObservationKindV1.FieldRead)
+        if name == "write": return Ok(DataObservationKindV1.FieldWrite)
+        if name == "init": return Ok(DataObservationKindV1.FieldInit)
+    if family == "data_node":
+        if name == "create": return Ok(DataObservationKindV1.NodeCreate)
+        if name == "finish": return Ok(DataObservationKindV1.NodeFinish)
+        if name == "discard": return Ok(DataObservationKindV1.NodeDiscard)
+        if name == "remove": return Ok(DataObservationKindV1.NodeRemove)
+        if name == "transition": return Ok(DataObservationKindV1.RepresentationTransition)
+    Err("unknown {family} kind '{name}'")
+
+fn data_sprof_op_from_name_v1(name: text) -> Result<DataCollectionOpV1, text>:
+    if name == "lookup": return Ok(DataCollectionOpV1.Lookup)
+    if name == "insert": return Ok(DataCollectionOpV1.Insert)
+    if name == "remove": return Ok(DataCollectionOpV1.Remove)
+    if name == "iterate": return Ok(DataCollectionOpV1.Iterate)
+    if name == "resize": return Ok(DataCollectionOpV1.Resize)
+    Err("unknown collection op '{name}'")
+
+fn data_sprof_u32_field_v1(line: text, key: text) -> Result<u32, text>:
+    val v = data_sprof_u64_v1(data_sprof_field_v1(line, key))?
+    if v > 4294967295u64:
+        return Err("'{key}' exceeds u32")
+    Ok(v as u32)
+
+pub fn data_sprof_parse_line_v1(line: text) -> Result<DataObservationV1, text>:
+    val duplicate = data_sprof_duplicate_key_v1(line)
+    if duplicate.len() > 0:
+        return Err("key '{duplicate}' repeated")
+    val family = line.split(";")[0]
+    var kind = DataObservationKindV1.CollectionOp
+    var op = DataCollectionOpV1.None
+    var schema_index: u32 = 0
+    var attr: u32 = 0
+    if family == "data_field":
+        kind = data_sprof_kind_from_name_v1(family, data_sprof_field_v1(line, "access"))?
+        schema_index = data_sprof_u32_field_v1(line, "schema")?
+        attr = data_sprof_u32_field_v1(line, "attr")?
+    elif family == "data_node":
+        kind = data_sprof_kind_from_name_v1(family, data_sprof_field_v1(line, "event"))?
+        schema_index = data_sprof_u32_field_v1(line, "schema")?
+    elif family == "data_collection":
+        op = data_sprof_op_from_name_v1(data_sprof_field_v1(line, "op"))?
+        schema_index = data_sprof_u32_field_v1(line, "schema")?
+    else:
+        return Err("not a data record line")
+    val o = DataObservationV1(kind: kind,
+        generation: data_sprof_u64_v1(data_sprof_field_v1(line, "gen"))?,
+        module_instance: data_sprof_u64_v1(data_sprof_field_v1(line, "module"))?,
+        site_id: data_sprof_u32_field_v1(line, "site")?,
+        schema_index: schema_index, attr_ordinal: attr, op: op,
+        count: data_sprof_metric_parse_v1(data_sprof_field_v1(line, "count"))?,
+        aux: data_sprof_metric_parse_v1(data_sprof_field_v1(line, "aux"))?,
+        representation_epoch: data_sprof_u32_field_v1(line, "epoch")?)
+    if not data_observation_valid_v1(o):
+        return Err("invalid data observation identity")
+    Ok(o)
+
+fn data_sprof_is_data_line_v1(line: text) -> bool:
+    line.starts_with("data_field;") or line.starts_with("data_collection;") or line.starts_with("data_node;")
+
+
+pub fn data_sprof_load_v1(profile_text: text) -> DataSprofLoadV1:
+    var envelope = ""
+    var minor: u64 = 0
+    var records: [DataObservationV1] = []
+    var skipped: i64 = 0
+    var diags: [text] = []
+    var data_lines: [text] = []
+    var index = 0
+    for raw in profile_text.split("\n"):
+        index = index + 1
+        val line = raw.trim()
+        if line.starts_with("header;"):
+            envelope = data_sprof_field_v1(line, "schema")
+        elif line.starts_with("ext;"):
+            val value = data_sprof_field_v1(line, "data_minor")
+            if value.len() > 0:
+                match data_sprof_u64_v1(value):
+                    case Ok(v): minor = v
+                    case Err(e): diags.push("line {index}: data_minor {e}")
+        elif line.starts_with("data_opt;"):
+            match data_sprof_u64_v1(data_sprof_field_v1(line, "tag")):
+                case Ok(tag):
+                    if tag >= DATA_RECORD_TAG_OPTIONAL_MIN_V1 as u64 and tag <= DATA_RECORD_TAG_OPTIONAL_MAX_V1 as u64:
+                        skipped = skipped + 1
+                    else:
+                        diags.push("line {index}: optional record tag {tag} outside 256..511")
+                case Err(e): diags.push("line {index}: optional record tag {e}")
+        elif data_sprof_is_data_line_v1(line):
+            data_lines.push("{index}\t{line}")
+    if data_lines.len() > 0 or skipped > 0:
+        if envelope != DATA_SPROF_ENVELOPE_V1:
+            diags.push("data records need envelope {DATA_SPROF_ENVELOPE_V1}, found '{envelope}'")
+            data_lines = []
+            skipped = 0
+        elif minor == 0:
+            diags.push("data records without '{DATA_SPROF_EXT_LINE_V1}'")
+            data_lines = []
+            skipped = 0
+        elif minor > DATA_SPROF_MINOR_V1 as u64:
+            diags.push("unsupported data_minor {minor}")
+            data_lines = []
+            skipped = 0
+    for entry in data_lines:
+        val tab = entry.index_of("\t")
+        val where = entry.slice(0, tab)
+        if records.len() >= DATA_SPROF_MAX_RECORDS_V1:
+            diags.push("data record limit {DATA_SPROF_MAX_RECORDS_V1} reached at line {where}")
+            break
+        match data_sprof_parse_line_v1(entry.slice(tab + 1, entry.len())):
+            case Ok(o): records.push(o)
+            case Err(e): diags.push("line {where}: {e}")
+    var kept: [text] = []
+    var dropped: i64 = 0
+    for d in diags:
+        if kept.len() < DATA_SPROF_MAX_DIAGNOSTICS_V1:
+            kept.push(d)
+        else:
+            dropped = dropped + 1
+    val reported_minor: i64 = if minor > DATA_SPROF_MINOR_V1 as u64: -1 else: minor as i64
+    DataSprofLoadV1(envelope: envelope, minor: reported_minor, records: records,
+        skipped_optional: skipped, diagnostics: kept, diagnostics_dropped: dropped)
+
+pub fn data_sprof_profile_lines_v1(records: [DataObservationV1]) -> Result<[text], text>:
+    var lines: [text] = [DATA_SPROF_EXT_LINE_V1]
+    for o in records:
+        lines.push(data_sprof_record_line_v1(o)?)
+    Ok(lines)
