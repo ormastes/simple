@@ -1,24 +1,26 @@
 # SMF wire-layout parity spec — guards src/spec/artifact/smf_v1_2.sdn
 #
-# Audit 2026-08-10: the pure-Simple SmfHeader is a PACKED 128-byte layout
-# (trailer at EOF-128); the Rust seed's #[repr(C)] SmfHeader is 96 bytes with
-# alignment padding (trailer at EOF-96). They are NOT wire-identical. This
-# spec pins the Simple side byte-for-byte so any drift from the normative
-# schema is caught, and encodes the measured Rust offsets so a future
-# convergence (or further drift) must update this file consciously.
+# Audit 2026-08-10: the pure-Simple SmfHeader was a PACKED 128-byte layout
+# (trailer at EOF-128) while the Rust seed's #[repr(C)] SmfHeader is 96 bytes
+# with alignment padding (trailer at EOF-96). Converged 2026-11-06 (v1.3): the
+# Simple writers emit the 96-byte layout. This spec pins the measured Rust
+# offsets against the default writer so any drift is caught, and keeps the
+# legacy packed layout (read-only, `to_packed_bytes`) pinned for the one
+# release in which readers still accept it.
 
-use compiler.backend.linker.smf_header.{SmfHeader, SMF_HEADER_SIZE, smf_header_from_bytes}
+use compiler.backend.linker.smf_header.{SmfHeader, SMF_HEADER_SIZE, SMF_PACKED_HEADER_SIZE, smf_header_from_bytes}
+use compiler.backend.linker.smf_meta.{smf_meta_compile_options_bytes}
 use compiler.backend.linker.smf_enums.{Platform, Arch}
 
 # Rust seed offsets, measured 2026-08-10 by compiled offset_of probe against
 # src/compiler_rust/common/src/smf/header.rs (repr(C), size 96).
 val RUST_SEED_HEADER_SIZE: i64 = 96
-val RUST_SECTION_TABLE_OFFSET: i64 = 24   # Simple packed layout: 20
-val RUST_ENTRY_POINT_OFFSET: i64 = 48     # Simple packed layout: 44
-val RUST_APP_TYPE_OFFSET: i64 = 80        # Simple packed layout: 76
+val RUST_SECTION_TABLE_OFFSET: i64 = 24   # legacy packed layout: 20
+val RUST_ENTRY_POINT_OFFSET: i64 = 48     # legacy packed layout: 44
+val RUST_APP_TYPE_OFFSET: i64 = 80        # legacy packed layout: 76
 
 fn sample_header() -> SmfHeader:
-    var h = SmfHeader.new_v1_1(Platform.Linux, Arch.X86_64)
+    var h = SmfHeader.new_v1_3(Platform.Linux, Arch.X86_64)
     h.section_count = 3
     h.section_table_offset = 0x1122334455667788
     h.symbol_table_offset = 0x0102030405060708
@@ -32,36 +34,38 @@ fn sample_header() -> SmfHeader:
     h.app_type = 2
     h
 
-describe "SMF v1.1 packed 128-byte layout (Simple side)":
-    it "serializes to exactly 128 bytes":
-        val bytes = sample_header().to_bytes()
-        expect bytes.len() == 128
-        expect SMF_HEADER_SIZE == 128
+fn legacy_header() -> SmfHeader:
+    var h = sample_header()
+    h.version_minor = 1
+    h
 
-    it "places fields at the normative packed offsets":
+describe "SMF v1.3 96-byte layout (Simple side, wire-identical to the Rust seed)":
+    it "serializes to exactly the Rust seed size":
         val bytes = sample_header().to_bytes()
-        # section_table_offset at 20 (LE u64 0x1122334455667788 -> first byte 0x88)
-        expect bytes[20] == 0x88
-        expect bytes[27] == 0x11
-        # symbol_count u32 at 36
-        expect bytes[36] == 7
-        # exported_count u32 at 40
-        expect bytes[40] == 5
-        # entry_point at 44 (LE -> first byte 0x11)
-        expect bytes[44] == 0x11
-        expect bytes[51] == 0xAA
-        # module_hash at 60 (LE 0xDEADBEEFCAFEF00D -> first byte 0x0D)
-        expect bytes[60] == 0x0D
-        # app_type at 76
-        expect bytes[76] == 2
-        # window_width 1280 = 0x0500 at 77
-        expect bytes[77] == 0x00
-        expect bytes[78] == 0x05
+        expect bytes.len() == RUST_SEED_HEADER_SIZE
+        expect SMF_HEADER_SIZE == RUST_SEED_HEADER_SIZE
 
-    it "round-trips through smf_header_from_bytes at offset 0 (v1.0 leading header)":
+    it "places fields at the measured Rust repr(C) offsets":
+        val bytes = sample_header().to_bytes()
+        # section_table_offset at 24 (LE u64 0x1122334455667788 -> first byte 0x88)
+        expect bytes[RUST_SECTION_TABLE_OFFSET] == 0x88
+        expect bytes[RUST_SECTION_TABLE_OFFSET + 7] == 0x11
+        # symbol_count u32 at 40, exported_count u32 at 44
+        expect bytes[40] == 7
+        expect bytes[44] == 5
+        # entry_point at 48 (LE -> first byte 0x11)
+        expect bytes[RUST_ENTRY_POINT_OFFSET] == 0x11
+        expect bytes[RUST_ENTRY_POINT_OFFSET + 7] == 0xAA
+        # module_hash at 64 (LE 0xDEADBEEFCAFEF00D -> first byte 0x0D)
+        expect bytes[64] == 0x0D
+        # app_type at 80; window_width 1280 = 0x0500 at 82
+        expect bytes[RUST_APP_TYPE_OFFSET] == 2
+        expect bytes[82] == 0x00
+        expect bytes[83] == 0x05
+
+    it "round-trips through smf_header_from_bytes at offset 0 (leading header)":
         val h = sample_header()
-        val parsed = smf_header_from_bytes(h.to_bytes())
-        match parsed:
+        match smf_header_from_bytes(h.to_bytes()):
             Ok(p):
                 expect p.section_table_offset == h.section_table_offset
                 expect p.symbol_table_offset == h.symbol_table_offset
@@ -71,7 +75,7 @@ describe "SMF v1.1 packed 128-byte layout (Simple side)":
             Err(e):
                 expect e == ""  # fail loudly
 
-    it "reads the v1.1 trailer at EOF-128 with a stub prefix":
+    it "reads the v1.3 trailer at EOF-96 with a stub prefix":
         val h = sample_header()
         var file: [u8] = []
         var i = 0
@@ -79,8 +83,7 @@ describe "SMF v1.1 packed 128-byte layout (Simple side)":
             file.push(0x90)
             i = i + 1
         file = file + h.to_bytes()
-        val parsed = smf_header_from_bytes(file)
-        match parsed:
+        match smf_header_from_bytes(file):
             Ok(p):
                 expect p.entry_point == h.entry_point
             Err(e):
@@ -90,32 +93,51 @@ describe "SMF v1.1 packed 128-byte layout (Simple side)":
         val bytes = sample_header().to_bytes()
         var short: [u8] = []
         var i = 0
-        while i < 100:
+        while i < 90:
             short.push(bytes[i])
             i = i + 1
         expect smf_header_from_bytes(short).err.?
 
-    it "stores compile-options hash in reserved bytes 88..104":
-        var h = sample_header()
-        var opts: [u8] = []
+    it "carries no compile-options bytes in the header":
+        # The hash lives in the .simple_meta section (smf_meta.spl); a bare
+        # header image therefore reports none.
+        expect smf_meta_compile_options_bytes(sample_header().to_bytes()).len() == 0
+
+describe "legacy packed 128-byte layout (read-only, one release)":
+    it "serializes to exactly 128 bytes with fields at the packed offsets":
+        val bytes = legacy_header().to_packed_bytes()
+        expect bytes.len() == SMF_PACKED_HEADER_SIZE
+        expect bytes[20] == 0x88
+        expect bytes[36] == 7
+        expect bytes[44] == 0x11
+        expect bytes[76] == 2
+        expect bytes[88] == 0 and bytes[103] == 0
+
+    it "reads the packed trailer at EOF-128 with a stub prefix":
+        val h = legacy_header()
+        var file: [u8] = []
+        var i = 0
+        while i < 64:
+            file.push(0x90)
+            i = i + 1
+        file = file + h.to_packed_bytes()
+        match smf_header_from_bytes(file):
+            Ok(p):
+                expect p.entry_point == h.entry_point
+                expect p.app_type == 2
+            Err(e):
+                expect e == ""
+
+    it "still reads the compile-options hash from legacy packed bytes 88..104":
+        var bytes = legacy_header().to_packed_bytes()
         var i = 0
         while i < 16:
-            opts.push((i + 1) as u8)
+            bytes[88 + i] = (i + 1) as u8
             i = i + 1
-        h.set_compile_options_bytes(opts)
-        expect h.has_compile_options_hash()
-        val bytes = h.to_bytes()
-        expect bytes[88] == 1
-        expect bytes[103] == 16
-        expect bytes[104] == 0
-
-describe "Rust seed divergence (documented, measured 2026-08-10)":
-    it "records that the seed header is NOT wire-identical to the packed layout":
-        # If either side is ever converged, update these AND smf_v1_2.sdn.
-        expect RUST_SEED_HEADER_SIZE != SMF_HEADER_SIZE
-        expect RUST_SECTION_TABLE_OFFSET != 20
-        expect RUST_ENTRY_POINT_OFFSET != 44
-        expect RUST_APP_TYPE_OFFSET != 76
+        val got = smf_meta_compile_options_bytes(bytes)
+        expect got.len() == 16
+        expect got[0] == 1
+        expect got[15] == 16
 
 describe "u64 header fields above i64 max (store + compare parity)":
     it "keeps 0xFFFF_FFFF_FFFF_FFF0 unsigned through store, serialize and parse":
@@ -125,8 +147,8 @@ describe "u64 header fields above i64 max (store + compare parity)":
         expect h.entry_point > 5
         expect h.entry_point > 0x7FFF_FFFF_FFFF_FFFF
         val bytes = h.to_bytes()
-        expect bytes[44] == 0xF0
-        expect bytes[51] == 0xFF
+        expect bytes[RUST_ENTRY_POINT_OFFSET] == 0xF0
+        expect bytes[RUST_ENTRY_POINT_OFFSET + 7] == 0xFF
         match smf_header_from_bytes(bytes):
             Ok(p):
                 expect p.entry_point == h.entry_point

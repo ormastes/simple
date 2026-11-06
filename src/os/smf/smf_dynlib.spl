@@ -1,5 +1,5 @@
 use std.common.string_core.{bytes_to_text}
-use compiler.backend.linker.smf_header.{smf_header_field_shift, smf_header_size_at, smf_header_seed_trailer_offset, SMF_SEED_HEADER_SIZE}
+use compiler.backend.linker.smf_header.{smf_header_field_shift, smf_header_size_at, smf_header_trailer_offset, SMF_SEED_HEADER_SIZE, SMF_VERSION_MINOR}
 use compiler.backend.linker.smf_reader_memory.{
     SmfReaderMemory,
     bytes_to_u32,
@@ -341,13 +341,15 @@ fn smf_dynlib_header_offset(data: [u8]) -> i64:
     if data.len() < SMF_SEED_HEADER_SIZE:
         return -1
     val trailer = data.len() - SMF_DYNLIB_HEADER_SIZE
-    # Packed v1.1 header: 128 bytes. Rust seed repr(C) header: 96 bytes with a
-    # +4 field shift (see compiler.backend.linker.smf_header).
+    # v1.3 header: 96 bytes at EOF-96 (+4 field shift); legacy packed: 128
+    # bytes at EOF-128. One precedence for every reader (see
+    # compiler.backend.linker.smf_header).
     val leading_magic = smf_dynlib_magic_at(data, 0) and
         (data.len() >= SMF_DYNLIB_HEADER_SIZE or smf_header_field_shift(data, 0) == 4)
-    val trailer_magic = data.len() >= SMF_DYNLIB_HEADER_SIZE and smf_dynlib_magic_at(data, trailer)
-    val seed_trailer = if trailer_magic: -1 else: smf_header_seed_trailer_offset(data)
-    val other_start = if trailer_magic: trailer else: seed_trailer
+    val trailer_start = smf_header_trailer_offset(data)
+    val trailer_magic = trailer_start >= 0 and trailer_start == trailer
+    val seed_trailer = if trailer_start >= 0 and not trailer_magic: trailer_start else: -1
+    val other_start = trailer_start
     if leading_magic and other_start > 0:
         return -2
     if leading_magic:
@@ -385,7 +387,7 @@ fn smf_dynlib_preflight_reader(data: [u8]) -> Result<SmfReaderMemory, text>:
         return Err("ambiguous smf header")
     if header_offset < 0:
         return Err("invalid smf header")
-    if data[header_offset + 4] != 1 or data[header_offset + 5] != 1:
+    if data[header_offset + 4] != 1 or data[header_offset + 5] < 1 or data[header_offset + 5] > SMF_VERSION_MINOR:
         return Err("unsupported smf version")
 
     val shift = smf_header_field_shift(data, header_offset)

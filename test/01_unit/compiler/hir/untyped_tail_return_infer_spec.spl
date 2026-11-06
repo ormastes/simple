@@ -1,0 +1,112 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# bug: doc/08_tracking/bug/native_untyped_return_fn_drops_tail_value_2026-09-13.md
+
+"""
+# Untyped functions infer their return type from the tail expression
+
+Owner decision 2026-11-06: a function without `-> T` infers its return type
+from its last expression when possible; when inference is impossible the
+compiler emits a diagnostic (never a silent Unit). In robust mode
+(`require_declared_return_type`, set per invocation by the driver from the
+assurance policy) a value-returning function without `-> T` is an error.
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_types.{HirTypeKind}
+
+fn lower_src(src: text, name: text, robust: bool) -> HirLowering:
+    val parsed = parse_full_frontend(src, "testdata/{name}.spl", name, Logger(level: 0))
+    var lowering = HirLowering.with_filename("testdata/{name}.spl")
+    lowering.require_declared_return_type = robust
+    lowering.lower_module(parsed)
+    lowering
+
+fn diag_count(lowering: HirLowering, needle: text) -> i64:
+    var n = 0
+    for m in lowering.diagnostic_messages:
+        if m.contains(needle):
+            n = n + 1
+    n
+
+fn ret_kind_name(src: text, name: text, fn_name: text) -> text:
+    val parsed = parse_full_frontend(src, "testdata/{name}.spl", name, Logger(level: 0))
+    var lowering = HirLowering.with_filename("testdata/{name}.spl")
+    val hir = lowering.lower_module(parsed)
+    match hir.symbols.lookup(fn_name):
+        Some(symbol):
+            val fn_ = hir.functions[symbol]
+            match fn_.return_type.kind:
+                HirTypeKind.Unit: "unit"
+                HirTypeKind.Any: "any"
+                HirTypeKind.Str: "text"
+                HirTypeKind.Int(_, _): "int"
+                _: "other"
+        nil: "missing"
+
+val BUG_SRC = "fn mk_untyped():\n    var c = []\n    c.push(7)\n    c\n\nfn main():\n    val a = mk_untyped()\n    print(a.len())\n"
+
+describe "untyped tail-value return inference (owner decision 2026-11-06)":
+    it "bug shape: bare local tail is not dropped to Unit":
+        expect(ret_kind_name(BUG_SRC, "bug_shape", "mk_untyped")).to_not_equal("unit")
+
+    it "bug shape: un-inferrable tail type is reported, never silent":
+        val lowering = lower_src(BUG_SRC, "bug_diag", false)
+        expect(diag_count(lowering, "W-RET-INFER-001")).to_equal(1)
+        expect(diag_count(lowering, "E-RET-DECL-001")).to_equal(0)
+
+    it "infers a scalar from an unannotated binding initializer":
+        val src = "fn k():\n    val x = 5\n    x\n"
+        expect(ret_kind_name(src, "bind_int", "k")).to_equal("int")
+
+    it "infers text from a literal tail":
+        expect(ret_kind_name("fn t():\n    val n = 1\n    \"hi\"\n", "lit_text", "t")).to_equal("text")
+
+    it "treats a sole string literal as a docstring, not a return":
+        expect(ret_kind_name("fn d():\n    \"just docs\"\n", "docstring", "d")).to_equal("unit")
+
+    it "keeps a call tail as Unit (calls may be procedures)":
+        val src = "fn helper() -> i64:\n    3\n\nfn c():\n    helper()\n"
+        expect(ret_kind_name(src, "call_val", "c")).to_equal("unit")
+
+    it "keeps a side-effect call tail as Unit with no diagnostic":
+        val src = "fn p():\n    print(\"x\")\n"
+        expect(ret_kind_name(src, "call_tail", "p")).to_equal("unit")
+        expect(diag_count(lower_src(src, "call_tail_d", false), "RET-")).to_equal(0)
+
+describe "robust mode: missing return type on a value-returning function is an error":
+    it "rejects an untyped tail-value function":
+        val lowering = lower_src("fn t():\n    5\n", "robust_tail", true)
+        expect(diag_count(lowering, "E-RET-DECL-001")).to_equal(1)
+
+    it "rejects an untyped explicit-return function":
+        val lowering = lower_src("fn r():\n    return 5\n", "robust_ret", true)
+        expect(diag_count(lowering, "E-RET-DECL-001")).to_equal(1)
+
+    it "accepts a procedure and an annotated function":
+        val src = "fn p():\n    print(\"x\")\n\nfn t() -> i64:\n    5\n"
+        expect(diag_count(lower_src(src, "robust_ok", true), "E-RET-DECL-001")).to_equal(0)
+
+    it "default mode never raises the robust error":
+        expect(diag_count(lower_src("fn t():\n    5\n", "default_tail", false), "E-RET-DECL-001")).to_equal(0)
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn count_of(hay: text, needle: text) -> i64:
+    hay.split(needle).len() - 1
+
+describe "robust return policy is passed per invocation, never a shared default":
+    it "every driver HIR lowering site sets the flag from the assurance policy":
+        val src = rt_file_read_text("src/compiler/80.driver/driver_hir_pipeline_lowering.spl") ?? ""
+        expect(count_of(src, "forbid_written_any = driver_hir_forbids_written_any(")).to_equal(5)
+        expect(count_of(src, "require_declared_return_type = driver_hir_requires_declared_return_type(")).to_equal(5)
+
+    it "the lowering default stays off":
+        expect(HirLowering.with_filename("default.spl").require_declared_return_type).to_equal(false)
+
+    it "the HIR source-body cache identity separates robust lowerings":
+        val src = rt_file_read_text("src/compiler/80.driver/cache/driver_hir_source_body_custody_identity_v1.spl") ?? ""
+        expect(count_of(src, "require-declared-return-v1")).to_equal(2)

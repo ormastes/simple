@@ -942,7 +942,7 @@ pub fn coverage_wrapper_compile_failure_v1(
 # the compiler wrote nothing to stdout the string starts with "\n" and a
 # naive first-line take yields an empty diagnostic (observed: the printed
 # "Compiler diagnostic:" was blank for every real fallback).
-fn first_line(text_value: text) -> text:
+pub fn compile_output_diagnostic_line_v1(text_value: text) -> text:
     # Prefer the first line that actually names an error; the compile output is
     # dominated by seed banners and lint warnings, and taking line 1 verbatim
     # masked the real diagnostic in every fail-closed/degrade message.
@@ -965,6 +965,11 @@ fn first_line(text_value: text) -> text:
         if trimmed == "" or
             trimmed.starts_with("WARNING: this Rust-built Simple binary") or
             trimmed.starts_with("Build and use the pure-Simple"):
+            continue
+        # A rustc-style source excerpt (`98 | code`, `   | ^`, `--> path`) is
+        # the body of a warning, not a diagnostic; an identifier such as
+        # `PackageImageErrorV1` in it must not read as an error mention.
+        if compile_output_is_source_listing_line_v1(trimmed):
             continue
         if trimmed.starts_with("error:") or trimmed.starts_with("error[") or
             (trimmed.contains("-E-") and trimmed.contains(":") and not trimmed.starts_with("[")):
@@ -1001,7 +1006,7 @@ pub fn smf_compile_degrade_token(compile_output: text) -> text:
             "smf-interpreter-only-constructs"
         else:
             "smf-compile-error"
-    val diagnostic = verdict_degrade_token_field(first_line(compile_output))
+    val diagnostic = verdict_degrade_token_field(compile_output_diagnostic_line_v1(compile_output))
     if diagnostic == "": kind else: kind + ":" + diagnostic
 
 # A verdict line is whitespace-separated `key=value` tokens, so the diagnostic
@@ -1337,7 +1342,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         val uncompilable_construct = compile_output.contains("cannot compile to standalone SMF")
         if mcdc_enabled and not options.coverage:
             cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts, if explicit_aot: smf_path + ".cache" else: "", native_quarantine_path)
-            val diagnostic = first_line(compile_output)
+            val diagnostic = compile_output_diagnostic_line_v1(compile_output)
             val reason = if uncompilable_construct:
                     "MC/DC instrumentation skipped: spec cannot compile to standalone SMF (interpreter-only constructs); degraded to plain interpreter execution. Compiler diagnostic: " + diagnostic
                 else:
@@ -1356,7 +1361,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         if options.coverage and wrapper_active and not coverage_interpreter_fallback_opted_in(env_get("SIMPLE_COVERAGE_FALLBACK") ?? ""):
             val end_abort = time_now_unix_micros()
             val failure = coverage_wrapper_compile_failure_v1(
-                first_line(compile_output), compile_result.limit_type, compile_ms,
+                compile_output_diagnostic_line_v1(compile_output), compile_result.limit_type, compile_ms,
                 test_resource_class_name(compile_class), scoped_child_budget_status(compile_scoped))
             cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts, if explicit_aot: smf_path + ".cache" else: "", native_quarantine_path)
             return TestFileResult(
@@ -1386,7 +1391,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
             # below runs the REAL, unwrapped spec and reports its real
             # pass/fail, so this cannot mask a genuine defect.
             cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts, if explicit_aot: smf_path + ".cache" else: "", native_quarantine_path)
-            val reason = "COVERAGE NOT COLLECTED (explicit SIMPLE_COVERAGE_FALLBACK=interpreter opt-in): wrapped spec failed to compile standalone; degraded to plain interpreter execution of the original source. Compiler diagnostic: " + first_line(compile_output)
+            val reason = "COVERAGE NOT COLLECTED (explicit SIMPLE_COVERAGE_FALLBACK=interpreter opt-in): wrapped spec failed to compile standalone; degraded to plain interpreter execution of the original source. Compiler diagnostic: " + compile_output_diagnostic_line_v1(compile_output)
             return run_test_file_mcdc_interpreter_fallback(file_path, options, start, "coverage-fallback", reason,
                 smf_compile_degrade_token(compile_output))
         val end = time_now_unix_micros()
@@ -1688,3 +1693,15 @@ export mcdc_compiler_lacks_probes, mcdc_compiler_identity_lacks_probes, MCDC_UNA
 export native_test_request_error, native_test_compile_threads, native_test_compile_args
 export native_test_compile_args_with_threads, native_test_invocation_receipt
 export cleanup_native_generated_files, make_native_completion_result_v1, native_test_source_kind_v1, allocate_native_completion_path_v1
+
+fn compile_output_is_source_listing_line_v1(trimmed: text) -> bool:
+    if trimmed.starts_with("|") or trimmed.starts_with("-->") or trimmed.starts_with("= "):
+        return true
+    val bar = trimmed.index_of("|") ?? -1
+    if bar <= 0:
+        return false
+    var digits_only = true
+    for ch in trimmed[0:bar].trim():
+        if ch < "0" or ch > "9":
+            digits_only = false
+    digits_only and trimmed[0:bar].trim() != ""
