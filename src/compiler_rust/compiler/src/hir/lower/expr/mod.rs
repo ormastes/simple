@@ -1974,7 +1974,10 @@ impl Lowerer {
                 // their result type declared here or the boxing step at the
                 // print()/call-arg lowering site is skipped, exactly as it was
                 // for `length` and the `is_*` predicates above.
-                "char_count" => Some(TypeId::I64),
+                // `byte_len` maps to the same raw-i64 `rt_string_len` as `len`; with
+                // no declared type its JIT result was printed/compared as a
+                // tagged word (jit_text_byte_len_untagged_int_boxing_2026-11-06).
+                "char_count" | "byte_len" => Some(TypeId::I64),
                 "capitalize" | "swapcase" | "title" | "titlecase" | "chomp" | "trim_start_matches"
                 | "trim_end_matches" | "removeprefix" | "remove_prefix" | "removesuffix" | "remove_suffix"
                 | "squeeze" | "replace_first" | "push_str" | "pad_left" | "pad_start" | "pad_right" | "pad_end"
