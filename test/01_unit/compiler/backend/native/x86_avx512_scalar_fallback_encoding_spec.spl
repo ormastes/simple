@@ -16,6 +16,7 @@ disp32 frame displacements). None of these sequences may contain an EVEX
 
 use std.spec.*
 use compiler.backend.native.x86_64_avx512_scalar.*
+use compiler.backend.native.x86_64_avx512_receipt.{x86_zmm_evidence}
 
 fn hex(bytes: [i64]) -> text:
     val digits = "0123456789abcdef"
@@ -63,6 +64,14 @@ describe "AVX-512 scalar fallback encoding (llvm-mc goldens)":
     it "permutes through a SIB-indexed frame read and bounds-checks broadcast lanes":
         expect(hex(avx512_scalar_permute_bytes(7, 9, -64, -300, -400, 2))).to_equal("4863bd70feffff4c8b8cfdd4feffff4c898dc0ffffff4863bd74feffff4c8b8cfdd4feffff4c898dc8ffffff4863bd78feffff4c8b8cfdd4feffff4c898dd0ffffff4863bd7cfeffff4c8b8cfdd4feffff4c898dd8ffffff4863bd80feffff4c8b8cfdd4feffff4c898de0ffffff4863bd84feffff4c8b8cfdd4feffff4c898de8ffffff4863bd88feffff4c8b8cfdd4feffff4c898df0ffffff4863bd8cfeffff4c8b8cfdd4feffff4c898df8ffffff")
         expect(hex(avx512_scalar_broadcast_bytes(12, 0, -64, -128, 1))).to_equal("4983fc1072020f0b428b84a580ffffff408985c0ffffff408985c4ffffff408985c8ffffff408985ccffffff408985d0ffffff408985d4ffffff408985d8ffffff408985dcffffff408985e0ffffff408985e4ffffff408985e8ffffff408985ecffffff408985f0ffffff408985f4ffffff408985f8ffffff408985fcffffff")
+
+    it "decodes into whole instructions with no EVEX or ZMM instruction":
+        val all = avx512_scalar_cmp_bytes(10, 6, -64, -128, -192, 1, 4) + avx512_scalar_unary_bytes(8, -64, -128, 2, 4) + avx512_scalar_permute_bytes(7, 9, -64, -300, -400, 2) + avx512_scalar_broadcast_bytes(12, 0, -64, -128, 1) + avx512_scalar_ibin_bytes(10, -64, -128, -192, 11, -256)
+        val evidence = x86_zmm_evidence(all)
+        expect(evidence.decoded).to_equal(true)
+        expect(evidence.instructions).to_equal(98 + 25 + 24 + 20 + 128)
+        expect(evidence.evex_instructions).to_equal(0)
+        expect(evidence.zmm_instructions).to_equal(0)
 
     it "keeps the fallback opcodes inside the AVX-512 frame band":
         # regalloc applies the frame-vector spill discipline to 400..450.
