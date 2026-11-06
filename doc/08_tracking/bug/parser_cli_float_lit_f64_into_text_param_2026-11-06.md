@@ -1,6 +1,6 @@
 # parser_cli passes an f64 to expr_float_lit(value: text) — cranelift call-ABI reject (2026-11-06)
 
-**Status:** fixed (2026-11-06)
+**Status:** fix-implemented-verification-pending (2026-11-06; closes when a Stage 2 `compiler_cli_build` row passes)
 
 Found while verifying `mir_generic_trait_bound_receiver_unresolved_2026-11-06`: a Stage 2 compiler
 built from release/1.0.0 + that fix lowered the whole `tldr_table_fill_v1.spl` closure through MIR
