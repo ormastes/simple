@@ -1,0 +1,40 @@
+# LSP overlay and diagnostic provenance: next implementation
+
+Read-only baseline: `0530658343c62fa092ddb2948824f8da76a5c89d`, `/private/tmp/simple-release100-next-20261106`. No execution qualification; no source edits. Parent reports reconciled tree differs only in codec files.
+
+## Remaining acceptance gap
+
+The saved `doc/03_plan/release/1.0.0/inputs_2026-11-06/simple_mcp_lsp_source_debugging_improvement_plan_2026-10-29.md` §§5.1/5.3, 10.1 and 10.4 require editor-owned immutable overlays, analyzed-snapshot provenance, complete versioned edit sets, and distinct analysis failures. DIAG-01 requires warnings despite successful exit; DIAG-02 forbids timeout/crash/invalid payload becoming empty success; FIX-07 requires correct unsaved overlay owner/version.
+
+`src/lib/nogc_sync_mut/lsp/lsp_code_action_handler.spl` currently rejects unsaved buffers when disk differs. This is honest refusal, not overlay support. `lsp_handlers.spl:168` only checks disk/overlay equality before spawning diagnostics; `_collect_diagnostics` at approximately 186 parses subprocess output without a completed-analysis envelope. Empty/malformed output can become an empty diagnostic list. Preflight equality cannot prove child analyzed the snapshot or exclude disk ABA. didChange does not reanalyze. Published diagnostics have no document version/run identity. These remain release acceptance gaps.
+
+## Existing canonical owners and limits
+
+* `tooling/easy_fix/snapshot.spl` owns exact source SHA256 and SourceSnapshot. `compiler/90.tools/fix/producer.spl:43` constructs FixUnit directly from provided immutable source; `fix/main.spl:221` already exposes collect_fixes_from_source. Reuse for overlay edit producers.
+* `compiler/80.driver/driver_api_compile_single.spl:48` check_file is path-only. Canonical source admission is `driver_source_pipeline_loading.spl`: parser consumes loaded contents; around 1340 it freezes source paths/authored paths/contents/full hashes into `driver_types.spl:408` source owners. `driver_source_parse_retained.spl:649` feeds SourceFile.content to the selected frontend. These are the proper extension points.
+* Existing registered `simple-summary://` virtual-source branch around loader line 842 is a bounded exact summary registry, not a general editor-overlay admission API.
+* `compiler/90.tools/query_api.spl` caches by path/mtime. Its parse_source_text does not establish modern semantic snapshot checking; `query_helpers.spl:155` delegates type checking to io.rt_type_check_ast. Do not select it as the new canonical pipeline.
+* `semantic_prerequisite_types_v1.spl:1` explicitly says its frozen scalar-literal probes cannot construct semantic grants/results. Its request accepts source bytes, but it is not a full check API.
+* Canonical `compiler/00.common/diagnostics/diagnostic_v1.spl:98` retains severity/code/message, file/span, all labels, notes/help, children, macro trace and fix. Preserve this structure; do not normalize by extracting message lines.
+
+## Minimal complete implementation path and ownership
+
+1. Compiler owner: add proposed `check_snapshot_set_v1(request)` at driver API, with immutable source entries, entry path, workspace identity, overlay-owner/lifetime generation, document versions, exact digests, target/features/config/compiler identity and bounds. Validate before compiling. Add an explicit source-provider field to driver context; canonical loader resolves entry AND imported files through the admitted overlay map before bounded disk reads, records every actual dependency digest, then uses its existing parse/freeze pipeline. Do not write temporary replacement files or merely assign ctx.sources before normal loading. All alternative read/streaming/cache paths must consult the provider or reject unsupported mode. Disk reads admitted during analysis become immutable dependency entries.
+2. Diagnostic owner: return `Completed` with exact analyzed snapshot/dependency identities and DiagnosticV1 records, or distinct `Rejected/Cancelled/TimedOut/Failed/InvalidPayload`. Clean completion may contain zero diagnostics; compiler source errors are completed analysis, distinct from infrastructure failure. Preserve warnings on successful exit. Copy retained diagnostic/provenance values across compiler session teardown (`driver_orchestration.spl:184` explicitly keeps result/error owners).
+3. CLI/process owner: expose that API through a bounded worker request/response contract, using SDN internally and explicit JSON conversion for interoperability. Require one complete validated response, run ID and analyzed digests. Propagate spawn failure, exit/crash, deadline, cancellation and truncation independently of source diagnostics. Avoid parsing arbitrary stdout log lines as success.
+4. LSP owner: capture immutable synchronized document set from existing LspServer, including lifetime generation so close/reopen cannot revive old authority. Trigger/debounce analysis on open/change/save; cancel superseded work. Before storing/publishing, atomically check owner generation, versions and digests against request and actual analyzed result. Publish versioned diagnostics from shared snapshot-keyed store. Failed analysis must not masquerade as clean empty results; retain prior diagnostics as stale internally and expose failure. Close explicitly clears diagnostics.
+5. Action/MCP owner: reuse the same snapshot admission and provided-source FixUnit path. Supply every edited file’s admitted revision to strict conversion, not only requested URI. MCP must explicitly choose overlay owner or report disk scope. Cache keys include content, dependency generations and semantic environment; path/mtime alone is insufficient.
+
+Implement steps 1–3 before claiming step 4 overlay semantics. Independent lanes can author protocol types/tests and LSP adapters against agreed interface; compiler source loading and provenance ownership need one integration owner.
+
+## Required focused regressions
+
+Actual dispatch tests: valid disk plus invalid unsaved overlay diagnoses overlay; invalid disk plus valid overlay yields completed clean overlay result; overlay import changes affect entry analysis; source-dependent edits bind overlay bytes/version. Include disk ABA during analysis, newer change during execution, close/reopen same version/content, two owners/worktrees, stale dependency result, and multifile edits with differing document versions. Diagnostic protocol tests: warning with exit 0, completed empty, source-error exit, spawn failure, crash, timeout, cancellation, malformed/truncated/log-only response; only completed empty clears current diagnostics. Preserve multiple file labels, children, fixes, Unicode/CRLF spans and analyzed content identities.
+
+## Bounds and performance acceptance
+
+Reuse current admission ceilings: 256 retained docs, 1 MiB/document, 16 MiB retained source, 4096-byte URI; current action conversion 4 MiB response, 128 actions, 64 revision records. These are implementation bounds, not measured performance claims. Add bounded dependency closure/work, response/diagnostic count, queued requests and compiler process count; cancel superseded requests and avoid repeated full source rereads. Saved plan warm targets are cached outline <100 ms, focused navigation <200 ms and cached annotation detail <200 ms (p95). It supplies no universal cold diagnostic deadline: select explicit configurable worker deadline and queue limits, then measure first-result/total latency, warm reuse, p99 and max RSS on pinned fixtures. Include 3000 distinct cache keys and close/evict cycles. No runtime or latency target is qualified by this static audit.
+
+## Implementation ownership
+
+Compiler source-provider admission and shared `source_analysis_v1` contracts: debug_truth. LSP/worker capture, transport and publication: lsp_revision_review. Root integrates and reviews the agreed contract before dependent work. Active worktree is `/private/tmp/simple-release100-reconciled-20261106`, starting at `a63f2a5eaf7`. Existing frozen bootstrap source is untouched. This design implements the selected full-plan overlay requirement; it does not narrow it to disk equality checks.
