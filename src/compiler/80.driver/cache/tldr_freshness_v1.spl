@@ -17,6 +17,7 @@ use compiler.driver.cache.tldr_layout_v1.{tldr_publish_v1}
 use compiler.driver.cache.hash_digest_v1.{digest_v1_of_text}
 use compiler.common.cache_contract.hash_algorithm_registry_v1.{digest_v1_text, HASH_ALGO_SHA256_V1}
 use std.io_runtime.{file_exists, file_read}
+use std.nogc_sync_mut.io_runtime.{process_run}
 
 pub val TLDR_FRESHNESS_SCHEMA_V1: text = "simple.tldr-freshness/1"
 
@@ -97,7 +98,116 @@ pub fn tldr_freshness_receipt_publish_v1(out_root: text, source_git_tree: text,
         return "receipt publish failed: {path}"
     ""
 
+# "" on success, otherwise a warning text. Best effort: the local receipt file is
+# the primary record, so callers must not fail on a non-empty result. Local ref
+# only; notes are never pushed.
+pub fn tldr_note_attach_v1(rev: text, receipt_file: text) -> text:
+    val (_out, err, code) = process_run("git", ["notes", "--ref=simple-tldr", "add", "-f", "-F", receipt_file, rev])
+    if code != 0:
+        return "git note not attached for {rev}: {err.trim()}"
+    ""
+
+# Note bytes for `rev`, or "" when there is no note / no git / not a repo.
+pub fn tldr_note_read_v1(rev: text) -> text:
+    val (out, _err, code) = process_run("git", ["notes", "--ref=simple-tldr", "show", rev])
+    if code != 0:
+        return ""
+    out
+
+fn _receipt_field_v1(sdn: text, key: text) -> text:
+    val prefix = key + ": "
+    for line in sdn.split("\n"):
+        if line.starts_with(prefix):
+            return line.substring(prefix.len()).trim()
+    ""
+
+fn _receipt_count_v1(sdn: text, key: text) -> i64:
+    val v = _receipt_field_v1(sdn, key)
+    if v == "":
+        return 0
+    v.to_int()
+
+# verified | partial | none. Derived from the counts, not from the state line alone.
+pub fn tldr_receipt_state_v1(sdn: text) -> text:
+    if _receipt_field_v1(sdn, "schema") != TLDR_FRESHNESS_SCHEMA_V1:
+        return "none"
+    val expected = _receipt_count_v1(sdn, "expected")
+    val verified = _receipt_count_v1(sdn, "verified")
+    if expected > 0 and verified == expected and _receipt_field_v1(sdn, "state") == "verified":
+        return "verified"
+    if verified > 0:
+        return "partial"
+    "none"
+
+pub struct TldrHistoryRowV1:
+    rev: text
+    tree: text
+    time: text
+    refs: text
+    state: text
+    current: bool
+
+# `git log --format=%H<TAB>%T<TAB>%cI<TAB>%D` rows.
+pub fn tldr_history_parse_log_v1(log: text) -> [TldrHistoryRowV1]:
+    var rows: [TldrHistoryRowV1] = []
+    for line in log.split("\n"):
+        if line.trim() == "":
+            continue
+        val parts = line.split("\t")
+        if parts.len() < 2:
+            continue
+        val time = if parts.len() > 2: parts[2] else: ""
+        val refs = if parts.len() > 3: parts[3] else: ""
+        rows.push(TldrHistoryRowV1(rev: parts[0], tree: parts[1], time: time, refs: refs,
+            state: "none", current: false))
+    rows
+
+# `receipts[i]` is the receipt SDN for rows[i] ("" = none). Newest-first rows: the
+# first verified one is TLDR-current. Branch and time never affect the state.
+pub fn tldr_history_annotate_v1(rows: [TldrHistoryRowV1], receipts: [text]) -> [TldrHistoryRowV1]:
+    var out: [TldrHistoryRowV1] = []
+    var found = false
+    var i = 0
+    while i < rows.len():
+        val r = rows[i]
+        val state = if i < receipts.len(): tldr_receipt_state_v1(receipts[i]) else: "none"
+        val is_cur = state == "verified" and not found
+        if is_cur:
+            found = true
+        out.push(TldrHistoryRowV1(rev: r.rev, tree: r.tree, time: r.time, refs: r.refs,
+            state: state, current: is_cur))
+        i = i + 1
+    out
+
+pub fn tldr_history_render_row_v1(r: TldrHistoryRowV1) -> text:
+    val mark = if r.current: "  <- TLDR-current" else: ""
+    val refs = if r.refs != "": " ({r.refs})" else: ""
+    r.rev.substring(0, 12) + " " + r.state + " " + r.time + refs + mark
+
+# Note bytes win; otherwise the local `<out>/receipts/<tree>.sdn`; otherwise "".
+pub fn tldr_history_receipt_text_v1(out_root: text, tree: text, note: text) -> text:
+    if note != "":
+        return note
+    val path = tldr_freshness_receipt_path_v1(out_root, tree)
+    if file_exists(path):
+        return file_read(path)
+    ""
+
+# Last `n` commits of HEAD, annotated. Empty when git is unavailable.
+pub fn tldr_history_collect_v1(out_root: text, n: i64) -> [TldrHistoryRowV1]:
+    val (out, _err, code) = process_run("git", ["log", "-n", "{n}", "--format=%H%x09%T%x09%cI%x09%D"])
+    if code != 0:
+        return []
+    val rows = tldr_history_parse_log_v1(out)
+    var receipts: [text] = []
+    for r in rows:
+        receipts.push(tldr_history_receipt_text_v1(out_root, r.tree, tldr_note_read_v1(r.rev)))
+    tldr_history_annotate_v1(rows, receipts)
+
 export TLDR_FRESHNESS_SCHEMA_V1, TldrFreshnessV1
 export tldr_freshness_verify_v1, tldr_freshness_current_v1
 export tldr_freshness_receipt_render_v1, tldr_freshness_receipt_path_v1
 export tldr_freshness_receipt_publish_v1
+export tldr_note_attach_v1, tldr_note_read_v1, tldr_receipt_state_v1
+export TldrHistoryRowV1, tldr_history_parse_log_v1, tldr_history_annotate_v1
+export tldr_history_render_row_v1, tldr_history_receipt_text_v1, tldr_history_collect_v1
