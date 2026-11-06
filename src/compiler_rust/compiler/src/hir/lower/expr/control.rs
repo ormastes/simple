@@ -2319,13 +2319,37 @@ impl Lowerer {
         // Only tagged `T?` slots take `rt_is_some` (`!rt_is_none`, i.e.
         // `is_nil()` for every non-enum word); raw scalar / raw-pointer
         // operands keep the sentinel compare, as in `lower_condition`.
-        let is_tagged_slot = matches!(
-            self.module.types.get(subject_ty),
-            Some(HirType::Pointer {
-                kind: PointerKind::Shared | PointerKind::Unique | PointerKind::Weak | PointerKind::Handle,
-                ..
-            })
-        );
+        // Explicit `Option<scalar>` enum subject: presence is `rt_is_some`
+        // (a real `None` is not the nil sentinel) and the coalesced value is the
+        // raw payload scalar (decoded in MIR by name + type).
+        let option_scalar_payload = match self.module.types.get(subject_ty) {
+            Some(HirType::Enum { name, .. }) if name == "Option" => self
+                .result_like_payload_type(subject_ty)
+                .filter(|p| {
+                    matches!(
+                        *p,
+                        TypeId::BOOL
+                            | TypeId::I8
+                            | TypeId::I16
+                            | TypeId::I32
+                            | TypeId::I64
+                            | TypeId::U8
+                            | TypeId::U16
+                            | TypeId::U32
+                            | TypeId::F32
+                            | TypeId::F64
+                    )
+                }),
+            _ => None,
+        };
+        let is_tagged_slot = option_scalar_payload.is_some()
+            || matches!(
+                self.module.types.get(subject_ty),
+                Some(HirType::Pointer {
+                    kind: PointerKind::Shared | PointerKind::Unique | PointerKind::Weak | PointerKind::Handle,
+                    ..
+                })
+            );
         let condition = if is_tagged_slot {
             HirExpr {
                 kind: HirExprKind::BuiltinCall {
@@ -2367,6 +2391,7 @@ impl Lowerer {
         // boxing, so both edges are raw and agree with the static type.
         // Bug: doc/08_tracking/bug/optional_i64_return_payload_corruption_2026-08-31.md
         let result_ty = self.optional_boxint_scalar_inner(result_ty).unwrap_or(result_ty);
+        let result_ty = option_scalar_payload.unwrap_or(result_ty);
         // Same for the non-BoxInt scalars (`bool?`, `f32?`, `f64?`): the
         // coalesced value is the raw inner scalar. Typed as the tagged `T?`,
         // `val b = maybe_bool() ?? false` kept a tagged word and
