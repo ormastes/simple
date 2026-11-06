@@ -1,0 +1,191 @@
+# @cover src/compiler/70.backend/backend/native/xray_sled_emit.spl
+# @req REQ-XRAY-PR6-NATIVE-X86-64-SLED
+"""
+# XRay PR6 — pure-Simple native x86-64 sleds (SysV)
+
+Design: doc/04_architecture/compiler/xray/xray_compiler_structural_change_2026-11-06.md
+A.5 (13-byte sled, `.simple_xray_map`) and B (static off identity).
+
+The sled bytes are the landed V1 contract template `trace_native_off_template_v1`
+(X64Rel32): `EB 0B` (jump over, off) / `E8 rel32` (CALL trampoline) / `EB 04`
+(jump over the id) / imm32 site id. Only the 2-byte activation word switches
+(`EB 0B` <-> `66 90`), so every sled starts on an even byte: the encoder pads
+an odd position with one `90` NOP.
+"""
+use std.spec.*
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_native_map_v1.*
+use std.common.trace.xray_native_map_format_v1.*
+use compiler.backend.native.mach_inst.{X86_OP_RET, X86_OP_NOP, X86_OP_XRAY_SLED, MachModule, MachFunction, MachBlock, MachInst, EncodedFunction, EncodedReloc, new_mach_inst, new_mach_block, mach_block_add_inst, new_mach_function, mach_func_add_block, new_mach_module, mach_module_add_func, op_imm}
+use compiler.backend.native.encode_x86_64.{new_encode_context, encode_inst, encode_module}
+use compiler.backend.native.native_elf.{emit_elf_x86_64, emit_elf_x86_64_xray}
+use compiler.backend.native.xray_sled_emit.*
+use compiler.mir.mir_data.{MirModule}
+
+# Independent golden for site 3: JMP +11 / CALL rel32 0 (PLT32 reloc) / JMP +4 / id 3.
+fn golden_sled_site3() -> [i64]:
+    [0xEB, 0x0B, 0xE8, 0, 0, 0, 0, 0xEB, 0x04, 3, 0, 0, 0]
+
+fn ret_block(label: text, id: i64) -> MachBlock:
+    var block = new_mach_block(label, id)
+    block = mach_block_add_inst(block, new_mach_inst(X86_OP_NOP, []))
+    mach_block_add_inst(block, new_mach_inst(X86_OP_RET, []))
+
+fn two_exit_function(name: text) -> MachFunction:
+    var func = new_mach_function(name)
+    var prologue = new_mach_block("prologue", -1)
+    prologue = mach_block_add_inst(prologue, new_mach_inst(X86_OP_NOP, []))
+    func = mach_func_add_block(func, prologue)
+    func = mach_func_add_block(func, ret_block("a", 0))
+    mach_func_add_block(func, ret_block("b", 1))
+
+fn fixture_module() -> MachModule:
+    var module = new_mach_module("xray_fixture")
+    module = mach_module_add_func(module, two_exit_function("traced"))
+    mach_module_add_func(module, two_exit_function("plain"))
+
+fn empty_mir_module(name: text) -> MirModule:
+    MirModule(name: name, functions: {}, statics: {}, constants: {}, types: {})
+
+fn opcodes(func: MachFunction) -> [i64]:
+    var out: [i64] = []
+    for block in func.blocks:
+        for inst in block.insts:
+            out.push(inst.opcode)
+    out
+
+fn le_u8(bytes: [u8], offset: i64, width: i64) -> i64:
+    var value = 0
+    for index in 0..width:
+        value = value | ((bytes[offset + index] as i64) << (index * 8))
+    value
+
+fn le_i64(bytes: [i64], offset: i64, width: i64) -> i64:
+    var value = 0
+    for index in 0..width:
+        value = value | (bytes[offset + index] << (index * 8))
+    value
+
+fn section_index(object: [i64], name: text) -> i64:
+    val shoff = le_i64(object, 40, 8)
+    val shnum = le_i64(object, 60, 2)
+    val shstrndx = le_i64(object, 62, 2)
+    val strtab_off = le_i64(object, shoff + shstrndx * 64 + 24, 8)
+    val wanted = name.bytes()
+    for index in 0..shnum:
+        val name_at = strtab_off + le_i64(object, shoff + index * 64, 4)
+        var same = object[name_at + wanted.len()] == 0
+        if same:
+            for k in 0..wanted.len():
+                if object[name_at + k] != (wanted[k] as i64):
+                    same = false
+        if same: return index
+    -1
+
+fn shdr_field(object: [i64], index: i64, field_offset: i64, width: i64) -> i64:
+    le_i64(object, le_i64(object, 40, 8) + index * 64 + field_offset, width)
+
+fn xray_object(module: MachModule) -> [i64]:
+    val planned = xray_insert_sleds_x86_64(module, ["traced"])
+    val encoded = encode_module(planned.module)
+    val sites = xray_locate_sleds_x86_64(encoded, planned.sites).unwrap()
+    emit_elf_x86_64_xray(encoded, planned.module, empty_mir_module("xray_fixture"), sites)
+
+describe "XRay PR6 native x86-64 sled emission":
+    it "encodes the sled pseudo-instruction as the V1 X64Rel32 template plus a PLT32 trampoline reloc":
+        val inst = new_mach_inst(X86_OP_XRAY_SLED, [op_imm(3), op_imm(XRAY_MAP_KIND_ENTRY_V1)])
+        val encoded = encode_inst(new_encode_context(), inst)
+        expect(encoded.code).to_equal(golden_sled_site3())
+        val site = TraceNativeSiteV1(site_id: 3, function_id: 1, kind: TraceEventKindV1.Entry,
+            offset: 0, target_offset: 7, encoding: TraceNativeEncodingV1.X64Rel32)
+        val template = trace_native_off_template_v1(site, 13).unwrap()
+        var template_i64: [i64] = []
+        for index in 0..template.len():
+            template_i64.push(template[index] as i64)
+        expect(encoded.code).to_equal(template_i64)
+        expect(xray_sled_template_x86_64(3)).to_equal(template_i64)
+        expect(encoded.relocations.len()).to_equal(1)
+        expect(encoded.relocations[0].offset).to_equal(3)
+        expect(encoded.relocations[0].symbol_name).to_equal(XRAY_TRAMPOLINE_SYMBOL_V1)
+        expect(encoded.relocations[0].reloc_type).to_equal(4)
+        expect(encoded.relocations[0].addend).to_equal(-4)
+
+    it "pads an odd position with one NOP so the 2-byte activation word is aligned":
+        var ctx = encode_inst(new_encode_context(), new_mach_inst(X86_OP_NOP, []))
+        ctx = encode_inst(ctx, new_mach_inst(X86_OP_XRAY_SLED, [op_imm(1), op_imm(XRAY_MAP_KIND_EXIT_V1)]))
+        expect(ctx.code.len()).to_equal(15)
+        expect(ctx.code[1]).to_equal(0x90)
+        expect(ctx.code[2]).to_equal(0xEB)
+        expect(ctx.code[3]).to_equal(0x0B)
+        expect(ctx.relocations[0].offset).to_equal(5)
+
+    it "inserts an entry sled first and an exit sled before every RET of instrumented functions only":
+        val planned = xray_insert_sleds_x86_64(fixture_module(), ["traced"])
+        val traced = planned.module.functions[0]
+        expect(opcodes(traced)).to_equal([X86_OP_XRAY_SLED, X86_OP_NOP, X86_OP_NOP, X86_OP_XRAY_SLED, X86_OP_RET, X86_OP_NOP, X86_OP_XRAY_SLED, X86_OP_RET])
+        expect(opcodes(planned.module.functions[1])).to_equal([X86_OP_NOP, X86_OP_NOP, X86_OP_RET, X86_OP_NOP, X86_OP_RET])
+        expect(planned.sites.len()).to_equal(3)
+        expect(planned.sites[0].kind).to_equal(XRAY_MAP_KIND_ENTRY_V1)
+        expect(planned.sites[2].kind).to_equal(XRAY_MAP_KIND_EXIT_V1)
+        expect(planned.module.extern_symbols.contains(XRAY_TRAMPOLINE_SYMBOL_V1)).to_equal(true)
+
+    it "is the identity when no function is instrumented (static off)":
+        val module = fixture_module()
+        val planned = xray_insert_sleds_x86_64(module, [])
+        expect(planned.sites.len()).to_equal(0)
+        expect(opcodes(planned.module.functions[0])).to_equal(opcodes(module.functions[0]))
+        val encoded = encode_module(module)
+        val off = emit_elf_x86_64(encoded, module, empty_mir_module("xray_fixture"))
+        val with_empty = emit_elf_x86_64_xray(encoded, module, empty_mir_module("xray_fixture"), [])
+        expect(with_empty).to_equal(off)
+        expect(section_index(off, ".simple_xray_map")).to_equal(-1)
+        expect(section_index(off, ".rela.simple_xray_map")).to_equal(-1)
+
+    it "locates every emitted sled on an even offset from its trampoline relocation":
+        val planned = xray_insert_sleds_x86_64(fixture_module(), ["traced"])
+        val encoded = encode_module(planned.module)
+        val sites = xray_locate_sleds_x86_64(encoded, planned.sites).unwrap()
+        # entry 0..13; NOP 13, NOP 14 -> 15 odd: pad 15, exit 16..29, RET 29; NOP 30 -> 31 odd: pad 31, exit 32
+        expect(sites[0].code_offset).to_equal(0)
+        expect(sites[1].code_offset).to_equal(16)
+        expect(sites[2].code_offset).to_equal(32)
+        for site in sites:
+            expect(site.code_offset % 2).to_equal(0)
+            expect(encoded[0].code[site.code_offset]).to_equal(0xEB)
+            expect(encoded[0].code[site.code_offset + 1]).to_equal(0x0B)
+            expect(encoded[0].code[site.code_offset + 9]).to_equal(site.site_id)
+        val stripped = [EncodedFunction(name: encoded[0].name, code: encoded[0].code, relocations: []), encoded[1]]
+        expect(xray_locate_sleds_x86_64(stripped, planned.sites).is_err()).to_equal(true)
+
+    it "writes a .simple_xray_map with x86-64 SysV rows that decode back to the emitted sleds":
+        val object = xray_object(fixture_module())
+        val map = xray_map_decode_v1(xray_object_map_bytes(object).unwrap()).unwrap()
+        expect(map.isa).to_equal(XRAY_MAP_ISA_X86_64_V1)
+        expect(map.abi_profile).to_equal(XRAY_MAP_ABI_X86_64_SYSV_V1)
+        expect(map.functions.len()).to_equal(1)
+        expect(map.functions[0].name).to_equal("traced")
+        expect(map.sites.len()).to_equal(3)
+        expect(map.sites[1].text_offset).to_equal(16u64)
+        expect(map.sites[0].len).to_equal(13)
+        expect(map.sites[0].align).to_equal(2)
+        expect(map.sites[0].off_word).to_equal(0x0BEB)
+        expect(map.sites[0].on_word).to_equal(0x9066)
+
+    it "relocates the map header text_base with one R_X86_64_PC64 against the .text section symbol":
+        val object = xray_object(fixture_module())
+        val text_idx = section_index(object, ".text")
+        val map_idx = section_index(object, ".simple_xray_map")
+        val rela_idx = section_index(object, ".rela.simple_xray_map")
+        expect(rela_idx > 0).to_equal(true)
+        expect(shdr_field(object, map_idx, 8, 8)).to_equal(130)
+        expect(shdr_field(object, map_idx, 40, 4)).to_equal(text_idx)
+        expect(shdr_field(object, rela_idx, 44, 4)).to_equal(map_idx)
+        val rela = xray_object_section_bytes(object, ".rela.simple_xray_map").unwrap()
+        expect(rela.len()).to_equal(24)
+        expect(le_u8(rela, 0, 8)).to_equal(36)
+        expect(le_u8(rela, 8, 4)).to_equal(24)
+        expect(le_u8(rela, 16, 8)).to_equal(0)
+        val symtab = xray_object_section_bytes(object, ".symtab").unwrap()
+        val sym = le_u8(rela, 12, 4)
+        expect(le_u8(symtab, sym * 24 + 4, 1)).to_equal(3)
+        expect(le_u8(symtab, sym * 24 + 6, 2)).to_equal(text_idx)

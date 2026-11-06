@@ -314,6 +314,31 @@ a selection; per-function toggle = a new prepared selection (new generation).
   thread may execute code on that page during a switch; `Live` is refused.
 - **Selection:** aspect extension `simple.trace/observer-v1.pointcuts` names
   canonical functions; each expands to all of its sleds (`xray_native_selection_v1`).
+
+### C.7 Stage-2 x86-64 SysV leaves (PR6)
+
+- Sled: the V1 `X64Rel32` template, 13 bytes, 2-aligned (the encoder pads an
+  odd position with one `90`): `EB 0B` | `66 90`, `E8 rel32` (R_X86_64_PLT32 at
+  +3, addend -4) to `__simple_xray_trampoline_v1`, `EB 04`, imm32 site id. Map
+  rows: isa 1, abi profile 2 (`simple-x86_64-sysv-sled-v1`), len 13, align 2,
+  off 0x0BEB, on 0x9066; text_base relocated by `R_X86_64_PC64`.
+- Patch: one aligned u16 store of the activation word (`store_u16` on the
+  `XrayCodePatchPortV1`, `rt_ptr_write_i16`). **Quiescent only** (Q6): no
+  cross-modifying-code qualification for live patching.
+- Runtime: `src/runtime/xray/xray_native_runtime_x86_64.c` owns the asm
+  trampoline (bounded remedy, SysV variant of the merged Windows experiment:
+  RFLAGS first, rax rcx rdx rsi rdi r8-r11, explicit 16-byte realignment,
+  xmm0-15 via `movdqu`, MXCSR, DF cleared for the handler; upper ymm/zmm,
+  opmask, x87/MMX, AMX/APX are NOT preserved, the handler is
+  `-mgeneral-regs-only`) and the registration sled leaf (`E8` target, `EB 04`,
+  id). Handler, registry and installer are shared with AArch64 through
+  `xray_native_registry_v1.h` (static inline bodies; each ISA TU defines the
+  two exported entry points). Simple twin:
+  `std.common.trace.xray_native_trampoline_x86_64_v1`.
+- Evidence lane on a non-x86 host: `check-xray-native-x86-64-objects.shs`
+  (cross-emitted objects, relocations, sled disassembly, OFF object clean,
+  twin vs assembled trampoline, patcher ops). Executing the patched code needs
+  an x86-64 Linux host and is not part of that check.
 ---
 
 ## D. Backend-neutral V1 contract placement and the draft branch
@@ -392,7 +417,7 @@ dependency diff, Linux-only paths, TDD (failing spec first).
 | 4 | `xray-llvm-adapter` | Private LLVM adapter + state-preserving handler shim + link of `clang_rt.xray` | Real Simple binary traced through facade on x86-64 + AArch64 Linux; ABI-01/02 (plan §16.2) |
 | 5 | `xray-native-aarch64` | `xray_sled_emit` AArch64, `.simple_xray_map`, `code_patch_adapter` POSIX, quiescent patch | Object inspection; MAP-01; PATCH-02 fault injection; differential vs PR4 |
 | 5b | `xray-aarch64-runtime` | Resident trampoline + handler, PREL64 map base, module registration, `--xray` link wiring, in-process quiescent patching, sled-kind agreement (C.6) | In-process e2e on a real `--xray` module; off identity |
-| 6 | `xray-native-x86_64` | 13-byte sled, SysV profile | Same + ABI-01/02 SysV |
+| 6 | `xray-native-x86_64` | 13-byte sled, SysV profile, u16 quiescent patch, resident SysV trampoline + shared registry, `--xray` link wiring (C.7) | Object inspection, twin vs assembled trampoline, off identity; execution on an x86-64 host |
 | 7 | `xray-native-live` | Qualified live patch per target | PATCH-01 stress |
 | 8+ | `xray-windows-*` | COFF map, Win32 leaf, x64 then ARM64 profiles | Native runners, MIT-01, plan §9 gates |
 

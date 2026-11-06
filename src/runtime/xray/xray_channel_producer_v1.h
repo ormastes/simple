@@ -1,7 +1,7 @@
 /*
  * xray_channel_producer_v1.h -- the one C producer of the V1 observer channel,
  * shared by the stage-1 LLVM handler (xray_llvm_adapter_linux.c, PR4) and the
- * stage-2 native trampoline handler (xray_native_runtime_aarch64.c, PR5b).
+ * stage-2 native trampoline handler (xray_native_registry_v1.h, PR5b/PR6).
  *
  * Simple twin: trace_native_channel_record_words_v1 in
  * src/lib/nogc_sync_mut/trace/observer_native_channel_v1.spl (same arena

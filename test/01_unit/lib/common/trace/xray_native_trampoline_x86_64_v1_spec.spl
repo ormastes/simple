@@ -1,0 +1,46 @@
+# @cover src/lib/common/trace/xray_native_trampoline_x86_64_v1.spl
+# @req REQ-XRAY-PR6-TRAMPOLINE
+"""
+# XRay PR6 — Simple twin of the x86-64 SysV resident trampoline
+
+`__simple_xray_trampoline_v1` is asm in
+src/runtime/xray/xray_native_runtime_x86_64.c (the irreplaceable register
+save/restore). This twin encodes the same bytes in pure Simple. The golden
+below is the clang 23 assembly of that TU (handler CALL rel32 = 0x9f); the
+x86-64 XRay e2e check re-compares the twin with the freshly built object.
+"""
+use std.spec.*
+use std.common.trace.xray_native_trampoline_x86_64_v1.*
+
+val GOLDEN_HEX: text = "9c554889e5fc505152565741504151415241534883e4f04881ec10010000f30f7f0424f30f7f4c2410f30f7f542420f30f7f5c2430f30f7f642440f30f7f6c2450f30f7f742460f30f7f7c2470f3440f7f842480000000f3440f7f8c2490000000f3440f7f9424a0000000f3440f7f9c24b0000000f3440f7fa424c0000000f3440f7fac24d0000000f3440f7fb424e0000000f3440f7fbc24f00000000fae9c2400010000488b75108b7e02e89f0000000fae942400010000f30f6f0424f30f6f4c2410f30f6f542420f30f6f5c2430f30f6f642440f30f6f6c2450f30f6f742460f30f6f7c2470f3440f6f842480000000f3440f6f8c2490000000f3440f6f9424a0000000f3440f6f9c24b0000000f3440f6fa424c0000000f3440f6fac24d0000000f3440f6fb424e0000000f3440f6fbc24f0000000488d65b8415b415a415941585f5e5a59585d9dc3"
+
+fn hex_of(bytes: [i64]) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    for byte in bytes:
+        out = out + digits[(byte >> 4) & 15] + digits[byte & 15]
+    out
+
+describe "XRay native x86-64 trampoline twin":
+    it "preserves RFLAGS, the SysV caller-saved GPRs, xmm0-15 and MXCSR":
+        val saved = xray_native_trampoline_x86_saved_state_v1()
+        for name in ["rflags", "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "xmm0", "xmm15", "mxcsr"]:
+            expect(saved.contains(name)).to_equal(true)
+        # callee-saved by the handler per SysV; never touched here
+        expect(saved.contains("rbx")).to_equal(false)
+        expect(saved.contains("r12")).to_equal(false)
+        expect(XRAY_NATIVE_TRAMPOLINE_X86_FRAME_BYTES_V1 % 16).to_equal(0)
+
+    it "matches the assembled trampoline byte for byte":
+        val bytes = xray_native_trampoline_bytes_x86_64_v1(0x9f)
+        expect(bytes.len()).to_equal(XRAY_NATIVE_TRAMPOLINE_X86_BYTES_V1)
+        expect(hex_of(bytes)).to_equal(GOLDEN_HEX)
+        expect(bytes[XRAY_NATIVE_TRAMPOLINE_X86_CALL_REL32_AT_V1 - 1]).to_equal(0xE8)
+        expect(bytes[0]).to_equal(0x9C)
+        expect(bytes[bytes.len() - 2]).to_equal(0x9D)
+
+    it "encodes a backward handler displacement and rejects one that does not fit rel32":
+        val back = xray_native_trampoline_bytes_x86_64_v1(-1)
+        expect(back[XRAY_NATIVE_TRAMPOLINE_X86_CALL_REL32_AT_V1]).to_equal(0xFF)
+        expect(back[XRAY_NATIVE_TRAMPOLINE_X86_CALL_REL32_AT_V1 + 3]).to_equal(0xFF)
+        expect(xray_native_trampoline_bytes_x86_64_v1(2147483648).len()).to_equal(0)

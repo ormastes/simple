@@ -1,4 +1,5 @@
-# Loaded-module registration for XRay native AArch64 sleds (PR5b).
+# Loaded-module registration for XRay native AArch64 (PR5b) and x86-64 SysV
+# (PR6) sleds. The ISA comes from the map header; everything else is shared.
 # Design: doc/04_architecture/compiler/xray/xray_compiler_structural_change_2026-11-06.md
 # A.5 (map + registration) and C.2 (quiescent protocol).
 #
@@ -11,11 +12,13 @@
 #   2. the module's ELF section table (read from the file, never trusted for
 #      bytes): `.simple_xray_map` sh_addr/sh_size -> runtime map address;
 #   3. the map's text_base field, relocated by the static linker
-#      (R_AARCH64_PREL64), gives the runtime address of the object's .text;
-#   4. every sled's BL target (the resident trampoline) is decoded from the
-#      loaded code so the validator can bind it to an executable range.
+#      (R_AARCH64_PREL64 / R_X86_64_PC64), gives the runtime address of the
+#      object's .text;
+#   4. every sled's call target (the resident trampoline: AArch64 BL at +20,
+#      x86-64 CALL rel32 at +2) is decoded from the loaded code so the
+#      validator can bind it to an executable range.
 # Registration with the resident runtime (simple_xray_native_register_module_v1
-# in src/runtime/xray/xray_native_runtime_aarch64.c) happens through
+# in src/runtime/xray/xray_native_registry_v1.h) happens through
 # XrayNativeDlModuleV1, which is also the XrayNativeDispatchPortV1 binding.
 #
 # Deliberate deviation from A.5's init-array entry: registration is driven by
@@ -43,7 +46,29 @@ extern fn rt_call_ptr_3(addr: i64, arg1: i64, arg2: i64, arg3: i64) -> i64
 
 pub const XRAY_NATIVE_RUNTIME_IDENTITY_V1 = "simple-xray-native-runtime-aarch64-v1"
 pub const XRAY_NATIVE_ABI_PROFILE_V1 = "simple-aarch64-sled-v1"
+pub const XRAY_NATIVE_RUNTIME_IDENTITY_X86_64_V1 = "simple-xray-native-runtime-x86_64-v1"
+pub const XRAY_NATIVE_ABI_PROFILE_X86_64_V1 = "simple-x86_64-sysv-sled-v1"
 const XRAY_DLOPEN_NOW_V1: i64 = 2
+
+# The per-ISA facts the locator needs; None for an ISA without sleds.
+pub struct XrayNativeIsaProfileV1:
+    sled_bytes: i64
+    call_at: i64
+    encoding: TraceNativeEncodingV1
+    target: text
+    abi_profile: text
+    runtime_identity: text
+
+pub fn xray_native_isa_profile_v1(isa: i64) -> XrayNativeIsaProfileV1?:
+    if isa == XRAY_MAP_ISA_AARCH64_V1:
+        return Some(XrayNativeIsaProfileV1(sled_bytes: XRAY_MAP_AARCH64_SLED_BYTES_V1, call_at: 20,
+            encoding: TraceNativeEncodingV1.Arm64Branch26, target: "aarch64-unknown-linux-gnu",
+            abi_profile: XRAY_NATIVE_ABI_PROFILE_V1, runtime_identity: XRAY_NATIVE_RUNTIME_IDENTITY_V1))
+    if isa == XRAY_MAP_ISA_X86_64_V1:
+        return Some(XrayNativeIsaProfileV1(sled_bytes: XRAY_MAP_X86_64_SLED_BYTES_V1, call_at: 2,
+            encoding: TraceNativeEncodingV1.X64Rel32, target: "x86_64-unknown-linux-gnu",
+            abi_profile: XRAY_NATIVE_ABI_PROFILE_X86_64_V1, runtime_identity: XRAY_NATIVE_RUNTIME_IDENTITY_X86_64_V1))
+    None
 
 pub struct XrayProcMappingV1:
     start: i64
@@ -146,6 +171,14 @@ pub fn xray_a64_bl_target_v1(at: i64, word: i64) -> i64?:
     if imm >= 0x2000000: imm = imm - 0x4000000
     Some(at + imm * 4)
 
+# Target of the x86-64 `E8 rel32` whose opcode byte is at `at` (`bytes` are
+# the 5 instruction bytes); the CALL's next instruction is at + 5.
+pub fn xray_x86_call_target_v1(at: i64, bytes: [i64]) -> i64?:
+    if bytes.len() != 5 or bytes[0] != 0xE8: return None
+    var rel = bytes[1] | (bytes[2] << 8) | (bytes[3] << 16) | (bytes[4] << 24)
+    if rel >= 0x80000000: rel = rel - 0x100000000
+    Some(at + 5 + rel)
+
 fn xray_read_bytes_v1(address: i64, length: i64) -> [u8]:
     var out: [u8] = []
     unsafe(capabilities: [ffi]):
@@ -215,10 +248,13 @@ pub fn xray_native_locate_module_v1(path: text, module_instance: u64, page_size:
     # One map per module: a link of several --xray objects concatenates their
     # maps into this section and the strict decode rejects it (InvalidMap).
     val map = xray_map_decode_v1(map_bytes)?
+    val isa = match xray_native_isa_profile_v1(map.isa):
+        case Some(profile): profile
+        case None: return Err(TraceFailureV1.UnsupportedTarget)
     val text_address = xray_map_runtime_text_base_v1(map_address, map.text_base)
     if map.sites.len() == 0 or map.functions.len() == 0: return Err(TraceFailureV1.InvalidMap)
     val first_sled = text_address + (map.sites[0].text_offset as i64)
-    val code = match xray_mapping_containing_v1(mappings, first_sled, XRAY_MAP_AARCH64_SLED_BYTES_V1):
+    val code = match xray_mapping_containing_v1(mappings, first_sled, isa.sled_bytes):
         case Some(mapping): mapping
         case None: return Err(TraceFailureV1.InvalidMap)
     if not code.executable or code.writable: return Err(TraceFailureV1.InvalidMap)
@@ -238,26 +274,34 @@ pub fn xray_native_locate_module_v1(path: text, module_instance: u64, page_size:
     for index in 0..map.sites.len():
         val row = map.sites[index]
         val sled = text_address + (row.text_offset as i64)
-        if sled < code.start or sled + XRAY_MAP_AARCH64_SLED_BYTES_V1 > code.end:
+        if sled < code.start or sled + isa.sled_bytes > code.end:
             return Err(TraceFailureV1.InvalidMap)
-        val target = match xray_a64_bl_target_v1(sled + 20, xray_read_u32_v1(sled + 20)):
+        val call = sled + isa.call_at
+        var decoded: i64? = None
+        if map.isa == XRAY_MAP_ISA_X86_64_V1:
+            var call_bytes: [i64] = []
+            for byte in xray_read_bytes_v1(call, 5): call_bytes.push(byte as i64)
+            decoded = xray_x86_call_target_v1(call, call_bytes)
+        else:
+            decoded = xray_a64_bl_target_v1(call, xray_read_u32_v1(call))
+        val target = match decoded:
             case Some(found): found
             case None: return Err(TraceFailureV1.InvalidMap)
         sites.push(TraceNativeSiteV1(site_id: (index + 1) as u32, function_id: row.local_fn_id,
             kind: xray_kind_v1(row.kind), offset: (sled - image_base) as u64,
-            target_offset: (target - image_base) as u64, encoding: TraceNativeEncodingV1.Arm64Branch26))
+            target_offset: (target - image_base) as u64, encoding: isa.encoding))
     var functions: [TraceNativeFunctionV1] = []
     for function in map.functions:
         val first_site = map.sites[(function.first_site as i64) - 1]
         val last_site = map.sites[(function.first_site as i64) + (function.site_count as i64) - 2]
         val start = text_address + (first_site.text_offset as i64)
-        val end = text_address + (last_site.text_offset as i64) + XRAY_MAP_AARCH64_SLED_BYTES_V1
+        val end = text_address + (last_site.text_offset as i64) + isa.sled_bytes
         functions.push(TraceNativeFunctionV1(function_id: function.local_fn_id,
             offset: (start - image_base) as u64, size: (end - start) as u64))
     val manifest = TraceNativeMapV1(schema: 1, module_instance: module_instance, manifest_incarnation: 1,
         build_identity: xray_build_identity_v1(map.build_id), source_identity: path,
-        runtime_identity: XRAY_NATIVE_RUNTIME_IDENTITY_V1, target: "aarch64-unknown-linux-gnu",
-        abi_profile: XRAY_NATIVE_ABI_PROFILE_V1, image_size: image_size as u64,
+        runtime_identity: isa.runtime_identity, target: isa.target,
+        abi_profile: isa.abi_profile, image_size: image_size as u64,
         map_offset: (map_address - image_base) as u64, map_size: section_size as u64,
         ranges: [
             TraceImageRangeV1(offset: (map_mapping.start - image_base) as u64,

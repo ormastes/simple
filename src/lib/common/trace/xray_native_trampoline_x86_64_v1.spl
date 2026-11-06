@@ -1,0 +1,122 @@
+# Simple twin of `__simple_xray_trampoline_v1` (XRay PR6, x86-64 SysV).
+# Design: doc/04_architecture/compiler/xray/xray_compiler_structural_change_2026-11-06.md
+# A.5 / C.3. The executing copy is asm in
+# src/runtime/xray/xray_native_runtime_x86_64.c — the irreplaceable register
+# save/restore boundary (doc/07_guide/os/hal/pure_simple_hal.md rung 4). This
+# module encodes the same bytes so the pure-Simple native backend can emit the
+# trampoline itself; the x86-64 XRay e2e check compares it with the built
+# object byte for byte.
+#
+# Bounded remedy (SysV variant of the merged Windows x64 experiment): saves
+# RFLAGS (first), rbp frame, rax rcx rdx rsi rdi r8-r11, then realigns rsp to
+# 16 and saves xmm0-15 (movdqu) and MXCSR in a 272-byte frame. DF is cleared
+# for the handler. The site id is the imm32 at [return address + 2]; the
+# handler gets edi = id, rsi = return address (sled + 7).
+
+pub const XRAY_NATIVE_TRAMPOLINE_X86_FRAME_BYTES_V1 = 272
+pub const XRAY_NATIVE_TRAMPOLINE_X86_BYTES_V1 = 332
+# Byte offset of the handler CALL's rel32 (the CALL opcode is one byte before).
+pub const XRAY_NATIVE_TRAMPOLINE_X86_CALL_REL32_AT_V1 = 173
+const XRAY_X86_MXCSR_SLOT_V1 = 256
+# SysV caller-saved GPR numbers in push order: rax rcx rdx rsi rdi r8 r9 r10 r11.
+const XRAY_X86_RAX_V1 = 0
+
+fn xray_x86_saved_gprs_v1() -> [i64]:
+    [XRAY_X86_RAX_V1, 1, 2, 6, 7, 8, 9, 10, 11]
+
+fn xray_x86_gpr_name_v1(reg: i64) -> text:
+    val names = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi"]
+    if reg < 8: names[reg] else: "r{reg}"
+
+# Every register / state word the trampoline itself preserves.
+pub fn xray_native_trampoline_x86_saved_state_v1() -> [text]:
+    var names: [text] = ["rflags", "rbp"]
+    for reg in xray_x86_saved_gprs_v1():
+        names.push(xray_x86_gpr_name_v1(reg))
+    for reg in 0..16:
+        names.push("xmm{reg}")
+    names.push("mxcsr")
+    names
+
+fn xray_x86_push_pop_v1(out: [i64], reg: i64, pop: bool) -> [i64]:
+    var bytes = out
+    val base = if pop: 0x58 else: 0x50
+    if reg >= 8:
+        bytes.push(0x41)
+    bytes.push(base + (reg & 7))
+    bytes
+
+fn xray_x86_le32_v1(out: [i64], value: i64) -> [i64]:
+    var bytes = out
+    for shift in [0, 8, 16, 24]:
+        bytes.push((value >> shift) & 255)
+    bytes
+
+# movdqu xmm<->[rsp+disp]: F3 [REX.R] 0F 7F (store) / 6F (load), SIB base rsp.
+fn xray_x86_movdqu_rsp_v1(out: [i64], xmm: i64, disp: i64, load: bool) -> [i64]:
+    var bytes = out
+    bytes.push(0xF3)
+    if xmm >= 8:
+        bytes.push(0x44)
+    bytes.push(0x0F)
+    val opcode = if load: 0x6F else: 0x7F
+    bytes.push(opcode)
+    val reg = (xmm & 7) << 3
+    if disp == 0:
+        bytes.push(0x04 | reg)
+        bytes.push(0x24)
+    elif disp <= 127:
+        bytes.push(0x44 | reg)
+        bytes.push(0x24)
+        bytes.push(disp)
+    else:
+        bytes.push(0x84 | reg)
+        bytes.push(0x24)
+        bytes = xray_x86_le32_v1(bytes, disp)
+    bytes
+
+# stmxcsr / ldmxcsr [rsp+256]: 0F AE /3 (store) or /2 (load), disp32.
+fn xray_x86_mxcsr_v1(out: [i64], load: bool) -> [i64]:
+    var bytes = out
+    bytes.push(0x0F)
+    bytes.push(0xAE)
+    val modrm = if load: 0x94 else: 0x9C
+    bytes.push(modrm)
+    bytes.push(0x24)
+    xray_x86_le32_v1(bytes, XRAY_X86_MXCSR_SLOT_V1)
+
+# The trampoline bytes, without the assembler's trailing alignment padding.
+# `handler_rel32` is the CALL displacement (handler - end of the CALL); []
+# when it does not fit a signed 32-bit displacement.
+pub fn xray_native_trampoline_bytes_x86_64_v1(handler_rel32: i64) -> [i64]:
+    if handler_rel32 < -2147483648 or handler_rel32 > 2147483647:
+        return []
+    var bytes: [i64] = [0x9C, 0x55, 0x48, 0x89, 0xE5, 0xFC]  # pushfq; push rbp; mov rbp,rsp; cld
+    for reg in xray_x86_saved_gprs_v1():
+        bytes = xray_x86_push_pop_v1(bytes, reg, false)
+    for byte in [0x48, 0x83, 0xE4, 0xF0]:                    # and rsp, -16
+        bytes.push(byte)
+    for byte in [0x48, 0x81, 0xEC]:                          # sub rsp, 272
+        bytes.push(byte)
+    bytes = xray_x86_le32_v1(bytes, XRAY_NATIVE_TRAMPOLINE_X86_FRAME_BYTES_V1)
+    for xmm in 0..16:
+        bytes = xray_x86_movdqu_rsp_v1(bytes, xmm, xmm * 16, false)
+    bytes = xray_x86_mxcsr_v1(bytes, false)
+    for byte in [0x48, 0x8B, 0x75, 0x10, 0x8B, 0x7E, 0x02]: # mov rsi,[rbp+16]; mov edi,[rsi+2]
+        bytes.push(byte)
+    bytes.push(0xE8)                                         # call handler
+    val encoded = if handler_rel32 < 0: handler_rel32 + 4294967296 else: handler_rel32
+    bytes = xray_x86_le32_v1(bytes, encoded)
+    bytes = xray_x86_mxcsr_v1(bytes, true)
+    for xmm in 0..16:
+        bytes = xray_x86_movdqu_rsp_v1(bytes, xmm, xmm * 16, true)
+    for byte in [0x48, 0x8D, 0x65, 0xB8]:                    # lea rsp, [rbp-72]
+        bytes.push(byte)
+    val gprs = xray_x86_saved_gprs_v1()
+    var index = gprs.len() - 1
+    while index >= 0:
+        bytes = xray_x86_push_pop_v1(bytes, gprs[index], true)
+        index = index - 1
+    for byte in [0x5D, 0x9D, 0xC3]:                          # pop rbp; popfq; ret
+        bytes.push(byte)
+    bytes
