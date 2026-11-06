@@ -76,7 +76,7 @@ describe "XRay .simple_xray_map format v1":
         bad_count[16] = 3u8
         expect(xray_map_decode_v1(bad_count)).to_equal(Err(TraceFailureV1.InvalidMap))
         var bad_isa = good
-        bad_isa[6] = 1u8
+        bad_isa[6] = 3u8
         expect(xray_map_decode_v1(bad_isa)).to_equal(Err(TraceFailureV1.UnsupportedTarget))
 
     it "rejects encoding a function row that does not cover its sites":
@@ -95,3 +95,44 @@ describe "XRay .simple_xray_map format v1":
         val minus_8192 = (-8192) as u64
         expect(xray_map_runtime_text_base_v1(65536, minus_8192)).to_equal(65536 + 36 - 8192)
         expect(xray_map_runtime_text_base_v1(4198400, (-4198436) as u64)).to_equal(0)
+
+fn x86_map() -> XrayMapV1:
+    XrayMapV1(isa: XRAY_MAP_ISA_X86_64_V1, abi_profile: XRAY_MAP_ABI_X86_64_SYSV_V1,
+        sled_abi_version: XRAY_MAP_SLED_ABI_V1, build_id: build_id(), text_base: 0,
+        functions: [XrayMapFunctionV1(local_fn_id: 1, first_site: 1, site_count: 2, name: "f")],
+        sites: [
+            xray_map_x86_64_site_v1(0, 1, XRAY_MAP_KIND_ENTRY_V1),
+            xray_map_x86_64_site_v1(30, 1, XRAY_MAP_KIND_EXIT_V1)
+        ])
+
+describe "XRay .simple_xray_map format v1 — x86-64 SysV rows (PR6)":
+    it "encodes a 13-byte, 2-aligned sled with the EB 0B / 66 90 activation word":
+        val bytes = xray_map_encode_v1(x86_map()).unwrap()
+        expect([bytes[6], bytes[7], bytes[8], bytes[9]]).to_equal([1u8, 0u8, 2u8, 0u8])
+        expect([bytes[76], bytes[77], bytes[78]]).to_equal([1u8, 13u8, 2u8])
+        expect([bytes[80], bytes[81], bytes[82], bytes[83]]).to_equal(u32le(0x0BEB))
+        expect([bytes[84], bytes[85], bytes[86], bytes[87]]).to_equal(u32le(0x9066))
+        val map = xray_map_decode_v1(bytes).unwrap()
+        expect(map.isa).to_equal(XRAY_MAP_ISA_X86_64_V1)
+        expect(map.sites[1].text_offset).to_equal(30u64)
+
+    it "rejects an odd x86-64 sled offset, an AArch64 row under the x86 ISA and a foreign profile":
+        val good = xray_map_encode_v1(x86_map()).unwrap()
+        var odd = good
+        odd[64] = 1u8
+        expect(xray_map_decode_v1(odd)).to_equal(Err(TraceFailureV1.InvalidMap))
+        var wrong_len = good
+        wrong_len[77] = 32u8
+        expect(xray_map_decode_v1(wrong_len)).to_equal(Err(TraceFailureV1.InvalidMap))
+        var wrong_profile = good
+        wrong_profile[8] = 1u8
+        expect(xray_map_decode_v1(wrong_profile)).to_equal(Err(TraceFailureV1.UnsupportedProfile))
+        var aarch64_rows = xray_map_encode_v1(sample_map()).unwrap()
+        aarch64_rows[6] = 1u8
+        aarch64_rows[8] = 2u8
+        expect(xray_map_decode_v1(aarch64_rows)).to_equal(Err(TraceFailureV1.InvalidMap))
+
+    it "still fails closed for an ISA without a sled emitter":
+        var unknown = xray_map_encode_v1(x86_map()).unwrap()
+        unknown[6] = 3u8
+        expect(xray_map_decode_v1(unknown)).to_equal(Err(TraceFailureV1.UnsupportedTarget))

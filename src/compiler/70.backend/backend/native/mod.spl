@@ -11,7 +11,7 @@
 # - RISC-V 64 (Linux ELF)
 
 use compiler.mir.mir_data.{MirModule}
-use compiler.backend.native.mach_inst.{EncodedFunction}
+use compiler.backend.native.mach_inst.{EncodedFunction, MachModule}
 use compiler.backend.backend.backend_types.{CodegenTarget, CompiledModule}
 use compiler.backend.native.isel_x86_64.{isel_module}
 use compiler.backend.native.isel_x86_64.{isel_module_with_avx2_capability}
@@ -29,8 +29,8 @@ use compiler.backend.native.encode_riscv64.{encode_module_riscv64}
 use compiler.backend.native.encode_riscv32.{encode_module_rv32, rv32_elf32_header, rv32_elf32_phdr_load, RV32_R_RISCV_CALL_PLT}
 use compiler.backend.native.elf_writer.{elf_writer_x86_64, elf_add_section, new_text_section, write_elf64}
 use compiler.backend.native.native_layout.{reorder_by_layout}
-use compiler.backend.native.native_elf.{emit_elf_x86_64, emit_elf_aarch64, emit_elf_aarch64_xray, emit_elf_riscv64}
-use compiler.backend.native.xray_sled_emit.{xray_reject_unsupported_native, xray_instrumented_function_names, xray_insert_sleds_aarch64, xray_locate_sleds}
+use compiler.backend.native.native_elf.{emit_elf_x86_64, emit_elf_x86_64_xray, emit_elf_aarch64, emit_elf_aarch64_xray, emit_elf_riscv64}
+use compiler.backend.native.xray_sled_emit.{XraySledPlan, xray_reject_unsupported_native, xray_instrumented_function_names, xray_insert_sleds_aarch64, xray_insert_sleds_x86_64, xray_locate_sleds, xray_locate_sleds_x86_64}
 @when(os = "macos" or feature = "macho"):
 use compiler.backend.native.native_macho.{compile_native_macho_aarch64, compile_native_macho_x86_64, emit_macho_aarch64, emit_macho_x86_64}
 @end
@@ -66,37 +66,58 @@ fn compile_native(module: MirModule, target: CodegenTarget) -> [i64]:
             compile_native_stub(module, "unsupported")
 
 fn compile_native_x86_64(module: MirModule) -> [i64]:
-    xray_reject_unsupported_native(module, "x86_64")
     # Phase 1: Instruction Selection (MIR -> MachInst)
     val mach_module = isel_module(module)
 
     # Phase 2: Register Allocation (virtual -> physical regs)
     val allocated = regalloc_module(mach_module)
 
+    # Phases 2b-4: XRay sleds (only with --xray), encoding, layout + ELF.
+    emit_x86_64_allocated(module, allocated)
+
+# Every pure-Simple x86-64 ELF route ends here after register allocation.
+# Phase 2b: XRay sleds (only functions the --xray policy marked). With no
+# instrumented function the sled branch is not taken: off is the old path.
+fn emit_x86_64_allocated(module: MirModule, allocated: MachModule) -> [i64]:
+    val xray_functions = xray_instrumented_function_names(module)
+    if xray_functions.len() > 0:
+        val plan = xray_insert_sleds_x86_64(allocated, xray_functions)
+        xray_require_every_marked_function(xray_functions, plan)
+        # Machine receipts decode the code linearly and would read a sled's
+        # imm32 site id as instructions: report them on the sled-free encoding.
+        x86_avx512_report_machine_receipts(module, encode_module(allocated))
+        val xray_encoded = encode_module(plan.module)
+        match xray_locate_sleds_x86_64(xray_encoded, plan.sites):
+            case Ok(sites):
+                return emit_elf_x86_64_xray(xray_encoded, plan.module, module, sites)
+            case Err(message):
+                panic(message)
     # Phase 3: Instruction Encoding (MachInst -> bytes)
     val encoded_funcs = encode_module(allocated)
     x86_avx512_report_machine_receipts(module, encoded_funcs)
-
     # Phase 4: Layout Optimization & ELF Emission
     emit_elf_x86_64(encoded_funcs, allocated, module)
 
+# Every function the policy marked must carry at least its entry sled; a
+# marked name the selector never produced is a dropped request.
+fn xray_require_every_marked_function(xray_functions: [text], plan: XraySledPlan):
+    for name in xray_functions:
+        var found = false
+        for site in plan.sites:
+            if site.function_name == name:
+                found = true
+        if not found:
+            panic("XRAY-E-SLED-MISSING: '{name}' is marked for sleds but none were emitted")
+
 fn compile_native_x86_64_avx2(module: MirModule, capability: NativeAvx2CapabilityV1) -> [i64]:
-    xray_reject_unsupported_native(module, "x86_64")
     if not capability.avx2_admitted:
         panic("native AVX2 compilation requires an admitted capability receipt")
     val mach_module = isel_module_with_avx2_capability(module, capability)
-    val allocated = regalloc_module(mach_module)
-    val encoded_funcs = encode_module(allocated)
-    x86_avx512_report_machine_receipts(module, encoded_funcs)
-    emit_elf_x86_64(encoded_funcs, allocated, module)
+    emit_x86_64_allocated(module, regalloc_module(mach_module))
 
 fn compile_native_x86_64_simd(module: MirModule, avx2_capability: NativeAvx2CapabilityV1, avx512_capability: NativeAvx512CapabilityV1) -> [i64]:
-    xray_reject_unsupported_native(module, "x86_64")
     val mach_module = isel_module_with_x86_simd_capability(module, avx2_capability, avx512_capability)
-    val allocated = regalloc_module(mach_module)
-    val encoded_funcs = encode_module(allocated)
-    x86_avx512_report_machine_receipts(module, encoded_funcs)
-    emit_elf_x86_64(encoded_funcs, allocated, module)
+    emit_x86_64_allocated(module, regalloc_module(mach_module))
 
 fn compile_native_aarch64(module: MirModule) -> [i64]:
     # Phase 1: Instruction Selection (MIR -> MachInst)
@@ -110,15 +131,7 @@ fn compile_native_aarch64(module: MirModule) -> [i64]:
     val xray_functions = xray_instrumented_function_names(module)
     if xray_functions.len() > 0:
         val plan = xray_insert_sleds_aarch64(allocated, xray_functions)
-        # Every function the policy marked must carry at least its entry sled;
-        # a marked name the selector never produced is a dropped request.
-        for name in xray_functions:
-            var found = false
-            for site in plan.sites:
-                if site.function_name == name:
-                    found = true
-            if not found:
-                panic("XRAY-E-SLED-MISSING: '{name}' is marked for sleds but none were emitted")
+        xray_require_every_marked_function(xray_functions, plan)
         val xray_encoded = encode_module_aarch64(plan.module)
         match xray_locate_sleds(xray_encoded, plan.sites):
             case Ok(sites):

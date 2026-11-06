@@ -9,7 +9,8 @@ use compiler.backend.native.elf_writer.{ElfWriter, ElfSection, ElfSectionKind, E
 use compiler.backend.native.layout_solver.{solve_layout, LayoutPlan}
 use compiler.backend.native.native_layout.{reorder_by_layout, native_comdat_function_names}
 use compiler.backend.native.native_section_bytes.{collect_section_bytes, solve_native_data_layout}
-use compiler.backend.native.xray_sled_emit.{XraySledSite, xray_map_section_bytes}
+use compiler.backend.native.xray_sled_emit.{XraySledSite, xray_map_section_bytes, xray_map_section_bytes_for}
+use std.common.trace.xray_native_map_format_v1.{XRAY_MAP_ISA_X86_64_V1}
 
 # ============================================================================
 # ELF Emission - x86_64
@@ -19,6 +20,16 @@ fn emit_elf_x86_64(
     encoded_funcs: [EncodedFunction],
     module: MachModule,
     mir_module: MirModule
+) -> [i64]:
+    emit_elf_x86_64_xray(encoded_funcs, module, mir_module, [])
+
+# `xray_sites` non-empty only with --xray (native backend, PR6): adds the
+# `.simple_xray_map` section. Empty => byte-identical to the pre-XRay object.
+fn emit_elf_x86_64_xray(
+    encoded_funcs: [EncodedFunction],
+    module: MachModule,
+    mir_module: MirModule,
+    xray_sites: [XraySledSite]
 ) -> [i64]:
     var writer = elf_writer_x86_64()
 
@@ -137,6 +148,9 @@ fn emit_elf_x86_64(
     for reloc in all_relocs:
         text_section = section_add_reloc(text_section, reloc)
     writer = elf_add_section(writer, text_section)
+
+    if xray_sites.len() > 0:
+        writer = elf_add_section(writer, new_xray_map_section(xray_map_section_bytes_for(XRAY_MAP_ISA_X86_64_V1, xray_sites, func_offsets, all_code)))
 
     # Create .rodata section for string constants
     if rodata_layout.bytes.len() > 0:

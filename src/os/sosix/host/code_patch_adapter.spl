@@ -7,7 +7,14 @@ manifest that passed trace_native_map_validate_v1.
 
 - begin: rt_mprotect(page, len, PROT_READ|PROT_WRITE) (RX -> RW, W^X; the
   runtime rejects PROT_WRITE|PROT_EXEC outright).
-- store_u32: one aligned 32-bit store through rt_ptr_write_i32.
+- store_u32: one aligned 32-bit store through rt_ptr_write_i32 (AArch64).
+- store_u16: one aligned 16-bit store through rt_ptr_write_i16 (x86-64
+  activation word, PR6); load_u16 composes two byte reads (no 16-bit read
+  extern exists in every lane, and quiescent mode needs no atomic read).
+  rt_ptr_write_i16 is backed by the seed interpreter (where the patcher runs
+  today) and the C runtime, but not the Rust runtime archive (baselined
+  c-only / unbacked). A silent no-op there is caught by the leaf's re-read,
+  which reports FAILED, never "on".
 - end: rt_mprotect(page, len, PROT_READ|PROT_EXEC). The C runtime
   (platform/unix_common.h, runtime_legacy_core.c) follows every execute grant
   with __builtin___clear_cache over the range - DC CVAU / DSB ISH / IC IVAU /
@@ -35,6 +42,10 @@ extern fn rt_mprotect(addr: i64, length: i64, prot: i64) -> i64
 extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32)
 @unsafe(reason: "reads a manifest-validated sled word", capabilities: [ffi])
 extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
+@unsafe(reason: "aligned 16-bit store to a manifest-validated x86-64 sled word on a page made RW by begin", capabilities: [ffi])
+extern fn rt_ptr_write_i16(addr: i64, offset: i64, value: i32)
+@unsafe(reason: "reads a byte of a manifest-validated sled word", capabilities: [ffi])
+extern fn rt_ptr_read_u8(addr: i64, offset: i64) -> i64
 
 val SOSIX_PROT_READ_WRITE: i64 = 3
 val SOSIX_PROT_READ_EXEC: i64 = 5
@@ -59,6 +70,17 @@ impl XrayCodePatchPortV1 for SosixCodePatchAdapterV1:
         if addr <= 0 or addr % 4 != 0: return -1
         val word = unsafe(capabilities: [ffi]): rt_ptr_read_i32(addr, 0)
         (word as i64) & 4294967295
+
+    me store_u16(addr: i64, value: i64) -> i64:
+        if addr <= 0 or addr % 2 != 0 or value < 0 or value > 65535: return -1
+        unsafe(capabilities: [ffi]): rt_ptr_write_i16(addr, 0, value as i32)
+        0
+
+    fn load_u16(addr: i64) -> i64:
+        if addr <= 0 or addr % 2 != 0: return -1
+        val low = unsafe(capabilities: [ffi]): rt_ptr_read_u8(addr, 0)
+        val high = unsafe(capabilities: [ffi]): rt_ptr_read_u8(addr, 1)
+        (low & 255) | ((high & 255) << 8)
 
     me end(page: i64, length: i64) -> i64:
         unsafe(capabilities: [ffi]): rt_mprotect(page, length, SOSIX_PROT_READ_EXEC)
