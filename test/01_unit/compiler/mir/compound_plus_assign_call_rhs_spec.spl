@@ -1,0 +1,110 @@
+# @cover src/compiler/10.frontend/desugar/collection_desugar.spl
+# @cover src/compiler/50.mir/mir_lowering_stmts.spl
+"""
+## Purpose and audience
+`t += f()` keeps the meaning of `+=` in the compiler path. The collection
+desugar used to rewrite every `+=` whose right-hand side was not a literal
+into `t.merge(f())`, before any type was known. That changed the evaluation
+order of an indexed place and handed scalars to the array-merge builtin.
+Readers are frontend and MIR authors.
+Bug: doc/08_tracking/bug/compound_plus_assign_call_rhs_rewritten_to_merge_2026-11-06.md
+## Operator workflow
+bin/simple test test/01_unit/compiler/mir/compound_plus_assign_call_rhs_spec.spl
+## Compatibility and limitations
+Checks the desugar rewrite count and the LLVM IR of the lowered function; it
+does not run native code. `x += [item]` (one-element array literal) still
+becomes `x.push(item)`.
+## Verification guidance and troubleshooting
+A rewrite count of 1 for a call right-hand side means the merge rewrite is
+back. `add nsw i64` in a text function means `+=` lowered text as integers.
+"""
+# @manual_section: Compound `+=` with a call right-hand side
+
+use std.spec
+use std.env.variables.{env_set}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.desugar.collection_desugar.{collection_desugar_rewrite_count}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+fn rewrites_of(src: text, name: text) -> i64:
+    val _ast = parse_full_frontend(src, name + ".spl", name, Logger(level: 0))
+    collection_desugar_rewrite_count()
+
+fn ir_of(src: text, name: text) -> text:
+    env_set("SIMPLE_BOOTSTRAP", "0")
+    val ast = parse_full_frontend(src, name + ".spl", name, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(name + ".spl")
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    MirToLlvm.create("t." + name, CodegenTarget.X86_64, nil).translate_module(mir)
+
+# The body of the LLVM function whose name ends with `fn_name`.
+fn body_of(ir: text, fn_name: text) -> text:
+    var out = ""
+    var inside = false
+    for line in ir.split("\n"):
+        if line.starts_with("define ") and line.contains(fn_name + "("):
+            inside = true
+        if inside:
+            out = out + line + "\n"
+            if line == "}":
+                inside = false
+    out
+
+val NUM_SRC = "fn rhs_num() -> i64:\n    2\n" +
+    "fn bump() -> i64:\n    var t = 5\n    t += rhs_num()\n    t\n"
+val TEXT_SRC = "fn rhs_text() -> text:\n    \"b\"\n" +
+    "fn grow() -> text:\n    var s = \"a\"\n    s += rhs_text()\n    s\n"
+val TEXT_LIT_SRC = "fn grow_lit() -> text:\n    var s = \"a\"\n    s += \"b\"\n    s\n"
+val ARR_SRC = "fn rhs_arr() -> [i64]:\n    [3]\n" +
+    "fn extend() -> i64:\n    var a = [1, 2]\n    a += rhs_arr()\n    a.len()\n"
+
+describe "compound `+=` with a call right-hand side":
+    it "is not rewritten to merge by the collection desugar":
+        # @req REQ-ATTR-16
+        step("Parse numeric, text and array `+=` with a call right-hand side")
+        val num = rewrites_of(NUM_SRC, "cpa_num")
+        val txt = rewrites_of(TEXT_SRC, "cpa_text")
+        val arr = rewrites_of(ARR_SRC, "cpa_arr")
+        # @capture(exec): desugar rewrite counts
+        step("Verify no rewrite fired")
+        expect(num).to_equal(0)
+        expect(txt).to_equal(0)
+        expect(arr).to_equal(0)
+
+    it "still rewrites a one-element array literal into push":
+        step("Parse `xs += [2]`")
+        val pushed = rewrites_of("fn one() -> [i64]:\n    var xs = [1]\n    xs += [2]\n    xs\n", "cpa_push")
+        step("Verify the push rewrite still fires")
+        expect(pushed).to_equal(1)
+
+    it "lowers numeric `+=` with a call right-hand side to integer addition":
+        step("Lower `t += rhs_num()`")
+        val body = body_of(ir_of(NUM_SRC, "cpa_num_ir"), "bump")
+        step("Verify an add and no array builtin")
+        expect(body).to_contain("add nsw i64")
+        expect(body.contains("rt_array_extend_i64")).to_equal(false)
+
+    it "lowers text `+=` to string concatenation, for a call and a literal":
+        step("Lower `s += rhs_text()` and `s += \"b\"`")
+        val call_body = body_of(ir_of(TEXT_SRC, "cpa_text_ir"), "grow")
+        val lit_body = body_of(ir_of(TEXT_LIT_SRC, "cpa_text_lit_ir"), "grow_lit")
+        step("Verify concatenation and no integer add of string handles")
+        expect(call_body).to_contain("rt_strcat_tagged")
+        expect(call_body.contains("add nsw i64")).to_equal(false)
+        expect(lit_body).to_contain("rt_strcat_tagged")
+        expect(lit_body.contains("add nsw i64")).to_equal(false)
+
+    it "lowers array `+=` with a call right-hand side to an array extend":
+        step("Lower `a += rhs_arr()`")
+        val body = body_of(ir_of(ARR_SRC, "cpa_arr_ir"), "extend")
+        step("Verify the array builtin and no integer add of handles")
+        expect(body).to_contain("rt_array_")
+        expect(body.contains("add nsw i64")).to_equal(false)

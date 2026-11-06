@@ -2183,11 +2183,8 @@ impl MirLowering:
                 val cur_local = b_cur.new_temp(g_type)
                 b_cur.emit(MirInst(kind: MirInstKind.LoadGlobal(cur_local, global_symbol), span: Some(span)))
                 self.builder = b_cur
-                val current = mir_operand_copy(cur_local)
-                val new_val = mir_operand_copy(value_local)
-                val mir_op = self.lower_assign_op(assign_op)
+                val result = self.lower_compound_combine(cur_local, assign_op, value_local, g_type)
                 var b_op = self.builder
-                val result = b_op.emit_binop(mir_op, current, new_val, g_type)
                 b_op.emit(MirInst(kind: MirInstKind.StoreGlobal(global_symbol, mir_operand_copy(result)), span: Some(span)))
                 self.builder = b_op
             else:
@@ -2207,13 +2204,18 @@ impl MirLowering:
             if op.?:
                 # Compound assignment (x += y etc.)
                 val assign_op = op.unwrap()
-                val current = mir_operand_copy(local)
-                val new_val = mir_operand_copy(value_local)
-                val mir_op = self.lower_assign_op(assign_op)
+                # `+=` on an array extends the local in place and on text
+                # concatenates (lower_compound_combine); either way the local
+                # keeps its kind, so its markers must survive the write.
+                val result = self.lower_compound_combine(local, assign_op, value_local, MirType.i64())
+                if result.id == local.id:
+                    return
                 var b = self.builder
-                val result = b.emit_binop(mir_op, current, new_val, MirType.i64())
                 b.emit_copy(local, result)
                 self.builder = b
+                if self.is_tagged_text_local(result.id):
+                    self.mark_tagged_text_local(local.id)
+                    return
                 self.unmark_runtime_value_local(local.id)
                 self.exists_collection_locals = marker_map_without(self.exists_collection_locals, local.id)
                 self.option_value_locals = marker_map_without(self.option_value_locals, local.id)
@@ -2824,7 +2826,48 @@ impl MirLowering:
         about to store to (see the Field/Index arms of lower_assign, which pass
         the receiver/field_index/index_local they then reuse for the store).
         Keeping the combine in one helper is what guarantees the load and the
-        store agree on the place and that the place is resolved exactly once."""
+        store agree on the place and that the place is resolved exactly once.
+
+        `+=` is classified like binary `+` (lower_binary_expr): an array
+        operand extends `current` in place, a text operand concatenates, and
+        only the rest is arithmetic. The collection desugar no longer turns
+        `t += f()` into `t.merge(f())`, so this is the only place that keeps
+        text and array `+=` from becoming an integer add of two handles. Bug:
+        doc/08_tracking/bug/compound_plus_assign_call_rhs_rewritten_to_merge_2026-11-06.md"""
+        val is_add = match op:
+            case HirAssignOp.Add: true
+            case _: false
+        if is_add:
+            if self.local_is_runtime_array(current) or self.local_is_runtime_array(rhs):
+                val extend_op = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_array_extend_i64"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                        params: [MirType.ptr(MirType.i64(), false), MirType.ptr(MirType.i64(), false), MirType.i64()],
+                        return_type: MirType(kind: MirTypeKind.I8),
+                        is_variadic: false
+                    )))
+                ))
+                var b_ext = self.builder
+                val extend_all = b_ext.emit_const_int(-1)
+                b_ext.emit_call(extend_op, [mir_operand_copy(current), mir_operand_copy(rhs), mir_operand_copy(extend_all)], MirType(kind: MirTypeKind.I8))
+                self.builder = b_ext
+                return current
+            if self.local_is_str(current) or self.local_is_str(rhs) or
+                    self.local_hir_type_is_str(current) or self.local_hir_type_is_str(rhs):
+                val cat_left = self.coerce_concat_operand(current)
+                val cat_right = self.coerce_concat_operand(rhs)
+                val cat_func = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_strcat_tagged"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+                ))
+                var b_cat = self.builder
+                val cat_res = b_cat.emit_call(cat_func, [cat_left, cat_right], MirType(kind: MirTypeKind.Opaque("str")))
+                self.builder = b_cat
+                if val cat_local = cat_res:
+                    self.mark_tagged_text_local(cat_local.id)
+                    return cat_local
+                self.error_fatal("unable to emit text `+=` concatenation", nil)
+                return current
         val mir_op = self.lower_assign_op(op)
         var b = self.builder
         val result = b.emit_binop(mir_op, mir_operand_copy(current), mir_operand_copy(rhs), type_)
