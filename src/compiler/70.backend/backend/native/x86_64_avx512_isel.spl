@@ -73,17 +73,15 @@ fn x86_avx512_instruction_owned(inst: MirInst, shapes: Dict<i64, text>) -> bool:
 
 fn x86_plan_avx512_fixed(func: MirFunction) -> X86Avx512FunctionPlanV1:
     var shapes: Dict<i64, text> = {}
-    var lower_width_vectors: Dict<i64, bool> = {}
+    var declared_shapes: Dict<i64, text> = {}
     for local in func.locals:
         val shape = x86_avx512_load_shape(local.type_.kind)
         if shape != "":
             shapes[local.id.id] = shape
+            declared_shapes[local.id.id] = shape
             match local.kind:
                 case Arg(_): return x86_avx512_reject("vector-argument-ABI-unavailable-use-pointer-kernel")
                 case _: ()
-        match local.type_.kind:
-            case MirTypeKind.Vec4f | MirTypeKind.Vec8f | MirTypeKind.Vec4d | MirTypeKind.Vec4i: lower_width_vectors[local.id.id] = true
-            case _: ()
     if x86_avx512_load_shape(func.signature.return_type.kind) != "":
         return x86_avx512_reject("vector-return-ABI-unavailable-use-pointer-kernel")
     # MIR has no first-class mask type. Recover mask lane count from its
@@ -106,7 +104,12 @@ fn x86_plan_avx512_fixed(func: MirFunction) -> X86Avx512FunctionPlanV1:
                         dest = id.id
                         inferred = x86_avx512_shape(shapes, source.id)
                         if inferred != "":
-                            if lower_width_vectors.contains_key(dest): return x86_avx512_reject("copy-move-cross-width")
+                            # The destination must itself be declared as an AVX-512
+                            # frame vector. A narrower (AVX2/SSE) or unreadable
+                            # destination kind has no 64-byte slot: refuse rather
+                            # than store a whole ZMM into it. Mask placeholders are
+                            # declared as 512-bit vectors, so they pass this check.
+                            if x86_avx512_shape(declared_shapes, dest) == "": return x86_avx512_reject("copy-move-cross-width")
                             val declared = x86_avx512_shape(shapes, dest)
                             # Masks use vector placeholders because MIR has no
                             # mask type; copies must carry their inferred shape.
