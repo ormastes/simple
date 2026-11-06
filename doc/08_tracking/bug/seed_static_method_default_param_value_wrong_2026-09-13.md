@@ -1,6 +1,6 @@
 # Seed interpreter: static-method default parameter fills the constant 3, not the declared value
 
-Status: open
+Status: FIXED (already, verified 2026-11-06) — see "Resolution"
 Date: 2026-09-13
 Severity: HIGH — silent wrong answers; no error is raised
 Component: Rust seed interpreter (`src/compiler_rust`), static-method overload/default fill
@@ -52,3 +52,11 @@ Declared defaults of `0`, `42` and `100` all yield `3`. With `b: i64 = 0`,
   (they evaluate `param.default` in an empty env), so the failing dispatch is probably a
   different static-method path — needs a debugger, not a re-read.
 - Not fixed here: `src/compiler_rust` must not be edited while a bootstrap is running.
+
+## Resolution (verified 2026-11-06)
+
+No longer reproduces on a seed built from `release/1.0.0` @ `ecb705896a4` (debug).
+`test/fixtures/seed_interp/static_method_default_param_repro.spl` prints
+`static_default 105 42 105` (`Probe.make(5)`, `Probe.one()`, `freefn(5)`)
+under both `SIMPLE_EXECUTION_MODE=interpret` and the default `run` lane.
+No code change in this pass.
