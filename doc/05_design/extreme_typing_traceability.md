@@ -280,3 +280,307 @@ module map and the receipt's own diagnostics use the pass's logical module
 key, so no alias could join. Facts are now keyed by that logical name;
 `module_path` still carries the file path. Route spec 3/6 -> 7/7 on the seed.
 The production join inside a real `compile()` remains pending Phase 3.
+
+## E2 named rule and publication guard (2026-11-06)
+
+`00.common/api_publication_decision_v1.spl` projects the resolved assurance
+strictness onto the named rule `extreme_public_api` (REQ-EAPI-003): advisory
+at moderate, warning at strict, denial at robust/critical/verified; an
+unrecognized profile name fails closed to denial. `decide_api_publication_v1`
+is pure over `CompileContext.api_exposure` and the frozen export routes. Its
+root set is every `Joined` route's terminal callable, deduplicated by
+(terminal module, local symbol). Unjoined callables, private locals and
+unresolved routes are neither Safe nor denied (REQ-EAPI-001). A joined root
+whose module has no exposure row, or whose symbol is missing or ambiguous,
+is an unknown root with an explicit reason.
+
+Denial applies only to `Violates` roots. **Unknown denial is deferred**: every
+module still carries `effective-export-closure-not-collected`, so denying
+Unknown would deny every build; this is recorded as an open E1 obligation,
+not a policy exception. Diagnostics name exporter, export, terminal callable,
+leaf kind and the return/argument path.
+
+`80.driver/driver_api_publication_guard_v1.spl` applies the disposition on
+its own rule code (errors at Deny, warnings at Warn, nothing at Advisory) and
+stores the decision in `CompileContext.api_publication_decision`, cleared with
+the facts. `driver_orchestration` evaluates it once at phase-5 mode dispatch
+before interpret/JIT/AOT and returns `TypeError` on denial, so no engine runs
+user code or emits an artifact. The typecheck pass's own warning policy is
+untouched (no global robust escalation).
+
+Activation is explicit: `SIMPLE_EXTREME_PUBLIC_API=1`. The stdlib is not yet
+migrated (E3), so an always-on robust denial would reject every robust build;
+activation order is migration policy (plan: "migration affects
+activation/order, not rule exceptions"). When active, the retained typecheck
+pass runs at every profile so advisory/warn rows have facts, and the native
+no-op admission and cached-SMF interpret route are refused at a denying
+profile rather than bypassed (owner audit step 4). Staged AOT flush / AOP
+recheck of generated exports (AC-EAPI-005) and REPL/dynload parity (E4) are
+not covered by this slice.
+
+Spec `test/01_unit/compiler/driver/api_publication_guard_v1_spec.spl` (7
+cases) covers the disposition ladder, inactivity, joined-root denial at
+robust/warn at strict, private-local exclusion, unknown roots, cached-admission
+refusal, and the production route fixture through the driver guard. It ran
+7/7 on the seed; a mutation disabling denial fails. The full `compile()`
+choke point is verification-pending on a self-hosted binary.
+
+## E1 effective export closure (design, 2026-11-06)
+
+Status: design handoff for the next code slice; nothing below is implemented
+by this section. It defines the one structural fact E2 still lacks: which
+retained callables are *effectively exported* from the compilation subject, so
+that a module verdict can become `Safe` and Unknown denial can activate.
+
+### Subject and model of record
+
+The closure is computed over the frozen `ModuleSurfacesByName` registry of
+one compile together with the retained signature facts and the frozen
+export-route facts. It is relative to that compilation subject: a facade that
+is not part of the compile is unseen, and the result says so rather than
+guessing. The visibility model of record is
+`00.common/dependency/visibility.spl` (Lean `VisibilityExport`): a declaration
+must be explicitly exported to be visible externally (`must_be_exported`), and
+nothing inside a child file can be more public than its directory manifest
+allows (`private_module_restricts`). Two facts about the current compiler
+bound what the closure can observe:
+
+- Export-origin rows exist only for explicit `export` / `export use` items
+  (`module_surface_export_index.spl` iterates `surface.exports`). A bare
+  `pub fn` with no export statement has no route and is therefore
+  `NotExported`; `pub` alone is a declaration shortcut, not publication.
+- The compiler frontend (`10.frontend/ast.spl`, `parser_types.spl`) has no
+  `mod` / `pub mod` node; only the interpreter loader's manifest reader
+  (`99.loader/module_resolver/manifest.spl`) parses them. A facade therefore
+  publishes through `export use` only; `pub mod` is not observable from the
+  frozen surface and is recorded as a model gap, not emulated.
+
+`35.semantics/visibility_checker.spl` treats `Visibility.Public` as visible
+everywhere and knows no ancestor chain. The closure follows the model of
+record, not the checker; it changes no W04xx diagnostic. The divergence is
+named here so that nobody reads a `NotExported` closure entry as a visibility
+error or a `Public` declaration as closure membership.
+
+### Definition
+
+For a retained module `M` bound to physical surface `p`, the *ancestor facade
+chain* is, for every proper dotted prefix `P` of `M`'s logical name (for a
+facade `X.__init__` the prefixes are those strictly shorter than `X`), the
+registry surface aliased by `P.__init__` (or by `P` when that alias resolves
+to a surface whose canonical path ends in `__init__.spl`), nearest first. A
+prefix with no facade surface in the registry is not a boundary and does not
+restrict, exactly as `checker_nearest_boundary_dir` treats a directory without
+`__init__.spl`; `src/lib` has no `__init__.spl`, so stdlib leaves publish by
+their own `export` list.
+
+A retained callable `(p, local_symbol, name)` has exactly one closure status:
+
+| Status | Rule |
+|---|---|
+| `Exported` | `M` has a `Joined` direct route (exporter `p`, terminal `p`, source `name`) **and** every facade in the ancestor chain has a `Joined` route whose terminal is `(p, name)`. The outermost such exporter is the *root exporter*. |
+| `NotExported` | No direct route for `name` exists, or some ancestor facade has no route whose terminal is `(p, name)`. The first missing exporter is recorded. |
+| `Unknown(reason)` | The direct route or an ancestor route exists but is not `Joined`; the route's own unknown reason is carried. Also when `M` has no retained facts, no surface binding, or the registry/route facts are missing, budget-truncated or malformed. |
+
+Routes are looked up once by `(exporter index, terminal index, source name)`
+over the bounded route array (4096 routes, 256 modules, 128 callables per
+module, chain depth bounded by 32 prefix segments). No HIR, symbol table or
+filesystem is consulted; no new registry pass is introduced. An outer facade
+whose re-export resolves to a middle facade instead of the terminal is
+`Unknown` with that route's reason (`export-authority-mismatch`), never
+`NotExported`.
+
+### Records and placement
+
+- `00.common/api_export_closure_facts_v1.spl`: `ApiExportClosureStatusV1
+  {Exported, NotExported, Unknown}`; `ApiExportClosureEntryV1` (terminal
+  physical index, terminal module, local symbol, declaration name, status,
+  reason, root exporter index/module, chain depth); `ApiExportClosureFactsV1`
+  (registry generation, entries, `unknown_reasons`, `truncated`,
+  `format_version`). Flat scalars only.
+- `20.hir/hir_lowering/api_export_closure_projection_v1.spl`:
+  `project_api_export_closure_v1(registry, routes, signatures) ->
+  ApiExportClosureFactsV1`, pure.
+- `30.types/type_infer/api_exposure_closure_v1.spl`:
+  `apply_api_export_closure_v1(exposure, closure) -> ApiModuleExposureV1`,
+  pure. `walk_api_exposure_v1` and `project_api_export_routes_v1` are not
+  edited; their specs stay collateral. `ApiCallableExposureV1` gains a
+  defaulted `export_status` field (`NotCollected` until applied).
+- `CompileContext.api_export_closure_facts: ApiExportClosureFactsV1?`,
+  computed in `run_typecheck_warn_pass` right after the route projection and
+  applied to every retained exposure row; cleared at pass entry and compile
+  entry together with the route facts; kept by the retain-products path.
+
+### Module verdict after closure
+
+`apply_api_export_closure_v1` replaces
+`effective-export-closure-not-collected` only when every retained callable of
+the module has a closure entry; otherwise the reason stays and
+`export-closure-incomplete` is added. The module verdict is then:
+
+- `Violates` iff some `Exported` callable walks `Violates`;
+- else `Unknown` iff any module-level unknown reason remains (budgets,
+  malformed facts, binding failures), any `Exported` callable walks `Unknown`,
+  or any callable's closure status is `Unknown`;
+- else `Safe`. An empty exported set with no unknowns is `Safe`: the module
+  publishes nothing.
+
+`NotExported` callables never drive the module verdict; their findings are
+retained for the explain path. This is a deliberate behaviour change for E2:
+a leaf `export`ed callable that its facade does not re-export is no longer a
+denied root, because it is not part of the effective public API
+(REQ-EAPI-001). The decision counts such roots as `excluded_roots`.
+
+### Unknown denial
+
+With the closure collected, `decide_api_publication_v1` may deny `Unknown`
+roots at a `Deny` disposition (REQ-EAPI-003 fail-closed) under the existing
+explicit activation. Consequence to state, not hide: every export whose
+signature carries a `Nominal` node is `Unknown("nominal-members-not-projected")`
+until nominal members are projected, so active robust builds of real code are
+denied for that reason. The switch therefore lands as its own commit with the
+publication-guard spec's "unknown roots" case flipped RED->GREEN on purpose,
+and the activation default stays an open owner question.
+
+### Spec obligations for the code slice
+
+`test/01_unit/compiler/hir_lowering/api_export_closure_projection_v1_spec.spl`
+(RED: module missing): facade re-export is `Exported` with the facade as root
+exporter; direct-only leaf export under a facade is `NotExported` naming the
+facade; a module with no facade in the registry is its own root; a route with
+an unknown reason propagates to `Unknown`; missing registry/routes yield no
+entries and an explicit reason. `api_exposure_walker_v1_spec.spl`,
+`api_export_route_projection_v1_spec.spl`, `api_signature_projection_v1_spec.spl`
+stay collateral; `api_publication_guard_v1_spec.spl` gains the excluded-root
+and (separately) the Unknown-denial case.
+
+## P12 export hardening (design, 2026-11-06)
+
+Status: design handoff, docs only. Owner answer on "hardening" is both: (a)
+the fail-closed typing invariants already carried by E1/E2 (every gap is an
+explicit `Unknown` reason, never `Safe`), and (b) plan P12 "Export hardening,
+privacy and complete graph round-trip" (AC-TRC-052/053, REQ-TRC-031). This
+section scopes (b) and ties it to (a). No report projection (P6) exists yet
+in `src/app/traceability` (`structural_report_v1.spl` is the P0 lane's
+structural check, not a Markdown/HTML export), so the first code slice waits
+for the P6 projection seam; a pure admission module with no consumer would be
+dead code and is not authored here.
+
+### Scope
+
+An *export* is any projection that leaves the process as a file or stream for
+another reader: Markdown/HTML reports (P6), SDN graph dumps and their
+round-trip import, independent edge pages (P2/P12), and the typing facets the
+trace graph consumes from the compiler (T1: `api_*` facts, closure entries,
+publication decisions). Terminal tables and SDN on stdout are not exports
+unless written to an explicit destination. The CLI JSON adapter, when
+requested, is an export and follows the same rules.
+
+### Invariants (fail closed; each is a gate, not advice)
+
+1. **Explicit destination.** No export without an explicit path. The path is
+   canonicalized once; a symlink anywhere on it, a traversal segment, or a
+   destination that resolves outside the declared output root is refused
+   before any byte is written. Collision with an existing file is refused
+   unless the caller declared overwrite; a failed or partial write leaves the
+   previous output untouched (write to a sibling temp name, then rename).
+2. **Private material never renders.** Absolute filesystem locations,
+   prompts, credentials/tokens, environment values, and source text of
+   non-public declarations are filtered *before* the render stage, from the
+   projection record, not scrubbed from the rendered text. Paths render as
+   safe repo-relative spellings or are omitted with a `redacted` marker.
+3. **Untrusted content is data.** Every rendered name, message, URL or
+   snippet is escaped for its target (Markdown, HTML attribute/text, SDN
+   string). HTML is offline: no script, no automatic remote resource, no
+   inline event handler, `javascript:`/`data:` URLs rejected. Injected markup
+   in a declaration name or diagnostic must appear escaped or the export is
+   refused; it never executes or links out.
+4. **Deterministic and byte-identical.** The same subject at the same
+   snapshot renders byte-identical output across runs and hosts: stable
+   ordering, no timestamps/hostnames/pids, no locale-dependent formatting.
+5. **Visibility-safe counts.** An export never reveals nodes or counts the
+   reader's visibility scope excludes; totals are computed after filtering.
+   Truncation is explicit (`truncated: true` plus the bound), never silent.
+6. **Complete graph round-trip.** An SDN graph export re-imported yields an
+   identical graph (same node/edge identity, same unknown reasons); edge
+   pages are independently fetchable and together cover the edge set exactly
+   once. Lossy exports must say what they dropped.
+7. **Typing facets keep their reasons.** When trace consumes `api_*` facts,
+   the export carries every `unknown_reasons` entry, `export_status`,
+   `excluded_roots` and the decision disposition verbatim. An export may not
+   collapse `Unknown` into `Safe` or drop the scope marker
+   (`non-callable-and-generated-surfaces-not-collected`). This is the bridge
+   to hardening (a): trace never claims more than the compiler proved.
+
+### Gates (what the first slice must ship, and in what order)
+
+- Design first (this section), then a pure `00.common`-level admission record
+  (`ExportAdmissionV1`: destination verdict, redaction count, escaping
+  verdict, truncation, reasons) consumed by the P6 projection the day it
+  exists; an admission with any refused reason yields no file.
+- Executable specs under `test/` only, each with a real fixture: traversal
+  and symlink escape refused; collision/failed write preserves prior output;
+  injected `<script>`, `javascript:` URL and Markdown link injection appear
+  escaped; absolute path and prompt text never appear in output; repeated
+  export is byte-identical; filtered graph counts match the visible node set;
+  SDN round-trip equality; typing facet reasons preserved. No manual-only
+  evidence substitutes for these.
+- `check-*` push-tier rows are out of scope until the projection exists;
+  until then the admission spec is the gate.
+
+### Open questions for the owner
+
+- Output root policy: fixed `build/` or caller-declared root with the
+  refusal above? (Design assumes caller-declared root inside the worktree.)
+- Whether a redaction count above zero should be a warning in the report
+  header (visible honesty) or silent (privacy). Design assumes visible count,
+  never the redacted values.
+
+### AC-EAPI-005 generated-surface recheck (finding, 2026-11-06)
+
+Rechecked against the code: `guard_api_publication_v1` runs once at phase-5
+mode dispatch (`driver_orchestration.spl:394`) over facts collected by the
+retained typecheck pass, i.e. **before** `weave_aop()`
+(`driver_orchestration.spl:590`, AOT path after borrow check) and before
+native staged codegen / postmono specialization. Generated exports that the
+surface builder already sees (`generated-comment` export origins from
+generated files, `module_surface_declarations.spl:191`) do reach the route
+projection and the closure. Exports introduced *after* the guard by AOP
+weaving or specialization are not rechecked: the AC-EAPI-005 gap is
+confirmed, not closed. Closing it is feature-sized: a second evaluation of
+the guard after weave over post-weave HIR facts (re-running
+`collect_module_typecheck_receipt_v1` on the woven modules and re-projecting
+routes/closure), with a spec whose aspect introduces a `bool`-returning
+export. Recorded in the todo; no partial recheck is shipped, because a guard
+that runs only before weaving must not be described as covering it.
+
+### Implemented (2026-11-06, follow-up to the design above)
+
+The code slice landed as designed with two refinements the seed run forced:
+
+- **Scope marker does not block Safe.** The projector publishes
+  `non-callable-and-generated-surfaces-not-collected` for every module
+  unconditionally. It bounds what the verdict claims (callable surface only;
+  types, constants and generated surfaces are still unobserved) and is kept in
+  `unknown_reasons`, but `apply_api_export_closure_v1` does not let it block
+  `Safe`. Every other module-level reason (budgets, malformed facts, binding
+  failures, generic bounds, effects) still does. A `Safe` module verdict is
+  therefore a *callable-surface* verdict.
+- **Unresolved facade spelling is Unknown, not NotExported.** The surface
+  builder creates no origin row for an `export use` it cannot resolve (seen
+  with a directory alias such as `export use pkg.fixture.{hidden}` when the
+  registry carries only `pkg.fixture.__init__`). The closure reads each
+  facade's raw `exports` items by last dotted segment: a facade that spells
+  the callable but has no route for it yields
+  `Unknown("export-origin-unresolved:<facade>")`. Re-export through a middle
+  facade spelled by its facade name (`export use pkg.fixture.__init__.{flag}`)
+  resolves transitively to the terminal and joins; the outer facade becomes
+  the root exporter at chain depth 3.
+
+Unknown denial is active under the explicit flag at a denying profile: every
+unknown root is named in the diagnostics with its reason. The spec lives at
+`test/01_unit/compiler/type_infer/api_export_closure_projection_v1_spec.spl`
+(beside the other E1 specs): RED (ERROR, 0 executed) -> GREEN 5/5 on the seed;
+`api_publication_guard_v1_spec.spl` 7/7 -> 8/8 with the unknown-root case
+intentionally flipped to deny; walker 7/7, route 7/7, signature projection
+7/7 unchanged. The full `compile()` choke point remains verification-pending
+on a self-hosted binary.

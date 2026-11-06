@@ -174,3 +174,41 @@ fn erased_field_into_virtual_i64_param_is_unboxed() {
         "virtual trait calls must untag erased arguments"
     );
 }
+
+/// Bug: seed_if_val_typed_option_class_binds_option_or_segv_2026-11-03.
+/// `if val c = o` with an explicit `Option<i64>` (generic-enum form) must
+/// decode the tagged payload; the `T?` Pointer form already did.
+fn unwrap_or_self_result_is_unboxed(func: &MirFunction) -> bool {
+    let insts = instructions(func);
+    let unwraps: Vec<_> = insts
+        .iter()
+        .filter_map(|inst| match inst {
+            MirInst::Call { dest: Some(d), target, .. } if target.name() == "rt_unwrap_or_self" => Some(*d),
+            _ => None,
+        })
+        .collect();
+    insts
+        .iter()
+        .any(|inst| matches!(inst, MirInst::UnboxInt { value, .. } if unwraps.contains(value)))
+}
+
+#[test]
+fn if_val_on_option_enum_i64_unboxes_payload() {
+    let source = "fn probe() -> i64:\n    val o: Option<i64> = Some(5)\n    if val c = o:\n        return c + 1\n    0\n";
+    let mir = compile_to_mir(source).expect("lower");
+    assert!(unwrap_or_self_result_is_unboxed(function(&mir, "probe")));
+}
+
+#[test]
+fn if_val_on_pointer_optional_i64_still_unboxes_payload() {
+    let source = "fn probe() -> i64:\n    val o: i64? = Some(5)\n    if val c = o:\n        return c + 1\n    0\n";
+    let mir = compile_to_mir(source).expect("lower");
+    assert!(unwrap_or_self_result_is_unboxed(function(&mir, "probe")));
+}
+
+#[test]
+fn if_val_on_option_enum_i32_field_unboxes_payload() {
+    let source = "class H:\n    v: Option<i32>\n\nfn probe() -> i32:\n    val h = H(v: Some(3))\n    if val c = h.v:\n        return c\n    0\n";
+    let mir = compile_to_mir(source).expect("lower");
+    assert!(unwrap_or_self_result_is_unboxed(function(&mir, "probe")));
+}

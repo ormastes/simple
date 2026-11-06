@@ -1,0 +1,106 @@
+# Adversarial spec: provider admission must load the exact bytes it hashed.
+# The loader stages the hashed buffer into a private snapshot named by its
+# BLAKE3 hash and opens THAT, never the mutable declared path.
+
+use std.spec.step
+use os.smf.provider_loader.{
+    PROVIDER_ADMISSION_OK,
+    PROVIDER_ADMISSION_DIGEST_MISMATCH,
+    ProviderAdmissionRequestV1,
+    provider_artifact_digest_v1,
+    provider_stage_artifact_snapshot_v1
+}
+use std.common.crypto.blake3.{blake3_hex}
+use std.nogc_sync_mut.sffi.file_bytes.{file_write_bytes_tagged_native}
+
+extern fn rt_file_read_bytes(path: text) -> [u8]?
+extern fn rt_file_read_text(path: text) -> text?
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+
+val SRC_DIR: text = "build/providers/snapshot_binding_spec"
+val SNAP_DIR: text = "build/provider_snapshot_spec_private"
+
+fn bytes_of(s: text) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < s.len():
+        out.push(s.char_code_at(i) as u8)
+        i = i + 1
+    out
+
+fn same_bytes(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn request_for(path: text, pin: text) -> ProviderAdmissionRequestV1:
+    ProviderAdmissionRequestV1(
+        artifact_path: path, artifact_kind: "native",
+        expected_artifact_digest: pin,
+        granted_capability_bits: 1, required_capability_bits: 1,
+        host_abi: 2, minimum_host_abi: 1, maximum_host_abi: 3,
+        requested_interface_major: 1, requested_interface_minor: 0,
+        provided_interface_major: 1, provided_interface_minor: 1)
+
+fn write_artifact(name: text, data: [u8]) -> text:
+    rt_dir_create(SRC_DIR, true)
+    val path = SRC_DIR + "/" + name
+    expect(file_write_bytes_tagged_native(path, data)).to_be(true)
+    path
+
+describe "provider snapshot binding (swap-after-hash TOCTOU)":
+    it "loads the genuine artifact from a BLAKE3-named private snapshot":
+        step("genuine artifact admitted from its snapshot")
+        val genuine = bytes_of("GENUINE-PROVIDER-IMAGE-v1")
+        val path = write_artifact("genuine.so", genuine)
+        val staged = provider_stage_artifact_snapshot_v1(
+            request_for(path, provider_artifact_digest_v1(genuine)), SNAP_DIR)
+        expect(staged.status).to_equal(PROVIDER_ADMISSION_OK)
+        expect(staged.load_path == path).to_be(false)
+        expect(staged.load_path.contains(blake3_hex(genuine))).to_be(true)
+        expect(same_bytes(rt_file_read_bytes(staged.load_path) ?? [], genuine)).to_be(true)
+
+    it "keeps loading the hashed bytes when the declared path is swapped after hashing":
+        step("attacker swaps declared path after admission hashed it")
+        val genuine = bytes_of("GENUINE-PROVIDER-IMAGE-swap")
+        val evil = bytes_of("EVIL-PROVIDER-IMAGE-swap!!")
+        val path = write_artifact("swap.so", genuine)
+        val staged = provider_stage_artifact_snapshot_v1(
+            request_for(path, provider_artifact_digest_v1(genuine)), SNAP_DIR)
+        expect(staged.status).to_equal(PROVIDER_ADMISSION_OK)
+        file_write_bytes_tagged_native(path, evil)
+        val loaded = rt_file_read_bytes(staged.load_path) ?? []
+        expect(same_bytes(loaded, genuine)).to_be(true)
+        expect(same_bytes(loaded, evil)).to_be(false)
+
+    it "rejects a tampered artifact against the SHA-256 pin":
+        step("tampered artifact is refused before staging")
+        val genuine = bytes_of("GENUINE-PROVIDER-IMAGE-tamper")
+        val path = write_artifact("tamper.so", bytes_of("TAMPERED-PROVIDER-IMAGE-xx"))
+        val staged = provider_stage_artifact_snapshot_v1(
+            request_for(path, provider_artifact_digest_v1(genuine)), SNAP_DIR)
+        expect(staged.status).to_equal(PROVIDER_ADMISSION_DIGEST_MISMATCH)
+        expect(staged.load_path).to_equal("")
+
+    it "never trusts a pre-planted snapshot whose bytes differ from its name":
+        step("planted snapshot is replaced by the hashed bytes")
+        val genuine = bytes_of("GENUINE-PROVIDER-IMAGE-plant")
+        rt_dir_create(SNAP_DIR, true)
+        file_write_bytes_tagged_native(SNAP_DIR + "/" + blake3_hex(genuine) + ".so",
+            bytes_of("PLANTED-EVIL-SNAPSHOT"))
+        val path = write_artifact("plant.so", genuine)
+        val staged = provider_stage_artifact_snapshot_v1(
+            request_for(path, provider_artifact_digest_v1(genuine)), SNAP_DIR)
+        expect(staged.status).to_equal(PROVIDER_ADMISSION_OK)
+        expect(same_bytes(rt_file_read_bytes(staged.load_path) ?? [], genuine)).to_be(true)
+
+    it "dynamic admission opens the staged snapshot, not the declared path":
+        step("dynlib_open never receives request.artifact_path")
+        val src = rt_file_read_text("src/os/smf/provider_loader.spl") ?? ""
+        expect(src.contains("dynlib_open(request.artifact_path")).to_be(false)
+        expect(src.contains("dynlib_open(staged.load_path")).to_be(true)

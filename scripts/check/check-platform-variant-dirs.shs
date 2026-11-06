@@ -55,9 +55,25 @@ skeleton_list() { # kind -> sets SKEL (space-separated rel dirs, no fork)
     done
 }
 
+root_present() { # repo root -> 0 unless the root is sparse-excluded (tracked, not on disk)
+    [ -d "$1/$2" ] && return 0
+    if [ -n "$(git -C "$1" ls-files -- "$2" 2>/dev/null | head -n 1)" ]; then
+        echo "note: $2 is tracked but not checked out (sparse checkout); not checked" >&2
+        return 1
+    fi
+    return 0
+}
+
 # scan REPO OUT -> writes sorted "key<TAB>count"; prints checked-item count
 scan() {
     _repo=$1; _out=$2; _dirs=""
+    # A root that is tracked in git but absent on disk is excluded by a sparse
+    # checkout, not deleted: drop it (unchecked, noted) instead of reporting
+    # skeleton:<root>. A root absent from git as well is still a violation.
+    _rc=""; _rs=""
+    for _r in $ROOTS_C; do root_present "$_repo" "$_r" && _rc="$_rc $_r"; done
+    for _r in $ROOTS_SPL; do root_present "$_repo" "$_r" && _rs="$_rs $_r"; done
+    ROOTS_C=$_rc; ROOTS_SPL=$_rs
     for _d in $NAME_SCAN_DIRS $ROOTS_C $ROOTS_SPL; do
         [ -d "$_repo/$_d" ] && _dirs="$_dirs $_repo/$_d"
     done
@@ -217,6 +233,13 @@ selftest() {
     expect cond-new 1 cond
     printf 'cond:%s/common.c\t1\n' "$_rp" > "$_t/cond/base.txt"; expect cond-frozen 0 cond
     printf '#if defined(_MSC_VER)\n#endif\n' >> "$_t/cond/$_rp/common.c"; expect cond-grown 1 cond
+    # sparse: root tracked in git but not on disk must be skipped, not reported
+    # (2026-11-06 false positive "NEW skeleton:src/runtime/platform" from a
+    # sparse aggregate-lander worktree)
+    cp -r "$_t/p" "$_t/sparse"
+    git -C "$_t/sparse" init -q && git -C "$_t/sparse" add -f "$_rp" 2>/dev/null && rm -rf "$_t/sparse/$_rp"
+    expect sparse-root-skipped 0 sparse
+    rm -rf "$_t/skel/$_rp"; expect untracked-root-missing 1 skel
     mkdir -p "$_t/empty"; : > "$_t/empty/base.txt"
     _o=$(PVD_NAME_SCAN_DIRS="" PVD_ROOTS_C="" PVD_ROOTS_SPL="" sh "$SELF" --no-selftest --root "$_t/empty" --baseline "$_t/empty/base.txt" 2>/dev/null)
     [ $? -eq 2 ] || { echo "selftest FAIL: empty tree must ERROR: $_o" >&2; _fail=1; }

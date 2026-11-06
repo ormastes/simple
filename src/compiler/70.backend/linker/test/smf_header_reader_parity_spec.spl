@@ -1,9 +1,10 @@
 # Prevention for bug smf_header_wire_layout_diverges_rust_vs_simple_2026-08-10:
-# every standalone SMF header reader must agree on the SAME packed image and
-# the SAME Rust-seed repr(C) image (96 B trailer, +4 field shift). A reader that
-# hardcodes packed offsets diverges here.
+# every standalone SMF header reader must agree on the SAME image in all three
+# accepted header forms: the v1.3 96-byte default, the Rust seed's 1.1 stamp of
+# that layout, and the legacy packed 128-byte trailer. A reader that hardcodes
+# offsets diverges here.
 use std.spec.{describe, it, expect}
-use compiler.backend.linker.smf_header.{smf_header_from_bytes}
+use compiler.backend.linker.smf_header.{SMF_HEADER_SIZE, SMF_PACKED_HEADER_SIZE, smf_header_from_bytes}
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
 use compiler.backend.linker.smf_writer.{SmfWriter, SmfWriterSymbol, SmfWriterSymbolBinding, SmfWriterSymbolType}
 use compiler.driver.cache.cache_validator.{SmfValidationSnapshot}
@@ -11,7 +12,7 @@ use os.smf.smf_dynlib.{smf_artifact_has_export}
 use os.smf.host_target.{smf_host_arch_id}
 use app.startup.launch_metadata.{retained_smf_launch_metadata_v1}
 
-fn packed_image() -> [u8]:
+fn v13_image() -> [u8]:
     var writer = SmfWriter.create()
     val code: [i64] = [195]
     writer.add_code_section("code", code)
@@ -32,35 +33,42 @@ fn packed_image() -> [u8]:
     var out: [u8] = []
     for word in built.unwrap():
         out.push(word as u8)
-    val hs = out.len() - 128
+    val hs = out.len() - SMF_HEADER_SIZE
     out[hs + 6] = 0
     out[hs + 7] = smf_host_arch_id()
+    # source_hash at repr(C) offset 72
     var i = 0
     while i < 8:
-        out[hs + 68 + i] = (0x21 + i) as u8
+        out[hs + 72 + i] = (0x21 + i) as u8
         i = i + 1
     out
 
-fn to_seed_trailer(packed: [u8]) -> [u8]:
-    # Rewrite the packed 128-byte trailer as the Rust seed repr(C) 96-byte one:
-    # 0..20 unchanged, 4 zero padding bytes at 20..24, packed 20..92 moved to 24..96.
-    val hs = packed.len() - 128
+fn body_of(image: [u8]) -> [u8]:
     var out: [u8] = []
     var i = 0
-    while i < hs:
-        out.push(packed[i])
-        i = i + 1
-    i = 0
-    while i < 96:
-        if i < 20:
-            out.push(packed[hs + i])
-        else:
-            if i < 24:
-                out.push(0)
-            else:
-                out.push(packed[hs + i - 4])
+    while i < image.len() - SMF_HEADER_SIZE:
+        out.push(image[i])
         i = i + 1
     out
+
+# The Rust seed stamps 1.1 on the same 96-byte layout.
+fn to_seed_stamp(image: [u8]) -> [u8]:
+    var out = image
+    out[out.len() - SMF_HEADER_SIZE + 5] = 1
+    out
+
+# Legacy packed 128-byte trailer (v1.1) built from the same header fields.
+fn to_packed_trailer(image: [u8]) -> [u8]:
+    var header = smf_header_from_bytes(image).unwrap()
+    header.version_minor = 1
+    val packed = header.to_packed_bytes()
+    var out = body_of(image)
+    var i = 0
+    while i < SMF_PACKED_HEADER_SIZE:
+        out.push(packed[i])
+        i = i + 1
+    out
+
 fn check_image(bytes: [u8], label: text):
     val parsed = smf_header_from_bytes(bytes).unwrap()
     val reader = SmfReaderMemory.from_data(bytes).unwrap()
@@ -80,16 +88,24 @@ fn check_image(bytes: [u8], label: text):
     expect(launch.reason == "smf_data_offset_invalid").to_equal(false)
 
 describe "SMF standalone header readers agree across layouts":
-    it "agree on the packed 128-byte image":
-        check_image(packed_image(), "packed")
+    it "agree on the v1.3 96-byte default image":
+        check_image(v13_image(), "v1.3")
+
+    it "agree on the legacy packed 128-byte image":
+        check_image(to_packed_trailer(v13_image()), "packed")
 
     it "agree on the Rust seed 96-byte repr(C) image":
-        check_image(to_seed_trailer(packed_image()), "seed")
+        check_image(to_seed_stamp(v13_image()), "seed")
 
-    it "decoders see identical table geometry for both layouts":
-        val packed = smf_header_from_bytes(packed_image()).unwrap()
-        val seed = smf_header_from_bytes(to_seed_trailer(packed_image())).unwrap()
-        expect(seed.section_count).to_equal(packed.section_count)
-        expect(seed.symbol_count).to_equal(packed.symbol_count)
-        expect(seed.section_table_offset).to_equal(packed.section_table_offset)
-        expect(seed.symbol_table_offset).to_equal(packed.symbol_table_offset)
+    it "decoders see identical table geometry for all layouts":
+        val v13 = smf_header_from_bytes(v13_image()).unwrap()
+        val packed = smf_header_from_bytes(to_packed_trailer(v13_image())).unwrap()
+        val seed = smf_header_from_bytes(to_seed_stamp(v13_image())).unwrap()
+        expect(seed.section_count).to_equal(v13.section_count)
+        expect(packed.section_count).to_equal(v13.section_count)
+        expect(seed.symbol_count).to_equal(v13.symbol_count)
+        expect(packed.symbol_count).to_equal(v13.symbol_count)
+        expect(seed.section_table_offset).to_equal(v13.section_table_offset)
+        expect(packed.section_table_offset).to_equal(v13.section_table_offset)
+        expect(seed.symbol_table_offset).to_equal(v13.symbol_table_offset)
+        expect(packed.symbol_table_offset).to_equal(v13.symbol_table_offset)

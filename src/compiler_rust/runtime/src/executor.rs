@@ -635,20 +635,43 @@ enum NativeCallable {
     },
 }
 
-fn native_closure_payload(raw: u64) -> Option<u64> {
-    if raw < 4096 {
+// Explicit worker-closure ABI kind, chosen by the SPAWNER from the static type
+// of what it passes (doc/08_tracking/bug/
+// isolated_thread_raw_worker_argument_heuristic_flake_2026-08-12.md). The
+// runtime never infers it from the word's value. Twin: runtime_thread.c
+// RT_WORKER_CLOSURE_*.
+//   ADDRESS  the word is a machine address of a code entry or a closure
+//            record; worker arguments are passed through unchanged.
+//   VALUE    the word is a tagged Simple RuntimeValue, decoded by its own tag:
+//            TAG_INT  (addr << 3) -> raw native record/entry, raw i64 args;
+//            TAG_HEAP (addr | 1)  -> heap record, RuntimeValue args;
+//            any other tag is not a callable and is rejected.
+// Any other kind is rejected (spawn returns 0).
+pub const RT_WORKER_CLOSURE_ADDRESS: i64 = 1;
+pub const RT_WORKER_CLOSURE_VALUE: i64 = 2;
+
+/// (payload address, raw_worker_args) for an explicitly kinded closure word.
+fn native_worker_closure_word(kind: i64, word: u64) -> Option<(u64, bool)> {
+    let decoded = match kind {
+        RT_WORKER_CLOSURE_ADDRESS => {
+            // Validity, not a guess: a word above the user-VA ceiling is not
+            // an address of this process.
+            if native_word_exceeds_user_va(word) {
+                return None;
+            }
+            (word, false)
+        }
+        RT_WORKER_CLOSURE_VALUE => match word & 0x7 {
+            0x0 => (word >> 3, true),
+            0x1 => (word & !0x7, false),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if decoded.0 < 4096 {
         return None;
     }
-
-    if native_word_exceeds_user_va(raw) {
-        Some(raw >> 3)
-    } else if raw & 0x7 == 0x1 && !unsafe { native_address_is_code(raw as usize) } {
-        // TAG_HEAP record pointer (an odd raw code address stays as is);
-        // twin of runtime_thread.c rt_native_closure_payload.
-        Some(raw & !0x7)
-    } else {
-        Some(raw)
-    }
+    Some(decoded)
 }
 
 fn native_worker_arg(value: RuntimeValue, raw_worker_args: bool) -> RuntimeValue {
@@ -743,7 +766,7 @@ fn native_query_region(addr: usize) -> Option<(usize, u32)> {
 
 // Some(true) when `words` machine words at `addr` are committed and readable,
 // Some(false) when they provably are not, None when this host has no
-// fault-free probe (the classifier then keeps the VA-ceiling rule only).
+// fault-free probe (the record is then read as the spawner declared it).
 #[cfg(windows)]
 fn native_words_readable(addr: usize, words: usize) -> Option<bool> {
     use windows_sys::Win32::System::Memory::{PAGE_GUARD, PAGE_NOACCESS};
@@ -767,63 +790,12 @@ fn native_words_readable(_addr: usize, _words: usize) -> Option<bool> {
     None
 }
 
-// A decoding candidate is valid when it is a code address, or an aligned,
-// readable two-word record whose entry word is a code address.
-unsafe fn native_candidate_is_callable(candidate: u64) -> Option<bool> {
-    if candidate < 4096 {
-        return Some(false);
-    }
-    let addr = candidate as usize;
-    if native_address_is_code(addr) {
-        return Some(true);
-    }
-    if candidate & 0x7 != 0 {
-        return Some(false);
-    }
-    if !native_words_readable(addr, 2)? {
-        return Some(false);
-    }
-    Some(native_address_is_code(*(addr as *const usize)))
-}
-
-// Below the VA ceiling an 8-aligned word is ambiguous: it is either a record
-// address (RuntimeValue ABI) or the int-tagged `addr << 3` of one (raw ABI);
-// a Windows heap at ~2^40 keeps the tagged form under the ceiling. Validate
-// both decodings; exactly one valid one decides, otherwise fail closed.
-// Returns None when the host cannot probe (keep the legacy rule).
-enum NativeWordForm {
-    Address,
-    Tagged,
-    Reject,
-}
-
-unsafe fn native_resolve_ambiguous_word(word: u64) -> Option<NativeWordForm> {
-    let as_address = native_candidate_is_callable(word)?;
-    let as_tagged = native_candidate_is_callable(word >> 3)?;
-    Some(match (as_address, as_tagged) {
-        (true, false) => NativeWordForm::Address,
-        (false, true) => NativeWordForm::Tagged,
-        _ => NativeWordForm::Reject,
-    })
-}
-
-unsafe fn native_callable(closure_arg: u64) -> Option<NativeCallable> {
-    let mut raw_worker_args = native_word_exceeds_user_va(closure_arg);
-    let payload = if !raw_worker_args && closure_arg >= 4096 && closure_arg & 0x7 == 0 {
-        match native_resolve_ambiguous_word(closure_arg) {
-            Some(NativeWordForm::Tagged) => {
-                raw_worker_args = true;
-                closure_arg >> 3
-            }
-            Some(NativeWordForm::Reject) => return None,
-            Some(NativeWordForm::Address) | None => native_closure_payload(closure_arg)?,
-        }
-    } else {
-        native_closure_payload(closure_arg)?
-    };
-    if payload < 4096 {
-        return None;
-    }
+// The explicit kind decides the word's encoding; the record SHAPE (bare
+// entry / direct-function record / closure record) is then read from the
+// payload itself (code-segment test + the record's marker word). A record that
+// is provably not readable is rejected, never dereferenced.
+unsafe fn native_callable(kind: i64, closure_arg: u64) -> Option<NativeCallable> {
+    let (payload, raw_worker_args) = native_worker_closure_word(kind, closure_arg)?;
 
     let payload_addr = payload as usize;
     if native_address_is_code(payload_addr) {
@@ -840,6 +812,9 @@ unsafe fn native_callable(closure_arg: u64) -> Option<NativeCallable> {
         });
     }
 
+    if native_words_readable(payload_addr, 2) == Some(false) {
+        return None;
+    }
     let entry = *(payload as *const usize);
     if entry < 4096 {
         return None;
@@ -869,8 +844,20 @@ unsafe fn native_callable(closure_arg: u64) -> Option<NativeCallable> {
 /// A thread handle that can be used to join the thread
 #[no_mangle]
 pub extern "C" fn rt_thread_spawn_isolated(closure_ptr: u64, data: RuntimeValue) -> u64 {
+    // Simple-facing: generated code passes the closure as a tagged RuntimeValue.
+    spawn_isolated_kind(RT_WORKER_CLOSURE_VALUE, closure_ptr, data)
+}
+
+/// Spawn with an explicit closure-word kind (`RT_WORKER_CLOSURE_*`) chosen by
+/// the spawner; an unknown kind is rejected (returns 0).
+#[no_mangle]
+pub extern "C" fn rt_thread_spawn_isolated_kind(kind: i64, closure_ptr: u64, data: RuntimeValue) -> u64 {
+    spawn_isolated_kind(kind, closure_ptr, data)
+}
+
+fn spawn_isolated_kind(kind: i64, closure_ptr: u64, data: RuntimeValue) -> u64 {
     crate::value::note_user_threads_started();
-    let Some(callable) = (unsafe { native_callable(closure_ptr) }) else {
+    let Some(callable) = (unsafe { native_callable(kind, closure_ptr) }) else {
         return 0;
     };
 
@@ -918,8 +905,23 @@ pub extern "C" fn rt_thread_spawn_isolated_with_args(
     data1: RuntimeValue,
     data2: RuntimeValue,
 ) -> u64 {
+    spawn_isolated_with_args_kind(RT_WORKER_CLOSURE_VALUE, closure_ptr, data1, data2)
+}
+
+/// Two-argument spawn with an explicit closure-word kind (`RT_WORKER_CLOSURE_*`).
+#[no_mangle]
+pub extern "C" fn rt_thread_spawn_isolated_with_args_kind(
+    kind: i64,
+    closure_ptr: u64,
+    data1: RuntimeValue,
+    data2: RuntimeValue,
+) -> u64 {
+    spawn_isolated_with_args_kind(kind, closure_ptr, data1, data2)
+}
+
+fn spawn_isolated_with_args_kind(kind: i64, closure_ptr: u64, data1: RuntimeValue, data2: RuntimeValue) -> u64 {
     crate::value::note_user_threads_started();
-    let Some(callable) = (unsafe { native_callable(closure_ptr) }) else {
+    let Some(callable) = (unsafe { native_callable(kind, closure_ptr) }) else {
         return 0;
     };
 
@@ -1156,7 +1158,7 @@ pub extern "C" fn rt_thread_spawn_limited(
     thread_limit: i64,
 ) -> u64 {
     crate::value::note_user_threads_started();
-    let Some(callable) = (unsafe { native_callable(closure_ptr) }) else {
+    let Some(callable) = (unsafe { native_callable(RT_WORKER_CLOSURE_VALUE, closure_ptr) }) else {
         return 0;
     };
 
@@ -1249,7 +1251,7 @@ pub extern "C" fn rt_thread_spawn_limited_with_args(
     thread_limit: i64,
 ) -> u64 {
     crate::value::note_user_threads_started();
-    let Some(callable) = (unsafe { native_callable(closure_ptr) }) else {
+    let Some(callable) = (unsafe { native_callable(RT_WORKER_CLOSURE_VALUE, closure_ptr) }) else {
         return 0;
     };
 

@@ -1,0 +1,101 @@
+# Pure reference-role classification (traceability design §15.1): the role a
+# source line plays for one symbol. The LSP `Location` type has no role field,
+# so roles are used to honour `ReferenceContext.includeDeclaration` and to
+# label CLI/MCP reference text; they are textual and therefore heuristic.
+#
+#   declaration  the line declares `symbol` (fn/struct/class/enum/trait/val/var)
+#   call         `symbol(` — a call site
+#   type_use     `symbol` follows `:`, `->` or sits inside `<...>`
+#   write        `symbol = ...` (not `==`, not `=>`)
+#   read         any other occurrence
+#   none         `symbol` does not occur as a whole word
+
+use std.common.json.value.{json_parse_value_strict, json_value_field, json_value_as_bool}
+
+fn _is_ident_byte(b: i64) -> bool:
+    (b >= 48 and b <= 57) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or b == 95
+
+fn _is_decl_keyword(w: text) -> bool:
+    w == "fn" or w == "struct" or w == "class" or w == "enum" or w == "trait" or
+        w == "val" or w == "var" or w == "type" or w == "impl"
+
+fn _is_decl_prefix(w: text) -> bool:
+    w == "pub" or w == "static" or w == "async" or w == "me" or w == ""
+
+# 0-based index of the first whole-word occurrence; -1 when absent.
+fn _word_index(line: text, symbol: text) -> i64:
+    if symbol == "": return -1
+    var from = 0
+    while from + symbol.len() <= line.len():
+        val rel = line.substring(from).index_of(symbol)
+        if rel < 0: return -1
+        val hit = from + rel
+        val before_ok = hit == 0 or not _is_ident_byte(line.byte_at(hit - 1))
+        val after = hit + symbol.len()
+        val after_ok = after >= line.len() or not _is_ident_byte(line.byte_at(after))
+        if before_ok and after_ok: return hit
+        from = hit + 1
+    -1
+
+fn _is_declaration(line: text, hit: i64) -> bool:
+    # Words before the symbol must be a declaration keyword preceded only by
+    # allowed prefixes: `pub fn name(`, `static fn name`, `val name =`.
+    val head = line.substring(0, hit).trim()
+    if head == "": return false
+    val words = head.split(" ")
+    var last = ""
+    var i = 0
+    while i < words.len():
+        if words[i] != "":
+            if last != "" and not _is_decl_prefix(last): return false
+            last = words[i]
+        i = i + 1
+    _is_decl_keyword(last)
+
+fn _next_non_space(line: text, from: i64) -> i64:
+    var i = from
+    while i < line.len():
+        val b = line.byte_at(i)
+        if b != 32 and b != 9: return i
+        i = i + 1
+    -1
+
+fn _prev_non_space(line: text, from: i64) -> i64:
+    var i = from - 1
+    while i >= 0:
+        val b = line.byte_at(i)
+        if b != 32 and b != 9: return i
+        i = i - 1
+    -1
+
+pub fn lsp_reference_role_v1(source_line: text, symbol: text) -> text:
+    val hit = _word_index(source_line, symbol)
+    if hit < 0: return "none"
+    if _is_declaration(source_line, hit): return "declaration"
+    val after = _next_non_space(source_line, hit + symbol.len())
+    if after >= 0:
+        val b = source_line.byte_at(after)
+        if b == 40: return "call"
+        if b == 61:
+            var b2 = 0
+            if after + 1 < source_line.len():
+                b2 = source_line.byte_at(after + 1)
+            if b2 != 61 and b2 != 62: return "write"
+    val before = _prev_non_space(source_line, hit)
+    if before >= 0:
+        val pb = source_line.byte_at(before)
+        if pb == 58 or pb == 60: return "type_use"           # `: T` or `<T`
+        if pb == 62 and before > 0 and source_line.byte_at(before - 1) == 45: return "type_use"  # `-> T`
+        if pb == 44 and source_line.substring(0, before).index_of("<") >= 0 and
+                source_line.substring(hit).index_of(">") >= 0:
+            return "type_use"                               # `<A, T>`
+    "read"
+
+# `params.context.includeDeclaration`; the protocol default when absent is true.
+pub fn lsp_references_include_declaration_v1(body: text) -> bool:
+    val parsed = json_parse_value_strict(body)
+    if parsed.is_err(): return true
+    val ctx = json_value_field(json_value_field(parsed.unwrap(), "params"), "context")
+    json_value_as_bool(json_value_field(ctx, "includeDeclaration")) ?? true
+
+export lsp_reference_role_v1, lsp_references_include_declaration_v1

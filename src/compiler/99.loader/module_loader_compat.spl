@@ -72,12 +72,15 @@ use std.io_runtime.{file_read_bytes}
 # Roll back a failed load transaction: unmap every candidate mapping exactly
 # once (ledger is flat [addr, size, ...]) and return the error. Global symbol
 # state is only mutated after the commit point, so there is nothing to unpublish.
-fn _compat_load_fail(allocs: [i64], message: text) -> LoadResult:
+fn _compat_release_exec_mappings(allocs: [i64]):
     var i = 0
     while i + 1 < allocs.len():
         unsafe(capabilities: [raw_ptr]):
             _ = native_free_exec_memory(allocs[i], allocs[i + 1])
         i = i + 2
+
+fn _compat_load_fail(allocs: [i64], message: text) -> LoadResult:
+    _compat_release_exec_mappings(allocs)
     LoadResult.Error(message: message)
 
 fn _jit_cached_loaded_symbol(sym_name: text, rec_cache: JitCacheRecord) -> LoadedSymbol:
@@ -158,6 +161,10 @@ struct LoadedModule:
     symbols: Dict<text, LoadedSymbol>
     load_time: i64
     version: i64
+    # Executable/GOT mappings this module owns, flat [addr, size, ...]. The
+    # load transaction's rollback ledger is handed over at the commit point
+    # and unmapped exactly once by `unload`.
+    exec_mappings: [i64]
 
 impl LoadedModule:
     fn has_symbol(name: text) -> bool:
@@ -1379,7 +1386,7 @@ impl ModuleLoader:
                 # silently downgrade to metadata modules. Metadata registration
                 # also avoids copying the full source into a temporary byte
                 # buffer; the JIT sidecar loader owns any data it actually needs.
-                val m = LoadedModule(path: path, reader: "", symbols: {}, load_time: 0, version: 1)
+                val m = LoadedModule(path: path, reader: "", symbols: {}, load_time: 0, version: 1, exec_mappings: [])
                 self.modules[path] = m
                 self.module_intents[path] = "source_metadata"
                 val _ = self.jit.load_smf_metadata(path)
@@ -1600,7 +1607,7 @@ impl ModuleLoader:
                 for publish_name in symbols.keys():
                     self.global_symbols[publish_name] = (path, symbols[publish_name])
 
-                val m = LoadedModule(path: path, reader: "", symbols: symbols, load_time: 0, version: 1)
+                val m = LoadedModule(path: path, reader: "", symbols: symbols, load_time: 0, version: 1, exec_mappings: allocs)
                 self.modules[path] = m
                 self.module_intents[path] = "smf_artifact"
                 return LoadResult.Success(module: m)
@@ -1686,6 +1693,11 @@ impl ModuleLoader:
                 _kept_self_dependency_semantic_fingerprints[_k] = self.dependency_semantic_fingerprints[_k]
         self.dependency_semantic_fingerprints = _kept_self_dependency_semantic_fingerprints
         if self.modules.has(path):
+            # Unmap the module's code/GOT mappings exactly once, on the only
+            # path that drops the module record (the gate returns above keep
+            # the module and therefore its mappings). See doc/08_tracking/bug/
+            # compat_loader_unload_leaks_exec_mappings_2026-11-03.md
+            _compat_release_exec_mappings(self.modules[path].exec_mappings)
             # `Dict.remove(k)` returns a NEW dict interpreted but the REMOVED VALUE
             # natively (rt_dict_remove); assigning it back destroys the map on the
             # compiled lane. Rebuild without the key. See doc/08_tracking/bug/

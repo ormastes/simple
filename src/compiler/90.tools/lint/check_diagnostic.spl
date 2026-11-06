@@ -86,3 +86,35 @@ pub fn check_parser_diagnostic(path: text, raw: text) -> CheckDiagnostic:
             line: line, column: column, expected: expected, found: found,
             help: "try adding `{expected}` before this token")
     CheckDiagnostic(path: path, code: "E0002", message: rest, line: line, column: column)
+
+# W0410: `use` lines whose root segment names no known module root.
+# Returns (line, module_path, root_segment) per top-level-or-indented `use`.
+pub fn check_import_roots(source: text) -> [(i64, text, text)]:
+    var out: [(i64, text, text)] = []
+    var line_no = 0
+    for raw in source.split("\n"):
+        line_no = line_no + 1
+        val trimmed = raw.trim()
+        if not trimmed.starts_with("use "):
+            continue
+        var module = trimmed[4:].trim()
+        val brace = module.index_of(".\{")
+        if brace >= 0:
+            module = module[:brace]
+        module = module.split(" ")[0]
+        if module == "":
+            continue
+        out.push((line_no, module, module.split(".")[0]))
+    out
+
+# Conservative by design: only the root segment is checked against
+# `known_roots`, which the caller derives from the filesystem, so a real
+# module tree never yields a false W0410.
+pub fn check_unresolved_import_diagnostics(path: text, source: text, known_roots: [text]) -> [CheckDiagnostic]:
+    var out: [CheckDiagnostic] = []
+    for entry in check_import_roots(source):
+        if not known_roots.contains(entry.2):
+            out.push(CheckDiagnostic(path: path, code: "W0410", severity: "warning",
+                message: "unresolved import '{entry.1}'", line: entry.0, column: 1,
+                help: "check the module path or add the source root with --source-root"))
+    out

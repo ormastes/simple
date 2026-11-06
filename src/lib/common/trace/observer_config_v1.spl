@@ -1,0 +1,175 @@
+# Cold-path configuration only. Parsing never resolves a backend, imports a
+# platform provider, or grants an ABI/profile capability.
+use std.common.trace.observer_contract_v1.*
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+use std.common.sdn.strict_v1.{sdn_parse_strict_v1}
+
+# SHA-256 of the exact UTF-8 descriptor, without a trailing newline.
+pub const TRACE_CONFIG_SCHEMA_DESCRIPTOR_V1 = "simple.trace/observer-v1;sdn-root=trace;schema=1;instrumentation=off|dynamic|always_on;backend=auto|llvm|simple|none;consistency=raw_edges|paired_spans;patch_mode=quiescent|live;abi_profile=ascii-alnum-dot-dash-underscore:0..128;events=entry|exit|tail_exit|transition|loss|unmatched_edge|truncated_span|unsupported_site|paired_span|completion;buffer_bytes=i64:96..max;max_contexts=i64:1..max;max_depth=i64:1..max;max_resident_generations=i64:1..max;defaults=off,auto,raw_edges,quiescent,empty,entry+exit+tail_exit,98304,64,128,8;strict=duplicates-unknown-type-coercion-rejected;control-diagnostics=mandatory;active=profile-required,backend-not-none;max_source_bytes=4096"
+pub const TRACE_CONFIG_SCHEMA_HASH_V1 = "32113b0b1f6b336c6a6b8613385c183e7847255a9e326161b7c6d1598793f1f8"
+
+pub fn trace_config_defaults_v1() -> TraceConfigV1:
+    TraceConfigV1(instrumentation: TraceInstrumentationV1.Off,
+        backend: TraceBackendV1.Auto, consistency: TraceConsistencyV1.RawEdges,
+        patch_mode: TracePatchModeV1.Quiescent, abi_profile: "", event_mask: 7,
+        buffer_bytes: 98304, max_contexts: 64, max_depth: 128,
+        max_resident_generations: 8)
+
+fn trace_profile_spelling_v1(profile: text) -> bool:
+    if profile.len() > 128: return false
+    for byte in profile.bytes():
+        if not ((byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or
+                (byte >= 97 and byte <= 122) or byte == 45 or byte == 46 or byte == 95):
+            return false
+    true
+
+# The signed ceilings preserve exact SDN Int representation. Providers impose
+# their actual resource ceilings separately, before allocating anything.
+pub fn trace_config_validate_v1(config: TraceConfigV1) -> Result<bool, TraceFailureV1>:
+    if not trace_profile_spelling_v1(config.abi_profile):
+        return Err(TraceFailureV1.InvalidArgument)
+    if config.event_mask == 0 or config.event_mask > 1023:
+        return Err(TraceFailureV1.InvalidArgument)
+    if (config.buffer_bytes < 96 or config.buffer_bytes > 9223372036854775807 or
+            config.max_contexts == 0 or config.max_contexts > 9223372036854775807 or
+            config.max_depth == 0 or config.max_depth > 9223372036854775807 or
+            config.max_resident_generations == 0 or config.max_resident_generations > 9223372036854775807):
+        return Err(TraceFailureV1.InvalidArgument)
+    match config.instrumentation:
+        case Off: ()
+        case _:
+            if config.abi_profile == "": return Err(TraceFailureV1.UnsupportedProfile)
+            match config.backend:
+                case None: return Err(TraceFailureV1.InvalidArgument)
+                case _: ()
+    Ok(true)
+
+fn trace_config_text_v1(value: SdnValue) -> Result<text, TraceFailureV1>:
+    match value:
+        case String(item): Ok(item)
+        case _: Err(TraceFailureV1.InvalidArgument)
+
+fn trace_config_positive_v1(value: SdnValue) -> Result<u64, TraceFailureV1>:
+    match value:
+        case Int(item):
+            if item <= 0: return Err(TraceFailureV1.InvalidArgument)
+            Ok(item as u64)
+        case _: Err(TraceFailureV1.InvalidArgument)
+
+fn trace_config_event_names_v1() -> [text]:
+    ["entry", "exit", "tail_exit", "transition", "loss", "unmatched_edge",
+        "truncated_span", "unsupported_site", "paired_span", "completion"]
+
+fn trace_config_events_v1(value: SdnValue) -> Result<u64, TraceFailureV1>:
+    var mask: u64 = 0
+    val names = trace_config_event_names_v1()
+    match value:
+        case Array(items):
+            for item in items:
+                val name = trace_config_text_v1(item)?
+                var bit: u64 = 1
+                var found = false
+                for known in names:
+                    if name == known:
+                        if (mask & bit) != 0: return Err(TraceFailureV1.InvalidArgument)
+                        mask = mask | bit
+                        found = true
+                    bit = bit << 1
+                if not found: return Err(TraceFailureV1.InvalidArgument)
+        case _: return Err(TraceFailureV1.InvalidArgument)
+    if mask == 0: return Err(TraceFailureV1.InvalidArgument)
+    Ok(mask)
+
+fn trace_config_fields_v1(fields: Dict<text, SdnValue>) -> Result<TraceConfigV1, TraceFailureV1>:
+    var config = trace_config_defaults_v1()
+    if not fields.contains_key("schema"): return Err(TraceFailureV1.InvalidArgument)
+    for key in fields.keys():
+        val value = fields[key]
+        match key:
+            case "schema":
+                match value:
+                    case Int(version):
+                        if version != 1: return Err(TraceFailureV1.InvalidArgument)
+                    case _: return Err(TraceFailureV1.InvalidArgument)
+            case "instrumentation":
+                match trace_config_text_v1(value)?:
+                    case "off": config.instrumentation = TraceInstrumentationV1.Off
+                    case "dynamic": config.instrumentation = TraceInstrumentationV1.Dynamic
+                    case "always_on": config.instrumentation = TraceInstrumentationV1.AlwaysOn
+                    case _: return Err(TraceFailureV1.InvalidArgument)
+            case "backend":
+                match trace_config_text_v1(value)?:
+                    case "auto": config.backend = TraceBackendV1.Auto
+                    case "llvm": config.backend = TraceBackendV1.Llvm
+                    case "simple": config.backend = TraceBackendV1.Simple
+                    case "none": config.backend = TraceBackendV1.None
+                    case _: return Err(TraceFailureV1.InvalidArgument)
+            case "consistency":
+                match trace_config_text_v1(value)?:
+                    case "raw_edges": config.consistency = TraceConsistencyV1.RawEdges
+                    case "paired_spans": config.consistency = TraceConsistencyV1.PairedSpans
+                    case _: return Err(TraceFailureV1.InvalidArgument)
+            case "patch_mode":
+                match trace_config_text_v1(value)?:
+                    case "quiescent": config.patch_mode = TracePatchModeV1.Quiescent
+                    case "live": config.patch_mode = TracePatchModeV1.Live
+                    case _: return Err(TraceFailureV1.InvalidArgument)
+            case "abi_profile": config.abi_profile = trace_config_text_v1(value)?
+            case "events": config.event_mask = trace_config_events_v1(value)?
+            case "buffer_bytes": config.buffer_bytes = trace_config_positive_v1(value)?
+            case "max_contexts": config.max_contexts = trace_config_positive_v1(value)?
+            case "max_depth": config.max_depth = trace_config_positive_v1(value)?
+            case "max_resident_generations": config.max_resident_generations = trace_config_positive_v1(value)?
+            case _: return Err(TraceFailureV1.InvalidArgument)
+    trace_config_validate_v1(config)?
+    Ok(config)
+
+# A dedicated extension document, not a whole application configuration.
+# Schema is required; omitted settings use conservative off defaults.
+pub fn trace_config_parse_sdn_v1(source: text) -> Result<TraceConfigV1, TraceFailureV1>:
+    val limits = SdnStrictLimitsV1(max_source_bytes: 4096, max_depth: 4,
+        max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 0)
+    match sdn_parse_strict_v1(source, limits):
+        case Err(_): Err(TraceFailureV1.InvalidArgument)
+        case Ok(document):
+            match document.value:
+                case Dict(root):
+                    if root.len() != 1 or not root.contains_key("trace"):
+                        return Err(TraceFailureV1.InvalidArgument)
+                    match root["trace"]:
+                        case Dict(fields): trace_config_fields_v1(fields)
+                        case _: Err(TraceFailureV1.InvalidArgument)
+                case _: Err(TraceFailureV1.InvalidArgument)
+
+pub fn trace_config_format_sdn_v1(config: TraceConfigV1) -> Result<text, TraceFailureV1>:
+    trace_config_validate_v1(config)?
+    val instrumentation = match config.instrumentation:
+        case Off: "off"
+        case Dynamic: "dynamic"
+        case AlwaysOn: "always_on"
+    val backend = match config.backend:
+        case Auto: "auto"
+        case Llvm: "llvm"
+        case Simple: "simple"
+        case None: "none"
+    val consistency = match config.consistency:
+        case RawEdges: "raw_edges"
+        case PairedSpans: "paired_spans"
+    val patch_mode = match config.patch_mode:
+        case Quiescent: "quiescent"
+        case Live: "live"
+    var events = ""
+    var bit: u64 = 1
+    for name in trace_config_event_names_v1():
+        if (config.event_mask & bit) != 0:
+            if events != "": events = events + ", "
+            events = events + name
+        bit = bit << 1
+    var output = "trace:\n    schema: 1\n"
+    output = output + "    instrumentation: {instrumentation}\n    backend: {backend}\n"
+    output = output + "    consistency: {consistency}\n    patch_mode: {patch_mode}\n"
+    output = output + "    abi_profile: \"{config.abi_profile}\"\n    events: [{events}]\n"
+    output = output + "    buffer_bytes: {config.buffer_bytes}\n    max_contexts: {config.max_contexts}\n"
+    output = output + "    max_depth: {config.max_depth}\n    max_resident_generations: {config.max_resident_generations}\n"
+    Ok(output)

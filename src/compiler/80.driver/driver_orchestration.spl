@@ -14,6 +14,8 @@ use compiler.driver.driver_mir_target.{driver_mir_target_context}
 use compiler.driver.driver_aot_pipeline.*
 use compiler.driver.driver_collection_native_receipt.{collection_native_clear_v1, collection_native_validate_v1, collection_native_copy_v1}
 use compiler.driver.driver_aot_output.{driver_native_sources_fingerprint}
+use compiler.driver.driver_api_publication_guard_v1.{guard_api_publication_v1}
+use compiler.common.api_publication_activation_v1.{extreme_public_api_denies_cached_admission_v1}
 use compiler.driver.driver_log_helpers.{
     build_trace_enabled,
     log_build_trace,
@@ -161,7 +163,9 @@ impl CompilerDriver:
         self.ctx.api_signature_node_count = 0
         self.ctx.api_signature_retention_exhausted = false
         self.ctx.api_exposure = {}
+        self.ctx.api_publication_decision = nil
         self.ctx.api_export_route_facts = nil
+        self.ctx.api_export_closure_facts = nil
         if not reverse_reference_owner_begin_v1():
             return CompileResult.RuntimeError(
                 "reverse-reference owner already active in this process")
@@ -185,6 +189,7 @@ impl CompilerDriver:
         if (self.ctx.config["build-session-retain-products"] ?? "") == "1":
             k = keep(k, self.ctx.api_signature_facts)
             k = keep(k, self.ctx.api_export_route_facts)
+            k = keep(k, self.ctx.api_export_closure_facts)
             k = keep(k, self.ctx.mir_modules)
             k = keep(k, self.ctx.cold_hir_typed_receipts)
             k = keep(k, self.ctx.runtime_std_hir_emissions)
@@ -241,7 +246,8 @@ impl CompilerDriver:
             self.ctx.options.output_format == driver_output_format_native() and
             self.ctx.runtime_std_full_inventory_selection == nil and
             (env_get("SIMPLE_PACKAGE_INDEX_FULL_INVENTORY") ?? "") != "1" and
-            (env_get("SIMPLE_NATIVE_BUILD_CLEAN") ?? "") != "1"
+            (env_get("SIMPLE_NATIVE_BUILD_CLEAN") ?? "") != "1" and
+            not extreme_public_api_denies_cached_admission_v1()
         # The request hashes compiler and environment authority. Check,
         # interpret, JIT, and other non-native modes never consume it.
         var native_noop_request = NativeNoopRequestV1("", "", "")
@@ -381,6 +387,14 @@ impl CompilerDriver:
         if compile_mode_text == "sdn":
             log_debug("sdn mode")
             return self.process_sdn()
+        # Named rule `extreme_public_api` (REQ-EAPI-003/004): one choke point
+        # before any engine runs user code or emits an artifact. A denial
+        # returns before interpret/JIT/AOT, so no initializer effect occurs.
+        log_phase("phase5:extreme_public_api:start")
+        val api_decision = guard_api_publication_v1(self.ctx)
+        log_phase("phase5:extreme_public_api:done")
+        if not api_decision.allowed:
+            return CompileResult.TypeError(self.ctx.errors)
         if compile_mode_text == "interpret":
             log_debug("interpret mode")
             return self.interpret()

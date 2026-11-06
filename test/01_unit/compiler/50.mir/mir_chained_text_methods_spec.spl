@@ -1,0 +1,62 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR chained call-result receivers and builtin text methods
+Bug: mir_simd_chained_struct_method_unresolved_2026-11-06 -- stage3 native
+build of lib.nogc_sync_mut.simd failed with 8 `unresolved method call` errors,
+all `<free call>(...).to_array()` on same-module SIMD structs (fixed by #7107).
+Bug: bootstrap-builder-owner-native-string-methods-2026-09-30 -- text.to_upper
+and for-in text.chars must lower via builtin text routing.
+Prevention: chained/static/nested call-result receivers and sibling text methods.
+"""
+
+# @tag: unit, compiler, mir
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn rs_lower(src: text) -> text:
+    val file = "testdata/fixture_chain_text.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_chain_text", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    val target_context = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+    val mir = lowering.lower_module(hir)
+    var out = ""
+    for e in hir_lowering.errors:
+        out = out + "HIR: " + e.message + "\n"
+    for e in lowering.errors:
+        out = out + "MIR: " + e.message + "\n"
+    out
+
+val vec_src = "struct V2:\n    a: i32\n    b: i32\n\nimpl V2:\n    static fn splat(x: i32) -> V2:\n        V2(a: x, b: x)\n    fn to_array() -> [i32]:\n        [self.a, self.b]\n\nfn v_add(x: V2, y: V2) -> V2:\n    V2(a: x.a + y.a, b: x.b + y.b)\n\nfn v_mul(x: V2, y: V2) -> V2:\n    V2(a: x.a * y.a, b: x.b * y.b)\n\n"
+
+describe "struct method on a free-call result (simd .to_array shape)":
+    # mir_simd_chained_struct_method_unresolved_2026-11-06
+    it "resolves f(x).to_array() for a same-module struct":
+        expect(rs_lower(vec_src + "fn f() -> i64:\n    val w = V2.splat(3)\n    val s = v_add(w, w).to_array()\n    s[0].to_i64()\n")).to_equal("")
+
+    it "resolves a nested call receiver g(f(x), y).to_array()":
+        expect(rs_lower(vec_src + "fn f() -> i64:\n    val w = V2.splat(3)\n    val d = v_mul(\n        v_add(w, w), w).to_array()\n    d[1].to_i64()\n")).to_equal("")
+
+    it "resolves a static-call result receiver V2.splat(x).to_array()":
+        expect(rs_lower(vec_src + "fn f() -> i64:\n    V2.splat(4).to_array().len()\n")).to_equal("")
+
+describe "builtin text methods (bootstrap-builder-owner-native-string-methods)":
+    it "lowers to_upper and for-in chars":
+        expect(rs_lower("fn f(s: text) -> i64:\n    val u = s.to_upper()\n    var n = 0\n    for c in s.chars():\n        n = n + 1\n    n + u.len()\n")).to_equal("")
+
+    it "lowers for-in directly over text":
+        expect(rs_lower("fn f(s: text) -> i64:\n    var n = 0\n    for c in s:\n        if c < \" \":\n            n = n + 1\n    n\n")).to_equal("")
+
+    it "lowers sibling text methods to_lower/trim/bytes/split/replace/contains":
+        expect(rs_lower("fn f(s: text) -> i64:\n    val a = s.to_lower()\n    val b = s.trim()\n    val c = s.bytes()\n    val d = s.split(\",\")\n    val e = s.replace(\"a\", \"b\")\n    if s.contains(\"x\"):\n        return 1\n    a.len() + b.len() + c.len() + d.len() + e.len()\n")).to_equal("")
+
+    it "lowers text methods on a call-result receiver":
+        expect(rs_lower("fn g() -> text:\n    \"ab\"\n\nfn f() -> i64:\n    g().to_upper().trim().len()\n")).to_equal("")

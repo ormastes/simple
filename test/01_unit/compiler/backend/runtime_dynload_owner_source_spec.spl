@@ -8,6 +8,8 @@ describe "hosted dynamic-loader ownership":
         val header = rt_file_read_text("src/runtime/runtime.h") ?? ""
         val compiler = rt_file_read_text("src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
         val linker = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
+        val hosted_support = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link_hosted_support.spl") ?? ""
+        val orchestrator = rt_file_read_text("src/compiler/70.backend/backend/llvm_native_link_orchestrator.spl") ?? ""
         val seed = rt_file_read_text("src/compiler_rust/runtime/src/value/wsffi_native.rs") ?? ""
         val unix = rt_file_read_text("src/runtime/platform/unix_common.h") ?? ""
         val windows = rt_file_read_text("src/runtime/platform/platform_win.h") ?? ""
@@ -17,20 +19,19 @@ describe "hosted dynamic-loader ownership":
             expect(header).to_contain("int64_t " + name + "(")
         expect(owner).to_contain("rt_interp_cstr(path_value)")
         expect(owner).to_contain("rt_interp_cstr(name_value)")
-        expect(owner).to_contain("if (!path) return 0;")
-        expect(owner).to_contain("if (!handle || !name) return 0;")
-        expect(owner).to_contain("if (!handle) return 0;")
+        expect(owner).to_contain("if (!path || !path[0]) return 1;")
+        expect(owner).to_contain("if (!handle || !name || !name[0]) return 1;")
+        expect(owner).to_contain("if (!handle) return -1;")
         expect(owner).to_contain("RTLD_NOW | RTLD_LOCAL")
-        expect(owner).to_contain("LoadLibraryA(path)")
+        expect(owner).to_contain("runtime_dynload_open_utf8(path)")
         expect(owner).to_contain("FreeLibrary((HMODULE)(intptr_t)handle) ? 0 : -1")
         expect(compiler).to_contain("include_dynload: bool = true")
         expect(compiler).to_contain("if include_dynload:\n        sources = sources.push(\"runtime_dynload\")")
-        expect(compiler).to_contain("if linker_flavor == \"msvc\":\n        return false")
-        expect(compiler).to_contain("if linker_flavor == \"gnu\":\n        return true")
-        expect(linker).to_contain("compile_runtime_objects(verbose, options.opt_level, bootstrap_native_all == \"\", hosted_cc, stage4_requested, runtime_compile_bundle,")
-        expect(linker).to_contain(
+        expect(compiler).to_contain("pub fn windows_link_flavor_select(")
+        expect(orchestrator).to_contain("compile_runtime_objects(verbose, options.opt_level, bootstrap_native_all == \"\", hosted_cc, stage4_requested, runtime_compile_bundle,")
+        expect(hosted_support).to_contain(
             "fn native_all_allowed_for_runtime_bundle(bundle: text) -> bool:")
-        expect(linker).to_contain(
+        expect(orchestrator).to_contain(
             "native_all_allowed_for_runtime_bundle(runtime_bundle)")
         for bundle in ["simple-core", "simple_core", "core-c-bootstrap",
                 "core_c_bootstrap", "runtime", "core", "core-c", "core_c"]:
@@ -38,7 +39,7 @@ describe "hosted dynamic-loader ownership":
             # SINGLE-quoted literal, which does NOT interpolate — it searched
             # for the literal text `case "{bundle}": false`, never matched, and
             # had been red at HEAD. Concatenate explicitly instead.
-            expect(linker).to_contain("case \"" + bundle + "\": false")
+            expect(hosted_support).to_contain("case \"" + bundle + "\": false")
         # Stale-expectation repair 2026-08-05: the seed body is unchanged in
         # meaning (FreeLibrary != 0 -> 0, else -1) but rustfmt spread it over
         # five lines, so the old single-line expectation had been red at HEAD.
