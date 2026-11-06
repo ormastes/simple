@@ -125,3 +125,11 @@ W2b access sites (2026-11-06).
 - **Receiver class lookup:** the receiver's class comes from its HIR type or, when unset (the usual case at this stage), from the variable's declared symbol type.
 - **How the decorator travels:** the flat bridge used to drop every class decorator (`ParserClass.attributes: []`). Class decorators are now recorded in the `ENUM_ATTRIBUTES` pool under `class:<name>|...`, so the parse-cache blob format is unchanged, and only `node_tree(...)` is forwarded onto the class. `@repr`/`@layout` on classes stay dropped on this path, exactly as before.
 - **Caches:** the HIR codec was regenerated (`check-hir-codec-complete.shs` PASS). A MIR cache hit rebuilds `MirModule` without `attr_sites`; nothing reads them yet.
+
+W3 read/access pilot (2026-11-06).
+- **Generator:** `src/app/compiler_schema/node_view_gen.spl` (`main.spl node_views`). It resolves `config/data_policy/compiler_ast_binary_expr.sdn` through the W1 resolver and emits `src/compiler/10.frontend/generated/binary_expr_view.spl`.
+- **Generated module:** `@node_tree("compiler.ast") class BinaryExprView(node)`, with `source_span`/`left`/`op` over the owner accessors `expr_get_span`/`expr_get_left`/`expr_get_int`. It also emits a sparse `BinaryExprInferredTypeStore` whose `get` returns `Err` when the entry is absent, `Ok(None)` for an explicit None, or `Ok(Some)`.
+- **Header:** `# @semantic_artifact node_tree <tree> view <class>`, plus the schema digest and one `# AttrId` line per attribute. `acc_is_semantic_artifact` in `accessor_core.spl` makes the dummy-accessor cleanup skip the module and treat its accessors as real.
+- **Freshness:** `scripts/check/check-node-view-gen-fresh.shs` (advisory push row `push-node-view-gen-fresh`).
+- **Reference stores:** `src/compiler/10.frontend/node_pool_pilot.spl` provides a column store (SoA) and a hash-row store for parity checks.
+- **Not in this pilot:** builders (W2c, which waits on #7241) and native layout lowering.
