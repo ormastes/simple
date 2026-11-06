@@ -1,23 +1,56 @@
 # Fixed SIMD instruction selection. This owner snapshots vector operands in
 # frame storage and uses only volatile ZMM0..3 / k1..3 within one instruction.
+# When AVX-512 is not admitted the same frame plan is lowered with scalar code
+# (x86_64_avx512_scalar.spl): no ZMM, EVEX or mask register is emitted.
+#
+# Frame-vector ABI v1 (Simple-internal; identical with and without AVX-512 so
+# modules built for different capabilities link):
+# - a 512-bit (or i32x8) vector argument takes one integer argument slot and
+#   is passed as a pointer to caller-owned memory holding the value; the
+#   callee copies it into its own frame slot in the prologue;
+# - a function returning such a vector takes a hidden result pointer in the
+#   first integer argument slot (declared arguments shift by one), writes the
+#   value there and returns the pointer in RAX;
+# - vector arguments past the integer argument registers, vector values on a
+#   call terminator, and indirect calls fail closed.
 use compiler.mir.mir_data.*
 use compiler.backend.common.isel_context.{ISelContext, isel_frame_offset, isel_alloc_frame_slot}
-use compiler.backend.common.isel_common.{ISelInstResult, isel_fresh_dest, local_vreg_op}
+use compiler.backend.common.isel_common.{ISelInstResult, LoweredOperand, isel_fresh_dest, local_vreg_op}
 use compiler.backend.native.mach_inst.*
 use compiler.backend.native.x86_64_avx512.{X86_ZMM0}
 use compiler.backend.native.x86_64_avx512_isel.{x86_avx512_shape, x86_avx512_source_shape, x86_avx512_operand_local}
 use compiler.backend.native.x86_64_avx512_ops.*
+use compiler.backend.native.x86_64_avx512_scalar.*
 use std.common.binary_io.{f64_to_bits}
 use std.common.math.ieee754_bits.{math_f64_round_to_f32_bits}
 
 val AVX512_SCRATCH_A: i64 = -9001
 val AVX512_SCRATCH_B: i64 = -9002
 val AVX512_SCRATCH_C: i64 = -9003
+val AVX512_RESULT_POINTER: i64 = -9004
 
-fn x86_avx512_allocate_scratch_slots(ctx: ISelContext) -> ISelContext:
+struct X86Avx512FrameV1:
+    shapes: Dict<i64, text>
+    # Capability denied: lower every frame-vector operation with scalar code.
+    scalar_fallback: bool
+    # Shape returned through the hidden result pointer, or "".
+    return_shape: text
+
+fn x86_avx512_frame_none() -> X86Avx512FrameV1:
+    X86Avx512FrameV1(shapes: {}, scalar_fallback: false, return_shape: "")
+
+fn x86_avx512_shape_bytes(shape: text) -> i64:
+    if shape == "i32x8": 32
+    elif shape == "mask8" or shape == "mask16": 2
+    elif shape == "": 0
+    else: 64
+
+fn x86_avx512_allocate_scratch_slots(ctx: ISelContext, frame: X86Avx512FrameV1) -> ISelContext:
     var out = isel_alloc_frame_slot(ctx, AVX512_SCRATCH_A, 64)
     out = isel_alloc_frame_slot(out, AVX512_SCRATCH_B, 64)
-    isel_alloc_frame_slot(out, AVX512_SCRATCH_C, 64)
+    out = isel_alloc_frame_slot(out, AVX512_SCRATCH_C, 64)
+    if frame.return_shape != "": out = isel_alloc_frame_slot(out, AVX512_RESULT_POINTER, 8)
+    out
 
 fn x86_avx512_handles(inst: MirInst, shapes: Dict<i64, text>) -> bool:
     # A denied AVX-512 capability produces no planned shapes.  In that state
@@ -50,6 +83,7 @@ class Avx512InstructionLowerer:
     ctx: ISelContext
     insts: [MachInst]
     shapes: Dict<i64, text>
+    scalar_fallback: bool
 
     fn slot(local: i64) -> Operand:
         if not self.ctx.frame_slots.contains_key(local): panic("AVX-512 local has no frame storage")
@@ -132,6 +166,9 @@ class Avx512InstructionLowerer:
     # to the only user `*.lower` method, so every text lowercase call in a
     # seed-built compiler jumped here (macOS Stage 2 hello-world abort).
     me lower_simd_inst(inst: MirInst):
+        if self.scalar_fallback:
+            self.lower_scalar_simd_inst(inst)
+            return
         match inst.kind:
             case MirSimdLoad(dest, ptr, _, _):
                 val pointer = self.scalar(ptr)
@@ -271,7 +308,145 @@ class Avx512InstructionLowerer:
                     self.store(dest.id, 1)
             case _: panic("non-SIMD instruction reached AVX-512 instruction owner")
 
-fn isel_avx512_frame_inst(ctx: ISelContext, inst: MirInst, shapes: Dict<i64, text>) -> ISelInstResult:
-    var lowerer = Avx512InstructionLowerer(ctx: ctx, insts: [], shapes: shapes)
+
+    # Memory-to-memory frame-vector copy used by the scalar fallback and the
+    # frame-vector ABI. `bytes` is 2 (mask image), 32 or 64.
+    me copy_mem(dst: Operand, src: Operand, bytes: i64):
+        if self.scalar_fallback or bytes == 2:
+            self.emit(X86_OP_V512S_COPY, [self.fresh(), dst, src, op_imm(bytes)])
+        else:
+            self.emit(X86_OP_AVX512_LOADU, [op_phys(X86_ZMM0), src, op_imm(bytes)])
+            self.emit(X86_OP_AVX512_STOREU, [dst, op_phys(X86_ZMM0), op_imm(bytes)])
+
+    me copy_lanes(dst: i64, dst_lane: i64, src: i64, src_lane: i64, shape: i64, data: Operand):
+        val width = avx512_lane_bytes(shape)
+        self.emit(X86_OP_AVX512_COPY_LANE, [data, op_mem(physical_reg(X86_RBP), self.offset(dst) + dst_lane * width), op_mem(physical_reg(X86_RBP), self.offset(src) + src_lane * width), op_imm(width)])
+
+    me lower_scalar_simd_inst(inst: MirInst):
+        match inst.kind:
+            case MirSimdLoad(dest, ptr, _, _):
+                val pointer = self.scalar(ptr)
+                self.copy_mem(self.slot(dest.id), op_mem(operand_get_reg(pointer), 0), x86_avx512_shape_bytes(x86_avx512_shape(self.shapes, dest.id)))
+            case MirSimdStore(value, ptr, _):
+                val pointer = self.scalar(ptr)
+                val local = x86_avx512_operand_local(value)
+                self.copy_mem(op_mem(operand_get_reg(pointer), 0), self.slot(local), x86_avx512_shape_bytes(x86_avx512_shape(self.shapes, local)))
+            case MirSimdSplat(dest, value, _):
+                val shape = avx512_shape_code(x86_avx512_shape(self.shapes, dest.id))
+                val scalar = self.scalar(value)
+                self.emit(X86_OP_V512S_SPLAT, [scalar, op_imm(self.offset(dest.id)), op_imm(avx512_lane_bytes(shape)), op_imm(avx512_lanes(shape))])
+            case Copy(dest, source), Move(dest, source):
+                self.copy_mem(self.slot(dest.id), self.slot(source.id), x86_avx512_shape_bytes(x86_avx512_shape(self.shapes, dest.id)))
+            case MirSimdBinop(dest, lhs, rhs, op):
+                val shape = avx512_shape_code(x86_avx512_shape(self.shapes, dest.id))
+                val code = avx512_binop_code(op)
+                val l = op_imm(self.offset(x86_avx512_operand_local(lhs)))
+                val r = op_imm(self.offset(x86_avx512_operand_local(rhs)))
+                if shape == 1 or shape == 2:
+                    self.emit(X86_OP_V512S_FBIN, [op_imm(self.offset(dest.id)), l, r, op_imm(shape), op_imm(code)])
+                else:
+                    if code >= 11: self.bounds(x86_avx512_operand_local(rhs), 16, 32)
+                    self.emit(X86_OP_V512S_IBIN, [self.fresh(), op_imm(self.offset(dest.id)), l, r, op_imm(code), op_imm(self.offset(AVX512_SCRATCH_C))])
+            case MirSimdTernop(_, _, _, _, _):
+                # FMA needs one rounding of a*b+c per lane. SSE2 has no fused
+                # form and a separate MULPS+ADDPS rounds twice, which would be
+                # silently wrong, so the scalar fallback refuses it by name.
+                panic("E-BACKEND-X86-AVX512-SCALAR-FMA: fused multiply-add has no exact scalar fallback without AVX-512; admit AVX-512 or split the expression")
+            case MirSimdUnop(dest, source, op):
+                val shape = avx512_shape_code(x86_avx512_shape(self.shapes, dest.id))
+                self.emit(X86_OP_V512S_UNARY, [self.fresh(), op_imm(self.offset(dest.id)), op_imm(self.offset(x86_avx512_operand_local(source))), op_imm(shape), op_imm(avx512_unop_code(op))])
+            case MirSimdCmp(dest, lhs, rhs, op):
+                val shape = avx512_shape_code(x86_avx512_source_shape(self.shapes, lhs))
+                self.emit(X86_OP_V512S_CMP, [self.fresh(), self.fresh(), op_imm(self.offset(dest.id)), op_imm(self.offset(x86_avx512_operand_local(lhs))), op_imm(self.offset(x86_avx512_operand_local(rhs))), op_imm(shape), op_imm(avx512_cmp_code(op))])
+            case MirSimdSelect(dest, mask, yes, no):
+                val shape = avx512_shape_code(x86_avx512_shape(self.shapes, dest.id))
+                self.emit(X86_OP_V512S_SELECT, [self.fresh(), self.fresh(), op_imm(self.offset(dest.id)), op_imm(self.offset(x86_avx512_operand_local(mask))), op_imm(self.offset(x86_avx512_operand_local(yes))), op_imm(self.offset(x86_avx512_operand_local(no))), op_imm(shape)])
+            case MirSimdMaskOp(dest, lhs, rhs, op):
+                val l = self.offset(x86_avx512_operand_local(lhs))
+                val r = if op == "Not": l else: self.offset(x86_avx512_operand_local(rhs))
+                self.emit(X86_OP_V512S_MASK, [self.fresh(), op_imm(self.offset(dest.id)), op_imm(l), op_imm(r), op_imm(if op == "Not": 14 else: avx512_binop_code(op))])
+            case MirSimdReduce(dest, source, op):
+                # The ordered scalar reduction is already GPR/SSE-only.
+                val scratch = self.fresh()
+                self.emit(X86_OP_AVX512_REDUCE, [local_vreg_op(dest.id), scratch, self.slot(x86_avx512_operand_local(source)), op_imm(avx512_shape_code(x86_avx512_source_shape(self.shapes, source))), op_imm(avx512_reduce_code(op))])
+            case MirSimdGather(dest, base, indices, _):
+                val pointer = self.scalar(base)
+                self.indexed(dest.id, x86_avx512_operand_local(indices), pointer, 0, avx512_shape_code(x86_avx512_shape(self.shapes, dest.id)), false)
+            case MirSimdScatter(value, base, indices):
+                val pointer = self.scalar(base)
+                val local = x86_avx512_operand_local(value)
+                self.indexed(local, x86_avx512_operand_local(indices), pointer, 0, avx512_shape_code(x86_avx512_shape(self.shapes, local)), true)
+            case MirSimdPermute(dest, source, indices):
+                val shape = avx512_shape_code(x86_avx512_shape(self.shapes, dest.id))
+                val index_local = x86_avx512_operand_local(indices)
+                self.bounds(index_local, avx512_lanes(shape), avx512_lanes(shape))
+                self.copy_mem(self.slot(AVX512_SCRATCH_A), self.slot(x86_avx512_operand_local(source)), 64)
+                self.emit(X86_OP_V512S_PERMUTE, [self.fresh(), self.fresh(), op_imm(self.offset(dest.id)), op_imm(self.offset(AVX512_SCRATCH_A)), op_imm(self.offset(index_local)), op_imm(shape)])
+            case MirSimdShuffle(dest, lhs, rhs, op):
+                val shape = avx512_shape_code(x86_avx512_shape(self.shapes, dest.id))
+                val count = avx512_lanes(shape)
+                if op == "BroadcastLane":
+                    val index = self.scalar(rhs)
+                    val scratch = self.fresh()
+                    self.emit(X86_OP_MOV_REG_REG, [scratch, index])
+                    self.emit(X86_OP_V512S_BROADCAST, [scratch, self.fresh(), op_imm(self.offset(dest.id)), op_imm(self.offset(x86_avx512_operand_local(lhs))), op_imm(shape)])
+                else:
+                    # Private copies keep the lane moves alias-safe when the
+                    # destination is also a source.
+                    self.copy_mem(self.slot(AVX512_SCRATCH_A), self.slot(x86_avx512_operand_local(lhs)), 64)
+                    if op != "Reverse": self.copy_mem(self.slot(AVX512_SCRATCH_B), self.slot(x86_avx512_operand_local(rhs)), 64)
+                    val data = self.fresh()
+                    val start = if op == "InterleaveHi": count / 2 else: 0
+                    for i in 0..count:
+                        if op == "Reverse": self.copy_lanes(dest.id, i, AVX512_SCRATCH_A, count - i - 1, shape, data)
+                        elif i % 2 == 0: self.copy_lanes(dest.id, i, AVX512_SCRATCH_A, start + i / 2, shape, data)
+                        else: self.copy_lanes(dest.id, i, AVX512_SCRATCH_B, start + i / 2, shape, data)
+            case _: panic("non-SIMD instruction reached AVX-512 scalar fallback owner")
+
+fn x86_avx512_lowerer(ctx: ISelContext, frame: X86Avx512FrameV1) -> Avx512InstructionLowerer:
+    Avx512InstructionLowerer(ctx: ctx, insts: [], shapes: frame.shapes, scalar_fallback: frame.scalar_fallback)
+
+fn isel_avx512_frame_inst(ctx: ISelContext, inst: MirInst, frame: X86Avx512FrameV1) -> ISelInstResult:
+    var lowerer = x86_avx512_lowerer(ctx, frame)
     lowerer.lower_simd_inst(inst)
+    ISelInstResult(insts: lowerer.insts, ctx: lowerer.ctx)
+
+fn x86_avx512_is_frame_vector(frame: X86Avx512FrameV1, local: i64) -> bool:
+    x86_avx512_shape_bytes(x86_avx512_shape(frame.shapes, local)) > 0
+
+fn x86_avx512_vector_arg_insts(ctx: ISelContext, frame: X86Avx512FrameV1, local: i64, arg_reg: i64) -> ISelInstResult:
+    """Prologue copy of a by-pointer vector argument into the callee slot."""
+    var lowerer = x86_avx512_lowerer(ctx, frame)
+    val pointer = lowerer.fresh()
+    lowerer.emit(X86_OP_MOV_REG_REG, [pointer, op_phys(arg_reg)])
+    lowerer.copy_mem(lowerer.slot(local), op_mem(operand_get_reg(pointer), 0), x86_avx512_shape_bytes(x86_avx512_shape(frame.shapes, local)))
+    ISelInstResult(insts: lowerer.insts, ctx: lowerer.ctx)
+
+fn x86_avx512_save_result_pointer_insts(ctx: ISelContext, frame: X86Avx512FrameV1, arg_reg: i64) -> ISelInstResult:
+    val lowerer = x86_avx512_lowerer(ctx, frame)
+    ISelInstResult(insts: [new_mach_inst(X86_OP_MOV_MEM_REG, [lowerer.slot(AVX512_RESULT_POINTER), op_phys(arg_reg)])], ctx: ctx)
+
+fn x86_avx512_frame_address(ctx: ISelContext, frame: X86Avx512FrameV1, local: i64) -> LoweredOperand:
+    """LEA of a frame vector: the caller side of a by-pointer argument or of
+    the hidden result pointer."""
+    var lowerer = x86_avx512_lowerer(ctx, frame)
+    val address = lowerer.fresh()
+    lowerer.emit(X86_OP_LEA, [address, lowerer.slot(local)])
+    LoweredOperand(insts: lowerer.insts, result: address, ctx: lowerer.ctx)
+
+fn x86_avx512_vector_return_insts(ctx: ISelContext, frame: X86Avx512FrameV1, value: MirOperand) -> ISelInstResult:
+    """Write the returned vector through the hidden result pointer, return
+    that pointer in RAX, then run the ordinary epilogue."""
+    var lowerer = x86_avx512_lowerer(ctx, frame)
+    val local = x86_avx512_operand_local(value)
+    val shape = x86_avx512_shape(frame.shapes, local)
+    if shape != frame.return_shape:
+        panic("E-BACKEND-X86-AVX512-ABI-RETURN-SHAPE: returned value shape '{shape}' does not match the declared '{frame.return_shape}'")
+    val pointer = lowerer.fresh()
+    lowerer.emit(X86_OP_MOV_REG_MEM, [pointer, lowerer.slot(AVX512_RESULT_POINTER)])
+    lowerer.copy_mem(op_mem(operand_get_reg(pointer), 0), lowerer.slot(local), x86_avx512_shape_bytes(frame.return_shape))
+    lowerer.emit(X86_OP_MOV_REG_REG, [op_phys(X86_RAX), pointer])
+    lowerer.emit(X86_OP_MOV_REG_REG, [op_phys(X86_RSP), op_phys(X86_RBP)])
+    lowerer.emit(X86_OP_POP, [op_phys(X86_RBP)])
+    lowerer.emit(X86_OP_RET, [])
     ISelInstResult(insts: lowerer.insts, ctx: lowerer.ctx)

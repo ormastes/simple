@@ -68,3 +68,13 @@ Not run: native green, needs a stage3 rebuilt with this fix. The `[i64]`
 annotations in `evex_encoding.spl` stay until that redeploy (removing them now
 would break building with the current stage3). AVX-512 execution: not run
 (host Xeon E5-2673 v4 has AVX2, no AVX-512F) — this bug is compile-time only.
+
+## Additional evidence 2026-11-06 (avx512-backend-harden-20261106)
+
+`test/01_unit/compiler/backend/native/x86_evex_register_array_inference_spec.spl`
+reads the real `evex_encoding.spl`, extracts every `val X86_ZMM*` / `val X86_K*`
+constant and the two allocatable arrays, strips the `[i64]` annotation (the
+original unannotated form) and lowers it through MIR: element type `i64`, zero
+module-static type errors (3/3, seed interpreter). Status unchanged:
+verification pending a native Stage 3 rebuild; the `[i64]` annotations and
+`@workaround` markers stay until then.
