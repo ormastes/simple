@@ -84,3 +84,13 @@ No compiler change: the compiler's negative answer is correct.
 
 See the commit message for Stage 2 hashes and run results. Spec:
 `test/01_unit/compiler/hir/async_io_facade_host_helper_reexport_spec.spl`.
+
+## Landing note (2026-11-06)
+
+While this branch was in review, `90f91052fae` ("route async facade host helpers from their
+concrete owners") landed the same facade repair more completely: every bare helper export in
+`io.spl` now goes through `export use std.nogc_sync_mut.io.{...}`, and `dir_exists` through
+`io_runtime`. On rebase both facade files were taken from origin. This branch now carries only
+the `resolution.spl` field read (`segs[i].name`), the spec (which pins no bare
+`file_exists`/`dir_exists` export, the `io_runtime` route in both facades, and the field read),
+and this record.
