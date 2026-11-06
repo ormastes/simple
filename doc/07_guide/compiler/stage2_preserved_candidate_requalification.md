@@ -1,4 +1,4 @@
-> **CYCLE 7 / CANDIDATE UNQUALIFIED:** After the six-cycle stop, the user explicitly authorized one additional bounded publication-gate repair cycle. The commit gate and direct-consumer protections are implemented; final independent review and targeted controls are pending. No real candidate has executed or gained admission. The prior stop evidence remains at `/private/tmp/release100-hardening-bootstrap/requalification-owner-stop.md`; the cycle count has not reset.
+> **CYCLE 8 / CANDIDATE UNQUALIFIED:** Cycle 7 publication protections passed independent review and 27 focused controls. Qualification attempt 2 then stopped before candidate sanity because `git archive` omitted tracked controls marked `export-ignore`. The user-authorized cycle 8 source-materialization repair passed 15 focused assertions and independent source review. Actual candidate qualification remains unperformed; no fresh candidate admission exists. Earlier attempts remain counted and preserved.
 
 # Preserved Stage 2 candidate requalification
 
@@ -41,7 +41,10 @@ ordinary admission graph; ordinary replay rejects missing or altered control
 files or producer state. The SDN record is a readable companion to that binding.
 
 Actual mode requires a clean committed control worktree. It materializes that
-exact HEAD with `git archive` into `control/source-root`, removes write access,
+exact HEAD with `git archive` into `control/source-root`, using private Git
+metadata whose highest-priority attributes disable `export-ignore` and
+`export-subst`. This preserves committed bytes, executable modes and symlinks
+without reading dirty files or changing shared Git attributes. It removes write access,
 and executes the canonical fixtures there. Uncommitted qualification repairs
 must be committed before launch; they are never silently excluded or relabeled.
 
