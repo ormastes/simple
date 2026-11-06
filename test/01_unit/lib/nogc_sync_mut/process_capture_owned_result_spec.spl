@@ -1,0 +1,89 @@
+"""Native capture copies payloads and consumes the provider's owned raw block.
+
+Requires an admitted, source-matched P2 compiled runner. Rust runtime tests
+and P1 fixture execution are separate diagnostic evidence.
+"""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{host_os}
+use std.nogc_sync_mut.sffi.process_capture.{process_capture_result, rt_process_run_tuple}
+use std.nogc_sync_mut.sffi.process_capture_text.{process_capture_text_data_v1}
+
+@unsafe(reason: "construct an owned three-word provider result for the real consumer", capabilities: [ffi, raw_ptr])
+extern fn rt_alloc(bytes: i64) -> i64
+@unsafe(reason: "initialize the actual provider result layout", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_write_i64(address: i64, offset: i64, value: i64)
+
+fn capture_result_block(stdout_word: i64, stderr_word: i64, status: i64) -> i64:
+    val block = unsafe(capabilities: [ffi, raw_ptr]): rt_alloc(24)
+    if block != 0:
+        unsafe(capabilities: [ffi, raw_ptr]):
+            rt_ptr_write_i64(block, 0, stdout_word)
+            rt_ptr_write_i64(block, 8, stderr_word)
+            rt_ptr_write_i64(block, 16, status)
+    block
+
+describe "Native process capture consumes its result block":
+    it "rejects a null block without reading it", tag: ["only-compiled"]:
+        step("Pass the provider's allocation-refusal sentinel to the actual consumer")
+        val (stdout, stderr, status) = process_capture_result(0)
+        expect(stdout).to_equal("")
+        expect(stderr).to_equal("native process capture returned no result")
+        expect(status).to_equal(-1)
+
+    it "accepts nil output streams and preserves a signed raw status", tag: ["only-compiled"]:
+        step("Consume an actual allocated block containing two runtime NIL words")
+        val block = capture_result_block(3, 3, -7)
+        expect(block).to_be_greater_than(0)
+        if block != 0:
+            val (stdout, stderr, status) = process_capture_result(block)
+            expect(stdout).to_equal("")
+            expect(stderr).to_equal("")
+            expect(status).to_equal(-7)
+
+    it "rejects an invalid text handle in either stream", tag: ["only-compiled"]:
+        step("Use a non-string tagged word with the real runtime's text validation")
+        for stream in [0, 1]:
+            val stdout_word = if stream == 0: -1 else: 3
+            val stderr_word = if stream == 1: -1 else: 3
+            val block = capture_result_block(stdout_word, stderr_word, 5)
+            expect(block).to_be_greater_than(0)
+            if block != 0:
+                val (stdout, stderr, status) = process_capture_result(block)
+                expect(stdout).to_equal("")
+                expect(stderr).to_equal("native process capture returned invalid text")
+                expect(status).to_equal(-1)
+
+    it "copies both real process streams before releasing the block", tag: ["only-compiled"]:
+        step("Capture a real child with distinct output streams and exit status seven")
+        var command = "/bin/sh"
+        var args = ["-c", "printf capture-out; printf capture-err >&2; exit 7"]
+        if host_os() == "windows":
+            command = "cmd.exe"
+            args = ["/d", "/c", "(echo capture-out)&(echo capture-err 1>&2)&exit /b 7"]
+        val pointer = process_capture_text_data_v1(command)
+        val block = unsafe(capabilities: [ffi, raw_ptr]): rt_process_run_tuple(pointer, command.len(), args)
+        expect(block).to_be_greater_than(0)
+        if block != 0:
+            val (stdout, stderr, status) = process_capture_result(block)
+            expect(stdout).to_contain("capture-out")
+            expect(stderr).to_contain("capture-err")
+            expect(status).to_equal(7)
+            expect(stdout + "-retained").to_contain("capture-out")
+            expect(stderr + "-retained").to_contain("capture-err")
+
+    it "preserves a real child's empty output", tag: ["only-compiled"]:
+        step("Capture a successful child that writes neither stream")
+        var command = "/bin/sh"
+        var args = ["-c", ":"]
+        if host_os() == "windows":
+            command = "cmd.exe"
+            args = ["/d", "/c", "exit /b 0"]
+        val pointer = process_capture_text_data_v1(command)
+        val block = unsafe(capabilities: [ffi, raw_ptr]): rt_process_run_tuple(pointer, command.len(), args)
+        expect(block).to_be_greater_than(0)
+        if block != 0:
+            val (stdout, stderr, status) = process_capture_result(block)
+            expect(stdout).to_equal("")
+            expect(stderr).to_equal("")
+            expect(status).to_equal(0)
