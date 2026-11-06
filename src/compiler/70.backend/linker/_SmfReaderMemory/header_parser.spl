@@ -12,11 +12,11 @@ use compiler.backend.linker.smf_reader_memory.*
 
 use compiler.backend.linker.obj_taker.{SmfSymbol, SymbolType, SymbolBinding}
 use compiler.backend.linker.smf_enums.{Platform, Arch, CompressionType}
-use compiler.backend.linker.smf_header.{SMF_HEADER_SIZE, SMF_SEED_HEADER_SIZE, smf_header_field_shift, smf_header_size_at, smf_header_seed_trailer_offset}
+use compiler.backend.linker.smf_header.{SMF_HEADER_SIZE, SMF_PACKED_HEADER_SIZE, SMF_SEED_HEADER_SIZE, SMF_VERSION_MINOR, smf_header_field_shift, smf_header_size_at, smf_header_trailer_offset}
 
-# SMF v1.1 uses the canonical 128-byte packed header layout. Files may store
-# that header either at file offset 0 or as a trailer at EOF-128.
-val SMF_READER_HEADER_SIZE: i64 = SMF_HEADER_SIZE
+# Header copy size: the legacy packed layout (128) is the larger of the two
+# layouts; a 96-byte v1.3/seed header is zero-padded to this extent on copy.
+val SMF_READER_HEADER_SIZE: i64 = SMF_PACKED_HEADER_SIZE
 # Existing GTPL section wire type emitted by driver.smf_writer. The general
 # linker SectionType enum does not yet include template sections.
 val SMF_TEMPLATE_CODE_SECTION_TYPE: i32 = 12
@@ -378,7 +378,7 @@ impl SmfReaderMemory:
                     if sec_size % reloc_entry_size != 0:
                         return Err("Reloc section has a partial entry")
                     val (major, minor) = self.header.version
-                    if major != 1 or (minor != 1 and minor != 2):
+                    if major != 1 or minor < 1 or minor > SMF_VERSION_MINOR:
                         return Err("Reloc section has unsupported SMF version")
                     val entry_count = sec_size / reloc_entry_size
                     var j = 0
@@ -391,10 +391,20 @@ impl SmfReaderMemory:
                         if minor == 1:
                             if source_low != 0 or source_high != 0 or marker != 0:
                                 return Err("v1.1 Reloc reserved bytes are nonzero")
-                        else:
+                        elif minor == 2:
                             if marker != 0xA2:
                                 return Err("v1.2 Reloc source marker is invalid")
                             source_section = source_low | (source_high << 8)
+                        else:
+                            # v1.3+: the header flag SMF_FLAG_SOURCE_RELOCS (0x80)
+                            # selects the entry form, so a corrupted marker is
+                            # still rejected rather than read as the plain form.
+                            if (self.data[self.header.header_offset + 8] as i64) & 0x80 != 0:
+                                if marker != 0xA2:
+                                    return Err("v1.3 Reloc source marker is invalid")
+                                source_section = source_low | (source_high << 8)
+                            elif source_low != 0 or source_high != 0 or marker != 0:
+                                return Err("v1.3 Reloc reserved bytes are nonzero")
                         if source_section >= section_count:
                             return Err("Reloc source section index is invalid")
                         val source_entry = self.sections_offset + source_section * section_entry_size
@@ -441,7 +451,10 @@ struct SmfRelocEntry:
 
 """Parse SMF header from byte array.
 
-Byte layout matches the Rust #[repr(C)] SmfHeader (128 bytes).
+Offsets below are the LEGACY packed 128-byte layout (v1.0-v1.2). The v1.3
+default and the Rust seed's repr(C) layout are 96 bytes with every field from
+20 on shifted by +4 (see compiler.backend.linker.smf_header); `seed_shift`
+below applies that shift.
 repr(C) inserts 4 bytes of padding between section_count (u32) and
 section_table_offset (u64) to satisfy u64's 8-byte alignment requirement.
 
@@ -585,19 +598,16 @@ fn parse_header_from_bytes(data: [u8]) -> Result<SmfMemoryHeader, text>:
 
 """Find the SMF header location.
 
-SMF files may store the canonical 128-byte header at file offset 0 or as a
-trailer at EOF-128. Check offset 0 first to preserve legacy leading-header
-files, then fall back to the trailer location.
+A leading header at offset 0 (legacy files, archive slices) wins; otherwise the
+trailer, located with the shared precedence in `smf_header_trailer_offset`
+(v1.3 at EOF-96, legacy packed at EOF-128, Rust-seed 1.1 at EOF-96).
 """
 fn find_smf_header_offset(data: [u8]) -> Result<i64, text>:
     if has_smf_magic_at(data, 0):
         return Ok(0)
-    val trailer_offset = data.len() - SMF_READER_HEADER_SIZE
-    if has_smf_magic_at(data, trailer_offset):
-        return Ok(trailer_offset)
-    val seed_trailer = smf_header_seed_trailer_offset(data)
-    if seed_trailer >= 0:
-        return Ok(seed_trailer)
+    val trailer = smf_header_trailer_offset(data)
+    if trailer >= 0:
+        return Ok(trailer)
     Err("Invalid SMF magic: expected 'SMF\\0'")
 
 """Check for SMF magic at an absolute file offset."""

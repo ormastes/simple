@@ -4,8 +4,9 @@
 # bytes after section_count). The pure-Simple decoder read every field from
 # section_table_offset onward 4 bytes early, so a seed-written .smf decoded
 # as garbage (section_table_offset 412316860416 instead of 96). The decoder
-# must recognise the seed layout on read; the packed 128-B write layout is
-# unchanged (see smf_layout_parity_spec.spl).
+# must recognise the seed layout on read. Since v1.3 the Simple writers emit
+# that same 96-B layout (smf_header_v1_3_default_layout_spec.spl); the packed
+# 128-B layout is a legacy read-only fixture here (to_packed_bytes).
 
 use compiler.backend.linker.smf_header.{SmfHeader, smf_header_from_bytes, smf_header_field_shift}
 use compiler.backend.linker.smf_enums.{Platform, Arch}
@@ -99,7 +100,6 @@ describe "Rust seed repr(C) SMF header decode (bug repro)":
                 expect p.window_height == 720
                 expect p.prefetch_hint == 1
                 expect p.prefetch_file_count == 4
-                expect not p.has_compile_options_hash()
             Err(e):
                 expect e == ""
 
@@ -130,26 +130,31 @@ describe "SMF header layout detection (prevention)":
     it "reports shift 4 for the seed layout":
         expect smf_header_field_shift(pad_to(seed_header_bytes(3), 256), 0) == 4
 
-    it "reports shift 0 for a packed Simple header with sections":
+    it "reports shift 0 for a legacy packed header with sections":
         var h = SmfHeader.new_v1_1(Platform.Linux, Arch.X86_64)
         h.section_count = 3
         h.section_table_offset = 128
         h.symbol_table_offset = 0x1000
-        expect smf_header_field_shift(h.to_bytes(), 0) == 0
+        expect smf_header_field_shift(h.to_packed_bytes(), 0) == 0
 
-    it "reports shift 0 for a packed header with no sections":
+    it "reports shift 0 for a legacy packed header with no sections":
         var h = SmfHeader.new_v1_1(Platform.Linux, Arch.X86_64)
         h.symbol_table_offset = 0x1000
-        expect smf_header_field_shift(h.to_bytes(), 0) == 0
+        expect smf_header_field_shift(h.to_packed_bytes(), 0) == 0
 
-    it "still round-trips a packed header unchanged":
+    it "reports shift 4 for the v1.3 default writer layout":
+        var h = SmfHeader.new_v1_3(Platform.Linux, Arch.X86_64)
+        h.symbol_table_offset = 0x1000
+        expect smf_header_field_shift(h.to_bytes(), 0) == 4
+
+    it "still round-trips a legacy packed header unchanged":
         var h = SmfHeader.new_v1_1(Platform.Linux, Arch.X86_64)
         h.section_count = 2
         h.section_table_offset = 128
         h.symbol_table_offset = 0x2000
         h.entry_point = 0x77
         h.app_type = 3
-        match smf_header_from_bytes(h.to_bytes()):
+        match smf_header_from_bytes(h.to_packed_bytes()):
             Ok(p):
                 expect p.section_table_offset == 128
                 expect p.symbol_table_offset == 0x2000
