@@ -2244,10 +2244,36 @@ impl Lowerer {
             })
         );
         let condition = if is_tagged_slot {
-            HirExpr {
+            // `Some(nil) ?? d` / `Ok(nil) ?? d` take the default, exactly as the
+            // interpreter's `Expr::Coalesce` does: `rt_is_some` alone unwrapped
+            // to the raw nil sentinel and printed `3`
+            // (seed_jit_dotq_coalesce_parity_2026-11-06). The unwrap here stays
+            // typed as the tagged subject so it is compared as a tagged word.
+            let is_some = HirExpr {
                 kind: HirExprKind::BuiltinCall {
                     name: "rt_is_some".to_string(),
                     args: vec![expr_hir.clone()],
+                },
+                ty: TypeId::BOOL,
+            };
+            let payload_not_nil = HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_is_some".to_string(),
+                    args: vec![HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_unwrap_or_self".to_string(),
+                            args: vec![expr_hir.clone()],
+                        },
+                        ty: subject_ty,
+                    }],
+                },
+                ty: TypeId::BOOL,
+            };
+            HirExpr {
+                kind: HirExprKind::Binary {
+                    op: BinOp::And,
+                    left: Box::new(is_some),
+                    right: Box::new(payload_not_nil),
                 },
                 ty: TypeId::BOOL,
             }

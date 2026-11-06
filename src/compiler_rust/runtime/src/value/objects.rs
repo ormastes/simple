@@ -863,6 +863,14 @@ pub extern "C" fn rt_is_present(value: RuntimeValue) -> bool {
     if rt_is_none(value) {
         return false;
     }
+    // `Err(e).?` is absent, exactly as the interpreter's `ExistsCheck` arm
+    // decides (seed_jit_dotq_coalesce_parity_2026-11-06).
+    if let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) {
+        let (enum_id, discriminant) = unsafe { ((*p).enum_id, (*p).discriminant) };
+        if enum_id == RESULT_ENUM_ID && discriminant == hash_variant_discriminant("Err") {
+            return false;
+        }
+    }
     let payload = rt_unwrap_or_self(value);
     if payload.is_nil() {
         return false;

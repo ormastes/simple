@@ -91,6 +91,14 @@ fn eval_control_condition(condition_eid: i64, decision_id: i64) -> i64:
         val right_value = eval_control_condition(condition_node.right, decision_id)
         if eval_had_error: return -1
         return val_make_bool(val_is_truthy(right_value))
+    # `if x.?:` is PRESENCE, not payload truthiness: `if Some(0).?:` is taken.
+    # (core_interp_option_coalesce_and_presence_gaps_2026-11-06)
+    if condition_node.tag == EXPR_EXISTS_CHECK:
+        val present_value = eval_expr(condition_eid)
+        if eval_had_error: return -1
+        val present = not val_is_nil(present_value)
+        record_control_condition(decision_id, condition_eid, present)
+        return val_make_bool(present)
     val condition_value = eval_expr(condition_eid)
     if eval_had_error: return -1
     val taken = val_is_truthy(condition_value)
@@ -243,6 +251,10 @@ fn eval_option_binding_value(value_id: i64) -> i64:
         val option_name = val_get_struct_name(value_id)
         if option_name == "Option::None": return val_make_nil()
         if option_name == "Option::Some":
+            return val_struct_get_field_idx(value_id, 1)
+        # `Ok(x).?` is x and `Err(e).?` is absent, as on the seed.
+        if option_name == "Result::Err": return val_make_nil()
+        if option_name == "Result::Ok":
             return val_struct_get_field_idx(value_id, 1)
     value_id
 
