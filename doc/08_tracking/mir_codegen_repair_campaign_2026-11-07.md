@@ -81,8 +81,18 @@ Additional work:
 - Optional trait recovery now ignores only top-level Error/Infer placeholders;
   Any, concrete declarations and nested unknown optionals retain authority.
   Ten controlled metadata assertions are authored, not executed.
-- The optional-Bool if-val defect remains open. Its durable six-check fixture
-  covers None, false/true payloads and explicit Bool presence predicates.
-  Parser provenance must survive HIR without changing either contract.
+- The optional-Bool if-val defect remains open. Its ten-check native fixture
+  covers None, false/true payloads, explicit Bool presence predicates, elif,
+  and bounded while bindings. A structural candidate carries parser provenance
+  through HIR lowering, resolution and union rewriting into MIR. Five codec/hash
+  and three transform scenarios are authored but unexecuted. Generated codec
+  and hash outputs still require the admitted self-hosted generator; the source
+  candidate is not ready to merge without regeneration and verification.
 - Cross-module always-inline text-extern ABI expansion remains open; the
   source workaround is not an inliner repair.
+- SVM-G float compound Add/Sub/Mul/Div has a source candidate. Admission is
+  limited to float literals, checked float locals and recursive float
+  arithmetic; mixed operands, comparison results and uncertain expression
+  forms are rejected. Its suite has 23 authored examples, including reference
+  VM value assertions and refusal controls; none were executed in this session.
+  The umbrella report remains open because integer printing is still deferred.

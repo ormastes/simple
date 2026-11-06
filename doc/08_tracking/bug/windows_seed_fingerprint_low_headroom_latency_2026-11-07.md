@@ -30,3 +30,16 @@ through the existing verified-parent route.
 Evidence: `build/node-attributes-qualification/bootstrap-attempt10.log` in the
 frozen worktree. The preceding attempts reused 1,592 native modules and rebuilt
 two, so this setup cost materially delays the small incremental compilation.
+
+By 2026-11-06 21:32 UTC the log had advanced through
+`rust-authority-target-key` and `cargo-build-or-skip`. The exact fingerprint
+completion time was not captured, so this observation is not a measured phase
+duration. The build remained active and unadmitted at that observation.
+
+A later bounded process inspection identified a separate preflight authority
+fingerprint, using Perl `Digest::SHA`/`File::Find` over the configured source
+roots. The preflight log started at 21:09:32 UTC and had passed seed identity,
+Cargo availability, the lazy-import probe, disk and marker checks. The active
+fingerprint process had accumulated approximately 1,331 CPU seconds by the
+later inspection. This distinguishes the second identity walk from a stalled
+compiler. Both walks need separate timing evidence before optimizing them.
