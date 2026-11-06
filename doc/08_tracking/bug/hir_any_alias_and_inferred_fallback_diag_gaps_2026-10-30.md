@@ -3,6 +3,31 @@
 Status: open
 Area: compiler/35.semantics/lint/hir_frontend_diagnostics.spl
 
+## 2026-11-07 source investigation and narrow repair
+
+Any-alias repair authored; runtime qualification **NOT_RUN**. The current
+`hir_lowering/statements.spl` transports initializer types through
+`binding_payload_type` into the non-optional `HirStmtKind.Let` type slot even
+without a source annotation. Consequently `any_note_let` took its `Any` branch
+and returned before recording the alias. It now retains immediate alias origin
+when the written-Any scanner does not identify an explicit annotation. Typed
+use reporting prefers that specific alias origin over a generic pending reason.
+The original alias regression is enabled, with chained-alias and explicit-Any
+negative cases. This does not establish an executed PASS or close this issue.
+
+Cross-module fallback remains open and its pending cases are unchanged.
+`note_let` likewise treats every non-`Infer` binding payload as an annotation;
+the canonical direct-call binding transport can supply `Any`, `Error`, or a
+named return type without an annotation. Independently, imported callable
+projection now resolves qualified type symbols in
+`hir_lowering/_Items/module_callable_types.spl`; older assumptions about a
+third-module type necessarily being erased must be checked against actual HIR
+layout authority. A follow-up needs explicit source-annotation provenance (or
+another canonical annotation receipt), plus resolved versus genuinely missing
+foreign-layout controls. Removing the annotation guard alone would regress
+the annotated-binding exclusion. No HIR schema or codec change is included in
+this narrow repair.
+
 ## Symptom
 
 - `test/01_unit/compiler/lint/frontend_diag/any_warn_rules_acceptance_spec.spl`, example "flags an
