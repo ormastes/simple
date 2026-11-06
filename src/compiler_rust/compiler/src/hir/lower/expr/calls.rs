@@ -777,6 +777,52 @@ impl Lowerer {
             };
             if let Some(target) = cast_target {
                 let inner = self.lower_expr(&args[0].value, ctx)?;
+                // The CALL form `f64(text)` / `i32(text)` PARSES its text, like
+                // `text.to_f64()` / `text.to_int()` and the interpreter's `T(x)`
+                // builtins (unparsable -> 0.0 / 0). It must not share the
+                // `x as T` Cast, whose text->number rule is the single-character
+                // code point (`"x" as f64 == 120.0`, `"5" as i32 == 53`).
+                // doc/08_tracking/bug/float_parse_call_failure_value_differs_from_seed_2026-10-10.md
+                if inner.ty == TypeId::STRING {
+                    let is_float = matches!(target, TypeId::F32 | TypeId::F64);
+                    let is_int = matches!(
+                        target,
+                        TypeId::I8
+                            | TypeId::I16
+                            | TypeId::I32
+                            | TypeId::I64
+                            | TypeId::U8
+                            | TypeId::U16
+                            | TypeId::U32
+                            | TypeId::U64
+                    );
+                    if is_float || is_int {
+                        let (method, parsed_ty) = if is_float {
+                            ("to_f64", TypeId::F64)
+                        } else {
+                            ("to_int", TypeId::I64)
+                        };
+                        let parsed = HirExpr {
+                            kind: HirExprKind::MethodCall {
+                                receiver: Box::new(inner),
+                                method: method.to_string(),
+                                args: Vec::new(),
+                                dispatch: DispatchMode::Static,
+                            },
+                            ty: parsed_ty,
+                        };
+                        if target == parsed_ty {
+                            return Ok(Some(parsed));
+                        }
+                        return Ok(Some(HirExpr {
+                            kind: HirExprKind::Cast {
+                                expr: Box::new(parsed),
+                                target,
+                            },
+                            ty: target,
+                        }));
+                    }
+                }
                 return Ok(Some(HirExpr {
                     kind: HirExprKind::Cast {
                         expr: Box::new(inner),
