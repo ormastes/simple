@@ -192,14 +192,92 @@ PERL
         [ $? -eq 0 ] || return 1
     fi
 
-    # Rust lane: `fn rt_*` definitions. Test modules are excluded by path; a
-    # #[cfg(test)] helper is not a runtime primitive.
+    # Rust lane: preserve the legacy `fn rt_*` census, except function items
+    # carrying their own #[test]: test entrypoints are not runtime primitives.
+    # Attribute ownership is per occurrence, never subtraction by symbol name.
     if [ -d "$el_root/src/compiler_rust/runtime/src" ]; then
         find "$el_root/src/compiler_rust/runtime/src" -name '*.rs' \
             -not -path '*/vendor/*' -not -name 'tests.rs' -print0 2>/dev/null \
-            | xargs -0 grep -hoE '\bfn[[:space:]]+rt_[A-Za-z0-9_]+' 2>/dev/null \
-            | grep -oE 'rt_[A-Za-z0-9_]+' \
-            | sort -u > "$el_out/rust_syms.txt"
+            > "$el_out/rust_files.txt"
+        perl - "$el_out/rust_files.txt" > "$el_out/rust_syms.txt" <<'PERL'
+use strict;
+use warnings;
+my %symbols;
+open my $paths, '<', $ARGV[0] or die "Rust extractor file list: $!\n";
+local $/ = "\0";
+while (my $path = <$paths>) {
+    chomp $path;
+    open my $fh, '<', $path or die "Rust extractor open $path: $!\n";
+    my $source = do { local $/; <$fh> } // '';
+    close $fh or die "Rust extractor close $path: $!\n";
+    my @tokens;
+    pos($source) = 0;
+    while (pos($source) < length($source)) {
+        next if $source =~ /\G\s+/gc;
+        next if $source =~ m{\G//[^\n]*}gc;
+        if (substr($source, pos($source), 2) eq '/*') {
+            my $depth = 1;
+            pos($source) += 2;
+            while ($depth && pos($source) < length($source)) {
+                if ($source =~ m{\G/\*}gc) { ++$depth; }
+                elsif ($source =~ m{\G\*/}gc) { --$depth; }
+                else { pos($source)++; }
+            }
+            next;
+        }
+        my $start = pos($source);
+        if ($source =~ /\G(?:br|cr|r)(\#*)"/gc) {
+            my $end = index($source, '"' . $1, pos($source));
+            pos($source) = $end < 0 ? length($source) : $end + 1 + length($1);
+            push @tokens, ['literal', $start];
+            next;
+        }
+        if ($source =~ /\G(?:b|c)?"(?:\\.|[^"\\])*"/gcs
+                || $source =~ /\G(?:b)?'(?:\\.|[^'\\])'/gcs) {
+            push @tokens, ['literal', $start];
+            next;
+        }
+        $source =~ /\G([A-Za-z_][A-Za-z0-9_]*|.)/gcs or die "Rust extractor token failure: $path\n";
+        push @tokens, [$1, $start];
+    }
+    my %test_functions;
+    my $test_attribute = 0;
+    for (my $i = 0; $i < @tokens; ++$i) {
+        my $t = $tokens[$i][0];
+        if ($t eq '#' && $i + 1 < @tokens && $tokens[$i + 1][0] eq '[') {
+            my $first = $i + 2;
+            my $depth = 1;
+            $i += 2;
+            while ($i < @tokens && $depth) {
+                ++$depth if $tokens[$i][0] eq '[';
+                --$depth if $tokens[$i][0] eq ']';
+                ++$i if $depth;
+            }
+            $test_attribute = 1 if !$depth && $i == $first + 1 && $tokens[$first][0] eq 'test';
+            next;
+        }
+        if ($t eq 'fn') {
+            $test_functions{$tokens[$i][1]} = 1 if $test_attribute;
+            $test_attribute = 0;
+            next;
+        }
+        if ($t eq 'pub' && $i + 1 < @tokens && $tokens[$i + 1][0] eq '(') {
+            ++$i until $i + 1 >= @tokens || $tokens[$i][0] eq ')';
+            next;
+        }
+        next if $t =~ /^(?:pub|unsafe|async|const|default|extern|literal)$/;
+        $test_attribute = 0;
+    }
+    # Keep the old candidate population, including its lexical error bar.
+    # Tokens above only decide whether this particular fn owns #[test].
+    pos($source) = 0;
+    while ($source =~ /\bfn[^\S\n]+(rt_[A-Za-z0-9_]+)/g) {
+        $symbols{$1} = 1 unless $test_functions{$-[0]};
+    }
+}
+print "$_\n" for sort keys %symbols;
+PERL
+        [ $? -eq 0 ] || return 1
     fi
 }
 
@@ -392,6 +470,77 @@ C
         echo 'selftest: FAILED C lexical error accepted'; rm -rf "$st_dir"; return 1
     fi
     st_n=$((st_n + 2))
+
+    # Rust test exclusion belongs to one function occurrence. Keep private
+    # runtime functions, adjacent items, and the existing candidate error bar.
+    mkfixture rust_attributes
+    cat >> "$st_dir/rust_attributes/src/compiler_rust/runtime/src/lib.rs" <<'RUST'
+#[allow(dead_code)]
+#[test]
+#[ignore]
+fn rt_test_entry() {}
+#[test] pub(crate) fn rt_inline_test_entry() {}
+#[test]
+fn ordinary_test() {}
+fn rt_after_test() {}
+fn rt_real_unpaired() {}
+RUST
+    mkdir -p "$st_dir/rust_attributes_out"
+    extract_lanes "$st_dir/rust_attributes" "$st_dir/rust_attributes_out" || { rm -rf "$st_dir"; return 1; }
+    printf '%s\n' rt_after_test rt_real_unpaired rt_ronly rt_shared > "$st_dir/rust_attributes_expected"
+    if ! cmp -s "$st_dir/rust_attributes_expected" "$st_dir/rust_attributes_out/rust_syms.txt"; then
+        echo 'selftest: FAILED Rust own test attributes/private adjacent functions'
+        rm -rf "$st_dir"; return 1
+    fi
+    single_lane "$st_dir/rust_attributes_out" > "$st_dir/rust_attributes_out/sl.txt"
+    st_new=$(comm -23 "$st_dir/rust_attributes_out/sl.txt" "$st_dir/base_ok.txt")
+    if [ "$st_new" != "$(printf 'rt_after_test\trust-only\nrt_real_unpaired\trust-only')" ]; then
+        echo "selftest: FAILED real unpaired Rust functions escaped comparison, got [$st_new]"
+        rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
+    mkfixture rust_attribute_leak
+    cat >> "$st_dir/rust_attribute_leak/src/compiler_rust/runtime/src/lib.rs" <<'RUST'
+// #[test]
+fn rt_after_line_comment() {}
+/* nested /* #[test] */ comment */
+fn rt_after_block_comment() {}
+const ATTRIBUTE_TEXT: &str = "#[test]";
+fn rt_after_string() {}
+const RAW_ATTRIBUTE_TEXT: &str = r#"#[test]"#;
+fn rt_after_raw_string() {}
+#[allow(dead_code)]
+fn rt_after_other_attribute() {}
+// fn rt_legacy_comment() {}
+const LEGACY_TEXT: &str = "fn rt_legacy_string() {}";
+fn
+rt_legacy_multiline_not_counted() {}
+RUST
+    mkdir -p "$st_dir/rust_attribute_leak_out"
+    extract_lanes "$st_dir/rust_attribute_leak" "$st_dir/rust_attribute_leak_out" || { rm -rf "$st_dir"; return 1; }
+    printf '%s\n' rt_after_block_comment rt_after_line_comment rt_after_other_attribute \
+        rt_after_raw_string rt_after_string rt_legacy_comment rt_legacy_string rt_ronly rt_shared \
+        > "$st_dir/rust_attribute_leak_expected"
+    if ! cmp -s "$st_dir/rust_attribute_leak_expected" "$st_dir/rust_attribute_leak_out/rust_syms.txt"; then
+        echo 'selftest: FAILED Rust attribute leak or changed legacy non-test extraction'
+        rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
+
+    mkfixture rust_same_name
+    cat >> "$st_dir/rust_same_name/src/compiler_rust/runtime/src/lib.rs" <<'RUST'
+mod runtime_owner { fn rt_same_name() {} }
+mod test_owner { #[test] fn rt_same_name() {} }
+RUST
+    mkdir -p "$st_dir/rust_same_name_out"
+    extract_lanes "$st_dir/rust_same_name" "$st_dir/rust_same_name_out" || { rm -rf "$st_dir"; return 1; }
+    printf '%s\n' rt_ronly rt_same_name rt_shared > "$st_dir/rust_same_name_expected"
+    if ! cmp -s "$st_dir/rust_same_name_expected" "$st_dir/rust_same_name_out/rust_syms.txt"; then
+        echo 'selftest: FAILED test-name subtraction hid same-name real Rust primitive'
+        rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 1))
 
     # Fixture 7: --rev must read the COMMITTED tree and the COMMITTED baseline,
     # never the working checkout. This replays the 2026-09-06 incident directly:
