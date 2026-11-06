@@ -93,6 +93,18 @@ impl HmInferContext:
             case BuiltinCollection(_): false
         match self.synthesize_expr(receiver):
             case Ok(receiver_ty):
+                # Option accessors on a receiver that can never be optional.
+                # Mirrors infer_option_pattern's scrutinee rule (same bug row):
+                # the flat runtime encoding makes this undecidable at run time.
+                if method_name == "unwrap" or method_name == "unwrap_or" or method_name == "expect" or method_name == "is_some" or method_name == "is_none":
+                    val recv_resolved = self.resolve(receiver_ty)
+                    val never_optional = match recv_resolved.kind:
+                        case Int(_, _) | Float(_) | HirTypeKind.Bool | HirTypeKind.Char | HirTypeKind.Str: true
+                        case _: false
+                    if never_optional:
+                        return Err(TypeInferError.Other(
+                            "Option method '{method_name}' requires an optional receiver; found '{recv_resolved.kind}'",
+                            span))
                 var argument_index = 0
                 while argument_index < argument_count:
                     match self.synthesize_expr(args[argument_index].value):

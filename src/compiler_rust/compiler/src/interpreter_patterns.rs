@@ -391,8 +391,19 @@ pub(crate) fn pattern_matches(
             // the bug.
             if matches!(variant.as_str(), "Some" | "None" | "Ok" | "Err")
                 && !matches!(value, Value::Enum { .. } | Value::Nil | Value::Object { .. })
-                && std::env::var("SIMPLE_DIAG_OPTION_PATTERN_SHAPE").as_deref() == Ok("1")
+                && crate::hir::lower::option_pattern_shape_diag::shape_gate()
+                    != crate::hir::lower::option_pattern_shape_diag::ShapeGate::Off
             {
+                if crate::hir::lower::option_pattern_shape_diag::shape_gate()
+                    == crate::hir::lower::option_pattern_shape_diag::ShapeGate::Error
+                {
+                    return Err(CompileError::Semantic(format!(
+                        "error[option-pattern-shape]: `case {}(...)` tested against a \
+                         non-Option/non-Result value of runtime kind `{}`",
+                        variant,
+                        value.type_name()
+                    )));
+                }
                 eprintln!(
                     "warning[option-pattern-shape]: `case {}(...)` tested against a \
                      non-Option/non-Result value of runtime kind `{}`; this pattern can \

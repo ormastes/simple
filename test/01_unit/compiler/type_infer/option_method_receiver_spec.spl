@@ -1,0 +1,54 @@
+# Purpose and audience: executable regression evidence for compiler type inference maintainers.
+# @req REQ-COMPILER-OPTION-PATTERN-002
+# Bug: doc/08_tracking/bug/option_pattern_accepted_on_non_option_scrutinee_2026-07-27.md
+
+use std.spec.step
+use std.spec.*
+use compiler.types.type_infer.inference.*
+use compiler.types.type_infer.context.*
+use compiler.types.type_infer.core.*
+use compiler.hir.hir.*
+use compiler.frontend.core.lexer.*
+
+fn omr_span() -> Span:
+    lex_span_empty()
+
+fn omr_int(value: i64) -> HirExpr:
+    HirExpr(
+        kind: HirExprKind.IntLit(value, nil),
+        has_type_: true,
+        type_: HirType(kind: HirTypeKind.Int(64, true), span: omr_span()),
+        span: omr_span())
+
+fn omr_nil() -> HirExpr:
+    HirExpr(
+        kind: HirExprKind.NilLit,
+        has_type_: false,
+        type_: HirType(kind: HirTypeKind.Infer(0, 0), span: omr_span()),
+        span: omr_span())
+
+fn omr_call(receiver: HirExpr, method: text, arg: HirExpr) -> HirExpr:
+    HirExpr(
+        kind: HirExprKind.MethodCall(
+            receiver, method,
+            [HirCallArg(has_name: false, name: "", value: arg, span: omr_span())],
+            MethodResolution.Unresolved),
+        has_type_: false,
+        type_: HirType(kind: HirTypeKind.Infer(0, 0), span: omr_span()),
+        span: omr_span())
+
+describe "Option method receiver typing":
+    it "rejects unwrap_or on a concrete i64 receiver":
+        # @req REQ-COMPILER-OPTION-PATTERN-002
+        step("Reject i64.unwrap_or before interpreter or native lowering")
+        var ctx = HmInferContext.new()
+        val inferred = ctx.synthesize_expr(omr_call(omr_int(5), "unwrap_or", omr_int(9)))
+        expect(inferred.is_err()).to_be(true)
+        expect(inferred.err.unwrap().message()).to_contain("requires an optional receiver")
+
+    it "accepts unwrap_or on a genuine optional receiver":
+        # @req REQ-COMPILER-OPTION-PATTERN-002
+        step("Control: Optional.unwrap_or stays accepted")
+        var ctx = HmInferContext.new()
+        val inferred = ctx.synthesize_expr(omr_call(omr_nil(), "unwrap_or", omr_int(9)))
+        expect(inferred.is_ok()).to_be(true)

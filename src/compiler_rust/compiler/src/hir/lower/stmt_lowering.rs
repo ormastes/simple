@@ -3347,7 +3347,7 @@ impl Lowerer {
                         line: self.current_pattern_span.map(|(line, _)| line),
                         column: self.current_pattern_span.map(|(_, column)| column),
                     },
-                );
+                )?;
                 // Does the subject's own enum type declare this variant name?
                 // Decided BEFORE the `Some`/`None` fast paths: a user-defined
                 // enum may name its variants `Some`/`None`, and `rt_is_some` is
