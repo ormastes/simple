@@ -1,6 +1,33 @@
 # SVM-G Task D4 lowering pass — deferred subset (design §4.4)
 
-Status: 2 open, in-subset-but-not-yet-implemented gaps remain in
+## 2026-11-07 — both gaps under repair, execution qualification pending
+
+Claim owner: `01a1afac/pure-svmg-d4`, isolated branch
+`work/pure-svmg-d4-d88f`, source baseline
+`9e39c485948e048933c6115785b36209be11b1af`.
+
+The current repair implements both recorded gaps. Integer printing evaluates
+its argument once, emits decimal i32/u32 values using existing VM instructions,
+handles signed minimum and unsigned maximum, and reserves separate scratch
+storage per print site. Float compound Add/Sub/Mul/Div select existing float
+opcodes while unsupported float operators still produce a diagnostic.
+
+Tests replace the two historical rejection expectations with actual generated
+bytecode execution through the existing reference VM. Coverage includes exact
+decimal output, typed local/expression/helper inputs, repeated execution of the
+same print site, all four float operations and unsupported-type/operator
+negatives. See the [repair design](../../05_design/runtime/svmg_d4_deferred_subset_completion.md)
+and [ownership plan](../../03_plan/agent_tasks/svmg_d4_deferred_subset_completion.md).
+
+**Status remains fixing.** Source review, test source and implementation are
+not executable acceptance. The source-matched self-hosted tests, required
+compiler/core/MCP verification and merged release PR remain pending. Historical
+results below retain their original producer/scope and are not current PASS
+evidence.
+
+## Historical report and earlier qualification
+
+Original status: 2 open, in-subset-but-not-yet-implemented gaps remain in
 `src/compiler/70.backend/svmg_lowering.spl` (Task D4, test-body lowering to
 SVM-G). Both fail fast with a diagnostic naming the gap — neither is silently
 mis-lowered. This doc was reported missing by an earlier audit; this is its
