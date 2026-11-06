@@ -57,6 +57,21 @@ their now-conflicting expectations; they are not counted as passing evidence.
 This source repair and its metadata/codec integration require the admitted
 runner before the bug can be closed.
 
+### Producer coverage repair, cycle 2 (authored, NOT_RUN)
+
+The follow-up producer audit found 14 Let emission sites: four ordinary
+val/var sites, four user tuple component sites, one source-pattern binding
+helper, and five compiler-temporary sites. The user tuple producers (literal
+val/var, nonliteral tuple components, and for-tuple components) now record
+inferred provenance at the exact symbol definition. The parser's tuple
+declaration path requires `=` after the names and carries no annotation.
+`match_binding_statement` records the original source Binding symbol as
+inferred. Compiler tuple-assignment/destructure, match/range scrutinee, and
+accessor temporaries remain unknown. No name-based production classification
+is used. Regression controls exercise literal tuple Any aliases, empty
+collection receivers, and tuple-pattern Any receivers; the pattern control
+also checks that the generated scrutinee remains unknown.
+
 ## Symptom
 
 - `test/01_unit/compiler/lint/frontend_diag/any_warn_rules_acceptance_spec.spl`, example "flags an

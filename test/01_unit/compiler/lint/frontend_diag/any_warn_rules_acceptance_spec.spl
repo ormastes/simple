@@ -30,6 +30,7 @@ use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_types.*
+use compiler.hir.binding_annotation_provenance.{hir_local_annotation_state}
 use compiler.semantics.lint.written_any_scan.{WrittenAnySite, scan_written_any, written_any_site_key}
 use compiler.semantics.lint.hir_frontend_diagnostics.{run_hir_frontend_diagnostics, HirFrontendFinding}
 use compiler.tools.lint.any_rules.{AnyRuleFinding, AnyRulesRun, AnyRulesRelay, any_rules_for_hir, any_rule_path_is_compiler_source, any_rules_mask, any_rules_mask_from_env, any_rules_lint_mask, any_rules_report_lines, any_rules_parse_check_output, any_rules_max_shown, any_rules_env_level, any_rules_report_path}
@@ -165,6 +166,31 @@ describe "R2 W-HIR-INFER-003: fallback-typed value used where a concrete type is
         val found = with_code(run_all(compiler_path, source), "W-HIR-INFER-003")
         expect(found.len()).to_equal(1)
         expect(messages(found)).to_contain("it is initialised from `c`")
+
+    it "keeps Any alias provenance through literal tuple val and var bindings":
+        for declaration in ["val", "var"]:
+            val source = "fn g(b: Any) -> i64:\n    {declaration} (c, n) = (b, 0)\n    c + 1\n"
+            val found = with_code(run_all(compiler_path, source), "W-HIR-INFER-003")
+            expect(found.len()).to_equal(1)
+            expect(messages(found)).to_contain("it is initialised from `b`")
+
+    it "reports an Any receiver bound by a source tuple pattern":
+        val source = "fn g(pair: (Any, i64)) -> i64:\n    match pair:\n        case (items, _):\n            items.len()\n"
+        val hir = lower(compiler_path, source)
+        var user_count = 0
+        var temporary_count = 0
+        for symbol in hir.symbols.symbols.values():
+            if symbol.name == "items":
+                expect(hir_local_annotation_state(hir, symbol.id)).to_equal(0)
+                user_count = user_count + 1
+            if symbol.name == "__mp_scrutinee":
+                expect(hir_local_annotation_state(hir, symbol.id)).to_equal(-1)
+                temporary_count = temporary_count + 1
+        expect(user_count).to_equal(1)
+        expect(temporary_count).to_equal(1)
+        val found = with_code(any_rules_for_hir(compiler_path, source, hir, "dfr"), "W-ANY-USE-002")
+        expect(found.len()).to_equal(1)
+        expect(messages(found)).to_contain("`items`")
 
     it "does not treat a written Any declaration as an inferred alias":
         val source = "fn g(b: Any) -> i64:\n    val c: Any = b\n    c + 1\n"
