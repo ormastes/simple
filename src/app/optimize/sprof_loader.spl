@@ -3,6 +3,8 @@
 # without opening profile files from hot request handlers.
 
 use std.nogc_sync_mut.io.file_ops.{file_read}
+use std.common.trace.data.data_observation_contracts.{DataObservationV1}
+use std.common.trace.data.data_sprof_v1.{DataSprofLoadV1, DATA_SPROF_ENVELOPE_V1, data_sprof_load_v1, data_sprof_profile_lines_v1}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
 
@@ -579,3 +581,25 @@ fn sprof_load_profile_text(profile_text: text, expected_module: text, expected_w
 fn sprof_load_profile_file(path: text, expected_module: text, expected_workload: text) -> SprofLoadedProfile:
     val body = file_read(path)
     sprof_load_profile_text(body, expected_module, expected_workload)
+
+# ---------------------------------------------------------------------------
+# Data observation records (data plan W5): a minor extension of the sprof-v2
+# envelope (owner decision 2026-11-06). The counter loader above ignores the
+# data_* lines; these entry points read and write them through the shared
+# pure codec in std.common.trace.data.data_sprof_v1.
+# ---------------------------------------------------------------------------
+fn sprof_load_data_observations(profile_text: text) -> DataSprofLoadV1:
+    data_sprof_load_v1(profile_text)
+
+fn sprof_serialize_profile_with_data(module_identity: text, workload_label: text,
+                                     records: [SprofCounterRecord], data: [DataObservationV1]) -> Result<text, text>:
+    if not _sprof_token_safe(module_identity) or not _sprof_token_safe(workload_label):
+        return Err("invalid module identity or workload label")
+    var lines: [text] = ["header;schema={DATA_SPROF_ENVELOPE_V1};module={module_identity};workload={workload_label}"]
+    for record in records:
+        if not sprof_counter_record_valid(record):
+            return Err("invalid counter record")
+        lines.push(sprof_serialize_record(record))
+    for line in data_sprof_profile_lines_v1(data)?:
+        lines.push(line)
+    Ok(lines.join("\n"))
