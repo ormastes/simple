@@ -1,0 +1,79 @@
+use std.spipe.*
+
+# Host-runnable pins for the arithmetic/array primitives the pure-Simple
+# Ed25519 sign path relies on (see bug rv64_ed25519_alpha_pure_sha512_timeout).
+# They hold on the host; the RV64 native lane is where they diverge.
+
+fn _sum_limbs(h: [u64]) -> u64:
+    var t: u64 = 0
+    var i: u64 = 0
+    while i < h.len():
+        t = t + h[i]
+        i = i + 1
+    t
+
+describe "ed25519 RV64 primitive pins":
+    it "round-trips indexed stores into a [u64] limb array":
+        var h: [u64] = [0, 0, 0, 0, 0]
+        h[0] = 0x7ffffffffffff
+        h[1] = 1
+        h[4] = 0x123456789abc
+        expect(h[0]).to_equal(0x7ffffffffffff)
+        expect(h[1]).to_equal(1)
+        expect(h[2]).to_equal(0)
+        expect(h[4]).to_equal(0x123456789abc)
+        expect(_sum_limbs(h)).to_equal(0x7ffffffffffff + 1 + 0x123456789abc)
+
+    it "propagates a 51-bit carry with shift and mask":
+        val mask: u64 = 0x7ffffffffffff
+        val x: u64 = 0xfedcba9876543
+        val lo = (x * 3) & mask
+        val hi = (x * 3) >> 51
+        expect(lo + (hi << 51)).to_equal(x * 3)
+
+    it "wraps u64 multiplication modulo 2^64":
+        val a: u64 = 0xffffffff
+        val b: u64 = 0x100000001
+        val p = a * b
+        expect(p & 0xffffffff).to_equal(0xffffffff)
+        expect(p >> 32).to_equal(0xffffffff)
+        val c: u64 = p + 1
+        expect(c).to_equal(0)
+
+    it "copies a sparse 32-byte array element-wise without loss":
+        var s: [u8] = []
+        var i: u64 = 0
+        while i < 32:
+            s.push(if i == 0: 64 else if i == 5: 200 else if i == 31: 7 else: 0)
+            i = i + 1
+        var c: [u8] = []
+        i = 0
+        while i < 32:
+            c.push(s[i])
+            i = i + 1
+        expect(c.len()).to_equal(32)
+        expect(c[0]).to_equal(64)
+        expect(c[5]).to_equal(200)
+        expect(c[31]).to_equal(7)
+
+    it "builds a 64-byte signature from R and S halves":
+        var r: [u8] = []
+        var s: [u8] = []
+        var i: u64 = 0
+        while i < 32:
+            r.push((i + 1) as u8)
+            s.push((i + 101) as u8)
+            i = i + 1
+        var sig: [u8] = []
+        i = 0
+        while i < 64:
+            if i < 32:
+                sig.push(r[i])
+            else:
+                sig.push(s[i - 32])
+            i = i + 1
+        expect(sig.len()).to_equal(64)
+        expect(sig[0]).to_equal(1)
+        expect(sig[31]).to_equal(32)
+        expect(sig[32]).to_equal(101)
+        expect(sig[63]).to_equal(132)
