@@ -716,6 +716,13 @@ fn eval_compound_assign_expr(eid: i64) -> i64:
     val target_eid = e_node.left
     val value_eid = e_node.right
 
+    # Evaluation order contract (owner decision 2026-11-06, data plan W2a):
+    # the right-hand side first, then the place (receiver, then index
+    # subexpressions outer to inner), each exactly once; then one read and
+    # one write of that place.
+    val rhs_val = eval_expr(value_eid)
+    if eval_had_error: return -1
+
     val target_node = expr_get(target_eid)
     val target_tag = target_node.tag
     if target_tag == EXPR_IDENT:
@@ -724,8 +731,6 @@ fn eval_compound_assign_expr(eid: i64) -> i64:
         if old_val < 0:
             eval_set_error("undefined variable: " + name)
             return -1
-        val rhs_val = eval_expr(value_eid)
-        if eval_had_error: return -1
         val new_val = val_compound_op(op, old_val, rhs_val)
         if new_val < 0:
             val err = ops_get_error()
@@ -741,8 +746,6 @@ fn eval_compound_assign_expr(eid: i64) -> i64:
     # it does not rebuild a copy), so this works at ARBITRARY hop depth:
     # `root.mid.inner.n += 1` resolves `root.mid.inner` to the real inner struct
     # and writes through it. Same place model as eval_assign_expr.
-    # Kept byte-identical to the copy in ../eval_access.spl — both definitions
-    # land in the same flat symbol registry, so they must not diverge.
     if target_tag == EXPR_FIELD_ACCESS:
         val fa_base_eid = target_node.left
         val fa_field = target_node.s_val
@@ -756,8 +759,7 @@ fn eval_compound_assign_expr(eid: i64) -> i64:
             eval_set_error("no field '" + fa_field + "' on struct " + val_get_struct_name(fa_base))
             return -1
         val fa_old = val_struct_get_field_idx(fa_base, fa_idx)
-        val fa_rhs = eval_expr(value_eid)
-        if eval_had_error: return -1
+        val fa_rhs = rhs_val
         val fa_new = val_compound_op(op, fa_old, fa_rhs)
         if fa_new < 0:
             val fa_err = ops_get_error()
@@ -788,8 +790,7 @@ fn eval_compound_assign_expr(eid: i64) -> i64:
                     eval_set_error("array index out of bounds: " + "{ix_i}")
                     return -1
                 val ix_old = ix_elems[ix_i]
-                val ix_rhs = eval_expr(value_eid)
-                if eval_had_error: return -1
+                val ix_rhs = rhs_val
                 val ix_new = val_compound_op(op, ix_old, ix_rhs)
                 if ix_new < 0:
                     val ix_err = ops_get_error()
@@ -806,8 +807,7 @@ fn eval_compound_assign_expr(eid: i64) -> i64:
                 eval_set_error("no key '" + ix_name + "' on " + val_get_struct_name(ix_base))
                 return -1
             val ix_sold = val_struct_get_field_idx(ix_base, ix_fi)
-            val ix_srhs = eval_expr(value_eid)
-            if eval_had_error: return -1
+            val ix_srhs = rhs_val
             val ix_snew = val_compound_op(op, ix_sold, ix_srhs)
             if ix_snew < 0:
                 val ix_serr = ops_get_error()

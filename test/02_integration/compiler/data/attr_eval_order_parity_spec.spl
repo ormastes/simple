@@ -1,0 +1,158 @@
+# @cover src/compiler/10.frontend/core/interpreter/_EvalOps/access_literal_assign_eval.spl
+"""
+## Purpose and audience
+Assignment evaluates its right-hand side first and then its place: the
+receiver, then index subexpressions outer to inner and left to right, each
+exactly once. Compound assignment is one read and one write of the same
+place. Every engine must agree. Readers are language and interpreter authors.
+Owner decision 2026-11-06 (option b): RHS first, then the place. Plan:
+doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md
+(W2, sections 3.4, 9.3; ATTR-16, ATTR-17, ATTR-18). Category: Language.
+## Operator workflow
+bin/simple test test/02_integration/compiler/data/attr_eval_order_parity_spec.spl
+## Compatibility and limitations
+Each case runs twice: inline in this spec (the engine running the spec) and
+through the pure-Simple core interpreter (`core_interpret`). The seed rejects a
+call result as an assignment target (`f().x = v` is not a place), so receiver
+side effects are observed through index subexpressions.
+## Verification guidance and troubleshooting
+The log names each side effect in evaluation order: `r` outer index, `i` inner
+index, `rhs` right-hand side. A duplicated name means double evaluation.
+"""
+# Lifecycle: doc/03_plan/compiler/data/data_attributes_layout_containers_xray_2026-11-06.md
+# @manual_section: Assignment evaluation order
+
+use std.spec.*
+use compiler.core.interpreter.mod.{core_interpret}
+use compiler.core.interpreter.eval.{eval_has_error, eval_get_error}
+use compiler.core.interpreter.value.{val_to_text}
+
+# Reference-typed log so every side effect lands in one place on every engine.
+class Trace:
+    entries: [text]
+
+val log = Trace(entries: [])
+
+class Box:
+    items: [i64]
+    x: i64
+
+class Leaf:
+    x: i64
+
+class Mid:
+    leaf: Leaf
+
+class Top:
+    mid: Mid
+
+fn idx(tag: text, i: i64) -> i64:
+    log.entries.push(tag)
+    i
+
+fn rhs(v: i64) -> i64:
+    log.entries.push("rhs")
+    v
+
+fn bump(b: Box) -> i64:
+    log.entries.push("rhs")
+    b.items[0] = 100
+    1
+
+fn take_log() -> text:
+    val joined = log.entries.join(",")
+    log.entries = []
+    joined
+
+val PURE_PRELUDE: text = "var log: [text] = []\nclass Box:\n    items: [i64]\n    x: i64\nclass Leaf:\n    x: i64\nclass Mid:\n    leaf: Leaf\nclass Top:\n    mid: Mid\nfn idx(tag: text, i: i64) -> i64:\n    log.push(tag)\n    i\nfn rhs(v: i64) -> i64:\n    log.push(\"rhs\")\n    v\nfn bump(b: Box) -> i64:\n    log.push(\"rhs\")\n    b.items[0] = 100\n    1\nfn main():\n    var boxes = [Box(items: [0, 0], x: 0), Box(items: [0, 0], x: 0)]\n    var grid = [[0, 0], [0, 0]]\n    var arr = [0, 0]\n    var top = Top(mid: Mid(leaf: Leaf(x: 5)))\n    val holder = Box(items: [0, 0], x: 0)\n"
+
+# Runs `stmt` in the pure-Simple core interpreter; returns "<log>|<probe>".
+fn pure(stmt: text, probe: text) -> text:
+    # Literal braces: the generated source interpolates `probe` itself.
+    val lb = """{"""
+    val rb = """}"""
+    val tail = "    val probe = " + probe + "\n    log.join(\",\") + \"|\" + \"" + lb + "probe" + rb + "\"\n"
+    val res = core_interpret(PURE_PRELUDE + "    " + stmt + "\n" + tail, "eval_order_case.spl")
+    if eval_has_error():
+        return "ERR:" + eval_get_error()
+    val_to_text(res)
+
+describe "Assignment evaluation order":
+    it "evaluates the right-hand side before an indexed place, once each":
+        # @req REQ-ATTR-16
+        step("Assign arr[i] = rhs with logging side effects in the index and the value")
+        var arr = [0, 0]
+        take_log()
+        arr[idx("i", 1)] = rhs(5)
+        val seed = take_log() + "|" + "{arr[1]}"
+        # @capture(exec): side-effect log per engine
+        step("Verify right-hand side then receiver index, on this engine and in the pure-Simple interpreter")
+        expect(seed).to_equal("rhs,i|5")
+        expect(pure("arr[idx(\"i\", 1)] = rhs(5)", "arr[1]")).to_equal(seed)
+
+    it "evaluates the right-hand side and then a nested place outer to inner":
+        # @req REQ-ATTR-17
+        step("Assign through a field of an indexed element and through a two-level index")
+        var boxes = [Box(items: [0, 0], x: 0), Box(items: [0, 0], x: 0)]
+        var grid = [[0, 0], [0, 0]]
+        take_log()
+        boxes[idx("r", 1)].x = rhs(1)
+        val field = take_log() + "|" + "{boxes[1].x}"
+        take_log()
+        boxes[idx("r", 0)].items[idx("i", 1)] = rhs(5)
+        val nested = take_log() + "|" + "{boxes[0].items[1]}"
+        take_log()
+        grid[idx("r", 1)][idx("i", 0)] = rhs(7)
+        val two = take_log() + "|" + "{grid[1][0]}"
+        # @capture(exec): side-effect logs
+        step("Verify right-hand side, outer index, inner index, each once, on both engines")
+        expect(field).to_equal("rhs,r|1")
+        expect(nested).to_equal("rhs,r,i|5")
+        expect(two).to_equal("rhs,r,i|7")
+        expect(pure("boxes[idx(\"r\", 1)].x = rhs(1)", "boxes[1].x")).to_equal(field)
+        expect(pure("boxes[idx(\"r\", 0)].items[idx(\"i\", 1)] = rhs(5)", "boxes[0].items[1]")).to_equal(nested)
+        expect(pure("grid[idx(\"r\", 1)][idx(\"i\", 0)] = rhs(7)", "grid[1][0]")).to_equal(two)
+
+    it "performs compound assignment as one read and one write of the same place":
+        # @req REQ-ATTR-16
+        step("Compound-assign an indexed element and a field of an indexed element")
+        var arr = [10, 20]
+        take_log()
+        arr[idx("i", 0)] += rhs(2)
+        val indexed = take_log() + "|" + "{arr[0]}"
+        var boxes = [Box(items: [0, 0], x: 0), Box(items: [0, 0], x: 5)]
+        boxes[idx("r", 1)].x += rhs(3)
+        val field_compound = take_log() + "|" + "{boxes[1].x}"
+        # @capture(exec): side-effect logs and results
+        step("Verify the right-hand side, then the place once, and the update lands")
+        expect(indexed).to_equal("rhs,i|12")
+        expect(field_compound).to_equal("rhs,r|8")
+        # The right-hand side runs before the place is read: its own write to
+        # the same element is the value the compound operator starts from.
+        val holder = Box(items: [0, 0], x: 0)
+        holder.items[idx("i", 0)] += bump(holder)
+        val mutated = take_log() + "|" + "{holder.items[0]}"
+        expect(mutated).to_equal("rhs,i|101")
+        expect(pure("holder.items[idx(\"i\", 0)] += bump(holder)", "holder.items[0]")).to_equal(mutated)
+        val top = Top(mid: Mid(leaf: Leaf(x: 5)))
+        top.mid.leaf.x += rhs(4)
+        val deep = take_log() + "|" + "{top.mid.leaf.x}"
+        expect(deep).to_equal("rhs|9")
+        expect(pure("top.mid.leaf.x += rhs(4)", "top.mid.leaf.x")).to_equal(deep)
+
+    it "performs compound assignment in the pure-Simple interpreter with the same order":
+        # @req REQ-ATTR-16
+        step("Compound-assign an indexed element, a field of an indexed element and a two-level index in the pure-Simple interpreter")
+        # @capture(exec): side-effect logs and results
+        step("Verify the right-hand side, then the place once, and the update lands")
+        expect(pure("arr[idx(\"i\", 0)] += rhs(2)", "arr[0]")).to_equal("rhs,i|2")
+        expect(pure("boxes[idx(\"r\", 1)].x += rhs(3)", "boxes[1].x")).to_equal("rhs,r|3")
+        expect(pure("grid[idx(\"r\", 1)][idx(\"i\", 0)] -= rhs(4)", "grid[1][0]")).to_equal("rhs,r,i|-4")
+
+    it "rejects an assignment to a call result":
+        # @req REQ-ATTR-16
+        step("Assign to a call result in the pure-Simple interpreter")
+        val outcome = pure("idx(\"r\", 0) = rhs(1)", "0")
+        # @capture(exec): interpreter error
+        step("Verify the assignment is refused")
+        expect(outcome).to_start_with("ERR:")
