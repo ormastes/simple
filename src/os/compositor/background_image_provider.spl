@@ -260,33 +260,30 @@ impl BackgroundImageProvider for HostBackgroundImageProvider:
             return BackgroundResolveOutcome(ok: false, surface: nil, stale: false, error_message: "empty background source")
         if target_w <= 0 or target_h <= 0:
             return BackgroundResolveOutcome(ok: false, surface: nil, stale: false, error_message: "invalid target size {target_w}x{target_h}")
-        # File.read_bytes is typed `-> [u8]?` but the runtime value on a
-        # missing/unreadable file is an actual Result::Err(...), not a plain
-        # `nil` Option — `if val` treats that Err as truthy (a live, unhealed
-        # Option/Result marshalling gap; see memory
-        # project_seed_crossmodule_field_option_poison_2026-06-14). Branch on
-        # it with `match Ok(...)/Err(...)` (the pattern already used by
-        # os.compositor.qemu_capture for decode_ppm_to_argb) instead of
-        # `if val`, so a missing source reliably falls to the unreadable path.
-        match File.read_bytes(source):
-            Ok(bytes):
-                val content_hash = _bg_image_content_hash(bytes)
-                if val cached = _bg_cache_lookup(content_hash, target_w, target_h, fit):
-                    _host_bg_hits = _host_bg_hits + 1
-                    _bg_remember_last_good(source, target_w, target_h, fit, cached)
-                    return BackgroundResolveOutcome(ok: true, surface: cached, stale: false, error_message: "")
-                match decode_ppm_to_argb(bytes):
-                    Ok(image):
-                        val surface = _bg_image_resample(image, target_w, target_h, fit)
-                        _host_bg_misses = _host_bg_misses + 1
-                        _host_bg_cache = _host_bg_cache.push(_BgImageCacheEntry(content_hash: content_hash, target_w: target_w, target_h: target_h, fit: fit, surface: surface))
-                        _bg_remember_last_good(source, target_w, target_h, fit, surface)
-                        return BackgroundResolveOutcome(ok: true, surface: surface, stale: false, error_message: "")
-                    Err(msg):
-                        if val last = _bg_last_good_lookup(source, target_w, target_h, fit):
-                            return BackgroundResolveOutcome(ok: true, surface: last, stale: true, error_message: "decode failed: {msg}; serving last-good")
-                        return BackgroundResolveOutcome(ok: false, surface: nil, stale: false, error_message: "decode failed: {msg}")
-            Err(read_error):
-                if val last = _bg_last_good_lookup(source, target_w, target_h, fit):
-                    return BackgroundResolveOutcome(ok: true, surface: last, stale: true, error_message: "source unreadable: {source} ({read_error}); serving last-good")
-                return BackgroundResolveOutcome(ok: false, surface: nil, stale: false, error_message: "source unreadable: {source} ({read_error})")
+        # File.read_bytes is declared `-> [u8]?`: absent bytes (missing or
+        # unreadable file) are nil. Both runtimes honour that -- the C/Rust
+        # runtime and the interpreter extern return the bare array or nil --
+        # so the old `match Ok(...)/Err(...)` matched neither arm (the
+        # interpreter raised "missing return") and could not compile natively
+        # (bug background_image_provider_ok_err_on_optional_2026-11-07).
+        val read_bytes: [u8]? = File.read_bytes(source)
+        if val bytes = read_bytes:
+            val content_hash = _bg_image_content_hash(bytes)
+            if val cached = _bg_cache_lookup(content_hash, target_w, target_h, fit):
+                _host_bg_hits = _host_bg_hits + 1
+                _bg_remember_last_good(source, target_w, target_h, fit, cached)
+                return BackgroundResolveOutcome(ok: true, surface: cached, stale: false, error_message: "")
+            match decode_ppm_to_argb(bytes):
+                Ok(image):
+                    val surface = _bg_image_resample(image, target_w, target_h, fit)
+                    _host_bg_misses = _host_bg_misses + 1
+                    _host_bg_cache = _host_bg_cache.push(_BgImageCacheEntry(content_hash: content_hash, target_w: target_w, target_h: target_h, fit: fit, surface: surface))
+                    _bg_remember_last_good(source, target_w, target_h, fit, surface)
+                    return BackgroundResolveOutcome(ok: true, surface: surface, stale: false, error_message: "")
+                Err(msg):
+                    if val last = _bg_last_good_lookup(source, target_w, target_h, fit):
+                        return BackgroundResolveOutcome(ok: true, surface: last, stale: true, error_message: "decode failed: {msg}; serving last-good")
+                    return BackgroundResolveOutcome(ok: false, surface: nil, stale: false, error_message: "decode failed: {msg}")
+        if val last = _bg_last_good_lookup(source, target_w, target_h, fit):
+            return BackgroundResolveOutcome(ok: true, surface: last, stale: true, error_message: "source unreadable: {source}; serving last-good")
+        return BackgroundResolveOutcome(ok: false, surface: nil, stale: false, error_message: "source unreadable: {source}")

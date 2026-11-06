@@ -1,4 +1,5 @@
 use compiler.hir.hir_lowering.concat_copy_v1.{hir_stmt_concat_copy_v1}
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.hir.hir_lowering.binding_types.{hir_binding_direct_call_return_kind, hir_binding_method_call_return_kind, hir_binding_transparent_kind, hir_binding_try_payload, hir_const_type_settled}
 # HIR Lowering - Statement Lowering
 #
@@ -43,6 +44,16 @@ fn _ast_tuple_lit_elements(e: Expr) -> [Expr]:
             case _:
                 return []
     []
+
+fn binding_type_is_unknown(type_: HirType) -> bool:
+    match type_.kind:
+        case HirTypeKind.Error: true
+        case _: false
+
+fn binding_join_arm_conflicts(left: HirType, right: HirType) -> bool:
+    if binding_type_is_unknown(left) or binding_type_is_unknown(right):
+        return false
+    not hir_types_equal(left, right)
 
 impl HirLowering:
     # Early pattern validation runs before inference. Retain only an existing
@@ -94,6 +105,18 @@ impl HirLowering:
             case HirExprKind.Cast(_, target):
                 if hir_const_type_settled(target): return target
                 return unknown
+            # An `if` with an else branch whose branch tails join to a fully
+            # known Result is typed by that join. Untyped, `val r = if c:
+            # Ok(x) else: Err(y)` made a later bare `case Ok(..)` ambiguous
+            # whenever another enum declared `Ok` (bug
+            # hir_if_expr_result_subject_untyped_2026-11-07). A join with an
+            # unknown arm, or of non-Result values, keeps the old untyped
+            # result, so no Error arm reaches type inference or MIR.
+            case HirExprKind.If(_, _, _) | HirExprKind.IfChain(_, _):
+                val joined: HirType = self.binding_branch_join(source_kind, span)
+                if self.binding_joined_result(joined) and hir_const_type_settled(joined):
+                    return joined
+                return unknown
             case _: ()
         val symbol = _hir_expr_symbol_or_invalid(source_kind)
         if symbol.is_valid():
@@ -106,6 +129,147 @@ impl HirLowering:
             return declared_return
         if val method_return = hir_binding_method_call_return_kind(source_kind, self.symbols):
             return method_return
+        unknown
+
+    # Branch-tail / payload type for the `if` join. Kinds only cross calls
+    # and `type_` is read only under `has_type_` (frozen-stage2 by-value
+    # HirExpr / placeholder-span hazard,
+    # bug stage2_struct_param_deep_copy_packed_span_2026-11-03).
+    # - a builtin `Ok(v)` / `Err(e)` call (symbol tagged by the
+    #   unresolved-builtin fallback in expression_support; a user function
+    #   named Ok/Err is not tagged) is a Result with the other arm unknown;
+    # - a string / bool literal has its literal type (numeric literals stay
+    #   unknown: their width comes from context);
+    # - a nested `if` is the join of its own branches;
+    # - anything else is ordinary binding transport, then `declared`.
+    fn binding_block_value_type(tail_kind: HirExprKind, declared: HirType, span: Span) -> HirType:
+        val unknown = HirType(kind: HirTypeKind.Error, span: span)
+        match tail_kind:
+            case HirExprKind.Call(callee, args, _):
+                if args.len() == 1:
+                    val ctor_symbol = _hir_expr_symbol_or_invalid(callee.kind)
+                    if ctor_symbol.is_valid():
+                        if val ctor = self.symbols.get_symbol_raw(ctor_symbol.id):
+                            val tag = ctor.builtin_method_tag
+                            if tag == BUILTIN_METHOD_RESULT_OK or tag == BUILTIN_METHOD_RESULT_ERR:
+                                val arg: HirCallArg = args[0]
+                                var arg_declared: HirType = unknown
+                                if arg.value.has_type_:
+                                    arg_declared = arg.value.type_
+                                val payload: HirType = self.binding_block_value_type(arg.value.kind, arg_declared, span)
+                                if tag == BUILTIN_METHOD_RESULT_OK:
+                                    return HirType(kind: HirTypeKind.Result(payload, unknown), span: span)
+                                return HirType(kind: HirTypeKind.Result(unknown, payload), span: span)
+            case HirExprKind.StringLit(_, _):
+                return HirType(kind: HirTypeKind.Str, span: span)
+            case HirExprKind.BoolLit(_):
+                return HirType(kind: HirTypeKind.Bool, span: span)
+            case HirExprKind.If(_, _, _) | HirExprKind.IfChain(_, _):
+                return self.binding_branch_join(tail_kind, span)
+            case HirExprKind.Field(field_base, field_name, _):
+                val field_type: HirType = self.binding_field_type(field_base.kind, field_name, span)
+                if not binding_type_is_unknown(field_type): return field_type
+            case _: ()
+        val transported: HirType = self.binding_kind_type(tail_kind, span)
+        if binding_type_is_unknown(transported):
+            return declared
+        transported
+
+    # Declared type of `base.field` when `base` is a binding typed
+    # Named(struct). Only the module-qualified `module.Name` key of
+    # struct_field_types_by_name is read: it is written from declarations and
+    # imports only, while the bare-name key is also rewritten from
+    # construction-site array literals (try_register_local_struct_type maps a
+    # `[]` argument to `[i64]`), which would hand back a wrong but settled type.
+    fn binding_field_type(base_kind: HirExprKind, field_name: text, span: Span) -> HirType:
+        val unknown = HirType(kind: HirTypeKind.Error, span: span)
+        var owner_raw: i64 = -1
+        val base_type: HirType = self.binding_kind_type(base_kind, span)
+        match base_type.kind:
+            case HirTypeKind.Named(owner_id, _): owner_raw = owner_id.id
+            case _: ()
+        if owner_raw < 0:
+            # A local built by a struct constructor call records only the
+            # struct NAME (local_struct_types); resolve it to its declaration.
+            val base_symbol = _hir_expr_symbol_or_invalid(base_kind)
+            if base_symbol.is_valid() and self.local_struct_types.has(base_symbol.id):
+                val struct_symbol = self.symbols.lookup_or_invalid(self.local_struct_types[base_symbol.id])
+                if struct_symbol.is_valid(): owner_raw = struct_symbol.id
+        if owner_raw < 0:
+            return unknown
+        if val owner = self.symbols.get_symbol_raw(owner_raw):
+            if owner.kind != SymbolKind.Struct and owner.kind != SymbolKind.Class:
+                return unknown
+            if val owner_module = owner.defining_module:
+                val canonical_name: text = owner_module + "." + owner.name
+                if self.struct_field_types_by_name.has(canonical_name):
+                    val canonical_fields = self.struct_field_types_by_name[canonical_name]
+                    if canonical_fields.has(field_name): return canonical_fields[field_name]
+        unknown
+
+    # Join of every branch tail of an `if` / `if-elif` with an else branch
+    # (unknown when there is no else or a branch has no value).
+    fn binding_branch_join(if_kind: HirExprKind, span: Span) -> HirType:
+        val unknown = HirType(kind: HirTypeKind.Error, span: span)
+        match if_kind:
+            case HirExprKind.If(_, then_, else_):
+                val else_opt: HirBlock? = else_
+                if val else_block = else_opt:
+                    if not then_.has or not else_block.has:
+                        return unknown
+                    var then_declared: HirType = unknown
+                    if then_.value.has_type_:
+                        then_declared = then_.value.type_
+                    var else_declared: HirType = unknown
+                    if else_block.value.has_type_:
+                        else_declared = else_block.value.type_
+                    return self.binding_join_type(self.binding_block_value_type(then_.value.kind, then_declared, span), self.binding_block_value_type(else_block.value.kind, else_declared, span), span)
+            case HirExprKind.IfChain(arms, chain_else):
+                val chain_else_opt: HirBlock? = chain_else
+                if val chain_else_block = chain_else_opt:
+                    if not chain_else_block.has:
+                        return unknown
+                    var chain_else_declared: HirType = unknown
+                    if chain_else_block.value.has_type_:
+                        chain_else_declared = chain_else_block.value.type_
+                    var joined: HirType = self.binding_block_value_type(chain_else_block.value.kind, chain_else_declared, span)
+                    for arm in arms:
+                        val arm_value: HirIfArm = arm
+                        if not arm_value.then_.has:
+                            return unknown
+                        var arm_declared: HirType = unknown
+                        if arm_value.then_.value.has_type_:
+                            arm_declared = arm_value.then_.value.type_
+                        joined = self.binding_join_type(self.binding_block_value_type(arm_value.then_.value.kind, arm_declared, span), joined, span)
+                    return joined
+            case _: ()
+        unknown
+
+    fn binding_joined_result(joined: HirType) -> bool:
+        match joined.kind:
+            case HirTypeKind.Result(_, _): true
+            case _: false
+
+    # Join of two branch types. Two Result shapes join arm by arm (an unknown
+    # arm takes the other side; otherwise the arms must be the same type);
+    # other types join only when identical. Anything else stays unknown so
+    # consumers fail closed instead of picking one branch's type.
+    fn binding_join_type(left: HirType, right: HirType, span: Span) -> HirType:
+        val unknown = HirType(kind: HirTypeKind.Error, span: span)
+        match left.kind:
+            case HirTypeKind.Result(left_ok, left_err):
+                match right.kind:
+                    case HirTypeKind.Result(right_ok, right_err):
+                        if binding_join_arm_conflicts(left_ok, right_ok) or binding_join_arm_conflicts(left_err, right_err):
+                            return unknown
+                        val ok_arm = if binding_type_is_unknown(left_ok): right_ok else: left_ok
+                        val err_arm = if binding_type_is_unknown(left_err): right_err else: left_err
+                        return HirType(kind: HirTypeKind.Result(ok_arm, err_arm), span: span)
+                    case _: ()
+            case _: ()
+        # Non-Result branches join only when both are known and identical.
+        if not binding_type_is_unknown(left) and not binding_type_is_unknown(right) and hir_types_equal(left, right):
+            return left
         unknown
 
     me check_char_condition(cond: HirExpr):
@@ -262,7 +426,14 @@ impl HirLowering:
                             # seen) is globally valid for the struct name.
                             if self.struct_field_order_by_name.has(callee_name):
                                 val field_order: [text] = self.struct_field_order_by_name[callee_name]
-                                var known_fields = self.struct_field_types_by_name[callee_name]
+                                # Copy, never mutate in place: the declaration
+                                # registers ONE dict under both the bare and the
+                                # module-qualified key, and the qualified key must
+                                # keep the declared types (binding_field_type).
+                                var known_fields: Dict<text, HirType> = {}
+                                val declared_fields = self.struct_field_types_by_name[callee_name]
+                                for declared_name in declared_fields.keys():
+                                    known_fields[declared_name] = declared_fields[declared_name]
                                 var arg_i = 0
                                 while arg_i < call_args.len() and arg_i < field_order.len():
                                     val field_name_at_i = field_order[arg_i]
