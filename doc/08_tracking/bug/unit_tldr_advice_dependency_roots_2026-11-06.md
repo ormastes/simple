@@ -1,6 +1,6 @@
 # Unit TLDR planning omitted advice dependency roots
 
-Status: source repair prepared; native baseline blocked by non-public parser statics; full producer verification pending.
+Status: source repair draft; baseline reproduced four expected failures with five healthy controls, but fixed executable crashed before assertions. Six-attempt budget exhausted; full producer verification pending.
 
 The root qualification attempt retained under
 `/home/yoon/dev/simple-bootstrap-qualification-20261106/build/bootstrap-qualification/`
@@ -102,3 +102,30 @@ Full woven advice execution and helper-object scheduling remain next-producer
 qualification gates. Summary readiness alone does not establish a complete
 linked program or admit Phase 3. Existing compiler/core/library/MCP runtime
 checks also remain pending the qualified full CLI.
+
+## Final bounded comparison
+
+Prerequisite owner repair `277911aa0e5` moves pending-array promotion and
+constraint registration into their state-owning modules. It is applied equally
+to the new baseline and fixed snapshots; the attempt-4 snapshot remains frozen.
+Before launch, both native fixtures were changed identically to aggregate all
+nine existing predicates into named results and a failure count. No predicate
+was weakened. The baseline still uses the old four-argument planner while the
+fixed invocation supplies advice roots. Baseline attempt 5 built with exit 0, quiescent 1 and peak RSS 14,477,972 KiB.
+Its executable completed all nine assertions: four expected failures
+(advice readiness, target/dependency readiness, parse-root count, surface count)
+and five healthy controls (unrelated readiness, picked ownership, advice parsed,
+unrelated surface exclusion and four-argument API). Run exit 4, quiescent 1.
+Evidence: `/home/yoon/dev/simple-bootstrap-advice-plan-before5-20261106/build/bootstrap-advice-plan-new/before5/`.
+
+Final attempt 6 built with exit 0, quiescent 1 and peak RSS 14,213,068 KiB.
+The fixed executable then exited 139 (SIGSEGV), quiescent 1, peak RSS 8,884 KiB,
+with an empty run log: zero printed assertions. Its SHA256 is
+`536c65d8738d0fd405f696e0d3f94213a108b43df239bfe3194a8452c6ee9227`.
+Evidence: `/home/yoon/dev/simple-bootstrap-advice-plan-fix-20261106/build/bootstrap-advice-plan-new/after6/`;
+`build.sh`, `build.env`, `build.log`, `run.sh`, `run.env`, `run.log` and `probe`
+are retained. The crash occurred on the fixed advice traversal path before
+assertion output; its exact cause is unresolved. No runtime PASS or complete
+repair is claimed. No seventh attempt or diagnostic rerun was performed.
+New owner API SSpec scenarios remain unexecuted. The source draft depends on
+PR #7292 and must not merge before this runtime failure and broad gates resolve.
