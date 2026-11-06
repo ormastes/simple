@@ -22,7 +22,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <xray/xray_interface.h>
+/* Declared locally: clang-18's xray/xray_interface.h includes <cstddef> unconditionally and does
+ * not compile as C (CI runner). Matches compiler-rt xray_interface.h. */
+enum XRayEntryType { XRAY_ENTRY = 0, XRAY_EXIT = 1, XRAY_TAIL = 2, XRAY_LOG_ARGS_ENTRY = 3 };
+extern int __xray_set_handler(void (*entry)(int32_t, enum XRayEntryType));
+extern uintptr_t __xray_function_address(int32_t function_id);
 
 int64_t simple_xray_llvm_max_function_id(void);
 int64_t simple_xray_llvm_install(int64_t arena, int64_t generation, int64_t context,
