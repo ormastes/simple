@@ -2716,18 +2716,15 @@ int64_t rt_shell_output(int64_t cmd_value) {
  * link), but conflicting weak-external defaults are a separate, unforceable
  * rule.
  *
- * Making THIS file the strong owner on hosted Windows fixes it while leaving exactly
- * one weak external (runtime_native.c's), which resolves against a strong
- * definition normally. The reverse -- compiling runtime_native.c's copies out
- * under SIMPLE_CORE_C_STANDALONE -- was tried first and is WRONG: it leaves
- * only a weak definition, and a weak archive member is never pulled in to
- * satisfy a reference on PE/COFF (the hazard already documented at the
- * rt_set_args carve-out in runtime_native.c), so the frontend-smoke lane then
- * failed with `simple_runtime.lib(runtime_native.obj) : error LNK2019:
- * unresolved external symbol rt_cli_get_args`.
- *
- * Standalone core-C instead needs runtime_native.c's registered tagged argv;
- * its three definitions below are excluded from that composition.
+ * So exactly one STRONG owner must exist on Windows. Where this file is linked
+ * without runtime_native.c (no SIMPLE_RUNTIME_MEMORY_OWNER), the copies below
+ * are that owner. Where both files are bundled, the copies below are compiled
+ * out (guard below) and runtime_native.c's SPL_CORE_ARGV_OWNER copies are
+ * strong instead. Leaving only a WEAK copy is wrong on PE/COFF: a weak
+ * archive member is never pulled in to satisfy a reference (the hazard at the
+ * rt_set_args carve-out in runtime_native.c), which once failed the
+ * frontend-smoke lane with `simple_runtime.lib(runtime_native.obj) : error
+ * LNK2019: unresolved external symbol rt_cli_get_args`.
  * CROSS-PLATFORM: off Windows this macro expands to exactly the
  * `__attribute__((weak))` that was here before, so Linux, macOS and FreeBSD
  * are byte-identical. The mingw lane is COFF too and benefits identically. */
@@ -2743,10 +2740,11 @@ int64_t rt_shell_output(int64_t cmd_value) {
  *
  * Also omitted whenever runtime_native.c is in the same bundle, on every
  * platform. SIMPLE_RUNTIME_MEMORY_OWNER is the marker for that: every full
- * bundle composer passes it and always lists runtime_native
- * (70.backend/backend/runtime_compiler.spl, native_project/tools.rs,
- * scripts/bootstrap/prepare-runtime-owner.shs); the C-backend lane that links
- * runtime.c alone (80.driver/driver_api_project_build.spl) does not. On ELF
+ * bundle composer that compiles this file passes it and always lists
+ * runtime_native (70.backend/backend/runtime_compiler.spl,
+ * scripts/bootstrap/prepare-runtime-owner.shs); the lanes that link runtime.c
+ * alone (80.driver/driver_api_project_build.spl,
+ * 90.tools/leak_check/external_runner.spl) do not. On ELF
  * both files' copies were weak, so the first object in the link won, and the
  * hosted bundle lists runtime.c first: rt_cli_get_args then returned a legacy
  * spl_array_new() array that runtime_native.c's rt_array_len rejects as

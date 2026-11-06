@@ -15,15 +15,29 @@
  * and returned 0: every native CLI built on that bundle (app.t32_cli, ...)
  * saw an empty argument list at startup.
  *
- * Build + run (Linux, both orders must pass; the define is what every full
- * bundle composer passes, the C-backend runtime.c-only lane does not):
+ * Build + run (Linux, clang + lld; both link orders must pass, with and
+ * without -DSIMPLE_CORE_C_STANDALONE=1 added to F). The MEMORY_OWNER define is
+ * what every full-bundle composer passes; the runtime.c-only C-backend lane
+ * does not.
+ *   O=/tmp/argv; mkdir -p $O
  *   F="-w -Isrc/runtime -Isrc/runtime/platform -DSIMPLE_RUNTIME_MEMORY_OWNER=1"
  *   for f in runtime runtime_native runtime_memory runtime_alloc_observer runtime_memtrack; do
- *     clang -c $F src/runtime/$f.c -o /tmp/argv_$f.o; done
- *   clang -c $F src/runtime/test/rt_cli_args_owner_order_selfcheck.c -o /tmp/argv_check.o
- *   # link with runtime.o BEFORE runtime_native.o (the hosted order), then reversed;
- *   # unrelated undefined data symbols may be satisfied with weak zero stubs.
- *   ./argv_check one two   -> "PASS ..." exit 0
+ *     clang -c $F src/runtime/$f.c -o $O/$f.o; done
+ *   clang -c $F src/runtime/test/rt_cli_args_owner_order_selfcheck.c -o $O/check.o
+ *   REST="$O/runtime_memory.o $O/runtime_alloc_observer.o $O/runtime_memtrack.o"
+ *   # These five TUs reference a few symbols owned by other bundle members
+ *   # that this check never calls; satisfy them with weak zero stubs:
+ *   clang -fuse-ld=lld $O/check.o $O/runtime.o $O/runtime_native.o $REST -o $O/x \
+ *     -lm -lpthread -ldl -Wl,--allow-multiple-definition -Wl,--error-limit=0 2>&1 |
+ *     grep -o "undefined symbol: [A-Za-z0-9_]*" | sort -u | sed 's/undefined symbol: //' |
+ *     awk '{print "__attribute__((weak)) long long " $1 "[64];"}' > $O/stubs.c
+ *   clang -c -w $O/stubs.c -o $O/stubs.o
+ *   # hosted order (runtime.o first), then reversed:
+ *   clang -fuse-ld=lld $O/check.o $O/runtime.o $O/runtime_native.o $REST $O/stubs.o \
+ *     -o $O/check -lm -lpthread -ldl -Wl,--allow-multiple-definition
+ *   $O/check one two   -> "PASS — 5 argv provider checks, argc=3", exit 0
+ * Before the fix the hosted order printed the rejected-handle diagnostic, three
+ * "rt_array_len=0 want 3" FAILs, then SIGSEGV in rt_string_len(rt_cli_arg_at()).
  */
 #include <stdint.h>
 #include <stdio.h>

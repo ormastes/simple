@@ -62,11 +62,15 @@ compiled Simple code can never consume its legacy array.
 
 `runtime.c` now omits the trio when `SIMPLE_RUNTIME_MEMORY_OWNER` is defined.
 Every full-bundle composer passes that define and always lists
-`runtime_native`: `runtime_compiler.spl` (both the `-D` and `/D` branches),
-`native_project/tools.rs:822`, `prepare-runtime-owner.shs`, and
-`p3-manual-link-stage3.shs`. The C-backend lane that links `runtime.c` alone
-(`80.driver/driver_api_project_build.spl`) does not pass it, so that lane keeps
-its legacy copies.
+`runtime_native`: `runtime_compiler.spl` (both the `-D` and `/D` branches) and
+`prepare-runtime-owner.shs`. (`native_project/tools.rs`, `p3-manual-link-stage3.shs`
+and `sysroot.shs` pass it too but never compile `runtime.c`.) The lanes that
+link `runtime.c` alone (`80.driver/driver_api_project_build.spl`,
+`90.tools/leak_check/external_runner.spl`) do not pass it, so they keep their
+legacy copies. `runtime_bundle_duplicate_symbols_baseline.txt` and
+`runtime_symbol_lane_divergence_baseline.txt` still list the trio as a
+`runtime.c,runtime_native.c` duplicate: their scan is textual and ignores `#if`;
+the two copies are now mutually exclusive per composition.
 
 On Windows, runtime_native.c's copies become strong when the define is set.
 Before the fix, runtime.c held the one strong definition there. A lone weak
@@ -91,6 +95,14 @@ stays weak for the Rust-capsule reason documented at `rt_set_args`.
   the worktree's `src/runtime/*.c`. After the fix the same command prints
   `direct=3 tail=2 guarded=3` with no rejected line. The link order is
   unchanged (runtime.o is still first).
+- **Standalone variant:** the selfcheck also passes in both orders with
+  `-DSIMPLE_CORE_C_STANDALONE=1` added (the hosted dynload lane passes it).
+- **Windows:** not built. This host has no Windows SDK headers (`winsock2.h`
+  is missing for both `x86_64-w64-windows-gnu` and `-msvc`). Only the
+  `SPL_CORE_ARGV_OWNER` truth table was checked, by compiling the macro block
+  with `-D_WIN32`: `_WIN32+MEMORY_OWNER` gives T, `_WIN32+STANDALONE` gives T,
+  `_WIN32` alone gives W, and ELF+MEMORY_OWNER gives W. A real clang-cl / mingw
+  link is still pending.
 
 ## Related, not fixed here
 
