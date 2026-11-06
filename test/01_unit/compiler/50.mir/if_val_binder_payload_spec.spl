@@ -1,0 +1,89 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: the `if val` binder is the payload, not the presence bit
+
+`if val v = e` desugars to `val v = e.?` + `if v != nil`. Two defects bound the
+wrong thing:
+
+- A `bool?` source: the binder's inferred let type is `bool`, and the
+  `.?`-into-declared-bool presence rule lowered it as `rt_is_some`, so `v` was
+  the presence bit and `v != nil` folded to true (always entered, v = true).
+- A struct `Option`: the binder must pass the payload handle through, never an
+  integer decode (`rt_value_as_int_wide`) of the Some box.
+
+See doc/08_tracking/bug/mir_if_val_bool_binder_is_presence_predicate_2026-11-06.md
+and stage2_if_val_struct_option_binding_as_int_wide_2026-11-03.md.
+"""
+
+# @tag: unit, compiler, mir
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+struct BinderShape:
+    callees: [text]
+    ne_compares: i64
+    errors: i64
+
+fn count_of(lst: [text], item: text) -> i64:
+    var n = 0
+    for x in lst:
+        if x == item:
+            n = n + 1
+    n
+
+fn shape_of(src: text, target: text) -> BinderShape:
+    val file = "testdata/if_val_binder_payload_spec.spl"
+    val parsed = parse_full_frontend(src, file, "if_val_binder_payload_spec", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(hir)
+    var callees: [text] = []
+    var ne_compares = 0
+    for function in mir.functions.values():
+        if not (function.name == target or function.name.ends_with("." + target)):
+            continue
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                callees = callees.push(name)
+                            case _: pass
+                    case MirInstKind.BinOp(_, MirBinOp.Ne, _, _):
+                        ne_compares = ne_compares + 1
+                    case _: pass
+    BinderShape(callees: callees, ne_compares: ne_compares, errors: lowering.errors.len())
+
+val BOOL_IF_VAL_SRC = "fn flag_opt(b: bool) -> bool?:\n    if b: return false\n    nil\n\nfn main() -> i64:\n    if val w = flag_opt(true):\n        print(w)\n    else:\n        print(\"none\")\n    0\n"
+
+val BOOL_SLOT_SRC = "fn main() -> i64:\n    val mp: text? = nil\n    val hm: bool = mp.?\n    if hm: return 1\n    0\n"
+
+val STRUCT_IF_VAL_SRC = "struct Box:\n    n: i64\n\nfn box_opt(b: bool) -> Box?:\n    if b: return Some(Box(n: 7))\n    nil\n\nfn main() -> i64:\n    var out: [Box] = []\n    if val got = box_opt(true):\n        out = out.push(got)\n    out.len()\n"
+
+describe "if-val binder lowering":
+    it "binds the bool payload and keeps a real nil test":
+        step("lower `if val w = flag_opt(true)` with a bool? callee")
+        val shape = shape_of(BOOL_IF_VAL_SRC, "main")
+        expect(shape.ne_compares >= 1).to_equal(true)
+        expect(shape.errors).to_equal(0)
+
+    it "still lowers an annotated bool slot of a text? .? as presence":
+        step("lower `val hm: bool = mp.?`")
+        val shape = shape_of(BOOL_SLOT_SRC, "main")
+        expect(count_of(shape.callees, "rt_is_some") >= 1).to_equal(true)
+        expect(shape.errors).to_equal(0)
+
+    it "never decodes a struct Option binder as a wide integer":
+        step("lower `if val got = box_opt(true)` with a struct Option")
+        val shape = shape_of(STRUCT_IF_VAL_SRC, "main")
+        expect(count_of(shape.callees, "rt_value_as_int_wide")).to_equal(0)
+        expect(shape.errors).to_equal(0)
