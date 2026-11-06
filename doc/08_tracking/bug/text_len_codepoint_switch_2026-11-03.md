@@ -1,10 +1,10 @@
-# text.len() returns bytes, violating ADR-005 (2026-11-06)
+# text.len() returns bytes, violating ADR-005 (row text_len_codepoint_switch_2026-11-03)
 
-- **ID:** text_len_returns_bytes_violates_adr005_2026-11-06
+- **ID:** text_len_codepoint_switch_2026-11-03 (existing staging row; audit added 2026-11-06)
 - **Severity:** P2 — **Status:** open (switch held until phase 3 passes)
 - **Decision:** ADR-005 (`doc/04_architecture/adr/ADR-005-text-index-yields-char.md`, owner 2026-11-06):
   `s.len()` = code points, `s.byte_len()` = bytes. No new methods, no `count()` alias.
-- **Related:** `text_len_codepoint_switch_2026-11-03` (staging row), JIT `byte_len` boxing fix (separate PR, other worker).
+- **Related:** JIT `byte_len` boxing fix (separate PR, other worker).
 
 ## Repro (seed `bin/simple.exe run`, release 0b2c3d015b7)
 
