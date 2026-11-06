@@ -165,6 +165,26 @@ BOOTSTRAP_TREE_RSS_PHASE_BASE_DEFAULT_KIB=$BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB
 # 7200 s internal / 14400 s row / 28800 s campaign; a hung worker is still
 # killed at the scaled limit.
 BOOTSTRAP_TREE_RSS_TIMEOUT_SCALE_MAX=4
+# compiler_cli_build ROW cap of the whole-build phase, KiB (60 GiB; owner
+# decision 2026-11-06). Applies to that one row only, when the plan runs
+# >= 2 workers below it; a host budget that holds those workers but not this
+# cap is refused up front, and the cap requires serial tool rows
+# (bootstrap_tree_rss_whole_build_plan). One worker / small hosts: plan cap.
+# Measured, run 11 (2026-11-06, release/1.0.0 e4c8830efc7, Stage 2 binary
+# sha256 7daae128..., 121 GiB aarch64, host budget 63800400 KiB): with
+# SIMPLE_MIR_SHARD_COUNT=8 the row was killed at the 54525952 KiB plan cap
+# (rss-cap-exceeded, peak_rss_kib=54579388) in native_compile of MIR shard 1
+# (20/382): two MIR shard workers sampled at 24.0 and 25.2 GiB plus a
+# ~1.1 GiB coordinator; host MemAvailable never fell below 35 GiB. Why a row
+# cap and not a higher worker FLOOR: the floor was measured for HIR
+# load_sources and prices every full-CLI row; raising it would also re-price
+# test_runner_build and the other rows, which did not exceed the plan. 60 GiB
+# leaves ~8.5 GiB over the measured 2 x 25.2 + 1.1 GiB. The rows run SERIALLY
+# here (BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1 in bootstrap-from-scratch.sh),
+# so the campaign envelope is the largest row cap, not a sum
+# (bootstrap_tree_rss_campaign_envelope). Record:
+# doc/08_tracking/bug/stage2_compiler_cli_build_mir_shard_share_unbounded_2026-11-06.md
+BOOTSTRAP_TREE_RSS_PHASE_CLI_ROW_CAP_KIB=62914560
 
 # bootstrap_tree_rss_worker_mem_mib REPO_ROOT -> per-worker MiB (always valid).
 bootstrap_tree_rss_worker_mem_mib() {
@@ -657,6 +677,9 @@ bootstrap_tree_rss_whole_build_plan() {
   bootstrap_tree_rss_plan_bound=refused
   bootstrap_tree_rss_plan_timeout_scale=1
   bootstrap_tree_rss_plan_summary=
+  bootstrap_tree_rss_plan_cli_row_cap_kib=0
+  bootstrap_tree_rss_plan_cli_row_ceiling_kib=0
+  bootstrap_tree_rss_plan_cli_row_bound=refused
   bootstrap_tree_rss_source=default
   [ -n "$btr_wb_requested" ] && [ "$btr_wb_requested" -ge 1 ] && [ "$btr_wb_requested" -le 128 ] || {
     bootstrap_tree_rss_refusal="tree RSS policy: whole-build phase worker count must be a decimal 1..128, got '${1:-}'"
@@ -730,7 +753,39 @@ bootstrap_tree_rss_whole_build_plan() {
     btr_wb_price="SMALL-HOST MODE: 1 worker under host budget (one-worker requirement $btr_wb_one KiB = $btr_wb_price exceeds it)"
   fi
   bootstrap_tree_rss_plan_timeout_scale=$(bootstrap_tree_rss_timeout_scale "$btr_wb_requested" "$bootstrap_tree_rss_plan_workers")
-  bootstrap_tree_rss_plan_summary="whole-build phase: workers ${bootstrap_tree_rss_plan_workers} (requested ${btr_wb_requested}, host budget fits ${btr_wb_fit}, timeout scale x${bootstrap_tree_rss_plan_timeout_scale}), cap ${bootstrap_tree_rss_plan_cap_kib} KiB = ${btr_wb_price}$([ "$btr_wb_small" = 1 ] || printf ' x %s' "$bootstrap_tree_rss_plan_workers"), host budget ${btr_wb_budget} KiB (${btr_wb_budget_bound}; host RAM via ${bootstrap_tree_rss_host_total_source}), default ceiling ${btr_wb_default_ceiling} KiB, elevated ceiling ${bootstrap_tree_rss_plan_ceiling_kib} KiB, bound ${bootstrap_tree_rss_plan_bound}"
+  # compiler_cli_build row (BOOTSTRAP_TREE_RSS_PHASE_CLI_ROW_CAP_KIB): the
+  # plan cap by default (one worker, small host, or a plan already above it);
+  # the row cap when >= 2 workers run and it is above the plan cap. A host
+  # budget (same bound admission applies) that holds the 2-worker plan but
+  # not the row cap is REFUSED, never left at the plan cap run 11 died at;
+  # one build thread (one MIR worker) is the documented way through. The row
+  # cap is the campaign envelope (max, not sum) only for serial tool rows,
+  # so it also requires BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1.
+  bootstrap_tree_rss_plan_cli_row_cap_kib=$bootstrap_tree_rss_plan_cap_kib
+  bootstrap_tree_rss_plan_cli_row_ceiling_kib=$bootstrap_tree_rss_plan_ceiling_kib
+  bootstrap_tree_rss_plan_cli_row_bound=$bootstrap_tree_rss_plan_bound
+  btr_wb_cli=$BOOTSTRAP_TREE_RSS_PHASE_CLI_ROW_CAP_KIB
+  btr_wb_cli_note=
+  if [ "$btr_wb_small" = 0 ] && [ "$bootstrap_tree_rss_plan_workers" -ge 2 ] &&
+     [ "$btr_wb_cli" -gt "$bootstrap_tree_rss_plan_cap_kib" ]; then
+    if [ "$btr_wb_cli" -le "$btr_wb_budget" ]; then
+      bootstrap_tree_rss_plan_cli_row_cap_kib=$btr_wb_cli
+      bootstrap_tree_rss_plan_cli_row_ceiling_kib=0
+      [ "$btr_wb_cli" -le "$btr_wb_default_ceiling" ] || bootstrap_tree_rss_plan_cli_row_ceiling_kib=$btr_wb_cli
+      bootstrap_tree_rss_plan_cli_row_bound=cli-row-mir-shards
+      btr_wb_cli_note="; compiler_cli_build row cap ${btr_wb_cli} KiB (bound cli-row-mir-shards)"
+    else
+      bootstrap_tree_rss_refusal="tree RSS policy: compiler_cli_build row needs ${btr_wb_cli} KiB with ${bootstrap_tree_rss_plan_workers} MIR workers (run 11: ${bootstrap_tree_rss_plan_cap_kib} KiB is not enough) but the host budget ${btr_wb_budget} KiB (${btr_wb_budget_bound}) cannot hold it; free host memory, or pin the phase to one build thread (one MIR worker)"
+      bootstrap_tree_rss_plan_bound=refused
+      return 1
+    fi
+    [ "${BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY:-2}" = 1 ] || {
+      bootstrap_tree_rss_refusal="tree RSS policy: the compiler_cli_build row cap ${btr_wb_cli} KiB is the campaign envelope (the largest row cap, not a sum) and requires serial tool rows: BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1, got '${BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY:-unset (verifier default 2)}'"
+      bootstrap_tree_rss_plan_bound=refused
+      return 1
+    }
+  fi
+  bootstrap_tree_rss_plan_summary="whole-build phase: workers ${bootstrap_tree_rss_plan_workers} (requested ${btr_wb_requested}, host budget fits ${btr_wb_fit}, timeout scale x${bootstrap_tree_rss_plan_timeout_scale}), cap ${bootstrap_tree_rss_plan_cap_kib} KiB = ${btr_wb_price}$([ "$btr_wb_small" = 1 ] || printf ' x %s' "$bootstrap_tree_rss_plan_workers"), host budget ${btr_wb_budget} KiB (${btr_wb_budget_bound}; host RAM via ${bootstrap_tree_rss_host_total_source}), default ceiling ${btr_wb_default_ceiling} KiB, elevated ceiling ${bootstrap_tree_rss_plan_ceiling_kib} KiB, bound ${bootstrap_tree_rss_plan_bound}${btr_wb_cli_note}"
 }
 
 # bootstrap_tree_rss_whole_build_export REQUESTED_WORKERS [REPO_ROOT]
@@ -764,6 +819,10 @@ bootstrap_tree_rss_whole_build_export() {
   # Attribution is rebuilt by bootstrap_tree_rss_scaled_timeout per phase.
   BOOTSTRAP_VERIFY_TIMEOUT_SOURCE=
   bootstrap_tree_rss_plan_timeout_scale=1
+  # The compiler_cli_build row cap is published only by an admitted
+  # enforce-mode plan below; never inherited from a caller.
+  unset SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB \
+    SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND
   if [ -n "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-}" ]; then
     # Kept as-is, but admitted NOW (over-ceiling is refused here, not by the
     # campaign minutes later) and the requested count is published unchanged
@@ -801,7 +860,133 @@ bootstrap_tree_rss_whole_build_export() {
   SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=$bootstrap_tree_rss_plan_bound
   export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB BOOTSTRAP_VERIFY_BUILD_THREADS \
     SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND
+  # compiler_cli_build row cap: published for the row owner
+  # (bootstrap_tree_rss_row_cap_enter) and the campaign envelope only in
+  # enforce mode (monitor mode cannot admit an elevated ceiling), and
+  # re-admitted NOW through the same owner check as the phase pair, so a host
+  # that cannot hold it refuses the phase here instead of mid-row.
+  if [ "$bootstrap_tree_rss_plan_cli_row_cap_kib" -gt "$bootstrap_tree_rss_plan_cap_kib" ] &&
+     [ "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" = enforce ]; then
+    btr_we_cli_refusal=$(
+      SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$bootstrap_tree_rss_plan_cli_row_cap_kib
+      SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=$bootstrap_tree_rss_plan_cli_row_bound
+      if [ "$bootstrap_tree_rss_plan_cli_row_ceiling_kib" -gt 0 ]; then
+        SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=$bootstrap_tree_rss_plan_cli_row_ceiling_kib
+        export SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB
+      fi
+      bootstrap_tree_rss_resolve "$bootstrap_tree_rss_plan_workers" "${2:-}" || {
+        printf '%s' "${bootstrap_tree_rss_refusal:-refused}"
+        exit 1
+      }
+    ) || {
+      bootstrap_tree_rss_refusal="tree RSS policy: compiler_cli_build row cap $bootstrap_tree_rss_plan_cli_row_cap_kib KiB not admitted: $btr_we_cli_refusal"
+      return 1
+    }
+    SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB=$bootstrap_tree_rss_plan_cli_row_cap_kib
+    SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB=$bootstrap_tree_rss_plan_cli_row_ceiling_kib
+    SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND=$bootstrap_tree_rss_plan_cli_row_bound
+    export SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB \
+      SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND
+  fi
   bootstrap_tree_rss_resolve "$bootstrap_tree_rss_plan_workers" "${2:-}" || return 1
+}
+
+# Validate the published compiler_cli_build row cap against the published
+# phase pair. Sets btr_rc_cap/_ceiling/_bound; returns 1 with
+# bootstrap_tree_rss_refusal on anything malformed or incoherent (fail closed).
+bootstrap_tree_rss__cli_row_published() {
+  btr_rc_cap=$SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB
+  btr_rc_ceiling=${SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB:-}
+  btr_rc_bound=${SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND:-}
+  btr_rc_phase=${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-}
+  case "$btr_rc_cap" in ''|0*|*[!0-9]*)
+    bootstrap_tree_rss_refusal="tree RSS policy: SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB must be a canonical positive decimal KiB value, got '$btr_rc_cap'"; return 1 ;;
+  esac
+  case "$btr_rc_ceiling" in 0) ;; ''|0*|*[!0-9]*)
+    bootstrap_tree_rss_refusal="tree RSS policy: SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB must be 0 or a canonical positive decimal KiB value, got '$btr_rc_ceiling'"; return 1 ;;
+  esac
+  [ "${#btr_rc_cap}" -le 15 ] && [ "${#btr_rc_ceiling}" -le 15 ] || {
+    bootstrap_tree_rss_refusal='tree RSS policy: compiler_cli_build row cap/ceiling is oversized'; return 1;
+  }
+  bootstrap_tree_rss_attribution_valid "$btr_rc_bound" || {
+    bootstrap_tree_rss_refusal="tree RSS policy: invalid SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND '$btr_rc_bound' (want [a-z][a-z-]{0,31})"; return 1;
+  }
+  case "$btr_rc_phase" in ''|0*|*[!0-9]*)
+    bootstrap_tree_rss_refusal="tree RSS policy: compiler_cli_build row cap $btr_rc_cap KiB published without a published phase cap"; return 1 ;;
+  esac
+  [ "${#btr_rc_phase}" -le 15 ] && [ "$btr_rc_cap" -gt "$btr_rc_phase" ] || {
+    bootstrap_tree_rss_refusal="tree RSS policy: compiler_cli_build row cap $btr_rc_cap KiB is at or below the phase cap $btr_rc_phase KiB"; return 1;
+  }
+  [ "$btr_rc_ceiling" = 0 ] || [ "$btr_rc_ceiling" -ge "$btr_rc_cap" ] || {
+    bootstrap_tree_rss_refusal="tree RSS policy: compiler_cli_build row cap $btr_rc_cap KiB is above its ceiling $btr_rc_ceiling KiB"; return 1;
+  }
+}
+
+# bootstrap_tree_rss_row_cap_enter TASK / bootstrap_tree_rss_row_cap_leave
+# Scope the published compiler_cli_build row cap (whole_build_export) around
+# that ONE row: the row owner then sees cap/ceiling/bound for the row, and
+# leave restores the phase pair exactly (set-ness included) for the next row.
+# Any other TASK, or no published row cap, is a no-op. Returns 1 with
+# bootstrap_tree_rss_refusal when the published row cap is malformed: the
+# caller must fail the row, never run it at the phase cap or a default.
+bootstrap_tree_rss_row_cap_enter() {
+  bootstrap_tree_rss_refusal=
+  btr_rc_active=0
+  [ "${1:-}" = compiler_cli_build ] || return 0
+  [ -n "${SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB+x}" ] || return 0
+  bootstrap_tree_rss__cli_row_published || return 1
+  [ "${BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY:-2}" = 1 ] || {
+    bootstrap_tree_rss_refusal="tree RSS policy: compiler_cli_build row cap $btr_rc_cap KiB requires serial tool rows (BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1, got '${BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY:-unset}'): the campaign envelope is the largest row cap, not a sum"
+    return 1
+  }
+  btr_rc_prev_cap=$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+  btr_rc_prev_bound_set=${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND+x}
+  btr_rc_prev_bound=${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND-}
+  btr_rc_prev_ceiling_set=${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB+x}
+  btr_rc_prev_ceiling=${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB-}
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$btr_rc_cap
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=$btr_rc_bound
+  export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND
+  if [ "$btr_rc_ceiling" != 0 ]; then
+    SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=$btr_rc_ceiling
+    export SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB
+  fi
+  btr_rc_active=1
+}
+
+bootstrap_tree_rss_row_cap_leave() {
+  [ "${btr_rc_active:-0}" = 1 ] || return 0
+  btr_rc_active=0
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$btr_rc_prev_cap
+  if [ -n "$btr_rc_prev_bound_set" ]; then
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=$btr_rc_prev_bound
+  else
+    unset SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND
+  fi
+  if [ -n "$btr_rc_prev_ceiling_set" ]; then
+    SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=$btr_rc_prev_ceiling
+  else
+    unset SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB
+  fi
+}
+
+# bootstrap_tree_rss_campaign_envelope
+# The campaign watchdog wraps every row of the phase, which run serially, so
+# its cap is the LARGEST published row cap: the compiler_cli_build row cap
+# when published (with its ceiling), else the phase pair. The receipt keeps
+# the phase's own bound (the row receipt carries cli-row-mir-shards). Sets
+# bootstrap_tree_rss_campaign_{cap_kib,ceiling_kib,bound}; ceiling_kib is
+# empty when no elevated ceiling is published. Returns 1 with
+# bootstrap_tree_rss_refusal on a malformed published row cap.
+bootstrap_tree_rss_campaign_envelope() {
+  bootstrap_tree_rss_refusal=
+  bootstrap_tree_rss_campaign_cap_kib=${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-5859375}
+  bootstrap_tree_rss_campaign_ceiling_kib=${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:-}
+  bootstrap_tree_rss_campaign_bound=${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND:-unspecified}
+  [ -n "${SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB+x}" ] || return 0
+  bootstrap_tree_rss__cli_row_published || return 1
+  bootstrap_tree_rss_campaign_cap_kib=$btr_rc_cap
+  [ "$btr_rc_ceiling" = 0 ] || bootstrap_tree_rss_campaign_ceiling_kib=$btr_rc_ceiling
 }
 
 # Worker count of a compiler command line: the value of the last --threads /
@@ -830,6 +1015,10 @@ bootstrap_tree_rss__selftest() {
   btr_st_dir=$(mktemp -d "${TMPDIR:-/tmp}/tree-rss-policy.XXXXXX") || return 2
   btr_st_fail=0
   btr_st_n=0
+  # Stage 2 runs its tool rows serially (bootstrap-from-scratch.sh); the
+  # compiler_cli_build row cap requires it. Cases that need otherwise say so.
+  BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1
+  export BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY
   printf 'MemTotal:       134094232 kB\n' >"$btr_st_dir/big"
   printf 'MemTotal:        16000000 kB\n' >"$btr_st_dir/small"
   printf 'MemTotal:         5000000 kB\n' >"$btr_st_dir/tiny"
@@ -839,6 +1028,9 @@ bootstrap_tree_rss__selftest() {
   printf 'MemTotal:       127600812 kB\nMemFree:        90000000 kB\nMemAvailable:   112044352 kB\n' >"$btr_st_dir/aarch64"
   printf 'MemTotal:       127600812 kB\nMemFree:        30000000 kB\nMemAvailable:    40000000 kB\n' >"$btr_st_dir/aarch64-busy"
   printf 'MemTotal:        66865260 kB\nMemAvailable:    60000000 kB\n' >"$btr_st_dir/host64"
+  # Same host, a lane holding ~40 GiB: 3/4 of 80000000 = 60000000 KiB still
+  # fits 2 workers (54525952) but not the 62914560 KiB compiler_cli_build row.
+  printf 'MemTotal:       127600812 kB\nMemFree:        70000000 kB\nMemAvailable:    80000000 kB\n' >"$btr_st_dir/aarch64-tight"
   printf 'host_config:\n  schema: simple-host-config-v1\n  tree_rss_per_job_mib: 200\n' >"$btr_st_dir/good.sdn"
   printf 'host_config:\n  schema: simple-host-config-v1\n  tree_rss_per_job_mib: many\n' >"$btr_st_dir/bad.sdn"
   printf 'host_config:\n  schema: simple-host-config-v1\n  tree_rss_host_pct: 90\n' >"$btr_st_dir/pct.sdn"
@@ -1072,6 +1264,105 @@ bootstrap_tree_rss__selftest() {
   btr_st_plan junk-workers-refused aarch64 8x 'REFUSED=worker count must be a decimal 1..128'
   btr_st_plan zero-workers-refused aarch64 0 'REFUSED=worker count must be a decimal 1..128'
   btr_st_plan pct-over-max-refused aarch64 8 'REFUSED=exceeds 75' SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=90
+  # compiler_cli_build row cap (run 11, 2026-11-06): a 2-worker plan prices
+  # that ONE row at BOOTSTRAP_TREE_RSS_PHASE_CLI_ROW_CAP_KIB when the host
+  # budget holds it; every other row keeps the plan cap, and the plan cap
+  # itself is unchanged. cli-plan LABEL MEMINFO REQUESTED WANT [SETUP]
+  #   WANT = row_cap:row_ceiling:row_bound:plan_cap:plan_ceiling
+  btr_st_cli_plan() {
+    btr_st_n=$((btr_st_n + 1))
+    btr_st_got=$(
+      unset SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT SIMPLE_HOST_TREE_RSS_HOST_PCT SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+      unset SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB SIMPLE_HOST_CONFIG SIMPLE_HOST_ENV_FILE
+      SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
+      BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$btr_st_dir/$2"
+      BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1
+      BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1
+      [ -z "${5:-}" ] || eval "$5"
+      bootstrap_tree_rss_whole_build_plan "$3" '' || { printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal"; exit 0; }
+      printf '%s:%s:%s:%s:%s' "${bootstrap_tree_rss_plan_cli_row_cap_kib:-unset}" \
+        "${bootstrap_tree_rss_plan_cli_row_ceiling_kib:-unset}" "${bootstrap_tree_rss_plan_cli_row_bound:-unset}" \
+        "$bootstrap_tree_rss_plan_cap_kib" "$bootstrap_tree_rss_plan_ceiling_kib"
+    )
+    case "$4" in
+      REFUSED=*) case "$btr_st_got" in REFUSED=*"${4#REFUSED=}"*) return 0 ;; esac ;;
+      *) [ "$btr_st_got" = "$4" ] && return 0 ;;
+    esac
+    echo "selftest FAIL: cli-plan-$1: want $4 got $btr_st_got" >&2
+    btr_st_fail=1
+  }
+  # Run-11 host: 60 GiB row, admitted as an elevated ceiling; phase stays 52 GiB.
+  btr_st_cli_plan aarch64-cli-row-60g aarch64 8 62914560:62914560:cli-row-mir-shards:54525952:54525952
+  btr_st_cli_plan big-cli-row-60g big 12 62914560:62914560:cli-row-mir-shards:54525952:54525952
+  # Budget 60000000 holds 2 workers (54525952) but not the 62914560 row that
+  # run 11 proved necessary: refused up front, naming the row and the budget
+  # (never silently the 52 GiB cap run 11 died at) ...
+  btr_st_cli_plan aarch64-tight-refused aarch64-tight 8 'REFUSED=compiler_cli_build row needs 62914560 KiB'
+  btr_st_cli_plan aarch64-tight-names-budget aarch64-tight 8 'REFUSED=host budget 60000000 KiB'
+  # ... unless the row is pinned to one MIR worker (one build thread).
+  btr_st_cli_plan aarch64-tight-one-worker aarch64-tight 1 29360128:0:worker-floor:29360128:0
+  # The campaign envelope is the max row cap, valid only for serial tool rows.
+  btr_st_cli_plan concurrent-tool-rows-refused aarch64 8 'REFUSED=BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1' BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=2
+  btr_st_cli_plan unset-concurrency-refused aarch64 8 'REFUSED=BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1' 'unset BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY'
+  btr_st_cli_plan concurrency-irrelevant-one-worker aarch64 1 29360128:0:worker-floor:29360128:0 BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=2
+  # One worker (no MIR shard pair) or a plan already above 60 GiB: unchanged.
+  btr_st_cli_plan one-worker-keeps-plan aarch64 1 29360128:0:worker-floor:29360128:0
+  btr_st_cli_plan host64-keeps-plan host64 8 29360128:0:worker-floor:29360128:0
+  btr_st_cli_plan pct75-keeps-plan aarch64 8 79691776:79691776:worker-floor-elevated:79691776:79691776 SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=75
+  btr_st_cli_plan small-host-keeps-plan small 8 12000000:0:small-host-one-worker:12000000:0
+  # Row / campaign consumers of a PUBLISHED plan (enforce-mode values, no host
+  # probe): row-cap TASK SETUP -> cap:ceiling:bound inside, then restored.
+  btr_st_pub='SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=54525952 SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=54525952
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=worker-floor-elevated
+    SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB=62914560 SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB=62914560
+    SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND=cli-row-mir-shards BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1'
+  btr_st_row() {
+    btr_st_n=$((btr_st_n + 1))
+    btr_st_got=$(
+      unset SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND \
+        BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY
+      eval "export $3"
+      bootstrap_tree_rss_row_cap_enter "$2" || { printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal"; exit 0; }
+      btr_st_in="$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:-unset}:$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND"
+      bootstrap_tree_rss_row_cap_leave
+      printf '%s|%s:%s:%s' "$btr_st_in" "$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB" \
+        "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:-unset}" "$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND"
+    )
+    case "$4" in
+      REFUSED=*) case "$btr_st_got" in REFUSED=*"${4#REFUSED=}"*) return 0 ;; esac ;;
+      *) [ "$btr_st_got" = "$4" ] && return 0 ;;
+    esac
+    echo "selftest FAIL: row-cap-$1: want $4 got $btr_st_got" >&2
+    btr_st_fail=1
+  }
+  btr_st_back='54525952:54525952:worker-floor-elevated'
+  btr_st_row cli-gets-60g compiler_cli_build "$btr_st_pub" "62914560:62914560:cli-row-mir-shards|$btr_st_back"
+  btr_st_row runner-keeps-plan test_runner_build "$btr_st_pub" "$btr_st_back|$btr_st_back"
+  btr_st_row mcp-keeps-plan mcp_build "$btr_st_pub" "$btr_st_back|$btr_st_back"
+  btr_st_row cli-without-row-cap compiler_cli_build 'SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=54525952 SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=54525952 SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=worker-floor-elevated' \
+    "$btr_st_back|$btr_st_back"
+  btr_st_row malformed-row-cap-refused compiler_cli_build "$btr_st_pub SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB=6x" 'REFUSED=CLI_ROW_CAP_KIB'
+  btr_st_row row-cap-below-phase-refused compiler_cli_build "$btr_st_pub SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB=1000" 'REFUSED=below the phase cap'
+  btr_st_row concurrent-rows-refused compiler_cli_build "$btr_st_pub BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=2" 'REFUSED=BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1'
+  btr_st_row runner-ignores-concurrency test_runner_build "$btr_st_pub BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=2" "$btr_st_back|$btr_st_back"
+  btr_st_row row-cap-over-ceiling-refused compiler_cli_build "$btr_st_pub SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB=60000000" 'REFUSED=above its ceiling'
+  btr_st_row row-cap-without-phase-refused compiler_cli_build 'SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB=62914560 SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB=62914560 SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND=cli-row-mir-shards' \
+    'REFUSED=without a published phase cap'
+  # The campaign watchdog encloses every (serial) row, so its envelope is the
+  # largest row cap; without a published row cap it is the phase pair.
+  btr_st_n=$((btr_st_n + 1))
+  btr_st_got=$(
+    eval "export $btr_st_pub"
+    bootstrap_tree_rss_campaign_envelope || { printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal"; exit 0; }
+    printf '%s:%s:%s' "$bootstrap_tree_rss_campaign_cap_kib" "$bootstrap_tree_rss_campaign_ceiling_kib" "$bootstrap_tree_rss_campaign_bound"
+    unset SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND
+    bootstrap_tree_rss_campaign_envelope || exit 0
+    printf '|%s:%s:%s' "$bootstrap_tree_rss_campaign_cap_kib" "$bootstrap_tree_rss_campaign_ceiling_kib" "$bootstrap_tree_rss_campaign_bound"
+  )
+  [ "$btr_st_got" = "62914560:62914560:worker-floor-elevated|54525952:54525952:worker-floor-elevated" ] || {
+    echo "selftest FAIL: campaign envelope: got $btr_st_got" >&2
+    btr_st_fail=1
+  }
   # Export under a fixture (monitor mode only, by the probe's own gate): the
   # elevated plan is clamped to the default ceiling, no ceiling env is set,
   # the thread count is the fitted one, and the pair re-admits.
@@ -1085,8 +1376,9 @@ bootstrap_tree_rss__selftest() {
     bootstrap_tree_rss_whole_build_export 8 '' || { printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal"; exit 0; }
     printf '%s:%s:%s:%s:%s:%s' "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-}" "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:-unset}" \
       "${BOOTSTRAP_VERIFY_BUILD_THREADS:-}" "$bootstrap_tree_rss_plan_bound" "$bootstrap_tree_rss_cap_kib" "$bootstrap_tree_rss_source"
+    printf ':%s' "${SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB:-unset}"
   )
-  [ "$btr_st_got" = '50331648:unset:2:worker-floor-monitor-clamped:50331648:phase-policy' ] || {
+  [ "$btr_st_got" = '50331648:unset:2:worker-floor-monitor-clamped:50331648:phase-policy:unset' ] || {
     echo "selftest FAIL: whole-build export under monitor fixture: got $btr_st_got" >&2
     btr_st_fail=1
   }
@@ -1261,10 +1553,12 @@ case "${0##*/}" in
       --whole-build-plan)
         [ "$#" -ge 2 ] || { echo "usage: $0 --whole-build-plan WORKERS [REPO_ROOT]" >&2; exit 2; }
         if bootstrap_tree_rss_whole_build_plan "$2" "${3:-}"; then
-          printf 'workers=%s\ncap_kib=%s\nceiling_kib=%s\nbudget_kib=%s\nbound=%s\nhost_total_kib=%s\nhost_available_kib=%s\nhost_total_source=%s\nsummary=%s\n' \
+          printf 'workers=%s\ncap_kib=%s\nceiling_kib=%s\nbudget_kib=%s\nbound=%s\ncli_row_cap_kib=%s\ncli_row_ceiling_kib=%s\ncli_row_bound=%s\nhost_total_kib=%s\nhost_available_kib=%s\nhost_total_source=%s\nsummary=%s\n' \
             "$bootstrap_tree_rss_plan_workers" "$bootstrap_tree_rss_plan_cap_kib" \
             "$bootstrap_tree_rss_plan_ceiling_kib" "$bootstrap_tree_rss_plan_budget_kib" \
-            "$bootstrap_tree_rss_plan_bound" "$bootstrap_tree_rss_host_total_kib" \
+            "$bootstrap_tree_rss_plan_bound" "$bootstrap_tree_rss_plan_cli_row_cap_kib" \
+            "$bootstrap_tree_rss_plan_cli_row_ceiling_kib" "$bootstrap_tree_rss_plan_cli_row_bound" \
+            "$bootstrap_tree_rss_host_total_kib" \
             "$bootstrap_tree_rss_host_available_kib" "$bootstrap_tree_rss_host_total_source" \
             "$bootstrap_tree_rss_plan_summary"
         else

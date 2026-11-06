@@ -3236,8 +3236,15 @@ impl MirLowering:
                 if typed_value == nil and pat.has_type_:
                     match pat.type_.kind:
                         case HirTypeKind.Str:
-                            bound_value = self.decode_declared_enum_payload_slot(value_local, pat.type_)
-                            self.remember_local_hir_type(bound_value.id, pat.type_, 0, 0)
+                            # Rebuild a fresh scalar-kind HirType instead of
+                            # forwarding the pattern's aggregate `type_`: on
+                            # stage3 native its `span` word arrived as -1 and
+                            # remember_local_hir_type's struct copy faulted
+                            # (F3 test_runner_main AV, s3_fable51). Root class:
+                            # untyped_optional_arm_join_typed_as_i64.
+                            val str_type = HirType(kind: HirTypeKind.Str, span: pat.span)
+                            bound_value = self.decode_declared_enum_payload_slot(value_local, str_type)
+                            self.remember_local_hir_type(bound_value.id, str_type, 0, 0)
                         case _: ()
                 self.local_map[bind_sym.id] = bound_value
                 self.bind_local(bind_sym.id, bound_value)
@@ -7688,7 +7695,7 @@ impl MirLowering:
         Conflicting evidence drops the binder."""
         var bindings: Dict<text, text> = {}
         var conflicted: [text] = []
-        val trace = (env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1"
+        val trace = (_sffi_env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1"
         var index = 0
         while index < args.len() and index < call_param_types.len():
             val call_arg: HirCallArg = args[index]
@@ -7838,7 +7845,7 @@ impl MirLowering:
         erased body; nothing is duplicated or renamed (generics = one erased
         body, 2026-11-01)."""
         val declared_return: HirType? = self.resolved_call_hir_return_type(callee)
-        val trace = (env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1"
+        val trace = (_sffi_env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1"
         if val return_hir = declared_return:
             if not self.hir_type_mentions_type_param(return_hir, self.symbols): return
             val bindings = self.erased_callback_record_bindings_for_call(args, call_param_types, lowered)
@@ -7926,7 +7933,7 @@ impl MirLowering:
             bound_args = bound_args.push(bound)
         val instance = self.substitute_struct_type_params(return_hir, names, bound_args)
         if self.hir_type_mentions_type_param(instance, self.symbols): return
-        if (env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1":
+        if (_sffi_env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1":
             print "[erased-result-instance] result={result.id} params={names.len()} bound={bound_args.len()}"
         self.remember_local_hir_type(result.id, instance, 0, 0)
         val record = self.optional_payload_struct_name(instance)
@@ -8270,7 +8277,7 @@ impl MirLowering:
                                     # word; a record passes through as its
                                     # handle. Give it the call site's layout.
                                     lw.mark_runtime_value_local(argument_local.id)
-                                    if (env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1":
+                                    if (_sffi_env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1":
                                         print "[erased-callback-lift] param={qi} binder={binder_name} bound={self.erased_callback_record_bindings.contains(binder_name)}"
                                     if self.erased_callback_record_bindings.contains(binder_name):
                                         lw.struct_value_syms[argument_local.id] = self.erased_callback_record_bindings[binder_name]
