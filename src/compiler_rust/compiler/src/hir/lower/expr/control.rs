@@ -2336,6 +2336,7 @@ impl Lowerer {
                             | TypeId::U8
                             | TypeId::U16
                             | TypeId::U32
+                            | TypeId::U64
                             | TypeId::F32
                             | TypeId::F64
                     )
