@@ -1,0 +1,47 @@
+# @req REQ-SSPEC-COMPILER
+# Declaration recovery must remove exactly one explicit Option/Result layer.
+use std.spec
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn declared_unwrap_kind(optional_depth: i64, unwrap_depth: i64) -> i64:
+    val span = Span.empty()
+    var symbols = SymbolTable.new()
+    val owner = symbols.define("DeclaredReader", SymbolKind.Trait, nil, span, Visibility.Public, false, nil)
+    var type_ = HirType(kind: HirTypeKind.Named(owner, []), span: span)
+    var depth = 0
+    while depth < optional_depth:
+        type_ = HirType(kind: HirTypeKind.Optional(type_), span: span)
+        depth = depth + 1
+    val binding = symbols.define("reader", SymbolKind.Variable, Some(type_), span, Visibility.Private, false, nil)
+    var expression = HirExpr(kind: HirExprKind.Var(binding), has_type_: false,
+        type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
+    depth = 0
+    while depth < unwrap_depth:
+        expression = HirExpr(kind: HirExprKind.Unwrap(expression), has_type_: false,
+            type_: HirType(kind: HirTypeKind.Unit, span: span), span: span)
+        depth = depth + 1
+    val lowering = MirLowering.new_for_target(symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    if val found = lowering.receiver_declared_type(expression):
+        if lowering.native_trait_owner_for_kind(found.kind) != "": return 1
+        match found.kind:
+            case HirTypeKind.Optional(_): return 2
+            case _: return 3
+    0
+
+describe "native trait declaration recovery through explicit unwrap":
+    it "preserves an optional receiver until an unwrap is present":
+        expect(declared_unwrap_kind(1, 0)).to_equal(2)
+    it "recovers the exact trait after one explicit unwrap":
+        expect(declared_unwrap_kind(1, 1)).to_equal(1)
+    it "does not erase a second optional layer implicitly":
+        expect(declared_unwrap_kind(2, 1)).to_equal(2)
+    it "recovers nested optional payloads through two explicit unwraps":
+        expect(declared_unwrap_kind(2, 2)).to_equal(1)
+    it "does not invent a payload for a nonoptional trait":
+        expect(declared_unwrap_kind(0, 1)).to_equal(0)
