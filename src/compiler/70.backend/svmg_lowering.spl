@@ -260,16 +260,17 @@ impl _Lowerer:
                 case HirBinOp.Shr: Some(if is_signed: OP_SAR else: OP_SHR)
                 case _: nil
 
-    # `e` is float-typed if it's a float literal, a Binary expr with a
-    # float-typed operand (transitively), or otherwise carries a checked
-    # Float type -- covers both literal-driven and variable-driven float
-    # expressions without requiring every intermediate node to be re-typed.
+    # Classify the emitted result, not merely the presence of float operands.
+    # Comparisons emit Bool words; arithmetic requires compatible operands.
+    # Other forms use their checked HIR result type, including calls/IntLit.
     fn expr_is_float(e: HirExpr) -> bool:
         match e.kind:
-            case HirExprKind.FloatLit(_, _): true
-            case HirExprKind.FloatLexeme(_, _): true
-            case HirExprKind.Binary(_, left, right):
-                self.expr_is_float(left) or self.expr_is_float(right)
+            case HirExprKind.FloatLit(_, _) | HirExprKind.FloatLexeme(_, _): true
+            case HirExprKind.Binary(op, left, right):
+                match op:
+                    case HirBinOp.Add | HirBinOp.Sub | HirBinOp.Mul | HirBinOp.Div:
+                        self.expr_is_float(left) and self.expr_is_float(right)
+                    case _: false
             case _:
                 if e.has_type_:
                     match e.type_.kind:
@@ -324,7 +325,11 @@ impl _Lowerer:
             return
         match e.kind:
             case HirExprKind.IntLit(value, _):
-                self.emit_pushi(value)
+                if self.expr_is_float(e):
+                    self.emit_op(OP_PUSHF)
+                    self.emit_imm32(f32_to_bits(value as f32) as i64)
+                else:
+                    self.emit_pushi(value)
             case HirExprKind.FloatLit(value, _):
                 self.emit_op(OP_PUSHF)
                 self.emit_imm32(f32_to_bits(value as f32) as i64)
@@ -336,7 +341,15 @@ impl _Lowerer:
             case HirExprKind.NamedVar(symbol, _):
                 self.load_local(symbol)
             case HirExprKind.Binary(op, left, right):
-                val is_float = self.expr_is_float(left) or self.expr_is_float(right)
+                val left_is_float = self.expr_is_float(left)
+                val right_is_float = self.expr_is_float(right)
+                # Every nested Binary passes this boundary, including helper
+                # bodies and conditional branches with checked result types.
+                # The VM has no implicit conversion between integer/float bits.
+                if left_is_float != right_is_float:
+                    self.fail("mixed integer/float binary operands are unsupported in the SVM-G v1 lowering subset")
+                    return
+                val is_float = left_is_float and right_is_float
                 val maybe_opcode = self.binop_opcode(op, is_float, self.expr_is_signed_i32(left))
                 if val opcode = maybe_opcode:
                     self.lower_expr(left)
@@ -690,14 +703,21 @@ impl _Lowerer:
                     case _: nil
                 if val sym = target_sym:
                     if val compound_op = op:
-                        val is_float = self.expr_is_float(target) or self.expr_is_float(value)
-                        val maybe_opcode = self.assign_opcode(compound_op, is_float, self.expr_is_signed_i32(target))
-                        if val opcode = maybe_opcode:
-                            self.compound_assign(sym, opcode, value)
-                        elif is_float:
-                            self.fail("unsupported compound-assignment operator on float operands (only + - * / lower to SVM-G v1 float opcodes; no float REM/bitwise/shift opcode exists)")
+                        val target_is_float = self.expr_is_float(target)
+                        val supported_operands = if target_is_float:
+                            self.expr_is_float(value)
                         else:
-                            self.fail("unsupported compound-assignment operator in the SVM-G v1 lowering subset")
+                            not self.expr_is_float(value)
+                        if not supported_operands:
+                            self.fail("mixed integer/float compound assignment or unproven floating RHS is unsupported in the SVM-G v1 lowering subset")
+                        else:
+                            val maybe_opcode = self.assign_opcode(compound_op, target_is_float, self.expr_is_signed_i32(target))
+                            if val opcode = maybe_opcode:
+                                self.compound_assign(sym, opcode, value)
+                            elif target_is_float:
+                                self.fail("unsupported compound-assignment operator on float operands (only + - * / lower to SVM-G v1 float opcodes; no float REM/bitwise/shift opcode exists)")
+                            else:
+                                self.fail("unsupported compound-assignment operator in the SVM-G v1 lowering subset")
                     else:
                         self.store_local_expr(sym, value)
                 else:

@@ -148,3 +148,20 @@ The lowering was correct (it does emit "...on float operands..."). The spec's
 fell to the generic "unsupported expression construct" arm (also the cause of
 the "array index out of bounds" failures). Fixed in the spec helper only;
 no assertion changed.
+
+## Release integration: numeric representation follow-up
+
+The current release source implements integer printing, floating compound
+arithmetic and signed right shifts. The node-attribute/MIR branch preserves
+those implementations and adds a narrower correctness follow-up: classify an
+expression's result rather than treating every expression containing a float
+as a float. Comparisons produce Boolean words. Mixed integer/float binary
+operations fail explicitly at the common lowering boundary, including nested
+helper bodies, rather than reinterpreting bits without a conversion.
+
+Integer literals carrying checked Float types use the existing floating
+constant emission path. Checked float helper results remain supported. The
+integrated suite has 53 authored examples (12 additions over the release
+baseline), including reference-VM value checks and refusal controls. Those
+new cases remain unexecuted pending the admitted self-hosted runner; source
+review and whitespace validation are not runtime qualification.

@@ -148,6 +148,147 @@ fn expect_vm_shift_result(result: VmRunResult, expected: i64):
 # Positive cases
 # ============================================================================
 
+fn guarded_float_compound_body(rhs: HirExpr) -> HirBlock:
+    val symbol = SymbolId(id: 100)
+    val target = HirExpr(kind: HirExprKind.Var(symbol), has_type_: true,
+        type_: float_ty(), span: Span.empty())
+    block_no_tail([
+        s(HirStmtKind.Let(symbol, float_ty(), float_lit(1.0))),
+        assign(target, HirAssignOp.Add, rhs),
+        s(HirStmtKind.Expr(expect_to_equal(target, float_lit(3.5)))),
+    ])
+
+describe "SVM-G float compound result representation":
+    it "executes a Float-typed integer literal through a helper and compound assignment":
+        step("Convert a checked Float integer literal to float bits before VM arithmetic")
+        var literal = int_lit(2)
+        literal.has_type_ = true
+        literal.type_ = float_ty()
+        val helper = SvmgHelperFn(name: "typed_integer_value", params: [],
+            body: block_with_tail([], literal))
+        var rhs = call(named_var(SymbolId(id: 104), "typed_integer_value"), [])
+        rhs.has_type_ = true
+        rhs.type_ = float_ty()
+        val symbol = SymbolId(id: 105)
+        val target = HirExpr(kind: HirExprKind.Var(symbol), has_type_: true,
+            type_: float_ty(), span: Span.empty())
+        val body = block_no_tail([
+            s(HirStmtKind.Expr(expect_to_equal(literal, float_lit(2.0)))),
+            s(HirStmtKind.Let(symbol, float_ty(), float_lit(1.0))),
+            assign(target, HirAssignOp.Add, rhs),
+            s(HirStmtKind.Expr(expect_to_equal(target, float_lit(3.0)))),
+        ])
+        val result = run_print_body(body, [helper])
+        expect_vm_print_log(result, "")
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records.len(), 2)
+        assert_equal(records[0].passed, 1)
+        assert_equal(records[0].value, expected_signed_i32_bits(2.0))
+        assert_equal(records[1].passed, 1)
+        assert_equal(records[1].value, expected_signed_i32_bits(3.0))
+
+    it "rejects direct mixed binary operands before emitting arithmetic":
+        step("Ordinary binary lowering must not reinterpret integer bits as float")
+        val body = block_no_tail([s(HirStmtKind.Expr(
+            binop(HirBinOp.Add, int_lit(1), float_lit(2.0))))])
+        val prog = lower_svmg_program(body, [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "mixed integer/float binary operands")
+
+    it "rejects mixed binary operands hidden by a checked helper result":
+        step("A Float call result cannot bypass validation of its helper body")
+        val helper = SvmgHelperFn(name: "mixed_value", params: [],
+            body: block_with_tail([], binop(HirBinOp.Add, int_lit(1), float_lit(1.5))))
+        var rhs = call(named_var(SymbolId(id: 103), "mixed_value"), [])
+        rhs.has_type_ = true
+        rhs.type_ = float_ty()
+        val prog = lower_svmg_program(guarded_float_compound_body(rhs), [helper], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "mixed integer/float binary operands")
+
+    it "rejects mixed binary operands hidden by a checked conditional result":
+        step("Typed conditional branches still validate their arithmetic operands")
+        var rhs = e(HirExprKind.If(
+            cond: binop(HirBinOp.Eq, int_lit(1), int_lit(1)),
+            then_: block_with_tail([], binop(HirBinOp.Add, int_lit(1), float_lit(1.5))),
+            else_: block_with_tail([], float_lit(2.5))))
+        rhs.has_type_ = true
+        rhs.type_ = float_ty()
+        val prog = lower_svmg_program(guarded_float_compound_body(rhs), [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "mixed integer/float binary operands")
+
+    it "rejects a float comparison used as a floating binary operand":
+        step("A comparison emits Bool bits rather than its operands' float representation")
+        val body = block_no_tail([s(HirStmtKind.Expr(binop(HirBinOp.Add,
+            binop(HirBinOp.Lt, float_lit(1.0), float_lit(2.0)), float_lit(1.0))))])
+        val prog = lower_svmg_program(body, [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "mixed integer/float binary operands")
+
+    it "executes a recursively floating arithmetic RHS":
+        step("Preserve floating arithmetic expression admission")
+        val body = guarded_float_compound_body(binop(HirBinOp.Add, float_lit(2.0), float_lit(0.5)))
+        val result = run_print_body(body, [])
+        expect_vm_print_log(result, "")
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records.len(), 1)
+        assert_equal(records[0].passed, 1)
+        assert_equal(records[0].value, expected_signed_i32_bits(3.5))
+
+    it "preserves a known helper call with a checked float result":
+        step("A supported helper returning a float remains a valid compound RHS")
+        val helper = SvmgHelperFn(name: "float_value", params: [],
+            body: block_with_tail([], float_lit(2.5)))
+        var rhs = call(named_var(SymbolId(id: 101), "float_value"), [])
+        rhs.has_type_ = true
+        rhs.type_ = float_ty()
+        val result = run_print_body(guarded_float_compound_body(rhs), [helper])
+        expect_vm_print_log(result, "")
+        val records = read_records(result.arena, result.log_cap, result.record_count)
+        assert_equal(records.len(), 1)
+        assert_equal(records[0].passed, 1)
+        assert_equal(records[0].value, expected_signed_i32_bits(3.5))
+
+    it "rejects an integer RHS for a float compound target":
+        step("Do not reinterpret an integer RHS as floating bits")
+        val prog = lower_svmg_program(guarded_float_compound_body(int_lit(1)), [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "mixed integer/float compound assignment")
+
+    it "rejects a float RHS for an integer compound target":
+        step("Do not reinterpret integer target storage as floating bits")
+        val symbol = SymbolId(id: 100)
+        val body = block_no_tail([
+            s(HirStmtKind.Let(symbol, ty(), int_lit(1))),
+            assign(var_(symbol), HirAssignOp.Add, float_lit(1.0)),
+        ])
+        val prog = lower_svmg_program(body, [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "mixed integer/float compound assignment")
+
+    it "rejects mixed numeric operands nested inside a float RHS":
+        step("A floating outer operation cannot hide a mixed inner operation")
+        val rhs = binop(HirBinOp.Mul, float_lit(3.0),
+            binop(HirBinOp.Add, int_lit(1), float_lit(2.0)))
+        val prog = lower_svmg_program(guarded_float_compound_body(rhs), [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "mixed integer/float compound assignment")
+
+    it "rejects a floating comparison result as a float compound RHS":
+        step("Comparisons produce Bool words even when their operands are floats")
+        val rhs = binop(HirBinOp.Lt, float_lit(1.0), float_lit(2.0))
+        val prog = lower_svmg_program(guarded_float_compound_body(rhs), [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "unproven floating RHS")
+
+    it "rejects an unknown call result without checked result metadata":
+        step("Do not guess an untyped call result from its name")
+        val rhs = call(named_var(SymbolId(id: 102), "unknown_float"), [])
+        val prog = lower_svmg_program(guarded_float_compound_body(rhs), [], 1000)
+        assert_false(prog.ok)
+        assert_contains(prog.error, "unproven floating RHS")
+
 describe "SVM-G Task D4 lowering — expect(add(1,2)).to_equal(3)":
     # @manual scenario evidence
     it "lowers a non-recursive helper-fn call plus expect().to_equal() and executes it correctly on D2's VM":
