@@ -4,7 +4,7 @@
 # the SMFAPK1 directory wire and cross-checks it against both that catalog and
 # the dynSMF manifest.  Admission never guesses an export symbol or ABI.
 
-use compiler.backend.linker.smf_header.{smf_header_field_shift, smf_header_size_at, smf_header_seed_trailer_offset, SMF_SEED_HEADER_SIZE}
+use compiler.backend.linker.smf_header.{smf_header_field_shift, smf_header_size_at, smf_header_trailer_offset, SMF_SEED_HEADER_SIZE, SMF_VERSION_MINOR}
 use std.common.string_core.{bytes_to_text}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.common.aspect_pack.{
@@ -170,13 +170,15 @@ fn _aspect_pack_outer_header_offset(data: [u8]) -> i64:
     if data.len() < SMF_SEED_HEADER_SIZE:
         return -1
     val trailer = data.len() - ASPECT_PACK_OUTER_SMF_HEADER_SIZE
-    # Packed v1.1 header: 128 bytes. Rust seed repr(C) header: 96 bytes with a
-    # +4 field shift (canonical decoder: compiler.backend.linker.smf_header).
+    # v1.3 header: 96 bytes at EOF-96 (+4 field shift); legacy packed: 128
+    # bytes at EOF-128. One precedence for every reader (canonical decoder:
+    # compiler.backend.linker.smf_header).
     val leading_magic = _aspect_pack_outer_magic_at(data, 0) and
         (data.len() >= ASPECT_PACK_OUTER_SMF_HEADER_SIZE or smf_header_field_shift(data, 0) == 4)
-    val trailer_magic = data.len() >= ASPECT_PACK_OUTER_SMF_HEADER_SIZE and _aspect_pack_outer_magic_at(data, trailer)
-    val seed_trailer = if trailer_magic: -1 else: smf_header_seed_trailer_offset(data)
-    val other_start = if trailer_magic: trailer else: seed_trailer
+    val trailer_start = smf_header_trailer_offset(data)
+    val trailer_magic = trailer_start >= 0 and trailer_start == trailer
+    val seed_trailer = if trailer_start >= 0 and not trailer_magic: trailer_start else: -1
+    val other_start = trailer_start
     if leading_magic and other_start > 0:
         return -2
     if leading_magic:
@@ -209,7 +211,7 @@ fn aspect_pack_directory_parse_from_outer_smf_bytes(data: [u8]) -> AspectPackDir
         return _aspect_pack_parse_error("ASPECT_PACK_OUTER_AMBIGUOUS_HEADER", "outer SMF has both leading and trailer magic")
     if header_offset < 0:
         return _aspect_pack_parse_error("ASPECT_PACK_OUTER_BAD_HEADER", "outer SMF has no bounded v1.1 header")
-    if data[header_offset + 4] != 1 or data[header_offset + 5] != 1:
+    if data[header_offset + 4] != 1 or data[header_offset + 5] < 1 or data[header_offset + 5] > SMF_VERSION_MINOR:
         return _aspect_pack_parse_error("ASPECT_PACK_OUTER_BAD_VERSION", "outer SMF version is unsupported")
     val flags = _aspect_pack_read_u32(data, header_offset + 8)
     if (flags & 0x40) == 0 or (flags & 0x01) != 0:
