@@ -166,9 +166,10 @@ BOOTSTRAP_TREE_RSS_PHASE_BASE_DEFAULT_KIB=$BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB
 # killed at the scaled limit.
 BOOTSTRAP_TREE_RSS_TIMEOUT_SCALE_MAX=4
 # compiler_cli_build ROW cap of the whole-build phase, KiB (60 GiB; owner
-# decision 2026-11-06). Applies to that one row only, and only when the plan
-# runs >= 2 workers, the plan cap is below it and the host budget holds it;
-# otherwise the row keeps the plan cap (bootstrap_tree_rss_whole_build_plan).
+# decision 2026-11-06). Applies to that one row only, when the plan runs
+# >= 2 workers below it; a host budget that holds those workers but not this
+# cap is refused up front, and the cap requires serial tool rows
+# (bootstrap_tree_rss_whole_build_plan). One worker / small hosts: plan cap.
 # Measured, run 11 (2026-11-06, release/1.0.0 e4c8830efc7, Stage 2 binary
 # sha256 7daae128..., 121 GiB aarch64, host budget 63800400 KiB): with
 # SIMPLE_MIR_SHARD_COUNT=8 the row was killed at the 54525952 KiB plan cap
@@ -753,8 +754,13 @@ bootstrap_tree_rss_whole_build_plan() {
   fi
   bootstrap_tree_rss_plan_timeout_scale=$(bootstrap_tree_rss_timeout_scale "$btr_wb_requested" "$bootstrap_tree_rss_plan_workers")
   # compiler_cli_build row (BOOTSTRAP_TREE_RSS_PHASE_CLI_ROW_CAP_KIB): the
-  # plan cap by default; the row cap when >= 2 workers run, it is above the
-  # plan cap and the host budget (same bound admission applies) holds it.
+  # plan cap by default (one worker, small host, or a plan already above it);
+  # the row cap when >= 2 workers run and it is above the plan cap. A host
+  # budget (same bound admission applies) that holds the 2-worker plan but
+  # not the row cap is REFUSED, never left at the plan cap run 11 died at;
+  # one build thread (one MIR worker) is the documented way through. The row
+  # cap is the campaign envelope (max, not sum) only for serial tool rows,
+  # so it also requires BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1.
   bootstrap_tree_rss_plan_cli_row_cap_kib=$bootstrap_tree_rss_plan_cap_kib
   bootstrap_tree_rss_plan_cli_row_ceiling_kib=$bootstrap_tree_rss_plan_ceiling_kib
   bootstrap_tree_rss_plan_cli_row_bound=$bootstrap_tree_rss_plan_bound
@@ -769,8 +775,15 @@ bootstrap_tree_rss_whole_build_plan() {
       bootstrap_tree_rss_plan_cli_row_bound=cli-row-mir-shards
       btr_wb_cli_note="; compiler_cli_build row cap ${btr_wb_cli} KiB (bound cli-row-mir-shards)"
     else
-      btr_wb_cli_note="; compiler_cli_build row cap ${btr_wb_cli} KiB exceeds host budget ${btr_wb_budget} KiB, row keeps the plan cap"
+      bootstrap_tree_rss_refusal="tree RSS policy: compiler_cli_build row needs ${btr_wb_cli} KiB with ${bootstrap_tree_rss_plan_workers} MIR workers (run 11: ${bootstrap_tree_rss_plan_cap_kib} KiB is not enough) but the host budget ${btr_wb_budget} KiB (${btr_wb_budget_bound}) cannot hold it; free host memory, or pin the phase to one build thread (one MIR worker)"
+      bootstrap_tree_rss_plan_bound=refused
+      return 1
     fi
+    [ "${BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY:-2}" = 1 ] || {
+      bootstrap_tree_rss_refusal="tree RSS policy: the compiler_cli_build row cap ${btr_wb_cli} KiB is the campaign envelope (the largest row cap, not a sum) and requires serial tool rows: BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1, got '${BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY:-unset (verifier default 2)}'"
+      bootstrap_tree_rss_plan_bound=refused
+      return 1
+    }
   fi
   bootstrap_tree_rss_plan_summary="whole-build phase: workers ${bootstrap_tree_rss_plan_workers} (requested ${btr_wb_requested}, host budget fits ${btr_wb_fit}, timeout scale x${bootstrap_tree_rss_plan_timeout_scale}), cap ${bootstrap_tree_rss_plan_cap_kib} KiB = ${btr_wb_price}$([ "$btr_wb_small" = 1 ] || printf ' x %s' "$bootstrap_tree_rss_plan_workers"), host budget ${btr_wb_budget} KiB (${btr_wb_budget_bound}; host RAM via ${bootstrap_tree_rss_host_total_source}), default ceiling ${btr_wb_default_ceiling} KiB, elevated ceiling ${bootstrap_tree_rss_plan_ceiling_kib} KiB, bound ${bootstrap_tree_rss_plan_bound}${btr_wb_cli_note}"
 }
@@ -922,6 +935,10 @@ bootstrap_tree_rss_row_cap_enter() {
   [ "${1:-}" = compiler_cli_build ] || return 0
   [ -n "${SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB+x}" ] || return 0
   bootstrap_tree_rss__cli_row_published || return 1
+  [ "${BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY:-2}" = 1 ] || {
+    bootstrap_tree_rss_refusal="tree RSS policy: compiler_cli_build row cap $btr_rc_cap KiB requires serial tool rows (BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1, got '${BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY:-unset}'): the campaign envelope is the largest row cap, not a sum"
+    return 1
+  }
   btr_rc_prev_cap=$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
   btr_rc_prev_bound_set=${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND+x}
   btr_rc_prev_bound=${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND-}
@@ -956,7 +973,8 @@ bootstrap_tree_rss_row_cap_leave() {
 # bootstrap_tree_rss_campaign_envelope
 # The campaign watchdog wraps every row of the phase, which run serially, so
 # its cap is the LARGEST published row cap: the compiler_cli_build row cap
-# when published (with its ceiling and bound), else the phase pair. Sets
+# when published (with its ceiling), else the phase pair. The receipt keeps
+# the phase's own bound (the row receipt carries cli-row-mir-shards). Sets
 # bootstrap_tree_rss_campaign_{cap_kib,ceiling_kib,bound}; ceiling_kib is
 # empty when no elevated ceiling is published. Returns 1 with
 # bootstrap_tree_rss_refusal on a malformed published row cap.
@@ -969,7 +987,6 @@ bootstrap_tree_rss_campaign_envelope() {
   bootstrap_tree_rss__cli_row_published || return 1
   bootstrap_tree_rss_campaign_cap_kib=$btr_rc_cap
   [ "$btr_rc_ceiling" = 0 ] || bootstrap_tree_rss_campaign_ceiling_kib=$btr_rc_ceiling
-  bootstrap_tree_rss_campaign_bound=$btr_rc_bound
 }
 
 # Worker count of a compiler command line: the value of the last --threads /
@@ -998,6 +1015,10 @@ bootstrap_tree_rss__selftest() {
   btr_st_dir=$(mktemp -d "${TMPDIR:-/tmp}/tree-rss-policy.XXXXXX") || return 2
   btr_st_fail=0
   btr_st_n=0
+  # Stage 2 runs its tool rows serially (bootstrap-from-scratch.sh); the
+  # compiler_cli_build row cap requires it. Cases that need otherwise say so.
+  BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1
+  export BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY
   printf 'MemTotal:       134094232 kB\n' >"$btr_st_dir/big"
   printf 'MemTotal:        16000000 kB\n' >"$btr_st_dir/small"
   printf 'MemTotal:         5000000 kB\n' >"$btr_st_dir/tiny"
@@ -1256,22 +1277,34 @@ bootstrap_tree_rss__selftest() {
       SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
       BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$btr_st_dir/$2"
       BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1
+      BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1
       [ -z "${5:-}" ] || eval "$5"
       bootstrap_tree_rss_whole_build_plan "$3" '' || { printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal"; exit 0; }
       printf '%s:%s:%s:%s:%s' "${bootstrap_tree_rss_plan_cli_row_cap_kib:-unset}" \
         "${bootstrap_tree_rss_plan_cli_row_ceiling_kib:-unset}" "${bootstrap_tree_rss_plan_cli_row_bound:-unset}" \
         "$bootstrap_tree_rss_plan_cap_kib" "$bootstrap_tree_rss_plan_ceiling_kib"
     )
-    [ "$btr_st_got" = "$4" ] || {
-      echo "selftest FAIL: cli-plan-$1: want $4 got $btr_st_got" >&2
-      btr_st_fail=1
-    }
+    case "$4" in
+      REFUSED=*) case "$btr_st_got" in REFUSED=*"${4#REFUSED=}"*) return 0 ;; esac ;;
+      *) [ "$btr_st_got" = "$4" ] && return 0 ;;
+    esac
+    echo "selftest FAIL: cli-plan-$1: want $4 got $btr_st_got" >&2
+    btr_st_fail=1
   }
   # Run-11 host: 60 GiB row, admitted as an elevated ceiling; phase stays 52 GiB.
   btr_st_cli_plan aarch64-cli-row-60g aarch64 8 62914560:62914560:cli-row-mir-shards:54525952:54525952
   btr_st_cli_plan big-cli-row-60g big 12 62914560:62914560:cli-row-mir-shards:54525952:54525952
-  # Budget 60000000 < 62914560: the host cannot afford it -> row keeps the plan cap.
-  btr_st_cli_plan aarch64-tight-keeps-plan aarch64-tight 8 54525952:54525952:worker-floor-elevated:54525952:54525952
+  # Budget 60000000 holds 2 workers (54525952) but not the 62914560 row that
+  # run 11 proved necessary: refused up front, naming the row and the budget
+  # (never silently the 52 GiB cap run 11 died at) ...
+  btr_st_cli_plan aarch64-tight-refused aarch64-tight 8 'REFUSED=compiler_cli_build row needs 62914560 KiB'
+  btr_st_cli_plan aarch64-tight-names-budget aarch64-tight 8 'REFUSED=host budget 60000000 KiB'
+  # ... unless the row is pinned to one MIR worker (one build thread).
+  btr_st_cli_plan aarch64-tight-one-worker aarch64-tight 1 29360128:0:worker-floor:29360128:0
+  # The campaign envelope is the max row cap, valid only for serial tool rows.
+  btr_st_cli_plan concurrent-tool-rows-refused aarch64 8 'REFUSED=BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1' BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=2
+  btr_st_cli_plan unset-concurrency-refused aarch64 8 'REFUSED=BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1' 'unset BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY'
+  btr_st_cli_plan concurrency-irrelevant-one-worker aarch64 1 29360128:0:worker-floor:29360128:0 BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=2
   # One worker (no MIR shard pair) or a plan already above 60 GiB: unchanged.
   btr_st_cli_plan one-worker-keeps-plan aarch64 1 29360128:0:worker-floor:29360128:0
   btr_st_cli_plan host64-keeps-plan host64 8 29360128:0:worker-floor:29360128:0
@@ -1282,11 +1315,12 @@ bootstrap_tree_rss__selftest() {
   btr_st_pub='SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=54525952 SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=54525952
     SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=worker-floor-elevated
     SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB=62914560 SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB=62914560
-    SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND=cli-row-mir-shards'
+    SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND=cli-row-mir-shards BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1'
   btr_st_row() {
     btr_st_n=$((btr_st_n + 1))
     btr_st_got=$(
-      unset SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND
+      unset SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND \
+        BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY
       eval "export $3"
       bootstrap_tree_rss_row_cap_enter "$2" || { printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal"; exit 0; }
       btr_st_in="$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:-unset}:$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND"
@@ -1309,6 +1343,8 @@ bootstrap_tree_rss__selftest() {
     "$btr_st_back|$btr_st_back"
   btr_st_row malformed-row-cap-refused compiler_cli_build "$btr_st_pub SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB=6x" 'REFUSED=CLI_ROW_CAP_KIB'
   btr_st_row row-cap-below-phase-refused compiler_cli_build "$btr_st_pub SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB=1000" 'REFUSED=below the phase cap'
+  btr_st_row concurrent-rows-refused compiler_cli_build "$btr_st_pub BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=2" 'REFUSED=BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1'
+  btr_st_row runner-ignores-concurrency test_runner_build "$btr_st_pub BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=2" "$btr_st_back|$btr_st_back"
   btr_st_row row-cap-over-ceiling-refused compiler_cli_build "$btr_st_pub SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB=60000000" 'REFUSED=above its ceiling'
   btr_st_row row-cap-without-phase-refused compiler_cli_build 'SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB=62914560 SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB=62914560 SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND=cli-row-mir-shards' \
     'REFUSED=without a published phase cap'
@@ -1323,7 +1359,7 @@ bootstrap_tree_rss__selftest() {
     bootstrap_tree_rss_campaign_envelope || exit 0
     printf '|%s:%s:%s' "$bootstrap_tree_rss_campaign_cap_kib" "$bootstrap_tree_rss_campaign_ceiling_kib" "$bootstrap_tree_rss_campaign_bound"
   )
-  [ "$btr_st_got" = "62914560:62914560:cli-row-mir-shards|54525952:54525952:worker-floor-elevated" ] || {
+  [ "$btr_st_got" = "62914560:62914560:worker-floor-elevated|54525952:54525952:worker-floor-elevated" ] || {
     echo "selftest FAIL: campaign envelope: got $btr_st_got" >&2
     btr_st_fail=1
   }

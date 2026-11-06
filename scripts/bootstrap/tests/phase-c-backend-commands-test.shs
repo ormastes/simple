@@ -30,6 +30,30 @@ SIMPLE_FILE_WORKERS=3
 bootstrap_phase_c_run_tool_build llvm cli producer entry.spl output cache 8
 [ "${actual%% *}" = fw=0 ] && [ "$SIMPLE_FILE_WORKERS" = 3 ] || { echo 'FAIL SIMPLE_FILE_WORKERS not restored'; exit 1; }
 unset SIMPLE_FILE_WORKERS
+# Row RSS cap (run 11, 2026-11-06): a published compiler_cli_build row cap is
+# seen by that row only, inside run_matrix_task, and the phase pair comes
+# back afterwards; other tasks never see it; a malformed one runs nothing.
+run_matrix_task() { actual="cap=${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-unset}:${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:-unset}:${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND:-unset}"; }
+export BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1 SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=54525952 \
+    SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=54525952 SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=worker-floor-elevated \
+    SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB=62914560 SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB=62914560 \
+    SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND=cli-row-mir-shards
+bootstrap_phase_c_run_tool_build llvm compiler_cli_build producer entry.spl output cache 2
+[ "$actual" = 'cap=62914560:62914560:cli-row-mir-shards' ] || { echo "FAIL cli row did not see its row cap: $actual"; exit 1; }
+[ "$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:$SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND" = \
+    54525952:54525952:worker-floor-elevated ] || { echo 'FAIL cli row cap leaked past the row'; exit 1; }
+bootstrap_phase_c_run_tool_build llvm test_runner_build producer entry.spl output cache 2
+[ "$actual" = 'cap=54525952:54525952:worker-floor-elevated' ] || { echo "FAIL test_runner_build saw a row cap: $actual"; exit 1; }
+actual=not-run
+row_status=0
+SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB=60g bootstrap_phase_c_run_tool_build llvm compiler_cli_build producer entry.spl output cache 2 2>/dev/null || row_status=$?
+[ "$actual" = not-run ] && [ "$row_status" = 125 ] && [ "$bootstrap_phase_c_policy_refused" = 1 ] ||
+    { echo "FAIL malformed cli row cap was not refused (status $row_status, $actual)"; exit 1; }
+unset BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB \
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB \
+    SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND
+run_matrix_task() { actual="fw=${SIMPLE_FILE_WORKERS:-unset} $*"; mir_count="${SIMPLE_MIR_SHARD_COUNT:-unset}"; }
+bootstrap_phase_c_run_tool_build llvm cli producer entry.spl output cache 8
 # argv[0] must be the compiler and argv[1] native-build once run_task strips
 # its --verification-* flags: an `env VAR=...` prefix bypassed the verifier's
 # Stage 2 block, the toolchain pin and the tree-RSS owner (run 6, 2026-11-06).

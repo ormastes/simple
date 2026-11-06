@@ -146,15 +146,24 @@ keep 8 MIR shards, keep every other row's cap. Implemented in the policy owner
 (`scripts/bootstrap/lib/tree-rss-policy.shs`,
 `BOOTSTRAP_TREE_RSS_PHASE_CLI_ROW_CAP_KIB`): the whole-build plan computes a
 separate row cap (only with >= 2 workers, above the plan cap and within the
-host budget; otherwise the plan cap), the export publishes it
+host budget), the export publishes it
 (`SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_{CAP_KIB,CEILING_KIB,BOUND}`, enforce mode
 only) and re-admits it before the phase starts; `bootstrap_tree_rss_row_cap_enter`
 scopes it around that one row (receipt `cap_bound=cli-row-mir-shards`), and
 `bootstrap_tree_rss_campaign_envelope` raises the campaign envelope to the
-largest row cap. The phase cap itself stays 54525952 for every other row. A
-higher worker FLOOR was not used because it would re-price every full-CLI row.
+largest row cap (its receipt keeps the phase bound). The phase cap itself stays
+54525952 for every other row. A higher worker FLOOR was not used because it
+would re-price every full-CLI row.
 
-Risk: run 11's `[hir-shard]` line reports a cgroup `memory.max` of 67108864 KiB
+Fail-closed rules (review follow-up): a host budget that holds the 2-worker
+plan but not 62914560 KiB is refused up front ("compiler_cli_build row needs
+62914560 KiB ..."), never run at the 52 GiB cap run 11 died at; one build
+thread (one MIR worker) and small hosts keep the plan cap. Because the
+campaign envelope is the max row cap, not a sum, the row cap also requires
+`BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1` (both Stage 2 entry points pin it);
+anything else is refused at plan time and at row entry.
+
+Known limit (not handled): the policy does not read cgroup `memory.max`. Run 11's `[hir-shard]` line reports a cgroup `memory.max` of 67108864 KiB
 (64 GiB); a 60 GiB tree leaves ~4 GiB before the kernel OOM-kills ahead of the
 watchdog. The compiler's own effective shard budget (cgroup - headroom = 40 GiB)
 is unchanged; only the watchdog kill line moved. This does not fix the

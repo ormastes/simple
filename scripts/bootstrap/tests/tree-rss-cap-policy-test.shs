@@ -182,7 +182,9 @@ ok
 #     headroom reason otherwise, and a host too small for one worker is a
 #     policy refusal naming the 16 GiB floor. No branch is a skip.
 plan_status=0
-plan=$(sh "$policy" --whole-build-plan 8 "" 2>"$scratch/plan.err") || plan_status=$?
+# Serial tool rows, as both Stage 2 entry points pin them (required by the
+# compiler_cli_build row cap).
+plan=$(BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1 sh "$policy" --whole-build-plan 8 "" 2>"$scratch/plan.err") || plan_status=$?
 if [ "$plan_status" -eq 0 ]; then
     plan_workers=$(printf '%s\n' "$plan" | sed -n 's/^workers=//p')
     plan_cap=$(printf '%s\n' "$plan" | sed -n 's/^cap_kib=//p')
@@ -225,6 +227,8 @@ if [ "$plan_status" -eq 0 ]; then
     else
         fail "whole-build plan pair not admitted: exit $guard_status: $(tail -3 "$scratch/plan.env.out")"
     fi
+elif grep -Fq 'compiler_cli_build row needs 62914560 KiB' "$scratch/plan.err"; then
+    : # host budget holds 2 workers but not the run-11 cli row: refused up front
 else
     grep -Fq 'cannot fit one full-CLI build worker' "$scratch/plan.err" &&
         grep -Fq 'worker floor 16777216 KiB' "$scratch/plan.err" ||
@@ -310,7 +314,7 @@ ok
 # Run-6 replay with the real elevated pair for 2 build threads. Admitted ->
 # the row runs at the plan cap under the elevated ceiling; refused -> only for
 # real headroom (125). Never the default budget.
-if replay_plan=$(sh "$policy" --whole-build-plan 2 "" 2>/dev/null); then
+if replay_plan=$(BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1 sh "$policy" --whole-build-plan 2 "" 2>/dev/null); then
     replay_cap=$(printf '%s\n' "$replay_plan" | sed -n 's/^cap_kib=//p')
     replay_ceiling=$(printf '%s\n' "$replay_plan" | sed -n 's/^ceiling_kib=//p')
     replay_bound=$(printf '%s\n' "$replay_plan" | sed -n 's/^bound=//p')
@@ -344,7 +348,8 @@ ok
 #     environment is restored afterwards. Small numbers keep this under the
 #     default ceiling (no host headroom needed); the plan numbers
 #     (62914560 on the run-11 host) are pinned by the policy selftest.
-tool_row_cap_env="SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=5859375
+tool_row_cap_env="BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1
+SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=5859375
 SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy
 SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=worker-floor
 SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB=6291456
@@ -386,44 +391,36 @@ tool_row tool-cli-bad.env $tool_row_cap_env SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CA
     grep -Fq 'CLI_ROW_CAP_KIB' "$scratch/tool-cli-bad.env.out" ||
     fail "malformed compiler_cli_build row cap was not refused (exit $tool_status): $(tail -2 "$scratch/tool-cli-bad.env.out")"
 ok
-# Run-11 replay with the REAL plan on this host: when the plan publishes a
-# row cap, the real owner runs compiler_cli_build at it under the elevated
-# ceiling (admitted against real host memory), or refuses for real headroom
-# (125) -- never at the phase cap and never the default budget.
-if replay_plan=$(sh "$policy" --whole-build-plan 8 "" 2>/dev/null); then
-    replay_cap=$(printf '%s\n' "$replay_plan" | sed -n 's/^cap_kib=//p')
-    replay_ceiling=$(printf '%s\n' "$replay_plan" | sed -n 's/^ceiling_kib=//p')
-    replay_bound=$(printf '%s\n' "$replay_plan" | sed -n 's/^bound=//p')
-    replay_row_cap=$(printf '%s\n' "$replay_plan" | sed -n 's/^cli_row_cap_kib=//p')
-    replay_row_ceiling=$(printf '%s\n' "$replay_plan" | sed -n 's/^cli_row_ceiling_kib=//p')
-    replay_row_bound=$(printf '%s\n' "$replay_plan" | sed -n 's/^cli_row_bound=//p')
-    replay_workers=$(printf '%s\n' "$replay_plan" | sed -n 's/^workers=//p')
-    if [ "$replay_row_cap" -gt "$replay_cap" ]; then
-        [ "$replay_row_bound" = cli-row-mir-shards ] && [ "$replay_row_cap" = 62914560 ] ||
-            fail "run-11 replay: unexpected row cap $replay_row_cap/$replay_row_bound"
-        replay_ceiling_kv=SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy
-        [ "$replay_ceiling" -eq 0 ] || replay_ceiling_kv=SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=$replay_ceiling
-        tool_row tool-run11.env SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB="$replay_cap" "$replay_ceiling_kv" \
-            SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND="$replay_bound" \
-            SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB="$replay_row_cap" SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB="$replay_row_ceiling" \
-            SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND="$replay_row_bound"
-        if [ "$tool_status" -eq 7 ]; then
-            [ "$(field tool-run11.env rss_limit_kib)" = 62914560 ] &&
-                [ "$(field tool-run11.env cap_source)" = phase-policy ] &&
-                [ "$(field tool-run11.env cap_bound)" = cli-row-mir-shards ] &&
-                { [ "$replay_row_ceiling" -eq 0 ] || [ "$(field tool-run11.env compiler_ceiling_admission)" = elevated ]; } ||
-                fail "run-11 replay: compiler_cli_build not run at 62914560: $(grep -E '^(cap_|rss_limit|compiler_ceiling)' "$scratch/tool-run11.env" | tr '\n' ' ')"
-        else
-            [ "$tool_status" -eq 125 ] && grep -Fq 'available_bound=' "$scratch/tool-run11.env.out" ||
-                fail "run-11 replay refused for a non-headroom reason (exit $tool_status): $(tail -3 "$scratch/tool-run11.env.out")"
-        fi
-    else
-        # Host budget below 60 GiB (or 1 worker / plan already above it): the
-        # row keeps the plan cap and bound.
-        [ "$replay_row_cap" = "$replay_cap" ] && [ "$replay_row_bound" = "$replay_bound" ] ||
-            fail "run-11 replay: row cap $replay_row_cap differs from plan cap $replay_cap without elevation (workers $replay_workers)"
-    fi
-fi
+# Run-11 replay, deterministic: the plan priced from an injected run-11 host
+# (MemTotal 127600812, MemAvailable 99095224 at row start; fixture hooks are
+# honoured only in monitor mode) publishes the 60 GiB compiler_cli_build row
+# beside the unchanged 52 GiB phase cap; a host whose budget holds the two
+# workers but not the row is refused up front, naming both numbers.
+printf 'MemTotal:       127600812 kB\nMemFree:        90000000 kB\nMemAvailable:    99095224 kB\n' >"$scratch/meminfo.run11"
+printf 'MemTotal:       127600812 kB\nMemFree:        70000000 kB\nMemAvailable:    80000000 kB\n' >"$scratch/meminfo.tight"
+run11_plan() { # MEMINFO WORKERS [ENV=VALUE ...] -> stdout of --whole-build-plan, status
+    run11_mem=$1 run11_workers=$2; shift 2
+    env SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1 \
+        BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$scratch/$run11_mem" BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1 "$@" \
+        sh "$policy" --whole-build-plan "$run11_workers" "" 2>&1
+}
+replay_plan=$(run11_plan meminfo.run11 8) || fail "run-11 replay plan refused: $replay_plan"
+[ "$(printf '%s\n' "$replay_plan" | sed -n 's/^cap_kib=//p')" = 54525952 ] &&
+    [ "$(printf '%s\n' "$replay_plan" | sed -n 's/^workers=//p')" = 2 ] &&
+    [ "$(printf '%s\n' "$replay_plan" | sed -n 's/^cli_row_cap_kib=//p')" = 62914560 ] &&
+    [ "$(printf '%s\n' "$replay_plan" | sed -n 's/^cli_row_ceiling_kib=//p')" = 62914560 ] &&
+    [ "$(printf '%s\n' "$replay_plan" | sed -n 's/^cli_row_bound=//p')" = cli-row-mir-shards ] ||
+    fail "run-11 replay: unexpected plan: $(printf '%s\n' "$replay_plan" | grep -v '^summary' | tr '\n' ' ')"
+ok
+replay_status=0
+replay_plan=$(run11_plan meminfo.tight 8) || replay_status=$?
+[ "$replay_status" -ne 0 ] && printf '%s' "$replay_plan" | grep -Fq 'compiler_cli_build row needs 62914560 KiB' ||
+    fail "tight host was not refused up front (status $replay_status): $replay_plan"
+ok
+replay_status=0
+replay_plan=$(run11_plan meminfo.run11 8 BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=2) || replay_status=$?
+[ "$replay_status" -ne 0 ] && printf '%s' "$replay_plan" | grep -Fq 'BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1' ||
+    fail "concurrent tool rows were not refused under the row cap (status $replay_status): $replay_plan"
 ok
 
 # 3. Transcribed runner: an over-ceiling explicit cap is refused BEFORE
