@@ -1,24 +1,44 @@
-# Adversarial spec: provider admission must load the exact bytes it hashed.
-# The loader stages the hashed buffer into a private snapshot named by its
-# BLAKE3 hash and opens THAT, never the mutable declared path.
+# Adversarial spec: provider admission must hand dlopen exactly the bytes it
+# hashed. Each admission writes a FRESH snapshot under an unpredictable name
+# (exclusive, no-follow create) in an owner-only, non-symlink directory, and
+# never reuses whatever sits at the BLAKE3 content name.
 
 use std.spec.step
+use os.posix.dynlib.{DynLibKind}
 use os.smf.provider_loader.{
     PROVIDER_ADMISSION_OK,
     PROVIDER_ADMISSION_DIGEST_MISMATCH,
+    PROVIDER_ADMISSION_LOAD_FAILED,
     ProviderAdmissionRequestV1,
     provider_artifact_digest_v1,
-    provider_stage_artifact_snapshot_v1
+    provider_stage_artifact_snapshot_v1,
+    provider_admit_dynamic_with_opener_v1
 }
 use std.common.crypto.blake3.{blake3_hex}
 use std.nogc_sync_mut.sffi.file_bytes.{file_write_bytes_tagged_native}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]?
 extern fn rt_file_read_text(path: text) -> text?
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_env_cwd() -> text?
+use std.nogc_sync_mut.sffi.system.{rt_process_run}
+extern fn rt_file_mode(path: text) -> i64
+extern fn rt_package_create_symlink(target: text, link_path: text) -> i32
 
 val SRC_DIR: text = "build/providers/snapshot_binding_spec"
-val SNAP_DIR: text = "build/provider_snapshot_spec_private"
+
+fn cwd_slash() -> text:
+    (rt_env_cwd() ?? ".").replace("\\", "/")
+
+fn abs_dir(name: text) -> text:
+    val dir = cwd_slash() + "/build/" + name
+    rt_dir_create(dir, true)
+    dir
+
+fn probe_dir() -> text:
+    abs_dir("provider_snapshot_spec_probe")
 
 fn bytes_of(s: text) -> [u8]:
     var out: [u8] = []
@@ -53,54 +73,127 @@ fn write_artifact(name: text, data: [u8]) -> text:
     expect(file_write_bytes_tagged_native(path, data)).to_be(true)
     path
 
+# Recording opener: captures the path and the bytes dlopen would map at the
+# moment of the open, then refuses to load (no native code runs in this spec).
+fn recording_opener(path: text) -> DynLibKind:
+    val probe = probe_dir()
+    rt_file_write_text(probe + "/opened_path.txt", path)
+    file_write_bytes_tagged_native(probe + "/opened_bytes.bin", rt_file_read_bytes(path) ?? [])
+    DynLibKind.Invalid
+
+# Attacker opener: swaps the declared source path just before dlopen runs.
+fn swapping_opener(path: text) -> DynLibKind:
+    file_write_bytes_tagged_native(SRC_DIR + "/swap.so", bytes_of("EVIL-PROVIDER-IMAGE-swap!!"))
+    recording_opener(path)
+
+fn opened_path() -> text:
+    rt_file_read_text(probe_dir() + "/opened_path.txt") ?? ""
+
+fn opened_bytes() -> [u8]:
+    rt_file_read_bytes(probe_dir() + "/opened_bytes.bin") ?? []
+
+fn reset_probe():
+    rt_file_write_text(probe_dir() + "/opened_path.txt", "")
+    file_write_bytes_tagged_native(probe_dir() + "/opened_bytes.bin", [])
+
 describe "provider snapshot binding (swap-after-hash TOCTOU)":
-    it "loads the genuine artifact from a BLAKE3-named private snapshot":
-        step("genuine artifact admitted from its snapshot")
+    it "hands dlopen a fresh snapshot of the genuine artifact":
+        step("genuine artifact reaches dlopen from a private snapshot")
+        reset_probe()
         val genuine = bytes_of("GENUINE-PROVIDER-IMAGE-v1")
         val path = write_artifact("genuine.so", genuine)
-        val staged = provider_stage_artifact_snapshot_v1(
-            request_for(path, provider_artifact_digest_v1(genuine)), SNAP_DIR)
-        expect(staged.status).to_equal(PROVIDER_ADMISSION_OK)
-        expect(staged.load_path == path).to_be(false)
-        expect(staged.load_path.contains(blake3_hex(genuine))).to_be(true)
-        expect(same_bytes(rt_file_read_bytes(staged.load_path) ?? [], genuine)).to_be(true)
+        val dir = abs_dir("provider_snapshot_spec_ok")
+        val result = provider_admit_dynamic_with_opener_v1(
+            request_for(path, provider_artifact_digest_v1(genuine)), dir, recording_opener)
+        expect(result.admission.status).to_equal(PROVIDER_ADMISSION_LOAD_FAILED)
+        expect(opened_path().starts_with(dir + "/")).to_be(true)
+        expect(opened_path() == path).to_be(false)
+        expect(same_bytes(opened_bytes(), genuine)).to_be(true)
 
-    it "keeps loading the hashed bytes when the declared path is swapped after hashing":
-        step("attacker swaps declared path after admission hashed it")
+    it "dlopen receives the hashed bytes even when the source is swapped before open":
+        step("attacker swaps declared path between hashing and dlopen")
+        reset_probe()
         val genuine = bytes_of("GENUINE-PROVIDER-IMAGE-swap")
-        val evil = bytes_of("EVIL-PROVIDER-IMAGE-swap!!")
         val path = write_artifact("swap.so", genuine)
-        val staged = provider_stage_artifact_snapshot_v1(
-            request_for(path, provider_artifact_digest_v1(genuine)), SNAP_DIR)
-        expect(staged.status).to_equal(PROVIDER_ADMISSION_OK)
-        file_write_bytes_tagged_native(path, evil)
-        val loaded = rt_file_read_bytes(staged.load_path) ?? []
-        expect(same_bytes(loaded, genuine)).to_be(true)
-        expect(same_bytes(loaded, evil)).to_be(false)
+        val result = provider_admit_dynamic_with_opener_v1(
+            request_for(path, provider_artifact_digest_v1(genuine)),
+            abs_dir("provider_snapshot_spec_ok"), swapping_opener)
+        expect(same_bytes(rt_file_read_bytes(path) ?? [], genuine)).to_be(false)
+        expect(same_bytes(opened_bytes(), genuine)).to_be(true)
+        expect(result.admission.is_admitted()).to_be(false)
 
-    it "rejects a tampered artifact against the SHA-256 pin":
-        step("tampered artifact is refused before staging")
+    it "rejects a tampered artifact against the SHA-256 pin and never opens it":
+        step("tampered artifact is refused before dlopen")
+        reset_probe()
         val genuine = bytes_of("GENUINE-PROVIDER-IMAGE-tamper")
         val path = write_artifact("tamper.so", bytes_of("TAMPERED-PROVIDER-IMAGE-xx"))
+        val result = provider_admit_dynamic_with_opener_v1(
+            request_for(path, provider_artifact_digest_v1(genuine)),
+            abs_dir("provider_snapshot_spec_ok"), recording_opener)
+        expect(result.admission.status).to_equal(PROVIDER_ADMISSION_DIGEST_MISMATCH)
+        expect(opened_path()).to_equal("")
+
+    it "never reuses a pre-planted file at the BLAKE3 content name, even a matching one":
+        step("matching planted snapshot is not reused")
+        val genuine = bytes_of("GENUINE-PROVIDER-IMAGE-plant")
+        val dir = abs_dir("provider_snapshot_spec_ok")
+        val planted = dir + "/" + blake3_hex(genuine) + ".so"
+        file_write_bytes_tagged_native(planted, genuine)
+        val path = write_artifact("plant.so", genuine)
+        val first = provider_stage_artifact_snapshot_v1(
+            request_for(path, provider_artifact_digest_v1(genuine)), dir)
+        val second = provider_stage_artifact_snapshot_v1(
+            request_for(path, provider_artifact_digest_v1(genuine)), dir)
+        expect(first.status).to_equal(PROVIDER_ADMISSION_OK)
+        expect(first.load_path == planted).to_be(false)
+        expect(first.load_path == second.load_path).to_be(false)
+        expect(same_bytes(rt_file_read_bytes(first.load_path) ?? [], genuine)).to_be(true)
+
+    it "never follows a symlink planted at the BLAKE3 content name":
+        step("planted symlink is not handed to dlopen")
+        reset_probe()
+        val genuine = bytes_of("GENUINE-PROVIDER-IMAGE-link")
+        val dir = abs_dir("provider_snapshot_spec_ok")
+        val evil = cwd_slash() + "/" + write_artifact("evil_target.so", bytes_of("EVIL-LINK-TARGET-IMAGE"))
+        val link = dir + "/" + blake3_hex(genuine) + ".so"
+        rt_package_create_symlink(evil, link)
+        val path = write_artifact("link.so", genuine)
+        provider_admit_dynamic_with_opener_v1(
+            request_for(path, provider_artifact_digest_v1(genuine)), dir, recording_opener)
+        expect(opened_path() == link).to_be(false)
+        expect(same_bytes(opened_bytes(), genuine)).to_be(true)
+
+    it "fails closed on a relative (cwd-dependent) snapshot directory":
+        step("relative snapshot dir refused")
+        val genuine = bytes_of("GENUINE-PROVIDER-IMAGE-rel")
+        val path = write_artifact("rel.so", genuine)
         val staged = provider_stage_artifact_snapshot_v1(
-            request_for(path, provider_artifact_digest_v1(genuine)), SNAP_DIR)
-        expect(staged.status).to_equal(PROVIDER_ADMISSION_DIGEST_MISMATCH)
+            request_for(path, provider_artifact_digest_v1(genuine)), "build/provider_snapshot_rel")
+        expect(staged.status == PROVIDER_ADMISSION_OK).to_be(false)
         expect(staged.load_path).to_equal("")
 
-    it "never trusts a pre-planted snapshot whose bytes differ from its name":
-        step("planted snapshot is replaced by the hashed bytes")
-        val genuine = bytes_of("GENUINE-PROVIDER-IMAGE-plant")
-        rt_dir_create(SNAP_DIR, true)
-        file_write_bytes_tagged_native(SNAP_DIR + "/" + blake3_hex(genuine) + ".so",
-            bytes_of("PLANTED-EVIL-SNAPSHOT"))
-        val path = write_artifact("plant.so", genuine)
+    it "fails closed on a symlinked snapshot directory":
+        step("symlinked snapshot dir refused")
+        val genuine = bytes_of("GENUINE-PROVIDER-IMAGE-dirlink")
+        val path = write_artifact("dirlink.so", genuine)
+        val real = abs_dir("provider_snapshot_spec_real")
+        val linked = cwd_slash() + "/build/provider_snapshot_spec_dirlink"
+        val made = rt_package_create_symlink(real, linked) == 0 or rt_file_exists(linked)
         val staged = provider_stage_artifact_snapshot_v1(
-            request_for(path, provider_artifact_digest_v1(genuine)), SNAP_DIR)
-        expect(staged.status).to_equal(PROVIDER_ADMISSION_OK)
-        expect(same_bytes(rt_file_read_bytes(staged.load_path) ?? [], genuine)).to_be(true)
+            request_for(path, provider_artifact_digest_v1(genuine)), linked)
+        if made:
+            expect(staged.status == PROVIDER_ADMISSION_OK).to_be(false)
+        expect(staged.load_path.starts_with(linked + "/")).to_be(false)
 
-    it "dynamic admission opens the staged snapshot, not the declared path":
-        step("dynlib_open never receives request.artifact_path")
-        val src = rt_file_read_text("src/os/smf/provider_loader.spl") ?? ""
-        expect(src.contains("dynlib_open(request.artifact_path")).to_be(false)
-        expect(src.contains("dynlib_open(staged.load_path")).to_be(true)
+    it "fails closed on a group/world-writable snapshot directory":
+        step("insecure dir mode refused where the host reports modes")
+        val genuine = bytes_of("GENUINE-PROVIDER-IMAGE-mode")
+        val path = write_artifact("mode.so", genuine)
+        val dir = abs_dir("provider_snapshot_spec_insecure")
+        rt_process_run("chmod", ["0777", dir])
+        val staged = provider_stage_artifact_snapshot_v1(
+            request_for(path, provider_artifact_digest_v1(genuine)), dir)
+        if rt_file_mode(dir) == 511:
+            expect(staged.status == PROVIDER_ADMISSION_OK).to_be(false)
+            expect(staged.load_path).to_equal("")
+        rt_process_run("chmod", ["0700", dir])

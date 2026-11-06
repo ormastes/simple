@@ -48,14 +48,16 @@ class RetainedFile:
     @unsafe(reason: "reads at most one MiB through retained native handle", capabilities: [ffi, raw_ptr])
     me read(maximum: i64) -> Result<[u8], text>:
         if self.closed or self.writable or self.position > self.maximum or maximum < 1 or maximum > 1048576: return Err("SCVDB_FILE_READ_QUOTA")
-        val ptr = _retained_alloc((maximum + 8) as u64)
+        # The native byte-count slot sits at an 8-aligned offset past the data.
+        val count_slot = ((maximum + 7) / 8) * 8
+        val ptr = _retained_alloc((count_slot + 8) as u64)
         if ptr == 0: return Err("SCVDB_FILE_MEMORY")
         var count = -1i64
         @when(os="windows"):
         # A failed positional-read restore never closes a copied owner. Reapply
         # the authoritative logical cursor before every sequential native read.
         if SetFilePointerEx(self.handle, self.position as i64, 0, 0u32) != 0:
-            if ReadFile(self.handle, ptr, maximum as u32, ptr + maximum, 0) != 0: count = volatile_read_u32(ptr + maximum)
+            if ReadFile(self.handle, ptr, maximum as u32, ptr + count_slot, 0) != 0: count = volatile_read_u32(ptr + count_slot)
         @else:
         count = retained_native_read(self.handle as i32, ptr, maximum as u64)
         @end
@@ -82,14 +84,16 @@ class RetainedFile:
     @unsafe(reason: "writes bounded chunk completely or fails on retained exclusive output", capabilities: [ffi, raw_ptr])
     me write(bytes: [u8]) -> Result<bool, text>:
         if self.closed or not self.writable or self.position > self.maximum or bytes.len() > 1048576 or (bytes.len() as u64) > self.maximum - self.position: return Err("SCVDB_FILE_WRITE_QUOTA")
-        val ptr = _retained_alloc((bytes.len() + 8) as u64)
+        # The native byte-count slot sits at an 8-aligned offset past the data.
+        val count_slot = ((bytes.len() + 7) / 8) * 8
+        val ptr = _retained_alloc((count_slot + 8) as u64)
         if ptr == 0: return Err("SCVDB_FILE_MEMORY")
         for index in 0..bytes.len(): volatile_write_u8(ptr + index, bytes[index] as i64)
         var offset = 0
         while offset < bytes.len():
             var count = -1i64
             @when(os="windows"):
-            if WriteFile(self.handle, ptr + offset, (bytes.len() - offset) as u32, ptr + bytes.len(), 0) != 0: count = volatile_read_u32(ptr + bytes.len())
+            if WriteFile(self.handle, ptr + offset, (bytes.len() - offset) as u32, ptr + count_slot, 0) != 0: count = volatile_read_u32(ptr + count_slot)
             @else:
             count = retained_native_write(self.handle as i32, ptr + offset, (bytes.len() - offset) as u64)
             @end
@@ -575,14 +579,15 @@ fn retained_file_read_at(file: RetainedFile, offset: u64, maximum: i64) -> Resul
     if offset > file.size or maximum as u64 > file.size - offset:
         return Err("SCVDB_FILE_READ_RANGE")
     retained_file_identity_unchanged(file)?
-    val ptr = _retained_alloc((maximum + 8) as u64)
+    val count_slot = ((maximum + 7) / 8) * 8
+    val ptr = _retained_alloc((count_slot + 8) as u64)
     if ptr == 0: return Err("SCVDB_FILE_MEMORY")
     var count = -1i64
     var restored = true
     @when(os="windows"):
     if SetFilePointerEx(file.handle, offset as i64, 0, 0u32) != 0:
-        if ReadFile(file.handle, ptr, maximum as u32, ptr + maximum, 0) != 0:
-            count = volatile_read_u32(ptr + maximum)
+        if ReadFile(file.handle, ptr, maximum as u32, ptr + count_slot, 0) != 0:
+            count = volatile_read_u32(ptr + count_slot)
     restored = SetFilePointerEx(file.handle, file.position as i64, 0, 0u32) != 0
     @else:
     count = pread(file.handle as i32, ptr, maximum as u64, offset as i64)

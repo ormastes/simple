@@ -20,7 +20,7 @@ use std.nogc_sync_mut.composition.vector_kernel_contract.{
 }
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.common.crypto.blake3.{blake3_hex}
-use std.nogc_sync_mut.sffi.file_bytes.{file_atomic_write_bytes_tagged_native}
+use std.nogc_sync_mut.io.retained_file.{retained_file_open, retained_file_sync, retained_directory_open_trusted_v1, retained_directory_is_real_no_follow}
 use std.nogc_sync_mut.composition.provider_contract.{
     SIMPLE_PROVIDER_OK, SimpleProviderQueryV1, SimpleProviderQueryResultV1,
     simple_provider_query_error_v1,
@@ -35,6 +35,8 @@ extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_bytes(path: text) -> [u8]?
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
 extern fn rt_env_get(key: text) -> text?
+extern fn rt_random_hex(length: i64) -> text?
+extern fn rt_file_delete(path: text) -> bool
 
 val SIMPLE_PROVIDER_QUERY_V1_SYMBOL: text = "simple_provider_query_v1"
 val SIMPLE_CLI_COMMAND_INVOKE_V1_SYMBOL: text = "simple_cli_command_invoke_v1"
@@ -265,16 +267,27 @@ fn provider_admit_evidence_v1(request: ProviderAdmissionRequestV1, evidence: Pro
     _provider_admission_result(PROVIDER_ADMISSION_OK, evidence.query_symbol_address, policy.artifact_digest, true, "admitted")
 
 class ProviderArtifactSnapshotV1:
-    """Hashed artifact bytes staged into a private, BLAKE3-named snapshot."""
+    """Hashed artifact bytes written to a fresh private snapshot for dlopen."""
     status: i32
     artifact_digest: text
     load_path: text
     reason: text
 
 fn provider_snapshot_dir_v1() -> text:
-    # Owner-private staging root; must not be writable by provider publishers.
+    # Per-user, owner-only staging root (never cwd-relative). Overridable for
+    # hosts that provision a dedicated private directory.
     val configured = rt_env_get("SIMPLE_PROVIDER_SNAPSHOT_DIR") ?? ""
-    if configured != "": configured else: ".simple/provider_snapshots"
+    if configured != "":
+        return configured
+    @when(os="windows"):
+    val base = (rt_env_get("LOCALAPPDATA") ?? "").replace("\\", "/")
+    if base == "": return ""
+    base + "/simple/provider_snapshots"
+    @else:
+    val home = rt_env_get("HOME") ?? ""
+    if home == "": return ""
+    home + "/.simple/provider_snapshots"
+    @end
 
 fn _provider_artifact_suffix_v1(path: text) -> text:
     if path.ends_with(".dylib"): return ".dylib"
@@ -282,15 +295,73 @@ fn _provider_artifact_suffix_v1(path: text) -> text:
     if path.ends_with(".smf"): return ".smf"
     ".so"
 
+fn _provider_path_absolute_v1(path: text) -> bool:
+    if path.starts_with("/"): return true
+    path.len() >= 3 and path.byte_at(1) == 58 and (path.byte_at(2) == 47 or path.byte_at(2) == 92)
+
+fn _provider_snapshot_dir_untrusted_reason_v1(dir: text) -> text:
+    # "" means trusted. Fail closed on anything cwd-relative, symlinked, not
+    # owned by the effective user, or group/world-writable.
+    if dir == "" or not _provider_path_absolute_v1(dir) or dir.contains(".."):
+        return "snapshot-dir-not-absolute"
+    if not retained_directory_is_real_no_follow(dir):
+        return "snapshot-dir-symlink-or-missing"
+    @when(os="linux"):
+    # Descriptor walk from "/" with O_NOFOLLOW: every component must be owned
+    # by the effective user or root, and the final directory must not be
+    # group/world-writable (statx on the exact retained descriptor).
+    match retained_directory_open_trusted_v1(dir):
+        case Err(_):
+            return "snapshot-dir-untrusted"
+        case Ok(owner):
+            var held = owner
+            held.close()
+    return ""
+    @elif(os="windows"):
+    # Reparse points (symlinks/junctions) are rejected above. Owner/ACL
+    # inspection has no Windows owner API in this tree yet; the per-user
+    # LOCALAPPDATA default inherits a user-only ACL.
+    return ""
+    @else:
+    return "snapshot-dir-host-unsupported"
+    @end
+
 fn _provider_snapshot_refusal_v1(status: i32, digest: text, reason: text) -> ProviderArtifactSnapshotV1:
     ProviderArtifactSnapshotV1(status: status, artifact_digest: digest, load_path: "", reason: reason)
 
+fn _provider_snapshot_write_fresh_v1(path: text, bytes: [u8]) -> bool:
+    # Exclusive create (O_CREAT|O_EXCL|O_NOFOLLOW, mode 0600 / CREATE_NEW):
+    # an existing file or planted symlink at this name makes the open fail.
+    match retained_file_open(path, bytes.len() as u64, true):
+        case Err(_):
+            return false
+        case Ok(opened):
+            var file = opened
+            val written = file.write(bytes)
+            val synced = retained_file_sync(file)
+            val closed = file.close()
+            match written:
+                case Ok(ok): return ok and synced and closed
+                case Err(_): return false
+
+fn _provider_snapshot_read_no_follow_v1(path: text, maximum: u64) -> [u8]?:
+    match retained_file_open(path, maximum):
+        case Err(_):
+            return nil
+        case Ok(opened):
+            var file = opened
+            val data = file.read_all_bounded_v1(maximum as i64)
+            val closed = file.close()
+            match data:
+                case Ok(bytes): return if closed: bytes else: nil
+                case Err(_): return nil
+
 fn provider_stage_artifact_snapshot_v1(request: ProviderAdmissionRequestV1,
         snapshot_dir: text) -> ProviderArtifactSnapshotV1:
-    # Read the declared path ONCE, check those bytes against the SHA-256 pin,
-    # then publish exactly those bytes to a content-addressed snapshot. The
-    # loader opens the snapshot, so a swap of the declared path after hashing
-    # cannot change the mapped image (bug provider_loader_path_digest_toctou).
+    # Read the declared path ONCE and check those bytes against the SHA-256
+    # pin. Then write exactly those bytes to a FRESH file with an unpredictable
+    # name inside a verified owner-only directory; an existing file at any
+    # content-derived name is never reused (bug provider_loader_path_digest_toctou).
     if not provider_artifact_path_allowed_v1(request.artifact_path, request.artifact_kind):
         val denied = _provider_admission_policy_v1(request, false, "")
         return _provider_snapshot_refusal_v1(denied.status, denied.artifact_digest, denied.reason)
@@ -302,33 +373,48 @@ fn provider_stage_artifact_snapshot_v1(request: ProviderAdmissionRequestV1,
     val policy = _provider_admission_policy_v1(request, exists, if exists: digest else: "")
     if policy.status != PROVIDER_ADMISSION_OK:
         return _provider_snapshot_refusal_v1(policy.status, policy.artifact_digest, policy.reason)
-    if first_read == nil or snapshot_dir == "":
-        return _provider_snapshot_refusal_v1(PROVIDER_ADMISSION_DIGEST_UNSTABLE, digest, "snapshot-unavailable")
+    if first_read == nil:
+        return _provider_snapshot_refusal_v1(PROVIDER_ADMISSION_DIGEST_UNSTABLE, digest, "artifact-unreadable")
+    if _provider_path_absolute_v1(snapshot_dir) and not snapshot_dir.contains(".."):
+        rt_dir_create(snapshot_dir, true)
+    val untrusted = _provider_snapshot_dir_untrusted_reason_v1(snapshot_dir)
+    if untrusted != "":
+        return _provider_snapshot_refusal_v1(PROVIDER_ADMISSION_DIGEST_UNSTABLE, digest, untrusted)
+    val nonce = rt_random_hex(16) ?? ""
+    if nonce.len() != 32:
+        return _provider_snapshot_refusal_v1(PROVIDER_ADMISSION_DIGEST_UNSTABLE, digest, "snapshot-nonce-unavailable")
     val bytes = first_read ?? []
     val content_id = blake3_hex(bytes)
-    val snapshot_path = snapshot_dir + "/" + content_id + _provider_artifact_suffix_v1(request.artifact_path)
-    rt_dir_create(snapshot_dir, true)
-    # A pre-existing snapshot is reused only when its bytes match its name; a
-    # planted or corrupted one is atomically replaced by the hashed buffer.
-    val existing = rt_file_read_bytes(snapshot_path)
-    val reuse = existing != nil and blake3_hex(existing ?? []) == content_id
-    if not reuse and not file_atomic_write_bytes_tagged_native(snapshot_path, bytes):
+    val snapshot_path = snapshot_dir + "/" + content_id + "-" + nonce + _provider_artifact_suffix_v1(request.artifact_path)
+    if not _provider_snapshot_write_fresh_v1(snapshot_path, bytes):
         return _provider_snapshot_refusal_v1(PROVIDER_ADMISSION_DIGEST_UNSTABLE, digest, "snapshot-write-failed")
-    val staged = rt_file_read_bytes(snapshot_path)
+    val staged = _provider_snapshot_read_no_follow_v1(snapshot_path, bytes.len() as u64)
     if staged == nil or blake3_hex(staged ?? []) != content_id:
+        rt_file_delete(snapshot_path)
         return _provider_snapshot_refusal_v1(PROVIDER_ADMISSION_DIGEST_UNSTABLE, digest, "snapshot-digest-unstable")
     ProviderArtifactSnapshotV1(status: PROVIDER_ADMISSION_OK, artifact_digest: digest,
         load_path: snapshot_path, reason: "snapshot-staged")
 
+fn _provider_dynlib_open_v1(path: text) -> DynLibKind:
+    dynlib_open(path, 2)
+
 fn provider_admit_dynamic_v1(request: ProviderAdmissionRequestV1) -> ProviderDynamicAdmissionV1:
+    provider_admit_dynamic_with_opener_v1(request, provider_snapshot_dir_v1(), _provider_dynlib_open_v1)
+
+fn provider_admit_dynamic_with_opener_v1(request: ProviderAdmissionRequestV1, snapshot_dir: text,
+        opener: fn(text) -> DynLibKind) -> ProviderDynamicAdmissionV1:
     # Path policy, pin, and request policy are all checked on the single read
-    # inside staging, before any dlopen.
-    val staged = provider_stage_artifact_snapshot_v1(request, provider_snapshot_dir_v1())
+    # inside staging, before any dlopen. The opener only ever sees the fresh
+    # snapshot path; it is a seam so specs can observe what dlopen receives.
+    val staged = provider_stage_artifact_snapshot_v1(request, snapshot_dir)
     if staged.status != PROVIDER_ADMISSION_OK:
         val refused = _provider_admission_result(staged.status, 0, staged.artifact_digest, false, staged.reason)
         return ProviderDynamicAdmissionV1(admission: refused, session: _closed_provider_session(refused))
     val digest = staged.artifact_digest
-    val library = dynlib_open(staged.load_path, 2)
+    val library = opener(staged.load_path)
+    # The mapping (POSIX) keeps the image alive; the private name is no longer
+    # needed. On Windows a loaded image cannot be unlinked and stays private.
+    rt_file_delete(staged.load_path)
     val address = dynlib_symbol(library, SIMPLE_PROVIDER_QUERY_V1_SYMBOL)
     val cli_address = dynlib_symbol(library, SIMPLE_CLI_COMMAND_INVOKE_V1_SYMBOL)
     val admission = provider_admit_evidence_v1(request, ProviderCallableEvidenceV1(
@@ -662,7 +748,7 @@ export ProviderLoaderSessionV1, ProviderDynamicAdmissionV1, ProviderSessionQuery
 export ProviderSessionQueryOwnedResultV1, ProviderSessionReleaseOwnedResultV1
 export ProviderSessionCloseResultV1
 export ProviderSessionVectorCallV1, ProviderSessionVectorCallOwnedResultV1
-export ProviderArtifactSnapshotV1, provider_stage_artifact_snapshot_v1, provider_snapshot_dir_v1, provider_admission_outcome_v1, provider_artifact_digest_v1, provider_artifact_path_allowed_v1, provider_admit_evidence_v1, provider_admit_dynamic_v1
+export ProviderArtifactSnapshotV1, provider_stage_artifact_snapshot_v1, provider_admit_dynamic_with_opener_v1, provider_snapshot_dir_v1, provider_admission_outcome_v1, provider_artifact_digest_v1, provider_artifact_path_allowed_v1, provider_admit_evidence_v1, provider_admit_dynamic_v1
 export provider_query_abi_validate_v1
 export provider_session_query_v1, provider_session_release_v1, provider_session_close_v1
 export provider_session_query_owned_v1, provider_session_release_owned_v1

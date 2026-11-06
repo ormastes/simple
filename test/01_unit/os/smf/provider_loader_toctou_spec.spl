@@ -1,7 +1,7 @@
-# Regression: provider_admit_dynamic_v1 must not hash the declared path and then
-# independently dlopen that same mutable path. Admission now stages the hashed
-# buffer into a BLAKE3-named private snapshot and opens the snapshot
-# (see provider_loader_snapshot_binding_spec.spl for the adversarial cases).
+# provider_admit_dynamic_v1 binding: the adversarial behaviour (what dlopen
+# receives under swap/plant/symlink/insecure-dir attacks) is exercised through
+# the opener seam in provider_loader_snapshot_binding_spec.spl. The one check
+# that needs source is that the production entry point uses that same seam.
 
 extern fn rt_file_read_text(path: text) -> text?
 
@@ -31,17 +31,10 @@ describe "provider_admit_dynamic_v1 snapshot identity binding":
         expect(src.len() > 0).to_be(true)
         expect(src.contains("fn provider_admit_dynamic_v1")).to_be(true)
 
-    it "stages the hashed bytes before any dlopen and opens the snapshot":
-        val body = fn_body(loader_source(), "provider_admit_dynamic_v1")
-        expect(body.len() > 0).to_be(true)
-        val before_open = body.split("dynlib_open(")[0]
-        expect(before_open.contains("provider_stage_artifact_snapshot_v1(")).to_be(true)
-        expect(body.contains("dynlib_open(request.artifact_path")).to_be(false)
-
-    it "does not rely on a pathname re-read after open":
-        val body = fn_body(loader_source(), "provider_admit_dynamic_v1")
-        val after_open = segment_after(body, "dynlib_open(")
-        expect(after_open.contains("rt_file_read_bytes(")).to_be(false)
+    it "production admission delegates to the snapshot-binding opener seam":
+        val body = fn_body(loader_source(), "provider_admit_dynamic_v1(")
+        expect(body.contains("provider_admit_dynamic_with_opener_v1(")).to_be(true)
+        expect(body.contains("dynlib_open(")).to_be(false)
 
     it "retains a valid library when close reports failure":
         val body = fn_body(loader_source(), "provider_session_close_v1")
