@@ -4,7 +4,14 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** open
+**Status:** fixed (re-verified 2026-11-06 on release/1.0.0 `a28bdd38966`)
+
+Re-run of the reproduction spec on the 2026-11-04 seed: the
+`undefined field ... 'kind' on Tuple` error no longer occurs; 2/3 examples
+pass. The remaining failure is a different, backend-level limitation —
+`CompileError(phase: backend (vulkan), message: Vulkan SPIR-V currently
+supports only if-without-else control flow)` — raised after HIR lowering
+succeeds, so it is outside this HIR bug and needs its own record.
 **Area:** dynamic frontend/HIR execution
 
 ## Reproduction
