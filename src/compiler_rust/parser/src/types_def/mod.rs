@@ -391,9 +391,10 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        let declaration_start = self.current.span.start;
-
         let visibility = self.parse_optional_visibility()?;
+        // The site hash covers the declaration after its visibility, matching
+        // the pure-Simple parser's field span.
+        let declaration_start = self.current.span.start;
 
         // Optional `var`/`val` mutability keyword prefix: class-field syntax
         // (`var name: Type` / `val name: Type`, optionally after `pub`).

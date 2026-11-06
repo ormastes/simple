@@ -609,7 +609,10 @@ pub(crate) fn collection_label_valid(label: &str) -> bool {
 pub(crate) fn normalize_collection_declaration(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     let mut quote: Option<char> = None;
+    let mut raw = false;
     let mut escaped = false;
+    let mut prev: char = '\0';
+    let mut prev_prev_word = false;
     let mut in_comment = false;
     let mut pending_space = false;
     let mut last_word = false;
@@ -625,33 +628,41 @@ pub(crate) fn normalize_collection_declaration(source: &str) -> String {
             out.push(c);
             if escaped {
                 escaped = false;
-            } else if c == '\\' {
+            } else if c == '\\' && !raw {
                 escaped = true;
             } else if c == open {
                 quote = None;
+                prev = c;
             }
             continue;
         }
         if c == '#' {
             in_comment = true;
+            prev = ' ';
             continue;
         }
         if matches!(c, ' ' | '\t' | '\n' | '\r') {
             pending_space = true;
+            prev = ' ';
             continue;
         }
         let word = collection_word_char(c);
         if pending_space && word && last_word {
             out.push(' ');
         }
+        // `r"..."` is raw only when the `r` stands alone, right before the quote.
+        let raw_prefix = !pending_space && prev == 'r' && !prev_prev_word;
         pending_space = false;
         out.push(c);
         if c == '"' || c == '\'' {
             quote = Some(c);
+            raw = c == '"' && raw_prefix;
             last_word = false;
         } else {
             last_word = word;
         }
+        prev_prev_word = prev != '\0' && collection_word_char(prev);
+        prev = c;
     }
     out
 }
@@ -664,4 +675,21 @@ pub(crate) fn collection_declaration_hash(declaration: &str) -> String {
         .fold(0xcbf29ce484222325_u64, |value, byte| (value ^ u64::from(byte)).wrapping_mul(0x100000001b3))
         as i64;
     format!("n1.{hash}")
+}
+
+#[cfg(test)]
+mod collection_site_hash_tests {
+    use super::collection_declaration_hash as hash;
+
+    #[test]
+    fn raw_string_ending_in_backslash_does_not_swallow_a_comment() {
+        assert_eq!(hash("var p = r\"a\\\"  # c"), hash("var p = r\"a\\\""));
+    }
+
+    #[test]
+    fn whitespace_and_comments_do_not_change_the_hash() {
+        assert_eq!(hash("var  hot = x  # c"), hash("var hot=x"));
+        assert_ne!(hash("var hot = ab"), hash("var hot = a b"));
+        assert!(hash("var hot = x").starts_with("n1."));
+    }
 }

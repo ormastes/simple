@@ -203,3 +203,23 @@ fn duplicate_label_extra_argument_and_bad_label_are_rejected() {
     assert!(parse_result("fn main():\n    @collection_algorithm(\"auto\", \"a\", \"fast\")\n    var a = AdaptiveTextSet.new()\n").is_err());
     assert!(parse_result("fn main():\n    @collection_algorithm(\"auto\", \"has space\")\n    var a = AdaptiveTextSet.new()\n").is_err());
 }
+
+#[test]
+fn public_field_site_matches_the_pure_simple_parser() {
+    let module = parse(
+        "class Store:\n    @collection_algorithm(\"ordered\")\n    pub values: AdaptiveTextSet = AdaptiveTextSet.new()\n",
+    );
+    let Node::Class(class) = &module.items[0] else { panic!("expected class") };
+    let site = assert_wrapped(class.fields[0].default.as_ref().unwrap(), "AdaptiveTextSet", "ordered");
+    // Same value as collection_site_attribute_spec.spl: visibility is not hashed.
+    assert_eq!(site, "ast://app/collection_probe.spl/Store/values#n1.5053061337019949519");
+}
+
+#[test]
+fn following_statement_and_trailing_comma_do_not_change_the_site() {
+    let followed = first_local_site("fn main():\n    @collection_algorithm(\"auto\")\n    var hot = AdaptiveTextSet.new()\n    val other = 1\n");
+    assert_eq!(followed, "ast://app/collection_probe.spl/main/local/hot#n1.3808762660471155820");
+    let labeled = first_local_site("fn main():\n    @collection_algorithm(\"auto\", \"t.c\",)\n    var hot = AdaptiveTextSet.new()\n");
+    assert_eq!(labeled, "ast://app/collection_probe.spl/label/t.c");
+}
+
