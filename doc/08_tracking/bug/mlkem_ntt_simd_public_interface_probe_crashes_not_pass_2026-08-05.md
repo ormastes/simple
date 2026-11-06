@@ -326,3 +326,17 @@ fixture. No code touched.
 ## Triage 2026-09-13
 
 Confirmed the missing probe is still missing: `test/09_baselines/crypto/x25519mlkem768/mlkem_ntt_simd_public_interface_probe.spl` does not exist (directory holds only `mlkem_avx2_reduce_selfcheck.c` and `mlkem_ntt_simd_c_test.c`). The alignment fix itself is already landed per the 2026-08-17 split. Writing the missing probe correctly (verdict line, `mlkem_ntt_simd_receipt().chunk_hits` SIMD-arm counting, GDB-instrument-equivalent discrimination) needs AVX2/x86-SIMD domain knowledge and a from-scratch spec beyond this pass's per-bug budget. Leaving OPEN for the missing probe only, no code change made.
+
+## Closed 2026-11-06 (work/x86-simd-bugs)
+
+The missing probe now exists:
+`test/09_baselines/crypto/x25519mlkem768/mlkem_ntt_simd_public_interface_probe.spl`
+— drives public `simd_{mul,add,sub}_i32x8` over 64 rounds of fresh `Vec8i`
+values (ML-KEM residues x zetas, plus i32-wrap cases) against a scalar i32
+reference. Host: Xeon E5-2673 v4, AVX2=yes, AVX-512F=no (so the AVX2 lane is
+the one exercised). Result on the seed interpreter (`bin/simple.exe run`):
+3/3 runs `ac4_x86_simd_public_interface_verdict=PASS checks=1536 checks_failed=0`,
+no crash. Combined with the 2026-08-06 `read_unaligned` fix this closes the row.
+Not run: native lane — stage3 `s3_fable46.exe` native-build fails before the
+probe, in `lib.nogc_sync_mut.simd` MIR (8x "unresolved method call: to..."),
+a separate native-stdlib defect, not this crash.
