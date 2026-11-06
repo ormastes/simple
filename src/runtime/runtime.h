@@ -837,6 +837,7 @@ int64_t  rt_io_tcp_connect(int64_t addr);
 int64_t  rt_io_tcp_connect_timeout(int64_t addr, int64_t timeout_ms);
 int64_t  rt_io_tcp_read(int64_t fd, int64_t size);
 int64_t  rt_io_tcp_read_line(int64_t fd);
+int64_t  rt_io_tcp_drain_line(int64_t fd);
 int64_t  rt_io_tcp_write(int64_t fd, int64_t data);
 int64_t  rt_io_socket_send_nosigpipe(int64_t fd, int64_t data);
 int64_t  rt_io_tcp_write_text(int64_t fd, int64_t text);
