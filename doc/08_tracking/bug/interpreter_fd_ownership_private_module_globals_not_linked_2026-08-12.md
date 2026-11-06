@@ -60,3 +60,6 @@ Acceptance requires `3 examples, 0 failures` and no `variable ... not found`
 diagnostic. Do not broaden to the SOSIX or whole repository suite until this
 single spec passes.
 
+
+## 2026-11-06 round 8: FIXED
+Root cause: a module-level `var t: [T; N]` with no initializer was never bound, so the module's own functions failed with "variable not found". `register_definitions` now zero-fills it as a `FixedSizeArray`, and module-global index assignment accepts `FixedSizeArray`. Spec: test/01_unit/os/sosix/fd_ownership_spec.spl (3/3, was 0/3) plus test/01_unit/compiler/interpreter/local_shadows_module_global_spec.spl.

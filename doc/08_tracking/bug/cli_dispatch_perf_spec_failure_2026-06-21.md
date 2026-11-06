@@ -40,3 +40,6 @@ syntax or fix the benchmark target.
 Do not use this spec as release evidence until the failing benchmark case is
 identified and made deterministic.
 
+
+## Update 2026-11-06
+Parse error fixed: trailing `# comment` inside call parens swallowed the `)` (5 sites), and `slow_it` had a mangled `step(...)` body. Spec now parses; 9/9 pass when `simple` is on PATH (without it, subprocess cases return -1: environmental, spec is tagged only-compiled).

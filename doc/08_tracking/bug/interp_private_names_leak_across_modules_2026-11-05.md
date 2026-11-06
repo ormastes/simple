@@ -36,3 +36,6 @@ hard error risks every seed-run spec and the bootstrap; it needs a census first.
    `interpreter_module`. 2. Census warnings over `bin/simple test` corpus.
 3. Flip to error once the census is zero; drop private fns from
    `global_functions` keyed lookups for non-owner modules.
+
+## 2026-11-06 skipped (not attempted)
+Needs the warn-first census over the stdlib (~75k non-pub fns) described above; too large for a minimal seed change.

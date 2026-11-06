@@ -1,0 +1,159 @@
+# Effect-inference fail-closed hardening (stronger-types P3).
+#
+# infer_expr_effects used to fail OPEN: unhandled expression kinds claimed "no
+# effects", a call whose callee synthesis failed contributed nothing, and an
+# unresolved method call pushed IO while still pretending the row was complete.
+# Each of those now leaves an EffectKind.Unknown marker in the returned row and
+# flips HmInferContext.current_function_effects_complete to false, so no
+# consumer can mistake the row for a complete effect proof.
+use std.spec.step
+
+use std.spec.*
+use compiler.types.type_infer.inference.*
+use compiler.types.type_infer.inference_effects.*
+use compiler.types.type_infer.context.*
+use compiler.hir.hir.*
+use compiler.frontend.core.lexer.*
+
+
+fn unknown_span() -> Span:
+    lex_span_empty()
+
+fn unknown_int(value: i64) -> HirExpr:
+    HirExpr(
+        kind: HirExprKind.IntLit(value, nil),
+        has_type_: false,
+        type_: nil,
+        span: unknown_span()
+    )
+
+fn unknown_var(symbol_id: i64) -> HirExpr:
+    HirExpr(
+        kind: HirExprKind.Var(SymbolId(id: symbol_id)),
+        has_type_: false,
+        type_: nil,
+        span: unknown_span()
+    )
+
+fn unknown_arg(value: HirExpr) -> HirCallArg:
+    HirCallArg(has_name: false, name: "", value: value, span: unknown_span())
+
+# Symbol id of a function bound in the context env with a declared IO row.
+# Must not collide with the undefined-symbol id used for the failing callee.
+val UNKNOWN_IO_FN_ID: i64 = 42
+val UNKNOWN_UNDEFINED_ID: i64 = 999999
+
+fn unknown_io_fn_type() -> HirType:
+    val s = unknown_span()
+    HirType(
+        kind: HirTypeKind.Function(
+            [],
+            HirType(kind: HirTypeKind.Unit, span: s),
+            [Effect(kind: EffectKind.IO, span: s)]
+        ),
+        span: s
+    )
+
+fn unknown_ctx_with_io_fn() -> HmInferContext:
+    var ctx = HmInferContext.new()
+    ctx.bind_mono(UNKNOWN_IO_FN_ID.to_text(), unknown_io_fn_type())
+    ctx
+
+fn unknown_call(callee: HirExpr, args: [HirCallArg]) -> HirExpr:
+    HirExpr(
+        kind: HirExprKind.Call(callee, args, []),
+        has_type_: false,
+        type_: nil,
+        span: unknown_span()
+    )
+
+fn effect_is_unknown(effect: Effect) -> bool:
+    match effect.kind:
+        case Unknown: true
+        case _: false
+
+fn effect_is_io(effect: Effect) -> bool:
+    match effect.kind:
+        case IO: true
+        case _: false
+
+fn row_has_unknown(row: [Effect]) -> bool:
+    for effect in row:
+        if effect_is_unknown(effect): return true
+    false
+
+fn row_has_io(row: [Effect]) -> bool:
+    for effect in row:
+        if effect_is_io(effect): return true
+    false
+
+describe "effect inference unknown markers":
+    it "marks an unhandled expression kind with Unknown and incompleteness":
+        # @req REQ-SSPEC-UNIT
+        step("marks an unhandled expression kind with Unknown and incompleteness")
+        # Await is a genuine HirExprKind variant with no arm in
+        # infer_expr_effects, so it lands in the fail-closed `case _` arm.
+        var ctx = HmInferContext.new()
+        val awaited = HirExpr(
+            kind: HirExprKind.Await(unknown_int(1)),
+            has_type_: false,
+            type_: nil,
+            span: unknown_span()
+        )
+
+        val row = ctx.infer_expr_effects(awaited)
+        expect(row.len()).to_equal(1)  # oracle: 1 — the case _ arm returns exactly one Unknown marker
+        expect(row_has_unknown(row)).to_be(true)  # oracle: true — the sole row entry is EffectKind.Unknown
+        expect(ctx.get_current_function_effects_complete()).to_be(false)  # oracle: false — case _ flags the row incomplete
+
+    it "keeps a pure expression complete with no Unknown marker":
+        # @req REQ-SSPEC-UNIT
+        step("keeps a pure expression complete with no Unknown marker")
+        var ctx = HmInferContext.new()
+
+        val row = ctx.infer_expr_effects(unknown_int(7))
+        expect(row.len()).to_equal(0)  # oracle: 0 — IntLit is an explicit pure arm of infer_expr_effects
+        expect(row_has_unknown(row)).to_be(false)  # oracle: false — no unclassified construct was seen
+        expect(ctx.get_current_function_effects_complete()).to_be(true)  # oracle: true — nothing marked the row incomplete
+
+    it "records Unknown plus the known effects when callee synthesis fails":
+        # @req REQ-SSPEC-UNIT
+        step("records Unknown plus the known effects when callee synthesis fails")
+        var ctx = unknown_ctx_with_io_fn()
+        # The argument is a resolvable call to a function whose declared row is
+        # [IO]; the callee Var(UNKNOWN_UNDEFINED_ID) is not in the environment,
+        # so synthesize_expr fails and the Call arm must fail closed.
+        val arg_call = unknown_call(unknown_var(UNKNOWN_IO_FN_ID), [])
+        val failing = unknown_call(unknown_var(UNKNOWN_UNDEFINED_ID), [unknown_arg(arg_call)])
+
+        val row = ctx.infer_expr_effects(failing)
+        expect(row_has_io(row)).to_be(true)  # oracle: true — the argument's declared IO effect survives in the row
+        expect(row_has_unknown(row)).to_be(true)  # oracle: true — the failed callee contributes an Unknown marker
+        expect(ctx.get_current_function_effects_complete()).to_be(false)  # oracle: false — callee synthesis failure flags the row incomplete
+
+    it "keeps a resolvable call complete with its declared effects and no Unknown":
+        # @req REQ-SSPEC-UNIT
+        step("keeps a resolvable call complete with its declared effects and no Unknown")
+        var ctx = unknown_ctx_with_io_fn()
+
+        val call = unknown_call(unknown_var(UNKNOWN_IO_FN_ID), [])
+        val row = ctx.infer_expr_effects(call)
+        expect(row.len()).to_equal(1)  # oracle: 1 — the row is exactly the callee's declared IO effect
+        expect(row_has_io(row)).to_be(true)  # oracle: true — the declared IO effect is merged into the row
+        expect(row_has_unknown(row)).to_be(false)  # oracle: false — a fully resolved call adds no Unknown marker
+        expect(ctx.get_current_function_effects_complete()).to_be(true)  # oracle: true — every construct in the walk was classified
+
+    it "exposes the accumulated row alongside the completeness flag":
+        # @req REQ-SSPEC-UNIT
+        step("exposes the accumulated row alongside the completeness flag")
+        var ctx = HmInferContext.new()
+        expect(ctx.get_current_function_effects().len()).to_equal(0)  # oracle: 0 — a fresh context starts with an empty accumulated row
+        expect(ctx.get_current_function_effects_complete()).to_be(true)  # oracle: true — a fresh context starts complete
+        ctx.infer_expr_effects(HirExpr(
+            kind: HirExprKind.Await(unknown_int(1)),
+            has_type_: false,
+            type_: nil,
+            span: unknown_span()
+        ))
+        expect(ctx.get_current_function_effects().len()).to_equal(0)  # oracle: 0 — infer_expr_effects returns rows without mutating the accumulator
+        expect(ctx.get_current_function_effects_complete()).to_be(false)  # oracle: false — the completeness flag carries the failure

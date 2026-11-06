@@ -41,3 +41,12 @@ to the traceability guide and feature expert route; no operational skills change
 Final checkpoint: cycle 2 independent source review completed with zero
 unresolved reported P0/P1/P2 findings. Owned tracked diff whitespace check passed.
 Source frozen for parent review/commit. No runtime, merge or release qualification.
+
+2026-11-06 (work/r10-xtype-20261106): structural exposure walker slice added
+(`api_exposure_walker_v1`, `api_exposure_result_v1`, spec). Projection
+and walker specs executed GREEN on the Windows seed runner; the route spec was
+already 3/6 there (pre-existing, not touched); design/feature
+expert updated. Next: retain walker results per module in CompileContext
+(observation only), then E2 named rule.
+Follow-up same day: walker results retained per module in
+`CompileContext.api_exposure` (observation only, cleared with the facts).

@@ -47,3 +47,24 @@ Workaround: typed [i64] literal over val constants kept at evex_encoding.spl:82.
 Fixture: test/04_smoke/static_val_array_infer_native.spl (interpreter lane passes).
 Stage3 repro: `bin/simple native-build --entry test/04_smoke/static_val_array_infer_native.spl --output build/static_arr && build/static_arr` -> 4 / STATIC_ARRAY_OK.
 Status: open. workaround in place; native repro fixture added; real producer fix still needed.
+
+## Fix 2026-11-06 (work/x86-simd-bugs)
+
+Real repro (unannotated, not the workaround form):
+`test/04_smoke/static_val_array_infer_unannotated_native.spl` — stage3
+`s3_fable46.exe` (copy) native-build fails MIR with
+"cannot derive module static type from unresolved initializer" (reproduced).
+Root cause: `lower_static`'s Infer branch never consulted
+`infer_unfolded_static_expr_type`, which had no `ArrayLit` arm, so an array
+visited before its element constants (production `lower_module` order) had no
+type evidence. Fix: `src/compiler/50.mir/_MirLowering/module_lowering.spl`
+adds an `ArrayLit` arm (declared const type first, then initializer; all
+elements must agree exactly — no width/sign/kind coercion) and uses it in the
+Infer branch. Spec `test/01_unit/compiler/mir/unannotated_module_array_static_type_spec.spl`
+red 2/6 before, 6/6 after (seed interpreter); siblings
+`unfolded_module_binary_static_type_spec` 6/6 and
+`unannotated_module_global_static_type_spec` 12/12 unchanged.
+Not run: native green, needs a stage3 rebuilt with this fix. The `[i64]`
+annotations in `evex_encoding.spl` stay until that redeploy (removing them now
+would break building with the current stage3). AVX-512 execution: not run
+(host Xeon E5-2673 v4 has AVX2, no AVX-512F) — this bug is compile-time only.

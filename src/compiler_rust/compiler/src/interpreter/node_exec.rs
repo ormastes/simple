@@ -121,10 +121,16 @@ pub(crate) fn record_let_declared_width(let_stmt: &simple_parser::ast::LetStmt, 
             _ => None,
         },
     };
-    let width = Env::narrow_signed_width_of(annotation).or_else(|| match &let_stmt.value {
-        Some(simple_parser::ast::Expr::Cast { target_type, .. }) => Env::narrow_signed_width_of(Some(target_type)),
-        _ => None,
-    });
+    // Unannotated: the initializer's static width (`val w = x as i32`,
+    // `val n = m + 1` with `m: i32`), so later arithmetic on `w`/`n` wraps
+    // at the same width the pure-Simple compiler types it with.
+    let width = match annotation {
+        Some(_) => Env::narrow_signed_width_of(annotation),
+        None => match let_stmt.value.as_ref().map(|v| super::expr::static_int_width(v, env)) {
+            Some(super::expr::StaticIntWidth::Narrow(w)) => Some(w),
+            _ => None,
+        },
+    };
     env.set_declared_int_width(name, width);
 }
 
@@ -1194,7 +1200,7 @@ pub(crate) fn exec_assignment(
                                 // and this path runs on EVERY local assignment. Until 2026-08-21
                                 // that made each intra-module call rebuild its env (~5 ms in a
                                 // driver module) -- see bootstrap_main_native_build_stalls_after_source_closure_2026-08-21.md
-                                if !cell.borrow().contains_key(name) {
+                                if env.is_local(name) || !cell.borrow().contains_key(name) {
                                     return;
                                 }
                                 if let Some(v) = env.get(name) {
@@ -1227,7 +1233,7 @@ pub(crate) fn exec_assignment(
                                     // and this path runs on EVERY local assignment. Until 2026-08-21
                                     // that made each intra-module call rebuild its env (~5 ms in a
                                     // driver module) -- see bootstrap_main_native_build_stalls_after_source_closure_2026-08-21.md
-                                    if !cell.borrow().contains_key(name) {
+                                    if env.is_local(name) || !cell.borrow().contains_key(name) {
                                         return;
                                     }
                                     if let Some(v) = env.get(name) {
@@ -1258,7 +1264,7 @@ pub(crate) fn exec_assignment(
                                     // and this path runs on EVERY local assignment. Until 2026-08-21
                                     // that made each intra-module call rebuild its env (~5 ms in a
                                     // driver module) -- see bootstrap_main_native_build_stalls_after_source_closure_2026-08-21.md
-                                    if !cell.borrow().contains_key(name) {
+                                    if env.is_local(name) || !cell.borrow().contains_key(name) {
                                         return;
                                     }
                                     if let Some(v) = env.get(name) {
@@ -1323,7 +1329,7 @@ pub(crate) fn exec_assignment(
                 MODULE_GLOBALS.with(|cell| {
                     // Peek first (see the note above): an unconditional borrow_mut here
                     // bumped the globals generation on every local assignment.
-                    if !cell.borrow().contains_key(name) {
+                    if env.is_local(name) || !cell.borrow().contains_key(name) {
                         return;
                     }
                     cell.borrow_mut().insert(name.clone(), env.get(name).unwrap().clone());
@@ -1832,6 +1838,27 @@ pub(crate) fn exec_assignment(
                         let idx = index_val.as_int()? as usize;
                         arr.assign_index(idx, value);
                         Value::Array(arc)
+                    }
+                    // Fixed-size array module state (`var t: [T; N]`): in-bounds
+                    // element write only; the size is part of the type.
+                    Value::FixedSizeArray { size, mut data } => {
+                        let idx = index_val.as_int()? as usize;
+                        if idx >= data.len() {
+                            let ctx = ErrorContext::new()
+                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                                .with_help(format!("fixed-size array has {} element(s)", data.len()))
+                                .with_note(format!("index {} is out of bounds", idx));
+                            return Err(CompileError::semantic_with_context(
+                                format!(
+                                    "index out of bounds: array index {} out of bounds (len={})",
+                                    idx,
+                                    data.len()
+                                ),
+                                ctx,
+                            ));
+                        }
+                        data[idx] = value;
+                        Value::FixedSizeArray { size, data }
                     }
                     // `rt_bytes_alloc` / `rt_byte_array_new` hand back a packed
                     // `Value::ByteArray`; `var buf = rt_bytes_alloc(n); buf[i] = b`
@@ -2749,7 +2776,13 @@ pub(crate) fn exec_augmented_assignment(
             };
             let result = evaluate_expr(&binary_expr, env, functions, classes, enums, impl_methods)?;
             env.remove(&temp_name);
-            result
+            // `x op= rhs` has the type of `x`: wrap to its declared narrow
+            // signed width (the RHS temp hides it from the binary-op wrap).
+            // Bug: seed_i32_overflow_interp_vs_jit_divergence_2026-11-05.
+            match (result, env.declared_int_width(name)) {
+                (Value::Int(r), Some(w)) => Value::Int(super::expr::wrap_signed(r, w)),
+                (other, _) => other,
+            }
         } else {
             // Simple ~= assignment
             rhs_value

@@ -23,4 +23,37 @@ double-(un)tags. Not fixed in the seed; worked around in .spl with typed idioms:
   and converts to `[u8]` once in `bitstream_finish`.
 
 ## Status
-Worked around; seed JIT bug itself still open (needs a fix in src/compiler_rust).
+FIXED in the seed 2026-11-06 (branch `work/seed-jit-miscompiles-20261106`). The `.spl`
+workarounds in `header.spl` / `huffman.spl` are no longer required by the seed but were
+not reverted here.
+
+Two seed defects, both in `src/compiler_rust/compiler/src/mir/lower/lowering_expr_method.rs`:
+
+1. **Bare push on an erased receiver stored a raw scalar.** `var bytes = bs[0]` is `Any`,
+   so `bytes.push(x)` is emitted as a bare `MethodCallStatic "push"`, which codegen always
+   routes to the tag-dispatched builtin `rt_push`
+   (`codegen/instr/closures_structs.rs`, `is_bare_builtin_collection_method`). Only the
+   typed-array path (`receiver_is_array`) boxed native scalars; the bare path passed the
+   raw `99`, read back as a tagged word (`99 >> 3 == 12`). Fix: `box_method_args_for_any_params`
+   boxes the single argument of a bare `push`/`append` via `box_arg_for_any_param`
+   (no-op for already-tagged values).
+2. **Numeric cast of a just-boxed erased value narrowed the tag word.**
+   `(crc & 255).to_u8()` with an untyped `crc`: the `&` is computed raw, then `BoxInt`'d
+   (HIR types it `Any`), then a bare `to_u8`. Codegen types every `BoxInt` dest as `I64`
+   (`codegen/instr/body.rs:461`), so the erased-cast decode (`rt_any_to_int`, gated on an
+   ANY/unknown vreg type, `closures_structs.rs:2136`) was skipped and the tagged word was
+   reduced: footer bytes `(v << 3) & 0xff`. Fix: when the bare cast's receiver is a
+   `BoxInt` in the current block, cast its raw source as `i64.<cast>` instead.
+
+Evidence:
+- Rust test `compiler/tests/erased_scalar_boundary_jit.rs`: before the fix
+  `scalar_pushed_onto_erased_array_reads_back_unchanged` and
+  `cast_of_arithmetic_on_untyped_param_is_not_tagged` FAIL; after, 3/3 pass.
+- `SIMPLE_EXECUTION_MODE=jit`, old seed (2026-10-05) vs fixed seed:
+  - `test/fixtures/compiler/seed_jit_untyped_any_tag_repro/main.spl`:
+    `untyped=[[12]] typed=[[99]] i64=[[12]] rev=1279022294173220864` ->
+    `untyped=[[99]] typed=[[99]] i64=[[99]] rev=142 rev2=142` (the `rev` half was the
+    erased-arg class, already fixed by 6581807d48c);
+  - `test/fixtures/compiler/seed_jit_miscompiles/erased_push_scalar.spl`:
+    `u8=[12] i64=[<special:12>] footer=[192, 176]` -> `u8=[99] i64=[99] footer=[120, 86]`.
+- `test/01_unit/lib/common/compress/gzip_spec.spl` on the fixed seed: 6/6 passed.

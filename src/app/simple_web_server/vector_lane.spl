@@ -1,0 +1,166 @@
+"""Single-owner plaintext loopback lane for simple-web-server.
+
+The default hosted server (async multi-worker HttpServer + SSR) parses with
+its own scalar state machine. The admitted HTTP vector parser exists only on
+the sync `SimpleHttpServer`, whose configured parser continuation is owned by
+the accept loop. This lane therefore runs one owner that accepts and serves
+connections in order, with the vector parser installed when the
+`--vector-provider` artifact is admitted and the scalar parser otherwise.
+Admission failure is never fatal: the reason is logged and scalar serves.
+"""
+
+use std.nogc_sync_mut.http_server.router.{Router}
+use std.nogc_sync_mut.http_server.server.{
+    SimpleHttpServer, SecureServerPolicy, plaintext_development_capability
+}
+use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpResponse}
+use std.nogc_sync_mut.http_server.vector_parser.{
+    HttpVectorRequestParserV1, http_vector_parser_session_open_owned_v1
+}
+use std.nogc_sync_mut.http_server.request_parser.{http_request_parser_close_owned_v1}
+use std.nogc_sync_mut.composition.vector_kernel_contract.{
+    SIMPLE_VECTOR_CAP_HTTP_FIND_BYTE, SIMPLE_VECTOR_CAP_HTTP_FIND_CRLF
+}
+use os.smf.provider_loader.{PROVIDER_SESSION_OK, ProviderAdmissionRequestV1}
+use os.posix.dynlib.{DynLibKind, dynlib_symbol}
+use std.nogc_sync_mut.io.tcp.{TcpListener}
+use app.simple_web_server.config.{HostedWebCli, hosted_web_listen_host, hosted_web_listen_port}
+
+# Levelled providers export `simple_vector_selected_level_v1() -> i32`
+# (1=SSE2, 2=x86-64-v2, 3=AVX2, 4=AVX-512); legacy providers lack it (-1).
+extern fn rt_call_ptr_0(fn_ptr: i64) -> i64
+
+class HostedVectorAdmission:
+    admitted: bool
+    parser: HttpVectorRequestParserV1
+    level: i64
+    reason: text
+
+fn hosted_vector_level_name(level: i64) -> text:
+    match level:
+        1: "sse2"
+        2: "x86-64-v2"
+        3: "avx2"
+        4: "avx512"
+        _: "unknown"
+
+fn _hosted_vector_selected_level(lib: DynLibKind) -> i64:
+    val ptr = dynlib_symbol(lib, "simple_vector_selected_level_v1")
+    if ptr <= 0:
+        return -1
+    rt_call_ptr_0(ptr)
+
+# Admission is digest-pinned and path-policed by the provider loader (only
+# relative build/providers/ paths). Any refusal returns admitted=false with
+# the loader's reason; the caller keeps the scalar parser.
+fn hosted_vector_admit(path: text, sha256: text) -> HostedVectorAdmission:
+    val caps = SIMPLE_VECTOR_CAP_HTTP_FIND_BYTE | SIMPLE_VECTOR_CAP_HTTP_FIND_CRLF
+    val opened = http_vector_parser_session_open_owned_v1(ProviderAdmissionRequestV1(
+        artifact_path: path, artifact_kind: "native",
+        expected_artifact_digest: sha256,
+        granted_capability_bits: caps, required_capability_bits: caps,
+        host_abi: 1, minimum_host_abi: 1, maximum_host_abi: 1,
+        requested_interface_major: 1, requested_interface_minor: 0,
+        provided_interface_major: 1, provided_interface_minor: 0))
+    val parser = HttpVectorRequestParserV1.from_session(opened.session)
+    if opened.status != PROVIDER_SESSION_OK:
+        val why = if opened.reason == "": "status {opened.status}" else: opened.reason
+        return HostedVectorAdmission(admitted: false, parser: parser, level: -1, reason: why)
+    val level = _hosted_vector_selected_level(opened.session.loader_session.library)
+    HostedVectorAdmission(admitted: true, parser: parser, level: level, reason: "admitted")
+
+# Deterministic ingest summary: identical across parser modes for identical
+# requests, so the load generator can diff responses between lanes.
+fn hosted_ingest_handler(request: HttpRequest) -> HttpResponse:
+    var pad_bytes = 0
+    for pair in request.headers:
+        if pair.0.to_lower().starts_with("x-pad-"):
+            pad_bytes = pad_bytes + pair.1.len()
+    val body = request.body
+    val n = body.len()
+    val head = if n >= 8: body.slice(0, 8) else: body
+    val tail = if n >= 8: body.slice(n - 8, n) else: body
+    HttpResponse.ok("ingest headers={request.headers.len()} pad_bytes={pad_bytes} body_bytes={n} req={request.header("X-Req-Id")} head={head} tail={tail}")
+
+fn hosted_health_handler(request: HttpRequest) -> HttpResponse:
+    HttpResponse.ok("ok")
+
+class HostedLaneStats:
+    requests: i64
+    provider_requests: i64
+    provider_attempts: i64
+    provider_successes: i64
+    accept_errors: i64
+
+# Runs the lane until --max-requests connections are served (0 = forever).
+fn hosted_single_owner_serve(cli: HostedWebCli) -> i64:
+    # An empty path is refused by loader path policy before any file access,
+    # which yields the closed (scalar) admission without a second code path.
+    val admission = hosted_vector_admit(cli.vector_provider_path, cli.vector_provider_sha256)
+    if cli.vector_provider_path != "":
+        if admission.admitted:
+            print("simple-web-server: vector provider admitted path={cli.vector_provider_path} level={admission.level} ({hosted_vector_level_name(admission.level)})")
+        else:
+            print("simple-web-server: vector provider refused ({admission.reason}); serving with the scalar parser")
+
+    val capability = match plaintext_development_capability("simple-web-server single-owner loopback lane"):
+        Ok(value): value
+        Err(message):
+            print("simple-web-server: {message}")
+            return 1
+    var policy = SecureServerPolicy.plaintext_dev(capability)
+    policy.max_body = cli.max_body_bytes.to_i32()
+    policy.read_timeout_ms = cli.read_timeout_ms
+    policy.write_timeout_ms = cli.write_timeout_ms
+
+    var router = Router.new()
+    router.post("/ingest", hosted_ingest_handler)
+    router.get("/health", hosted_health_handler)
+    val host = hosted_web_listen_host(cli.listen_addr)
+    val port = hosted_web_listen_port(cli.listen_addr)
+    var server = SimpleHttpServer.new(host, port.to_i32(), router)
+    server = server.with_policy(policy)
+    if admission.admitted:
+        server = server.with_http_request_parser_v1(admission.parser)
+
+    val listener = match TcpListener.bind(cli.listen_addr):
+        Ok(value): value
+        Err(error):
+            print("simple-web-server: startup failed: bind {cli.listen_addr}: {error}")
+            return 1
+    val parser_name = if admission.admitted: "vector" else: "scalar"
+    print("SIMPLE_WEB_SERVER_READY lane=single-owner parser={parser_name} level={admission.level} addr={cli.listen_addr}")
+
+    var stats = HostedLaneStats(requests: 0, provider_requests: 0,
+        provider_attempts: 0, provider_successes: 0, accept_errors: 0)
+    var consecutive_errors = 0
+    while cli.max_requests == 0 or stats.requests < cli.max_requests:
+        match listener.accept():
+            Ok(stream):
+                consecutive_errors = 0
+                if not server.admission.try_acquire():
+                    val _ = stream.close()
+                    continue
+                val outcome = server.handle_connection_on_owner_v1(stream)
+                stats.requests = stats.requests + 1
+                if outcome.provider_used:
+                    stats.provider_requests = stats.provider_requests + 1
+                stats.provider_attempts = stats.provider_attempts + outcome.provider_attempts
+                stats.provider_successes = stats.provider_successes + outcome.provider_successes
+            Err(error):
+                stats.accept_errors = stats.accept_errors + 1
+                consecutive_errors = consecutive_errors + 1
+                print("simple-web-server: accept error: {error}")
+                if consecutive_errors >= 100:
+                    break
+    val _ = listener.close()
+    var close_status = "none"
+    if server.request_parser != nil:
+        val closed = http_request_parser_close_owned_v1(server.request_parser!)
+        close_status = if closed.status == PROVIDER_SESSION_OK: "ok" else: "failed:{closed.reason}"
+    print("SIMPLE_WEB_SERVER_STATS parser={parser_name} level={admission.level} requests={stats.requests} provider_requests={stats.provider_requests} provider_attempts={stats.provider_attempts} provider_successes={stats.provider_successes} accept_errors={stats.accept_errors} provider_close={close_status}")
+    0
+
+export HostedVectorAdmission, HostedLaneStats
+export hosted_vector_admit, hosted_vector_level_name
+export hosted_ingest_handler, hosted_health_handler, hosted_single_owner_serve

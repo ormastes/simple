@@ -589,3 +589,18 @@ Leaving OPEN, no attempt.
 ## HIR-P2 HC triage 2026-11-05
 
 Premise holds (illegal in every lane; not a compiler gap). Fix is a ~740-site mechanical rewrite across src/os, src/compiler, src/lib; needs a scoped per-module plan (and a lint rule to ratchet) rather than one family PR. Re-scoped: remains OPEN as a systemic migration; no code change here.
+
+## HIR-P2 HC2 compiler-subset rescan 2026-11-05
+
+Re-scanned every `.spl` under `src/compiler/**` at origin/release/1.0.0
+`27e65c24371` (2,577 files) with a per-class heuristic (class/struct fields vs
+bare identifiers inside non-static `me`/`fn` bodies, excluding params, `val`/`var`
+locals, `for` binders, named args and strings). 43 raw hits, **all false
+positives** (docstrings, `{self.x}` interpolation, `case Err(error)` /
+`if val provider = self.provider` pattern binders, multi-line parameter lists).
+The census's `src/compiler/70.backend` (124) and `10.frontend` (58) counts are
+stale: e.g. `10.frontend/domain/schema_contract.spl` now uses `self.` throughout.
+
+Consequence: this row does **not** block the compiler compiling itself. The
+remaining sites are in `src/os/**` and `src/lib/**` (non-bootstrap scope). Row
+stays OPEN, re-scoped to those trees.
