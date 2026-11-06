@@ -445,21 +445,6 @@ static int rt_thread_data_release(RtThreadData* td) {
 #endif
 }
 
-static int rt_native_address_is_code(int64_t raw_addr);
-
-/* Pool-v1 scalar-task decoder only (rt_pool_v1_scalar_task_create); the
- * isolated-thread spawns use the explicit-kind spl_worker_closure_word. This
- * value-based decode is tracked by
- * doc/08_tracking/bug/pool_native_function_payload_value_heuristic_2026-11-06.md. */
-static int64_t rt_native_closure_payload(int64_t raw) {
-    uint64_t value = (uint64_t)raw;
-    if (value < 4096ULL) return 0;
-    if (rt_native_word_exceeds_user_va(value)) return (int64_t)(value >> 3);
-    /* TAG_HEAP record pointer; an odd raw code address stays as is. */
-    if ((value & TAG_MASK) == TAG_HEAP && !rt_native_address_is_code(raw)) return (int64_t)(value & ~TAG_MASK);
-    return raw;
-}
-
 #if defined(SPL_THREAD_HAVE_PHDR_ITERATE)
 typedef struct {
     uintptr_t addr;
@@ -510,45 +495,15 @@ static int rt_native_address_is_code(int64_t raw_addr) {
 #endif
 }
 
-/* Explicit worker-closure ABI kind, chosen by the SPAWNER from the static type
- * of what it passes; never inferred from the word's value. Twin of executor.rs
- * RT_WORKER_CLOSURE_* / native_worker_closure_word.
- *   ADDRESS  machine address of a code entry or closure record; worker
- *            arguments pass through unchanged.
- *   VALUE    tagged Simple RuntimeValue, decoded by its own tag:
- *            TAG_INT  (addr << 3) -> raw native record/entry, raw i64 args;
- *            TAG_HEAP (addr | 1)  -> heap record, RuntimeValue args;
- *            any other tag is rejected.
- * Any other kind is rejected (spawn returns 0). */
-#define RT_WORKER_CLOSURE_ADDRESS 1
-#define RT_WORKER_CLOSURE_VALUE   2
-
+/* Explicit worker-closure ABI kind (RT_WORKER_CLOSURE_*), chosen by the
+ * SPAWNER from the static type of what it passes; never inferred from the
+ * word's value. The pure decode is rt_native_function_word_decode in
+ * runtime_value.h, shared with the pool submit (runtime_pool.c and the
+ * pool-v1 path below). ADDRESS worker arguments pass through unchanged;
+ * VALUE TAG_INT selects raw i64 args, TAG_HEAP RuntimeValue args. Any other
+ * kind or tag is rejected (spawn returns 0). */
 static int spl_worker_closure_word(int64_t kind, int64_t word, int64_t* payload, int* raw_worker_args) {
-    uint64_t value = (uint64_t)word;
-    uint64_t decoded;
-    int raw;
-    if (kind == RT_WORKER_CLOSURE_ADDRESS) {
-        /* Validity, not a guess: above the user-VA ceiling is no address. */
-        if (rt_native_word_exceeds_user_va(value)) return 0;
-        decoded = value;
-        raw = 0;
-    } else if (kind == RT_WORKER_CLOSURE_VALUE) {
-        if ((value & TAG_MASK) == TAG_INT) {
-            decoded = value >> 3;
-            raw = 1;
-        } else if ((value & TAG_MASK) == TAG_HEAP) {
-            decoded = value & ~TAG_MASK;
-            raw = 0;
-        } else {
-            return 0;
-        }
-    } else {
-        return 0;
-    }
-    if (decoded < 4096ULL) return 0;
-    *payload = (int64_t)decoded;
-    *raw_worker_args = raw;
-    return 1;
+    return rt_native_function_word_decode(kind, word, payload, raw_worker_args);
 }
 
 /* 1 when two machine words at addr are committed and readable, 0 when they
@@ -1647,9 +1602,13 @@ static void rt_pool_v1_task_dispose(RtPoolTask* task) {
     SPL_FREE(task);
 }
 
-static RtPoolTask* rt_pool_v1_scalar_task_create(int64_t function_value, int64_t input) {
-    int64_t payload = rt_native_closure_payload(function_value);
-    if (payload == 0) return NULL;
+static RtPoolTask* rt_pool_v1_scalar_task_create(int64_t kind, int64_t function_value, int64_t input) {
+    /* Decoded by the submitter's declared kind, never by the word's value
+     * (pool_native_function_payload_value_heuristic_2026-11-06). */
+    int64_t payload = 0;
+    int raw_record = 0;
+    if (!rt_native_function_word_decode(kind, function_value, &payload, &raw_record)) return NULL;
+    (void)raw_record; /* both encodings name the same task ABI: (i64) -> i64 */
     const int64_t* descriptor = (const int64_t*)(intptr_t)payload;
     int is_direct = descriptor[0] != 0 && descriptor[1] == RT_POOL_V1_DIRECT_FUNCTION_MARKER;
     /* Probed only after the direct-record test: a closure's word 1 is its
@@ -1712,10 +1671,14 @@ int64_t rt_pool_state_create_v1(int64_t capacity) {
     return handle;
 }
 
-int64_t rt_pool_state_try_submit_i64_v1(int64_t state_handle, int64_t entry_fn, int64_t input_i64) {
+/* Pool submit with an explicit function-value kind (RT_WORKER_CLOSURE_*),
+ * chosen by the submitter: ADDRESS for a machine-address record (runtime and
+ * test callers), VALUE for a tagged Simple function value. Unknown kinds and
+ * tags are rejected (-3). Twin of runtime_pool.c. */
+int64_t rt_pool_state_try_submit_i64_kind_v1(int64_t state_handle, int64_t kind, int64_t entry_fn, int64_t input_i64) {
     RtPoolStateV1* state = (RtPoolStateV1*)rt_pool_v1_handle_acquire(state_handle, RT_POOL_V1_STATE);
     if (!state) return -3;
-    RtPoolTask* task = rt_pool_v1_scalar_task_create(entry_fn, input_i64);
+    RtPoolTask* task = rt_pool_v1_scalar_task_create(kind, entry_fn, input_i64);
     if (!task) {
         rt_pool_v1_handle_release(state_handle);
         return -3;
@@ -1779,6 +1742,12 @@ int64_t rt_pool_state_try_submit_i64_v1(int64_t state_handle, int64_t entry_fn, 
     }
     rt_pool_v1_handle_release(state_handle);
     return task_handle;
+}
+
+/* Simple-facing legacy entry (extern name kept for deployed binaries): the
+ * Simple pool facade passes a tagged function value, so the kind is VALUE. */
+int64_t rt_pool_state_try_submit_i64_v1(int64_t state_handle, int64_t entry_fn, int64_t input_i64) {
+    return rt_pool_state_try_submit_i64_kind_v1(state_handle, RT_WORKER_CLOSURE_VALUE, entry_fn, input_i64);
 }
 
 int64_t rt_pool_task_status_i64_v1(int64_t task_handle) {
