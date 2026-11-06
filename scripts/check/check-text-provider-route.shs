@@ -1,0 +1,80 @@
+#!/bin/sh
+# Runtime text route over the levelled vector provider (Stage 1 of moving
+# CPU-level SIMD out of the static runtime). Called by
+# check-vector-provider-levels.shs run lane after it built the DSO set in DIR:
+#   check-text-provider-route.shs DIR TRIPLE HOST_LEVEL
+# Checks (one "ok"/"FAIL" line each, last stdout line is the verdict):
+#   ISA    runtime_simd_{utf8,case,search}.c compiled for the baseline carry no
+#          ymm/zmm/opmask (x86-64) and no target(...) attribute in source
+#   route  production runtime objects + text_simd_provider_route_selfcheck, one
+#          process per admission outcome: not configured, path denied, pin
+#          invalid, artifact absent, digest mismatch, no SIMD level (cap0 DSO),
+#          admitted at every cap <= host; every public text entry point must
+#          match the reference whatever the route.
+set -u
+d=${1:?usage: DIR TRIPLE HOST_LEVEL} t=${2:?triple} host=${3:?host level}
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+rt=$root/src/runtime
+cc=${CLANG:-clang}
+command -v "$cc" >/dev/null 2>&1 || cc=/c/llvm/install/bin/clang
+objdump=${OBJDUMP:-llvm-objdump}
+command -v "$objdump" >/dev/null 2>&1 || objdump=$(dirname "$(command -v "$cc")")/llvm-objdump
+checked=0 failed=0
+ok() { checked=$((checked + 1)); echo "ok   $*"; }
+fail() { failed=$((failed + 1)); echo "FAIL $*"; }
+w=$d/text_route
+rm -rf "$w"; mkdir -p "$w/build/providers"
+case $t in *windows*) exe=.exe dl=;; *) exe= dl=-ldl;; esac
+case $t in *linux*) tf="--target=$t --gcc-toolchain=/usr";; *) tf="--target=$t";; esac
+
+# ISA: the static runtime keeps only the architecture baseline.
+for f in runtime_simd_utf8 runtime_simd_case runtime_simd_search; do
+    if grep -n '__attribute__((target\|RT_SIMD_TARGET' "$rt/$f.c" >/dev/null; then
+        fail "$f.c still carries a target(...) attribute"; continue
+    fi
+    case $t in x86_64*) base=-march=x86-64;; *) base=;; esac
+    if ! "$cc" $tf $base -std=gnu11 -O2 -DSPL_SIMD_TEXT_CASE_PROVIDER -I"$rt" -c "$rt/$f.c" -o "$w/$f.o" 2>"$w/$f.log"; then
+        fail "$f.c baseline compile (see $w/$f.log)"; continue
+    fi
+    "$objdump" -d "$w/$f.o" >"$w/$f.dis" 2>&1
+    case $t in
+        x86_64*) pat='[yz]mm[0-9]|kmov';;
+        aarch64*) pat='\bz[0-9]+\.';;
+        riscv64*) pat='vsetvli|vsetivli|vle[0-9]|vse[0-9]';;
+    esac
+    if grep -Eiq "$pat" "$w/$f.dis"; then fail "$f.o carries above-baseline vector instructions"
+    else ok "$f.o baseline-only"; fi
+done
+
+# Route: one process per admission outcome.
+"$cc" $tf -std=gnu11 -O2 -Wall -Wextra -Werror -DSPL_SIMD_TEXT_CASE_PROVIDER -I"$rt" \
+    "$rt/test/text_simd_provider_route_selfcheck.c" "$rt/runtime_simd_utf8.c" \
+    "$rt/runtime_simd_case.c" "$rt/runtime_simd_search.c" -o "$w/route$exe" $dl >"$w/route.log" 2>&1 \
+    || { fail "route selfcheck compile (see $w/route.log)"; echo "FAIL — $failed failed, $checked checked"; exit 1; }
+ext=so; case $t in *windows*) ext=dll;; esac
+for f in "$d"/simple_vector_provider_levelled*.$ext; do cp "$f" "$w/build/providers/"; done
+pin() { sha256sum "$w/build/providers/$1" | cut -c1-64; }
+full=simple_vector_provider_levelled.$ext
+route() { # route LABEL STATUS LEVEL [VAR=VALUE...]
+    label=$1 st=$2 lv=$3; shift 3
+    line=$(cd "$w" && env -u SIMPLE_VECTOR_PROVIDER_PATH -u SIMPLE_VECTOR_PROVIDER_SHA256 "$@" "./route$exe" "$st" "$lv" 2>&1); rc=$?
+    if [ $rc -eq 0 ]; then ok "route $label: $line"; else fail "route $label rc=$rc: $line"; fi
+}
+route not-configured 1 0
+route path-denied 2 0 SIMPLE_VECTOR_PROVIDER_PATH="$w/build/providers/$full" SIMPLE_VECTOR_PROVIDER_SHA256="$(pin $full)"
+route pin-invalid 3 0 SIMPLE_VECTOR_PROVIDER_PATH="build/providers/$full" SIMPLE_VECTOR_PROVIDER_SHA256=not-a-digest
+route dll-absent 4 0 SIMPLE_VECTOR_PROVIDER_PATH="build/providers/absent.$ext" SIMPLE_VECTOR_PROVIDER_SHA256="$(pin $full)"
+route digest-refused 5 0 SIMPLE_VECTOR_PROVIDER_PATH="build/providers/$full" \
+    SIMPLE_VECTOR_PROVIDER_SHA256=0000000000000000000000000000000000000000000000000000000000000000
+route no-simd-level 10 0 SIMPLE_VECTOR_PROVIDER_PATH="build/providers/simple_vector_provider_levelled_cap0.$ext" \
+    SIMPLE_VECTOR_PROVIDER_SHA256="$(pin simple_vector_provider_levelled_cap0.$ext)"
+for cap in 1 2 3 4; do
+    name=simple_vector_provider_levelled; [ $cap = 4 ] || name=${name}_cap$cap
+    want=$cap; [ $cap -gt "$host" ] && want=$host
+    [ "$want" -gt 0 ] || continue
+    route admitted-cap$cap 0 "$want" SIMPLE_VECTOR_PROVIDER_PATH="build/providers/$name.$ext" \
+        SIMPLE_VECTOR_PROVIDER_SHA256="$(pin $name.$ext)"
+done
+if [ "$failed" -gt 0 ]; then echo "FAIL — $failed failed, $checked checked"; exit 1; fi
+[ "$checked" -gt 0 ] || { echo "ERROR — nothing was checked"; exit 2; }
+echo "PASS — $checked checked"

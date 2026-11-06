@@ -1,45 +1,25 @@
 /*
- * SIMD ASCII Case Operations — is_ascii, to_upper, to_lower
+ * ASCII Case Operations — is_ascii, to_upper, to_lower
  *
- * Wave 1: scalar stubs with reserved-field caching for is_ascii.
- * Wave 2: SSE2 / AVX2 / NEON fast paths.
+ * Portable scalar baseline only. The SSE2/AVX2/NEON kernels moved to the
+ * levelled vector provider (providers/vector/text_level_kernels.c, opcodes
+ * SIMPLE_VECTOR_TEXT_ASCII_*); when runtime_simd_utf8.c admitted it, spans of
+ * at least SIMD_TEXT_PROVIDER_MIN_BYTES route there, otherwise scalar.
  *
  * Build: cc -c -fPIC -O2 -std=gnu11 -I. runtime_simd_case.c
  */
 
 #include "runtime_simd_dispatch.h"
+#include "simple_vector_kernel_abi_v1.h"
 #include <stdlib.h>
 #include <stdatomic.h>
 
-/* MSVC portability for the GCC/Clang attributes this file uses.
- *
- * - target(): MSVC has no per-function ISA attribute. On x64 SSE2 is baseline
- *   and AVX2 intrinsics compile unconditionally, so dropping it is correct;
- *   which kernel actually RUNS is still decided by the runtime dispatch table,
- *   not by the attribute.
- * - unused: MSVC does not warn about an unreferenced static inline, so there
- *   is nothing to suppress.
- * The predicate is the COMPILER, not the platform: clang targeting
- * *-pc-windows-msvc defines _MSC_VER but supports both attributes, so gating
- * on _MSC_VER alone would silently drop them there. GCC and Clang keep the
- * real attributes byte for byte on every target. */
+/* unused: MSVC does not warn about an unreferenced static, so there is nothing
+ * to suppress; GCC/Clang keep the attribute. */
 #if defined(__GNUC__) || defined(__clang__)
-#define RT_SIMD_TARGET(feature) __attribute__((target(feature)))
 #define RT_SIMD_UNUSED __attribute__((unused))
 #else
-#define RT_SIMD_TARGET(feature)
 #define RT_SIMD_UNUSED
-#endif
-
-
-/* x86 intrinsics — guarded by platform macro */
-#if SIMD_HAS_X86
-#  include <immintrin.h>
-#endif
-
-/* ARM NEON intrinsics — aarch64 only (vmaxvq_u8 is not available on armv7) */
-#if defined(__aarch64__) || defined(_M_ARM64)
-#  include <arm_neon.h>
 #endif
 
 /* ================================================================
@@ -91,241 +71,32 @@ static void scalar_to_upper_ascii(const uint8_t* src, uint8_t* dst, uint64_t len
 }
 
 /* ================================================================
- * SSE2 Kernels (x86_64 — SSE2 is baseline)
+ * Provider-routed kernels (scalar for short spans or any refusal)
  * ================================================================ */
 
-#if SIMD_HAS_SSE2
-
-RT_SIMD_TARGET("sse2")
-static int sse2_is_ascii(const uint8_t* data, uint64_t len) {
-    uint64_t i = 0;
-    /* Process 16 bytes at a time */
-    for (; i + 16 <= len; i += 16) {
-        __m128i chunk = _mm_loadu_si128((const __m128i*)(data + i));
-        int mask = _mm_movemask_epi8(chunk);
-        if (mask != 0) return 0;
-    }
-    /* Scalar tail */
-    for (; i < len; i++) {
-        if (data[i] >= 0x80) return 0;
-    }
-    return 1;
+RT_SIMD_UNUSED static int routed_is_ascii(const uint8_t* data, uint64_t len) {
+    int64_t r;
+    if (len >= SIMD_TEXT_PROVIDER_MIN_BYTES &&
+        simd_text_provider_call(SIMPLE_VECTOR_TEXT_ASCII_CHECK, data, len, NULL, 0, NULL, &r))
+        return r == 1;
+    return scalar_is_ascii(data, len);
 }
 
-RT_SIMD_TARGET("sse2")
-static void sse2_to_lower_ascii(const uint8_t* src, uint8_t* dst, uint64_t len) {
-    uint64_t i = 0;
-    const __m128i lower_bound = _mm_set1_epi8('A' - 1);   /* 64 */
-    const __m128i upper_bound = _mm_set1_epi8('Z' + 1);   /* 91 */
-    const __m128i delta = _mm_set1_epi8(0x20);
-
-    for (; i + 16 <= len; i += 16) {
-        __m128i chunk = _mm_loadu_si128((const __m128i*)(src + i));
-        __m128i ge_A = _mm_cmpgt_epi8(chunk, lower_bound);
-        __m128i le_Z = _mm_cmplt_epi8(chunk, upper_bound);
-        __m128i in_range = _mm_and_si128(ge_A, le_Z);
-        __m128i add = _mm_and_si128(in_range, delta);
-        __m128i result = _mm_or_si128(chunk, add);
-        _mm_storeu_si128((__m128i*)(dst + i), result);
-    }
-    /* Scalar tail */
-    for (; i < len; i++) {
-        uint8_t c = src[i];
-        if (c >= 'A' && c <= 'Z')
-            dst[i] = c | 0x20;
-        else
-            dst[i] = c;
-    }
+RT_SIMD_UNUSED static void routed_to_lower_ascii(const uint8_t* src, uint8_t* dst, uint64_t len) {
+    int64_t r;
+    if (len >= SIMD_TEXT_PROVIDER_MIN_BYTES &&
+        simd_text_provider_call(SIMPLE_VECTOR_TEXT_ASCII_LOWER, src, len, NULL, 0, dst, &r))
+        return;
+    scalar_to_lower_ascii(src, dst, len);
 }
 
-RT_SIMD_TARGET("sse2")
-static void sse2_to_upper_ascii(const uint8_t* src, uint8_t* dst, uint64_t len) {
-    uint64_t i = 0;
-    const __m128i lower_bound = _mm_set1_epi8('a' - 1);   /* 96 */
-    const __m128i upper_bound = _mm_set1_epi8('z' + 1);   /* 123 */
-
-    for (; i + 16 <= len; i += 16) {
-        __m128i chunk = _mm_loadu_si128((const __m128i*)(src + i));
-        __m128i ge_a = _mm_cmpgt_epi8(chunk, lower_bound);
-        __m128i le_z = _mm_cmplt_epi8(chunk, upper_bound);
-        __m128i in_range = _mm_and_si128(ge_a, le_z);
-        /* For bytes in range: AND with 0xDF to clear bit 5
-         * For bytes out of range: keep original
-         * result = (chunk & mask_clear) where in_range, else chunk
-         * = chunk & (in_range ? 0xDF : 0xFF)
-         * = chunk & (0xFF ^ (in_range & 0x20))
-         * = chunk & ~(in_range & 0x20)
-         */
-        __m128i bit5 = _mm_and_si128(in_range, _mm_set1_epi8(0x20));
-        __m128i result = _mm_andnot_si128(bit5, chunk);
-        _mm_storeu_si128((__m128i*)(dst + i), result);
-    }
-    /* Scalar tail */
-    for (; i < len; i++) {
-        uint8_t c = src[i];
-        if (c >= 'a' && c <= 'z')
-            dst[i] = c & 0xDF;
-        else
-            dst[i] = c;
-    }
+RT_SIMD_UNUSED static void routed_to_upper_ascii(const uint8_t* src, uint8_t* dst, uint64_t len) {
+    int64_t r;
+    if (len >= SIMD_TEXT_PROVIDER_MIN_BYTES &&
+        simd_text_provider_call(SIMPLE_VECTOR_TEXT_ASCII_UPPER, src, len, NULL, 0, dst, &r))
+        return;
+    scalar_to_upper_ascii(src, dst, len);
 }
-
-#endif /* SIMD_HAS_SSE2 */
-
-/* ================================================================
- * AVX2 Kernels (runtime-detected on x86_64)
- * ================================================================ */
-
-#if SIMD_CAN_AVX2
-
-RT_SIMD_TARGET("avx2")
-static int avx2_is_ascii(const uint8_t* data, uint64_t len) {
-    uint64_t i = 0;
-    /* Process 32 bytes at a time */
-    for (; i + 32 <= len; i += 32) {
-        __m256i chunk = _mm256_loadu_si256((const __m256i*)(data + i));
-        int mask = _mm256_movemask_epi8(chunk);
-        if (mask != 0) return 0;
-    }
-    /* SSE2 cleanup for 16-byte remainder */
-    for (; i + 16 <= len; i += 16) {
-        __m128i chunk = _mm_loadu_si128((const __m128i*)(data + i));
-        int mask = _mm_movemask_epi8(chunk);
-        if (mask != 0) return 0;
-    }
-    /* Scalar tail */
-    for (; i < len; i++) {
-        if (data[i] >= 0x80) return 0;
-    }
-    return 1;
-}
-
-RT_SIMD_TARGET("avx2")
-static void avx2_to_lower_ascii(const uint8_t* src, uint8_t* dst, uint64_t len) {
-    uint64_t i = 0;
-    const __m256i lower_bound = _mm256_set1_epi8('A' - 1);
-    const __m256i upper_bound = _mm256_set1_epi8('Z' + 1);
-    const __m256i delta = _mm256_set1_epi8(0x20);
-
-    for (; i + 32 <= len; i += 32) {
-        __m256i chunk = _mm256_loadu_si256((const __m256i*)(src + i));
-        __m256i ge_A = _mm256_cmpgt_epi8(chunk, lower_bound);
-        __m256i le_Z = _mm256_cmpgt_epi8(upper_bound, chunk);
-        __m256i in_range = _mm256_and_si256(ge_A, le_Z);
-        __m256i add = _mm256_and_si256(in_range, delta);
-        __m256i result = _mm256_or_si256(chunk, add);
-        _mm256_storeu_si256((__m256i*)(dst + i), result);
-    }
-    /* Scalar tail */
-    for (; i < len; i++) {
-        uint8_t c = src[i];
-        if (c >= 'A' && c <= 'Z')
-            dst[i] = c | 0x20;
-        else
-            dst[i] = c;
-    }
-}
-
-RT_SIMD_TARGET("avx2")
-static void avx2_to_upper_ascii(const uint8_t* src, uint8_t* dst, uint64_t len) {
-    uint64_t i = 0;
-    const __m256i lower_bound = _mm256_set1_epi8('a' - 1);
-    const __m256i upper_bound = _mm256_set1_epi8('z' + 1);
-    const __m256i bit5 = _mm256_set1_epi8(0x20);
-
-    for (; i + 32 <= len; i += 32) {
-        __m256i chunk = _mm256_loadu_si256((const __m256i*)(src + i));
-        __m256i ge_a = _mm256_cmpgt_epi8(chunk, lower_bound);
-        __m256i le_z = _mm256_cmpgt_epi8(upper_bound, chunk);
-        __m256i in_range = _mm256_and_si256(ge_a, le_z);
-        __m256i clear = _mm256_and_si256(in_range, bit5);
-        __m256i result = _mm256_andnot_si256(clear, chunk);
-        _mm256_storeu_si256((__m256i*)(dst + i), result);
-    }
-    /* Scalar tail */
-    for (; i < len; i++) {
-        uint8_t c = src[i];
-        if (c >= 'a' && c <= 'z')
-            dst[i] = c & 0xDF;
-        else
-            dst[i] = c;
-    }
-}
-
-#endif /* SIMD_CAN_AVX2 */
-
-/* ================================================================
- * NEON Kernels (aarch64 — NEON is baseline)
- * ================================================================ */
-
-#if defined(__aarch64__) || defined(_M_ARM64)
-
-static int neon_is_ascii(const uint8_t* data, uint64_t len) {
-    uint64_t i = 0;
-    /* Process 16 bytes at a time */
-    for (; i + 16 <= len; i += 16) {
-        uint8x16_t chunk = vld1q_u8(data + i);
-        uint8_t max_val = vmaxvq_u8(chunk);
-        if (max_val >= 0x80) return 0;
-    }
-    /* Scalar tail */
-    for (; i < len; i++) {
-        if (data[i] >= 0x80) return 0;
-    }
-    return 1;
-}
-
-static void neon_to_lower_ascii(const uint8_t* src, uint8_t* dst, uint64_t len) {
-    uint64_t i = 0;
-    const uint8x16_t vA = vdupq_n_u8('A');
-    const uint8x16_t vZ = vdupq_n_u8('Z');
-    const uint8x16_t v20 = vdupq_n_u8(0x20);
-
-    for (; i + 16 <= len; i += 16) {
-        uint8x16_t chunk = vld1q_u8(src + i);
-        uint8x16_t ge_A = vcgeq_u8(chunk, vA);
-        uint8x16_t le_Z = vcleq_u8(chunk, vZ);
-        uint8x16_t in_range = vandq_u8(ge_A, le_Z);
-        uint8x16_t delta = vandq_u8(in_range, v20);
-        uint8x16_t result = vorrq_u8(chunk, delta);
-        vst1q_u8(dst + i, result);
-    }
-    /* Scalar tail */
-    for (; i < len; i++) {
-        uint8_t c = src[i];
-        if (c >= 'A' && c <= 'Z')
-            dst[i] = c | 0x20;
-        else
-            dst[i] = c;
-    }
-}
-
-static void neon_to_upper_ascii(const uint8_t* src, uint8_t* dst, uint64_t len) {
-    uint64_t i = 0;
-    const uint8x16_t va = vdupq_n_u8('a');
-    const uint8x16_t vz = vdupq_n_u8('z');
-    const uint8x16_t v20 = vdupq_n_u8(0x20);
-
-    for (; i + 16 <= len; i += 16) {
-        uint8x16_t chunk = vld1q_u8(src + i);
-        uint8x16_t ge_a = vcgeq_u8(chunk, va);
-        uint8x16_t le_z = vcleq_u8(chunk, vz);
-        uint8x16_t in_range = vandq_u8(ge_a, le_z);
-        uint8x16_t bit5 = vandq_u8(in_range, v20);
-        uint8x16_t result = vbicq_u8(chunk, bit5);
-        vst1q_u8(dst + i, result);
-    }
-    /* Scalar tail */
-    for (; i < len; i++) {
-        uint8_t c = src[i];
-        if (c >= 'a' && c <= 'z')
-            dst[i] = c & 0xDF;
-        else
-            dst[i] = c;
-    }
-}
-
-#endif /* __aarch64__ */
 
 /* ================================================================
  * Dispatch Slot Upgrade — first use by the opt-in case provider only
@@ -340,37 +111,19 @@ RT_SIMD_UNUSED static void simd_case_init(void) {
         while (atomic_load_explicit(&state, memory_order_acquire) != 2) {}
         return;
     }
-    /* Ensure base dispatch table is initialized first */
+    /* Ensure base dispatch table (and provider admission) is done first */
     simd_text_init();
 
-    /* Always install our scalar kernels (they avoid locale-dependent
-     * toupper/tolower from <ctype.h> used in the dispatch.c fallbacks) */
+    /* Our scalar kernels avoid the locale-dependent toupper/tolower from
+     * <ctype.h> used in the dispatch-table defaults. */
     g_simd_text.is_ascii       = scalar_is_ascii;
     g_simd_text.to_lower_ascii = scalar_to_lower_ascii;
     g_simd_text.to_upper_ascii = scalar_to_upper_ascii;
-
-#if SIMD_HAS_SSE2
-    /* SSE2 is baseline on all x86_64 — always upgrade */
-    g_simd_text.is_ascii       = sse2_is_ascii;
-    g_simd_text.to_lower_ascii = sse2_to_lower_ascii;
-    g_simd_text.to_upper_ascii = sse2_to_upper_ascii;
-#endif
-
-#if SIMD_CAN_AVX2
-    /* AVX2 requires runtime detection */
-    if (simd_detect_avx2()) {
-        g_simd_text.is_ascii       = avx2_is_ascii;
-        g_simd_text.to_lower_ascii = avx2_to_lower_ascii;
-        g_simd_text.to_upper_ascii = avx2_to_upper_ascii;
+    if (simd_text_provider_level() > 0) {
+        g_simd_text.is_ascii       = routed_is_ascii;
+        g_simd_text.to_lower_ascii = routed_to_lower_ascii;
+        g_simd_text.to_upper_ascii = routed_to_upper_ascii;
     }
-#endif
-
-#if defined(__aarch64__) || defined(_M_ARM64)
-    /* NEON is mandatory on aarch64 */
-    g_simd_text.is_ascii       = neon_is_ascii;
-    g_simd_text.to_lower_ascii = neon_to_lower_ascii;
-    g_simd_text.to_upper_ascii = neon_to_upper_ascii;
-#endif
     atomic_store_explicit(&state, 2, memory_order_release);
 }
 
