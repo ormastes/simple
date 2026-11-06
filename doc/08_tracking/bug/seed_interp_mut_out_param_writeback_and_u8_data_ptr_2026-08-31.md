@@ -1,7 +1,7 @@
 # Seed interpreter: `&mut` out-param writeback loss and `[u8].data_ptr()` pointing at boxed value cells
 
 - **Filed:** 2026-08-31
-- **Status:** OPEN — two distinct seed-interpreter ABI gaps, root cause not fixed;
+- **Status:** FIXED 2026-11-06 — gap 1 already fixed upstream, gap 2 fixed in `work/seed-interp-batch2-20261106` (see "Resolution"); originally: two distinct seed-interpreter ABI gaps,
   in-tree workarounds landed at the two call sites that blocked the UI showcase
 - **Platform:** aarch64-apple-darwin (likely all platforms; untested elsewhere)
 - **Found during:** UI showcase real-launch sweep (2d / 2d-metal / web / gui / wm)
@@ -81,3 +81,28 @@ buffer).
   clicks on menubar items (Text-kind children of the toolbar), so the
   toolbar is clickable as the design intends and the hosts spec's
   `click 20,10` contract holds.
+
+## Resolution (2026-11-06)
+
+Measured with `test/fixtures/seed_interp/mut_out_param_and_data_ptr_repro.spl`
+(Windows, `SIMPLE_EXECUTION_MODE=interpret`, loads `kernel32.dll`).
+
+- **Gap 1 — already fixed.** On a seed built from `release/1.0.0` @
+  `ecb705896a4` the base prints `out_param status=0 handle_nonzero=true`:
+  the extern's `&mut` write reaches the caller's `var`. The fallback in
+  `src/lib/nogc_sync_mut/sffi/dynamic.spl` stays: it also covers the
+  separate JIT out-slot defect
+  (`jit_refmut_extern_out_param_passes_value_not_address_2026-10-05.md`).
+- **Gap 2 — fixed.** `interpreter_method/collections.rs`
+  `handle_byte_array_methods` now answers `ptr` / `data_ptr` from the packed
+  fast path with the `Arc<Vec<u8>>` payload pointer (the same address
+  `rt_array_data_ptr` returns), instead of widening to `Vec<Value>` and
+  returning that temporary's cell pointer. The contract for a boxed
+  `Value::Array` (no packed form) is unchanged and remains an owner decision.
+  Before: `data_ptr word=3455309644288` (not the bytes; the widened buffer
+  was already freed). After: `data_ptr word=67305985` (`0x04030201`).
+  Rust test
+  `interpreter_method::collections::byte_array_metadata_fast_path_tests::byte_array_data_ptr_addresses_the_packed_payload`:
+  FAILED before (`data_ptr must return the packed byte pointer`, left/right
+  differ), ok after. The `metal_sffi.spl` host-buffer marshal is not
+  reverted here (no Metal host to verify it on).
