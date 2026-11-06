@@ -143,3 +143,16 @@ l[0].inc()` leaves `a` unchanged; direct parameter passing aliases). Hence
 stay nil). No std-lib-only fix preserves the spec's `input.grad` contract;
 needs runtime shared-reference semantics for stored class values. Status: OPEN,
 runtime-blocked. Related: interp_list_class_element_read_returns_copy_mutation_loss_2026-08-17.md.
+
+## 2026-11-06 re-verification (seed-class-reference lane): 7/7, runtime gap closed
+
+Seed built from `origin/release/1.0.0` `f1390d48254` (worktree
+`simple-seed-class-reference`): `src/lib/gc_async_mut/pure/test/nn_spec.spl`
+is **7 passed / 0 failed** by default, and 2/7 (the 5 `unwrap() on None`
+gradient cases) with `SIMPLE_INTERP_CLASS_REF=0`. The runtime shared-reference
+semantics this record waited on landed as `6c7b4db3d39` ("fix(interp): class
+reference semantics by default", merged to release/1.0.0 2026-11-04 via
+`7e3b0244cc3`); the `simple-ref` binary used for the earlier 2026-11-06 note
+predates it. `training_spec` 1 pass / 1 skip either way. No library change.
+Owner decision 2026-11-06: classes are reference types everywhere, structs
+are value types. Coordinator owns the bug_db status change.
