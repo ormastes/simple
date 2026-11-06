@@ -3,9 +3,12 @@
 Hand-maintained companion, not canonical docgen output.
 Source: `test/01_unit/compiler/driver/unit_tldr_advice_roots_spec.spl`.
 Source SHA256: `fc9e290c2e76c6f1609720a92345ead8c15c1e624a38e4d5be21692715046177`.
-Execution status: blocked on old-producer native compilation; no assertions or SSpec PASS claimed.
-Attempt 1 was isolation-rejected; attempt 2 failed at an unrelated Cranelift f64/i64 ABI boundary.
-The newer Hello-tested producer is reserved for the next scoped attempt.
+Execution status: native baseline blocked; no assertions or SSpec PASS claimed.
+Attempt 1 was isolation-rejected; attempt 2 exposed the parser float/text caller
+defect subsequently fixed in PR #7269. Attempt 3 was a guard preflight refusal.
+Attempt 4 included that merged caller fix and the newer Hello-tested producer,
+but failed on two imported non-public parser statics. Exit 1, quiescent 1; no
+assertion executable. The fixed-case build was not launched.
 
 ## Scenario and oracle
 
