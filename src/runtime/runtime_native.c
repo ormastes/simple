@@ -19314,6 +19314,24 @@ int64_t rt_dyncall_3(int64_t fn_ptr, int64_t arg0, int64_t arg1, int64_t arg2) {
     return ((rt_dyncall_3_fn)(uintptr_t)fn_ptr)(arg0, arg1, arg2);
 }
 
+int64_t rt_dyncall_4(int64_t fn_ptr, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3) {
+    typedef int64_t (*rt_dyncall_4_fn)(int64_t, int64_t, int64_t, int64_t);
+    if (fn_ptr <= 0) return -1;
+    return ((rt_dyncall_4_fn)(uintptr_t)fn_ptr)(arg0, arg1, arg2, arg3);
+}
+
+int64_t rt_dyncall_5(int64_t fn_ptr, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4) {
+    typedef int64_t (*rt_dyncall_5_fn)(int64_t, int64_t, int64_t, int64_t, int64_t);
+    if (fn_ptr <= 0) return -1;
+    return ((rt_dyncall_5_fn)(uintptr_t)fn_ptr)(arg0, arg1, arg2, arg3, arg4);
+}
+
+int64_t rt_dyncall_6(int64_t fn_ptr, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5) {
+    typedef int64_t (*rt_dyncall_6_fn)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+    if (fn_ptr <= 0) return -1;
+    return ((rt_dyncall_6_fn)(uintptr_t)fn_ptr)(arg0, arg1, arg2, arg3, arg4, arg5);
+}
+
 /* Exact SimpleProviderQueryV1 discovery call.  Keep this separate from the
  * generic i64 dynamic-call family: the provider ABI returns int32_t. */
 int32_t rt_provider_query_v1_call(int64_t fn_ptr, int64_t request_ptr, int64_t result_ptr) {
