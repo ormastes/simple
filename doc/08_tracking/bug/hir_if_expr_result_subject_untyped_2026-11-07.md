@@ -40,11 +40,22 @@ Type the if-expression from its branch tails (unify `Result<T, _>` /
 
 `binding_kind_type` (`src/compiler/20.hir/hir_lowering/statements.spl`) types
 a binding from an `if` / `if-elif` expression with an else branch by the join
-of its branch tails. A tail that is a bare builtin `Ok(v)` / `Err(e)` call is
-`Result<typeof v, ?>` / `Result<?, typeof e>`; two Result shapes join arm by
-arm (two settled, different arms do not join). Anything that does not join
-stays untyped, so the match still fails closed. Arms neither branch settles
-keep the existing Error unknown sentinel; MIR only needs the Result owner.
+of its branch tails (`binding_branch_join`), but only when the join is a fully
+known Result. Branch tails are typed by `binding_block_value_type`: a bare
+builtin `Ok(v)` / `Err(e)` is a Result with the other arm unknown, unsuffixed
+literals have their literal type, `base.field` uses the declared field type,
+and a nested `if` is joined recursively. Two Results join arm by arm (an
+unknown arm takes the other side, otherwise the arms must be equal); other
+types join only when identical. A partial join (an arm neither branch knows)
+or a non-joining pair leaves the binding untyped, as before, so no Error arm
+reaches type inference or MIR `lower_type`, and the match still fails closed.
+
+Independent review of the first draft found that it typed partial joins
+(`Result<T, Error>`), which leaked an `E-MIR-TYPE-Error` advisory and would
+check the initializer against an Error arm; and that two different unsettled
+arms (`Ok(t: T)` vs `Ok(u: U)`) joined silently. Both are fixed and pinned by
+the spec (it also fails on any `HirTypeKind.Error` MIR advisory).
 
 Spec `test/01_unit/compiler/50.mir/if_expr_result_join_subject_spec.spl`:
-2/4 pass before (the two fail-closed negative cases), 4/4 after.
+before 3/6 (only the three fail-closed negatives pass), after 6/6, including
+the exact `jit_instantiator.spl:419` shape (struct-field payloads, nested if).

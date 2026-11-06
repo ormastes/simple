@@ -16,7 +16,9 @@ expression with an else branch was not typed from its branches (a bare builtin
 declares `Ok`/`Err` then makes the bare arms ambiguous.
 
 Through pure-Simple HIR+MIR in-process (seed-hosted), the binding must carry
-the join of its branch types (`Result<T, E>`), and the match must lower clean.
+the join of its branch types (`Result<T, E>`), and the match must lower clean
+with no unresolved (Error) HIR type reaching MIR lower_type (an arm neither
+branch settles stays an inference marker on the Let).
 Branches that do not join stay untyped, so the match still fails closed.
 """
 
@@ -78,6 +80,10 @@ fn lower_closure(names: [text], srcs: [text]) -> text:
     for e in ml.errors:
         if not e.message.contains("non-exhaustive enum match"):
             out = out + "mir: " + e.message + "\n"
+    # The join must not leak an unknown (Error) Result arm into lower_type.
+    for a in ml.mir_advisories:
+        if a.message.contains("HirTypeKind.Error"):
+            out = out + "mir-advisory: " + a.message + "\n"
     print "diagnostics: [" + out + "]"
     out
 
@@ -103,3 +109,11 @@ describe "if-expression Result join types the bound subject":
     it "Result branches with conflicting settled Ok types do not join and still fail closed":
         val d = lower_main(["fn f(b: bool, n: i64, m: text) -> i64:", "    val r = if b: Ok(n) else: Ok(m)", "    match r:", "        case Ok(_): 1", "        case _: 0"])
         expect(d.contains("is ambiguous")).to_equal(true)
+
+    it "generic branches with different type parameters do not join and still fail closed":
+        val d = lower_main(["fn f<T, U>(b: bool, t: T, u: U) -> i64:", "    val r = if b: Ok(t) else: Ok(u)", "    match r:", "        case Ok(_): 1", "        case _: 0"])
+        expect(d.contains("is ambiguous")).to_equal(true)
+
+    it "struct-field payloads with a nested if (exact jit_instantiator.spl:419 shape) lower clean":
+        val d = lower_main(["struct TypedResult:", "    success: bool", "    code: [u8]", "    has_error: bool", "    error: text", "", "fn mk() -> TypedResult:", "    TypedResult(success: true, code: [], has_error: false, error: \"\")", "", "fn f() -> i64:", "    val typed_result = mk()", "    val code_result = if typed_result.success:", "        Ok(typed_result.code)", "    else:", "        Err(if typed_result.has_error: typed_result.error else: \"Unknown error\")", "    match code_result:", "        case Ok(compiled_code): compiled_code.len()", "        case Err(_): 0"])
+        expect(d).to_equal("")
