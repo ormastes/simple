@@ -92,3 +92,13 @@ scoped bugfix — **confirmed ARCHITECTURAL-OPEN**, left as filed.
 Google's inline scripts in `google_live.html` (11 script bodies) all `eval`
 without error precisely because they never depend on a populated DOM — they
 return `undefined` and move on. No parser hang was observed on that corpus.
+
+## Update 2026-11-06 — minimal BOM subset bound in run_page_scripts
+
+`run_page_scripts` (`script/script_runner.spl`, `_bind_minimal_bom_globals`)
+now binds `window`/`self`/`globalThis`, `navigator` (userAgent/language/
+platform) and `location` (about:blank) before evaluating page scripts.
+RED 4/5 -> GREEN 5/5: `test/01_unit/browser_engine/script/page_scripts_bom_globals_spec.spl`.
+`BrowserSession` already binds the full surface. STILL OPEN for this lane:
+`document` (getElementById/querySelector/createElement), `localStorage`, and
+DOM-tree bridging; those need the ScriptHost/BeDomNode bridge.
