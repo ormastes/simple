@@ -672,6 +672,7 @@ fn build_c_runtime_library(
     // failure surfaces much later and far from its cause, at the archive
     // step: `llvm-ar: runtime_native.obj: no such file or directory`.
     let msvc = simple_common::platform::cc_detect::is_msvc_compiler(&cc);
+    let sqlite_include = if include_stage4_hosted { stage_windows_sqlite_header_include(build_dir) } else { None };
     // Host C translation units compile independently; run them across the
     // rayon pool (sized by --threads, default = host parallelism) instead of
     // one cc at a time. The serial loop cost OS lanes tens of minutes
@@ -687,6 +688,11 @@ fn build_c_runtime_library(
             .map(|source| {
                 let object = build_dir.join(format!("{}.{}", core_c_object_stem(source), obj_ext));
                 let mut command = std::process::Command::new(&cc);
+                if source == "runtime_sqlite.c" {
+                    if let Some(include) = &sqlite_include {
+                        command.arg(format!("-I{}", include.display()));
+                    }
+                }
                 if msvc {
                     command
                         .arg("-c")
@@ -908,6 +914,31 @@ fn build_sqlite_runtime_object_with_include(build_dir: &Path, sqlite_include: Op
         .status()
         .ok()?;
     (status.success() && std::fs::metadata(&object).map(|m| m.len() > 0).unwrap_or(false)).then_some(object)
+}
+
+/// Seed-only exception (user decision 2026-11-04): the Rust seed may compile
+/// `runtime_sqlite.c` against a real `sqlite3.h`. On Windows/MSVC the header is
+/// not on clang-cl's default include path, so stage ONLY `sqlite3.h` from an
+/// installed MSYS2 SDK into a private directory (a whole MinGW include tree
+/// would select foreign stdint/stdlib headers). Pure-Simple lanes never use this.
+#[cfg(all(target_os = "windows", target_env = "msvc"))]
+fn stage_windows_sqlite_header_include(build_dir: &Path) -> Option<PathBuf> {
+    for prefix in ["C:/msys64/clang64", "C:/msys64/ucrt64", "C:/msys64/mingw64"] {
+        let header = Path::new(prefix).join("include/sqlite3.h");
+        if !header.is_file() {
+            continue;
+        }
+        let include = build_dir.join("sqlite-sdk-include");
+        std::fs::create_dir_all(&include).ok()?;
+        std::fs::copy(&header, include.join("sqlite3.h")).ok()?;
+        return Some(include);
+    }
+    None
+}
+
+#[cfg(not(all(target_os = "windows", target_env = "msvc")))]
+fn stage_windows_sqlite_header_include(_build_dir: &Path) -> Option<PathBuf> {
+    None
 }
 
 pub(crate) struct BootstrapToolsSqliteInputs {
@@ -4919,6 +4950,16 @@ mod llvm_tool_policy_tests {
     #[test]
     fn core_c_command_accepts_successful_exit() {
         assert!(super::run_core_c_command(std::process::Command::new("/bin/sh").args(["-c", "exit 0"])).is_ok());
+    }
+
+    #[cfg(all(target_os = "windows", target_env = "msvc"))]
+    #[test]
+    fn stage4_runtime_sqlite_header_staging_exposes_only_sqlite3_h() {
+        let directory = tempfile::tempdir().unwrap();
+        let include = super::stage_windows_sqlite_header_include(directory.path())
+            .expect("installed MSYS2 SQLite SDK header must be discoverable for the seed stage4 runtime");
+        let names: Vec<_> = std::fs::read_dir(&include).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("sqlite3.h")], "only sqlite3.h may reach MSVC's include path");
     }
 
     #[cfg(all(target_os = "windows", target_env = "msvc"))]
