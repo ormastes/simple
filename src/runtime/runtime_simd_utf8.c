@@ -11,11 +11,14 @@
  * keeps only portable scalar code compiled at the architecture baseline, and
  * at first use (lazy, once, atomic) tries to admit that provider:
  *
- *   path   SIMPLE_VECTOR_PROVIDER_PATH, else the build-time
- *          SIMPLE_VECTOR_PROVIDER_DEFAULT_PATH; same path policy as
- *          provider_artifact_path_allowed_v1 (src/os/smf/provider_loader.spl)
- *   pin    SIMPLE_VECTOR_PROVIDER_SHA256 (with the env path), else the
- *          build-time SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256; no pin => refused
+ *   path   SIMPLE_VECTOR_PROVIDER_PATH, else (deployed builds only)
+ *          <exe_dir>/providers/simple_vector_provider_levelled-<pin16>.<ext>;
+ *          same path policy as provider_artifact_path_allowed_for_exe_v1
+ *          (src/os/smf/provider_loader.spl)
+ *   pin    SIMPLE_VECTOR_PROVIDER_SHA256 (with the env path), else the pin
+ *          baked at build time (SIMPLE_VECTOR_PROVIDER_PIN_HEX) from the DLL
+ *          that same build produced -- never derived from the file found at
+ *          run time; no pin => scalar (NOT_CONFIGURED)
  *   checks digest before open, digest re-read after open (unstable =>
  *          refused), exports present, interface + ABI digest + TEXT caps
  *          granted by simple_provider_query_v1, selected level > 0, and a
@@ -45,6 +48,27 @@
 #endif
 #ifndef SIMD_TEXT_DYNLOAD
 #  define SIMD_TEXT_DYNLOAD 0 /* no dynamic loader (SimpleOS sysroot): scalar only */
+#endif
+/* Build-time provider pin. A deploying build compiles this TU with
+ * -DSIMPLE_VECTOR_PROVIDER_PIN_HEX=<sha256 of the provider it just built>
+ * (runtime_compiler.spl / the seed's core-C bundle read it from
+ * SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256); the bare hex token is stringized
+ * here so no quoting crosses a process boundary. Without it the default
+ * route is the scalar baseline, exactly as before. */
+#if defined(SIMPLE_VECTOR_PROVIDER_PIN_HEX)
+#  define SIMD_TEXT_STR2(x) #x
+#  define SIMD_TEXT_STR(x) SIMD_TEXT_STR2(x)
+#  define SIMD_TEXT_BAKED_PIN SIMD_TEXT_STR(SIMPLE_VECTOR_PROVIDER_PIN_HEX)
+#endif
+/* Deployed file name is content-addressed by the first 16 pin digits, so
+ * generations (and Windows bin/simple.exe beside them) never overwrite each
+ * other's provider and a rollback needs no provider restore. */
+#if defined(_WIN32)
+#  define SIMD_TEXT_PROVIDER_EXT "dll"
+#elif defined(__APPLE__)
+#  define SIMD_TEXT_PROVIDER_EXT "dylib"
+#else
+#  define SIMD_TEXT_PROVIDER_EXT "so"
 #endif
 
 /* Site ids + prototypes for the UTF-8 slice-boundary audit defined at the
@@ -101,22 +125,14 @@ static inline uint64_t scalar_lane_sum(uint64_t acc) {
 static int64_t scalar_utf8_count_codepoints(const uint8_t* data, uint64_t len) {
     const uint64_t high = UINT64_C(0x8080808080808080);
     uint64_t i = 0, cont = 0;
-    while (len - i >= 16) {
-        uint64_t a0 = 0, a1 = 0;
-        for (unsigned round = 0; round < 255 && len - i >= 16; round++, i += 16) {
-            uint64_t x, y;
+    while (len - i >= 8) {
+        uint64_t acc = 0;
+        for (unsigned round = 0; round < 255 && len - i >= 8; round++, i += 8) {
+            uint64_t x;
             memcpy(&x, data + i, 8);
-            memcpy(&y, data + i + 8, 8);
-            a0 += (x & ~(x << 1) & high) >> 7;
-            a1 += (y & ~(y << 1) & high) >> 7;
+            acc += (x & ~(x << 1) & high) >> 7;
         }
-        cont += scalar_lane_sum(a0) + scalar_lane_sum(a1);
-    }
-    if (len - i >= 8) {
-        uint64_t x;
-        memcpy(&x, data + i, 8);
-        cont += scalar_lane_sum((x & ~(x << 1) & high) >> 7);
-        i += 8;
+        cont += scalar_lane_sum(acc);
     }
     int64_t count = (int64_t)(i - cont);
     for (; i < len; i++) count += (data[i] & 0xC0) != 0x80;
@@ -348,17 +364,76 @@ static int text_file_sha256(const char* path, char hex[65]) {
     return ok;
 }
 
-/* Mirror of provider_artifact_path_allowed_v1(path, "native"). */
-static int text_provider_path_allowed(const char* p) {
+/* Directory of the running executable, '/'-separated, no trailing '/'.
+ * Returns 0 when the OS gives no reliable answer (then no exe-relative root). */
+#if defined(__linux__)
+#  include <unistd.h>
+#endif
+#if defined(__FreeBSD__)
+#  include <sys/types.h>
+#  include <sys/sysctl.h>
+#endif
+#if defined(__APPLE__)
+extern int _NSGetExecutablePath(char* buf, uint32_t* size);
+#endif
+static int text_exe_dir(char* out, size_t cap) {
+    char raw[4096];
+    size_t n = 0;
+#if defined(_WIN32)
+    DWORD got = GetModuleFileNameA(NULL, raw, (DWORD)sizeof(raw));
+    if (got == 0 || got >= sizeof(raw)) return 0;
+    n = got;
+#elif defined(__linux__)
+    ssize_t got = readlink("/proc/self/exe", raw, sizeof(raw) - 1);
+    if (got <= 0 || (size_t)got >= sizeof(raw) - 1) return 0;
+    n = (size_t)got;
+#elif defined(__FreeBSD__)
+    int mib[4] = { 1 /* CTL_KERN */, 14 /* KERN_PROC */, 12 /* KERN_PROC_PATHNAME */, -1 };
+    size_t size = sizeof(raw);
+    if (sysctl(mib, 4, raw, &size, NULL, 0) != 0 || size == 0 || size > sizeof(raw)) return 0;
+    n = strnlen(raw, size);
+    if (n >= sizeof(raw)) return 0;
+#elif defined(__APPLE__)
+    uint32_t size = (uint32_t)sizeof(raw);
+    char link[4096];
+    if (_NSGetExecutablePath(link, &size) != 0 || !realpath(link, raw)) return 0;
+    n = strlen(raw);
+#else
+    (void)raw;
+    return 0;
+#endif
+    raw[n] = 0;
+    for (size_t i = 0; i < n; i++) if (raw[i] == '\\') raw[i] = '/';
+    char* slash = strrchr(raw, '/');
+    if (!slash || slash == raw || (size_t)(slash - raw) + 1 > cap) return 0;
+    *slash = 0;
+    memcpy(out, raw, (size_t)(slash - raw) + 1);
+    return 1;
+}
+
+static int text_provider_ext_ok(const char* p) {
+    size_t n = strlen(p);
+    return (n > 3 && !strcmp(p + n - 3, ".so")) ||
+        (n > 6 && !strcmp(p + n - 6, ".dylib")) || (n > 4 && !strcmp(p + n - 4, ".dll"));
+}
+
+/* Mirror of provider_artifact_path_allowed_for_exe_v1(path, "native", exe_dir)
+ * (src/os/smf/provider_loader.spl): the four fixed roots, plus exactly one
+ * file directly inside <exe_dir>/providers/ (no deeper path, no other dir). */
+static int text_provider_path_allowed(const char* p, const char* exe_dir) {
     if (!p || !*p || strstr(p, "..") || strstr(p, "//") || strchr(p, '\\')) return 0;
+    if (!text_provider_ext_ok(p)) return 0;
     static const char* roots[] = { "build/providers/", "/sys/providers/",
         "/usr/lib/simple/providers/", "/usr/local/lib/simple/providers/" };
-    int rooted = 0;
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
-        if (!strncmp(p, roots[i], strlen(roots[i]))) rooted = 1;
-    size_t n = strlen(p);
-    return rooted && ((n > 3 && !strcmp(p + n - 3, ".so")) ||
-        (n > 6 && !strcmp(p + n - 6, ".dylib")) || (n > 4 && !strcmp(p + n - 4, ".dll")));
+        if (!strncmp(p, roots[i], strlen(roots[i]))) return 1;
+    if (exe_dir && *exe_dir && !strstr(exe_dir, "..") && !strstr(exe_dir, "//")) {
+        size_t d = strlen(exe_dir);
+        if (!strncmp(p, exe_dir, d) && !strncmp(p + d, "/providers/", 11) &&
+            p[d + 11] && !strchr(p + d + 11, '/'))
+            return 1;
+    }
+    return 0;
 }
 
 static int text_pin_valid(const char* pin) {
@@ -430,17 +505,26 @@ static int text_provider_self_test(void) {
 static void simd_text_provider_admit(void) {
     const char* path = getenv("SIMPLE_VECTOR_PROVIDER_PATH");
     const char* pin = getenv("SIMPLE_VECTOR_PROVIDER_SHA256");
+    char exe_dir[4096] = {0};
+    const int have_exe_dir = text_exe_dir(exe_dir, sizeof(exe_dir));
+    if (path && !strcmp(path, "off")) { g_text_status = SIMD_TEXT_PROVIDER_NOT_CONFIGURED; return; }
+#if defined(SIMD_TEXT_BAKED_PIN)
+    /* Deployed binaries: the pin was baked from the DLL the same build
+     * produced; the artifact sits in <exe_dir>/providers/. */
+    char baked_path[4096 + 64];
     if (!path || !*path) {
-#if defined(SIMPLE_VECTOR_PROVIDER_DEFAULT_PATH) && defined(SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256)
-        path = SIMPLE_VECTOR_PROVIDER_DEFAULT_PATH;
-        pin = SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256;
-#else
-        g_text_status = SIMD_TEXT_PROVIDER_NOT_CONFIGURED;
-        return;
-#endif
+        if (!have_exe_dir) { g_text_status = SIMD_TEXT_PROVIDER_EXE_DIR_UNKNOWN; return; }
+        snprintf(baked_path, sizeof(baked_path), "%s/providers/simple_vector_provider_levelled-%.16s." SIMD_TEXT_PROVIDER_EXT,
+                 exe_dir, SIMD_TEXT_BAKED_PIN);
+        path = baked_path;
+        pin = SIMD_TEXT_BAKED_PIN;
     }
-    if (!strcmp(path, "off")) { g_text_status = SIMD_TEXT_PROVIDER_NOT_CONFIGURED; return; }
-    if (!text_provider_path_allowed(path)) { g_text_status = SIMD_TEXT_PROVIDER_PATH_DENIED; return; }
+#else
+    if (!path || !*path) { g_text_status = SIMD_TEXT_PROVIDER_NOT_CONFIGURED; return; }
+#endif
+    if (!text_provider_path_allowed(path, have_exe_dir ? exe_dir : NULL)) {
+        g_text_status = SIMD_TEXT_PROVIDER_PATH_DENIED; return;
+    }
     if (!text_pin_valid(pin)) { g_text_status = SIMD_TEXT_PROVIDER_PIN_INVALID; return; }
     char digest[65];
     if (!text_file_sha256(path, digest)) { g_text_status = SIMD_TEXT_PROVIDER_ARTIFACT_MISSING; return; }
@@ -496,19 +580,19 @@ static void simd_text_provider_admit(void) {
  * non-OK provider status falls back to scalar for that call. */
 static int64_t routed_utf8_count(const uint8_t* d, uint64_t n) {
     int64_t r;
-    if (n >= SIMD_TEXT_PROVIDER_MIN_BYTES &&
+    if (n >= SIMD_TEXT_PROVIDER_MIN_BYTES && g_text_apply &&
         simd_text_provider_call(SIMPLE_VECTOR_TEXT_UTF8_COUNT, d, n, NULL, 0, NULL, &r)) return r;
     return scalar_utf8_count_codepoints(d, n);
 }
 static int routed_utf8_validate(const uint8_t* d, uint64_t n) {
     int64_t r;
-    if (n >= SIMD_TEXT_PROVIDER_MIN_BYTES &&
+    if (n >= SIMD_TEXT_PROVIDER_MIN_BYTES && g_text_apply &&
         simd_text_provider_call(SIMPLE_VECTOR_TEXT_UTF8_VALIDATE, d, n, NULL, 0, NULL, &r)) return r == 1;
     return scalar_utf8_validate(d, n);
 }
 static int64_t routed_utf8_find_invalid(const uint8_t* d, uint64_t n) {
     int64_t r;
-    if (n >= SIMD_TEXT_PROVIDER_MIN_BYTES &&
+    if (n >= SIMD_TEXT_PROVIDER_MIN_BYTES && g_text_apply &&
         simd_text_provider_call(SIMPLE_VECTOR_TEXT_UTF8_FIND_INVALID, d, n, NULL, 0, NULL, &r)) return r;
     return scalar_utf8_find_invalid(d, n);
 }
@@ -573,7 +657,7 @@ int64_t rt_text_count_codepoints_cached(int64_t value) {
     if (cached >= 0) return cached;
 
     /* Dispatch to best available implementation */
-    int64_t count = g_simd_text.utf8_count_codepoints(
+    int64_t count = routed_utf8_count(
         (const uint8_t*)s->data, s->len);
 
     /* Cache the result */
@@ -598,7 +682,7 @@ int64_t rt_text_validate_utf8(int64_t value) {
     /* Fast path: all-ASCII is always valid UTF-8 */
     if (rt_str_is_ascii_cached(s)) return 1;
 
-    return (int64_t)g_simd_text.utf8_validate(
+    return (int64_t)routed_utf8_validate(
         (const uint8_t*)s->data, s->len);
 }
 
@@ -614,7 +698,7 @@ int64_t rt_text_find_invalid_utf8(int64_t value) {
     /* Fast path: all-ASCII is always valid UTF-8 */
     if (rt_str_is_ascii_cached(s)) return -1;
 
-    return g_simd_text.utf8_find_invalid(
+    return routed_utf8_find_invalid(
         (const uint8_t*)s->data, s->len);
 }
 
@@ -629,7 +713,7 @@ int64_t rt_text_find_invalid_utf8(int64_t value) {
 int64_t rt_text_validate_utf8_bytes(const uint8_t* data, uint64_t len) {
     if (!data || len == 0) return 1;
     simd_text_ensure_init();
-    return (int64_t)g_simd_text.utf8_validate(data, len);
+    return (int64_t)routed_utf8_validate(data, len);
 }
 
 /* ================================================================

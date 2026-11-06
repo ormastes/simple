@@ -289,7 +289,8 @@ enum {
     SIMD_TEXT_PROVIDER_SYMBOL_MISSING = 8,
     SIMD_TEXT_PROVIDER_QUERY_REFUSED = 9,
     SIMD_TEXT_PROVIDER_NO_SIMD_LEVEL = 10,
-    SIMD_TEXT_PROVIDER_SELF_TEST_FAILED = 11
+    SIMD_TEXT_PROVIDER_SELF_TEST_FAILED = 11,
+    SIMD_TEXT_PROVIDER_EXE_DIR_UNKNOWN = 12
 };
 int simd_text_provider_call(uint32_t op, const uint8_t* a, uint64_t n,
                             const uint8_t* b, uint64_t bn, uint8_t* out,
