@@ -2315,6 +2315,36 @@ NATIVE_LOW_MEMORY=${SIMPLE_NATIVE_LOW_MEMORY:-0}   # Explicit opt-in; default us
 COMPILER_CHECK_KILL_GRACE_SECONDS=${COMPILER_CHECK_KILL_GRACE_SECONDS:-1}
 . "${repo_root}/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
 
+# bootstrap_sanity_failure_is_reserve_refusal LOG -> 0 when every diagnostic
+# in the sanity failure log is the compiler's transient memory-reserve
+# refusal ("build refused: ... below the ... reserve"), i.e. the candidate
+# never ran. A 24 GiB host idles near the 12 GiB reserve while other lanes
+# run, so one refusal used to discard an hour-long Stage 2 build.
+bootstrap_sanity_failure_is_reserve_refusal() {
+  [ -s "$1" ] || return 1
+  grep -q 'build refused: .* below the .* reserve' "$1" || return 1
+  ! grep -v -e 'build refused: .* below the .* reserve' \
+    -e '^candidate_frontend_smoke: .* failed (raw rc=3)$' -e '^[[:space:]]*$' "$1" | grep -q .
+}
+
+# Runs bootstrap_stage_sanity; on a pure reserve refusal waits for headroom
+# and retries (SIMPLE_BOOTSTRAP_SANITY_RESERVE_RETRIES, default 6, every
+# SIMPLE_BOOTSTRAP_SANITY_RESERVE_WAIT_SECONDS, default 300). The reserve is
+# never lowered; any other failure is returned at once.
+bootstrap_stage2_sanity_reserve_retry() {
+  bssr_left=${SIMPLE_BOOTSTRAP_SANITY_RESERVE_RETRIES:-6}
+  bssr_wait=${SIMPLE_BOOTSTRAP_SANITY_RESERVE_WAIT_SECONDS:-300}
+  while :; do
+    bssr_status=0
+    bootstrap_stage_sanity "$@" || bssr_status=$?
+    [ "$bssr_status" -ne 0 ] || return 0
+    [ "$bssr_left" -gt 0 ] && bootstrap_sanity_failure_is_reserve_refusal "$2.frontend-failure.log" || return "$bssr_status"
+    bssr_left=$((bssr_left - 1))
+    echo "  Stage 2 sanity: build refused below the memory reserve (candidate never ran); waiting ${bssr_wait}s for headroom, ${bssr_left} retr(ies) left" >&2
+    sleep "$bssr_wait"
+  done
+}
+
 bootstrap_stage_sanity() (
   candidate=$1
   evidence_path=${2:-}
@@ -4793,7 +4823,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     esac
     if [ "${stage2_tombstone_status}" -ne 0 ] ||
       ! SIMPLE_RT_OBJ_CACHE_DIR="${stage2_cache_absolute}/rt-obj" \
-      bootstrap_stage_sanity "${stage2_bin}" \
+      bootstrap_stage2_sanity_reserve_retry "${stage2_bin}" \
       "$(absolute_path "${stage2_sanity_evidence}")" \
       "${stage2_home_absolute}" "${stage2_tmp_absolute}" \
       "${stage_build_path}"; then
