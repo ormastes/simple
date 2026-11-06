@@ -608,11 +608,33 @@ pub fn worktree_add(ws: AgentWorkspace, agent_id: text) -> WorkspaceResult:
     dir_create_all(ws.worktree_root)
     _run(cmd: "git", args: ["-C", ws.repo, "worktree", "add", "--detach", path], reason: "worktree_add_failed")
 
+# Pure: the git argv for removing a worktree. `force: false` (the viewer /
+# offline-agent path, design §18.3) never passes `--force`, so git refuses to
+# delete a worktree with uncommitted or untracked work.
+pub fn worktree_remove_args_v1(repo: text, path: text, force: bool) -> [text]:
+    var args = ["-C", repo, "worktree", "remove"]
+    if force:
+        args.push("--force")
+    args.push(path)
+    args
+
+# Operator-explicit removal (`workspace_cli` remove / detach): forced.
 pub fn worktree_remove(ws: AgentWorkspace, agent_id: text) -> WorkspaceResult:
     val path = worktree_path(ws: ws, agent_id: agent_id)
     if not dir_exists(path):
         return _ok("absent")
-    _run(cmd: "git", args: ["-C", ws.repo, "worktree", "remove", "--force", path], reason: "worktree_remove_failed")
+    _run(cmd: "git", args: worktree_remove_args_v1(ws.repo, path, true), reason: "worktree_remove_failed")
+
+# Viewer / offline-agent release: the only removal a non-operator path may
+# call. A dirty worktree stays on disk and is reported as `worktree_dirty`.
+pub fn worktree_release(ws: AgentWorkspace, agent_id: text) -> WorkspaceResult:
+    val path = worktree_path(ws: ws, agent_id: agent_id)
+    if not dir_exists(path):
+        return _ok("absent")
+    val r = _run(cmd: "git", args: worktree_remove_args_v1(ws.repo, path, false), reason: "worktree_release_failed")
+    if r.status != "ok" and dir_exists(path):
+        return _err(reason: "worktree_dirty", out: path)
+    r
 
 pub fn worktree_list(ws: AgentWorkspace) -> [text]:
     val r = _run(cmd: "git", args: ["-C", ws.repo, "worktree", "list", "--porcelain"], reason: "worktree_list_failed")
@@ -676,4 +698,4 @@ export agent_workspace, tmux_available, workspace_backend, workspace_available, 
     session_alive, session_ensure, session_kill, workspace_server_alive, workspace_server_address, workspace_server_token_path,
     window_exists, window_open, pane_split, list_panes, list_panes_except, send_to_pane, send_to_each_pane,
     capture_pane, wait_for_pane_text, worktree_path, worktree_add,
-    worktree_remove, worktree_list, agent_attach, agent_detach, launch_caret_suite
+    worktree_remove, worktree_remove_args_v1, worktree_release, worktree_list, agent_attach, agent_detach, launch_caret_suite

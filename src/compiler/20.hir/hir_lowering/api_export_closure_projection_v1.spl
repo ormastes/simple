@@ -1,0 +1,171 @@
+# Effective export closure: a retained callable is Exported only when its own
+# module exports it AND every ancestor facade present in the frozen registry
+# re-exports it (export use only; a bare `pub` is not publication). The chain
+# is relative to the compilation subject: a prefix with no facade surface is
+# not a boundary, matching checker_nearest_boundary_dir. Routes are indexed
+# once; no HIR, symbol table or filesystem is consulted.
+use compiler.common.api_signature_facts_v1.{ApiSignatureFactsV1, ApiCallableFactV1}
+use compiler.common.api_export_route_facts_v1.{ApiExportJoinV1, ApiExportRouteFactV1, ApiExportRouteFactsV1}
+use compiler.common.api_export_closure_facts_v1.{ApiExportClosureStatusV1, ApiExportClosureEntryV1, ApiExportClosureFactsV1}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName, ModuleSurface}
+
+val API_EXPORT_CLOSURE_CHAIN_BUDGET_V1: i64 = 32
+
+fn closure_route_key_v1(exporter: i64, terminal: i64, name: text) -> text:
+    "{exporter}:{terminal}:{name.len()}:{name}"
+
+fn with_unique(reasons: [text], reason: text) -> [text]:
+    var out: [text] = []
+    for existing in reasons:
+        if existing == reason: return reasons
+        out.push(existing)
+    out.push(reason)
+    out
+
+fn facade_index_for_prefix_v1(registry: ModuleSurfacesByName, aliases: Dict<text, i64>, prefix: text) -> i64:
+    val facade_name = prefix + ".__init__"
+    if aliases.has(facade_name): return aliases[facade_name]
+    if aliases.has(prefix):
+        val candidate = aliases[prefix]
+        val surface: ModuleSurface = registry.surfaces[candidate]
+        if surface.canonical_path.ends_with("__init__.spl"): return candidate
+    -1
+
+# Ancestor facade physical indexes, nearest first. For `X.__init__` the own
+# directory X is the module itself, so only strictly shorter prefixes count.
+fn ancestor_facades_v1(registry: ModuleSurfacesByName, aliases: Dict<text, i64>,
+        module_name: text, own_index: i64) -> [i64]:
+    var segments = module_name.split(".")
+    if segments.len() > 0 and segments[segments.len() - 1] == "__init__":
+        segments = segments[0:segments.len() - 1]
+    var chain: [i64] = []
+    var length = segments.len() - 1
+    while length >= 1:
+        val prefix = segments[0:length].join(".")
+        val facade = facade_index_for_prefix_v1(registry, aliases, prefix)
+        if facade >= 0 and facade != own_index: chain.push(facade)
+        length = length - 1
+    chain
+
+pub fn project_api_export_closure_v1(registry: ModuleSurfacesByName,
+        routes: ApiExportRouteFactsV1?,
+        signatures: Dict<text, ApiSignatureFactsV1>) -> ApiExportClosureFactsV1:
+    var result = ApiExportClosureFactsV1(0, [], [], false)
+    if registry == nil or not registry.frozen or registry.generation <= 0:
+        result.unknown_reasons.push("registry-not-frozen")
+        return result
+    result.registry_generation = registry.generation
+    var route_facts: ApiExportRouteFactsV1? = routes
+    if route_facts == nil:
+        result.unknown_reasons.push("export-routes-not-collected")
+        return result
+    val facts: ApiExportRouteFactsV1 = route_facts.unwrap()
+    if facts.registry_generation != registry.generation:
+        result.unknown_reasons.push("export-routes-generation-mismatch")
+        return result
+    if facts.truncated or facts.routes.len() > 4096 or signatures.len() > 256 or registry.surfaces.len() > 4096 or registry.ordered_names.len() > 16384:
+        result.unknown_reasons.push("export-closure-budget")
+        result.truncated = true
+        return result
+    if registry.ordered_names.len() != registry.ordered_indices.len():
+        result.unknown_reasons.push("registry-index-malformed")
+        return result
+    var aliases: Dict<text, i64> = {}
+    var index = 0
+    while index < registry.ordered_names.len():
+        val target = registry.ordered_indices[index]
+        if target < 0 or target >= registry.surfaces.len():
+            result.unknown_reasons.push("registry-index-malformed")
+            return result
+        aliases[registry.ordered_names[index]] = target
+        index = index + 1
+    # Route lookup built once: (exporter, terminal, source name) -> route index.
+    var route_index: Dict<text, i64> = {}
+    index = 0
+    while index < facts.routes.len():
+        val route: ApiExportRouteFactV1 = facts.routes[index]
+        if route.exporter_index < 0 or route.exporter_index >= registry.surfaces.len():
+            result.unknown_reasons.push("export-route-malformed")
+            return result
+        if route.terminal_index >= 0:
+            val key = closure_route_key_v1(route.exporter_index, route.terminal_index, route.source_name)
+            if route_index.has(key): route_index[key] = -2
+            else: route_index[key] = index
+        index = index + 1
+    # Raw export spellings per surface, by last dotted segment. An export the
+    # surface builder could not resolve to an origin row (e.g. a directory
+    # alias absent from the registry) must read Unknown, never NotExported.
+    var raw_export_names: Dict<text, bool> = {}
+    index = 0
+    while index < registry.surfaces.len():
+        val surface: ModuleSurface = registry.surfaces[index]
+        for export_decl in surface.exports:
+            for item in export_decl.items:
+                val segments = item.split(".")
+                val last = segments[segments.len() - 1]
+                raw_export_names[closure_route_key_v1(index, index, last)] = true
+        index = index + 1
+    for module_key in signatures.keys():
+        val module_facts: ApiSignatureFactsV1 = signatures[module_key]
+        val physical = module_facts.surface_index
+        var module_reason = ""
+        if module_facts.surface_binding_reason != "" or module_facts.surface_generation != registry.generation or physical < 0 or physical >= registry.surfaces.len():
+            module_reason = "signature-surface-binding-mismatch"
+        elif not aliases.has(module_facts.module_name) or aliases[module_facts.module_name] != physical:
+            module_reason = "signature-surface-binding-mismatch"
+        elif module_facts.callables.len() > 128:
+            module_reason = "signature-observation-budget"
+            result.truncated = true
+        var chain: [i64] = []
+        if module_reason == "":
+            chain = ancestor_facades_v1(registry, aliases, module_facts.module_name, physical)
+            if chain.len() > API_EXPORT_CLOSURE_CHAIN_BUDGET_V1:
+                module_reason = "export-closure-chain-budget"
+                result.truncated = true
+        for raw_callable in module_facts.callables:
+            val callable: ApiCallableFactV1 = raw_callable
+            var entry = ApiExportClosureEntryV1(physical, module_facts.module_name, callable.local_symbol,
+                callable.declaration_name, ApiExportClosureStatusV1.Unknown, module_reason, -1, "", 0)
+            if module_reason != "":
+                result.unknown_reasons = with_unique(result.unknown_reasons, module_reason)
+                result.entries.push(entry)
+                continue
+            # Direct route first, then every ancestor facade, nearest first.
+            var exporters: [i64] = [physical]
+            for facade in chain: exporters.push(facade)
+            var status = ApiExportClosureStatusV1.Exported
+            var reason = ""
+            var root = physical
+            var depth = 0
+            for exporter in exporters:
+                val key = closure_route_key_v1(exporter, physical, callable.declaration_name)
+                val exporter_module = registry.surfaces[exporter].module_name
+                if not route_index.has(key):
+                    val spelled = closure_route_key_v1(exporter, exporter, callable.declaration_name)
+                    if raw_export_names.has(spelled) or raw_export_names.has(closure_route_key_v1(exporter, exporter, "*")):
+                        status = ApiExportClosureStatusV1.Unknown
+                        reason = "export-origin-unresolved:{exporter_module}"
+                    else:
+                        status = ApiExportClosureStatusV1.NotExported
+                        reason = "not-exported-by:{exporter_module}"
+                    break
+                if route_index[key] == -2:
+                    status = ApiExportClosureStatusV1.Unknown
+                    reason = "ambiguous-export-route:{exporter_module}"
+                    break
+                val route: ApiExportRouteFactV1 = facts.routes[route_index[key]]
+                if route.join_status != ApiExportJoinV1.Joined or route.local_symbol != callable.local_symbol:
+                    status = ApiExportClosureStatusV1.Unknown
+                    reason = if route.join_status != ApiExportJoinV1.Joined: route.unknown_reason else: "export-route-symbol-mismatch"
+                    break
+                root = exporter
+                depth = depth + 1
+            entry.status = status
+            entry.reason = reason
+            entry.root_exporter_index = root
+            entry.root_exporter_module = registry.surfaces[root].module_name
+            entry.chain_depth = depth
+            if status == ApiExportClosureStatusV1.Unknown:
+                result.unknown_reasons = with_unique(result.unknown_reasons, reason)
+            result.entries.push(entry)
+    result

@@ -555,14 +555,7 @@ pub(super) fn process_imports_and_assignments(
                         evaluate_expr(&size_expr, env, local_functions, local_classes, local_enums, impl_methods)
                     {
                         if n >= 0 {
-                            let zero = match element.as_ref() {
-                                Type::Simple(t) if t == "bool" => Value::Bool(false),
-                                Type::Simple(t) if t.starts_with('i') || t.starts_with('u') => {
-                                    crate::interpreter::coerce_to_declared_type(Value::Int(0), Some(element.as_ref()))
-                                }
-                                Type::Simple(t) if t == "f64" || t == "f32" => Value::Float(0.0),
-                                _ => Value::Nil,
-                            };
+                            let zero = crate::interpreter::fixed_array_zero_element(element.as_ref());
                             let value = Value::FixedSizeArray {
                                 size: n as usize,
                                 data: vec![zero; n as usize],

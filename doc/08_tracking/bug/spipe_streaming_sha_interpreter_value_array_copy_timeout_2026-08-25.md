@@ -126,3 +126,22 @@ scenarios, infer RSS, or rerun this attempt unchanged.
 - `doc/03_plan/sys_test/spipe_knowledge_compiler.md`
 - `test/01_unit/app/spipe_knowledge_provider/provider_streaming_sha256_spec.spl`
 
+
+## 2026-11-06 copy hypotheses refuted on the current seed (Windows)
+
+Probe (`SIMPLE_EXECUTION_MODE=interpret`, seed `D:/dev/wt/seed/simple.exe`):
+building a 1 MiB `[u8]` by 1,048,576 `push` calls = 1,103 ms (linear);
+2,000 calls passing that 1 MiB array by value to a free fn = 12 ms;
+2,000 method calls passing it plus an indexed write into a 64-byte owner
+field = 15 ms; 1,024 64-byte slices = 3 ms. The interpreter does not copy an
+array per by-value call, per method call, or per slice, so the "likely copy
+sites" above are not where the budget went. See the spec run recorded below.
+
+Spec run (same host/seed, `--mode=interpreter`):
+`provider_streaming_sha256_spec.spl` outcome=OK 9/9 passed, wall 328 s of
+which the seed's fixed session setup on this host is ~190-200 s (every
+loader spec run in the same session cost 180-200 s for 1-9 trivial examples),
+so the spec body itself is well inside the 180 s ceiling. The 2026-08-25
+"zero output after 3 min 9 s" is consistent with that startup, not with the
+1 MiB case. Interpreter mode is no longer outside budget; the Stage 4
+admission evidence remains a separate (native-lane) item.

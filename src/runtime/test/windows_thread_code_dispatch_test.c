@@ -1,5 +1,5 @@
-/* Native Windows regression using GCC (place its bin directory on PATH):
- * gcc -O2 -flto -fwhole-program \
+/* Native Windows regression (clang + lld; never GCC):
+ * clang -O2 -flto -fuse-ld=lld \
  *   src/runtime/test/windows_thread_code_dispatch_test.c \
  *   src/runtime/runtime_memtrack.c -o windows_thread_code_dispatch_test.exe
  * Include the real owner to exercise its private address classifier too.
@@ -47,11 +47,23 @@ int main(void) {
     assert(!rt_native_address_is_code((int64_t)(intptr_t)page));
     assert(VirtualFree(page, 0, MEM_RELEASE));
     assert(!rt_native_address_is_code((int64_t)(intptr_t)page));
-    int64_t h = rt_thread_spawn_isolated(raw, 34);
+    /* The spawner states the closure-word kind (RT_WORKER_CLOSURE_*). */
+    int64_t h = rt_thread_spawn_isolated_kind(RT_WORKER_CLOSURE_ADDRESS, raw, 34);
     assert(h);
     assert(rt_thread_join(h) == 42);
     rt_thread_free(h);
-    h = rt_thread_spawn_isolated((int64_t)(intptr_t)closure, 32);
+    h = rt_thread_spawn_isolated_kind(RT_WORKER_CLOSURE_ADDRESS, (int64_t)(intptr_t)closure, 32);
+    assert(h);
+    assert(rt_thread_join(h) == 42);
+    rt_thread_free(h);
+    /* Simple-facing entry: an int-tagged code word is a raw-ABI worker. */
+    h = rt_thread_spawn_isolated(raw << 3, 34 << 3);
+    assert(h);
+    assert(rt_thread_join(h) == 42);
+    rt_thread_free(h);
+    /* A record word naming no committed memory is rejected, never read. */
+    assert(rt_thread_spawn_isolated_kind(RT_WORKER_CLOSURE_ADDRESS, INT64_C(0x0000123000000000), 1) == 0);
+    h = rt_thread_spawn_isolated_kind(RT_WORKER_CLOSURE_ADDRESS, (int64_t)(intptr_t)closure, 32);
     assert(h);
     assert(rt_thread_join(h) == 42);
     rt_thread_free(h);

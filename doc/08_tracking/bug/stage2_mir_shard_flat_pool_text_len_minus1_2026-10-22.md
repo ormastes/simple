@@ -1,6 +1,6 @@
 # Stage2 MIR shard: flat-pool encode of MIR artifact sees invalid text handle (rt_string_len == -1), worker stack-overflows
 
-**Status:** open
+**Status:** fix-implemented-verification-pending (2026-11-06; see "Fix 2026-11-06" at end)
 
 Date: 2026-10-22
 Lane: bootstrap-from-scratch, stage2 gate (attempt 36)
@@ -1363,3 +1363,54 @@ pool clearing before each parse/restore in the child, or a scope-lifetime
 contract for cumulative pools. The sanitize/refusal/promotion workarounds
 remain landed (they convert crashes into cache misses and removed three
 crash layers) but cannot repair the module graph the consumer walks.
+
+## Fix 2026-11-06 (worker C, P2/P3 bootstrap lane): fix direction 3, encode-boundary handle check
+
+**Chosen:** direction 3 of Update 7/10 ("stop re-encoding dangling texts;
+give the encoder only valid input"), applied at the one place every text
+pool goes through: `flat_pool_enc_text_into`
+(`src/compiler/10.frontend/core/flat_pool_codec.spl`).
+
+**Defect closed:** the encoder called `flat_pool_escape(v)` BEFORE the
+append check, so a dangling pool text (`rt_string_len == -1`) had its freed
+bytes read by the escape scan first; the `site=text.value` panic only fired
+afterwards, and in sanitize mode the "refusal" still read the bytes. Each
+element is now checked by handle (`flat_pool_text_handle_valid_v1`, O(1), no
+byte read) first: sanitize/validate mode poisons the capture and skips the
+element (caller reparses), strict mode raises the same fatal diagnostic the
+append check already emits (`... site=text.value item=<n> input_length=-1
+result=0`, unchanged for `flat_pool_append_diagnostic_spec`).
+
+**Why this is the safest of the three:**
+1. Promote-on-decode needs a deep copy across ~30 ParserModule fields and
+   nested containers and does not cover pool blocks that are not registry
+   objects (Update 10) — high blast radius.
+2. Pinning pool lifetime changes the flat-AST arena contract and the pool
+   allocator — the riskiest change for the frozen stage2 that builds phase 3.
+3. The encode-boundary check is source-only, local to one function, adds no
+   runtime/ABI surface, and reuses the exact `rt_string_len(value) < 0` shape
+   stage2 already compiles in `flat_pool_validate_text`. It cannot change a
+   valid encode (valid handles take the old path byte-for-byte).
+
+It is containment of the reader, not a cure of the scope-lifetime writer
+(Handoff 2: cumulative decl/expr pools across child scopes). The
+`@workaround` markers (module_assembly.spl:1618, decl_nodes.spl:1681,
+extend_decls.spl:257, types.spl:1724, module_surface_*) stay until the
+verification below passes.
+
+**Tests:** `test/01_unit/compiler/frontend/flat_pool_invalid_text_guard_spec.spl`
+runs `test/fixtures/compiler/flat_pool_sanitize_invalid_text.spl`: FAILS on
+the old codec (missing guard), PASSES on the new one (interpreter,
+`bin/simple.exe run`). Sibling prevention: text_list and text_list_list
+pools, validate-only arm. Coverage: valid escape arms (`""`, `\n`, `\`)
+still encode exactly. Regression: `flat_pool_codec_roundtrip_spec` 18/18,
+`flat_pool_cache_lifetime_spec` 1/1. Native run on a copy of
+`s3_fable46.exe` was attempted: hello canary rc=0 `[hello]`, but the fixture
+build (imports `compiler.frontend`) hits the known stage3 MIR-lowering AV
+(rc=0xC0000005), so native evidence waits on a newer stage3.
+
+**Verification pending (needs stage3):** rebuild a stage3 with this tree and
+rerun the Update 1 exact-environment delegated repro (p2_add, cache
+enabled). Expected: no `flat pool encoder ... input_length=-1` panic and no
+0xC00000FD worker; a `[flat-pool] capture refused` line is acceptable. Then
+remove the `@workaround` markers one at a time with the same repro.

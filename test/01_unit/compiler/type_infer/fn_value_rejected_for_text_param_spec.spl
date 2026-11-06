@@ -1,0 +1,93 @@
+"""
+## Purpose and audience
+
+Regression guard for bug `typecheck_accepts_fn_value_for_text_param_2026-11-06`.
+A function value (lambda, placeholder `_1` identity lambda, or function-typed
+value) passed where a non-function parameter (`text`, `i64`, struct) is
+expected must be a `TypeInferError.Mismatch` in the pure-Simple HM checker
+(`inference_expr.spl` Lambda check arm, `inference_expr_calls.spl` call-arg
+loop, `core.spl` unify). Incident: driver passed
+`builder.build(_compile_frozen_module_capsule(..., _1))` and the identity
+lambda reached a `text` unit-name param at runtime (call site fixed by
+45fb9585333). For compiler engineers changing call-argument checking.
+"""
+use compiler.types.type_infer_types.*
+use compiler.types.type_infer.context.*
+use compiler.types.type_infer.core.*
+use compiler.types.type_infer.inference_expr.*
+use compiler.hir.hir.*
+use compiler.frontend.core.lexer.*
+use compiler.common.diagnostics.span.{Span}
+
+fn fv_sp() -> Span:
+    lex_span_empty()
+
+fn fv_mk(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: fv_sp())
+
+fn fv_i64() -> HirType:
+    fv_mk(HirTypeKind.Int(64, true))
+
+fn fv_text() -> HirType:
+    fv_mk(HirTypeKind.Str)
+
+fn fv_fn_ty() -> HirType:
+    fv_mk(HirTypeKind.Function([fv_i64()], fv_i64(), []))
+
+fn fv_unify(expected: HirType, found: HirType) -> text:
+    var ctx = HmInferContext.new()
+    match ctx.unify(expected, found):
+        case Ok(_): "ok"
+        case Err(TypeInferError.Mismatch(_, _, _)): "mismatch"
+        case Err(_): "other-error"
+
+fn fv_check(expr: HirExpr, expected: HirType) -> text:
+    var ctx = HmInferContext.new()
+    match ctx.infer_expr(expr, InferMode.Check(expected)):
+        case Ok(_): "ok"
+        case Err(TypeInferError.Mismatch(_, _, _)): "mismatch"
+        case Err(_): "other-error"
+
+fn fv_param(name: text, ty: HirType) -> HirParam:
+    HirParam(symbol: SymbolId(id: 900), name: name, type_: ty, default: nil, is_mutable: false, span: fv_sp())
+
+fn fv_int_lit(v: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.IntLit(v, nil), type_: nil, span: fv_sp())
+
+# `\x: 1` -- an untyped-param lambda (what `_1` lowers to, modulo body).
+fn fv_lambda_untyped() -> HirExpr:
+    val p = fv_param("x", fv_mk(HirTypeKind.Infer(0, 0)))
+    HirExpr(kind: HirExprKind.Lambda([p], fv_int_lit(1), []), type_: nil, span: fv_sp())
+
+fn fv_lambda_typed() -> HirExpr:
+    val p = fv_param("x", fv_i64())
+    HirExpr(kind: HirExprKind.Lambda([p], fv_int_lit(1), []), type_: nil, span: fv_sp())
+
+describe "function value rejected for non-function parameter (HM checker)":
+    it "unify: fn type vs text is a mismatch":
+        expect(fv_unify(fv_text(), fv_fn_ty())).to_equal("mismatch")
+
+    it "unify: fn type vs i64 is a mismatch":
+        expect(fv_unify(fv_i64(), fv_fn_ty())).to_equal("mismatch")
+
+    it "unify: fn type vs fn type is ok (legit higher-order)":
+        expect(fv_unify(fv_fn_ty(), fv_fn_ty())).to_equal("ok")
+
+    it "untyped lambda checked against text is a mismatch":
+        expect(fv_check(fv_lambda_untyped(), fv_text())).to_equal("mismatch")
+
+    it "typed lambda checked against text is a mismatch":
+        expect(fv_check(fv_lambda_typed(), fv_text())).to_equal("mismatch")
+
+    it "untyped lambda checked against i64 is a mismatch":
+        expect(fv_check(fv_lambda_untyped(), fv_i64())).to_equal("mismatch")
+
+    it "untyped lambda checked against i64? is a mismatch":
+        expect(fv_check(fv_lambda_untyped(), fv_mk(HirTypeKind.Optional(fv_i64())))).to_equal("mismatch")
+
+    it "lambda checked against a fn param type is ok (legit higher-order callee)":
+        expect(fv_check(fv_lambda_untyped(), fv_fn_ty())).to_equal("ok")
+
+    it "lambda with wrong arity against fn param type is a mismatch":
+        val f2 = fv_mk(HirTypeKind.Function([fv_i64(), fv_i64()], fv_i64(), []))
+        expect(fv_check(fv_lambda_untyped(), f2)).to_equal("mismatch")

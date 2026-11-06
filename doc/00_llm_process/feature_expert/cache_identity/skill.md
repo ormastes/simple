@@ -53,3 +53,14 @@ The double-read staleness guarantee is preserved per projection, not per
 pair. See `doc/07_guide/compiler/backends/freestanding_safe_channels.md`.
 
 - 2026-10-25: persisted digests are algorithm-tagged `DigestV1` (unknown tag = miss); live key declarations are pinned by `scripts/check/check-cache-formal-source-binding.shs`. See `doc/07_guide/tooling/bootstrap_options.md`.
+
+## Incremental TLDR freshness scope (2026-11-06)
+
+Freshness authority is the content digest only (design rule 4). For 1.0.0 the
+TLDR/SCV feature is reduced to: complete-inventory TLDR verifier, local
+immutable receipt (temp + atomic rename, optional `refs/notes/simple-tldr`
+adapter), byte-reconciled validated change, post-build pending/settled records,
+`simple tldr status/history`. Edit-event stores (SMET, SourceMetaStoreV1, WAL,
+editor adapters, SCV metadata v2) are NOT-NEEDED — see
+`doc/03_plan/compiler/incremental_build_tldr_scv_implementation_2026-10-10.md`
+§ "Stale-feature review — 2026-11-06".

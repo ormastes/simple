@@ -210,6 +210,7 @@ unsafe extern "C" {
     pub fn rt_pool_blocked_count() -> i64;
     pub fn rt_pool_state_create_v1(capacity: i64) -> i64;
     pub fn rt_pool_state_try_submit_i64_v1(state: i64, entry: i64, input: i64) -> i64;
+    pub fn rt_pool_state_try_submit_i64_kind_v1(state: i64, kind: i64, entry: i64, input: i64) -> i64;
     pub fn rt_pool_task_status_i64_v1(handle: i64) -> i64;
     pub fn rt_pool_task_join_i64_v1(handle: i64) -> i64;
     pub fn rt_pool_task_release_i64_v1(handle: i64) -> i64;
@@ -247,6 +248,10 @@ static SIMPLE_KEEP_RT_POOL_STATE_CREATE: unsafe extern "C" fn(i64) -> i64 = rt_p
 #[used]
 static SIMPLE_KEEP_RT_POOL_STATE_TRY_SUBMIT_I64: unsafe extern "C" fn(i64, i64, i64) -> i64 =
     rt_pool_state_try_submit_i64_v1;
+#[cfg(feature = "runtime-symbol-table")]
+#[used]
+static SIMPLE_KEEP_RT_POOL_STATE_TRY_SUBMIT_I64_KIND: unsafe extern "C" fn(i64, i64, i64, i64) -> i64 =
+    rt_pool_state_try_submit_i64_kind_v1;
 #[cfg(feature = "runtime-symbol-table")]
 #[used]
 static SIMPLE_KEEP_RT_POOL_TASK_STATUS_I64: unsafe extern "C" fn(i64) -> i64 = rt_pool_task_status_i64_v1;

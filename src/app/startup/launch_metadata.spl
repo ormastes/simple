@@ -1,5 +1,5 @@
 use std.common.bytes.concat_copy_v1.{bytes_concat_copy_v1}
-use compiler.backend.linker.smf_header.{smf_header_field_shift, smf_header_seed_trailer_offset, SMF_SEED_HEADER_SIZE}
+use compiler.backend.linker.smf_header.{smf_header_field_shift, smf_header_trailer_offset, SMF_SEED_HEADER_SIZE, SMF_VERSION_MINOR}
 # Simple App Startup Launch Metadata
 #
 # Pure policy helpers shared by CLI, build metadata checks, and SimpleOS launch
@@ -559,11 +559,11 @@ pub fn retained_smf_launch_metadata_v1(bytes: [u8], fallback_kind: text) -> Reta
             present: false, ok: false, metadata: fallback,
             reason: "smf_header_missing")
 
-    # Packed v1.1 trailer at EOF-128; Rust seed repr(C) trailer at EOF-96 with a
-    # +4 field shift (canonical decoder: compiler.backend.linker.smf_header).
-    val packed_header = if bytes.len() >= 128: bytes.len() - 128 else: -1
-    val seed_header = if packed_header >= 0 and bytes[packed_header] == 83 and bytes[packed_header + 1] == 77 and bytes[packed_header + 2] == 70 and bytes[packed_header + 3] == 0: -1 else: smf_header_seed_trailer_offset(bytes)
-    val header = if seed_header >= 0: seed_header else: packed_header
+    # Trailer precedence shared with every reader: v1.3 96-byte header at
+    # EOF-96, legacy packed at EOF-128, Rust seed 1.1 at EOF-96; fields from
+    # offset 20 on carry the layout's shift (canonical decoder:
+    # compiler.backend.linker.smf_header).
+    val header = smf_header_trailer_offset(bytes)
     if header < 0:
         return RetainedSmfLaunchMetadataV1(
             present: false, ok: false, metadata: fallback,
@@ -580,7 +580,8 @@ pub fn retained_smf_launch_metadata_v1(bytes: [u8], fallback_kind: text) -> Reta
         return RetainedSmfLaunchMetadataV1(
             present: true, ok: false, metadata: fallback,
             reason: "smf_header_ambiguous")
-    if bytes[header + 4] != 1 or bytes[header + 5] != 1:
+    # v1.1 (packed or Rust seed), v1.2 (relocations), v1.3 (96-byte default).
+    if bytes[header + 4] != 1 or bytes[header + 5] < 1 or bytes[header + 5] > SMF_VERSION_MINOR:
         return RetainedSmfLaunchMetadataV1(
             present: false, ok: false, metadata: fallback,
             reason: "smf_version_unsupported")

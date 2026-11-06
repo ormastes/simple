@@ -1,0 +1,75 @@
+# Applies the effective export closure to one walked exposure row. Pure; the
+# walker itself is untouched. Safe is reachable only through the explicit
+# conjunction below; NotExported callables never drive the module verdict.
+use compiler.common.api_exposure_result_v1.{ApiExposureVerdictV1, ApiCallableExposureV1, ApiModuleExposureV1}
+use compiler.common.api_export_closure_facts_v1.{ApiExportClosureStatusV1, ApiExportClosureEntryV1, ApiExportClosureFactsV1}
+
+val CLOSURE_NOT_COLLECTED_REASON: text = "effective-export-closure-not-collected"
+# Unconditional observation-scope marker published by the projector for every
+# module. It bounds what the callable-surface verdict claims; it is not a fault
+# of the module and does not block Safe. Every other reason does.
+val API_EXPOSURE_SCOPE_REASON_V1: text = "non-callable-and-generated-surfaces-not-collected"
+
+fn has_blocking_reason(reasons: [text]) -> bool:
+    for reason in reasons:
+        if reason != API_EXPOSURE_SCOPE_REASON_V1: return true
+    false
+
+fn without_reason(reasons: [text], reason: text) -> [text]:
+    var out: [text] = []
+    for existing in reasons:
+        if existing != reason: out.push(existing)
+    out
+
+fn with_unique(reasons: [text], reason: text) -> [text]:
+    var out: [text] = []
+    for existing in reasons:
+        if existing == reason: return reasons
+        out.push(existing)
+    out.push(reason)
+    out
+
+pub fn apply_api_export_closure_v1(exposure: ApiModuleExposureV1,
+        closure: ApiExportClosureFactsV1) -> ApiModuleExposureV1:
+    var result = exposure
+    result.callables = []
+    # Exactly one entry per (module, symbol); a duplicate is a malformed closure.
+    var by_symbol: Dict<i64, ApiExportClosureEntryV1> = {}
+    var duplicate = false
+    for raw_entry in closure.entries:
+        val entry: ApiExportClosureEntryV1 = raw_entry
+        if entry.terminal_module != exposure.module_name: continue
+        if by_symbol.has(entry.local_symbol): duplicate = true
+        by_symbol[entry.local_symbol] = entry
+    var complete = not duplicate and not closure.truncated
+    var closure_unknown = false
+    var exported_violates = false
+    var exported_unknown = false
+    for raw_row in exposure.callables:
+        var row: ApiCallableExposureV1 = raw_row
+        if duplicate or not by_symbol.has(row.local_symbol):
+            complete = false
+            row.export_status = ApiExportClosureStatusV1.NotCollected
+        else:
+            val entry: ApiExportClosureEntryV1 = by_symbol[row.local_symbol]
+            row.export_status = entry.status
+            match entry.status:
+                case ApiExportClosureStatusV1.Exported:
+                    if row.verdict == ApiExposureVerdictV1.Violates: exported_violates = true
+                    if row.verdict == ApiExposureVerdictV1.Unknown: exported_unknown = true
+                case ApiExportClosureStatusV1.NotExported: ()
+                case _:
+                    closure_unknown = true
+        result.callables.push(row)
+    if complete:
+        result.unknown_reasons = without_reason(exposure.unknown_reasons, CLOSURE_NOT_COLLECTED_REASON)
+    else:
+        result.unknown_reasons = with_unique(exposure.unknown_reasons, CLOSURE_NOT_COLLECTED_REASON)
+        result.unknown_reasons = with_unique(result.unknown_reasons, "export-closure-incomplete")
+    if exported_violates:
+        result.verdict = ApiExposureVerdictV1.Violates
+    elif has_blocking_reason(result.unknown_reasons) or exported_unknown or closure_unknown or exposure.truncated:
+        result.verdict = ApiExposureVerdictV1.Unknown
+    else:
+        result.verdict = ApiExposureVerdictV1.Safe
+    result

@@ -81,8 +81,19 @@ fn value_to_runtime_inner(v: &Value) -> RuntimeValue {
         // `a.len() == 0` and the next `a[i] = b` stored through NIL and
         // crashed with SIGSEGV
         // (doc/08_tracking/bug/packed_byte_array_write_span_noop_2026-10-05.md).
+        // It must cross as a PACKED runtime byte array (one memcpy), not one
+        // heap-boxed `UInt` RuntimeValue per byte: native `[u8]` reads take the
+        // element as a raw byte, so the boxed pointer bits read back as
+        // garbage (`rt_bytes_alloc(8)` gave 161,97,129,...) and a 1 MiB buffer
+        // cost ~1M heap allocations (239 MB peak)
+        // (doc/08_tracking/bug/interpreter_bytes_u64_false_green_memory_2026-08-11.md).
         Value::ByteArray(bytes) | Value::FrozenByteArray(bytes) => {
-            values_to_runtime_array(Value::byte_array_values(bytes).iter())
+            if bytes.is_empty() {
+                simple_runtime::value::rt_byte_array_new(0)
+            } else {
+                // SAFETY: `bytes` is a live slice of `bytes.len()` bytes for the call.
+                unsafe { simple_runtime::value::rt_bytes_from_raw(bytes.as_ptr() as i64, bytes.len() as i64) }
+            }
         }
         // A tuple must marshal to a runtime tuple (not an array) so it is
         // byte-identical to a natively-constructed tuple and reads correctly via
@@ -583,6 +594,24 @@ mod tests {
         assert_eq!(value_to_runtime(&Value::Nil), RuntimeValue::NIL);
         assert_eq!(value_to_runtime(&Value::Int(42)).as_int(), 42);
         assert_eq!(value_to_runtime(&Value::Bool(true)), RuntimeValue::TRUE);
+    }
+
+    /// interpreter_bytes_u64_false_green_memory_2026-08-11: a packed `[u8]`
+    /// crossing the hybrid splice must read back as raw bytes (zeros stay
+    /// zeros), not as boxed-UInt pointer bits.
+    #[test]
+    fn test_value_to_runtime_byte_array_is_packed_bytes() {
+        use simple_runtime::value::{rt_array_get, rt_array_len};
+        for bytes in [vec![0u8; 8], vec![0, 1, 127, 255]] {
+            let rv = value_to_runtime(&Value::byte_array(bytes.clone()));
+            assert_eq!(rt_array_len(rv), bytes.len() as i64);
+            for (i, b) in bytes.iter().enumerate() {
+                assert_eq!(rt_array_get(rv, i as i64).as_int(), i64::from(*b), "byte {i}");
+            }
+        }
+        let empty = value_to_runtime(&Value::byte_array(vec![]));
+        assert_ne!(empty, RuntimeValue::NIL);
+        assert_eq!(rt_array_len(empty), 0);
     }
 
     #[test]

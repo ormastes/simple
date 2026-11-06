@@ -1,0 +1,67 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/app/lsp/symbol_identity_resolved_index.md
+#
+# Symbol identity (todo L11): a stable key derived from kind, module path,
+# qualified name and signature digest, paired with a snapshot-bound locator.
+# Locations used to be `path:line` text only.
+
+use std.spec
+use std.spec.step
+use std.common.json.parser.{json_parse}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.types.{json_to_string, json_to_number}
+use std.nogc_sync_mut.lsp.lsp_symbol_key.{lsp_symbol_module_path_v1, lsp_symbol_decl_kind_v1,
+    lsp_symbol_decl_name_v1, lsp_symbol_signature_digest_v1, lsp_symbol_key_v1,
+    lsp_symbol_key_text_v1, lsp_symbol_data_json_v1}
+
+describe "lsp_symbol_key identity":
+    it "derives the module path from a repo-relative or absolute file path":
+        # @req REQ-SSPEC-UNIT
+        step("module path")
+        expect(lsp_symbol_module_path_v1("src/lib/nogc_sync_mut/lsp/lsp_call_edges.spl")).to_equal("src.lib.nogc_sync_mut.lsp.lsp_call_edges")
+        expect(lsp_symbol_module_path_v1("D:\\dev\\wt\\x\\src\\app\\cli\\query.spl")).to_equal("src.app.cli.query")
+        expect(lsp_symbol_module_path_v1("/home/u/repo/test/01_unit/a_spec.spl")).to_equal("test.01_unit.a_spec")
+        expect(lsp_symbol_module_path_v1("./tmp/fixture.spl")).to_equal("tmp.fixture")
+
+    it "classifies declaration kinds and names":
+        # @req REQ-SSPEC-UNIT
+        step("kinds")
+        expect(lsp_symbol_decl_kind_v1("pub fn foo(a: i64) -> i64:")).to_equal("fn")
+        expect(lsp_symbol_decl_kind_v1("struct Foo:")).to_equal("struct")
+        expect(lsp_symbol_decl_kind_v1("pub static val LIMIT: i64 = 3")).to_equal("val")
+        expect(lsp_symbol_decl_kind_v1("    foo(1)")).to_equal("")
+        step("names")
+        expect(lsp_symbol_decl_name_v1("pub fn foo(a: i64) -> i64:")).to_equal("foo")
+        expect(lsp_symbol_decl_name_v1("enum Color:")).to_equal("Color")
+        expect(lsp_symbol_decl_name_v1("    foo(1)")).to_equal("")
+
+    it "is stable across whitespace and comment edits and changes on signature edits":
+        # @req REQ-SSPEC-UNIT
+        step("digest")
+        val a = lsp_symbol_signature_digest_v1("fn foo(a: i64) -> i64:")
+        val b = lsp_symbol_signature_digest_v1("fn   foo(a:  i64)   ->  i64:   # comment")
+        val c = lsp_symbol_signature_digest_v1("fn foo(a: text) -> i64:")
+        expect(a.len()).to_equal(12)
+        expect(a).to_equal(b)
+        expect(a != c).to_equal(true)
+        step("key text")
+        val key = lsp_symbol_key_v1("src/lib/x.spl", "fn foo(a: i64) -> i64:", "")!
+        expect(lsp_symbol_key_text_v1(key)).to_equal("fn:src.lib.x:foo:" + a)
+        val member = lsp_symbol_key_v1("src/lib/x.spl", "    fn bar():", "Owner")!
+        expect(member.qualified_name).to_equal("Owner.bar")
+        expect(lsp_symbol_key_v1("src/lib/x.spl", "    val y = foo(1)", "") != nil).to_equal(true)
+        expect(lsp_symbol_key_v1("src/lib/x.spl", "    foo(1)", "") == nil).to_equal(true)
+
+    it "encodes the key plus a snapshot-bound locator for CallHierarchyItem.data":
+        # @req REQ-SSPEC-UNIT
+        step("data json")
+        val key = lsp_symbol_key_v1("src/lib/x.spl", "fn foo():", "")!
+        val data = json_parse(lsp_symbol_data_json_v1(key, "snap-1", "src\\lib\\x.spl", "abc123", 7, 4))
+        expect(json_to_string(json_object_get(data, "symbolKey")).starts_with("fn:src.lib.x:foo:")).to_equal(true)
+        val loc = json_object_get(data, "locator")
+        expect(json_to_string(json_object_get(loc, "snapshot_id"))).to_equal("snap-1")
+        expect(json_to_string(json_object_get(loc, "path"))).to_equal("src/lib/x.spl")
+        expect(json_to_string(json_object_get(loc, "blob_id"))).to_equal("abc123")
+        expect(json_to_number(json_object_get(loc, "line"))).to_equal(7.0)
+        expect(json_to_number(json_object_get(loc, "col"))).to_equal(4.0)

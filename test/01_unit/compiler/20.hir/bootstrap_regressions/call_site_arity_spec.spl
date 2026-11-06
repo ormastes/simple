@@ -91,3 +91,26 @@ describe "call-site arity of same-module functions":
     it "does not false-positive on a method call with a same-named free fn":
         val src = f3_decl + "struct Q:\n    v: i64\n\nimpl Q:\n    fn f3(n: i64) -> i64:\n        self.v + n\n\nfn main() -> i64:\n    val q = Q(v: 1)\n    q.f3(4)\n"
         expect(arity_hir_errors(src)).to_equal("")
+
+    it "accepts a positional argument after a named one (stage2 full-CLI repro, sdoctest runner)":
+        val src = f3_decl + "fn main() -> i64:\n    f3(1, b: 2, 3)\n"
+        expect(arity_hir_errors(src)).to_equal("")
+
+    it "accepts positionals filling params left unnamed (test_executor_composite shape)":
+        val src = f3_decl + "fn main() -> i64:\n    f3(a: 1, 2, c: 3)\n"
+        expect(arity_hir_errors(src)).to_equal("")
+
+    it "still rejects a mixed call that leaves a required param uncovered":
+        val errs = arity_hir_errors(f3_decl + "fn main() -> i64:\n    f3(b: 2, 1)\n")
+        expect(errs.contains("requires argument(s) c")).to_equal(true)
+
+    # MIR call lowering passes free-call arguments in SOURCE order (no
+    # name-based reordering on the native lane), so a positional that would
+    # bind a different parameter than its source slot is a silent misbind.
+    it "rejects a positional that binds a different param than its slot (named first)":
+        val errs = arity_hir_errors(f3_decl + "fn main() -> i64:\n    f3(b: 2, 1, 3)\n")
+        expect(errs.contains("positional argument 2 would bind parameter a")).to_equal(true)
+
+    it "rejects a positional shifted past an out-of-order named arg":
+        val errs = arity_hir_errors(f3_decl + "fn main() -> i64:\n    f3(1, c: 3, 2)\n")
+        expect(errs.contains("positional argument 3 would bind parameter b")).to_equal(true)
