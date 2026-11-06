@@ -1,0 +1,256 @@
+#!/bin/sh
+# System-level perf of the real Simple web server and DB server with and
+# without the levelled SIMD provider:
+#
+#   web  src/app/simple_web_server/main.spl     single-owner lane, POST /ingest
+#        (50 x 1500-byte headers + 64 KiB body per request: LF/CRLF scans)
+#   db   src/app/postgres_mimic_server/main.spl --listen (PureDatabase)
+#        two-term AND full scans over DB_ROWS rows (RowBitmap AND reducer)
+#
+# Each server runs in three modes: scalar (no provider), cap3 (AVX2-capped
+# DSO) and full (levelled DSO, the host's admitted level; AVX-512 on an L4
+# host). The pure-Simple load generator test/03_system/tools/avx_server_loadgen.spl
+# drives N concurrent TCP clients and reports rps, p50/p99 and a response
+# digest. PASS requires, per server:
+#   correctness  identical response digest in all three modes, 0 errors
+#   provider     scalar reports parser=scalar with zero provider counters;
+#                cap3 and full report parser=vector, level 3 / host level,
+#                and the provider served every request
+#   perf         (MODE=native only) full rps >= scalar rps * MIN_*_RATIO_X100/100
+#
+# Ratio bounds (provisional, recorded in results): HTTP 105 (full >= 1.05x
+# scalar), DB 95 (full >= 0.95x scalar, i.e. no regression beyond 5%). The DB
+# bound is deliberately parity-level: the provider replaces only the 32768-word
+# bitmap AND of a 1M-row scan, while predicate evaluation over every row stays
+# scalar Simple code, so end-to-end DB gains are expected to be small. The
+# seed-interpreter dry run (2026-11-06, 4 requests, interpret mode) measured
+# HTTP full/scalar = 3.6x and DB = 1.0x; recalibrate both bounds from the
+# first native Stage 2 run and record them here.
+#
+# Usage: check-avx-server-system-perf.shs ABS_OUT COMPILER RUNTIME_PATH LEVELS_OUT
+#   COMPILER     MODE=native: admitted pure-Simple compiler (never the Rust seed)
+#                MODE=interpret: any `simple run` driver (the seed is allowed;
+#                correctness/provider only, perf is recorded but not gated)
+#   RUNTIME_PATH runtime authority directory for hosted linking (native)
+#   LEVELS_OUT   ABS_OUT of a passing check-vector-provider-levels.shs run
+# Env: MODE (native), BACKEND (cranelift), PORT_BASE (18560), CLIENTS (4),
+#      HTTP_REQUESTS, DB_REQUESTS, WARMUP, DB_ROWS, DB_RESULT_ROWS (16),
+#      MIN_HTTP_RATIO_X100 (105), MIN_DB_RATIO_X100 (95), SERVER_TIMEOUT (s).
+# Verdict (last stdout line): PASS — ... | FAIL — ... | ERROR — nothing was checked
+set -u
+out=${1:?usage: check-avx-server-system-perf.shs ABS_OUT COMPILER RUNTIME_PATH LEVELS_OUT}
+compiler=${2:?compiler required}
+runtime=${3:?runtime path required}
+levels=${4:?levels output required}
+case "$out" in /*|[A-Za-z]:/*) ;; *) echo 'ERROR — nothing was checked (absolute ABS_OUT required)'; exit 2;; esac
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+mode=${MODE:-native}
+backend=${BACKEND:-cranelift}
+port_base=${PORT_BASE:-18560}
+clients=${CLIENTS:-4}
+min_http=${MIN_HTTP_RATIO_X100:-105}
+min_db=${MIN_DB_RATIO_X100:-95}
+db_result_rows=${DB_RESULT_ROWS:-16}
+case $mode in
+    native) http_requests=${HTTP_REQUESTS:-400}; db_requests=${DB_REQUESTS:-40}
+            warmup=${WARMUP:-8}; db_rows=${DB_ROWS:-1048576}; server_timeout=${SERVER_TIMEOUT:-3600} ;;
+    interpret) http_requests=${HTTP_REQUESTS:-4}; db_requests=${DB_REQUESTS:-4}
+            warmup=${WARMUP:-1}; db_rows=${DB_ROWS:-4096}; server_timeout=${SERVER_TIMEOUT:-1800} ;;
+    *) echo "ERROR — nothing was checked (MODE must be native or interpret, got $mode)"; exit 2 ;;
+esac
+
+case $(uname -s) in
+    # MinGW clang is the default Windows lane; the compiler's unhinted link
+    # flavor is still msvc, so pin the ABI explicitly.
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) triple=x86_64-w64-windows-gnu; ext=dll; exe=.exe
+        SIMPLE_WINDOWS_ABI=${SIMPLE_WINDOWS_ABI:-gnu}; export SIMPLE_WINDOWS_ABI ;;
+    Linux) triple=x86_64-linux-gnu; ext=so; exe= ;;
+    *) echo "UNSUPPORTED: $(uname -s)"; exit 77 ;;
+esac
+pdir=$levels/$triple
+[ -f "$pdir/simple_vector_provider_levelled.$ext" ] || {
+    echo "ERROR — nothing was checked (missing $pdir/simple_vector_provider_levelled.$ext; run check-vector-provider-levels.shs run first)"; exit 2; }
+[ -f "$pdir/simple_vector_provider_levelled_cap3.$ext" ] || {
+    echo "ERROR — nothing was checked (missing cap3 DSO in $pdir)"; exit 2; }
+host_level=$(sed -n "s/^host $triple admits L\([0-9]\).*/\1/p" "$levels/results.txt" 2>/dev/null | head -1)
+[ -z "$host_level" ] && host_level=$(grep -o 'admits L[0-9]' "$levels/build.log" 2>/dev/null | head -1 | tr -dc 0-9)
+[ -n "$host_level" ] || { echo "ERROR — nothing was checked (host level unknown in $levels)"; exit 2; }
+if [ "$mode" = native ] && "$compiler" --version 2>&1 | grep -qi 'rust seed'; then
+    echo 'ERROR — nothing was checked (compiler is the Rust seed; use MODE=interpret for a seed dry run)'; exit 2
+fi
+
+mkdir -p "$out"
+: >"$out/results.txt"
+: >"$out/summary.txt"
+# Provider admission only accepts relative build/providers/ paths
+# (os/smf/provider_loader.spl), so stage the DSOs there and run from $root.
+cd "$root" || exit 2
+mkdir -p build/providers
+cp "$pdir"/simple_vector_provider_levelled*."$ext" build/providers/ || {
+    echo 'ERROR — nothing was checked (could not stage provider DSOs)'; exit 2; }
+fails=0 checked=0
+note() { printf '%s\n' "$*" | tee -a "$out/results.txt"; }
+fail() { note "FAIL $*"; fails=$((fails + 1)); }
+sha() { sha256sum "$1" | cut -d' ' -f1; }
+field() { printf '%s\n' "$1" | sed -n "s/.*[ ]$2=\([^ ]*\).*/\1/p" | head -1; }
+note "mode=$mode backend=$backend host=$triple host_level=L$host_level clients=$clients http_requests=$http_requests db_requests=$db_requests db_rows=$db_rows warmup=$warmup min_http_ratio_x100=$min_http min_db_ratio_x100=$min_db"
+printf 'mode %s\nhost_level %s\nmin_http_ratio_x100 %s\nmin_db_ratio_x100 %s\n' \
+    "$mode" "$host_level" "$min_http" "$min_db" >>"$out/summary.txt"
+
+# --- build (native) or interpret driver ------------------------------------
+build() { # name src
+    bin=$out/$1$exe
+    rm -f "$bin"
+    t0=$(date +%s)
+    # Same native-build contract as check-vector-provider-selfhost-apps.shs.
+    SIMPLE_RUNTIME_PATH=$runtime SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB=$root/src \
+    SIMPLE_BINARY=$compiler SIMPLE_BIN=$compiler SIMPLE_BOOTSTRAP_DRIVER=$compiler \
+    SIMPLE_NATIVE_BUILD_FORCE_WORKER=0 \
+    SIMPLE_SCV_INVENTORY_COLD_INIT=${SIMPLE_SCV_INVENTORY_COLD_INIT:-1} \
+        "$compiler" native-build --backend "$backend" --runtime-bundle core-c-bootstrap \
+        --entry-closure --entry "$2" --cache-dir "$out/$1.cache" \
+        --mode one-binary --output "$bin" >"$out/$1.build.log" 2>&1
+    rc=$?
+    checked=$((checked + 1))
+    if [ "$rc" -ne 0 ] || [ ! -x "$bin" ]; then
+        fail "build $1 rc=$rc (log $out/$1.build.log)"; return 1
+    fi
+    note "ok   build $1 in $(( $(date +%s) - t0 ))s ($(stat -c %s "$bin") bytes)"
+}
+web_src=src/app/simple_web_server/main.spl
+db_src=src/app/postgres_mimic_server/main.spl
+lg_src=test/03_system/tools/avx_server_loadgen.spl
+if [ "$mode" = native ]; then
+    build web_server "$web_src" || web_src=
+    build db_server "$db_src" || db_src=
+    build loadgen "$lg_src" || lg_src=
+    if [ -z "$lg_src" ]; then echo "FAIL — $checked checked, $fails failed (loadgen did not build; results: $out/results.txt)"; exit 1; fi
+fi
+# run_prog <name> <src> args...: native binary or `$compiler run` in interpret mode.
+run_prog() {
+    name=$1 src=$2; shift 2
+    if [ "$mode" = native ]; then "$out/$name$exe" "$@"
+    else SIMPLE_EXECUTION_MODE=interpret SIMPLE_RUST_SEED_WARNING=0 "$compiler" run "$src" "$@"; fi
+}
+
+wait_ready() { # log marker
+    n=0
+    while [ "$n" -lt "$server_timeout" ]; do
+        grep -q "$2" "$1" 2>/dev/null && return 0
+        grep -q 'startup failed\|^error:' "$1" 2>/dev/null && return 1
+        sleep 1; n=$((n + 1))
+    done
+    return 1
+}
+
+# run_mode <kind> <mode-name> <port> [provider-dso]
+run_mode() {
+    kind=$1 m=$2 port=$3 dso=${4:-}
+    addr=127.0.0.1:$port
+    log=$out/$kind.$m.server.log
+    lgdir=$out/$kind.$m.lg; rm -rf "$lgdir"; mkdir -p "$lgdir"
+    if [ "$kind" = http ]; then requests=$http_requests; else requests=$db_requests; fi
+    total=$((warmup + requests))
+    if [ -n "$dso" ]; then pargs="--vector-provider $dso --vector-provider-sha256 $(sha "$dso")"
+    elif [ "$kind" = http ]; then pargs=--single-owner
+    else pargs=; fi
+    if [ "$kind" = http ]; then
+        timeout "$server_timeout" sh -c "$(declare_run) run_prog web_server $web_src --listen $addr --max-requests $total $pargs" >"$log" 2>&1 &
+        marker=SIMPLE_WEB_SERVER_READY
+    else
+        timeout "$server_timeout" sh -c "$(declare_run) run_prog db_server $db_src --listen $addr --db :memory: --seed-rows $db_rows --max-requests $total $pargs" >"$log" 2>&1 &
+        marker=POSTGRES_MIMIC_SERVER_READY
+    fi
+    spid=$!
+    if ! wait_ready "$log" "$marker"; then
+        kill "$spid" 2>/dev/null; wait "$spid" 2>/dev/null
+        fail "$kind $m server did not become ready (log $log)"; return 1
+    fi
+    ready=$(grep "$marker" "$log" | head -1)
+    if [ "$warmup" -gt 0 ]; then
+        mkdir -p "$lgdir/warm"
+        run_prog loadgen "$lg_src" "$kind" "$addr" 1 "$warmup" "$lgdir/warm" "$db_rows" "$db_result_rows" >"$lgdir/warm.log" 2>&1
+    fi
+    run_prog loadgen "$lg_src" "$kind" "$addr" "$clients" "$requests" "$lgdir" "$db_rows" "$db_result_rows" >"$lgdir/run.log" 2>&1
+    lrc=$?
+    wait "$spid"; src_rc=$?
+    lg=$(grep '^LOADGEN ' "$lgdir/run.log" | tail -1)
+    if [ "$kind" = http ]; then stats=$(grep SIMPLE_WEB_SERVER_STATS "$log" | tail -1)
+    else stats=$(grep POSTGRES_MIMIC_SERVER_STATS "$log" | tail -1); fi
+    checked=$((checked + 1))
+    printf '%s %s %s %s %s\n' "$kind" "$m" "$ready" "$lg" "$stats" >>"$out/summary.txt"
+    note "     $kind $m: $(field "$lg" ok)/$requests ok rps_x100=$(field "$lg" rps_x100) p50_us=$(field "$lg" p50_us) p99_us=$(field "$lg" p99_us) digest=$(field "$lg" digest) parser=$(field "$ready" parser) level=$(field "$ready" level) server_rc=$src_rc"
+    if [ "$lrc" -ne 0 ] || [ -z "$lg" ] || [ "$(field "$lg" errors)" != 0 ]; then
+        fail "$kind $m load generator rc=$lrc errors=$(field "$lg" errors) first_error=$(field "$lg" first_error) (log $lgdir/run.log)"; return 1
+    fi
+    [ -n "$stats" ] || { fail "$kind $m server printed no stats (rc=$src_rc, log $log)"; return 1; }
+    parser=$(field "$ready" parser) level=$(field "$ready" level)
+    case $m in
+        scalar) want_parser=scalar want_level=-1 ;;
+        cap3) want_parser=vector want_level=3 ;;
+        full) want_parser=vector want_level=$host_level ;;
+    esac
+    if [ "$parser" != "$want_parser" ] || [ "$level" != "$want_level" ]; then
+        fail "$kind $m parser=$parser level=$level, want parser=$want_parser level=$want_level"; return 1
+    fi
+    if [ "$kind" = http ]; then
+        used=$(field "$stats" provider_requests) att=$(field "$stats" provider_attempts) suc=$(field "$stats" provider_successes)
+        if [ "$m" = scalar ]; then
+            [ "$used" = 0 ] && [ "$att" = 0 ] || { fail "http scalar touched the provider ($stats)"; return 1; }
+        elif [ "$used" != "$total" ] || [ "$att" -le 0 ] || [ "$att" != "$suc" ]; then
+            fail "http $m provider did not serve every request: $stats"; return 1
+        fi
+    else
+        used=$(field "$stats" provider_queries) calls=$(field "$stats" provider_and_calls)
+        if [ "$m" = scalar ]; then
+            [ "$used" = 0 ] || { fail "db scalar touched the provider ($stats)"; return 1; }
+        elif [ "$used" != "$total" ] || [ "$calls" != "$total" ]; then
+            fail "db $m provider did not serve every query: $stats"; return 1
+        fi
+    fi
+    note "ok   $kind $m parser=$parser level=$level provider counters consistent"
+}
+# Child shells re-declare run_prog with the resolved settings.
+declare_run() {
+    printf 'mode=%s; compiler=%s; out=%s; exe=%s; ' "$mode" "$compiler" "$out" "$exe"
+    printf 'run_prog() { name=$1 src=$2; shift 2; if [ "$mode" = native ]; then exec "$out/$name$exe" "$@"; else SIMPLE_EXECUTION_MODE=interpret SIMPLE_RUST_SEED_WARNING=0 exec "$compiler" run "$src" "$@"; fi; }; '
+}
+
+rps() { field "$(grep "^$1 $2 " "$out/summary.txt" | tail -1)" rps_x100; }
+dig() { field "$(grep "^$1 $2 " "$out/summary.txt" | tail -1)" digest; }
+port=$port_base
+for kind in http db; do
+    if [ "$kind" = http ] && [ "$mode" = native ] && [ -z "$web_src" ]; then continue; fi
+    if [ "$kind" = db ] && [ "$mode" = native ] && [ -z "$db_src" ]; then continue; fi
+    ok_modes=0
+    run_mode "$kind" scalar "$port" && ok_modes=$((ok_modes + 1)); port=$((port + 1))
+    run_mode "$kind" cap3 "$port" build/providers/simple_vector_provider_levelled_cap3.$ext && ok_modes=$((ok_modes + 1)); port=$((port + 1))
+    run_mode "$kind" full "$port" build/providers/simple_vector_provider_levelled.$ext && ok_modes=$((ok_modes + 1)); port=$((port + 1))
+    [ "$ok_modes" -eq 3 ] || continue
+    checked=$((checked + 1))
+    d0=$(dig "$kind" scalar) d3=$(dig "$kind" cap3) d4=$(dig "$kind" full)
+    if [ -z "$d0" ] || [ "$d0" != "$d3" ] || [ "$d0" != "$d4" ]; then
+        fail "$kind responses differ across modes: scalar=$d0 cap3=$d3 full=$d4"
+    else note "ok   $kind responses identical across scalar/cap3/full (digest $d0)"; fi
+    s=$(rps "$kind" scalar) c3=$(rps "$kind" cap3) f=$(rps "$kind" full)
+    if [ "$kind" = http ]; then min=$min_http; else min=$min_db; fi
+    if [ -z "$s" ] || [ "$s" -le 0 ] || [ -z "$f" ]; then fail "$kind throughput missing (scalar=$s full=$f)"; continue; fi
+    ratio=$((f * 100 / s)); ratio3=$((c3 * 100 / s))
+    printf 'ratio %s full_x100=%s cap3_x100=%s min_x100=%s\n' "$kind" "$ratio" "$ratio3" "$min" >>"$out/summary.txt"
+    if [ "$mode" != native ]; then
+        note "     $kind full/scalar=${ratio}% cap3/scalar=${ratio3}% (MODE=$mode: recorded, not gated)"
+        continue
+    fi
+    checked=$((checked + 1))
+    if [ "$ratio" -lt "$min" ]; then fail "$kind full/scalar throughput ${ratio}% below bound ${min}% (cap3 ${ratio3}%)"
+    else note "ok   $kind full/scalar throughput ${ratio}% >= ${min}% (cap3 ${ratio3}%)"; fi
+done
+
+gated=gated; [ "$mode" = native ] || gated="not gated (MODE=$mode)"
+if [ "$fails" -ne 0 ]; then
+    printf 'verdict FAIL\n' >>"$out/summary.txt"
+    echo "FAIL — $checked checked, $fails failed (results: $out/results.txt)"; exit 1
+fi
+[ "$checked" -gt 0 ] || { echo 'ERROR — nothing was checked'; exit 2; }
+printf 'verdict PASS\n' >>"$out/summary.txt"
+echo "PASS — $checked checked, 0 failed, host level L$host_level, perf $gated (results: $out/results.txt)"
