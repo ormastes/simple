@@ -380,6 +380,15 @@ impl Lowerer {
             Expr::Range { start, end, bound } => self.lower_range(start.as_deref(), end.as_deref(), *bound, ctx),
             _ => {
                 if self.lenient_types {
+                    match expr {
+                        Expr::ListComprehension { .. } => {
+                            crate::hir::lower::record_dropped_unsupported_expr("ListComprehension")
+                        }
+                        Expr::DictComprehension { .. } => {
+                            crate::hir::lower::record_dropped_unsupported_expr("DictComprehension")
+                        }
+                        _ => {}
+                    }
                     Ok(HirExpr {
                         kind: HirExprKind::Nil,
                         ty: TypeId::ANY,

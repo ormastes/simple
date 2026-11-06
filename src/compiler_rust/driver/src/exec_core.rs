@@ -1216,6 +1216,7 @@ impl ExecCore {
         } else {
             std::collections::HashMap::new()
         };
+        let _ = hir::take_dropped_unsupported_exprs();
         let hir_module = match hir::lower_with_context_lenient_project_hint_and_duplicate_structs(
             &ast,
             path,
@@ -1225,6 +1226,16 @@ impl ExecCore {
             Ok(m) => m,
             Err(e) => return Err(jit_strict_fallback_error_for("HIR lowering error", &e, Some(path))),
         };
+        // The lenient lowering turns expressions HIR cannot lower (list/dict
+        // comprehensions) into `nil`; running that would silently compute the
+        // wrong value (`[for x in xs: x]` -> `[]`). Fall back to the interpreter.
+        let dropped = hir::take_dropped_unsupported_exprs();
+        if !dropped.is_empty() {
+            return Err(format!(
+                "HIR has no lowering for {}; falling back to interpreter",
+                dropped.join(",")
+            ));
+        }
 
         // Lower to MIR
         let mut mir_module = match lower_to_mir(&hir_module) {
