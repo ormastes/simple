@@ -1,0 +1,66 @@
+# Bug unsafe_capabilities_not_carried_into_hir_2026-08-21: the declaration-level
+# `@unsafe(reason:, capabilities:)` form was recorded by the parser and never
+# read, so HIR had no way to tell which functions carry which capability.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode}
+
+fn lower_source(source: text) -> (HirModule, i64):
+    val parsed = parse_full_frontend(source, "unsafe_caps.spl", "unsafe_caps", Logger(level: 0))
+    var lowering = HirLowering.with_filename("unsafe_caps.spl")
+    val module = lowering.lower_module(parsed)
+    (module, lowering.errors.len())
+
+fn find_fn(module: HirModule, name: text, nth: i64) -> HirFunction?:
+    var seen = 0
+    for key in module.functions.keys():
+        val f: HirFunction = module.functions[key]
+        if f.name == name:
+            if seen == nth:
+                return Some(f)
+            seen = seen + 1
+    nil
+
+val TOP_SRC = "@unsafe(reason: \"erases\", capabilities: [type_erasure, ffi])\nfn erase() -> i64:\n    1\nfn plain() -> i64:\n    2\n"
+
+describe "declaration-level @unsafe reaches HirFunction":
+    it "carries reason and capabilities on a top-level function":
+        val (module, errors) = lower_source(TOP_SRC)
+        expect(errors).to_equal(0)
+        val f = find_fn(module, "erase", 0).unwrap()
+        expect(f.unsafe_reason).to_equal("erases")
+        expect(f.unsafe_caps).to_equal(["type_erasure", "ffi"])
+        val p = find_fn(module, "plain", 0).unwrap()
+        expect(p.unsafe_caps.len()).to_equal(0)
+        expect(p.unsafe_reason).to_equal("")
+
+    it "keys methods by declaration, not by bare name":
+        val src = "class A:\n    v: i64\n    @unsafe(reason: \"a\", capabilities: [raw_ptr])\n    fn get() -> i64:\n        self.v\nclass B:\n    v: i64\n    fn get() -> i64:\n        self.v\n"
+        val (module, errors) = lower_source(src)
+        expect(errors).to_equal(0)
+        var annotated = 0
+        var plain = 0
+        for key in module.functions.keys():
+            val f: HirFunction = module.functions[key]
+            if f.name == "get":
+                if f.unsafe_caps == ["raw_ptr"]: annotated = annotated + 1
+                if f.unsafe_caps.len() == 0: plain = plain + 1
+        expect(annotated).to_equal(1)
+        expect(plain).to_equal(1)
+
+    it "reports an unknown capability name":
+        val (_, errors) = lower_source("@unsafe(reason: \"x\", capabilities: [raw_pointer])\nfn bad() -> i64:\n    1\n")
+        expect(errors > 0).to_equal(true)
+
+    it "survives a HIR codec round trip":
+        val (module, _) = lower_source(TOP_SRC)
+        val decoded = hir_module_decode(hir_module_encode(module)).unwrap()
+        val f = find_fn(decoded, "erase", 0).unwrap()
+        expect(f.unsafe_reason).to_equal("erases")
+        expect(f.unsafe_caps).to_equal(["type_erasure", "ffi"])

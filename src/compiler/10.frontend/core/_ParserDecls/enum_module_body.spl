@@ -785,15 +785,53 @@ use compiler.frontend.core.representation_declarations_v1.{representation_parse_
 var PENDING_UNSAFE: i64 = 0
 var PENDING_UNSAFE_REASON: text = ""
 var PENDING_UNSAFE_CAPS: [text] = []
-# One entry per annotated decl: "decl_name|reason|cap1,cap2". Reset per module.
+# One entry per annotated decl: "decl_idx|cap1,cap2|reason". Keyed by the
+# flat decl index, not the name, so two classes' same-named `@unsafe` methods
+# cannot collide. The reason is last because it is free text and may itself
+# contain `|`. Reset per module; carried through the parse cache with the
+# other declaration metadata.
 var UNSAFE_ANNOTATIONS: [text] = []
 
 fn parser_unsafe_annotations_get() -> [text]:
     UNSAFE_ANNOTATIONS
 
-fn parser_record_unsafe_annotation(decl_name: text):
-    if PENDING_UNSAFE == 1:
-        UNSAFE_ANNOTATIONS.push(decl_name + "|" + PENDING_UNSAFE_REASON + "|" + PENDING_UNSAFE_CAPS.join(","))
+fn parser_record_unsafe_annotation(decl_idx: i64):
+    if PENDING_UNSAFE == 1 and decl_idx >= 0:
+        UNSAFE_ANNOTATIONS.push("{decl_idx}|" + PENDING_UNSAFE_CAPS.join(",") + "|" + PENDING_UNSAFE_REASON)
+
+fn _unsafe_annotation_entry_for(decl_idx: i64) -> text:
+    val prefix = "{decl_idx}|"
+    for entry in UNSAFE_ANNOTATIONS:
+        if entry.starts_with(prefix):
+            return entry.substring(prefix.len(), entry.len())
+    ""
+
+fn parser_unsafe_annotation_present(decl_idx: i64) -> bool:
+    """True when the decl at `decl_idx` carried a declaration-level `@unsafe`."""
+    val prefix = "{decl_idx}|"
+    for entry in UNSAFE_ANNOTATIONS:
+        if entry.starts_with(prefix):
+            return true
+    false
+
+fn parser_unsafe_annotation_caps(decl_idx: i64) -> [text]:
+    """Capability names from `@unsafe(capabilities: [...])` on that decl."""
+    val rest = _unsafe_annotation_entry_for(decl_idx)
+    val bar = rest.find("|")
+    val caps_text = if bar >= 0: rest.substring(0, bar) else: rest
+    var caps: [text] = []
+    for cap in caps_text.split(","):
+        if cap != "":
+            caps.push(cap)
+    caps
+
+fn parser_unsafe_annotation_reason(decl_idx: i64) -> text:
+    """The `reason:` text from `@unsafe(...)` on that decl ("" when absent)."""
+    val rest = _unsafe_annotation_entry_for(decl_idx)
+    val bar = rest.find("|")
+    if bar < 0:
+        return ""
+    rest.substring(bar + 1, rest.len())
 
 fn parser_reset_pending_unsafe():
     """Clear the pending `@unsafe` slots after they have been attached.
@@ -1167,7 +1205,7 @@ fn parse_module_body():
                     decl_set_clocked_args(visible_decl, PENDING_CLOCKED_ARGS)
                     decl_set_vhdl_generic_args(visible_decl, PENDING_VHDL_GENERIC_ARGS)
                     decl_set_flatten_struct_output(visible_decl, PENDING_FLATTEN_STRUCT_OUTPUT)
-                parser_record_unsafe_annotation(decl_get_name(visible_decl))
+                parser_record_unsafe_annotation(visible_decl)
                 module_add_decl(visible_decl)
                 parser_reset_pending_vhdl_decorators()
             continue
@@ -1202,7 +1240,7 @@ fn parse_module_body():
                 decl_set_clocked_args(d, PENDING_CLOCKED_ARGS)
                 decl_set_vhdl_generic_args(d, PENDING_VHDL_GENERIC_ARGS)
                 decl_set_flatten_struct_output(d, PENDING_FLATTEN_STRUCT_OUTPUT)
-            parser_record_unsafe_annotation(decl_get_name(d))
+            parser_record_unsafe_annotation(d)
             module_add_decl(d)
             parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 34:

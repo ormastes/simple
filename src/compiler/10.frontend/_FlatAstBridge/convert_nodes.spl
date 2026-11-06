@@ -16,7 +16,7 @@ use compiler.frontend.trace_policy.{frontend_compiler_trace_enabled}
 use compiler.core.parser.{parser_error, parser_error_at, parser_parse_type, parser_advance, par_kind_get}
 use compiler.frontend.core.lexer.{lex_init_with_path}
 use compiler.core.tokens.{TOK_EOF}
-use compiler.core.parser_decls.{parse_module_body}
+use compiler.core.parser_decls.{parse_module_body, parser_unsafe_annotation_present, parser_unsafe_annotation_caps, parser_unsafe_annotation_reason}
 use compiler.frontend.core.string_interpolation_expand.{
     parse_interpolation_fragment, parse_interpolation_fragment_at, interpolation_literalize_region
 }
@@ -2504,6 +2504,15 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
                 fn_attributes.push(Attribute(name: attr_name, args: export_args, span: span))
             else:
                 fn_attributes.push(Attribute(name: attr_name, args: [Expr(kind: ExprKind.StringLit(raw_arg, None), span: span)], span: span))
+    # Declaration-level `@unsafe(reason: "...", capabilities: [...])`: the
+    # parser records it against this decl index; rebuild it as an `unsafe`
+    # attribute (reason string first, then one Ident per capability) so HIR
+    # lowering carries it onto HirFunction.unsafe_reason / unsafe_caps.
+    if parser_unsafe_annotation_present(idx):
+        var unsafe_args: [Expr] = [Expr(kind: ExprKind.StringLit(parser_unsafe_annotation_reason(idx), None), span: span)]
+        for cap in parser_unsafe_annotation_caps(idx):
+            unsafe_args.push(Expr(kind: ExprKind.Ident(cap), span: span))
+        fn_attributes.push(Attribute(name: "unsafe", args: unsafe_args, span: span))
     val rt_hal_flags = decl_get_rt_hal_flags(idx)
     if (rt_hal_flags & 1) != 0:
         var rt_args: [Expr] = [Expr(kind: ExprKind.Ident("hal"), span: span)]
