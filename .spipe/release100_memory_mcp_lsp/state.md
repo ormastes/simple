@@ -91,3 +91,8 @@ All full-plan acceptance requirements remain in scope. Each new regression must 
 - Memory targeted review count is 4 of the user-authorized maximum6 (user AGENTS cap takes precedence over skill3). Cycle4 moves bounded typed-HIR validation before recursive classification/inference and adds deep-type regressions; independent review pending. Counts are not reset.
 - Bootstrap first-batch completion was not whole-program completion. Owner is installing identity-bound supervision with a deadline of original attempt start+7200 seconds, preserving caches and canonical termination receipts. No compatible old cache authority was established; no runtime admission yet.
 - Cycle4 independent targeted memory review completed: prior ordering P1 addressed, no new findings in scope; all executable regressions remain NOT_RUN. Working direct-env guard and tracked whitespace check passed for the saved next checkpoint.
+
+## Release reconciliation — 2026-11-06
+
+- Rebased six owned commits in `/private/tmp/simple-release100-reconciled-20261106` onto release `6beb0b4463db0fb309db7a74bf1c9120ad15ebce`. Only codec owner files overlapped; generated conflict resolved preserving upstream presence/scalar validation and all113 decoder/placeholder blocks plus97 bounded encoder wrappers. Independent integration review found no new issues. Memory repair count remains4; runtime/regeneration NOT_RUN.
+- Frozen bootstrap source and original next checkpoint remain unchanged. Bootstrap session6563 confirmed live with active worker CPU; same fixed deadline retained.
