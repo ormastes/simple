@@ -1,0 +1,116 @@
+# Actual read-only installed control probe plus exact common parent inspection.
+# Installed policy is protected host configuration, NOT untrusted request wire.
+# This finite route grants no child begin or exec permission. Windows unsupported.
+use std.common.contracts.container.exec_control_v3.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.execution_evidence_v2.{container_runtime_query_digest_v2, container_runtime_observation_digest_v2}
+use std.common.string_core.str_len
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_backend_v2, simple_container_scope_v2,
+    simple_container_observation_v2, simple_container_project_v2, simple_container_read_v2}
+use std.nogc_async_mut.container.providers.linux.installed_policy_v3.{linux_oci_installed_policy_decode_v3, linux_oci_installed_policy_digest_v3}
+use std.nogc_async_mut.container.providers.linux.installed_observer_v3.{linux_oci_installed_probe_v3, linux_oci_installed_probe_close_v3}
+use std.nogc_sync_mut.io.local_ipc_v1.LocalUnixConnectionV1
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
+
+pub enum ContainerExecControlCleanupV3:
+    Linux(LocalUnixConnectionV1)
+
+pub struct ContainerExecControlProbeTurnV3:
+    owner: SimpleContainerOwnerV2
+    observation: ContainerExecControlObservationV3?
+    cleanup: ContainerExecControlCleanupV3?
+    error: text
+
+pub struct ContainerExecControlCloseTurnV3:
+    cleanup: ContainerExecControlCleanupV3?
+    closed: bool
+    error: text
+
+fn exec_control_failed_v3(owner: SimpleContainerOwnerV2, reason: text) -> ContainerExecControlProbeTurnV3:
+    ContainerExecControlProbeTurnV3(owner: owner, observation: nil, cleanup: nil, error: reason)
+
+pub fn simple_container_exec_control_probe_v3(owner: SimpleContainerOwnerV2,
+        request: ContainerExecutionRequestV2, expected_runtime: RuntimeIdentityV1,
+        installed_policy_bytes: text, timeout_ms: i64) -> ContainerExecControlProbeTurnV3:
+    if (str_len(installed_policy_bytes) == 0 or str_len(installed_policy_bytes) > 1048576 or
+            timeout_ms <= 0 or timeout_ms > 30000): return exec_control_failed_v3(owner, "container-exec-control-input-bound")
+    if simple_container_backend_v2(owner) != "linux-podman":
+        return exec_control_failed_v3(owner, "container-exec-control-windows-unsupported")
+    val parent_matched = container_exec_control_parent_match_v3(request, expected_runtime)
+    if parent_matched.is_err(): return exec_control_failed_v3(owner, parent_matched.unwrap_err())
+    val projected = simple_container_project_v2(owner, request)
+    if projected.is_err(): return exec_control_failed_v3(owner, projected.unwrap_err())
+    val scope = simple_container_scope_v2(owner)
+    val cached = simple_container_observation_v2(owner)
+    if (cached.backend != "linux-podman" or cached.execution_os != "linux" or cached.native_machine_id != scope.native_machine_id):
+        return exec_control_failed_v3(owner, "container-exec-control-owner-platform-mismatch")
+    val policy = match linux_oci_installed_policy_decode_v3(installed_policy_bytes):
+        case Ok(value): value
+        case Err(reason): return exec_control_failed_v3(owner, reason)
+    val policy_digest = match linux_oci_installed_policy_digest_v3(policy):
+        case Ok(value): value
+        case Err(reason): return exec_control_failed_v3(owner, reason)
+    # Scripted owners must never reach native service observation or advertise it.
+    match owner:
+        case SimpleContainerOwnerV2.Linux(_, adapter):
+            if adapter.is_scripted_fixture_v2(): return exec_control_failed_v3(owner, "container-exec-control-scripted-observer-forbidden")
+        case SimpleContainerOwnerV2.Windows(_, _): return exec_control_failed_v3(owner, "container-exec-control-windows-unsupported")
+    val probed = linux_oci_installed_probe_v3(policy, timeout_ms)
+    val cleanup = match probed.connection:
+        case Some(connection): Some(ContainerExecControlCleanupV3.Linux(connection))
+        case None: nil
+    if probed.error != "" or cleanup.is_some() or probed.observation == nil:
+        val reason = if probed.error != "": probed.error else: "container-exec-control-probe-unconfirmed"
+        return ContainerExecControlProbeTurnV3(owner: owner, observation: nil, cleanup: cleanup, error: reason)
+    val installed = probed.observation.unwrap()
+    if installed.cli.identity_digest != cached.provider_identity_digest:
+        return exec_control_failed_v3(owner, "container-exec-control-parent-provider-mismatch")
+    val inspected = simple_container_read_v2(owner, "inspect", request)
+    val retained = inspected.owner
+    val operation = inspected.operation
+    if (operation.status != "ok" or operation.operation != "inspect" or operation.state.phase != "running"):
+        return exec_control_failed_v3(retained, "container-exec-control-running-parent-required")
+    val actual = operation.state.identity
+    if (actual.pod_uid != expected_runtime.pod_uid or actual.attempt != expected_runtime.attempt or
+            actual.operation_id != expected_runtime.operation_id or actual.provider_generation != expected_runtime.provider_generation or
+            actual.engine != expected_runtime.engine or actual.native_id != expected_runtime.native_id or
+            actual.node_boot_id != expected_runtime.node_boot_id):
+        return exec_control_failed_v3(retained, "container-exec-control-inspected-parent-mismatch")
+    val parent_query = match container_runtime_query_digest_v2(operation.command):
+        case Ok(value): value
+        case Err(reason): return exec_control_failed_v3(retained, reason)
+    val parent_evidence = match container_runtime_observation_digest_v2(operation):
+        case Ok(value): value
+        case Err(reason): return exec_control_failed_v3(retained, reason)
+    val micros = time_sample_unix_micros_or_failure()
+    if micros <= 0 or micros / 1000 <= 0: return exec_control_failed_v3(retained, "container-exec-control-clock-unavailable")
+    val query: Dict<text, SdnValue> = {"kind": SdnValue.String("container-exec-control-query-v3"),
+        "installedQueryDigest": SdnValue.String(installed.query_digest), "parentQueryDigest": SdnValue.String(parent_query),
+        "parentRequestDigest": SdnValue.String(request.plan.request_digest), "parentNativeId": SdnValue.String(actual.native_id),
+        "scopeFence": SdnValue.String(actual.node_boot_id), "controlIdentity": SdnValue.String(installed.identity_digest)}
+    val query_digest = sha256_text(sdn_encode_canonical(SdnValue.Dict(query)) + "\n")
+    val evidence: Dict<text, SdnValue> = {"kind": SdnValue.String("container-exec-control-evidence-v3"),
+        "queryDigest": SdnValue.String(query_digest), "installedEvidenceDigest": SdnValue.String(installed.evidence_digest),
+        "parentEvidenceDigest": SdnValue.String(parent_evidence), "observedUnixMs": SdnValue.Int(micros / 1000)}
+    val value = ContainerExecControlObservationV3(backend: "linux-podman", scope: scope, parent_runtime: actual,
+        parent_request_digest: request.plan.request_digest, parent_provider_identity_digest: cached.provider_identity_digest,
+        exec_control_identity_digest: installed.identity_digest, installed_policy_digest: installed.policy_digest,
+        api_version: installed.api_version, observed_unix_ms: micros / 1000, query_digest: query_digest,
+        evidence_digest: sha256_text(sdn_encode_canonical(SdnValue.Dict(evidence)) + "\n"))
+    val checked = container_exec_control_observation_match_v3(value, request, expected_runtime, cached.provider_identity_digest, policy_digest)
+    if checked.is_err(): return exec_control_failed_v3(retained, checked.unwrap_err())
+    ContainerExecControlProbeTurnV3(owner: retained, observation: Some(value), cleanup: nil, error: "")
+
+pub fn simple_container_exec_control_probe_close_v3(cleanup: ContainerExecControlCleanupV3) -> ContainerExecControlCloseTurnV3:
+    match cleanup:
+        case ContainerExecControlCleanupV3.Linux(connection):
+            val closed = linux_oci_installed_probe_close_v3(connection)
+            val retained = match closed.connection:
+                case Some(value): Some(ContainerExecControlCleanupV3.Linux(value))
+                case None: nil
+            # Consumed owner with a nonempty error remains failure.
+            ContainerExecControlCloseTurnV3(cleanup: retained, closed: retained.is_none() and closed.error == "", error: closed.error)

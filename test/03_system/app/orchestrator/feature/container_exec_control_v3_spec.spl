@@ -1,0 +1,126 @@
+# @req ORCH-02 HOST-02
+# Constructed metadata integrity only; actual common preflight refusals below.
+# Execution NOT_RUN. No fake native-success probe/socket/parent response.
+use std.common.contracts.container.exec_control_v3.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.nogc_async_mut.container.exec_control_v3.*
+use std.nogc_async_mut.container.api_v2.*
+use std.nogc_async_mut.container.providers.linux.installed_policy_v3.*
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.*
+use test.fixtures.orchestration.simple_container_windows_adapter_fixture_v2.*
+
+fn control_parent_fixture_v3() -> RuntimeIdentityV1:
+    val request = linux_container_request_fixture_v2(linux_container_leaf_fixture_v2())
+    RuntimeIdentityV1(pod_uid: request.plan.workload_uid, attempt: request.plan.attempt,
+        provider_generation: request.plan.provider_generation, operation_id: request.plan.operation_id,
+        engine: "podman", native_id: "b".repeat(64), node_boot_id: container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap())
+
+fn control_metadata_fixture_v3() -> ContainerExecControlObservationV3:
+    val request = linux_container_request_fixture_v2(linux_container_leaf_fixture_v2())
+    ContainerExecControlObservationV3(backend: "linux-podman", scope: linux_container_scope_fixture_v2(),
+        parent_runtime: control_parent_fixture_v3(), parent_request_digest: request.plan.request_digest,
+        parent_provider_identity_digest: "a".repeat(64), exec_control_identity_digest: "b".repeat(64),
+        installed_policy_digest: "c".repeat(64), api_version: "5.2.5", observed_unix_ms: 100,
+        query_digest: "d".repeat(64), evidence_digest: "e".repeat(64))
+
+fn control_metadata_match_v3(value: ContainerExecControlObservationV3) -> bool:
+    container_exec_control_observation_match_v3(value,
+        linux_container_request_fixture_v2(linux_container_leaf_fixture_v2()), control_parent_fixture_v3(),
+        "a".repeat(64), "c".repeat(64)).is_ok()
+
+describe "finite exec control actual route and metadata integrity":
+    it "matches exact constructed parent and separate parent control policy identities only as data":
+        step("matches exact constructed parent and separate parent control policy identities only as data")
+        val value = control_metadata_fixture_v3()
+        expect(control_metadata_match_v3(value)).to_equal(true)
+        expect(value.parent_provider_identity_digest == value.exec_control_identity_digest).to_equal(false)
+        expect(value.parent_runtime.native_id).to_equal(control_parent_fixture_v3().native_id)
+        # This does NOT certify an actual peer, CLI, query or capability.
+        val windows_request = windows_adapter_request_fixture_v2()
+        val plan = windows_request.plan
+        var windows = value
+        windows.backend = "windows-docker-process"
+        windows.scope = windows_adapter_scope_fixture_v2()
+        windows.parent_request_digest = plan.request_digest
+        windows.api_version = "1.48"
+        windows.parent_runtime = RuntimeIdentityV1(pod_uid: plan.workload_uid, attempt: plan.attempt,
+            operation_id: plan.operation_id, provider_generation: plan.provider_generation, engine: "docker",
+            native_id: "b".repeat(64), node_boot_id: container_scope_fence_id_v2(windows.scope).unwrap())
+        expect(container_exec_control_observation_match_v3(windows, windows_request, windows.parent_runtime,
+            "a".repeat(64), "c".repeat(64)).is_ok()).to_equal(true)
+        windows.api_version = "5.2.5"
+        expect(container_exec_control_observation_match_v3(windows, windows_request, windows.parent_runtime,
+            "a".repeat(64), "c".repeat(64)).is_err()).to_equal(true)
+
+    it "refuses every changed parent runtime field and request digest":
+        step("refuses every changed parent runtime field and request digest")
+        val original = control_metadata_fixture_v3()
+        for field in ["uid", "attempt", "operation", "generation", "engine", "native", "fence", "request"]:
+            var value = original
+            if field == "uid": value.parent_runtime.pod_uid = "other-workload"
+            if field == "attempt": value.parent_runtime.attempt = value.parent_runtime.attempt + 1
+            if field == "operation": value.parent_runtime.operation_id = "other-operation"
+            if field == "generation": value.parent_runtime.provider_generation = value.parent_runtime.provider_generation + 1
+            if field == "engine": value.parent_runtime.engine = "docker"
+            if field == "native": value.parent_runtime.native_id = "f".repeat(64)
+            if field == "fence": value.parent_runtime.node_boot_id = "f".repeat(64)
+            if field == "request": value.parent_request_digest = "f".repeat(64)
+            expect(control_metadata_match_v3(value)).to_equal(false)
+
+    it "refuses wrong scope baseline policy API clock and malformed observation hashes":
+        step("refuses wrong scope baseline policy API clock and malformed observation hashes")
+        val original = control_metadata_fixture_v3()
+        for field in ["alias", "machine", "provider", "policy", "api", "clock", "query", "evidence", "control", "backend"]:
+            var value = original
+            if field == "alias": value.scope.physical_host_id = "other-alias"
+            if field == "machine": value.scope.native_machine_id = "other-machine"
+            if field == "provider": value.parent_provider_identity_digest = "f".repeat(64)
+            if field == "policy": value.installed_policy_digest = "f".repeat(64)
+            if field == "api": value.api_version = "unsupported"
+            if field == "clock": value.observed_unix_ms = 0
+            if field == "query": value.query_digest = "invalid"
+            if field == "evidence": value.evidence_digest = "invalid"
+            if field == "control": value.exec_control_identity_digest = "invalid"
+            if field == "backend": value.backend = "windows-docker-process"
+            expect(control_metadata_match_v3(value)).to_equal(false)
+
+    it "calls actual common probe and refuses invalid input before native or scripted execution":
+        step("calls actual common probe and refuses invalid input before native or scripted execution")
+        val owner = linux_container_owner_fixture_v2([], [])
+        val request = linux_container_request_fixture_v2(linux_container_leaf_fixture_v2())
+        val expected = control_parent_fixture_v3()
+        for timeout in [0, -1, 30001]:
+            val turn = simple_container_exec_control_probe_v3(owner, request, expected, "invalid policy", timeout)
+            expect(turn.error).to_equal("container-exec-control-input-bound")
+            expect(turn.observation == nil and turn.cleanup == nil).to_equal(true)
+            expect(simple_container_scope_v2(turn.owner)).to_equal(simple_container_scope_v2(owner))
+        val malformed = simple_container_exec_control_probe_v3(owner, request, expected, "invalid policy", 1000)
+        expect(malformed.error == "").to_equal(false)
+        expect(malformed.observation == nil and malformed.cleanup == nil).to_equal(true)
+        match malformed.owner:
+            case SimpleContainerOwnerV2.Linux(_, adapter): expect(adapter.provider.executor_call_count()).to_equal(0)
+            case _: fail("wrong actual retained backend")
+
+    it "refuses scripted native observation even with canonical installed policy and exact parent":
+        step("refuses scripted native observation even with canonical installed policy and exact parent")
+        val owner = linux_container_owner_fixture_v2([], [])
+        val request = linux_container_request_fixture_v2(linux_container_leaf_fixture_v2())
+        val policy = LinuxOciInstalledPolicyV3(cli_policy: linux_container_policy_fixture_v2(), socket_path: "/run/user/1000/podman/podman.sock",
+            expected_service_uid: 1000, api_version: "5.2.5")
+        val source = linux_oci_installed_policy_encode_v3(policy).unwrap()
+        val turn = simple_container_exec_control_probe_v3(owner, request, control_parent_fixture_v3(), source, 1000)
+        expect(turn.error).to_equal("container-exec-control-scripted-observer-forbidden")
+        expect(turn.observation == nil and turn.cleanup == nil).to_equal(true)
+        match turn.owner:
+            case SimpleContainerOwnerV2.Linux(_, adapter): expect(adapter.provider.executor_call_count()).to_equal(0)
+            case _: fail("wrong actual retained backend")
+
+    it "refuses actual Windows tagged owner without fabricating a Linux socket observation":
+        step("refuses actual Windows tagged owner without fabricating a Linux socket observation")
+        val owner = windows_adapter_owner_fixture_v2([], [])
+        val turn = simple_container_exec_control_probe_v3(owner, windows_adapter_request_fixture_v2(),
+            control_parent_fixture_v3(), "protected policy not read for unsupported backend", 1000)
+        expect(turn.error).to_equal("container-exec-control-windows-unsupported")
+        expect(turn.observation == nil and turn.cleanup == nil).to_equal(true)
+        expect(simple_container_scope_v2(turn.owner)).to_equal(simple_container_scope_v2(owner))

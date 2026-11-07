@@ -1,0 +1,177 @@
+# Explicit JSON interoperability with the pinned Podman 5.2.5 Engine API.
+# Pure codec only: no socket, journal, permission, retry or native capability.
+use std.common.contracts.container.exec_v3.{ContainerExecRequestV3, ContainerExecEnvironmentEntryV3,
+    container_exec_request_digest_v3}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.string_core.str_len
+use std.common.json.value.{JsonValue, json_value_serialize, json_parse_value_strict,
+    json_value_get, json_value_as_text, json_value_as_bool, json_value_keys}
+
+pub const LINUX_ENGINE_EXEC_API_V3 = "5.2.5"
+pub const LINUX_ENGINE_EXEC_BODY_LIMIT_V3: i64 = 1048576
+
+pub struct LinuxEngineExecHttpRequestV3:
+    action: text
+    method: text
+    path: text
+    content_type: text
+    body: text
+    request_digest: text
+    parent_native_id: text
+    native_exec_id: text
+
+pub struct LinuxEngineExecInspectV3:
+    native_exec_id: text
+    parent_native_id: text
+    running: bool
+    exit_code: i64
+    pid: i64
+    can_remove: bool
+
+fn engine_exec_request_error_v3(request: ContainerExecRequestV3) -> Result<text, text>:
+    val digest = container_exec_request_digest_v3(request)?
+    if request.parent.backend != "linux-podman" or request.parent_runtime.engine != "podman":
+        return Err("engine-exec-podman-required")
+    if request.terminal_mode != "none" or request.stdin_requested:
+        return Err("engine-exec-finite-noninteractive-required")
+    if request.timeout_ms > 60000: return Err("engine-exec-timeout-bound")
+    Ok(digest)
+
+pub fn linux_engine_exec_create_request_v3(request: ContainerExecRequestV3) -> Result<LinuxEngineExecHttpRequestV3, text>:
+    val digest = engine_exec_request_error_v3(request)?
+    var command: [JsonValue] = []
+    for argument in request.argv: command.push(JsonValue.Str(argument))
+    var environment: [JsonValue] = []
+    for entry in request.environment:
+        match entry:
+            case ContainerExecEnvironmentEntryV3.Literal(name, value):
+                environment.push(JsonValue.Str(name + "=" + value))
+            case ContainerExecEnvironmentEntryV3.SecretReference(_, _, _):
+                return Err("engine-exec-secret-resolution-required")
+    val body = json_value_serialize(JsonValue.Object(
+        ["Cmd", "Env", "User", "WorkingDir", "Privileged", "Tty", "AttachStdin", "AttachStdout", "AttachStderr"],
+        [JsonValue.Array(command), JsonValue.Array(environment), JsonValue.Str(request.selected_user),
+            JsonValue.Str(request.working_directory), JsonValue.Bool(false), JsonValue.Bool(false),
+            JsonValue.Bool(false), JsonValue.Bool(false), JsonValue.Bool(false)]))
+    if str_len(body) > LINUX_ENGINE_EXEC_BODY_LIMIT_V3: return Err("engine-exec-body-bound")
+    Ok(LinuxEngineExecHttpRequestV3(action: "create", method: "POST",
+        path: "/v5.2.5/libpod/containers/" + request.parent_runtime.native_id + "/exec",
+        content_type: "application/json", body: body, request_digest: digest,
+        parent_native_id: request.parent_runtime.native_id, native_exec_id: ""))
+
+pub fn linux_engine_exec_inspect_request_v3(request: ContainerExecRequestV3,
+        native_exec_id: text) -> Result<LinuxEngineExecHttpRequestV3, text>:
+    val digest = engine_exec_request_error_v3(request)?
+    if (not builder_digest_valid_v1(native_exec_id) or native_exec_id == request.parent_runtime.native_id):
+        return Err("engine-exec-native-id-invalid")
+    Ok(LinuxEngineExecHttpRequestV3(action: "inspect", method: "GET", path: "/v5.2.5/libpod/exec/" + native_exec_id + "/json",
+        content_type: "application/json", body: "", request_digest: digest,
+        parent_native_id: request.parent_runtime.native_id, native_exec_id: native_exec_id))
+
+pub fn linux_engine_exec_start_request_v3(request: ContainerExecRequestV3,
+        native_exec_id: text) -> Result<LinuxEngineExecHttpRequestV3, text>:
+    var result = linux_engine_exec_inspect_request_v3(request, native_exec_id)?
+    result.action = "start"
+    result.method = "POST"
+    result.path = "/v5.2.5/libpod/exec/" + native_exec_id + "/start"
+    result.body = "{\"Detach\":true,\"Tty\":false}"
+    Ok(result)
+
+fn engine_exec_json_v3(body: text) -> Result<JsonValue, text>:
+    if str_len(body) == 0 or str_len(body) > LINUX_ENGINE_EXEC_BODY_LIMIT_V3:
+        return Err("engine-exec-body-bound")
+    var quoted = false
+    var escaped = false
+    var depth = 0
+    var index = 0
+    while index < str_len(body):
+        val byte = body.byte_at(index)
+        if quoted:
+            if escaped: escaped = false
+            elif byte == 92: escaped = true
+            elif byte == 34: quoted = false
+        else:
+            if byte == 34: quoted = true
+            elif byte == 123 or byte == 91:
+                depth = depth + 1
+                if depth > 3: return Err("engine-exec-json-depth")
+            elif byte == 125 or byte == 93: depth = depth - 1
+        index = index + 1
+    json_parse_value_strict(body)
+
+fn engine_exec_known_v3(value: JsonValue, names: [text]) -> Result<bool, text>:
+    match value:
+        case JsonValue.Object(keys, _):
+            if keys.len() != names.len(): return Err("engine-exec-json-fields")
+            for key in keys:
+                if not names.contains(key): return Err("engine-exec-json-fields")
+        case _: return Err("engine-exec-json-object")
+    Ok(true)
+
+fn engine_exec_field_v3(value: JsonValue, key: text) -> Result<JsonValue, text>:
+    match json_value_get(value, key):
+        case Some(found): Ok(found)
+        case None: Err("engine-exec-json-field-missing")
+
+fn engine_exec_text_v3(value: JsonValue, key: text) -> Result<text, text>:
+    match json_value_as_text(engine_exec_field_v3(value, key)?):
+        case Some(found): Ok(found)
+        case None: Err("engine-exec-json-text")
+
+fn engine_exec_bool_v3(value: JsonValue, key: text) -> Result<bool, text>:
+    match json_value_as_bool(engine_exec_field_v3(value, key)?):
+        case Some(found): Ok(found)
+        case None: Err("engine-exec-json-bool")
+
+fn engine_exec_int_v3(value: JsonValue, key: text) -> Result<i64, text>:
+    match engine_exec_field_v3(value, key)?:
+        case JsonValue.Int(found): Ok(found)
+        case _: Err("engine-exec-json-integer")
+
+pub fn linux_engine_exec_create_id_v3(body: text, parent_native_id: text) -> Result<text, text>:
+    val value = engine_exec_json_v3(body)?
+    val known = engine_exec_known_v3(value, ["Id"])?
+    val native = engine_exec_text_v3(value, "Id")?
+    if (not builder_digest_valid_v1(parent_native_id) or not builder_digest_valid_v1(native) or native == parent_native_id):
+        return Err("engine-exec-native-id-invalid")
+    Ok(native)
+
+pub fn linux_engine_exec_inspect_decode_v3(body: text, request: ContainerExecRequestV3,
+        native_exec_id: text) -> Result<LinuxEngineExecInspectV3, text>:
+    val validated = linux_engine_exec_inspect_request_v3(request, native_exec_id)?
+    val value = engine_exec_json_v3(body)?
+    val known = engine_exec_known_v3(value, ["CanRemove", "ContainerID", "DetachKeys", "ExitCode", "ID",
+        "OpenStderr", "OpenStdin", "OpenStdout", "Running", "Pid", "ProcessConfig"])?
+    if (engine_exec_text_v3(value, "ID")? != native_exec_id or
+            engine_exec_text_v3(value, "ContainerID")? != request.parent_runtime.native_id):
+        return Err("engine-exec-parent-or-native-id-mismatch")
+    if (engine_exec_text_v3(value, "DetachKeys")? != "" or engine_exec_bool_v3(value, "OpenStdin")? or
+            engine_exec_bool_v3(value, "OpenStdout")? or engine_exec_bool_v3(value, "OpenStderr")?):
+        return Err("engine-exec-interactive-inspect-refused")
+    val process = engine_exec_field_v3(value, "ProcessConfig")?
+    val process_known = engine_exec_known_v3(process, ["arguments", "entrypoint", "privileged", "tty", "user"])?
+    if (engine_exec_bool_v3(process, "privileged")? or engine_exec_bool_v3(process, "tty")? or
+            engine_exec_text_v3(process, "entrypoint")? != request.argv[0] or
+            engine_exec_text_v3(process, "user")? != request.selected_user):
+        return Err("engine-exec-process-config-mismatch")
+    val arguments = engine_exec_field_v3(process, "arguments")?
+    match arguments:
+        case JsonValue.Null:
+            if request.argv.len() != 1: return Err("engine-exec-arguments-mismatch")
+        case JsonValue.Array(values):
+            if values.len() != request.argv.len() - 1: return Err("engine-exec-arguments-mismatch")
+            var index = 0
+            for argument in values:
+                match argument:
+                    case JsonValue.Str(text_value):
+                        if text_value != request.argv[index + 1]: return Err("engine-exec-arguments-mismatch")
+                    case _: return Err("engine-exec-arguments-type")
+                index = index + 1
+        case _: return Err("engine-exec-arguments-type")
+    val running = engine_exec_bool_v3(value, "Running")?
+    val pid = engine_exec_int_v3(value, "Pid")?
+    val exit_code = engine_exec_int_v3(value, "ExitCode")?
+    if pid < 0 or pid > 2147483647 or (running and pid == 0) or exit_code < -1 or exit_code > 255:
+        return Err("engine-exec-process-status-bound")
+    Ok(LinuxEngineExecInspectV3(native_exec_id: native_exec_id, parent_native_id: request.parent_runtime.native_id,
+        running: running, exit_code: exit_code, pid: pid, can_remove: engine_exec_bool_v3(value, "CanRemove")?))

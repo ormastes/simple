@@ -1,0 +1,60 @@
+# Read-only observation integrity. No decoder, signature authority, readiness,
+# exec birth or permission to replace parent/provider/control owners is implied.
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.build_manager.contracts.builder_digest_valid_v1
+
+pub struct ContainerExecControlObservationV3:
+    backend: text
+    scope: ContainerHostScopeV2
+    parent_runtime: RuntimeIdentityV1
+    parent_request_digest: text
+    parent_provider_identity_digest: text
+    exec_control_identity_digest: text
+    installed_policy_digest: text
+    api_version: text
+    observed_unix_ms: i64
+    query_digest: text
+    evidence_digest: text
+
+pub fn container_exec_control_parent_match_v3(request: ContainerExecutionRequestV2,
+        expected: RuntimeIdentityV1) -> Result<bool, text>:
+    val canonical = container_execution_request_encode_v2(request)?
+    val plan = request.plan
+    val scope = ContainerHostScopeV2(physical_host_id: plan.physical_host_id, service_scope_id: plan.service_scope_id,
+        boot_id: plan.boot_id, provider_generation: plan.provider_generation, native_machine_id: plan.native_machine_id,
+        continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
+    val engine = if plan.backend == "linux-podman": "podman" else: "docker"
+    if (expected.pod_uid != plan.workload_uid or expected.attempt != plan.attempt or expected.operation_id != plan.operation_id or
+            expected.provider_generation != plan.provider_generation or expected.engine != engine or
+            not builder_digest_valid_v1(expected.native_id) or expected.node_boot_id != container_scope_fence_id_v2(scope)?):
+        return Err("container-exec-control-parent-mismatch")
+    Ok(true)
+
+pub fn container_exec_control_observation_match_v3(value: ContainerExecControlObservationV3,
+        request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
+        expected_parent_provider_identity_digest: text, expected_installed_policy_digest: text) -> Result<bool, text>:
+    val parent_matched = container_exec_control_parent_match_v3(request, expected)?
+    # Metadata recognizes explicit platform profiles; this checker opens no owner.
+    val profile = ((value.backend == "linux-podman" and value.api_version == "5.2.5") or
+        (value.backend == "windows-docker-process" and value.api_version == "1.48"))
+    if (not profile or value.backend != request.plan.backend or
+            value.observed_unix_ms <= 0): return Err("container-exec-control-profile-clock-invalid")
+    for digest in [value.parent_request_digest, value.parent_provider_identity_digest, value.exec_control_identity_digest,
+            value.installed_policy_digest, value.query_digest, value.evidence_digest,
+            expected_parent_provider_identity_digest, expected_installed_policy_digest]:
+        if not builder_digest_valid_v1(digest): return Err("container-exec-control-digest-invalid")
+    val plan = request.plan
+    val scope = ContainerHostScopeV2(physical_host_id: plan.physical_host_id, service_scope_id: plan.service_scope_id,
+        boot_id: plan.boot_id, provider_generation: plan.provider_generation, native_machine_id: plan.native_machine_id,
+        continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
+    val actual = value.parent_runtime
+    if (container_scope_fence_id_v2(value.scope)? != container_scope_fence_id_v2(scope)? or
+            value.parent_request_digest != plan.request_digest or
+            value.parent_provider_identity_digest != expected_parent_provider_identity_digest or
+            value.installed_policy_digest != expected_installed_policy_digest or
+            actual.pod_uid != expected.pod_uid or actual.attempt != expected.attempt or actual.operation_id != expected.operation_id or
+            actual.provider_generation != expected.provider_generation or actual.engine != expected.engine or
+            actual.native_id != expected.native_id or actual.node_boot_id != expected.node_boot_id):
+        return Err("container-exec-control-observation-mismatch")
+    Ok(true)
