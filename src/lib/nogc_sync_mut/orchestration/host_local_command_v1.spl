@@ -7,6 +7,7 @@ use std.nogc_sync_mut.orchestration.host_authorized_execution_v2.*
 use std.nogc_sync_mut.orchestration.host_execution_envelope_v2.*
 use std.nogc_sync_mut.orchestration.host_execution_intent_v1.*
 use std.nogc_sync_mut.orchestration.host_execution_observation_v2.*
+use std.nogc_sync_mut.orchestration.host_parent_budget_v1.*
 use std.nogc_sync_mut.orchestration.host_enrollment_v1.host_enrollment_payload_bytes_v1
 use std.common.contracts.orchestration.host_capacity_v1.host_available_capacity_v1
 use std.common.contracts.orchestration.host_reservation_codec_v1.HostReservationIntentV1
@@ -177,6 +178,17 @@ fn host_local_run_owned_v1(action: text, local: HostLocalRootV1,
     val binding = local.binding
     val refresh = fn() -> HostReservationAuthorizationContextV1:
         host_local_refresh_context_v1(service_root, binding)
+    if action == "host-parent-budget":
+        val decoded = host_parent_budget_record_decode_v1(payload)
+        if decoded.is_err(): return host_local_finish_v1(local.capacity, action, operation_id,
+            host_local_error_v1(action, operation_id, decoded.unwrap_err(), false))
+        val stored = host_parent_budget_store_v1(local, decoded.unwrap(), host_local_context_v1(policy), refresh)
+        if stored.is_err(): return host_local_finish_v1(local.capacity, action, operation_id,
+            host_local_error_v1(action, operation_id, stored.unwrap_err(), true))
+        val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-parent-budget-reference"),
+            "parentOperationId": SdnValue.String(operation_id), "budgetDigest": SdnValue.String(stored.unwrap())}
+        return host_local_finish_v1(local.capacity, action, operation_id,
+            HostLocalCommandReplyV1(exit_code: 0, output: sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"))
     if action == "host-prepare":
         val prepared = host_authorized_prepare_reply_v1(local.capacity, payload,
             policy.snapshot, policy.snapshot.generation, host_local_context_v1(policy), refresh)
@@ -268,18 +280,23 @@ pub fn host_local_command_v1(args: [text]) -> HostLocalCommandReplyV1:
             "root": SdnValue.String(claim.root), "operationId": SdnValue.String(claim.operation_id),
             "claimDigest": SdnValue.String(claim.claim_digest), "bindingDigest": SdnValue.String(claim.binding_digest)}
         return HostLocalCommandReplyV1(exit_code: 0, output: sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
-    if action != "host-prepare" and action != "host-execute" and action != "host-inspect" and action != "host-status":
+    if (action != "host-prepare" and action != "host-execute" and action != "host-inspect" and
+            action != "host-status" and action != "host-parent-budget"):
         return host_local_error_v1(action, "", "host-local-action-invalid", false)
     val required = if action == "host-status": 2 else: 3
     if args.len() != required: return host_local_error_v1(action, "", "host-local-argument-count", false)
     var payload = ""
     var operation_id = if action == "host-inspect": args[2] else: ""
     var timeout_ms = 30000
-    if action == "host-prepare" or action == "host-execute":
+    if action == "host-prepare" or action == "host-execute" or action == "host-parent-budget":
         val bytes = file_read_regular_no_follow_bounded(args[2], 2097152)
         if bytes.is_err(): return host_local_error_v1(action, "", bytes.unwrap_err(), false)
         payload = bytes.unwrap()
-        if action == "host-prepare":
+        if action == "host-parent-budget":
+            val record = host_parent_budget_record_decode_v1(payload)
+            if record.is_err(): return host_local_error_v1(action, "", record.unwrap_err(), false)
+            operation_id = record.unwrap().proof.budget.parent_operation_id
+        elif action == "host-prepare":
             val request = host_prepare_request_decode_v1(payload)
             if request.is_err(): return host_local_error_v1(action, "", request.unwrap_err(), false)
             operation_id = request.unwrap().operation.id
