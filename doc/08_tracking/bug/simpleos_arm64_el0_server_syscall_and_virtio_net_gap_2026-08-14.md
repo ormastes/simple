@@ -133,3 +133,53 @@ This is bounded host transport-logic evidence, **not** live NIC, EL0 syscall,
 host-visible HTTP, firmware boot or durable database admission. The broader
 record stays open/in progress until its real target acceptance gates pass.
 
+
+## 2026-11-07 generic socket route + missing port-provenance owner
+
+Re-checked on `origin/release/1.0.0` (`0e56cc6bade`) by code analysis and a
+host spec; no QEMU or board run was available.
+
+- **Headline not reproduced on the ARM64 route as written.** ARM64 EL0
+  syscalls 70--76 dispatch at
+  `examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c:1474-1480`
+  through `arm64_dispatch_net_shim` to the direct NIC exports or to the
+  `spl_handle_net_*` shims (`src/os/kernel/abi/syscall_shim_net.spl`), which
+  use `syscall_net_portable_v1`. None of them reach `_forward_net_ipc`.
+- **Real defect on that same route.** The portable owner calls
+  `posix_bound_port_for_fd` / `posix_server_port_for_fd`
+  (`src/os/kernel/ipc/syscall_net_portable_v1.spl` 72/74/75/76 authority
+  checks). No ancestor of `release/1.0.0` or `main` defines them: they came in
+  as dangling references with the single-parent squash `e274cd33719`. So
+  listen/accept/send/recv through the shim failed at resolution
+  (`semantic: function posix_bound_port_for_fd not found`). Fixed in
+  `src/os/kernel/socket_compat.spl` with plain parallel-array registries (no
+  lock): bind records the bound port, accept records the listener's port on
+  the accepted fd, close clears both.
+- **Generic dispatcher fork.** `syscall_handler` (`src/os/kernel/ipc/syscall.spl`,
+  used by the x86_64 trap bridge fallthrough) sent 70--76 to `_handle_net_*` ->
+  `_forward_net_ipc`, behind wildcard `NetListen(0)`/`NetConnect(0)` checks.
+  That forwarder did not even type-check (`IpcMessage` has no `payload_addr`).
+  70--76 now go through the same portable owner (bind via
+  `portable_net_bind_args_checked_v1`), and the dead handlers and forwarder
+  were deleted. Real IPC forwarding to netstack port 2 already lives in
+  `socket_compat` (`_net_ipc_request`); a second forwarder was not added.
+- Syscall 77 (`_handle_net_if_config`) has no owner anywhere and still
+  returns ENOSYS honestly.
+- Spec `test/01_unit/os/kernel/ipc/generic_syscall_net_portable_route_spec.spl`:
+  base 0/5 passed (-1 under the exact grant, IpcMessage semantic error, -1 where
+  -14 expected); fix 5/5 passed. `portable_net_shim_capability_spec` 3/3.
+  `riscv64_syscall_net_parity_spec` went 5/9 -> 7/9; the 2 that still fail want
+  routing text in `src/os/kernel/arch/riscv64/syscall.spl` that is not there
+  (riscv lane, not touched here). `syscall_spec` and `syscall_shim_spec` die
+  with no exit status on this runner both before and after the change.
+- Not restored: `e274cd33719` also rewound `socket_compat`'s loopback
+  (`os.kernel.net.loopback_socket`) integration that the
+  `syscall_shim_net.spl` docstrings still describe. Separate finding for the
+  socket owner; not changed here.
+- On non-x86_64 targets `socket_ipc_send_bytes` fails closed (ENOSYS -> EIO), so
+  ARM64 sockets still work only through the direct VirtIO-net exports.
+
+**Still unverified:** no ARM64 QEMU real-firmware boot and no physical-board
+run (board-runnable.md). Acceptance criteria 3--5 (live EL0 SVC route, real
+VirtIO-net host-visible TCP, block-write persistence) stay open, and so does
+this record.

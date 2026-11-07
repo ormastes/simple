@@ -39,6 +39,13 @@ val _POLLERR: i16 = 8
 var g_ai_cli_socket_manifest: AiCliManifest? = nil
 var g_ai_cli_socket_bound_fds: [i32] = []
 var g_ai_cli_socket_bound_endpoints: [text] = []
+# Port provenance consumed by the portable syscall owner's exact authority
+# checks: the local port each bound descriptor holds, and the listener port
+# each accepted (server I/O) descriptor came from. Single kernel owner, no lock.
+var g_socket_bound_port_fds: [i32] = []
+var g_socket_bound_ports: [u16] = []
+var g_socket_server_io_fds: [i32] = []
+var g_socket_server_io_ports: [u16] = []
 
 extern fn unsafe_addr_of(ref: any) -> u64
 use os.kernel.boot.mmio.{mmio_write8, mmio_read8}
@@ -141,6 +148,7 @@ fn posix_bind(fd: i32, addr: SockaddrIn) -> i64:
     val reply = _net_ipc_request(NET_BIND, payload)
     if reply.status == 0:
         _record_bound_endpoint(fd, endpoint)
+        _record_bound_port(fd, addr.port)
     reply.status as i64
 
 fn posix_listen(fd: i32, backlog: i32) -> i64:
@@ -210,6 +218,9 @@ fn posix_accept(fd: i32) -> i64:
     if set_result < 0:
         _net_close_remote(reply.value_i32)
         return set_result as i64
+    match posix_bound_port_for_fd(fd):
+        Some(port): _record_server_io_port(accepted_fd, port)
+        nil: _clear_server_io_port(accepted_fd)
     accepted_fd as i64
 
 fn posix_send(fd: i32, data_addr: u64, data_len: u64, flags: i32) -> i64:
@@ -264,7 +275,63 @@ fn posix_close_socket(fd: i32) -> i64:
     val net_fd = _get_net_fd(fd)
     if net_fd >= 0:
         _net_close_remote(net_fd)
+    _clear_bound_port(fd)
+    _clear_server_io_port(fd)
     fd_close(fd) as i64
+
+fn posix_bound_port_for_fd(fd: i32) -> u16?:
+    """Local port a descriptor was successfully bound to, if any."""
+    _port_lookup(g_socket_bound_port_fds, g_socket_bound_ports, fd)
+
+fn posix_server_port_for_fd(fd: i32) -> u16?:
+    """Listener port an accepted descriptor was produced by, if any."""
+    _port_lookup(g_socket_server_io_fds, g_socket_server_io_ports, fd)
+
+fn _port_lookup(fds: [i32], ports: [u16], fd: i32) -> u16?:
+    var i = 0
+    while i < fds.len():
+        if fds[i] == fd:
+            return Some(ports[i])
+        i = i + 1
+    nil
+
+fn _record_bound_port(fd: i32, port: u16):
+    var i = 0
+    while i < g_socket_bound_port_fds.len():
+        if g_socket_bound_port_fds[i] == fd:
+            g_socket_bound_ports[i] = port
+            return
+        i = i + 1
+    g_socket_bound_port_fds.push(fd)
+    g_socket_bound_ports.push(port)
+
+fn _clear_bound_port(fd: i32):
+    var i = 0
+    while i < g_socket_bound_port_fds.len():
+        if g_socket_bound_port_fds[i] == fd:
+            g_socket_bound_port_fds.remove(i)
+            g_socket_bound_ports.remove(i)
+            return
+        i = i + 1
+
+fn _record_server_io_port(fd: i32, port: u16):
+    var i = 0
+    while i < g_socket_server_io_fds.len():
+        if g_socket_server_io_fds[i] == fd:
+            g_socket_server_io_ports[i] = port
+            return
+        i = i + 1
+    g_socket_server_io_fds.push(fd)
+    g_socket_server_io_ports.push(port)
+
+fn _clear_server_io_port(fd: i32):
+    var i = 0
+    while i < g_socket_server_io_fds.len():
+        if g_socket_server_io_fds[i] == fd:
+            g_socket_server_io_fds.remove(i)
+            g_socket_server_io_ports.remove(i)
+            return
+        i = i + 1
 
 fn _copy_user_bytes(data_addr: u64, data_len: u64) -> [u8]:
     var data: [u8] = []
