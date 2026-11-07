@@ -16,7 +16,7 @@ use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.LinuxOciRuntimeP
 use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_digest_v1}
 use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_decode_v1
 use std.nogc_async_mut.container.providers.linux.engine_policy_v1.{LinuxOciEngineObservationV1,
-    linux_oci_engine_policy_decode_v1}
+    linux_oci_engine_policy_decode_v1, linux_oci_engine_policy_digest_v1}
 use std.nogc_async_mut.container.providers.linux.engine_observer_v1.linux_oci_engine_observe_v1
 use std.nogc_sync_mut.sffi.linux_uname_v1.linux_native_uname_architecture_v1
 use std.sffi.platform.platform_name_raw
@@ -33,6 +33,11 @@ use std.nogc_sync_mut.io.process_ops.PipedProcessOwnedSpawnV2
 use std.common.contracts.container.output_capabilities_v2.ContainerOutputCapabilitiesV2
 use std.nogc_sync_mut.io.linux_process_owner.linux_process_stream_template_admit_v3
 use std.nogc_async_mut.container.providers.linux.output_session_v2.linux_oci_output_command_v2
+use std.common.contracts.container.exec_installed_v3.{ContainerExecInstalledV3, container_exec_installed_match_v3}
+use std.common.contracts.container.exec_admission_v3.ContainerExecAdmissionV3
+use std.common.contracts.container.exec_control_v3.ContainerExecControlObservationV3
+use std.nogc_async_mut.container.providers.linux.installed_policy_v3.linux_oci_installed_policy_decode_v3
+use std.nogc_async_mut.container.providers.linux.engine_exec_owner_v3.{LinuxOciEngineExecOwnerV3, LinuxOciEngineExecTurnV3}
 
 pub const LINUX_SIMPLE_CONTAINER_BACKEND_V2 = "linux-podman"
 
@@ -174,6 +179,42 @@ impl LinuxSimpleContainerAdapterV2:
         val valid = self.provider.validate(checked.0)
         if not valid.accepted: return Err(valid.reason)
         Ok(true)
+
+    fn _exec_configuration_v3(parent: ContainerExecutionRequestV2, installed: ContainerExecInstalledV3,
+            admission: ContainerExecAdmissionV3) -> Result<bool, text>:
+        if self.provider.scripted: return Err("container-exec-scripted-owner-unsupported")
+        val checked = self._checked_request_v2(parent)?
+        val matched = container_exec_installed_match_v3(installed, admission)?
+        if (self.provider.engine != "podman" or not self.provider.engine_policy.? or
+                not self.provider.engine_baseline.?): return Err("container-exec-managed-podman-required")
+        if (container_host_scope_bytes_v2(installed.intent.scope)? != container_host_scope_bytes_v2(self.scope)? or
+                installed.intent.provider_identity_digest != self._observed_host.provider_identity_digest):
+            return Err("container-exec-installed-owner-mismatch")
+        val policy = linux_oci_installed_policy_decode_v3(installed.intent.control_policy_bytes)?
+        if linux_oci_engine_policy_digest_v1(policy.cli_policy)? != linux_oci_engine_policy_digest_v1(self.provider.engine_policy.unwrap())?:
+            return Err("container-exec-installed-cli-policy-mismatch")
+        Ok(true)
+
+    # Only the common API's trusted Host composition calls these ports. The
+    # journal root is retained factory configuration, never exec request data.
+    pub me exec_begin_v3(parent: ContainerExecutionRequestV2, installed: ContainerExecInstalledV3,
+            admission: ContainerExecAdmissionV3, observed: ContainerExecControlObservationV3,
+            action: text) -> LinuxOciEngineExecTurnV3:
+        match self._exec_configuration_v3(parent, installed, admission):
+            case Err(reason):
+                return LinuxOciEngineExecTurnV3(owner: nil, birth: nil, inspection: nil, phase: "rejected", error: reason)
+            case Ok(_): pass
+        LinuxOciEngineExecOwnerV3.begin(self.provider.state_dir, parent, installed, admission, observed, action)
+
+    pub me exec_inspect_v3(parent: ContainerExecutionRequestV2, installed: ContainerExecInstalledV3,
+            admission: ContainerExecAdmissionV3) -> LinuxOciEngineExecTurnV3:
+        match self._exec_configuration_v3(parent, installed, admission):
+            case Err(reason):
+                return LinuxOciEngineExecTurnV3(owner: nil, birth: nil, inspection: nil, phase: "rejected", error: reason)
+            case Ok(_): pass
+        # Known-birth recovery may outlive the launch grant or parent process.
+        # The leaf still checks retained identity and fresh installed service.
+        LinuxOciEngineExecOwnerV3.inspect(self.provider.state_dir, parent, installed, admission)
 
     pub fn action_project(request: ContainerExecutionRequestV2) -> Result<ContainerActionProjectionV2, text>:
         val checked = self._checked_request_v2(request)?

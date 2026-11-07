@@ -1,0 +1,541 @@
+# Serialized parent-owned exec continuation. Workers never own provider/WAL.
+use std.common.contracts.container.exec_v3.*
+use std.common.contracts.container.exec_admission_v3.*
+use std.common.contracts.container.effect_deadline_v1.container_effect_remaining_ms_v1
+use std.common.contracts.container.exec_installed_v3.*
+use std.common.contracts.container.exec_control_v3.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.orchestration.host_runtime_exec_v3.*
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.{sdn_encode_canonical, sdn_encoded_text_size_v1}
+use std.nogc_sync_mut.io.local_ipc_v1.*
+use std.nogc_sync_mut.io.file_lock_owned_v2.*
+use std.nogc_sync_mut.io.retained_file.retained_directory_open_trusted_v1
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, directory_fsync}
+use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure, time_sample_monotonic_nanos_or_failure}
+use std.nogc_async_mut.container.providers.linux.installed_policy_v3.*
+use std.nogc_async_mut.container.providers.linux.installed_observer_v3.*
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.LinuxOciEngineObservationV1
+use std.nogc_async_mut.container.providers.linux.engine_observer_v1.linux_oci_engine_observe_v1
+use std.nogc_async_mut.container.providers.linux.engine_exec_codec_v3.*
+use std.nogc_async_mut.container.providers.linux.engine_exec_http_v3.*
+use std.nogc_async_mut.container.providers.linux.engine_exec_record_v3.*
+
+fn exec_unix_ms_v3() -> i64:
+    val micros = time_sample_unix_micros_or_failure()
+    if micros <= 0: return -1
+    micros / 1000
+
+fn exec_monotonic_ms_v3() -> i64:
+    val nanos = time_sample_monotonic_nanos_or_failure()
+    if nanos <= 0: return -1
+    nanos / 1000000
+
+pub fn linux_engine_exec_step_deadline_v3(now: i64, whole: i64, budget: i64) -> Result<i64, text>:
+    if budget < 1 or budget > 25: return Err("engine-exec-step-budget")
+    if now <= 0 or now >= whole or now > 9223372036854775807 - budget: return Err("engine-exec-transport-deadline")
+    Ok(if now + budget < whole: now + budget else: whole)
+
+pub fn linux_engine_exec_write_progress_v3(offset: i64, accepted: i64, total: i64,
+        maximum: i64) -> Result<(i64, text), text>:
+    if (offset < 0 or total < offset or maximum <= 0 or maximum > total - offset or
+            accepted < 0 or accepted > maximum): return Err("engine-exec-write-contract")
+    val next = offset + accepted
+    Ok((next, if next == total: "read" else: "write"))
+
+pub fn linux_engine_exec_step_pending_v3(stage: text, error: text, now: i64,
+        step_deadline: i64, whole_deadline: i64) -> bool:
+    (error == "local_unix_timeout" and ["write", "read"].contains(stage) and
+        now > 0 and now >= step_deadline and now < whole_deadline)
+
+pub struct LinuxOciEngineExecTurnV3:
+    owner: LinuxOciEngineExecOwnerV3?
+    birth: ContainerExecBirthReceiptV3?
+    inspection: LinuxEngineExecInspectV3?
+    phase: text
+    error: text
+    cleanup_complete: bool = false
+
+fn engine_exec_rejected_v3(reason: text) -> LinuxOciEngineExecTurnV3:
+    LinuxOciEngineExecTurnV3(owner: nil, birth: nil, inspection: nil, phase: "rejected", error: reason)
+
+pub class LinuxOciEngineExecOwnerV3:
+    root: text
+    path: text
+    payload: text
+    row: LinuxEngineExecRecordV3
+    policy: LinuxOciInstalledPolicyV3
+    admission: ContainerExecAdmissionV3
+    cli: LinuxOciEngineObservationV1
+    action: text
+    whole_deadline: i64
+    connection: LocalUnixConnectionV1? = nil
+    lock_cleanup: FileLockOwnerV2? = nil
+    session_lock: FileLockOwnerV2? = nil
+    row_attached: bool = false
+    revision_proven: bool = false
+    attempted_row: LinuxEngineExecRecordV3? = nil
+    service_peer: LocalUnixPeerV1? = nil
+    peer: LocalUnixPeerV1? = nil
+    exchange: text = "info"
+    stage: text = "connect"
+    outgoing: [u8] = []
+    offset: i64 = 0
+    wire: [u8] = []
+    candidate_birth: ContainerExecBirthReceiptV3? = nil
+    inspection: LinuxEngineExecInspectV3? = nil
+    error: text = ""
+    executor_calls: i64 = 0
+    stale_view: bool = false
+    cleanup_requested: bool = false
+
+impl LinuxOciEngineExecOwnerV3:
+    fn _turn() -> LinuxOciEngineExecTurnV3:
+        val local_closed = not self.connection.? and not self.lock_cleanup.? and not self.attempted_row.? and not self.session_lock.?
+        val complete = self.stage == "done" and self.error == "" and local_closed and not self.cleanup_requested
+        LinuxOciEngineExecTurnV3(owner: Some(self), birth: if complete: self.candidate_birth else: nil,
+            inspection: if complete and self.action == "inspect": self.inspection else: nil,
+            phase: if self.stale_view: "stale-view" else: if self.cleanup_requested and local_closed: "cleanup-complete" else:
+                if self.error != "": "cleanup-required" else: if complete: "complete" else: "pending", error: self.error,
+            cleanup_complete: self.cleanup_requested and local_closed and not self.stale_view)
+
+    me _release() -> LinuxOciEngineExecTurnV3:
+        if self.lock_cleanup.?:
+            val release = file_lock_release_owned_v2(self.lock_cleanup.unwrap())
+            self.lock_cleanup = release.owner
+            if release.state == FileLockReleaseStateV2.Stale: self.stale_view = true
+            if release.error != "":
+                self.error = if self.error == "": release.error else: self.error + "; " + release.error
+                if not self.stale_view: self.stage = if self.connection.?: "cleanup" else: "failed"
+        if (not self.stale_view and not self.lock_cleanup.? and not self.connection.? and not self.attempted_row.? and
+                (["done", "failed"].contains(self.stage) or self.cleanup_requested) and
+                (self.revision_proven or not self.row_attached)):
+            self._release_session()
+        self._turn()
+
+    me _release_session():
+        if self.stale_view or not self.session_lock.?: return
+        if file_lock_owner_state_v2(self.session_lock.unwrap()) == "unknown":
+            if self.error == "": self.error = "engine-exec-session-lock-unknown"
+            return
+        val released = file_lock_release_owned_v2(self.session_lock.unwrap())
+        self.session_lock = released.owner
+        if released.error != "":
+            self.error = if self.error == "": released.error else: self.error + "; " + released.error
+
+    me _fail(reason: text):
+        self.error = reason
+        self.stage = if self.connection.?: "cleanup" else: "failed"
+
+    me _persist(next: LinuxEngineExecRecordV3) -> bool:
+        match linux_engine_exec_record_store_v3(self.root, self.path, Some(self.row), next):
+            case Ok(_):
+                self.row = next
+                true
+            case Err(reason):
+                self.error = reason
+                self.attempted_row = Some(next)
+                self.stage = if self.connection.?: "cleanup" else: "failed"
+                false
+
+    pub static fn begin(state_root: text, parent: ContainerExecutionRequestV2, installed: ContainerExecInstalledV3,
+            admission: ContainerExecAdmissionV3, observed: ContainerExecControlObservationV3, action: text) -> LinuxOciEngineExecTurnV3:
+        if not ["create", "start"].contains(action): return engine_exec_rejected_v3("engine-exec-action")
+        LinuxOciEngineExecOwnerV3._begin(state_root, parent, installed, admission, Some(observed), action)
+
+    pub static fn inspect(state_root: text, parent: ContainerExecutionRequestV2, installed: ContainerExecInstalledV3,
+            admission: ContainerExecAdmissionV3) -> LinuxOciEngineExecTurnV3:
+        LinuxOciEngineExecOwnerV3._begin(state_root, parent, installed, admission, nil, "inspect")
+
+    static fn _begin(state_root: text, parent: ContainerExecutionRequestV2, installed: ContainerExecInstalledV3,
+            admission: ContainerExecAdmissionV3, observed: ContainerExecControlObservationV3?, action: text) -> LinuxOciEngineExecTurnV3:
+        if not ["create", "start", "inspect"].contains(action): return engine_exec_rejected_v3("engine-exec-action")
+        val installed_match = container_exec_installed_match_v3(installed, admission)
+        if installed_match.is_err(): return engine_exec_rejected_v3(installed_match.unwrap_err())
+        val policy = match linux_oci_installed_policy_decode_v3(installed.intent.control_policy_bytes):
+            case Ok(value): value
+            case Err(reason): return engine_exec_rejected_v3(reason)
+        val request = admission.request
+        val parent_bytes = container_execution_plan_bytes_v2(parent.plan)
+        val expected_parent = container_execution_plan_bytes_v2(request.parent)
+        if parent_bytes.is_err() or expected_parent.is_err():
+            return engine_exec_rejected_v3("engine-exec-original-parent-mismatch")
+        if parent_bytes.unwrap() != expected_parent.unwrap():
+            return engine_exec_rejected_v3("engine-exec-original-parent-mismatch")
+        val parent_match = container_exec_control_parent_match_v3(parent, request.parent_runtime)
+        if parent_match.is_err(): return engine_exec_rejected_v3(parent_match.unwrap_err())
+        if observed.?:
+            val observation = observed.unwrap()
+            val observed_match = container_exec_control_observation_match_v3(observation, parent, request.parent_runtime,
+                installed.intent.provider_identity_digest, installed.intent.control_policy_digest)
+            if observed_match.is_err(): return engine_exec_rejected_v3(observed_match.unwrap_err())
+            if observation.exec_control_identity_digest != admission.provider_identity_digest: return engine_exec_rejected_v3("engine-exec-control-pin-mismatch")
+        elif action != "inspect": return engine_exec_rejected_v3("engine-exec-control-observation-required")
+        val matched = if action == "inspect":
+            container_exec_admission_binding_match_v3(admission, request, admission.provider_identity_digest)
+        else:
+            match container_exec_admission_match_v3(admission, request, admission.provider_identity_digest, exec_unix_ms_v3()):
+                case Ok(_): Ok(true)
+                case Err(reason): Err(reason)
+        if matched.is_err(): return engine_exec_rejected_v3(matched.unwrap_err())
+        if request.timeout_ms > admission.operation.duration_ms: return engine_exec_rejected_v3("engine-exec-duration-mismatch")
+        val create = match linux_engine_exec_create_request_v3(request):
+            case Ok(value): value
+            case Err(reason): return engine_exec_rejected_v3(reason)
+        val payload_fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-engine-exec-payload-v3"),
+            "request": SdnValue.String(container_exec_request_encode_v3(request).unwrap()),
+            "intent": SdnValue.String(host_runtime_exec_intent_encode_v3(admission.intent).unwrap()),
+            "parent": SdnValue.String(container_execution_request_encode_v2(parent).unwrap()),
+            "operation": SdnValue.String(distributed_encode_operation_v2(admission.operation).unwrap()),
+            "installation": SdnValue.String(installed.artifact_digest)}
+        var payload_size: i64 = 3
+        for key in payload_fields.keys():
+            match payload_fields[key]:
+                case SdnValue.String(value): payload_size = payload_size + str_len(key) + 4 + sdn_encoded_text_size_v1(value)
+                case _: return engine_exec_rejected_v3("engine-exec-payload-type")
+            if payload_size > 16777216: return engine_exec_rejected_v3("engine-exec-payload-bound")
+        val payload = sdn_encode_canonical(SdnValue.Dict(payload_fields)) + "\n"
+        if str_len(payload) > 16777216: return engine_exec_rejected_v3("engine-exec-payload-bound")
+        val key = sha256_text(request.parent_runtime.node_boot_id + ":" + request.operation_id)
+        val path = state_root + "/runtime-exec-" + key
+        val initial = LinuxEngineExecRecordV3(payload_digest: sha256_text(payload), request_digest: create.request_digest,
+            intent_digest: host_runtime_exec_intent_digest_v3(admission.intent).unwrap(), control_digest: admission.provider_identity_digest,
+            revision: 1, phase: "prepared", io_armed: false, create_armed: false, start_armed: false, native_exec_id: "", offset: 0)
+        # Real CLI observation remains synchronous and is not a hard wall-time
+        # guarantee; the common parent must call begin outside its hot handler.
+        val cli = match linux_oci_engine_observe_v1(policy.cli_policy, if request.timeout_ms < 30000: request.timeout_ms else: 30000):
+            case Ok(value): value
+            case Err(reason): return engine_exec_rejected_v3(reason)
+        if cli.identity_digest != installed.intent.provider_identity_digest: return engine_exec_rejected_v3("engine-exec-cli-baseline-mismatch")
+        val now = exec_monotonic_ms_v3()
+        if now <= 0 or now > 9223372036854775807 - request.timeout_ms: return engine_exec_rejected_v3("engine-exec-transport-clock")
+        var owner = LinuxOciEngineExecOwnerV3(root: state_root, path: path, payload: payload, row: initial,
+            policy: policy, admission: admission, cli: cli, action: action, whole_deadline: now + request.timeout_ms,
+            outgoing: linux_engine_info_http_request_v3())
+        var directory = match retained_directory_open_trusted_v1(state_root):
+            case Ok(value): value
+            case Err(reason): return engine_exec_rejected_v3(reason)
+        if not directory.close():
+            return engine_exec_rejected_v3("engine-exec-state-directory-close-consumed-error")
+        match file_lock_open_owned_v2(path + ".session.lock", 0):
+            case FileLockOpenV2.Rejected(reason): return engine_exec_rejected_v3(reason)
+            case FileLockOpenV2.CleanupRequired(claim, reason):
+                owner.session_lock = Some(claim)
+                owner.error = reason
+                owner.stage = "failed"
+                return owner._turn()
+            case FileLockOpenV2.Ready(claim): owner.session_lock = Some(claim)
+        match file_lock_open_owned_v2(path + ".lock", 0):
+            case FileLockOpenV2.Rejected(reason):
+                owner.error = reason
+                owner.stage = "failed"
+                return owner._release()
+            case FileLockOpenV2.CleanupRequired(lock, reason):
+                owner.lock_cleanup = Some(lock)
+                owner.error = reason
+                owner.stage = "failed"
+                return owner._turn()
+            case FileLockOpenV2.Ready(lock): owner.lock_cleanup = Some(lock)
+        val stored = linux_engine_exec_payload_store_v3(state_root, path + ".payload", payload)
+        if stored.is_err():
+            owner.error = stored.unwrap_err()
+            owner.stage = "failed"
+            return owner._release()
+        match linux_engine_exec_record_read_v3(path):
+            case Ok(retained):
+                var row = retained
+                if (row.payload_digest != initial.payload_digest or row.request_digest != initial.request_digest or
+                        row.intent_digest != initial.intent_digest or row.control_digest != initial.control_digest):
+                    owner.error = "engine-exec-original-intent-mismatch"
+                if owner.error == "" and action == "inspect" and row.native_exec_id == "" and row.create_armed:
+                    match linux_engine_exec_recover_birth_v3(state_root, path, row, request, installed.intent.control_policy_digest):
+                        case Ok(repaired): row = repaired
+                        case Err(reason): owner.error = reason
+                if owner.error == "" and action == "create":
+                    owner.error = "engine-exec-create-replay-forbidden"
+                elif owner.error == "" and action != "create" and row.native_exec_id == "": owner.error = "engine-exec-native-birth-required"
+                elif owner.error == "" and action == "start" and (row.start_armed or row.io_armed): owner.error = "engine-exec-start-reconcile-only"
+                elif owner.error == "" and action == "start" and row.phase != "known-created": owner.error = "engine-exec-start-reconcile-only"
+                owner.row = row
+                if row.payload_digest == initial.payload_digest:
+                    owner.row_attached = true
+                    owner.revision_proven = true
+                if owner.error == "" and row.native_exec_id != "":
+                    val birth_source = file_read_regular_no_follow_bounded(path + ".birth", 16384)
+                    if birth_source.is_err(): owner.error = birth_source.unwrap_err()
+                    else:
+                        val birth = container_exec_birth_decode_v3(birth_source.unwrap())
+                        if birth.is_err(): owner.error = birth.unwrap_err()
+                        else:
+                            val birth_match = container_exec_birth_match_v3(birth.unwrap(), request)
+                            val query = linux_engine_exec_query_digest_v3(create, installed.intent.control_policy_digest)
+                            if (birth_match.is_err() or birth.unwrap().native_exec_id != row.native_exec_id or
+                                    birth.unwrap().provider_identity_digest != row.control_digest or query.is_err() or
+                                    birth.unwrap().query_digest != query.unwrap()): owner.error = "engine-exec-birth-binding-mismatch"
+                            else: owner.candidate_birth = Some(birth.unwrap())
+            case Err(reason):
+                if reason != "engine-exec-record-absent" or action != "create": owner.error = reason
+                else:
+                    val published = linux_engine_exec_record_store_v3(state_root, path, nil, initial)
+                    if published.is_err(): owner.error = published.unwrap_err()
+                    else:
+                        owner.row_attached = true
+                        owner.revision_proven = true
+        if owner.error != "": owner.stage = "failed"
+        owner._release()
+
+    fn _same_peer(left: LocalUnixPeerV1, right: LocalUnixPeerV1) -> bool:
+        (left.uid == right.uid and left.gid == right.gid and left.pid == right.pid and
+            left.socket_device == right.socket_device and left.socket_inode == right.socket_inode)
+
+    me _next_exchange(kind: text) -> bool:
+        val request = self.admission.request
+        val built = if kind == "create": linux_engine_exec_create_request_v3(request) else:
+            if kind == "start": linux_engine_exec_start_request_v3(request, self.row.native_exec_id) else:
+                linux_engine_exec_inspect_request_v3(request, self.row.native_exec_id)
+        if built.is_err():
+            self._fail(built.unwrap_err())
+            return false
+        val wire = linux_engine_exec_http_encode_v3(built.unwrap())
+        if wire.is_err():
+            self._fail(wire.unwrap_err())
+            return false
+        self.exchange = kind
+        if kind == "start": self.inspection = nil
+        self.outgoing = wire.unwrap()
+        self.offset = 0
+        self.wire = []
+        self.peer = nil
+        self.stage = "connect"
+        true
+
+    me _response() -> bool:
+        if self.exchange == "info": return true
+        val kind = if self.exchange == "verify": "inspect" else: self.exchange
+        val response = linux_engine_exec_http_decode_v3(kind, self.wire)
+        if response.is_err():
+            self._fail(response.unwrap_err())
+            return false
+        if self.exchange == "create":
+            val native = linux_engine_exec_create_id_v3(response.unwrap().body, self.admission.request.parent_runtime.native_id)
+            if native.is_err():
+                self._fail(native.unwrap_err())
+                return false
+            val query = linux_engine_exec_query_digest_v3(linux_engine_exec_create_request_v3(self.admission.request).unwrap(),
+                linux_oci_installed_policy_digest_v3(self.policy).unwrap())
+            if query.is_err():
+                self._fail(query.unwrap_err())
+                return false
+            val evidence = linux_engine_exec_response_evidence_digest_v3("create", self.wire, query.unwrap())
+            if evidence.is_err():
+                self._fail(evidence.unwrap_err())
+                return false
+            val birth = ContainerExecBirthReceiptV3(request_digest: self.row.request_digest,
+                parent_runtime: self.admission.request.parent_runtime, native_exec_id: native.unwrap(),
+                provider_identity_digest: self.row.control_digest, created_unix_ms: exec_unix_ms_v3(),
+                query_digest: query.unwrap(), evidence_digest: evidence.unwrap(), proof_kind: "exact-native-exec-birth-v3")
+            self.candidate_birth = Some(birth)
+            val encoded = container_exec_birth_encode_v3(birth)
+            if encoded.is_err():
+                self._fail(encoded.unwrap_err())
+                return false
+            val published = linux_engine_exec_payload_store_v3(self.root, self.path + ".birth", encoded.unwrap())
+            if published.is_err():
+                self._fail(published.unwrap_err())
+                return false
+            self.row.native_exec_id = native.unwrap()
+            self.row.phase = "known-created"
+        elif self.exchange == "inspect" or self.exchange == "verify":
+            val inspected = linux_engine_exec_inspect_decode_v3(response.unwrap().body, self.admission.request, self.row.native_exec_id)
+            if inspected.is_err():
+                self._fail(inspected.unwrap_err())
+                return false
+            self.inspection = Some(inspected.unwrap())
+        true
+
+    # Local transport abandonment only. Native exec/container and their budget
+    # remain governed by the retained journal and separate control authority.
+    pub me cleanup() -> LinuxOciEngineExecTurnV3:
+        self.cleanup_requested = true
+        if self.stale_view: return self._turn()
+        if not self.row_attached and not self.connection.? and not self.lock_cleanup.? and not self.attempted_row.?:
+            self.stage = "failed"
+            self._release_session()
+            return self._turn()
+        if not self.connection.? and not self.lock_cleanup.? and not self.attempted_row.? and not self.session_lock.?:
+            self.stage = "failed"
+            return self._turn()
+        self.stage = "cleanup"
+        self.step(25)
+
+    pub me step(step_budget_ms: i64) -> LinuxOciEngineExecTurnV3:
+        if self.stale_view: return self._turn()
+        if self.cleanup_requested:
+            if not self.connection.? and not self.lock_cleanup.? and not self.attempted_row.? and not self.session_lock.?:
+                self.stage = "failed"
+                return self._turn()
+            self.stage = "cleanup"
+        if step_budget_ms < 1 or step_budget_ms > 25:
+            self._fail("engine-exec-step-budget")
+            return self._turn()
+        if self.lock_cleanup.?:
+            if file_lock_owner_state_v2(self.lock_cleanup.unwrap()) == "unknown": return self._turn()
+            return self._release()
+        if ((self.stage == "failed" and not self.attempted_row.?) or self.stage == "done"): return self._turn()
+        if not self.session_lock.?:
+            self._fail("engine-exec-session-claim-required")
+            return self._turn()
+        val session_state = file_lock_owner_state_v2(self.session_lock.unwrap())
+        if session_state == "unknown":
+            if self.error == "": self.error = "engine-exec-session-lock-unknown"
+            return self._turn()
+        if session_state != "held" and not (self.cleanup_requested and not self.connection.? and session_state == "retained"):
+            self._fail("engine-exec-session-claim-required")
+            return self._turn()
+        self.revision_proven = false
+        val now = exec_monotonic_ms_v3()
+        var step_deadline = linux_engine_exec_step_deadline_v3(now, self.whole_deadline, step_budget_ms)
+        if self.stage != "cleanup" and not self.attempted_row.? and step_deadline.is_err():
+            self._fail(step_deadline.unwrap_err())
+            return self._turn()
+        match file_lock_open_owned_v2(self.path + ".lock", 0):
+            case FileLockOpenV2.Rejected(reason):
+                self._fail(reason)
+                return self._turn()
+            case FileLockOpenV2.CleanupRequired(lock, reason):
+                self.lock_cleanup = Some(lock)
+                self.error = reason
+                return self._turn()
+            case FileLockOpenV2.Ready(lock): self.lock_cleanup = Some(lock)
+        val actual = linux_engine_exec_record_read_v3(self.path)
+        val qualified = if actual.is_err(): Err(actual.unwrap_err()) else:
+            linux_engine_exec_cleanup_record_v3(self.row, self.attempted_row, actual.unwrap())
+        if qualified.is_err():
+            self.error = "engine-exec-record-stale-revision"
+            self.stale_view = true
+            self.stage = "failed"
+            return self._release()
+        if self.attempted_row.?:
+            if not directory_fsync(self.root): return self._release()
+            self.row = qualified.unwrap()
+            self.attempted_row = nil
+            self.revision_proven = true
+            if not self.connection.?:
+                self.stage = "failed"
+                return self._release()
+            self.stage = "cleanup"
+        self.revision_proven = true
+        if self.stage == "cleanup" and not self.connection.?:
+            self.stage = "failed"
+            return self._release()
+        val old = self.row
+        var armed = old
+        armed.revision = old.revision + 1
+        armed.io_armed = true
+        if (armed.phase == "prepared" or (armed.phase == "quarantined" and not armed.create_armed and armed.native_exec_id == "")):
+            armed.phase = "probing"
+        armed.offset = self.offset
+        if self.stage == "write" and ["create", "start"].contains(self.exchange):
+            val grant = container_effect_remaining_ms_v1(self.admission.deadline, old.request_digest,
+                self.admission.request.operation_id, "exec", exec_unix_ms_v3())
+            if grant.is_err():
+                self._fail(grant.unwrap_err())
+                return self._release()
+            if self.exchange == "create":
+                armed.create_armed = true
+                armed.phase = "creating"
+            else:
+                armed.start_armed = true
+                armed.phase = "starting"
+        if not self._persist(armed): return self._release()
+        # Disk barriers are not part of the native wait slice. Start that slice
+        # after durable arming, still capped by the unchanged whole deadline.
+        step_deadline = linux_engine_exec_step_deadline_v3(exec_monotonic_ms_v3(), self.whole_deadline, step_budget_ms)
+        if self.stage != "cleanup" and step_deadline.is_err():
+            self._fail(step_deadline.unwrap_err())
+            var skipped = armed
+            skipped.revision = armed.revision + 1
+            skipped.io_armed = false
+            skipped.phase = if skipped.create_armed and skipped.native_exec_id == "": "unknown-create" else:
+                if skipped.start_armed: "start-unknown" else: "quarantined"
+            self._persist(skipped)
+            return self._release()
+        var io_error = ""
+        self.executor_calls = self.executor_calls + 1
+        if self.stage == "connect":
+            val connected = local_unix_connect_v1(self.policy.socket_path, self.policy.expected_service_uid, step_deadline.unwrap())
+            self.connection = connected.owner
+            self.peer = connected.peer
+            io_error = connected.error
+            if io_error == "":
+                if not connected.owner.? or not connected.peer.?: io_error = "engine-exec-connect-unconfirmed"
+                elif self.exchange != "info" and not self._same_peer(self.service_peer.unwrap(), connected.peer.unwrap()): io_error = "engine-exec-service-peer-changed"
+                else: self.stage = "write"
+        elif self.stage == "write":
+            val remaining = self.outgoing.len() - self.offset
+            val maximum = if remaining < 65536: remaining else: 65536
+            val written = if ["create", "start"].contains(self.exchange):
+                local_unix_write_some_admitted_v1(self.connection.unwrap(), self.outgoing, self.offset, maximum,
+                    step_deadline.unwrap(), self.admission.deadline.expires_at_unix_ms)
+            else: local_unix_write_some_v1(self.connection.unwrap(), self.outgoing, self.offset, maximum, step_deadline.unwrap())
+            self.connection = Some(written.owner)
+            io_error = written.error
+            match linux_engine_exec_write_progress_v3(self.offset, written.accepted_bytes, self.outgoing.len(), maximum):
+                case Ok(progress):
+                    self.offset = progress.0
+                    self.stage = progress.1
+                case Err(reason): io_error = reason
+            if io_error == "" and written.accepted_bytes == 0: io_error = "engine-exec-write-no-progress"
+        elif self.stage == "read":
+            val remaining = 2113537 - self.wire.len()
+            val maximum = if remaining < 65536: remaining else: 65536
+            val read = local_unix_read_v1(self.connection.unwrap(), maximum, step_deadline.unwrap())
+            self.connection = Some(read.owner)
+            for byte in read.bytes: self.wire.push(byte)
+            io_error = read.error
+            if self.wire.len() > 2113536: io_error = "engine-exec-response-wire-bound"
+            if io_error == "" and read.eof:
+                if self._response(): self.stage = "close"
+            elif io_error == "" and read.bytes.len() == 0: io_error = "engine-exec-read-no-progress"
+        else:
+            val closed = local_unix_close_v1(self.connection.unwrap())
+            self.connection = closed.owner
+            io_error = closed.error
+            if io_error == "" and (not closed.closed or closed.owner.?): io_error = "engine-exec-close-unconfirmed"
+            if io_error == "":
+                if self.stage == "cleanup": self.stage = "failed"
+                elif self.exchange == "info":
+                    val observed = linux_oci_installed_correlate_v3(self.policy, self.cli, self.peer.unwrap(), self.wire, exec_unix_ms_v3())
+                    if observed.is_err(): self._fail(observed.unwrap_err())
+                    elif observed.unwrap().identity_digest != self.row.control_digest: self._fail("engine-exec-installed-control-changed")
+                    else:
+                        self.service_peer = self.peer
+                        self._next_exchange(if self.action == "create": "create" else: if self.action == "start": "verify" else: "inspect")
+                elif self.exchange == "verify" and not self.inspection.unwrap().running: self._next_exchange("start")
+                else:
+                    self.stage = "done"
+                    if self.exchange == "start": self.row.phase = "observed"
+        if io_error != "":
+            val after_now = exec_monotonic_ms_v3()
+            val pending = if step_deadline.is_err(): false else:
+                linux_engine_exec_step_pending_v3(self.stage, io_error, after_now, step_deadline.unwrap(), self.whole_deadline)
+            if not pending: self._fail(io_error)
+        var next = self.row
+        if self.error != "":
+            if next.create_armed and next.native_exec_id == "": next.phase = "unknown-create"
+            elif next.start_armed: next.phase = "start-unknown"
+            else: next.phase = "quarantined"
+        elif self.cleanup_requested:
+            if next.create_armed and next.native_exec_id == "": next.phase = "unknown-create"
+            elif next.start_armed: next.phase = "start-unknown"
+        # self.row may have acquired a candidate ID while processing the result;
+        # the durable before image remains the armed row until CAS completes.
+        self.row = armed
+        next.revision = armed.revision + 1
+        next.io_armed = false
+        next.offset = self.offset
+        if not self._persist(next): return self._release()
+        self._release()

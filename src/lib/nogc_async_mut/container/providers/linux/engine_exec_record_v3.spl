@@ -1,0 +1,187 @@
+# Provider-local exec WAL. Callers hold the existing owned file lock. No IO
+# owner or provider is transferred to workers or serialized into this record.
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_is_regular_no_follow,
+    file_read_regular_no_follow_bounded, file_publish_noreplace, file_remove, directory_fsync}
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.common.contracts.container.exec_v3.*
+use std.nogc_async_mut.container.providers.linux.engine_exec_codec_v3.linux_engine_exec_create_request_v3
+use std.nogc_async_mut.container.providers.linux.engine_exec_http_v3.linux_engine_exec_query_digest_v3
+
+pub struct LinuxEngineExecRecordV3:
+    payload_digest: text
+    request_digest: text
+    intent_digest: text
+    control_digest: text
+    revision: i64
+    phase: text
+    io_armed: bool
+    create_armed: bool
+    start_armed: bool
+    native_exec_id: text
+    offset: i64
+
+pub fn linux_engine_exec_record_encode_v3(row: LinuxEngineExecRecordV3) -> Result<text, text>:
+    for digest in [row.payload_digest, row.request_digest, row.intent_digest, row.control_digest]:
+        if not builder_digest_valid_v1(digest): return Err("engine-exec-record-digest")
+    if (row.revision <= 0 or row.revision >= 9223372036854775807 or row.offset < 0 or row.offset > 2113536 or
+            not ["prepared", "probing", "creating", "known-created", "starting", "observed", "unknown-create", "start-unknown", "quarantined"].contains(row.phase)):
+        return Err("engine-exec-record-shape")
+    if row.native_exec_id != "" and not builder_digest_valid_v1(row.native_exec_id): return Err("engine-exec-record-native-id")
+    if ((row.native_exec_id != "" and not row.create_armed) or
+            (row.start_armed and (not row.create_armed or row.native_exec_id == "")) or
+            (["prepared", "probing"].contains(row.phase) and (row.create_armed or row.start_armed or row.native_exec_id != "")) or
+            (row.phase == "prepared" and row.io_armed) or
+            (["creating", "unknown-create"].contains(row.phase) and (not row.create_armed or row.native_exec_id != "" or row.start_armed)) or
+            (["known-created", "starting", "start-unknown", "observed"].contains(row.phase) and row.native_exec_id == "") or
+            (row.phase == "known-created" and row.start_armed) or
+            (["starting", "start-unknown", "observed"].contains(row.phase) and not row.start_armed)):
+        return Err("engine-exec-record-state-invariant")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3), "kind": SdnValue.String("linux-engine-exec-record"),
+        "payloadDigest": SdnValue.String(row.payload_digest), "requestDigest": SdnValue.String(row.request_digest),
+        "intentDigest": SdnValue.String(row.intent_digest), "controlDigest": SdnValue.String(row.control_digest),
+        "revision": SdnValue.Int(row.revision), "phase": SdnValue.String(row.phase), "ioArmed": SdnValue.Bool(row.io_armed),
+        "createArmed": SdnValue.Bool(row.create_armed), "startArmed": SdnValue.Bool(row.start_armed),
+        "nativeExecId": SdnValue.String(row.native_exec_id), "offset": SdnValue.Int(row.offset)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+fn exec_row_text_v3(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("engine-exec-record-type")
+
+fn exec_row_int_v3(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("engine-exec-record-type")
+
+fn exec_row_bool_v3(fields: Dict<text, SdnValue>, key: text) -> Result<bool, text>:
+    match fields[key]:
+        case SdnValue.Bool(value): Ok(value)
+        case _: Err("engine-exec-record-type")
+
+pub fn linux_engine_exec_record_decode_v3(source: text) -> Result<LinuxEngineExecRecordV3, text>:
+    if str_len(source) > 8192: return Err("engine-exec-record-bound")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 8192, max_depth: 2,
+            max_nodes: 40, max_rows: 0, max_cells: 0, max_columns: 16)):
+        case Ok(value): value
+        case Err(_): return Err("engine-exec-record-syntax")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("engine-exec-record-object")
+    val names = ["version", "kind", "payloadDigest", "requestDigest", "intentDigest", "controlDigest", "revision",
+        "phase", "ioArmed", "createArmed", "startArmed", "nativeExecId", "offset"]
+    if fields.len() != names.len(): return Err("engine-exec-record-fields")
+    for name in names:
+        if not fields.contains_key(name): return Err("engine-exec-record-fields")
+    if fields["version"] != SdnValue.Int(3) or exec_row_text_v3(fields, "kind")? != "linux-engine-exec-record":
+        return Err("engine-exec-record-version")
+    val row = LinuxEngineExecRecordV3(payload_digest: exec_row_text_v3(fields, "payloadDigest")?,
+        request_digest: exec_row_text_v3(fields, "requestDigest")?, intent_digest: exec_row_text_v3(fields, "intentDigest")?,
+        control_digest: exec_row_text_v3(fields, "controlDigest")?, revision: exec_row_int_v3(fields, "revision")?,
+        phase: exec_row_text_v3(fields, "phase")?, io_armed: exec_row_bool_v3(fields, "ioArmed")?,
+        create_armed: exec_row_bool_v3(fields, "createArmed")?, start_armed: exec_row_bool_v3(fields, "startArmed")?,
+        native_exec_id: exec_row_text_v3(fields, "nativeExecId")?, offset: exec_row_int_v3(fields, "offset")?)
+    if linux_engine_exec_record_encode_v3(row)? != source: return Err("engine-exec-record-noncanonical")
+    Ok(row)
+
+pub fn linux_engine_exec_record_read_v3(path: text) -> Result<LinuxEngineExecRecordV3, text>:
+    if not file_exists(path): return Err("engine-exec-record-absent")
+    if not file_is_regular_no_follow(path): return Err("engine-exec-record-not-regular")
+    val bytes = file_read_regular_no_follow_bounded(path, 8192)?
+    linux_engine_exec_record_decode_v3(bytes)
+
+fn exec_record_publish_v3(root: text, path: text, bytes: text, first: bool) -> Result<bool, text>:
+    if first:
+        val pending = path + ".pending"
+        if not file_atomic_write_mode(pending, bytes, 0o600): return Err("engine-exec-record-stage-failed")
+        val published = file_publish_noreplace(pending, path)
+        file_remove(pending)
+        val accepted = published?
+        if not accepted: return Err("engine-exec-record-publication-failed")
+    elif not file_atomic_write_mode(path, bytes, 0o600): return Err("engine-exec-record-replace-failed")
+    if not directory_fsync(root): return Err("engine-exec-record-durability-uncertain")
+    Ok(true)
+
+pub fn linux_engine_exec_payload_store_v3(root: text, path: text, bytes: text) -> Result<bool, text>:
+    if str_len(bytes) > 16777216: return Err("engine-exec-payload-bound")
+    if file_exists(path):
+        if not file_is_regular_no_follow(path): return Err("engine-exec-payload-not-regular")
+        if file_read_regular_no_follow_bounded(path, 16777216)? != bytes: return Err("engine-exec-payload-mismatch")
+        return Ok(true)
+    exec_record_publish_v3(root, path, bytes, true)
+
+pub fn linux_engine_exec_record_transition_v3(before: LinuxEngineExecRecordV3,
+        after: LinuxEngineExecRecordV3) -> Result<bool, text>:
+    val old = linux_engine_exec_record_encode_v3(before)?
+    val next = linux_engine_exec_record_encode_v3(after)?
+    if (after.revision != before.revision + 1 or after.payload_digest != before.payload_digest or
+            after.request_digest != before.request_digest or after.intent_digest != before.intent_digest or
+            after.control_digest != before.control_digest or (before.create_armed and not after.create_armed) or
+            (before.start_armed and not after.start_armed) or
+            (before.native_exec_id != "" and after.native_exec_id != before.native_exec_id)):
+        return Err("engine-exec-record-transition-mismatch")
+    val allowed = if before.phase == "prepared": ["prepared", "probing", "quarantined"] else:
+        if before.phase == "probing": ["probing", "creating", "quarantined"] else:
+        if before.phase == "creating": ["creating", "known-created", "unknown-create"] else:
+        if before.phase == "known-created": ["known-created", "starting", "quarantined"] else:
+        if before.phase == "starting": ["starting", "observed", "start-unknown"] else:
+        if before.phase == "observed": ["observed", "quarantined", "start-unknown"] else:
+        if before.phase == "unknown-create": ["unknown-create"] else:
+        if before.phase == "start-unknown": ["start-unknown"] else: ["quarantined", "probing"]
+    if not allowed.contains(after.phase): return Err("engine-exec-record-phase-transition")
+    Ok(true)
+
+pub fn linux_engine_exec_cleanup_record_v3(before: LinuxEngineExecRecordV3,
+        attempted: LinuxEngineExecRecordV3?, actual: LinuxEngineExecRecordV3) -> Result<LinuxEngineExecRecordV3, text>:
+    val bytes = linux_engine_exec_record_encode_v3(actual)?
+    if bytes == linux_engine_exec_record_encode_v3(before)?: return Ok(actual)
+    if attempted.?:
+        val valid = linux_engine_exec_record_transition_v3(before, attempted.unwrap())?
+        if bytes == linux_engine_exec_record_encode_v3(attempted.unwrap())?: return Ok(actual)
+    Err("engine-exec-record-stale-revision")
+
+pub fn linux_engine_exec_record_store_v3(root: text, path: text,
+        before: LinuxEngineExecRecordV3?, after: LinuxEngineExecRecordV3) -> Result<bool, text>:
+    val bytes = linux_engine_exec_record_encode_v3(after)?
+    if before.?:
+        val actual = linux_engine_exec_record_read_v3(path)?
+        if linux_engine_exec_record_encode_v3(actual)? != linux_engine_exec_record_encode_v3(before.unwrap())?:
+            return Err("engine-exec-record-stale-revision")
+        val transition = linux_engine_exec_record_transition_v3(actual, after)?
+        exec_record_publish_v3(root, path, bytes, false)
+    else:
+        if after.revision != 1 or after.phase != "prepared": return Err("engine-exec-record-initial-revision")
+        exec_record_publish_v3(root, path, bytes, true)
+
+# Exceptional crash-window repair only: ID comes from the existing protected
+# birth file, never a caller parameter or a name/label discovery query.
+pub fn linux_engine_exec_recover_birth_v3(root: text, path: text, before: LinuxEngineExecRecordV3,
+        request: ContainerExecRequestV3, policy_digest: text) -> Result<LinuxEngineExecRecordV3, text>:
+    if (before.native_exec_id != "" or not before.create_armed or before.start_armed or
+            not ["creating", "unknown-create"].contains(before.phase)):
+        return Err("engine-exec-birth-repair-state")
+    val actual = linux_engine_exec_record_read_v3(path)?
+    if linux_engine_exec_record_encode_v3(actual)? != linux_engine_exec_record_encode_v3(before)?:
+        return Err("engine-exec-record-stale-revision")
+    val birth_bytes = file_read_regular_no_follow_bounded(path + ".birth", 16384)?
+    val birth = container_exec_birth_decode_v3(birth_bytes)?
+    val matched = container_exec_birth_match_v3(birth, request)?
+    val query = linux_engine_exec_query_digest_v3(linux_engine_exec_create_request_v3(request)?, policy_digest)?
+    if (birth.request_digest != before.request_digest or birth.provider_identity_digest != before.control_digest or
+            birth.query_digest != query): return Err("engine-exec-birth-binding-mismatch")
+    if not directory_fsync(root): return Err("engine-exec-record-durability-uncertain")
+    var repaired = before
+    repaired.revision = before.revision + 1
+    repaired.native_exec_id = birth.native_exec_id
+    repaired.phase = "known-created"
+    repaired.io_armed = false
+    repaired.offset = 0
+    val published = exec_record_publish_v3(root, path, linux_engine_exec_record_encode_v3(repaired)?, false)?
+    Ok(repaired)
