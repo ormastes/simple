@@ -2687,6 +2687,14 @@ impl MirLowering:
             case _:
                 self.error_fatal("unsupported MIR assignment target: {target.kind}", nil)
 
+    fn numeric_int_const_for(value: i64, ty: MirType) -> MirConstValue:
+        """The NUMBER `value` as a constant of type `ty`. A float type takes
+        the Float form: a float-typed MirConstValue.Int is a bit pattern (the
+        backends iconst+bitcast it, see cl_scalar_const_plan), never 1.0."""
+        match ty.kind:
+            case MirTypeKind.F32 | MirTypeKind.F64: MirConstValue.Float(value.to_f64())
+            case _: MirConstValue.Int(value)
+
     me lower_int_literal_for_float_slot(value: HirExpr, declared: HirType) -> LocalId?:
         """An unsuffixed integer literal (or its negation) flowing into a
         DECLARED f32/f64 slot (call argument, annotated binding, return,
@@ -2699,6 +2707,16 @@ impl MirLowering:
             case HirTypeKind.Float(bits):
                 if bits == 32:
                     float_type = MirType(kind: MirTypeKind.F32)
+            case HirTypeKind.Optional(optional_inner):
+                # `val d: f64? = 3` / `takeo(3)` with `x: f64?`: the payload is
+                # the float 3.0. Lowered as Int(3) it was Some-boxed as the
+                # integer word, which a float decode reads as 1.5e-323.
+                match optional_inner.kind:
+                    case HirTypeKind.Float(optional_bits):
+                        if optional_bits == 32:
+                            float_type = MirType(kind: MirTypeKind.F32)
+                    case _:
+                        return nil
             case _:
                 return nil
         var int_value = 0
@@ -4555,7 +4573,7 @@ impl MirLowering:
         else:
             var b = self.builder
             val temp = b.new_temp(loop_ty)
-            b.emit_const(temp, MirConstValue.Int(0), loop_ty)
+            b.emit_const(temp, self.numeric_int_const_for(0, loop_ty), loop_ty)
             self.builder = b
             start_local = temp
 
@@ -4572,7 +4590,7 @@ impl MirLowering:
         else:
             var b = self.builder
             val temp = b.new_temp(loop_ty)
-            b.emit_const(temp, MirConstValue.Int(1), loop_ty)
+            b.emit_const(temp, self.numeric_int_const_for(1, loop_ty), loop_ty)
             self.builder = b
             step_local = temp
 

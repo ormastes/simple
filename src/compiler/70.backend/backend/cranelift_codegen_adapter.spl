@@ -1208,14 +1208,8 @@ fn load_local(
 fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type_: MirType) -> i64:
     # EXPLICIT returns: mixed-return/tail rule (see cl_translate_operand).
     match value:
-        case Int(v):
-            # A float-typed Int const (e.g. an int literal widened to f64) is
-            # an f32const/f64const of the same numeric value: Cranelift's
-            # `iconst` only admits I8..I64 and its verifier hits
-            # `unreachable!()` (iconst_bounds) for an F32/F64 controlling type.
-            if cl_const_is_float(type_):
-                return cranelift_fconst(ctx, mir_type_to_cl(type_), v as f64)
-            return cranelift_iconst(ctx, const_int_cl_type(type_), v)
+        case Int(_):
+            return cl_emit_scalar_const_plan(ctx, cl_scalar_const_plan(value, type_), type_)
         case FloatLexeme(v):
             return cranelift_fconst(ctx, mir_type_to_cl(type_), float_literal_scalar(v))
         case Float(v):
@@ -1264,9 +1258,7 @@ fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type
         case Zero:
             # `x!` / `x.unwrap()` on an `f64?` emits Zero typed F64 on the nil
             # (panic) arm; a float zero must be fconst, never iconst.f64.
-            if cl_const_is_float(type_):
-                return cranelift_fconst(ctx, mir_type_to_cl(type_), 0.0)
-            return cranelift_iconst(ctx, mir_type_to_cl(type_), 0)
+            return cl_emit_scalar_const_plan(ctx, cl_scalar_const_plan(value, type_), type_)
         case _:
             return cranelift_iconst(ctx, CL_TYPE_I64, 0)
 
@@ -1893,13 +1885,47 @@ fn const_int_cl_type(ty: MirType) -> i64:
     """Int consts emit as I64 regardless of declared width: the lane is
     uniformly i64 and sub-64 iconst types leaked i16 args into i64-signature
     calls (probe_enum6 verifier reject). Never a float type: `iconst` is integer-only (float consts go through
-    cl_const_is_float -> cranelift_fconst)."""
+    cl_scalar_const_plan)."""
     CL_TYPE_I64
 
 fn cl_const_is_float(ty: MirType) -> bool:
     match ty.kind:
         case F32 | F64: true
         case _: false
+
+pub fn cl_scalar_const_plan(value: MirConstValue, type_: MirType) -> (text, i64, i64):
+    """Instruction selection for an Int/Zero MIR const: (opcode, cl type, operand).
+
+    - "iconst"         integer-typed: iconst.<cl type> operand.
+    - "fconst_zero"    float-typed Zero: fconst.<cl type> 0.0.
+    - "iconst_bitcast" float-typed Int(v): v is a BIT PATTERN (a raw word such
+      as the nil sentinel 3), never a number -- numeric float constants are
+      MirConstValue.Float. Emit iconst.<cl type> of the bits, then bitcast to
+      the float type. A numeric `v as f64` here turned sentinel 3 into 3.0
+      (bits 0x4008...), which rt_is_none no longer recognises. Cranelift's
+      iconst only admits I8..I64 (verifier iconst_bounds unreachable!() on
+      F32/F64), hence the integer carrier."""
+    match value:
+        case Int(v):
+            match type_.kind:
+                case F64: return ("iconst_bitcast", CL_TYPE_I64, v)
+                case F32: return ("iconst_bitcast", CL_TYPE_I32, v & 4294967295)
+                case _: return ("iconst", const_int_cl_type(type_), v)
+        case Zero:
+            if cl_const_is_float(type_):
+                return ("fconst_zero", mir_type_to_cl(type_), 0)
+            return ("iconst", mir_type_to_cl(type_), 0)
+        case _:
+            return ("iconst", CL_TYPE_I64, 0)
+
+fn cl_emit_scalar_const_plan(ctx: i64, plan: (text, i64, i64), type_: MirType) -> i64:
+    val (opcode, cl_type, operand) = plan
+    if opcode == "fconst_zero":
+        return cranelift_fconst(ctx, cl_type, 0.0)
+    val word = cranelift_iconst(ctx, cl_type, operand)
+    if opcode == "iconst_bitcast":
+        return cranelift_bitcast(ctx, mir_type_to_cl(type_), word)
+    word
 
 fn type_is_aggregate(ty: MirType) -> bool:
     match ty.kind:
