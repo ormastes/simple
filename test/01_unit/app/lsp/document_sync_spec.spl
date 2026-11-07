@@ -1,549 +1,313 @@
-describe "Document Sync":
-    it "skipped":
-        val pending_reason = "pre-existing test failures - functions/imports not available"
-        expect(pending_reason.len()).to_be_greater_than(0)
+# Actual full-sync adapter and existing document owner; no placeholder passes.
+# @req REQ-LSP-CODEACTION-REVISION-001
+use std.spec
+use std.spec.step
+use std.common.json.value.{JsonValue, json_value_object_from, json_value_serialize, json_parse_value_strict, json_value_field, json_value_items, json_value_has, json_value_text_or}
+use std.nogc_sync_mut.lsp.server.{LspServer}
+use std.nogc_sync_mut.lsp.lsp_code_action_handler.{lsp_code_action_response, lsp_code_action_complete_v1}
+use std.nogc_sync_mut.lsp.lsp_handlers.{lsp_handle_did_open, lsp_handle_did_change, lsp_handle_did_close, lsp_handle_code_action}
+use std.nogc_sync_mut.lsp.lsp_code_action.{lsp_edit_source_map, lsp_code_action_text_edit, lsp_query_code_action}
+use compiler.tools.fix.main.{collect_fixes_from_source}
+use std.nogc_sync_mut.io.file_ops.{file_write, secure_temp_dir}
+use std.io_runtime.{file_delete, dir_remove}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.lsp.lsp_document_sync.{lsp_document_sync_apply, lsp_document_snapshot, lsp_document_snapshot_matches}
 
-# # LSP Document Synchronization Tests
-# # Feature: Language Server Protocol Document Sync
-# # Category: LSP, Editor Integration
-# # Status: Complete
-# #
-# # Tests for LSP document synchronization including didOpen, didChange,
-# # and didClose notifications. Validates document caching and updates.
-# 
-# use app.lsp.server.{ServerState, LspServer}
-# 
-# # Local type definitions (test stubs)
-# 
-# struct Position:
-#     line: i64
-#     character: i64
-# 
-# struct Range:
-#     start: Position
-#     end: Position
-# 
-# enum DiagnosticSeverity:
-#     Error
-#     Warning
-#     Information
-#     Hint
-# 
-# struct Diagnostic:
-#     range: Range
-#     severity: DiagnosticSeverity
-#     message: str
-#     source: str
-# 
-# enum CompletionItemKind:
-#     Text = 1
-#     Method = 2
-#     Function = 3
-#     Variable = 6
-#     Keyword = 14
-#     Struct = 22
-# 
-# struct CompletionItem:
-#     label: str
-#     kind: i64
-#     detail: Option<str>
-#     documentation: Option<str>
-#     insert_text: Option<str>
-# 
-# 
-# 
-# describe "Document Synchronization":
-#     # Tests for LSP textDocument/did* notifications.
-# 
-#     context "didOpen Notification":
-#         it "caches new document":
-#             var server = LspServer.new()
-#             server.state = ServerState.Initialized
-# 
-#             val notification = JsonRpcNotification(
-#                 method: "textDocument/didOpen",
-#                 params: Some({
-#                     "textDocument": {
-#                         "uri": "file:///test.spl",
-#                         "languageId": "simple",
-#                         "version": 1,
-#                         "text": "fn main(): print(\"Hello\")"
-#                     }
-#                 })
-#             )
-# 
-#             val result = server.handle_notification(notification)
-#             expect result.is_ok()
-# 
-#             # Document should be cached
-#             expect server.documents.has("file:///test.spl")
-# 
-#         it "stores document version":
-#             var server = LspServer.new()
-#             server.state = ServerState.Initialized
-# 
-#             val notification = JsonRpcNotification(
-#                 method: "textDocument/didOpen",
-#                 params: Some({
-#                     "textDocument": {
-#                         "uri": "file:///test.spl",
-#                         "languageId": "simple",
-#                         "version": 1,
-#                         "text": "fn main(): print(\"Hello\")"
-#                     }
-#                 })
-#             )
-# 
-#             server.handle_notification(notification)
-# 
-#             val doc_info = server.documents.get("file:///test.spl")
-#             expect doc_info.?
-#             expect doc_info.unwrap().version == 1
-# 
-#         it "stores document text":
-#             var server = LspServer.new()
-#             server.state = ServerState.Initialized
-# 
-#             val text = "fn main(): print(\"Hello\")"
-#             val notification = JsonRpcNotification(
-#                 method: "textDocument/didOpen",
-#                 params: Some({
-#                     "textDocument": {
-#                         "uri": "file:///test.spl",
-#                         "languageId": "simple",
-#                         "version": 1,
-#                         "text": text
-#                     }
-#                 })
-#             )
-# 
-#             server.handle_notification(notification)
-# 
-#             val doc_info = server.documents.get("file:///test.spl")
-#             expect doc_info.?
-#             expect doc_info.unwrap().text == text
-# 
-#         it "parses document into syntax tree":
-#             var server = LspServer.new()
-#             server.state = ServerState.Initialized
-# 
-#             val notification = JsonRpcNotification(
-#                 method: "textDocument/didOpen",
-#                 params: Some({
-#                     "textDocument": {
-#                         "uri": "file:///test.spl",
-#                         "languageId": "simple",
-#                         "version": 1,
-#                         "text": "fn main(): print(\"Hello\")"
-#                     }
-#                 })
-#             )
-# 
-#             server.handle_notification(notification)
-# 
-#             val doc_info = server.documents.get("file:///test.spl")
-#             expect doc_info.?
-#             # Tree should be parsed (Some) if parser succeeded
-#             # or None if parsing failed
-#             val tree_opt = doc_info.unwrap().tree
-#             expect tree_opt != nil
-# 
-#         it "returns error if params missing":
-#             var server = LspServer.new()
-#             server.state = ServerState.Initialized
-# 
-#             val notification = JsonRpcNotification(
-#                 method: "textDocument/didOpen",
-#                 params: nil
-#             )
-# 
-#             val result = server.handle_notification(notification)
-#             expect result.err.?
-# 
-#         it "publishes diagnostics after opening":
-#             var server = LspServer.new()
-#             server.state = ServerState.Initialized
-# 
-#             val notification = JsonRpcNotification(
-#                 method: "textDocument/didOpen",
-#                 params: Some({
-#                     "textDocument": {
-#                         "uri": "file:///test.spl",
-#                         "languageId": "simple",
-#                         "version": 1,
-#                         "text": "fn main(): print(\"Hello\")"
-#                     }
-#                 })
-#             )
-# 
-#             val result = server.handle_notification(notification)
-#             expect result.is_ok()
-#             # Diagnostics would be published via transport
-#             # (actual publishing tested in integration tests)
-# 
-#     context "didChange Notification":
-#         it "updates document text":
-#             var server = LspServer.new()
-#             server.state = ServerState.Initialized
-# 
-#             # First, open document
-#             val open_notif = JsonRpcNotification(
-#                 method: "textDocument/didOpen",
-#                 params: Some({
-#                     "textDocument": {
-#                         "uri": "file:///test.spl",
-#                         "languageId": "simple",
-#                         "version": 1,
-#                         "text": "fn main(): print(\"Hello\")"
-#                     }
-#                 })
-#             )
-#             server.handle_notification(open_notif)
-# 
-#             # Then, change document
-#             val new_text = "fn main(): print(\"World\")"
-#             val change_notif = JsonRpcNotification(
-#                 method: "textDocument/didChange",
-#                 params: Some({
-#                     "textDocument": {
-#                         "uri": "file:///test.spl",
-#                         "version": 2
-#                     },
-#                     "contentChanges": [
-#                         {"text": new_text}
-#                     ]
-#                 })
-#             )
-# 
-#             val result = server.handle_notification(change_notif)
-#             expect result.is_ok()
-# 
-#             # Document text should be updated
-#             val doc_info = server.documents.get("file:///test.spl")
-#             expect doc_info.?
-#             expect doc_info.unwrap().text == new_text
-# 
-#         it "updates document version":
-#             var server = LspServer.new()
-#             server.state = ServerState.Initialized
-# 
-#             # Open document
-#             val open_notif = JsonRpcNotification(
-#                 method: "textDocument/didOpen",
-#                 params: Some({
-#                     "textDocument": {
-#                         "uri": "file:///test.spl",
-#                         "languageId": "simple",
-#                         "version": 1,
-#                         "text": "fn main(): print(\"Hello\")"
-#                     }
-#                 })
-#             )
-#             server.handle_notification(open_notif)
-# 
-#             # Change document
-#             val change_notif = JsonRpcNotification(
-#                 method: "textDocument/didChange",
-#                 params: Some({
-#                     "textDocument": {
-#                         "uri": "file:///test.spl",
-#                         "version": 2
-#                     },
-#                     "contentChanges": [
-#                         {"text": "fn main(): print(\"World\")"}
-#                     ]
-#                 })
-#             )
-# 
-#             server.handle_notification(change_notif)
-# 
-#             val doc_info = server.documents.get("file:///test.spl")
-#             expect doc_info.?
-#             expect doc_info.unwrap().version == 2
-# 
-#         it "re-parses document":
-#             var server = LspServer.new()
-#             server.state = ServerState.Initialized
-# 
-#             # Open document
-#             val open_notif = JsonRpcNotification(
-#                 method: "textDocument/didOpen",
-#                 params: Some({
-#                     "textDocument": {
-#                         "uri": "file:///test.spl",
-#                         "languageId": "simple",
-#                         "version": 1,
-#                         "text": "fn main(): print(\"Hello\")"
-#                     }
-#                 })
-#             )
-#             server.handle_notification(open_notif)
-# 
-#             # Change document
-#             val change_notif = JsonRpcNotification(
-#                 method: "textDocument/didChange",
-#                 params: Some({
-#                     "textDocument": {
-#                         "uri": "file:///test.spl",
-#                         "version": 2
-#                     },
-#                     "contentChanges": [
-#                         {"text": "fn main(): print(\"World\")"}
-#                     ]
-#                 })
-#             )
-# 
-#             server.handle_notification(change_notif)
-# 
-#             # Tree should be re-parsed
-#             val doc_info = server.documents.get("file:///test.spl")
-#             expect doc_info.?
-#             expect doc_info.unwrap().tree != nil
-# 
-#         it "returns error if params missing":
-#             var server = LspServer.new()
-#             server.state = ServerState.Initialized
-# 
-#             val notification = JsonRpcNotification(
-#                 method: "textDocument/didChange",
-#                 params: nil
-#             )
-# 
-#             val result = server.handle_notification(notification)
-#             expect result.err.?
-# 
-#         it "returns error if content changes empty":
-#             var server = LspServer.new()
-#             server.state = ServerState.Initialized
-# 
-#             val notification = JsonRpcNotification(
-#                 method: "textDocument/didChange",
-#                 params: Some({
-#                     "textDocument": {
-#                         "uri": "file:///test.spl",
-#                         "version": 2
-#                     },
-#                     "contentChanges": []
-#                 })
-#             )
-# 
-#             val result = server.handle_notification(notification)
-#             expect result.err.?
-# 
-#         it "clears query cache on change":
-#             var server = LspServer.new()
-#             server.state = ServerState.Initialized
-# 
-#             # Open document
-#             val open_notif = JsonRpcNotification(
-#                 method: "textDocument/didOpen",
-#                 params: Some({
-#                     "textDocument": {
-#                         "uri": "file:///test.spl",
-#                         "languageId": "simple",
-#                         "version": 1,
-#                         "text": "fn main(): print(\"Hello\")"
-#                     }
-#                 })
-#             )
-#             server.handle_notification(open_notif)
-# 
-#             # Change document
-#             val change_notif = JsonRpcNotification(
-#                 method: "textDocument/didChange",
-#                 params: Some({
-#                     "textDocument": {
-#                         "uri": "file:///test.spl",
-#                         "version": 2
-#                     },
-#                     "contentChanges": [
-#                         {"text": "fn main(): print(\"World\")"}
-#                     ]
-#                 })
-#             )
-# 
-#             server.handle_notification(change_notif)
-# 
-#             # Query cache should be cleared
-#             # (implementation detail - cache is cleared in handle_did_change)
-# 
-#         it "publishes diagnostics after change":
-#             var server = LspServer.new()
-#             server.state = ServerState.Initialized
-# 
-#             # Open document
-#             val open_notif = JsonRpcNotification(
-#                 method: "textDocument/didOpen",
-#                 params: Some({
-#                     "textDocument": {
-#                         "uri": "file:///test.spl",
-#                         "languageId": "simple",
-#                         "version": 1,
-#                         "text": "fn main(): print(\"Hello\")"
-#                     }
-#                 })
-#             )
-#             server.handle_notification(open_notif)
-# 
-#             # Change document
-#             val change_notif = JsonRpcNotification(
-#                 method: "textDocument/didChange",
-#                 params: Some({
-#                     "textDocument": {
-#                         "uri": "file:///test.spl",
-#                         "version": 2
-#                     },
-#                     "contentChanges": [
-#                         {"text": "fn main(): syntax error here"}
-#                     ]
-#                 })
-#             )
-# 
-#             val result = server.handle_notification(change_notif)
-#             expect result.is_ok()
-#             # Diagnostics would be published via transport
-# 
-#     context "didClose Notification":
-#         it "removes document from cache":
-#             var server = LspServer.new()
-#             server.state = ServerState.Initialized
-# 
-#             # Open document
-#             val open_notif = JsonRpcNotification(
-#                 method: "textDocument/didOpen",
-#                 params: Some({
-#                     "textDocument": {
-#                         "uri": "file:///test.spl",
-#                         "languageId": "simple",
-#                         "version": 1,
-#                         "text": "fn main(): print(\"Hello\")"
-#                     }
-#                 })
-#             )
-#             server.handle_notification(open_notif)
-# 
-#             # Verify document is cached
-#             expect server.documents.has("file:///test.spl")
-# 
-#             # Close document
-#             val close_notif = JsonRpcNotification(
-#                 method: "textDocument/didClose",
-#                 params: Some({
-#                     "textDocument": {
-#                         "uri": "file:///test.spl"
-#                     }
-#                 })
-#             )
-# 
-#             val result = server.handle_notification(close_notif)
-#             expect result.is_ok()
-# 
-#             # Document should be removed
-#             expect not server.documents.has("file:///test.spl")
-# 
-#         it "returns error if params missing":
-#             var server = LspServer.new()
-#             server.state = ServerState.Initialized
-# 
-#             val notification = JsonRpcNotification(
-#                 method: "textDocument/didClose",
-#                 params: nil
-#             )
-# 
-#             val result = server.handle_notification(notification)
-#             expect result.err.?
-# 
-#         it "handles closing non-existent document":
-#             var server = LspServer.new()
-#             server.state = ServerState.Initialized
-# 
-#             val close_notif = JsonRpcNotification(
-#                 method: "textDocument/didClose",
-#                 params: Some({
-#                     "textDocument": {
-#                         "uri": "file:///nonexistent.spl"
-#                     }
-#                 })
-#             )
-# 
-#             # Should succeed even if document not in cache
-#             val result = server.handle_notification(close_notif)
-#             expect result.is_ok()
-# 
-#     context "Document Lifecycle":
-#         it "supports open → change → close flow":
-#             var server = LspServer.new()
-#             server.state = ServerState.Initialized
-# 
-#             val uri = "file:///test.spl"
-# 
-#             # Open
-#             val open_notif = JsonRpcNotification(
-#                 method: "textDocument/didOpen",
-#                 params: Some({
-#                     "textDocument": {
-#                         "uri": uri,
-#                         "languageId": "simple",
-#                         "version": 1,
-#                         "text": "fn main(): print(\"Hello\")"
-#                     }
-#                 })
-#             )
-#             server.handle_notification(open_notif)
-#             expect server.documents.has(uri)
-# 
-#             # Change multiple times
-#             for i in 2..5:
-#                 val change_notif = JsonRpcNotification(
-#                     method: "textDocument/didChange",
-#                     params: Some({
-#                         "textDocument": {
-#                             "uri": uri,
-#                             "version": i
-#                         },
-#                         "contentChanges": [
-#                             {"text": "fn main(): print(\"Version {i}\")"}
-#                         ]
-#                     })
-#                 )
-#                 server.handle_notification(change_notif)
-# 
-#             val doc_info = server.documents.get(uri)
-#             expect doc_info.?
-#             expect doc_info.unwrap().version == 4
-# 
-#             # Close
-#             val close_notif = JsonRpcNotification(
-#                 method: "textDocument/didClose",
-#                 params: Some({
-#                     "textDocument": {"uri": uri}
-#                 })
-#             )
-#             server.handle_notification(close_notif)
-#             expect not server.documents.has(uri)
-# 
-#         it "supports multiple documents":
-#             var server = LspServer.new()
-#             server.state = ServerState.Initialized
-# 
-#             # Open multiple documents
-#             for i in 1..4:
-#                 val uri = "file:///test{i}.spl"
-#                 val open_notif = JsonRpcNotification(
-#                     method: "textDocument/didOpen",
-#                     params: Some({
-#                         "textDocument": {
-#                             "uri": uri,
-#                             "languageId": "simple",
-#                             "version": 1,
-#                             "text": "fn main{i}(): print(\"Doc {i}\")"
-#                         }
-#                     })
-#                 )
-#                 server.handle_notification(open_notif)
-# 
-#             # All documents should be cached
-#             expect server.documents.len() == 3
-#             expect server.documents.has("file:///test1.spl")
-#             expect server.documents.has("file:///test2.spl")
-#             expect server.documents.has("file:///test3.spl")
+fn sync_open(uri: text, version: i64, source: text) -> text:
+    val doc = json_value_object_from([("uri", JsonValue.Str(uri)), ("version", JsonValue.Int(version)), ("text", JsonValue.Str(source))])
+    json_value_serialize(json_value_object_from([("textDocument", doc)]))
+
+fn sync_change(uri: text, version: i64, changes: [JsonValue]) -> text:
+    val doc = json_value_object_from([("uri", JsonValue.Str(uri)), ("version", JsonValue.Int(version))])
+    json_value_serialize(json_value_object_from([("textDocument", doc), ("contentChanges", JsonValue.Array(changes))]))
+
+fn sync_text(source: text) -> JsonValue:
+    json_value_object_from([("text", JsonValue.Str(source))])
+
+describe "Live full-sync document ownership":
+    it "retains empty editor text and exact version then evicts on close":
+        step("Open an empty document using the actual sync adapter")
+        val uri = "file:///sync-empty.spl"
+        expect(lsp_document_sync_apply("textDocument/didOpen", sync_open(uri, 0, ""))).to_equal(true)
+        val snapshot = lsp_document_snapshot(uri).unwrap()
+        expect(snapshot.version).to_equal(0)
+        expect(snapshot.content).to_equal("")
+        expect(lsp_document_sync_apply("textDocument/didClose", sync_open(uri, 0, ""))).to_equal(true)
+        expect(lsp_document_snapshot(uri) == nil).to_equal(true)
+        expect(lsp_document_snapshot_matches(snapshot)).to_equal(false)
+
+    it "revokes captured authority across close and identical reopen":
+        step("Reopen the same URI and version with identical bytes")
+        val uri = "file:///sync-lifetime.spl"
+        expect(lsp_document_sync_apply("textDocument/didOpen", sync_open(uri, 4, "same"))).to_equal(true)
+        val before = lsp_document_snapshot(uri).unwrap()
+        expect(lsp_document_sync_apply("textDocument/didClose", sync_open(uri, 4, "same"))).to_equal(true)
+        expect(lsp_document_sync_apply("textDocument/didOpen", sync_open(uri, 4, "same"))).to_equal(true)
+        val after = lsp_document_snapshot(uri).unwrap()
+        expect(after.lifetime_generation).to_be_greater_than(before.lifetime_generation)
+        expect(lsp_document_snapshot_matches(before)).to_equal(false)
+        expect(lsp_document_snapshot_matches(after)).to_equal(true)
+        expect(lsp_document_sync_apply("textDocument/didClose", sync_open(uri, 4, "same"))).to_equal(true)
+
+    it "updates the same owner and refuses stale changes":
+        step("Apply a full editor replacement and reject an older revision")
+        val uri = "file:///sync-version.spl"
+        expect(lsp_document_sync_apply("textDocument/didOpen", sync_open(uri, 7, "old"))).to_equal(true)
+        val before = lsp_document_snapshot(uri).unwrap()
+        expect(lsp_document_sync_apply("textDocument/didChange", sync_change(uri, 9, [sync_text("new")]))).to_equal(true)
+        expect(lsp_document_snapshot_matches(before)).to_equal(false)
+        expect(lsp_document_sync_apply("textDocument/didChange", sync_change(uri, 8, [sync_text("stale")]))).to_equal(false)
+        val after = lsp_document_snapshot(uri).unwrap()
+        expect(after.version).to_equal(9)
+        expect(after.content).to_equal("new")
+        expect(lsp_document_sync_apply("textDocument/didClose", sync_open(uri, 0, ""))).to_equal(true)
+
+    it "validates every full replacement before changing state":
+        step("Reject a malformed later replacement atomically")
+        val uri = "file:///sync-atomic.spl"
+        expect(lsp_document_sync_apply("textDocument/didOpen", sync_open(uri, 2, "original"))).to_equal(true)
+        val invalid = json_value_object_from([("text", JsonValue.Null)])
+        expect(lsp_document_sync_apply("textDocument/didChange", sync_change(uri, 3, [sync_text("partial"), invalid]))).to_equal(false)
+        expect(lsp_document_snapshot(uri) == nil).to_equal(true)
+        val document = json_value_object_from([("uri", JsonValue.Str(uri))])
+        val position = json_value_object_from([("line", JsonValue.Int(0)), ("character", JsonValue.Int(0))])
+        val range = json_value_object_from([("start", position), ("end", position)])
+        val request = json_value_serialize(json_value_object_from([("textDocument", document), ("range", range)]))
+        val refusal = lsp_code_action_response("1", request, "/must-not-launch")
+        expect(refusal).to_contain("open editor document revision")
+        val ranged = json_value_object_from([("text", JsonValue.Str("partial")), ("range", JsonValue.Null)])
+        expect(lsp_document_sync_apply("textDocument/didChange", sync_change(uri, 3, [ranged]))).to_equal(false)
+        expect(lsp_document_snapshot(uri) == nil).to_equal(true)
+        expect(lsp_document_sync_apply("textDocument/didChange", sync_change(uri, 10, []))).to_equal(false)
+        expect(lsp_document_sync_apply("textDocument/didChange", sync_change(uri, 9, [sync_text("too old")]))).to_equal(false)
+        expect(lsp_document_snapshot(uri) == nil).to_equal(true)
+        expect(lsp_document_sync_apply("textDocument/didChange", sync_change(uri, 10, [sync_text("resynchronized")]))).to_equal(true)
+        val restored = lsp_document_snapshot(uri).unwrap()
+        expect(restored.version).to_equal(10)
+        expect(restored.content).to_equal("resynchronized")
+        expect(lsp_document_sync_apply("textDocument/didClose", sync_open(uri, 0, ""))).to_equal(true)
+
+    it "uses the final full replacement and prevents duplicate-open rewind":
+        step("Apply multiple full changes and reject a conflicting reopen")
+        val uri = "file:///sync-multiple.spl"
+        expect(lsp_document_sync_apply("textDocument/didOpen", sync_open(uri, -2, "first"))).to_equal(true)
+        expect(lsp_document_sync_apply("textDocument/didChange", sync_change(uri, -1, [sync_text("middle"), sync_text("last")]))).to_equal(true)
+        expect(lsp_document_sync_apply("textDocument/didOpen", sync_open(uri, -2, "rewind"))).to_equal(false)
+        val actual = lsp_document_snapshot(uri).unwrap()
+        expect(actual.version).to_equal(-1)
+        expect(actual.content).to_equal("last")
+        expect(lsp_document_sync_apply("textDocument/didClose", sync_open(uri, 0, ""))).to_equal(true)
+
+    it "rejects changes without an open owner and malformed notification JSON":
+        step("Reject invalid sync input without creating document ownership")
+        val uri = "file:///sync-unopened.spl"
+        expect(lsp_document_sync_apply("textDocument/didChange", sync_change(uri, 1, [sync_text("text")]))).to_equal(false)
+        expect(lsp_document_sync_apply("textDocument/didOpen", "{invalid}")).to_equal(false)
+        expect(lsp_document_snapshot(uri) == nil).to_equal(true)
+
+    it "keeps accepted bytes and version intact while revoking stale authority":
+        step("Invalidate a newer observation in the same document owner")
+        var owner = LspServer.create()
+        expect(owner.open_doc("file:///local.spl", 2, "original")).to_equal(true)
+        owner.invalidate_doc("file:///local.spl", 7)
+        val retained = owner.get_doc("file:///local.spl")
+        expect(retained.version).to_equal(2)
+        expect(retained.content).to_equal("original")
+        expect(owner.doc_is_synchronized("file:///local.spl")).to_equal(false)
+        expect(owner.update_doc("file:///local.spl", 6, "stale resync")).to_equal(false)
+        expect(owner.update_doc("file:///local.spl", 7, "new full source")).to_equal(true)
+        expect(owner.doc_is_synchronized("file:///local.spl")).to_equal(true)
+
+    it "bounds retained documents and releases their byte budget on close":
+        step("Fill document admission and release a retained slot")
+        var owner = LspServer.create()
+        for i in 0..256:
+            expect(owner.open_doc("file:///bounded-" + str(i) + ".spl", 1, "x")).to_equal(true)
+        expect(owner.open_doc("file:///overflow.spl", 1, "x")).to_equal(false)
+        expect(owner.retained_bytes).to_equal(256)
+        owner.close_doc("file:///bounded-0.spl")
+        expect(owner.retained_bytes).to_equal(255)
+        expect(owner.open_doc("file:///overflow.spl", 1, "x")).to_equal(true)
+        expect(owner.doc_is_synchronized("file:///bounded-255.spl")).to_equal(true)
+
+    it "bounds per-document and total retained bytes without partial updates":
+        step("Refuse oversized retention and reclaim capacity after replacement")
+        var block = "x"
+        for i in 0..20: block = block + block
+        var owner = LspServer.create()
+        for i in 0..16:
+            expect(owner.open_doc("file:///bytes-" + str(i) + ".spl", 1, block)).to_equal(true)
+        expect(owner.retained_bytes).to_equal(16777216)
+        expect(owner.open_doc("file:///extra.spl", 1, "x")).to_equal(false)
+        expect(owner.update_doc("file:///bytes-0.spl", 2, block + "x")).to_equal(false)
+        val retained = owner.get_doc("file:///bytes-0.spl")
+        expect(retained.version).to_equal(1)
+        expect(retained.content).to_equal(block)
+        expect(owner.doc_is_synchronized("file:///bytes-0.spl")).to_equal(false)
+        expect(owner.update_doc("file:///bytes-0.spl", 2, "")).to_equal(true)
+        expect(owner.open_doc("file:///extra.spl", 1, "x")).to_equal(true)
+        expect(owner.retained_bytes).to_equal(15728641)
+
+    it "revokes authority on a conflicting reopen at the same version":
+        step("Reject same-version editor content ambiguity")
+        var owner = LspServer.create()
+        expect(owner.open_doc("file:///reopen.spl", 4, "accepted")).to_equal(true)
+        expect(owner.open_doc("file:///reopen.spl", 4, "different")).to_equal(false)
+        val retained = owner.get_doc("file:///reopen.spl")
+        expect(retained.content).to_equal("accepted")
+        expect(retained.version).to_equal(4)
+        expect(owner.doc_is_synchronized("file:///reopen.spl")).to_equal(false)
+        expect(owner.update_doc("file:///reopen.spl", 5, "authoritative")).to_equal(true)
+
+    it "counts multibyte source and URI budgets in bytes":
+        step("Charge Unicode retention by bytes and reject oversize Unicode source")
+        var owner = LspServer.create()
+        expect(owner.open_doc("file:///unicode.spl", 1, "é😀")).to_equal(true)
+        expect(owner.retained_bytes).to_equal(6)
+        owner.close_doc("file:///unicode.spl")
+        expect(owner.retained_bytes).to_equal(0)
+        var block = "é"
+        for i in 0..19: block = block + block
+        expect(owner.open_doc("file:///limit.spl", 1, block)).to_equal(true)
+        expect(owner.retained_bytes).to_equal(1048576)
+        expect(owner.update_doc("file:///limit.spl", 2, block + "é")).to_equal(false)
+        expect(owner.retained_bytes).to_equal(1048576)
+        var long_uri = "é"
+        for i in 0..11: long_uri = long_uri + long_uri
+        expect(owner.open_doc("file:///" + long_uri, 1, "")).to_equal(false)
+
+    it "refuses disk growth beyond the snapshot budget before starting a query":
+        step("Grow a previously admitted source file beyond the bounded-read ceiling")
+        val root = secure_temp_dir(get_temp_dir(), "simple-lsp-revision-budget-").unwrap()
+        val path = root + "/source.spl"
+        val uri = "file://" + path
+        expect(file_write(path, "x")).to_equal(true)
+        expect(lsp_document_sync_apply("textDocument/didOpen", sync_open(uri, 1, "x"))).to_equal(true)
+        var oversized = "x"
+        for i in 0..20: oversized = oversized + oversized
+        expect(file_write(path, oversized + "x")).to_equal(true)
+        val document = json_value_object_from([("uri", JsonValue.Str(uri))])
+        val position = json_value_object_from([("line", JsonValue.Int(0)), ("character", JsonValue.Int(0))])
+        val range = json_value_object_from([("start", position), ("end", position)])
+        val request = json_value_serialize(json_value_object_from([("textDocument", document), ("range", range)]))
+        val response = lsp_handle_code_action("2", request)
+        expect(response).to_contain("could not read the analyzed source")
+        expect(lsp_document_sync_apply("textDocument/didClose", sync_open(uri, 0, ""))).to_equal(true)
+        expect(file_delete(path)).to_equal(true)
+        expect(dir_remove(root, false)).to_equal(true)
+
+    it "revokes authority on conflicting same-version changes but ignores old ones":
+        step("Distinguish stale delivery from contradictory current editor content")
+        var owner = LspServer.create()
+        expect(owner.open_doc("file:///same-change.spl", 5, "current")).to_equal(true)
+        expect(owner.update_doc("file:///same-change.spl", 4, "old")).to_equal(false)
+        expect(owner.doc_is_synchronized("file:///same-change.spl")).to_equal(true)
+        expect(owner.update_doc("file:///same-change.spl", 5, "different")).to_equal(false)
+        expect(owner.doc_is_synchronized("file:///same-change.spl")).to_equal(false)
+        val retained = owner.get_doc("file:///same-change.spl")
+        expect(retained.version).to_equal(5)
+        expect(retained.content).to_equal("current")
+        expect(owner.update_doc("file:///same-change.spl", 6, "resynced")).to_equal(true)
+
+fn lsp_revision_request(uri: text) -> text:
+    val document = json_value_object_from([("uri", JsonValue.Str(uri))])
+    val position = json_value_object_from([("line", JsonValue.Int(0)), ("character", JsonValue.Int(0))])
+    val range = json_value_object_from([("start", position), ("end", position)])
+    json_value_serialize(json_value_object_from([("textDocument", document), ("range", range)]))
+
+fn lsp_revision_ordinary_output(path: text, source: text) -> text:
+    val proposals = collect_fixes_from_source(path, source)
+    val map = lsp_edit_source_map(source)
+    var actions: [JsonValue] = []
+    for proposal in proposals:
+        if proposal.id.starts_with("L:todo_format:"):
+            expect(proposal.base_version).to_equal(map.source_version)
+            var edits: [JsonValue] = []
+            for replacement in proposal.replacements:
+                edits.push(lsp_code_action_text_edit(map, replacement.start, replacement.end, replacement.new_text).unwrap())
+            expect(edits.len()).to_be_greater_than(0)
+            actions.push(lsp_query_code_action(proposal.description, "quickfix", proposal.is_safe(), path, edits, proposal.base_version))
+    expect(actions.len()).to_be_greater_than(0)
+    json_value_serialize(JsonValue.Array(actions))
+
+describe "Public live handlers and consumed revision completion":
+    it "uses one owner through Unicode CRLF stale updates conflicting versions and reopen":
+        step("Drive actual public notification handlers without a diagnostic child")
+        val root = secure_temp_dir(get_temp_dir(), "simple-lsp-public-owner-").unwrap()
+        val uri = "file://" + root + "/not-yet-saved.spl"
+        val source = "# 한😀\r\nfn f(): 1\r\n"
+        lsp_handle_did_open(sync_open(uri, 4, source))
+        val captured = lsp_document_snapshot(uri).unwrap()
+        expect(captured.content).to_equal(source)
+        lsp_handle_did_change(sync_change(uri, 3, [sync_text("older")]))
+        expect(lsp_document_snapshot_matches(captured)).to_equal(true)
+        lsp_handle_did_change(sync_change(uri, 4, [sync_text("conflicting")]))
+        expect(lsp_document_snapshot(uri) == nil).to_equal(true)
+        val refusal = lsp_handle_code_action("20", lsp_revision_request(uri))
+        expect(refusal).to_contain("open editor document revision")
+        lsp_handle_did_change(sync_change(uri, 5, [sync_text(source)]))
+        expect(lsp_document_snapshot(uri).unwrap().content).to_equal(source)
+        lsp_handle_did_change(sync_change(uri, 4, []))
+        expect(lsp_document_snapshot(uri).unwrap().version).to_equal(5)
+        lsp_handle_did_change(sync_change(uri, 5, []))
+        expect(lsp_document_snapshot(uri) == nil).to_equal(true)
+        expect(lsp_handle_code_action("25", lsp_revision_request(uri))).to_contain("open editor document revision")
+        lsp_handle_did_change(sync_change(uri, 6, [sync_text(source)]))
+        expect(lsp_document_snapshot(uri).unwrap().version).to_equal(6)
+        expect(lsp_document_snapshot(uri).unwrap().content).to_equal(source)
+        val missing_old_text = json_value_object_from([("uri", JsonValue.Str(uri)), ("version", JsonValue.Int(5))])
+        lsp_handle_did_open(json_value_serialize(json_value_object_from([("textDocument", missing_old_text)])))
+        expect(lsp_document_snapshot(uri).unwrap().version).to_equal(6)
+        val missing_text = json_value_object_from([("uri", JsonValue.Str(uri)), ("version", JsonValue.Int(6))])
+        lsp_handle_did_open(json_value_serialize(json_value_object_from([("textDocument", missing_text)])))
+        expect(lsp_document_snapshot(uri) == nil).to_equal(true)
+        lsp_handle_did_change(sync_change(uri, 7, [sync_text(source)]))
+        val missing_version = json_value_object_from([("uri", JsonValue.Str(uri)), ("text", JsonValue.Str(source))])
+        lsp_handle_did_open(json_value_serialize(json_value_object_from([("textDocument", missing_version)])))
+        expect(lsp_document_snapshot(uri) == nil).to_equal(true)
+        expect(lsp_handle_code_action("26", lsp_revision_request(uri))).to_contain("open editor document revision")
+        lsp_handle_did_change(sync_change(uri, 8, [sync_text(source)]))
+        expect(lsp_document_snapshot(uri).unwrap().content).to_equal(source)
+        lsp_handle_did_close(sync_open(uri, 8, source))
+        lsp_handle_did_open(sync_open(uri, 4, source))
+        val reopened = lsp_document_snapshot(uri).unwrap()
+        expect(reopened.lifetime_generation).to_be_greater_than(captured.lifetime_generation)
+        expect(lsp_document_snapshot_matches(captured)).to_equal(false)
+        lsp_handle_did_close(sync_open(uri, 4, source))
+        expect(dir_remove(root, false)).to_equal(true)
+
+    it "accepts a real ordinary producer then refuses stale stamps and closed lifetimes":
+        step("Complete production-produced actions against a real file and live owner")
+        val root = secure_temp_dir(get_temp_dir(), "simple-lsp-completion-").unwrap()
+        val path = root + "/source.spl"
+        val uri = "file://" + path
+        val source = "# TODO: repair\nfn f(): 1\n"
+        expect(file_write(path, source)).to_equal(true)
+        expect(lsp_document_sync_apply("textDocument/didOpen", sync_open(uri, 17, source))).to_equal(true)
+        val captured = lsp_document_snapshot(uri).unwrap()
+        val output = lsp_revision_ordinary_output(path, source)
+        val response = lsp_code_action_complete_v1("21", captured, path, path, output)
+        val result = json_value_items(json_value_field(json_parse_value_strict(response).unwrap(), "result"))
+        expect(result.len()).to_be_greater_than(0)
+        expect(json_value_has(result[0], "disabled")).to_equal(false)
+        val documents = json_value_items(json_value_field(json_value_field(result[0], "edit"), "documentChanges"))
+        expect(json_value_field(json_value_field(documents[0], "textDocument"), "version")).to_equal(JsonValue.Int(17))
+        val stale_output = lsp_revision_ordinary_output(path, source + "# changed\n")
+        val stale = lsp_code_action_complete_v1("22", captured, path, path, stale_output)
+        val stale_actions = json_value_items(json_value_field(json_parse_value_strict(stale).unwrap(), "result"))
+        expect(json_value_has(stale_actions[0], "disabled")).to_equal(true)
+        expect(json_value_has(stale_actions[0], "edit")).to_equal(false)
+        val malformed = json_value_object_from([("text", JsonValue.Null)])
+        lsp_handle_did_change(sync_change(uri, 16, [malformed]))
+        expect(lsp_document_snapshot_matches(captured)).to_equal(true)
+        lsp_handle_did_change(sync_change(uri, 17, [sync_text("contradiction"), malformed]))
+        expect(lsp_document_snapshot(uri) == nil).to_equal(true)
+        val revoked = lsp_code_action_complete_v1("27", captured, path, path, output)
+        expect(revoked).to_contain("Source changed during analysis")
+        expect(lsp_document_sync_apply("textDocument/didClose", sync_open(uri, 17, source))).to_equal(true)
+        expect(lsp_document_sync_apply("textDocument/didOpen", sync_open(uri, 17, source))).to_equal(true)
+        val reopened = lsp_code_action_complete_v1("23", captured, path, path, output)
+        expect(reopened).to_contain("Source changed during analysis")
+        expect(lsp_document_sync_apply("textDocument/didClose", sync_open(uri, 17, source))).to_equal(true)
+        expect(file_delete(path)).to_equal(true)
+        expect(dir_remove(root, false)).to_equal(true)

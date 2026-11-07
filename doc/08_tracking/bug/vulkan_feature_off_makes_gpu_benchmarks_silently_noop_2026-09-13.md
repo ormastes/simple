@@ -80,3 +80,35 @@ This cost most of a session. The failure mode is maximally misleading: the probe
 is green, the device is real, the handle is non-zero, and the only symptom is a
 benchmark that prints its header and exits 0 — which reads as "the benchmark is
 broken" rather than "this binary cannot do Vulkan".
+
+## 2026-11-07 current-owner audit — do not gate the wrong backend family
+
+The original implementation inventory above is historical. At authenticated
+release/1.0.0 `68a6f89671421a65a1b99faba1b76cba592850eb`, `gpu.rs`
+contains two distinct Vulkan families. The `rt_vk_*` runtime wrappers are
+conditional on the Cargo `vulkan` feature. The interpreter's `rt_vulkan_*`
+family instead owns an unconditional dynamic-loader implementation.
+
+`interpreter_extern/mod.rs` registers `rt_vulkan_is_available`,
+`rt_vulkan_alloc_buffer`, `rt_vulkan_dispatch` and
+`rt_vulkan_submit_and_wait` directly to that second family. Its buffer
+handler calls the loaded `create_buffer` pointer and its dispatch handler
+calls the loaded `cmd_dispatch` pointer; they do not become the feature-off
+`rt_vk_*` stubs. Source identities are `gpu.rs` Git blob
+`82acf26bdd90ce5eb973efead9148087637546c1` and registration-module blob
+`552f1cc72ed6f302cbb27a68b2a039921ffc902b`.
+
+Consequently, adding `cfg!(feature = "vulkan")` to the existing interpreter
+availability handler would hide an implemented default-build backend. An
+isolated proposal doing that was rejected by independent source review and
+withdrawn before publication or execution. No availability predicate,
+feature selection, runtime symbol, loader, dispatcher or device state was
+changed. Do not repeat that proposed fix based only on Cargo forwarding or
+the older family inventory.
+
+Disposition: current interpreter source no longer matches the stated
+feature-off/stub mechanism. This is source evidence, not a device or benchmark
+PASS. Default-build execution, native/JIT routing and real transfer/dispatch
+must be bound to their actual selected provider before declaring the whole
+record resolved. No GPU, performance or platform checks were run in this
+audit, and the canonical BugDB row remains untouched and OPEN.

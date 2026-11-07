@@ -1,0 +1,132 @@
+use std.spec.*
+use compiler.hir.hir_types.{HirModule, SymbolTable}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_aot_native_output.{
+    driver_cold_hir_record_verified_object_v1
+}
+use compiler.driver.cache.cold_hir_semantic_seed_v1.{
+    ColdHirTypedReceiptV1,
+    cold_hir_typed_receipts_from_lowered_sources_v1,
+    cold_hir_typed_receipts_from_held_sources_v1,
+    cold_hir_receipt_capture_scope_v1
+}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryEntryV1, CompileSourceInventoryV1,
+    CompileSourceInventoryReadV1,
+    compile_source_inventory_digest_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+# Per-file pool (SIMPLE_FILE_WORKER_UNIT=1, 2026-11-07). A unit child holds HIR
+# for its picked batch plus that batch's import closure, but every closure
+# source row. Two regressions this spec pins:
+#  (a) capturing over every closure row failed on the first row it never
+#      lowered: cold-hir-lowered-module-missing:app.cli.bootstrap_main;
+#  (b) capturing NOTHING (PR #7617) left cold_hir_typed_receipts empty, so the
+#      unit recorded no capsule identity, published "" in its MIR-shard ledger
+#      sidecar, and the link rejected every object with
+#      cold-hir-object-identity-invalid.
+
+fn subset_module(path: text, name: text) -> HirModule:
+    HirModule(name: name, path: path, imports: [], exports: [],
+        domain_blocks: [], symbols: SymbolTable.new(), functions: {},
+        gpu_function_targets: {}, gpu_function_backend_orders: {}, classes: {},
+        structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [], extend_enums: [])
+
+# Three closure rows pkg/{a,b,c}.spl; `held` names the modules whose HIR the
+# process holds. `held_only` selects the unit-child subset capture.
+fn subset_receipts(held: [text], held_only: bool,
+        unheld_b_digest: text = "") -> Result<[ColdHirTypedReceiptV1], text>:
+    val content = "pub val value = 1\n"
+    val digest = sha256_text(content)
+    val empty = sha256_text("")
+    var entries: [CompileSourceInventoryEntryV1] = []
+    var modules: Dict<text, HirModule> = {}
+    var rows: [text] = []
+    for suffix in ["a", "b", "c"]:
+        val identity = "pkg/{suffix}.spl"
+        val name = "pkg.{suffix}"
+        entries.push(CompileSourceInventoryEntryV1(
+            identity, digest, empty, empty, empty, empty, content.len()))
+        rows.push("{identity}|sha256_{digest}|{content.len()}")
+        if held.contains(name):
+            modules[name] = subset_module("/repo/{identity}", name)
+    val inventory = CompileSourceInventoryV1(1, 1, entries)
+    val inventory_digest = compile_source_inventory_digest_v1(inventory)
+    val admitted = CompileSourceInventoryReadV1(
+        true, "", inventory_digest, Some(inventory))
+    val snapshot = rows.join("\n")
+    val paths = ["/repo/pkg/a.spl", "/repo/pkg/b.spl", "/repo/pkg/c.spl"]
+    val b_digest = if unheld_b_digest == "": digest else: unheld_b_digest
+    val digests = [digest, b_digest, digest]
+    val sizes = [content.len(), content.len(), content.len()]
+    val names = ["pkg.a", "pkg.b", "pkg.c"]
+    if held_only:
+        return cold_hir_typed_receipts_from_held_sources_v1(
+            "/repo", inventory_digest, admitted,
+            snapshot, sha256_text(snapshot), paths, digests, sizes, names, modules)
+    cold_hir_typed_receipts_from_lowered_sources_v1(
+        "/repo", inventory_digest, admitted,
+        snapshot, sha256_text(snapshot), paths, digests, sizes, names, modules)
+
+fn receipt_modules(receipts: [ColdHirTypedReceiptV1]) -> [text]:
+    var names: [text] = []
+    for receipt in receipts:
+        names.push(receipt.seed.module_identity)
+    names
+
+describe "cold HIR receipt capture scope":
+    it "selects whole-closure capture outside a unit and a held subset inside one":
+        expect(cold_hir_receipt_capture_scope_v1(false, false)).to_equal("closure")
+        expect(cold_hir_receipt_capture_scope_v1(true, false)).to_equal("closure")
+        expect(cold_hir_receipt_capture_scope_v1(false, true)).to_equal("held-subset")
+
+    it "fails closed when a unit child is asked for the full inventory":
+        expect(cold_hir_receipt_capture_scope_v1(true, true)).to_equal(
+            "cold-hir-full-inventory-file-worker-unit")
+
+describe "per-file unit subset cold HIR capture":
+    it "keeps whole-closure capture strict about rows it never lowered":
+        val closure = subset_receipts(["pkg.a", "pkg.c"], false)
+        expect(closure.is_err()).to_be(true)
+        expect(closure.unwrap_err()).to_equal("cold-hir-lowered-module-missing:pkg.b")
+
+    it "(a) captures exactly the held modules without requiring unlowered rows":
+        val held = subset_receipts(["pkg.a", "pkg.c"], true)
+        expect(held.is_ok()).to_be(true)
+        expect(receipt_modules(held.unwrap())).to_equal(["pkg.a", "pkg.c"])
+
+    it "captures the full closure when the unit holds every row":
+        val held = subset_receipts(["pkg.a", "pkg.b", "pkg.c"], true)
+        expect(receipt_modules(held.unwrap())).to_equal(["pkg.a", "pkg.b", "pkg.c"])
+
+    it "still admits an unheld row against the frozen inventory":
+        val held = subset_receipts(["pkg.a", "pkg.c"], true, sha256_text("drift"))
+        expect(held.is_err()).to_be(true)
+        expect(held.unwrap_err()).to_equal("cold-hir-source-content-mismatch")
+
+    it "fails closed when the unit holds no closure row":
+        val held = subset_receipts([], true)
+        expect(held.is_err()).to_be(true)
+        expect(held.unwrap_err()).to_equal("cold-hir-file-worker-unit-receipts-empty")
+
+    it "(b) lets the unit record a capsule identity for every module it lowered":
+        val held = subset_receipts(["pkg.a", "pkg.c"], true)
+        val ctx = CompileContext.create(driver_core_compile_options_default())
+        ctx.cold_hir_typed_receipts = held.unwrap()
+        expect(driver_cold_hir_record_verified_object_v1(
+            ctx, "pkg.a", "/tmp/pkg-a.o", "capsule-a")).to_equal("")
+        expect(driver_cold_hir_record_verified_object_v1(
+            ctx, "pkg.c", "/tmp/pkg-c.o", "capsule-c")).to_equal("")
+        expect(ctx.cold_hir_native_capsule_identities.len()).to_equal(2)
+        expect(ctx.cold_hir_native_capsule_identities["pkg.a"]).to_equal("capsule-a")
+        expect(ctx.cold_hir_native_capsule_identities["pkg.c"]).to_equal("capsule-c")
+
+    it "(b) shows an empty capture publishes no identity for the link to admit":
+        val ctx = CompileContext.create(driver_core_compile_options_default())
+        expect(driver_cold_hir_record_verified_object_v1(
+            ctx, "pkg.a", "/tmp/pkg-a.o", "capsule-a")).to_equal("")
+        expect(ctx.cold_hir_native_capsule_identities.len()).to_equal(0)

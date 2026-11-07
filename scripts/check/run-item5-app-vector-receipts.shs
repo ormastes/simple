@@ -186,7 +186,7 @@ for json in "$producer_receipt" "$app_manifest"; do
     size=$(stat -c %s -- "$json") || fail "cannot stat provenance JSON $json"
     [ "$size" -le 65536 ] || fail 'provenance JSON exceeds 64 KiB bound'
 done
-mkdir -p "$output/staged" "$output/logs" "$output/receipts"
+mkdir -p "$output/staged" "$output/build/providers" "$output/logs" "$output/receipts"
 sha_file() { sha256sum -- "$1" | awk '{print $1}'; }
 stage_file() {
     source=$1 name=$2 mode=$3 expected=$4
@@ -203,7 +203,8 @@ stage_app "$db_scalar" db-scalar "$db_scalar_sha"
 stage_app "$db_vector" db-vector "$db_vector_sha"
 stage_app "$http_scalar" http-scalar "$http_scalar_sha"
 stage_app "$http_vector" http-vector "$http_vector_sha"
-stage_file "$provider_dso" vector-provider.so 0444 "$provider_sha"
+sh "$stage_helper" "$provider_dso" "$output/build/providers/vector-provider.so" 0444 "$provider_sha" || fail 'cannot stage provider'
+chmod 0555 "$output/build/providers" "$output/build" || fail 'cannot freeze staged provider directories'
 stage_file "$observer_so" vector-observer.so 0444 "$observer_sha"
 stage_file "$producer_receipt" producer-hello.json 0444 "$producer_receipt_sha"
 stage_file "$app_manifest" app-build-manifest.json 0444 "$app_manifest_sha"
@@ -230,7 +231,8 @@ staged_db_scalar=$output/staged/db-scalar/${db_scalar##*/}
 staged_db_vector=$output/staged/db-vector/${db_vector##*/}
 staged_http_scalar=$output/staged/http-scalar/${http_scalar##*/}
 staged_http_vector=$output/staged/http-vector/${http_vector##*/}
-staged_provider=$output/staged/vector-provider.so
+staged_provider=$output/build/providers/vector-provider.so
+staged_provider_argument=build/providers/vector-provider.so
 staged_observer=$output/staged/vector-observer.so
 staged_producer_receipt=$output/staged/producer-hello.json
 staged_app_manifest=$output/staged/app-build-manifest.json
@@ -351,6 +353,9 @@ run_app() {
     [ ! -e "$event_receipt" ] && [ ! -e "$rss_receipt" ] || fail "duplicate role run $role"
     result=0
     (
+        # Relative provider admission and default owner-private snapshots share
+        # this writable run root; all binaries, tools and logs stay absolute.
+        cd "$output" || fail 'cannot enter private application run directory'
         exec 3>"$event_receipt"
         ulimit -f 2048 || fail 'cannot set app output-file limit'
         if [ "$target_profile" = native ]; then
@@ -411,12 +416,12 @@ run_app db-scalar "$staged_db_scalar" no-load \
     'PURE_DATABASE_SCALAR_QUERY_PASS queries=10 boundaries=31,32,33,511,512,513,1023,1024,1025 no_match=checked'
 run_app db-vector "$staged_db_vector" db-vector \
     'PURE_DATABASE_BITMAP_PROVIDER_PASS queries=10 owner_reported_calls=10 boundaries=31,32,33,511,512,513,1023,1024,1025 no_match=checked native_call_counter=unavailable isa=unproved' \
-    "$staged_provider" "$provider_sha" "$provider_id" "$implementation_id"
+    "$staged_provider_argument" "$provider_sha" "$provider_id" "$implementation_id"
 run_app http-scalar "$staged_http_scalar" no-load \
     'HTTP_SCALAR_LIVE_SOCKET_PROBE_COMPLETE valid=true security_rejection=true provider_used=false'
 run_app http-vector "$staged_http_vector" http-vector \
     'HTTP_VECTOR_LIVE_SOCKET_PROBE_COMPLETE provider_used=true retained_session_reused=true scalar_fallback=true security_rejection=true' \
-    "$staged_provider" "$provider_sha"
+    "$staged_provider_argument" "$provider_sha"
 
 compare_db_records() {
     perl - "$output/logs/db-scalar.stdout" "$output/logs/db-vector.stdout" <<'PERL'

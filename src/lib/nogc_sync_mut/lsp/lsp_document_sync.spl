@@ -1,0 +1,82 @@
+# Live protocol adapter over the existing LspServer document owner.
+# Full synchronization is advertised (change=1); incremental ranges are rejected.
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_has, json_value_text_or}
+use std.nogc_sync_mut.lsp.server.{LspServer, DocumentInfo}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+
+var LSP_DOCUMENT_OWNER = LspServer.create()
+
+pub fn lsp_read_analyzed_source(path: text) -> Result<text, text>:
+    # Admission happens on the opened regular file before allocation/decoding;
+    # a disk file that grew after didOpen cannot evade the editor byte ceiling.
+    file_read_regular_no_follow_bounded(path, 1048576)
+
+pub fn lsp_document_snapshot(uri: text) -> DocumentInfo?:
+    if not LSP_DOCUMENT_OWNER.doc_is_synchronized(uri): return nil
+    Some(LSP_DOCUMENT_OWNER.get_doc(uri))
+
+pub fn lsp_document_snapshot_matches(snapshot: DocumentInfo) -> bool:
+    val current = lsp_document_snapshot(snapshot.uri)
+    if current == nil: return false
+    val value = current.unwrap()
+    value.lifetime_generation == snapshot.lifetime_generation and value.version == snapshot.version and value.content == snapshot.content
+
+pub fn lsp_document_sync_uri(body: text) -> text:
+    val parsed = json_parse_value_strict(body)
+    if parsed.is_err(): return ""
+    val message = parsed.unwrap()
+    var params = json_value_field(message, "params")
+    if not json_value_has(message, "params"): params = message
+    val document = json_value_field(params, "textDocument")
+    json_value_text_or(json_value_field(document, "uri"), "")
+
+pub fn lsp_document_sync_apply(method: text, body: text) -> bool:
+    val parsed = json_parse_value_strict(body)
+    if parsed.is_err(): return false
+    val message = parsed.unwrap()
+    var params = json_value_field(message, "params")
+    if not json_value_has(message, "params"): params = message
+    val document = json_value_field(params, "textDocument")
+    val uri = json_value_text_or(json_value_field(document, "uri"), "")
+    if uri == "": return false
+    if method == "textDocument/didClose":
+        if LSP_DOCUMENT_OWNER.find_doc(uri) < 0: return false
+        LSP_DOCUMENT_OWNER.close_doc(uri)
+        return true
+    var version: i64 = 0
+    match json_value_field(document, "version"):
+        case Int(value): version = value
+        case _:
+            if method == "textDocument/didChange" or method == "textDocument/didOpen":
+                LSP_DOCUMENT_OWNER.invalidate_doc_unknown_version(uri)
+            return false
+    if method == "textDocument/didOpen":
+        match json_value_field(document, "text"):
+            case Str(content): return LSP_DOCUMENT_OWNER.open_doc(uri, version, content)
+            case _:
+                LSP_DOCUMENT_OWNER.invalidate_doc(uri, version)
+                return false
+    if method != "textDocument/didChange": return false
+    # Retain accepted bytes/version, but revoke authority after a malformed
+    # newer change. Only a valid full sync at/after that version restores it.
+    # Validate the entire notification before mutating source content. Each full
+    # replacement supersedes the preceding one; the last is the new document.
+    var source = ""
+    match json_value_field(params, "contentChanges"):
+        case Array(changes):
+            if changes.len() == 0:
+                LSP_DOCUMENT_OWNER.invalidate_doc(uri, version)
+                return false
+            for change in changes:
+                if json_value_has(change, "range") or json_value_has(change, "rangeLength"):
+                    LSP_DOCUMENT_OWNER.invalidate_doc(uri, version)
+                    return false
+                match json_value_field(change, "text"):
+                    case Str(content): source = content
+                    case _:
+                        LSP_DOCUMENT_OWNER.invalidate_doc(uri, version)
+                        return false
+        case _:
+            LSP_DOCUMENT_OWNER.invalidate_doc(uri, version)
+            return false
+    LSP_DOCUMENT_OWNER.update_doc(uri, version, source)

@@ -1,0 +1,70 @@
+# Repro: stage2_hir_registration_reencode_timeout_2026-10-16.
+#
+# HIR shard registration publishes each module's complete body twice -- the
+# parser-keyed transaction cache entry and the content-keyed body archive --
+# and before the fix every publication re-ran `hir_module_encode` on the same
+# unchanged module: the archive store encoded once for its body digest and its
+# inner cache store encoded again (2 per archive store, 3 per registered
+# module). Each encode is a full ~0.2 MB walk with ~56 MB scratch; across
+# 1,600-3,000 modules this held Stage 2 past its 3,600 s bound.
+#
+# Counts `hir_module_encode_calls()` around one archive publication with the
+# sampled store self-check OFF (it deliberately decodes and re-encodes; it is
+# a validation gate, not registration, and runs every 8th store in bootstrap).
+
+use std.spec.*
+use app.io.env_ops.{env_get, env_set}
+use test.fixtures.compiler.hir_encode_once.hir_encode_once_v1.{hir_encode_once_module_v1,
+    hir_encode_once_archive_input_v1}
+use compiler.hir.hir_codec.{hir_module_encode_calls}
+use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_promote_diagnostic_owner_v1,
+    hir_cache_clear_last_warnings}
+use compiler.driver.cache.hir_body_typecheck_lease_v1.{hir_body_archive_store_in_owned_scope_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_getpid() -> i64
+
+# Encode delta of one archive store (the shard's second publication), or -1
+# when the archive itself was refused.
+fn archive_store_encode_delta_v1(root: text) -> i64:
+    val module = hir_encode_once_module_v1(root, false)
+    val input = hir_encode_once_archive_input_v1(root, module)
+    if not transient_scope_begin():
+        panic("encode-count spec requires a real scratch scope")
+    val before = hir_module_encode_calls()
+    val archived = hir_body_archive_store_in_owned_scope_v1(input, module, ["w"])
+    val delta = hir_module_encode_calls() - before
+    val ok = archived.is_ok()
+    val _owner = hir_cache_promote_diagnostic_owner_v1()
+    hir_cache_clear_last_warnings()
+    if not transient_scope_end():
+        panic("encode-count spec could not end scratch scope")
+    if ok: delta else: -1
+
+describe "HIR registration encode count":
+    it "encodes a module once per body-archive publication":
+        val root = "build/hir_registration_encode_count_{rt_getpid()}"
+        expect(rt_dir_create_all(root)).to_equal(true)
+        val saved_scope = env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? ""
+        val saved_dir = env_get("SIMPLE_HIR_CACHE_DIR") ?? ""
+        val saved_cache = env_get("SIMPLE_HIR_CACHE") ?? ""
+        val saved_check = env_get("SIMPLE_HIR_CACHE_SELFCHECK") ?? ""
+        val saved_count = env_get("SIMPLE_HIR_ENCODE_COUNT_DIAGNOSTIC") ?? ""
+        expect(env_set("SIMPLE_FRONTEND_CACHE_SCOPE", "encode-count-spec")).to_be(true)
+        expect(env_set("SIMPLE_HIR_CACHE_DIR", root + "/hir")).to_be(true)
+        expect(env_set("SIMPLE_HIR_CACHE", "1")).to_be(true)
+        expect(env_set("SIMPLE_HIR_CACHE_SELFCHECK", "0")).to_be(true)
+        expect(env_set("SIMPLE_HIR_ENCODE_COUNT_DIAGNOSTIC", "1")).to_be(true)
+        expect(hir_cache_enabled()).to_equal(true)
+
+        # Before the fix: 2 (digest encode + inner cache-store encode).
+        expect(archive_store_encode_delta_v1(root)).to_equal(1)
+
+        val _scope = env_set("SIMPLE_FRONTEND_CACHE_SCOPE", saved_scope)
+        val _dir = env_set("SIMPLE_HIR_CACHE_DIR", saved_dir)
+        val _cache = env_set("SIMPLE_HIR_CACHE", saved_cache)
+        val _check = env_set("SIMPLE_HIR_CACHE_SELFCHECK", saved_check)
+        val _count = env_set("SIMPLE_HIR_ENCODE_COUNT_DIAGNOSTIC", saved_count)
+        val _gone = rt_dir_remove_all(root)

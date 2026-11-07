@@ -1,28 +1,32 @@
+use std.common.string_core.{str_len}
 # Pure query/LSP code-action boundary. JSON is the explicit wire protocol.
 use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field,
     json_value_has, json_value_items, json_value_keys, json_value_text_or,
     json_value_object_from, json_value_object_set, json_value_serialize}
 
+use std.tooling.easy_fix.snapshot.{snapshot_version}
+
 pub struct LspEditSourceMap:
     source: text
+    source_version: text
     line_starts: [i64]
 
 pub fn lsp_edit_source_map(source: text) -> LspEditSourceMap:
     var starts: [i64] = [0]
     var i = 0
-    while i < source.byte_len():
+    while i < str_len(source):
         val byte = source.byte_at(i)
-        if byte == 13 and i + 1 < source.byte_len() and source.byte_at(i + 1) == 10:
+        if byte == 13 and i + 1 < str_len(source) and source.byte_at(i + 1) == 10:
             i = i + 1
             starts.push(i + 1)
         elif byte == 10 or byte == 13:
             starts.push(i + 1)
         i = i + 1
-    LspEditSourceMap(source: source, line_starts: starts)
+    LspEditSourceMap(source: source, source_version: snapshot_version(source), line_starts: starts)
 
 fn edit_position(map: LspEditSourceMap, offset: i64) -> JsonValue?:
-    if offset < 0 or offset > map.source.byte_len(): return nil
-    if offset < map.source.byte_len():
+    if offset < 0 or offset > str_len(map.source): return nil
+    if offset < str_len(map.source):
         val byte = map.source.byte_at(offset)
         if byte >= 128 and byte < 192: return nil
         if byte == 10 and offset > 0 and map.source.byte_at(offset - 1) == 13: return nil
@@ -47,22 +51,26 @@ pub fn lsp_code_action_text_edit(map: LspEditSourceMap, start: i64, end: i64, ne
     val range = json_value_object_from([("start", start_position), ("end", end_position)])
     Some(json_value_object_from([("range", range), ("newText", JsonValue.Str(new_text))]))
 
-pub fn lsp_query_code_action(title: text, kind: text, preferred: bool, file: text, edits: [JsonValue]) -> JsonValue:
+pub fn lsp_query_code_action(title: text, kind: text, preferred: bool, file: text, edits: [JsonValue], source_version: text = "") -> JsonValue:
     var action = json_value_object_from([("title", JsonValue.Str(title)),
         ("kind", JsonValue.Str(kind)), ("isPreferred", JsonValue.Bool(preferred))])
     if edits.len() > 0:
         val changes = json_value_object_from([(file, JsonValue.Array(edits))])
         action = json_value_object_set(action, "edit", json_value_object_from([("changes", changes)]))
+        if source_version != "":
+            val snapshot = json_value_object_from([("file", JsonValue.Str(file)), ("version", JsonValue.Str(source_version))])
+            val data = json_value_object_from([("simpleSourceSnapshots", JsonValue.Array([snapshot]))])
+            action = json_value_object_set(action, "data", data)
     action
 
 pub fn lsp_constructor_code_action(map: LspEditSourceMap, file: text, line: i64, column: i64) -> JsonValue:
     val title = "Replace .new() with constructor syntax"
     if line >= 0 and line < map.line_starts.len() and column > 0:
         val offset = map.line_starts[line] + column - 1
-        if offset >= 0 and offset + 6 <= map.source.byte_len() and map.source.substring(offset, offset + 6) == ".new()":
+        if offset >= 0 and offset + 6 <= str_len(map.source) and map.source.substring(offset, offset + 6) == ".new()":
             val edit = lsp_code_action_text_edit(map, offset, offset + 4, "")
             if edit != nil:
-                return lsp_query_code_action(title, "quickfix", true, file, [edit.unwrap()])
+                return lsp_query_code_action(title, "quickfix", true, file, [edit.unwrap()], map.source_version)
     # Mapping positional .new(args) to named constructor fields needs type
     # information. Surface that limitation as disabled, never an empty fix.
     val action = lsp_query_code_action(title, "quickfix", false, file, [])
@@ -72,14 +80,14 @@ pub fn lsp_constructor_code_action(map: LspEditSourceMap, file: text, line: i64,
 pub fn lsp_pass_code_action(map: LspEditSourceMap, file: text, line: i64) -> JsonValue?:
     if line < 0 or line >= map.line_starts.len(): return nil
     var start = map.line_starts[line]
-    while start < map.source.byte_len() and (map.source.byte_at(start) == 32 or map.source.byte_at(start) == 9):
+    while start < str_len(map.source) and (map.source.byte_at(start) == 32 or map.source.byte_at(start) == 9):
         start = start + 1
-    if start + 4 > map.source.byte_len() or map.source.substring(start, start + 4) != "pass": return nil
-    if start + 4 < map.source.byte_len():
+    if start + 4 > str_len(map.source) or map.source.substring(start, start + 4) != "pass": return nil
+    if start + 4 < str_len(map.source):
         val next = map.source.byte_at(start + 4)
         if next != 32 and next != 9 and next != 10 and next != 13 and next != 35: return nil
     val edit = lsp_code_action_text_edit(map, start, start + 4, "pass_do_nothing")?
-    Some(lsp_query_code_action("Replace 'pass' with 'pass_do_nothing'", "quickfix", true, file, [edit]))
+    Some(lsp_query_code_action("Replace 'pass' with 'pass_do_nothing'", "quickfix", true, file, [edit], map.source_version))
 
 pub fn lsp_code_action_query_args(file: text, zero_based_line: i64) -> [text]:
     ["code-actions", file, str(zero_based_line + 1), "--format", "json"]
@@ -121,12 +129,33 @@ fn valid_text_edit(edit: JsonValue) -> bool:
     val e = end.unwrap()
     e.0 > s.0 or (e.0 == s.0 and e.1 >= s.1)
 
+fn position_before(a: (i64, i64), b: (i64, i64)) -> bool:
+    a.0 < b.0 or (a.0 == b.0 and a.1 < b.1)
+
+fn text_edits_conflict(a: JsonValue, b: JsonValue) -> bool:
+    val ar = json_value_field(a, "range")
+    val br = json_value_field(b, "range")
+    val a_start = position_components(json_value_field(ar, "start")).unwrap()
+    val a_end = position_components(json_value_field(ar, "end")).unwrap()
+    val b_start = position_components(json_value_field(br, "start")).unwrap()
+    val b_end = position_components(json_value_field(br, "end")).unwrap()
+    # Shared insertion points are ambiguous, including insertion at replacement
+    # start. Touching nonempty end/start boundaries remain valid.
+    if a_start == b_start: return true
+    position_before(a_start, b_end) and position_before(b_start, a_end)
+
 fn valid_edit_array(value: JsonValue) -> bool:
     match value:
         case Array(edits):
-            if edits.len() == 0: return false
+            if edits.len() == 0 or edits.len() > 256: return false
+            var i = 0
             for edit in edits:
                 if not valid_text_edit(edit): return false
+                var j = 0
+                while j < i:
+                    if text_edits_conflict(edits[j], edit): return false
+                    j = j + 1
+                i = i + 1
             true
         case _: false
 
@@ -135,9 +164,11 @@ fn document_edit(uri: text, edits: JsonValue) -> JsonValue:
     json_value_object_from([("textDocument", document), ("edits", edits)])
 
 fn nested_workspace_edit(edit: JsonValue, uri: text) -> JsonValue?:
+    if json_value_has(edit, "changes") and json_value_has(edit, "documentChanges"): return nil
     val changes = json_value_field(edit, "changes")
     val keys = json_value_keys(changes)
     if keys.len() > 0:
+        if keys.len() > 64: return nil
         var documents: [JsonValue] = []
         for key in keys:
             val edits = json_value_field(changes, key)
@@ -155,10 +186,19 @@ fn nested_workspace_edit(edit: JsonValue, uri: text) -> JsonValue?:
     val documents = json_value_field(edit, "documentChanges")
     match documents:
         case Array(items):
-            if items.len() == 0: return nil
+            if items.len() == 0 or items.len() > 64: return nil
+            var seen: [text] = []
             for item in items:
                 val document = json_value_field(item, "textDocument")
-                if json_value_text_or(json_value_field(document, "uri"), "") == "": return nil
+                val target = json_value_text_or(json_value_field(document, "uri"), "")
+                if target == "": return nil
+                for previous in seen:
+                    if previous == target: return nil
+                seen.push(target)
+                match json_value_field(document, "version"):
+                    case Int(_): pass
+                    case Null: pass
+                    case _: return nil
                 if not valid_edit_array(json_value_field(item, "edits")): return nil
             Some(edit)
         case _: nil
@@ -198,6 +238,16 @@ fn legacy_workspace_edit(action: JsonValue, uri: text) -> JsonValue?:
     val document = document_edit(uri, JsonValue.Array([edit]))
     Some(json_value_object_from([("documentChanges", JsonValue.Array([document]))]))
 
+fn disabled_action(value: JsonValue, reason: text) -> JsonValue:
+    # Drop edit AND command atomically: a malformed edit must not leave its
+    # follow-up command runnable. Preserve only descriptive provenance.
+    var fields: [(text, JsonValue)] = []
+    for field in ["title", "kind", "diagnostics", "data"]:
+        if json_value_has(value, field): fields.push((field, json_value_field(value, field)))
+    fields.push(("isPreferred", JsonValue.Bool(false)))
+    fields.push(("disabled", json_value_object_from([("reason", JsonValue.Str(reason))])))
+    json_value_object_from(fields)
+
 fn convert_action(value: JsonValue, uri: text) -> JsonValue?:
     val title = json_value_text_or(json_value_field(value, "title"), "")
     if title == "": return nil
@@ -208,10 +258,14 @@ fn convert_action(value: JsonValue, uri: text) -> JsonValue?:
         nested_workspace_edit(json_value_field(value, "edit"), uri)
     else:
         legacy_workspace_edit(value, uri)
+    if workspace == nil and (json_value_has(value, "edit") or json_value_has(value, "newText") or json_value_has(value, "editLine")):
+        return Some(disabled_action(action, "invalid, overlapping or incomplete workspace edit; rerun analysis"))
     if workspace != nil: action = json_value_object_set(action, "edit", workspace.unwrap())
     for field in ["isPreferred", "diagnostics", "disabled", "command", "data"]:
         if json_value_has(value, field):
             action = json_value_object_set(action, field, json_value_field(value, field))
+    if workspace == nil and not json_value_has(action, "command") and not json_value_has(action, "disabled"):
+        action = disabled_action(action, "analysis supplied no executable edit or command")
     Some(action)
 
 fn convert_payload(value: JsonValue, uri: text) -> [JsonValue]:
@@ -247,4 +301,110 @@ pub fn lsp_code_actions_convert_output(output: text, uri: text) -> text:
                 val row = json_value_object_from([("title", JsonValue.Str(fields[0])), ("kind", JsonValue.Str(fields[1].trim()))])
                 val action = convert_action(row, uri)
                 if action != nil: actions.push(action.unwrap())
+    json_value_serialize(JsonValue.Array(actions))
+
+# Immutable bindings supplied by the document owner AFTER proving which bytes
+# were analyzed. Never infer authority from a version claimed in child JSON.
+pub struct LspCodeActionRevision:
+    uri: text
+    source_path: text
+    version: i64
+    source: text
+
+fn revision_position_valid(map: LspEditSourceMap, position: JsonValue) -> bool:
+    val parsed = position_components(position)
+    if parsed == nil: return false
+    val target = parsed.unwrap()
+    if target.0 >= map.line_starts.len(): return false
+    var end = str_len(map.source)
+    if target.0 + 1 < map.line_starts.len(): end = map.line_starts[target.0 + 1]
+    var units = 0
+    for ch in map.source.substring(map.line_starts[target.0], end).chars():
+        if units == target.1: return true
+        if ch == "\r" or ch == "\n": return false
+        units = units + (if ch.char_code_at(0) > 0xFFFF: 2 else: 1)
+        if units > target.1: return false
+    units == target.1
+
+struct LspCodeActionIndexedRevision:
+    revision: LspCodeActionRevision
+    source_map: LspEditSourceMap
+
+fn bind_action_revisions(action: JsonValue, revisions: [LspCodeActionIndexedRevision]) -> JsonValue:
+    if not json_value_has(action, "edit"): return action
+    val workspace = json_value_field(action, "edit")
+    val documents = json_value_items(json_value_field(workspace, "documentChanges"))
+    var bound: [JsonValue] = []
+    for item in documents:
+        val document = json_value_field(item, "textDocument")
+        val uri = json_value_text_or(json_value_field(document, "uri"), "")
+        var index = -1
+        var i = 0
+        for indexed in revisions:
+            if indexed.revision.uri == uri:
+                if index >= 0: return disabled_action(action, "ambiguous document revision authority")
+                index = i
+            i = i + 1
+        if index < 0: return disabled_action(action, "missing analyzed editor revision for " + uri)
+        val revision = revisions[index].revision
+        match json_value_field(document, "version"):
+            case Int(version):
+                if version != revision.version: return disabled_action(action, "stale workspace edit; rerun analysis")
+            case Null: pass
+            case _: return disabled_action(action, "invalid workspace edit version")
+        val map = revisions[index].source_map
+        val data = json_value_field(action, "data")
+        var stamp_count = 0
+        for stamp in json_value_items(json_value_field(data, "simpleSourceSnapshots")):
+            val file = json_value_text_or(json_value_field(stamp, "file"), "")
+            if file == revision.uri or file == revision.source_path:
+                stamp_count = stamp_count + 1
+                val version = json_value_text_or(json_value_field(stamp, "version"), "")
+                if version != map.source_version:
+                    return disabled_action(action, "analyzed source stamp differs from editor snapshot; rerun analysis")
+        if stamp_count != 1:
+            return disabled_action(action, "missing or ambiguous analyzed-source stamp")
+        for edit in json_value_items(json_value_field(item, "edits")):
+            val range = json_value_field(edit, "range")
+            if not revision_position_valid(map, json_value_field(range, "start")) or not revision_position_valid(map, json_value_field(range, "end")):
+                return disabled_action(action, "edit range is outside the analyzed editor source")
+        val identifier = json_value_object_set(document, "version", JsonValue.Int(revision.version))
+        bound.push(json_value_object_set(item, "textDocument", identifier))
+    val edit = json_value_object_from([("documentChanges", JsonValue.Array(bound))])
+    json_value_object_set(action, "edit", edit)
+
+fn action_paths_match_revision(action: JsonValue, uri: text, revisions: [LspCodeActionRevision]) -> bool:
+    val changes = json_value_field(json_value_field(action, "edit"), "changes")
+    for key in json_value_keys(changes):
+        if not key.starts_with("file://"):
+            var matched = false
+            for revision in revisions:
+                if revision.uri == uri and revision.source_path == key: matched = true
+            if not matched: return false
+    true
+
+pub fn lsp_code_actions_convert_with_revisions(output: text, uri: text, revisions: [LspCodeActionRevision]) -> text:
+    # This strict API consumes the JSON array contract of the live child, not
+    # the older log/tab compatibility format. The handler reports bad input.
+    if str_len(output) > 4194304 or revisions.len() > 64: return "[]"
+    var rows: [JsonValue] = []
+    match json_parse_value_strict(output.trim()):
+        case Ok(Array(items)): rows = items
+        case _: return "[]"
+    if rows.len() > 128: return "[]"
+    var indexed: [LspCodeActionIndexedRevision] = []
+    var total_bytes = 0
+    for revision in revisions:
+        val bytes = str_len(revision.source)
+        if bytes > 1048576 or bytes > 16777216 - total_bytes: return "[]"
+        total_bytes = total_bytes + bytes
+        indexed.push(LspCodeActionIndexedRevision(revision: revision, source_map: lsp_edit_source_map(revision.source)))
+    var actions: [JsonValue] = []
+    for row in rows:
+        val converted = convert_action(row, uri)
+        if converted != nil:
+            if not action_paths_match_revision(row, uri, revisions):
+                actions.push(disabled_action(converted.unwrap(), "query edit source path differs from the analyzed document"))
+            else:
+                actions.push(bind_action_revisions(converted.unwrap(), indexed))
     json_value_serialize(JsonValue.Array(actions))

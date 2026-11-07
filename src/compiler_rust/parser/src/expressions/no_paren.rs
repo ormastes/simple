@@ -42,6 +42,17 @@ impl<'a> Parser<'a> {
         };
 
         if let Some(op) = assign_op {
+            // `vec[...]` remains SIMD literal syntax in expressions. In an
+            // assignment target, its one element is instead the index of the
+            // ordinary identifier `vec`; a literal itself is not an lvalue.
+            // Name existence and mutability remain semantic checks.
+            let expr = match expr {
+                Expr::VecLiteral(mut elements) if elements.len() == 1 => Expr::Index {
+                    receiver: Box::new(Expr::Identifier("vec".to_string())),
+                    index: Box::new(elements.remove(0)),
+                },
+                target => target,
+            };
             let span = self.current.span;
             self.advance();
             // Trailing-`=` line continuation (`x =\n    value`). Unlike the

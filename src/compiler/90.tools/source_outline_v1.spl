@@ -1,0 +1,140 @@
+# Native syntax adapter over the canonical token-based Simple outline parser.
+# This is not external Tree-sitter, a line scanner, or semantic resolution.
+# CoreLexer's internal positions count scalars, but lexer_next_token applies
+# lex_current_token_byte_span before outline_lexer receives Token.span. All
+# native spans below are therefore already bytes; do not convert them twice.
+use compiler.frontend.treesitter.outline.{TreeSitter}
+use compiler.frontend.treesitter.outline_lexer.{treesitter_new}
+use compiler.frontend.treesitter_types.{FunctionOutline, FieldOutline, ErrorSeverity}
+use compiler.frontend.core.lexer_types.{LexSpan}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use std.common.source.contracts.{SourceSnapshotV1, SourceRangeV1,
+    SourceOutlineNodeV1, SourceOutlineIssueV1, SourceOutlineV1}
+
+fn source_native_range_v1(span: LexSpan) -> SourceRangeV1:
+    SourceRangeV1(span.start, span.end_pos)
+
+fn source_native_header_v1(bytes: [u8], span: LexSpan, body_start: i64) -> SourceRangeV1:
+    var begin = span.start
+    while begin > 0 and begin <= bytes.len() and bytes[begin - 1] != 10:
+        begin = begin - 1
+    var end_byte = if body_start > span.start: body_start else: span.end_pos
+    while end_byte > begin and end_byte <= bytes.len() and (bytes[end_byte - 1] == 32 or bytes[end_byte - 1] == 9):
+        end_byte = end_byte - 1
+    SourceRangeV1(begin, end_byte)
+
+fn source_native_leaf_v1(nodes: [SourceOutlineNodeV1], bytes: [u8],
+        name: text, kind: text, parent: i64, qualified: text,
+        span: LexSpan, body_start: i64) -> [SourceOutlineNodeV1]:
+    var result = nodes
+    val header = source_native_header_v1(bytes, span, body_start)
+    val full = SourceRangeV1(header.start_byte, span.end_pos)
+    val body = if body_start > span.start: SourceRangeV1(body_start, span.end_pos) else: SourceRangeV1(span.end_pos, span.end_pos)
+    result.push(SourceOutlineNodeV1(name, qualified, kind, parent, full, header, body))
+    result
+
+fn source_native_function_v1(nodes: [SourceOutlineNodeV1], bytes: [u8],
+        function: FunctionOutline, parent: i64, owner: text) -> [SourceOutlineNodeV1]:
+    val qualified = if owner == "": function.name else: owner + "." + function.name
+    source_native_leaf_v1(nodes, bytes, function.name, "function", parent,
+        qualified, function.span, function.body_span.start)
+
+fn source_native_container_body_v1(bytes: [u8], span: LexSpan, first_member: i64) -> i64:
+    # Container declarations in this outline grammar have one header line.
+    # Starting at the first member would expose preceding body docstrings.
+    var end_byte = span.start
+    while end_byte < first_member and end_byte < span.end_pos and end_byte < bytes.len() and bytes[end_byte] != 10:
+        end_byte = end_byte + 1
+    if end_byte < first_member and end_byte < span.end_pos and end_byte < bytes.len():
+        end_byte = end_byte + 1
+    end_byte
+
+fn source_native_type_v1(nodes: [SourceOutlineNodeV1], bytes: [u8], name: text,
+        kind: text, span: LexSpan, fields: [FieldOutline], methods: [FunctionOutline]) -> [SourceOutlineNodeV1]:
+    var body_start = span.end_pos
+    for field in fields:
+        if field.span.start < body_start: body_start = field.span.start
+    for method in methods:
+        if method.span.start < body_start: body_start = method.span.start
+    body_start = source_native_container_body_v1(bytes, span, body_start)
+    val parent = nodes.len()
+    var result = source_native_leaf_v1(nodes, bytes, name, kind, -1, name, span, body_start)
+    for field in fields:
+        result = source_native_leaf_v1(result, bytes, field.name, "field", parent,
+            name + "." + field.name, field.span, 0)
+    for method in methods:
+        result = source_native_function_v1(result, bytes, method, parent, name)
+    result
+
+pub fn source_native_outline_v1(snapshot: SourceSnapshotV1) -> Result<SourceOutlineV1, text>:
+    """Produce L1 syntax nodes from the canonical native token parser.
+
+    Provider source is capped before lexing. The lexer/parser owner remains
+    single-request serialized; no concurrent/reentrant parser claim is made.
+    """
+    val bytes = text_to_utf8_bytes(snapshot.source)
+    if bytes.len() > 65536: return Err("native_outline_source_limit_65536")
+    var parser = treesitter_new(snapshot.source)
+    parser.heuristic_mode = false
+    val parsed = parser.parse_outline()
+    var nodes: [SourceOutlineNodeV1] = []
+    for item in parsed.imports:
+        nodes = source_native_leaf_v1(nodes, bytes, item.module, "import", -1, item.module, item.span, 0)
+    for item in parsed.exports:
+        nodes = source_native_leaf_v1(nodes, bytes, "export", "export", -1, "export", item.span, 0)
+    for item in parsed.functions:
+        nodes = source_native_function_v1(nodes, bytes, item, -1, "")
+    for item in parsed.classes:
+        nodes = source_native_type_v1(nodes, bytes, item.name, "class", item.span, item.fields, item.methods)
+    for item in parsed.actors:
+        nodes = source_native_type_v1(nodes, bytes, item.name, "actor", item.span, item.fields, item.methods)
+    for item in parsed.structs:
+        nodes = source_native_type_v1(nodes, bytes, item.name, "struct", item.span, item.fields, [])
+    for item in parsed.traits:
+        nodes = source_native_type_v1(nodes, bytes, item.name, "trait", item.span, [], item.methods)
+    for item in parsed.impls:
+        # The existing outline's type is structured, not a durable symbol ID.
+        # A source-coordinate label avoids guessing its resolved type name.
+        val name = "impl@" + str(item.span.start)
+        nodes = source_native_type_v1(nodes, bytes, name, "impl", item.span, [], item.methods)
+    for item in parsed.enums:
+        var first = item.span.end_pos
+        for variant in item.variants:
+            if variant.span.start < first: first = variant.span.start
+        first = source_native_container_body_v1(bytes, item.span, first)
+        val parent = nodes.len()
+        nodes = source_native_leaf_v1(nodes, bytes, item.name, "enum", -1, item.name, item.span, first)
+        for variant in item.variants:
+            nodes = source_native_leaf_v1(nodes, bytes, variant.name, "variant", parent,
+                item.name + "." + variant.name, variant.span, 0)
+    for item in parsed.bitfields:
+        var first = item.span.end_pos
+        for field in item.fields:
+            if field.span.start < first: first = field.span.start
+        first = source_native_container_body_v1(bytes, item.span, first)
+        val parent = nodes.len()
+        nodes = source_native_leaf_v1(nodes, bytes, item.name, "bitfield", -1, item.name, item.span, first)
+        for field in item.fields:
+            nodes = source_native_leaf_v1(nodes, bytes, field.name, "field", parent,
+                item.name + "." + field.name, field.span, 0)
+    for item in parsed.type_aliases:
+        nodes = source_native_leaf_v1(nodes, bytes, item.name, "type", -1, item.name, item.span, 0)
+    for item in parsed.constants:
+        nodes = source_native_leaf_v1(nodes, bytes, item.name, "binding", -1, item.name, item.span, item.value_span.start)
+    for item in parsed.static_asserts:
+        val name = "static_assert@" + str(item.span.start)
+        nodes = source_native_leaf_v1(nodes, bytes, name, "static_assert", -1, name, item.span, 0)
+    if nodes.len() > 512: return Err("native_outline_node_limit_512")
+    var issues: [SourceOutlineIssueV1] = []
+    for issue in parsed.errors:
+        if issues.len() < 32:
+            val severity = match issue.severity:
+                ErrorSeverity.Error: "error"
+                ErrorSeverity.Warning: "warning"
+                ErrorSeverity.Info: "info"
+            issues.push(SourceOutlineIssueV1(issue.message, severity, source_native_range_v1(issue.span)))
+    val syntax_status = if parsed.errors.len() == 0: "parsed" else: "partial"
+    Ok(SourceOutlineV1(snapshot.snapshot_id, "simple-native-token-outline-v1", "L1",
+        syntax_status, nodes, issues, parsed.errors.len(), [
+            "syntax_only_not_semantic_resolution", "function_bodies_not_typechecked",
+            "unrepresented_syntax_remains_in_omission_ledger", "serialized_native_parser_owner"]))
