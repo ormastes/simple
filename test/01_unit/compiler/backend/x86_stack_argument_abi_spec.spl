@@ -1,0 +1,143 @@
+# Selector-level ABI regressions: inspect real MachInst output before register
+# allocation, isolating the separate generic spill-lowering limitation.
+# Execution pending an admitted source-matched pure-Simple runtime.
+use std.spec.*
+use compiler.backend.common.isel_context.{new_isel_context, isel_alloc_frame_slot}
+use compiler.backend.native.isel_x86_64.{isel_call, isel_call_with_frame, isel_function}
+use compiler.backend.native.mach_inst.*
+use compiler.backend.native.operand_utils.{get_phys_reg_id, get_mem_base_id, get_mem_offset, get_imm_value}
+use compiler.backend.native.x86_64_avx512_lower.{X86Avx512FrameV1}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_data.*
+
+fn stack_abi_args(count: i64) -> [MirOperand]:
+    var args: [MirOperand] = []
+    for index in 0..count:
+        args.push(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 100 + index))))
+    args
+
+fn stack_abi_callee() -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str("stack_abi_target"), MirType.i64()))
+
+fn check_stack_abi_call(count: i64, indirect: bool, with_dest: bool):
+    val target = if indirect: MirOperand(kind: MirOperandKind.Copy(LocalId(id: 900))) else: stack_abi_callee()
+    val dest = if with_dest: Some(LocalId(id: 500)) else: nil
+    val selected = isel_call(new_isel_context(), dest, target, stack_abi_args(count))
+    val overflow = if count > 6: count - 6 else: 0
+    val padding = if overflow % 2 == 1: 8 else: 0
+    var position = 0
+    if padding > 0:
+        expect(selected.insts[position].opcode).to_equal(X86_OP_SUB_IMM)
+        expect(get_phys_reg_id(selected.insts[position].operands[0])).to_equal(X86_RSP)
+        expect(get_imm_value(selected.insts[position].operands[1])).to_equal(8)
+        position = position + 1
+    for index in 0..overflow:
+        expect(selected.insts[position].opcode).to_equal(X86_OP_PUSH)
+        expect(get_phys_reg_id(selected.insts[position].operands[0])).to_equal(100 + count - 1 - index)
+        position = position + 1
+    val registers = if count < 6: count else: 6
+    for index in 0..registers:
+        expect(selected.insts[position].opcode).to_equal(X86_OP_MOV_REG_REG)
+        expect(get_phys_reg_id(selected.insts[position].operands[0])).to_equal(X86_ARG_REGS[index])
+        expect(get_phys_reg_id(selected.insts[position].operands[1])).to_equal(100 + index)
+        position = position + 1
+    expect(selected.insts[position].opcode).to_equal(if indirect: X86_OP_CALL_INDIRECT else: X86_OP_CALL)
+    position = position + 1
+    if with_dest:
+        expect(selected.insts[position].opcode).to_equal(X86_OP_MOV_REG_REG)
+        expect(get_phys_reg_id(selected.insts[position].operands[0])).to_equal(500)
+        expect(get_phys_reg_id(selected.insts[position].operands[1])).to_equal(X86_RAX)
+        position = position + 1
+    if overflow > 0:
+        expect(selected.insts[position].opcode).to_equal(X86_OP_ADD_IMM)
+        expect(get_phys_reg_id(selected.insts[position].operands[0])).to_equal(X86_RSP)
+        expect(get_imm_value(selected.insts[position].operands[1])).to_equal(overflow * 8 + padding)
+        position = position + 1
+    expect(selected.insts.len()).to_equal(position)
+
+fn stack_abi_function(indices: [i64]) -> MirFunction:
+    var params: [MirType] = []
+    var locals: [MirLocal] = []
+    for position in 0..indices.len():
+        params.push(MirType.i64())
+        locals.push(MirLocal(id: LocalId(id: 100 + position), name: nil, type_: MirType.i64(),
+            kind: LocalKind.Arg(indices[position]), is_ghost: false))
+    MirFunction(
+        symbol: SymbolId(id: 1), name: "stack_abi_target",
+        signature: MirSignature(params: params, return_type: MirType.i64(), is_variadic: false),
+        locals: locals,
+        blocks: [MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: [],
+            terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64())))))],
+        entry_block: BlockId.entry(), span: Span.empty(), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {}, layout_phase: nil,
+        is_kernel: false, gpu_target: "", gpu_backend_order: "", is_export_c: false, export_name: "",
+        has_driver_manifest_attr: false, driver_manifest_attr: nil, has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false)
+
+fn check_stack_abi_entry(indices: [i64]):
+    val selected = isel_function(new_isel_context(), stack_abi_function(indices))
+    val prologue = selected.func.blocks[0]
+    expect(prologue.insts.len()).to_equal(3 + indices.len())
+    for position in 0..indices.len():
+        val index = indices[position]
+        val inst = prologue.insts[3 + position]
+        expect(get_phys_reg_id(inst.operands[0])).to_equal(100 + position)
+        if index < 6:
+            expect(inst.opcode).to_equal(X86_OP_MOV_REG_REG)
+            expect(get_phys_reg_id(inst.operands[1])).to_equal(X86_ARG_REGS[index])
+        else:
+            expect(inst.opcode).to_equal(X86_OP_MOV_REG_MEM)
+            expect(get_mem_base_id(inst.operands[1])).to_equal(X86_RBP)
+            expect(get_mem_offset(inst.operands[1])).to_equal(16 + (index - 6) * 8)
+
+describe "custom x86-64 integer stack argument ABI":
+    it "preserves register-only calls with zero through six arguments":
+        step("Select calls at the register boundary without stack changes")
+        for count in [0, 1, 5, 6]:
+            check_stack_abi_call(count, false, false)
+
+    it "pads above the seventh argument and restores sixteen bytes":
+        step("Select one overflow argument and a scalar return")
+        check_stack_abi_call(7, false, true)
+
+    it "pushes argument eight before argument seven without padding":
+        step("Use distinct source registers so reversed overflow values are observable")
+        check_stack_abi_call(8, false, false)
+
+    it "pads above three overflow arguments and restores thirty-two bytes":
+        step("Check the next odd overflow boundary")
+        check_stack_abi_call(9, false, true)
+
+    it "uses the same stack discipline for indirect calls":
+        step("Select both overflow parities through a function-valued local")
+        check_stack_abi_call(7, true, false)
+        check_stack_abi_call(8, true, true)
+
+    it "loads incoming arguments six through nine from ABI locations":
+        step("Select actual callee prologues independently of caller allocation")
+        for count in [6, 7, 8, 9]:
+            var indices: [i64] = []
+            for index in 0..count:
+                indices.push(index)
+            check_stack_abi_entry(indices)
+
+    it "uses the declared argument index even when local order differs":
+        step("Reorder all nine locals to distinguish Arg index from local position")
+        check_stack_abi_entry([8, 6, 0, 7, 1, 2, 3, 4, 5])
+
+    it "keeps a hidden vector result pointer in the first register slot":
+        step("Select the admitted five-scalar frame-vector call boundary")
+        val ctx = isel_alloc_frame_slot(new_isel_context(), 0, 64)
+        val frame = X86Avx512FrameV1(shapes: {0: "f32x16"}, scalar_fallback: true, return_shape: "f32x16")
+        val selected = isel_call_with_frame(ctx, Some(LocalId(id: 0)), stack_abi_callee(), stack_abi_args(5), frame)
+        expect(selected.insts.len()).to_equal(8)
+        expect(selected.insts[0].opcode).to_equal(X86_OP_LEA)
+        expect(get_phys_reg_id(selected.insts[1].operands[0])).to_equal(X86_ARG_REGS[0])
+        for index in 0..5:
+            val inst = selected.insts[index + 2]
+            expect(inst.opcode).to_equal(X86_OP_MOV_REG_REG)
+            expect(get_phys_reg_id(inst.operands[0])).to_equal(X86_ARG_REGS[index + 1])
+            expect(get_phys_reg_id(inst.operands[1])).to_equal(100 + index)
+        expect(selected.insts[7].opcode).to_equal(X86_OP_CALL)
