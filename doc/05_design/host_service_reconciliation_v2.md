@@ -1,6 +1,6 @@
 # Persistent startup reconciliation in the existing host ledger
 
-Status: source reviewed, six scenarios authored, NOT_RUN. This is the actual
+Status: source reviewed, seven scenarios authored, NOT_RUN. This is the actual
 startup transition; installed service root and persistent SDK routing remain
 separate composition work. No complete Windows host service is claimed here.
 
@@ -30,8 +30,11 @@ A private immutable startup receipt records full scope, inventory digest, actual
 journal authority/revision/sequence and every row classification. It is read back
 and synchronized before constructing the common typed quarantine acknowledgment.
 Only successful common acknowledgment allows continuity=true. Failed calls return
-the updated owner after any cancellation. A retained receipt cannot silently be
-replaced by a different inventory in the same incarnation.
+the updated owner after any cancellation. The filename hashes the complete
+canonical receipt, binding the refreshed inventory and actual journal commit.
+A retry after partial publication or cancellation preserves older turn receipts
+and publishes a distinct current receipt when the facts changed. An older receipt
+is never loaded as permission to activate the current owner.
 
 The selected WAL profile is `process-crash-v1`; archive fsync does not upgrade
 journal power-loss guarantees. Every fresh service startup must inventory again.

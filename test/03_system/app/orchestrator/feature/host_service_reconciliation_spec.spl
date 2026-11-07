@@ -10,7 +10,8 @@ use std.common.contracts.container.service_v2.*
 use std.nogc_async_mut.container.api_v2.simple_container_apply_v2
 use std.nogc_async_mut.container.service_v2.{simple_container_inventory_service_v2, simple_container_complete_quarantine_v2}
 use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_lookup_v2
-use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_create_exclusive, file_remove}
+use std.common.crypto.sha256.sha256_text
 use std.nogc_sync_mut.file_system.metadata.file_mode_bits
 use std.nogc_sync_mut.io_runtime.dir_remove
 use std.common.sdn.value.SdnValue
@@ -42,6 +43,32 @@ fn reconciliation_classification_v2(path: text, operation_id: text) -> text:
     fail("required reconciliation classification missing")
 
 describe "Actual host service startup reconciliation with explicitly scripted Windows inventory":
+    it "retries publication after cancellation advanced the journal without a scope-only receipt collision":
+        val fixture = host_reconciliation_fixture_v2("admitted")
+        val directory = fixture.root + "/service-reconciliations"
+        assert(file_create_exclusive(directory, "publication obstruction\n"))
+        val failed = host_service_reconcile_v2(fixture.owner, host_reconciliation_retry_container_v2())
+        assert(failed.error != "")
+        assert(not failed.admission.?)
+        assert(not failed.owner.ledger.continuity_proven)
+        assert(failed.owner.journal.sequence > fixture.owner.journal.sequence)
+        expect(distributed_operation_journal_lookup_v2(failed.owner.journal, fixture.entry.runtime.operation_id).unwrap().state).to_equal("cancelled")
+        host_reconciliation_assert_quarantined_v2(failed.container)
+        assert(file_remove(directory))
+        val recovered = host_service_reconcile_v2(failed.owner, failed.container)
+        expect(recovered.error).to_equal("")
+        assert(recovered.admission.?)
+        expect(recovered.owner.journal.sequence).to_equal(failed.owner.journal.sequence)
+        val bytes = file_read_regular_no_follow_bounded(recovered.receipt_path, 4194304).unwrap()
+        expect(recovered.receipt_path).to_equal(directory + "/" + sha256_text(bytes) + ".sdn")
+        val fields = reconciliation_receipt_fields_v2(recovered.receipt_path)
+        expect(fields["journalCommitDigest"]).to_equal(SdnValue.String(recovered.owner.journal.revision))
+        expect(recovered.admission.unwrap().host_journal_commit_digest).to_equal(recovered.owner.journal.revision)
+        expect(recovered.admission.unwrap().inventory_digest).to_equal(container_service_inventory_digest_v2("windows-docker-process", fixture.scope, []).unwrap())
+        expect(host_available_capacity_v1(recovered.owner.ledger).unwrap().cpu_millis).to_equal(4000)
+        assert(host_capacity_owner_close_v1(recovered.owner).unwrap())
+        dir_remove(fixture.root, true)
+
     it "requires actual post-writer refresh and durable receipt before empty quarantine becomes ready":
         val fixture = host_reconciliation_fixture_v2("empty")
         val container = host_reconciliation_container_v2([])

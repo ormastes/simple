@@ -15,9 +15,9 @@ use std.common.task_runner.distributed_operation_journal_v2.distributed_operatio
 use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
 use std.common.crypto.sha256.sha256_text
-use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_regular_no_follow_bounded, file_fsync, directory_fsync}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_create_exclusive, file_read_regular_no_follow_bounded, file_fsync, directory_fsync}
 use std.nogc_sync_mut.io_runtime.dir_create
-use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.nogc_sync_mut.file_system.permissions.file_set_mode
 
 pub struct HostServiceReconciliationTurnV2:
     owner: HostCapacityOwnerV1
@@ -83,10 +83,12 @@ fn host_service_receipt_store_v2(owner: HostCapacityOwnerV1, scope: ContainerHos
     val bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
     val directory = owner.journal.root + "/service-reconciliations"
     if not file_exists(directory) and not dir_create(directory, true): return Err("host-service-receipt-directory-failed")
-    val path = directory + "/" + container_scope_fence_id_v2(scope)? + ".sdn"
-    if file_exists(path):
-        if file_read_regular_no_follow_bounded(path, 4194304)? != bytes: return Err("host-service-receipt-changed")
-    elif not file_atomic_write_mode(path, bytes, 0o600): return Err("host-service-receipt-write-failed")
+    # A live quarantined owner may retry after cancellations advanced CURRENT.
+    # Content addressing binds scope, refreshed inventory, journal commit and
+    # classifications without overwriting a previous reconciliation turn.
+    val path = directory + "/" + sha256_text(bytes) + ".sdn"
+    val created = file_create_exclusive(path, bytes)
+    if created and not file_set_mode(path, 0o600): return Err("host-service-receipt-mode-failed")
     if file_read_regular_no_follow_bounded(path, 4194304)? != bytes: return Err("host-service-receipt-readback-failed")
     if not file_fsync(path) or not directory_fsync(directory) or not directory_fsync(owner.journal.root):
         return Err("host-service-receipt-sync-failed")
