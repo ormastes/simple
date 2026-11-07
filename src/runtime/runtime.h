@@ -1445,6 +1445,18 @@ int64_t   rt_process_observation_v4_pin_cwd_value(const char* path_data,
                                                    uint64_t path_len);
 SplArray* rt_process_observation_v4_cwd_digest_value(int64_t handle);
 int       rt_process_observation_v4_close_cwd_value(int64_t handle);
+/* Reservation V4: scalar authority precedes child launch. NULL observations
+ * are errors with authority retained; explicit confirm releases a terminal slot. */
+int64_t rt_process_observation_v4_reserve_value(void);
+int64_t rt_process_observation_v4_reserved_matches_value(int64_t token,
+    int64_t rh, int64_t rl, int64_t th, int64_t tl);
+int64_t rt_process_observation_v4_reserved_state_value(int64_t token);
+int64_t rt_process_observation_v4_reserved_start_pinned_value(
+    int64_t token, int64_t executable, int64_t cwd, SplArray* binding);
+SplArray* rt_process_observation_v4_reserved_observe_value(
+    int64_t token, int64_t wait_ns, int64_t retire);
+SplArray* rt_process_observation_v4_reserved_ack_value(int64_t token, SplArray* digest);
+int64_t rt_process_observation_v4_reserved_confirm_release_value(int64_t token);
 SplArray* rt_process_observation_v4_start_value(SplArray* binding);
 SplArray* rt_process_observation_v4_start_pinned_value(
               int64_t executable_handle, int64_t cwd_handle,

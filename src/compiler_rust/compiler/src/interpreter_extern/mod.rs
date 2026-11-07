@@ -2064,6 +2064,13 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         insert_simple!("rt_process_observation_v4_pin_cwd_value", pov4::pin_cwd);
         insert_simple!("rt_process_observation_v4_cwd_digest_value", pov4::cwd_digest);
         insert_simple!("rt_process_observation_v4_close_cwd_value", pov4::close_cwd);
+        insert_simple!("rt_process_observation_v4_reserved_matches_value", pov4::reservation_unavailable);
+        insert_simple!("rt_process_observation_v4_reserve_value", pov4::reservation_unavailable);
+        insert_simple!("rt_process_observation_v4_reserved_state_value", pov4::reservation_unavailable);
+        insert_simple!("rt_process_observation_v4_reserved_start_pinned_value", pov4::reservation_unavailable);
+        insert_simple!("rt_process_observation_v4_reserved_observe_value", pov4::reservation_unavailable);
+        insert_simple!("rt_process_observation_v4_reserved_ack_value", pov4::reservation_unavailable);
+        insert_simple!("rt_process_observation_v4_reserved_confirm_release_value", pov4::reservation_unavailable);
         insert_simple!("rt_process_observation_v4_start_value", system::rt_process_observation_v4_provider_unavailable);
         insert_simple!("rt_process_observation_v4_start_pinned_value", pov4::start_pinned);
         insert_simple!("rt_process_observation_v4_poll_value", pov4::poll);
