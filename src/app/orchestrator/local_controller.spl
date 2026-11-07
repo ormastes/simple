@@ -10,6 +10,7 @@ use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_dig
 use std.common.crypto.sha256.sha256_text
 use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
+use std.nogc_sync_mut.io.file_lock_owned_v2.FileLockReleaseStateV2
 
 fn local_reply_v1(fields: Dict<text, SdnValue>, exit_code: i64) -> OrchestratorValidationReplyV1:
     var output = fields
@@ -93,12 +94,22 @@ pub fn orchestrator_local_command_v1(args: [text]) -> OrchestratorValidationRepl
         source = input.unwrap()
     val entropy = sosix_random_hex(32)
     if not entropy.?: return local_error_v1("local-owner-entropy-unavailable", 1, false)
-    val opened = controller_workload_store_open_v1(args[1] + "/journal", args[2], entropy ?? "", 100000)
-    if opened.is_err(): return local_error_v1(opened.unwrap_err(), 1, true)
-    val owner = opened.unwrap()
+    val owner = match controller_workload_store_open_owned_v2(args[1] + "/journal", args[2], entropy ?? "", 100000):
+        case ControllerWorkloadStoreOpenV2.Ready(value): value
+        case ControllerWorkloadStoreOpenV2.Rejected(reason): return local_error_v1(reason, 1, true)
+        case ControllerWorkloadStoreOpenV2.CleanupRequired(cleanup, reason):
+            var reply = local_error_v1(reason, 2, true)
+            reply.journal_cleanup = Some(cleanup)
+            return reply
     val effect = local_controller_effect_v1(owner, args, source)
     # Close uses the same lock/lease identity even when effect advanced the WAL.
-    val closed = controller_workload_store_close_v1(owner)
-    if closed.is_err(): return local_error_v1(closed.unwrap_err(), 1, true)
+    val closed = controller_workload_store_close_owned_v2(owner)
+    if (closed.cleanup.is_some() or not closed.closed or closed.error != "" or
+            closed.state != FileLockReleaseStateV2.Released):
+        val reason = if closed.error == "": "local-owner-close-unconfirmed" else: closed.error
+        var reply = local_error_v1(reason, 2, true)
+        reply.journal_cleanup = closed.cleanup
+        reply.cleanup_state = Some(closed.state)
+        return reply
     if effect.is_err(): return local_error_v1(effect.unwrap_err(), 1, true)
     local_reply_v1(effect.unwrap(), 0)

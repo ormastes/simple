@@ -1,0 +1,174 @@
+# @req ORCH-02 HOST-02
+# Actual controller journal/lease/filesystem. No fake live lock or scripted WAL.
+# Execution NOT_RUN; owned SDK dependency is combined separately.
+use std.nogc_sync_mut.orchestration.workload_store_v1.*
+use std.nogc_sync_mut.orchestration.agent_preflight_objects_v1.*
+use std.common.contracts.orchestration.agent_preflight_binding_v1.*
+use std.common.contracts.orchestration.workload_fence_v1.controller_workload_create_v1
+use std.common.contracts.container.execution_v2.*
+use std.common.task_runner.distributed_operation_journal_v2.*
+use std.nogc_sync_mut.io.file_lock_owned_v2.FileLockReleaseStateV2
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_admit_v2
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.orchestration.assignment_v1.controller_assignment_authority_v1
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_read_regular_no_follow_bounded, file_atomic_write}
+use std.nogc_sync_mut.io_runtime.dir_remove
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use app.orchestrator.reply_cleanup_v2.orchestrator_reply_cleanup_v2
+
+fn owned_store_ready_v2(root: text, nonce: text) -> ControllerWorkloadStoreV1:
+    match controller_workload_store_open_owned_v2(root, "controller", nonce, 4096):
+        case ControllerWorkloadStoreOpenV2.Ready(owner): owner
+        case ControllerWorkloadStoreOpenV2.Rejected(reason): fail("unexpected journal rejection:" + reason)
+        case ControllerWorkloadStoreOpenV2.CleanupRequired(cleanup, reason):
+            val closed = distributed_operation_journal_open_cleanup_v2(cleanup)
+            expect(closed.cleanup.is_none()).to_equal(true)
+            expect(closed.closed).to_equal(true)
+            expect(closed.error).to_equal("")
+            fail("unexpected retained journal cleanup:" + reason)
+
+fn owned_store_close_v2(owner: ControllerWorkloadStoreV1):
+    val closed = controller_workload_store_close_owned_v2(owner)
+    expect(closed.cleanup.is_none()).to_equal(true)
+    expect(closed.closed).to_equal(true)
+    expect(closed.error).to_equal("")
+    expect(closed.state).to_equal(FileLockReleaseStateV2.Released)
+
+describe "owned controller workload journal startup and cleanup":
+    it "replays desired policy preflight child and cancellation through the actual owned journal":
+        step("replays desired policy preflight child and cancellation through the actual owned journal")
+        val source = file_read_regular_no_follow_bounded("test/fixtures/orchestration/caret_agent_session.sdn", 1048576).unwrap()
+        val catalog = file_read_regular_no_follow_bounded("test/fixtures/orchestration/caret_policy_catalog.sdn", 1048576).unwrap()
+        val root = secure_temp_dir("/tmp", "owned-controller-replay-").unwrap()
+        var owner = owned_store_ready_v2(root, "a".repeat(64))
+        owner = controller_workload_store_submit_agent_v1(owner, "session", source, "caret", "review-simple").unwrap()
+        owner = controller_workload_store_pin_policy_v1(owner, "session", catalog, "caret", "review-simple").unwrap()
+        val policy = controller_workload_store_pinned_policy_v1(owner, "session").unwrap()
+        val plan = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: "probe-child", attempt: 1,
+            operation_id: "probe-operation", request_digest: "b".repeat(64), physical_host_id: "alias", service_scope_id: "service",
+            boot_id: "boot", provider_generation: 3, native_machine_id: "machine", continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot")
+        val binding = AgentPreflightBindingV1(controller_id: "controller", session_uid: "session", source_digest: policy.source_digest,
+            catalog_digest: policy.catalog_digest, task_digest: "c".repeat(64), image_digest: "d".repeat(64), probe_producer_digest: "e".repeat(64),
+            nonce: "f".repeat(64), preflight: plan, agent_provider: policy.session.agent.provider, executable_path: "/usr/bin/codex",
+            execution_os: policy.runtime.execution_os, architecture: policy.runtime.architecture, selected_user: "1000:1000")
+        owner = controller_workload_store_preflight_v1(owner, binding).unwrap()
+        val child = controller_workload_create_v1("controller", 1, plan.workload_uid, 1, container_execution_plan_digest_v2(plan).unwrap()).unwrap()
+        owner = controller_workload_store_create_v1(owner, child).unwrap()
+        owner = controller_workload_store_cancel_agent_v1(owner, "session", sha256_text(source)).unwrap()
+        owned_store_close_v2(owner)
+        owner = owned_store_ready_v2(root, "b".repeat(64))
+        expect(controller_workload_store_agent_source_v1(owner, "session").unwrap()).to_equal(source)
+        expect(controller_workload_store_agent_cancelled_v1(owner, "session").unwrap()).to_equal(true)
+        expect(controller_workload_store_lookup_v1(owner, plan.workload_uid).unwrap().cancellation_requested).to_equal(true)
+        expect(controller_workload_store_preflight_guard_v1(owner, plan).is_err()).to_equal(true)
+        expect(agent_preflight_for_workload_v1(owner.journal, "controller", plan.workload_uid).unwrap().is_some()).to_equal(true)
+        owned_store_close_v2(owner)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "retains actual cleanup ownership after lease mismatch until exact lease restoration":
+        step("retains actual cleanup ownership after lease mismatch until exact lease restoration")
+        val root = secure_temp_dir("/tmp", "owned-controller-cleanup-").unwrap()
+        val owner = owned_store_ready_v2(root, "a".repeat(64))
+        val lease = file_read_regular_no_follow_bounded(root + "/parent.lease", 512).unwrap()
+        expect(file_atomic_write(root + "/parent.lease", "changed lease")).to_equal(true)
+        val refused = controller_workload_store_close_owned_v2(owner)
+        expect(refused.cleanup.is_some()).to_equal(true)
+        expect(refused.closed).to_equal(false)
+        expect(refused.state).to_equal(FileLockReleaseStateV2.Retained)
+        expect(refused.error).to_equal("OPERATION_JOURNAL_LEASE_STALE")
+        expect(file_atomic_write(root + "/parent.lease", lease)).to_equal(true)
+        val released = distributed_operation_journal_open_cleanup_v2(refused.cleanup.unwrap())
+        expect(released.cleanup.is_none()).to_equal(true)
+        expect(released.closed).to_equal(true)
+        expect(released.error).to_equal("")
+        expect(released.state).to_equal(FileLockReleaseStateV2.Released)
+        val reopened = owned_store_ready_v2(root, "b".repeat(64))
+        owned_store_close_v2(reopened)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "rejects foreign replay domains and releases the actual owned journal on projection failure":
+        step("rejects foreign replay domains and releases the actual owned journal on projection failure")
+        val root = secure_temp_dir("/tmp", "owned-controller-foreign-").unwrap()
+        val owner = owned_store_ready_v2(root, "a".repeat(64))
+        val authority = controller_assignment_authority_v1("controller").unwrap()
+        val foreign = OperationEnvelopeV2(version: 2, id: "foreign-operation", payload_digest: "c".repeat(64), principal: "controller",
+            project: "controller", host_id: "controller", operation: "unknown_foreign_domain", environment_digest: authority,
+            policy_revision: 1, revocation_epoch: 0, session_generation: 1, memory_bytes: 1, duration_ms: 1)
+        val admitted = daemon_operation_admit_v2(owner.journal, foreign).unwrap()
+        val closed = distributed_operation_journal_close_owned_v2(admitted.journal)
+        expect(closed.closed and closed.error == "" and closed.cleanup.is_none()).to_equal(true)
+        match controller_workload_store_open_owned_v2(root, "controller", "b".repeat(64), 4096):
+            case ControllerWorkloadStoreOpenV2.Rejected(reason): expect(reason).to_contain("foreign")
+            case ControllerWorkloadStoreOpenV2.Ready(unexpected):
+                owned_store_close_v2(unexpected)
+                fail("foreign domain incorrectly accepted")
+            case ControllerWorkloadStoreOpenV2.CleanupRequired(cleanup, reason):
+                val release = distributed_operation_journal_open_cleanup_v2(cleanup)
+                expect(release.cleanup.is_none()).to_equal(true)
+                fail("ordinary projection rejection retained cleanup unexpectedly:" + reason)
+        # A raw SDK replay can acquire the same real lease after rejection.
+        match distributed_operation_journal_open_owned_v2(root, authority, "c".repeat(64), 4096):
+            case DistributedOperationJournalOpenV2.Ready(journal):
+                val release = distributed_operation_journal_close_owned_v2(journal)
+                expect(release.closed and release.error == "" and release.cleanup.is_none()).to_equal(true)
+            case _: fail("projection failure lost the lock owner")
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "preserves stale typed close failure instead of treating absent cleanup as success":
+        step("preserves stale typed close failure instead of treating absent cleanup as success")
+        val root = secure_temp_dir("/tmp", "owned-controller-stale-").unwrap()
+        val owner = owned_store_ready_v2(root, "a".repeat(64))
+        owned_store_close_v2(owner)
+        val stale = controller_workload_store_close_owned_v2(owner)
+        expect(stale.cleanup.is_none()).to_equal(true)
+        expect(stale.closed).to_equal(false)
+        expect(stale.state).to_equal(FileLockReleaseStateV2.Stale)
+        expect(stale.error == "").to_equal(false)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "retains both actual journal cleanups through the app reply without promoting later release":
+        step("retains both actual journal cleanups through the app reply without promoting later release")
+        val controller_root = secure_temp_dir("/tmp", "reply-controller-cleanup-").unwrap()
+        val host_root = secure_temp_dir("/tmp", "reply-host-cleanup-").unwrap()
+        val controller = owned_store_ready_v2(controller_root, "a".repeat(64))
+        val host = owned_store_ready_v2(host_root, "b".repeat(64))
+        val controller_lease = file_read_regular_no_follow_bounded(controller_root + "/parent.lease", 512).unwrap()
+        val host_lease = file_read_regular_no_follow_bounded(host_root + "/parent.lease", 512).unwrap()
+        expect(file_atomic_write(controller_root + "/parent.lease", "changed controller lease")).to_equal(true)
+        expect(file_atomic_write(host_root + "/parent.lease", "changed host lease")).to_equal(true)
+        val controller_close = controller_workload_store_close_owned_v2(controller)
+        val host_close = controller_workload_store_close_owned_v2(host)
+        expect(controller_close.cleanup.is_some() and host_close.cleanup.is_some()).to_equal(true)
+        val reply = OrchestratorValidationReplyV1(exit_code: 2, output: "command remains unconfirmed",
+            journal_cleanup: controller_close.cleanup, cleanup_state: Some(controller_close.state),
+            host_journal_cleanup: host_close.cleanup, host_cleanup_state: Some(host_close.state))
+        val retained = orchestrator_reply_cleanup_v2(reply)
+        expect(retained.exit_code).to_equal(2)
+        expect(retained.journal_cleanup.is_some() and retained.host_journal_cleanup.is_some()).to_equal(true)
+        expect(retained.output).to_contain("orchestrator-local-cleanup-error")
+        expect(retained.output).to_contain("OPERATION_JOURNAL_LEASE_STALE")
+        expect(file_atomic_write(controller_root + "/parent.lease", controller_lease)).to_equal(true)
+        expect(file_atomic_write(host_root + "/parent.lease", host_lease)).to_equal(true)
+        val released = orchestrator_reply_cleanup_v2(retained)
+        expect(released.journal_cleanup.is_none() and released.host_journal_cleanup.is_none()).to_equal(true)
+        expect(released.cleanup_state.unwrap()).to_equal(FileLockReleaseStateV2.Released)
+        expect(released.host_cleanup_state.unwrap()).to_equal(FileLockReleaseStateV2.Released)
+        expect(released.exit_code).to_equal(2)
+        expect(released.output).to_equal(retained.output)
+        owned_store_close_v2(owned_store_ready_v2(controller_root, "c".repeat(64)))
+        owned_store_close_v2(owned_store_ready_v2(host_root, "d".repeat(64)))
+        expect(dir_remove(controller_root, true)).to_equal(true)
+        expect(dir_remove(host_root, true)).to_equal(true)
+
+    it "refuses an ownerless error state without inventing a cleanup retry":
+        step("refuses an ownerless error state without inventing a cleanup retry")
+        # Pure boundary invariant only, not a native close-error injection.
+        for state in [FileLockReleaseStateV2.ConsumedError, FileLockReleaseStateV2.Unknown, FileLockReleaseStateV2.Stale]:
+            val reply = OrchestratorValidationReplyV1(exit_code: 0, output: "inconsistent host response",
+                host_cleanup_state: Some(state))
+            val refused = orchestrator_reply_cleanup_v2(reply)
+            expect(refused.exit_code).to_equal(2)
+            expect(refused.journal_cleanup.is_none() and refused.host_journal_cleanup.is_none()).to_equal(true)
+            expect(refused.host_cleanup_state.unwrap()).to_equal(state)
+            expect(refused.output).to_contain("host-cleanup-state-unconfirmed")
