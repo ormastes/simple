@@ -297,3 +297,36 @@ describe "Some(<concrete>) into an Optional trait slot":
         expect(count_matching(lowered.errors, "missing native trait implementation")).to_equal(0)
         expect(lowered.errors.len()).to_equal(0)
         expect(lowered.trait_objects).to_equal(1)
+
+# An existing `Concrete?` VALUE (param, local, call result) flowing into a
+# `Trait?` slot. Not a literal `Some(..)`, so presence is only known at
+# runtime: the conversion must branch on rt_is_some, convert the payload to
+# the trait object on the Some arm, and pass None through unchanged. Before
+# the fix every form failed with "native optional trait conversion requires a
+# matching declared payload" (hosted_backend.spl:357,362,378 shape).
+val OPT_CONCRETE_SRC = SOME_TRAIT_SRC + "fn make_cp(n: i64) -> CountingParser?:\n    if n > 0:\n        return CountingParser(n: n)\n    nil\n\n"
+
+fn expect_optional_concrete_converted(lowered: Lowered):
+    expect(count_matching(lowered.errors, "requires a matching declared payload")).to_equal(0)
+    expect(lowered.errors.len()).to_equal(0)
+    # Exactly one trait object, built on the Some arm only.
+    expect(lowered.trait_objects).to_equal(1)
+    # Presence is decided at runtime, and only the Some arm reads the payload.
+    expect(count_matching(lowered.callees, "rt_is_some")).to_be_greater_than(0)
+    expect(count_matching(lowered.callees, "rt_enum_payload")).to_be_greater_than(0)
+
+describe "Concrete? value into an Optional trait slot":
+    it "converts a Concrete? param on return":
+        expect_optional_concrete_converted(lower_source(OPT_CONCRETE_SRC + "fn up(c: CountingParser?) -> Parser?:\n    return c\n\nfn main() -> i64:\n    0\n", true))
+
+    it "converts a narrowed Concrete? call result on return":
+        expect_optional_concrete_converted(lower_source(OPT_CONCRETE_SRC + "fn pick(n: i64) -> Parser?:\n    val c = make_cp(n)\n    if c != nil:\n        return c\n    nil\n\nfn main() -> i64:\n    0\n", true))
+
+    it "converts a Concrete? local on assignment":
+        expect_optional_concrete_converted(lower_source(OPT_CONCRETE_SRC + "fn assign(n: i64) -> i64:\n    val c = make_cp(n)\n    var p: Parser? = nil\n    p = c\n    if p != nil: return 1\n    0\n\nfn main() -> i64:\n    0\n", true))
+
+    it "converts a Concrete? local passed as a Parser? argument":
+        expect_optional_concrete_converted(lower_source(OPT_CONCRETE_SRC + "fn take(p: Parser?) -> i64:\n    if p != nil: return 1\n    0\n\nfn pass_opt(n: i64) -> i64:\n    val c = make_cp(n)\n    take(c)\n\nfn main() -> i64:\n    0\n", true))
+
+    it "passes a nil Concrete? through as None":
+        expect_optional_concrete_converted(lower_source(OPT_CONCRETE_SRC + "fn none_up() -> Parser?:\n    val c: CountingParser? = nil\n    return c\n\nfn main() -> i64:\n    0\n", true))
