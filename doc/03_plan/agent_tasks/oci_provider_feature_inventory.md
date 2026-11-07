@@ -21,8 +21,8 @@ Host, Caret, and runners consume the common API.
 | Terminal input/TTY | Request digest/codec has explicit modes; provider effects reject them | Actual create stdin/TTY flags, interactive transport ownership, input backpressure, detach behavior, separate readiness evidence |
 | Terminal resize | Output-only smux transport refuses geometry changes | Backend resize capability and exact execution identity authorization; no local PTY resize proxy claim |
 | Exec sessions | No admitted integrated provider exec owner | Exact parent runtime identity, immutable exec request/receipt, independently owned stream and exit lifecycle |
-| Environment | Typed bounded explicit non-secret entries are retained; provider effects reject them | Provider argv plus authorized Host/controller consumer, exact replay mutation cases, literal-value live oracle |
-| Working directory | Canonical absolute path is retained; provider effects reject it | Actual --workdir mapping and image-path behavior through authorized consumer |
+| Environment | Explicit bounded entries now map to typed --env NAME=VALUE; new Podman creates disable implicit host proxy inheritance | Common signed-consumer integration and literal-value live oracle; image/admin configuration is not claimed empty |
+| Working directory | Explicit canonical absolute cwd maps to --workdir and exact common action projection | Common facade integration and live image-path behavior through authorized consumer |
 | Workspace/storage | Existing build-input/output mount mode is separate | General workspace attachment policy, immutable source/destination/mode binding, scoped ownership and cleanup; no global prune |
 | Statistics | Existing provider returns explicit unsupported result | Exact scoped native collection, typed units/limits, authorization and independently observed metrics |
 | Full vertical authorization | Host/orchestrator/Caret own their composed consumers | Signed controller→host execution and authenticated binding; no remote argv/root/ref authority |

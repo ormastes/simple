@@ -15,6 +15,7 @@ use std.common.contracts.container.effect_deadline_v1.{ContainerEffectDeadlineV1
     container_effect_deadline_v1, container_effect_remaining_ms_v1}
 use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
 use std.common.contracts.container.command_v1.oci_command_parts_v1
+use std.common.contracts.container.execution_options_v1.oci_execution_options_v1
 pub use std.nogc_async_mut.container.providers.linux.request_v1.LinuxOciRequestV1
 use std.nogc_async_mut.container.providers.linux.request_v1.{linux_oci_request_bounds_v1, linux_oci_request_digest_v1}
 use std.common.contracts.container.bound_intent_v2.{RuntimeBoundIntentV2, runtime_bound_intent_encode_v2, runtime_bound_intent_decode_v2, runtime_bound_intent_match_v2}
@@ -446,10 +447,10 @@ impl LinuxOciRuntimeProviderV1:
         match linux_oci_request_bounds_v1(request):
             case Err(reason): return RuntimeValidationV1(accepted: false, reason: reason)
             case Ok(_): pass
-        if request.environment.len() != 0 or request.working_directory != "":
-            return RuntimeValidationV1(accepted: false, reason: "execution-options-not-admitted")
         if request.terminal_mode != "none":
             return RuntimeValidationV1(accepted: false, reason: "terminal-mode-not-admitted")
+        val build_roots_error = _linux_oci_build_roots_error_v1(request)
+        if build_roots_error != "": return RuntimeValidationV1(accepted: false, reason: build_roots_error)
         if self.platform != "linux":
             return RuntimeValidationV1(accepted: false,
                 reason: "unsupported-platform: linux OCI provider received " + self.platform)
@@ -1675,6 +1676,25 @@ fn _safe_token(value: text) -> bool:
         index = index + 1
     true
 
+# These roots are encoded in OCI --mount CSV. Reject syntax that could make
+# the effect differ from the typed workspace projection. Authorization and
+# no-follow ownership of the staged roots remain the Host's responsibility.
+fn _linux_oci_build_root_error_v1(root: text) -> text:
+    if not root.starts_with("/") or root.contains(",") or root.contains("\"") or
+            root.contains("\0") or root.contains("\n") or root.contains("\r") or root.contains("//"):
+        return "build-root-unsafe"
+    if root != "/" and root.ends_with("/"): return "build-root-not-canonical"
+    for segment in root.split("/"):
+        if segment == "." or segment == "..": return "build-root-not-canonical"
+    ""
+
+fn _linux_oci_build_roots_error_v1(request: LinuxOciRequestV1) -> text:
+    if request.build_input_root == "" and request.build_output_root == "": return ""
+    if request.build_input_root == "" or request.build_output_root == "": return "build-root-incomplete"
+    val input_error = _linux_oci_build_root_error_v1(request.build_input_root)
+    if input_error != "": return input_error
+    _linux_oci_build_root_error_v1(request.build_output_root)
+
 fn _locked_image(value: text) -> bool:
     val marker = "@sha256:"
     val at = value.index_of(marker)
@@ -1826,10 +1846,10 @@ pub fn build_create_command(engine: text, state_dir: text,
     match linux_oci_request_bounds_v1(request):
         case Err(reason): return (reason, runtime_command_empty())
         case Ok(_): pass
-    if request.environment.len() != 0 or request.working_directory != "":
-        return ("execution-options-not-admitted", runtime_command_empty())
     if request.terminal_mode != "none":
         return ("terminal-mode-not-admitted", runtime_command_empty())
+    val build_roots_error = _linux_oci_build_roots_error_v1(request)
+    if build_roots_error != "": return (build_roots_error, runtime_command_empty())
     match linux_oci_container_name(request.pod_uid, request.attempt):
         case Err(reason): return (reason, runtime_command_empty())
         case Ok(name):
@@ -1843,6 +1863,8 @@ pub fn build_create_command(engine: text, state_dir: text,
                     engine != OCI_ENGINE_RUNC:
                 return ("unsupported-engine: " + engine, runtime_command_empty())
             if engine == OCI_ENGINE_RUNC:
+                if request.environment.len() != 0 or request.working_directory != "":
+                    return ("runc-execution-options-unsupported", runtime_command_empty())
                 if request.replace_entrypoint:
                     return ("runc-entrypoint-override-unsupported", runtime_command_empty())
                 if request.bundle_path == "":
@@ -1871,6 +1893,7 @@ pub fn build_create_command(engine: text, state_dir: text,
                 "--network", request.network_policy,
                 "--read-only", "--security-opt", "no-new-privileges",
                 "--cap-drop", "ALL"]
+            if engine == OCI_ENGINE_PODMAN: args.push("--http-proxy=false")
             val build_mode = request.build_input_root != "" or request.build_output_root != ""
             if build_mode:
                 if request.build_input_root == "" or request.build_output_root == "":
@@ -1882,6 +1905,11 @@ pub fn build_create_command(engine: text, state_dir: text,
                 case Ok(parts): parts
                 case Err(reason): return (reason, runtime_command_empty())
             for option in command_parts.options:
+                args.push(option)
+            val execution_options = match oci_execution_options_v1(request.environment, request.working_directory):
+                case Ok(options): options
+                case Err(reason): return (reason, runtime_command_empty())
+            for option in execution_options:
                 args.push(option)
             if build_mode:
                 args.push("--mount")

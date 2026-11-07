@@ -1,0 +1,160 @@
+# Contract SSpec over actual provider/common API branches with explicit scripted
+# engine fixtures. Authored/unexecuted; not native Podman qualification.
+use std.spec.*
+use std.common.contracts.container.execution_options_v1.*
+use std.common.contracts.container.runtime_v1.*
+use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
+use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
+use std.nogc_async_mut.container.providers.linux.request_v1.linux_oci_request_digest_v1
+use std.nogc_async_mut.container.api_v2.*
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.*
+use test.fixtures.container.simple_container_api_fixture_v2.simple_container_scripted_linux_fixture_v2
+
+fn _options_request_v1() -> LinuxOciRequestV1:
+    var request = linux_container_leaf_fixture_v2()
+    request.command = ["/bin/echo", ""]
+    request.args = ["a b", ""]
+    request.replace_entrypoint = true
+    request.working_directory = "/work"
+    request.environment = [OciEnvironmentEntryV1(name: "PLAIN", value: "literal ; $(task)"),
+        OciEnvironmentEntryV1(name: "LINES", value: "first\nsecond"),
+        OciEnvironmentEntryV1(name: "EMPTY", value: "")]
+    request
+
+describe "OCI explicit environment working directory and action projection":
+    it "maps explicit values as literal typed options with no host lookup":
+        val request = _options_request_v1()
+        expect(oci_execution_options_v1(request.environment, request.working_directory).unwrap()).to_equal([
+            "--workdir", "/work", "--env", "PLAIN=literal ; $(task)",
+            "--env", "LINES=first\nsecond", "--env", "EMPTY="])
+
+    it "constructs independent exact Podman create argv with proxy inheritance disabled":
+        val request = _options_request_v1()
+        val built = build_create_command("podman", "/unused/options", request, "create-api", 7, "boot-1")
+        expect(built.0).to_equal("")
+        expect(built.1.program).to_equal("podman")
+        expect(built.1.args).to_equal(["create", "--name", "simpleorch-workload-1-1",
+            "--label", "io.simpleorch.pod_uid=workload-1", "--label", "io.simpleorch.attempt=1",
+            "--label", "io.simpleorch.node_boot_id=boot-1", "--label", "io.simpleorch.provider_generation=7",
+            "--label", "io.simpleorch.operation_id=create-api", "--cpu-period", "100000", "--cpu-quota", "100000",
+            "--memory", "268435456", "--pids-limit", "64", "--network", "none", "--read-only",
+            "--security-opt", "no-new-privileges", "--cap-drop", "ALL", "--http-proxy=false",
+            "--entrypoint", "/bin/echo", "--workdir", "/work", "--env", "PLAIN=literal ; $(task)",
+            "--env", "LINES=first\nsecond", "--env", "EMPTY=", request.image, "", "a b", ""])
+
+    it "keeps Docker typed environment support without adding a Podman-only proxy flag":
+        val request = _options_request_v1()
+        val built = build_create_command("docker", "/unused/options", request, "create-api", 7, "boot-1")
+        expect(built.0).to_equal("")
+        expect(built.1.args).to_equal(["create", "--name", "simpleorch-workload-1-1",
+            "--label", "io.simpleorch.pod_uid=workload-1", "--label", "io.simpleorch.attempt=1",
+            "--label", "io.simpleorch.node_boot_id=boot-1", "--label", "io.simpleorch.provider_generation=7",
+            "--label", "io.simpleorch.operation_id=create-api", "--cpu-period", "100000", "--cpu-quota", "100000",
+            "--memory", "268435456", "--pids-limit", "64", "--network", "none", "--read-only",
+            "--security-opt", "no-new-privileges", "--cap-drop", "ALL",
+            "--entrypoint", "/bin/echo", "--workdir", "/work", "--env", "PLAIN=literal ; $(task)",
+            "--env", "LINES=first\nsecond", "--env", "EMPTY=", request.image, "", "a b", ""])
+        expect(build_create_command("runc", "/unused/options", request, "create-api", 7, "boot-1").0)
+            .to_equal("runc-execution-options-unsupported")
+
+    it "refuses duplicate malformed and NUL environment before state reservation or executor calls":
+        for kind in ["duplicate", "name", "nul"]:
+            var request = _options_request_v1()
+            if kind == "duplicate": request.environment = [OciEnvironmentEntryV1(name: "A", value: "one"), OciEnvironmentEntryV1(name: "A", value: "two")]
+            if kind == "name": request.environment = [OciEnvironmentEntryV1(name: "HOST*", value: "")]
+            if kind == "nul": request.environment = [OciEnvironmentEntryV1(name: "A", value: "one\0two")]
+            val owner = LinuxOciRuntimeProviderV1.scripted("linux", "podman", "/unused/options", "boot-1", 7, [])
+            expect(owner.validate(request).accepted).to_equal(false)
+            expect(owner.prepare_pod(request).status).to_equal(RUNTIME_STATUS_REJECTED)
+            expect(build_create_command("podman", "/unused/options", request, "create-api", 7, "boot-1").0.len()).to_be_greater_than(0)
+            expect(owner.retained_state_count()).to_equal(0)
+            expect(owner.executor_call_count()).to_equal(0)
+
+    it "refuses noncanonical working directories without interpreting their text":
+        for path in ["relative", "/work/../other", "/work//other", "/work/", "/work\nother"]:
+            var request = _options_request_v1()
+            request.working_directory = path
+            expect(oci_execution_options_v1(request.environment, path).is_err()).to_equal(true)
+            expect(build_create_command("podman", "/unused/options", request, "create-api", 7, "boot-1").0.len()).to_be_greater_than(0)
+
+    it "projects the actual explicit argv and cwd through the common API":
+        val adapter = linux_container_adapter_fixture_v2([], [1])
+        val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+        val request = linux_container_request_fixture_v2(_options_request_v1())
+        val projection = simple_container_action_project_v2(owner, request).unwrap()
+        expect(projection.argv).to_equal(["/bin/echo", "", "a b", ""])
+        expect(projection.working_directory).to_equal("/work")
+        expect(projection.mounts.len()).to_equal(0)
+        expect(adapter.provider.executor_call_count()).to_equal(0)
+
+    it "projects command-only explicit entrypoint without inheriting image CMD":
+        val owner = linux_container_owner_fixture_v2([], [1])
+        var leaf = _options_request_v1()
+        leaf.command = ["/bin/echo"]
+        leaf.args = []
+        val projected = simple_container_action_project_v2(owner, linux_container_request_fixture_v2(leaf)).unwrap()
+        expect(projected.argv).to_equal(["/bin/echo"])
+
+    it "refuses image-default argv cwd and unsupported generic workspace projection":
+        val owner = linux_container_owner_fixture_v2([], [1])
+        for unknown in ["entrypoint", "cwd", "workspace"]:
+            var leaf = _options_request_v1()
+            if unknown == "entrypoint":
+                leaf.command = []
+                leaf.replace_entrypoint = false
+            if unknown == "cwd": leaf.working_directory = ""
+            if unknown == "workspace": leaf.bundle_path = "/unmapped/bundle"
+            expect(simple_container_action_project_v2(owner, linux_container_request_fixture_v2(leaf)).is_err()).to_equal(true)
+
+    it "reports only the real fixed build mounts and preserves canonical space and Unicode roots":
+        val owner = linux_container_owner_fixture_v2([], [1])
+        var leaf = _options_request_v1()
+        leaf.replace_entrypoint = false
+        leaf.build_input_root = "/stage/input space"
+        leaf.build_output_root = "/stage/출력"
+        val projected = simple_container_action_project_v2(owner, linux_container_request_fixture_v2(leaf)).unwrap()
+        expect(projected.argv).to_equal(["/bin/echo", "", "a b", ""])
+        expect(projected.mounts.len()).to_equal(2)
+        expect(projected.mounts[0].host_root).to_equal("/stage/input space")
+        expect(projected.mounts[0].guest_root).to_equal("/simple-build/inputs")
+        expect(projected.mounts[0].read_only).to_equal(true)
+        expect(projected.mounts[1].host_root).to_equal("/stage/출력")
+        expect(projected.mounts[1].guest_root).to_equal("/simple-build/outputs")
+        expect(projected.mounts[1].read_only).to_equal(false)
+        expect(build_create_command("podman", "/unused/options", leaf, "create-api", 7, "boot-1").0).to_equal("")
+
+    it "refuses CSV-ambiguous build roots in both admission and actual effect construction":
+        for path in ["/stage/input,target=/other", "/stage/\"quoted\"", "relative", "/stage/../other", "/stage//input", "/stage/input/"]:
+            var leaf = _options_request_v1()
+            leaf.build_input_root = path
+            leaf.build_output_root = "/stage/outputs"
+            val provider = LinuxOciRuntimeProviderV1.scripted("linux", "podman", "/unused/options", "boot-1", 7, [])
+            expect(provider.prepare_pod(leaf).status).to_equal(RUNTIME_STATUS_REJECTED)
+            expect(build_create_command("podman", "/unused/options", leaf, "create-api", 7, "boot-1").0.len()).to_be_greater_than(0)
+            expect(provider.executor_call_count()).to_equal(0)
+
+    it "binds environment and working directory replay before another common create effect":
+        val leaf = _options_request_v1()
+        val request = linux_container_request_fixture_v2(leaf)
+        val fence = container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap()
+        val create = build_create_command("podman", "/unused/api", leaf, leaf.operation_id, 7, fence).1
+        val adapter = linux_container_adapter_fixture_v2([linux_container_script_result_fixture_v2(create, "a".repeat(64))], [1])
+        val owner = simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(), adapter)
+        val deadline = container_effect_deadline_v1(request.plan.request_digest, leaf.operation_id, ["create"], 100).unwrap()
+        val created = simple_container_apply_v2(owner, "create", request, deadline)
+        expect(created.operation.status).to_equal(RUNTIME_STATUS_OK)
+        expect(created.operation.command.args.contains("PLAIN=literal ; $(task)")).to_equal(true)
+        expect(created.operation.command.args.contains("LINES=first\nsecond")).to_equal(true)
+        expect(created.operation.command.args.contains("--http-proxy=false")).to_equal(true)
+        for field in ["environment", "cwd"]:
+            var changed = leaf
+            if field == "environment": changed.environment = [OciEnvironmentEntryV1(name: "PLAIN", value: "different")]
+            if field == "cwd": changed.working_directory = "/different"
+            expect(linux_oci_request_digest_v1(changed) == linux_oci_request_digest_v1(leaf)).to_equal(false)
+            val changed_request = linux_container_request_fixture_v2(changed)
+            val altered_deadline = container_effect_deadline_v1(changed_request.plan.request_digest, leaf.operation_id, ["create"], 100).unwrap()
+            val refused = simple_container_apply_v2(created.owner, "create", changed_request, altered_deadline)
+            expect(refused.operation.reason).to_equal("intent-request-mismatch")
+        expect(adapter.provider.executor_call_count()).to_equal(1)
+        expect(adapter.provider.scripted_cursor).to_equal(1)

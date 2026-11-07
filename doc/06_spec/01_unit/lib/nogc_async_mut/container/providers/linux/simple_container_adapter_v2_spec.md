@@ -34,3 +34,5 @@ not stop running work or prevent retained authorized cleanup.
 
 See `doc/05_design/linux_simple_container_adapter_v2.md` for ABI provenance,
 scope/continuity rules, trusted deadline boundary, and remaining verification.
+
+Execution-options source update (UNEXECUTED): Podman create vectors now include `--http-proxy=false`; typed environment/cwd are admitted, terminal effects remain refused. See `doc/05_design/oci_execution_options_effects.md` and the eleven-case system specification mirror.

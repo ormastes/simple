@@ -28,3 +28,5 @@ The command follow-up admits the already-digested executable override. The
 unsupported-effects loop now covers environment, working directory, and terminal
 modes only. Schema decoding still grants no execution authority by itself; mode
 replay continues through the provider's actual immutable payload binding.
+
+Execution-options source update (UNEXECUTED): Podman create vectors now include `--http-proxy=false`; typed environment/cwd are admitted, terminal effects remain refused. See `doc/05_design/oci_execution_options_effects.md` and the eleven-case system specification mirror.

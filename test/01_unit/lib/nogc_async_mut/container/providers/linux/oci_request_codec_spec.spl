@@ -62,7 +62,7 @@ describe "OCI retained request data codec":
         changed.terminal_mode = "stdin"
         expect(linux_oci_request_digest_v1(changed) == first).to_equal(false)
 
-    it "decodes new schema fields as data while provider and builder reject their effects":
+    it "roundtrips supported execution options while keeping terminal effects refused":
         val provider = LinuxOciRuntimeProviderV1.new("linux", OCI_ENGINE_PODMAN,
             "/unused/codec", "boot-1", 7, false)
         for mode in ["environment", "workdir", "terminal"]:
@@ -76,6 +76,12 @@ describe "OCI retained request data codec":
             val decoded = match linux_oci_retained_request_decode_v1(body):
                 case Ok(value): value
                 case Err(reason): fail(reason)
-            expect(provider.validate(decoded).accepted).to_equal(false)
-            expect(build_create_command(OCI_ENGINE_PODMAN, "/unused/codec",
-                decoded, "create-codec", 7, "boot-1").0).to_equal(provider.validate(decoded).reason)
+            val built = build_create_command(OCI_ENGINE_PODMAN, "/unused/codec",
+                decoded, "create-codec", 7, "boot-1")
+            if mode == "terminal":
+                expect(provider.validate(decoded).accepted).to_equal(false)
+                expect(built.0).to_equal("terminal-mode-not-admitted")
+            else:
+                expect(provider.validate(decoded).accepted).to_equal(true)
+                expect(built.0).to_equal("")
+                expect(built.1.args.contains("--http-proxy=false")).to_equal(true)

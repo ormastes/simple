@@ -1,6 +1,6 @@
 # Linux leaf adapter for the common container API. Its callers serialize access
 # to the retained provider; this module is not another scheduler or grant verifier.
-use std.common.contracts.container.execution_v2.{ContainerHostScopeV2,
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, ContainerActionProjectionV2, ContainerMountProjectionV2,
     ContainerExecutionRequestV2, ContainerRequestProjectionV2, ContainerHostObservationV2, container_scope_fence_id_v2, container_host_scope_bytes_v2}
 use std.common.contracts.container.effect_deadline_v1.ContainerEffectDeadlineV1
 use std.common.contracts.container.runtime_v1.{RuntimeOperationV1, RuntimeIntentV1, RuntimeIdentityV1,
@@ -19,6 +19,7 @@ use std.sffi.platform.platform_name_raw
 use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
 use std.nogc_sync_mut.io.retained_file.retained_directory_open_trusted_v1
 use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.contracts.container.command_v1.oci_command_parts_v1
 
 pub const LINUX_SIMPLE_CONTAINER_BACKEND_V2 = "linux-podman"
 
@@ -156,6 +157,26 @@ impl LinuxSimpleContainerAdapterV2:
         val valid = self.provider.validate(checked.0)
         if not valid.accepted: return Err(valid.reason)
         Ok(true)
+
+    pub fn action_project(request: ContainerExecutionRequestV2) -> Result<ContainerActionProjectionV2, text>:
+        val checked = self._checked_request_v2(request)?
+        val decoded = checked.0
+        val valid = self.provider.validate(decoded)
+        if not valid.accepted: return Err(valid.reason)
+        if decoded.bundle_path != "": return Err("container-action-workspace-unsupported")
+        val build_mode = decoded.build_input_root != "" or decoded.build_output_root != ""
+        if not decoded.replace_entrypoint and not build_mode: return Err("container-action-entrypoint-unresolved")
+        if decoded.working_directory == "": return Err("container-action-working-directory-unresolved")
+        val parts = oci_command_parts_v1(decoded.command, decoded.args, true)?
+        var argv: [text] = [decoded.command[0]]
+        for argument in parts.arguments: argv.push(argument)
+        var mounts: [ContainerMountProjectionV2] = []
+        if build_mode:
+            mounts.push(ContainerMountProjectionV2(host_root: decoded.build_input_root,
+                guest_root: "/simple-build/inputs", read_only: true))
+            mounts.push(ContainerMountProjectionV2(host_root: decoded.build_output_root,
+                guest_root: "/simple-build/outputs", read_only: false))
+        Ok(ContainerActionProjectionV2(argv: argv, working_directory: decoded.working_directory, mounts: mounts))
 
     fn _set_duration_v2(request: LinuxOciRequestV1) -> Result<(), text>:
         val timeout = if request.timeout_ms < self._duration_cap_ms: request.timeout_ms else: self._duration_cap_ms
