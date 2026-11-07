@@ -227,12 +227,38 @@ fn _symbol_start_col(signature: text, kind: text, name: text) -> i64:
         return 0
     val name_len = _text_len(name)
     val signature_len = _text_len(signature)
-    var i = 0
+    # A name may also spell part of its declaration keyword or visibility
+    # scope (fn f, pub fn p, pub(package) fn package). Search only the
+    # identifier portion already classified by the outline owner.
+    var i = _declaration_name_start_col(signature: signature, kind: kind)
     while i + name_len <= signature_len:
         if signature.substring(i, i + name_len) == name:
             return i
         i = i + 1
     0
+
+fn _declaration_name_start_col(signature: text, kind: text) -> i64:
+    val declaration = strip_visibility_prefix(signature)
+    var prefix_width = 0
+    if kind == "fn" or kind == "method" or kind == "static_method" or kind == "extern_fn":
+        if declaration.starts_with("static fn ") or declaration.starts_with("extern fn "):
+            prefix_width = 10
+        elif declaration.starts_with("fn ") or declaration.starts_with("me "):
+            prefix_width = 3
+    elif kind == "class" or kind == "struct" or kind == "enum" or kind == "trait" or kind == "impl" or kind == "val" or kind == "var":
+        val prefix = kind + " "
+        if declaration.starts_with(prefix):
+            prefix_width = _text_len(prefix)
+    elif kind == "import":
+        if declaration.starts_with("use "):
+            prefix_width = 4
+        elif declaration.starts_with("import "):
+            prefix_width = 7
+    if prefix_width == 0:
+        return 0
+    # Outline signatures have already been trimmed. The canonical visibility
+    # owner removes only the leading modifier here; authored text is retained.
+    _text_len(signature) - _text_len(declaration) + prefix_width
 
 fn _symbol_end_col(signature: text, kind: text, name: text, start_col: i64) -> i64:
     if kind == "domain":
