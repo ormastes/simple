@@ -2,6 +2,8 @@
 # controller's configured local-inprocess target. No listener or second ledger.
 use std.nogc_sync_mut.orchestration.host_local_root_v1.*
 use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.host_exec_control_installation_owner_v3.*
+use std.common.contracts.orchestration.host_exec_control_installation_v3.*
 use std.nogc_sync_mut.orchestration.host_authorized_reservation_v1.*
 use std.nogc_sync_mut.orchestration.host_authorized_execution_v2.*
 use std.nogc_sync_mut.orchestration.host_execution_envelope_v2.*
@@ -203,6 +205,20 @@ fn host_local_run_owned_v1(action: text, local: HostLocalRootV1,
     val binding = local.binding
     val refresh = fn() -> HostReservationAuthorizationContextV1:
         host_local_refresh_context_v1(service_root, binding)
+    if action == "host-exec-control-install":
+        val turn = host_exec_control_installation_install_v3(local, payload, host_local_context_v1(policy), refresh)
+        if turn.error != "": return host_local_finish_owned_v2(turn.local.capacity, action, operation_id,
+            host_local_error_v1(action, operation_id, turn.error, turn.recovery_required))
+        val installed = match turn.installation:
+            case Some(value): value
+            case nil: return host_local_finish_owned_v2(turn.local.capacity, action, operation_id,
+                host_local_error_v1(action, operation_id, "host-exec-install-result-required", true))
+        val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3), "kind": SdnValue.String("host-exec-control-installed"),
+            "operationId": SdnValue.String(installed.intent.operation_id), "artifactDigest": SdnValue.String(installed.artifact_digest),
+            "controlPolicyDigest": SdnValue.String(installed.intent.control_policy_digest),
+            "installed": SdnValue.Bool(true), "execReady": SdnValue.Bool(false)}
+        return host_local_finish_owned_v2(turn.local.capacity, action, operation_id,
+            HostLocalCommandReplyV1(exit_code: 0, output: sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"))
     if action == "host-parent-budget":
         val decoded = host_parent_budget_record_decode_v1(payload)
         if decoded.is_err(): return host_local_finish_owned_v2(local.capacity, action, operation_id,
@@ -319,18 +335,23 @@ pub fn host_local_command_v1(args: [text]) -> HostLocalCommandReplyV1:
             "claimDigest": SdnValue.String(claim.claim_digest), "bindingDigest": SdnValue.String(claim.binding_digest)}
         return HostLocalCommandReplyV1(exit_code: 0, output: sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
     if (action != "host-prepare" and action != "host-execute" and action != "host-inspect" and
-            action != "host-status" and action != "host-parent-budget"):
+            action != "host-status" and action != "host-parent-budget" and action != "host-exec-control-install"):
         return host_local_error_v1(action, "", "host-local-action-invalid", false)
     val required = if action == "host-status": 2 else: 3
     if args.len() != required: return host_local_error_v1(action, "", "host-local-argument-count", false)
     var payload = ""
     var operation_id = if action == "host-inspect": args[2] else: ""
     var timeout_ms = 30000
-    if action == "host-prepare" or action == "host-execute" or action == "host-parent-budget":
-        val bytes = file_read_regular_no_follow_bounded(args[2], 2097152)
+    if action == "host-prepare" or action == "host-execute" or action == "host-parent-budget" or action == "host-exec-control-install":
+        val limit = if action == "host-exec-control-install": 4194304 else: 2097152
+        val bytes = file_read_regular_no_follow_bounded(args[2], limit)
         if bytes.is_err(): return host_local_error_v1(action, "", bytes.unwrap_err(), false)
         payload = bytes.unwrap()
-        if action == "host-parent-budget":
+        if action == "host-exec-control-install":
+            val installation = host_exec_control_installation_request_decode_v3(payload)
+            if installation.is_err(): return host_local_error_v1(action, "", installation.unwrap_err(), false)
+            operation_id = installation.unwrap().operation.id
+        elif action == "host-parent-budget":
             val record = host_parent_budget_record_decode_v1(payload)
             if record.is_err(): return host_local_error_v1(action, "", record.unwrap_err(), false)
             operation_id = record.unwrap().proof.budget.parent_operation_id
