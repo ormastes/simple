@@ -1,0 +1,231 @@
+# Downloaded bytes are untrusted until the separate completion authority verifier
+# and current parent ownership both accept them. No publication occurs here.
+use std.common.build_manager.contracts.{BuildTaskV1, BuildResultV1, BuildInputV1,
+    builder_validate_task_v1, builder_validate_result_v1, builder_task_identity_v1,
+    builder_identifier_valid_v1, builder_digest_valid_v1, builder_relative_path_valid_v1}
+use std.common.build_manager.codec.{builder_wire_line_v1, builder_encode_result_v1, BuilderWireReaderV1}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.task_runner.scheduler.task_runner_output_error
+use std.nogc_sync_mut.io.external_text_io.io_legacy_utf8
+use app.buildrunner.process_evidence.build_runner_process_evidence_decode_v1
+
+struct RemoteEvidencePolicyV1:
+    host_id: text
+    assignment_digest: text
+    controller_epoch: i64
+    operation_id: text
+    action_kind: text
+    expected_tests: [text]
+    test_report_path: text
+    maximum_bytes: i64
+    toolchain_inputs: [BuildInputV1]
+
+struct RemoteOutputBytesV1:
+    path: text
+    content: [u8]
+
+struct RemoteEvidenceBytesV1:
+    process_payload: text
+    stdout: [u8]
+    stderr: [u8]
+    outputs: [RemoteOutputBytesV1]
+
+struct RemoteFrozenEvidenceV1:
+    bytes: RemoteEvidenceBytesV1
+    observed: [BuildInputV1]
+    result_digest: text
+    process_digest: text
+    stdout_digest: text
+    stderr_digest: text
+    output_inventory_digest: text
+    tests_digest: text
+
+fn remote_inventory_digest_v1(inputs: [BuildInputV1]) -> text:
+    var wire = "SIMPLE-REMOTE-INVENTORY-1\n"
+    for input in inputs:
+        wire = wire + builder_wire_line_v1(input.path) + builder_wire_line_v1(input.digest)
+    sha256_text(wire)
+
+fn remote_policy_encode_v1(policy: RemoteEvidencePolicyV1) -> Result<text, text>:
+    if not builder_identifier_valid_v1(policy.host_id) or
+            not builder_identifier_valid_v1(policy.operation_id) or
+            not builder_digest_valid_v1(policy.assignment_digest) or policy.controller_epoch < 1:
+        return Err("REMOTE_POLICY_IDENTITY_INVALID")
+    if policy.maximum_bytes < 1 or policy.maximum_bytes > 268435456:
+        return Err("REMOTE_EVIDENCE_BOUND_INVALID")
+    if policy.action_kind != "build" and policy.action_kind != "test":
+        return Err("REMOTE_ACTION_INVALID")
+    if policy.expected_tests.len() > 4096 or policy.toolchain_inputs.len() == 0 or
+            policy.toolchain_inputs.len() > 4096:
+        return Err("REMOTE_POLICY_INVENTORY_INVALID")
+    if policy.action_kind == "test":
+        if policy.expected_tests.len() == 0 or not builder_relative_path_valid_v1(policy.test_report_path):
+            return Err("REMOTE_EXPECTED_TESTS_REQUIRED")
+    elif policy.expected_tests.len() != 0 or policy.test_report_path != "":
+        return Err("REMOTE_BUILD_TEST_POLICY_INVALID")
+    var seen: Dict<text, bool> = {}
+    for test_id in policy.expected_tests:
+        if not builder_identifier_valid_v1(test_id) or seen.contains_key(test_id):
+            return Err("REMOTE_TEST_ID_INVALID")
+        seen[test_id] = true
+    var tool_paths: Dict<text, bool> = {}
+    for input in policy.toolchain_inputs:
+        if not builder_relative_path_valid_v1(input.path) or not builder_digest_valid_v1(input.digest) or
+                tool_paths.contains_key(input.path): return Err("REMOTE_TOOLCHAIN_INPUT_INVALID")
+        tool_paths[input.path] = true
+    var wire = "SIMPLE-REMOTE-POLICY-1\n"
+    for field in [policy.host_id, policy.assignment_digest, str(policy.controller_epoch),
+            policy.operation_id, policy.action_kind, policy.test_report_path,
+            str(policy.maximum_bytes), str(policy.expected_tests.len())]:
+        wire = wire + builder_wire_line_v1(field)
+    for test_id in policy.expected_tests: wire = wire + builder_wire_line_v1(test_id)
+    wire = wire + builder_wire_line_v1(str(policy.toolchain_inputs.len()))
+    for input in policy.toolchain_inputs:
+        wire = wire + builder_wire_line_v1(input.path) + builder_wire_line_v1(input.digest)
+    Ok(wire)
+
+fn remote_policy_bind_v1(task: BuildTaskV1, policy: RemoteEvidencePolicyV1) -> Result<bool, text>:
+    val invalid = builder_validate_task_v1(task)
+    if invalid != "": return Err(invalid)
+    val policy_digest = sha256_text(remote_policy_encode_v1(policy)?)
+    var found = false
+    for input in task.inputs:
+        if input.path == "remote-policy/" + task.id + ".sdn":
+            if input.digest != policy_digest: return Err("REMOTE_POLICY_CHANGED")
+            found = true
+    if not found: return Err("REMOTE_POLICY_NOT_PINNED")
+    if remote_inventory_digest_v1(policy.toolchain_inputs) != task.toolchain_digest:
+        return Err("REMOTE_TOOLCHAIN_IDENTITY_DIFFERS")
+    for tool in policy.toolchain_inputs:
+        var declared = false
+        for input in task.inputs:
+            if input.path == tool.path and input.digest == tool.digest: declared = true
+        if not declared: return Err("REMOTE_TOOLCHAIN_INPUT_NOT_PINNED")
+    if policy.action_kind == "test" and not task.outputs.contains(policy.test_report_path):
+        return Err("REMOTE_TEST_REPORT_NOT_DECLARED")
+    Ok(true)
+
+fn remote_test_report_validate_v1(task: BuildTaskV1, policy: RemoteEvidencePolicyV1,
+        payload: text) -> Result<text, text>:
+    # Exact ordered inventory is pinned before execution. Zero tests, duplicate
+    # cases, skips, failures, unknown cases and aggregate-only summaries refuse.
+    var expected = "SIMPLE-REMOTE-TEST-REPORT-1\n" + builder_task_identity_v1(task) + "\n"
+    for test_id in policy.expected_tests: expected = expected + test_id + "\tpassed\n"
+    if payload != expected: return Err("REMOTE_TEST_INVENTORY_DIFFERS")
+    Ok(sha256_text(payload))
+
+fn remote_evidence_freeze_v1(task: BuildTaskV1, result: BuildResultV1,
+        policy: RemoteEvidencePolicyV1, bytes: RemoteEvidenceBytesV1) -> Result<RemoteFrozenEvidenceV1, text>:
+    val _policy = remote_policy_bind_v1(task, policy)?
+    val invalid = builder_validate_result_v1(task, result)
+    if invalid != "": return Err(invalid)
+    if result.host_id != policy.host_id: return Err("REMOTE_HOST_DIFFERS")
+    if bytes.process_payload.byte_len() > 2048 or bytes.outputs.len() > 4096:
+        return Err("REMOTE_EVIDENCE_EXCEEDS_BOUND")
+    var remaining = policy.maximum_bytes
+    for size in [bytes.process_payload.byte_len(), bytes.stdout.len(), bytes.stderr.len()]:
+        if size > remaining: return Err("REMOTE_EVIDENCE_EXCEEDS_BOUND")
+        remaining = remaining - size
+    val stdout_digest = sha256_u8_hex(bytes.stdout)
+    val stderr_digest = sha256_u8_hex(bytes.stderr)
+    # Content validation is deliberately separate from tree ownership authority.
+    val process = build_runner_process_evidence_decode_v1(bytes.process_payload)?
+    if process.task_identity != builder_task_identity_v1(task) or
+            process.stdout_digest != stdout_digest or process.stderr_digest != stderr_digest:
+        return Err("compiler process evidence differs from manifest or logs")
+    var expected_status = "ERROR"
+    var expected_code = process.exit_code
+    if process.outcome == "cancelled": expected_code = 125
+    elif process.outcome == "timed-out":
+        expected_status = "TIMEOUT"
+        expected_code = 124
+    elif process.outcome == "crashed":
+        expected_status = "CRASHED"
+        if process.signal_number > 0: expected_code = 128 + process.signal_number
+    elif process.exit_code == 0: expected_status = "OK"
+    if result.status != expected_status or result.exit_code != expected_code:
+        return Err("compiler result differs from frozen observation")
+    var observed: [BuildInputV1] = []
+    var tests_digest = sha256_text("")
+    var seen: Dict<text, bool> = {}
+    for output in bytes.outputs:
+        if not task.outputs.contains(output.path) or seen.contains_key(output.path):
+            return Err("REMOTE_OUTPUT_UNKNOWN_OR_DUPLICATE")
+        seen[output.path] = true
+        if output.content.len() > remaining: return Err("REMOTE_EVIDENCE_EXCEEDS_BOUND")
+        remaining = remaining - output.content.len()
+        observed = observed.push(BuildInputV1(output.path, sha256_u8_hex(output.content)))
+        if policy.action_kind == "test" and output.path == policy.test_report_path:
+            tests_digest = remote_test_report_validate_v1(task, policy, io_legacy_utf8(output.content)?)?
+    if result.status == "OK":
+        val output_error = task_runner_output_error(task, result, observed)
+        if output_error != "": return Err(output_error)
+    elif observed.len() != 0: return Err("REMOTE_FAILED_RESULT_HAS_OUTPUTS")
+    # Canonical order derives from the admitted task, never network arrival order.
+    var ordered: [BuildInputV1] = []
+    for path in task.outputs:
+        for output in observed:
+            if path == output.path: ordered = ordered.push(output)
+    Ok(RemoteFrozenEvidenceV1(bytes, ordered, sha256_text(builder_encode_result_v1(result)),
+        sha256_text(bytes.process_payload), stdout_digest, stderr_digest,
+        remote_inventory_digest_v1(ordered), tests_digest))
+
+export RemoteEvidencePolicyV1, RemoteOutputBytesV1, RemoteEvidenceBytesV1, RemoteFrozenEvidenceV1
+export remote_inventory_digest_v1, remote_policy_encode_v1, remote_policy_bind_v1
+export remote_test_report_validate_v1, remote_evidence_freeze_v1
+
+# Preserve the encoder's positive-i64 epoch domain. The generic wire reader
+# intentionally caps integer text at 17 characters, so epoch needs a checked
+# 19-digit decimal reader rather than silent truncation or a narrower domain.
+fn remote_policy_epoch_decode_v1(field: text) -> Result<i64, text>:
+    if field.byte_len() == 0 or field.byte_len() > 19 or field.starts_with("0"):
+        return Err("REMOTE_POLICY_INTEGER_INVALID")
+    var epoch: i64 = 0
+    for i in 0..field.byte_len():
+        val code = field.byte_at(i) as i64
+        if code < 48 or code > 57: return Err("REMOTE_POLICY_INTEGER_INVALID")
+        val digit = code - 48
+        if epoch > (9223372036854775807 - digit) / 10:
+            return Err("REMOTE_POLICY_INTEGER_INVALID")
+        epoch = epoch * 10 + digit
+    Ok(epoch)
+
+fn remote_policy_decode_v1(payload: text) -> Result<RemoteEvidencePolicyV1, text>:
+    if payload.byte_len() > 1048576: return Err("REMOTE_POLICY_WIRE_TOO_LARGE")
+    if not payload.ends_with("\n"): return Err("REMOTE_POLICY_WIRE_INVALID")
+    val fields = payload.split("\n")
+    if fields.len() > 12300: return Err("REMOTE_POLICY_WIRE_INVALID")
+    var reader = BuilderWireReaderV1(lines: fields, index: 0, reason: "")
+    if reader.scalar() != "SIMPLE-REMOTE-POLICY-1": return Err("REMOTE_POLICY_WIRE_VERSION_INVALID")
+    val host_id = reader.scalar()
+    val assignment_digest = reader.scalar()
+    val epoch_field = reader.scalar()
+    if reader.reason != "": return Err("REMOTE_POLICY_WIRE_INVALID")
+    val controller_epoch = remote_policy_epoch_decode_v1(epoch_field)?
+    val operation_id = reader.scalar()
+    val action_kind = reader.scalar()
+    val test_report_path = reader.scalar()
+    val maximum_bytes = reader.number(268435456, false)
+    val expected_count = reader.number(4096, false)
+    if reader.reason != "": return Err("REMOTE_POLICY_WIRE_INVALID")
+    var expected_tests: [text] = []
+    for i in 0..expected_count:
+        expected_tests.push(reader.scalar())
+        if reader.reason != "": return Err("REMOTE_POLICY_WIRE_INVALID")
+    val tool_count = reader.number(4096, false)
+    if reader.reason != "": return Err("REMOTE_POLICY_WIRE_INVALID")
+    var toolchain_inputs: [BuildInputV1] = []
+    for i in 0..tool_count:
+        val path = reader.scalar()
+        val digest = reader.scalar()
+        if reader.reason != "": return Err("REMOTE_POLICY_WIRE_INVALID")
+        toolchain_inputs.push(BuildInputV1(path: path, digest: digest))
+    if reader.complete_error() != "": return Err("REMOTE_POLICY_WIRE_INVALID")
+    val policy = RemoteEvidencePolicyV1(host_id: host_id, assignment_digest: assignment_digest,
+        controller_epoch: controller_epoch, operation_id: operation_id, action_kind: action_kind,
+        expected_tests: expected_tests, test_report_path: test_report_path,
+        maximum_bytes: maximum_bytes, toolchain_inputs: toolchain_inputs)
+    if remote_policy_encode_v1(policy)? != payload: return Err("REMOTE_POLICY_WIRE_NONCANONICAL")
+    Ok(policy)
+
+export remote_policy_decode_v1

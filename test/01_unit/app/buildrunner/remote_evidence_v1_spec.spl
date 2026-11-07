@@ -1,0 +1,254 @@
+use std.spec.{describe, it, expect}
+use std.common.build_manager.contracts.{BuildTaskV1, BuildInputV1, BuildResultV1,
+    builder_validate_task_v1, builder_task_identity_v1}
+use std.common.build_manager.codec.builder_encode_result_v1
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use app.buildrunner.process_evidence.{BuildRunnerProcessEvidenceV1,
+    build_runner_process_evidence_encode_v1}
+use app.buildrunner.remote_evidence_v1.{RemoteEvidencePolicyV1, RemoteOutputBytesV1,
+    RemoteEvidenceBytesV1, remote_inventory_digest_v1, remote_policy_encode_v1,
+    remote_policy_bind_v1, remote_test_report_validate_v1, remote_evidence_freeze_v1}
+
+# Source-authored unit specifications; runtime qualification is pending.
+# These process observations are encoded fixtures, not proof of a real launch.
+struct RemoteEvidenceFixtureV1:
+    task: BuildTaskV1
+    result: BuildResultV1
+    policy: RemoteEvidencePolicyV1
+    bytes: RemoteEvidenceBytesV1
+
+fn evidence_policy_v1(action: text, maximum_bytes: i64 = 65536) -> RemoteEvidencePolicyV1:
+    val tools = [BuildInputV1("tools/simple", sha256_text("compiler fixture bytes")),
+        BuildInputV1("tools/runtime.a", sha256_text("runtime fixture bytes"))]
+    RemoteEvidencePolicyV1(host_id: "remote_a", assignment_digest: sha256_text("assignment"),
+        controller_epoch: 7, operation_id: "operation_a", action_kind: action,
+        expected_tests: if action == "test": ["case_alpha", "case_beta"] else: [],
+        test_report_path: if action == "test": "reports/tests.sdn" else: "",
+        maximum_bytes: maximum_bytes, toolchain_inputs: tools)
+
+fn evidence_task_v1(policy: RemoteEvidencePolicyV1) -> BuildTaskV1:
+    val policy_input = BuildInputV1("remote-policy/remote_task.sdn",
+        sha256_text(remote_policy_encode_v1(policy).unwrap()))
+    BuildTaskV1(id: "remote_task", attempt: 1, phase: "compile",
+        producer_digest: sha256_text("producer"), source_digest: sha256_text("source"),
+        toolchain_digest: remote_inventory_digest_v1(policy.toolchain_inputs),
+        dependencies: [], program: "tools/simple", args: ["native-build", "src/main.spl"],
+        inputs: [BuildInputV1("src/main.spl", sha256_text("fn main(): 0\n")),
+            policy.toolchain_inputs[0], policy.toolchain_inputs[1], policy_input],
+        outputs: if policy.action_kind == "test": ["bin/program", policy.test_report_path]
+            else: ["bin/program", "reports/build.txt"],
+        cache_key: sha256_text("remote-cache"), timeout_ms: 1000,
+        memory_limit_bytes: 1048576, links: [])
+
+fn evidence_result_v1(task: BuildTaskV1, outputs: [RemoteOutputBytesV1]) -> BuildResultV1:
+    var digests: [BuildInputV1] = []
+    for output in outputs:
+        digests = digests.push(BuildInputV1(output.path, sha256_u8_hex(output.content)))
+    BuildResultV1(task_id: task.id, attempt: task.attempt,
+        identity_digest: builder_task_identity_v1(task), host_id: "remote_a",
+        status: "OK", exit_code: 0, outputs: digests,
+        cache_hits: -1, cache_misses: -1, cache_stores: -1)
+
+fn evidence_process_v1(task: BuildTaskV1, stdout: [u8], stderr: [u8]) -> text:
+    build_runner_process_evidence_encode_v1(BuildRunnerProcessEvidenceV1(
+        task_identity: builder_task_identity_v1(task), pid: 43, process_generation: 91,
+        native_identity_digest: sha256_text("native-observation"), exit_code: 0,
+        signal_number: 0, outcome: "exited", stdout_digest: sha256_u8_hex(stdout),
+        stderr_digest: sha256_u8_hex(stderr),
+        transport_execution_digest: sha256_text("transport-execution"))).unwrap()
+
+fn evidence_report_v1(task: BuildTaskV1, rows: text) -> text:
+    "SIMPLE-REMOTE-TEST-REPORT-1\n" + builder_task_identity_v1(task) + "\n" + rows
+
+fn evidence_fixture_v1(action: text, maximum_bytes: i64 = 65536) -> RemoteEvidenceFixtureV1:
+    val policy = evidence_policy_v1(action, maximum_bytes)
+    val task = evidence_task_v1(policy)
+    val secondary = if action == "test":
+        evidence_report_v1(task, "case_alpha\tpassed\ncase_beta\tpassed\n")
+        else: "built fixture program\n"
+    # Deliberately reverse download order; frozen inventory follows the task.
+    val outputs = [RemoteOutputBytesV1(task.outputs[1], secondary.bytes()),
+        RemoteOutputBytesV1("bin/program", [0 as u8, 127 as u8, 255 as u8])]
+    val stdout = "compiler stdout\n".bytes()
+    val stderr = "compiler stderr\n".bytes()
+    val bytes = RemoteEvidenceBytesV1(evidence_process_v1(task, stdout, stderr),
+        stdout, stderr, outputs)
+    RemoteEvidenceFixtureV1(task, evidence_result_v1(task, outputs), policy, bytes)
+
+describe "Remote evidence bytes V1":
+    it "freezes a pinned build from actual byte digests in task output order":
+        val fixture = evidence_fixture_v1("build")
+        expect(builder_validate_task_v1(fixture.task)).to_equal("")
+        expect(remote_policy_bind_v1(fixture.task, fixture.policy)).to_equal(Ok(true))
+        val frozen = remote_evidence_freeze_v1(fixture.task, fixture.result,
+            fixture.policy, fixture.bytes).unwrap()
+        expect(frozen.observed).to_equal([
+            BuildInputV1("bin/program", sha256_u8_hex(fixture.bytes.outputs[1].content)),
+            BuildInputV1("reports/build.txt", sha256_u8_hex(fixture.bytes.outputs[0].content))])
+        expect(frozen.result_digest).to_equal(sha256_text(builder_encode_result_v1(fixture.result)))
+        expect(frozen.process_digest).to_equal(sha256_text(fixture.bytes.process_payload))
+        expect(frozen.stdout_digest).to_equal(sha256_u8_hex(fixture.bytes.stdout))
+        expect(frozen.stderr_digest).to_equal(sha256_u8_hex(fixture.bytes.stderr))
+        expect(frozen.output_inventory_digest).to_equal(remote_inventory_digest_v1(frozen.observed))
+        expect(frozen.tests_digest).to_equal(sha256_text(""))
+        expect(frozen.bytes.outputs[1].content).to_equal([0 as u8, 127 as u8, 255 as u8])
+
+    it "freezes only the exact task-bound ordered passing test inventory":
+        val fixture = evidence_fixture_v1("test")
+        val report = evidence_report_v1(fixture.task, "case_alpha\tpassed\ncase_beta\tpassed\n")
+        expect(remote_test_report_validate_v1(fixture.task, fixture.policy, report))
+            .to_equal(Ok(sha256_text(report)))
+        val frozen = remote_evidence_freeze_v1(fixture.task, fixture.result,
+            fixture.policy, fixture.bytes).unwrap()
+        expect(frozen.tests_digest).to_equal(sha256_text(report))
+        expect(frozen.observed[1]).to_equal(BuildInputV1("reports/tests.sdn", sha256_text(report)))
+
+    it "rejects output byte changes and dishonest result digests independently":
+        val fixture = evidence_fixture_v1("build")
+        var changed_bytes = fixture.bytes
+        changed_bytes.outputs[1].content = "substituted program".bytes()
+        expect(remote_evidence_freeze_v1(fixture.task, fixture.result, fixture.policy, changed_bytes))
+            .to_equal(Err("parent output digest does not match worker receipt"))
+        var changed_result = fixture.result
+        changed_result.outputs[1].digest = sha256_text("dishonest claim")
+        expect(remote_evidence_freeze_v1(fixture.task, changed_result, fixture.policy, fixture.bytes))
+            .to_equal(Err("parent output digest does not match worker receipt"))
+
+    it "rejects changed stdout and stderr bytes against encoded process observation":
+        val fixture = evidence_fixture_v1("build")
+        var stdout_changed = fixture.bytes
+        stdout_changed.stdout = "substituted stdout".bytes()
+        expect(remote_evidence_freeze_v1(fixture.task, fixture.result, fixture.policy, stdout_changed))
+            .to_equal(Err("compiler process evidence differs from manifest or logs"))
+        var stderr_changed = fixture.bytes
+        stderr_changed.stderr = "substituted stderr".bytes()
+        expect(remote_evidence_freeze_v1(fixture.task, fixture.result, fixture.policy, stderr_changed))
+            .to_equal(Err("compiler process evidence differs from manifest or logs"))
+
+    it "rejects stale result identity and independently stale process identity":
+        val fixture = evidence_fixture_v1("build")
+        var task = fixture.task
+        task.attempt = 2
+        expect(remote_evidence_freeze_v1(task, fixture.result, fixture.policy, fixture.bytes))
+            .to_equal(Err("stale or mismatched result identity"))
+        val current_result = evidence_result_v1(task, fixture.bytes.outputs)
+        expect(remote_evidence_freeze_v1(task, current_result, fixture.policy, fixture.bytes))
+            .to_equal(Err("compiler process evidence differs from manifest or logs"))
+
+    it "requires policy bytes to remain pinned and tied to the declared toolchain":
+        val fixture = evidence_fixture_v1("build")
+        var changed_policy = fixture.policy
+        changed_policy.controller_epoch = 8
+        expect(remote_policy_bind_v1(fixture.task, changed_policy))
+            .to_equal(Err("REMOTE_POLICY_CHANGED"))
+        var no_policy = fixture.task
+        no_policy.inputs = no_policy.inputs[0:3]
+        expect(remote_policy_bind_v1(no_policy, fixture.policy))
+            .to_equal(Err("REMOTE_POLICY_NOT_PINNED"))
+        var changed_toolchain = fixture.task
+        changed_toolchain.toolchain_digest = sha256_text("other toolchain inventory")
+        expect(remote_policy_bind_v1(changed_toolchain, fixture.policy))
+            .to_equal(Err("REMOTE_TOOLCHAIN_IDENTITY_DIFFERS"))
+        var missing_tool = fixture.task
+        missing_tool.inputs = [fixture.task.inputs[0], fixture.task.inputs[2], fixture.task.inputs[3]]
+        expect(remote_policy_bind_v1(missing_tool, fixture.policy))
+            .to_equal(Err("REMOTE_TOOLCHAIN_INPUT_NOT_PINNED"))
+        var changed_tool = fixture.task
+        changed_tool.inputs[1].digest = sha256_text("changed compiler bytes")
+        expect(remote_policy_bind_v1(changed_tool, fixture.policy))
+            .to_equal(Err("REMOTE_TOOLCHAIN_INPUT_NOT_PINNED"))
+
+    it "rejects duplicate and undeclared downloaded output paths":
+        val fixture = evidence_fixture_v1("build")
+        var duplicate = fixture.bytes
+        duplicate.outputs = [fixture.bytes.outputs[0], fixture.bytes.outputs[1], fixture.bytes.outputs[0]]
+        expect(remote_evidence_freeze_v1(fixture.task, fixture.result, fixture.policy, duplicate))
+            .to_equal(Err("REMOTE_OUTPUT_UNKNOWN_OR_DUPLICATE"))
+        var unknown = fixture.bytes
+        unknown.outputs = [RemoteOutputBytesV1("bin/unexpected", "untrusted".bytes())]
+        expect(remote_evidence_freeze_v1(fixture.task, fixture.result, fixture.policy, unknown))
+            .to_equal(Err("REMOTE_OUTPUT_UNKNOWN_OR_DUPLICATE"))
+
+    it "rejects a different result host and duplicate or unknown result output claims":
+        val fixture = evidence_fixture_v1("build")
+        var host = fixture.result
+        host.host_id = "remote_b"
+        expect(remote_evidence_freeze_v1(fixture.task, host, fixture.policy, fixture.bytes))
+            .to_equal(Err("REMOTE_HOST_DIFFERS"))
+        var duplicate = fixture.result
+        duplicate.outputs = [fixture.result.outputs[0], fixture.result.outputs[0]]
+        expect(remote_evidence_freeze_v1(fixture.task, duplicate, fixture.policy, fixture.bytes))
+            .to_equal(Err("duplicate result output"))
+        var unknown = fixture.result
+        unknown.outputs[0].path = "reports/unknown.txt"
+        expect(remote_evidence_freeze_v1(fixture.task, unknown, fixture.policy, fixture.bytes))
+            .to_equal(Err("undeclared or missing output"))
+
+    it "rejects missing test report bytes even when the result claims them":
+        val fixture = evidence_fixture_v1("test")
+        var bytes = fixture.bytes
+        bytes.outputs = [fixture.bytes.outputs[1]]
+        expect(remote_evidence_freeze_v1(fixture.task, fixture.result, fixture.policy, bytes))
+            .to_equal(Err("success requires every declared output and fresh parent digest"))
+
+    it "rejects missing zero skipped failed unknown duplicate and reordered test rows":
+        val fixture = evidence_fixture_v1("test")
+        val invalid_rows = [
+            "case_alpha\tpassed\n",
+            "",
+            "case_alpha\tskipped\ncase_beta\tpassed\n",
+            "case_alpha\tpassed\ncase_beta\tfailed\n",
+            "case_alpha\tpassed\ncase_unknown\tpassed\n",
+            "case_alpha\tpassed\ncase_alpha\tpassed\n",
+            "case_beta\tpassed\ncase_alpha\tpassed\n",
+            "passed: 2\nfailed: 0\n"]
+        for rows in invalid_rows:
+            val report = evidence_report_v1(fixture.task, rows)
+            var bytes = fixture.bytes
+            bytes.outputs[0].content = report.bytes()
+            # Recompute result claims, so the rejection proves test inventory
+            # checking rather than an unrelated byte-digest mismatch.
+            val result = evidence_result_v1(fixture.task, bytes.outputs)
+            expect(remote_evidence_freeze_v1(fixture.task, result, fixture.policy, bytes))
+                .to_equal(Err("REMOTE_TEST_INVENTORY_DIFFERS"))
+
+    it "rejects a report copied from another task identity":
+        val fixture = evidence_fixture_v1("test")
+        var other_task = fixture.task
+        other_task.attempt = 2
+        var bytes = fixture.bytes
+        bytes.outputs[0].content = evidence_report_v1(other_task,
+            "case_alpha\tpassed\ncase_beta\tpassed\n").bytes()
+        val result = evidence_result_v1(fixture.task, bytes.outputs)
+        expect(remote_evidence_freeze_v1(fixture.task, result, fixture.policy, bytes))
+            .to_equal(Err("REMOTE_TEST_INVENTORY_DIFFERS"))
+
+    it "requires a nonempty unique test policy and a declared report path":
+        val fixture = evidence_fixture_v1("test")
+        var zero = fixture.policy
+        zero.expected_tests = []
+        expect(remote_policy_encode_v1(zero)).to_equal(Err("REMOTE_EXPECTED_TESTS_REQUIRED"))
+        var duplicate = fixture.policy
+        duplicate.expected_tests = ["case_alpha", "case_alpha"]
+        expect(remote_policy_encode_v1(duplicate)).to_equal(Err("REMOTE_TEST_ID_INVALID"))
+        var task = fixture.task
+        task.outputs = ["bin/program"]
+        expect(remote_policy_bind_v1(task, fixture.policy))
+            .to_equal(Err("REMOTE_TEST_REPORT_NOT_DECLARED"))
+
+    it "counts process payload logs and every output against one exact byte limit":
+        val original = evidence_fixture_v1("build")
+        val size = (original.bytes.process_payload.byte_len() + original.bytes.stdout.len() +
+            original.bytes.stderr.len() + original.bytes.outputs[0].content.len() +
+            original.bytes.outputs[1].content.len())
+        # Rebuild the policy pin and process identity for each admitted bound.
+        # Their hash strings have fixed length, preserving total byte size.
+        val exact = evidence_fixture_v1("build", size)
+        val frozen = remote_evidence_freeze_v1(exact.task, exact.result, exact.policy, exact.bytes).unwrap()
+        expect(frozen.observed.len()).to_equal(2)
+        val short = evidence_fixture_v1("build", size - 1)
+        expect(remote_evidence_freeze_v1(short.task, short.result, short.policy, short.bytes))
+            .to_equal(Err("REMOTE_EVIDENCE_EXCEEDS_BOUND"))
+        val only_process = evidence_fixture_v1("build", original.bytes.process_payload.byte_len())
+        expect(remote_evidence_freeze_v1(only_process.task, only_process.result,
+            only_process.policy, only_process.bytes)).to_equal(Err("REMOTE_EVIDENCE_EXCEEDS_BOUND"))

@@ -1,0 +1,181 @@
+# Explicit opt-in parent adapter. The legacy database session's local-only guard
+# stays unchanged. Worker wire data cannot construct this journal owner.
+use app.buildrunner.remote_evidence_v1.*
+use app.buildrunner.remote_authority_v1.*
+use app.buildrunner.remote_context_v1.*
+use app.buildrunner.remote_host_v1.RemoteCompletionBundleV1
+use app.buildrunner.remote_bundle_codec_v1.remote_bundle_decode_v1
+use app.buildrunner.database_session.BuildRunnerDatabaseSessionV1
+use app.buildrunner.task_database.{build_runner_task_identity_v1,
+    build_runner_database_open_v1, build_runner_database_collect_v1}
+use std.common.build_manager.contracts.{BuildRunV1, BuildTaskV1, BuildResultV1,
+    builder_validate_run_v1, builder_task_identity_v1}
+use std.common.build_manager.codec.builder_encode_result_v1
+use std.common.task_runner.contracts.task_runner_identity_v1
+use std.common.task_runner.journal.task_runner_journal_history_v1
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
+    distributed_operation_journal_lookup_v2, distributed_operation_journal_commit_v2}
+use std.common.contracts.distributed_operation_state_v2.{DistributedOperationStateV2,
+    distributed_operation_transition_v2}
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.crypto.sha256.sha256_text
+use app.io.file_ops.{file_read_regular_no_follow_bounded, file_atomic_write_bytes,
+    file_hash_sha256, secure_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_is_real_no_follow}
+
+struct RemoteAcceptedResultV1:
+    result: BuildResultV1
+    outputs_root: text
+    completion_digest: text
+
+fn remote_parent_output_path_v1(root: text, relative: text) -> Result<text, text>:
+    # relative comes from the already validated exact task output inventory.
+    if not dir_is_real_no_follow(root): return Err("REMOTE_PARENT_ROOT_UNSAFE")
+    val parts = relative.split("/")
+    var parent = root
+    for index in 0..parts.len() - 1:
+        parent = parent + "/" + parts[index]
+        if not dir_create_all(parent) or not dir_is_real_no_follow(parent):
+            return Err("REMOTE_PARENT_DIRECTORY_UNSAFE")
+    Ok(root + "/" + relative)
+
+fn remote_operation_collectable_v1(prior: DistributedOperationStateV2,
+        operation_id: text, envelope: text) -> Result<bool, text>:
+    if prior.operation_id != operation_id or prior.envelope != envelope or
+            prior.envelope_digest != sha256_text(envelope):
+        return Err("REMOTE_OPERATION_BINDING_DIFFERS")
+    if prior.state == "cancelled": return Err("REMOTE_EXECUTION_CANCELLED")
+    if prior.state == "completed" or prior.state == "failed": return Err("REMOTE_COMPLETION_REPLAY")
+    if prior.state != "executing" and prior.state != "outcome-unknown":
+        return Err("REMOTE_EXECUTION_NOT_STARTED")
+    Ok(true)
+
+class RemoteDatabaseSessionV1:
+    database: BuildRunnerDatabaseSessionV1
+    operations: DistributedOperationJournalV2
+    policies: Dict<text, RemoteEvidencePolicyV1>
+    identities: Dict<text, text>
+    journal_identities: Dict<text, text>
+
+impl RemoteDatabaseSessionV1:
+    me accept_wire(task: BuildTaskV1, payload: text,
+            context: RemoteAuthorityContextV1) -> Result<RemoteAcceptedResultV1, text>:
+        # Decoding transports claims and bytes, never authority. The same parent
+        # gate runs for in-process and remote responses.
+        self.accept(task, remote_bundle_decode_v1(payload)?, context)
+
+    me cancel(operation_id: text, cancellation_digest: text) -> Result<bool, text>:
+        var task_id = ""
+        for candidate in self.policies.keys():
+            if self.policies[candidate].operation_id == operation_id: task_id = candidate
+        if task_id == "": return Err("REMOTE_OPERATION_NOT_OWNED")
+        val prior = distributed_operation_journal_lookup_v2(self.operations, operation_id)?
+        # The task append is the publication linearization point. If a crash
+        # interrupted the following operation commit, cancellation is too late;
+        # require exact-evidence reconciliation, never leave a cancelled operation
+        # beside an already committed passed task row. All cancellation for this
+        # protected owner must route through this method.
+        val history = task_runner_journal_history_v1(self.database.journal, self.journal_identities[task_id])?
+        for row in history:
+            if row.group_id == operation_id: return Err("REMOTE_COMPLETION_ALREADY_COMMITTING")
+        val terminal = distributed_operation_transition_v2(prior, "cancelled", cancellation_digest)?
+        self.operations = distributed_operation_journal_commit_v2(self.operations, terminal)?
+        # Actual remote tree cancellation remains the host execution owner duty.
+        # Durable cancellation here immediately excludes late result admission.
+        Ok(true)
+
+    me accept(task: BuildTaskV1, bundle: RemoteCompletionBundleV1,
+            context: RemoteAuthorityContextV1) -> Result<RemoteAcceptedResultV1, text>:
+        if not self.policies.contains_key(task.id) or not self.identities.contains_key(task.id) or
+                self.identities[task.id] != builder_task_identity_v1(task):
+            return Err("REMOTE_TASK_NOT_ADMITTED")
+        val policy = self.policies[task.id]
+        val _authority = remote_context_admit_v1(context, task, policy)?
+        val envelope = distributed_encode_operation_v2(context.request)?
+        val prior = distributed_operation_journal_lookup_v2(self.operations, policy.operation_id)?
+        val _collectable = remote_operation_collectable_v1(prior, policy.operation_id, envelope)?
+        val frozen = remote_evidence_freeze_v1(task, bundle.result, policy, bundle.evidence)?
+        val expected = RemoteCompletionBindingV1(builder_task_identity_v1(task), policy.host_id,
+            policy.assignment_digest, policy.controller_epoch, policy.operation_id,
+            frozen.result_digest, frozen.process_digest, frozen.output_inventory_digest, frozen.tests_digest)
+        val completion = remote_verify_completion_v1(bundle.completion, context.signed,
+            context.approval, context.issuer, context.approver, context.host_key, context.request,
+            task, expected, context.now, context.policy_revision, context.revocation_epoch,
+            context.session_generation)?
+        val completion_digest = sha256_text(remote_completion_encode_v1(completion)?)
+        # Write private parent staging from the same frozen buffers, never recopy
+        # a mutable worker path after verifying its digest. No cache pointer or
+        # accepted result escapes before both durable journals commit.
+        # Exact-evidence retries reuse this private staging slot. It has no
+        # public cache index and remains quarantined when either commit fails.
+        if not dir_is_real_no_follow(self.database.window_root):
+            return Err("REMOTE_PARENT_ROOT_UNSAFE")
+        val output_root = self.database.window_root + "/accepted-" + completion_digest
+        if not dir_create_all(output_root) or not dir_is_real_no_follow(output_root):
+            return Err("REMOTE_PARENT_ROOT_UNSAFE")
+        for output in frozen.bytes.outputs:
+            val destination = remote_parent_output_path_v1(output_root, output.path)?
+            if not file_atomic_write_bytes(destination, output.content):
+                return Err("REMOTE_PARENT_OUTPUT_WRITE_FAILED")
+            val digest = file_hash_sha256(destination)
+            var expected_digest = ""
+            for observed in frozen.observed:
+                if observed.path == output.path: expected_digest = observed.digest
+            if digest == nil or digest.unwrap() != expected_digest:
+                return Err("REMOTE_PARENT_OUTPUT_READBACK_DIFFERS")
+        val identity = task_runner_identity_v1(build_runner_task_identity_v1(task, self.database.contexts[task.id])?)?
+        val history = task_runner_journal_history_v1(self.database.journal, identity)?
+        val evidence_digest = sha256_text(builder_encode_result_v1(bundle.result) + "\n" + frozen.bytes.process_payload)
+        var retained = false
+        for row in history:
+            if row.group_id == policy.operation_id and row.attempt == task.attempt:
+                if row.result_digest != evidence_digest: return Err("REMOTE_RECOVERY_EVIDENCE_DIFFERS")
+                retained = true
+        if not retained:
+            # Stable operation_id is the journal group: reopening the session
+            # cannot grant another publication for the same operation/attempt.
+            self.database.journal = build_runner_database_collect_v1(self.database.journal,
+                task, self.database.contexts[task.id], policy.operation_id, "grouped",
+                bundle.result, frozen.observed, frozen.bytes.process_payload,
+                frozen.stdout_digest, frozen.stderr_digest, completion.tree_reaped)?
+        # A crash between journals is reconciled by the exact retained evidence
+        # above. A terminal operation is rejected before touching either ledger.
+        val terminal = if bundle.result.status == "OK": "completed" else: "failed"
+        self.operations = distributed_operation_journal_commit_v2(self.operations,
+            distributed_operation_transition_v2(prior, terminal, completion_digest)?)?
+        self.database.recorded[task.id + ":" + str(task.attempt)] = true
+        Ok(RemoteAcceptedResultV1(bundle.result, output_root, completion_digest))
+
+fn remote_database_session_open_v1(run: BuildRunV1, state_root: text, source_root: text,
+        policies: Dict<text, RemoteEvidencePolicyV1>,
+        operations: DistributedOperationJournalV2) -> Result<RemoteDatabaseSessionV1, text>:
+    val invalid = builder_validate_run_v1(run)
+    if invalid != "": return Err(invalid)
+    if policies.len() != run.tasks.len(): return Err("REMOTE_POLICY_INVENTORY_DIFFERS")
+    var contexts: Dict<text, text> = {}
+    var identities: Dict<text, text> = {}
+    var journal_identities: Dict<text, text> = {}
+    var operation_ids: Dict<text, bool> = {}
+    for task in run.tasks:
+        if not policies.contains_key(task.id): return Err("REMOTE_POLICY_MISSING")
+        val policy = policies[task.id]
+        if operation_ids.contains_key(policy.operation_id): return Err("REMOTE_OPERATION_SHARED_BY_TASKS")
+        operation_ids[policy.operation_id] = true
+        val _bound = remote_policy_bind_v1(task, policy)?
+        var host_found = false
+        for host in run.hosts:
+            if host.id == policy.host_id: host_found = true
+        if not host_found: return Err("REMOTE_HOST_NOT_ADMITTED")
+        val payload = file_read_regular_no_follow_bounded(source_root + "/task-context/" + task.id + ".sdn", 2048)?
+        val identity = build_runner_task_identity_v1(task, payload)?
+        contexts[task.id] = payload
+        identities[task.id] = builder_task_identity_v1(task)
+        journal_identities[task.id] = task_runner_identity_v1(identity)?
+    val window = secure_temp_dir(state_root, "remote-task-window")?
+    val nonce = sha256_text(window)
+    val journal = build_runner_database_open_v1(state_root + "/task-database", nonce, run, contexts)?
+    val database = BuildRunnerDatabaseSessionV1(journal, contexts, nonce, state_root, {}, window, "", [])
+    Ok(RemoteDatabaseSessionV1(database, operations, policies, identities, journal_identities))
+
+export RemoteAcceptedResultV1, RemoteDatabaseSessionV1, remote_database_session_open_v1
+export remote_operation_collectable_v1
