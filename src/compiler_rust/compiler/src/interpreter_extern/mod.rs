@@ -2520,6 +2520,12 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("spl_mutex_try_lock", concurrency::spl_mutex_try_lock);
     insert_simple!("spl_mutex_unlock", concurrency::spl_mutex_unlock);
     insert_simple!("spl_mutex_destroy", concurrency::spl_mutex_destroy);
+    insert_simple!("spl_condvar_create", concurrency::spl_condvar_create);
+    insert_simple!("spl_condvar_wait", concurrency::spl_condvar_wait);
+    insert_simple!("spl_condvar_wait_timeout", concurrency::spl_condvar_wait_timeout);
+    insert_simple!("spl_condvar_signal", concurrency::spl_condvar_signal);
+    insert_simple!("spl_condvar_broadcast", concurrency::spl_condvar_broadcast);
+    insert_simple!("spl_condvar_destroy", concurrency::spl_condvar_destroy);
     insert_simple!("rt_thread_free", concurrency::rt_thread_free);
     insert_simple!("rt_thread_id", concurrency::rt_thread_id);
     insert_simple!("rt_thread_is_done", concurrency::rt_thread_is_done);
