@@ -29,6 +29,13 @@ group start and actual child exec. Neither path may silently fall back to an
 unguarded process runner. These owner integrations and common API consumer
 composition are prerequisites for claiming final-exec enforcement.
 
+The Linux managed create/start route calls
+`process_run_bounded_admitted_v1` with the absolute deadline after its own
+policy observation and clock check. A capture error can occur after the native
+effect has begun. Output-limit results are also uncertain failures, even if an
+exit field happens to be zero. The provider retains its bound request and uses
+its existing exact-identity recovery path; neither error proves absence.
+
 Existing unqualified local provider calls retain their existing policy. The
 managed policy path requires an explicit deadline for new launches. Scripted
 providers have an explicit bounded clock-sample seam for deterministic unit

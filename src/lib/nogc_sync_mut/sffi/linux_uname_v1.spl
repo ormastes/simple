@@ -1,0 +1,78 @@
+# Linux-only native uname owner. Linux UAPI new_utsname is six 65-byte fields;
+# sysname offset 0, machine offset 260, total 390. Provenance:
+# /usr/include/linux/utsname.h and Linux include/uapi/linux/utsname.h;
+# https://man7.org/linux/man-pages/man2/uname.2.html . No BSD layout assumption.
+use std.sffi.platform.platform_name_raw
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_write_u8}
+use std.common.text_bytes.bytes_to_text
+
+@when(os="linux"):
+use std.nogc_sync_mut.io.path_identity_abi.{malloc, free}
+@unsafe(reason: "libc uname writes Linux new_utsname into an owned 390-byte buffer", capabilities: [ffi, raw_ptr])
+extern fn uname(buffer: i64) -> i32
+@end
+
+pub fn linux_uname_architecture_from_fields_v1(sysname: text, machine: text) -> Result<text, text>:
+    if sysname != "Linux": return Err("linux-uname-kernel-mismatch")
+    if machine == "" or machine.len() > 64: return Err("linux-uname-machine-invalid")
+    match machine:
+        case "x86_64" | "amd64": Ok("x86_64")
+        case "aarch64" | "arm64": Ok("aarch64")
+        case "riscv64": Ok("riscv64")
+        case "i386" | "i486" | "i586" | "i686": Ok("i686")
+        case "armv7l" | "armv7": Ok("arm")
+        case _: Err("linux-uname-architecture-unsupported")
+
+fn _linux_uname_pointer_abi_supported_v1() -> bool:
+    # Compilation gates the foreign size_t/pointer ABI only. Architecture
+    # observation below always comes from the actual native uname result.
+    @when(arch="x86_64"):
+    true
+    @else:
+    @when(arch="aarch64"):
+    true
+    @else:
+    @when(arch="riscv64"):
+    true
+    @else:
+    false
+    @end
+    @end
+    @end
+
+@unsafe(reason: "bounded ASCII/NUL scan of one Linux utsname field in owned storage", capabilities: [raw_ptr])
+fn _linux_uname_field_v1(pointer: i64, offset: i64) -> Result<text, text>:
+    var bytes: [u8] = []
+    for index in 0..65:
+        val byte = volatile_read_u8(pointer + offset + index) as u8
+        if byte == 0u8: return Ok(bytes_to_text(bytes))
+        # Linux sysname and supported machine identifiers are ASCII, hence a
+        # strict UTF8 subset. Never replace invalid bytes with a guessed name.
+        if byte < 33u8 or byte > 126u8: return Err("linux-uname-field-encoding-invalid")
+        bytes.push(byte)
+    Err("linux-uname-field-unterminated")
+
+pub fn linux_native_uname_architecture_v1() -> Result<text, text>:
+    if platform_name_raw().lower() != "linux": return Err("linux-uname-host-unsupported")
+    if not _linux_uname_pointer_abi_supported_v1(): return Err("linux-uname-pointer-abi-unsupported")
+    @when(os="linux"):
+    unsafe(capabilities: [ffi, raw_ptr]):
+        val pointer = malloc(390u64)
+        if pointer == 0: return Err("linux-uname-memory-unavailable")
+        for index in 0..390: volatile_write_u8(pointer + index, 0)
+        val status = uname(pointer)
+        if status != 0:
+            free(pointer)
+            return Err("linux-uname-native-failed")
+        val sysname = _linux_uname_field_v1(pointer, 0)
+        val machine = _linux_uname_field_v1(pointer, 260)
+        free(pointer)
+        match sysname:
+            case Err(reason): return Err(reason)
+            case Ok(name):
+                match machine:
+                    case Err(reason): Err(reason)
+                    case Ok(architecture): linux_uname_architecture_from_fields_v1(name, architecture)
+    @else:
+    Err("linux-uname-host-unsupported")
+    @end

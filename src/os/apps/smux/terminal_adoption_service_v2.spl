@@ -1,0 +1,54 @@
+# Trusted explicit-state adoption. The API publishes the returned state once.
+# Peer requests may never supply these process-local authority values.
+use os.apps.smux.service.ServiceState
+use os.apps.smux.service_revision.{ServiceRevisionState, service_revision_writable}
+use std.sosix.process.{PipedProcessRefV1, PipedProcessOwnedTransferV2,
+    sosix_process_validate_piped_ref_v1, sosix_process_validate_piped_owned_transfer_v2}
+
+pub fn terminal_transport_admit_v2(before: ServiceState, clock: ServiceRevisionState,
+        closing: bool, session_id: text, window_id: text, pane_id: text,
+        expected_epoch: u64, expected_revision: u64, expected_child_incarnation: u64,
+        reference: PipedProcessRefV1) -> Result<int, text>:
+    if not service_revision_writable(clock): return Err("service revision authority exhausted")
+    if clock.epoch != expected_epoch or clock.value != expected_revision:
+        return Err("terminal transport configuration changed")
+    if closing: return Err("window or session is closing")
+    val si = before.find_session_idx(session_id)
+    val wi = before.find_window_idx(window_id)
+    val pi = before.find_pane_idx(pane_id)
+    if si < 0 or wi < 0 or pi < 0: return Err("unknown terminal transport target")
+    val pane = before.get_pane(pi)
+    if (pane.pane.session_id != session_id or pane.pane.window_id != window_id or
+            before.get_window(wi).session_id != session_id): return Err("foreign terminal transport target")
+    if pane.child_incarnation != expected_child_incarnation: return Err("terminal transport incarnation changed")
+    if (pane.owned_terminal_transfer != nil or pane.helper_cleaned_awaiting_release or
+            pane.terminal_ref != nil or pane.child_pid > 0 or pane.pty_fd >= 0):
+        return Err("pane already owns a child or pending transport")
+    if not pane.can_attach(): return Err("pane incarnation or content revision exhausted")
+    if reference.pid <= 0 or reference.generation <= 0: return Err("terminal transport reference invalid")
+    var index = 0
+    while index < before.pane_count:
+        if before.get_pane(index).same_terminal_ref(reference):
+            return Err("terminal transport already owned by a pane")
+        index = index + 1
+    Ok(pi)
+
+pub fn terminal_transport_adopt_ref_v2(before: ServiceState, clock: ServiceRevisionState,
+        closing: bool, session_id: text, window_id: text, pane_id: text,
+        expected_epoch: u64, expected_revision: u64, expected_child_incarnation: u64,
+        reference: PipedProcessRefV1) -> Result<ServiceState, text>:
+    if reference.group_root != "" or reference.group_identity != "":
+        return Err("owned terminal transport requires complete transfer")
+    val pi = terminal_transport_admit_v2(before, clock, closing, session_id, window_id,
+        pane_id, expected_epoch, expected_revision, expected_child_incarnation, reference)?
+    sosix_process_validate_piped_ref_v1(reference)?
+    Ok(before.replace_pane(pi, before.get_pane(pi).with_terminal_ref(reference)))
+
+pub fn terminal_transport_adopt_owned_v2(before: ServiceState, clock: ServiceRevisionState,
+        closing: bool, session_id: text, window_id: text, pane_id: text,
+        expected_epoch: u64, expected_revision: u64, expected_child_incarnation: u64,
+        transfer: PipedProcessOwnedTransferV2) -> Result<ServiceState, text>:
+    val pi = terminal_transport_admit_v2(before, clock, closing, session_id, window_id,
+        pane_id, expected_epoch, expected_revision, expected_child_incarnation, transfer.reference)?
+    sosix_process_validate_piped_owned_transfer_v2(transfer)?
+    Ok(before.replace_pane(pi, before.get_pane(pi).with_owned_terminal_transfer(transfer)))

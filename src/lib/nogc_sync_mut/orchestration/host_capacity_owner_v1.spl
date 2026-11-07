@@ -88,7 +88,21 @@ fn host_capacity_projection_v1(journal: DistributedOperationJournalV2, capacity:
         rows.push(row)
     val ledger = HostCapacityLedgerV1(capacity: capacity, revision: journal.sequence + 1,
         continuity_proven: continuity_proven, reservations: rows)
-    val checked = host_available_capacity_v1(ledger)?
+    if quarantine_previous:
+        # Historical releases can legitimately sum above today's capacity.
+        # Keep every row charged/uncertain, but allow the recovery owner to open
+        # and prove no-effect releases. This temporary shape-only projection is
+        # never returned and grants no availability or admission.
+        var shape_rows: [HostReservationV1] = []
+        for row in rows:
+            var shape = row
+            shape.state = HostReservationStateV1.Released
+            shape_rows.push(shape)
+        val shape = HostCapacityLedgerV1(capacity: capacity, revision: ledger.revision,
+            continuity_proven: false, reservations: shape_rows)
+        val checked = host_available_capacity_v1(shape)?
+    else:
+        val checked = host_available_capacity_v1(ledger)?
     Ok(ledger)
 
 pub fn host_capacity_owner_open_v1(root: text, capacity: HostCapacityV1, nonce: text,

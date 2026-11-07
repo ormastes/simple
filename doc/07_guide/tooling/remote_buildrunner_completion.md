@@ -52,6 +52,35 @@ Docker on Windows. Its completion signer must consume container-owned cleanup
 and absence proof plus exact runtime identity and bytes. Neither the native
 worker adapter nor a host start/inspect observation proves container completion.
 
+For the explicit V2 path, reserve the host-owned attempt directory before
+approving the common request that binds its actual mount. Pin the canonical
+request and provider digest as declared task inputs, stage immutable bytes with
+`remote_container_stage_v2`, and consume an opened shared Container API owner
+through `remote_container_owner_v2`. The provider must establish executable
+permissions and protected selected-user workspace access; byte staging alone
+does not authorize execution. `collect` accepts a protected authority callback
+so it can refresh authorization after wait, cleanup and hashing. Transfer the
+canonical V2 bundle to `RemoteContainerDatabaseSessionV2.accept_wire`.
+
+The host retains actual wait and complete bounded logs before destruction,
+then obtains independent exact-object absence. The parent verifies the signed
+common execution evidence and transferred bytes, writes parent-owned outputs,
+and appends a typed container record to the existing task journal. Use the V2
+history/snapshot API for mixed native/container results; the V1 readers refuse
+container records. Keep cancellation routed through the same parent owner.
+
+Use `remote_container_reserve_nonce_v2` on the private reserved root before task
+approval, pin its returned bytes at `remote-workspace/<id>.nonce`, and declare
+`remote-workspace/<id>.probe.sdn` as an output. Pin the compiled
+`remote_container_producer_v2` entrypoint as `producer.exe`. It performs the
+same-process access cycle before calling the build/test action. The host's
+separate fresh engine-user query and the actual probe receipt are signed and
+rechecked by the receiving parent. These observations do not claim effective
+OS token/SID introspection; verify Windows token/ACL behavior during platform
+qualification. Build arguments currently support explicit `native-build`,
+`--source`, `--entry`, `--output`, `--backend`, `--entry-closure` and `--strip`;
+unknown switches fail before the action.
+
 Before qualification, run the source specs and real native/container provider
 smokes with an admitted runtime; sabotage signatures, fences, toolchains,
 outputs, per-case reports and cancellation timing. Measure request latency/RSS

@@ -145,10 +145,30 @@ fn remote_evidence_freeze_v1(task: BuildTaskV1, result: BuildResultV1,
     elif process.exit_code == 0: expected_status = "OK"
     if result.status != expected_status or result.exit_code != expected_code:
         return Err("compiler result differs from frozen observation")
+    val output_observation = remote_outputs_freeze_v1(task, result, policy, bytes.outputs, remaining)?
+    Ok(RemoteFrozenEvidenceV1(bytes, output_observation.observed, sha256_text(builder_encode_result_v1(result)),
+        sha256_text(bytes.process_payload), stdout_digest, stderr_digest,
+        output_observation.output_inventory_digest, output_observation.tests_digest))
+
+struct RemoteOutputObservationV1:
+    observed: [BuildInputV1]
+    output_inventory_digest: text
+    tests_digest: text
+
+fn remote_outputs_freeze_v1(task: BuildTaskV1, result: BuildResultV1,
+        policy: RemoteEvidencePolicyV1, outputs: [RemoteOutputBytesV1],
+        remaining_bytes: i64) -> Result<RemoteOutputObservationV1, text>:
+    val _bound = remote_policy_bind_v1(task, policy)?
+    val invalid = builder_validate_result_v1(task, result)
+    if invalid != "": return Err(invalid)
+    if result.host_id != policy.host_id: return Err("REMOTE_HOST_DIFFERS")
+    if remaining_bytes < 0 or remaining_bytes > policy.maximum_bytes or outputs.len() > 4096:
+        return Err("REMOTE_EVIDENCE_EXCEEDS_BOUND")
+    var remaining = remaining_bytes
     var observed: [BuildInputV1] = []
     var tests_digest = sha256_text("")
     var seen: Dict<text, bool> = {}
-    for output in bytes.outputs:
+    for output in outputs:
         if not task.outputs.contains(output.path) or seen.contains_key(output.path):
             return Err("REMOTE_OUTPUT_UNKNOWN_OR_DUPLICATE")
         seen[output.path] = true
@@ -166,9 +186,7 @@ fn remote_evidence_freeze_v1(task: BuildTaskV1, result: BuildResultV1,
     for path in task.outputs:
         for output in observed:
             if path == output.path: ordered = ordered.push(output)
-    Ok(RemoteFrozenEvidenceV1(bytes, ordered, sha256_text(builder_encode_result_v1(result)),
-        sha256_text(bytes.process_payload), stdout_digest, stderr_digest,
-        remote_inventory_digest_v1(ordered), tests_digest))
+    Ok(RemoteOutputObservationV1(ordered, remote_inventory_digest_v1(ordered), tests_digest))
 
 export RemoteEvidencePolicyV1, RemoteOutputBytesV1, RemoteEvidenceBytesV1, RemoteFrozenEvidenceV1
 export remote_inventory_digest_v1, remote_policy_encode_v1, remote_policy_bind_v1
@@ -229,3 +247,5 @@ fn remote_policy_decode_v1(payload: text) -> Result<RemoteEvidencePolicyV1, text
     Ok(policy)
 
 export remote_policy_decode_v1
+
+export RemoteOutputObservationV1, remote_outputs_freeze_v1

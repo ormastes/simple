@@ -1,0 +1,574 @@
+# Docker is a delegated Windows engine, never a rootless or VM claim.
+# SOURCE-ONLY NOT_RUN: no Windows runtime qualification is implied by fixtures.
+# Caller must persist the immutable request + operation and RuntimeIntentV1
+# before handing off and after receiving an exact native ID. This bounded cache
+# is not a durable replay journal. Ambiguous create without an exact ID requires
+# external reconciliation; no name lookup, inventory adoption, or retry exists.
+pub use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{
+    WindowsDockerPolicyV1, WindowsDockerRequestV1, WindowsDockerScriptedResultV1}
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{
+    WINDOWS_DOCKER_ENGINE_V1, WINDOWS_DOCKER_NATIVE_ENGINE_V1, WINDOWS_DOCKER_MAX_RECORDS_V1, WINDOWS_DOCKER_MAX_SCRIPT_V1,
+    WINDOWS_DOCKER_MAX_SCRIPT_BYTES_V1, WINDOWS_DOCKER_INFO_FORMAT_V1,
+    WINDOWS_DOCKER_IMAGE_FORMAT_V1, WINDOWS_DOCKER_INSPECT_FORMAT_V1, WINDOWS_DOCKER_MOUNTS_FORMAT_V3,
+    windows_docker_request_reason_v1, windows_docker_policy_reason_v1,
+    windows_docker_request_digest_v1, windows_docker_command_v1,
+    windows_docker_create_command_v1, windows_docker_args_equal_v1, windows_docker_id_v1}
+use std.common.contracts.container.runtime_v1.{RuntimeProviderV1, RuntimeProviderContractV1,
+    RuntimeIdentityV1, RuntimeCommandV1, RuntimeStateV1, RuntimeOperationV1,
+    RuntimeProbeV1, RuntimeIntentV1, runtime_state_empty, runtime_command_empty,
+    runtime_probe_unavailable, RUNTIME_PRIVILEGE_UNKNOWN, RUNTIME_STATUS_OK,
+    RUNTIME_STATUS_BLOCKED, RUNTIME_STATUS_REJECTED}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded_environment_v1, process_run_bounded_environment_admitted_v1}
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_scope_fence_id_v2, container_host_scope_bytes_v2}
+use std.nogc_async_mut.container.providers.windows.docker_scope_v2.{windows_docker_scope_values_v2, windows_docker_scoped_create_v2, WINDOWS_DOCKER_SCOPED_INSPECT_FORMAT_V2}
+use std.common.contracts.container.effect_deadline_v1.{ContainerEffectDeadlineV1,
+    container_effect_deadline_v1, container_effect_remaining_ms_v1}
+
+struct WindowsDockerRecordV1:
+    digest: text
+    state: RuntimeStateV1
+    create_attempted: bool
+    candidate_id: text
+
+pub fn windows_docker_provider_contract_v1() -> RuntimeProviderContractV1:
+    RuntimeProviderContractV1(provider_id: WINDOWS_DOCKER_ENGINE_V1, version: 1,
+        supports_recovery: true, supports_logs: true)
+
+pub class WindowsDockerRuntimeProviderV1:
+    policy: WindowsDockerPolicyV1
+    scripted_mode: bool
+    scripted_results: [WindowsDockerScriptedResultV1]
+    script_error: text
+    var cursor: i64
+    var records: [WindowsDockerRecordV1]
+    var managed_scope: ContainerHostScopeV2?
+    var launch_deadline: ContainerEffectDeadlineV1?
+    var scripted_admission_clock_ms: i64?
+
+impl WindowsDockerRuntimeProviderV1:
+    pub static fn new(policy: WindowsDockerPolicyV1) -> WindowsDockerRuntimeProviderV1:
+        WindowsDockerRuntimeProviderV1(policy: policy, scripted_mode: false,
+            scripted_results: [], script_error: "", cursor: 0, records: [],
+            managed_scope: nil, launch_deadline: nil, scripted_admission_clock_ms: nil)
+
+    pub static fn scripted(policy: WindowsDockerPolicyV1,
+            results: [WindowsDockerScriptedResultV1]) -> WindowsDockerRuntimeProviderV1:
+        var provider = WindowsDockerRuntimeProviderV1.new(policy)
+        provider.scripted_mode = true
+        var bytes = 0
+        if results.len() > WINDOWS_DOCKER_MAX_SCRIPT_V1:
+            provider.script_error = "docker-script-count-limit"
+            return provider
+        for result in results:
+            if result.args.len() > 256:
+                provider.script_error = "docker-script-argument-limit"
+                return provider
+            bytes = bytes + 128 + result.operation.len() + result.program.len() + result.stdout.len() + result.stderr.len()
+            for arg in result.args: bytes = bytes + 16 + arg.len()
+            if bytes > WINDOWS_DOCKER_MAX_SCRIPT_BYTES_V1:
+                provider.script_error = "docker-script-byte-limit"
+                return provider
+        provider.scripted_results = results
+        provider
+
+    pub me fn bind_managed_scope_v2(scope: ContainerHostScopeV2) -> Result<bool, text>:
+        val fence = container_scope_fence_id_v2(scope)?
+        if fence != self.policy.node_boot_id or scope.provider_generation != self.policy.provider_generation:
+            return Err("windows-docker-scope-fence-mismatch")
+        if self.records.len() != 0: return Err("windows-docker-scope-already-in-use")
+        match self.managed_scope:
+            case Some(previous):
+                if container_host_scope_bytes_v2(previous)? != container_host_scope_bytes_v2(scope)?:
+                    return Err("windows-docker-scope-rebind-refused")
+            case nil: ()
+        self.managed_scope = Some(scope)
+        Ok(true)
+
+    # The common Container API supplies a verified grant's narrowed launch
+    # context. Expiry never authorizes cleanup or ends an existing workload.
+    pub me fn set_launch_deadline_v1(deadline: ContainerEffectDeadlineV1) -> Result<bool, text>:
+        val checked = container_effect_deadline_v1(deadline.request_digest, deadline.operation_id,
+            deadline.actions, deadline.expires_at_unix_ms)?
+        self.launch_deadline = Some(checked)
+        Ok(true)
+
+    pub me fn set_scripted_admission_clock_v1(now_ms: i64) -> Result<bool, text>:
+        if not self.scripted_mode or now_ms <= 0: return Err("docker-script-clock-invalid")
+        self.scripted_admission_clock_ms = Some(now_ms)
+        Ok(true)
+
+    fn _launch_admit(request: WindowsDockerRequestV1, action: text) -> Result<i64, text>:
+        val deadline = match self.launch_deadline:
+            case Some(value): value
+            case nil: return Err("docker-launch-deadline-required")
+        val now_ms = if self.scripted_mode:
+            match self.scripted_admission_clock_ms:
+                case Some(value): value
+                case nil: return Err("docker-script-admission-clock-required")
+        else:
+            val sampled = time_sample_unix_micros_or_failure()
+            if sampled < 0: return Err("docker-launch-clock-unavailable")
+            sampled / 1000
+        val digest = windows_docker_request_digest_v1(self.policy, request)?
+        val remaining = container_effect_remaining_ms_v1(deadline, digest, request.operation_id, action, now_ms)?
+        Ok(deadline.expires_at_unix_ms)
+
+    pub fn is_scripted_fixture_v1() -> bool: self.scripted_mode and self.script_error == ""
+
+    pub fn retained_record_count() -> i64: self.records.len()
+    pub fn consumed_script_count() -> i64: self.cursor
+
+    fn _index(request: WindowsDockerRequestV1) -> i64:
+        var index = 0
+        while index < self.records.len():
+            val identity = self.records[index].state.identity
+            if identity.pod_uid == request.pod_uid and identity.attempt == request.attempt: return index
+            index = index + 1
+        -1
+
+    fn _state(request: WindowsDockerRequestV1) -> RuntimeStateV1:
+        val index = self._index(request)
+        if index < 0: return runtime_state_empty()
+        self.records[index].state
+
+    fn _operation(request: WindowsDockerRequestV1, operation: text,
+            status: text, reason: text, command: RuntimeCommandV1) -> RuntimeOperationV1:
+        RuntimeOperationV1(status: status, operation: operation, command: command,
+            state: self._state(request), exit_code: -1, stdout: "", stderr: "", reason: reason)
+
+    fn _failure(request: WindowsDockerRequestV1, operation: text, reason: text) -> RuntimeOperationV1:
+        self._operation(request, operation, RUNTIME_STATUS_BLOCKED, reason, runtime_command_empty())
+
+    fn _binding(request: WindowsDockerRequestV1) -> Result<i64, text>:
+        val digest = windows_docker_request_digest_v1(self.policy, request)?
+        val index = self._index(request)
+        if index < 0: return Err("docker-attempt-not-prepared")
+        val record = self.records[index]
+        if record.digest != digest or record.state.identity.operation_id != request.operation_id:
+            return Err("docker-request-binding-mismatch")
+        Ok(index)
+
+    # All process calls carry --host and a copied allowlist, excluding inherited
+    # DOCKER_CONTEXT/HOST/TLS/config/plugin variables. Native-only Windows
+    # environment capture fails closed on unsupported runtime/provider paths.
+    me fn _execute(command: RuntimeCommandV1, admission_expiry_ms: i64 = 0) -> Result<(text, text, i64), text>:
+        val invalid = windows_docker_policy_reason_v1(self.policy)
+        if invalid != "": return Err(invalid)
+        if self.script_error != "": return Err(self.script_error)
+        if self.scripted_mode:
+            if self.cursor >= self.scripted_results.len(): return Err("docker-script-exhausted")
+            val result = self.scripted_results[self.cursor]
+            if result.operation != command.operation or result.program != command.program or
+                    not windows_docker_args_equal_v1(result.args, command.args):
+                return Err("docker-script-command-mismatch")
+            self.cursor = self.cursor + 1
+            if result.limit_exceeded or result.stdout.len() > self.policy.max_output_bytes or
+                    result.stderr.len() > self.policy.max_output_bytes:
+                return Err("docker-execution-limit-exceeded")
+            if result.exit_code != 0: return Err("docker-command-failed-" + result.exit_code.to_text())
+            return Ok((result.stdout, result.stderr, result.exit_code))
+        val environment = [("SystemRoot", self.policy.system_root),
+            ("TEMP", self.policy.temp_directory), ("TMP", self.policy.temp_directory)]
+        val result = if admission_expiry_ms > 0:
+            process_run_bounded_environment_admitted_v1(command.program, command.args,
+                environment, self.policy.timeout_ms, self.policy.max_output_bytes, admission_expiry_ms)?
+        else:
+            process_run_bounded_environment_v1(command.program, command.args,
+                environment, self.policy.timeout_ms, self.policy.max_output_bytes)?
+        if result.limit_exceeded: return Err("docker-execution-limit-" + result.limit_type)
+        if result.exit_code != 0: return Err("docker-command-failed-" + result.exit_code.to_text())
+        Ok((result.stdout, result.stderr, result.exit_code))
+
+    me fn _engine() -> Result<bool, text>:
+        val command = windows_docker_command_v1(self.policy, "engine-info",
+            ["info", "--format", WINDOWS_DOCKER_INFO_FORMAT_V1])
+        val run = self._execute(command)?
+        val expected = "windows|" + self.policy.engine_id + "|" + self.policy.expected_kernel_version
+        if run.0.trim() != expected: return Err("docker-live-engine-identity-mismatch")
+        Ok(true)
+
+    me fn _image(request: WindowsDockerRequestV1) -> Result<bool, text>:
+        val command = windows_docker_command_v1(self.policy, "image-inspect",
+            ["image", "inspect", "--format", WINDOWS_DOCKER_IMAGE_FORMAT_V1, request.image])
+        val run = self._execute(command)?
+        val output = run.0.trim()
+        val lines = output.split("\n")
+        val expected = "windows|" + self.policy.expected_image_id + "|" + self.policy.image_os_version
+        if lines.len() < 2 or lines[0].trim() != expected: return Err("docker-image-observation-mismatch")
+        var found = false
+        var index = 1
+        while index < lines.len():
+            if lines[index].trim() == request.image: found = true
+            index = index + 1
+        if not found: return Err("docker-image-repodigest-mismatch")
+        Ok(true)
+
+    fn _identity(request: WindowsDockerRequestV1, native_id: text) -> RuntimeIdentityV1:
+        RuntimeIdentityV1(pod_uid: request.pod_uid, attempt: request.attempt,
+            provider_generation: self.policy.provider_generation, operation_id: request.operation_id,
+            engine: WINDOWS_DOCKER_NATIVE_ENGINE_V1, native_id: native_id, node_boot_id: self.policy.node_boot_id)
+
+    me fn _observe(request: WindowsDockerRequestV1, native_id: text) -> Result<RuntimeStateV1, text>:
+        if not windows_docker_id_v1(native_id): return Err("docker-exact-native-id-required")
+        val digest = windows_docker_request_digest_v1(self.policy, request)?
+        var format = match self.managed_scope:
+            case Some(_): WINDOWS_DOCKER_SCOPED_INSPECT_FORMAT_V2
+            case nil: WINDOWS_DOCKER_INSPECT_FORMAT_V1
+        var inspect_mounts = request.mounts.len() > 0 or request.working_directory != ""
+        match self.managed_scope:
+            case Some(_): inspect_mounts = true
+            case nil: ()
+        if request.working_directory != "": format = format + "|{{{{.Config.WorkingDir}}}}"
+        if inspect_mounts: format = format + WINDOWS_DOCKER_MOUNTS_FORMAT_V3
+        val command = windows_docker_command_v1(self.policy, "inspect",
+            ["container", "inspect", "--format", format, native_id])
+        val run = self._execute(command)?
+        val output = run.0.trim()
+        val fields = output.split("|")
+        var expected = [native_id, self.policy.expected_image_id, request.image, "process", "ContainerUser",
+            "none", request.cpu_count.to_text(), request.memory_limit_bytes.to_text(), WINDOWS_DOCKER_ENGINE_V1,
+            request.pod_uid, request.attempt.to_text(), request.operation_id, self.policy.node_boot_id,
+            self.policy.provider_generation.to_text(), digest]
+        var count = 17
+        match self.managed_scope:
+            case Some(scope):
+                expected[12] = scope.boot_id
+                val scoped = windows_docker_scope_values_v2(scope)?
+                count = 23
+                if fields.len() < count: return Err("docker-inspect-field-count")
+                var field = 0
+                while field < scoped.len():
+                    if fields[17 + field] != scoped[field]: return Err("docker-inspect-managed-scope-mismatch")
+                    field = field + 1
+            case nil: ()
+        if request.working_directory != "":
+            if fields.len() < count + 1: return Err("docker-inspect-field-count")
+            if fields[count] != request.working_directory: return Err("docker-inspect-working-directory-mismatch")
+            count = count + 1
+        if inspect_mounts:
+            if request.mounts.len() == 0:
+                if fields.len() != count + 2: return Err("docker-inspect-mount-field-count")
+                if fields[count] != "0" or fields[count + 1] != "": return Err("docker-inspect-mount-mismatch")
+                count = count + 2
+            else:
+                if fields.len() != count + 5: return Err("docker-inspect-mount-field-count")
+                val mount = request.mounts[0]
+                val expected_rw = if mount.read_only: "false" else: "true"
+                if fields[count] != "1" or fields[count + 1] != "bind" or fields[count + 2] != mount.host_root or
+                        fields[count + 3] != mount.guest_root or fields[count + 4] != expected_rw:
+                    return Err("docker-inspect-mount-mismatch")
+                count = count + 5
+        if fields.len() != count: return Err("docker-inspect-field-count")
+        var index = 0
+        while index < expected.len():
+            if fields[index] != expected[index]: return Err("docker-inspect-ownership-or-isolation-mismatch")
+            index = index + 1
+        var phase = fields[15]
+        if phase != "created" and phase != "running" and phase != "exited":
+            return Err("docker-inspect-state-unsupported")
+        val raw_exit = fields[16]
+        if raw_exit == "" or raw_exit.len() > 10: return Err("docker-exit-code-invalid")
+        for ch in raw_exit.chars():
+            if ch < "0" or ch > "9": return Err("docker-exit-code-invalid")
+        val exit = raw_exit.to_i64() ?? -1
+        if exit < 0 or exit.to_text() != raw_exit or exit > 4294967295: return Err("docker-exit-code-invalid")
+        Ok(RuntimeStateV1(phase: phase, identity: self._identity(request, native_id),
+            exit_code: if phase == "exited": exit else: -1, reason: "docker-owned-observation"))
+
+    me fn _guard(request: WindowsDockerRequestV1) -> Result<RuntimeStateV1, text>:
+        val index = self._binding(request)?
+        val engine = self._engine()?
+        self._observe(request, self.records[index].state.identity.native_id)
+
+    me fn _success(request: WindowsDockerRequestV1, operation: text,
+            command: RuntimeCommandV1, state: RuntimeStateV1, stdout: text = "", stderr: text = "") -> RuntimeOperationV1:
+        val index = self._index(request)
+        var record = self.records[index]
+        record.state = state
+        self.records[index] = record
+        RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: operation,
+            command: command, state: state, exit_code: state.exit_code,
+            stdout: stdout, stderr: stderr, reason: state.reason)
+
+    me fn _probe() -> RuntimeProbeV1:
+        val observed = self._engine()
+        match observed:
+            case Err(reason): return runtime_probe_unavailable(WINDOWS_DOCKER_ENGINE_V1,
+                WINDOWS_DOCKER_NATIVE_ENGINE_V1, reason)
+            case Ok(_): ()
+        RuntimeProbeV1(provider: WINDOWS_DOCKER_ENGINE_V1, engine: WINDOWS_DOCKER_NATIVE_ENGINE_V1,
+            engine_present: true, healthy: true, launch_capable: false,
+            privilege: RUNTIME_PRIVILEGE_UNKNOWN,
+            reason: if self.scripted_mode: "scripted-contract-only-not-live-qualified" else: "engine-observed-request-admission-required")
+
+    pub me fn prepare_pod(request: WindowsDockerRequestV1) -> RuntimeOperationV1:
+        val reason = windows_docker_request_reason_v1(self.policy, request)
+        if reason != "": return self._operation(request, "prepare_pod", RUNTIME_STATUS_REJECTED, reason, runtime_command_empty())
+        val existing = self._index(request)
+        if existing >= 0:
+            val bound = self._binding(request)
+            match bound:
+                case Err(error): return self._failure(request, "prepare_pod", error)
+                case Ok(_): return self._operation(request, "prepare_pod", RUNTIME_STATUS_OK, "docker-attempt-already-reserved", runtime_command_empty())
+        if self.records.len() >= WINDOWS_DOCKER_MAX_RECORDS_V1: return self._failure(request, "prepare_pod", "docker-record-limit")
+        val engine = self._engine()
+        match engine:
+            case Err(error): return self._failure(request, "prepare_pod", error)
+            case Ok(_): ()
+        val image = self._image(request)
+        match image:
+            case Err(error): return self._failure(request, "prepare_pod", error)
+            case Ok(_): ()
+        val digest = match windows_docker_request_digest_v1(self.policy, request):
+            case Ok(value): value
+            case Err(error): return self._failure(request, "prepare_pod", error)
+        val state = RuntimeStateV1(phase: "prepared", identity: self._identity(request, ""),
+            exit_code: -1, reason: "docker-attempt-prepared-caller-persistence-required")
+        self.records.push(WindowsDockerRecordV1(digest: digest, state: state, create_attempted: false, candidate_id: ""))
+        self._operation(request, "prepare_pod", RUNTIME_STATUS_OK, state.reason, runtime_command_empty())
+
+    pub me fn create(request: WindowsDockerRequestV1) -> RuntimeOperationV1:
+        val index = match self._binding(request):
+            case Ok(value): value
+            case Err(error): return self._failure(request, "create", error)
+        if self.records[index].state.phase != "prepared" or self.records[index].create_attempted:
+            return self._failure(request, "create", "docker-create-reserved-no-retry-use-exact-id-recovery")
+        val engine = self._engine()
+        match engine:
+            case Err(error): return self._failure(request, "create", error)
+            case Ok(_): ()
+        val image = self._image(request)
+        match image:
+            case Err(error): return self._failure(request, "create", error)
+            case Ok(_): ()
+        val planned = match self.managed_scope:
+            case Some(scope): windows_docker_scoped_create_v2(self.policy, request, scope)
+            case nil: windows_docker_create_command_v1(self.policy, request)
+        val command = match planned:
+            case Ok(value): value
+            case Err(error): return self._failure(request, "create", error)
+        val admission = match self._launch_admit(request, "create"):
+            case Ok(value): value
+            case Err(error): return self._failure(request, "create", error)
+        # Reserve before the first mutating call, including timeout/error paths.
+        var reserved = self.records[index]
+        reserved.create_attempted = true
+        self.records[index] = reserved
+        val run = match self._execute(command, admission):
+            case Ok(value): value
+            case Err(error): return self._operation(request, "create", RUNTIME_STATUS_BLOCKED,
+                "docker-create-ambiguous-exact-id-recovery-required:" + error, command)
+        val native_id = run.0.trim()
+        if not windows_docker_id_v1(native_id): return self._failure(request, "create", "docker-create-exact-id-missing")
+        var candidate = self.records[index]
+        candidate.candidate_id = native_id
+        self.records[index] = candidate
+        val confirmed_engine = self._engine()
+        match confirmed_engine:
+            case Err(error): return self._failure(request, "create", error)
+            case Ok(_): ()
+        val state = match self._observe(request, native_id):
+            case Ok(value): value
+            case Err(error): return self._failure(request, "create", error)
+        if state.phase != "created": return self._failure(request, "create", "docker-create-phase-mismatch")
+        self._success(request, "create", command, state, run.0, run.1)
+
+    pub fn intent(request: WindowsDockerRequestV1) -> Result<RuntimeIntentV1, text>:
+        val index = self._binding(request)?
+        val state = self.records[index].state
+        var native_id = state.identity.native_id
+        if native_id == "": native_id = self.records[index].candidate_id
+        Ok(RuntimeIntentV1(pod_uid: request.pod_uid, attempt: request.attempt,
+            provider_generation: self.policy.provider_generation, operation_id: request.operation_id,
+            engine: WINDOWS_DOCKER_NATIVE_ENGINE_V1, native_id: native_id, node_boot_id: self.policy.node_boot_id,
+            phase: if state.identity.native_id == "" and native_id != "": "unknown" else: state.phase))
+
+    pub me fn recover(request: WindowsDockerRequestV1, intent: RuntimeIntentV1) -> RuntimeOperationV1:
+        val reason = windows_docker_request_reason_v1(self.policy, request)
+        if reason != "": return self._failure(request, "recover", reason)
+        if intent.pod_uid != request.pod_uid or intent.attempt != request.attempt or
+                intent.operation_id != request.operation_id or intent.engine != WINDOWS_DOCKER_NATIVE_ENGINE_V1 or
+                intent.provider_generation != self.policy.provider_generation or intent.node_boot_id != self.policy.node_boot_id or
+                not windows_docker_id_v1(intent.native_id): return self._failure(request, "recover", "docker-recovery-intent-mismatch")
+        if intent.phase != "created" and intent.phase != "running" and intent.phase != "exited" and
+                intent.phase != "stopped" and intent.phase != "unknown":
+            return self._failure(request, "recover", "docker-recovery-intent-phase-invalid")
+        var index = self._index(request)
+        if index >= 0:
+            val bound = self._binding(request)
+            match bound:
+                case Err(error): return self._failure(request, "recover", error)
+                case Ok(_): ()
+            val current = self.records[index].state
+            if current.phase == "destroyed" or (current.identity.native_id != "" and current.identity.native_id != intent.native_id):
+                return self._failure(request, "recover", "docker-recovery-current-id-conflict")
+            val candidate = self.records[index].candidate_id
+            if candidate != "" and candidate != intent.native_id:
+                return self._failure(request, "recover", "docker-recovery-candidate-id-conflict")
+        elif self.records.len() >= WINDOWS_DOCKER_MAX_RECORDS_V1: return self._failure(request, "recover", "docker-record-limit")
+        val engine = self._engine()
+        match engine:
+            case Err(error): return self._failure(request, "recover", error)
+            case Ok(_): ()
+        val image = self._image(request)
+        match image:
+            case Err(error): return self._failure(request, "recover", error)
+            case Ok(_): ()
+        val state = match self._observe(request, intent.native_id):
+            case Ok(value): value
+            case Err(error): return self._failure(request, "recover", error)
+        if index < 0:
+            val digest = match windows_docker_request_digest_v1(self.policy, request):
+                case Ok(value): value
+                case Err(error): return self._failure(request, "recover", error)
+            self.records.push(WindowsDockerRecordV1(digest: digest, state: state,
+                create_attempted: true, candidate_id: intent.native_id))
+        self._success(request, "recover", runtime_command_empty(), state)
+
+    # Independent exact-object absence observation. A destroyed cache phase or
+    # failed inspect never substitutes for this successful empty native query.
+    pub me fn absence(request: WindowsDockerRequestV1, expected: RuntimeIdentityV1) -> Result<(RuntimeOperationV1, i64), text>:
+        val index = self._binding(request)?
+        val identity = self._identity(request, expected.native_id)
+        if not windows_docker_id_v1(expected.native_id) or expected.pod_uid != identity.pod_uid or
+                expected.attempt != identity.attempt or expected.operation_id != identity.operation_id or
+                expected.provider_generation != identity.provider_generation or expected.engine != identity.engine or
+                expected.node_boot_id != identity.node_boot_id:
+            return Err("docker-absence-expected-identity-mismatch")
+        val record = self.records[index]
+        val retained = if record.state.identity.native_id != "": record.state.identity.native_id else: record.candidate_id
+        if retained != expected.native_id: return Err("docker-absence-native-id-not-retained")
+        val engine_before = self._engine()?
+        val command = windows_docker_command_v1(self.policy, "verify-absence",
+            ["container", "ls", "--all", "--no-trunc", "--filter", "id=" + expected.native_id, "--format", "{{{{.ID}}}}"])
+        val run = self._execute(command)?
+        if run.0 != "": return Err("docker-exact-object-still-present")
+        val engine_after = self._engine()?
+        val observed_ms = if self.scripted_mode:
+            match self.scripted_admission_clock_ms:
+                case Some(value): value
+                case nil: return Err("docker-script-observation-clock-required")
+        else:
+            val sampled = time_sample_unix_micros_or_failure()
+            if sampled < 0: return Err("docker-absence-clock-unavailable")
+            sampled / 1000
+        if observed_ms <= 0: return Err("docker-absence-clock-unavailable")
+        val state = RuntimeStateV1(phase: "destroyed", identity: expected, exit_code: -1,
+            reason: "independent-exact-native-object-absence")
+        val fact = RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: "verify-absence", command: command,
+            state: state, exit_code: run.2, stdout: run.0, stderr: run.1,
+            reason: "positive-empty-native-id-filter")
+        Ok((fact, observed_ms))
+
+    # Fresh exact-object configured-user observation, separate from projection.
+    # This records Docker Config.User, not a guessed SID or process token proof.
+    pub me fn selected_user(request: WindowsDockerRequestV1) -> Result<(RuntimeOperationV1, text, i64), text>:
+        val state = self._guard(request)?
+        val command = windows_docker_command_v1(self.policy, "selected-user",
+            ["container", "inspect", "--format", "{{{{.Config.User}}}}", state.identity.native_id])
+        val run = self._execute(command)?
+        var selected = run.0
+        if selected.ends_with("\r\n"): selected = selected.substring(0, selected.len() - 2)
+        elif selected.ends_with("\n"): selected = selected.substring(0, selected.len() - 1)
+        if selected != "ContainerUser": return Err("docker-selected-user-observation-mismatch")
+        val engine_after = self._engine()?
+        val observed_ms = if self.scripted_mode:
+            match self.scripted_admission_clock_ms:
+                case Some(value): value
+                case nil: return Err("docker-script-observation-clock-required")
+        else:
+            val sampled = time_sample_unix_micros_or_failure()
+            if sampled < 0: return Err("docker-selected-user-clock-unavailable")
+            sampled / 1000
+        if observed_ms <= 0: return Err("docker-selected-user-clock-unavailable")
+        val fact = RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: "selected-user", command: command,
+            state: state, exit_code: run.2, stdout: run.0, stderr: run.1,
+            reason: "fresh-exact-native-object-configured-user")
+        Ok((fact, selected, observed_ms))
+
+    pub me fn inspect(request: WindowsDockerRequestV1) -> RuntimeOperationV1:
+        val state = match self._guard(request):
+            case Ok(value): value
+            case Err(error): return self._failure(request, "inspect", error)
+        self._success(request, "inspect", runtime_command_empty(), state)
+
+    # Capture the full finite stdout/stderr log stream or fail its output bound.
+    # No line-tail option may silently discard earlier workload evidence.
+    pub me fn logs(request: WindowsDockerRequestV1) -> RuntimeOperationV1:
+        val state = match self._guard(request):
+            case Ok(value): value
+            case Err(error): return self._failure(request, "logs", error)
+        val command = windows_docker_command_v1(self.policy, "logs", ["logs", state.identity.native_id])
+        val run = match self._execute(command):
+            case Ok(value): value
+            case Err(error): return self._failure(request, "logs", error)
+        self._success(request, "logs", command, state, run.0, run.1)
+
+    pub me fn start(request: WindowsDockerRequestV1) -> RuntimeOperationV1:
+        self._lifecycle(request, "start", false)
+    pub me fn stop(request: WindowsDockerRequestV1) -> RuntimeOperationV1:
+        self._lifecycle(request, "stop", false)
+    pub me fn destroy(request: WindowsDockerRequestV1, force: bool = false) -> RuntimeOperationV1:
+        self._lifecycle(request, "destroy", force)
+    pub me fn wait(request: WindowsDockerRequestV1) -> RuntimeOperationV1:
+        self._lifecycle(request, "wait", false)
+
+    me fn _lifecycle(request: WindowsDockerRequestV1, operation: text, force: bool) -> RuntimeOperationV1:
+        val before = match self._guard(request):
+            case Ok(value): value
+            case Err(error): return self._failure(request, operation, error)
+        if operation == "start" and before.phase == "running":
+            return self._success(request, operation, runtime_command_empty(), before)
+        if operation == "stop" and before.phase == "exited":
+            return self._success(request, operation, runtime_command_empty(), before)
+        if operation == "start" and before.phase != "created": return self._failure(request, operation, "docker-start-phase-invalid")
+        if operation == "destroy" and before.phase == "running" and not force:
+            return self._failure(request, operation, "docker-destroy-running-requires-force")
+        var args = [operation, before.identity.native_id]
+        if operation == "stop": args = ["stop", "--time", "10", before.identity.native_id]
+        if operation == "destroy":
+            args = if force: ["rm", "--force", before.identity.native_id] else: ["rm", before.identity.native_id]
+        val command = windows_docker_command_v1(self.policy, operation, args)
+        var admission = 0
+        if operation == "start":
+            admission = match self._launch_admit(request, "start"):
+                case Ok(value): value
+                case Err(error): return self._failure(request, operation, error)
+        val run = match self._execute(command, admission):
+            case Ok(value): value
+            case Err(error): return self._failure(request, operation, error)
+        if operation == "destroy":
+            if run.0.trim() != before.identity.native_id: return self._failure(request, operation, "docker-rm-receipt-mismatch")
+            # Exact-ID filtered positive-empty query, never inventory adoption.
+            val engine = self._engine()
+            match engine:
+                case Err(error): return self._failure(request, operation, error)
+                case Ok(_): ()
+            val absence = windows_docker_command_v1(self.policy, "verify-absence",
+                ["container", "ls", "--all", "--no-trunc", "--filter", "id=" + before.identity.native_id, "--format", "{{{{.ID}}}}"])
+            val checked = match self._execute(absence):
+                case Ok(value): value
+                case Err(error): return self._failure(request, operation, error)
+            if checked.0 != "": return self._failure(request, operation, "docker-destroy-absence-unproven")
+            var state = before
+            state.phase = "destroyed"
+            state.reason = "docker-exact-id-absence-confirmed"
+            return self._success(request, operation, command, state, run.0, run.1)
+        val confirmed_engine = self._engine()
+        match confirmed_engine:
+            case Err(error): return self._failure(request, operation, error)
+            case Ok(_): ()
+        val after = match self._observe(request, before.identity.native_id):
+            case Ok(value): value
+            case Err(error): return self._failure(request, operation, error)
+        if operation == "start" and after.phase != "running" and after.phase != "exited":
+            return self._failure(request, operation, "docker-start-unconfirmed")
+        if (operation == "stop" or operation == "wait") and after.phase != "exited":
+            return self._failure(request, operation, "docker-terminal-state-unconfirmed")
+        if operation == "wait" and run.0.trim() != after.exit_code.to_text():
+            return self._failure(request, operation, "docker-wait-exit-code-mismatch")
+        self._success(request, operation, command, after, run.0, run.1)
+
+impl RuntimeProviderV1 for WindowsDockerRuntimeProviderV1:
+    me fn probe() -> RuntimeProbeV1: self._probe()

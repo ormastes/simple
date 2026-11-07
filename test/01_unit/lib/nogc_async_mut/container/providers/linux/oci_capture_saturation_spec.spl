@@ -1,0 +1,63 @@
+# AUTHORED_UNRUN. Exact scripted native-limit metadata through the real common
+# API owner. Native allocation/saturation tests belong to the capture owner.
+use std.spec.*
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.*
+use test.fixtures.container.simple_container_api_fixture_v2.simple_container_scripted_linux_fixture_v2
+use std.nogc_async_mut.container.api_v2.*
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
+use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
+use std.common.contracts.container.runtime_v1.*
+
+describe "Managed container capture refuses incomplete native observations":
+    it "does not publish saturated logs as successful even when the native CLI exits zero":
+        val leaf = linux_container_leaf_fixture_v2()
+        val request = linux_container_request_fixture_v2(leaf)
+        val scope = linux_container_scope_fixture_v2()
+        val fence = container_scope_fence_id_v2(scope).unwrap()
+        val native = "b".repeat(64)
+        val create = build_create_command("podman", "/unused/api", leaf, leaf.operation_id, 7, fence).1
+        val start = build_start_command("podman", "/unused/api", native).1
+        val logs = build_logs_command("podman", "/unused/api", native).1
+        var limited = linux_container_script_result_fixture_v2(logs, "incomplete-output")
+        limited.output_limited = true
+        val adapter = linux_container_adapter_fixture_v2([
+            linux_container_script_result_fixture_v2(create, native),
+            linux_container_script_result_fixture_v2(start, ""), limited], [1, 2])
+        val owner = simple_container_scripted_linux_fixture_v2(scope, adapter)
+        val deadline = container_effect_deadline_v1(request.plan.request_digest, leaf.operation_id,
+            ["create", "start"], 100).unwrap()
+        val created = simple_container_apply_v2(owner, "create", request, deadline)
+        expect(created.operation.status).to_equal(RUNTIME_STATUS_OK)
+        val started = simple_container_apply_v2(created.owner, "start", request, deadline)
+        expect(started.operation.status).to_equal(RUNTIME_STATUS_OK)
+        val logged = simple_container_read_v2(started.owner, "logs", request)
+        expect(logged.operation.status).to_equal(RUNTIME_STATUS_REJECTED)
+        expect(logged.operation.reason).to_contain("container-effect-process-limit:output")
+        expect(logged.operation.stdout).to_equal("incomplete-output")
+        expect(adapter.provider.scripted_cursor).to_equal(3)
+        expect(simple_container_intent_v2(logged.owner, request).unwrap().native_id).to_equal(native)
+
+    it "cannot create an absence receipt from a saturated native result with an absent exit code":
+        val leaf = linux_container_leaf_fixture_v2()
+        val request = linux_container_request_fixture_v2(leaf)
+        val scope = linux_container_scope_fixture_v2()
+        val fence = container_scope_fence_id_v2(scope).unwrap()
+        val native = "b".repeat(64)
+        val create = build_create_command("podman", "/unused/api", leaf, leaf.operation_id, 7, fence).1
+        val query = RuntimeCommandV1(operation: "absence", program: "podman", args: ["container", "exists", native])
+        var limited = linux_container_script_result_fixture_v2(query, "")
+        limited.exit_code = 1
+        limited.output_limited = true
+        val adapter = linux_container_adapter_fixture_v2([
+            linux_container_script_result_fixture_v2(create, native), limited], [1, 2])
+        val owner = simple_container_scripted_linux_fixture_v2(scope, adapter)
+        val deadline = container_effect_deadline_v1(request.plan.request_digest, leaf.operation_id, ["create"], 100).unwrap()
+        val created = simple_container_apply_v2(owner, "create", request, deadline)
+        expect(created.operation.status).to_equal(RUNTIME_STATUS_OK)
+        val observed = simple_container_absence_v2(created.owner, request, created.operation.state.identity)
+        expect(observed.receipt).to_equal(nil)
+        expect(observed.error).to_contain("container-effect-process-limit:output")
+        expect(adapter.provider.scripted_cursor).to_equal(2)
+        expect(adapter.provider.scripted_effect_clock_cursor).to_equal(1)
+        expect(simple_container_intent_v2(observed.owner, request).unwrap().native_id).to_equal(native)

@@ -1,0 +1,90 @@
+# AWAITING_VERIFICATION. Pure receipt checks and real wrong-cwd temp-file
+# refusal when run; successful correct-cwd child execution remains pending.
+use std.spec.{describe, it, expect}
+use std.common.build_manager.contracts.{BuildTaskV1, BuildInputV1, builder_task_identity_v1}
+use std.common.crypto.sha256.sha256_text
+use app.buildrunner.remote_container_workspace_probe_v2.*
+use app.io.file_ops.{secure_temp_dir, path_absolute, file_create_exclusive,
+    file_read_regular_no_follow_bounded, file_remove}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use test.fixtures.buildrunner.remote_authority_v1.remote_authority_task_v1
+
+fn workspace_task_v2(nonce: text) -> BuildTaskV1:
+    var task = remote_authority_task_v1()
+    task.inputs = task.inputs.push(BuildInputV1(path: "remote-workspace/" + task.id + ".nonce",
+        digest: sha256_text(nonce + "\n")))
+    task
+
+fn workspace_receipt_v2(task: BuildTaskV1, nonce: text) -> text:
+    "SIMPLE-REMOTE-CONTAINER-WORKSPACE-PROBE-2\n" + builder_task_identity_v1(task) +
+        "\n" + nonce + "\nwrite-read-delete\n"
+
+describe "same-process container workspace preflight V2":
+    it "validates only the exact bounded task-and-pinned-nonce receipt as a pure value":
+        val nonce = "a".repeat(64)
+        val task = workspace_task_v2(nonce)
+        expect(remote_container_workspace_receipt_validate_v2(task, nonce, workspace_receipt_v2(task, nonce)))
+            .to_equal(Ok(true))
+        # This pure validation is structural, never proof that the I/O occurred.
+
+    it "rejects stale retry, changed argv and changed source identity":
+        val nonce = "a".repeat(64)
+        val task = workspace_task_v2(nonce)
+        val receipt = workspace_receipt_v2(task, nonce)
+        var attempt = task
+        attempt.attempt = 2
+        var argv = task
+        argv.args = ["compile", "other.spl"]
+        var source = task
+        source.source_digest = "b".repeat(64)
+        for changed in [attempt, argv, source]:
+            expect(remote_container_workspace_receipt_validate_v2(changed, nonce, receipt))
+                .to_equal(Err("REMOTE_WORKSPACE_RECEIPT_DIFFERS"))
+
+    it "requires the declared exact nonce input hash and canonical lowercase hex":
+        val nonce = "a".repeat(64)
+        val task = workspace_task_v2(nonce)
+        val receipt = workspace_receipt_v2(task, nonce)
+        expect(remote_container_workspace_receipt_validate_v2(task, "b".repeat(64), receipt))
+            .to_equal(Err("REMOTE_WORKSPACE_NONCE_PIN_DIFFERS"))
+        expect(remote_container_workspace_receipt_validate_v2(task, "A".repeat(64), receipt))
+            .to_equal(Err("REMOTE_WORKSPACE_NONCE_INVALID"))
+        expect(remote_container_workspace_receipt_validate_v2(task, "a".repeat(63), receipt))
+            .to_equal(Err("REMOTE_WORKSPACE_NONCE_INVALID"))
+        val missing = remote_authority_task_v1()
+        expect(remote_container_workspace_receipt_validate_v2(missing, nonce, receipt))
+            .to_equal(Err("REMOTE_WORKSPACE_NONCE_NOT_PINNED"))
+
+    it "rejects another receipt version, missing newline, trailing data and oversized text":
+        val nonce = "a".repeat(64)
+        val task = workspace_task_v2(nonce)
+        val receipt = workspace_receipt_v2(task, nonce)
+        for payload in [receipt.replace("PROBE-2", "PROBE-1"),
+                receipt.replace("write-read-delete\n", "write-read-delete"), receipt + "extra\n", "x".repeat(257)]:
+            expect(remote_container_workspace_receipt_validate_v2(task, nonce, payload))
+                .to_equal(Err("REMOTE_WORKSPACE_RECEIPT_DIFFERS"))
+
+    it "refuses an actual wrong cwd before creating any probe file":
+        val root = secure_temp_dir("/tmp", "container-workspace-wrong-cwd").unwrap()
+        expect(dir_create_all(root + "/work")).to_equal(true)
+        expect(path_absolute(".") == path_absolute(root + "/work")).to_equal(false)
+        val nonce = "a".repeat(64)
+        val task = workspace_task_v2(nonce)
+        expect(remote_container_workspace_probe_v2(task, root)).to_equal(Err("REMOTE_WORKSPACE_CWD_DIFFERS"))
+        val path = root + "/work/.simple-container-access-" + nonce
+        # Positively prove no probe was created, without exists(false).
+        expect(file_create_exclusive(path, "owned after refusal\n")).to_equal(true)
+        expect(file_remove(path)).to_equal(true)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "leaves a preexisting file untouched when cwd admission fails":
+        val root = secure_temp_dir("/tmp", "container-workspace-existing").unwrap()
+        expect(dir_create_all(root + "/work")).to_equal(true)
+        val nonce = "a".repeat(64)
+        val path = root + "/work/.simple-container-access-" + nonce
+        expect(file_create_exclusive(path, "preexisting unowned bytes\n")).to_equal(true)
+        expect(remote_container_workspace_probe_v2(workspace_task_v2(nonce), root))
+            .to_equal(Err("REMOTE_WORKSPACE_CWD_DIFFERS"))
+        expect(file_read_regular_no_follow_bounded(path, 256).unwrap()).to_equal("preexisting unowned bytes\n")
+        expect(file_remove(path)).to_equal(true)
+        expect(dir_remove_all(root)).to_equal(true)

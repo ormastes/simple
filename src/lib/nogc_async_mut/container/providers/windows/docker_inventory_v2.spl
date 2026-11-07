@@ -1,0 +1,217 @@
+# Read-only Docker inventory for persistent-service startup quarantine.
+# SOURCE-ONLY NOT_RUN. No inventory observation grants ownership/readiness,
+# authorizes adoption, or releases capacity, including exited/dead containers.
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{
+    WindowsDockerPolicyV1, WINDOWS_DOCKER_ENGINE_V1, WINDOWS_DOCKER_INFO_FORMAT_V1,
+    windows_docker_policy_reason_v1, windows_docker_id_v1, windows_docker_token_v1}
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_scope_fence_id_v2}
+use std.nogc_sync_mut.io.windows_host_identity_v1.{windows_machine_guid_decode_v1}
+
+pub const WINDOWS_DOCKER_INVENTORY_MAX_ENTRIES_V2: i64 = 64
+pub const WINDOWS_DOCKER_INVENTORY_IDS_FORMAT_V2 = "{{{{.ID}}}}"
+# The boot-key presence marker distinguishes a missing label from present empty
+# map[string]string values. Four source braces become two Go-template braces.
+pub const WINDOWS_DOCKER_INVENTORY_INSPECT_FORMAT_V2 = "{{{{.Id}}}}|{{{{index .Config.Labels \"simple.provider\"}}}}|{{{{index .Config.Labels \"simple.physical-host\"}}}}|{{{{index .Config.Labels \"simple.service-scope\"}}}}|{{{{index .Config.Labels \"simple.service-incarnation\"}}}}|{{{{index .Config.Labels \"simple.pod\"}}}}|{{{{index .Config.Labels \"simple.attempt\"}}}}|{{{{index .Config.Labels \"simple.operation\"}}}}|{{{{index .Config.Labels \"simple.generation\"}}}}|{{{{index .Config.Labels \"simple.boot\"}}}}|{{{{index .Config.Labels \"simple.request\"}}}}|{{{{.HostConfig.CpuCount}}}}|{{{{.HostConfig.Memory}}}}|{{{{.State.Status}}}}|{{{{range $key, $value := .Config.Labels}}}}{{{{if eq $key \"simple.boot\"}}}}present{{{{end}}}}{{{{end}}}}|{{{{index .Config.Labels \"simple.continuity-mode\"}}}}|{{{{index .Config.Labels \"simple.native-machine\"}}}}|{{{{index .Config.Labels \"simple.fence\"}}}}"
+
+pub struct WindowsManagedInventoryEntryV2:
+    native_id: text
+    workload_uid: text
+    attempt: i64
+    operation_id: text
+    request_digest: text
+    provider_generation: i64
+    boot_id: text
+    service_incarnation_id: text
+    native_machine_id: text
+    scope_fence_id: text
+    state: text
+    cpu_millis: i64
+    memory_bytes: i64
+
+pub struct WindowsManagedInventoryV2:
+    physical_host_id: text
+    service_scope_id: text
+    engine_id: text
+    entries: [WindowsManagedInventoryEntryV2]
+
+# Accept one ordinary CLI line terminator, never arbitrary surrounding space.
+fn inventory_line_v2(output: text, max_output_bytes: i64) -> Result<text, text>:
+    if max_output_bytes <= 0 or max_output_bytes > 1048576 or output.len() > max_output_bytes:
+        return Err("docker-inventory-output-bound")
+    var line = output
+    if line.ends_with("\r\n"): line = line.substring(0, line.len() - 2)
+    elif line.ends_with("\n"): line = line.substring(0, line.len() - 1)
+    if line.contains("\n") or line.contains("\r") or line.contains("\0"):
+        return Err("docker-inventory-multiline-record")
+    Ok(line)
+
+# Synthetic decoding seam; parsing text does not prove a live inventory.
+pub fn windows_docker_inventory_ids_decode_v2(output: text, max_output_bytes: i64) -> Result<[text], text>:
+    if max_output_bytes <= 0 or max_output_bytes > 1048576 or output.len() > max_output_bytes:
+        return Err("docker-inventory-output-bound")
+    if output == "": return Ok([])
+    val normalized = output.replace("\r\n", "\n")
+    if normalized.contains("\r") or normalized.contains("\0"):
+        return Err("docker-inventory-id-list-malformed")
+    var body = normalized
+    if body.ends_with("\n"): body = body.substring(0, body.len() - 1)
+    if body == "": return Err("docker-inventory-empty-id-row")
+    val rows = body.split("\n")
+    if rows.len() > WINDOWS_DOCKER_INVENTORY_MAX_ENTRIES_V2:
+        return Err("docker-inventory-entry-bound")
+    var ids: [text] = []
+    for row in rows:
+        if not windows_docker_id_v1(row): return Err("docker-inventory-full-native-id-required")
+        if ids.contains(row): return Err("docker-inventory-duplicate-native-id")
+        ids = ids.push(row)
+    Ok(ids)
+
+# Canonical positive decimal only; overflow is rejected before multiplication.
+fn inventory_positive_v2(source: text, maximum: i64) -> Result<i64, text>:
+    if source == "" or source.len() > 19 or source.starts_with("0"):
+        return Err("docker-inventory-positive-decimal-required")
+    var value: i64 = 0
+    for index in 0..source.len():
+        val digit = source.char_code_at(index) - 48
+        if digit < 0 or digit > 9: return Err("docker-inventory-decimal-malformed")
+        if value > maximum / 10 or (value == maximum / 10 and digit > maximum % 10):
+            return Err("docker-inventory-decimal-overflow")
+        value = value * 10 + digit
+    Ok(value)
+
+fn inventory_incarnation_v2(value: text) -> bool:
+    val prefix = "windows-service-incarnation-v1:"
+    if value.len() != prefix.len() + 64 or not value.starts_with(prefix): return false
+    val suffix = value.substring(prefix.len(), value.len())
+    windows_docker_id_v1(suffix) and suffix != "0000000000000000000000000000000000000000000000000000000000000000"
+
+fn inventory_native_machine_v2(value: text) -> bool:
+    val prefix = "windows-machine-guid-v1:"
+    if value.len() != 60 or not value.starts_with(prefix): return false
+    var units: [i64] = []
+    for index in prefix.len()..value.len():
+        units = units.push(value.char_code_at(index))
+    units = units.push(0)
+    match windows_machine_guid_decode_v1(1, 74, units):
+        case Ok(canonical): canonical == value
+        case Err(_reason): false
+
+# Returns exact entry plus physical/service labels for scoped filtering. Validate
+# every provider-listed row before filtering, so malformed legacy/foreign rows
+# cannot silently disappear from completeness accounting.
+pub fn windows_docker_inventory_inspect_decode_v2(expected_native_id: text, output: text,
+        max_output_bytes: i64) -> Result<(WindowsManagedInventoryEntryV2, text, text), text>:
+    if not windows_docker_id_v1(expected_native_id): return Err("docker-inventory-expected-id-invalid")
+    val line = inventory_line_v2(output, max_output_bytes)?
+    val fields = line.split("|")
+    if fields.len() != 18: return Err("docker-inventory-inspection-field-count")
+    if fields[0] != expected_native_id: return Err("docker-inventory-exact-native-id-mismatch")
+    if fields[1] != WINDOWS_DOCKER_ENGINE_V1: return Err("docker-inventory-provider-label-mismatch")
+    if not windows_docker_token_v1(fields[2]) or not windows_docker_token_v1(fields[3]):
+        return Err("docker-inventory-scope-label-invalid")
+    if not inventory_incarnation_v2(fields[4]): return Err("docker-inventory-service-incarnation-invalid")
+    if not windows_docker_token_v1(fields[5]) or not windows_docker_token_v1(fields[7]):
+        return Err("docker-inventory-operation-label-invalid")
+    val attempt = inventory_positive_v2(fields[6], 9223372036854775807)?
+    val generation = inventory_positive_v2(fields[8], 9223372036854775807)?
+    if fields[9] != "" or fields[14] != "present" or fields[15] != "service-incarnation-v1":
+        return Err("docker-inventory-service-continuity-label-invalid")
+    if not windows_docker_id_v1(fields[10]):
+        return Err("docker-inventory-request-digest-invalid")
+    val cpu_count = inventory_positive_v2(fields[11], 256)?
+    val memory = inventory_positive_v2(fields[12], 1099511627776)?
+    if memory < 16777216: return Err("docker-inventory-memory-ceiling-invalid")
+    if not ["created", "restarting", "running", "removing", "paused", "exited", "dead"].contains(fields[13]):
+        return Err("docker-inventory-state-invalid")
+    if not inventory_native_machine_v2(fields[16]): return Err("docker-inventory-native-machine-label-invalid")
+    # Reconstruct the recorded OLD scope, including its old native machine and
+    # service incarnation. Current-machine mismatch remains charged quarantine;
+    # only physical/service scope labels govern the later filtering decision.
+    val recorded_scope = ContainerHostScopeV2(physical_host_id: fields[2],
+        service_scope_id: fields[3], boot_id: "", provider_generation: generation,
+        native_machine_id: fields[16], continuity_mode: "service-incarnation-v1",
+        continuity_id: fields[4])
+    val expected_fence = container_scope_fence_id_v2(recorded_scope)?
+    if fields[17] == "" or fields[17] != expected_fence:
+        return Err("docker-inventory-scope-fence-label-mismatch")
+    val entry = WindowsManagedInventoryEntryV2(native_id: fields[0], workload_uid: fields[5],
+        attempt: attempt, operation_id: fields[7], request_digest: fields[10],
+        provider_generation: generation, boot_id: "", service_incarnation_id: fields[4],
+        native_machine_id: fields[16], scope_fence_id: fields[17],
+        state: fields[13], cpu_millis: cpu_count * 1000, memory_bytes: memory)
+    Ok((entry, fields[2], fields[3]))
+
+@when(os="windows"):
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded_environment_v1}
+use std.nogc_sync_mut.io.time_ops.{time_sample_monotonic_nanos_or_failure}
+
+# A 30-second acceptance budget, not a preemptible governor-wait deadline.
+# Every admitted process receives only its current remaining budget; a late
+# completion or failed/backward clock rejects the whole inventory.
+fn inventory_capture_v2(policy: WindowsDockerPolicyV1, args: [text],
+        started_nanos: i64, deadline_nanos: i64) -> Result<text, text>:
+    val before = time_sample_monotonic_nanos_or_failure()
+    if before < started_nanos or before >= deadline_nanos:
+        return Err("docker-inventory-total-budget-exhausted")
+    val remaining_ms = (deadline_nanos - before) / 1000000
+    if remaining_ms <= 0: return Err("docker-inventory-total-budget-exhausted")
+    val timeout = if policy.timeout_ms < remaining_ms: policy.timeout_ms else: remaining_ms
+    val environment = [("SystemRoot", policy.system_root), ("TEMP", policy.temp_directory), ("TMP", policy.temp_directory)]
+    val result = process_run_bounded_environment_v1(policy.docker_executable,
+        ["--host", policy.endpoint] + args, environment, timeout, policy.max_output_bytes)?
+    val after = time_sample_monotonic_nanos_or_failure()
+    if after < before or after >= deadline_nanos: return Err("docker-inventory-total-budget-exhausted")
+    if result.limit_exceeded or result.stdout.len() > policy.max_output_bytes or result.stderr.len() > policy.max_output_bytes:
+        return Err("docker-inventory-capture-limit")
+    if result.exit_code != 0: return Err("docker-inventory-command-failed")
+    Ok(result.stdout)
+
+fn inventory_list_v2(policy: WindowsDockerPolicyV1, started: i64, deadline: i64) -> Result<[text], text>:
+    val output = inventory_capture_v2(policy, ["container", "ls", "--all", "--no-trunc",
+        "--filter", "label=simple.provider=windows-docker-process-v1", "--format", WINDOWS_DOCKER_INVENTORY_IDS_FORMAT_V2], started, deadline)?
+    windows_docker_inventory_ids_decode_v2(output, policy.max_output_bytes)
+
+pub fn windows_docker_managed_inventory_v2(policy: WindowsDockerPolicyV1,
+        physical_host_id: text, service_scope_id: text) -> Result<WindowsManagedInventoryV2, text>:
+    val reason = windows_docker_policy_reason_v1(policy)
+    if reason != "": return Err(reason)
+    if not windows_docker_token_v1(physical_host_id) or not windows_docker_token_v1(service_scope_id):
+        return Err("docker-inventory-request-scope-invalid")
+    val started = time_sample_monotonic_nanos_or_failure()
+    if started < 0 or started > 9223372006854775807: return Err("docker-inventory-monotonic-clock-unavailable")
+    val deadline = started + 30000000000
+    val expected_engine = "windows|" + policy.engine_id + "|" + policy.expected_kernel_version
+    val initial_engine = inventory_capture_v2(policy, ["info", "--format", WINDOWS_DOCKER_INFO_FORMAT_V1], started, deadline)?
+    if inventory_line_v2(initial_engine, policy.max_output_bytes)? != expected_engine:
+        return Err("docker-inventory-live-engine-identity-mismatch")
+    val ids = inventory_list_v2(policy, started, deadline)?
+    var entries: [WindowsManagedInventoryEntryV2] = []
+    for id in ids:
+        val output = inventory_capture_v2(policy, ["container", "inspect", "--format",
+            WINDOWS_DOCKER_INVENTORY_INSPECT_FORMAT_V2, id], started, deadline)?
+        val decoded = windows_docker_inventory_inspect_decode_v2(id, output, policy.max_output_bytes)?
+        if decoded.1 == physical_host_id and decoded.2 == service_scope_id:
+            entries = entries.push(decoded.0)
+    # Detect observed membership churn as incomplete; never silently accept only
+    # the surviving subset when a listed container disappears during inspection.
+    val final_ids = inventory_list_v2(policy, started, deadline)?
+    if ids.len() != final_ids.len(): return Err("docker-inventory-membership-changed")
+    for id in ids:
+        if not final_ids.contains(id): return Err("docker-inventory-membership-changed")
+    val final_engine = inventory_capture_v2(policy, ["info", "--format", WINDOWS_DOCKER_INFO_FORMAT_V1], started, deadline)?
+    if inventory_line_v2(final_engine, policy.max_output_bytes)? != expected_engine:
+        return Err("docker-inventory-live-engine-identity-changed")
+    val completed = time_sample_monotonic_nanos_or_failure()
+    if completed < started or completed >= deadline: return Err("docker-inventory-total-budget-exhausted")
+    Ok(WindowsManagedInventoryV2(physical_host_id: physical_host_id,
+        service_scope_id: service_scope_id, engine_id: policy.engine_id, entries: entries))
+@else:
+pub fn windows_docker_managed_inventory_v2(policy: WindowsDockerPolicyV1,
+        physical_host_id: text, service_scope_id: text) -> Result<WindowsManagedInventoryV2, text>:
+    Err("docker-managed-inventory-requires-native-windows-provider")
+@end
+
+export WindowsManagedInventoryEntryV2, WindowsManagedInventoryV2
+export windows_docker_managed_inventory_v2, windows_docker_inventory_ids_decode_v2
+export windows_docker_inventory_inspect_decode_v2
+export WINDOWS_DOCKER_INVENTORY_MAX_ENTRIES_V2, WINDOWS_DOCKER_INVENTORY_IDS_FORMAT_V2, WINDOWS_DOCKER_INVENTORY_INSPECT_FORMAT_V2

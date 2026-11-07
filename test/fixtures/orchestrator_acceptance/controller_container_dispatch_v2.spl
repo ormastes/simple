@@ -1,0 +1,154 @@
+# Real immutable assignment/receipt and Ed25519 FRAME fixtures, not AUTH passes.
+# Linux body uses its real canonical request codec; Windows body is explicitly
+# opaque common-wire fixture data until its platform owner validates semantics.
+# Adapted from prior V1 controller_dispatch_authority proof/receipt construction.
+use std.common.contracts.orchestration.controller_dispatch_request_v2.*
+use std.common.contracts.orchestration.host_execute_request_v2.*
+use std.common.contracts.orchestration.host_helper_plan_v1.*
+use std.common.contracts.orchestration.controller_execution_reply_v2.*
+use std.common.contracts.orchestration.controller_parent_budget_v1.*
+use std.common.contracts.orchestration.assignment_v1.*
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.orchestration.host_reservation_codec_v1.*
+use std.common.contracts.orchestration.host_prepare_response_v1.host_prepare_response_encode_v1
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.distributed_control_v2.{OperationEnvelopeV2, ExecutionGrantV2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_grant_digest_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{distributed_grant_signature_message_v2, distributed_approval_signature_message_v2}
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.crypto.sha256.sha256_text
+use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_digest_v1}
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_encode_v1
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct ContainerDispatchSignedPairV2:
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+
+pub struct ControllerContainerWireFixtureV2:
+    dispatch: ControllerDispatchRequestV2
+    host: HostExecuteRequestV2
+    helper: HostHelperPlanV1
+    reply: ControllerExecutionReplyV2
+
+fn container_dispatch_seed_v2(offset: i64) -> [u8]:
+    var bytes: [u8] = []
+    for index in 0..32: bytes.push((offset + index) as u8)
+    bytes
+
+fn container_dispatch_pair_v2(original: OperationEnvelopeV2, action: text, id: text, renew: bool) -> ContainerDispatchSignedPairV2:
+    var operation = original
+    operation.operation = action
+    val controller = operation.host_id == "controller"
+    val grant_id = if renew: id + "-renewed" else: id
+    val grant = ExecutionGrantV2(id: grant_id, principal: operation.principal, project: operation.project,
+        host_id: operation.host_id, operations: [action], environment_digest: operation.environment_digest,
+        policy_revision: operation.policy_revision, revocation_epoch: operation.revocation_epoch,
+        expires_at: if renew: 1200 else: 800, maximum_memory_bytes: 8000, maximum_duration_ms: 1000)
+    var signed = DistributedSignedGrantV2(grant: grant, issuer_id: if controller: "controller-issuer" else: "host-issuer",
+        key_revision: 1, signature: [])
+    val issuer = pure_ed25519_sign_from_seed_v1(container_dispatch_seed_v2(if controller: 1 else: 129),
+        distributed_grant_signature_message_v2(signed).unwrap())
+    signed.signature = issuer.signature
+    var approval = DistributedSignedApprovalV2(approver_id: if controller: "controller-approver" else: "host-approver",
+        key_revision: 1, grant_digest: distributed_grant_digest_v2(grant).unwrap(),
+        request_digest: sha256_text(distributed_encode_operation_v2(operation).unwrap()),
+        policy_revision: operation.policy_revision, session_generation: operation.session_generation,
+        expires_at: if renew: 1100 else: 700, signature: [])
+    val approver = pure_ed25519_sign_from_seed_v1(container_dispatch_seed_v2(if controller: 65 else: 193),
+        distributed_approval_signature_message_v2(approval).unwrap())
+    approval.signature = approver.signature
+    ContainerDispatchSignedPairV2(signed: signed, approval: approval)
+
+pub fn controller_container_renew_fixture_v2(original: ControllerDispatchRequestV2) -> ControllerDispatchRequestV2:
+    var request = original
+    val assignment = container_dispatch_pair_v2(request.operation, "controller_assignment_v1", "assignment", true)
+    val execution = container_dispatch_pair_v2(request.operation, "controller_execute_v1", "execution", true)
+    val prepare = container_dispatch_pair_v2(request.binding.host_operation, "host_reservation_v1", "prepare", true)
+    val host_execution = container_dispatch_pair_v2(request.binding.host_operation, "host_execute_v1", "host-execution", true)
+    request.assignment_signed = assignment.signed
+    request.assignment_approval = assignment.approval
+    request.execution_signed = execution.signed
+    request.execution_approval = execution.approval
+    request.prepare_signed = prepare.signed
+    request.prepare_approval = prepare.approval
+    request.host_execution_signed = host_execution.signed
+    request.host_execution_approval = host_execution.approval
+    request
+
+pub fn controller_container_wire_fixture_v2(backend: text) -> ControllerContainerWireFixtureV2:
+    val windows = backend == "windows-docker-process"
+    val scope = ContainerHostScopeV2(physical_host_id: "authorized-alias", service_scope_id: "service",
+        boot_id: if windows: "" else: "native-boot", provider_generation: 3,
+        native_machine_id: if windows: "windows-machine-guid-v1:abcd" else: "native-machine",
+        continuity_mode: if windows: "service-incarnation-v1" else: "native-boot-incarnation-v1",
+        continuity_id: if windows: "windows-service-incarnation-v1:beef" else: "native-boot")
+    val linux = LinuxOciRequestV1(pod_uid: "workload", attempt: 1, operation_id: "host-operation",
+        image: "image@sha256:" + "a".repeat(64), bundle_path: "", command: ["echo"], args: ["retained-nonce"],
+        timeout_ms: 50, cpu_limit_millis: 2000, memory_limit_bytes: 4000, pid_limit: 16,
+        network_policy: "none", filesystem_policy: "read-only")
+    val body = if windows: "opaque-Windows-common-wire-fixture" else: linux_oci_retained_request_encode_v1(linux).unwrap()
+    val semantic_digest = if windows: "a".repeat(64) else: linux_oci_request_digest_v1(linux).unwrap()
+    val plan = ContainerExecutionPlanV2(backend: backend, workload_uid: "workload", attempt: 1,
+        operation_id: "host-operation", request_digest: semantic_digest, physical_host_id: scope.physical_host_id,
+        service_scope_id: scope.service_scope_id, boot_id: scope.boot_id, provider_generation: scope.provider_generation,
+        native_machine_id: scope.native_machine_id, continuity_mode: scope.continuity_mode, continuity_id: scope.continuity_id)
+    val execution_request = ContainerExecutionRequestV2(plan: plan, request_bytes: body)
+    val row = HostReservationV1(id: "reservation", operation_id: "host-operation", payload_digest: "0".repeat(64),
+        service_scope_id: scope.service_scope_id, assignment_generation: 1, nonce: "nonce", cpu_millis: 2000,
+        memory_bytes: 4000, exclusive_devices: [], prepare_deadline_ms: 200, state: HostReservationStateV1.Prepared)
+    val intent = host_reservation_bind_intent_v1(HostReservationIntentV1(physical_host_id: scope.physical_host_id,
+        fence: HostLedgerFenceV1(authority_id: "host-authority", boot_id: container_scope_fence_id_v2(scope).unwrap(),
+            provider_generation: scope.provider_generation, revision: 7), plan_digest: container_execution_plan_digest_v2(plan).unwrap(), reservation: row)).unwrap()
+    val host_operation = OperationEnvelopeV2(version: 2, id: "host-operation", payload_digest: intent.reservation.payload_digest,
+        principal: "user", project: "project", host_id: scope.physical_host_id, operation: "host_reservation_v1",
+        environment_digest: "b".repeat(64), policy_revision: 1, revocation_epoch: 0, session_generation: 3,
+        memory_bytes: 4000, duration_ms: 100)
+    val binding = ControllerAssignmentBindingV1(controller_id: "controller", controller_epoch: 1, workload_uid: "workload",
+        desired_revision: 1, host_intent: intent, host_operation: host_operation)
+    var operation = host_operation
+    operation.id = "controller-operation"
+    operation.host_id = "controller"
+    operation.operation = "controller_assignment_v1"
+    operation.payload_digest = sha256_text(controller_assignment_bytes_v1(binding).unwrap())
+    val assignment = container_dispatch_pair_v2(operation, "controller_assignment_v1", "assignment", false)
+    val execution = container_dispatch_pair_v2(operation, "controller_execute_v1", "execution", false)
+    val prepare = container_dispatch_pair_v2(host_operation, "host_reservation_v1", "prepare", false)
+    val host_execution = container_dispatch_pair_v2(host_operation, "host_execute_v1", "host-execution", false)
+    val dispatch = ControllerDispatchRequestV2(binding: binding, operation: operation, execution: execution_request,
+        assignment_signed: assignment.signed, assignment_approval: assignment.approval,
+        execution_signed: execution.signed, execution_approval: execution.approval,
+        prepare_signed: prepare.signed, prepare_approval: prepare.approval,
+        host_execution_signed: host_execution.signed, host_execution_approval: host_execution.approval)
+    val receipt = host_reservation_receipt_v1(intent, host_operation).unwrap()
+    val host = HostExecuteRequestV2(intent: intent, operation: host_operation, receipt: receipt,
+        execution: execution_request, signed: host_execution.signed, approval: host_execution.approval)
+    val assignment_digest = sha256_text(controller_assignment_bytes_v1(binding).unwrap())
+    val budget = ControllerParentBudgetV1(parent_operation_id: host_operation.id,
+        parent_operation_digest: sha256_text(distributed_encode_operation_v2(host_operation).unwrap()),
+        parent_assignment_digest: assignment_digest, maximum_cpu_millis: 6000, maximum_memory_bytes: 12000, scope: scope)
+    val helper = HostHelperPlanV1(operation_id: "helper-operation", helper_kind: "attach-broker", parent_operation_id: host_operation.id,
+        parent_operation_digest: budget.parent_operation_digest, parent_assignment_digest: assignment_digest,
+        parent_budget_digest: controller_parent_budget_digest_v1(budget).unwrap(), request_digest: "d".repeat(64), scope: scope)
+    val response = host_prepare_response_encode_v1(receipt, intent, host_operation).unwrap()
+    val reply = ControllerExecutionReplyV2(controller_id: "controller", request_uid: "workload", controller_operation_id: operation.id,
+        host_operation_id: host_operation.id, assignment_digest: assignment_digest, plan_digest: intent.plan_digest,
+        request_digest: plan.request_digest, status: "host-prepared", host_response: response, observation_digest: sha256_text(response))
+    ControllerContainerWireFixtureV2(dispatch: dispatch, host: host, helper: helper, reply: reply)
+
+pub fn controller_container_wire_field_v2(source: text, key: text, value: SdnValue) -> text:
+    val parsed = parse_resource_document(source).unwrap()
+    var fields = as_dict(parsed.0, "", parsed.1).unwrap()
+    fields[key] = value
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+pub fn controller_container_wire_without_v2(source: text, key: text) -> text:
+    val parsed = parse_resource_document(source).unwrap()
+    val fields = as_dict(parsed.0, "", parsed.1).unwrap()
+    var kept: Dict<text, SdnValue> = {}
+    for name in fields.keys():
+        if name != key: kept[name] = fields[name]
+    sdn_encode_canonical(SdnValue.Dict(kept)) + "\n"

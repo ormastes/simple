@@ -1,0 +1,119 @@
+# Dedicated workload entrypoint. This process is launched only by the common
+# Container API. Its compiler child stays inside that same container boundary.
+use app.buildrunner.remote_container_workspace_probe_v2.remote_container_workspace_probe_v2
+use app.buildrunner.remote_evidence_v1.{RemoteEvidencePolicyV1, remote_policy_decode_v1, remote_policy_bind_v1}
+use app.buildrunner.remote_test_runner_v1.remote_test_run_owned_v1
+use app.buildrunner.remote_capture_v1.remote_capture_path_v1
+use app.bootstrap_builder.codec.builder_read_task_v1
+use app.bootstrap_builder.transport.builder_transport_parent_v1
+use app.bootstrap_builder.worker.builder_worker_verify_inputs_v1
+use std.common.build_manager.contracts.{BuildTaskV1, builder_relative_path_valid_v1}
+use std.common.traceability.run_plan_codec.decode_trace_run_plan
+use app.io.file_ops.{path_absolute, file_read_regular_no_follow_bounded, file_create_exclusive, file_hash_sha256}
+use app.io.env_ops.env_set
+use app.io.process_ops.process_run_inherit
+
+fn remote_container_build_args_v2(task: BuildTaskV1) -> Result<bool, text>:
+    # A deliberately bounded native-build surface. Unknown switches cannot add
+    # external source roots, alternate producers, cache reuse or implicit entry.
+    if task.args.len() < 2 or task.args[0] != "native-build": return Err("REMOTE_CONTAINER_BUILD_COMMAND_REQUIRED")
+    var index = 1
+    var entry = false
+    var output = false
+    var backend = false
+    var source = false
+    var closure = false
+    while index < task.args.len():
+        val flag = task.args[index]
+        if flag == "--strip" or flag == "--entry-closure":
+            if flag == "--entry-closure": closure = true
+            index = index + 1
+            continue
+        if not ["--source", "--entry", "--output", "--backend"].contains(flag) or index + 1 >= task.args.len():
+            return Err("REMOTE_CONTAINER_BUILD_ARGUMENT_UNSUPPORTED")
+        val value = task.args[index + 1]
+        if flag == "--backend":
+            if backend or not ["llvm", "llvm-lib", "cranelift"].contains(value):
+                return Err("REMOTE_CONTAINER_BUILD_BACKEND_REQUIRED")
+            backend = true
+        else:
+            if not builder_relative_path_valid_v1(value): return Err("REMOTE_CONTAINER_BUILD_PATH_UNSAFE")
+            if flag == "--output":
+                if output or not task.outputs.contains(value): return Err("REMOTE_CONTAINER_BUILD_OUTPUT_DIFFERS")
+                output = true
+            else:
+                var pinned = false
+                for input in task.inputs:
+                    if (flag == "--entry" and input.path == value) or
+                            (flag == "--source" and input.path.starts_with(value + "/")):
+                        pinned = true
+                if not pinned: return Err("REMOTE_CONTAINER_BUILD_SOURCE_NOT_PINNED")
+                if flag == "--entry":
+                    if entry: return Err("REMOTE_CONTAINER_BUILD_ENTRY_DUPLICATE")
+                    entry = true
+                else: source = true
+        index = index + 2
+    if not entry or not output or not backend or not source or not closure:
+        return Err("REMOTE_CONTAINER_BUILD_EXPLICIT_CLOSURE_REQUIRED")
+    Ok(true)
+
+fn remote_container_producer_run_v2(task: BuildTaskV1, policy: RemoteEvidencePolicyV1,
+        root: text) -> Result<i64, text>:
+    val _policy = remote_policy_bind_v1(task, policy)?
+    val work = root + "/work"
+    if path_absolute(".") != path_absolute(work): return Err("REMOTE_CONTAINER_PRODUCER_WORKSPACE_DIFFERS")
+    val receipt_path = "remote-workspace/" + task.id + ".probe.sdn"
+    if not task.outputs.contains(receipt_path): return Err("REMOTE_CONTAINER_PROBE_OUTPUT_NOT_DECLARED")
+    if policy.action_kind == "build":
+        val _args = remote_container_build_args_v2(task)?
+    # This actual same-process access test MUST finish before the first build or
+    # test action. A task cannot supply or replay its own pre-created receipt.
+    val receipt = remote_container_workspace_probe_v2(task, root)?
+    val destination = remote_capture_path_v1(work, receipt_path)?
+    if not file_create_exclusive(destination, receipt): return Err("REMOTE_CONTAINER_PROBE_RECEIPT_ALREADY_EXISTS")
+    if file_read_regular_no_follow_bounded(destination, 1024)? != receipt:
+        return Err("REMOTE_CONTAINER_PROBE_RECEIPT_READBACK_DIFFERS")
+    if policy.action_kind == "test":
+        val plan = decode_trace_run_plan(file_read_regular_no_follow_bounded(
+            remote_capture_path_v1(work, "remote-tests/" + task.id + ".sdn")?, 1048576)?)?
+        val _ran = remote_test_run_owned_v1(task, policy, plan, root)?
+        return Ok(0)
+    var compiler_digest = ""
+    var runtime_pinned = false
+    for input in policy.toolchain_inputs:
+        if input.path == "tools/simple": compiler_digest = input.digest
+        if input.path.starts_with("tools/runtime/"): runtime_pinned = true
+    if compiler_digest == "" or not runtime_pinned: return Err("REMOTE_CONTAINER_BUILD_TOOLCHAIN_NOT_PINNED")
+    val compiler = remote_capture_path_v1(work, "tools/simple")?
+    val before = file_hash_sha256(compiler)
+    if before == nil or before.unwrap() != compiler_digest: return Err("REMOTE_CONTAINER_BUILD_COMPILER_CHANGED")
+    if not env_set("SIMPLE_BINARY", compiler) or not env_set("SIMPLE_RUNTIME_PATH", work + "/tools/runtime") or
+            not env_set("SIMPLE_LIB", work + "/src") or not env_set("SIMPLE_NO_STUB_FALLBACK", "1") or
+            not env_set("SIMPLE_NO_BOOTSTRAP_DELEGATE", "1") or not env_set("SIMPLE_NATIVE_BUILD_THREADS", "1"):
+        return Err("REMOTE_CONTAINER_BUILD_ENVIRONMENT_UNAVAILABLE")
+    # Inherited stdio is captured, bounded and qualified by the Container API.
+    # Container wait/absence, not this child exit, authorizes host completion.
+    val code = process_run_inherit(compiler, task.args)
+    val invalid = builder_worker_verify_inputs_v1(task, root)
+    if invalid != "": return Err(invalid)
+    Ok(code)
+
+fn remote_container_producer_main_v2() -> i64:
+    val root = builder_transport_parent_v1(path_absolute("."))
+    val task = match builder_read_task_v1(root + "/request.sdn"):
+        Ok(value): value
+        Err(_reason): return 2
+    val payload = match file_read_regular_no_follow_bounded(root + "/work/remote-policy/" + task.id + ".sdn", 1048576):
+        Ok(value): value
+        Err(_reason): return 2
+    val policy = match remote_policy_decode_v1(payload):
+        Ok(value): value
+        Err(_reason): return 2
+    match remote_container_producer_run_v2(task, policy, root):
+        Ok(code): code
+        Err(_reason): 2
+
+fn main() -> i64:
+    remote_container_producer_main_v2()
+
+export remote_container_build_args_v2, remote_container_producer_run_v2, remote_container_producer_main_v2

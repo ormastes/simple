@@ -1,0 +1,144 @@
+# Typed journal identity union. Native records retain the exact V1 process
+# identity/reap invariant. Containers carry actual common execution evidence;
+# neither branch fabricates a PID, signal, boot or tree-reap observation.
+use std.common.task_runner.contracts.TaskRunnerAttemptV1
+use std.common.task_runner.index.{task_runner_attempt_encode_v1, task_runner_attempt_decode_v1,
+    task_runner_storage_escape_v1, task_runner_storage_unescape_v1}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.contracts.container.execution_evidence_v2.{ContainerExecutionEvidenceV2,
+    container_execution_evidence_encode_v2, container_execution_evidence_decode_v2}
+
+struct TaskRunnerContainerAttemptV2:
+    identity_digest: text
+    group_id: text
+    attempt: i64
+    mode: text
+    status: text
+    reason: text
+    task_exit_code: i64
+    result_validated: bool
+    stdout_digest: text
+    stderr_digest: text
+    result_digest: text
+    execution: ContainerExecutionEvidenceV2
+
+enum TaskRunnerAttemptRecordV2:
+    Native(TaskRunnerAttemptV1)
+    Container(TaskRunnerContainerAttemptV2)
+
+fn task_runner_record_identity_v2(record: TaskRunnerAttemptRecordV2) -> text:
+    match record:
+        Native(row): row.identity_digest
+        Container(row): row.identity_digest
+
+fn task_runner_record_group_v2(record: TaskRunnerAttemptRecordV2) -> text:
+    match record:
+        Native(row): row.group_id
+        Container(row): row.group_id
+
+fn task_runner_record_attempt_v2(record: TaskRunnerAttemptRecordV2) -> i64:
+    match record:
+        Native(row): row.attempt
+        Container(row): row.attempt
+
+fn task_runner_record_status_v2(record: TaskRunnerAttemptRecordV2) -> text:
+    match record:
+        Native(row): row.status
+        Container(row): row.status
+
+fn task_runner_record_result_digest_v2(record: TaskRunnerAttemptRecordV2) -> text:
+    match record:
+        Native(row): row.result_digest
+        Container(row): row.result_digest
+
+fn task_runner_container_attempt_error_v2(row: TaskRunnerContainerAttemptV2) -> text:
+    if not builder_digest_valid_v1(row.identity_digest): return "invalid container attempt identity"
+    if row.group_id == "" or row.group_id.len() > 4096 or row.group_id.contains("\n") or row.group_id.contains("\r"):
+        return "invalid container attempt group"
+    if row.attempt < 1 or row.attempt > 8: return "container attempt bound exceeded"
+    if row.mode != "grouped" and row.mode != "isolated": return "invalid container execution mode"
+    if row.reason.len() > 128 or row.reason.contains("\n") or row.reason.contains("\r"):
+        return "invalid container attempt reason"
+    if row.task_exit_code < -4294967295 or row.task_exit_code > 4294967295:
+        return "invalid container task exit code"
+    for digest in [row.stdout_digest, row.stderr_digest]:
+        if not builder_digest_valid_v1(digest): return "invalid container attempt log digest"
+    if row.result_digest != "" and not builder_digest_valid_v1(row.result_digest):
+        return "invalid container attempt result digest"
+    match container_execution_evidence_encode_v2(row.execution):
+        case Err(reason): return reason
+        case Ok(_wire): pass
+    if row.execution.execution.attempt != row.attempt:
+        return "container execution attempt differs"
+    if row.status == "passed" or row.status == "failed":
+        if not row.result_validated or not builder_digest_valid_v1(row.result_digest):
+            return "container terminal task lacks validated evidence"
+        if row.status == "passed":
+            if row.execution.exit_code != 0 or row.task_exit_code != 0 or row.reason != "":
+                return "passing container task has failed result"
+        else:
+            if row.execution.exit_code == 0 or row.task_exit_code == 0:
+                return "failed container task lacks nonzero exit"
+            if row.reason != "compile" and row.reason != "assertion":
+                return "container failure lacks attributable reason"
+    elif row.status == "aborted":
+        if row.reason != "infrastructure" or row.result_validated:
+            return "container abort lacks infrastructure reason"
+    elif row.status == "crashed":
+        # Exit 139/137 is not typed signal/crash evidence. The common receipt
+        # currently records exit only, so no container crash can be asserted.
+        return "container crash lacks typed cause evidence"
+    else:
+        return "invalid container attempt status"
+    ""
+
+fn task_runner_record_encode_v2(record: TaskRunnerAttemptRecordV2) -> Result<text, text>:
+    match record:
+        Native(row): task_runner_attempt_encode_v1(row)
+        Container(row):
+            val invalid = task_runner_container_attempt_error_v2(row)
+            if invalid != "": return Err(invalid)
+            val execution = container_execution_evidence_encode_v2(row.execution)?
+            var fields: [text] = []
+            for field in [row.identity_digest, row.group_id, str(row.attempt), row.mode,
+                    row.status, row.reason, str(row.task_exit_code),
+                    if row.result_validated: "1" else: "0", row.stdout_digest,
+                    row.stderr_digest, row.result_digest, execution]:
+                fields.push(task_runner_storage_escape_v1(field))
+            val payload = "SIMPLE-TASK-CONTAINER-ATTEMPT-2\n" + fields.join("\n") + "\n"
+            if payload.byte_len() > 65536: return Err("container attempt exceeds wire bound")
+            # Snapshot group filtering can retain eight records that never
+            # coexisted in the global newest-eight projection. Bound each new
+            # container's fully escaped outer line before WAL publication.
+            # Native V1 bytes and historical native admission stay unchanged.
+            if task_runner_storage_escape_v1(payload).byte_len() + 32 > 16320:
+                return Err("container attempt exceeds projection row bound")
+            Ok(payload)
+
+fn task_runner_record_decode_v2(payload: text) -> Result<TaskRunnerAttemptRecordV2, text>:
+    if payload.byte_len() > 65536: return Err("attempt record exceeds wire bound")
+    if not payload.starts_with("SIMPLE-TASK-CONTAINER-ATTEMPT-2\n"):
+        return Ok(TaskRunnerAttemptRecordV2.Native(task_runner_attempt_decode_v1(payload)?))
+    val encoded = payload.split("\n")
+    if encoded.len() != 14 or encoded[13] != "": return Err("invalid container attempt framing")
+    var f: [text] = []
+    for i in 1..13:
+        val field = task_runner_storage_unescape_v1(encoded[i])
+        if task_runner_storage_escape_v1(field) != encoded[i]: return Err("noncanonical container attempt scalar")
+        f.push(field)
+    if f[7] != "0" and f[7] != "1": return Err("invalid container validation flag")
+    val attempt = f[2].to_int() ?? -1
+    val task_exit_code = f[6].to_int() ?? -9999999999
+    val execution = container_execution_evidence_decode_v2(f[11])?
+    val row = TaskRunnerContainerAttemptV2(identity_digest: f[0], group_id: f[1],
+        attempt: attempt, mode: f[3], status: f[4], reason: f[5], task_exit_code: task_exit_code,
+        result_validated: f[7] == "1", stdout_digest: f[8], stderr_digest: f[9],
+        result_digest: f[10], execution: execution)
+    val record = TaskRunnerAttemptRecordV2.Container(row)
+    if task_runner_record_encode_v2(record)? != payload: return Err("noncanonical container attempt")
+    Ok(record)
+
+export TaskRunnerContainerAttemptV2, TaskRunnerAttemptRecordV2
+export task_runner_record_identity_v2, task_runner_record_group_v2, task_runner_record_attempt_v2
+export task_runner_record_status_v2, task_runner_record_result_digest_v2
+export task_runner_container_attempt_error_v2, task_runner_record_encode_v2, task_runner_record_decode_v2

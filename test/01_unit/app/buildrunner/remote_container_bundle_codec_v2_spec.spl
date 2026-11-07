@@ -1,0 +1,276 @@
+use std.spec.{describe, it, expect}
+use app.buildrunner.remote_container_bundle_codec_v2.{remote_container_bundle_encode_v2,
+    remote_container_bundle_decode_v2}
+use app.buildrunner.remote_bundle_codec_v1.remote_bundle_blob_lines_v1
+use app.buildrunner.remote_container_evidence_v2.{RemoteContainerBundleV2, RemoteContainerBytesV2,
+    remote_container_execution_digest_v2}
+use app.buildrunner.remote_container_authority_v2.{RemoteContainerCompletionV2,
+    remote_container_completion_encode_v2}
+use app.buildrunner.remote_evidence_v1.RemoteOutputBytesV1
+use std.common.build_manager.contracts.{BuildInputV1, BuildResultV1}
+use std.common.build_manager.codec.{builder_encode_result_v1, builder_wire_line_v1}
+use std.common.contracts.container.execution_evidence_v2.{ContainerExecutionEvidenceV2,
+    ContainerExecutionUserReceiptV2, container_execution_evidence_encode_v2,
+    container_execution_user_receipt_encode_v2, container_runtime_query_digest_v2,
+    container_runtime_observation_digest_v2}
+use std.common.contracts.container.runtime_v1.{RuntimeCommandV1, RuntimeStateV1, RuntimeOperationV1}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use test.fixtures.task_runner.execution_identity_v2.container_execution_fixture_v2
+
+# Structural transport fixtures deliberately use invalid all-zero signatures.
+# No assertion here claims execution, absence provenance, signature or admission.
+fn container_bundle_user_fixture_v2(execution: ContainerExecutionEvidenceV2) -> ContainerExecutionUserReceiptV2:
+    val query = RuntimeCommandV1(operation: "selected-user", program: "podman",
+        args: ["inspect", "--format", r"{{.Config.User}}", execution.runtime.native_id])
+    val observation = RuntimeOperationV1(status: "ok", operation: "selected-user", command: query,
+        state: RuntimeStateV1(phase: "exited", identity: execution.runtime,
+            exit_code: execution.exit_code, reason: "synthetic-selected-user"),
+        exit_code: 0, stdout: "1000:1000\n", stderr: "", reason: "synthetic-selected-user")
+    ContainerExecutionUserReceiptV2(backend: execution.execution.backend, scope: execution.absence.scope,
+        identity: execution.runtime, request_digest: execution.execution.request_digest,
+        provider_identity_digest: execution.provider_identity_digest, selected_user: "1000:1000",
+        observed_unix_ms: 990, query_digest: container_runtime_query_digest_v2(query).unwrap(),
+        evidence_digest: container_runtime_observation_digest_v2(observation).unwrap(),
+        proof_kind: "exact-native-execution-user-v1")
+
+fn container_bundle_fixture_v2() -> RemoteContainerBundleV2:
+    val execution = container_execution_fixture_v2()
+    val output = RemoteOutputBytesV1("out/café%25.bin", [0u8, 255u8, 128u8, 10u8])
+    val stdout = [0u8, 255u8, 13u8]
+    val stderr = [128u8, 10u8]
+    val user = container_bundle_user_fixture_v2(execution)
+    val nonce = sha256_text("codec workspace nonce")
+    val probe = "SIMPLE-REMOTE-CONTAINER-WORKSPACE-PROBE-2\n" + sha256_text("fixture task") +
+        "\n" + nonce + "\nwrite-read-delete\n"
+    val probe_output = RemoteOutputBytesV1("remote-workspace/task_a.probe.sdn", probe.bytes())
+    val result = BuildResultV1(task_id: execution.execution.workload_uid,
+        attempt: execution.execution.attempt, identity_digest: sha256_text("fixture task"),
+        host_id: execution.execution.physical_host_id, status: "OK", exit_code: 0,
+        outputs: [BuildInputV1(output.path, sha256_u8_hex(output.content)),
+            BuildInputV1(probe_output.path, sha256_u8_hex(probe_output.content))],
+        cache_hits: -1, cache_misses: -1, cache_stores: -1)
+    val completion = RemoteContainerCompletionV2(version: 2, task_identity: result.identity_digest,
+        host_id: result.host_id, assignment_digest: sha256_text("fixture assignment"), controller_epoch: 1,
+        operation_id: execution.execution.operation_id, request_digest: sha256_text("fixture request"),
+        grant_digest: sha256_text("fixture grant"), result_digest: sha256_text(builder_encode_result_v1(result)),
+        execution_digest: remote_container_execution_digest_v2(execution, user, probe).unwrap(),
+        stdout_digest: sha256_u8_hex(stdout), stderr_digest: sha256_u8_hex(stderr),
+        output_inventory_digest: sha256_text("fixture inventory"), tests_digest: sha256_text(""),
+        signer_id: "host_signer", key_revision: 1, completed_at: 1000,
+        signature: [for i in 0..64: 0u8])
+    RemoteContainerBundleV2(result,
+        RemoteContainerBytesV2(execution, stdout, stderr, [output, probe_output], user, probe), completion)
+
+# Reframe arbitrary nested text bytes to exercise decoder checks independently
+# of the production encoder's validation of nested structures.
+fn container_bundle_reframe_v2(bundle: RemoteContainerBundleV2, result_bytes: [u8],
+        completion_bytes: [u8], execution_bytes: [u8], user_bytes: [u8], probe_bytes: [u8]) -> text:
+    var lines: [text] = [builder_wire_line_v1("SIMPLE_REMOTE_CONTAINER_BUNDLE_V2")]
+    for content in [result_bytes, completion_bytes, execution_bytes, user_bytes, probe_bytes,
+            bundle.evidence.stdout, bundle.evidence.stderr]:
+        for line in remote_bundle_blob_lines_v1(content): lines = lines.push(line)
+    lines = lines.push(builder_wire_line_v1(str(bundle.evidence.outputs.len())))
+    for output in bundle.evidence.outputs:
+        lines = lines.push(builder_wire_line_v1(output.path))
+        for line in remote_bundle_blob_lines_v1(output.content): lines = lines.push(line)
+    lines.join("")
+
+describe "Container completion bundle structural transport V2":
+    it "preserves actual common evidence binary bytes UTF-8 paths and V2 completion":
+        val bundle = container_bundle_fixture_v2()
+        val wire = remote_container_bundle_encode_v2(bundle).unwrap()
+        val decoded = remote_container_bundle_decode_v2(wire).unwrap()
+        expect(decoded.evidence.stdout).to_equal(bundle.evidence.stdout)
+        expect(decoded.evidence.stderr).to_equal(bundle.evidence.stderr)
+        expect(decoded.evidence.outputs[0].path).to_equal("out/café%25.bin")
+        expect(decoded.evidence.outputs[0].content).to_equal(bundle.evidence.outputs[0].content)
+        expect(decoded.result.outputs[0].digest).to_equal(bundle.result.outputs[0].digest)
+        expect(decoded.completion.signature).to_equal(bundle.completion.signature)
+        expect(decoded.completion.execution_digest).to_equal(bundle.completion.execution_digest)
+        expect(container_execution_evidence_encode_v2(decoded.evidence.execution).unwrap())
+            .to_equal(container_execution_evidence_encode_v2(bundle.evidence.execution).unwrap())
+        expect(decoded.evidence.execution.runtime.native_id).to_equal(bundle.evidence.execution.runtime.native_id)
+        expect(decoded.evidence.execution.absence.query_digest).to_equal(bundle.evidence.execution.absence.query_digest)
+        expect(container_execution_user_receipt_encode_v2(decoded.evidence.selected_user).unwrap())
+            .to_equal(container_execution_user_receipt_encode_v2(bundle.evidence.selected_user).unwrap())
+        expect(decoded.evidence.workspace_probe).to_equal(bundle.evidence.workspace_probe)
+        expect(decoded.evidence.outputs[1].content).to_equal(bundle.evidence.workspace_probe.bytes())
+        expect(remote_container_bundle_encode_v2(decoded).unwrap()).to_equal(wire)
+
+    it "advances the reader through different blobs and a 16384-byte chunk boundary":
+        var bundle = container_bundle_fixture_v2()
+        bundle.evidence.stdout = [for i in 0..16385: (i % 256) as u8]
+        val wire = remote_container_bundle_encode_v2(bundle).unwrap()
+        expect(wire.contains("\n16385\n2\n")).to_equal(true)
+        val decoded = remote_container_bundle_decode_v2(wire).unwrap()
+        expect(decoded.evidence.stdout).to_equal(bundle.evidence.stdout)
+        expect(decoded.evidence.stderr).to_equal(bundle.evidence.stderr)
+        expect(decoded.evidence.outputs[0].content).to_equal(bundle.evidence.outputs[0].content)
+
+    it "permits empty logs and output inventory without conferring result authority":
+        var bundle = container_bundle_fixture_v2()
+        bundle.evidence.stdout = []
+        bundle.evidence.stderr = []
+        bundle.evidence.outputs = []
+        val wire = remote_container_bundle_encode_v2(bundle).unwrap()
+        val decoded = remote_container_bundle_decode_v2(wire).unwrap()
+        expect(decoded.evidence.stdout.len()).to_equal(0)
+        expect(decoded.evidence.stderr.len()).to_equal(0)
+        expect(decoded.evidence.outputs.len()).to_equal(0)
+        expect(decoded.result.outputs.len()).to_equal(2)
+
+    it "retains user and workspace evidence for a failed result without publishing outputs":
+        var bundle = container_bundle_fixture_v2()
+        bundle.result.status = "ERROR"
+        bundle.result.exit_code = 1
+        bundle.result.outputs = []
+        bundle.evidence.execution = container_execution_fixture_v2(1)
+        bundle.evidence.outputs = []
+        bundle.completion.result_digest = sha256_text(builder_encode_result_v1(bundle.result))
+        bundle.completion.execution_digest = remote_container_execution_digest_v2(bundle.evidence.execution,
+            bundle.evidence.selected_user, bundle.evidence.workspace_probe).unwrap()
+        val wire = remote_container_bundle_encode_v2(bundle).unwrap()
+        val decoded = remote_container_bundle_decode_v2(wire).unwrap()
+        expect(decoded.result.outputs.len()).to_equal(0)
+        expect(decoded.evidence.outputs.len()).to_equal(0)
+        expect(decoded.evidence.workspace_probe).to_equal(bundle.evidence.workspace_probe)
+        expect(decoded.evidence.selected_user.selected_user).to_equal("1000:1000")
+        expect(decoded.completion.execution_digest).to_equal(bundle.completion.execution_digest)
+
+    it "preserves well-framed byte substitution for separate parent verification":
+        val bundle = container_bundle_fixture_v2()
+        val wire = remote_container_bundle_encode_v2(bundle).unwrap()
+        val changed = wire.replace("\n00ff0d\n", "\n00ff0e\n")
+        expect(changed == wire).to_equal(false)
+        val decoded = remote_container_bundle_decode_v2(changed).unwrap()
+        expect(decoded.evidence.stdout).to_equal([0u8, 255u8, 14u8])
+        expect(decoded.completion.stdout_digest).to_equal(bundle.completion.stdout_digest)
+        expect(sha256_u8_hex(decoded.evidence.stdout) == decoded.completion.stdout_digest).to_equal(false)
+
+    it "rejects native frame downgrade truncation missing termination and extra rows":
+        val frame = "SIMPLE_REMOTE_CONTAINER_BUNDLE_V2\n"
+        expect(remote_container_bundle_decode_v2("SIMPLE_REMOTE_COMPLETION_BUNDLE_V1\n").unwrap_err())
+            .to_equal("REMOTE_CONTAINER_BUNDLE_FRAME_INVALID")
+        expect(remote_container_bundle_decode_v2("SIMPLE_REMOTE_CONTAINER_BUNDLE_V2").unwrap_err())
+            .to_equal("REMOTE_CONTAINER_BUNDLE_WIRE_INVALID")
+        expect(remote_container_bundle_decode_v2(frame + "1\n1\n").unwrap_err())
+            .to_equal("REMOTE_BUNDLE_BLOB_INVALID")
+        val wire = remote_container_bundle_encode_v2(container_bundle_fixture_v2()).unwrap()
+        expect(remote_container_bundle_decode_v2(wire + "extra\n").unwrap_err())
+            .to_equal("REMOTE_CONTAINER_BUNDLE_WIRE_INVALID")
+
+    it "rejects noncanonical lengths counts chunk lengths hex casing and escaping":
+        val frame = "SIMPLE_REMOTE_CONTAINER_BUNDLE_V2\n"
+        expect(remote_container_bundle_decode_v2(frame + "00\n0\n").unwrap_err())
+            .to_equal("REMOTE_BUNDLE_BLOB_INVALID")
+        expect(remote_container_bundle_decode_v2(frame + "0\n1\n00\n").unwrap_err())
+            .to_equal("REMOTE_BUNDLE_CHUNK_COUNT_INVALID")
+        expect(remote_container_bundle_decode_v2(frame + "2\n1\n00\n").unwrap_err())
+            .to_equal("REMOTE_BUNDLE_CHUNK_SIZE_INVALID")
+        expect(remote_container_bundle_decode_v2(frame + "1\n1\nFF\n").unwrap_err())
+            .to_equal("REMOTE_BUNDLE_HEX_INVALID")
+        expect(remote_container_bundle_decode_v2(frame + "1\n1\n%30%30\n").unwrap_err())
+            .to_equal("REMOTE_BUNDLE_CHUNK_SIZE_INVALID")
+
+    it "rejects unsafe duplicate and excessive output inventory on encode and decode":
+        val valid = container_bundle_fixture_v2()
+        var traversal = valid
+        traversal.evidence.outputs[0].path = "../outside"
+        expect(remote_container_bundle_encode_v2(traversal).unwrap_err())
+            .to_equal("REMOTE_CONTAINER_BUNDLE_OUTPUT_PATH_INVALID")
+        var duplicate = valid
+        duplicate.evidence.outputs = [valid.evidence.outputs[0], valid.evidence.outputs[0]]
+        expect(remote_container_bundle_encode_v2(duplicate).unwrap_err())
+            .to_equal("REMOTE_CONTAINER_BUNDLE_OUTPUT_PATH_INVALID")
+        var excessive = valid
+        excessive.evidence.outputs = [for i in 0..4097: RemoteOutputBytesV1("out/item_" + str(i), [])]
+        expect(remote_container_bundle_encode_v2(excessive).unwrap_err())
+            .to_equal("REMOTE_CONTAINER_BUNDLE_OUTPUT_COUNT_INVALID")
+        val wire = remote_container_bundle_encode_v2(valid).unwrap()
+        expect(remote_container_bundle_decode_v2(wire.replace("out/café%2525.bin\n", "../outside\n")).unwrap_err())
+            .to_equal("REMOTE_CONTAINER_BUNDLE_OUTPUT_PATH_INVALID")
+        val first_output = "out/café%2525.bin\n4\n1\n00ff800a\n"
+        val probe_lines = remote_bundle_blob_lines_v1(valid.evidence.outputs[1].content)
+        val probe_tail = builder_wire_line_v1(valid.evidence.outputs[1].path) + probe_lines.join("")
+        val tail = "\n2\n" + first_output + probe_tail
+        expect(wire.contains(tail)).to_equal(true)
+        val duplicated = "\n3\n" + first_output + first_output + probe_tail
+        expect(remote_container_bundle_decode_v2(wire.replace(tail, duplicated)).unwrap_err())
+            .to_equal("REMOTE_CONTAINER_BUNDLE_OUTPUT_PATH_INVALID")
+        expect(remote_container_bundle_decode_v2(wire.replace(tail, "\n4097\n")).unwrap_err())
+            .to_equal("REMOTE_CONTAINER_BUNDLE_OUTPUT_COUNT_INVALID")
+
+    it "enforces wire raw-byte and cumulative metadata log budgets":
+        val frame = "SIMPLE_REMOTE_CONTAINER_BUNDLE_V2\n"
+        expect(remote_container_bundle_decode_v2("x".repeat(16777217)).unwrap_err())
+            .to_equal("REMOTE_CONTAINER_BUNDLE_WIRE_TOO_LARGE")
+        expect(remote_container_bundle_decode_v2(frame + "4194305\n257\n").unwrap_err())
+            .to_equal("REMOTE_BUNDLE_BLOB_INVALID")
+        var large = container_bundle_fixture_v2()
+        large.evidence.stdout = [for i in 0..4194305: 0u8]
+        expect(remote_container_bundle_encode_v2(large).unwrap_err())
+            .to_equal("REMOTE_CONTAINER_BUNDLE_BYTES_EXCEEDED")
+        var combined = container_bundle_fixture_v2()
+        val half: [u8] = [for i in 0..2097152: 0u8]
+        combined.evidence.stdout = half
+        combined.evidence.stderr = half
+        expect(remote_container_bundle_encode_v2(combined).unwrap_err())
+            .to_equal("REMOTE_CONTAINER_BUNDLE_BYTES_EXCEEDED")
+        val bundle = container_bundle_fixture_v2()
+        val result = builder_encode_result_v1(bundle.result).bytes()
+        val completion = remote_container_completion_encode_v2(bundle.completion).unwrap()
+        val execution = container_execution_evidence_encode_v2(bundle.evidence.execution).unwrap()
+        val user = container_execution_user_receipt_encode_v2(bundle.evidence.selected_user).unwrap()
+        val probe = bundle.evidence.workspace_probe
+        var prefix = frame
+        for content in [result, completion.bytes(), execution.bytes(), user.bytes(), probe.bytes()]:
+            for line in remote_bundle_blob_lines_v1(content): prefix = prefix + line
+        val individually_bounded = (4194304 - result.len() - completion.byte_len() - execution.byte_len() -
+            user.byte_len() - probe.byte_len() + 1)
+        expect(individually_bounded < 4194304).to_equal(true)
+        val count = (individually_bounded + 16383) / 16384
+        # Empty stdout, then a stderr declaration within the individual limit
+        # but one byte over the remaining budget; no giant body is required.
+        val oversubscribed = prefix + "0\n0\n" + str(individually_bounded) + "\n" + str(count) + "\n"
+        expect(remote_container_bundle_decode_v2(oversubscribed).unwrap_err())
+            .to_equal("REMOTE_BUNDLE_BLOB_INVALID")
+
+    it "validates nested result completion execution wire and UTF-8 after raw reassembly":
+        val bundle = container_bundle_fixture_v2()
+        val result = builder_encode_result_v1(bundle.result)
+        val completion = remote_container_completion_encode_v2(bundle.completion).unwrap()
+        val execution = container_execution_evidence_encode_v2(bundle.evidence.execution).unwrap()
+        val user = container_execution_user_receipt_encode_v2(bundle.evidence.selected_user).unwrap()
+        val probe = bundle.evidence.workspace_probe.bytes()
+        val valid = container_bundle_reframe_v2(bundle, result.bytes(), completion.bytes(), execution.bytes(), user.bytes(), probe)
+        expect(valid).to_equal(remote_container_bundle_encode_v2(bundle).unwrap())
+        val invalid_result = container_bundle_reframe_v2(bundle, (result + "extra\n").bytes(),
+            completion.bytes(), execution.bytes(), user.bytes(), probe)
+        expect(remote_container_bundle_decode_v2(invalid_result).is_err()).to_equal(true)
+        val native_completion = completion.replace("SIMPLE_REMOTE_CONTAINER_COMPLETION_ENVELOPE_V2",
+            "SIMPLE_REMOTE_COMPLETION_ENVELOPE_V1")
+        val invalid_completion = container_bundle_reframe_v2(bundle, result.bytes(),
+            native_completion.bytes(), execution.bytes(), user.bytes(), probe)
+        expect(remote_container_bundle_decode_v2(invalid_completion).unwrap_err())
+            .to_equal("CONTAINER_COMPLETION_WIRE_VERSION_INVALID")
+        val replaced_absence = execution.replace("exact-native-object-absence-v1", "destroy-command-returned")
+        expect(replaced_absence == execution).to_equal(false)
+        val invalid_execution = container_bundle_reframe_v2(bundle, result.bytes(),
+            completion.bytes(), replaced_absence.bytes(), user.bytes(), probe)
+        expect(remote_container_bundle_decode_v2(invalid_execution).unwrap_err())
+            .to_equal("container-evidence-absence-proof-invalid")
+        val bad_utf8 = container_bundle_reframe_v2(bundle, result.bytes(), completion.bytes(), [255u8], user.bytes(), probe)
+        expect(remote_container_bundle_decode_v2(bad_utf8).is_err()).to_equal(true)
+        val bad_user = container_bundle_reframe_v2(bundle, result.bytes(), completion.bytes(), execution.bytes(),
+            user.replace("exact-native-execution-user-v1", "configured-user-assertion").bytes(), probe)
+        expect(remote_container_bundle_decode_v2(bad_user).unwrap_err()).to_equal("container-evidence-user-proof-invalid")
+        val bad_probe_utf8 = container_bundle_reframe_v2(bundle, result.bytes(), completion.bytes(), execution.bytes(),
+            user.bytes(), [255u8])
+        expect(remote_container_bundle_decode_v2(bad_probe_utf8).is_err()).to_equal(true)
+        # Old V2 frames omitted mandatory user/probe fields; never infer them
+        # from execution, logs, signatures, or task defaults during decoding.
+        var old_schema = "SIMPLE_REMOTE_CONTAINER_BUNDLE_V2\n"
+        for content in [result.bytes(), completion.bytes(), execution.bytes(),
+                bundle.evidence.stdout, bundle.evidence.stderr]:
+            for line in remote_bundle_blob_lines_v1(content): old_schema = old_schema + line
+        expect(remote_container_bundle_decode_v2(old_schema + "0\n").is_err()).to_equal(true)

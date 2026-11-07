@@ -1,0 +1,216 @@
+# V2 observation: scope carries native/service continuity truth. runtimeFenceId
+# is an internal opaque scope hash, NEVER a native boot attestation.
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.string_core.str_len
+use std.common.crypto.sha256.sha256_text
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_exists, file_fsync, directory_fsync}
+use std.nogc_sync_mut.io_runtime.dir_create
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_scope_fence_id_v2}
+
+pub struct HostExecutionObservationV2:
+    scope: ContainerHostScopeV2
+    operation_id: text
+    operation_digest: text
+    plan_digest: text
+    request_digest: text
+    grant_id: text
+    principal: text
+    issuer_id: text
+    approver_id: text
+    provider_identity_digest: text
+    observed_unix_ms: i64
+    observed_monotonic_ms: i64
+    phase: text
+    create_status: text
+    start_status: text
+    inspect_status: text
+    reason: text
+    runtime: RuntimeIdentityV1
+
+fn host_observation_text_valid_v2(value: text) -> bool:
+    str_len(value) <= 4096 and not value.contains("\0") and not value.contains("\r") and not value.contains("\n")
+
+fn host_observation_valid_v2(value: HostExecutionObservationV2) -> bool:
+    val fence = container_scope_fence_id_v2(value.scope)
+    if fence.is_err(): return false
+    if value.runtime.node_boot_id != fence.unwrap() or value.runtime.provider_generation != value.scope.provider_generation: return false
+    for digest in [value.operation_digest, value.plan_digest, value.request_digest, value.provider_identity_digest]:
+        if str_len(digest) != 64 or not builder_digest_valid_v1(digest): return false
+    for identity in [value.operation_id, value.grant_id, value.principal, value.issuer_id, value.approver_id]:
+        if not builder_identifier_valid_v1(identity): return false
+    for text_value in [value.runtime.pod_uid, value.runtime.native_id, value.runtime.node_boot_id, value.reason]:
+        if not host_observation_text_valid_v2(text_value): return false
+    if value.runtime.native_id != "" and (str_len(value.runtime.native_id) != 64 or not builder_digest_valid_v1(value.runtime.native_id)): return false
+    if value.observed_unix_ms <= 0 or value.observed_monotonic_ms < 0 or value.runtime.attempt <= 0 or value.runtime.provider_generation <= 0:
+        return false
+    if (value.runtime.operation_id != value.operation_id or not ["podman", "docker"].contains(value.runtime.engine) or
+            value.runtime.pod_uid == "" or value.runtime.node_boot_id == ""): return false
+    if not ["prepared", "created", "running", "exited", "stopped", "destroyed", "unknown"].contains(value.phase): return false
+    if value.runtime.native_id == "" and value.phase != "prepared" and value.phase != "unknown": return false
+    for status in [value.create_status, value.start_status, value.inspect_status]:
+        if not ["not-attempted", "ok", "rejected", "blocked"].contains(status): return false
+    true
+
+fn host_observation_scope_value_v2(scope: ContainerHostScopeV2) -> SdnValue:
+    val fields: Dict<text, SdnValue> = {"physicalHostId": SdnValue.String(scope.physical_host_id),
+        "serviceScopeId": SdnValue.String(scope.service_scope_id), "nativeMachineId": SdnValue.String(scope.native_machine_id),
+        "bootId": SdnValue.String(scope.boot_id), "providerGeneration": SdnValue.Int(scope.provider_generation),
+        "continuityMode": SdnValue.String(scope.continuity_mode), "continuityId": SdnValue.String(scope.continuity_id)}
+    SdnValue.Dict(fields)
+
+fn host_observation_scope_decode_v2(value: SdnValue) -> Result<ContainerHostScopeV2, text>:
+    val fields = match value:
+        case SdnValue.Dict(items): items
+        case _: return Err("host-observation-scope-required")
+    val names = ["physicalHostId", "serviceScopeId", "nativeMachineId", "bootId", "providerGeneration", "continuityMode", "continuityId"]
+    for name in fields.keys():
+        if not names.contains(name): return Err("host-observation-scope-unknown-field:" + name)
+    for name in names:
+        if not fields.contains_key(name): return Err("host-observation-scope-missing-field:" + name)
+    val scope = ContainerHostScopeV2(physical_host_id: host_observation_text_v2(fields, "physicalHostId")?,
+        service_scope_id: host_observation_text_v2(fields, "serviceScopeId")?, native_machine_id: host_observation_text_v2(fields, "nativeMachineId")?,
+        boot_id: host_observation_text_v2(fields, "bootId")?, provider_generation: host_observation_int_v2(fields, "providerGeneration")?,
+        continuity_mode: host_observation_text_v2(fields, "continuityMode")?, continuity_id: host_observation_text_v2(fields, "continuityId")?)
+    val fence = container_scope_fence_id_v2(scope)?
+    Ok(scope)
+
+pub fn host_execution_observation_encode_v2(value: HostExecutionObservationV2) -> Result<text, text>:
+    if not host_observation_valid_v2(value): return Err("host-observation-invalid")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("host-execution-observation"),
+        "scope": host_observation_scope_value_v2(value.scope),
+        "operationId": SdnValue.String(value.operation_id),
+        "operationDigest": SdnValue.String(value.operation_digest),
+        "planDigest": SdnValue.String(value.plan_digest),
+        "requestDigest": SdnValue.String(value.request_digest),
+        "grantId": SdnValue.String(value.grant_id),
+        "principal": SdnValue.String(value.principal),
+        "issuerId": SdnValue.String(value.issuer_id),
+        "approverId": SdnValue.String(value.approver_id),
+        "providerIdentityDigest": SdnValue.String(value.provider_identity_digest),
+        "observedUnixMs": SdnValue.Int(value.observed_unix_ms),
+        "observedMonotonicMs": SdnValue.Int(value.observed_monotonic_ms),
+        "phase": SdnValue.String(value.phase),
+        "createStatus": SdnValue.String(value.create_status),
+        "startStatus": SdnValue.String(value.start_status),
+        "inspectStatus": SdnValue.String(value.inspect_status),
+        "reason": SdnValue.String(value.reason),
+        "runtimePodUid": SdnValue.String(value.runtime.pod_uid),
+        "runtimeAttempt": SdnValue.Int(value.runtime.attempt),
+        "runtimeProviderGeneration": SdnValue.Int(value.runtime.provider_generation),
+        "runtimeOperationId": SdnValue.String(value.runtime.operation_id),
+        "runtimeEngine": SdnValue.String(value.runtime.engine),
+        "runtimeNativeId": SdnValue.String(value.runtime.native_id),
+        "runtimeFenceId": SdnValue.String(value.runtime.node_boot_id)}
+    val bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(bytes) > 65536: return Err("host-observation-size")
+    Ok(bytes)
+
+fn host_observation_text_v2(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("host-observation-field-type:" + name)
+
+fn host_observation_int_v2(fields: Dict<text, SdnValue>, name: text) -> Result<i64, text>:
+    match fields[name]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("host-observation-field-type:" + name)
+
+pub fn host_execution_observation_decode_v2(source: text) -> Result<HostExecutionObservationV2, text>:
+    if str_len(source) == 0 or str_len(source) > 65536: return Err("host-observation-size")
+    val limits = SdnStrictLimitsV1(max_source_bytes: 65536, max_depth: 3, max_nodes: 128,
+        max_rows: 0, max_cells: 0, max_columns: 32)
+    val document = match sdn_parse_strict_v1(source, limits):
+        case Ok(value): value
+        case Err(issue): return Err("host-observation-syntax:" + issue.code)
+    val fields = match document.value:
+        case SdnValue.Dict(items): items
+        case _: return Err("host-observation-object-required")
+    val names = ["version", "kind", "scope", "operationId", "operationDigest", "planDigest", "requestDigest", "grantId", "principal", "issuerId", "approverId", "providerIdentityDigest", "observedUnixMs", "observedMonotonicMs", "phase", "createStatus", "startStatus", "inspectStatus", "reason", "runtimePodUid", "runtimeAttempt", "runtimeProviderGeneration", "runtimeOperationId", "runtimeEngine", "runtimeNativeId", "runtimeFenceId"]
+    for name in fields.keys():
+        if not names.contains(name): return Err("host-observation-unknown-field:" + name)
+    for name in names:
+        if not fields.contains_key(name): return Err("host-observation-missing-field:" + name)
+    if host_observation_int_v2(fields, "version")? != 2 or host_observation_text_v2(fields, "kind")? != "host-execution-observation":
+        return Err("host-observation-version")
+    val runtime = RuntimeIdentityV1(
+        pod_uid: host_observation_text_v2(fields, "runtimePodUid")?,
+        attempt: host_observation_int_v2(fields, "runtimeAttempt")?,
+        provider_generation: host_observation_int_v2(fields, "runtimeProviderGeneration")?,
+        operation_id: host_observation_text_v2(fields, "runtimeOperationId")?,
+        engine: host_observation_text_v2(fields, "runtimeEngine")?,
+        native_id: host_observation_text_v2(fields, "runtimeNativeId")?,
+        node_boot_id: host_observation_text_v2(fields, "runtimeFenceId")?)
+    val scope = host_observation_scope_decode_v2(fields["scope"])?
+    val value = HostExecutionObservationV2(scope: scope,
+        operation_id: host_observation_text_v2(fields, "operationId")?,
+        operation_digest: host_observation_text_v2(fields, "operationDigest")?,
+        plan_digest: host_observation_text_v2(fields, "planDigest")?,
+        request_digest: host_observation_text_v2(fields, "requestDigest")?,
+        grant_id: host_observation_text_v2(fields, "grantId")?,
+        principal: host_observation_text_v2(fields, "principal")?,
+        issuer_id: host_observation_text_v2(fields, "issuerId")?,
+        approver_id: host_observation_text_v2(fields, "approverId")?,
+        provider_identity_digest: host_observation_text_v2(fields, "providerIdentityDigest")?,
+        observed_unix_ms: host_observation_int_v2(fields, "observedUnixMs")?,
+        observed_monotonic_ms: host_observation_int_v2(fields, "observedMonotonicMs")?,
+        phase: host_observation_text_v2(fields, "phase")?,
+        create_status: host_observation_text_v2(fields, "createStatus")?,
+        start_status: host_observation_text_v2(fields, "startStatus")?,
+        inspect_status: host_observation_text_v2(fields, "inspectStatus")?,
+        reason: host_observation_text_v2(fields, "reason")?, runtime: runtime)
+    if host_execution_observation_encode_v2(value)? != source: return Err("host-observation-noncanonical")
+    Ok(value)
+
+pub fn host_execution_observation_load_v2(root: text, operation_id: text) -> Result<HostExecutionObservationV2, text>:
+    if not builder_identifier_valid_v1(operation_id): return Err("host-observation-operation-invalid")
+    val bytes = file_read_regular_no_follow_bounded(root + "/host-execution-observations-v2/" + sha256_text(operation_id) + ".sdn", 65536)?
+    val value = host_execution_observation_decode_v2(bytes)?
+    if value.operation_id != operation_id: return Err("host-observation-operation-mismatch")
+    Ok(value)
+
+pub fn host_execution_observation_store_v2(root: text, value: HostExecutionObservationV2) -> Result<text, text>:
+    val bytes = host_execution_observation_encode_v2(value)?
+    val directory = root + "/host-execution-observations-v2"
+    if not file_exists(directory) and not dir_create(directory, true): return Err("host-observation-directory-unavailable")
+    val path = directory + "/" + sha256_text(value.operation_id) + ".sdn"
+    if file_exists(path):
+        if file_read_regular_no_follow_bounded(path, 65536)? != bytes: return Err("host-observation-retained-mismatch")
+    elif not file_atomic_write_mode(path, bytes, 0o600): return Err("host-observation-publication-failed")
+    val retained = host_execution_observation_load_v2(root, value.operation_id)?
+    if host_execution_observation_encode_v2(retained)? != bytes: return Err("host-observation-readback-mismatch")
+    if not file_fsync(path) or not directory_fsync(directory) or not directory_fsync(root): return Err("host-observation-sync-failed")
+    Ok(path)
+
+# Inspection is a bounded latest-cache projection. The initial execution result
+# remains immutable and authoritative for all correlation/native identity fields.
+pub fn host_execution_inspection_store_v2(root: text, value: HostExecutionObservationV2) -> Result<text, text>:
+    val original = host_execution_observation_load_v2(root, value.operation_id)?
+    val bytes = host_execution_observation_encode_v2(value)?
+    var correlation = value
+    correlation.phase = original.phase
+    correlation.inspect_status = original.inspect_status
+    correlation.reason = original.reason
+    correlation.observed_unix_ms = original.observed_unix_ms
+    correlation.observed_monotonic_ms = original.observed_monotonic_ms
+    if host_execution_observation_encode_v2(correlation)? != host_execution_observation_encode_v2(original)?:
+        return Err("host-inspection-correlation-mismatch")
+    if value.observed_unix_ms < original.observed_unix_ms or value.observed_monotonic_ms < original.observed_monotonic_ms:
+        return Err("host-inspection-clock-regressed")
+    val directory = root + "/host-execution-inspections-v2"
+    if not file_exists(directory) and not dir_create(directory, true): return Err("host-inspection-directory-unavailable")
+    val path = directory + "/" + sha256_text(value.operation_id) + ".sdn"
+    if file_exists(path):
+        val previous = host_execution_observation_decode_v2(file_read_regular_no_follow_bounded(path, 65536)?)?
+        if value.observed_unix_ms < previous.observed_unix_ms or value.observed_monotonic_ms < previous.observed_monotonic_ms:
+            return Err("host-inspection-clock-regressed")
+    if not file_atomic_write_mode(path, bytes, 0o600): return Err("host-inspection-publication-failed")
+    if file_read_regular_no_follow_bounded(path, 65536)? != bytes: return Err("host-inspection-readback-mismatch")
+    if not file_fsync(path) or not directory_fsync(directory) or not directory_fsync(root): return Err("host-inspection-sync-failed")
+    Ok(path)

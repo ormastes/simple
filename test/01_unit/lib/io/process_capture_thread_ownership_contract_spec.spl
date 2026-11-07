@@ -1,0 +1,44 @@
+use std.spec
+use std.nogc_sync_mut.io.file_ops.file_read
+
+# Source wiring evidence only; the pthread C selfcheck is the native witness.
+describe "synchronous capture thread ownership source contract":
+    it "keeps capture descriptors and retained results with one calling thread":
+        val context = file_read("src/runtime/runtime_fork_capture_context_private.h")
+        val fork_owner = file_read("src/runtime/runtime_fork.c")
+        expect(context).to_contain("static _Thread_local ForkCaptureContextV1*")
+        expect(context).to_contain("pthread_key_create")
+        expect(context).to_contain("fork_capture_context_destroy_v1")
+        expect(context.contains("pthread_mutex_lock")).to_equal(false)
+        expect(fork_owner).to_contain("context->active_child != child_pid")
+        expect(fork_owner.contains("static int s_stdout_read_fd")).to_equal(false)
+
+    it "releases copied output while retaining the scalar resource receipt":
+        val process_owner = file_read("src/runtime/runtime_process.c")
+        val context = file_read("src/runtime/runtime_fork_capture_context_private.h")
+        expect(process_owner).to_contain("SplArray* copied_result = process_capture_result")
+        expect(process_owner).to_contain("simple_fork_parent_capture_release_v1();")
+        expect(context).to_contain("fork_capture_clear_output_v1(fork_capture_current_v1)")
+        expect(context).to_contain("rt_fork_parent_peak_rss_bytes")
+
+    it "authors actual interleaved ordinary and admitted pthread captures":
+        val witness = file_read("src/runtime/test/process_capture_admission_concurrency_selfcheck.c")
+        expect(witness).to_contain("pthread_create(&threads[0]")
+        expect(witness).to_contain("pthread_create(&threads[1]")
+        expect(witness).to_contain("test->other->pid")
+        expect(witness).to_contain("rt_process_run_bounded_admitted_tuple_v1")
+        expect(witness).to_contain("rt_process_run_bounded(test->executable")
+        expect(witness).to_contain("actual status-pipe/pre-exec rejection")
+
+    it "closes unrelated writers before a captured child can wait before exec":
+        val descriptors = file_read("src/runtime/runtime_fork_capture_fd_private.h")
+        val process_owner = file_read("src/runtime/runtime_process.c")
+        val overlap = file_read("src/runtime/test/process_capture_cloexec_overlap_private.h")
+        expect(descriptors).to_contain("pipe2(fds, O_CLOEXEC)")
+        expect(descriptors).to_contain("dup3(status_fd, 3, O_CLOEXEC)")
+        expect(descriptors).to_contain("syscall(SYS_close_range, 4U, ~0U, 0U)")
+        expect(process_owner).to_contain("simple_fork_child_setup_capture_v2")
+        expect(overlap).to_contain("test->b_alive_after_a = waitpid")
+        expect(overlap).to_contain("AFTER the production captured-child whitelist")
+        expect(descriptors).to_contain("pthread_mutex_trylock")
+        expect(overlap).to_contain("test->b_rejected_overlap = rejected == -1")

@@ -28,3 +28,5 @@ service and settlement consumers remain ongoing work, not a completion claim.
 The added scenario in `host_signed_prepare_spec.spl` exercises both prepared and
 executing rows across changed fences, writer reopen and exact charge checks.
 It is authored **NOT_RUN**; no compiler/runtime qualification is claimed.
+
+Historical released allocations may sum above the physical ceiling. Quarantined open now validates their row/identity shape without requiring the uncertain total to fit, so actual reconciliation remains reachable. Every returned row stays charged and continuity stays false; querying availability returns capacity-exceeded until proven no-effect history is released. No over-capacity admission is enabled. The authored three-generation prepare/expiry/reopen regression is NOT_RUN.

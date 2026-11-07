@@ -1,0 +1,69 @@
+# Actual shared API refusal and scoped command contracts, not Windows execution.
+# @req REQ-WDP-001 REQ-WDP-004 REQ-WDP-006
+# SPipe/native Windows qualification NOT_RUN.
+use std.spec.*
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_scope_fence_id_v2}
+use std.nogc_async_mut.container.api_v2.{simple_container_observe_v2, simple_container_open_v2}
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{WindowsDockerPolicyV1, WindowsDockerRequestV1}
+use std.nogc_async_mut.container.providers.windows.docker_policy_codec_v1.{windows_docker_policy_encode_v1, windows_docker_policy_decode_v1}
+use std.nogc_async_mut.container.providers.windows.docker_scope_v2.windows_docker_scoped_create_v2
+
+fn api_policy() -> WindowsDockerPolicyV1:
+    WindowsDockerPolicyV1(docker_executable: "C:\\Program Files\\Docker\\docker.exe",
+        endpoint: "npipe:////./pipe/docker_engine", engine_id: "engine-a", node_boot_id: "policy-fence",
+        provider_generation: 4, expected_kernel_version: "selected-host-kernel", image_os_version: "selected-image-version",
+        expected_image_id: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        timeout_ms: 5000, max_output_bytes: 8192, system_root: "C:\\Windows", temp_directory: "C:\\Temp")
+
+fn api_scope() -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: "worker-alias", service_scope_id: "service-a", boot_id: "",
+        provider_generation: 4, native_machine_id: "windows-machine-guid-v1:12345678-9abc-4def-8012-3456789abcde",
+        continuity_mode: "service-incarnation-v1",
+        continuity_id: "windows-service-incarnation-v1:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
+
+describe "Windows through the shared Simple Container API":
+    it "rejects an unknown backend at the public API boundary":
+        step("Call the common observer without selecting a Windows-specific app path")
+        match simple_container_observe_v2("windows-hyperv", "policy"):
+            case Ok(_): fail("unsupported backend accepted")
+            case Err(reason): expect(reason).to_equal("container-api-backend-unsupported")
+
+    it "routes Windows policy parsing through the common observer":
+        step("Reject malformed canonical Windows policy before any native host call")
+        match simple_container_observe_v2("windows-docker-process", "not a policy"):
+            case Ok(_): fail("malformed Windows policy accepted")
+            case Err(reason): expect(reason).to_start_with("docker-policy-record-invalid:")
+
+    it "does not open service continuity through the finite strong-boot factory":
+        step("Require the persistent service owner instead of treating copied scope bytes as authority")
+        val policy = windows_docker_policy_encode_v1(api_policy()).unwrap()
+        match simple_container_open_v2("windows-docker-process", policy, "C:\\Simple\\state", api_scope(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 5000):
+            case Ok(_): fail("finite factory accepted service incarnation without live persistent owner")
+            case Err(reason): expect(reason).to_equal("container-api-continuity-unproven")
+
+    it "keeps policy decoding strict and separate from request scope":
+        val original = windows_docker_policy_encode_v1(api_policy()).unwrap()
+        val decoded = windows_docker_policy_decode_v1(original).unwrap()
+        expect(decoded.docker_executable).to_equal(api_policy().docker_executable)
+        for invalid in [original.replace("version: 1", "version: 1, version: 1"),
+                original.replace("version: 1", "version: 1, callerTrusted: true"),
+                original.replace("timeoutMs: 5000", "timeoutMs: true"), original + "\n"]:
+            expect(windows_docker_policy_decode_v1(invalid).is_err()).to_equal(true)
+
+    it "labels the real empty native boot separately from the internal scope fence":
+        step("Bind physical host, service and actual service incarnation without inventing a native boot ID")
+        val scope = api_scope()
+        var policy = api_policy()
+        policy.node_boot_id = container_scope_fence_id_v2(scope).unwrap()
+        val request = WindowsDockerRequestV1(pod_uid: "workload-a", attempt: 2, operation_id: "operation-a",
+            image: "mcr.microsoft.com/windows/servercore@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            command: ["C:\\work\\fixture.exe"], args: ["17"], cpu_count: 2, memory_limit_bytes: 536870912, network: "none")
+        val command = windows_docker_scoped_create_v2(policy, request, scope).unwrap()
+        expect(command.args.contains("simple.boot=")).to_equal(true)
+        expect(command.args.contains("simple.fence=" + policy.node_boot_id)).to_equal(true)
+        expect(command.args.contains("simple.service-incarnation=" + scope.continuity_id)).to_equal(true)
+        expect(command.args.contains("simple.continuity-mode=service-incarnation-v1")).to_equal(true)
+        expect(command.args.contains("simple.physical-host=worker-alias")).to_equal(true)
+        expect(command.args.contains("simple.service-scope=service-a")).to_equal(true)
+        expect(command.args.contains("simple.boot=" + scope.continuity_id)).to_equal(false)

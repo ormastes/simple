@@ -1325,6 +1325,18 @@ char* rt_windows_build_command_line(const char* cmd, const char** args, int64_t 
  * Descriptors above stderr are closed; this API has no extra-fd handoff.
  * Other platforms retain their existing descriptor inheritance policy. */
 int64_t  rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_count);
+/* Admission-bounded synchronous capture. mode1=exact Windows child env;
+ * mode2=trusted inherited env (never an implicit empty Linux environment).
+ * Borrowed per-thread four-word receipt; flags extend the ordinary capture
+ * bits with32=confirmed expiry before workload entry,64=other confirmed
+ * pre-entry provider rejection. Postfork uncertainty carries neither bit. */
+int64_t* rt_process_run_bounded_admitted_tuple_v1(const char* cmd,uint64_t cmd_len,
+    SplArray* args,SplArray* environment,int64_t mode,int64_t timeout_ms,
+    int64_t max_output_bytes,int64_t expires_at_unix_ms);
+/* Ordinary bounded inherited-environment capture with authoritative limit
+ * flags. No deadline policy and no ProcessOwnedV4 lifetime assertion. */
+int64_t* rt_process_run_bounded_observed_tuple_v1(const char* cmd,uint64_t cmd_len,
+    SplArray* args,int64_t timeout_ms,int64_t max_output_bytes);
 #ifdef _WIN32
 /* Core-C PID/handle ownership shared with rt_process_wait. */
 int64_t  rt_process_spawn_async_owned_windows(const char* cmd, const char** args, int64_t arg_count);

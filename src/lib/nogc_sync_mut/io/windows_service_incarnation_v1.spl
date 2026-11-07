@@ -1,0 +1,73 @@
+# Native entropy for one persistent Windows service lifetime. The owner obtains
+# this once per service start and holds the lifetime/scope authority separately.
+# This random label is NOT an OS boot ID; copied text carries no authority.
+use std.common.string_core.{char_from_code_inline}
+
+pub val WINDOWS_SERVICE_INCARNATION_PREFIX_V1 = "windows-service-incarnation-v1:"
+
+# Deterministic formatting seam, never an entropy source or proof of ownership.
+# Reject the zero sentinel in addition to malformed byte count, without retry.
+pub fn windows_service_incarnation_nonce_encode_v1(bytes: [u8]) -> Result<text, text>:
+    if bytes.len() != 32: return Err("Windows service incarnation requires exactly 32 bytes")
+    var nonzero = false
+    var hexadecimal = ""
+    for byte in bytes:
+        val scalar = byte as i64
+        if scalar != 0: nonzero = true
+        val high = scalar >> 4
+        val low = scalar & 15
+        hexadecimal = hexadecimal + char_from_code_inline(if high < 10: 48 + high else: 87 + high)
+        hexadecimal = hexadecimal + char_from_code_inline(if low < 10: 48 + low else: 87 + low)
+    if not nonzero: return Err("Windows service incarnation zero entropy sentinel")
+    if hexadecimal.len() != 64: return Err("Windows service incarnation hex allocation failed")
+    val nonce = WINDOWS_SERVICE_INCARNATION_PREFIX_V1 + hexadecimal
+    if nonce.len() != WINDOWS_SERVICE_INCARNATION_PREFIX_V1.len() + 64:
+        return Err("Windows service incarnation text allocation failed")
+    Ok(nonce)
+
+@when(os="windows"):
+# Deliberate owner selection: the existing Win64 NoGC/sync owner provides
+# bounded heap storage; this module adds no C/Rust or replacement runtime.
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8}
+
+@unsafe(reason: "Windows CNG system-preferred RNG fills exactly one owned 32-byte buffer", capabilities: [ffi, raw_ptr])
+extern fn BCryptGenRandom(algorithm: i64, buffer: i64, count: u32, flags: u32) -> i32
+@unsafe(reason: "refuse interpreter before direct native Windows entropy ABI", capabilities: [ffi])
+extern fn rt_is_interpreter_runtime() -> bool
+@unsafe(reason: "refuse boxed JIT before direct native Windows entropy ABI", capabilities: [ffi])
+extern fn rt_is_jit_runtime() -> bool
+
+@unsafe(reason: "one bounded CNG output buffer is copied and released before formatting or returning", capabilities: [ffi, raw_ptr])
+fn windows_service_incarnation_nonce_native_v1() -> Result<text, text>:
+    if rt_is_interpreter_runtime() or rt_is_jit_runtime():
+        return Err("Windows service incarnation entropy requires native AOT runtime")
+    # Allocate the managed copy before acquiring raw storage, so no dynamic
+    # carrier allocation occurs while the private Win32 heap buffer is owned.
+    var bytes: [u8] = [0u8; 32]
+    if bytes.len() != 32: return Err("Windows service incarnation byte allocation failed")
+    val heap = GetProcessHeap()
+    if heap == 0: return Err("Windows service incarnation heap unavailable")
+    val buffer = HeapAlloc(heap, 8u32, 32u64)
+    if buffer == 0: return Err("Windows service incarnation allocation failed")
+    # NULL algorithm is required for BCRYPT_USE_SYSTEM_PREFERRED_RNG=2.
+    # STATUS_SUCCESS=0 is the only admitted completion. No retry or fallback.
+    val status = BCryptGenRandom(0, buffer, 32u32, 2u32)
+    if status == 0:
+        for index in 0..32:
+            bytes[index] = volatile_read_u8(buffer + index) as u8
+    val released = HeapFree(heap, 0u32, buffer)
+    if released == 0: return Err("Windows service incarnation allocation release failed")
+    if status != 0: return Err("Windows service incarnation CNG query failed: {status}")
+    windows_service_incarnation_nonce_encode_v1(bytes)
+
+pub fn windows_service_incarnation_nonce_v1() -> Result<text, text>:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        windows_service_incarnation_nonce_native_v1()
+@else:
+pub fn windows_service_incarnation_nonce_v1() -> Result<text, text>:
+    Err("Windows service incarnation entropy unavailable on this platform")
+@end
+
+export WINDOWS_SERVICE_INCARNATION_PREFIX_V1
+export windows_service_incarnation_nonce_v1, windows_service_incarnation_nonce_encode_v1

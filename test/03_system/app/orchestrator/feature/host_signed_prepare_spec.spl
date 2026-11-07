@@ -58,6 +58,44 @@ fn signed_prepare_fixture_v1() -> SignedPrepareFixtureV1:
         operation: operation, signed: signed, approval: approval), snapshot: snapshot)
 
 describe "Signed preparation through the actual host owner":
+    it "opens over-capacity released history only as charged quarantine for actual reconciliation":
+        val fixture = signed_prepare_fixture_v1()
+        var owner = fixture.owner
+        for index in [0, 1, 2]:
+            var intent = fixture.request.intent
+            intent.fence.revision = owner.ledger.revision
+            intent.reservation.id = "history-reservation-{index}"
+            intent.reservation.operation_id = "history-operation-{index}"
+            intent.reservation.nonce = "history-nonce-{index}"
+            intent.reservation.prepare_deadline_ms = (index + 1) * 1000
+            intent = host_reservation_bind_intent_v1(intent).unwrap()
+            var operation = fixture.request.operation
+            operation.id = intent.reservation.operation_id
+            operation.payload_digest = intent.reservation.payload_digest
+            var context = signed_prepare_clock_v1()
+            context.monotonic_ms = index * 1000 + 10
+            # Trusted primitive fixture: public signed admission has real
+            # signature cases below; no signature bypass claim is made here.
+            owner = host_capacity_owner_prepare_v1(owner, intent, operation,
+                fixture.request.signed.grant, context).unwrap()
+            owner = host_capacity_owner_expire_prepared_v1(owner, operation.id,
+                intent.reservation.prepare_deadline_ms).unwrap()
+            expect(host_available_capacity_v1(owner.ledger).unwrap().cpu_millis).to_equal(2000)
+        expect(owner.ledger.reservations.len()).to_equal(3)
+        assert(host_capacity_owner_close_v1(owner).unwrap())
+        var capacity = owner.ledger.capacity
+        capacity.boot_id = "fresh-service-fence"
+        val quarantined = host_capacity_owner_open_quarantined_v2(owner.journal.root,
+            capacity, "e".repeat(64), 50).unwrap()
+        assert(not quarantined.ledger.continuity_proven)
+        expect(quarantined.ledger.reservations.len()).to_equal(3)
+        for row in quarantined.ledger.reservations:
+            expect(row.state).to_equal(HostReservationStateV1.Uncertain)
+            expect(quarantined.journal.operations[row.operation_id].state).to_equal("cancelled")
+        expect(host_available_capacity_v1(quarantined.ledger).unwrap_err()).to_equal("capacity-exceeded")
+        assert(host_capacity_owner_close_v1(quarantined).unwrap())
+        dir_remove(owner.journal.root, true)
+
     it "returns the same durable receipt across exact replay and a newly opened writer":
         val fixture = signed_prepare_fixture_v1()
         val payload = host_prepare_request_encode_v1(fixture.request).unwrap()

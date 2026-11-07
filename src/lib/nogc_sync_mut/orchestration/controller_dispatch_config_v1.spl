@@ -1,0 +1,167 @@
+# Local administrator installation on an existing private metadata root.
+# Path/mode checks do not establish UID ownership or race-proof ancestor handles:
+# the caller must own the secure_temp_dir root and its trusted ancestor tree.
+# Client workload packets cannot install/replace this configuration or policy.
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.{LocalAuthorityPolicyV1, local_authority_policy_decode_v1, local_authority_policy_load_v1}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_is_regular_no_follow, file_create_exclusive, file_fsync, directory_fsync}
+use std.nogc_sync_mut.io.dir_ops.dir_is_real_no_follow
+use std.nogc_sync_mut.file_system.metadata.file_mode_bits
+use std.nogc_sync_mut.sosix.time.sosix_time_now_unix_micros
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct ControllerDispatchConfigV1:
+    controller_id: text
+    controller_epoch: i64
+    target: text
+    host_root: text
+    host_authority_id: text
+    provider_identity_digest: text
+    authority_policy_digest: text
+
+pub struct ControllerDispatchContextV1:
+    config: ControllerDispatchConfigV1
+    policy: LocalAuthorityPolicyV1
+
+fn dispatch_config_path_v1(path: text) -> bool:
+    if str_len(path) == 0 or str_len(path) > 4096 or not path.starts_with("/") or
+            path == "/" or path.ends_with("/") or path.contains("\0") or
+            path.contains("\n") or path.contains("\r"): return false
+    val parts = path.split("/")
+    var index = 1
+    while index < parts.len():
+        if parts[index] == "" or parts[index] == "." or parts[index] == "..": return false
+        index = index + 1
+    true
+
+fn dispatch_config_root_v1(root: text, controller: text) -> Result<bool, text>:
+    if not dispatch_config_path_v1(root) or not builder_identifier_valid_v1(controller):
+        return Err("dispatch-root-identity-invalid")
+    var prefix = ""
+    val parts = root.split("/")
+    var index = 1
+    while index < parts.len():
+        prefix = prefix + "/" + parts[index]
+        if not dir_is_real_no_follow(prefix): return Err("dispatch-root-not-real")
+        index = index + 1
+    if file_mode_bits(root) != 0o700: return Err("dispatch-root-not-private")
+    val marker = file_read_regular_no_follow_bounded(root + "/controller.sdn", 1024)?
+    val expected = "version: 1\nkind: orchestrator-local-state\ncontrollerId: \"{controller}\"\n"
+    if marker != expected: return Err("dispatch-controller-mismatch")
+    Ok(true)
+
+fn dispatch_config_private_read_v1(path: text, maximum: i64) -> Result<text, text>:
+    if not file_is_regular_no_follow(path): return Err("dispatch-file-not-regular")
+    val mode = file_mode_bits(path)
+    if mode < 0 or (mode & 0o400) == 0 or (mode & 0o7077) != 0:
+        return Err("dispatch-file-not-private")
+    file_read_regular_no_follow_bounded(path, maximum)
+
+pub fn controller_dispatch_config_encode_v1(config: ControllerDispatchConfigV1) -> Result<text, text>:
+    if not builder_identifier_valid_v1(config.controller_id) or config.controller_epoch <= 0 or
+            not builder_identifier_valid_v1(config.host_authority_id) or
+            not builder_digest_valid_v1(config.provider_identity_digest) or
+            not builder_digest_valid_v1(config.authority_policy_digest):
+        return Err("dispatch-config-identity-invalid")
+    if config.target != "local-inprocess": return Err("dispatch-target-unsupported")
+    if not dispatch_config_path_v1(config.host_root): return Err("dispatch-host-root-invalid")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("controller-dispatch-config"),
+        "controllerId": SdnValue.String(config.controller_id),
+        "controllerEpoch": SdnValue.Int(config.controller_epoch),
+        "target": SdnValue.String(config.target), "hostRoot": SdnValue.String(config.host_root),
+        "hostAuthorityId": SdnValue.String(config.host_authority_id),
+        "providerIdentityDigest": SdnValue.String(config.provider_identity_digest),
+        "authorityPolicyDigest": SdnValue.String(config.authority_policy_digest)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+fn dispatch_config_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("dispatch-config-text-required:" + key)
+
+pub fn controller_dispatch_config_decode_v1(source: text) -> Result<ControllerDispatchConfigV1, text>:
+    if str_len(source) == 0 or str_len(source) > 16384: return Err("dispatch-config-size")
+    val limits = SdnStrictLimitsV1(max_source_bytes: 16384, max_depth: 2,
+        max_nodes: 24, max_rows: 0, max_cells: 0, max_columns: 16)
+    val parsed = match sdn_parse_strict_v1(source, limits):
+        case Ok(value): value
+        case Err(issue): return Err("dispatch-config-syntax:" + issue.code)
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("dispatch-config-object-required")
+    val allowed = ["version", "kind", "controllerId", "controllerEpoch", "target",
+        "hostRoot", "hostAuthorityId", "providerIdentityDigest", "authorityPolicyDigest"]
+    for key in fields.keys():
+        if not allowed.contains(key): return Err("dispatch-config-unknown-field:" + key)
+    for key in allowed:
+        if not fields.contains_key(key): return Err("dispatch-config-missing-field:" + key)
+    val version = match fields["version"]:
+        case SdnValue.Int(value): value
+        case _: return Err("dispatch-config-version")
+    if version != 1 or dispatch_config_text_v1(fields, "kind")? != "controller-dispatch-config":
+        return Err("dispatch-config-version")
+    val epoch = match fields["controllerEpoch"]:
+        case SdnValue.Int(value): value
+        case _: return Err("dispatch-config-epoch")
+    val config = ControllerDispatchConfigV1(controller_id: dispatch_config_text_v1(fields, "controllerId")?,
+        controller_epoch: epoch, target: dispatch_config_text_v1(fields, "target")?,
+        host_root: dispatch_config_text_v1(fields, "hostRoot")?,
+        host_authority_id: dispatch_config_text_v1(fields, "hostAuthorityId")?,
+        provider_identity_digest: dispatch_config_text_v1(fields, "providerIdentityDigest")?,
+        authority_policy_digest: dispatch_config_text_v1(fields, "authorityPolicyDigest")?)
+    if controller_dispatch_config_encode_v1(config)? != source: return Err("dispatch-config-noncanonical")
+    Ok(config)
+
+# Exclusive files are never replaced. An interrupted installation retains its
+# partial files; an identical retry may complete, different bytes must refuse.
+fn dispatch_config_install_file_v1(path: text, bytes: text, maximum: i64) -> Result<bool, text>:
+    val created = file_create_exclusive(path, bytes)
+    val retained = dispatch_config_private_read_v1(path, maximum)?
+    if retained != bytes: return Err("dispatch-install-immutable-mismatch")
+    if not file_fsync(path): return Err("dispatch-install-sync-required")
+    Ok(true)
+
+pub fn controller_dispatch_config_install_v1(root: text, controller: text,
+        config_bytes: text, policy_bytes: text) -> Result<ControllerDispatchContextV1, text>:
+    """Administrator-only installation; caller ownership is a prerequisite, not a decoded field."""
+    val owned = dispatch_config_root_v1(root, controller)?
+    val config = controller_dispatch_config_decode_v1(config_bytes)?
+    if config.controller_id != controller: return Err("dispatch-controller-mismatch")
+    if config.host_root == root: return Err("dispatch-owner-roots-must-differ")
+    val policy = local_authority_policy_decode_v1(policy_bytes)?
+    if policy.source_digest != config.authority_policy_digest: return Err("dispatch-policy-pin-mismatch")
+    # Verify existing configuration first when present; never let a different
+    # install replace the policy beneath an already published configuration.
+    val existing = file_read_regular_no_follow_bounded(root + "/dispatch-config.sdn", 16384)
+    if existing.is_ok() and existing.unwrap() != config_bytes:
+        return Err("dispatch-install-immutable-mismatch")
+    val saved_policy = dispatch_config_install_file_v1(root + "/authority-policy.sdn", policy_bytes, 1048576)?
+    val saved_config = dispatch_config_install_file_v1(root + "/dispatch-config.sdn", config_bytes, 16384)?
+    if not directory_fsync(root): return Err("dispatch-install-root-sync-required")
+    controller_dispatch_context_load_v1(root, controller)
+
+pub fn controller_dispatch_context_load_v1(root: text, controller: text) -> Result<ControllerDispatchContextV1, text>:
+    val owned = dispatch_config_root_v1(root, controller)?
+    val bytes = dispatch_config_private_read_v1(root + "/dispatch-config.sdn", 16384)?
+    val config = controller_dispatch_config_decode_v1(bytes)?
+    if config.controller_id != controller: return Err("dispatch-controller-mismatch")
+    if config.host_root == root: return Err("dispatch-owner-roots-must-differ")
+    val policy = local_authority_policy_load_v1(root, config.authority_policy_digest)?
+    # A partially acknowledged administrative installation must be durable
+    # before any caller can use this context for an execution decision.
+    if not file_fsync(root + "/authority-policy.sdn") or
+            not file_fsync(root + "/dispatch-config.sdn") or not directory_fsync(root):
+        return Err("dispatch-context-sync-required")
+    Ok(ControllerDispatchContextV1(config: config, policy: policy))
+
+pub fn controller_dispatch_grant_clock_v1() -> Result<i64, text>:
+    """Production signed-grant/key/approval clock: Unix milliseconds, never request time."""
+    val micros = sosix_time_now_unix_micros()
+    if micros <= 0: return Err("dispatch-wall-clock-unavailable")
+    Ok(micros / 1000)

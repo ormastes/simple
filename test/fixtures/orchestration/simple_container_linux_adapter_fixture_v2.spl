@@ -1,0 +1,91 @@
+# Explicit Linux adapter fixture over the real leaf's exact scripted executor.
+# Supplied native identity is synthetic test data, not enrollment evidence.
+use std.common.contracts.container.runtime_v1.RuntimeCommandV1
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2,
+    ContainerExecutionPlanV2, ContainerExecutionRequestV2, ContainerHostObservationV2, container_scope_fence_id_v2}
+use std.nogc_async_mut.container.providers.linux.simple_container_adapter_v2.LinuxSimpleContainerAdapterV2
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.*
+use std.nogc_async_mut.container.providers.linux.request_v1.linux_oci_request_digest_v1
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_encode_v1
+use std.nogc_async_mut.container.api_v2.SimpleContainerOwnerV2
+use test.fixtures.container.simple_container_api_fixture_v2.simple_container_scripted_linux_fixture_v2
+
+pub fn linux_container_scope_fixture_v2() -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: "physical-host-alias", service_scope_id: "service-1",
+        boot_id: "boot-1", provider_generation: 7, native_machine_id: "native-machine-1",
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot-1")
+
+pub fn linux_container_leaf_fixture_v2() -> LinuxOciRequestV1:
+    LinuxOciRequestV1(pod_uid: "workload-1", attempt: 1, operation_id: "create-api",
+        image: "example/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        bundle_path: "", command: ["/agent"], args: ["literal"], timeout_ms: 5000,
+        cpu_limit_millis: 1000, memory_limit_bytes: 268435456, pid_limit: 64,
+        network_policy: "none", filesystem_policy: "read-only")
+
+pub fn linux_container_request_fixture_v2(leaf: LinuxOciRequestV1) -> ContainerExecutionRequestV2:
+    val scope = linux_container_scope_fixture_v2()
+    val digest = match linux_oci_request_digest_v1(leaf):
+        case Ok(value): value
+        case Err(reason):
+            assert(false, reason)
+            ""
+    val bytes = match linux_oci_retained_request_encode_v1(leaf):
+        case Ok(value): value
+        case Err(reason):
+            assert(false, reason)
+            ""
+    ContainerExecutionRequestV2(plan: ContainerExecutionPlanV2(backend: "linux-podman",
+        workload_uid: leaf.pod_uid, attempt: leaf.attempt, operation_id: leaf.operation_id,
+        request_digest: digest, physical_host_id: scope.physical_host_id, service_scope_id: scope.service_scope_id,
+        boot_id: scope.boot_id, provider_generation: scope.provider_generation, native_machine_id: scope.native_machine_id,
+        continuity_mode: scope.continuity_mode, continuity_id: scope.continuity_id), request_bytes: bytes)
+
+pub fn linux_container_policy_fixture_v2() -> LinuxOciEnginePolicyV1:
+    LinuxOciEnginePolicyV1(mode: "trusted-local-admin-v1", executable_path: "/usr/bin/podman",
+        expected_uid: 1000, expected_graph_root: "/home/test/storage", expected_run_root: "/run/user/1000/storage",
+        expected_storage_driver: "overlay")
+
+pub fn linux_container_engine_fixture_v2() -> LinuxOciEngineObservationV1:
+    val source = "{\"host\":{\"security\":{\"rootless\":true},\"serviceIsRemote\":false}," +
+        "\"store\":{\"graphRoot\":\"/home/test/storage\",\"runRoot\":\"/run/user/1000/storage\"," +
+        "\"graphDriverName\":\"overlay\",\"graphOptions\":{}},\"version\":{\"Version\":\"5.0.0\"}}"
+    match linux_oci_engine_info_observation_v1(linux_container_policy_fixture_v2(), source, "a".repeat(64), 1000):
+        case Ok(value): value
+        case Err(reason):
+            assert(false, reason)
+            LinuxOciEngineObservationV1(policy_digest: "", executable_path: "", executable_digest: "",
+                uid: 0, rootless: false, graph_root: "", run_root: "", storage_driver: "", engine_version: "", identity_digest: "")
+
+pub fn linux_container_script_result_fixture_v2(command: RuntimeCommandV1, output: text) -> ScriptedCommandResultV1:
+    val args = match linux_oci_engine_route_v1(linux_container_policy_fixture_v2(), command.args):
+        case Ok(value): value
+        case Err(reason):
+            assert(false, reason)
+            []
+    ScriptedCommandResultV1(operation: command.operation, program: "/usr/bin/podman", args: args,
+        stdout: output, stderr: "", exit_code: 0)
+
+pub fn linux_container_adapter_fixture_v2(results: [ScriptedCommandResultV1],
+        samples_unix_ms: [i64]) -> LinuxSimpleContainerAdapterV2:
+    val scope = linux_container_scope_fixture_v2()
+    val engine = linux_container_engine_fixture_v2()
+    val opened = LinuxOciRuntimeProviderV1.scripted_with_engine_policy("linux", "podman", "/unused/api",
+        container_scope_fence_id_v2(scope).unwrap(), 7, linux_container_policy_fixture_v2(), engine, engine, results)
+    assert(opened.is_ok(), "exact scripted policy provider construction failed")
+    val provider = opened.unwrap()
+    match provider.set_scripted_effect_clock_v1(samples_unix_ms):
+        case Err(reason): assert(false, reason)
+        case Ok(_): pass
+    val observed = ContainerHostObservationV2(backend: "linux-podman", native_machine_id: scope.native_machine_id,
+        native_boot_id: scope.boot_id, provider_identity_digest: engine.identity_digest,
+        execution_os: "linux", architecture: "x86_64", continuity_assurance: scope.continuity_mode,
+        boot_observation: scope.continuity_id)
+    val adapted = LinuxSimpleContainerAdapterV2.scripted_fixture_v2(scope, provider, observed, 3000)
+    assert(adapted.is_ok(), "explicit Linux adapter fixture construction failed")
+    adapted.unwrap()
+
+pub fn linux_container_owner_fixture_v2(results: [ScriptedCommandResultV1],
+        samples_unix_ms: [i64]) -> SimpleContainerOwnerV2:
+    simple_container_scripted_linux_fixture_v2(linux_container_scope_fixture_v2(),
+        linux_container_adapter_fixture_v2(results, samples_unix_ms))

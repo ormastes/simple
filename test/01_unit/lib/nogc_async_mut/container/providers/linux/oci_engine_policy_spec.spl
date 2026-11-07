@@ -3,6 +3,8 @@ use std.spec.*
 use std.nogc_async_mut.container.providers.linux.engine_policy_v1.*
 use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
 use std.common.contracts.container.runtime_v1.*
+use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
+use std.nogc_async_mut.container.providers.linux.request_v1.linux_oci_request_digest_v1
 
 fn _engine_policy_v1() -> LinuxOciEnginePolicyV1:
     LinuxOciEnginePolicyV1(mode: "trusted-local-admin-v1", executable_path: "/usr/bin/podman",
@@ -33,7 +35,7 @@ fn _engine_expected_create_v1() -> [text]:
         "--label", "io.simpleorch.node_boot_id=boot-1", "--label", "io.simpleorch.provider_generation=7",
         "--label", "io.simpleorch.operation_id=create-policy", "--cpu-period", "100000", "--cpu-quota", "100000",
         "--memory", "268435456", "--pids-limit", "64", "--network", "none", "--read-only",
-        "--security-opt", "no-new-privileges", "--cap-drop", "ALL", _engine_request_v1().image,
+        "--security-opt", "no-new-privileges", "--cap-drop", "ALL", "--http-proxy=false", _engine_request_v1().image,
         "/agent", "literal ; $(task)"]
 
 describe "Linux OCI trusted local administrator engine policy":
@@ -191,6 +193,14 @@ describe "Linux OCI trusted local administrator engine policy":
                     stdout: "native-policy", stderr: "", exit_code: 0)]):
             case Ok(value): value
             case Err(reason): fail(reason)
+        val request_digest = match linux_oci_request_digest_v1(_engine_request_v1()):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        val deadline = match container_effect_deadline_v1(request_digest, "create-policy", ["create"], 2000):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        expect(provider.set_effect_deadline_v1(deadline)).to_equal(Ok(()))
+        expect(provider.set_scripted_effect_clock_v1([1000])).to_equal(Ok(()))
         val result = provider.create(_engine_request_v1())
         expect(result.status).to_equal(RUNTIME_STATUS_OK)
         expect(result.command.program).to_equal("/usr/bin/podman")

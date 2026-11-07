@@ -1,0 +1,83 @@
+# Real signatures for common-envelope normalization only. The opaque canonical
+# request body is deliberately NOT a provider request or runtime admission.
+use test.fixtures.daemon_sdk.distributed_authority_verification_fixture_v2.*
+use std.common.contracts.orchestration.host_execute_request_v1.*
+use std.common.contracts.orchestration.host_execute_request_v2.*
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.orchestration.host_reservation_codec_v1.*
+use std.common.contracts.orchestration.linux_launch_plan_v1.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_encode_grant_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_authority_snapshot_create_v2
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{distributed_grant_signature_message_v2, distributed_approval_signature_message_v2}
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct HostExecutionEnvelopeFixtureV2:
+    original: HostExecuteRequestV1
+    common: HostExecuteRequestV2
+    policy: LocalAuthorityPolicyV1
+    scope: ContainerHostScopeV2
+
+fn host_envelope_signed_v2(operation: OperationEnvelopeV2) -> DistributedSignedGrantV2:
+    val base = verification_fixture()
+    var signed = base.signed
+    signed.grant.operations = ["host_execute_v1"]
+    signed.signature = pure_ed25519_sign_from_seed_v1(verification_seed(1), distributed_grant_signature_message_v2(signed).unwrap()).signature
+    signed
+
+fn host_envelope_approval_v2(operation: OperationEnvelopeV2, signed: DistributedSignedGrantV2) -> DistributedSignedApprovalV2:
+    var execution = operation
+    execution.operation = "host_execute_v1"
+    var approval = verification_fixture().approval
+    approval.grant_digest = sha256_text(distributed_encode_grant_v2(signed.grant).unwrap())
+    approval.request_digest = sha256_text(distributed_encode_operation_v2(execution).unwrap())
+    approval.signature = pure_ed25519_sign_from_seed_v1(verification_seed(65), distributed_approval_signature_message_v2(approval).unwrap()).signature
+    approval
+
+pub fn host_execution_envelope_fixture_v2(backend: text = "linux-podman", continuity_mode: text = "native-boot-incarnation-v1") -> HostExecutionEnvelopeFixtureV2:
+    val native_boot = if continuity_mode == "native-boot-incarnation-v1": "boot-1" else: ""
+    val continuity_id = if continuity_mode == "native-boot-incarnation-v1": "boot-1" else: "service-epoch-1"
+    val scope = ContainerHostScopeV2(physical_host_id: "worker_1", service_scope_id: "user_1", native_machine_id: "machine-1",
+        boot_id: native_boot, provider_generation: 7, continuity_mode: continuity_mode, continuity_id: continuity_id)
+    val scope_fence = container_scope_fence_id_v2(scope).unwrap()
+    val original_plan = HostLinuxLaunchPlanV1(workload_uid: "workload", attempt: 1, runtime_class: "podman-rootless",
+        service_scope_id: "user_1", request_digest: "d".repeat(64), physical_host_id: "worker_1", boot_id: "boot-1", provider_generation: 7)
+    val row = HostReservationV1(id: "reservation", operation_id: "operation_1", payload_digest: "0".repeat(64),
+        service_scope_id: "user_1", assignment_generation: 1, nonce: "nonce", cpu_millis: 1000, memory_bytes: 512,
+        exclusive_devices: [], prepare_deadline_ms: 1000, state: HostReservationStateV1.Prepared)
+    val old_intent = host_reservation_bind_intent_v1(HostReservationIntentV1(physical_host_id: "worker_1",
+        fence: HostLedgerFenceV1(authority_id: "authority", boot_id: "boot-1", provider_generation: 7, revision: 1),
+        plan_digest: host_linux_launch_plan_digest_v1(original_plan).unwrap(), reservation: row)).unwrap()
+    var original_operation = verification_fixture().request
+    original_operation.operation = "host_reservation_v1"
+    original_operation.payload_digest = old_intent.reservation.payload_digest
+    val signed = host_envelope_signed_v2(original_operation)
+    val opaque = sdn_encode_canonical(SdnValue.Dict({"shapeOnly": SdnValue.Bool(true)})) + "\n"
+    val original = HostExecuteRequestV1(intent: old_intent, operation: original_operation,
+        receipt: host_reservation_receipt_v1(old_intent, original_operation).unwrap(), plan: original_plan, request_bytes: opaque,
+        signed: signed, approval: host_envelope_approval_v2(original_operation, signed))
+    val plan = ContainerExecutionPlanV2(backend: backend, workload_uid: "workload", attempt: 1, operation_id: "operation_1",
+        request_digest: "d".repeat(64), physical_host_id: "worker_1", service_scope_id: "user_1", boot_id: native_boot, provider_generation: 7,
+        native_machine_id: scope.native_machine_id, continuity_mode: continuity_mode, continuity_id: continuity_id)
+    val common_intent = host_reservation_bind_intent_v1(HostReservationIntentV1(physical_host_id: "worker_1", fence: HostLedgerFenceV1(authority_id: old_intent.fence.authority_id,
+            boot_id: scope_fence, provider_generation: 7, revision: 1),
+        plan_digest: container_execution_plan_digest_v2(plan).unwrap(), reservation: row)).unwrap()
+    var common_operation = original_operation
+    common_operation.payload_digest = common_intent.reservation.payload_digest
+    val common = HostExecuteRequestV2(intent: common_intent, operation: common_operation,
+        receipt: host_reservation_receipt_v1(common_intent, common_operation).unwrap(),
+        execution: ContainerExecutionRequestV2(plan: plan, request_bytes: opaque), signed: signed,
+        approval: host_envelope_approval_v2(common_operation, signed))
+    var issuer = verification_fixture().issuer
+    issuer.operations = ["host_execute_v1"]
+    var approver = verification_fixture().approver
+    approver.operations = ["host_execute_v1"]
+    HostExecutionEnvelopeFixtureV2(original: original, common: common, scope: scope,
+        policy: LocalAuthorityPolicyV1(snapshot: distributed_authority_snapshot_create_v2([issuer, approver], 7, 4, 2).unwrap(),
+            session_generation: 3, source_digest: "f".repeat(64)))

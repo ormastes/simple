@@ -1,0 +1,200 @@
+# @req ORCH-02 HOST-02
+# Real administrator filesystem contract; admitted execution NOT_RUN.
+# Real private-root administrator installation only; synthetic PUBLIC keys.
+# No signing, workload dispatch, enrollment or authenticated grant is exercised.
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.*
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive, file_read_regular_no_follow_bounded, file_is_regular_no_follow, file_remove, file_fsync, directory_fsync}
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.nogc_sync_mut.package_sffi.create_symlink
+use std.nogc_sync_mut.file_system.permissions.file_set_mode
+use std.nogc_sync_mut.file_system.metadata.file_mode_bits
+use std.nogc_sync_mut.io_runtime.dir_remove
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict}
+use std.common.string_core.str_len
+
+struct DispatchConfigFixtureV1:
+    parent: text
+    root: text
+    host_root: text
+    policy_bytes: text
+    config_bytes: text
+
+fn dispatch_config_policy_fixture_v1(session: i64) -> text:
+    val key: Dict<text, SdnValue> = {"identity": SdnValue.String("issuer"), "role": SdnValue.String("grant-issuer"),
+        "revision": SdnValue.Int(1), "publicKeyHex": SdnValue.String("ab".repeat(32)),
+        "principal": SdnValue.String("user"), "project": SdnValue.String("project"),
+        "hostId": SdnValue.String("host"), "operations": SdnValue.Array([SdnValue.String("host_execute_v1")]),
+        "maximumMemoryBytes": SdnValue.Int(8000), "maximumDurationMs": SdnValue.Int(500),
+        "policyRevision": SdnValue.Int(1), "revocationEpoch": SdnValue.Int(0),
+        "expiresAt": SdnValue.Int(900), "revoked": SdnValue.Bool(false)}
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "generation": SdnValue.Int(2),
+        "policyRevision": SdnValue.Int(1), "revocationEpoch": SdnValue.Int(0),
+        "sessionGeneration": SdnValue.Int(session), "keys": SdnValue.Array([SdnValue.Dict(key)])}
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+fn dispatch_config_fixture_v1() -> DispatchConfigFixtureV1:
+    val parent = secure_temp_dir("/tmp", "controller-dispatch-config-").unwrap()
+    val root = secure_temp_dir(parent, "controller-").unwrap()
+    val host_root = secure_temp_dir(parent, "host-").unwrap()
+    val marker = "version: 1\nkind: orchestrator-local-state\ncontrollerId: \"controller\"\n"
+    assert(file_create_exclusive(root + "/controller.sdn", marker))
+    assert(file_fsync(root + "/controller.sdn"))
+    assert(directory_fsync(root))
+    val policy_bytes = dispatch_config_policy_fixture_v1(3)
+    val config = ControllerDispatchConfigV1(controller_id: "controller", controller_epoch: 1,
+        target: "local-inprocess", host_root: host_root, host_authority_id: "host-authority", provider_identity_digest: "e".repeat(64),
+        authority_policy_digest: sha256_text(policy_bytes))
+    DispatchConfigFixtureV1(parent: parent, root: root, host_root: host_root,
+        policy_bytes: policy_bytes, config_bytes: controller_dispatch_config_encode_v1(config).unwrap())
+
+fn dispatch_config_install_fixture_v1(fixture: DispatchConfigFixtureV1) -> ControllerDispatchContextV1:
+    controller_dispatch_config_install_v1(fixture.root, "controller", fixture.config_bytes, fixture.policy_bytes).unwrap()
+
+fn dispatch_config_wire_field_v1(source: text, key: text, value: SdnValue) -> text:
+    val parsed = parse_resource_document(source).unwrap()
+    var fields = as_dict(parsed.0, "", parsed.1).unwrap()
+    fields[key] = value
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+fn dispatch_config_assert_bytes_v1(fixture: DispatchConfigFixtureV1):
+    assert(file_read_regular_no_follow_bounded(fixture.root + "/dispatch-config.sdn", 16384).unwrap() == fixture.config_bytes)
+    assert(file_read_regular_no_follow_bounded(fixture.root + "/authority-policy.sdn", 1048576).unwrap() == fixture.policy_bytes)
+
+describe "private local-inprocess controller dispatch installation":
+    it "installs and loads exact durable private configuration without granting authority":
+        step("Installs and loads exact durable private configuration without granting authority")
+        val fixture = dispatch_config_fixture_v1()
+        val context = dispatch_config_install_fixture_v1(fixture)
+        expect(context.config.target == "local-inprocess").to_equal(true)
+        expect(context.config.controller_id == "controller").to_equal(true)
+        expect(context.config.host_root == fixture.host_root).to_equal(true)
+        expect(context.config.host_authority_id == "host-authority").to_equal(true)
+        expect(context.config.provider_identity_digest == "e".repeat(64)).to_equal(true)
+        expect(context.policy.source_digest == sha256_text(fixture.policy_bytes)).to_equal(true)
+        expect(context.policy.session_generation == 3).to_equal(true)
+        expect(context.policy.snapshot.keys["grant-issuer/issuer"].public_key[0] as i64 == 171).to_equal(true)
+        dispatch_config_assert_bytes_v1(fixture)
+        expect(file_mode_bits(fixture.root) == 0o700).to_equal(true)
+        expect(file_mode_bits(fixture.root + "/dispatch-config.sdn") == 0o600).to_equal(true)
+        expect(file_mode_bits(fixture.root + "/authority-policy.sdn") == 0o600).to_equal(true)
+        expect(file_fsync(fixture.root + "/dispatch-config.sdn")).to_equal(true)
+        expect(file_fsync(fixture.root + "/authority-policy.sdn")).to_equal(true)
+        expect(directory_fsync(fixture.root)).to_equal(true)
+        val loaded = controller_dispatch_context_load_v1(fixture.root, "controller").unwrap()
+        expect(loaded.config.authority_policy_digest == context.config.authority_policy_digest).to_equal(true)
+        expect(loaded.policy.source_digest == context.policy.source_digest).to_equal(true)
+        expect(dir_remove(fixture.parent, true)).to_equal(true)
+
+    it "replays identical installation and completes a retained partial policy publication":
+        step("Replays identical installation and completes a retained partial policy publication")
+        val fixture = dispatch_config_fixture_v1()
+        expect(file_create_exclusive(fixture.root + "/authority-policy.sdn", fixture.policy_bytes)).to_equal(true)
+        expect(file_fsync(fixture.root + "/authority-policy.sdn")).to_equal(true)
+        expect(directory_fsync(fixture.root)).to_equal(true)
+        expect(not file_is_regular_no_follow(fixture.root + "/dispatch-config.sdn")).to_equal(true)
+        val installed = dispatch_config_install_fixture_v1(fixture)
+        val replay = dispatch_config_install_fixture_v1(fixture)
+        expect(installed.policy.source_digest == replay.policy.source_digest).to_equal(true)
+        dispatch_config_assert_bytes_v1(fixture)
+        expect(dir_remove(fixture.parent, true)).to_equal(true)
+
+    it "refuses conflicting config and policy while retaining committed bytes":
+        step("Refuses conflicting config and policy while retaining committed bytes")
+        val fixture = dispatch_config_fixture_v1()
+        val installed = dispatch_config_install_fixture_v1(fixture)
+        var changed = installed.config
+        changed.controller_epoch = 2
+        val changed_bytes = controller_dispatch_config_encode_v1(changed).unwrap()
+        expect(controller_dispatch_config_install_v1(fixture.root, "controller", changed_bytes, fixture.policy_bytes).unwrap_err() == "dispatch-install-immutable-mismatch").to_equal(true)
+        val other_policy = dispatch_config_policy_fixture_v1(4)
+        expect(controller_dispatch_config_install_v1(fixture.root, "controller", fixture.config_bytes, other_policy).unwrap_err() == "dispatch-policy-pin-mismatch").to_equal(true)
+        changed.authority_policy_digest = sha256_text(other_policy)
+        expect(controller_dispatch_config_install_v1(fixture.root, "controller", controller_dispatch_config_encode_v1(changed).unwrap(), other_policy).unwrap_err() == "dispatch-install-immutable-mismatch").to_equal(true)
+        dispatch_config_assert_bytes_v1(fixture)
+        expect(dir_remove(fixture.parent, true)).to_equal(true)
+
+    it "refuses weak directory config and policy modes and tampered pinned policy":
+        step("Refuses weak directory config and policy modes and tampered pinned policy")
+        val fixture = dispatch_config_fixture_v1()
+        val installed = dispatch_config_install_fixture_v1(fixture)
+        expect(file_set_mode(fixture.root + "/dispatch-config.sdn", 0o644)).to_equal(true)
+        expect(controller_dispatch_context_load_v1(fixture.root, "controller").unwrap_err() == "dispatch-file-not-private").to_equal(true)
+        expect(file_set_mode(fixture.root + "/dispatch-config.sdn", 0o600)).to_equal(true)
+        expect(file_set_mode(fixture.root + "/authority-policy.sdn", 0o644)).to_equal(true)
+        expect(controller_dispatch_context_load_v1(fixture.root, "controller").unwrap_err() == "local-policy-file-not-private").to_equal(true)
+        expect(file_set_mode(fixture.root + "/authority-policy.sdn", 0o600)).to_equal(true)
+        expect(file_set_mode(fixture.root, 0o755)).to_equal(true)
+        expect(controller_dispatch_context_load_v1(fixture.root, "controller").unwrap_err() == "dispatch-root-not-private").to_equal(true)
+        expect(file_set_mode(fixture.root, 0o700)).to_equal(true)
+        expect(file_atomic_write_mode(fixture.root + "/authority-policy.sdn", dispatch_config_policy_fixture_v1(4), 0o600)).to_equal(true)
+        expect(file_fsync(fixture.root + "/authority-policy.sdn")).to_equal(true)
+        expect(controller_dispatch_context_load_v1(fixture.root, "controller").unwrap_err() == "local-policy-digest-mismatch").to_equal(true)
+        expect(dir_remove(fixture.parent, true)).to_equal(true)
+
+    it "requires exact marker controller identity and canonical independent root paths":
+        step("Requires exact marker controller identity and canonical independent root paths")
+        val fixture = dispatch_config_fixture_v1()
+        expect(controller_dispatch_context_load_v1(fixture.root, "other-controller").unwrap_err() == "dispatch-controller-mismatch").to_equal(true)
+        for root in ["relative", "/", fixture.root + "/", fixture.root + "/../other", fixture.root + "//other", fixture.root + "\n"]:
+            expect(controller_dispatch_config_install_v1(root, "controller", fixture.config_bytes, fixture.policy_bytes).unwrap_err() == "dispatch-root-identity-invalid").to_equal(true)
+        var config = controller_dispatch_config_decode_v1(fixture.config_bytes).unwrap()
+        config.host_root = fixture.root
+        expect(controller_dispatch_config_install_v1(fixture.root, "controller", controller_dispatch_config_encode_v1(config).unwrap(), fixture.policy_bytes).unwrap_err() == "dispatch-owner-roots-must-differ").to_equal(true)
+        config.host_root = "relative"
+        expect(controller_dispatch_config_encode_v1(config).is_err()).to_equal(true)
+        config.host_root = fixture.host_root
+        config.provider_identity_digest = "invalid"
+        expect(controller_dispatch_config_encode_v1(config).is_err()).to_equal(true)
+        expect(file_atomic_write_mode(fixture.root + "/controller.sdn", "wrong-marker", 0o600)).to_equal(true)
+        expect(file_fsync(fixture.root + "/controller.sdn")).to_equal(true)
+        expect(controller_dispatch_config_install_v1(fixture.root, "controller", fixture.config_bytes, fixture.policy_bytes).unwrap_err() == "dispatch-controller-mismatch").to_equal(true)
+        expect(dir_remove(fixture.parent, true)).to_equal(true)
+
+    it "rejects real symlink roots ancestors and leaves without changing outside targets":
+        step("Rejects real symlink roots ancestors and leaves without changing outside targets")
+        val fixture = dispatch_config_fixture_v1()
+        val root_link = fixture.parent + "/root-link"
+        expect(create_symlink(fixture.root, root_link)).to_equal(true)
+        expect(controller_dispatch_config_install_v1(root_link, "controller", fixture.config_bytes, fixture.policy_bytes).unwrap_err() == "dispatch-root-not-real").to_equal(true)
+        expect(file_remove(root_link)).to_equal(true)
+        val ancestor_link = fixture.parent + "/ancestor-link"
+        expect(create_symlink(fixture.parent, ancestor_link)).to_equal(true)
+        val tail = fixture.root.slice(fixture.parent.len() + 1, fixture.root.len())
+        expect(controller_dispatch_config_install_v1(ancestor_link + "/" + tail, "controller", fixture.config_bytes, fixture.policy_bytes).unwrap_err() == "dispatch-root-not-real").to_equal(true)
+        expect(file_remove(ancestor_link)).to_equal(true)
+        val outside_policy = fixture.parent + "/outside-policy.sdn"
+        expect(file_atomic_write_mode(outside_policy, fixture.policy_bytes, 0o600)).to_equal(true)
+        expect(create_symlink(outside_policy, fixture.root + "/authority-policy.sdn")).to_equal(true)
+        expect(controller_dispatch_config_install_v1(fixture.root, "controller", fixture.config_bytes, fixture.policy_bytes).unwrap_err() == "dispatch-file-not-regular").to_equal(true)
+        expect(file_read_regular_no_follow_bounded(outside_policy, 1048576).unwrap() == fixture.policy_bytes).to_equal(true)
+        expect(file_remove(fixture.root + "/authority-policy.sdn")).to_equal(true)
+        val installed = dispatch_config_install_fixture_v1(fixture)
+        expect(file_remove(fixture.root + "/dispatch-config.sdn")).to_equal(true)
+        val outside_config = fixture.parent + "/outside-config.sdn"
+        expect(file_atomic_write_mode(outside_config, fixture.config_bytes, 0o600)).to_equal(true)
+        expect(create_symlink(outside_config, fixture.root + "/dispatch-config.sdn")).to_equal(true)
+        expect(controller_dispatch_context_load_v1(fixture.root, "controller").unwrap_err() == "dispatch-file-not-regular").to_equal(true)
+        expect(file_read_regular_no_follow_bounded(outside_config, 16384).unwrap() == fixture.config_bytes).to_equal(true)
+        expect(file_remove(fixture.root + "/dispatch-config.sdn")).to_equal(true)
+        expect(dir_remove(fixture.parent, true)).to_equal(true)
+
+    it "rejects malformed unknown duplicate noncanonical and byte oversized configuration":
+        step("Rejects malformed unknown duplicate noncanonical and byte oversized configuration")
+        val fixture = dispatch_config_fixture_v1()
+        expect(controller_dispatch_config_decode_v1("{").is_err()).to_equal(true)
+        expect(controller_dispatch_config_decode_v1(fixture.config_bytes + "\n").unwrap_err() == "dispatch-config-noncanonical").to_equal(true)
+        expect(controller_dispatch_config_decode_v1(dispatch_config_wire_field_v1(fixture.config_bytes, "authenticated", SdnValue.Bool(true))).is_err()).to_equal(true)
+        expect(controller_dispatch_config_decode_v1(dispatch_config_wire_field_v1(fixture.config_bytes, "controllerEpoch", SdnValue.String("1"))).unwrap_err() == "dispatch-config-epoch").to_equal(true)
+        expect(controller_dispatch_config_decode_v1(dispatch_config_wire_field_v1(fixture.config_bytes, "target", SdnValue.String("remote-daemon"))).unwrap_err() == "dispatch-target-unsupported").to_equal(true)
+        val head = fixture.config_bytes.slice(0, fixture.config_bytes.len() - 2)
+        expect(controller_dispatch_config_decode_v1(head + ", controllerEpoch: 1" + "}\n").is_err()).to_equal(true)
+        val too_large = "é".repeat(8193)
+        expect(str_len(too_large) == 16386).to_equal(true)
+        expect(controller_dispatch_config_decode_v1(too_large).unwrap_err() == "dispatch-config-size").to_equal(true)
+        expect(controller_dispatch_config_install_v1(fixture.root, "controller", fixture.config_bytes, "é".repeat(524289)).is_err()).to_equal(true)
+        expect(not file_is_regular_no_follow(fixture.root + "/dispatch-config.sdn")).to_equal(true)
+        expect(not file_is_regular_no_follow(fixture.root + "/authority-policy.sdn")).to_equal(true)
+        expect(dir_remove(fixture.parent, true)).to_equal(true)

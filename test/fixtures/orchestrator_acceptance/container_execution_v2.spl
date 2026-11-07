@@ -1,0 +1,180 @@
+# Pure common contract diagnostic; NOT_RUN, no runtime/provider acceptance.
+# Pure V2 wire assertions. Opaque bodies grant no runtime authority.
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+
+fn execution_plan_fixture_v2(backend: text) -> ContainerExecutionPlanV2:
+    ContainerExecutionPlanV2(backend: backend, workload_uid: "workload", attempt: 1,
+        operation_id: "operation", request_digest: "a".repeat(64), physical_host_id: "machine",
+        service_scope_id: "service", boot_id: "boot", provider_generation: 7, native_machine_id: "machine-native",
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot")
+
+fn execution_wire_field_v2(source: text, key: text, value: SdnValue) -> text:
+    val parsed = parse_resource_document(source).unwrap()
+    var fields = as_dict(parsed.0, "", parsed.1).unwrap()
+    fields[key] = value
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+fn main() -> i64:
+    execution_case_1_v2()
+    execution_case_2_v2()
+    execution_case_3_v2()
+    execution_case_4_v2()
+    execution_case_5_v2()
+    execution_case_6_v2()
+    execution_case_7_v2()
+    execution_continuity_checks_v2()
+    print "container-execution-v2: pure wire assertions passed"
+    0
+
+fn execution_case_1_v2():
+    for backend in ["linux-podman", "windows-docker-process"]:
+        val plan = execution_plan_fixture_v2(backend)
+        val bytes = container_execution_plan_bytes_v2(plan).unwrap()
+        val decoded = container_execution_plan_decode_v2(bytes).unwrap()
+        assert(container_execution_plan_bytes_v2(decoded).unwrap() == bytes)
+        assert(decoded.backend == backend)
+        assert(decoded.operation_id == plan.operation_id)
+        assert(decoded.provider_generation == 7)
+        assert(container_execution_plan_digest_v2(plan).unwrap() == sha256_text(bytes))
+    val linux = execution_plan_fixture_v2("linux-podman")
+    val windows = execution_plan_fixture_v2("windows-docker-process")
+    assert(container_execution_plan_digest_v2(linux).unwrap() != container_execution_plan_digest_v2(windows).unwrap())
+
+fn execution_case_2_v2():
+    var plan = execution_plan_fixture_v2("docker")
+    assert(container_execution_plan_bytes_v2(plan).is_err())
+    plan = execution_plan_fixture_v2("linux-podman")
+    plan.operation_id = ""
+    assert(container_execution_plan_bytes_v2(plan).is_err())
+    plan = execution_plan_fixture_v2("linux-podman")
+    plan.boot_id = ""
+    assert(container_execution_plan_bytes_v2(plan).is_err())
+    plan = execution_plan_fixture_v2("linux-podman")
+    plan.service_scope_id = "x".repeat(1048576)
+    assert(container_execution_plan_bytes_v2(plan).is_err())
+    plan = execution_plan_fixture_v2("linux-podman")
+    plan.attempt = 0
+    assert(container_execution_plan_bytes_v2(plan).is_err())
+    plan = execution_plan_fixture_v2("linux-podman")
+    plan.provider_generation = 0
+    assert(container_execution_plan_bytes_v2(plan).is_err())
+    plan = execution_plan_fixture_v2("linux-podman")
+    plan.request_digest = "a".repeat(63)
+    assert(container_execution_plan_bytes_v2(plan).is_err())
+
+fn execution_case_3_v2():
+    val wire = container_execution_plan_bytes_v2(execution_plan_fixture_v2("linux-podman")).unwrap()
+    assert(container_execution_plan_decode_v2(execution_wire_field_v2(wire, "authenticated", SdnValue.Bool(true))).is_err())
+    assert(container_execution_plan_decode_v2(execution_wire_field_v2(wire, "attempt", SdnValue.String("1"))).is_err())
+    assert(container_execution_plan_decode_v2(wire + "\n").is_err())
+    val head = wire.slice(0, wire.len() - 2)
+    assert(container_execution_plan_decode_v2(head + ", version: 2" + "}\n").is_err())
+    assert(container_execution_plan_decode_v2("é".repeat(8193)).is_err())
+
+fn execution_case_4_v2():
+    for backend in ["linux-podman", "windows-docker-process"]:
+        val request = ContainerExecutionRequestV2(plan: execution_plan_fixture_v2(backend), request_bytes: "opaque unvalidated body")
+        val wire = container_execution_request_encode_v2(request).unwrap()
+        val decoded = container_execution_request_decode_v2(wire).unwrap()
+        assert(decoded.plan.backend == backend)
+        assert(decoded.request_bytes == request.request_bytes)
+        assert(container_execution_request_encode_v2(decoded).unwrap() == wire)
+
+fn execution_case_5_v2():
+    val request = ContainerExecutionRequestV2(plan: execution_plan_fixture_v2("linux-podman"), request_bytes: "opaque")
+    val wire = container_execution_request_encode_v2(request).unwrap()
+    assert(container_execution_request_decode_v2(execution_wire_field_v2(wire, "receipt", SdnValue.String("forged"))).is_err())
+    assert(container_execution_request_decode_v2(execution_wire_field_v2(wire, "requestBytes", SdnValue.Int(1))).is_err())
+    assert(container_execution_request_decode_v2(execution_wire_field_v2(wire, "kind", SdnValue.String("container-execution-plan"))).is_err())
+    assert(container_execution_request_decode_v2(execution_wire_field_v2(wire, "plan", SdnValue.String("changed"))).is_err())
+    val head = wire.slice(0, wire.len() - 2)
+    assert(container_execution_request_decode_v2(head + ", version: 2" + "}\n").is_err())
+    assert(container_execution_request_decode_v2("{kind: container-execution-request, version: 2}\n").is_err())
+    assert(container_execution_request_decode_v2(wire + "\n").is_err())
+
+fn execution_case_6_v2():
+    val plan = execution_plan_fixture_v2("linux-podman")
+    var changed = plan
+    changed.boot_id = "other-boot"
+    changed.continuity_id = "other-boot"
+    assert(container_execution_plan_digest_v2(plan).unwrap() != container_execution_plan_digest_v2(changed).unwrap())
+    changed = plan
+    changed.operation_id = "other-operation"
+    assert(container_execution_plan_digest_v2(plan).unwrap() != container_execution_plan_digest_v2(changed).unwrap())
+    changed = plan
+    changed.request_digest = "b".repeat(64)
+    assert(container_execution_plan_digest_v2(plan).unwrap() != container_execution_plan_digest_v2(changed).unwrap())
+
+fn execution_case_7_v2():
+    var request = ContainerExecutionRequestV2(plan: execution_plan_fixture_v2("linux-podman"), request_bytes: "")
+    assert(container_execution_request_encode_v2(request).unwrap_err() == "container-execution-body-size")
+    request.request_bytes = "é".repeat(524288)
+    assert(str_len(request.request_bytes) == 1048576)
+    assert(container_execution_request_encode_v2(request).is_ok())
+    request.request_bytes = "é".repeat(524289)
+    assert(container_execution_request_encode_v2(request).unwrap_err() == "container-execution-body-size")
+    request.request_bytes = "\"".repeat(1048576)
+    assert(container_execution_request_encode_v2(request).unwrap_err() == "container-execution-request-too-large")
+    assert(container_execution_request_decode_v2("é".repeat(1048577)).unwrap_err() == "container-execution-request-too-large")
+    request.request_bytes = "opaque"
+    val wire = container_execution_request_encode_v2(request).unwrap()
+    assert(container_execution_request_decode_v2(execution_wire_field_v2(wire, "requestBytes", SdnValue.String("x".repeat(1048577)))).unwrap_err() == "container-execution-body-size")
+
+fn execution_continuity_checks_v2():
+    var plan = execution_plan_fixture_v2("windows-docker-process")
+    plan.continuity_mode = "service-incarnation-v1"
+    plan.continuity_id = "windows-service-incarnation-v1:abcd"
+    plan.native_machine_id = "windows-machine-guid-v1:00112233-4455"
+    plan.boot_id = ""
+    val bytes = container_execution_plan_bytes_v2(plan).unwrap()
+    val restored = container_execution_plan_decode_v2(bytes).unwrap()
+    assert(restored.boot_id == "")
+    assert(restored.continuity_id == "windows-service-incarnation-v1:abcd")
+    var invalid = plan
+    invalid.native_machine_id = "native machine"
+    assert(container_execution_plan_bytes_v2(invalid).is_err())
+    invalid = plan
+    invalid.native_machine_id = "native/path"
+    assert(container_execution_plan_bytes_v2(invalid).is_err())
+    invalid = plan
+    invalid.continuity_id = "owner\nnonce"
+    assert(container_execution_plan_bytes_v2(invalid).is_err())
+    invalid = plan
+    invalid.continuity_id = "owner/path"
+    assert(container_execution_plan_bytes_v2(invalid).is_err())
+    invalid = plan
+    invalid.native_machine_id = "x".repeat(257)
+    assert(container_execution_plan_bytes_v2(invalid).is_err())
+    var scope = ContainerHostScopeV2(physical_host_id: "authorized-alias", service_scope_id: "service", boot_id: "",
+        provider_generation: 7, native_machine_id: "actual-machine", continuity_mode: "service-incarnation-v1", continuity_id: "persisted-owner-nonce")
+    val scope_bytes = container_host_scope_bytes_v2(scope).unwrap()
+    val decoded_scope = container_host_scope_decode_v2(scope_bytes).unwrap()
+    assert(decoded_scope.native_machine_id == "actual-machine")
+    assert(decoded_scope.physical_host_id == "authorized-alias")
+    assert(container_host_scope_decode_v2(scope_bytes + "\n").is_err())
+    val fence = container_scope_fence_id_v2(scope).unwrap()
+    var changed = scope
+    changed.physical_host_id = "other-alias"
+    assert(container_scope_fence_id_v2(changed).unwrap() != fence)
+    changed = scope
+    changed.native_machine_id = "other-machine"
+    assert(container_scope_fence_id_v2(changed).unwrap() != fence)
+    changed = scope
+    changed.continuity_id = "other-owner-nonce"
+    assert(container_scope_fence_id_v2(changed).unwrap() != fence)
+    changed = scope
+    changed.provider_generation = 8
+    assert(container_scope_fence_id_v2(changed).unwrap() != fence)
+    changed = scope
+    changed.service_scope_id = "other-service"
+    assert(container_scope_fence_id_v2(changed).unwrap() != fence)
+    plan.boot_id = "invented-os-boot"
+    assert(container_execution_plan_bytes_v2(plan).is_err())
+    plan = execution_plan_fixture_v2("linux-podman")
+    plan.continuity_id = "different-from-observed-boot"
+    assert(container_execution_plan_bytes_v2(plan).is_err())

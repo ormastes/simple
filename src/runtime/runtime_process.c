@@ -451,9 +451,21 @@ static wchar_t* win_capture_environment(void) {
     return filtered;
 }
 
+static int win_launch_admission_check_v1(int64_t expires_at_unix_ms) {
+    FILETIME sampled;
+    ULARGE_INTEGER ticks;
+    GetSystemTimeAsFileTime(&sampled);
+    ticks.LowPart = sampled.dwLowDateTime; ticks.HighPart = sampled.dwHighDateTime;
+    if (expires_at_unix_ms <= 0 || ticks.QuadPart < 116444736000000000ULL) return -1;
+    uint64_t milliseconds = (ticks.QuadPart - 116444736000000000ULL) / 10000ULL;
+    if (milliseconds > INT64_MAX) return -1;
+    return (int64_t)milliseconds >= expires_at_unix_ms ? 1 : 0;
+}
+
 static SplArray* win_process_run_capture_environment_v1(const char* cmd, uint64_t cmd_len, SplArray* args,
                                          int64_t timeout_ms, int64_t max_output_bytes, int raw_bytes,
-        const wchar_t* child_environment, int explicit_environment, int64_t* flags) {
+        const wchar_t* child_environment, int explicit_environment, int64_t* flags,
+        int64_t expires_at_unix_ms) {
     if(flags)*flags=8; /* provider failure until the complete owner finishes */
     const char* failure = NULL;
     const char** child_args = NULL;
@@ -476,6 +488,8 @@ static SplArray* win_process_run_capture_environment_v1(const char* cmd, uint64_
     int assigned_to_job = 0;
     int process_done = 0;
     int timed_out = 0;
+    int usercode_may_run = 0;
+    int64_t admission_outcome = 0;
     int64_t code = -1;
 
     if (raw_bytes && (timeout_ms < 0 || max_output_bytes < 0 || max_output_bytes > 16777216)) {
@@ -579,6 +593,14 @@ static SplArray* win_process_run_capture_environment_v1(const char* cmd, uint64_
     startup.StartupInfo.hStdOutput = stdout_write;
     startup.StartupInfo.hStdError = stderr_write;
     DWORD creation_flags = CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW;
+    if (expires_at_unix_ms > 0) {
+        int admitted = win_launch_admission_check_v1(expires_at_unix_ms);
+        if (admitted != 0) {
+            admission_outcome = admitted > 0 ? 32 : 64;
+            failure = "process launch admission rejected before CreateProcess";
+            goto finish;
+        }
+    }
     BOOL launched = CreateProcessW(NULL, wide_command, NULL, NULL, TRUE,
         creation_flags | CREATE_UNICODE_ENVIRONMENT, wide_environment, NULL,
         &startup.StartupInfo, &process);
@@ -591,6 +613,15 @@ static SplArray* win_process_run_capture_environment_v1(const char* cmd, uint64_
         goto finish;
     }
     assigned_to_job = 1;
+    if (expires_at_unix_ms > 0) {
+        int admitted = win_launch_admission_check_v1(expires_at_unix_ms);
+        if (admitted != 0) {
+            admission_outcome = admitted > 0 ? 32 : 64;
+            failure = "process launch admission rejected while suspended";
+            goto finish;
+        }
+    }
+    usercode_may_run = 1; /* ResumeThread errors are conservatively uncertain */
     if (ResumeThread(process.hThread) == (DWORD)-1) {
         failure = "process spawn failed";
         goto finish;
@@ -681,6 +712,9 @@ finish:
         *flags=(timed_out?1:0) | (stdout_capture.total>stdout_capture.limit?2:0) |
             (stderr_capture.total>stderr_capture.limit?4:0) | (failure?8:0) |
             (process.hProcess&&!process_done?16:0);
+        if (expires_at_unix_ms > 0 && !usercode_may_run && (!process.hProcess || process_done)) {
+            *flags = admission_outcome == 32 ? 32 : 8 | 64;
+        }
     }
     const char* result_error = failure ? failure : stderr_capture.data;
     SplArray* result = raw_bytes
@@ -710,7 +744,7 @@ finish:
 static SplArray* win_process_run_capture(const char* cmd,uint64_t cmd_len,SplArray* args,
         int64_t timeout_ms,int64_t max_output_bytes,int raw_bytes) {
     return win_process_run_capture_environment_v1(cmd,cmd_len,args,timeout_ms,
-        max_output_bytes,raw_bytes,NULL,0,NULL);
+        max_output_bytes,raw_bytes,NULL,0,NULL,0);
 }
 
 /* Borrow immutable UTF8 assignments only while making a private UTF16 block. */
@@ -759,7 +793,7 @@ int64_t* rt_process_run_bounded_environment_tuple_v1(const char* cmd,uint64_t cm
     }
     copied=win_child_env_array_v1(environment,mode,&error);
     if(!copied)goto rejected;
-    result=win_process_run_capture_environment_v1(cmd,cmd_len,args,timeout_ms,max_output_bytes,0,copied,1,&flags);
+    result=win_process_run_capture_environment_v1(cmd,cmd_len,args,timeout_ms,max_output_bytes,0,copied,1,&flags,0);
     free(copied);
     if(!result)return block;
     block[0]=rt_array_get(result,0);block[1]=rt_array_get(result,1);
@@ -770,6 +804,58 @@ int64_t* rt_process_run_bounded_environment_tuple_v1(const char* cmd,uint64_t cm
         char reason[128];int count=snprintf(reason,sizeof(reason),"private child environment rejected: Win32 %lu",(unsigned long)error);
         block[1]=rt_string_new((const uint8_t*)reason,(uint64_t)(count>0?count:0));return block;
     }
+}
+
+int64_t* rt_process_run_bounded_admitted_tuple_v1(const char* cmd, uint64_t cmd_len,
+        SplArray* args, SplArray* environment, int64_t mode, int64_t timeout_ms,
+        int64_t max_output_bytes, int64_t expires_at_unix_ms) {
+    static RT_CHILD_ENV_TLS_V1 int64_t block[4];
+    block[0] = block[1] = 3; block[2] = -1; block[3] = 8 | 64;
+    if (!cmd || !cmd_len || cmd_len > 1048576 || memchr(cmd, 0, (size_t)cmd_len) ||
+            timeout_ms <= 0 || max_output_bytes <= 0 || max_output_bytes > 16777216 ||
+            expires_at_unix_ms <= 0 || (mode != 1 && mode != 2)) return block;
+    if (cmd_len < 3 || cmd[1] != ':' || (cmd[2] != '\\' && cmd[2] != '/')) return block;
+    int64_t count = args ? rt_array_len(args) : 0;
+    if (count < 0 || count > 32768) return block;
+    for (int64_t i = 0; i < count; i++) {
+        int64_t value = rt_array_get(args, i);
+        if (value == 3) continue;
+        uint64_t length = rt_string_len(value);
+        const uint8_t* data = rt_string_data(value);
+        if (!data || length > 16777216 || memchr(data, 0, (size_t)length)) return block;
+    }
+    DWORD error = 0;
+    wchar_t* copied = NULL;
+    if (mode == 1) {
+        copied = win_child_env_array_v1(environment, 1, &error);
+        if (!copied) return block;
+    } else if (environment && rt_array_len(environment) != 0) return block;
+    int64_t flags = 8 | 64;
+    SplArray* result = win_process_run_capture_environment_v1(cmd, cmd_len, args,
+        timeout_ms, max_output_bytes, 0, copied, mode == 1, &flags, expires_at_unix_ms);
+    free(copied);
+    if (!result) { block[3] = 8; return block; }
+    block[0] = rt_array_get(result, 0); block[1] = rt_array_get(result, 1);
+    block[2] = rt_value_as_int(rt_array_get(result, 2)); block[3] = flags;
+    rt_array_free(result);
+    return block;
+}
+
+/* Observed ordinary capture has no launch-expiry policy. Keep its ABI
+ * separate so it cannot weaken admitted capture's positive-expiry guard. */
+int64_t* rt_process_run_bounded_observed_tuple_v1(const char* cmd, uint64_t cmd_len,
+        SplArray* args, int64_t timeout_ms, int64_t max_output_bytes) {
+    static RT_CHILD_ENV_TLS_V1 int64_t block[4];
+    block[0] = block[1] = 3; block[2] = -1; block[3] = 8 | 64;
+    if (!cmd || !cmd_len || cmd_len > 1048576 || memchr(cmd, 0, (size_t)cmd_len) ||
+            timeout_ms <= 0 || max_output_bytes <= 0 || max_output_bytes > 16777216) return block;
+    int64_t flags = 8;
+    SplArray* result = win_process_run_capture_environment_v1(cmd, cmd_len, args,
+        timeout_ms, max_output_bytes, 0, NULL, 0, &flags, 0);
+    if (!result) { block[3] = 8; return block; }
+    block[0] = rt_array_get(result, 0); block[1] = rt_array_get(result, 1);
+    block[2] = rt_value_as_int(rt_array_get(result, 2)); block[3] = flags;
+    rt_array_free(result); return block;
 }
 
 /* (cmd_ptr, cmd_len, args, timeout_ms) -> RuntimeValue (array), per
@@ -2552,8 +2638,10 @@ int64_t rt_browser_renderer_spawn_sandboxed(
 static _Thread_local int64_t posix_wait_peak_rss_kib = -1;
 static _Thread_local int posix_wait_peak_is_latest = 0;
 
-static SplArray* posix_process_run_capture(const char* cmd, uint64_t cmd_len, SplArray* args,
-                                           int64_t timeout_ms, int64_t max_output_bytes, int raw_bytes) {
+static SplArray* posix_process_run_capture_admission_v1(const char* cmd, uint64_t cmd_len, SplArray* args,
+        int64_t timeout_ms, int64_t max_output_bytes, int raw_bytes,
+        int64_t expires_at_unix_ms, int64_t* flags) {
+    if (flags) *flags = 8 | 64; /* rejected before any native child exists */
     posix_wait_peak_is_latest = 0;
     if (raw_bytes && (timeout_ms < 0 || max_output_bytes < 0 || max_output_bytes > 16777216))
         return process_capture_result("", 0, "", 0, -1, 0, timeout_ms, 1, 0);
@@ -2585,22 +2673,53 @@ static SplArray* posix_process_run_capture(const char* cmd, uint64_t cmd_len, Sp
     }
     argv[argc + 1] = NULL;
 
-    int64_t child_pid = rt_fork_child_setup();
+    int admission_pipe[2] = {-1, -1};
+    /* Preserve every preexisting ordinary text/raw/unbounded expiry0 route.
+     * Only new structured/admitted capture requires the stronger FD owner. */
+    int isolated_capture = flags != NULL || expires_at_unix_ms > 0;
+    int64_t child_pid = isolated_capture
+        ? simple_fork_child_setup_capture_v2(expires_at_unix_ms, admission_pipe)
+        : rt_fork_child_setup();
     if (child_pid == 0) {
+        /* The captured setup already closed every unrelated descriptor and
+         * remapped the sole private writer to CLOEXEC FD3. */
+        if (isolated_capture) { admission_pipe[0] = -1; admission_pipe[1] = 3; }
         int null_fd = open("/dev/null", O_RDONLY);
-        if (null_fd >= 0) {
-            (void)dup2(null_fd, STDIN_FILENO);
-            close(null_fd);
+        if ((null_fd < 0 || dup2(null_fd, STDIN_FILENO) < 0) && isolated_capture) {
+            const unsigned char rejected = 4;
+            (void)write(3, &rejected, 1); rt_fork_child_exit(126);
         }
+        if (null_fd >= 0 && null_fd != STDIN_FILENO) close(null_fd);
         (void)unsetenv("_SIMPLE_STACK_SET");
-        execvp(cmd_c, argv);
+        if (expires_at_unix_ms > 0) {
+            int admitted = simple_process_launch_admission_check_v1(expires_at_unix_ms);
+            if (admitted != 0) {
+                unsigned char outcome = admitted > 0 ? 1 : 2;
+                ssize_t written;
+                do { written = write(admission_pipe[1], &outcome, 1); } while (written < 0 && errno == EINTR);
+                rt_fork_child_exit(125);
+            }
+        }
+        if (expires_at_unix_ms > 0) execv(cmd_c, argv);
+        else execvp(cmd_c, argv);
+        if (admission_pipe[1] >= 0) {
+            unsigned char outcome = 3; /* exec rejected, not a workload exit */
+            ssize_t written;
+            do { written = write(admission_pipe[1], &outcome, 1); } while (written < 0 && errno == EINTR);
+        }
         perror("rt_process_run_timeout execvp");
         rt_fork_child_exit(127);
     }
 
+    if (admission_pipe[1] >= 0) close(admission_pipe[1]);
     free(argv);
     free(cmd_c);
-    if (child_pid < 0) return process_capture_result("", 0, raw_bytes ? "" : "process spawn failed", raw_bytes ? 0 : 20, -1, 0, timeout_ms, raw_bytes, max_output_bytes);
+    if (child_pid < 0) {
+        if (admission_pipe[0] >= 0) close(admission_pipe[0]);
+        if (flags) *flags = child_pid == -2 ? 32 : 8 | 64;
+        return process_capture_result("", 0, raw_bytes ? "" : "process spawn failed", raw_bytes ? 0 : 20, -1, 0, timeout_ms, raw_bytes, max_output_bytes);
+    }
+    if (flags) *flags = 8; /* child exists: failures are uncertain until reaped */
 
     int64_t code = raw_bytes
         ? simple_fork_parent_wait_bounded_bytes(child_pid, timeout_ms, (uint64_t)max_output_bytes)
@@ -2614,9 +2733,86 @@ static SplArray* posix_process_run_capture(const char* cmd, uint64_t cmd_len, Sp
     const char* err = rt_fork_parent_stderr();
     uint64_t out_len = 0, err_len = 0;
     simple_fork_parent_capture_lengths(&out_len, &err_len);
-    if (code == 127 && err && strstr(err, "rt_process_run_timeout execvp") != NULL) code = -1;
-    return process_capture_result(out, (size_t)out_len, err, (size_t)err_len,
+    int64_t capture_flags = simple_fork_parent_capture_flags_v1();
+    if (code < 0 || rt_fork_parent_signaled()) capture_flags |= 8;
+    if (isolated_capture) {
+        unsigned char outcome = 0;
+        ssize_t observed;
+        do { observed = read(admission_pipe[0], &outcome, 1); } while (observed < 0 && errno == EINTR);
+        close(admission_pipe[0]);
+        if (observed == 1 && code == 125 && (capture_flags & 8) == 0 && (outcome == 1 || outcome == 2)) {
+            capture_flags = outcome == 1 ? 32 : 8 | 64;
+            code = -1;
+        } else if (observed == 1 && (capture_flags & 8) == 0 &&
+                ((code == 127 && outcome == 3) || (code == 126 && outcome == 4))) {
+            capture_flags = 8 | 64;
+            code = -1;
+        } else if (observed != 0) {
+            capture_flags |= 8; /* malformed/unconfirmed admission channel */
+        }
+    } else if (code == 127 && err && strstr(err, "rt_process_run_timeout execvp") != NULL) code = -1;
+    if (flags) *flags = capture_flags;
+    SplArray* copied_result = process_capture_result(out, (size_t)out_len, err, (size_t)err_len,
                                   code, raw_bytes ? 0 : timed_out, timeout_ms, raw_bytes, raw_bytes ? max_output_bytes : -1);
+    simple_fork_parent_capture_release_v1();
+    return copied_result;
+}
+
+static SplArray* posix_process_run_capture(const char* cmd, uint64_t cmd_len, SplArray* args,
+        int64_t timeout_ms, int64_t max_output_bytes, int raw_bytes) {
+    return posix_process_run_capture_admission_v1(cmd, cmd_len, args, timeout_ms,
+        max_output_bytes, raw_bytes, 0, NULL);
+}
+
+int64_t* rt_process_run_bounded_admitted_tuple_v1(const char* cmd, uint64_t length,
+        SplArray* args, SplArray* environment, int64_t mode, int64_t timeout,
+        int64_t cap, int64_t expires_at_unix_ms) {
+    static _Thread_local int64_t block[4];
+    block[0] = block[1] = 3; block[2] = -1; block[3] = 8 | 64;
+    /* mode 2 inherits the trusted parent environment. No empty-env fallback. */
+    if (mode != 2 || (environment && rt_array_len(environment) != 0) ||
+            !cmd || !length || cmd[0] != '/' || length > 1048576 || memchr(cmd, 0, (size_t)length) ||
+            timeout <= 0 || cap <= 0 || cap > 16777216 || expires_at_unix_ms <= 0) return block;
+    int64_t count = args ? rt_array_len(args) : 0;
+    if (count < 0 || count > 32768) return block;
+    for (int64_t i = 0; i < count; i++) {
+        int64_t value = rt_array_get(args, i);
+        if (value == 3) continue;
+        uint64_t size = rt_string_len(value);
+        const uint8_t* data = rt_string_data(value);
+        if (!data || size > 16777216 || memchr(data, 0, (size_t)size)) return block;
+    }
+    int64_t flags = 8 | 64;
+    SplArray* result = posix_process_run_capture_admission_v1(cmd, length, args,
+        timeout, cap, 0, expires_at_unix_ms, &flags);
+    if (!result) { block[3] = 8; return block; }
+    block[0] = rt_array_get(result, 0); block[1] = rt_array_get(result, 1);
+    block[2] = rt_value_as_int(rt_array_get(result, 2)); block[3] = flags;
+    rt_array_free(result);
+    return block;
+}
+
+int64_t* rt_process_run_bounded_observed_tuple_v1(const char* cmd, uint64_t length,
+        SplArray* args, int64_t timeout, int64_t cap) {
+    static _Thread_local int64_t block[4];
+    block[0] = block[1] = 3; block[2] = -1; block[3] = 8 | 64;
+    if (!cmd || !length || length > 1048576 || memchr(cmd, 0, (size_t)length) ||
+            timeout <= 0 || cap <= 0 || cap > 16777216) return block;
+    int64_t count = args ? rt_array_len(args) : 0;
+    if (count < 0 || count > 32768) return block;
+    for (int64_t i = 0; i < count; i++) {
+        int64_t value = rt_array_get(args, i);
+        if (value == 3) continue;
+        uint64_t size = rt_string_len(value); const uint8_t* data = rt_string_data(value);
+        if (!data || size > 16777216 || memchr(data, 0, (size_t)size)) return block;
+    }
+    int64_t flags = 8;
+    SplArray* result = posix_process_run_capture_admission_v1(cmd, length, args,
+        timeout, cap, 0, 0, &flags);
+    if (!result) { block[3] = 8; return block; }
+    block[0] = rt_array_get(result, 0); block[1] = rt_array_get(result, 1);
+    block[2] = rt_value_as_int(rt_array_get(result, 2)); block[3] = flags;
+    rt_array_free(result); return block;
 }
 
 /* (cmd_ptr, cmd_len, args, timeout_ms) -> RuntimeValue (array), per

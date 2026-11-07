@@ -1,0 +1,345 @@
+# AUTHORED_UNRUN. Linux broker-backed helper transport, not Container admission.
+# Trusted test-admin config and a fresh isolated spec process are mandatory.
+use std.spec.step
+use app.io.mod.{env_get, process_run_bounded, file_read_regular_no_follow_bounded,
+    file_hash_sha256, file_exists, file_is_regular_no_follow, current_time_ms}
+use std.nogc_sync_mut.io.dir_ops.dir_list
+use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
+use std.sosix.time.{sosix_time_now_monotonic_ms, sosix_sleep_ms}
+use std.sosix.process.{PipedProcessRefV1, PipedProcessOwnedTransferV2, PipedProcessOwnedSpawnV2,
+    sosix_process_spawn_piped_owned_v2, sosix_process_cleanup_piped_owned_v2,
+    sosix_process_validate_piped_ref_v1}
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamRequestV2,
+    GroupProcessStreamLaunchV2, group_process_child_argv_digest_v2}
+use std.nogc_sync_mut.io.group_process_owner.{GroupProcessStreamOwnerV2, group_process_stream_terminal_v2, group_process_stream_cancel_v2}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use os.apps.smux.api.{smux_create_session, smux_list_windows, smux_list_panes,
+    smux_owner_snapshot, smux_configuration_revision, smux_pane_adopt_owned_terminal_transport_v2,
+    smux_poll_output, smux_capture, smux_close_pane, smux_send_text, smux_send_command, smux_paste_text}
+use os.apps.smux.service_revision.service_configuration_equal
+use os.apps.smux.server.smux_server_dispatch
+
+pub struct SmuxOwnedFixtureConfig:
+    root: text
+    broker_program: text
+    broker_digest: text
+    helper_program: text
+    delegated_cgroup_path: text
+    memory_limit_bytes: i64
+    snapshot_digest: text
+    cache_identity: text
+    helper_digest: text = ""
+
+pub struct SmuxOwnedFixture:
+    config: SmuxOwnedFixtureConfig
+    marker: text
+    owner: GroupProcessStreamOwnerV2?
+    reference: PipedProcessRefV1?
+    launch_ready: bool
+    adopted: bool
+    cleanup_attempted: bool
+    helper_cleaned: bool
+    session_id: text
+    window_id: text
+    pane_id: text
+    failure: text
+    cancellation_attempted: bool = false
+
+pub fn owned_fixture_diagnostic(reason: text) -> text:
+    var output = ""
+    var bytes: i64 = 0
+    for ch in reason.chars():
+        val shown = if ch.ord() < 32 or ch.ord() == 127: " " else: ch
+        val width = shown.bytes().len()
+        if bytes + width > 1024: return output + " [truncated]"
+        output = output + shown
+        bytes = bytes + width
+    output
+
+pub fn owned_fixture_note(original: SmuxOwnedFixture, reason: text) -> SmuxOwnedFixture:
+    var fixture = original
+    fixture.failure = if fixture.failure == "": reason else: fixture.failure + "; " + reason
+    fixture
+
+pub fn owned_fixture_path(path: text) -> bool:
+    (path.starts_with("/") and path.bytes().len() <= 4096 and not path.contains("\0") and
+        not path.contains("\n") and not path.contains("\r") and not path.contains("\t"))
+
+pub fn owned_fixture_text(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("fixture config field type differs")
+
+pub fn owned_fixture_digits(value: text) -> bool:
+    if value == "" or value.len() > 20: return false
+    for digit in value.bytes():
+        if digit < 48u8 or digit > 57u8: return false
+    true
+
+pub fn owned_fixture_config_for(env_name: text, program_key: text, digest_key: text) -> Result<SmuxOwnedFixtureConfig, text>:
+    val path = env_get(env_name)
+    if not owned_fixture_path(path): return Err("precondition: mandatory absolute " + env_name)
+    val bytes = file_read_regular_no_follow_bounded(path, 8192)?
+    val parsed = sdn_parse_strict_v1(bytes, SdnStrictLimitsV1(max_source_bytes: 8192,
+        max_depth: 4, max_nodes: 64, max_rows: 16, max_cells: 64, max_columns: 16))
+    if parsed.is_err(): return Err("precondition: malformed strict fixture config")
+    var fields: Dict<text, SdnValue> = {}
+    match parsed.unwrap().value:
+        case SdnValue.Dict(value): fields = value
+        case _: return Err("precondition: fixture config must be a dictionary")
+    var keys = ["root", "brokerProgram", "brokerDigest", program_key, "delegatedCgroupPath",
+        "memoryLimitBytes", "snapshotDigest", "cacheIdentity"]
+    if digest_key != "": keys = keys + [digest_key]
+    if fields.len() != keys.len(): return Err("precondition: exact fixture config fields required")
+    for key in keys:
+        if not fields.contains_key(key): return Err("precondition: missing fixture config field")
+    var memory: i64 = 0
+    match fields["memoryLimitBytes"]:
+        case SdnValue.Int(value): memory = value
+        case _: return Err("precondition: integer memoryLimitBytes required")
+    var helper_digest = ""
+    if digest_key != "":
+        helper_digest = owned_fixture_text(fields, digest_key)?
+        if not builder_digest_valid_v1(helper_digest): return Err("precondition: expected executable digest required")
+    val config = SmuxOwnedFixtureConfig(root: owned_fixture_text(fields, "root")?,
+        broker_program: owned_fixture_text(fields, "brokerProgram")?,
+        broker_digest: owned_fixture_text(fields, "brokerDigest")?,
+        helper_program: owned_fixture_text(fields, program_key)?,
+        delegated_cgroup_path: owned_fixture_text(fields, "delegatedCgroupPath")?,
+        memory_limit_bytes: memory, snapshot_digest: owned_fixture_text(fields, "snapshotDigest")?,
+        cache_identity: owned_fixture_text(fields, "cacheIdentity")?, helper_digest: helper_digest)
+    for value in [config.root, config.broker_program, config.helper_program, config.delegated_cgroup_path]:
+        if not owned_fixture_path(value): return Err("precondition: absolute fixture paths required")
+    for digest in [config.broker_digest, config.snapshot_digest, config.cache_identity]:
+        if not builder_digest_valid_v1(digest): return Err("precondition: invalid fixture digest")
+    if memory <= 0 or memory > 1125899906842624: return Err("precondition: fixture memory bound invalid")
+    var programs = ["/usr/bin/stat", "/usr/bin/id", config.helper_program, config.broker_program]
+    if program_key == "helperProgram": programs = programs + ["/bin/sleep"]
+    for program in programs:
+        if not file_exists(program): return Err("precondition: required actual fixture executable missing")
+    if not file_is_regular_no_follow(config.helper_program) or not file_is_regular_no_follow(config.broker_program):
+        return Err("precondition: helper and broker must be explicit regular no-follow executables")
+    owned_fixture_private_path(config.root, "directory", "700")?
+    if dir_list(config.root).len() != 0: return Err("precondition: fresh empty broker root required")
+    val observed = file_hash_sha256(config.broker_program)
+    if observed == nil or observed.unwrap() != config.broker_digest:
+        return Err("precondition: actual compiled broker digest differs")
+    if helper_digest != "":
+        val child = file_hash_sha256(config.helper_program)
+        if child == nil or child.unwrap() != helper_digest: return Err("precondition: actual compiled target digest differs")
+    Ok(config)
+
+pub fn owned_fixture_private_path(path: text, kind: text, mode: text) -> Result<(), text>:
+    # Explicit Linux fixture oracles; no shell, mkdir, chmod or assumed privacy.
+    val (uid_output, uid_error, uid_code) = process_run_bounded("/usr/bin/id", ["-u"], 2000, 1024)
+    val uid = uid_output.trim()
+    if uid_code != 0 or uid_error != "" or not owned_fixture_digits(uid):
+        return Err("precondition: current UID oracle failed")
+    val (stat_output, stat_error, stat_code) = process_run_bounded("/usr/bin/stat",
+        ["--printf=%F|%a|%u", "--", path], 2000, 1024)
+    if stat_code != 0 or stat_error != "" or stat_output != kind + "|" + mode + "|" + uid:
+        return Err("precondition: private fixture path type mode or current UID differs")
+    Ok(())
+
+pub fn smux_owned_fixture_config() -> Result<SmuxOwnedFixtureConfig, text>:
+    owned_fixture_config_for("SMUX_OWNED_TEST_CONFIG", "helperProgram", "")
+
+pub fn owned_fixture_empty(config: SmuxOwnedFixtureConfig, marker: text) -> SmuxOwnedFixture:
+    SmuxOwnedFixture(config: config, marker: marker, owner: nil, reference: nil,
+        launch_ready: false, adopted: false, cleanup_attempted: false, helper_cleaned: false,
+        session_id: "", window_id: "", pane_id: "", failure: "")
+
+pub fn owned_fixture_start_process(config: SmuxOwnedFixtureConfig, marker: text,
+        args: [text], timeout_ms: i64) -> SmuxOwnedFixture:
+    var fixture = owned_fixture_empty(config, marker)
+    val child_digest = file_hash_sha256(config.helper_program)
+    val now = current_time_ms()
+    if child_digest == nil or now <= 0 or now > 9223372036854765807:
+        fixture.failure = "precondition: child digest or bounded wall clock unavailable"
+        return fixture
+    if config.helper_digest != "" and child_digest.unwrap() != config.helper_digest:
+        return owned_fixture_note(fixture, "precondition: compiled executable changed before native launch")
+    val request = GroupProcessStreamRequestV2(program: config.helper_program, producer_digest: child_digest.unwrap(),
+        args: args, environment: ["LANG=C", "LC_ALL=C", "PATH=/nonexistent"], directory: config.root,
+        inputs: [], timeout_ms: timeout_ms, broker_program: config.broker_program, broker_digest: config.broker_digest,
+        child_argv_digest: group_process_child_argv_digest_v2(config.helper_program, args), launch_deadline_unix_ms: now + 10000)
+    val launch = GroupProcessStreamLaunchV2(root: config.root, worker_id: fixture.marker,
+        generation: 1, snapshot_digest: config.snapshot_digest, cache_identity: config.cache_identity,
+        memory_limit_bytes: config.memory_limit_bytes, request: request,
+        delegated_cgroup_path: config.delegated_cgroup_path)
+    step("Spawn a real broker-backed helper through native delegation admission")
+    match sosix_process_spawn_piped_owned_v2(launch):
+        case PipedProcessOwnedSpawnV2.Ready(owner, reference):
+            fixture.owner = owner
+            fixture.reference = reference
+            fixture.launch_ready = true
+        case PipedProcessOwnedSpawnV2.CleanupRequired(owner, reference, reason):
+            fixture.owner = owner
+            fixture.reference = reference
+            fixture.failure = "owned launch retained cleanup authority: " + owned_fixture_diagnostic(reason)
+        case PipedProcessOwnedSpawnV2.Rejected(reason):
+            fixture.failure = "precondition: actual delegated broker launch rejected: " + owned_fixture_diagnostic(reason)
+    fixture
+
+pub fn smux_owned_fixture_start(config: SmuxOwnedFixtureConfig) -> SmuxOwnedFixture:
+    val entropy = sosix_random_hex(16)
+    if entropy == nil: return owned_fixture_note(owned_fixture_empty(config, ""), "precondition: fresh marker entropy unavailable")
+    val marker = "smux-owned-" + entropy.unwrap()
+    val script = "printf '%s\\r\\n' '" + marker + "-start'; /bin/sleep 1 && printf '%s\\r\\n' '" + marker + "-tail'"
+    owned_fixture_start_process(config, marker, ["-c", script], 5000)
+
+pub fn smux_owned_fixture_adopt(original: SmuxOwnedFixture) -> SmuxOwnedFixture:
+    var fixture = original
+    if fixture.failure != "": return fixture
+    if fixture.owner == nil or fixture.reference == nil:
+        fixture.failure = "ready result omitted complete cleanup authority"
+        return fixture
+    step("Adopt the complete owner and canonical reference into smux")
+    val session = smux_create_session(fixture.marker)
+    fixture.session_id = session.id
+    val windows = smux_list_windows(session.id)
+    if session.id == "" or windows.len() == 0:
+        fixture.failure = "precondition: smux session or window capacity unavailable"
+        return fixture
+    fixture.window_id = windows[0].id
+    val panes = smux_list_panes(session.id, fixture.window_id)
+    if panes.len() == 0:
+        fixture.failure = "precondition: smux created no target pane"
+        return fixture
+    fixture.pane_id = panes[0].id
+    val snapshot = smux_owner_snapshot()
+    val index = snapshot.find_pane_idx(fixture.pane_id)
+    if index < 0:
+        fixture.failure = "smux target disappeared before owned adoption"
+        return fixture
+    val revision = smux_configuration_revision()
+    val transfer = PipedProcessOwnedTransferV2(owner: fixture.owner.unwrap(), reference: fixture.reference.unwrap())
+    val adopted = smux_pane_adopt_owned_terminal_transport_v2(fixture.session_id, fixture.window_id,
+        fixture.pane_id, revision.epoch, revision.value, snapshot.get_pane(index).child_incarnation, transfer)
+    if adopted.is_err():
+        fixture.failure = "smux refused complete owned transfer: " + owned_fixture_diagnostic(adopted.unwrap_err())
+        return fixture
+    fixture.adopted = true
+    if smux_server_dispatch("wrong-token stop-server", "fixture-owner-token") != "smux: unauthorized":
+        return owned_fixture_note(fixture, "real owned stop guard did not authenticate first")
+    if smux_server_dispatch("fixture-owner-token stop-server", "fixture-owner-token") != "smux: stop refused: terminal cleanup or host release pending":
+        return owned_fixture_note(fixture, "real adopted owner did not refuse server stop")
+    val adopted_snapshot = smux_owner_snapshot()
+    val adopted_index = adopted_snapshot.find_pane_idx(fixture.pane_id)
+    if adopted_index < 0: return owned_fixture_note(fixture, "real owned pane disappeared before input refusal")
+    val before_input = adopted_snapshot.get_pane(adopted_index)
+    for sent in [smux_send_text(fixture.session_id, fixture.window_id, fixture.pane_id, "text"),
+            smux_send_command(fixture.session_id, fixture.window_id, fixture.pane_id, "command"),
+            smux_paste_text(fixture.session_id, fixture.window_id, fixture.pane_id, "paste")]:
+        if sent.is_ok(): return owned_fixture_note(fixture, "real output-only owner accepted input")
+        if sent.unwrap_err() != "terminal transport is read-only":
+            return owned_fixture_note(fixture, "unexpected real input refusal: " + owned_fixture_diagnostic(sent.unwrap_err()))
+    val input_snapshot = smux_owner_snapshot()
+    val input_index = input_snapshot.find_pane_idx(fixture.pane_id)
+    if input_index < 0: return owned_fixture_note(fixture, "owned pane disappeared during input refusal")
+    if input_snapshot.get_pane(input_index).input.bytes != before_input.input.bytes:
+        return owned_fixture_note(fixture, "real refused input changed the queue")
+    fixture
+
+pub fn smux_owned_fixture_poll(original: SmuxOwnedFixture) -> SmuxOwnedFixture:
+    var fixture = original
+    if fixture.failure != "": return fixture
+    step("Observe fresh helper output and EOF through the sole smux reader")
+    val deadline = sosix_time_now_monotonic_ms() + 8000
+    var turn = 0
+    val transfer = PipedProcessOwnedTransferV2(owner: fixture.owner.unwrap(), reference: fixture.reference.unwrap())
+    while turn < 400 and sosix_time_now_monotonic_ms() < deadline:
+        val _progress = smux_poll_output()
+        val captured = smux_capture(fixture.session_id, fixture.window_id, fixture.pane_id, 20)
+        val snapshot = smux_owner_snapshot()
+        val index = snapshot.find_pane_idx(fixture.pane_id)
+        if captured.is_err():
+            fixture.failure = "owned capture failed: " + owned_fixture_diagnostic(captured.unwrap_err())
+            return fixture
+        if index < 0:
+            fixture.failure = "owned retained pane unavailable"
+            return fixture
+        val pane = snapshot.get_pane(index)
+        if not pane.same_owned_terminal_transfer(transfer):
+            fixture.failure = "owned stream authority changed"
+            return fixture
+        if pane.terminal_read_error != "":
+            fixture.failure = "owned stream read failed: " + owned_fixture_diagnostic(pane.terminal_read_error)
+            return fixture
+        if pane.terminal_eof:
+            val content = captured.unwrap().content
+            if not content.contains(fixture.marker + "-start") or not content.contains(fixture.marker + "-tail"):
+                fixture.failure = "owned EOF lacked both fresh helper markers"
+            return fixture
+        turn = turn + 1
+        sosix_sleep_ms(20)
+    fixture.failure = "bounded owned output EOF deadline exceeded"
+    fixture
+
+pub fn smux_owned_fixture_cleanup(original: SmuxOwnedFixture) -> SmuxOwnedFixture:
+    var fixture = original
+    if fixture.owner == nil or fixture.cleanup_attempted: return fixture
+    val owner = fixture.owner.unwrap()
+    if fixture.launch_ready and not fixture.adopted and fixture.failure != "" and not fixture.cancellation_attempted:
+        fixture.cancellation_attempted = true
+        val cancelled = group_process_stream_cancel_v2(owner)
+        if cancelled.is_err():
+            fixture = owned_fixture_note(fixture, "bounded broker cancellation pending: " + owned_fixture_diagnostic(cancelled.unwrap_err()))
+    if fixture.launch_ready:
+        # EOF alone is not terminal/reap proof. Wait only for actual collected
+        # broker evidence before this fixture's one cleanup attempt.
+        val deadline = sosix_time_now_monotonic_ms() + 8000
+        var proof = false
+        var last_reason = "no collected broker proof observed"
+        var turn = 0
+        while turn < 160 and sosix_time_now_monotonic_ms() < deadline and not proof:
+            val observed = group_process_stream_terminal_v2(owner)
+            proof = observed.is_ok()
+            if observed.is_err(): last_reason = owned_fixture_diagnostic(observed.unwrap_err())
+            if not proof: sosix_sleep_ms(50)
+            turn = turn + 1
+        if not proof:
+            return owned_fixture_note(fixture, "terminal proof unavailable: " + last_reason + "; complete owner retained without cleanup attempt")
+    step("Clean the helper once while retaining host release authority")
+    fixture.cleanup_attempted = true
+    if fixture.adopted:
+        if smux_close_pane(fixture.session_id, fixture.window_id, fixture.pane_id):
+            return owned_fixture_note(fixture, "smux close incorrectly claimed host release completion")
+        val snapshot = smux_owner_snapshot()
+        val index = snapshot.find_pane_idx(fixture.pane_id)
+        if index < 0:
+            return owned_fixture_note(fixture, "helper cleanup discarded the pane before host acknowledgement")
+        val pane = snapshot.get_pane(index)
+        val transfer = PipedProcessOwnedTransferV2(owner: owner, reference: fixture.reference.unwrap())
+        if not pane.helper_cleaned_awaiting_release or not pane.same_owned_terminal_transfer(transfer):
+            return owned_fixture_note(fixture, "helper cleanup pending or complete owner was not retained")
+        fixture.helper_cleaned = true
+        if smux_server_dispatch("wrong-token stop-server", "fixture-owner-token") != "smux: unauthorized":
+            return owned_fixture_note(fixture, "cleaned owner stop guard did not authenticate first")
+        if smux_server_dispatch("fixture-owner-token stop-server", "fixture-owner-token") != "smux: stop refused: terminal cleanup or host release pending":
+            return owned_fixture_note(fixture, "cleaned owner did not retain server stop refusal")
+        # This source path sees the committed flag and must skip native cleanup.
+        val prior_revision = smux_configuration_revision()
+        val second = smux_close_pane(fixture.session_id, fixture.window_id, fixture.pane_id)
+        val after = smux_owner_snapshot()
+        val after_revision = smux_configuration_revision()
+        if (second or not service_configuration_equal(snapshot, after) or
+                prior_revision.epoch != after_revision.epoch or prior_revision.value != after_revision.value):
+            return owned_fixture_note(fixture, "repeated close changed retained host-release state")
+    else:
+        # CleanupRequired is never execution success. The canonical cleanup
+        # owner may collect a no-child or cancellation proof; failure stays held.
+        val cleaned = sosix_process_cleanup_piped_owned_v2(owner, fixture.reference)
+        if cleaned.is_err():
+            return owned_fixture_note(fixture, "unsuccessful handoff cleanup remains pending: " + owned_fixture_diagnostic(cleaned.unwrap_err()))
+        fixture.helper_cleaned = true
+    if fixture.reference != nil:
+        val retired = sosix_process_validate_piped_ref_v1(fixture.reference.unwrap())
+        if retired.is_ok():
+            return owned_fixture_note(fixture, "cleanup did not retire the exact canonical reference")
+        if retired.unwrap_err() != "stale_process_reference":
+            return owned_fixture_note(fixture, "unexpected post-cleanup reference validation: " + owned_fixture_diagnostic(retired.unwrap_err()))
+    fixture

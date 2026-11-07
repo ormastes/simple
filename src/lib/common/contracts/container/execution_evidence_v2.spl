@@ -1,0 +1,252 @@
+# Canonical integrity for actual provider observations. These data values do not
+# authenticate their producer: signed host evidence and parent acceptance remain
+# mandatory. Absence is a separate native query, never a destroy/tombstone flag.
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeCommandV1, RuntimeOperationV1}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub struct ContainerAbsenceReceiptV2:
+    backend: text
+    scope: ContainerHostScopeV2
+    identity: RuntimeIdentityV1
+    request_digest: text
+    provider_identity_digest: text
+    observed_unix_ms: i64
+    query_digest: text
+    evidence_digest: text
+    proof_kind: text
+
+pub struct ContainerExecutionUserReceiptV2:
+    backend: text
+    scope: ContainerHostScopeV2
+    identity: RuntimeIdentityV1
+    request_digest: text
+    provider_identity_digest: text
+    selected_user: text
+    observed_unix_ms: i64
+    query_digest: text
+    evidence_digest: text
+    proof_kind: text
+
+pub struct ContainerExecutionEvidenceV2:
+    execution: ContainerExecutionPlanV2
+    runtime: RuntimeIdentityV1
+    provider_identity_digest: text
+    exit_code: i64
+    wait_observation_digest: text
+    absence: ContainerAbsenceReceiptV2
+
+fn evidence_fields_v2(source: text, names: [text]) -> Result<Dict<text, SdnValue>, text>:
+    if str_len(source) == 0 or str_len(source) > 65536: return Err("container-evidence-source-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 65536,
+            max_depth: 2, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 24)):
+        case Ok(value): value
+        case Err(issue): return Err("container-evidence-syntax:" + issue.code)
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("container-evidence-object-required")
+    for key in fields.keys():
+        if not names.contains(key): return Err("container-evidence-unknown-field:" + key)
+    for key in names:
+        if not fields.contains_key(key): return Err("container-evidence-missing-field:" + key)
+    Ok(fields)
+
+fn evidence_text_v2(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("container-evidence-text-required:" + key)
+
+fn evidence_int_v2(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("container-evidence-integer-required:" + key)
+
+fn evidence_identity_bytes_v2(identity: RuntimeIdentityV1) -> Result<text, text>:
+    if not builder_identifier_valid_v1(identity.pod_uid) or not builder_identifier_valid_v1(identity.operation_id) or
+            identity.attempt <= 0 or identity.provider_generation <= 0 or
+            not builder_digest_valid_v1(identity.native_id) or not builder_digest_valid_v1(identity.node_boot_id):
+        return Err("container-evidence-runtime-identity-invalid")
+    if identity.engine != "podman" and identity.engine != "docker": return Err("container-evidence-engine-invalid")
+    val fields: Dict<text, SdnValue> = {"podUid": SdnValue.String(identity.pod_uid),
+        "attempt": SdnValue.Int(identity.attempt), "operationId": SdnValue.String(identity.operation_id),
+        "providerGeneration": SdnValue.Int(identity.provider_generation), "engine": SdnValue.String(identity.engine),
+        "nativeId": SdnValue.String(identity.native_id), "scopeFence": SdnValue.String(identity.node_boot_id)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+fn evidence_identity_decode_v2(source: text) -> Result<RuntimeIdentityV1, text>:
+    val fields = evidence_fields_v2(source, ["podUid", "attempt", "operationId", "providerGeneration", "engine", "nativeId", "scopeFence"])?
+    val identity = RuntimeIdentityV1(pod_uid: evidence_text_v2(fields, "podUid")?, attempt: evidence_int_v2(fields, "attempt")?,
+        operation_id: evidence_text_v2(fields, "operationId")?, provider_generation: evidence_int_v2(fields, "providerGeneration")?,
+        engine: evidence_text_v2(fields, "engine")?, native_id: evidence_text_v2(fields, "nativeId")?,
+        node_boot_id: evidence_text_v2(fields, "scopeFence")?)
+    if evidence_identity_bytes_v2(identity)? != source: return Err("container-evidence-identity-noncanonical")
+    Ok(identity)
+
+pub fn container_runtime_query_digest_v2(command: RuntimeCommandV1) -> Result<text, text>:
+    if str_len(command.operation) == 0 or str_len(command.operation) > 64 or
+            str_len(command.program) == 0 or str_len(command.program) > 4096 or
+            command.operation.contains("\0") or command.program.contains("\0") or command.args.len() > 4096:
+        return Err("container-evidence-query-invalid")
+    var arguments: [SdnValue] = []
+    var size = str_len(command.operation) + str_len(command.program)
+    for argument in command.args:
+        if str_len(argument) > 1048576 or argument.contains("\0"): return Err("container-evidence-query-argument-invalid")
+        size = size + str_len(argument)
+        if size > 1048576: return Err("container-evidence-query-too-large")
+        arguments.push(SdnValue.String(argument))
+    val fields: Dict<text, SdnValue> = {"operation": SdnValue.String(command.operation),
+        "program": SdnValue.String(command.program), "args": SdnValue.Array(arguments)}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"))
+
+pub fn container_runtime_observation_digest_v2(operation: RuntimeOperationV1) -> Result<text, text>:
+    var size = 0
+    for value in [operation.status, operation.operation, operation.stdout, operation.stderr,
+            operation.reason, operation.state.phase, operation.state.reason]:
+        if str_len(value) > 2097152: return Err("container-evidence-observation-too-large")
+        size = size + str_len(value)
+        if size > 2097152: return Err("container-evidence-observation-too-large")
+    val fields: Dict<text, SdnValue> = {"status": SdnValue.String(operation.status),
+        "operation": SdnValue.String(operation.operation),
+        "queryDigest": SdnValue.String(container_runtime_query_digest_v2(operation.command)?),
+        "operationExit": SdnValue.Int(operation.exit_code), "stdout": SdnValue.String(operation.stdout),
+        "stderr": SdnValue.String(operation.stderr), "reason": SdnValue.String(operation.reason),
+        "phase": SdnValue.String(operation.state.phase), "workloadExit": SdnValue.Int(operation.state.exit_code),
+        "stateReason": SdnValue.String(operation.state.reason),
+        "runtime": SdnValue.String(evidence_identity_bytes_v2(operation.state.identity)?)}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"))
+
+pub fn container_absence_receipt_encode_v2(receipt: ContainerAbsenceReceiptV2) -> Result<text, text>:
+    if receipt.proof_kind != "exact-native-object-absence-v1" or receipt.observed_unix_ms <= 0:
+        return Err("container-evidence-absence-proof-invalid")
+    for digest in [receipt.request_digest, receipt.provider_identity_digest, receipt.query_digest, receipt.evidence_digest]:
+        if not builder_digest_valid_v1(digest): return Err("container-evidence-digest-invalid")
+    if (receipt.backend != "linux-podman" and receipt.backend != "windows-docker-process") or
+            (receipt.backend == "linux-podman" and receipt.identity.engine != "podman") or
+            (receipt.backend == "windows-docker-process" and receipt.identity.engine != "docker"):
+        return Err("container-evidence-absence-backend-mismatch")
+    if receipt.identity.node_boot_id != container_scope_fence_id_v2(receipt.scope)? or
+            receipt.identity.provider_generation != receipt.scope.provider_generation:
+        return Err("container-evidence-absence-scope-mismatch")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("container-absence-receipt"),
+        "backend": SdnValue.String(receipt.backend), "scope": SdnValue.String(container_host_scope_bytes_v2(receipt.scope)?),
+        "runtime": SdnValue.String(evidence_identity_bytes_v2(receipt.identity)?),
+        "requestDigest": SdnValue.String(receipt.request_digest), "providerIdentityDigest": SdnValue.String(receipt.provider_identity_digest),
+        "observedUnixMs": SdnValue.Int(receipt.observed_unix_ms), "queryDigest": SdnValue.String(receipt.query_digest),
+        "evidenceDigest": SdnValue.String(receipt.evidence_digest), "proofKind": SdnValue.String(receipt.proof_kind)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn container_absence_receipt_decode_v2(source: text) -> Result<ContainerAbsenceReceiptV2, text>:
+    val fields = evidence_fields_v2(source, ["version", "kind", "backend", "scope", "runtime", "requestDigest",
+        "providerIdentityDigest", "observedUnixMs", "queryDigest", "evidenceDigest", "proofKind"])?
+    if evidence_int_v2(fields, "version")? != 2 or evidence_text_v2(fields, "kind")? != "container-absence-receipt":
+        return Err("container-evidence-absence-version")
+    val receipt = ContainerAbsenceReceiptV2(backend: evidence_text_v2(fields, "backend")?,
+        scope: container_host_scope_decode_v2(evidence_text_v2(fields, "scope")?)?,
+        identity: evidence_identity_decode_v2(evidence_text_v2(fields, "runtime")?)?,
+        request_digest: evidence_text_v2(fields, "requestDigest")?, provider_identity_digest: evidence_text_v2(fields, "providerIdentityDigest")?,
+        observed_unix_ms: evidence_int_v2(fields, "observedUnixMs")?, query_digest: evidence_text_v2(fields, "queryDigest")?,
+        evidence_digest: evidence_text_v2(fields, "evidenceDigest")?, proof_kind: evidence_text_v2(fields, "proofKind")?)
+    if container_absence_receipt_encode_v2(receipt)? != source: return Err("container-evidence-absence-noncanonical")
+    Ok(receipt)
+
+pub fn container_absence_receipt_digest_v2(receipt: ContainerAbsenceReceiptV2) -> Result<text, text>:
+    val source = container_absence_receipt_encode_v2(receipt)?
+    Ok(sha256_text(source))
+
+pub fn container_execution_evidence_encode_v2(value: ContainerExecutionEvidenceV2) -> Result<text, text>:
+    val plan = value.execution
+    val absence = value.absence
+    val plan_bytes = container_execution_plan_bytes_v2(plan)?
+    val absence_bytes = container_absence_receipt_encode_v2(absence)?
+    if plan.backend != absence.backend or plan.request_digest != absence.request_digest or
+            plan.workload_uid != value.runtime.pod_uid or plan.attempt != value.runtime.attempt or
+            plan.operation_id != value.runtime.operation_id or plan.provider_generation != value.runtime.provider_generation:
+        return Err("container-evidence-execution-mismatch")
+    val scope = ContainerHostScopeV2(physical_host_id: plan.physical_host_id, service_scope_id: plan.service_scope_id,
+        boot_id: plan.boot_id, provider_generation: plan.provider_generation, native_machine_id: plan.native_machine_id,
+        continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
+    if container_host_scope_bytes_v2(scope)? != container_host_scope_bytes_v2(absence.scope)? or
+            evidence_identity_bytes_v2(value.runtime)? != evidence_identity_bytes_v2(absence.identity)? or
+            value.provider_identity_digest != absence.provider_identity_digest or
+            not builder_digest_valid_v1(value.wait_observation_digest) or value.exit_code < 0:
+        return Err("container-evidence-completion-mismatch")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("container-execution-evidence"),
+        "execution": SdnValue.String(plan_bytes), "runtime": SdnValue.String(evidence_identity_bytes_v2(value.runtime)?),
+        "providerIdentityDigest": SdnValue.String(value.provider_identity_digest), "exitCode": SdnValue.Int(value.exit_code),
+        "waitObservationDigest": SdnValue.String(value.wait_observation_digest), "absence": SdnValue.String(absence_bytes)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(source) > 65536: return Err("container-evidence-source-size")
+    Ok(source)
+
+pub fn container_execution_evidence_decode_v2(source: text) -> Result<ContainerExecutionEvidenceV2, text>:
+    val fields = evidence_fields_v2(source, ["version", "kind", "execution", "runtime", "providerIdentityDigest",
+        "exitCode", "waitObservationDigest", "absence"])?
+    if evidence_int_v2(fields, "version")? != 2 or evidence_text_v2(fields, "kind")? != "container-execution-evidence":
+        return Err("container-evidence-version")
+    val value = ContainerExecutionEvidenceV2(execution: container_execution_plan_decode_v2(evidence_text_v2(fields, "execution")?)?,
+        runtime: evidence_identity_decode_v2(evidence_text_v2(fields, "runtime")?)?,
+        provider_identity_digest: evidence_text_v2(fields, "providerIdentityDigest")?, exit_code: evidence_int_v2(fields, "exitCode")?,
+        wait_observation_digest: evidence_text_v2(fields, "waitObservationDigest")?,
+        absence: container_absence_receipt_decode_v2(evidence_text_v2(fields, "absence")?)?)
+    if container_execution_evidence_encode_v2(value)? != source: return Err("container-evidence-noncanonical")
+    Ok(value)
+
+pub fn container_execution_evidence_v2(plan: ContainerExecutionPlanV2, wait: RuntimeOperationV1,
+        absence: ContainerAbsenceReceiptV2) -> Result<ContainerExecutionEvidenceV2, text>:
+    if wait.status != "ok" or wait.operation != "wait" or wait.command.operation != "wait" or
+            wait.state.phase != "exited" or wait.state.exit_code < 0:
+        return Err("container-evidence-terminal-wait-required")
+    val value = ContainerExecutionEvidenceV2(execution: plan, runtime: wait.state.identity,
+        provider_identity_digest: absence.provider_identity_digest, exit_code: wait.state.exit_code,
+        wait_observation_digest: container_runtime_observation_digest_v2(wait)?, absence: absence)
+    val validated = container_execution_evidence_encode_v2(value)?
+    Ok(value)
+
+# Selected engine user is an observation, not proof of the workload effective UID.
+pub fn container_execution_user_receipt_encode_v2(receipt: ContainerExecutionUserReceiptV2) -> Result<text, text>:
+    if receipt.proof_kind != "exact-native-execution-user-v1" or receipt.observed_unix_ms <= 0:
+        return Err("container-evidence-user-proof-invalid")
+    if str_len(receipt.selected_user) == 0 or str_len(receipt.selected_user) > 256 or
+            receipt.selected_user.contains("\0") or receipt.selected_user.contains("\n") or
+            receipt.selected_user.contains("\r") or receipt.selected_user.contains("\t"):
+        return Err("container-evidence-selected-user-invalid")
+    for digest in [receipt.request_digest, receipt.provider_identity_digest, receipt.query_digest, receipt.evidence_digest]:
+        if not builder_digest_valid_v1(digest): return Err("container-evidence-digest-invalid")
+    if (receipt.backend != "linux-podman" and receipt.backend != "windows-docker-process") or
+            (receipt.backend == "linux-podman" and receipt.identity.engine != "podman") or
+            (receipt.backend == "windows-docker-process" and receipt.identity.engine != "docker"):
+        return Err("container-evidence-user-backend-mismatch")
+    if receipt.identity.node_boot_id != container_scope_fence_id_v2(receipt.scope)? or
+            receipt.identity.provider_generation != receipt.scope.provider_generation:
+        return Err("container-evidence-user-scope-mismatch")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("container-execution-user-receipt"),
+        "backend": SdnValue.String(receipt.backend), "scope": SdnValue.String(container_host_scope_bytes_v2(receipt.scope)?),
+        "runtime": SdnValue.String(evidence_identity_bytes_v2(receipt.identity)?),
+        "requestDigest": SdnValue.String(receipt.request_digest), "providerIdentityDigest": SdnValue.String(receipt.provider_identity_digest),
+        "selectedUser": SdnValue.String(receipt.selected_user), "observedUnixMs": SdnValue.Int(receipt.observed_unix_ms), "queryDigest": SdnValue.String(receipt.query_digest),
+        "evidenceDigest": SdnValue.String(receipt.evidence_digest), "proofKind": SdnValue.String(receipt.proof_kind)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn container_execution_user_receipt_decode_v2(source: text) -> Result<ContainerExecutionUserReceiptV2, text>:
+    val fields = evidence_fields_v2(source, ["version", "kind", "backend", "scope", "runtime", "requestDigest",
+        "providerIdentityDigest", "selectedUser", "observedUnixMs", "queryDigest", "evidenceDigest", "proofKind"])?
+    if evidence_int_v2(fields, "version")? != 2 or evidence_text_v2(fields, "kind")? != "container-execution-user-receipt":
+        return Err("container-evidence-user-version")
+    val receipt = ContainerExecutionUserReceiptV2(backend: evidence_text_v2(fields, "backend")?,
+        scope: container_host_scope_decode_v2(evidence_text_v2(fields, "scope")?)?,
+        identity: evidence_identity_decode_v2(evidence_text_v2(fields, "runtime")?)?,
+        request_digest: evidence_text_v2(fields, "requestDigest")?, provider_identity_digest: evidence_text_v2(fields, "providerIdentityDigest")?,
+        selected_user: evidence_text_v2(fields, "selectedUser")?, observed_unix_ms: evidence_int_v2(fields, "observedUnixMs")?, query_digest: evidence_text_v2(fields, "queryDigest")?,
+        evidence_digest: evidence_text_v2(fields, "evidenceDigest")?, proof_kind: evidence_text_v2(fields, "proofKind")?)
+    if container_execution_user_receipt_encode_v2(receipt)? != source: return Err("container-evidence-user-noncanonical")
+    Ok(receipt)
+
+pub fn container_execution_user_receipt_digest_v2(receipt: ContainerExecutionUserReceiptV2) -> Result<text, text>:
+    val source = container_execution_user_receipt_encode_v2(receipt)?
+    Ok(sha256_text(source))
