@@ -858,3 +858,42 @@ write/verify on Darwin, which is so far verified only by fixtures, not a real ru
 Stage-3 resume command once an admitted Stage 2 exists:
 `sh scripts/bootstrap/resume-stage3-from-admitted.sh <admitted-stage2-output-dir>`
 (e.g. `/private/tmp/boot2-out/s2`).
+
+## Re-triage 2026-11-07: owner decision already implemented; residual is the descriptor capsule
+
+Owner decision (2026-11-07): pin descriptors by fstat dev+inode identity,
+keeping re-open-and-compare. Checked on release/1.0.0 `5392e57a49a`: that
+mechanism has been in the tree since 2026-11-04. The 2026-11-04 re-triage above
+was written before it landed, so its claim that `:877-930` is GNU-stat-only is
+stale.
+
+- `f6c03cbc837` and `62f9fed02aa` added `bootstrap_stage3_fd_identity`,
+  `bootstrap_stage3_fd_stamp` and `bootstrap_stage3_fd_matches_path` in
+  `scripts/check/lib/bootstrap-stage3/manifest-verify.shs`. On Linux these use
+  procfs plus GNU `stat -Lc`. On Darwin and the BSDs they use `fstat(2)` on the
+  held fd and `lstat(2)` on the path. They do not use `stat -L /dev/fd/N`,
+  because on Darwin that reports the fdesc device as st_dev (measured; see the
+  comment at `:686`).
+- Without procfs, `verify_manifest_impl` takes the portable arm for the bound
+  map (fd 9) and the manifest (fd 8): open, stamp, read, then
+  `fd_matches_path`.
+- Selftest `sh scripts/check/check-bootstrap-fd-identity.shs`:
+  `PASS — 33 fixture(s) checked on Darwin arm`. It includes these negative
+  cases: renamed-over, modified-after-open, path-removed, inherited-renamed-over,
+  closed-fd and missing-tool.
+
+**Still OPEN (the real residual):** with `BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE=1`,
+the portable arm refuses with `portable-descriptor-capsule-not-supported`.
+Three places set it unconditionally:
+`bootstrap-stage3-shared-runner.pl:1184` and
+`bootstrap-stage3-provenance-verifier.sh:198,356`. The Perl runner hands every
+helper over as `/proc/<parent_pid>/fd/N` and pins the owner with
+`proc_start_ticks`. Porting it means redesigning the capsule protocol:
+pass held fds plus fstat stamps instead of procfd paths, and stamp the owner
+without `/proc/<pid>/stat`. That is a separate task. A blanket swap of
+`/proc` for `/dev/fd` is not acceptable here.
+
+Not part of this gap: the path-shape validators (`expr ... '/proc/...'`) in
+sanity, command-snapshot and manifest-write already reject unmatched shapes.
+`/proc/meminfo`, `/proc/loadavg` and the PSS reads are memory and load metrics,
+not identity checks. The `self-test.shs:606-640` fixtures run on Linux only.
