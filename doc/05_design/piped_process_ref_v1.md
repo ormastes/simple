@@ -146,3 +146,14 @@ producer/runtime/provider identities. Do not repeat earlier unqualified runs.
    execution; Linux execution cannot establish Windows cleanup/overlapped proof.
 
 Draft disposition: awaiting source review and verification, not merged/admitted.
+
+## Pending verification isolation
+
+Each SDK Simple facade fixture invocation intentionally retains exactly one
+POSIX registry slot and its child ownership until the owning fixture host
+process exits. The independent Caret fixture retains two. Run each SSpec or
+native diagnostic in a separate host process; never repeat them against a shared
+16-slot registry. Intentional exhaustion from unsupported POSIX lifecycle
+cleanup is a known capability limit, not a retry bug or a reason to rerun the
+same diagnostic. The native C harness explicitly retires its own test fixtures;
+that test-only ownership is not a production Ref cleanup fallback.

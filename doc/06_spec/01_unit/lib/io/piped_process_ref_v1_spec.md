@@ -30,3 +30,10 @@ retirement is explicitly test-only, not a supported production fallback.
 The native/SSpec fixture must fail if its real child executable is absent. No
 optional-provider success, placeholder body, raw PID cleanup fallback, actual OS
 PID-reuse execution or POSIX group-incarnation guarantee is claimed.
+
+Verification isolation: one SDK Simple facade invocation retains exactly one
+POSIX slot/child ownership until its owning fixture host exits; the separate
+Caret fixture retains two. Run each spec/native diagnostic in a separate host
+process. Do not repeat fixtures against one shared 16-slot registry or treat
+intentional unsupported-cleanup exhaustion as a retry bug. Native C harness
+teardown applies only to fixtures it explicitly owns.
