@@ -25,6 +25,21 @@ all owner calls even if the parent gate was held at fork. They must exec before
 using the registry; copied tokens cannot unlock the parent's shared open
 description. The regression holds the gate across fork and bounds refusal.
 
+Linux origin additionally binds the verified kernel PID-namespace device and
+inode, so numeric PID equality across namespaces is insufficient. Initial
+nsfs/PID-type proof is allocation-free and checks its temporary close once;
+after establishment only stat is used. Missing or changed identity permanently
+quarantines the process copy, even if proc visibility later returns. Initial
+in-progress publication refuses without waiting. Origin checks preserve errno
+and bracket gate acquisition, with another check every 64 contended spins.
+This adds stat work under contention; no throughput qualification is claimed.
+An origin failure after gate acquisition leaves that quarantined gate untouched.
+Positive state/release tokens remain UNKNOWN on refused origin, never a false
+stale/closed result. If an acquiring thread already opened a handle, its unique
+atomic slot retains that handle as UNKNOWN without reacquiring the gate or
+issuing a foreign native close. No arbitrary fork-in-signal safety inside an
+active native critical section or native syscall is claimed.
+
 | Release state | Owner returned | Meaning |
 | --- | --- | --- |
 | Released | none | Native unlock and close succeeded |
