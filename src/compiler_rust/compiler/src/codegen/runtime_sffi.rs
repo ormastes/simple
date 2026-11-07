@@ -2466,6 +2466,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     // Pure-Simple collection helpers implemented by the C SFFI runtime.
     RuntimeFuncSpec::new("spl_ordered_key_cmp", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("spl_erased_key_hash", &[I64], &[I64]),
     RuntimeFuncSpec::new("spl_collection_capture_begin", &[I64], &[I64]),
     RuntimeFuncSpec::new("spl_collection_capture_note_size", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("spl_collection_capture_note_lookup", &[I64, I64, I64], &[I64]),
