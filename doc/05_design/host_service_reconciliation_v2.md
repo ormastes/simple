@@ -18,10 +18,14 @@ journal state, missing provenance or resource mismatch block readiness. No objec
 is adopted or deleted. Every observed object, including terminal state, remains
 charged through its retained reservation.
 
-Only absent rows that never committed begin, or previously recorded the exact
-prepared-abort outcome, are cancelled/released. Executing recovery becomes
-outcome-unknown; absence from inventory alone never releases it. Unknown rows stay
-charged. Historical released allocations can sum above capacity, so quarantined
+Absent rows that never committed begin, or previously recorded the exact
+prepared-abort outcome, are cancelled/released. A completed row preserves release
+only when the shared capacity evidence dispatcher revalidates the exact archived
+qualified wait, signed cleanup intent and native absence (or helper reap), and
+the journal's immutable outcome digest matches that proof. Missing or corrupt
+proof recharges the row; a Released flag alone is insufficient. Executing recovery
+becomes outcome-unknown; absence from inventory alone never releases it. Unknown
+rows stay charged. Historical released allocations can sum above capacity, so quarantined
 open validates shape but does not grant availability. The final reconciled ledger
 must pass the real capacity check before readiness; unresolved overcapacity stays
 blocked.

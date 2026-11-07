@@ -153,6 +153,13 @@ pub fn host_service_reconcile_v2(owner: HostCapacityOwnerV1,
             if entry.runtime.operation_id == operation.id: present = true
         val no_effect = not present and (state.state == "admitted" or
             (state.state == "cancelled" and state.outcome_digest == sha256_text(abort.unwrap())))
+        var completed_release = false
+        if not present and state.state == "completed":
+            # Reuse the same exact retained native/wait/cleanup proof validator
+            # as ordinary settlement and journal reopen. A Released row flag
+            # alone never survives a new service incarnation as authority.
+            val evidence = host_capacity_completion_evidence_v1(current.journal.root, operation)
+            if evidence.is_ok(): completed_release = state.outcome_digest == sha256_text(evidence.unwrap())
         if no_effect:
             # Admitted means begin never committed in the selected process-crash
             # profile. A native match above refuses; unknown never takes this path.
@@ -161,11 +168,13 @@ pub fn host_service_reconcile_v2(owner: HostCapacityOwnerV1,
             current.journal = cancelled.unwrap()
             current.ledger.revision = current.journal.sequence + 1
             row.state = HostReservationStateV1.Released
+        elif completed_release:
+            row.state = HostReservationStateV1.Released
         else:
             row.state = HostReservationStateV1.Uncertain
         rows.push(row)
         val record: Dict<text, SdnValue> = {"operationId": SdnValue.String(operation.id),
-            "state": SdnValue.String(if no_effect: "released-no-effect" else: "charged-uncertain"),
+            "state": SdnValue.String(if no_effect: "released-no-effect" elif completed_release: "released-completion-evidence" else: "charged-uncertain"),
             "cpuMillis": SdnValue.Int(row.cpu_millis), "memoryBytes": SdnValue.Int(row.memory_bytes)}
         classifications.push(SdnValue.Dict(record))
     current.ledger.reservations = rows
