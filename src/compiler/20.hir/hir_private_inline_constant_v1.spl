@@ -1,0 +1,19 @@
+# Shared HIR/MIR decision: private immutable values that need no imported storage.
+# Keep HIR export lifting and MIR provider binding on the same literal contract.
+use compiler.hir.hir_definitions.{HirConst, HirExprKind}
+use compiler.hir.hir_literal_constant_v1.{hir_fold_literal_constant_v1}
+
+pub fn hir_private_literal_is_inline_v1(constant: HirConst) -> bool:
+    if constant.is_mutable or not constant.visibility.is_private(): return false
+    match constant.value.kind:
+        case HirExprKind.IntLit(_, _) | HirExprKind.FloatLit(_, _) |
+             HirExprKind.FloatLexeme(_, _) | HirExprKind.BoolLit(_): true
+        case HirExprKind.StringLit(_, interps):
+            # For an immutable Private string, the MIR runtime initializer
+            # requires storage exactly when interpolation parts are present.
+            if val parts = interps:
+                return parts.len() == 0
+            true
+        case HirExprKind.Binary(_, _, _) | HirExprKind.Unary(_, _):
+            hir_fold_literal_constant_v1(constant.value) != nil
+        case _: false
