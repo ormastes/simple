@@ -20,7 +20,7 @@ static int test_close(int fd) {
     return result;
 }
 #define SPL_OWNED_LOCK_CLOSE_V2(h) test_close(h)
-#include "../runtime_file_lock_owned_v2.h"
+#include "../runtime_file_lock_owned_v2.c"
 int main(void) {
     char root[] = "/tmp/simple-owned-unknown-XXXXXX";
     assert(mkdtemp(root));

@@ -14102,7 +14102,7 @@ bool rt_madvise(int64_t addr, int64_t size, int64_t advice) {
 #endif
 }
 
-#include "runtime_file_lock_owned_v2.h"
+#include "runtime_file_lock_owned_v2.c"
 
 /* ---- file_ops.rs: rt_file_lock / rt_file_unlock -------------------------- */
 
