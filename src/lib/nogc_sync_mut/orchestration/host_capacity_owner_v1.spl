@@ -1,8 +1,8 @@
-use std.nogc_sync_mut.orchestration.host_runtime_exec_projection_v3.host_runtime_exec_child_projection_v3
 # Local host reservation owner over the existing distributed-operation journal.
 # No provider launch or remote endpoint. Callers supply authenticated grants and
 # trusted capacity/continuity; schemas and digests do not authenticate callers.
 use std.common.contracts.orchestration.host_capacity_v1.*
+use std.nogc_sync_mut.orchestration.host_runtime_exec_cleanup_guard_v3.{host_runtime_exec_cleanup_index_v3, host_runtime_exec_parent_cleanup_guard_v3}
 use std.nogc_sync_mut.orchestration.host_exec_control_installation_projection_v3.host_exec_control_installation_projection_v3
 use std.common.contracts.orchestration.host_helper_plan_v1.*
 use std.common.contracts.orchestration.host_reservation_codec_v1.*
@@ -68,16 +68,17 @@ fn host_capacity_projection_v1(journal: DistributedOperationJournalV2, capacity:
         continuity_proven: bool, quarantine_previous: bool = false) -> Result<HostCapacityLedgerV1, text>:
     if journal.operations.len() > 4096:
         return Err("reservation-history-full")
+    # One validated child prepass for this fixed journal projection. Its child
+    # packets are reused for barriers, not re-read once per parent release.
+    val child_barriers = host_runtime_exec_cleanup_index_v3(journal, capacity)?
     var rows: [HostReservationV1] = []
     for operation_id in journal.operations.keys():
         # The indexed journal read also verifies writer lease and current revision.
         val state = distributed_operation_journal_lookup_v2(journal, operation_id)?
         val operation = distributed_decode_operation_v2(state.envelope)?
         if operation.operation == "host_runtime_exec_v3":
-            val child_valid = host_runtime_exec_child_projection_v3(journal, capacity, operation)?
-            if not child_valid: return Err("retained-exec-child-provenance-refused")
-            # Validated provenance is not another allocation or a helper row.
-            # Parent charge/release projection below remains authoritative.
+            # Every child was fully validated in the same-current-journal
+            # prepass above. It is not another allocation or a helper row.
             continue
         if operation.operation == "host_exec_control_install_v3":
             val installation = host_exec_control_installation_projection_v3(journal, capacity, operation)?
@@ -95,7 +96,7 @@ fn host_capacity_projection_v1(journal: DistributedOperationJournalV2, capacity:
             return Err("retained-reservation-host-fence-mismatch")
         var row = intent.reservation
         val abort_outcome = host_capacity_abort_outcome_v1(intent, operation, helper)?
-        val completion = if state.state == "completed": host_capacity_completion_evidence_v1(journal.root, operation)
+        val completion = if state.state == "completed": host_capacity_completion_from_children_v2(journal.root, operation, child_barriers)
             else: Err("host-settlement-not-completed")
         if completion.is_ok() and state.outcome_digest == sha256_text(completion.unwrap()):
             row.state = HostReservationStateV1.Released
@@ -104,7 +105,8 @@ fn host_capacity_projection_v1(journal: DistributedOperationJournalV2, capacity:
             # preparation deadlines, cancellation or native absence assumptions.
             # Unproved retained resources remain charged until explicit reconciliation.
             row.state = HostReservationStateV1.Uncertain
-        elif state.state == "cancelled" and state.outcome_digest == sha256_text(abort_outcome) and continuity_proven:
+        elif (state.state == "cancelled" and state.outcome_digest == sha256_text(abort_outcome) and continuity_proven and
+                not child_barriers.contains_key(operation.id)):
             row.state = HostReservationStateV1.Released
         elif state.state != "admitted":
             # Terminal create/cancel is not native absence. Recovery remains
@@ -354,6 +356,10 @@ fn host_capacity_owner_release_prepared_v1(owner: HostCapacityOwnerV1,
     val matched = host_capacity_match_receipt_v1(receipt, intent, operation, helper)?
     val retained = host_capacity_owner_check_retained_v1(owner, intent, operation, helper)?
     if not owner.ledger.continuity_proven: return Err("host-reconciliation-required")
+    if not helper:
+        # This is resource release, never a native stop/destroy. Each existing
+        # API handles one preparation, so it builds one actual child index.
+        val children = host_runtime_exec_parent_cleanup_guard_v3(owner.journal, owner.ledger.capacity, operation)?
     val prior = daemon_operation_exact_v2(owner.journal, operation)?
     val outcome = host_capacity_abort_outcome_v1(intent, operation, helper)?
     val digest = sha256_text(outcome)
@@ -375,6 +381,51 @@ pub fn host_capacity_completion_evidence_v1(root: text, operation: OperationEnve
     if operation.operation == "host_helper_reservation_v1": return host_helper_settlement_evidence_v1(root, operation)
     Err("host-settlement-original-action")
 
+# Internal index came from the actual same-journal prepass, never a decoded
+# permission or caller-supplied skip flag. Helper settlement stays independent.
+fn host_capacity_completion_from_children_v2(root: text, operation: OperationEnvelopeV2,
+        barriers: Dict<text, text>) -> Result<text, text>:
+    if operation.operation == "host_reservation_v1" and barriers.contains_key(operation.id):
+        return Err("host-child-cleanup-unsettled:" + barriers[operation.id])
+    host_capacity_completion_evidence_v1(root, operation)
+
+# Actual release/evidence consumers use this owner-aware gate. The root-only
+# decoder above is historical receipt integrity, not sufficient release proof.
+pub fn host_capacity_completion_evidence_owned_v2(journal: DistributedOperationJournalV2,
+        capacity: HostCapacityV1, operation: OperationEnvelopeV2) -> Result<text, text>:
+    val exact = daemon_operation_exact_v2(journal, operation)?
+    if operation.operation != "host_reservation_v1": return host_capacity_completion_evidence_v1(journal.root, operation)
+    val barriers = host_runtime_exec_cleanup_index_v3(journal, capacity)?
+    host_capacity_completion_from_children_v2(journal.root, operation, barriers)
+
+# Small derived evidence facts for startup under the same held writer. This
+# batch is produced internally, never accepted from a request or wire decoder.
+# Canonical proof bytes are validated once, hashed, and not retained per row.
+pub struct HostCapacityCompletionEntryV3:
+    operation_digest: text
+    outcome_digest: text
+    evidence_digest: text
+
+pub struct HostCapacityCompletionBatchV3:
+    entries: Dict<text, HostCapacityCompletionEntryV3>
+    child_barriers: Dict<text, text>
+
+pub fn host_capacity_completion_batch_v3(journal: DistributedOperationJournalV2,
+        capacity: HostCapacityV1) -> Result<HostCapacityCompletionBatchV3, text>:
+    val barriers = host_runtime_exec_cleanup_index_v3(journal, capacity)?
+    var entries: Dict<text, HostCapacityCompletionEntryV3> = {}
+    for id in journal.operations.keys():
+        val row = distributed_operation_journal_lookup_v2(journal, id)?
+        if row.state != "completed": continue
+        val operation = distributed_decode_operation_v2(row.envelope)?
+        if not ["host_reservation_v1", "host_helper_reservation_v1"].contains(operation.operation): continue
+        val evidence = host_capacity_completion_from_children_v2(journal.root, operation, barriers)
+        if evidence.is_err(): continue
+        val digest = sha256_text(evidence.unwrap())
+        if digest != row.outcome_digest: continue
+        entries[id] = HostCapacityCompletionEntryV3(sha256_text(row.envelope), row.outcome_digest, digest)
+    Ok(HostCapacityCompletionBatchV3(entries, barriers))
+
 pub struct HostCapacitySettlementTurnV1:
     owner: HostCapacityOwnerV1
     settled: bool
@@ -390,7 +441,7 @@ pub fn host_capacity_owner_settle_v1(owner: HostCapacityOwnerV1,
     if original_operation.operation == "host_reservation_v1":
         val helpers = host_capacity_owner_parent_helpers_settled_v1(owner, original_operation.id)
         if helpers.is_err(): return HostCapacitySettlementTurnV1(owner, false, helpers.unwrap_err())
-    val evidence = host_capacity_completion_evidence_v1(owner.journal.root, original_operation)
+    val evidence = host_capacity_completion_evidence_owned_v2(owner.journal, owner.ledger.capacity, original_operation)
     if evidence.is_err(): return HostCapacitySettlementTurnV1(owner, false, evidence.unwrap_err())
     val digest = sha256_text(evidence.unwrap())
     if not ["executing", "outcome-unknown", "completed"].contains(state.state):

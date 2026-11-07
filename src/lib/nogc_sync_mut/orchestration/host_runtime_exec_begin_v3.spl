@@ -80,7 +80,7 @@ fn exec_begin_current_v3(local: HostLocalRootV1, packet: HostRuntimeExecRequestV
 
 # No Host/Container owner is captured in the publication guard. Only immutable
 # policy, signed request and context data cross this synchronous callback port.
-fn exec_begin_verify_v3(policy: LocalAuthorityPolicyV1, packet: HostRuntimeExecRequestV3,
+pub fn host_runtime_exec_verify_v3(policy: LocalAuthorityPolicyV1, packet: HostRuntimeExecRequestV3,
         before: HostReservationAuthorizationContextV1, after: HostReservationAuthorizationContextV1) -> Result<ExecutionGrantV2, text>:
     if (after.grant_clock <= 0 or after.monotonic_ms < 0 or after.grant_clock < before.grant_clock or
             after.monotonic_ms < before.monotonic_ms): return Err("host-exec-begin-clock-invalid-or-regressed")
@@ -130,7 +130,7 @@ pub fn host_runtime_exec_begin_v3(local: HostLocalRootV1, source: text,
     val charged = exec_begin_current_v3(current, packet)
     if charged.is_err(): return exec_begin_failed_v3(current, admitted_retry, charged.unwrap_err())
     # Even read-only native resolver work is preceded by full SDK verification.
-    val authorized = exec_begin_verify_v3(current.policy, packet, context, context)
+    val authorized = host_runtime_exec_verify_v3(current.policy, packet, context, context)
     if authorized.is_err(): return exec_begin_failed_v3(current, admitted_retry, authorized.unwrap_err())
     val resolved = host_local_resolve_execution_v2(current, packet.intent.request.parent.operation_id)
     current = resolved.local
@@ -146,7 +146,7 @@ pub fn host_runtime_exec_begin_v3(local: HostLocalRootV1, source: text,
     if loaded.is_err(): return exec_begin_failed_v3(current, admitted_retry, loaded.unwrap_err())
     val installation = loaded.unwrap()
     val before_probe = refresh()
-    val probe_authority = exec_begin_verify_v3(current.policy, packet, context, before_probe)
+    val probe_authority = host_runtime_exec_verify_v3(current.policy, packet, context, before_probe)
     if probe_authority.is_err(): return exec_begin_failed_v3(current, admitted_retry, probe_authority.unwrap_err())
     val probe_timeout = if packet.intent.request.timeout_ms > 30000: 30000 else: packet.intent.request.timeout_ms
     val probed = simple_container_exec_control_probe_v3(current.container, resolved.execution.unwrap(),
@@ -165,7 +165,7 @@ pub fn host_runtime_exec_begin_v3(local: HostLocalRootV1, source: text,
     if control.observed_unix_ms < before_probe.grant_clock:
         return exec_begin_failed_v3(current, admitted_retry, "host-exec-begin-control-clock-regressed")
     val after_probe = refresh()
-    val fresh_authority = exec_begin_verify_v3(current.policy, packet, before_probe, after_probe)
+    val fresh_authority = host_runtime_exec_verify_v3(current.policy, packet, before_probe, after_probe)
     if fresh_authority.is_err(): return exec_begin_failed_v3(current, admitted_retry, fresh_authority.unwrap_err())
     if after_probe.grant_clock < control.observed_unix_ms:
         return exec_begin_failed_v3(current, admitted_retry, "host-exec-begin-control-clock-regressed")
@@ -176,7 +176,7 @@ pub fn host_runtime_exec_begin_v3(local: HostLocalRootV1, source: text,
     val policy = current.policy
     val archive_guard = fn() -> Result<HostReservationAuthorizationContextV1, text>:
         val fresh = refresh()
-        val verified = exec_begin_verify_v3(policy, packet, after_probe, fresh)?
+        val verified = host_runtime_exec_verify_v3(policy, packet, after_probe, fresh)?
         Ok(fresh)
     val archived = host_exec_private_publish_v3(root, "host-runtime-exec-requests", name, source, archive_guard)
     if archived.error != "" or archived.recovery_required:
@@ -185,7 +185,7 @@ pub fn host_runtime_exec_begin_v3(local: HostLocalRootV1, source: text,
             exec_begin_publication_error_v3(reason, archived.stage_path))
     if archived.context.is_none(): return exec_begin_failed_v3(current, true, "host-exec-begin-archive-context-required")
     val before_admit = refresh()
-    val admit_authority = exec_begin_verify_v3(policy, packet, archived.context.unwrap(), before_admit)
+    val admit_authority = host_runtime_exec_verify_v3(policy, packet, archived.context.unwrap(), before_admit)
     if admit_authority.is_err(): return exec_begin_failed_v3(current, admitted_retry, admit_authority.unwrap_err())
     val admitted = daemon_operation_admit_v2(current.capacity.journal, packet.operation)
     if admitted.is_err(): return exec_begin_failed_v3(current, true, admitted.unwrap_err())
@@ -193,7 +193,7 @@ pub fn host_runtime_exec_begin_v3(local: HostLocalRootV1, source: text,
     current.capacity.ledger.revision = current.capacity.journal.sequence + 1
     if admitted.unwrap().state != "admitted": return exec_begin_failed_v3(current, true, "host-exec-begin-recovery-required")
     val before_begin = refresh()
-    val begin_authority = exec_begin_verify_v3(policy, packet, before_admit, before_begin)
+    val begin_authority = host_runtime_exec_verify_v3(policy, packet, before_admit, before_begin)
     if begin_authority.is_err(): return exec_begin_failed_v3(current, true, begin_authority.unwrap_err())
     val begun = daemon_operation_begin_v2(current.capacity.journal, packet.operation)
     if begun.is_err(): return exec_begin_failed_v3(current, true, begun.unwrap_err())
@@ -204,7 +204,7 @@ pub fn host_runtime_exec_begin_v3(local: HostLocalRootV1, source: text,
     val begin_revision = current.capacity.journal.revision
     current.capacity.ledger.revision = begin_sequence + 1
     val after_begin = refresh()
-    val delegation_authority = exec_begin_verify_v3(policy, packet, before_begin, after_begin)
+    val delegation_authority = host_runtime_exec_verify_v3(policy, packet, before_begin, after_begin)
     if delegation_authority.is_err(): return exec_begin_failed_v3(current, true, delegation_authority.unwrap_err())
     val delegation = HostRuntimeExecDelegationV3(request: packet, installation: installation.request,
         installation_artifact_digest: installation.artifact_digest, begin_journal_sequence: begin_sequence,
@@ -223,7 +223,7 @@ pub fn host_runtime_exec_begin_v3(local: HostLocalRootV1, source: text,
     if not installed_match.unwrap(): return exec_begin_failed_v3(current, true, "host-exec-begin-installed-refused")
     val delegation_guard = fn() -> Result<HostReservationAuthorizationContextV1, text>:
         val fresh = refresh()
-        val verified = exec_begin_verify_v3(policy, packet, after_begin, fresh)?
+        val verified = host_runtime_exec_verify_v3(policy, packet, after_begin, fresh)?
         Ok(fresh)
     val delegated = host_exec_private_publish_v3(root, "host-runtime-exec-delegations", name,
         delegation_bytes.unwrap(), delegation_guard)
@@ -233,7 +233,7 @@ pub fn host_runtime_exec_begin_v3(local: HostLocalRootV1, source: text,
     if not delegated.published_new: return exec_begin_failed_v3(current, true, "host-exec-begin-delegation-already-recorded")
     if delegated.context.is_none(): return exec_begin_failed_v3(current, true, "host-exec-begin-delegation-context-required")
     val handoff = refresh()
-    val handoff_authority = exec_begin_verify_v3(policy, packet, delegated.context.unwrap(), handoff)
+    val handoff_authority = host_runtime_exec_verify_v3(policy, packet, delegated.context.unwrap(), handoff)
     if handoff_authority.is_err(): return exec_begin_failed_v3(current, true, handoff_authority.unwrap_err())
     HostRuntimeExecBeginTurnV3(local: current, lease: Some(HostRuntimeExecLeaseV3(admission: admission, installed: installed,
         delegation: delegation, delegation_digest: proof_digest)), control_cleanup: nil, recovery_required: false, error: "")

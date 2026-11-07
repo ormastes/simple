@@ -1,0 +1,208 @@
+# @req HOST-EXEC-RESOURCE-GUARD-01 HOST-EXEC-RESOURCE-GUARD-02
+# NOT_RUN. Actual SDK/signatures/owned WAL/private files. Container facts and
+# commands are explicitly scripted; no child teardown proof is fabricated.
+use std.spec.{describe, it, expect, fail, step}
+use test.fixtures.orchestration.host_runtime_exec_cleanup_guard_fixture_v3.*
+use test.fixtures.orchestration.host_runtime_exec_begin_fixture_v3.*
+use test.fixtures.orchestration.host_authorized_execution_fixture_v2.host_execution_clock_v2
+use test.fixtures.daemon_sdk.distributed_authority_verification_fixture_v2.verification_fixture
+use test.fixtures.orchestration.host_owned_journal_fixture_v2.{host_owned_journal_ready_v2, host_owned_journal_closed_v2}
+use std.nogc_sync_mut.orchestration.host_runtime_exec_cleanup_guard_v3.*
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.host_cleanup_v1.*
+use std.nogc_sync_mut.orchestration.host_local_root_v1.HostLocalRootV1
+use test.fixtures.orchestration.host_exec_control_installation_fixture_v3.host_installation_cursor_v3
+use std.nogc_sync_mut.orchestration.host_cleanup_receipt_v1.host_cleanup_receipt_encode_v1
+use std.nogc_sync_mut.orchestration.host_cleanup_evidence_v1.host_cleanup_evidence_v1
+use std.common.contracts.orchestration.host_reservation_codec_v1.*
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.{daemon_operation_admit_v2, daemon_operation_record_outcome_v2}
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_lookup_v2
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.file_ops.{file_remove, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+
+# Original parent always retains its entire charge; child metadata is no debit.
+fn child_guard_assert_charged_v3(local: HostLocalRootV1):
+    expect(host_available_capacity_v1(local.capacity.ledger).unwrap().cpu_millis).to_equal(0)
+    expect(host_available_capacity_v1(local.capacity.ledger).unwrap().memory_bytes).to_equal(0)
+
+describe "Exec child barriers control resource settlement, never signed native cleanup":
+    it "blocks every actual child state label from direct parent resource settlement":
+        step("blocks every actual child state label from direct parent resource settlement")
+        for label in ["admitted", "executing", "outcome-unknown", "completed", "failed", "cancelled"]:
+            val fixture = child_guard_fixture_v3()
+            val local = child_guard_record_v3(fixture, label)
+            val parent = fixture.packet.parent_binding.host_operation
+            val before = local.capacity.journal.sequence
+            val index = host_runtime_exec_cleanup_index_v3(local.capacity.journal, local.capacity.ledger.capacity).unwrap()
+            expect(index[parent.id]).to_equal(fixture.packet.operation.id)
+            expect(host_runtime_exec_parent_cleanup_guard_v3(local.capacity.journal, local.capacity.ledger.capacity, parent).unwrap_err()).to_start_with("host-child-cleanup-unsettled:")
+            val settled = host_capacity_owner_settle_v1(local.capacity, parent)
+            expect(settled.settled).to_equal(false)
+            expect(settled.error).to_start_with("host-child-cleanup-unsettled:")
+            expect(settled.owner.journal.sequence).to_equal(before)
+            child_guard_assert_charged_v3(local)
+            expect(distributed_operation_journal_lookup_v2(local.capacity.journal, parent.id).unwrap().state).to_equal("executing")
+            exec_begin_fixture_close_v3(fixture, local)
+
+    it "fails closed on missing or malformed retained child provenance without release":
+        step("fails closed on missing or malformed retained child provenance without release")
+        for mode in ["missing", "malformed"]:
+            val fixture = child_guard_fixture_v3()
+            val local = child_guard_record_v3(fixture, "executing")
+            val path = local.capacity.journal.root + "/host-runtime-exec-requests/" + sha256_text(fixture.packet.operation.id) + ".sdn"
+            if mode == "missing": assert(file_remove(path))
+            else: assert(file_atomic_write_mode(path, "{broken: true}\n", 0o600))
+            assert(host_runtime_exec_cleanup_index_v3(local.capacity.journal, local.capacity.ledger.capacity).is_err())
+            val settled = host_capacity_owner_settle_v1(local.capacity, fixture.packet.parent_binding.host_operation)
+            expect(settled.settled).to_equal(false)
+            assert(settled.error != "")
+            expect(settled.owner.journal.sequence).to_equal(local.capacity.journal.sequence)
+            child_guard_assert_charged_v3(local)
+            exec_begin_fixture_close_v3(fixture, local)
+
+    it "allows actual signed parent destroy and retains absence receipt while child blocks release":
+        step("allows actual signed parent destroy and retains absence receipt while child blocks release")
+        val fixture = child_guard_fixture_v3()
+        val local = child_guard_record_v3(fixture, "executing")
+        val cleanup = child_guard_cleanup_fixture_v3(local)
+        val context = cleanup.context
+        val refresh = fn() -> HostReservationAuthorizationContextV1:
+            context
+        val turn = host_cleanup_v1(cleanup.local, "operation_1", cleanup.signed, cleanup.approval, context, refresh)
+        expect(turn.error).to_start_with("host-child-cleanup-unsettled:")
+        expect(turn.recovery_required).to_equal(true)
+        assert(turn.receipt.?)
+        val receipt = turn.receipt.unwrap()
+        expect(receipt.destroy_status).to_equal("ok")
+        expect(receipt.absence.proof_kind).to_equal("exact-native-object-absence-v1")
+        expect(host_installation_cursor_v3(turn.local)).to_equal(10)
+        child_guard_assert_charged_v3(turn.local)
+        expect(turn.local.capacity.journal.operations["operation_1"].state).to_equal("executing")
+        # Integrity of original parent WAIT/absence is real and still insufficient
+        # to prove contained child termination/cgroup teardown.
+        expect(host_cleanup_evidence_v1(turn.local.capacity.journal.root, fixture.packet.parent_binding.host_operation).unwrap()).to_equal(host_cleanup_receipt_encode_v1(receipt).unwrap())
+        assert(host_cleanup_settled_v1(turn.local, receipt).is_err())
+        exec_begin_fixture_close_v3(fixture, turn.local)
+
+    it "preserves the no-child signed cleanup success control":
+        step("preserves the no-child signed cleanup success control")
+        val fixture = child_guard_fixture_v3()
+        val cleanup = child_guard_cleanup_fixture_v3(fixture.local)
+        val context = cleanup.context
+        val refresh = fn() -> HostReservationAuthorizationContextV1:
+            context
+        val turn = host_cleanup_v1(cleanup.local, "operation_1", cleanup.signed, cleanup.approval, context, refresh)
+        expect(turn.error).to_equal("")
+        expect(turn.recovery_required).to_equal(false)
+        assert(host_cleanup_settled_v1(turn.local, turn.receipt.unwrap()).unwrap())
+        expect(host_available_capacity_v1(turn.local.capacity.ledger).unwrap().cpu_millis).to_equal(turn.local.capacity.ledger.capacity.cpu_millis)
+        # There is deliberately NO child row here; this is not a fake positive
+        # child teardown fixture.
+        assert(not turn.local.capacity.journal.operations.contains_key(fixture.packet.operation.id))
+        exec_begin_fixture_close_v3(fixture, turn.local)
+
+    it "keeps completed parent charged across disjoint sibling cancellation and owned reopen":
+        step("keeps completed parent charged across disjoint sibling cancellation and owned reopen")
+        val fixture = child_guard_fixture_v3()
+        val local = child_guard_record_v3(fixture, "outcome-unknown")
+        val cleanup = child_guard_cleanup_fixture_v3(local)
+        val context = cleanup.context
+        val refresh = fn() -> HostReservationAuthorizationContextV1:
+            context
+        val destroyed = host_cleanup_v1(cleanup.local, "operation_1", cleanup.signed, cleanup.approval, context, refresh)
+        assert(destroyed.receipt.?)
+        expect(destroyed.recovery_required).to_equal(true)
+        var current = destroyed.local
+        val parent = fixture.packet.parent_binding.host_operation
+        val receipt = destroyed.receipt.unwrap()
+        # Reproduce the historical unsafe completion using actual SDK WAL,
+        # never a fabricated Released ledger flag. Existing guard refuses it.
+        current.capacity.journal = daemon_operation_record_outcome_v2(current.capacity.journal, parent, "completed",
+            sha256_text(host_cleanup_receipt_encode_v1(receipt).unwrap())).unwrap()
+        current.capacity.ledger.revision = current.capacity.journal.sequence + 1
+        var sibling = fixture.packet.parent_binding.host_intent
+        sibling.fence.revision = current.capacity.ledger.revision
+        sibling.reservation.id = "unrelated-reservation"
+        sibling.reservation.operation_id = "unrelated-parent"
+        sibling.reservation.nonce = "unrelated-nonce"
+        sibling.reservation.cpu_millis = 1
+        sibling.reservation.memory_bytes = 1
+        sibling = host_reservation_bind_intent_v1(sibling).unwrap()
+        var operation = parent
+        operation.id = sibling.reservation.operation_id
+        operation.payload_digest = sibling.reservation.payload_digest
+        operation.memory_bytes = 1
+        val path = current.capacity.journal.root + "/reservation-payloads/" + operation.payload_digest + ".sdn"
+        assert(file_atomic_write_mode(path, host_reservation_encode_intent_v1(sibling).unwrap(), 0o600))
+        current.capacity.journal = daemon_operation_admit_v2(current.capacity.journal, operation).unwrap().journal
+        current.capacity.ledger.revision = current.capacity.journal.sequence + 1
+        val batch = host_capacity_completion_batch_v3(current.capacity.journal, current.capacity.ledger.capacity).unwrap()
+        assert(batch.child_barriers.contains_key(parent.id))
+        assert(not batch.child_barriers.contains_key(operation.id))
+        assert(not batch.entries.contains_key(parent.id))
+        # Exactly the disjoint admitted->cancelled no-effect mutation performed
+        # inside startup. Completed parent and children remain immutable.
+        current.capacity.journal = daemon_operation_record_outcome_v2(current.capacity.journal, operation, "cancelled",
+            sha256_text(host_reservation_abort_outcome_v1(sibling, operation).unwrap())).unwrap()
+        current.capacity.ledger.revision = current.capacity.journal.sequence + 1
+        assert(batch.child_barriers.contains_key(parent.id))
+        assert(not batch.entries.contains_key(parent.id))
+        expect(current.capacity.journal.operations[parent.id].state).to_equal("completed")
+        expect(current.capacity.journal.operations[operation.id].state).to_equal("cancelled")
+        assert(host_capacity_completion_evidence_owned_v2(current.capacity.journal, current.capacity.ledger.capacity, parent).is_err())
+        val capacity = current.capacity.ledger.capacity
+        host_owned_journal_closed_v2(current.capacity)
+        current.capacity = host_owned_journal_ready_v2(host_capacity_owner_open_owned_v2(current.capacity.journal.root, capacity, "e".repeat(64), 100, true))
+        var blocked_parent = false
+        var released_sibling = false
+        for row in current.capacity.ledger.reservations:
+            if row.operation_id == parent.id: blocked_parent = row.state == HostReservationStateV1.Uncertain
+            if row.operation_id == operation.id: released_sibling = row.state == HostReservationStateV1.Released
+        assert(blocked_parent)
+        assert(released_sibling)
+        child_guard_assert_charged_v3(current)
+        assert(host_cleanup_settled_v1(current, receipt).is_err())
+        exec_begin_fixture_close_v3(fixture, current)
+
+    it "blocks actual prepared abort and expiry release under an admitted-parent ordering fault":
+        step("blocks actual prepared abort and expiry release under an admitted-parent ordering fault")
+        val fixture = child_guard_admitted_parent_fault_v3()
+        val local = child_guard_record_v3(fixture, "admitted")
+        val intent = fixture.packet.parent_binding.host_intent
+        val operation = fixture.packet.parent_binding.host_operation
+        val capacity = local.capacity.ledger.capacity
+        val fence = HostLedgerFenceV1(capacity.authority_id, capacity.boot_id, capacity.provider_generation, local.capacity.ledger.revision)
+        val receipt = host_reservation_receipt_v1(intent, operation).unwrap()
+        val authority = verification_fixture()
+        var grant = authority.signed.grant
+        grant.operations = ["host_abort_prepared_v1"]
+        grant.environment_digest = operation.environment_digest
+        val aborted = host_capacity_owner_abort_prepared_v1(local.capacity, intent, operation, receipt, fence, grant, host_execution_clock_v2())
+        expect(aborted.unwrap_err()).to_start_with("host-child-cleanup-unsettled:")
+        expect(host_capacity_owner_expire_prepared_v1(local.capacity, operation.id, intent.reservation.prepare_deadline_ms).unwrap_err()).to_start_with("host-child-cleanup-unsettled:")
+        expect(local.capacity.journal.operations[operation.id].state).to_equal("admitted")
+        child_guard_assert_charged_v3(local)
+        exec_begin_fixture_close_v3(fixture, local)
+
+    it "does not release cancelled abort-label parent or mark it no-effect when child lacks proof":
+        step("does not release cancelled abort-label parent or mark it no-effect when child lacks proof")
+        val fixture = child_guard_admitted_parent_fault_v3()
+        var local = child_guard_record_v3(fixture, "admitted")
+        val parent = fixture.packet.parent_binding.host_operation
+        val intent = fixture.packet.parent_binding.host_intent
+        local.capacity.journal = daemon_operation_record_outcome_v2(local.capacity.journal, parent, "cancelled",
+            sha256_text(host_reservation_abort_outcome_v1(intent, parent).unwrap())).unwrap()
+        local.capacity.ledger.revision = local.capacity.journal.sequence + 1
+        val batch = host_capacity_completion_batch_v3(local.capacity.journal, local.capacity.ledger.capacity).unwrap()
+        assert(batch.child_barriers.contains_key(parent.id))
+        # Startup's no-effect branch explicitly consults this actual same-writer
+        # map even when cancelled state and exact abort digest would match.
+        expect(local.capacity.journal.operations[parent.id].state).to_equal("cancelled")
+        val capacity = local.capacity.ledger.capacity
+        host_owned_journal_closed_v2(local.capacity)
+        local.capacity = host_owned_journal_ready_v2(host_capacity_owner_open_owned_v2(local.capacity.journal.root, capacity, "e".repeat(64), 100, true))
+        expect(local.capacity.ledger.reservations[0].state).to_equal(HostReservationStateV1.Uncertain)
+        child_guard_assert_charged_v3(local)
+        exec_begin_fixture_close_v3(fixture, local)
