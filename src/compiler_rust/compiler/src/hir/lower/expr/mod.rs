@@ -1760,6 +1760,18 @@ impl Lowerer {
                     }
                 }
                 "unwrap" => {
+                    // Only a source Optional<Char> owns this builtin dispatch.
+                    // A genuine shared pointer with the same representation
+                    // must retain its existing method-resolution behavior.
+                    if self.module.types.optional_inner(receiver.ty) == Some(TypeId::CHAR) {
+                        return Ok(Some(HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_unwrap_or_trap".to_string(),
+                                args: vec![receiver.clone()],
+                            },
+                            ty: TypeId::CHAR,
+                        }));
+                    }
                     let nullable_named_inner = match self.module.types.get(receiver.ty) {
                         Some(HirType::Pointer { inner, .. })
                             if matches!(self.module.types.get(*inner), Some(HirType::Struct { .. } | HirType::Enum { .. })) => Some(*inner),
