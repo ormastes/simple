@@ -97,8 +97,11 @@ Run 11 (`build/bootstrap-opus-11`, carries #7274) logged
 54,525,952 KiB (52.0 GiB) cap, the same cap as run 10. Top process
 26,437,356 KiB (25.2 GiB). Worker curve (MIR position: RSS MiB) 50: 19634,
 300: 21498, 500: 20974, 750: 22290. Both first-wave workers finished lowering
-their ~382 modules, ran `native_cache` 382/382 and were 12-20 modules into
-`native_compile` when the cap hit; RSS rose from ~22.4 to 25.2 GiB in those
+their ~382 modules, ran `native_cache` 382/382 and were in `native_compile`
+when the cap hit (in run 14 the same `done=13`/`done=19` counters were printed 2 ms
+into the phase and counted modules settled before codegen, not objects
+written -- run 14 wrote 669 objects before its kill; see
+`stage2_cranelift_codegen_scope_default_off_2026-11-07.md`); RSS rose from ~22.4 to 25.2 GiB in those
 last minutes. So the peak is end-of-shard codegen, ~16 MiB per claimed module
 all-in (the 11 MiB run-10 slope was MIR only).
 
@@ -106,7 +109,7 @@ The `[mir]` lines walk alphabetically (app.* first), not largest-first:
 wave 1 measured the lighter modules. The compiler.* / lib.* waves are not
 measured, so the per-module figure may be higher for them.
 
-### Pin raised to 12 (best value of an exhausted knob)
+### Pin raised to 12 (superseded: the pin is 8 again, #7354; see 2026-11-07 below)
 
 ceil(3049/12) = 255 modules per worker: 19.6 + 255 x 16 MiB = ~23.6 GiB,
 ~48 GiB for two plus the coordinator, a 2-4 GiB margin on the light modules.
@@ -127,7 +130,7 @@ structural fix is item 3 below.
 Fixed by #7301 (`64026e63fe6`, cranelift narrow-integer negate in the I64
 lane) and #7308 (`fadd88059b3`, MIR f64 across text parse). Kept for history:
 
-5 cranelift AOT errors fail the row independently of memory:
+Run 11 recorded 5 cranelift AOT errors that failed the row independently of memory:
 - `app.office.sheets.data_ops._compare_row_cells`: verifier error
   `isub.i32 v167, v166` where `v166` is i64.
 - `app.office.sheets.spreadsheet._parse_f64`:

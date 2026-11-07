@@ -389,10 +389,20 @@ pub fn backend_helper_aot_opt_level(
     elif opt_level_i64 == 2: OptimizationLevel.Speed
     else: OptimizationLevel.Aggressive
 
+# Per-module scope policy for compile_module_with_backend_scoped_v1. Cranelift:
+# on unless SIMPLE_CODEGEN_MODULE_SCOPE=0. Any other backend: only with =1.
+fn codegen_module_scope_enabled_for_v1(backend_name: text, knob: text) -> bool:
+    if backend_name == "cranelift":
+        return knob != "0"
+    knob == "1"
+
 # Bug native_codegen_unscoped_rss_growth_2026_10_24: one module's AOT compile
 # (storage-projection lowering, the backend MIR optimization copy, Cranelift
-# translation scratch, the object byte read) in its own transient scope,
-# opt-in via SIMPLE_CODEGEN_MODULE_SCOPE=1. Only the returned Result is
+# translation scratch, the object byte read) in its own transient scope.
+# Default-on for Cranelift (bootstrap run 14: ~13 MiB/module never reclaimed,
+# 335 modules/worker); opt-in (=1) for the other backends, whose in-memory
+# lanes (SIMPLE_BOOTSTRAP=1 LLVM string cache) are not qualified for it.
+# See codegen_module_scope_enabled_for_v1. Only the returned Result is
 # promoted. The scope wraps this pure call and nothing else: the backend
 # session authority mutates its persistent records (uses/results/kept) around
 # it, and a scope over those writes freed records still linked into the
@@ -408,7 +418,8 @@ fn compile_module_with_backend_scoped_v1(
     retained_cranelift_triple: text?, retained_cranelift_cpu_v2: text?,
     retained_cranelift_features_v2: [text]
 ) -> Result<CompiledModule, CompileError>:
-    var scoped = (env_get_opt("SIMPLE_CODEGEN_MODULE_SCOPE") ?? "") == "1"
+    var scoped = codegen_module_scope_enabled_for_v1(backend_name,
+        env_get_opt("SIMPLE_CODEGEN_MODULE_SCOPE") ?? "")
     if scoped and (transient_array_scope_state_v1() != 0 or not transient_scope_begin()):
         eprint("[codegen-scope] WARNING transient scope refused; compiling UNSCOPED, arena retained: module={module.name}")
         scoped = false
