@@ -44,7 +44,15 @@ pub fn host_installation_resign_v3(request: HostExecControlInstallationRequestV3
     value
 
 pub fn host_installation_fixture_v3(mode: text = "success",
-        actions: [text] = ["host_exec_control_install_v3"]) -> HostInstallationFixtureV3:
+        actions: [text] = ["host_exec_control_install_v3"], grant_clock: i64 = 100,
+        authority_window_ms: i64 = 0, key_expires_at: Option<i64> = nil) -> HostInstallationFixtureV3:
+    val timing_override = authority_window_ms > 0
+    val clock = grant_clock
+    val window = authority_window_ms
+    assert(clock > 0 and window >= 0 and window <= 1000000000)
+    if timing_override:
+        assert(window > 10 and clock <= 9223372036854775807 - 2 * window)
+    val expires = if timing_override: clock + window else: 0
     val shape = host_execution_fixture_v2(mode)
     assert(host_capacity_owner_close_v1(shape.owner).unwrap())
     val root = host_claim_fixture_v1()
@@ -58,6 +66,12 @@ pub fn host_installation_fixture_v3(mode: text = "success",
     var approver = base.approver
     issuer.operations = actions
     approver.operations = actions
+    if timing_override:
+        issuer.expires_at = clock + 2 * window
+        approver.expires_at = clock + 2 * window
+    if val key_expiry = key_expires_at:
+        issuer.expires_at = key_expiry
+        approver.expires_at = key_expiry
     val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "generation": SdnValue.Int(7),
         "policyRevision": SdnValue.Int(4), "revocationEpoch": SdnValue.Int(2), "sessionGeneration": SdnValue.Int(3),
         "keys": SdnValue.Array([host_claim_key_fields_v1(issuer), host_claim_key_fields_v1(approver)])}
@@ -78,7 +92,8 @@ pub fn host_installation_fixture_v3(mode: text = "success",
     retained_operation.payload_digest = retained_intent.reservation.payload_digest
     var preparation = shape.envelope.signed.grant
     preparation.operations = ["host_reservation_v1"]
-    val context = HostReservationAuthorizationContextV1(100, 10, 4, 2, 3)
+    if timing_override: preparation.expires_at = expires
+    val context = HostReservationAuthorizationContextV1(clock, 10, 4, 2, 3)
     val prepared = host_capacity_owner_prepare_v1(opened, retained_intent, retained_operation, preparation, context).unwrap()
     val local = HostLocalRootV1(root: root.parent, binding: binding, config: config, policy: policy,
         scope: shape.scope, container: shape.container, capacity: prepared)
@@ -86,6 +101,9 @@ pub fn host_installation_fixture_v3(mode: text = "success",
     parent.intent = retained_intent
     parent.operation = retained_operation
     parent.receipt = host_capacity_owner_prepared_receipt_v1(prepared, retained_intent, retained_operation, preparation, context).unwrap()
+    if timing_override:
+        parent.signed.grant.expires_at = expires
+        parent.approval.expires_at = expires - 10
     parent.signed.signature = pure_ed25519_sign_from_seed_v1(verification_seed(1), distributed_grant_signature_message_v2(parent.signed).unwrap()).signature
     var execution_operation = retained_operation
     execution_operation.operation = "host_execute_v1"
@@ -105,10 +123,12 @@ pub fn host_installation_fixture_v3(mode: text = "success",
     operation.environment_digest = local.binding.provider_identity_digest
     var signed = base.signed
     signed.grant.operations = ["host_exec_control_install_v3"]
+    if timing_override: signed.grant.expires_at = expires
     signed.grant.environment_digest = local.binding.provider_identity_digest
     val fixture = HostInstallationFixtureV3(local, HostExecControlInstallationRequestV3(intent, operation, signed, base.approval), context, shape.root, parent)
     var complete = fixture
-    complete.request = host_installation_resign_v3(fixture.request)
+    if timing_override: complete.request.approval.expires_at = expires - 10
+    complete.request = host_installation_resign_v3(complete.request)
     complete
 
 pub fn host_installation_cursor_v3(local: HostLocalRootV1) -> i64:
