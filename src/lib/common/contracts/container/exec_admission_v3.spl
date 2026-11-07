@@ -3,7 +3,7 @@
 # prevent copying, or grant authority: the actual broker needs the host verified
 # lease and an exclusive same-operation claim before any native exec creation.
 use std.common.contracts.container.exec_v3.*
-use std.common.contracts.container.effect_deadline_v1.{ContainerEffectDeadlineV1, container_effect_remaining_ms_v1}
+use std.common.contracts.container.effect_deadline_v1.{ContainerEffectDeadlineV1, container_effect_deadline_v1, container_effect_remaining_ms_v1}
 use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
 use std.common.contracts.orchestration.host_runtime_exec_v3.{HostRuntimeExecIntentV3, host_runtime_exec_match_operation_v3}
 use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
@@ -22,9 +22,10 @@ pub struct ContainerExecAdmissionV3:
     approver_id: text
     execution_proof_digest: text
 
-pub fn container_exec_admission_match_v3(admission: ContainerExecAdmissionV3,
-        expected_request: ContainerExecRequestV3, expected_provider_identity_digest: text,
-        now_unix_ms: i64) -> Result<i64, text>:
+# Integrity only, useful for exact known-ID read-only reconciliation after expiry.
+# This function alone never admits create/start or reissues a consumed lease.
+pub fn container_exec_admission_binding_match_v3(admission: ContainerExecAdmissionV3,
+        expected_request: ContainerExecRequestV3, expected_provider_identity_digest: text) -> Result<bool, text>:
     val digest = container_exec_request_digest_v3(expected_request)?
     if container_exec_request_digest_v3(admission.request)? != digest:
         return Err("container-exec-admission-request-mismatch")
@@ -45,6 +46,17 @@ pub fn container_exec_admission_match_v3(admission: ContainerExecAdmissionV3,
         if not builder_identifier_valid_v1(value): return Err("container-exec-admission-authority-identity-invalid")
     if admission.deadline.actions != ["exec"]:
         return Err("container-exec-admission-actions-mismatch")
+    val deadline = container_effect_deadline_v1(admission.deadline.request_digest,
+        admission.deadline.operation_id, admission.deadline.actions, admission.deadline.expires_at_unix_ms)?
+    if deadline.request_digest != digest or deadline.operation_id != expected_request.operation_id:
+        return Err("container-exec-admission-deadline-binding-mismatch")
+    Ok(true)
+
+pub fn container_exec_admission_match_v3(admission: ContainerExecAdmissionV3,
+        expected_request: ContainerExecRequestV3, expected_provider_identity_digest: text,
+        now_unix_ms: i64) -> Result<i64, text>:
+    val matched = container_exec_admission_binding_match_v3(admission, expected_request, expected_provider_identity_digest)?
+    val digest = container_exec_request_digest_v3(expected_request)?
     # Remaining admission window only, never exec lifetime, auto-kill or release.
     container_effect_remaining_ms_v1(admission.deadline, digest,
         expected_request.operation_id, "exec", now_unix_ms)

@@ -18,6 +18,7 @@ this carrier. No host journal, broker claim or provider is mocked.
 | refuses operation id action payload host and malformed shared envelope | Change operation ID/action/payload/physical alias, set invalid shared-envelope memory, or narrow duration below the requested control window; refuse all. |
 | refuses provider mismatch invalid retained digests and noncanonical proof identities | Refuse different/malformed provider pin, invalid parent/proof digests, empty grant, invalid issuer and overlong approver. |
 | refuses widened actions stale deadline bindings expiry and unavailable clock | Refuse exec+attach widening, stale deadline operation/digest, exact-boundary expiry and negative clock. |
+| preserves exact binding for read-only reconciliation without inventing a fresh clock | Pure binding validation remains usable for an expired retained admission; timed new-effect validation refuses. Changed deadline digest and zero expiry fail even the pure check. |
 
 The actual host must verify signatures, match retained parent digests, establish
 journal begin and hand the broker a verified live host lease. The broker must
@@ -30,3 +31,7 @@ capacity release. The requested control timeout must not exceed the child
 operation duration; this relation does not turn it into an enforced exec lifetime.
 Running/unknown execs remain owned and charged after expiry or
 disconnect. Builds/tests were prohibited for this source task.
+
+The binding-only matcher has no clock parameter and cannot authorize effects.
+Exact known-native-ID reconciliation still requires the retained provider owner;
+create/start uses the timed matcher and final native admission check.
