@@ -1,0 +1,37 @@
+# Next verification proposal — NOT AUTHORIZED TO EXECUTE
+
+## Integrated source
+
+Candidate source commit `55657916818efe67895d466e6369179e5a131b4e` merges release `5709105f40e6814a4cbd75c268436e6c64351043` into draft #7575. Upstream supplied the same bootstrap visibility applications; duplicate auto-merged locals were removed without losing either path. Astra re-reviewed the exact resolved source. All bug rows were retained, our claim remains wait-verify, and the canonical sealer produced `bug_db.xxh3_b8c3e3c4943342c0.csm`. Normal commit hook passed. No compiler was invoked during integration.
+
+## Producer prerequisite — currently BLOCKED
+
+Preferred admitted Linux/AArch64 pure-Simple producer: `/home/yoon/dev/simple/.simple/storage/build/bootstrap/stage3/aarch64-unknown-linux-gnu/stage2-admitted/simple`, SHA256 `bf3886132be19f10feca15558553b888e91363622ae31ca7d9f9f0a184b7d3bb`. Matching runtime: sibling `stage2-runtime-authority`; runtime manifest `runtime-admitted.txt`, SHA256 `d59cc6238831a991b5a02de7640089dede84ccdb40166c1e3f65667640e467bc`. Verify all eight runtime file digests, admission/sanity receipts and executable identity before any launch. Retained authority demonstrates LLVM native-build, not current-source compiler correctness or full CLI testing capability.
+
+The single new helper diagnostic failed `SCV-E-ADMISSION: directory-alias-inventory-invalid` before compilation. That receipt is final and must not be overwritten or retried. A compiler build is NOT launch-ready until source-only investigation identifies a supported directory-alias/source-admission inventory for this exact candidate. Do not disable admission or copy synthetic substitute modules. Any proposed corrected source inventory needs root review and a content manifest before the user exception is sought.
+
+Alternative `/home/yoon/dev/simple-advice-lexical-scan-20261106/build/mirgen2-probe/authority/simple`, SHA256 `ffe83fd87c69573a1ca93e24134e46bbe754be7dff2de2f0eeefc4cf60c9037a`, with sibling runtime, has retained normal Cranelift Hello PASS but failed canonical Stage2 sanity and remains unadmitted. Its old compiler semantics caused subsequent failures; current source changes do not repair its producer. It is only a separately disclosed provisional route, never an admitted substitute. No fallback is automatic.
+
+## Minimal graph proposed for review
+
+Prefer ONE direct full-CLI build from the integrated candidate using the admitted LLVM producer, if admission preparation is resolved. A compiler-only bootstrap_main build cannot itself run the required `test`/`check` gates; it adds another large compilation before meaningful verification. Direct full CLI avoids that extra generation but has an unmeasured current LLVM memory/time peak. Prior compiler-only selected1600 modules and fullCLI3081 are historical observations, not promises for this source. The prior fullCLI Cranelift run exceeded32GiB;48GiB is a proposed bounded ceiling, not demonstrated sufficiency.
+
+From a new immutable candidate checkout with complete tracked source roots and reviewed admission inventory, the supported command shape is:
+
+```sh
+sh scripts/bootstrap/run-process-group-timeout.shs 43200 15 "$PRODUCER" native-build   --backend llvm --low-memory --runtime-bundle core-c-bootstrap   --source src/compositions/kernel_llvm_cranelift --source src/compiler   --source src/app --source src/lib --source src/os --source src/plugins   --entry-closure --entry src/app/cli/main.spl --mode dynload   --threads 1 --timeout 43200 --runtime-path "$RUNTIME"   --cache-dir "$OUT/native" --output "$OUT/simple"
+```
+
+Environment: canonical enforcing RSS guard with `SIMPLE_PROCESS_TREE_RSS_CAP_KIB=50331648`, `SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=50331648`, `SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce`; serial `SIMPLE_FILE_WORKERS=0`, `SIMPLE_MIR_SHARD_COUNT=8`, both `SIMPLE_UNIT_TLDR_IMPORTS=0` and `SIMPLE_TLDR_IMPORTS=0` select complete import/HIR semantics. Explicit private TMPDIR/frontend/HIR/native caches and a unique guard receipt are mandatory. Remove inherited session/bootstrap/worker overrides using the reviewed prior launcher pattern. No whole-program workaround, readiness/AOP bypass, seed fallback, cache identity mixing or automatic retry. K8 is supported partitioning; eight repeated hydration costs may still exceed12h.
+
+If root instead chooses compiler-only, replace entry with `src/app/cli/bootstrap_main.spl`; this is a DIFFERENT reviewed plan and still needs subsequent candidate-produced fullCLI before core checks. It must not be presented as completion of the proposed direct fullCLI graph.
+
+## Finite envelope and conditional evidence
+
+Observed fresh host sample: MemAvailable114867812KiB; disk free21293993984bytes (~19.8GiB). These are observations, not reservations. Launch requires fresh available memory sufficient for48GiB cap plus24GiB host reserve AND cap<=75%available, accounting for other admitted jobs. Disk must retain>=2GiB after source materialization and throughout output creation. Current~20GiB free is NOT evidence fullCLI artifacts will fit; measure the planned snapshot and retained historical artifact footprint before setting a root-reviewed minimum free-disk threshold. No deletion of others' caches/work is allowed.12h is a hard ceiling, not a success forecast; source-admission failures terminate immediately.
+
+Only terminal exit0 + quiescent1 + unchanged source/runtime identities + real candidate executable allow exact-candidate Hello build/run. Proposed Hello limits:900s build/120s run, same48GiB ceiling, normal per-file LLVM, tiny committed Git `src/main.spl`, exact positive stdout, private candidate-specific caches and immutable binary/runtime hashes. Failed/nonquiescent build means STOP, no Hello.
+
+After Hello PASS, meaningful verification still requires separately reviewed authorization for actual HIR export visibility SSpec (all eleven scenarios, real runner-positive assertion evidence), generated manual, compiler/lib/MCP/LSP checks, MCP stdio interpreter integration, core runtime and MCP native smokes. The new fullCLI must demonstrate those commands actually run; help output and exit0 alone are insufficient. Capture each criterion once. Scope may admit #7575 only when its gates pass; planner #7294 remains independently blocked and must not be rerun or silently admitted.
+
+All six original bootstrap cycles plus explicit cycle7 remain consumed. This document requests no execution and creates no fresh budget. Any next build requires a specific user exception authorizing this one finite graph, with fail-fast/no retry and no hidden compiler-only/fullCLI fallback. No new candidate, Hello, HIR/core PASS or overall bootstrap completion is claimed.
