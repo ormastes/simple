@@ -59,8 +59,28 @@ failures. None of the four effect routes is accepted or queued here. They do
 not invoke synchronous execute, inspect, wait or cleanup on the control loop.
 No listener, PTY reader, native effect protocol, queue or second journal is added.
 
+`host_service_gateway_classify_v2(owner, incoming)` supplies scheduling metadata
+only after one shared mapped-request validator checks root provenance, actual
+SDK peer UID distinct from service UID, unique UID/action rule, exact mapped
+scope and request shape, in that order. The callback invokes that same validator
+again at dispatch. The mapped-domain scope condition is extracted unchanged
+into `host_service_mapped_peer_error_v2`; trusted in-process behavior remains.
+
+Only an allowed `host-status` request returns `ControlRead`. Allowed validate,
+prepare and parent-budget requests return `Work`. Every effect action returns
+dispatch-required even when present in the policy. The classifier decodes no
+signed packet, verifies no SDK proof, reads no journal/provider and publishes
+no response. A work class is not admission: the callback still performs its
+same-decoded subject checks and current SDK authorization. A previous class
+cannot authorize changed peer metadata or skip callback revalidation.
+
+The daemon owns actual receive-ready/dispatch/publication splitting and bounded
+scheduling. It must classify only metadata produced after real EOF and kernel
+peer checks, then retain the native one-use claim at dispatch. This delta adds
+no dependency on an unpublished SDK split and no loop/listener extension.
+
 Startup reads at most one 64-KiB policy. Callback mapping scans at most 64 rules
 and eight actions, with no policy file reread/hot reload. Actual native startup,
 socket latency, send-failure retention, fault-injected cleanup states and control
-responsiveness are unqualified. Seventeen authored scenarios are **NOT_RUN**;
+responsiveness are unqualified. Twenty-three authored scenarios are **NOT_RUN**;
 static/source review does not establish those runtime properties.

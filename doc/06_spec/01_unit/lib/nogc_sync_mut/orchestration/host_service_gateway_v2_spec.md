@@ -22,6 +22,12 @@ Requirements: HOST-02, ORCH-02. Status: **NOT_RUN**, authored manual.
 | Independent nested subjects | Canonically encoded proof, original Host and controller principal tampering each yields its exact shared-chain rejection before SDK, publication or native progress |
 | Immutable snapshot | Changing owned policy bytes does not hot reload the running snapshot; old pin fails a fresh load |
 | Recurrence/effects | All effect routes remain nonaccepted; actual owned SDK port and returned owner are used; no new listener/native call/gateway packet predecode; canonical close turn is retained |
+| Authenticated control | Actual loaded same-root mapping permits only a correctly shaped, explicitly allowed status request to return ControlRead, without journal/provider progress |
+| Unauthorized priority | Denied status action, unmapped/service UID, foreign root and wrong scope all return exact errors rather than a priority class |
+| Each work action | Allowed validate, prepare and budget requests return Work without packet decode; separately invoking the callback rejects their malformed opaque payloads |
+| Validation order | Status shape errors follow mapped scope/identity checks and match callback errors |
+| Effect scheduling | Every policy-allowed effect action returns dispatch-required rather than Work or accepted queue state |
+| Revalidation/recurrence | Changed peer metadata cannot use a prior class; callback rechecks the shared mapping helper and retains the returned owner; classifier has no journal, provider, packet decoder or response side effect |
 
 Pure codec assertions use real SDN. Private-loader cases use actual retained
 files and native EUID observations. Callback FRAME fixtures explicitly supply a
@@ -34,7 +40,10 @@ primitive, creates freshly signed request bytes and checks real callback
 admission/owner return. It does not fabricate a Released flag or mutate a
 journal's authority alias. It does not simulate native socket send failure.
 
-All seventeen scenarios remain NOT_RUN. Required additional native evidence:
+All twenty-three scenarios remain NOT_RUN. The six scheduling cases are
+supplemental to the original seventeen unchanged cases. Classification is an
+authenticated scheduling hint, not proof of signed packet acceptance.
+Required additional native evidence:
 actual pinned Ready bootstrap, every open/close cleanup state including
 consumed-error without cleanup, same-UID native listener refusal, wrong kernel
 UID, real SDK send/timeout failure after admission, snapshot lifetime under
