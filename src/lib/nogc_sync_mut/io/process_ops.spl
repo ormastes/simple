@@ -2,7 +2,7 @@
 # Extracted from mod.spl for modularity
 
 use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release)
-use std.nogc_sync_mut.fs.host_path.{host_path_native, host_is_windows_host}
+use std.nogc_sync_mut.fs.host_path.{host_path_native, host_is_windows_host, host_path_is_absolute}
 use std.nogc_sync_mut.sffi.process_capture.{process_capture_bounded_native, process_capture_unbounded_native}
 use std.nogc_sync_mut.io.windows_redirected_process.{WINDOWS_REDIRECTED_TOKEN_BASE, windows_redirected_spawn, windows_redirected_wait, windows_redirected_is_running, windows_redirected_kill}
 use std.common.process.observation_v1.{
@@ -1681,6 +1681,129 @@ pub fn process_bounded_kill_signal(exit_code: i64) -> i64:
     if exit_code > 128 and exit_code < 192:
         return exit_code - 128
     0
+
+# Generation-bearing local handle over the canonical native piped registry.
+# Copying a Ref does not create another stdout reader or remote authority.
+use std.common.text_bytes.{boxed_text_bytes_checked}
+use std.common.string_core.{str_len}
+
+struct PipedProcessRefV1:
+    pid: i64
+    generation: i64
+
+val PIPED_PROCESS_REF_V1_MAX_ARGS: i64 = 64
+
+@unsafe(reason: "spawn returns the exact reserved slot generation; command length and argv are checked before effects", capabilities: [ffi])
+extern fn rt_process_spawn_piped_generation_v1(cmd: text, cmd_len: i64, args: [text]) -> i64
+@unsafe(reason: "resolve PID only for the exact generation returned by spawn, never adopt a PID", capabilities: [ffi])
+extern fn rt_process_piped_pid_for_generation_v1(generation: i64) -> i64
+@unsafe(reason: "same-registry exact-reference read; empty text requires exact-reference state query", capabilities: [ffi])
+extern fn rt_process_read_stdout_ref_v1(pid: i64, generation: i64) -> text
+@unsafe(reason: "same-registry stdout state: 0 deferred, 1 drained EOF, -2 stale, -1 runtime failure", capabilities: [ffi])
+extern fn rt_process_stdout_state_ref_v1(pid: i64, generation: i64) -> i64
+@unsafe(reason: "same-registry exact-reference validation only; no read, wait, signal or close", capabilities: [ffi])
+extern fn rt_process_validate_piped_ref_v1(pid: i64, generation: i64) -> i64
+@unsafe(reason: "same-registry generation-checked partial write; >=0 progress, -2 stale, -1 failure", capabilities: [ffi])
+extern fn rt_process_write_stdin_some_ref_v1(pid: i64, generation: i64, data: text, data_len: i64, offset: i64, max_bytes: i64) -> i64
+@unsafe(reason: "same-registry exact-reference liveness: 0 stopped, 1 running, -2 stale, -3 POSIX unsupported, -1 failure", capabilities: [ffi])
+extern fn rt_process_is_piped_alive_ref_v1(pid: i64, generation: i64) -> i64
+@unsafe(reason: "same-registry exact-reference close claim: 0 success, -2 stale or duplicate, -3 POSIX unsupported, -1 cleanup failure", capabilities: [ffi])
+extern fn rt_process_close_piped_ref_v1(pid: i64, generation: i64) -> i64
+
+fn _piped_ref_input_error_v1(value: text) -> text:
+    match boxed_text_bytes_checked(value):
+        case Err(reason): return "process_input_encoding_failed"
+        case Ok(bytes):
+            for byte in bytes:
+                if byte == 0u8: return "process_input_contains_nul"
+    ""
+
+fn _piped_ref_valid_v1(process: PipedProcessRefV1) -> bool:
+    process.pid > 0 and process.generation > 0
+
+pub fn process_spawn_piped_ref_v1(cmd: text, args: [text]) -> Result<PipedProcessRefV1, text>:
+    if cmd == "": return Err("empty_process_command")
+    if args.len() > PIPED_PROCESS_REF_V1_MAX_ARGS: return Err("process_argv_too_large")
+    val command_error = _piped_ref_input_error_v1(cmd)
+    if command_error != "": return Err(command_error)
+    for arg in args:
+        val argument_error = _piped_ref_input_error_v1(arg)
+        if argument_error != "": return Err(argument_error)
+    if not host_path_is_absolute(cmd): return Err("process_command_not_absolute")
+    # Translate platform spelling only; no tool/script/PATH resolution.
+    val native_command = host_path_native(cmd)
+    val native_error = _piped_ref_input_error_v1(native_command)
+    if native_error != "": return Err(native_error)
+    if not host_path_is_absolute(native_command): return Err("process_command_not_absolute")
+    val command_bytes = str_len(native_command)
+    var generation: i64 = -1
+    unsafe(capabilities: [ffi]):
+        generation = rt_process_spawn_piped_generation_v1(native_command, command_bytes, args)
+    if generation <= 0: return Err("process_spawn_failed")
+    var pid: i64 = -1
+    unsafe(capabilities: [ffi]):
+        pid = rt_process_piped_pid_for_generation_v1(generation)
+    if pid == -2: return Err("stale_process_reference")
+    if pid <= 0: return Err("process_spawn_failed")
+    Ok(PipedProcessRefV1(pid: pid, generation: generation))
+
+pub fn process_validate_piped_ref_v1(process: PipedProcessRefV1) -> Result<(), text>:
+    if not _piped_ref_valid_v1(process): return Err("invalid_process_reference")
+    var validated: i64 = -1
+    unsafe(capabilities: [ffi]):
+        validated = rt_process_validate_piped_ref_v1(process.pid, process.generation)
+    if validated == -2: return Err("stale_process_reference")
+    if validated != 0: return Err("process_reference_validation_failed")
+    Ok(())
+
+pub fn process_read_stdout_ref_v1(process: PipedProcessRefV1) -> Result<text?, text>:
+    if not _piped_ref_valid_v1(process): return Err("invalid_process_reference")
+    var chunk: text = ""
+    unsafe(capabilities: [ffi]):
+        chunk = rt_process_read_stdout_ref_v1(process.pid, process.generation)
+    if chunk != "": return Ok(Some(chunk))
+    var state: i64 = -1
+    unsafe(capabilities: [ffi]):
+        state = rt_process_stdout_state_ref_v1(process.pid, process.generation)
+    if state == 0: return Ok(nil)
+    if state == 1: return Err("process_stdout_eof")
+    if state == -2: return Err("stale_process_reference")
+    Err("process_stdout_failed")
+
+pub fn process_write_stdin_some_ref_v1(process: PipedProcessRefV1, data: text,
+        offset: i64, max_bytes: i64) -> Result<i64, text>:
+    if not _piped_ref_valid_v1(process): return Err("invalid_process_reference")
+    val data_bytes = str_len(data)
+    if offset < 0 or offset > data_bytes or max_bytes <= 0:
+        return Err("invalid_process_write_range")
+    var written: i64 = -1
+    unsafe(capabilities: [ffi]):
+        written = rt_process_write_stdin_some_ref_v1(process.pid, process.generation,
+            data, data_bytes, offset, max_bytes)
+    if written == -2: return Err("stale_process_reference")
+    if written < 0: return Err("process_write_failed")
+    Ok(written)
+
+pub fn process_is_piped_alive_ref_v1(process: PipedProcessRefV1) -> Result<bool, text>:
+    if not _piped_ref_valid_v1(process): return Err("invalid_process_reference")
+    var alive: i64 = -1
+    unsafe(capabilities: [ffi]):
+        alive = rt_process_is_piped_alive_ref_v1(process.pid, process.generation)
+    if alive == -2: return Err("stale_process_reference")
+    if alive == -3: return Err("process_liveness_unsupported")
+    if alive == 0: return Ok(false)
+    if alive == 1: return Ok(true)
+    Err("process_probe_failed")
+
+pub fn process_close_piped_ref_v1(process: PipedProcessRefV1) -> Result<(), text>:
+    if not _piped_ref_valid_v1(process): return Err("invalid_process_reference")
+    var closed: i64 = -1
+    unsafe(capabilities: [ffi]):
+        closed = rt_process_close_piped_ref_v1(process.pid, process.generation)
+    if closed == -2: return Err("stale_process_reference")
+    if closed == -3: return Err("process_close_unsupported")
+    if closed != 0: return Err("process_close_failed")
+    Ok(())
 
 pub fn process_spawn_piped(cmd: text, args: [text]) -> i64:
     _process_spawn_piped_raw(cmd, args)
