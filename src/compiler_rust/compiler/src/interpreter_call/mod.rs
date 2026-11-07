@@ -690,6 +690,16 @@ fn warn_prelude_shadow_once(name: &str, functions: &HashMap<String, Arc<Function
     }
 }
 
+/// Adds the elapsed phase time to its counter on drop, so a phase that ends
+/// in several `return`s is still accounted.
+struct PhaseGuard(&'static std::sync::atomic::AtomicU64, Option<std::time::Instant>);
+
+impl Drop for PhaseGuard {
+    fn drop(&mut self) {
+        crate::perf_counters::phase_end(self.0, self.1);
+    }
+}
+
 pub(crate) fn evaluate_call(
     callee: &Box<Expr>,
     args: &[Argument],
@@ -701,6 +711,9 @@ pub(crate) fn evaluate_call(
 ) -> Result<Value, CompileError> {
     // Priority 1: Check extern functions first (before builtins)
     if let Expr::Identifier(name) = callee.as_ref() {
+        use crate::perf_counters::{self as pc, phase_end, phase_start};
+        pc::bump(&pc::EVALCALL_IDENT_CALLS, 1);
+        let t = phase_start();
         let is_extern = EXTERN_FUNCTIONS.with(|cell| {
             let externs = cell.borrow();
             let contains = externs.contains(name);
@@ -749,18 +762,27 @@ pub(crate) fn evaluate_call(
         }
         // A fn-typed local/parameter named like a prelude builtin (`fn f(str: fn(i64) -> text)`)
         // is a value call and must win over the extern/builtin of the same name.
-        let local_callable_shadows = !super::interpreter_eval::PRELUDE_UNSHADOWABLE.contains(&name.as_str())
-            && matches!(env.get(name.as_str()), Some(Value::Function { .. }) | Some(Value::Lambda { .. }));
-        if is_extern && !has_local_def && !local_callable_shadows {
+        // Evaluated only on the two branches that read it: the `env.get`
+        // cascade it runs costs ~300 ns on an owned frame, and the common
+        // user-function call (Priority 5) never needs the answer.
+        let local_callable_shadows = |env: &Env| {
+            !super::interpreter_eval::PRELUDE_UNSHADOWABLE.contains(&name.as_str())
+                && matches!(env.get(name.as_str()), Some(Value::Function { .. }) | Some(Value::Lambda { .. }))
+        };
+        phase_end(&pc::EVALCALL_NS_P1_EXTERN_CHECK, t);
+        if is_extern && !has_local_def && !local_callable_shadows(env) {
             if runtime_profile::is_profiling_active() {
                 runtime_profile::record_full_call(name, None, vec![], runtime_profile::CallType::Ffi);
             }
+            let t = phase_start();
             let result = call_extern_function(name, args, env, functions, classes, enums, impl_methods);
+            phase_end(&pc::EVALCALL_NS_P1_EXTERN_CALL, t);
             if runtime_profile::is_profiling_active() {
                 runtime_profile::record_full_return(None);
             }
             return result;
         }
+        let t = phase_start();
 
         // Priority 2: Try built-ins.
         //
@@ -786,11 +808,13 @@ pub(crate) fn evaluate_call(
         if user_defined && !builtin_wins && super::interpreter_eval::is_user_facing_prelude(name.as_str()) {
             warn_prelude_shadow_once(name.as_str(), functions, false);
         }
-        if builtin_wins && !local_callable_shadows {
+        if builtin_wins && !local_callable_shadows(env) {
             if let Some(result) = builtins::eval_builtin(name, args, env, functions, classes, enums, impl_methods)? {
                 return Ok(result);
             }
         }
+        phase_end(&pc::EVALCALL_NS_P2_BUILTIN, t);
+        let t = phase_start();
 
         // Priority 3: Try BDD framework for spec DSL names (describe/it/before_each/…).
         //
@@ -808,6 +832,8 @@ pub(crate) fn evaluate_call(
         if let Some(result) = bdd::eval_bdd_builtin(name, args, env, functions, classes, enums, impl_methods)? {
             return Ok(result);
         }
+        phase_end(&pc::EVALCALL_NS_P3_BDD, t);
+        let t = phase_start();
 
         // Priority 3.9: a LEXICAL local bound to a callable (`val resolve =
         // loader.resolve_fn`, a fn-typed parameter) shadows every module-level
@@ -824,6 +850,8 @@ pub(crate) fn evaluate_call(
             }
         }
 
+        phase_end(&pc::EVALCALL_NS_P39_LOCAL, t);
+        let t = phase_start();
         // Priority 4: Check overloaded regular functions before the flat map fallback.
         let overloads = FUNCTION_OVERLOADS.with(|cell| cell.borrow().get(name).cloned());
         if let Some(overloads) = overloads {
@@ -881,13 +909,19 @@ pub(crate) fn evaluate_call(
             }
         }
 
+        phase_end(&pc::EVALCALL_NS_P4_OVERLOADS, t);
+        let t = phase_start();
         // Priority 4.5: a function rebound by a user-defined decorator. The
         // decorated closure lives in `env` under `name`, but the undecorated
         // definition is still in `functions` (the original body needs it to
         // recurse), and Priority 5 below would therefore shadow the wrapper.
         // The sentinel is written by crate::decorator_apply and is scoped to
         // the same Env as the binding.
-        if env.get(&crate::decorator_apply::decorated_fn_key(name)).is_some() {
+        // Only worth the key build + env cascade once a decorator has bound
+        // anything in this process (see decorator_apply::DECORATED_FN_BOUND).
+        if crate::decorator_apply::any_decorated_fn_bound()
+            && env.get(&crate::decorator_apply::decorated_fn_key(name)).is_some()
+        {
             if let Some(val) = env.get(name).cloned() {
                 if let Some(result) = call_value_as_callable(val, args, env, functions, classes, enums, impl_methods)? {
                     return Ok(result);
@@ -895,6 +929,8 @@ pub(crate) fn evaluate_call(
             }
         }
 
+        phase_end(&pc::EVALCALL_NS_P45_DECORATED, t);
+        let t = phase_start();
         // Priority 4.9: a nested `fn` declared inside a BLOCK CLOSURE (an `it`
         // block, or any lambda body) is registered TWICE by
         // `exec_block_closure_into`: once in `functions`, so the body can recurse,
@@ -944,8 +980,11 @@ pub(crate) fn evaluate_call(
             }
         }
 
+        phase_end(&pc::EVALCALL_NS_P49_ENV_SHADOW, t);
         // Priority 5: Check regular functions (user-defined) — most common case
         if let Some(func) = functions.get(name).cloned() {
+            let t = phase_start();
+            let _flat_exec = PhaseGuard(&pc::EVALCALL_NS_P5_FLAT_EXEC, t);
             if debug_dupdispatch() {
                 eprintln!(
                     "[dupdispatch] P5-flat name={name} owner={:?} current={:?}",
