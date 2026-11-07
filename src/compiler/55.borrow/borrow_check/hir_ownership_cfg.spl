@@ -1,0 +1,94 @@
+# HIR control flow preserves reachability before the common ownership solver.
+use compiler.hir.hir_definitions.{HirBlock, HirStmtKind, HirExpr, HirExprKind}
+use compiler.borrow.borrow_check.hir_ownership_facts.{HirOwnershipFactsV1, HirOwnershipLoopV1, hir_ownership_place_v1}
+use compiler.borrow.borrow_check.hir_ownership_expr.{hir_ownership_expr_v1, hir_ownership_place_inputs_v1}
+use compiler.borrow.borrow_check.borrow_graph.{Place, place_local}
+use compiler.borrow.borrow_check.ownership_flow.{OwnershipEvent}
+
+pub fn hir_ownership_block_v1(facts: HirOwnershipFactsV1, block: HirBlock, transfer_tail: bool):
+    if facts.depth >= 256:
+        facts.reject(block.span, "ownership block nesting budget exhausted")
+        return
+    facts.depth = facts.depth + 1
+    hir_ownership_block_impl_v1(facts, block, transfer_tail)
+    facts.depth = facts.depth - 1
+
+fn hir_ownership_block_impl_v1(facts: HirOwnershipFactsV1, block: HirBlock, transfer_tail: bool):
+    for statement in block.stmts:
+        if facts.current < 0 or facts.errors.len() > 0: return
+        if not facts.reserve(statement.span): return
+        match statement.kind:
+            case HirStmtKind.Expr(expr): hir_ownership_expr_v1(facts, expr, false)
+            case HirStmtKind.Let(symbol, _, value):
+                hir_ownership_expr_v1(facts, value, true)
+                facts.locals[symbol.id] = true
+                facts.record(OwnershipEvent.Revive(place_local(symbol.id)), statement.span)
+            case HirStmtKind.Assign(target, op, value):
+                # Preserve value evaluation before overwrite/revival.
+                hir_ownership_expr_v1(facts, value, true)
+                hir_ownership_place_inputs_v1(facts, target)
+                if val place = hir_ownership_place_v1(facts, target):
+                    facts.record(OwnershipEvent.Write(place), target.span)
+                    if op != nil: facts.record(OwnershipEvent.Read(place), target.span)
+                    facts.record(OwnershipEvent.Revive(place), statement.span)
+                else:
+                    facts.reject(target.span, "assignment target has no admitted ownership place")
+            case HirStmtKind.Block(nested): hir_ownership_block_v1(facts, nested, false)
+            case HirStmtKind.AsmAssert(_): pass
+    if block.has and facts.current >= 0 and facts.errors.len() == 0:
+        hir_ownership_expr_v1(facts, block.value, transfer_tail)
+
+pub fn hir_ownership_branch_v1(facts: HirOwnershipFactsV1, condition: HirExpr,
+        then_: HirBlock, else_: HirBlock?, transfer: bool):
+    hir_ownership_expr_v1(facts, condition, false)
+    if facts.current < 0: return
+    val predecessor = facts.current
+    val left = facts.new_block(condition.span)
+    val right = facts.new_block(condition.span)
+    val join = facts.new_block(condition.span)
+    facts.connect(predecessor, left)
+    facts.connect(predecessor, right)
+    facts.current = left
+    hir_ownership_block_v1(facts, then_, transfer)
+    val left_exit = facts.current
+    facts.connect(left_exit, join)
+    facts.current = right
+    if val other = else_: hir_ownership_block_v1(facts, other, transfer)
+    val right_exit = facts.current
+    facts.connect(right_exit, join)
+    facts.current = if left_exit < 0 and right_exit < 0: -1 else: join
+
+pub fn hir_ownership_loop_v1(facts: HirOwnershipFactsV1, condition: HirExpr?,
+        body: HirBlock, label: text?):
+    val header = facts.new_block(body.span)
+    val body_entry = facts.new_block(body.span)
+    val exit_block = facts.new_block(body.span)
+    facts.connect(facts.current, header)
+    facts.current = header
+    if val check = condition:
+        hir_ownership_expr_v1(facts, check, false)
+        facts.connect(facts.current, exit_block)
+    facts.connect(facts.current, body_entry)
+    val old_loops = facts.loops.len()
+    facts.loops.push(HirOwnershipLoopV1(label: label ?? "", header: header, exit: exit_block))
+    facts.current = body_entry
+    hir_ownership_block_v1(facts, body, false)
+    facts.connect(facts.current, header)
+    var restored: [HirOwnershipLoopV1] = []
+    var index = 0
+    while index < old_loops:
+        restored.push(facts.loops[index])
+        index = index + 1
+    facts.loops = restored
+    facts.current = exit_block
+
+pub fn hir_ownership_exit_v1(facts: HirOwnershipFactsV1, expr: HirExpr, label: text, breaking: bool):
+    var index = facts.loops.len() - 1
+    while index >= 0:
+        val loop_ = facts.loops[index]
+        if label == "" or label == loop_.label:
+            facts.connect(facts.current, if breaking: loop_.exit else: loop_.header)
+            facts.current = -1
+            return
+        index = index - 1
+    facts.reject(expr.span, "loop exit has no matching typed loop target")

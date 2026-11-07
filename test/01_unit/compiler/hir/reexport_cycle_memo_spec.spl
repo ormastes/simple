@@ -27,21 +27,20 @@ describe "HIR re-export cycle memo":
         val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
         val facade = surfaces.surfaces[surfaces.index_by_name["cycle.a"]]
         var lowering = hirlowering_for_module("cycle.consumer", surfaces)
-        val first = lowering.find_reexport_source(facade, "cycle.a", "NeverThere", 0)
+        val first = lowering.find_reexport_source(facade.physical_index, "NeverThere")
         expect(first.found).to_equal(false)
-        var first_snapshot = lowering.module_surfaces
-        expect(first_snapshot.reexport_count()).to_equal(1)
+        expect(lowering.reexport_walk_complete).to_equal(true)
+        expect(lowering.reexport_walk_valid).to_equal(true)
+        expect(lowering.reexport_root_memo_keys.len()).to_equal(1)
+        val calls_after_first = lowering.reexport_chase_calls
 
-        # Thread the persisted snapshot into a second lowering.  The seed
-        # interpreter is Arc/COW and cannot prove live cross-copy class alias
-        # mutation; the MIR class prescan covers that native ABI path.
-        var second_lowering = hirlowering_for_module("cycle.other_consumer", first_snapshot)
-        var second_snapshot = second_lowering.module_surfaces
-        expect(second_snapshot.reexport_count()).to_equal(1)
-        val second = second_lowering.find_reexport_source(facade, "cycle.a", "NeverThere", 0)
+        # Memo ownership is the lowerer, not the immutable surface registry.
+        # begin_module must preserve completed roots in the same generation.
+        lowering.begin_module("cycle.other_consumer")
+        val second = lowering.find_reexport_source(facade.physical_index, "NeverThere")
         expect(second.found).to_equal(false)
-        second_snapshot = second_lowering.module_surfaces
-        expect(second_snapshot.reexport_count()).to_equal(1)
+        expect(lowering.reexport_root_memo_keys.len()).to_equal(1)
+        expect(lowering.reexport_chase_calls).to_equal(calls_after_first)
 
     it "retains a positive result reached through a cyclic facade graph":
         val log = cycle_memo_logger()
@@ -63,23 +62,24 @@ describe "HIR re-export cycle memo":
         val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
         val facade = surfaces.surfaces[surfaces.index_by_name["cycle.a"]]
         var lowering = hirlowering_for_module("cycle.consumer", surfaces)
-        val resolved = lowering.find_reexport_source(facade, "cycle.a", "Stable", 0)
+        val resolved = lowering.find_reexport_source(facade.physical_index, "Stable")
         expect(resolved.found).to_equal(true)
         expect(resolved.module_name).to_equal("cycle.owner")
         expect(resolved.item_name).to_equal("Stable")
-        var persisted_snapshot = lowering.module_surfaces
-        expect(persisted_snapshot.reexport_count()).to_equal(1)
+        expect(resolved.module_index).to_equal(surfaces.index_by_name["cycle.owner"])
+        expect(lowering.reexport_walk_complete).to_equal(true)
+        expect(lowering.reexport_walk_valid).to_equal(true)
+        expect(lowering.reexport_root_memo_keys.len()).to_equal(1)
+        val calls_after_resolved = lowering.reexport_chase_calls
 
-        # Exercise the completed positive cache entry through a second
-        # lowering.  Stage4 previously corrupted the aggregate cache payload
-        # at exactly this native ABI boundary.
-        var cached_lowering = hirlowering_for_module("cycle.cached_consumer", persisted_snapshot)
-        val cached = cached_lowering.find_reexport_source(facade, "cycle.a", "Stable", 0)
+        lowering.begin_module("cycle.cached_consumer")
+        val cached = lowering.find_reexport_source(facade.physical_index, "Stable")
         expect(cached.found).to_equal(true)
         expect(cached.module_name).to_equal("cycle.owner")
+        expect(cached.module_index).to_equal(resolved.module_index)
         expect(cached.item_name).to_equal("Stable")
-        persisted_snapshot = cached_lowering.module_surfaces
-        expect(persisted_snapshot.reexport_count()).to_equal(1)
+        expect(lowering.reexport_root_memo_keys.len()).to_equal(1)
+        expect(lowering.reexport_chase_calls).to_equal(calls_after_resolved)
 
     it "does not carry a completed lookup into a fresh surface snapshot":
         val log = cycle_memo_logger()
@@ -102,9 +102,10 @@ describe "HIR re-export cycle memo":
         val first_surfaces = module_surfaces_from_modules(modules, sources).unwrap()
         val first_facade = first_surfaces.surfaces[first_surfaces.index_by_name["cycle.a"]]
         var first_lowering = hirlowering_for_module("cycle.first_consumer", first_surfaces)
-        val first = first_lowering.find_reexport_source(first_facade, "cycle.a", "Stable", 0)
+        val first = first_lowering.find_reexport_source(first_facade.physical_index, "Stable")
         expect(first.found).to_equal(true)
-        expect(first_lowering.module_surfaces.reexport_count()).to_equal(1)
+        expect(first_lowering.reexport_root_memo_keys.len()).to_equal(1)
+        expect(first.module_index).to_equal(first_surfaces.index_by_name["cycle.owner"])
 
         val changed_owner = parse_full_frontend(changed_owner_source, "cycle.owner", "cycle.owner", log)
         var changed_modules: Dict<text, Module> = {}
@@ -118,7 +119,16 @@ describe "HIR re-export cycle memo":
         ]
         val fresh_surfaces = module_surfaces_from_modules(changed_modules, changed_sources).unwrap()
         val fresh_facade = fresh_surfaces.surfaces[fresh_surfaces.index_by_name["cycle.a"]]
-        var fresh_lowering = hirlowering_for_module("cycle.fresh_consumer", fresh_surfaces)
-        val fresh = fresh_lowering.find_reexport_source(fresh_facade, "cycle.a", "Stable", 0)
+        expect(fresh_surfaces.generation == first_surfaces.generation).to_equal(false)
+        first_lowering.module_surfaces = fresh_surfaces
+        first_lowering.begin_module("cycle.fresh_consumer")
+        val fresh = first_lowering.find_reexport_source(fresh_facade.physical_index, "Stable")
         expect(fresh.found).to_equal(false)
-        expect(fresh_lowering.module_surfaces.reexport_count()).to_equal(1)
+        expect(first_lowering.reexport_walk_complete).to_equal(true)
+        expect(first_lowering.reexport_walk_valid).to_equal(true)
+        expect(first_lowering.reexport_root_memo_keys.len()).to_equal(1)
+        val replacement = first_lowering.find_reexport_source(fresh_facade.physical_index, "Replaced")
+        expect(replacement.found).to_equal(true)
+        expect(replacement.module_index).to_equal(fresh_surfaces.index_by_name["cycle.owner"])
+        expect(replacement.module_name).to_equal("cycle.owner")
+        expect(replacement.item_name).to_equal("Replaced")

@@ -1,0 +1,43 @@
+# AUTHORED / NOT_RUN until the campaign runtime owner admits a full CLI.
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{file_read}
+use app.cli.native_build_shard_admission.{native_build_shard_count_for_closure_v1,
+    native_build_small_closure_max_v1}
+
+describe "focused HIR published-closure worker admission":
+    it "starts no warming workers for empty or default-small published closures":
+        step("Apply the actual shared production policy to a twenty-worker admission")
+        val threshold = native_build_small_closure_max_v1("")
+        expect(threshold).to_equal(4)
+        expect(native_build_shard_count_for_closure_v1(20, 0, threshold)).to_equal(0)
+        expect(native_build_shard_count_for_closure_v1(20, 1, threshold)).to_equal(0)
+        expect(native_build_shard_count_for_closure_v1(20, 4, threshold)).to_equal(0)
+        expect(native_build_shard_count_for_closure_v1(20, 5, threshold)).to_equal(5)
+
+    it "preserves zero and one admitted worker and never raises a memory ceiling":
+        expect(native_build_shard_count_for_closure_v1(0, 100, 4)).to_equal(0)
+        expect(native_build_shard_count_for_closure_v1(-1, 100, 4)).to_equal(-1)
+        expect(native_build_shard_count_for_closure_v1(1, 100, 4)).to_equal(1)
+        expect(native_build_shard_count_for_closure_v1(3, 100, 4)).to_equal(3)
+        expect(native_build_shard_count_for_closure_v1(3, 2, 0)).to_equal(2)
+
+    it "keeps configured large capacity and clamps only to known available work":
+        expect(native_build_shard_count_for_closure_v1(20, 200, 4)).to_equal(20)
+        expect(native_build_shard_count_for_closure_v1(80, 200, 4)).to_equal(80)
+        expect(native_build_shard_count_for_closure_v1(128, 200, 4)).to_equal(128)
+        expect(native_build_shard_count_for_closure_v1(128, 100, 4)).to_equal(100)
+        expect(native_build_shard_count_for_closure_v1(20, 1, 0)).to_equal(1)
+
+    it "does not fabricate an empty closure when publication is unavailable":
+        expect(native_build_shard_count_for_closure_v1(20, -1, 4)).to_equal(20)
+        expect(native_build_shard_count_for_closure_v1(1, -1, 4)).to_equal(1)
+        expect(native_build_shard_count_for_closure_v1(0, -1, 4)).to_equal(0)
+        expect(native_build_small_closure_max_v1("0")).to_equal(0)
+        expect(native_build_small_closure_max_v1("junk")).to_equal(4)
+
+    it "connects focused HIR launch to the shared policy after memory admission":
+        # The behavioral controls above call the production helper; this guard
+        # separately detects accidentally wiring only the ordinary route.
+        val source = file_read("src/app/cli/native_build_main.spl")
+        expect(source.contains("val hir_count = native_build_shard_count_for_closure_v1(\n        requested_hir_count, closure_files, small_closure_max)")).to_equal(true)
+        expect(source.contains("if hir_count > 1:")).to_equal(true)

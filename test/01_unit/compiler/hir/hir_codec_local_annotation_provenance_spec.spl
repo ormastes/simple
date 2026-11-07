@@ -1,0 +1,68 @@
+# NOT_RUN: codec serialization obligations. Producer provenance is tested in
+# frontend diagnostics specs; these controlled rows isolate the wire contract.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode, hir_codec_header,
+    hir_canonical_codec_header, hir_canonical_codec_generated_available_v1}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.generated.hir_codec.{hc_enc_hir_module}
+
+fn provenance_codec_module() -> HirModule:
+    val parsed = parse_full_frontend("fn answer() -> i64:\n    42\n",
+        "provenance.spl", "provenance", Logger(level: 0))
+    var lowering = HirLowering.with_filename("provenance.spl")
+    val module = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    module
+
+describe "HIR local annotation provenance codec":
+    it "round trips explicit, inferred and absent without conflating false with missing":
+        var module = provenance_codec_module()
+        module.local_annotation_provenance = {101: true, 202: false}
+        val wire = hir_module_encode(module)
+        expect(wire != "").to_equal(true)
+        val decoded = hir_module_decode(wire).unwrap()
+        expect(decoded.local_annotation_provenance.len()).to_equal(2)
+        expect(decoded.local_annotation_provenance.contains_key(101)).to_equal(true)
+        expect(decoded.local_annotation_provenance[101]).to_equal(true)
+        expect(decoded.local_annotation_provenance.contains_key(202)).to_equal(true)
+        expect(decoded.local_annotation_provenance[202]).to_equal(false)
+        expect(decoded.local_annotation_provenance.contains_key(303)).to_equal(false)
+        expect(hir_module_encode(decoded)).to_equal(wire)
+
+    it "keeps empty provenance unknown across a round trip":
+        var module = provenance_codec_module()
+        module.local_annotation_provenance = {}
+        val decoded = hir_module_decode(hir_module_encode(module)).unwrap()
+        expect(decoded.local_annotation_provenance.len()).to_equal(0)
+        expect(decoded.local_annotation_provenance.contains_key(101)).to_equal(false)
+
+    it "uses deterministic raw symbol key order and retains bounded traversal":
+        var module = provenance_codec_module()
+        module.local_annotation_provenance = {202: false, 101: true}
+        val first = hir_module_encode(module)
+        module.local_annotation_provenance = {101: true, 202: false}
+        expect(hir_module_encode(module)).to_equal(first)
+        var legacy = HirCodecWriter.create()
+        var bounded = HirCodecWriter.create_canonical_bounded(1048576, 16777216, 1048576)
+        hc_enc_hir_module(legacy, module)
+        hc_enc_hir_module(bounded, module)
+        expect(bounded.ok).to_equal(true)
+        expect(bounded.current_depth).to_equal(0)
+        expect(bounded.finish()).to_equal(legacy.finish())
+        expect(bounded.finish()).to_end_with("2\n101\n1\n202\n0\n")
+
+    it "invalidates previous cache headers without opening canonical admission":
+        val wire = hir_module_encode(provenance_codec_module())
+        expect(wire != "").to_equal(true)
+        val previous = wire.replace("spl-hircodec-v16-local-annotation-provenance",
+            "spl-hircodec-v15-function-unsafe-caps")
+        expect(hir_module_decode(previous).?).to_equal(false)
+        expect(hir_codec_header()).to_start_with("spl-hircodec-v16-local-annotation-provenance ")
+        expect(hir_canonical_codec_header()).to_start_with("spl-hircodec-canonical-v6-local-annotation-provenance ")
+        expect(hir_canonical_codec_generated_available_v1()).to_equal(false)

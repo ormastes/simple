@@ -72,7 +72,7 @@ int64_t rt_process_session_is_running(int64_t pid);
 /* Send signo to every live process whose session id is sid, except the caller.
  *   >= 0  number of processes signalled (0 is a valid answer: nothing left)
  *   -EINVAL  sid <= 1, or sid is the caller's own session
- *   -errno   enumeration failed
+ *   -errno   enumeration or signal delivery failed (ESRCH is a benign exit race)
  *   RT_PTREE_UNSUPPORTED */
 int64_t rt_process_kill_session(int64_t sid, int32_t signo);
 
@@ -81,7 +81,9 @@ int64_t rt_process_kill_session(int64_t sid, int32_t signo);
  *   0  session enumerated, every member signalled, leader reaped or not ours
  *   RT_PTREE_NOT_SESSION_LEADER  pid is alive and getsid(pid) != pid
  *   RT_PTREE_SWEEP_FAILED_AFTER_REAP  leader gone, second sweep failed
- *   -EINVAL / -errno / RT_PTREE_UNSUPPORTED  as above */
+ *   -ETIMEDOUT  leader reap not confirmed within the 2-second wait budget
+ *   -EINVAL / -errno / RT_PTREE_UNSUPPORTED  as above; ordinary errors do not
+ *       grant retirement or authorize forgetting an owned child */
 int64_t rt_process_kill_tree(int64_t pid);
 
 /* Child-side: die with signo when the parent exits.
