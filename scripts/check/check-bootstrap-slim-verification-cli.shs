@@ -81,10 +81,12 @@ for omitted in none $tasks; do
   done
 done
 
-python3 - "$verifier" "$root/src/app/cli/bootstrap_verify_main.spl" <<'PY'
+python3 - "$verifier" "$root/src/app/cli/bootstrap_verify_main.spl" \
+  "$root/.github/workflows/simpleos-build.yml" <<'PY'
 from pathlib import Path
+import re
 import sys
-verifier, entry = (Path(p).read_text() for p in sys.argv[1:])
+verifier, entry, workflow = (Path(p).read_text() for p in sys.argv[1:])
 assert 'run_phase_c_tool_worker cli compiler_cli_build "$compiler_cli_entry"' in verifier
 assert 'run_phase_c_tool_build compiler_cli_build "$compiler_cli_entry"' in verifier
 assert 'tool_cache_cli="$tool_cache/full-cli"' in verifier
@@ -96,5 +98,24 @@ assert 'val driver = _cli_driver_binary()' in entry and 'if driver.len() == 0:' 
 assert 'process_run_inherit(driver, child_args)' in entry
 imports = [line for line in entry.splitlines() if line.startswith('use ')]
 assert not any('main_and_help' in line or 'driver_api' in line or 'run_commands' in line for line in imports)
+required_delegation_env = (
+    "BOOTSTRAP_STAGE2_TEST_DELEGATE: '1'",
+    "SIMPLE_MCDC_OFF_WAIVER_REASON:",
+    "SIMPLE_MCDC_OFF_WAIVER_REVIEWER:",
+    "SIMPLE_MCDC_OFF_WAIVER_REVIEW_ID:",
+    "SIMPLE_MCDC_OFF_WAIVER_VERSION:",
+)
+for job_id, step_name in (
+    ('toolchain_artifacts_phase2', 'Build admitted pure-Simple host on this runner'),
+    ('smoke', 'Build and deploy admitted pure-Simple host CLI'),
+    ('full', 'Build and deploy admitted pure-Simple host CLI'),
+):
+    job_match = re.search(
+        rf'(?ms)^  {re.escape(job_id)}:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)',
+        workflow,
+    )
+    assert job_match, job_id
+    step = job_match.group('body').split(f'- name: {step_name}', 1)[1].split('\n      - name:', 1)[0]
+    assert all(atom in step for atom in required_delegation_env), f'{job_id}: {step_name}'
 PY
-printf 'PASS: delegated slim selector, isolated cache, local SCV/explicit-driver contract, five required PASS rows\n'
+printf 'PASS: delegated slim selector, SimpleOS wiring, isolated cache, local SCV/explicit-driver contract, five required PASS rows\n'
