@@ -1,0 +1,185 @@
+use std.spec.{describe, it, expect, step}
+# @req ORCH-02 HOST-02
+# Pure plan/archive/helper integrity, never native attachment or Input rights.
+# Execution NOT_RUN. Full typed daemon template, no fake native owner.
+use std.common.contracts.container.primary_attach_v1.*
+use std.common.contracts.container.stream_v2.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
+use std.common.build_manager.group_process_stream_profile_v3.*
+use std.common.build_manager.group_process_stream_protocol_v2.*
+use std.common.contracts.orchestration.host_helper_plan_v1.host_helper_plan_digest_v1
+use std.common.contracts.orchestration.host_reservation_codec_v1.{host_reservation_bind_intent_v1, host_helper_reservation_receipt_v1}
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.string_core.str_len
+use test.fixtures.orchestration.host_helper_fixture_v1.host_helper_fixture_v1
+
+fn primary_fixture_v1() -> ContainerPrimaryAttachPlanV1:
+    val workload = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: "workload", attempt: 2,
+        operation_id: "parent-operation", request_digest: "a".repeat(64), physical_host_id: "authorized-alias",
+        service_scope_id: "service", boot_id: "boot", provider_generation: 7, native_machine_id: "machine",
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot")
+    val scope = ContainerHostScopeV2(physical_host_id: workload.physical_host_id, service_scope_id: workload.service_scope_id,
+        boot_id: workload.boot_id, provider_generation: workload.provider_generation, native_machine_id: workload.native_machine_id,
+        continuity_mode: workload.continuity_mode, continuity_id: workload.continuity_id)
+    val runtime = RuntimeIdentityV1(pod_uid: workload.workload_uid, attempt: workload.attempt,
+        operation_id: workload.operation_id, provider_generation: workload.provider_generation, engine: "podman",
+        native_id: "b".repeat(64), node_boot_id: container_scope_fence_id_v2(scope).unwrap())
+    val identity = ContainerOutputIdentityV2(operation_id: "output-operation", parent_operation_id: workload.operation_id,
+        parent_operation_digest: "c".repeat(64), parent_assignment_digest: "d".repeat(64),
+        parent_budget_digest: "e".repeat(64), binding_digest: "f".repeat(64))
+    val args = ["attach", "--no-stdin=false", "--sig-proxy=false", "--detach-keys=", runtime.native_id]
+    val request = GroupProcessStreamRequestV2(program: "/usr/bin/podman", producer_digest: "1".repeat(64), args: args,
+        environment: ["LANG=C", "TERM=dumb"], directory: "/trusted/work", inputs: [], timeout_ms: 30000,
+        broker_program: "/trusted/broker", broker_digest: "2".repeat(64),
+        child_argv_digest: group_process_child_argv_digest_v2("/usr/bin/podman", args), launch_deadline_unix_ms: 0)
+    val budget = GroupProcessBrokerBudgetV3(cgroup_path: "/delegated/broker", device: 1, inode: 2, generation: 3,
+        policy_digest: "3".repeat(64), cpu_quota_us: 10000, cpu_period_us: 100000,
+        reserved_cpu_millis: 100, memory_limit_bytes: 16777216, reserved_memory_bytes: 16777216)
+    val profile = GroupProcessStreamProfileV3(helper_cpu: group_process_cpu_quota_v3(50).unwrap(),
+        broker: budget, child_image_mode: "trusted-local-admin-image-fd-v1")
+    val launch = GroupProcessStreamLaunchV2(root: "/trusted/output", worker_id: identity.operation_id, generation: 7,
+        snapshot_digest: "4".repeat(64), cache_identity: "5".repeat(64), memory_limit_bytes: 33554432,
+        request: request, delegated_cgroup_path: "/delegated/helpers", memory_policy: "enforce", transport_generation: 0,
+        profile_v3: Some(profile))
+    var plan = ContainerPrimaryAttachPlanV1(terminal_mode: "stdin", workload: workload, runtime: runtime, identity: identity,
+        resources: ContainerOutputResourcesV2(cpu_millis: 50, memory_bytes: 33554432), provider_identity_digest: "6".repeat(64),
+        policy_digest: "7".repeat(64), launch_template: launch, request_digest: "")
+    plan.request_digest = container_primary_attach_plan_digest_v1(plan).unwrap()
+    plan
+
+fn primary_wire_v1(source: text, key: text, value: SdnValue) -> text:
+    val parsed = parse_resource_document(source).unwrap()
+    var fields = as_dict(parsed.0, "", parsed.1).unwrap()
+    fields[key] = value
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+fn primary_without_v1(source: text, key: text) -> text:
+    val parsed = parse_resource_document(source).unwrap()
+    val fields = as_dict(parsed.0, "", parsed.1).unwrap()
+    var retained: Dict<text, SdnValue> = {}
+    for name in fields.keys():
+        if name != key: retained[name] = fields[name]
+    sdn_encode_canonical(SdnValue.Dict(retained)) + "\n"
+
+fn primary_helper_v1(plan: ContainerPrimaryAttachPlanV1) -> ContainerHelperAdmissionV2:
+    val fixture = host_helper_fixture_v1()
+    val work = plan.workload
+    val scope = ContainerHostScopeV2(physical_host_id: work.physical_host_id, service_scope_id: work.service_scope_id,
+        boot_id: work.boot_id, provider_generation: work.provider_generation, native_machine_id: work.native_machine_id,
+        continuity_mode: work.continuity_mode, continuity_id: work.continuity_id)
+    var helper = fixture.request.plan
+    helper.operation_id = plan.identity.operation_id
+    helper.helper_kind = "attach-broker"
+    helper.parent_operation_id = plan.identity.parent_operation_id
+    helper.parent_operation_digest = plan.identity.parent_operation_digest
+    helper.parent_assignment_digest = plan.identity.parent_assignment_digest
+    helper.parent_budget_digest = plan.identity.parent_budget_digest
+    helper.request_digest = plan.request_digest
+    helper.scope = scope
+    var intent = fixture.request.intent
+    intent.physical_host_id = scope.physical_host_id
+    intent.reservation.operation_id = plan.identity.operation_id
+    intent.reservation.service_scope_id = scope.service_scope_id
+    intent.reservation.cpu_millis = plan.resources.cpu_millis
+    intent.reservation.memory_bytes = plan.resources.memory_bytes
+    intent.fence.boot_id = container_scope_fence_id_v2(scope).unwrap()
+    intent.fence.provider_generation = scope.provider_generation
+    intent.plan_digest = host_helper_plan_digest_v1(helper).unwrap()
+    intent = host_reservation_bind_intent_v1(intent).unwrap()
+    var operation = fixture.request.operation
+    operation.id = plan.identity.operation_id
+    operation.host_id = scope.physical_host_id
+    operation.memory_bytes = plan.resources.memory_bytes
+    operation.duration_ms = plan.launch_template.request.timeout_ms
+    operation.payload_digest = intent.reservation.payload_digest
+    val receipt = host_helper_reservation_receipt_v1(intent, operation).unwrap()
+    ContainerHelperAdmissionV2(plan: helper, intent: intent, operation: operation, receipt: receipt,
+        deadline: container_effect_deadline_v1(plan.request_digest, plan.identity.operation_id, ["attach"], 1000).unwrap(),
+        grant_id: "grant", issuer_id: "issuer", approver_id: "approver", cpu_millis: plan.resources.cpu_millis, memory_bytes: plan.resources.memory_bytes)
+
+describe "distinct primary attach plan retained integrity":
+    it "round trips stdin and tty plans with full template identities and paired containment":
+        step("round trips stdin and tty plans with full template identities and paired containment")
+        for mode in ["stdin", "tty"]:
+            var plan = primary_fixture_v1()
+            plan.terminal_mode = mode
+            plan.containment_profile_digest = "a".repeat(64)
+            plan.containment_identity_digest = "b".repeat(64)
+            plan.request_digest = container_primary_attach_plan_digest_v1(plan).unwrap()
+            val source = container_primary_attach_plan_encode_v1(plan).unwrap()
+            val decoded = container_primary_attach_plan_decode_v1(source).unwrap()
+            expect(container_primary_attach_plan_encode_v1(decoded).unwrap()).to_equal(source)
+            expect(group_process_stream_template_encode_v3(decoded.launch_template).unwrap()).to_equal(group_process_stream_template_encode_v3(plan.launch_template).unwrap())
+            expect(decoded.runtime).to_equal(plan.runtime)
+            expect(decoded.identity).to_equal(plan.identity)
+            expect(decoded.terminal_mode).to_equal(mode)
+
+    it "separates primary attach from output follow digest and helper request domains":
+        step("separates primary attach from output follow digest and helper request domains")
+        val primary = primary_fixture_v1()
+        var output = ContainerOutputPlanV2(mode: "output-follow", workload: primary.workload, runtime: primary.runtime,
+            identity: primary.identity, resources: primary.resources, provider_identity_digest: primary.provider_identity_digest,
+            policy_digest: primary.policy_digest, launch_template: primary.launch_template, request_digest: "")
+        output.request_digest = container_output_plan_digest_v2(output).unwrap()
+        expect(primary.request_digest == output.request_digest).to_equal(false)
+        val helper = primary_helper_v1(primary)
+        expect(container_primary_attach_admission_validate_v1(primary, helper).unwrap()).to_equal(true)
+        expect(container_output_admission_validate_v2(output, helper).is_err()).to_equal(true)
+        # Full-template integrity alone does not validate actual leaf argv/support.
+
+    it "retains the exact helper intent operation receipt fence resource chain":
+        step("retains the exact helper intent operation receipt fence resource chain")
+        val plan = primary_fixture_v1()
+        val original = primary_helper_v1(plan)
+        for field in ["intent", "planhash", "payload", "receipt", "resources", "scope", "action", "deadline"]:
+            var changed = original
+            if field == "intent": changed.intent.reservation.nonce = "changed"
+            if field == "planhash": changed.intent.plan_digest = "9".repeat(64)
+            if field == "payload": changed.operation.payload_digest = changed.intent.plan_digest
+            if field == "receipt": changed.receipt.prepared_revision = changed.receipt.prepared_revision + 1
+            if field == "resources": changed.cpu_millis = changed.cpu_millis + 1
+            if field == "scope": changed.intent.fence.boot_id = "9".repeat(64)
+            if field == "action": changed.operation.operation = "host_reservation_v1"
+            if field == "deadline": changed.deadline.actions = ["exec"]
+            expect(container_primary_attach_admission_validate_v1(plan, changed).is_err()).to_equal(true)
+
+    it "refuses unsupported platform mode containment and generated planning fields":
+        step("refuses unsupported platform mode containment and generated planning fields")
+        val original = primary_fixture_v1()
+        var changed = original
+        changed.terminal_mode = "none"
+        expect(container_primary_attach_plan_digest_v1(changed).is_err()).to_equal(true)
+        changed = original
+        changed.workload.backend = "windows-docker-process"
+        expect(container_primary_attach_plan_digest_v1(changed).is_err()).to_equal(true)
+        changed = original
+        changed.containment_profile_digest = "a".repeat(64)
+        expect(container_primary_attach_plan_digest_v1(changed).is_err()).to_equal(true)
+        changed = original
+        changed.launch_template.transport_generation = 1
+        expect(container_primary_attach_plan_digest_v1(changed).is_err()).to_equal(true)
+        changed = original
+        changed.launch_template.request.launch_deadline_unix_ms = 1000
+        expect(container_primary_attach_plan_digest_v1(changed).is_err()).to_equal(true)
+        changed = original
+        changed.runtime.native_id = "short"
+        expect(container_primary_attach_plan_digest_v1(changed).is_err()).to_equal(true)
+
+    it "refuses stale digest unknown missing typed duplicate noncanonical and oversized archives":
+        step("refuses stale digest unknown missing typed duplicate noncanonical and oversized archives")
+        val plan = primary_fixture_v1()
+        val source = container_primary_attach_plan_encode_v1(plan).unwrap()
+        expect(container_primary_attach_plan_decode_v1(primary_wire_v1(source, "requestDigest", SdnValue.String("a".repeat(64)))).is_err()).to_equal(true)
+        expect(container_primary_attach_plan_decode_v1(primary_wire_v1(source, "inputAuthorized", SdnValue.Bool(true))).is_err()).to_equal(true)
+        expect(container_primary_attach_plan_decode_v1(primary_without_v1(source, "containmentIdentityDigest")).is_err()).to_equal(true)
+        expect(container_primary_attach_plan_decode_v1(primary_wire_v1(source, "terminalMode", SdnValue.Int(1))).is_err()).to_equal(true)
+        expect(container_primary_attach_plan_decode_v1(source + "\n").is_err()).to_equal(true)
+        val head = source.slice(0, source.len() - 2)
+        expect(container_primary_attach_plan_decode_v1(head + ", version: 1" + "}\n").is_err()).to_equal(true)
+        val oversized = "é".repeat(1048577)
+        expect(str_len(oversized)).to_equal(2097154)
+        expect(container_primary_attach_plan_decode_v1(oversized).is_err()).to_equal(true)

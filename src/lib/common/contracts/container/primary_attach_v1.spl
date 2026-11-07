@@ -1,0 +1,163 @@
+# Primary attach plan integrity/archive only. Helper admission grants no input
+# or geometry right. Actual leaf must derive stdin-enabled, sig-proxy=false and
+# disabled detach-key argv/config and observe the retained primary runtime.
+use std.common.contracts.container.stream_v2.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2,
+    group_process_stream_template_digest_v3, group_process_stream_template_encode_v3, group_process_stream_template_decode_v3}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub struct ContainerPrimaryAttachPlanV1:
+    workload: ContainerExecutionPlanV2
+    runtime: RuntimeIdentityV1
+    identity: ContainerOutputIdentityV2
+    resources: ContainerOutputResourcesV2
+    provider_identity_digest: text
+    policy_digest: text
+    terminal_mode: text
+    containment_profile_digest: text = ""
+    containment_identity_digest: text = ""
+    launch_template: GroupProcessStreamLaunchV2
+    request_digest: text
+
+pub fn container_primary_attach_plan_digest_v1(plan: ContainerPrimaryAttachPlanV1) -> Result<text, text>:
+    if (plan.workload.backend != "linux-podman" or not ["stdin", "tty"].contains(plan.terminal_mode) or plan.resources.cpu_millis <= 0 or plan.resources.memory_bytes <= 0):
+        return Err("container-primary-attach-mode-or-resources-invalid")
+    if (plan.identity.parent_operation_id != plan.workload.operation_id or
+            plan.runtime.operation_id != plan.workload.operation_id or
+            plan.runtime.pod_uid != plan.workload.workload_uid or plan.runtime.attempt != plan.workload.attempt or
+            plan.runtime.provider_generation != plan.workload.provider_generation):
+        return Err("container-primary-attach-runtime-workload-mismatch")
+    val workload = plan.workload
+    val scope = ContainerHostScopeV2(physical_host_id: workload.physical_host_id,
+        service_scope_id: workload.service_scope_id, boot_id: workload.boot_id,
+        provider_generation: workload.provider_generation, native_machine_id: workload.native_machine_id,
+        continuity_mode: workload.continuity_mode, continuity_id: workload.continuity_id)
+    if plan.runtime.engine != "podman":
+        return Err("container-primary-attach-backend-runtime-mismatch")
+    if plan.runtime.node_boot_id != container_scope_fence_id_v2(scope)?:
+        return Err("container-primary-attach-runtime-scope-mismatch")
+    for digest in [plan.provider_identity_digest, plan.policy_digest, plan.runtime.native_id]:
+        if not builder_digest_valid_v1(digest): return Err("container-primary-attach-observation-invalid")
+    if (plan.containment_profile_digest != "" or plan.containment_identity_digest != ""):
+        if ((not builder_digest_valid_v1(plan.containment_profile_digest) or
+                not builder_digest_valid_v1(plan.containment_identity_digest))):
+            return Err("container-primary-attach-containment-invalid")
+    val launch = plan.launch_template
+    if (launch.worker_id != plan.identity.operation_id or launch.generation != plan.workload.provider_generation or
+            launch.memory_limit_bytes != plan.resources.memory_bytes or launch.transport_generation != 0 or
+            launch.request.launch_deadline_unix_ms != 0):
+        return Err("container-primary-attach-template-mismatch")
+    val profile = match launch.profile_v3:
+        case Some(value): value
+        case None: return Err("container-primary-attach-profile-required")
+    if profile.helper_cpu.cpu_millis != plan.resources.cpu_millis:
+        return Err("container-primary-attach-cpu-mismatch")
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("container-primary-attach-plan-v1"),
+        "terminalMode": SdnValue.String(plan.terminal_mode),
+        "stdinEnabled": SdnValue.Bool(true), "signalProxy": SdnValue.Bool(false), "detachKeys": SdnValue.String(""),
+        "containmentProfileDigest": SdnValue.String(plan.containment_profile_digest),
+        "containmentIdentityDigest": SdnValue.String(plan.containment_identity_digest), "workload": SdnValue.String(container_execution_plan_bytes_v2(plan.workload)?),
+        "identityDigest": SdnValue.String(container_output_identity_digest_v2(plan.identity)?),
+        "engine": SdnValue.String(plan.runtime.engine), "nativeId": SdnValue.String(plan.runtime.native_id),
+        "runtimeFence": SdnValue.String(plan.runtime.node_boot_id),
+        "cpuMillis": SdnValue.Int(plan.resources.cpu_millis), "memoryBytes": SdnValue.Int(plan.resources.memory_bytes),
+        "providerIdentity": SdnValue.String(plan.provider_identity_digest), "policyDigest": SdnValue.String(plan.policy_digest),
+        "launchTemplateDigest": SdnValue.String(group_process_stream_template_digest_v3(launch)?)}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields))))
+
+pub fn container_primary_attach_admission_validate_v1(plan: ContainerPrimaryAttachPlanV1,
+        helper: ContainerHelperAdmissionV2) -> Result<bool, text>:
+    val digest = container_primary_attach_plan_digest_v1(plan)?
+    if plan.request_digest != digest: return Err("container-primary-attach-admission-template-mismatch")
+    container_helper_admission_validate_v3(ContainerHelperAssociationV3(workload: plan.workload, runtime: plan.runtime,
+        identity: plan.identity, resources: plan.resources, request_digest: digest,
+        timeout_ms: plan.launch_template.request.timeout_ms), helper)
+
+pub fn container_primary_attach_plan_encode_v1(plan: ContainerPrimaryAttachPlanV1) -> Result<text, text>:
+    if plan.request_digest != container_primary_attach_plan_digest_v1(plan)?:
+        return Err("container-primary-attach-plan-request-digest-mismatch")
+    val workload_bytes = container_execution_plan_bytes_v2(plan.workload)?
+    val template_bytes = group_process_stream_template_encode_v3(plan.launch_template)?
+    if str_len(workload_bytes) > 2097152 or str_len(template_bytes) > 2097152:
+        return Err("container-primary-attach-plan-nested-size")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("container-primary-attach-plan"),
+        "terminalMode": SdnValue.String(plan.terminal_mode),
+        "containmentProfileDigest": SdnValue.String(plan.containment_profile_digest),
+        "containmentIdentityDigest": SdnValue.String(plan.containment_identity_digest),
+        "workload": SdnValue.String(workload_bytes),
+        "runtimePodUid": SdnValue.String(plan.runtime.pod_uid),
+        "runtimeAttempt": SdnValue.Int(plan.runtime.attempt),
+        "runtimeProviderGeneration": SdnValue.Int(plan.runtime.provider_generation),
+        "runtimeOperationId": SdnValue.String(plan.runtime.operation_id),
+        "runtimeEngine": SdnValue.String(plan.runtime.engine),
+        "runtimeNativeId": SdnValue.String(plan.runtime.native_id),
+        "runtimeFence": SdnValue.String(plan.runtime.node_boot_id),
+        "operationId": SdnValue.String(plan.identity.operation_id),
+        "parentOperationId": SdnValue.String(plan.identity.parent_operation_id),
+        "parentOperationDigest": SdnValue.String(plan.identity.parent_operation_digest),
+        "parentAssignmentDigest": SdnValue.String(plan.identity.parent_assignment_digest),
+        "parentBudgetDigest": SdnValue.String(plan.identity.parent_budget_digest),
+        "bindingDigest": SdnValue.String(plan.identity.binding_digest),
+        "cpuMillis": SdnValue.Int(plan.resources.cpu_millis),
+        "memoryBytes": SdnValue.Int(plan.resources.memory_bytes),
+        "providerIdentityDigest": SdnValue.String(plan.provider_identity_digest),
+        "policyDigest": SdnValue.String(plan.policy_digest),
+        "requestDigest": SdnValue.String(plan.request_digest),
+        "launchTemplate": SdnValue.String(template_bytes)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(source) > 2097152: return Err("container-primary-attach-plan-source-size")
+    Ok(source)
+
+fn primary_plan_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("container-primary-attach-plan-text-required:" + key)
+
+fn primary_plan_int_v1(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("container-primary-attach-plan-integer-required:" + key)
+
+pub fn container_primary_attach_plan_decode_v1(source: text) -> Result<ContainerPrimaryAttachPlanV1, text>:
+    if str_len(source) == 0 or str_len(source) > 2097152: return Err("container-primary-attach-plan-source-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 2097152,
+            max_depth: 2, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 26)):
+        case Ok(value): value
+        case Err(_): return Err("container-primary-attach-plan-syntax")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("container-primary-attach-plan-object-required")
+    val names = ["version", "kind", "terminalMode", "containmentProfileDigest", "containmentIdentityDigest", "workload", "runtimePodUid", "runtimeAttempt", "runtimeProviderGeneration", "runtimeOperationId", "runtimeEngine", "runtimeNativeId", "runtimeFence", "operationId", "parentOperationId", "parentOperationDigest", "parentAssignmentDigest", "parentBudgetDigest", "bindingDigest", "cpuMillis", "memoryBytes", "providerIdentityDigest", "policyDigest", "requestDigest", "launchTemplate"]
+    for key in fields.keys():
+        if not names.contains(key): return Err("container-primary-attach-plan-unknown-field:" + key)
+    for key in names:
+        if not fields.contains_key(key): return Err("container-primary-attach-plan-missing-field:" + key)
+    if primary_plan_int_v1(fields, "version")? != 1 or primary_plan_text_v1(fields, "kind")? != "container-primary-attach-plan":
+        return Err("container-primary-attach-plan-version-kind")
+    val runtime = RuntimeIdentityV1(pod_uid: primary_plan_text_v1(fields, "runtimePodUid")?,
+        attempt: primary_plan_int_v1(fields, "runtimeAttempt")?, provider_generation: primary_plan_int_v1(fields, "runtimeProviderGeneration")?,
+        operation_id: primary_plan_text_v1(fields, "runtimeOperationId")?, engine: primary_plan_text_v1(fields, "runtimeEngine")?,
+        native_id: primary_plan_text_v1(fields, "runtimeNativeId")?, node_boot_id: primary_plan_text_v1(fields, "runtimeFence")?)
+    val identity = ContainerOutputIdentityV2(operation_id: primary_plan_text_v1(fields, "operationId")?,
+        parent_operation_id: primary_plan_text_v1(fields, "parentOperationId")?,
+        parent_operation_digest: primary_plan_text_v1(fields, "parentOperationDigest")?,
+        parent_assignment_digest: primary_plan_text_v1(fields, "parentAssignmentDigest")?,
+        parent_budget_digest: primary_plan_text_v1(fields, "parentBudgetDigest")?, binding_digest: primary_plan_text_v1(fields, "bindingDigest")?)
+    val plan = ContainerPrimaryAttachPlanV1(terminal_mode: primary_plan_text_v1(fields, "terminalMode")?,
+        containment_profile_digest: primary_plan_text_v1(fields, "containmentProfileDigest")?,
+        containment_identity_digest: primary_plan_text_v1(fields, "containmentIdentityDigest")?,
+        workload: container_execution_plan_decode_v2(primary_plan_text_v1(fields, "workload")?)?, runtime: runtime, identity: identity,
+        resources: ContainerOutputResourcesV2(cpu_millis: primary_plan_int_v1(fields, "cpuMillis")?, memory_bytes: primary_plan_int_v1(fields, "memoryBytes")?),
+        provider_identity_digest: primary_plan_text_v1(fields, "providerIdentityDigest")?, policy_digest: primary_plan_text_v1(fields, "policyDigest")?,
+        launch_template: group_process_stream_template_decode_v3(primary_plan_text_v1(fields, "launchTemplate")?)?,
+        request_digest: primary_plan_text_v1(fields, "requestDigest")?)
+    if container_primary_attach_plan_encode_v1(plan)? != source: return Err("container-primary-attach-plan-noncanonical")
+    Ok(plan)
