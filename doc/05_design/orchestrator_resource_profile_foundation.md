@@ -54,10 +54,11 @@ profile assertions. Its profile fixture is `agent_cpu_profile.sdn`; the existing
 source coordinates through the shared value decoder. A standalone
 `resource_profile_foundation_native_probe.spl` includes a real indented nested
 numeric 10000 assertion, quantity boundaries and direct profile allocations.
-That probe remains diagnostic-only; its first bounded build failed before link.
+That probe remains diagnostic-only; its first bounded build failed before link,
+and its changed-fixture retry built and ran successfully.
 
-Runtime verdict: **NOT_RUN**. No admitted self-hosted runner is available. Root
-granted one bounded native diagnostic slot. No coverage percentage,
+Admitted runtime verdict: **NOT_RUN**. No admitted self-hosted runner is available.
+Root granted the initial bounded diagnostic and one changed-fixture retry. No coverage percentage,
 SPipe generation, runtime PASS, compiler/MCP/LSP smoke, production readiness or
 release qualification is claimed. The matching manual is authored, not generated.
 Static diff/provenance checks do not substitute for executing the spec.
@@ -80,3 +81,15 @@ read form followed by an explicit nonempty assertion, preserving fail-fast
 missing-fixture behavior. The failed log also retains runtime array-handle and
 HIR-cache decode refusals; successful later assertions would not erase those
 producer limitations. No product source changed for this fixture repair.
+
+The authorized cache-preserving retry at source commit `6891d21142b` built and
+ran with exit 0. The native assertions exercised the real resource/profile
+implementations, including nested integer 10000, signed-integer and scaling
+boundaries, allocation minima/caps and duplicate refusal. Artifact SHA-256:
+`6cb0bb61211d356253e25d6b36390eefbd226d9c3c7624ac7829daca74269088`.
+Source identities, both attempts, log hashes and containment receipts are
+recorded in `.spipe/simple_orchestrator/resource_profile_foundation_verification_20261107.sdn`.
+The successful build still emitted two invalid-array-handle diagnostics and
+three HIR-cache decode refusals; no compiler repair or admitted qualification
+is inferred. Full system SSpec acceptance remains required after integration
+with actual controller, host and provider entrypoints.
