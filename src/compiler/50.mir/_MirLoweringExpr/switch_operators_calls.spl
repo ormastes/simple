@@ -777,6 +777,14 @@ impl MirLowering:
         val static_scalar_some = disc == 0 and not option_payload_is_boxed(option_type) and self.local_is_provably_scalar_payload(local)
         if disc == 0 and not static_scalar_some:
             return self.normalize_option_handle(local, option_type)
+        self.emit_option_handle_with_disc(local, option_type, disc)
+
+    me emit_option_handle_with_disc(local: LocalId, option_type: HirType, disc: i64) -> LocalId:
+        """Build the canonical enum-id-1 Option handle with a discriminant
+        fixed at compile time (0 = Some(local), 1 = None). Callers must know
+        presence by construction: ensure_option_handle (nil literal or a
+        provably scalar payload) and the bounds-checked some-arm of
+        lower_array_first_or_last, whose payload word may legally be 3."""
         var b = self.builder
         val enum_id_local = b.new_temp(MirType(kind: MirTypeKind.I32))
         b.emit_const(enum_id_local, MirConstValue.Int(1), MirType(kind: MirTypeKind.I32))
@@ -1063,6 +1071,19 @@ impl MirLowering:
         is what makes `nil` a real, distinct value for scalar optionals:
         Some(3), Some(true) and Some(0) are heap handles, never the raw
         sentinel, and a handle is never wrapped twice."""
+        self.classify_option_word(local, option_type, true)
+
+    me normalize_present_option_handle(local: LocalId, option_type: HirType) -> LocalId:
+        """normalize_option_handle for a word that is PRESENT by construction
+        (the bounds-checked array get some-arm) whose element type does not
+        rule out a stored Option handle (`Any`, a type parameter): an
+        enum-id-1 handle passes through unchanged (the interpreter returns a
+        stored Option as-is), anything else -- including the word 3 -- is
+        Some(word). No nil-sentinel test.
+        doc/08_tracking/bug/native_option_int_sink_miss_and_payload_three_2026-11-07.md"""
+        self.classify_option_word(local, option_type, false)
+
+    me classify_option_word(local: LocalId, option_type: HirType, sentinel_is_nil: bool) -> LocalId:
         if val float_word_type = self.local_mir_type_of(local):
             match float_word_type.kind:
                 case MirTypeKind.F32 | MirTypeKind.F64:
@@ -1078,9 +1099,10 @@ impl MirLowering:
         val id_local = id_res ?? LocalId(id: 0)
         val option_id = b.emit_const_int(1)
         val is_handle = b.emit_binop(MirBinOp.Eq, mir_operand_copy(id_local), mir_operand_copy(option_id), MirType.bool())
-        val handle_block = b.new_block(Some("option_norm_handle"))
-        val raw_block = b.new_block(Some("option_norm_raw"))
-        val merge_block = b.new_block(Some("option_norm_merge"))
+        val label_prefix = if sentinel_is_nil: "option_norm" else: "option_present"
+        val handle_block = b.new_block(Some("{label_prefix}_handle"))
+        val raw_block = b.new_block(Some("{label_prefix}_raw"))
+        val merge_block = b.new_block(Some("{label_prefix}_merge"))
         val result = b.new_temp(MirType.i64())
         b.terminate_if(mir_operand_copy(is_handle), handle_block, raw_block)
         b.switch_to_block(handle_block)
@@ -1089,11 +1111,15 @@ impl MirLowering:
         b.switch_to_block(raw_block)
         # None=1 exactly when the word is the nil sentinel (3); the payload
         # word is passed through untouched either way.
-        val nil_key = b.emit_const_int(3)
-        val is_nil = b.emit_binop(MirBinOp.Eq, mir_operand_copy(local), mir_operand_copy(nil_key), MirType.bool())
         val enum_id_local = b.new_temp(MirType(kind: MirTypeKind.I32))
         b.emit_const(enum_id_local, MirConstValue.Int(1), MirType(kind: MirTypeKind.I32))
-        val disc_local = b.emit_cast(mir_operand_copy(is_nil), MirType(kind: MirTypeKind.I32))
+        var disc_local = b.new_temp(MirType(kind: MirTypeKind.I32))
+        if sentinel_is_nil:
+            val nil_key = b.emit_const_int(3)
+            val is_nil = b.emit_binop(MirBinOp.Eq, mir_operand_copy(local), mir_operand_copy(nil_key), MirType.bool())
+            disc_local = b.emit_cast(mir_operand_copy(is_nil), MirType(kind: MirTypeKind.I32))
+        else:
+            b.emit_const(disc_local, MirConstValue.Int(0), MirType(kind: MirTypeKind.I32))
         val ctor = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_enum_new"),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType(kind: MirTypeKind.I32), MirType(kind: MirTypeKind.I32), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
