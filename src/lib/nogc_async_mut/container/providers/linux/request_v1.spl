@@ -28,14 +28,26 @@ pub struct LinuxOciRequestV1:
     # Explicit non-secret values, already authorized by the caller's host policy.
     environment: [OciEnvironmentEntryV1] = []
     working_directory: text = ""
-    # Non-default modes use retained-request/digest version 2.
+    # Without user selection, non-default modes use retained/digest version 2.
     # none preserves the exact historical V1 identity and serialized bytes.
     terminal_mode: text = "none"
+    # Absent selection preserves exact historical V1/V2 bytes and digest.
+    # An explicit numeric pair plus keep-id uses request/digest version 3.
+    user_uid: i64 = -1
+    user_gid: i64 = -1
+    user_namespace_mode: text = ""
+
+pub fn linux_oci_user_selection_v3(request: LinuxOciRequestV1) -> bool:
+    request.user_uid != -1 or request.user_gid != -1 or request.user_namespace_mode != ""
 
 # The operation ID is recovery metadata, checked separately against the bound
 # intent. Every execution field, including currently inert fields, is included.
 # Field hashes keep arbitrary UTF-8 and delimiters unambiguous in canonical SDN.
 fn request_fields_v1(request: LinuxOciRequestV1) -> Result<[text], text>:
+    if linux_oci_user_selection_v3(request):
+        if request.user_uid < 0 or request.user_uid > 4294967294 or
+                request.user_gid < 0 or request.user_gid > 4294967294 or request.user_namespace_mode != "keep-id":
+            return Err("request-user-selection-invalid")
     if request.terminal_mode != "none" and request.terminal_mode != "stdin" and request.terminal_mode != "tty":
         return Err("request-terminal-mode-invalid")
     if request.command.len() > 256 or request.args.len() > 256:
@@ -73,6 +85,10 @@ pub fn linux_oci_request_digest_v1(request: LinuxOciRequestV1) -> Result<text, t
     var body = "version: 1\nkind: linux-oci-request-digest\n"
     if request.terminal_mode != "none":
         body = "version: 2\nkind: linux-oci-request-digest\nterminalMode: " + request.terminal_mode + "\n"
+    if linux_oci_user_selection_v3(request):
+        body = "version: 3\nkind: linux-oci-request-digest\nterminalMode: " + request.terminal_mode + "\n" +
+            "userUid: " + request.user_uid.to_text() + "\nuserGid: " + request.user_gid.to_text() +
+            "\nuserNamespaceMode: keep-id\n"
     var index = 0
     while index < names.len():
         body = body + names[index] + "Digest: \"" + sha256_text(values[index]) + "\"\n"

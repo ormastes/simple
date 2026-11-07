@@ -1,0 +1,64 @@
+# Audit metadata only. A decoded/copied receipt never grants file access:
+# preparation also needs the live native observation owner and revalidation.
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_host_scope_bytes_v2, container_scope_fence_id_v2}
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+
+pub struct ContainerUserMappingReceiptV3:
+    backend: text
+    scope: ContainerHostScopeV2
+    identity: RuntimeIdentityV1
+    request_digest: text
+    provider_identity_digest: text
+    selected_uid: i64
+    selected_gid: i64
+    user_namespace_mode: text
+    native_binding_digest: text
+    native_evidence_digest: text
+    observed_unix_ms: i64
+    pre_query_digest: text
+    pre_evidence_digest: text
+    post_query_digest: text
+    post_evidence_digest: text
+    proof_kind: text
+
+# There is deliberately no decoder for authority-bearing native owners.
+pub fn container_user_mapping_receipt_encode_v3(value: ContainerUserMappingReceiptV3) -> Result<text, text>:
+    if value.backend != "linux-podman" or value.identity.engine != "podman" or
+            value.proof_kind != "exact-native-primary-user-mapping-v3":
+        return Err("container-user-mapping-kind-invalid")
+    if value.selected_uid < 0 or value.selected_uid > 4294967294 or
+            value.selected_gid < 0 or value.selected_gid > 4294967294 or
+            value.user_namespace_mode != "keep-id" or value.observed_unix_ms <= 0:
+        return Err("container-user-mapping-selection-invalid")
+    val runtime = value.identity
+    if not builder_identifier_valid_v1(runtime.pod_uid) or runtime.attempt <= 0 or
+            not builder_identifier_valid_v1(runtime.operation_id) or
+            runtime.provider_generation != value.scope.provider_generation or
+            runtime.node_boot_id != container_scope_fence_id_v2(value.scope)?:
+        return Err("container-user-mapping-runtime-invalid")
+    for digest in [runtime.native_id, value.request_digest, value.provider_identity_digest,
+            value.native_binding_digest, value.native_evidence_digest, value.pre_query_digest,
+            value.pre_evidence_digest, value.post_query_digest, value.post_evidence_digest]:
+        if not builder_digest_valid_v1(digest): return Err("container-user-mapping-digest-invalid")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3),
+        "kind": SdnValue.String(value.proof_kind), "backend": SdnValue.String(value.backend),
+        "scope": SdnValue.String(container_host_scope_bytes_v2(value.scope)?),
+        "podUid": SdnValue.String(runtime.pod_uid), "attempt": SdnValue.Int(runtime.attempt),
+        "operationId": SdnValue.String(runtime.operation_id), "engine": SdnValue.String(runtime.engine),
+        "nativeId": SdnValue.String(runtime.native_id), "runtimeFence": SdnValue.String(runtime.node_boot_id),
+        "providerGeneration": SdnValue.Int(runtime.provider_generation),
+        "requestDigest": SdnValue.String(value.request_digest), "providerIdentity": SdnValue.String(value.provider_identity_digest),
+        "selectedUid": SdnValue.Int(value.selected_uid), "selectedGid": SdnValue.Int(value.selected_gid),
+        "userNamespace": SdnValue.String(value.user_namespace_mode), "observedUnixMs": SdnValue.Int(value.observed_unix_ms),
+        "nativeBindingDigest": SdnValue.String(value.native_binding_digest),
+        "nativeEvidenceDigest": SdnValue.String(value.native_evidence_digest),
+        "preQueryDigest": SdnValue.String(value.pre_query_digest), "preEvidenceDigest": SdnValue.String(value.pre_evidence_digest),
+        "postQueryDigest": SdnValue.String(value.post_query_digest), "postEvidenceDigest": SdnValue.String(value.post_evidence_digest)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn container_user_mapping_receipt_digest_v3(value: ContainerUserMappingReceiptV3) -> Result<text, text>:
+    Ok(sha256_text(container_user_mapping_receipt_encode_v3(value)?))

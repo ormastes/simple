@@ -1,7 +1,7 @@
 # Configured container user metadata, never an effective-UID measurement.
 use std.common.contracts.container.runtime_v1.{RuntimeCommandV1, RuntimeIdentityV1}
 use std.common.build_manager.contracts.builder_digest_valid_v1
-use std.common.json.value.{json_parse_value_strict, json_value_keys, json_value_as_text, json_value_get, json_value_type}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_keys, json_value_as_text, json_value_get, json_value_type}
 
 pub fn build_execution_user_command_v2(engine: text, native_id: text) -> Result<RuntimeCommandV1, text>:
     if engine != "podman": return Err("execution-user-managed-podman-required")
@@ -10,7 +10,7 @@ pub fn build_execution_user_command_v2(engine: text, native_id: text) -> Result<
     Ok(RuntimeCommandV1(operation: "execution-user", program: engine,
         args: ["container", "inspect", "--format", format, native_id]))
 
-pub fn linux_oci_execution_user_parse_v2(raw: text, expected: RuntimeIdentityV1) -> Result<text, text>:
+pub fn linux_oci_flat_inspect_json_v2(raw: text) -> Result<JsonValue, text>:
     if raw.byte_len() > 16384: return Err("execution-user-output-bound")
     # Reject nested JSON before the recursive parser. Quoted braces remain data.
     var quoted = false
@@ -33,6 +33,10 @@ pub fn linux_oci_execution_user_parse_v2(raw: text, expected: RuntimeIdentityV1)
         index = index + 1
     val value = json_parse_value_strict(raw)?
     if json_value_type(value) != "object": return Err("execution-user-json-object-required")
+    Ok(value)
+
+pub fn linux_oci_execution_user_parse_v2(raw: text, expected: RuntimeIdentityV1) -> Result<text, text>:
+    val value = linux_oci_flat_inspect_json_v2(raw)?
     val keys = json_value_keys(value)
     if keys.len() != 7: return Err("execution-user-json-fields")
     var fields: [text] = []
@@ -50,7 +54,7 @@ pub fn linux_oci_execution_user_parse_v2(raw: text, expected: RuntimeIdentityV1)
         return Err("execution-user-observed-identity-mismatch")
     if fields[6] == "": return Err("execution-user-unresolved")
     if fields[6].byte_len() > 128: return Err("execution-user-invalid")
-    index = 0
+    var index = 0
     while index < fields[6].byte_len():
         val byte = fields[6].byte_at(index)
         if byte < 32 or byte == 127: return Err("execution-user-invalid")

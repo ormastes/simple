@@ -1,0 +1,91 @@
+# Native owners remain local to this process. There is no wire decoder, PID
+# adoption, or authority inferred from a caller's receipt/configuration string.
+use std.common.contracts.container.user_mapping_v3.*
+use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, ContainerHostScopeV2}
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.execution_evidence_v2.{container_runtime_query_digest_v2, container_runtime_observation_digest_v2}
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_project_v2}
+use std.nogc_async_mut.container.providers.linux.user_mapping_v3.{LinuxOciUserMappingOutcomeV3,
+    LinuxOciUserMappingFactsV3, linux_oci_mapping_native_digest_v3}
+use std.nogc_sync_mut.io.linux_container_user_observation_v1.{LinuxContainerUserObservationV1,
+    LinuxContainerUserObservationFailureV1, linux_container_user_observation_close_v1,
+    linux_container_user_observation_failure_close_v1}
+
+pub enum ContainerUserMappingOwnerV3:
+    Linux(receipt: ContainerUserMappingReceiptV3, native: LinuxContainerUserObservationV1)
+    LinuxCleanupRequired(native: LinuxContainerUserObservationV1, reason: text)
+    LinuxInitialCleanupRequired(failure: LinuxContainerUserObservationFailureV1)
+
+pub struct ContainerUserMappingTurnV3:
+    owner: SimpleContainerOwnerV2
+    mapping: ContainerUserMappingOwnerV3?
+    error: text
+
+pub struct ContainerUserMappingCloseTurnV3:
+    mapping: ContainerUserMappingOwnerV3?
+    error: text
+
+fn container_user_mapping_receipt_from_native_v3(scope: ContainerHostScopeV2,
+        request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
+        facts: LinuxOciUserMappingFactsV3, native: LinuxContainerUserObservationV1) -> Result<ContainerUserMappingReceiptV3, text>:
+    if facts.request_digest != request.plan.request_digest or facts.binding_digest != native.binding_digest or
+            native.container_effective_uid != facts.selected_uid or native.container_effective_gid != facts.selected_gid:
+        return Err("container-user-mapping-native-correlation-mismatch")
+    val value = ContainerUserMappingReceiptV3(backend: "linux-podman", scope: scope, identity: expected,
+        request_digest: facts.request_digest, provider_identity_digest: facts.provider_identity_digest,
+        selected_uid: facts.selected_uid, selected_gid: facts.selected_gid, user_namespace_mode: facts.user_namespace_mode,
+        native_binding_digest: facts.binding_digest, native_evidence_digest: linux_oci_mapping_native_digest_v3(native),
+        observed_unix_ms: native.observed_unix_ms,
+        pre_query_digest: container_runtime_query_digest_v2(facts.before.command)?,
+        pre_evidence_digest: container_runtime_observation_digest_v2(facts.before)?,
+        post_query_digest: container_runtime_query_digest_v2(facts.after.command)?,
+        post_evidence_digest: container_runtime_observation_digest_v2(facts.after)?,
+        proof_kind: "exact-native-primary-user-mapping-v3")
+    val encoded = container_user_mapping_receipt_encode_v3(value)?
+    Ok(value)
+
+fn container_user_mapping_rejected_owner_v3(owner: SimpleContainerOwnerV2,
+        native: LinuxContainerUserObservationV1, reason: text) -> ContainerUserMappingTurnV3:
+    match linux_container_user_observation_close_v1(native):
+        case Ok(_): ContainerUserMappingTurnV3(owner: owner, mapping: nil, error: reason)
+        case Err(close_error): ContainerUserMappingTurnV3(owner: owner,
+            mapping: Some(ContainerUserMappingOwnerV3.LinuxCleanupRequired(native, reason + "; " + close_error)),
+            error: reason + "; " + close_error)
+
+pub fn simple_container_user_mapping_v3(owner: SimpleContainerOwnerV2,
+        request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1) -> ContainerUserMappingTurnV3:
+    match simple_container_project_v2(owner, request):
+        case Err(reason): return ContainerUserMappingTurnV3(owner: owner, mapping: nil, error: reason)
+        case Ok(_): pass
+    match owner:
+        case SimpleContainerOwnerV2.Windows(_, _):
+            ContainerUserMappingTurnV3(owner: owner, mapping: nil, error: "container-user-mapping-windows-unsupported")
+        case SimpleContainerOwnerV2.Linux(scope, adapter):
+            var active = adapter
+            val outcome = active.user_mapping(request, expected)
+            val retained = SimpleContainerOwnerV2.Linux(scope, active)
+            match outcome:
+                case LinuxOciUserMappingOutcomeV3.Rejected(reason):
+                    ContainerUserMappingTurnV3(owner: retained, mapping: nil, error: reason)
+                case LinuxOciUserMappingOutcomeV3.CleanupRequired(native, reason):
+                    ContainerUserMappingTurnV3(owner: retained,
+                        mapping: Some(ContainerUserMappingOwnerV3.LinuxCleanupRequired(native, reason)), error: reason)
+                case LinuxOciUserMappingOutcomeV3.InitialCleanupRequired(failure):
+                    ContainerUserMappingTurnV3(owner: retained,
+                        mapping: Some(ContainerUserMappingOwnerV3.LinuxInitialCleanupRequired(failure)), error: failure.error)
+                case LinuxOciUserMappingOutcomeV3.Observed(facts, native):
+                    match container_user_mapping_receipt_from_native_v3(scope, request, expected, facts, native):
+                        case Ok(receipt): ContainerUserMappingTurnV3(owner: retained,
+                            mapping: Some(ContainerUserMappingOwnerV3.Linux(receipt, native)), error: "")
+                        case Err(reason): container_user_mapping_rejected_owner_v3(retained, native, reason)
+
+# None is returned only after native confirmed descriptor/slot retirement.
+# Err retains the original owner; no native token is fabricated or discarded.
+pub fn simple_container_user_mapping_close_v3(mapping: ContainerUserMappingOwnerV3) -> ContainerUserMappingCloseTurnV3:
+    val closed = match mapping:
+        case ContainerUserMappingOwnerV3.Linux(_, native): linux_container_user_observation_close_v1(native)
+        case ContainerUserMappingOwnerV3.LinuxCleanupRequired(native, _): linux_container_user_observation_close_v1(native)
+        case ContainerUserMappingOwnerV3.LinuxInitialCleanupRequired(failure): linux_container_user_observation_failure_close_v1(failure)
+    match closed:
+        case Ok(_): ContainerUserMappingCloseTurnV3(mapping: nil, error: "")
+        case Err(reason): ContainerUserMappingCloseTurnV3(mapping: Some(mapping), error: reason)

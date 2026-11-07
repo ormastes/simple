@@ -19,11 +19,14 @@ use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
 use std.common.contracts.container.command_v1.oci_command_parts_v1
 use std.common.contracts.container.execution_options_v1.oci_execution_options_v1
 use std.nogc_async_mut.container.providers.linux.execution_user_v2.{build_execution_user_command_v2, linux_oci_execution_user_parse_v2}
+use std.nogc_async_mut.container.providers.linux.user_mapping_v3.*
+use std.nogc_sync_mut.io.linux_container_user_observation_v1.{linux_container_user_observe_v1,
+    linux_container_user_observation_refresh_v1}
 use std.nogc_async_mut.container.providers.linux.output_session_v2.linux_oci_output_command_v2
 use std.common.build_manager.group_process_stream_protocol_v2.GroupProcessStreamLaunchV2
 use std.nogc_sync_mut.io.process_ops.{PipedProcessOwnedSpawnV2, process_spawn_piped_owned_v2}
 pub use std.nogc_async_mut.container.providers.linux.request_v1.LinuxOciRequestV1
-use std.nogc_async_mut.container.providers.linux.request_v1.{linux_oci_request_bounds_v1, linux_oci_request_digest_v1}
+use std.nogc_async_mut.container.providers.linux.request_v1.{linux_oci_request_bounds_v1, linux_oci_request_digest_v1, linux_oci_user_selection_v3}
 use std.common.contracts.container.bound_intent_v2.{RuntimeBoundIntentV2, runtime_bound_intent_encode_v2, runtime_bound_intent_decode_v2, runtime_bound_intent_match_v2}
 use std.common.build_manager.contracts.builder_digest_valid_v1
 use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1,
@@ -409,6 +412,70 @@ impl LinuxOciRuntimeProviderV1:
             return PipedProcessOwnedSpawnV2.Rejected("output-scripted-provider-native-spawn-forbidden")
         process_spawn_piped_owned_v2(launch)
 
+    pub me observe_execution_user_mapping_v3(request: LinuxOciRequestV1, expected: RuntimeIdentityV1,
+            pin: text) -> LinuxOciUserMappingOutcomeV3:
+        val valid = self.validate(request)
+        if not valid.accepted: return LinuxOciUserMappingOutcomeV3.Rejected(valid.reason)
+        if not linux_oci_user_selection_v3(request): return LinuxOciUserMappingOutcomeV3.Rejected("user-mapping-selection-required")
+        if self.engine != OCI_ENGINE_PODMAN or not self.engine_policy.? or not self.live_enabled:
+            return LinuxOciUserMappingOutcomeV3.Rejected("user-mapping-managed-podman-required")
+        val retained = match self.retained_intent_v1(request):
+            case Ok(value): value
+            case Err(reason): return LinuxOciUserMappingOutcomeV3.Rejected(reason)
+        if not builder_digest_valid_v1(expected.native_id) or not linux_oci_mapping_identity_equal_v3(retained, expected):
+            return LinuxOciUserMappingOutcomeV3.Rejected("user-mapping-retained-identity-mismatch")
+        val engine = match self.engine_observation_v1():
+            case Ok(value): value
+            case Err(reason): return LinuxOciUserMappingOutcomeV3.Rejected(reason)
+        if engine.identity_digest != pin: return LinuxOciUserMappingOutcomeV3.Rejected("user-mapping-provider-identity-mismatch")
+        val command = match linux_oci_mapping_command_v3(expected.native_id):
+            case Ok(value): value
+            case Err(reason): return LinuxOciUserMappingOutcomeV3.Rejected(reason)
+        val pre = self._execute(command, request)
+        if not pre.matched or pre.exit_code != 0 or pre.stderr != "":
+            return LinuxOciUserMappingOutcomeV3.Rejected(self._execution_failure_reason_v1(pre, "user-mapping-prequery-failed"))
+        val before = match linux_oci_mapping_inspect_v3(pre.stdout, expected, request):
+            case Ok(value): value
+            case Err(reason): return LinuxOciUserMappingOutcomeV3.Rejected(reason)
+        val state = _state_from_intent(retained, RUNTIME_PHASE_UNKNOWN, "native-user-mapping-observed")
+        val pre_operation = RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: "user-mapping",
+            command: self._receipt_command_v1(command), state: state, exit_code: pre.exit_code,
+            stdout: pre.stdout, stderr: pre.stderr, reason: "user-mapping-before")
+        val binding = match linux_oci_mapping_binding_v3(request, expected, pin, pre_operation):
+            case Ok(value): value
+            case Err(reason): return LinuxOciUserMappingOutcomeV3.Rejected(reason)
+        if self.scripted: return LinuxOciUserMappingOutcomeV3.Rejected("user-mapping-scripted-native-observation-forbidden")
+        val native = match linux_container_user_observe_v1(before.pid, before.cgroup_path, binding):
+            case Ok(value): value
+            case Err(failure):
+                if failure.retained_native_token > 0: return LinuxOciUserMappingOutcomeV3.InitialCleanupRequired(failure)
+                return LinuxOciUserMappingOutcomeV3.Rejected(failure.error)
+        if native.binding_digest != binding or native.pid != before.pid or native.cgroup_path != before.cgroup_path or
+                native.container_effective_uid != request.user_uid or native.container_effective_gid != request.user_gid:
+            return linux_oci_mapping_reject_owned_v3(native, "user-mapping-native-selection-mismatch")
+        val post = self._execute(command, request)
+        if not post.matched or post.exit_code != 0 or post.stderr != "":
+            return linux_oci_mapping_reject_owned_v3(native, self._execution_failure_reason_v1(post, "user-mapping-postquery-failed"))
+        val after = match linux_oci_mapping_inspect_v3(post.stdout, expected, request):
+            case Ok(value): value
+            case Err(reason): return linux_oci_mapping_reject_owned_v3(native, reason)
+        if after.pid != before.pid or after.cgroup_path != before.cgroup_path or after.configured_user != before.configured_user:
+            return linux_oci_mapping_reject_owned_v3(native, "user-mapping-inspect-incarnation-changed")
+        val refreshed = match linux_container_user_observation_refresh_v1(native):
+            case Ok(value): value
+            case Err(reason): return linux_oci_mapping_reject_owned_v3(native, reason)
+        if not linux_oci_mapping_same_native_v3(native, refreshed):
+            return linux_oci_mapping_reject_owned_v3(native, "user-mapping-native-facts-changed")
+        val post_operation = RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: "user-mapping",
+            command: self._receipt_command_v1(command), state: state, exit_code: post.exit_code,
+            stdout: post.stdout, stderr: post.stderr, reason: "user-mapping-after")
+        val digest = match linux_oci_request_digest_v1(request):
+            case Ok(value): value
+            case Err(reason): return linux_oci_mapping_reject_owned_v3(refreshed, reason)
+        LinuxOciUserMappingOutcomeV3.Observed(LinuxOciUserMappingFactsV3(before: pre_operation, after: post_operation,
+            request_digest: digest, provider_identity_digest: pin, binding_digest: binding,
+            selected_uid: request.user_uid, selected_gid: request.user_gid, user_namespace_mode: request.user_namespace_mode), refreshed)
+
     # A deterministic executor seam for contract tests.  Each result is
     # matched by operation, program, and exact argv; an unmatched command is
     # a failed scripted execution, never an implicit success.
@@ -537,6 +604,8 @@ impl LinuxOciRuntimeProviderV1:
         RuntimeValidationV1(accepted: true, reason: "")
 
     pub fn validate(request: LinuxOciRequestV1) -> RuntimeValidationV1:
+        if linux_oci_user_selection_v3(request) and self.engine != OCI_ENGINE_PODMAN:
+            return RuntimeValidationV1(accepted: false, reason: "user-selection-podman-only")
         match linux_oci_request_bounds_v1(request):
             case Err(reason): return RuntimeValidationV1(accepted: false, reason: reason)
             case Ok(_): pass
@@ -1951,6 +2020,8 @@ fn _base_command(engine: text, operation: text, state_dir: text,
 pub fn build_create_command(engine: text, state_dir: text,
         request: LinuxOciRequestV1, operation_id: text,
         provider_generation: i64, node_boot_id: text) -> (text, RuntimeCommandV1):
+    if linux_oci_user_selection_v3(request) and engine != OCI_ENGINE_PODMAN:
+        return ("user-selection-podman-only", runtime_command_empty())
     match linux_oci_request_bounds_v1(request):
         case Err(reason): return (reason, runtime_command_empty())
         case Ok(_): pass
@@ -2002,6 +2073,10 @@ pub fn build_create_command(engine: text, state_dir: text,
                 "--read-only", "--security-opt", "no-new-privileges",
                 "--cap-drop", "ALL"]
             if engine == OCI_ENGINE_PODMAN: args.push("--http-proxy=false")
+            if linux_oci_user_selection_v3(request):
+                args.push("--user")
+                args.push(request.user_uid.to_text() + ":" + request.user_gid.to_text())
+                args.push("--userns=keep-id")
             val build_mode = request.build_input_root != "" or request.build_output_root != ""
             if build_mode:
                 if request.build_input_root == "" or request.build_output_root == "":
