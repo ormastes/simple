@@ -1706,6 +1706,26 @@ impl MirLowering:
                 case _: ()
         nil
 
+    me null_coalesce_optional_fallback_type(left: HirExpr, left_local: LocalId, right: HirExpr) -> HirType?:
+        """`left ?? right` whose default is itself statically `T?` with the
+        SAME nominal payload owner as left's Option (`opt ?? other_opt`, a
+        chained fallback) merges to `T?`, not `T`: absence survives when both
+        sides are absent. Returns that `T?`. The merged word is not a
+        canonical Option box: the present edge holds the unwrapped payload,
+        the default edge the default's own word (box, raw handle or nil);
+        `rt_unwrap_or_self`/`rt_is_some` accept every form. A default of another owner, or
+        one whose type is unknown, stays nil (the record-owner check below
+        still rejects a mismatched owner). Nothing is lowered here."""
+        val left_nominal = self.null_coalesce_nominal_join_type(left, left_local)
+        if val present_left = left_nominal:
+            if val right_type = self.enum_match_expr_type(right):
+                match right_type.kind:
+                    case HirTypeKind.Optional(right_inner):
+                        if enum_payload_types_alias_compatible(present_left, right_inner, self.symbols):
+                            return Some(HirType(kind: HirTypeKind.Optional(present_left), span: right.span))
+                    case _: ()
+        nil
+
     me null_coalesce_default_owner_type(right: HirExpr) -> HirType?:
         """Resolved class/struct/enum type of the `??` default operand, used as
         the merged value's owner when the left Option's inner type is unknown.
@@ -6753,6 +6773,22 @@ impl MirLowering:
                 var coalesce_record_type: HirType? = nil
                 var coalesce_tuple_type: HirType? = nil
                 var coalesce_record_fallback_valid = true
+                # `opt ?? other_opt`: the merge stays `T?` (see
+                # null_coalesce_optional_fallback_type). It must not be typed
+                # as the bare record, and the record-owner check must not
+                # reject the optional default. bug
+                # mir_null_coalesce_optional_fallback_payload_2026-11-07.
+                # A present, resolved annotation that is NOT optional (`val w:
+                # T = a ?? b`) keeps the bare-record path and its owner check.
+                var coalesce_annotation_admits_optional = coalesce_missing_type
+                if not coalesce_missing_type:
+                    if val coalesce_annotation = expr_value.type_:
+                        match coalesce_annotation.kind:
+                            case HirTypeKind.Optional(_): coalesce_annotation_admits_optional = true
+                            case _: ()
+                var coalesce_optional_fallback: HirType? = nil
+                if coalesce_annotation_admits_optional:
+                    coalesce_optional_fallback = self.null_coalesce_optional_fallback_type(left, left_local, right)
                 if val nc_inner_type = self.option_inner_hir_type_for_local(left, left_local):
                     # Bug (native_typed_array_text_element_destroyed_at_store,
                     # "still open" item `.first()`/`.last()`): `result_type`
@@ -6806,24 +6842,27 @@ impl MirLowering:
                         case _: ()
                     match nc_inner_type.kind:
                         case HirTypeKind.Named(nc_struct_symbol, _):
-                            if val present_nc_type_symbol = self.symbols.get_symbol_raw(nc_struct_symbol.id):
-                                val nc_type_symbol: HirSymbol = present_nc_type_symbol
-                                match nc_type_symbol.kind:
-                                    case SymbolKind.Struct:
-                                        result_struct_name = self.declared_struct_layout_key(self.composite_layout_key(nc_type_symbol))
-                                        # Preserve the declared record owner, not only its
-                                        # spelling, across the new merged local. The flat
-                                        # path often has no coalesce expression annotation.
-                                        if coalesce_missing_type:
-                                            result_type = self.lower_type(nc_inner_type)
-                                            coalesce_record_type = Some(nc_inner_type)
-                                        elif expr_value.has_type_:
-                                            if val annotated = expr_value.type_:
-                                                if hir_types_equal(annotated, nc_inner_type):
-                                                    coalesce_record_type = Some(nc_inner_type)
-                                    case _: ()
+                            # An optional default keeps the merge `T?`: no
+                            # record result type, layout name or owner check.
+                            if coalesce_optional_fallback == nil:
+                                if val present_nc_type_symbol = self.symbols.get_symbol_raw(nc_struct_symbol.id):
+                                    val nc_type_symbol: HirSymbol = present_nc_type_symbol
+                                    match nc_type_symbol.kind:
+                                        case SymbolKind.Struct:
+                                            result_struct_name = self.declared_struct_layout_key(self.composite_layout_key(nc_type_symbol))
+                                            # Preserve the declared record owner, not only its
+                                            # spelling, across the new merged local. The flat
+                                            # path often has no coalesce expression annotation.
+                                            if coalesce_missing_type:
+                                                result_type = self.lower_type(nc_inner_type)
+                                                coalesce_record_type = Some(nc_inner_type)
+                                            elif expr_value.has_type_:
+                                                if val annotated = expr_value.type_:
+                                                    if hir_types_equal(annotated, nc_inner_type):
+                                                        coalesce_record_type = Some(nc_inner_type)
+                                        case _: ()
                         case _: ()
-                if result_struct_name == "":
+                if result_struct_name == "" and coalesce_optional_fallback == nil:
                     # Same "raw migration form" fallback as ExistsCheck: a
                     # struct pointer bound straight to `T?` without ever
                     # calling ensure_option_handle leaves left_local with no
@@ -6889,7 +6928,7 @@ impl MirLowering:
                     b_right.emit_copy(result_local, right_value)
                     b_right.terminate_goto(merge_block)
                     self.builder = b_right
-                if not right_terminated and result_struct_name == "":
+                if not right_terminated and result_struct_name == "" and coalesce_optional_fallback == nil:
                     # The right (default) operand is a fresh, non-Option
                     # expression -- its own construction registers
                     # struct_value_syms on right_local directly, independent
@@ -6913,7 +6952,10 @@ impl MirLowering:
                         self.remember_local_hir_type(result_local.id, tuple_payload, 0, 0)
                     if val record_type = coalesce_record_type:
                         self.remember_local_hir_type(result_local.id, record_type, 0, 0)
-                if coalesce_record_type == nil and coalesce_array_type == nil and not right_terminated:
+                if val optional_merge = coalesce_optional_fallback:
+                    if not right_terminated:
+                        self.remember_local_hir_type(result_local.id, optional_merge, 0, 0)
+                elif coalesce_record_type == nil and coalesce_array_type == nil and not right_terminated:
                     # `opt ?? E.Zero` / `d[k] ?? MirType.i64()`: the merged value
                     # has the left side's declared nominal payload type. Without
                     # it a `match` on the result saw an untyped subject (bare
