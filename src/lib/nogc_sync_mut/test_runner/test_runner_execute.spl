@@ -255,6 +255,62 @@ fn _compiler_select_failure(file_path: text, message: text) -> TestFileResult:
     TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
         duration_ms: 0, setup_ms: 0, error: "test-runner: " + message, timed_out: false, cached: false)
 
+fn preprocess_probe_verdict(exit_code: i64, stdout: text) -> text:
+    """Empty when the child probe lexed the spec cleanly; else the failure detail.
+    Fault boundary for runner_inprocess_spec_lexing_has_no_fault_boundary_2026-09-13."""
+    if exit_code == 0 and stdout.contains("PREPROCESS_PROBE_OK"):
+        return ""
+    "spec preprocessing (lexing) crashed or failed in an isolated child (rc={exit_code}); the spec source defeats the compiler front end"
+
+fn preprocess_needs_isolation(content: text) -> bool:
+    """Cheap pre-lex heuristic (plain string scan, no lexer): a spec is lexed in
+    an isolated child only when its size or its longest run of blank lines could
+    drive the lexer's per-newline recursion past the stack. Ordinary specs never
+    pay for a child process."""
+    if content.len() > 1000000:
+        return true
+    var run = 0
+    for line in content.split("\n"):
+        if line.trim() == "":
+            run = run + 1
+            if run > 2000:
+                return true
+        else:
+            run = 0
+    false
+
+fn _preprocess_probe_path(file_path: text) -> text:
+    var roots: [text] = []
+    val norm = file_path.replace("\\", "/")
+    val cut = norm.index_of("/test/")
+    if cut > 0:
+        roots.push(norm[0:cut])
+    val env_root = env_get("SIMPLE_REPO_ROOT") ?? ""
+    if env_root != "":
+        roots.push(env_root)
+    roots.push(cwd())
+    for root in roots:
+        val candidate = root + "/src/app/test_runner_new/preprocess_probe.spl"
+        if file_exists(candidate):
+            return candidate
+    ""
+
+fn preprocess_boundary_failure(binary: text, file_path: text) -> text:
+    """Fault boundary for runner_inprocess_spec_lexing_has_no_fault_boundary_2026-09-13.
+    Returns "" when in-process preprocessing is safe, else the failure detail.
+    SIMPLE_TEST_PREPROCESS_BOUNDARY: unset=heuristic, 0=off, always=probe every spec."""
+    val mode = env_get("SIMPLE_TEST_PREPROCESS_BOUNDARY") ?? ""
+    if mode == "0" or not file_path.ends_with("_spec.spl"):
+        return ""
+    if mode != "always" and not preprocess_needs_isolation(read_file_content(file_path)):
+        return ""
+    val probe = _preprocess_probe_path(file_path)
+    if probe == "":
+        # Fail closed: a spec that needs isolation must not be lexed in-process.
+        return "spec needs isolated preprocessing but preprocess_probe.spl was not found (set SIMPLE_REPO_ROOT)"
+    val (stdout, _stderr, code) = process_run_bounded(binary, ["run", probe, "--file=" + file_path], 120000, 65536)
+    preprocess_probe_verdict(code, stdout)
+
 fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileResult:
     # Coverage probes are MIR-owned. The HIR tree interpreter never executes
     # them, so route coverage runs through the real LLVM native path.
@@ -288,6 +344,9 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
     env_set("SIMPLE_EXECUTION_MODE", "interpret")
     # Legacy word-infix `expect X to_equal Y` matchers are not understood by the
     # interpreter `run` path; rewrite them to method form first (sibling temp).
+    val boundary_failure = preprocess_boundary_failure(binary, file_path)
+    if boundary_failure != "":
+        return _compiler_select_failure(file_path, boundary_failure)
     val infix_path = preprocess_infix_matchers_only(file_path)
     val (wrapped_path, cleanup_path) = build_coverage_wrapper(infix_path, options)
     # NOTE: deliberately does NOT use
@@ -429,6 +488,9 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
     if selected_binary.is_err():
         return _compiler_select_failure(file_path, selected_binary.unwrap_err())
     val binary = selected_binary.unwrap()
+    val lane_boundary_failure = preprocess_boundary_failure(binary, file_path)
+    if lane_boundary_failure != "":
+        return _compiler_select_failure(file_path, lane_boundary_failure)
     val smf_path = file_path.replace(".spl", ".smf")
     val start = time_now_unix_micros()
     val timeout_ms = options.timeout * 1000
@@ -478,6 +540,9 @@ fn run_test_file_native_old(file_path: text, options: TestOptions) -> TestFileRe
     if selected_binary.is_err():
         return _compiler_select_failure(file_path, selected_binary.unwrap_err())
     val binary = selected_binary.unwrap()
+    val lane_boundary_failure = preprocess_boundary_failure(binary, file_path)
+    if lane_boundary_failure != "":
+        return _compiler_select_failure(file_path, lane_boundary_failure)
     val start = time_now_unix_micros()
     val timeout_ms = options.timeout * 1000
 
@@ -833,6 +898,9 @@ fn run_test_file_mcdc_interpreter_fallback(file_path: text, options: TestOptions
     if selected_binary.is_err():
         return _compiler_select_failure(file_path, selected_binary.unwrap_err())
     val binary = selected_binary.unwrap()
+    val lane_boundary_failure = preprocess_boundary_failure(binary, file_path)
+    if lane_boundary_failure != "":
+        return _compiler_select_failure(file_path, lane_boundary_failure)
     val timeout_ms = options.timeout * 1000
     var run_args: [text] = ["run", file_path]
     if options.gc_log:
@@ -1108,6 +1176,9 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     if selected_binary.is_err():
         return _compiler_select_failure(file_path, selected_binary.unwrap_err())
     val binary = selected_binary.unwrap()
+    val lane_boundary_failure = preprocess_boundary_failure(binary, file_path)
+    if lane_boundary_failure != "":
+        return _compiler_select_failure(file_path, lane_boundary_failure)
     val start = time_now_unix_micros()
     val timeout_ms = options.timeout * 1000
     val explicit_aot = options.native_backend != ""
@@ -1639,6 +1710,9 @@ fn run_test_file_safe_mode(file_path: text, options: TestOptions) -> TestFileRes
     if selected_binary.is_err():
         return _compiler_select_failure(file_path, selected_binary.unwrap_err())
     val binary = selected_binary.unwrap()
+    val lane_boundary_failure = preprocess_boundary_failure(binary, file_path)
+    if lane_boundary_failure != "":
+        return _compiler_select_failure(file_path, lane_boundary_failure)
     val start = time_now_unix_micros()
     val timeout_ms = options.timeout * 1000
     val caps = safe_mode_caps(options.no_limits, options.max_procs)
@@ -1690,7 +1764,7 @@ export use std.test_runner.test_executor_parsing.{find_simple_binary, find_simpl
 # std.test_runner.test_executor_lanes instead.
 
 # Exports from this file
-export run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_safe_mode, preprocess_spipe_file
+export preprocess_probe_verdict, preprocess_boundary_failure, preprocess_needs_isolation, run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_safe_mode, preprocess_spipe_file
 export mcdc_manifest_transport_args
 export smf_compile_degrade_token, scoped_limit_exceeded_result, mcdc_manifest_absent_degrade_opted_in
 export mcdc_compiler_lacks_probes, mcdc_compiler_identity_lacks_probes, MCDC_UNAVAILABLE_DEGRADE_TOKEN, MCDC_UNAVAILABLE_REASON
