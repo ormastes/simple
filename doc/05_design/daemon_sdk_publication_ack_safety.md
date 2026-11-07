@@ -23,7 +23,9 @@ must use the existing V2 journal path. No global runtime cleanup is introduced.
 Tests inject a real response-publication failure, mismatched response identity,
 acknowledgement race, successful ordering and invalid spool IDs. Authored specs and
 manuals are included; admitted-toolchain execution and required core/MCP/LSP checks
-remain blocked. This change must remain draft until those gates pass.
+remain blocked. See the evidence report for the initial hold and subsequent
+explicit user instruction to land the reviewed source repair without claiming
+runtime qualification.
 
 The shared native/SSpec fixture uses `assert(false)` for forbidden dispatch.
 Diagnostic compilation succeeded; admitted SSpec execution remains blocked.

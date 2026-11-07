@@ -1,6 +1,7 @@
 # Daemon publication regression evidence — 2026-11-07
 
-STATUS: BLOCKED for landing. Source review is not runtime qualification.
+Runtime qualification: BLOCKED. Source review is not runtime qualification.
+The initial landing hold and subsequent user-authorized landing are recorded below.
 Target: `release/1.0.0`; PR #7415. Production scope is the shared DaemonRunner
 and its V1 spool writers, not every app-specific daemon loop.
 
@@ -71,3 +72,25 @@ Control artifact SHA256:
 Control logs: `/home/yoon/dev/simple-daemon-publication-before-20261107/build/daemon-publication-control/`
 (`build.log`, `injection.log`, `injection.exit`). Both worktrees retain separate
 caches, source snapshots and outputs. No production source was swapped during a build.
+
+## Renewed landing instruction
+
+After the failed diagnostics and missing admitted-toolchain gates were reported,
+the user explicitly requested landing the fixes after Astra review. This permits
+landing the reviewed source repair with these limitations retained; it does not
+certify a release, erase failing cases, or mark the orchestrator complete.
+
+Additional pre-guard control: `success`, `prefix`, and `error-status` each exit 1
+at commit `662c9c4fe01b07f3712faeccab945ee69fcd889c` with the identical fixture.
+This excludes the new envelope guard as their cause, but does not clear the
+original publication-ordering change. Logs are `baseline-*-qualified-launch.log`
+in the control build directory; “qualified-launch” denotes only the configured
+containment wrapper, not compiler admission. An earlier wrapper invocation
+returned 125 for missing TMPDIR and did not run the tests.
+
+The remote gate failure on the old head was `local-sdn-crc32-sealed`, for an
+inherited `doc/08_tracking/bug/bug_db.sdn` seal; this PR changes no SDN files.
+The two owned commits were rebased without conflicts onto release commit
+`0e56cc6bade`; source hashes and the 13-file feature delta are preserved.
+Astra reviews the rebased head before landing. All diagnostic results above
+remain tied to their recorded original source inputs, not a new runtime run.
