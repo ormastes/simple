@@ -2,7 +2,7 @@
 
 - **ID:** stage2_inline_env_get_boxed_extern_abi_2026-11-03
 - **Priority:** P1 (phase 3: stage3 codegen phase dies in ucrtbase memcpy)
-- **Status:** open. Source workaround landed in `driver_aot_native_output.spl` (use the imported
+- **Status:** fix-implemented-verification-pending (2026-11-07, re-scoped; see "Root cause (re-scoped)"). Source workaround landed in `driver_aot_native_output.spl` (use the imported
   `env_get_nullable`) and `driver_bootstrap.spl` (local non-inline `env_get` over `io_runtime.env_get_nullable`).
 
 ## Symptom
@@ -28,3 +28,24 @@ entry point for the boxed convention); `s3_fable4.exe` passed this phase with it
 
 ## Removal condition
 A stage2 whose inliner expands `text` extern arguments to `(data, len)` across module boundaries.
+
+## Root cause (re-scoped 2026-11-07)
+Not an inliner defect. The current tree has no cross-module body inliner (the MIR
+`ModuleInliner` is per-module, and it preserves the `(ptr, len)` split when it splices a
+same-module `@always_inline` wrapper). The one-word call comes from the LLVM backend alias
+in `MirToLlvm` (`src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl`, the
+`call_func_name` chain): an importer references the provider `env_get` by its bare name,
+and the backend rewrote `env_get` to `@rt_env_get` while forwarding the caller's single
+boxed text word. MIR's text-extern split is keyed on `rt_env_get`, so it never applied to
+the alias. Result: `rt_env_get(handle, <stale rdx>)` -- exactly the observed rcx/rdx shape,
+and it looks inlined because the caller calls `rt_env_get` directly.
+
+## Fix
+A one-word `env_get` callee now routes to the boxed entry `rt_env_get_value(i64)` (same
+as the existing one-word `rt_env_get` guard; Cranelift already had that guard).
+Spec: `test/01_unit/compiler/mir/inline_text_extern_abi_spec.spl` (bare alias with literal
+and variable keys -- RED before, GREEN after; plus inlined plain/unsafe wrappers and a
+direct call, which keep `(ptr, len)`).
+
+Verification pending: a stage2 rebuilt from this source must be re-run on the stage3 /
+phase-4 group E path before the source workarounds are removed.
