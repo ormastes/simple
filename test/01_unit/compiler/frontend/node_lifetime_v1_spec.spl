@@ -1,0 +1,218 @@
+# @req REQ-004
+# @req REQ-005
+# UNEXECUTED: admitted self-hosted runtime qualification is pending.
+use std.spec.{describe, it, expect}
+use compiler.core.ast.{ast_reset, expr_int_lit, expr_binary, expr_unary,
+    expr_block, expr_lambda, expr_match_expr, expr_asm_operands, expr_custom_block, expr_child_exprs,
+    expr_get_left, expr_get_right,
+    expr_get_int, expr_get_span, stmt_expr_stmt, stmt_if_stmt, elif_new, arm_new,
+    stmt_contract_clause, STMT_CONTRACT_IN, STMT_CONTRACT_INVARIANT, STMT_CONTRACT_OUT,
+    STMT_CONTRACT_OUT_ERR, STMT_CONTRACT_DECREASES, STMT_CONTRACT_PROOF_USES}
+use compiler.frontend.core._AstExpr.nodes.{expr_reset, expr_store_state_take,
+    expr_store_state_install, expr_lifetime_next_incarnation_v1,
+    flat_expr_pools_dump, flat_expr_pools_restore}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+use compiler.frontend.node_lifetime_v1.*
+use compiler.frontend.node_lifetime_topology_v1.{node_lifetime_child_edge_error_v1}
+
+struct LifetimeFixtureV1:
+    left: AstExprHandleV1
+    right: AstExprHandleV1
+    node: AstExprHandleV1
+    neighbor: AstExprHandleV1
+
+fn lifetime_handle(index: i64) -> AstExprHandleV1:
+    node_lifetime_expr_handle_v1(index).unwrap()
+
+fn lifetime_fixture() -> LifetimeFixtureV1:
+    ast_reset()
+    val left = expr_int_lit(3, 7)
+    val right = expr_int_lit(5, 8)
+    val node = expr_binary(60, left, right, 9)
+    val neighbor = expr_binary(61, left, right, 10)
+    LifetimeFixtureV1(left: lifetime_handle(left), right: lifetime_handle(right),
+        node: lifetime_handle(node), neighbor: lifetime_handle(neighbor))
+
+fn lifetime_expect_cycle_rejected(fixture: LifetimeFixtureV1, child: i64):
+    val result = node_lifetime_binary_set_left_v1(fixture.node, lifetime_handle(child))
+    expect(result.is_err()).to_equal(true)
+    expect(expr_get_left(fixture.node.node)).to_equal(fixture.left.node)
+    expect(expr_get_right(fixture.node.node)).to_equal(fixture.right.node)
+    expect(expr_get_int(fixture.neighbor.node)).to_equal(61)
+    expect(expr_get_left(fixture.neighbor.node)).to_equal(fixture.left.node)
+
+describe "qualified AST expression lifetime authority":
+    it "reads and writes the actual binary owner while preserving neighbors":
+        val f = lifetime_fixture()
+        expect(node_lifetime_binary_span_v1(f.node).unwrap()).to_equal(9)
+        expect(node_lifetime_binary_op_v1(f.node).unwrap()).to_equal(60)
+        expect(node_lifetime_binary_left_v1(f.node).unwrap()).to_equal(f.left)
+        expect(node_lifetime_binary_right_v1(f.node).unwrap()).to_equal(f.right)
+        expect(node_lifetime_binary_set_span_v1(f.node, 12).unwrap()).to_equal(true)
+        expect(node_lifetime_binary_set_op_v1(f.node, 62).unwrap()).to_equal(true)
+        expect(expr_get_span(f.node.node)).to_equal(12)
+        expect(expr_get_int(f.node.node)).to_equal(62)
+        expect(expr_get_span(f.neighbor.node)).to_equal(10)
+        expect(expr_get_int(f.neighbor.node)).to_equal(61)
+
+    it "rejects stale reads and writes after direct expression reset and slot reuse":
+        val f = lifetime_fixture()
+        val old_key = node_lifetime_expr_key_v1(f.node).unwrap()
+        expr_reset()
+        val left = expr_int_lit(11, 1)
+        val right = expr_int_lit(13, 2)
+        val reused = expr_binary(63, left, right, 3)
+        expect(reused).to_equal(f.node.node)
+        val read = node_lifetime_binary_op_v1(f.node)
+        val write = node_lifetime_binary_set_op_v1(f.node, 64)
+        expect(read.is_err()).to_equal(true)
+        expect(write.is_err()).to_equal(true)
+        expect(expr_get_int(reused)).to_equal(63)
+        val new_key = node_lifetime_expr_key_v1(lifetime_handle(reused)).unwrap()
+        expect(new_key == old_key).to_equal(false)
+
+    it "rejects wrong owners, invalid bounds, and the wrong expression family":
+        val f = lifetime_fixture()
+        val foreign = AstExprHandleV1(owner: "another.ast", incarnation: f.node.incarnation,
+            node: f.node.node)
+        val outside = AstExprHandleV1(owner: f.node.owner, incarnation: f.node.incarnation,
+            node: 99999)
+        val wrong_owner = node_lifetime_validate_expr_v1(foreign)
+        val bad_bounds = node_lifetime_validate_expr_v1(outside)
+        val wrong_family = node_lifetime_binary_set_op_v1(f.left, 62)
+        expect(wrong_owner.is_err()).to_equal(true)
+        expect(bad_bounds.is_err()).to_equal(true)
+        expect(wrong_family.is_err()).to_equal(true)
+        expect(expr_get_int(f.left.node)).to_equal(3)
+
+    it "does not resurrect handles when a taken store is installed again":
+        val f = lifetime_fixture()
+        val old_key = node_lifetime_expr_key_v1(f.node).unwrap()
+        val snapshot = expr_store_state_take()
+        val taken = node_lifetime_validate_expr_v1(f.node)
+        expect(taken.is_err()).to_equal(true)
+        expr_store_state_install(snapshot)
+        val installed = node_lifetime_validate_expr_v1(f.node)
+        expect(installed.is_err()).to_equal(true)
+        expect(expr_get_int(f.node.node)).to_equal(60)
+        val fresh_key = node_lifetime_expr_key_v1(lifetime_handle(f.node.node)).unwrap()
+        expect(fresh_key == old_key).to_equal(false)
+
+    it "invalidates before a successful cache restore without restoring authority":
+        val f = lifetime_fixture()
+        val encoded = flat_expr_pools_dump()
+        expect(flat_expr_pools_restore(FlatPoolReader.new(encoded))).to_equal(true)
+        val stale = node_lifetime_binary_op_v1(f.node)
+        expect(stale.is_err()).to_equal(true)
+        expect(node_lifetime_binary_op_v1(lifetime_handle(f.node.node)).unwrap()).to_equal(60)
+
+    it "invalidates before even a failed partial cache restore":
+        val f = lifetime_fixture()
+        expect(flat_expr_pools_restore(FlatPoolReader.new(""))).to_equal(false)
+        val stale = node_lifetime_validate_expr_v1(f.node)
+        expect(stale.is_err()).to_equal(true)
+
+    it "retires exhausted incarnations without wrapping or reviving":
+        expect(expr_lifetime_next_incarnation_v1(9223372036854775806)).to_equal(9223372036854775807)
+        expect(expr_lifetime_next_incarnation_v1(9223372036854775807)).to_equal(0)
+        expect(expr_lifetime_next_incarnation_v1(0)).to_equal(0)
+        expect(expr_lifetime_next_incarnation_v1(-1)).to_equal(0)
+
+describe "checked AST child writes preserve DAG topology":
+    it "accepts a legitimate later-created replacement child":
+        val f = lifetime_fixture()
+        val newer = lifetime_handle(expr_int_lit(17, 11))
+        expect(node_lifetime_binary_set_left_v1(f.node, newer).unwrap()).to_equal(true)
+        expect(node_lifetime_binary_left_v1(f.node).unwrap()).to_equal(newer)
+        expect(expr_get_left(f.neighbor.node)).to_equal(f.left.node)
+
+    it "commits a newer right child and preserves it after a rejected right cycle":
+        val f = lifetime_fixture()
+        val newer = lifetime_handle(expr_int_lit(19, 12))
+        expect(node_lifetime_binary_set_right_v1(f.node, newer).unwrap()).to_equal(true)
+        expect(node_lifetime_binary_right_v1(f.node).unwrap()).to_equal(newer)
+        val rejected = node_lifetime_binary_set_right_v1(f.node, f.node)
+        expect(rejected.is_err()).to_equal(true)
+        expect(expr_get_right(f.node.node)).to_equal(newer.node)
+        expect(expr_get_left(f.node.node)).to_equal(f.left.node)
+        expect(expr_get_right(f.neighbor.node)).to_equal(f.right.node)
+
+    it "rejects direct self cycles without modifying the owner":
+        val f = lifetime_fixture()
+        lifetime_expect_cycle_rejected(f, f.node.node)
+
+    it "rejects an indirect cycle through a unary expression":
+        val f = lifetime_fixture()
+        lifetime_expect_cycle_rejected(f, expr_unary(61, f.node.node, 0))
+
+    it "rejects an indirect cycle through block statements":
+        val f = lifetime_fixture()
+        val statement = stmt_expr_stmt(f.node.node, 0)
+        lifetime_expect_cycle_rejected(f, expr_block([statement], -1, 0))
+
+    it "rejects an indirect cycle through an elif chain":
+        val f = lifetime_fixture()
+        val body = stmt_expr_stmt(f.node.node, 0)
+        val nested = stmt_if_stmt(f.left.node, [body], -1, 0)
+        val branches = elif_new(f.right.node, [], [nested])
+        val outer = stmt_if_stmt(f.right.node, [], branches, 0)
+        lifetime_expect_cycle_rejected(f, expr_block([outer], -1, 0))
+
+    it "rejects an indirect cycle through a lambda body expression":
+        val f = lifetime_fixture()
+        lifetime_expect_cycle_rejected(f, expr_lambda([], [f.node.node], 0))
+
+    it "rejects an indirect cycle through a match-arm body":
+        val f = lifetime_fixture()
+        val body = stmt_expr_stmt(f.node.node, 0)
+        val arm = arm_new(-1, -1, [body])
+        lifetime_expect_cycle_rejected(f, expr_match_expr(f.left.node, [arm], 0))
+
+    it "rejects an indirect cycle through an inline assembly input operand":
+        val f = lifetime_fixture()
+        val assembly = expr_asm_operands("", [f.node.node], ["x"], ["in"], ["reg"], [], [], 0)
+        lifetime_expect_cycle_rejected(f, assembly)
+
+    it "rejects an indirect cycle through an inline assembly output place":
+        val f = lifetime_fixture()
+        val assembly = expr_asm_operands("", [f.left.node], ["x"], ["out"], ["reg"], [f.node.node], [], 0)
+        lifetime_expect_cycle_rejected(f, assembly)
+
+    it "accepts inline assembly whose operand and output references are acyclic":
+        val f = lifetime_fixture()
+        val assembly = expr_asm_operands("", [f.left.node], ["x"], ["inout"], ["reg"], [f.right.node], [], 0)
+        val replacement = lifetime_handle(assembly)
+        expect(node_lifetime_binary_set_right_v1(f.node, replacement).unwrap()).to_equal(true)
+        expect(node_lifetime_binary_right_v1(f.node).unwrap()).to_equal(replacement)
+        expect(expr_get_right(f.neighbor.node)).to_equal(f.right.node)
+
+    it "rejects indirect cycles through every contract-clause body":
+        for tag in [STMT_CONTRACT_IN, STMT_CONTRACT_INVARIANT, STMT_CONTRACT_OUT,
+            STMT_CONTRACT_OUT_ERR, STMT_CONTRACT_DECREASES, STMT_CONTRACT_PROOF_USES]:
+            val f = lifetime_fixture()
+            val body = stmt_expr_stmt(f.node.node, 0)
+            val clause = stmt_contract_clause(tag, "", [body], 0)
+            lifetime_expect_cycle_rejected(f, expr_block([clause], -1, 0))
+
+    it "retains a custom block's actual payload expression in canonical traversal":
+        val f = lifetime_fixture()
+        val custom = expr_custom_block("code", "payload", 0)
+        expect(expr_child_exprs(custom)).to_equal([expr_get_left(custom)])
+        expect(node_lifetime_binary_set_left_v1(f.node, lifetime_handle(custom)).unwrap()).to_equal(true)
+
+    it "rejects an exhausted traversal budget explicitly":
+        val f = lifetime_fixture()
+        val child = expr_unary(61, f.left.node, 0)
+        expect(node_lifetime_child_edge_error_v1(f.node.node, child, 1)).to_equal(
+            "AST topology validation resource limit")
+        expect(expr_get_left(f.node.node)).to_equal(f.left.node)
+
+    it "rejects a stale child before changing the parent":
+        val f = lifetime_fixture()
+        expr_reset()
+        val left = expr_int_lit(11, 1)
+        val right = expr_int_lit(13, 2)
+        val current = lifetime_handle(expr_binary(63, left, right, 3))
+        val result = node_lifetime_binary_set_right_v1(current, f.right)
+        expect(result.is_err()).to_equal(true)
+        expect(expr_get_right(current.node)).to_equal(right)
