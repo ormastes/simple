@@ -1,7 +1,9 @@
 # Submission deadline reservation controls
 
 Executable: `test/02_integration/lib/process_submission_admission_v5_spec.spl`.
-Status: **NOT_RUN**; no build or runtime qualification was authorized.
+Simple/native-owner status: **NOT_RUN**. Only the standalone clock helper has a
+scoped compile/run PASS, with both attempts and hashes recorded under
+`doc/09_report/process_submission_admission_v5_clock_20261107/`.
 
 | Requirement | Actual owner control authored |
 |---|---|
@@ -12,5 +14,7 @@ Status: **NOT_RUN**; no build or runtime qualification was authorized.
 The clock mechanism selfcheck is
 `src/runtime/test/runtime_process_submission_admission_v5_selfcheck.c`.
 It uses a test-only clock syscall substitute and makes no live process claim.
+The authored Linux and Darwin `runtime_process_submission_admission_v5_*_selfcheck.c`
+live fixtures cover actual no-child/child/reap boundaries; both remain NOT_RUN.
 Post-create expiry must retain the actual child owner until observed reap;
 source inspection or a failed initial receipt cannot substitute for that test.

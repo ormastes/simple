@@ -40,16 +40,29 @@ the reservation API or acquiring its mutex.
 
 ## Verification boundary
 
-All tests are **NOT_RUN** in this source-only task. No native build, Simple
-compiler campaign or deployment qualification was authorized.
+The standalone clock mechanism test compiled and ran once successfully with
+explicit BFD linking after an approved changed-harness retry. The first default
+Mold attempt failed because its 8 GiB virtual reservation exceeded the initial
+64 MiB child address-space cap; that was a harness/resource failure, not a
+process-owner result. Exact source/compiler/binary/log hashes and both attempts
+are retained under `doc/09_report/process_submission_admission_v5_clock_20261107/`.
+The successful attempt used the separately approved 2 GiB address-space cap,
+128 MiB aggregate RSS watchdog, CPUs 0–4 and 30/5 second compile/run limits.
+This is **clock-mechanism PASS only**. Every owner ABI, spawn, exec, reap and
+Simple integration fixture remains **NOT_RUN**; no broader build was authorized.
 
 The Simple integration spec exercises actual reservation entry, consumed
 expired/missing-deadline refusal and replay prevention. The C clock mechanism
 selfcheck covers the exact expiry boundary, unknown clock, invalid clock and
 legacy no-clock-query behavior through a test-only syscall substitution.
 These controls are not proof of final-create or post-create child cleanup.
-The live Darwin reserved-owner fixture adds final-spawn expiry/unknown-clock
-and post-spawn expiry controls using the same actual owner and child. Linux
-final-fork and post-fork/pre-exec tests remain required qualification until a
-live fixture is admitted. No successful child execution or cleanup is inferred
-from the source or clock-mechanism tests.
+The live Darwin fixture adds final-spawn expiry/unknown-clock and post-spawn
+expiry controls using the same actual owner and child. The authored Linux
+fixture `runtime_process_submission_admission_v5_linux_selfcheck.c` uses an
+actual sealed memfd executable snapshot and real fork/ptrace/exec/observe/reap
+with a small value-runtime and duplicate-pin test bridge. Its clock/fork
+wrappers exist only in the test translation unit. It checks zero child
+creation for final-fork expiry/unknown clock, retained actual ownership for
+post-fork/pre-exec expiry, and a positive actual-exec stdout marker. Both live
+fixtures remain **NOT_RUN**. No successful child execution or cleanup is
+inferred from their source or the clock-mechanism result.

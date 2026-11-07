@@ -2,6 +2,7 @@
 # deliberately prove expiry/invalid-deadline refusal precedes child preparation.
 # Final-fork, child-exec and Darwin resume controls require the live C fixture.
 use std.spec
+use std.nogc_sync_mut.io.env_ops.{host_os}
 
 @unsafe(reason: "reserves exact native process owner before child effects", capabilities: [ffi])
 extern fn rt_process_observation_v4_reserve_value() -> i64
@@ -12,20 +13,41 @@ extern fn rt_process_observation_v4_reserved_state_value(token: i64) -> i64
 @unsafe(reason: "confirms release only for actual terminal or no-child state", capabilities: [ffi])
 extern fn rt_process_observation_v4_reserved_confirm_release_value(token: i64) -> i64
 
+fn _reserve() -> i64:
+    unsafe(capabilities: [ffi]): rt_process_observation_v4_reserve_value()
+
+fn _start(token: i64, expiry: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_observation_v5_reserved_start_admitted_value(token, -1, -1, [], expiry)
+
+fn _state(token: i64) -> i64:
+    unsafe(capabilities: [ffi]): rt_process_observation_v4_reserved_state_value(token)
+
+fn _release(token: i64) -> i64:
+    unsafe(capabilities: [ffi]): rt_process_observation_v4_reserved_confirm_release_value(token)
+
 describe "Unix submission deadline at the retained process owner":
     it "REQ-SUBMIT-EXPIRY-001 consumes an expired attempt without permitting a replay":
-        val token = rt_process_observation_v4_reserve_value()
-        expect(token > 0).to_equal(true)
-        val result = rt_process_observation_v5_reserved_start_admitted_value(token, -1, -1, [], 1)
-        expect(result < 0).to_equal(true)
-        expect(rt_process_observation_v4_reserved_state_value(token)).to_equal(3)
-        expect(rt_process_observation_v5_reserved_start_admitted_value(token, -1, -1, [], 9223372036854775807) < 0).to_equal(true)
-        expect(rt_process_observation_v4_reserved_state_value(token)).to_equal(3)
-        expect(rt_process_observation_v4_reserved_confirm_release_value(token)).to_equal(1)
+        if host_os() == "windows":
+            expect(_reserve() < 0).to_equal(true)
+            expect(_start(-1, 1) < 0).to_equal(true)
+        else:
+            val token = _reserve()
+            expect(token > 0).to_equal(true)
+            val result = _start(token, 1)
+            expect(result < 0).to_equal(true)
+            expect(_state(token)).to_equal(3)
+            expect(_start(token, 9223372036854775807) < 0).to_equal(true)
+            expect(_state(token)).to_equal(3)
+            expect(_release(token)).to_equal(1)
 
     it "REQ-SUBMIT-EXPIRY-002 refuses a missing deadline with retained no-child ownership":
-        val token = rt_process_observation_v4_reserve_value()
-        expect(token > 0).to_equal(true)
-        expect(rt_process_observation_v5_reserved_start_admitted_value(token, -1, -1, [], 0) < 0).to_equal(true)
-        expect(rt_process_observation_v4_reserved_state_value(token)).to_equal(3)
-        expect(rt_process_observation_v4_reserved_confirm_release_value(token)).to_equal(1)
+        if host_os() == "windows":
+            expect(_reserve() < 0).to_equal(true)
+            expect(_start(-1, 1) < 0).to_equal(true)
+        else:
+            val token = _reserve()
+            expect(token > 0).to_equal(true)
+            expect(_start(token, 0) < 0).to_equal(true)
+            expect(_state(token)).to_equal(3)
+            expect(_release(token)).to_equal(1)
