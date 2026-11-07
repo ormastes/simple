@@ -20,6 +20,8 @@ use std.sosix.process.{sosix_process_spawn_piped as process_spawn_piped,
     sosix_process_read_stdout as process_read_stdout,
     sosix_process_is_piped_alive as process_is_piped_alive,
     sosix_process_close_piped as process_close_piped}
+use std.sosix.process.{sosix_process_read_stdout_ref_v1,
+    sosix_process_is_piped_alive_ref_v1, sosix_process_close_piped_ref_v1}
 
 pub struct PanePidUpdate:
     state: ServiceState
@@ -74,18 +76,23 @@ fn _pane_idx(st: ServiceState, session_id: text, window_id: text, pane_id: text)
     return idx
 
 fn _has_child(pr: PaneRecord) -> bool:
-    return pr.child_pid > 0
+    return pr.terminal_ref != nil or pr.child_pid > 0
 
 fn _is_pty(pr: PaneRecord) -> bool:
     return pr.pty_fd >= 0
 
 pub fn pane_release_best_effort(pr: PaneRecord):
-    if _is_pty(pr):
+    if val reference = pr.terminal_ref:
+        val _closed = sosix_process_close_piped_ref_v1(reference)
+    elif _is_pty(pr):
         val _c = pty_close(pr.pty_fd as i32)
     elif _has_child(pr):
         val _p = process_close_piped(pr.child_pid)
 
 fn _child_alive(pr: PaneRecord) -> bool:
+    if val reference = pr.terminal_ref:
+        val alive = sosix_process_is_piped_alive_ref_v1(reference)
+        return alive.is_ok() and alive.unwrap()
     if _is_pty(pr):
         return pty_is_running(pr.pty_fd as i32)
     if _has_child(pr):
@@ -148,6 +155,7 @@ fn _clean_output(raw: text) -> text:
     return out
 
 fn _flush_input(pr0: PaneRecord, closing: bool) -> PaneRecord:
+    if pr0.terminal_ref != nil: return pr0
     if closing:
         return pr0
     if pr0.input.error != "" or not _has_child(pr0):
@@ -191,10 +199,20 @@ fn _drain_bounded_no_flush(pr0: PaneRecord, limit: int, closing: bool) -> PaneRe
         return pr0
     var pr = pr0
     var reads = 0
-    var more = _has_child(pr)
+    var more = _has_child(pr) and not pr.terminal_eof and pr.terminal_read_error == ""
     while more and reads < limit and pr.can_ingest():
         var chunk = ""
-        if _is_pty(pr):
+        if val reference = pr.terminal_ref:
+            val read = sosix_process_read_stdout_ref_v1(reference)
+            if read.is_err():
+                if read.unwrap_err() == "process_stdout_eof":
+                    pr.terminal_eof = true
+                else:
+                    pr.terminal_read_error = read.unwrap_err()
+            else:
+                chunk = read.unwrap() ?? ""
+                if chunk != "": pr = pr.feed_screen(chunk)
+        elif _is_pty(pr):
             chunk = pty_read(pr.pty_fd as i32, 0)
             if chunk != "":
                 pr = pr.feed_screen(chunk)
@@ -208,6 +226,9 @@ fn _drain_bounded_no_flush(pr0: PaneRecord, limit: int, closing: bool) -> PaneRe
     # failure; clear the reply accumulator instead of retaining an unbounded
     # second queue outside the pane input limit.
     val owed = pr.replies()
+    # Adopted provider transports are output-only. Discard terminal-generated
+    # replies rather than silently enqueue unsupported input to the relay.
+    if pr.terminal_ref != nil: return pr.without_replies()
     if owed != "":
         val queued = pane_input_enqueue(pr.input, owed)
         if queued.is_ok():
@@ -296,7 +317,12 @@ pub fn pane_alive_state(before: ServiceState, closing: bool, session_id: text, w
     val idx = _pane_idx(state, session_id, window_id, pane_id)
     if idx < 0:
         return PaneBoolUpdate(state: state, commit: commit, result: Err("unknown pane: " + pane_id))
-    return PaneBoolUpdate(state: state, commit: commit, result: Ok(_child_alive(state.get_pane(idx))))
+    val pane = state.get_pane(idx)
+    if pane.terminal_read_error != "":
+        return PaneBoolUpdate(state: state, commit: commit, result: Err("terminal transport read failed; cleanup required"))
+    if val reference = pane.terminal_ref:
+        return PaneBoolUpdate(state: state, commit: commit, result: sosix_process_is_piped_alive_ref_v1(reference))
+    return PaneBoolUpdate(state: state, commit: commit, result: Ok(_child_alive(pane)))
 
 pub fn pane_close_pty_state(before: ServiceState, closing: bool, session_id: text, window_id: text, pane_id: text) -> PaneCloseUpdate:
     var state = before
@@ -325,6 +351,7 @@ pub fn pane_literal_admit_v1(before: ServiceState, closing: bool, session_id: te
     if si < 0 or wi < 0 or pi < 0: return Err("unknown literal input owner")
     if before.get_window(wi).session_id != session_id: return Err("foreign literal input window")
     val pane = before.get_pane(pi)
+    if pane.terminal_ref != nil: return Err("terminal transport is read-only")
     if not _has_child(pane): return Err("pane has no child")
     if not _is_pty(pane) or not supported: return Err("literal PTY input unsupported")
     return Ok(pi)
@@ -353,6 +380,8 @@ pub fn pane_send_state(before: ServiceState, closing: bool, session_id: text, wi
     if idx < 0:
         return PaneTextUpdate(state: state, commit: commit, result: Err("unknown pane: " + pane_id))
     val pr = state.get_pane(idx)
+    if pr.terminal_ref != nil:
+        return PaneTextUpdate(state: state, commit: false, result: Err("terminal transport is read-only"))
     if not _has_child(pr):
         return PaneTextUpdate(state: state, commit: commit, result: Err("pane has no child: " + pane_id))
     val queued = pane_input_enqueue(pr.input, text_input)
@@ -454,6 +483,8 @@ pub fn pane_paste_state(before: ServiceState, closing: bool, session_id: text, w
     val idx = _pane_idx(state, session_id, window_id, pane_id)
     if idx < 0:
         return PaneTextUpdate(state: state, commit: commit, result: Err("unknown pane: " + pane_id))
+    if state.get_pane(idx).terminal_ref != nil:
+        return PaneTextUpdate(state: state, commit: false, result: Err("terminal transport is read-only"))
     # Read/queue terminal replies without a write, then flush the complete
     # input stream once after appending the paste below.
     val drained = _drain_bounded_no_flush(state.get_pane(idx), 256, closing)
@@ -481,7 +512,7 @@ pub fn pane_capture_cells_state(before: ServiceState, closing: bool, session_id:
     if idx < 0:
         return PaneCellsUpdate(state: state, commit: commit, result: Err("unknown pane: " + pane_id))
     val drained = _drain(state.get_pane(idx), closing)
-    val screen = if _is_pty(drained): drained.screen else: vt_feed(vt_new(drained.pane.rows, drained.pane.cols), drained.tail)
+    val screen = if drained.has_terminal_stream(): drained.screen else: vt_feed(vt_new(drained.pane.rows, drained.pane.cols), drained.tail)
     val shown = if screen.frozen.len() > 0: screen.frozen else: screen.cells
     val m = state.metrics
     commit = true

@@ -1,82 +1,31 @@
-# Document Sync Specification
+# document sync spec
 
-> <details>
+Status: authored operator outline, not generated execution evidence.
+Generation and execution require the admitted pure-Simple runtime.
 
-<!-- sdn-diagram:id=document_sync_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
+1. Open an empty document and inspect its integer revision.
+2. Apply newer full changes; reject stale versions without rewinding content.
+3. Reject a malformed later event atomically.
+4. Retain final full replacement; prevent duplicate-open overwrite.
+5. Reject unopened or malformed notifications.
 
-```sdn id=document_sync_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
+See `doc/07_guide/tooling/lsp_revision_bound_code_actions.md` for authority and
+remaining acceptance criteria. No public-protocol or release PASS is claimed.
 
-document_sync_spec
-```
+6. Revoke synchronization after a malformed newer change; retain accepted bytes
+   and version, refuse action queries, then restore only at the observed revision.
+7. Fill the finite document and source-byte budgets, reject excess admission,
+   and prove close/replacement reclaim the budget.
 
-</details>
+8. Reject a conflicting reopen at the same version and revoke stale authority.
+9. Charge multibyte source/URI retention by actual bytes.
+10. Grow an admitted source on disk beyond 1 MiB, call the real action handler,
+    and verify it refuses before starting a child query; remove the fixture.
 
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
+11. Public didOpen/didChange/didClose handlers share the same document owner; Korean/emoji and CRLF survive exact snapshots, stale updates do not rewind, conflicting equal-version changes revoke trust, and identical close/reopen invalidates captured lifetimes.
+12. Real collect_fixes_from_source produces an ordinary TODO-format action against a real temp file. The production-consumed completion seam accepts its source stamp, then refuses changed-source stamps and captured lifetimes after reopen. This is in-process completion integration, not child execution evidence.
+13. External child execution is isolated in test/02_integration/app/lsp/revision_code_action_child_spec.spl. Ordinary unit scenarios do not require SIMPLE_BINARY. That integration requires an admitted runtime; no fake child or skip is supplied. All scenarios remain NOT_RUN.
 
-```ascii generated-from=document_sync_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
+R1 authority control: malformed full-sync changes at the accepted version revoke trust; older malformed events leave accepted authority intact. The actual public handler refuses actions until a newer valid full sync recovers ownership. NOT_RUN.
 
-</details>
-<!-- sdn-diagram:end -->
-
-| Tests | Active | Skipped | Pending |
-|-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
-
-<details>
-<summary>Full Scenario Manual</summary>
-
-# Document Sync Specification
-
-## Scenarios
-
-### Document Sync
-
-#### skipped
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val pending_reason = "pre-existing test failures - functions/imports not available"
-expect(pending_reason.len()).to_be_greater_than(0)
-```
-
-</details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/01_unit/app/lsp/document_sync_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- Document Sync
-
-## Scenario Summary
-
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
-
-
-</details>
+Malformed duplicate didOpen controls cover missing text at older/current versions and unknown version. Current/unknown observations revoke existing authority; strictly older malformed text does not. New full synchronization restores trust without resetting retained bytes.

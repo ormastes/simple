@@ -19,6 +19,10 @@ interpreter has no backing for them, so the populated map scenario runs only on
 a runtime that links those externs. The text-set scenarios use no site id and
 reach no extern. An ordered pin on a key type without native order is still a
 runtime check at the first insert; the adapter cannot see key values.
+Opaque hard-constraint references have no interpreter or admitted proof input
+at this entrypoint: active modes refuse them and report-only preserves the
+container with an explicit unproved reason. This is a safety boundary, not
+production resolved-context/CollectionPlan integration.
 ## Verification guidance and troubleshooting
 If the transition scenario goes RED, a directed representation change lost or
 rewrote a value. If the unsupported-pin scenario panics instead of failing, the
@@ -36,6 +40,7 @@ use compiler.common.data.data_schema_resolver.*
 use compiler.semantics.perf.collection_plan_selection.{CollectionPlanAlgorithm}
 use compiler.semantics.perf_facts.collection_contracts.{CollectionOriginV1, CollectionCreationKind}
 use compiler.semantics.perf.resolved_collection_policy.*
+use compiler.semantics.perf.resolved_data_policy.{resolved_collection_token_v1}
 use compiler.semantics.perf.collection_policy_adapter.*
 
 fn adapter_origin() -> CollectionOriginV1:
@@ -46,12 +51,13 @@ fn adapter_origin() -> CollectionOriginV1:
 fn adapter_all_three() -> [CollectionPlanAlgorithm]:
     [CollectionPlanAlgorithm.Linear, CollectionPlanAlgorithm.Hash, CollectionPlanAlgorithm.Ordered]
 
-fn adapter_policy(choice: text, allowed: [CollectionPlanAlgorithm], switch_policy: text) -> ResolvedCollectionPolicyV1:
+fn adapter_policy(choice: text, allowed: [CollectionPlanAlgorithm], switch_policy: text,
+                  constraints: [text] = []) -> ResolvedCollectionPolicyV1:
     val prov = data_decl_provenance_v1(DataDeclOriginV1.Spl, "src/compiler/resolve.spl", 12, "compiler.resolve")
     val rule = data_policy_rule_v1(DataPolicyKindV1.Collection, "compiler.resolve.symbols", DataRuleSpecificityV1.ExactSite,
         DataRuleStrengthV1.Pin, choice, false, prov)
     val resolved = data_policy_resolve_rules_v1(DataPolicyKindV1.Collection, [rule], "auto").unwrap()
-    resolved_collection_policy_v1(adapter_origin(), resolved, allowed, [], [], switch_policy, "").unwrap()
+    resolved_collection_policy_v1(adapter_origin(), resolved, allowed, constraints, [], switch_policy, "").unwrap()
 
 fn adapter_algorithm_name(algorithm: AdaptiveSetAlgorithm) -> text:
     match algorithm:
@@ -75,6 +81,71 @@ fn adapter_text_set_with(start: text, values: [text]) -> AdaptiveTextSet:
     set
 
 describe "Adaptive collection policy adapter":
+    it "refuses unproved hard constraints before every active pin or automatic choice":
+        # @req REQ-COL-07
+        # @req REQ-COL-08
+        step("Construct valid policies carrying an opaque reference with no owner proof at this API")
+        val allowed = [CollectionPlanAlgorithm.Original, CollectionPlanAlgorithm.Linear,
+            CollectionPlanAlgorithm.Hash, CollectionPlanAlgorithm.Ordered]
+        for mode in ["next_instance", "exclusive_live"]:
+            for choice in ["linear", "hash", "ordered", "auto", "original"]:
+                val policy = adapter_policy(choice, allowed, mode, ["owner-proof:missing-lease-v1"])
+                val result = collection_policy_decide_v1(policy, adaptive_set_default_profile())
+                step("An explicit pin or unchanged original cannot silently claim the opaque constraint was met")
+                expect(result.is_err()).to_equal(true)
+                expect(result.unwrap_err()).to_contain("hard-constraint-evidence-unavailable")
+                expect(result.unwrap_err()).to_contain("owner-proof:missing-lease-v1")
+
+    it "reports unproved hard constraints without changing a populated container or its observations":
+        # @req REQ-COL-07
+        # @req REQ-COL-09
+        step("Keep a populated hash-backed text set while reporting every possible choice")
+        val allowed = [CollectionPlanAlgorithm.Original, CollectionPlanAlgorithm.Linear,
+            CollectionPlanAlgorithm.Hash, CollectionPlanAlgorithm.Ordered]
+        for choice in ["linear", "hash", "ordered", "auto", "original"]:
+            var set = adapter_text_set_with("hash", ["b", "a"])
+            val before = set.observation()
+            val policy = adapter_policy(choice, allowed, "report_only", ["owner-proof:missing-lease-v1"])
+            val report = collection_policy_decide_v1(policy, set.profile).unwrap()
+            step("The report retains the recommendation but selects Original and names the missing proof")
+            expect(report.applied).to_equal(false)
+            expect(resolved_collection_token_v1(report.selected)).to_equal("original")
+            expect(resolved_collection_token_v1(report.recommended)).to_equal(if choice == "auto": "original" else: choice)
+            expect(report.reason).to_equal("hard-constraint-evidence-unavailable")
+            expect(report.policy_digest).to_equal(policy.canonical_policy_digest)
+            expect(report.linear_rejection).to_contain("owner-proof:missing-lease-v1")
+            expect(report.hash_rejection).to_contain("owner-proof:missing-lease-v1")
+            expect(report.ordered_rejection).to_contain("owner-proof:missing-lease-v1")
+            expect(collection_policy_explain_v1(report)).to_contain("hard-constraint-evidence-unavailable")
+            set = collection_policy_apply_text_set_v1(set, report).unwrap()
+            val after = set.observation()
+            expect(adapter_algorithm_name(set.selected_algorithm())).to_equal("hash")
+            expect(adapter_attribute_name(set.algorithm_attribute())).to_equal("hash")
+            expect(set.snapshot_values()).to_equal(["a", "b"])
+            expect(after.size).to_equal(before.size)
+            expect(after.peak_size).to_equal(before.peak_size)
+            expect(after.lookups).to_equal(before.lookups)
+            expect(after.hits).to_equal(before.hits)
+            expect(after.misses).to_equal(before.misses)
+
+    it "never treats workload hints or a permissive profile as proof of opaque constraints":
+        # @req REQ-COL-07
+        step("Retain two independent hard references beside favorable workload hints")
+        val policy = adapter_policy("auto", adapter_all_three(), "next_instance",
+            ["ownership:unproved-lease-v1", "abi:unproved-fixed-v1"])
+        val hinted = resolved_collection_policy_v1(policy.origin, policy.choice, policy.allowed_representations,
+            policy.hard_constraints, ["size_p95=0", "lookup_count_p95=100000"], policy.switch_policy, "").unwrap()
+        val digest = hinted.canonical_policy_digest
+        for profile in [adaptive_set_default_profile(),
+            AdaptiveSetProfile(linear_size_limit: 1024, lookup_promotion_count: 1, allow_hash: true)]:
+            val result = collection_policy_decide_v1(hinted, profile)
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err()).to_contain("ownership:unproved-lease-v1")
+            expect(result.unwrap_err()).to_contain("abi:unproved-fixed-v1")
+        expect(hinted.hard_constraints).to_equal(["abi:unproved-fixed-v1", "ownership:unproved-lease-v1"])
+        expect(hinted.workload_hints).to_equal(["lookup_count_p95=100000", "size_p95=0"])
+        expect(hinted.canonical_policy_digest).to_equal(digest)
+
     it "preserves exact keys and values across every directed linear, hash and ordered transition":
         # @req REQ-COL-01
         step("Build a text set in each starting representation through the adapter and move it to each other one")

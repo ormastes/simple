@@ -1757,14 +1757,23 @@ pub extern "C" fn rt_bytes_u8_at(array: RuntimeValue, index: i64) -> i64 {
 /// Read a u32 element from a `[u32]`-style runtime array without generic index dispatch.
 #[no_mangle]
 pub extern "C" fn rt_typed_words_u32_at(array: RuntimeValue, index: i64) -> i64 {
-    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
+    let arr = as_typed_ptr_packed!(array, HeapObjectType::Array, RuntimeArray, 0);
     unsafe {
         let len = (*arr).len as i64;
         let idx = normalize_index(index, len);
         if idx < 0 || idx >= len {
             return 0;
         }
+        if (*arr).is_u64_packed() {
+            return (*((*arr).data as *const u64).add(idx as usize) & 0xFFFF_FFFF) as i64;
+        }
         let raw = (*arr).as_slice()[idx as usize];
+        if let Some(value) = raw.as_heap_u64() {
+            return (value & 0xFFFF_FFFF) as i64;
+        }
+        if let Some(value) = raw.as_heap_i64() {
+            return value & 0xFFFF_FFFF;
+        }
         if raw.is_int() {
             return raw.as_int() & 0xFFFF_FFFF;
         }
@@ -1872,6 +1881,12 @@ pub extern "C" fn rt_typed_words_u64_at(array: RuntimeValue, index: i64) -> i64 
             return *((*arr).data as *const u64).add(idx as usize) as i64;
         }
         let raw = (*arr).as_slice()[idx as usize];
+        if let Some(value) = raw.as_heap_u64() {
+            return value as i64;
+        }
+        if let Some(value) = raw.as_heap_i64() {
+            return value;
+        }
         if raw.is_int() {
             return raw.as_int();
         }
