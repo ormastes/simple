@@ -442,16 +442,18 @@ pub fn shard_tree_headroom_kib_v1() -> i64:
     shard_tree_headroom_kib_for_v1(env_get("SIMPLE_BUILD_MEMORY_RESERVE_BYTES") ?? "",
         host_limit_mem_reserve_free_kib(0))
 
-# min(declared, cap_or_free - headroom). cap_or_free is the enforced tree RSS
-# cap when set, else free commit; headroom is the reserve floor (default
-# 24 GiB). Unknown declared (<= 0) takes the clamp; unknown cap and free (both
-# <= 0) leave the declared budget. 0 = nothing admissible.
+# Host RAM/commit reserve and enforced tree RSS cap are separate bounds:
+# min(declared, cap, free - headroom) when host free memory is known. A
+# scoped compiler cap does not consume the reserve kept free on the host.
+# With unknown host free memory, retain the conservative cap - headroom
+# fallback. Unknown cap and free leave the declared budget. 0 admits nothing.
 pub fn shard_effective_tree_budget_kb_v1(declared_kb: i64, cap_kb: i64, free_kb: i64, headroom_kb: i64 = SHARD_TREE_HEADROOM_KB_V1) -> i64:
-    val base = if cap_kb > 0: cap_kb else: free_kb
+    val base = if free_kb > 0: free_kb else: cap_kb
     if base <= 0: return declared_kb
     if base <= headroom_kb: return 0
     val clamped = base - headroom_kb
-    if declared_kb > 0 and declared_kb < clamped: declared_kb else: clamped
+    val capped = if cap_kb > 0 and cap_kb < clamped: cap_kb else: clamped
+    if declared_kb > 0 and declared_kb < capped: declared_kb else: capped
 
 pub fn shard_pool_workers_v1(effective_kb: i64, estimate_kb: i64) -> i64:
     if effective_kb <= 0 or estimate_kb <= 0: return 0

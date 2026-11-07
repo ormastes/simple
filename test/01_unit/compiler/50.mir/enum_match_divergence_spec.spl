@@ -1,0 +1,102 @@
+# @req REQ-MIR-ENUM-MATCH-DIVERGENCE-001
+# UNEXECUTED: source-only repair; diagnostic lane's four attempts are exhausted.
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir.*
+use compiler.mir.mir_verify.{mir_verify_module}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+# Counts actual return terminators, invalid return operand types, and live
+# match merges. A zero-function or lowering-error result cannot silently pass.
+fn divergence_shape(body: text, expected: MirTypeKind) -> [i64]:
+    val source = "enum Choice:\n    Number(value: f64)\n    Empty\n\n" + body
+    val ast = parse_full_frontend(source, "app/main.spl", "app.main", Logger(level: 0))
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: source, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hir_lowering = hirlowering_for_module("app.main", surfaces)
+    val hir = hir_lowering.lower_module(ast)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir, [hir])
+    expect(lowering.errors.len()).to_equal(0)
+    # MIRV-005e inspects instruction operands as well as terminators. This
+    # catches boxing/copying an unused match result even when Ret counts and
+    # types still look correct after the child has already terminated.
+    val verified = mir_verify_module(mir)
+    var undefined_reads = ""
+    for finding in verified.findings:
+        if finding.rule == "MIRV-005e":
+            undefined_reads = undefined_reads + finding.function + ": " + finding.message + "\n"
+    expect(undefined_reads).to_equal("")
+    var functions = 0
+    var returns = 0
+    var invalid = 0
+    var live_merges = 0
+    for function in mir.functions.values():
+        if function.name == "target" or function.name.ends_with(".target"):
+            functions = functions + 1
+            for block in function.blocks:
+                if (block.label ?? "") == "ematch_merge":
+                    match block.terminator:
+                        case MirTerminator.Unreachable: ()
+                        case _: live_merges = live_merges + 1
+                match block.terminator:
+                    case MirTerminator.Ret(value):
+                        returns = returns + 1
+                        if val operand = value:
+                            var actual = MirTypeKind.Unit
+                            match operand.kind:
+                                case MirOperandKind.Copy(id) | MirOperandKind.Move(id):
+                                    for local in function.locals:
+                                        if local.id.id == id.id:
+                                            actual = local.type_.kind
+                                case MirOperandKind.Const(_, type_): actual = type_.kind
+                                case _: ()
+                            if expected == MirTypeKind.Unit or actual != expected:
+                                invalid = invalid + 1
+                        elif expected != MirTypeKind.Unit:
+                            invalid = invalid + 1
+                    case _: ()
+    expect(functions).to_equal(1)
+    [returns, invalid, live_merges]
+
+describe "enum match preserves terminating paths":
+    it "all-returning f64 arms have only the two typed returns":
+        val shape = divergence_shape("fn target(v: Choice) -> f64:\n    match v:\n        Choice.Number(value):\n            return value\n        _:\n            return 1.5\n", MirTypeKind.F64)
+        expect(shape).to_equal([2, 0, 0])
+
+    it "a live value arm retains its typed merge beside an early return":
+        val shape = divergence_shape("fn target(v: Choice) -> f64:\n    match v:\n        Choice.Number(value):\n            return value\n        _:\n            1.5\n", MirTypeKind.F64)
+        expect(shape).to_equal([2, 0, 1])
+
+    it "all-returning unit arms never fabricate a value return":
+        val shape = divergence_shape("fn target(v: Choice) -> ():\n    match v:\n        Choice.Number(value):\n            return ()\n        _:\n            return ()\n", MirTypeKind.Unit)
+        expect(shape).to_equal([2, 0, 0])
+
+    it "live valueless arms preserve the following return":
+        val shape = divergence_shape("fn target(v: Choice) -> f64:\n    match v:\n        Choice.Number(value):\n            print value\n        _:\n            print 0\n    return 9.5\n", MirTypeKind.F64)
+        expect(shape).to_equal([1, 0, 1])
+
+    it "an optional tail does not box the unused all-returning result":
+        val shape = divergence_shape("fn target(v: Choice) -> f64?:\n    match v:\n        Choice.Number(value):\n            return value\n        _:\n            return nil\n", MirTypeKind.I64)
+        expect(shape).to_equal([2, 0, 0])
+
+    it "a divergent optional initializer does not bind or continue afterward":
+        val shape = divergence_shape("fn target(v: Choice) -> f64?:\n    val unused: f64? = match v:\n        Choice.Number(value):\n            return value\n        _:\n            return nil\n    return 99.5\n", MirTypeKind.I64)
+        expect(shape).to_equal([2, 0, 0])
+
+    it "nested all-returning matches retain their three real returns":
+        val shape = divergence_shape("fn target(v: Choice, w: Choice) -> f64:\n    match v:\n        Choice.Number(value):\n            match w:\n                Choice.Number(other):\n                    return other\n                _:\n                    return value\n        _:\n            return 1.5\n", MirTypeKind.F64)
+        expect(shape).to_equal([3, 0, 0])
+
+    it "a live guarded catch-all contributes a merge edge beside returning arms":
+        val shape = divergence_shape("fn target(v: Choice, allow: bool) -> f64:\n    match v:\n        case Choice.Number(value):\n            return value\n        case _ if allow:\n            2.5\n        case _:\n            return 3.5\n", MirTypeKind.F64)
+        expect(shape).to_equal([3, 0, 1])
