@@ -33,3 +33,8 @@ durability. Process identity, successful exit, and tree-reap fields are signed
 fixture observations; these specs do not start a compiler, SSH host, or remote
 execution owner. Real host execution and fault injection require separate
 runtime qualification.
+
+Additional domain-admission scenario: independently signed container, sandbox,
+VM and emulated grants are refused by the native host adapter before its injected
+launcher runs; an explicit call counter must stay zero. This remains source-only
+evidence until the spec executes.

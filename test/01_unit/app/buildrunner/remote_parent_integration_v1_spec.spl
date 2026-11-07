@@ -25,7 +25,8 @@ use app.buildrunner.remote_evidence_v1.{RemoteEvidencePolicyV1, RemoteOutputByte
     remote_evidence_freeze_v1}
 use app.buildrunner.remote_authority_v1.{RemoteCompletionEnvelopeV1, remote_completion_encode_v1}
 use app.buildrunner.remote_context_v1.{RemoteAuthorityContextV1, remote_context_admit_v1}
-use app.buildrunner.remote_host_v1.RemoteCompletionBundleV1
+use app.buildrunner.remote_host_v1.{RemoteCompletionBundleV1, remote_host_start_v1}
+use app.bootstrap_builder.process_port.builder_process_portable_v1
 use app.buildrunner.remote_session_v1.{RemoteDatabaseSessionV1, remote_database_session_open_v1}
 use app.io.file_ops.{secure_temp_dir, file_atomic_write, file_atomic_write_bytes,
     file_read_regular_no_follow_bounded_bytes}
@@ -45,7 +46,7 @@ struct RemoteParentFixtureV1:
     authority: RemoteAuthorityContextV1
     bundle: RemoteCompletionBundleV1
 
-fn parent_fixture_v1() -> RemoteParentFixtureV1:
+fn parent_fixture_v1(isolation: text = "native-process") -> RemoteParentFixtureV1:
     val root = secure_temp_dir("/tmp", "remote-parent-spec").unwrap()
     val compiler_bytes = "fixture compiler bytes".bytes()
     val runtime_bytes = "fixture runtime bytes".bytes()
@@ -57,7 +58,7 @@ fn parent_fixture_v1() -> RemoteParentFixtureV1:
     val policy_wire = remote_policy_encode_v1(policy).unwrap()
     val toolchain_digest = remote_inventory_digest_v1(tools)
     val environment = ExecutionEnvironmentV2(host_id: "worker_1", execution_platform: "linux",
-        target_platform: "linux", test_runtime: "native", isolation_class: "native-process",
+        target_platform: "linux", test_runtime: "native", isolation_class: isolation,
         toolchain_digest: toolchain_digest, sdk_digest: sha256_text("sdk"), abi: "gnu",
         isa: "x86_64", optimization: "debug")
     val environment_digest = distributed_environment_digest_v2(environment).unwrap()
@@ -171,7 +172,28 @@ fn parent_release_v1(session: RemoteDatabaseSessionV1):
     expect(task_runner_journal_release_v1(session.database.journal)).to_equal(Ok(true))
     expect(distributed_operation_journal_close_v2(session.operations)).to_equal(Ok(true))
 
+var remote_forbidden_spawn_calls_v1: i64 = 0
+
+fn remote_forbidden_spawn_v1(program: text, digest: text, args: [text], directory: text) -> Result<i64, text>:
+    remote_forbidden_spawn_calls_v1 = remote_forbidden_spawn_calls_v1 + 1
+    Err("test native launcher must not be called")
+
 describe "Remote parent signed completion and real journal integration V1":
+    it "refuses container sandbox VM and emulated grants before native launch":
+        for isolation in ["native-container", "sandbox", "vm", "emulated"]:
+            val fixture = parent_fixture_v1(isolation)
+            var host = fixture.run.hosts[0]
+            host.transport = "local"
+            host.endpoint = ""
+            var port = builder_process_portable_v1()
+            port.spawn_operation = remote_forbidden_spawn_v1
+            remote_forbidden_spawn_calls_v1 = 0
+            expect(remote_host_start_v1(fixture.task, host, fixture.root + "/source",
+                fixture.root + "/state", port, fixture.policy, fixture.authority).unwrap_err())
+                .to_equal("REMOTE_NATIVE_PROCESS_ISOLATION_REQUIRED")
+            expect(remote_forbidden_spawn_calls_v1).to_equal(0)
+            expect(dir_remove_all(fixture.root)).to_equal(true)
+
     it "publishes exact accepted bytes and durably refuses a second completion":
         val fixture = parent_fixture_v1()
         var session: RemoteDatabaseSessionV1 = parent_open_v1(fixture)
