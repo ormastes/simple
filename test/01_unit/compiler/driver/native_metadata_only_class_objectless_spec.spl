@@ -1,0 +1,37 @@
+# Bug native_metadata_only_class_objectless_2026_11_07: a class that owns only
+# field metadata (defaults are evaluated by constructor lowering in the
+# consumer) must be an objectless candidate; callable or hardware-bound
+# classes must keep a real native object.
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.core.parser.{par_had_error_get}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfaceParserOwner, module_surface_canonical_path}
+use compiler.driver.driver_native_objectless_proof.{driver_native_parser_classes_are_metadata_only_v1, driver_native_parser_can_persist_objectless}
+
+fn owner_of(source: text) -> ModuleSurfaceParserOwner:
+    val path = module_surface_canonical_path("test/fixtures/metadata_class.spl")
+    val parsed = parse_full_frontend(source, path, "metadata_class", Logger(level: 0))
+    expect(par_had_error_get()).to_equal(false)
+    ModuleSurfaceParserOwner.new(parsed)
+
+describe "metadata-only class objectless candidate":
+    it "admits classes whose fields carry array and dictionary defaults":
+        for source in ["class Holder:\n    items: [i64] = []\n", "class Holder:\n    items: [i64] = [1, 2, 3]\n", "class Holder:\n    table: Dict<text, i64> = {}\n", "class Plain:\n    value: i64\n"]:
+            val owner = owner_of(source)
+            expect(driver_native_parser_classes_are_metadata_only_v1(owner)).to_equal(true)
+            expect(driver_native_parser_can_persist_objectless(owner)).to_equal(true)
+
+    it "keeps a real object for a class with a method":
+        val owner = owner_of("class Holder:\n    items: [i64] = []\n    fn count() -> i64: self.items.len()\n")
+        # Inline class methods are carried by a synthesized impl block, so the
+        # class row stays metadata; that impl must still block admission.
+        expect(driver_native_parser_can_persist_objectless(owner)).to_equal(false)
+
+    it "keeps a real object for a class with an executable impl":
+        val owner = owner_of("class Holder:\n    value: i64\nimpl Holder:\n    fn get() -> i64: self.value\n")
+        expect(driver_native_parser_can_persist_objectless(owner)).to_equal(false)
+
+    it "keeps a real object for a free function or constant beside a class":
+        for source in ["class Holder:\n    value: i64\nval answer = 42\n","class Holder:\n    value: i64\nfn make() -> Holder: Holder(value: 1)\n"]:
+            expect(driver_native_parser_can_persist_objectless(owner_of(source))).to_equal(false)

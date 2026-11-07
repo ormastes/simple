@@ -40,3 +40,16 @@ every class as data and may conservatively reject this case; that separate
 guard is unchanged. Full bootstrap, small default image, provider/aspect
 dynload, AVX512 DB/HTTP comparisons, CUDA and ARM/RISC-V qualification remain
 open under Item 5.
+
+## Classifier spec (2026-11-07)
+
+`test/01_unit/compiler/driver/native_metadata_only_class_objectless_spec.spl`
+pins the parsed classifier: classes with empty-array, nonempty-array,
+dictionary or no defaults are objectless candidates; a class with an inline
+method (carried by its synthesized impl), an explicit impl, a free function
+or a constant beside it is not. 4/4 pass on 204128b335a; with the pre-fix
+classifier (204128b335a~1) the admission example fails. Native fixture
+execution against a rebuilt compiler is still pending, so status is
+fix-implemented-verification-pending, not closed. The older
+`native_objectless_proof_spec.spl` fails 15/15 on this base because it
+imports `driver_native_module_is_objectless`, which no longer exists.
