@@ -306,6 +306,64 @@ pub unsafe extern "C" fn rt_dir_exists(path_ptr: *const u8, path_len: u64) -> bo
     }
 }
 
+/// Copy a managed path while its allocation registry entry is locked.
+/// The legacy facade bounds the full counted input before C-string truncation.
+fn file_mtime_path_copy(path: crate::value::RuntimeValue, out: &mut [u8; 4096]) -> Option<usize> {
+    use crate::value::heap::{with_typed_ptr, HeapObjectType};
+    use crate::value::RuntimeString;
+
+    let len = with_typed_ptr::<RuntimeString, _>(path, HeapObjectType::String, |ptr| unsafe {
+        let len = usize::try_from((*ptr).len).ok()?;
+        if len >= out.len() {
+            return None;
+        }
+        out[..len].copy_from_slice((*ptr).as_bytes());
+        Some(len)
+    })??;
+    std::str::from_utf8(&out[..len]).ok()?;
+    Some(out[..len].iter().position(|byte| *byte == 0).unwrap_or(len))
+}
+
+fn file_mtime_value(path: crate::value::RuntimeValue) -> i64 {
+    let mut bytes = [0u8; 4096];
+    let Some(_len) = file_mtime_path_copy(path, &mut bytes) else {
+        return -1;
+    };
+    // The registry lock is released before native filesystem access.
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    #[cfg(windows)]
+    let status = {
+        let text = std::str::from_utf8(&bytes[.._len]).expect("validated managed path");
+        let mut wide = [0u16; 4096];
+        for (index, unit) in text.encode_utf16().enumerate() {
+            wide[index] = unit;
+        }
+        unsafe { libc::wstat(wide.as_ptr(), metadata.as_mut_ptr()) }
+    };
+    #[cfg(not(windows))]
+    let status = unsafe { libc::stat(bytes.as_ptr().cast(), metadata.as_mut_ptr()) };
+    if status != 0 {
+        return -1;
+    }
+    unsafe { metadata.assume_init().st_mtime as i64 }
+}
+
+/// Legacy tagged-path mtime facade: native whole seconds, -1 on failure.
+#[no_mangle]
+pub extern "C" fn rt_file_modified(path: crate::value::RuntimeValue) -> i64 {
+    file_mtime_value(path)
+}
+
+/// Same native mtime policy as rt_file_modified; distinct from rt_file_stat.
+#[no_mangle]
+pub extern "C" fn rt_file_modified_time(path: crate::value::RuntimeValue) -> i64 {
+    file_mtime_value(path)
+}
+
+#[cfg(test)]
+#[path = "mtime_facade_tests.rs"]
+mod mtime_facade_tests;
+
 /// Get file modification time in seconds since epoch.
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_stat(path_ptr: *const u8, path_len: u64) -> i64 {
