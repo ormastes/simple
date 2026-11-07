@@ -1,0 +1,76 @@
+# Pure provenance tests. These values do not claim an admitted native cgroup.
+use std.spec.{describe, it, expect, fail}
+use std.common.build_manager.group_process_stream_profile_v3.{GroupProcessCpuQuotaV3, GroupProcessBrokerBudgetV3, GroupProcessStreamProfileV3}
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamRequestV2, GroupProcessStreamLaunchV2, group_process_child_argv_digest_v2, group_process_stream_identity_profiled_v3, group_process_stream_template_digest_v3}
+use std.nogc_sync_mut.io.group_process_owner.{GroupProcessStreamOwnerV2, group_process_stream_owner_validate_v2}
+use std.nogc_sync_mut.io.process_ops.{PipedProcessRefV1, PipedProcessOwnedTransferV2, process_piped_owned_transfer_equal_v2}
+
+fn profile_owner_fixture_v3() -> GroupProcessStreamOwnerV2:
+    val program = "/opt/approved-helper"
+    val args = ["--output"]
+    val request = GroupProcessStreamRequestV2(program: program, producer_digest: "a".repeat(64),
+        args: args, environment: [], directory: "/work", inputs: [], timeout_ms: 5000,
+        broker_program: "/opt/approved-broker", broker_digest: "b".repeat(64),
+        child_argv_digest: group_process_child_argv_digest_v2(program, args), launch_deadline_unix_ms: 1900000000000)
+    val policy = GroupProcessStreamProfileV3(
+        helper_cpu: GroupProcessCpuQuotaV3(cpu_millis: 25, quota_us: 2500, period_us: 100000),
+        broker: GroupProcessBrokerBudgetV3(cgroup_path: "/sys/fs/cgroup/service/brokers",
+            device: 11, inode: 22, generation: 3, policy_digest: "c".repeat(64),
+            cpu_quota_us: 250000, cpu_period_us: 1000000, reserved_cpu_millis: 250,
+            memory_limit_bytes: 67108864, reserved_memory_bytes: 134217728),
+        child_image_mode: "trusted-local-admin-image-fd-v1")
+    val launch = GroupProcessStreamLaunchV2(root: "/work/owner", worker_id: "worker_1", generation: 7,
+        snapshot_digest: "d".repeat(64), cache_identity: "e".repeat(64), memory_limit_bytes: 1048576,
+        request: request, delegated_cgroup_path: "/sys/fs/cgroup/service", transport_generation: 34,
+        profile_v3: Some(policy))
+    GroupProcessStreamOwnerV2(launch: launch, identity_digest: group_process_stream_identity_profiled_v3(launch))
+
+fn profile_transfer_fixture_v3(owner: GroupProcessStreamOwnerV2) -> PipedProcessOwnedTransferV2:
+    PipedProcessOwnedTransferV2(owner: owner,
+        reference: PipedProcessRefV1(pid: 123, generation: owner.launch.transport_generation,
+            group_root: owner.launch.root, group_identity: owner.identity_digest))
+
+describe "retained V3 pipe resource provenance":
+    it "includes CPU and image policy in existing full-owner transfer equality":
+        val owner = profile_owner_fixture_v3()
+        expect(group_process_stream_owner_validate_v2(owner)).to_equal("")
+        val original = profile_transfer_fixture_v3(owner)
+        expect(process_piped_owned_transfer_equal_v2(original, original)).to_equal(true)
+        var changed = owner
+        var launch = changed.launch
+        var policy = launch.profile_v3.unwrap()
+        policy.helper_cpu = GroupProcessCpuQuotaV3(cpu_millis: 26, quota_us: 2600, period_us: 100000)
+        launch.profile_v3 = Some(policy)
+        changed.launch = launch
+        changed.identity_digest = group_process_stream_identity_profiled_v3(launch)
+        expect(process_piped_owned_transfer_equal_v2(original, profile_transfer_fixture_v3(changed))).to_equal(false)
+        policy = owner.launch.profile_v3.unwrap()
+        policy.child_image_mode = "sealed-main-image-v1"
+        launch = owner.launch
+        launch.profile_v3 = Some(policy)
+        changed.launch = launch
+        changed.identity_digest = group_process_stream_identity_profiled_v3(launch)
+        expect(process_piped_owned_transfer_equal_v2(original, profile_transfer_fixture_v3(changed))).to_equal(false)
+
+    it "rejects dropping the resource profile while retaining the admitted identity":
+        var owner = profile_owner_fixture_v3()
+        var launch = owner.launch
+        launch.profile_v3 = nil
+        owner.launch = launch
+        expect(group_process_stream_owner_validate_v2(owner)).to_equal("stream owner request identity differs")
+
+    it "keeps template correlation while runtime fills only reserved generation and expiry":
+        val owner = profile_owner_fixture_v3()
+        var template = owner.launch
+        template.transport_generation = 0
+        var request = template.request
+        request.launch_deadline_unix_ms = 0
+        template.request = request
+        val before = match group_process_stream_template_digest_v3(template):
+            case Ok(digest): digest
+            case Err(reason):
+                fail("valid planning template rejected: {reason}")
+                ""
+        match group_process_stream_template_digest_v3(owner.launch):
+            case Ok(digest): expect(digest).to_equal(before)
+            case Err(reason): fail("final owner template correlation failed: {reason}")

@@ -8,7 +8,9 @@ use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_atomic_write, file_create_exclusive, file_exists}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms, sleep_ms}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
-use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2, group_process_stream_launch_validate_v2, group_process_stream_launch_encode_v2, group_process_stream_launch_decode_v2, group_process_stream_identity_v2, group_process_stream_ready_encode_v2, group_process_stream_unlaunched_encode_v2}
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2, group_process_stream_launch_validate_profiled_v3, group_process_stream_launch_encode_profiled_v3, group_process_stream_launch_decode_profiled_v3, group_process_stream_identity_profiled_v3, group_process_stream_ready_encode_v2, group_process_stream_unlaunched_encode_v2}
+use std.common.build_manager.group_process_stream_protocol_v2.{group_process_stream_template_digest_v3}
+use std.common.build_manager.group_process_stream_profile_v3.{group_process_stream_resource_receipt_v3}
 
 struct GroupProcessOwnerV1:
     launch: GroupProcessLaunchV1
@@ -153,10 +155,10 @@ export group_process_start_v1, group_process_recover_v1, group_process_poll_v1, 
 export group_process_peak_memory_v1, group_process_collect_reap_v1, group_process_reap_path_v1
 
 fn group_process_stream_owner_validate_v2(owner: GroupProcessStreamOwnerV2) -> text:
-    val invalid = group_process_stream_launch_validate_v2(owner.launch)
+    val invalid = group_process_stream_launch_validate_profiled_v3(owner.launch)
     if invalid != "": return invalid
     if owner.launch.transport_generation <= 0: return "stream owner lacks a reserved transport generation"
-    val identity = group_process_stream_identity_v2(owner.launch)
+    val identity = group_process_stream_identity_profiled_v3(owner.launch)
     if identity == "" or identity != owner.identity_digest: return "stream owner request identity differs"
     ""
 
@@ -166,19 +168,19 @@ fn _group_process_stream_installed_v2(owner: GroupProcessStreamOwnerV2) -> Resul
     val claim = file_read_regular_no_follow_bounded(owner.launch.root + "/broker.claim", 128)?
     if claim != owner.identity_digest: return Err("stream broker claim differs from retained owner")
     val request = file_read_regular_no_follow_bounded(owner.launch.root + "/broker.request.sdn", 16777216)?
-    if request != group_process_stream_launch_encode_v2(owner.launch):
+    if request != group_process_stream_launch_encode_profiled_v3(owner.launch):
         return Err("stream broker immutable request differs from retained owner")
     Ok(true)
 
 # Preparation never launches. The caller already owns the reserved native ticket
 # and may abandon it on this error only while native admission proves no launch.
 fn group_process_stream_prepare_v2(launch: GroupProcessStreamLaunchV2) -> Result<GroupProcessStreamOwnerV2, text>:
-    val owner = GroupProcessStreamOwnerV2(launch: launch, identity_digest: group_process_stream_identity_v2(launch))
+    val owner = GroupProcessStreamOwnerV2(launch: launch, identity_digest: group_process_stream_identity_profiled_v3(launch))
     val invalid = group_process_stream_owner_validate_v2(owner)
     if invalid != "": return Err(invalid)
     if not file_create_exclusive(launch.root + "/broker.claim", owner.identity_digest):
         return Err("stream broker root already claimed; recover required")
-    if not file_atomic_write(launch.root + "/broker.request.sdn", group_process_stream_launch_encode_v2(launch)):
+    if not file_atomic_write(launch.root + "/broker.request.sdn", group_process_stream_launch_encode_profiled_v3(launch)):
         return Err("cannot persist immutable stream broker request")
     Ok(owner)
 
@@ -186,7 +188,7 @@ fn group_process_stream_prepare_v2(launch: GroupProcessStreamLaunchV2) -> Result
 # the vanished host's descriptor/reader handle, and grant expiry cannot revoke it.
 fn group_process_stream_recover_v2(root: text, identity: text) -> Result<GroupProcessStreamOwnerV2, text>:
     val payload = file_read_regular_no_follow_bounded(root + "/broker.request.sdn", 16777216)?
-    val launch = group_process_stream_launch_decode_v2(payload)?
+    val launch = group_process_stream_launch_decode_profiled_v3(payload)?
     if launch.root != root: return Err("stream broker recovery root differs")
     val owner = GroupProcessStreamOwnerV2(launch: launch, identity_digest: identity)
     val _installed = _group_process_stream_installed_v2(owner)?
@@ -200,11 +202,24 @@ fn group_process_stream_confirm_v2(owner: GroupProcessStreamOwnerV2) -> Result<G
     for _attempt in 0..50:
         match file_read_regular_no_follow_bounded(owner.launch.root + "/broker.stream.ready.sdn", 4096):
             case Ok(actual):
-                if actual != expected: return Err("stream readiness differs from admitted child exec")
+                if actual != expected: return Err("stream transfer receipt differs from admitted owner")
+                val _resources = _group_process_stream_resources_v3(owner)?
                 return _group_process_control_identity_v2(owner.launch.root, owner.identity_digest, "probe", 100)
             case Err(_reason): pass
         sleep_ms(20)
-    Err("stream broker has not confirmed the admitted child exec; owner retained")
+    Err("stream broker has not confirmed an owned transfer; owner retained")
+
+# The broker publishes this only after the native owner has verified the actual
+# V3 child cap and authenticated shared-broker placement/caps. Nil preserves V2.
+fn _group_process_stream_resources_v3(owner: GroupProcessStreamOwnerV2) -> Result<text, text>:
+    match owner.launch.profile_v3:
+        case None: Ok("")
+        case Some(profile):
+            val expected = group_process_stream_resource_receipt_v3(owner.identity_digest, profile)
+            if expected == "": return Err("invalid stream resource receipt identity")
+            val actual = file_read_regular_no_follow_bounded(owner.launch.root + "/broker.resources.sdn", 4096)?
+            if actual != expected: return Err("stream resource receipt differs from admitted profile")
+            Ok(actual)
 
 fn group_process_stream_poll_v2(owner: GroupProcessStreamOwnerV2) -> Result<GroupProcessPollV1, text>:
     val _installed = _group_process_stream_installed_v2(owner)?
@@ -231,6 +246,7 @@ fn group_process_stream_terminal_v2(owner: GroupProcessStreamOwnerV2) -> Result<
     val observed = group_process_observation_decode_v1(owner.identity_digest, payload)?
     if not observed.terminal or not observed.leader_reaped or not observed.tree_empty or observed.active_processes != 0:
         return Err("stream group collected terminal proof remains incomplete")
+    val _resources = _group_process_stream_resources_v3(owner)?
     Ok((observed, payload))
 
 # A failed admission with no child is a distinct fact from a reaped child tree.
@@ -249,13 +265,14 @@ fn group_process_stream_cleanup_proof_v2(owner: GroupProcessStreamOwnerV2) -> Re
 
 fn group_process_stream_collect_reap_v2(owner: GroupProcessStreamOwnerV2,
         lease: GroupedActionLeaseV1) -> Result<GroupedReapReceiptV1, text>:
-    if lease.worker_id != owner.launch.worker_id or lease.generation != owner.launch.generation or
-            lease.snapshot_digest != owner.launch.snapshot_digest or lease.cache_identity != owner.launch.cache_identity:
+    if (lease.worker_id != owner.launch.worker_id or lease.generation != owner.launch.generation or
+            lease.snapshot_digest != owner.launch.snapshot_digest or lease.cache_identity != owner.launch.cache_identity):
         return Err("stream reap lease differs from admitted broker request")
     if lease.group_id == "" or lease.action_id == "" or lease.lease_id == "":
         return Err("stream reap lease is incomplete")
     val terminal = group_process_stream_cleanup_proof_v2(owner)?
     var memory = ""
+    var resources = ""
     val unlaunched = terminal.starts_with("SIMPLE-GROUP-STREAM-UNLAUNCHED-2\n")
     # The implemented stream provider is Linux cgroup/pidfd. A different broker
     # cannot acquire that capability by supplying an observation or a boolean.
@@ -266,13 +283,22 @@ fn group_process_stream_collect_reap_v2(owner: GroupProcessStreamOwnerV2,
             owner.launch.memory_policy, owner.launch.memory_limit_bytes,
             observed.memory_peak_bytes, "linux")?
         if memory != expected_memory: return Err("stream memory receipt differs from admitted owner")
+        resources = _group_process_stream_resources_v3(owner)?
     var retained = "SIMPLE-GROUP-STREAM-REAP-2\n"
+    match owner.launch.profile_v3:
+        case Some(_profile): retained = "SIMPLE-GROUP-STREAM-REAP-3\n"
+        case None: pass
     for field in [lease.group_id, lease.action_id, lease.worker_id, str(lease.generation),
             lease.lease_id, lease.snapshot_digest, lease.cache_identity, owner.identity_digest,
             str(owner.launch.transport_generation), owner.launch.request.child_argv_digest,
             owner.launch.request.producer_digest, owner.launch.request.broker_digest]:
         retained = retained + builder_wire_line_v1(field)
     retained = retained + terminal + builder_wire_line_v1(memory)
+    match owner.launch.profile_v3:
+        case Some(_profile):
+            val template_digest = group_process_stream_template_digest_v3(owner.launch)?
+            retained = retained + builder_wire_line_v1(template_digest) + builder_wire_line_v1(resources)
+        case None: pass
     val path = owner.launch.root + "/tree-reaped.sdn"
     if file_exists(path):
         val prior = file_read_regular_no_follow_bounded(path, 16384)?

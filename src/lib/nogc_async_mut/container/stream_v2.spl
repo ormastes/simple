@@ -1,0 +1,45 @@
+# The common container stream entrypoint. Handles stay in this process and
+# callers retain every cleanup-bearing outcome before publishing a reply.
+use std.common.contracts.container.execution_v2.ContainerExecutionRequestV2
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.stream_v2.*
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_project_v2}
+use std.nogc_sync_mut.io.process_ops.PipedProcessOwnedSpawnV2
+
+pub struct ContainerOutputTurnV2:
+    owner: SimpleContainerOwnerV2
+    spawn: PipedProcessOwnedSpawnV2
+
+# Planning produces immutable helper demand, not launch permission. The host
+# must separately sign/admit its template under the parent assignment budget.
+pub fn simple_container_output_plan_v2(owner: SimpleContainerOwnerV2,
+        request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
+        identity: ContainerOutputIdentityV2, policy: ContainerStreamPolicyV2,
+        resources: ContainerOutputResourcesV2) -> Result<ContainerOutputPlanV2, text>:
+    val projection = simple_container_project_v2(owner, request)?
+    match owner:
+        case SimpleContainerOwnerV2.Linux(_, adapter):
+            adapter.output_plan(request, expected, identity, policy, resources)
+        case SimpleContainerOwnerV2.Windows(_, _):
+            Err("container-output-windows-transport-unsupported")
+
+# Ready means ownership is available in an opening state. It does not prove
+# that attach succeeded or that any workload output was observed. This call
+# moves all helper cleanup authority to the returned spawn; the provider does
+# not retain a duplicate handle. No stdin, terminal or resize is advertised.
+pub fn simple_container_open_output_v2(owner: SimpleContainerOwnerV2,
+        request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
+        identity: ContainerOutputIdentityV2, helper: ContainerHelperAdmissionV2,
+        policy: ContainerStreamPolicyV2) -> ContainerOutputTurnV2:
+    match simple_container_project_v2(owner, request):
+        case Err(reason):
+            return ContainerOutputTurnV2(owner: owner, spawn: PipedProcessOwnedSpawnV2.Rejected(reason))
+        case Ok(_): pass
+    match owner:
+        case SimpleContainerOwnerV2.Linux(scope, adapter):
+            var retained = adapter
+            val spawned = retained.open_output_session(request, expected, identity, helper, policy)
+            ContainerOutputTurnV2(owner: SimpleContainerOwnerV2.Linux(scope, retained), spawn: spawned)
+        case SimpleContainerOwnerV2.Windows(_, _):
+            ContainerOutputTurnV2(owner: owner,
+                spawn: PipedProcessOwnedSpawnV2.Rejected("container-output-windows-transport-unsupported"))

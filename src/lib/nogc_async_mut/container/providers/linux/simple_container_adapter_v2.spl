@@ -23,6 +23,11 @@ use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
 use std.nogc_sync_mut.io.retained_file.retained_directory_open_trusted_v1
 use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
 use std.common.contracts.container.command_v1.oci_command_parts_v1
+use std.common.contracts.container.stream_v2.{ContainerOutputIdentityV2, ContainerOutputResourcesV2,
+    ContainerStreamPolicyV2, ContainerOutputPlanV2, ContainerHelperAdmissionV2,
+    container_stream_policy_digest_v2, container_output_plan_digest_v2, container_output_admission_validate_v2}
+use std.nogc_async_mut.container.providers.linux.output_session_v2.linux_oci_output_launch_template_v2
+use std.nogc_sync_mut.io.process_ops.PipedProcessOwnedSpawnV2
 
 pub const LINUX_SIMPLE_CONTAINER_BACKEND_V2 = "linux-podman"
 
@@ -268,6 +273,44 @@ impl LinuxSimpleContainerAdapterV2:
             proof_kind: "exact-native-execution-user-v1")
         val canonical = container_execution_user_receipt_encode_v2(receipt)?
         Ok(receipt)
+
+    pub fn output_plan(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
+            identity: ContainerOutputIdentityV2, policy: ContainerStreamPolicyV2,
+            resources: ContainerOutputResourcesV2) -> Result<ContainerOutputPlanV2, text>:
+        val checked = self._checked_request_v2(request)?
+        val policy_digest = container_stream_policy_digest_v2(policy)?
+        val pin = self._observed_host.provider_identity_digest
+        val observed = self.provider.output_engine_observation_v2(checked.0, expected, pin)?
+        val launch = linux_oci_output_launch_template_v2(policy, identity, resources, expected,
+            self.scope.provider_generation, self.provider.engine_policy.unwrap(), observed)?
+        var plan = ContainerOutputPlanV2(mode: "output-follow", workload: request.plan,
+            runtime: expected, identity: identity, resources: resources,
+            provider_identity_digest: pin, policy_digest: policy_digest,
+            launch_template: launch, request_digest: "")
+        plan.request_digest = container_output_plan_digest_v2(plan)?
+        Ok(plan)
+
+    pub me open_output_session(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
+            identity: ContainerOutputIdentityV2, helper: ContainerHelperAdmissionV2,
+            policy: ContainerStreamPolicyV2) -> PipedProcessOwnedSpawnV2:
+        val resources = ContainerOutputResourcesV2(cpu_millis: helper.cpu_millis, memory_bytes: helper.memory_bytes)
+        val plan = match self.output_plan(request, expected, identity, policy, resources):
+            case Ok(value): value
+            case Err(reason): return PipedProcessOwnedSpawnV2.Rejected(reason)
+        match container_output_admission_validate_v2(plan, helper):
+            case Err(reason): return PipedProcessOwnedSpawnV2.Rejected(reason)
+            case Ok(_): pass
+        val checked = match self._checked_request_v2(request):
+            case Ok(value): value
+            case Err(reason): return PipedProcessOwnedSpawnV2.Rejected(reason)
+        match self._set_duration_v2(checked.0):
+            case Err(reason): return PipedProcessOwnedSpawnV2.Rejected(reason)
+            case Ok(_): pass
+        var launch = plan.launch_template
+        var child = launch.request
+        child.launch_deadline_unix_ms = helper.deadline.expires_at_unix_ms
+        launch.request = child
+        self.provider.open_output_session_v2(checked.0, expected, plan.provider_identity_digest, launch)
 
     pub me recover(request: ContainerExecutionRequestV2, expected: RuntimeIntentV1) -> RuntimeOperationV1:
         val checked = match self._checked_request_v2(request):

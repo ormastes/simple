@@ -42,10 +42,26 @@ fn host_reservation_receipt_for_action_v1(intent: HostReservationIntentV1,
     val envelope = distributed_encode_operation_v2(operation)?
     val envelope_digest = sha256_text(envelope)
     val revision = intent.fence.revision + 1
-    val body = "kind: host-prepared-reservation-v1\noperationId: \"{operation.id}\"\nenvelopeDigest: \"{envelope_digest}\"\nintentDigest: \"{operation.payload_digest}\"\npreparedRevision: {revision}\n"
     Ok(HostPreparedReservationReceiptV1(operation_id: operation.id,
         envelope_digest: envelope_digest, intent_digest: operation.payload_digest,
-        prepared_revision: revision, receipt_digest: sha256_text(body)))
+        prepared_revision: revision, receipt_digest: host_reservation_receipt_digest_v1(operation, envelope_digest, revision)))
+
+fn host_reservation_receipt_digest_v1(operation: OperationEnvelopeV2, envelope_digest: text, revision: i64) -> text:
+    val body = "kind: host-prepared-reservation-v1\noperationId: \"{operation.id}\"\nenvelopeDigest: \"{envelope_digest}\"\nintentDigest: \"{operation.payload_digest}\"\npreparedRevision: {revision}\n"
+    sha256_text(body)
+
+# Integrity only, for a trusted carrier that retains the original operation.
+# Without the full intent this cannot prove its fence, admission or signatures.
+pub fn host_reservation_receipt_integrity_v1(receipt: HostPreparedReservationReceiptV1,
+        operation: OperationEnvelopeV2) -> Result<bool, text>:
+    if operation.operation != "host_reservation_v1" and operation.operation != "host_helper_reservation_v1":
+        return Err("reservation-operation-mismatch")
+    val digest = sha256_text(distributed_encode_operation_v2(operation)?)
+    if (receipt.operation_id != operation.id or receipt.envelope_digest != digest or
+            receipt.intent_digest != operation.payload_digest or receipt.prepared_revision <= 0 or
+            receipt.receipt_digest != host_reservation_receipt_digest_v1(operation, digest, receipt.prepared_revision)):
+        return Err("reservation-receipt-mismatch")
+    Ok(true)
 
 pub fn host_reservation_match_receipt_v1(receipt: HostPreparedReservationReceiptV1,
         intent: HostReservationIntentV1, operation: OperationEnvelopeV2) -> Result<bool, text>:

@@ -6539,6 +6539,31 @@ static SplArray* group_stream_unavailable_v2(int count) {
     }
     return values;
 }
+int64_t rt_linux_group_stream_admit_profiled_v3(const char*d,int64_t dn,const char*b,int64_t bn,
+        const char*p,int64_t pn,SplArray*w) {
+    (void)d;(void)dn;(void)b;(void)bn;(void)p;(void)pn;(void)w;return ENOTSUP;
+}
+int64_t rt_linux_group_stream_verify_broker_profiled_v3(const char*d,int64_t dn,const char*b,int64_t bn,
+        const char*p,int64_t pn,SplArray*w) {
+    (void)d;(void)dn;(void)b;(void)bn;(void)p;(void)pn;(void)w;return ENOTSUP;
+}
+SplArray* rt_linux_group_parent_acquire_profiled_at_v3(const char*p,uint64_t pn,const char*a,uint64_t an,const char*i,uint64_t in) {
+    (void)p;(void)pn;(void)a;(void)an;(void)i;(void)in;return group_stream_unavailable_v2(4);
+}
+SplArray* rt_linux_group_launch_stream_broker_profiled_v3(const char*p,int64_t pn,const char*d,int64_t dn,
+        SplArray*a,int64_t g,const char*r,int64_t rn,const char*i,int64_t in,
+        const char*c,int64_t cn,int64_t deadline,const char*b,int64_t bn,const char*pd,int64_t pdn,SplArray*w) {
+    (void)p;(void)pn;(void)d;(void)dn;(void)a;(void)g;(void)r;(void)rn;(void)i;(void)in;
+    (void)c;(void)cn;(void)deadline;(void)b;(void)bn;(void)pd;(void)pdn;(void)w;return group_stream_unavailable_v2(2);
+}
+SplArray* rt_linux_group_start_stream_profiled_v3(const char*p,int64_t pn,const char*d,int64_t dn,
+        SplArray*a,SplArray*e,const char*c,int64_t cn,const char*r,int64_t rn,
+        const char*i,int64_t in,int64_t memory,int64_t timeout,int64_t deadline,
+        const char*b,int64_t bn,const char*pd,int64_t pdn,SplArray*w) {
+    (void)p;(void)pn;(void)d;(void)dn;(void)a;(void)e;(void)c;(void)cn;(void)r;(void)rn;
+    (void)i;(void)in;(void)memory;(void)timeout;(void)deadline;(void)b;(void)bn;(void)pd;(void)pdn;(void)w;
+    return group_stream_unavailable_v2(2);
+}
 int64_t rt_linux_group_stream_admit_v2(const char*p,int64_t n){(void)p;(void)n;return ENOTSUP;}
 SplArray* rt_linux_group_launch_stream_broker_v2(const char*p,int64_t pn,const char*d,int64_t dn,
         SplArray*a,int64_t g,const char*r,int64_t rn,const char*i,int64_t in,
