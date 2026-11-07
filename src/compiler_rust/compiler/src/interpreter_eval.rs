@@ -502,6 +502,9 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
     super::BITFIELDS.with(|cell| cell.borrow_mut().clear());
     // Clear the struct/class overload registry from previous runs.
     CLASS_OVERLOADS.with(|cell| cell.borrow_mut().clear());
+    // The entry script is being (re-)evaluated: drop the previous entry's
+    // owner-keyed classes so they cannot answer for this one.
+    crate::interpreter::clear_entry_owner_classes();
 
     let mut env = Env::new();
     let mut functions: HashMap<String, Arc<FunctionDef>> = HashMap::new();
@@ -632,7 +635,9 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                     parent: None,
                     visibility: s.visibility,
                     effects: Vec::new(),
-                    attributes: Vec::new(),
+                    // Keep the flattening loader's owner tag: an imported `struct` must not be
+                    // mistaken for an entry-declared class (`record_entry_owner_class`).
+                    attributes: s.attributes.clone(),
                     doc_comment: None,
                     invariant: None,
                     macro_invocations: Vec::new(),
@@ -642,6 +647,8 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                     type_bindings: std::collections::HashMap::new(),
                     is_value_type: true,
                 });
+                crate::interpreter::record_flattened_owner_class(&struct_class);
+                crate::interpreter::record_entry_owner_class(&struct_class);
                 classes.insert(s.name.clone(), Arc::clone(&struct_class));
                 CLASS_OVERLOADS.with(|cell| {
                     cell.borrow_mut().entry(s.name.clone()).or_default().push(struct_class);
@@ -677,6 +684,7 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                 );
                 let arc_c = Arc::new(c.clone());
                 crate::interpreter::record_flattened_owner_class(&arc_c);
+                crate::interpreter::record_entry_owner_class(&arc_c);
                 classes.insert(c.name.clone(), Arc::clone(&arc_c));
                 CLASS_OVERLOADS.with(|cell| {
                     cell.borrow_mut().entry(c.name.clone()).or_default().push(arc_c);

@@ -844,7 +844,8 @@ pub(super) fn eval_call_expr(
                 }
                 Value::Constructor { ref class_name } => {
                     // Look up static method on class - check both class_def.methods and impl_methods
-                    if let Some(class_def) = classes.get(class_name).cloned() {
+                    // (module-qualified: the class this source module declares or imports).
+                    if let Some(class_def) = crate::interpreter::resolve_class_in_scope(classes, class_name)? {
                         // First check methods defined in class body
                         if let Some(method) = class_def.methods.iter().find(|m| &m.name == field) {
                             // Warn if using deprecated .new() pattern

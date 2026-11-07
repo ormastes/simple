@@ -1105,17 +1105,18 @@ pub(crate) fn evaluate_call(
                     return Ok(value);
                 }
             }
-            // Try local impl_methods first, then GLOBAL_IMPL_METHODS fallback
-            let impl_methods_for_type = impl_methods
-                .get(module_name)
-                .cloned()
-                .or_else(|| GLOBAL_IMPL_METHODS.with(|cell| cell.borrow().get(module_name).cloned()));
-            if let Some(methods) = impl_methods_for_type {
+            // Class static methods, module-qualified: the class this source
+            // module declares or imports under the name. This must run BEFORE
+            // the impl-method tables below, which are merged by BARE type name
+            // across every loaded module (`Config.default()` from a module that
+            // imported A's `Config` used to run B's `impl Config: default`).
+            let scoped_fa_class = crate::interpreter::resolve_class_in_scope(classes, module_name)?;
+            if let Some(class_def) = scoped_fa_class.clone() {
                 let evaluated_args: Vec<Value> = args
                     .iter()
                     .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
                     .collect::<Result<Vec<_>, _>>()?;
-                if let Some(func) = select_named_static_overload(methods.iter(), field, &evaluated_args) {
+                if let Some(func) = select_named_static_overload(class_def.methods.iter(), field, &evaluated_args) {
                     // If calling a `new` method, mark it to prevent double execution via instantiate_class
                     let is_new_method = field == "new";
                     if is_new_method {
@@ -1137,13 +1138,17 @@ pub(crate) fn evaluate_call(
                     return result;
                 }
             }
-            // Check for class static methods
-            if let Some(class_def) = classes.get(module_name).cloned() {
+            // Try local impl_methods first, then GLOBAL_IMPL_METHODS fallback
+            let impl_methods_for_type = impl_methods
+                .get(module_name)
+                .cloned()
+                .or_else(|| GLOBAL_IMPL_METHODS.with(|cell| cell.borrow().get(module_name).cloned()));
+            if let Some(methods) = impl_methods_for_type {
                 let evaluated_args: Vec<Value> = args
                     .iter()
                     .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
                     .collect::<Result<Vec<_>, _>>()?;
-                if let Some(func) = select_named_static_overload(class_def.methods.iter(), field, &evaluated_args) {
+                if let Some(func) = select_named_static_overload(methods.iter(), field, &evaluated_args) {
                     // If calling a `new` method, mark it to prevent double execution via instantiate_class
                     let is_new_method = field == "new";
                     if is_new_method {
@@ -1281,19 +1286,12 @@ pub(crate) fn evaluate_call(
                 );
             }
 
-            // Cross-module fallback for FieldAccess: search MODULE_CLASSES_CACHE
-            // for the class definition when it's not in the local classes map.
-            let cached_fa_class: Option<Arc<ClassDef>> = MODULE_CLASSES_CACHE.with(|cache| {
-                let cache = cache.borrow();
-                for (_path, module_classes) in cache.iter() {
-                    if let Some(class_def) = module_classes.get(module_name.as_str()) {
-                        return Some(class_def.clone());
-                    }
-                }
-                None
-            });
-            if let Some(class_def) = cached_fa_class {
-                classes.insert(module_name.clone(), class_def.clone());
+            // Cross-module fallback for FieldAccess: the module-qualified class
+            // resolved above (it may not be in the local classes map). This
+            // used to take the first MODULE_CLASSES_CACHE entry in hash order
+            // that had the bare name.
+            if let Some(class_def) = scoped_fa_class {
+                classes.entry(module_name.clone()).or_insert_with(|| class_def.clone());
                 if let Some(func) = class_def.methods.iter().find(|m| &m.name == field) {
                     let is_new_method = field == "new";
                     if is_new_method {
@@ -1418,6 +1416,41 @@ pub(crate) fn evaluate_call(
                         variant: method_name.clone(),
                         payload,
                     });
+                }
+            }
+
+            // Module-qualified resolution first: the class the SOURCE module
+            // declares or imports under `type_name`. This runs before the
+            // impl-method tables, which are merged by BARE type name across
+            // every loaded module and used to hand `physics/config.spl`'s
+            // `Vec3` methods to code that imported `math3d.Vec3`. An
+            // ambiguous bare name (two owned definitions, none in scope) is
+            // an error here instead of a last-registration-wins pick.
+            let scoped_class = crate::interpreter::resolve_class_in_scope(classes, type_name)?;
+            if let Some(class_def) = scoped_class.as_ref() {
+                let evaluated_args: Vec<Value> = args
+                    .iter()
+                    .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if let Some(func) = select_named_static_overload(class_def.methods.iter(), method_name, &evaluated_args)
+                {
+                    let is_new_method = method_name == "new";
+                    if is_new_method {
+                        core::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(type_name.to_string()));
+                    }
+                    let result = core::exec_function_with_values(
+                        &func,
+                        &evaluated_args,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    );
+                    if is_new_method {
+                        core::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(type_name));
+                    }
+                    return result;
                 }
             }
 
@@ -1657,8 +1690,10 @@ pub(crate) fn evaluate_call(
             let type_name = &segments[0];
             let method_name = &segments[1];
 
-            // Check class methods for static methods
-            if let Some(class_def) = classes.get(type_name.as_str()).cloned() {
+            // Check class methods for static methods (module-qualified: the
+            // class this source module declares or imports under the name).
+            let scoped_class = crate::interpreter::resolve_class_in_scope(classes, type_name.as_str())?;
+            if let Some(class_def) = scoped_class.clone() {
                 let evaluated_args: Vec<Value> = args
                     .iter()
                     .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
@@ -1742,22 +1777,15 @@ pub(crate) fn evaluate_call(
                 }
             }
 
-            // Cross-module fallback: search MODULE_CLASSES_CACHE for the class definition.
-            // When a class is imported from another module, its ClassDef may not be in the
-            // local `classes` map if the import path didn't fully merge definitions.
-            // Search all cached module definitions for the class and dispatch the method.
-            let cached_class_def: Option<Arc<ClassDef>> = MODULE_CLASSES_CACHE.with(|cache| {
-                let cache = cache.borrow();
-                for (_path, module_classes) in cache.iter() {
-                    if let Some(class_def) = module_classes.get(type_name.as_str()) {
-                        return Some(class_def.clone());
-                    }
-                }
-                None
-            });
-            if let Some(class_def) = cached_class_def {
-                // Also insert into local classes map so subsequent lookups are fast
-                classes.insert(type_name.clone(), class_def.clone());
+            // Cross-module fallback: the module-qualified class resolved above
+            // (its ClassDef may not be in the local `classes` map if the import
+            // path didn't fully merge definitions). This used to scan
+            // MODULE_CLASSES_CACHE in hash order and take the FIRST module that
+            // had the bare name.
+            if let Some(class_def) = scoped_class.clone() {
+                // Make the flat map see this class too, without displacing a
+                // definition that is already there.
+                classes.entry(type_name.clone()).or_insert_with(|| class_def.clone());
 
                 // Try any method (static or instance-as-static)
                 if let Some(method) = class_def.methods.iter().find(|m| m.name == *method_name) {
