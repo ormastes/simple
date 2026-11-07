@@ -1,0 +1,61 @@
+# Requires SIMPLE_BINARY to identify the rebuilt, admitted pure-Simple producer.
+# Runtime verification stays pending until this spec runs with that producer.
+use std.spec.*
+use std.spec.step
+use std.io.{file_exists}
+use app.io.env_ops.{env_get}
+use app.io.process_ops.{process_run_timeout, process_bounded_timed_out}
+use app.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+
+fn build_cranelift_cast_fixture(name: text) -> text:
+    val producer = env_get("SIMPLE_BINARY")
+    expect(producer != "").to_equal(true)
+    expect(file_exists(producer)).to_equal(true)
+    val root = "build/tmp/cranelift_cast_{getpid()}/{name}"
+    expect(dir_create_all(root)).to_equal(true)
+    val output = root + "/probe.exe"
+    val source = "test/fixtures/compiler/cranelift_narrow_cast/{name}.spl"
+    val build = process_run_timeout(producer, ["native-build", "--backend", "cranelift",
+        "--source", "src/lib", "--entry-closure", "--entry", source,
+        "--cache-dir", root + "/cache", "--output", output], 300000)
+    expect(build.2).to_equal(0)
+    output
+
+fn run_cranelift_cast_fixture(name: text) -> text:
+    val output = build_cranelift_cast_fixture(name)
+    val run = process_run_timeout(output, [], 30000)
+    expect(run.2).to_equal(0)
+    expect(run.1).to_equal("")
+    run.0
+
+describe "Cranelift integer casts preserve destination width and signedness":
+    slow_it "executes the signed and unsigned integer width matrix":
+        step("Build and execute all 64 source/destination pairs with boundary and positive controls")
+        val output = run_cranelift_cast_fixture("integer_width_matrix")
+        expect(output).to_contain("PASS integer cast width matrix checks=128")
+
+    slow_it "extends float conversions back to I64 and admits unsigned high-bit values":
+        step("Build and execute F32/F64 casts to every integer width with fractional controls")
+        val output = run_cranelift_cast_fixture("float_to_integer")
+        expect(output).to_contain("PASS float integer cast checks=48")
+
+    slow_it "traps on small-target overflow and nonfinite inputs after legal I32 conversion":
+        step("Build a native trap fixture and first execute its valid fractional boundary control")
+        val output = build_cranelift_cast_fixture("float_to_small_integer_traps")
+        val control = process_run_timeout(output, ["valid"], 30000)
+        expect(control.2).to_equal(0)
+        expect(control.0).to_contain("PASS float cast trap control")
+        step("Run each out-of-range and nonfinite case in its own process; reject timeouts and returned casts")
+        for source in ["f32", "f64"]:
+            for target in ["i8", "u8", "i16", "u16"]:
+                for boundary in ["overflow", "underflow", "nan", "positive_infinity", "negative_infinity"]:
+                    val case_name = "{source}_{target}_{boundary}"
+                    val run = process_run_timeout(output, [case_name], 30000)
+                    expect(run.0).to_contain("ENTER {case_name}")
+                    expect(run.2 != 0).to_equal(true)
+                    expect(process_bounded_timed_out(run.2 as i64, run.1)).to_equal(false)
+                    # The Unix timeout wrapper reports seconds; the shared
+                    # bounded-process classifier recognizes milliseconds.
+                    expect(run.1.contains("[TIMEOUT: Process killed after ")).to_equal(false)
+                    expect(run.0.contains("UNEXPECTED cast returned")).to_equal(false)
