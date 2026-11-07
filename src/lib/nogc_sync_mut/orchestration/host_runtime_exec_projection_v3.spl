@@ -34,8 +34,8 @@ fn exec_projection_runtime_matches_v3(observed: RuntimeIdentityV1, expected: Run
         observed.provider_generation == expected.provider_generation and observed.operation_id == expected.operation_id and
         observed.engine == expected.engine and observed.native_id == expected.native_id and observed.node_boot_id == expected.node_boot_id)
 
-pub fn host_runtime_exec_child_projection_v3(journal: DistributedOperationJournalV2,
-        capacity: HostCapacityV1, child: OperationEnvelopeV2) -> Result<bool, text>:
+pub fn host_runtime_exec_child_packet_v3(journal: DistributedOperationJournalV2,
+        capacity: HostCapacityV1, child: OperationEnvelopeV2) -> Result<HostRuntimeExecRequestV3, text>:
     if child.operation != "host_runtime_exec_v3": return Err("exec-projection-action-mismatch")
     val child_envelope = distributed_encode_operation_v2(child)?
     val child_state = distributed_operation_journal_lookup_v2(journal, child.id)?
@@ -44,7 +44,14 @@ pub fn host_runtime_exec_child_projection_v3(journal: DistributedOperationJourna
     val packet = host_runtime_exec_request_decode_v3(file_read_regular_no_follow_bounded(packet_path, 4194304)?)?
     if distributed_encode_operation_v2(packet.operation)? != child_envelope:
         return Err("exec-projection-retained-child-mismatch")
-    host_runtime_exec_parent_projection_v3(journal, capacity, packet)
+    val matched = host_runtime_exec_parent_projection_v3(journal, capacity, packet)?
+    if not matched: return Err("exec-projection-parent-chain-refused")
+    Ok(packet)
+
+pub fn host_runtime_exec_child_projection_v3(journal: DistributedOperationJournalV2,
+        capacity: HostCapacityV1, child: OperationEnvelopeV2) -> Result<bool, text>:
+    val packet = host_runtime_exec_child_packet_v3(journal, capacity, child)?
+    Ok(true)
 
 # Also used before first child admission by the trusted live producer. This
 # historical check alone grants no permission and performs no native observation.

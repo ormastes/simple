@@ -159,6 +159,14 @@ pub fn host_service_reconcile_v2(owner: HostCapacityOwnerV1,
     val matched = host_service_inventory_match_v2(owner, scope, entries)
     if matched.is_err(): return HostServiceReconciliationTurnV2(owner, current_container, nil, "", matched.unwrap_err())
     var current = owner
+    # One owner-validated batch before the loop, never a caller-supplied skip.
+    # The held writer/quarantine admits no child callback here. Intervening WAL
+    # appends below only cancel disjoint admitted no-effect reservations;
+    # completed targets and child provenance remain unchanged.
+    val completion_batch = host_capacity_completion_batch_v3(current.journal, current.ledger.capacity)
+    if completion_batch.is_err(): return HostServiceReconciliationTurnV2(current, current_container, nil, "", completion_batch.unwrap_err())
+    val completions = completion_batch.unwrap().entries
+    val child_barriers = completion_batch.unwrap().child_barriers
     var rows: [HostReservationV1] = []
     var classifications: [SdnValue] = []
     for original in owner.ledger.reservations:
@@ -180,15 +188,19 @@ pub fn host_service_reconcile_v2(owner: HostCapacityOwnerV1,
         var present = false
         for entry in entries:
             if entry.runtime.operation_id == operation.id: present = true
-        val no_effect = not present and (state.state == "admitted" or
-            (state.state == "cancelled" and state.outcome_digest == sha256_text(abort.unwrap())))
+        val no_effect = (not present and not child_barriers.contains_key(operation.id) and
+            (state.state == "admitted" or (state.state == "cancelled" and state.outcome_digest == sha256_text(abort.unwrap()))))
         var completed_release = false
         if not present and state.state == "completed":
             # Reuse the same exact retained native/wait/cleanup proof validator
             # as ordinary settlement and journal reopen. A Released row flag
             # alone never survives a new service incarnation as authority.
-            val evidence = host_capacity_completion_evidence_v1(current.journal.root, operation)
-            if evidence.is_ok(): completed_release = state.outcome_digest == sha256_text(evidence.unwrap())
+            if completions.contains_key(operation.id):
+                val evidence = completions[operation.id]
+                # Current actual immutable completed target must still match
+                # the initial owner-produced facts after disjoint cancellations.
+                completed_release = (evidence.operation_digest == sha256_text(state.envelope) and
+                    evidence.outcome_digest == state.outcome_digest and evidence.evidence_digest == state.outcome_digest)
         if no_effect:
             # Admitted means begin never committed in the selected process-crash
             # profile. A native match above refuses; unknown never takes this path.

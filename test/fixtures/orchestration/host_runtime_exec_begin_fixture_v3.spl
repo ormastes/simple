@@ -1,0 +1,86 @@
+# Shared real signed parent/child setup. Native Container observations are
+# explicitly scripted; no live exec lease, probe or readiness is manufactured.
+use std.spec.expect
+use std.nogc_sync_mut.orchestration.host_local_root_v1.HostLocalRootV1
+use std.nogc_sync_mut.orchestration.host_local_command_v1.{host_local_retained_execution_v2, HostRetainedExecutionV2}
+use std.nogc_sync_mut.orchestration.host_authorized_execution_v2.host_authorized_execute_v2
+use std.common.contracts.orchestration.host_execute_request_v2.host_execute_request_encode_v2
+use std.common.contracts.orchestration.host_runtime_exec_v3.*
+use std.common.contracts.orchestration.assignment_v1.{ControllerAssignmentBindingV1, controller_assignment_bytes_v1}
+use std.common.contracts.container.exec_v3.ContainerExecRequestV3
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_grant_digest_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{distributed_grant_signature_message_v2, distributed_approval_signature_message_v2}
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.crypto.sha256.sha256_text
+use test.fixtures.daemon_sdk.distributed_authority_verification_fixture_v2.verification_fixture
+use test.fixtures.orchestration.host_authorized_execution_fixture_v2.host_execution_clock_v2
+use test.fixtures.orchestration.host_exec_control_installation_fixture_v3.{host_installation_fixture_v3, host_installation_dispose_v3}
+
+# Public deterministic TEST key material only, never a service trust root.
+pub fn exec_begin_signing_seed_v3(offset: i64) -> [u8]:
+    assert(offset >= 0 and offset <= 224)
+    var seed: [u8] = []
+    for index in 0..32: seed.push((index + offset) as u8)
+    seed
+
+pub struct ExecBeginFixtureV3:
+    local: HostLocalRootV1
+    packet: HostRuntimeExecRequestV3
+    auxiliary_root: text
+
+pub fn exec_begin_fixture_v3(mode: text = "resolver-success",
+        actions: [text] = ["host_exec_control_install_v3", "host_execute_v1", "host_runtime_exec_v3"],
+        key_expires_at: Option<i64> = nil) -> ExecBeginFixtureV3:
+    val base = host_installation_fixture_v3(mode, actions, key_expires_at: key_expires_at)
+    var local = base.local
+    val started = host_authorized_execute_v2(local.capacity, local.container, host_execute_request_encode_v2(base.parent).unwrap(),
+        local.policy, local.binding.provider_identity_digest, local.scope.service_scope_id, base.context, host_execution_clock_v2)
+    expect(started.error).to_equal("")
+    local.capacity = started.owner
+    local.container = started.container
+    val parent = host_local_retained_execution_v2(local, "operation_1").unwrap()
+    val packet = exec_begin_packet_fixture_v3(local, parent)
+    ExecBeginFixtureV3(local: local, packet: packet, auxiliary_root: base.auxiliary_root)
+
+# Builds exact signed data from supplied observed parent facts. No live lease
+# is made; negative protocol-fault fixtures may deliberately omit parent BEGIN.
+pub fn exec_begin_packet_fixture_v3(local: HostLocalRootV1,
+        parent: HostRetainedExecutionV2) -> HostRuntimeExecRequestV3:
+    val binding = ControllerAssignmentBindingV1(controller_id: "controller", controller_epoch: 1,
+        workload_uid: parent.execution.plan.workload_uid, desired_revision: 1, host_intent: parent.intent, host_operation: parent.operation)
+    var controller = parent.operation
+    controller.id = "controller-operation"
+    controller.operation = "controller_assignment_v1"
+    controller.host_id = "controller"
+    controller.payload_digest = sha256_text(controller_assignment_bytes_v1(binding).unwrap())
+    val request = ContainerExecRequestV3(parent: parent.execution.plan, parent_runtime: parent.observation.runtime,
+        operation_id: "exec-child", nonce: "c".repeat(64), argv: ["/agent", "--version"], environment: [],
+        working_directory: "/workspace", selected_user: "1000:1000", terminal_mode: "none", stdin_requested: false, timeout_ms: 500)
+    val intent = HostRuntimeExecIntentV3(request: request,
+        parent_operation_digest: sha256_text(distributed_encode_operation_v2(parent.operation).unwrap()),
+        parent_assignment_digest: sha256_text(controller_assignment_bytes_v1(binding).unwrap()),
+        parent_controller_operation_digest: sha256_text(distributed_encode_operation_v2(controller).unwrap()),
+        parent_provider_identity_digest: local.binding.provider_identity_digest, exec_control_identity_digest: "4".repeat(64))
+    var operation = parent.operation
+    operation.id = "exec-child"
+    operation.operation = "host_runtime_exec_v3"
+    operation.payload_digest = host_runtime_exec_intent_digest_v3(intent).unwrap()
+    val keys = verification_fixture()
+    var signed = keys.signed
+    signed.grant.operations = ["host_runtime_exec_v3"]
+    signed.grant.environment_digest = operation.environment_digest
+    signed.signature = pure_ed25519_sign_from_seed_v1(exec_begin_signing_seed_v3(1), distributed_grant_signature_message_v2(signed).unwrap()).signature
+    var approval = keys.approval
+    approval.grant_digest = distributed_grant_digest_v2(signed.grant).unwrap()
+    approval.request_digest = sha256_text(distributed_encode_operation_v2(operation).unwrap())
+    approval.signature = pure_ed25519_sign_from_seed_v1(exec_begin_signing_seed_v3(65), distributed_approval_signature_message_v2(approval).unwrap()).signature
+    val packet = HostRuntimeExecRequestV3(intent: intent, parent_binding: binding, parent_controller_operation: controller,
+        operation: operation, signed: signed, approval: approval)
+    # Verify fixture authority acceptance independently before testing refusals.
+    assert(distributed_verify_grant_approval_from_snapshot_v2(local.policy.snapshot, signed, approval,
+        operation, 100, 7, 4, 2, 3).is_ok())
+    packet
+
+pub fn exec_begin_fixture_close_v3(fixture: ExecBeginFixtureV3, local: HostLocalRootV1):
+    host_installation_dispose_v3(local, fixture.auxiliary_root)
