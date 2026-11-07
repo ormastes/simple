@@ -59,3 +59,10 @@ file and the next lookup rejected it as `header` (both symptoms above).
   disables; diff names the field). `driver_cache_scope_publication_spec` 8/8.
 Still open: why stage2.exe's executable hash was empty on the Windows probe
 (rerun the probe; the new line names the field). Status stays open until then.
+
+## Correction 2026-11-07 (PR follow-up)
+The "disable the cache for an `uncacheable-` scope" half of the 2026-11-07 fix
+is reverted. The orchestrator publishes the scope once and every shard child
+inherits it, so an uncacheable token is still shared by one build; across runs it
+already fails closed as a `header` miss. The header-reject diagnostic stays.
+The remaining defect is the empty executable hash on the Windows probe.
