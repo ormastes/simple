@@ -92,7 +92,14 @@ static int lu_origin_v1(void) {
  * -5 capacity,-6 allocation,-7 concurrent operation busy,-8 admission expired,
  * -9 ancillary rejected. Private gates use -10 for foreign origin; public
  * array-returning entries refuse foreign origin with allocation-free NULL. */
-typedef struct LuSlotV1 { pthread_mutex_t operation; int64_t token; int fd; int active; } LuSlotV1;
+typedef struct LuSlotV1 {
+    pthread_mutex_t operation; int64_t token; int fd; int active;
+    int write_shutdown, accepted, read_eof, request_claimed; char request_id[65];
+    int pending_fd, transfer_phase, sent_any; char transfer_binding[65];
+    int role; /* 1 byte connection, 2 listener; never inferred from fd */
+    int parent_fd, bound, node_known, close_status; uid_t service_uid;
+    dev_t node_device; ino_t node_inode; char leaf[108];
+} LuSlotV1;
 static LuSlotV1 lu_slots_v1[LUV1_SLOTS];
 static pthread_mutex_t lu_registry_v1=PTHREAD_MUTEX_INITIALIZER;
 static pthread_once_t lu_once_v1=PTHREAD_ONCE_INIT;
@@ -144,7 +151,17 @@ static LuSlotV1* lu_lock_v1(int64_t token,int* status) {
     }
     pthread_mutex_unlock(&lu_registry_v1);return result;
 }
-static int64_t lu_install_v1(int fd) {
+static LuSlotV1* lu_connection_lock_v1(int64_t token,int* status) {
+    LuSlotV1* slot=lu_lock_v1(token,status);
+    if(slot&&slot->role!=1){pthread_mutex_unlock(&slot->operation);*status=-1;return NULL;}
+    return slot;
+}
+/* Caller holds slot operation lock; this performs no identity observation. */
+static void lu_retire_slot_v1(LuSlotV1* slot) {
+    pthread_mutex_lock(&lu_registry_v1);slot->active=0;slot->fd=-1;
+    pthread_mutex_unlock(&lu_registry_v1);
+}
+static int64_t lu_install_role_v1(int fd,int role,int parent,const char* leaf,uid_t uid,dev_t device,ino_t inode,int accepted) {
     if(!lu_origin_v1())return -10;
     if(pthread_once(&lu_once_v1,lu_init_v1)||!lu_initialized_v1)return -3;
     if(pthread_mutex_lock(&lu_registry_v1))return -3;
@@ -152,11 +169,19 @@ static int64_t lu_install_v1(int fd) {
     if(lu_generation_v1<LUV1_INTEGER_MAX)for(int i=0;i<LUV1_SLOTS;i++) {
         LuSlotV1* s=&lu_slots_v1[i];
         if(!s->active&&pthread_mutex_trylock(&s->operation)==0) {
-            s->token=++lu_generation_v1;s->fd=fd;s->active=1;token=s->token;
+            s->token=++lu_generation_v1;s->fd=fd;s->active=1;
+            s->pending_fd=-1;s->transfer_phase=0;s->sent_any=0;s->transfer_binding[0]=0;
+            s->write_shutdown=0;s->accepted=accepted;s->read_eof=0;s->request_claimed=0;s->request_id[0]=0;s->parent_fd=parent;s->bound=0;s->node_known=0;s->close_status=0;s->role=role;s->service_uid=uid;
+            s->node_device=device;s->node_inode=inode;
+            if(leaf)memcpy(s->leaf,leaf,strlen(leaf)+1);else s->leaf[0]=0;token=s->token;
             pthread_mutex_unlock(&s->operation);break;
         }
     }
     pthread_mutex_unlock(&lu_registry_v1);return token;
+}
+static int64_t lu_install_v1(int fd) { return lu_install_role_v1(fd,1,-1,NULL,0,0,0,0); }
+static int64_t lu_install_connection_v1(int fd,dev_t device,ino_t inode,int accepted) {
+    return lu_install_role_v1(fd,1,-1,NULL,0,device,inode,accepted);
 }
 static int lu_directory_v1(int fd,uid_t expected,int final) {
     struct stat s;
@@ -197,6 +222,7 @@ static void lu_word_v1(SplArray* a,int64_t index,int64_t value) {
 }
 /* Foreign-process refusal is NULL before ANY generic runtime allocation,
  * receipt decoding or owner gate. Caller must use a nullable-array ABI. */
+#include "runtime_local_unix_transfer_v1.h"
 static SplArray* lu_connect_impl_v1(const char* path,int64_t bytes,int64_t expected_uid,int64_t deadline) {
 #if defined(__linux__)
     if(!lu_origin_v1())return NULL;
@@ -234,7 +260,7 @@ static SplArray* lu_connect_impl_v1(const char* path,int64_t bytes,int64_t expec
     if(getsockopt(fd,SOL_SOCKET,SO_PEERCRED,&peer,&peer_size)||peer_size!=sizeof(peer)||peer.uid!=(uid_t)expected_uid||peer.pid<=0||
        fstatat(directory,leaf,&after,AT_SYMLINK_NOFOLLOW)||!S_ISSOCK(after.st_mode)||after.st_uid!=(uid_t)expected_uid||
        before.st_dev!=after.st_dev||before.st_ino!=after.st_ino){status=-3;goto done;}
-    int64_t token=lu_install_v1(fd);
+    int64_t token=lu_install_connection_v1(fd,before.st_dev,before.st_ino,0);
     if(token<=0){status=(int)token;goto done;}
     fd=-1;lu_word_v1(answer,1,token);lu_word_v1(answer,2,peer.uid);lu_word_v1(answer,3,peer.gid);
     lu_word_v1(answer,4,peer.pid);lu_word_v1(answer,5,(int64_t)before.st_dev);lu_word_v1(answer,6,(int64_t)before.st_ino);
@@ -247,19 +273,20 @@ done:
 #endif
     return answer;
 }
-static SplArray* lu_read_impl_v1(int64_t token,int64_t maximum,int64_t deadline) {
+static SplArray* lu_read_impl_v1(int64_t token,int64_t maximum,int64_t deadline,int now,int handoff) {
 #if defined(__linux__)
     if(!lu_origin_v1())return NULL;
 #endif
     int valid=maximum>0&&maximum<=65536;
     SplArray* answer=lu_receipt_v1(valid?maximum+3:3);if(!answer)return NULL;
 #if defined(__linux__)
-    int status=valid?lu_deadline_v1(deadline):-1;LuSlotV1* slot=NULL;unsigned char* data=NULL;
+    int status=valid?(now?0:lu_deadline_v1(deadline)):-1;LuSlotV1* slot=NULL;unsigned char* data=NULL;
     if(status)goto done;
     data=malloc((size_t)maximum);if(!data){status=-6;goto done;}
-    slot=lu_lock_v1(token,&status);if(!slot)goto done;
+    slot=lu_connection_lock_v1(token,&status);if(!slot)goto done;
+    if(handoff&&(slot->accepted||!slot->write_shutdown)){status=-15;goto done;}
     for(;;) {
-        status=lu_deadline_v1(deadline);if(status)break;
+        status=now?0:lu_deadline_v1(deadline);if(status)break;
         union { struct cmsghdr alignment; unsigned char bytes[CMSG_SPACE(16*sizeof(int))]; } control;
         struct iovec io={.iov_base=data,.iov_len=(size_t)maximum};
         struct msghdr message;memset(&message,0,sizeof(message));
@@ -267,24 +294,16 @@ static SplArray* lu_read_impl_v1(int64_t token,int64_t maximum,int64_t deadline)
         message.msg_control=control.bytes;message.msg_controllen=sizeof(control.bytes);
         ssize_t n=recvmsg(slot->fd,&message,MSG_CMSG_CLOEXEC);
         if(n>=0) {
-            int ancillary=message.msg_controllen>0||(message.msg_flags&(MSG_CTRUNC|MSG_TRUNC));
-            /* Generic bytes never import rights. Close every delivered fd even
-             * on control truncation; Linux closes excess undisclosed rights. */
-            for(struct cmsghdr* c=CMSG_FIRSTHDR(&message);c;c=CMSG_NXTHDR(&message,c)) {
-                if(c->cmsg_len<CMSG_LEN(0)){ancillary=1;break;}
-                if(c->cmsg_level==SOL_SOCKET&&c->cmsg_type==SCM_RIGHTS) {
-                    size_t count=(c->cmsg_len-CMSG_LEN(0))/sizeof(int);
-                    int* descriptors=(int*)CMSG_DATA(c);
-                    for(size_t i=0;i<count;i++)if(descriptors[i]>=0)(void)close(descriptors[i]);
-                }
-            }
+            int ancillary_status=lu_receive_control_v1(slot,&message,handoff);
             lu_word_v1(answer,1,n==0);lu_word_v1(answer,2,n);
             for(ssize_t i=0;i<n;i++)lu_word_v1(answer,i+3,data[i]);
-            if(ancillary)status=-9; /* payload remains reported, no retry */
+            if(ancillary_status)status=ancillary_status; /* consumed bytes remain reported */
+            else if(n==0)slot->read_eof=1;
             break;
         }
-        if(errno==EINTR)continue;
+        if(errno==EINTR){if(now){status=-11;break;}continue;}
         if(errno!=EAGAIN&&errno!=EWOULDBLOCK){status=-3;break;}
+        if(now){status=-11;break;}
         status=lu_poll_v1(slot->fd,POLLIN,deadline);if(status)break;
     }
 done:
@@ -296,7 +315,7 @@ done:
     return answer;
 }
 static SplArray* lu_write_v1(int64_t token,SplArray* bytes,int64_t offset,int64_t maximum,
-        int64_t deadline,int admitted,int64_t expiry) {
+        int64_t deadline,int admitted,int64_t expiry,int now) {
 #if defined(__linux__)
     if(!lu_origin_v1())return NULL;
 #endif
@@ -304,7 +323,7 @@ static SplArray* lu_write_v1(int64_t token,SplArray* bytes,int64_t offset,int64_
 #if defined(__linux__)
     int64_t length=bytes?rt_array_len(bytes):-1;
     int status=length<0||offset<0||offset>length||maximum<=0||maximum>LUV1_BYTES||maximum>length-offset||
-        (admitted&&expiry<=0)?-1:lu_deadline_v1(deadline);
+        (admitted&&expiry<=0)?-1:(now?0:lu_deadline_v1(deadline));
     unsigned char* data=NULL;LuSlotV1* slot=NULL;
     if(status)goto done;
     data=malloc((size_t)maximum);if(!data){status=-6;goto done;}
@@ -313,19 +332,21 @@ static SplArray* lu_write_v1(int64_t token,SplArray* bytes,int64_t offset,int64_
         if(!rt_value_is_int(value)||rt_value_as_int(value)<0||rt_value_as_int(value)>255){status=-1;goto done;}
         data[i]=(unsigned char)rt_value_as_int(value);
     }
-    slot=lu_lock_v1(token,&status);if(!slot)goto done;
+    slot=lu_connection_lock_v1(token,&status);if(!slot)goto done;
+    if(slot->write_shutdown){status=-12;goto done;}
     for(;;) {
-        status=lu_deadline_v1(deadline);if(status)break;
+        status=now?0:lu_deadline_v1(deadline);if(status)break;
         if(admitted) {
             int64_t now=lu_clock_v1(CLOCK_REALTIME);
             if(now<0){status=-3;break;}
             if(now>=expiry){status=-8;break;}
         }
         /* MSG_NOSIGNAL: a closed peer returns an error, never process SIGPIPE. */
-        ssize_t n=send(slot->fd,data,(size_t)maximum,MSG_NOSIGNAL);
-        if(n>=0){lu_word_v1(answer,1,n);break;}
-        if(errno==EINTR)continue;
+        ssize_t n=lu_send_bytes_v1(slot,data,(size_t)maximum);
+        if(n>=0){lu_word_v1(answer,1,n);status=lu_note_sent_v1(slot,n);break;}
+        if(errno==EINTR){if(now){status=-11;break;}continue;}
         if(errno!=EAGAIN&&errno!=EWOULDBLOCK){status=-3;break;}
+        if(now){status=-11;break;}
         status=lu_poll_v1(slot->fd,POLLOUT,deadline);if(status)break;
     }
 done:
@@ -343,12 +364,14 @@ static SplArray* lu_close_impl_v1(int64_t token) {
 #endif
     SplArray* answer=lu_receipt_v1(2);if(!answer)return NULL;
 #if defined(__linux__)
-    int status;LuSlotV1* slot=lu_lock_v1(token,&status);
+    int status;LuSlotV1* slot=lu_connection_lock_v1(token,&status);
     if(slot) {
+        int pending=slot->pending_fd;slot->pending_fd=-1;
+        int pending_error=pending>=0&&close(pending)!=0;
         int fd=slot->fd;
         /* On Linux close consumes the fd even when reporting an error. Retire
          * exact generation and NEVER retry that integer after kernel reuse. */
-        int rc=close(fd);status=rc==0?0:-3;
+        int rc=close(fd);status=rc==0&&!pending_error?0:-3;
         pthread_mutex_lock(&lu_registry_v1);
         slot->active=0;slot->fd=-1;
         pthread_mutex_unlock(&lu_registry_v1);
@@ -357,6 +380,201 @@ static SplArray* lu_close_impl_v1(int64_t token) {
     lu_word_v1(answer,0,status);
 #else
     (void)token;lu_word_v1(answer,0,-4);
+#endif
+    return answer;
+}
+
+/* Listener and zero-wait gateway ports share the SAME generation/role slots. */
+static SplArray* lu_listen_impl_v1(const char* path,int64_t bytes,int64_t uid,int64_t backlog) {
+#if defined(__linux__)
+    if(!lu_origin_v1())return NULL;
+#endif
+    SplArray* answer=lu_receipt_v1(2);if(!answer)return NULL;
+#if defined(__linux__)
+    int status=-1,parent=-1;char leaf[108];LuSlotV1* slot=NULL;
+    if(uid<0||uid>UINT32_MAX||(uid_t)uid!=geteuid()||backlog<1||backlog>128)goto done;
+    parent=lu_parent_v1(path,bytes,(uid_t)uid,leaf);if(parent<0)goto done;
+    int64_t token=lu_install_role_v1(-1,2,parent,leaf,(uid_t)uid,0,0,0);
+    if(token<=0){status=(int)token;goto done;}
+    parent=-1;lu_word_v1(answer,1,token); /* retain even pre-bind cleanup errors */
+    slot=lu_lock_v1(token,&status);if(!slot)goto done;
+    struct stat existing;
+    if(fstatat(slot->parent_fd,leaf,&existing,AT_SYMLINK_NOFOLLOW)==0){status=-1;goto done;}
+    if(errno!=ENOENT){status=-3;goto done;}
+    struct sockaddr_un address={0};address.sun_family=AF_UNIX;
+    int n=snprintf(address.sun_path,sizeof(address.sun_path),"/proc/self/fd/%d/%s",slot->parent_fd,leaf);
+    if(n<0||(size_t)n>=sizeof(address.sun_path)){status=-1;goto done;}
+    slot->fd=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC|SOCK_NONBLOCK,0);
+    if(slot->fd<0){status=-3;goto done;}
+    if(bind(slot->fd,(struct sockaddr*)&address,sizeof(address))){status=-3;goto done;}
+    slot->bound=1;
+    struct stat node;
+    if(fstatat(slot->parent_fd,leaf,&node,AT_SYMLINK_NOFOLLOW)||!S_ISSOCK(node.st_mode)||
+       node.st_uid!=(uid_t)uid||(uint64_t)node.st_dev>LUV1_INTEGER_MAX||(uint64_t)node.st_ino>LUV1_INTEGER_MAX){status=-3;goto done;}
+    slot->node_device=node.st_dev;slot->node_inode=node.st_ino;slot->node_known=1;
+    /* Parent is non-writable by other UIDs. Same-UID admin namespace remains
+     * trusted; mode is explicit without changing process-global umask. */
+    if(fchmodat(slot->parent_fd,leaf,0666,0)||fstatat(slot->parent_fd,leaf,&node,AT_SYMLINK_NOFOLLOW)||
+       !S_ISSOCK(node.st_mode)||node.st_dev!=slot->node_device||node.st_ino!=slot->node_inode||
+       node.st_uid!=slot->service_uid||(node.st_mode&0777)!=0666||listen(slot->fd,(int)backlog)){status=-3;goto done;}
+    status=0;
+done:
+    if(slot)pthread_mutex_unlock(&slot->operation);
+    if(parent>=0)(void)close(parent);
+    lu_word_v1(answer,0,status);
+#else
+    (void)path;(void)bytes;(void)uid;(void)backlog;lu_word_v1(answer,0,-4);
+#endif
+    return answer;
+}
+static SplArray* lu_accept_impl_v1(int64_t token,int64_t expected_uid) {
+#if defined(__linux__)
+    if(!lu_origin_v1())return NULL;
+#endif
+    SplArray* answer=lu_receipt_v1(7);if(!answer)return NULL;
+#if defined(__linux__)
+    int status=-1,fd=-1;LuSlotV1* slot=NULL;
+    if(expected_uid<0||expected_uid>UINT32_MAX)goto done;
+    slot=lu_lock_v1(token,&status);if(!slot)goto done;
+    if(slot->role!=2||slot->fd<0||!slot->bound||!slot->node_known||slot->service_uid!=geteuid()||
+       (uid_t)expected_uid==slot->service_uid){status=-1;goto done;}
+    fd=accept4(slot->fd,NULL,NULL,SOCK_CLOEXEC|SOCK_NONBLOCK);
+    if(fd<0){status=(errno==EAGAIN||errno==EWOULDBLOCK||errno==EINTR)?-11:-3;goto done;}
+    struct ucred peer;socklen_t length=sizeof(peer);memset(&peer,0,sizeof(peer));
+    if(getsockopt(fd,SOL_SOCKET,SO_PEERCRED,&peer,&length)||length!=sizeof(peer)||peer.uid!=(uid_t)expected_uid||peer.pid<=0){status=-3;goto done;}
+    int64_t connection=lu_install_connection_v1(fd,slot->node_device,slot->node_inode,1);
+    if(connection<=0){status=(int)connection;goto done;}
+    fd=-1;lu_word_v1(answer,1,connection);lu_word_v1(answer,2,peer.uid);lu_word_v1(answer,3,peer.gid);
+    lu_word_v1(answer,4,peer.pid);lu_word_v1(answer,5,slot->node_device);lu_word_v1(answer,6,slot->node_inode);status=0;
+done:
+    if(fd>=0)(void)close(fd);
+    if(slot)pthread_mutex_unlock(&slot->operation);
+    lu_word_v1(answer,0,status);
+#else
+    (void)token;(void)expected_uid;lu_word_v1(answer,0,-4);
+#endif
+    return answer;
+}
+static SplArray* lu_poll_impl_v1(int64_t token,int64_t want_read,int64_t want_write) {
+#if defined(__linux__)
+    if(!lu_origin_v1())return NULL;
+#endif
+    SplArray* answer=lu_receipt_v1(4);if(!answer)return NULL;
+#if defined(__linux__)
+    int status=-1;LuSlotV1* slot=NULL;
+    if((want_read!=0&&want_read!=1)||(want_write!=0&&want_write!=1)||(!want_read&&!want_write))goto done;
+    slot=lu_connection_lock_v1(token,&status);if(!slot)goto done;
+    struct pollfd p={.fd=slot->fd,.events=(short)((want_read?POLLIN:0)|(want_write?POLLOUT:0)|POLLRDHUP)};
+    int rc=poll(&p,1,0);
+    if(rc<0){status=errno==EINTR?-11:-3;goto done;}
+    if(p.revents&POLLNVAL){status=-3;goto done;}
+    lu_word_v1(answer,1,(p.revents&POLLIN)!=0);lu_word_v1(answer,2,(p.revents&POLLOUT)!=0);
+    lu_word_v1(answer,3,(p.revents&(POLLHUP|POLLRDHUP))!=0);status=(p.revents&POLLERR)?-3:0;
+done:
+    if(slot)pthread_mutex_unlock(&slot->operation);
+    lu_word_v1(answer,0,status);
+#else
+    (void)token;(void)want_read;(void)want_write;lu_word_v1(answer,0,-4);
+#endif
+    return answer;
+}
+static SplArray* lu_listener_close_impl_v1(int64_t token) {
+#if defined(__linux__)
+    if(!lu_origin_v1())return NULL;
+#endif
+    SplArray* answer=lu_receipt_v1(2);if(!answer)return NULL;
+#if defined(__linux__)
+    int status;LuSlotV1* slot=lu_lock_v1(token,&status);
+    if(!slot)goto done;
+    if(slot->role!=2){status=-1;goto done;}
+    if(slot->fd>=0) {
+        int fd=slot->fd;slot->fd=-1;
+        if(close(fd))slot->close_status=-3; /* Linux consumed: NEVER retry fd */
+    }
+    if(slot->bound) {
+        struct stat node;
+        if(fstatat(slot->parent_fd,slot->leaf,&node,AT_SYMLINK_NOFOLLOW)) {
+            if(errno!=ENOENT){status=-3;goto done;}
+        } else {
+            if(!slot->node_known||!S_ISSOCK(node.st_mode)||node.st_uid!=slot->service_uid||
+               node.st_dev!=slot->node_device||node.st_ino!=slot->node_inode){status=-3;goto done;}
+            if(unlinkat(slot->parent_fd,slot->leaf,0)){status=-3;goto done;}
+        }
+        slot->bound=0;
+    }
+    if(slot->parent_fd>=0){int fd=slot->parent_fd;slot->parent_fd=-1;if(close(fd))slot->close_status=-3;}
+    status=slot->close_status;lu_retire_slot_v1(slot);lu_word_v1(answer,1,1);
+done:
+    if(slot)pthread_mutex_unlock(&slot->operation);
+    lu_word_v1(answer,0,status);
+#else
+    (void)token;lu_word_v1(answer,0,-4);
+#endif
+    return answer;
+}
+
+static SplArray* lu_peer_impl_v1(int64_t token) {
+#if defined(__linux__)
+    if(!lu_origin_v1())return NULL;
+#endif
+    SplArray* answer=lu_receipt_v1(6);if(!answer)return NULL;
+#if defined(__linux__)
+    int status;LuSlotV1* slot=lu_connection_lock_v1(token,&status);
+    if(slot) {
+        struct ucred peer;socklen_t length=sizeof(peer);memset(&peer,0,sizeof(peer));
+        if(getsockopt(slot->fd,SOL_SOCKET,SO_PEERCRED,&peer,&length)||length!=sizeof(peer)||peer.pid<=0)status=-3;
+        else {
+            lu_word_v1(answer,1,peer.uid);lu_word_v1(answer,2,peer.gid);lu_word_v1(answer,3,peer.pid);
+            lu_word_v1(answer,4,slot->node_device);lu_word_v1(answer,5,slot->node_inode);status=0;
+        }
+        pthread_mutex_unlock(&slot->operation);
+    }
+    lu_word_v1(answer,0,status);
+#else
+    (void)token;lu_word_v1(answer,0,-4);
+#endif
+    return answer;
+}
+
+static SplArray* lu_shutdown_write_impl_v1(int64_t token) {
+#if defined(__linux__)
+    if(!lu_origin_v1())return NULL;
+#endif
+    SplArray* answer=lu_receipt_v1(2);if(!answer)return NULL;
+#if defined(__linux__)
+    int status;LuSlotV1* slot=lu_connection_lock_v1(token,&status);
+    if(slot) {
+        if(slot->write_shutdown){status=0;lu_word_v1(answer,1,1);}
+        else if(shutdown(slot->fd,SHUT_WR)){status=-3;}
+        else{slot->write_shutdown=1;status=0;lu_word_v1(answer,1,1);}
+        pthread_mutex_unlock(&slot->operation);
+    }
+    lu_word_v1(answer,0,status);
+#else
+    (void)token;lu_word_v1(answer,0,-4);
+#endif
+    return answer;
+}
+
+static SplArray* lu_claim_request_impl_v1(int64_t token,const char* request,int64_t bytes) {
+#if defined(__linux__)
+    if(!lu_origin_v1())return NULL;
+#endif
+    SplArray* answer=lu_receipt_v1(2);if(!answer)return NULL;
+#if defined(__linux__)
+    int status=-1;LuSlotV1* slot=NULL;
+    if(!request||bytes!=64)goto done;
+    for(int i=0;i<64;i++)if(!((request[i]>='0'&&request[i]<='9')||(request[i]>='a'&&request[i]<='f')))goto done;
+    slot=lu_connection_lock_v1(token,&status);if(!slot)goto done;
+    if(!slot->accepted||!slot->read_eof){status=-13;goto done;}
+    if(slot->request_claimed){status=-14;goto done;}
+    memcpy(slot->request_id,request,64);slot->request_id[64]=0;slot->request_claimed=1;
+    lu_word_v1(answer,1,1);status=0;
+done:
+    if(slot)pthread_mutex_unlock(&slot->operation);
+    lu_word_v1(answer,0,status);
+#else
+    (void)token;(void)request;(void)bytes;lu_word_v1(answer,0,-4);
 #endif
     return answer;
 }

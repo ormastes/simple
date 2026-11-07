@@ -1,0 +1,30 @@
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.piped_byte_endpoint_v1.*
+
+describe "Descriptor-only byte endpoint public boundary":
+    it "requires both generation and binding for local snapshot equality":
+        val original = PipedByteEndpointV1(generation: 17, binding_digest: "a".repeat(64))
+        expect(process_byte_endpoint_equal_v1(original, original)).to_equal(true)
+        expect(process_byte_endpoint_equal_v1(original,
+            PipedByteEndpointV1(generation: 18, binding_digest: original.binding_digest))).to_equal(false)
+        expect(process_byte_endpoint_equal_v1(original,
+            PipedByteEndpointV1(generation: 17, binding_digest: "b".repeat(64)))).to_equal(false)
+
+    it "does not treat malformed or zero-generation values as live equality":
+        val zero = PipedByteEndpointV1(generation: 0, binding_digest: "a".repeat(64))
+        val malformed = PipedByteEndpointV1(generation: 17, binding_digest: "A".repeat(64))
+        expect(process_byte_endpoint_equal_v1(zero, zero)).to_equal(false)
+        expect(process_byte_endpoint_equal_v1(malformed, malformed)).to_equal(false)
+        assert(process_validate_byte_endpoint_v1(zero).is_err())
+        assert(process_byte_endpoint_state_v1(malformed).is_err())
+
+    it "retains rejected close ownership and never invents EOF":
+        val invalid = PipedByteEndpointV1(generation: -1, binding_digest: "a".repeat(64))
+        val read = process_read_byte_endpoint_v1(invalid)
+        expect(read.endpoint.generation).to_equal(-1)
+        expect(read.eof).to_equal(false)
+        expect(read.error).to_equal("byte_endpoint_invalid")
+        val closed = process_close_byte_endpoint_v1(invalid)
+        expect(closed.closed).to_equal(false)
+        expect(closed.endpoint.unwrap().generation).to_equal(-1)
+        expect(closed.error).to_equal("byte_endpoint_invalid")

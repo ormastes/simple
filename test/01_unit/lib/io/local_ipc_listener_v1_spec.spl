@@ -1,0 +1,69 @@
+# NOT_RUN. Pure invalid-input owner retention; native role/path/peer behavior
+# is exercised by the separate actual-socket fixture, never mocked here.
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.local_ipc_v1.*
+use std.nogc_sync_mut.io.process_ops.PipedProcessRefV1
+
+describe "Local Unix listener and zero-wait turns":
+    it "rejects invalid listener paths UID and backlog without fabricating owner":
+        val relative = local_unix_listen_v1("relative", 0, 1)
+        assert(not relative.owner.?)
+        expect(relative.error).to_equal("local_unix_invalid_argument_or_path_policy")
+        for backlog in [0, 129]:
+            val result = local_unix_listen_v1("/tmp/service", 0, backlog)
+            assert(not result.owner.?)
+            expect(result.error).to_equal("local_unix_invalid_argument_or_path_policy")
+        val nul = local_unix_listen_v1("/tmp/service\0hidden", 0, 1)
+        assert(not nul.owner.?)
+        val uid = local_unix_listen_v1("/tmp/service", -1, 1)
+        assert(not uid.owner.?)
+
+    it "retains listener on rejected accept and close input":
+        val listener = LocalUnixListenerV1(token: 0)
+        val accepted = local_unix_accept_v1(listener, 0)
+        expect(accepted.listener.token).to_equal(listener.token)
+        assert(not accepted.connection.?)
+        assert(not accepted.peer.?)
+        expect(accepted.error).to_equal("local_unix_invalid_argument_or_path_policy")
+        val closed = local_unix_listener_close_v1(listener)
+        assert(not closed.closed)
+        expect(closed.owner.unwrap().token).to_equal(listener.token)
+
+    it "does not confuse invalid now turns or half-close with EOF or dispatch":
+        val owner = LocalUnixConnectionV1(token: 0)
+        val poll = local_unix_poll_v1(owner, false, false)
+        expect(poll.owner.token).to_equal(owner.token)
+        assert(not poll.readable and not poll.writable and not poll.hangup)
+        val read = local_unix_read_now_v1(owner, 1)
+        assert(not read.eof)
+        expect(read.bytes.len()).to_equal(0)
+        expect(read.error).to_equal("local_unix_invalid_argument_or_path_policy")
+        val write = local_unix_write_some_now_v1(owner, [65u8], 0, 1)
+        expect(write.accepted_bytes).to_equal(0)
+        expect(write.owner.token).to_equal(owner.token)
+        val shutdown = local_unix_shutdown_write_v1(owner)
+        assert(not shutdown.shutdown)
+        expect(shutdown.owner.token).to_equal(owner.token)
+        val claim = local_unix_claim_request_v1(owner, "a".repeat(64))
+        assert(not claim.claimed)
+        expect(claim.owner.token).to_equal(owner.token)
+        val peer = local_unix_peer_v1(owner)
+        assert(not peer.peer.?)
+        expect(peer.owner.token).to_equal(owner.token)
+
+    it "retains socket owner on invalid stage handoff adoption and phase input":
+        val owner = LocalUnixConnectionV1(token: 0)
+        val reference = PipedProcessRefV1(pid: 1, generation: 1)
+        val staged = local_unix_stage_stdout_v1(owner, reference, "a".repeat(64))
+        assert(not staged.staged)
+        expect(staged.owner.token).to_equal(owner.token)
+        expect(staged.error).to_equal("local_unix_invalid_argument_or_path_policy")
+        val read = local_unix_read_handoff_now_v1(owner, 1)
+        assert(not read.eof)
+        expect(read.owner.token).to_equal(owner.token)
+        val adopted = local_unix_adopt_byte_endpoint_v1(owner, "a".repeat(64))
+        assert(not adopted.endpoint.?)
+        expect(adopted.owner.token).to_equal(owner.token)
+        val state = local_unix_handoff_state_v1(owner)
+        expect(state.owner.token).to_equal(owner.token)
+        expect(state.error).to_equal("local_unix_invalid_argument_or_path_policy")
