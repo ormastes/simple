@@ -1,0 +1,37 @@
+# Deferred admitted process launch V6
+
+Status: implemented source checkpoint under review; all V6 tests NOT_RUN.
+
+The existing ProcessObservationReservationV4 remains the sole mutable child owner. V6 adds Linux-only scalar launch progression without changing V4 observation bytes, static sealed-image pinning, V5 submission expiry, or synchronous entry points. It does not transfer a mutable Container or introduce a supervisor, worker pool, journal, or queued-success receipt.
+
+## Public contract
+
+`start_deferred_admitted_v6(request, expires_at_unix_ms)` consumes one reserved attempt and returns `Result<ProcessLaunchProgressV6,text>`. `poll_launch_v6(retire=false)` advances that same reservation. Progress is exactly NoChild=0, LaunchPending=1, ObservationAvailable=2. Unknown scalar values are errors. NoChild is available only from an attempted V6 reservation with actual no-child state3, never from an unused reservation or a legacy attempt. Negative native errors preserve the original reservation and pins.
+
+Native leaves are `rt_process_observation_v6_reserved_start_deferred_admitted_value(token, executable, cwd, binding, expiry)` and `rt_process_observation_v6_reserved_poll_launch_value(token, retire)`. Non-Linux ports return unsupported before child effects. The exact two OS leaves use the existing reviewed C-only ownership policy; no ratchet baseline or extraction exemption changes.
+
+## Ownership and transitions
+
+The existing short reservation registry gate locates the token and checks busy state and submitting Linux TID. This precedes per-child owner locks and ptrace progression. V6 is parent-coordinator-only, not fork-safe or a hard wait-free registry design. Every later API on that V6 reservation retains the TID restriction, including ordinary observation/acknowledgment and cleanup.
+
+After fork, the same RtOwnedSlot retains the error pipe, trace phase, actual child identity, failure class, deadline and partial error bytes. Reservation state6 refuses legacy observe, ack and confirm-release. Post-fork clock/setpgid/pidfd/identity setup failure also enters this owner path rather than synchronous cleanup. A failed pidfd acquisition can leave cleanup uncertain: V6 never falls back to bare-PID signaling.
+
+Each pending poll advances at most one waitpid(WNOHANG), ptrace, error-pipe read or exact pidfd signal step, with clock observations. It never runs the older exec confirmation/deadline/reconcile loops. The actual PTRACE_EVENT_EXEC is observed before sampling its proof timestamp. Detach must succeed before ordinary Running observation is exposed. CLOEXEC error-pipe EOF alone is not exec proof.
+
+Cancel and timeout request termination but retain state6 through actual terminal wait/reap and complete error-pipe interpretation. A signal request is not reap or tree proof. Fatal ptrace progression, ECHILD, partial-report EOF and uncertain IO remain retained errors. EINTR and EAGAIN preserve the exact phase and descriptor. The exec descriptor closes once after resolved detach or error interpretation; no close retry can target a reused descriptor. ObservationAvailable hands control to the unchanged V4 durable-observe-before-ack lifecycle; retire on an already materialized launch does not replace normal V4 cancellation.
+
+## Limits and scheduling integration
+
+This checkpoint removes synchronous exec-confirmation waiting, not all latency. Request encoding, validation, executable hashing/pinning, fork/setup, existing native registry locks, normal V4 observe/group reconciliation and provider WAL/CLI preparation retain their existing behavior. Ordinary observation can still scan or reconcile with existing loops. Linux enforcement remains LeaderOnly with None/RLIMIT_AS policy; no CPU or descendant enforcement is claimed. Dynamic Podman requires a separate explicitly trusted original-FD image policy: the current static sealed pin still rejects dynamic ELF.
+
+Persistent HostServiceDomain scheduling, immutable provider tickets/revision commit, reserved health/cancel capacity and bootstrap-qualified dynamic pins remain dependent work. Health handling must use cached owner/domain state, never synchronous provider probe/execute/wait. No full daemon responsiveness or perf PASS is claimed.
+
+## Verification source
+
+`test/01_unit/lib/io/process_deferred_launch_v6_spec.spl` covers strict progress decoding. `src/runtime/test/runtime_process_deferred_admission_v6_selfcheck.c` uses the production owner and normal CoreC array/pin providers, a real static helper, actual ptrace stop/exec/cancel/expiry/timeout and wrong-thread refusal. It must include runtime_process_owned.c exactly once and link runtime_process.c for actual sealed executable pins; fake pin/array providers are forbidden. The test harness alone uses finite sleeps/deadlines and terminates on failure.
+
+The native fixture also links test-only wrappers for setpgid/read/rt_array_new: one real parent setup syscall failure leaves state6 and the actual error FD retained; unavailable observation allocation preserves reservation authority; the actual child errno report is consumed one byte at a time with one injected EAGAIN. These wrappers never fabricate child identity, exec success or reap facts. The setup-failure test harness alone kills/reaps its known actual child after proving production refusal; it does not mint a V6 receipt/release. Tests also assert poll_launch(retire=true) after materialization remains observational and normal V4 cancellation is still required.
+
+No test has run. Fatal ptrace and lost-child/partial-EOF uncertainty need further negative qualification. The authored wrappers are not proof of kernel resource exhaustion or all allocator failures. No native producer/build has been allocated for this checkpoint.
+
+The positive native exec case observes without retirement and requires frozen exit0 plus exact stdout `exec-v6\n` before acknowledgment. The pending-timeout case uses a one-second workload budget and a real 1.1-second stopped delay, avoiding preparation-dependent expiry. The final uncertain setup-failure reservation retains its original executable/directory pins through isolated fixture process exit; the harness reaps only its actual known child, and process exit reclaims the retained test capabilities.

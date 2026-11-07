@@ -1334,6 +1334,15 @@ pub const PROCESS_OBSERVATION_RESERVED_NO_CHILD_V4: i64 = 3
 pub const PROCESS_OBSERVATION_RESERVED_OWNED_V4: i64 = 4
 pub const PROCESS_OBSERVATION_RESERVED_ACKED_V4: i64 = 5
 
+pub use std.common.process.launch_progress_v6.{ProcessLaunchProgressV6, PROCESS_RESERVATION_LAUNCH_PENDING_V6}
+use std.common.process.launch_progress_v6.process_launch_progress_decode_v6
+
+@unsafe(reason: "Linux-only same-reservation deferred ptrace launch; scalar progress, no pending V4 receipt", capabilities: [ffi])
+extern fn rt_process_observation_v6_reserved_start_deferred_admitted_value(token: i64, executable: i64,
+    cwd: i64, binding: [u8], expires_at_unix_ms: i64) -> i64
+@unsafe(reason: "same submitting thread; one zero-wait pending trace/error/cleanup step", capabilities: [ffi])
+extern fn rt_process_observation_v6_reserved_poll_launch_value(token: i64, retire: i64) -> i64
+
 pub class ProcessObservationReservationV4:
     token: i64
     executable: OwnedExecutablePin
@@ -1382,6 +1391,29 @@ pub class ProcessObservationReservationV4:
         if value < 0:
             return Err("process reservation admission refused; retain owner and query state: {value}")
         Ok(value)
+
+    # Additive Linux-only path. Preparation/encoding/pin validation still run
+    # synchronously; only exec-proof progression is deferred. No owner escapes.
+    pub me fn start_deferred_admitted_v6(self, request: ProcessObservationRequestV4,
+            expires_at_unix_ms: i64) -> Result<ProcessLaunchProgressV6, text>:
+        if self.released: return Err("process reservation already released")
+        val bound = _process_observation_bound_request_v4(self.executable, self.cwd, request)?
+        val encoded = canonical_encode_process_observation_request_v4(bound)?
+        val value = unsafe(capabilities: [ffi]):
+            rt_process_observation_v6_reserved_start_deferred_admitted_value(
+                self.token, self.executable.handle, self.cwd.handle, encoded, expires_at_unix_ms)
+        if value < 0: return Err("deferred process start refused; reservation retained: {value}")
+        process_launch_progress_decode_v6(value)
+
+    # Pending cancellation is not terminal proof. Keep polling on the SAME
+    # submitting OS thread until ObservationAvailable, then use existing observe
+    # and durable-before-ack flow. retire applies only while launch is pending.
+    pub fn poll_launch_v6(self, retire: bool = false) -> Result<ProcessLaunchProgressV6, text>:
+        if self.released: return Err("process reservation already released")
+        val value = unsafe(capabilities: [ffi]):
+            rt_process_observation_v6_reserved_poll_launch_value(self.token, if retire: 1 else: 0)
+        if value < 0: return Err("deferred process progress unavailable; reservation retained: {value}")
+        process_launch_progress_decode_v6(value)
 
     pub fn observe(self, caller_wait_ns: i64, retire: bool) -> Result<ProcessObservationReceiptV4, text>:
         if self.released: return Err("process reservation already released")

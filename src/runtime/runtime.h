@@ -1479,6 +1479,10 @@ int64_t rt_process_observation_v4_reserved_start_pinned_value(
 int64_t rt_process_observation_v5_reserved_start_admitted_value(
     int64_t token, int64_t executable, int64_t cwd, SplArray* binding,
     int64_t expires_at_unix_ms);
+/* Additive Linux-only scalar launch progression; no V4 pending receipt. */
+int64_t rt_process_observation_v6_reserved_start_deferred_admitted_value(int64_t,int64_t,int64_t,SplArray*,int64_t);
+int64_t rt_process_observation_v6_reserved_poll_launch_value(int64_t,int64_t);
+
 SplArray* rt_process_observation_v4_reserved_observe_value(
     int64_t token, int64_t wait_ns, int64_t retire);
 SplArray* rt_process_observation_v4_reserved_ack_value(int64_t token, SplArray* digest);

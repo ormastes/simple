@@ -1,0 +1,13 @@
+# Deferred launch V6 verification manual
+
+Status: NOT_RUN. Source-only checkpoint; no native, SSpec, latency or full daemon PASS.
+
+1. Run the two pure progress decoder cases in `test/01_unit/lib/io/process_deferred_launch_v6_spec.spl` on an allocated self-hosted producer.
+2. In a private output directory, build `src/runtime/test/process_deferred_launch_v6_child.c` as a real static ELF (`-static -no-pie`). Failure to obtain a static helper blocks native qualification; do not substitute a dynamic image or fake executable pin.
+3. Build `src/runtime/test/runtime_process_deferred_admission_v6_selfcheck.c` with actual CoreC runtime providers. It directly includes runtime_process_owned.c, so omit that separate translation unit; include runtime_process.c, runtime_native.c, runtime_legacy_core.c and their normal memory/SIMD/process-tree/thread/fork/timestamp dependencies. Link `--wrap=rt_array_new,--wrap=read,--wrap=setpgid` for the explicit one-shot fault cases. No stub providers. Root must approve the exact finite recipe before execution.
+4. Run once with the absolute helper path, bounded 15 seconds on CPU0-4. The fixture checks real pending state6, actual exec event/detach, duplicate start, legacy observe/ack/release refusal, wrong-thread refusal before child-lock entry, cancel/reap, workload timeout and V5 expiry before exec, postfork setup failure retaining uncertainty, unavailable observation allocation, partial/EAGAIN actual errno reads, and observational retire after materialization. Every failure retains diagnostic artifacts; do not auto-retry or use raw-PID fallback.
+5. Preserve command, exact source manifest, producer/binary hashes, exit/log/timing evidence. All authored cases remain NOT_RUN. Fatal-ptrace, lost-child and partial-EOF uncertainty remain coverage gaps; wrapper failures do not prove actual kernel/allocator exhaustion.
+
+The parent owns request/reservation/pins until actual durable V4 acknowledgment and confirm-release. This checkpoint remains static-pin-only and does not qualify provider WAL scheduling or health priority. See [design](../../../../05_design/process_deferred_admission_v6.md).
+
+The positive native exec case observes without retirement and requires frozen exit0 plus exact stdout `exec-v6\n` before acknowledgment. The pending-timeout case uses a one-second workload budget and a real 1.1-second stopped delay, avoiding preparation-dependent expiry. The final uncertain setup-failure reservation retains its original executable/directory pins through isolated fixture process exit; the harness reaps only its actual known child, and process exit reclaims the retained test capabilities.
