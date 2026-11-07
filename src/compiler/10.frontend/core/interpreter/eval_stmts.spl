@@ -17,7 +17,7 @@
 # the pure-Simple HIR resolves per module and reported them as unresolved.
 use compiler.core.ast.{arm_get_body, arm_get_guard, arm_get_pattern, elif_get_body, elif_get_cond}
 use compiler.core.ast.{elif_get_else, expr_get, stmt_get}
-use compiler.core.ast_expr.{EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_IDENT, EXPR_INDEX, EXPR_RANGE}
+use compiler.core.ast_expr.{EXPR_CALL, EXPR_EXISTS_CHECK, EXPR_FIELD_ACCESS, EXPR_IDENT, EXPR_INDEX, EXPR_RANGE}
 use compiler.core.ast_expr.{expr_owner_int, expr_owner_int_set}
 use compiler.core.ast_stmt.{STMT_ASSIGN, STMT_BIND, STMT_BLOCK, STMT_BREAK, STMT_COMPOUND_ASSIGN}
 use compiler.core.ast_stmt.{STMT_CONTINUE, STMT_DEFER, STMT_ERRDEFER, STMT_EXPR, STMT_FOR}
@@ -215,6 +215,17 @@ fn eval_stmt_val_decl(sid: i64) -> i64:
         init_val = eval_expr(init_eid)
         if eval_had_error: return -1
     if stmt_is_if_val_decl(sid):
+        # Keep original expression provenance: an authored .? has already
+        # chosen presence; a bare Result is not an optional binding carrier.
+        var explicit_presence = false
+        if init_eid >= 0:
+            val original_init = expr_get(init_eid)
+            explicit_presence = original_init.tag == EXPR_EXISTS_CHECK
+        if not explicit_presence and val_is_struct(init_val):
+            val carrier_name = val_get_struct_name(init_val)
+            if carrier_name == "Result::Ok" or carrier_name == "Result::Err":
+                eval_set_error("cannot bind a Result with bare if val/while val; use match Ok/Err or Result.ok.?")
+                return -1
         init_val = eval_option_binding_value(init_val)
     # S1 copy-site 3 (struct local binding): `val b = a` on a value-type struct
     # binds a SNAPSHOT, so later writes through `a` cannot be observed via `b`.

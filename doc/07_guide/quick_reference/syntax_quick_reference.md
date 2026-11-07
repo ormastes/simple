@@ -650,6 +650,10 @@ val query = user_input.presence_trimmed ?? "default search"
 
 ### Result with `.?`
 
+For a Result, use `if val value = result.ok.?:` or match `Ok` / `Err`
+explicitly. A bare `if val value = result:` or `while val value = result:`
+is an error; it does not select the Ok payload or bind the whole Result.
+
 ```text
 # Result.ok returns Option, Result.err returns Option
 result.ok.?                   # T? if Ok (replaces is_ok())
