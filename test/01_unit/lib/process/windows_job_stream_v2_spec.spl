@@ -1,0 +1,122 @@
+use std.spec
+use std.common.process.windows_job_stream_v2.{WindowsManagedStreamHostV2, WindowsManagedStreamRequestV2,
+    windows_managed_cpu_quantum_v2, windows_managed_cpu_rate_v2, windows_managed_stream_request_reason_v2}
+use std.nogc_sync_mut.io.file_ops.file_read
+
+fn host(processors: i64) -> WindowsManagedStreamHostV2:
+    val quantum = windows_managed_cpu_quantum_v2(1, processors, false).unwrap()
+    WindowsManagedStreamHostV2(processor_groups: 1, logical_processors: processors,
+        process_in_job: false, cpu_quantum_millis: quantum)
+
+fn request() -> WindowsManagedStreamRequestV2:
+    WindowsManagedStreamRequestV2(program: "C:\\Tools\\docker.exe",
+        producer_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        args: ["--host", "npipe:////./pipe/docker_engine", "attach", "owned-id"],
+        environment: ["SystemRoot=C:\\Windows", "TEMP=C:\\Temp"], directory: "C:\\Work",
+        cpu_millis: 1000, memory_bytes: 67108864, timeout_ms: 30000,
+        launch_expires_at_unix_ms: 9000000, mode: "raw", rows: 0, cols: 0)
+
+describe "Windows Job stream V2 pure CPU and RAW contract":
+    it "REQ-WJS-001 derives exact CPU quantum from a single actual processor group":
+        expect(windows_managed_cpu_quantum_v2(1, 6, false).unwrap()).to_equal(3)
+        expect(windows_managed_cpu_quantum_v2(1, 64, false).unwrap()).to_equal(32)
+        expect(windows_managed_cpu_quantum_v2(1, 48, false).unwrap()).to_equal(24)
+        expect(windows_managed_cpu_quantum_v2(2, 64, false).is_err()).to_equal(true)
+        expect(windows_managed_cpu_quantum_v2(1, 4, true).is_err()).to_equal(true)
+        expect(windows_managed_cpu_quantum_v2(1, 0, false).is_err()).to_equal(true)
+
+    it "REQ-WJS-002 never rounds an unrepresentable CPU hard cap":
+        expect(windows_managed_cpu_rate_v2(1000, host(4)).unwrap()).to_equal(2500)
+        expect(windows_managed_cpu_rate_v2(999, host(6)).unwrap()).to_equal(1665)
+        expect(windows_managed_cpu_rate_v2(1000, host(6)).is_err()).to_equal(true)
+        expect(windows_managed_cpu_rate_v2(64001, host(64)).is_err()).to_equal(true)
+        expect(windows_managed_cpu_rate_v2(0, host(4)).is_err()).to_equal(true)
+        var forged = host(4)
+        forged.cpu_quantum_millis = 1
+        expect(windows_managed_cpu_rate_v2(1000, forged).is_err()).to_equal(true)
+
+    it "REQ-WJS-003 admits only explicit RAW requests with exact launch fields":
+        val valid = request()
+        expect(windows_managed_stream_request_reason_v2(valid, host(4))).to_equal("")
+        var tty = request()
+        tty.mode = "tty"
+        expect(windows_managed_stream_request_reason_v2(tty, host(4))).to_equal("windows-managed-stream-raw-only-no-terminal")
+        var sized = request()
+        sized.cols = 80
+        expect(windows_managed_stream_request_reason_v2(sized, host(4))).to_equal("windows-managed-stream-raw-only-no-terminal")
+        var unpinned = request()
+        unpinned.producer_digest = "latest"
+        expect(windows_managed_stream_request_reason_v2(unpinned, host(4))).to_equal("windows-managed-stream-producer-digest-invalid")
+        var relative = request()
+        relative.program = "docker.exe"
+        expect(windows_managed_stream_request_reason_v2(relative, host(4))).to_equal("windows-managed-stream-absolute-path-required")
+
+    it "REQ-WJS-004 rejects duplicate clean-environment names and missing budgets":
+        var duplicate = request()
+        duplicate.environment = ["TEMP=C:\\One", "temp=C:\\Two"]
+        expect(windows_managed_stream_request_reason_v2(duplicate, host(4))).to_equal("windows-managed-stream-environment-name-duplicate")
+        var ambient = request()
+        ambient.environment = ["TEMP"]
+        expect(windows_managed_stream_request_reason_v2(ambient, host(4))).to_equal("windows-managed-stream-environment-assignment-required")
+        var memory = request()
+        memory.memory_bytes = 0
+        expect(windows_managed_stream_request_reason_v2(memory, host(4))).to_equal("windows-managed-stream-memory-budget-invalid")
+        var expiry = request()
+        expiry.launch_expires_at_unix_ms = 0
+        expect(windows_managed_stream_request_reason_v2(expiry, host(4))).to_equal("windows-managed-stream-time-budget-invalid")
+
+describe "Windows managed RAW native source ownership contract (not execution evidence)":
+    it "REQ-WJS-005 keeps managed resources in the existing generation-checked PTY registry":
+        val owner = file_read("src/lib/nogc_sync_mut/io/windows_pty_owner.spl")
+        val native = file_read("src/lib/nogc_sync_mut/io/windows_managed_stream_native_v2.spl")
+        expect(owner).to_contain("state.managed_generation != lease.generation")
+        expect(owner).to_contain("state.managed_create_attempted and state.process == 0")
+        expect(owner).to_contain("next.managed_pins = retained_pins")
+        expect(native).to_contain("not observed.leader_reaped or not observed.job_empty or observed.pending_io")
+        expect(native).to_contain("Windows attempted child identity unknown; ownership retained")
+
+    it "REQ-WJS-006 constructs a RAW child with hard Job readbacks and suspended admission checks":
+        val launch = file_read("src/lib/nogc_sync_mut/io/windows_managed_stream_launch_v2.spl")
+        val policy = file_read("src/lib/nogc_sync_mut/io/windows_managed_stream_policy_v2.spl")
+        expect(launch.contains("CreatePseudoConsole")).to_equal(false)
+        expect(launch).to_contain("state.managed_create_attempted = true")
+        expect(launch).to_contain("before_create = windows_managed_stream_launch_check_v2")
+        expect(launch).to_contain("before_resume = windows_managed_stream_launch_check_v2")
+        expect(policy).to_contain("QueryInformationJobObject(state.job, 9")
+        expect(policy).to_contain("QueryInformationJobObject(state.job, 15")
+        expect(policy).to_contain("volatile_read_u32(cpu) != 5u32")
+
+    it "REQ-WJS-007 preserves byte channels and bounded input authority":
+        val native = file_read("src/lib/nogc_sync_mut/io/windows_managed_stream_native_v2.spl")
+        expect(native).to_contain("max_bytes > 8192")
+        expect(native).to_contain("data.len() > 4096")
+        expect(native).to_contain("state.pending_size = count")
+        expect(native).to_contain("WindowsManagedStreamReadV2.Data(bytes)")
+        expect(native.contains("windows_pty_decode_v1")).to_equal(false)
+        expect(native).to_contain("RAW managed streams have no terminal to resize")
+
+    it "REQ-WJS-008 keeps non-Windows wrapper closures free from unconditional Win32 imports":
+        val wrapper = file_read("src/lib/nogc_sync_mut/io/windows_managed_stream_owner_v2.spl")
+        expect(wrapper).to_contain("@when(os=\"windows\"):")
+        expect(wrapper).to_contain("@else:")
+        expect(wrapper).to_contain("Windows managed stream unsupported on this platform")
+
+    it "REQ-WJS-009 retains each failed CNG or heap release in the same cleanup lease":
+        val pin = file_read("src/lib/nogc_sync_mut/io/windows_process_owner.spl")
+        val launch = file_read("src/lib/nogc_sync_mut/io/windows_managed_stream_launch_v2.spl")
+        val owner = file_read("src/lib/nogc_sync_mut/io/windows_pty_owner.spl")
+        expect(pin).to_contain("retained.algorithm = volatile_read_u64(algorithm_slot)")
+        expect(pin).to_contain("retained.hash = volatile_read_u64(hash_slot)")
+        expect(pin).to_contain("if retained.hash == 0 and retained.algorithm != 0")
+        expect(pin).to_contain("if retained.hash != 0 or retained.algorithm != 0")
+        expect(pin).to_contain("elif HeapFree(heap, 0u32, address) == 0")
+        expect(pin).to_contain("retained.allocations = retained.allocations.push(address)")
+        expect(launch).to_contain("state.managed_hash = pin.hash")
+        expect(launch).to_contain("state.managed_algorithm = pin.algorithm")
+        expect(launch).to_contain("state.temporaries = state.temporaries + pin.allocations")
+        expect(owner).to_contain("if BCryptDestroyHash(next.managed_hash) == 0")
+        expect(owner).to_contain("if BCryptCloseAlgorithmProvider(next.managed_algorithm, 0u32) == 0")
+        expect(pin).to_contain("retained.allocations = retained.allocations.push(wide)")
+        expect(pin).to_contain("WINDOWS_MANAGED_PRODUCER_MAX_HASH_BYTES_V2: i64 = 268435456")
+        expect(pin).to_contain("if not _windows_managed_hash_deadline_v2(expires_at_unix_ms)")
+        expect(launch).to_contain("request.launch_expires_at_unix_ms)")

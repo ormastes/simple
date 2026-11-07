@@ -7,9 +7,11 @@ use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u8, volatile_write_u32, vo
 use std.nogc_sync_mut.io.windows_pty_codec.{windows_pty_size_valid_v1, windows_pty_coord_v1, windows_pty_decode_v1}
 use std.common.base_encoding.utilities.{text_to_bytes_linear}
 use std.nogc_sync_mut.io.windows_process_owner_abi.{GetExitCodeProcess}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{BCryptDestroyHash, BCryptCloseAlgorithmProvider}
 use std.sys.pty_launch.{PtyLaunchV1}
 use std.nogc_sync_mut.io.windows_pty_launch_config.{WindowsPtyLaunchPreparedV1, windows_pty_launch_prepare_v1}
 use std.nogc_sync_mut.io.windows_pty_launch_abi.{FreeEnvironmentStringsW}
+use std.common.process.windows_job_stream_v2.WindowsManagedStreamLeaseV2
 
 struct WindowsPtyStateV1:
     heap: i64
@@ -34,6 +36,20 @@ struct WindowsPtyStateV1:
     tail: [u8] = []
     temporaries: [i64] = []
     environment_snapshot: i64 = 0
+    managed: bool = false
+    managed_generation: i64 = 0
+    managed_pins: [i64] = []
+    managed_started: bool = false
+    managed_assigned: bool = false
+    managed_create_attempted: bool = false
+    managed_deadline: u64 = 0
+    managed_cancelled: bool = false
+    managed_timed_out: bool = false
+    managed_output_end: bool = false
+    managed_exit_code: i64 = -1
+    managed_attributes: i64 = 0
+    managed_hash: i64 = 0
+    managed_algorithm: i64 = 0
 
 var _windows_pty_slots_v1: [WindowsPtyStateV1] = []
 var _windows_pty_quarantine_v1: [i64] = []
@@ -41,7 +57,7 @@ var _windows_pty_active_v1: i64 = 0
 var _windows_pty_cleanup_failed_v1: bool = false
 
 fn _windows_pty_live_v1(handle: i32) -> bool:
-    handle >= 0 and (handle as i64) < _windows_pty_slots_v1.len() and not _windows_pty_slots_v1[handle as i64].closing and not _windows_pty_slots_v1[handle as i64].closed
+    handle >= 0 and (handle as i64) < _windows_pty_slots_v1.len() and not _windows_pty_slots_v1[handle as i64].managed and not _windows_pty_slots_v1[handle as i64].closing and not _windows_pty_slots_v1[handle as i64].closed
 
 # arena offsets: console-out0, pipe-out8/16, available24, read-count32,
 # write-count40, attribute-size48, OVERLAPPED64..95 (hEvent at88), input128..4223,
@@ -91,6 +107,9 @@ fn _windows_pty_free_v1(heap: i64, address: i64) -> i64:
 @unsafe(reason: "releases launch temporaries while retaining every failed native release", capabilities: [ffi, raw_ptr])
 fn _windows_pty_launch_release_v1(state: WindowsPtyStateV1) -> WindowsPtyStateV1:
     var next = state
+    if next.managed_attributes != 0:
+        DeleteProcThreadAttributeList(next.managed_attributes)
+        next.managed_attributes = 0
     if next.environment_snapshot != 0:
         if FreeEnvironmentStringsW(next.environment_snapshot) != 0:
             next.environment_snapshot = 0
@@ -110,6 +129,18 @@ fn _windows_pty_launch_release_v1(state: WindowsPtyStateV1) -> WindowsPtyStateV1
 fn _windows_pty_release_v1(state: WindowsPtyStateV1) -> WindowsPtyStateV1:
     var next = state
     if state.pending: return next
+    if next.managed_hash != 0:
+        if BCryptDestroyHash(next.managed_hash) == 0: next.managed_hash = 0
+        else:
+            next.release_failed = true
+            next.failed = true
+            return next
+    if next.managed_algorithm != 0:
+        if BCryptCloseAlgorithmProvider(next.managed_algorithm, 0u32) == 0: next.managed_algorithm = 0
+        else:
+            next.release_failed = true
+            next.failed = true
+            return next
     next.output = _windows_pty_close_handle_v1(next.output)
     # A failed output close must never enter a potentially blocking HPCON close.
     if next.output == 0 and next.console != 0:
@@ -122,11 +153,16 @@ fn _windows_pty_release_v1(state: WindowsPtyStateV1) -> WindowsPtyStateV1:
     next.thread = _windows_pty_close_handle_v1(next.thread)
     next.process = _windows_pty_close_handle_v1(next.process)
     next.job = _windows_pty_close_handle_v1(next.job)
+    var retained_pins: [i64] = []
+    for pin in next.managed_pins:
+        val remaining = _windows_pty_close_handle_v1(pin)
+        if remaining != 0: retained_pins.push(remaining)
+    next.managed_pins = retained_pins
     next = _windows_pty_launch_release_v1(next)
     val handles_released = next.input_server == 0 and next.input == 0 and next.output_server == 0 and next.output == 0 and next.event == 0 and next.thread == 0 and next.process == 0 and next.job == 0 and next.console == 0
-    if handles_released and next.temporaries.len() == 0 and next.environment_snapshot == 0:
+    if handles_released and next.managed_pins.len() == 0 and next.temporaries.len() == 0 and next.environment_snapshot == 0:
         next.arena = _windows_pty_free_v1(next.heap, next.arena)
-    next.closed = handles_released and next.temporaries.len() == 0 and next.environment_snapshot == 0 and next.arena == 0
+    next.closed = handles_released and next.managed_pins.len() == 0 and next.temporaries.len() == 0 and next.environment_snapshot == 0 and next.arena == 0
     if not next.closed:
         next.failed = true
         next.release_failed = true
@@ -481,6 +517,7 @@ pub fn windows_pty_close_v1(handle: i32) -> bool:
     _windows_pty_reap_v1()
     if handle < 0 or (handle as i64) >= _windows_pty_slots_v1.len(): return false
     var state = _windows_pty_slots_v1[handle as i64]
+    if state.managed: return false
     if state.closed: return _windows_pty_cleanup_complete_v1(state)
     if state.closing: return false
     state.closing = true
@@ -508,3 +545,58 @@ pub fn windows_pty_close_v1(handle: i32) -> bool:
         else: _windows_pty_quarantine_v1 = _windows_pty_quarantine_v1.push(handle as i64)
     _windows_pty_slots_v1[handle as i64] = state
     _windows_pty_cleanup_complete_v1(state)
+
+# IO-owner-private ports for the managed RAW sibling. They lend a state copy
+# only within the single-threaded owner turn; all resources remain in this
+# SAME nonreused registry, and generation checks precede every load/store.
+pub fn _windows_pty_managed_capacity_v2() -> bool:
+    _windows_pty_slots_v1.len() < 100000 and _windows_pty_active_v1 < 1024
+
+@unsafe(reason: "reserves bounded RAW ownership without creating a pseudoconsole or child", capabilities: [ffi, raw_ptr])
+pub fn _windows_pty_managed_reserve_v2() -> Result<WindowsManagedStreamLeaseV2, text>:
+    if not _windows_pty_managed_capacity_v2(): return Err("Windows managed owner capacity exhausted")
+    val heap = GetProcessHeap()
+    if heap == 0: return Err("Windows managed process heap unavailable")
+    val arena = HeapAlloc(heap, 8u32, 16384u64)
+    if arena == 0: return Err("Windows managed arena allocation failed")
+    val index = _windows_pty_slots_v1.len()
+    val state = WindowsPtyStateV1(heap: heap, arena: arena, managed: true, managed_generation: index + 1)
+    _windows_pty_slots_v1 = _windows_pty_slots_v1.push(state)
+    _windows_pty_active_v1 = _windows_pty_active_v1 + 1
+    Ok(WindowsManagedStreamLeaseV2(slot: index as i32, generation: index + 1))
+
+pub fn _windows_pty_managed_load_v2(lease: WindowsManagedStreamLeaseV2) -> Result<WindowsPtyStateV1, text>:
+    if lease.slot < 0 or (lease.slot as i64) >= _windows_pty_slots_v1.len(): return Err("Windows managed lease slot invalid")
+    val state = _windows_pty_slots_v1[lease.slot as i64]
+    if not state.managed or state.managed_generation != lease.generation:
+        return Err("Windows managed lease generation invalid")
+    Ok(state)
+
+pub fn _windows_pty_managed_store_v2(lease: WindowsManagedStreamLeaseV2, state: WindowsPtyStateV1) -> Result<bool, text>:
+    val previous = _windows_pty_managed_load_v2(lease)?
+    if not state.managed or state.managed_generation != previous.managed_generation: return Err("Windows managed state generation differs")
+    _windows_pty_slots_v1[lease.slot as i64] = state
+    Ok(true)
+
+pub fn _windows_pty_managed_retain_observation_v2(heap: i64, arena: i64):
+    _windows_pty_cleanup_failed_v1 = true
+    val state = WindowsPtyStateV1(heap: heap, arena: arena, release_failed: true)
+    val _retained = _windows_pty_open_failed_v1(state)
+
+pub fn _windows_pty_managed_complete_v2(state: WindowsPtyStateV1) -> WindowsPtyStateV1:
+    _windows_pty_complete_v1(state)
+
+pub fn _windows_pty_managed_release_v2(lease: WindowsManagedStreamLeaseV2) -> Result<bool, text>:
+    var state = _windows_pty_managed_load_v2(lease)?
+    if state.closed: return Ok(true)
+    if state.managed_create_attempted and state.process == 0: return Err("Windows attempted child identity remains unknown")
+    if state.pending or not _windows_pty_terminal_v1(state): return Err("Windows managed job or IO is not terminal")
+    state.terminal_observed = true
+    state.closing = true
+    state = _windows_pty_release_v1(state)
+    if state.closed: _windows_pty_active_v1 = _windows_pty_active_v1 - 1
+    val stored = _windows_pty_managed_store_v2(lease, state)?
+    if not state.closed: return Err("Windows managed cleanup retained failed native release")
+    Ok(true)
+
+export WindowsPtyStateV1

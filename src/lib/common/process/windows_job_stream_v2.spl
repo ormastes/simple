@@ -1,0 +1,110 @@
+# Pure Windows managed-stream values. No host calls or ownership registry.
+# RAW merges stdout/stderr explicitly. Admission expiry is not stream lifetime.
+pub struct WindowsManagedStreamLeaseV2:
+    slot: i32
+    generation: i64
+
+pub enum WindowsManagedStreamAdmissionV2:
+    Started(lease: WindowsManagedStreamLeaseV2)
+    Rejected(reason: text)
+    CleanupRequired(lease: WindowsManagedStreamLeaseV2, reason: text)
+
+pub struct WindowsManagedStreamRequestV2:
+    program: text
+    producer_digest: text
+    args: [text]
+    environment: [text]
+    directory: text
+    cpu_millis: i64
+    memory_bytes: i64
+    timeout_ms: i64
+    launch_expires_at_unix_ms: i64
+    mode: text
+    rows: i32
+    cols: i32
+
+pub struct WindowsManagedStreamHostV2:
+    processor_groups: i64
+    logical_processors: i64
+    process_in_job: bool
+    cpu_quantum_millis: i64
+
+pub struct WindowsManagedStreamPollV2:
+    leader_reaped: bool
+    job_empty: bool
+    pending_io: bool
+    closed: bool
+    exit_code: i64
+    timed_out: bool
+    cancelled: bool
+
+pub enum WindowsManagedStreamReadV2:
+    Data(bytes: [u8])
+    Pending
+    End
+    Failed(reason: text)
+
+pub fn windows_managed_cpu_quantum_v2(groups: i64, processors: i64, nested: bool) -> Result<i64, text>:
+    if groups != 1 or processors < 1 or processors > 64:
+        return Err("windows-managed-stream-single-processor-group-required")
+    if nested: return Err("windows-managed-stream-unnested-host-required")
+    var first = processors
+    var second: i64 = 10
+    while second != 0:
+        val remaining = first % second
+        first = second
+        second = remaining
+    Ok(processors / first)
+
+pub fn windows_managed_cpu_rate_v2(cpu_millis: i64, host: WindowsManagedStreamHostV2) -> Result<i64, text>:
+    val quantum = windows_managed_cpu_quantum_v2(host.processor_groups, host.logical_processors, host.process_in_job)?
+    if host.cpu_quantum_millis != quantum: return Err("windows-managed-stream-cpu-quantum-mismatch")
+    if cpu_millis <= 0 or cpu_millis > 64000: return Err("windows-managed-stream-cpu-budget-invalid")
+    val scaled = cpu_millis * 10
+    if scaled % host.logical_processors != 0: return Err("windows-managed-stream-cpu-rate-not-exact")
+    val rate = scaled / host.logical_processors
+    if rate < 1 or rate > 10000: return Err("windows-managed-stream-cpu-rate-out-of-range")
+    Ok(rate)
+
+fn absolute_path(value: text) -> bool:
+    if value.len() < 4 or value.len() > 32766 or value.contains("\0") or value.contains("\""): return false
+    val drive = value.byte_at(0)
+    (((drive >= 65 and drive <= 90) or (drive >= 97 and drive <= 122)) and
+        value.byte_at(1) == 58 and value.byte_at(2) == 92)
+
+pub fn windows_managed_stream_request_reason_v2(request: WindowsManagedStreamRequestV2,
+        host: WindowsManagedStreamHostV2) -> text:
+    if request.mode != "raw" or request.rows != 0 or request.cols != 0:
+        return "windows-managed-stream-raw-only-no-terminal"
+    if not absolute_path(request.program) or not absolute_path(request.directory):
+        return "windows-managed-stream-absolute-path-required"
+    if request.producer_digest.len() != 64: return "windows-managed-stream-producer-digest-invalid"
+    for ch in request.producer_digest.chars():
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return "windows-managed-stream-producer-digest-invalid"
+    val rate = windows_managed_cpu_rate_v2(request.cpu_millis, host)
+    if rate.is_err(): return rate.unwrap_err()
+    if request.memory_bytes <= 0 or request.memory_bytes > 1125899906842624:
+        return "windows-managed-stream-memory-budget-invalid"
+    if request.timeout_ms <= 0 or request.timeout_ms > 86400000 or request.launch_expires_at_unix_ms <= 0:
+        return "windows-managed-stream-time-budget-invalid"
+    if request.args.len() > 256 or request.environment.len() > 256:
+        return "windows-managed-stream-launch-count-bound"
+    var size = request.program.len() + request.directory.len()
+    for argument in request.args:
+        if argument.contains("\0") or argument.len() > 131064: return "windows-managed-stream-argument-invalid"
+        size = size + argument.len()
+    var names: [text] = []
+    for assignment in request.environment:
+        if assignment.contains("\0") or assignment.len() > 131064: return "windows-managed-stream-environment-invalid"
+        val pieces = assignment.split("=")
+        if pieces.len() < 2 or pieces[0] == "": return "windows-managed-stream-environment-assignment-required"
+        val name = pieces[0].to_upper()
+        for ch in name.chars():
+            if not ((ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"):
+                return "windows-managed-stream-environment-name-invalid"
+        if names.contains(name): return "windows-managed-stream-environment-name-duplicate"
+        names.push(name)
+        size = size + assignment.len()
+    if size > 1048576: return "windows-managed-stream-launch-byte-bound"
+    ""

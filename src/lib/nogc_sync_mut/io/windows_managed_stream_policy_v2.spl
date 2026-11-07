@@ -1,0 +1,64 @@
+# Windows-only native observations and checked launch/Job policy. No registry.
+use std.common.process.windows_job_stream_v2.{WindowsManagedStreamHostV2,
+    WindowsManagedStreamRequestV2, windows_managed_cpu_quantum_v2, windows_managed_cpu_rate_v2}
+use std.nogc_sync_mut.io.windows_job_stream_abi_v2.{GetActiveProcessorGroupCount, GetActiveProcessorCount, GetCurrentProcess, IsProcessInJob}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree, SetInformationJobObject, QueryInformationJobObject}
+use std.nogc_sync_mut.io.windows_pty_owner.{WindowsPtyStateV1, _windows_pty_managed_capacity_v2, _windows_pty_managed_retain_observation_v2}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u32, volatile_write_u64, volatile_read_u32, volatile_read_u64}
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
+
+@unsafe(reason: "actual topology and unnested process status into one caller-owned bounded arena", capabilities: [ffi, raw_ptr])
+pub fn windows_managed_stream_host_at_v2(arena: i64) -> Result<WindowsManagedStreamHostV2, text>:
+    val groups = GetActiveProcessorGroupCount() as i64
+    val processors = GetActiveProcessorCount(65535u16) as i64
+    volatile_write_u32(arena, 0)
+    if IsProcessInJob(GetCurrentProcess(), 0, arena) == 0: return Err("Windows process nesting observation failed")
+    val member = volatile_read_u32(arena)
+    if member != 0u32 and member != 1u32: return Err("Windows process nesting observation invalid")
+    val quantum = windows_managed_cpu_quantum_v2(groups, processors, member != 0u32)?
+    Ok(WindowsManagedStreamHostV2(processor_groups: groups, logical_processors: processors,
+        process_in_job: member != 0u32, cpu_quantum_millis: quantum))
+
+@unsafe(reason: "bounded topology query; failed temporary release remains with existing PTY quarantine owner", capabilities: [ffi, raw_ptr])
+pub fn windows_managed_stream_host_observe_v2() -> Result<WindowsManagedStreamHostV2, text>:
+    if not _windows_pty_managed_capacity_v2(): return Err("Windows native observation owner capacity exhausted")
+    val heap = GetProcessHeap()
+    if heap == 0: return Err("Windows native observation heap unavailable")
+    val arena = HeapAlloc(heap, 8u32, 8u64)
+    if arena == 0: return Err("Windows native observation allocation failed")
+    val result = windows_managed_stream_host_at_v2(arena)
+    if HeapFree(heap, 0u32, arena) == 0:
+        _windows_pty_managed_retain_observation_v2(heap, arena)
+        return Err("Windows native observation release failed; owner retained allocation")
+    result
+
+pub fn windows_managed_stream_launch_check_v2(request: WindowsManagedStreamRequestV2,
+        expected: WindowsManagedStreamHostV2, arena: i64) -> Result<bool, text>:
+    val observed = windows_managed_stream_host_at_v2(arena)?
+    if (observed.processor_groups != expected.processor_groups or observed.logical_processors != expected.logical_processors or
+            observed.process_in_job != expected.process_in_job or observed.cpu_quantum_millis != expected.cpu_quantum_millis):
+        return Err("Windows managed stream host topology or nesting drifted")
+    val sampled = time_sample_unix_micros_or_failure()
+    if sampled <= 0: return Err("Windows launch clock unavailable")
+    if sampled / 1000 >= request.launch_expires_at_unix_ms: return Err("Windows managed stream launch expired")
+    Ok(true)
+
+@unsafe(reason: "hard Job CPU and aggregate memory configured and independently read back before child admission", capabilities: [ffi, raw_ptr])
+pub fn windows_managed_stream_job_policy_v2(state: WindowsPtyStateV1,
+        request: WindowsManagedStreamRequestV2, host: WindowsManagedStreamHostV2) -> Result<bool, text>:
+    val rate = windows_managed_cpu_rate_v2(request.cpu_millis, host)?
+    val limits = state.arena + 12504
+    volatile_write_u32(limits + 16, 8704)
+    volatile_write_u64(limits + 120, request.memory_bytes)
+    if SetInformationJobObject(state.job, 9, limits, 144u32) == 0: return Err("Windows Job memory admission failed")
+    if QueryInformationJobObject(state.job, 9, limits, 144u32, 0) == 0: return Err("Windows Job memory readback failed")
+    if volatile_read_u32(limits + 16) != 8704u32 or volatile_read_u64(limits + 120) != request.memory_bytes as u64:
+        return Err("Windows Job memory or kill-on-close readback differs")
+    val cpu = state.arena + 12968
+    volatile_write_u32(cpu, 5)
+    volatile_write_u32(cpu + 4, rate)
+    if SetInformationJobObject(state.job, 15, cpu, 8u32) == 0: return Err("Windows Job CPU hard cap admission failed")
+    if QueryInformationJobObject(state.job, 15, cpu, 8u32, 0) == 0: return Err("Windows Job CPU hard cap readback failed")
+    if volatile_read_u32(cpu) != 5u32 or volatile_read_u32(cpu + 4) != rate as u32:
+        return Err("Windows Job CPU hard cap readback differs")
+    Ok(true)

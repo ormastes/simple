@@ -1,0 +1,170 @@
+# Windows-only RAW admission. The existing PTY slot owns every retained value.
+# No HPCON/ConPTY/conhost is created; stdout/stderr intentionally share a pipe.
+use std.common.process.windows_job_stream_v2.{WindowsManagedStreamLeaseV2,
+    WindowsManagedStreamRequestV2, WindowsManagedStreamAdmissionV2,
+    windows_managed_stream_request_reason_v2}
+use std.nogc_sync_mut.io.windows_pty_owner.{WindowsPtyStateV1,
+    _windows_pty_managed_reserve_v2, _windows_pty_managed_load_v2, _windows_pty_managed_store_v2}
+use std.nogc_sync_mut.io.windows_managed_stream_policy_v2.{windows_managed_stream_host_observe_v2,
+    windows_managed_stream_launch_check_v2, windows_managed_stream_job_policy_v2}
+use std.nogc_sync_mut.io.windows_process_owner.{_windows_process_wide_v1, _windows_process_pin_retained_v2}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{CreateFileW, CreateProcessW, CreateJobObjectW,
+    AssignProcessToJobObject, ResumeThread, InitializeProcThreadAttributeList,
+    UpdateProcThreadAttribute, GetTickCount64, GetLastError, HeapAlloc, CloseHandle}
+use std.nogc_sync_mut.io.windows_pty_abi.{CreateNamedPipeW, ConnectNamedPipe, CreatePipe,
+    CreateEventW, GetCurrentProcessId}
+use std.nogc_sync_mut.io.windows_job_stream_abi_v2.SetHandleInformation
+use std.nogc_sync_mut.io.windows_pty_launch_config.{WindowsPtyLaunchPreparedV1, windows_pty_launch_command_checked_v1}
+use std.sys.pty_launch.PtyLaunchModeV1
+use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u32, volatile_write_u64, volatile_read_u32, volatile_read_u64}
+
+fn failed(lease: WindowsManagedStreamLeaseV2, state: WindowsPtyStateV1, reason: text) -> WindowsManagedStreamAdmissionV2:
+    var retained = state
+    retained.failed = true
+    val stored = _windows_pty_managed_store_v2(lease, retained)
+    WindowsManagedStreamAdmissionV2.CleanupRequired(lease,
+        if stored.is_ok(): reason else: reason + "; retained state commit refused")
+
+@unsafe(reason: "exact clean UTF16 environment and typed argv storage remain in the existing owner arena ledger", capabilities: [ffi, raw_ptr])
+fn prepare(state: WindowsPtyStateV1, request: WindowsManagedStreamRequestV2) -> (WindowsPtyStateV1, WindowsPtyLaunchPreparedV1):
+    var next = state
+    var prepared = WindowsPtyLaunchPreparedV1()
+    val command = windows_pty_launch_command_checked_v1(PtyLaunchModeV1.Exec(request.program, request.args))
+    if command.is_err():
+        prepared.error = command.unwrap_err()
+        return (next, prepared)
+    var ordered = request.environment
+    var index = 1
+    while index < ordered.len():
+        var before = index
+        while before > 0 and ordered[before].to_upper() < ordered[before - 1].to_upper():
+            val previous = ordered[before - 1]
+            ordered[before - 1] = ordered[before]
+            ordered[before] = previous
+            before = before - 1
+        index = index + 1
+    var environment = ""
+    for assignment in ordered: environment = environment + assignment + "\0"
+    if environment == "": environment = "\0"
+    prepared.application = _windows_process_wide_v1(next.heap, request.program)
+    prepared.command = _windows_process_wide_v1(next.heap, command.unwrap())
+    prepared.directory = _windows_process_wide_v1(next.heap, request.directory)
+    prepared.environment = _windows_process_wide_v1(next.heap, environment)
+    next.temporaries = next.temporaries + [prepared.application, prepared.command, prepared.directory, prepared.environment]
+    if prepared.application == 0 or prepared.command == 0 or prepared.directory == 0 or prepared.environment == 0:
+        prepared.error = "Windows managed exact launch storage failed"
+    (next, prepared)
+
+@unsafe(reason: "creates only private RAW byte pipe endpoints with an exact child handle list", capabilities: [ffi, raw_ptr])
+fn raw_pipes(state: WindowsPtyStateV1, lease: WindowsManagedStreamLeaseV2) -> (WindowsPtyStateV1, text):
+    var next = state
+    val name_text = "\\\\.\\pipe\\simple-managed-raw-" + str(GetCurrentProcessId()) + "-" + str(lease.slot) + "-" + str(lease.generation)
+    val name = _windows_process_wide_v1(next.heap, name_text)
+    next.temporaries = next.temporaries.push(name)
+    if name == 0: return (next, "Windows managed pipe name allocation failed")
+    # FIRST_PIPE_INSTANCE + REJECT_REMOTE_CLIENTS; parent write client is overlapped.
+    next.input_server = CreateNamedPipeW(name, 524289u32, 8u32, 1u32, 4096u32, 4096u32, 0u32, 0)
+    if next.input_server == -1: next.input_server = 0
+    if next.input_server == 0: return (next, "Windows managed input pipe creation failed")
+    next.input = CreateFileW(name, 1073741824u32, 0u32, 0, 3u32, 1073741824u32, 0)
+    if next.input == -1: next.input = 0
+    if next.input == 0: return (next, "Windows managed input client creation failed")
+    if ConnectNamedPipe(next.input_server, 0) == 0 and GetLastError() != 535u32:
+        return (next, "Windows managed input pipe connection failed")
+    val output_created = CreatePipe(next.arena + 8, next.arena + 16, 0, 65536u32)
+    next.output = volatile_read_u64(next.arena + 8)
+    next.output_server = volatile_read_u64(next.arena + 16)
+    if next.output == -1: next.output = 0
+    if next.output_server == -1: next.output_server = 0
+    if output_created == 0: return (next, "Windows managed output pipe creation failed")
+    next.event = CreateEventW(0, 1, 0, 0)
+    if next.event == 0: return (next, "Windows managed input event creation failed")
+    volatile_write_u64(next.arena + 88, next.event)
+    if SetHandleInformation(next.input_server, 1u32, 1u32) == 0 or SetHandleInformation(next.output_server, 1u32, 1u32) == 0:
+        return (next, "Windows managed child endpoint inheritance failed")
+    (next, "")
+
+@unsafe(reason: "retains Job, file pins, launch allocations and attempted child identity in one existing PTY slot", capabilities: [ffi, raw_ptr])
+pub fn windows_managed_stream_admit_v2(request: WindowsManagedStreamRequestV2) -> WindowsManagedStreamAdmissionV2:
+    val host = match windows_managed_stream_host_observe_v2():
+        case Ok(value): value
+        case Err(reason): return WindowsManagedStreamAdmissionV2.Rejected(reason)
+    val reason = windows_managed_stream_request_reason_v2(request, host)
+    if reason != "": return WindowsManagedStreamAdmissionV2.Rejected(reason)
+    val lease = match _windows_pty_managed_reserve_v2():
+        case Ok(value): value
+        case Err(reason): return WindowsManagedStreamAdmissionV2.Rejected(reason)
+    var state = match _windows_pty_managed_load_v2(lease):
+        case Ok(value): value
+        case Err(reason): return WindowsManagedStreamAdmissionV2.CleanupRequired(lease, reason)
+    val pin = _windows_process_pin_retained_v2(state.heap, request.program, request.producer_digest,
+        request.launch_expires_at_unix_ms)
+    if pin.file != 0: state.managed_pins = state.managed_pins.push(pin.file)
+    state.managed_hash = pin.hash
+    state.managed_algorithm = pin.algorithm
+    state.temporaries = state.temporaries + pin.allocations
+    state.release_failed = pin.release_failed
+    if not pin.digest_matches:
+        return failed(lease, state, "Windows managed producer pin/digest or retained hash cleanup failed: " + pin.reason)
+    val launch = prepare(state, request)
+    state = launch.0
+    val prepared = launch.1
+    if prepared.error != "": return failed(lease, state, prepared.error)
+    val pipes = raw_pipes(state, lease)
+    state = pipes.0
+    if pipes.1 != "": return failed(lease, state, pipes.1)
+    state.job = CreateJobObjectW(0, 0)
+    if state.job == 0: return failed(lease, state, "Windows managed Job creation failed")
+    val policy = windows_managed_stream_job_policy_v2(state, request, host)
+    if policy.is_err(): return failed(lease, state, policy.unwrap_err())
+    val startup = state.arena + 12704
+    val process_info = state.arena + 12816
+    val allowed = state.arena + 12984
+    val _sized = InitializeProcThreadAttributeList(0, 1u32, 0u32, state.arena + 48)
+    val size = volatile_read_u64(state.arena + 48)
+    if size <= 0 or size > 1048576: return failed(lease, state, "Windows managed attribute size invalid")
+    val attributes = HeapAlloc(state.heap, 8u32, size)
+    state.temporaries = state.temporaries.push(attributes)
+    if attributes == 0: return failed(lease, state, "Windows managed attribute allocation failed")
+    if InitializeProcThreadAttributeList(attributes, 1u32, 0u32, state.arena + 48) == 0:
+        return failed(lease, state, "Windows managed attribute initialization failed")
+    # Retain initialized attribute identity until checked collect, including failures.
+    state.managed_attributes = attributes
+    volatile_write_u64(allowed, state.input_server)
+    volatile_write_u64(allowed + 8, state.output_server)
+    if UpdateProcThreadAttribute(attributes, 0u32, 131074u64, allowed, 16u64, 0, 0) == 0:
+        return failed(lease, state, "Windows managed HANDLE_LIST admission failed")
+    volatile_write_u32(startup, 112)
+    volatile_write_u32(startup + 60, 256)
+    volatile_write_u64(startup + 80, state.input_server)
+    volatile_write_u64(startup + 88, state.output_server)
+    volatile_write_u64(startup + 96, state.output_server)
+    volatile_write_u64(startup + 104, attributes)
+    val before_create = windows_managed_stream_launch_check_v2(request, host, state.arena + 13024)
+    if before_create.is_err(): return failed(lease, state, before_create.unwrap_err())
+    state.managed_create_attempted = true
+    # Suspended + UNICODE_ENVIRONMENT + EXTENDED_STARTUPINFO + NO_WINDOW.
+    val created = CreateProcessW(prepared.application, prepared.command, 0, 0, 1,
+        134743044u32, prepared.environment, prepared.directory, startup, process_info)
+    state.process = volatile_read_u64(process_info)
+    state.thread = volatile_read_u64(process_info + 8)
+    state.pid = volatile_read_u32(process_info + 16)
+    if created == 0: return failed(lease, state, "Windows managed CreateProcess attempted; cleanup authority retained")
+    if state.process == 0 or state.thread == 0: return failed(lease, state, "Windows managed attempted child handles incomplete")
+    if AssignProcessToJobObject(state.job, state.process) == 0:
+        return failed(lease, state, "Windows managed suspended Job assignment failed")
+    state.managed_assigned = true
+    # Close parent copies of child-only endpoints before resume/EOF observation.
+    if CloseHandle(state.input_server) == 0: return failed(lease, state, "Windows managed parent input endpoint release failed")
+    state.input_server = 0
+    if CloseHandle(state.output_server) == 0: return failed(lease, state, "Windows managed parent output endpoint release failed")
+    state.output_server = 0
+    val before_resume = windows_managed_stream_launch_check_v2(request, host, state.arena + 13024)
+    if before_resume.is_err(): return failed(lease, state, before_resume.unwrap_err())
+    if ResumeThread(state.thread) == 4294967295u32:
+        return failed(lease, state, "Windows managed resume outcome failed or uncertain")
+    state.managed_started = true
+    state.managed_deadline = GetTickCount64() + (request.timeout_ms as u64)
+    val stored = _windows_pty_managed_store_v2(lease, state)
+    if stored.is_err(): return WindowsManagedStreamAdmissionV2.CleanupRequired(lease, stored.unwrap_err())
+    WindowsManagedStreamAdmissionV2.Started(lease)

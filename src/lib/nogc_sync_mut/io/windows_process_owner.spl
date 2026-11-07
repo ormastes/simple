@@ -6,6 +6,7 @@ use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, GlobalMemory
 use std.nogc_sync_mut.io.windows_process_owner_abi.{GetFileInformationByHandleEx, ReadFile, BCryptOpenAlgorithmProvider, BCryptCreateHash, BCryptHashData, BCryptFinishHash, BCryptDestroyHash, BCryptCloseAlgorithmProvider}
 use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u16, volatile_write_u32, volatile_write_u64, volatile_read_u8, volatile_read_u32, volatile_read_u64}
 use std.nogc_sync_mut.io.windows_process_text.{windows_process_wide_linear_v1, windows_process_quote_arg_linear_v1}
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
 
 struct WindowsProcessInputV1:
     path: text
@@ -186,6 +187,130 @@ fn _windows_process_pin_v1(heap: i64, path: text, digest: text) -> i64:
         val _closed = CloseHandle(handle)
         return 0
     handle
+
+# Managed owners retain every opened handle, including mismatches, until
+# their own checked cleanup. This does not alter the legacy V1 close policy.
+pub struct WindowsProducerPinRetainedV2:
+    file: i64 = 0
+    digest_matches: bool = false
+    hash: i64 = 0
+    algorithm: i64 = 0
+    allocations: [i64] = []
+    release_failed: bool = false
+    reason: text = ""
+
+pub const WINDOWS_MANAGED_PRODUCER_MAX_HASH_BYTES_V2: i64 = 268435456
+
+fn _windows_managed_hash_deadline_v2(expires_at_unix_ms: i64) -> bool:
+    val sampled = time_sample_unix_micros_or_failure()
+    sampled > 0 and expires_at_unix_ms > 0 and sampled / 1000 < expires_at_unix_ms
+
+@unsafe(reason: "lends exact pinned executable identity with explicit retained mismatch ownership", capabilities: [ffi, raw_ptr])
+pub fn _windows_process_pin_retained_v2(heap: i64, path: text, digest: text,
+        expires_at_unix_ms: i64) -> WindowsProducerPinRetainedV2:
+    if digest.len() != 64: return WindowsProducerPinRetainedV2()
+    var retained = WindowsProducerPinRetainedV2()
+    if not _windows_managed_hash_deadline_v2(expires_at_unix_ms):
+        retained.reason = "Windows managed producer pin expired or clock unavailable"
+        return retained
+    val wide = _windows_process_wide_v1(heap, path)
+    if wide == 0:
+        retained.reason = "Windows managed producer path allocation failed"
+        return retained
+    # Do not use the V1 file helper: it discards a failed HeapFree(wide).
+    retained.file = CreateFileW(wide, 2147483648u32, 1u32, 0, 3u32, 2097280u32, 0)
+    if retained.file == -1: retained.file = 0
+    if HeapFree(heap, 0u32, wide) == 0:
+        retained.allocations = retained.allocations.push(wide)
+        retained.release_failed = true
+        retained.reason = "Windows managed producer path release failed; allocation retained"
+        return retained
+    if retained.file == 0:
+        retained.reason = "Windows managed producer file open failed"
+        return retained
+    _windows_process_hash_retained_v2(heap, retained.file, digest, expires_at_unix_ms)
+
+# V1 returns only text and cannot transfer failed cleanup ownership. Keep its
+# historical call sequence intact; V2 carries the complete native ledger.
+@unsafe(reason: "retains every CNG handle and failed heap release for the managed owner", capabilities: [ffi, raw_ptr])
+fn _windows_process_hash_retained_v2(heap: i64, file: i64, expected: text,
+        expires_at_unix_ms: i64) -> WindowsProducerPinRetainedV2:
+    var retained = WindowsProducerPinRetainedV2(file: file)
+    val metadata = HeapAlloc(heap, 8u32, 8u64)
+    val algorithm_slot = HeapAlloc(heap, 8u32, 8u64)
+    val hash_slot = HeapAlloc(heap, 8u32, 8u64)
+    val count_slot = HeapAlloc(heap, 8u32, 8u64)
+    val buffer = HeapAlloc(heap, 8u32, 65536u64)
+    val digest_buffer = HeapAlloc(heap, 8u32, 32u64)
+    val algorithm_name = _windows_process_wide_v1(heap, "SHA256")
+    val allocations = [metadata, algorithm_slot, hash_slot, count_slot, buffer, digest_buffer, algorithm_name]
+    var valid = true
+    for address in allocations:
+        if address == 0: valid = false
+    if valid:
+        if GetFileInformationByHandleEx(file, 9, metadata, 8u32) == 0 or (volatile_read_u32(metadata) & 1040) != 0:
+            valid = false
+    if valid:
+        val opened = BCryptOpenAlgorithmProvider(algorithm_slot, algorithm_name, 0, 0u32)
+        retained.algorithm = volatile_read_u64(algorithm_slot)
+        if opened != 0 or retained.algorithm == 0: valid = false
+    if valid:
+        val created = BCryptCreateHash(retained.algorithm, hash_slot, 0, 0u32, 0, 0u32, 0u32)
+        retained.hash = volatile_read_u64(hash_slot)
+        if created != 0 or retained.hash == 0: valid = false
+    var total: i64 = 0
+    while valid:
+        if not _windows_managed_hash_deadline_v2(expires_at_unix_ms):
+            retained.reason = "Windows managed producer hash expired or clock unavailable"
+            valid = false
+            break
+        val remaining = WINDOWS_MANAGED_PRODUCER_MAX_HASH_BYTES_V2 - total + 1
+        val capacity = if remaining < 65536: remaining else: 65536
+        if ReadFile(file, buffer, capacity as u32, count_slot, 0) == 0:
+            valid = false
+            break
+        val count = volatile_read_u32(count_slot)
+        total = total + (count as i64)
+        if total > WINDOWS_MANAGED_PRODUCER_MAX_HASH_BYTES_V2:
+            retained.reason = "Windows managed producer hash exceeds 256MiB bound"
+            valid = false
+            break
+        if not _windows_managed_hash_deadline_v2(expires_at_unix_ms):
+            retained.reason = "Windows managed producer hash expired or clock unavailable"
+            valid = false
+            break
+        if count == 0: break
+        if count > capacity or BCryptHashData(retained.hash, buffer, count as u32, 0u32) != 0:
+            valid = false
+            break
+    var digest = ""
+    if valid:
+        if BCryptFinishHash(retained.hash, digest_buffer, 32u32, 0u32) != 0:
+            valid = false
+        else:
+            val hex = "0123456789abcdef"
+            for index in 0..32:
+                val byte = volatile_read_u8(digest_buffer + index)
+                val high = byte / 16
+                val low = byte % 16
+                digest = digest + hex[high:high + 1] + hex[low:low + 1]
+    if retained.hash != 0:
+        if BCryptDestroyHash(retained.hash) == 0: retained.hash = 0
+        else: retained.release_failed = true
+    # Preserve provider and all launch buffers while any hash still owns them.
+    if retained.hash == 0 and retained.algorithm != 0:
+        if BCryptCloseAlgorithmProvider(retained.algorithm, 0u32) == 0: retained.algorithm = 0
+        else: retained.release_failed = true
+    for address in allocations:
+        if address != 0:
+            if retained.hash != 0 or retained.algorithm != 0:
+                retained.allocations = retained.allocations.push(address)
+            elif HeapFree(heap, 0u32, address) == 0:
+                retained.allocations = retained.allocations.push(address)
+                retained.release_failed = true
+    retained.digest_matches = (valid and digest == expected and retained.hash == 0 and
+        retained.algorithm == 0 and retained.allocations.len() == 0 and not retained.release_failed)
+    retained
 
 # Hash the exact pinned file handle, not a second path lookup. Reparse points
 # and directories are rejected from handle metadata before any data is read.
