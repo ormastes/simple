@@ -60,3 +60,37 @@ Rust tests `compiler/tests/conversion_call_text_parse_jit.rs`:
 `narrow_int_conversion_calls_parse_text_and_wrap` (541 before, 277 after),
 `as_cast_of_single_char_text_keeps_code_point` (ok before and after — pins
 that `as` keeps its rule).
+
+## Re-verification 2026-11-07 (int_builtin_text_single_char_returns_char_code_jit_2026_11_07)
+
+The single-character `int(text)` report is the same defect. Rust repro:
+`int_call_of_single_char_text_parses_not_code_point` in
+`compiler/tests/conversion_call_text_parse_jit.rs` (landed in PR #7484; the
+four tests in that file pass on a post-fix seed).
+
+Before the fix: `C:/dev/wt/seedtry_simple.exe` (built Nov 6 13:36, older than
+`173e92fe8e3`) running a fixture that has a `main` function, so it compiles
+under JIT. Output, verbatim:
+
+| expr | output | expected |
+|---|---|---|
+| `int("6")` | 54 | 6 |
+| `i32("4")` | 52 | 4 |
+| `i8("3")` | 51 | 3 |
+| `int("-5")` | -5 | -5 |
+| `int("0")` | 48 | 0 |
+| `int("42")` | 42 | 42 |
+| `int("")` | 0 | 0 |
+| `int("-")` | 45 | 0 |
+
+The deployed `bin/simple.exe` (built Nov 4 16:58) is older than `173e92fe8e3`
+and gives the same output, which is why the bug was filed again after the fix.
+Top-level code runs on the interpreter, which already prints 6.
+
+Spec: `test/01_unit/language/jit_int_call_single_char_text_parse_spec.spl`,
+tagged `@tag:in-development`. An explicit-path run on the deployed seed fails
+with the bug's values (`got 54 48 57`, `got 52 51`, `got -5 42 0 45`):
+`SPEC FILE VERDICT: ... outcome=ERROR declared>=3 executed=3 passed=0 failed=3`.
+
+Follow-up: the post-fix run and removing the tag wait for the next seed deploy.
+Un-tag the spec on the first seed deploy that contains `173e92fe8e3`.
