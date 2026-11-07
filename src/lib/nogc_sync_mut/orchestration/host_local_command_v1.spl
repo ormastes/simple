@@ -16,7 +16,7 @@ use std.common.contracts.orchestration.host_prepare_request_v1.host_prepare_requ
 use std.common.contracts.orchestration.host_execute_request_v1.host_execute_request_decode_v1
 use std.common.contracts.orchestration.host_execute_request_v2.host_execute_request_decode_v2
 use std.common.contracts.container.execution_v2.*
-use std.nogc_async_mut.container.api_v2.{simple_container_project_v2, simple_container_recover_v2, simple_container_read_v2}
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_project_v2, simple_container_recover_v2, simple_container_read_v2}
 use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
 use std.common.contracts.container.runtime_v1.{RuntimeOperationV1, RUNTIME_STATUS_OK}
 use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
@@ -50,7 +50,9 @@ fn host_local_finish_v1(owner: HostCapacityOwnerV1, action: text, operation_id: 
         case Err(reason): return host_local_error_v1(action, operation_id, "host-local-close-failed:" + reason, true)
     reply
 
-fn host_local_status_v1(local: HostLocalRootV1) -> Result<text, text>:
+# Project facts from the caller's retained single-writer owner. This does not
+# refresh provider state or confer authority to execute a request.
+pub fn host_local_status_v1(local: HostLocalRootV1) -> Result<text, text>:
     val ledger = local.capacity.ledger
     val available = host_available_capacity_v1(ledger)?
     val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("host-local-status"),
@@ -236,7 +238,20 @@ fn host_local_validate_v1(root: text, path: text) -> Result<text, text>:
     # Validation opens only the configured Container owner. It creates no
     # capacity journal and never calls create/start or manufactures a grant.
     val local = host_local_runtime_open_v1(root, 30000)?
-    val projection = simple_container_project_v2(local.container, request)?
+    host_local_validate_request_v2(local.container, request)
+
+# Persistent handlers use the same projection with their retained Container
+# owner; they neither reopen the capacity writer nor interpret a payload path.
+pub fn host_local_validate_payload_v2(container: SimpleContainerOwnerV2,
+        source: text, expected_operation_id: text = "") -> Result<text, text>:
+    val request = container_execution_request_decode_v2(source)?
+    if expected_operation_id != "" and request.plan.operation_id != expected_operation_id:
+        return Err("host-validate-operation-mismatch")
+    host_local_validate_request_v2(container, request)
+
+fn host_local_validate_request_v2(container: SimpleContainerOwnerV2,
+        request: ContainerExecutionRequestV2) -> Result<text, text>:
+    val projection = simple_container_project_v2(container, request)?
     val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("host-container-validation"),
         "backend": SdnValue.String(request.plan.backend), "operationId": SdnValue.String(projection.operation_id),
         "workloadUid": SdnValue.String(projection.workload_uid), "attempt": SdnValue.Int(projection.attempt),
