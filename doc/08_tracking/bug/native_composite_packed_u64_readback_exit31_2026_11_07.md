@@ -1,7 +1,7 @@
 # Pure native composite packed U64 readback exits31
 
 ID: native_composite_packed_u64_readback_exit31_2026_11_07
-Severity: P2. Status: fixing, owner `seed_bool_parameter` by explicit agreement; no repair or verification pass claimed.
+Severity: P2. Status: fix-implemented-verification-pending. Owner claim waiting_verify by explicit agreement; no semantic pass or closure.
 
 ## Actual observation
 
@@ -47,3 +47,11 @@ The actual selected link RSP SHA256 is `906703021e4d273337502faf9ab5807d94fba879
 The duplication audit found no exact duplicate; current canonical records were rechecked before insertion. Related records remain distinct and unchanged: `generic_struct_field_untagged_payload_seed_2026-08-21` is a historical generic scalar return; `result_struct_payload_pushed_into_struct_array_crashes_2026-10-25` is a struct-pointer/Result push crash; `sosix_stage2_blocked_by_runtime_wide_int_merge_2026-08-11` is runtime integration; `stage2_if_val_struct_option_binding_as_int_wide_2026-11-03` is an Option binder. Their observations/claims are not merged. Landed getter/index/loop repairs #7697/#7703/#7707 repair read paths and do not supersede this actual packed push observation.
 
 `seed_bool_parameter` explicitly agreed to active fixing ownership for this new ID. Registration adds only the observed P2 record, description, agreed fixing claim and this report. No new tests/builds, no closed/verified state, no workaround fixture edits and no campaign reset. Preserve two boxed greens, the composite failure and both unreached criteria exactly; future changed-source qualification requires root admission and must not replay unchanged passing criteria.
+
+## Source implementation landed; verification pending
+
+The independent source repair landed in [PR7741](https://github.com/ormastes/simple/pull/7741), merge `51d1823fefea53d1a8a086ba2811ce1aa182dda9`, exact reviewed head `911aa8ba1114bdfd0d84190ca6a9dd1a568f1dd0`. AstraTuple independently approved all five paths, including the current-release MIR-owner reconciliation. The known runtime-U64 receiver uses canonical `rt_typed_words_u64_push` with raw bits; declared HIR authority takes precedence, unproven/Any families retain generic insertion, and current boxed/packed providers are unchanged. Three pure LLVM declaration owners preserve `(ptr,i64)->i8`. The fifth file is a real five-case MIR spec, not an extra native fixture.
+
+Exact source review receipt: `build/review/pure-packed-u64-push-repair/ASTRA-PR7741-REVIEW.md`, SHA256 `c7f8673029d6f483c37d3de8c1f50f336d54050cf3724d34471cc3492c1c2f26`. The future native entry `fixtures/main.spl` SHA256 `4b3b034a8b08d058393c8c8cf6baae5f6759208ff11bfa0407461367f30d664c` is a separate local qualification artifact, not an additional published test. It targets a new boxed-push case, the failed packed comparison and the two unreached criteria without replaying old boxed-literal greens.
+
+The initial fixing claim above is historical. The owner explicitly agreed transition to `waiting_verify` after source merge; root owns the next pure producer, real Hello and target/resource admission. **All new unit/native controls remain UNRUN.** The old c56 binary and its actual composite failure are not repaired by changing source. No semantic PASS, full provider qualification, performance result, done or closure is asserted. At source landing Required/Component/RTL were in progress, not reported as passed. Preserve the earlier observation/evidence and finite ledger; no automatic run or previous-green replay follows from this metadata update.
