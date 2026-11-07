@@ -139,6 +139,7 @@ static int64_t ws_origin_empty_v1(void) {
 #include "runtime_workspace_storage_linux_private.h"
 #include "runtime_workspace_user_observation_linux_private.h"
 #include "runtime_workspace_executable_prep_linux_private.h"
+#include "runtime_workspace_containment_linux_private.h"
 static pthread_mutex_t ws_lock_v1 = PTHREAD_MUTEX_INITIALIZER;
 static int ws_lock_acquire_v1(void) {
     int error=ws_origin_guard_v1();if(error)return error;
@@ -180,17 +181,19 @@ static int ws_native_release_if_absent_v1(WsNativeV1* n,const char* l,int64_t h,
 
 #if !defined(__linux__)
 typedef struct { int unavailable; } WsUserNativeV1;
+typedef struct { int unavailable; } WsContainNativeV1;
 #endif
 
 #define WS_SLOT_COUNT_V1 32
 typedef struct {
     int64_t token, hard_bytes, used_bytes, used_inodes;
     uint32_t quota;
-    int released, role; /* role1 storage, role2 read-only user observation */
+    int released, role; /* role1 storage, role2 user observation, role3 containment observation */
     atomic_int busy; /* Registry admits loans; final borrower releases atomically. */
     char kind[64], parent[4096], leaf[128], pool[256], workspace[256], policy[65];
     WsNativeV1 native;
     WsUserNativeV1 user;
+    WsContainNativeV1 containment;
 } WsSlotV1;
 static WsSlotV1 ws_slots_v1[WS_SLOT_COUNT_V1];
 static int64_t ws_next_token_v1 = 1;
@@ -462,4 +465,73 @@ int64_t rt_workspace_storage_prepare_executable_v1(int64_t storage_token,int64_t
     (void)input_relative;(void)output_relative;(void)executable_relative;(void)expected_digest;
 #endif
     return rt_string_new((const uint8_t*)record,strlen(record));
+}
+
+/* A positive token means an owner exists, including partial capture. The
+ * facade must observe it and return it on every failure; never auto-close. */
+int64_t rt_linux_container_containment_capture_v1(int64_t pid,int64_t cgroup,int64_t binding) {
+    int error=ws_origin_guard_v1();if(error)return -error;
+#if defined(__linux__)
+    char path[4096],digest[65];
+    if(pid<=0||pid>INT_MAX||!ws_copy_text_v1(cgroup,path,sizeof(path))||!ws_cgroup_path_v1(path)||
+       !ws_copy_text_v1(binding,digest,sizeof(digest))||!ws_digest_v1(digest))return -EINVAL;
+    error=ws_lock_acquire_v1();if(error)return -error;
+    size_t index=WS_SLOT_COUNT_V1;
+    for(size_t i=0;i<WS_SLOT_COUNT_V1;i++)if(!ws_slots_v1[i].token){index=i;break;}
+    if(index==WS_SLOT_COUNT_V1||ws_next_token_v1==INT64_MAX){ws_lock_release_v1();return -ENOSPC;}
+    WsSlotV1* slot=&ws_slots_v1[index];memset(slot,0,sizeof(*slot));atomic_init(&slot->busy,0);
+    slot->role=3;slot->token=ws_next_token_v1++;strcpy(slot->policy,digest);strcpy(slot->parent,path);
+    ws_contain_init_v1(&slot->containment);
+    slot->containment.error=ws_contain_open_v1(&slot->containment,(pid_t)pid,path);
+    int64_t token=slot->token;ws_lock_release_v1();return token;
+#else
+    (void)pid;(void)cgroup;(void)binding;return -ENOTSUP;
+#endif
+}
+int64_t rt_linux_container_containment_observe_v1(int64_t token,int64_t binding) {
+    if(ws_origin_guard_v1())return ws_origin_empty_v1();
+    char output[6144]={0};
+#if defined(__linux__)
+    char digest[65];
+    if(!ws_copy_text_v1(binding,digest,sizeof(digest))||!ws_digest_v1(digest))return rt_string_new((const uint8_t*)"",0);
+    if(ws_lock_acquire_v1())return rt_string_new((const uint8_t*)"",0);
+    WsSlotV1* slot=ws_find_v1(token);int populated=-1;
+    if(slot&&slot->role==3&&!slot->busy&&!strcmp(slot->policy,digest)&&!ws_contain_observe_v1(&slot->containment,&populated)) {
+        WsContainNativeV1* n=&slot->containment;struct timespec now;
+        if(!clock_gettime(CLOCK_REALTIME,&now)&&now.tv_sec>0&&now.tv_sec<(INT64_MAX-999)/1000) {
+            int used=snprintf(output,sizeof(output),"linux-container-containment-native-v1\n%lld\n%s\n%ld\n%llu\n%s\n%llu\n%llu\n%llu\n%llu\n%llu\n",
+                (long long)token,digest,(long)n->pid,(unsigned long long)n->start_ticks,n->path,
+                (unsigned long long)n->mount_id,(unsigned long long)n->mount_device,(unsigned long long)n->mount_inode,
+                (unsigned long long)n->group_device,(unsigned long long)n->group_inode);
+            for(size_t i=0;i<5&&used>0&&(size_t)used<sizeof(output);i++) {
+                int wrote=snprintf(output+used,sizeof(output)-(size_t)used,"%llu\n%llu\n",
+                    (unsigned long long)n->ns_device[i],(unsigned long long)n->ns_inode[i]);
+                if(wrote<=0||(size_t)wrote>=sizeof(output)-(size_t)used){used=-1;break;}used+=wrote;
+            }
+            if(used>0&&(size_t)used<sizeof(output)) {
+                int wrote=snprintf(output+used,sizeof(output)-(size_t)used,"%lld\n%d\n",
+                    (long long)now.tv_sec*1000+now.tv_nsec/1000000,populated);
+                if(wrote<=0||(size_t)wrote>=sizeof(output)-(size_t)used)output[0]=0;
+            }else output[0]=0;
+        }
+    }
+    ws_lock_release_v1();if(ws_origin_guard_v1())return ws_origin_empty_v1();
+#else
+    (void)token;(void)binding;
+#endif
+    return rt_string_new((const uint8_t*)output,strlen(output));
+}
+int64_t rt_linux_container_containment_close_v1(int64_t token,int64_t binding) {
+    int error=ws_origin_guard_v1();if(error)return -error;
+#if defined(__linux__)
+    char digest[65];if(!ws_copy_text_v1(binding,digest,sizeof(digest))||!ws_digest_v1(digest))return -EINVAL;
+    error=ws_lock_acquire_v1();if(error)return -error;
+    WsSlotV1* slot=ws_find_v1(token);
+    if(!slot||slot->role!=3||strcmp(slot->policy,digest))error=ESTALE;
+    else if(slot->busy)error=EBUSY;
+    else if(!(error=ws_contain_close_v1(&slot->containment)))memset(slot,0,sizeof(*slot));
+    ws_lock_release_v1();return -error;
+#else
+    (void)token;(void)binding;return -ENOTSUP;
+#endif
 }
