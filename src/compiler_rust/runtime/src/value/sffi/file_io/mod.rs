@@ -39,7 +39,8 @@ pub use workspace_storage_v1::{rt_workspace_storage_open_v1, rt_workspace_storag
     rt_workspace_storage_forget_released_v1,rt_linux_container_user_open_v1,
     rt_linux_container_user_observe_v1,rt_linux_container_user_close_v1,
     rt_workspace_storage_prepare_executable_v1, rt_linux_container_containment_capture_v1,
-    rt_linux_container_containment_observe_v1, rt_linux_container_containment_close_v1};
+    rt_linux_container_containment_observe_v1, rt_linux_container_containment_close_v1,
+    rt_linux_container_containment_kernel_observe_v1};
 
 // Re-export all public functions for compatibility
 pub use metadata::{

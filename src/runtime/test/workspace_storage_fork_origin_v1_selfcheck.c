@@ -31,6 +31,7 @@
 #define rt_linux_container_containment_capture_v1 fork_fixture_containment_capture_v1
 #define rt_linux_container_containment_observe_v1 fork_fixture_containment_observe_v1
 #define rt_linux_container_containment_close_v1 fork_fixture_containment_close_v1
+#define rt_linux_container_containment_kernel_observe_v1 fork_fixture_kernel_observe_v1
 #include "../runtime_workspace_storage_v1.c"
 
 static volatile sig_atomic_t fork_fixture_in_child;

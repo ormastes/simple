@@ -51,3 +51,9 @@ pub extern "C" fn rt_linux_container_containment_observe_v1(_token:i64,_binding:
 }
 #[no_mangle]
 pub extern "C" fn rt_linux_container_containment_close_v1(_token:i64,_binding:RuntimeValue)->i64{-95}
+
+#[no_mangle]
+pub extern "C" fn rt_linux_container_containment_kernel_observe_v1(_token:i64,_binding:RuntimeValue,
+    _release:RuntimeValue,_build:RuntimeValue,_profile:RuntimeValue)->RuntimeValue{
+    unsafe {rt_string_new(b"".as_ptr(),0)}
+}

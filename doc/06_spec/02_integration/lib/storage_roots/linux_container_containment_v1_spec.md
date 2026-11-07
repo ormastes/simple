@@ -21,3 +21,13 @@ The latter verifies permanent uncertainty and no repeated close of a consumed FD
 Neither fixture has been built or run. They do not test positive private PID/
 cgroup namespaces, live Podman association, descendants, removal ordering,
 no-repopulation, recovery, Windows containment, Simple ABI or capacity release.
+
+## Kernel observation extension (authored, not executed)
+
+**Retain the actual failed capture through kernel profile observation.** The
+third scenario obtains an actual partial native owner for an unrelated cgroup,
+then calls the production kernel observer with a valid profile. It requires no
+facts, an explicit error, and the same retained cleanup authority; successful
+close retires only descriptors. Unexpected owners are retained before assertions.
+No missing native provider becomes a pass. This is a refusal/ownership scenario,
+not positive running-kernel or terminal qualification.

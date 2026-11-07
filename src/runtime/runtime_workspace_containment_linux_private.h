@@ -16,12 +16,15 @@ typedef struct {
     uint64_t ns_device[5], ns_inode[5];
     uint64_t start_ticks, mount_id, mount_device, mount_inode, group_device, group_inode;
     pid_t pid;
+    pid_t kernel_tid;
+    int kernel_rootfd, kernel_sysfsfd, kernel_dirfd, kernel_notesfd, kernel_statusfd;
     char path[4096], mountpoint[4096];
 } WsContainNativeV1;
 
 static void ws_contain_init_v1(WsContainNativeV1* n) {
     memset(n,0,sizeof(*n));
     for(size_t i=0;i<WS_CONTAIN_FDS_V1;i++)n->fds[i]=-1;
+    n->kernel_rootfd=n->kernel_sysfsfd=n->kernel_dirfd=n->kernel_notesfd=n->kernel_statusfd=-1;
 }
 static int ws_contain_keep_v1(WsContainNativeV1* n,int fd) {
     /* Callers reserve room before the syscall; never discard an opened FD. */
