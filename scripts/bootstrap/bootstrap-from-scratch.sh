@@ -2461,6 +2461,16 @@ bootstrap_stage_sanity() (
     0|1) sanity_file_workers=${SIMPLE_FILE_WORKERS} ;;
     *) sanity_file_workers= ;;
   esac
+  # Explicit whole-program admission is the supported low-memory hosted-runner
+  # route. Preserve it across the same environment scrub as SIMPLE_FILE_WORKERS
+  # or candidate_frontend_smoke silently falls back to the >=30 GiB pool route.
+  sanity_bootstrap_whole_program_present=${SIMPLE_BOOTSTRAP_WHOLE_PROGRAM+x}
+  sanity_bootstrap_whole_program=${SIMPLE_BOOTSTRAP_WHOLE_PROGRAM-}
+  if [ "$sanity_bootstrap_whole_program_present" = x ] &&
+     [ "$sanity_bootstrap_whole_program" != 1 ]; then
+    echo 'bootstrap-sanity-error: phase=resource-validation reason=invalid-bootstrap-whole-program raw_status=125' >&2
+    return 125
+  fi
   sanity_probe_timeout=${COMPILER_PROBE_TIMEOUT_SECONDS}
   sanity_kill_grace=${COMPILER_CHECK_KILL_GRACE_SECONDS}
   sanity_max_log_bytes=${CANDIDATE_FRONTEND_MAX_LOG_BYTES}
@@ -2527,6 +2537,10 @@ bootstrap_stage_sanity() (
   if [ -n "${sanity_file_workers}" ]; then
     SIMPLE_FILE_WORKERS=${sanity_file_workers}
     export SIMPLE_FILE_WORKERS
+  fi
+  if [ "$sanity_bootstrap_whole_program_present" = x ]; then
+    SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=${sanity_bootstrap_whole_program}
+    export SIMPLE_BOOTSTRAP_WHOLE_PROGRAM
   fi
   CANDIDATE_FRONTEND_MAX_LOG_BYTES=${sanity_max_log_bytes}
   CANDIDATE_FRONTEND_ROOT=${sanity_frontend_root}
