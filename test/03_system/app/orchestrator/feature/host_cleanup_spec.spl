@@ -1,0 +1,210 @@
+# @req HOST-CLEANUP-01 HOST-CLEANUP-02 HOST-CLEANUP-03
+# NOT_RUN: real journal/crypto/collector; native provider is explicitly scripted.
+use test.fixtures.orchestration.host_cleanup_fixture_v1.*
+use test.fixtures.orchestration.host_service_reconciliation_fixture_v2.host_reconciliation_container_v2
+use std.nogc_async_mut.container.api_v2.SimpleContainerOwnerV2
+use test.fixtures.orchestration.host_terminal_wait_fixture_v2.host_terminal_wait_consumed_fixture_v2
+use std.nogc_sync_mut.orchestration.host_cleanup_v1.*
+use std.nogc_sync_mut.orchestration.host_local_root_v1.HostLocalRootV1
+use std.nogc_sync_mut.orchestration.host_cleanup_receipt_v1.*
+use std.nogc_sync_mut.orchestration.host_cleanup_store_v1.host_cleanup_publish_v1
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_regular_no_follow_bounded, file_remove}
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.nogc_sync_mut.io_runtime.{dir_remove, dir_create}
+use std.common.crypto.sha256.sha256_text
+
+fn host_cleanup_dispose_v1(local: HostLocalRootV1):
+    assert(host_capacity_owner_close_v1(local.capacity).unwrap())
+    assert(dir_remove(local.root, true))
+
+describe "Signed terminal host cleanup through common Container API":
+    it "releases only after qualified wait, actual destroy and exact independent absence, and survives reopen":
+        val fixture = host_cleanup_fixture_v1()
+        val context = fixture.context
+        val refresh = fn() -> HostReservationAuthorizationContextV1:
+            context
+        val turn = host_cleanup_v1(fixture.local, "operation_1", fixture.signed, fixture.approval, context, refresh)
+        expect(turn.error).to_equal("")
+        expect(turn.recovery_required).to_equal(false)
+        assert(turn.receipt.?)
+        val receipt = turn.receipt.unwrap()
+        assert(host_cleanup_settled_v1(turn.local, receipt).unwrap())
+        expect(receipt.absence.identity.native_id).to_equal("1".repeat(64))
+        expect(host_terminal_wait_consumed_fixture_v2(turn.local.container)).to_equal(10)
+        expect(host_available_capacity_v1(turn.local.capacity.ledger).unwrap().cpu_millis).to_equal(2000)
+        val bytes = host_cleanup_receipt_encode_v1(receipt).unwrap()
+        expect(host_cleanup_receipt_encode_v1(host_cleanup_receipt_decode_v1(bytes).unwrap()).unwrap()).to_equal(bytes)
+        expect(turn.local.capacity.journal.operations["operation_1"].outcome_digest).to_equal(sha256_text(bytes))
+        assert(host_capacity_owner_close_v1(turn.local.capacity).unwrap())
+        val reopened = host_capacity_owner_open_v1(turn.local.capacity.journal.root, turn.local.capacity.ledger.capacity, "d".repeat(64), 50, true).unwrap()
+        expect(host_available_capacity_v1(reopened.ledger).unwrap().cpu_millis).to_equal(2000)
+        assert(host_capacity_owner_close_v1(reopened).unwrap())
+        val quarantined = host_capacity_owner_open_quarantined_v2(turn.local.capacity.journal.root,
+            turn.local.capacity.ledger.capacity, "e".repeat(64), 50).unwrap()
+        assert(not quarantined.ledger.continuity_proven)
+        expect(quarantined.ledger.reservations[0].state).to_equal(HostReservationStateV1.Released)
+        expect(host_available_capacity_v1(quarantined.ledger).unwrap().cpu_millis).to_equal(2000)
+        assert(host_capacity_owner_close_v1(quarantined).unwrap())
+        val proof_path = turn.local.capacity.journal.root + "/host-cleanup-receipts-v1/" + sha256_text("operation_1") + ".sdn"
+        var changed = receipt
+        changed.wait_observation_digest = "e".repeat(64)
+        assert(file_atomic_write_mode(proof_path, host_cleanup_receipt_encode_v1(changed).unwrap(), 0o600))
+        val tampered = host_capacity_owner_open_quarantined_v2(turn.local.capacity.journal.root,
+            turn.local.capacity.ledger.capacity, "f".repeat(64), 50).unwrap()
+        expect(tampered.ledger.reservations[0].state).to_equal(HostReservationStateV1.Uncertain)
+        expect(host_available_capacity_v1(tampered.ledger).unwrap().cpu_millis).to_equal(1000)
+        assert(host_capacity_owner_close_v1(tampered).unwrap())
+        assert(file_remove(proof_path))
+        val missing = host_capacity_owner_open_quarantined_v2(turn.local.capacity.journal.root,
+            turn.local.capacity.ledger.capacity, "a".repeat(64), 50).unwrap()
+        expect(missing.ledger.reservations[0].state).to_equal(HostReservationStateV1.Uncertain)
+        expect(host_available_capacity_v1(missing.ledger).unwrap().cpu_millis).to_equal(1000)
+        assert(host_capacity_owner_close_v1(missing).unwrap())
+        assert(dir_remove(turn.local.root, true))
+
+    it "rejects a real corrupted cleanup signature before destroy and retains charge":
+        var fixture = host_cleanup_fixture_v1()
+        fixture.approval.signature[0] = ((fixture.approval.signature[0] as i64 + 1) % 256) as u8
+        val context = fixture.context
+        val refresh = fn() -> HostReservationAuthorizationContextV1:
+            context
+        val turn = host_cleanup_v1(fixture.local, "operation_1", fixture.signed, fixture.approval, context, refresh)
+        assert(turn.error != "")
+        host_cleanup_assert_charged_v1(turn.local)
+        expect(host_terminal_wait_consumed_fixture_v2(turn.local.container)).to_equal(8)
+        assert(not file_exists(turn.local.capacity.journal.root + "/host-cleanup-intents-v1"))
+        host_cleanup_dispose_v1(turn.local)
+
+    it "refuses exact approval expiry and clock regression after expensive verification before destroy":
+        for mode in ["expiry", "regression"]:
+            val fixture = host_cleanup_fixture_v1()
+            val context = fixture.context
+            var changed = context
+            changed.grant_clock = if mode == "expiry": fixture.approval.expires_at else: context.grant_clock - 1
+            val refresh_context = changed
+            val refresh = fn() -> HostReservationAuthorizationContextV1:
+                refresh_context
+            val turn = host_cleanup_v1(fixture.local, "operation_1", fixture.signed, fixture.approval, context, refresh)
+            expect(turn.error).to_equal(if mode == "expiry": "APPROVAL_EXPIRED" else: "host-cleanup-clock-regressed")
+            host_cleanup_assert_charged_v1(turn.local)
+            expect(host_terminal_wait_consumed_fixture_v2(turn.local.container)).to_equal(8)
+            assert(not file_exists(turn.local.capacity.journal.root + "/host-cleanup-intents-v1"))
+            host_cleanup_dispose_v1(turn.local)
+
+    it "keeps unknown absence charged after destroy and never retries destroy from retained intent":
+        val fixture = host_cleanup_fixture_v1("absence-unknown")
+        val context = fixture.context
+        val refresh = fn() -> HostReservationAuthorizationContextV1:
+            context
+        val turn = host_cleanup_v1(fixture.local, "operation_1", fixture.signed, fixture.approval, context, refresh)
+        assert(turn.error != "")
+        expect(turn.recovery_required).to_equal(true)
+        host_cleanup_assert_charged_v1(turn.local)
+        val proof = turn.local.capacity.journal.root + "/host-cleanup-intents-v1/" + sha256_text("operation_1") + ".sdn"
+        val before = file_read_regular_no_follow_bounded(proof, 2097152).unwrap()
+        val retried = host_cleanup_v1(turn.local, "operation_1", fixture.signed, fixture.approval, context, refresh)
+        assert(retried.error != "")
+        expect(retried.recovery_required).to_equal(true)
+        expect(file_read_regular_no_follow_bounded(proof, 2097152).unwrap()).to_equal(before)
+        expect(host_terminal_wait_consumed_fixture_v2(retried.local.container)).to_equal(10)
+        host_cleanup_assert_charged_v1(retried.local)
+        host_cleanup_dispose_v1(retried.local)
+
+    it "accepts independent exact absence after a lost destroy result without inferring failed means not-run":
+        val fixture = host_cleanup_fixture_v1("lost-destroy-result")
+        val context = fixture.context
+        val refresh = fn() -> HostReservationAuthorizationContextV1:
+            context
+        val turn = host_cleanup_v1(fixture.local, "operation_1", fixture.signed, fixture.approval, context, refresh)
+        expect(turn.error).to_equal("")
+        expect(turn.receipt.unwrap().destroy_status).to_equal("unknown")
+        assert(host_cleanup_settled_v1(turn.local, turn.receipt.unwrap()).unwrap())
+        host_cleanup_dispose_v1(turn.local)
+
+    it "rejects receipt drift and cannot settle an immutable conflicting receipt archive":
+        val fixture = host_cleanup_fixture_v1()
+        val context = fixture.context
+        val refresh = fn() -> HostReservationAuthorizationContextV1:
+            context
+        val turn = host_cleanup_v1(fixture.local, "operation_1", fixture.signed, fixture.approval, context, refresh)
+        expect(turn.error).to_equal("")
+        val receipt = turn.receipt.unwrap()
+        var changed = receipt
+        changed.runtime.native_id = "2".repeat(64)
+        expect(host_cleanup_receipt_encode_v1(changed).unwrap_err()).to_equal("host-cleanup-receipt-correlation")
+        changed = receipt
+        changed.wait_observation_digest = "e".repeat(64)
+        assert(host_cleanup_settled_v1(turn.local, changed).is_err())
+        assert(host_cleanup_publish_v1(turn.local.capacity.journal.root, "host-cleanup-receipts-v1", "operation_1", host_cleanup_receipt_encode_v1(changed).unwrap()).is_err())
+        assert(host_cleanup_settled_v1(turn.local, receipt).unwrap())
+        host_cleanup_dispose_v1(turn.local)
+
+    it "refuses missing qualified wait evidence before any inspection or destroy":
+        val fixture = host_cleanup_fixture_v1()
+        val wait_path = fixture.local.capacity.journal.root + "/host-terminal-waits-v2/" + sha256_text("operation_1") + ".sdn"
+        assert(file_remove(wait_path))
+        val context = fixture.context
+        val refresh = fn() -> HostReservationAuthorizationContextV1:
+            context
+        val turn = host_cleanup_v1(fixture.local, "operation_1", fixture.signed, fixture.approval, context, refresh)
+        assert(turn.error != "")
+        expect(host_terminal_wait_consumed_fixture_v2(turn.local.container)).to_equal(6)
+        host_cleanup_assert_charged_v1(turn.local)
+        assert(not file_exists(turn.local.capacity.journal.root + "/host-cleanup-intents-v1"))
+        host_cleanup_dispose_v1(turn.local)
+
+    it "retains charged owner after actual receipt path obstruction following native destroy":
+        val fixture = host_cleanup_fixture_v1()
+        val directory = fixture.local.capacity.journal.root + "/host-cleanup-receipts-v1"
+        assert(dir_create(directory, true))
+        # Actual private filesystem obstruction, not a fake failure callback.
+        assert(dir_create(directory + "/" + sha256_text("operation_1") + ".sdn", false))
+        val context = fixture.context
+        val refresh = fn() -> HostReservationAuthorizationContextV1:
+            context
+        val turn = host_cleanup_v1(fixture.local, "operation_1", fixture.signed, fixture.approval, context, refresh)
+        assert(turn.error != "")
+        expect(turn.recovery_required).to_equal(true)
+        expect(host_terminal_wait_consumed_fixture_v2(turn.local.container)).to_equal(10)
+        host_cleanup_assert_charged_v1(turn.local)
+        assert(file_exists(turn.local.capacity.journal.root + "/host-cleanup-intents-v1/" + sha256_text("operation_1") + ".sdn"))
+        host_cleanup_dispose_v1(turn.local)
+
+    it "rejects a cryptographically valid cleanup grant outside its issuer key lifetime":
+        val fixture = host_cleanup_fixture_v1("key-expired")
+        val context = fixture.context
+        val refresh = fn() -> HostReservationAuthorizationContextV1:
+            context
+        val turn = host_cleanup_v1(fixture.local, "operation_1", fixture.signed, fixture.approval, context, refresh)
+        expect(turn.error).to_equal("AUTHORITY_KEY_EXPIRED")
+        expect(host_terminal_wait_consumed_fixture_v2(turn.local.container)).to_equal(8)
+        host_cleanup_assert_charged_v1(turn.local)
+        assert(not file_exists(turn.local.capacity.journal.root + "/host-cleanup-intents-v1"))
+        host_cleanup_dispose_v1(turn.local)
+
+    it "rejects actual Common owner backend and scope drift before native inspection or destroy":
+        for mode in ["backend", "scope"]:
+            var fixture = host_cleanup_fixture_v1()
+            if mode == "backend":
+                fixture.local.container = host_reconciliation_container_v2([])
+            else:
+                match fixture.local.container:
+                    case SimpleContainerOwnerV2.Linux(scope, adapter):
+                        var different = scope
+                        different.boot_id = "another-native-boot"
+                        different.continuity_id = "another-native-boot"
+                        fixture.local.container = SimpleContainerOwnerV2.Linux(different, adapter)
+                    case _: fail("cleanup scope case requires actual Linux adapter")
+            val context = fixture.context
+            val refresh = fn() -> HostReservationAuthorizationContextV1:
+                context
+            val turn = host_cleanup_v1(fixture.local, "operation_1", fixture.signed, fixture.approval, context, refresh)
+            assert(turn.error != "")
+            match turn.local.container:
+                case SimpleContainerOwnerV2.Linux(_, adapter): expect(adapter.provider.scripted_cursor).to_equal(6)
+                case SimpleContainerOwnerV2.Windows(_, adapter): expect(adapter.provider.cursor).to_equal(0)
+            host_cleanup_assert_charged_v1(turn.local)
+            assert(not file_exists(turn.local.capacity.journal.root + "/host-cleanup-intents-v1"))
+            host_cleanup_dispose_v1(turn.local)

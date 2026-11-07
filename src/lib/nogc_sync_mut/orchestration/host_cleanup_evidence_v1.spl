@@ -1,0 +1,120 @@
+# Root-independent historical cleanup proof validation. The protected journal
+# producer authenticates archive publication; retained public policy is used at
+# its recorded authorization time, NEVER as fresh destruction permission.
+use std.nogc_sync_mut.orchestration.host_cleanup_receipt_v1.*
+use std.nogc_sync_mut.orchestration.host_cleanup_store_v1.host_cleanup_private_read_v1
+use std.nogc_sync_mut.orchestration.host_execution_envelope_v2.*
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.*
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.*
+use std.common.contracts.orchestration.host_terminal_wait_receipt_v2.*
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.*
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_authority_codec_v2.*
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+
+pub struct HostCleanupIntentV1:
+    operation: OperationEnvelopeV2
+    execution: ContainerExecutionPlanV2
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+    policy_bytes: text
+    policy_digest: text
+    authorized_unix_ms: i64
+    monotonic_ms: i64
+    policy_revision: i64
+    revocation_epoch: i64
+    session_generation: i64
+    wait_observation_digest: text
+    runtime_native_id: text
+
+pub fn host_cleanup_intent_encode_v1(value: HostCleanupIntentV1) -> Result<text, text>:
+    if (str_len(value.policy_bytes) > 1048576 or value.policy_digest != sha256_text(value.policy_bytes) or
+            value.authorized_unix_ms <= 0 or value.monotonic_ms < 0): return Err("host-cleanup-intent-policy-clock")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-cleanup-intent"),
+        "operation": SdnValue.String(distributed_encode_operation_v2(value.operation)?),
+        "execution": SdnValue.String(container_execution_plan_bytes_v2(value.execution)?),
+        "signedGrant": SdnValue.String(distributed_encode_signed_grant_v2(value.signed)?),
+        "signedApproval": SdnValue.String(distributed_encode_signed_approval_v2(value.approval)?),
+        "policy": SdnValue.String(value.policy_bytes), "policyDigest": SdnValue.String(value.policy_digest),
+        "authorizedUnixMs": SdnValue.Int(value.authorized_unix_ms), "monotonicMs": SdnValue.Int(value.monotonic_ms),
+        "policyRevision": SdnValue.Int(value.policy_revision), "revocationEpoch": SdnValue.Int(value.revocation_epoch),
+        "sessionGeneration": SdnValue.Int(value.session_generation),
+        "waitObservationDigest": SdnValue.String(value.wait_observation_digest), "nativeId": SdnValue.String(value.runtime_native_id)}
+    val bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(bytes) > 2097152: return Err("host-cleanup-intent-size")
+    Ok(bytes)
+
+fn cleanup_int_v1(fields: Dict<text, SdnValue>, name: text) -> Result<i64, text>:
+    match fields[name]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("host-cleanup-integer-required:" + name)
+
+pub fn host_cleanup_intent_decode_v1(source: text) -> Result<HostCleanupIntentV1, text>:
+    val fields = cleanup_fields_v1(source, ["version", "kind", "operation", "execution", "signedGrant", "signedApproval", "policy", "policyDigest", "authorizedUnixMs", "monotonicMs", "policyRevision", "revocationEpoch", "sessionGeneration", "waitObservationDigest", "nativeId"], 2097152)?
+    if fields["version"] != SdnValue.Int(1) or cleanup_text_v1(fields, "kind")? != "host-cleanup-intent": return Err("host-cleanup-intent-version")
+    val value = HostCleanupIntentV1(operation: distributed_decode_operation_v2(cleanup_text_v1(fields, "operation")?)?,
+        execution: container_execution_plan_decode_v2(cleanup_text_v1(fields, "execution")?)?,
+        signed: distributed_decode_signed_grant_v2(cleanup_text_v1(fields, "signedGrant")?)?,
+        approval: distributed_decode_signed_approval_v2(cleanup_text_v1(fields, "signedApproval")?)?,
+        policy_bytes: cleanup_text_v1(fields, "policy")?, policy_digest: cleanup_text_v1(fields, "policyDigest")?,
+        authorized_unix_ms: cleanup_int_v1(fields, "authorizedUnixMs")?, monotonic_ms: cleanup_int_v1(fields, "monotonicMs")?,
+        policy_revision: cleanup_int_v1(fields, "policyRevision")?, revocation_epoch: cleanup_int_v1(fields, "revocationEpoch")?,
+        session_generation: cleanup_int_v1(fields, "sessionGeneration")?, wait_observation_digest: cleanup_text_v1(fields, "waitObservationDigest")?,
+        runtime_native_id: cleanup_text_v1(fields, "nativeId")?)
+    if host_cleanup_intent_encode_v1(value)? != source: return Err("host-cleanup-intent-noncanonical")
+    Ok(value)
+
+pub fn host_cleanup_intent_load_v1(root: text, operation_id: text) -> Result<HostCleanupIntentV1, text>:
+    val bytes = host_cleanup_private_read_v1(root + "/host-cleanup-intents-v1", sha256_text(operation_id) + ".sdn", 2097152)?
+    val value = host_cleanup_intent_decode_v1(bytes)?
+    if value.operation.id != operation_id: return Err("host-cleanup-intent-operation")
+    Ok(value)
+
+# Historical authorization is checked against exact archived public policy and
+# context, not today's revocation state. Does not confer new effect authority.
+pub fn host_cleanup_intent_match_v1(value: HostCleanupIntentV1, operation: OperationEnvelopeV2,
+        execution: ContainerExecutionPlanV2, runtime: RuntimeIdentityV1, wait_digest: text) -> Result<bool, text>:
+    if (distributed_encode_operation_v2(value.operation)? != distributed_encode_operation_v2(operation)? or
+            container_execution_plan_bytes_v2(value.execution)? != container_execution_plan_bytes_v2(execution)? or
+            value.runtime_native_id != runtime.native_id or value.wait_observation_digest != wait_digest):
+        return Err("host-cleanup-intent-original-mismatch")
+    val policy = local_authority_policy_decode_v1(value.policy_bytes)?
+    if (policy.source_digest != value.policy_digest or policy.snapshot.policy_revision != value.policy_revision or
+            policy.snapshot.revocation_epoch != value.revocation_epoch or policy.session_generation != value.session_generation):
+        return Err("host-cleanup-intent-policy-mismatch")
+    var cleanup = operation
+    cleanup.operation = "host_cleanup_v1"
+    val grant = distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, value.signed, value.approval,
+        cleanup, value.authorized_unix_ms, policy.snapshot.generation, value.policy_revision, value.revocation_epoch, value.session_generation)?
+    Ok(true)
+
+# Entry used BEFORE journal settlement and on EVERY reopen. No root owner,
+# mutable capacity, caller digest, or terminal row flag establishes release.
+pub fn host_cleanup_evidence_v1(root: text, original_operation: OperationEnvelopeV2) -> Result<text, text>:
+    if original_operation.operation != "host_reservation_v1": return Err("host-cleanup-original-action")
+    val receipt = host_cleanup_receipt_load_v1(root, original_operation.id)?
+    val packet = file_read_regular_no_follow_bounded(root + "/host-execute-packets/" + sha256_text(original_operation.id) + ".sdn", 2097152)?
+    val envelope = host_execution_decode_v2(packet, receipt.scope)?
+    if distributed_encode_operation_v2(envelope.operation)? != distributed_encode_operation_v2(original_operation)?: return Err("host-cleanup-original-operation")
+    val observation = host_execution_observation_load_v2(root, original_operation.id)?
+    if (observation.operation_id != original_operation.id or observation.operation_digest != sha256_text(distributed_encode_operation_v2(original_operation)?) or
+            observation.plan_digest != envelope.intent.plan_digest or observation.request_digest != envelope.execution.plan.request_digest or
+            container_scope_fence_id_v2(observation.scope)? != container_scope_fence_id_v2(receipt.scope)?):
+        return Err("host-cleanup-original-observation-mismatch")
+    val wait = host_terminal_wait_receipt_decode_v2(host_cleanup_private_read_v1(root + "/host-terminal-waits-v2", sha256_text(original_operation.id) + ".sdn", HOST_TERMINAL_WAIT_MAX_BYTES_V2)?)?
+    val matched = host_cleanup_receipt_match_v1(receipt, wait, envelope.execution.plan, observation.runtime,
+        sha256_text(distributed_encode_operation_v2(original_operation)?), envelope.intent.plan_digest,
+        observation.provider_identity_digest, observation.observed_unix_ms)?
+    val intent = host_cleanup_intent_load_v1(root, original_operation.id)?
+    val matching = host_cleanup_intent_match_v1(intent, original_operation, envelope.execution.plan, observation.runtime, wait.observation_digest)?
+    if (sha256_text(host_cleanup_intent_encode_v1(intent)?) != receipt.cleanup_intent_digest or
+            receipt.observed_unix_ms < intent.authorized_unix_ms): return Err("host-cleanup-intent-receipt-mismatch")
+    Ok(host_cleanup_receipt_encode_v1(receipt)?)
