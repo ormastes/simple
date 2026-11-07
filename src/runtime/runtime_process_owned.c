@@ -6525,3 +6525,36 @@ SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket, SplArray
 #if !defined(RT_PROCESS_OWNED_CORE_ONLY)
 #include "runtime_sosix_darwin_snapshot_v1_impl.h"
 #endif
+
+/* Group-stream broker mode is explicitly unavailable outside its admitted
+ * Linux provider. Keep generic process/SOSIX facades link-complete without
+ * fabricating a lease or altering legacy Windows pipe ownership. */
+#if !defined(__linux__) || defined(RT_PROCESS_OWNED_CORE_ONLY)
+static SplArray* group_stream_unavailable_v2(int count) {
+    SplArray* values=rt_array_new((uint64_t)count);
+    if(!values)return NULL;
+    for(int i=0;i<count;i++) {
+        int64_t word=count==2?(i==1?ENOTSUP:0):(i==0?ENOTSUP:0);
+        if(!rt_array_push(values,rt_value_int(word))){rt_array_free(values);return NULL;}
+    }
+    return values;
+}
+int64_t rt_linux_group_stream_admit_v2(const char*p,int64_t n){(void)p;(void)n;return ENOTSUP;}
+SplArray* rt_linux_group_launch_stream_broker_v2(const char*p,int64_t pn,const char*d,int64_t dn,
+        SplArray*a,int64_t g,const char*r,int64_t rn,const char*i,int64_t in,
+        const char*c,int64_t cn,int64_t deadline) {
+    (void)p;(void)pn;(void)d;(void)dn;(void)a;(void)g;(void)r;(void)rn;(void)i;(void)in;
+    (void)c;(void)cn;(void)deadline;return group_stream_unavailable_v2(2);
+}
+SplArray* rt_linux_group_start_stream_v2(const char*p,int64_t pn,const char*d,int64_t dn,
+        SplArray*a,SplArray*e,const char*c,int64_t cn,const char*r,int64_t rn,
+        const char*i,int64_t in,int64_t memory,int64_t timeout,int64_t deadline) {
+    (void)p;(void)pn;(void)d;(void)dn;(void)a;(void)e;(void)c;(void)cn;(void)r;(void)rn;
+    (void)i;(void)in;(void)memory;(void)timeout;(void)deadline;return group_stream_unavailable_v2(2);
+}
+int64_t rt_linux_group_stream_recover_lease_v2(const char*r,int64_t n,const char*i,int64_t m){(void)r;(void)n;(void)i;(void)m;return -1;}
+int64_t rt_linux_group_stream_no_child_scope_v2(const char*r,int64_t n,const char*i,int64_t m){(void)r;(void)n;(void)i;(void)m;return -1;}
+int64_t rt_linux_group_stream_collect_no_child_v2(const char*r,int64_t n,const char*i,int64_t m){(void)r;(void)n;(void)i;(void)m;return ENOTSUP;}
+SplArray* rt_linux_group_collected_stream_v2(int64_t token){(void)token;return group_stream_unavailable_v2(10);}
+int64_t rt_linux_group_stream_release_inherited_v2(void){return ENOTSUP;}
+#endif

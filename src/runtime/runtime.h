@@ -1487,6 +1487,17 @@ SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket);
  * cgroup memory.current while live and zero after the tree is reaped.
  * Unsupported hosts fail closed. */
 #ifdef __linux__
+/* Counted-byte group-stream profile; unsupported providers return explicit errors. */
+int64_t rt_linux_group_stream_admit_v2(const char*,int64_t);
+SplArray* rt_linux_group_launch_stream_broker_v2(const char*,int64_t,const char*,int64_t,
+    SplArray*,int64_t,const char*,int64_t,const char*,int64_t,const char*,int64_t,int64_t);
+SplArray* rt_linux_group_start_stream_v2(const char*,int64_t,const char*,int64_t,
+    SplArray*,SplArray*,const char*,int64_t,const char*,int64_t,const char*,int64_t,int64_t,int64_t,int64_t);
+SplArray* rt_linux_group_collected_stream_v2(int64_t);
+int64_t rt_linux_group_stream_no_child_scope_v2(const char*,int64_t,const char*,int64_t);
+int64_t rt_linux_group_stream_collect_no_child_v2(const char*,int64_t,const char*,int64_t);
+int64_t rt_linux_group_stream_recover_lease_v2(const char*,int64_t,const char*,int64_t);
+int64_t rt_linux_group_stream_release_inherited_v2(void);
 SplArray* rt_linux_group_launch_broker_v1(const char* program,
     uint64_t program_len, const char* digest, uint64_t digest_len,
     SplArray* args);
@@ -1516,6 +1527,21 @@ SplArray*   rt_process_piped_exit_status_value(int64_t pid);
  * alive 0 stopped/1 running, write >=0 accepted. stdout state 0 deferred/1 EOF.
  * Valid POSIX Ref liveness/close return -3 unsupported: no reap/signal/free.
  * Reads use the same thread-local buffer and UTF-8 framing as legacy PID reads. */
+/* Group-stream V2 tickets and binding-aware stream actions. No language FD or
+ * pointer lease crosses this ABI. POSIX proof retirement uses the pinned root. */
+int64_t rt_process_stream_reserve_v2(void);
+int64_t rt_process_stream_bind_v2(int64_t,const char*,int64_t,const char*,int64_t);
+int64_t rt_process_stream_abandon_unlaunched_v2(int64_t,const char*,int64_t,const char*,int64_t);
+int64_t rt_process_stream_pid_v2(int64_t,const char*,int64_t,const char*,int64_t);
+int64_t rt_process_stream_retire_v2(int64_t,const char*,int64_t,const char*,int64_t,const char*,int64_t);
+const char* rt_process_read_stdout_owned_v2(int64_t,int64_t,const char*,int64_t,const char*,int64_t);
+int64_t rt_process_stdout_state_owned_v2(int64_t,int64_t,const char*,int64_t,const char*,int64_t);
+int64_t rt_process_validate_piped_owned_v2(int64_t,int64_t,const char*,int64_t,const char*,int64_t);
+int64_t rt_process_write_stdin_some_owned_v2(int64_t,int64_t,const char*,int64_t,const char*,int64_t,const char*,int64_t,int64_t,int64_t);
+/* Native-private explicit owned descriptor transfer, never a language API. */
+int rt_process_stream_claim_launch_v2(int64_t,const char*,int64_t,const char*,int64_t,int*,int*,int*);
+int rt_process_stream_launch_not_started_v2(int64_t,const char*,int64_t,const char*,int64_t);
+int rt_process_stream_publish_broker_v2(int64_t,const char*,int64_t,const char*,int64_t,int64_t);
 int64_t rt_process_spawn_piped_generation_v1(const char* cmd, int64_t cmd_len, SplArray* args);
 int64_t rt_process_piped_pid_for_generation_v1(int64_t generation);
 const char* rt_process_read_stdout_ref_v1(int64_t pid, int64_t generation);

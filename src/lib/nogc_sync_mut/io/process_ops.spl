@@ -1863,10 +1863,27 @@ pub fn process_bounded_kill_signal(exit_code: i64) -> i64:
 # Copying a Ref does not create another stdout reader or remote authority.
 use std.common.text_bytes.{boxed_text_bytes_checked}
 use std.common.string_core.{str_len}
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2, group_process_stream_launch_validate_v2, group_process_stream_launch_encode_v2, group_process_stream_identity_v2}
+use std.nogc_sync_mut.io.group_process_owner.{GroupProcessStreamOwnerV2, group_process_stream_owner_validate_v2, group_process_stream_prepare_v2, group_process_stream_recover_v2, group_process_stream_confirm_v2, group_process_stream_probe_bound_v2, group_process_stream_cancel_v2, group_process_stream_cleanup_proof_v2}
+use std.nogc_sync_mut.io.linux_process_owner.{linux_process_stream_admit_v2, linux_process_launch_stream_broker_v2}
 
 struct PipedProcessRefV1:
     pid: i64
     generation: i64
+    group_root: text = ""
+    group_identity: text = ""
+
+struct PipedProcessOwnedTransferV2:
+    owner: GroupProcessStreamOwnerV2
+    reference: PipedProcessRefV1
+
+enum PipedProcessOwnedSpawnV2:
+    # Transfer availability only. This is not application/attach success or an
+    # attestation that child code executed; consumers remain opening until
+    # their own qualified provider/stream observation.
+    Ready(owner: GroupProcessStreamOwnerV2, reference: PipedProcessRefV1)
+    CleanupRequired(owner: GroupProcessStreamOwnerV2, reference: PipedProcessRefV1?, reason: text)
+    Rejected(reason: text)
 
 val PIPED_PROCESS_REF_V1_MAX_ARGS: i64 = 64
 
@@ -1887,6 +1904,25 @@ extern fn rt_process_is_piped_alive_ref_v1(pid: i64, generation: i64) -> i64
 @unsafe(reason: "same-registry exact-reference close claim: 0 success, -2 stale or duplicate, -3 POSIX unsupported, -1 cleanup failure", capabilities: [ffi])
 extern fn rt_process_close_piped_ref_v1(pid: i64, generation: i64) -> i64
 
+@unsafe(reason: "reserve only pipe descriptors and a unique generation in the existing registry", capabilities: [ffi])
+extern fn rt_process_stream_reserve_v2() -> i64
+@unsafe(reason: "bind a reserved generation to a pinned protected root and immutable request digest", capabilities: [ffi])
+extern fn rt_process_stream_bind_v2(generation: i64, root: text, root_len: i64, identity: text, identity_len: i64) -> i64
+@unsafe(reason: "release a ticket only when the canonical launcher proves no process was launched", capabilities: [ffi])
+extern fn rt_process_stream_abandon_unlaunched_v2(generation: i64, root: text, root_len: i64, identity: text, identity_len: i64) -> i64
+@unsafe(reason: "retrieve a PID only from the exact generation and immutable group binding", capabilities: [ffi])
+extern fn rt_process_stream_pid_v2(generation: i64, root: text, root_len: i64, identity: text, identity_len: i64) -> i64
+@unsafe(reason: "retire bound descriptors only when pinned-root terminal bytes match canonical verified proof", capabilities: [ffi])
+extern fn rt_process_stream_retire_v2(generation: i64, root: text, root_len: i64, identity: text, identity_len: i64, proof: text, proof_len: i64) -> i64
+@unsafe(reason: "read the sole native stream after atomic reference and group-binding validation", capabilities: [ffi])
+extern fn rt_process_read_stdout_owned_v2(pid: i64, generation: i64, root: text, root_len: i64, identity: text, identity_len: i64) -> text
+@unsafe(reason: "observe exact bound stream EOF without process polling or another reader", capabilities: [ffi])
+extern fn rt_process_stdout_state_owned_v2(pid: i64, generation: i64, root: text, root_len: i64, identity: text, identity_len: i64) -> i64
+@unsafe(reason: "validate exact bound registry ownership without read, wait or signal", capabilities: [ffi])
+extern fn rt_process_validate_piped_owned_v2(pid: i64, generation: i64, root: text, root_len: i64, identity: text, identity_len: i64) -> i64
+@unsafe(reason: "write bytes only after atomic reference and group-binding validation", capabilities: [ffi])
+extern fn rt_process_write_stdin_some_owned_v2(pid: i64, generation: i64, root: text, root_len: i64, identity: text, identity_len: i64, data: text, data_len: i64, offset: i64, max_bytes: i64) -> i64
+
 fn _piped_ref_input_error_v1(value: text) -> text:
     match boxed_text_bytes_checked(value):
         case Err(reason): return "process_input_encoding_failed"
@@ -1896,7 +1932,121 @@ fn _piped_ref_input_error_v1(value: text) -> text:
     ""
 
 fn _piped_ref_valid_v1(process: PipedProcessRefV1) -> bool:
-    process.pid > 0 and process.generation > 0
+    process.pid > 0 and process.generation > 0 and ((process.group_root == "" and process.group_identity == "") or
+        (process.group_root != "" and process.group_identity != ""))
+
+pub fn process_piped_ref_equal_v1(left: PipedProcessRefV1, right: PipedProcessRefV1) -> bool:
+    left.pid == right.pid and left.generation == right.generation and
+        left.group_root == right.group_root and left.group_identity == right.group_identity
+
+pub fn process_validate_piped_owned_transfer_v2(transfer: PipedProcessOwnedTransferV2) -> Result<(), text>:
+    val owner = transfer.owner
+    val invalid = group_process_stream_owner_validate_v2(owner)
+    if invalid != "": return Err(invalid)
+    val reference = transfer.reference
+    if reference.group_root != owner.launch.root or reference.group_identity != owner.identity_digest or
+            reference.generation != owner.launch.transport_generation:
+        return Err("process_owned_transfer_binding_mismatch")
+    process_validate_piped_ref_v1(reference)
+
+pub fn process_piped_owned_transfer_equal_v2(left: PipedProcessOwnedTransferV2,
+        right: PipedProcessOwnedTransferV2) -> bool:
+    if group_process_stream_owner_validate_v2(left.owner) != "" or
+            group_process_stream_owner_validate_v2(right.owner) != "": return false
+    process_piped_ref_equal_v1(left.reference, right.reference) and
+        left.owner.identity_digest == right.owner.identity_digest and
+        group_process_stream_launch_encode_v2(left.owner.launch) == group_process_stream_launch_encode_v2(right.owner.launch)
+
+fn _process_stream_reference_v2(owner: GroupProcessStreamOwnerV2) -> PipedProcessRefV1?:
+    val launch = owner.launch
+    val pid = unsafe(capabilities: [ffi]):
+        rt_process_stream_pid_v2(launch.transport_generation, launch.root, str_len(launch.root),
+            owner.identity_digest, str_len(owner.identity_digest))
+    if pid <= 0: return nil
+    Some(PipedProcessRefV1(pid: pid, generation: launch.transport_generation,
+        group_root: launch.root, group_identity: owner.identity_digest))
+
+fn _process_stream_reject_or_retain_v2(owner: GroupProcessStreamOwnerV2, reason: text) -> PipedProcessOwnedSpawnV2:
+    val launch = owner.launch
+    val abandoned = unsafe(capabilities: [ffi]):
+        rt_process_stream_abandon_unlaunched_v2(launch.transport_generation, launch.root, str_len(launch.root),
+            owner.identity_digest, str_len(owner.identity_digest))
+    if abandoned == 0: return PipedProcessOwnedSpawnV2.Rejected(reason)
+    PipedProcessOwnedSpawnV2.CleanupRequired(owner, _process_stream_reference_v2(owner), reason)
+
+pub fn process_spawn_piped_owned_v2(launch: GroupProcessStreamLaunchV2) -> PipedProcessOwnedSpawnV2:
+    if launch.transport_generation != 0: return PipedProcessOwnedSpawnV2.Rejected("process_transport_already_assigned")
+    val invalid = group_process_stream_launch_validate_v2(launch)
+    if invalid != "": return PipedProcessOwnedSpawnV2.Rejected(invalid)
+    if group_process_stream_launch_encode_v2(launch) == "":
+        return PipedProcessOwnedSpawnV2.Rejected("process_stream_request_exceeds_wire_bound")
+    # Admission checks the actual platform and delegation before any ticket or fork.
+    match linux_process_stream_admit_v2(launch.delegated_cgroup_path):
+        case Err(reason): return PipedProcessOwnedSpawnV2.Rejected(reason)
+        case Ok(_): pass
+    val now = time_now_unix_micros()
+    if now <= 0 or now / 1000 >= launch.request.launch_deadline_unix_ms:
+        return PipedProcessOwnedSpawnV2.Rejected("process_launch_authority_expired")
+    val generation = unsafe(capabilities: [ffi]): rt_process_stream_reserve_v2()
+    if generation <= 0: return PipedProcessOwnedSpawnV2.Rejected("process_stream_reservation_failed")
+    var prepared = launch
+    prepared.transport_generation = generation
+    val owner = GroupProcessStreamOwnerV2(launch: prepared, identity_digest: group_process_stream_identity_v2(prepared))
+    val bound = unsafe(capabilities: [ffi]):
+        rt_process_stream_bind_v2(generation, prepared.root, str_len(prepared.root),
+            owner.identity_digest, str_len(owner.identity_digest))
+    if bound != 0: return _process_stream_reject_or_retain_v2(owner, "process_stream_binding_failed")
+    match group_process_stream_prepare_v2(prepared):
+        case Err(reason): return _process_stream_reject_or_retain_v2(owner, reason)
+        case Ok(_): pass
+    val broker_args = ["--broker-root", prepared.root, "--request-digest", owner.identity_digest]
+    match linux_process_launch_stream_broker_v2(prepared.request.broker_program, prepared.request.broker_digest,
+            broker_args, generation, prepared.root, owner.identity_digest,
+            prepared.delegated_cgroup_path, prepared.request.launch_deadline_unix_ms):
+        case Err(reason): return _process_stream_reject_or_retain_v2(owner, reason)
+        case Ok(_): pass
+    val reference = _process_stream_reference_v2(owner)
+    match reference:
+        case None: return PipedProcessOwnedSpawnV2.CleanupRequired(owner, nil, "process_stream_handoff_unknown")
+        case Some(exact):
+            match group_process_stream_confirm_v2(owner):
+                case Err(reason): return PipedProcessOwnedSpawnV2.CleanupRequired(owner, reference, reason)
+                case Ok(observed):
+                    if observed.terminal:
+                        return PipedProcessOwnedSpawnV2.CleanupRequired(owner, reference, "process_stream_already_terminal")
+                    return PipedProcessOwnedSpawnV2.Ready(owner, exact)
+
+pub fn process_cleanup_piped_owned_v2(owner: GroupProcessStreamOwnerV2,
+        reference: PipedProcessRefV1?) -> Result<(), text>:
+    val invalid = group_process_stream_owner_validate_v2(owner)
+    if invalid != "": return Err(invalid)
+    match reference:
+        case Some(exact):
+            val _valid = process_validate_piped_owned_transfer_v2(PipedProcessOwnedTransferV2(owner: owner, reference: exact))?
+        case None: pass
+    # A bounded cancel turn is not proof. Only the canonical durable terminal
+    # receipt permits descriptor retirement; all failures retain the owner.
+    # A no-child admission receipt needs no control response from an exited
+    # broker. Otherwise request cancellation and require its collected proof.
+    val proof = match group_process_stream_cleanup_proof_v2(owner):
+        case Ok(value): value
+        case Err(_pending):
+            val _cancelled = group_process_stream_cancel_v2(owner)?
+            group_process_stream_cleanup_proof_v2(owner)?
+    val launch = owner.launch
+    val retired = unsafe(capabilities: [ffi]):
+        rt_process_stream_retire_v2(launch.transport_generation, launch.root, str_len(launch.root),
+            owner.identity_digest, str_len(owner.identity_digest), proof, str_len(proof))
+    if retired == -2:
+        match reference:
+            # Recovery after host loss has no native endpoint to retire. The
+            # exact durable cleanup proof was still required above; no slot
+            # with another generation or binding is touched by this outcome.
+            case None: return Ok(())
+            case Some(_): return Err("stale_process_reference")
+    if retired != 0: return Err("process_stream_retirement_failed")
+    # Durable owner/receipt files remain for the host ledger's separate reap ack.
+    Ok(())
 
 pub fn process_spawn_piped_ref_v1(cmd: text, args: [text]) -> Result<PipedProcessRefV1, text>:
     if cmd == "": return Err("empty_process_command")
@@ -1928,7 +2078,11 @@ pub fn process_validate_piped_ref_v1(process: PipedProcessRefV1) -> Result<(), t
     if not _piped_ref_valid_v1(process): return Err("invalid_process_reference")
     var validated: i64 = -1
     unsafe(capabilities: [ffi]):
-        validated = rt_process_validate_piped_ref_v1(process.pid, process.generation)
+        if process.group_root != "":
+            validated = rt_process_validate_piped_owned_v2(process.pid, process.generation,
+                process.group_root, str_len(process.group_root), process.group_identity, str_len(process.group_identity))
+        else:
+            validated = rt_process_validate_piped_ref_v1(process.pid, process.generation)
     if validated == -2: return Err("stale_process_reference")
     if validated != 0: return Err("process_reference_validation_failed")
     Ok(())
@@ -1937,11 +2091,19 @@ pub fn process_read_stdout_ref_v1(process: PipedProcessRefV1) -> Result<text?, t
     if not _piped_ref_valid_v1(process): return Err("invalid_process_reference")
     var chunk: text = ""
     unsafe(capabilities: [ffi]):
-        chunk = rt_process_read_stdout_ref_v1(process.pid, process.generation)
+        if process.group_root != "":
+            chunk = rt_process_read_stdout_owned_v2(process.pid, process.generation,
+                process.group_root, str_len(process.group_root), process.group_identity, str_len(process.group_identity))
+        else:
+            chunk = rt_process_read_stdout_ref_v1(process.pid, process.generation)
     if chunk != "": return Ok(Some(chunk))
     var state: i64 = -1
     unsafe(capabilities: [ffi]):
-        state = rt_process_stdout_state_ref_v1(process.pid, process.generation)
+        if process.group_root != "":
+            state = rt_process_stdout_state_owned_v2(process.pid, process.generation,
+                process.group_root, str_len(process.group_root), process.group_identity, str_len(process.group_identity))
+        else:
+            state = rt_process_stdout_state_ref_v1(process.pid, process.generation)
     if state == 0: return Ok(nil)
     if state == 1: return Err("process_stdout_eof")
     if state == -2: return Err("stale_process_reference")
@@ -1955,14 +2117,25 @@ pub fn process_write_stdin_some_ref_v1(process: PipedProcessRefV1, data: text,
         return Err("invalid_process_write_range")
     var written: i64 = -1
     unsafe(capabilities: [ffi]):
-        written = rt_process_write_stdin_some_ref_v1(process.pid, process.generation,
-            data, data_bytes, offset, max_bytes)
+        if process.group_root != "":
+            written = rt_process_write_stdin_some_owned_v2(process.pid, process.generation,
+                process.group_root, str_len(process.group_root), process.group_identity, str_len(process.group_identity),
+                data, data_bytes, offset, max_bytes)
+        else:
+            written = rt_process_write_stdin_some_ref_v1(process.pid, process.generation,
+                data, data_bytes, offset, max_bytes)
     if written == -2: return Err("stale_process_reference")
     if written < 0: return Err("process_write_failed")
     Ok(written)
 
 pub fn process_is_piped_alive_ref_v1(process: PipedProcessRefV1) -> Result<bool, text>:
     if not _piped_ref_valid_v1(process): return Err("invalid_process_reference")
+    if process.group_root != "":
+        val _valid = process_validate_piped_ref_v1(process)?
+        val observed = group_process_stream_probe_bound_v2(process.group_root, process.group_identity)?
+        # The owned workload remains live until the broker proves its tree empty;
+        # EOF and a reaped leader alone do not settle descendants or capacity.
+        return Ok(not observed.terminal)
     var alive: i64 = -1
     unsafe(capabilities: [ffi]):
         alive = rt_process_is_piped_alive_ref_v1(process.pid, process.generation)
@@ -1974,6 +2147,10 @@ pub fn process_is_piped_alive_ref_v1(process: PipedProcessRefV1) -> Result<bool,
 
 pub fn process_close_piped_ref_v1(process: PipedProcessRefV1) -> Result<(), text>:
     if not _piped_ref_valid_v1(process): return Err("invalid_process_reference")
+    if process.group_root != "":
+        val _valid = process_validate_piped_ref_v1(process)?
+        val owner = group_process_stream_recover_v2(process.group_root, process.group_identity)?
+        return process_cleanup_piped_owned_v2(owner, Some(process))
     var closed: i64 = -1
     unsafe(capabilities: [ffi]):
         closed = rt_process_close_piped_ref_v1(process.pid, process.generation)

@@ -1579,6 +1579,18 @@ int64_t rt_process_spawn_pinned_piped(int64_t executable_handle, SplArray* args)
     return -1;
 }
 
+/* Group stream V2 is not an admitted Windows broker provider. Legacy
+ * Windows pipe ownership remains unchanged; these APIs fail closed. */
+int64_t rt_process_stream_reserve_v2(void){return -1;}
+int64_t rt_process_stream_bind_v2(int64_t g,const char*r,int64_t n,const char*i,int64_t m){(void)g;(void)r;(void)n;(void)i;(void)m;return -1;}
+int64_t rt_process_stream_abandon_unlaunched_v2(int64_t g,const char*r,int64_t n,const char*i,int64_t m){(void)g;(void)r;(void)n;(void)i;(void)m;return -1;}
+int64_t rt_process_stream_pid_v2(int64_t g,const char*r,int64_t n,const char*i,int64_t m){(void)g;(void)r;(void)n;(void)i;(void)m;return -1;}
+int64_t rt_process_stream_retire_v2(int64_t g,const char*r,int64_t n,const char*i,int64_t m,const char*p,int64_t z){(void)g;(void)r;(void)n;(void)i;(void)m;(void)p;(void)z;return -1;}
+const char* rt_process_read_stdout_owned_v2(int64_t p,int64_t g,const char*r,int64_t n,const char*i,int64_t m){(void)p;(void)g;(void)r;(void)n;(void)i;(void)m;return "";}
+int64_t rt_process_stdout_state_owned_v2(int64_t p,int64_t g,const char*r,int64_t n,const char*i,int64_t m){(void)p;(void)g;(void)r;(void)n;(void)i;(void)m;return -1;}
+int64_t rt_process_validate_piped_owned_v2(int64_t p,int64_t g,const char*r,int64_t n,const char*i,int64_t m){(void)p;(void)g;(void)r;(void)n;(void)i;(void)m;return -1;}
+int64_t rt_process_write_stdin_some_owned_v2(int64_t p,int64_t g,const char*r,int64_t n,const char*i,int64_t m,const char*d,int64_t l,int64_t o,int64_t b){(void)p;(void)g;(void)r;(void)n;(void)i;(void)m;(void)d;(void)l;(void)o;(void)b;return -1;}
+
 #else /* POSIX */
 int64_t* rt_process_run_bounded_environment_tuple_v1(const char* cmd,uint64_t length,
         SplArray* args,SplArray* environment,int64_t mode,int64_t timeout,int64_t cap) {
@@ -1640,6 +1652,10 @@ struct RtProcSlot {
     int   stdout_fd; /* parent reads here   ← child's stdout */
     uint64_t generation;
     bool  closing; /* exclusive cleanup owner; slot remains reserved */
+    bool stream_ticket;
+    int stream_phase; /* 0 reserved,1 bound,2 inheritance claimed,3 broker published */
+    int stream_child_in, stream_child_out, stream_root_fd;
+    char stream_root[4096], stream_identity[65];
     bool  sandboxed_renderer;
     bool  leader_reaped;
     bool  leader_status_valid;
@@ -1686,6 +1702,10 @@ static struct RtProcSlot* proc_alloc(bool sandboxed_renderer) {
             s_procs[i].pid = -1;
             s_procs[i].generation = ++s_proc_generation;
             s_procs[i].closing = false;
+            s_procs[i].stream_ticket = false; s_procs[i].stream_phase = 0;
+            s_procs[i].stream_child_in = -1; s_procs[i].stream_child_out = -1;
+            s_procs[i].stream_root_fd = -1;
+            s_procs[i].stream_root[0] = 0; s_procs[i].stream_identity[0] = 0;
             s_procs[i].stdin_fd = -1;
             s_procs[i].stdout_fd = -1;
             s_procs[i].sandboxed_renderer = sandboxed_renderer;
@@ -1708,6 +1728,12 @@ static struct RtProcSlot* proc_alloc(bool sandboxed_renderer) {
 static void proc_free_locked(struct RtProcSlot* slot) {
     if (!slot || slot->pid == 0) return;
     int stdin_fd=slot->stdin_fd, stdout_fd=slot->stdout_fd;
+    if (slot->stream_child_in >= 0) close(slot->stream_child_in);
+    if (slot->stream_child_out >= 0) close(slot->stream_child_out);
+    if (slot->stream_root_fd >= 0) close(slot->stream_root_fd);
+    slot->stream_child_in = slot->stream_child_out = slot->stream_root_fd = -1;
+    slot->stream_ticket = false; slot->stream_phase = 0;
+    slot->stream_root[0] = slot->stream_identity[0] = 0;
     if (slot->sandboxed_renderer && s_renderer_slots_active>0) s_renderer_slots_active--;
     slot->stdin_fd=-1;slot->stdout_fd=-1;slot->sandboxed_renderer=false;
     slot->leader_reaped=false;slot->leader_status_valid=false;slot->leader_status=0;
@@ -2481,7 +2507,7 @@ int64_t rt_process_piped_pid_for_generation_v1(int64_t generation) {
     if (pthread_mutex_lock(&s_proc_lock) != 0) return -1;
     int64_t pid = -2;
     for (int i = 0; i < RT_PROC_MAX; i++) {
-        if (s_procs[i].generation == (uint64_t)generation && s_procs[i].pid > 0 && !s_procs[i].closing) {
+        if (s_procs[i].generation == (uint64_t)generation && s_procs[i].pid > 0 && !s_procs[i].closing && !s_procs[i].stream_ticket) {
             pid = s_procs[i].pid; break;
         }
     }
@@ -2493,7 +2519,7 @@ static struct RtProcSlot* proc_ref_v1(int64_t pid, int64_t generation) {
     if (pid <= 0 || pid > INT_MAX || generation <= 0) return NULL;
     for (int i = 0; i < RT_PROC_MAX; i++) {
         struct RtProcSlot* slot = &s_procs[i];
-        if (slot->pid == (pid_t)pid && slot->generation == (uint64_t)generation) return slot;
+        if (slot->pid == (pid_t)pid && slot->generation == (uint64_t)generation && !slot->stream_ticket) return slot;
     }
     return NULL;
 }
@@ -2726,7 +2752,9 @@ static int64_t posix_core_rt_process_write_stdin_some_slot(
 static int64_t posix_core_rt_process_write_stdin_some(int64_t pid, const char* data,
         int64_t data_len, int64_t offset, int64_t max_bytes) {
     if (pid <= 0) return -1;
-    return posix_core_rt_process_write_stdin_some_slot(proc_find((pid_t)pid), data, data_len, offset, max_bytes);
+    struct RtProcSlot* slot = proc_find((pid_t)pid);
+    if (slot && slot->stream_ticket) return -1;
+    return posix_core_rt_process_write_stdin_some_slot(slot, data, data_len, offset, max_bytes);
 }
 int64_t rt_process_write_stdin_some(int64_t pid,const char* data,int64_t data_len,int64_t offset,int64_t max_bytes) {
     if (pthread_mutex_lock(&s_proc_lock)!=0) return -1;
@@ -2734,6 +2762,166 @@ int64_t rt_process_write_stdin_some(int64_t pid,const char* data,int64_t data_le
     (void)pthread_mutex_unlock(&s_proc_lock);return result;
 }
 
+
+/* Group-stream tickets use this registry only; lifecycle remains in the
+ * independent cgroup broker. Native-private FD handoff is an owned duplicate. */
+static int stream_dup_cloexec_v2(int fd) {
+#ifdef F_DUPFD_CLOEXEC
+    return fcntl(fd,F_DUPFD_CLOEXEC,6);
+#else
+    (void)fd;errno=ENOTSUP;return -1;
+#endif
+}
+static struct RtProcSlot* stream_ticket_locked_v2(int64_t generation) {
+    if (generation <= 0) return NULL;
+    for (int i = 0; i < RT_PROC_MAX; i++)
+        if (s_procs[i].pid && s_procs[i].stream_ticket &&
+            s_procs[i].generation == (uint64_t)generation) return &s_procs[i];
+    return NULL;
+}
+static int stream_binding_text_v2(const char* root, int64_t root_len,
+        const char* identity, int64_t identity_len) {
+    if (!root || root_len <= 0 || root_len >= 4096 || root[0] != '/' ||
+        memchr(root, 0, (size_t)root_len) || root[root_len] != 0 ||
+        !identity || identity_len != 64 || identity[64] != 0) return 0;
+    for (int i = 0; i < 64; i++)
+        if (!((identity[i] >= '0' && identity[i] <= '9') ||
+              (identity[i] >= 'a' && identity[i] <= 'f'))) return 0;
+    return 1;
+}
+static struct RtProcSlot* stream_bound_locked_v2(int64_t generation,
+        const char* root, int64_t root_len, const char* identity, int64_t identity_len) {
+    if (!stream_binding_text_v2(root, root_len, identity, identity_len)) return NULL;
+    struct RtProcSlot* slot = stream_ticket_locked_v2(generation);
+    return slot && !slot->closing && slot->stream_phase >= 1 &&
+        strcmp(slot->stream_root, root) == 0 && strcmp(slot->stream_identity, identity) == 0
+        ? slot : NULL;
+}
+int64_t rt_process_stream_reserve_v2(void) {
+#ifndef __linux__
+    return -1;
+#else
+    int input[2] = {-1,-1}, output[2] = {-1,-1};
+    if (!proc_pipe_cloexec(input) || !proc_pipe_cloexec(output)) goto failed;
+    int flags = fcntl(input[1], F_GETFL);
+    if (flags < 0 || fcntl(input[1], F_SETFL, flags | O_NONBLOCK) < 0) goto failed;
+    flags = fcntl(output[0], F_GETFL);
+    if (flags < 0 || fcntl(output[0], F_SETFL, flags | O_NONBLOCK) < 0) goto failed;
+    struct RtProcSlot* slot = proc_alloc(false);
+    if (!slot) goto failed;
+    /* pid==-1 is private reservation; no consumer can adopt it by PID. */
+    if (pthread_mutex_lock(&s_proc_lock) != 0) { proc_free(slot); goto failed; }
+    slot->stream_ticket = true; slot->stdin_fd = input[1]; slot->stdout_fd = output[0];
+    slot->stream_child_in = input[0]; slot->stream_child_out = output[1];
+    int64_t generation = (int64_t)slot->generation;
+    pthread_mutex_unlock(&s_proc_lock); return generation;
+failed:
+    for (int i=0;i<2;i++) { if(input[i]>=0)close(input[i]); if(output[i]>=0)close(output[i]); }
+    return -1;
+#endif
+}
+int64_t rt_process_stream_bind_v2(int64_t generation, const char* root, int64_t root_len,
+        const char* identity, int64_t identity_len) {
+    if (!stream_binding_text_v2(root, root_len, identity, identity_len)) return -1;
+    int root_fd = open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat st;
+    if (root_fd < 0) return -1;
+    if (fstat(root_fd,&st) || !S_ISDIR(st.st_mode) || st.st_uid != geteuid() || (st.st_mode & 0022)) {
+        close(root_fd); return -1;
+    }
+    if (pthread_mutex_lock(&s_proc_lock) != 0) { close(root_fd); return -1; }
+    struct RtProcSlot* slot = stream_ticket_locked_v2(generation);
+    int64_t result = -2;
+    if (slot && !slot->closing && slot->stream_phase == 0) {
+        memcpy(slot->stream_root,root,(size_t)root_len+1);
+        memcpy(slot->stream_identity,identity,65);
+        slot->stream_root_fd=root_fd; slot->stream_phase=1; root_fd=-1; result=0;
+    }
+    pthread_mutex_unlock(&s_proc_lock); if(root_fd>=0)close(root_fd); return result;
+}
+int64_t rt_process_stream_abandon_unlaunched_v2(int64_t generation, const char* root,
+        int64_t root_len, const char* identity, int64_t identity_len) {
+    if (pthread_mutex_lock(&s_proc_lock) != 0) return -1;
+    struct RtProcSlot* slot = stream_ticket_locked_v2(generation);
+    int64_t result = -2;
+    if (slot && !slot->closing && slot->stream_phase < 2 &&
+        (slot->stream_phase == 0 || stream_bound_locked_v2(generation,root,root_len,identity,identity_len)==slot)) {
+        proc_free_locked(slot); result=0;
+    }
+    pthread_mutex_unlock(&s_proc_lock); return result;
+}
+/* Native-private bridge: duplicates, never borrowed FDs, leave this lock.
+ * The caller owns returned FDs and must close them on every outcome. */
+int rt_process_stream_claim_launch_v2(int64_t generation,const char* root,int64_t root_len,
+        const char* identity,int64_t identity_len,int* input,int* output,int* root_fd) {
+    if (!input || !output || !root_fd) return EINVAL;
+    *input=-1; *output=-1; *root_fd=-1;
+    if(pthread_mutex_lock(&s_proc_lock)!=0)return EIO;
+    struct RtProcSlot* slot=stream_bound_locked_v2(generation,root,root_len,identity,identity_len);
+    int error=ESTALE;
+    if(slot&&slot->stream_phase==1) {
+        *input=stream_dup_cloexec_v2(slot->stream_child_in);
+        *output=stream_dup_cloexec_v2(slot->stream_child_out);
+        *root_fd=stream_dup_cloexec_v2(slot->stream_root_fd);
+        if(*input>=0&&*output>=0&&*root_fd>=0){slot->stream_phase=2;error=0;}
+        else {error=errno?errno:EIO;if(*input>=0)close(*input);if(*output>=0)close(*output);
+            if(*root_fd>=0)close(*root_fd);
+            *input=*output=*root_fd=-1;
+        }
+    }
+    pthread_mutex_unlock(&s_proc_lock);return error;
+}
+/* Only the launcher calls this when fork itself failed: no helper exists. */
+int rt_process_stream_launch_not_started_v2(int64_t generation,const char* root,int64_t root_len,
+        const char* identity,int64_t identity_len) {
+    if(pthread_mutex_lock(&s_proc_lock)!=0)return EIO;
+    struct RtProcSlot* slot=stream_bound_locked_v2(generation,root,root_len,identity,identity_len);
+    int error=ESTALE;
+    if(slot&&slot->stream_phase==2&&slot->pid==-1){slot->stream_phase=1;error=0;}
+    pthread_mutex_unlock(&s_proc_lock);return error;
+}
+int rt_process_stream_publish_broker_v2(int64_t generation,const char* root,int64_t root_len,
+        const char* identity,int64_t identity_len,int64_t broker_pid) {
+    if(broker_pid<=0||broker_pid>INT_MAX)return EINVAL;
+    if(pthread_mutex_lock(&s_proc_lock)!=0)return EIO;
+    struct RtProcSlot* slot=stream_bound_locked_v2(generation,root,root_len,identity,identity_len);
+    int error=ESTALE;
+    if(slot&&slot->stream_phase==2) {
+        slot->pid=(pid_t)broker_pid;slot->stream_phase=3;
+        close(slot->stream_child_in);close(slot->stream_child_out);
+        slot->stream_child_in=slot->stream_child_out=-1;error=0;
+    }
+    pthread_mutex_unlock(&s_proc_lock);return error;
+}
+int64_t rt_process_stream_pid_v2(int64_t generation,const char* root,int64_t root_len,
+        const char* identity,int64_t identity_len) {
+    if(pthread_mutex_lock(&s_proc_lock)!=0)return -1;
+    struct RtProcSlot* slot=stream_bound_locked_v2(generation,root,root_len,identity,identity_len);
+    int64_t result=slot&&slot->stream_phase==3?slot->pid:-2;
+    pthread_mutex_unlock(&s_proc_lock);return result;
+}
+int64_t rt_process_stream_retire_v2(int64_t generation,const char* root,int64_t root_len,
+        const char* identity,int64_t identity_len,const char* proof,int64_t proof_len) {
+    if(!proof||proof_len<=0||proof_len>4096||memchr(proof,0,(size_t)proof_len))return -1;
+    if(pthread_mutex_lock(&s_proc_lock)!=0)return -1;
+    struct RtProcSlot* slot=stream_bound_locked_v2(generation,root,root_len,identity,identity_len);
+    int64_t result=-2;
+    if(slot) {
+        const char* marker="SIMPLE-GROUP-STREAM-UNLAUNCHED-2\n";
+        const char* file=proof_len>=(int64_t)strlen(marker)&&memcmp(proof,marker,strlen(marker))==0
+            ?"broker.stream.unlaunched.sdn":"broker.tree.sdn";
+        int fd=openat(slot->stream_root_fd,file,O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+        struct stat st;char bytes[4097];ssize_t count=-1;
+        if(fd>=0&&fstat(fd,&st)==0&&S_ISREG(st.st_mode)&&st.st_uid==geteuid()&&
+           !(st.st_mode&0022)&&st.st_size==proof_len) {
+            count=read(fd,bytes,sizeof(bytes));
+            if(count==proof_len&&memcmp(bytes,proof,(size_t)proof_len)==0){proc_free_locked(slot);result=0;}
+            else result=-1;
+        } else result=-1;
+        if(fd>=0)close(fd);
+    }
+    pthread_mutex_unlock(&s_proc_lock);return result;
+}
 
 /*
  * Non-blocking read from the process's stdout.
@@ -2755,7 +2943,9 @@ static const char* posix_core_rt_process_read_stdout_slot(struct RtProcSlot* slo
     return s_read_buf;
 }
 static const char* posix_core_rt_process_read_stdout(int64_t pid) {
-    return posix_core_rt_process_read_stdout_slot(proc_find((pid_t)pid));
+    struct RtProcSlot* slot = proc_find((pid_t)pid);
+    if (slot && slot->stream_ticket) { s_read_buf[0] = 0; return s_read_buf; }
+    return posix_core_rt_process_read_stdout_slot(slot);
 }
 
 const char* rt_process_read_stdout(int64_t pid) {
@@ -2797,13 +2987,46 @@ int64_t rt_process_write_stdin_some_ref_v1(int64_t pid, int64_t generation,
     return result;
 }
 
+static struct RtProcSlot* stream_action_locked_v2(int64_t pid,int64_t generation,
+        const char* root,int64_t root_len,const char* identity,int64_t identity_len) {
+    struct RtProcSlot* slot=stream_bound_locked_v2(generation,root,root_len,identity,identity_len);
+    return slot&&slot->stream_phase==3&&slot->pid==pid?slot:NULL;
+}
+const char* rt_process_read_stdout_owned_v2(int64_t pid,int64_t generation,const char* root,
+        int64_t root_len,const char* identity,int64_t identity_len) {
+    s_read_buf[0]=0;if(pthread_mutex_lock(&s_proc_lock)!=0)return s_read_buf;
+    struct RtProcSlot* slot=stream_action_locked_v2(pid,generation,root,root_len,identity,identity_len);
+    if(slot)posix_core_rt_process_read_stdout_slot(slot);
+    pthread_mutex_unlock(&s_proc_lock);return s_read_buf;
+}
+int64_t rt_process_stdout_state_owned_v2(int64_t pid,int64_t generation,const char* root,
+        int64_t root_len,const char* identity,int64_t identity_len) {
+    if(pthread_mutex_lock(&s_proc_lock)!=0)return -1;
+    struct RtProcSlot* slot=stream_action_locked_v2(pid,generation,root,root_len,identity,identity_len);
+    int64_t result=slot?slot->stdout_state:-2;pthread_mutex_unlock(&s_proc_lock);return result;
+}
+int64_t rt_process_validate_piped_owned_v2(int64_t pid,int64_t generation,const char* root,
+        int64_t root_len,const char* identity,int64_t identity_len) {
+    if(pthread_mutex_lock(&s_proc_lock)!=0)return -1;
+    struct RtProcSlot* slot=stream_action_locked_v2(pid,generation,root,root_len,identity,identity_len);
+    int64_t result=slot?0:-2;pthread_mutex_unlock(&s_proc_lock);return result;
+}
+int64_t rt_process_write_stdin_some_owned_v2(int64_t pid,int64_t generation,const char* root,
+        int64_t root_len,const char* identity,int64_t identity_len,const char* data,
+        int64_t data_len,int64_t offset,int64_t max_bytes) {
+    if(pthread_mutex_lock(&s_proc_lock)!=0)return -1;
+    struct RtProcSlot* slot=stream_action_locked_v2(pid,generation,root,root_len,identity,identity_len);
+    int64_t result=slot?posix_core_rt_process_write_stdin_some_slot(slot,data,data_len,offset,max_bytes):-2;
+    pthread_mutex_unlock(&s_proc_lock);return result;
+}
+
 bool rt_process_is_alive(int64_t pid) {
     if (pid <= 0) return false;
     uint64_t generation = 0;
     for (;;) {
         if (pthread_mutex_lock(&s_proc_lock) != 0) return false;
         struct RtProcSlot* slot = proc_find((pid_t)pid);
-        if (!slot || slot->closing || slot->leader_reaped ||
+        if (!slot || slot->closing || slot->stream_ticket || slot->leader_reaped ||
             (generation && slot->generation != generation)) {
             (void)pthread_mutex_unlock(&s_proc_lock);
             return false;
@@ -2849,7 +3072,7 @@ void simple_piped_owner_observe_v1(int64_t pid, int64_t collect_exit,
     int lock_error = pthread_mutex_lock(&s_proc_lock);
     if (lock_error != 0) { out->owner_error = lock_error; return; }
     struct RtProcSlot* slot = proc_find((pid_t)pid);
-    if (slot && !slot->closing) {
+    if (slot && !slot->closing && !slot->stream_ticket) {
         out->owner_error = 0;
         out->stdout_state = slot->stdout_state;
         out->exit_kind = 0;
@@ -2886,7 +3109,7 @@ SplArray* rt_process_piped_exit_status_value(int64_t pid) {
     if (lock_error != 0) return piped_exit_status_receipt(-1, 0, lock_error);
     struct RtProcSlot* slot = proc_find((pid_t)pid);
     int64_t state = -1, code = 0, error = EINVAL;
-    if (slot && !slot->closing) {
+    if (slot && !slot->closing && !slot->stream_ticket) {
         if (slot->stdout_state < 0) error = EIO;
         else if (slot->stdout_state != 1) { state = 0; error = 0; }
         else {
@@ -2919,7 +3142,7 @@ SplArray* rt_process_piped_exit_status_value(int64_t pid) {
 int64_t rt_process_stdout_state(int64_t pid) {
     if (pid <= 0 || pthread_mutex_lock(&s_proc_lock) != 0) return -1;
     struct RtProcSlot* slot = proc_find((pid_t)pid);
-    int64_t state = slot && !slot->closing ? slot->stdout_state : -1;
+    int64_t state = slot && !slot->closing && !slot->stream_ticket ? slot->stdout_state : -1;
     (void)pthread_mutex_unlock(&s_proc_lock); return state;
 }
 #endif /* C exports selected unless a bound Rust observer object is linked. */
@@ -2974,7 +3197,7 @@ static bool posix_core_rt_process_close_piped(struct RtProcSlot* slot) {
 bool rt_process_close_piped(int64_t pid) {
     if (pid <= 0 || pthread_mutex_lock(&s_proc_lock) != 0) return false;
     struct RtProcSlot* slot = proc_find((pid_t)pid);
-    if (!slot || slot->closing) {
+    if (!slot || slot->closing || slot->stream_ticket) {
         (void)pthread_mutex_unlock(&s_proc_lock);
         return false;
     }
