@@ -157,3 +157,22 @@ native diagnostic in a separate host process; never repeat them against a shared
 cleanup is a known capability limit, not a retry bug or a reason to rerun the
 same diagnostic. The native C harness explicitly retires its own test fixtures;
 that test-only ownership is not a production Ref cleanup fallback.
+
+## Approved canonical native leaf ownership
+
+On 2026-11-07 the user and root approved the existing exact designed-C-only
+allowlist for these eight canonical OS registry leaf symbols:
+`rt_process_spawn_piped_generation_v1`, `rt_process_piped_pid_for_generation_v1`,
+`rt_process_read_stdout_ref_v1`, `rt_process_stdout_state_ref_v1`,
+`rt_process_validate_piped_ref_v1`, `rt_process_write_stdin_some_ref_v1`,
+`rt_process_is_piped_alive_ref_v1`, and `rt_process_close_piped_ref_v1`.
+`src/compiler/70.backend/backend/runtime_compiler.spl` includes `runtime_process`
+in both `runtime_core_c_sources_v1` (line712) and the default native source list
+(line897). The Simple process facade and SOSIX aliases call that single native
+registry/reader. Previously landed evidence in PR7622 records a Linux native
+binary containing all eight symbols; that execution is not rerun here. No Rust
+alias, duplicate registry or baseline regeneration is introduced. The ratchet's
+existing unknown-symbol and stale-allowlist selftests/enforcement remain strict
+and unchanged. This ownership decision does not admit the remaining Simple
+facade/runtime gates or enable unsupported POSIX liveness/close; their explicit
+limitations and verification isolation requirements above still apply.
