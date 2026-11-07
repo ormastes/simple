@@ -79,6 +79,55 @@ static void* wrong_thread(void* p){
     assert(rt_process_observation_v4_reserved_confirm_release_value(t)==-EPERM);
     return NULL;
 }
+static void inherited_gate_refusal(int64_t token,RtOwnedSlot* core){
+    pthread_mutex_lock(&pov4_reservations_lock);
+    pthread_mutex_lock(&pov4_slots_lock);
+    pthread_mutex_lock(&rt_owned_lock);
+    pthread_mutex_lock(core->state_lock);
+    pid_t forked=fork();assert(forked>=0);
+    if(forked==0){
+        alarm(2);fail_array_once=1;
+        assert(rt_process_observation_v6_reserved_start_deferred_admitted_value(token,0,0,NULL,1)==-EPERM);
+        assert(rt_process_observation_v6_reserved_poll_launch_value(token,0)==-EPERM);
+        assert(rt_process_observation_v4_reserve_value()==-EPERM);
+        assert(rt_process_observation_v4_reserved_state_value(token)==-EPERM);
+        assert(rt_process_observation_v4_reserved_matches_value(token,1,1,1,1)==-EPERM);
+        assert(rt_process_observation_v4_reserved_start_pinned_value(token,0,0,NULL)==-EPERM);
+        assert(rt_process_observation_v5_reserved_start_admitted_value(token,0,0,NULL,1)==-EPERM);
+        assert(rt_process_observation_v4_reserved_observe_value(token,0,0)==NULL);
+        assert(rt_process_observation_v4_reserved_ack_value(token,NULL)==NULL);
+        assert(rt_process_observation_v4_reserved_confirm_release_value(token)==-EPERM);
+        /* Nullable Simple ticket ABI must match these allocation-free NULLs.
+         * Invalid addresses prove ticket entry refuses before array decoding. */
+        SplArray* unreadable=(SplArray*)(uintptr_t)1;
+        assert(rt_process_observation_v4_poll_value(unreadable,0)==NULL);
+        assert(rt_process_observation_v4_cancel_value(unreadable,0)==NULL);
+        assert(rt_process_observation_v4_collect_value(unreadable,0)==NULL);
+        assert(rt_process_observation_v4_ack_collect_value(unreadable,unreadable)==NULL);
+        assert(fail_array_once==1);_exit(0);
+    }
+    pthread_mutex_unlock(core->state_lock);
+    pthread_mutex_unlock(&rt_owned_lock);
+    pthread_mutex_unlock(&pov4_slots_lock);
+    pthread_mutex_unlock(&pov4_reservations_lock);
+    int status;assert(waitpid(forked,&status,0)==forked);
+    assert(WIFEXITED(status)&&WEXITSTATUS(status)==0);
+}
+static void* issue_thread_stamp(void* output){
+    assert(simple_local_unix_origin_v1());*(unsigned*)output=pov6_current_thread_stamp();
+    assert(*(unsigned*)output);return NULL;
+}
+static void thread_stamp_negative(int64_t token){
+    unsigned other=0;pthread_t t;assert(pthread_create(&t,NULL,issue_thread_stamp,&other)==0);
+    assert(pthread_join(t,NULL)==0);
+    assert(other!=reservation(token)->submit_thread_stamp);
+    /* Negative reuse mechanism: same actual TID cannot authorize a different
+     * immutable stamp. This does not claim forced kernel TID reuse. */
+    Pov4Reservation* r=reservation(token);unsigned original=r->submit_thread_stamp;
+    r->submit_thread_stamp=other;
+    assert(rt_process_observation_v6_reserved_poll_launch_value(token,0)==-EPERM);
+    r->submit_thread_stamp=original;
+}
 static int64_t start(const char* program,int64_t image,int64_t cwd,const char* mode,int64_t wall,int64_t expiry){
     int64_t t=rt_process_observation_v4_reserve_value();assert(t>0);
     assert(rt_process_observation_v6_reserved_poll_launch_value(t,0)==-EINVAL);
@@ -97,7 +146,7 @@ int main(int argc,char** argv){
     int64_t cwd=rt_process_observation_v4_pin_cwd_value("/",1);assert(cwd>0);
     int64_t expiry=unix_ms()+10000;
     int64_t t=start(argv[1],image,cwd,"exit",2000000000LL,expiry);
-    RtOwnedSlot* c=child(t);pthread_mutex_lock(c->state_lock);
+    RtOwnedSlot* c=child(t);inherited_gate_refusal(t,c);thread_stamp_negative(t);pthread_mutex_lock(c->state_lock);
     pthread_t thread;struct WrongThread wrong={t};assert(pthread_create(&thread,NULL,wrong_thread,&wrong)==0);
     assert(pthread_join(thread,NULL)==0);pthread_mutex_unlock(c->state_lock);
     /* Parent has not continued the actual ptrace stop: no exec proof exists. */

@@ -112,13 +112,13 @@ extern fn rt_process_observation_v4_start_value(binding: [u8]) -> ([u8], [u8], [
 @unsafe(reason: "native exact pinned V4 process start", capabilities: [ffi])
 extern fn rt_process_observation_v4_start_pinned_value(exec_handle: i64, cwd_handle: i64, binding: [u8]) -> ([u8], [u8], [u8], [i64])
 @unsafe(reason: "native V4 process observation poll", capabilities: [ffi])
-extern fn rt_process_observation_v4_poll_value(ticket: [i64], caller_wait_ns: i64) -> ([u8], [u8], [u8], [i64])
+extern fn rt_process_observation_v4_poll_value(ticket: [i64], caller_wait_ns: i64) -> ([u8], [u8], [u8], [i64])?
 @unsafe(reason: "native V4 absolute-deadline cancellation", capabilities: [ffi])
-extern fn rt_process_observation_v4_cancel_value(ticket: [i64], caller_wait_ns: i64) -> ([u8], [u8], [u8], [i64])
+extern fn rt_process_observation_v4_cancel_value(ticket: [i64], caller_wait_ns: i64) -> ([u8], [u8], [u8], [i64])?
 @unsafe(reason: "native V4 two-phase frozen collection", capabilities: [ffi])
-extern fn rt_process_observation_v4_collect_value(ticket: [i64], caller_wait_ns: i64) -> ([u8], [u8], [u8], [i64])
+extern fn rt_process_observation_v4_collect_value(ticket: [i64], caller_wait_ns: i64) -> ([u8], [u8], [u8], [i64])?
 @unsafe(reason: "native V4 exact frozen digest acknowledgement", capabilities: [ffi])
-extern fn rt_process_observation_v4_ack_collect_value(ticket: [i64], digest: [u8]) -> ([u8], [u8], [u8], [i64])
+extern fn rt_process_observation_v4_ack_collect_value(ticket: [i64], digest: [u8]) -> ([u8], [u8], [u8], [i64])?
 @unsafe(reason: "native exact pinned inspection start copies and binds stdin before spawn", capabilities: [ffi])
 extern fn rt_process_inspection_v1_start_pinned_value(exec_handle: i64, cwd_handle: i64, binding: [u8], input: [u8], expected_digest: [u8]) -> ([u8], [u8], [u8], [i64])
 @unsafe(reason: "native same-ticket input delivery and digest receipt", capabilities: [ffi])
@@ -1244,8 +1244,11 @@ pub class ProcessObservationLeaseV4:
     pub fn poll(self, caller_wait_ns: i64) -> Result<ProcessObservationReceiptV4, text>:
         if not self.active or self.acknowledged:
             return Err("process observation V4 lease is inactive")
-        val (stdout, stderr, binding, words) = unsafe(capabilities: [ffi]):
+        val wire = unsafe(capabilities: [ffi]):
             rt_process_observation_v4_poll_value(self.ticket, caller_wait_ns)
+        val (stdout, stderr, binding, words) = match wire:
+            case Some(value): value
+            case nil: return Err("process observation unavailable; lease retained")
         val receipt = decode_process_observation_v4(ProcessObservationWireV4(
             words: words, stdout: stdout, stderr: stderr, binding: binding))?
         if not self.receipt_matches_ticket(receipt.packet):
@@ -1255,8 +1258,11 @@ pub class ProcessObservationLeaseV4:
     pub fn cancel(self, caller_wait_ns: i64) -> Result<ProcessObservationReceiptV4, text>:
         if not self.active or self.acknowledged:
             return Err("process observation V4 lease is inactive")
-        val (stdout, stderr, binding, words) = unsafe(capabilities: [ffi]):
+        val wire = unsafe(capabilities: [ffi]):
             rt_process_observation_v4_cancel_value(self.ticket, caller_wait_ns)
+        val (stdout, stderr, binding, words) = match wire:
+            case Some(value): value
+            case nil: return Err("process observation unavailable; lease retained")
         val receipt = decode_process_observation_v4(ProcessObservationWireV4(
             words: words, stdout: stdout, stderr: stderr, binding: binding))?
         if not self.receipt_matches_ticket(receipt.packet):
@@ -1266,8 +1272,11 @@ pub class ProcessObservationLeaseV4:
     me fn collect(self, caller_wait_ns: i64) -> Result<ProcessObservationReceiptV4, text>:
         if not self.active or self.acknowledged:
             return Err("process observation V4 lease is inactive")
-        val (stdout, stderr, binding, words) = unsafe(capabilities: [ffi]):
+        val wire = unsafe(capabilities: [ffi]):
             rt_process_observation_v4_collect_value(self.ticket, caller_wait_ns)
+        val (stdout, stderr, binding, words) = match wire:
+            case Some(value): value
+            case nil: return Err("process observation unavailable; lease retained")
         val receipt = decode_process_observation_v4(ProcessObservationWireV4(
             words: words, stdout: stdout, stderr: stderr, binding: binding))?
         if not self.receipt_matches_ticket(receipt.packet):
@@ -1286,9 +1295,12 @@ pub class ProcessObservationLeaseV4:
                 frozen_receipt.packet.packet_kind != ProcessObservationPacketKindV4.Frozen or
                 not self.receipt_matches_ticket(frozen_receipt.packet):
             return Err("process observation V4 lease has no unacknowledged frozen snapshot")
-        val (stdout, stderr, binding, words) = unsafe(capabilities: [ffi]):
+        val wire = unsafe(capabilities: [ffi]):
             rt_process_observation_v4_ack_collect_value(
                 self.ticket, frozen_receipt.binding_digest)
+        val (stdout, stderr, binding, words) = match wire:
+            case Some(value): value
+            case nil: return Err("process observation unavailable; lease retained")
         val receipt = decode_process_observation_v4(ProcessObservationWireV4(
             words: words, stdout: stdout, stderr: stderr, binding: binding))?
         if receipt.packet.packet_kind != ProcessObservationPacketKindV4.Ack or
@@ -1310,9 +1322,12 @@ pub class ProcessObservationLeaseV4:
                 cleanup_receipt.binding_digest.len() != PROCESS_OBSERVATION_V4_DIGEST_BYTES or
                 not self.receipt_matches_ticket(cleanup_receipt.packet):
             return Err("process observation V4 lease has no cleanup snapshot to acknowledge")
-        val (stdout, stderr, returned_binding, words) = unsafe(capabilities: [ffi]):
+        val wire = unsafe(capabilities: [ffi]):
             rt_process_observation_v4_ack_collect_value(
                 self.ticket, cleanup_receipt.binding_digest)
+        val (stdout, stderr, returned_binding, words) = match wire:
+            case Some(value): value
+            case nil: return Err("process observation unavailable; lease retained")
         val receipt = decode_process_observation_v4(ProcessObservationWireV4(
             words: words, stdout: stdout, stderr: stderr,
             binding: returned_binding))?
@@ -1324,6 +1339,7 @@ pub class ProcessObservationLeaseV4:
         self.acknowledged = true
         self.active = false
         Ok(receipt)
+
 
 # The reservation, not a decoded receipt or PID, owns every post-start outcome.
 # Pins remain retained until confirm_release succeeds; close failures remain

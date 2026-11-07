@@ -3464,6 +3464,41 @@ typedef struct Pov4Slot {
 static Pov4Slot pov4_slots[POV4_SLOTS];
 static pthread_mutex_t pov4_slots_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* V6 activates the canonical process-origin guard before any V6 mutation.
+ * Legacy-only processes retain their prior V4 behavior. No origin is recreated. */
+#if defined(__linux__)
+#include <stdatomic.h>
+#include "runtime_local_unix_bridge_v1.h"
+_Static_assert(ATOMIC_INT_LOCK_FREE==2,"V6 admission atomics must be lock-free");
+static atomic_uint pov6_active;
+static atomic_uint pov6_thread_sequence;
+static _Thread_local unsigned pov6_thread_stamp;
+static int pov6_origin_activate(void) {
+    if(!simple_local_unix_origin_v1()){errno=EPERM;return 0;}
+    atomic_store_explicit(&pov6_active,1,memory_order_release);return 1;
+}
+static int pov6_origin_if_active(void) {
+    if(!atomic_load_explicit(&pov6_active,memory_order_acquire))return 1;
+    if(!simple_local_unix_origin_v1()){errno=EPERM;return 0;}return 1;
+}
+/* Called only after canonical origin admission. A new OS thread starts at zero;
+ * even a recycled numeric TID cannot reuse a previously issued stamp. */
+static unsigned pov6_current_thread_stamp(void) {
+    if(pov6_thread_stamp)return pov6_thread_stamp;
+    unsigned before=atomic_load_explicit(&pov6_thread_sequence,memory_order_relaxed);
+    for(unsigned attempt=0;attempt<16;attempt++){
+        if(before==UINT_MAX){errno=EOVERFLOW;return 0;}
+        if(atomic_compare_exchange_weak_explicit(&pov6_thread_sequence,&before,before+1,
+                memory_order_relaxed,memory_order_relaxed)) {
+            pov6_thread_stamp=before+1;return pov6_thread_stamp;
+        }
+    }
+    errno=EBUSY;return 0;
+}
+#else
+static int pov6_origin_if_active(void){return 1;}
+#endif
+
 /* Reservation authority is delivered before any child side effect. Tokens are
  * monotonically minted and never reused, including when a slot is recycled. */
 typedef struct Pov4Reservation {
@@ -3472,6 +3507,7 @@ typedef struct Pov4Reservation {
     int state; /* 1 reserved,2 attempting,3 no child,4 owned,5 acked,6 V6 launch pending */
     int deferred_launch;
     int submit_tid; /* V6 submitting Linux thread; checked before child locks */
+    unsigned submit_thread_stamp;
     uint32_t owner_index;
     int64_t executable_pin, cwd_pin;
     int64_t submission_expires_unix_ms;
@@ -3598,6 +3634,7 @@ static SplArray* pov4_rejected(int error, int failure_phase, int failure_reason,
 }
 
 static int pov4_reserve(uint32_t* index) {
+    if(!pov6_origin_if_active())return 0;
     if (pthread_mutex_lock(&pov4_slots_lock) != 0) { errno = EBUSY; return 0; }
     int found = -1;
     for (int i = 0; i < POV4_SLOTS; i++) if (!pov4_slots[i].active) { found = i; break; }
@@ -3612,6 +3649,7 @@ static int pov4_reserve(uint32_t* index) {
 }
 
 static Pov4Slot* pov4_acquire_ticket(SplArray* ticket, uint32_t* index) {
+    if(!pov6_origin_if_active())return NULL;
     if (!ticket || rt_array_len(ticket) != POV4_TICKET_WORDS ||
         rt_value_as_int(rt_array_get(ticket, 0)) != POV4_VERSION_VALUE) {
         errno = EPROTO; return NULL;
@@ -4038,6 +4076,7 @@ static void pov4_abandon_unpublished(uint32_t index) {
 
 SplArray* rt_process_observation_v4_poll_value(SplArray* ticket,
                                                 int64_t caller_wait_ns) {
+    if(!pov6_origin_if_active())return NULL;
     uint32_t index = 0; Pov4Slot* owner = pov4_acquire_ticket(ticket, &index);
     if (!owner) return pov4_rejected(errno ? errno : ESTALE, POV4_FAIL_WAIT,
         POV4_REASON_BINDING, 0, 0, NULL);
@@ -4057,6 +4096,7 @@ SplArray* rt_process_observation_v4_poll_value(SplArray* ticket,
 
 SplArray* rt_process_observation_v4_cancel_value(SplArray* ticket,
                                                   int64_t caller_wait_ns) {
+    if(!pov6_origin_if_active())return NULL;
     uint32_t index = 0; Pov4Slot* owner = pov4_acquire_ticket(ticket, &index);
     if (!owner) return pov4_rejected(errno ? errno : ESTALE, POV4_FAIL_WAIT,
         POV4_REASON_BINDING, 0, 0, NULL);
@@ -4074,6 +4114,7 @@ SplArray* rt_process_observation_v4_cancel_value(SplArray* ticket,
 
 SplArray* rt_process_observation_v4_collect_value(SplArray* ticket,
                                                    int64_t caller_wait_ns) {
+    if(!pov6_origin_if_active())return NULL;
     uint32_t index = 0; Pov4Slot* owner = pov4_acquire_ticket(ticket, &index);
     if (!owner) return pov4_rejected(errno ? errno : ESTALE, POV4_FAIL_COLLECTION,
         POV4_REASON_BINDING, 0, 0, NULL);
@@ -4101,6 +4142,7 @@ SplArray* rt_process_observation_v4_collect_value(SplArray* ticket,
 
 SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket,
                                                        SplArray* digest_value) {
+    if(!pov6_origin_if_active())return NULL;
     uint32_t index = 0; Pov4Slot* owner = pov4_acquire_ticket(ticket, &index);
     if (!owner) return SIMPLE_RT_NONNULL("rt_process_observation_v4_ack_collect_value",
         pov4_rejected(errno ? errno : ESTALE, POV4_FAIL_ACK, POV4_REASON_BINDING, 0, 0, NULL));

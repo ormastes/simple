@@ -9,6 +9,7 @@ static int pov6_current_tid(void) {
 #endif
 }
 static Pov4Reservation* pov4_reservation_acquire(int64_t token) {
+    if(!pov6_origin_if_active())return NULL;
     if (token <= 0) { errno = ESTALE; return NULL; }
     pthread_mutex_lock(&pov4_reservations_lock);
     Pov4Reservation* found = NULL;
@@ -19,7 +20,11 @@ static Pov4Reservation* pov4_reservation_acquire(int64_t token) {
         /* Existing short registry gate locates actual reservation metadata.
          * V6 thread admission precedes every core/per-child lock and ptrace. */
         if (r->busy) errno = EBUSY;
-        else if(r->deferred_launch&&(r->submit_tid<=0||r->submit_tid!=pov6_current_tid()))errno=EPERM;
+        else if(r->deferred_launch&&(r->submit_tid<=0||r->submit_tid!=pov6_current_tid()
+#if defined(__linux__)
+            ||r->submit_thread_stamp==0||r->submit_thread_stamp!=pov6_current_thread_stamp()
+#endif
+            ))errno=EPERM;
         else { r->busy = 1; found = r; }
         break;
     }
@@ -41,6 +46,7 @@ static Pov4Slot* pov4_reservation_owner(Pov4Reservation* r) {
 }
 
 int64_t rt_process_observation_v4_reserve_value(void) {
+    if(!pov6_origin_if_active())return -errno;
     pthread_mutex_lock(&pov4_reservations_lock);
     int64_t result = -EAGAIN;
     for (int i = 0; i < POV4_SLOTS; ++i) {
@@ -367,10 +373,13 @@ static int64_t pov6_start_deferred_admitted_impl(int64_t token,int64_t executabl
 #ifndef __linux__
     (void)token;(void)executable;(void)cwd;(void)binding;(void)expiry;return -ENOTSUP;
 #else
+    if(!pov6_origin_activate())return -errno;
     Pov4Reservation* r=pov4_reservation_acquire(token);if(!r)return -errno;
     if(r->state!=1){pov4_reservation_release_busy(r);return -EALREADY;}
     int tid=pov6_current_tid();if(tid<=0){pov4_reservation_release_busy(r);return -ENOTSUP;}
-    r->submit_tid=tid;r->deferred_launch=1;r->state=2;r->executable_pin=executable;r->cwd_pin=cwd;
+    unsigned stamp=pov6_current_thread_stamp();
+    if(!stamp){pov4_reservation_release_busy(r);return -errno;}
+    r->submit_tid=tid;r->submit_thread_stamp=stamp;r->deferred_launch=1;r->state=2;r->executable_pin=executable;r->cwd_pin=cwd;
     r->submission_expires_unix_ms=expiry;
     int error=expiry<=0?EINVAL:pov5_submission_admission_check(expiry);
     if(error){r->submission_admission_error=error;r->state=3;pov4_reservation_release_busy(r);return -error;}
@@ -388,6 +397,7 @@ static int64_t pov6_poll_launch_impl(int64_t token,int retire) {
 #ifndef __linux__
     (void)token;(void)retire;return -ENOTSUP;
 #else
+    if(!pov6_origin_activate())return -errno;
     Pov4Reservation* r=pov4_reservation_acquire(token);if(!r)return -errno;
     if(!r->deferred_launch||r->state==1){pov4_reservation_release_busy(r);return -EINVAL;}
     if(r->state==3){pov4_reservation_release_busy(r);return 0;}

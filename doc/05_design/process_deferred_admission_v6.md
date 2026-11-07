@@ -12,7 +12,7 @@ Native leaves are `rt_process_observation_v6_reserved_start_deferred_admitted_va
 
 ## Ownership and transitions
 
-The existing short reservation registry gate locates the token and checks busy state and submitting Linux TID. This precedes per-child owner locks and ptrace progression. V6 is parent-coordinator-only, not fork-safe or a hard wait-free registry design. Every later API on that V6 reservation retains the TID restriction, including ordinary observation/acknowledgment and cleanup.
+The existing short reservation registry gate locates the token and checks busy state and submitting Linux TID plus immutable per-thread stamp. This precedes per-child owner locks and ptrace progression. V6 is parent-coordinator-only. Activated V6/reservation/ticket follow-up admission refuses a foreign fork process before owner gates; this is not general fork safety for every raw-owned API or a hard wait-free registry design. Every later API on that V6 reservation retains the TID restriction, including ordinary observation/acknowledgment and cleanup.
 
 After fork, the same RtOwnedSlot retains the error pipe, trace phase, actual child identity, failure class, deadline and partial error bytes. Reservation state6 refuses legacy observe, ack and confirm-release. Post-fork clock/setpgid/pidfd/identity setup failure also enters this owner path rather than synchronous cleanup. A failed pidfd acquisition can leave cleanup uncertain: V6 never falls back to bare-PID signaling.
 
@@ -35,3 +35,15 @@ The native fixture also links test-only wrappers for setpgid/read/rt_array_new: 
 No test has run. Fatal ptrace and lost-child/partial-EOF uncertainty need further negative qualification. The authored wrappers are not proof of kernel resource exhaustion or all allocator failures. No native producer/build has been allocated for this checkpoint.
 
 The positive native exec case observes without retirement and requires frozen exit0 plus exact stdout `exec-v6\n` before acknowledgment. The pending-timeout case uses a one-second workload budget and a real 1.1-second stopped delay, avoiding preparation-dependent expiry. The final uncertain setup-failure reservation retains its original executable/directory pins through isolated fixture process exit; the harness reaps only its actual known child, and process exit reclaims the retained test capabilities.
+
+## Cycle 2 origin and thread-incarnation repair
+
+Before new V6 admission touches any owner gate, it invokes canonical `simple_local_unix_origin_v1`. Successful admission publishes a nonclearable lock-free process-private V6-active latch before any V6 reservation mutation. Once active, existing reserve/reservation acquisition and public V4 ticket follow-ups check that same origin before inherited mutexes, ticket decoding or result allocation. Foreign calls return scalar error or NULL with authority retained. A legacy-only process with the latch unset retains existing behavior. No new origin registry is introduced.
+
+A lock-free checked monotonic unsigned sequence issues a process-private TLS stamp only after origin admission. Zero is unissued, exhaustion fails closed and stamps never reset/reuse. A V6 reservation binds both actual Linux TID and that stamp. Thus a later thread with a reused integer TID cannot inherit admission. Existing short registry lookup remains necessary; no parallel lock-free owner registry exists.
+
+The public V4 ticket selector already excludes `reservation_token` slots, and V6 never exposes its private core token. Raw-owned adapters are unchanged; the checkpoint does not claim arbitrary private-core-token forgery, inherited raw-owned APIs, native fork during an operation or all runtime allocator fork safety. Internal unlock remains unconditional.
+
+The focused native fixture now forks while actual reservation, V4 slot, raw-owner and child locks are held. Its child calls both new ports, every reservation route and all four public ticket follow-ups, with unreadable ticket addresses and an armed allocator-failure sentinel; prompt error/NULL must precede both decoding and allocation. Parent then progresses its actual child normally. A separate actual-thread stamp test substitutes only a foreign issued stamp to exercise refusal despite matching actual TID; it does not claim forced kernel TID recycling. Both additions remain NOT_RUN; no new native build is allocated.
+
+The four public V4 ticket externs now declare nullable tuple results. All five actual lease call sites (poll, cancel, collect, acknowledge and acknowledge_cleanup) match absence before tuple destructuring/decoding and return an error without changing lease authority. Foreign native refusal allocates no diagnostic tuple. TLS stamp issuance is bounded to 16 CAS attempts; exhaustion returns EOVERFLOW and contention returns EBUSY without reusing a stamp. This source contract remains NOT_RUN.
