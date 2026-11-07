@@ -2755,7 +2755,10 @@ fn try_compile_builtin_method_call<M: Module>(
             .declare_function(runtime_func, cranelift_module::Linkage::Import, &sig)
         {
             Ok(fid) => {
-                ctx.func_ids.insert(runtime_func.to_string(), fid);
+                // The raw name may already identify a local function body.
+                // Keep that mapping for its later definition; this call still
+                // uses the runtime import's own FuncId.
+                ctx.func_ids.or_insert(runtime_func.to_string(), fid);
                 fid
             }
             Err(_) => return Ok(None),
