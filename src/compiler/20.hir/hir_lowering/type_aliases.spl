@@ -1,9 +1,9 @@
 # Type aliases retain parser templates until their arguments are known. Their
 # expansion produces the underlying HIR shape, never a nominal alias symbol.
-use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.types.{HirLowering, HirNominalTypeTemplate}
 use compiler.hir.hir_types.*
 use compiler.frontend.parser_types.{ParserTypeParam}
-use compiler.frontend.parser_types_expr.{Type, TypeKind, parser_type_written_any_spans_v1}
+use compiler.frontend.parser_types_expr.{Type, TypeKind, parser_type_written_any_spans_v1, parser_type_named_dependencies}
 use compiler.common.diagnostics.span.{Span}
 
 # Inspect the declaration template, before substituting caller-owned arguments.
@@ -37,7 +37,24 @@ fn alias_template_has_ownership(type_: Type) -> bool:
         case _: pass
     false
 
+fn unavailable_default_parameter(type_: Type, parameters: [ParserTypeParam], bound_count: i64) -> text:
+    # A current/later formal shadows a same-named module declaration too.
+    # Reject its use before name resolution can capture that declaration or
+    # turn an unbound single-letter name into the legacy Any fallback.
+    for dependency in parser_type_named_dependencies(type_):
+        for index in bound_count..parameters.len():
+            val name = parameters[index].name
+            if dependency == name or dependency == "has_{name}" or dependency.starts_with("{name}."):
+                return name
+    ""
+
 impl HirLowering:
+    me register_nominal_type_template(symbol_id: SymbolId, parameters: [ParserTypeParam], owner: text):
+        if self.nominal_type_templates.contains_key(symbol_id.id):
+            return
+        self.nominal_type_templates[symbol_id.id] = HirNominalTypeTemplate(
+            parameters: parameters, owner: owner, scope: self.symbols.current_scope)
+
     me lower_alias_template_type(target: Type) -> HirType:
         val owner = self.type_alias_current_owner
         if self.nogc_strict and owner != "" and owner != self.module_filename and alias_template_has_ownership(target):
@@ -90,22 +107,42 @@ impl HirLowering:
                 return HirTypeKind.Error
             return self.prescan_type_parameters[symbol_id.id].kind
         val position = self.type_alias_position(symbol_id)
-        if position < 0:
+        val is_alias = position >= 0
+        if not is_alias and not self.nominal_type_templates.contains_key(symbol_id.id):
             return HirTypeKind.Named(symbol_id, arguments)
+        var parameters: [ParserTypeParam] = []
+        var owner = ""
+        var declaration_scope = self.symbols.current_scope
+        if is_alias:
+            parameters = self.type_alias_parameters[position]
+            owner = self.type_alias_owners[position]
+            declaration_scope = self.type_alias_scopes[position]
+        else:
+            val template: HirNominalTypeTemplate = self.nominal_type_templates[symbol_id.id]
+            parameters = template.parameters
+            owner = template.owner
+            declaration_scope = template.scope
         for active_id in self.type_alias_active_ids:
-            if active_id == symbol_id.id:
-                self.error("cyclic type alias `{self.symbols.symbols[symbol_id.id].name}`", span)
+            if active_id == symbol_id.id and (is_alias or arguments.len() < parameters.len()):
+                val label = if is_alias: "type alias" else: "generic defaults for"
+                self.error("cyclic {label} `{self.symbols.symbols[symbol_id.id].name}`", span)
                 return HirTypeKind.Error
-        val parameters: [ParserTypeParam] = self.type_alias_parameters[position]
+        val declaration_label = if is_alias: "type alias" else: "type `{self.symbols.symbols[symbol_id.id].name}`"
         if arguments.len() > parameters.len():
-            self.error("type alias expects {parameters.len()} type arguments, got {arguments.len()}", span)
+            self.error("{declaration_label} expects {parameters.len()} type arguments, got {arguments.len()}", span)
             return HirTypeKind.Error
         var required_index = arguments.len()
         while required_index < parameters.len():
             if not parameters[required_index].has_default:
-                self.error("type alias expects {parameters.len()} type arguments, got {arguments.len()}", span)
+                self.error("{declaration_label} expects {parameters.len()} type arguments, got {arguments.len()}", span)
+                return HirTypeKind.Error
+            val unavailable = unavailable_default_parameter(parameters[required_index].default, parameters, required_index)
+            if unavailable != "":
+                self.error("default for type parameter `{parameters[required_index].name}` refers to unavailable type parameter `{unavailable}`; defaults may refer only to earlier parameters", span)
                 return HirTypeKind.Error
             required_index = required_index + 1
+        if not is_alias and arguments.len() == parameters.len():
+            return HirTypeKind.Named(symbol_id, arguments)
 
         # Each expansion owns its frame. A nested alias cannot accidentally
         # capture a formal from the caller; defaults can use earlier formals.
@@ -116,8 +153,8 @@ impl HirLowering:
         val saved_active = self.type_alias_active_ids
         self.type_alias_argument_names = []
         self.type_alias_argument_types = []
-        self.type_alias_current_owner = self.type_alias_owners[position]
-        self.symbols.current_scope = self.type_alias_scopes[position]
+        self.type_alias_current_owner = owner
+        self.symbols.current_scope = declaration_scope
         var active_frame: [i64] = []
         for active_id in saved_active:
             active_frame = active_frame.push(active_id)
@@ -128,7 +165,10 @@ impl HirLowering:
             self.type_alias_argument_names = self.type_alias_argument_names.push(parameters[index].name)
             self.type_alias_argument_types = self.type_alias_argument_types.push(argument)
             index = index + 1
-        val expanded = self.lower_alias_template_type(self.type_alias_targets[position])
+        val expanded = if is_alias:
+            self.lower_alias_template_type(self.type_alias_targets[position])
+        else:
+            HirType(kind: HirTypeKind.Named(symbol_id, self.type_alias_argument_types), span: span)
         self.type_alias_argument_names = saved_names
         self.type_alias_argument_types = saved_types
         self.type_alias_current_owner = saved_owner
