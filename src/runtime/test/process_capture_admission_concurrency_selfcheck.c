@@ -136,6 +136,8 @@ static void concurrent_owners(const char* executable) {
     CHECK(pthread_cond_destroy(&shared.changed) == 0); CHECK(pthread_mutex_destroy(&shared.lock) == 0);
 }
 
+#include "process_capture_cloexec_overlap_private.h"
+
 int main(int argc, char** argv) {
     if (argc == 3) {
         if (!strcmp(argv[1], "--interleave")) {
@@ -154,10 +156,15 @@ int main(int argc, char** argv) {
             if (inherited) fputs(inherited, stdout); return 0;
         }
         if (!strcmp(argv[1], "--limit")) { for (int i = 0; i < 1024; i++) fputc('x', stdout); return 0; }
+        if (!strcmp(argv[1], "--exec-holder")) {
+            const char output[] = "exec-holder";
+            (void)write(STDOUT_FILENO, output, sizeof(output) - 1);
+            struct timespec duration = {2, 0}; nanosleep(&duration, NULL); return 29;
+        }
         if (!strcmp(argv[1], "--timeout")) { for (;;) pause(); }
         return 98;
     }
-    CHECK(argc == 1); CHECK(argv[0][0] == '/'); CHECK(pthread_atfork(NULL, NULL, child_delay) == 0);
+    CHECK(argc == 1); CHECK(argv[0][0] == '/'); CHECK(pthread_atfork(overlap_atfork_prepare_v1, NULL, child_delay) == 0);
     char marker[] = "/tmp/simple-admission-owner-XXXXXX";
     int marker_fd = mkstemp(marker); CHECK(marker_fd >= 0); close(marker_fd); CHECK(unlink(marker) == 0);
     SplArray* args = arguments("--marker", marker);
@@ -185,11 +192,17 @@ int main(int argc, char** argv) {
     args = arguments("--limit", "");
     receipt = rt_process_run_bounded_admitted_tuple_v1(argv[0], strlen(argv[0]), args, NULL, 2, 2000, 16, now_ms() + 5000);
     CHECK((receipt[3] & 2) != 0); CHECK((receipt[3] & (32 | 64)) == 0); rt_array_free(args);
+    args = arguments("--limit", "");
+    receipt = rt_process_run_bounded_observed_tuple_v1(argv[0], strlen(argv[0]), args, 2000, 16);
+    CHECK(receipt[2] == 0); CHECK((receipt[3] & 2) != 0); rt_array_free(args);
     args = arguments("--timeout", "");
     receipt = rt_process_run_bounded_admitted_tuple_v1(argv[0], strlen(argv[0]), args, NULL, 2, 50, 1024, now_ms() + 5000);
     CHECK((receipt[3] & 1) != 0); CHECK((receipt[3] & (32 | 64)) == 0); rt_array_free(args);
     concurrent_owners(argv[0]);
+    forced_descriptor_overlap_v1(argv[0], 0);
+    forced_descriptor_overlap_v1(argv[0], 1);
+    forced_descriptor_overlap_v1(argv[0], 2);
     int status; errno = 0; CHECK(waitpid(-1, &status, WNOHANG) == -1 && errno == ECHILD);
-    printf("PASS capture admission/concurrency: %d checks; actual POSIX owners, status pipe, no-entry, inherited env, limits, timeout/reap\n", checks);
+    printf("PASS capture admission/concurrency: %d checks; actual POSIX owners, atomic CLOEXEC, forced overlap, delayed preexec, EOF while other child live, status pipe, no-entry, inherited env, limits, timeout/reap\n", checks);
     return 0;
 }

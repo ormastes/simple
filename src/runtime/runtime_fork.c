@@ -1,8 +1,12 @@
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 /*
  * Fork-without-exec implementation for test runner isolation.
  *
  * Key design decisions:
- * - Uses pipe() + fork() + dup2() for stdio capture
+ * - Linux capture pipes are atomically CLOEXEC; captured exec children close
+ *   unrelated descriptors promptly. Raw legacy children keep their FD policy.
  * - poll() multiplexes reads from stdout/stderr pipes (avoids deadlock)
  * - Fixed-size head/tail buffers for bounded test output
  * - _exit() in child to avoid atexit handlers and double-flush
@@ -23,6 +27,9 @@ int64_t rt_fork_child_setup(void) {
 }
 int simple_process_launch_admission_check_v1(int64_t expiry) { (void)expiry; return -1; }
 int64_t simple_fork_child_setup_admitted_v1(int64_t expiry) { (void)expiry; return -3; }
+int64_t simple_fork_child_setup_capture_v1(int64_t expiry, int status_fd) { (void)expiry; (void)status_fd; return -1; }
+int64_t simple_fork_child_setup_capture_v2(int64_t expiry, int status_pipe[2]) { (void)expiry; (void)status_pipe; return -1; }
+int simple_fork_capture_pipe_v1(int fds[2]) { (void)fds; return -1; }
 int64_t simple_fork_parent_capture_flags_v1(void) { return 8; }
 void simple_fork_parent_capture_release_v1(void) {}
 
@@ -82,6 +89,7 @@ int64_t rt_fork_shared_heap_wait_v1(int64_t child_pid) {
 #include <fcntl.h>
 #include <time.h>
 
+#include "runtime_fork_capture_fd_private.h"
 #include "runtime_fork_capture_context_private.h"
 
 /* Each stream retains at most 4 MiB of child output, split head/tail. */
@@ -230,42 +238,50 @@ int simple_process_launch_admission_check_v1(int64_t expires_at_unix_ms) {
     return milliseconds >= expires_at_unix_ms ? 1 : 0;
 }
 
-static int64_t fork_child_setup_admission_v1(int64_t expires_at_unix_ms) {
+static int64_t fork_child_setup_admission_v1(int64_t expires_at_unix_ms, int captured_status_fd,
+        int owned_status_pipe[2]) {
     ForkCaptureContextV1* context = fork_capture_context_v1();
     if (!context || context->active_child > 0 || context->stdout_read_fd >= 0 ||
             context->stderr_read_fd >= 0) return -1;
-    int stdout_pipe[2]; /* [0]=read, [1]=write */
-    int stderr_pipe[2];
-
-    if (pipe(stdout_pipe) < 0) {
-        return -1;
+    int stdout_pipe[2] = {-1, -1}; /* [0]=read, [1]=write */
+    int stderr_pipe[2] = {-1, -1};
+    /* Avoid holding writer-inheritance coordination while flushing stdio. */
+    fflush(stdout); fflush(stderr);
+    int cancellation_state;
+    if (capture_setup_acquire_v1(&cancellation_state) != 0) return -1;
+    int64_t failure = -1;
+    if (owned_status_pipe) {
+        if (simple_fork_capture_pipe_v1(owned_status_pipe) != 0 ||
+                fcntl(owned_status_pipe[0], F_SETFL, O_NONBLOCK) < 0) goto setup_failed;
+        captured_status_fd = owned_status_pipe[1];
     }
-    if (pipe(stderr_pipe) < 0) {
-        close(stdout_pipe[0]);
-        close(stdout_pipe[1]);
-        return -1;
+    int captured = captured_status_fd >= 3;
+#if defined(__linux__)
+    if (simple_fork_capture_pipe_v1(stdout_pipe) < 0) {
+#else
+    if ((captured ? simple_fork_capture_pipe_v1(stdout_pipe) : pipe(stdout_pipe)) < 0) {
+#endif
+        goto setup_failed;
     }
-
-    /* Flush parent stdio before fork to avoid double-output */
-    fflush(stdout);
-    fflush(stderr);
+#if defined(__linux__)
+    if (simple_fork_capture_pipe_v1(stderr_pipe) < 0) {
+#else
+    if ((captured ? simple_fork_capture_pipe_v1(stderr_pipe) : pipe(stderr_pipe)) < 0) {
+#endif
+        goto setup_failed;
+    }
 
     if (expires_at_unix_ms > 0) {
         int admitted = simple_process_launch_admission_check_v1(expires_at_unix_ms);
         if (admitted != 0) {
-            close(stdout_pipe[0]); close(stdout_pipe[1]);
-            close(stderr_pipe[0]); close(stderr_pipe[1]);
-            return admitted > 0 ? -2 : -3;
+            failure = admitted > 0 ? -2 : -3;
+            goto setup_failed;
         }
     }
     pid_t pid = fork();
     if (pid < 0) {
         /* Fork failed */
-        close(stdout_pipe[0]);
-        close(stdout_pipe[1]);
-        close(stderr_pipe[0]);
-        close(stderr_pipe[1]);
-        return -1;
+        goto setup_failed;
     }
 
     if (pid == 0) {
@@ -279,18 +295,23 @@ static int64_t fork_child_setup_admission_v1(int64_t expires_at_unix_ms) {
         close(stderr_pipe[0]);
 
         /* Redirect stdout/stderr to pipe write ends */
-        dup2(stdout_pipe[1], STDOUT_FILENO);
-        dup2(stderr_pipe[1], STDERR_FILENO);
+        if (dup2(stdout_pipe[1], STDOUT_FILENO) < 0 || dup2(stderr_pipe[1], STDERR_FILENO) < 0) {
+            if (captured) capture_child_descriptor_reject_v1(captured_status_fd);
+            _exit(126);
+        }
 
         /* Close original write ends (now duped to fd 1/2) */
         close(stdout_pipe[1]);
         close(stderr_pipe[1]);
+        if (captured) capture_child_descriptors_v1(captured_status_fd);
 
         /* Reset signal handlers to default (avoid inheriting parent's handlers) */
         signal(SIGINT, SIG_DFL);
         signal(SIGTERM, SIG_DFL);
         signal(SIGPIPE, SIG_DFL);
-
+        /* Child owns a private mutex copy. Unlock before any raw child can
+         * recursively capture; cancellation state never crosses into wait. */
+        capture_setup_release_v1(cancellation_state);
         return 0; /* Child returns 0 */
     }
 
@@ -302,19 +323,46 @@ static int64_t fork_child_setup_admission_v1(int64_t expires_at_unix_ms) {
     /* Close write ends (child uses these) */
     close(stdout_pipe[1]);
     close(stderr_pipe[1]);
+    if (owned_status_pipe) {
+        close(owned_status_pipe[1]); owned_status_pipe[1] = -1;
+    }
 
     /* Store read ends for rt_fork_parent_wait */
     s_stdout_read_fd = stdout_pipe[0];
     s_stderr_read_fd = stderr_pipe[0];
     context->active_child = pid;
-
+    capture_setup_release_v1(cancellation_state);
     return (int64_t)pid;
+
+setup_failed:
+    if (stdout_pipe[0] >= 0) close(stdout_pipe[0]);
+    if (stdout_pipe[1] >= 0) close(stdout_pipe[1]);
+    if (stderr_pipe[0] >= 0) close(stderr_pipe[0]);
+    if (stderr_pipe[1] >= 0) close(stderr_pipe[1]);
+    if (owned_status_pipe) {
+        if (owned_status_pipe[0] >= 0) close(owned_status_pipe[0]);
+        if (owned_status_pipe[1] >= 0) close(owned_status_pipe[1]);
+        owned_status_pipe[0] = owned_status_pipe[1] = -1;
+    }
+    capture_setup_release_v1(cancellation_state);
+    return failure;
 }
 
-int64_t rt_fork_child_setup(void) { return fork_child_setup_admission_v1(0); }
+int64_t rt_fork_child_setup(void) { return fork_child_setup_admission_v1(0, -1, NULL); }
 int64_t simple_fork_child_setup_admitted_v1(int64_t expiry) {
     if (expiry <= 0) return -3;
-    return fork_child_setup_admission_v1(expiry);
+    return fork_child_setup_admission_v1(expiry, -1, NULL);
+}
+int64_t simple_fork_child_setup_capture_v1(int64_t expiry, int status_fd) {
+    if (expiry < 0 || status_fd < 3) return -1;
+    int flags = fcntl(status_fd, F_GETFD);
+    if (flags < 0 || (flags & FD_CLOEXEC) == 0) return -1;
+    return fork_child_setup_admission_v1(expiry, status_fd, NULL);
+}
+int64_t simple_fork_child_setup_capture_v2(int64_t expiry, int status_pipe[2]) {
+    if (expiry < 0 || !status_pipe) return -1;
+    status_pipe[0] = status_pipe[1] = -1;
+    return fork_child_setup_admission_v1(expiry, -1, status_pipe);
 }
 
 static int64_t fork_parent_wait_mode(int64_t child_pid, int64_t timeout_ms,

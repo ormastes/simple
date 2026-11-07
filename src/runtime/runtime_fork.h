@@ -42,6 +42,16 @@ int64_t rt_fork_child_setup(void);
  * -2 means expired/no child and -3 means unavailable clock/no child. */
 int simple_process_launch_admission_check_v1(int64_t expires_at_unix_ms);
 int64_t simple_fork_child_setup_admitted_v1(int64_t expires_at_unix_ms);
+/* Exec-capture-only descriptor whitelist. Child returns with only stdio and
+ * CLOEXEC status FD3; the parent retains its original status_fd. Isolation
+ * rejection writes status byte4 and exits126; no raw legacy FD-policy change.
+ * Linux uses atomic pipe2 + checked close_range; unsupported routes reject. */
+int simple_fork_capture_pipe_v1(int fds[2]);
+int64_t simple_fork_child_setup_capture_v1(int64_t expires_at_unix_ms, int status_fd);
+/* Product capture creates its status pipe in the same bounded setup/fork/
+ * parent-close transaction as stdio writers. Parent returns read end only;
+ * child returns with its sole private writer at CLOEXEC FD3. */
+int64_t simple_fork_child_setup_capture_v2(int64_t expires_at_unix_ms, int status_pipe[2]);
 
 /*
  * Parent: read captured stdout/stderr from child, wait for exit with timeout.

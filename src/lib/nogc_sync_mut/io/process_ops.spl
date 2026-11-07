@@ -4,7 +4,7 @@
 use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release)
 use std.nogc_sync_mut.fs.host_path.{host_path_native, host_is_windows_host, host_path_is_absolute}
 use std.nogc_sync_mut.sffi.process_capture.{process_capture_bounded_native, process_capture_unbounded_native}
-use std.nogc_sync_mut.sffi.process_environment_capture.{process_environment_capture_native_v1, process_environment_spawn_native_v1, process_capture_admitted_native_v1}
+use std.nogc_sync_mut.sffi.process_environment_capture.{process_environment_capture_native_v1, process_environment_spawn_native_v1, process_capture_admitted_native_v1, process_capture_observed_native_v1}
 use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
 use std.nogc_sync_mut.io.windows_redirected_process.{WINDOWS_REDIRECTED_TOKEN_BASE, windows_redirected_spawn, windows_redirected_wait, windows_redirected_is_running, windows_redirected_kill}
 use std.common.process.observation_v1.{
@@ -1797,6 +1797,34 @@ fn process_admitted_capture_v1(command: text, args: [text], environment: [text],
 pub fn process_run_bounded_admitted_v1(command: text, args: [text], timeout_ms: i64,
         max_output_bytes: i64, expires_at_unix_ms: i64) -> Result<ProcessResult, text>:
     process_admitted_capture_v1(command, args, [], 2, timeout_ms, max_output_bytes, expires_at_unix_ms)
+
+# Ordinary native capture with authoritative timeout/output flags, inherited
+# trusted environment, and no launch deadline or fabricated expiration value.
+pub fn process_run_bounded_observed_v1(command: text, args: [text], timeout_ms: i64,
+        max_output_bytes: i64) -> Result<ProcessResult, text>:
+    val interpreted = unsafe(capabilities: [ffi]): rt_is_interpreter_runtime()
+    val jit = unsafe(capabilities: [ffi]): rt_is_jit_runtime()
+    if interpreted or jit: return Err("observed-capture-requires-native-core-c-provider-before-effect")
+    if not host_path_is_absolute(command) or command.contains("\u{0}") or args.len() > 32768 or
+            timeout_ms <= 0 or max_output_bytes <= 0 or max_output_bytes > 16777216:
+        return Err("observed-capture-invalid-input-before-effect")
+    var size = command.len()
+    for arg in args:
+        if arg.contains("\u{0}") or arg.len() > 16777216: return Err("observed-capture-invalid-argument-before-effect")
+        size = size + arg.len()
+        if size > 4194304: return Err("observed-capture-argument-byte-limit-before-effect")
+    proc_slot_acquire()
+    val outcome = process_capture_observed_native_v1(host_path_native(command), args, timeout_ms, max_output_bytes)
+    proc_slot_release()
+    val result = outcome?
+    val flags = result.3
+    if flags >= 32: return Err("observed-capture-provider-rejected-before-effect")
+    if flags >= 8: return Err("observed-capture-native-failure-effect-uncertain")
+    val timed_out = flags % 2 == 1
+    val output_limited = flags % 8 >= 2
+    Ok(ProcessResult(stdout: result.0, stderr: result.1, exit_code: result.2,
+        limit_exceeded: timed_out or output_limited,
+        limit_type: if timed_out: "timeout" else: if output_limited: "output" else: ""))
 
 # Explicit clean copied environment remains Windows-only. No Linux empty-env
 # fallback and no overlay/inherited Docker selector variables are admitted.
