@@ -1,0 +1,285 @@
+# Shared unbound application source-view service. No protocol envelopes.
+# Local MCP captures cwd; this slice supplies no authenticated host entrypoint.
+# File admission is not an atomic sandbox against hostile ancestor replacement.
+use std.common.source.service_contracts.{SourceOpenResultV1}
+use app.io.mod.{cwd, dir_is_real_no_follow, file_read_regular_no_follow_bounded_bytes}
+use app.io.file_ops.{path_absolute}
+use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text, utf8_bytes_valid}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.string_core.{str_len}
+use std.common.source.contracts.{SourceSnapshotV1, SourceRangeV1, SourceProjectionV1,
+    SourceOutlineV1, SourceStructuredViewV1}
+use std.nogc_sync_mut.source.projection.{source_project_raw_v1}
+use std.nogc_sync_mut.source.structure.{source_project_structure_v1, source_view_node_expanded_v1}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field,
+    json_value_text_or, json_value_items, json_value_object_from,
+    json_value_serialize}
+
+fn source_result_error_v1(status: text, reason: text) -> SourceOpenResultV1:
+    val result = json_value_object_from([
+        ("status", JsonValue.Str(status)),
+        ("completeness", JsonValue.Str("not_evaluated")),
+        ("reason", JsonValue.Str(reason))])
+    SourceOpenResultV1(json_value_serialize(result), true)
+
+fn source_integer_argument_v1(arguments: JsonValue, key: text, fallback: i64) -> Result<i64, text>:
+    match json_value_field(arguments, key):
+        JsonValue.Null: Ok(fallback)
+        JsonValue.Int(value): Ok(value)
+        _: Err("integer_required: " + key)
+
+pub fn source_relative_path_valid_v1(path: text) -> bool:
+    if path == "" or str_len(path) > 512 or path.starts_with("/"):
+        return false
+    if path.contains("\\") or path.contains(":"): return false
+    for byte in text_to_utf8_bytes(path):
+        if byte < 32 or byte == 127: return false
+    for component in path.split("/"):
+        if component == "" or component == "." or component == "..": return false
+    true
+
+fn source_workspace_file_v1(path: text, root: text) -> Result<text, text>:
+    if not source_relative_path_valid_v1(path): return Err("workspace_relative_path_required")
+    if root == "": return Err("workspace_root_unavailable")
+    if not dir_is_real_no_follow(root): return Err("workspace_root_not_real_directory")
+    val components = path.split("/")
+    var parent = root
+    var index = 0
+    while index + 1 < components.len():
+        parent = parent + "/" + components[index]
+        if not dir_is_real_no_follow(parent): return Err("symlink_or_non_directory_parent")
+        index = index + 1
+    Ok(root + "/" + path)
+
+fn source_range_json_v1(span: SourceRangeV1) -> JsonValue:
+    json_value_object_from([("start_byte", JsonValue.Int(span.start_byte)),
+        ("end_byte", JsonValue.Int(span.end_byte))])
+
+fn source_safe_json_v1(serialized: text) -> text:
+    # JSON escapes preserve authoritative decoded source while preventing bidi
+    # controls from rearranging the visible JSON evidence presented to agents.
+    var safe = serialized
+    val controls = ["\u061C", "\u200E", "\u200F", "\u202A", "\u202B", "\u202C", "\u202D", "\u202E", "\u2066", "\u2067", "\u2068", "\u2069"]
+    val escapes = [r"\u061C", r"\u200E", r"\u200F", r"\u202A", r"\u202B", r"\u202C", r"\u202D", r"\u202E", r"\u2066", r"\u2067", r"\u2068", r"\u2069"]
+    var index = 0
+    while index < controls.len():
+        safe = safe.replace(controls[index], escapes[index])
+        index = index + 1
+    safe
+
+pub fn source_projection_payload_v1(path: text, projection: SourceProjectionV1) -> text:
+    var selected: [JsonValue] = []
+    for span in projection.selected: selected.push(source_range_json_v1(span))
+    var omitted: [JsonValue] = []
+    for span in projection.omitted: omitted.push(source_range_json_v1(span))
+    val result = json_value_object_from([
+        ("schema_version", JsonValue.Int(1)),
+        ("status", JsonValue.Str("ok")),
+        ("mode", JsonValue.Str("raw")),
+        ("path", JsonValue.Str(path)),
+        ("snapshot_id", JsonValue.Str(projection.snapshot_id)),
+        ("completeness", JsonValue.Str(projection.completeness)),
+        ("evidence_kind", JsonValue.Str(projection.evidence_kind)),
+        ("provider_level", JsonValue.Str("L0")),
+        ("source_text", JsonValue.Str(projection.source_text)),
+        ("selected_ranges", JsonValue.Array(selected)),
+        ("omitted_ranges", JsonValue.Array(omitted)),
+        ("next_byte", JsonValue.Int(projection.next_byte)),
+        ("limitations", JsonValue.Array([
+            JsonValue.Str("disk_snapshot_not_editor_overlay"),
+            JsonValue.Str("outline_and_semantics_unavailable"),
+            JsonValue.Str("authenticated_agent_session_binding_unavailable"),
+            JsonValue.Str("workspace_ancestor_checks_not_race_proof_sandbox")]))])
+    source_safe_json_v1(json_value_serialize(result))
+
+fn source_bounded_payload_v1(payload: text) -> SourceOpenResultV1:
+    # The MCP adapter enforces its final envelope cap separately.
+    if str_len(payload) > 12288:
+        return source_result_error_v1("error", "source_payload_exceeds_budget; reduce max_bytes or max_nodes")
+    SourceOpenResultV1(payload, false)
+
+fn source_load_native_outline_v1(snapshot: SourceSnapshotV1) -> Result<SourceOutlineV1, text>:
+    # Keep native syntax dependencies off raw reads and initialize/tools/list.
+    use compiler.tools.source_outline_v1.{source_native_outline_v1}
+    source_native_outline_v1(snapshot)
+
+pub fn source_outline_result_identity_v1(outline: SourceOutlineV1) -> text:
+    # Canonical ordered arrays are unambiguous; this binds produced syntax
+    # facts, not an unavailable compiler build/admission identity.
+    var nodes: [JsonValue] = []
+    for node in outline.nodes:
+        nodes.push(JsonValue.Array([JsonValue.Str(node.name), JsonValue.Str(node.qualified_name),
+            JsonValue.Str(node.kind), JsonValue.Int(node.parent_index),
+            source_range_json_v1(node.full_range), source_range_json_v1(node.header_range),
+            source_range_json_v1(node.body_range)]))
+    var issues: [JsonValue] = []
+    for issue in outline.issues:
+        issues.push(JsonValue.Array([JsonValue.Str(issue.message), JsonValue.Str(issue.severity), source_range_json_v1(issue.span)]))
+    val identity = JsonValue.Array([JsonValue.Str("source-outline-result-v1"),
+        JsonValue.Str(outline.snapshot_id), JsonValue.Str(outline.provider_id),
+        JsonValue.Str(outline.provider_level), JsonValue.Str(outline.syntax_status),
+        JsonValue.Array(nodes), JsonValue.Array(issues), JsonValue.Int(outline.total_issues)])
+    sha256_text(json_value_serialize(identity))
+
+pub fn source_structure_cursor_v1(cursor: text, query_key: text,
+        expected_snapshot: text) -> Result<i64, text>:
+    if cursor == "": return Ok(0)
+    if expected_snapshot == "": return Err("continuation_requires_snapshot_id")
+    val fields = cursor.split(":")
+    if fields.len() != 2 or fields[0] != query_key: return Err("source_cursor_query_changed")
+    val start_index = fields[1].to_i64() ?? -1
+    if start_index < 0 or str(start_index) != fields[1]: return Err("invalid_source_cursor")
+    Ok(start_index)
+
+fn source_display_lines_v1(source: text, first_line: i64, numbers: bool) -> text:
+    if not numbers: return source
+    var parts: [text] = []
+    var line = first_line
+    val rows = source.split("\n")
+    var index = 0
+    while index < rows.len():
+        if index + 1 == rows.len() and rows[index] == "": break
+        parts.push(str(line) + " | " + rows[index])
+        if index + 1 < rows.len(): parts.push("\n")
+        line = line + 1
+        index = index + 1
+    parts.join("")
+
+fn source_structure_payload_v1(path: text, snapshot: SourceSnapshotV1,
+        outline: SourceOutlineV1, view: SourceStructuredViewV1,
+        query_key: text, result_identity: text, numbers: bool) -> text:
+    val bytes = text_to_utf8_bytes(view.projection.source_text)
+    val original = text_to_utf8_bytes(snapshot.source)
+    var segments: [JsonValue] = []
+    var position = 0
+    var original_position = 0
+    var line = 1
+    var index = 0
+    for span in view.projection.selected:
+        while original_position < span.start_byte:
+            if original[original_position] == 10: line = line + 1
+            original_position = original_position + 1
+        var selected: [u8] = []
+        val count = span.end_byte - span.start_byte
+        var copied = 0
+        while copied < count:
+            selected.push(bytes[position])
+            position = position + 1
+            copied = copied + 1
+        val source = bytes_to_text(selected)
+        val node_index = view.visible_nodes[index]
+        val node = outline.nodes[node_index]
+        segments.push(json_value_object_from([
+            ("node", JsonValue.Int(node_index)), ("name", JsonValue.Str(node.qualified_name)),
+            ("kind", JsonValue.Str(node.kind)), ("range", source_range_json_v1(span)),
+            ("first_line", JsonValue.Int(line)), ("source_text", JsonValue.Str(source)),
+            ("display_text", JsonValue.Str(source_display_lines_v1(source, line, numbers))),
+            ("expanded", JsonValue.Bool(source_view_node_expanded_v1(outline, view, node_index)))]))
+        index = index + 1
+    var folds: [JsonValue] = []
+    for fold in view.folds:
+        var ranges: [JsonValue] = []
+        for span in fold.ranges: ranges.push(source_range_json_v1(span))
+        folds.push(json_value_object_from([("label", JsonValue.Str(fold.label)),
+            ("node", JsonValue.Int(fold.node_index)), ("ranges", JsonValue.Array(ranges))]))
+    var omitted: [JsonValue] = []
+    for span in view.projection.omitted: omitted.push(source_range_json_v1(span))
+    var issues: [JsonValue] = []
+    for issue in outline.issues:
+        issues.push(json_value_object_from([("message", JsonValue.Str(issue.message)),
+            ("severity", JsonValue.Str(issue.severity)), ("range", source_range_json_v1(issue.span))]))
+    var limitations: [JsonValue] = []
+    for reason in outline.limitations: limitations.push(JsonValue.Str(reason))
+    limitations.push(JsonValue.Str("disk_snapshot_not_editor_overlay"))
+    limitations.push(JsonValue.Str("authenticated_agent_session_binding_unavailable"))
+    limitations.push(JsonValue.Str("workspace_ancestor_checks_not_race_proof_sandbox"))
+    limitations.push(JsonValue.Str("relevant_import_semantics_not_evaluated"))
+    limitations.push(JsonValue.Str("provider_build_provenance_unavailable; outline_result_identity_bound"))
+    val next_cursor = if view.next_index >= 0: query_key + ":" + str(view.next_index) else: ""
+    val result = json_value_object_from([
+        ("schema_version", JsonValue.Int(1)), ("status", JsonValue.Str("ok")),
+        ("mode", JsonValue.Str(view.mode)), ("path", JsonValue.Str(path)),
+        ("snapshot_id", JsonValue.Str(snapshot.snapshot_id)),
+        ("provider_id", JsonValue.Str(outline.provider_id)),
+        ("provider_level", JsonValue.Str(outline.provider_level)),
+        ("outline_result_id", JsonValue.Str(result_identity)),
+        ("syntax_status", JsonValue.Str(outline.syntax_status)),
+        ("completeness", JsonValue.Str(view.projection.completeness)),
+        ("partial_context", JsonValue.Bool(view.projection.completeness != "complete" or outline.syntax_status != "parsed")),
+        ("segments", JsonValue.Array(segments)), ("folds", JsonValue.Array(folds)),
+        ("omitted_ranges", JsonValue.Array(omitted)), ("diagnostics", JsonValue.Array(issues)),
+        ("total_diagnostics", JsonValue.Int(outline.total_issues)),
+        ("next_cursor", JsonValue.Str(next_cursor)),
+        ("limitations", JsonValue.Array(limitations)),
+        ("footer", JsonValue.Str("[ess] [adv]"))])
+    source_safe_json_v1(json_value_serialize(result))
+
+fn source_open_context_v1(body: text, numbers: bool, workspace_root: text) -> SourceOpenResultV1:
+    if str_len(body) > 4096: return source_result_error_v1("error", "request_too_large")
+    val arguments = match json_parse_value_strict(body):
+        Ok(value): value
+        Err(_): return source_result_error_v1("error", "invalid_json_arguments")
+    val mode = json_value_text_or(json_value_field(arguments, "mode"), "outline")
+    if mode != "raw" and mode != "outline" and mode != "focused":
+        return source_result_error_v1("unsupported", "unsupported_source_mode")
+    val path = json_value_text_or(json_value_field(arguments, "path"), "")
+    val file = match source_workspace_file_v1(path, workspace_root):
+        Ok(value): value
+        Err(reason): return source_result_error_v1("denied", reason)
+    val start_byte = match source_integer_argument_v1(arguments, "start_byte", 0):
+        Ok(value): value
+        Err(reason): return source_result_error_v1("error", reason)
+    val max_bytes = match source_integer_argument_v1(arguments, "max_bytes", 4096):
+        Ok(value): value
+        Err(reason): return source_result_error_v1("error", reason)
+    if max_bytes <= 0 or max_bytes > 8192:
+        return source_result_error_v1("error", "max_bytes_must_be_1_to_8192")
+    val expected = json_value_text_or(json_value_field(arguments, "snapshot_id"), "")
+    if start_byte > 0 and expected == "":
+        return source_result_error_v1("stale", "continuation_requires_snapshot_id")
+    val bytes = match file_read_regular_no_follow_bounded_bytes(file, 1048576):
+        Ok(value): value
+        Err(_): return source_result_error_v1("error", "bounded_regular_file_read_failed")
+    if not utf8_bytes_valid(bytes):
+        return source_result_error_v1("unsupported", "source_is_not_utf8")
+    val source = bytes_to_text(bytes)
+    # Bind URI and full content identity independently, without ambiguous joins.
+    val snapshot_id = "sha256:" + sha256_text(file) + ":" + sha256_text(source)
+    if expected != "" and expected != snapshot_id:
+        return source_result_error_v1("stale", "source_snapshot_changed")
+    val snapshot = SourceSnapshotV1(snapshot_id, file, source)
+    if mode != "raw":
+        if not path.ends_with(".spl"):
+            return source_result_error_v1("unsupported", "native_structure_provider_unavailable_for_language; explicit raw mode remains available")
+        val outline = match source_load_native_outline_v1(snapshot):
+            Ok(value): value
+            Err(reason): return source_result_error_v1("error", reason)
+        val depth = match source_integer_argument_v1(arguments, "depth", 1):
+            Ok(value): value
+            Err(reason): return source_result_error_v1("error", reason)
+        val max_nodes = match source_integer_argument_v1(arguments, "max_nodes", 32):
+            Ok(value): value
+            Err(reason): return source_result_error_v1("error", reason)
+        val target = json_value_text_or(json_value_field(arguments, "target"), "")
+        val result_identity = source_outline_result_identity_v1(outline)
+        val query_key = sha256_text(json_value_serialize(JsonValue.Array([
+            JsonValue.Str(snapshot_id), JsonValue.Str(mode), JsonValue.Str(target),
+            JsonValue.Str(result_identity),
+            JsonValue.Int(depth), JsonValue.Int(max_nodes), JsonValue.Int(max_bytes)])))
+        val cursor = json_value_text_or(json_value_field(arguments, "cursor"), "")
+        val start_index = match source_structure_cursor_v1(cursor, query_key, expected):
+            Ok(value): value
+            Err(reason): return source_result_error_v1("stale", reason)
+        val view = match source_project_structure_v1(snapshot, outline, mode, target, depth, start_index, max_nodes, max_bytes):
+            Ok(value): value
+            Err(reason): return source_result_error_v1("error", reason)
+        return source_bounded_payload_v1(source_structure_payload_v1(path, snapshot, outline, view, query_key, result_identity, numbers))
+    val projection = match source_project_raw_v1(snapshot, start_byte, max_bytes):
+        Ok(value): value
+        Err(reason): return source_result_error_v1("error", reason)
+    val payload = source_projection_payload_v1(path, projection)
+    # No second full raw source is hidden in structuredContent.
+    source_bounded_payload_v1(payload)
+
+pub fn source_open_result_v1(body: text) -> SourceOpenResultV1:
+    source_open_context_v1(body, false, path_absolute(cwd()))
