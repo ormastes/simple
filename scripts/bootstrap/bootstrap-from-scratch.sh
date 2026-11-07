@@ -2983,13 +2983,25 @@ bootstrap_acquire_shared_rust_cargo_cache() {
   else
     rust_cache_common_now=$(bootstrap_authority_git_common_dir "${repo_root}") || return 1
   fi
-  [ "${rust_cache_common_now}" = "${rust_shared_cache_common_dir}" ] || return 1
+  [ "${rust_cache_common_now}" = "${rust_shared_cache_common_dir}" ] || {
+    echo "error: shared Rust cargo cache moved during this run: ${rust_shared_cache_common_dir} -> ${rust_cache_common_now}" >&2
+    return 1
+  }
   if [ -n "${rust_shared_cache_lock_handle}" ]; then
-    bootstrap_authority_require_owned_lock "${rust_shared_cache_lock_handle}"
-    return $?
+    bootstrap_authority_require_owned_lock "${rust_shared_cache_lock_handle}" || {
+      echo "error: shared Rust cargo cache lock ownership was lost" >&2
+      return 1
+    }
+    return 0
   fi
+  # Every linked worktree serialises here, so a sibling lane's build holds
+  # this lock for as long as its cargo runs. A silent failure here aborted a
+  # Windows Stage 2 lane (2026-11-07) with nothing but "preflight failed".
   portable_lock_acquire "${rust_shared_cache_common_dir}/simple-rust-cargo-cache-locks" \
-    authority "${SIMPLE_BOOTSTRAP_AUTHORITY_LOCK_WAIT_SECONDS:-120}" || return 1
+    authority "${SIMPLE_BOOTSTRAP_AUTHORITY_LOCK_WAIT_SECONDS:-120}" || {
+    echo "error: timed out after ${SIMPLE_BOOTSTRAP_AUTHORITY_LOCK_WAIT_SECONDS:-120}s waiting for the shared Rust cargo cache lock in ${rust_shared_cache_common_dir}/simple-rust-cargo-cache-locks (another worktree's build may hold it; raise SIMPLE_BOOTSTRAP_AUTHORITY_LOCK_WAIT_SECONDS)" >&2
+    return 1
+  }
   rust_shared_cache_lock_handle=${PORTABLE_LOCK_HANDLE}
 }
 
