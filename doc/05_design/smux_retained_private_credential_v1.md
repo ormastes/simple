@@ -1,5 +1,20 @@
 # Retained private credential V1
 
+Cycle 5 source provenance: virgin namespace observation ports
+`lu_initial_namespace_v1` verbatim except its symbol name from
+`/home/yoon/dev/simple-local-unix-gateway-owner-20261107/src/runtime/runtime_local_unix_v1.h`
+(lines 37–46), verified whole-file SHA256
+`33545b151e65ec1b3added3b8bb96ad9c2a9341a381e3281428eacdbcb35605f`.
+It opens the namespace handle O_RDONLY|CLOEXEC, requires fstat plus fstatfs
+NSFS_MAGIC and NS_GET_NSTYPE ioctl equal to CLONE_NEWPID, and checks exactly
+one close before publishing origin. The kernel sched header supplies clone
+constants when libc GNU-extension declarations are disabled. Existing CAS,
+Ready, established stat comparison and permanent quarantine remain unchanged.
+An isolated exec-only test redirects only the initial open to a real regular
+file and exercises actual filesystem/ioctl rejection and single checked close.
+Restoring the open target never resets failed initialization. Actual namespace
+transition qualification remains BLOCKED; this source has not been compiled.
+
 Established Ready origin stat failure or observed mismatch permanently stores
 phase 3 Quarantined. Restoring stat availability or the prior origin values
 never re-admits this process-local registry. Initial acquisition failure keeps

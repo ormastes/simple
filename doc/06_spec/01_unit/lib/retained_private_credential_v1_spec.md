@@ -1,5 +1,14 @@
 # Canonical private credential owner
 
+The virgin-origin contract now redirects only the initial namespace open to an
+actual private regular file in an isolated exec process. Real fstatfs and ioctl
+oracles reject that file as a PID namespace. The observer must return IO error
+after exactly one checked close and leave initialization at phase 1 even when
+the genuine namespace path is restored; held-mutex refusal verifies no reset or
+re-adoption. The observer body is the approved shared NSFS/NS_GET_NSTYPE routine,
+with provenance recorded in the design. This fault-target test does not create
+a namespace or qualify actual namespace transitions. **AUTHORED_UNRUN**.
+
 An isolated test-only stat wrapper now injects one EIO for the established
 namespace identity probe, then restores actual stat. With the registry mutex
 held, that first entry must fail IO and all later entries must refuse before

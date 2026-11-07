@@ -14,6 +14,12 @@ int64_t rt_retained_private_credential_close_v1(int64_t);
 #include <sys/types.h>
 #include <sys/syscall.h>
 #include <sys/random.h>
+#include <sys/vfs.h>
+#include <sys/ioctl.h>
+#include <linux/nsfs.h>
+#include <linux/magic.h>
+#include <sched.h>
+#include <linux/sched.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -46,6 +52,17 @@ static pid_t simple_private_credentials_origin_pid_v1;
 static dev_t simple_private_credentials_origin_device_v1;
 static ino_t simple_private_credentials_origin_inode_v1;
 static int64_t simple_private_credentials_next_v1=1;
+/* Verbatim shared namespace observer; see design for source/hash provenance. */
+static int rpc_initial_namespace_v1(struct stat* observed) {
+    int fd=open("/proc/self/ns/pid",O_RDONLY|O_CLOEXEC);
+    if(fd<0)return 0;
+    struct statfs filesystem;
+    int valid=fstat(fd,observed)==0&&fstatfs(fd,&filesystem)==0&&
+        (unsigned long)filesystem.f_type==(unsigned long)NSFS_MAGIC&&
+        ioctl(fd,NS_GET_NSTYPE)==CLONE_NEWPID;
+    int closed=close(fd);
+    return valid&&closed==0;
+}
 static int rpc_lock_v1(void) {
     int phase=atomic_load_explicit(&simple_private_credentials_origin_phase_v1,memory_order_acquire);
     if (phase==0) {
@@ -54,7 +71,7 @@ static int rpc_lock_v1(void) {
                 &expected,1,memory_order_acq_rel,memory_order_acquire)) {
             struct stat origin;
             /* Failure leaves Initializing permanently: never reset/adopt. */
-            if (stat("/proc/self/ns/pid",&origin)!=0) return RPC_IO;
+            if (!rpc_initial_namespace_v1(&origin)) return RPC_IO;
             simple_private_credentials_origin_pid_v1=getpid();
             simple_private_credentials_origin_device_v1=origin.st_dev;
             simple_private_credentials_origin_inode_v1=origin.st_ino;

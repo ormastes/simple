@@ -15,6 +15,17 @@
 #include <assert.h>
 static int fail_consumed_close_once=0;
 static int fail_namespace_stat_once=0;
+static const char *initial_namespace_open_redirect=NULL;
+static int initial_namespace_redirect_fd=-1;
+static int initial_namespace_redirect_closed=0;
+static int credential_test_open(const char *path,int flags) {
+    if (initial_namespace_open_redirect && !strcmp(path,"/proc/self/ns/pid")) {
+        int fd=open(initial_namespace_open_redirect,flags);
+        initial_namespace_redirect_fd=fd;
+        return fd;
+    }
+    return open(path,flags);
+}
 static int credential_test_stat(const char *path,struct stat *out) {
     if (fail_namespace_stat_once && !strcmp(path,"/proc/self/ns/pid")) {
         fail_namespace_stat_once=0; errno=EIO; return -1;
@@ -23,16 +34,22 @@ static int credential_test_stat(const char *path,struct stat *out) {
 }
 static int credential_test_close(int fd) {
     int result=close(fd);
+    if (fd==initial_namespace_redirect_fd) {
+        initial_namespace_redirect_closed++;
+        initial_namespace_redirect_fd=-1;
+    }
     if (fail_consumed_close_once && result==0) {
         fail_consumed_close_once=0; errno=EINTR; return -1;
     }
     return result;
 }
 #define close credential_test_close
+#define open(path,flags) credential_test_open(path,flags)
 #define stat(path,out) credential_test_stat(path,out)
 #define SIMPLE_RETAINED_PRIVATE_CREDENTIAL_IMPLEMENTATION
 #include "../../../src/runtime/runtime_retained_private_credential_v1.h"
 #undef close
+#undef open
 #undef stat
 
 static const char initial[]="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n";
@@ -62,6 +79,24 @@ int main(int argc,char **argv) {
     (void)argc;(void)argv; fprintf(stderr,"precondition: actual Linux owner required\n"); return 1;
 #else
     alarm(20);
+    if (argc==3 && !strcmp(argv[1],"--initial-namespace-file-contract")) {
+        /* Redirect ONLY the virgin namespace open to an actual regular file.
+         * Real fstatfs/ioctl reject it; no namespace boolean is fabricated. */
+        int fd=open(argv[2],O_RDONLY|O_CLOEXEC); assert(fd>=0);
+        struct statfs filesystem; assert(fstatfs(fd,&filesystem)==0);
+        assert((unsigned long)filesystem.f_type!=(unsigned long)NSFS_MAGIC);
+        assert(ioctl(fd,NS_GET_NSTYPE)<0); assert(close(fd)==0);
+        initial_namespace_open_redirect=argv[2];
+        assert(acquire(argv[2])==RPC_IO);
+        assert(initial_namespace_redirect_closed==1 && initial_namespace_redirect_fd==-1);
+        initial_namespace_open_redirect=NULL;
+        assert(atomic_load_explicit(&simple_private_credentials_origin_phase_v1,memory_order_acquire)==1);
+        assert(pthread_mutex_lock(&simple_private_credentials_lock_v1)==0);
+        assert(rt_retained_private_credential_state_v1(1)==RPC_STATE);
+        assert(rt_retained_private_credential_close_v1(1)==RPC_STATE);
+        assert(pthread_mutex_unlock(&simple_private_credentials_lock_v1)==0);
+        return 0;
+    }
     if (argc==3 && !strcmp(argv[1],"--origin-mismatch-contract")) {
         int64_t token=acquire(argv[2]); assert(token>0);
         assert(rt_retained_private_credential_state_v1(token)==RPC_OPEN);
@@ -136,8 +171,8 @@ int main(int argc,char **argv) {
     if (!child) _exit(rt_retained_private_credential_close_v1(successor)==RPC_FORK?0:1);
     int status=0; assert(waitpid(child,&status,0)==child && WIFEXITED(status) && WEXITSTATUS(status)==0);
     assert(pthread_mutex_unlock(&simple_private_credentials_lock_v1)==0);
-    const char *origin_modes[]={"--origin-mismatch-contract","--origin-initializing-contract","--origin-stat-contract"};
-    for (int i=0;i<3;i++) {
+    const char *origin_modes[]={"--origin-mismatch-contract","--origin-initializing-contract","--origin-stat-contract","--initial-namespace-file-contract"};
+    for (int i=0;i<4;i++) {
         child=fork(); assert(child>=0);
         if (!child) {
             if (i!=1) execl(argv[0],argv[0],origin_modes[i],path,(char *)NULL);
