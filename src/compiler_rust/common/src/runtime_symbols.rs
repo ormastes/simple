@@ -936,6 +936,15 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // Runtime-owned opaque process V3 adapter.  The C owner is deliberately
     // additive and keeps RtOwnedProcessTokenV2 private; interpreter mode
     // registers these names only to reject them explicitly.
+    "rt_process_owned_interactive_v1_capabilities_value",
+    "rt_process_owned_interactive_v1_deadline_value",
+    "rt_process_owned_interactive_v1_start_value",
+    "rt_process_owned_interactive_v1_write_some_value",
+    "rt_process_owned_interactive_v1_poll_value",
+    "rt_process_owned_interactive_v1_close_stdin_value",
+    "rt_process_owned_interactive_v1_cancel_value",
+    "rt_process_owned_interactive_v1_collect_value",
+    "rt_process_owned_interactive_v1_release_value",
     "rt_process_owned_v3_start_value",
     "rt_process_owned_v3_poll_value",
     "rt_process_owned_v3_input_value",

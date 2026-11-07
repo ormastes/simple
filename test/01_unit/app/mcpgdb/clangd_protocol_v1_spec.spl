@@ -1,0 +1,30 @@
+use std.spec.{describe, it, expect}
+use std.common.json.value.{JsonValue, json_value_field, json_value_serialize}
+use app.mcpgdb.clangd_protocol_v1.{clangd_initialize_validate_v1, clangd_server_reply_v1}
+
+describe "resident clangd protocol contracts":
+    it "accepts standard UTF16 default and rejects incompatible negotiation":
+        val default_caps = JsonValue.Object(["result"], [JsonValue.Object(["capabilities"], [JsonValue.Object([], [])])])
+        expect(clangd_initialize_validate_v1(default_caps).is_ok()).to_equal(true)
+        val utf8 = JsonValue.Object(["result"], [JsonValue.Object(["capabilities"], [JsonValue.Object(["positionEncoding"], [JsonValue.Str("utf-8")])])])
+        expect(clangd_initialize_validate_v1(utf8).is_err()).to_equal(true)
+        expect(clangd_initialize_validate_v1(JsonValue.Null).is_err()).to_equal(true)
+
+    it "echoes a server string ID without numeric coercion":
+        val request = JsonValue.Object(["id", "method"], [JsonValue.Str("01"), JsonValue.Str("window/workDoneProgress/create")])
+        val reply = clangd_server_reply_v1(request, "file:///C:/workspace").unwrap()
+        expect(json_value_serialize(json_value_field(reply, "id"))).to_equal("\"01\"")
+        expect(json_value_serialize(json_value_field(reply, "result"))).to_equal("null")
+
+    it "returns one configuration value per actual requested item":
+        val params = JsonValue.Object(["items"], [JsonValue.Array([JsonValue.Object([], []), JsonValue.Object([], [])])])
+        val request = JsonValue.Object(["id", "method", "params"], [JsonValue.Int(8), JsonValue.Str("workspace/configuration"), params])
+        val reply = clangd_server_reply_v1(request, "file:///C:/workspace").unwrap()
+        expect(json_value_serialize(json_value_field(reply, "result"))).to_equal("[null,null]")
+
+    it "rejects invalid server IDs and sends method-not-found for unsupported methods":
+        val invalid = JsonValue.Object(["id", "method"], [JsonValue.Null, JsonValue.Str("workspace/configuration")])
+        expect(clangd_server_reply_v1(invalid, "file:///C:/workspace").is_err()).to_equal(true)
+        val unsupported = JsonValue.Object(["id", "method"], [JsonValue.Int(9), JsonValue.Str("workspace/applyEdit")])
+        val reply = clangd_server_reply_v1(unsupported, "file:///C:/workspace").unwrap()
+        expect(json_value_serialize(json_value_field(json_value_field(reply, "error"), "code"))).to_equal("-32601")

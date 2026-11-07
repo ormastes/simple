@@ -1,0 +1,323 @@
+# One frontend-owned interactive lease. No PID adoption or persisted handles.
+use app.io.mod.{InteractiveProcessLeaseV1, InteractiveDeadlineV1, InteractiveStatusV1, InteractivePhaseV1, InteractiveStreamV1, InteractiveExitV1, InteractiveReceiptV1, process_interactive_capabilities_v1, process_interactive_deadline_v1, process_interactive_start_v1}
+use app.mcpgdb.clangd_frames_v1.{ClangdFramesV1, clangd_frame_encode_v1, clangd_response_matches_v1}
+use app.mcpgdb.clangd_documents_v1.{ClangdDocumentV1, clangd_file_uri_v1, clangd_document_read_v1, clangd_position_valid_v1}
+use app.mcpgdb.clangd_protocol_v1.{clangd_request_message_v1, clangd_notification_v1, clangd_initialize_message_v1, clangd_initialize_validate_v1, clangd_document_message_v1, clangd_query_params_v1, clangd_server_reply_v1}
+use std.common.json.value.{JsonValue, json_value_field, json_value_has}
+use std.common.encoding.external_text.{external_text_decode, utf8_format}
+
+fn rc_receipt_admitted_v1(receipt: InteractiveReceiptV1) -> Result<bool, text>:
+    match receipt.status:
+        InteractiveStatusV1.Ok: pass
+        InteractiveStatusV1.Pending: pass
+        _: return Err("clangd process operation did not complete: " + str(receipt.status))
+    if not receipt.owner_valid():
+        return Err("clangd process receipt has no validated owner")
+    Ok(true)
+
+pub fn clangd_cleanup_receipt_v1(receipt: InteractiveReceiptV1) -> Result<bool, text>:
+    if not receipt.owner_valid() or not receipt.phase_valid():
+        return Err("clangd cleanup lacks validated lifecycle authority")
+    match receipt.status:
+        InteractiveStatusV1.Ok: Ok(true)
+        InteractiveStatusV1.Pending: Ok(true)
+        InteractiveStatusV1.RetainedCleanup: Ok(true)
+        # Latched operation failure is independent of cleanup progress.
+        InteractiveStatusV1.NativeFailure: Ok(true)
+        _: Err("clangd cleanup retained owner without admitted progress")
+
+pub fn clangd_release_observed_v1(receipt: InteractiveReceiptV1) -> bool:
+    clangd_cleanup_receipt_v1(receipt).is_ok() and not receipt.observed_before_wait() and receipt.phase == InteractivePhaseV1.Released
+
+pub class ResidentClangdV1:
+    lease: InteractiveProcessLeaseV1?
+    root: text
+    root_uri: text
+    compile_dir: text
+    binary: text
+    frames: ClangdFramesV1
+    documents: [ClangdDocumentV1]
+    accepted_total: i64
+    next_id: i64
+    stderr_tail: [u8]
+    initialized: bool
+    failure: text
+    diagnostic: bool
+    diagnostic_stdout: [u8]
+
+    static fn empty() -> ResidentClangdV1:
+        ResidentClangdV1(lease: nil, root: "", root_uri: "", compile_dir: "", binary: "", frames: ClangdFramesV1.empty(), documents: [], accepted_total: 0, next_id: 1, stderr_tail: [], initialized: false, failure: "", diagnostic: false, diagnostic_stdout: [])
+
+    fn retained() -> bool:
+        match self.lease:
+            Some(_): true
+            nil: false
+
+    me poll(deadline: InteractiveDeadlineV1, cleanup: bool = false) -> Result<InteractiveReceiptV1, text>:
+        var lease = match self.lease:
+            Some(value): value
+            nil: return Err("clangd has no process lease")
+        val outcome = lease.poll(deadline, 25, 65536, 65536)
+        self.lease = Some(lease)
+        val polled = outcome?
+        # Preserve delivered raw bytes before interpreting status/deadline.
+        if self.diagnostic:
+            if self.diagnostic_stdout.len() + polled.stdout.len() > 4194304 or self.stderr_tail.len() + polled.stderr.len() > 4194304:
+                return Err("clangd diagnostics output exceeds limit")
+            for byte in polled.stdout: self.diagnostic_stdout.push(byte)
+        else:
+            self.frames.feed(polled.stdout)?
+        var tail: [u8] = []
+        val retained = self.stderr_tail.len() + polled.stderr.len()
+        var skip = if not self.diagnostic and retained > 65536: retained - 65536 else: 0
+        for byte in self.stderr_tail:
+            if skip > 0: skip = skip - 1
+            else: tail.push(byte)
+        for byte in polled.stderr:
+            if skip > 0: skip = skip - 1
+            else: tail.push(byte)
+        self.stderr_tail = tail
+        if cleanup:
+            clangd_cleanup_receipt_v1(polled.receipt)?
+            self.remember_failure(polled.receipt)
+        else:
+            rc_receipt_admitted_v1(polled.receipt)?
+        if polled.receipt.streams_valid() and not polled.receipt.observed_before_wait():
+            if polled.receipt.stdout_state == InteractiveStreamV1.Failed or polled.receipt.stderr_state == InteractiveStreamV1.Failed:
+                return Err("clangd pipe failed")
+            if not self.diagnostic and polled.receipt.stdout_state == InteractiveStreamV1.Eof:
+                self.frames.finish()?
+        Ok(polled.receipt)
+
+    me send(message: JsonValue, deadline: InteractiveDeadlineV1) -> Result<bool, text>:
+        val bytes = clangd_frame_encode_v1(message)?
+        var offset = 0
+        var attempts = 0
+        while offset < bytes.len():
+            if attempts >= 4096: return Err("clangd write progress bound exceeded")
+            attempts = attempts + 1
+            var lease = match self.lease:
+                Some(value): value
+                nil: return Err("clangd has no process lease")
+            val outcome = lease.write_some(bytes, offset, 4096, self.accepted_total, deadline)
+            self.lease = Some(lease)
+            val receipt = outcome?
+            if receipt.owner_valid() and receipt.counts_valid():
+                if receipt.accepted_delta < 0 or receipt.accepted_delta > bytes.len() - offset or receipt.accepted_total != self.accepted_total + receipt.accepted_delta:
+                    return Err("clangd write receipt counter mismatch")
+                offset = offset + receipt.accepted_delta
+                self.accepted_total = receipt.accepted_total
+            rc_receipt_admitted_v1(receipt)?
+            if not receipt.counts_valid(): return Err("clangd write lacks progress counters")
+            if offset < bytes.len():
+                self.poll(deadline)?
+        # Completion means written, not merely queued. Keep original deadline.
+        var polls = 0
+        while polls < 4096:
+            val receipt = self.poll(deadline)?
+            if receipt.counts_valid() and not receipt.observed_before_wait() and receipt.written_total >= self.accepted_total:
+                return Ok(true)
+            polls = polls + 1
+        Err("clangd write completion bound exceeded")
+
+    me await_response(id: i64, deadline: InteractiveDeadlineV1) -> Result<JsonValue, text>:
+        var polls = 0
+        var notifications = 0
+        while polls < 4096:
+            while self.frames.frames.len() > 0:
+                val message = self.frames.take().unwrap()
+                if clangd_response_matches_v1(message, id): return Ok(message)
+                if json_value_has(message, "method"):
+                    match json_value_field(message, "method"):
+                        JsonValue.Str(method):
+                            if method == "": return Err("clangd sent an empty method")
+                        _: return Err("clangd sent a non-text method")
+                    if json_value_has(message, "result") or json_value_has(message, "error"):
+                        return Err("clangd mixed request and response fields")
+                    if json_value_has(message, "id"):
+                        self.send(clangd_server_reply_v1(message, self.root_uri)?, deadline)?
+                    notifications = notifications + 1
+                    if notifications > 1024: return Err("clangd notification/request bound exceeded")
+                else:
+                    return Err("clangd response ID does not match outstanding request")
+            val receipt = self.poll(deadline)?
+            if receipt.streams_valid() and not receipt.observed_before_wait() and receipt.stdout_state == InteractiveStreamV1.Eof and self.frames.frames.len() == 0:
+                return Err("clangd stdout closed before response")
+            polls = polls + 1
+        Err("clangd response progress bound exceeded")
+
+    me request(method: text, params: JsonValue, deadline: InteractiveDeadlineV1) -> Result<JsonValue, text>:
+        if self.next_id >= 9007199254740991: return Err("clangd request ID exhausted")
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        self.send(clangd_request_message_v1(id, method, params), deadline)?
+        self.await_response(id, deadline)
+
+    me start(binary: text, root: text, compile_dir: text, deadline: InteractiveDeadlineV1) -> Result<bool, text>:
+        if self.retained(): return Err("previous clangd owner must be collected first")
+        if not process_interactive_capabilities_v1()?.supported(): return Err("interactive clangd transport unsupported")
+        val root_uri = clangd_file_uri_v1(root)?
+        var args = ["--background-index=false", "--offset-encoding=utf-16"]
+        if compile_dir != "": args.push("--compile-commands-dir=" + compile_dir)
+        val started = process_interactive_start_v1(binary, args, deadline, 65536, 262144, 262144)?
+        self.lease = started.lease
+        self.root = root
+        self.root_uri = root_uri
+        self.compile_dir = compile_dir
+        self.binary = binary
+        rc_receipt_admitted_v1(started.receipt)?
+        if not started.receipt.phase_valid(): return Err("clangd startup has no validated phase")
+        var phase = started.receipt.phase
+        var polls = 0
+        while phase != InteractivePhaseV1.Running:
+            if polls >= 4096: return Err("clangd startup progress bound exceeded")
+            val receipt = self.poll(deadline)?
+            if receipt.phase_valid() and not receipt.observed_before_wait(): phase = receipt.phase
+            if phase == InteractivePhaseV1.FailedHeld or phase == InteractivePhaseV1.Terminal:
+                return Err("clangd exited during startup")
+            polls = polls + 1
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        self.send(clangd_initialize_message_v1(id, self.root_uri), deadline)?
+        clangd_initialize_validate_v1(self.await_response(id, deadline)?)?
+        self.send(clangd_notification_v1("initialized", JsonValue.Object([], [])), deadline)?
+        self.initialized = true
+        Ok(true)
+
+    me query(method: text, file: text, line: i64, character: i64, deadline: InteractiveDeadlineV1) -> Result<JsonValue, text>:
+        if not self.initialized or self.failure != "": return Err("clangd session is not ready")
+        var document = clangd_document_read_v1(self.root, file, 1)?
+        var found = -1
+        var index = 0
+        while index < self.documents.len():
+            if self.documents[index].path == document.path: found = index
+            index = index + 1
+        if method != "textDocument/documentSymbol" and not clangd_position_valid_v1(document, line, character):
+            return Err("position is not a UTF-16 document boundary")
+        if found < 0:
+            if self.documents.len() >= 32: return Err("clangd document cache limit reached")
+            self.send(clangd_document_message_v1(document, false), deadline)?
+            self.documents.push(document)
+        elif self.documents[found].bytes != document.bytes:
+            if self.documents[found].version >= 2147483647: return Err("document version exhausted")
+            document.version = self.documents[found].version + 1
+            self.send(clangd_document_message_v1(document, true), deadline)?
+            self.documents[found] = document
+        self.request(method, clangd_query_params_v1(document, method, line, character), deadline)
+
+    # Error cleanup is separately bounded. Never erase an unreleased lease.
+    me remember_failure(receipt: InteractiveReceiptV1):
+        if receipt.owner_valid() and receipt.status == InteractiveStatusV1.NativeFailure and self.failure == "":
+            self.failure = "clangd native failure domain=" + str(receipt.error_domain) + " code=" + str(receipt.error_code)
+
+    me abort(deadline: InteractiveDeadlineV1) -> Result<bool, text>:
+        self.initialized = false
+        var lease = match self.lease:
+            Some(value): value
+            nil: return Ok(true)
+        val cancelled = lease.cancel(deadline)
+        self.lease = Some(lease)
+        val cancellation = cancelled?
+        self.remember_failure(cancellation)
+        clangd_cleanup_receipt_v1(cancellation)?
+        var attempts = 0
+        while attempts < 4096:
+            val collected = lease.collect(deadline, true)
+            self.lease = Some(lease)
+            val receipt = collected?
+            self.remember_failure(receipt)
+            clangd_cleanup_receipt_v1(receipt)?
+            if receipt.phase_valid() and not receipt.observed_before_wait() and receipt.phase == InteractivePhaseV1.Collected:
+                val released = lease.release()
+                self.lease = Some(lease)
+                val final = released?
+                self.remember_failure(final)
+                if clangd_release_observed_v1(final):
+                    self.lease = nil
+                    return Ok(true)
+                return Err("clangd release retained owner")
+            val observed = lease.poll(deadline, 25, 65536, 65536)
+            self.lease = Some(lease)
+            val progress = observed?.receipt
+            self.remember_failure(progress)
+            clangd_cleanup_receipt_v1(progress)?
+            attempts = attempts + 1
+        Err("clangd cleanup retained owner")
+
+    me finish_collect(deadline: InteractiveDeadlineV1) -> Result<InteractiveReceiptV1, text>:
+        var attempts = 0
+        while attempts < 4096:
+            var lease = match self.lease:
+                Some(value): value
+                nil: return Err("clangd collection lost owner")
+            val outcome = lease.collect(deadline, false)
+            self.lease = Some(lease)
+            val receipt = outcome?
+            self.remember_failure(receipt)
+            clangd_cleanup_receipt_v1(receipt)?
+            if receipt.phase_valid() and not receipt.observed_before_wait() and receipt.phase == InteractivePhaseV1.Collected:
+                val released = lease.release()
+                self.lease = Some(lease)
+                val final = released?
+                self.remember_failure(final)
+                if clangd_release_observed_v1(final):
+                    self.lease = nil
+                    self.initialized = false
+                    return Ok(receipt)
+                return Err("clangd release retained owner")
+            self.poll(deadline, true)?
+            attempts = attempts + 1
+        Err("clangd collection progress bound exceeded")
+
+    me shutdown(deadline: InteractiveDeadlineV1) -> Result<bool, text>:
+        if not self.retained(): return Ok(true)
+        if not self.initialized or self.failure != "": return self.abort(deadline)
+        val reply = self.request("shutdown", JsonValue.Null, deadline)?
+        if json_value_has(reply, "error"): return Err("clangd rejected shutdown")
+        self.send(clangd_notification_v1("exit", JsonValue.Null), deadline)?
+        var lease = match self.lease:
+            Some(value): value
+            nil: return Err("clangd shutdown lost owner")
+        val closed = lease.close_stdin(deadline)
+        self.lease = Some(lease)
+        rc_receipt_admitted_v1(closed?)?
+        self.finish_collect(deadline)?
+        if self.failure != "": return Err(self.failure)
+        Ok(true)
+
+    me check(binary: text, file: text, compile_dir: text, deadline: InteractiveDeadlineV1) -> Result<JsonValue, text>:
+        if self.retained(): return Err("previous diagnostic owner is retained")
+        if not process_interactive_capabilities_v1()?.supported(): return Err("interactive diagnostics transport unsupported")
+        self.diagnostic = true
+        var args = ["--check=" + file]
+        if compile_dir != "": args.push("--compile-commands-dir=" + compile_dir)
+        val started = process_interactive_start_v1(binary, args, deadline, 65536, 262144, 262144)?
+        self.lease = started.lease
+        rc_receipt_admitted_v1(started.receipt)?
+        var attempts = 0
+        var closed = false
+        while attempts < 4096:
+            val receipt = self.poll(deadline)?
+            if receipt.phase_valid() and not receipt.observed_before_wait():
+                if receipt.phase == InteractivePhaseV1.FailedHeld: return Err("clangd diagnostic startup failed")
+                if receipt.phase == InteractivePhaseV1.Running and not closed:
+                    var lease = self.lease.unwrap()
+                    val outcome = lease.close_stdin(deadline)
+                    self.lease = Some(lease)
+                    rc_receipt_admitted_v1(outcome?)?
+                    closed = true
+                if receipt.phase == InteractivePhaseV1.Terminal:
+                    val final = self.finish_collect(deadline)?
+                    if self.failure != "": return Err(self.failure)
+                    if not final.exit_valid() or final.exit_kind != InteractiveExitV1.Exited:
+                        return Err("clangd diagnostic exit is not available")
+                    val stdout = match external_text_decode(self.diagnostic_stdout, utf8_format()):
+                        Ok(value): value
+                        Err(_): return Err("clangd diagnostic stdout is not UTF-8")
+                    val stderr = match external_text_decode(self.stderr_tail, utf8_format()):
+                        Ok(value): value
+                        Err(_): return Err("clangd diagnostic stderr is not UTF-8")
+                    val status = if final.exit_value == 0: "ok" else: "error"
+                    return Ok(JsonValue.Object(["status", "stdout", "stderr", "exit_code"], [JsonValue.Str(status), JsonValue.Str(stdout), JsonValue.Str(stderr), JsonValue.Int(final.exit_value)]))
+            attempts = attempts + 1
+        Err("clangd diagnostic progress bound exceeded")

@@ -21680,3 +21680,11 @@ int64_t rt_collection_set(int64_t receiver, int64_t key, int64_t value) {
 
 /* Single hosted owner for read-back workspace storage capabilities. */
 #include "runtime_workspace_storage_v1.c"
+
+/* Native value-family projection only. The Rust runtime supplies its own
+ * value projection over the same canonical raw-span process owner. */
+#if UINTPTR_MAX == UINT64_MAX
+#include "runtime_process_interactive_v1_value_private.h"
+#else
+#include "runtime_process_interactive_v1_unavailable_value_private.h"
+#endif

@@ -59,6 +59,11 @@ pub mod process;
 #[cfg(target_os = "macos")]
 pub mod process_observation_v4;
 pub mod process_owned_v3;
+#[cfg(target_pointer_width = "64")]
+pub mod process_interactive_v1;
+#[cfg(target_pointer_width = "32")]
+#[path = "process_interactive_v1_unavailable.rs"]
+pub mod process_interactive_v1;
 pub mod pty;
 pub mod time;
 pub mod math;
@@ -1992,6 +1997,18 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_process_run_owned_observed_bounded_value",
         system::rt_process_run_owned_observed_bounded_value
     );
+    #[cfg(any(target_pointer_width = "64", target_pointer_width = "32"))]
+    {
+        insert_simple!("rt_process_owned_interactive_v1_capabilities_value", process_interactive_v1::capabilities);
+        insert_simple!("rt_process_owned_interactive_v1_deadline_value", process_interactive_v1::deadline);
+        insert_simple!("rt_process_owned_interactive_v1_start_value", process_interactive_v1::start);
+        insert_simple!("rt_process_owned_interactive_v1_write_some_value", process_interactive_v1::write_some);
+        insert_simple!("rt_process_owned_interactive_v1_poll_value", process_interactive_v1::poll);
+        insert_simple!("rt_process_owned_interactive_v1_close_stdin_value", process_interactive_v1::close_stdin);
+        insert_simple!("rt_process_owned_interactive_v1_cancel_value", process_interactive_v1::cancel);
+        insert_simple!("rt_process_owned_interactive_v1_collect_value", process_interactive_v1::collect);
+        insert_simple!("rt_process_owned_interactive_v1_release_value", process_interactive_v1::release);
+    }
     // Opaque V3 lifecycle is marshalled to the C adapter (process_owned_v3.rs);
     // pinned starts and the observation projection still fail closed below.
     insert_simple!(

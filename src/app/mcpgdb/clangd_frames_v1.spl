@@ -1,0 +1,179 @@
+# Incremental byte framing for the resident Clangd owner. No process authority.
+use std.common.text_bytes.{boxed_text_bytes_checked, bytes_to_text}
+use std.common.encoding.external_text.{external_text_decode, utf8_format}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_has, json_value_serialize}
+
+val CLANGD_HEADER_LIMIT_V1: i64 = 8192
+val CLANGD_BODY_LIMIT_V1: i64 = 4194304
+val CLANGD_QUEUE_BYTES_V1: i64 = 8388608
+val CLANGD_QUEUE_FRAMES_V1: i64 = 64
+
+# Bound recursive JSON parser stack use without replacing its grammar checks.
+fn clangd_json_depth_v1(bytes: [u8]) -> bool:
+    var depth = 0
+    var quoted = false
+    var escaped = false
+    for byte in bytes:
+        if quoted:
+            if escaped: escaped = false
+            elif byte == 92: escaped = true
+            elif byte == 34: quoted = false
+        elif byte == 34:
+            quoted = true
+        elif byte == 123 or byte == 91:
+            depth = depth + 1
+            if depth > 64: return false
+        elif byte == 125 or byte == 93:
+            depth = depth - 1
+            if depth < 0: return false
+    depth == 0 and not quoted
+
+fn clangd_header_length_v1(raw: [u8]) -> Result<i64, text>:
+    # Every byte is admitted as ASCII before this conversion.
+    val header = bytes_to_text(raw)
+    val lines = header.split("\r\n")
+    var found = false
+    var count: i64 = 0
+    for line in lines:
+        if line != "":
+            if line.contains("\r") or line.contains("\n"):
+                return Err("LSP headers require CRLF line endings")
+            var colon = 0
+            while colon < line.len() and line.byte_at(colon) != 58:
+                colon = colon + 1
+            if colon == line.len():
+                return Err("malformed LSP header")
+            if colon <= 0:
+                return Err("malformed LSP header")
+            val key = line.substring(0, colon).to_lower()
+            val value = line.substring(colon + 1, line.len()).trim()
+            if key == "content-length":
+                if found or value.len() == 0:
+                    return Err("missing or duplicate LSP content length")
+                found = true
+                var pos = 0
+                while pos < value.len():
+                    val digit = value.byte_at(pos) - 48
+                    if digit < 0 or digit > 9:
+                        return Err("LSP content length must be decimal digits")
+                    if count > (CLANGD_BODY_LIMIT_V1 - digit) / 10:
+                        return Err("LSP body exceeds limit")
+                    count = count * 10 + digit
+                    pos = pos + 1
+            elif key == "content-type":
+                val lowered = value.to_lower()
+                if lowered != "application/vscode-jsonrpc; charset=utf-8" and lowered != "application/vscode-jsonrpc; charset=utf8" and lowered != "application/vscode-jsonrpc":
+                    return Err("unsupported LSP content type")
+    if not found or count == 0:
+        return Err("missing or empty LSP body")
+    Ok(count)
+
+pub class ClangdFramesV1:
+    header: [u8]
+    body: [u8]
+    expected: i64
+    frames: [JsonValue]
+    frame_sizes: [i64]
+    queued_bytes: i64
+    failed: text
+
+    static fn empty() -> ClangdFramesV1:
+        ClangdFramesV1(header: [], body: [], expected: -1, frames: [], frame_sizes: [], queued_bytes: 0, failed: "")
+
+    me poison(reason: text) -> Result<bool, text>:
+        self.failed = reason
+        Err(reason)
+
+    # Input chunks may end anywhere, including inside CRLF or a UTF-8 scalar.
+    me feed(chunk: [u8]) -> Result<bool, text>:
+        if self.failed != "":
+            return Err(self.failed)
+        for byte in chunk:
+            if self.expected < 0:
+                val code = byte as i64
+                if code > 126 or (code < 32 and code != 13 and code != 10 and code != 9):
+                    return self.poison("non-ASCII LSP header")
+                if self.header.len() >= CLANGD_HEADER_LIMIT_V1:
+                    return self.poison("LSP header exceeds limit")
+                self.header.push(byte)
+                val size = self.header.len()
+                if size >= 4 and self.header[size - 4] == 13 and self.header[size - 3] == 10 and self.header[size - 2] == 13 and self.header[size - 1] == 10:
+                    match clangd_header_length_v1(self.header):
+                        Ok(length):
+                            if self.frames.len() >= CLANGD_QUEUE_FRAMES_V1 or self.queued_bytes + length > CLANGD_QUEUE_BYTES_V1:
+                                return self.poison("LSP queue exceeds limit")
+                            self.expected = length
+                            self.header = []
+                        Err(reason):
+                            return self.poison(reason)
+            else:
+                self.body.push(byte)
+                if self.body.len() == self.expected:
+                    if not clangd_json_depth_v1(self.body):
+                        return self.poison("LSP JSON nesting exceeds limit or is incomplete")
+                    val decoded = match external_text_decode(self.body, utf8_format()):
+                        Ok(value): value
+                        Err(error): return self.poison("invalid UTF-8 LSP body: " + error.reason)
+                    val parsed = match json_parse_value_strict(decoded):
+                        Ok(value): value
+                        Err(reason): return self.poison("invalid LSP JSON: " + reason)
+                    match parsed:
+                        JsonValue.Object(keys, values): pass
+                        _: return self.poison("LSP message must be an object")
+                    match json_value_field(parsed, "jsonrpc"):
+                        JsonValue.Str(version):
+                            if version != "2.0":
+                                return self.poison("unsupported JSON-RPC version")
+                        _: return self.poison("missing JSON-RPC version")
+                    self.frames.push(parsed)
+                    self.frame_sizes.push(self.expected)
+                    self.queued_bytes = self.queued_bytes + self.expected
+                    self.body = []
+                    self.expected = -1
+        Ok(true)
+
+    me take() -> Option<JsonValue>:
+        if self.frames.len() == 0:
+            return nil
+        val value = self.frames[0]
+        self.queued_bytes = self.queued_bytes - self.frame_sizes[0]
+        var next_frames: [JsonValue] = []
+        var next_sizes: [i64] = []
+        var index = 1
+        while index < self.frames.len():
+            next_frames.push(self.frames[index])
+            next_sizes.push(self.frame_sizes[index])
+            index = index + 1
+        self.frames = next_frames
+        self.frame_sizes = next_sizes
+        Some(value)
+
+    fn finish() -> Result<bool, text>:
+        if self.failed != "":
+            return Err(self.failed)
+        if self.expected >= 0 or self.header.len() != 0:
+            return Err("EOF within LSP frame")
+        Ok(true)
+
+pub fn clangd_frame_encode_v1(message: JsonValue) -> Result<[u8], text>:
+    val body = match boxed_text_bytes_checked(json_value_serialize(message)):
+        Ok(value): value
+        Err(_): return Err("cannot encode LSP JSON")
+    if body.len() > CLANGD_BODY_LIMIT_V1:
+        return Err("LSP body exceeds limit")
+    var encoded = match boxed_text_bytes_checked("Content-Length: " + body.len().to_string() + "\r\n\r\n"):
+        Ok(value): value
+        Err(_): return Err("cannot encode LSP header")
+    for byte in body:
+        encoded.push(byte)
+    Ok(encoded)
+
+# Numeric response IDs are compared as typed values, never substring matches.
+pub fn clangd_response_matches_v1(message: JsonValue, expected: i64) -> bool:
+    if json_value_has(message, "method") or not json_value_has(message, "id"):
+        return false
+    if json_value_has(message, "result") == json_value_has(message, "error"):
+        return false
+    match json_value_field(message, "id"):
+        JsonValue.Int(actual): actual == expected
+        _: false

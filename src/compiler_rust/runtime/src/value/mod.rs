@@ -63,6 +63,19 @@ pub use rc_graph::{rt_heap_graph_bytes, rt_rc_count, rt_rc_release, rt_rc_retain
 mod ownership;
 pub mod pbkdf2_native;
 mod process;
+#[cfg(target_pointer_width = "64")]
+pub mod interactive_process_abi_v1;
+#[cfg(target_pointer_width = "64")]
+#[doc(hidden)]
+pub mod interactive_process_protocol_v1;
+#[cfg(target_pointer_width = "64")]
+mod interactive_process_v1;
+#[cfg(target_pointer_width = "64")]
+pub use interactive_process_v1::*;
+#[cfg(target_pointer_width = "32")]
+mod interactive_process_v1_unavailable;
+#[cfg(target_pointer_width = "32")]
+pub use interactive_process_v1_unavailable::*;
 mod process_transfer;
 pub mod primitive_sort;
 pub mod pty;

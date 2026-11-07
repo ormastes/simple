@@ -1,0 +1,22 @@
+# Receipt-policy controls only; real process cleanup requires the native oracles.
+use std.spec.{describe, it, expect}
+use app.io.mod.{InteractiveReceiptV1, InteractiveStatusV1, InteractivePhaseV1, InteractiveStreamV1, InteractiveExitV1}
+use app.mcpgdb.resident_clangd_v1.{clangd_cleanup_receipt_v1, clangd_release_observed_v1}
+
+fn cleanup_receipt_v1(status: InteractiveStatusV1, phase: InteractivePhaseV1, mask: i64, flags: i64) -> InteractiveReceiptV1:
+    InteractiveReceiptV1(status: status, validity_mask: mask, phase: phase, stdin_state: InteractiveStreamV1.Failed, stdout_state: InteractiveStreamV1.Eof, stderr_state: InteractiveStreamV1.Eof, exit_kind: InteractiveExitV1.Failed, exit_value: 0, error_domain: 1, error_code: 5, accepted_delta: 0, accepted_total: 4, written_total: 2, stdin_queued: 2, stdout_seen_total: 0, stderr_seen_total: 0, stdout_delivered_total: 0, stderr_delivered_total: 0, stdout_count: 0, stderr_count: 0, stdout_discarded_total: 0, stderr_discarded_total: 0, flags: flags, operation_sequence: 4)
+
+describe "clangd failed-operation cleanup receipt policy":
+    it "admits validated latched failure through stopping collected and released":
+        for phase in [InteractivePhaseV1.Stopping, InteractivePhaseV1.Collected, InteractivePhaseV1.Released]:
+            val receipt = cleanup_receipt_v1(InteractiveStatusV1.NativeFailure, phase, 3, 0)
+            expect(clangd_cleanup_receipt_v1(receipt).is_ok()).to_equal(true)
+            expect(clangd_release_observed_v1(receipt)).to_equal(phase == InteractivePhaseV1.Released)
+            expect(receipt.error_code).to_equal(5)
+
+    it "does not discard ownership on busy expired stale or pre-wait snapshots":
+        for status in [InteractiveStatusV1.Busy, InteractiveStatusV1.DeadlineReached, InteractiveStatusV1.Stale]:
+            val receipt = cleanup_receipt_v1(status, InteractivePhaseV1.Released, 3, 0)
+            expect(clangd_release_observed_v1(receipt)).to_equal(false)
+        expect(clangd_release_observed_v1(cleanup_receipt_v1(InteractiveStatusV1.NativeFailure, InteractivePhaseV1.Released, 0, 0))).to_equal(false)
+        expect(clangd_release_observed_v1(cleanup_receipt_v1(InteractiveStatusV1.NativeFailure, InteractivePhaseV1.Released, 3, 32768))).to_equal(false)

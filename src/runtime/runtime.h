@@ -1415,6 +1415,22 @@ bool     rt_process_owned_collect_v2(RtOwnedProcessTokenV2 token,
  * identity crosses this boundary.  All numeric receipts are SplArray values.
  * poll returns [stdout_bytes, stderr_bytes, receipt], where both byte arrays
  * retain all bytes (including NUL) and receipt contains delivered counts. */
+/* InteractiveV1 native value family. Raw span ABI is private and shared with
+ * the Rust projection; token halves, OS handles and tickets never escape. */
+SplArray* rt_process_owned_interactive_v1_capabilities_value(void);
+SplArray* rt_process_owned_interactive_v1_deadline_value(int64_t timeout_ms);
+SplArray* rt_process_owned_interactive_v1_start_value(const uint8_t* command, uint64_t command_len,
+    SplArray* args, int64_t clock_tag, int64_t expires_ms,
+    int64_t stdin_capacity, int64_t stdout_capacity, int64_t stderr_capacity);
+SplArray* rt_process_owned_interactive_v1_write_some_value(int64_t handle, SplArray* bytes,
+    int64_t offset, int64_t maximum, int64_t expected_accepted_total, int64_t clock_tag, int64_t expires_ms);
+int64_t* rt_process_owned_interactive_v1_poll_value(int64_t handle, int64_t clock_tag,
+    int64_t expires_ms, int64_t wait_ms, int64_t stdout_max, int64_t stderr_max);
+SplArray* rt_process_owned_interactive_v1_close_stdin_value(int64_t handle, int64_t clock_tag, int64_t expires_ms);
+SplArray* rt_process_owned_interactive_v1_cancel_value(int64_t handle, int64_t clock_tag, int64_t expires_ms);
+SplArray* rt_process_owned_interactive_v1_collect_value(int64_t handle, int64_t clock_tag, int64_t expires_ms, bool discard_unread);
+SplArray* rt_process_owned_interactive_v1_release_value(int64_t handle);
+
 SplArray* rt_process_owned_v3_start_value(const char* command_data,
                                           uint64_t command_len,
                                           SplArray* args, SplArray* input,

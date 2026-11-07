@@ -1,0 +1,161 @@
+# Public Windows Clangd routes; owned only by the long-lived MCP frontend.
+use app.io.mod.{cwd, process_interactive_deadline_v1, InteractiveDeadlineV1}
+use app.mcpgdb.resident_clangd_v1.{ResidentClangdV1}
+use app.mcpgdb.clangd_documents_v1.{clangd_absolute_path_v1}
+use app.mcpgdb.native_runners_v1.{mcpgdb_bundle_path_v1, mcpgdb_bundle_validate_v1}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_has, json_value_serialize}
+
+var _wc_resident_v1 = ResidentClangdV1.empty()
+var _wc_check_v1 = ResidentClangdV1.empty()
+var _wc_workspace_v1: text = ""
+var _wc_compile_v1: text = ""
+
+pub fn windows_clangd_handles_v1(name: text) -> bool:
+    ["clangd_open", "clangd_definition", "clangd_references", "clangd_hover", "clangd_completion", "clangd_type_definition", "clangd_symbols", "clangd_diagnostics"].contains(name)
+
+fn wc_arguments_v1(raw: text) -> Result<JsonValue, text>:
+    if raw.len() > 65536: return Err("clangd argument bound exceeded")
+    # Schema is flat; reject containers before the recursive JSON parser.
+    var quoted = false
+    var escaped = false
+    var depth = 0
+    var index = 0
+    while index < raw.len():
+        val byte = raw.byte_at(index)
+        if quoted:
+            if escaped: escaped = false
+            elif byte == 92: escaped = true
+            elif byte == 34: quoted = false
+        elif byte == 34: quoted = true
+        elif byte == 123 or byte == 91:
+            depth = depth + 1
+            if depth > 1: return Err("clangd arguments require scalar values")
+        elif byte == 125 or byte == 93: depth = depth - 1
+        index = index + 1
+    val args = json_parse_value_strict(raw)?
+    match args:
+        JsonValue.Object(keys, values):
+            if keys.len() > 16: return Err("clangd argument field bound exceeded")
+        _: return Err("clangd arguments must be an object")
+    Ok(args)
+
+fn wc_text_v1(args: JsonValue, name: text, required: bool = false) -> Result<text, text>:
+    if not json_value_has(args, name):
+        if required: return Err("missing clangd argument: " + name)
+        return Ok("")
+    match json_value_field(args, name):
+        JsonValue.Str(value):
+            if required and value == "": return Err("empty clangd argument: " + name)
+            Ok(value)
+        _: Err("clangd argument must be text: " + name)
+
+fn wc_position_v1(args: JsonValue, name: text) -> Result<i64, text>:
+    match json_value_field(args, name):
+        JsonValue.Int(value):
+            if value < 0 or value > 2147483647: return Err("clangd position out of bounds")
+            Ok(value)
+        _: Err("clangd position requires an integer: " + name)
+
+# Called only after the existing GDB workspace route succeeds. No child starts.
+pub fn windows_clangd_workspace_v1(raw: text) -> Result<bool, text>:
+    val args = wc_arguments_v1(raw)?
+    var root = wc_text_v1(args, "root")?
+    if root == "": root = cwd()
+    _wc_workspace_v1 = clangd_absolute_path_v1("", root)?
+    val compile_dir = wc_text_v1(args, "compile_commands_dir")?
+    _wc_compile_v1 = if compile_dir == "": "" else: clangd_absolute_path_v1(_wc_workspace_v1, compile_dir)?
+    Ok(true)
+
+fn wc_ready_v1(deadline: InteractiveDeadlineV1) -> Result<bool, text>:
+    if _wc_workspace_v1 == "": _wc_workspace_v1 = clangd_absolute_path_v1("", cwd())?
+    if _wc_resident_v1.initialized and _wc_resident_v1.failure == "" and _wc_resident_v1.root == _wc_workspace_v1 and _wc_resident_v1.compile_dir == _wc_compile_v1:
+        return Ok(true)
+    if _wc_resident_v1.retained():
+        val cleanup = process_interactive_deadline_v1(2000)?
+        _wc_resident_v1.shutdown(cleanup)?
+    _wc_resident_v1 = ResidentClangdV1.empty()
+    val binary = mcpgdb_bundle_path_v1("clangd")?
+    _wc_resident_v1.start(binary, _wc_workspace_v1, _wc_compile_v1, deadline)
+
+fn wc_execute_v1(name: text, args: JsonValue, deadline: InteractiveDeadlineV1) -> Result<JsonValue, text>:
+    if name == "clangd_open":
+        val root = wc_text_v1(args, "root")?
+        if root != "": _wc_workspace_v1 = clangd_absolute_path_v1("", root)?
+        if _wc_workspace_v1 == "": _wc_workspace_v1 = clangd_absolute_path_v1("", cwd())?
+        val compile_dir = wc_text_v1(args, "compile_commands_dir")?
+        if json_value_has(args, "compile_commands_dir"):
+            _wc_compile_v1 = if compile_dir == "": "" else: clangd_absolute_path_v1(_wc_workspace_v1, compile_dir)?
+        wc_ready_v1(deadline)?
+        return Ok(JsonValue.Object(["workspace_root", "clangd_binary", "compile_commands_dir"], [JsonValue.Str(_wc_workspace_v1), JsonValue.Str(_wc_resident_v1.binary), JsonValue.Str(_wc_compile_v1)]))
+    val file = wc_text_v1(args, "file", true)?
+    if _wc_workspace_v1 == "": _wc_workspace_v1 = clangd_absolute_path_v1("", cwd())?
+    if name == "clangd_diagnostics":
+        if _wc_check_v1.retained(): return Err("previous clangd diagnostic cleanup is pending")
+        _wc_check_v1 = ResidentClangdV1.empty()
+        return _wc_check_v1.check(mcpgdb_bundle_path_v1("clangd")?, clangd_absolute_path_v1(_wc_workspace_v1, file)?, _wc_compile_v1, deadline)
+    var method = ""
+    match name:
+        "clangd_definition": method = "textDocument/definition"
+        "clangd_references": method = "textDocument/references"
+        "clangd_hover": method = "textDocument/hover"
+        "clangd_completion": method = "textDocument/completion"
+        "clangd_type_definition": method = "textDocument/typeDefinition"
+        "clangd_symbols": method = "textDocument/documentSymbol"
+        _: return Err("unknown clangd tool")
+    var line = 0
+    var character = 0
+    if name != "clangd_symbols":
+        line = wc_position_v1(args, "line")?
+        character = wc_position_v1(args, "character")?
+    wc_ready_v1(deadline)?
+    _wc_resident_v1.query(method, file, line, character, deadline)
+
+pub fn windows_clangd_dispatch_v1(name: text, raw: text) -> Result<text, text>:
+    if not windows_clangd_handles_v1(name): return Err("unknown clangd tool")
+    mcpgdb_bundle_validate_v1(false)?
+    val args = wc_arguments_v1(raw)?
+    val deadline = process_interactive_deadline_v1(15000)?
+    match wc_execute_v1(name, args, deadline):
+        Ok(value):
+            if json_value_has(value, "error"): return Err("clangd returned protocol error: " + json_value_serialize(json_value_field(value, "error")))
+            Ok(json_value_serialize(value))
+        Err(reason):
+            val cleanup = process_interactive_deadline_v1(2000)?
+            var cleanup_error = ""
+            if name == "clangd_diagnostics":
+                match _wc_check_v1.abort(cleanup):
+                    Ok(_): pass
+                    Err(error): cleanup_error = error
+            else:
+                _wc_resident_v1.failure = reason
+                match _wc_resident_v1.abort(cleanup):
+                    Ok(_): pass
+                    Err(error): cleanup_error = error
+            if cleanup_error != "": return Err(reason + "; cleanup retained: " + cleanup_error)
+            Err(reason)
+
+pub fn windows_clangd_shutdown_v1() -> Result<bool, text>:
+    var failures = ""
+    val graceful = match process_interactive_deadline_v1(2000):
+        Ok(deadline): _wc_resident_v1.shutdown(deadline)
+        Err(reason): Err(reason)
+    match graceful:
+        Ok(_): pass
+        Err(reason):
+            failures = reason
+            # A spent graceful budget cannot prevent cancellation admission.
+            val fallback = match process_interactive_deadline_v1(2000):
+                Ok(deadline): _wc_resident_v1.abort(deadline)
+                Err(error): Err(error)
+            match fallback:
+                Ok(_): pass
+                Err(error): failures = failures + "; " + error
+    # Independent diagnostic owner is always attempted, even after LSP failure.
+    val diagnostic = match process_interactive_deadline_v1(2000):
+        Ok(deadline): _wc_check_v1.abort(deadline)
+        Err(reason): Err(reason)
+    match diagnostic:
+        Ok(_): pass
+        Err(reason): failures = failures + "; diagnostics: " + reason
+    if failures != "": return Err(failures)
+    Ok(true)
