@@ -1,0 +1,88 @@
+# Shared durable operation mechanisms over the existing V2 journal.
+# This is an internal, single-owner service port, not an authenticated RPC
+# endpoint. The domain owner must reauthorize before every call, including
+# retained-outcome disclosure, and persist result bytes before recording a digest.
+# No process is spawned here and no new operation state machine is introduced.
+
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.contracts.distributed_operation_state_v2.{DistributedOperationStateV2,
+    distributed_operation_initial_v2, distributed_operation_duplicate_v2,
+    distributed_operation_transition_v2}
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
+    distributed_operation_journal_lookup_v2, distributed_operation_journal_commit_v2}
+use std.common.crypto.sha256.sha256_text
+
+struct DaemonOperationAdmissionV2:
+    journal: DistributedOperationJournalV2
+    disposition: text
+    state: text
+    outcome_digest: text
+
+fn daemon_operation_exact_v2(owner: DistributedOperationJournalV2,
+        request: OperationEnvelopeV2) -> Result<DistributedOperationStateV2, text>:
+    val envelope = distributed_encode_operation_v2(request)?
+    val prior = distributed_operation_journal_lookup_v2(owner, request.id)?
+    val disposition = distributed_operation_duplicate_v2(prior, envelope)
+    if disposition == "OPERATION_PAYLOAD_MISMATCH" or disposition == "OPERATION_STATE_INVALID":
+        return Err(disposition)
+    Ok(prior)
+
+fn daemon_operation_admit_v2(owner: DistributedOperationJournalV2,
+        request: OperationEnvelopeV2) -> Result<DaemonOperationAdmissionV2, text>:
+    val envelope = distributed_encode_operation_v2(request)?
+    match distributed_operation_journal_lookup_v2(owner, request.id):
+        case Ok(prior):
+            val disposition = distributed_operation_duplicate_v2(prior, envelope)
+            if disposition == "OPERATION_PAYLOAD_MISMATCH" or disposition == "OPERATION_STATE_INVALID":
+                return Err(disposition)
+            return Ok(DaemonOperationAdmissionV2(owner, disposition, prior.state, prior.outcome_digest))
+        case Err(error):
+            if error != "OPERATION_NOT_FOUND": return Err(error)
+    val initial = distributed_operation_initial_v2(envelope)?
+    val committed = distributed_operation_journal_commit_v2(owner, initial)?
+    Ok(DaemonOperationAdmissionV2(committed, "NEWLY_ADMITTED", initial.state, ""))
+
+# Only the returned updated owner can be used for subsequent journal operations.
+# Publish execution intent before the caller performs an external effect.
+fn daemon_operation_begin_v2(owner: DistributedOperationJournalV2,
+        request: OperationEnvelopeV2) -> Result<DistributedOperationJournalV2, text>:
+    val envelope = distributed_encode_operation_v2(request)?
+    val prior = distributed_operation_journal_lookup_v2(owner, request.id)?
+    val disposition = distributed_operation_duplicate_v2(prior, envelope)
+    if disposition != "ALREADY_ADMITTED": return Err(disposition)
+    val executing = distributed_operation_transition_v2(prior, "executing", "")?
+    distributed_operation_journal_commit_v2(owner, executing)
+
+# The outcome owner retains bytes/evidence under this digest independently of
+# transport response retention. An unchanged terminal replay makes no new commit.
+fn daemon_operation_record_outcome_v2(owner: DistributedOperationJournalV2,
+        request: OperationEnvelopeV2, terminal_state: text,
+        outcome_digest: text) -> Result<DistributedOperationJournalV2, text>:
+    if terminal_state != "completed" and terminal_state != "failed" and terminal_state != "cancelled":
+        return Err("OUTCOME_NOT_TERMINAL")
+    val prior = daemon_operation_exact_v2(owner, request)?
+    if prior.state == "completed" or prior.state == "failed" or prior.state == "cancelled":
+        if prior.state != terminal_state or prior.outcome_digest != outcome_digest:
+            return Err("OPERATION_OUTCOME_MISMATCH")
+        return Ok(owner)
+    val terminal = distributed_operation_transition_v2(prior, terminal_state, outcome_digest)?
+    distributed_operation_journal_commit_v2(owner, terminal)
+
+# Publication can repeat; execution cannot. Callbacks must use exact validated
+# request identity and atomic response publication. A failed publish never calls
+# acknowledge. A failed acknowledgement leaves the authoritative outcome intact.
+fn daemon_operation_publish_v2(owner: DistributedOperationJournalV2,
+        request: OperationEnvelopeV2, outcome_bytes: text,
+        publish: fn(text, text) -> bool,
+        acknowledge: fn(text) -> bool) -> Result<bool, text>:
+    val prior = daemon_operation_exact_v2(owner, request)?
+    if prior.state != "completed" and prior.state != "failed" and prior.state != "cancelled":
+        return Err("OUTCOME_NOT_TERMINAL")
+    if sha256_text(outcome_bytes) != prior.outcome_digest:
+        return Err("OUTCOME_BYTES_MISMATCH")
+    if not publish(request.id, outcome_bytes):
+        return Err("RESPONSE_PUBLICATION_FAILED")
+    if not acknowledge(request.id):
+        return Err("REQUEST_ACKNOWLEDGEMENT_FAILED")
+    Ok(true)
