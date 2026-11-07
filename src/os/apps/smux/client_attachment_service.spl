@@ -2,7 +2,7 @@
 use os.apps.smux.service.{ServiceState}
 use os.apps.smux.contract.{MuxClientAttachment}
 use os.apps.smux.client_context_service.{client_context_put}
-use os.apps.smux.client_leases.{ClientLeaseState, smux_leases_new, smux_lease_admit,
+use os.apps.smux.client_leases.{ClientLease, ClientLeaseState, smux_leases_new, smux_lease_admit, smux_lease_check,
     smux_lease_heartbeat, smux_lease_expiry_candidates, smux_lease_expire}
 use std.sosix.entropy.{sosix_random_hex}
 
@@ -17,6 +17,19 @@ pub fn client_attachment_index(st: ServiceState, session: text, client: text) ->
     val idx = st.find_client_idx(client)
     if idx < 0 or st.get_client(idx).session_id != session: return -1
     return idx
+
+pub fn client_lease_snapshot(st: ServiceState, leases: ClientLeaseState, closing: bool,
+    session: text, client: text, token: text, now_ms: i64) -> Result<ClientLease, text>:
+    """Return the current admitted attachment after checking its actual lease."""
+    val idx = client_attachment_index(st, session, client)
+    if closing or idx < 0: return Err("client lease attachment unavailable")
+    if not smux_lease_check(leases, session, client, token, now_ms)?: return Err("client lease unavailable")
+    for lease in leases.leases:
+        if lease.session_id == session and lease.client_id == client and lease.token == token:
+            if st.get_client(idx).attachment_generation != lease.generation:
+                return Err("client lease generation mismatch")
+            return Ok(lease)
+    Err("client lease unavailable")
 
 fn canvas_valid(cols: int, rows: int) -> bool:
     return cols > 0 and cols <= 512 and rows > 0 and rows <= 256 and cols * rows <= 60000
