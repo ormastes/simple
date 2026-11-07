@@ -16,7 +16,7 @@ use simple_parser::token::Span;
 use simple_runtime::value::diagram_sffi;
 
 use crate::error::{codes, CompileError, ErrorContext};
-use crate::interpreter::{control_to_value, evaluate_expr, evaluate_module, exec_block, Enums, ImplMethods};
+use crate::interpreter::{evaluate_expr, evaluate_module, Enums, ImplMethods};
 use crate::value::{Env, Value};
 use crate::value_bridge::BridgeValue;
 
@@ -392,21 +392,12 @@ fn call_interpreted_function(
         diagram_sffi::trace_call(&func.name);
     }
 
-    // Build local environment with arguments bound to parameters
-    let mut local_env = env.clone();
-    for (i, param) in func.params.iter().enumerate() {
-        if let Some(arg) = args.get(i) {
-            local_env.insert(param.name.clone(), arg.clone());
-        } else if let Some(default) = &param.default {
-            // Use default value if not provided
-            let default_val = evaluate_expr(default, &mut local_env, functions, classes, enums, impl_methods)?;
-            local_env.insert(param.name.clone(), default_val);
-        }
-    }
-
-    // Execute the function body
-    let result = exec_block(&func.body, &mut local_env, functions, classes, enums, impl_methods);
-    control_to_value(result)
+    // The canonical pre-evaluated-args entry point (parameter binding,
+    // defaults, effect check, and the implicit last-expression return). The
+    // hand-rolled `exec_block` + `control_to_value` this replaces answered
+    // NIL for a body whose value is its last expression (`if c: 7 else: 3`),
+    // so an SMF/native caller decoded every such routed call as garbage.
+    crate::interpreter::exec_function_with_value_args(func, &args, env, functions, classes, enums, impl_methods)
 }
 
 /// Evaluate a single expression via the interpreter.
