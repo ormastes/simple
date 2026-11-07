@@ -1818,6 +1818,117 @@ static spl_u8 g_boot_tcp_rx_buf[4096];
 static spl_u64 g_boot_tcp_rx_len = 0;
 static spl_u64 g_boot_tcp_rx_off = 0;
 
+/* Bounded opaque handles over the singleton boot TCP transport.  A previous
+ * release-tree transplant retained the public registry entry points below but
+ * dropped their owner state and helpers, leaving the SimpleOS runtime unable
+ * to compile. */
+#define RT_BOOT_TCP_REGISTRY_CAPACITY 4U
+#define RT_BOOT_TCP_REGISTRY_FD_BASE 1073741824LL
+#define RT_BOOT_TCP_REGISTRY_FD_SLOT_BITS 3U
+#define RT_BOOT_TCP_REGISTRY_LISTENER 1U
+#define RT_BOOT_TCP_REGISTRY_CLIENT 2U
+
+typedef struct RtBootTcpRegistryEntry {
+    spl_u64 generation;
+    spl_u64 parent_generation;
+    spl_u8 active;
+    spl_u8 kind;
+    spl_u8 parent_slot;
+} RtBootTcpRegistryEntry;
+
+static RtBootTcpRegistryEntry g_boot_tcp_registry[RT_BOOT_TCP_REGISTRY_CAPACITY];
+static spl_u64 g_boot_tcp_registry_next_generation = 1ULL;
+
+static spl_i64 rt_boot_tcp_registry_encode_fd(spl_u64 slot, spl_u64 generation) {
+    if (slot >= RT_BOOT_TCP_REGISTRY_CAPACITY || generation == 0ULL ||
+        generation > ((0x7fffffffffffffffULL - (spl_u64)RT_BOOT_TCP_REGISTRY_FD_BASE) >> RT_BOOT_TCP_REGISTRY_FD_SLOT_BITS)) {
+        return -1;
+    }
+    return RT_BOOT_TCP_REGISTRY_FD_BASE + (spl_i64)((generation << RT_BOOT_TCP_REGISTRY_FD_SLOT_BITS) | slot);
+}
+
+static RtBootTcpRegistryEntry *rt_boot_tcp_registry_lookup(spl_i64 fd, spl_u64 *slot_out) {
+    spl_u64 encoded;
+    spl_u64 slot;
+    spl_u64 generation;
+    RtBootTcpRegistryEntry *entry;
+    if (fd < RT_BOOT_TCP_REGISTRY_FD_BASE) {
+        return 0;
+    }
+    encoded = (spl_u64)(fd - RT_BOOT_TCP_REGISTRY_FD_BASE);
+    slot = encoded & ((1ULL << RT_BOOT_TCP_REGISTRY_FD_SLOT_BITS) - 1ULL);
+    generation = encoded >> RT_BOOT_TCP_REGISTRY_FD_SLOT_BITS;
+    if (slot >= RT_BOOT_TCP_REGISTRY_CAPACITY || generation == 0ULL) {
+        return 0;
+    }
+    entry = &g_boot_tcp_registry[slot];
+    if (!entry->active || entry->generation != generation) {
+        return 0;
+    }
+    if (slot_out) {
+        *slot_out = slot;
+    }
+    return entry;
+}
+
+static spl_i64 rt_boot_tcp_registry_has_active(void) {
+    for (spl_u64 slot = 0ULL; slot < RT_BOOT_TCP_REGISTRY_CAPACITY; slot = slot + 1ULL) {
+        if (g_boot_tcp_registry[slot].active) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static spl_i64 rt_boot_tcp_registry_can_allocate(void) {
+    for (spl_u64 slot = 0ULL; slot < RT_BOOT_TCP_REGISTRY_CAPACITY; slot = slot + 1ULL) {
+        if (!g_boot_tcp_registry[slot].active) {
+            return rt_boot_tcp_registry_encode_fd(slot, g_boot_tcp_registry_next_generation) >= 0;
+        }
+    }
+    return 0;
+}
+
+static spl_i64 rt_boot_tcp_registry_has_child(spl_u64 parent_slot, spl_u64 parent_generation) {
+    for (spl_u64 slot = 0ULL; slot < RT_BOOT_TCP_REGISTRY_CAPACITY; slot = slot + 1ULL) {
+        RtBootTcpRegistryEntry *entry = &g_boot_tcp_registry[slot];
+        if (entry->active && entry->kind == RT_BOOT_TCP_REGISTRY_CLIENT &&
+            entry->parent_slot == parent_slot && entry->parent_generation == parent_generation) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static spl_i64 rt_boot_tcp_registry_allocate(spl_u8 kind, spl_u64 parent_slot, spl_u64 parent_generation) {
+    for (spl_u64 slot = 0ULL; slot < RT_BOOT_TCP_REGISTRY_CAPACITY; slot = slot + 1ULL) {
+        RtBootTcpRegistryEntry *entry = &g_boot_tcp_registry[slot];
+        spl_u64 generation;
+        if (entry->active) {
+            continue;
+        }
+        generation = g_boot_tcp_registry_next_generation;
+        if (generation == 0ULL || rt_boot_tcp_registry_encode_fd(slot, generation) < 0) {
+            return -1;
+        }
+        g_boot_tcp_registry_next_generation = generation + 1ULL;
+        entry->generation = generation;
+        entry->parent_generation = parent_generation;
+        entry->active = 1U;
+        entry->kind = kind;
+        entry->parent_slot = (spl_u8)parent_slot;
+        return rt_boot_tcp_registry_encode_fd(slot, generation);
+    }
+    return -1;
+}
+
+static void rt_boot_tcp_registry_release(RtBootTcpRegistryEntry *entry) {
+    entry->active = 0U;
+    entry->kind = 0U;
+    entry->parent_slot = 0U;
+    entry->parent_generation = 0ULL;
+}
+
 /* RFC 4253: the complete SSH identification line, including LF, is at most
  * 255 wire bytes. Keep this at the raw C owner so an unauthenticated peer
  * cannot make the Simple boundary allocate or copy an unbounded line. */
@@ -2131,50 +2242,6 @@ static void rt_pci_scan_qemu_virt(void) {
         g_rt_pci_count = g_rt_pci_count + 1;
     }
 }
-
-static spl_i64 rt_pci_is_virtio_net(spl_i64 cls, spl_i64 sub, spl_i64 vendor, spl_i64 device_id) {
-    if (cls != 2 || sub != 0) {
-        return 0;
-    }
-    if (vendor != RT_VIRTIO_VENDOR_ID) {
-        return 0;
-    }
-    if (device_id == RT_VIRTIO_NET_LEGACY_DEVICE_ID ||
-        device_id == RT_VIRTIO_NET_MODERN_DEVICE_ID) {
-        return 1;
-    }
-    return 0;
-}
-
-static spl_i64 rt_pci_is_virtio_gpu(spl_i64 cls, spl_i64 sub, spl_i64 vendor, spl_i64 device_id) {
-    if (vendor != RT_VIRTIO_VENDOR_ID) {
-        return 0;
-    }
-    if (device_id == RT_VIRTIO_GPU_LEGACY_DEVICE_ID) {
-        return 1;
-    }
-    if (device_id == RT_VIRTIO_GPU_MODERN_DEVICE_ID) {
-        (void)cls;
-        (void)sub;
-        return 1;
-    }
-    return 0;
-}
-
-static spl_i64 rt_pci_is_virtio_blk(spl_i64 vendor, spl_i64 device_id) {
-    if (vendor != RT_VIRTIO_VENDOR_ID) {
-        return 0;
-    }
-    if (device_id == RT_VIRTIO_BLK_LEGACY_DEVICE_ID ||
-        device_id == RT_VIRTIO_BLK_MODERN_DEVICE_ID) {
-        return 1;
-    }
-    return 0;
-}
-
-static void rt_put_le32(spl_u8 *p, spl_u32 v);
-static void rt_put_le64(spl_u8 *p, spl_u64 v);
-static spl_u32 rt_get_le32(const spl_u8 *p);
 
 spl_i64 rt_pci_device_count(void) {
     if (g_rt_pci_count < 0) {
@@ -3074,7 +3141,16 @@ spl_i64 rt_boot_tcp_registry_close(spl_i64 fd) {
     if (!entry) {
         return -1;
     }
-    return rt_boot_tcp_read_bytes(max_len);
+    if (entry->kind == RT_BOOT_TCP_REGISTRY_LISTENER &&
+        rt_boot_tcp_registry_has_child(slot, entry->generation)) {
+        return -1;
+    }
+    legacy_fd = entry->kind == RT_BOOT_TCP_REGISTRY_CLIENT ? 200 : 100;
+    if (rt_boot_tcp_close(legacy_fd) != 0) {
+        return -1;
+    }
+    rt_boot_tcp_registry_release(entry);
+    return 0;
 }
 
 __attribute__((weak)) spl_i64 rt_io_tcp_bind(spl_i64 addr) {
@@ -3436,7 +3512,7 @@ spl_i64 rt_display_flush_test(void) {
     if (!g_rt_display_ready || !g_rt_gpu_fb) {
         return -1;
     }
-    rt_gpu_fill_test_pattern();
+    rt_gpu_fill_wm_scene();
     return rt_gpu_cmd_transfer_flush();
 }
 
