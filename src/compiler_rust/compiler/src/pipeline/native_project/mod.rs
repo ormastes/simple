@@ -1151,6 +1151,14 @@ impl NativeProjectBuilder {
                 step_start.elapsed().as_secs_f64()
             );
         }
+        // The parse above ran on the rayon workers and `parsed` was dropped on
+        // this thread, so every closure AST is now a cross-thread free parked
+        // on an idle worker's pages (~1.1 GB resident for a 1598-module
+        // closure, tracked live heap 67 MB). Collect on every worker and here
+        // before the per-file compile phase builds on top of it.
+        rayon::broadcast(|_| crate::mem_trace::release_thread_heap());
+        crate::mem_trace::release_thread_heap();
+        crate::mem_trace::snapshot("native-build: after build_import_map");
         if let Some(collision) = &result.enum_runtime_collision {
             return Err(collision.clone());
         }
@@ -1408,11 +1416,13 @@ impl NativeProjectBuilder {
         //  which modules are dirty.)
 
         // 5. Compile dirty files
+        crate::mem_trace::snapshot("native-build: before compile");
         let results = if self.config.parallel {
             self.compile_entries_parallel(&to_compile, &temp_dir_path, &canonical_entry, &imports)
         } else {
             self.compile_entries_sequential(&to_compile, &temp_dir_path, &canonical_entry, &imports)
         };
+        crate::mem_trace::snapshot("native-build: after compile");
         let compile_time = compile_start.elapsed();
         if rust_trace {
             eprintln!("[native-rust-trace] step 5 compile: {:.3}s", compile_time.as_secs_f64());

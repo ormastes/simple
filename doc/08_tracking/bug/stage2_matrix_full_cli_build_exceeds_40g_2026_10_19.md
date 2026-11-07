@@ -141,6 +141,36 @@ next sanctioned Stage 2 rerun (s2d). Close this bug as fixed if that peak is
 under 40 GiB. If it is not, reopen it with `SIMPLE_PHASE_RSS=1` per-phase
 attribution.
 
+## 2026-11-07 note (lane r14-bootstrap-mem): Windows MSVC Stage 2 seed native-build measured
+
+Different term from the full-CLI MIR rows above; recorded here because the
+owner's "Stage 2 keeps being killed" report (boot2 lane,
+`bootstrap-windows.sh --msvc --full-bootstrap --keep-going --jobs=min
+--stop-after-stage2`) resolves to this stage.
+
+- **What both boot2 logs actually say:** `exit=1 signal=none`, cause
+  `driver_aot_pipeline.spl: timeout (300s)` then 555 `NOT_ATTEMPTED` from the
+  admission latch. No reap/kill/cap line exists in either log.
+- **Reproduced the exact Stage 2 argv** (boot2 runtime-authority seed, copy of
+  its cache, `--threads 1`) under a 2 s PeakWorkingSet sampler: peak
+  **1.62-1.66 GB** WS on a host with ~3.8 GB free. `driver_aot_pipeline.spl`
+  compiled in 30.7 s (run 1) and 105 s (run 2) of CPU — same binary, same
+  inputs, cpu ~= wall both times. The 300 s abort is host-load inflation of
+  CPU cost, not a stall and not memory; `SIMPLE_NATIVE_FILE_TIMEOUT` (opt-in,
+  pinned into the Stage 2 argv) is the lever; the retry path reuses the same
+  timeout so it fails identically.
+- **Dominant memory term found and fixed:** after `build_import_map` the
+  tracked heap is 67 MB while the process holds 1.12 GB WS / 1.33 GB private.
+  The parallel parse allocates every closure AST on the rayon worker and the
+  builder thread frees them cross-thread; mimalloc parks those frees on the
+  idle worker's pages. Fix: `mem_trace::release_thread_heap` broadcast to the
+  pool + caller right after the import map. BEFORE -> AFTER on the same argv:
+  after-import-map WS 1,122 -> 188 MB; before-compile 1,352 -> 340 MB;
+  compile-phase max 1,656 -> 619 MB; whole-run peak 1,659 -> 1,123 MB (the
+  remaining peak is the parse transient while all 1,598 ASTs are live).
+- **Not a term here:** per-file tracked heap stays 290-412 MB across 32 files
+  (no Rust-side ratchet); `--jobs=min` already yields 1 job / `--threads 1` /
+  `workers: 1`, so admission is already serialised on Windows.
 ## 2026-11-07 Phase-4 q0019 / q0021 (mem-p4cap, evidence; no code change)
 
 Jobs (s4e queue, `C:/dev/p3new/s4/out/s4e_q/<id>`, binary
