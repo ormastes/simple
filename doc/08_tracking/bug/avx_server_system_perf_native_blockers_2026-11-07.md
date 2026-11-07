@@ -1,6 +1,6 @@
 # AVX server system perf: native build blockers with the admitted Windows Stage 2
 
-Status: OPEN. Found 2026-11-07 on DESKTOP-5A4V03J (Xeon W-2135, AVX-512, MinGW
+Status: OPEN (several fixes landed; remaining failures and verification are listed in Progress). Found 2026-11-07 on DESKTOP-5A4V03J (Xeon W-2135, AVX-512, MinGW
 clang lane, `--backend=cranelift`).
 
 Compiler: admitted Stage 2 from release `060ecf462c5`
@@ -84,8 +84,40 @@ For the perf test the vector lane should get its own small entry (sync
 `SimpleHttpServer` + provider only) so these do not gate AVX measurement; the
 gaps themselves stay open.
 
+## Progress (2026-11-07, Stage 2 rebuilt from release `cea5d2682c5`, sha256 `58220b2c…`)
+
+| item | fix | native proof |
+|---|---|---|
+| 1, 2 | #7359 trait-object move / `x!.field` dispatch | web server compiles past MIR |
+| 3 | #7361 surface link Err, link with the runtime's clang, C `rt_io_tcp_drain_line` | loadgen links |
+| 4 | #7355 `vector_main.spl` entry (577 → 6 modules) | builds |
+| 5 | #7365 Winsock TCP/UDP in the C runtime (all `rt_io_*` were stubs) | server listens |
+| 6 | #7379 `@cfg(baremetal or simpleos)` on dynlib's kernel SMF import; C `rt_dyncall_4/5/6` | web + loadgen link |
+| 7 | #7384 float `Zero`/`Int` constants lowered with `fconst` (was `iconst.f64` → verifier `unreachable!`) | needs Stage 2 rebuild |
+| 8 | #7397 `spl_print`/`spl_println` flush stdout (READY line stuck in buffer) | READY reaches log |
+
+New items found on the way:
+
+5. **Hosted native builds linked the SimpleOS kernel loader.** `os.posix.dynlib` →
+   `dylib_async` → `os.kernel.loader` (ELF loader, PMM, paging, port I/O):
+   undefined `pmm_*`, `rt_port_*`. Fixed in #7379.
+6. **DB server: Cranelift verifier panic** `verifier/mod.rs:1634` (`iconst` of
+   f64; trigger `f64?` unwrap nil path). The 0xC0000409 hint wrongly said
+   "host commit limit exhausted". Source fix landed in #7384; rebuilt Stage 2 verification is pending.
+7. **Loadgen ↔ web server exchange fails on Windows**: warmup `ok=0 errors=8
+   first_error=no-response:0 elapsed_ms=8`, then the 4-client pass segfaults;
+   the server logs nothing after READY. OPEN (under investigation).
+8. **`Some(<concrete>)` into a `Trait?` slot** still fails with the empty-type
+   message (workaround in `pure_database.spl`). OPEN (fix in progress).
+9. **Int literal to an `f64` parameter** (`takef(3)`) fails the verifier
+   "arg 0 has type i64, expected f64". OPEN (fix in progress).
+10. **Stage 2 phase verification matrix aborted on its RSS cap**
+    (`status=rss-cap-exceeded`, peak 12813020 KiB vs cap 12784023 KiB,
+    `cap_bound=small-host-one-worker`) while native perf builds ran
+    concurrently; the cap is derived from free host memory at start. Rerun
+    alone to tell a real regression from contention.
+
 ## Next
 
-Fix 1+2 (native trait-object assignment/dispatch) and 3 (surface link errors)
-in the pure-Simple compiler, rebuild Stage 2, add a vector-lane entry for the
-web server, rerun the native system perf test.
+Rebuild Stage 2 with #7384 and the open fixes, rerun the native system perf
+test alone, recalibrate the ratio bounds from the first native numbers.
