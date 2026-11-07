@@ -15,6 +15,29 @@ corrected absolute-path run and that failure are both retained. This closes the
 capture compatibility blocker below for that native snapshot, not the separate
 Windows candidate-recovery finding or any full application qualification gate.
 
+## Reviewed source landing snapshot
+
+The combined branch was rebased onto `2e651ca5268` (a check-script change).
+At `92a95a71ce1`, host commands, controller commands, Caret consumers, remote
+container result publication, Windows recovery/service/workspace source, and
+both selected-user adapters are integrated. The Windows candidate-authority
+finding is fixed by an explicit recovery-only state and a common-API regression;
+ordinary start/cleanup is refused until successful exact reconciliation.
+
+Independent Astra source reviews covered the Windows correction, remote parent
+publication, Caret/controller correlation and native capture correction. The
+host/controller command boundary has also been crosschecked. These are source
+reviews, not passing Simple execution tests. The final source hash manifest for
+the integrated native fixtures still matches after rebase; those tests were not
+rerun merely because unrelated Simple source was added.
+
+Whitespace, direct-environment guards and executable-spec layout checks passed
+for this assembly. Full compiler, Simple SSpec, Windows and live Podman checks
+remain **NOT_RUN**. Persistent host application composition, terminal bind and
+acknowledgement, hard storage admission, helper CPU enforcement, legacy consumer
+migration and executable workspace preparation remain active work. This source
+landing must not be reported as the completed distributed orchestrator.
+
 ## Required execution boundary
 
 Linux selects `linux-podman`; Windows selects `windows-docker-process`.
