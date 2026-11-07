@@ -1676,9 +1676,52 @@ impl MirLowering:
 
         nil
 
+    me array_push_receiver_is_u64_v1(receiver_local: LocalId) -> bool:
+        # Receiver authority must precede inference from the appended value.
+        # An Any/generic array or a user owner must keep its existing route.
+        if not self.local_is_runtime_array(receiver_local):
+            return false
+        if val declared = self.find_local_hir_type(receiver_local.id):
+            match declared.kind:
+                case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element):
+                    val declared_element = self.lower_type(element)
+                    match declared_element.kind:
+                        case MirTypeKind.U64: return true
+                        case _: return false
+                case HirTypeKind.Infer(_, _): ()
+                case _: return false
+        if val receiver_type = self.local_mir_type_of(receiver_local):
+            match receiver_type.kind:
+                case MirTypeKind.Array(element, _) | MirTypeKind.Slice(element):
+                    match element.kind:
+                        case MirTypeKind.U64: return true
+                        case _: return false
+                case _: ()
+        false
+
     me lower_unresolved_array_push(push_recv: LocalId, push_value: HirExpr, wb_kind: i64, wb_base: LocalId, wb_index: LocalId, wb_field_idx: i64) -> LocalId:
+        val push_u64_receiver = self.array_push_receiver_is_u64_v1(push_recv)
         val push_val_raw = self.lower_expr(push_value)
         self.note_container_elem_type(push_recv, push_val_raw)
+        if push_u64_receiver:
+            # The canonical typed helper owns the storage layout: raw U64
+            # lanes in packed arrays, boxed RuntimeValues in ordinary arrays.
+            # Generic rt_array_push expects an already boxed slot and cannot
+            # normalize that representation for a packed destination.
+            val push_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_typed_words_u64_push"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                    params: [MirType.ptr(MirType.i64(), false), MirType.i64()],
+                    return_type: MirType(kind: MirTypeKind.I8),
+                    is_variadic: false
+                )))
+            ))
+            var b_push = self.builder
+            val push_bits = b_push.emit_cast(mir_operand_copy(push_val_raw), MirType.i64())
+            b_push.emit_call(push_op, [mir_operand_copy(push_recv), mir_operand_copy(push_bits)], MirType(kind: MirTypeKind.I8))
+            self.builder = b_push
+            self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, push_recv)
+            return push_recv
         val push_val_tagged = self.box_runtime_value(push_val_raw)
         val push_op = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_array_push"),
