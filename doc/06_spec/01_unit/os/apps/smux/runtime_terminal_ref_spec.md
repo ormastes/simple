@@ -28,9 +28,11 @@ readiness.
 generation fields cannot be restored or deserialized as authority after
 restart. Recovery must acquire a fresh reference from the issuing owner.
 
-Actual terminal adoption requires an owner-issued live reference, exact target
+Actual terminal adoption requires a validated owner-issued registry reference, exact target
 revision/incarnation fencing and exclusive reader transfer. The existing pane
-reader drains through explicit EOF; deferred reads are not EOF, and read errors
+reader drains through explicit EOF; neither validation nor EOF proves process
+liveness or exit. POSIX liveness is explicitly unsupported. Deferred reads are
+not EOF, and read errors
 retain cleanup authority. Successful adoption means only that smux owns the
 output-only helper. It does not prove the engine attached. Input, native
 geometry and interactive operation remain unsupported for this transport.

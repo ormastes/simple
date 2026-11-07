@@ -67,6 +67,13 @@ POSIX teardown requires further exact group ownership work and remains blocked.
 Windows HANDLE/job cleanup is a separate mechanism and is not qualified here.
 This limitation also blocks a complete provider-attach lifecycle.
 
+POSIX canonical liveness similarly returns `process_liveness_unsupported`
+without waiting, reaping or signalling. Adoption uses the separate
+`sosix_process_validate_piped_ref_v1` exact registry lookup, which proves only
+that the process-local owner reference is present. It does not establish a
+live helper or completed attachment. Stream EOF proves drained output, not
+process exit. Both exit and teardown qualification remain blocked.
+
 ## Binding transaction
 
 Authenticate before decoding or effects. Validate the bounded versioned

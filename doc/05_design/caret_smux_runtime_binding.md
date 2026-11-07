@@ -29,6 +29,10 @@ target identity/incarnation, vacancy and a real canonical owner before the
 single API publication. Failed adoption leaves reference cleanup with its
 caller. No bind request supplies a raw PID/reference or a command to execute.
 Adoption means helper ownership/opening, not completed Podman attachment.
+Side-effect-free exact-reference validation admits an existing registry owner;
+it does not require or establish process liveness. POSIX liveness returns
+`process_liveness_unsupported` without waiting or reaping. EOF is stream state,
+not proof of process exit.
 
 REQ-SMUX-RUNTIME-REF-004: this transport is output-only. Input, paste, command
 delivery, generated VT replies and native geometry changes must not reach the
@@ -51,6 +55,7 @@ The shared daemon lane owns these exact SOSIX APIs:
 
 - PipedProcessRefV1 with pid and generation;
 - sosix_process_spawn_piped_ref_v1(cmd, args);
+- sosix_process_validate_piped_ref_v1;
 - sosix_process_read_stdout_ref_v1;
 - sosix_process_write_stdin_some_ref_v1 (not used by this output-only consumer);
 - sosix_process_is_piped_alive_ref_v1;
@@ -79,12 +84,12 @@ system acceptance are NOT_RUN, not PASS.
 |---|---|
 | BOUNDARY-001/002 | `smux_runtime_binding_capabilities_spec.spl`: real authenticated dispatcher, exact absence/refusal, unchanged state and frame limits |
 | REF-001 | `runtime_terminal_ref_spec.spl`: clone, generation/incarnation, revision and rollback identity |
-| REF-002/003 | `smux_runtime_terminal_transport_spec.spl`: real canonical helper adoption, sole-reader marker capture, independent exit followed by tail/EOF drain |
+| REF-002/003 | `smux_runtime_terminal_transport_spec.spl`: exact registry owner validation, real helper adoption, sole-reader fresh marker capture and explicit EOF |
 | REF-004 | Both reference specs: pre-effect input refusal and changed-geometry rejection through the real resize path |
-| REF-005 | Native-consumer scenario: unsupported POSIX close retains exact owner, prevents removal and leaves an unrelated helper alive |
+| REF-005 | Native-consumer scenario: unsupported POSIX close retains exact owner and prevents removal; liveness/exit remain explicitly unsupported |
 
 The short requirement names in this table retain the `REQ-SMUX-RUNTIME-`
 prefix above. All three specs are AUTHORED_UNRUN. Native dependency source,
 producer admission, docgen and execution evidence remain outstanding;
-successful POSIX teardown, restart recovery and full host/provider binding
+POSIX process liveness/exit, successful teardown, restart recovery and full host/provider binding
 are not qualified by the authored scenarios.

@@ -3,6 +3,12 @@
 Status: awaiting verification, with positive runtime-binding source composition
 still incomplete. No feature-complete or full-system PASS is asserted.
 
+Canonical process API dependency: daemon source commit
+`65b04829656503ad9715e6e0fb12474094585710` on
+`work/piped-generation-owner-20261107`. This is an immutable source dependency,
+not runtime admission. Integrate it before building the consumer; its exact
+validator and POSIX unsupported lifecycle results define this test boundary.
+
 The current production-route suite is
 `test/03_system/app/llm_caret/feature/smux_runtime_binding_capabilities_spec.spl`.
 It exercises real server dispatch for authentication ordering, exact absence
@@ -18,14 +24,17 @@ as native process authority.
 The authored native-consumer scenario is
 `test/03_system/app/llm_caret/feature/smux_runtime_terminal_transport_spec.spl`,
 with its manual in the corresponding `doc/06_spec/03_system` path. It uses a
-real bounded helper for reference adoption, fresh output, post-exit tail
-draining, explicit EOF, stale-generation refusal, retained POSIX close refusal,
-an unaffected unrelated helper, and output-only input/geometry refusal. Run it only after the canonical process
+real bounded helper for exact owner validation/adoption, fresh output,
+tail draining, explicit EOF, stale-generation refusal, retained POSIX close
+refusal, and output-only input/geometry refusal. Run it only after the canonical process
 owner is admitted. It is AUTHORED_UNRUN, not Podman conformance evidence.
-Successful POSIX teardown and duplicate close after release are BLOCKED_CAPABILITY:
+POSIX liveness/exit, successful teardown and duplicate close after release are BLOCKED_CAPABILITY:
 the current canonical owner returns `process_close_unsupported` with no signals
 or slot release. Run the scenario in an isolated test process; its two retained
 slots are intentional uncertainty evidence, not completed cleanup.
+Liveness returns `process_liveness_unsupported` without waiting or reaping;
+the exact-reference validator checks only registry existence/generation.
+Fresh delivered bytes and drained EOF do not prove a helper has exited.
 Restart recovery and the full legacy smux regression
 suite remain additional required verification; they are not covered by this
 one positive helper scenario.
