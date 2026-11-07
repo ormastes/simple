@@ -56,7 +56,10 @@ No evidence here justifies a production allocation or capture semantic change.
 The new fixture refuses inherited module/session ownership, missing hardening,
 missing declared provenance, or the wrong declared runtime composition. Its
 actual process call and actual consumer remain the production implementations.
-Its physical array-scope ABI is i8, while the raw-word query is i64.
+It reuses the existing bool-returning `transient_scope_begin`,
+`transient_scope_pause` and `transient_scope_end` wrappers, whose physical C
+array-scope ABI is i8. The raw-word query is i64. No competing scope signature
+is introduced merely to observe the native lifecycle.
 
 Setup completes before begin. Both the real child-result block and the
 invalid-text block are allocated while the canonical array scope is active.
@@ -119,6 +122,12 @@ forensic claim.
 
 Source review by Astra and Sol checked the composition contract, i8 scope ABI,
 ownership sequence, fail-closed provenance declarations and dependency limits.
+The source-only SFFI backlog audit exposed three needless scope-signature
+variants in the first fixture version. Reusing the existing transient wrappers
+removed those variants: the aggregate inventory changed from403/399 to400/399
+source variants, but its prerequisite still FAILs (migration3769/3546 after the
+change). This is not a passing aggregate SFFI audit; neither this source-only
+audit nor its queued migration count establishes runtime/link identity.
 No compiler, native build or fixture execution was performed for this source
 follow-up. Dynamic assertions, Windows native-all closure, source-matched
 P2/SSpec and broader compiler/core/MCP qualification remain UNRUN. A source-only

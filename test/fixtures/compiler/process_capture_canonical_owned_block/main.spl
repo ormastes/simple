@@ -8,17 +8,10 @@
 use std.io_runtime.{host_os, env_get}
 use std.nogc_sync_mut.sffi.process_capture.{process_capture_result, rt_process_run_tuple}
 use std.nogc_sync_mut.sffi.process_capture_text.{process_capture_text_data_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, rt_session_heap_id}
 
 @unsafe(reason: "reject an inherited module scope without taking its ownership", capabilities: [ffi])
 extern fn rt_transient_array_scope_state_v1() -> i64
-@unsafe(reason: "reject an inherited session so paused copies have independent lifetime", capabilities: [ffi])
-extern fn rt_session_heap_id() -> u32
-@unsafe(reason: "open the canonical C graph owner and its delegated raw scope", capabilities: [ffi, raw_ptr])
-extern fn rt_transient_array_scope_begin() -> i8
-@unsafe(reason: "keep consumer copies outside the ending canonical scope", capabilities: [ffi, raw_ptr])
-extern fn rt_transient_array_scope_pause() -> i8
-@unsafe(reason: "close only the canonical scope successfully opened by this fixture", capabilities: [ffi, raw_ptr])
-extern fn rt_transient_array_scope_end() -> i8
 @unsafe(reason: "observe actual canonical raw registration before and after consumption", capabilities: [ffi, raw_ptr])
 extern fn rt_transient_raw_words(value: i64, words_out: i64, canonical_out: i64) -> i64
 @unsafe(reason: "allocate the real provider layout for invalid-text rejection", capabilities: [ffi, raw_ptr])
@@ -33,14 +26,14 @@ fn declared_sha256_is_valid(value: text) -> bool:
         if (digit < 48 or digit > 57) and (digit < 97 or digit > 102): return false
     true
 
-# Call only after begin returned one. Take only scalar input: an error string
+# Call only after begin returned true. Take only scalar input: an error string
 # allocated inside the owned scope would not survive the cleanup below.
 fn fail_owned_scope(stage_code: i64) -> i64:
-    val ended = unsafe(capabilities: [ffi, raw_ptr]): rt_transient_array_scope_end()
+    val ended = transient_scope_end()
     print "early_cleanup:"
     print "    failure_code: {stage_code}"
     print "    scope_end: {ended}"
-    if ended != 1: return 29
+    if not ended: return 29
     stage_code
 
 fn main() -> i64:
@@ -83,8 +76,8 @@ fn main() -> i64:
         print "    error: command pointer or extent unavailable"
         return 14
 
-    val began = unsafe(capabilities: [ffi, raw_ptr]): rt_transient_array_scope_begin()
-    if began != 1:
+    val began = transient_scope_begin()
+    if not began:
         print "begin:"
         print "    scope_begin: {began}"
         print "    error: no owned scope to close"
@@ -102,8 +95,8 @@ fn main() -> i64:
         rt_ptr_write_i64(invalid, 16, 0)
     val invalid_before = unsafe(capabilities: [ffi, raw_ptr]): rt_transient_raw_words(invalid, 0, 0)
 
-    val paused = unsafe(capabilities: [ffi, raw_ptr]): rt_transient_array_scope_pause()
-    if paused != 1: return fail_owned_scope(19)
+    val paused = transient_scope_pause()
+    if not paused: return fail_owned_scope(19)
     val paused_state = unsafe(capabilities: [ffi]): rt_transient_array_scope_state_v1()
     if paused_state != 2: return fail_owned_scope(20)
     # Diagnostic strings and consumer tuple temporaries are created only after
@@ -125,13 +118,13 @@ fn main() -> i64:
     print "after_consume:"
     print "    provider_words: {after}"
     print "    invalid_words: {invalid_after}"
-    val ended = unsafe(capabilities: [ffi, raw_ptr]): rt_transient_array_scope_end()
+    val ended = transient_scope_end()
     val ended_state = unsafe(capabilities: [ffi]): rt_transient_array_scope_state_v1()
     print "ended:"
     print "    scope_end: {ended}"
     print "    scope_state: {ended_state}"
 
-    if ended != 1 or ended_state != 0: return 21
+    if not ended or ended_state != 0: return 21
     # Unconditional dependency check: current base does not release either
     # block. Canonical scope teardown cannot substitute for consumer release.
     if after != -1 or invalid_after != -1:
