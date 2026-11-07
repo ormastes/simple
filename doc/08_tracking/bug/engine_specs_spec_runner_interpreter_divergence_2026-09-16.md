@@ -74,3 +74,15 @@ Repro: `test/01_unit/compiler/95.interp/interpreter/module_qualified_type_regist
 `unknown static method zero on class Vec3` and `class Config has no field named backend`.
 Prevention: `..._prevention_spec.spl` (same dir). Shapes 1, 2 and 4 are
 separate defects and are not addressed by this change.
+
+Residuals measured on the fixed seed (`engine3d_spec` 0/5 -> 2/5), neither a
+registry pick: (a) `class PhysicsConfig3D has no field named backend` x2 —
+the spec imports `default_physics_config_3d` from
+`physics.simple.types3d` (a 3-field `PhysicsConfig3D`) and hands it to
+`physics.world3d.PhysicsWorld3D.create`, whose `config.spl` struct carries
+`backend`; the interpreter now reports that mismatch faithfully (owner
+decision: which factory the spec/engine should use); (b) `method up not found
+on type object (receiver Transform3D)` — `component/camera3d.spl:57` calls
+`transform.up()` but `math3d.Transform3D` defines only `forward()`; no
+`Transform3D.up` exists in `src/lib` (lib gap, previously masked by the
+`Vec3.one()` failure).
