@@ -1,0 +1,48 @@
+# @req CFG-02 ORCH-02 HOST-02
+# Actual strict decoder, pure policy only. Runtime NOT_RUN.
+use std.common.contracts.orchestration.execution_policy_v1.*
+use std.common.contracts.orchestration.resource_v1.{ORCHESTRATION_API_VERSION_V1, parse_resource_document}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+fn runtime_backend_document_v1(provider: text, os: text, isolation: text) -> text:
+    val meta: Dict<text, SdnValue> = {"name": SdnValue.String("runtime"), "namespace": SdnValue.String("caret")}
+    val spec: Dict<text, SdnValue> = {"provider": SdnValue.String(provider), "executionOS": SdnValue.String(os),
+        "architecture": SdnValue.String("x86_64"), "isolation": SdnValue.String(isolation)}
+    val root: Dict<text, SdnValue> = {"apiVersion": SdnValue.String(ORCHESTRATION_API_VERSION_V1),
+        "kind": SdnValue.String("RuntimeClass"), "metadata": SdnValue.Dict(meta), "spec": SdnValue.Dict(spec)}
+    sdn_encode_canonical(SdnValue.Dict(root))
+
+fn runtime_backend_decode_v1(provider: text, os: text, isolation: text) -> Result<RuntimeClassV1, text>:
+    val parsed = parse_resource_document(runtime_backend_document_v1(provider, os, isolation)).unwrap()
+    match decode_runtime_class_value(parsed.0, parsed.1, ""):
+        case Ok(value): Ok(value)
+        case Err(issue): Err(issue.path)
+
+describe "explicit managed container runtime policy":
+    it "preserves Linux rootless Podman and admits Windows process Docker explicitly":
+        step("Decode only the two supported platform provider isolation combinations")
+        val linux = runtime_backend_decode_v1("podman", "linux", "rootless").unwrap()
+        val windows = runtime_backend_decode_v1("docker", "windows", "process").unwrap()
+        expect(runtime_class_backend_v1(linux).unwrap()).to_equal("linux-podman")
+        expect(runtime_class_backend_v1(windows).unwrap()).to_equal("windows-docker-process")
+        expect(windows.architecture).to_equal("x86_64")
+
+    it "refuses cross platform engines and isolation fallback":
+        step("Reject Linux Docker Windows Podman and mismatched process isolation")
+        expect(runtime_backend_decode_v1("docker", "linux", "process").is_err()).to_equal(true)
+        expect(runtime_backend_decode_v1("podman", "windows", "rootless").is_err()).to_equal(true)
+        expect(runtime_backend_decode_v1("docker", "windows", "rootless").is_err()).to_equal(true)
+        expect(runtime_backend_decode_v1("podman", "linux", "process").is_err()).to_equal(true)
+
+    it "refuses unknown engines platforms and isolation modes":
+        step("Reject unknown policy values without probing or selecting another backend")
+        expect(runtime_backend_decode_v1("auto", "linux", "rootless").is_err()).to_equal(true)
+        expect(runtime_backend_decode_v1("podman", "freebsd", "rootless").is_err()).to_equal(true)
+        expect(runtime_backend_decode_v1("docker", "windows", "hyperv").is_err()).to_equal(true)
+
+    it "validates typed policies at the backend projection boundary":
+        step("Reject a manually changed policy instead of relying only on its decoder")
+        var runtime = runtime_backend_decode_v1("docker", "windows", "process").unwrap()
+        runtime.execution_os = "linux"
+        expect(runtime_class_backend_v1(runtime).is_err()).to_equal(true)
