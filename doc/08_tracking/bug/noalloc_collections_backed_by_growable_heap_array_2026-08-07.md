@@ -1,5 +1,15 @@
 # `nogc_async_mut_noalloc/collections/*` claim "no heap allocation" but are backed by a real heap `[T]` array — partially fixed, root cause stays open
-## Open 2026-09-16 — needs owner triage
+## Re-scoped 2026-11-07 — FIXED for "allocation-free after construction" (owner-approved)
+
+Scope of this bug is now **allocation-free after construction**, which is met:
+`FixedArray`/`FixedStack` fill their backing storage once in `new()` and never
+grow afterwards, and `FixedMap` uses parallel arrays (no per-operation object
+allocation). The remaining goal — genuine inline/static storage with no heap
+allocation at all — moved to the language feature request
+`doc/08_tracking/feature/inline_fixed_size_array_struct_storage_2026-11-07.md`
+(FR-LANG-INLINE-FIXED-ARRAY-0001, inline `[T; N]` struct storage).
+
+## Previous status (superseded)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -7,7 +17,7 @@ evidence found in the body. This is bookkeeping, not verification.
 **Filed:** 2026-08-07
 **Severity:** high — undermines the allocation-class lattice (WP-12) the whole
 Wave-3 aerospace plan depends on
-**Status:** PARTIALLY FIXED — steady-state (post-construction) heap growth
+**Status:** FIXED (re-scoped 2026-11-07, see top) — was PARTIALLY FIXED — steady-state (post-construction) heap growth
 eliminated for `FixedArray`/`FixedStack`, and per-operation object allocation
 eliminated for `FixedMap`; genuine inline/static storage is **not
 achievable** with the language as it exists today. Stays RED.
