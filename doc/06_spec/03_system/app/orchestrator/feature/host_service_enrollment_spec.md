@@ -13,3 +13,15 @@ Source: `test/03_system/app/orchestrator/feature/host_service_enrollment_spec.sp
 These are pure codec/arithmetic plus actual cryptographic verification assertions. They do not read an engine policy or authenticate an arbitrary root. Static installed policy pins never imply Windows ACL ownership, native process/job limits, boot-counter continuity, service readiness, provider liveness, or broker enforcement. A fresh service incarnation belongs to the actual startup factory and is absent from this signed static schema. The broker partition is deducted once by its capacity consumer, never once per helper.
 
 Missing runtime evidence: all seven source cases, actual Windows native root loading/enrollment, installed raw engine/broker byte comparison, broker/job capability enforcement, fresh epoch startup, same-journal reconciliation and supported platform builds. Claim/root WIP is not included. No runtime PASS, power-loss durability or full persistent-host claim is made.
+
+Exact authored step trace (all NOT_RUN):
+
+| Case | Exact `step()` text |
+| --- | --- |
+| 1 | verifies real signatures and derives allocatable capacity by exact subtraction |
+| 2 | rejects changing the engine pin, broker partition or broker policy after signing |
+| 3 | refuses zero negative exhausted and overflow-shaped partitions before subtraction |
+| 4 | refuses actual signature corruption expiry and policy revision drift |
+| 5 | rejects noncanonical oversized unknown and wrong-backend data |
+| 6 | rejects relative or traversing installed parents without inferring filesystem ownership |
+| 7 | requires canonical bounded engine policy pin and rejects an actually missing wire field |
