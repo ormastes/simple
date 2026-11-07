@@ -382,3 +382,100 @@ describe "Pinned private Host service peer policy and owned callback":
         expect(source.contains("CloseCleanupRequired(closed,")).to_equal(true)
         host_parent_budget_fixture_close_v1(fixture)
         peer_policy_fixture_close_v2(peers)
+
+    it "classifies only an authenticated allowed status read as control":
+        step("Use actual loaded same-root mapping before selecting the control-read class")
+        val fixture = host_parent_budget_fixture_v1()
+        val peers = peer_policy_fixture_v2(fixture.local.scope.service_scope_id, ["host-status"], fixture.local.root)
+        val owner = peer_gateway_fixture_v2(fixture.local, peers)
+        val request = peer_request_v2(peers.client_uid, "host-status")
+        expect(host_service_gateway_classify_v2(owner, request).unwrap()).to_equal(HostServiceDispatchClassV2.ControlRead)
+        expect(owner.domain.local.capacity.journal.sequence).to_equal(fixture.local.capacity.journal.sequence)
+        expect(host_local_resolver_consumed_fixture_v2(owner.domain.local.container)).to_equal(0)
+        expect(host_service_gateway_callback_v2(owner, request).response.exit_code).to_equal(0)
+        host_parent_budget_fixture_close_v1(fixture)
+
+    it "never gives unauthorized status root service UID or scope a priority class":
+        step("Reject policy and provenance failures before interpreting the raw status action as priority")
+        val fixture = host_parent_budget_fixture_v1()
+        val peers = peer_policy_fixture_v2(fixture.local.scope.service_scope_id, ["host-validate"], fixture.local.root)
+        val owner = peer_gateway_fixture_v2(fixture.local, peers)
+        expect(host_service_gateway_classify_v2(owner, peer_request_v2(peers.client_uid, "host-status")).unwrap_err()).to_equal("host-service-peer-action-forbidden")
+        expect(host_service_gateway_classify_v2(owner, peer_request_v2(peers.service_uid, "host-status")).unwrap_err()).to_equal("host-service-peer-service-uid-forbidden")
+        val unknown_uid = if peers.service_uid == 2000: 2001 else: 2000
+        expect(host_service_gateway_classify_v2(owner, peer_request_v2(unknown_uid, "host-status")).unwrap_err()).to_equal("host-service-peer-uid-unmapped")
+        val foreign = peer_policy_fixture_v2(fixture.local.scope.service_scope_id)
+        val foreign_owner = peer_gateway_fixture_v2(fixture.local, foreign)
+        expect(host_service_gateway_classify_v2(foreign_owner, peer_request_v2(foreign.client_uid, "host-status")).unwrap_err()).to_equal("host-service-peer-root-mismatch")
+        val scoped = peer_policy_fixture_v2("other-service", ["host-status"], fixture.local.root)
+        val scope_owner = peer_gateway_fixture_v2(fixture.local, scoped)
+        expect(host_service_gateway_classify_v2(scope_owner, peer_request_v2(scoped.client_uid, "host-status")).unwrap_err()).to_equal("host-service-peer-scope-mismatch")
+        expect(fixture.local.capacity.journal.sequence).to_equal(owner.domain.local.capacity.journal.sequence)
+        expect(host_local_resolver_consumed_fixture_v2(owner.domain.local.container)).to_equal(0)
+        host_parent_budget_fixture_close_v1(fixture)
+        peer_policy_fixture_close_v2(foreign)
+
+    it "classifies each allowed work action without decoding or authorizing signed packets":
+        step("Keep opaque invalid packet bytes as Work metadata and require callback rejection separately")
+        val fixture = host_parent_budget_fixture_v1()
+        val peers = peer_policy_fixture_v2(fixture.local.scope.service_scope_id,
+            ["host-validate", "host-prepare", "host-parent-budget"], fixture.local.root)
+        val owner = peer_gateway_fixture_v2(fixture.local, peers)
+        for action in ["host-validate", "host-prepare", "host-parent-budget"]:
+            val request = peer_request_v2(peers.client_uid, action, "operation_1", "invalid-signed-packet")
+            expect(host_service_gateway_classify_v2(owner, request).unwrap()).to_equal(HostServiceDispatchClassV2.Work)
+            val rejected = host_service_gateway_callback_v2(owner, request)
+            expect(rejected.response.exit_code).to_equal(1)
+            expect(rejected.owner.domain.local.capacity.journal.sequence).to_equal(fixture.local.capacity.journal.sequence)
+            expect(host_local_resolver_consumed_fixture_v2(rejected.owner.domain.local.container)).to_equal(0)
+        host_parent_budget_fixture_close_v1(fixture)
+
+    it "preserves scope and request shape error ordering before scheduling":
+        step("Require exact status shape after mapped identity and scope validation")
+        val fixture = host_parent_budget_fixture_v1()
+        val peers = peer_policy_fixture_v2(fixture.local.scope.service_scope_id, ["host-status"], fixture.local.root)
+        val owner = peer_gateway_fixture_v2(fixture.local, peers)
+        val request = peer_request_v2(peers.client_uid, "host-status", "operation_1", "unexpected")
+        expect(host_service_gateway_classify_v2(owner, request).unwrap_err()).to_equal("host-service-status-fields")
+        val callback = host_service_gateway_callback_v2(owner, request)
+        expect(peer_fields_v2(callback.response.payload)["error"]).to_equal(SdnValue.String("host-service-status-fields"))
+        val scoped = peer_policy_fixture_v2("other-service", ["host-status"], fixture.local.root)
+        val scope_owner = peer_gateway_fixture_v2(fixture.local, scoped)
+        expect(host_service_gateway_classify_v2(scope_owner, request).unwrap_err()).to_equal("host-service-peer-scope-mismatch")
+        expect(fixture.local.capacity.journal.sequence).to_equal(owner.domain.local.capacity.journal.sequence)
+        host_parent_budget_fixture_close_v1(fixture)
+
+    it "refuses scheduling effects even when the installed policy allows their action":
+        step("Return dispatch-required rather than a work class or an accepted queue receipt")
+        val fixture = host_parent_budget_fixture_v1()
+        val peers = peer_policy_fixture_v2(fixture.local.scope.service_scope_id,
+            ["host-execute", "host-inspect", "host-wait", "host-cleanup"], fixture.local.root)
+        val owner = peer_gateway_fixture_v2(fixture.local, peers)
+        for action in ["host-execute", "host-inspect", "host-wait", "host-cleanup"]:
+            val payload = if action == "host-inspect" or action == "host-wait": "" else: "not-authority"
+            expect(host_service_gateway_classify_v2(owner, peer_request_v2(peers.client_uid, action, "operation_1", payload)).unwrap_err()).to_equal("host-service-effect-dispatch-required")
+        expect(fixture.local.capacity.journal.sequence).to_equal(owner.domain.local.capacity.journal.sequence)
+        expect(host_local_resolver_consumed_fixture_v2(owner.domain.local.container)).to_equal(0)
+        host_parent_budget_fixture_close_v1(fixture)
+
+    it "revalidates at callback and keeps classification free of journal and response effects":
+        step("A prior control class cannot authorize changed peer metadata at dispatch")
+        val fixture = host_parent_budget_fixture_v1()
+        val peers = peer_policy_fixture_v2(fixture.local.scope.service_scope_id, ["host-status"], fixture.local.root)
+        val owner = peer_gateway_fixture_v2(fixture.local, peers)
+        var request = peer_request_v2(peers.client_uid, "host-status")
+        expect(host_service_gateway_classify_v2(owner, request).unwrap()).to_equal(HostServiceDispatchClassV2.ControlRead)
+        request.peer_uid = peers.service_uid
+        val rejected = host_service_gateway_callback_v2(owner, request)
+        expect(peer_fields_v2(rejected.response.payload)["error"]).to_equal(SdnValue.String("host-service-peer-service-uid-forbidden"))
+        expect(rejected.owner.domain.local.capacity.journal.sequence).to_equal(fixture.local.capacity.journal.sequence)
+        val source = read_file_text_result("src/lib/nogc_sync_mut/orchestration/host_service_gateway_v2.spl").unwrap()
+        val classifier = source.split("pub fn host_service_gateway_classify_v2")[1].split("pub fn host_service_gateway_callback_v2")[0]
+        expect(classifier.contains("host_gateway_mapped_request_v2(owner, incoming)?")).to_equal(true)
+        for forbidden in ["host_service_domain_mapped_turn_v2", "distributed_operation_journal", "simple_container_",
+                "host_prepare_request_decode", "host_parent_budget_record_decode", "LocalGatewayResponseV1", "local_gateway_publish"]:
+            expect(classifier.contains(forbidden)).to_equal(false)
+        val callback = source.split("pub fn host_service_gateway_callback_v2")[1].split("pub fn host_service_gateway_turn_v2")[0]
+        expect(callback.contains("host_gateway_mapped_request_v2(owner, incoming)")).to_equal(true)
+        expect(callback.contains("domain: turn.owner")).to_equal(true)
+        host_parent_budget_fixture_close_v1(fixture)

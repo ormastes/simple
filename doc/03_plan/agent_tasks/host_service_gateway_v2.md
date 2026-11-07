@@ -15,3 +15,10 @@ Final source/spec/manual reviewer: `/root/astra_host`. Merge owner: `/root`.
 Peer-policy loader, gateway adapter and mapped domain consumer must integrate
 together. Data-only mappings are not UID authority. Native readiness, owned
 cleanup faults, response-send failures and async control progress remain NOT_RUN.
+
+Separate classifier delta: this lane owns only the shared Host mapped-request
+validator, ControlRead/Work classification, verbatim domain scope-check
+extraction and focused prevention cases/docs. Daemon owns actual receive-ready,
+one-use dispatch/publication and loop scheduling. Consume new SDK split ports
+only after their immutable dependency exists; do not infer authority from raw
+action strings or invent an accepted effect queue.

@@ -12,6 +12,14 @@ pub struct HostServiceGatewayV2:
     domain: HostServiceDomainV2
     peers: HostServicePeerPolicySnapshotV2
 
+pub enum HostServiceDispatchClassV2:
+    ControlRead
+    Work
+
+struct HostServiceMappedRequestV2:
+    request: HostServiceRequestV2
+    peer: HostServiceMappedPeerV2
+
 pub enum HostServiceGatewayOpenV2:
     Ready(HostServiceGatewayV2)
     Rejected(text)
@@ -50,25 +58,49 @@ fn host_gateway_rejected_v2(owner: HostServiceGatewayV2, incoming: LocalGatewayR
     LocalGatewayOwnedResponseV1(owner: owner, response: LocalGatewayResponseV1(request_id: incoming.request_id,
         exit_code: 1, payload: host_service_error_payload_v2(request, reason, false)))
 
-pub fn host_service_gateway_callback_v2(owner: HostServiceGatewayV2,
-        incoming: LocalGatewayRequestV1) -> LocalGatewayOwnedResponseV1<HostServiceGatewayV2>:
+fn host_gateway_mapped_request_v2(owner: HostServiceGatewayV2,
+        incoming: LocalGatewayRequestV1) -> Result<HostServiceMappedRequestV2, text>:
     val request = HostServiceRequestV2(action: incoming.action, operation_id: incoming.operation_id, payload: incoming.payload)
     if owner.peers.protected_root != owner.domain.local.root:
-        return host_gateway_rejected_v2(owner, incoming, request, "host-service-peer-root-mismatch")
+        return Err("host-service-peer-root-mismatch")
     # This is the actual SDK peer UID; no identity in payload can replace it.
     if incoming.peer_uid == owner.peers.service_uid:
-        return host_gateway_rejected_v2(owner, incoming, request, "host-service-peer-service-uid-forbidden")
+        return Err("host-service-peer-service-uid-forbidden")
     var selected: Option<HostServicePeerRuleV2> = nil
     for rule in owner.peers.policy.rules:
         if rule.peer_uid == incoming.peer_uid:
-            if selected.is_some(): return host_gateway_rejected_v2(owner, incoming, request, "host-service-peer-policy-duplicate")
+            if selected.is_some(): return Err("host-service-peer-policy-duplicate")
             selected = Some(rule)
-    if selected.is_none(): return host_gateway_rejected_v2(owner, incoming, request, "host-service-peer-uid-unmapped")
+    if selected.is_none(): return Err("host-service-peer-uid-unmapped")
     val rule = selected.unwrap()
     if not rule.actions.contains(incoming.action):
-        return host_gateway_rejected_v2(owner, incoming, request, "host-service-peer-action-forbidden")
+        return Err("host-service-peer-action-forbidden")
     val peer = HostServiceMappedPeerV2(principal: rule.principal, project: rule.project, service_scope_id: rule.service_scope_id)
-    val turn = host_service_domain_mapped_turn_v2(owner.domain, request, peer)
+    val scope_error = host_service_mapped_peer_error_v2(owner.domain, peer)
+    if scope_error != "": return Err(scope_error)
+    val shape_error = host_service_request_error_v2(request)
+    if shape_error != "": return Err(shape_error)
+    Ok(HostServiceMappedRequestV2(request: request, peer: peer))
+
+# Scheduling classification only after the installed peer/action/scope gates.
+# Caller passes actual SDK receive-ready metadata. This does not decode/verify
+# signed packets, touch a journal/provider, accept work or publish a response.
+pub fn host_service_gateway_classify_v2(owner: HostServiceGatewayV2,
+        incoming: LocalGatewayRequestV1) -> Result<HostServiceDispatchClassV2, text>:
+    val mapped = host_gateway_mapped_request_v2(owner, incoming)?
+    if host_service_effect_action_v2(mapped.request.action): return Err("host-service-effect-dispatch-required")
+    if mapped.request.action == "host-status": return Ok(HostServiceDispatchClassV2.ControlRead)
+    Ok(HostServiceDispatchClassV2.Work)
+
+pub fn host_service_gateway_callback_v2(owner: HostServiceGatewayV2,
+        incoming: LocalGatewayRequestV1) -> LocalGatewayOwnedResponseV1<HostServiceGatewayV2>:
+    # Revalidate at dispatch; a prior classification is never an admission or a
+    # capability to skip same-decoded subject checks and fresh SDK verification.
+    val mapped = host_gateway_mapped_request_v2(owner, incoming)
+    if mapped.is_err():
+        val request = HostServiceRequestV2(action: incoming.action, operation_id: incoming.operation_id, payload: incoming.payload)
+        return host_gateway_rejected_v2(owner, incoming, request, mapped.unwrap_err())
+    val turn = host_service_domain_mapped_turn_v2(owner.domain, mapped.unwrap().request, mapped.unwrap().peer)
     # Retain the complete returned owner BEFORE response validation or send in
     # the SDK. A publication error never rolls the journal back to this input.
     val current = HostServiceGatewayV2(domain: turn.owner, peers: owner.peers)
