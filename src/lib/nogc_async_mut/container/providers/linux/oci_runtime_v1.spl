@@ -7,6 +7,10 @@
 # probe.  This module does not install tools, change uid maps, change kernel
 # policy, or infer capability from an engine name.
 
+pub use std.nogc_async_mut.container.providers.linux.engine_policy_v1.{LinuxOciEnginePolicyV1, LinuxOciEngineObservationV1}
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.{linux_oci_engine_policy_error_v1,
+    linux_oci_engine_observation_match_v1, linux_oci_engine_route_v1}
+use std.nogc_async_mut.container.providers.linux.engine_observer_v1.linux_oci_engine_observe_v1
 use std.common.contracts.container.command_v1.oci_command_parts_v1
 pub use std.nogc_async_mut.container.providers.linux.request_v1.LinuxOciRequestV1
 use std.nogc_async_mut.container.providers.linux.request_v1.{linux_oci_request_bounds_v1, linux_oci_request_digest_v1}
@@ -85,6 +89,9 @@ pub class LinuxOciRuntimeProviderV1:
     timeout_ms: i64
     live_enabled: bool
     scripted: bool
+    engine_policy: LinuxOciEnginePolicyV1?
+    engine_baseline: LinuxOciEngineObservationV1?
+    scripted_engine_observation: LinuxOciEngineObservationV1?
     # Explicit fixture opt-in: exact scripted effects with real owned journals.
     # Production constructors leave this false; live execution always journals.
     persist_scripted_journal: bool
@@ -106,9 +113,63 @@ impl LinuxOciRuntimeProviderV1:
             state_dir: state_dir, node_boot_id: node_boot_id,
             provider_generation: provider_generation,
             timeout_ms: effective_timeout, live_enabled: live_enabled,
-            scripted: false, persist_scripted_journal: false, scripted_results: [], intents: [], request_bindings: {}, states: [],
+            scripted: false, engine_policy: nil, engine_baseline: nil, scripted_engine_observation: nil, persist_scripted_journal: false, scripted_results: [], intents: [], request_bindings: {}, states: [],
             operation_sequence: 0, scripted_cursor: 0, executor_calls: 0)
         provider
+
+    pub static fn new_with_engine_policy(platform: text, engine: text, state_dir: text,
+            node_boot_id: text, provider_generation: i64, policy: LinuxOciEnginePolicyV1,
+            live_enabled: bool = true,
+            timeout_ms: i64 = OCI_DEFAULT_TIMEOUT_MS) -> Result<LinuxOciRuntimeProviderV1, text>:
+        val error = linux_oci_engine_policy_error_v1(policy)
+        if error != "": return Err(error)
+        if platform != "linux" or engine != OCI_ENGINE_PODMAN:
+            return Err("engine-policy-linux-podman-required")
+        if not live_enabled: return Err("engine-policy-live-observation-required")
+        if timeout_ms <= 0: return Err("engine-policy-timeout-invalid")
+        val provider = LinuxOciRuntimeProviderV1.new(platform, engine, state_dir,
+            node_boot_id, provider_generation, true, timeout_ms)
+        val config = provider.validate_probe_config()
+        if not config.accepted: return Err(config.reason)
+        val observed = linux_oci_engine_observe_v1(policy, if timeout_ms > 5000: 5000 else: timeout_ms)?
+        provider.engine_policy = Some(policy)
+        provider.engine_baseline = Some(observed)
+        Ok(provider)
+
+    # Explicit typed fixture injection; production construction never selects it.
+    pub static fn scripted_with_engine_policy(platform: text, engine: text, state_dir: text,
+            node_boot_id: text, provider_generation: i64, policy: LinuxOciEnginePolicyV1,
+            baseline: LinuxOciEngineObservationV1, current: LinuxOciEngineObservationV1,
+            results: [ScriptedCommandResultV1],
+            timeout_ms: i64 = OCI_DEFAULT_TIMEOUT_MS) -> Result<LinuxOciRuntimeProviderV1, text>:
+        val error = linux_oci_engine_policy_error_v1(policy)
+        if error != "": return Err(error)
+        if platform != "linux" or engine != OCI_ENGINE_PODMAN:
+            return Err("engine-policy-linux-podman-required")
+        val valid = linux_oci_engine_observation_match_v1(policy, baseline)?
+        val provider = LinuxOciRuntimeProviderV1.scripted(platform, engine, state_dir,
+            node_boot_id, provider_generation, results, timeout_ms)
+        provider.engine_policy = Some(policy)
+        provider.engine_baseline = Some(baseline)
+        provider.scripted_engine_observation = Some(current)
+        Ok(provider)
+
+    pub fn engine_observation_v1() -> Result<LinuxOciEngineObservationV1, text>:
+        val policy = match self.engine_policy:
+            case Some(value): value
+            case nil: return Err("engine-policy-required")
+        val baseline = match self.engine_baseline:
+            case Some(value): value
+            case nil: return Err("engine-observation-baseline-required")
+        val observed = if self.scripted:
+            match self.scripted_engine_observation:
+                case Some(value): value
+                case nil: return Err("engine-scripted-observation-required")
+        else:
+            linux_oci_engine_observe_v1(policy, if self.timeout_ms > 5000: 5000 else: self.timeout_ms)?
+        val valid = linux_oci_engine_observation_match_v1(policy, observed)?
+        if observed.identity_digest != baseline.identity_digest: return Err("engine-observation-identity-changed")
+        Ok(observed)
 
     # A deterministic executor seam for contract tests.  Each result is
     # matched by operation, program, and exact argv; an unmatched command is
@@ -122,7 +183,7 @@ impl LinuxOciRuntimeProviderV1:
         LinuxOciRuntimeProviderV1(platform: platform, engine: engine,
             state_dir: state_dir, node_boot_id: node_boot_id,
             provider_generation: provider_generation,
-            timeout_ms: effective_timeout, live_enabled: true, scripted: true, persist_scripted_journal: persist_scripted_journal,
+            timeout_ms: effective_timeout, live_enabled: true, scripted: true, engine_policy: nil, engine_baseline: nil, scripted_engine_observation: nil, persist_scripted_journal: persist_scripted_journal,
             scripted_results: _bounded_scripted_results(results), intents: [], request_bindings: {}, states: [],
             operation_sequence: 0, scripted_cursor: 0, executor_calls: 0)
 
@@ -136,7 +197,7 @@ impl LinuxOciRuntimeProviderV1:
         LinuxOciRuntimeProviderV1(platform: platform, engine: engine,
             state_dir: state_dir, node_boot_id: node_boot_id,
             provider_generation: provider_generation,
-            timeout_ms: effective_timeout, live_enabled: true, scripted: true, persist_scripted_journal: persist_scripted_journal,
+            timeout_ms: effective_timeout, live_enabled: true, scripted: true, engine_policy: nil, engine_baseline: nil, scripted_engine_observation: nil, persist_scripted_journal: persist_scripted_journal,
             scripted_results: _bounded_scripted_results(results),
             intents: _bounded_intents(intents), request_bindings: {}, states: [],
             operation_sequence: 0, scripted_cursor: 0, executor_calls: 0)
@@ -166,6 +227,22 @@ impl LinuxOciRuntimeProviderV1:
             return RuntimeProbeV1(provider: "linux-oci-v1", engine: self.engine,
                 engine_present: false, healthy: false, launch_capable: false,
                 privilege: RUNTIME_PRIVILEGE_UNKNOWN, reason: valid.reason)
+        if self.engine_policy.?:
+            val observed = match self.engine_observation_v1():
+                case Ok(value): value
+                case Err(reason):
+                    return RuntimeProbeV1(provider: "linux-oci-v1", engine: self.engine,
+                        engine_present: false, healthy: false, launch_capable: false,
+                        privilege: RUNTIME_PRIVILEGE_UNKNOWN, reason: reason)
+            val capability = rootless_capability_error(_rootless_capability_evidence(observed.uid.to_text()))
+            if capability != "":
+                return RuntimeProbeV1(provider: "linux-oci-v1", engine: self.engine,
+                    engine_present: true, healthy: true, launch_capable: false,
+                    privilege: RUNTIME_PRIVILEGE_UNKNOWN, reason: capability)
+            return RuntimeProbeV1(provider: "linux-oci-v1", engine: self.engine,
+                engine_present: true, healthy: true, launch_capable: true,
+                privilege: RUNTIME_PRIVILEGE_ROOTLESS,
+                reason: "trusted-admin mutable-path observation matched; not sealed")
         if self.scripted:
             return RuntimeProbeV1(provider: "linux-oci-v1", engine: self.engine,
                 engine_present: true, healthy: true, launch_capable: true,
@@ -419,7 +496,7 @@ impl LinuxOciRuntimeProviderV1:
         if not run.matched:
             return self._create_failure_with_recovery(request,
                 self._rejected_with_output("create", current, command.1,
-                    "scripted-command-not-found", run.stdout, run.stderr, run.exit_code))
+                    self._execution_failure_reason_v1(run, "scripted-command-not-found"), run.stdout, run.stderr, run.exit_code))
         if run.exit_code != 0:
             return self._create_failure_with_recovery(request,
                 self._rejected_with_output("create", current, command.1,
@@ -470,7 +547,7 @@ impl LinuxOciRuntimeProviderV1:
         val run = self._execute(command.1)
         if not run.matched:
             return self._rejected_with_output("start", current, command.1,
-                "scripted-command-not-found", run.stdout, run.stderr, run.exit_code)
+                self._execution_failure_reason_v1(run, "scripted-command-not-found"), run.stdout, run.stderr, run.exit_code)
         if run.exit_code != 0:
             return self._rejected_with_output("start", current, command.1,
                 "native-start-failed", run.stdout, run.stderr, run.exit_code)
@@ -497,7 +574,7 @@ impl LinuxOciRuntimeProviderV1:
         val run = self._execute(command.1)
         if not run.matched:
             return self._rejected_with_output("inspect", current, command.1,
-                "scripted-command-not-found", run.stdout, run.stderr, run.exit_code)
+                self._execution_failure_reason_v1(run, "scripted-command-not-found"), run.stdout, run.stderr, run.exit_code)
         if run.exit_code != 0:
             return self._rejected_with_output("inspect", current, command.1,
                 "native-inspect-failed", run.stdout, run.stderr, run.exit_code)
@@ -534,7 +611,7 @@ impl LinuxOciRuntimeProviderV1:
         val run = self._execute(command.1)
         if not run.matched:
             return self._rejected_with_output("wait", current, command.1,
-                "scripted-command-not-found", run.stdout, run.stderr, run.exit_code)
+                self._execution_failure_reason_v1(run, "scripted-command-not-found"), run.stdout, run.stderr, run.exit_code)
         if run.exit_code != 0:
             return self._rejected_with_output("wait", current, command.1,
                 "native-wait-failed", run.stdout, run.stderr, run.exit_code)
@@ -567,12 +644,12 @@ impl LinuxOciRuntimeProviderV1:
         val run = self._execute(command.1)
         if not run.matched:
             return self._rejected_with_output("logs", current, command.1,
-                "scripted-command-not-found", run.stdout, run.stderr, run.exit_code)
+                self._execution_failure_reason_v1(run, "scripted-command-not-found"), run.stdout, run.stderr, run.exit_code)
         if run.exit_code != 0:
             return self._rejected_with_output("logs", current, command.1,
                 "native-logs-failed", run.stdout, run.stderr, run.exit_code)
         RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: "logs",
-            command: command.1, state: current, exit_code: current.exit_code,
+            command: self._receipt_command_v1(command.1), state: current, exit_code: current.exit_code,
             stdout: run.stdout, stderr: run.stderr, reason: "observed")
 
     me stop(request: LinuxOciRequestV1) -> RuntimeOperationV1:
@@ -598,7 +675,7 @@ impl LinuxOciRuntimeProviderV1:
         val run = self._execute(command.1)
         if not run.matched:
             return self._rejected_with_output("stop", current, command.1,
-                "scripted-command-not-found", run.stdout, run.stderr, run.exit_code)
+                self._execution_failure_reason_v1(run, "scripted-command-not-found"), run.stdout, run.stderr, run.exit_code)
         if run.exit_code != 0:
             return self._rejected_with_output("stop", current, command.1,
                 "native-stop-failed", run.stdout, run.stderr, run.exit_code)
@@ -666,7 +743,7 @@ impl LinuxOciRuntimeProviderV1:
         val run = self._execute(command.1)
         if not run.matched:
             return self._rejected_with_output("destroy", current, command.1,
-                "scripted-command-not-found", run.stdout, run.stderr, run.exit_code)
+                self._execution_failure_reason_v1(run, "scripted-command-not-found"), run.stdout, run.stderr, run.exit_code)
         if run.exit_code != 0:
             return self._rejected_with_output("destroy", current, command.1,
                 "native-destroy-failed", run.stdout, run.stderr, run.exit_code)
@@ -749,7 +826,7 @@ impl LinuxOciRuntimeProviderV1:
         val run = self._execute(command.1)
         if not run.matched:
             return self._rejected_with_output("recover", current, command.1,
-                "scripted-command-not-found", run.stdout, run.stderr, run.exit_code)
+                self._execution_failure_reason_v1(run, "scripted-command-not-found"), run.stdout, run.stderr, run.exit_code)
         if run.exit_code != 0:
             if native_inspect_definitively_not_found(self.engine, run.exit_code,
                     run.stderr):
@@ -1201,16 +1278,40 @@ impl LinuxOciRuntimeProviderV1:
         false
 
 
+    fn _execution_failure_reason_v1(run: RuntimeExecResultV1, fallback: text) -> text:
+        if self.engine_policy.? and not run.matched and run.stderr != "":
+            return "engine-policy-refused: " + run.stderr
+        fallback
+
+    fn _receipt_command_v1(command: RuntimeCommandV1) -> RuntimeCommandV1:
+        if command.program == "" or command.program != self.engine: return command
+        if not self.engine_policy.?: return command
+        val policy = self.engine_policy.unwrap()
+        match linux_oci_engine_route_v1(policy, command.args):
+            case Ok(arguments): RuntimeCommandV1(operation: command.operation,
+                program: policy.executable_path, args: arguments)
+            case Err(_): runtime_command_empty()
+
     fn _execute(command: RuntimeCommandV1) -> RuntimeExecResultV1:
         self.executor_calls = self.executor_calls + 1
+        var routed = command
+        if self.engine_policy.?:
+            val observed = match self.engine_observation_v1():
+                case Ok(value): value
+                case Err(reason): return RuntimeExecResultV1(stdout: "", stderr: reason, exit_code: -1, matched: false)
+            val policy = self.engine_policy.unwrap()
+            routed.program = policy.executable_path
+            routed.args = match linux_oci_engine_route_v1(policy, command.args):
+                case Ok(value): value
+                case Err(reason): return RuntimeExecResultV1(stdout: "", stderr: reason, exit_code: -1, matched: false)
         if self.scripted:
             if self.scripted_cursor >= self.scripted_results.len():
                 return RuntimeExecResultV1(stdout: "", stderr: "scripted-command-not-found",
                     exit_code: -1, matched: false)
             val scripted = self.scripted_results[self.scripted_cursor]
             if scripted.operation == command.operation and
-                    scripted.program == command.program and
-                    _args_equal(scripted.args, command.args):
+                    scripted.program == routed.program and
+                    _args_equal(scripted.args, routed.args):
                 self.scripted_cursor = self.scripted_cursor + 1
                 if scripted.stdout.len() > OCI_MAX_OUTPUT_BYTES or
                         scripted.stderr.len() > OCI_MAX_OUTPUT_BYTES:
@@ -1224,7 +1325,7 @@ impl LinuxOciRuntimeProviderV1:
         if not self.live_enabled:
             return RuntimeExecResultV1(stdout: "", stderr: OCI_REASON_PROVIDER_UNAVAILABLE,
                 exit_code: -1, matched: false)
-        val run = process_run_bounded(command.program, command.args, self.timeout_ms,
+        val run = process_run_bounded(routed.program, routed.args, self.timeout_ms,
             OCI_MAX_OUTPUT_BYTES)
         RuntimeExecResultV1(stdout: run.0, stderr: run.1,
             exit_code: run.2.to_i64(), matched: true)
@@ -1273,26 +1374,26 @@ impl LinuxOciRuntimeProviderV1:
     fn _ok(operation: text, state: RuntimeStateV1,
             command: RuntimeCommandV1, reason: text) -> RuntimeOperationV1:
         RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: operation,
-            command: command, state: state, exit_code: state.exit_code,
+            command: self._receipt_command_v1(command), state: state, exit_code: state.exit_code,
             stdout: "", stderr: "", reason: reason)
 
     fn _blocked(operation: text, reason: text,
             command: RuntimeCommandV1) -> RuntimeOperationV1:
         RuntimeOperationV1(status: RUNTIME_STATUS_BLOCKED, operation: operation,
-            command: command, state: runtime_state_empty(), exit_code: -1,
+            command: self._receipt_command_v1(command), state: runtime_state_empty(), exit_code: -1,
             stdout: "", stderr: "", reason: reason)
 
     fn _rejected(operation: text, reason: text,
             command: RuntimeCommandV1) -> RuntimeOperationV1:
         RuntimeOperationV1(status: RUNTIME_STATUS_REJECTED, operation: operation,
-            command: command, state: runtime_state_empty(), exit_code: -1,
+            command: self._receipt_command_v1(command), state: runtime_state_empty(), exit_code: -1,
             stdout: "", stderr: "", reason: reason)
 
     fn _rejected_with_output(operation: text, state: RuntimeStateV1,
             command: RuntimeCommandV1, reason: text, stdout: text, stderr: text,
             exit_code: i64) -> RuntimeOperationV1:
         RuntimeOperationV1(status: RUNTIME_STATUS_REJECTED, operation: operation,
-            command: command, state: state, exit_code: exit_code,
+            command: self._receipt_command_v1(command), state: state, exit_code: exit_code,
             stdout: stdout, stderr: stderr, reason: reason)
 
 impl RuntimeProviderV1 for LinuxOciRuntimeProviderV1:
@@ -1405,11 +1506,18 @@ fn _effective_cgroup_dir(content: text) -> text:
             return "/sys/fs/cgroup/" + relative
     ""
 
-fn _rootless_capability_evidence() -> RootlessCapabilityEvidenceV1:
-    val uid_result = process_run_timeout("id", ["-u"], 5000)
-    val uid = if uid_result.2.to_i64() == 0 then uid_result.0.trim() else ""
-    val username_result = process_run_timeout("id", ["-un"], 5000)
-    val username = if username_result.2.to_i64() == 0 then username_result.0.trim() else ""
+fn _rootless_capability_evidence(observed_uid: text = "") -> RootlessCapabilityEvidenceV1:
+    var uid = observed_uid
+    var username = ""
+    if observed_uid == "":
+        val uid_result = process_run_timeout("id", ["-u"], 5000)
+        uid = if uid_result.2.to_i64() == 0 then uid_result.0.trim() else ""
+        val username_result = process_run_timeout("id", ["-un"], 5000)
+        username = if username_result.2.to_i64() == 0 then username_result.0.trim() else ""
+    else:
+        for line in _read_probe_file("/etc/passwd").split("\n"):
+            val fields = line.split(":")
+            if fields.len() == 7 and fields[2] == uid: username = fields[0]
     val cgroup_dir = _effective_cgroup_dir(_read_probe_file("/proc/self/cgroup"))
     RootlessCapabilityEvidenceV1(uid: uid, username: username,
         uid_map: _read_probe_file("/proc/self/uid_map"),
