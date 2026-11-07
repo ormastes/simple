@@ -7,6 +7,8 @@ Exact commands, compiler/binary hashes and unchanged before/after hashes for 15
 source inputs are in `local_ipc_v1_native_evidence.sdn`; captured output is in
 `local_ipc_v1_native_stdout.txt`. This inventory is the explicit translation
 units and included owner boundary, not a full system dependency closure.
+That PASS predates the fork-origin correction and remains historical; it does
+not qualify the subsequently changed native header.
 
 The Simple cases check lexical rejection before connect, owner retention on
 invalid IO/close/admission input, and stale-token versus EOF behavior. Platforms
@@ -35,3 +37,12 @@ The reviewed private recipe used `taskset -c 0-4`, a 120-second build deadline,
 one 15-second run and a private TMPDIR. Build took 2.206 seconds and run took
 0.202 seconds; peak allocated artifact storage was 2,588,672 bytes against a
 128 MiB cap. Preserve the evidence; do not repeat this passing run unchanged.
+
+The separate `src/runtime/test/local_unix_fork_origin_v1_selfcheck.c` is authored
+for the subsequent fork-safety correction and is **NOT_RUN**. It holds both parent
+registry and operation locks plus the actual runtime immortal-registry spinlock
+across fork, requires all five inherited-owner calls to return NULL without
+allocation, consuming bytes, connecting, writing or closing, then exercises
+the parent's retained connection. It also covers independent first use in a
+child forked before any owner existed. This is a new failure scenario, not a
+repeat of the historical passing IO fixture.

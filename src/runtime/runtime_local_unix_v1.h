@@ -14,6 +14,41 @@
 #include <sys/un.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <stdatomic.h>
+
+_Static_assert(ATOMIC_INT_LOCK_FREE == 2, "local Unix origin guard requires lock-free unsigned int atomics");
+_Static_assert(sizeof(pid_t) <= sizeof(unsigned int), "local Unix origin PID must fit unsigned int");
+static atomic_uint lu_process_origin_v1;
+static atomic_uint lu_process_origin_ready_v1;
+/* Immutable after release publication; ready acquire protects both plain fields. */
+static dev_t lu_origin_namespace_device_v1;
+static ino_t lu_origin_namespace_inode_v1;
+static int lu_namespace_v1(struct stat* observed) {
+    return stat("/proc/self/ns/pid",observed)==0;
+}
+/* Observe real PID+namespace before any owner lock/allocation. A virgin winner
+ * publishes an immutable pair. Other threads/processes never wait for an
+ * incomplete publication and never reset/reconstruct inherited registry state. */
+static int lu_origin_v1(void) {
+    struct stat namespace_identity;
+    pid_t observed=getpid();
+    if(observed<=0||!lu_namespace_v1(&namespace_identity))return 0;
+    unsigned int pid=(unsigned int)observed;
+    unsigned int origin=atomic_load_explicit(&lu_process_origin_v1,memory_order_acquire);
+    if(origin==0) {
+        unsigned int expected=0;
+        if(atomic_compare_exchange_strong_explicit(&lu_process_origin_v1,&expected,pid,
+                memory_order_acq_rel,memory_order_acquire)) {
+            lu_origin_namespace_device_v1=namespace_identity.st_dev;
+            lu_origin_namespace_inode_v1=namespace_identity.st_ino;
+            atomic_store_explicit(&lu_process_origin_ready_v1,1,memory_order_release);
+        }
+    }
+    if(atomic_load_explicit(&lu_process_origin_ready_v1,memory_order_acquire)!=1)return 0;
+    origin=atomic_load_explicit(&lu_process_origin_v1,memory_order_acquire);
+    return origin==pid&&lu_origin_namespace_device_v1==namespace_identity.st_dev&&
+        lu_origin_namespace_inode_v1==namespace_identity.st_ino;
+}
 
 #define LUV1_SLOTS 64
 /* CoreC signed immediate range: receipt words must never allocate after I/O. */
@@ -21,7 +56,9 @@
 #define LUV1_BYTES 65536
 #define LUV1_HORIZON 30000
 /* status: 0 success,1 timeout,-1 invalid,-2 stale,-3 syscall,-4 unsupported,
- * -5 capacity,-6 allocation,-7 concurrent operation busy,-8 admission expired,-9 ancillary rejected. */
+ * -5 capacity,-6 allocation,-7 concurrent operation busy,-8 admission expired,
+ * -9 ancillary rejected. Private gates use -10 for foreign origin; public
+ * array-returning entries refuse foreign origin with allocation-free NULL. */
 typedef struct LuSlotV1 { pthread_mutex_t operation; int64_t token; int fd; int active; } LuSlotV1;
 static LuSlotV1 lu_slots_v1[LUV1_SLOTS];
 static pthread_mutex_t lu_registry_v1=PTHREAD_MUTEX_INITIALIZER;
@@ -29,6 +66,7 @@ static pthread_once_t lu_once_v1=PTHREAD_ONCE_INIT;
 static int64_t lu_generation_v1=0;
 static int lu_initialized_v1=0;
 static void lu_init_v1(void) {
+    if(!lu_origin_v1())return;
     for(int i=0;i<LUV1_SLOTS;i++) {
         lu_slots_v1[i].fd=-1;
         if(pthread_mutex_init(&lu_slots_v1[i].operation,NULL)!=0)return;
@@ -61,6 +99,7 @@ static int lu_poll_v1(int fd,short events,int64_t deadline) {
 }
 static LuSlotV1* lu_lock_v1(int64_t token,int* status) {
     *status=-2;
+    if(!lu_origin_v1()){*status=-10;return NULL;}
     if(token<=0){*status=-1;return NULL;}
     if(pthread_once(&lu_once_v1,lu_init_v1)||!lu_initialized_v1){*status=-3;return NULL;}
     if(pthread_mutex_lock(&lu_registry_v1)){*status=-3;return NULL;}
@@ -73,6 +112,7 @@ static LuSlotV1* lu_lock_v1(int64_t token,int* status) {
     pthread_mutex_unlock(&lu_registry_v1);return result;
 }
 static int64_t lu_install_v1(int fd) {
+    if(!lu_origin_v1())return -10;
     if(pthread_once(&lu_once_v1,lu_init_v1)||!lu_initialized_v1)return -3;
     if(pthread_mutex_lock(&lu_registry_v1))return -3;
     int64_t token=-5;
@@ -122,7 +162,12 @@ static SplArray* lu_receipt_v1(int64_t count) {
 static void lu_word_v1(SplArray* a,int64_t index,int64_t value) {
     (void)rt_array_set(a,index,rt_value_int(value)); /* existing reserved index */
 }
+/* Foreign-process refusal is NULL before ANY generic runtime allocation,
+ * receipt decoding or owner gate. Caller must use a nullable-array ABI. */
 static SplArray* lu_connect_impl_v1(const char* path,int64_t bytes,int64_t expected_uid,int64_t deadline) {
+#if defined(__linux__)
+    if(!lu_origin_v1())return NULL;
+#endif
     SplArray* answer=lu_receipt_v1(7);if(!answer)return NULL;
 #if defined(__linux__)
     int status=expected_uid<0||expected_uid>UINT32_MAX?-1:lu_deadline_v1(deadline);
@@ -170,6 +215,9 @@ done:
     return answer;
 }
 static SplArray* lu_read_impl_v1(int64_t token,int64_t maximum,int64_t deadline) {
+#if defined(__linux__)
+    if(!lu_origin_v1())return NULL;
+#endif
     int valid=maximum>0&&maximum<=65536;
     SplArray* answer=lu_receipt_v1(valid?maximum+3:3);if(!answer)return NULL;
 #if defined(__linux__)
@@ -216,6 +264,9 @@ done:
 }
 static SplArray* lu_write_v1(int64_t token,SplArray* bytes,int64_t offset,int64_t maximum,
         int64_t deadline,int admitted,int64_t expiry) {
+#if defined(__linux__)
+    if(!lu_origin_v1())return NULL;
+#endif
     SplArray* answer=lu_receipt_v1(2);if(!answer)return NULL;
 #if defined(__linux__)
     int64_t length=bytes?rt_array_len(bytes):-1;
@@ -254,6 +305,9 @@ done:
     return answer;
 }
 static SplArray* lu_close_impl_v1(int64_t token) {
+#if defined(__linux__)
+    if(!lu_origin_v1())return NULL;
+#endif
     SplArray* answer=lu_receipt_v1(2);if(!answer)return NULL;
 #if defined(__linux__)
     int status;LuSlotV1* slot=lu_lock_v1(token,&status);

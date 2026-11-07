@@ -24,6 +24,23 @@ truncating the returned identity. Native read receipts reserve their entire
 `maximum+3` integer capacity before receive; only the reported count contains
 bytes, and unused capacity is zero padding.
 
+Every native entry first observes its PID and `/proc/self/ns/pid` device/inode,
+then checks a lock-free atomic process-origin latch. Namespace observation
+failure refuses the call. The first claimant publishes its immutable namespace
+pair with release/acquire readiness; concurrent readers refuse an incomplete
+publication instead of waiting or reading partial identity. PID alone is not
+sufficient because separate PID namespaces can each contain PID 1. Once
+the owner has been used, a fork child receives an absent native receipt before
+allocation, inherited registry/slot/initialization locks or socket effects.
+It cannot reset or reconstruct the registry. A fork before any owner use has an
+independent zero-initialized copy and may initialize it. CLOEXEC still governs
+descriptor disposal at exec; refusing a token does not itself close inherited
+raw descriptors. The nullable-array facade checks absence before decoding and
+returns `local_unix_native_receipt_unavailable`, retaining the supplied owner as
+unconfirmed. It does not invent a precise cause: allocation failure can also
+produce absence. Native foreign-process rejection performs no allocation; this
+is not a claim of general Simple allocator/thread safety after fork.
+
 Connect walks nofollow directory components from `/`, accepting root or the
 configured peer UID as owner. Writable ancestors are rejected except root-owned
 sticky ancestors before the final parent. The final parent must not permit
@@ -92,6 +109,17 @@ positive result or native descriptor-transfer result is claimed. CPU use was
 restricted to cores 0–4; peak artifact storage was 2,588,672 bytes. Further native
 verification requires a new finite allocation. Prior passing pipe harnesses
 were not repeated.
+
+Independent review subsequently found that the first checkpoint lacked the
+process-origin fence above. Its original PASS remains historical. The correction
+has a separate focused `local_unix_fork_origin_v1_selfcheck.c`: both parent owner
+locks and the real runtime immortal-registry spinlock are held across fork;
+all five child operations must return NULL without allocation or side
+effects while the parent retains its queued bytes and working connection. A
+separate virgin-registry fork tests first-use behavior. This new case is NOT_RUN
+pending independent source review and the allocated serialized check.
+The fixture observes the actual unchanged namespace identity; namespace-changing
+and PID-collision execution scenarios are NOT_RUN and require separate evidence.
 
 Linux contracts: [Unix sockets](https://man7.org/linux/man-pages/man7/unix.7.html)
 and [recvmsg](https://man7.org/linux/man-pages/man2/recvmsg.2.html). These describe
