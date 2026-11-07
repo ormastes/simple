@@ -112,13 +112,13 @@ extern fn rt_process_observation_v4_start_value(binding: [u8]) -> ([u8], [u8], [
 @unsafe(reason: "native exact pinned V4 process start", capabilities: [ffi])
 extern fn rt_process_observation_v4_start_pinned_value(exec_handle: i64, cwd_handle: i64, binding: [u8]) -> ([u8], [u8], [u8], [i64])
 @unsafe(reason: "native V4 process observation poll", capabilities: [ffi])
-extern fn rt_process_observation_v4_poll_value(ticket: [i64], caller_wait_ns: i64) -> ([u8], [u8], [u8], [i64])
+extern fn rt_process_observation_v4_poll_value(ticket: [i64], caller_wait_ns: i64) -> ([u8], [u8], [u8], [i64])?
 @unsafe(reason: "native V4 absolute-deadline cancellation", capabilities: [ffi])
-extern fn rt_process_observation_v4_cancel_value(ticket: [i64], caller_wait_ns: i64) -> ([u8], [u8], [u8], [i64])
+extern fn rt_process_observation_v4_cancel_value(ticket: [i64], caller_wait_ns: i64) -> ([u8], [u8], [u8], [i64])?
 @unsafe(reason: "native V4 two-phase frozen collection", capabilities: [ffi])
-extern fn rt_process_observation_v4_collect_value(ticket: [i64], caller_wait_ns: i64) -> ([u8], [u8], [u8], [i64])
+extern fn rt_process_observation_v4_collect_value(ticket: [i64], caller_wait_ns: i64) -> ([u8], [u8], [u8], [i64])?
 @unsafe(reason: "native V4 exact frozen digest acknowledgement", capabilities: [ffi])
-extern fn rt_process_observation_v4_ack_collect_value(ticket: [i64], digest: [u8]) -> ([u8], [u8], [u8], [i64])
+extern fn rt_process_observation_v4_ack_collect_value(ticket: [i64], digest: [u8]) -> ([u8], [u8], [u8], [i64])?
 @unsafe(reason: "native exact pinned inspection start copies and binds stdin before spawn", capabilities: [ffi])
 extern fn rt_process_inspection_v1_start_pinned_value(exec_handle: i64, cwd_handle: i64, binding: [u8], input: [u8], expected_digest: [u8]) -> ([u8], [u8], [u8], [i64])
 @unsafe(reason: "native same-ticket input delivery and digest receipt", capabilities: [ffi])
@@ -1244,8 +1244,11 @@ pub class ProcessObservationLeaseV4:
     pub fn poll(self, caller_wait_ns: i64) -> Result<ProcessObservationReceiptV4, text>:
         if not self.active or self.acknowledged:
             return Err("process observation V4 lease is inactive")
-        val (stdout, stderr, binding, words) = unsafe(capabilities: [ffi]):
+        val wire = unsafe(capabilities: [ffi]):
             rt_process_observation_v4_poll_value(self.ticket, caller_wait_ns)
+        val (stdout, stderr, binding, words) = match wire:
+            case Some(value): value
+            case nil: return Err("process observation unavailable; lease retained")
         val receipt = decode_process_observation_v4(ProcessObservationWireV4(
             words: words, stdout: stdout, stderr: stderr, binding: binding))?
         if not self.receipt_matches_ticket(receipt.packet):
@@ -1255,8 +1258,11 @@ pub class ProcessObservationLeaseV4:
     pub fn cancel(self, caller_wait_ns: i64) -> Result<ProcessObservationReceiptV4, text>:
         if not self.active or self.acknowledged:
             return Err("process observation V4 lease is inactive")
-        val (stdout, stderr, binding, words) = unsafe(capabilities: [ffi]):
+        val wire = unsafe(capabilities: [ffi]):
             rt_process_observation_v4_cancel_value(self.ticket, caller_wait_ns)
+        val (stdout, stderr, binding, words) = match wire:
+            case Some(value): value
+            case nil: return Err("process observation unavailable; lease retained")
         val receipt = decode_process_observation_v4(ProcessObservationWireV4(
             words: words, stdout: stdout, stderr: stderr, binding: binding))?
         if not self.receipt_matches_ticket(receipt.packet):
@@ -1266,8 +1272,11 @@ pub class ProcessObservationLeaseV4:
     me fn collect(self, caller_wait_ns: i64) -> Result<ProcessObservationReceiptV4, text>:
         if not self.active or self.acknowledged:
             return Err("process observation V4 lease is inactive")
-        val (stdout, stderr, binding, words) = unsafe(capabilities: [ffi]):
+        val wire = unsafe(capabilities: [ffi]):
             rt_process_observation_v4_collect_value(self.ticket, caller_wait_ns)
+        val (stdout, stderr, binding, words) = match wire:
+            case Some(value): value
+            case nil: return Err("process observation unavailable; lease retained")
         val receipt = decode_process_observation_v4(ProcessObservationWireV4(
             words: words, stdout: stdout, stderr: stderr, binding: binding))?
         if not self.receipt_matches_ticket(receipt.packet):
@@ -1286,9 +1295,12 @@ pub class ProcessObservationLeaseV4:
                 frozen_receipt.packet.packet_kind != ProcessObservationPacketKindV4.Frozen or
                 not self.receipt_matches_ticket(frozen_receipt.packet):
             return Err("process observation V4 lease has no unacknowledged frozen snapshot")
-        val (stdout, stderr, binding, words) = unsafe(capabilities: [ffi]):
+        val wire = unsafe(capabilities: [ffi]):
             rt_process_observation_v4_ack_collect_value(
                 self.ticket, frozen_receipt.binding_digest)
+        val (stdout, stderr, binding, words) = match wire:
+            case Some(value): value
+            case nil: return Err("process observation unavailable; lease retained")
         val receipt = decode_process_observation_v4(ProcessObservationWireV4(
             words: words, stdout: stdout, stderr: stderr, binding: binding))?
         if receipt.packet.packet_kind != ProcessObservationPacketKindV4.Ack or
@@ -1310,9 +1322,12 @@ pub class ProcessObservationLeaseV4:
                 cleanup_receipt.binding_digest.len() != PROCESS_OBSERVATION_V4_DIGEST_BYTES or
                 not self.receipt_matches_ticket(cleanup_receipt.packet):
             return Err("process observation V4 lease has no cleanup snapshot to acknowledge")
-        val (stdout, stderr, returned_binding, words) = unsafe(capabilities: [ffi]):
+        val wire = unsafe(capabilities: [ffi]):
             rt_process_observation_v4_ack_collect_value(
                 self.ticket, cleanup_receipt.binding_digest)
+        val (stdout, stderr, returned_binding, words) = match wire:
+            case Some(value): value
+            case nil: return Err("process observation unavailable; lease retained")
         val receipt = decode_process_observation_v4(ProcessObservationWireV4(
             words: words, stdout: stdout, stderr: stderr,
             binding: returned_binding))?
@@ -1325,6 +1340,7 @@ pub class ProcessObservationLeaseV4:
         self.active = false
         Ok(receipt)
 
+
 # The reservation, not a decoded receipt or PID, owns every post-start outcome.
 # Pins remain retained until confirm_release succeeds; close failures remain
 # on the original pin objects and must be retried by their owner.
@@ -1333,6 +1349,15 @@ pub const PROCESS_OBSERVATION_RESERVED_ATTEMPTING_V4: i64 = 2
 pub const PROCESS_OBSERVATION_RESERVED_NO_CHILD_V4: i64 = 3
 pub const PROCESS_OBSERVATION_RESERVED_OWNED_V4: i64 = 4
 pub const PROCESS_OBSERVATION_RESERVED_ACKED_V4: i64 = 5
+
+pub use std.common.process.launch_progress_v6.{ProcessLaunchProgressV6, PROCESS_RESERVATION_LAUNCH_PENDING_V6}
+use std.common.process.launch_progress_v6.process_launch_progress_decode_v6
+
+@unsafe(reason: "Linux-only same-reservation deferred ptrace launch; scalar progress, no pending V4 receipt", capabilities: [ffi])
+extern fn rt_process_observation_v6_reserved_start_deferred_admitted_value(token: i64, executable: i64,
+    cwd: i64, binding: [u8], expires_at_unix_ms: i64) -> i64
+@unsafe(reason: "same submitting thread; one zero-wait pending trace/error/cleanup step", capabilities: [ffi])
+extern fn rt_process_observation_v6_reserved_poll_launch_value(token: i64, retire: i64) -> i64
 
 pub class ProcessObservationReservationV4:
     token: i64
@@ -1382,6 +1407,29 @@ pub class ProcessObservationReservationV4:
         if value < 0:
             return Err("process reservation admission refused; retain owner and query state: {value}")
         Ok(value)
+
+    # Additive Linux-only path. Preparation/encoding/pin validation still run
+    # synchronously; only exec-proof progression is deferred. No owner escapes.
+    pub me fn start_deferred_admitted_v6(self, request: ProcessObservationRequestV4,
+            expires_at_unix_ms: i64) -> Result<ProcessLaunchProgressV6, text>:
+        if self.released: return Err("process reservation already released")
+        val bound = _process_observation_bound_request_v4(self.executable, self.cwd, request)?
+        val encoded = canonical_encode_process_observation_request_v4(bound)?
+        val value = unsafe(capabilities: [ffi]):
+            rt_process_observation_v6_reserved_start_deferred_admitted_value(
+                self.token, self.executable.handle, self.cwd.handle, encoded, expires_at_unix_ms)
+        if value < 0: return Err("deferred process start refused; reservation retained: {value}")
+        process_launch_progress_decode_v6(value)
+
+    # Pending cancellation is not terminal proof. Keep polling on the SAME
+    # submitting OS thread until ObservationAvailable, then use existing observe
+    # and durable-before-ack flow. retire applies only while launch is pending.
+    pub fn poll_launch_v6(self, retire: bool = false) -> Result<ProcessLaunchProgressV6, text>:
+        if self.released: return Err("process reservation already released")
+        val value = unsafe(capabilities: [ffi]):
+            rt_process_observation_v6_reserved_poll_launch_value(self.token, if retire: 1 else: 0)
+        if value < 0: return Err("deferred process progress unavailable; reservation retained: {value}")
+        process_launch_progress_decode_v6(value)
 
     pub fn observe(self, caller_wait_ns: i64, retire: bool) -> Result<ProcessObservationReceiptV4, text>:
         if self.released: return Err("process reservation already released")

@@ -199,6 +199,10 @@ typedef struct RtOwnedSlot {
     int64_t prepared_ns;
     int64_t process_started_ns;
     int64_t exec_confirmed_ns;
+    /* V6 only: native-owned unresolved ptrace launch, never exposed as V4. */
+    int launch_exec_fd, launch_phase, launch_failure, launch_failure_class;
+    int launch_error_count; uint8_t launch_error_bytes[sizeof(int)];
+    int64_t launch_confirm_deadline_ns, launch_event_ns;
     int64_t leader_waited_ns;
     int64_t tree_empty_ns;
     int64_t execution_deadline_ns;
@@ -461,6 +465,8 @@ static int owned_reserve(uint32_t* index, uint64_t* generation) {
             if (next == 0) { rt_owned_slots[i].retired = 1; continue; }
             rt_owned_slots[i].pid = -1;
             rt_owned_slots[i].pidfd = -1;
+            rt_owned_slots[i].launch_exec_fd = -1;
+            rt_owned_slots[i].launch_phase = 0;
             rt_owned_slots[i].generation = next;
             rt_owned_slots[i].state_lock = &rt_owned_state_locks[i];
             *index = i;
@@ -1884,7 +1890,7 @@ static bool owned_collect_v2_core(RtOwnedProcessTokenV2 token,
      * release the capture, pidfd, and registry slot exactly as it does for a
      * clean exit; its false return and copied result preserve that error for
      * the caller. */
-    if (slot->state != 2 ||
+    if (slot->state != 2 || slot->launch_phase != 0 ||
         slot->stdout_delivered != slot->stdout_kept ||
         slot->stderr_delivered != slot->stderr_kept) {
         result->runtime_error = slot->state != 2 ? EAGAIN :
@@ -1895,6 +1901,7 @@ static bool owned_collect_v2_core(RtOwnedProcessTokenV2 token,
     }
     owned_async_fill_result(slot, result);
     RT_OWNED_HOST_FREE(slot->retained); slot->retained = NULL;
+    if(slot->launch_exec_fd>=0){int fd=slot->launch_exec_fd;slot->launch_exec_fd=-1;close(fd);}
     int pidfd = slot->pidfd;
     if (pidfd >= 0) { close(pidfd); slot->pidfd = -1; }
     /* `collecting` was set under the registry before this slot lock.  Drop the
@@ -2621,6 +2628,7 @@ typedef struct Pov4Request {
     int atomic_input_bound;
     int64_t submission_expires_unix_ms;
     int submission_admission_error;
+    int deferred_launch; /* native V6 selection only; never request wire data */
 } Pov4Request;
 
 typedef struct Pov4Cursor {
@@ -2843,7 +2851,8 @@ static int pov4_request_from_value(SplArray* binding, Pov4Request* request) {
 enum Pov4StartOutcome {
     POV4_START_NO_CHILD = 0,
     POV4_START_CONFIRMED = 1,
-    POV4_START_CLEANUP = 2
+    POV4_START_CLEANUP = 2,
+    POV6_START_PENDING = 3 /* private result, never a V4 receipt status */
 };
 
 enum Pov4SignalOutcome {
@@ -3372,7 +3381,20 @@ static enum Pov4StartOutcome pov4_start_exact(
     int child_reaped=0, terminal_status=0; int64_t confirmed_ns=-1; uint64_t retries=0;
     /* Exec confirmation is a finite control lease even for unlimited work. */
     int64_t confirm_deadline_ns = execution_deadline_ns > 0
-        ? execution_deadline_ns : request_started_ns + 30000000000LL;
+        ? execution_deadline_ns : (request->deferred_launch&&request_started_ns>INT64_MAX-30000000000LL
+            ? INT64_MAX : request_started_ns+30000000000LL);
+    if(request->deferred_launch) {
+        pthread_mutex_lock(slot->state_lock);
+        slot->launch_exec_fd=exec_pipe[0];exec_pipe[0]=-1;
+        slot->launch_phase=failure?5:1; /* kill-needed or initial-stop wait */
+        slot->launch_failure=failure;slot->launch_failure_class=failure_class;
+        slot->launch_error_count=0;slot->launch_confirm_deadline_ns=confirm_deadline_ns;
+        slot->launch_event_ns=-1;
+        pthread_mutex_unlock(slot->state_lock);
+        /* Includes post-fork setup failure: NEVER enter synchronous kill/reap
+         * or exec-confirmation loops. The exact child and error FD remain owned. */
+        return POV6_START_PENDING;
+    }
     if(!failure && !owned_confirm_exec_v4(pid,exec_pipe[0],confirm_deadline_ns,
             &confirmed_ns,&retries,&child_reaped,&failure,&failure_class,
             &terminal_status)) {
@@ -3442,12 +3464,57 @@ typedef struct Pov4Slot {
 static Pov4Slot pov4_slots[POV4_SLOTS];
 static pthread_mutex_t pov4_slots_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* All Linux reservation gates establish canonical origin before mint/lookup.
+ * V6 activation additionally fences ticket follow-ups; unrelated raw adapters
+ * retain their prior behavior. No origin is recreated. */
+#if defined(__linux__)
+#include <stdatomic.h>
+#include "runtime_local_unix_bridge_v1.h"
+_Static_assert(ATOMIC_INT_LOCK_FREE==2,"V6 admission atomics must be lock-free");
+static atomic_uint pov6_active;
+static atomic_uint pov6_thread_sequence;
+static _Thread_local unsigned pov6_thread_stamp;
+static int pov6_origin_activate(void) {
+    if(!simple_local_unix_origin_v1()){errno=EPERM;return 0;}
+    atomic_store_explicit(&pov6_active,1,memory_order_release);return 1;
+}
+/* Every Linux reservation is V6-eligible: establish origin before even a
+ * legacy reservation lookup/mint can first hold the shared gate. */
+static int pov6_reservation_origin(void) {
+    if(!simple_local_unix_origin_v1()){errno=EPERM;return 0;}return 1;
+}
+static int pov6_origin_if_active(void) {
+    if(!atomic_load_explicit(&pov6_active,memory_order_acquire))return 1;
+    if(!simple_local_unix_origin_v1()){errno=EPERM;return 0;}return 1;
+}
+/* Called only after canonical origin admission. A new OS thread starts at zero;
+ * even a recycled numeric TID cannot reuse a previously issued stamp. */
+static unsigned pov6_current_thread_stamp(void) {
+    if(pov6_thread_stamp)return pov6_thread_stamp;
+    unsigned before=atomic_load_explicit(&pov6_thread_sequence,memory_order_relaxed);
+    for(unsigned attempt=0;attempt<16;attempt++){
+        if(before==UINT_MAX){errno=EOVERFLOW;return 0;}
+        if(atomic_compare_exchange_weak_explicit(&pov6_thread_sequence,&before,before+1,
+                memory_order_relaxed,memory_order_relaxed)) {
+            pov6_thread_stamp=before+1;return pov6_thread_stamp;
+        }
+    }
+    errno=EBUSY;return 0;
+}
+#else
+static int pov6_origin_if_active(void){return 1;}
+static int pov6_reservation_origin(void){return 1;}
+#endif
+
 /* Reservation authority is delivered before any child side effect. Tokens are
  * monotonically minted and never reused, including when a slot is recycled. */
 typedef struct Pov4Reservation {
     int64_t token;
     int busy;
-    int state; /* 1 reserved, 2 attempting, 3 no child, 4 owned, 5 acked */
+    int state; /* 1 reserved,2 attempting,3 no child,4 owned,5 acked,6 V6 launch pending */
+    int deferred_launch;
+    int submit_tid; /* V6 submitting Linux thread; checked before child locks */
+    unsigned submit_thread_stamp;
     uint32_t owner_index;
     int64_t executable_pin, cwd_pin;
     int64_t submission_expires_unix_ms;
@@ -3574,6 +3641,7 @@ static SplArray* pov4_rejected(int error, int failure_phase, int failure_reason,
 }
 
 static int pov4_reserve(uint32_t* index) {
+    if(!pov6_origin_if_active())return 0;
     if (pthread_mutex_lock(&pov4_slots_lock) != 0) { errno = EBUSY; return 0; }
     int found = -1;
     for (int i = 0; i < POV4_SLOTS; i++) if (!pov4_slots[i].active) { found = i; break; }
@@ -3588,6 +3656,7 @@ static int pov4_reserve(uint32_t* index) {
 }
 
 static Pov4Slot* pov4_acquire_ticket(SplArray* ticket, uint32_t* index) {
+    if(!pov6_origin_if_active())return NULL;
     if (!ticket || rt_array_len(ticket) != POV4_TICKET_WORDS ||
         rt_value_as_int(rt_array_get(ticket, 0)) != POV4_VERSION_VALUE) {
         errno = EPROTO; return NULL;
@@ -4014,6 +4083,7 @@ static void pov4_abandon_unpublished(uint32_t index) {
 
 SplArray* rt_process_observation_v4_poll_value(SplArray* ticket,
                                                 int64_t caller_wait_ns) {
+    if(!pov6_origin_if_active())return NULL;
     uint32_t index = 0; Pov4Slot* owner = pov4_acquire_ticket(ticket, &index);
     if (!owner) return pov4_rejected(errno ? errno : ESTALE, POV4_FAIL_WAIT,
         POV4_REASON_BINDING, 0, 0, NULL);
@@ -4033,6 +4103,7 @@ SplArray* rt_process_observation_v4_poll_value(SplArray* ticket,
 
 SplArray* rt_process_observation_v4_cancel_value(SplArray* ticket,
                                                   int64_t caller_wait_ns) {
+    if(!pov6_origin_if_active())return NULL;
     uint32_t index = 0; Pov4Slot* owner = pov4_acquire_ticket(ticket, &index);
     if (!owner) return pov4_rejected(errno ? errno : ESTALE, POV4_FAIL_WAIT,
         POV4_REASON_BINDING, 0, 0, NULL);
@@ -4050,6 +4121,7 @@ SplArray* rt_process_observation_v4_cancel_value(SplArray* ticket,
 
 SplArray* rt_process_observation_v4_collect_value(SplArray* ticket,
                                                    int64_t caller_wait_ns) {
+    if(!pov6_origin_if_active())return NULL;
     uint32_t index = 0; Pov4Slot* owner = pov4_acquire_ticket(ticket, &index);
     if (!owner) return pov4_rejected(errno ? errno : ESTALE, POV4_FAIL_COLLECTION,
         POV4_REASON_BINDING, 0, 0, NULL);
@@ -4077,6 +4149,7 @@ SplArray* rt_process_observation_v4_collect_value(SplArray* ticket,
 
 SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket,
                                                        SplArray* digest_value) {
+    if(!pov6_origin_if_active())return NULL;
     uint32_t index = 0; Pov4Slot* owner = pov4_acquire_ticket(ticket, &index);
     if (!owner) return SIMPLE_RT_NONNULL("rt_process_observation_v4_ack_collect_value",
         pov4_rejected(errno ? errno : ESTALE, POV4_FAIL_ACK, POV4_REASON_BINDING, 0, 0, NULL));
@@ -4148,7 +4221,10 @@ static SplArray* pov4_start_pinned_impl(
         return pov4_rejected(ESTALE, POV4_FAIL_ADMISSION, POV4_REASON_BINDING,
                             started, 0, NULL);
     }
-    if (reservation) request.submission_expires_unix_ms=reservation->submission_expires_unix_ms;
+    if (reservation) {
+        request.submission_expires_unix_ms=reservation->submission_expires_unix_ms;
+        request.deferred_launch=reservation->deferred_launch;
+    }
     if (atomic_input_mode) {
         uint8_t expected_digest[32];
         if (!expected_input_digest ||
@@ -4339,7 +4415,7 @@ static SplArray* pov4_start_pinned_impl(
             POV4_REASON_PROVIDER,started,1,&request);
         pov4_request_free(&request); return rejected;
     }
-    if (reservation) reservation->state = 4;
+    if (reservation) reservation->state = outcome==POV6_START_PENDING?6:4;
     RtOwnedSlot* core = owned_token_acquire(owner->core, NULL);
     int64_t process_started=core?core->process_started_ns:-1;
     int64_t exec_confirmed=core?core->exec_confirmed_ns:-1;
@@ -4347,7 +4423,7 @@ static SplArray* pov4_start_pinned_impl(
     if(core) owned_token_release(core);
     memcpy(owner->request_digest, request.request_digest, POV4_DIGEST_BYTES);
     pov4_words_base(owner->words, POV4_KIND_POLL,
-        outcome==POV4_START_CONFIRMED?POV4_STATUS_RUNNING:POV4_STATUS_CLEANUP_PENDING,
+        outcome==POV6_START_PENDING?0:(outcome==POV4_START_CONFIRMED?POV4_STATUS_RUNNING:POV4_STATUS_CLEANUP_PENDING),
         started, prepared);
     owner->words[POV4_REQUEST_ID_HIGH]=(int64_t)request_high;
     owner->words[POV4_REQUEST_ID_LOW]=(int64_t)request_low;
@@ -4373,7 +4449,7 @@ static SplArray* pov4_start_pinned_impl(
     owner->words[POV4_STDOUT_STATE]=POV4_STREAM_OPEN;
     owner->words[POV4_STDERR_STATE]=POV4_STREAM_OPEN;
     if(outcome==POV4_START_CONFIRMED) owner->words[POV4_VALIDITY]|=POV4_VALID_EXEC;
-    else {
+    else if(outcome!=POV6_START_PENDING) {
         owner->cleanup_only=1;
         owner->words[POV4_PHASE]=POV4_PHASE_CLEANUP;
         owner->words[POV4_EXEC_ERRNO]=
@@ -4402,6 +4478,10 @@ static SplArray* pov4_start_pinned_impl(
     owner->ticket_high=ticket_high; owner->ticket_low=ticket_low;
     owner->busy=0;
     pthread_mutex_unlock(&pov4_slots_lock);
+    if(outcome==POV6_START_PENDING) {
+        /* State 6 owns a real child, but has NO V4 observation grammar yet. */
+        pov4_tuple4_free(start_result);pov4_request_free(&request);return NULL;
+    }
     if(!pov4_tuple4_replace_words(start_result,owner->words)) {
         pov4_tuple4_free(start_result); start_result=NULL;
     }
@@ -4439,6 +4519,15 @@ SplArray* rt_process_inspection_v1_start_pinned_value(
 }
 
 #include "runtime_process_observation_reserved_v4_impl.h"
+int64_t rt_process_observation_v6_reserved_start_deferred_admitted_value(
+        int64_t token,int64_t executable,int64_t cwd,SplArray* binding,int64_t expiry) {
+    return pov6_start_deferred_admitted_impl(token,executable,cwd,binding,expiry);
+}
+int64_t rt_process_observation_v6_reserved_poll_launch_value(int64_t token,int64_t retire) {
+    if(retire!=0&&retire!=1)return -EINVAL;
+    return pov6_poll_launch_impl(token,(int)retire);
+}
+
 
 /* This companion fact is issued only while the same opaque V4 ticket remains
  * live. Its request digest includes the V4 binding and copied input digest. */
@@ -6512,6 +6601,14 @@ SplArray* rt_process_observation_v4_reserved_ack_value(int64_t token, SplArray* 
 int64_t rt_process_observation_v4_reserved_confirm_release_value(int64_t token) {
     (void)token; return -ENOTSUP;
 }
+int64_t rt_process_observation_v6_reserved_start_deferred_admitted_value(
+        int64_t t,int64_t e,int64_t c,SplArray* b,int64_t expiry) {
+    (void)t;(void)e;(void)c;(void)b;(void)expiry;return -ENOTSUP;
+}
+int64_t rt_process_observation_v6_reserved_poll_launch_value(int64_t t,int64_t retire) {
+    (void)t;(void)retire;return -ENOTSUP;
+}
+
 SplArray* rt_process_observation_v4_start_value(SplArray* binding) {
     (void)binding; return SIMPLE_RT_NONNULL("rt_process_observation_v4_start_value", pov4_unavailable_tuple());
 }
