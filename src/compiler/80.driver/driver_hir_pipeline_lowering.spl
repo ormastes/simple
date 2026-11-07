@@ -28,7 +28,7 @@ use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable, sosix_cwd}
 use compiler.driver.cache.cold_hir_semantic_seed_v1.{
     cold_hir_typed_receipts_from_lowered_sources_v1,
-    cold_hir_source_mismatch_evidence_v1
+    cold_hir_source_mismatch_evidence_v1, cold_hir_receipt_capture_scope_v1
 }
 use compiler.driver.smf.runtime_std_hir_emission_types_v1.{
     RuntimeStdHirModuleEmissionV1
@@ -401,6 +401,17 @@ impl CompilerDriver:
             return true
         if source_root == "" or inventory_binding.snapshot_manifest_digest == "" or inventory_binding.source_inventory_digest == "":
             self.ctx.add_error("cold HIR receipt authority incomplete")
+            return false
+        # After the authority-completeness checks so a misconfigured unit child
+        # still errors. A per-file unit child holds HIR for its picked batch only; walking
+        # the whole closure here failed on the first unlowered row (Stage 3,
+        # cold-hir-lowered-module-missing:app.cli.bootstrap_main).
+        val capture_scope = cold_hir_receipt_capture_scope_v1(
+            full_inventory_cold, native_file_worker_unit_active_v1())
+        if capture_scope == "skip":
+            return true
+        if capture_scope != "capture":
+            self.ctx.add_error("cold HIR receipt capture refused: {capture_scope}")
             return false
         val inventory_cache_root = compile_source_inventory_snapshot_cache_root_v1(
             sosix_cwd(), source_root,
