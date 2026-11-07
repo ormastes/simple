@@ -95,4 +95,4 @@ UNEXECUTED. Existing historical mutable-only PASS does not validate this patch.
 Native cross-module storage/accessor/ABI proof and broad compiler/MCP gates remain
 pending. Do not use the earlier four `pub val` source workarounds as root repair,
 or a private inline literal as sufficient static-rejection evidence. Cycle7 and
-planner attempt caps remain unchanged; no compiler invocation or build occurred.
+planner attempt caps remain unchanged. Two bounded helper compilations were attempted: the first stopped at source admission, and the corrected-input attempt reached MIR before failing on a builtin unsupported by the retained producer. Neither produced a probe executable; zero diagnostic assertions ran. No new full-bootstrap build occurred.

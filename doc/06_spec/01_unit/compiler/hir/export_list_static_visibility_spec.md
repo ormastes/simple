@@ -1,8 +1,10 @@
 # Export-list module-static visibility
 
 Status: **UNEXECUTED — source-prepared manual, not generated runtime evidence.**
-No docgen, SSpec runner, native diagnostic, or broad qualification was executed
-for this revision. Historical mutable-only results do not establish this repair.
+No docgen, SSpec runner, or broad qualification completed for this revision.
+Two native helper compilation attempts failed before producing an executable;
+zero diagnostic assertions ran. Historical mutable-only results do not establish
+this repair.
 
 Executable source: `test/01_unit/compiler/hir/export_list_static_visibility_spec.spl`.
 Audience: compiler engineers reviewing HIR visibility and ABI/interface digest
