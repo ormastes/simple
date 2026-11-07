@@ -1,0 +1,154 @@
+use std.spec
+use std.common.process.windows_engine_pipe_v1.{WindowsEnginePipeAceV1, WindowsEnginePipeWriteContextV1,
+    windows_engine_pipe_acl_reason_v1, windows_engine_pipe_write_context_reason_v1,
+    windows_engine_pipe_completion_v1, windows_engine_pipe_read_window_v1}
+use std.nogc_sync_mut.io.file_ops.file_read
+use std.common.contracts.container.exec_v3.{ContainerExecRequestV3,
+    ContainerExecEnvironmentEntryV3, container_exec_request_digest_v3}
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+use test.fixtures.orchestration.simple_container_windows_adapter_fixture_v2.*
+
+fn allow(mask: i64, trustee: text) -> WindowsEnginePipeAceV1:
+    WindowsEnginePipeAceV1(kind: 0, flags: 0, mask: mask, trustee_class: trustee)
+
+fn context() -> WindowsEnginePipeWriteContextV1:
+    WindowsEnginePipeWriteContextV1(action: "create",
+        request_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        operation_id: "operation-1", expires_at_unix_ms: 9000000)
+
+fn generic_exec_fixture() -> ContainerExecRequestV3:
+    val plan = windows_adapter_request_fixture_v2().plan
+    val runtime = RuntimeIdentityV1(pod_uid: plan.workload_uid, attempt: plan.attempt,
+        operation_id: plan.operation_id, engine: "docker", native_id: windows_adapter_native_id_fixture_v2(),
+        node_boot_id: container_scope_fence_id_v2(windows_adapter_scope_fixture_v2()).unwrap(),
+        provider_generation: plan.provider_generation)
+    ContainerExecRequestV3(parent: plan, parent_runtime: runtime, operation_id: "exec-pipe-a",
+        nonce: context().request_digest, argv: ["C:\\work\\producer.exe", "test"],
+        environment: [ContainerExecEnvironmentEntryV3.Literal("TASK", "fixture")],
+        working_directory: "C:\\work", selected_user: "ContainerUser", terminal_mode: "none",
+        stdin_requested: false, timeout_ms: 5000)
+
+describe "Windows Engine pipe pure trust and completion contract":
+    it "REQ-WEP-001 requires trusted owner and protected nonnull DACL":
+        val grants = [allow(2032127, "system"), allow(3, "other")]
+        expect(windows_engine_pipe_acl_reason_v1("system", true, true, false, grants)).to_equal("")
+        expect(windows_engine_pipe_acl_reason_v1("administrators", true, true, false, grants)).to_equal("")
+        expect(windows_engine_pipe_acl_reason_v1("other", true, true, false, grants)).to_equal("engine-pipe-owner-untrusted")
+        expect(windows_engine_pipe_acl_reason_v1("system", false, true, false, grants)).to_equal("engine-pipe-protected-present-dacl-required")
+        expect(windows_engine_pipe_acl_reason_v1("system", true, false, false, grants)).to_equal("engine-pipe-protected-present-dacl-required")
+        expect(windows_engine_pipe_acl_reason_v1("system", true, true, true, grants)).to_equal("engine-pipe-protected-present-dacl-required")
+
+    it "REQ-WEP-002 refuses each untrusted security-control grant and unsupported ACE":
+        for right in [4, 65536, 262144, 524288, 268435456, 1073741824, 1179926]:
+            expect(windows_engine_pipe_acl_reason_v1("system", true, true, false,
+                [allow(right, "other")])).to_equal("engine-pipe-untrusted-control-grant")
+        val denied = WindowsEnginePipeAceV1(kind: 1, flags: 0, mask: 851968, trustee_class: "other")
+        expect(windows_engine_pipe_acl_reason_v1("system", true, true, false, [denied])).to_equal("")
+        val inherited_only = WindowsEnginePipeAceV1(kind: 0, flags: 8, mask: 851968, trustee_class: "other")
+        expect(windows_engine_pipe_acl_reason_v1("system", true, true, false, [inherited_only])).to_equal("")
+        val unknown = WindowsEnginePipeAceV1(kind: 9, flags: 0, mask: 0, trustee_class: "other")
+        expect(windows_engine_pipe_acl_reason_v1("system", true, true, false, [unknown])).to_equal("engine-pipe-ace-kind-unsupported")
+
+    it "REQ-WEP-003 validates explicit private create/start write scope":
+        expect(windows_engine_pipe_write_context_reason_v1(context())).to_equal("")
+        var start = context()
+        start.action = "start"
+        expect(windows_engine_pipe_write_context_reason_v1(start)).to_equal("")
+        var exec = context()
+        exec.action = "exec"
+        expect(windows_engine_pipe_write_context_reason_v1(exec)).to_equal("engine-pipe-explicit-create-start-required")
+        var missing = context()
+        missing.request_digest = ""
+        expect(windows_engine_pipe_write_context_reason_v1(missing)).to_equal("engine-pipe-request-digest-invalid")
+        var prefixed = context()
+        prefixed.request_digest = "sha256:" + prefixed.request_digest
+        expect(windows_engine_pipe_write_context_reason_v1(prefixed)).to_equal("engine-pipe-request-digest-invalid")
+        var expired = context()
+        expired.expires_at_unix_ms = 0
+        expect(windows_engine_pipe_write_context_reason_v1(expired)).to_equal("engine-pipe-expiry-invalid")
+
+    it "REQ-WEP-009 accepts the exact generic exec birth digest domain without conversion":
+        val request = generic_exec_fixture()
+        val digest = container_exec_request_digest_v3(request).unwrap()
+        var admitted = context()
+        admitted.request_digest = digest
+        admitted.operation_id = request.operation_id
+        expect(digest.len()).to_equal(64)
+        expect(windows_engine_pipe_write_context_reason_v1(admitted)).to_equal("")
+        var changed = request
+        changed.argv = ["C:\\work\\producer.exe", "different"]
+        expect(container_exec_request_digest_v3(changed).unwrap() == digest).to_equal(false)
+
+    it "REQ-WEP-010 drains a completed large pending read in later caller-sized windows":
+        # The native completion owns 64 KiB; later calls reduce their bounds.
+        val first = windows_engine_pipe_read_window_v1(65536, 0, 3).unwrap()
+        expect(first.offset).to_equal(0)
+        expect(first.count).to_equal(3)
+        expect(first.drained).to_equal(false)
+        val second = windows_engine_pipe_read_window_v1(65536, first.next_offset, 1).unwrap()
+        expect(second.offset).to_equal(3)
+        expect(second.count).to_equal(1)
+        expect(second.drained).to_equal(false)
+        val suffix = windows_engine_pipe_read_window_v1(65536, second.next_offset, 65536).unwrap()
+        expect(suffix.offset).to_equal(4)
+        expect(suffix.count).to_equal(65532)
+        expect(suffix.next_offset).to_equal(65536)
+        expect(suffix.drained).to_equal(true)
+        expect(first.count + second.count + suffix.count).to_equal(65536)
+        expect(windows_engine_pipe_read_window_v1(3, 4, 1).is_err()).to_equal(true)
+        expect(windows_engine_pipe_read_window_v1(65537, 0, 1).is_err()).to_equal(true)
+        expect(windows_engine_pipe_read_window_v1(1, 0, 0).is_err()).to_equal(true)
+
+    it "REQ-WEP-004 never treats an unknown completion query as released storage":
+        expect(windows_engine_pipe_completion_v1(996, false, true)).to_equal("pending")
+        expect(windows_engine_pipe_completion_v1(996, true, true)).to_equal("pending")
+        expect(windows_engine_pipe_completion_v1(995, true, false)).to_equal("cancelled")
+        expect(windows_engine_pipe_completion_v1(995, false, false)).to_equal("failed-terminal")
+        expect(windows_engine_pipe_completion_v1(109, false, true)).to_equal("end")
+        expect(windows_engine_pipe_completion_v1(6, true, true)).to_equal("unknown")
+        expect(windows_engine_pipe_completion_v1(5, true, false)).to_equal("unknown")
+
+describe "Windows Engine pipe native source wiring, not execution evidence":
+    it "REQ-WEP-005 keeps a private IO-only ledger and exact fixed endpoint security checks":
+        val native = file_read("src/lib/nogc_sync_mut/io/windows_engine_pipe_native_v1.spl")
+        expect(native).to_contain("slots.len() >= 100000 or active >= 64")
+        expect(native).to_contain("WINDOWS_ENGINE_PIPE_ENDPOINT_V1")
+        expect(native).to_contain("1074855936u32")
+        expect(native).to_contain("GetSecurityInfo(next.pipe, 1, 5u32")
+        expect(native).to_contain("GetNamedPipeServerProcessId(next.pipe")
+        expect(native).to_contain("if before != after")
+        expect(native.contains("CreateProcess")).to_equal(false)
+        expect(native.contains("pub struct PipeState")).to_equal(false)
+        expect(native.contains("pub fn load(")).to_equal(false)
+        expect(native.contains("pub fn store(")).to_equal(false)
+
+    it "REQ-WEP-006 separates ordinary/admitted writes and retains partial-operation uncertainty":
+        val native = file_read("src/lib/nogc_sync_mut/io/windows_engine_pipe_native_v1.spl")
+        expect(native).to_contain("pub fn windows_engine_pipe_write_some_admitted_v1")
+        expect(native).to_contain("windows_engine_pipe_write_context_reason_v1(context)")
+        expect(native).to_contain("sampled / 1000 >= gate.expires_at_unix_ms")
+        expect(native).to_contain("state.write_attempted = true")
+        expect(native).to_contain("if result == \"unknown\" or result == \"pending\": state.write_pending = true")
+        expect(native).to_contain("volatile_write_u8(state.arena + 66048 + index")
+
+    it "REQ-WEP-007 keeps descriptor/event/buffer ownership until confirmed IO completion and checked release":
+        val native = file_read("src/lib/nogc_sync_mut/io/windows_engine_pipe_native_v1.spl")
+        expect(native).to_contain("cancelled.read_pending or cancelled.write_pending")
+        expect(native).to_contain("LocalFree(state.descriptor) == 0")
+        expect(native).to_contain("HeapFree(state.heap, 0u32, state.wide) != 0")
+        expect(native).to_contain("if not state.closed: return Err(\"engine-pipe-native-release-failed-owner-retained\")")
+        expect(native).to_contain("if previous.closed: return Err")
+        expect(native).to_contain("windows_engine_pipe_read_window_v1(state.read_ready, state.read_offset, max_bytes)")
+        expect(native).to_contain("state.read_ready == 0 and not state.read_end and not state.read_pending")
+        expect(native).to_contain("state.arena + 512 + bounded.offset + index")
+        expect(native).to_contain("if bounded.drained:")
+
+    it "REQ-WEP-008 keeps the native facade conditional and every public native entry thread-owned":
+        val wrapper = file_read("src/lib/nogc_sync_mut/io/windows_engine_pipe_owner_v1.spl")
+        val native = file_read("src/lib/nogc_sync_mut/io/windows_engine_pipe_native_v1.spl")
+        expect(wrapper).to_contain("@when(os=\"windows\"):")
+        expect(wrapper).to_contain("Windows Engine pipe unsupported on this platform")
+        val public_entries = native.split("\npub fn ")
+        val guards = native.split("val owner = entry()")
+        expect(public_entries.len()).to_equal(guards.len())

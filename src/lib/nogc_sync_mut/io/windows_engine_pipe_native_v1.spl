@@ -1,0 +1,403 @@
+# Windows-only private broker IO capsule. No process/job/credential registry.
+# Only typed leases and trust observations leave this module. SOURCE NOT_RUN.
+use std.common.process.windows_engine_pipe_v1.{WINDOWS_ENGINE_PIPE_ENDPOINT_V1,
+    WINDOWS_ENGINE_PIPE_MAX_BYTES_V1, WindowsEnginePipeLeaseV1, WindowsEnginePipeAdmissionV1,
+    WindowsEnginePipeReadV1, WindowsEnginePipeObservationV1, WindowsEnginePipePollV1,
+    WindowsEnginePipeWriteContextV1, WindowsEnginePipeAceV1, windows_engine_pipe_acl_reason_v1,
+    windows_engine_pipe_write_context_reason_v1, windows_engine_pipe_completion_v1,
+    windows_engine_pipe_read_window_v1}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree, CreateFileW,
+    CloseHandle, GetLastError, ReadFile}
+use std.nogc_sync_mut.io.windows_process_owner._windows_process_wide_v1
+use std.nogc_sync_mut.io.windows_pty_abi.{WriteFile, GetOverlappedResult, CancelIoEx, CreateEventW, ResetEvent}
+use std.nogc_sync_mut.io.windows_engine_pipe_abi_v1.{GetNamedPipeServerProcessId, SetNamedPipeHandleState,
+    GetSecurityInfo, GetSecurityDescriptorLength, GetSecurityDescriptorControl, IsValidAcl,
+    GetAclInformation, GetAce, IsValidSid, IsWellKnownSid, LocalFree}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u32,
+    volatile_read_u64, volatile_write_u32, volatile_write_u64}
+use std.nogc_sync_mut.io.volatile_ops.volatile_write_u8
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
+use std.nogc_sync_mut.io.windows_job_stream_abi_v2.rt_windows_pty_owner_thread_guard_v1
+
+# Header0..511; read buffer512..66047; write buffer66048..131583.
+# Read/write OVERLAPPED0/32 with events24/56; counters64/72; security80..159.
+struct PipeState:
+    generation: i64
+    revision: i64 = 0
+    heap: i64
+    arena: i64
+    pipe: i64 = 0
+    wide: i64 = 0
+    read_event: i64 = 0
+    write_event: i64 = 0
+    descriptor: i64 = 0
+    server_pid: i64 = 0
+    owner_class: text = ""
+    admitted: bool = false
+    read_pending: bool = false
+    write_pending: bool = false
+    read_ready: i64 = 0
+    read_offset: i64 = 0
+    read_requested: i64 = 0
+    write_requested: i64 = 0
+    read_end: bool = false
+    closing: bool = false
+    closed: bool = false
+    failed: bool = false
+    write_attempted: bool = false
+
+var slots: [PipeState] = []
+var active: i64 = 0
+
+fn entry() -> Result<bool, text>:
+    val status = unsafe(capabilities: [ffi]): rt_windows_pty_owner_thread_guard_v1()
+    if status == 1: return Ok(true)
+    Err("engine-pipe-native-owner-thread-unavailable-transfer-refused")
+
+fn load(lease: WindowsEnginePipeLeaseV1) -> Result<PipeState, text>:
+    if lease.slot < 0 or (lease.slot as i64) >= slots.len(): return Err("engine-pipe-lease-slot-invalid")
+    val state = slots[lease.slot as i64]
+    if state.generation != lease.generation: return Err("engine-pipe-lease-generation-invalid")
+    Ok(state)
+
+fn store(lease: WindowsEnginePipeLeaseV1, state: PipeState) -> Result<PipeState, text>:
+    val previous = load(lease)?
+    if previous.closed: return Err("engine-pipe-closed-owner-cannot-change")
+    if state.generation != previous.generation or state.revision != previous.revision:
+        return Err("engine-pipe-state-snapshot-stale")
+    if state.revision >= 9223372036854775806: return Err("engine-pipe-revision-exhausted")
+    var committed = state
+    committed.revision = state.revision + 1
+    if committed.closed: active = active - 1
+    slots[lease.slot as i64] = committed
+    Ok(committed)
+
+fn poll_value(state: PipeState) -> WindowsEnginePipePollV1:
+    WindowsEnginePipePollV1(read_pending: state.read_pending, write_pending: state.write_pending,
+        closing: state.closing, closed: state.closed, write_attempted: state.write_attempted)
+
+fn failed(lease: WindowsEnginePipeLeaseV1, state: PipeState, reason: text) -> WindowsEnginePipeAdmissionV1:
+    var retained = state
+    retained.failed = true
+    val saved = store(lease, retained)
+    WindowsEnginePipeAdmissionV1.CleanupRequired(lease, if saved.is_ok(): reason else: reason + "; owner commit refused")
+
+@unsafe(reason: "bounds-checks native SID storage before exact well-known SID classification", capabilities: [ffi, raw_ptr])
+fn sid_class(sid: i64, descriptor: i64, length: i64) -> Result<(text, i64), text>:
+    if sid < descriptor or sid > descriptor + length - 8: return Err("engine-pipe-sid-outside-descriptor")
+    if volatile_read_u8(sid) != 1: return Err("engine-pipe-sid-revision-invalid")
+    val count = volatile_read_u8(sid + 1)
+    val size = 8 + count * 4
+    if count > 15 or sid > descriptor + length - size: return Err("engine-pipe-sid-length-invalid")
+    if IsValidSid(sid) == 0: return Err("engine-pipe-sid-invalid")
+    if IsWellKnownSid(sid, 22) != 0: return Ok(("system", size))
+    if IsWellKnownSid(sid, 26) != 0: return Ok(("administrators", size))
+    Ok(("other", size))
+
+# The returned LocalAlloc descriptor is written into state BEFORE checking
+# native status. Failure/failed LocalFree never discards its ownership.
+@unsafe(reason: "observes owner, protected DACL and actual server PID on the connected HANDLE", capabilities: [ffi, raw_ptr])
+fn security(state: PipeState) -> (PipeState, text):
+    var next = state
+    if next.descriptor != 0: return (next, "engine-pipe-prior-security-release-pending")
+    if GetNamedPipeServerProcessId(next.pipe, next.arena + 136) == 0:
+        return (next, "engine-pipe-server-pid-unavailable")
+    val before = volatile_read_u32(next.arena + 136) as i64
+    if before <= 0: return (next, "engine-pipe-server-pid-invalid")
+    for offset in [80, 88, 96]: volatile_write_u64(next.arena + offset, 0)
+    # SE_FILE_OBJECT=1, OWNER_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION=5.
+    val observed = GetSecurityInfo(next.pipe, 1, 5u32, next.arena + 80, 0, next.arena + 88, 0, next.arena + 96)
+    next.descriptor = volatile_read_u64(next.arena + 96)
+    if observed != 0u32 or next.descriptor <= 0: return (next, "engine-pipe-security-descriptor-unavailable")
+    val length = GetSecurityDescriptorLength(next.descriptor) as i64
+    if length < 20 or length > 1048576 or next.descriptor <= 0 or next.descriptor > 9223372036854775807 - length:
+        return (next, "engine-pipe-security-descriptor-bound")
+    if GetSecurityDescriptorControl(next.descriptor, next.arena + 104, next.arena + 108) == 0:
+        return (next, "engine-pipe-security-control-unavailable")
+    val control = volatile_read_u16(next.arena + 104)
+    val owner = sid_class(volatile_read_u64(next.arena + 80), next.descriptor, length)
+    if owner.is_err(): return (next, owner.unwrap_err())
+    val owner_class = owner.unwrap().0
+    val acl = volatile_read_u64(next.arena + 88)
+    if (control & 4096) == 0 or (control & 4) == 0 or acl == 0:
+        return (next, "engine-pipe-protected-present-dacl-required")
+    if acl < next.descriptor or acl > next.descriptor + length - 8:
+        return (next, "engine-pipe-dacl-invalid")
+    val acl_size = volatile_read_u16(acl + 2)
+    if acl_size < 8 or acl > next.descriptor + length - acl_size or IsValidAcl(acl) == 0:
+        return (next, "engine-pipe-dacl-storage-invalid")
+    if GetAclInformation(acl, next.arena + 112, 12u32, 2) == 0: return (next, "engine-pipe-dacl-info-unavailable")
+    val count = volatile_read_u32(next.arena + 112) as i64
+    val used = volatile_read_u32(next.arena + 116) as i64
+    if count > 256 or used < 8 or used > acl_size or acl > next.descriptor + length - used:
+        return (next, "engine-pipe-dacl-bound")
+    var aces: [WindowsEnginePipeAceV1] = []
+    for index in 0..count:
+        if GetAce(acl, index as u32, next.arena + 128) == 0: return (next, "engine-pipe-ace-unavailable")
+        val ace = volatile_read_u64(next.arena + 128)
+        if ace < acl + 8 or ace > acl + used - 16: return (next, "engine-pipe-ace-outside-dacl")
+        val size = volatile_read_u16(ace + 2)
+        if size < 16 or ace > acl + used - size: return (next, "engine-pipe-ace-bound")
+        val kind = volatile_read_u8(ace)
+        if kind != 0 and kind != 1: return (next, "engine-pipe-ace-kind-unsupported")
+        val trustee = sid_class(ace + 8, next.descriptor, length)
+        if trustee.is_err(): return (next, trustee.unwrap_err())
+        val classified = trustee.unwrap()
+        if classified.1 > size - 8: return (next, "engine-pipe-ace-sid-bound")
+        aces = aces.push(WindowsEnginePipeAceV1(kind: kind, flags: volatile_read_u8(ace + 1),
+            mask: volatile_read_u32(ace + 4) as i64, trustee_class: classified.0))
+    val rejected = windows_engine_pipe_acl_reason_v1(owner_class, true, true, false, aces)
+    if rejected != "": return (next, rejected)
+    if GetNamedPipeServerProcessId(next.pipe, next.arena + 144) == 0:
+        return (next, "engine-pipe-server-pid-recheck-unavailable")
+    val after = volatile_read_u32(next.arena + 144) as i64
+    if before != after or (next.server_pid != 0 and next.server_pid != after):
+        return (next, "engine-pipe-connected-server-changed")
+    next.server_pid = after
+    next.owner_class = owner_class
+    if LocalFree(next.descriptor) != 0: return (next, "engine-pipe-security-release-failed-owner-retained")
+    next.descriptor = 0
+    (next, "")
+
+@unsafe(reason: "opens only the fixed local Docker Engine endpoint with identification-only SQOS and private OVERLAPPED storage", capabilities: [ffi, raw_ptr])
+pub fn windows_engine_pipe_connect_v1() -> WindowsEnginePipeAdmissionV1:
+    val owner = entry()
+    if owner.is_err(): return WindowsEnginePipeAdmissionV1.Rejected(owner.unwrap_err())
+    if slots.len() >= 100000 or active >= 64: return WindowsEnginePipeAdmissionV1.Rejected("engine-pipe-owner-capacity")
+    val heap = GetProcessHeap()
+    if heap == 0: return WindowsEnginePipeAdmissionV1.Rejected("engine-pipe-process-heap-unavailable")
+    val arena = HeapAlloc(heap, 8u32, 131584u64)
+    if arena == 0: return WindowsEnginePipeAdmissionV1.Rejected("engine-pipe-arena-allocation-failed")
+    val index = slots.len()
+    var state = PipeState(generation: index + 1, heap: heap, arena: arena)
+    slots = slots.push(state)
+    active = active + 1
+    val lease = WindowsEnginePipeLeaseV1(slot: index as i32, generation: index + 1)
+    state.wide = _windows_process_wide_v1(heap, WINDOWS_ENGINE_PIPE_ENDPOINT_V1)
+    if state.wide == 0: return failed(lease, state, "engine-pipe-endpoint-allocation-failed")
+    # READ|WRITE|READ_CONTROL; OVERLAPPED|SQOS_PRESENT|IDENTIFICATION. No inherited HANDLE.
+    state.pipe = CreateFileW(state.wide, 3221356544u32, 0u32, 0, 3u32, 1074855936u32, 0)
+    if state.pipe == -1: state.pipe = 0
+    if HeapFree(heap, 0u32, state.wide) == 0: return failed(lease, state, "engine-pipe-endpoint-release-failed")
+    state.wide = 0
+    if state.pipe == 0: return failed(lease, state, "engine-pipe-fixed-endpoint-open-failed")
+    state.read_event = CreateEventW(0, 1, 0, 0)
+    state.write_event = CreateEventW(0, 1, 0, 0)
+    if state.read_event == 0 or state.write_event == 0: return failed(lease, state, "engine-pipe-event-allocation-failed")
+    volatile_write_u64(arena + 24, state.read_event)
+    volatile_write_u64(arena + 56, state.write_event)
+    volatile_write_u32(arena + 152, 0)
+    if SetNamedPipeHandleState(state.pipe, arena + 152, 0, 0) == 0:
+        return failed(lease, state, "engine-pipe-byte-mode-admission-failed")
+    val observed = security(state)
+    state = observed.0
+    if observed.1 != "": return failed(lease, state, observed.1)
+    state.admitted = true
+    val saved = store(lease, state)
+    if saved.is_err(): return WindowsEnginePipeAdmissionV1.CleanupRequired(lease, saved.unwrap_err())
+    WindowsEnginePipeAdmissionV1.Ready(lease)
+
+pub fn windows_engine_pipe_observe_v1(lease: WindowsEnginePipeLeaseV1) -> Result<WindowsEnginePipeObservationV1, text>:
+    val owner = entry()?
+    var state = load(lease)?
+    if state.closed or state.closing or not state.admitted: return Err("engine-pipe-live-observation-unavailable")
+    val checked = security(state)
+    state = checked.0
+    if checked.1 != "": state.failed = true
+    state = store(lease, state)?
+    if checked.1 != "": return Err(checked.1)
+    Ok(WindowsEnginePipeObservationV1(server_pid: state.server_pid, owner_class: state.owner_class,
+        dacl_protected: true, untrusted_control_rights: false))
+
+# Unknown GetOverlappedResult failures do not discharge pending storage. Only
+# successful completion or explicit terminal operation status clears a loan.
+@unsafe(reason: "observes both retained requests without waiting or freeing in-flight buffers", capabilities: [ffi, raw_ptr])
+fn advance(state: PipeState) -> PipeState:
+    var next = state
+    if next.read_pending:
+        val done = GetOverlappedResult(next.pipe, next.arena, next.arena + 64, 0)
+        if done != 0:
+            val count = volatile_read_u32(next.arena + 64) as i64
+            next.read_pending = false
+            if count < 0 or count > next.read_requested: next.failed = true
+            else:
+                next.read_ready = count
+                next.read_offset = 0
+        else:
+            val result = windows_engine_pipe_completion_v1(GetLastError() as i64, next.closing, true)
+            if result == "end":
+                next.read_pending = false
+                next.read_end = true
+            elif result == "cancelled" or result == "failed-terminal":
+                next.read_pending = false
+                if result == "failed-terminal": next.failed = true
+            elif result == "unknown": next.failed = true
+    if next.write_pending:
+        val done = GetOverlappedResult(next.pipe, next.arena + 32, next.arena + 72, 0)
+        if done != 0:
+            next.write_pending = false
+            if volatile_read_u32(next.arena + 72) as i64 != next.write_requested:
+                next.failed = true # never replay an ambiguous accepted request
+        else:
+            val result = windows_engine_pipe_completion_v1(GetLastError() as i64, next.closing, false)
+            if result == "cancelled" or result == "failed-terminal":
+                next.write_pending = false
+                if result == "failed-terminal": next.failed = true
+            elif result == "unknown": next.failed = true
+    next
+
+pub fn windows_engine_pipe_poll_v1(lease: WindowsEnginePipeLeaseV1) -> Result<WindowsEnginePipePollV1, text>:
+    val owner = entry()?
+    var state = load(lease)?
+    if state.closed: return Ok(poll_value(state))
+    state = advance(state)
+    state = store(lease, state)?
+    Ok(poll_value(state))
+
+@unsafe(reason: "copies at most64KiB from owner storage; zero completion is Pending, never fabricated EOF", capabilities: [ffi, raw_ptr])
+pub fn windows_engine_pipe_read_some_v1(lease: WindowsEnginePipeLeaseV1, max_bytes: i64) -> WindowsEnginePipeReadV1:
+    val owner = entry()
+    if owner.is_err(): return WindowsEnginePipeReadV1.Failed(owner.unwrap_err())
+    if max_bytes <= 0 or max_bytes > WINDOWS_ENGINE_PIPE_MAX_BYTES_V1:
+        return WindowsEnginePipeReadV1.Failed("engine-pipe-read-bound-invalid")
+    var state = match load(lease):
+        case Ok(value): value
+        case Err(reason): return WindowsEnginePipeReadV1.Failed(reason)
+    if state.closed or state.closing or not state.admitted: return WindowsEnginePipeReadV1.Failed("engine-pipe-read-owner-unavailable")
+    state = advance(state)
+    if not state.failed and state.read_ready == 0 and not state.read_end and not state.read_pending:
+        for offset in [0, 8, 16]: volatile_write_u64(state.arena + offset, 0)
+        volatile_write_u32(state.arena + 64, 0)
+        state.read_requested = max_bytes
+        if ResetEvent(state.read_event) == 0:
+            state.failed = true
+        else:
+            val submitted = ReadFile(state.pipe, state.arena + 512, max_bytes as u32, state.arena + 64, state.arena)
+            if submitted != 0:
+                val count = volatile_read_u32(state.arena + 64) as i64
+                if count < 0 or count > max_bytes: state.failed = true
+                else:
+                    state.read_ready = count
+                    state.read_offset = 0
+            else:
+                val error = GetLastError() as i64
+                if error == 997: state.read_pending = true
+                else:
+                    val result = windows_engine_pipe_completion_v1(error, false, true)
+                    if result == "end": state.read_end = true
+                    else:
+                        state.failed = true
+                        # Unknown immediate failure is not EOF or confirmed
+                        # completion: retain the OVERLAPPED and its buffer.
+                        if result == "unknown" or result == "pending": state.read_pending = true
+    var bytes: [u8] = []
+    if not state.failed and state.read_ready > 0:
+        val window = windows_engine_pipe_read_window_v1(state.read_ready, state.read_offset, max_bytes)
+        if window.is_err(): state.failed = true
+        else:
+            val bounded = window.unwrap()
+            bytes = [0u8; bounded.count]
+            for index in 0..bounded.count:
+                bytes[index] = volatile_read_u8(state.arena + 512 + bounded.offset + index) as u8
+            state.read_offset = bounded.next_offset
+            if bounded.drained:
+                state.read_ready = 0
+                state.read_offset = 0
+    val saved = store(lease, state)
+    if saved.is_err(): return WindowsEnginePipeReadV1.Failed(saved.unwrap_err())
+    if state.failed: return WindowsEnginePipeReadV1.Failed("engine-pipe-read-or-prior-write-failed-owner-retained")
+    if bytes.len() > 0: return WindowsEnginePipeReadV1.Data(bytes)
+    if state.read_end: return WindowsEnginePipeReadV1.End
+    WindowsEnginePipeReadV1.Pending
+
+# The broker, not this generic IO owner, validates the complete HTTP payload
+# and its scope. An admitted context is not an authorization grant.
+@unsafe(reason: "copies a bounded prefix and checks live admission immediately before WriteFile", capabilities: [ffi, raw_ptr])
+fn write(lease: WindowsEnginePipeLeaseV1, bytes: [u8], context: WindowsEnginePipeWriteContextV1?) -> Result<i64, text>:
+    var state = load(lease)?
+    if state.closed or state.closing or state.failed or not state.admitted: return Err("engine-pipe-write-owner-unavailable")
+    state = advance(state)
+    state = store(lease, state)?
+    if state.failed: return Err("engine-pipe-prior-operation-failed-do-not-replay")
+    if state.write_pending or bytes.len() == 0: return Ok(0)
+    val count = if bytes.len() > WINDOWS_ENGINE_PIPE_MAX_BYTES_V1: WINDOWS_ENGINE_PIPE_MAX_BYTES_V1 else: bytes.len()
+    for index in 0..count: volatile_write_u8(state.arena + 66048 + index, bytes[index] as i64)
+    for offset in [32, 40, 48]: volatile_write_u64(state.arena + offset, 0)
+    volatile_write_u32(state.arena + 72, 0)
+    if ResetEvent(state.write_event) == 0:
+        state.failed = true
+        val retained = store(lease, state)?
+        return Err("engine-pipe-write-event-reset-failed")
+    if context.?:
+        val gate = context.unwrap()
+        val sampled = time_sample_unix_micros_or_failure()
+        if sampled <= 0 or sampled / 1000 >= gate.expires_at_unix_ms:
+            return Err("engine-pipe-create-start-write-expired-before-submission")
+    state.write_requested = count
+    state.write_attempted = true
+    state = store(lease, state)?
+    val submitted = WriteFile(state.pipe, state.arena + 66048, count as u32, state.arena + 72, state.arena + 32)
+    var accepted = count
+    if submitted != 0:
+        accepted = volatile_read_u32(state.arena + 72) as i64
+        if accepted <= 0 or accepted > count: state.failed = true
+    else:
+        val error = GetLastError() as i64
+        if error == 997: state.write_pending = true
+        else:
+            state.failed = true
+            val result = windows_engine_pipe_completion_v1(error, false, false)
+            if result == "unknown" or result == "pending": state.write_pending = true
+    state = store(lease, state)?
+    if state.failed: return Err("engine-pipe-write-failed-or-uncertain-do-not-replay")
+    Ok(accepted)
+
+pub fn windows_engine_pipe_write_some_v1(lease: WindowsEnginePipeLeaseV1, bytes: [u8]) -> Result<i64, text>:
+    val owner = entry()?
+    write(lease, bytes, nil)
+
+pub fn windows_engine_pipe_write_some_admitted_v1(lease: WindowsEnginePipeLeaseV1, bytes: [u8],
+        context: WindowsEnginePipeWriteContextV1) -> Result<i64, text>:
+    val owner = entry()?
+    val rejected = windows_engine_pipe_write_context_reason_v1(context)
+    if rejected != "": return Err(rejected)
+    val observed = windows_engine_pipe_observe_v1(lease)?
+    write(lease, bytes, Some(context))
+
+@unsafe(reason: "cancellation is request-only; pending buffers remain owned until observed completion", capabilities: [ffi, raw_ptr])
+pub fn windows_engine_pipe_cancel_v1(lease: WindowsEnginePipeLeaseV1) -> Result<WindowsEnginePipePollV1, text>:
+    val owner = entry()?
+    var state = load(lease)?
+    if state.closed: return Ok(poll_value(state))
+    state.closing = true
+    state = store(lease, state)?
+    if state.read_pending:
+        if CancelIoEx(state.pipe, state.arena) == 0 and GetLastError() != 1168u32:
+            return Err("engine-pipe-read-cancellation-unconfirmed-owner-retained")
+    if state.write_pending:
+        if CancelIoEx(state.pipe, state.arena + 32) == 0 and GetLastError() != 1168u32:
+            return Err("engine-pipe-write-cancellation-unconfirmed-owner-retained")
+    state = advance(state)
+    state = store(lease, state)?
+    Ok(poll_value(state))
+
+@unsafe(reason: "only confirmed-complete requests permit closing handles and freeing retained descriptor/buffers", capabilities: [ffi, raw_ptr])
+pub fn windows_engine_pipe_collect_v1(lease: WindowsEnginePipeLeaseV1) -> Result<WindowsEnginePipePollV1, text>:
+    val owner = entry()?
+    val cancelled = windows_engine_pipe_cancel_v1(lease)?
+    if cancelled.read_pending or cancelled.write_pending: return Err("engine-pipe-IO-pending-owner-retained")
+    var state = load(lease)?
+    if state.closed: return Ok(poll_value(state))
+    if state.revision >= 9223372036854775805: return Err("engine-pipe-cleanup-revision-exhausted-owner-retained")
+    if state.pipe != 0 and CloseHandle(state.pipe) != 0: state.pipe = 0
+    if state.read_event != 0 and CloseHandle(state.read_event) != 0: state.read_event = 0
+    if state.write_event != 0 and CloseHandle(state.write_event) != 0: state.write_event = 0
+    if state.descriptor != 0 and LocalFree(state.descriptor) == 0: state.descriptor = 0
+    if state.wide != 0 and HeapFree(state.heap, 0u32, state.wide) != 0: state.wide = 0
+    if state.pipe == 0 and state.read_event == 0 and state.write_event == 0 and state.descriptor == 0 and state.wide == 0:
+        if HeapFree(state.heap, 0u32, state.arena) != 0:
+            state.arena = 0
+            state.closed = true
+    state = store(lease, state)?
+    if not state.closed: return Err("engine-pipe-native-release-failed-owner-retained")
+    Ok(poll_value(state))

@@ -85,3 +85,12 @@ CSV mount options, readonly semantics, missing-source behavior and the actual
 Mounts fields used for inspection. [Docker Windows mount constraints](https://docs.docker.com/reference/cli/docker/container/run/)
 documents Windows source/destination restrictions. These references are not
 native execution evidence.
+
+
+Explicit primary terminal/stdin extension: request SDN version4 binds the
+default-false terminal_tty/stdin_open fields when either is requested. CLI
+create emits the corresponding actual flags, and exact native inspection checks
+Tty/OpenStdin/StdinOnce/AttachStdin under official CLI semantics. Existing false
+request branches keep their previous bytes/commands. Focused executable source
+and NOT_RUN manual: windows_docker_primary_terminal_v4_spec.spl / .md in the
+same system-spec directories. No native terminal qualification is claimed.

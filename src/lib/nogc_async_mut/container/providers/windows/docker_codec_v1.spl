@@ -19,7 +19,7 @@ pub fn windows_docker_request_encode_v1(policy: WindowsDockerPolicyV1,
         request: WindowsDockerRequestV1) -> Result<text, text>:
     val digest = windows_docker_request_digest_v1(policy, request)?
     var fields: Dict<text, SdnValue> = {
-        "version": SdnValue.Int(if request.mounts.len() > 0: 3 elif request.working_directory == "": 1 else: 2), "kind": SdnValue.String("windows-docker-request"),
+        "version": SdnValue.Int(if request.terminal_tty or request.stdin_open: 4 elif request.mounts.len() > 0: 3 elif request.working_directory == "": 1 else: 2), "kind": SdnValue.String("windows-docker-request"),
         "podUid": SdnValue.String(request.pod_uid), "attempt": SdnValue.Int(request.attempt),
         "operationId": SdnValue.String(request.operation_id), "image": SdnValue.String(request.image),
         "command": text_array(request.command), "args": text_array(request.args),
@@ -34,6 +34,9 @@ pub fn windows_docker_request_encode_v1(policy: WindowsDockerPolicyV1,
                 "guestRoot": SdnValue.String(mount.guest_root), "readOnly": SdnValue.Bool(mount.read_only)}
             mounts = mounts.push(SdnValue.Dict(item))
         fields["mounts"] = SdnValue.Array(mounts)
+    if request.terminal_tty or request.stdin_open:
+        fields["terminalTty"] = SdnValue.Bool(request.terminal_tty)
+        fields["stdinOpen"] = SdnValue.Bool(request.stdin_open)
     val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
     if source.len() > WINDOWS_DOCKER_REQUEST_MAX_BYTES_V1: return Err("docker-request-record-byte-limit")
     Ok(source)
@@ -73,32 +76,46 @@ fn field_mounts(fields: Dict<text, SdnValue>, spans: Dict<text, SdnSpan>) -> Res
     Ok([WindowsDockerMountV1(host_root: field_text(item, "hostRoot", spans)?,
         guest_root: field_text(item, "guestRoot", spans)?, read_only: read_only)])
 
+fn field_boolean(fields: Dict<text, SdnValue>, key: text, spans: Dict<text, SdnSpan>) -> Result<bool, RejectionV1>:
+    match require(fields, key, "", spans)?:
+        case SdnValue.Bool(value): Ok(value)
+        case _: Err(reject("type", key, "expected bool", spans))
+
 fn decode_fields(policy: WindowsDockerPolicyV1,
         source: text) -> Result<WindowsDockerRequestV1, RejectionV1>:
     val parsed = parse_resource_document(source)?
     val spans = parsed.1
     val fields = as_dict(parsed.0, "", spans)?
     only_known(fields, ["version", "kind", "podUid", "attempt", "operationId", "image", "command",
-        "args", "cpuCount", "memoryLimitBytes", "network", "requestDigest", "workingDirectory", "mounts"], "", spans)?
+        "args", "cpuCount", "memoryLimitBytes", "network", "requestDigest", "workingDirectory", "mounts", "terminalTty", "stdinOpen"], "", spans)?
     val version = field_integer(fields, "version", spans)?
-    if version != 1 and version != 2 and version != 3:
+    if version != 1 and version != 2 and version != 3 and version != 4:
         return Err(reject("version", "version", "unsupported request version", spans))
     var working_directory = ""
-    if version == 2 or version == 3:
+    if version == 2 or version == 3 or (version == 4 and fields.has("workingDirectory")):
         working_directory = field_text(fields, "workingDirectory", spans)?
         if working_directory == "": return Err(reject("request", "workingDirectory", "explicit directory required", spans))
     elif fields.has("workingDirectory"):
         return Err(reject("version", "workingDirectory", "directory requires version two", spans))
     var mounts: [WindowsDockerMountV1] = []
-    if version == 3: mounts = field_mounts(fields, spans)?
+    if version == 3 or (version == 4 and fields.has("mounts")): mounts = field_mounts(fields, spans)?
     elif fields.has("mounts"): return Err(reject("version", "mounts", "mounts require version three", spans))
+    var terminal_tty = false
+    var stdin_open = false
+    if version == 4:
+        terminal_tty = field_boolean(fields, "terminalTty", spans)?
+        stdin_open = field_boolean(fields, "stdinOpen", spans)?
+        if not terminal_tty and not stdin_open:
+            return Err(reject("version", "", "version four requires an explicit terminal or stdin flag", spans))
+    elif fields.has("terminalTty") or fields.has("stdinOpen"):
+        return Err(reject("version", "terminalTty", "terminal flags require version four", spans))
     if field_text(fields, "kind", spans)? != "windows-docker-request":
         return Err(reject("kind", "kind", "wrong request kind", spans))
     val request = WindowsDockerRequestV1(pod_uid: field_text(fields, "podUid", spans)?,
         attempt: field_integer(fields, "attempt", spans)?, operation_id: field_text(fields, "operationId", spans)?,
         image: field_text(fields, "image", spans)?, command: field_array(fields, "command", spans)?,
         args: field_array(fields, "args", spans)?, cpu_count: field_integer(fields, "cpuCount", spans)?,
-        memory_limit_bytes: field_integer(fields, "memoryLimitBytes", spans)?, network: field_text(fields, "network", spans)?, working_directory: working_directory, mounts: mounts)
+        memory_limit_bytes: field_integer(fields, "memoryLimitBytes", spans)?, network: field_text(fields, "network", spans)?, working_directory: working_directory, mounts: mounts, terminal_tty: terminal_tty, stdin_open: stdin_open)
     val digest = match windows_docker_request_digest_v1(policy, request):
         case Ok(value): value
         case Err(reason): return Err(reject("request", "", reason, spans))

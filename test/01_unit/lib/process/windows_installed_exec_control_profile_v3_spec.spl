@@ -1,0 +1,150 @@
+# @req REQ-WIC-001 REQ-WIC-002 REQ-WIC-003 REQ-WIC-004
+# Pure codec scenarios authored NOT_RUN. No installed/host observation fixture.
+use std.spec.*
+use std.nogc_async_mut.container.providers.windows.docker_exec_control_policy_v3.*
+use std.nogc_async_mut.container.providers.windows.docker_policy_codec_v1.windows_docker_policy_encode_v1
+use std.common.contracts.container.windows_stream_v3.{WindowsContainerStreamPolicyV3,
+    windows_container_stream_policy_bytes_v3}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.text_bytes.bytes_to_text
+use test.fixtures.orchestration.simple_container_windows_adapter_fixture_v2.windows_adapter_policy_fixture_v2
+
+fn profile() -> WindowsInstalledExecControlProfileV3:
+    WindowsInstalledExecControlProfileV3(docker_policy: windows_adapter_policy_fixture_v2(),
+        stream_policy: WindowsContainerStreamPolicyV3(root: "C:\\Simple\\brokers\\fixture",
+            broker_program: "C:\\Simple\\broker.exe",
+            broker_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            environment: ["SystemRoot=C:\\Windows", "TASK=value=with=equals"],
+            directory: "C:\\Simple", api_version: "1.48", timeout_ms: 60000))
+
+fn dictionary(source: text) -> Dict<text, SdnValue>:
+    val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 1048576,
+        max_depth: 4, max_nodes: 512, max_rows: 0, max_cells: 0, max_columns: 32)).unwrap()
+    match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: fail("fixture requires canonical dictionary")
+
+fn string_value(value: SdnValue) -> text:
+    match value:
+        case SdnValue.String(content): content
+        case _: fail("fixture requires text")
+
+fn wrapper() -> Dict<text, SdnValue>:
+    dictionary(windows_installed_exec_control_profile_encode_v3(profile()).unwrap())
+
+fn encode(values: Dict<text, SdnValue>) -> text:
+    sdn_encode_canonical(SdnValue.Dict(values)) + "\n"
+
+fn replace_stream(values: Dict<text, SdnValue>, source: text) -> text:
+    var changed = values
+    changed["streamPolicy"] = SdnValue.String(source)
+    changed["streamPolicyDigest"] = SdnValue.String(sha256_text(source))
+    encode(changed)
+
+describe "Windows installed exec control canonical policy codec":
+    it "REQ-WIC-001 roundtrips exact component bytes and derives the wrapper digest":
+        val original = profile()
+        val source = windows_installed_exec_control_profile_encode_v3(original).unwrap()
+        val decoded = windows_installed_exec_control_profile_decode_v3(source).unwrap()
+        expect(windows_installed_exec_control_profile_encode_v3(decoded).unwrap()).to_equal(source)
+        expect(decoded.stream_policy.environment).to_equal(original.stream_policy.environment)
+        val values = dictionary(source)
+        val docker = windows_docker_policy_encode_v1(original.docker_policy).unwrap()
+        val stream = windows_container_stream_policy_bytes_v3(original.stream_policy).unwrap()
+        expect(string_value(values["dockerPolicy"])).to_equal(docker)
+        expect(string_value(values["streamPolicy"])).to_equal(stream)
+        expect(string_value(values["dockerPolicyDigest"])).to_equal(sha256_text(docker))
+        expect(string_value(values["streamPolicyDigest"])).to_equal(sha256_text(stream))
+        expect(windows_installed_exec_control_profile_digest_v3(original).unwrap()).to_equal(sha256_text(source))
+        expect(windows_installed_exec_control_profile_digest_v3(original).unwrap() == sha256_text(docker)).to_equal(false)
+        var changed = original
+        changed.stream_policy.timeout_ms = 60001
+        expect(windows_installed_exec_control_profile_digest_v3(changed).unwrap() == sha256_text(source)).to_equal(false)
+        changed = original
+        changed.docker_policy.engine_id = "different-engine"
+        expect(windows_installed_exec_control_profile_digest_v3(changed).unwrap() == sha256_text(source)).to_equal(false)
+        changed = original
+        changed.docker_policy.docker_executable = "docker.exe"
+        expect(windows_installed_exec_control_profile_encode_v3(changed).is_err()).to_equal(true)
+        changed = original
+        changed.stream_policy.environment = ["TASK=a", "task=b"]
+        expect(windows_installed_exec_control_profile_encode_v3(changed).is_err()).to_equal(true)
+
+    it "REQ-WIC-002 refuses swapped hashes, caller observation hash and malformed wrapper fields":
+        var values = wrapper()
+        val docker_hash = values["dockerPolicyDigest"]
+        expect(string_value(docker_hash) == string_value(values["streamPolicyDigest"])).to_equal(false)
+        values["dockerPolicyDigest"] = values["streamPolicyDigest"]
+        values["streamPolicyDigest"] = docker_hash
+        expect(windows_installed_exec_control_profile_decode_v3(encode(values)).unwrap_err()).to_equal("windows-installed-exec-component-digest-mismatch")
+        values = wrapper()
+        values["installedPolicyDigest"] = SdnValue.String(sha256_text(encode(values)))
+        expect(windows_installed_exec_control_profile_decode_v3(encode(values)).is_err()).to_equal(true)
+        values = wrapper()
+        values["version"] = SdnValue.String("3")
+        expect(windows_installed_exec_control_profile_decode_v3(encode(values)).is_err()).to_equal(true)
+        values = wrapper()
+        values["dockerPolicy"] = SdnValue.Dict(dictionary(string_value(values["dockerPolicy"])))
+        expect(windows_installed_exec_control_profile_decode_v3(encode(values)).is_err()).to_equal(true)
+        var missing: Dict<text, SdnValue> = {}
+        for key in wrapper().keys():
+            if key != "streamPolicyDigest": missing[key] = wrapper()[key]
+        expect(windows_installed_exec_control_profile_decode_v3(encode(missing)).is_err()).to_equal(true)
+        val valid = encode(wrapper())
+        val duplicate = valid.substring(0, valid.len() - 2) + ", \"kind\": \"windows-installed-exec-control-profile-v3\"}\n"
+        expect(windows_installed_exec_control_profile_decode_v3(duplicate).is_err()).to_equal(true)
+        expect(windows_installed_exec_control_profile_decode_v3(valid + "# noncanonical alias\n").unwrap_err()).to_equal("windows-installed-exec-wrapper-not-canonical")
+
+    it "REQ-WIC-003 rejects nested constants and env aliases even with matching component hashes":
+        val original = wrapper()
+        val stream = string_value(original["streamPolicy"])
+        for key in ["headerLimit", "controlLimit", "frameLimit", "pendingLimit"]:
+            var values = dictionary(stream)
+            values[key] = SdnValue.Int(1)
+            expect(windows_installed_exec_control_profile_decode_v3(replace_stream(original,
+                sdn_encode_canonical(SdnValue.Dict(values)))).unwrap_err()).to_equal("windows-installed-exec-stream-constant")
+        val malformed = [SdnValue.Dict({"SystemRoot": SdnValue.String("C:\\Windows")}),
+            SdnValue.Array([SdnValue.String("SystemRoot=C:\\Windows")]),
+            SdnValue.Array([SdnValue.Array([SdnValue.String("SystemRoot")])]),
+            SdnValue.Array([SdnValue.Array([SdnValue.String("SystemRoot"), SdnValue.Int(2)])]),
+            SdnValue.Array([SdnValue.Array([SdnValue.String("TASK"), SdnValue.String("a")]),
+                SdnValue.Array([SdnValue.String("task"), SdnValue.String("b")])])]
+        for environment in malformed:
+            var values = dictionary(stream)
+            values["environment"] = environment
+            expect(windows_installed_exec_control_profile_decode_v3(replace_stream(original,
+                sdn_encode_canonical(SdnValue.Dict(values)))).is_err()).to_equal(true)
+        var values = dictionary(stream)
+        values["unknown"] = SdnValue.Int(1)
+        expect(windows_installed_exec_control_profile_decode_v3(replace_stream(original,
+            sdn_encode_canonical(SdnValue.Dict(values)))).is_err()).to_equal(true)
+        values = dictionary(stream)
+        values["timeoutMs"] = SdnValue.String("60000")
+        expect(windows_installed_exec_control_profile_decode_v3(replace_stream(original,
+            sdn_encode_canonical(SdnValue.Dict(values)))).is_err()).to_equal(true)
+        val duplicate = stream.substring(0, stream.len() - 1) + ", \"apiVersion\": \"1.48\"}"
+        expect(windows_installed_exec_control_profile_decode_v3(replace_stream(original, duplicate)).is_err()).to_equal(true)
+        expect(windows_installed_exec_control_profile_decode_v3(replace_stream(original, stream + "\n")).unwrap_err()).to_equal("windows-installed-exec-stream-not-canonical")
+        var mismatch = original
+        mismatch["streamPolicy"] = SdnValue.String(stream + "\n")
+        expect(windows_installed_exec_control_profile_decode_v3(encode(mismatch)).unwrap_err()).to_equal("windows-installed-exec-component-digest-mismatch")
+
+    it "REQ-WIC-004 enforces explicit UTF8 source and component byte limits":
+        var bytes = [0u8; WINDOWS_INSTALLED_EXEC_CONTROL_MAX_BYTES_V3 + 2]
+        for index in 0..bytes.len() / 2:
+            bytes[index * 2] = 195u8
+            bytes[index * 2 + 1] = 169u8
+        val source = bytes_to_text(bytes)
+        expect(source.byte_len()).to_equal(WINDOWS_INSTALLED_EXEC_CONTROL_MAX_BYTES_V3 + 2)
+        expect(windows_installed_exec_control_profile_decode_v3(source).unwrap_err()).to_equal("windows-installed-exec-record-byte-bound")
+        var values = wrapper()
+        val oversized = bytes_to_text([120u8; 16385])
+        values["dockerPolicy"] = SdnValue.String(oversized)
+        values["dockerPolicyDigest"] = SdnValue.String(sha256_text(oversized))
+        expect(windows_installed_exec_control_profile_decode_v3(encode(values)).unwrap_err()).to_equal("windows-installed-exec-component-byte-bound")
+        val oversized_stream = bytes_to_text([120u8; WINDOWS_INSTALLED_EXEC_STREAM_MAX_BYTES_V3 + 1])
+        expect(windows_installed_exec_control_profile_decode_v3(replace_stream(wrapper(), oversized_stream)).unwrap_err()).to_equal("windows-installed-exec-component-byte-bound")

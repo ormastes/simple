@@ -1,0 +1,324 @@
+# Pure Docker wire vectors only. SOURCE-ONLY NOT_RUN, no Windows/Engine effects.
+use std.spec.*
+use std.common.text_bytes.{boxed_text_bytes_checked, bytes_to_text}
+use std.common.json.value.{JsonValue, json_value_object_from, json_value_str_array, json_value_serialize, json_parse_value_strict, json_value_get}
+use std.nogc_async_mut.container.providers.windows.docker_engine_codec_v3.*
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{WindowsDockerPolicyV1, WindowsDockerRequestV1, WindowsDockerMountV1, windows_docker_request_digest_v1}
+use std.nogc_async_mut.container.providers.windows.docker_scope_v2.windows_docker_scope_values_v2
+use test.fixtures.orchestration.simple_container_windows_adapter_fixture_v2.{windows_adapter_scope_fixture_v2, windows_adapter_policy_fixture_v2, windows_adapter_native_request_fixture_v2}
+
+fn engine_cid_v3() -> text: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+fn engine_eid_v3() -> text: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+fn engine_test_bytes_v3(value: text) -> [u8]: boxed_text_bytes_checked(value).unwrap()
+fn engine_test_slice_v3(value: [u8], start: i64, end: i64) -> [u8]: [for index in start..end: value[index]]
+
+fn engine_request_fixture_v3(tty: bool = false) -> WindowsEngineExecRequestV3:
+    WindowsEngineExecRequestV3(container_id: engine_cid_v3(), argv: ["C:\\work\\tool.exe", "--echo", "a b", "quoted\"value", "λ"],
+        environment: [("A", "one"), ("PATH", "C:\\work")], working_directory: "C:\\work", tty: tty, stdin_requested: true)
+
+fn engine_inspect_fixture_v3(user: text = "ContainerUser", observe_user: bool = true, observe_privilege: bool = true) -> text:
+    val request = engine_request_fixture_v3()
+    val arguments = [for index in 1..request.argv.len(): request.argv[index]]
+    var process = json_value_object_from([("entrypoint", JsonValue.Str(request.argv[0])),
+        ("arguments", json_value_str_array(arguments)), ("tty", JsonValue.Bool(false))])
+    match process:
+        case JsonValue.Object(keys, values):
+            var next_keys = keys
+            var next_values = values
+            if observe_user:
+                next_keys.push("user")
+                next_values.push(JsonValue.Str(user))
+            if observe_privilege:
+                next_keys.push("privileged")
+                next_values.push(JsonValue.Bool(false))
+            process = JsonValue.Object(keys: next_keys, values: next_values)
+        case _: panic("fixture process is not an object")
+    json_value_serialize(json_value_object_from([("ID", JsonValue.Str(engine_eid_v3())),
+        ("ContainerID", JsonValue.Str(engine_cid_v3())), ("ProcessConfig", process),
+        ("Running", JsonValue.Bool(true)), ("ExitCode", JsonValue.Int(0)),
+        ("OpenStdin", JsonValue.Bool(true)), ("OpenStdout", JsonValue.Bool(true)), ("OpenStderr", JsonValue.Bool(true))]))
+
+fn engine_response_fixture_v3(source: text, operation: text, tty: bool = false) -> Result<WindowsEngineHttpResponseV3, text>:
+    match windows_engine_http_parse_v3(engine_test_bytes_v3(source), operation, tty)?:
+        case WindowsEngineHttpParseV3.Complete(response): Ok(response)
+        case WindowsEngineHttpParseV3.NeedMore: Err("fixture unexpectedly incomplete")
+
+fn engine_pending_fixture_v3(bytes: [u8], operation: text) -> bool:
+    match windows_engine_http_parse_v3(bytes, operation, false).unwrap():
+        case WindowsEngineHttpParseV3.NeedMore: true
+        case WindowsEngineHttpParseV3.Complete(_): false
+
+describe "Docker Engine exact request builders":
+    it "pins version and exact IDs and keeps container and exec resize distinct":
+        expect(windows_engine_info_v3("1.48").unwrap().target).to_equal("/v1.48/info")
+        expect(windows_engine_info_v3("1.47").is_err()).to_equal(true)
+        expect(windows_engine_info_v3("1.49").is_err()).to_equal(true)
+        expect(windows_engine_container_inspect_v3("1.48", "short").is_err()).to_equal(true)
+        expect(windows_engine_container_inspect_v3("1.48", engine_cid_v3()).unwrap().target).to_equal("/v1.48/containers/" + engine_cid_v3() + "/json")
+        expect(windows_engine_exec_inspect_v3("1.48", engine_eid_v3()).unwrap().target).to_equal("/v1.48/exec/" + engine_eid_v3() + "/json")
+        expect(windows_engine_exec_resize_v3("1.48", engine_eid_v3(), 24, 80, true).unwrap().target).to_equal("/v1.48/exec/" + engine_eid_v3() + "/resize?h=24&w=80")
+        expect(windows_engine_container_resize_v3("1.48", engine_cid_v3(), 24, 80, true).unwrap().target).to_equal("/v1.48/containers/" + engine_cid_v3() + "/resize?h=24&w=80")
+        expect(windows_engine_exec_resize_v3("1.48", engine_eid_v3(), 0, 80, true).is_err()).to_equal(true)
+        expect(windows_engine_exec_resize_v3("1.48", engine_eid_v3(), 24, 32768, true).is_err()).to_equal(true)
+        expect(windows_engine_container_resize_v3("1.48", engine_cid_v3(), 24, 80, false).is_err()).to_equal(true)
+
+    it "serializes exact exec argv/environment and explicit unprivileged ContainerUser request":
+        val request = engine_request_fixture_v3(true)
+        val created = windows_engine_exec_create_v3("1.48", request).unwrap()
+        val value = json_parse_value_strict(bytes_to_text(created.body)).unwrap()
+        expect(json_value_get(value, "Cmd").unwrap()).to_equal(json_value_str_array(request.argv))
+        expect(json_value_get(value, "User").unwrap()).to_equal(JsonValue.Str("ContainerUser"))
+        expect(json_value_get(value, "Privileged").unwrap()).to_equal(JsonValue.Bool(false))
+        expect(json_value_get(value, "Tty").unwrap()).to_equal(JsonValue.Bool(true))
+        expect(json_value_get(value, "Env").unwrap()).to_equal(json_value_str_array(["A=one", "PATH=C:\\work"]))
+        expect(json_value_get(value, "AttachStdin").unwrap()).to_equal(JsonValue.Bool(true))
+        var output_only = request
+        output_only.stdin_requested = false
+        val output_json = json_parse_value_strict(bytes_to_text(windows_engine_exec_create_v3("1.48", output_only).unwrap().body)).unwrap()
+        expect(json_value_get(output_json, "AttachStdin").unwrap()).to_equal(JsonValue.Bool(false))
+        expect(created.method).to_equal("POST")
+        expect(created.target).to_equal("/v1.48/containers/" + engine_cid_v3() + "/exec")
+        val started = windows_engine_exec_start_v3("1.48", engine_eid_v3(), true).unwrap()
+        expect(started.hijack).to_equal(true)
+        expect(bytes_to_text(started.body)).to_equal("{\"Detach\":false,\"Tty\":true}")
+        expect(windows_engine_attach_v3("1.48", engine_cid_v3(), false, false).unwrap().target.contains("stdin=0")).to_equal(true)
+        expect(windows_engine_attach_v3("1.48", engine_cid_v3(), true, true).unwrap().target.contains("stdin=1")).to_equal(true)
+
+    it "rejects ambiguous environment keys, empty argv, unsafe program and NUL":
+        var request = engine_request_fixture_v3()
+        request.environment = [("Path", "one"), ("PATH", "two")]
+        expect(windows_engine_exec_create_v3("1.48", request).is_err()).to_equal(true)
+        request.environment = [("BAD=NAME", "one")]
+        expect(windows_engine_exec_create_v3("1.48", request).is_err()).to_equal(true)
+        request = engine_request_fixture_v3()
+        request.argv = []
+        expect(windows_engine_exec_create_v3("1.48", request).is_err()).to_equal(true)
+        request.argv = ["relative.exe"]
+        expect(windows_engine_exec_create_v3("1.48", request).is_err()).to_equal(true)
+        request = engine_request_fixture_v3()
+        request.argv = [request.argv[0], "bad\0argument"]
+        expect(windows_engine_exec_create_v3("1.48", request).is_err()).to_equal(true)
+
+describe "Docker typed strict JSON observations":
+    it "keeps actual IDs, argv, TTY and optional user/privilege observations distinct":
+        val decoded = windows_engine_exec_inspect_decode_v3(engine_test_bytes_v3(engine_inspect_fixture_v3()), engine_eid_v3(), engine_request_fixture_v3()).unwrap()
+        expect(decoded.container_id).to_equal(engine_cid_v3())
+        expect(decoded.exec_id).to_equal(engine_eid_v3())
+        expect(decoded.argv).to_equal(engine_request_fixture_v3().argv)
+        expect(decoded.observed_user.unwrap()).to_equal("ContainerUser")
+        expect(decoded.observed_privileged.unwrap()).to_equal(false)
+        val unobservable = windows_engine_exec_inspect_decode_v3(engine_test_bytes_v3(engine_inspect_fixture_v3("", false, false)), engine_eid_v3(), engine_request_fixture_v3()).unwrap()
+        expect(unobservable.observed_user).to_be_nil()
+        expect(unobservable.observed_privileged).to_be_nil()
+        val empty_user = windows_engine_exec_inspect_decode_v3(engine_test_bytes_v3(engine_inspect_fixture_v3("")), engine_eid_v3(), engine_request_fixture_v3()).unwrap()
+        expect(empty_user.observed_user).to_be_nil()
+
+    it "rejects duplicate decoded keys, missing/type errors and wrong exact exec binding":
+        val source = engine_inspect_fixture_v3()
+        for malformed in [source.replace("\"Running\":true", "\"Running\":true,\"Running\":false"),
+                source.replace("\"entrypoint\":", "\"entrypoint\":false,\"unused\":"),
+                source.replace("\"tty\":false", "\"tty\":true"),
+                source.replace("\"privileged\":false", "\"privileged\":true"),
+                source.replace("\"OpenStderr\":true", "\"OpenStderr\":false"),
+                source.replace("\"ExitCode\":0", "\"ExitCode\":0.0")]:
+            expect(malformed == source).to_equal(false)
+            expect(windows_engine_exec_inspect_decode_v3(engine_test_bytes_v3(malformed), engine_eid_v3(), engine_request_fixture_v3()).is_err()).to_equal(true)
+        expect(windows_engine_exec_inspect_decode_v3(engine_test_bytes_v3(engine_inspect_fixture_v3("ContainerAdministrator")), engine_eid_v3(), engine_request_fixture_v3()).is_err()).to_equal(true)
+        expect(windows_engine_exec_inspect_decode_v3(engine_test_bytes_v3(source), engine_cid_v3(), engine_request_fixture_v3()).is_err()).to_equal(true)
+        expect(windows_engine_exec_create_decode_v3(engine_test_bytes_v3("{\"Id\":\"" + engine_eid_v3() + "\",\"\\u0049d\":\"" + engine_eid_v3() + "\"}")).is_err()).to_equal(true)
+        expect(windows_engine_exec_create_decode_v3(engine_test_bytes_v3("{\"Id\":true}")).is_err()).to_equal(true)
+        expect(windows_engine_exec_create_decode_v3(engine_test_bytes_v3("{\"Id\":\"\\ud800\"}")).is_err()).to_equal(true)
+
+    it "requires actual Windows engine metadata and target container configured user":
+        val info = windows_engine_info_decode_v3(engine_test_bytes_v3("{\"ID\":\"engine-a\",\"KernelVersion\":\"10.0\",\"OSType\":\"windows\"}")).unwrap()
+        expect(info.engine_id).to_equal("engine-a")
+        expect(windows_engine_info_decode_v3(engine_test_bytes_v3("{\"ID\":\"engine-a\",\"KernelVersion\":\"10.0\"}")).is_err()).to_equal(true)
+        val source = "{\"Id\":\"" + engine_cid_v3() + "\",\"Config\":{\"User\":\"ContainerUser\",\"Tty\":false},\"State\":{\"Running\":true}}"
+        expect(windows_engine_container_decode_v3(engine_test_bytes_v3(source), engine_cid_v3(), false).unwrap().running).to_equal(true)
+        expect(windows_engine_container_decode_v3(engine_test_bytes_v3(source.replace("ContainerUser", "ContainerAdministrator")), engine_cid_v3(), false).is_err()).to_equal(true)
+
+describe "Docker bounded HTTP and hijack response framing":
+    it "preserves exact framed body and leftover bytes without fabricating an empty success":
+        val body = "{\"Id\":\"" + engine_eid_v3() + "\"}"
+        val response = engine_response_fixture_v3("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: " + body.byte_len().to_text() + "\r\n\r\n" + body + "NEXT", "exec-create").unwrap()
+        expect(bytes_to_text(response.body)).to_equal(body)
+        expect(bytes_to_text(response.leftover)).to_equal("NEXT")
+        expect(engine_pending_fixture_v3([], "info")).to_equal(true)
+        expect(engine_pending_fixture_v3(engine_test_bytes_v3("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Type: application/json\r\n\r\n{}"), "info")).to_equal(true)
+
+    it "rejects ambiguous lengths, malformed headers/statuses and unsupported content types":
+        for headers in ["Content-Length: 2\r\nTransfer-Encoding: chunked", "Content-Length: 2\r\nContent-Length: 2",
+                "Content-Length: 999999999999999999999", "Content-Length: 2\r\n bad-fold: x"]:
+            expect(windows_engine_http_parse_v3(engine_test_bytes_v3("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" + headers + "\r\n\r\n{}"), "info", false).is_err()).to_equal(true)
+        expect(engine_response_fixture_v3("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n", "info").is_err()).to_equal(true)
+        expect(engine_response_fixture_v3("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\n{}", "info").is_err()).to_equal(true)
+
+    it "transitions hijack to raw/multiplexed mode preserving every initial byte":
+        val raw = engine_response_fixture_v3("HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/vnd.docker.raw-stream\r\n\r\nfirst", "attach", true).unwrap()
+        expect(raw.stream_mode).to_equal("raw")
+        expect(bytes_to_text(raw.leftover)).to_equal("first")
+        val mux = engine_response_fixture_v3("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\n\r\nbytes", "exec-start").unwrap()
+        expect(mux.stream_mode).to_equal("multiplexed")
+        expect(bytes_to_text(mux.leftover)).to_equal("bytes")
+        expect(engine_response_fixture_v3("HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\n\r\n", "attach", true).is_err()).to_equal(true)
+        expect(engine_response_fixture_v3("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.docker.raw-stream\r\n\r\n", "exec-start").is_err()).to_equal(true)
+
+    it "decodes bounded chunked control bytes without text conversion across chunks":
+        val response = engine_response_fixture_v3("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n{\r\n1\r\n}\r\n0\r\n\r\nTAIL", "info").unwrap()
+        expect(response.body).to_equal([123u8, 125u8])
+        expect(bytes_to_text(response.leftover)).to_equal("TAIL")
+        expect(engine_pending_fixture_v3(engine_test_bytes_v3("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{"), "info")).to_equal(true)
+        expect(engine_response_fixture_v3("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nBad: trailer\r\n\r\n", "info").is_err()).to_equal(true)
+
+describe "Docker binary TTY and strict multiplexed output":
+    it "preserves split binary stdout/stderr payload and closes only at frame boundary":
+        val wire: [u8] = [1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 3u8, 65u8, 0u8, 255u8, 2u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 2u8, 66u8, 67u8]
+        val first = windows_engine_mux_feed_v3(windows_engine_mux_open_v3(false), engine_test_slice_v3(wire, 0, 10), false).unwrap()
+        expect(first.chunks[0].stream).to_equal("stdout")
+        expect(first.chunks[0].native_tag).to_equal(1)
+        expect(first.chunks[0].bytes).to_equal([65u8, 0u8])
+        expect(first.state.payload_remaining).to_equal(1)
+        val second = windows_engine_mux_feed_v3(first.state, engine_test_slice_v3(wire, 10, wire.len()), true).unwrap()
+        expect(second.chunks[0].stream).to_equal("stdout")
+        expect(second.chunks[0].bytes).to_equal([255u8])
+        expect(second.chunks[1].stream).to_equal("stderr")
+        expect(second.chunks[1].native_tag).to_equal(2)
+        expect(second.chunks[1].bytes).to_equal([66u8, 67u8])
+        expect(second.state.closed).to_equal(true)
+        val raw = windows_engine_mux_feed_v3(windows_engine_mux_open_v3(true), wire, true).unwrap()
+        expect(raw.chunks[0].stream).to_equal("tty")
+        expect(raw.chunks[0].native_tag).to_equal(-1)
+        expect(raw.chunks[0].bytes).to_equal(wire)
+
+    it "retains partial headers and refuses invalid tags, reserved bytes, oversize and truncated EOF":
+        val partial = windows_engine_mux_feed_v3(windows_engine_mux_open_v3(false), [1u8, 0u8, 0u8], false).unwrap()
+        expect(partial.state.header).to_equal([1u8, 0u8, 0u8])
+        expect(partial.chunks.len()).to_equal(0)
+        expect(windows_engine_mux_feed_v3(partial.state, [], true).is_err()).to_equal(true)
+        for header in [[3u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8],
+                [1u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8], [1u8, 0u8, 0u8, 0u8, 0u8, 16u8, 0u8, 1u8]]:
+            expect(windows_engine_mux_feed_v3(windows_engine_mux_open_v3(false), header, false).is_err()).to_equal(true)
+        val header_only = windows_engine_mux_feed_v3(windows_engine_mux_open_v3(false), [1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 3u8], false).unwrap()
+        expect(header_only.chunks.len()).to_equal(0)
+        expect(header_only.state.payload_remaining).to_equal(3)
+        expect(windows_engine_mux_feed_v3(header_only.state, [1u8], true).is_err()).to_equal(true)
+
+
+fn engine_bound_container_fixture_v3(policy: WindowsDockerPolicyV1, request: WindowsDockerRequestV1) -> text:
+    val scope = windows_adapter_scope_fixture_v2()
+    val names = ["simple.provider", "simple.pod", "simple.attempt", "simple.operation", "simple.boot", "simple.generation", "simple.request",
+        "simple.physical-host", "simple.service-scope", "simple.service-incarnation", "simple.continuity-mode", "simple.native-machine", "simple.fence"]
+    val values = ["windows-docker-process-v1", request.pod_uid, request.attempt.to_text(), request.operation_id, "", "4",
+        windows_docker_request_digest_v1(policy, request).unwrap()] + windows_docker_scope_values_v2(scope).unwrap()
+    var label_values: [JsonValue] = []
+    for value in values: label_values.push(JsonValue.Str(value))
+    val labels = JsonValue.Object(keys: names, values: label_values)
+    var mounts: [JsonValue] = []
+    for mount in request.mounts:
+        mounts.push(json_value_object_from([("Type", JsonValue.Str("bind")), ("Source", JsonValue.Str(mount.host_root)),
+            ("Destination", JsonValue.Str(mount.guest_root)), ("RW", JsonValue.Bool(not mount.read_only))]))
+    val arguments = [for index in 1..request.command.len(): request.command[index]] + request.args
+    val config = json_value_object_from([("Image", JsonValue.Str(request.image)), ("User", JsonValue.Str("ContainerUser")),
+        ("Tty", JsonValue.Bool(request.terminal_tty)), ("OpenStdin", JsonValue.Bool(request.stdin_open)),
+        ("StdinOnce", JsonValue.Bool(request.stdin_open)), ("AttachStdin", JsonValue.Bool(request.stdin_open)),
+        ("WorkingDir", JsonValue.Str(request.working_directory)),
+        ("Entrypoint", json_value_str_array([request.command[0]])), ("Cmd", json_value_str_array(arguments)), ("Labels", labels)])
+    val host = json_value_object_from([("Isolation", JsonValue.Str("process")), ("NetworkMode", JsonValue.Str("none")),
+        ("Privileged", JsonValue.Bool(false)), ("CpuCount", JsonValue.Int(request.cpu_count)), ("Memory", JsonValue.Int(request.memory_limit_bytes))])
+    json_value_serialize(json_value_object_from([("Id", JsonValue.Str(engine_cid_v3())), ("Image", JsonValue.Str(policy.expected_image_id)),
+        ("Config", config), ("HostConfig", host), ("State", json_value_object_from([("Running", JsonValue.Bool(true))])), ("Mounts", JsonValue.Array(mounts))]))
+
+fn engine_bound_info_fixture_v3(policy: WindowsDockerPolicyV1) -> [u8]:
+    engine_test_bytes_v3(json_value_serialize(json_value_object_from([("ID", JsonValue.Str(policy.engine_id)),
+        ("KernelVersion", JsonValue.Str(policy.expected_kernel_version)), ("OSType", JsonValue.Str("windows"))])))
+
+describe "Docker private broker independent installed-policy binding":
+    it "requires actual image, resource ceilings, network, scope, command and zero mounts":
+        val policy = windows_adapter_policy_fixture_v2()
+        val request = windows_adapter_native_request_fixture_v2()
+        val source = engine_bound_container_fixture_v3(policy, request)
+        val bound = windows_engine_container_binding_decode_v3(engine_bound_info_fixture_v3(policy), engine_test_bytes_v3(source),
+            engine_cid_v3(), policy, request, windows_adapter_scope_fixture_v2(), false).unwrap()
+        expect(bound.engine.engine_id).to_equal(policy.engine_id)
+        expect(bound.container.configured_user).to_equal("ContainerUser")
+        expect(bound.request_digest).to_equal(windows_docker_request_digest_v1(policy, request).unwrap())
+        for altered in [source.replace("\"CpuCount\":2", "\"CpuCount\":3"),
+                source.replace("\"Memory\":536870912", "\"Memory\":1073741824"),
+                source.replace("\"Isolation\":\"process\"", "\"Isolation\":\"hyperv\""),
+                source.replace("\"NetworkMode\":\"none\"", "\"NetworkMode\":\"nat\""),
+                source.replace("ContainerUser", "ContainerAdministrator"),
+                source.replace("\"simple.boot\":\"\"", "\"simple.boot\":\"invented\""),
+                source.replace("\"simple.operation\":\"operation-a\"", "\"simple.operation\":\"operation-b\""),
+                source.replace("\"Cmd\":[]", "\"Cmd\":[\"inherited-image-command\"]"),
+                source.replace("\"Mounts\":[]", "\"Mounts\":[{}]")]:
+            expect(altered == source).to_equal(false)
+            expect(windows_engine_container_binding_decode_v3(engine_bound_info_fixture_v3(policy), engine_test_bytes_v3(altered),
+                engine_cid_v3(), policy, request, windows_adapter_scope_fixture_v2(), false).is_err()).to_equal(true)
+        var wrong_policy = policy
+        wrong_policy.engine_id = "different-installed-engine"
+        expect(windows_engine_container_binding_decode_v3(engine_bound_info_fixture_v3(wrong_policy), engine_test_bytes_v3(source),
+            engine_cid_v3(), policy, request, windows_adapter_scope_fixture_v2(), false).is_err()).to_equal(true)
+
+    it "compares actual bind mount source, guest, mode and count against protected retained request":
+        var policy = windows_adapter_policy_fixture_v2()
+        policy.workspace_root = "C:\\protected-workspaces"
+        var request = windows_adapter_native_request_fixture_v2()
+        request.mounts = [WindowsDockerMountV1(host_root: "C:\\protected-workspaces\\attempt-a", guest_root: "C:\\work", read_only: true)]
+        val source = engine_bound_container_fixture_v3(policy, request)
+        expect(windows_engine_container_binding_decode_v3(engine_bound_info_fixture_v3(policy), engine_test_bytes_v3(source),
+            engine_cid_v3(), policy, request, windows_adapter_scope_fixture_v2(), false).is_ok()).to_equal(true)
+        for altered in [source.replace("\"RW\":false", "\"RW\":true"), source.replace("\"Type\":\"bind\"", "\"Type\":\"volume\""),
+                source.replace("attempt-a", "attempt-b"), source.replace("\"Mounts\":[", "\"Mounts\":[{},")]:
+            expect(altered == source).to_equal(false)
+            expect(windows_engine_container_binding_decode_v3(engine_bound_info_fixture_v3(policy), engine_test_bytes_v3(altered),
+                engine_cid_v3(), policy, request, windows_adapter_scope_fixture_v2(), false).is_err()).to_equal(true)
+
+
+describe "Docker optional exit, stdin binding and documented stdin echo frames":
+    it "does not invent a terminal exit while running or before an exit is observable":
+        val source = engine_inspect_fixture_v3()
+        for pending in [source.replace("\"ExitCode\":0", "\"ExitCode\":null"),
+                source.replace("\"Running\":true", "\"Running\":false").replace("\"ExitCode\":0", "\"ExitCode\":null")]:
+            val observed = windows_engine_exec_inspect_decode_v3(engine_test_bytes_v3(pending), engine_eid_v3(), engine_request_fixture_v3()).unwrap()
+            expect(observed.exit_code).to_be_nil()
+        expect(windows_engine_exec_inspect_decode_v3(engine_test_bytes_v3(source), engine_eid_v3(), engine_request_fixture_v3()).unwrap().exit_code).to_be_nil()
+        val finished = source.replace("\"Running\":true", "\"Running\":false").replace("\"ExitCode\":0", "\"ExitCode\":17")
+        expect(windows_engine_exec_inspect_decode_v3(engine_test_bytes_v3(finished), engine_eid_v3(), engine_request_fixture_v3()).unwrap().exit_code.unwrap()).to_equal(17)
+
+    it "requires actual exec OpenStdin to match the immutable requested mode":
+        val source = engine_inspect_fixture_v3()
+        var output_only = engine_request_fixture_v3()
+        output_only.stdin_requested = false
+        expect(windows_engine_exec_inspect_decode_v3(engine_test_bytes_v3(source), engine_eid_v3(), output_only).is_err()).to_equal(true)
+        val matched = source.replace("\"OpenStdin\":true", "\"OpenStdin\":false")
+        expect(windows_engine_exec_inspect_decode_v3(engine_test_bytes_v3(matched), engine_eid_v3(), output_only).is_ok()).to_equal(true)
+
+    it "maps documented tag zero to stdout while retaining its native tag across a split payload":
+        val pending = windows_engine_mux_feed_v3(windows_engine_mux_open_v3(false), [0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 2u8], false).unwrap()
+        expect(pending.chunks.len()).to_equal(0)
+        expect(pending.state.payload_remaining).to_equal(2)
+        expect(pending.state.stream_tag).to_equal(0)
+        val echoed = windows_engine_mux_feed_v3(pending.state, [0u8, 255u8], true).unwrap()
+        expect(echoed.chunks[0].stream).to_equal("stdout")
+        expect(echoed.chunks[0].native_tag).to_equal(0)
+        expect(echoed.chunks[0].bytes).to_equal([0u8, 255u8])
+
+
+describe "Docker full binding derives primary terminal mode from retained v4 request":
+    it "refuses caller TTY override and every mismatched actual primary stdin lifetime flag":
+        val policy = windows_adapter_policy_fixture_v2()
+        var request = windows_adapter_native_request_fixture_v2()
+        request.terminal_tty = true
+        request.stdin_open = true
+        val source = engine_bound_container_fixture_v3(policy, request)
+        expect(windows_engine_container_binding_decode_v3(engine_bound_info_fixture_v3(policy), engine_test_bytes_v3(source),
+            engine_cid_v3(), policy, request, windows_adapter_scope_fixture_v2(), true).unwrap().container.tty).to_equal(true)
+        expect(windows_engine_container_binding_decode_v3(engine_bound_info_fixture_v3(policy), engine_test_bytes_v3(source),
+            engine_cid_v3(), policy, request, windows_adapter_scope_fixture_v2(), false).is_err()).to_equal(true)
+        for actual in [source.replace("\"Tty\":true", "\"Tty\":false"),
+                source.replace("\"OpenStdin\":true", "\"OpenStdin\":false"),
+                source.replace("\"StdinOnce\":true", "\"StdinOnce\":false"),
+                source.replace("\"AttachStdin\":true", "\"AttachStdin\":false")]:
+            expect(actual == source).to_equal(false)
+            expect(windows_engine_container_binding_decode_v3(engine_bound_info_fixture_v3(policy), engine_test_bytes_v3(actual),
+                engine_cid_v3(), policy, request, windows_adapter_scope_fixture_v2(), true).is_err()).to_equal(true)

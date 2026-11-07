@@ -94,3 +94,12 @@ with no --tail line truncation. Existing output bounds still reject overlimit
 capture; success preserves actual stdout/stderr. Complete text capture is not a
 claim of a byte-complete binary log protocol. Native log transport and complete
 remote-build evidence remain NOT_RUN.
+
+
+Explicit primary terminal/stdin extension: request SDN version4 binds the
+default-false terminal_tty/stdin_open fields when either is requested. CLI
+create emits the corresponding actual flags, and exact native inspection checks
+Tty/OpenStdin/StdinOnce/AttachStdin under official CLI semantics. Existing false
+request branches keep their previous bytes/commands. Focused executable source
+and NOT_RUN manual: windows_docker_primary_terminal_v4_spec.spl / .md in the
+same system-spec directories. No native terminal qualification is claimed.
