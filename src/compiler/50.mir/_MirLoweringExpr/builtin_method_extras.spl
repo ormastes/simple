@@ -643,6 +643,30 @@ impl MirLowering:
         self.builder = b_body
         Some(acc)
 
+    me builtin_keeps_numeric_type_on_assign(target: LocalId, value: LocalId, declared: HirType?) -> bool:
+        """`total = total + x` on a numeric `var`: the binop result carries no
+        HIR type, and dropping the binding's tracked `f64`/`i64` left a later
+        `total.round()` with no receiver proof. Keep the tracked numeric type
+        only when the assigned value's MIR class agrees AND the value is not a
+        known handle word (struct, runtime value, Any, Option, nil, tagged
+        text, extern result) -- those are i64 at MIR too. Anything else is
+        still forgotten."""
+        if val kept = declared:
+            val kept_kind = self.builtin_numeric_kind_of_hir(kept)
+            if kept_kind == 0:
+                return false
+            if self.builtin_local_has_custom_owner(value) or self.local_hir_type_is_any(value) or self.is_runtime_value_local(value.id):
+                return false
+            if self.option_value_locals.contains(value.id) or self.nil_locals.contains(value.id) or self.tagged_text_locals.contains(value.id) or self.extern_result_locals.contains(value.id):
+                return false
+            if val target_mir = self.local_mir_type_of(target):
+                if val value_mir = self.local_mir_type_of(value):
+                    val target_class = self.builtin_mir_value_class(target_mir)
+                    val value_class = self.builtin_mir_value_class(value_mir)
+                    val expected_class = if kept_kind == 3: 3 else: 1
+                    return target_class == expected_class and value_class == expected_class
+        false
+
     me builtin_numeric_kind_of_hir(type_: HirType) -> i64:
         """0 not numeric, 1 signed integer, 2 unsigned integer, 3 float."""
         var numeric_kind = 0
@@ -745,7 +769,7 @@ impl MirLowering:
                             numeric_kind = 2
                         if inner_method == "abs":
                             numeric_kind = inner_kind
-                        if inner_kind == 3 and (inner_method == "floor" or inner_method == "ceil" or inner_method == "round"):
+                        if inner_kind == 3 and (inner_method == "floor" or inner_method == "ceil" or inner_method == "round" or inner_method == "sqrt"):
                             numeric_kind = 3
                     if inner_args.len() == 1 and (inner_method == "min" or inner_method == "max"):
                         numeric_kind = inner_kind
@@ -840,6 +864,15 @@ impl MirLowering:
         if self.find_local_hir_type(local.id) != nil:
             return
         if val init_type = self.enum_match_expr_type(init):
+            match init_type.kind:
+                case HirTypeKind.Result(_, _):
+                    # `val r = self.m()` -> `Result<T, E>`: keep the call's
+                    # declared instantiation on the binding so `match r:`
+                    # binds Ok/Err from it, never from the closure-global
+                    # `Result::Ok` slot (simple_ring_result_payload_provenance_2026-11-06).
+                    self.remember_local_hir_type(local.id, init_type, 0, 0)
+                    return
+                case _: ()
             val nominal: HirType = match init_type.kind:
                 case HirTypeKind.Optional(optional_inner): optional_inner
                 case _: init_type
@@ -882,7 +915,7 @@ impl MirLowering:
         own `max` / `abs`, an unknown type -- returns nil and keeps the
         existing method-resolution path, so a user method is never replaced
         by an integer compare on object handles."""
-        val unary_shape = args.len() == 0 and (method == "abs" or method == "floor" or method == "ceil" or method == "round")
+        val unary_shape = args.len() == 0 and (method == "abs" or method == "floor" or method == "ceil" or method == "round" or method == "sqrt")
         val binary_shape = args.len() == 1 and (method == "min" or method == "max")
         if not unary_shape and not binary_shape:
             return nil
@@ -912,7 +945,7 @@ impl MirLowering:
                 self.builder = b_widen
             var float_result = recv_f64
             if unary_shape:
-                val unary_symbol = if method == "abs": "rt_math_abs" elif method == "floor": "rt_math_floor" elif method == "ceil": "rt_math_ceil" else: "rt_math_round"
+                val unary_symbol = if method == "abs": "rt_math_abs" elif method == "floor": "rt_math_floor" elif method == "ceil": "rt_math_ceil" elif method == "sqrt": "rt_math_sqrt" else: "rt_math_round"
                 var b_unary = self.builder
                 float_result = b_unary.emit_call_value(
                     builtin_extra_rt_operand(unary_symbol, [MirType.f64()], MirType.f64()),
@@ -948,7 +981,7 @@ impl MirLowering:
             return Some(float_result)
 
         # Integer receivers: floor/ceil/round are float-only.
-        if method == "floor" or method == "ceil" or method == "round":
+        if method == "floor" or method == "ceil" or method == "round" or method == "sqrt":
             return nil
         if recv_kind == 2:
             if method == "abs":

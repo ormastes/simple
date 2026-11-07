@@ -1,26 +1,37 @@
-# Prints the Simple twin's trampoline words for scripts/check/check-xray-native-inprocess-e2e.shs.
-# XRAY_TWIN_BL = signed BL displacement (instructions) to the handler, read
-# by the check from the built runtime object. One lowercase 8-digit hex word
-# per line, then `TWIN-OK <count>`.
+# Prints the Simple twin of the resident trampoline for the in-process e2e
+# checks (scripts/check/lib/xray-inprocess-e2e-lib.shs).
+#   XRAY_TWIN_ISA unset / aarch64: XRAY_TWIN_BL = signed BL displacement
+#     (instructions) to the handler; one lowercase 8-digit hex word per line.
+#   XRAY_TWIN_ISA=x86_64: XRAY_TWIN_REL32 = signed handler CALL rel32; one
+#     lowercase 2-digit hex byte per line.
+# Both read by the check from the linked module. Then `TWIN-OK <count>`.
 use std.common.trace.xray_native_trampoline_aarch64_v1.{xray_native_trampoline_words_aarch64_v1}
+use std.common.trace.xray_native_trampoline_x86_64_v1.{xray_native_trampoline_bytes_x86_64_v1}
 
 extern fn rt_env_get(key: text) -> text?
 
-fn hex8(word: i64) -> text:
-    val digits = "0123456789abcdef"
+fn hex_digits(value: i64, digits: i64) -> text:
+    val table = "0123456789abcdef"
     var out = ""
-    var shift = 28
+    var shift = (digits - 1) * 4
     while shift >= 0:
-        out = out + digits[(word >> shift) & 15]
+        out = out + table[(value >> shift) & 15]
         shift = shift - 4
     out
 
 fn main():
+    if (rt_env_get("XRAY_TWIN_ISA") ?? "") == "x86_64":
+        val rel32 = (rt_env_get("XRAY_TWIN_REL32") ?? "").to_i64() ?? 0
+        val bytes = xray_native_trampoline_bytes_x86_64_v1(rel32)
+        for byte in bytes:
+            print hex_digits(byte, 2)
+        print "TWIN-OK {bytes.len()}"
+        return
     val raw = rt_env_get("XRAY_TWIN_BL") ?? ""
     val displacement = raw.to_i64() ?? 0
     val words = xray_native_trampoline_words_aarch64_v1(displacement)
     for word in words:
-        print hex8(word)
+        print hex_digits(word, 8)
     print "TWIN-OK {words.len()}"
 
 main()

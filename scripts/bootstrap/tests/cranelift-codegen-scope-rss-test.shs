@@ -1,0 +1,129 @@
+#!/bin/sh
+# Measured bounded-memory check for Cranelift per-module codegen
+# (bug stage2_cranelift_codegen_scope_default_off_2026-11-07).
+#
+# Builds a synthetic project of N modules with <compiler> native-build
+# --backend=cranelift on the codegen-only route (MIR for every module first,
+# then one serial codegen pass, as a bootstrap MIR shard worker does) and
+# samples the compiler's RSS against the number of objects written. With no
+# collector, an unscoped codegen keeps every module's scratch (~13-17 MiB per
+# module measured on the run-14 Stage 2 candidate), so RSS climbs linearly.
+# With the default per-module scope the slope is near zero.
+#
+# Run it under a memory cap, one at a time:
+#   systemd-run --user --scope -p MemoryMax=40G \
+#     sh scripts/bootstrap/tests/cranelift-codegen-scope-rss-test.shs <compiler> [N] [max_mib_per_module]
+#
+# Verdict (last line of stdout):
+#   PASS  — <n> objects, slope <s> MiB/module <= <max>        exit 0
+#   FAIL  — <n> objects, slope <s> MiB/module > <max>         exit 1
+#   ERROR — nothing was checked (<reason>)                    exit 2
+set -u
+compiler=${1:-}
+modules=${2:-40}
+max_slope=${3:-5}
+functions=40
+repo=$(cd "$(dirname "$0")/../../.." && pwd)
+if [ -z "$compiler" ] || [ ! -x "$compiler" ]; then
+  echo "ERROR — nothing was checked (compiler not executable: '$compiler')"
+  exit 2
+fi
+work=$(mktemp -d "${TMPDIR:-/tmp}/cl-scope-rss.XXXXXX") || {
+  echo "ERROR — nothing was checked (no temp dir)"
+  exit 2
+}
+trap 'rm -rf "$work"' EXIT
+trap 'kill "${pid:-}" 2>/dev/null; exit 2' INT TERM
+proj=$work/proj
+mkdir -p "$proj/src" "$work/home" "$work/tmp" "$work/cache"
+i=1
+: >"$proj/src/main.spl"
+while [ "$i" -le "$modules" ]; do
+  m=$proj/src/mod$i.spl
+  : >"$m"
+  j=1
+  while [ "$j" -le "$functions" ]; do
+    cat >>"$m" <<EOT
+fn m${i}_f${j}(x: i64, s: text) -> i64:
+    var acc = x
+    var k = 0
+    while k < 10:
+        acc = acc * 3 + k
+        if acc > 1000000:
+            acc = acc % 9973
+        k = k + 1
+    val t = "{s}-{acc}-$j"
+    acc + t.len()
+
+EOT
+    j=$((j + 1))
+  done
+  echo "export m${i}_f1" >>"$m"
+  echo "use mod$i.{m${i}_f1}" >>"$proj/src/main.spl"
+  i=$((i + 1))
+done
+{
+  echo "fn main():"
+  echo "    var total = 0"
+  i=1
+  while [ "$i" -le "$modules" ]; do
+    echo "    total = total + m${i}_f1($i, \"a\")"
+    i=$((i + 1))
+  done
+  echo "    print \"total={total}\""
+  echo ""
+  echo "main()"
+} >>"$proj/src/main.spl"
+
+(
+  cd "$proj" || exit 125
+  HOME=$work/home TMPDIR=$work/tmp LC_ALL=C SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+    SIMPLE_FILE_WORKERS=0 SIMPLE_NATIVE_STAGED_CODEGEN_BATCH=0 SIMPLE_PROJECT_ROOT="$repo" \
+    exec "$compiler" native-build src/main.spl --backend=cranelift --low-memory \
+    --cache-dir "$work/cache" --threads 1 -o "$work/a.out" >"$work/log" 2>&1
+) &
+pid=$!
+: >"$work/rss"
+while kill -0 "$pid" 2>/dev/null; do
+  objs=$(find "$work/cache" -name 'aot-*.o' 2>/dev/null | wc -l)
+  kib=$(awk '/^VmRSS:/ {print $2}' "/proc/$pid/status" 2>/dev/null)
+  [ -n "$kib" ] && printf '%s %s\n' "$objs" "$kib" >>"$work/rss"
+  sleep 1
+done
+wait "$pid"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  tail -5 "$work/log"
+  echo "ERROR — nothing was checked (native-build exit $rc)"
+  exit 2
+fi
+# Only the top-level process is sampled, so codegen must have run in it.
+if ! grep -q 'concurrency=1 (serial lane in this process' "$work/log"; then
+  echo "ERROR — nothing was checked (codegen did not run serially in the sampled process)"
+  exit 2
+fi
+# Slope over the codegen pass: first sample with >= 3 objects to the first
+# sample that sees every object (later samples belong to the link step).
+total=$(find "$work/cache" -name 'aot-*.o' | wc -l)
+verdict=$(awk -v total="$total" -v max="$max_slope" '
+  $1 >= 3 && first == "" { first = $1; r0 = $2 }
+  $1 >= 3 && done == "" { last = $1; r1 = $2; if ($1 >= total) done = 1 }
+  END {
+    if (first == "" || last <= first) { print "ERROR"; exit }
+    s = (r1 - r0) / 1024 / (last - first)
+    printf "%s %d %.1f %.0f %.0f\n", (s <= max ? "PASS" : "FAIL"), last - first, s, r0 / 1024, r1 / 1024
+  }' "$work/rss")
+set -- $verdict
+case "${1:-ERROR}" in
+  PASS)
+    echo "rss ${4}MiB -> ${5}MiB over $2 modules"
+    echo "PASS — $total objects, slope $3 MiB/module <= $max_slope"
+    exit 0 ;;
+  FAIL)
+    echo "rss ${4}MiB -> ${5}MiB over $2 modules"
+    echo "FAIL — $total objects, slope $3 MiB/module > $max_slope"
+    exit 1 ;;
+  *)
+    echo "ERROR — nothing was checked (too few RSS samples during codegen)"
+    exit 2 ;;
+esac

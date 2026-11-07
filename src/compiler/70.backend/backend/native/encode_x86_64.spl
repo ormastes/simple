@@ -14,7 +14,8 @@
 
 use compiler.backend.native.mach_inst.{MachReg, MachRegKind, physical_reg, reg_id, Operand, OperandKind, MachInst, MachBlock, MachFunction, MachModule, EncodedReloc, EncodedFunction, new_encoded_function}
 use compiler.backend.native.mach_inst.{X86_RAX, X86_RCX, X86_RDX, X86_RBX, X86_RSP, X86_RBP, X86_RSI, X86_RDI, X86_R8, X86_R9, X86_R10, X86_R11, X86_R12, X86_R13, X86_R14, X86_R15, X86_YMM0}
-use compiler.backend.native.mach_inst.{X86_OP_MOV_REG_REG, X86_OP_MOV_REG_IMM, X86_OP_MOV_REG_MEM, X86_OP_MOV_MEM_REG, X86_OP_ADD, X86_OP_SUB, X86_OP_IMUL, X86_OP_IDIV, X86_OP_AND, X86_OP_OR, X86_OP_XOR, X86_OP_SHL, X86_OP_SAR, X86_OP_SHR, X86_OP_NEG, X86_OP_NOT, X86_OP_BSWAP, X86_OP_POPCNT, X86_OP_CMP, X86_OP_TEST, X86_OP_SETE, X86_OP_SETNE, X86_OP_SETL, X86_OP_SETLE, X86_OP_SETG, X86_OP_SETGE, X86_OP_SETB, X86_OP_SETBE, X86_OP_SETA, X86_OP_SETAE, X86_OP_JMP, X86_OP_JE, X86_OP_JNE, X86_OP_JNZ, X86_OP_JZ, X86_OP_CALL, X86_OP_RET, X86_OP_PUSH, X86_OP_POP, X86_OP_LEA, X86_OP_MOVZX, X86_OP_CQO, X86_OP_NOP, X86_OP_INT3, X86_OP_SYSCALL, X86_OP_ADD_IMM, X86_OP_SUB_IMM, X86_OP_CMP_IMM, X86_OP_MOV_REG_IMM32, X86_OP_CALL_INDIRECT}
+use compiler.backend.native.mach_inst.{X86_OP_MOV_REG_REG, X86_OP_MOV_REG_IMM, X86_OP_MOV_REG_MEM, X86_OP_MOV_MEM_REG, X86_OP_ADD, X86_OP_SUB, X86_OP_IMUL, X86_OP_IDIV, X86_OP_AND, X86_OP_OR, X86_OP_XOR, X86_OP_SHL, X86_OP_SAR, X86_OP_SHR, X86_OP_NEG, X86_OP_NOT, X86_OP_BSWAP, X86_OP_POPCNT, X86_OP_CMP, X86_OP_TEST, X86_OP_SETE, X86_OP_SETNE, X86_OP_SETL, X86_OP_SETLE, X86_OP_SETG, X86_OP_SETGE, X86_OP_SETB, X86_OP_SETBE, X86_OP_SETA, X86_OP_SETAE, X86_OP_JMP, X86_OP_JE, X86_OP_JNE, X86_OP_JNZ, X86_OP_JZ, X86_OP_CALL, X86_OP_RET, X86_OP_PUSH, X86_OP_POP, X86_OP_LEA, X86_OP_MOVZX, X86_OP_CQO, X86_OP_NOP, X86_OP_INT3, X86_OP_SYSCALL, X86_OP_ADD_IMM, X86_OP_SUB_IMM, X86_OP_CMP_IMM, X86_OP_MOV_REG_IMM32, X86_OP_CALL_INDIRECT, X86_OP_XRAY_SLED}
+use compiler.backend.native.xray_sled_emit.{xray_sled_template_x86_64, XRAY_TRAMPOLINE_SYMBOL_V1}
 use compiler.backend.native.mach_inst.{X86_OP_MOVZX_REG_MEM8, X86_OP_MOVZX_REG_MEM16, X86_OP_MOV_REG_MEM32, X86_OP_MOV_MEM8_REG, X86_OP_MOV_MEM16_REG, X86_OP_MOV_MEM32_REG}
 use compiler.backend.native.mach_inst.{X86_OP_MOVSX_REG_MEM8, X86_OP_MOVSX_REG_MEM16, X86_OP_MOVSX_REG_MEM32}
 use compiler.backend.native.mach_inst.{X86_OP_VMOVAPS_LOAD_YMM, X86_OP_VMOVAPS_STORE_YMM, X86_OP_VADDPS_YMM, X86_OP_VSUBPS_YMM, X86_OP_VMULPS_YMM, X86_OP_VDIVPS_YMM}
@@ -351,6 +352,19 @@ fn encode_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
 
     elif inst.opcode == X86_OP_RET:
         code.push(0xc3)
+
+    elif inst.opcode == X86_OP_XRAY_SLED:
+        # XRay sled (xray_sled_emit.spl): 13-byte V1 template, CALL rel32 at
+        # +2 resolved to the resident trampoline by R_X86_64_PLT32. The 2-byte
+        # activation word must be 2-aligned (one aligned store patches it):
+        # an odd position gets one 0x90 NOP first. Function starts are
+        # 16-aligned, so function parity is .text parity.
+        if code.len() % 2 != 0:
+            code.push(0x90)
+        val sled_offset = code.len()
+        for byte in xray_sled_template_x86_64(get_imm_value(inst.operands[0])):
+            code.push(byte)
+        relocs.push(EncodedReloc(offset: sled_offset + 3, symbol_name: XRAY_TRAMPOLINE_SYMBOL_V1, reloc_type: 4, addend: -4))
 
     elif inst.opcode == X86_OP_CQO:
         # REX.W + 99

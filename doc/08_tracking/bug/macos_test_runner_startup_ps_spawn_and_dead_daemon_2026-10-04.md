@@ -47,3 +47,17 @@ resolver is the likely fix.
 `HIR lowering error: Cannot infer field type: struct 'CostEstimate' field
 'scalar_cost'`. Identical before and after part 1, so the "Session setup"
 phase cannot be measured on this host via the seed.
+
+## 2026-11-07 — part 2 source fix present; native resolver verified
+
+`light_daemon.spl` `invoking_binary()` already falls back to
+`cli_current_exe_path()` when `/proc/self/exe` is absent (source at release/1.0.0
+`80fbc6a5860`). A probe that calls `cli_current_exe_path()` and `path_absolute()`
+was native-built on aarch64-apple-darwin by the self-hosted Stage 2 compiler
+(`/private/tmp/s3-par/stage2/simple`, sha256 prefix `d05b5bcf561e6fee`,
+`--backend cranelift`, core-c-bootstrap, whole-program build). It printed its
+own absolute path for both values and exited 0, so the Darwin resolver the
+daemon depends on works natively. The daemon lane itself has not run end to
+end: Stage 2 is the bootstrap CLI, which offers only `compile` and
+`native-build`, so `simple test` cannot be run with it. Part 2 stays OPEN until
+a full-CLI binary shows the client accepting the daemon's identity.

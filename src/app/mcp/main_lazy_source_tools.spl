@@ -1,0 +1,136 @@
+# Read-only, L0 source paging. Loaded only when source_open is called.
+# No parser/compiler/provider process is started by this route.
+use .main_lazy_json.{make_tool_result_status}
+use app.io.mod.{cwd, dir_is_real_no_follow, file_read_regular_no_follow_bounded_bytes}
+use app.io.file_ops.{path_absolute}
+use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text, utf8_bytes_valid}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.source.contracts.{SourceSnapshotV1, SourceRangeV1, SourceProjectionV1}
+use std.nogc_sync_mut.source.projection.{source_project_raw_v1}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field,
+    json_value_text_or, json_value_object_from, json_value_serialize}
+
+fn source_result_error_v1(id: text, status: text, reason: text) -> text:
+    val result = json_value_object_from([
+        ("status", JsonValue.Str(status)),
+        ("completeness", JsonValue.Str("not_evaluated")),
+        ("reason", JsonValue.Str(reason))])
+    make_tool_result_status(id, json_value_serialize(result), true)
+
+fn source_integer_argument_v1(arguments: JsonValue, key: text, fallback: i64) -> Result<i64, text>:
+    match json_value_field(arguments, key):
+        JsonValue.Null: Ok(fallback)
+        JsonValue.Int(value): Ok(value)
+        _: Err("integer_required: " + key)
+
+pub fn source_relative_path_valid_v1(path: text) -> bool:
+    if path == "" or path.byte_len() > 512 or path.starts_with("/"):
+        return false
+    if path.contains("\\") or path.contains(":"): return false
+    for byte in text_to_utf8_bytes(path):
+        if byte < 32 or byte == 127: return false
+    for component in path.split("/"):
+        if component == "" or component == "." or component == "..": return false
+    true
+
+fn source_workspace_file_v1(path: text) -> Result<text, text>:
+    if not source_relative_path_valid_v1(path): return Err("workspace_relative_path_required")
+    val root = path_absolute(cwd())
+    if root == "": return Err("workspace_root_unavailable")
+    val components = path.split("/")
+    var parent = root
+    var index = 0
+    while index + 1 < components.len():
+        parent = parent + "/" + components[index]
+        if not dir_is_real_no_follow(parent): return Err("symlink_or_non_directory_parent")
+        index = index + 1
+    Ok(root + "/" + path)
+
+fn source_range_json_v1(span: SourceRangeV1) -> JsonValue:
+    json_value_object_from([("start_byte", JsonValue.Int(span.start_byte)),
+        ("end_byte", JsonValue.Int(span.end_byte))])
+
+fn source_safe_json_v1(serialized: text) -> text:
+    # JSON escapes preserve authoritative decoded source while preventing bidi
+    # controls from rearranging the visible JSON evidence presented to agents.
+    var safe = serialized
+    val controls = ["\u061C", "\u200E", "\u200F", "\u202A", "\u202B", "\u202C", "\u202D", "\u202E", "\u2066", "\u2067", "\u2068", "\u2069"]
+    val escapes = [r"\u061C", r"\u200E", r"\u200F", r"\u202A", r"\u202B", r"\u202C", r"\u202D", r"\u202E", r"\u2066", r"\u2067", r"\u2068", r"\u2069"]
+    var index = 0
+    while index < controls.len():
+        safe = safe.replace(controls[index], escapes[index])
+        index = index + 1
+    safe
+
+pub fn source_projection_payload_v1(path: text, projection: SourceProjectionV1) -> text:
+    var selected: [JsonValue] = []
+    for span in projection.selected: selected.push(source_range_json_v1(span))
+    var omitted: [JsonValue] = []
+    for span in projection.omitted: omitted.push(source_range_json_v1(span))
+    val result = json_value_object_from([
+        ("schema_version", JsonValue.Int(1)),
+        ("status", JsonValue.Str("ok")),
+        ("mode", JsonValue.Str("raw")),
+        ("path", JsonValue.Str(path)),
+        ("snapshot_id", JsonValue.Str(projection.snapshot_id)),
+        ("completeness", JsonValue.Str(projection.completeness)),
+        ("evidence_kind", JsonValue.Str(projection.evidence_kind)),
+        ("provider_level", JsonValue.Str("L0")),
+        ("source_text", JsonValue.Str(projection.source_text)),
+        ("selected_ranges", JsonValue.Array(selected)),
+        ("omitted_ranges", JsonValue.Array(omitted)),
+        ("next_byte", JsonValue.Int(projection.next_byte)),
+        ("limitations", JsonValue.Array([
+            JsonValue.Str("disk_snapshot_not_editor_overlay"),
+            JsonValue.Str("outline_and_semantics_unavailable"),
+            JsonValue.Str("authenticated_agent_session_binding_unavailable"),
+            JsonValue.Str("workspace_ancestor_checks_not_race_proof_sandbox")]))])
+    source_safe_json_v1(json_value_serialize(result))
+
+pub fn source_bounded_response_v1(id: text, payload: text) -> text:
+    val response = make_tool_result_status(id, payload, false)
+    # Bound the entire successful wire response, including JSON escaping.
+    if response.byte_len() > 16384:
+        return source_result_error_v1(id, "error", "serialized_response_exceeds_budget; reduce max_bytes")
+    response
+
+pub fn handle_source_open(id: text, body: text) -> text:
+    if body.byte_len() > 4096: return source_result_error_v1(id, "error", "request_too_large")
+    val arguments = match json_parse_value_strict(body):
+        Ok(value): value
+        Err(_): return source_result_error_v1(id, "error", "invalid_json_arguments")
+    val mode = json_value_text_or(json_value_field(arguments, "mode"), "outline")
+    if mode != "raw":
+        return source_result_error_v1(id, "unsupported", "outline_provider_unavailable; request explicit mode=raw")
+    val path = json_value_text_or(json_value_field(arguments, "path"), "")
+    val file = match source_workspace_file_v1(path):
+        Ok(value): value
+        Err(reason): return source_result_error_v1(id, "denied", reason)
+    val start_byte = match source_integer_argument_v1(arguments, "start_byte", 0):
+        Ok(value): value
+        Err(reason): return source_result_error_v1(id, "error", reason)
+    val max_bytes = match source_integer_argument_v1(arguments, "max_bytes", 4096):
+        Ok(value): value
+        Err(reason): return source_result_error_v1(id, "error", reason)
+    if max_bytes <= 0 or max_bytes > 8192:
+        return source_result_error_v1(id, "error", "max_bytes_must_be_1_to_8192")
+    val expected = json_value_text_or(json_value_field(arguments, "snapshot_id"), "")
+    if start_byte > 0 and expected == "":
+        return source_result_error_v1(id, "stale", "continuation_requires_snapshot_id")
+    val bytes = match file_read_regular_no_follow_bounded_bytes(file, 1048576):
+        Ok(value): value
+        Err(_): return source_result_error_v1(id, "error", "bounded_regular_file_read_failed")
+    if not utf8_bytes_valid(bytes):
+        return source_result_error_v1(id, "unsupported", "source_is_not_utf8")
+    val source = bytes_to_text(bytes)
+    # Bind URI and full content identity independently, without ambiguous joins.
+    val snapshot_id = "sha256:" + sha256_text(file) + ":" + sha256_text(source)
+    if expected != "" and expected != snapshot_id:
+        return source_result_error_v1(id, "stale", "source_snapshot_changed")
+    val snapshot = SourceSnapshotV1(snapshot_id, file, source)
+    val projection = match source_project_raw_v1(snapshot, start_byte, max_bytes):
+        Ok(value): value
+        Err(reason): return source_result_error_v1(id, "error", reason)
+    val payload = source_projection_payload_v1(path, projection)
+    # No second full raw source is hidden in structuredContent.
+    source_bounded_response_v1(id, payload)

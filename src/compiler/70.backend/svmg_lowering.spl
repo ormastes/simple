@@ -21,9 +21,8 @@
 #   - `val`/`var` locals (HirStmtKind.Let) bound to fixed-size DATA slots.
 #   - Fixed-size integer arrays (ArrayLit) lowered into the DATA region.
 #   - Compound assignment (HirStmtKind.Assign with an arithmetic op) --
-#     Simple's `+=`/`-=`/etc, e.g. loop accumulators. Rejected (not silently
-#     mis-lowered) when either side is float-typed, since assign_opcode only
-#     maps to the integer opcodes.
+#     integer arithmetic/bitwise operations and float `+=`/`-=`/`*=`/`/=`.
+#     Float remainder, bitwise and shift operations have no opcode and fail.
 #   - Bounded `for i in a..b` (HirExprKind.Range) and `for x in <fixed array
 #     local>` loops (both compiled with an explicit index/counter and a
 #     structural exit jump -- never unrolled, never unbounded).
@@ -32,11 +31,9 @@
 #     design §4.4 specifies; no separate iteration cap is added here.
 #   - `if/elif/else` (`HirExprKind.If` or flat `HirExprKind.IfChain`) -- both
 #     forms preserve ordered condition evaluation and a terminal else.
-#   - `print` of a string-literal argument (no interpolation), lowered to one
-#     SYS_PUTC per byte via `char_code_at`. `print` of any other argument
-#     (e.g. an integer, which needs runtime decimal-digit extraction) is
-#     in-subset per design §4.4 but not yet implemented -- fails fast naming
-#     the gap rather than mis-lowering.
+#   - `print` of a string literal (no interpolation), or an i32/u32 value.
+#     Integer decimal digits are extracted at runtime after evaluating the
+#     argument once, including i32::MIN and the full u32 range.
 #   - Non-recursive `fn` calls: a small set of helper functions supplied
 #     alongside the main body, called via CALL/RET with arguments passed
 #     through fixed per-callee DATA slots (no operand-stack calling
@@ -54,11 +51,7 @@
 # Anything else outside the implemented subset also fails fast, naming the
 # HIR construct kind, rather than silently degrading.
 #
-# Still deferred (in the design §4.4 subset, diagnostic says "...is not yet
-# implemented by this D4 lowering pass", distinct from the exclusions above
-# so a future reader does not mistake a scope cut for a design boundary):
-# `print` of a non-string-literal argument, and float-typed compound
-# assignment. Tracked:
+# Integer print and float compound-assignment completion tracked by:
 # doc/08_tracking/bug/svmg_d4_lowering_deferred_subset_2026-08-07.md.
 
 use compiler.hir.hir_types.{SymbolId, HirType, HirTypeKind}
@@ -233,7 +226,7 @@ impl _Lowerer:
 
     # -- binary operator mapping ---------------------------------------------
 
-    fn binop_opcode(op: HirBinOp, is_float: bool) -> i64?:
+    fn binop_opcode(op: HirBinOp, is_float: bool, is_signed: bool = false) -> i64?:
         if is_float:
             match op:
                 case HirBinOp.Add: Some(OP_FADD)
@@ -264,7 +257,7 @@ impl _Lowerer:
                 case HirBinOp.BitOr: Some(OP_OR)
                 case HirBinOp.BitXor: Some(OP_XOR)
                 case HirBinOp.Shl: Some(OP_SHL)
-                case HirBinOp.Shr: Some(OP_SHR)
+                case HirBinOp.Shr: Some(if is_signed: OP_SAR else: OP_SHR)
                 case _: nil
 
     # `e` is float-typed if it's a float literal, a Binary expr with a
@@ -285,19 +278,34 @@ impl _Lowerer:
                 else:
                     false
 
-    fn assign_opcode(op: HirAssignOp) -> i64?:
-        match op:
-            case HirAssignOp.Add: Some(OP_ADD)
-            case HirAssignOp.Sub: Some(OP_SUB)
-            case HirAssignOp.Mul: Some(OP_MUL)
-            case HirAssignOp.Div: Some(OP_DIV)
-            case HirAssignOp.Mod: Some(OP_REM)
-            case HirAssignOp.BitAnd: Some(OP_AND)
-            case HirAssignOp.BitOr: Some(OP_OR)
-            case HirAssignOp.BitXor: Some(OP_XOR)
-            case HirAssignOp.Shl: Some(OP_SHL)
-            case HirAssignOp.Shr: Some(OP_SHR)
-            case _: nil
+    fn expr_is_signed_i32(e: HirExpr) -> bool:
+        if not e.has_type_:
+            return false
+        match e.type_.kind:
+            case HirTypeKind.Int(bits, signed_type): bits == 32 and signed_type
+            case _: false
+
+    fn assign_opcode(op: HirAssignOp, is_float: bool = false, is_signed: bool = false) -> i64?:
+        if is_float:
+            match op:
+                case HirAssignOp.Add: Some(OP_FADD)
+                case HirAssignOp.Sub: Some(OP_FSUB)
+                case HirAssignOp.Mul: Some(OP_FMUL)
+                case HirAssignOp.Div: Some(OP_FDIV)
+                case _: nil
+        else:
+            match op:
+                case HirAssignOp.Add: Some(OP_ADD)
+                case HirAssignOp.Sub: Some(OP_SUB)
+                case HirAssignOp.Mul: Some(OP_MUL)
+                case HirAssignOp.Div: Some(OP_DIV)
+                case HirAssignOp.Mod: Some(OP_REM)
+                case HirAssignOp.BitAnd: Some(OP_AND)
+                case HirAssignOp.BitOr: Some(OP_OR)
+                case HirAssignOp.BitXor: Some(OP_XOR)
+                case HirAssignOp.Shl: Some(OP_SHL)
+                case HirAssignOp.Shr: Some(if is_signed: OP_SAR else: OP_SHR)
+                case _: nil
 
     # -- helper-fn lookup (linear scan; helper counts are tiny) --------------
 
@@ -329,7 +337,7 @@ impl _Lowerer:
                 self.load_local(symbol)
             case HirExprKind.Binary(op, left, right):
                 val is_float = self.expr_is_float(left) or self.expr_is_float(right)
-                val maybe_opcode = self.binop_opcode(op, is_float)
+                val maybe_opcode = self.binop_opcode(op, is_float, self.expr_is_signed_i32(left))
                 if val opcode = maybe_opcode:
                     self.lower_expr(left)
                     self.lower_expr(right)
@@ -410,7 +418,142 @@ impl _Lowerer:
             self.emit_pushi(self.helper_retslot[idx])
             self.emit_op(OP_LOAD32)
 
-    # -- print(<string literal>) -> one SYS_PUTC per byte --------------------
+    # -- integer print -> runtime decimal extraction and SYS_PUTC ------------
+
+    me lower_print_int(arg: HirExpr):
+        var signed_print = true
+        if arg.has_type_:
+            match arg.type_.kind:
+                case HirTypeKind.Int(bits, is_signed_type):
+                    if bits != 32:
+                        self.fail("integer print supports only 32-bit integer values (i32/u32) in the SVM-G v1 lowering subset")
+                        return
+                    signed_print = is_signed_type
+                case _:
+                    self.fail("print supports only string literals or 32-bit integer expressions (i32/u32) in the SVM-G v1 lowering subset")
+                    return
+        else:
+            match arg.kind:
+                case HirExprKind.IntLit(_, suffix):
+                    match suffix:
+                        case Some("u32"): signed_print = false
+                        case Some("i32"): signed_print = true
+                        case None: signed_print = true
+                        case _:
+                            self.fail("integer print requires a 32-bit integer literal (i32/u32) or checked integer type")
+                            return
+                case _:
+                    self.fail("integer print requires a 32-bit integer literal (i32/u32) or checked integer type")
+                    return
+        val literal_value = match arg.kind:
+            case HirExprKind.IntLit(value, _): Some(value)
+            case _: nil
+        if val value = literal_value:
+            if signed_print:
+                if value < -2147483648 or value > 2147483647:
+                    self.fail("integer print literal is outside the i32 range")
+                    return
+            elif value < 0 or value > 4294967295:
+                self.fail("integer print literal is outside the u32 range")
+                return
+
+        # Reserve before lowering the argument: a nested helper call/print
+        # receives disjoint slots from the same monotonic allocator.
+        val number_slot = self.alloc_slot()
+        val half_slot = self.alloc_slot()
+        val count_slot = self.alloc_slot()
+        val digit_base = self.alloc_slot()
+        self.alloc_slot()
+        self.alloc_slot()  # Twelve bytes hold at most ten decimal digits.
+        self.emit_pushi(number_slot)
+        self.lower_expr(arg)  # Exactly one evaluation, including side effects.
+        if not self.ok():
+            return
+        self.emit_op(OP_STORE32)
+        self.emit_pushi(count_slot)
+        self.emit_pushi(0)
+        self.emit_op(OP_STORE32)
+
+        if signed_print:
+            self.emit_pushi(number_slot)
+            self.emit_op(OP_LOAD32)
+            self.emit_pushi(0)
+            self.emit_op(OP_LT)
+            val nonnegative_patch = self.emit_jump(OP_JZ)
+            self.emit_pushi(45)  # '-'
+            self.emit_op(OP_SYS_PUTC)
+            self.emit_pushi(number_slot)
+            self.emit_pushi(0)
+            self.emit_pushi(number_slot)
+            self.emit_op(OP_LOAD32)
+            self.emit_op(OP_SUB)  # VM wraps: i32::MIN retains magnitude bits.
+            self.emit_op(OP_STORE32)
+            self.patch_rel16(nonnegative_patch, self.code.len())
+
+        # For u32 bits n=2*h+lsb, h=n>>>1 is nonnegative. Thus q=h/5
+        # and r=2*(h%5)+lsb are exact unsigned division/remainder by ten,
+        # using only nonnegative signed DIV/REM, even for 0xffffffff.
+        # The do-once loop emits '0' for zero without a special branch.
+        val digit_loop = self.code.len()
+        self.emit_pushi(half_slot)
+        self.emit_pushi(number_slot)
+        self.emit_op(OP_LOAD32)
+        self.emit_pushi(1)
+        self.emit_op(OP_SHR)
+        self.emit_op(OP_STORE32)
+        self.emit_pushi(digit_base)
+        self.emit_pushi(count_slot)
+        self.emit_op(OP_LOAD32)
+        self.emit_op(OP_ADD)
+        self.emit_pushi(half_slot)
+        self.emit_op(OP_LOAD32)
+        self.emit_pushi(5)
+        self.emit_op(OP_REM)
+        self.emit_pushi(2)
+        self.emit_op(OP_MUL)
+        self.emit_pushi(number_slot)
+        self.emit_op(OP_LOAD32)
+        self.emit_pushi(1)
+        self.emit_op(OP_AND)
+        self.emit_op(OP_ADD)
+        self.emit_pushi(48)  # '0'
+        self.emit_op(OP_ADD)
+        self.emit_op(OP_STORE8)
+        # Preserve the original number through digit extraction, then store q.
+        self.emit_pushi(number_slot)
+        self.emit_pushi(half_slot)
+        self.emit_op(OP_LOAD32)
+        self.emit_pushi(5)
+        self.emit_op(OP_DIV)
+        self.emit_op(OP_STORE32)
+        self.emit_pushi(count_slot)
+        self.emit_op(OP_DUP)
+        self.emit_op(OP_LOAD32)
+        self.emit_pushi(1)
+        self.emit_op(OP_ADD)
+        self.emit_op(OP_STORE32)
+        self.emit_pushi(number_slot)
+        self.emit_op(OP_LOAD32)
+        self.emit_jump_back(OP_JNZ, digit_loop)
+
+        val output_loop = self.code.len()
+        self.emit_pushi(count_slot)
+        self.emit_op(OP_DUP)
+        self.emit_op(OP_LOAD32)
+        self.emit_pushi(1)
+        self.emit_op(OP_SUB)
+        self.emit_op(OP_STORE32)
+        self.emit_pushi(digit_base)
+        self.emit_pushi(count_slot)
+        self.emit_op(OP_LOAD32)
+        self.emit_op(OP_ADD)
+        self.emit_op(OP_LOAD8)
+        self.emit_op(OP_SYS_PUTC)
+        self.emit_pushi(count_slot)
+        self.emit_op(OP_LOAD32)
+        self.emit_jump_back(OP_JNZ, output_loop)
+
+    # -- print(<string literal or i32/u32>) ---------------------------------
 
     me lower_print(args: [HirCallArg]):
         if args.len() != 1:
@@ -429,7 +572,7 @@ impl _Lowerer:
                             self.emit_op(OP_SYS_PUTC)
                             i = i + 1
             case _:
-                self.fail("`print` of a non-string-literal argument (e.g. an integer) is in the design §4.4 subset but is not yet implemented by this D4 lowering pass")
+                self.lower_print_int(arg)
 
     # -- if/elif/else ----------------------------------------------------------
     # Legacy nested `HirExprKind.If` and flat `HirExprKind.IfChain` are both
@@ -547,14 +690,14 @@ impl _Lowerer:
                     case _: nil
                 if val sym = target_sym:
                     if val compound_op = op:
-                        if self.expr_is_float(target) or self.expr_is_float(value):
-                            self.fail("compound assignment (+=/-=/etc) on a float local is in the design §4.4 subset but is not yet implemented by this D4 lowering pass (assign_opcode only maps to integer opcodes)")
+                        val is_float = self.expr_is_float(target) or self.expr_is_float(value)
+                        val maybe_opcode = self.assign_opcode(compound_op, is_float, self.expr_is_signed_i32(target))
+                        if val opcode = maybe_opcode:
+                            self.compound_assign(sym, opcode, value)
+                        elif is_float:
+                            self.fail("unsupported compound-assignment operator on float operands (only + - * / lower to SVM-G v1 float opcodes; no float REM/bitwise/shift opcode exists)")
                         else:
-                            val maybe_opcode = self.assign_opcode(compound_op)
-                            if val opcode = maybe_opcode:
-                                self.compound_assign(sym, opcode, value)
-                            else:
-                                self.fail("unsupported compound-assignment operator in the SVM-G v1 lowering subset")
+                            self.fail("unsupported compound-assignment operator in the SVM-G v1 lowering subset")
                     else:
                         self.store_local_expr(sym, value)
                 else:

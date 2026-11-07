@@ -4,8 +4,10 @@ use compiler.common.driver_core_types.{SourceFile}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.frontend.frontend.{parse_full_frontend}
-use compiler.frontend.parser_types.{Module}
+use compiler.frontend.parser_types.{Module, Pattern, PatternKind, EnumPatternPayload}
 use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.{HirPatternKind}
+use compiler.hir.hir_symbol_table_methods.*
 use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering._Expressions.expression_components.*
@@ -13,6 +15,37 @@ use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfa
 use compiler.mir.mir.*
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLowering.function_lowering.*
+
+fn positional_owner_pattern(name: text, count: i64) -> Pattern:
+    var fields: [Pattern] = []
+    var index = 0
+    while index < count:
+        fields.push(Pattern(kind: PatternKind.Wildcard, span: Span.empty()))
+        index = index + 1
+    Pattern(kind: PatternKind.Enum("", name, Some(EnumPatternPayload.Tuple(fields))), span: Span.empty())
+
+fn positional_owner_fields(hir: HirLowering, name: text, owner: text, count: i64) -> [text]:
+    val expected_symbol = hir.symbols.lookup_or_invalid(name)
+    expect(expected_symbol.is_valid()).to_equal(true)
+    val lowered = hir.lower_pattern(positional_owner_pattern(name, count))
+    match lowered.kind:
+        case HirPatternKind.Struct(type_, fields):
+            match type_.kind:
+                case HirTypeKind.Named(symbol, _):
+                    expect(symbol.id).to_equal(expected_symbol.id)
+                    expect(hir.symbols.symbols[symbol.id].defining_module ?? "").to_equal(owner)
+                case _: fail("positional struct pattern must retain its nominal declaration")
+            var names: [text] = []
+            for field in fields: names.push(field.0)
+            return names
+        case _: fail("registered positional struct must lower to a Struct pattern")
+    []
+
+fn expect_positional_owner_rejected(hir: HirLowering):
+    val lowered = hir.lower_pattern(positional_owner_pattern("Record", 1))
+    match lowered.kind:
+        case HirPatternKind.Enum(_, variant, _): expect(variant).to_equal("Record")
+        case _: fail("unowned or non-struct layout must not reinterpret the parsed enum pattern")
 
 describe "Imported positional struct patterns retain declaration ownership":
     it "lowers imported alias array fields and nested optional struct payloads":
@@ -36,9 +69,9 @@ describe "Imported positional struct patterns retain declaration ownership":
         var hir = hirlowering_for_module("consumer", surfaces)
         val module_ = hir.lower_module(consumer)
         expect(hir.errors.len()).to_equal(0)
-        expect(hir.positional_struct_pattern_field_order("FirstRecord") ?? []).to_equal(["tag", "values"])
-        expect(hir.positional_struct_pattern_field_order("SecondRecord") ?? []).to_equal(["values", "tag"])
-        expect(hir.positional_struct_pattern_field_order("Record") ?? []).to_equal(["label"])
+        expect(positional_owner_fields(hir, "FirstRecord", "first", 2)).to_equal(["tag", "values"])
+        expect(positional_owner_fields(hir, "SecondRecord", "second", 2)).to_equal(["values", "tag"])
+        expect(positional_owner_fields(hir, "Record", "consumer", 1)).to_equal(["label"])
         var lowering = MirLowering.new(module_.symbols)
         lowering.use_explicit_semantic_policy()
         val mir = lowering.lower_module(module_)
@@ -49,10 +82,10 @@ describe "Imported positional struct patterns retain declaration ownership":
         var hir = HirLowering.with_filename("consumer")
         hir.symbols.define("Record", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, Some("foreign"))
         hir.struct_field_order_by_name["Record"] = ["wrong_owner_field"]
-        expect(hir.positional_struct_pattern_field_order("Record")).to_be_nil()
+        expect_positional_owner_rejected(hir)
 
     it "does not reinterpret an enum declaration using a stale struct layout":
         var hir = HirLowering.with_filename("consumer")
         hir.symbols.define("Record", SymbolKind.Enum, nil, Span.empty(), Visibility.Public, false, Some("consumer"))
         hir.struct_field_order_by_name["consumer.Record"] = ["wrong_kind_field"]
-        expect(hir.positional_struct_pattern_field_order("Record")).to_be_nil()
+        expect_positional_owner_rejected(hir)

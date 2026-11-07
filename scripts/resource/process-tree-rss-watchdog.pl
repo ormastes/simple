@@ -793,7 +793,7 @@ sub windows_compile_flags {
     return ($compiler, 'cl', '-nologo', '-O2', '-fuse-ld=lld', @defines)
         if ($name // '') =~ /\Aclang-cl(?:\.exe)?\z/i;
     return ($compiler, 'gnu', '-O2', '-fuse-ld=lld', @defines)
-        if ($name // '') =~ /\Aclang(?:-[0-9]+)?(?:\.exe)?\z/i;
+        if ($name // '') =~ /\A(?:[A-Za-z0-9_]+-w64-mingw32-)?clang(?:-[0-9]+)?(?:\.exe)?\z/i;
     die "Windows session helper requires clang-cl or clang (CC=$compiler; cl/gcc are not permitted)";
 }
 

@@ -1,7 +1,11 @@
 # Stage 2 `compiler_cli_build` hits the tree RSS cap during MIR (2026-11-06)
 
-Status: mitigated (shard-count pin in `scripts/bootstrap/phase-c-backend-commands.shs`).
-Root retention in the MIR shard worker remains open; see "Not fixed" below.
+Status (2026-11-07): mitigated, verification pending. 8 MIR shards
+(`scripts/bootstrap/phase-c-backend-commands.shs`, #7274; #7352's 12 reverted
+by #7354) under the 60 GiB `compiler_cli_build` row cap (#7302). Run 13
+finished MIR with no rss-cap kill; codegen headroom of the `compiler.*` /
+`lib.*` / `os.*` shards is still unmeasured (see the 2026-11-07 section). Root
+retention in the MIR shard worker remains open; see "Not fixed" below.
 
 ## Symptom
 
@@ -84,6 +88,54 @@ Costs and margins (estimates from run 10, unverified until the next run):
   starts at its spawn.
 - The pin covers all four tool rows (cli, test runner, MCP, LSP). Smaller
   closures pay extra frontend passes; a closure-scaled count would avoid that.
+
+## Run 11: 8 shards were not enough (2026-11-06)
+
+Run 11 (`build/bootstrap-opus-11`, carries #7274) logged
+`[mir-shard] shards=8 parallel=2` and still aborted with
+`rss-cap-exceeded`: tree peak 54,579,388 KiB (52.05 GiB) against the
+54,525,952 KiB (52.0 GiB) cap, the same cap as run 10. Top process
+26,437,356 KiB (25.2 GiB). Worker curve (MIR position: RSS MiB) 50: 19634,
+300: 21498, 500: 20974, 750: 22290. Both first-wave workers finished lowering
+their ~382 modules, ran `native_cache` 382/382 and were in `native_compile`
+when the cap hit (in run 14 the same `done=13`/`done=19` counters were printed 2 ms
+into the phase and counted modules settled before codegen, not objects
+written -- run 14 wrote 669 objects before its kill; see
+`stage2_cranelift_codegen_scope_default_off_2026-11-07.md`); RSS rose from ~22.4 to 25.2 GiB in those
+last minutes. So the peak is end-of-shard codegen, ~16 MiB per claimed module
+all-in (the 11 MiB run-10 slope was MIR only).
+
+The `[mir]` lines walk alphabetically (app.* first), not largest-first:
+wave 1 measured the lighter modules. The compiler.* / lib.* waves are not
+measured, so the per-module figure may be higher for them.
+
+### Pin raised to 12 (superseded: the pin is 8 again, #7354; see 2026-11-07 below)
+
+ceil(3049/12) = 255 modules per worker: 19.6 + 255 x 16 MiB = ~23.6 GiB,
+~48 GiB for two plus the coordinator, a 2-4 GiB margin on the light modules.
+
+Wall time is the other side of the trade. Every shard worker repeats the
+frontend: run 11 coordinator HIR ~1,411 s, worker frontend ~1,160 s, worker
+MIR ~1,220 s for 382 modules. Six waves of 255 need about
+1,411 + 6 x (1,160 + ~815) = ~13,300 s before codegen, against the 14,400 s
+row timeout; codegen cost per wave is unknown (run 11 died 12-20 modules into
+it). Each worker's own `--timeout` (7200 s) starts at its spawn
+(`native_build_main.spl` shard pool), so it is not the binding limit; the row
+timeout is. 8 shards is proven OOM; 16 would certainly time out. No shard
+count meets both bounds while each worker rebuilds ~19.6 GiB of HIR: the
+structural fix is item 3 below.
+
+### Separate blocker in run 11 (not memory) - fixed
+
+Fixed by #7301 (`64026e63fe6`, cranelift narrow-integer negate in the I64
+lane) and #7308 (`fadd88059b3`, MIR f64 across text parse). Kept for history:
+
+Run 11 recorded 5 cranelift AOT errors that failed the row independently of memory:
+- `app.office.sheets.data_ops._compare_row_cells`: verifier error
+  `isub.i32 v167, v166` where `v166` is i64.
+- `app.office.sheets.spreadsheet._parse_f64`:
+  `E-BACKEND-CRANELIFT-CALL-ABI` call to `rt_enum_id` with an f64 argument
+  (callee declares i64).
 
 ## Not fixed
 
@@ -168,3 +220,29 @@ Known limit (not handled): the policy does not read cgroup `memory.max`. Run 11'
 watchdog. The compiler's own effective shard budget (cgroup - headroom = 40 GiB)
 is unchanged; only the watchdog kill line moved. This does not fix the
 unbounded MIR share above; it buys ~8.5 GiB over the measured 51.5 GiB.
+
+## 2026-11-07: shard count back to 8 (reverts the #7352 raise to 12)
+
+#7352 raised the full-tool MIR shard count from 8 to 12 based on run 11,
+which ran under the old 52 GiB row cap. #7302 has since raised that cap to
+60 GiB. Run 13 (`5fdf9fa4fc0`, Stage 2 binary sha256 `ef163123d471887e...`)
+ran the row at 8 shards under the 60 GiB cap. All 8 shard workers finished
+MIR. Every run-process receipt reports `primary_status=complete`, and there
+was no rss-cap kill. The coordinator's tree RSS sample peaked at 57.06 GiB
+(the external sampler's process sum was 56.96 GiB), and the largest single
+process was 31.99 GiB. That peak came from the 2 `app.*` shards, which
+reached end-of-shard codegen (at 361/383 and 364/383). They failed on
+`export_list_static_visibility_not_lifted_2026-11-06`.
+**The 6 `compiler.*`/`lib.*`/`os.*` shards stopped on 498 MIR lowering
+errors before codegen** (`driver_aot_pipeline.spl` runs `compile_to_native`
+only at 0 errors). Their codegen memory headroom is therefore UNMEASURED.
+
+On wall time, the row took 10156 s against `task_timeout_seconds=14400`.
+With parallel=2, 8 shards run as 4 waves of about 2540 s each, and each
+wave repeats the ~19 min frontend. 12 shards run as 6 waves, projected at
+12400 s (frontend fixed, MIR scaled) to 15200 s (whole wave fixed). That
+reaches or passes the row timeout, and that is before the unmeasured codegen,
+which adds wall time at any shard count. No memory measurement requires 12.
+The pin goes back to 8. `phase-c-backend-commands-test.shs` now bounds it
+on both sides: >= 8 for memory (run 10) and <= 8 for wall time (run 13).
+This adds no new knob; `SIMPLE_MIR_SHARD_COUNT` from the caller still wins.

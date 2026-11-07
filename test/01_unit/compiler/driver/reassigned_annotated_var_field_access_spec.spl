@@ -1,0 +1,36 @@
+use std.spec
+
+# bug stage2_var_hir_module_field_access_offset0_2026-11-03: the frozen phase-3
+# stage2 lowered every field read on a reassigned, annotated struct `var`
+# (initialised from an if/elif expression) at offset 0. The current compiler
+# types such vars; this pins field reads at non-zero offsets after reassignment.
+struct S2VarMod:
+    path: text
+    count: i64
+    tag: text
+
+fn s2var_make(p: text, c: i64) -> S2VarMod:
+    S2VarMod(path: p, count: c, tag: "t" + p)
+
+fn s2var_loop_module() -> S2VarMod:
+    val hit = s2var_make("a", 1).count > 0
+    var m: S2VarMod = if hit: s2var_make("hit", 7) elif hit == false: s2var_make("miss", 3) else: s2var_make("x", 0)
+    var i = 0
+    while i < 2:
+        m = if i == 0: s2var_make("r0", 11) else: s2var_make("r1", 22)
+        i = i + 1
+    m
+
+describe "reassigned annotated struct var field access":
+    it "reads the initial if/elif value fields at their own offsets":
+        val hit = true
+        var m: S2VarMod = if hit: s2var_make("hit", 7) elif hit == false: s2var_make("miss", 3) else: s2var_make("x", 0)
+        expect(m.path).to_equal("hit")
+        expect(m.count).to_equal(7)
+        expect(m.tag).to_equal("thit")
+
+    it "reads fields of the value reassigned inside a loop":
+        val m = s2var_loop_module()
+        expect(m.path).to_equal("r1")
+        expect(m.count).to_equal(22)
+        expect(m.tag).to_equal("tr1")

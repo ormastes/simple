@@ -1,0 +1,117 @@
+name: XRay Windows native verification (experimental)
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]  # PR runs only when the ci:full label is added (2026-09-27)
+    paths:
+      - '.github/workflows/xray-windows-native-verification.yml'
+      - 'test/integration/xray/**'
+
+permissions:
+  contents: read
+
+jobs:
+  native-security-prerequisites:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    name: Native Windows ${{ matrix.arch }} security probe
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+            target_triple: x86_64-pc-windows-msvc
+            vcvars: amd64
+            cetflags: /CETCOMPAT
+          - arch: arm64
+            runner: windows-11-arm
+            target_triple: aarch64-pc-windows-msvc
+            vcvars: arm64
+            cetflags: ''
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            test/integration/xray
+
+      - name: Compile and execute under native MSVC and Windows
+        shell: cmd
+        run: |
+          echo XRAY_PROBE runner=${{ matrix.runner }} intended_arch=${{ matrix.arch }}
+          "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath > "%TEMP%\xray_vs_path.txt"
+          set /p VSDIR=<"%TEMP%\xray_vs_path.txt"
+          if not defined VSDIR exit /b 2
+          call "%VSDIR%\VC\Auxiliary\Build\vcvarsall.bat" ${{ matrix.vcvars }}
+          if errorlevel 1 exit /b 2
+          cl /nologo /std:c++17 /EHsc /O2 /guard:cf /Fe:xray_windows_probe.exe test\integration\xray\windows_native_probe.cpp /link /GUARD:CF /DYNAMICBASE ${{ matrix.cetflags }}
+          if errorlevel 1 exit /b 3
+          xray_windows_probe.exe
+          if errorlevel 1 exit /b 4
+
+      - name: Examine PE security metadata
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -property installationPath
+          $dumpbin = Get-ChildItem -Path "$vs\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe |
+            Where-Object { $_.FullName -match 'Host' } |
+            Select-Object -First 1 -ExpandProperty FullName
+          if ($dumpbin) {
+            & $dumpbin /headers /loadconfig xray_windows_probe.exe |
+              Select-String -Pattern 'machine|Guard|CF Instrumented|FID table|CET|Load Configuration'
+          } else {
+            Write-Host 'XRAY_PROBE dumpbin unavailable: PE metadata UNVERIFIED'
+          }
+
+      - name: Compile and execute real LLVM XRay-style sleds under native Windows
+        shell: cmd
+        run: |
+          echo XRAY_INTEGRATION runner=${{ matrix.runner }} target=${{ matrix.target_triple }}
+          "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath > "%TEMP%\xray_vs_path.txt"
+          set /p VSDIR=<"%TEMP%\xray_vs_path.txt"
+          if not defined VSDIR exit /b 11
+          call "%VSDIR%\VC\Auxiliary\Build\vcvarsall.bat" ${{ matrix.vcvars }}
+          if errorlevel 1 exit /b 12
+          where clang
+          if errorlevel 1 exit /b 13
+          clang --target=${{ matrix.target_triple }} -c -x ir test\integration\xray\sled_${{ matrix.arch }}.ll -o xray_sled.obj
+          if errorlevel 1 exit /b 14
+          clang --target=${{ matrix.target_triple }} -c -x assembler test\integration\xray\trampoline_${{ matrix.arch }}.S -o xray_trampoline.obj
+          if errorlevel 1 exit /b 15
+          cl /nologo /std:c++17 /EHsc /O2 /guard:cf /Fe:xray_native_integration.exe test\integration\xray\windows_native_integration.cpp xray_sled.obj xray_trampoline.obj /link /GUARD:CF /DYNAMICBASE ${{ matrix.cetflags }}
+          if errorlevel 1 exit /b 16
+          xray_native_integration.exe
+          if errorlevel 1 exit /b 17
+
+      - name: Check x64 full YMM and MXCSR state regression
+        if: matrix.arch == 'x64'
+        shell: cmd
+        run: |
+          "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath > "%TEMP%\xray_vs_path.txt"
+          set /p VSDIR=<"%TEMP%\xray_vs_path.txt"
+          call "%VSDIR%\VC\Auxiliary\Build\vcvarsall.bat" amd64
+          if errorlevel 1 exit /b 21
+          clang --target=x86_64-pc-windows-msvc -c -x assembler-with-cpp test\integration\xray\abi_state_regression.S -o abi_state_regression_asm.obj
+          if errorlevel 1 exit /b 22
+          clang --target=x86_64-pc-windows-msvc -c -x assembler-with-cpp test\integration\xray\trampoline_x64_bounded.S -o trampoline_x64_bounded.obj
+          if errorlevel 1 exit /b 23
+          cl /nologo /std:c++17 /EHsc /O2 /guard:cf /Fe:xray_abi_regression.exe test\integration\xray\abi_state_regression.cpp abi_state_regression_asm.obj trampoline_x64_bounded.obj xray_trampoline.obj /link /GUARD:CF /DYNAMICBASE /CETCOMPAT
+          if errorlevel 1 exit /b 24
+          xray_abi_regression.exe
+          if errorlevel 1 exit /b 25
+
+      - name: Check process-isolated mitigation enforcement
+        shell: cmd
+        run: |
+          "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath > "%TEMP%\xray_vs_path.txt"
+          set /p VSDIR=<"%TEMP%\xray_vs_path.txt"
+          call "%VSDIR%\VC\Auxiliary\Build\vcvarsall.bat" ${{ matrix.vcvars }}
+          if errorlevel 1 exit /b 31
+          clang --target=${{ matrix.target_triple }} -c -x assembler test\integration\xray\security_${{ matrix.arch }}.S -o security_enforcement.obj
+          if errorlevel 1 exit /b 32
+          cl /nologo /std:c++17 /EHsc /O2 /guard:cf /Fe:xray_security_enforcement.exe test\integration\xray\security_enforcement_probe.cpp security_enforcement.obj /link /GUARD:CF /DYNAMICBASE ${{ matrix.cetflags }}
+          if errorlevel 1 exit /b 33
+          xray_security_enforcement.exe
+          if errorlevel 1 exit /b 34

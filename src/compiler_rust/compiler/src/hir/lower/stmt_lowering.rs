@@ -185,6 +185,26 @@ fn freeze_hir_place_at(expr: HirExpr, top: bool, ctx: &mut FunctionContext, prel
     }
 }
 
+/// The surface (AST) operator of a compound assignment, for statements that
+/// are re-expressed as ordinary AST before lowering.
+fn compound_assign_ast_binop(op: ast::ast::AssignOp) -> Option<ast::ast::BinOp> {
+    match op {
+        ast::ast::AssignOp::AddAssign | ast::ast::AssignOp::SuspendAddAssign => Some(ast::ast::BinOp::Add),
+        ast::ast::AssignOp::SubAssign | ast::ast::AssignOp::SuspendSubAssign => Some(ast::ast::BinOp::Sub),
+        ast::ast::AssignOp::MulAssign | ast::ast::AssignOp::SuspendMulAssign => Some(ast::ast::BinOp::Mul),
+        ast::ast::AssignOp::DivAssign | ast::ast::AssignOp::SuspendDivAssign => Some(ast::ast::BinOp::Div),
+        ast::ast::AssignOp::ModAssign => Some(ast::ast::BinOp::Mod),
+        ast::ast::AssignOp::Assign | ast::ast::AssignOp::SuspendAssign => None,
+    }
+}
+
+/// A bare variable receiver: naming it twice runs no user code. A dotted
+/// path is not accepted, because a segment may itself be a forwarded getter
+/// that would then run twice.
+fn ast_receiver_is_variable_path(expr: &ast::ast::Expr) -> bool {
+    matches!(expr, ast::ast::Expr::Identifier(_))
+}
+
 fn compound_assign_binop(op: ast::ast::AssignOp) -> Option<BinOp> {
     match op {
         ast::ast::AssignOp::AddAssign | ast::ast::AssignOp::SuspendAddAssign => Some(BinOp::Add),
@@ -780,6 +800,37 @@ impl Lowerer {
                                 generic_args: vec![],
                             };
                             return Ok(vec![HirStmt::Expr(self.lower_expr(&call, ctx)?)]);
+                        }
+                    } else if let Some(op) = compound_assign_ast_binop(assign.op) {
+                        // `recv.prop op= v` through a getter/setter pair: the
+                        // RHS into a temporary first, then one getter read and
+                        // one setter write (owner contract 2026-11-06). Only a
+                        // bare variable receiver qualifies, so naming it twice
+                        // evaluates nothing twice; the read re-uses the
+                        // ordinary get_/is_ forwarding of `recv.prop`.
+                        // Bug: doc/08_tracking/bug/compound_assign_through_property_setter_fails_seed_2026-11-06.md
+                        if ast_receiver_is_variable_path(receiver) {
+                            if let Some(setter) = self.setter_forward_name(receiver, field, ctx) {
+                                let value = self.lower_expr(&assign.value, ctx)?;
+                                let rhs_ty = value.ty;
+                                let rhs_name = format!("$aug_rhs_{}", ctx.locals.len());
+                                let rhs_local = ctx.add_local(rhs_name.clone(), rhs_ty, Mutability::Immutable);
+                                let mut stmts =
+                                    vec![HirStmt::Let { local_index: rhs_local, ty: rhs_ty, value: Some(value) }];
+                                let combined = ast::ast::Expr::Binary {
+                                    op,
+                                    left: Box::new(assign.target.clone()),
+                                    right: Box::new(ast::ast::Expr::Identifier(rhs_name)),
+                                };
+                                let call = ast::ast::Expr::MethodCall {
+                                    receiver: receiver.clone(),
+                                    method: setter,
+                                    args: vec![ast::ast::Argument::new(None, combined)],
+                                    generic_args: vec![],
+                                };
+                                stmts.push(HirStmt::Expr(self.lower_expr(&call, ctx)?));
+                                return Ok(stmts);
+                            }
                         }
                     }
                 }

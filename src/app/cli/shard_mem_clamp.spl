@@ -389,12 +389,14 @@ pub fn shard_commit_unmeasured_estimate_kib_v1(static_kib: i64, recorded_peak_ki
     if recorded_peak_kib > 0: shard_commit_estimate_kib_v1(static_kib, recorded_peak_kib) else: static_kib * 2
 
 # 0xC0000409 (-1073740791 / 3221226505) is the Windows fast-fail that Rust's
-# `handle_alloc_error` abort raises after "memory allocation of N bytes failed".
+# `handle_alloc_error` abort raises after "memory allocation of N bytes failed",
+# but it is ALSO what any Rust panic (panic=abort) raises -- e.g. a Cranelift
+# verifier `unreachable!()` -- so the hint must not assert a memory cause.
 pub fn shard_worker_exit_hint_v1(code: i64, label: text) -> text:
     if code != -1073740791 and code != 3221226505: return ""
     # file-worker pools are priced from the HIR knob (run_ledger_shards).
     val knob = if label == "mir-shard": "SIMPLE_MIR_SHARD_WORKER_KB" elif label == "file-worker": "SIMPLE_HIR_SHARD_WORKER_KB (file-worker pool)" else: "SIMPLE_HIR_SHARD_WORKER_KB"
-    " (allocation-failure abort 0xC0000409: host commit limit exhausted; set {knob} to at least the measured worker peak commit)"
+    " (fast-fail abort 0xC0000409: a worker panic or allocation failure -- check the log for 'panicked at'; only if it says 'memory allocation ... failed' set {knob} to at least the measured worker peak commit)"
 
 pub fn shard_commit_spawn_admit_v1(headroom_kib: i64, reserve_kib: i64, est_kib: i64, live_private_kib: [i64]) -> bool:
     if headroom_kib < 0: return true
@@ -440,16 +442,18 @@ pub fn shard_tree_headroom_kib_v1() -> i64:
     shard_tree_headroom_kib_for_v1(env_get("SIMPLE_BUILD_MEMORY_RESERVE_BYTES") ?? "",
         host_limit_mem_reserve_free_kib(0))
 
-# min(declared, cap_or_free - headroom). cap_or_free is the enforced tree RSS
-# cap when set, else free commit; headroom is the reserve floor (default
-# 24 GiB). Unknown declared (<= 0) takes the clamp; unknown cap and free (both
-# <= 0) leave the declared budget. 0 = nothing admissible.
+# Host RAM/commit reserve and enforced tree RSS cap are separate bounds:
+# min(declared, cap, free - headroom) when host free memory is known. A
+# scoped compiler cap does not consume the reserve kept free on the host.
+# With unknown host free memory, retain the conservative cap - headroom
+# fallback. Unknown cap and free leave the declared budget. 0 admits nothing.
 pub fn shard_effective_tree_budget_kb_v1(declared_kb: i64, cap_kb: i64, free_kb: i64, headroom_kb: i64 = SHARD_TREE_HEADROOM_KB_V1) -> i64:
-    val base = if cap_kb > 0: cap_kb else: free_kb
+    val base = if free_kb > 0: free_kb else: cap_kb
     if base <= 0: return declared_kb
     if base <= headroom_kb: return 0
     val clamped = base - headroom_kb
-    if declared_kb > 0 and declared_kb < clamped: declared_kb else: clamped
+    val capped = if cap_kb > 0 and cap_kb < clamped: cap_kb else: clamped
+    if declared_kb > 0 and declared_kb < capped: declared_kb else: capped
 
 pub fn shard_pool_workers_v1(effective_kb: i64, estimate_kb: i64) -> i64:
     if effective_kb <= 0 or estimate_kb <= 0: return 0

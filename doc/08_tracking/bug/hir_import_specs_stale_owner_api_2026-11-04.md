@@ -51,3 +51,18 @@ Regression comparison (original vs fixed export_index.spl, 14 neighbouring impor
 specs that fail after the fix): identical counts in 13; same_named_package_facade_reexport 0/5 -> 2/5;
 module_surface_semantic_projection hangs/times out both before and after. 19 other neighbouring
 specs pass after the fix. No pass->fail.
+
+## 2026-11-07 current-API reconciliation (runtime NOT_RUN)
+
+The cyclic memo spec now calls find_reexport_source(physical_index,item), checks
+exact terminal module index/name/item, and observes the lowerer-owned memo across
+begin_module. Replacing the registry on the same warmed lowerer must invalidate
+the old answer and resolve the replacement declaration. It no longer expects a
+memo to live in or transfer with ModuleSurfacesByName.
+
+The imported positional struct spec now exercises lower_pattern and inspects the
+resulting Struct pattern field order plus exact nominal symbol/provider identity,
+while retaining full source→HIR→MIR lowering and foreign-layout/wrong-kind
+negative controls. The removed positional_struct_pattern_field_order helper is
+not restored. These are test-only API repairs; no product semantics changed.
+No runtime verdict or closure of historical import behavior is claimed.

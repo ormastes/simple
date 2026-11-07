@@ -37,3 +37,25 @@ pub fn managed_native_input_args_error_v1(inputs: [text]) -> text:
                 input.contains("\0") or input.contains("\r") or input.contains("\n"):
             return "managed native input is an indirect argument or option: " + input
     ""
+
+# Hosts whose managed C-driver link pins BOTH admitted tools: the clang driver
+# (`cc` role, run by absolute path) and the linker it invokes (`linker` role,
+# passed by absolute path). Linux/Windows pass it as `-fuse-ld=<path>`; Darwin
+# as `--ld-path=<path>` (ld64 has no -fuse-ld= flavor name, and an absolute
+# --ld-path is the clang driver's documented exact-linker selector). FreeBSD
+# is not admitted: its arm would work the same way, but no FreeBSD managed
+# authority has been minted and linked under strict mode yet.
+pub fn managed_native_cc_link_host_admitted_v1(os: text) -> bool:
+    os == "linux" or os == "windows" or os == "macos" or os == "darwin"
+
+# The driver flag that pins the admitted linker for a managed C-driver link.
+# Linux/Windows keep their existing `-fuse-ld=<path>` unchanged.
+pub fn managed_native_linker_selector_v1(os: text, linker_path: text) -> Result<text, text>:
+    if os != "macos" and os != "darwin":
+        return Ok("-fuse-ld=" + linker_path)
+    if not linker_path.starts_with("/") or managed_native_input_args_error_v1([linker_path]) != "":
+        return Err("managed native darwin linker path is not an admitted absolute path: " + linker_path)
+    if linker_path.starts_with("/usr/bin/"):
+        # /usr/bin/ld is the xcrun trampoline; pinning it pins no linker.
+        return Err("managed native darwin linker is the xcrun trampoline, not a toolchain linker: " + linker_path)
+    Ok("--ld-path=" + linker_path)

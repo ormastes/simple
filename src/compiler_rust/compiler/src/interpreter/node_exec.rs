@@ -1122,6 +1122,92 @@ fn try_assign_module_global_index(
     })
 }
 
+/// The class of `obj_name` when it is a class/struct value with no field
+/// `field` (so `obj.field` can only be a getter/setter property). `None` for
+/// `_`-prefixed names, real fields and unknown receivers.
+fn field_less_class(
+    obj_name: &str,
+    field: &str,
+    env: &Env,
+    classes: &HashMap<String, Arc<ClassDef>>,
+) -> Option<(String, Arc<ClassDef>)> {
+    if field.starts_with('_') {
+        return None;
+    }
+    let current = match env.get(obj_name).cloned() {
+        Some(v) => Some(v),
+        None => MODULE_GLOBALS.with(|cell| cell.borrow().get(obj_name).cloned()),
+    };
+    let (class_name, has_field) = match current.map(Value::into_option_payload) {
+        Some(Value::ClassInstance(ref inst)) => (inst.class().to_string(), inst.field(field).is_some()),
+        Some(Value::Object { ref class, ref fields }) => (class.clone(), fields.contains_key(field)),
+        _ => return None,
+    };
+    if has_field {
+        return None;
+    }
+    let class_def = classes.get(class_name.as_str()).cloned()?;
+    if class_def.fields.iter().any(|f| f.name == field) {
+        return None;
+    }
+    Some((class_name, class_def))
+}
+
+fn class_has_method(class_name: &str, class_def: &ClassDef, impl_methods: &ImplMethods, method: &str) -> bool {
+    class_def.methods.iter().any(|m| m.name == method)
+        || impl_methods
+            .get(class_name)
+            .is_some_and(|ms| ms.iter().any(|m| m.name == method))
+}
+
+/// `obj.prop op= rhs` where `prop` is a getter/setter pair (no field `prop`):
+/// one getter read, then one setter write, after the already-evaluated RHS
+/// (owner contract 2026-11-06). Returns `None` when `obj.prop` is not such a
+/// property, leaving the field paths in charge.
+/// Bug: doc/08_tracking/bug/compound_assign_through_property_setter_fails_seed_2026-11-06.md
+#[allow(clippy::too_many_arguments)]
+fn augmented_through_setter(
+    obj_name: &str,
+    field: &str,
+    op: BinOp,
+    rhs_value: Value,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Control>, CompileError> {
+    let Some((class_name, class_def)) = field_less_class(obj_name, field, env, classes) else {
+        return Ok(None);
+    };
+    if !class_has_method(&class_name, &class_def, impl_methods, &format!("set_{field}")) {
+        return Ok(None);
+    }
+    // The read goes through the ordinary field-access path, which forwards a
+    // missing field to `get_<field>()` / `is_<field>()` exactly as a plain
+    // read of `obj.prop` does.
+    let read = Expr::FieldAccess {
+        receiver: Box::new(Expr::Identifier(obj_name.to_string())),
+        field: field.to_string(),
+    };
+    let current = evaluate_expr(&read, env, functions, classes, enums, impl_methods)?;
+    let old_temp = "\u{0}setter_old".to_string();
+    let rhs_temp = "\u{0}setter_rhs".to_string();
+    env.insert(old_temp.clone(), current);
+    env.insert(rhs_temp.clone(), rhs_value);
+    let binary = Expr::Binary {
+        op,
+        left: Box::new(Expr::Identifier(old_temp.clone())),
+        right: Box::new(Expr::Identifier(rhs_temp.clone())),
+    };
+    let combined = evaluate_expr(&binary, env, functions, classes, enums, impl_methods);
+    env.remove(&old_temp);
+    env.remove(&rhs_temp);
+    let combined = combined?;
+    forward_field_setter(obj_name, field, &combined, env, functions, classes, enums, impl_methods)?;
+    Ok(Some(Control::Next))
+}
+
 // Helper function for regular assignment
 /// `obj.name = v` where `name` is not a field of `obj`'s class: forward to
 /// `obj.set_name(v)` when that method exists (the setter half of the
@@ -1143,32 +1229,11 @@ fn forward_field_setter(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<bool, CompileError> {
-    if field.starts_with('_') {
-        return Ok(false);
-    }
-    let current = match env.get(obj_name).cloned() {
-        Some(v) => Some(v),
-        None => MODULE_GLOBALS.with(|cell| cell.borrow().get(obj_name).cloned()),
-    };
-    let (class_name, has_field) = match current.map(Value::into_option_payload) {
-        Some(Value::ClassInstance(ref inst)) => (inst.class().to_string(), inst.field(field).is_some()),
-        Some(Value::Object { ref class, ref fields }) => (class.clone(), fields.contains_key(field)),
-        _ => return Ok(false),
-    };
-    if has_field {
-        return Ok(false);
-    }
-    let Some(class_def) = classes.get(class_name.as_str()).cloned() else {
+    let Some((class_name, class_def)) = field_less_class(obj_name, field, env, classes) else {
         return Ok(false);
     };
-    if class_def.fields.iter().any(|f| f.name == field) {
-        return Ok(false);
-    }
     let setter = format!("set_{field}");
-    let has_setter = class_def.methods.iter().any(|m| m.name == setter)
-        || impl_methods
-            .get(class_name.as_str())
-            .is_some_and(|ms| ms.iter().any(|m| m.name == setter));
+    let has_setter = class_has_method(&class_name, &class_def, impl_methods, &setter);
     if !has_setter {
         let ctx = ErrorContext::new().with_code(codes::UNDEFINED_FIELD).with_help(format!(
             "declare field '{field}' or a setter 'fn {setter}(v)' on {class_name}"
@@ -1200,6 +1265,32 @@ fn forward_field_setter(
         }
     }
     Ok(true)
+}
+
+/// Write `value` through a place whose call-result root was already bound by
+/// `place::bind_call_root`; the indices on the path are evaluated here, after
+/// the root.
+#[allow(clippy::too_many_arguments)]
+fn write_rebound_place(
+    target: &Expr,
+    value: Value,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Control, CompileError> {
+    if let Some(place) = super::place::resolve_place(target, env, functions, classes, enums, impl_methods)? {
+        super::place::refuse_shared_call_root(env, &place)?;
+        let value = coerce_store_at_place(env, &place, value, classes);
+        if super::place::write_place(env, &place, value) {
+            return Ok(Control::Next);
+        }
+    }
+    let ctx = ErrorContext::new()
+        .with_code(codes::INVALID_ASSIGNMENT)
+        .with_help("the indexed place does not exist or cannot be written");
+    Err(CompileError::semantic_with_context("invalid assignment: invalid index assignment", ctx))
 }
 
 pub(crate) fn exec_assignment(
@@ -1833,6 +1924,15 @@ pub(crate) fn exec_assignment(
     } else if let Expr::Index { receiver, index } = &assign.target {
         // Handle index assignment: arr[i] = value or dict["key"] = value or self.dict[key] = value
         let mut value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+        // A call-result root (`get()[i()] = v`): evaluate the call once after
+        // the RHS, then the indices, and write through the bound result.
+        if let Some((target, binding)) =
+            super::place::bind_call_root(&assign.target, env, functions, classes, enums, impl_methods)?
+        {
+            let written = write_rebound_place(&target, value, env, functions, classes, enums, impl_methods);
+            super::place::unbind_call_root(env, binding);
+            return written;
+        }
         // Evaluation order contract (owner decision 2026-11-06, data plan W2a):
         // RHS first, then the place — receiver, then index subexpressions
         // outer to inner — each exactly once. A receiver whose path holds an
@@ -2800,6 +2900,7 @@ fn augmented_through_place(
     let Some(place) = super::place::resolve_place(&assign.target, env, functions, classes, enums, impl_methods)? else {
         return Ok(None);
     };
+    super::place::refuse_shared_call_root(env, &place)?;
     super::place::refresh_module_global_root(env, &place.root);
     let new_value = match bin_op {
         Some(op) => {
@@ -2987,6 +3088,21 @@ pub(crate) fn exec_augmented_assignment(
             let mut rhs_value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
             if is_suspend {
                 rhs_value = await_value(rhs_value)?;
+            }
+            if let Some(op) = bin_op {
+                if let Some(control) = augmented_through_setter(
+                    obj_name,
+                    field,
+                    op,
+                    rhs_value.clone(),
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )? {
+                    return Ok(control);
+                }
             }
             if let Some(obj_val) = env.remove(obj_name).map(Value::into_option_payload) {
                 match obj_val {
@@ -3231,6 +3347,30 @@ pub(crate) fn exec_augmented_assignment(
         let mut rhs_value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
         if is_suspend {
             rhs_value = await_value(rhs_value)?;
+        }
+        // A call-result root (`get()[i()] += v`): the root call runs once,
+        // after the RHS and before the indices.
+        // Bug: doc/08_tracking/bug/seed_interp_call_root_place_order_2026-11-06.md
+        if let Some((target, binding)) =
+            super::place::bind_call_root(&assign.target, env, functions, classes, enums, impl_methods)?
+        {
+            let rebound = simple_parser::ast::AssignmentStmt {
+                span: assign.span,
+                target,
+                op: assign.op,
+                value: Expr::Nil,
+            };
+            let result = augmented_through_place(&rebound, bin_op, rhs_value, env, functions, classes, enums, impl_methods);
+            super::place::unbind_call_root(env, binding);
+            return match result? {
+                Some(control) => Ok(control),
+                None => {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INVALID_ASSIGNMENT)
+                        .with_help("the indexed place does not exist or cannot be written");
+                    Err(CompileError::semantic_with_context("invalid assignment: invalid index assignment", ctx))
+                }
+            };
         }
         if index_may_have_effects(receiver) {
             if let Some(control) =

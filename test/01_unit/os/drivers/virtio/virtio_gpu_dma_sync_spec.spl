@@ -1,0 +1,112 @@
+# @cover src/os/drivers/virtio/virtio_gpu.spl
+# @tag: unit, simpleos, virtio, gpu, dma
+"""
+# VirtIO-GPU managed-DMA CPU/device sync
+
+Pins the managed-DMA contract that non-coherent boards need: allocations made
+through kernel syscall 84 carry an allocation id, and the driver issues
+DmaSyncForDevice (86) before the device reads a buffer and DmaSyncForCpu (87)
+after the device wrote it. The wrapper/baremetal lane (no kernel DMA,
+allocation id 0) must treat every sync as a successful no-op.
+
+Behaviour that needs no hardware is exercised directly; the syscall-issuing
+hot paths are pinned by source contract.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use os.drivers.virtio.virtio_gpu.{GpuDmaAllocResult, VirtioGpuDriver}
+
+fn count_of(haystack: text, needle: text) -> i64:
+    haystack.split(needle).len() - 1
+
+describe "VirtIO-GPU managed DMA allocation identity":
+    it "carries the kernel allocation id and owner into the DMA descriptor":
+        val dma = GpuDmaAllocResult(virt: 0x70000000, phys: 0x200000, device: 0x200000, size: 4096, cache_policy: 0, allocation_id: 42, owner_device: 0x10800, ok: true)
+        expect(dma.unwrap_allocation_id()).to_equal(42)
+        expect(dma.into_descriptor().allocation_id).to_equal(42)
+        expect(dma.into_descriptor().owner_device).to_equal(0x10800)
+
+describe "VirtIO-GPU wrapper lane (allocation id 0)":
+    it "treats framebuffer syncs as successful no-ops":
+        var drv = VirtioGpuDriver.new()
+        expect(drv.framebuffer_sync_for_device()).to_be(true)
+        expect(drv.framebuffer_sync_for_cpu()).to_be(true)
+
+    it "reports backing as registered only once a managed framebuffer exists":
+        var drv = VirtioGpuDriver.new()
+        expect(drv.capabilities().backing_registered).to_be(false)
+        drv.set_framebuffer_dma(0x70000000, 0x200000, 4096, 5)
+        expect(drv.capabilities().backing_registered).to_be(true)
+
+describe "VirtIO-GPU managed DMA source contract":
+    it "allocates through syscall 84 when kernel DMA is available":
+        val source = file_read("src/os/drivers/virtio/virtio_gpu.spl")
+        expect(source).to_contain("if self.kernel_dma_available:")
+        expect(source).to_contain("syscall(84, size,")
+        expect(source).to_contain("allocation_id: result_pair[1]")
+
+    it "syncs command and response buffers around controlq submission":
+        val source = file_read("src/os/drivers/virtio/virtio_gpu.spl")
+        expect(source).to_contain("syscall(86, allocation_id, self.device_bdf")
+        expect(source).to_contain("syscall(87, allocation_id, self.device_bdf")
+        expect(source).to_contain("self._sync_allocation_for_device(self.cmd_buf_allocation_id)")
+        expect(source).to_contain("self._sync_allocation_for_device(self.resp_buf_allocation_id)")
+        expect(source).to_contain("self._sync_allocation_for_cpu(self.resp_buf_allocation_id)")
+        expect(source).to_contain("self._sync_allocation_for_cpu(self.cmd_buf_allocation_id)")
+
+    it "syncs the framebuffer before device reads and after device writes on both flush paths":
+        val ops = file_read("src/os/drivers/virtio/virtio_gpu_ops.spl")
+        expect(count_of(ops, "drv.framebuffer_sync_for_device()")).to_equal(2)
+        expect(count_of(ops, "drv.framebuffer_sync_for_cpu()")).to_equal(2)
+
+    it "records allocation ids in the kernel lane and disables kernel DMA in the wrapper lane":
+        val init = file_read("src/os/drivers/virtio/virtio_gpu_init.spl")
+        expect(init).to_contain("drv.kernel_dma_available = false")
+        expect(count_of(init, "fb_dma.unwrap_allocation_id()")).to_equal(3)
+        expect(count_of(init, "cmd_dma.unwrap_allocation_id()")).to_equal(3)
+        expect(count_of(init, "resp_dma.unwrap_allocation_id()")).to_equal(3)
+
+describe "VirtIO-GPU kernel DMA is opt-in":
+    it "defaults to the wrapper lane until the caller opts in":
+        var drv = VirtioGpuDriver.new()
+        expect(drv.kernel_dma_available).to_be(false)
+        drv.set_kernel_dma_available(true)
+        expect(drv.kernel_dma_available).to_be(true)
+
+    it "only the kernel-hosted display service opts in; the standalone entry does not":
+        val init = file_read("src/os/drivers/virtio/virtio_gpu_init.spl")
+        val service = file_read("src/os/services/display/display_service.spl")
+        val entry = file_read("src/os/drivers/gpu/virtio_gpu_entry.spl")
+        expect(init).to_not_contain("drv.kernel_dma_available = true")
+        expect(service).to_contain("driver.set_kernel_dma_available(true)")
+        expect(entry).to_not_contain("set_kernel_dma_available")
+
+describe "VirtIO-GPU sync ordering and failure release (source order; syscalls have no overridable shim)":
+    it "syncs cmd/resp for the device before notifying the queue":
+        val source = file_read("src/os/drivers/virtio/virtio_gpu.spl")
+        val before_notify = source.split("me _send_command(")[1].split("self.notify_queue(")[0]
+        expect(before_notify).to_contain("self._sync_allocation_for_device(self.cmd_buf_allocation_id)")
+        expect(before_notify).to_contain("self._sync_allocation_for_device(self.resp_buf_allocation_id)")
+
+    it "hands cmd/resp back to the CPU on timeout before returning":
+        val source = file_read("src/os/drivers/virtio/virtio_gpu.spl")
+        val timeout_branch = source.split("send_command timeout\")")[1].split("return 0")[0]
+        expect(timeout_branch).to_contain("self._sync_allocation_for_cpu(self.resp_buf_allocation_id)")
+        expect(timeout_branch).to_contain("self._sync_allocation_for_cpu(self.cmd_buf_allocation_id)")
+
+    it "syncs the framebuffer for the device before the transfer on both flush paths":
+        val ops = file_read("src/os/drivers/virtio/virtio_gpu_ops.spl")
+        expect(ops.split("fn virtio_gpu_flush(")[1].split("_send_command(56, 24)")[0]).to_contain("drv.framebuffer_sync_for_device()")
+        expect(ops.split("fn virtio_gpu_flush_rect(")[1].split("_send_command(56, 24)")[0]).to_contain("drv.framebuffer_sync_for_device()")
+
+    it "syncs the framebuffer back to the CPU even when the transfer fails":
+        val ops = file_read("src/os/drivers/virtio/virtio_gpu_ops.spl")
+        val parts = ops.split("val transfer_response = drv._send_command(56, 24)")
+        expect(parts.len()).to_equal(3)
+        expect(parts[1].split("transfer_response == 0")[0]).to_contain("drv.framebuffer_sync_for_cpu()")
+        expect(parts[2].split("transfer_response == 0")[0]).to_contain("drv.framebuffer_sync_for_cpu()")
+
+    it "documents the uncached-ring assumption where ring allocation ids are recorded":
+        val source = file_read("src/os/drivers/virtio/virtio_gpu.spl")
+        expect(count_of(source, "# Ring left unsynced: kernel maps DMA uncached")).to_equal(2)

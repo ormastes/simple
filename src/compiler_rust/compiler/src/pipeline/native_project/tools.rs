@@ -1669,6 +1669,42 @@ pub(crate) fn find_objcopy_tool() -> Option<String> {
     None
 }
 
+/// Select an objcopy that supports symbol localization for the target object
+/// format. LLVM 18 rejects non-empty `--localize-symbols` lists for COFF, so
+/// Windows GNU projections must use GNU objcopy instead.
+fn find_stage4_objcopy_tool(target: simple_common::target::Target) -> Option<String> {
+    if target.os == simple_common::target::TargetOS::Windows
+        && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu
+    {
+        for tool in ["x86_64-w64-mingw32-objcopy", "objcopy"] {
+            if let Ok(version) = std::process::Command::new(tool).arg("--version").output() {
+                let stdout = String::from_utf8_lossy(&version.stdout);
+                if version.status.success() && (stdout.contains("GNU objcopy") || stdout.contains("GNU Binutils")) {
+                    return Some(tool.to_string());
+                }
+            }
+        }
+        return None;
+    }
+    find_objcopy_tool()
+}
+
+fn find_stage4_nm_tool(target: simple_common::target::Target) -> Option<String> {
+    if target.os == simple_common::target::TargetOS::Windows
+        && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu
+    {
+        for tool in ["x86_64-w64-mingw32-nm", "nm"] {
+            if let Ok(version) = std::process::Command::new(tool).arg("--version").output() {
+                let stdout = String::from_utf8_lossy(&version.stdout);
+                if version.status.success() && (stdout.contains("GNU nm") || stdout.contains("GNU Binutils")) {
+                    return Some(tool.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 fn canonical_archive_symbol(symbol: &str) -> &str {
     #[cfg(target_os = "macos")]
     {
@@ -1685,11 +1721,18 @@ fn canonical_archive_symbol(symbol: &str) -> &str {
 /// is how runtime_memtrack.c's rt_heap_* fallbacks yield to the Rust runtime
 /// accounting (93e0b028ffb). `archive_global_symbols` counts these as defined.
 pub(super) fn archive_weak_global_symbols(path: &Path) -> Result<BTreeSet<String>, String> {
+    archive_weak_global_symbols_with_nm(path, None)
+}
+
+fn archive_weak_global_symbols_with_nm(path: &Path, nm: Option<&str>) -> Result<BTreeSet<String>, String> {
     // Mach-O weak definitions appear as T in the one-letter nm output. Read
     // their explicit flags; an undefined weak reference is not an owner.
     let macho = cfg!(target_os = "macos");
     let output = {
-        let mut cmd = nm_command()?;
+        let mut cmd = match nm {
+            Some(tool) => std::process::Command::new(tool),
+            None => nm_command()?,
+        };
         cmd.arg("-g").arg(if macho { "-m" } else { "-p" });
         cmd.arg(external_tool_path(path)).output()
     }
@@ -3182,8 +3225,15 @@ fn project_stage4_archive_closure(
                 temp_dir.display()
             )
         })?;
-        let cc = find_c_compiler();
+        // The closure contains target objects, so a hosted cross build must
+        // select the same C driver and target flag as the runtime producers.
+        // Otherwise Clang invokes the host linker on a Windows GNU archive.
+        let target = effective_target();
+        let cc = target_c_compiler(target);
         let mut closure_cmd = std::process::Command::new(&cc);
+        if let Some(flag) = windows_gnu_target_flag(target, &cc) {
+            closure_cmd.arg(flag);
+        }
         // A relocatable closure made by GNU ld can carry misaligned AArch64
         // LDST relocations into an lld final link. Use the selected linker
         // for both steps so the capsule has the same relocation semantics.
@@ -3336,7 +3386,15 @@ fn project_stage4_archive_closure(
         std::fs::write(&weaken_path, weaken_text + "\n")
             .map_err(|err| format!("failed to write Stage4 runtime capsule weaken list: {err}"))?;
 
-        let objcopy = find_objcopy_tool().ok_or_else(|| missing_llvm_tool_error("llvm-objcopy") + " (Stage4 runtime capsule)")?;
+        let objcopy = find_stage4_objcopy_tool(target).ok_or_else(|| {
+            if target.os == simple_common::target::TargetOS::Windows
+                && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu
+            {
+                "no GNU objcopy was found for the Stage4 Windows GNU runtime capsule".to_string()
+            } else {
+                missing_llvm_tool_error("llvm-objcopy") + " (Stage4 runtime capsule)"
+            }
+        })?;
         let localized = std::process::Command::new(&objcopy)
             .arg(format!("--localize-symbols={}", localize_path.display()))
             .arg(format!("--weaken-symbols={}", weaken_path.display()))
@@ -3365,7 +3423,16 @@ fn project_stage4_archive_closure(
         }
 
         let (localized_defined, localized_undefined) = archive_global_symbols(&localized_object)?;
-        let localized_weak = archive_weak_global_symbols(&localized_object)?;
+        // LLVM 18 llvm-nm reports GNU objcopy's COFF WeakExternal symbols as
+        // strong `T`. Inspect Windows GNU output with the matching GNU reader.
+        let stage4_nm = find_stage4_nm_tool(target);
+        if target.os == simple_common::target::TargetOS::Windows
+            && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu
+            && stage4_nm.is_none()
+        {
+            return Err("no GNU nm was found for the Stage4 Windows GNU runtime capsule".to_string());
+        }
+        let localized_weak = archive_weak_global_symbols_with_nm(&localized_object, stage4_nm.as_deref())?;
         let strong_external: Vec<&str> = localized_defined
             .keys()
             .filter(|raw| allowed_external.contains(canonical_archive_symbol(raw)))

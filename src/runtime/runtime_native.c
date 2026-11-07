@@ -8,6 +8,12 @@
 #undef _WIN32_WINNT
 #define _WIN32_WINNT 0x0602
 #endif
+#if defined(_WIN32)
+/* Winsock 2 for the TCP/UDP section. It must precede every transitive
+ * <windows.h> (runtime_win_long_path.h pulls one in below). */
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#endif
 #include "runtime_alloc_observer.h"
 #if defined(SIMPLE_ALLOC_OBSERVER_V1) && SIMPLE_ALLOC_OBSERVER_V1
 const volatile int rt_alloc_observer_native_owner_v1 = 1;
@@ -7835,11 +7841,40 @@ SPL_WEAK const char* spl_get_arg(int64_t idx) {
  * (8ca87866c6, ~475 collisions). ELF/Mach-O extract a weak archive member
  * normally (unlike the Windows GNU case above), so keeping it weak there
  * costs nothing and avoids that risk. See the Windows bootstrap
- * rt_set_args unresolved-reference investigation, 2026-09-01. */
+ * rt_set_args unresolved-reference investigation, 2026-09-01.
+ *
+ * Exception, ELF only: the hosted bundle linked together with
+ * libsimple_native_all.a (host-gpu / auto native-build). Among HOSTED ELF
+ * composers it is the only one that passes SIMPLE_RUNTIME_MEMORY_OWNER without
+ * SIMPLE_CORE_C_STANDALONE (runtime_compiler.spl adds STANDALONE when
+ * `include_dynload or core_c_profile`, and its caller passes include_dynload =
+ * no native_all archive; tools.rs, the exact_stage4 lane above, always adds
+ * it). The freestanding SimpleOS sysroots also omit STANDALONE, but there
+ * simple_core/core_process.spl owns argv (see os/libc/simpleos_cli_args.c), so
+ * __simpleos__ / non-hosted builds keep the weak copies. The native_all link
+ * always carries --allow-multiple-definition and puts these objects before
+ * the archive. There, `-u
+ * rt_vulkan_provider_is_available` pulls the simple_runtime CGU that also
+ * defines rt_set_args/rt_get_args/sys_get_args/rt_get_argc STRONGLY, and a
+ * weak C copy loses to it: Rust rt_get_args built its array with the C
+ * rt_array_new and the Rust rt_array_push_grow, which rejects a C array, so
+ * compiled code read `sys_get_args().len()` as 0. The whole argv family is
+ * therefore strong here, so the first (C) definition wins and the C array
+ * owner settled for runtime.c (see rt_cli_get_args below) holds for the Rust
+ * archive too. Mach-O has no --allow-multiple-definition, so it is excluded.
+ * doc/08_tracking/bug/hosted_native_all_rust_argv_overrides_c_array_owner_2026-11-07.md */
+#if defined(__ELF__) && defined(SIMPLE_RUNTIME_MEMORY_OWNER) && \
+    !defined(SIMPLE_CORE_C_STANDALONE) && !defined(__simpleos__) && \
+    defined(__STDC_HOSTED__) && __STDC_HOSTED__
+#define SPL_ARGV_RUST_ARCHIVE_PEER 1
+#define SPL_ARGV_FAMILY_OWNER
+#else
+#define SPL_ARGV_FAMILY_OWNER SPL_WEAK
+#endif
 #if defined(_WIN32)
 void rt_set_args(int argc, char** argv) {
 #else
-SPL_WEAK void rt_set_args(int argc, char** argv) {
+SPL_ARGV_FAMILY_OWNER void rt_set_args(int argc, char** argv) {
 #endif
     spl_init_args(argc, argv);
 }
@@ -7887,11 +7922,11 @@ void rt_set_args_wide(int argc, const wchar_t** argv) {
 }
 #endif /* _WIN32 */
 
-SPL_WEAK int32_t rt_get_argc(void) {
+SPL_ARGV_FAMILY_OWNER int32_t rt_get_argc(void) {
     return (int32_t)spl_arg_count();
 }
 
-SPL_WEAK SplArray* rt_get_args(void) {
+SPL_ARGV_FAMILY_OWNER SplArray* rt_get_args(void) {
     return rt_cli_get_args();
 }
 
@@ -7899,14 +7934,20 @@ SPL_WEAK SplArray* rt_get_args(void) {
  * interpreter registers it on every lane). No native C definition existed, so
  * entry-closure binaries linked it as a silent 0-returning stub and
  * get_args() saw an empty array (native_sys_get_args_missing 2026-07-23). */
-SPL_WEAK SplArray* sys_get_args(void) {
+SPL_ARGV_FAMILY_OWNER SplArray* sys_get_args(void) {
     return rt_cli_get_args();
 }
 
 /* A COFF archive needs a strong standalone owner. The hosted runtime.c argv
  * implementation uses incompatible legacy array/value layouts and is omitted
- * for this lane. Preserve its existing ownership for hosted and Unix builds. */
-#if defined(_WIN32) && defined(SIMPLE_CORE_C_STANDALONE)
+ * whenever this file is in the bundle (SIMPLE_RUNTIME_MEMORY_OWNER; see the
+ * matching guard in runtime.c), so on Windows this copy is then the only one
+ * and must be strong: a lone weak external is not resolved there. ELF keeps
+ * weak for the Rust-capsule coexistence reason given at rt_set_args above,
+ * except beside the Rust archive (SPL_ARGV_RUST_ARCHIVE_PEER, same place). */
+#if (defined(_WIN32) && \
+    (defined(SIMPLE_CORE_C_STANDALONE) || defined(SIMPLE_RUNTIME_MEMORY_OWNER))) || \
+    defined(SPL_ARGV_RUST_ARCHIVE_PEER)
 #define SPL_CORE_ARGV_OWNER
 #else
 #define SPL_CORE_ARGV_OWNER SPL_WEAK
@@ -7937,6 +7978,8 @@ SPL_CORE_ARGV_OWNER int64_t rt_cli_arg_at(int64_t index) {
     return rt_string_new((const uint8_t*)arg, (uint64_t)strlen(arg));
 }
 #undef SPL_CORE_ARGV_OWNER
+#undef SPL_ARGV_FAMILY_OWNER
+#undef SPL_ARGV_RUST_ARCHIVE_PEER
 
 int64_t rt_file_preload_pages(int64_t path_value) {
 #if defined(_WIN32)
@@ -19271,6 +19314,24 @@ int64_t rt_dyncall_3(int64_t fn_ptr, int64_t arg0, int64_t arg1, int64_t arg2) {
     return ((rt_dyncall_3_fn)(uintptr_t)fn_ptr)(arg0, arg1, arg2);
 }
 
+int64_t rt_dyncall_4(int64_t fn_ptr, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3) {
+    typedef int64_t (*rt_dyncall_4_fn)(int64_t, int64_t, int64_t, int64_t);
+    if (fn_ptr <= 0) return -1;
+    return ((rt_dyncall_4_fn)(uintptr_t)fn_ptr)(arg0, arg1, arg2, arg3);
+}
+
+int64_t rt_dyncall_5(int64_t fn_ptr, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4) {
+    typedef int64_t (*rt_dyncall_5_fn)(int64_t, int64_t, int64_t, int64_t, int64_t);
+    if (fn_ptr <= 0) return -1;
+    return ((rt_dyncall_5_fn)(uintptr_t)fn_ptr)(arg0, arg1, arg2, arg3, arg4);
+}
+
+int64_t rt_dyncall_6(int64_t fn_ptr, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5) {
+    typedef int64_t (*rt_dyncall_6_fn)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+    if (fn_ptr <= 0) return -1;
+    return ((rt_dyncall_6_fn)(uintptr_t)fn_ptr)(arg0, arg1, arg2, arg3, arg4, arg5);
+}
+
 /* Exact SimpleProviderQueryV1 discovery call.  Keep this separate from the
  * generic i64 dynamic-call family: the provider ABI returns int32_t. */
 int32_t rt_provider_query_v1_call(int64_t fn_ptr, int64_t request_ptr, int64_t result_ptr) {
@@ -19595,11 +19656,91 @@ int64_t rt_event_ports_close(int64_t h) { (void)h; return -1; }
  * text = int64_t tagged heap pointer; extract via rt_core_as_string()
  * ================================================================ */
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+/* Winsock compat shim: the POSIX bodies below compile and run unchanged on
+ * Windows through these definitions. Every macro is #undef'd at the end of the
+ * socket section so file I/O elsewhere keeps the CRT read/close.
+ * A SOCKET is a kernel HANDLE, and Windows guarantees handle values fit in 32
+ * bits, so the existing (int)fd narrowing is lossless. */
+static INIT_ONCE ws_compat_init_once = INIT_ONCE_STATIC_INIT;
 
+static BOOL CALLBACK ws_compat_init_cb(PINIT_ONCE once, PVOID param, PVOID* context) {
+    (void)once; (void)param; (void)context;
+    WSADATA data;
+    return WSAStartup(MAKEWORD(2, 2), &data) == 0;
+}
+
+/* Every descriptor this section owns starts here, so WSAStartup runs once
+ * before first use (a failed startup is retried on the next call). */
+static int ws_compat_socket(int af, int type, int protocol) {
+    if (!InitOnceExecuteOnce(&ws_compat_init_once, ws_compat_init_cb, NULL, NULL)) return -1;
+    SOCKET s = socket(af, type, protocol);
+    return s == INVALID_SOCKET ? -1 : (int)s;
+}
+
+/* Winsock reports failure through WSAGetLastError, not errno; map the one
+ * code the nonblocking connect path inspects. */
+static int ws_compat_connect(SOCKET s, const struct sockaddr* address, int length) {
+    if (connect(s, address, length) == 0) return 0;
+    errno = WSAGetLastError() == WSAEWOULDBLOCK ? EINPROGRESS : EIO;
+    return -1;
+}
+
+/* Winsock takes char* option buffers, and SO_RCVTIMEO/SO_SNDTIMEO as a DWORD
+ * of milliseconds instead of a struct timeval (0 = no timeout on both). */
+static int ws_compat_setsockopt(SOCKET s, int level, int name, const void* value, int length) {
+    if (level == SOL_SOCKET && (name == SO_RCVTIMEO || name == SO_SNDTIMEO) &&
+        length == (int)sizeof(struct timeval)) {
+        const struct timeval* tv = (const struct timeval*)value;
+        if (tv->tv_sec < 0 || tv->tv_usec < 0) { WSASetLastError(WSAEINVAL); return -1; }
+        DWORD ms = (DWORD)tv->tv_sec * 1000u + (DWORD)((tv->tv_usec + 999) / 1000);
+        return setsockopt(s, level, name, (const char*)&ms, (int)sizeof(ms));
+    }
+    return setsockopt(s, level, name, (const char*)value, length);
+}
+
+static int ws_compat_getsockopt(SOCKET s, int level, int name, void* value, socklen_t* length) {
+    return getsockopt(s, level, name, (char*)value, length);
+}
+
+/* Winsock cannot query FIONBIO, so F_GETFL reports no flags. Both callers set
+ * or clear O_NONBLOCK explicitly afterwards, and connect_timeout's "restore"
+ * targets a socket it just created (always blocking), so nothing is lost. */
+#define WS_COMPAT_F_GETFL 3
+#define WS_COMPAT_F_SETFL 4
+#define WS_COMPAT_O_NONBLOCK 0x4000
+static int ws_compat_fcntl(SOCKET s, int command, int argument) {
+    if (command == WS_COMPAT_F_GETFL) return 0;
+    if (command != WS_COMPAT_F_SETFL) return -1;
+    u_long mode = (argument & WS_COMPAT_O_NONBLOCK) ? 1 : 0;
+    return ioctlsocket(s, FIONBIO, &mode) == 0 ? 0 : -1;
+}
+
+#define F_GETFL WS_COMPAT_F_GETFL
+#define F_SETFL WS_COMPAT_F_SETFL
+#define O_NONBLOCK WS_COMPAT_O_NONBLOCK
+#define fcntl ws_compat_fcntl
+#define socket ws_compat_socket
+#define connect ws_compat_connect
+#define setsockopt ws_compat_setsockopt
+#define getsockopt ws_compat_getsockopt
+#define close(fd) closesocket(fd)
+#define read(fd, buffer, length) recv((fd), (char*)(buffer), (int)(length), 0)
+#define poll(fds, count, timeout) WSAPoll((fds), (ULONG)(count), (timeout))
+/* Windows has no SIGPIPE: a send to a closed peer is already just an error. */
+#define MSG_NOSIGNAL 0
+#endif /* _WIN32 */
+
+/* Socket address operands arrive in BOTH text conventions: a tagged
+ * RtCoreString (seed, interpreter, and the compiler's boxed-text externs such
+ * as rt_io_tcp_bind) or the bare char* the compiler's default extern text
+ * bridge produces (rt_interp_cstr unwrap). Measured on the Windows Stage 2
+ * build of avx_server_loadgen: rt_io_tcp_connect received the raw buffer, the
+ * tagged-only decode returned NULL, and every connect failed in 0 us before a
+ * socket existed. rt_interp_cstr is the runtime's existing tagged-or-raw
+ * autodetector (NULL for nil and low words). */
 static const char* rt_extract_cstr(int64_t text_val) {
-    RtCoreString* s = rt_core_as_string(text_val);
-    return s ? s->data : NULL;
+    return rt_interp_cstr(text_val);
 }
 
 static int rt_parse_addr_port(const char* addr_str, struct sockaddr_in* sa) {
@@ -19762,6 +19903,23 @@ int64_t rt_io_tcp_read_line(int64_t fd) {
     }
     if (pos == 0) return rt_core_nil();
     return rt_string_new((const uint8_t*)buf, (uint64_t)pos);
+}
+
+/* Consume one line (newline included) without materialising it. Mirrors the
+ * Rust runtime's rt_io_tcp_drain_line: bytes consumed (capped at 8192), or -1
+ * when nothing could be read. Declared by std nogc_sync_mut/sffi/net.spl;
+ * without a C definition every C-runtime native link of a TCP client failed
+ * with `undefined symbol: rt_io_tcp_drain_line`. */
+int64_t rt_io_tcp_drain_line(int64_t fd) {
+    int64_t total = 0;
+    char byte;
+    while (total < 8192) {
+        ssize_t n = read((int)fd, &byte, 1);
+        if (n <= 0) break;
+        total++;
+        if (byte == '\n') break;
+    }
+    return total > 0 ? total : -1;
 }
 
 /* A peer closing its read side must be a transport error, never a process
@@ -20076,47 +20234,20 @@ int64_t rt_io_udp_recv_from(int64_t fd, int64_t size) {
     return tuple;
 }
 
-#else /* _WIN32 stubs */
-int64_t rt_io_tcp_socket_create(int64_t f) { (void)f; return -1; }
-int64_t rt_io_tcp_bind(int64_t a) { (void)a; return -1; }
-bool rt_io_tcp_bind_fd(int64_t f, int64_t a) { (void)f; (void)a; return false; }
-bool rt_io_tcp_listen(int64_t f, int64_t b) { (void)f; (void)b; return false; }
-int64_t rt_io_tcp_accept(int64_t f) { (void)f; return -1; }
-int64_t rt_io_tcp_accept_timeout(int64_t f, int64_t m) { (void)f; (void)m; return -1; }
-int64_t rt_io_tcp_connect(int64_t a) { (void)a; return -1; }
-int64_t rt_io_tcp_connect_timeout(int64_t a, int64_t m) { (void)a; (void)m; return -1; }
-int64_t rt_io_tcp_read(int64_t f, int64_t s) { (void)f; (void)s; return rt_core_nil(); }
-int64_t rt_io_tcp_read_line(int64_t f) { (void)f; return rt_core_nil(); }
-int64_t rt_io_tcp_write(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
-int64_t rt_io_socket_send_nosigpipe(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
-int64_t rt_io_tcp_write_text(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
-int64_t rt_io_tcp_write_bytes(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
-bool rt_io_tcp_flush(int64_t f) { (void)f; return false; }
-bool rt_io_tcp_close(int64_t f) { (void)f; return false; }
-int64_t rt_io_tcp_local_addr(int64_t f) { (void)f; return rt_core_nil(); }
-int64_t rt_io_tcp_peer_addr(int64_t f) { (void)f; return rt_core_nil(); }
-bool rt_io_tcp_set_nonblocking(int64_t f, bool e) { (void)f; (void)e; return false; }
-bool rt_io_tcp_set_nodelay(int64_t f, bool e) { (void)f; (void)e; return false; }
-bool rt_io_tcp_set_reuseport(int64_t f, bool e) { (void)f; (void)e; return false; }
-bool rt_io_tcp_set_reuseaddr(int64_t f, bool e) { (void)f; (void)e; return false; }
-bool rt_io_tcp_set_read_timeout(int64_t f, int64_t m) { (void)f; (void)m; return false; }
-bool rt_io_tcp_set_write_timeout(int64_t f, int64_t m) { (void)f; (void)m; return false; }
-bool rt_io_tcp_shutdown(int64_t f, int64_t h) { (void)f; (void)h; return false; }
-int64_t rt_io_udp_bind(int64_t a) { (void)a; return -1; }
-int64_t rt_io_udp_send_to(int64_t f, int64_t d, int64_t a) { (void)f; (void)d; (void)a; return -1; }
-int64_t rt_io_udp_send(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
-int64_t rt_io_udp_recv(int64_t f, int64_t s) { (void)f; (void)s; return rt_core_nil(); }
-bool rt_io_udp_connect(int64_t f, int64_t a) { (void)f; (void)a; return false; }
-int64_t rt_io_udp_local_addr(int64_t f) { (void)f; return rt_core_nil(); }
-bool rt_io_udp_set_broadcast(int64_t f, bool e) { (void)f; (void)e; return false; }
-bool rt_io_udp_set_read_timeout(int64_t f, int64_t m) { (void)f; (void)m; return false; }
-bool rt_io_udp_close(int64_t f) { (void)f; return false; }
-bool rt_io_udp_set_nonblocking(int64_t f, bool e) { (void)f; (void)e; return false; }
-bool rt_io_udp_set_multicast_loop(int64_t f, bool e) { (void)f; (void)e; return false; }
-bool rt_io_udp_join_multicast(int64_t f, int64_t a) { (void)f; (void)a; return false; }
-bool rt_io_udp_leave_multicast(int64_t f, int64_t a) { (void)f; (void)a; return false; }
-int64_t rt_io_udp_recv_from(int64_t f, int64_t s) { (void)f; (void)s; return rt_core_nil(); }
-#endif /* !_WIN32 */
+#if defined(_WIN32)
+#undef F_GETFL
+#undef F_SETFL
+#undef O_NONBLOCK
+#undef fcntl
+#undef socket
+#undef connect
+#undef setsockopt
+#undef getsockopt
+#undef close
+#undef read
+#undef poll
+#undef MSG_NOSIGNAL
+#endif /* _WIN32 */
 
 /* ================================================================
  * Channel Functions (simple mutex-based queue)

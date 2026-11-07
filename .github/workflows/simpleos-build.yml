@@ -2,7 +2,7 @@ name: SimpleOS Build & QEMU Smoke
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, 'release/**']
     tags: ['v*']
     paths:
       - 'examples/09_embedded/simple_os/**'
@@ -27,11 +27,13 @@ on:
       - 'config/simpleos_fabricated_rt_elf_accounting.sdn'
       - 'src/app/test/engine2d_jit_timing_probe.spl'
       - 'scripts/os/**'
+      - 'scripts/check/check-simpleos-aarch64-hello-world-in-guest-efi.shs'
+      - 'vendor/limine/**'
       - 'assets/fonts/google-fonts/ofl/notosansmono/**'
       - '.github/workflows/simpleos-build.yml'
   pull_request:
     types: [labeled]  # PR runs only when the ci:full label is added (2026-09-27)
-    branches: [main, master]
+    branches: [main, master, 'release/**']
     paths:
       - 'examples/09_embedded/simple_os/**'
       - 'src/compiler/**'
@@ -55,6 +57,8 @@ on:
       - 'config/simpleos_fabricated_rt_elf_accounting.sdn'
       - 'src/app/test/engine2d_jit_timing_probe.spl'
       - 'scripts/os/**'
+      - 'scripts/check/check-simpleos-aarch64-hello-world-in-guest-efi.shs'
+      - 'vendor/limine/**'
       - 'assets/fonts/google-fonts/ofl/notosansmono/**'
       - '.github/workflows/simpleos-build.yml'
   schedule:
@@ -72,10 +76,223 @@ on:
           - full
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Keep explicitly requested release evidence alive while the busy release
+  # branch advances. Automatic runs still supersede older automatic runs.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || 'automatic' }}
   cancel-in-progress: true
 
 jobs:
+  # Phase 1 only: proves a seed-built Simple payload executes at EL1 through
+  # AAVMF -> tracked BOOTAA64.EFI -> the SimpleOS aarch64 kernel. Phase 2 is
+  # the separately admitted self-hosted static toolchain build; do not treat
+  # this bootstrap evidence as a substitute for that authority.
+  arm64_phase1:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    name: SimpleOS ARM64 Phase 1 — seed-built EFI hello
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-09-15
+          components: rustfmt, clippy
+
+      - name: Install ARM64 bootstrap evidence dependencies
+        timeout-minutes: 20
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential pkg-config clang lld llvm binutils libunwind-dev \
+            qemu-system-arm qemu-efi-aarch64 mtools dosfstools
+
+      - name: Build bootstrap seed
+        working-directory: src/compiler_rust
+        run: cargo build --locked --release -p simple-driver --bin simple
+
+      - name: Boot seed-built ARM64 hello through EFI
+        timeout-minutes: 25
+        env:
+          SIMPLE_BIN: ${{ github.workspace }}/src/compiler_rust/target/release/simple
+        run: sh scripts/check/check-simpleos-aarch64-hello-world-in-guest-efi.shs
+
+      - name: Upload ARM64 Phase 1 binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: simpleos-phase1-seed-aarch64-${{ github.sha }}
+          path: |
+            build/os/aarch64_hello/kernel.elf
+            build/os/aarch64_hello/esp/esp.img
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload ARM64 Phase 1 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: simpleos-phase1-seed-aarch64-evidence-${{ github.sha }}
+          path: |
+            build/os/aarch64_hello/kernel-build.log
+            build/os/aarch64_hello/gate-kernel.log
+            build/os/aarch64_hello/gate-esp.log
+            build/os/aarch64_hello/run/serial.log
+          if-no-files-found: warn
+          retention-days: 7
+
+  # Artifact production only. Guest execution of these target-native tools is
+  # verified separately; building static ELFs does not establish guest acceptance.
+  # Keep the compiler and its path-bound admission receipt on this same runner.
+  toolchain_artifacts_phase2:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    name: SimpleOS Phase 2 — three-arch toolchain artifacts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+    env:
+      SIMPLE_ABI_POLICY: v1
+      SIMPLE_NO_STUB_FALLBACK: '1'
+      SIMPLE_NATIVE_BACKEND: cranelift
+      SIMPLE_CORE_BACKEND: cranelift
+      SIMPLE_NATIVE_BUILD_THREADS: '2'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-09-15
+          components: rustfmt, clippy
+
+      - name: Initialize Phase 2 production storage
+        run: |
+          printf 'SIMPLE_WORKTREE_STORAGE_ROOT=%s/simpleos-phase2-%s-%s\n' \
+            "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          mkdir -p build/simpleos-phase2
+
+      - name: Install toolchain artifact dependencies
+        timeout-minutes: 20
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential pkg-config clang lld llvm binutils libunwind-dev ripgrep
+
+      - name: Build admitted pure-Simple host on this runner
+        id: phase2_host_bootstrap
+        timeout-minutes: 240
+        env:
+          # GitHub-hosted runners expose ~14 GiB free memory; the default
+          # two-worker admission route intentionally requires >=30 GiB.
+          SIMPLE_BOOTSTRAP_WHOLE_PROGRAM: "1"
+        run: |
+          sh scripts/bootstrap/prepare-simpleos-ci-host.shs \
+            2>&1 | tee build/simpleos-phase2/host-bootstrap.log
+
+      - name: Select and validate the adjacent admitted builder
+        id: admitted_builder
+        run: |
+          STORAGE_ROOTS_REPO_ROOT="$GITHUB_WORKSPACE"
+          export STORAGE_ROOTS_REPO_ROOT
+          . scripts/lib/storage-roots.shs
+          storage_roots_init
+          shopt -s nullglob
+          candidates=("$SIMPLE_WORKTREE_STORAGE_ROOT"/build/bootstrap/stage3/*/stage2-admitted/simple)
+          if [ "${#candidates[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one canonical admitted Stage 2 compiler; found ${#candidates[@]}"
+            exit 1
+          fi
+          compiler=${candidates[0]}
+          receipt="$(dirname -- "$compiler")/admission.env"
+          test -f "$compiler" && test -x "$compiler" && test -f "$receipt"
+          sh scripts/os/provision_simpleos_guest_simple_fs.shs \
+            --validate-builder "$compiler" "$receipt" \
+            2>&1 | tee build/simpleos-phase2/builder-admission.log
+          {
+            printf 'SIMPLE_WORKTREE_STORAGE_ROOT=%s\n' "$SIMPLE_WORKTREE_STORAGE_ROOT"
+            printf 'SIMPLE_BUILD_COMPILER=%s\n' "$compiler"
+            printf 'SIMPLE_BUILD_COMPILER_ADMISSION_RECEIPT=%s\n' "$receipt"
+          } >> "$GITHUB_ENV"
+
+      # Each target can still produce diagnostics after another target fails.
+      # The job remains failed and the final upload requires all six outputs.
+      - name: Build x86_64 SimpleOS toolchain artifact
+        if: ${{ !cancelled() && steps.admitted_builder.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          CC=clang AR=llvm-ar SIMPLEOS_TARGET_TRIPLE=x86_64-unknown-simpleos \
+            sh src/os/port/llvm/sysroot.shs \
+            2>&1 | tee build/simpleos-phase2/x86_64-sysroot.log
+          sh scripts/os/simpleos-native-build.shs --target x86_64-unknown-simpleos \
+            2>&1 | tee build/simpleos-phase2/x86_64-toolchain.log
+
+      - name: Build AArch64 SimpleOS toolchain artifact
+        if: ${{ !cancelled() && steps.admitted_builder.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          SIMPLE_BINARY="$SIMPLE_BUILD_COMPILER" AR=llvm-ar \
+            sh scripts/os/simpleos-core-archive.shs \
+              --target aarch64-unknown-simpleos --backend cranelift \
+            2>&1 | tee build/simpleos-phase2/aarch64-core.log
+          CLANG=clang CXX=clang++ AR=llvm-ar \
+            sh scripts/os/simpleos-sysroot-aarch64.shs \
+            2>&1 | tee build/simpleos-phase2/aarch64-sysroot.log
+          sh scripts/os/simpleos-native-build-aarch64.shs \
+            2>&1 | tee build/simpleos-phase2/aarch64-toolchain.log
+
+      - name: Build RISC-V64 SimpleOS toolchain artifact
+        if: ${{ !cancelled() && steps.admitted_builder.outcome == 'success' }}
+        timeout-minutes: 60
+        run: |
+          SIMPLE_BINARY="$SIMPLE_BUILD_COMPILER" AR=llvm-ar \
+            sh scripts/os/simpleos-core-archive.shs \
+              --target riscv64-unknown-simpleos --backend cranelift \
+            2>&1 | tee build/simpleos-phase2/riscv64-core.log
+          CC=clang AR=llvm-ar sh scripts/os/simpleos-sysroot-riscv64.shs \
+            2>&1 | tee build/simpleos-phase2/riscv64-sysroot.log
+          sh scripts/os/simpleos-native-build-riscv64.shs \
+            2>&1 | tee build/simpleos-phase2/riscv64-toolchain.log
+
+      - name: Require every target binary and producer stamp
+        run: |
+          for target in x86_64-unknown-simpleos aarch64-unknown-simpleos riscv64-unknown-simpleos; do
+            test -s "bin/release/$target/simple"
+            test -s "bin/release/$target/simple.build_stamp"
+          done
+
+      - name: Upload three-architecture Phase 2 toolchain artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: simpleos-phase2-toolchain-artifacts-${{ github.sha }}
+          path: |
+            bin/release/x86_64-unknown-simpleos/simple
+            bin/release/x86_64-unknown-simpleos/simple.build_stamp
+            bin/release/aarch64-unknown-simpleos/simple
+            bin/release/aarch64-unknown-simpleos/simple.build_stamp
+            bin/release/riscv64-unknown-simpleos/simple
+            bin/release/riscv64-unknown-simpleos/simple.build_stamp
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Phase 2 production diagnostics
+        if: always() && steps.phase2_host_bootstrap.outputs.bootstrap_root != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: simpleos-phase2-toolchain-diagnostics-${{ github.sha }}
+          path: |
+            build/simpleos-phase2/*.log
+            build/os/simple-core-simpleos*/**/*.log
+            ${{ steps.phase2_host_bootstrap.outputs.bootstrap_root }}/**/*.log
+            ${{ steps.phase2_host_bootstrap.outputs.bootstrap_root }}/**/*.env
+          if-no-files-found: warn
+          retention-days: 7
+
   # ---------------------------------------------------------------------------
   # Smoke job: labeled PRs, pushes, and nightly runs.
   # Mirrors check-simpleos-bootstrap-qemu.shs --smoke locally.
@@ -100,6 +317,9 @@ jobs:
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-09-15
+          components: rustfmt, clippy
 
       - name: Cache Rust build artifacts
         uses: actions/cache@v4
@@ -113,7 +333,7 @@ jobs:
             simpleos-rust-bootstrap-
 
       - name: Install SimpleOS evidence dependencies
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
@@ -123,6 +343,8 @@ jobs:
 
       - name: Build and deploy admitted pure-Simple host CLI
         id: pure_simple_bootstrap
+        env:
+          SIMPLE_BOOTSTRAP_WHOLE_PROGRAM: "1"
         run: sh scripts/bootstrap/prepare-simpleos-ci-host.shs
 
       - name: Upload pure-Simple bootstrap failure logs
@@ -130,7 +352,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: simpleos-${{ github.job }}-pure-bootstrap-failure-${{ github.sha }}
-          path: build/bootstrap/logs/**
+          path: |
+            ${{ steps.pure_simple_bootstrap.outputs.bootstrap_root }}/**/*.log
+            ${{ steps.pure_simple_bootstrap.outputs.bootstrap_root }}/rust-authority-fingerprint-*.manifest
+            ${{ steps.pure_simple_bootstrap.outputs.bootstrap_root }}/rust-authority-fingerprint-*.env
+          include-hidden-files: true
           if-no-files-found: warn
           retention-days: 7
 
@@ -233,6 +459,9 @@ jobs:
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-09-15
+          components: rustfmt, clippy
 
       - name: Cache Rust build artifacts
         uses: actions/cache@v4
@@ -246,7 +475,7 @@ jobs:
             simpleos-rust-bootstrap-
 
       - name: Install SimpleOS evidence dependencies
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
@@ -254,6 +483,8 @@ jobs:
 
       - name: Build and deploy admitted pure-Simple host CLI
         id: pure_simple_bootstrap
+        env:
+          SIMPLE_BOOTSTRAP_WHOLE_PROGRAM: "1"
         run: sh scripts/bootstrap/prepare-simpleos-ci-host.shs
 
       - name: Upload pure-Simple bootstrap failure logs
@@ -261,7 +492,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: simpleos-${{ github.job }}-pure-bootstrap-failure-${{ github.sha }}
-          path: build/bootstrap/logs/**
+          path: |
+            ${{ steps.pure_simple_bootstrap.outputs.bootstrap_root }}/**/*.log
+            ${{ steps.pure_simple_bootstrap.outputs.bootstrap_root }}/rust-authority-fingerprint-*.manifest
+            ${{ steps.pure_simple_bootstrap.outputs.bootstrap_root }}/rust-authority-fingerprint-*.env
+          include-hidden-files: true
           if-no-files-found: warn
           retention-days: 7
 
@@ -293,7 +528,7 @@ jobs:
   summary:
     name: SimpleOS Build Summary
     runs-on: ubuntu-latest
-    needs: [smoke, full]
+    needs: [arm64_phase1, toolchain_artifacts_phase2, smoke, full]
     if: always() && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
 
     steps:
@@ -304,14 +539,20 @@ jobs:
             echo ""
             echo "| Job | Result |"
             echo "|-----|--------|"
+            echo "| ARM64 Phase 1 (seed EFI hello) | ${{ needs.arm64_phase1.result }} |"
+            echo "| Phase 2 toolchain artifact production (x86_64, AArch64, RISC-V64) | ${{ needs.toolchain_artifacts_phase2.result }} |"
             echo "| Smoke (x86_64) | ${{ needs.smoke.result }} |"
             echo "| Full (x86_64)  | ${{ needs.full.result }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Gate critical failures
         run: |
+          echo "ARM64 Phase 1 result: ${{ needs.arm64_phase1.result }}"
+          echo "Phase 2 artifact production result: ${{ needs.toolchain_artifacts_phase2.result }}"
           echo "Smoke result: ${{ needs.smoke.result }}"
           echo "Full  result: ${{ needs.full.result }}"
+          test "${{ needs.arm64_phase1.result }}" = success
+          test "${{ needs.toolchain_artifacts_phase2.result }}" = success
           test "${{ needs.smoke.result }}" = success
           case "${{ github.event_name }}:${{ github.ref }}:${{ inputs.mode }}" in
             schedule:*|push:refs/tags/v*|workflow_dispatch:*:full)

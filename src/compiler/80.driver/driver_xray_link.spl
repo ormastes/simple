@@ -1,10 +1,11 @@
-# XRay PR5b link wiring: the resident native runtime joins ONLY --xray builds.
+# XRay PR5b/PR6 link wiring: the resident native runtime joins ONLY --xray builds.
 #
 # Design: doc/04_architecture/compiler/xray/xray_compiler_structural_change_2026-11-06.md
-# (A.5, C.2-C.5). The pure-Simple native AArch64 backend emits sleds whose BL
-# targets `__simple_xray_trampoline_v1`; that symbol, the module registry and
-# the installer live in src/runtime/xray/xray_native_runtime_aarch64.c, which
-# is deliberately NOT in the core runtime archive. The driver calls this module
+# (A.5, C.2-C.5). The pure-Simple native AArch64 / x86-64 backends emit sleds
+# that call `__simple_xray_trampoline_v1`; that symbol lives in the per-ISA
+# TU src/runtime/xray/xray_native_runtime_<isa>.c and the module registry and
+# installer in the shared xray_native_registry_v1.h it includes. Neither is
+# in the core runtime archive. The driver calls this module
 # only inside `if ctx.options.xray_enabled:`, so an OFF build never reaches it.
 #
 # The LLVM --xray link (compiler-rt) is out of scope here: a non-native backend
@@ -14,13 +15,29 @@ use std.nogc_sync_mut.io_runtime.{dir_create_all, is_file, process_run_timeout, 
 use compiler.driver.driver_build.native_link_receipt_v1.{native_link_cc_driver_path_v1}
 
 export xray_link_runtime_needed_v1, xray_link_objects_v1, xray_native_runtime_object_v1
-export xray_link_with_runtime_v1
+export xray_link_with_runtime_v1, xray_native_runtime_source_v1, xray_native_runtime_cflags_v1
 
-val XRAY_NATIVE_RUNTIME_SOURCE_V1: text = "src/runtime/xray/xray_native_runtime_aarch64.c"
 val XRAY_NATIVE_RUNTIME_OBJECT_DIR_V1: text = "build/xray"
 
 fn _xray_target_is_aarch64_linux_v1(target: text) -> bool:
     (target.starts_with("aarch64-") or target.starts_with("arm64-")) and target.contains("-linux")
+
+fn _xray_target_is_x86_64_linux_v1(target: text) -> bool:
+    (target.starts_with("x86_64-") or target.starts_with("amd64-")) and target.contains("-linux")
+
+# The resident runtime TU of a supported target (only after needed == true).
+pub fn xray_native_runtime_source_v1(target: text) -> text:
+    if _xray_target_is_x86_64_linux_v1(target):
+        return "src/runtime/xray/xray_native_runtime_x86_64.c"
+    "src/runtime/xray/xray_native_runtime_aarch64.c"
+
+# Per-ISA flags: the handler must not touch FP/SIMD state on either ISA.
+# -mno-outline-atomics is AArch64-only; x86-64 adds -ffreestanding (the
+# runtime uses no libc, and a cross build then needs no target sysroot).
+pub fn xray_native_runtime_cflags_v1(target: text) -> [text]:
+    if _xray_target_is_x86_64_linux_v1(target):
+        return ["-O2", "-fPIC", "-ffreestanding", "-mgeneral-regs-only"]
+    ["-O2", "-fPIC", "-mgeneral-regs-only", "-mno-outline-atomics"]
 
 # Pure: does this link need the resident runtime object? Off and non-native
 # backends never do; a native target without a sled emitter fails closed (an
@@ -30,10 +47,10 @@ pub fn xray_link_runtime_needed_v1(xray_enabled: bool, backend: text, target: te
         return Ok(false)
     if backend != "native":
         return Ok(false)
-    if _xray_target_is_aarch64_linux_v1(target):
+    if _xray_target_is_aarch64_linux_v1(target) or _xray_target_is_x86_64_linux_v1(target):
         return Ok(true)
     val shown = if target == "": "<unresolved>" else: target
-    Err("XRAY-E-UNSUPPORTED-TARGET: --xray native link runtime exists only for aarch64 Linux ELF, not {shown}")
+    Err("XRAY-E-UNSUPPORTED-TARGET: --xray native link runtime exists only for aarch64 and x86_64 Linux ELF, not {shown}")
 
 # Pure: the link inputs for this build. Off -> `objects` unchanged.
 pub fn xray_link_objects_v1(objects: [text], xray_enabled: bool, backend: text, target: text,
@@ -59,17 +76,22 @@ fn _xray_cc_is_clang_v1(cc: text) -> bool:
 # The object path is private to this process, so concurrent --xray builds in
 # one checkout never link each other's half-written object.
 pub fn xray_native_runtime_object_v1(target: text) -> Result<text, text>:
-    if not is_file(XRAY_NATIVE_RUNTIME_SOURCE_V1):
-        return Err("XRAY-E-RUNTIME-SOURCE: {XRAY_NATIVE_RUNTIME_SOURCE_V1} not found (run from the repository root)")
+    val source = xray_native_runtime_source_v1(target)
+    if not is_file(source):
+        return Err("XRAY-E-RUNTIME-SOURCE: {source} not found (run from the repository root)")
     val cc = native_link_cc_driver_path_v1()
     if cc == "" or not _xray_cc_is_clang_v1(cc):
         return Err("XRAY-E-RUNTIME-CC: --xray native runtime needs clang, found '{cc}'")
     if not dir_create_all(XRAY_NATIVE_RUNTIME_OBJECT_DIR_V1):
         return Err("XRAY-E-RUNTIME-CC: cannot create {XRAY_NATIVE_RUNTIME_OBJECT_DIR_V1}")
-    val object = "{XRAY_NATIVE_RUNTIME_OBJECT_DIR_V1}/xray_native_runtime_aarch64.{getpid()}.o"
-    val (_out, err, code) = process_run_timeout(cc, ["--target={target}", "-O2", "-fPIC",
-        "-mgeneral-regs-only", "-mno-outline-atomics", "-c", XRAY_NATIVE_RUNTIME_SOURCE_V1, "-o",
-        object], 120000)
+    val isa = if _xray_target_is_x86_64_linux_v1(target): "x86_64" else: "aarch64"
+    val object = "{XRAY_NATIVE_RUNTIME_OBJECT_DIR_V1}/xray_native_runtime_{isa}.{getpid()}.o"
+    var args: [text] = ["--target={target}"]
+    for flag in xray_native_runtime_cflags_v1(target):
+        args.push(flag)
+    for tail in ["-c", source, "-o", object]:
+        args.push(tail)
+    val (_out, err, code) = process_run_timeout(cc, args, 120000)
     if code != 0 or not is_file(object):
         return Err("XRAY-E-RUNTIME-CC: {cc} failed ({code}): {err}")
     Ok(object)

@@ -1,0 +1,156 @@
+# Source-produced required HIR payloads, before HM inference. AUTHORED / NOT_RUN.
+# Unlike nogc_hir_binding_type_probe, no Let or DictLit is constructed by this test.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirFunction, HirBlock, HirStmt, HirStmtKind, HirExprKind}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode, hir_module_encode_canonical,
+    hir_module_decode_bounded, HirDecodeLimits, HirDecodeError}
+
+fn required_payload_source(source: text) -> HirModule:
+    val parsed = parse_full_frontend(source, "required_payload.spl", "required_payload", Logger(level: 0))
+    var lowering = HirLowering.with_filename("required_payload.spl")
+    val module = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    expect(module.functions.len()).to_be_greater_than(0)
+    module
+
+fn required_payload_roundtrip(module: HirModule) -> HirModule:
+    # Supported legacy codec only. This is not bounded/canonical admission.
+    val encoded = hir_module_encode(module)
+    expect(encoded != "").to_equal(true)
+    val decoded = hir_module_decode(encoded)
+    expect(decoded != nil).to_equal(true)
+    decoded.unwrap()
+
+fn required_payload_block_lets(block: HirBlock) -> [HirStmt]:
+    var result: [HirStmt] = []
+    for statement in block.stmts:
+        match statement.kind:
+            case HirStmtKind.Let(_, _, _): result.push(statement)
+            case HirStmtKind.Block(nested):
+                for binding in required_payload_block_lets(nested): result.push(binding)
+            case _: ()
+    result
+
+fn required_payload_lets(module: HirModule) -> [HirStmt]:
+    for key in module.functions.keys():
+        val function: HirFunction = module.functions[key]
+        if function.name == "probe": return required_payload_block_lets(function.body)
+    fail("source fixture did not produce probe")
+    []
+
+fn required_payload_binding(module: HirModule, name: text) -> HirStmt:
+    for binding in required_payload_lets(module):
+        match binding.kind:
+            case HirStmtKind.Let(symbol, type_, _):
+                expect(type_ != nil).to_equal(true)
+                val declaration = module.symbols.get_symbol_raw(symbol.id)
+                expect(declaration != nil).to_equal(true)
+                if declaration.unwrap().name == name: return binding
+            case _: fail("binding inventory contained a non-Let statement")
+    fail("source fixture did not produce binding {name}")
+    required_payload_lets(module)[0]
+
+fn required_payload_infer(type_: HirType):
+    expect(type_ != nil).to_equal(true)
+    match type_.kind:
+        case HirTypeKind.Infer(id, level):
+            expect(id).to_equal(0)
+            expect(level).to_equal(0)
+        case _: fail("unsettled required slot must retain the Infer marker")
+
+describe "source-produced required HIR type payloads":
+    it "retains unannotated scalar val and var initializers with non-nil inference slots":
+        val original = required_payload_source("fn probe() -> i64:\n    val scalar = 7\n    var mutable_scalar = 9\n    scalar\n")
+        # Complete producer assertions before attempting the independent codec path.
+        for phase in [0, 1]:
+            val module = if phase == 0: original else: required_payload_roundtrip(original)
+            expect(required_payload_lets(module).len()).to_equal(2)
+            for name in ["scalar", "mutable_scalar"]:
+                val expected = if name == "scalar": 7 else: 9
+                match required_payload_binding(module, name).kind:
+                    case HirStmtKind.Let(_, type_, initializer):
+                        # Literal lowering is unattributed here; HM owns settling it.
+                        required_payload_infer(type_)
+                        match initializer.kind:
+                            case HirExprKind.IntLit(value, _): expect(value).to_equal(expected)
+                            case _: fail("scalar initializer changed during lowering or codec")
+                    case _: fail("source scalar did not lower to Let")
+
+    it "keeps a generic call's unsettled binding as Infer without inventing a return type":
+        val original = required_payload_source("fn identity<T>(value: T) -> T:\n    value\nfn probe() -> i64:\n    val result = identity(7)\n    0\n")
+        # Complete producer assertions before attempting the independent codec path.
+        for phase in [0, 1]:
+            val module = if phase == 0: original else: required_payload_roundtrip(original)
+            expect(required_payload_lets(module).len()).to_equal(1)
+            match required_payload_binding(module, "result").kind:
+                case HirStmtKind.Let(_, type_, initializer):
+                    required_payload_infer(type_)
+                    match initializer.kind:
+                        case HirExprKind.Call(_, arguments, _): expect(arguments.len()).to_equal(1)
+                        case _: fail("generic call initializer disappeared")
+                case _: fail("source call did not lower to Let")
+
+    it "distinguishes an empty dictionary's required Infer key from its optional value type":
+        val original = required_payload_source("fn probe() -> i64:\n    val empty = {}\n    0\n")
+        # Complete producer assertions before attempting the independent codec path.
+        for phase in [0, 1]:
+            val module = if phase == 0: original else: required_payload_roundtrip(original)
+            expect(required_payload_lets(module).len()).to_equal(1)
+            match required_payload_binding(module, "empty").kind:
+                case HirStmtKind.Let(_, type_, initializer):
+                    required_payload_infer(type_)
+                    match initializer.kind:
+                        case HirExprKind.DictLit(entries, key_type, value_type):
+                            expect(entries.len()).to_equal(0)
+                            required_payload_infer(key_type)
+                            expect(value_type == nil).to_equal(true)
+                        case _: fail("empty dictionary did not lower to DictLit")
+                case _: fail("dictionary binding did not lower to Let")
+
+    it "preserves required payloads on tuple-destructuring generated bindings":
+        # The canonical signature pass records pair's tuple return in
+        # fn_tuple_returns; parameter tuple-field attribution is a separate path.
+        val original = required_payload_source("fn pair() -> (i64, bool):\n    (7, true)\nfn probe() -> i64:\n    val (left,right) = pair()\n    left\n")
+        # Complete producer assertions before attempting the independent codec path.
+        for phase in [0, 1]:
+            val module = if phase == 0: original else: required_payload_roundtrip(original)
+            expect(required_payload_lets(module).len()).to_equal(3)
+            match required_payload_binding(module, "__tuple_destr").kind:
+                case HirStmtKind.Let(_, type_, _):
+                    expect(type_ != nil).to_equal(true)
+                    match type_.kind:
+                        case HirTypeKind.Tuple(elements): expect(elements.len()).to_equal(2)
+                        case _: fail("destructuring temporary lost the declared tuple type")
+                case _: fail("destructuring temporary missing")
+            match required_payload_binding(module, "left").kind:
+                case HirStmtKind.Let(_, type_, _):
+                    expect(type_ != nil).to_equal(true)
+                    expect(type_.kind).to_equal(HirTypeKind.Int(64, true))
+                case _: fail("left generated binder missing")
+            match required_payload_binding(module, "right").kind:
+                case HirStmtKind.Let(_, type_, _):
+                    expect(type_ != nil).to_equal(true)
+                    expect(type_.kind).to_equal(HirTypeKind.Bool)
+                case _: fail("right generated binder missing")
+
+    it "refuses canonical and bounded entry points while their generation gate is unavailable":
+        val module = required_payload_source("fn probe() -> i64:\n    val scalar = 7\n    scalar\n")
+        match hir_module_encode_canonical(module):
+            case Err(error):
+                match error:
+                    case HirDecodeError.Unavailable(reason): expect(reason).to_equal("canonical_codec_generator_stale")
+                    case _: fail("canonical encode must report its unavailable generation")
+            case _: fail("canonical encode must not bypass the generation gate")
+        match hir_module_decode_bounded(hir_module_encode(module), HirDecodeLimits.standard()):
+            case Err(error):
+                match error:
+                    case HirDecodeError.Unavailable(reason): expect(reason).to_equal("canonical_codec_generator_stale")
+                    case _: fail("bounded decode must report its unavailable generation before decoding")
+            case _: fail("bounded decode must not bypass the generation gate")

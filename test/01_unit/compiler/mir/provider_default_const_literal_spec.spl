@@ -1,0 +1,99 @@
+"""Provider struct field defaults that name a provider module constant.
+
+Bootstrap run 13 (5fdf9fa): `WmLifecycleWindowState.content_owner: i32 =
+HOST_CONTENT_OWNER_LOCAL_WEB` (os/compositor/wm_action_lifecycle.spl:58) was
+relocated into a consumer that omits the field
+(shared_mdi_framebuffer_scene.spl:307) as HirExprKind.Error, so MIR raised
+"unsupported provider default ...; supply the field explicitly".
+relocate_provider_default only relocated callables, classes and structs.
+"""
+# @cover src/compiler/50.mir/_MirLowering/provider_metadata.spl
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolKind, SymbolTable}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.hir.hir_definitions.{HirConst}
+use compiler.hir.hir_operators.{HirUnaryOp}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.provider_metadata.*
+
+fn provider_const_i32() -> HirType:
+    HirType(kind: HirTypeKind.Int(32, true), span: Span.empty())
+
+fn provider_const(symbol: SymbolId, name: text, value: HirExpr, mutable: bool) -> HirConst:
+    HirConst(symbol: symbol, name: name, type_: provider_const_i32(), value: value,
+        is_mutable: mutable, visibility: Visibility.Private, is_public: false,
+        is_volatile: false, has_fixed_address: false, fixed_address: 0, span: Span.empty())
+
+fn provider_const_int(value: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.IntLit(value, nil), has_type_: true, type_: provider_const_i32(), span: Span.empty())
+
+fn provider_const_ref(symbol: SymbolId) -> HirExpr:
+    HirExpr(kind: HirExprKind.Var(symbol), has_type_: true, type_: provider_const_i32(), span: Span.empty())
+
+describe "provider field default naming a provider constant":
+    it "relocates an immutable literal constant to its literal value":
+        var provider = SymbolTable.new()
+        val local_web = provider.define("LOCAL_WEB", SymbolKind.Const, nil, Span.empty(),
+            Visibility.Private, false, Some("app.wm.lifecycle"))
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.remember_provider_default_constants_v1("app.wm.lifecycle",
+            [provider_const(local_web, "LOCAL_WEB", provider_const_int(7), false)])
+        val relocated = lowering.relocate_provider_default(provider_const_ref(local_web), provider, {})
+        match relocated.kind:
+            case HirExprKind.IntLit(value, _): expect(value).to_equal(7)
+            case _: fail("literal provider constant default was not relocated")
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "relocates negative numeric and text literal constants":
+        var provider = SymbolTable.new()
+        val negative = provider.define("NEG", SymbolKind.Const, nil, Span.empty(),
+            Visibility.Private, false, Some("app.wm.lifecycle"))
+        val label = provider.define("LABEL", SymbolKind.Const, nil, Span.empty(),
+            Visibility.Private, false, Some("app.wm.lifecycle"))
+        val minus_one = HirExpr(kind: HirExprKind.Unary(HirUnaryOp.Neg, provider_const_int(1)),
+            has_type_: true, type_: provider_const_i32(), span: Span.empty())
+        val text_value = HirExpr(kind: HirExprKind.StringLit("web", nil), has_type_: true,
+            type_: HirType(kind: HirTypeKind.Str, span: Span.empty()), span: Span.empty())
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.remember_provider_default_constants_v1("app.wm.lifecycle", [
+            provider_const(negative, "NEG", minus_one, false),
+            provider_const(label, "LABEL", text_value, false)])
+        match lowering.relocate_provider_default(provider_const_ref(negative), provider, {}).kind:
+            case HirExprKind.Unary(_, operand):
+                match operand.kind:
+                    case HirExprKind.IntLit(value, _): expect(value).to_equal(1)
+                    case _: fail("negated literal operand lost")
+            case _: fail("negative literal constant was not relocated")
+        match lowering.relocate_provider_default(provider_const_ref(label), provider, {}).kind:
+            case HirExprKind.StringLit(value, _): expect(value).to_equal("web")
+            case _: fail("text literal constant was not relocated")
+
+    it "keeps a mutable or non-literal constant fatal at use (Error), never a guessed value":
+        var provider = SymbolTable.new()
+        val counter = provider.define("COUNTER", SymbolKind.Const, nil, Span.empty(),
+            Visibility.Private, true, Some("app.wm.lifecycle"))
+        val derived = provider.define("DERIVED", SymbolKind.Const, nil, Span.empty(),
+            Visibility.Private, false, Some("app.wm.lifecycle"))
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.remember_provider_default_constants_v1("app.wm.lifecycle", [
+            provider_const(counter, "COUNTER", provider_const_int(1), true),
+            provider_const(derived, "DERIVED", provider_const_ref(counter), false)])
+        for symbol in [counter, derived]:
+            val relocated = lowering.relocate_provider_default(provider_const_ref(symbol), provider, {})
+            match relocated.kind:
+                case HirExprKind.Error: ()
+                case _: fail("only an immutable literal constant may be inlined")
+
+    it "does not take a same-named constant from a different provider module":
+        var provider = SymbolTable.new()
+        val local_web = provider.define("LOCAL_WEB", SymbolKind.Const, nil, Span.empty(),
+            Visibility.Private, false, Some("app.wm.lifecycle"))
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.remember_provider_default_constants_v1("app.other",
+            [provider_const(local_web, "LOCAL_WEB", provider_const_int(9), false)])
+        val relocated = lowering.relocate_provider_default(provider_const_ref(local_web), provider, {})
+        match relocated.kind:
+            case HirExprKind.Error: ()
+            case _: fail("constant owner must match the symbol's defining module")

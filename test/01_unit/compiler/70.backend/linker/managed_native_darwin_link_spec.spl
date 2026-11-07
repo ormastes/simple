@@ -1,0 +1,64 @@
+# @req REQ-SSPEC-COMPILER
+# Managed (strict-tool) C-driver linking on macOS. Stage 2 compiler tests
+# always run in managed mode; until this change link_native_cc refused every
+# darwin host ("admitted only for Linux and Windows"), so a macOS Stage 2 could
+# never link test_runner. The contract that must hold instead: the admitted
+# clang runs the admitted ld64 by absolute path (--ld-path), and the /usr/bin
+# xcrun trampoline is never accepted as a pinned linker.
+use std.spec.*
+use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_child_roles_v1, native_tool_projection_decode_for_platform_v1}
+use compiler.backend.linker.managed_native_args_v1.{managed_native_cc_link_host_admitted_v1, managed_native_linker_selector_v1, managed_native_extra_args_error_v1}
+
+val XCODE_LD = "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld"
+
+describe "managed native C-driver link on macOS":
+    it "admits darwin hosts alongside linux and windows":
+        expect(managed_native_cc_link_host_admitted_v1("macos")).to_equal(true)
+        expect(managed_native_cc_link_host_admitted_v1("darwin")).to_equal(true)
+        expect(managed_native_cc_link_host_admitted_v1("linux")).to_equal(true)
+        expect(managed_native_cc_link_host_admitted_v1("windows")).to_equal(true)
+        expect(managed_native_cc_link_host_admitted_v1("freebsd")).to_equal(false)
+
+    it "pins the admitted ld64 with --ld-path on darwin":
+        expect(managed_native_linker_selector_v1("macos", XCODE_LD).unwrap()).to_equal("--ld-path=" + XCODE_LD)
+
+    it "keeps -fuse-ld=<path> on linux":
+        expect(managed_native_linker_selector_v1("linux", "/usr/bin/ld.lld").unwrap()).to_equal("-fuse-ld=/usr/bin/ld.lld")
+
+    it "refuses the xcrun trampoline and non-absolute darwin linkers":
+        expect(managed_native_linker_selector_v1("macos", "/usr/bin/ld").is_err()).to_equal(true)
+        expect(managed_native_linker_selector_v1("darwin", "ld").is_err()).to_equal(true)
+        expect(managed_native_linker_selector_v1("darwin", "-fuse-ld=lld").is_err()).to_equal(true)
+
+    it "admits the darwin origin rpath the native link emits":
+        expect(managed_native_extra_args_error_v1(["-rpath", "@loader_path"])).to_equal("")
+        expect(managed_native_extra_args_error_v1(["-framework", "Metal"]) != "").to_equal(true)
+
+describe "managed native child tool roles":
+    # Darwin's ranlibs are argv[0]-dispatched multicall binaries (ranlib ->
+    # libtool, llvm-ranlib -> llvm-ar): pinned by their canonical no-follow
+    # file they are not ranlib, and pinned by name they are symlinks the
+    # authority loader refuses ("admitted tool is not a regular no-follow file").
+    it "admits no ranlib role on darwin":
+        expect(native_tool_child_roles_v1("macos").contains("ranlib")).to_equal(false)
+        expect(native_tool_child_roles_v1("macos").contains("ar")).to_equal(true)
+        expect(native_tool_child_roles_v1("macos").contains("linker")).to_equal(true)
+
+    it "keeps ranlib on linux and windows":
+        expect(native_tool_child_roles_v1("linux").contains("ranlib")).to_equal(true)
+        expect(native_tool_child_roles_v1("windows").contains("ranlib")).to_equal(true)
+
+describe "managed tool projection decode is platform-aware":
+    fn row(role: text, path: text) -> text:
+        "managed-tool=" + role + "|path=" + path + "|sha256=0000000000000000000000000000000000000000000000000000000000000000\n"
+    fn seven() -> text:
+        "managed-native-tools-format=1\n" + row("cc", "/opt/llvm/bin/clang") + row("linker", "/opt/x/ld") +
+            row("ar", "/opt/llvm/bin/llvm-ar") + row("llc", "/opt/llvm/bin/llc") +
+            row("llvm-as", "/opt/llvm/bin/llvm-as") + row("opt", "/opt/llvm/bin/opt") + row("nm", "/opt/llvm/bin/llvm-nm")
+    it "accepts the darwin 7-role mint (no ranlib)":
+        val r = native_tool_projection_decode_for_platform_v1(seven(), "macos")
+        expect(r.is_ok()).to_equal(true)
+        expect(r.unwrap().len()).to_equal(7)
+    it "still requires ranlib on linux":
+        val r = native_tool_projection_decode_for_platform_v1(seven(), "linux")
+        expect(r.is_err()).to_equal(true)

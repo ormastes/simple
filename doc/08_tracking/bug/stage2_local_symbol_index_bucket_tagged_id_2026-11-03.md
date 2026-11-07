@@ -31,3 +31,20 @@ this change); then the mirror is redundant and can be dropped.
 The fallback also resolves bindings that other sites write straight into `local_map` without `bind_local`
 (e.g. the catch-pattern `Binding` at expr_dispatch.spl:7447). Under a correct compiler those used to answer
 `LocalId(id: -1)` from `find_local`; now they resolve. That is the intended semantics of the mirror, but it is a change.
+
+## Re-scope (2026-11-07)
+Checked whether the root can be fixed in current MIR source. It cannot be fixed there alone:
+- The defect is in the frozen stage2 binary (ef0681fc0e1). It decodes `[i64]` field-element reads inconsistently:
+  the `-1` slot fill came back as `-8` (raw tagged word, no `>> 3`), and id 8 hashed to bucket 1 (`8 >> 3`,
+  decoded twice). The current lowering decodes `I64` element reads through one path only,
+  `decode_runtime_value` -> `rt_value_as_int_wide`, which mirrors `box_runtime_value`'s
+  `rt_value_int_wide`. Nothing in the current source produces the stage2 asymmetry, so no source edit
+  is left to make.
+- Every stage3 "leaf" is compiled by the frozen stage2. Removing the mirror before stage2 is rebuilt from
+  current source would bring the failure straight back.
+- No free MIR probe slot was available (`C:/dev/wt/.mir_slot.3` was locked), so the current source could
+  not be shown free of this class on a native lane.
+
+**Keep the workaround.** Removal condition, made more precise: rebuild stage2 from release/1.0.0 at or after
+this record; build a stage3 with the mirror removed; `test/04_smoke/fable_variable.spl` prints `x`. Only then
+delete both `@workaround` sites in `mir_lowering_types.spl`.

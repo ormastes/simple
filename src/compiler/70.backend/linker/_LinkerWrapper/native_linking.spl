@@ -53,7 +53,7 @@ use std.common.crypto.sha256.{sha256_text}
 # directly instead of a second, disagreeing detector.
 use std.log.{debug, info}
 use std.string_builder.{StringBuilder}
-use compiler.backend.linker.managed_native_args_v1.{managed_native_extra_args_error_v1, managed_native_input_args_error_v1}
+use compiler.backend.linker.managed_native_args_v1.{managed_native_extra_args_error_v1, managed_native_input_args_error_v1, managed_native_cc_link_host_admitted_v1, managed_native_linker_selector_v1}
 use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1, native_tool_strict_resolve_v1, native_tool_strict_revalidate_v1}
 use std.nogc_sync_mut.io.native_runtime_authority_v1.{native_runtime_strict_archives_v1, native_runtime_strict_revalidate_v1, native_runtime_strict_generated_inputs_v1}
 use compiler.backend.linker._LinkerWrapper.native_all_support.{native_all_msvc_llvm_link_inputs, native_all_input_present, native_all_input_dir}
@@ -200,6 +200,18 @@ fn native_effective_link_os(host: text, target: text, linker_abi: text) -> text:
         return "windows-msvc"
     host
 
+pub fn native_windows_link_os_for_flavor(os: text, flavor: text) -> text:
+    """Resolve the bare host spelling "windows" to the concrete link lane. Pure.
+
+    native_effective_link_os() returns the host ("windows") when no target
+    triple or linker ABI is set -- the ordinary `native-build` case. The
+    default lane is decided by windows_link_flavor_for_config (llvm-mingw GNU
+    since the no-MSVC policy), so name it explicitly here: the trace then says
+    which linker family runs, and the MinGW arm is selected directly."""
+    if os != "windows": return os
+    if flavor == "msvc": return "windows-msvc"
+    "windows-mingw"
+
 # ============================================================================
 # Native Linking
 # ============================================================================
@@ -290,7 +302,11 @@ fn native_link_with_admitted_inputs_and_engine_v1(object_files: [text], output: 
         val simpleos_target = if native_target != "": native_target elif explicit_target != "": explicit_target else: "simpleos"
         return native_link_success_v1(link_simpleos_internal(object_files, output, simpleos_target, config), "internal:simpleos")
 
-    val os = native_effective_link_os(host_os(), config.target_triple, config.linker_abi)
+    val effective_os = native_effective_link_os(host_os(), config.target_triple, config.linker_abi)
+    var windows_flavor = ""
+    if effective_os == "windows":
+        windows_flavor = windows_link_flavor_for_config(config)
+    val os = native_windows_link_os_for_flavor(effective_os, windows_flavor)
     if reproduce_path != "" and os != "linux":
         return Err("native-link-reproduce-requires-linux-lld")
     if trace:
@@ -618,7 +634,6 @@ fn link_native_unix_with_engine(object_files: [text], output: text, config: Nati
 # (design D4: reject, never mask). allow_duplicate_definitions is not listed:
 # internal:elf is stricter (duplicate strong definitions are a loud error).
 fn internal_simpleos_unsupported_config_field(config: NativeLinkConfig) -> text:
-    # @workaround bug=methods_mir_2026-10-31 reason=call-result-receiver-untyped-in-mir
     val simpleos_flags: Result<InternalSimpleOsFlags, text> = internal_simpleos_flags(config.extra_flags)
     if simpleos_flags.is_err(): return "extra_flags"
     if config.debug:
@@ -786,7 +801,6 @@ fn internal_elf_unsupported_config_field(config: NativeLinkConfig) -> text:
     # ELF consumes user libraries/search paths and the selected runtime
     # provider archives. The remaining fields need explicit implementations;
     # rejecting them prevents a successful link with silently changed policy.
-    # @workaround bug=methods_mir_2026-10-31 reason=call-result-receiver-untyped-in-mir
     val elf_runpath: Result<text, text> = internal_elf_runpath(config.extra_flags)
     if elf_runpath.is_err(): return "extra_flags"
     val elf_hash_style: Result<text, text> = internal_elf_hash_style(config.extra_flags)
@@ -901,7 +915,6 @@ fn internal_coff_unsupported_config_field(config: NativeLinkConfig) -> text:
     # internal:coff consumes libraries, library_paths, and runtime provider
     # archives itself. Modeled optional-header flags become typed PE policy;
     # every other option remains a fail-closed unsupported field.
-    # @workaround bug=methods_mir_2026-10-31 reason=call-result-receiver-untyped-in-mir
     val coff_flags: Result<InternalCoffFlags, text> = internal_coff_flags(
         config.extra_flags, _windows_link_arch(config))
     if coff_flags.is_err():
@@ -2227,7 +2240,7 @@ fn cc_requested_fuse_ld_flag(os_name: text, hosted_cross: bool) -> Result<text, 
         val path: text = match native_tool_strict_resolve_v1("linker"):
             case Ok(v): v
             case Err(e): return Err(e)
-        return Ok("-fuse-ld=" + path)
+        return managed_native_linker_selector_v1(host_os(), path)
     val requested = requested_linker_override()
     if requested == "":
         return Ok("")
@@ -2244,8 +2257,8 @@ fn cc_requested_fuse_ld_flag(os_name: text, hosted_cross: bool) -> Result<text, 
 # @workaround bug=rti007_any_return_rows_2026-11-01 reason=bare Result return is Any in interface row (E-RTI-007); spell Result<text, text>
 fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) -> Result<text, text>:
     if native_tool_strict_requested_v1():
-        if host_os() != "linux" and host_os() != "windows":
-            return Err("managed native C-driver linking is admitted only for Linux and Windows")
+        if not managed_native_cc_link_host_admitted_v1(host_os()):
+            return Err("managed native C-driver linking is admitted only for Linux, Windows and macOS")
         val argument_error = managed_native_extra_args_error_v1(config.extra_flags)
         if argument_error != "": return Err(argument_error)
         val path_argument_error = managed_native_input_args_error_v1(object_files + [output] + config.library_paths + config.libraries)
@@ -2329,6 +2342,10 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         # generated entry shim). Passing only obj0 dropped the entry-point
         # object -> "Undefined symbols: _main" on Mach-O.
         var args = native_retained_symbol_cc_args(config.retained_symbols, link_os)
+        # Strict mode: --ld-path=<admitted ld64>, so the clang driver runs the
+        # pinned linker instead of whatever `ld` it finds itself.
+        if requested_fuse_ld != "":
+            args.push(requested_fuse_ld)
         for target_arg in hosted_cross_c_target_args(target, os_name, arch_name):
             args.push(target_arg)
         for obj in cc_fallback_object_args(object_files):

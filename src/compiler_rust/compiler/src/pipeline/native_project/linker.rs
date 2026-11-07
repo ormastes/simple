@@ -3102,6 +3102,12 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
                                 c_cmd
                                     .args([
                                         "-c",
+                                        // `cc` is also the final link driver and may
+                                        // therefore be clang++. Boot `.c` owners are
+                                        // C ABI translation units; force their language
+                                        // so exported runtime names are never mangled.
+                                        "-x",
+                                        "c",
                                         "-ffreestanding",
                                         "-nostdlib",
                                         "-fno-pie",

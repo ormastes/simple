@@ -77,3 +77,18 @@ Revert-ready: not yet (needs stage3 self-build).
 
 ## Lane note 2026-11-03 (wl01 lane)
 Deferred: five receiver shapes need typed-HIR propagation into MIR method resolution (typed_module_owner_v1.spl); verification requires a stage3 closure build, not available on this lane. Workaround tags bug=methods-mir-20261031 kept.
+
+## Status (2026-11-07): fixed; shapes 4-6 do not reproduce from current source
+
+**Status:** fixed. Shapes 1-3 were root-fixed on 2026-11-02 (waf-2). Shapes 4-6 were
+re-checked cross-module (callee/enum/array fn in `app.lib`, receiver in
+`app.main`, full prescan) and lower clean with current source -- the stage3
+failures came from the older frozen stage2, not from current MIR receiver typing.
+New cross-module cases in `test/01_unit/compiler/50.mir/methods_mir_receiver_shapes_spec.spl`
+(15/15 green). The old "shape 2 untyped call-initialized tail stays fail-closed"
+case was outdated by owner decision 2026-11-06 (infer missing return, warn
+`W-RET-INFER-001`, return dynamically) and now asserts that.
+All `bug=methods_mir_2026-10-31` tags removed; the redundant `_sdn_check_limits`
+rebinding was reverted to the original `headers`/`rows` receivers; other
+explicit type annotations stay as ordinary code.
+Not verified here: a full stage3 closure build.

@@ -1,6 +1,6 @@
 # simple_ring fails Stage 2 MIR: wrong Ok-payload record and untyped Err binder (2026-11-06)
 
-**Status:** workaround-landed (source); two MIR lowering defects open
+**Status:** defect 1 fixed in source (2026-11-06, needs Stage 2 redeploy to verify); defect 2 open; workarounds kept
 
 Module `lib.nogc_async_mut.async_ring.simple_ring` fails MIR lowering under the Stage 2
 compiler with up to two fatal errors. Seen first on the `file_fiber_v1.spl` entry closure
@@ -67,3 +67,38 @@ with no `main`). Seed specs: `simple_ring_spec` 9/9, `mission_adapter_spec` 10/1
 Fix both MIR defects (give the bound payload the subject's instantiated type when the subject
 is a typed method-call result; remember the declared Err type on a Result Err binder), then
 remove the two workarounds.
+
+## Defect 1 fix (2026-11-06)
+
+Root cause: `resolved_call_hir_return_type` never answered for a same-module
+generic class method. Its primary source `fn_return_types` has no writer, and
+the method symbol carries no `Function` type, so `enum_match_expr_type` returned
+nil for `self.take_retained(id)`; the untyped `retained` local therefore had no
+Result type and the Ok binder fell to the closure-global `Result::Ok` slot.
+
+Fix:
+- `expr_dispatch.spl` `resolved_call_hir_return_type`: fall back to the
+  module's own `module_fn_declared_returns` (same-module ids).
+- `builtin_method_extras.spl` `remember_untyped_let_nominal_init`: record a
+  `Result<T, E>` initializer type on an untyped `val`.
+- `switch_operators_calls.spl` single-payload bind arm: never apply the
+  closure-global record slot when the known payload is structural
+  (`hir_payload_type_is_structural`: `T?`, array, slice, tuple, dict, primitive).
+
+Spec: `test/01_unit/compiler/50.mir/result_payload_provenance_spec.spl` (case 1
+red before, green after). Case 2 pins defect 2's shape, which still does not
+reproduce in the seed-run harness. The two source workarounds stay until a
+redeployed Stage 2 compiler builds `simple_ring.spl` without them.
+
+## Re-scope (2026-11-07)
+- Defect 1: the source fix stands. `result_payload_provenance_spec` passes 2/2 on the seed run (2026-11-07,
+  base 07ed6359433).
+- Defect 2 is still not reproducible on the seed. Case 2 is green, and `result_variant_payload_type` already
+  answers `Err` from a `HirTypeKind.Result` subject. The stage2 trace (`remembered-miss`) means the binder
+  local got no `remember_local_hir_type`. In the current bind arm, that happens only when
+  `effective_payload_type` is nil, or on the `exact_err_record` branch (which never records a HIR type).
+  Telling these two apart needs a Stage 2 probe. No MIR probe slot was free (`.mir_slot.3` locked), so no
+  speculative edit was landed without a failing repro.
+- Next step: in a free probe slot, run the stage2 build of `simple_ring.spl` with the `cancel` workaround
+  reverted and `SIMPLE_ENUM_PAYLOAD_PATH_TRACE=1`, and log which branch the `Err` arm takes. Then write the
+  failing spec for that branch.

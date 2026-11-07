@@ -397,14 +397,20 @@ int64_t rt_process_kill_session(int64_t sid, int32_t signo) {
     if (rc < 0) return rc;
     pid_t self = getpid();
     int64_t signalled = 0;
+    int signal_error = 0;
     for (size_t i = 0; i < count; i++) {
         if (list[i].sid != (pid_t)sid || list[i].pid == self || list[i].pid <= 1) continue;
-        if (kill(list[i].pid, signo) == 0) signalled++;
-        /* ESRCH: exited since enumeration; EPERM: not ours to signal. Neither
-         * is an enumeration failure, so the pass continues. */
+        if (kill(list[i].pid, signo) == 0) {
+            signalled++;
+        } else if (errno != ESRCH && signal_error == 0) {
+            /* ESRCH is the benign enumeration/exit race. All other failures
+             * prevent an all-members-signalled receipt, but still attempt
+             * the remaining members rather than abandoning their cleanup. */
+            signal_error = errno ? errno : EIO;
+        }
     }
     free(list);
-    return signalled;
+    return signal_error ? -(int64_t)signal_error : signalled;
 #endif
 }
 
@@ -420,6 +426,7 @@ int64_t rt_process_kill_tree(int64_t pid) {
          * rather than kill a session that belongs to someone else. */
         return RT_PTREE_NOT_SESSION_LEADER;
     }
+    if (sid < 0 && errno != ESRCH) return -(int64_t)errno;
     /* sid < 0 (ESRCH): the leader already exited. Its orphans still carry
      * session id == pid, so the sweep below is still meaningful. */
     int64_t rc = rt_process_kill_session(pid, SIGKILL);
@@ -427,18 +434,23 @@ int64_t rt_process_kill_tree(int64_t pid) {
 
     /* Reap the leader if it is our child. SIGKILL is not deferrable, so this
      * completes quickly; the bound only guards against a stopped/traced leader. */
-    int64_t deadline = ptree_monotonic_ms() + 2000;
+    int64_t now = ptree_monotonic_ms();
+    if (now <= 0) return -EIO;
+    int64_t deadline = now + 2000;
     int leader_gone = 0; /* reaped here, or no longer waitable by us */
     for (;;) {
+        now = ptree_monotonic_ms();
+        if (now <= 0) return -EIO;
+        if (now >= deadline) return -ETIMEDOUT;
         int status = 0;
         pid_t waited = waitpid((pid_t)pid, &status, WNOHANG);
         if (waited == (pid_t)pid) { leader_gone = 1; break; }
         if (waited < 0) {
-            if (errno == EINTR) continue;
-            if (errno == ECHILD) leader_gone = 1;
-            break; /* ECHILD: not our child, or already reaped */
+            int saved = errno;
+            if (saved == EINTR) continue; /* deadline still advances */
+            if (saved == ECHILD) { leader_gone = 1; break; }
+            return saved ? -(int64_t)saved : -EIO;
         }
-        if (ptree_monotonic_ms() >= deadline) break;
         ptree_sleep_ms(1);
     }
 

@@ -53,6 +53,7 @@
 # -> arm body -> enclosing expression -> function, and names the function.
 
 use compiler.hir.hir_types.*
+use compiler.hir.binding_annotation_provenance.{hir_local_annotation_state}
 use compiler.hir.hir_definitions.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.semantics.lint.match_exhaustiveness.{_mexh_is_suspect_case_name}
@@ -165,6 +166,10 @@ fn hir_frontend_type_unresolved(hir: HirModule, t: HirType) -> bool:
         case Named(sym, _):
             if not sym.is_valid():
                 return true
+            # Qualified callable dependencies can be fully materialized
+            # without exposing the type name in the consumer import list.
+            if hir.structs.contains_key(sym) or hir.classes.contains_key(sym) or hir.enums.contains_key(sym):
+                return false
             val s = hir.symbols.get_symbol(sym)
             if not s.?:
                 return true
@@ -534,14 +539,9 @@ class HirFrontendWalker:
             case _: ("", "")
 
     me note_let(sym: SymbolId, declared: HirType?, init: HirExpr, stmt_span: Span):
-        var annotated = false
-        if declared.?:
-            val d: HirType = declared
-            annotated = match d.kind:
-                case Infer(_, _): false
-                case _: true
-        if annotated:
-            return
+        # Let.type_ carries inferred initializer types too. Only the exact
+        # AST lowering receipt can certify this declaration as unannotated.
+        if hir_local_annotation_state(self.hir, sym) != 0: return
         val (code, reason) = self.let_unresolved_reason(init)
         if code == "":
             return
@@ -656,18 +656,29 @@ class HirFrontendWalker:
 
     me any_note_let(sym: SymbolId, declared: HirType?, init: HirExpr):
         val name = self.symbol_name(sym)
+        val annotation_state = hir_local_annotation_state(self.hir, sym)
+        if annotation_state == -1: return
         if declared.?:
             val d: HirType = declared
             var is_infer = false
             match d.kind:
                 case Any:
                     val key = self.fn_key + "/" + name
-                    if self.written.contains_key(key):
+                    if annotation_state == 1:
                         self.any_syms[sym.id] = "local `{name}` is declared `Any`"
                         val shown = self.expr_known_type(init)
                         if shown != "":
                             self.suggestions[key] = shown
                     else:
+                        # Lowering also stores inferred initializer types in
+                        # this slot. An Any payload is not a written annotation.
+                        val source = self.receiver_symbol(init)
+                        if source.is_valid() and (self.any_syms.contains_key(source.id) or
+                                self.alias_syms.contains_key(source.id) or
+                                self.pending_code.contains_key(source.id)):
+                            val source_name = self.symbol_name(source)
+                            self.alias_syms[sym.id] = "it is initialised from `{source_name}`, whose type is not known"
+                            return
                         self.any_syms[sym.id] = "local `{name}` has no concrete type and lowers as `Any`"
                     return
                 case Infer(_, _): is_infer = true
@@ -706,10 +717,10 @@ class HirFrontendWalker:
         if not sym.is_valid():
             return
         var reason = ""
-        if self.pending_reason.contains_key(sym.id):
-            reason = self.pending_reason[sym.id]
-        elif self.alias_syms.contains_key(sym.id):
+        if self.alias_syms.contains_key(sym.id):
             reason = self.alias_syms[sym.id]
+        elif self.pending_reason.contains_key(sym.id):
+            reason = self.pending_reason[sym.id]
         else:
             return
         val name = self.symbol_name(sym)

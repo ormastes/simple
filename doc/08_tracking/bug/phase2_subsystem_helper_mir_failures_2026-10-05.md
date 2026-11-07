@@ -83,3 +83,19 @@ the fresh diagnostics.
 - Action: keep OPEN, P1. Unblock condition: a deployed stage3/self-hosted compiler;
   then re-run the generator + main-verdict helper native builds for the six lanes,
   capture fresh diagnostics, and write per-site repro specs (TDD) before fixing.
+
+## 2026-11-07 mir-p2: interpreter-level MIR repro of the FlatPoolReader site — clean
+
+Correction to the earlier "the seed cannot execute pure-Simple MIR lowering"
+notes: the interpreter runs the real `50.mir` lowering. New spec
+`test/01_unit/compiler/50.mir/flat_pool_reader_mir_lowering_spec.spl` parses the
+REAL `flat_pool_codec.spl` plus a consumer (`FlatPoolReader.new`, `new_bounded`,
+`r.ok`, `r.reject_malformed`, `flat_pool_dec_i64(r)`), lowers both to HIR and MIR
+in a 2-module closure, and reports **zero** `FlatPoolReader` constructor/method
+diagnostics; the only codec diagnostics are the deliberately absent deps
+(`text_byte_len`, `env_get_opt`). 3/3 green, non-vacuity case
+(`r.nope_missing(1)` -> `unresolved method call`) included. It was never red, so
+it is a regression guard, not proof of a fix. Read with the v4 codec rework: the
+`FlatPoolReader` part of the 916be6c2 diagnostics is likely stale. Status stays
+OPEN: the other groups (`ord`, process_ops/env_ops `Result`/handle methods,
+enum arms) and the native helper builds themselves still need a native producer.

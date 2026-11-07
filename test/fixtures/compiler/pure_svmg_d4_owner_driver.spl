@@ -1,0 +1,220 @@
+# Provisional ordinary owner diagnostic: actual HIR lowering and reference VM.
+# No SPipe DSL and no substitute lowerer/VM implementation.
+use compiler.hir.hir_types.{SymbolId, HirType, HirTypeKind, MethodResolution}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirStmt, HirStmtKind, HirBlock, HirBinOp, HirAssignOp, HirCallArg, HirParam}
+use compiler.common.diagnostics.span.{Span}
+use compiler.backend.svmg_lowering.{SvmgHelperFn, lower_svmg_program}
+use std.common.svmg.ref_vm.{VmRunResult, assemble_and_run, read_log, read_records}
+use std.common.binary_io.{f32_to_bits}
+
+fn svmg_require(condition: bool, message: text):
+    if not condition:
+        panic(message)
+
+fn svmg_i32() -> HirType:
+    HirType(kind: HirTypeKind.Int(bits: 32, signed: true), span: Span.empty())
+
+fn svmg_f32() -> HirType:
+    HirType(kind: HirTypeKind.Float(bits: 32), span: Span.empty())
+
+fn svmg_e(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, type_: svmg_i32(), span: Span.empty())
+
+fn svmg_checked(kind: HirExprKind, type_: HirType) -> HirExpr:
+    HirExpr(kind: kind, has_type_: true, type_: type_, span: Span.empty())
+
+fn svmg_s(kind: HirStmtKind) -> HirStmt:
+    HirStmt(kind: kind, span: Span.empty())
+
+fn svmg_int(value: i64) -> HirExpr:
+    svmg_e(HirExprKind.IntLit(value: value, suffix: None))
+
+fn svmg_float(value: f64) -> HirExpr:
+    svmg_checked(HirExprKind.FloatLit(value: value, suffix: None), svmg_f32())
+
+fn svmg_text(value: text) -> HirExpr:
+    svmg_e(HirExprKind.StringLit(value: value, interpolations: None))
+
+fn svmg_var(symbol: SymbolId) -> HirExpr:
+    svmg_checked(HirExprKind.Var(symbol: symbol), svmg_i32())
+
+fn svmg_arg(value: HirExpr) -> HirCallArg:
+    HirCallArg(has_name: false, name: "", value: value, span: Span.empty())
+
+fn svmg_call(name: text, values: [HirExpr]) -> HirExpr:
+    var args: [HirCallArg] = []
+    for value in values:
+        args = args.push(svmg_arg(value))
+    val callee = svmg_e(HirExprKind.NamedVar(symbol: SymbolId(id: 9000), name: name))
+    svmg_e(HirExprKind.Call(callee: callee, args: args, type_args: []))
+
+fn svmg_expect(actual: HirExpr, expected: HirExpr) -> HirStmt:
+    svmg_s(HirStmtKind.Expr(expr: svmg_e(HirExprKind.MethodCall(
+        receiver: svmg_call("expect", [actual]), method: "to_equal",
+        args: [svmg_arg(expected)], resolution: MethodResolution.Unresolved))))
+
+fn svmg_block(stmts: [HirStmt]) -> HirBlock:
+    HirBlock(stmts: stmts, has: false, value: svmg_int(0), span: Span.empty())
+
+fn svmg_print(value: HirExpr) -> HirStmt:
+    svmg_s(HirStmtKind.Expr(expr: svmg_call("print", [value])))
+
+fn run_print_body(body: HirBlock, helpers: [SvmgHelperFn]) -> VmRunResult:
+    val prog = lower_svmg_program(body, helpers, 50000)
+    svmg_require(prog.ok, prog.error)
+    val result = assemble_and_run(prog.code, prog.step_budget, prog.entry_pc)
+    svmg_require(result.halted, "reference VM did not halt")
+    svmg_require(not result.trapped, "reference VM trapped")
+    svmg_require(not result.timed_out, "reference VM exhausted step budget")
+    result
+
+fn expect_vm_print_log(result: VmRunResult, expected: text):
+    svmg_require(read_log(result.arena, result.log_cap) == expected, "executed print LOG differs")
+
+fn svmg_expect_records(result: VmRunResult, expected: [i64]):
+    val records = read_records(result.arena, result.log_cap, result.record_count)
+    svmg_require(records.len() == expected.len(), "wrong VM assertion count")
+    var index = 0
+    while index < expected.len():
+        svmg_require(records[index].passed == 1, "executed VM assertion failed")
+        svmg_require(records[index].value == expected[index], "executed VM value differs")
+        index = index + 1
+
+fn float_compound_body(op: HirAssignOp, initial: f64, operand: f64, expected: f64) -> HirBlock:
+    val left_sym = SymbolId(id: 1)
+    val right_sym = SymbolId(id: 2)
+    val left = svmg_checked(HirExprKind.Var(symbol: left_sym), svmg_f32())
+    val right = svmg_checked(HirExprKind.Var(symbol: right_sym), svmg_f32())
+    svmg_block([
+        svmg_s(HirStmtKind.Let(symbol: left_sym, type_: svmg_f32(), init: svmg_float(initial))),
+        svmg_s(HirStmtKind.Let(symbol: right_sym, type_: svmg_f32(), init: svmg_float(operand))),
+        svmg_s(HirStmtKind.Assign(target: left, op: op, value: right)),
+        svmg_expect(left, svmg_float(expected)),
+    ])
+
+fn svmg_float_bits(value: f64) -> i64:
+    val bits = f32_to_bits(value as f32) as i64
+    if bits >= 0x80000000: bits - 0x100000000 else: bits
+
+fn svmg_check_float(op: HirAssignOp, expected: f64):
+    val result = run_print_body(float_compound_body(op, 8.0, 2.0, expected), [])
+    expect_vm_print_log(result, "")
+    svmg_expect_records(result, [svmg_float_bits(expected)])
+
+fn main():
+    # All signed decimal boundary/sign/zero cases execute actual bytecode.
+    val signed = run_print_body(svmg_block([
+        svmg_print(svmg_int(0)), svmg_print(svmg_text("|")),
+        svmg_print(svmg_int(7)), svmg_print(svmg_text("|")),
+        svmg_print(svmg_int(12345)), svmg_print(svmg_text("|")),
+        svmg_print(svmg_int(-7)), svmg_print(svmg_text("|")),
+        svmg_print(svmg_int(-12345)), svmg_print(svmg_text("|")),
+        svmg_print(svmg_int(-2147483648)), svmg_print(svmg_text("|")),
+        svmg_print(svmg_int(2147483647)),
+    ]), [])
+    expect_vm_print_log(signed, "0|7|12345|-7|-12345|-2147483648|2147483647")
+    svmg_expect_records(signed, [])
+
+    val unsigned_ty = HirType(kind: HirTypeKind.Int(bits: 32, signed: false), span: Span.empty())
+    val unsigned = run_print_body(svmg_block([
+        svmg_print(svmg_checked(HirExprKind.IntLit(value: 2147483648, suffix: None), unsigned_ty)),
+        svmg_print(svmg_text("|")),
+        svmg_print(svmg_checked(HirExprKind.IntLit(value: 4294967295, suffix: None), unsigned_ty)),
+    ]), [])
+    expect_vm_print_log(unsigned, "2147483648|4294967295")
+    svmg_expect_records(unsigned, [])
+
+    val left_sym = SymbolId(id: 1)
+    val right_sym = SymbolId(id: 2)
+    val left = svmg_var(left_sym)
+    val right = svmg_var(right_sym)
+    val difference = svmg_checked(HirExprKind.Binary(op: HirBinOp.Sub, left: left, right: svmg_int(9)), svmg_i32())
+    val locals = run_print_body(svmg_block([
+        svmg_s(HirStmtKind.Let(symbol: left_sym, type_: svmg_i32(), init: svmg_int(123456789))),
+        svmg_s(HirStmtKind.Let(symbol: right_sym, type_: svmg_i32(), init: svmg_int(-987654321))),
+        svmg_print(left), svmg_print(svmg_text("|")), svmg_print(right),
+        svmg_print(svmg_text("|")), svmg_print(difference),
+        svmg_print(svmg_text("|")), svmg_print(left),
+        svmg_expect(left, svmg_int(123456789)),
+        svmg_expect(right, svmg_int(-987654321)),
+    ]), [])
+    expect_vm_print_log(locals, "123456789|-987654321|123456780|123456789")
+    svmg_expect_records(locals, [123456789, -987654321])
+
+    # One compiled print site runs repeatedly; digit count must reset each time.
+    val loop_value_sym = SymbolId(id: 1)
+    val count_sym = SymbolId(id: 2)
+    val loop_value = svmg_var(loop_value_sym)
+    val loop_body = svmg_block([
+        svmg_print(loop_value), svmg_print(svmg_text("|")),
+        svmg_s(HirStmtKind.Assign(target: loop_value, op: HirAssignOp.Div, value: svmg_int(10))),
+        svmg_s(HirStmtKind.Assign(target: svmg_var(count_sym), op: HirAssignOp.Add, value: svmg_int(1))),
+    ])
+    val repeated = run_print_body(svmg_block([
+        svmg_s(HirStmtKind.Let(symbol: loop_value_sym, type_: svmg_i32(), init: svmg_int(1000))),
+        svmg_s(HirStmtKind.Let(symbol: count_sym, type_: svmg_i32(), init: svmg_int(0))),
+        svmg_s(HirStmtKind.Expr(expr: svmg_e(HirExprKind.While(
+            cond: svmg_e(HirExprKind.Binary(op: HirBinOp.Gt, left: loop_value, right: svmg_int(0))),
+            body: loop_body, label: None)))),
+        svmg_expect(loop_value, svmg_int(0)),
+        svmg_expect(svmg_var(count_sym), svmg_int(4)),
+    ]), [])
+    expect_vm_print_log(repeated, "1000|100|10|1|")
+    svmg_expect_records(repeated, [0, 4])
+
+    # A real nested helper prints a marker before returning its integer argument.
+    val param_sym = SymbolId(id: 77)
+    val parameter = HirParam(symbol: param_sym, name: "value", type_: svmg_i32(), has_default: false, default: svmg_int(0), span: Span.empty())
+    val helper = SvmgHelperFn(name: "print_once_helper", params: [parameter], body: HirBlock(
+        stmts: [svmg_print(svmg_text("call;")), svmg_print(svmg_var(param_sym)),
+            svmg_print(svmg_text("|")), svmg_expect(svmg_var(param_sym), svmg_int(12345))],
+        has: true, value: svmg_var(param_sym), span: Span.empty()))
+    val invoked = svmg_call("print_once_helper", [svmg_int(12345)])
+    val once = run_print_body(svmg_block([svmg_print(svmg_checked(invoked.kind, svmg_i32()))]), [helper])
+    expect_vm_print_log(once, "call;12345|12345")
+    svmg_expect_records(once, [12345])
+
+    svmg_check_float(HirAssignOp.Add, 10.0)
+    svmg_check_float(HirAssignOp.Sub, 6.0)
+    svmg_check_float(HirAssignOp.Mul, 16.0)
+    svmg_check_float(HirAssignOp.Div, 4.0)
+
+    val integer_sym = SymbolId(id: 1)
+    val integer = run_print_body(svmg_block([
+        svmg_s(HirStmtKind.Let(symbol: integer_sym, type_: svmg_i32(), init: svmg_int(8))),
+        svmg_s(HirStmtKind.Assign(target: svmg_var(integer_sym), op: HirAssignOp.Add, value: svmg_int(2))),
+        svmg_s(HirStmtKind.Assign(target: svmg_var(integer_sym), op: HirAssignOp.Sub, value: svmg_int(1))),
+        svmg_s(HirStmtKind.Assign(target: svmg_var(integer_sym), op: HirAssignOp.Mul, value: svmg_int(3))),
+        svmg_s(HirStmtKind.Assign(target: svmg_var(integer_sym), op: HirAssignOp.Div, value: svmg_int(3))),
+        svmg_expect(svmg_var(integer_sym), svmg_int(9)),
+    ]), [])
+    expect_vm_print_log(integer, "")
+    svmg_expect_records(integer, [9])
+
+    for op in [HirAssignOp.Mod, HirAssignOp.BitAnd, HirAssignOp.BitOr, HirAssignOp.BitXor, HirAssignOp.Shl, HirAssignOp.Shr]:
+        val rejected = lower_svmg_program(float_compound_body(op, 8.0, 2.0, 0.0), [], 1000)
+        svmg_require(not rejected.ok, "unsupported float compound operator was admitted")
+        svmg_require(rejected.error.contains("float operands"), "missing float compound diagnostic")
+    for op in [HirBinOp.Mod, HirBinOp.BitAnd, HirBinOp.BitOr, HirBinOp.BitXor, HirBinOp.Shl, HirBinOp.Shr]:
+        val rejected = lower_svmg_program(svmg_block([
+            svmg_s(HirStmtKind.Expr(expr: svmg_e(HirExprKind.Binary(op: op, left: svmg_float(8.0), right: svmg_float(2.0))))),
+        ]), [], 1000)
+        svmg_require(not rejected.ok, "unsupported float binary operator was admitted")
+        svmg_require(rejected.error.contains("float operands"), "missing float binary diagnostic")
+    val float_print = lower_svmg_program(svmg_block([svmg_print(svmg_float(1.5))]), [], 1000)
+    svmg_require(not float_print.ok, "F32 print was admitted")
+    svmg_require(float_print.error.contains("32-bit integer"), "missing F32 print diagnostic")
+    val bool_ty = HirType(kind: HirTypeKind.Bool, span: Span.empty())
+    val bool_print = lower_svmg_program(svmg_block([
+        svmg_print(svmg_checked(HirExprKind.BoolLit(value: true), bool_ty)),
+    ]), [], 1000)
+    svmg_require(not bool_print.ok, "Bool print was admitted")
+    svmg_require(bool_print.error.contains("32-bit integer"), "missing Bool print diagnostic")
+    for signed_kind in [true, false]:
+        val wide_ty = HirType(kind: HirTypeKind.Int(bits: 64, signed: signed_kind), span: Span.empty())
+        val wide_print = lower_svmg_program(svmg_block([
+            svmg_print(svmg_checked(HirExprKind.IntLit(value: 7, suffix: None), wide_ty)),
+        ]), [], 1000)
+        svmg_require(not wide_print.ok, "wide integer print was admitted")
+        svmg_require(wide_print.error.contains("32-bit integer"), "missing wide integer print diagnostic")
+    print "pure-svmg-d4-owner: PASS"

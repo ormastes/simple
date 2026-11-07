@@ -486,6 +486,7 @@ fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCo
         # and truncates their tagged pointers before a by-value codec call.
         var out = indent + "var ks{k}: [" + s.a + "] = []\n"
         out = out + indent + "if " + v + " != nil:\n"
+        out = out + indent + "    if not w.account_key_snapshot(" + v + ".len()): return\n"
         out = out + indent + "    ks{k} = " + v + ".keys()\n"
         val order_fn = if s.a == "i64": "hc_order_i64_keys_v1"
             elif s.a == "text": "hc_order_text_keys_v1"
@@ -493,6 +494,8 @@ fn _emit_enc(u: CodecUniverse, type_text: text, v: text, indent: text, c: EmitCo
             else: ""
         if order_fn == "":
             _codec_fail("hir codec generator: unsupported dictionary key order " + s.a)
+        val admission = if s.a == "text": "account_text_key_order(ks{k})" else: "account_scalar_key_order(ks{k}.len())"
+        out = out + indent + "if not w." + admission + ": return\n"
         out = out + indent + "ks{k} = " + order_fn + "(ks{k})\n"
         out = out + indent + "w.put_i64(ks{k}.len())\n"
         out = out + indent + "for dk{k} in ks{k}:\n"
@@ -1023,6 +1026,41 @@ fn _unwrap_optional_decoder_calls(body: text, optional_decoders: [text]) -> text
             out.push(line)
     out.join("\n")
 
+# A wrapper owns balanced depth even when a generated body refuses early.
+# Apply this one source transformation to every declaration, rather than
+# relying on each shape/enum arm to remember its unwind and poison guards.
+pub fn guard_codec_encoder_v1(body: text) -> text:
+    val lines = body.split("\n")
+    if lines.len() == 0: _codec_fail("empty encoder body")
+    val signature = lines[0]
+    val marker = "(w: HirCodecWriter, node: "
+    val split = signature.find(marker)
+    if not signature.starts_with("fn hc_enc_") or split < 0:
+        _codec_fail("unexpected encoder signature: " + signature)
+    val name = signature.substring(3, split)
+    val private_name = "_" + name + "_body"
+    var out: [text] = [signature,
+        "    if not w.enter_node(): return",
+        "    " + private_name + "(w, node)",
+        "    w.leave_node()", "",
+        "fn " + private_name + signature.substring(split)]
+    var i = 1
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+        val indent = line.substring(0, _indent_of(line))
+        # Guard variable traversal and composite argument evaluation. Scalar
+        # writer calls already refuse poison; their fixed tails may unwind.
+        val boundary = (trimmed.starts_with("for ") or trimmed.starts_with("var ks") or
+            trimmed.starts_with("val enc_node_") or
+            (trimmed.starts_with("hc_enc_") and not trimmed.starts_with("hc_enc_enum_")))
+        if boundary: out.push(indent + "if not w.ok: return")
+        out.push(line)
+        if trimmed.starts_with("for "):
+            out.push(indent + "    if not w.charge_work(1): return")
+        i = i + 1
+    out.join("\n")
+
 fn emit_codec_file(u: CodecUniverse) -> text:
     var parts: [text] = [CODEC_GEN_HEADER]
     parts.push("#\n# HirModule <-> line blob codec. One encoder and one decoder per\n")
@@ -1041,7 +1079,7 @@ fn emit_codec_file(u: CodecUniverse) -> text:
         optional_decoders.push("hc_dec_opaque_" + _codec_snake(opaque))
     for name in order:
         val decl = u.decl_of(name)
-        bodies.push(_emit_enc_decl(u, decl) + "\n")
+        bodies.push(guard_codec_encoder_v1(_emit_enc_decl(u, decl)) + "\n")
         val dec = _emit_dec_decl(u, decl)
         if dec.starts_with("fn " + dec_fn_name(name) + "(r: FlatPoolReader) -> " + name + "?:"):
             optional_decoders.push(dec_fn_name(name))
@@ -1068,4 +1106,4 @@ fn codec_decl_count(repo_root: text) -> i64:
 export codec_decl_sources, codec_opaque_types, CodecUniverse, CodecDecl, TypeShape
 export extract_codec_struct_fields, codec_closure, codec_emit_order
 export emit_codec_file, generate_codec_into, codec_decl_count, bare_placeholder_literal_v1
-export enc_fn_name, dec_fn_name, CODEC_GEN_HEADER
+export enc_fn_name, dec_fn_name, CODEC_GEN_HEADER, guard_codec_encoder_v1

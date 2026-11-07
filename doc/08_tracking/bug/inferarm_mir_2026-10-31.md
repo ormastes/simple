@@ -52,3 +52,23 @@ for method-name dispatch. No `[infer-arm]`. Audit: all 20 tagged sites present;
 ~1400 other unannotated `var x = []` locals in src/ were lowered by the frozen
 stage2 that emitted the stage3 objects, so mass annotation is not justified.
 Removal condition unchanged.
+
+## Status (2026-11-07): fixed in MIR empty-array element typing
+
+**Status:** fixed. Root cause: `lower_type` lowered `Array(elem)` / `Slice(elem)` by
+calling `lower_type(elem)` directly, so an element that was still `Infer` (an
+un-annotated `var x = []` whose element never got resolved upstream) hit the
+fatal `[infer-arm]` arm. Top-level `Infer` on a Let was already mapped to the
+erased slot; the nested element was not.
+Fix: `lower_collection_element_type` (`src/compiler/50.mir/_MirLowering/function_lowering.spl`)
+resolves an `Infer` element to MIR's unknown-element stand-in (I64, see
+`mir_elem_type_is_unspecific`), which the existing later-use tracking
+(`remember_local_hir_type` / `inferred_array_elem_state` on push/assign) refines.
+Per owner decision 2026-11-06, under `SIMPLE_SAFETY_PROFILE=robust|critical` it
+is the compile error `E-MIR-EMPTY-ARRAY-ELEM` instead.
+Tests: `test/01_unit/compiler/50.mir/infer_empty_array_push_spec.spl` red 2/4 ->
+green 4/4 (new: default resolves to erased element, robust errors);
+`infer_empty_array_full_closure_spec` 2/2, `function_lowering_types_fields_mcdc_spec` 36/36.
+Workaround tags removed from all 20 sites; the explicit element annotations stay
+as ordinary code (they are correct types and robust mode would require them).
+Not verified here: a full stage3 closure build (no stage3 lane in this worktree).

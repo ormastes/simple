@@ -47,3 +47,15 @@ empty display name; every caller passes the identifier as `fallback`). Pinned by
 - Fix: body routes through `symbol_name_scalar_raw`; spec PASSES (seed interpreter).
 - Stage3 proof needs a stage2 closure rebuild of `compiler.hir.hir_symbol_table_methods` (next `fable_probe_hirfix` run after
   hirfix2d) and the variable smoke (`test/04_smoke/fable_variable.spl`, expect `x`).
+
+## Re-scope (2026-11-07)
+This cannot be fixed in source while stage2 is frozen. The miscompile, `if val payload = <HirSymbol?>`
+bound through the scalar decode, is in the frozen stage2 binary's codegen. Every next-leaf object of
+`hir_symbol_table_methods` is compiled by that same binary. The `symbol_name_scalar_raw` route is also the
+correct shape under a correct compiler: it is behaviour-equivalent apart from the empty-name note above,
+and `symbol_display_name_scalar_shape_spec` pins it. So the "workaround" carries no extra cost and is safe to
+keep for good.
+
+No free MIR probe slot was available (`.mir_slot.3` locked), so a stage2 rebuilt from current source could
+not be checked. **Removal condition:** a stage2 rebuilt from current release/1.0.0, and a stage3 built from the
+original `if val` body that passes `test/04_smoke/fable_variable.spl`. Until both exist, keep the workaround.

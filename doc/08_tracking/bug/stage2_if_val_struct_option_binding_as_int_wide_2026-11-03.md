@@ -46,3 +46,13 @@ reused by a later string). The phase-3 smokes run with `SIMPLE_HIR_CACHE=0` unti
 ## Removal condition
 A stage2 that binds struct-typed optionals through the payload (any seed-built stage2 from release/1.0.0 at
 or after this change) makes the `if val` form safe again.
+
+## Re-scope (2026-11-07, fix-implemented-verification-pending)
+Current source already binds `if val` through `ExistsCheck` (convert_nodes.spl STMT_VAL_DECL,
+bind_optional_payload) with the binder typed by the payload; the stage2 that miscompiled was the
+frozen ef0681fc0e1 build. Pinned at MIR level by
+`test/01_unit/compiler/50.mir/if_val_binder_payload_spec.spl` ("never decodes a struct Option
+binder as a wide integer": no `rt_value_as_int_wide` in the lowered binder). Shares the binder
+lowering fixed for mir_if_val_bool_binder_is_presence_predicate_2026-11-06. The seven
+`driver_pipeline_lowering.spl` workaround sites stay until a stage2 built from this source is
+verified on the stage3 hello smoke (removal condition above).

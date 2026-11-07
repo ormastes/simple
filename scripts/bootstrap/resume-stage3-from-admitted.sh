@@ -1203,6 +1203,13 @@ COMPILER_CHECK_KILL_GRACE_SECONDS=${COMPILER_CHECK_KILL_GRACE_SECONDS:-1}
 bootstrap_stage_sanity() (
   candidate_sanity=$1 evidence=$2 sanity_home=$3 sanity_tmp=$4 sanity_path=$5
   sanity_repo_root=$root
+  sanity_bootstrap_whole_program_present=${SIMPLE_BOOTSTRAP_WHOLE_PROGRAM+x}
+  sanity_bootstrap_whole_program=${SIMPLE_BOOTSTRAP_WHOLE_PROGRAM-}
+  if [ "$sanity_bootstrap_whole_program_present" = x ] &&
+     [ "$sanity_bootstrap_whole_program" != 1 ]; then
+    echo 'bootstrap-sanity-error: phase=resource-validation reason=invalid-bootstrap-whole-program raw_status=125' >&2
+    return 125
+  fi
   version_expect_status=0
   version_expected=$(bootstrap_stage3_canonical_version "$sanity_repo_root") || \
     version_expect_status=1
@@ -1234,6 +1241,10 @@ bootstrap_stage_sanity() (
   done
   HOME=$sanity_home TMPDIR=$sanity_tmp PATH=$sanity_path LC_ALL=C LANG=C
   export HOME TMPDIR PATH LC_ALL LANG
+  if [ "$sanity_bootstrap_whole_program_present" = x ]; then
+    SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=$sanity_bootstrap_whole_program
+    export SIMPLE_BOOTSTRAP_WHOLE_PROGRAM
+  fi
   evidence_tmp="$evidence.tmp.$$"
   frontend_log="$evidence.frontend-driver.log"
   frontend0_log="$evidence.frontend-bootstrap-0.log"

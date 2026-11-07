@@ -215,11 +215,40 @@ y
         st_fail=1
     fi
 
+    # Fixture 4: a deletion-only range PASSes and counts the deleted paths.
+    st_repo4="$st_tmp/delete-repo"
+    mkdir -p "$st_repo4/scripts/check"
+    cp "$st_self" "$st_repo4/scripts/check/check-no-conflict-markers-push.shs"
+    (
+        cd "$st_repo4" || exit 2
+        git init -q
+        git config user.email test@example.com
+        git config user.name test
+        printf 'a\n' > a.txt
+        printf 'b\n' > b.txt
+        git add a.txt b.txt
+        git commit -q -m "initial"
+        st_base=$(git rev-parse HEAD)
+        git rm -q a.txt b.txt
+        git commit -q -m "delete both"
+        st_tip=$(git rev-parse HEAD)
+        sh scripts/check/check-no-conflict-markers-push.shs "$st_base..$st_tip" > out.txt 2>&1
+        echo $? > rc.txt
+    )
+    st_rc4=$(cat "$st_repo4/rc.txt" 2>/dev/null)
+    st_out4=$(cat "$st_repo4/out.txt" 2>/dev/null)
+    if [ "$st_rc4" = "0" ] && printf '%s' "$st_out4" | "$GREP" -q "PASS — 2 path(s) checked.*all deletions"; then
+        echo "$SELF: selftest fixture 4 (deletion-only range counts deleted paths) -> PASS: ok"
+    else
+        echo "$SELF: selftest FIXTURE 4 FAILED (deletion-only range should PASS): rc=$st_rc4 out=$st_out4" >&2
+        st_fail=1
+    fi
+
     if [ "$st_fail" -ne 0 ]; then
         echo "$SELF: ERROR — nothing was checked (selftest failed)"
         exit 2
     fi
-    echo "$SELF: selftest: 3 fixture(s) passed"
+    echo "$SELF: selftest: 4 fixture(s) passed"
     exit 0
 fi
 
@@ -608,10 +637,11 @@ if [ "$scanned" -eq 0 ]; then
     # here, but the OLD script's separate `git ls-tree --format` gitlink
     # probe used to fail on 2.34 and misclassify the path as unreadable
     # content, ERRORing on every push that touched .spipe/spipe). An
-    # all-DELETION range is deliberately NOT given the same pass: a commit
-    # that only deletes previously-scanned content and adds nothing new to
-    # scan is exactly the shape a bad rebase can produce, so that case still
-    # requires an explicit --allow below, unchanged from before this rewrite.
+    # all-DELETION range gets the same pass (2026-11-07): a deleted path has
+    # no blob at the tip, so it categorically cannot carry marker text. The
+    # "a bad rebase can delete content" risk is real but is not a marker
+    # risk; mass deletion is the job of check-tree-size-push.shs, which still
+    # runs on every push. Every deleted path is counted as checked.
     # `exempted` must be exactly 0 here too: if some OTHER path was skipped by
     # the (implicit or --allow) allowlist, the "entirely explained by
     # uncontroversial gitlinks" story no longer covers the whole range, and
@@ -620,6 +650,11 @@ if [ "$scanned" -eq 0 ]; then
     if [ "$skipped_gitlink" -gt 0 ] && [ "$skipped_deleted" -eq 0 ] && [ "$exempted" -eq 0 ] \
        && [ "$nlines" -eq "$skipped_gitlink" ]; then
         echo "$SELF: PASS — 0 file(s) scanned at $tip across $ncommits commit(s) in $range$allow_note ($skipped_gitlink submodule gitlink(s) skipped: no blob content in this repo) (repo $toplevel)"
+        exit 0
+    fi
+    if [ "$skipped_deleted" -gt 0 ] && [ "$skipped_gitlink" -eq 0 ] && [ "$exempted" -eq 0 ] \
+       && [ "$nlines" -eq "$skipped_deleted" ]; then
+        echo "$SELF: PASS — $skipped_deleted path(s) checked at $tip across $ncommits commit(s) in $range$allow_note (all deletions: no content to scan) (repo $toplevel)"
         exit 0
     fi
     # Still fail closed when the zero came from anything OTHER than paths the

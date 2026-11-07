@@ -1,0 +1,52 @@
+#!/bin/sh
+# Materialize committed control bytes, ignoring archive-only export attributes.
+# Never alter source metadata or consult dirty working files/check-out filters.
+set -eu
+[ "$#" = 3 ] || exit 64
+source_root=$1 commit=$2 destination=$3
+case "$destination" in /*) ;; *) exit 64 ;; esac
+[ ! -e "$destination" ] && [ ! -L "$destination" ] || exit 1
+case "$commit" in ''|*[!0-9a-f]*) exit 64 ;; esac
+# This bootstrap repository's admitted object format is SHA-1.
+[ "${#commit}" = 40 ] || exit 64
+[ "$(git -C "$source_root" rev-parse --verify "$commit^{commit}")" = "$commit" ]
+objects=$(git -C "$source_root" rev-parse --path-format=absolute --git-path objects)
+case "$objects" in *'
+'*) exit 64 ;; esac
+[ -d "$objects" ]
+temporary=$(mktemp -d "${destination%/*}/.committed-controls.XXXXXX")
+trap 'rm -rf "$temporary"' EXIT HUP INT TERM
+(
+    # Private metadata provides highest-priority attributes without touching
+    # shared .git/info/attributes. Repository/global attributes cannot restore
+    # export-ignore or export-subst over this override, even in nested trees.
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
+    unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ATTR_NOSYSTEM=1
+    export GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL GIT_ATTR_NOSYSTEM
+    git -c init.defaultBranch=controls init --quiet --bare --template= "$temporary/git"
+    printf '%s\n' "$objects" >"$temporary/git/objects/info/alternates"
+    mkdir -p "$temporary/git/info"
+    printf '%s\n' '* -export-ignore -export-subst' >"$temporary/git/info/attributes"
+    git --git-dir="$temporary/git" -c core.attributesFile=/dev/null \
+        archive --format=tar "$commit" >"$temporary/source.tar"
+)
+mkdir "$destination"
+tar -xf "$temporary/source.tar" -C "$destination"
+# Inventory/workaround discovery needs Git membership and HEAD, not just files.
+# Retain our private metadata with a detached committed identity and private
+# index. Only immutable object reads use the source alternate; no source refs,
+# config, index or working files are shared or updated.
+mv "$temporary/git" "$destination/.git"
+(
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_CONFIG
+    unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+    unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+    export GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL
+    git --git-dir="$destination/.git" config core.bare false
+    git --git-dir="$destination/.git" config core.worktree "$destination"
+    git --git-dir="$destination/.git" config core.logAllRefUpdates false
+    git --git-dir="$destination/.git" update-ref --no-deref HEAD "$commit"
+    git --git-dir="$destination/.git" read-tree "$commit"
+)

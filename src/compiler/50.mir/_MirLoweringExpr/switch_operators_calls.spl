@@ -1621,6 +1621,7 @@ impl MirLowering:
         temp-then-merge pattern."""
         var b = self.builder
         val result = b.new_temp(self.match_result_mir_type(expected_type))
+        var oj_arm_locals: [LocalId] = []
         # Arm-type inference fallback: HIR match exprs usually carry NO type_
         # (expected_type nil), leaving the temp i64 — print then decimal-
         # renders text results. Capture the first arm result's MIR type and
@@ -1673,6 +1674,7 @@ impl MirLowering:
                     val arm_result_fb = LocalId(id: 0)
                     val arm_result_local = arm_result ?? arm_result_fb
                     b_arm2.emit_copy(result, arm_result_local)
+                    oj_arm_locals = oj_arm_locals.push(arm_result_local)
                     result_defined = true
                     # Struct-value chain fix (native_build_instance_method_dispatch
                     # _unresolved_after_match_bind_2026-08-09.md): an arm body
@@ -1717,6 +1719,7 @@ impl MirLowering:
                 val def_result_fb = LocalId(id: 0)
                 val def_result_local = def_result ?? def_result_fb
                 b_d2.emit_copy(result, def_result_local)
+                oj_arm_locals = oj_arm_locals.push(def_result_local)
                 result_defined = true
                 if not inferred_known:
                     if val def_ty_found = self.local_mir_type_of(def_result_local):
@@ -1746,6 +1749,8 @@ impl MirLowering:
                 case _:
                     ()
 
+        if expected_type == nil:
+            return self.join_untyped_optional_arms(result, oj_arm_locals)
         result
 
     me emit_if_chain_dispatch(scrut_local: LocalId, int_cases: [(i64, HirBlock)], default_body: HirBlock, default_binding: SymbolId?, expected_type: HirType?) -> LocalId:
@@ -1753,6 +1758,7 @@ impl MirLowering:
         Cheaper than a jump table when arms < 4 or key span > 1024."""
         var b = self.builder
         val result = b.new_temp(self.match_result_mir_type(expected_type))
+        var oj_arm_locals: [LocalId] = []
         # Arm-type inference fallback: HIR match exprs usually carry NO type_
         # (expected_type nil), leaving the temp i64 — print then decimal-
         # renders text results. Capture the first arm result's MIR type and
@@ -1804,6 +1810,7 @@ impl MirLowering:
                     val arm_result_fb = LocalId(id: 0)
                     val arm_result_local = arm_result ?? arm_result_fb
                     b_arm2.emit_copy(result, arm_result_local)
+                    oj_arm_locals = oj_arm_locals.push(arm_result_local)
                     result_defined = true
                     # Struct-value chain fix (native_build_instance_method_dispatch
                     # _unresolved_after_match_bind_2026-08-09.md): an arm body
@@ -1851,6 +1858,7 @@ impl MirLowering:
                 val def_result_fb2 = LocalId(id: 0)
                 val def_result_local = def_result ?? def_result_fb2
                 b_def.emit_copy(result, def_result_local)
+                oj_arm_locals = oj_arm_locals.push(def_result_local)
                 result_defined = true
                 if not inferred_known:
                     if val def_ty_found2 = self.local_mir_type_of(def_result_local):
@@ -1879,6 +1887,8 @@ impl MirLowering:
                 case _:
                     ()
 
+        if expected_type == nil:
+            return self.join_untyped_optional_arms(result, oj_arm_locals)
         result
 
     me try_lower_bitfield_construct(callee: HirExpr, args: [HirCallArg]) -> LocalId?:
@@ -2758,7 +2768,10 @@ impl MirLowering:
                     match declared_field.kind:
                         case HirTypeKind.Named(field_owner, field_args):
                             val field_kind = enum_payload_nominal_kind(field_owner, self.symbols)
-                            if field_args.len() == 0 and (field_kind == 1 or field_kind == 2 or field_kind == 3):
+                            # A trait-typed field (kind 4) is a native trait
+                            # object; lower_method_call dispatches it through
+                            # the trait table only when this type is known.
+                            if field_args.len() == 0 and (field_kind == 1 or field_kind == 2 or field_kind == 3 or field_kind == 4):
                                 return Some(declared_field)
                         # A declared builtin `Result<..>` field
                         # (`owned.query.is_err()` with `query: Result<[Row], E>`)
@@ -2884,6 +2897,13 @@ impl MirLowering:
                         return found_rs.type_
             case Field(base, field_name, _):
                 return self.declared_field_hir_type(base, field_name)
+            # `opt!` names the declared payload (`self.bitmap!.reducer` with
+            # `bitmap: Slot?`). Without this the field chain behind a force
+            # unwrap lost its declared type and a trait-typed field below it
+            # fell to `unresolved method call ... route=runtime-fallback`.
+            case HirExprKind.Unwrap(unwrap_base):
+                if val wrapped = self.receiver_declared_type(unwrap_base):
+                    return enum_match_unwrap_inner_type(wrapped)
             case _: ()
         nil
 
@@ -3692,6 +3712,7 @@ impl MirLowering:
         val scrut_local = self.lower_expr(scrutinee)
         var b = self.builder
         val result = b.new_temp(self.match_result_mir_type(expected_type))
+        var oj_arm_locals: [LocalId] = []
         val merge_block = b.new_block(Some("match_merge"))
         self.builder = b
         var inferred_known = false
@@ -3770,6 +3791,7 @@ impl MirLowering:
                     val arm_result_fb = LocalId(id: 0)
                     val arm_result_local = arm_result ?? arm_result_fb
                     b_arm.emit_copy(result, arm_result_local)
+                    oj_arm_locals = oj_arm_locals.push(arm_result_local)
                     result_defined = true
                     if self.struct_value_syms.contains(arm_result_local.id):
                         self.struct_value_syms[result.id] = self.struct_value_syms[arm_result_local.id]
@@ -3807,6 +3829,8 @@ impl MirLowering:
                     self.mark_runtime_value_local(result.id)
                 case _:
                     ()
+        if expected_type == nil:
+            return self.join_untyped_optional_arms(result, oj_arm_locals)
         result
 
     me bind_catch_all_arm(arm: HirMatchArm, scrut_local: LocalId):
@@ -4584,6 +4608,9 @@ impl MirLowering:
         if self.enum_semantic_capture_enabled and self.enum_semantic_capture_error != "":
             return result
         var result_defined = false
+        # Reachability is independent of value production: unit arms also
+        # contribute a live edge, while returning arms contribute none.
+        var merge_has_incoming = false
         # Canonical verification witness state. It stays disabled unless the
         # source match is exactly exhaustive Result.Ok/Result.Err with one
         # shallow bound payload in each arm and no wildcard/default path.
@@ -4919,7 +4946,11 @@ impl MirLowering:
                         # Scrutinee-instantiation-derived name: immune to the
                         # global-map collision above.
                         self.struct_value_syms[bound_payload.id] = scrutinee_payload_struct
-                    elif payload_struct != nil and payload_struct != "":
+                    elif payload_struct != nil and payload_struct != "" and not hir_payload_type_is_structural(result_payload_type):
+                        # The closure-global slot is only a guess for an
+                        # unknown payload. A known structural payload (`T?`,
+                        # array, tuple, primitive) is never a record value
+                        # (simple_ring_result_payload_provenance_2026-11-06).
                         self.struct_value_syms[bound_payload.id] = payload_struct ?? ""
                     else:
                         # Declared nominal payload (`case X86(caps)` with
@@ -5101,6 +5132,7 @@ impl MirLowering:
                             inferred_known = true
                             inferred_ty = arm_ty_found
                 b_arm2.terminate_goto(merge_block)
+                merge_has_incoming = true
             self.builder = b_arm2
             self.enum_semantic_arm_exit_v1(enum_semantic_capture, semantic_arm, b_arm2.current_block)
             var b_n = self.builder
@@ -5160,6 +5192,7 @@ impl MirLowering:
                             inferred_known = true
                             inferred_ty = gd_ty
                 b_gd2.terminate_goto(merge_block)
+                merge_has_incoming = true
             self.enum_semantic_arm_exit_v1(enum_semantic_capture, semantic_default_arm, b_gd2.current_block)
             b_gd2.switch_to_block(gd_fail)
             self.builder = b_gd2
@@ -5433,10 +5466,17 @@ impl MirLowering:
         var b_end = self.builder
         if not b_end.current_block_has_explicit_terminator():
             b_end.terminate_goto(merge_block)
+            merge_has_incoming = true
         self.builder = b_end
         self.enum_semantic_arm_exit_v1(enum_semantic_capture, semantic_final_default, b_end.current_block)
         self.enum_semantic_finish_v1(enum_semantic_capture)
 
+        # Keep the final Ret/Abort current when every path diverged. Switching
+        # to the unused merge would fabricate an i64 tail in a typed function.
+        # Unreachable is also the builder's unfinished-block sentinel, so do
+        # not switch and then attempt to mark that placeholder unreachable.
+        if not merge_has_incoming and self.builder.current_block_has_explicit_terminator():
+            return result
         self.builder.switch_to_block(merge_block)
         if result_match_candidate and result_ok_arm.id >= 0 and result_err_arm.id >= 0 and result_ok_payload.id >= 0 and result_err_payload.id >= 0:
             self.builder.emit(MirInst(kind: MirInstKind.ResultMatchSemantic(
@@ -5461,6 +5501,9 @@ impl MirLowering:
                 self.propagate_branch_collection_marks(first_arm, result)
                 if self.runtime_elem_value_type.contains(first_arm.id):
                     self.runtime_elem_value_type[result.id] = self.runtime_elem_value_type[first_arm.id]
+        var joined_result = result
+        if expected_type == nil:
+            joined_result = self.join_untyped_optional_arms(result, merged_arm_locals)
         if val found_expected = expected_type:
             self.remember_local_hir_type(result.id, found_expected, 0, 0)
             match found_expected.kind:
@@ -5469,7 +5512,7 @@ impl MirLowering:
                     self.mark_runtime_value_local(result.id)
                 case _:
                     ()
-        result
+        joined_result
 
     me lower_try_expr(base: HirExpr) -> LocalId:
         """Lower `expr?` (Try) on a Result or flat-nullable Option value.
@@ -6144,7 +6187,10 @@ impl MirLowering:
                 # payload keeps its actual declaration ID, never a bare name.
                 # Types with supplied arguments and unknown/nested kinds keep the untyped route.
                 if variant == "Some" and args.len() == 1:
-                    if val inner_type = self.some_witness_inner_hir_type(args[0].value):
+                    # Prefer the payload's own retained type (a struct ctor
+                    # `Some(S(..))`); fall back to the literal/expr witness.
+                    val witness_type = option_payload_type ?? self.some_witness_inner_hir_type(args[0].value)
+                    if val inner_type = witness_type:
                         match inner_type.kind:
                             case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char | HirTypeKind.Str:
                                 self.remember_local_hir_type(tagged.id, HirType(
@@ -6285,6 +6331,9 @@ impl MirLowering:
                             return result
                         case _: ()
                 case _: ()
+            # `x: f64` initialised from an int literal is a float constant.
+            if val float_literal = self.lower_int_literal_for_float_slot(expression, expected):
+                return Some(float_literal)
         self.lower_expr(expression)
 
     me struct_field_requires_move(source: HirExpr, declared_type: HirType?) -> bool:
@@ -9412,3 +9461,13 @@ impl MirLowering:
 # lowered to a const-0 placeholder in MIR. Bug: doc/08_tracking/bug/mir_unresolved_method_on_enum_payload_binding_2026-10-25.md
 fn wa_method_resolution_symbol_id(r: MethodResolution) -> SymbolId?:
     r.get_symbol_id()
+
+fn hir_payload_type_is_structural(payload: HirType?) -> bool:
+    """True when a known Result/Option payload type can never hold a record
+    value, so the closure-global payload-record slot must not be applied."""
+    if val found = payload:
+        match found.kind:
+            case HirTypeKind.Optional(_) | HirTypeKind.Array(_, _) | HirTypeKind.Slice(_) | HirTypeKind.Tuple(_) | HirTypeKind.Dict(_, _): return true
+            case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char | HirTypeKind.Str | HirTypeKind.Unit: return true
+            case _: return false
+    false

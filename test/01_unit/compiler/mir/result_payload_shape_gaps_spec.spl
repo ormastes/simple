@@ -1,0 +1,189 @@
+"""MIR lowering probes for Result payload shapes the Stage 2 compiler rejected.
+
+Bootstrap run 13 (5fdf9fa) hit these fatals while lowering compiler_cli_build:
+- `Result<u64, E>.unwrap()` / `Result<u16, E>.unwrap()` (nvme_performance_contract,
+  real_device_readiness, dbfs_driver): "payload is Int(64, false), not a tuple".
+- `Result<[u8], E>.unwrap_or([])` (compress/deflate): "payload is Array, not a tuple".
+- `Result<(text, [[text]]), E>?` (db_atomic) and `Result<(DeclRef, bool, [RtType]), E>?`
+  with `RtType` an enum (return_type_interface_v1): "slot N is Array".
+"""
+# @cover src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/result_tuple_payload.spl
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolKind, SymbolTable}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instruction_graph.{MirFunction}
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirSignature, MirConstValue}
+use compiler.mir.mir_instruction_support.{MirOperandKind, MirTerminator}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.provider_metadata.{mir_class_identity_raw}
+use compiler.mir._MirLoweringExpr.method_calls_literals.*
+use compiler.mir._MirLoweringExpr.result_tuple_payload.*
+
+struct PayloadGapProbe:
+    function: MirFunction
+    diagnostics: [text]
+    output_type: MirType?
+    runtime_array: bool
+    element_type: MirType?
+
+fn gap_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn gap_text() -> HirType:
+    gap_type(HirTypeKind.Str)
+
+fn payload_gap_probe(payload: HirType, unwrap_err: bool, fallback: HirExpr?) -> PayloadGapProbe:
+    var lowering = MirLowering.new(SymbolTable.new())
+    var builder = lowering.builder
+    builder.begin_function(SymbolId(id: 73), "payload_gap_probe",
+        MirSignature(params: [], return_type: MirType.unit(), is_variadic: false), Span.empty())
+    val prelowered = builder.emit_const_int(73)
+    lowering.builder = builder
+    val receiver_type = if unwrap_err:
+        gap_type(HirTypeKind.Result(gap_text(), payload))
+    else:
+        gap_type(HirTypeKind.Result(payload, gap_text()))
+    val receiver = HirExpr(kind: HirExprKind.Error, has_type_: true, type_: receiver_type, span: Span.empty())
+    val output = lowering.lower_result_unwrap_core(receiver, payload, fallback, unwrap_err, prelowered, true)
+    var diagnostics: [text] = []
+    for error in lowering.errors:
+        diagnostics.push(error.message)
+    val element_type: MirType? = if lowering.runtime_elem_value_type.has(output.id):
+        Some(lowering.runtime_elem_value_type[output.id])
+    else:
+        nil
+    val runtime_array = lowering.runtime_array_locals.get(output.id) ?? false
+    val output_type = lowering.local_mir_type_of(output)
+    var finished = lowering.builder
+    finished.terminate_return(nil)
+    PayloadGapProbe(function: finished.end_function(), diagnostics: diagnostics,
+        output_type: output_type, runtime_array: runtime_array, element_type: element_type)
+
+fn payload_gap_mismatch_terminator(function: MirFunction) -> MirTerminator?:
+    for block in function.blocks:
+        if block.label == Some("result_unwrap_mismatch"):
+            return Some(block.terminator)
+    nil
+
+fn payload_gap_call_count(function: MirFunction, name: text) -> i64:
+    var count = 0
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, callee, _):
+                    match callee.kind:
+                        case MirOperandKind.Const(MirConstValue.Str(actual), _):
+                            if actual == name: count = count + 1
+                        case _: ()
+                case _: ()
+    count
+
+fn payload_gap_cast_count(function: MirFunction, target: MirTypeKind) -> i64:
+    var count = 0
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Cast(_, _, cast_type):
+                    if cast_type.kind == target: count = count + 1
+                case _: ()
+    count
+
+fn payload_gap_int_lit(value: i64, payload: HirType) -> HirExpr:
+    HirExpr(kind: HirExprKind.IntLit(value, nil), has_type_: true, type_: payload, span: Span.empty())
+
+fn payload_gap_empty_array(payload: HirType) -> HirExpr:
+    HirExpr(kind: HirExprKind.ArrayLit([], nil), has_type_: true, type_: payload, span: Span.empty())
+
+fn payload_gap_nil() -> HirExpr:
+    HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: gap_type(HirTypeKind.Unit), span: Span.empty())
+
+describe "Result unwrap of unsigned and narrow integer payloads":
+    it "types u64 and u16 unwrap results by their declared width":
+        for bits in [64, 16]:
+            for unwrap_err in [false, true]:
+                val payload = gap_type(HirTypeKind.Int(bits, false))
+                val probe = payload_gap_probe(payload, unwrap_err, nil)
+                expect(probe.diagnostics).to_equal([])
+                val expected = if bits == 64: MirTypeKind.U64 else: MirTypeKind.U16
+                if val output_type = probe.output_type:
+                    expect(output_type.kind).to_equal(expected)
+                else:
+                    fail("unsigned unwrap lost its result local type")
+                match payload_gap_mismatch_terminator(probe.function):
+                    case Some(MirTerminator.Abort(_)): ()
+                    case _: fail("no-default unsigned unwrap mismatch must abort")
+                # u64 is the boxed width (rt_value_as_u64, as `?` decodes it);
+                # u16 is the raw word narrowed to the declared width.
+                expect(payload_gap_call_count(probe.function, "rt_value_as_u64")).to_equal(if bits == 64: 1 else: 0)
+                expect(payload_gap_cast_count(probe.function, expected)).to_equal(1)
+
+    it "keeps signed i64 unwrap a plain word copy with no decode or cast":
+        val payload = gap_type(HirTypeKind.Int(64, true))
+        for fallback in [nil, Some(payload_gap_nil())]:
+            val probe = payload_gap_probe(payload, false, fallback)
+            expect(probe.diagnostics).to_equal([])
+            expect(probe.output_type).to_equal(Some(MirType.i64()))
+            expect(payload_gap_call_count(probe.function, "rt_value_as_u64")).to_equal(0)
+            expect(payload_gap_cast_count(probe.function, MirTypeKind.I64)).to_equal(0)
+
+    it "keeps u64 and narrow unwrap_or defaults on the merge edge at the declared width":
+        for bits in [64, 16]:
+            val payload = gap_type(HirTypeKind.Int(bits, false))
+            val probe = payload_gap_probe(payload, false, Some(payload_gap_int_lit(0, payload)))
+            expect(probe.diagnostics).to_equal([])
+            match payload_gap_mismatch_terminator(probe.function):
+                case Some(MirTerminator.Goto(_)): ()
+                case _: fail("unwrap_or default must merge, not abort")
+            if bits == 16:
+                # Ok edge and default edge both reach the merge as u16.
+                expect(payload_gap_cast_count(probe.function, MirTypeKind.U16)).to_equal(2)
+
+    it "rejects a nil projection fallback for non-i64 integer payloads":
+        for bits in [64, 16]:
+            val payload = gap_type(HirTypeKind.Int(bits, false))
+            val probe = payload_gap_probe(payload, false, Some(payload_gap_nil()))
+            expect(probe.diagnostics).to_equal(["unsupported Result unwrap payload type: payload is Int({bits}, false), not a tuple"])
+
+describe "Result<[T], E>.unwrap_or with an array default":
+    it "admits an array literal default and keeps the runtime array handle":
+        val payload = gap_type(HirTypeKind.Array(gap_type(HirTypeKind.Int(8, false)), nil))
+        val probe = payload_gap_probe(payload, false, Some(payload_gap_empty_array(payload)))
+        expect(probe.diagnostics).to_equal([])
+        expect(probe.runtime_array).to_equal(true)
+        expect(probe.element_type).to_equal(Some(MirType(kind: MirTypeKind.U8)))
+        match payload_gap_mismatch_terminator(probe.function):
+            case Some(MirTerminator.Goto(_)): ()
+            case _: fail("unwrap_or default must merge, not abort")
+
+    it "still rejects a nil fallback for an array payload (.ok projection)":
+        val payload = gap_type(HirTypeKind.Array(gap_text(), nil))
+        val probe = payload_gap_probe(payload, false, Some(payload_gap_nil()))
+        expect(probe.diagnostics).to_equal(["unsupported Result unwrap payload type: payload is Array, not a tuple"])
+        expect(probe.runtime_array).to_equal(false)
+
+describe "Result tuple payload collection slots":
+    it "admits a nested unsized runtime array slot":
+        var lowering = MirLowering.new(SymbolTable.new())
+        val rows = gap_type(HirTypeKind.Array(gap_type(HirTypeKind.Array(gap_text(), nil)), nil))
+        val payload = gap_type(HirTypeKind.Tuple([gap_type(HirTypeKind.Array(gap_text(), nil)), rows]))
+        val admitted = lowering.result_try_tuple_payload_type(payload)
+        expect(admitted != nil).to_equal(true)
+        expect(lowering.result_tuple_rejected_element(payload)).to_equal("all slots admitted")
+
+    it "admits an array of a registered enum owner and rejects an unregistered one":
+        var symbols = SymbolTable.new()
+        val kind_symbol = symbols.define("Kind", SymbolKind.Enum, nil, Span.empty(),
+            Visibility.Public, false, Some("payload_gap"))
+        symbols.bind_qualified_type("payload_gap", "Kind", kind_symbol)
+        var lowering = MirLowering.new(symbols)
+        val enum_type = gap_type(HirTypeKind.Named(kind_symbol, []))
+        val payload = gap_type(HirTypeKind.Tuple([gap_type(HirTypeKind.Bool), gap_type(HirTypeKind.Array(enum_type, nil))]))
+        expect(lowering.result_tuple_rejected_element(payload)).to_equal("slot 1 is Array")
+        lowering.enum_runtime_id_index_q[mir_class_identity_raw(symbols, kind_symbol.id)] = 0
+        expect(lowering.result_try_tuple_payload_type(payload) != nil).to_equal(true)
+        expect(lowering.result_tuple_rejected_element(payload)).to_equal("all slots admitted")

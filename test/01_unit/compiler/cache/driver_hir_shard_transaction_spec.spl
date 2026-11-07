@@ -1,4 +1,6 @@
-use std.spec.{describe, it, expect}
+use std.spec.{describe, it, expect, before_each, after_each}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.io_runtime.{env_get, env_set}
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive}
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
@@ -12,7 +14,30 @@ use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_module_count}
 use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_key}
 
+# Fixture roots live under the system temp dir and are removed after each
+# example (they used to land in the cwd and were never deleted).
+var spec_temp_roots: [text] = []
+
+fn spec_temp_root(prefix: text) -> text:
+    val tmp = env_get("TMPDIR") ?? env_get("TEMP") ?? ""
+    val parent = if tmp == "": "/tmp" else: tmp
+    val root = secure_temp_dir(parent, prefix).unwrap()
+    spec_temp_roots.push(root)
+    root
+
 describe "Driver HIR shard transaction ownership":
+    # The HIR cache needs a published compiler scope (hir_cache_enabled). The
+    # native-build orchestrator publishes it before any lowering
+    # (native_build_publish_cache_scope_v1); a bare driver in a spec does not.
+    before_each:
+        if (env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? "") == "":
+            env_set("SIMPLE_FRONTEND_CACHE_SCOPE", "spec-driver-hir-scope-v1")
+
+    after_each:
+        for root in spec_temp_roots:
+            dir_remove_all(root)
+        spec_temp_roots = []
+
     it "maps only actual cache hits and stores to the ledger cache flag":
         expect(driver_hir_shard_cache_stored_v1(0)).to_equal(true)
         expect(driver_hir_shard_cache_stored_v1(1)).to_equal(true)
@@ -22,7 +47,7 @@ describe "Driver HIR shard transaction ownership":
         expect(driver_hir_shard_cache_stored_v1(4)).to_equal(false)
 
     it "rejects a real parsed module with no parser binding before classifying a store refusal":
-        val root = secure_temp_dir(".", "hir-driver-no-binding-").unwrap()
+        val root = spec_temp_root("hir-driver-no-binding-")
         val path = "{root}/answer.spl"
         val content = "fn answer() -> i64:\n    37\n"
         expect(file_create_exclusive(path, content)).to_equal(true)
@@ -31,17 +56,16 @@ describe "Driver HIR shard transaction ownership":
         var lowering = hirlowering_for_module(path, ModuleSurfacesByName.empty())
         val rows_before = bootstrap_hir_module_count()
         val receipt = driver.lower_streaming_hir_shard_receipt_transaction_v1(
-            lowering, source, false, "", nil, nil, -1)
+            lowering, source, false, "", nil, -1)
         expect(receipt.status).to_equal(-1)
         expect(receipt.archive.is_none()).to_equal(true)
-        expect(receipt.declaration_registration.is_none()).to_equal(true)
         expect(driver.ctx.errors.join("\n")).to_contain("HIR shard parser binding unavailable")
         expect(driver.ctx.hir_modules.len()).to_equal(0)
         expect(bootstrap_hir_module_count()).to_equal(rows_before)
         expect(transient_array_scope_state_v1()).to_equal(0)
 
     it "rolls back actual failed parser rows and retains diagnostics after reclamation":
-        val root = secure_temp_dir(".", "hir-driver-failure-").unwrap()
+        val root = spec_temp_root("hir-driver-failure-")
         val path = "{root}/broken.spl"
         val content = "fn broken(\n"
         expect(file_create_exclusive(path, content)).to_equal(true)
@@ -50,10 +74,9 @@ describe "Driver HIR shard transaction ownership":
         var lowering = hirlowering_for_module(path, ModuleSurfacesByName.empty())
         val rows_before = bootstrap_hir_module_count()
         val receipt = driver.lower_streaming_hir_shard_receipt_transaction_v1(
-            lowering, source, false, "", nil, nil, -1)
+            lowering, source, false, "", nil, -1)
         expect(receipt.status).to_equal(2)
         expect(receipt.archive.is_none()).to_equal(true)
-        expect(receipt.declaration_registration.is_none()).to_equal(true)
         expect(bootstrap_hir_module_count()).to_equal(rows_before)
         expect(driver.ctx.hir_modules.len()).to_equal(0)
         expect(driver.ctx.errors.len()).to_be_greater_than(0)
@@ -72,7 +95,7 @@ describe "Driver HIR shard transaction ownership":
 
     it "publishes a real durable module without retaining its body in the context":
         expect(hir_cache_enabled()).to_equal(true)
-        val root = secure_temp_dir(".", "hir-driver-success-").unwrap()
+        val root = spec_temp_root("hir-driver-success-")
         val path = "{root}/answer.spl"
         val content = "fn answer() -> i64:\n    37\n"
         expect(file_create_exclusive(path, content)).to_equal(true)
@@ -83,19 +106,17 @@ describe "Driver HIR shard transaction ownership":
         var lowering = hirlowering_for_module(path, ModuleSurfacesByName.empty())
         val rows_before = bootstrap_hir_module_count()
         val receipt = driver.lower_streaming_hir_shard_receipt_transaction_v1(
-            lowering, source, false, key, nil, nil, -1)
+            lowering, source, false, key, nil, -1)
         expect(receipt.status).to_equal(1)
         expect(receipt.archive.is_none()).to_equal(true)
-        expect(receipt.declaration_registration.is_none()).to_equal(true)
         expect(driver.ctx.errors.len()).to_equal(0)
         expect(driver.ctx.hir_modules.len()).to_equal(0)
         expect(bootstrap_hir_module_count()).to_equal(rows_before)
         expect(transient_array_scope_state_v1()).to_equal(0)
         val cached = driver.lower_streaming_hir_shard_receipt_transaction_v1(
-            lowering, source, false, key, nil, nil, -1)
+            lowering, source, false, key, nil, -1)
         expect(cached.status).to_equal(0)
         expect(cached.archive.is_none()).to_equal(true)
-        expect(cached.declaration_registration.is_none()).to_equal(true)
         # The production integer wrapper requests no archive roots. Immediate
         # None values require no heap promotion under the actual core-C owner.
         expect(driver.lower_streaming_hir_shard_transaction_v1(

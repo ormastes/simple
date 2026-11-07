@@ -446,13 +446,16 @@ int64_t spl_dict_len(SplDict* d) {
     return d ? d->len : 0;
 }
 
+/* Flush like rt_print_str (see runtime.c spl_print). */
 void spl_print(const char* s) {
     fputs(s ? s : "", stdout);
+    fflush(stdout);
 }
 
 void spl_println(const char* s) {
     fputs(s ? s : "", stdout);
     fputc('\n', stdout);
+    fflush(stdout);
 }
 
 /* stderr sibling of spl_println. rt_eprintln (runtime_native.c) calls this

@@ -38,16 +38,29 @@ impl MirLowering:
                     match value.kind:
                         case HirExprKind.NilLit: return self.ensure_option_handle(local, expected)
                         case _: ()
-                    if val existing = self.find_local_hir_type(local.id):
+                    # `Some(<concrete>)`: `local` is the already-built Option
+                    # handle (typed `Concrete?`, or untyped), which names no
+                    # implementation itself -- the impl search failed with an
+                    # EMPTY concrete owner, or the declared-payload check
+                    # rejected `Concrete?`. Statically Some, so take its
+                    # payload word and convert THAT, typed by the `Some`
+                    # argument, to the trait object before re-wrapping.
+                    val some_argument = self.native_trait_some_argument(value)
+                    if val existing = self.native_trait_declared_source_type(local, value):
                         match existing.kind:
                             case HirTypeKind.Optional(existing_inner):
                                 if self.native_trait_owner_for_type(existing_inner) == self.native_trait_owner_for_type(inner):
                                     self.option_value_locals[local.id] = true
                                     self.mark_runtime_value_local(local.id)
                                     return local
-                                self.error_fatal("native optional trait conversion requires a matching declared payload", Some(value.span))
-                                return local
+                                if some_argument == nil:
+                                    self.error_fatal("native optional trait conversion requires a matching declared payload", Some(value.span))
+                                    return local
                             case _: ()
+                    if val some_payload_expr = some_argument:
+                        val raw_payload = self.native_trait_some_payload_word(local, value)
+                        val payload = self.coerce_native_trait_object(raw_payload, some_payload_expr, inner)
+                        return self.ensure_option_handle(payload, expected)
                     # Use the same Option owner as ordinary call/field
                     # lowering, after the payload has the real trait ABI.
                     val payload = self.coerce_native_trait_object(local, value, inner)
@@ -60,14 +73,11 @@ impl MirLowering:
         if self.local_hir_type_resource_state(local.id) != 0:
             self.error_fatal("native trait resource conversion requires a concrete drop slot", Some(value.span))
             return local
-        if val existing = self.find_local_hir_type(local.id):
+        # An already trait-typed source (typed local, declared field chain,
+        # declared container read) is this trait's object: move the existing
+        # (data, table) value. Only a concrete source searches for an impl.
+        if val existing = self.native_trait_declared_source_type(local, value):
             if self.native_trait_owner_for_kind(existing.kind) == owner: return local
-        # A read out of a declared trait-object container (`self.blocks[kind]`
-        # on Dict<text, BlockDefinition>) is already this trait's object; its
-        # index-result local just carries no HIR type. Re-wrapping it searched
-        # for a concrete implementation of '' and failed.
-        if val declared_source = self.declared_container_read_type(value):
-            if self.native_trait_owner_for_kind(declared_source.kind) == owner: return local
         val layout_index = self.native_trait_layout_index(owner)
         if layout_index < 0:
             self.error_fatal("native trait conversion lacks canonical declaration: {owner}", Some(value.span))
@@ -129,6 +139,80 @@ impl MirLowering:
         val resource_state = self.local_hir_type_resource_state(local.id)
         self.remember_local_hir_type(object.id, expected, isolation_state, resource_state)
         object
+
+    me native_trait_some_argument(value: HirExpr) -> HirExpr?:
+        """The single argument of a `Some(arg)` construction, else nil."""
+        match value.kind:
+            case HirExprKind.Call(callee, args, _):
+                if args.len() != 1: return nil
+                var name = ""
+                match callee.kind:
+                    case HirExprKind.Var(symbol):
+                        if val present_symbol = self.symbols.get_symbol_raw(symbol.id):
+                            val symbol_entry: HirSymbol = present_symbol
+                            name = symbol_entry.name
+                    case HirExprKind.NamedVar(_, named): name = named
+                    case _: ()
+                if name == "Some": return Some(args[0].value)
+                nil
+            case _: nil
+
+    me native_trait_some_payload_word(option: LocalId, value: HirExpr) -> LocalId:
+        """Payload word of a statically-Some Option handle, carrying the
+        `Some` argument's static type: its own HIR type, else the class or
+        struct a constructor call `Concrete(..)` names."""
+        var builder = self.builder
+        val enum_signature = MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false, params_known: true)
+        val payload_fn = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_enum_payload"), MirType(kind: MirTypeKind.FuncPtr(enum_signature))))
+        val payload_result = builder.emit_call(payload_fn, [mir_operand_copy(option)], MirType.i64())
+        self.builder = builder
+        if payload_result == nil:
+            self.error_fatal("native optional trait conversion lacks payload", Some(value.span))
+            return option
+        val payload = payload_result ?? LocalId(id: -1)
+        val argument = self.native_trait_some_argument(value) ?? value
+        var payload_type: HirType? = nil
+        if argument.has_type_ and argument.type_ != nil:
+            val argument_type = argument.type_ ?? HirType(kind: HirTypeKind.Error, span: value.span)
+            match argument_type.kind:
+                case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Unit: ()
+                case _: payload_type = Some(argument_type)
+        if payload_type == nil:
+            match argument.kind:
+                case HirExprKind.Call(callee, _, _):
+                    var constructor = SymbolId(id: -1)
+                    match callee.kind:
+                        case HirExprKind.Var(symbol): constructor = symbol
+                        case HirExprKind.NamedVar(symbol, _): constructor = symbol
+                        case _: ()
+                    if constructor.id >= 0:
+                        if val present_symbol = self.symbols.get_symbol_raw(constructor.id):
+                            val symbol_entry: HirSymbol = present_symbol
+                            if symbol_entry.kind == SymbolKind.Class or symbol_entry.kind == SymbolKind.Struct:
+                                payload_type = Some(HirType(kind: HirTypeKind.Named(constructor, []), span: value.span))
+                case _: ()
+        if val known = payload_type:
+            self.remember_local_hir_type(payload.id, known, 0, 0)
+        payload
+
+    me native_trait_declared_source_type(local: LocalId, value: HirExpr) -> HirType?:
+        """Static type of a conversion source without lowering anything: the
+        local's remembered HIR type, then the expression's own type, then the
+        declared type of a binding/field chain (`parsed.parser` with
+        `parser: Trait?` -- its field-load local carries no HIR type), then a
+        declared container read (`self.blocks[kind]` on Dict<text, Trait>).
+        A missing answer leaves the concrete-implementation search in charge."""
+        if val local_type = self.find_local_hir_type(local.id):
+            return Some(local_type)
+        if value.has_type_ and value.type_ != nil:
+            val expression_type = value.type_ ?? HirType(kind: HirTypeKind.Error, span: value.span)
+            match expression_type.kind:
+                case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Unit: ()
+                case _: return Some(expression_type)
+        if val declared = self.receiver_declared_type(value):
+            return Some(declared)
+        self.declared_container_read_type(value)
 
     me emit_native_trait_object_for(implementation: NativeTraitImplementation,
             layout: NativeTraitLayout, data: LocalId, cast_name: text) -> LocalId:

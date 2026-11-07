@@ -4,7 +4,7 @@
 # Fail-closed guard for
 # doc/08_tracking/bug/stage3_lookup_or_invalid_returns_unrelated_symbol_id_2026-08-18.md
 #
-# Two invariants of src/compiler/20.hir/hir_types.spl:
+# Two invariants across hir_types.spl and hir_symbol_table_methods.spl:
 #
 #   1. SymbolTable.reset_module() must reset its name/id maps by ASSIGNING a
 #      fresh Dict (`self.X = {}`), never by calling `self.X.clear()`. A
@@ -33,6 +33,7 @@ FIELDS="root_scope_symbols symbols scopes gpu_function_targets gpu_function_back
 # the globals EV_CHECKED / EV_FAILED written to a temp file.
 scan_file() {
     f="$1"
+    lookup_file="${2:-$f}"
     checked=0
     failures=""
 
@@ -58,7 +59,10 @@ scan_file() {
         fi
     done
 
-    lbody=$(awk '/^    fn lookup_or_invalid\(/{on=1;next} on && /^    (me|fn|static fn) /{exit} on{print}' "$f")
+    lbody=""
+    if [ -f "$lookup_file" ]; then
+        lbody=$(awk '/^    fn lookup_or_invalid\(/{on=1;next} on && /^    (me|fn|static fn) /{exit} on{print}' "$lookup_file")
+    fi
     checked=$((checked + 1))
     if [ -z "$lbody" ]; then
         failures="${failures} lookup_or_invalid-body-not-found"
@@ -122,6 +126,17 @@ selftest() {
     scan_file "$empty"
     [ "$EV_CHECKED" -eq 0 ] || { echo "selftest: empty fixture must yield 0 checked"; rc=1; }
 
+    # Production splits the reset and lookup owners. Never accept a lookup
+    # from the reset file when the selected methods owner is missing or bad.
+    awk '/^    fn lookup_or_invalid\(/{exit} {print}' "$good" > "$d/reset.spl"
+    awk '/^    fn lookup_or_invalid\(/{on=1} on{print}' "$good" > "$d/methods.spl"
+    scan_file "$d/reset.spl" "$d/methods.spl"
+    [ "$EV_CHECKED" -eq 9 ] && [ -z "$EV_FAILED" ] || { echo 'selftest: split owners rejected'; rc=1; }
+    scan_file "$good" "$d/missing.spl"
+    case "$EV_FAILED" in *lookup_or_invalid-body-not-found*) : ;; *) echo 'selftest: missing selected owner accepted'; rc=1 ;; esac
+    scan_file "$good" "$bad2"
+    case "$EV_FAILED" in *lookup_or_invalid-missing-id-range-guard*) : ;; *) echo 'selftest: bad selected owner accepted'; rc=1 ;; esac
+
     rm -rf "$d"
     if [ "$rc" -ne 0 ]; then
         echo "FAIL — selftest failed"
@@ -133,8 +148,12 @@ selftest
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
 target="${1:-$root/src/compiler/20.hir/hir_types.spl}"
+lookup_target="${2:-$target}"
+if [ "$#" -eq 0 ]; then
+    lookup_target="$root/src/compiler/20.hir/hir_symbol_table_methods.spl"
+fi
 
-scan_file "$target"
+scan_file "$target" "$lookup_target"
 
 if [ "$EV_CHECKED" -eq 0 ]; then
     echo "ERROR — nothing was checked${EV_FAILED:+ (${EV_FAILED})}"

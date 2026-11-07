@@ -2461,6 +2461,16 @@ bootstrap_stage_sanity() (
     0|1) sanity_file_workers=${SIMPLE_FILE_WORKERS} ;;
     *) sanity_file_workers= ;;
   esac
+  # Explicit whole-program admission is the supported low-memory hosted-runner
+  # route. Preserve it across the same environment scrub as SIMPLE_FILE_WORKERS
+  # or candidate_frontend_smoke silently falls back to the >=30 GiB pool route.
+  sanity_bootstrap_whole_program_present=${SIMPLE_BOOTSTRAP_WHOLE_PROGRAM+x}
+  sanity_bootstrap_whole_program=${SIMPLE_BOOTSTRAP_WHOLE_PROGRAM-}
+  if [ "$sanity_bootstrap_whole_program_present" = x ] &&
+     [ "$sanity_bootstrap_whole_program" != 1 ]; then
+    echo 'bootstrap-sanity-error: phase=resource-validation reason=invalid-bootstrap-whole-program raw_status=125' >&2
+    return 125
+  fi
   sanity_probe_timeout=${COMPILER_PROBE_TIMEOUT_SECONDS}
   sanity_kill_grace=${COMPILER_CHECK_KILL_GRACE_SECONDS}
   sanity_max_log_bytes=${CANDIDATE_FRONTEND_MAX_LOG_BYTES}
@@ -2527,6 +2537,10 @@ bootstrap_stage_sanity() (
   if [ -n "${sanity_file_workers}" ]; then
     SIMPLE_FILE_WORKERS=${sanity_file_workers}
     export SIMPLE_FILE_WORKERS
+  fi
+  if [ "$sanity_bootstrap_whole_program_present" = x ]; then
+    SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=${sanity_bootstrap_whole_program}
+    export SIMPLE_BOOTSTRAP_WHOLE_PROGRAM
   fi
   CANDIDATE_FRONTEND_MAX_LOG_BYTES=${sanity_max_log_bytes}
   CANDIDATE_FRONTEND_ROOT=${sanity_frontend_root}
@@ -3202,6 +3216,35 @@ if [ "${os}" = windows ] && [ "${PLATFORM_ABI}" = gnu ]; then
   # Cargo builds the seed as x86_64-pc-windows-gnullvm (PLATFORM_RUST_TRIPLE):
   # its std links compiler-rt + libunwind natively, so no libgcc is needed.
   mingw_rustflags="${mingw_rustflags} -C link-arg=-fuse-ld=lld"
+  # LLVM's SDK may share its library directory with a different MinGW CRT.
+  # Rust link-search paths precede Clang's defaults, so bind this driver's CRT
+  # first rather than letting LLVM's dependency metadata select SDK CRT files.
+  mingw_crt_archive=$("${mingw_linker}" --target="${mingw_target}" \
+    --print-file-name=libmingw32.a) || exit 1
+  mingw_crt_archive=$(printf '%s\n' "${mingw_crt_archive}" | tr -d '\r') || exit 1
+  mingw_crt_archive=$(cygpath -m "${mingw_crt_archive}") || exit 1
+  mingw_crt_libdir=$(dirname "${mingw_crt_archive}")
+  [ -s "${mingw_crt_archive}" ] && [ -s "${mingw_crt_libdir}/libmingwex.a" ] || {
+    echo "error: Windows GNU C driver did not resolve its MinGW CRT archives" >&2
+    exit 1
+  }
+  mingw_rustflags="-Lnative=${mingw_crt_libdir} ${mingw_rustflags}"
+  # Cargo's ordinary RUSTFLAGS strings split on whitespace. Preserve native
+  # paths containing spaces with its unit-separated encoding, including all
+  # canonical target/link arguments. Ambient flags retain their precedence.
+  mingw_encoded_rustflags=$(printf '%s\037%s\037%s\037%s\037%s' \
+    "-Lnative=${mingw_crt_libdir}" -C "link-arg=--target=${mingw_target}" \
+    -C link-arg=-fuse-ld=lld)
+  mingw_ambient_encoded=${CARGO_ENCODED_RUSTFLAGS:-}
+  if [ "${CARGO_ENCODED_RUSTFLAGS+x}" != x ] && [ -n "${RUSTFLAGS:-}" ]; then
+    mingw_ambient_encoded=$(printf '%s' "${RUSTFLAGS}" | awk '
+      BEGIN { RS="[ \t\r\n]+" }
+      length($0) { if (n++) printf "\037"; printf "%s", $0 }
+    ')
+  fi
+  if [ -n "${mingw_ambient_encoded}" ]; then
+    mingw_encoded_rustflags="${mingw_encoded_rustflags}$(printf '\037')${mingw_ambient_encoded}"
+  fi
   export CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER="${mingw_linker}"
   export CC_x86_64_pc_windows_gnullvm="${mingw_cc}"
   export AR_x86_64_pc_windows_gnullvm="${mingw_ar}"
@@ -3460,7 +3503,7 @@ if [ "${full_bootstrap}" -eq 1 ]; then
   #     replacement, vendor directory, any [build] settings it carries).
   rust_authority_cxx=${CXX:-}
   if [ "${os}" = windows ]; then rust_authority_cxx=; fi
-  rust_authority_toolchain_extra="cc=${cc_abs};mingw_linker=${mingw_linker:-};mingw_cc=${mingw_cc:-};mingw_ar=${mingw_ar:-};mingw_cflags=${mingw_cflags:-};mingw_rustflags=${mingw_rustflags:-};abi_cflags=${simple_abi_cflags:-};cxx=${rust_authority_cxx};ar_env=${AR:-};ld_env=${LD:-};llvm_config_env=${LLVM_CONFIG:-};llvm_sys_231_prefix=${rust_llvm_prefix:-};llvm_link_kind=${rust_llvm_link_kind:-};rustflags=${RUSTFLAGS:-};darwin_rustflags=${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS:-};encoded_rustflags=${CARGO_ENCODED_RUSTFLAGS:-};sdkroot=${SDKROOT:-${rust_llvm_sdkroot:-}};include=${windows_include:-};lib=${windows_lib:-};cargo_config_sha256=${rust_authority_cargo_config_sha256}"
+  rust_authority_toolchain_extra="cc=${cc_abs};mingw_linker=${mingw_linker:-};mingw_cc=${mingw_cc:-};mingw_ar=${mingw_ar:-};mingw_cflags=${mingw_cflags:-};mingw_rustflags=${mingw_rustflags:-};mingw_encoded_rustflags=${mingw_encoded_rustflags:-};abi_cflags=${simple_abi_cflags:-};cxx=${rust_authority_cxx};ar_env=${AR:-};ld_env=${LD:-};llvm_config_env=${LLVM_CONFIG:-};llvm_sys_231_prefix=${rust_llvm_prefix:-};llvm_link_kind=${rust_llvm_link_kind:-};rustflags=${RUSTFLAGS:-};darwin_rustflags=${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS:-};encoded_rustflags=${CARGO_ENCODED_RUSTFLAGS:-};sdkroot=${SDKROOT:-${rust_llvm_sdkroot:-}};include=${windows_include:-};lib=${windows_lib:-};cargo_config_sha256=${rust_authority_cargo_config_sha256}"
   rust_authority_config_key=$(
     bootstrap_authority_rust_build_config_key \
       "${rust_authority_rustc_version}" "${rust_authority_cargo_version}" \
@@ -3559,6 +3602,10 @@ prepare_rust_authority_workspace() {
 run_rust_authority_env() {
   rust_env_log=$1
   shift
+  if [ "${os}" = windows ] && [ "${PLATFORM_ABI}" = gnu ] &&
+      [ -n "${mingw_encoded_rustflags:-}" ]; then
+    set -- "CARGO_ENCODED_RUSTFLAGS=${mingw_encoded_rustflags}" "$@"
+  fi
   if [ "${rust_env_log}" = bootstrap-preflight ] && [ -n "${rust_shared_cache_root}" ]; then
     set -- "SIMPLE_BOOTSTRAP_RUST_CARGO_CACHE_ROOT=${rust_shared_cache_root}" "$@"
   fi
@@ -3567,6 +3614,12 @@ run_rust_authority_env() {
   if [ "$rust_env_log" = bootstrap-preflight ] && [ "${os}" = windows ] &&
       [ -n "${SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT:-}" ]; then
     set -- "SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT=$SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT" "$@"
+  fi
+  # Preserve an explicit bounded consumer budget through preflight's env -i.
+  # The native consumer still validates the value and enforces its ceiling.
+  if [ "$rust_env_log" = bootstrap-preflight ] && [ "${os}" = windows ] &&
+      [ -n "${BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS:-}" ]; then
+    set -- "BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS=$BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS" "$@"
   fi
   if [ "${os}" != windows ] && [ "${CXX+x}" = x ]; then set -- "CXX=$CXX" "$@"; fi
   if [ "${AR+x}" = x ]; then set -- "AR=$AR" "$@"; fi

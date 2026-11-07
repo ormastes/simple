@@ -16,12 +16,40 @@ pub fn driver_frontend_cache_scope_publish_allowed_v1(mode_text: text, cli_mode_
 # The HIR cache identity. With both caches on this is exactly the frontend
 # scope (headers unchanged). With SIMPLE_FRONTEND_CACHE=0 the frontend scope
 # reads "" by design, so the published scope is used directly.
+#
+# An `uncacheable-<pid>-<time>` compiler identity (the executable could not be
+# hashed) is kept: it is stable within one process (memoized scope), so
+# same-process reuse stays valid, and across runs it fails closed as a
+# `header` miss, which the load-side diagnostic names
+# (hir_cache_never_hits_header_rejected_2026-10-26).
 pub fn hir_cache_identity_scope_v1(frontend_scope: text, published_scope: text, frontend_cache_env: text) -> text:
     if frontend_scope != "":
         return frontend_scope
     if frontend_cache_env == "0":
         return published_scope
     ""
+
+# Diagnostic for a `header` rejection: the first field (split on ' ' and ';')
+# where the stored header differs from the expected one, as
+# "field=<n> stored=<s> expected=<e>" (each side capped at 160 bytes), or ""
+# when the two are equal.
+pub fn hir_cache_header_diff_v1(stored: text, expected: text) -> text:
+    if stored == expected:
+        return ""
+    val a = stored.replace(";", " ").split(" ")
+    val b = expected.replace(";", " ").split(" ")
+    val n = if a.len() > b.len(): a.len() else: b.len()
+    var i = 0
+    while i < n:
+        val sa = if i < a.len(): a[i] else: "<absent>"
+        val sb = if i < b.len(): b[i] else: "<absent>"
+        if sa != sb:
+            return "field={i} stored={_hir_header_cap_v1(sa)} expected={_hir_header_cap_v1(sb)}"
+        i = i + 1
+    "field=-1 stored-len={stored.len()} expected-len={expected.len()}"
+
+fn _hir_header_cap_v1(s: text) -> text:
+    if s.len() <= 160: s else: s.substring(0, 160)
 
 # Whether a HIR closure digest (and therefore cache keys / shard identity) may
 # be computed. The explicit-semantic-policy lane is admitted: its policy is

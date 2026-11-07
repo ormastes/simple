@@ -56,7 +56,7 @@ use compiler.common.cache_contract.hir_cache_envelope_reader_v1.{hir_cache_envel
 use compiler.common.module_path_naming.{module_source_relative_path}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_scope}
-use compiler.driver.driver_cache_scope_policy_v1.{hir_cache_identity_scope_v1}
+use compiler.driver.driver_cache_scope_policy_v1.{hir_cache_identity_scope_v1, hir_cache_header_diff_v1}
 use compiler.driver.driver_target_hir_cache_v1.{target_hir_cache_key_suffix}
 use compiler.hir.target_hir.target_hir_flags.{target_hir_mode}
 use compiler.hir.target_hir.hir_target_constraints.{HirTargetConstraints, hir_target_constraints_digest, hir_target_constraints_capture}
@@ -461,6 +461,14 @@ fn hir_cache_load_in_owned_scope(key: text, parser_binding: text = "", source_pa
     val entry = hir_cache_entry_parse(raw, expected_header, parser_binding)
     if entry.reason != "":
         _hir_cache_reject(entry.reason)
+        if entry.reason == "header" and not _hir_cache_header_reject_noted:
+            # First header rejection per process: name the differing field so
+            # a never-hitting cache is diagnosable from one log
+            # (hir_cache_never_hits_header_rejected_2026-10-26).
+            _hir_cache_header_reject_noted = true
+            val nl = raw.index_of("\n")
+            val stored_header = if nl < 0: raw else: raw.substring(0, nl)
+            eprint("[hir-cache] header rejected path={path} {hir_cache_header_diff_v1(stored_header, expected_header)}")
         return nil
     # A hit decodes ONCE. The stability gate (decode + full re-encode + compare)
     # already ran on the STORE side for every published entry
@@ -902,6 +910,7 @@ val HIR_CACHE_STORE_RATE_EVERY: i64 = 64
 var _hir_cache_store_attempts: i64 = 0
 var _hir_cache_codec_refusal_noted: bool = false
 var _hir_cache_decode_refusal_noted: bool = false
+var _hir_cache_header_reject_noted: bool = false
 var _hir_cache_reencode_refusal_noted: bool = false
 var _hir_cache_admission_noted: bool = false
 

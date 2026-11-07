@@ -17,3 +17,7 @@ Landed tagged source workaround (typed params on huffman_lookup, src/lib/nogc_sy
 
 ## Lane note 2026-11-03 (comp-huffret)
 Typed the remaining untyped params (`code`/`length`/`distance`: i64) of deflate_length_decode_info, deflate_distance_decode_info, deflate_length_extra, deflate_distance_extra in huffman.spl; all functions now have explicit param and return types. Status: fix-implemented-verification-pending. Verify: native-build test/fixtures/compiler/huffman_workaround_probe/main.spl with a native producer (not available on the Windows seed lane). Compiler-side inference fix remains out of scope.
+
+## Verification
+
+Verified natively on stage3 s3_fable57s (2026-11-07): RESULT rc=0, 14x true, PASS

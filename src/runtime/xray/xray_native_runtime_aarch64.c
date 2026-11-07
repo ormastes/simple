@@ -13,13 +13,12 @@
  *     src/lib/common/trace/xray_native_trampoline_aarch64_v1.spl encodes the
  *     same instruction words; scripts/check/check-xray-native-inprocess-e2e.shs
  *     compares them with this object's disassembly word for word.
- *  2. The hot-path handler: resolves (return address, site id) to a
- *     registered module's map row, then the shared channel producer
- *     (xray_channel_producer_v1.h, Simple twin trace_native_channel_record_words_v1).
- *  3. Module registration + channel publication, called by the Simple control
- *     plane (src/lib/nogc_sync_mut/trace/xray_native_module_v1.spl). The map
- *     itself is found and validated in Simple; registration re-checks its
- *     header and every sled row before any hook can read it (fail closed).
+ *  2. The AArch64 sled leaf for registration: the activation word is the
+ *     V1 OFF/ON word and the sled's BL targets this TU's trampoline.
+ *  3. Everything ISA-neutral -- hot-path handler, module registration and
+ *     channel publication -- is shared with the x86-64 runtime through
+ *     xray_native_registry_v1.h (called by the Simple control plane
+ *     src/lib/nogc_sync_mut/trace/xray_native_module_v1.spl).
  *
  * Sled contract (trace_native_off_template_v1, Arm64Branch26): on entry
  * x0 = site id (w0, zero-extended by MOVZ/MOVK), x30 = sled + 24 (the BL is at
@@ -42,77 +41,37 @@
  * resident runtime instance; the entry points stay dlsym-able for the
  * loaded-module path.
  */
-#include <stddef.h>
 #include <stdint.h>
-
-#include "xray_channel_producer_v1.h"
 
 #if defined(__linux__) && defined(__aarch64__)
 #define SIMPLE_XRAY_NATIVE_SUPPORTED 1
 #endif
 
-#define SIMPLE_XRAY_API __attribute__((visibility("protected"), used))
-
-/* .simple_xray_map format v1 (src/lib/common/trace/xray_native_map_format_v1.spl). */
-#define XMAP_HEADER_BYTES 48
-#define XMAP_FN_ROW_BYTES 16
-#define XMAP_SITE_ROW_BYTES 24
-#define XMAP_TEXT_BASE_OFFSET 36
+/* AArch64 sled shape (xray_native_map_format_v1.spl). */
+#define XMAP_ISA 2
+#define XMAP_ABI 1
 #define XMAP_SLED_BYTES 32
+#define XMAP_SLED_ALIGN 4
 #define XMAP_OFF_WORD 0x14000008u /* B +32 */
 #define XMAP_ON_WORD 0xD503201Fu  /* NOP */
-#define XMAP_MAX_ROWS 1048576u
-#define SIMPLE_XRAY_NATIVE_MAX_MODULES 64
-
-struct simple_xray_native_module {
-    uintptr_t text_lo;      /* first sled */
-    uintptr_t text_hi;      /* one past the last sled */
-    uintptr_t text_base;    /* relocated .text base of the module's object */
-    const uint8_t *sites;   /* site rows inside the resident map */
-    uint32_t site_count;
-    uint64_t module_instance;
-    int64_t *arena;         /* published channel, NULL until install */
-};
-
-static struct simple_xray_native_module g_modules[SIMPLE_XRAY_NATIVE_MAX_MODULES];
-static uint32_t g_module_count; /* release-published; entries are immutable after */
-/* Per runtime instance (each --xray module links its own copy): sequence
- * numbers are monotonic per module, and an arena is published to exactly one
- * module (install keys it by module instance). */
-static uint64_t g_sequence;
-
-static inline uint32_t xmap_u16(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8); }
-static inline uint32_t xmap_u32(const uint8_t *p) {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-static inline uint64_t xmap_u64(const uint8_t *p) {
-    return (uint64_t)xmap_u32(p) | ((uint64_t)xmap_u32(p + 4) << 32);
-}
+/* x30 = sled + 24: the BL is at sled + 20. */
+#define XMAP_RETURN_TO_SLED 24
 
 #ifdef SIMPLE_XRAY_NATIVE_SUPPORTED
 
 extern void __simple_xray_trampoline_v1(void);
 
-/* Hot path. Never blocks, allocates or calls out. A return address outside
- * every registered module, an out-of-range id, or a row whose sled is not the
- * caller is ignored: such a call is not one of ours. */
-__attribute__((used, noinline)) static void simple_xray_native_handler_v1(uint64_t site_id,
-                                                                         uintptr_t sled_return) {
-    uint32_t count = __atomic_load_n(&g_module_count, __ATOMIC_ACQUIRE);
-    uintptr_t sled = sled_return - 24;
-    for (uint32_t index = 0; index < count; index++) {
-        const struct simple_xray_native_module *module = &g_modules[index];
-        if (sled < module->text_lo || sled >= module->text_hi) continue;
-        int64_t *base = __atomic_load_n(&module->arena, __ATOMIC_ACQUIRE);
-        if (base == NULL || site_id < 1 || site_id > module->site_count) return;
-        const uint8_t *row = module->sites + (site_id - 1) * XMAP_SITE_ROW_BYTES;
-        if (module->text_base + xmap_u64(row) != sled) return;
-        uint64_t function_id = xmap_u32(row + 8);
-        uint64_t kind = row[12]; /* 1 entry, 2 exit, 3 tail exit == event codes */
-        simple_xray_channel_produce_v1(base, kind, module->module_instance,
-                                       function_id | (site_id << 32), &g_sequence);
-        return;
-    }
+/* Registration leaf: first word OFF or ON, and the BL at +20 reaches THIS
+ * runtime's trampoline. */
+static int xray_isa_sled_calls_trampoline(uintptr_t sled, uint32_t site_id) {
+    (void)site_id; /* materialised by MOVZ/MOVK; the map row index binds it */
+    uint32_t word = __atomic_load_n((const uint32_t *)sled, __ATOMIC_RELAXED);
+    if (word != XMAP_OFF_WORD && word != XMAP_ON_WORD) return 0;
+    uint32_t bl = __atomic_load_n((const uint32_t *)(sled + 20), __ATOMIC_RELAXED);
+    if ((bl & 0xFC000000u) != 0x94000000u) return 0;
+    int64_t imm = (int64_t)(bl & 0x3FFFFFFu);
+    if (imm >= 0x2000000) imm -= 0x4000000;
+    return sled + 20 + (uintptr_t)(imm * 4) == (uintptr_t)&__simple_xray_trampoline_v1;
 }
 
 /* Saves x1-x15, x18, x29/x30, NZCV, FPCR, FPSR, q0-q31 (688-byte frame incl.
@@ -199,106 +158,8 @@ __asm__(
     "    ret\n"
     ".size __simple_xray_trampoline_v1, .-__simple_xray_trampoline_v1\n");
 
-/* Register a resident, already-validated `.simple_xray_map` (control plane
- * only, serialized by its single owner; never callable from a hook). Every
- * row is re-checked: aligned sled, known kind, 32-byte AArch64 sled with the
- * V1 off/on words, and the sled's first word currently OFF or ON. Returns the
- * 1-based module slot, 0 on any rejection (nothing published). A map already
- * registered returns its slot (idempotent); an overlapping one is rejected. */
-SIMPLE_XRAY_API int64_t simple_xray_native_register_module_v1(int64_t map_address,
-                                                              int64_t module_instance) {
-    if (map_address <= 0 || module_instance <= 0) return 0;
-    const uint8_t *map = (const uint8_t *)(uintptr_t)map_address;
-    if (map[0] != 'S' || map[1] != 'X' || map[2] != 'R' || map[3] != 'M') return 0;
-    if (xmap_u16(map + 4) != 1 || xmap_u16(map + 6) != 2 || xmap_u16(map + 8) != 1 ||
-        xmap_u16(map + 10) != 1)
-        return 0; /* format 1, isa aarch64, abi simple-aarch64, sled abi 1 */
-    uint32_t fn_count = xmap_u32(map + 12);
-    uint32_t site_count = xmap_u32(map + 16);
-    if (fn_count == 0 || site_count == 0 || fn_count > XMAP_MAX_ROWS || site_count > XMAP_MAX_ROWS)
-        return 0;
-    /* text_base: PREL64 resolved by the static linker -> field address + value. */
-    uintptr_t field = (uintptr_t)map_address + XMAP_TEXT_BASE_OFFSET;
-    uintptr_t text_base = field + (uintptr_t)(int64_t)xmap_u64(map + XMAP_TEXT_BASE_OFFSET);
-    const uint8_t *sites = map + XMAP_HEADER_BYTES + (size_t)fn_count * XMAP_FN_ROW_BYTES;
-    uintptr_t lo = UINTPTR_MAX, hi = 0;
-    for (uint32_t index = 0; index < site_count; index++) {
-        const uint8_t *row = sites + (size_t)index * XMAP_SITE_ROW_BYTES;
-        uintptr_t sled = text_base + (uintptr_t)xmap_u64(row);
-        uint32_t kind = row[12];
-        if ((sled & 3u) != 0 || kind < 1 || kind > 3 || row[13] != XMAP_SLED_BYTES ||
-            xmap_u32(row + 16) != XMAP_OFF_WORD || xmap_u32(row + 20) != XMAP_ON_WORD)
-            return 0;
-        uint32_t word = __atomic_load_n((const uint32_t *)sled, __ATOMIC_RELAXED);
-        if (word != XMAP_OFF_WORD && word != XMAP_ON_WORD) return 0;
-        /* The sled must call THIS runtime instance: a map registered with
-         * another module's runtime would patch ON and record nowhere. */
-        uint32_t bl = __atomic_load_n((const uint32_t *)(sled + 20), __ATOMIC_RELAXED);
-        if ((bl & 0xFC000000u) != 0x94000000u) return 0;
-        int64_t imm = (int64_t)(bl & 0x3FFFFFFu);
-        if (imm >= 0x2000000) imm -= 0x4000000;
-        if (sled + 20 + (uintptr_t)(imm * 4) != (uintptr_t)&__simple_xray_trampoline_v1) return 0;
-        if (sled < lo) lo = sled;
-        if (sled + XMAP_SLED_BYTES > hi) hi = sled + XMAP_SLED_BYTES;
-    }
-    uint32_t count = __atomic_load_n(&g_module_count, __ATOMIC_ACQUIRE);
-    for (uint32_t index = 0; index < count; index++) {
-        if (g_modules[index].sites == sites) {
-            if (g_modules[index].module_instance != (uint64_t)module_instance) return 0;
-            return (int64_t)index + 1;
-        }
-        if (lo < g_modules[index].text_hi && g_modules[index].text_lo < hi) return 0;
-    }
-    if (count >= SIMPLE_XRAY_NATIVE_MAX_MODULES) return 0;
-    g_modules[count] = (struct simple_xray_native_module){
-        .text_lo = lo, .text_hi = hi, .text_base = text_base, .sites = sites,
-        .site_count = site_count, .module_instance = (uint64_t)module_instance, .arena = NULL};
-    __atomic_store_n(&g_module_count, count + 1, __ATOMIC_RELEASE);
-    return (int64_t)count + 1;
-}
+#endif /* SIMPLE_XRAY_NATIVE_SUPPORTED */
 
-/* Publish an initialized, open, resident channel arena for a registered
- * module (design C.2 step 3: before any selected sled can reach it). Returns
- * 1 on success, 0 when the module is unknown or the arena does not describe
- * the stated generation / an open, empty-gate channel. The arena stays
- * resident until process exit; a replaced arena is never freed here. */
-SIMPLE_XRAY_API int64_t simple_xray_native_install_v1(int64_t module_instance, int64_t arena,
-                                                      int64_t generation) {
-    if (module_instance <= 0 || arena <= 0 || (arena % 8) != 0 || generation <= 0) return 0;
-    int64_t *base = (int64_t *)(intptr_t)arena;
-    int64_t capacity = base[CH_CAPACITY];
-    if (capacity <= 0 || capacity > CH_MAX_RECORDS) return 0;
-    if (base[CH_GENERATION] != generation || base[CH_CONTEXT] <= 0) return 0;
-    if (base[CH_ARENA_BYTES] != (CH_HEADER_WORDS + capacity * CH_RECORD_WORDS) * 8) return 0;
-    if (__atomic_load_n(&base[CH_GATE], __ATOMIC_SEQ_CST) != 0) return 0;
-    uint32_t count = __atomic_load_n(&g_module_count, __ATOMIC_ACQUIRE);
-    for (uint32_t index = 0; index < count; index++) {
-        if (g_modules[index].module_instance == (uint64_t)module_instance) {
-            __atomic_store_n(&g_modules[index].arena, base, __ATOMIC_RELEASE);
-            return 1;
-        }
-    }
-    return 0;
-}
+#include "xray_native_registry_v1.h"
 
-#else /* unsupported target: no sleds, nothing can be registered or installed */
-
-SIMPLE_XRAY_API int64_t simple_xray_native_register_module_v1(int64_t map_address,
-                                                              int64_t module_instance) {
-    (void)map_address;
-    (void)module_instance;
-    (void)g_modules;
-    (void)g_module_count;
-    (void)g_sequence;
-    return 0;
-}
-
-SIMPLE_XRAY_API int64_t simple_xray_native_install_v1(int64_t module_instance, int64_t arena,
-                                                      int64_t generation) {
-    (void)module_instance;
-    (void)arena;
-    (void)generation;
-    return 0;
-}
-
-#endif
+SIMPLE_XRAY_NATIVE_ENTRY_POINTS_V1

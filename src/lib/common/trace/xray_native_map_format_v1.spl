@@ -16,8 +16,8 @@
 #
 # text_offset is relative to the start of THIS object's input `.text` section.
 # text_base (u64 at header +36) is 0 in an object and carries one
-# R_AARCH64_PREL64 relocation (`.rela.simple_xray_map`) against the `.text`
-# section symbol, addend 0. After linking the field holds the signed 64-bit
+# R_AARCH64_PREL64 (AArch64) / R_X86_64_PC64 (x86-64) relocation
+# (`.rela.simple_xray_map`) against the `.text` section symbol, addend 0. After linking the field holds the signed 64-bit
 # two's-complement distance `.text(input) - &text_base`, so a loaded image has
 #   runtime_text_base = address_of_field + signed(field)
 # (see xray_map_runtime_text_base_v1). Module registration through an
@@ -32,10 +32,12 @@ pub const XRAY_MAP_TEXT_BASE_OFFSET_V1 = 36
 pub const XRAY_MAP_FUNCTION_ROW_BYTES_V1 = 16
 pub const XRAY_MAP_SITE_ROW_BYTES_V1 = 24
 pub const XRAY_MAP_FORMAT_V1 = 1
-# ISA codes. x86-64 (1) is reserved for PR6 and rejected until it lands.
+# ISA codes (x86-64 since PR6). Any other ISA is UnsupportedTarget.
 pub const XRAY_MAP_ISA_X86_64_V1 = 1
 pub const XRAY_MAP_ISA_AARCH64_V1 = 2
+# ABI profiles are globally unique, never reused across ISAs.
 pub const XRAY_MAP_ABI_AARCH64_SIMPLE_V1 = 1
+pub const XRAY_MAP_ABI_X86_64_SYSV_V1 = 2
 pub const XRAY_MAP_SLED_ABI_V1 = 1
 pub const XRAY_MAP_KIND_ENTRY_V1 = 1
 pub const XRAY_MAP_KIND_EXIT_V1 = 2
@@ -44,6 +46,11 @@ pub const XRAY_MAP_KIND_TAIL_EXIT_V1 = 3
 pub const XRAY_MAP_AARCH64_SLED_BYTES_V1 = 32
 pub const XRAY_MAP_AARCH64_OFF_WORD_V1 = 335544328   # 0x14000008  B +32
 pub const XRAY_MAP_AARCH64_ON_WORD_V1 = 3573751839   # 0xD503201F  NOP
+# x86-64 SysV sled: 13 bytes, 2-aligned; only the first 2 bytes switch
+# (little-endian u16 of `EB 0B` jmp +11 / `66 90` 2-byte nop).
+pub const XRAY_MAP_X86_64_SLED_BYTES_V1 = 13
+pub const XRAY_MAP_X86_64_OFF_WORD_V1 = 3051    # 0x0BEB
+pub const XRAY_MAP_X86_64_ON_WORD_V1 = 36966    # 0x9066
 const XRAY_MAP_MAX_ROWS_V1 = 1048576
 
 pub struct XrayMapFunctionV1:
@@ -75,6 +82,17 @@ pub fn xray_map_aarch64_site_v1(text_offset: u64, local_fn_id: u32, kind: i64) -
         len: XRAY_MAP_AARCH64_SLED_BYTES_V1, align: 4,
         off_word: XRAY_MAP_AARCH64_OFF_WORD_V1, on_word: XRAY_MAP_AARCH64_ON_WORD_V1)
 
+pub fn xray_map_x86_64_site_v1(text_offset: u64, local_fn_id: u32, kind: i64) -> XrayMapSiteV1:
+    XrayMapSiteV1(text_offset: text_offset, local_fn_id: local_fn_id, kind: kind,
+        len: XRAY_MAP_X86_64_SLED_BYTES_V1, align: 2,
+        off_word: XRAY_MAP_X86_64_OFF_WORD_V1, on_word: XRAY_MAP_X86_64_ON_WORD_V1)
+
+# The one site-row shape an ISA admits: (len, align, off_word, on_word).
+fn xray_map_site_shape_v1(isa: i64) -> (i64, i64, i64, i64):
+    if isa == XRAY_MAP_ISA_X86_64_V1:
+        return (XRAY_MAP_X86_64_SLED_BYTES_V1, 2, XRAY_MAP_X86_64_OFF_WORD_V1, XRAY_MAP_X86_64_ON_WORD_V1)
+    (XRAY_MAP_AARCH64_SLED_BYTES_V1, 4, XRAY_MAP_AARCH64_OFF_WORD_V1, XRAY_MAP_AARCH64_ON_WORD_V1)
+
 # Runtime address of the object's input `.text` from a linked map: the field
 # lives at map_address + 36 and holds a PC-relative signed 64-bit offset.
 pub fn xray_map_runtime_text_base_v1(map_address: i64, text_base_field: u64) -> i64:
@@ -97,11 +115,12 @@ fn xray_map_kind_valid_v1(kind: i64) -> bool:
 
 # Shared row rules for encode and decode: dense function ids, contiguous
 # non-overlapping site ranges covering every site exactly once, owner ids that
-# match, valid kinds, and the exact AArch64 sled shape.
+# match, valid kinds, and the exact sled shape of the map's ISA.
 fn xray_map_rows_valid_v1(map: XrayMapV1) -> Result<bool, TraceFailureV1>:
-    if map.isa == XRAY_MAP_ISA_X86_64_V1: return Err(TraceFailureV1.UnsupportedTarget)
-    if map.isa != XRAY_MAP_ISA_AARCH64_V1: return Err(TraceFailureV1.InvalidMap)
-    if map.abi_profile != XRAY_MAP_ABI_AARCH64_SIMPLE_V1 or map.sled_abi_version != XRAY_MAP_SLED_ABI_V1:
+    if map.isa != XRAY_MAP_ISA_AARCH64_V1 and map.isa != XRAY_MAP_ISA_X86_64_V1:
+        return Err(TraceFailureV1.UnsupportedTarget)
+    val profile = if map.isa == XRAY_MAP_ISA_X86_64_V1: XRAY_MAP_ABI_X86_64_SYSV_V1 else: XRAY_MAP_ABI_AARCH64_SIMPLE_V1
+    if map.abi_profile != profile or map.sled_abi_version != XRAY_MAP_SLED_ABI_V1:
         return Err(TraceFailureV1.UnsupportedProfile)
     if map.build_id.len() != 16: return Err(TraceFailureV1.InvalidMap)
     if (map.functions.len() == 0 or map.sites.len() == 0 or
@@ -123,13 +142,13 @@ fn xray_map_rows_valid_v1(map: XrayMapV1) -> Result<bool, TraceFailureV1>:
         for offset in 0..(function.site_count as i64):
             if map.sites[first + offset].local_fn_id != function.local_fn_id:
                 return Err(TraceFailureV1.InvalidMap)
+    val (sled_len, sled_align, off_word, on_word) = xray_map_site_shape_v1(map.isa)
     for site in map.sites:
         if not xray_map_kind_valid_v1(site.kind): return Err(TraceFailureV1.InvalidMap)
-        if (site.len != XRAY_MAP_AARCH64_SLED_BYTES_V1 or site.align != 4 or
-                site.off_word != XRAY_MAP_AARCH64_OFF_WORD_V1 or
-                site.on_word != XRAY_MAP_AARCH64_ON_WORD_V1):
+        if (site.len != sled_len or site.align != sled_align or
+                site.off_word != off_word or site.on_word != on_word):
             return Err(TraceFailureV1.InvalidMap)
-        if site.text_offset % 4u64 != 0u64: return Err(TraceFailureV1.InvalidMap)
+        if site.text_offset % (sled_align as u64) != 0u64: return Err(TraceFailureV1.InvalidMap)
     Ok(true)
 
 pub fn xray_map_encode_v1(map: XrayMapV1) -> Result<[u8], TraceFailureV1>:

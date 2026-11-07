@@ -3,6 +3,75 @@
 Status: open
 Area: compiler/35.semantics/lint/hir_frontend_diagnostics.spl
 
+## 2026-11-07 source investigation and narrow repair
+
+Any-alias repair authored; runtime qualification **NOT_RUN**. The current
+`hir_lowering/statements.spl` transports initializer types through
+`binding_payload_type` into the non-optional `HirStmtKind.Let` type slot even
+without a source annotation. Consequently `any_note_let` took its `Any` branch
+and returned before recording the alias. It now retains immediate alias origin
+when the written-Any scanner does not identify an explicit annotation. Typed
+use reporting prefers that specific alias origin over a generic pending reason.
+The original alias regression is enabled, with chained-alias and explicit-Any
+negative cases. This does not establish an executed PASS or close this issue.
+
+Cross-module fallback remains open and its pending cases are unchanged.
+`note_let` likewise treats every non-`Infer` binding payload as an annotation;
+the canonical direct-call binding transport can supply `Any`, `Error`, or a
+named return type without an annotation. Independently, imported callable
+projection now resolves qualified type symbols in
+`hir_lowering/_Items/module_callable_types.spl`; older assumptions about a
+third-module type necessarily being erased must be checked against actual HIR
+layout authority. A follow-up needs explicit source-annotation provenance (or
+another canonical annotation receipt), plus resolved versus genuinely missing
+foreign-layout controls. Removing the annotation guard alone would regress
+the annotated-binding exclusion. No HIR schema or codec change is included in
+this narrow repair.
+
+### Annotation provenance follow-up (authored, NOT_RUN)
+
+The approved follow-up retains `local_annotation_provenance: Dict<i64, bool>`
+on `HirModule`, keyed by the canonical local `SymbolId.id`. True means an
+explicit AST annotation, false means an inferred declaration, and absence is
+unknown. `hir_local_annotation_state` returns 1/0/-1 respectively. No module
+completeness flag is asserted. The four ordinary val/var lowering branches
+record their actual `has_annotation` decision after symbol definition;
+synthetic and destructured binders without a proven receipt remain unknown.
+The map resets at module lowering entry, is copied into both module-build
+outputs, and is copied independently by method resolution and the finite HM
+typed-module owner. Synthetic empty/layout-only modules default to unknown.
+The codec owner separately updates both formats and their cache admission
+versions; old-cache absence is not evidence of an inferred declaration.
+
+`note_let` now classifies only proven inferred declarations, and local Any
+alias handling uses the same exact metadata. The pre-existing written-Any
+scanner remains a presentation/suggestion input, not local binding authority.
+Qualified retained struct/class/enum layouts now establish known return types
+even when the caller does not directly import the type's defining module.
+
+Enabled tests cover the exact foreign return symbol/layout, genuine Any-return
+fallback, explicit annotations, shadowed same-name locals, var producers,
+unknown legacy metadata, and independent map copies. Historical pending
+third-module warning cases are left intact pending executable confirmation of
+their now-conflicting expectations; they are not counted as passing evidence.
+This source repair and its metadata/codec integration require the admitted
+runner before the bug can be closed.
+
+### Producer coverage repair, cycle 2 (authored, NOT_RUN)
+
+The follow-up producer audit found 14 Let emission sites: four ordinary
+val/var sites, four user tuple component sites, one source-pattern binding
+helper, and five compiler-temporary sites. The user tuple producers (literal
+val/var, nonliteral tuple components, and for-tuple components) now record
+inferred provenance at the exact symbol definition. The parser's tuple
+declaration path requires `=` after the names and carries no annotation.
+`match_binding_statement` records the original source Binding symbol as
+inferred. Compiler tuple-assignment/destructure, match/range scrutinee, and
+accessor temporaries remain unknown. No name-based production classification
+is used. Regression controls exercise literal tuple Any aliases, empty
+collection receivers, and tuple-pattern Any receivers; the pattern control
+also checks that the generated scrutinee remains unknown.
+
 ## Symptom
 
 - `test/01_unit/compiler/lint/frontend_diag/any_warn_rules_acceptance_spec.spl`, example "flags an
