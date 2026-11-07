@@ -173,3 +173,18 @@ Consequences:
   `SIMPLE_MIR_METHOD_CALL_TRACE`-style `[mir-method-call]` probes enabled, and
   check whether `struct_method_syms["Widget::bump"]` exists when the entry is
   lowered with `SIMPLE_BOOTSTRAP=1`.
+
+## 2026-11-07 mir-p2: driver-shaped feed does not reproduce either
+
+- Added a case to `entry_module_own_class_method_with_import_spec.spl` that
+  calls `lower_module_transient_scoped(main, [main, helper], true)` — the exact
+  `driver_pipeline_lowering.spl` call (whole closure as feed, entry included,
+  lazy provider session). 4/4 green on the seed interpreter.
+- `SIMPLE_BOOTSTRAP=1` makes this harness vacuous: the non-vacuity case fails
+  (the ambient branch of `lower_module_guarded_v1` returns before the
+  `module.impls` -> `struct_method_syms` pass and reports no unresolved call),
+  so a bootstrap-mode interpreter run cannot discriminate this defect.
+- Conclusion: the defect is in the natively compiled compiler (values such as
+  the `disc=1337030607` garbage point at native miscompile of the recovery
+  inputs), not in the lowering logic as interpreted. Needs a stage3 producer
+  and the `test/fixtures/compiler/native_entry_own_class_methods/` run. OPEN.
