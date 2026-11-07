@@ -1,0 +1,144 @@
+# ResourceProfile schema and pure CPU/memory proposal (CFG-01, ORCH-01).
+# A proposal is neither a reservation nor an execution authorization. Host
+# admission must validate current capabilities, quotas and device claims.
+
+use std.common.sdn.value.{SdnValue, SdnSpan}
+use std.common.contracts.orchestration.resource_v1.{
+    ObjectMetaV1, RejectionV1, ORCHESTRATION_API_VERSION_V1,
+    parse_resource_document, decode_resource_envelope, resource_envelope_path,
+    decode_meta, require, only_known, as_dict, as_text, reject,
+    parse_cpu_millis, parse_memory_bytes}
+
+pub struct ResourceAmountRangeV1:
+    minimum: i64
+    recommended: i64
+    preferred: i64
+    limit: i64
+
+pub struct ResourceProfileV1:
+    meta: ObjectMetaV1
+    cpu: ResourceAmountRangeV1
+    memory: ResourceAmountRangeV1
+    gpu_required: bool
+    preserve_scarce_gpu_hosts: bool
+
+pub struct ProfileAllocationProposalV1:
+    cpu_millis: i64
+    memory_bytes: i64
+    cpu_cap_millis: i64
+    memory_cap_bytes: i64
+    below_recommendation: bool
+    requires_gpu_resolution: bool
+
+pub fn resource_amount_range_valid(amount: ResourceAmountRangeV1) -> bool:
+    (amount.minimum >= 0 and amount.minimum <= amount.recommended and
+        amount.recommended <= amount.preferred and amount.preferred <= amount.limit)
+
+fn profile_bool(value: SdnValue, path: text, spans: Dict<text, SdnSpan>) -> Result<bool, RejectionV1>:
+    match value:
+        case SdnValue.Bool(flag): Ok(flag)
+        case _: Err(reject("type", path, path + " must be a boolean", spans))
+
+fn profile_quantity(value: SdnValue, path: text, spans: Dict<text, SdnSpan>,
+                     cpu: bool) -> Result<i64, RejectionV1>:
+    val raw = as_text(value, path, spans)?
+    var amount = 0
+    if cpu:
+        amount = parse_cpu_millis(raw)
+    else:
+        amount = parse_memory_bytes(raw)
+    if amount < 0:
+        return Err(reject("quantity", path, "invalid or overflowing resource quantity '" + raw + "'", spans))
+    Ok(amount)
+
+fn decode_range(value: SdnValue, path: text, spans: Dict<text, SdnSpan>,
+                 cpu: bool) -> Result<ResourceAmountRangeV1, RejectionV1>:
+    val fields = as_dict(value, path, spans)?
+    only_known(fields, ["min", "recommend", "prefer", "limit"], path, spans)?
+    val minimum_value = require(fields, "min", path, spans)?
+    val minimum = profile_quantity(minimum_value, path + ".min", spans, cpu)?
+    var recommended = minimum
+    if fields.contains_key("recommend"):
+        recommended = profile_quantity(fields["recommend"], path + ".recommend", spans, cpu)?
+    if recommended < minimum:
+        return Err(reject("resource_order", path + ".recommend", "recommend must be at least min", spans))
+    var preferred = recommended
+    if fields.contains_key("prefer"):
+        preferred = profile_quantity(fields["prefer"], path + ".prefer", spans, cpu)?
+    if preferred < recommended:
+        return Err(reject("resource_order", path + ".prefer", "prefer must be at least recommend", spans))
+    var limit = preferred
+    if fields.contains_key("limit"):
+        limit = profile_quantity(fields["limit"], path + ".limit", spans, cpu)?
+    if limit < preferred:
+        return Err(reject("resource_order", path + ".limit", "limit must be at least prefer", spans))
+    Ok(ResourceAmountRangeV1(minimum: minimum, recommended: recommended,
+        preferred: preferred, limit: limit))
+
+pub fn decode_resource_profile(source: text) -> Result<ResourceProfileV1, RejectionV1>:
+    val parsed = parse_resource_document(source)?
+    decode_resource_profile_value(parsed.0, parsed.1, "")
+
+# Only accepts values whose parser issues have already been checked.
+pub fn decode_resource_profile_value(value: SdnValue, spans: Dict<text, SdnSpan>,
+                                     prefix: text) -> Result<ResourceProfileV1, RejectionV1>:
+    val envelope = resource_envelope_path(prefix)
+    val top = decode_resource_envelope(value, spans, prefix, ORCHESTRATION_API_VERSION_V1)?
+    val kind_value = require(top, "kind", envelope, spans)?
+    val kind = as_text(kind_value, prefix + "kind", spans)?
+    if kind != "ResourceProfile":
+        return Err(reject("unsupported_kind", prefix + "kind", "expected ResourceProfile", spans))
+    val meta_value = require(top, "metadata", envelope, spans)?
+    val meta = decode_meta(meta_value, prefix + "metadata", spans)?
+    val spec_value = require(top, "spec", envelope, spans)?
+    val path = prefix + "spec"
+    val fields = as_dict(spec_value, path, spans)?
+    only_known(fields, ["cpu", "memory", "gpu", "placement"], path, spans)?
+    val cpu_value = require(fields, "cpu", path, spans)?
+    val cpu = decode_range(cpu_value, path + ".cpu", spans, true)?
+    val memory_value = require(fields, "memory", path, spans)?
+    val memory = decode_range(memory_value, path + ".memory", spans, false)?
+    var gpu_required = false
+    if fields.contains_key("gpu"):
+        val gpu = as_dict(fields["gpu"], path + ".gpu", spans)?
+        only_known(gpu, ["required"], path + ".gpu", spans)?
+        val required_value = require(gpu, "required", path + ".gpu", spans)?
+        gpu_required = profile_bool(required_value, path + ".gpu.required", spans)?
+    var preserve = true
+    if fields.contains_key("placement"):
+        val placement = as_dict(fields["placement"], path + ".placement", spans)?
+        only_known(placement, ["preserveScarceGpuHosts"], path + ".placement", spans)?
+        if placement.contains_key("preserveScarceGpuHosts"):
+            preserve = profile_bool(placement["preserveScarceGpuHosts"],
+                path + ".placement.preserveScarceGpuHosts", spans)?
+    Ok(ResourceProfileV1(meta: meta, cpu: cpu, memory: memory,
+        gpu_required: gpu_required, preserve_scarce_gpu_hosts: preserve))
+
+fn select_amount(amount: ResourceAmountRangeV1, available: i64, allow_preferred: bool) -> i64:
+    var target = amount.recommended
+    if allow_preferred:
+        target = amount.preferred
+    if available < target:
+        return available
+    target
+
+# Select recommendation by default; opportunistic preference requires the
+# caller's explicit fairness decision. Effective caps equal the allocations.
+# Revalidate typed inputs: callers may construct profiles without SDN decoding.
+pub fn propose_profile_allocation(profile: ResourceProfileV1, available_cpu_millis: i64,
+                                  available_memory_bytes: i64,
+                                  allow_preferred: bool) -> Result<ProfileAllocationProposalV1, text>:
+    if not resource_amount_range_valid(profile.cpu) or not resource_amount_range_valid(profile.memory):
+        return Err("invalid-resource-range")
+    if available_cpu_millis < 0 or available_memory_bytes < 0:
+        return Err("invalid-available-capacity")
+    if available_cpu_millis < profile.cpu.minimum:
+        return Err("insufficient-cpu-minimum")
+    if available_memory_bytes < profile.memory.minimum:
+        return Err("insufficient-memory-minimum")
+    val cpu = select_amount(profile.cpu, available_cpu_millis, allow_preferred)
+    val memory = select_amount(profile.memory, available_memory_bytes, allow_preferred)
+    Ok(ProfileAllocationProposalV1(cpu_millis: cpu, memory_bytes: memory,
+        cpu_cap_millis: cpu, memory_cap_bytes: memory,
+        below_recommendation: cpu < profile.cpu.recommended or memory < profile.memory.recommended,
+        requires_gpu_resolution: profile.gpu_required))
