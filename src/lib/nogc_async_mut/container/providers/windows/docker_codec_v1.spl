@@ -1,0 +1,89 @@
+# Strict bounded canonical SDN for the caller-owned immutable request record.
+# Policy is trusted caller input, never selected or overridden by the payload.
+# A serialized request is not a durable intent, journal, or replay authority.
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{
+    WindowsDockerPolicyV1, WindowsDockerRequestV1, windows_docker_request_digest_v1}
+use std.common.contracts.orchestration.resource_v1.{RejectionV1, reject,
+    parse_resource_document, as_dict, as_array, as_int, only_known, require}
+use std.common.sdn.value.{SdnValue, SdnSpan}
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub const WINDOWS_DOCKER_REQUEST_MAX_BYTES_V1: i64 = 1048576
+
+fn text_array(values: [text]) -> SdnValue:
+    var items: [SdnValue] = []
+    for value in values: items.push(SdnValue.String(value))
+    SdnValue.Array(items)
+
+pub fn windows_docker_request_encode_v1(policy: WindowsDockerPolicyV1,
+        request: WindowsDockerRequestV1) -> Result<text, text>:
+    val digest = windows_docker_request_digest_v1(policy, request)?
+    val fields: Dict<text, SdnValue> = {
+        "version": SdnValue.Int(1), "kind": SdnValue.String("windows-docker-request"),
+        "podUid": SdnValue.String(request.pod_uid), "attempt": SdnValue.Int(request.attempt),
+        "operationId": SdnValue.String(request.operation_id), "image": SdnValue.String(request.image),
+        "command": text_array(request.command), "args": text_array(request.args),
+        "cpuCount": SdnValue.Int(request.cpu_count), "memoryLimitBytes": SdnValue.Int(request.memory_limit_bytes),
+        "network": SdnValue.String(request.network), "requestDigest": SdnValue.String(digest)
+    }
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if source.len() > WINDOWS_DOCKER_REQUEST_MAX_BYTES_V1: return Err("docker-request-record-byte-limit")
+    Ok(source)
+
+fn field_text(fields: Dict<text, SdnValue>, key: text,
+        spans: Dict<text, SdnSpan>) -> Result<text, RejectionV1>:
+    val value = require(fields, key, "", spans)?
+    match value:
+        case SdnValue.String(content): Ok(content)
+        case _: Err(reject("type", key, "expected text", spans))
+
+fn field_integer(fields: Dict<text, SdnValue>, key: text,
+        spans: Dict<text, SdnSpan>) -> Result<i64, RejectionV1>:
+    as_int(require(fields, key, "", spans)?, key, spans)
+
+fn field_array(fields: Dict<text, SdnValue>, key: text,
+        spans: Dict<text, SdnSpan>) -> Result<[text], RejectionV1>:
+    val values = as_array(require(fields, key, "", spans)?, key, spans)?
+    if values.len() > 128: return Err(reject("limit", key, "argument count exceeded", spans))
+    var strings: [text] = []
+    var index = 0
+    for value in values:
+        match value:
+            case SdnValue.String(content): strings.push(content)
+            case _: return Err(reject("type", key + "." + index.to_text(), "expected text", spans))
+        index = index + 1
+    Ok(strings)
+
+fn decode_fields(policy: WindowsDockerPolicyV1,
+        source: text) -> Result<WindowsDockerRequestV1, RejectionV1>:
+    val parsed = parse_resource_document(source)?
+    val spans = parsed.1
+    val fields = as_dict(parsed.0, "", spans)?
+    only_known(fields, ["version", "kind", "podUid", "attempt", "operationId", "image", "command",
+        "args", "cpuCount", "memoryLimitBytes", "network", "requestDigest"], "", spans)?
+    if field_integer(fields, "version", spans)? != 1:
+        return Err(reject("version", "version", "unsupported request version", spans))
+    if field_text(fields, "kind", spans)? != "windows-docker-request":
+        return Err(reject("kind", "kind", "wrong request kind", spans))
+    val request = WindowsDockerRequestV1(pod_uid: field_text(fields, "podUid", spans)?,
+        attempt: field_integer(fields, "attempt", spans)?, operation_id: field_text(fields, "operationId", spans)?,
+        image: field_text(fields, "image", spans)?, command: field_array(fields, "command", spans)?,
+        args: field_array(fields, "args", spans)?, cpu_count: field_integer(fields, "cpuCount", spans)?,
+        memory_limit_bytes: field_integer(fields, "memoryLimitBytes", spans)?, network: field_text(fields, "network", spans)?)
+    val digest = match windows_docker_request_digest_v1(policy, request):
+        case Ok(value): value
+        case Err(reason): return Err(reject("request", "", reason, spans))
+    if field_text(fields, "requestDigest", spans)? != digest:
+        return Err(reject("digest", "requestDigest", "request digest mismatch", spans))
+    Ok(request)
+
+pub fn windows_docker_request_decode_v1(policy: WindowsDockerPolicyV1,
+        source: text) -> Result<WindowsDockerRequestV1, text>:
+    if source == "" or source.len() > WINDOWS_DOCKER_REQUEST_MAX_BYTES_V1:
+        return Err("docker-request-record-byte-limit")
+    val request = match decode_fields(policy, source):
+        case Ok(value): value
+        case Err(reason): return Err("docker-request-record-invalid:" + reason.kind + ":" + reason.path)
+    val canonical = windows_docker_request_encode_v1(policy, request)?
+    if canonical != source: return Err("docker-request-record-not-canonical")
+    Ok(request)
