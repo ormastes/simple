@@ -8,11 +8,10 @@
 
 use std.daemon_sdk.types.{DaemonRequest, DaemonResponse, daemon_request_new, daemon_response_new}
 
-use std.io_runtime.{read_file_text}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{file_delete}
 use std.io_runtime.{file_write}
-use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_read_regular_no_follow_bounded}
 use std.io_runtime.{mkdir_p}
 use std.nogc_sync_mut.io_runtime.{dir_list}
 use std.io_runtime.{hash_text}
@@ -24,6 +23,8 @@ use std.io_runtime.{file_rename}
 # ============================================================================
 
 fn write_daemon_request(req: DaemonRequest, request_dir: text) -> text:
+    if not daemon_spool_id_valid(req.id):
+        return ""
     mkdir_p(request_dir)
 
     val req_path = daemon_request_path_for(req.id, request_dir)
@@ -43,6 +44,9 @@ fn write_daemon_request(req: DaemonRequest, request_dir: text) -> text:
         i = i + 1
 
     val content = parts.join("\n") + "\n"
+
+    if content.len() > 1048576:
+        return ""
 
     # Atomic write: tmp + rename
     if file_atomic_write(req_path, content):
@@ -65,17 +69,17 @@ fn read_daemon_requests(request_dir: text) -> [DaemonRequest]:
     val files = dir_list(request_dir)
     var i = 0
     while i < files.len():
-        val file_path = files[i]
+        val file_path = "{request_dir}/{files[i]}"
         if file_path.ends_with(".req"):
             val req = parse_request_file(file_path)
-            if req.id != "":
+            if req.id != "" and file_path == daemon_request_path_for(req.id, request_dir):
                 requests.push(req)
         i = i + 1
 
     requests
 
 fn parse_request_file(path: text) -> DaemonRequest:
-    val content = read_file_text(path)
+    val content = daemon_spool_read(path)
     if content == "":
         return DaemonRequest(id: "", kind: 0, timestamp: 0, fields: {})
 
@@ -103,6 +107,8 @@ fn parse_request_file(path: text) -> DaemonRequest:
                 fields[key] = value
         li = li + 1
 
+    if not daemon_spool_id_valid(id):
+        return DaemonRequest(id: "", kind: 0, timestamp: 0, fields: {})
     DaemonRequest(id: id, kind: kind, timestamp: timestamp, fields: fields)
 
 # ============================================================================
@@ -110,6 +116,8 @@ fn parse_request_file(path: text) -> DaemonRequest:
 # ============================================================================
 
 fn write_daemon_response(resp: DaemonResponse, response_dir: text) -> bool:
+    if not daemon_spool_id_valid(resp.request_id):
+        return false
     mkdir_p(response_dir)
 
     val resp_path = "{response_dir}/{resp.request_id}.resp"
@@ -129,6 +137,9 @@ fn write_daemon_response(resp: DaemonResponse, response_dir: text) -> bool:
 
     val content = parts.join("\n") + "\n"
 
+    if content.len() > 1048576:
+        return false
+
     # Atomic write
     if file_atomic_write(resp_path, content):
         return true
@@ -142,11 +153,13 @@ fn write_daemon_response(resp: DaemonResponse, response_dir: text) -> bool:
 # ============================================================================
 
 fn read_daemon_response(request_id: text, response_dir: text) -> DaemonResponse:
+    if not daemon_spool_id_valid(request_id):
+        return DaemonResponse(request_id: "", status: -1, timestamp: 0, fields: {})
     val resp_path = "{response_dir}/{request_id}.resp"
     if not file_exists(resp_path):
         return DaemonResponse(request_id: "", status: -1, timestamp: 0, fields: {})
 
-    val content = read_file_text(resp_path)
+    val content = daemon_spool_read(resp_path)
     if content == "":
         return DaemonResponse(request_id: "", status: -1, timestamp: 0, fields: {})
 
@@ -174,6 +187,8 @@ fn read_daemon_response(request_id: text, response_dir: text) -> DaemonResponse:
                 fields[key] = value
         li = li + 1
 
+    if req_id != request_id:
+        return DaemonResponse(request_id: "", status: -1, timestamp: 0, fields: {})
     DaemonResponse(request_id: req_id, status: status, timestamp: timestamp, fields: fields)
 
 # ============================================================================
@@ -181,11 +196,23 @@ fn read_daemon_response(request_id: text, response_dir: text) -> DaemonResponse:
 # ============================================================================
 
 fn clear_processed_requests(request_dir: text, processed_ids: [text]):
+    # Legacy callers retain the original no-result API. Service runners should
+    # use the checked variant and stop dispatch if acknowledgement fails.
+    val acknowledged = acknowledge_processed_requests(request_dir, processed_ids)
+
+fn acknowledge_processed_requests(request_dir: text, processed_ids: [text]) -> bool:
+    # Validate the entire batch before deleting any entry.
+    for request_id in processed_ids:
+        if not daemon_spool_id_valid(request_id):
+            return false
+    var acknowledged = true
     var i = 0
     while i < processed_ids.len():
         val req_path = daemon_request_path_for(processed_ids[i], request_dir)
-        file_delete(req_path)
+        if not file_delete(req_path):
+            acknowledged = false
         i = i + 1
+    acknowledged
 
 fn clear_old_responses(response_dir: text, max_age_ms: i64):
     if not file_exists(response_dir):
@@ -196,7 +223,7 @@ fn clear_old_responses(response_dir: text, max_age_ms: i64):
     val files = dir_list(response_dir)
     var i = 0
     while i < files.len():
-        val file_path = files[i]
+        val file_path = "{response_dir}/{files[i]}"
         if file_path.ends_with(".resp"):
             val resp = read_daemon_response_timestamp(file_path)
             if resp > 0 and (now - resp) > max_age_us:
@@ -204,7 +231,7 @@ fn clear_old_responses(response_dir: text, max_age_ms: i64):
         i = i + 1
 
 fn read_daemon_response_timestamp(path: text) -> i64:
-    val content = read_file_text(path)
+    val content = daemon_spool_read(path)
     if content == "":
         return 0
     val lines = content.split("\n")
@@ -221,5 +248,25 @@ fn read_daemon_response_timestamp(path: text) -> i64:
 # ============================================================================
 
 fn daemon_request_path_for(request_id: text, request_dir: text) -> text:
+    if not daemon_spool_id_valid(request_id):
+        return ""
     val hash = hash_text(request_id)
     "{request_dir}/{hash}_{request_id}.req"
+
+# Legacy spool admission only. Parent directory ownership and atomic claiming
+# remain service responsibilities; this is not an authenticated remote codec.
+fn daemon_spool_id_valid(value: text) -> bool:
+    if value == "" or value.len() > 128 or value == "." or value == "..":
+        return false
+    for ch in value.chars():
+        if not ((ch >= "a" and ch <= "z") or
+                (ch >= "A" and ch <= "Z") or
+                (ch >= "0" and ch <= "9") or
+                ch == "-" or ch == "_" or ch == "."):
+            return false
+    true
+
+fn daemon_spool_read(path: text) -> text:
+    match file_read_regular_no_follow_bounded(path, 1048576):
+        case Ok(content): content
+        case Err(message): ""
