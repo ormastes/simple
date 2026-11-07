@@ -13,6 +13,7 @@
 
 #define WP_CAPACITY_V1 256
 #define WP_PENDING_V1 4
+#define WP_DEPTH_V1 64
 typedef struct {
     uint64_t generation;
     int kind, phase, created_stage;
@@ -216,7 +217,9 @@ static int64_t wp_root_open_impl_v1(int64_t raw_path) {
     wchar_t *end=count && count<128?wcsrchr(final,L'}'):NULL;
     if (!end || end[1]!=L'\\' || end[2]!=0) return wp_reject_v1(lease);
     const wchar_t *cursor=path+3;
+    unsigned depth=1;
     while (*cursor) {
+        if (++depth>WP_DEPTH_V1) return wp_reject_v1(lease);
         const wchar_t *end=wcschr(cursor,L'\\'); size_t count=end?(size_t)(end-cursor):wcslen(cursor);
         if (!count || count>255) return wp_reject_v1(lease);
         wchar_t name[256]; memcpy(name,cursor,count*sizeof(wchar_t)); name[count]=0;
@@ -234,6 +237,9 @@ static int64_t wp_root_open_impl_v1(int64_t raw_path) {
 static int64_t wp_directory_impl_v1(int64_t raw,int64_t raw_name,int64_t create) {
     WpRootV1 *root=(WpRootV1*)(intptr_t)raw;
     if (!wp_root_ready_impl_v1(raw)) return -1;
+    unsigned depth=0;
+    for (WpRootV1 *item=root;item;item=item->parent)
+        if (++depth>=WP_DEPTH_V1) return -1;
     WpRootV1 *child=(WpRootV1*)calloc(1,sizeof(*child)); if (!child) return -1;
     child->directory=INVALID_HANDLE_VALUE;
     WpRootV1 **tail=&child->parent;

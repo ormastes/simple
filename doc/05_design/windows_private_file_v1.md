@@ -3,7 +3,8 @@
 The typed owner is `std.nogc_sync_mut.io.windows_private_file_v1`. The native Windows boundary is
 `src/runtime/platform/runtime_windows_private_root.h`. There is no second
 process registry or journal authority. The narrow native IO registry has 256
-slots and non-reused monotonic generations. Simple values contain only tokens;
+slots, at most 64 pinned ancestry components per root, and non-reused monotonic
+generations. Simple values contain only tokens;
 all validation, IO, close, publication, cursor/quota accounting and authoritative
 write/sealed/published transitions occur under one exclusive native owner lock.
 Copied stale values cannot dereference freed memory, close a recycled HANDLE,
