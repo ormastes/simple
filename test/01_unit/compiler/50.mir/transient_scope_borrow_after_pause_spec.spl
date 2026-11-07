@@ -1,0 +1,125 @@
+# A `val x: [T] = <retained array>` binding is an rt_array_copy under native
+# codegen. Taken while a transient array scope is live (after begin, before
+# pause), the copy is an arena allocation that scope end frees; reading the
+# local after end then dereferences a dangling handle. Stage2 native-build
+# worker hit exactly this in MirLowering.lower_module_transient_scoped
+# (borrowed_trait_providers) -> "rejected invalid array handle" + AV on a
+# main-only fixture. These specs pin the ordering in every transient-scope
+# owner file in the compiler.
+use std.spec
+use std.io_runtime.{file_read}
+
+val SCOPE_FILES: [text] = [
+    "src/compiler/50.mir/_MirLowering/module_lowering.spl",
+    "src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl",
+    "src/compiler/70.backend/backend/runtime_tagged_callback_owner_v1.spl",
+    "src/compiler/80.driver/driver_entry_closure_core.spl",
+    "src/compiler/80.driver/driver_hir_pipeline_lowering.spl",
+    "src/compiler/80.driver/driver_hir_pipeline_support.spl",
+    "src/compiler/80.driver/driver_pipeline_lowering.spl",
+    "src/compiler/80.driver/driver_source_parse_support.spl"
+]
+
+fn is_ident_char(c: text) -> bool:
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
+
+fn mentions_word(line: text, word: text) -> bool:
+    var from = 0
+    while from <= line.len() - word.len():
+        val rel = line.substring(from, line.len()).index_of(word)
+        if rel < 0: return false
+        val at = from + rel
+        val before_ok = at == 0 or not is_ident_char(line.substring(at - 1, at))
+        val end = at + word.len()
+        val after_ok = end >= line.len() or not is_ident_char(line.substring(end, end + 1))
+        if before_ok and after_ok: return true
+        from = at + 1
+    false
+
+fn starts_scope(line: text) -> bool:
+    line.contains("transient_array_scope_begin_v1()") or line.contains("rt_transient_array_scope_begin()")
+
+fn pauses_scope(line: text) -> bool:
+    line.contains("transient_array_scope_pause_v1()") or line.contains("rt_transient_array_scope_pause()")
+
+fn ends_scope(line: text) -> bool:
+    line.contains("transient_array_scope_end_v1()") or line.contains("rt_transient_array_scope_end()")
+
+# Name of an array-typed local copied from a retained root (self field or a
+# g_ global), or "" when the line is not such a binding.
+fn retained_array_copy_name(line: text) -> text:
+    val t = line.trim()
+    var rest = ""
+    if t.starts_with("val "): rest = t.substring(4, t.len())
+    elif t.starts_with("var "): rest = t.substring(4, t.len())
+    else: return ""
+    val colon = rest.index_of(":")
+    val eq = rest.index_of(" = ")
+    if colon <= 0 or eq <= colon: return ""
+    if not rest.substring(colon + 1, eq).trim().starts_with("["): return ""
+    val rhs = rest.substring(eq + 3, rest.len()).trim()
+    if not (rhs.starts_with("self.") or rhs.starts_with("g_")): return ""
+    rest.substring(0, colon).trim()
+
+fn is_fn_header(line: text) -> bool:
+    val t = line.trim()
+    t.starts_with("fn ") or t.starts_with("me ") or t.starts_with("pub fn ") or t.starts_with("static fn ")
+
+# Violations as "file:line:name".
+fn scan_source(path: text, source: text) -> [text]:
+    # `live` = begun and not yet paused. Early-exit branches may call end
+    # before the pause, so an end does not close collection; it only arms the
+    # copies collected so far (a mention after any later end is a read of a
+    # freed arena copy).
+    var out: [text] = []
+    var live = false
+    var copies: [text] = []
+    var armed: [text] = []
+    var n = 0
+    for line in source.split("\n"):
+        n = n + 1
+        if is_fn_header(line):
+            live = false
+            copies = []
+            armed = []
+        if starts_scope(line):
+            live = true
+        elif pauses_scope(line):
+            live = false
+        elif ends_scope(line):
+            for name in copies: armed.push(name)
+            copies = []
+        else:
+            if live:
+                val name = retained_array_copy_name(line)
+                if name != "": copies.push(name)
+            for name in armed:
+                if mentions_word(line, name): out.push("{path}:{n}:{name}")
+    out
+
+describe "transient scope retained-array borrow ordering":
+    it "reproduces the borrowed_trait_providers dangling copy shape":
+        val bad = "    me lower():\n        if not transient_array_scope_begin_v1(): return\n        val borrowed: [HirModule] = self.providers\n        self.providers = []\n        if not transient_array_scope_pause_v1(): return\n        if not transient_array_scope_end_v1(): return\n        self.providers = borrowed\n"
+        expect(scan_source("fixture", bad)).to_equal(["fixture:7:borrowed"])
+
+    it "still sees the copy when an early-exit branch ends the scope first":
+        val bad = "    me lower():\n        if not transient_array_scope_begin_v1(): return\n        if broken:\n            val _e = transient_array_scope_end_v1()\n            return\n        val borrowed: [HirModule] = self.providers\n        if not transient_array_scope_pause_v1(): return\n        if not transient_array_scope_end_v1(): return\n        self.providers = borrowed\n"
+        expect(scan_source("fixture", bad)).to_equal(["fixture:9:borrowed"])
+
+    it "accepts a borrow taken after the scope is paused":
+        val good = "    me lower():\n        if not transient_array_scope_begin_v1(): return\n        if not transient_array_scope_pause_v1(): return\n        val borrowed: [HirModule] = self.providers\n        self.providers = []\n        if not transient_array_scope_end_v1(): return\n        self.providers = borrowed\n"
+        expect(scan_source("fixture", good).len()).to_equal(0)
+
+    it "covers raw rt_ scope calls and g_ globals":
+        val bad = "fn parse():\n    rt_transient_array_scope_begin()\n    var saved: [i64] = g_pending\n    rt_transient_array_scope_end()\n    g_pending = saved\n"
+        expect(scan_source("fixture", bad)).to_equal(["fixture:5:saved"])
+
+    it "does not leak scope state across functions":
+        val src = "fn a():\n    rt_transient_array_scope_begin()\n    val x: [i64] = g_rows\n    rt_transient_array_scope_end()\nfn b():\n    print x\n"
+        expect(scan_source("fixture", src).len()).to_equal(0)
+
+    it "finds no live-scope retained-array copy used after scope end in the compiler":
+        var all: [text] = []
+        for path in SCOPE_FILES:
+            for v in scan_source(path, file_read(path)): all.push(v)
+        expect(all).to_equal([])

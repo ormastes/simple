@@ -2595,9 +2595,12 @@ impl MirLowering:
         # the promote walk (no write barrier, so it walks persistent graphs
         # too) re-traversed every closure HirModule once per module. Detach
         # it for the promotion and restore the borrowed reference after the
-        # scope ends.
-        val borrowed_trait_providers: [HirModule] = self.trait_impl_provider_modules
-        self.trait_impl_provider_modules = []
+        # scope ends. The borrow is taken only AFTER the scope is paused: under
+        # native codegen `val x: [T] = self.field` is an rt_array_copy, and a
+        # copy made while the scope is live lands in the arena that
+        # transient_array_scope_end_v1 frees, so the restore below then read
+        # a dangling handle ("rejected invalid array handle" + AV in the
+        # stage2 native-build worker on a main-only fixture).
         # From here every exit path must close the scope. `end` frees the
         # arena, so any path that ends WITHOUT a successful promotion must
         # also refuse to hand `lowered` back.
@@ -2606,6 +2609,8 @@ impl MirLowering:
             if scope_trace: eprint(mir_scope_decision_trace_line_v1(scope_decisions, 2))
             return Err("transient MIR scope pause failed for {module.name}")
         scope_decisions = scope_decisions | 2
+        val borrowed_trait_providers: [HirModule] = self.trait_impl_provider_modules
+        self.trait_impl_provider_modules = []
         # The returned module and owner builder share the same MIR graph.
         # Share committed nodes across both promotions, including the owner's
         # overlapping field roots. No retained graph is written in this window;
