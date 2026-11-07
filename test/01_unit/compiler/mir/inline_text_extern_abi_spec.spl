@@ -1,0 +1,139 @@
+# @always_inline wrappers over `text` externs must keep the (ptr, len)
+# text-extern ABI after the MIR inliner splices them into a caller.
+#
+# Bugs: always_inline_cross_module_text_extern_abi_dropped_2026-11-06,
+#       stage2_inline_env_get_boxed_extern_abi_2026-11-03.
+
+use compiler.backend.{MirToLlvm}
+use compiler.backend.llvm_ir_builder.{llvm_codegen_error_from_ir}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir_lowering_types.{MirLowering}
+
+fn lower_to_llvm(source: text, name: text) -> text:
+    val ast = parse_full_frontend(source, name, name, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(name)
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var errors = ""
+    for err in mir_lowering.errors:
+        errors = errors + err.message + "\n"
+    if errors != "":
+        return "MIR_LOWERING_ERRORS:\n" + errors
+    MirToLlvm.create("test.llvm.process_text_abi", CodegenTarget.X86_64, nil).translate_module(mir)
+
+fn call_line(output: text, marker: text) -> text:
+    for line in output.split("\n"):
+        if line.contains(marker) and line.contains("call "):
+            return line
+    ""
+
+fn top_level_arg_count(line: text, marker: text) -> i64:
+    val start_idx = line.find(marker)
+    if start_idx < 0:
+        return -1
+    val body = line.substring(start_idx + marker.len())
+    var depth = 1
+    var commas = 0
+    var saw = false
+    var i = 0
+    while i < body.len():
+        val ch = body[i]
+        if ch == "(":
+            depth = depth + 1
+            saw = true
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                if not saw:
+                    return 0
+                return commas + 1
+        elif ch == "," and depth == 1:
+            commas = commas + 1
+        elif ch != " ":
+            saw = true
+        i = i + 1
+    -1
+
+use compiler.mir_opt.inline.{create_inline_pass, inline_run_on_module}
+
+fn lower_inlined_to_llvm(source: text, name: text) -> text:
+    val ast = parse_full_frontend(source, name, name, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(name)
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var errors = ""
+    for err in mir_lowering.errors:
+        errors = errors + err.message + "\n"
+    if errors != "":
+        return "MIR_LOWERING_ERRORS:\n" + errors
+    val inlined = inline_run_on_module(create_inline_pass(), mir)
+    MirToLlvm.create("test.llvm.inline_text_abi", CodegenTarget.X86_64, nil).translate_module(inlined)
+
+fn count_calls(output: text, marker: text) -> i64:
+    var n = 0
+    for line in output.split("\n"):
+        if line.contains("call ") and line.contains(marker):
+            n = n + 1
+    n
+
+fn env_get_call_lines(output: text) -> [text]:
+    var lines: [text] = []
+    for line in output.split("\n"):
+        if line.contains("call ") and line.contains("@rt_env_get"):
+            lines = lines.push(line.trim())
+    lines
+
+fn assert_no_one_word_rt_env_get(output: text):
+    # The C owner is rt_env_get(const uint8_t* key_ptr, uint64_t key_len): a
+    # one-word call hands it the text handle as the pointer and a stale
+    # register as the length (memmove AV, stage3 F3 / stage2 veh_89604).
+    for line in env_get_call_lines(output):
+        if line.contains("@rt_env_get("):
+            assert_equal(2, top_level_arg_count(line, "@rt_env_get("), "rt_env_get must receive (ptr, len): " + line)
+
+val EXTERN_RT_ENV_GET = "extern fn rt_env_get(key: text) -> text?\n\n"
+
+describe "always_inline wrappers keep the rt_env_get (ptr, len) text-extern ABI":
+    it "lowers a bare env_get callee (cross-module provider shape) onto the boxed entry, never a one-word rt_env_get":
+        # An importer sees config.env_get / std.env.env_get as a bare `env_get`
+        # callee. MirToLlvm aliased that name to @rt_env_get but forwarded the
+        # caller's single text handle.
+        val source = "extern fn env_get(key: text) -> text?\n\nfn probe() -> text?:\n    env_get(\"PATH\")\n"
+        val output = lower_to_llvm(source, "bare_env_get_alias_fixture.spl")
+        assert_true(not output.starts_with("MIR_LOWERING_ERRORS:"), output)
+        assert_true(llvm_codegen_error_from_ir(output) == "", "LLVM codegen error marker in emitted IR")
+        assert_no_one_word_rt_env_get(output)
+        assert_equal(1, count_calls(output, "@rt_env_get_value("), "one boxed text word goes to rt_env_get_value: " + env_get_call_lines(output).join(" | "))
+
+    it "keeps a bare env_get callee with a variable key off the (ptr, len) owner":
+        val source = "extern fn env_get(key: text) -> text?\n\nfn probe(k: text) -> text:\n    env_get(k) ?? \"\"\n"
+        val output = lower_to_llvm(source, "bare_env_get_var_fixture.spl")
+        assert_true(not output.starts_with("MIR_LOWERING_ERRORS:"), output)
+        assert_no_one_word_rt_env_get(output)
+        assert_equal(1, count_calls(output, "@rt_env_get_value("), "variable key also uses the boxed entry: " + env_get_call_lines(output).join(" | "))
+
+    it "keeps (ptr, len) when the MIR inliner splices an @always_inline rt_env_get wrapper":
+        val source = EXTERN_RT_ENV_GET + "@always_inline\nfn get(k: text) -> text?:\n    rt_env_get(k)\n\nfn probe() -> text?:\n    get(\"PATH\")\n"
+        val output = lower_inlined_to_llvm(source, "inlined_rt_env_get_fixture.spl")
+        assert_true(not output.starts_with("MIR_LOWERING_ERRORS:"), output)
+        assert_no_one_word_rt_env_get(output)
+        assert_true(count_calls(output, "@rt_env_get(") >= 2, "wrapper body and the inlined copy both call the pair owner")
+
+    it "keeps (ptr, len) for an unsafe-block @always_inline wrapper (config.env_get shape)":
+        val source = "@unsafe(reason: \"env\", capabilities: [ffi])\n" + EXTERN_RT_ENV_GET +
+            "@always_inline\nfn env_get_wrapped(key: text) -> text?:\n    unsafe(capabilities: [ffi]):\n        rt_env_get(key)\n\nfn probe() -> text?:\n    env_get_wrapped(\"SIMPLE_MIR_FIELD_TRACE\")\n"
+        val output = lower_inlined_to_llvm(source, "inlined_unsafe_env_get_fixture.spl")
+        assert_true(not output.starts_with("MIR_LOWERING_ERRORS:"), output)
+        assert_no_one_word_rt_env_get(output)
+
+    it "still splits a direct rt_env_get call":
+        val source = EXTERN_RT_ENV_GET + "fn probe(k: text) -> text?:\n    rt_env_get(k)\n"
+        val output = lower_to_llvm(source, "direct_rt_env_get_fixture.spl")
+        assert_true(not output.starts_with("MIR_LOWERING_ERRORS:"), output)
+        assert_no_one_word_rt_env_get(output)
+        assert_equal(1, count_calls(output, "@rt_env_get("), "one pair call")
