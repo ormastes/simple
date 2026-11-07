@@ -102,3 +102,21 @@ redeployed Stage 2 compiler builds `simple_ring.spl` without them.
 - Next step: in a free probe slot, run the stage2 build of `simple_ring.spl` with the `cancel` workaround
   reverted and `SIMPLE_ENUM_PAYLOAD_PATH_TRACE=1`, and log which branch the `Err` arm takes. Then write the
   failing spec for that branch.
+
+## Defect 2: empty-owner branch fixed (2026-11-07, lane p1-ring)
+- Stage 2 probe NOT run: no current Stage 2 binary exists (`build/bootstrap/stage2/.../simple.exe.rejected`
+  only), and a cold Stage 2 build does not fit the lane budget (41.6 GB free, 24 GB must stay free).
+- Seed repro of the lead, now `result_payload_provenance_spec` case 4: a `Result<(), SlotErr>` subject
+  whose owner came from a join with an unknown arm (`if c: Ok(()) else: self.release(id)`).
+  `join_result_err_record_owners` (and `invalidate_`/conflicting `copy_`) store `""` but keep the key, so
+  `contains` made the bind arm take `exact_err_record`. That branch raised "Result Err record has no
+  unique provider layout snapshot", never remembered a HIR type for the binder, and so also failed
+  with the exact Stage 2 text `payload type mismatch at 0; function=cancel`. Red before, green after.
+- Fix (`switch_operators_calls.spl`): `exact_err_record` now needs a non-empty owner. The only exception is
+  a subject with no declared payload type, which keeps the fail-closed check. An empty owner with a
+  declared `Result` binds from the declaration (and remembers its HIR type).
+- Case 3 (exact provider record, non-empty owner) passes before and after. That shows the
+  non-empty `exact_err_record` path types the binder correctly on the seed.
+- Still open: whether Stage 2's `cancel` reaches the empty-owner branch, or has `effective_payload_type`
+  nil (SimpleRingError is an enum, so a provider owner should never be registered for it). Keep the
+  `cancel` workaround until a redeployed Stage 2 builds `simple_ring.spl` without it.
