@@ -1,0 +1,150 @@
+# Linux grouped-reference input barrier; no process lifecycle authority added.
+use std.common.string_core.{str_len, char_from_code_raw}
+use std.nogc_sync_mut.io.process_ops.PipedProcessRefV1
+pub use std.common.process.input_control_v1.{ProcessInputWriteDispositionV1, ProcessInputControlStateV1}
+
+pub struct ProcessInputWriteTurnV1:
+    reference: PipedProcessRefV1
+    disposition: ProcessInputWriteDispositionV1
+    attempt_sequence: i64
+    accepted_bytes: i64
+    error: text
+
+@unsafe(reason: "canonical same-slot grouped input revision gate with nullable preallocated receipt", capabilities: [ffi])
+extern fn rt_process_input_enable_v1(pid: i64, generation: i64, root: text, root_bytes: i64, identity: text, identity_bytes: i64) -> [i64]?
+@unsafe(reason: "canonical same-slot grouped input revision gate with nullable preallocated receipt", capabilities: [ffi])
+extern fn rt_process_input_install_v1(pid: i64, generation: i64, root: text, root_bytes: i64, identity: text, identity_bytes: i64, target: text, target_bytes: i64, nonce: text, nonce_bytes: i64, revision: i64, expires: i64) -> [i64]?
+@unsafe(reason: "canonical same-slot grouped input revision gate with nullable preallocated receipt", capabilities: [ffi])
+extern fn rt_process_input_revoke_v1(pid: i64, generation: i64, root: text, root_bytes: i64, identity: text, identity_bytes: i64, target: text, target_bytes: i64, nonce: text, nonce_bytes: i64, revision: i64) -> [i64]?
+@unsafe(reason: "canonical same-slot grouped input revision gate with nullable preallocated receipt", capabilities: [ffi])
+extern fn rt_process_input_state_v1(pid: i64, generation: i64, root: text, root_bytes: i64, identity: text, identity_bytes: i64) -> [i64]?
+@unsafe(reason: "canonical same-slot grouped input revision gate with nullable preallocated receipt", capabilities: [ffi])
+extern fn rt_process_input_write_some_v1(pid: i64, generation: i64, root: text, root_bytes: i64, identity: text, identity_bytes: i64, target: text, target_bytes: i64, nonce: text, nonce_bytes: i64, revision: i64, attempt: i64, data: text, data_bytes: i64, offset: i64, maximum: i64) -> [i64]?
+
+fn input_ref_v1(reference: PipedProcessRefV1) -> bool:
+    (reference.pid > 0 and reference.generation > 0 and reference.group_root != "" and
+        str_len(reference.group_identity) == 64)
+
+fn input_mutation_v1(raw: [i64]?) -> Result<(), text>:
+    val words = match raw:
+        case Some(value): value
+        case nil: return Err("process_input_native_receipt_unavailable; reference retained")
+    if words.len() != 2: return Err("process_input_malformed_receipt; reference retained")
+    if words[0] != 0: return Err("process_input_refused:{words[0]}; reference retained")
+    if words[1] != 1: return Err("process_input_unconfirmed; reference retained")
+    Ok(())
+
+pub fn process_input_control_enable_ref_v1(reference: PipedProcessRefV1) -> Result<(), text>:
+    if not input_ref_v1(reference): return Err("invalid_grouped_process_reference")
+    val raw = unsafe(capabilities: [ffi]):
+        rt_process_input_enable_v1(reference.pid, reference.generation, reference.group_root, str_len(reference.group_root), reference.group_identity, str_len(reference.group_identity))
+    input_mutation_v1(raw)
+
+pub fn process_input_control_install_ref_v1(reference: PipedProcessRefV1, target_digest: text, nonce_digest: text, revision: i64, expires_monotonic_ns: i64) -> Result<(), text>:
+    if not input_ref_v1(reference): return Err("invalid_grouped_process_reference")
+    val raw = unsafe(capabilities: [ffi]):
+        rt_process_input_install_v1(reference.pid, reference.generation, reference.group_root, str_len(reference.group_root), reference.group_identity, str_len(reference.group_identity), target_digest, str_len(target_digest), nonce_digest, str_len(nonce_digest), revision, expires_monotonic_ns)
+    input_mutation_v1(raw)
+
+pub fn process_input_control_revoke_ref_v1(reference: PipedProcessRefV1, target_digest: text, nonce_digest: text, revision: i64) -> Result<(), text>:
+    if not input_ref_v1(reference): return Err("invalid_grouped_process_reference")
+    val raw = unsafe(capabilities: [ffi]):
+        rt_process_input_revoke_v1(reference.pid, reference.generation, reference.group_root, str_len(reference.group_root), reference.group_identity, str_len(reference.group_identity), target_digest, str_len(target_digest), nonce_digest, str_len(nonce_digest), revision)
+    input_mutation_v1(raw)
+
+fn input_digest_v1(words: [i64], start: i64, present: bool) -> Result<text, text>:
+    var value = ""
+    for index in 0..64:
+        val code = words[start + index]
+        if not present:
+            if code != 0: return Err("process_input_malformed_empty_digest")
+        else:
+            if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+                return Err("process_input_malformed_digest")
+            value = value + char_from_code_raw(code)
+    Ok(value)
+
+pub fn process_input_control_state_ref_v1(reference: PipedProcessRefV1) -> Result<ProcessInputControlStateV1, text>:
+    if not input_ref_v1(reference): return Err("invalid_grouped_process_reference")
+    val raw = unsafe(capabilities: [ffi]):
+        rt_process_input_state_v1(reference.pid, reference.generation, reference.group_root, str_len(reference.group_root), reference.group_identity, str_len(reference.group_identity))
+    val words = match raw:
+        case Some(value): value
+        case nil: return Err("process_input_native_receipt_unavailable; reference retained")
+    if words.len() != 268: return Err("process_input_malformed_state")
+    if words[0] != 0: return Err("process_input_state_refused:{words[0]}")
+    if ((words[1] != 0 and words[1] != 1) or (words[2] != 0 and words[2] != 1)):
+        return Err("process_input_malformed_state")
+    val maximum = 1152921504606846975
+    for index in [3, 4, 5, 6, 10, 11]:
+        if words[index] < 0 or words[index] > maximum:
+            return Err("process_input_malformed_numeric_state")
+    if words[3] == 0:
+        if words[2] != 0 or words[4] != 0 or words[5] != 0:
+            return Err("process_input_malformed_uninstalled_state")
+    elif words[1] != 1 or words[4] <= 0:
+        return Err("process_input_malformed_installed_state")
+    if words[2] == 1 and (words[1] != 1 or words[3] <= 0 or words[4] <= 0):
+        return Err("process_input_malformed_active_state")
+    if words[6] == 0:
+        if (words[5] != 0 or words[7] != 0 or words[8] != 0 or words[9] != 0 or
+                words[10] != 0 or words[11] != 0):
+            return Err("process_input_malformed_empty_attempt")
+    else:
+        if words[10] <= 0 or words[11] <= 0 or words[10] > words[3]:
+            return Err("process_input_malformed_attempt_identity")
+        if words[10] == words[3]:
+            if words[5] != words[6]: return Err("process_input_malformed_attempt_sequence")
+        elif words[5] != 0:
+            return Err("process_input_malformed_revision_sequence")
+        if words[9] == 1:
+            if words[7] < 0 or words[7] > 4096:
+                return Err("process_input_malformed_known_prefix")
+        elif words[9] == 2:
+            if words[7] != -1: return Err("process_input_malformed_unknown_prefix")
+        else:
+            return Err("process_input_malformed_consumed_disposition")
+    if words[8] != 0 and words[8] != -3 and words[8] != -17:
+        return Err("process_input_malformed_last_status")
+    val disposition = match words[9]:
+        case 0: ProcessInputWriteDispositionV1.Rejected
+        case 1: ProcessInputWriteDispositionV1.Recorded
+        case 2: ProcessInputWriteDispositionV1.Unknown
+        case _: return Err("process_input_malformed_disposition")
+    Ok(ProcessInputControlStateV1(controlled: words[1] == 1, active: words[2] == 1,
+        revision: words[3], expires_monotonic_ns: words[4], current_attempt_sequence: words[5],
+        last_attempt_sequence: words[6], last_accepted_bytes: words[7], last_status: words[8],
+        last_disposition: disposition, last_revision: words[10], last_expires_monotonic_ns: words[11],
+        target_digest: input_digest_v1(words, 12, words[3] > 0)?,
+        nonce_digest: input_digest_v1(words, 76, words[3] > 0)?,
+        last_target_digest: input_digest_v1(words, 140, words[6] > 0)?,
+        last_nonce_digest: input_digest_v1(words, 204, words[6] > 0)?))
+
+fn input_unknown_v1(reference: PipedProcessRefV1, attempt: i64, reason: text) -> ProcessInputWriteTurnV1:
+    ProcessInputWriteTurnV1(reference, ProcessInputWriteDispositionV1.Unknown, attempt, -1, reason)
+
+pub fn process_write_stdin_some_controlled_ref_v1(reference: PipedProcessRefV1,
+        target_digest: text, nonce_digest: text, revision: i64, attempt_sequence: i64,
+        data: text, offset: i64, max_bytes: i64) -> ProcessInputWriteTurnV1:
+    if not input_ref_v1(reference):
+        return ProcessInputWriteTurnV1(reference, ProcessInputWriteDispositionV1.Rejected,
+            attempt_sequence, 0, "invalid_grouped_process_reference")
+    val raw = unsafe(capabilities: [ffi]):
+        rt_process_input_write_some_v1(reference.pid, reference.generation, reference.group_root, str_len(reference.group_root), reference.group_identity, str_len(reference.group_identity), target_digest, str_len(target_digest),
+            nonce_digest, str_len(nonce_digest), revision, attempt_sequence, data, str_len(data), offset, max_bytes)
+    val words = match raw:
+        case Some(value): value
+        case nil: return input_unknown_v1(reference, attempt_sequence, "process_input_native_receipt_unavailable")
+    if words.len() != 4: return input_unknown_v1(reference, attempt_sequence, "process_input_malformed_write")
+    if words[2] != attempt_sequence: return input_unknown_v1(reference, attempt_sequence, "process_input_attempt_mismatch")
+    val error = if words[0] == 0: "" else: "process_input_write_status:{words[0]}"
+    if words[1] == 0 and words[3] == 0:
+        return ProcessInputWriteTurnV1(reference, ProcessInputWriteDispositionV1.Rejected, attempt_sequence, 0, error)
+    val data_bytes = str_len(data)
+    if offset < 0 or offset > data_bytes or max_bytes < 1 or max_bytes > 4096:
+        return input_unknown_v1(reference, attempt_sequence, "process_input_malformed_recorded_range")
+    val available = data_bytes - offset
+    val allowed = if available < max_bytes: available else: max_bytes
+    if words[1] == 1 and words[3] >= 0 and words[3] <= allowed:
+        return ProcessInputWriteTurnV1(reference, ProcessInputWriteDispositionV1.Recorded, attempt_sequence, words[3], error)
+    input_unknown_v1(reference, attempt_sequence, "process_input_unconfirmed_write")

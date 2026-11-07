@@ -1576,6 +1576,13 @@ int64_t rt_process_stream_retire_v2(int64_t,const char*,int64_t,const char*,int6
 const char* rt_process_read_stdout_owned_v2(int64_t,int64_t,const char*,int64_t,const char*,int64_t);
 int64_t rt_process_stdout_state_owned_v2(int64_t,int64_t,const char*,int64_t,const char*,int64_t);
 int64_t rt_process_validate_piped_owned_v2(int64_t,int64_t,const char*,int64_t,const char*,int64_t);
+/* Linux same-slot input revision barrier. NULL retains possible write outcome;
+ * all arrays are preallocated before effects. State is exactly268words. */
+SplArray* rt_process_input_enable_v1(int64_t pid,int64_t generation,const char* root,int64_t root_bytes,const char* identity,int64_t identity_bytes);
+SplArray* rt_process_input_install_v1(int64_t pid,int64_t generation,const char* root,int64_t root_bytes,const char* identity,int64_t identity_bytes,const char* target,int64_t target_bytes,const char* nonce,int64_t nonce_bytes,int64_t revision,int64_t expires_monotonic_ns);
+SplArray* rt_process_input_revoke_v1(int64_t pid,int64_t generation,const char* root,int64_t root_bytes,const char* identity,int64_t identity_bytes,const char* target,int64_t target_bytes,const char* nonce,int64_t nonce_bytes,int64_t revision);
+SplArray* rt_process_input_state_v1(int64_t pid,int64_t generation,const char* root,int64_t root_bytes,const char* identity,int64_t identity_bytes);
+SplArray* rt_process_input_write_some_v1(int64_t pid,int64_t generation,const char* root,int64_t root_bytes,const char* identity,int64_t identity_bytes,const char* target,int64_t target_bytes,const char* nonce,int64_t nonce_bytes,int64_t revision,int64_t attempt_sequence,const char* data,int64_t data_bytes,int64_t offset,int64_t maximum);
 int64_t rt_process_write_stdin_some_owned_v2(int64_t,int64_t,const char*,int64_t,const char*,int64_t,const char*,int64_t,int64_t,int64_t);
 /* Native-private explicit owned descriptor transfer, never a language API. */
 int rt_process_stream_claim_launch_v2(int64_t,const char*,int64_t,const char*,int64_t,int*,int*,int*);
