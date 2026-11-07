@@ -40,6 +40,13 @@ returns `local_unix_native_receipt_unavailable`, retaining the supplied owner as
 unconfirmed. It does not invent a precise cause: allocation failure can also
 produce absence. Native foreign-process rejection performs no allocation; this
 is not a claim of general Simple allocator/thread safety after fork.
+An established identity observation failure or mismatch permanently quarantines
+that process's registry copy. Future calls refuse before even re-observing the
+namespace; restored `/proc` access cannot resurrect authority. Native fork
+within an operation is unsupported. Already admitted operations retain their
+bounded local scratch cleanup and unconditional mutex unlock; no uncertain
+owner release or registry reset is introduced. Existing owner descriptors can
+remain retained until process exit when the registry is quarantined.
 
 Connect walks nofollow directory components from `/`, accepting root or the
 configured peer UID as owner. Writable ancestors are rejected except root-owned
@@ -120,6 +127,9 @@ separate virgin-registry fork tests first-use behavior. This new case is NOT_RUN
 pending independent source review and the allocated serialized check.
 The fixture observes the actual unchanged namespace identity; namespace-changing
 and PID-collision execution scenarios are NOT_RUN and require separate evidence.
+It also injects one namespace-stat EIO in a virgin child's genuinely initialized
+registry with a real connection. All other stat calls use the actual provider;
+restoring it must not undo quarantine or change the connection's bytes/FD.
 
 Linux contracts: [Unix sockets](https://man7.org/linux/man-pages/man7/unix.7.html)
 and [recvmsg](https://man7.org/linux/man-pages/man2/recvmsg.2.html). These describe

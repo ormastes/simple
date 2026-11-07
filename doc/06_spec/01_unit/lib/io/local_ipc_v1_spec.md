@@ -46,3 +46,8 @@ allocation, consuming bytes, connecting, writing or closing, then exercises
 the parent's retained connection. It also covers independent first use in a
 child forked before any owner existed. This is a new failure scenario, not a
 repeat of the historical passing IO fixture.
+In the independently initialized child it also injects one actual namespace
+observation failure with a `--wrap=stat` wrapper that delegates every other call
+to the real provider. Restored observation must leave the owner quarantined;
+all five future calls refuse before stat or socket effects. Privileged namespace
+changes and PID-collision execution remain NOT_RUN.

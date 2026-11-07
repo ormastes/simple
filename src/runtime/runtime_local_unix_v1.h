@@ -20,6 +20,7 @@ _Static_assert(ATOMIC_INT_LOCK_FREE == 2, "local Unix origin guard requires lock
 _Static_assert(sizeof(pid_t) <= sizeof(unsigned int), "local Unix origin PID must fit unsigned int");
 static atomic_uint lu_process_origin_v1;
 static atomic_uint lu_process_origin_ready_v1;
+static atomic_uint lu_process_quarantined_v1;
 /* Immutable after release publication; ready acquire protects both plain fields. */
 static dev_t lu_origin_namespace_device_v1;
 static ino_t lu_origin_namespace_inode_v1;
@@ -28,11 +29,19 @@ static int lu_namespace_v1(struct stat* observed) {
 }
 /* Observe real PID+namespace before any owner lock/allocation. A virgin winner
  * publishes an immutable pair. Other threads/processes never wait for an
- * incomplete publication and never reset/reconstruct inherited registry state. */
+ * incomplete publication and never reset/reconstruct inherited registry state.
+ * Established observation failure/mismatch permanently quarantines this process
+ * copy. No native fork is supported within an in-flight operation; local scratch
+ * cleanup and unconditional operation unlock remain exact after later failure. */
 static int lu_origin_v1(void) {
+    if(atomic_load_explicit(&lu_process_quarantined_v1,memory_order_acquire))return 0;
     struct stat namespace_identity;
     pid_t observed=getpid();
-    if(observed<=0||!lu_namespace_v1(&namespace_identity))return 0;
+    if(observed<=0||!lu_namespace_v1(&namespace_identity)) {
+        if(atomic_load_explicit(&lu_process_origin_ready_v1,memory_order_acquire)==1)
+            atomic_store_explicit(&lu_process_quarantined_v1,1,memory_order_release);
+        return 0;
+    }
     unsigned int pid=(unsigned int)observed;
     unsigned int origin=atomic_load_explicit(&lu_process_origin_v1,memory_order_acquire);
     if(origin==0) {
@@ -46,8 +55,12 @@ static int lu_origin_v1(void) {
     }
     if(atomic_load_explicit(&lu_process_origin_ready_v1,memory_order_acquire)!=1)return 0;
     origin=atomic_load_explicit(&lu_process_origin_v1,memory_order_acquire);
-    return origin==pid&&lu_origin_namespace_device_v1==namespace_identity.st_dev&&
-        lu_origin_namespace_inode_v1==namespace_identity.st_ino;
+    if(origin!=pid||lu_origin_namespace_device_v1!=namespace_identity.st_dev||
+       lu_origin_namespace_inode_v1!=namespace_identity.st_ino) {
+        atomic_store_explicit(&lu_process_quarantined_v1,1,memory_order_release);
+        return 0;
+    }
+    return !atomic_load_explicit(&lu_process_quarantined_v1,memory_order_acquire);
 }
 
 #define LUV1_SLOTS 64
