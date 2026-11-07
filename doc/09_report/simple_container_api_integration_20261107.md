@@ -6,6 +6,15 @@ Integration baseline: `8028e75917289a50b31bb695cbb5fe6f8c528667` on
 `release/1.0.0`. Initial assembled source: `e335ef3a210d6a1accb16b4c502ee0cf1ef1c4a9`.
 This report describes that source snapshot; later fixes require their own evidence.
 
+Follow-up: `fc06f40` and Linux effect projection `4050939` are integrated.
+At `23fc344c4b9`, the combined native sources passed the 82-check capture and
+36-check seccomp compatibility fixtures. See
+[integrated evidence](container_capture_integrated_20261107/evidence.sdn).
+The initial relative-path fixture invocation failed its prerequisite; the
+corrected absolute-path run and that failure are both retained. This closes the
+capture compatibility blocker below for that native snapshot, not the separate
+Windows candidate-recovery finding or any full application qualification gate.
+
 ## Required execution boundary
 
 Linux selects `linux-podman`; Windows selects `windows-docker-process`.
