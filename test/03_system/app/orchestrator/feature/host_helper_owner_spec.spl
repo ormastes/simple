@@ -2,10 +2,11 @@
 # NOT_RUN. Real signatures and physical ledger; no native helper effects.
 use test.fixtures.orchestration.host_helper_fixture_v1.*
 use std.nogc_sync_mut.orchestration.host_helper_owner_v1.*
-use std.nogc_sync_mut.orchestration.host_helper_request_v1.{host_helper_request_encode_v1, host_helper_request_decode_v1, host_helper_request_store_v1, host_helper_request_load_v1, host_helper_execution_proof_store_v1, host_helper_execution_proof_load_v1}
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.{host_helper_request_encode_v1, host_helper_request_decode_v1, host_helper_request_store_v1, host_helper_request_load_v1, host_helper_execution_proof_store_v1, host_helper_execution_proof_load_v1, host_helper_execution_proof_load_typed_v1, host_helper_execution_proof_decode_v1}
 use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
 use std.common.contracts.orchestration.host_helper_plan_v1.*
 use std.common.contracts.orchestration.host_capacity_v1.host_available_capacity_v1
+use std.common.contracts.orchestration.host_reservation_codec_v1.host_reservation_receipt_integrity_v1
 use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
 use std.common.contracts.distributed_authority_codec_v2.{distributed_encode_signed_grant_v2, distributed_encode_signed_approval_v2}
 use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
@@ -78,6 +79,13 @@ describe "Signed parent-budget helper ownership":
         val prepared = helper_test_prepare_v1(fixture)
         expect(prepared.error).to_equal("")
         val receipt = prepared.receipt.unwrap()
+        assert(host_reservation_receipt_integrity_v1(receipt, fixture.request.operation).unwrap())
+        var changed_receipt = receipt
+        changed_receipt.prepared_revision = receipt.prepared_revision + 1
+        expect(host_reservation_receipt_integrity_v1(changed_receipt, fixture.request.operation).unwrap_err()).to_equal("reservation-receipt-mismatch")
+        changed_receipt = receipt
+        changed_receipt.envelope_digest = "0".repeat(64)
+        assert(host_reservation_receipt_integrity_v1(changed_receipt, fixture.request.operation).is_err())
         expect(receipt.envelope_digest).to_equal(sha256_text(distributed_encode_operation_v2(fixture.request.operation).unwrap()))
         expect(host_available_capacity_v1(prepared.owner.ledger).unwrap().cpu_millis).to_equal(2500)
         val loaded = host_helper_request_load_v1(fixture.root, fixture.request.operation.id).unwrap()
@@ -101,6 +109,11 @@ describe "Signed parent-budget helper ownership":
         expect(lease.grant_id).to_equal("helper_execution_grant")
         assert(lease.grant_id != fixture.request.signed.grant.id)
         val proof_bytes = host_helper_execution_proof_load_v1(fixture.root, fixture.request.operation.id).unwrap()
+        val typed = host_helper_execution_proof_load_typed_v1(fixture.root, fixture.request.operation.id).unwrap()
+        expect(typed.signed.grant.id).to_equal(lease.grant_id)
+        expect(typed.approval.approver_id).to_equal(lease.approver_id)
+        expect(typed.request_digest).to_equal(sha256_text(host_helper_request_encode_v1(fixture.request).unwrap()))
+        assert(host_helper_execution_proof_decode_v1(fixture.request, proof_bytes + "\n").is_err())
         val proof = helper_test_fields_v1(proof_bytes)
         expect(proof["requestDigest"]).to_equal(SdnValue.String(sha256_text(host_helper_request_encode_v1(fixture.request).unwrap())))
         expect(proof["operationDigest"]).to_equal(SdnValue.String(sha256_text(distributed_encode_operation_v2(fixture.request.operation).unwrap())))

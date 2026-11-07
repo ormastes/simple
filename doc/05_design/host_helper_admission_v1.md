@@ -1,6 +1,6 @@
 # Signed helper admission in the host physical ledger
 
-Status: source reviewed; six executable scenarios authored, NOT_RUN.
+Status: source reviewed; seven executable scenarios authored, NOT_RUN.
 
 `HostHelperRequestV1` binds the shared helper plan, immutable reservation and
 operation, preparation signatures, controller parent-budget proof and exact
@@ -39,3 +39,11 @@ versioned process owner, and is not inferred from ledger accounting alone.
 
 Source/prevention inventory: see the authored manual
 `doc/06_spec/03_system/app/orchestrator/feature/host_helper_owner_spec.md`.
+
+Integration projections: `host_helper_execution_proof_load_typed_v1` and
+`host_helper_execution_proof_decode_v1` return the canonical proof pair and
+request/operation digests as data; begin remains the signature/current-context
+owner. `host_reservation_receipt_integrity_v1` checks the original supported
+operation, envelope/intent binding, positive revision and existing receipt hash
+without requiring the full intent. It proves neither journal admission nor
+signature authority. The constructor and checker share one receipt preimage.
