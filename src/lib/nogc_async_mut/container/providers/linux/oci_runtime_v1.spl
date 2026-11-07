@@ -7,6 +7,7 @@
 # probe.  This module does not install tools, change uid maps, change kernel
 # policy, or infer capability from an engine name.
 
+use std.common.contracts.container.command_v1.oci_command_parts_v1
 pub use std.nogc_async_mut.container.providers.linux.request_v1.LinuxOciRequestV1
 use std.nogc_async_mut.container.providers.linux.request_v1.{linux_oci_request_bounds_v1, linux_oci_request_digest_v1}
 use std.common.contracts.container.bound_intent_v2.{RuntimeBoundIntentV2, runtime_bound_intent_encode_v2, runtime_bound_intent_decode_v2, runtime_bound_intent_match_v2}
@@ -220,8 +221,6 @@ impl LinuxOciRuntimeProviderV1:
         match linux_oci_request_bounds_v1(request):
             case Err(reason): return RuntimeValidationV1(accepted: false, reason: reason)
             case Ok(_): pass
-        if request.replace_entrypoint:
-            return RuntimeValidationV1(accepted: false, reason: "entrypoint-override-not-admitted")
         if request.environment.len() != 0 or request.working_directory != "":
             return RuntimeValidationV1(accepted: false, reason: "execution-options-not-admitted")
         if request.terminal_mode != "none":
@@ -265,10 +264,18 @@ impl LinuxOciRuntimeProviderV1:
         if request.image.contains("\n") or request.image.contains("\r"):
             return RuntimeValidationV1(accepted: false,
                 reason: "image-contains-control-character")
-        for item in request.command:
-            if item == "":
-                return RuntimeValidationV1(accepted: false,
-                    reason: "command-contains-empty-argument")
+        val build_mode = request.build_input_root != "" or request.build_output_root != ""
+        if build_mode and request.command.len() == 0:
+            return RuntimeValidationV1(accepted: false, reason: "build-command-empty")
+        match oci_command_parts_v1(request.command, request.args,
+                request.replace_entrypoint or build_mode):
+            case Err(reason): return RuntimeValidationV1(accepted: false, reason: reason)
+            case Ok(_): pass
+        if not (request.replace_entrypoint or build_mode):
+            for item in request.command:
+                if item == "":
+                    return RuntimeValidationV1(accepted: false,
+                        reason: "command-contains-empty-argument")
         for item in request.args:
             if item.contains("\n") or item.contains("\r"):
                 return RuntimeValidationV1(accepted: false,
@@ -1491,8 +1498,6 @@ pub fn build_create_command(engine: text, state_dir: text,
     match linux_oci_request_bounds_v1(request):
         case Err(reason): return (reason, runtime_command_empty())
         case Ok(_): pass
-    if request.replace_entrypoint:
-        return ("entrypoint-override-not-admitted", runtime_command_empty())
     if request.environment.len() != 0 or request.working_directory != "":
         return ("execution-options-not-admitted", runtime_command_empty())
     if request.terminal_mode != "none":
@@ -1510,6 +1515,8 @@ pub fn build_create_command(engine: text, state_dir: text,
                     engine != OCI_ENGINE_RUNC:
                 return ("unsupported-engine: " + engine, runtime_command_empty())
             if engine == OCI_ENGINE_RUNC:
+                if request.replace_entrypoint:
+                    return ("runc-entrypoint-override-unsupported", runtime_command_empty())
                 if request.bundle_path == "":
                     return ("runc-bundle-path-empty", runtime_command_empty())
                 return ("", RuntimeCommandV1(operation: "create", program: engine,
@@ -1536,29 +1543,27 @@ pub fn build_create_command(engine: text, state_dir: text,
                 "--network", request.network_policy,
                 "--read-only", "--security-opt", "no-new-privileges",
                 "--cap-drop", "ALL"]
-            var rest: [text] = request.command
-            if request.build_input_root != "" or request.build_output_root != "":
+            val build_mode = request.build_input_root != "" or request.build_output_root != ""
+            if build_mode:
                 if request.build_input_root == "" or request.build_output_root == "":
                     return ("build-root-incomplete", runtime_command_empty())
                 if request.command.len() == 0:
                     return ("build-command-empty", runtime_command_empty())
-                args.push("--entrypoint")
-                args.push(request.command[0])
+            val command_parts = match oci_command_parts_v1(request.command, request.args,
+                    request.replace_entrypoint or build_mode):
+                case Ok(parts): parts
+                case Err(reason): return (reason, runtime_command_empty())
+            for option in command_parts.options:
+                args.push(option)
+            if build_mode:
                 args.push("--mount")
                 args.push("type=bind,source=" + request.build_input_root +
                     ",target=/simple-build/inputs,readonly")
                 args.push("--mount")
                 args.push("type=bind,source=" + request.build_output_root +
                     ",target=/simple-build/outputs")
-                rest = []
-                var i = 1
-                while i < request.command.len():
-                    rest.push(request.command[i])
-                    i = i + 1
             args.push(request.image)
-            for value in rest:
-                args.push(value)
-            for value in request.args:
+            for value in command_parts.arguments:
                 args.push(value)
             ("", RuntimeCommandV1(operation: "create", program: engine, args: args))
 
