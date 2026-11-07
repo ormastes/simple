@@ -1,0 +1,98 @@
+# Real external-process metadata CLI oracle; no in-process command adapter.
+# NOT_RUN. Requires an explicitly supplied compiled orchestrator executable.
+# These metadata commands cannot launch a provider or authorize execution.
+use std.nogc_sync_mut.io.process_ops.process_run_bounded
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_read_regular_no_follow_bounded, file_atomic_write}
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict, as_text}
+use std.common.sdn.value.SdnValue
+use std.common.crypto.sha256.sha256_text
+use std.sffi.cli_args.cli_get_args
+
+fn process_cli_fields(binary: text, args: [text], expected_exit: i64) -> Dict<text, SdnValue>:
+    val result = process_run_bounded(binary, args, 20000, 65536)
+    assert(result.2 == expected_exit)
+    val parsed = parse_resource_document(result.0).unwrap()
+    val fields = as_dict(parsed.0, "", parsed.1).unwrap()
+    match fields["version"]:
+        case SdnValue.Int(value): assert(value == 1)
+        case _: assert(false)
+    assert(as_text(fields["kind"], "kind", {}).unwrap() == "orchestrator-local-controller")
+    if expected_exit == 0:
+        assert(as_text(fields["controllerId"], "controllerId", {}).unwrap() == args[2])
+        if args[0] != "local-init":
+            assert(as_text(fields["requestUid"], "requestUid", {}).unwrap() == args[3])
+    match fields["executionAuthorized"]:
+        case SdnValue.Bool(value): assert(not value)
+        case _: assert(false)
+    fields
+
+fn process_cli_text(fields: Dict<text, SdnValue>, key: text) -> text:
+    as_text(fields[key], key, {}).unwrap()
+
+pub fn local_controller_process_checks(binary: text):
+    assert(binary != "")
+    val source_path = "test/fixtures/orchestration/caret_agent_session.sdn"
+    val catalog_path = "test/fixtures/orchestration/caret_policy_catalog.sdn"
+    val source = file_read_regular_no_follow_bounded(source_path, 1048576).unwrap()
+    val source_digest = sha256_text(source)
+    val parent = secure_temp_dir("/tmp", "simple-controller-process-").unwrap()
+    val init = process_cli_fields(binary, ["local-init", parent, "controller"], 0)
+    val root = process_cli_text(init, "stateRoot")
+    assert(root.starts_with(parent + "/"))
+    val submit = ["submit", root, "controller", "caret-request-one", source_path, "caret", "review-simple"]
+    val retained = process_cli_fields(binary, submit, 0)
+    assert(process_cli_text(retained, "requestUid") == "caret-request-one")
+    assert(process_cli_text(retained, "sourceDigest") == source_digest)
+    assert(process_cli_text(retained, "status") == "intent-retained")
+    # Independent persisted-object oracle: exact expected public path and bytes,
+    # no controller store helper or returned internal path used to validate it.
+    val persisted = file_read_regular_no_follow_bounded(root + "/journal/desired-input-objects/" + source_digest + ".sdn", 1048576).unwrap()
+    assert(persisted == source)
+    assert(sha256_text(persisted) == source_digest)
+    # Every invocation above/below is a new child, exercising close/reopen.
+    val repeated = process_cli_fields(binary, submit, 0)
+    assert(process_cli_text(repeated, "sourceDigest") == source_digest)
+    val inspect = ["inspect", root, "controller", "caret-request-one"]
+    val observed = process_cli_fields(binary, inspect, 0)
+    assert(process_cli_text(observed, "sourceDigest") == source_digest)
+    assert(process_cli_text(observed, "assignmentState") == "unbound")
+    assert(process_cli_text(observed, "runtimeState") == "unobserved")
+    val changed_path = parent + "/changed.sdn"
+    assert(file_atomic_write(changed_path, source.replace("task-immutable-42", "task-immutable-43")))
+    val changed = process_cli_fields(binary, ["submit", root, "controller", "caret-request-one", changed_path, "caret", "review-simple"], 1)
+    assert(process_cli_text(changed, "code") == "desired-input-identity-reused")
+    val pin = ["pin-policy", root, "controller", "caret-request-one", catalog_path, "caret", "review-simple"]
+    val policy = process_cli_fields(binary, pin, 0)
+    assert(process_cli_text(policy, "status") == "policy-retained")
+    val policy_replay = process_cli_fields(binary, pin, 0)
+    assert(process_cli_text(policy_replay, "catalogDigest") == process_cli_text(policy, "catalogDigest"))
+    val refused = process_cli_fields(binary, ["cancel", root, "controller", "caret-request-one", "b".repeat(64)], 1)
+    assert(process_cli_text(refused, "code") == "desired-cancel-source-mismatch")
+    val cancel = ["cancel", root, "controller", "caret-request-one", source_digest]
+    val cancelled = process_cli_fields(binary, cancel, 0)
+    assert(process_cli_text(cancelled, "status") == "intent-cancelled")
+    val cancelled_replay = process_cli_fields(binary, cancel, 0)
+    assert(process_cli_text(cancelled_replay, "sourceDigest") == source_digest)
+    val last = process_cli_fields(binary, inspect, 0)
+    assert(process_cli_text(last, "desiredState") == "cancellation-requested")
+    assert(process_cli_text(last, "sourceDigest") == source_digest)
+    assert(process_cli_text(last, "runtimeState") == "unobserved")
+    match last["terminationObserved"]:
+        case SdnValue.Bool(value): assert(not value)
+        case _: assert(false)
+    val cancelled_submit = process_cli_fields(binary, submit, 1)
+    assert(process_cli_text(cancelled_submit, "code") == "desired-input-cancelled")
+    val cancelled_pin = process_cli_fields(binary, pin, 1)
+    assert(process_cli_text(cancelled_pin, "code") == "desired-input-cancelled")
+    val wrong_controller = process_cli_fields(binary, ["inspect", root, "other-controller", "caret-request-one"], 1)
+    assert(process_cli_text(wrong_controller, "code") == "local-controller-mismatch")
+    print "local-controller-process-probe: metadata close/reopen and immutable UID assertions passed"
+    print "local-controller-process-evidence: {root}"
+
+fn main() -> i64:
+    val args = cli_get_args()
+    if args.len() != 2:
+        print "usage: local-controller-process-probe <compiled-orchestrator>"
+        return 2
+    local_controller_process_checks(args[1])
+    0

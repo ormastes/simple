@@ -1,0 +1,104 @@
+# Local filesystem-owned metadata commands, not an authenticated remote API.
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use app.orchestrator.inspection.orchestrator_inspect_fields_v1
+use std.nogc_sync_mut.orchestration.workload_store_v1.*
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.dir_ops.dir_is_real_no_follow
+use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
+use std.nogc_sync_mut.fs.host_path.{host_path_is_absolute, host_path_canonical}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+fn local_reply_v1(fields: Dict<text, SdnValue>, exit_code: i64) -> OrchestratorValidationReplyV1:
+    var output = fields
+    output["version"] = SdnValue.Int(1)
+    output["kind"] = SdnValue.String("orchestrator-local-controller")
+    output["executionAuthorized"] = SdnValue.Bool(false)
+    OrchestratorValidationReplyV1(exit_code: exit_code, output: sdn_encode_canonical(SdnValue.Dict(output)))
+
+fn local_error_v1(reason: text, exit_code: i64, unconfirmed: bool) -> OrchestratorValidationReplyV1:
+    local_reply_v1({"status": SdnValue.String("error"), "code": SdnValue.String(reason),
+        "reconciliationRequired": SdnValue.Bool(unconfirmed)}, exit_code)
+
+fn local_marker_v1(controller: text) -> text:
+    "version: 1\nkind: orchestrator-local-state\ncontrollerId: \"{controller}\"\n"
+
+fn local_path_valid_v1(path: text) -> bool:
+    if not host_path_is_absolute(path) or path.len() > 4096 or path.contains("\0") or
+            path.contains("\n") or path.contains("\r"): return false
+    for component in host_path_canonical(path).split("/"):
+        if component == "." or component == "..": return false
+    true
+
+# Errors after journal open may follow a committed metadata effect. The caller
+# reports them as unconfirmed and must inspect/retry the SAME immutable UID.
+fn local_controller_effect_v1(owner: ControllerWorkloadStoreV1, args: [text],
+        source: text) -> Result<Dict<text, SdnValue>, text>:
+    val action = args[0]
+    val uid = args[3]
+    var fields: Dict<text, SdnValue> = {"controllerId": SdnValue.String(args[2]),
+        "requestUid": SdnValue.String(uid)}
+    if action == "submit":
+        val retained = controller_workload_store_submit_agent_v1(owner, uid, source, args[5], args[6])?
+        fields["status"] = SdnValue.String("intent-retained")
+        fields["sourceDigest"] = SdnValue.String(sha256_text(source))
+    elif action == "pin-policy":
+        val retained = controller_workload_store_pin_policy_v1(owner, uid, source, args[5], args[6])?
+        val policy = controller_workload_store_pinned_policy_v1(retained, uid)?
+        fields["status"] = SdnValue.String("policy-retained")
+        fields["sourceDigest"] = SdnValue.String(policy.source_digest)
+        fields["catalogDigest"] = SdnValue.String(policy.catalog_digest)
+    elif action == "cancel":
+        val cancelled = controller_workload_store_cancel_agent_v1(owner, uid, args[4])?
+        fields["status"] = SdnValue.String("intent-cancelled")
+        fields["sourceDigest"] = SdnValue.String(args[4])
+        fields["terminationObserved"] = SdnValue.Bool(false)
+    else:
+        return orchestrator_inspect_fields_v1(owner, uid)
+    Ok(fields)
+
+pub fn orchestrator_local_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
+    if args.len() == 0: return local_error_v1("local-command-required", 2, false)
+    val action = args[0]
+    if action == "local-init":
+        if args.len() != 3: return local_error_v1("usage: local-init <trusted-parent> <controller-id>", 2, false)
+        if not local_path_valid_v1(args[1]) or not builder_identifier_valid_v1(args[2]):
+            return local_error_v1("local-init-arguments-invalid", 2, false)
+        val directory = secure_temp_dir(args[1], "simple-orchestrator-")
+        if directory.is_err(): return local_error_v1("local-state-create-failed", 1, false)
+        val root = directory.unwrap()
+        if not file_create_exclusive(root + "/controller.sdn", local_marker_v1(args[2])):
+            return local_error_v1("local-state-marker-failed", 1, false)
+        return local_reply_v1({"status": SdnValue.String("initialized"),
+            "controllerId": SdnValue.String(args[2]), "stateRoot": SdnValue.String(root)}, 0)
+    val expected = if action == "submit" or action == "pin-policy": 7 else: if action == "cancel": 5 else: if action == "inspect": 4 else: 0
+    if expected == 0 or args.len() != expected:
+        return local_error_v1("invalid-local-command-arguments", 2, false)
+    if not local_path_valid_v1(args[1]) or not builder_identifier_valid_v1(args[2]) or not builder_identifier_valid_v1(args[3]):
+        return local_error_v1("local-identity-invalid", 2, false)
+    if action == "cancel" and not builder_digest_valid_v1(args[4]):
+        return local_error_v1("cancel-source-digest-invalid", 2, false)
+    if expected == 7 and (args[4] == "" or args[5] == "" or args[6] == ""):
+        return local_error_v1("local-input-selector-required", 2, false)
+    if not dir_is_real_no_follow(args[1]): return local_error_v1("local-state-directory-unavailable", 1, false)
+    val marker = file_read_regular_no_follow_bounded(args[1] + "/controller.sdn", 1024)
+    if marker.is_err(): return local_error_v1("local-state-not-initialized", 1, false)
+    if marker.unwrap() != local_marker_v1(args[2]): return local_error_v1("local-controller-mismatch", 1, false)
+    var source = ""
+    if expected == 7:
+        val input = file_read_regular_no_follow_bounded(args[4], 1048576)
+        if input.is_err(): return local_error_v1("local-input-unavailable", 1, false)
+        source = input.unwrap()
+    val entropy = sosix_random_hex(32)
+    if not entropy.?: return local_error_v1("local-owner-entropy-unavailable", 1, false)
+    val opened = controller_workload_store_open_v1(args[1] + "/journal", args[2], entropy ?? "", 100000)
+    if opened.is_err(): return local_error_v1(opened.unwrap_err(), 1, true)
+    val owner = opened.unwrap()
+    val effect = local_controller_effect_v1(owner, args, source)
+    # Close uses the same lock/lease identity even when effect advanced the WAL.
+    val closed = controller_workload_store_close_v1(owner)
+    if closed.is_err(): return local_error_v1(closed.unwrap_err(), 1, true)
+    if effect.is_err(): return local_error_v1(effect.unwrap_err(), 1, true)
+    local_reply_v1(effect.unwrap(), 0)

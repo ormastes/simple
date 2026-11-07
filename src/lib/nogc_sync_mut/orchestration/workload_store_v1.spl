@@ -1,0 +1,431 @@
+# Trusted controller storage, sharing the controller operation journal writer.
+# Authentication belongs at the service boundary. Process-crash durability only.
+use std.common.contracts.orchestration.workload_fence_v1.*
+use std.common.contracts.orchestration.workload_fence_codec_v1.*
+use std.common.contracts.orchestration.assignment_v1.*
+use std.common.contracts.orchestration.host_reservation_codec_v1.HostPreparedReservationReceiptV1
+use std.common.contracts.distributed_control_v2.{OperationEnvelopeV2, ExecutionGrantV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2}
+use std.common.task_runner.distributed_operation_journal_v2.*
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.*
+use std.nogc_sync_mut.orchestration.assignment_commit_v1.*
+use std.nogc_sync_mut.orchestration.assignment_objects_v1.*
+use std.nogc_sync_mut.orchestration.desired_input_objects_v1.*
+use std.nogc_sync_mut.orchestration.agent_policy_objects_v1.*
+use std.common.contracts.orchestration.desired_input_v1.*
+use std.common.contracts.orchestration.agent_policy_resolution_v1.{AgentPolicyResolutionV1, resolve_agent_policy_v1}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_read_regular_no_follow_bounded, file_exists}
+use std.nogc_sync_mut.io_runtime.dir_create
+use std.common.crypto.sha256.sha256_text
+
+pub struct ControllerWorkloadStoreV1:
+    controller_id: text
+    journal: DistributedOperationJournalV2
+    rows: {text: ControllerWorkloadFenceV1}
+
+struct WorkloadReplayV1:
+    rows: {text: ControllerWorkloadFenceV1}
+    pending: [ControllerWorkloadFenceV1]
+    pending_inputs: [OperationEnvelopeV2]
+
+# Internal metadata operation, not a workload resource grant. Positive unit
+# fields satisfy the existing envelope codec; they are never capacity charges.
+pub fn workload_store_operation_v1(state: ControllerWorkloadFenceV1) -> Result<OperationEnvelopeV2, text>:
+    val bytes = workload_fence_encode_v1(state)?
+    val authority = controller_assignment_authority_v1(state.controller_id)?
+    val id = sha256_text("WORKLOAD-REVISION-V1\n{state.controller_id}\n{state.workload_uid}\n{state.revision}\n")
+    Ok(OperationEnvelopeV2(version: 2, id: "workload-" + id, payload_digest: sha256_text(bytes),
+        principal: state.controller_id, project: state.controller_id, host_id: state.controller_id,
+        operation: "controller_workload_revision_v1", environment_digest: authority, policy_revision: 1,
+        revocation_epoch: 0, session_generation: state.controller_epoch, memory_bytes: 1, duration_ms: 1))
+
+fn workload_payload_path_v1(journal: DistributedOperationJournalV2, digest: text) -> text:
+    journal.root + "/workload-payloads/" + digest + ".sdn"
+
+fn workload_store_current_v1(owner: ControllerWorkloadStoreV1) -> Result<bool, text>:
+    val authority = controller_assignment_authority_v1(owner.controller_id)?
+    if owner.journal.authority_digest != authority: return Err("workload-store-authority-mismatch")
+    # Indexed lookup verifies both the writer lease and published WAL revision.
+    match distributed_operation_journal_lookup_v2(owner.journal, "workload-owner-check"):
+        case Ok(_): return Err("workload-store-reserved-id")
+        case Err(reason):
+            if reason != "OPERATION_NOT_FOUND": return Err(reason)
+    Ok(true)
+
+fn workload_store_replay_v1(journal: DistributedOperationJournalV2, controller_id: text) -> Result<WorkloadReplayV1, text>:
+    if journal.operations.len() > 4096: return Err("workload-store-history-bound")
+    var versions: {text: ControllerWorkloadFenceV1} = {}
+    var rows: {text: ControllerWorkloadFenceV1} = {}
+    var pending: [ControllerWorkloadFenceV1] = []
+    var pending_inputs: [OperationEnvelopeV2] = []
+    var cancelled_inputs: [text] = []
+    var bindings: {text: ControllerAssignmentBindingV1} = {}
+    for id in journal.operations.keys():
+        val record = distributed_operation_journal_lookup_v2(journal, id)?
+        val operation = distributed_decode_operation_v2(record.envelope)?
+        if operation.operation == "controller_agent_policy_v1":
+            val policy = controller_agent_policy_read_v1(journal, operation, controller_id)?
+            if record.state == "completed":
+                if record.outcome_digest != operation.payload_digest: return Err("policy-snapshot-outcome-mismatch")
+            elif record.state == "admitted" or record.state == "executing" or record.state == "outcome-unknown":
+                pending_inputs.push(operation)
+            else:
+                return Err("policy-snapshot-terminal-invalid")
+            continue
+        if operation.operation == "controller_desired_input_v1" or operation.operation == "controller_desired_cancel_v1":
+            val input = controller_desired_objects_read_v1(journal.root, operation, controller_id)?
+            if operation.operation == "controller_desired_cancel_v1":
+                val parent = controller_desired_cancel_parent_v1(journal, input.input)?
+                cancelled_inputs.push(input.input.workload_uid)
+            if record.state == "completed":
+                if record.outcome_digest != operation.payload_digest: return Err("desired-input-outcome-mismatch")
+            elif record.state == "admitted" or record.state == "executing" or record.state == "outcome-unknown":
+                pending_inputs.push(operation)
+            else:
+                return Err("desired-input-terminal-invalid")
+            continue
+        if operation.operation == "controller_assignment_v1":
+            if operation.host_id != controller_id: return Err("workload-store-scope-invalid")
+            continue
+        if operation.operation != "controller_workload_revision_v1": return Err("workload-store-foreign-operation")
+        val bytes = file_read_regular_no_follow_bounded(workload_payload_path_v1(journal, operation.payload_digest), 8192)?
+        val state = workload_fence_decode_v1(bytes)?
+        if state.controller_id != controller_id or state.revision > 4096: return Err("workload-store-scope-invalid")
+        val expected = workload_store_operation_v1(state)?
+        val envelope = distributed_encode_operation_v2(expected)?
+        if envelope != record.envelope: return Err("workload-store-payload-mismatch")
+        if state.assignment_digest != "":
+            if not bindings.contains_key(state.assignment_digest):
+                bindings[state.assignment_digest] = assignment_objects_read_v1(journal.root, state.assignment_digest)?
+            val matched = controller_workload_matches_v1(state, bindings[state.assignment_digest])?
+        if record.state == "completed":
+            if record.outcome_digest != sha256_text(bytes): return Err("workload-store-outcome-mismatch")
+            val key = state.workload_uid + ":" + str(state.revision)
+            if versions.contains_key(key): return Err("workload-store-revision-conflict")
+            versions[key] = state
+            if not rows.contains_key(state.workload_uid):
+                rows[state.workload_uid] = state
+            elif rows[state.workload_uid].revision < state.revision:
+                rows[state.workload_uid] = state
+        elif record.state == "admitted" or record.state == "executing" or record.state == "outcome-unknown":
+            pending.push(state)
+        else:
+            return Err("workload-store-terminal-invalid")
+    if pending.len() + pending_inputs.len() > 1: return Err("workload-store-pending-conflict")
+    for uid in cancelled_inputs:
+        if rows.contains_key(uid): return Err("desired-cancel-resolved-workload-conflict")
+        for state in pending:
+            if state.workload_uid == uid: return Err("desired-cancel-resolved-workload-conflict")
+    for uid in rows.keys():
+        val initial_key = uid + ":1"
+        if not versions.contains_key(initial_key): return Err("workload-store-history-gap")
+        var prior = versions[initial_key]
+        if not workload_fence_initial_v1(prior): return Err("workload-store-initial-invalid")
+        var revision: i64 = 2
+        while revision <= rows[uid].revision:
+            val key = uid + ":" + str(revision)
+            if not versions.contains_key(key): return Err("workload-store-history-gap")
+            val next = versions[key]
+            if not workload_fence_successor_v1(prior, next): return Err("workload-store-transition-invalid")
+            prior = next
+            revision = revision + 1
+    for state in pending:
+        if rows.contains_key(state.workload_uid):
+            if not workload_fence_successor_v1(rows[state.workload_uid], state): return Err("workload-store-pending-invalid")
+        elif not workload_fence_initial_v1(state):
+            return Err("workload-store-pending-invalid")
+    Ok(WorkloadReplayV1(rows: rows, pending: pending, pending_inputs: pending_inputs))
+
+fn workload_store_complete_metadata_v1(journal: DistributedOperationJournalV2,
+        state: ControllerWorkloadFenceV1) -> Result<DistributedOperationJournalV2, text>:
+    val operation = workload_store_operation_v1(state)?
+    val prior = daemon_operation_exact_v2(journal, operation)?
+    var current = journal
+    if prior.state == "admitted": current = daemon_operation_begin_v2(current, operation)?
+    daemon_operation_record_outcome_v2(current, operation, "completed", operation.payload_digest)
+
+pub fn controller_workload_store_open_v1(root: text, controller_id: text, nonce: text,
+        maximum_events: i64) -> Result<ControllerWorkloadStoreV1, text>:
+    val authority = controller_assignment_authority_v1(controller_id)?
+    var journal = distributed_operation_journal_open_v2(root, authority, nonce, maximum_events)?
+    val replay = workload_store_replay_v1(journal, controller_id)
+    if replay.is_err():
+        val closed = distributed_operation_journal_close_v2(journal)
+        return Err(replay.unwrap_err())
+    var rows = replay.unwrap().rows
+    # Only these pure metadata publications are safely completed on recovery.
+    # Remote assignment operations are left untouched for host reconciliation.
+    for pending in replay.unwrap().pending:
+        val completion = workload_store_complete_metadata_v1(journal, pending)
+        if completion.is_err():
+            val closed = distributed_operation_journal_close_v2(journal)
+            return Err(completion.unwrap_err())
+        journal = completion.unwrap()
+        rows[pending.workload_uid] = pending
+    for operation in replay.unwrap().pending_inputs:
+        val completion = controller_desired_complete_v1(journal, operation)
+        if completion.is_err():
+            val closed = distributed_operation_journal_close_v2(journal)
+            return Err(completion.unwrap_err())
+        journal = completion.unwrap()
+    Ok(ControllerWorkloadStoreV1(controller_id: controller_id, journal: journal, rows: rows))
+
+pub fn controller_workload_store_lookup_v1(owner: ControllerWorkloadStoreV1,
+        uid: text) -> Result<ControllerWorkloadFenceV1, text>:
+    val current = workload_store_current_v1(owner)?
+    if not owner.rows.contains_key(uid): return Err("workload-not-found")
+    Ok(owner.rows[uid])
+
+# Trusted internal extension port: caller authentication and approvals belong
+# to the service boundary; this function grants no authority by itself.
+pub fn workload_store_publish_v1(owner: ControllerWorkloadStoreV1,
+        next: ControllerWorkloadFenceV1) -> Result<ControllerWorkloadStoreV1, text>:
+    val current = workload_store_current_v1(owner)?
+    if next.controller_id != owner.controller_id: return Err("workload-store-scope-invalid")
+    val bytes = workload_fence_encode_v1(next)?
+    if owner.rows.contains_key(next.workload_uid):
+        val prior = owner.rows[next.workload_uid]
+        val prior_bytes = workload_fence_encode_v1(prior)?
+        if prior_bytes == bytes: return Ok(owner)
+        if not workload_fence_successor_v1(prior, next): return Err("workload-store-transition-invalid")
+    elif not workload_fence_initial_v1(next):
+        return Err("workload-store-initial-invalid")
+    if owner.journal.operations.len() >= 4096: return Err("workload-store-history-bound")
+    val operation = workload_store_operation_v1(next)?
+    val path = workload_payload_path_v1(owner.journal, operation.payload_digest)
+    if file_exists(path):
+        val retained = file_read_regular_no_follow_bounded(path, 8192)?
+        if retained != bytes: return Err("workload-store-payload-mismatch")
+    else:
+        dir_create(owner.journal.root + "/workload-payloads", true)
+        if not file_atomic_write(path, bytes): return Err("workload-store-publication-failed")
+        val retained = file_read_regular_no_follow_bounded(path, 8192)?
+        if retained != bytes: return Err("workload-store-publication-mismatch")
+    val admitted = daemon_operation_admit_v2(owner.journal, operation)?
+    val committed = workload_store_complete_metadata_v1(admitted.journal, next)?
+    var rows = owner.rows
+    rows[next.workload_uid] = next
+    Ok(ControllerWorkloadStoreV1(controller_id: owner.controller_id, journal: committed, rows: rows))
+
+pub fn controller_workload_store_create_v1(owner: ControllerWorkloadStoreV1,
+        state: ControllerWorkloadFenceV1) -> Result<ControllerWorkloadStoreV1, text>:
+    if not workload_fence_initial_v1(state): return Err("workload-store-initial-invalid")
+    val desired_id = controller_desired_operation_id_v1(owner.controller_id, state.workload_uid)?
+    val desired = distributed_operation_journal_lookup_v2(owner.journal, desired_id)
+    if desired.is_ok(): return Err("desired-input-resolution-required")
+    if desired.unwrap_err() != "OPERATION_NOT_FOUND": return Err(desired.unwrap_err())
+    workload_store_publish_v1(owner, state)
+
+# Trusted local controller boundary. Caller authentication precedes this API;
+# schema-valid input is not an execution plan or a scheduling authorization.
+pub fn controller_workload_store_submit_agent_v1(owner: ControllerWorkloadStoreV1,
+        uid: text, source: text, ns: text, name: text) -> Result<ControllerWorkloadStoreV1, text>:
+    val current = workload_store_current_v1(owner)?
+    val input = controller_desired_input_select_v1(owner.controller_id, uid, source, ns, name)?
+    val operation = controller_desired_operation_v1(input)?
+    val existing = distributed_operation_journal_lookup_v2(owner.journal, operation.id)
+    if existing.is_ok():
+        val prior = existing.unwrap()
+        if prior.envelope != distributed_encode_operation_v2(operation)?: return Err("desired-input-identity-reused")
+        val retained = controller_desired_objects_read_v1(owner.journal.root, operation, owner.controller_id)?
+        if prior.state != "completed": return Err("desired-input-recovery-required")
+        if prior.outcome_digest != operation.payload_digest: return Err("desired-input-outcome-mismatch")
+        if controller_workload_store_agent_cancelled_v1(owner, uid)?: return Err("desired-input-cancelled")
+        return Ok(owner)
+    if existing.unwrap_err() != "OPERATION_NOT_FOUND": return Err(existing.unwrap_err())
+    if owner.rows.contains_key(uid): return Err("desired-input-workload-already-exists")
+    if owner.journal.operations.len() >= 4096: return Err("workload-store-history-bound")
+    val saved = controller_desired_objects_retain_v1(owner.journal.root, input, source)?
+    val admitted = daemon_operation_admit_v2(owner.journal, operation)?
+    val committed = controller_desired_complete_v1(admitted.journal, operation)?
+    Ok(ControllerWorkloadStoreV1(controller_id: owner.controller_id, journal: committed, rows: owner.rows))
+
+pub fn controller_workload_store_agent_source_v1(owner: ControllerWorkloadStoreV1,
+        uid: text) -> Result<text, text>:
+    val current = workload_store_current_v1(owner)?
+    val id = controller_desired_operation_id_v1(owner.controller_id, uid)?
+    val record = distributed_operation_journal_lookup_v2(owner.journal, id)?
+    val operation = distributed_decode_operation_v2(record.envelope)?
+    if record.state != "completed" or record.outcome_digest != operation.payload_digest:
+        return Err("desired-input-not-committed")
+    val retained = controller_desired_objects_read_v1(owner.journal.root, operation, owner.controller_id)?
+    Ok(retained.source)
+
+# Read-only policy resolution. No plan is admitted or assigned by this call.
+pub fn controller_workload_store_agent_policy_v1(owner: ControllerWorkloadStoreV1,
+        uid: text, catalog: text, ns: text, name: text) -> Result<AgentPolicyResolutionV1, text>:
+    val source = controller_workload_store_agent_source_v1(owner, uid)?
+    if controller_workload_store_agent_cancelled_v1(owner, uid)?: return Err("desired-input-cancelled")
+    val selected = controller_desired_input_select_v1(owner.controller_id, uid, source, ns, name)?
+    val exact = daemon_operation_exact_v2(owner.journal, controller_desired_operation_v1(selected)?)?
+    val snapshot_operation = controller_agent_policy_operation_v1(selected, sha256_text(catalog))?
+    val snapshot = distributed_operation_journal_lookup_v2(owner.journal, snapshot_operation.id)
+    if snapshot.is_ok():
+        val prior = daemon_operation_exact_v2(owner.journal, snapshot_operation)?
+        if prior.state != "completed" or prior.outcome_digest != snapshot_operation.payload_digest:
+            return Err("policy-snapshot-recovery-required")
+        return controller_agent_policy_read_v1(owner.journal, snapshot_operation, owner.controller_id)
+    if snapshot.unwrap_err() != "OPERATION_NOT_FOUND": return Err(snapshot.unwrap_err())
+    resolve_agent_policy_v1(source, catalog, ns, name)
+
+# Trusted controller metadata commit, not execution approval. Catalog policy
+# authorization belongs at the service boundary before this internal call.
+pub fn controller_workload_store_pin_policy_v1(owner: ControllerWorkloadStoreV1,
+        uid: text, catalog: text, ns: text, name: text) -> Result<ControllerWorkloadStoreV1, text>:
+    val policy = controller_workload_store_agent_policy_v1(owner, uid, catalog, ns, name)?
+    val source = controller_workload_store_agent_source_v1(owner, uid)?
+    val input = controller_desired_input_select_v1(owner.controller_id, uid, source, ns, name)?
+    val operation = controller_agent_policy_operation_v1(input, policy.catalog_digest)?
+    val existing = distributed_operation_journal_lookup_v2(owner.journal, operation.id)
+    if existing.is_ok():
+        val prior = daemon_operation_exact_v2(owner.journal, operation)?
+        val retained = controller_agent_policy_read_v1(owner.journal, operation, owner.controller_id)?
+        if prior.state != "completed": return Err("policy-snapshot-recovery-required")
+        if prior.outcome_digest != operation.payload_digest: return Err("policy-snapshot-outcome-mismatch")
+        return Ok(owner)
+    if existing.unwrap_err() != "OPERATION_NOT_FOUND": return Err(existing.unwrap_err())
+    if owner.journal.operations.len() >= 4096: return Err("workload-store-history-bound")
+    val saved = controller_agent_policy_retain_v1(owner.journal.root, input, catalog)?
+    val admitted = daemon_operation_admit_v2(owner.journal, operation)?
+    val completed = controller_desired_complete_v1(admitted.journal, operation)?
+    Ok(ControllerWorkloadStoreV1(controller_id: owner.controller_id, journal: completed, rows: owner.rows))
+
+pub fn controller_workload_store_pinned_policy_v1(owner: ControllerWorkloadStoreV1,
+        uid: text) -> Result<AgentPolicyResolutionV1, text>:
+    if controller_workload_store_agent_cancelled_v1(owner, uid)?: return Err("desired-input-cancelled")
+    val id = "policy-" + controller_desired_operation_id_v1(owner.controller_id, uid)?
+    val record = distributed_operation_journal_lookup_v2(owner.journal, id)?
+    val operation = distributed_decode_operation_v2(record.envelope)?
+    if record.state != "completed" or record.outcome_digest != operation.payload_digest: return Err("policy-snapshot-not-committed")
+    controller_agent_policy_read_v1(owner.journal, operation, owner.controller_id)
+
+# Read source remains allowed after cancellation for inspection. This separate
+# query is mandatory before future resolution; cancellation never implies reap.
+pub fn controller_workload_store_agent_cancelled_v1(owner: ControllerWorkloadStoreV1,
+        uid: text) -> Result<bool, text>:
+    val current = workload_store_current_v1(owner)?
+    val id = controller_desired_operation_id_v1(owner.controller_id, uid)?
+    val original = distributed_operation_journal_lookup_v2(owner.journal, id)?
+    val operation = distributed_decode_operation_v2(original.envelope)?
+    val retained = controller_desired_objects_read_v1(owner.journal.root, operation, owner.controller_id)?
+    val parent = controller_desired_cancel_parent_v1(owner.journal, retained.input)?
+    val cancellation = controller_desired_cancel_operation_v1(retained.input)?
+    val result = distributed_operation_journal_lookup_v2(owner.journal, cancellation.id)
+    if result.is_err():
+        if result.unwrap_err() == "OPERATION_NOT_FOUND": return Ok(false)
+        return Err(result.unwrap_err())
+    val record = daemon_operation_exact_v2(owner.journal, cancellation)?
+    if record.state == "completed":
+        if record.outcome_digest != cancellation.payload_digest: return Err("desired-cancel-outcome-mismatch")
+    elif record.state != "admitted" and record.state != "executing" and record.state != "outcome-unknown":
+        return Err("desired-cancel-terminal-invalid")
+    Ok(true)
+
+pub fn controller_workload_store_cancel_agent_v1(owner: ControllerWorkloadStoreV1,
+        uid: text, expected_source_digest: text) -> Result<ControllerWorkloadStoreV1, text>:
+    val current = workload_store_current_v1(owner)?
+    if owner.rows.contains_key(uid): return Err("desired-cancel-requires-workload-owner")
+    val id = controller_desired_operation_id_v1(owner.controller_id, uid)?
+    val record = distributed_operation_journal_lookup_v2(owner.journal, id)?
+    val original = distributed_decode_operation_v2(record.envelope)?
+    val retained = controller_desired_objects_read_v1(owner.journal.root, original, owner.controller_id)?
+    val parent = controller_desired_cancel_parent_v1(owner.journal, retained.input)?
+    if retained.input.source_digest != expected_source_digest: return Err("desired-cancel-source-mismatch")
+    val operation = controller_desired_cancel_operation_v1(retained.input)?
+    if controller_workload_store_agent_cancelled_v1(owner, uid)?:
+        val prior = daemon_operation_exact_v2(owner.journal, operation)?
+        if prior.state != "completed": return Err("desired-input-recovery-required")
+        return Ok(owner)
+    if owner.journal.operations.len() >= 4096: return Err("workload-store-history-bound")
+    val admitted = daemon_operation_admit_v2(owner.journal, operation)?
+    val committed = controller_desired_complete_v1(admitted.journal, operation)?
+    Ok(ControllerWorkloadStoreV1(controller_id: owner.controller_id, journal: committed, rows: owner.rows))
+
+pub fn controller_workload_store_bind_v1(owner: ControllerWorkloadStoreV1, uid: text,
+        expected_revision: i64, binding: ControllerAssignmentBindingV1) -> Result<ControllerWorkloadStoreV1, text>:
+    val current = workload_store_current_v1(owner)?
+    val desired_id = controller_desired_operation_id_v1(owner.controller_id, uid)?
+    val desired = distributed_operation_journal_lookup_v2(owner.journal, desired_id)
+    if desired.is_ok(): return Err("agent-assignment-retained-request-required")
+    if desired.unwrap_err() != "OPERATION_NOT_FOUND": return Err(desired.unwrap_err())
+    workload_store_bind_checked_v1(owner, uid, expected_revision, binding)
+
+# Trusted internal extension port: caller authentication and approvals belong
+# to the service boundary; this function grants no authority by itself.
+pub fn workload_store_bind_checked_v1(owner: ControllerWorkloadStoreV1, uid: text,
+        expected_revision: i64, binding: ControllerAssignmentBindingV1) -> Result<ControllerWorkloadStoreV1, text>:
+    val prior = controller_workload_store_lookup_v1(owner, uid)?
+    val next = controller_workload_bind_v1(prior, expected_revision, binding)?
+    if prior.assignment_digest == "":
+        val retained = assignment_objects_retain_v1(owner.journal.root, binding)?
+        if retained != next.assignment_digest: return Err("workload-assignment-object-mismatch")
+    else:
+        # Missing/corrupt committed objects are evidence loss, not permission
+        # to silently repair them from a caller-provided request.
+        val retained = assignment_objects_read_v1(owner.journal.root, prior.assignment_digest)?
+        val matching = controller_workload_matches_v1(prior, retained)?
+    workload_store_publish_v1(owner, next)
+
+pub fn controller_workload_store_assignment_v1(owner: ControllerWorkloadStoreV1,
+        uid: text) -> Result<ControllerAssignmentBindingV1, text>:
+    val state = controller_workload_store_lookup_v1(owner, uid)?
+    if state.assignment_digest == "": return Err("workload-not-assigned")
+    val binding = assignment_objects_read_v1(owner.journal.root, state.assignment_digest)?
+    val matching = controller_workload_matches_v1(state, binding)?
+    Ok(binding)
+
+fn workload_store_exact_binding_v1(owner: ControllerWorkloadStoreV1,
+        binding: ControllerAssignmentBindingV1) -> Result<ControllerAssignmentBindingV1, text>:
+    val retained = controller_workload_store_assignment_v1(owner, binding.workload_uid)?
+    val expected = controller_assignment_bytes_v1(retained)?
+    val received = controller_assignment_bytes_v1(binding)?
+    if received != expected: return Err("workload-assignment-object-mismatch")
+    Ok(retained)
+
+pub fn controller_workload_store_cancel_v1(owner: ControllerWorkloadStoreV1, uid: text,
+        expected_revision: i64) -> Result<ControllerWorkloadStoreV1, text>:
+    val prior = controller_workload_store_lookup_v1(owner, uid)?
+    val next = controller_workload_cancel_v1(prior, expected_revision)?
+    workload_store_publish_v1(owner, next)
+
+# Refresh from the current writer-owned projection instead of trusting a copied
+# context. The same journal revision guards the ensuing preparation commit.
+pub fn controller_workload_store_admit_assignment_v1(owner: ControllerWorkloadStoreV1,
+        binding: ControllerAssignmentBindingV1, operation: OperationEnvelopeV2,
+        grant: ExecutionGrantV2, context: ControllerAssignmentContextV1) -> Result<ControllerWorkloadStoreV1, text>:
+    var fresh = context
+    fresh.workload = controller_workload_store_lookup_v1(owner, binding.workload_uid)?
+    val retained = workload_store_exact_binding_v1(owner, binding)?
+    val journal = controller_assignment_admit_v1(owner.journal, retained, operation, grant, fresh)?
+    Ok(ControllerWorkloadStoreV1(controller_id: owner.controller_id, journal: journal, rows: owner.rows))
+
+pub fn controller_workload_store_begin_prepare_v1(owner: ControllerWorkloadStoreV1,
+        binding: ControllerAssignmentBindingV1, operation: OperationEnvelopeV2,
+        grant: ExecutionGrantV2, context: ControllerAssignmentContextV1) -> Result<ControllerWorkloadStoreV1, text>:
+    var fresh = context
+    fresh.workload = controller_workload_store_lookup_v1(owner, binding.workload_uid)?
+    val retained = workload_store_exact_binding_v1(owner, binding)?
+    val journal = controller_assignment_begin_prepare_v1(owner.journal, retained, operation, grant, fresh)?
+    Ok(ControllerWorkloadStoreV1(controller_id: owner.controller_id, journal: journal, rows: owner.rows))
+
+pub fn controller_workload_store_close_v1(owner: ControllerWorkloadStoreV1) -> Result<bool, text>:
+    distributed_operation_journal_close_v2(owner.journal)
+
+# Cancellation does not discard a host receipt that raced the cancellation.
+# It is still committed for reconciliation, but cannot become execution-ready.
+pub fn controller_workload_store_commit_assignment_v1(owner: ControllerWorkloadStoreV1,
+        uid: text, operation: OperationEnvelopeV2, receipt: HostPreparedReservationReceiptV1,
+        grant: ExecutionGrantV2, context: ControllerAssignmentContextV1) -> Result<ControllerWorkloadStoreV1, text>:
+    var fresh = context
+    fresh.workload = controller_workload_store_lookup_v1(owner, uid)?
+    val binding = controller_workload_store_assignment_v1(owner, uid)?
+    val journal = controller_assignment_commit_v1(owner.journal, binding, operation, receipt, grant, fresh)?
+    Ok(ControllerWorkloadStoreV1(controller_id: owner.controller_id, journal: journal, rows: owner.rows))
+
+pub fn controller_workload_store_execution_ready_v1(owner: ControllerWorkloadStoreV1,
+        uid: text, operation: OperationEnvelopeV2, grant: ExecutionGrantV2,
+        context: ControllerAssignmentContextV1) -> Result<ControllerExecutionReadinessV1, text>:
+    var fresh = context
+    fresh.workload = controller_workload_store_lookup_v1(owner, uid)?
+    val binding = controller_workload_store_assignment_v1(owner, uid)?
+    controller_assignment_execution_ready_v1(owner.journal, binding, operation, grant, fresh)

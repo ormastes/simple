@@ -1,0 +1,63 @@
+# Static policy references only. Task/repository/image/CLI capabilities and
+# authentication remain unresolved; this value is never an executable plan.
+use std.common.contracts.orchestration.resource_set_v1.*
+use std.common.contracts.orchestration.agent_session_v1.AgentSessionV1
+use std.common.contracts.orchestration.profile_v1.ResourceProfileV1
+use std.common.contracts.orchestration.execution_policy_v1.{HostPoolV1, RuntimeClassV1}
+use std.common.crypto.sha256.sha256_text
+
+pub struct AgentPolicyResolutionV1:
+    session: AgentSessionV1
+    profile: ResourceProfileV1
+    pool: HostPoolV1
+    runtime: RuntimeClassV1
+    source_digest: text
+    catalog_digest: text
+
+# The catalog is an explicitly supplied snapshot, never an implicit global
+# lookup. The controller must authorize its contents and retain its exact bytes.
+pub fn resolve_agent_policy_v1(source: text, catalog: text, ns: text, name: text) -> Result<AgentPolicyResolutionV1, text>:
+    val decoded = decode_resource_set(source)
+    if decoded.is_err(): return Err("agent-source-schema:" + decoded.unwrap_err().path)
+    var items = decoded.unwrap().items
+    var sessions: [AgentSessionV1] = []
+    for item in items:
+        match item:
+            case ResourceSetItemV1.AgentSession(session):
+                if session.meta.ns == ns and session.meta.name == name: sessions.push(session)
+            case _: ()
+    if sessions.len() != 1: return Err("agent-session-not-in-source")
+    val session = sessions[0]
+    if catalog != "":
+        val external = decode_resource_set(catalog)
+        if external.is_err(): return Err("agent-catalog-schema:" + external.unwrap_err().path)
+        if items.len() + external.unwrap().items.len() > 1024: return Err("agent-catalog-limit")
+        for item in external.unwrap().items: items.push(item)
+    var identities: Dict<text, bool> = {}
+    for item in items:
+        val identity = resource_set_item_identity(item)
+        if identities.contains_key(identity): return Err("agent-catalog-duplicate-identity")
+        identities[identity] = true
+    var profiles: [ResourceProfileV1] = []
+    var pools: [HostPoolV1] = []
+    var runtimes: [RuntimeClassV1] = []
+    for item in items:
+        match item:
+            case ResourceSetItemV1.Profile(profile):
+                if profile.meta.ns == ns and profile.meta.name == session.resource_profile_ref: profiles.push(profile)
+            case ResourceSetItemV1.HostPool(pool):
+                if pool.meta.ns == ns and pool.meta.name == session.host_pool_ref: pools.push(pool)
+            case ResourceSetItemV1.RuntimeClass(runtime):
+                if runtime.meta.ns == ns and runtime.meta.name == session.runtime_class_ref: runtimes.push(runtime)
+            case _: ()
+    if profiles.len() != 1: return Err("agent-resource-profile-unresolved")
+    if pools.len() != 1: return Err("agent-host-pool-unresolved")
+    if runtimes.len() != 1: return Err("agent-runtime-class-unresolved")
+    val pool = pools[0]
+    val runtime = runtimes[0]
+    if not pool.runtime_class_refs.contains(runtime.meta.name): return Err("agent-runtime-not-allowed-by-pool")
+    if pool.execution_os != runtime.execution_os or session.template.os_name != runtime.execution_os:
+        return Err("agent-execution-os-conflict")
+    if pool.architecture != runtime.architecture: return Err("agent-architecture-conflict")
+    Ok(AgentPolicyResolutionV1(session: session, profile: profiles[0], pool: pool, runtime: runtime,
+        source_digest: sha256_text(source), catalog_digest: sha256_text(catalog)))

@@ -1,0 +1,118 @@
+# AgentSession intent only. References, image digests, installed CLI versions,
+# authorization, workspace ownership and runtime capabilities resolve later.
+use std.common.sdn.value.{SdnValue, SdnSpan}
+use std.common.contracts.orchestration.resource_v1.{ObjectMetaV1, PodSpecV1, RejectionV1, ORCHESTRATION_API_VERSION_V1, parse_resource_document, decode_resource_envelope, resource_envelope_path, decode_meta, decode_pod_spec, as_dict, only_known, require, reject}
+
+pub struct AgentDefinitionV1:
+    provider: text
+    task_ref: text
+
+pub struct AgentWorkspaceV1:
+    repository_ref: text
+    revision_ref: text
+    isolation: text
+    retention: text
+
+pub struct AgentTerminalPolicyV1:
+    frontend: text
+    persistent: bool
+    disconnect_policy: text
+
+pub struct AgentSessionV1:
+    meta: ObjectMetaV1
+    resource_profile_ref: text
+    host_pool_ref: text
+    runtime_class_ref: text
+    agent: AgentDefinitionV1
+    workspace: AgentWorkspaceV1
+    session: AgentTerminalPolicyV1
+    template: PodSpecV1
+
+fn agent_text(fields: Dict<text, SdnValue>, key: text, path: text,
+              spans: Dict<text, SdnSpan>) -> Result<text, RejectionV1>:
+    val value = require(fields, key, path, spans)?
+    match value:
+        case SdnValue.String(raw):
+            if raw.len() == 0 or raw.len() > 256 or raw.trim() != raw or raw.contains("\n") or raw.contains("\r") or raw.contains("\t") or raw.contains("\0"):
+                return Err(reject("invalid_reference", path + "." + key, "expected nonempty bounded text without control characters", spans))
+            Ok(raw)
+        case _: Err(reject("type", path + "." + key, "expected text", spans))
+
+fn agent_choice(fields: Dict<text, SdnValue>, key: text, path: text,
+                choices: [text], spans: Dict<text, SdnSpan>) -> Result<text, RejectionV1>:
+    val value = agent_text(fields, key, path, spans)?
+    if not choices.contains(value):
+        return Err(reject("unsupported_value", path + "." + key, "unsupported " + key + " '" + value + "'", spans))
+    Ok(value)
+
+fn decode_agent(value: SdnValue, path: text, spans: Dict<text, SdnSpan>) -> Result<AgentDefinitionV1, RejectionV1>:
+    val fields = as_dict(value, path, spans)?
+    only_known(fields, ["provider", "taskRef"], path, spans)?
+    val provider = agent_choice(fields, "provider", path, ["codex", "claude", "gemini", "kimi"], spans)?
+    val task = agent_text(fields, "taskRef", path, spans)?
+    Ok(AgentDefinitionV1(provider: provider, task_ref: task))
+
+fn decode_workspace(value: SdnValue, path: text, spans: Dict<text, SdnSpan>) -> Result<AgentWorkspaceV1, RejectionV1>:
+    val fields = as_dict(value, path, spans)?
+    only_known(fields, ["repositoryRef", "revisionRef", "isolation", "retention"], path, spans)?
+    val repository = agent_text(fields, "repositoryRef", path, spans)?
+    val revision = agent_text(fields, "revisionRef", path, spans)?
+    val isolation = agent_choice(fields, "isolation", path, ["worktree"], spans)?
+    val retention = agent_choice(fields, "retention", path, ["retain", "retain-on-failure-or-dirty"], spans)?
+    Ok(AgentWorkspaceV1(repository_ref: repository, revision_ref: revision, isolation: isolation, retention: retention))
+
+fn decode_terminal(value: SdnValue, path: text, spans: Dict<text, SdnSpan>) -> Result<AgentTerminalPolicyV1, RejectionV1>:
+    val fields = as_dict(value, path, spans)?
+    only_known(fields, ["frontend", "persistent", "disconnectPolicy"], path, spans)?
+    val frontend = agent_choice(fields, "frontend", path, ["smux"], spans)?
+    val persistent_value = require(fields, "persistent", path, spans)?
+    val persistent = match persistent_value:
+        case SdnValue.Bool(flag): flag
+        case _: return Err(reject("type", path + ".persistent", "expected boolean", spans))
+    val disconnect = agent_choice(fields, "disconnectPolicy", path, ["retain", "terminate"], spans)?
+    Ok(AgentTerminalPolicyV1(frontend: frontend, persistent: persistent, disconnect_policy: disconnect))
+
+fn decode_agent_template(value: SdnValue, path: text, spans: Dict<text, SdnSpan>) -> Result<PodSpecV1, RejectionV1>:
+    var fields = as_dict(value, path, spans)?
+    only_known(fields, ["os", "containers", "networkProfile"], path, spans)?
+    # New-kind semantics: the referenced runtime class selects a container
+    # provider later. Adapt the typed value in memory, without reparsing SDN or
+    # accepting a second runtime selection inside the AgentSession template.
+    fields["runtimeClassName"] = SdnValue.String("native-container")
+    val template = decode_pod_spec(SdnValue.Dict(fields), path, spans)?
+    if template.containers.len() != 1:
+        return Err(reject("unsupported_container_count", path + ".containers", "AgentSession requires one agent container", spans))
+    val container = template.containers[0]
+    if container.image == "" or container.artifact_set_ref != "":
+        return Err(reject("agent_image_required", path + ".containers.0.image", "AgentSession requires an image reference", spans))
+    if container.command.len() != 0 or container.args.len() != 0:
+        val command_field = if container.command.len() != 0: "command" else: "args"
+        return Err(reject("agent_command_owned", path + ".containers.0." + command_field, "agent command and task injection belong to the selected CLI adapter", spans))
+    Ok(template)
+
+pub fn decode_agent_session(source: text) -> Result<AgentSessionV1, RejectionV1>:
+    val parsed = parse_resource_document(source)?
+    decode_agent_session_value(parsed.0, parsed.1, "")
+
+# Value entrypoint requires an already checked span/issue parse.
+pub fn decode_agent_session_value(value: SdnValue, spans: Dict<text, SdnSpan>, prefix: text) -> Result<AgentSessionV1, RejectionV1>:
+    val envelope = resource_envelope_path(prefix)
+    val top = decode_resource_envelope(value, spans, prefix, ORCHESTRATION_API_VERSION_V1)?
+    val kind = require(top, "kind", envelope, spans)?
+    match kind:
+        case SdnValue.String(name):
+            if name != "AgentSession": return Err(reject("unsupported_kind", prefix + "kind", "expected AgentSession", spans))
+        case _: return Err(reject("type", prefix + "kind", "expected text", spans))
+    val meta = decode_meta(require(top, "metadata", envelope, spans)?, prefix + "metadata", spans)?
+    val path = prefix + "spec"
+    val fields = as_dict(require(top, "spec", envelope, spans)?, path, spans)?
+    only_known(fields, ["resourceProfileRef", "hostPoolRef", "runtimeClassRef", "agent", "workspace", "session", "template"], path, spans)?
+    val profile = agent_text(fields, "resourceProfileRef", path, spans)?
+    val pool = agent_text(fields, "hostPoolRef", path, spans)?
+    val runtime = agent_text(fields, "runtimeClassRef", path, spans)?
+    val agent = decode_agent(require(fields, "agent", path, spans)?, path + ".agent", spans)?
+    val workspace = decode_workspace(require(fields, "workspace", path, spans)?, path + ".workspace", spans)?
+    val session = decode_terminal(require(fields, "session", path, spans)?, path + ".session", spans)?
+    val template = decode_agent_template(require(fields, "template", path, spans)?, path + ".template", spans)?
+    Ok(AgentSessionV1(meta: meta, resource_profile_ref: profile, host_pool_ref: pool,
+        runtime_class_ref: runtime, agent: agent, workspace: workspace, session: session, template: template))
