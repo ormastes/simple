@@ -26,8 +26,9 @@ Docker and Podman availability is not required by these deterministic cases.
 
 All cases use `step(...)` with real assertions. The source recurrence guards
 supplement direct production builder and caller tests; they do not prove live
-container isolation or native execution. The specs preserve the existing API
-visibility; no previously private API is widened just for tests.
+container isolation or native execution. The specs import legacy callers through the existing public test-runner facade
+and import new public argv helpers directly. No previously private API is widened
+just for tests.
 
 The legacy cleanup signature provides only an engine name, so it cannot prove
 which volume belongs to this request. It returns false with no effects until a
@@ -38,10 +39,12 @@ the existing monotonic owner; a negative starting sample fails before launch.
 A failed or decreasing final sample returns an explicit nonzero error and a zero
 error duration. Existing callers receive no newly introduced negative sentinel.
 The legacy volume syntax cannot represent a colon in the host source; such
-requests fail rather than silently changing mount fields. Literal argv prevents
+requests, including Windows drive paths such as `C:\work`, fail rather than
+silently changing mount fields. Literal argv prevents
 shell interpretation but does not claim general container containment, image
 validity, permission isolation, or live engine conformance.
 
 When an admitted runtime becomes available, run this focused SSpec once under
 its recorded exact producer identity and report actual assertion counts. Engine
-conformance and elapsed-clock accuracy remain separate NOT_RUN evidence gates.
+conformance, sampled elapsed duration, and pre/post-execution clock failure
+behavior remain separate NOT_RUN evidence gates.
