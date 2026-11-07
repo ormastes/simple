@@ -1,0 +1,248 @@
+# Shared signed host executor. All native/container operations use Simple
+# Container API V2; no Linux/Windows provider or request codec imports.
+# Selected journal profile: process-crash-v1, NOT power-loss durability.
+# Restart/unproven continuity requires managed-scope inventory and quarantine.
+# Dependency APIs/envelope are frozen but not yet present in this worktree.
+use std.nogc_sync_mut.orchestration.host_execution_envelope_v2.*
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.*
+use std.nogc_sync_mut.orchestration.host_execution_intent_v1.*
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_project_v2, simple_container_apply_v2, simple_container_read_v2, simple_container_intent_v2, simple_container_scope_v2, simple_container_observation_v2, simple_container_backend_v2}
+use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, ContainerHostScopeV2, container_execution_request_encode_v2, container_execution_plan_bytes_v2, container_scope_fence_id_v2}
+use std.common.contracts.container.effect_deadline_v1.{ContainerEffectDeadlineV1, container_effect_deadline_v1}
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeIntentV1, RUNTIME_STATUS_OK}
+use std.common.contracts.orchestration.host_capacity_v1.HostLedgerFenceV1
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, distributed_grant_authorize_v2}
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_lookup_v2
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_regular_no_follow_bounded, file_fsync, directory_fsync}
+use std.nogc_sync_mut.io_runtime.dir_create
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+
+pub struct HostExecutionTurnV2:
+    owner: HostCapacityOwnerV1
+    container: SimpleContainerOwnerV2
+    observation: Option<HostExecutionObservationV2>
+    recovery_required: bool
+    error: text
+
+struct HostExecutionPreparedV2:
+    envelope: HostExecutionEnvelopeV2
+    grant: ExecutionGrantV2
+    deadline: ContainerEffectDeadlineV1
+    operation_digest: text
+    runtime_engine: text
+    scope: ContainerHostScopeV2
+    runtime_fence_id: text
+
+fn host_execution_current_v2(owner: HostCapacityOwnerV1) -> bool:
+    val checked = distributed_operation_journal_lookup_v2(owner.journal, "")
+    checked.is_err() and checked.unwrap_err() == "OPERATION_NOT_FOUND"
+
+fn host_execution_context_error_v2(before: HostReservationAuthorizationContextV1,
+        after: HostReservationAuthorizationContextV1, policy: LocalAuthorityPolicyV1) -> text:
+    if after.grant_clock <= 0 or after.monotonic_ms < 0: return "host-execution-clock-invalid"
+    if after.grant_clock < before.grant_clock or after.monotonic_ms < before.monotonic_ms: return "host-execution-clock-regressed"
+    if (after.policy_revision != before.policy_revision or after.revocation_epoch != before.revocation_epoch or
+            after.session_generation != before.session_generation or after.policy_revision != policy.snapshot.policy_revision or
+            after.revocation_epoch != policy.snapshot.revocation_epoch or after.session_generation != policy.session_generation):
+        return "host-execution-context-changed"
+    ""
+
+fn host_execution_fresh_authority_v2(prepared: HostExecutionPreparedV2, context: HostReservationAuthorizationContextV1) -> text:
+    if prepared.envelope.approval.expires_at <= context.grant_clock: return "APPROVAL_EXPIRED"
+    var execution = prepared.envelope.operation
+    execution.operation = "host_execute_v1"
+    distributed_grant_authorize_v2(prepared.grant, execution, context.grant_clock,
+        context.policy_revision, context.revocation_epoch, context.session_generation)
+
+fn host_execution_prepare_v2(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2,
+        payload: text, policy: LocalAuthorityPolicyV1, expected_provider_digest: text,
+        service_scope_id: text, context: HostReservationAuthorizationContextV1) -> Result<HostExecutionPreparedV2, text>:
+    val context_error = host_execution_context_error_v2(context, context, policy)
+    if context_error != "": return Err(context_error)
+    if str_len(expected_provider_digest) != 64 or not builder_digest_valid_v1(expected_provider_digest):
+        return Err("host-execution-provider-pin-invalid")
+    if not owner.ledger.continuity_proven: return Err("host-reconciliation-required")
+    val scope = simple_container_scope_v2(container)
+    val runtime_fence_id = container_scope_fence_id_v2(scope)?
+    val envelope = host_execution_decode_v2(payload, scope)?
+    val retained = daemon_operation_exact_v2(owner.journal, envelope.operation)?
+    if retained.state != "admitted": return Err("execution-reconciliation-required")
+    var execution = envelope.operation
+    execution.operation = "host_execute_v1"
+    val grant = distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, envelope.signed, envelope.approval,
+        execution, context.grant_clock, policy.snapshot.generation, context.policy_revision,
+        context.revocation_epoch, context.session_generation)?
+    val plan = envelope.execution.plan
+    val engine = if plan.backend == "linux-podman": "podman"
+        elif plan.backend == "windows-docker-process": "docker"
+        else: return Err("host-execution-backend-unsupported")
+    val container_observation = simple_container_observation_v2(container)
+    if (simple_container_backend_v2(container) != plan.backend or container_observation.backend != plan.backend or
+            container_observation.provider_identity_digest != expected_provider_digest or
+            container_observation.native_machine_id != scope.native_machine_id):
+        return Err("host-execution-provider-identity-mismatch")
+    if scope.continuity_mode == "native-boot-incarnation-v1" and container_observation.native_boot_id != scope.boot_id:
+        return Err("host-execution-provider-native-continuity-mismatch")
+    val capacity = owner.ledger.capacity
+    if (plan.physical_host_id != capacity.physical_host_id or plan.physical_host_id != envelope.intent.physical_host_id or
+            plan.provider_generation != capacity.provider_generation or plan.provider_generation != envelope.intent.fence.provider_generation):
+        return Err("host-execution-container-fence-mismatch")
+    val ledger_fence = if envelope.legacy_v1: scope.boot_id else: runtime_fence_id
+    if capacity.boot_id != ledger_fence or envelope.intent.fence.boot_id != ledger_fence:
+        return Err("host-execution-container-fence-mismatch")
+    if plan.service_scope_id != service_scope_id or plan.service_scope_id != envelope.intent.reservation.service_scope_id:
+        return Err("host-execution-service-scope-mismatch")
+    val projection = simple_container_project_v2(container, envelope.execution)?
+    if (projection.operation_id != envelope.operation.id or projection.operation_id != plan.operation_id or
+            projection.workload_uid != plan.workload_uid or projection.attempt != plan.attempt or projection.request_digest != plan.request_digest):
+        return Err("host-execution-request-identity-mismatch")
+    if projection.cpu_millis != envelope.intent.reservation.cpu_millis or projection.memory_bytes != envelope.intent.reservation.memory_bytes:
+        return Err("host-execution-allocation-mismatch")
+    if envelope.intent.reservation.exclusive_devices.len() != 0 or projection.has_devices or projection.has_workspace: return Err("host-execution-allocation-adapter-unavailable")
+    if projection.timeout_ms <= 0 or projection.timeout_ms > envelope.operation.duration_ms: return Err("host-execution-timeout-mismatch")
+    val expires = if grant.expires_at < envelope.approval.expires_at: grant.expires_at else: envelope.approval.expires_at
+    val deadline = container_effect_deadline_v1(plan.request_digest, envelope.operation.id, ["create", "start"], expires)?
+    val operation_digest = sha256_text(distributed_encode_operation_v2(envelope.operation)?)
+    Ok(HostExecutionPreparedV2(envelope: envelope, grant: grant, deadline: deadline,
+        operation_digest: operation_digest, runtime_engine: engine, scope: scope, runtime_fence_id: runtime_fence_id))
+
+fn host_execution_archive_object_v2(root: text, directory_name: text, operation_id: text, bytes: text) -> Result<bool, text>:
+    val directory = root + "/" + directory_name
+    if not file_exists(directory) and not dir_create(directory, true): return Err("host-execution-archive-directory-unavailable")
+    val path = directory + "/" + sha256_text(operation_id) + ".sdn"
+    if file_exists(path):
+        if file_read_regular_no_follow_bounded(path, 2097152)? != bytes: return Err("host-execution-retained-archive-mismatch")
+    elif not file_atomic_write_mode(path, bytes, 0o600): return Err("host-execution-archive-publication-failed")
+    if file_read_regular_no_follow_bounded(path, 2097152)? != bytes: return Err("host-execution-archive-readback-mismatch")
+    if not file_fsync(path) or not directory_fsync(directory) or not directory_fsync(root): return Err("host-execution-archive-sync-failed")
+    Ok(true)
+
+fn host_execution_retain_v2(owner: HostCapacityOwnerV1, prepared: HostExecutionPreparedV2, payload: text) -> Result<bool, text>:
+    val plan = prepared.envelope.execution.plan
+    # Canonical runtime adapter plan is archived separately, never substituted
+    # for the original signed V1 hash in the unchanged full packet.
+    val plan_bytes = container_execution_plan_bytes_v2(plan)?
+    val request_bytes = container_execution_request_encode_v2(prepared.envelope.execution)?
+    if str_len(request_bytes) > 2097152: return Err("host-execution-archive-size")
+    val plan_written = host_execution_archive_object_v2(owner.journal.root, "host-execution-plans", plan.operation_id, plan_bytes)?
+    val request_written = host_execution_archive_object_v2(owner.journal.root, "host-execution-requests", plan.operation_id, request_bytes)?
+    val packet_written = host_execution_archive_object_v2(owner.journal.root, "host-execute-packets", plan.operation_id, payload)?
+    Ok(true)
+
+fn host_execution_identity_match_v2(identity: RuntimeIdentityV1, prepared: HostExecutionPreparedV2, expected_native: text) -> bool:
+    val plan = prepared.envelope.execution.plan
+    (identity.pod_uid == plan.workload_uid and identity.attempt == plan.attempt and identity.operation_id == plan.operation_id and
+        identity.engine == prepared.runtime_engine and identity.node_boot_id == prepared.runtime_fence_id and identity.provider_generation == plan.provider_generation and
+        str_len(identity.native_id) == 64 and builder_digest_valid_v1(identity.native_id) and (expected_native == "" or identity.native_id == expected_native))
+
+fn host_execution_unobserved_v2(prepared: HostExecutionPreparedV2) -> RuntimeIdentityV1:
+    val plan = prepared.envelope.execution.plan
+    RuntimeIdentityV1(pod_uid: plan.workload_uid, attempt: plan.attempt, provider_generation: plan.provider_generation,
+        operation_id: plan.operation_id, engine: prepared.runtime_engine, native_id: "", node_boot_id: prepared.runtime_fence_id)
+
+fn host_execution_record_v2(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2, prepared: HostExecutionPreparedV2,
+        provider_digest: text, context: HostReservationAuthorizationContextV1, runtime: RuntimeIdentityV1, phase: text,
+        create_status: text, start_status: text, inspect_status: text, error: text) -> HostExecutionTurnV2:
+    val observation = HostExecutionObservationV2(scope: prepared.scope, operation_id: prepared.envelope.operation.id, operation_digest: prepared.operation_digest,
+        plan_digest: prepared.envelope.intent.plan_digest, request_digest: prepared.envelope.execution.plan.request_digest,
+        grant_id: prepared.grant.id, principal: prepared.grant.principal, issuer_id: prepared.envelope.signed.issuer_id,
+        approver_id: prepared.envelope.approval.approver_id, provider_identity_digest: provider_digest,
+        observed_unix_ms: context.grant_clock, observed_monotonic_ms: context.monotonic_ms, runtime: runtime, phase: phase,
+        create_status: create_status, start_status: start_status, inspect_status: inspect_status,
+        reason: if error == "": "native lifecycle observed; completion not awaited" else: error)
+    val stored = host_execution_observation_store_v2(owner.journal.root, observation)
+    if stored.is_err(): return HostExecutionTurnV2(owner, container, Some(observation), true, stored.unwrap_err())
+    HostExecutionTurnV2(owner, container, Some(observation), error != "", error)
+
+fn host_execution_creation_intent_v2(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2,
+        prepared: HostExecutionPreparedV2, created_identity: RuntimeIdentityV1) -> Result<bool, text>:
+    val intent = simple_container_intent_v2(container, prepared.envelope.execution)?
+    val identity = RuntimeIdentityV1(pod_uid: intent.pod_uid, attempt: intent.attempt, provider_generation: intent.provider_generation,
+        operation_id: intent.operation_id, engine: intent.engine, native_id: intent.native_id, node_boot_id: intent.node_boot_id)
+    if intent.phase != "created" or not host_execution_identity_match_v2(identity, prepared, created_identity.native_id):
+        return Err("host-execution-created-intent-mismatch")
+    val stored = host_execution_intent_store_v1(owner.journal.root, intent)?
+    Ok(true)
+
+pub fn host_authorized_execute_v2(owner: HostCapacityOwnerV1, container: SimpleContainerOwnerV2,
+        payload: text, policy: LocalAuthorityPolicyV1, expected_provider_identity_digest: text, service_scope_id: text,
+        context: HostReservationAuthorizationContextV1,
+        refresh_context: fn() -> HostReservationAuthorizationContextV1) -> HostExecutionTurnV2:
+    if not host_execution_current_v2(owner): return HostExecutionTurnV2(owner, container, nil, true, "host-execution-owner-stale")
+    val checked = host_execution_prepare_v2(owner, container, payload, policy, expected_provider_identity_digest, service_scope_id, context)
+    if checked.is_err():
+        val reason = checked.unwrap_err()
+        return HostExecutionTurnV2(owner, container, nil, reason == "host-reconciliation-required" or reason == "execution-reconciliation-required", reason)
+    val prepared = checked.unwrap()
+    val retained = host_execution_retain_v2(owner, prepared, payload)
+    if retained.is_err(): return HostExecutionTurnV2(owner, container, nil, false, retained.unwrap_err())
+    val commit_context = refresh_context()
+    var error = host_execution_context_error_v2(context, commit_context, policy)
+    if error == "": error = host_execution_fresh_authority_v2(prepared, commit_context)
+    if error != "": return HostExecutionTurnV2(owner, container, nil, false, error)
+    val capacity = owner.ledger.capacity
+    val fence = HostLedgerFenceV1(authority_id: capacity.authority_id, boot_id: capacity.boot_id,
+        provider_generation: capacity.provider_generation, revision: owner.ledger.revision)
+    val beginning = host_capacity_owner_begin_v1(owner, prepared.envelope.intent, prepared.envelope.operation,
+        prepared.envelope.receipt, fence, prepared.grant, commit_context)
+    if beginning.is_err(): return HostExecutionTurnV2(owner, container, nil, not host_execution_current_v2(owner), beginning.unwrap_err())
+    val executing = beginning.unwrap()
+    var current_container = container
+    var latest_context = commit_context
+    val create_context = refresh_context()
+    error = host_execution_context_error_v2(commit_context, create_context, policy)
+    if error == "":
+        latest_context = create_context
+        error = host_execution_fresh_authority_v2(prepared, create_context)
+    if error != "": return host_execution_record_v2(executing, current_container, prepared, expected_provider_identity_digest,
+        latest_context, host_execution_unobserved_v2(prepared), "unknown", "not-attempted", "not-attempted", "not-attempted", error)
+    val create_turn = simple_container_apply_v2(current_container, "create", prepared.envelope.execution, prepared.deadline)
+    current_container = create_turn.owner
+    val created = create_turn.operation
+    var start_status = "not-attempted"
+    if created.status != RUNTIME_STATUS_OK:
+        error = "host-execution-create-failed:" + created.reason
+    elif created.state.phase != "created" or not host_execution_identity_match_v2(created.state.identity, prepared, ""):
+        error = "host-execution-created-identity-mismatch"
+    else:
+        # The exact newly created identity is durable BEFORE start. Windows
+        # recovery relies on this caller-owned record rather than a leaf cache.
+        val stored_intent = host_execution_creation_intent_v2(executing, current_container, prepared, created.state.identity)
+        if stored_intent.is_err(): error = stored_intent.unwrap_err()
+        else:
+            val start_context = refresh_context()
+            error = host_execution_context_error_v2(latest_context, start_context, policy)
+            if error == "":
+                latest_context = start_context
+                error = host_execution_fresh_authority_v2(prepared, start_context)
+            if error == "":
+                val start_turn = simple_container_apply_v2(current_container, "start", prepared.envelope.execution, prepared.deadline)
+                current_container = start_turn.owner
+                start_status = start_turn.operation.status
+                if start_status != RUNTIME_STATUS_OK: error = "host-execution-start-failed:" + start_turn.operation.reason
+                elif not host_execution_identity_match_v2(start_turn.operation.state.identity, prepared, created.state.identity.native_id):
+                    error = "host-execution-started-identity-mismatch"
+    val inspect_turn = simple_container_read_v2(current_container, "inspect", prepared.envelope.execution)
+    current_container = inspect_turn.owner
+    val inspected = inspect_turn.operation
+    var runtime = host_execution_unobserved_v2(prepared)
+    var phase = "unknown"
+    if inspected.status == RUNTIME_STATUS_OK and host_execution_identity_match_v2(inspected.state.identity, prepared, created.state.identity.native_id):
+        runtime = inspected.state.identity
+        phase = inspected.state.phase
+    elif error == "": error = "host-execution-inspect-failed-or-identity-mismatch"
+    if error == "" and phase != "running" and phase != "exited" and phase != "stopped": error = "host-execution-inspect-phase-not-started"
+    val observation_context = refresh_context()
+    val observation_error = host_execution_context_error_v2(latest_context, observation_context, policy)
+    if observation_error == "": latest_context = observation_context
+    elif error == "": error = observation_error
+    host_execution_record_v2(executing, current_container, prepared, expected_provider_identity_digest,
+        latest_context, runtime, phase, created.status, start_status, inspected.status, error)
