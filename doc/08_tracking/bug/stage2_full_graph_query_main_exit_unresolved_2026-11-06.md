@@ -1,7 +1,7 @@
 # Stage 2 full-graph HIR: `unresolved name: exit` in traceability/query_main.spl
 
 - Date: 2026-11-06
-- Status: OPEN — blocked: reproduces only in the full `compiler_cli_build` graph (Stage 2 verification)
+- Status: CLOSED 2026-11-07 — no longer reproduces in the full graph (see Resolution)
 - Priority: P0 (blocks Stage 2 `compiler_cli_build` verification)
 - Tree: `a58d06d80d3` (ancestor of `origin/release/1.0.0`)
 - Cluster: A (import/symbol resolution) with probable cluster B (HIR cache/codec) involvement
@@ -67,3 +67,13 @@ resolves, hand to cluster B (codec). Do not patch `query_main.spl`.
   graph; (b) a surface or registry-generation mismatch, which takes the `reexport-root-reject` paths. Those only
   print under `SIMPLE_BOOTSTRAP_DIAG=1`, and that was off for this run. Next run: set `SIMPLE_BOOTSTRAP_DIAG=1`
   and grep `reexport-root-reject|reexport-chase\] .*wanted=exit`.
+
+## Resolution (2026-11-07)
+
+Not reproducible at tree `d21afc1bf02` (ancestor of `origin/release/1.0.0`). Stage 2
+`compiler_cli_build` run `/private/tmp/boot4-out/s2n` (log
+`stage2-compiler-tests/aarch64-apple-darwin/verification/logs/compiler_cli_build.log`,
+2026-11-07) includes `query_main` and has **0** `hir-fatal` lines; it reached `native_compile`.
+The only failing log is the 2026-11-06 `s2` run at `a58d06d80d3`. The fixing commit between
+the two trees was not bisected. Shadowing by private `fn exit` in glob-imported modules was
+separately ruled out with a Stage 2 fixture (0 HIR fatals in the importer).
