@@ -1,0 +1,156 @@
+# Structural transport only. Decoding confers no signature, execution, output,
+# test, replay or publication authority; the parent must accept actual bytes.
+use app.buildrunner.remote_host_v1.RemoteCompletionBundleV1
+use app.buildrunner.remote_evidence_v1.{RemoteEvidenceBytesV1, RemoteOutputBytesV1}
+use app.buildrunner.remote_authority_v1.{remote_completion_encode_v1, remote_completion_decode_v1}
+use std.common.build_manager.codec.{BuilderWireReaderV1, builder_wire_line_v1,
+    builder_encode_result_v1, builder_decode_result_v1}
+use std.common.build_manager.contracts.builder_relative_path_valid_v1
+use std.common.text_bytes.text_to_utf8_bytes
+use std.nogc_sync_mut.io.external_text_io.io_legacy_utf8
+
+pub val REMOTE_BUNDLE_BYTES_MAX_V1: i64 = 4194304
+pub val REMOTE_BUNDLE_WIRE_MAX_V1: i64 = 16777216
+pub val REMOTE_BUNDLE_CHUNK_BYTES_V1: i64 = 16384
+
+fn remote_bundle_hex_digit_v1(code: i64) -> i64:
+    if code >= 48 and code <= 57: return code - 48
+    if code >= 97 and code <= 102: return code - 87
+    -1
+
+fn remote_bundle_blob_lines_v1(content: [u8]) -> [text]:
+    val count = (content.len() + REMOTE_BUNDLE_CHUNK_BYTES_V1 - 1) / REMOTE_BUNDLE_CHUNK_BYTES_V1
+    var lines: [text] = [builder_wire_line_v1("{content.len()}"), builder_wire_line_v1("{count}")]
+    val alphabet = "0123456789abcdef"
+    var offset = 0
+    while offset < content.len():
+        var end = offset + REMOTE_BUNDLE_CHUNK_BYTES_V1
+        if end > content.len(): end = content.len()
+        var parts: [text] = []
+        for i in offset..end:
+            val byte = content[i] as i64
+            parts.push(alphabet.substring(byte / 16, byte / 16 + 1) +
+                alphabet.substring(byte % 16, byte % 16 + 1))
+        lines.push(builder_wire_line_v1(parts.join("")))
+        offset = end
+    lines
+
+fn remote_bundle_read_blob_v1(reader: BuilderWireReaderV1, remaining: i64) -> Result<(BuilderWireReaderV1, [u8]), text>:
+    var next = reader
+    val length = next.number(remaining, false)
+    val count = next.number(REMOTE_BUNDLE_BYTES_MAX_V1 / REMOTE_BUNDLE_CHUNK_BYTES_V1, false)
+    if next.reason != "": return Err("REMOTE_BUNDLE_BLOB_INVALID")
+    val expected_count = (length + REMOTE_BUNDLE_CHUNK_BYTES_V1 - 1) / REMOTE_BUNDLE_CHUNK_BYTES_V1
+    if count != expected_count: return Err("REMOTE_BUNDLE_CHUNK_COUNT_INVALID")
+    var content: [u8] = []
+    for chunk in 0..count:
+        # Hex admits no escaping. Read this bounded ASCII line directly: the
+        # general scalar unescaper grows text per character and is unsuitable
+        # for multi-megabyte binary transport. byte_at avoids UTF-8 rescans.
+        if next.index >= next.lines.len() - 1: return Err("REMOTE_BUNDLE_BLOB_INVALID")
+        val encoded = next.lines[next.index]
+        next.index = next.index + 1
+        var size = length - chunk * REMOTE_BUNDLE_CHUNK_BYTES_V1
+        if size > REMOTE_BUNDLE_CHUNK_BYTES_V1: size = REMOTE_BUNDLE_CHUNK_BYTES_V1
+        if encoded.byte_len() != size * 2: return Err("REMOTE_BUNDLE_CHUNK_SIZE_INVALID")
+        for i in 0..size:
+            val high = remote_bundle_hex_digit_v1(encoded.byte_at(i * 2) as i64)
+            val low = remote_bundle_hex_digit_v1(encoded.byte_at(i * 2 + 1) as i64)
+            if high < 0 or low < 0: return Err("REMOTE_BUNDLE_HEX_INVALID")
+            content.push((high * 16 + low) as u8)
+    Ok((next, content))
+
+fn remote_bundle_encode_v1(bundle: RemoteCompletionBundleV1) -> Result<text, text>:
+    val result_wire = builder_encode_result_v1(bundle.result)
+    if result_wire == "": return Err("REMOTE_BUNDLE_RESULT_INVALID")
+    val completion_wire = remote_completion_encode_v1(bundle.completion)?
+    if bundle.evidence.process_payload.byte_len() > 2048 or bundle.evidence.outputs.len() > 4096:
+        return Err("REMOTE_BUNDLE_EVIDENCE_INVALID")
+    val result_bytes = text_to_utf8_bytes(result_wire)
+    val completion_bytes = text_to_utf8_bytes(completion_wire)
+    val process_bytes = text_to_utf8_bytes(bundle.evidence.process_payload)
+    var remaining = REMOTE_BUNDLE_BYTES_MAX_V1
+    for size in [result_bytes.len(), completion_bytes.len(), process_bytes.len(),
+            bundle.evidence.stdout.len(), bundle.evidence.stderr.len()]:
+        if size > remaining: return Err("REMOTE_BUNDLE_BYTES_EXCEEDED")
+        remaining = remaining - size
+    var seen: Dict<text, bool> = {}
+    for output in bundle.evidence.outputs:
+        if not builder_relative_path_valid_v1(output.path) or seen.contains_key(output.path):
+            return Err("REMOTE_BUNDLE_OUTPUT_PATH_INVALID")
+        seen[output.path] = true
+        for size in [output.path.byte_len(), output.content.len()]:
+            if size > remaining: return Err("REMOTE_BUNDLE_BYTES_EXCEEDED")
+            remaining = remaining - size
+    var lines: [text] = [builder_wire_line_v1("SIMPLE_REMOTE_COMPLETION_BUNDLE_V1")]
+    for content in [result_bytes, completion_bytes, process_bytes,
+            bundle.evidence.stdout, bundle.evidence.stderr]:
+        for line in remote_bundle_blob_lines_v1(content): lines.push(line)
+    lines.push(builder_wire_line_v1("{bundle.evidence.outputs.len()}"))
+    for output in bundle.evidence.outputs:
+        lines.push(builder_wire_line_v1(output.path))
+        for line in remote_bundle_blob_lines_v1(output.content): lines.push(line)
+    val wire = lines.join("")
+    if wire.byte_len() > REMOTE_BUNDLE_WIRE_MAX_V1: return Err("REMOTE_BUNDLE_WIRE_TOO_LARGE")
+    Ok(wire)
+
+fn remote_bundle_decode_v1(wire: text) -> Result<RemoteCompletionBundleV1, text>:
+    if wire.byte_len() > REMOTE_BUNDLE_WIRE_MAX_V1: return Err("REMOTE_BUNDLE_WIRE_TOO_LARGE")
+    if not wire.ends_with("\n"): return Err("REMOTE_BUNDLE_WIRE_INVALID")
+    # Split once. The generic create path scans one-character substrings;
+    # binary frames need neither that scan nor its much larger line budget.
+    val fields = wire.split("\n")
+    if fields.len() > 32768: return Err("REMOTE_BUNDLE_WIRE_INVALID")
+    var reader = BuilderWireReaderV1(lines: fields, index: 0, reason: "")
+    if reader.scalar() != "SIMPLE_REMOTE_COMPLETION_BUNDLE_V1": return Err("REMOTE_BUNDLE_FRAME_INVALID")
+    var remaining = REMOTE_BUNDLE_BYTES_MAX_V1
+    val result_bytes_read = remote_bundle_read_blob_v1(reader, remaining)?
+    reader = result_bytes_read.0
+    val result_bytes = result_bytes_read.1
+    remaining = remaining - result_bytes.len()
+    val completion_bytes_read = remote_bundle_read_blob_v1(reader, remaining)?
+    reader = completion_bytes_read.0
+    val completion_bytes = completion_bytes_read.1
+    remaining = remaining - completion_bytes.len()
+    val process_bytes_read = remote_bundle_read_blob_v1(reader, remaining)?
+    reader = process_bytes_read.0
+    val process_bytes = process_bytes_read.1
+    remaining = remaining - process_bytes.len()
+    if process_bytes.len() > 2048: return Err("REMOTE_BUNDLE_EVIDENCE_INVALID")
+    val stdout_read = remote_bundle_read_blob_v1(reader, remaining)?
+    reader = stdout_read.0
+    val stdout = stdout_read.1
+    remaining = remaining - stdout.len()
+    val stderr_read = remote_bundle_read_blob_v1(reader, remaining)?
+    reader = stderr_read.0
+    val stderr = stderr_read.1
+    remaining = remaining - stderr.len()
+    val count = reader.number(4096, false)
+    if reader.reason != "": return Err("REMOTE_BUNDLE_OUTPUT_COUNT_INVALID")
+    var outputs: [RemoteOutputBytesV1] = []
+    var seen: Dict<text, bool> = {}
+    for i in 0..count:
+        val path = reader.scalar()
+        if reader.reason != "" or not builder_relative_path_valid_v1(path) or seen.contains_key(path):
+            return Err("REMOTE_BUNDLE_OUTPUT_PATH_INVALID")
+        seen[path] = true
+        if path.byte_len() > remaining: return Err("REMOTE_BUNDLE_BYTES_EXCEEDED")
+        remaining = remaining - path.byte_len()
+        val content_read = remote_bundle_read_blob_v1(reader, remaining)?
+        reader = content_read.0
+        val content = content_read.1
+        remaining = remaining - content.len()
+        outputs.push(RemoteOutputBytesV1(path: path, content: content))
+    if reader.complete_error() != "": return Err("REMOTE_BUNDLE_WIRE_INVALID")
+    val result_wire = io_legacy_utf8(result_bytes)?
+    val result = builder_decode_result_v1(result_wire)?
+    if builder_encode_result_v1(result) != result_wire: return Err("REMOTE_BUNDLE_RESULT_NONCANONICAL")
+    val completion = remote_completion_decode_v1(io_legacy_utf8(completion_bytes)?)?
+    val evidence = RemoteEvidenceBytesV1(process_payload: io_legacy_utf8(process_bytes)?,
+        stdout: stdout, stderr: stderr, outputs: outputs)
+    val bundle = RemoteCompletionBundleV1(result: result, evidence: evidence, completion: completion)
+    Ok(bundle)
+
+export remote_bundle_encode_v1, remote_bundle_decode_v1
+# Shared bounded raw transport kernel; these helpers confer no authority.
+export remote_bundle_blob_lines_v1, remote_bundle_read_blob_v1

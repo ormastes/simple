@@ -11,6 +11,7 @@
 mod aggregate_layout;
 mod archive;
 mod config;
+mod piped_observer;
 mod compiler;
 mod discovery;
 pub(crate) mod inline_asm_emit;
@@ -227,8 +228,11 @@ fn native_object_staging_dir(cache_base_dir: &Path, cache_dir: &Path) -> Result<
 /// Invalid entries are left in place: another builder may have atomically
 /// published a valid object after our read, so unlinking here would race it.
 fn expected_cached_object_identity() -> (Architecture, BinaryFormat) {
+    object_identity_for_target(effective_target())
+}
+
+fn object_identity_for_target(target: simple_common::target::Target) -> (Architecture, BinaryFormat) {
     use simple_common::target::{TargetArch, TargetOS};
-    let target = effective_target();
     let architecture = match target.arch {
         TargetArch::X86_64 => Architecture::X86_64,
         TargetArch::Aarch64 => Architecture::Aarch64,
@@ -785,6 +789,7 @@ pub struct NativeProjectBuilder {
     pub(crate) config: NativeBuildConfig,
     /// Entry file whose `main` becomes `spl_main` (the program entry point).
     pub(crate) entry_file: Option<PathBuf>,
+    piped_observer: piped_observer::PipedObserverSelection,
 }
 
 impl NativeProjectBuilder {
@@ -805,6 +810,7 @@ impl NativeProjectBuilder {
             output,
             config: NativeBuildConfig::default(),
             entry_file: None,
+            piped_observer: piped_observer::PipedObserverSelection::CoreC,
         }
     }
 
@@ -946,6 +952,7 @@ impl NativeProjectBuilder {
     /// Returns an error when file discovery, source loading, incremental cache
     /// setup, compilation, or linking fails.
     pub fn build(mut self) -> Result<NativeBuildResult, String> {
+        self.validate_piped_observer_lane()?;
         if let Ok(backend) = std::env::var("SIMPLE_BACKEND") {
             if !matches!(backend.as_str(), "llvm" | "cranelift") {
                 return Err(format!(

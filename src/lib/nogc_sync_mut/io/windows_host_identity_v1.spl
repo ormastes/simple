@@ -1,0 +1,148 @@
+# Native Windows host observations. This leaf deliberately selects the Win64
+# NoGC/sync owner for checked private heap storage; no C/Rust runtime addition.
+# Installation identity is read from the OS registry, never from configuration.
+use std.common.string_core.{char_from_code_inline}
+
+pub struct WindowsNativeHostIdentityV1:
+    native_machine_id: text
+    boot_counter: i64
+    boot_assurance: text
+    architecture: text
+
+# Only canonical 36-character ASCII GUIDs plus exactly one UTF16 NUL qualify.
+# REG_SZ=1. No truncation, embedded NUL, replacement decoding or nil GUID.
+pub fn windows_machine_guid_decode_v1(kind: i64, byte_count: i64, units: [i64]) -> Result<text, text>:
+    if kind != 1 or byte_count != 74 or units.len() != 37:
+        return Err("Windows MachineGuid requires exact REG_SZ GUID storage")
+    if units[36] != 0: return Err("Windows MachineGuid missing terminator")
+    var guid = ""
+    var nonzero = false
+    for index in 0..36:
+        var scalar = units[index]
+        if index == 8 or index == 13 or index == 18 or index == 23:
+            if scalar != 45: return Err("Windows MachineGuid malformed separator")
+        else:
+            if scalar >= 65 and scalar <= 70: scalar = scalar + 32
+            if not ((scalar >= 48 and scalar <= 57) or (scalar >= 97 and scalar <= 102)):
+                return Err("Windows MachineGuid malformed hexadecimal digit")
+            if scalar != 48: nonzero = true
+        guid = guid + char_from_code_inline(scalar)
+    if not nonzero: return Err("Windows MachineGuid nil identity")
+    if guid.len() != 36: return Err("Windows MachineGuid text allocation failed")
+    val identity = "windows-machine-guid-v1:" + guid
+    if identity.len() != 60: return Err("Windows MachineGuid identity allocation failed")
+    Ok(identity)
+
+# SYSTEM_INFO architecture and IsWow64Process2 nativeMachine must agree. The
+# latter prevents an emulated x64 process on ARM64 from asserting x64 host.
+pub fn windows_native_architecture_decode_v1(system_architecture: i64, native_machine: i64) -> Result<text, text>:
+    if system_architecture == 9 and native_machine == 34404: return Ok("x86_64")
+    if system_architecture == 12 and native_machine == 43620: return Ok("aarch64")
+    Err("Windows native architecture unsupported or inconsistent")
+
+# Microsoft documents this registry value as a successful-boot counter. It is
+# NOT a unique boot incarnation: rollback, restore and administrator edits can
+# reuse values. Counter equality never authorizes adoption or journal continuity.
+pub fn windows_boot_counter_decode_v1(kind: i64, byte_count: i64, counter: i64) -> Result<i64, text>:
+    if kind != 4 or byte_count != 4:
+        return Err("Windows BootId requires exact REG_DWORD storage")
+    if counter <= 0 or counter >= 4294967295:
+        return Err("Windows BootId zero or exhausted counter")
+    Ok(counter)
+
+@when(os="windows"):
+use std.nogc_sync_mut.io.windows_process_owner_abi.{GetProcessHeap, HeapAlloc, HeapFree}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u16, volatile_write_u32, volatile_read_u16, volatile_read_u32}
+
+@unsafe(reason: "read-only Win64 OS registry query into one bounded private allocation", capabilities: [ffi, raw_ptr])
+extern fn RegGetValueW(key: i64, subkey: i64, value: i64, flags: u32, kind: i64, data: i64, byte_count: i64) -> i32
+@unsafe(reason: "Win64 current OS SYSTEM_INFO copied into private 48-byte storage", capabilities: [ffi, raw_ptr])
+extern fn GetNativeSystemInfo(information: i64)
+@unsafe(reason: "Win64 native architecture crosscheck independent of process emulation", capabilities: [ffi, raw_ptr])
+extern fn IsWow64Process2(process: i64, process_machine: i64, native_machine: i64) -> i32
+@unsafe(reason: "reject interpreter before direct Windows ABI invocation", capabilities: [ffi])
+extern fn rt_is_interpreter_runtime() -> bool
+@unsafe(reason: "reject boxed JIT before direct Windows ABI invocation", capabilities: [ffi])
+extern fn rt_is_jit_runtime() -> bool
+
+# All inputs are short fixed ASCII OS paths/names, never caller-selected paths.
+# Storage includes the zero terminator; the outer zeroed allocation owns it.
+fn windows_identity_write_ascii_v1(address: i64, capacity: i64, value: text) -> bool:
+    if capacity <= 0 or value.len() >= capacity: return false
+    for index in 0..value.len():
+        val scalar = value.char_code_at(index)
+        if scalar <= 0 or scalar > 127: return false
+        volatile_write_u16(address + index * 2, scalar)
+    volatile_write_u16(address + value.len() * 2, 0)
+    true
+
+@unsafe(reason: "one bounded Win64 observation allocation released before returning any copied result", capabilities: [ffi, raw_ptr])
+fn windows_host_identity_native_v1() -> Result<WindowsNativeHostIdentityV1, text>:
+    if rt_is_interpreter_runtime() or rt_is_jit_runtime():
+        return Err("Windows host identity requires native AOT runtime")
+    # Allocate the copied carrier before acquiring the raw heap buffer.
+    var guid_units: [i64] = [0; 37]
+    if guid_units.len() != 37: return Err("Windows MachineGuid carrier allocation failed")
+    val heap = GetProcessHeap()
+    if heap == 0: return Err("Windows host identity heap unavailable")
+    # Layout: four DWORD metadata slots 0..15; boot DWORD16..19;
+    # architecture USHORT24,26; Win64 SYSTEM_INFO32..79; GUID80..153;
+    # machine subkey160..239; value240..263; boot subkey288..479;
+    # boot name480..493. All pointer arithmetic is bounded by these fixed slots.
+    val buffer = HeapAlloc(heap, 8u32, 512u64)
+    if buffer == 0: return Err("Windows host identity allocation failed")
+    val machine_key = windows_identity_write_ascii_v1(buffer + 160, 40, "SOFTWARE\\Microsoft\\Cryptography")
+    val machine_name = windows_identity_write_ascii_v1(buffer + 240, 12, "MachineGuid")
+    val boot_key = windows_identity_write_ascii_v1(buffer + 288, 96, "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management\\PrefetchParameters")
+    val boot_name = windows_identity_write_ascii_v1(buffer + 480, 8, "BootId")
+    var machine_status: i32 = -1
+    var boot_status: i32 = -1
+    var architecture_status: i32 = 0
+    if machine_key and machine_name and boot_key and boot_name:
+        volatile_write_u32(buffer + 4, 74)
+        volatile_write_u32(buffer + 12, 4)
+        # HKEY_LOCAL_MACHINE is sign-extended LONG 0x80000002 on Win64.
+        # RRF_SUBKEY_WOW6464KEY | RRF_RT_REG_SZ / RRF_RT_REG_DWORD;
+        # RRF_ZEROONFAILURE ensures failed queries expose no partial value.
+        machine_status = RegGetValueW(-2147483646, buffer + 160, buffer + 240,
+            536936450u32, buffer, buffer + 80, buffer + 4)
+        boot_status = RegGetValueW(-2147483646, buffer + 288, buffer + 480,
+            536936464u32, buffer + 8, buffer + 16, buffer + 12)
+        volatile_write_u16(buffer + 32, 65535)
+        GetNativeSystemInfo(buffer + 32)
+        # GetCurrentProcess() documented pseudohandle, borrowed; never closed.
+        architecture_status = IsWow64Process2(-1, buffer + 24, buffer + 26)
+    # Copy only fixed bounded storage, then release even after query failure.
+    val machine_kind = volatile_read_u32(buffer)
+    val machine_bytes = volatile_read_u32(buffer + 4)
+    val boot_kind = volatile_read_u32(buffer + 8)
+    val boot_bytes = volatile_read_u32(buffer + 12)
+    val counter = volatile_read_u32(buffer + 16)
+    val system_architecture = volatile_read_u16(buffer + 32)
+    val native_machine = volatile_read_u16(buffer + 26)
+    if machine_status == 0 and machine_kind == 1 and machine_bytes == 74:
+        for index in 0..37:
+            guid_units[index] = volatile_read_u16(buffer + 80 + index * 2)
+    val freed = HeapFree(heap, 0u32, buffer)
+    if freed == 0: return Err("Windows host identity allocation release failed")
+    if not machine_key or not machine_name or not boot_key or not boot_name:
+        return Err("Windows host identity fixed registry path preparation failed")
+    if machine_status != 0: return Err("Windows OS MachineGuid query failed: {machine_status}")
+    if boot_status != 0: return Err("Windows OS successful-boot counter query failed: {boot_status}")
+    if architecture_status == 0: return Err("Windows native architecture query failed")
+    val machine = windows_machine_guid_decode_v1(machine_kind, machine_bytes, guid_units)?
+    val boot = windows_boot_counter_decode_v1(boot_kind, boot_bytes, counter)?
+    val architecture = windows_native_architecture_decode_v1(system_architecture, native_machine)?
+    Ok(WindowsNativeHostIdentityV1(native_machine_id: machine, boot_counter: boot,
+        boot_assurance: "successful-boot-counter", architecture: architecture))
+
+pub fn windows_host_identity_v1() -> Result<WindowsNativeHostIdentityV1, text>:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        windows_host_identity_native_v1()
+@else:
+pub fn windows_host_identity_v1() -> Result<WindowsNativeHostIdentityV1, text>:
+    Err("Windows host identity unavailable on this platform")
+@end
+
+export WindowsNativeHostIdentityV1, windows_host_identity_v1
+export windows_machine_guid_decode_v1, windows_boot_counter_decode_v1, windows_native_architecture_decode_v1

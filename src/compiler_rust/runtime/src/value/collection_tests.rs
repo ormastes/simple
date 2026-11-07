@@ -239,6 +239,41 @@ fn test_bytes_u8_set_fast_path() {
 }
 
 #[test]
+fn checked_word_getters_decode_boxed_and_preserve_packed_bits() {
+    let signed_wide = rt_array_new(2);
+    for value in [i64::MIN, i64::MAX] {
+        let boxed_value = RuntimeValue::from_int(value);
+        assert_eq!(boxed_value.as_heap_i64(), Some(value));
+        assert!(rt_array_push(signed_wide, boxed_value));
+    }
+    for (index, value) in [i64::MIN, i64::MAX].into_iter().enumerate() {
+        assert_eq!(rt_typed_words_u32_at(signed_wide, index as i64), value & 0xFFFF_FFFF);
+        assert_eq!(rt_typed_words_u64_at(signed_wide, index as i64), value);
+    }
+    rt_array_free(signed_wide);
+    let boxed = rt_array_new(6);
+    let packed = rt_array_new_with_cap_u64(6);
+    let values = [0u64, 8, 9, 0xFF00_0000, 0x8000_0000_0000_0000, u64::MAX];
+    for value in values {
+        assert!(rt_array_push(boxed, RuntimeValue::from_u64(value)));
+        assert!(rt_typed_words_u64_push(packed, value as i64));
+    }
+    for array in [boxed, packed] {
+        for (index, expected) in values.into_iter().enumerate() {
+            assert_eq!(rt_typed_words_u32_at(array, index as i64), (expected & 0xFFFF_FFFF) as i64);
+            assert_eq!(rt_typed_words_u64_at(array, index as i64) as u64, expected);
+        }
+        assert_eq!(rt_typed_words_u32_at(array, -1), 0xFFFF_FFFF);
+        assert_eq!(rt_typed_words_u64_at(array, -1) as u64, u64::MAX);
+        for index in [-7, 6] {
+            assert_eq!(rt_typed_words_u32_at(array, index), 0);
+            assert_eq!(rt_typed_words_u64_at(array, index), 0);
+        }
+        rt_array_free(array);
+    }
+}
+
+#[test]
 fn test_typed_words_u32_fast_path() {
     let array = rt_array_new(3);
 

@@ -1,7 +1,7 @@
 # Caret local controller submission and inspection
 
 Caret's existing `run_main_args` dispatcher now consumes the local controller
-protocol through a real child-process boundary. It routes `orchestrator` to
+protocol through a real child-process boundary. Metadata actions route to
 `run_orchestrator_cli`, which validates the request, invokes the explicitly
 selected compiled controller once, and validates the structured SDN reply.
 This is a client for retained metadata. It does not start a runtime workload,
@@ -61,3 +61,45 @@ processes lose workspace/auth environment, V4 supports explicit cwd/env but
 requires a consumed owner-bearing lifecycle, and Linux static-ELF admission
 does not cover scripts or dynamic Claude/Kimi binaries. No orphan checked
 launch helper or mux V3 contract-only breadth is admitted here.
+
+## Separate V2 execution observation client
+
+Continued implementation adds `orchestrator_execution_client_v2.spl` and
+consumes it directly from `run_main_args`. Public arguments are:
+
+```
+orchestrator <absolute-controller> dispatch <state-root> <controller-id> <uid> <packet-file>
+orchestrator <absolute-controller> resume-execution <state-root> <controller-id> <uid> <packet-file>
+orchestrator <absolute-controller> inspect-execution <state-root> <controller-id> <uid>
+```
+
+REQ-CARET-EXECUTION-001: keep metadata V1 separate; validate exact V2 action,
+absolute paths and identities before invoking the controller. Dispatch/resume
+use its agreed 120000 ms transport budget; inspection uses 30000 ms. Both use
+262144-byte capture with saturation treated as uncertainty. These budgets are
+not signed effect deadlines, workload lifetime limits or governor admission
+latency guarantees. Explicit resume is a caller request, never an automatic
+timeout retry.
+
+REQ-CARET-EXECUTION-002: consume the shared
+`controller_execution_reply_decode_v2`, then the host-owned observation V2
+decoder for `runtime-observed`. Correlate controller/UID and nested host
+operation, plan and semantic request digests. A prepared report requires the
+exact five-field host operation-state schema. Preserve canonical nested scope
+and runtime facts; internal fence hashes remain distinct from native boot
+identities. The configured controller and host owners verify signed packet and
+grant authority; this client does not independently reverify those grants.
+
+REQ-CARET-EXECUTION-003: every post-invocation error retains the original UID as
+unconfirmed with reconciliation required. Output is the separate version-2
+`caret-orchestrator-execution-result`; `completionObserved` is always false,
+including an observed `exited` runtime phase. CLI exit 0 confirms correlated
+facts, exit 1 requests reconciliation and exit 2 reports preflight/usage error.
+Generic resolved dispatch cannot stand in for retained AgentSession image,
+task, workspace and installed CLI resolution or terminal binding.
+
+Seven focused scenarios and their manual are authored at the matching
+`orchestrator_execution_client_spec` system-spec paths. They exercise production
+client/codec source with synthetic observations and remain AUTHORED_UNRUN.
+Actual compiled Caret/controller invocation, signed host execution and full
+terminal acceptance remain separate required verification.

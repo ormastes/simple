@@ -587,6 +587,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
             # An entry equal to decl_enum_payload_unnamed_marker() means the
             # field was POSITIONAL. Absent (older flat AST) => all positional.
             val e_payload_field_names_flat = decl_get_param_names(idx)
+            val e_payload_defaults_flat = decl_get_param_defaults(idx)
             var e_vi = 0
             var e_type_offset = 0
             while e_vi < e_names.len():
@@ -606,6 +607,7 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                     e_payload_count = e_payload_counts[e_vi]
                 var e_variant_types: [Type] = []
                 var e_variant_field_names: [text] = []
+                var e_variant_field_defaults: [i64] = []
                 var e_variant_any_named = false
                 var e_ti = 0
                 while e_ti < e_payload_count and e_type_offset < e_payload_types_flat.len():
@@ -616,6 +618,10 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                     if e_field_name != decl_enum_payload_unnamed_marker():
                         e_variant_any_named = true
                     e_variant_field_names.push(e_field_name)
+                    var e_default_id: i64 = -1
+                    if e_type_offset < e_payload_defaults_flat.len():
+                        e_default_id = e_payload_defaults_flat[e_type_offset]
+                    e_variant_field_defaults.push(e_default_id)
                     e_type_offset = e_type_offset + 1
                     e_ti = e_ti + 1
                 # A variant whose payload fields were DECLARED with names
@@ -639,11 +645,15 @@ fn flat_ast_to_module(path: text) -> ParserModule:
                         # struct-field ParserField note above: the positional
                         # form misaligns the 12-field desugared struct and
                         # SIGSEGVs in lower_type.
+                        val e_default_id = e_variant_field_defaults[e_fi]
+                        var e_default = Expr(kind: ExprKind.NilLit, span: make_span())
+                        if e_default_id >= 0:
+                            e_default = convert_flat_expr(e_default_id)
                         e_variant_fields.push(ParserField(
                             name: e_fname,
                             type_: e_variant_types[e_fi],
-                            has_default: false,
-                            default: Expr(kind: ExprKind.NilLit, span: make_span()),
+                            has_default: e_default_id >= 0,
+                            default: e_default,
                             visibility: Visibility.Public,
                             is_public: true,
                             is_volatile: false,

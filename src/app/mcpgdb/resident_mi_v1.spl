@@ -1,0 +1,437 @@
+# Single-threaded resident MI process owner. No handles leave these arrays.
+use app.io.mod.{process_spawn_piped, process_write_stdin_some, process_read_stdout_result, process_piped_exit_status_v1, process_close_piped, thread_native_sleep_ms, time_now_monotonic_ms}
+use app.mcpgdb.native_runners_v1.{mcpgdb_bundle_path_v1, mcpgdb_bundle_validate_v1}
+use app.mcpgdb.resident_mi_value_v1.{resident_mi_field_v1}
+use app.mcpgdb.json_helpers.{js, jp, LB, RB}
+use std.nogc_async_mut.debug.remote.protocol.gdb_mi_parser.{GdbMiParser}
+
+pub struct ResidentMiReplyV1:
+    record: text
+    payload: text
+    console: text
+    state: text
+    stop: text
+    stop_revision: i64
+    inferior_pid: text
+
+struct ResidentMiRecordV1:
+    kind: text
+    token: i64
+    cls: text
+    payload: text
+
+var _rg_ids_v1: [text] = []
+var _rg_pids_v1: [i64] = []
+var _rg_tokens_v1: [i64] = []
+var _rg_buffers_v1: [text] = []
+var _rg_scan_v1: [i64] = []
+var _rg_console_v1: [text] = []
+var _rg_states_v1: [text] = []
+var _rg_stops_v1: [text] = []
+var _rg_stop_revisions_v1: [i64] = []
+var _rg_inferior_pids_v1: [text] = []
+var _rg_programs_v1: [text] = []
+var _rg_builds_v1: [text] = []
+var _rg_backends_v1: [text] = []
+var _rg_roots_v1: [text] = []
+var _rg_eof_v1: [bool] = []
+var _rg_exit_codes_v1: [i64] = []
+var _rg_errors_v1: [text] = []
+var _rg_policy_scopes_v1: [bool] = []
+var _rg_selected_v1: text = ""
+var _rg_serial_v1: i64 = 0
+
+pub fn resident_mi_quote_v1(value: text) -> Result<text, text>:
+    if value.len() > 65536 or value.contains("\n") or value.contains("\r") or value.contains("\u{0}"):
+        return Err("GDB argument contains a control character or exceeds its bound")
+    var position = 0
+    while position < value.len():
+        if value.byte_at(position) < 32 or value.byte_at(position) == 127:
+            return Err("GDB argument contains a control character")
+        position = position + 1
+    Ok(js(value))
+
+fn resident_mi_record_v1(line: text) -> ResidentMiRecordV1:
+    val raw = line.trim()
+    if raw == "" or raw == "(gdb)": return ResidentMiRecordV1(kind: "prompt", token: -1, cls: "", payload: "")
+    val first = raw.substring(0, 1)
+    if first == "~" or first == "@" or first == "&":
+        return ResidentMiRecordV1(kind: "stream", token: -1, cls: first, payload: GdbMiParser.unescape_string(raw.substring(1)))
+    var position = 0
+    while position < raw.len() and raw.byte_at(position) >= 48 and raw.byte_at(position) <= 57:
+        position = position + 1
+    var token = -1
+    var kind = "unknown"
+    var start = 0
+    if position < raw.len() and raw.substring(position, position + 1) == "^":
+        token = if position > 0: raw.substring(0, position).to_int() else: -1
+        kind = "result"
+        start = position + 1
+    elif first == "*" or first == "=" or first == "+":
+        kind = first
+        start = 1
+    else:
+        return ResidentMiRecordV1(kind: "unknown", token: -1, cls: "", payload: raw)
+    val comma = GdbMiParser.find_char(raw, ",", start as i32)
+    if comma < 0: return ResidentMiRecordV1(kind: kind, token: token, cls: raw.substring(start), payload: "")
+    ResidentMiRecordV1(kind: kind, token: token, cls: raw.substring(start, comma as i64), payload: raw.substring(comma as i64 + 1))
+
+fn resident_newline_v1(value: text, start: i64) -> i64:
+    var position = start
+    while position < value.len():
+        if value.substring(position, position + 1) == "\n": return position
+        position = position + 1
+    -1
+
+fn resident_take_line_v1(index: i64) -> text?:
+    val buffer = _rg_buffers_v1[index]
+    val newline = resident_newline_v1(buffer, _rg_scan_v1[index])
+    if newline < 0:
+        _rg_scan_v1[index] = buffer.len()
+        return nil
+    _rg_scan_v1[index] = 0
+    _rg_buffers_v1[index] = buffer.substring(newline + 1)
+    Some(buffer.substring(0, newline).trim())
+
+fn resident_read_line_v1(index: i64) -> Result<text?, text>:
+    val ready = resident_take_line_v1(index)
+    if ready != nil: return Ok(ready)
+    if _rg_eof_v1[index]: return Ok(nil)
+    match process_read_stdout_result(_rg_pids_v1[index]):
+        Ok(chunk):
+            if chunk != nil:
+                val value = chunk ?? ""
+                if _rg_buffers_v1[index].len() + value.len() > 1048576:
+                    return Err("resident GDB MI framing bound exceeded")
+                _rg_buffers_v1[index] = _rg_buffers_v1[index] + value
+        Err(reason):
+            if reason != "process_stdout_eof": return Err(reason)
+            _rg_eof_v1[index] = true
+            if _rg_buffers_v1[index].trim() != "" and _rg_buffers_v1[index].trim() != "(gdb)":
+                return Err("resident GDB MI truncated record at EOF")
+            _rg_buffers_v1[index] = ""
+    Ok(resident_take_line_v1(index))
+
+fn resident_observe_v1(index: i64, record: ResidentMiRecordV1) -> Result<bool, text>:
+    if record.kind == "stream" or record.kind == "unknown":
+        if _rg_console_v1[index].len() + record.payload.len() + 1 > 1048576:
+            return Err("resident GDB MI console capture bound exceeded")
+        _rg_console_v1[index] = _rg_console_v1[index] + record.payload + "\n"
+    if record.kind == "*" and record.cls == "running": _rg_states_v1[index] = "running"
+    if record.kind == "*" and record.cls == "stopped":
+        _rg_stops_v1[index] = record.payload
+        _rg_stop_revisions_v1[index] = _rg_stop_revisions_v1[index] + 1
+        val reason = resident_mi_field_v1(record.payload, "reason")
+        _rg_states_v1[index] = if reason.starts_with("exited"): "exited" else: "stopped"
+    if record.kind == "=" and record.cls == "thread-group-started":
+        _rg_inferior_pids_v1[index] = resident_mi_field_v1(record.payload, "pid")
+    if record.kind == "=" and record.cls == "thread-group-exited": _rg_states_v1[index] = "exited"
+    Ok(true)
+
+fn resident_abort_v1(index: i64, reason: text) -> text:
+    _rg_errors_v1[index] = reason
+    val pid = _rg_pids_v1[index]
+    if pid <= 0: return reason
+    val closed = process_close_piped(pid)
+    if closed:
+        _rg_pids_v1[index] = 0
+        _rg_states_v1[index] = "failed"
+        _rg_buffers_v1[index] = ""
+    else:
+        _rg_states_v1[index] = "cleanup_failed"
+    reason + "; owned process closed=" + str(closed)
+
+fn resident_pump_v1(index: i64) -> Result<bool, text>:
+    var records = 0
+    while records < 256:
+        val line = match resident_read_line_v1(index):
+            Ok(value): value
+            Err(reason): return Err(resident_abort_v1(index, reason))
+        if line == nil: return Ok(true)
+        val record = resident_mi_record_v1(line ?? "")
+        match resident_observe_v1(index, record):
+            Ok(_): pass
+            Err(reason): return Err(resident_abort_v1(index, reason))
+        if record.kind == "result": return Err(resident_abort_v1(index, "unsolicited or late GDB MI result token"))
+        records = records + 1
+    Err(resident_abort_v1(index, "resident MI pending record bound exceeded"))
+
+pub fn resident_gdb_index_v1(requested: text) -> Result<i64, text>:
+    val wanted = if requested != "": requested else: _rg_selected_v1
+    var index = 0
+    while index < _rg_ids_v1.len():
+        if _rg_ids_v1[index] == wanted and _rg_states_v1[index] != "closed": return Ok(index)
+        index = index + 1
+    Err("session not found: " + wanted)
+
+pub fn resident_gdb_command_v1(index: i64, command: text, wait_stop: bool, deadline_ms: i64 = -1) -> Result<ResidentMiReplyV1, text>:
+    if index < 0 or index >= _rg_pids_v1.len() or _rg_pids_v1[index] <= 0:
+        return Err("resident GDB session has no live process owner")
+    if _rg_states_v1[index] == "cleanup_failed": return Err("resident GDB cleanup debt must be closed first")
+    if command.len() > 65536 or command.contains("\n") or command.contains("\r") or command.contains("\u{0}"):
+        return Err("GDB MI command contains an invalid frame boundary")
+    val started = time_now_monotonic_ms()
+    if started < 0: return Err(resident_abort_v1(index, "resident GDB command clock unavailable"))
+    val deadline = if deadline_ms >= 0: deadline_ms else: started + 6000
+    if started >= deadline: return Err(resident_abort_v1(index, "resident GDB command deadline expired"))
+    _rg_console_v1[index] = ""
+    resident_pump_v1(index)?
+    if _rg_eof_v1[index]: return Err(resident_abort_v1(index, "resident GDB exited before command"))
+    if _rg_tokens_v1[index] >= 1000000000: return Err(resident_abort_v1(index, "GDB MI token budget exhausted"))
+    val token = _rg_tokens_v1[index] + 1
+    _rg_tokens_v1[index] = token
+    val before_stop = _rg_stop_revisions_v1[index]
+    val frame = str(token) + command + "\n"
+    var delivered = 0
+    var reply = ""
+    var payload = ""
+    var tick = 0
+    while tick < 300 and time_now_monotonic_ms() < deadline:
+        if delivered < frame.len():
+            val written = process_write_stdin_some(_rg_pids_v1[index], frame, delivered, 4096)
+            if written < 0 or written > frame.len() - delivered:
+                return Err(resident_abort_v1(index, "resident GDB MI stdin delivery failed"))
+            delivered = delivered + written
+        var records = 0
+        while records < 64 and time_now_monotonic_ms() < deadline:
+            val line = match resident_read_line_v1(index):
+                Ok(value): value
+                Err(reason): return Err(resident_abort_v1(index, reason))
+            if line == nil: break
+            val raw = line ?? ""
+            val record = resident_mi_record_v1(raw)
+            match resident_observe_v1(index, record):
+                Ok(_): pass
+                Err(reason): return Err(resident_abort_v1(index, reason))
+            if record.kind == "result":
+                if delivered != frame.len():
+                    return Err(resident_abort_v1(index, "resident GDB MI result before complete stdin delivery"))
+                if record.token != token or reply != "":
+                    return Err(resident_abort_v1(index, "resident GDB MI response token mismatch"))
+                if record.cls == "error":
+                    val message = resident_mi_field_v1(record.payload, "msg")
+                    val detail = if message != "": message else: record.payload
+                    return Err("GDB MI command failed: " + detail)
+                if not ["done", "running", "connected", "exit"].contains(record.cls):
+                    return Err(resident_abort_v1(index, "resident GDB MI result class invalid"))
+                reply = raw
+                payload = record.payload
+                if record.cls == "running" and _rg_stop_revisions_v1[index] == before_stop: _rg_states_v1[index] = "running"
+            records = records + 1
+        if reply != "" and (not wait_stop or _rg_stop_revisions_v1[index] > before_stop):
+            return Ok(ResidentMiReplyV1(record: reply, payload: payload, console: _rg_console_v1[index], state: _rg_states_v1[index], stop: _rg_stops_v1[index], stop_revision: _rg_stop_revisions_v1[index], inferior_pid: _rg_inferior_pids_v1[index]))
+        if _rg_eof_v1[index]: return Err(resident_abort_v1(index, "resident GDB EOF before complete command outcome"))
+        thread_native_sleep_ms(10)
+        tick = tick + 1
+    if delivered != frame.len():
+        return Err(resident_abort_v1(index, "resident GDB MI stdin delivery deadline expired"))
+    if reply != "" and wait_stop and ["running", "exited"].contains(_rg_states_v1[index]):
+        return Ok(ResidentMiReplyV1(record: reply, payload: payload, console: _rg_console_v1[index], state: _rg_states_v1[index], stop: if _rg_stop_revisions_v1[index] > before_stop: _rg_stops_v1[index] else: "", stop_revision: _rg_stop_revisions_v1[index], inferior_pid: _rg_inferior_pids_v1[index]))
+    Err(resident_abort_v1(index, "resident GDB MI command-result deadline expired"))
+
+fn resident_policy_abort_v1(index: i64, reason: text) -> text:
+    if _rg_pids_v1[index] <= 0 or _rg_states_v1[index] == "cleanup_failed": return reason
+    resident_abort_v1(index, reason)
+
+fn resident_policy_read_v1(index: i64, name: text, deadline: i64) -> Result<text, text>:
+    val reply = match resident_gdb_command_v1(index, "-gdb-show " + name, false, deadline):
+        Ok(value): value
+        Err(reason): return Err(resident_policy_abort_v1(index, "GDB policy cannot be observed: " + name + ": " + reason))
+    val value = resident_mi_field_v1(reply.payload, "value")
+    if value != "on" and value != "off":
+        return Err(resident_policy_abort_v1(index, "GDB policy value unsupported: " + name))
+    Ok(value)
+
+fn resident_policy_set_v1(index: i64, name: text, value: text, deadline: i64) -> Result<bool, text>:
+    match resident_gdb_command_v1(index, "-gdb-set " + name + " " + value, false, deadline):
+        Ok(_): pass
+        Err(reason): return Err(resident_policy_abort_v1(index, "GDB policy cannot be enforced: " + name + ": " + reason))
+    if resident_policy_read_v1(index, name, deadline)? != value:
+        return Err(resident_policy_abort_v1(index, "GDB policy verification failed: " + name))
+    Ok(true)
+
+fn resident_scoped_command_inner_v1(index: i64, command: text, wait_stop: bool, inspection: bool) -> Result<ResidentMiReplyV1, text>:
+    val names = ["may-call-functions", "may-write-memory", "may-write-registers"]
+    val started = time_now_monotonic_ms()
+    if started < 0: return Err(resident_abort_v1(index, "GDB policy clock unavailable"))
+    val deadline = started + 6000
+    var saved: [text] = []
+    for name in names:
+        saved.push(resident_policy_read_v1(index, name, deadline)?)
+    var position = 0
+    for name in names:
+        # Inspection forbids inferior calls and writes, including macro effects.
+        # An explicitly authorized semantic expression may call functions but
+        # never silently overrides an existing no-write policy.
+        val value = if inspection: "off" else: if position == 0: "on" else: saved[position]
+        resident_policy_set_v1(index, name, value, deadline)?
+        position = position + 1
+    val outcome = resident_gdb_command_v1(index, command, wait_stop, deadline)
+    if _rg_pids_v1[index] <= 0 or _rg_states_v1[index] == "cleanup_failed": return outcome
+    position = 0
+    for name in names:
+        # Restore exactly what was observed, not an assumed default ON.
+        resident_policy_set_v1(index, name, saved[position], deadline)?
+        position = position + 1
+    outcome
+
+pub fn resident_gdb_scoped_command_v1(index: i64, command: text, wait_stop: bool, inspection: bool) -> Result<ResidentMiReplyV1, text>:
+    if index < 0 or index >= _rg_policy_scopes_v1.len(): return Err("resident GDB session unavailable")
+    if _rg_policy_scopes_v1[index]: return Err("resident GDB policy scope already active")
+    # The frontend's serialized request thread is the sole native process owner.
+    # A per-session guard additionally refuses reentrant scopes.
+    _rg_policy_scopes_v1[index] = true
+    val outcome = resident_scoped_command_inner_v1(index, command, wait_stop, inspection)
+    _rg_policy_scopes_v1[index] = false
+    outcome
+
+pub fn resident_gdb_create_v1(backend: text, root: text) -> Result<text, text>:
+    if not ["gdb", "openocd_gdb", "t32_gdb"].contains(backend): return Err("resident Windows backend unsupported: " + backend)
+    val directory = resident_mi_quote_v1(root)?
+    val binary = mcpgdb_bundle_path_v1("gdb")?
+    var index = 0
+    while index < _rg_pids_v1.len() and _rg_pids_v1[index] > 0: index = index + 1
+    if index >= 8: return Err("resident GDB session limit reached")
+    if _rg_serial_v1 >= 1000000000: return Err("resident GDB session identity budget exhausted")
+    _rg_serial_v1 = _rg_serial_v1 + 1
+    val id = "win-gdb-" + str(_rg_serial_v1)
+    if index == _rg_ids_v1.len():
+        _rg_ids_v1.push(id)
+        _rg_pids_v1.push(0)
+        _rg_tokens_v1.push(0)
+        _rg_buffers_v1.push("")
+        _rg_scan_v1.push(0)
+        _rg_console_v1.push("")
+        _rg_states_v1.push("created")
+        _rg_stops_v1.push("")
+        _rg_stop_revisions_v1.push(0)
+        _rg_inferior_pids_v1.push("")
+        _rg_programs_v1.push("")
+        _rg_builds_v1.push("")
+        _rg_backends_v1.push(backend)
+        _rg_roots_v1.push(root)
+        _rg_eof_v1.push(false)
+        _rg_exit_codes_v1.push(-1)
+        _rg_errors_v1.push("")
+        _rg_policy_scopes_v1.push(false)
+    else:
+        _rg_ids_v1[index] = id
+        _rg_tokens_v1[index] = 0
+        _rg_buffers_v1[index] = ""
+        _rg_scan_v1[index] = 0
+        _rg_console_v1[index] = ""
+        _rg_states_v1[index] = "created"
+        _rg_stops_v1[index] = ""
+        _rg_stop_revisions_v1[index] = 0
+        _rg_inferior_pids_v1[index] = ""
+        _rg_programs_v1[index] = ""
+        _rg_builds_v1[index] = ""
+        _rg_backends_v1[index] = backend
+        _rg_roots_v1[index] = root
+        _rg_eof_v1[index] = false
+        _rg_exit_codes_v1[index] = -1
+        _rg_errors_v1[index] = ""
+        _rg_policy_scopes_v1[index] = false
+    val pid = process_spawn_piped(binary, ["--quiet", "--nx", "--interpreter=mi2"])
+    if pid <= 0:
+        _rg_states_v1[index] = "failed"
+        return Err("resident GDB native process spawn failed")
+    _rg_pids_v1[index] = pid
+    _rg_states_v1[index] = "idle"
+    for command in ["-gdb-set pagination off", "-gdb-set confirm off", "-gdb-set mi-async on", "-gdb-set charset UTF-8", "-environment-cd " + directory]:
+        match resident_gdb_command_v1(index, command, false):
+            Ok(_): pass
+            Err(reason): return Err(resident_abort_v1(index, reason))
+    val policy_started = time_now_monotonic_ms()
+    if policy_started < 0: return Err(resident_abort_v1(index, "GDB policy clock unavailable"))
+    resident_policy_set_v1(index, "may-call-functions", "off", policy_started + 6000)?
+    _rg_selected_v1 = id
+    Ok(id)
+
+pub fn resident_gdb_id_v1(index: i64) -> text: _rg_ids_v1[index]
+pub fn resident_gdb_retained_v1(index: i64) -> bool: _rg_pids_v1[index] > 0
+pub fn resident_gdb_backend_v1(index: i64) -> text: _rg_backends_v1[index]
+pub fn resident_gdb_root_v1(index: i64) -> text: _rg_roots_v1[index]
+pub fn resident_gdb_program_v1(index: i64) -> text: _rg_programs_v1[index]
+pub fn resident_gdb_build_v1(index: i64) -> text: _rg_builds_v1[index]
+pub fn resident_gdb_set_program_v1(index: i64, program: text): _rg_programs_v1[index] = program
+pub fn resident_gdb_set_build_v1(index: i64, build: text): _rg_builds_v1[index] = build
+
+pub fn resident_gdb_state_v1(index: i64) -> Result<text, text>:
+    if _rg_pids_v1[index] <= 0: return Err("resident GDB session process has retired")
+    resident_pump_v1(index)?
+    if _rg_eof_v1[index]: return Err(resident_abort_v1(index, "resident GDB process has exited"))
+    Ok(_rg_states_v1[index])
+
+pub fn resident_gdb_select_v1(id: text) -> Result<text, text>:
+    val index = resident_gdb_index_v1(id)?
+    if _rg_pids_v1[index] <= 0: return Err("resident GDB session process has retired")
+    _rg_selected_v1 = _rg_ids_v1[index]
+    Ok(_rg_selected_v1)
+
+pub fn resident_gdb_current_v1() -> text: _rg_selected_v1
+
+pub fn resident_gdb_ids_v1() -> [text]:
+    var ids: [text] = []
+    var index = 0
+    while index < _rg_ids_v1.len():
+        if _rg_states_v1[index] != "closed": ids.push(_rg_ids_v1[index])
+        index = index + 1
+    ids
+
+pub fn resident_gdb_list_v1() -> text:
+    var observed = 0
+    while observed < _rg_pids_v1.len():
+        if _rg_pids_v1[observed] > 0:
+            match resident_gdb_state_v1(observed):
+                Ok(_): pass
+                Err(reason): _rg_errors_v1[observed] = reason
+        observed = observed + 1
+    var values: [text] = []
+    var index = 0
+    while index < _rg_ids_v1.len():
+        if _rg_states_v1[index] != "closed":
+            values.push(LB() + jp("session_id", js(_rg_ids_v1[index])) + "," + jp("backend", js(_rg_backends_v1[index])) + "," + jp("state", js(_rg_states_v1[index])) + "," + jp("failure", js(_rg_errors_v1[index])) + "," + jp("workspace_root", js(_rg_roots_v1[index])) + "," + jp("current", if _rg_selected_v1 == _rg_ids_v1[index]: "true" else: "false") + RB())
+        index = index + 1
+    "[" + values.join(",") + "]"
+
+pub fn resident_gdb_close_v1(index: i64) -> Result<text, text>:
+    var failure = _rg_errors_v1[index]
+    var actual = _rg_exit_codes_v1[index]
+    if _rg_pids_v1[index] > 0:
+        if _rg_states_v1[index] != "cleanup_failed":
+            match resident_gdb_command_v1(index, "-gdb-exit", false):
+                Ok(_): pass
+                Err(reason): failure = reason
+        var tick = 0
+        while _rg_pids_v1[index] > 0 and tick < 300:
+            match resident_read_line_v1(index):
+                Ok(_): pass
+                Err(reason): failure = reason
+            if _rg_eof_v1[index]:
+                match process_piped_exit_status_v1(_rg_pids_v1[index]):
+                    Ok(code):
+                        if code != nil:
+                            actual = code ?? -1
+                            break
+                    Err(reason):
+                        failure = reason
+                        break
+            thread_native_sleep_ms(10)
+            tick = tick + 1
+        if _rg_pids_v1[index] > 0:
+            if not process_close_piped(_rg_pids_v1[index]):
+                _rg_states_v1[index] = "cleanup_failed"
+                return Err("resident GDB cleanup failed; process owner retained")
+            _rg_pids_v1[index] = 0
+        if actual != 0 and failure == "": failure = "resident GDB close lacks observed EOF/OS exit0: " + str(actual)
+    _rg_states_v1[index] = "closed"
+    _rg_buffers_v1[index] = ""
+    _rg_exit_codes_v1[index] = actual
+    if _rg_selected_v1 == _rg_ids_v1[index]: _rg_selected_v1 = ""
+    match mcpgdb_bundle_validate_v1(true):
+        Ok(_): pass
+        Err(reason): return Err(reason)
+    if failure == "" and actual != 0: failure = "resident GDB had no observed normal exit: " + str(actual)
+    if failure != "": return Err(failure)
+    Ok(LB() + jp("closed", js(_rg_ids_v1[index])) + "," + jp("process_exit_code", str(actual)) + "," + jp("stdout_eof", if _rg_eof_v1[index]: "true" else: "false") + RB())

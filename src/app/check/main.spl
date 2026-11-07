@@ -7,6 +7,9 @@ use compiler.core.parser.{parse_module, parser_has_errors, parser_get_errors}
 use compiler.core.ast.{ast_reset}
 use compiler.core.types.{reset_all_pools}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
+use compiler.frontend.core.lexer_struct.{core_token_text_intern_reset}
+use compiler.frontend.retained_parse_owners_v1.{frontend_promote_retained_parse_owners_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_pause}
 use app.check.sspec_source.{check_sspec_guidance}
 use app.check.targets.{expand_check_targets}
 use app.check.check_options.{check_option_error}
@@ -252,20 +255,37 @@ fn concurrency_api_lint_errors(source: text) -> [text]:
         msgs.push("error[E-PAR-006]: multicore_green_spawn_sliced closure must not capture shared mutable state")
     msgs
 
+# A failed retained-owner boundary cannot safely serve a later file.
+var checker_retained_owner_poisoned_v1: bool = false
+
+fn checker_scope_owner_poisoned_v1() -> bool:
+    checker_retained_owner_poisoned_v1
+
 fn checker_begin_file_scope() -> bool:
-    # Native module globals can start nil. Materialize reusable parser arenas
-    # before allocations become owned by the per-file transient scope.
+    if checker_retained_owner_poisoned_v1: return false
     reset_all_pools()
     ast_reset()
-    unsafe(capabilities: [ffi]): rt_transient_array_scope_begin()
+    val began = unsafe(capabilities: [ffi]): rt_transient_array_scope_begin()
+    if not began: checker_retained_owner_poisoned_v1 = true
+    began
 
-fn checker_end_file_scope() -> bool:
-    # Drop source roots first, reclaim the file-owned heap second, then rebuild
-    # process-lifetime arenas outside the ended scope for the next file.
-    lexer_release_parse_source_globals()
+fn checker_end_file_scope(parser_entered: bool = true) -> bool:
+    if checker_retained_owner_poisoned_v1: return false
+    val paused = transient_scope_pause()
+    # Do not traverse global roots unless pause established the live owner.
+    val retained = if paused: frontend_promote_retained_parse_owners_v1(parser_entered) else: false
     val ended = unsafe(capabilities: [ffi]): rt_transient_array_scope_end()
+    if not ended:
+        checker_retained_owner_poisoned_v1 = true
+        return false
+    lexer_release_parse_source_globals()
+    # Replace scope-owned token text before any subsequent lexer lookup.
+    core_token_text_intern_reset()
+    if not paused or not retained:
+        checker_retained_owner_poisoned_v1 = true
+        return false
     ast_reset()
-    ended
+    true
 
 fn check_one(path: text, as_json: bool) -> i64:
     """Check a single file. Published two-argument entry point.
@@ -292,6 +312,10 @@ fn check_one_profiled(path: text, as_json: bool, phase_profile: bool, syntax_onl
     failures
 
 fn check_one_full(path: text, as_json: bool, phase_profile: bool, syntax_only: bool, done: i64, total: i64) -> (i64, i64):
+    # Allocate the legacy failure payload before this file can own allocations.
+    val ownership_failure: (i64, i64) = (1, 0)
+    if checker_retained_owner_poisoned_v1: return ownership_failure
+    var parser_entered = false
     var warning_count = 0
     var file_started_us: i64 = 0
     var phase_started_us: i64 = 0
@@ -306,10 +330,7 @@ fn check_one_full(path: text, as_json: bool, phase_profile: bool, syntax_only: b
             help: "check that the path exists and is readable"), as_json)
         return (1, 0)
     if not checker_begin_file_scope():
-        if phase_profile:
-            val _marked = check_phase_mark(true, "scope_setup", phase_started_us, path, done, total, "failed")
-        emit_check_message(path, "checker transient parse scope unavailable", as_json)
-        return (1, 0)
+        return ownership_failure
     if phase_profile:
         phase_started_us = check_phase_mark(true, "scope_setup", phase_started_us, path, done, total, "running")
 
@@ -322,6 +343,7 @@ fn check_one_full(path: text, as_json: bool, phase_profile: bool, syntax_only: b
         emit_check_message(path, sspec_guidance, as_json)
         failure_count = 1
     else:
+        parser_entered = true
         parse_module(source, path)
         if phase_profile:
             phase_started_us = check_phase_mark(true, "parse", phase_started_us, path, done, total, "running")
@@ -367,9 +389,9 @@ fn check_one_full(path: text, as_json: bool, phase_profile: bool, syntax_only: b
                         emit_check_message(path, "semantic check incomplete", true)
                 failure_count = if semantic_result.diagnostics.len() > 0: semantic_result.diagnostics.len() else: 1
 
-    if not checker_end_file_scope():
-        emit_check_message(path, "checker transient parse scope teardown failed", as_json)
-        failure_count = failure_count + 1
+    if not checker_end_file_scope(parser_entered):
+        # No late formatting or source-invalid record under unknown ownership.
+        return ownership_failure
     if phase_profile:
         val terminal = if failure_count == 0: "succeeded" else: "failed"
         val _teardown_mark = check_phase_mark(true, "scope_teardown", phase_started_us, path, done, total, terminal)
@@ -414,6 +436,7 @@ fn main() -> i64:
     for file in files:
         checked = checked + 1
         val (failed, file_warnings) = check_one_full(file, as_json, phase_profile, syntax_only, checked, files.len())
+        if checker_retained_owner_poisoned_v1: return 2
         if file_warnings > 0:
             warnings_total = warnings_total + file_warnings
             files_with_warnings = files_with_warnings + 1

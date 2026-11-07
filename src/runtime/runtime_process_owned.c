@@ -3396,6 +3396,7 @@ typedef struct Pov4Slot {
     int busy;
     int frozen;
     int cleanup_only;
+    int64_t reservation_token; /* Reserved owners reject legacy ticket access. */
     uint64_t request_high, request_low, ticket_high, ticket_low;
     RtOwnedProcessTokenV2 core;
     int64_t words[POV4_WORDS];
@@ -3413,6 +3414,28 @@ typedef struct Pov4Slot {
 
 static Pov4Slot pov4_slots[POV4_SLOTS];
 static pthread_mutex_t pov4_slots_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Reservation authority is delivered before any child side effect. Tokens are
+ * monotonically minted and never reused, including when a slot is recycled. */
+typedef struct Pov4Reservation {
+    int64_t token;
+    int busy;
+    int state; /* 1 reserved, 2 attempting, 3 no child, 4 owned, 5 acked */
+    uint32_t owner_index;
+    int64_t executable_pin, cwd_pin;
+    uint8_t request_digest[32];
+} Pov4Reservation;
+static Pov4Reservation pov4_reservations[POV4_SLOTS];
+static uint64_t pov4_reservation_sequence;
+static pthread_mutex_t pov4_reservations_lock = PTHREAD_MUTEX_INITIALIZER;
+#ifdef RT_PROCESS_OBSERVATION_V4_TESTING
+/* Compile-time-only controls; no production API/environment fault knob. */
+static int pov4_reservation_test_retry_collect;
+static int pov4_reservation_test_drop_start;
+static int pov4_reservation_test_corrupt_observe;
+static int pov4_reservation_test_corrupt_ack;
+#endif
+
 
 static void pov4_words_base(int64_t words[POV4_WORDS], int kind, int status,
                             int64_t request_started_ns, int64_t prepared_ns) {
@@ -3549,7 +3572,7 @@ static Pov4Slot* pov4_acquire_ticket(SplArray* ticket, uint32_t* index) {
     Pov4Slot* found = NULL;
     for (uint32_t i = 0; i < POV4_SLOTS; i++) {
         Pov4Slot* slot = &pov4_slots[i];
-        if (slot->active && slot->request_high == (uint64_t)rh &&
+        if (slot->active && !slot->reservation_token && slot->request_high == (uint64_t)rh &&
             slot->request_low == (uint64_t)rl && slot->ticket_high == (uint64_t)th &&
             slot->ticket_low == (uint64_t)tl) {
             if (!slot->busy) { slot->busy = 1; found = slot; *index = i; }
@@ -3885,6 +3908,15 @@ static SplArray* pov4_freeze_terminal(Pov4Slot* owner) {
         return NULL;
     }
     RtOwnedProcessResultV2 result;
+#ifdef RT_PROCESS_OBSERVATION_V4_TESTING
+    if (owner->reservation_token && pov4_reservation_test_retry_collect > 0) {
+        --pov4_reservation_test_retry_collect;
+        pov4_tuple4_free(tuple);
+        memcpy(owner->words, prior_words, sizeof(prior_words));
+        errno = EAGAIN;
+        return NULL;
+    }
+#endif
     int collected = owned_collect_v2_core(owner->core, &result);
     if (!collected && !(result.reaped && result.runtime_error != EAGAIN &&
                          result.runtime_error != EBUSY)) {
@@ -3905,7 +3937,7 @@ static SplArray* pov4_freeze_terminal(Pov4Slot* owner) {
 }
 
 static void pov4_abandon_unpublished(uint32_t index) {
-    if (index >= POV4_SLOTS) return;
+    if (index >= POV4_SLOTS || pov4_slots[index].reservation_token) return;
     Pov4Slot* owner = &pov4_slots[index];
     RtOwnedSlot* core = owned_token_acquire(owner->core, NULL);
     if (core) {
@@ -4074,7 +4106,7 @@ SplArray* rt_process_observation_v4_start_value(SplArray* binding) {
 static SplArray* pov4_start_pinned_impl(
     int64_t executable_handle, int64_t cwd_handle, SplArray* binding,
     SplArray* atomic_input, SplArray* expected_input_digest,
-    int atomic_input_mode) {
+    int atomic_input_mode, Pov4Reservation* reservation) {
     int64_t started = owned_now_ns(); Pov4Request request;
     if (started < 0)
         return pov4_rejected(EIO, POV4_FAIL_ADMISSION,
@@ -4082,6 +4114,11 @@ static SplArray* pov4_start_pinned_impl(
     if (!pov4_request_from_value(binding, &request))
         return pov4_rejected(errno ? errno : EPROTO, POV4_FAIL_ADMISSION,
             POV4_REASON_INVALID_SCHEMA, started, 0, NULL);
+    if (reservation && memcmp(reservation->request_digest, request.request_digest, 32) != 0) {
+        pov4_request_free(&request);
+        return pov4_rejected(ESTALE, POV4_FAIL_ADMISSION, POV4_REASON_BINDING,
+                            started, 0, NULL);
+    }
     if (atomic_input_mode) {
         uint8_t expected_digest[32];
         if (!expected_input_digest ||
@@ -4206,6 +4243,13 @@ static SplArray* pov4_start_pinned_impl(
         pov4_request_free(&request); return rejected;
     }
     Pov4Slot* owner = &pov4_slots[index];
+    if (reservation) {
+        /* Binding is installed before allocations and, critically, before spawn. */
+        pthread_mutex_lock(&pov4_slots_lock);
+        owner->reservation_token = reservation->token;
+        pthread_mutex_unlock(&pov4_slots_lock);
+        reservation->owner_index = index;
+    }
     owner->atomic_input_bound = atomic_input_mode;
     owner->atomic_input_len = request.atomic_input_len;
     if (atomic_input_mode)
@@ -4264,6 +4308,7 @@ static SplArray* pov4_start_pinned_impl(
             POV4_REASON_PROVIDER,started,1,&request);
         pov4_request_free(&request); return rejected;
     }
+    if (reservation) reservation->state = 4;
     RtOwnedSlot* core = owned_token_acquire(owner->core, NULL);
     int64_t process_started=core?core->process_started_ns:-1;
     int64_t exec_confirmed=core?core->exec_confirmed_ns:-1;
@@ -4329,15 +4374,22 @@ static SplArray* pov4_start_pinned_impl(
     if(!pov4_tuple4_replace_words(start_result,owner->words)) {
         pov4_tuple4_free(start_result); start_result=NULL;
     }
+#ifdef RT_PROCESS_OBSERVATION_V4_TESTING
+    if (reservation && start_result && pov4_reservation_test_drop_start > 0) {
+        --pov4_reservation_test_drop_start;
+        pov4_tuple4_free(start_result);
+        start_result = NULL;
+    }
+#endif
     pov4_request_free(&request);
-    if (!start_result) pov4_abandon_unpublished(index);
+    if (!start_result && !reservation) pov4_abandon_unpublished(index);
     return start_result;
 }
 
 SplArray* rt_process_observation_v4_start_pinned_value(
     int64_t executable_handle, int64_t cwd_handle, SplArray* binding) {
     return pov4_start_pinned_impl(executable_handle, cwd_handle,
-        binding, NULL, NULL, 0);
+        binding, NULL, NULL, 0, NULL);
 }
 
 SplArray* rt_process_inspection_v1_start_pinned_value(
@@ -4352,8 +4404,10 @@ SplArray* rt_process_inspection_v1_start_pinned_value(
 #endif
     return pov4_start_pinned_impl(
         executable_handle, cwd_handle, binding, atomic_input,
-        expected_input_digest, 1);
+        expected_input_digest, 1, NULL);
 }
+
+#include "runtime_process_observation_reserved_v4_impl.h"
 
 /* This companion fact is issued only while the same opaque V4 ticket remains
  * live. Its request digest includes the V4 binding and copied input digest. */
@@ -6399,6 +6453,28 @@ SplArray* rt_process_observation_v4_cwd_digest_value(int64_t handle) {
 }
 int rt_process_observation_v4_close_cwd_value(int64_t handle) { (void)handle; return 0; }
 #endif
+int64_t rt_process_observation_v4_reserve_value(void) { return -ENOTSUP; }
+int64_t rt_process_observation_v4_reserved_matches_value(int64_t token,
+    int64_t rh, int64_t rl, int64_t th, int64_t tl) {
+    (void)token; (void)rh; (void)rl; (void)th; (void)tl; return -ENOTSUP;
+}
+int64_t rt_process_observation_v4_reserved_state_value(int64_t token) {
+    (void)token; return -ENOTSUP;
+}
+int64_t rt_process_observation_v4_reserved_start_pinned_value(
+    int64_t token, int64_t executable, int64_t cwd, SplArray* binding) {
+    (void)token; (void)executable; (void)cwd; (void)binding; return -ENOTSUP;
+}
+SplArray* rt_process_observation_v4_reserved_observe_value(
+    int64_t token, int64_t wait_ns, int64_t retire) {
+    (void)token; (void)wait_ns; (void)retire; return NULL;
+}
+SplArray* rt_process_observation_v4_reserved_ack_value(int64_t token, SplArray* digest) {
+    (void)token; (void)digest; return NULL;
+}
+int64_t rt_process_observation_v4_reserved_confirm_release_value(int64_t token) {
+    (void)token; return -ENOTSUP;
+}
 SplArray* rt_process_observation_v4_start_value(SplArray* binding) {
     (void)binding; return SIMPLE_RT_NONNULL("rt_process_observation_v4_start_value", pov4_unavailable_tuple());
 }
@@ -6448,4 +6524,37 @@ SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket, SplArray
 
 #if !defined(RT_PROCESS_OWNED_CORE_ONLY)
 #include "runtime_sosix_darwin_snapshot_v1_impl.h"
+#endif
+
+/* Group-stream broker mode is explicitly unavailable outside its admitted
+ * Linux provider. Keep generic process/SOSIX facades link-complete without
+ * fabricating a lease or altering legacy Windows pipe ownership. */
+#if !defined(__linux__) || defined(RT_PROCESS_OWNED_CORE_ONLY)
+static SplArray* group_stream_unavailable_v2(int count) {
+    SplArray* values=rt_array_new((uint64_t)count);
+    if(!values)return NULL;
+    for(int i=0;i<count;i++) {
+        int64_t word=count==2?(i==1?ENOTSUP:0):(i==0?ENOTSUP:0);
+        if(!rt_array_push(values,rt_value_int(word))){rt_array_free(values);return NULL;}
+    }
+    return values;
+}
+int64_t rt_linux_group_stream_admit_v2(const char*p,int64_t n){(void)p;(void)n;return ENOTSUP;}
+SplArray* rt_linux_group_launch_stream_broker_v2(const char*p,int64_t pn,const char*d,int64_t dn,
+        SplArray*a,int64_t g,const char*r,int64_t rn,const char*i,int64_t in,
+        const char*c,int64_t cn,int64_t deadline) {
+    (void)p;(void)pn;(void)d;(void)dn;(void)a;(void)g;(void)r;(void)rn;(void)i;(void)in;
+    (void)c;(void)cn;(void)deadline;return group_stream_unavailable_v2(2);
+}
+SplArray* rt_linux_group_start_stream_v2(const char*p,int64_t pn,const char*d,int64_t dn,
+        SplArray*a,SplArray*e,const char*c,int64_t cn,const char*r,int64_t rn,
+        const char*i,int64_t in,int64_t memory,int64_t timeout,int64_t deadline) {
+    (void)p;(void)pn;(void)d;(void)dn;(void)a;(void)e;(void)c;(void)cn;(void)r;(void)rn;
+    (void)i;(void)in;(void)memory;(void)timeout;(void)deadline;return group_stream_unavailable_v2(2);
+}
+int64_t rt_linux_group_stream_recover_lease_v2(const char*r,int64_t n,const char*i,int64_t m){(void)r;(void)n;(void)i;(void)m;return -1;}
+int64_t rt_linux_group_stream_no_child_scope_v2(const char*r,int64_t n,const char*i,int64_t m){(void)r;(void)n;(void)i;(void)m;return -1;}
+int64_t rt_linux_group_stream_collect_no_child_v2(const char*r,int64_t n,const char*i,int64_t m){(void)r;(void)n;(void)i;(void)m;return ENOTSUP;}
+SplArray* rt_linux_group_collected_stream_v2(int64_t token){(void)token;return group_stream_unavailable_v2(10);}
+int64_t rt_linux_group_stream_release_inherited_v2(void){return ENOTSUP;}
 #endif

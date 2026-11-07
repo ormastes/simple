@@ -1,0 +1,52 @@
+# Preserve the child tool result outcome through the text-content facade.
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_has, json_value_serialize}
+
+fn mcpgdb_status_failure_v1(value: JsonValue) -> bool:
+    match json_value_field(value, "status"):
+        JsonValue.Str(status): return status == "error" or status == "denied" or status == "unsupported"
+        _: return false
+
+fn mcpgdb_result_failed_v1(result: JsonValue) -> Result<bool, text>:
+    if not json_value_has(result, "isError"): return Ok(false)
+    match json_value_field(result, "isError"):
+        JsonValue.Bool(value): return Ok(value)
+        _: return Err("runner isError must be boolean")
+
+pub fn mcpgdb_runner_outcome_v1(envelope: text) -> Result<text, text>:
+    val message = json_parse_value_strict(envelope)?
+    match json_value_field(message, "jsonrpc"):
+        JsonValue.Str(version):
+            if version != "2.0": return Err("runner JSON-RPC version invalid")
+        _: return Err("runner JSON-RPC version missing")
+    match json_value_field(message, "id"):
+        JsonValue.Str(value):
+            if value != "1": return Err("runner response correlation invalid")
+        _: return Err("runner response correlation missing")
+    if json_value_has(message, "error"):
+        return Err(json_value_serialize(json_value_field(message, "error")))
+    val result = json_value_field(message, "result")
+    val failed = mcpgdb_result_failed_v1(result)?
+    val content = match json_value_field(result, "content"):
+        JsonValue.Array(items): items
+        _: return Err("runner tool content missing")
+    if content.len() == 0: return Err("runner tool content empty")
+    var texts: [text] = []
+    for item in content:
+        match json_value_field(item, "type"):
+            JsonValue.Str(kind):
+                if kind != "text": return Err("runner content type unsupported")
+            _: return Err("runner content type missing")
+        match json_value_field(item, "text"):
+            JsonValue.Str(value): texts.push(value)
+            _: return Err("runner content text missing")
+    val text = texts.join("\n")
+    if text == "": return Err("runner returned empty tool text")
+    if failed: return Err(text)
+    # Legacy debugger runners have a second structured response layer. Preserve
+    # those explicit failure statuses without interpreting diagnostic prefixes.
+    match json_parse_value_strict(text):
+        Ok(value):
+            if mcpgdb_status_failure_v1(value) or mcpgdb_status_failure_v1(json_value_field(value, "response")):
+                return Err(text)
+        Err(_): pass
+    Ok(text)

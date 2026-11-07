@@ -698,7 +698,7 @@ run_manifest_push_gates() {
             'push-private-import-baseline:tree:sh scripts/check/check-private-import-baseline.shs')
                 # Private cross-module imports: no stale baseline entry, and the
                 # baseline gains no line vs the merge-base (removals only).
-                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-private-import-baseline.shs" --base "${_range%%..*}" || { rm -f "$_push_rows"; return 1; } ;;
+                run_push_gate "$_id" "$_blocking" "$ROOT/scripts/check/check-private-import-baseline.shs" --range "$_range" || { rm -f "$_push_rows"; return 1; } ;;
             'push-text-encoding:range:sh scripts/check/check-text-encoding-push.shs {range}')
                 # Simple text formats (*.spl *.sdn *.shs *.sdl) must be valid UTF-8
                 # with LF endings in committed content; diff-scoped, ~1s.
@@ -1307,6 +1307,15 @@ main_merged_predecessor() {
 # tracking ref, unrelated history, ambiguous merge base on every candidate, or
 # an unavailable remote remains a refusal. The entire tip-side range from the
 # chosen base is checked by every range guard.
+published_line_fetch() {
+    # $1 remote/destination, $2 refs/heads/<line>, $3 sha the live query
+    # advertised. Objects only (no ref, no FETCH_HEAD); success requires that
+    # exact sha to be present afterwards, so nothing local is trusted.
+    "$TIMEOUT_BIN" -k 1s "${REMOTE_QUERY_TIMEOUT_S}s" git -C "$ROOT" fetch -q --no-tags --no-write-fetch-head \
+        "$1" "$2" </dev/null >/dev/null 2>&1 || return 1
+    git -C "$ROOT" rev-parse --verify --quiet "$3^{commit}" >/dev/null
+}
+
 rebased_push_published_base() {
     _rebased_tip=$1
     _rebased_remote=${MUST_CHECK_PUSH_REMOTE:-}
@@ -1329,7 +1338,14 @@ rebased_push_published_base() {
             *) continue ;;
         esac
         case "$_rebased_sha" in ''|*[!0-9a-f]*) continue ;; esac
-        git -C "$ROOT" rev-parse --verify --quiet "$_rebased_sha^{commit}" >/dev/null || {
+        # A protected line advertised by the LIVE query but not yet fetched
+        # (release/* moves several times an hour) used to be skipped, so the
+        # choice silently fell to main and every release-based push was
+        # measured from merge-base(release, main): unrelated rt_* deltas
+        # blamed on a docs-only push. Fetch exactly that advertised object
+        # (bounded, no ref update) instead of trusting any local tracking ref.
+        git -C "$ROOT" rev-parse --verify --quiet "$_rebased_sha^{commit}" >/dev/null ||
+            published_line_fetch "$_rebased_remote" "$_rebased_ref" "$_rebased_sha" || {
             _rebased_missing="$_rebased_missing ${_rebased_ref#refs/heads/}"
             continue
         }
@@ -1408,7 +1424,8 @@ new_ref_published_base() {
             _nr_sha=${_nr_line%%[[:space:]]*}
             _nr_seen_ref=${_nr_line#*[[:space:]]}
             [ "$_nr_seen_ref" = "$_nr_merge" ] || return 1
-            git -C "$ROOT" rev-parse --verify --quiet "$_nr_sha^{commit}" >/dev/null || {
+            git -C "$ROOT" rev-parse --verify --quiet "$_nr_sha^{commit}" >/dev/null ||
+                published_line_fetch "$_nr_destination" "$_nr_merge" "$_nr_sha" || {
                 echo "push-must-check: remote has newer ${_nr_merge#refs/heads/} ($_nr_sha) than this clone has fetched; run git fetch first" >&2
                 return 1
             }
@@ -1614,6 +1631,21 @@ if [ "${1:-}" = --self-test-release-base ]; then
     [ "$(new_ref_published_base refs/heads/fix/release "$_st_tip")" = "$_st_release_one" ] || exit 2
     echo 'push-must-check: advanced published release keeps the common base: PASS'
 
+    # Release advanced on the remote and this clone has not fetched it. The
+    # base must still come from release (fetched on demand), never from
+    # main: merge-base(release, main) blamed release-vs-main rt_* deltas on
+    # every docs-only release push (2026-11-07).
+    _st_rel_prev=$(git -C "$_st_dir/remote.git" rev-parse refs/heads/release/1.0) || exit 2
+    _st_rel_remote=$(printf 'release three (remote only)\n' | git -C "$_st_dir/remote.git" -c user.name=test -c user.email=test@example.com \
+        commit-tree "$_st_rel_prev^{tree}" -p "$_st_rel_prev") || exit 2
+    git -C "$_st_dir/remote.git" update-ref refs/heads/release/1.0 "$_st_rel_remote" || exit 2
+    git -C "$ROOT" rev-parse --verify --quiet "$_st_rel_remote^{commit}" >/dev/null && exit 2
+    [ "$(rebased_push_published_base "$_st_tip")" = "$_st_release_one" ] || {
+        echo 'push-must-check: unfetched release tip fell back to a main base: FAIL' >&2; exit 2; }
+    git -C "$ROOT" rev-parse --verify --quiet "$_st_rel_remote^{commit}" >/dev/null || exit 2
+    git -C "$_st_dir/remote.git" update-ref refs/heads/release/1.0 "$_st_rel_prev" || exit 2
+    echo 'push-must-check: unfetched advanced release is fetched and stays the base (not main): PASS'
+
     git -C "$ROOT" switch -q main && git -C "$ROOT" switch -qc fix/main
     git -C "$ROOT" branch -q --set-upstream-to=origin/main
     printf 'main feature\n' > "$ROOT/main-feature.txt"
@@ -1736,9 +1768,12 @@ if [ "${1:-}" = --self-test-release-base ]; then
     _st_unfetched=$(printf 'remote-only legacy\n' | git -C "$_st_dir/remote.git" -c user.name=test -c user.email=test@example.com commit-tree "$_st_tree" -p "$_st_published_merge") || exit 2
     git -C "$_st_dir/remote.git" update-ref refs/heads/release_phase3 "$_st_unfetched" || exit 2
     git -C "$ROOT" rev-parse --verify --quiet "$_st_unfetched^{commit}" >/dev/null && exit 2
-    _st_err=$(new_ref_published_base refs/heads/work/legacy "$_st_own" 2>&1 >/dev/null) && exit 2
-    case "$_st_err" in *"run git fetch first"*) ;; *) exit 2 ;; esac
-    echo 'push-must-check: unavailable published legacy commit refuses and says to fetch: PASS'
+    # The live-advertised commit is now fetched on demand (objects only); the
+    # result must equal the unique merge base with that exact fetched sha.
+    _st_got=$(new_ref_published_base refs/heads/work/legacy "$_st_own" 2>/dev/null) || exit 2
+    git -C "$ROOT" rev-parse --verify --quiet "$_st_unfetched^{commit}" >/dev/null || exit 2
+    [ "$_st_got" = "$(git -C "$ROOT" merge-base "$_st_unfetched" "$_st_own")" ] || exit 2
+    echo 'push-must-check: unfetched published legacy commit is fetched on demand and bases the range: PASS'
 
     git -C "$ROOT" push -q origin :refs/heads/release_phase3 || exit 2
     git -C "$ROOT" update-ref refs/remotes/origin/release_phase3 "$_st_legacy" || exit 2

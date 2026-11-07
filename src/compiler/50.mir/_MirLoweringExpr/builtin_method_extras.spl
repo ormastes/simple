@@ -1365,6 +1365,7 @@ impl MirLowering:
         var collection_local: LocalId = 0
         var elem_type = MirType.i64()
         var elem_is_u8 = false
+        var elem_is_u32 = false
         if iter_is_range:
             if val start_expr = range_start:
                 counter_start = self.lower_expr(start_expr)
@@ -1391,6 +1392,9 @@ impl MirLowering:
             elem_type = known_elem ?? MirType.i64()
             elem_is_u8 = match elem_type.kind:
                 case MirTypeKind.U8: true
+                case _: false
+            elem_is_u32 = match elem_type.kind:
+                case MirTypeKind.U32: true
                 case _: false
             if self.builtin_elem_mir_is_packed(elem_type) and not elem_is_u8:
                 return self.builtin_extra_fail_closed("E-MIR-EXPR-Comprehension: unsupported in stage2: comprehension over a packed [u64] array (its slots are raw, not tagged); index it in a while loop", Some(span))
@@ -1433,22 +1437,21 @@ impl MirLowering:
             self.builder = b_var
             self.bind_local(loop_symbol, range_var)
         else:
-            if elem_is_u8:
-                # Packed [u8]: read the raw byte through rt_bytes_u8_at (the
-                # accessor lower_for_array_indexed and `arr[i]` use); the slot
-                # is not a tagged word, so there is no decode.
-                var b_byte = self.builder
-                val raw_byte = b_byte.emit_call_value(
+            if elem_is_u8 or elem_is_u32:
+                # Checked unsigned getters normalize boxed and packed slots.
+                # Their raw result must not pass through tagged decode.
+                var b_unsigned = self.builder
+                val raw_unsigned = b_unsigned.emit_call_value(
                     MirOperand(kind: MirOperandKind.Const(
-                        MirConstValue.Str("rt_bytes_u8_at"),
+                        MirConstValue.Str(if elem_is_u8: "rt_bytes_u8_at" else: "rt_typed_words_u32_at"),
                         MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
                     )),
                     [mir_operand_copy(collection_local), mir_operand_copy(counter)], MirType.i64())
-                val byte_value = b_byte.emit_cast(mir_operand_copy(raw_byte), elem_type)
-                val byte_var = b_byte.new_local(nil, elem_type, LocalKind.Var)
-                b_byte.emit_copy(byte_var, byte_value)
-                self.builder = b_byte
-                self.bind_local(loop_symbol, byte_var)
+                val unsigned_value = b_unsigned.emit_cast(mir_operand_copy(raw_unsigned), elem_type)
+                val unsigned_var = b_unsigned.new_local(nil, elem_type, LocalKind.Var)
+                b_unsigned.emit_copy(unsigned_var, unsigned_value)
+                self.builder = b_unsigned
+                self.bind_local(loop_symbol, unsigned_var)
             else:
                 var b_get = self.builder
                 val elem_tagged = b_get.emit_call_value(self.rt_array_get_operand(), [mir_operand_copy(collection_local), mir_operand_copy(counter)], MirType.i64())

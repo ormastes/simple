@@ -1,0 +1,295 @@
+# AWAITING_VERIFICATION. Actual file/database/WAL APIs when executed; synthetic
+# signed container observations never claim a real provider or workload ran.
+use std.spec.{describe, it, expect, fail}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.crypto.ed25519.pure_ed25519_verify
+use std.common.build_manager.contracts.builder_task_identity_v1
+use std.common.task_runner.execution_identity_v2.*
+use std.common.task_runner.journal.{task_runner_journal_history_v1, task_runner_journal_history_v2}
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_lookup_v2
+use app.buildrunner.remote_container_evidence_v2.{RemoteContainerBytesV2, remote_container_evidence_freeze_v2,
+    remote_container_execution_digest_v2}
+use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+use app.buildrunner.remote_container_authority_v2.{remote_container_completion_encode_v2,
+    remote_container_completion_signature_message_v2}
+use app.buildrunner.remote_container_bundle_codec_v2.remote_container_bundle_encode_v2
+use app.buildrunner.remote_container_session_v2.RemoteContainerDatabaseSessionV2
+use app.buildrunner.remote_host_v1.RemoteCompletionBundleV1
+use app.buildrunner.remote_evidence_v1.{RemoteEvidenceBytesV1, RemoteOutputBytesV1}
+use app.buildrunner.remote_bundle_codec_v1.remote_bundle_encode_v1
+use app.io.file_ops.file_read_regular_no_follow_bounded_bytes
+use std.nogc_sync_mut.io.dir_ops.dir_remove_all
+use std.nogc_sync_mut.io_runtime.file_exists
+use test.fixtures.buildrunner.remote_container_parent_v2.*
+use test.fixtures.buildrunner.remote_authority_v1.remote_authority_fixture_v1
+use test.fixtures.task_runner.execution_identity_v2.container_execution_fixture_v2
+
+fn container_parent_freeze_error_v2(fixture: RemoteContainerParentFixtureV2,
+        bytes: RemoteContainerBytesV2) -> text:
+    match remote_container_evidence_freeze_v2(fixture.task, fixture.bundle.result,
+            fixture.policy, fixture.request, fixture.provider_identity_digest, bytes):
+        Ok(_): ""
+        Err(reason): reason
+
+describe "container parent signed bytes and same-journal integration V2":
+    it "accepts actual wire bytes into real files and retains typed container history across replay":
+        val fixture = container_parent_fixture_v2()
+        var session: RemoteContainerDatabaseSessionV2 = container_parent_open_v2(fixture)
+        val wire = remote_container_bundle_encode_v2(fixture.bundle).unwrap()
+        val accepted = session.accept_wire(fixture.task, wire, fixture.authority).unwrap()
+        expect(file_read_regular_no_follow_bounded_bytes(accepted.outputs_root + "/artifact/program.bin", 1024).unwrap())
+            .to_equal(fixture.bundle.evidence.outputs[0].content)
+        expect(file_read_regular_no_follow_bounded_bytes(accepted.outputs_root + "/remote-workspace/task_a.probe.sdn", 1024).unwrap())
+            .to_equal(fixture.bundle.evidence.workspace_probe.bytes())
+        expect(fixture.bundle.completion.execution_digest).to_equal(remote_container_execution_digest_v2(
+            fixture.bundle.evidence.execution, fixture.bundle.evidence.selected_user, fixture.bundle.evidence.workspace_probe).unwrap())
+        expect(accepted.completion_digest).to_equal(sha256_text(remote_container_completion_encode_v2(fixture.bundle.completion).unwrap()))
+        val identity = session.parent.journal_identities[fixture.task.id]
+        val history = task_runner_journal_history_v2(session.parent.database.journal, identity).unwrap()
+        expect(history.len()).to_equal(1)
+        match history[0]:
+            Native(_): fail("container parent fabricated a native process record")
+            Container(row):
+                expect(row.identity_digest).to_equal(identity)
+                expect(row.status).to_equal("passed")
+                expect(row.result_validated).to_equal(true)
+                expect(row.result_digest).to_equal(accepted.completion_digest)
+                expect(row.execution.runtime.native_id).to_equal(fixture.bundle.evidence.execution.runtime.native_id)
+                expect(row.execution.absence.query_digest).to_equal(fixture.bundle.evidence.execution.absence.query_digest)
+        expect(task_runner_journal_history_v1(session.parent.database.journal, identity).is_err()).to_equal(true)
+        val terminal = distributed_operation_journal_lookup_v2(session.parent.operations, fixture.policy.operation_id).unwrap()
+        expect(terminal.state).to_equal("completed")
+        expect(terminal.outcome_digest).to_equal(accepted.completion_digest)
+        container_parent_release_v2(session)
+        var reopened: RemoteContainerDatabaseSessionV2 = container_parent_open_v2(fixture)
+        expect(reopened.accept_wire(fixture.task, wire, fixture.authority).unwrap_err()).to_equal("REMOTE_COMPLETION_REPLAY")
+        expect(task_runner_journal_history_v2(reopened.parent.database.journal, identity).unwrap().len()).to_equal(1)
+        container_parent_release_v2(reopened)
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "durably cancels before admission and writes no task row for late completion":
+        val fixture = container_parent_fixture_v2()
+        var session: RemoteContainerDatabaseSessionV2 = container_parent_open_v2(fixture)
+        val digest = sha256_text("container cancel before admission")
+        expect(session.cancel(fixture.policy.operation_id, digest)).to_equal(Ok(true))
+        container_parent_release_v2(session)
+        var reopened: RemoteContainerDatabaseSessionV2 = container_parent_open_v2(fixture)
+        expect(reopened.accept_wire(fixture.task, remote_container_bundle_encode_v2(fixture.bundle).unwrap(),
+            fixture.authority).unwrap_err()).to_equal("REMOTE_EXECUTION_CANCELLED")
+        val identity = reopened.parent.journal_identities[fixture.task.id]
+        expect(task_runner_journal_history_v2(reopened.parent.database.journal, identity).unwrap().len()).to_equal(0)
+        val terminal = distributed_operation_journal_lookup_v2(reopened.parent.operations, fixture.policy.operation_id).unwrap()
+        expect(terminal.state).to_equal("cancelled")
+        expect(terminal.outcome_digest).to_equal(digest)
+        container_parent_release_v2(reopened)
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "rejects substituted output bytes even with an unchanged valid host signature":
+        val fixture = container_parent_fixture_v2()
+        expect(pure_ed25519_verify(fixture.authority.host_key.public_key,
+            remote_container_completion_signature_message_v2(fixture.bundle.completion).unwrap(),
+            fixture.bundle.completion.signature)).to_equal(true)
+        var changed = fixture.bundle
+        var bytes = changed.evidence
+        bytes.outputs[0].content = [9u8, 9u8]
+        changed.evidence = bytes
+        expect(changed.completion.signature).to_equal(fixture.bundle.completion.signature)
+        var session: RemoteContainerDatabaseSessionV2 = container_parent_open_v2(fixture)
+        expect(session.accept_wire(fixture.task, remote_container_bundle_encode_v2(changed).unwrap(),
+            fixture.authority).unwrap_err()).to_equal("parent output digest does not match worker receipt")
+        val identity = session.parent.journal_identities[fixture.task.id]
+        expect(task_runner_journal_history_v2(session.parent.database.journal, identity).unwrap().len()).to_equal(0)
+        expect(distributed_operation_journal_lookup_v2(session.parent.operations,
+            fixture.policy.operation_id).unwrap().state).to_equal("executing")
+        container_parent_release_v2(session)
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "requires the selected user receipt to match exact runtime provider scope and chronology":
+        val fixture = container_parent_fixture_v2()
+        expect(pure_ed25519_verify(fixture.authority.host_key.public_key,
+            remote_container_completion_signature_message_v2(fixture.bundle.completion).unwrap(),
+            fixture.bundle.completion.signature)).to_equal(true)
+        val base = fixture.bundle.evidence.selected_user
+        var native = base
+        native.identity.native_id = sha256_text("another native container")
+        var provider = base
+        provider.provider_identity_digest = sha256_text("another provider identity")
+        var scope = base
+        scope.scope.service_scope_id = "another_service"
+        scope.identity.node_boot_id = container_scope_fence_id_v2(scope.scope).unwrap()
+        var late = base
+        late.observed_unix_ms = 1001
+        var session: RemoteContainerDatabaseSessionV2 = container_parent_open_v2(fixture)
+        for receipt in [native, provider, scope, late]:
+            var changed = fixture.bundle
+            changed.evidence.selected_user = receipt
+            expect(changed.completion.signature).to_equal(fixture.bundle.completion.signature)
+            expect(session.accept_wire(fixture.task, remote_container_bundle_encode_v2(changed).unwrap(),
+                fixture.authority).unwrap_err()).to_equal("REMOTE_CONTAINER_SELECTED_USER_DIFFERS")
+        val history = task_runner_journal_history_v2(session.parent.database.journal,
+            session.parent.journal_identities[fixture.task.id]).unwrap()
+        expect(history.len()).to_equal(0)
+        container_parent_release_v2(session)
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "cryptographically binds engine-selected user bytes in the execution measurement digest":
+        val fixture = container_parent_fixture_v2()
+        var changed = fixture.bundle
+        changed.evidence.selected_user.selected_user = "2000:2000"
+        var session: RemoteContainerDatabaseSessionV2 = container_parent_open_v2(fixture)
+        expect(changed.completion.signature).to_equal(fixture.bundle.completion.signature)
+        expect(session.accept_wire(fixture.task, remote_container_bundle_encode_v2(changed).unwrap(),
+            fixture.authority).unwrap_err()).to_equal("CONTAINER_COMPLETION_OBSERVATION_MISMATCH")
+        val history = task_runner_journal_history_v2(session.parent.database.journal,
+            session.parent.journal_identities[fixture.task.id]).unwrap()
+        expect(history.len()).to_equal(0)
+        container_parent_release_v2(session)
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "rejects changed nonce and stale task workspace receipts with the original signature intact":
+        val fixture = container_parent_fixture_v2()
+        val fields = fixture.bundle.evidence.workspace_probe.split("\n")
+        var changed_nonce = fixture.bundle
+        changed_nonce.evidence.workspace_probe = changed_nonce.evidence.workspace_probe.replace(fields[2], sha256_text("another nonce"))
+        var old_task = fixture.task
+        old_task.attempt = 2
+        var stale = fixture.bundle
+        stale.evidence.workspace_probe = "SIMPLE-REMOTE-CONTAINER-WORKSPACE-PROBE-2\n" +
+            builder_task_identity_v1(old_task) + "\n" + fields[2] + "\nwrite-read-delete\n"
+        var session: RemoteContainerDatabaseSessionV2 = container_parent_open_v2(fixture)
+        expect(changed_nonce.completion.signature).to_equal(fixture.bundle.completion.signature)
+        expect(session.accept_wire(fixture.task, remote_container_bundle_encode_v2(changed_nonce).unwrap(),
+            fixture.authority).unwrap_err()).to_equal("REMOTE_WORKSPACE_NONCE_PIN_DIFFERS")
+        expect(stale.completion.signature).to_equal(fixture.bundle.completion.signature)
+        expect(session.accept_wire(fixture.task, remote_container_bundle_encode_v2(stale).unwrap(),
+            fixture.authority).unwrap_err()).to_equal("REMOTE_WORKSPACE_RECEIPT_DIFFERS")
+        val history = task_runner_journal_history_v2(session.parent.database.journal,
+            session.parent.journal_identities[fixture.task.id]).unwrap()
+        expect(history.len()).to_equal(0)
+        container_parent_release_v2(session)
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "requires successful probe output bytes to match the separately retained receipt":
+        val fixture = container_parent_fixture_v2()
+        var changed = fixture.bundle
+        changed.evidence.outputs[1].content = "different output probe bytes\n".bytes()
+        changed.result.outputs[1].digest = sha256_u8_hex(changed.evidence.outputs[1].content)
+        var session: RemoteContainerDatabaseSessionV2 = container_parent_open_v2(fixture)
+        expect(changed.completion.signature).to_equal(fixture.bundle.completion.signature)
+        # The updated output claim matches its actual bytes, isolating the
+        # retained-probe comparison from ordinary output digest verification.
+        expect(session.accept_wire(fixture.task, remote_container_bundle_encode_v2(changed).unwrap(),
+            fixture.authority).unwrap_err()).to_equal("REMOTE_CONTAINER_WORKSPACE_OUTPUT_DIFFERS")
+        val history = task_runner_journal_history_v2(session.parent.database.journal,
+            session.parent.journal_identities[fixture.task.id]).unwrap()
+        expect(history.len()).to_equal(0)
+        container_parent_release_v2(session)
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "requires approved workspace nonce input and probe output contracts before freezing":
+        val fixture = container_parent_fixture_v2()
+        var no_nonce = fixture.task
+        no_nonce.inputs = [for input in no_nonce.inputs if input.path != "remote-workspace/task_a.nonce": input]
+        expect(remote_container_evidence_freeze_v2(no_nonce, fixture.bundle.result, fixture.policy,
+            fixture.request, fixture.provider_identity_digest, fixture.bundle.evidence).unwrap_err())
+            .to_equal("REMOTE_CONTAINER_WORKSPACE_CONTRACT_REQUIRED")
+        var no_output = fixture.task
+        no_output.outputs = ["artifact/program.bin"]
+        expect(remote_container_evidence_freeze_v2(no_output, fixture.bundle.result, fixture.policy,
+            fixture.request, fixture.provider_identity_digest, fixture.bundle.evidence).unwrap_err())
+            .to_equal("REMOTE_CONTAINER_WORKSPACE_CONTRACT_REQUIRED")
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "retains signed user and workspace observations for failure while publishing no outputs":
+        val fixture = container_parent_fixture_v2(1)
+        expect(fixture.bundle.result.outputs.len()).to_equal(0)
+        expect(fixture.bundle.evidence.outputs.len()).to_equal(0)
+        expect(fixture.bundle.evidence.workspace_probe.starts_with("SIMPLE-REMOTE-CONTAINER-WORKSPACE-PROBE-2\n"))
+            .to_equal(true)
+        expect(fixture.bundle.completion.execution_digest).to_equal(remote_container_execution_digest_v2(
+            fixture.bundle.evidence.execution, fixture.bundle.evidence.selected_user, fixture.bundle.evidence.workspace_probe).unwrap())
+        var session: RemoteContainerDatabaseSessionV2 = container_parent_open_v2(fixture)
+        val accepted = session.accept_wire(fixture.task, remote_container_bundle_encode_v2(fixture.bundle).unwrap(),
+            fixture.authority).unwrap()
+        expect(accepted.result.status).to_equal("ERROR")
+        expect(file_exists(accepted.outputs_root + "/artifact/program.bin")).to_equal(false)
+        expect(file_exists(accepted.outputs_root + "/remote-workspace/task_a.probe.sdn")).to_equal(false)
+        val history = task_runner_journal_history_v2(session.parent.database.journal,
+            session.parent.journal_identities[fixture.task.id]).unwrap()
+        expect(history.len()).to_equal(1)
+        match history[0]:
+            Native(_): fail("container failure fabricated native process evidence")
+            Container(row):
+                expect(row.status).to_equal("failed")
+                expect(row.result_validated).to_equal(true)
+                expect(row.result_digest).to_equal(accepted.completion_digest)
+        val terminal = distributed_operation_journal_lookup_v2(session.parent.operations, fixture.policy.operation_id).unwrap()
+        expect(terminal.state).to_equal("failed")
+        container_parent_release_v2(session)
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "rejects a fully encoded native V1 bundle at the container wire boundary":
+        val fixture = container_parent_fixture_v2()
+        val native = RemoteCompletionBundleV1(result: fixture.bundle.result,
+            evidence: RemoteEvidenceBytesV1(process_payload: "", stdout: [], stderr: [], outputs: []),
+            completion: remote_authority_fixture_v1().completion)
+        val native_wire = remote_bundle_encode_v1(native).unwrap()
+        var session: RemoteContainerDatabaseSessionV2 = container_parent_open_v2(fixture)
+        expect(session.accept_wire(fixture.task, native_wire, fixture.authority).unwrap_err())
+            .to_equal("REMOTE_CONTAINER_BUNDLE_FRAME_INVALID")
+        val identity = session.parent.journal_identities[fixture.task.id]
+        expect(task_runner_journal_history_v2(session.parent.database.journal, identity).unwrap().len()).to_equal(0)
+        container_parent_release_v2(session)
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "requires signed completion time after the independently represented absence observation":
+        val fixture = container_parent_fixture_v2()
+        var bundle = fixture.bundle
+        var completion = bundle.completion
+        completion.completed_at = 999
+        bundle.completion = container_parent_completion_resign_v2(completion)
+        var session: RemoteContainerDatabaseSessionV2 = container_parent_open_v2(fixture)
+        expect(session.accept_wire(fixture.task, remote_container_bundle_encode_v2(bundle).unwrap(),
+            fixture.authority).unwrap_err()).to_equal("REMOTE_CONTAINER_COMPLETION_PRECEDES_ABSENCE")
+        expect(task_runner_journal_history_v2(session.parent.database.journal,
+            session.parent.journal_identities[fixture.task.id]).unwrap().len()).to_equal(0)
+        container_parent_release_v2(session)
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "rejects unknown and missing output bytes without trusting the remote inventory":
+        val fixture = container_parent_fixture_v2()
+        var unknown = fixture.bundle.evidence
+        unknown.outputs = [RemoteOutputBytesV1("unknown.bin", [1u8])]
+        expect(container_parent_freeze_error_v2(fixture, unknown)).to_equal("REMOTE_OUTPUT_UNKNOWN_OR_DUPLICATE")
+        var missing = fixture.bundle.evidence
+        missing.outputs = []
+        expect(container_parent_freeze_error_v2(fixture, missing))
+            .to_equal("success requires every declared output and fresh parent digest")
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "requires exact pinned provider identity and container plan rather than copied claims":
+        val fixture = container_parent_fixture_v2()
+        var task = fixture.task
+        task.inputs = task.inputs[0:task.inputs.len() - 1]
+        expect(remote_container_evidence_freeze_v2(task, fixture.bundle.result, fixture.policy,
+            fixture.request, fixture.provider_identity_digest, fixture.bundle.evidence).unwrap_err())
+            .to_equal("REMOTE_CONTAINER_PROVIDER_NOT_PINNED")
+        var changed_provider = fixture.bundle.evidence
+        var execution = changed_provider.execution
+        var absence = execution.absence
+        execution.provider_identity_digest = "d".repeat(64)
+        absence.provider_identity_digest = execution.provider_identity_digest
+        execution.absence = absence
+        changed_provider.execution = execution
+        expect(container_parent_freeze_error_v2(fixture, changed_provider)).to_equal("REMOTE_CONTAINER_PROVIDER_CHANGED")
+        var changed_plan = fixture.bundle.evidence
+        changed_plan.execution = container_execution_fixture_v2(0, 2, fixture.request.plan.request_digest)
+        expect(container_parent_freeze_error_v2(fixture, changed_plan)).to_equal("REMOTE_CONTAINER_EXECUTION_PLAN_DIFFERS")
+        var request = fixture.request
+        var plan = request.plan
+        plan.operation_id = "another_operation"
+        request.plan = plan
+        expect(remote_container_evidence_freeze_v2(fixture.task, fixture.bundle.result, fixture.policy,
+            request, fixture.provider_identity_digest, fixture.bundle.evidence).unwrap_err())
+            .to_equal("REMOTE_CONTAINER_REQUEST_NOT_PINNED")
+        expect(dir_remove_all(fixture.root)).to_equal(true)

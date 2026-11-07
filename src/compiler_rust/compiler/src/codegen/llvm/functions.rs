@@ -4154,6 +4154,33 @@ mod tests {
     use simple_common::target::{Target, TargetArch, TargetOS};
     use std::collections::HashMap;
 
+
+    #[test]
+    fn checked_typed_word_reads_use_layout_aware_runtime_getters() {
+        for name in ["rt_typed_words_u32_at", "rt_typed_words_u64_at"] {
+            let mut backend = LlvmBackend::new(Target::host()).unwrap();
+            backend.create_module("checked_word_getter").unwrap();
+            let mut function = MirFunction::new(
+                "probe".to_string(), crate::hir::TypeId::I64,
+                simple_parser::ast::Visibility::Public,
+            );
+            function.params.push(MirLocal {
+                name: "array".to_string(), ty: crate::hir::TypeId::ANY,
+                kind: LocalKind::Parameter, is_ghost: false,
+            });
+            function.blocks[0].instructions.push(MirInst::ConstInt { dest: VReg(1), value: 0 });
+            function.blocks[0].instructions.push(MirInst::Call {
+                dest: Some(VReg(2)), target: CallTarget::from_name(name),
+                args: vec![VReg(0), VReg(1)],
+            });
+            function.blocks[0].terminator = Terminator::Return(Some(VReg(2)));
+            backend.compile_function(&function).unwrap();
+            backend.verify().unwrap();
+            let ir = backend.get_ir().unwrap();
+            assert!(ir.contains(&format!("call i64 @{name}(")), "{ir}");
+        }
+    }
+
     fn byte_len_dispatch_ir(inst: MirInst, receiver_type: crate::hir::TypeId) -> Result<String, CompileError> {
         let backend = LlvmBackend::new(Target::host())?;
         backend.create_module("byte_len_dispatch")?;
@@ -4281,7 +4308,7 @@ mod tests {
         let ast = simple_parser::Parser::new(source).parse().unwrap();
         let hir = crate::hir::lower(&ast).unwrap();
         let mir = crate::mir::lower_to_mir(&hir).unwrap();
-        let backend = LlvmBackend::new(Target::host()).unwrap();
+        let mut backend = LlvmBackend::new(Target::host()).unwrap();
         backend.create_module("byte_len_source").unwrap();
         backend.compile(&mir).unwrap();
         backend.verify().unwrap();

@@ -1,0 +1,17 @@
+# Real host execution platform gate
+
+Status: **NOT_RUN — prerequisites unavailable**. This is a separate real-platform test plan, not an executable passing test and not scripted-provider qualification.
+
+Required trusted consumer inputs: completed installed host enrollment, actual native machine/boot observation, protected current policy and signed preparation/execute packet, exact enrolled provider identity, state-directory containment, admitted self-hosted compiler/runtime, live rootless Podman with actual kernel/cgroup/uid-map probe, authorized image and a resource budget large enough for OCI execution. The production root opener/CLI wrapper belongs to the host integration lane; this core does not fabricate its authority or bypass it with fixture booleans.
+
+Run once through that real consumer after the prerequisites exist. Require persisted admitted reservation -> executing intent before native create; independent actual Podman inspect must report the same complete pod/attempt/operation/native/engine/boot/provider-generation identity. Verify readback and synchronization of signed packet and exact observation. Repeat the execute request and reopen the owner: no second create/start may occur; unknown work remains charged. Exercise signed expiry before start and a wrong provider identity using a separate authorized disposable fixture. Retain real journal, command output, identity, timestamps, exit status and source/binary hashes as evidence.
+
+Native platform acceptance must explicitly distinguish observed running/exited state from waited completion and storage absence. No passing live result or full-system qualification may be reported from the scripted SSpec. Any real destructive cleanup belongs to the existing provider owner and separately authorized fixture cleanup, never capacity-release inference from a failed command.
+
+No executable real-platform scenario is claimed until the trusted enrolled-root fixture and admitted runtime are supplied. No build or provider command was run for this artifact.
+
+Pending provider acceptance: inject a delayed engine observation using the explicitly named provider test seam, advance actual/supplied native-boundary clock past the typed signed action deadline, and require native create/start refusal without command dispatch. The shared typed deadline and Linux adapter source are authored; the scripted native-boundary prevention case is also authored and NOT_RUN. Actual platform execution remains required; core refresh checks alone are insufficient.
+
+Both platforms must enter through Simple Container API V2. Linux accepts only `linux-podman`; Windows accepts only `windows-docker-process`. A mismatching configured owner/backend must refuse before native dispatch, with unchanged admission state. Windows acceptance additionally requires a real persistent service incarnation, fresh complete managed-scope inventory under the host writer, retained quarantine reconciliation and typed admission. A boot counter is diagnostic only. Codec tests do not qualify this service path.
+
+The selected WAL profile is `process-crash-v1`, not power-loss durability. Power-loss mode is unsupported. Process restart or unproven continuity must inventory/quarantine before admission, retain unknown resource charges, and never infer absence from a failed query. Tests must preserve the original receipt/time when terminal wait evidence is eventually added; current execution success means observed start only.

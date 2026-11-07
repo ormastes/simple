@@ -1,0 +1,270 @@
+# Pure state regressions only. Synthetic refs never enter a native operation.
+# AUTHORED / NOT_RUN: these checks do not prove a live provider stream.
+use std.spec.{describe, it, expect, step}
+use std.sosix.process.{PipedProcessRefV1, PipedProcessOwnedTransferV2}
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamRequestV2,
+    GroupProcessStreamLaunchV2, group_process_child_argv_digest_v2, group_process_stream_identity_v2}
+use std.nogc_sync_mut.io.group_process_owner.GroupProcessStreamOwnerV2
+use os.apps.smux.service.{ServiceState, PaneRecord}
+use os.apps.smux.contract.{MuxSession, MuxWindow, MuxPane}
+use os.apps.smux.input_queue.pane_input_new
+use os.apps.smux.mux_rects.MuxRect
+use os.apps.smux.service_revision.service_configuration_equal
+use os.apps.smux.pane_io_service.{pane_literal_admit_v1, pane_send_state,
+    pane_paste_state, pane_command_state, pane_alive_state, pane_poll_state, pane_close_pty_state,
+    pane_send_bytes_state}
+use os.apps.smux.pane_configured_launch_service.pane_configured_launch_admit
+use os.apps.smux.window_layout_service.{layout_resize_capable, resize_layout_children}
+use os.apps.smux.split_checkpoint.{split_checkpoint_capture, split_checkpoint_restore}
+use os.apps.smux.session_lifecycle.{remove_session_state, remove_window_state}
+use os.apps.smux.pane_lifecycle.remove_closed_pane_state
+use os.apps.smux.child_lifecycle.{prepare_pane_reset_v2, close_owned_children}
+use os.apps.smux.terminal_adoption_service_v2.terminal_transport_adopt_ref_v2
+use os.apps.smux.service_revision.service_revision_new
+use os.apps.smux.server.{smux_server_stop_reply_v1, smux_server_dispatch}
+use os.apps.smux.smux_remote.smux_remote_reply_ok
+use os.apps.smux.api.smux_owner_snapshot
+
+# Shape-valid synthetic broker values for storage/comparison only. No filesystem
+# or native process operation is invoked with these fabricated authority values.
+fn owned_terminal_fixture(memory: i64) -> PipedProcessOwnedTransferV2:
+    val digest = "a".repeat(64)
+    val request = GroupProcessStreamRequestV2(program: "/synthetic/program",
+        producer_digest: digest, args: [], environment: ["LANG=C"], directory: "/synthetic/work",
+        inputs: [], timeout_ms: 1000, broker_program: "/synthetic/broker", broker_digest: digest,
+        child_argv_digest: group_process_child_argv_digest_v2("/synthetic/program", []), launch_deadline_unix_ms: 1)
+    val launch = GroupProcessStreamLaunchV2(root: "/synthetic/group", worker_id: "worker-a",
+        generation: 1, snapshot_digest: digest, cache_identity: digest, memory_limit_bytes: memory,
+        request: request, delegated_cgroup_path: "/synthetic/cgroup", transport_generation: 1)
+    val identity = group_process_stream_identity_v2(launch)
+    val owner = GroupProcessStreamOwnerV2(launch: launch, identity_digest: identity)
+    PipedProcessOwnedTransferV2(owner: owner, reference: PipedProcessRefV1(pid: 71,
+        generation: 1, group_root: launch.root, group_identity: identity))
+
+fn owned_terminal_state() -> ServiceState:
+    val state = terminal_ref_state()
+    val empty = PaneRecord.create(state.get_pane(0).pane)
+    return state.replace_pane(0, empty.with_owned_terminal_transfer(owned_terminal_fixture(4096)))
+
+fn terminal_ref_state() -> ServiceState:
+    val rect = MuxRect(pane_id: "p", col: 0, row: 0, cols: 80, rows: 24)
+    var state = ServiceState.empty()
+    state = state.add_session(MuxSession.create("s", "terminal"))
+    state = state.add_window(MuxWindow.create("w", "s", "terminal").with_geometry([rect], 80, 24))
+    val pane = PaneRecord.create(MuxPane.create("p", "w", "s")).resize(80, 24)
+    return state.add_pane(pane.with_terminal_ref(PipedProcessRefV1(pid: 71, generation: 1)))
+
+describe "smux canonical terminal ref state":
+    it "preserves canonical identity and read outcome through pane clones":
+        step("Copy focus input geometry and terminal response state without losing cleanup authority")
+        var pane = terminal_ref_state().get_pane(0)
+        pane = pane.with_terminal_ref(PipedProcessRefV1(pid: 71, generation: 1,
+            group_root: "/synthetic/group-a", group_identity: "synthetic-owner-a"))
+        pane.terminal_eof = true
+        pane.terminal_read_error = "retained read failure"
+        for copy in [pane.with_focus(true), pane.with_input(pane_input_new()),
+                pane.resize(81, 25), pane.without_replies()]:
+            expect(copy.same_terminal_ref(pane.terminal_ref)).to_equal(true)
+            expect(copy.terminal_ref.unwrap().group_root).to_equal("/synthetic/group-a")
+            expect(copy.terminal_ref.unwrap().group_identity).to_equal("synthetic-owner-a")
+            expect(copy.terminal_pipe).to_equal(true)
+            expect(copy.terminal_eof).to_equal(true)
+            expect(copy.terminal_read_error).to_equal("retained read failure")
+
+    it "distinguishes reused pids by canonical generation and incarnation":
+        step("Advance child incarnation for a changed registry generation even when the PID is unchanged")
+        val pane = terminal_ref_state().get_pane(0)
+        val same = pane.with_terminal_ref(PipedProcessRefV1(pid: 71, generation: 1))
+        val replaced = pane.with_terminal_ref(PipedProcessRefV1(pid: 71, generation: 2))
+        expect(same.child_incarnation).to_equal(pane.child_incarnation)
+        expect(replaced.child_pid).to_equal(pane.child_pid)
+        expect(replaced.child_incarnation).to_equal(pane.child_incarnation + 1)
+        expect(replaced.same_terminal_ref(pane.terminal_ref)).to_equal(false)
+        val closed = replaced.with_pty(-1, -1)
+        expect(closed.terminal_ref == nil).to_equal(true)
+        expect(closed.child_pid).to_equal(-1)
+        expect(closed.terminal_pipe).to_equal(true)
+
+    it "distinguishes group authority even when pid and registry generation match":
+        step("Compare all canonical authority fields through the shared owner helper")
+        val pane = terminal_ref_state().get_pane(0).with_terminal_ref(PipedProcessRefV1(
+            pid: 71, generation: 1, group_root: "/synthetic/group-a", group_identity: "synthetic-owner-a"))
+        for reference in [PipedProcessRefV1(pid: 71, generation: 1,
+                group_root: "/synthetic/group-b", group_identity: "synthetic-owner-a"),
+                PipedProcessRefV1(pid: 71, generation: 1,
+                group_root: "/synthetic/group-a", group_identity: "synthetic-owner-b")]:
+            expect(pane.same_terminal_ref(reference)).to_equal(false)
+            val replaced = pane.with_terminal_ref(reference)
+            expect(replaced.child_pid).to_equal(pane.child_pid)
+            expect(replaced.terminal_ref.unwrap().generation).to_equal(pane.terminal_ref.unwrap().generation)
+            expect(replaced.child_incarnation).to_equal(pane.child_incarnation + 1)
+            expect(replaced.terminal_ref.unwrap().group_root).to_equal(reference.group_root)
+            expect(replaced.terminal_ref.unwrap().group_identity).to_equal(reference.group_identity)
+
+    it "publishes canonical reference changes in configuration identity":
+        step("Compare registry generations independently of a diagnostic PID or stale incarnation counter")
+        val state = terminal_ref_state()
+        for reference in [PipedProcessRefV1(pid: 71, generation: 2),
+                PipedProcessRefV1(pid: 71, generation: 1, group_root: "/synthetic/group-b"),
+                PipedProcessRefV1(pid: 71, generation: 1, group_identity: "synthetic-owner-b")]:
+            var changed = state.get_pane(0)
+            changed.terminal_ref = reference
+            expect(service_configuration_equal(state, state.replace_pane(0, changed))).to_equal(false)
+            expect(service_configuration_equal(state, state.replace_pane(0, changed.with_input(pane_input_new())))).to_equal(false)
+
+    it "rejects output-only transport input before queue or native effects":
+        step("Reject literal text command and paste while preserving the same owner and queue")
+        val state = terminal_ref_state()
+        expect(pane_literal_admit_v1(state, false, "s", "w", "p", true).unwrap_err()).to_equal("terminal transport is read-only")
+        for update in [pane_send_state(state, false, "s", "w", "p", "text"),
+                pane_command_state(state, false, "s", "w", "p", "command"),
+                pane_paste_state(state, false, "s", "w", "p", "paste")]:
+            expect(update.result.unwrap_err()).to_equal("terminal transport is read-only")
+            expect(update.commit).to_equal(false)
+            expect(update.state.get_pane(0).input.bytes.len()).to_equal(0)
+            expect(update.state.get_pane(0).same_terminal_ref(state.get_pane(0).terminal_ref)).to_equal(true)
+        expect(layout_resize_capable(state, [0], true)).to_equal(false)
+        val changed_geometry = [MuxRect(pane_id: "p", col: 0, row: 0, cols: 81, rows: 25)]
+        val resized = resize_layout_children(state, [0], changed_geometry)
+        expect(resized.is_err()).to_equal(true)
+        expect(resized.unwrap_err()).to_equal("terminal transport geometry unsupported")
+        expect(resized.state.get_pane(0).pane.cols).to_equal(80)
+        expect(resized.state.get_pane(0).pane.rows).to_equal(24)
+        expect(pane_configured_launch_admit(state, false, "s", "w", "p").is_err()).to_equal(true)
+
+    it "refuses split rollback across a canonical generation change":
+        step("Check retained stream identity before any geometry compensation")
+        val before = terminal_ref_state()
+        val rects = [MuxRect(pane_id: "p", col: 0, row: 0, cols: 39, rows: 24),
+            MuxRect(pane_id: "q", col: 40, row: 0, cols: 40, rows: 24)]
+        var after = before.replace_window(0, before.get_window(0).with_geometry(rects, 80, 24))
+        after = after.replace_pane(0, after.get_pane(0).resize(39, 24))
+        after = after.add_pane(PaneRecord.create(MuxPane.create("q", "w", "s")).resize(40, 24))
+        val checkpoint = split_checkpoint_capture(before, after, "s", "w", "q")
+        for reference in [PipedProcessRefV1(pid: 71, generation: 2),
+                PipedProcessRefV1(pid: 71, generation: 1, group_root: "/synthetic/group-b"),
+                PipedProcessRefV1(pid: 71, generation: 1, group_identity: "synthetic-owner-b")]:
+            var changed = after.get_pane(0)
+            changed.terminal_ref = reference
+            val result = split_checkpoint_restore(after.replace_pane(0, changed), checkpoint)
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err()).to_contain("canonical child changed")
+
+    it "retains complete owned transfer and pending release through every clone":
+        step("Keep broker launch cleanup authority alongside the canonical stream reference")
+        var pane = owned_terminal_state().get_pane(0)
+        pane.helper_cleaned_awaiting_release = true
+        for copy in [pane.with_focus(true), pane.with_input(pane_input_new()), pane.resize(81, 25),
+                pane.without_replies(), pane.with_child(-1), pane.with_pty(-1, -1),
+                pane.with_terminal_ref(PipedProcessRefV1(pid: 99, generation: 2))]:
+            expect(copy.same_owned_terminal_transfer(pane.owned_terminal_transfer)).to_equal(true)
+            expect(copy.same_terminal_ref(pane.terminal_ref)).to_equal(true)
+            expect(copy.helper_cleaned_awaiting_release).to_equal(true)
+            expect(copy.can_attach()).to_equal(false)
+
+    it "detects owner changes and cleanup phase without treating the same ref as sufficient":
+        step("Include full cleanup authority and host-release phase in configuration publication")
+        val state = owned_terminal_state()
+        val pane = state.get_pane(0)
+        var other = owned_terminal_fixture(8192)
+        other.reference = pane.terminal_ref.unwrap()
+        var changed_owner = pane
+        changed_owner.owned_terminal_transfer = other
+        expect(changed_owner.same_terminal_ref(pane.terminal_ref)).to_equal(true)
+        expect(changed_owner.same_owned_terminal_transfer(pane.owned_terminal_transfer)).to_equal(false)
+        expect(service_configuration_equal(state, state.replace_pane(0, changed_owner))).to_equal(false)
+        var cleaned = pane
+        cleaned.helper_cleaned_awaiting_release = true
+        expect(service_configuration_equal(state, state.replace_pane(0, cleaned))).to_equal(false)
+
+    it "retains cleaned helper ownership without another native cleanup or stream operation":
+        step("Refuse generic reset removal and replacement while host release acknowledgement is absent")
+        var state = owned_terminal_state()
+        var pane = state.get_pane(0)
+        pane.helper_cleaned_awaiting_release = true
+        state = state.replace_pane(0, pane)
+        # The cleaned flag skips cleanup; these calls must not touch native fake refs.
+        val closed = close_owned_children(state, "s")
+        expect(closed.get_pane(0).same_owned_terminal_transfer(pane.owned_terminal_transfer)).to_equal(true)
+        expect(closed.get_pane(0).helper_cleaned_awaiting_release).to_equal(true)
+        val reset = prepare_pane_reset_v2(state)
+        expect(reset.may_reset).to_equal(false)
+        expect(service_configuration_equal(reset.state, state)).to_equal(true)
+        expect(remove_session_state(state, "s").is_err()).to_equal(true)
+        expect(remove_window_state(state, "s", "w").is_err()).to_equal(true)
+        expect(remove_closed_pane_state(state, "s", "w", "p").is_err()).to_equal(true)
+        expect(pane_close_pty_state(state, false, "s", "w", "p").result).to_equal(false)
+        expect(pane_alive_state(state, false, "s", "w", "p").result.unwrap_err()).to_equal("terminal helper cleaned; host release pending")
+        val polled = pane_poll_state(state, [], [])
+        expect(polled.result).to_equal(0)
+        expect(polled.state.get_pane(0).same_owned_terminal_transfer(pane.owned_terminal_transfer)).to_equal(true)
+
+    it "rejects budget-bearing references on the old bare adoption path before native validation":
+        step("Prevent dropping broker cleanup provenance into a ref-only pane")
+        val before = terminal_ref_state()
+        val empty = before.replace_pane(0, PaneRecord.create(before.get_pane(0).pane))
+        val clock = service_revision_new()
+        val refused = terminal_transport_adopt_ref_v2(empty, clock, false, "s", "w", "p",
+            clock.epoch, clock.value, 0, owned_terminal_fixture(4096).reference)
+        expect(refused.unwrap_err()).to_equal("owned terminal transport requires complete transfer")
+
+    it "rejects rollback after cleanup authority or pending release phase changed":
+        step("Fence the complete owned bundle and one-shot cleanup state before geometry compensation")
+        val before = owned_terminal_state()
+        val rects = [MuxRect(pane_id: "p", col: 0, row: 0, cols: 39, rows: 24),
+            MuxRect(pane_id: "q", col: 40, row: 0, cols: 40, rows: 24)]
+        var after = before.replace_window(0, before.get_window(0).with_geometry(rects, 80, 24))
+        after = after.replace_pane(0, after.get_pane(0).resize(39, 24))
+        after = after.add_pane(PaneRecord.create(MuxPane.create("q", "w", "s")).resize(40, 24))
+        val checkpoint = split_checkpoint_capture(before, after, "s", "w", "q")
+        var changed = after.get_pane(0)
+        changed.helper_cleaned_awaiting_release = true
+        val phase = split_checkpoint_restore(after.replace_pane(0, changed), checkpoint)
+        expect(phase.is_err()).to_equal(true)
+        expect(phase.unwrap_err()).to_contain("owned cleanup authority changed")
+        var other = owned_terminal_fixture(8192)
+        other.reference = changed.terminal_ref.unwrap()
+        changed = after.get_pane(0)
+        changed.owned_terminal_transfer = other
+        val authority = split_checkpoint_restore(after.replace_pane(0, changed), checkpoint)
+        expect(authority.is_err()).to_equal(true)
+        expect(authority.unwrap_err()).to_contain("owned cleanup authority changed")
+
+    it "refuses stop while any pane retains typed cleanup authority":
+        step("Keep the server owner alive for bare references owned bundles and pending host release")
+        val bare = terminal_ref_state()
+        val owned = owned_terminal_state()
+        var cleaned = PaneRecord.create(bare.get_pane(0).pane)
+        cleaned.helper_cleaned_awaiting_release = true
+        val cleaned_state = bare.replace_pane(0, cleaned)
+        for state in [bare, owned, cleaned_state]:
+            val reply = smux_server_stop_reply_v1(state)
+            expect(reply).to_equal("smux: stop refused: terminal cleanup or host release pending")
+            expect(smux_remote_reply_ok(reply)).to_equal(false)
+        expect(smux_server_stop_reply_v1(ServiceState.empty())).to_equal("smux: stopping server")
+
+    it "authenticates before actual stop admission and preserves an empty owner's legacy reply":
+        step("Exercise the production dispatcher without installing synthetic owners in its global state")
+        expect(smux_server_dispatch("wrong-token stop-server", "owner-token")).to_equal("smux: unauthorized")
+        expect(smux_server_dispatch("owner-token stop-server", "")).to_equal("smux: unauthorized")
+        # Run in an isolated spec process; retained authority from another test
+        # is a failed precondition, never a reason to reset/drop that authority.
+        expect(smux_owner_snapshot().pane_count).to_equal(0)
+        expect(smux_server_dispatch("owner-token stop-server", "owner-token")).to_equal("smux: stopping server")
+
+    it "rejects pending-release input even if bundle and reference metadata are absent":
+        step("Fail closed on an inconsistent pending flag before queue or native provider effects")
+        val base = terminal_ref_state()
+        var malformed = PaneRecord.create(base.get_pane(0).pane)
+        malformed.helper_cleaned_awaiting_release = true
+        expect(malformed.child_pid).to_equal(-1)
+        val state = base.replace_pane(0, malformed)
+        expect(pane_literal_admit_v1(state, false, "s", "w", "p", true).unwrap_err()).to_equal("terminal transport is read-only")
+        for update in [pane_send_state(state, false, "s", "w", "p", "text"),
+                pane_command_state(state, false, "s", "w", "p", "command"),
+                pane_paste_state(state, false, "s", "w", "p", "paste"),
+                pane_send_bytes_state(state, false, "s", "w", "p", [0u8])]:
+            expect(update.result.unwrap_err()).to_equal("terminal transport is read-only")
+            expect(update.commit).to_equal(false)
+            expect(update.state.get_pane(0).input.bytes.len()).to_equal(0)
+            expect(update.state.get_pane(0).helper_cleaned_awaiting_release).to_equal(true)

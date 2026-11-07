@@ -32,7 +32,7 @@ describe "windows hcs provider leaf":
         val contract = windows_hcs_provider_contract_v1()
         expect(contract.provider_id).to_equal(WINDOWS_HCS_ENGINE_V1)
         expect(contract.supports_recovery).to_equal(false)
-        expect(contract.supports_logs).to_equal(true)
+        expect(contract.supports_logs).to_equal(false)
 
     it "admits only enumerated host image pairs":
         expect(windows_host_image_pair_admitted_v1("server", "2025", "2022",
@@ -84,17 +84,13 @@ describe "windows hcs provider leaf":
             "pod-1"])
         expect(windows_hcs_command_v1("bogus", "pod-1", digest).program).to_equal("")
 
-    it "translates a live capable probe into the delegated route":
+    it "does not promote the historical intent builder into live delegation":
         val probe = _scripted_capable().probe()
-        expect(probe.launch_capable).to_equal(true)
+        expect(probe.launch_capable).to_equal(false)
         val capability = windows_hcs_capability_from_probe_v1(probe, true)
-        expect(capability.launch_capable).to_equal(true)
-        expect(capability.client_privilege).to_equal("delegated")
-        expect(capability.admin_setup).to_equal(true)
-        expect(container_host_admission_reason_v1(capability,
-            ContainerHostRequirementV1(host_os: "windows", guest_os: "windows",
-                isolation_class: CONTAINER_ISOLATION_NATIVE_V1,
-                require_unprivileged_client: false))).to_equal("")
+        expect(capability.launch_capable).to_equal(false)
+        expect(capability.client_privilege).to_equal("unavailable")
+        expect(capability.reason).to_equal("windows-hcs-superseded-use-docker-process-provider")
 
     it "never reports scripted probe evidence as a live capability":
         val capability = windows_hcs_capability_from_probe_v1(
@@ -108,13 +104,13 @@ describe "windows hcs provider leaf":
             "pod-1", "sha256:" + "a".repeat(64), "2025", "process")
         expect(request.status).to_equal(RUNTIME_STATUS_BLOCKED)
 
-    it "blocks scripted live execution even when the probe is capable":
+    it "blocks historical lifecycle admission instead of reporting execution success":
         val request = _scripted_capable().lifecycle_request_v1(
             _prepared_state(), "create", "pod-1", "sha256:" + "a".repeat(64),
             "2025", "process")
         expect(request.status).to_equal(RUNTIME_STATUS_BLOCKED)
         expect(request.reason).to_equal(
-            "windows-hcs-scripted-live-execution-unavailable")
+            "windows-hcs-superseded-use-docker-process-provider")
 
     it "rejects incompatible host image pairs before probing":
         val provider = WindowsHcsRuntimeProviderV1.scripted("server", "2019",

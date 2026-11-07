@@ -10,7 +10,7 @@ use simple_common::target::{LinkerFlavor, Target, TargetOS};
 
 use super::{effective_target, inline_asm_emit, safe_canonicalize, ModuleImports, NativeProjectBuilder};
 use super::config::runtime_bundle_requests_core_c_bootstrap;
-use super::stubs::{generate_stub_object, generate_stub_object_freestanding};
+use super::stubs::generate_stub_object_freestanding;
 use super::tools::{
     archive_create_command, build_bootstrap_mutex_runtime_capsule_archive, build_compiler_backfill_archive,
     build_bootstrap_tools_sqlite_runtime, stage_sqlite_runtime_dll,
@@ -1586,6 +1586,7 @@ int main(int argc, char** argv) {
 
     /// Link object files into a native binary using LinkerBuilder.
     pub(crate) fn link_objects(&self, object_paths: &[PathBuf], imports: &ModuleImports) -> Result<(), String> {
+        self.validate_piped_observer_lane()?;
         // Resolve the `SIMPLE_LINKER` preference FIRST, before any archive is
         // built or any object is projected: an unsupported or uninstallable
         // value is a configuration error, and reporting it after several
@@ -1619,7 +1620,10 @@ int main(int argc, char** argv) {
 
         let main_o = self.compile_main_stub(temp_dir)?;
         let (init_o, init_names) = self.generate_init_caller(temp_dir, object_paths, None)?;
-        let extra_link_objects = configured_extra_link_objects()?;
+        let mut extra_link_objects = configured_extra_link_objects()?;
+        if let Some(observer) = self.piped_observer.archive() {
+            extra_link_objects.push(observer.to_path_buf());
+        }
         let bootstrap_tools_authority = if self.resolve_runtime_lane() == super::NativeRuntimeLane::BootstrapTools {
             Some(self.bootstrap_tools_authority()?)
         } else {
@@ -1631,6 +1635,14 @@ int main(int argc, char** argv) {
             self.selected_runtime_library(temp_dir)?
         };
         self.reject_unexpected_native_all(selected_runtime.as_ref())?;
+        if self.piped_observer.is_rust() {
+            let core = &selected_runtime.as_ref().ok_or("observer C owner absent")?.0;
+            let mut providers = object_paths.to_vec();
+            providers.push(main_o.clone());
+            if let Some(init) = init_o.as_ref() { providers.push(init.clone()); }
+            providers.extend(extra_link_objects.iter().cloned());
+            self.piped_observer.verify_link_inputs(core, &providers)?;
+        }
         // SQLite's provider borrows the selected runtime owner's bounded string
         // ABI. It does not bring in the incompatible core-C value/array owner.
         let bootstrap_tools_sqlite = if bootstrap_tools_authority.is_some()
@@ -1777,7 +1789,8 @@ int main(int argc, char** argv) {
             let rust_runtime = stage4_rust_runtime.as_ref().expect("validated Stage4 Rust runtime");
             let mut provider_paths = vec![compiler.as_path(), core.as_path(), rust_runtime.as_path()];
             provider_paths.extend(stage4_c_providers.iter().map(PathBuf::as_path));
-            let alias_stub = generate_stub_object(temp_dir, object_paths, &main_o, &provider_paths, imports)?;
+            let alias_stub = super::stubs::generate_stub_object_with_policy(
+                temp_dir, object_paths, &main_o, &provider_paths, imports, &[], self.piped_observer.is_rust())?;
             let requested =
                 Self::stage4_live_runtime_requests(temp_dir, object_paths, &main_o, init_o.as_ref(), &alias_stub)?;
 
@@ -2090,6 +2103,9 @@ int main(int argc, char** argv) {
             }
         }
         add_extra_link_objects(&mut cmd, &extra_link_objects);
+        let observer_roots = self.piped_observer.link_roots(is_msvc);
+        if is_msvc { msvc_link_args.extend(observer_roots); }
+        else { cmd.args(observer_roots); }
 
         #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
         if exact_stage4 {
@@ -2603,7 +2619,8 @@ int main(int argc, char** argv) {
                     provider_paths.push(mutex_runtime.as_path());
                 }
                 provider_paths.extend(extra_link_objects.iter().map(PathBuf::as_path));
-                let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o, &provider_paths, imports)?;
+                let stubs_o = super::stubs::generate_stub_object_with_policy(
+                    temp_dir, object_paths, &main_o, &provider_paths, imports, &[], self.piped_observer.is_rust())?;
                 cmd.arg(&stubs_o);
                 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 if let Some((runtime_lib, _)) = selected_runtime.as_ref() {
@@ -2639,17 +2656,19 @@ int main(int argc, char** argv) {
             // mingw/unwind libs) are real providers: never trap-stub their
             // imports (WriteFile, sockets, _Unwind_*).
             let system_libs = gnu_link_line_libraries(&cmd, &cc);
-            let stubs_o = super::stubs::generate_stub_object_with_system_libs(
+            let stubs_o = super::stubs::generate_stub_object_with_policy(
                 temp_dir,
                 object_paths,
                 &main_o,
                 &provider_paths,
                 &imports,
                 &system_libs,
+                self.piped_observer.is_rust(),
             )?;
             cmd.arg(external_tool_path(&stubs_o));
         }
-        let strict_no_stub_fallback = std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() == Ok("1");
+        let strict_no_stub_fallback = self.piped_observer.is_rust()
+            || std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() == Ok("1");
         if !strict_no_stub_fallback {
             for flag in &link_config.unresolved_symbol_flags {
                 cmd.arg(flag);
@@ -2684,7 +2703,7 @@ int main(int argc, char** argv) {
             msvc_link_args.extend(msvc_stub_fallback_link_args().iter().map(|s| s.to_string()));
         }
 
-        if self.config.strip {
+        if self.config.strip && !self.piped_observer.is_rust() {
             #[cfg(target_os = "macos")]
             cmd.arg("-Wl,-S");
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -2769,6 +2788,14 @@ int main(int argc, char** argv) {
         }
 
         if output_result.status.success() {
+            self.validate_piped_observer_lane()?;
+            self.piped_observer.verify_image(&self.output)?;
+            if self.config.strip && self.piped_observer.is_rust() {
+                let objcopy = find_objcopy_tool().ok_or_else(|| missing_llvm_tool_error("llvm-objcopy"))?;
+                let status = std::process::Command::new(objcopy).arg("--strip-all").arg(&self.output)
+                    .status().map_err(|e| format!("strip selected observer image: {e}"))?;
+                if !status.success() { return Err("strip selected observer image failed".into()); }
+            }
             if let Some(dll) = bootstrap_tools_sqlite.as_ref().and_then(|sqlite| sqlite.runtime_dll.as_ref()) {
                 stage_sqlite_runtime_dll(dll, &self.output)?;
             }

@@ -1,0 +1,207 @@
+# Actual temporary files/journals when executed, with independently signed
+# synthetic observations. No provider, wait/absence query or process is run.
+use std.spec.expect
+use std.common.build_manager.contracts.{BuildTaskV1, BuildHostV1, BuildInputV1,
+    BuildResultV1, BuildRunV1, builder_task_identity_v1}
+use std.common.build_manager.codec.builder_encode_task_v1
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2,
+    container_execution_request_encode_v2}
+use std.common.contracts.container.execution_evidence_v2.{ContainerExecutionEvidenceV2,
+    ContainerExecutionUserReceiptV2, container_runtime_query_digest_v2, container_runtime_observation_digest_v2}
+use std.common.contracts.container.runtime_v1.{RuntimeCommandV1, RuntimeStateV1, RuntimeOperationV1}
+use std.common.contracts.distributed_control_v2.{ExecutionEnvironmentV2, ExecutionGrantV2, OperationEnvelopeV2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_environment_digest_v2,
+    distributed_encode_operation_v2, distributed_grant_digest_v2}
+use std.common.contracts.distributed_operation_state_v2.{distributed_operation_initial_v2,
+    distributed_operation_transition_v2}
+use std.common.task_runner.distributed_operation_journal_v2.{distributed_operation_journal_open_v2,
+    distributed_operation_journal_commit_v2, distributed_operation_journal_close_v2}
+use std.common.task_runner.journal.task_runner_journal_release_v1
+use app.llm_caret.workbench.distributed_grant_verification_v2.DistributedAuthorityKeyV2
+use app.buildrunner.task_context.{BuildRunnerTaskContextV1, build_runner_context_encode_v1}
+use app.buildrunner.remote_evidence_v1.{RemoteEvidencePolicyV1, RemoteOutputBytesV1,
+    remote_policy_encode_v1, remote_inventory_digest_v1}
+use app.buildrunner.remote_context_v1.{RemoteAuthorityContextV1, remote_context_admit_v1}
+use app.buildrunner.remote_container_evidence_v2.{RemoteContainerBundleV2, RemoteContainerBytesV2,
+    remote_container_evidence_freeze_v2}
+use app.buildrunner.remote_container_authority_v2.RemoteContainerCompletionV2
+use app.buildrunner.remote_session_v1.remote_database_session_open_v1
+use app.buildrunner.remote_container_session_v2.{RemoteContainerDatabaseSessionV2, remote_container_session_v2}
+use app.io.file_ops.{secure_temp_dir, file_atomic_write, file_atomic_write_bytes}
+use std.nogc_sync_mut.io.dir_ops.dir_create_all
+use test.fixtures.task_runner.execution_identity_v2.container_execution_fixture_v2
+use test.fixtures.app.llm_caret.distributed_authority_verification_fixture_v2.{verification_seed,
+    verification_bytes, verification_key}
+
+struct RemoteContainerParentFixtureV2:
+    root: text
+    task: BuildTaskV1
+    run: BuildRunV1
+    policy: RemoteEvidencePolicyV1
+    request: ContainerExecutionRequestV2
+    provider_identity_digest: text
+    authority: RemoteAuthorityContextV1
+    bundle: RemoteContainerBundleV2
+
+fn container_parent_key_v2(identity: text, role: text, public_key: [u8]) -> DistributedAuthorityKeyV2:
+    var key = verification_key(identity, role, public_key)
+    key.host_id = "host_a"
+    key.expires_at = 3000
+    key
+
+fn container_parent_completion_resign_v2(value: RemoteContainerCompletionV2) -> RemoteContainerCompletionV2:
+    # Independent published signing order, never production message builder.
+    val message = ["SIMPLE_REMOTE_CONTAINER_COMPLETION_SIGNATURE_V2", "2", value.task_identity,
+        value.host_id, value.assignment_digest, str(value.controller_epoch), value.operation_id,
+        value.request_digest, value.grant_digest, value.result_digest, value.execution_digest,
+        value.stdout_digest, value.stderr_digest, value.output_inventory_digest, value.tests_digest,
+        value.signer_id, str(value.key_revision), str(value.completed_at), ""].join("\n")
+    val signed = pure_ed25519_sign_from_seed_v1(verification_seed(129), verification_bytes(message))
+    var completion = value
+    completion.signature = signed.signature
+    completion
+
+fn container_parent_user_fixture_v2(execution: ContainerExecutionEvidenceV2) -> ContainerExecutionUserReceiptV2:
+    # Synthetic engine-selected-user observation, not an effective UID claim.
+    val query = RuntimeCommandV1(operation: "selected-user", program: "podman",
+        args: ["inspect", "--format", r"{{.Config.User}}", execution.runtime.native_id])
+    val observation = RuntimeOperationV1(status: "ok", operation: "selected-user", command: query,
+        state: RuntimeStateV1(phase: "exited", identity: execution.runtime,
+            exit_code: execution.exit_code, reason: "synthetic-selected-user"),
+        exit_code: 0, stdout: "1000:1000\n", stderr: "", reason: "synthetic-selected-user")
+    ContainerExecutionUserReceiptV2(backend: execution.execution.backend, scope: execution.absence.scope,
+        identity: execution.runtime, request_digest: execution.execution.request_digest,
+        provider_identity_digest: execution.provider_identity_digest, selected_user: "1000:1000",
+        observed_unix_ms: 990, query_digest: container_runtime_query_digest_v2(query).unwrap(),
+        evidence_digest: container_runtime_observation_digest_v2(observation).unwrap(),
+        proof_kind: "exact-native-execution-user-v1")
+
+fn container_parent_fixture_v2(exit_code: i64 = 0) -> RemoteContainerParentFixtureV2:
+    val root = secure_temp_dir("/tmp", "remote-container-parent-v2").unwrap()
+    val body = "synthetic opaque provider request\n"
+    val execution = container_execution_fixture_v2(exit_code, 1, sha256_text(body))
+    val request = ContainerExecutionRequestV2(plan: execution.execution, request_bytes: body)
+    val request_payload = container_execution_request_encode_v2(request).unwrap()
+    val provider = execution.provider_identity_digest
+    val compiler: [u8] = [1u8, 2u8, 255u8]
+    val runtime: [u8] = [3u8, 4u8]
+    val tools = [BuildInputV1("tools/simple", sha256_u8_hex(compiler)),
+        BuildInputV1("tools/runtime.a", sha256_u8_hex(runtime))]
+    val policy = RemoteEvidencePolicyV1(host_id: "host_a", assignment_digest: sha256_text("container assignment"),
+        controller_epoch: 7, operation_id: "operation_a", action_kind: "build", expected_tests: [],
+        test_report_path: "", maximum_bytes: 65536, toolchain_inputs: tools)
+    val policy_payload = remote_policy_encode_v1(policy).unwrap()
+    val environment = ExecutionEnvironmentV2(host_id: "host_a", execution_platform: "linux",
+        target_platform: "linux", test_runtime: "native", isolation_class: "native-container",
+        toolchain_digest: remote_inventory_digest_v1(tools), sdk_digest: sha256_text("container sdk"),
+        abi: "gnu", isa: "x86_64", optimization: "debug")
+    val environment_digest = distributed_environment_digest_v2(environment).unwrap()
+    val context_payload = build_runner_context_encode_v1(BuildRunnerTaskContextV1(backend: "llvm",
+        runtime_digest: tools[1].digest, policy_digest: sha256_text(policy_payload),
+        environment_digest: environment_digest)).unwrap()
+    val source = "fn main(): 0\n"
+    val nonce = sha256_text("synthetic workspace nonce subject")
+    val task = BuildTaskV1(id: "task_a", attempt: 1, phase: "native", producer_digest: tools[0].digest,
+        source_digest: sha256_text(source), toolchain_digest: environment.toolchain_digest,
+        dependencies: [], program: "tools/simple", args: ["native-build", "src/main.spl"],
+        inputs: [BuildInputV1("src/main.spl", sha256_text(source)), tools[0], tools[1],
+            BuildInputV1("remote-policy/task_a.sdn", sha256_text(policy_payload)),
+            BuildInputV1("task-context/task_a.sdn", sha256_text(context_payload)),
+            BuildInputV1("remote-container/task_a.sdn", sha256_text(request_payload)),
+            BuildInputV1("remote-workspace/task_a.nonce", sha256_text(nonce + "\n")),
+            BuildInputV1("remote-container-provider/task_a.sdn", sha256_text(provider + "\n"))],
+        outputs: ["artifact/program.bin", "remote-workspace/task_a.probe.sdn"], cache_key: sha256_text("container cache"),
+        timeout_ms: 500, memory_limit_bytes: 512, links: [], memory_policy: "enforce")
+    val grant_wire = "DBC_EXECUTION_GRANT_V2\ngrant_1\nuser_1\nproject_1\nhost_a\n" +
+        environment_digest + "\n4\n2\n2000\n1024\n1000\n1\nbuild\n"
+    val request_wire = "DBC_OPERATION_V2\noperation_a\n" + sha256_text(builder_encode_task_v1(task)) +
+        "\nuser_1\nproject_1\nhost_a\nbuild\n" + environment_digest + "\n4\n2\n3\n512\n500\n"
+    val issuer_signed = pure_ed25519_sign_from_seed_v1(verification_seed(1), verification_bytes(
+        "DBC_GRANT_SIGNATURE_V2\nissuer_1\n1\n" + grant_wire.replace("\n", "%0A") + "\n"))
+    val approver_signed = pure_ed25519_sign_from_seed_v1(verification_seed(65), verification_bytes(
+        "DBC_APPROVAL_SIGNATURE_V2\napprover_1\n1\n" + sha256_text(grant_wire) + "\n" +
+        sha256_text(request_wire) + "\n4\n3\n1900\n"))
+    val host_signed = pure_ed25519_sign_from_seed_v1(verification_seed(129), [])
+    val grant = ExecutionGrantV2(id: "grant_1", principal: "user_1", project: "project_1", host_id: "host_a",
+        operations: ["build"], environment_digest: environment_digest, policy_revision: 4, revocation_epoch: 2,
+        expires_at: 2000, maximum_memory_bytes: 1024, maximum_duration_ms: 1000)
+    val operation = OperationEnvelopeV2(version: 2, id: "operation_a",
+        payload_digest: sha256_text(builder_encode_task_v1(task)), principal: "user_1", project: "project_1",
+        host_id: "host_a", operation: "build", environment_digest: environment_digest,
+        policy_revision: 4, revocation_epoch: 2, session_generation: 3, memory_bytes: 512, duration_ms: 500)
+    expect(distributed_encode_operation_v2(operation).unwrap()).to_equal(request_wire)
+    expect(distributed_grant_digest_v2(grant).unwrap()).to_equal(sha256_text(grant_wire))
+    val authority = RemoteAuthorityContextV1(
+        signed: DistributedSignedGrantV2(grant: grant, issuer_id: "issuer_1", key_revision: 1, signature: issuer_signed.signature),
+        approval: DistributedSignedApprovalV2(approver_id: "approver_1", key_revision: 1,
+            grant_digest: sha256_text(grant_wire), request_digest: sha256_text(request_wire),
+            policy_revision: 4, session_generation: 3, expires_at: 1900, signature: approver_signed.signature),
+        issuer: container_parent_key_v2("issuer_1", "grant-issuer", issuer_signed.public_key),
+        approver: container_parent_key_v2("approver_1", "human-approver", approver_signed.public_key),
+        host_key: container_parent_key_v2("host_signer_1", "execution-host", host_signed.public_key),
+        request: operation, requested: environment, observed: environment, now: 1100,
+        policy_revision: 4, revocation_epoch: 2, session_generation: 3,
+        assignment_digest: policy.assignment_digest, controller_epoch: policy.controller_epoch)
+    expect(remote_context_admit_v1(authority, task, policy)).to_equal(Ok(true))
+    val output = RemoteOutputBytesV1("artifact/program.bin", [0u8, 128u8, 255u8, 10u8])
+    val probe = "SIMPLE-REMOTE-CONTAINER-WORKSPACE-PROBE-2\n" + builder_task_identity_v1(task) +
+        "\n" + nonce + "\nwrite-read-delete\n"
+    val probe_output = RemoteOutputBytesV1("remote-workspace/task_a.probe.sdn", probe.bytes())
+    val outputs: [RemoteOutputBytesV1] = if exit_code == 0: [output, probe_output] else: []
+    var result_outputs: [BuildInputV1] = []
+    for item in outputs: result_outputs = result_outputs.push(BuildInputV1(item.path, sha256_u8_hex(item.content)))
+    val result = BuildResultV1(task_id: task.id, attempt: task.attempt,
+        identity_digest: builder_task_identity_v1(task), host_id: policy.host_id,
+        status: if exit_code == 0: "OK" else: "ERROR", exit_code: exit_code,
+        outputs: result_outputs, cache_hits: -1, cache_misses: -1, cache_stores: -1)
+    val bytes = RemoteContainerBytesV2(execution: execution, stdout: [1u8, 0u8, 255u8], stderr: [], outputs: outputs,
+        selected_user: container_parent_user_fixture_v2(execution), workspace_probe: probe)
+    val frozen = remote_container_evidence_freeze_v2(task, result, policy, request, provider, bytes).unwrap()
+    val completion = container_parent_completion_resign_v2(RemoteContainerCompletionV2(version: 2,
+        task_identity: builder_task_identity_v1(task), host_id: policy.host_id,
+        assignment_digest: policy.assignment_digest, controller_epoch: policy.controller_epoch,
+        operation_id: policy.operation_id, request_digest: sha256_text(request_wire), grant_digest: sha256_text(grant_wire),
+        result_digest: frozen.result_digest, execution_digest: frozen.execution_digest,
+        stdout_digest: frozen.stdout_digest, stderr_digest: frozen.stderr_digest,
+        output_inventory_digest: frozen.output_inventory_digest, tests_digest: frozen.tests_digest,
+        signer_id: "host_signer_1", key_revision: 1, completed_at: 1099, signature: []))
+    val host = BuildHostV1(id: policy.host_id, transport: "ssh", endpoint: "fixture-container-host",
+        workspace: "/fixture/work", worker_program: "/fixture/buildrunner",
+        worker_digest: sha256_text("container fixture worker"), slots: 1)
+    val run = BuildRunV1(tasks: [task], hosts: [host], keep_going: false, max_attempts: 1)
+    for directory in ["source/src", "source/tools", "source/remote-policy", "source/task-context",
+            "source/remote-container", "source/remote-container-provider", "source/remote-workspace", "state"]:
+        expect(dir_create_all(root + "/" + directory)).to_equal(true)
+    expect(file_atomic_write(root + "/source/src/main.spl", source)).to_equal(true)
+    expect(file_atomic_write_bytes(root + "/source/tools/simple", compiler)).to_equal(true)
+    expect(file_atomic_write_bytes(root + "/source/tools/runtime.a", runtime)).to_equal(true)
+    expect(file_atomic_write(root + "/source/remote-policy/task_a.sdn", policy_payload)).to_equal(true)
+    expect(file_atomic_write(root + "/source/task-context/task_a.sdn", context_payload)).to_equal(true)
+    expect(file_atomic_write(root + "/source/remote-container/task_a.sdn", request_payload)).to_equal(true)
+    expect(file_atomic_write(root + "/source/remote-workspace/task_a.nonce", nonce + "\n")).to_equal(true)
+    expect(file_atomic_write(root + "/source/remote-container-provider/task_a.sdn", provider + "\n")).to_equal(true)
+    RemoteContainerParentFixtureV2(root, task, run, policy, request, provider, authority,
+        RemoteContainerBundleV2(result: result, evidence: bytes, completion: completion))
+
+fn container_parent_open_v2(fixture: RemoteContainerParentFixtureV2) -> RemoteContainerDatabaseSessionV2:
+    var operations = distributed_operation_journal_open_v2(fixture.root + "/operations",
+        sha256_text("container fixture authority"), sha256_text(fixture.root + "/nonce"), 1000).unwrap()
+    if operations.operations.len() == 0:
+        val initial = distributed_operation_initial_v2(distributed_encode_operation_v2(fixture.authority.request).unwrap()).unwrap()
+        operations = distributed_operation_journal_commit_v2(operations, initial).unwrap()
+        operations = distributed_operation_journal_commit_v2(operations,
+            distributed_operation_transition_v2(initial, "executing", "").unwrap()).unwrap()
+    val base = remote_database_session_open_v1(fixture.run, fixture.root + "/state", fixture.root + "/source",
+        {fixture.task.id: fixture.policy}, operations).unwrap()
+    remote_container_session_v2(base, [fixture.task], {fixture.task.id: fixture.request},
+        {fixture.task.id: fixture.provider_identity_digest}).unwrap()
+
+fn container_parent_release_v2(session: RemoteContainerDatabaseSessionV2):
+    expect(task_runner_journal_release_v1(session.parent.database.journal)).to_equal(Ok(true))
+    expect(distributed_operation_journal_close_v2(session.parent.operations)).to_equal(Ok(true))
+
+export RemoteContainerParentFixtureV2, container_parent_fixture_v2
+export container_parent_open_v2, container_parent_release_v2, container_parent_completion_resign_v2

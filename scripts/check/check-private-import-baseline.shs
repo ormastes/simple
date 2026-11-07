@@ -25,10 +25,13 @@ BASELINE_REL="scripts/check/private_import_baseline.txt"
 
 stale_scan() (
     scan_root=$(cd "$1" && pwd -P) || return 2
-    scan_tmp_parent=$(cd "${TMPDIR:-/tmp}" && pwd -P) || return 2
-    scan_tmp=$(mktemp -d "$scan_tmp_parent/private-import-sources.XXXXXX") || return 2
-    case $scan_tmp in "$scan_tmp_parent"/private-import-sources.*) ;; *) return 2 ;; esac
+    # Plain `mktemp -d` like the other check scripts: a hand-built
+    # "$(pwd -P of TMPDIR)/..." template broke on Windows (Git Bash), where
+    # the physical TMPDIR spelling and mktemp's own path disagreed and every
+    # later write hit "sources: No such file or directory".
+    scan_tmp=$(mktemp -d) || { echo 'private-import mktemp failed' >&2; return 2; }
     trap 'rm -rf "$scan_tmp"' EXIT INT TERM HUP
+    [ -d "$scan_tmp" ] && : > "$scan_tmp/.probe" || { echo "private-import temp dir unusable: $scan_tmp" >&2; return 2; }
     git -C "$scan_root" ls-files -t --stage -z > "$scan_tmp/index.raw" || return 2
     # -z has no record newlines: any LF here belongs to a filename. The
     # line-based baseline cannot represent it; reject before NUL conversion
@@ -53,8 +56,10 @@ stale_scan() (
         case $source_path in ''|/*|*\\*|?:*|..|../*|*/../*|*/..) echo 'private-import source path escapes root' >&2; return 2 ;; esac
         if [ -e "$scan_root/$source_path" ] || [ -L "$scan_root/$source_path" ]; then
             [ -f "$scan_root/$source_path" ] && [ -r "$scan_root/$source_path" ] || return 2
-            source_real=$(realpath "$scan_root/$source_path") || return 2
-            case $source_real in "$scan_root"/*) ;; *) echo 'private-import source symlink escapes root' >&2; return 2 ;; esac
+            # Containment is checked in ONE batched realpath after the loop:
+            # a realpath spawn per file (~3.6k) took 20+ min of near-0-CPU
+            # process-creation wait on Windows and read as a hang.
+            printf '%s\000' "$scan_root/$source_path" >> "$scan_tmp/realpath-req" || return 2
             printf '%s|%s\n' "$source_path" "$scan_root/$source_path" >> "$scan_tmp/sources" || return 2
             continue
         fi
@@ -72,6 +77,12 @@ stale_scan() (
             *) printf '%s|\n' "$source_path" >> "$scan_tmp/sources" || return 2 ;;
         esac
     done < "$scan_tmp/plan" || return 2
+    if [ -s "$scan_tmp/realpath-req" ]; then
+        xargs -0 realpath -- < "$scan_tmp/realpath-req" > "$scan_tmp/realpath-out" || return 2
+        awk -v root="$scan_root/" 'index($0, root) != 1 { bad=1 } END { if (bad) exit 1 }' "$scan_tmp/realpath-out" || {
+            echo 'private-import source symlink escapes root' >&2; return 2; }
+        [ "$(tr -cd '\000' < "$scan_tmp/realpath-req" | wc -c)" -eq "$(awk 'END { print NR }' "$scan_tmp/realpath-out")" ] || return 2
+    fi
     if [ -s "$scan_tmp/requests" ]; then
         # No -u: checkout-index must not update the live index/stat cache.
         # Filters/attributes may transform extracted bytes, so verify raw blob
@@ -277,9 +288,7 @@ selftest() {
 }
 
 sparse_extra_controls() (
-    extra_tmp=$(cd "${TMPDIR:-/tmp}" && pwd -P) || return 2
-    extra_dir=$(mktemp -d "$extra_tmp/private-import-new.XXXXXX") || return 2
-    case $extra_dir in "$extra_tmp"/private-import-new.*) ;; *) return 2 ;; esac
+    extra_dir=$(mktemp -d) || return 2
     trap 'rm -rf "$extra_dir"' EXIT INT TERM HUP
     mkdir -p "$extra_dir/scripts/check" "$extra_dir/lib"
     printf 'fn live() -> i64:\n    1\n' > "$extra_dir/lib/m.spl"
@@ -325,9 +334,7 @@ sparse_extra_controls() (
 
 
 shell_index_controls() (
-    shell_tmp=$(cd "${TMPDIR:-/tmp}" && pwd -P) || return 2
-    shell_dir=$(mktemp -d "$shell_tmp/private-import-shell.XXXXXX") || return 2
-    case $shell_dir in "$shell_tmp"/private-import-shell.*) ;; *) return 2 ;; esac
+    shell_dir=$(mktemp -d) || return 2
     trap 'rm -rf "$shell_dir"' EXIT INT TERM HUP
     mkdir -p "$shell_dir/scripts/check" "$shell_dir/lib"
     printf 'fn live() -> i64:\n    1\n' > "$shell_dir/lib/m.spl"
@@ -358,9 +365,7 @@ shell_index_controls() (
 
 
 shell_failure_controls() (
-    failure_tmp=$(cd "${TMPDIR:-/tmp}" && pwd -P) || return 2
-    failure_dir=$(mktemp -d "$failure_tmp/private-import-failure.XXXXXX") || return 2
-    case $failure_dir in "$failure_tmp"/private-import-failure.*) ;; *) return 2 ;; esac
+    failure_dir=$(mktemp -d) || return 2
     trap 'rm -rf "$failure_dir"' EXIT INT TERM HUP
     mkdir -p "$failure_dir/scripts/check" "$failure_dir/lib" || return 2
     printf 'fn live() -> i64:\n    1\n' > "$failure_dir/lib/m.spl" || return 2
@@ -368,6 +373,18 @@ shell_failure_controls() (
     (cd "$failure_dir" && git init -q && git config core.autocrlf false && git config user.email t@t && git config user.name t && git add -A && git commit -qm base) || return 2
     failure_output=$(stale_scan "$failure_dir"); failure_status=$?
     [ "$failure_status" -eq 0 ] && [ -z "$failure_output" ] || return 2
+    # Temp dir regression (Windows "sources: No such file or directory"):
+    # TMPDIR with a space, and in Windows spelling where cygpath exists, must
+    # still scan cleanly with nothing on stderr.
+    mkdir "$failure_dir/tmp dir" || return 2
+    failure_tmpdirs="$failure_dir/tmp dir"
+    if command -v cygpath >/dev/null 2>&1; then failure_tmpdirs="$failure_tmpdirs${NL}$(cygpath -m "$failure_dir/tmp dir")"; fi
+    while IFS= read -r failure_td; do
+        failure_err=$(TMPDIR=$failure_td stale_scan "$failure_dir" 2>&1 >/dev/null); failure_status=$?
+        [ "$failure_status" -eq 0 ] && [ -z "$failure_err" ] || { echo "ERROR - temp dir under TMPDIR=$failure_td failed ($failure_status: $failure_err)"; return 2; }
+    done <<FAILURE_TD
+$failure_tmpdirs
+FAILURE_TD
     # Force a real redirection failure at the production sources initializer.
     # The wrapper still creates a real private mktemp directory; no Git or
     # scanner output is mocked into a success result.
@@ -394,19 +411,296 @@ shell_failure_controls() (
     echo 'PASS - real write-failure/empty-map/newline-index controls'
 )
 
+# ---------------------------------------------------------------------------
+# Diff-scoped committed-content mode (push tier): --range BASE..NEW
+#
+# Reads COMMITTED content only, with a fixed process count independent of
+# baseline size (mktemp, rev-parse, diff, tr, ls-tree, two cat-file --batch streams,
+# two awk): no working tree, no index extraction, no per-file process. Each
+# spawn costs ~0.7 s on a loaded Windows host, so the count is the budget.
+#   * ratchet: NEW's baseline may not gain any line vs BASE's (removals only);
+#   * stale: only baseline entries whose source path the range touched or
+#     deleted are re-verified against NEW's blob. An untouched source cannot
+#     become stale and a shrinking baseline cannot create a stale entry, so
+#     every other entry keeps BASE's verdict. The whole-baseline stale scan
+#     (tree mode, no --range) remains for CI's extended job / --selftest.
+# ---------------------------------------------------------------------------
+
+NL='
+'
+
+# plan_awk CHANGED STREAM REQ AFF DIFF_RC: STREAM is the cat-file --batch stream of
+# BASE^{commit}, NEW^{commit}, BASE:baseline, NEW:baseline. Writes affected entries to AFF and
+# "<NEW>:<path>" requests to REQ; prints one status line:
+#   ERR <reason> | ADDED <k> <first5> | OK <total> <affected> <changed> <base-has-baseline 0|1> <base-sha> <new-sha>
+plan_awk() {
+    LC_ALL=C awk -v req="$3" -v aff="$4" -v drc="$5" '
+        FILENAME==ARGV[1] { if ($0 ~ /^"/) { err="changed path needs quoting (unrepresentable in baseline)"; exit }
+                            if ($0!="") { chg[$0]=1; nchg++ }; next }
+        rem > 0 { rem -= length($0) + 1; if (!(rem == 0 && length($0) == 0)) { if (k==3) base[$0]=1; else if (k==4) nl[++nn]=$0 }; next }
+        { k++; if ($0 ~ / missing$/) { if (k<=2) { err="range endpoint is not a readable commit"; exit }; miss[k]=1; next }
+          if (NF!=3 || $1 !~ /^[0-9a-f]+$/ || $3 !~ /^[0-9]+$/ || $2!=(k<=2?"commit":"blob")) { err="object stream malformed"; exit }
+          oid[k]=$1; rem=$3+1 }
+        END {
+            if (err!="") { print "ERR " err; exit }
+            if (k!=4 || rem>0) { print "ERR object stream malformed"; exit }
+            if (drc!=0) { print "ERR git diff failed"; exit }
+            if (nchg<1) { print "ERR range changes 0 files"; exit }
+            if (miss[4] || nn<1) { print "ERR no or empty baseline at NEW"; exit }
+            added=0; first=""
+            for (i=1;i<=nn;i++) {
+                l=nl[i]; split(l,p,"|")
+                if (p[1] ~ /:/) { print "ERR baseline path contains :"; exit }
+                if (!miss[3] && !(l in base) && !(l in dup)) { dup[l]=1; added++; if (added<=5) first=first l " " }
+                if (p[1] in chg) { print l > aff; naff++; if (!(p[1] in rq)) { rq[p[1]]=1; print oid[2] ":" p[1] > req } }
+            }
+            if (added) { print "ADDED " added " " oid[1] " " first; exit }
+            printf "OK %d %d %d %d %s %s\n", nn, naff+0, nchg, miss[3]?0:1, oid[1], oid[2]
+        }' "$1" "$2"
+}
+
+# classify_awk AFF REQ TREE SRCSTREAM: SRCSTREAM answers REQ in order. TREE
+# supplies the pinned commit's modes and object IDs (cat-file has no objectmode
+# format atom). Prints
+# stale `path|name` entries; exit 2 on a malformed/truncated stream or a
+# non-regular source blob (symlink, gitlink).
+classify_awk() {
+    LC_ALL=C awk -F'|' '
+        FILENAME==ARGV[1] { aff[++na]=$0; next }
+        FILENAME==ARGV[2] { request[++nr]=$0; p=$0; sub(/^[^:]*:/,"",p); path[nr]=p; wanted[p]=1; next }
+        FILENAME==ARGV[3] {
+            tab=index($0,"\t"); if (!tab) { bad=1; exit }
+            p=substr($0,tab+1)
+            if (p in wanted) {
+                n=split(substr($0,1,tab-1),h," ")
+                if (p in mode || n!=3 || (h[1]!="100644" && h[1]!="100755") || h[2]!="blob" || h[3] !~ /^[0-9a-f]+$/) { bad=1; exit }
+                mode[p]=h[1]; oid[p]=h[3]
+            }
+            next }
+        rem > 0 { rem -= length($0) + 1; line=$0
+            if (rem<0) { bad=1; exit }
+            if (match(line,/^fn[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) {
+                nm=substr(line,RSTART,RLENGTH); sub(/^fn[ \t]+/,"",nm); priv[cur SUBSEP nm]=1
+            } else if (match(line,/^export[ \t]+/) && line !~ /^export[ \t]+use[ \t]/) {
+                rest=substr(line,RLENGTH+1); gsub(/[,]/," ",rest); np=split(rest,parts,/[ \t]+/)
+                for (i=1;i<=np;i++) if (parts[i]!="") expo[cur SUBSEP parts[i]]=1
+            }
+            next }
+        { k++; cur=path[k]
+          if ($0 ~ / missing$/) { if ($0!=request[k] " missing" || (cur in mode)) { bad=1; exit }; next }
+          n=split($0,h," ")
+          if (n!=3 || !(cur in mode) || h[1]!=oid[cur] || h[2]!="blob" || h[3] !~ /^[0-9]+$/) { bad=1; exit }
+          s=h[3]
+          present[cur]=1; rem=s+1 }
+        END {
+            if (bad || rem>0 || k!=nr) exit 2
+            for (j=1;j<=na;j++) { split(aff[j],e,"|")
+                if (!(e[1] in present) || !((e[1] SUBSEP e[2]) in priv) || ((e[1] SUBSEP e[2]) in expo)) print aff[j] }
+        }' "$1" "$2" "$3" "$4"
+}
+
+range_scan() (
+    rroot=$1
+    case $2 in *..*) ;; *) echo "ERROR - nothing was checked (--range needs BASE..NEW, got $2)"; exit 2 ;; esac
+    rbase=${2%%..*}; rnew=${2#*..}
+    case "$rbase" in ''|-*|*[[:space:]]*) echo "ERROR - nothing was checked (bad range endpoint: $2)"; exit 2 ;; esac
+    case "$rnew" in ''|-*|*[[:space:]]*) echo "ERROR - nothing was checked (bad range endpoint: $2)"; exit 2 ;; esac
+    rtmp=$(mktemp -d) || { echo "ERROR - nothing was checked (mktemp)"; exit 2; }
+    trap 'rm -rf "$rtmp"' EXIT INT TERM HUP
+    # Two independent git reads run CONCURRENTLY (git startup is ~1-3 s on a
+    # loaded Windows host): one cat-file stream resolves both endpoints AND
+    # reads both baselines; diff lists the changed paths. quotepath=false
+    # keeps UTF-8 names verbatim; any name git must still quote (LF, '"',
+    # '\', control chars) is refused by plan_awk, never skipped.
+    printf '%s^{commit}\n%s^{commit}\n%s:%s\n%s:%s\n' "$rbase" "$rnew" "$rbase" "$BASELINE_REL" "$rnew" "$BASELINE_REL" > "$rtmp/blreq"
+    git -C "$rroot" -c core.quotepath=false diff --no-renames --name-only "$rbase^{commit}" "$rnew^{commit}" -- > "$rtmp/changed" 2>/dev/null &
+    dpid=$!
+    git -C "$rroot" cat-file --batch='%(objectname) %(objecttype) %(objectsize)' < "$rtmp/blreq" > "$rtmp/bl" 2>/dev/null &
+    bpid=$!
+    range_parser_selftest "$rtmp"; prc=$?
+    wait "$dpid"; drc=$?
+    wait "$bpid"; brc=$?
+    [ "$prc" -eq 0 ] || exit 2
+    [ "$brc" -eq 0 ] || { echo "ERROR - nothing was checked (object read failed)"; exit 2; }
+    : > "$rtmp/req"; : > "$rtmp/aff"
+    plan_awk "$rtmp/changed" "$rtmp/bl" "$rtmp/req" "$rtmp/aff" "$drc" > "$rtmp/st" || { echo "ERROR - nothing was checked (plan failed)"; exit 2; }
+    IFS= read -r st < "$rtmp/st" || st=
+    case $st in
+        "ERR "*) echo "ERROR - nothing was checked (${st#ERR } in $2)"; exit 2 ;;
+        "ADDED "*) set -- ${st#ADDED }; k=$1; rb=$2; shift 2; echo "FAIL - baseline gained $k line(s) vs $rb (removals only): $*"; exit 1 ;;
+        "OK "*) ;;
+        *) echo "ERROR - nothing was checked (plan status unexpected)"; exit 2 ;;
+    esac
+    set -- ${st#OK }; total=$1; naff=$2; nchanged=$3; rb=$5; rn=$6
+    if [ "$4" = 1 ]; then ratchet="0 added vs $rb"; else ratchet="ratchet skipped (base $rb has no baseline: introducing change)"; fi
+    if [ "$naff" -eq 0 ]; then
+        echo "PASS - $nchanged changed file(s) checked, 0 of $total baseline entries affected, $ratchet"
+        exit 0
+    fi
+    # Mode is tree metadata, not an object property. Read it from the same
+    # immutable NEW commit used by REQ, never from the live index/worktree.
+    # Quoted paths cannot match REQ: plan_awk already refuses them in diff.
+    git -C "$rroot" -c core.quotepath=false ls-tree -r --full-tree "$rn" > "$rtmp/tree" 2>/dev/null || {
+        echo "ERROR - nothing was checked (source tree read failed)"; exit 2; }
+    git -C "$rroot" cat-file --batch='%(objectname) %(objecttype) %(objectsize)' < "$rtmp/req" > "$rtmp/src" 2>/dev/null || {
+        echo "ERROR - nothing was checked (source read failed)"; exit 2; }
+    classify_awk "$rtmp/aff" "$rtmp/req" "$rtmp/tree" "$rtmp/src" > "$rtmp/stale" || {
+        echo "ERROR - nothing was checked (source stream malformed or non-regular blob)"; exit 2; }
+    k=0; first=""
+    while IFS= read -r l; do k=$((k+1)); [ $k -le 5 ] && first="$first$l "; done < "$rtmp/stale"
+    if [ "$k" -gt 0 ]; then
+        echo "FAIL - $naff affected entries checked, $k stale: $first"
+        exit 1
+    fi
+    echo "PASS - $nchanged changed file(s) checked, $naff of $total baseline entries re-verified, 0 stale, $ratchet"
+)
+
+# Git-free parser self-check DIR [full]: before every --range scan it runs
+# one awk spawn over a size-delimited stream with a file lacking a trailing
+# newline, an empty blob, a missing object, pub promotion and export. With
+# `full` (--selftest) it also proves a symlink and a truncated stream ERROR.
+range_parser_selftest() {
+    pt=$1
+    printf 'lib/a.spl|live\nlib/a.spl|tail\nlib/e.spl|live\nlib/gone.spl|live\nlib/p.spl|live\nlib/p.spl|ex\n' > "$pt/st.aff"
+    printf 'x:lib/a.spl\nx:lib/e.spl\nx:lib/gone.spl\nx:lib/p.spl\n' > "$pt/st.req"
+    printf '100644 blob aaa\tlib/a.spl\n100644 blob eee\tlib/e.spl\n100755 blob fff\tlib/p.spl\n' > "$pt/st.tree"
+    printf 'aaa blob 31\nfn live() -> i64:\n    1\nfn tail\neee blob 0\n\nx:lib/gone.spl missing\nfff blob 39\npub fn live() -> i64:\nfn ex()\nexport ex\n' > "$pt/st.src"
+    classify_awk "$pt/st.aff" "$pt/st.req" "$pt/st.tree" "$pt/st.src" > "$pt/st.out"; rc=$?
+    out=; while IFS= read -r l; do out="$out${out:+$NL}$l"; done < "$pt/st.out"
+    exp="lib/e.spl|live${NL}lib/gone.spl|live${NL}lib/p.spl|live${NL}lib/p.spl|ex"
+    [ "$rc" -eq 0 ] && [ "$out" = "$exp" ] || { echo "ERROR - parser selftest: stale set wrong (rc=$rc: $out)"; return 2; }
+    [ "${2:-}" = full ] || return 0
+    printf 'lib/a.spl|live\n' > "$pt/st.aff"; printf 'x:lib/a.spl\n' > "$pt/st.req"
+    printf '120000 blob aaa\tlib/a.spl\n' > "$pt/st.tree"
+    printf 'aaa blob 3\nabc\n' > "$pt/st.src"
+    classify_awk "$pt/st.aff" "$pt/st.req" "$pt/st.tree" "$pt/st.src" >/dev/null 2>&1; lrc=$?
+    printf '100644 blob aaa\tlib/a.spl\n' > "$pt/st.tree"
+    printf 'aaa blob 99\nshort\n' > "$pt/st.src"
+    classify_awk "$pt/st.aff" "$pt/st.req" "$pt/st.tree" "$pt/st.src" >/dev/null 2>&1; trc=$?
+    [ "$lrc" -eq 2 ] || { echo "ERROR - parser selftest: symlink source must ERROR"; return 2; }
+    [ "$trc" -eq 2 ] || { echo "ERROR - parser selftest: truncated stream must ERROR"; return 2; }
+    printf 'bbb blob 3\nabc\n' > "$pt/st.src"
+    classify_awk "$pt/st.aff" "$pt/st.req" "$pt/st.tree" "$pt/st.src" >/dev/null 2>&1; rc=$?
+    [ "$rc" -eq 2 ] || { echo "ERROR - parser selftest: mismatched tree/blob ID must ERROR"; return 2; }
+    printf 'x:lib/a.spl missing\n' > "$pt/st.src"
+    classify_awk "$pt/st.aff" "$pt/st.req" "$pt/st.tree" "$pt/st.src" >/dev/null 2>&1; rc=$?
+    [ "$rc" -eq 2 ] || { echo "ERROR - parser selftest: unreadable tracked blob must ERROR"; return 2; }
+    printf 'aaa blob 2\nabc\n' > "$pt/st.src"
+    classify_awk "$pt/st.aff" "$pt/st.req" "$pt/st.tree" "$pt/st.src" >/dev/null 2>&1; rc=$?
+    [ "$rc" -eq 2 ] || { echo "ERROR - parser selftest: oversized stream record must ERROR"; return 2; }
+    return 0
+}
+
+# Git fixtures for --range (run by --selftest and tree mode, not at push).
+range_fixture_selftest() (
+    rd=$(mktemp -d) || exit 2
+    trap 'rm -rf "$rd"' EXIT INT TERM HUP
+    mkdir -p "$rd/scripts/check" "$rd/lib" "$rd/doc"
+    printf 'fn live() -> i64:\n    1\nfn other() -> i64:\n    2\n' > "$rd/lib/m.spl"
+    printf 'lib/m.spl|live\nlib/m.spl|other\n' > "$rd/$BASELINE_REL"
+    printf 'a\n' > "$rd/doc/x.md"
+    g() { git -C "$rd" "$@"; }
+    commit() { g add -A && g commit -qm "$1" && g rev-parse HEAD; }
+    (g init -q && g config core.autocrlf false && g config user.email t@t && g config user.name t) || exit 2
+    b0=$(commit base) || exit 2
+    expect() { o=$(range_scan "$rd" "$1"); c=$?; [ "$c" -eq "$2" ] || { echo "ERROR - range selftest $3: exit $c ($o)"; exit 2; }
+        case $o in *"$4"*) ;; *) echo "ERROR - range selftest $3: missing '$4' ($o)"; exit 2 ;; esac; }
+    printf 'b\n' > "$rd/doc/x.md"; b1=$(commit docs) || exit 2
+    expect "$b0..$b1" 0 untouched "0 of 2 baseline entries affected"
+    expect "$b1..$b1" 2 empty-range "changes 0 files"
+    expect "$b0..nosuch" 2 bad-endpoint "not a readable commit"
+    printf 'lib/m.spl|live\n' > "$rd/$BASELINE_REL"; b2=$(commit removal) || exit 2
+    expect "$b1..$b2" 0 removal "0 added"
+    printf 'fn live() -> i64:\n    1\nfn other() -> i64:\n    2\nfn leak() -> i64:\n    3\n' > "$rd/lib/m.spl"
+    printf 'lib/m.spl|live\nlib/m.spl|leak\n' > "$rd/$BASELINE_REL"; b3=$(commit leak) || exit 2
+    expect "$b2..$b3" 1 new-leak "gained 1 line"
+    g checkout -q "$b2" 2>/dev/null || exit 2
+    printf 'pub fn live() -> i64:\n    1\n' > "$rd/lib/m.spl"; b4=$(commit promote) || exit 2
+    expect "$b2..$b4" 1 promotion "lib/m.spl|live"
+    g rm -q lib/m.spl && b5=$(g commit -qm del && g rev-parse HEAD) || exit 2
+    expect "$b4..$b5" 1 deletion "lib/m.spl|live"
+    g checkout -q "$b2" 2>/dev/null || exit 2
+    printf 'fn live() -> i64:\n    9\n' > "$rd/lib/m.spl"; b6=$(commit edit) || exit 2
+    expect "$b2..$b6" 0 regular-blob "1 of 1 baseline entries re-verified"
+    # Sparse checkout without lib/: committed content still verifies.
+    (g sparse-checkout init --cone && g sparse-checkout set scripts/check) >/dev/null 2>&1 || exit 2
+    [ ! -e "$rd/lib/m.spl" ] || { echo "ERROR - range selftest: sparse fixture not sparse"; exit 2; }
+    # A different live index must neither influence the pinned source nor be
+    # changed by its metadata/blob reads. This uses real Git, including on 2.43.
+    dirty=$(printf 'pub fn live() -> i64:\n    0\n' | g hash-object -w --stdin) || exit 2
+    g update-index --cacheinfo "100644,$dirty,lib/m.spl" && g update-index --skip-worktree lib/m.spl || exit 2
+    before=$(g hash-object --no-filters "$rd/.git/index") || exit 2
+    expect "$b2..$b6" 0 sparse-dirty-index "1 of 1 baseline entries re-verified"
+    [ ! -e "$rd/lib/m.spl" ] && [ "$(g hash-object --no-filters "$rd/.git/index")" = "$before" ] || { echo 'ERROR - range selftest: checkout/index changed'; exit 2; }
+    g reset -q --hard "$b6" && g sparse-checkout disable || exit 2
+    blob=$(g rev-parse "$b6:lib/m.spl") || exit 2
+    g update-index --cacheinfo "100755,$blob,lib/m.spl" || exit 2
+    b7=$(g commit -qm executable && g rev-parse HEAD) || exit 2
+    expect "$b6..$b7" 0 executable-blob "1 of 1 baseline entries re-verified"
+    g update-index --cacheinfo "120000,$blob,lib/m.spl" || exit 2
+    b8=$(g commit -qm symlink && g rev-parse HEAD) || exit 2
+    expect "$b7..$b8" 2 symlink "non-regular blob"
+    g update-index --cacheinfo "160000,$b6,lib/m.spl" || exit 2
+    b9=$(g commit -qm gitlink && g rev-parse HEAD) || exit 2
+    expect "$b8..$b9" 2 gitlink "non-regular blob"
+    # Corrupt an otherwise reachable loose blob: this is a read ERROR, never
+    # a stale declaration or a successful scan of an empty stream.
+    g update-index --cacheinfo "100644,$dirty,lib/m.spl" || exit 2
+    b10=$(g commit -qm unreadable && g rev-parse HEAD) || exit 2
+    prefix=$(printf '%.2s' "$dirty"); suffix=${dirty#??}
+    rm "$rd/.git/objects/$prefix/$suffix" || exit 2
+    expect "$b9..$b10" 2 missing-blob "non-regular blob"
+    echo 'PASS - range fixtures: untouched/empty/bad-endpoint/removal/leak/promotion/deletion/regular/sparse/index/executable/symlink/gitlink/missing-blob'
+)
+
+# Hang guard: a full tree scan over 400 baseline files and a --range scan run
+# as real child processes under `timeout`; not finishing is a FAIL, never a
+# wait. Replays the 20+ min near-0-CPU "hang" (one realpath per file).
+# PRIVATE_IMPORT_NESTED=1 skips the selftest suites in the child.
+timeout_guard_selftest() (
+    command -v timeout >/dev/null 2>&1 || { echo "ERROR - hang guard: timeout(1) unavailable"; exit 2; }
+    td=$(mktemp -d) || exit 2
+    trap 'rm -rf "$td"' EXIT INT TERM HUP
+    mkdir -p "$td/scripts/check" "$td/lib" || exit 2
+    awk -v d="$td" 'BEGIN { for (i = 0; i < 400; i++) { f = "lib/f" i ".spl"; print "fn p" i "() -> i64:\n    1" > (d "/" f); close(d "/" f); print f "|p" i > (d "/scripts/check/private_import_baseline.txt") } }' || exit 2
+    (cd "$td" && git init -q && git config core.autocrlf false && git config user.email t@t && git config user.name t && git add -A && git commit -qm base) >/dev/null 2>&1 || exit 2
+    printf 'fn p0() -> i64:\n    2\n' > "$td/lib/f0.spl"
+    (cd "$td" && git commit -qam edit) >/dev/null 2>&1 || exit 2
+    o=$(PRIVATE_IMPORT_NESTED=1 timeout 300 sh "$self" --root "$td" --base HEAD~1 < /dev/null 2>&1); c=$?
+    [ "$c" -ne 124 ] || { echo "ERROR - hang guard: tree scan did not finish in 300 s"; exit 2; }
+    case "$c:$o" in 0:*PASS*"400 baseline entries checked"*) ;; *) echo "ERROR - hang guard: tree scan ($c: $o)"; exit 2 ;; esac
+    o=$(PRIVATE_IMPORT_NESTED=1 timeout 120 sh "$self" --range HEAD~1..HEAD --root "$td" < /dev/null 2>&1); c=$?
+    [ "$c" -ne 124 ] || { echo "ERROR - hang guard: range scan did not finish in 120 s"; exit 2; }
+    case "$c:$o" in 0:*PASS*"1 of 400 baseline entries re-verified"*) ;; *) echo "ERROR - hang guard: range scan ($c: $o)"; exit 2 ;; esac
+    echo 'PASS - hang guard: tree + range scans finished under timeout'
+)
+self=$0
 
 main_root=.
 main_base=${PRIVATE_IMPORT_BASE:-}
+main_range=
 mode=scan
 while [ $# -gt 0 ]; do
     case $1 in
         --root) main_root=$2; shift ;;
         --base) main_base=$2; shift ;;
+        --range) main_range=$2; mode=range; shift ;;
         --selftest) mode=selftest ;;
         *) echo "ERROR - nothing was checked (unknown arg $1)"; exit 2 ;;
     esac
     shift
 done
-( selftest ) || exit 2
+if [ "$mode" = range ]; then
+    # Push tier: the git-fixture suites cost ~150 process spawns, which is
+    # minutes on a loaded Windows host; they run under --selftest / tree mode.
+    range_scan "$main_root" "$main_range"
+    exit $?
+fi
+if [ "${PRIVATE_IMPORT_NESTED:-}" != 1 ]; then
+    ( selftest ) || exit 2
+    pst=$(mktemp -d) || exit 2; range_parser_selftest "$pst" full; prc=$?; rm -rf "$pst"; [ "$prc" -eq 0 ] || exit 2
+    range_fixture_selftest || exit 2
+    timeout_guard_selftest || exit 2
+fi
 [ "$mode" = selftest ] && { echo "PASS - selftest fixtures ok"; exit 0; }
 scan "$main_root" "$main_base"

@@ -7,7 +7,16 @@
 # probe.  This module does not install tools, change uid maps, change kernel
 # policy, or infer capability from an engine name.
 
+pub use std.nogc_async_mut.container.providers.linux.engine_policy_v1.{LinuxOciEnginePolicyV1, LinuxOciEngineObservationV1}
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.{linux_oci_engine_policy_error_v1,
+    linux_oci_engine_observation_match_v1, linux_oci_engine_route_v1}
+use std.nogc_async_mut.container.providers.linux.engine_observer_v1.linux_oci_engine_observe_v1
+use std.common.contracts.container.effect_deadline_v1.{ContainerEffectDeadlineV1,
+    container_effect_deadline_v1, container_effect_remaining_ms_v1}
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
 use std.common.contracts.container.command_v1.oci_command_parts_v1
+use std.common.contracts.container.execution_options_v1.oci_execution_options_v1
+use std.nogc_async_mut.container.providers.linux.execution_user_v2.{build_execution_user_command_v2, linux_oci_execution_user_parse_v2}
 pub use std.nogc_async_mut.container.providers.linux.request_v1.LinuxOciRequestV1
 use std.nogc_async_mut.container.providers.linux.request_v1.{linux_oci_request_bounds_v1, linux_oci_request_digest_v1}
 use std.common.contracts.container.bound_intent_v2.{RuntimeBoundIntentV2, runtime_bound_intent_encode_v2, runtime_bound_intent_decode_v2, runtime_bound_intent_match_v2}
@@ -22,7 +31,8 @@ use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1,
     RUNTIME_STATUS_BLOCKED, runtime_identity_empty, runtime_command_empty,
     runtime_state_empty, RUNTIME_PRIVILEGE_ROOTLESS, RUNTIME_PRIVILEGE_ROOT,
     RUNTIME_PRIVILEGE_UNKNOWN}
-use std.nogc_sync_mut.io.process_ops.{process_run_timeout, process_run_bounded}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout, process_run_bounded,
+    process_run_bounded_admitted_v1, process_run_bounded_observed_v1}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_publish_noreplace, file_remove, directory_fsync, file_is_regular_no_follow,
     file_read_regular_no_follow_bounded, file_lock, file_unlock}
 use std.nogc_sync_mut.sffi.fs.{file_atomic_write_mode}
@@ -66,6 +76,21 @@ pub struct ScriptedCommandResultV1:
     stdout: text
     stderr: text
     exit_code: i64
+    # Explicit fixture representation of the native bounded-capture flag.
+    output_limited: bool = false
+
+# Fresh configured-user metadata, not an effective process UID measurement.
+pub struct LinuxOciExecutionUserObservationV2:
+    operation: RuntimeOperationV1
+    selected_user: text
+    observed_unix_ms: i64
+    provider_identity_digest: text
+
+# Native object absence is not a lifecycle completion or helper-group reap.
+pub struct LinuxOciAbsenceObservationV2:
+    operation: RuntimeOperationV1
+    observed_unix_ms: i64
+    provider_identity_digest: text
 
 struct RuntimeExecResultV1:
     stdout: text
@@ -85,6 +110,12 @@ pub class LinuxOciRuntimeProviderV1:
     timeout_ms: i64
     live_enabled: bool
     scripted: bool
+    engine_policy: LinuxOciEnginePolicyV1?
+    engine_baseline: LinuxOciEngineObservationV1?
+    scripted_engine_observation: LinuxOciEngineObservationV1?
+    effect_deadline: ContainerEffectDeadlineV1?
+    scripted_effect_clock_ms: [i64]
+    var scripted_effect_clock_cursor: i64
     # Explicit fixture opt-in: exact scripted effects with real owned journals.
     # Production constructors leave this false; live execution always journals.
     persist_scripted_journal: bool
@@ -106,9 +137,220 @@ impl LinuxOciRuntimeProviderV1:
             state_dir: state_dir, node_boot_id: node_boot_id,
             provider_generation: provider_generation,
             timeout_ms: effective_timeout, live_enabled: live_enabled,
-            scripted: false, persist_scripted_journal: false, scripted_results: [], intents: [], request_bindings: {}, states: [],
+            scripted: false, engine_policy: nil, engine_baseline: nil, scripted_engine_observation: nil,
+            effect_deadline: nil, scripted_effect_clock_ms: [], scripted_effect_clock_cursor: 0,
+            persist_scripted_journal: false, scripted_results: [], intents: [], request_bindings: {}, states: [],
             operation_sequence: 0, scripted_cursor: 0, executor_calls: 0)
         provider
+
+    pub static fn new_with_engine_policy(platform: text, engine: text, state_dir: text,
+            node_boot_id: text, provider_generation: i64, policy: LinuxOciEnginePolicyV1,
+            live_enabled: bool = true,
+            timeout_ms: i64 = OCI_DEFAULT_TIMEOUT_MS) -> Result<LinuxOciRuntimeProviderV1, text>:
+        val error = linux_oci_engine_policy_error_v1(policy)
+        if error != "": return Err(error)
+        if platform != "linux" or engine != OCI_ENGINE_PODMAN:
+            return Err("engine-policy-linux-podman-required")
+        if not live_enabled: return Err("engine-policy-live-observation-required")
+        if timeout_ms <= 0: return Err("engine-policy-timeout-invalid")
+        val provider = LinuxOciRuntimeProviderV1.new(platform, engine, state_dir,
+            node_boot_id, provider_generation, true, timeout_ms)
+        val config = provider.validate_probe_config()
+        if not config.accepted: return Err(config.reason)
+        val observed = linux_oci_engine_observe_v1(policy, if timeout_ms > 5000: 5000 else: timeout_ms)?
+        provider.engine_policy = Some(policy)
+        provider.engine_baseline = Some(observed)
+        Ok(provider)
+
+    # Explicit typed fixture injection; production construction never selects it.
+    pub static fn scripted_with_engine_policy(platform: text, engine: text, state_dir: text,
+            node_boot_id: text, provider_generation: i64, policy: LinuxOciEnginePolicyV1,
+            baseline: LinuxOciEngineObservationV1, current: LinuxOciEngineObservationV1,
+            results: [ScriptedCommandResultV1],
+            timeout_ms: i64 = OCI_DEFAULT_TIMEOUT_MS) -> Result<LinuxOciRuntimeProviderV1, text>:
+        val error = linux_oci_engine_policy_error_v1(policy)
+        if error != "": return Err(error)
+        if platform != "linux" or engine != OCI_ENGINE_PODMAN:
+            return Err("engine-policy-linux-podman-required")
+        val valid = linux_oci_engine_observation_match_v1(policy, baseline)?
+        val provider = LinuxOciRuntimeProviderV1.scripted(platform, engine, state_dir,
+            node_boot_id, provider_generation, results, timeout_ms)
+        provider.engine_policy = Some(policy)
+        provider.engine_baseline = Some(baseline)
+        provider.scripted_engine_observation = Some(current)
+        Ok(provider)
+
+    pub fn engine_observation_v1() -> Result<LinuxOciEngineObservationV1, text>:
+        val policy = match self.engine_policy:
+            case Some(value): value
+            case nil: return Err("engine-policy-required")
+        val baseline = match self.engine_baseline:
+            case Some(value): value
+            case nil: return Err("engine-observation-baseline-required")
+        val observed = if self.scripted:
+            match self.scripted_engine_observation:
+                case Some(value): value
+                case nil: return Err("engine-scripted-observation-required")
+        else:
+            linux_oci_engine_observe_v1(policy, if self.timeout_ms > 5000: 5000 else: self.timeout_ms)?
+        val valid = linux_oci_engine_observation_match_v1(policy, observed)?
+        if observed.identity_digest != baseline.identity_digest: return Err("engine-observation-identity-changed")
+        Ok(observed)
+
+    # Trusted Host/common-API composition installs this only after verifying its
+    # grant/approval. This setter validates data; it does not verify signatures.
+    pub fn set_effect_deadline_v1(value: ContainerEffectDeadlineV1) -> Result<(), text>:
+        val checked = container_effect_deadline_v1(value.request_digest, value.operation_id,
+            value.actions, value.expires_at_unix_ms)?
+        self.effect_deadline = Some(checked)
+        Ok(())
+
+    # Explicit deterministic fixture seam. Production providers cannot replace
+    # the native clock, and an exhausted fixture clock fails closed.
+    pub fn set_scripted_effect_clock_v1(samples_unix_ms: [i64]) -> Result<(), text>:
+        if not self.scripted: return Err("container-effect-clock-fixture-only")
+        if samples_unix_ms.len() == 0 or samples_unix_ms.len() > 512:
+            return Err("container-effect-clock-fixture-limit")
+        self.scripted_effect_clock_ms = samples_unix_ms
+        self.scripted_effect_clock_cursor = 0
+        Ok(())
+
+    fn _effect_clock_unix_ms_v1() -> i64:
+        if self.scripted:
+            if self.scripted_effect_clock_cursor >= self.scripted_effect_clock_ms.len(): return -1
+            val sampled = self.scripted_effect_clock_ms[self.scripted_effect_clock_cursor]
+            self.scripted_effect_clock_cursor = self.scripted_effect_clock_cursor + 1
+            return sampled
+        val micros = time_sample_unix_micros_or_failure()
+        if micros < 0: return -1
+        micros / 1000
+
+    # Called after observations, immediately before the native launch. Attach
+    # owners outside _execute must use this same gate and carry its absolute
+    # deadline into the broker's final pre-exec check. Remaining time is not a
+    # lifetime timeout and grants no stop/destroy authority.
+    pub fn check_launch_deadline_v1(request: LinuxOciRequestV1, action: text) -> Result<i64, text>:
+        val deadline = match self.effect_deadline:
+            case Some(value): value
+            case nil: return Err("container-effect-deadline-required")
+        val digest = linux_oci_request_digest_v1(request)?
+        val now = self._effect_clock_unix_ms_v1()
+        container_effect_remaining_ms_v1(deadline, digest, request.operation_id, action, now)
+
+    pub fn retained_engine_observation_v1() -> Result<LinuxOciEngineObservationV1, text>:
+        match self.engine_baseline:
+            case Some(value): Ok(value)
+            case nil: Err("engine-observation-baseline-required")
+
+    # Serialized common-API composition bounds each operation by its signed
+    # request duration. This is independent of launch-admission expiry.
+    pub fn set_operation_timeout_v1(timeout_ms: i64) -> Result<(), text>:
+        if timeout_ms <= 0: return Err("provider-operation-timeout-invalid")
+        self.timeout_ms = timeout_ms
+        Ok(())
+
+    # Read the durable identity through the same strict payload/scope gate used
+    # by lifecycle operations. A corrupt disk record cannot be replaced by cache.
+    pub fn retained_intent_v1(request: LinuxOciRequestV1,
+            allow_legacy: bool = false) -> Result<RuntimeIntentV1, text>:
+        val valid = self.validate(request)
+        if not valid.accepted: return Err(valid.reason)
+        val binding_error = self._request_binding_error(request, allow_legacy)
+        if binding_error != "": return Err(binding_error)
+        # Validate the same decoded record we return. A second read must not
+        # silently fall back to cache after corruption or a payload change.
+        val digest = linux_oci_request_digest_v1(request)?
+        val retained = match self._read_bound_intent(request):
+            case Ok(bound):
+                runtime_bound_intent_match_v2(bound, digest, request.operation_id)?
+                bound.identity
+            case Err(reason):
+                if reason == "intent-legacy-unbound" and allow_legacy:
+                    val legacy = self._read_legacy_intent(request)?
+                    val legacy_error = self._legacy_reconciliation_error(request, legacy)
+                    if legacy_error != "": return Err(legacy_error)
+                    legacy
+                elif reason == "intent-absent":
+                    val key = self._binding_key(request)
+                    if self.request_bindings.has(key):
+                        val bound = self.request_bindings[key]
+                        runtime_bound_intent_match_v2(bound, digest, request.operation_id)?
+                        bound.identity
+                    elif allow_legacy:
+                        val legacy = self._intent_for(request.pod_uid, request.attempt)
+                        if legacy.operation_id == "": return Err("intent-not-found")
+                        val legacy_error = self._legacy_reconciliation_error(request, legacy)
+                        if legacy_error != "": return Err(legacy_error)
+                        legacy
+                    else:
+                        return Err("intent-not-found")
+                else:
+                    return Err(reason)
+        if retained.operation_id == "": return Err("intent-not-found")
+        val scope_error = self._retained_scope_error(request, retained)
+        if scope_error != "": return Err(scope_error)
+        Ok(retained)
+
+    # Independent storage query, including after a retained destroyed tombstone.
+    # Podman documents container-exists status 0=present, 1=absent, 125=error.
+    # No names, partial IDs, stderr substring inference, or global cleanup.
+    pub me observe_absence_v2(request: LinuxOciRequestV1,
+            expected: RuntimeIdentityV1) -> Result<LinuxOciAbsenceObservationV2, text>:
+        if self.engine != OCI_ENGINE_PODMAN or not self.engine_policy.?:
+            return Err("absence-managed-podman-required")
+        if not builder_digest_valid_v1(expected.native_id): return Err("absence-full-native-id-required")
+        val retained = self.retained_intent_v1(request)?
+        if retained.pod_uid != expected.pod_uid or retained.attempt != expected.attempt or
+                retained.provider_generation != expected.provider_generation or
+                retained.operation_id != expected.operation_id or retained.engine != expected.engine or
+                retained.native_id != expected.native_id or retained.node_boot_id != expected.node_boot_id:
+            return Err("absence-retained-identity-mismatch")
+        if not self.live_enabled: return Err(OCI_REASON_PROVIDER_UNAVAILABLE)
+        val command = RuntimeCommandV1(operation: "absence", program: self.engine,
+            args: ["container", "exists", expected.native_id])
+        val run = self._execute(command, request)
+        if not run.matched: return Err(self._execution_failure_reason_v1(run, "absence-query-failed"))
+        if run.exit_code == 0: return Err("absence-native-object-present")
+        if run.exit_code != 1 or run.stdout != "" or run.stderr != "":
+            return Err("absence-native-query-unproven")
+        val observed_ms = self._effect_clock_unix_ms_v1()
+        if observed_ms < 0: return Err("absence-observation-clock-unavailable")
+        val baseline = self.retained_engine_observation_v1()?
+        val state = _state_from_intent(retained, RUNTIME_PHASE_DESTROYED, "independently-observed-absent")
+        val operation = RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: "absence",
+            command: self._receipt_command_v1(command), state: state, exit_code: run.exit_code,
+            stdout: run.stdout, stderr: run.stderr, reason: "exact-native-object-absence-v1")
+        Ok(LinuxOciAbsenceObservationV2(operation: operation, observed_unix_ms: observed_ms,
+            provider_identity_digest: baseline.identity_digest))
+
+    pub me observe_execution_user_v2(request: LinuxOciRequestV1,
+            expected: RuntimeIdentityV1) -> Result<LinuxOciExecutionUserObservationV2, text>:
+        val valid = self.validate(request)
+        if not valid.accepted: return Err(valid.reason)
+        if self.engine != OCI_ENGINE_PODMAN or not self.engine_policy.?:
+            return Err("execution-user-managed-podman-required")
+        if not builder_digest_valid_v1(expected.native_id): return Err("execution-user-full-native-id-required")
+        val retained = self.retained_intent_v1(request)?
+        if retained.pod_uid != expected.pod_uid or retained.attempt != expected.attempt or
+                retained.provider_generation != expected.provider_generation or
+                retained.operation_id != expected.operation_id or retained.engine != expected.engine or
+                retained.native_id != expected.native_id or retained.node_boot_id != expected.node_boot_id:
+            return Err("execution-user-retained-identity-mismatch")
+        if not self.live_enabled: return Err(OCI_REASON_PROVIDER_UNAVAILABLE)
+        val command = build_execution_user_command_v2(self.engine, expected.native_id)?
+        val run = self._execute(command, request)
+        if not run.matched: return Err(self._execution_failure_reason_v1(run, "execution-user-query-failed"))
+        if run.exit_code != 0 or run.stderr != "": return Err("execution-user-query-unproven")
+        val selected = linux_oci_execution_user_parse_v2(run.stdout, expected)?
+        val observed_ms = self._effect_clock_unix_ms_v1()
+        if observed_ms < 0: return Err("execution-user-observation-clock-unavailable")
+        val baseline = self.retained_engine_observation_v1()?
+        val operation = RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: "execution-user",
+            command: self._receipt_command_v1(command), state: _state_from_intent(retained, RUNTIME_PHASE_UNKNOWN, "configured-user-observed"),
+            exit_code: run.exit_code, stdout: run.stdout, stderr: run.stderr,
+            reason: "exact-native-execution-user-v1")
+        Ok(LinuxOciExecutionUserObservationV2(operation: operation, selected_user: selected,
+            observed_unix_ms: observed_ms, provider_identity_digest: baseline.identity_digest))
 
     # A deterministic executor seam for contract tests.  Each result is
     # matched by operation, program, and exact argv; an unmatched command is
@@ -122,7 +364,9 @@ impl LinuxOciRuntimeProviderV1:
         LinuxOciRuntimeProviderV1(platform: platform, engine: engine,
             state_dir: state_dir, node_boot_id: node_boot_id,
             provider_generation: provider_generation,
-            timeout_ms: effective_timeout, live_enabled: true, scripted: true, persist_scripted_journal: persist_scripted_journal,
+            timeout_ms: effective_timeout, live_enabled: true, scripted: true, engine_policy: nil, engine_baseline: nil, scripted_engine_observation: nil,
+            effect_deadline: nil, scripted_effect_clock_ms: [], scripted_effect_clock_cursor: 0,
+            persist_scripted_journal: persist_scripted_journal,
             scripted_results: _bounded_scripted_results(results), intents: [], request_bindings: {}, states: [],
             operation_sequence: 0, scripted_cursor: 0, executor_calls: 0)
 
@@ -136,7 +380,9 @@ impl LinuxOciRuntimeProviderV1:
         LinuxOciRuntimeProviderV1(platform: platform, engine: engine,
             state_dir: state_dir, node_boot_id: node_boot_id,
             provider_generation: provider_generation,
-            timeout_ms: effective_timeout, live_enabled: true, scripted: true, persist_scripted_journal: persist_scripted_journal,
+            timeout_ms: effective_timeout, live_enabled: true, scripted: true, engine_policy: nil, engine_baseline: nil, scripted_engine_observation: nil,
+            effect_deadline: nil, scripted_effect_clock_ms: [], scripted_effect_clock_cursor: 0,
+            persist_scripted_journal: persist_scripted_journal,
             scripted_results: _bounded_scripted_results(results),
             intents: _bounded_intents(intents), request_bindings: {}, states: [],
             operation_sequence: 0, scripted_cursor: 0, executor_calls: 0)
@@ -166,6 +412,22 @@ impl LinuxOciRuntimeProviderV1:
             return RuntimeProbeV1(provider: "linux-oci-v1", engine: self.engine,
                 engine_present: false, healthy: false, launch_capable: false,
                 privilege: RUNTIME_PRIVILEGE_UNKNOWN, reason: valid.reason)
+        if self.engine_policy.?:
+            val observed = match self.engine_observation_v1():
+                case Ok(value): value
+                case Err(reason):
+                    return RuntimeProbeV1(provider: "linux-oci-v1", engine: self.engine,
+                        engine_present: false, healthy: false, launch_capable: false,
+                        privilege: RUNTIME_PRIVILEGE_UNKNOWN, reason: reason)
+            val capability = rootless_capability_error(_rootless_capability_evidence(observed.uid.to_text()))
+            if capability != "":
+                return RuntimeProbeV1(provider: "linux-oci-v1", engine: self.engine,
+                    engine_present: true, healthy: true, launch_capable: false,
+                    privilege: RUNTIME_PRIVILEGE_UNKNOWN, reason: capability)
+            return RuntimeProbeV1(provider: "linux-oci-v1", engine: self.engine,
+                engine_present: true, healthy: true, launch_capable: true,
+                privilege: RUNTIME_PRIVILEGE_ROOTLESS,
+                reason: "trusted-admin mutable-path observation matched; not sealed")
         if self.scripted:
             return RuntimeProbeV1(provider: "linux-oci-v1", engine: self.engine,
                 engine_present: true, healthy: true, launch_capable: true,
@@ -221,10 +483,10 @@ impl LinuxOciRuntimeProviderV1:
         match linux_oci_request_bounds_v1(request):
             case Err(reason): return RuntimeValidationV1(accepted: false, reason: reason)
             case Ok(_): pass
-        if request.environment.len() != 0 or request.working_directory != "":
-            return RuntimeValidationV1(accepted: false, reason: "execution-options-not-admitted")
         if request.terminal_mode != "none":
             return RuntimeValidationV1(accepted: false, reason: "terminal-mode-not-admitted")
+        val build_roots_error = _linux_oci_build_roots_error_v1(request)
+        if build_roots_error != "": return RuntimeValidationV1(accepted: false, reason: build_roots_error)
         if self.platform != "linux":
             return RuntimeValidationV1(accepted: false,
                 reason: "unsupported-platform: linux OCI provider received " + self.platform)
@@ -415,11 +677,11 @@ impl LinuxOciRuntimeProviderV1:
         if not self._save_intent(request, operation_id, "", RUNTIME_PHASE_PREPARED):
             return self._rejected("create", "intent-journal-write-failed",
                 runtime_command_empty())
-        val run = self._execute(command.1)
+        val run = self._execute(command.1, request)
         if not run.matched:
             return self._create_failure_with_recovery(request,
                 self._rejected_with_output("create", current, command.1,
-                    "scripted-command-not-found", run.stdout, run.stderr, run.exit_code))
+                    self._execution_failure_reason_v1(run, "scripted-command-not-found"), run.stdout, run.stderr, run.exit_code))
         if run.exit_code != 0:
             return self._create_failure_with_recovery(request,
                 self._rejected_with_output("create", current, command.1,
@@ -429,6 +691,11 @@ impl LinuxOciRuntimeProviderV1:
             return self._create_failure_with_recovery(request,
                 self._rejected_with_output("create", current, command.1,
                     "native-create-returned-empty-id", run.stdout, run.stderr, run.exit_code))
+        if self.engine_policy.? and (not builder_digest_valid_v1(native_id) or
+                (run.stdout != native_id and run.stdout != native_id + "\n" and run.stdout != native_id + "\r\n")):
+            return self._create_failure_with_recovery(request,
+                self._rejected_with_output("create", current, command.1,
+                    "native-create-returned-unqualified-id", run.stdout, run.stderr, run.exit_code))
         var identity = current.identity
         identity.native_id = native_id
         identity.operation_id = operation_id
@@ -467,10 +734,10 @@ impl LinuxOciRuntimeProviderV1:
             return self._rejected("start", command.0, runtime_command_empty())
         if not self.live_enabled:
             return self._blocked("start", OCI_REASON_PROVIDER_UNAVAILABLE, command.1)
-        val run = self._execute(command.1)
+        val run = self._execute(command.1, request)
         if not run.matched:
             return self._rejected_with_output("start", current, command.1,
-                "scripted-command-not-found", run.stdout, run.stderr, run.exit_code)
+                self._execution_failure_reason_v1(run, "scripted-command-not-found"), run.stdout, run.stderr, run.exit_code)
         if run.exit_code != 0:
             return self._rejected_with_output("start", current, command.1,
                 "native-start-failed", run.stdout, run.stderr, run.exit_code)
@@ -494,10 +761,10 @@ impl LinuxOciRuntimeProviderV1:
                 command.1)
         if not self.live_enabled:
             return self._blocked("inspect", OCI_REASON_PROVIDER_UNAVAILABLE, command.1)
-        val run = self._execute(command.1)
+        val run = self._execute(command.1, request)
         if not run.matched:
             return self._rejected_with_output("inspect", current, command.1,
-                "scripted-command-not-found", run.stdout, run.stderr, run.exit_code)
+                self._execution_failure_reason_v1(run, "scripted-command-not-found"), run.stdout, run.stderr, run.exit_code)
         if run.exit_code != 0:
             return self._rejected_with_output("inspect", current, command.1,
                 "native-inspect-failed", run.stdout, run.stderr, run.exit_code)
@@ -511,18 +778,20 @@ impl LinuxOciRuntimeProviderV1:
                 self.states[index] = observed
                 self._ok("inspect", observed, command.1, "inspected")
 
-    me wait(request: LinuxOciRequestV1) -> RuntimeOperationV1:
+    me wait(request: LinuxOciRequestV1, observe_native: bool = false) -> RuntimeOperationV1:
         val current_result = self._current_for(request, "wait")
         if current_result.status != RUNTIME_STATUS_OK:
             return current_result
         val index = self._find(request.pod_uid, request.attempt)
         val current = self.states[index]
-        if current.phase == RUNTIME_PHASE_EXITED or
-                current.phase == RUNTIME_PHASE_STOPPED:
+        if observe_native and current.phase == RUNTIME_PHASE_DESTROYED:
+            return self._rejected("wait", "wait-retained-evidence-unavailable", runtime_command_empty())
+        val terminal = current.phase == RUNTIME_PHASE_EXITED or current.phase == RUNTIME_PHASE_STOPPED
+        if terminal and not observe_native:
             return self._ok("wait", current,
                 RuntimeCommandV1(operation: "wait", program: "", args: []),
                 "idempotent terminal observation")
-        if current.phase != RUNTIME_PHASE_RUNNING:
+        if current.phase != RUNTIME_PHASE_RUNNING and not (observe_native and terminal):
             return self._rejected("wait", "invalid-state-for-wait-" + current.phase,
                 runtime_command_empty())
         val command = build_wait_command(self.engine, self.state_dir,
@@ -531,10 +800,10 @@ impl LinuxOciRuntimeProviderV1:
             return self._rejected("wait", command.0, runtime_command_empty())
         if not self.live_enabled:
             return self._blocked("wait", OCI_REASON_PROVIDER_UNAVAILABLE, command.1)
-        val run = self._execute(command.1)
+        val run = self._execute(command.1, request)
         if not run.matched:
             return self._rejected_with_output("wait", current, command.1,
-                "scripted-command-not-found", run.stdout, run.stderr, run.exit_code)
+                self._execution_failure_reason_v1(run, "scripted-command-not-found"), run.stdout, run.stderr, run.exit_code)
         if run.exit_code != 0:
             return self._rejected_with_output("wait", current, command.1,
                 "native-wait-failed", run.stdout, run.stderr, run.exit_code)
@@ -542,9 +811,18 @@ impl LinuxOciRuntimeProviderV1:
         if raw_code == "" or raw_code.to_i64().to_text() != raw_code:
             return self._rejected_with_output("wait", current, command.1,
                 "native-wait-returned-invalid-exit-code", run.stdout, run.stderr, run.exit_code)
+        if observe_native and raw_code.to_i64() < 0:
+            return self._rejected_with_output("wait", current, command.1,
+                "native-wait-returned-invalid-exit-code", run.stdout, run.stderr, run.exit_code)
         val exited = RuntimeStateV1(phase: RUNTIME_PHASE_EXITED,
             identity: current.identity, exit_code: raw_code.to_i64(), reason: "exited")
         self.states[index] = exited
+        if observe_native:
+            # Preserve the actual CLI exit separately from the workload exit.
+            # Common evidence hashes the native query and raw observed output.
+            return RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: "wait",
+                command: self._receipt_command_v1(command.1), state: exited,
+                exit_code: run.exit_code, stdout: run.stdout, stderr: run.stderr, reason: "exited")
         self._ok("wait", exited, command.1, "exited")
 
     pub fn logs(request: LinuxOciRequestV1) -> RuntimeOperationV1:
@@ -564,15 +842,15 @@ impl LinuxOciRuntimeProviderV1:
             return self._rejected("logs", command.0, runtime_command_empty())
         if not self.live_enabled:
             return self._blocked("logs", OCI_REASON_PROVIDER_UNAVAILABLE, command.1)
-        val run = self._execute(command.1)
+        val run = self._execute(command.1, request)
         if not run.matched:
             return self._rejected_with_output("logs", current, command.1,
-                "scripted-command-not-found", run.stdout, run.stderr, run.exit_code)
+                self._execution_failure_reason_v1(run, "scripted-command-not-found"), run.stdout, run.stderr, run.exit_code)
         if run.exit_code != 0:
             return self._rejected_with_output("logs", current, command.1,
                 "native-logs-failed", run.stdout, run.stderr, run.exit_code)
         RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: "logs",
-            command: command.1, state: current, exit_code: current.exit_code,
+            command: self._receipt_command_v1(command.1), state: current, exit_code: current.exit_code,
             stdout: run.stdout, stderr: run.stderr, reason: "observed")
 
     me stop(request: LinuxOciRequestV1) -> RuntimeOperationV1:
@@ -595,10 +873,10 @@ impl LinuxOciRuntimeProviderV1:
             return self._rejected("stop", command.0, runtime_command_empty())
         if not self.live_enabled:
             return self._blocked("stop", OCI_REASON_PROVIDER_UNAVAILABLE, command.1)
-        val run = self._execute(command.1)
+        val run = self._execute(command.1, request)
         if not run.matched:
             return self._rejected_with_output("stop", current, command.1,
-                "scripted-command-not-found", run.stdout, run.stderr, run.exit_code)
+                self._execution_failure_reason_v1(run, "scripted-command-not-found"), run.stdout, run.stderr, run.exit_code)
         if run.exit_code != 0:
             return self._rejected_with_output("stop", current, command.1,
                 "native-stop-failed", run.stdout, run.stderr, run.exit_code)
@@ -663,10 +941,10 @@ impl LinuxOciRuntimeProviderV1:
             return self._rejected("destroy", command.0, runtime_command_empty())
         if not self.live_enabled:
             return self._blocked("destroy", OCI_REASON_PROVIDER_UNAVAILABLE, command.1)
-        val run = self._execute(command.1)
+        val run = self._execute(command.1, request)
         if not run.matched:
             return self._rejected_with_output("destroy", current, command.1,
-                "scripted-command-not-found", run.stdout, run.stderr, run.exit_code)
+                self._execution_failure_reason_v1(run, "scripted-command-not-found"), run.stdout, run.stderr, run.exit_code)
         if run.exit_code != 0:
             return self._rejected_with_output("destroy", current, command.1,
                 "native-destroy-failed", run.stdout, run.stderr, run.exit_code)
@@ -746,10 +1024,10 @@ impl LinuxOciRuntimeProviderV1:
             return self._rejected("recover", command.0, runtime_command_empty())
         if not self.live_enabled:
             return self._blocked("recover", OCI_REASON_PROVIDER_UNAVAILABLE, command.1)
-        val run = self._execute(command.1)
+        val run = self._execute(command.1, request)
         if not run.matched:
             return self._rejected_with_output("recover", current, command.1,
-                "scripted-command-not-found", run.stdout, run.stderr, run.exit_code)
+                self._execution_failure_reason_v1(run, "scripted-command-not-found"), run.stdout, run.stderr, run.exit_code)
         if run.exit_code != 0:
             if native_inspect_definitively_not_found(self.engine, run.exit_code,
                     run.stderr):
@@ -764,6 +1042,18 @@ impl LinuxOciRuntimeProviderV1:
                 self._rejected_with_output("recover", current, command.1,
                     reason, run.stdout, run.stderr, run.exit_code)
             case Ok(recovered):
+                if self.engine_policy.?:
+                    if not builder_digest_valid_v1(recovered.identity.native_id):
+                        return self._rejected_with_output("recover", current, command.1,
+                            "native-recover-returned-unqualified-id", run.stdout, run.stderr, run.exit_code)
+                    # A successful create can have an uncertain/truncated reply.
+                    # Preserve the already bound request/operation and publish
+                    # its independently reconciled exact ID before success. The
+                    # existing writer rejects conflicts and never promotes V1.
+                    if self._has_bound_intent(request) and not self._save_intent(request,
+                            expected_operation_id, recovered.identity.native_id, recovered.phase):
+                        return self._rejected_with_output("recover", current, command.1,
+                            "recovered-intent-publication-uncertain", run.stdout, run.stderr, run.exit_code)
                 if index >= 0:
                     self.states[index] = recovered
                 else:
@@ -1201,21 +1491,57 @@ impl LinuxOciRuntimeProviderV1:
         false
 
 
-    fn _execute(command: RuntimeCommandV1) -> RuntimeExecResultV1:
+    fn _execution_failure_reason_v1(run: RuntimeExecResultV1, fallback: text) -> text:
+        if self.engine_policy.? and not run.matched and run.stderr != "":
+            return "engine-policy-refused: " + run.stderr
+        fallback
+
+    fn _receipt_command_v1(command: RuntimeCommandV1) -> RuntimeCommandV1:
+        if command.program == "" or command.program != self.engine: return command
+        if not self.engine_policy.?: return command
+        val policy = self.engine_policy.unwrap()
+        match linux_oci_engine_route_v1(policy, command.args):
+            case Ok(arguments): RuntimeCommandV1(operation: command.operation,
+                program: policy.executable_path, args: arguments)
+            case Err(_): runtime_command_empty()
+
+    fn _execute(command: RuntimeCommandV1, request: LinuxOciRequestV1) -> RuntimeExecResultV1:
         self.executor_calls = self.executor_calls + 1
+        var routed = command
+        if self.engine_policy.?:
+            val observed = match self.engine_observation_v1():
+                case Ok(value): value
+                case Err(reason): return RuntimeExecResultV1(stdout: "", stderr: reason, exit_code: -1, matched: false)
+            val policy = self.engine_policy.unwrap()
+            routed.program = policy.executable_path
+            routed.args = match linux_oci_engine_route_v1(policy, command.args):
+                case Ok(value): value
+                case Err(reason): return RuntimeExecResultV1(stdout: "", stderr: reason, exit_code: -1, matched: false)
+        # Managed launch authority is checked after the final policy observation
+        # and argv preparation. Read/reconcile and lifecycle cleanup do not
+        # borrow a launch grant; their callers retain their own authority.
+        val managed_launch = (self.engine_policy.? or self.effect_deadline.?) and
+            (command.operation == "create" or command.operation == "start")
+        if managed_launch:
+            match self.check_launch_deadline_v1(request, command.operation):
+                case Err(reason): return RuntimeExecResultV1(stdout: "", stderr: reason, exit_code: -1, matched: false)
+                case Ok(_): pass
         if self.scripted:
             if self.scripted_cursor >= self.scripted_results.len():
                 return RuntimeExecResultV1(stdout: "", stderr: "scripted-command-not-found",
                     exit_code: -1, matched: false)
             val scripted = self.scripted_results[self.scripted_cursor]
             if scripted.operation == command.operation and
-                    scripted.program == command.program and
-                    _args_equal(scripted.args, command.args):
+                    scripted.program == routed.program and
+                    _args_equal(scripted.args, routed.args):
                 self.scripted_cursor = self.scripted_cursor + 1
                 if scripted.stdout.len() > OCI_MAX_OUTPUT_BYTES or
                         scripted.stderr.len() > OCI_MAX_OUTPUT_BYTES:
                     return RuntimeExecResultV1(stdout: "", stderr: "output-limit-exceeded",
                         exit_code: -1, matched: true)
+                if scripted.output_limited:
+                    return RuntimeExecResultV1(stdout: scripted.stdout,
+                        stderr: "container-effect-process-limit:output", exit_code: -1, matched: false)
                 return RuntimeExecResultV1(stdout: scripted.stdout,
                     stderr: scripted.stderr, exit_code: scripted.exit_code,
                     matched: true)
@@ -1224,7 +1550,39 @@ impl LinuxOciRuntimeProviderV1:
         if not self.live_enabled:
             return RuntimeExecResultV1(stdout: "", stderr: OCI_REASON_PROVIDER_UNAVAILABLE,
                 exit_code: -1, matched: false)
-        val run = process_run_bounded(command.program, command.args, self.timeout_ms,
+        if managed_launch:
+            # The captured-process owner repeats the native clock check after
+            # acquiring its governor slot and immediately before child exec.
+            # The leaf check alone cannot cover that intervening wait/setup.
+            val admitted = process_run_bounded_admitted_v1(routed.program, routed.args,
+                self.timeout_ms, OCI_MAX_OUTPUT_BYTES, self.effect_deadline.unwrap().expires_at_unix_ms)
+            match admitted:
+                case Err(reason):
+                    return RuntimeExecResultV1(stdout: "", stderr: reason, exit_code: -1, matched: false)
+                case Ok(result):
+                    if result.limit_exceeded:
+                        return RuntimeExecResultV1(stdout: result.stdout,
+                            stderr: "container-effect-process-limit:" + result.limit_type,
+                            exit_code: -1, matched: false)
+                    return RuntimeExecResultV1(stdout: result.stdout, stderr: result.stderr,
+                        exit_code: result.exit_code, matched: true)
+        if self.engine_policy.?:
+            # Structured ordinary capture has no launch authority/deadline.
+            # Its native saturation flags must survive read/reconcile/cleanup;
+            # legacy head/tail text markers with CLI status zero are not proof
+            # that logs or an inspection response were complete.
+            match process_run_bounded_observed_v1(routed.program, routed.args,
+                    self.timeout_ms, OCI_MAX_OUTPUT_BYTES):
+                case Err(reason):
+                    return RuntimeExecResultV1(stdout: "", stderr: reason, exit_code: -1, matched: false)
+                case Ok(result):
+                    if result.limit_exceeded:
+                        return RuntimeExecResultV1(stdout: result.stdout,
+                            stderr: "container-effect-process-limit:" + result.limit_type,
+                            exit_code: -1, matched: false)
+                    return RuntimeExecResultV1(stdout: result.stdout, stderr: result.stderr,
+                        exit_code: result.exit_code, matched: true)
+        val run = process_run_bounded(routed.program, routed.args, self.timeout_ms,
             OCI_MAX_OUTPUT_BYTES)
         RuntimeExecResultV1(stdout: run.0, stderr: run.1,
             exit_code: run.2.to_i64(), matched: true)
@@ -1273,26 +1631,26 @@ impl LinuxOciRuntimeProviderV1:
     fn _ok(operation: text, state: RuntimeStateV1,
             command: RuntimeCommandV1, reason: text) -> RuntimeOperationV1:
         RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: operation,
-            command: command, state: state, exit_code: state.exit_code,
+            command: self._receipt_command_v1(command), state: state, exit_code: state.exit_code,
             stdout: "", stderr: "", reason: reason)
 
     fn _blocked(operation: text, reason: text,
             command: RuntimeCommandV1) -> RuntimeOperationV1:
         RuntimeOperationV1(status: RUNTIME_STATUS_BLOCKED, operation: operation,
-            command: command, state: runtime_state_empty(), exit_code: -1,
+            command: self._receipt_command_v1(command), state: runtime_state_empty(), exit_code: -1,
             stdout: "", stderr: "", reason: reason)
 
     fn _rejected(operation: text, reason: text,
             command: RuntimeCommandV1) -> RuntimeOperationV1:
         RuntimeOperationV1(status: RUNTIME_STATUS_REJECTED, operation: operation,
-            command: command, state: runtime_state_empty(), exit_code: -1,
+            command: self._receipt_command_v1(command), state: runtime_state_empty(), exit_code: -1,
             stdout: "", stderr: "", reason: reason)
 
     fn _rejected_with_output(operation: text, state: RuntimeStateV1,
             command: RuntimeCommandV1, reason: text, stdout: text, stderr: text,
             exit_code: i64) -> RuntimeOperationV1:
         RuntimeOperationV1(status: RUNTIME_STATUS_REJECTED, operation: operation,
-            command: command, state: state, exit_code: exit_code,
+            command: self._receipt_command_v1(command), state: state, exit_code: exit_code,
             stdout: stdout, stderr: stderr, reason: reason)
 
 impl RuntimeProviderV1 for LinuxOciRuntimeProviderV1:
@@ -1354,6 +1712,25 @@ fn _safe_token(value: text) -> bool:
         index = index + 1
     true
 
+# These roots are encoded in OCI --mount CSV. Reject syntax that could make
+# the effect differ from the typed workspace projection. Authorization and
+# no-follow ownership of the staged roots remain the Host's responsibility.
+fn _linux_oci_build_root_error_v1(root: text) -> text:
+    if not root.starts_with("/") or root.contains(",") or root.contains("\"") or
+            root.contains("\0") or root.contains("\n") or root.contains("\r") or root.contains("//"):
+        return "build-root-unsafe"
+    if root != "/" and root.ends_with("/"): return "build-root-not-canonical"
+    for segment in root.split("/"):
+        if segment == "." or segment == "..": return "build-root-not-canonical"
+    ""
+
+fn _linux_oci_build_roots_error_v1(request: LinuxOciRequestV1) -> text:
+    if request.build_input_root == "" and request.build_output_root == "": return ""
+    if request.build_input_root == "" or request.build_output_root == "": return "build-root-incomplete"
+    val input_error = _linux_oci_build_root_error_v1(request.build_input_root)
+    if input_error != "": return input_error
+    _linux_oci_build_root_error_v1(request.build_output_root)
+
 fn _locked_image(value: text) -> bool:
     val marker = "@sha256:"
     val at = value.index_of(marker)
@@ -1405,11 +1782,18 @@ fn _effective_cgroup_dir(content: text) -> text:
             return "/sys/fs/cgroup/" + relative
     ""
 
-fn _rootless_capability_evidence() -> RootlessCapabilityEvidenceV1:
-    val uid_result = process_run_timeout("id", ["-u"], 5000)
-    val uid = if uid_result.2.to_i64() == 0 then uid_result.0.trim() else ""
-    val username_result = process_run_timeout("id", ["-un"], 5000)
-    val username = if username_result.2.to_i64() == 0 then username_result.0.trim() else ""
+fn _rootless_capability_evidence(observed_uid: text = "") -> RootlessCapabilityEvidenceV1:
+    var uid = observed_uid
+    var username = ""
+    if observed_uid == "":
+        val uid_result = process_run_timeout("id", ["-u"], 5000)
+        uid = if uid_result.2.to_i64() == 0 then uid_result.0.trim() else ""
+        val username_result = process_run_timeout("id", ["-un"], 5000)
+        username = if username_result.2.to_i64() == 0 then username_result.0.trim() else ""
+    else:
+        for line in _read_probe_file("/etc/passwd").split("\n"):
+            val fields = line.split(":")
+            if fields.len() == 7 and fields[2] == uid: username = fields[0]
     val cgroup_dir = _effective_cgroup_dir(_read_probe_file("/proc/self/cgroup"))
     RootlessCapabilityEvidenceV1(uid: uid, username: username,
         uid_map: _read_probe_file("/proc/self/uid_map"),
@@ -1498,10 +1882,10 @@ pub fn build_create_command(engine: text, state_dir: text,
     match linux_oci_request_bounds_v1(request):
         case Err(reason): return (reason, runtime_command_empty())
         case Ok(_): pass
-    if request.environment.len() != 0 or request.working_directory != "":
-        return ("execution-options-not-admitted", runtime_command_empty())
     if request.terminal_mode != "none":
         return ("terminal-mode-not-admitted", runtime_command_empty())
+    val build_roots_error = _linux_oci_build_roots_error_v1(request)
+    if build_roots_error != "": return (build_roots_error, runtime_command_empty())
     match linux_oci_container_name(request.pod_uid, request.attempt):
         case Err(reason): return (reason, runtime_command_empty())
         case Ok(name):
@@ -1515,6 +1899,8 @@ pub fn build_create_command(engine: text, state_dir: text,
                     engine != OCI_ENGINE_RUNC:
                 return ("unsupported-engine: " + engine, runtime_command_empty())
             if engine == OCI_ENGINE_RUNC:
+                if request.environment.len() != 0 or request.working_directory != "":
+                    return ("runc-execution-options-unsupported", runtime_command_empty())
                 if request.replace_entrypoint:
                     return ("runc-entrypoint-override-unsupported", runtime_command_empty())
                 if request.bundle_path == "":
@@ -1543,6 +1929,7 @@ pub fn build_create_command(engine: text, state_dir: text,
                 "--network", request.network_policy,
                 "--read-only", "--security-opt", "no-new-privileges",
                 "--cap-drop", "ALL"]
+            if engine == OCI_ENGINE_PODMAN: args.push("--http-proxy=false")
             val build_mode = request.build_input_root != "" or request.build_output_root != ""
             if build_mode:
                 if request.build_input_root == "" or request.build_output_root == "":
@@ -1554,6 +1941,11 @@ pub fn build_create_command(engine: text, state_dir: text,
                 case Ok(parts): parts
                 case Err(reason): return (reason, runtime_command_empty())
             for option in command_parts.options:
+                args.push(option)
+            val execution_options = match oci_execution_options_v1(request.environment, request.working_directory):
+                case Ok(options): options
+                case Err(reason): return (reason, runtime_command_empty())
+            for option in execution_options:
                 args.push(option)
             if build_mode:
                 args.push("--mount")

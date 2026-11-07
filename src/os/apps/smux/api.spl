@@ -33,7 +33,7 @@ use os.apps.smux.service_revision.{ServiceRevisionState, service_revision_new,
     service_revision_publish, service_revision_writable, service_revision_reset, service_attachment_identities, service_revision_rollback_allowed}
 use os.apps.smux.client_attachment_service.{ClientAttachmentUpdate, client_attachment_index,
     client_attach_leased, client_resize_leased, client_reap_expired, client_attach_unmanaged}
-use os.apps.smux.pane_io_service.{pane_release_best_effort as _release_child,
+use os.apps.smux.pane_io_service.{
     pane_poll_state,
     pane_spawn_state,
     pane_spawn_pty_state,
@@ -51,7 +51,9 @@ use os.apps.smux.pane_io_service.{pane_release_best_effort as _release_child,
     pane_capture_history_state,
     pane_capture_frame_state}
 use os.apps.smux.session_lifecycle.{rename_session_state, remove_session_state, remove_window_state}
-use os.apps.smux.child_lifecycle.{close_owned_children}
+use os.apps.smux.child_lifecycle.{close_owned_children, prepare_pane_reset_v2}
+use std.sosix.process.{PipedProcessRefV1, PipedProcessOwnedTransferV2}
+use os.apps.smux.terminal_adoption_service_v2.{terminal_transport_adopt_ref_v2, terminal_transport_adopt_owned_v2}
 use os.apps.smux.pane_lifecycle.{PaneClosePending, close_pane_state,
     pane_close_window_pending, pane_close_poll_windows, pane_close_forget}
 use os.apps.smux.split_checkpoint.{SplitCheckpoint, split_checkpoint_capture, split_checkpoint_restore}
@@ -94,15 +96,12 @@ fn _publish(next: ServiceState) -> ServiceState:
         _client_leases.owner_nonce, service_attachment_identities(_client_leases))
     return canonical
 
-pub fn smux_configuration_writable() -> bool:
-    return service_revision_writable(_revisions)
+pub fn smux_configuration_writable() -> bool: service_revision_writable(_revisions)
 
-pub fn smux_configuration_revision() -> ServiceRevisionState:
-    return _revisions
+pub fn smux_configuration_revision() -> ServiceRevisionState: _revisions
 
 # Internal server projection only: never serialize native handles from this value.
-pub fn smux_owner_snapshot() -> ServiceState:
-    return _svc
+pub fn smux_owner_snapshot() -> ServiceState: _svc
 
 fn _clear_attachment_notices(update: ClientAttachmentUpdate):
     for item in update.cleared:
@@ -118,6 +117,10 @@ fn _geometry_quarantine(window_id: text, outcome: WindowGeometryUpdate):
 # Test support
 
 pub fn smux_reset_for_test():
+    val prepared = prepare_pane_reset_v2(_svc)
+    if not prepared.may_reset:
+        _svc = _publish(prepared.state)
+        return
     _revisions = service_revision_reset(_revisions)
     smux_notifications_clear_all()
     # Empty incarnation triggers fresh secure entropy on the next admission.
@@ -126,20 +129,13 @@ pub fn smux_reset_for_test():
     _closing_sessions = []
     _closing_windows = []
     _closing_panes = []
-    # Reap every attached child first: a reset must not leak processes.
-    var i = 0
-    while i < _svc.pane_count:
-        _release_child(_svc.get_pane(i))
-        i = i + 1
     _svc = _publish(ServiceState.empty())
 
 # Pure helpers
 
-fn id_text(n: int) -> text:
-    return "id" + n.to_text()
+fn id_text(n: int) -> text: "id" + n.to_text()
 
-fn _now_ns() -> u64:
-    return (time_now_unix_micros() * 1000) as u64
+fn _now_ns() -> u64: (time_now_unix_micros() * 1000) as u64
 
 fn _with_startup(st: ServiceState) -> ServiceState:
     val m = st.metrics
@@ -568,6 +564,27 @@ pub fn smux_pane_spawn(session_id: text, window_id: text, pane_id: text, cmd: te
     val updated = pane_spawn_state(_svc, smux_window_closing(session_id, window_id), session_id, window_id, pane_id, cmd, args)
     if updated.commit: _svc = _publish(updated.state)
     return updated.result
+
+# Trusted process-local transfer; the caller retains ownership on refusal.
+# Adoption is not engine readiness; references cannot be restored after restart.
+pub fn smux_pane_adopt_terminal_transport(session_id: text, window_id: text,
+        pane_id: text, expected_epoch: u64, expected_revision: u64,
+        expected_child_incarnation: u64, reference: PipedProcessRefV1) -> Result<i64, text>:
+    val updated = terminal_transport_adopt_ref_v2(_svc, _revisions,
+        smux_window_closing(session_id, window_id), session_id, window_id, pane_id,
+        expected_epoch, expected_revision, expected_child_incarnation, reference)?
+    _svc = _publish(updated)
+    return Ok(reference.pid)
+
+# Complete transfer retains cleanup provenance until a future verified host ack.
+pub fn smux_pane_adopt_owned_terminal_transport_v2(session_id: text, window_id: text,
+        pane_id: text, expected_epoch: u64, expected_revision: u64,
+        expected_child_incarnation: u64, transfer: PipedProcessOwnedTransferV2) -> Result<i64, text>:
+    val updated = terminal_transport_adopt_owned_v2(_svc, _revisions,
+        smux_window_closing(session_id, window_id), session_id, window_id, pane_id,
+        expected_epoch, expected_revision, expected_child_incarnation, transfer)?
+    _svc = _publish(updated)
+    return Ok(transfer.reference.pid)
 
 # Attaches a child on a real pseudo-terminal sized to the pane geometry.
 # `command_line` is handed to the platform launcher as one line (a shell path

@@ -465,6 +465,10 @@ fn preferred_stdlib_variant(base_dir: &Path) -> Option<&'static str> {
     ];
 
     let base = base_dir.to_string_lossy();
+    // Windows paths may mix separators. POSIX backslashes are filename bytes,
+    // so retain them rather than inventing a stdlib-family path component.
+    #[cfg(windows)]
+    let base = base.replace('\\', "/");
     VARIANTS.iter().copied().find(|variant| {
         let marker = format!("/src/lib/{variant}");
         base.contains(&format!("{marker}/")) || base.ends_with(&marker)
@@ -1112,7 +1116,10 @@ fn resolve_module_path_uncached(parts: &[String], base_dir: &Path) -> Result<Pat
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_cache_key, find_numbered_dir, find_workspace_boundary, normalize_base_dir, resolve_module_path};
+    use super::{
+        compute_cache_key, find_numbered_dir, find_workspace_boundary, normalize_base_dir, preferred_stdlib_variant,
+        resolve_module_path,
+    };
     use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1635,5 +1642,35 @@ mod tests {
             find_numbered_dir(temp.path(), "frontend"),
             Some(temp.path().join("10.frontend"))
         );
+    }
+
+    #[test]
+    fn stdlib_family_preference_keeps_component_boundaries() {
+        assert_eq!(preferred_stdlib_variant(Path::new("/repo/src/lib/nogc_sync_mut")), Some("nogc_sync_mut"));
+        assert_eq!(preferred_stdlib_variant(Path::new("/repo/src/lib/nogc_sync_mut/module")), Some("nogc_sync_mut"));
+        assert_eq!(preferred_stdlib_variant(Path::new("/repo/src/lib/nogc_sync_mut_extra/module")), None);
+        assert_eq!(preferred_stdlib_variant(Path::new("/repo/not_src/lib/nogc_sync_mut/module")), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stdlib_family_preference_accepts_windows_and_mixed_separators() {
+        for variant in ["nogc_sync_mut", "nogc_async_mut", "nogc_async_immut", "gc_async_mut", "nogc_async_mut_noalloc", "common"] {
+            let native = format!(r"C:\repo\src\lib\{variant}\module");
+            let mixed = format!(r"C:\repo/src/lib\{variant}/module");
+            let family_root = format!(r"C:\repo\src\lib\{variant}");
+            assert_eq!(preferred_stdlib_variant(Path::new(&native)), Some(variant));
+            assert_eq!(preferred_stdlib_variant(Path::new(&mixed)), Some(variant));
+            assert_eq!(preferred_stdlib_variant(Path::new(&family_root)), Some(variant));
+        }
+        assert_eq!(preferred_stdlib_variant(Path::new(r"C:\repo\src\lib\nogc_sync_mut_extra\module")), None);
+        assert_eq!(preferred_stdlib_variant(Path::new(r"C:\repo\not_src\lib\nogc_sync_mut\module")), None);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn stdlib_family_preference_preserves_posix_backslash_filename_bytes() {
+        assert_eq!(preferred_stdlib_variant(Path::new(r"/repo/src/lib\nogc_sync_mut/module")), None);
+        assert_eq!(preferred_stdlib_variant(Path::new(r"/repo\src\lib\nogc_sync_mut/module")), None);
     }
 }

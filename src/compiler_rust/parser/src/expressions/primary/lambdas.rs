@@ -97,9 +97,17 @@ impl<'a> Parser<'a> {
                             }
                         }
 
-                        // Consume dedent if present
+                        // A closer on the last body line has not emitted a
+                        // Dedent. Release only this lambda's consumed Indent,
+                        // leaving the closer for its enclosing list parser.
+                        // Match parse_lambda_body's backslash-lambda cleanup.
                         if self.check(&TokenKind::Dedent) {
                             self.advance();
+                        } else if matches!(
+                            self.current.kind,
+                            TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace
+                        ) {
+                            self.lexer.pop_indent();
                         }
 
                         // Disable forced indentation after lambda body

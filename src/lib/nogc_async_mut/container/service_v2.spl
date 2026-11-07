@@ -1,0 +1,95 @@
+# Persistent Windows service entrypoint. Start/refresh owners are quarantined;
+# only a trusted host's retained reconciliation acknowledgment opens launch.
+# Ordinary finite open never accepts this lower-assurance continuity route.
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.service_v2.*
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.string_core.str_len
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_scope_v2, simple_container_observation_v2}
+use std.nogc_async_mut.container.providers.windows.simple_container_adapter_v2.WindowsSimpleContainerAdapterV2
+
+pub struct ContainerServiceStartV2:
+    owner: SimpleContainerOwnerV2
+    scope: ContainerHostScopeV2
+    observation: ContainerHostObservationV2
+    inventory: [ContainerServiceInventoryEntryV2]
+    inventory_digest: text
+
+pub struct ContainerServiceInventoryTurnV2:
+    owner: SimpleContainerOwnerV2
+    inventory: [ContainerServiceInventoryEntryV2]?
+    inventory_digest: text
+    error: text
+
+pub struct ContainerServiceAdmissionTurnV2:
+    owner: SimpleContainerOwnerV2
+    admitted: bool
+    error: text
+
+pub fn simple_container_start_service_v2(backend: text, policy_bytes: text, state_root: text,
+        basis: ContainerServiceScopeBasisV2, expected_provider_identity_digest: text,
+        timeout_ms: i64) -> Result<ContainerServiceStartV2, text>:
+    if backend != "windows-docker-process": return Err("container-service-backend-unsupported")
+    if str_len(policy_bytes) == 0 or str_len(policy_bytes) > 1048576 or timeout_ms <= 0 or
+            str_len(state_root) == 0 or str_len(state_root) > 4096 or state_root.contains("\0") or
+            not builder_digest_valid_v1(expected_provider_identity_digest): return Err("container-service-input-invalid")
+    val started = WindowsSimpleContainerAdapterV2.start_service(policy_bytes, state_root, basis,
+        expected_provider_identity_digest, timeout_ms)?
+    # This leaf factory finishes read-only captures before constructing its
+    # data-only provider: no workload, stream, native handle or host writer has
+    # been acquired, authority is empty and the launch gate is closed. Thus
+    # validation errors below have no active cleanup obligation to drop. If the
+    # leaf ever acquires one, this API must return an owner-bearing start turn.
+    val adapter = started.0
+    val scope = started.1
+    val inventory = started.2
+    val observed = adapter.observation()
+    if scope.physical_host_id != basis.physical_host_id or scope.service_scope_id != basis.service_scope_id or
+            scope.native_machine_id != basis.native_machine_id or scope.provider_generation != basis.provider_generation or
+            scope.continuity_mode != "service-incarnation-v1" or scope.boot_id != "" or
+            observed.backend != backend or observed.execution_os != "windows" or
+            observed.native_machine_id != basis.native_machine_id or observed.native_boot_id != "" or
+            observed.continuity_assurance != "machine-boot-counter-v1" or observed.boot_observation == "" or
+            observed.provider_identity_digest != expected_provider_identity_digest:
+        return Err("container-service-start-observation-mismatch")
+    val digest = container_service_inventory_digest_v2(backend, scope, inventory)?
+    Ok(ContainerServiceStartV2(owner: SimpleContainerOwnerV2.Windows(scope, adapter), scope: scope,
+        observation: observed, inventory: inventory, inventory_digest: digest))
+
+# The host acquires its EXISTING writer before refresh. A factory's earlier
+# inventory cannot justify reconciliation across that writer acquisition gap.
+pub fn simple_container_inventory_service_v2(owner: SimpleContainerOwnerV2) -> ContainerServiceInventoryTurnV2:
+    match owner:
+        case SimpleContainerOwnerV2.Linux(_, _):
+            ContainerServiceInventoryTurnV2(owner: owner, inventory: nil, inventory_digest: "", error: "container-service-backend-unsupported")
+        case SimpleContainerOwnerV2.Windows(scope, adapter):
+            var active = adapter
+            val refreshed = active.refresh_service_inventory()
+            val retained = SimpleContainerOwnerV2.Windows(scope, active)
+            val entries = match refreshed:
+                case Ok(value): value
+                case Err(reason): return ContainerServiceInventoryTurnV2(owner: retained, inventory: nil, inventory_digest: "", error: reason)
+            val digest = container_service_inventory_digest_v2("windows-docker-process", scope, entries)
+            if digest.is_err(): return ContainerServiceInventoryTurnV2(owner: retained, inventory: nil, inventory_digest: "", error: digest.unwrap_err())
+            ContainerServiceInventoryTurnV2(owner: retained, inventory: Some(entries), inventory_digest: digest.unwrap(), error: "")
+
+# No wire path invokes this with decoded input. The trusted host must have
+# retained its real startup receipt and reconciled the same ledger first.
+pub fn simple_container_complete_quarantine_v2(owner: SimpleContainerOwnerV2,
+        admission: ContainerServiceAdmissionV2) -> ContainerServiceAdmissionTurnV2:
+    val checked = container_service_admission_valid_v2(admission)
+    if checked.is_err(): return ContainerServiceAdmissionTurnV2(owner: owner, admitted: false, error: checked.unwrap_err())
+    val fence = container_scope_fence_id_v2(simple_container_scope_v2(owner))
+    if fence.is_err() or fence.unwrap() != admission.scope_fence_id:
+        return ContainerServiceAdmissionTurnV2(owner: owner, admitted: false, error: "container-service-admission-scope-mismatch")
+    match owner:
+        case SimpleContainerOwnerV2.Linux(_, _):
+            ContainerServiceAdmissionTurnV2(owner: owner, admitted: false, error: "container-service-backend-unsupported")
+        case SimpleContainerOwnerV2.Windows(scope, adapter):
+            var active = adapter
+            val activated = active.complete_quarantine(admission)
+            val retained = SimpleContainerOwnerV2.Windows(scope, active)
+            match activated:
+                case Ok(value): ContainerServiceAdmissionTurnV2(owner: retained, admitted: value,
+                    error: if value: "" else: "container-service-admission-refused")
+                case Err(reason): ContainerServiceAdmissionTurnV2(owner: retained, admitted: false, error: reason)

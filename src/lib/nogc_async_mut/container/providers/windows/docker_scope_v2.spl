@@ -1,0 +1,43 @@
+# Explicit managed scope labels. The legacy identity boot slot holds only the
+# common opaque scope fence; managed Docker simple.boot stays actual native boot.
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_scope_fence_id_v2}
+use std.common.contracts.container.runtime_v1.RuntimeCommandV1
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{WindowsDockerPolicyV1,
+    WindowsDockerRequestV1, windows_docker_create_command_v1, WINDOWS_DOCKER_INSPECT_FORMAT_V1}
+
+pub const WINDOWS_DOCKER_SCOPED_INSPECT_FORMAT_V2 = WINDOWS_DOCKER_INSPECT_FORMAT_V1 +
+    "|{{{{index .Config.Labels \"simple.physical-host\"}}}}|{{{{index .Config.Labels \"simple.service-scope\"}}}}|{{{{index .Config.Labels \"simple.service-incarnation\"}}}}|{{{{index .Config.Labels \"simple.continuity-mode\"}}}}|{{{{index .Config.Labels \"simple.native-machine\"}}}}|{{{{index .Config.Labels \"simple.fence\"}}}}"
+
+pub fn windows_docker_scope_values_v2(scope: ContainerHostScopeV2) -> Result<[text], text>:
+    val fence = container_scope_fence_id_v2(scope)?
+    Ok([scope.physical_host_id, scope.service_scope_id,
+        if scope.continuity_mode == "service-incarnation-v1": scope.continuity_id else: "",
+        scope.continuity_mode, scope.native_machine_id, fence])
+
+pub fn windows_docker_scoped_create_v2(policy: WindowsDockerPolicyV1,
+        request: WindowsDockerRequestV1, scope: ContainerHostScopeV2) -> Result<RuntimeCommandV1, text>:
+    val values = windows_docker_scope_values_v2(scope)?
+    if policy.node_boot_id != values[5] or policy.provider_generation != scope.provider_generation:
+        return Err("windows-docker-scope-fence-mismatch")
+    var command = windows_docker_create_command_v1(policy, request)?
+    val names = ["simple.physical-host", "simple.service-scope", "simple.service-incarnation",
+        "simple.continuity-mode", "simple.native-machine", "simple.fence"]
+    var arguments: [text] = []
+    var index = 0
+    var inserted = false
+    while index < command.args.len():
+        val argument = command.args[index]
+        if argument == "--entrypoint" and not inserted:
+            var field = 0
+            while field < names.len():
+                arguments = arguments + ["--label", names[field] + "=" + values[field]]
+                field = field + 1
+            inserted = true
+        if argument == "simple.boot=" + policy.node_boot_id:
+            arguments.push("simple.boot=" + scope.boot_id)
+        else:
+            arguments.push(argument)
+        index = index + 1
+    if not inserted: return Err("windows-docker-entrypoint-boundary-missing")
+    command.args = arguments
+    Ok(command)

@@ -1,0 +1,159 @@
+# Real journal and real Ed25519 authorization; ONLY provider commands/engine
+# observation are explicitly scripted. This is not live platform qualification.
+use test.fixtures.daemon_sdk.distributed_authority_verification_fixture_v2.*
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.common.contracts.orchestration.host_execute_request_v2.*
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.orchestration.host_reservation_codec_v1.*
+use std.common.contracts.container.execution_v2.*
+use std.nogc_async_mut.container.api_v2.SimpleContainerOwnerV2
+use std.nogc_async_mut.container.providers.linux.simple_container_adapter_v2.LinuxSimpleContainerAdapterV2
+use test.fixtures.container.simple_container_api_fixture_v2.simple_container_scripted_linux_fixture_v2
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_authority_snapshot_create_v2
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{distributed_grant_signature_message_v2, distributed_approval_signature_message_v2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_encode_grant_v2}
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.*
+use std.nogc_async_mut.container.providers.linux.request_v1.linux_oci_request_digest_v1
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_encode_v1
+
+pub struct HostExecutionFixtureV2:
+    root: text
+    owner: HostCapacityOwnerV1
+    provider: LinuxOciRuntimeProviderV1
+    container: SimpleContainerOwnerV2
+    scope: ContainerHostScopeV2
+    request: LinuxOciRequestV1
+    envelope: HostExecuteRequestV2
+    policy: LocalAuthorityPolicyV1
+    provider_digest: text
+    context: HostReservationAuthorizationContextV1
+
+pub fn host_execution_clock_v2() -> HostReservationAuthorizationContextV1:
+    HostReservationAuthorizationContextV1(grant_clock: 100, monotonic_ms: 10,
+        policy_revision: 4, revocation_epoch: 2, session_generation: 3)
+
+pub fn host_execution_expired_clock_v2() -> HostReservationAuthorizationContextV1:
+    HostReservationAuthorizationContextV1(grant_clock: 190, monotonic_ms: 20,
+        policy_revision: 4, revocation_epoch: 2, session_generation: 3)
+
+# mode: success | create-failed | start-failed | inspect-mismatch | inspect-failed | expiry-before-start | short-native-id | effect-expired | intent-obstructed | unsupported-device | wrong-backend.
+pub fn host_execution_fixture_v2(mode: text, operation_id: text = "operation_1") -> HostExecutionFixtureV2:
+    val root = secure_temp_dir("/tmp", "host-execution-fixture").unwrap()
+    val state_dir = root + "/provider"
+    val scope = ContainerHostScopeV2(physical_host_id: "worker_1", service_scope_id: "user_1", native_machine_id: "machine-1",
+        boot_id: "boot-1", provider_generation: 7, continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot-1")
+    val fence_id = container_scope_fence_id_v2(scope).unwrap()
+    val engine_policy = LinuxOciEnginePolicyV1(mode: "trusted-local-admin-v1", executable_path: "/usr/bin/podman",
+        expected_uid: 1000, expected_graph_root: "/home/test/storage", expected_run_root: "/run/user/1000/storage",
+        expected_storage_driver: "overlay")
+    val info = "{\"host\":{\"security\":{\"rootless\":true},\"serviceIsRemote\":false}," +
+        "\"store\":{\"graphRoot\":\"/home/test/storage\",\"runRoot\":\"/run/user/1000/storage\",\"graphDriverName\":\"overlay\",\"graphOptions\":{}},\"version\":{\"Version\":\"5.0.0\"}}"
+    val engine_observation = linux_oci_engine_info_observation_v1(engine_policy, info, "a".repeat(64), 1000).unwrap()
+    val request = LinuxOciRequestV1(pod_uid: "workload", attempt: 1, operation_id: operation_id,
+        image: "example/agent@sha256:" + "a".repeat(64), bundle_path: "", command: ["/agent"], args: [], timeout_ms: 100,
+        cpu_limit_millis: 1000, memory_limit_bytes: 512, pid_limit: 64, network_policy: "none", filesystem_policy: "read-only")
+    val native_id = if mode == "short-native-id": "short-native" else: "1".repeat(64)
+    val create_command = build_create_command("podman", state_dir, request, request.operation_id, 7, fence_id).1
+    val start_command = build_start_command("podman", state_dir, native_id).1
+    val inspect_command = build_inspect_command("podman", state_dir, native_id).1
+    val create_result = ScriptedCommandResultV1(operation: "create", program: engine_policy.executable_path,
+        args: linux_oci_engine_route_v1(engine_policy, create_command.args).unwrap(), stdout: native_id, stderr: "", exit_code: if mode == "create-failed": 1 else: 0)
+    val start_result = ScriptedCommandResultV1(operation: "start", program: engine_policy.executable_path,
+        args: linux_oci_engine_route_v1(engine_policy, start_command.args).unwrap(), stdout: "", stderr: "", exit_code: if mode == "start-failed": 1 else: 0)
+    val inspect_result = ScriptedCommandResultV1(operation: "inspect", program: engine_policy.executable_path,
+        args: linux_oci_engine_route_v1(engine_policy, inspect_command.args).unwrap(),
+        stdout: "workload|1|" + fence_id + "|7|" + operation_id + "|" + (if mode == "inspect-mismatch": "2".repeat(64) else: native_id) +
+            "|" + (if mode == "start-failed" or mode == "expiry-before-start" or mode == "short-native-id" or mode == "intent-obstructed": "created" else: "running"), stderr: "", exit_code: if mode == "inspect-failed": 1 else: 0)
+    val results = if mode == "create-failed": [create_result] elif mode == "expiry-before-start" or mode == "short-native-id" or mode == "intent-obstructed": [create_result, inspect_result] else: [create_result, start_result, inspect_result]
+    val provider = LinuxOciRuntimeProviderV1.scripted_with_engine_policy("linux", "podman", state_dir, fence_id, 7,
+        engine_policy, engine_observation, engine_observation, results, 100).unwrap()
+    assert(provider.set_scripted_effect_clock_v1(if mode == "effect-expired": [190] else: [100, 100]).is_ok())
+    val observed = ContainerHostObservationV2(backend: "linux-podman", native_machine_id: scope.native_machine_id,
+        native_boot_id: scope.boot_id, provider_identity_digest: engine_observation.identity_digest,
+        execution_os: "linux", architecture: "x86_64", continuity_assurance: scope.continuity_mode, boot_observation: scope.continuity_id)
+    val adapter = LinuxSimpleContainerAdapterV2.scripted_fixture_v2(scope, provider, observed, 100).unwrap()
+    val container = simple_container_scripted_linux_fixture_v2(scope, adapter)
+    val capacity = HostCapacityV1(physical_host_id: "worker_1", authority_id: "authority", boot_id: fence_id,
+        provider_generation: 7, cpu_millis: 2000, memory_bytes: 2048, exclusive_devices: if mode == "unsupported-device": ["gpu0"] else: [])
+    val owner = host_capacity_owner_open_v1(root + "/journal", capacity, "c".repeat(64), 50, true).unwrap()
+    val plan = ContainerExecutionPlanV2(backend: if mode == "wrong-backend": "windows-docker-process" else: "linux-podman", workload_uid: request.pod_uid, attempt: 1, operation_id: request.operation_id,
+        service_scope_id: "user_1", request_digest: linux_oci_request_digest_v1(request).unwrap(), physical_host_id: "worker_1", boot_id: scope.boot_id,
+        provider_generation: 7, native_machine_id: scope.native_machine_id, continuity_mode: scope.continuity_mode, continuity_id: scope.continuity_id)
+    val row = HostReservationV1(id: "reservation-" + operation_id, operation_id: request.operation_id, payload_digest: "0".repeat(64),
+        service_scope_id: "user_1", assignment_generation: 1, nonce: "reservation-nonce", cpu_millis: 1000,
+        memory_bytes: 512, exclusive_devices: if mode == "unsupported-device": ["gpu0"] else: [], prepare_deadline_ms: 1000, state: HostReservationStateV1.Prepared)
+    val intent = host_reservation_bind_intent_v1(HostReservationIntentV1(physical_host_id: "worker_1",
+        fence: HostLedgerFenceV1(authority_id: "authority", boot_id: fence_id, provider_generation: 7, revision: 1),
+        plan_digest: container_execution_plan_digest_v2(plan).unwrap(), reservation: row)).unwrap()
+    val base = verification_fixture()
+    var operation = base.request
+    operation.id = operation_id
+    operation.operation = "host_reservation_v1"
+    operation.payload_digest = intent.reservation.payload_digest
+    operation.environment_digest = engine_observation.identity_digest
+    var grant = base.signed.grant
+    grant.environment_digest = engine_observation.identity_digest
+    grant.operations = ["host_reservation_v1"]
+    val context = host_execution_clock_v2()
+    val prepared = host_capacity_owner_prepare_v1(owner, intent, operation, grant, context).unwrap()
+    val receipt = host_capacity_owner_prepared_receipt_v1(prepared, intent, operation, grant, context).unwrap()
+    grant.operations = ["host_execute_v1"]
+    var signed = base.signed
+    signed.grant = grant
+    signed.signature = pure_ed25519_sign_from_seed_v1(verification_seed(1), distributed_grant_signature_message_v2(signed).unwrap()).signature
+    var execution = operation
+    execution.operation = "host_execute_v1"
+    var approval = base.approval
+    approval.grant_digest = sha256_text(distributed_encode_grant_v2(grant).unwrap())
+    approval.request_digest = sha256_text(distributed_encode_operation_v2(execution).unwrap())
+    approval.signature = pure_ed25519_sign_from_seed_v1(verification_seed(65), distributed_approval_signature_message_v2(approval).unwrap()).signature
+    var issuer = base.issuer
+    issuer.operations = ["host_execute_v1"]
+    var approver = base.approver
+    approver.operations = ["host_execute_v1"]
+    val snapshot = distributed_authority_snapshot_create_v2([issuer, approver], 7, 4, 2).unwrap()
+    val envelope = HostExecuteRequestV2(intent: intent, operation: operation, receipt: receipt, execution: ContainerExecutionRequestV2(plan: plan,
+            request_bytes: linux_oci_retained_request_encode_v1(request).unwrap()), signed: signed, approval: approval)
+    HostExecutionFixtureV2(root: root, owner: prepared, provider: provider, container: container, scope: scope, request: request, envelope: envelope,
+        policy: LocalAuthorityPolicyV1(snapshot: snapshot, session_generation: 3, source_digest: "f".repeat(64)),
+        provider_digest: engine_observation.identity_digest, context: context)
+
+pub fn host_execution_request_mismatch_fixture_v2(fixture: HostExecutionFixtureV2) -> HostExecutionFixtureV2:
+    var changed = fixture
+    var request = fixture.request
+    request.operation_id = "another_operation"
+    changed.envelope.execution.request_bytes = linux_oci_retained_request_encode_v1(request).unwrap()
+    changed
+
+pub fn host_execution_drift_fixture_v2(fixture: HostExecutionFixtureV2):
+    var observed = fixture.provider.scripted_engine_observation.unwrap()
+    observed.executable_digest = "e".repeat(64)
+    observed.identity_digest = linux_oci_engine_identity_digest_v1(observed)
+    fixture.provider.scripted_engine_observation = Some(observed)
+
+# Retarget one separately signed preparation to the already-owned journal for
+# an archival namespace regression. No provider effect is performed by helper.
+pub fn host_execution_retarget_owner_v2(fixture: HostExecutionFixtureV2, owner: HostCapacityOwnerV1) -> HostExecutionFixtureV2:
+    var result = fixture
+    var intent = fixture.envelope.intent
+    intent.fence.revision = owner.ledger.revision
+    intent = host_reservation_bind_intent_v1(intent).unwrap()
+    var operation = fixture.envelope.operation
+    operation.payload_digest = intent.reservation.payload_digest
+    var prepare_grant = fixture.envelope.signed.grant
+    prepare_grant.operations = ["host_reservation_v1"]
+    result.owner = host_capacity_owner_prepare_v1(owner, intent, operation, prepare_grant, fixture.context).unwrap()
+    result.envelope.intent = intent
+    result.envelope.operation = operation
+    result.envelope.receipt = host_reservation_receipt_v1(intent, operation).unwrap()
+    var execution = operation
+    execution.operation = "host_execute_v1"
+    result.envelope.approval.request_digest = sha256_text(distributed_encode_operation_v2(execution).unwrap())
+    result.envelope.approval.signature = pure_ed25519_sign_from_seed_v1(verification_seed(65),
+        distributed_approval_signature_message_v2(result.envelope.approval).unwrap()).signature
+    result

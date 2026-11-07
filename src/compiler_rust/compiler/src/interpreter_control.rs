@@ -170,6 +170,34 @@ pub(crate) fn optional_let_binding(pattern: &Pattern, value: &Value) -> LetBind 
     }
 }
 
+/// Bare identifier binding is nullable presence, not implicit Result success.
+/// An explicit presence expression may already have unwrapped Some(Result),
+/// so retain its payload and the existing structural Ok/Err pattern path.
+pub(crate) fn optional_let_binding_condition(
+    pattern: &Pattern,
+    value: &Value,
+    condition: &Expr,
+) -> Result<LetBind, CompileError> {
+    ensure_optional_binding_condition(pattern, value, condition)?;
+    Ok(optional_let_binding(pattern, value))
+}
+
+pub(crate) fn ensure_optional_binding_condition(
+    pattern: &Pattern,
+    value: &Value,
+    condition: &Expr,
+) -> Result<(), CompileError> {
+    if matches!(pattern, Pattern::Identifier(_) | Pattern::MutIdentifier(_) | Pattern::MoveIdentifier(_))
+        && !matches!(condition, Expr::ExistsCheck(_))
+        && matches!(value, Value::Enum { enum_name, .. } if enum_name == "Result")
+    {
+        return Err(CompileError::Semantic(
+            "cannot bind a Result with bare if val/while val; use match Ok/Err or Result.ok.?".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Is `val` (the already-evaluated result of a boolean-context condition
 /// expression) "true" for branch-taking purposes? For an `Expr::ExistsCheck`
 /// (`.?`) condition, presence was already fully decided inside
@@ -245,6 +273,75 @@ mod optional_let_binding_tests {
             _ => panic!("if val must not bind nil payloads"),
         }
     }
+
+    fn interpret_binding(source: &str) -> Result<i32, String> {
+        crate::interpreter::clear_module_cache();
+        crate::interpreter::clear_interpreter_state();
+        let module = simple_parser::Parser::new(source).parse().map_err(|e| e.to_string())?;
+        crate::interpreter::evaluate_module(&module.items).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn rejects_bare_result_bindings_before_branch_execution() {
+        let cases = [
+            "fn make() -> Result<i64, text>: Ok(7)\nfn main() -> i64:\n    if val value = make(): return 99\n    0\n",
+            "fn make() -> Result<i64, text>: Err(\"no\")\nfn main() -> i64:\n    if val value = make(): 99\n    else: 0\n",
+            "fn make() -> Result<i64, text>: Ok(7)\nfn main() -> i64:\n    if false: return 98\n    elif val value = make(): return 99\n    0\n",
+            "fn make() -> Result<i64, text>: Ok(7)\nfn main() -> i64:\n    while val value = make(): return 99\n    0\n",
+            "fn make() -> Result<i64, text>: Ok(7)\nfn main() -> i64:\n    val selected = if val value = make(): 99 else: 0\n    selected\n",
+        ];
+        for source in cases {
+            let error = interpret_binding(source).expect_err("bare Result must not enter a presence-binding branch");
+            assert!(error.contains("cannot bind a Result"), "{error}");
+            assert!(error.contains("Result.ok.?"), "{error}");
+        }
+    }
+
+    #[test]
+    fn some_result_and_structural_result_patterns_keep_their_meaning() {
+        let result = Value::Enum {
+            enum_name: "Result".to_string(),
+            variant: "Ok".to_string(),
+            payload: Some(Box::new(Value::Int(7))),
+        };
+        let name = Pattern::Identifier("value".to_string());
+        let condition = Expr::Identifier("input".to_string());
+        let wrapped = Value::some(result.clone());
+        match optional_let_binding_condition(&name, &wrapped, &condition).unwrap() {
+            LetBind::Bind(bound, inner) => {
+                assert_eq!(bound, "value");
+                assert_eq!(inner, result);
+            }
+            _ => panic!("Some(Result) must bind its Result payload"),
+        }
+        let structural = Pattern::Enum {
+            name: "Result".to_string(),
+            variant: "Ok".to_string(),
+            payload: Some(vec![name.clone()]),
+        };
+        assert!(matches!(optional_let_binding_condition(&structural, &result, &condition), Ok(LetBind::NotApplicable)));
+        let present = Expr::ExistsCheck(Box::new(condition));
+        assert!(matches!(optional_let_binding_condition(&name, &result, &present), Ok(LetBind::NotApplicable)));
+    }
+
+    #[test]
+    fn result_guard_preserves_existing_optional_presence() {
+        let source = "fn make() -> Result<i64, text>: Ok(7)\nfn main() -> i64:\n    if val outer = Some(make()):\n        match outer:\n            case Ok(value): return value - 7\n            case Err(_): return 1\n    2\n";
+        assert_eq!(interpret_binding(source), Ok(0));
+        for source in [
+            "fn make() -> Result<i64, text>: Ok(7)\nfn main() -> i64:\n    if val item = make().?: return item - 7\n    1\n",
+            "fn make() -> Result<i64, text>: Ok(7)\nfn main() -> i64:\n    while val item = make().?: return item - 7\n    1\n",
+        ] {
+            assert_eq!(interpret_binding(source), Ok(0));
+        }
+        let pattern = Pattern::Identifier("value".to_string());
+        let condition = Expr::Identifier("input".to_string());
+        for value in [Value::Int(0), Value::Bool(false)] {
+            assert!(matches!(optional_let_binding_condition(&pattern, &Value::some(value), &condition), Ok(LetBind::Bind(_, _))));
+        }
+        assert!(matches!(optional_let_binding_condition(&pattern, &Value::Nil, &condition), Ok(LetBind::Skip)));
+        assert!(matches!(optional_let_binding_condition(&pattern, &Value::some(Value::Nil), &condition), Ok(LetBind::Skip)));
+    }
 }
 
 pub(super) fn exec_if(
@@ -258,7 +355,7 @@ pub(super) fn exec_if(
     // Handle if-let: if let PATTERN = EXPR:
     if let Some(pattern) = &if_stmt.let_pattern {
         let value = evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?;
-        match optional_let_binding(pattern, &value) {
+        match optional_let_binding_condition(pattern, &value, &if_stmt.condition)? {
             LetBind::Bind(name, inner) => {
                 // An `if val NAME = …` binding is a LOCAL of this frame. Marking it
                 // so is load-bearing, not cosmetic: `Env::insert` alone leaves
@@ -329,7 +426,7 @@ pub(super) fn exec_if(
         if let Some(pattern) = pattern {
             // elif val PATTERN = EXPR: pattern binding
             let value = evaluate_expr(cond, env, functions, classes, enums, impl_methods)?;
-            match optional_let_binding(pattern, &value) {
+            match optional_let_binding_condition(pattern, &value, cond)? {
                 LetBind::Bind(name, inner) => {
                     // An `if val NAME = …` binding is a LOCAL of this frame. Marking it
                     // so is load-bearing, not cosmetic: `Env::insert` alone leaves
@@ -463,6 +560,7 @@ pub(super) fn exec_while(
             check_execution_limit!();
             check_timeout!();
             let value = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
+            ensure_optional_binding_condition(pattern, &value, &while_stmt.condition)?;
             let mut bindings = HashMap::new();
             let matched = pattern_matches(pattern, &value, &mut bindings, enums, classes)?;
             record_decision_site(while_stmt.span.line, while_stmt.span.column, SUB_STMT, matched);
@@ -5658,7 +5756,7 @@ pub(crate) fn exec_if_core(
         // reaches THIS function instead whenever the `if` is the last statement
         // of a function/block body (implicit-return / value position).
         let value = evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?;
-        match optional_let_binding(pattern, &value) {
+        match optional_let_binding_condition(pattern, &value, &if_stmt.condition)? {
             LetBind::Bind(name, inner) => {
                 // An `if val NAME = …` binding is a LOCAL of this frame. Marking it
                 // so is load-bearing, not cosmetic: `Env::insert` alone leaves
@@ -5742,7 +5840,7 @@ pub(crate) fn exec_if_core(
     for (elif_idx, (pattern, cond, block)) in if_stmt.elif_branches.iter().enumerate() {
         if let Some(pattern) = pattern {
             let value = evaluate_expr(cond, env, functions, classes, enums, impl_methods)?;
-            match optional_let_binding(pattern, &value) {
+            match optional_let_binding_condition(pattern, &value, cond)? {
                 LetBind::Bind(name, inner) => {
                     // An `if val NAME = …` binding is a LOCAL of this frame. Marking it
                     // so is load-bearing, not cosmetic: `Env::insert` alone leaves

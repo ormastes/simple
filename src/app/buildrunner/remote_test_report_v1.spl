@@ -1,0 +1,72 @@
+# Producer bridge from actual framework case events to the pinned exact-case
+# report. Events are untrusted observations, not process execution authority.
+# The runner must write the declared report before worker output finalization;
+# this module never repairs a missing output or converts a failed result to OK.
+use std.common.build_manager.contracts.{BuildTaskV1, builder_task_identity_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.traceability.run_plan.{TraceRunPlan, TraceCaseEventFile,
+    reconcile_trace_case_events}
+use std.common.traceability.run_plan_codec.{encode_trace_run_plan, decode_trace_run_plan}
+use std.common.traceability.case_events.decode_trace_case_events
+use app.buildrunner.remote_evidence_v1.{RemoteEvidencePolicyV1, remote_policy_bind_v1,
+    remote_test_report_validate_v1}
+
+struct RemoteTestEventDocumentV1:
+    test_path: text
+    source: text
+
+fn remote_test_report_from_events_v1(task: BuildTaskV1, policy: RemoteEvidencePolicyV1,
+        plan: TraceRunPlan, actual_files: [TraceCaseEventFile]) -> Result<text, text>:
+    if policy.action_kind != "test": return Err("REMOTE_TEST_POLICY_REQUIRED")
+    val _policy = remote_policy_bind_v1(task, policy)?
+    val canonical_plan = encode_trace_run_plan(plan)?
+    if plan.run_id != policy.operation_id or plan.binary_id != task.producer_digest or
+            plan.subject_id != task.source_digest or plan.configuration_id != task.toolchain_digest:
+        return Err("REMOTE_TEST_PLAN_IDENTITY_DIFFERS")
+    if plan.cases.len() != policy.expected_tests.len(): return Err("REMOTE_TEST_PLAN_CASES_DIFFER")
+    for i in 0..plan.cases.len():
+        if plan.cases[i].case_id != policy.expected_tests[i]: return Err("REMOTE_TEST_PLAN_CASES_DIFFER")
+    val plan_digest = sha256_text(canonical_plan)
+    var pinned = false
+    for input in task.inputs:
+        if input.path == "remote-tests/" + task.id + ".sdn":
+            if input.digest != plan_digest: return Err("REMOTE_TEST_PLAN_HASH_DIFFERS")
+            pinned = true
+    if not pinned: return Err("REMOTE_TEST_PLAN_NOT_PINNED")
+    # One emitting file per planned path, at most two events per planned case;
+    # reconciliation rejects unknown files, cases, phases, duplicates and order.
+    if actual_files.len() > plan.cases.len(): return Err("REMOTE_TEST_EVENT_FILES_EXCEED_PLAN")
+    val completion = reconcile_trace_case_events(plan, actual_files)?
+    if not completion.complete or completion.missing_case_ids.len() != 0 or
+            completion.attempts.len() != policy.expected_tests.len():
+        return Err("REMOTE_TEST_EVENTS_INCOMPLETE")
+    for i in 0..completion.attempts.len():
+        val attempt = completion.attempts[i]
+        if attempt.case_id != policy.expected_tests[i] or not attempt.started or
+                not attempt.finished or attempt.outcome != "passed":
+            return Err("REMOTE_TEST_CASE_NOT_PASSED")
+    var lines: [text] = ["SIMPLE-REMOTE-TEST-REPORT-1", builder_task_identity_v1(task)]
+    for case_id in policy.expected_tests: lines.push(case_id + "\tpassed")
+    val report = lines.join("\n") + "\n"
+    val _digest = remote_test_report_validate_v1(task, policy, report)?
+    Ok(report)
+
+# Optional pure document entrypoint for a runner collecting framework SDN.
+# The hash pin describes canonical plan bytes, so alternate source formatting
+# is refused even if it parses to the same plan. No file/process I/O occurs.
+fn remote_test_report_from_documents_v1(task: BuildTaskV1, policy: RemoteEvidencePolicyV1,
+        plan_source: text, documents: [RemoteTestEventDocumentV1]) -> Result<text, text>:
+    val plan = decode_trace_run_plan(plan_source)?
+    if encode_trace_run_plan(plan)? != plan_source: return Err("REMOTE_TEST_PLAN_NONCANONICAL")
+    if documents.len() > 4096: return Err("REMOTE_TEST_EVENT_FILES_EXCEED_PLAN")
+    var remaining: i64 = 4194304
+    var actual_files: [TraceCaseEventFile] = []
+    for document in documents:
+        for size in [document.test_path.byte_len(), document.source.byte_len()]:
+            if size > remaining: return Err("REMOTE_TEST_EVENT_BYTES_EXCEEDED")
+            remaining = remaining - size
+        actual_files.push(TraceCaseEventFile(test_path: document.test_path,
+            events: decode_trace_case_events(document.source)?))
+    remote_test_report_from_events_v1(task, policy, plan, actual_files)
+
+export RemoteTestEventDocumentV1, remote_test_report_from_events_v1, remote_test_report_from_documents_v1

@@ -1,0 +1,62 @@
+# Immutable input/observation objects beneath the existing controller writer.
+# No object file is an admission record; journal fences remain authoritative.
+use std.common.contracts.orchestration.controller_dispatch_request_v2.*
+use std.common.contracts.orchestration.assignment_v1.controller_assignment_bytes_v1
+use std.common.contracts.container.execution_v2.container_execution_request_encode_v2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_create_exclusive, file_fsync, directory_fsync}
+use std.nogc_sync_mut.io.dir_ops.dir_is_real_no_follow
+use std.nogc_sync_mut.io_runtime.dir_create
+
+fn dispatch_object_directory_v2(root: text, domain: text) -> Result<text, text>:
+    val directory = root + "/" + domain
+    if not dir_is_real_no_follow(directory):
+        if not dir_create(directory, false): return Err("dispatch-object-directory-unavailable")
+        if not dir_is_real_no_follow(directory): return Err("dispatch-object-directory-not-real")
+    Ok(directory)
+
+pub fn controller_dispatch_same_input_v2(left: ControllerDispatchRequestV2,
+        right: ControllerDispatchRequestV2) -> Result<bool, text>:
+    # Proofs may be refreshed for the SAME immutable operation after expiry.
+    # They never change the workload, original operation or retained request.
+    val left_shape = controller_dispatch_request_encode_v2(left)?
+    val right_shape = controller_dispatch_request_encode_v2(right)?
+    Ok(controller_assignment_bytes_v1(left.binding)? == controller_assignment_bytes_v1(right.binding)? and
+        distributed_encode_operation_v2(left.operation)? == distributed_encode_operation_v2(right.operation)? and
+        container_execution_request_encode_v2(left.execution)? == container_execution_request_encode_v2(right.execution)?)
+
+pub fn controller_dispatch_packet_load_v2(root: text, assignment_digest: text) -> Result<ControllerDispatchRequestV2, text>:
+    if not builder_digest_valid_v1(assignment_digest): return Err("dispatch-assignment-digest-invalid")
+    val bytes = file_read_regular_no_follow_bounded(root + "/dispatch-packets/" + assignment_digest + ".sdn", 2097152)?
+    val packet = controller_dispatch_request_decode_v2(bytes)?
+    if sha256_text(controller_assignment_bytes_v1(packet.binding)?) != assignment_digest:
+        return Err("dispatch-retained-assignment-mismatch")
+    Ok(packet)
+
+pub fn controller_dispatch_packet_retain_v2(root: text,
+        packet: ControllerDispatchRequestV2) -> Result<bool, text>:
+    val bytes = controller_dispatch_request_encode_v2(packet)?
+    val digest = sha256_text(controller_assignment_bytes_v1(packet.binding)?)
+    val directory = dispatch_object_directory_v2(root, "dispatch-packets")?
+    val path = directory + "/" + digest + ".sdn"
+    val created = file_create_exclusive(path, bytes)
+    val prior = controller_dispatch_packet_load_v2(root, digest)?
+    if not controller_dispatch_same_input_v2(prior, packet)?:
+        return Err("dispatch-retained-input-mismatch")
+    if not file_fsync(path) or not directory_fsync(directory) or not directory_fsync(root):
+        return Err("dispatch-packet-sync-required")
+    Ok(true)
+
+pub fn controller_dispatch_message_retain_v2(root: text, bytes: text) -> Result<text, text>:
+    if str_len(bytes) == 0 or str_len(bytes) > 2097152: return Err("dispatch-message-size")
+    val directory = dispatch_object_directory_v2(root, "dispatch-messages")?
+    val path = directory + "/" + sha256_text(bytes) + ".sdn"
+    val created = file_create_exclusive(path, bytes)
+    if file_read_regular_no_follow_bounded(path, 2097152)? != bytes:
+        return Err("dispatch-message-content-mismatch")
+    if not file_fsync(path) or not directory_fsync(directory) or not directory_fsync(root):
+        return Err("dispatch-message-sync-required")
+    Ok(path)

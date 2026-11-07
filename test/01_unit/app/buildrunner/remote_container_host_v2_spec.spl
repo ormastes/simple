@@ -1,0 +1,114 @@
+use std.spec.{describe, it, expect}
+use std.common.build_manager.contracts.BuildTaskV1
+use std.common.contracts.container.execution_v2.{ContainerActionProjectionV2, ContainerMountProjectionV2}
+use app.buildrunner.remote_container_host_v2.remote_container_action_bind_v2
+use test.fixtures.buildrunner.remote_authority_v1.remote_authority_task_v1
+
+# Pure projection fixtures. No owner, provider, filesystem or container is run.
+fn projected_action_v2(task: BuildTaskV1, host_root: text, guest_root: text) -> ContainerActionProjectionV2:
+    var argv = [guest_root + "/producer.exe"]
+    for argument in task.args: argv = argv.push(argument)
+    ContainerActionProjectionV2(argv: argv, working_directory: guest_root + "/work",
+        mounts: [ContainerMountProjectionV2(host_root: host_root, guest_root: guest_root, read_only: false)])
+
+describe "Remote container projected action binding V2":
+    it "accepts exact Linux executable arguments cwd and one writable workspace":
+        val task = remote_authority_task_v1()
+        val action = projected_action_v2(task, "/private/attempt-a", "/runner/attempt-a")
+        expect(remote_container_action_bind_v2(task, "/private/attempt-a", action)).to_equal(Ok(true))
+
+    it "accepts Windows guest slash normalization without changing argument bytes":
+        var task = remote_authority_task_v1()
+        task.args = ["--mode=native", r"test\unit\case with spaces_spec.spl"]
+        val host_root = r"D:\host\attempt-a"
+        var action = projected_action_v2(task, host_root, r"C:\runner\attempt-a")
+        action.argv[0] = r"C:\runner\attempt-a\producer.exe"
+        action.working_directory = r"C:\runner\attempt-a\work"
+        expect(remote_container_action_bind_v2(task, host_root, action)).to_equal(Ok(true))
+        action.mounts[0].guest_root = "C:/runner/attempt-a"
+        expect(remote_container_action_bind_v2(task, host_root, action)).to_equal(Ok(true))
+
+    it "rejects wrong or empty executable on both Linux and Windows":
+        val task = remote_authority_task_v1()
+        val linux = projected_action_v2(task, "/private/attempt-a", "/runner/attempt-a")
+        val windows = projected_action_v2(task, r"D:\host\attempt-a", r"C:\runner\attempt-a")
+        for base in [linux, windows]:
+            val host_root = base.mounts[0].host_root
+            var wrong = base
+            wrong.argv[0] = base.mounts[0].guest_root + "/other.exe"
+            expect(remote_container_action_bind_v2(task, host_root, wrong))
+                .to_equal(Err("REMOTE_CONTAINER_ACTION_DIFFERS"))
+            wrong.argv[0] = ""
+            expect(remote_container_action_bind_v2(task, host_root, wrong))
+                .to_equal(Err("REMOTE_CONTAINER_ACTION_DIFFERS"))
+
+    it "requires every original argument in its original position":
+        val task = remote_authority_task_v1()
+        val linux = projected_action_v2(task, "/private/attempt-a", "/runner/attempt-a")
+        val windows = projected_action_v2(task, r"D:\host\attempt-a", r"C:\runner\attempt-a")
+        for base in [linux, windows]:
+            val host_root = base.mounts[0].host_root
+            var changed = base
+            changed.argv[1] = "test"
+            expect(remote_container_action_bind_v2(task, host_root, changed))
+                .to_equal(Err("REMOTE_CONTAINER_ACTION_DIFFERS"))
+            var reordered = base
+            reordered.argv = [base.argv[0], task.args[1], task.args[0]]
+            expect(remote_container_action_bind_v2(task, host_root, reordered))
+                .to_equal(Err("REMOTE_CONTAINER_ACTION_DIFFERS"))
+
+    it "rejects empty missing and additional argv entries without indexing past them":
+        val task = remote_authority_task_v1()
+        val linux = projected_action_v2(task, "/private/attempt-a", "/runner/attempt-a")
+        val windows = projected_action_v2(task, r"D:\host\attempt-a", r"C:\runner\attempt-a")
+        for base in [linux, windows]:
+            val host_root = base.mounts[0].host_root
+            var empty = base
+            empty.argv = []
+            var missing = base
+            missing.argv = [base.argv[0], task.args[0]]
+            var additional = base
+            additional.argv = [base.argv[0], task.args[0], task.args[1], "extra"]
+            for action in [empty, missing, additional]:
+                expect(remote_container_action_bind_v2(task, host_root, action))
+                    .to_equal(Err("REMOTE_CONTAINER_ACTION_DIFFERS"))
+
+    it "rejects a different host root even with an otherwise exact action":
+        val task = remote_authority_task_v1()
+        val linux = projected_action_v2(task, "/private/attempt-a", "/runner/attempt-a")
+        expect(remote_container_action_bind_v2(task, "/private/another-attempt", linux))
+            .to_equal(Err("REMOTE_CONTAINER_WORKSPACE_DIFFERS"))
+        val windows = projected_action_v2(task, r"D:\host\attempt-a", r"C:\runner\attempt-a")
+        expect(remote_container_action_bind_v2(task, r"D:\host\another-attempt", windows))
+            .to_equal(Err("REMOTE_CONTAINER_WORKSPACE_DIFFERS"))
+
+    it "requires the work directory beneath the same projected guest mount":
+        val task = remote_authority_task_v1()
+        var linux = projected_action_v2(task, "/private/attempt-a", "/runner/attempt-a")
+        linux.working_directory = "/runner/another-attempt/work"
+        expect(remote_container_action_bind_v2(task, "/private/attempt-a", linux))
+            .to_equal(Err("REMOTE_CONTAINER_ACTION_DIFFERS"))
+        var windows = projected_action_v2(task, r"D:\host\attempt-a", r"C:\runner\attempt-a")
+        windows.working_directory = r"C:\runner\another-attempt\work"
+        expect(remote_container_action_bind_v2(task, r"D:\host\attempt-a", windows))
+            .to_equal(Err("REMOTE_CONTAINER_ACTION_DIFFERS"))
+        windows.working_directory = r"C:\runner\attempt-a"
+        expect(remote_container_action_bind_v2(task, r"D:\host\attempt-a", windows))
+            .to_equal(Err("REMOTE_CONTAINER_ACTION_DIFFERS"))
+
+    it "rejects absent read-only and additional mounts on either platform":
+        val task = remote_authority_task_v1()
+        val linux = projected_action_v2(task, "/private/attempt-a", "/runner/attempt-a")
+        val windows = projected_action_v2(task, r"D:\host\attempt-a", r"C:\runner\attempt-a")
+        for base in [linux, windows]:
+            val host_root = base.mounts[0].host_root
+            var absent = base
+            absent.mounts = []
+            var read_only = base
+            read_only.mounts[0].read_only = true
+            var additional = base
+            additional.mounts = [base.mounts[0], ContainerMountProjectionV2(host_root: "/unrelated",
+                guest_root: "/extra", read_only: true)]
+            for action in [absent, read_only, additional]:
+                expect(remote_container_action_bind_v2(task, host_root, action))
+                    .to_equal(Err("REMOTE_CONTAINER_WORKSPACE_DIFFERS"))

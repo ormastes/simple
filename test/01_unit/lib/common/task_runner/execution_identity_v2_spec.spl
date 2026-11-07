@@ -1,0 +1,142 @@
+# AWAITING_VERIFICATION. Value contracts only, no process/container ran.
+use std.spec.{describe, it, expect, fail}
+use std.common.task_runner.execution_identity_v2.*
+use std.common.task_runner.index.task_runner_attempt_encode_v1
+use std.common.contracts.container.execution_evidence_v2.container_execution_evidence_encode_v2
+use test.fixtures.task_runner.execution_identity_v2.{native_attempt_fixture_v2,
+    container_attempt_fixture_v2, container_execution_fixture_v2}
+
+describe "task journal typed execution identity V2":
+    it "preserves exact native V1 bytes and all common identity getters":
+        val native = native_attempt_fixture_v2()
+        val record = TaskRunnerAttemptRecordV2.Native(native)
+        val wire = task_runner_record_encode_v2(record).unwrap()
+        expect(wire).to_equal(task_runner_attempt_encode_v1(native).unwrap())
+        expect(task_runner_record_identity_v2(record)).to_equal(native.identity_digest)
+        expect(task_runner_record_group_v2(record)).to_equal(native.group_id)
+        expect(task_runner_record_attempt_v2(record)).to_equal(native.attempt)
+        expect(task_runner_record_status_v2(record)).to_equal("passed")
+        expect(task_runner_record_result_digest_v2(record)).to_equal(native.result_digest)
+        match task_runner_record_decode_v2(wire).unwrap():
+            Native(decoded):
+                expect(decoded.pid).to_equal(41)
+                expect(decoded.process_generation).to_equal(99)
+                expect(decoded.tree_reaped).to_equal(true)
+                expect(task_runner_attempt_encode_v1(decoded).unwrap()).to_equal(wire)
+            Container(_): fail("native V1 was converted to a container")
+
+    it "keeps native positive PID, generation and actual reap mandatory":
+        var missing_pid = native_attempt_fixture_v2()
+        missing_pid.pid = 0
+        var missing_generation = native_attempt_fixture_v2()
+        missing_generation.process_generation = 0
+        var unreaped = native_attempt_fixture_v2()
+        unreaped.tree_reaped = false
+        for native in [missing_pid, missing_generation, unreaped]:
+            expect(task_runner_record_encode_v2(TaskRunnerAttemptRecordV2.Native(native)).is_err()).to_equal(true)
+
+    it "retains typed native signal evidence without accepting exit-code inference":
+        val native = native_attempt_fixture_v2("crash_group", 1, "crashed")
+        val wire = task_runner_record_encode_v2(TaskRunnerAttemptRecordV2.Native(native)).unwrap()
+        expect(task_runner_record_status_v2(task_runner_record_decode_v2(wire).unwrap())).to_equal("crashed")
+        var inferred = native
+        inferred.signal_number = 0
+        expect(task_runner_record_encode_v2(TaskRunnerAttemptRecordV2.Native(inferred)).is_err()).to_equal(true)
+
+    it "rejects unknown framing, native truncation and oversized record input":
+        expect(task_runner_record_decode_v2("SIMPLE-TASK-CONTAINER-ATTEMPT-3\n").is_err()).to_equal(true)
+        expect(task_runner_record_decode_v2("1\ngroup\n").is_err()).to_equal(true)
+        expect(task_runner_record_decode_v2("x".repeat(65537)).is_err()).to_equal(true)
+
+    it "roundtrips canonical common container evidence without inventing a native identity":
+        val row = container_attempt_fixture_v2(container_execution_fixture_v2())
+        val record = TaskRunnerAttemptRecordV2.Container(row)
+        val wire = task_runner_record_encode_v2(record).unwrap()
+        expect(wire.starts_with("SIMPLE-TASK-CONTAINER-ATTEMPT-2\n")).to_equal(true)
+        expect(task_runner_record_identity_v2(record)).to_equal(row.identity_digest)
+        expect(task_runner_record_group_v2(record)).to_equal(row.group_id)
+        expect(task_runner_record_attempt_v2(record)).to_equal(1)
+        expect(task_runner_record_status_v2(record)).to_equal("passed")
+        expect(task_runner_record_result_digest_v2(record)).to_equal(row.result_digest)
+        match task_runner_record_decode_v2(wire).unwrap():
+            Native(_): fail("container evidence downgraded to a fabricated native process")
+            Container(decoded):
+                expect(container_execution_evidence_encode_v2(decoded.execution).unwrap())
+                    .to_equal(container_execution_evidence_encode_v2(row.execution).unwrap())
+                expect(decoded.execution.runtime.native_id).to_equal("b".repeat(64))
+                expect(decoded.execution.absence.proof_kind).to_equal("exact-native-object-absence-v1")
+                expect(task_runner_record_encode_v2(TaskRunnerAttemptRecordV2.Container(decoded)).unwrap()).to_equal(wire)
+
+    it "requires zero actual and task exits, validated result and empty passing reason":
+        val base = container_attempt_fixture_v2(container_execution_fixture_v2())
+        var task_failed = base
+        task_failed.task_exit_code = 1
+        var execution_failed = base
+        execution_failed.execution = container_execution_fixture_v2(1)
+        var unvalidated = base
+        unvalidated.result_validated = false
+        var reason = base
+        reason.reason = "unexpected"
+        var digest = base
+        digest.result_digest = ""
+        for row in [task_failed, execution_failed, unvalidated, reason, digest]:
+            expect(task_runner_record_encode_v2(TaskRunnerAttemptRecordV2.Container(row)).is_err()).to_equal(true)
+
+    it "accepts attributable validated failure and rejects exit/result substitution":
+        var row = container_attempt_fixture_v2(container_execution_fixture_v2(1))
+        row.status = "failed"
+        row.reason = "assertion"
+        row.task_exit_code = 1
+        expect(task_runner_record_encode_v2(TaskRunnerAttemptRecordV2.Container(row)).is_ok()).to_equal(true)
+        row.reason = "compile"
+        expect(task_runner_record_encode_v2(TaskRunnerAttemptRecordV2.Container(row)).is_ok()).to_equal(true)
+        row.task_exit_code = 0
+        expect(task_runner_record_encode_v2(TaskRunnerAttemptRecordV2.Container(row)).is_err()).to_equal(true)
+        row.task_exit_code = 1
+        row.execution = container_execution_fixture_v2()
+        expect(task_runner_record_encode_v2(TaskRunnerAttemptRecordV2.Container(row)).is_err()).to_equal(true)
+        row.execution = container_execution_fixture_v2(1)
+        row.reason = "process-signal"
+        expect(task_runner_record_encode_v2(TaskRunnerAttemptRecordV2.Container(row)).is_err()).to_equal(true)
+        row.reason = "assertion"
+        row.result_validated = false
+        expect(task_runner_record_encode_v2(TaskRunnerAttemptRecordV2.Container(row)).is_err()).to_equal(true)
+
+    it "refuses container crash inference and permits only unvalidated infrastructure abort":
+        var row = container_attempt_fixture_v2(container_execution_fixture_v2(139))
+        row.status = "crashed"
+        row.reason = "process-signal"
+        row.task_exit_code = 139
+        expect(task_runner_container_attempt_error_v2(row)).to_equal("container crash lacks typed cause evidence")
+        row.status = "aborted"
+        row.reason = "infrastructure"
+        row.result_validated = false
+        row.result_digest = ""
+        expect(task_runner_record_encode_v2(TaskRunnerAttemptRecordV2.Container(row)).is_ok()).to_equal(true)
+        for reason in ["timed-out", "cancelled"]:
+            row.reason = reason
+            expect(task_runner_record_encode_v2(TaskRunnerAttemptRecordV2.Container(row)).is_err()).to_equal(true)
+
+    it "requires exact common scope/absence and matching attempt with strict V2 framing":
+        val base = container_attempt_fixture_v2(container_execution_fixture_v2())
+        var row = base
+        row.attempt = 2
+        expect(task_runner_container_attempt_error_v2(row)).to_equal("container execution attempt differs")
+        row = base
+        var execution = row.execution
+        var absence = execution.absence
+        absence.proof_kind = "destroy-returned-ok"
+        execution.absence = absence
+        row.execution = execution
+        expect(task_runner_record_encode_v2(TaskRunnerAttemptRecordV2.Container(row)).is_err()).to_equal(true)
+        row = base
+        execution = row.execution
+        var runtime = execution.runtime
+        runtime.native_id = "d".repeat(64)
+        execution.runtime = runtime
+        row.execution = execution
+        expect(task_runner_record_encode_v2(TaskRunnerAttemptRecordV2.Container(row)).is_err()).to_equal(true)
+        val wire = task_runner_record_encode_v2(TaskRunnerAttemptRecordV2.Container(base)).unwrap()
+        expect(task_runner_record_decode_v2(wire + "extra\n").is_err()).to_equal(true)
+        expect(task_runner_record_decode_v2(wire.replace("\n1\nisolated\n", "\n01\nisolated\n")).is_err()).to_equal(true)
+        expect(task_runner_record_decode_v2(wire.replace("\n0\n1\n", "\n0\ntrue\n")).is_err()).to_equal(true)

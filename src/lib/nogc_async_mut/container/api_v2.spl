@@ -1,0 +1,334 @@
+# The single Simple Container API routes actual platform owners, never a fake
+# trait probe. Returned turns retain the updated tagged owner after every call.
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.execution_evidence_v2.*
+use std.common.contracts.container.effect_deadline_v1.ContainerEffectDeadlineV1
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeOperationV1, RuntimeIntentV1, runtime_operation_empty}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.string_core.str_len
+use std.nogc_async_mut.container.providers.linux.simple_container_adapter_v2.LinuxSimpleContainerAdapterV2
+use std.nogc_async_mut.container.providers.windows.simple_container_adapter_v2.WindowsSimpleContainerAdapterV2
+
+pub enum SimpleContainerOwnerV2:
+    Linux(ContainerHostScopeV2, LinuxSimpleContainerAdapterV2)
+    Windows(ContainerHostScopeV2, WindowsSimpleContainerAdapterV2)
+
+pub struct ContainerOperationTurnV2:
+    owner: SimpleContainerOwnerV2
+    operation: RuntimeOperationV1
+
+pub struct ContainerAbsenceTurnV2:
+    owner: SimpleContainerOwnerV2
+    receipt: ContainerAbsenceReceiptV2?
+    error: text
+
+pub struct ContainerExecutionUserTurnV2:
+    owner: SimpleContainerOwnerV2
+    receipt: ContainerExecutionUserReceiptV2?
+    error: text
+
+pub fn simple_container_observation_v2(owner: SimpleContainerOwnerV2) -> ContainerHostObservationV2:
+    match owner:
+        case SimpleContainerOwnerV2.Linux(_, adapter): adapter.observation()
+        case SimpleContainerOwnerV2.Windows(_, adapter): adapter.observation()
+
+# Trusted owner metadata only; accessors perform no engine call or admission.
+pub fn simple_container_scope_v2(owner: SimpleContainerOwnerV2) -> ContainerHostScopeV2:
+    match owner:
+        case SimpleContainerOwnerV2.Linux(scope, _): scope
+        case SimpleContainerOwnerV2.Windows(scope, _): scope
+
+pub fn simple_container_backend_v2(owner: SimpleContainerOwnerV2) -> text:
+    match owner:
+        case SimpleContainerOwnerV2.Linux(_, _): "linux-podman"
+        case SimpleContainerOwnerV2.Windows(_, _): "windows-docker-process"
+
+fn container_api_text_v2(value: text) -> bool:
+    str_len(value) > 0 and str_len(value) <= 4096 and not value.contains("\0") and
+        not value.contains("\n") and not value.contains("\r") and not value.contains("\t")
+
+fn container_api_scope_v2(scope: ContainerHostScopeV2) -> bool:
+    container_scope_fence_id_v2(scope).is_ok()
+
+fn container_api_observation_v2(backend: text, value: ContainerHostObservationV2) -> Result<ContainerHostObservationV2, text>:
+    if value.backend != backend or not container_api_text_v2(value.native_machine_id) or
+            not builder_digest_valid_v1(value.provider_identity_digest) or
+            not builder_identifier_valid_v1(value.architecture):
+        return Err("container-api-host-observation-invalid")
+    if (backend == "linux-podman" and value.execution_os != "linux") or
+            (backend == "windows-docker-process" and value.execution_os != "windows"):
+        return Err("container-api-host-os-mismatch")
+    if value.continuity_assurance == "native-boot-incarnation-v1":
+        if not container_api_text_v2(value.native_boot_id): return Err("container-api-native-boot-required")
+        if value.boot_observation != "" and not container_api_text_v2(value.boot_observation):
+            return Err("container-api-boot-observation-invalid")
+    elif value.continuity_assurance == "machine-boot-counter-v1":
+        if value.native_boot_id != "" or not container_api_text_v2(value.boot_observation):
+            return Err("container-api-weak-boot-observation-invalid")
+    else:
+        return Err("container-api-continuity-assurance-unsupported")
+    Ok(value)
+
+fn container_api_open_observation_v2(backend: text, scope: ContainerHostScopeV2,
+        pin: text, observed: ContainerHostObservationV2) -> Result<bool, text>:
+    val valid = container_api_observation_v2(backend, observed)?
+    # A weak counter is useful observation, never boot-incarnation authority.
+    # Persistent service incarnation/quarantine is not implemented in this API.
+    if observed.continuity_assurance != "native-boot-incarnation-v1":
+        return Err("container-api-continuity-unproven")
+    if observed.native_machine_id != scope.native_machine_id or observed.native_boot_id != scope.boot_id or
+            observed.provider_identity_digest != pin:
+        return Err("container-api-open-observation-mismatch")
+    Ok(true)
+
+pub fn simple_container_observe_v2(backend: text, policy_bytes: text) -> Result<ContainerHostObservationV2, text>:
+    if backend != "linux-podman" and backend != "windows-docker-process": return Err("container-api-backend-unsupported")
+    if str_len(policy_bytes) == 0 or str_len(policy_bytes) > 1048576: return Err("container-api-policy-size")
+    if backend == "linux-podman":
+        val observed = LinuxSimpleContainerAdapterV2.observe(policy_bytes)?
+        return container_api_observation_v2(backend, observed)
+    val observed = WindowsSimpleContainerAdapterV2.observe(policy_bytes)?
+    container_api_observation_v2(backend, observed)
+
+pub fn simple_container_open_v2(backend: text, policy_bytes: text, state_root: text,
+        scope: ContainerHostScopeV2, expected_provider_identity_digest: text, timeout_ms: i64) -> Result<SimpleContainerOwnerV2, text>:
+    if backend != "linux-podman" and backend != "windows-docker-process": return Err("container-api-backend-unsupported")
+    if str_len(policy_bytes) == 0 or str_len(policy_bytes) > 1048576: return Err("container-api-policy-size")
+    if not container_api_text_v2(state_root) or not container_api_scope_v2(scope) or
+            not builder_digest_valid_v1(expected_provider_identity_digest) or timeout_ms <= 0:
+        return Err("container-api-open-invalid")
+    if scope.continuity_mode != "native-boot-incarnation-v1": return Err("container-api-continuity-unproven")
+    if backend == "linux-podman":
+        val adapter = LinuxSimpleContainerAdapterV2.open(policy_bytes, state_root, scope, expected_provider_identity_digest, timeout_ms)?
+        val observed = container_api_open_observation_v2(backend, scope, expected_provider_identity_digest, adapter.observation())?
+        return Ok(SimpleContainerOwnerV2.Linux(scope, adapter))
+    val adapter = WindowsSimpleContainerAdapterV2.open(policy_bytes, state_root, scope, expected_provider_identity_digest, timeout_ms)?
+    val observed = container_api_open_observation_v2(backend, scope, expected_provider_identity_digest, adapter.observation())?
+    Ok(SimpleContainerOwnerV2.Windows(scope, adapter))
+
+fn container_api_request_scope_v2(backend: text, scope: ContainerHostScopeV2,
+        request: ContainerExecutionRequestV2) -> Result<bool, text>:
+    val plan = request.plan
+    val valid = container_execution_plan_bytes_v2(plan)?
+    if str_len(request.request_bytes) == 0 or str_len(request.request_bytes) > 1048576:
+        return Err("container-api-body-size")
+    if plan.backend != backend: return Err("container-api-backend-mismatch")
+    if plan.physical_host_id != scope.physical_host_id or plan.service_scope_id != scope.service_scope_id or
+            plan.boot_id != scope.boot_id or plan.provider_generation != scope.provider_generation or
+            plan.native_machine_id != scope.native_machine_id or plan.continuity_mode != scope.continuity_mode or
+            plan.continuity_id != scope.continuity_id:
+        return Err("container-api-scope-mismatch")
+    Ok(true)
+
+fn container_api_projection_v2(request: ContainerExecutionRequestV2,
+        projection: ContainerRequestProjectionV2) -> Result<ContainerRequestProjectionV2, text>:
+    val plan = request.plan
+    if projection.workload_uid != plan.workload_uid or projection.attempt != plan.attempt or
+            projection.operation_id != plan.operation_id or projection.request_digest != plan.request_digest or
+            projection.cpu_millis < 0 or projection.memory_bytes < 0 or projection.timeout_ms <= 0:
+        return Err("container-api-projection-mismatch")
+    Ok(projection)
+
+pub fn simple_container_project_v2(owner: SimpleContainerOwnerV2,
+        request: ContainerExecutionRequestV2) -> Result<ContainerRequestProjectionV2, text>:
+    match owner:
+        case SimpleContainerOwnerV2.Linux(scope, adapter):
+            val scoped = container_api_request_scope_v2("linux-podman", scope, request)?
+            if not adapter.validate(request)?: return Err("container-api-leaf-validation-refused")
+            val projection = adapter.project(request)?
+            container_api_projection_v2(request, projection)
+        case SimpleContainerOwnerV2.Windows(scope, adapter):
+            val scoped = container_api_request_scope_v2("windows-docker-process", scope, request)?
+            if not adapter.validate(request)?: return Err("container-api-leaf-validation-refused")
+            val projection = adapter.project(request)?
+            container_api_projection_v2(request, projection)
+
+pub fn simple_container_action_project_v2(owner: SimpleContainerOwnerV2,
+        request: ContainerExecutionRequestV2) -> Result<ContainerActionProjectionV2, text>:
+    val resources = simple_container_project_v2(owner, request)?
+    val projected = match owner:
+        case SimpleContainerOwnerV2.Linux(_, adapter): adapter.action_project(request)?
+        case SimpleContainerOwnerV2.Windows(_, adapter): adapter.action_project(request)?
+    if projected.argv.len() == 0 or projected.argv.len() > 4096 or projected.mounts.len() > 256 or
+            not container_api_text_v2(projected.working_directory):
+        return Err("container-api-action-projection-invalid")
+    var argument_bytes = 0
+    for argument in projected.argv:
+        if str_len(argument) > 1048576 or argument.contains("\0"): return Err("container-api-action-argument-invalid")
+        argument_bytes = argument_bytes + str_len(argument)
+        if argument_bytes > 1048576: return Err("container-api-action-arguments-too-large")
+    if projected.argv[0] == "": return Err("container-api-action-program-empty")
+    var targets: [text] = []
+    for mount in projected.mounts:
+        if not container_api_text_v2(mount.host_root) or not container_api_text_v2(mount.guest_root) or
+                targets.contains(mount.guest_root): return Err("container-api-action-mount-invalid")
+        targets.push(mount.guest_root)
+    Ok(projected)
+
+fn container_api_rejected_v2(owner: SimpleContainerOwnerV2, action: text, reason: text) -> ContainerOperationTurnV2:
+    var rejected = runtime_operation_empty()
+    rejected.operation = action
+    rejected.reason = reason
+    # Unknown state is intentional: API refusal never proves native absence.
+    ContainerOperationTurnV2(owner: owner, operation: rejected)
+
+pub fn simple_container_read_v2(owner: SimpleContainerOwnerV2, action: text,
+        request: ContainerExecutionRequestV2) -> ContainerOperationTurnV2:
+    if action != "inspect" and action != "logs" and action != "wait":
+        return container_api_rejected_v2(owner, action, "container-api-read-action-unsupported")
+    val projected = simple_container_project_v2(owner, request)
+    if projected.is_err(): return container_api_rejected_v2(owner, action, projected.unwrap_err())
+    match owner:
+        case SimpleContainerOwnerV2.Linux(scope, adapter):
+            var active = adapter
+            val operation = active.read(action, request)
+            ContainerOperationTurnV2(owner: SimpleContainerOwnerV2.Linux(scope, active), operation: operation)
+        case SimpleContainerOwnerV2.Windows(scope, adapter):
+            var active = adapter
+            val operation = active.read(action, request)
+            ContainerOperationTurnV2(owner: SimpleContainerOwnerV2.Windows(scope, active), operation: operation)
+
+pub fn simple_container_apply_v2(owner: SimpleContainerOwnerV2, action: text,
+        request: ContainerExecutionRequestV2, deadline: ContainerEffectDeadlineV1) -> ContainerOperationTurnV2:
+    if action == "inspect" or action == "logs" or action == "wait":
+        return simple_container_read_v2(owner, action, request)
+    if not ["prepare", "create", "start", "stop", "destroy"].contains(action):
+        return container_api_rejected_v2(owner, action, "container-api-action-unsupported")
+    val projected = simple_container_project_v2(owner, request)
+    if projected.is_err(): return container_api_rejected_v2(owner, action, projected.unwrap_err())
+    # The deadline governs NEW launch effects only; expiry never kills work.
+    # Stop/destroy require separate caller-verified live cleanup authority or
+    # retained authorized lifecycle ownership. They are not mere observations.
+    match owner:
+        case SimpleContainerOwnerV2.Linux(scope, adapter):
+            var active = adapter
+            val operation = active.apply(action, request, deadline)
+            ContainerOperationTurnV2(owner: SimpleContainerOwnerV2.Linux(scope, active), operation: operation)
+        case SimpleContainerOwnerV2.Windows(scope, adapter):
+            var active = adapter
+            val operation = active.apply(action, request, deadline)
+            ContainerOperationTurnV2(owner: SimpleContainerOwnerV2.Windows(scope, active), operation: operation)
+
+fn container_api_intent_v2(request: ContainerExecutionRequestV2, intent: RuntimeIntentV1) -> Result<RuntimeIntentV1, text>:
+    val plan = request.plan
+    val scope = ContainerHostScopeV2(physical_host_id: plan.physical_host_id, service_scope_id: plan.service_scope_id,
+        boot_id: plan.boot_id, provider_generation: plan.provider_generation, native_machine_id: plan.native_machine_id,
+        continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
+    val fence = container_scope_fence_id_v2(scope)?
+    if intent.pod_uid != plan.workload_uid or intent.attempt != plan.attempt or intent.operation_id != plan.operation_id or
+            intent.provider_generation != plan.provider_generation or intent.node_boot_id != fence:
+        return Err("container-api-intent-mismatch")
+    Ok(intent)
+
+pub fn simple_container_intent_v2(owner: SimpleContainerOwnerV2,
+        request: ContainerExecutionRequestV2) -> Result<RuntimeIntentV1, text>:
+    val projected = simple_container_project_v2(owner, request)?
+    match owner:
+        case SimpleContainerOwnerV2.Linux(scope, adapter):
+            val intent = adapter.intent(request)?
+            container_api_intent_v2(request, intent)
+        case SimpleContainerOwnerV2.Windows(scope, adapter):
+            val intent = adapter.intent(request)?
+            container_api_intent_v2(request, intent)
+
+pub fn simple_container_recover_v2(owner: SimpleContainerOwnerV2,
+        request: ContainerExecutionRequestV2, intent: RuntimeIntentV1) -> ContainerOperationTurnV2:
+    val projected = simple_container_project_v2(owner, request)
+    if projected.is_err(): return container_api_rejected_v2(owner, "recover", projected.unwrap_err())
+    val matching = container_api_intent_v2(request, intent)
+    if matching.is_err(): return container_api_rejected_v2(owner, "recover", matching.unwrap_err())
+    match owner:
+        case SimpleContainerOwnerV2.Linux(scope, adapter):
+            var active = adapter
+            val operation = active.recover(request, intent)
+            ContainerOperationTurnV2(owner: SimpleContainerOwnerV2.Linux(scope, active), operation: operation)
+        case SimpleContainerOwnerV2.Windows(scope, adapter):
+            var active = adapter
+            val operation = active.recover(request, intent)
+            ContainerOperationTurnV2(owner: SimpleContainerOwnerV2.Windows(scope, active), operation: operation)
+
+fn container_api_runtime_identity_v2(owner: SimpleContainerOwnerV2,
+        request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1) -> Result<bool, text>:
+    val plan = request.plan
+    val scope = simple_container_scope_v2(owner)
+    val engine = if plan.backend == "linux-podman": "podman" else: "docker"
+    if expected.engine != engine or expected.pod_uid != plan.workload_uid or expected.attempt != plan.attempt or
+            expected.operation_id != plan.operation_id or expected.provider_generation != scope.provider_generation or
+            expected.node_boot_id != container_scope_fence_id_v2(scope)? or not builder_digest_valid_v1(expected.native_id):
+        return Err("container-api-absence-identity-mismatch")
+    Ok(true)
+
+fn container_api_absence_turn_v2(owner: SimpleContainerOwnerV2, request: ContainerExecutionRequestV2,
+        expected: RuntimeIdentityV1, result: Result<ContainerAbsenceReceiptV2, text>) -> ContainerAbsenceTurnV2:
+    val receipt = match result:
+        case Ok(value): value
+        case Err(reason): return ContainerAbsenceTurnV2(owner: owner, receipt: nil, error: reason)
+    val encoded = container_absence_receipt_encode_v2(receipt)
+    if encoded.is_err(): return ContainerAbsenceTurnV2(owner: owner, receipt: nil, error: encoded.unwrap_err())
+    val matching = container_api_runtime_identity_v2(owner, request, receipt.identity)
+    if matching.is_err(): return ContainerAbsenceTurnV2(owner: owner, receipt: nil, error: matching.unwrap_err())
+    val scope_bytes = container_host_scope_bytes_v2(simple_container_scope_v2(owner))
+    val receipt_scope = container_host_scope_bytes_v2(receipt.scope)
+    if scope_bytes.is_err() or receipt_scope.is_err():
+        return ContainerAbsenceTurnV2(owner: owner, receipt: nil, error: "container-api-absence-scope-invalid")
+    if scope_bytes.unwrap() != receipt_scope.unwrap() or receipt.backend != request.plan.backend or
+            receipt.identity.native_id != expected.native_id or receipt.request_digest != request.plan.request_digest or
+            receipt.provider_identity_digest != simple_container_observation_v2(owner).provider_identity_digest:
+        return ContainerAbsenceTurnV2(owner: owner, receipt: nil, error: "container-api-absence-receipt-mismatch")
+    ContainerAbsenceTurnV2(owner: owner, receipt: Some(receipt), error: "")
+
+# Independent read-only native absence query. The returned owner survives every
+# failure. Callers retain ledger charges on absent receipt/error, and storage or
+# helper release requires its own proof beyond this workload-object receipt.
+pub fn simple_container_absence_v2(owner: SimpleContainerOwnerV2, request: ContainerExecutionRequestV2,
+        expected: RuntimeIdentityV1) -> ContainerAbsenceTurnV2:
+    val projected = simple_container_project_v2(owner, request)
+    if projected.is_err(): return ContainerAbsenceTurnV2(owner: owner, receipt: nil, error: projected.unwrap_err())
+    val matching = container_api_runtime_identity_v2(owner, request, expected)
+    if matching.is_err(): return ContainerAbsenceTurnV2(owner: owner, receipt: nil, error: matching.unwrap_err())
+    match owner:
+        case SimpleContainerOwnerV2.Linux(scope, adapter):
+            var active = adapter
+            val result = active.absence(request, expected)
+            container_api_absence_turn_v2(SimpleContainerOwnerV2.Linux(scope, active), request, expected, result)
+        case SimpleContainerOwnerV2.Windows(scope, adapter):
+            var active = adapter
+            val result = active.absence(request, expected)
+            container_api_absence_turn_v2(SimpleContainerOwnerV2.Windows(scope, active), request, expected, result)
+
+fn container_api_execution_user_turn_v2(owner: SimpleContainerOwnerV2, request: ContainerExecutionRequestV2,
+        expected: RuntimeIdentityV1, result: Result<ContainerExecutionUserReceiptV2, text>) -> ContainerExecutionUserTurnV2:
+    val receipt = match result:
+        case Ok(value): value
+        case Err(reason): return ContainerExecutionUserTurnV2(owner: owner, receipt: nil, error: reason)
+    val encoded = container_execution_user_receipt_encode_v2(receipt)
+    if encoded.is_err(): return ContainerExecutionUserTurnV2(owner: owner, receipt: nil, error: encoded.unwrap_err())
+    val matching = container_api_runtime_identity_v2(owner, request, receipt.identity)
+    if matching.is_err(): return ContainerExecutionUserTurnV2(owner: owner, receipt: nil, error: matching.unwrap_err())
+    val scope_bytes = container_host_scope_bytes_v2(simple_container_scope_v2(owner))
+    val receipt_scope = container_host_scope_bytes_v2(receipt.scope)
+    if scope_bytes.is_err() or receipt_scope.is_err():
+        return ContainerExecutionUserTurnV2(owner: owner, receipt: nil, error: "container-api-execution-user-scope-invalid")
+    if scope_bytes.unwrap() != receipt_scope.unwrap() or receipt.backend != request.plan.backend or
+            receipt.identity.native_id != expected.native_id or receipt.request_digest != request.plan.request_digest or
+            receipt.provider_identity_digest != simple_container_observation_v2(owner).provider_identity_digest:
+        return ContainerExecutionUserTurnV2(owner: owner, receipt: nil, error: "container-api-execution-user-receipt-mismatch")
+    ContainerExecutionUserTurnV2(owner: owner, receipt: Some(receipt), error: "")
+
+# Fresh exact native selected-user query. Actual effective process identity
+# requires its separate same-process probe, not this engine configuration fact.
+pub fn simple_container_execution_user_v2(owner: SimpleContainerOwnerV2, request: ContainerExecutionRequestV2,
+        expected: RuntimeIdentityV1) -> ContainerExecutionUserTurnV2:
+    val projected = simple_container_project_v2(owner, request)
+    if projected.is_err(): return ContainerExecutionUserTurnV2(owner: owner, receipt: nil, error: projected.unwrap_err())
+    val matching = container_api_runtime_identity_v2(owner, request, expected)
+    if matching.is_err(): return ContainerExecutionUserTurnV2(owner: owner, receipt: nil, error: matching.unwrap_err())
+    match owner:
+        case SimpleContainerOwnerV2.Linux(scope, adapter):
+            var active = adapter
+            val result = active.execution_user(request, expected)
+            container_api_execution_user_turn_v2(SimpleContainerOwnerV2.Linux(scope, active), request, expected, result)
+        case SimpleContainerOwnerV2.Windows(scope, adapter):
+            var active = adapter
+            val result = active.execution_user(request, expected)
+            container_api_execution_user_turn_v2(SimpleContainerOwnerV2.Windows(scope, active), request, expected, result)

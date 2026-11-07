@@ -21,3 +21,5 @@ not claim complete Kubernetes image-default CMD equivalence.
 Runtime validation remains blocked by the unchanged secure-memory producer
 failure; no build was retried. See
 `doc/05_design/oci_command_entrypoint_admission.md` for provenance and limits.
+
+Execution-options source update (UNEXECUTED): Podman create vectors now include `--http-proxy=false`; typed environment/cwd are admitted, terminal effects remain refused. See `doc/05_design/oci_execution_options_effects.md` and the eleven-case system specification mirror.

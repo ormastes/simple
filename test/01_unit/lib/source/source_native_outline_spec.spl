@@ -1,0 +1,160 @@
+# @req VIEW-01 VIEW-08 VIEW-09 VIEW-10 LANG-01
+# Native parser/selection tests; no runtime PASS until admitted execution.
+use std.spec.step
+use std.common.source.contracts.{SourceSnapshotV1}
+use compiler.tools.source_outline_v1.{source_native_outline_v1}
+use std.nogc_sync_mut.source.structure.{source_project_structure_v1, source_outline_target_v1}
+
+describe "native source outlines reuse canonical token grammar":
+    it "retains an inline function and its following declaration":
+        step("parse inline bodies without consuming the next declaration")
+        val snapshot = SourceSnapshotV1("inline", "fixture.spl", "fn first(): 1\nfn second(): 2\n")
+        val outline = source_native_outline_v1(snapshot).unwrap()
+        expect(outline.provider_id).to_equal("simple-native-token-outline-v1")
+        expect(outline.provider_level).to_equal("L1")
+        expect(source_outline_target_v1(outline, "first").unwrap()).to_be_greater_than(-1)
+        expect(source_outline_target_v1(outline, "second").unwrap()).to_be_greater_than(-1)
+        val view = source_project_structure_v1(snapshot, outline, "outline", "", 1, 0, 32, 4096).unwrap()
+        expect(view.visible_nodes.len()).to_equal(2)
+        expect(view.projection.source_text).to_contain("fn first():")
+        expect(view.projection.source_text).to_contain("fn second():")
+        expect(view.projection.source_text.contains("1")).to_equal(false)
+        expect(view.projection.source_text.contains("2")).to_equal(false)
+        expect(view.folds.len()).to_equal(2)
+
+    it "opens the selected class method with parent context and folds siblings":
+        step("focus a native method while preserving sibling fold boundaries")
+        val source = "class Counter:\n    fn first(): 11\n    fn second(): 22\nfn outside(): 33\n"
+        val snapshot = SourceSnapshotV1("method", "fixture.spl", source)
+        val outline = source_native_outline_v1(snapshot).unwrap()
+        val view = source_project_structure_v1(snapshot, outline, "focused", "Counter.second", 1, 0, 32, 4096).unwrap()
+        expect(view.projection.source_text).to_contain("class Counter:")
+        expect(view.projection.source_text).to_contain("fn first():")
+        expect(view.projection.source_text).to_contain("fn second(): 22")
+        expect(view.projection.source_text.contains("11")).to_equal(false)
+        expect(view.projection.source_text.contains("33")).to_equal(false)
+        expect(view.target_index).to_equal(source_outline_target_v1(outline, "Counter.second").unwrap())
+
+    it "keeps class body documentation folded with its members":
+        step("fold body docstrings rather than treating them as header source")
+        val source = "class Counter:\n    \"\"\"Private body documentation.\"\"\"\n    fn first(): 11\n"
+        val snapshot = SourceSnapshotV1("class-doc", "fixture.spl", source)
+        val outline = source_native_outline_v1(snapshot).unwrap()
+        val view = source_project_structure_v1(snapshot, outline, "outline", "", 1, 0, 32, 4096).unwrap()
+        expect(view.projection.source_text).to_contain("class Counter:")
+        expect(view.projection.source_text.contains("Private body")).to_equal(false)
+        expect(view.projection.source_text.contains("fn first")).to_equal(false)
+
+    it "keeps nested multiline bodies separate from the following function":
+        step("preserve native Indent Dedent nesting")
+        val source = "fn first():\n    if true:\n        print 1\n    print 2\nfn second(): 3\n"
+        val snapshot = SourceSnapshotV1("nested", "fixture.spl", source)
+        val outline = source_native_outline_v1(snapshot).unwrap()
+        val view = source_project_structure_v1(snapshot, outline, "focused", "first", 1, 0, 32, 4096).unwrap()
+        expect(view.projection.source_text).to_contain("print 1")
+        expect(view.projection.source_text).to_contain("print 2")
+        expect(view.projection.source_text.contains("fn second")).to_equal(false)
+        expect(source_outline_target_v1(outline, "second").unwrap()).to_be_greater_than(-1)
+
+    it "preserves inline asm and opaque-block boundaries":
+        step("reuse canonical nested inline payload parsing")
+        for body in ["asm { nop }", "m{ 1 + 2 }"]:
+            val source = "fn first(): " + body + "\nfn second(): 7\n"
+            val outline = source_native_outline_v1(SourceSnapshotV1("payload", "fixture.spl", source)).unwrap()
+            expect(source_outline_target_v1(outline, "second").unwrap()).to_be_greater_than(-1)
+
+    it "groups noncontiguous imports using exact ordered range sets":
+        step("retain import ranges without swallowing the intervening declaration")
+        val source = "use first.module\nfn middle(): 1\nuse second.module\nfn last(): 2\n"
+        val snapshot = SourceSnapshotV1("imports", "fixture.spl", source)
+        val outline = source_native_outline_v1(snapshot).unwrap()
+        val view = source_project_structure_v1(snapshot, outline, "outline", "", 1, 0, 32, 4096).unwrap()
+        expect(view.folds[0].label).to_equal("imports")
+        expect(view.folds[0].ranges.len()).to_equal(2)
+        expect(view.folds[0].ranges[0].end_byte).to_be_less_than(view.folds[0].ranges[1].start_byte)
+        expect(view.projection.source_text).to_contain("fn middle():")
+        expect(view.projection.source_text.contains("use first")).to_equal(false)
+
+    it "reuses native use import grouped wildcard relative and alias grammar":
+        step("parse existing import forms without a viewer-specific scanner")
+        val source = "use alpha.{One, Two}\nimport beta.*\nuse .gamma as local\nfn after(): 1\n"
+        val snapshot = SourceSnapshotV1("import-forms", "fixture.spl", source)
+        val outline = source_native_outline_v1(snapshot).unwrap()
+        expect(outline.total_issues).to_equal(0)
+        val view = source_project_structure_v1(snapshot, outline, "outline", "", 1, 0, 32, 4096).unwrap()
+        expect(view.folds[0].ranges.len()).to_equal(3)
+        expect(source_outline_target_v1(outline, "alpha").unwrap()).to_be_greater_than(-1)
+        expect(source_outline_target_v1(outline, "beta").unwrap()).to_be_greater_than(-1)
+        expect(source_outline_target_v1(outline, ".gamma").unwrap()).to_be_greater_than(-1)
+        expect(view.projection.source_text).to_contain("fn after():")
+
+    it "rejects ambiguous targets and pages a bounded outline":
+        step("disambiguate syntax names and continue at the next candidate")
+        val source = "class A:\n    fn same(): 1\nclass B:\n    fn same(): 2\n"
+        val snapshot = SourceSnapshotV1("ambiguous", "fixture.spl", source)
+        val outline = source_native_outline_v1(snapshot).unwrap()
+        match source_outline_target_v1(outline, "same"):
+            Ok(_): fail("ambiguous method name resolved arbitrarily")
+            Err(reason): expect(reason).to_equal("ambiguous_syntax_target")
+        val first = source_project_structure_v1(snapshot, outline, "outline", "", 1, 0, 1, 4096).unwrap()
+        expect(first.visible_nodes.len()).to_equal(1)
+        expect(first.next_index).to_equal(1)
+        val next = source_project_structure_v1(snapshot, outline, "outline", "", 1, first.next_index, 1, 4096).unwrap()
+        expect(next.projection.source_text).to_contain("class B:")
+        expect(next.projection.source_text.contains("class A:")).to_equal(false)
+        expect(next.next_index).to_equal(-1)
+
+    it "retains parent context on later depth-two and focused pages":
+        step("include enclosing headers without advancing the cursor for duplicated context")
+        val source = "class A:\n    fn first(): 1\n    fn second(): 2\n"
+        val snapshot = SourceSnapshotV1("parent-pages", "fixture.spl", source)
+        val outline = source_native_outline_v1(snapshot).unwrap()
+        val first = source_project_structure_v1(snapshot, outline, "outline", "", 2, 0, 2, 4096).unwrap()
+        expect(first.next_index).to_equal(2)
+        val next = source_project_structure_v1(snapshot, outline, "outline", "", 2, first.next_index, 2, 4096).unwrap()
+        expect(next.projection.source_text).to_contain("class A:")
+        expect(next.projection.source_text).to_contain("fn second():")
+        expect(next.projection.source_text.contains("fn first")).to_equal(false)
+        expect(next.visible_nodes.len()).to_equal(2)
+        expect(next.next_index).to_equal(-1)
+        val focus_first = source_project_structure_v1(snapshot, outline, "focused", "A.second", 1, 0, 2, 4096).unwrap()
+        val focus_next = source_project_structure_v1(snapshot, outline, "focused", "A.second", 1, focus_first.next_index, 2, 4096).unwrap()
+        expect(focus_next.projection.source_text).to_contain("class A:")
+        expect(focus_next.projection.source_text).to_contain("fn second(): 2")
+        expect(focus_next.next_index).to_equal(-1)
+        match source_project_structure_v1(snapshot, outline, "outline", "", 2, 1, 1, 4096):
+            Ok(_): fail("page lost mandatory ancestor to fit node limit")
+            Err(reason): expect(reason).to_equal("mandatory_context_exceeds_budget")
+        match source_project_structure_v1(snapshot, outline, "focused", "A.second", 1, 2, 2, 1):
+            Ok(_): fail("page lost mandatory ancestor to fit byte limit")
+            Err(reason): expect(reason).to_equal("mandatory_context_exceeds_budget")
+
+    it "retains exact Unicode source bytes and leaves incomplete syntax partial":
+        step("preserve bytes without promoting error recovery to complete analysis")
+        val source = "fn first():\n    print \"한😀\"\nfn second(): 2\n"
+        val snapshot = SourceSnapshotV1("unicode", "fixture.spl", source)
+        val outline = source_native_outline_v1(snapshot).unwrap()
+        val view = source_project_structure_v1(snapshot, outline, "focused", "first", 1, 0, 32, 4096).unwrap()
+        expect(view.projection.source_text).to_contain("한😀")
+        expect(view.projection.source_text.contains("fn second")).to_equal(false)
+        val broken = source_native_outline_v1(SourceSnapshotV1("broken", "fixture.spl", "fn broken(:\n")).unwrap()
+        expect(broken.syntax_status).to_equal("partial")
+        expect(broken.total_issues).to_be_greater_than(0)
+
+    it "uses the canonical byte conversion after multibyte comments and inline bodies":
+        step("verify native token byte spans without a second scalar conversion")
+        val source = "# 한😀\nfn first(): \"한😀\"\nfn second(): 2\n"
+        val snapshot = SourceSnapshotV1("unicode-before", "fixture.spl", source)
+        val outline = source_native_outline_v1(snapshot).unwrap()
+        val first_index = source_outline_target_v1(outline, "first").unwrap()
+        val second_index = source_outline_target_v1(outline, "second").unwrap()
+        expect(outline.nodes[first_index].full_range.start_byte).to_equal(10)
+        expect(outline.nodes[first_index].body_range.start_byte).to_equal(22)
+        expect(outline.nodes[first_index].full_range.end_byte).to_equal(31)
+        expect(outline.nodes[second_index].full_range.start_byte).to_equal(32)
+        val focused = source_project_structure_v1(snapshot, outline, "focused", "first", 1, 0, 32, 4096).unwrap()
+        expect(focused.projection.source_text).to_equal("fn first(): \"한😀\"")
+        val page = source_project_structure_v1(snapshot, outline, "outline", "", 1, 0, 1, 4096).unwrap()
+        val next = source_project_structure_v1(snapshot, outline, "outline", "", 1, page.next_index, 1, 4096).unwrap()
+        expect(next.projection.selected[0].start_byte).to_equal(32)
+        expect(next.projection.source_text).to_equal("fn second():")
