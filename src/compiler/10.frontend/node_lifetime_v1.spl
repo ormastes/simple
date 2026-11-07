@@ -1,0 +1,113 @@
+# Qualified references to the active AST expression owner. This is the single
+# ready-handle authority used by node views and reference storage adapters.
+# Pending construction obligations belong to the construction owner instead.
+use compiler.frontend.core._AstExpr.nodes.{
+    expr_lifetime_incarnation_v1, expr_owner_len, expr_owner_tag,
+    expr_owner_int_set, expr_owner_left_set, expr_owner_right_set, expr_i64_set
+}
+use compiler.core.ast.{EXPR_BINARY, expr_get_span, expr_set_span,
+    expr_get_int, expr_get_left, expr_get_right}
+use compiler.frontend.node_lifetime_topology_v1.{node_lifetime_child_edge_error_v1}
+
+const NODE_LIFETIME_EXPR_OWNER_V1: text = "compiler.ast.expr/v1"
+
+pub struct AstExprHandleV1:
+    owner: text
+    incarnation: i64
+    node: i64
+
+pub fn node_lifetime_validate_expr_v1(handle: AstExprHandleV1) -> Result<i64, text>:
+    if handle.owner != NODE_LIFETIME_EXPR_OWNER_V1:
+        return Err("AST expression handle belongs to another owner")
+    val incarnation = expr_lifetime_incarnation_v1()
+    if incarnation <= 0: return Err("AST expression lifetime authority is retired")
+    if handle.incarnation != incarnation:
+        return Err("AST expression handle has a stale store incarnation")
+    if handle.node < 0 or handle.node >= expr_owner_len():
+        return Err("AST expression handle is out of bounds")
+    Ok(handle.node)
+
+pub fn node_lifetime_expr_handle_v1(index: i64) -> Result<AstExprHandleV1, text>:
+    val handle = AstExprHandleV1(owner: NODE_LIFETIME_EXPR_OWNER_V1,
+        incarnation: expr_lifetime_incarnation_v1(), node: index)
+    match node_lifetime_validate_expr_v1(handle):
+        case Ok(_): Ok(handle)
+        case Err(reason): Err(reason)
+
+pub fn node_lifetime_validate_binary_v1(handle: AstExprHandleV1) -> Result<i64, text>:
+    match node_lifetime_validate_expr_v1(handle):
+        case Err(reason): Err(reason)
+        case Ok(index):
+            if expr_owner_tag(index) != EXPR_BINARY:
+                return Err("AST expression handle is not a binary expression")
+            Ok(index)
+
+pub fn node_lifetime_expr_key_v1(handle: AstExprHandleV1) -> Result<text, text>:
+    match node_lifetime_validate_expr_v1(handle):
+        case Err(reason): Err(reason)
+        case Ok(index): Ok("{handle.owner}:{handle.incarnation}:{index}")
+
+pub fn node_lifetime_binary_span_v1(handle: AstExprHandleV1) -> Result<i64, text>:
+    match node_lifetime_validate_binary_v1(handle):
+        case Ok(index): Ok(expr_get_span(index))
+        case Err(reason): Err(reason)
+
+pub fn node_lifetime_binary_op_v1(handle: AstExprHandleV1) -> Result<i64, text>:
+    match node_lifetime_validate_binary_v1(handle):
+        case Ok(index): Ok(expr_get_int(index))
+        case Err(reason): Err(reason)
+
+pub fn node_lifetime_binary_left_v1(handle: AstExprHandleV1) -> Result<AstExprHandleV1, text>:
+    match node_lifetime_validate_binary_v1(handle):
+        case Ok(index): node_lifetime_expr_handle_v1(expr_get_left(index))
+        case Err(reason): Err(reason)
+
+pub fn node_lifetime_binary_right_v1(handle: AstExprHandleV1) -> Result<AstExprHandleV1, text>:
+    match node_lifetime_validate_binary_v1(handle):
+        case Ok(index): node_lifetime_expr_handle_v1(expr_get_right(index))
+        case Err(reason): Err(reason)
+
+pub fn node_lifetime_binary_set_span_v1(handle: AstExprHandleV1, value: i64) -> Result<bool, text>:
+    match node_lifetime_validate_binary_v1(handle):
+        case Err(reason): Err(reason)
+        case Ok(index):
+            expr_set_span(index, value)
+            Ok(true)
+
+pub fn node_lifetime_binary_set_op_v1(handle: AstExprHandleV1, value: i64) -> Result<bool, text>:
+    match node_lifetime_validate_binary_v1(handle):
+        case Err(reason): Err(reason)
+        case Ok(index):
+            expr_owner_int_set(index, value)
+            expr_i64_set(index, "I", value)
+            Ok(true)
+
+fn node_lifetime_binary_set_child_v1(handle: AstExprHandleV1,
+    child: AstExprHandleV1, left: bool) -> Result<bool, text>:
+    val parent_result = node_lifetime_validate_binary_v1(handle)
+    match parent_result:
+        case Err(reason): return Err(reason)
+        case Ok(_): ()
+    val child_result = node_lifetime_validate_expr_v1(child)
+    match child_result:
+        case Err(reason): return Err(reason)
+        case Ok(_): ()
+    val parent = parent_result.unwrap()
+    val child_index = child_result.unwrap()
+    val topology_error = node_lifetime_child_edge_error_v1(parent, child_index)
+    if topology_error != "": return Err(topology_error)
+    if left:
+        expr_owner_left_set(parent, child_index)
+        expr_i64_set(parent, "LEFT", child_index)
+    else:
+        expr_owner_right_set(parent, child_index)
+        expr_i64_set(parent, "RIGHT", child_index)
+    Ok(true)
+
+pub fn node_lifetime_binary_set_left_v1(handle: AstExprHandleV1,
+    child: AstExprHandleV1) -> Result<bool, text>:
+    node_lifetime_binary_set_child_v1(handle, child, true)
+
+pub fn node_lifetime_binary_set_right_v1(handle: AstExprHandleV1,
+    child: AstExprHandleV1) -> Result<bool, text>:
+    node_lifetime_binary_set_child_v1(handle, child, false)
