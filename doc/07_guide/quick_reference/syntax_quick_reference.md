@@ -394,6 +394,8 @@ val s = "Hello, World!"
 s[0:5]                              # "Hello"
 s[7:]                               # "World!"
 s[-6:-1]                            # "World"
+"héllo€"[1..3]                      # "él" once C2 lands (s[a..b] counts code points, like s[i]); bytes until then
+"héllo€".substring(1, 3)            # "é" — substring/slice(a, b) are BYTE offsets
 ```
 
 ### Text Indexing and `char` ([ADR-005](../../04_architecture/adr/ADR-005-text-index-yields-char.md))
@@ -421,10 +423,10 @@ s.char_at(99)                       # "" (char_at keeps its over-run policy)
 - `c == "7"` and `c + 1` are compile errors: compare with `'7'` or use
   `c.to_text()` / `c.ord()`.
 - **Staged:** using `s[i]` where an `i64` is expected is a WARNING now and an
-  ERROR after phase 3. `s.len()` still counts bytes until phase 3; use
-  `s.byte_len()` for bytes. `s[i]` is O(1) on ASCII text and O(i) otherwise, so
+  ERROR after phase 3. `s[i]` is O(1) on ASCII text and O(i) otherwise, so
   use `s.chars()` or `s.byte_at(i)` in loops (a lint warns on `s[i]` inside
-  `for i in 0..s.len()`). Lexers must use `byte_at` / `char_code_at`.
+  `for i in 0..s.len()`). Lexers must use `byte_at` / `char_code_at` with
+  `byte_len()` bounds and cut with `substring`.
 - **Single quotes mean ONLY `char`** (decision 2026-11-03): exactly one Unicode
   scalar (U+0000..U+10FFFF minus surrogates, 1-4 UTF-8 bytes) or one escape
   (`'\n'`, `'\''`, `'\u{1F600}'`). `'é'`, `'한'`, `'😀'` are each one char.
@@ -432,15 +434,21 @@ s.char_at(99)                       # "" (char_at keeps its over-run policy)
   `"..."`. A user-perceived character can be several scalars (decomposed
   `e` + U+0301, ZWJ emoji), so `'é'` written decomposed is NOT a valid char
   literal and stays text; grapheme handling is a separate API.
-- `s[i]` indexes by code point; `.len()` counts code points (staged);
-  `.byte_len()` / `byte_at` are byte-level.
-- **Two explicit length functions (owner decision 2026-11-06):** `s.byte_len()`
-  = UTF-8 bytes, `s.char_count()` = code points (`s.chars().len()` is the O(n)
-  equivalent). Prefer these over `len()`, which is ambiguous today (bytes in
-  both engines; `s[i]` is bounded by `char_count()`, not `len()`). Known gap:
-  under `simple run` (JIT) `s.byte_len()` yields an untagged int (prints
-  `<invalid-heap:0x9>`, `byte_len() == len()` is false) - `+ 0` first.
-  Spec: `test/01_unit/lib/text/text_len_units_spec.spl`.
+- **Length and slicing units (owner decision 2026-11-07,
+  [design](../../05_design/language/text/text_len_counts_characters_2026-11-07.md)):**
+  the index family is character-based and the named byte family is
+  byte-based. `s.len()` (and `s.length()`, `s.char_count()`) = code points;
+  `s[i]` and `s[a..b]` / `s[a:b]` index and slice by code point and are
+  bounded by `len()`. `s.byte_len()` = UTF-8 bytes; `byte_at`, `substring(a, b)`,
+  `slice(a, b)`, `index_of`, `char_code_at`, `to_bytes` are byte-offset APIs.
+  Never mix `len()` with `byte_at`/`substring` on one receiver: a byte scan
+  is bounded by `byte_len()`. Rollout: callers that used `len()` as a byte
+  offset (buffers, protocol framing, base64, SDN/JSON lexers) migrate to
+  `byte_len()` first; then `len()` flips to code points in the interpreter
+  and JIT together (C1); `s[a..b]` flips after its own byte-offset audit (C2).
+  Until each flip lands, that form still counts bytes in both engines. The
+  JIT `byte_len()` boxing gap is fixed
+  (`177e47d13d9`). Spec: `test/01_unit/lib/text/text_len_units_spec.spl`.
 - A `char` is not a condition: `if c:` / `while c:` is a type error. Write
   `c != '\0'`.
 - Staged warnings (non-exhaustive match, `Any` outside `unsafe:`, char used as

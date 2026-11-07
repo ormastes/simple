@@ -59,3 +59,16 @@ Switch `len()` to code points in interpreter, JIT and native **with parity specs
 phase 3 passes** (compiler callers are on the bootstrap path). Before that: land the JIT
 `byte_len` boxing fix (separate PR, another worker) and add a `byte_len` arm to pure-Simple
 MIR lowering, then switch the 535 remaining byte-dependent sites listed by this audit's method.
+
+## 2026-11-07 — hold lifted (owner decision)
+
+The "ONLY AFTER phase 3 passes" hold is superseded. Owner decision 2026-11-07:
+`len()` counts code points; `byte_len()` stays bytes; `char_count()` stays an
+alias; `s[a..b]` slices by code point (consistent with `s[i]`), while
+`substring`/`slice(a, b)` stay byte-offset. Design + migration + rollout:
+`doc/05_design/language/text/text_len_counts_characters_2026-11-07.md`.
+The JIT `byte_len` boxing gap named above is fixed (`177e47d13d9`, verified on
+the 2026-11-07 release seed: `byte_len()` prints 9 and `n == 9` is true).
+Rollout: (A) docs, (B) byte-offset callers -> `byte_len()` + pure-Simple MIR
+`byte_len`/`char_count` arms, (C) flip in interpreter + JIT + MIR together with
+specs, (D) Phase 3 self-hosted verification.

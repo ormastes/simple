@@ -89,6 +89,13 @@ no longer type-checks as "parse this text", because `char` has no `to_i64`.
 
 Same staging as exhaustive match: a warning now, an error after phase 3.
 
+**2026-11-07 (owner decision):** the `s.len()` code-point switch is no longer
+held behind phase 3. It rolls out per
+`doc/05_design/language/text/text_len_counts_characters_2026-11-07.md`:
+byte-offset callers move to `byte_len()` first, then `len()` and `s[a..b]`
+flip to code points in the interpreter and JIT together; `substring`/`slice(a, b)`
+stay byte-offset. Phase 3 remains the self-hosted verification step, not a gate.
+
 | item | now | after phase 3 passes once |
 |---|---|---|
 | `s[i]` used where an i64/int is expected | **warning** | error (TODO + bug row `text_index_char_int_context_warning_to_error_2026-11-03`) |
