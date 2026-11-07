@@ -3103,6 +3103,7 @@ impl LlvmBackend {
                     "char_count" => Some("rt_string_char_count"),
                     "push" => Some("rt_array_push"),
                     "write_span" => Some("rt_array_write_span"),
+                    "fill_span" => Some("rt_array_fill_span"),
                     "pop" => Some("rt_array_pop"),
                     // Keep the LLVM bootstrap table synchronized with the
                     // Cranelift and pure-Simple lowerers. `write_span` is an
@@ -3111,6 +3112,7 @@ impl LlvmBackend {
                     // is correct; interpreter write-back remains owned by its
                     // dedicated mutating-method channel.
                     "write_span" => Some("rt_array_write_span"),
+                    "fill_span" => Some("rt_array_fill_span"),
                     "clear" => Some("rt_array_clear"),
                     "enumerate" => Some("rt_array_enumerate"),
                     "join" => Some("rt_string_join"),
@@ -3333,7 +3335,9 @@ impl LlvmBackend {
                         } else if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                             let ret_val = if returns_bool {
                                 self.coerce_value_to_type(ret_val, Some(i64_type.into()), builder)?
-                            } else if rt_name == "rt_array_write_span" && ret_val.is_int_value() {
+                            } else if (rt_name == "rt_array_write_span" || rt_name == "rt_array_fill_span")
+                                && ret_val.is_int_value()
+                            {
                                 // Raw i64 count from both runtimes; this result is
                                 // consumed as a tagged value, so tag it like
                                 // `rt_value_int`: `(v << 3) | INT(0)`. Same as the

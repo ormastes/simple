@@ -2403,6 +2403,9 @@ fn try_compile_builtin_method_call<M: Module>(
         // returns the count written). Array-only name; no other receiver
         // type defines it.
         "write_span" => "rt_array_write_span",
+        // Bulk in-place volatile fill (`arr.fill_span(dst_off, count, value)`):
+        // same array-only, raw-count contract as write_span.
+        "fill_span" => "rt_array_fill_span",
         // Generic collection methods (work on String, Array, Tuple, Dict)
         "len" | "length" => "rt_len",
         // Result/Option methods.
@@ -2875,7 +2878,7 @@ fn try_compile_builtin_method_call<M: Module>(
         Ok(Some(receiver_val))
     } else if results.is_empty() {
         Ok(Some(builder.ins().iconst(types::I64, 0)))
-    } else if runtime_func == "rt_array_write_span" {
+    } else if runtime_func == "rt_array_write_span" || runtime_func == "rt_array_fill_span" {
         // The runtimes return the RAW i64 count (C twin, pure-Simple lowering and
         // the seed runtime agree); `write_span` is typed `Any` here, so the
         // result is consumed as a tagged value. Tag it: `(v << 3) | INT(0)`,

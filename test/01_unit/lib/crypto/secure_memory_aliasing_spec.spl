@@ -1,0 +1,100 @@
+"""Secure-memory wipes reach exactly the caller's place -- never an alias.
+
+Reproducer for
+doc/08_tracking/bug/secure_memory_interpreter_raw_pointer_aliasing_2026-08-24.md.
+The owner used to take `rt_array_data_ptr_text(bytes)` and write through it
+with `rt_volatile_write_u8`. Under the interpreter that pointer addressed a
+SHARED `Arc<Vec<u8>>` allocation (a callee parameter is an `Arc` clone of the
+caller's value) or a freed temporary, so a wipe landed in memory the language
+says is a separate value -- or in nothing at all -- while the report still
+said `verified()`. The owner now takes its buffer as a `mut` parameter and
+wipes it with the compiler-owned `Array.fill_span`, so the write goes to the
+resolved place's exclusive storage and is published back through the normal
+mutable-argument write-back.
+
+## Operator workflow
+bin/simple test test/01_unit/lib/crypto/secure_memory_aliasing_spec.spl
+
+## Compatibility and limitations
+Interpreter lane. The same scenarios run on the JIT through
+test/fixtures/engine_differential/fill_span_secure_wipe.spl (engine parity).
+"""
+# @manual_section: secure-memory-aliasing
+use std.spec.*
+use std.common.crypto.secure_memory.{
+    secure_zero_u8_slots, secure_zero_u8_range, secure_zero_i64_slots}
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+class KeyHolder:
+    key: [u8]
+
+class Session:
+    holder: KeyHolder
+
+fn _all_zero(bytes: [u8]) -> bool:
+    var i = 0u64
+    while i < bytes.len():
+        if (bytes[i] as i64) != 0:
+            return false
+        i = i + 1u64
+    true
+
+fn _wipe_private_copy(bytes: [u8]) -> bool:
+    # A by-value parameter copied into a local is a SEPARATE value: wiping
+    # the local must not reach the caller's buffer.
+    var local = bytes
+    secure_zero_u8_slots(local).verified() and _all_zero(local)
+
+describe "secure-memory wipe addresses the caller's place":
+    it "wipes a local secret through the owner API with no raw pointer":
+        # @req REQ-SECURE-MEMORY-ALIAS-001
+        var secret = rt_text_to_bytes("srvdb-acceptance-key")
+        val report = secure_zero_u8_slots(secret)
+        expect(report.verified()).to_equal(true)
+        expect(report.overwritten_slots).to_equal(20u64)
+        expect(_all_zero(secret)).to_equal(true)
+        val copy_after = secret
+        expect(_all_zero(copy_after)).to_equal(true)
+
+    it "does not reach a value-semantics copy taken before the wipe, which is wiped on its own":
+        # @req REQ-SECURE-MEMORY-ALIAS-002
+        var secret = rt_text_to_bytes("srvdb-acceptance-key")
+        var copy_before = secret
+        expect(secure_zero_u8_slots(secret).verified()).to_equal(true)
+        expect(_all_zero(secret)).to_equal(true)
+        # The language gives `[u8]` value semantics: the copy is its own
+        # allocation and still holds the secret until its owner wipes it.
+        expect(copy_before[0u64] as i64).to_equal(115)
+        expect(secure_zero_u8_slots(copy_before).verified()).to_equal(true)
+        expect(_all_zero(copy_before)).to_equal(true)
+
+    it "never writes through a callee's private copy into the caller's buffer":
+        # @req REQ-SECURE-MEMORY-ALIAS-003
+        var secret = rt_text_to_bytes("srvdb-acceptance-key")
+        expect(_wipe_private_copy(secret)).to_equal(true)
+        expect(secret[0u64] as i64).to_equal(115)
+        expect(secret[19u64] as i64).to_equal(121)
+
+    it "wipes a secret held in a class field and a nested field":
+        # @req REQ-SECURE-MEMORY-ALIAS-004
+        var holder = KeyHolder(key: rt_text_to_bytes("field-secret"))
+        expect(secure_zero_u8_slots(holder.key).verified()).to_equal(true)
+        expect(_all_zero(holder.key)).to_equal(true)
+        var session = Session(holder: KeyHolder(key: rt_text_to_bytes("nested-secret")))
+        expect(secure_zero_u8_slots(session.holder.key).verified()).to_equal(true)
+        expect(_all_zero(session.holder.key)).to_equal(true)
+
+    it "wipes an exact window of a literal buffer and leaves the canaries":
+        # @req REQ-SECURE-MEMORY-ALIAS-005
+        var guarded: [u8] = [170u8, 17u8, 34u8, 51u8, 68u8, 187u8]
+        val report = secure_zero_u8_range(guarded, 1u64, 4u64)
+        expect(report.verified()).to_equal(true)
+        expect(guarded).to_equal([170u8, 0u8, 0u8, 0u8, 0u8, 187u8])
+
+    it "wipes an i64 slot array in place through the typed owner":
+        # @req REQ-SECURE-MEMORY-ALIAS-006
+        var words: [i64] = [0x5EC4E7, -1, 42]
+        val report = secure_zero_i64_slots(words)
+        expect(report.verified()).to_equal(true)
+        expect(words).to_equal([0, 0, 0])

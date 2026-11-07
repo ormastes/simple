@@ -696,6 +696,10 @@ int8_t   rt_array_clear(SplArray* array);
  * Returns count copied, -1 on out-of-bounds/invalid handle, 0 for count<=0. */
 int64_t  rt_array_write_span(SplArray* dst, SplArray* src, int64_t dst_off,
                              int64_t src_off, int64_t count);
+/* Bulk in-place VOLATILE fill: dst[dst_off..dst_off+count] = value, then a
+ * full fence. Twin of Array.fill_span; same contract shape as write_span. */
+int64_t  rt_array_fill_span(SplArray* dst, int64_t dst_off, int64_t count,
+                            int64_t value);
 int8_t   rt_array_push_i64_raw(SplArray* array, int64_t value);
 int64_t  spl_wffi_call_i64_checked(int64_t fptr, int64_t args_value,
                                     int64_t nargs);

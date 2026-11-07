@@ -2001,6 +2001,36 @@ impl MirLowering:
         self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, ws_recv)
         ws_result
 
+    me lower_unresolved_array_fill_span(fs_recv: LocalId, fs_args: [HirCallArg], wb_kind: i64, wb_base: LocalId, wb_index: LocalId, wb_field_idx: i64) -> LocalId:
+        """Builtin Array.fill_span(dst_off, count, value) -> i64.
+
+        Sibling of write_span above: the compiler-owned in-place VOLATILE
+        fill the secure-memory owner uses to zero or overwrite a secret
+        buffer without a raw data pointer. Lowers straight to the runtime
+        symbol `rt_array_fill_span(ptr dst, i64 dst_off, i64 count,
+        i64 value) -> i64` (count written, -1 on an invalid handle, 0 for
+        count <= 0; an out-of-range span never writes -- same contract as
+        rt_array_fill_span in runtime_native.c / value/collections.rs and
+        the interpreter's array_fill_span / byte_array_fill_span kernels).
+        The runtime stores volatile and fences, so the wipe is never elided.
+        Bug: doc/08_tracking/bug/secure_memory_interpreter_raw_pointer_aliasing_2026-08-24.md"""
+        val fs_dst_off = self.lower_expr(fs_args[0].value)
+        val fs_count = self.lower_expr(fs_args[1].value)
+        val fs_value = self.lower_expr(fs_args[2].value)
+        val fs_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_array_fill_span"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                params: [MirType.ptr(MirType.i64(), false), MirType.i64(), MirType.i64(), MirType.i64()],
+                return_type: MirType.i64(),
+                is_variadic: false
+            )))
+        ))
+        var b_fs = self.builder
+        val fs_result = b_fs.emit_call(fs_op, [mir_operand_copy(fs_recv), mir_operand_copy(fs_dst_off), mir_operand_copy(fs_count), mir_operand_copy(fs_value)], MirType.i64())
+        self.builder = b_fs
+        self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, fs_recv)
+        fs_result
+
     me lower_text_index_operand(value: HirExpr) -> LocalId:
         # Text search/slice runtime indices use raw i64, while an erased
         # producer can leave a tagged RuntimeValue in an i64 MIR local.
@@ -5046,6 +5076,11 @@ impl MirLowering:
                     return self.lower_unresolved_array_write_span(
                         unresolved_receiver_local, args,
                         wb_kind, wb_base, wb_index, wb_field_idx)
+                # Builtin Array.fill_span (see lower_unresolved_array_fill_span).
+                if method == "fill_span" and args.len() == 3:
+                    return self.lower_unresolved_array_fill_span(
+                        unresolved_receiver_local, args,
+                        wb_kind, wb_base, wb_index, wb_field_idx)
 
                 # `char_code_at` is a text runtime primitive, but flat HIR has
                 # no method symbol for it. Keep custom owner methods above,
@@ -5616,6 +5651,11 @@ impl MirLowering:
                 # and same stable-handle writeback rationale as push above.
                 if method == "write_span" and args.len() == 4:
                     return self.lower_unresolved_array_write_span(
+                        unresolved_receiver_local, args,
+                        wb_kind, wb_base, wb_index, wb_field_idx)
+                # Builtin Array.fill_span, same rationale.
+                if method == "fill_span" and args.len() == 3:
+                    return self.lower_unresolved_array_fill_span(
                         unresolved_receiver_local, args,
                         wb_kind, wb_base, wb_index, wb_field_idx)
                 # Enumerated siblings (2026-08-08). A single probe carrying
