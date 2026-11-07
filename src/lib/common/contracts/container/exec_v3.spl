@@ -70,8 +70,8 @@ fn exec_path_v3(value: text, windows: bool) -> bool:
         return false
     if not windows: return value.starts_with("/")
     if value.len() < 3: return false
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".contains(value.substring(0, 1)) and
-        value.substring(1, 2) == ":" and (value.substring(2, 3) == "/" or value.substring(2, 3) == "\\")
+    ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".contains(value.substring(0, 1)) and
+        value.substring(1, 2) == ":" and (value.substring(2, 3) == "/" or value.substring(2, 3) == "\\"))
 
 fn exec_name_v3(name: text) -> bool:
     if str_len(name) == 0 or str_len(name) > 256: return false
@@ -110,8 +110,8 @@ fn exec_environment_bytes_v3(entries: [ContainerExecEnvironmentEntryV3], windows
                 if str_len(value) > 16384 or value.contains("\0"): return Err("container-exec-literal-value")
                 {"kind": SdnValue.String("literal"), "name": SdnValue.String(name), "value": SdnValue.String(value)}
             case ContainerExecEnvironmentEntryV3.SecretReference(_, reference, digest):
-                if str_len(reference) == 0 or str_len(reference) > 1024 or reference.contains("\0") or
-                        reference.contains("\n") or reference.contains("\r") or not builder_digest_valid_v1(digest):
+                if (str_len(reference) == 0 or str_len(reference) > 1024 or reference.contains("\0") or
+                        reference.contains("\n") or reference.contains("\r") or not builder_digest_valid_v1(digest)):
                     return Err("container-exec-secret-reference")
                 {"kind": SdnValue.String("secret-reference"), "name": SdnValue.String(name),
                     "reference": SdnValue.String(reference), "versionDigest": SdnValue.String(digest)}
@@ -119,9 +119,9 @@ fn exec_environment_bytes_v3(entries: [ContainerExecEnvironmentEntryV3], windows
     Ok(result)
 
 fn exec_runtime_bytes_v3(identity: RuntimeIdentityV1) -> Result<text, text>:
-    if not builder_identifier_valid_v1(identity.pod_uid) or not builder_identifier_valid_v1(identity.operation_id) or
+    if (not builder_identifier_valid_v1(identity.pod_uid) or not builder_identifier_valid_v1(identity.operation_id) or
             identity.attempt <= 0 or identity.provider_generation <= 0 or not ["podman", "docker"].contains(identity.engine) or
-            not builder_digest_valid_v1(identity.native_id) or not builder_digest_valid_v1(identity.node_boot_id):
+            not builder_digest_valid_v1(identity.native_id) or not builder_digest_valid_v1(identity.node_boot_id)):
         return Err("container-exec-parent-runtime-invalid")
     val fields: Dict<text, SdnValue> = {"podUid": SdnValue.String(identity.pod_uid), "attempt": SdnValue.Int(identity.attempt),
         "providerGeneration": SdnValue.Int(identity.provider_generation), "operationId": SdnValue.String(identity.operation_id),
@@ -143,8 +143,8 @@ fn exec_runtime_plan_v3(identity: RuntimeIdentityV1, plan: ContainerExecutionPla
         boot_id: plan.boot_id, provider_generation: plan.provider_generation, native_machine_id: plan.native_machine_id,
         continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
     val engine = if plan.backend == "linux-podman": "podman" else: "docker"
-    if identity.pod_uid != plan.workload_uid or identity.attempt != plan.attempt or identity.operation_id != plan.operation_id or
-            identity.provider_generation != plan.provider_generation or identity.engine != engine or identity.node_boot_id != container_scope_fence_id_v2(scope)?:
+    if (identity.pod_uid != plan.workload_uid or identity.attempt != plan.attempt or identity.operation_id != plan.operation_id or
+            identity.provider_generation != plan.provider_generation or identity.engine != engine or identity.node_boot_id != container_scope_fence_id_v2(scope)?):
         return Err("container-exec-parent-runtime-plan-mismatch")
     Ok(true)
 
@@ -153,11 +153,11 @@ pub fn container_exec_request_encode_v3(request: ContainerExecRequestV3) -> Resu
     val runtime_matched = exec_runtime_plan_v3(request.parent_runtime, request.parent)?
     val parent_runtime = exec_runtime_bytes_v3(request.parent_runtime)?
     val windows = request.parent.backend == "windows-docker-process"
-    if not builder_identifier_valid_v1(request.operation_id) or request.operation_id == request.parent.operation_id or
-            not builder_digest_valid_v1(request.nonce) or request.argv.len() == 0 or request.argv.len() > 4096 or request.timeout_ms <= 0:
+    if (not builder_identifier_valid_v1(request.operation_id) or request.operation_id == request.parent.operation_id or
+            not builder_digest_valid_v1(request.nonce) or request.argv.len() == 0 or request.argv.len() > 4096 or request.timeout_ms <= 0):
         return Err("container-exec-request-identity-bound")
-    if not exec_path_v3(request.argv[0], windows) or not exec_path_v3(request.working_directory, windows) or
-            not exec_user_v3(request.selected_user, windows) or not ["none", "tty"].contains(request.terminal_mode):
+    if (not exec_path_v3(request.argv[0], windows) or not exec_path_v3(request.working_directory, windows) or
+            not exec_user_v3(request.selected_user, windows) or not ["none", "tty"].contains(request.terminal_mode)):
         return Err("container-exec-platform-options")
     var args: [SdnValue] = []
     var size: i64 = 0
@@ -227,9 +227,9 @@ pub fn container_exec_request_decode_v3(source: text) -> Result<ContainerExecReq
 
 pub fn container_exec_birth_encode_v3(receipt: ContainerExecBirthReceiptV3) -> Result<text, text>:
     val identity = receipt.parent_runtime
-    if receipt.proof_kind != "exact-native-exec-birth-v3" or receipt.created_unix_ms <= 0 or identity.attempt <= 0 or
+    if (receipt.proof_kind != "exact-native-exec-birth-v3" or receipt.created_unix_ms <= 0 or identity.attempt <= 0 or
             identity.provider_generation <= 0 or not builder_identifier_valid_v1(identity.pod_uid) or
-            not builder_identifier_valid_v1(identity.operation_id) or not ["podman", "docker"].contains(identity.engine):
+            not builder_identifier_valid_v1(identity.operation_id) or not ["podman", "docker"].contains(identity.engine)):
         return Err("container-exec-birth-identity")
     for digest in [receipt.request_digest, identity.native_id, identity.node_boot_id, receipt.native_exec_id,
             receipt.provider_identity_digest, receipt.query_digest, receipt.evidence_digest]:
@@ -274,9 +274,9 @@ pub fn container_exec_birth_match_v3(receipt: ContainerExecBirthReceiptV3, reque
         continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
     val identity = receipt.parent_runtime
     val engine = if plan.backend == "linux-podman": "podman" else: "docker"
-    if receipt.request_digest != container_exec_request_digest_v3(request)? or identity.pod_uid != plan.workload_uid or
+    if (receipt.request_digest != container_exec_request_digest_v3(request)? or identity.pod_uid != plan.workload_uid or
             identity.attempt != plan.attempt or identity.operation_id != plan.operation_id or
             identity.provider_generation != plan.provider_generation or identity.engine != engine or
-            identity.node_boot_id != container_scope_fence_id_v2(scope)?:
+            identity.node_boot_id != container_scope_fence_id_v2(scope)?):
         return Err("container-exec-birth-parent-mismatch")
     Ok(true)
