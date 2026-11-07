@@ -129,3 +129,43 @@ during promotion, and warn on a refused scope. Pinned by
 `test/01_unit/compiler/50.mir/bootstrap_closure_provider_retention_spec.spl`.
 Per-module RSS is unmeasured until a Stage 2 is rebuilt from this source: a 12G
 probe with the r16b Stage 2 cannot reach MIR (it ended at `phase4:monomorphize`).
+
+## Provider trait-impl rows once per closure (2026-11-07, Phase 2 lane 3)
+
+On this tree the struct/class layout rows and provider method rows were already
+session-indexed and demand-driven. One per-consumer walk of the whole provider
+closure was left: `register_trait_receiver_impls`. It ran on every consumer, walked
+every provider's impl table, and relocated every impl method into the consumer's
+symbol table, through `define_with_binding` plus a ledger record. That cost is
+N x P in both time and consumer-table growth.
+
+Repair: `build_provider_trait_impl_index_v1` builds the trait owner, method and
+scalar rows once, inside `ensure_provider_session_v1`. These rows hold
+provider-table ids only. Each consumer then does three things:
+`register_provider_trait_impls_demand_v1` registers its own impls, replays the
+scalar rows only for the traits it can see, and leaves everything else to two
+lookups. `trait_impl_owners_materialize_v1` and `trait_impl_method_materialize_v1`
+take a key only when the fallback trait-receiver dispatch asks for it. The demand
+lane uses the same conditions as layout demand. The escape hatch for A/B checks is
+`SIMPLE_MIR_EAGER_TRAIT_IMPLS=1`.
+
+Measured on seed `D:/dev/wt/seed/simple.exe`, sha256 `4efe643ae90e1a85…`, with
+the interpreted spec, N=3 consumers and P=3 providers:
+
+| counter | before | after |
+|---|---|---|
+| `trait_impl_provider_index_builds` | 3 | 1 |
+| `trait_impl_provider_relocations` | 9 | 0 |
+
+Pinned by `test/01_unit/compiler/50.mir/mir_provider_trait_impl_once_per_closure_spec.spl`
+and `..._prevention_spec.spl`. The prevention spec also checks that the demand lane's
+MIR calls match the eager lane's.
+
+Still open: the native trait layout and implementation registration, and the
+promotion walk. Neither is touched by this change.
+
+The full-scale wall time is pending a Stage 2 rebuild on the Windows MSVC host:
+`SIMPLE_COMPILER_PHASE_PROFILE=1 SIMPLE_MIR_SECTION_PROFILE_FILE=build/p2mir.sections sh scripts/bootstrap/bootstrap-from-scratch.sh --deploy --progress`.
+Run it again with `SIMPLE_MIR_EAGER_TRAIT_IMPLS=1` and compare three things: the
+Stage 2 wall time, the `[mir] i/N elapsed_s` lines, and the per-module
+`p5_provider_layouts` -> `p6_trait_impls` deltas.

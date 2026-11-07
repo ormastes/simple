@@ -1,0 +1,92 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# @tag: unit, compiler, mir
+"""
+# MIR: provider trait-impl rows are built once per closure
+
+Repro for doc/08_tracking/bug/mir_in_process_per_consumer_provider_rebuild_quadratic_2026-10-20.md.
+The Stage 2 direct lane lowers every closure module on ONE `MirLowering`
+with the whole closure as providers (`lower_module_transient_scoped(hir,
+ctx.mir_feed_modules, ...)`). `register_trait_receiver_impls` walked every
+provider's impl table on every consumer and relocated every impl method into
+that consumer's symbol table: N consumers x P providers. The provider walk
+must happen once per closure and a consumer that never dispatches through a
+provider trait must relocate none of its methods.
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir.*
+
+val shape_src = "pub trait Shape:\n    fn area() -> i64\n"
+
+fn impl_src(i: i64) -> text:
+    "use lib.shape.\{Shape\}\n\npub struct Sq{i}:\n    side: i64\n\nimpl Shape for Sq{i}:\n    fn area() -> i64:\n        self.side * {i + 1}\n"
+
+fn consumer_src() -> text:
+    "use lib.impl0.\{Sq0\}\n\nfn run(n: i64) -> i64:\n    val sq = Sq0(side: n)\n    sq.side\n"
+
+struct ProviderRun:
+    errors: i64
+    index_builds: i64
+    relocations: i64
+
+fn lower_closure(provider_count: i64, consumer_count: i64) -> ProviderRun:
+    val log = Logger(level: 0)
+    var modules: Dict<text, ParserModule> = {}
+    var sources: [SourceFile] = []
+    modules["lib.shape"] = parse_full_frontend(shape_src, "lib/shape.spl", "lib.shape", log)
+    sources.push(SourceFile(path: "lib/shape.spl", content: shape_src, module_name: "lib.shape"))
+    var i = 0
+    while i < provider_count:
+        val src = impl_src(i)
+        modules["lib.impl{i}"] = parse_full_frontend(src, "lib/impl{i}.spl", "lib.impl{i}", log)
+        sources.push(SourceFile(path: "lib/impl{i}.spl", content: src, module_name: "lib.impl{i}"))
+        i = i + 1
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var providers: [HirModule] = []
+    var shape_lowering = hirlowering_for_module("lib/shape.spl", surfaces)
+    providers.push(shape_lowering.lower_module(modules["lib.shape"]))
+    i = 0
+    while i < provider_count:
+        var impl_lowering = hirlowering_for_module("lib/impl{i}.spl", surfaces)
+        providers.push(impl_lowering.lower_module(modules["lib.impl{i}"]))
+        i = i + 1
+    var consumers: [HirModule] = []
+    var c = 0
+    while c < consumer_count:
+        var consumer_lowering = hirlowering_for_module("app/c{c}.spl", surfaces)
+        consumers.push(consumer_lowering.lower_module(parse_full_frontend(consumer_src(), "app/c{c}.spl", "app.c{c}", log)))
+        c = c + 1
+    val target = driver_mir_target_context(driver_core_compile_options_default())
+    val first: HirModule = consumers[0]
+    var lowering = MirLowering.new_for_target(first.symbols, target)
+    lowering.trait_impl_closure_complete = true
+    var failed = 0
+    c = 0
+    while c < consumer_count:
+        val consumer: HirModule = consumers[c]
+        val mir = lowering.lower_module_transient_scoped(consumer, providers, c == 0)
+        if mir.is_err():
+            failed = failed + 1
+        c = c + 1
+    ProviderRun(errors: lowering.errors.len() + failed,
+        index_builds: lowering.trait_impl_provider_index_builds,
+        relocations: lowering.trait_impl_provider_relocations)
+
+describe "MIR provider trait-impl registration per closure":
+    it "walks the provider impl tables once for a three-consumer closure":
+        val run = lower_closure(3, 3)
+        expect(run.errors).to_equal(0)
+        expect(run.index_builds).to_equal(1)
+
+    it "relocates no provider impl method into consumers that never dispatch through the trait":
+        val run = lower_closure(3, 3)
+        expect(run.relocations).to_equal(0)
