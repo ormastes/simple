@@ -1318,6 +1318,14 @@ int64_t  rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_
 #ifdef _WIN32
 /* Core-C PID/handle ownership shared with rt_process_wait. */
 int64_t  rt_process_spawn_async_owned_windows(const char* cmd, const char** args, int64_t arg_count);
+/* Native child-env v1: mode 0 overlays a copied parent environment; mode 1 is
+ * exact replacement. The four-word capture result is borrowed per-thread:
+ * text handles, untagged exit status, authoritative flags (timeout/output/error).
+ * Ordinary capture/async lifetime only: no ProcessOwnedV4 proof is implied. */
+int64_t* rt_process_run_bounded_environment_tuple_v1(const char* cmd,uint64_t cmd_len,
+    SplArray* args,SplArray* environment,int64_t mode,int64_t timeout_ms,int64_t max_output_bytes);
+int64_t rt_process_spawn_async_environment_v1(const char* cmd,uint64_t cmd_len,
+    SplArray* args,SplArray* environment,int64_t mode);
 #endif
 int64_t  rt_process_spawn_guarded(const char* cmd, const char** args, int64_t arg_count);
 /* Spawn the installed MCP wrapper with inherited stdio; result is waitable. */
