@@ -81,6 +81,8 @@ would be wrong.
   Fixing the producer (keep `Any` payloads tagged) changes every `Optional(Any)`
   consumer (`??` currently relies on the raw word) and needs native
   verification; tracked here rather than widened silently.
+- **MISS into an i64 sink is still a silent wrong value (pre-existing, unchanged here):** the None handle carries payload 3 and `rt_unwrap_or_self` (`src/runtime/runtime_native.c:6269`, Rust `objects.rs:530`) returns it, so an out-of-range `get` reads as `3`. Same for typed `[i64].get`. A stored element `3` in a `list` is also classified None by the runtime Some check. Both are in follow-up `native_option_int_sink_miss_and_payload_three_2026-11-07`, which proposes `rt_unwrap_or_trap` at integer sinks.
+- `option_payload_for_int_sink` assumes an int-decoded payload. That holds only for the array get/at/first/last producer: other `Optional(Any)` producers (`any?` params, tagged dict reads) hand over a tagged word. The limit is stated in the helper docstring.
 - The public array `get` contract (Option vs element) remains the open question
   of `array_get_contract_drift_crypto_2026-10-18`.
 
