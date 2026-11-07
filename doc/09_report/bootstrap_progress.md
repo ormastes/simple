@@ -48,7 +48,14 @@ repo evidence. Anything not re-run on 2026-11-07 is marked **unverified**.
 
 ## Open blockers (cross-platform)
 
-1. Stage 3 HIR RSS growth / SIGBUS.
+1. Stage 3 HIR RSS growth / SIGBUS. One contributing cause has been fixed in
+   PR #7686 (2026-11-07). Phase 1's interface index leaked per-character text
+   scratch, which added +2.72 GB before parse even started. On the macOS arm64
+   full-CLI build, peak RSS before the fix was 7.45 GB at HIR module 1073 of
+   the closure. The phase reproducer over the 3097-source closure dropped from
+   3.37 GB to 1.60 GB, with byte-identical output. HIR itself still grows from
+   6.18 GB to 7.1 GB over 1073 modules, so this blocker stays open. See
+   `doc/08_tracking/bug/stage3_current_source_hir_rss_termination_2026-08-14.md`.
 2. LLVM `i64`→`void` mismatch in `test_runner_build`.
 3. Small-host per-file pool refusal: needs ≥30 GB RAM.
 4. Linux arm64: Stage 3 admission receipt is missing, and the seed stopgap is
