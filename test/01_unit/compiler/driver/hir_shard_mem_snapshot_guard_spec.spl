@@ -8,6 +8,12 @@ every worker failed with "SIMPLE_MEM_SNAPSHOT_FILE could not be established
 safely", blocked the shard ledger, and the next claim failed with "HIR shard
 ledger claim failed". The streaming path already guarded the call with
 `if not hir_shard_mode:`; both call sites must carry that guard.
+
+Widened 2026-11-07: MIR shard workers (SIMPLE_MIR_SHARD) collided the same
+way (`[mir-shard] owner=1/2@0 status=BLOCKED`). Both call sites now ask the
+single owner predicate mem_snapshot_owner_v1 (driver_mem_snapshot.spl), which
+refuses HIR and MIR shard children; its truth table is pinned by
+mem_snapshot_owner_v1_spec.spl.
 """
 
 use std.spec.*
@@ -15,20 +21,20 @@ use std.io.{file_read}
 
 val HIR_LOWERING = "src/compiler/80.driver/driver_hir_pipeline_lowering.spl"
 val BEGIN_CALL = "if mem_snapshot_begin() < 0:"
-val GUARD = "if not hir_shard_mode:"
+val GUARD = "if mem_snapshot_owner_v1(hir_shard_mode, mir_shard_child):"
 
-describe "HIR shard memory snapshot guard":
-    it "guards every mem_snapshot_begin() call site with the shard-mode check":
+describe "shard memory snapshot guard":
+    it "guards every mem_snapshot_begin() call site with the owner predicate":
         val source = file_read(HIR_LOWERING)
         # Every text before a call site ends with the statement that encloses
-        # the call: the guard must sit within the preceding 64 bytes.
+        # the call: the guard must sit within the preceding 96 bytes.
         val parts = source.split(BEGIN_CALL)
         val sites = parts.len() - 1
         var guarded = 0
         var index = 0
         while index < sites:
             val before: text = parts[index]
-            val window_start = if before.len() > 64: before.len() - 64 else: 0
+            val window_start = if before.len() > 96: before.len() - 96 else: 0
             val window = before.substring(window_start, before.len())
             if window.contains(GUARD): guarded = guarded + 1
             index = index + 1
