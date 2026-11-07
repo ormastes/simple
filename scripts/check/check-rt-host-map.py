@@ -211,6 +211,25 @@ def c_provider_views(root):
                         pending.append(child)
 
 
+def provider_definitions(src):
+    """External definitions from comment/string/attribute-stripped C text.
+
+    A candidate's declaration extends back to the preceding ;/{/} boundary,
+    not merely its return-type line. Scan those bounded segments once so a
+    storage qualifier on an earlier line cannot turn a private helper public.
+    Preprocessor directive tokens are not C declaration qualifiers.
+    """
+    src = re.sub(r'^[ \t]*#[^\n]*', '', src, flags=re.M)
+    segments = re.split(r'([;{}])', src)
+    for i in range(1, len(segments), 2):
+        if segments[i] != '{':
+            continue
+        declaration = segments[i - 1]
+        match = DEF.search(declaration + '{')
+        if match and not re.search(r'\bstatic\b', declaration[:match.end(1)]):
+            yield match[1]
+
+
 def scan(root):
     prov, rust, decl, _definite = scan_detail(root)
     return prov, rust, decl
@@ -225,7 +244,7 @@ def scan_detail(root):
     for h, definite_only, _path, view in c_provider_views(root):
         src = re.sub(r'__attribute__\s*\(\((?:[^()]|\([^()]*\))*\)\)', ' ', C_STRING.sub(' ', view))
         target = definite if definite_only else prov
-        target[h].update(DEF.findall(src))
+        target[h].update(provider_definitions(src))
     definite = {h: definite[h] & prov[h] for h in HOSTS}
     rust = set()
     for rel in ('src/compiler_rust/runtime/src', 'src/runtime'):
@@ -328,7 +347,11 @@ def include_selftest():
                 'long rt_shared(void) { return 1; }\n'
                 'long rt_prototype(void);\n'
                 '    static long rt_static(void) { return 1; }\n'
-                'inline static long rt_static_inline(void) { return 1; }\n'),
+                'inline static long rt_static_inline(void) { return 1; }\n'
+                'static\nint64_t rt_multiline_static(void) { return 1; }\n'
+                'inline\nstatic\nlong rt_inline_static(void) { return 1; }\n'
+                'static\ninline\nlong rt_static_reordered(void) { return 1; }\n'
+                'inline\nlong rt_public_inline(void) { return 1; }\n'),
             'src/runtime/diamond.h': '#include "nested/leaf.h"\n',
             'src/runtime/cycle.h': '#include "shared.h"\n',
             'src/runtime/nested/leaf.h': 'long rt_leaf(void) { return 1; }\n',
@@ -345,10 +368,20 @@ def include_selftest():
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, 'w') as f:
                 f.write(body)
-        os.symlink(os.path.join(root, 'outside.h'), os.path.join(root, 'src/runtime/escape.h'))
+        try:
+            os.symlink(os.path.join(root, 'outside.h'), os.path.join(root, 'src/runtime/escape.h'))
+        except OSError as exc:
+            # Windows commonly requires an elevated token or Developer Mode.
+            # Report only that known capability gap; other failures are real.
+            if os.name == 'nt' and getattr(exc, 'winerror', None) == 1314:
+                print('UNTESTED — symlink-escape fixture: Windows symlink privilege unavailable')
+            else:
+                raise
+        else:
+            print('PASS — symlink-escape fixture: real symlink outside owned runtime')
         prov, _rust, _decl, definite = scan_detail(root)
         for h in HOSTS:
-            want = {'rt_shared', 'rt_leaf', 'rt_unknown'}
+            want = {'rt_shared', 'rt_leaf', 'rt_unknown', 'rt_public_inline'}
             if h == 'linux':
                 want.update(('rt_root_host', 'rt_include_host'))
             if prov[h] != want or definite[h] != want - {'rt_unknown'}:
