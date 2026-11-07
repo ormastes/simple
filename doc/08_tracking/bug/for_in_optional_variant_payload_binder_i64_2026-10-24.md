@@ -10,7 +10,7 @@ Spec: test/01_unit/compiler/50.mir/for_in_optional_array_payload_binder_spec.spl
 
 ## Workaround record (phase-3 adhoc lane, landed with #4302)
 
-Status: workaround applied, root fix open. Phase-3 run-11 (8ab7cd693d8) MIR stage.
+Status: root fix landed (bd2af2006a0, #143); spec test/01_unit/compiler/50.mir/for_in_optional_array_payload_binder_spec.spl GREEN 2026-11-07 (1 passed, seed release100-7a0e6fe516f). Workaround `(opt ?? [])` removal waits on a Stage 2 redeploy. (Was: workaround applied, root fix open.)
 
 Symptom: for-in over non-array (#143), collection mir type I64 in generated/hir_visitor.spl:188: optional variant payload binder (StringLit interpolations) is I64.
 
