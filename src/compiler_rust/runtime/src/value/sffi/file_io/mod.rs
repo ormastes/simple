@@ -49,6 +49,7 @@ pub use file_ops::{
     rt_file_write_text_at, rt_file_write_text_at_cached, rt_file_write_text_at_cached_repeat, rt_mmap, rt_mmap_create, rt_munmap,
     rt_madvise, rt_msync, rt_getpid, rt_bytes_from_raw, rt_write_u32s_to_raw, rt_write_u32s_strided_to_raw,
     rt_write_u32s_to_raw_checksum, rt_write_fill_u32s_to_raw_checksum, rt_bytes_to_text, rt_text_to_bytes,
+    rt_tls_wire_from_bytes,
 };
 pub use directory::{
     rt_dir_create, rt_dir_list, rt_dir_remove, rt_file_find, rt_dir_glob, rt_dir_create_all, rt_dir_walk,

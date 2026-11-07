@@ -112,3 +112,25 @@ and fixed in the seed (see that record's 2026-09-13 addendum); this new link hol
 is what now stands between the chain and a Stage-2 candidate, so the enum fix
 could not be confirmed at Stage-2 scale by either BOOT-16 run.
 
+## 2026-11-07 SimpleOS qualification recurrence — candidate fix
+
+Run `42344153899`, x86 job `128318138141` and Phase2 job `128318138148`,
+failed at Stage2 link on `_sffi_enum_discriminant` referenced by
+`enum_constructor_payload.spl:enum_payload_local_compatible` (the diagnostic
+branch around line 382). Revalidated at release head
+`247d7febfd1d1bebe89d92e729b5fb180e96834b`: this module called the private
+helper through wildcard-imported siblings but defined no local owner.
+
+The scoped fix adds the same generic, private `@always_inline` wrapper and
+annotated `rt_enum_discriminant<T>` FFI boundary already owned independently
+by `expr_dispatch.spl` and `switch_operators_calls.spl`. It changes no payload
+acceptance rule, runtime discriminant ABI, tracing policy or sibling visibility.
+
+`test/01_unit/scripts/mir_enum_discriminant_owner_contract_test.shs` audits all
+current MIR-expression callers for a local generic unsafe wrapper. Its four
+negative mutations remove the helper, remove the extern, replace the body with
+a constant and remove the unsafe guard. These are static ownership checks;
+Stage2 link/qualification is UNRUN locally under the low-disk build constraint.
+The earlier `module_surfaces_promote_reason` scope is not revalidated here, so
+this broader bug remains verification-pending rather than closed.
+

@@ -1,0 +1,67 @@
+"""Nonboot reads are unavailable until authorization binds the read object.
+
+These are denial/boot-separation assertions, not capability-correct read proof.
+"""
+# @req REQ-VFS-EXEC-READ-001
+use std.spec.{describe, it, expect, step}
+use os.kernel.security.execution_context.{KernelCallContext, kernel_call_context_from_legacy_task}
+use os.kernel.security.executable_read.{executable_nonboot_read_unavailable, executable_boot_read_allows}
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.capability_types.{CapabilityKind, CapabilitySet, CapabilityToken}
+use os.apps.shell.path_search.{shell_path_plan, shell_path_candidates}
+use std.io_runtime.{file_read_nullable}
+
+fn _read_context() -> KernelCallContext:
+    val grants = [
+        CapabilityToken(kind: CapabilityKind.FileRead(path_prefix: "/bin/simple"), generation: 1u64, owner: 42u64, token_id: 1u64, parent_token_id: 0u64, depth: 1i64),
+        CapabilityToken(kind: CapabilityKind.FileExec(path_prefix: "/bin/simple"), generation: 1u64, owner: 42u64, token_id: 2u64, parent_token_id: 0u64, depth: 1i64)]
+    var context = kernel_call_context_from_legacy_task(
+        TaskId(id: 42u64), CapabilitySet(caps: grants, is_pledged: true), 7u64, 7u64, 1u64)
+    context.filesystem_root = "/"
+    context.filesystem_view_bound = true
+    context
+
+describe "unavailable nonboot executable reads":
+    it "rejects a missing caller and kernel sentinel on the nonboot route":
+        step("Keep nonboot reads unavailable without an object binding")
+        expect(executable_nonboot_read_unavailable(nil, "/bin/simple").is_err()).to_equal(true)
+        var kernel = _read_context()
+        kernel.task_id = TaskId(id: 0u64)
+        expect(executable_nonboot_read_unavailable(Some(kernel), "/bin/simple").is_err()).to_equal(true)
+        expect(executable_boot_read_allows(kernel)).to_equal(true)
+        expect(executable_boot_read_allows(_read_context())).to_equal(false)
+
+    it "does not treat /bin/simple rights as authority for registry and FAT32 aliases":
+        step("Reject path-only authorization even with both requested-name grants")
+        val context = _read_context()
+        for path in ["/bin/simple", "/bin/simple.smf", "/sys/apps/simple", "/SYS/APPS/SIMPLE.SMF"]:
+            val result = executable_nonboot_read_unavailable(Some(context), path)
+            expect(result.is_err()).to_equal(true)
+            expect(result.unwrap_err()).to_contain("resolved mounted-object binding required")
+
+    it "does not restore nonboot reads for ambient full compatibility authority":
+        step("Require object binding even for a legacy full pouch")
+        var context = _read_context()
+        context.capabilities = CapabilitySet.full()
+        expect(executable_nonboot_read_unavailable(Some(context), "/bin/simple").is_err()).to_equal(true)
+
+    it "constructs PATH names without discovering executable presence":
+        step("Filter hostile PATH components without reading a candidate")
+        val paths = shell_path_candidates(shell_path_plan(".:relative:/bin:/../b/bin"), "simple")
+        expect(paths).to_equal(["/bin/simple"])
+        expect(executable_nonboot_read_unavailable(Some(_read_context()), paths[0]).is_err()).to_equal(true)
+
+    it "keeps the public nonboot seam disconnected from legacy byte backends":
+        step("Pin production wiring so denial cannot fall through to alias resolution")
+        val shell = file_read_nullable("src/os/apps/shell/path_search.spl") ?? ""
+        expect(shell.len() > 0).to_equal(true)
+        expect(shell.contains("use ")).to_equal(false)
+        expect(shell.contains("extern fn")).to_equal(false)
+        val loader = file_read_nullable("src/os/kernel/loader/fs_exec_spawn.spl") ?? ""
+        expect(loader.contains("pub fn fs_exec_read_executable_bytes(path:")).to_equal(false)
+        expect(loader.contains("executable_nonboot_read_unavailable(caller, path)")).to_equal(true)
+        expect(loader.contains("_fs_exec_read_bytes(authorized.unwrap())")).to_equal(false)
+        val policy = file_read_nullable("src/os/kernel/security/executable_read.spl") ?? ""
+        expect(policy.len() > 0).to_equal(true)
+        expect(policy.contains("g_vfs_")).to_equal(false)
+        expect(policy.contains("arm_fs_exec_")).to_equal(false)

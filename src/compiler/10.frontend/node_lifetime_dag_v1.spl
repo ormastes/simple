@@ -1,0 +1,72 @@
+# Complete, bounded DAG validation for checked AST edge writes. No proof is
+# retained between operations, so mutable array aliases cannot stale a cache.
+use compiler.frontend.core.ast_traversal.*
+use compiler.frontend.core._AstExpr.nodes.{expr_owner_len}
+use compiler.core.ast_stmt.{stmt_owner_len}
+use compiler.core.ast.{EXPR_BINARY, STMT_IF, expr_get_tag, expr_get_left,
+    expr_get_right, stmt_get_tag, stmt_get_type, elif_count, arm_pattern_len}
+
+struct NodeLifetimeDagWorkV1:
+    domain: i64
+    index: i64
+    exiting: bool
+
+pub fn node_lifetime_dag_error_v1(index: i64, budget: i64 = 1000000,
+    forbidden_expression: i64 = -1) -> text:
+    if budget <= 0: return "AST topology validation resource limit"
+    var work = [NodeLifetimeDagWorkV1(domain: 0, index: index, exiting: false)]
+    var colors: Dict<text, i64> = {}
+    var steps = 0
+    while work.len() > 0:
+        if steps >= budget: return "AST topology validation resource limit"
+        steps = steps + 1
+        val item: NodeLifetimeDagWorkV1 = work[work.len() - 1]
+        work.pop()
+        if item.domain == 0:
+            if item.index == forbidden_expression: return "AST child update would introduce a cycle"
+            if item.index < 0 or item.index >= expr_owner_len():
+                return "AST topology contains an invalid expression reference"
+        elif item.domain == 1:
+            if item.index < 0 or item.index >= stmt_owner_len():
+                return "AST topology contains an invalid statement reference"
+            if stmt_get_tag(item.index) == STMT_IF:
+                val branches = stmt_get_type(item.index)
+                if branches >= 0 and branches >= elif_count():
+                    return "AST topology contains an invalid if/elif reference"
+        elif item.index < 0 or item.index >= arm_pattern_len():
+            return "AST topology contains an invalid match-arm reference"
+        val key = "{item.domain}:{item.index}"
+        if item.exiting:
+            colors[key] = 2
+            continue
+        if colors.contains_key(key):
+            if colors[key] == 1: return "AST topology already contains a cycle"
+            continue
+        colors[key] = 1
+        var expressions: [i64] = []
+        var statements: [i64] = []
+        var arms: [i64] = []
+        if item.domain == 0:
+            if expr_get_tag(item.index) == EXPR_BINARY:
+                if expr_get_left(item.index) < 0 or expr_get_right(item.index) < 0:
+                    return "binary expression has an uninitialized required child"
+            expressions = flat_expr_child_exprs(item.index)
+            statements = flat_expr_child_stmts(item.index)
+            arms = flat_expr_child_arms(item.index)
+        elif item.domain == 1:
+            expressions = flat_stmt_child_exprs(item.index)
+            statements = flat_stmt_child_stmts(item.index)
+            arms = flat_stmt_child_arms(item.index)
+        else:
+            expressions = flat_arm_child_exprs(item.index)
+            statements = flat_arm_child_stmts(item.index)
+        if work.len() + expressions.len() + statements.len() + arms.len() + 1 > budget:
+            return "AST topology validation resource limit"
+        work.push(NodeLifetimeDagWorkV1(domain: item.domain, index: item.index, exiting: true))
+        for child in expressions:
+            work.push(NodeLifetimeDagWorkV1(domain: 0, index: child, exiting: false))
+        for child in statements:
+            work.push(NodeLifetimeDagWorkV1(domain: 1, index: child, exiting: false))
+        for child in arms:
+            work.push(NodeLifetimeDagWorkV1(domain: 2, index: child, exiting: false))
+    ""

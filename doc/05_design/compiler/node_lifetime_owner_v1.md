@@ -12,6 +12,9 @@ authority and bounds before projecting storage. Binary operations additionally
 check the owner's internal expression family; no public type tag is required.
 The conversion from a raw expression index is an explicit legacy boundary and
 only qualifies an index in the currently active arena.
+Qualification alone does not prove a raw subtree complete or acyclic. The
+checked child setters use a fresh bounded DAG validation, described in
+[complete DAG checks](node_lifetime_dag_v1.md). No proof cache is retained.
 
 The expression arena owns the incarnation cell. It is process-local and omitted
 from snapshots, cached pool bytes, diagnostic generations, and store records.

@@ -12,6 +12,8 @@
 #   bare_exempt             @extern("bare", ...) — freestanding, host-unresolvable by design
 #   in_deployed_binary      defined symbol in the deployed `simple` (nm --defined-only)
 #   libc_libm               defined in libc/libm/libgcc_s, i.e. resolvable by dlsym
+#   windows_crt_export      named export of the inspected Windows CRT DLL;
+#                           provider evidence, not proof of this binary's imports
 #   interp_extern_registry  a string literal in interpreter_extern/**.rs (name-dispatched)
 # Candidate-unbacked sub-classes:
 #   c_runtime_source_only     defined in owned src/runtime or src/os C/C++ but absent from the seed binary
@@ -32,13 +34,8 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "${root}"
 OUT="${1:-/dev/stdout}"
-if [ -n "${SIMPLE_BIN:-}" ]; then
-  BIN=$SIMPLE_BIN
-elif [ -x "${root}/bin/release/x86_64-unknown-linux-gnu/simple" ]; then
-  BIN=${root}/bin/release/x86_64-unknown-linux-gnu/simple
-else
-  BIN=${root}/bin/simple
-fi
+. "$root/scripts/check/lib/extern-census-symbol-sources.shs"
+BIN=$(census_select_binary "$root")
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT INT TERM
 
 grep -rnE --include='*.spl' --exclude-dir=vendor \
@@ -60,7 +57,7 @@ fi
 
 cut -f2 "$W/decls.tsv" | sort -u > "$W/syms.txt"
 awk -F'\t' '$1=="bare"{print $2}' "$W/decls.tsv" | sort -u > "$W/bare.txt"
-nm -a --defined-only "$BIN" 2>/dev/null | awk '{print $NF}' | sort -u > "$W/bin.txt"
+census_collect_primary "$BIN" "$W/bin.txt" "$W"
 # NON-VACUITY: `in_deployed_binary` is the census's PRIMARY evidence that a
 # declared extern is backed. If the binary carries no symbol table, every
 # lookup misses and the census silently reclassifies the whole tree as
@@ -76,15 +73,8 @@ nm -a --defined-only "$BIN" 2>/dev/null | awk '{print $NF}' | sort -u > "$W/bin.
 # Cross-platform impact: none. An unstripped ELF or Mach-O `simple` defines
 # tens of thousands of symbols, so this floor is unreachable on Linux and
 # macOS; it fires only where the census had no evidence to begin with.
-BIN_SYMS=$(wc -l < "$W/bin.txt" | tr -d ' ')
-BIN_SYM_FLOOR=${EXTERN_CENSUS_BIN_SYM_FLOOR:-100}
-if [ "$BIN_SYMS" -lt "$BIN_SYM_FLOOR" ]; then
-  echo "ERROR — nothing was checked: $BIN yielded $BIN_SYMS defined symbol(s) (floor $BIN_SYM_FLOOR); it is stripped or not a readable object for this nm. Backing classification would be vacuous." >&2
-  exit 2
-fi
-for L in libc.so.6 libm.so.6 libgcc_s.so.1 libpthread.so.0 libdl.so.2; do
-  [ -e "/lib/x86_64-linux-gnu/$L" ] && nm -D --defined-only "/lib/x86_64-linux-gnu/$L" 2>/dev/null | awk 'NF>=3{print $3}' | sed 's/@.*//'
-done | sort -u > "$W/libc.txt"
+census_collect_system "$W/libc.txt" "$W"
+export EXTERN_CENSUS_SYSTEM_CLASS="$CENSUS_SYSTEM_CLASS"
 grep -rhoE '"[A-Za-z_][A-Za-z0-9_]{2,}"' src/compiler_rust/compiler/src/interpreter_extern/ --include=*.rs \
   | tr -d '"' | sort -u > "$W/interp.txt"
 find src/runtime src/os -name '*.c' | grep -v '/vendor/' > "$W/c-source-files.txt"
@@ -157,7 +147,7 @@ for s in syms:
     n=len([1 for (f,l) in occ[s] if (f,l) not in decllines[s] and (f in dfs or os.path.dirname(f) in dirs)])
     if   s in bare:   k="bare_exempt"
     elif s in binf:   k="in_deployed_binary"
-    elif s in libc:   k="libc_libm"
+    elif s in libc:   k=os.environ["EXTERN_CENSUS_SYSTEM_CLASS"]
     elif s in interp: k="interp_extern_registry"
     elif s in cdefs or s in cxxdefs or s in cheaderdefs: k="c_runtime_source_only"
     elif s in rsdefs: k="rust_source_feature_gated"

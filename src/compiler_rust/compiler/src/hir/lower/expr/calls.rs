@@ -64,14 +64,14 @@ impl Lowerer {
                         ty: TypeId::ANY,
                     });
                     let args_hir = self.lower_call_args(args, ctx)?;
-                    // `Some(f)` with a FUNCTION payload: answer `Option<fn>`,
-                    // not ANY. An ANY payload binds `case Some(h)` as ANY, and
-                    // an indirect call through an ANY callee mixes the raw
-                    // and tagged conventions (LLVM: wrong result even for a
-                    // local `f`). Other payloads keep ANY.
+                    // Keep an already-known function or nominal record payload
+                    // on Some, including record variables and call results.
+                    // Otherwise `Some(owned)` binds ANY and a later field read
+                    // loses its authored record owner. Other shapes stay erased;
+                    // no field-name or layout guessing may create an owner.
                     let ty = match (name.as_str(), args_hir.first()) {
                         ("Some", Some(payload))
-                            if matches!(self.module.types.get(payload.ty), Some(HirType::Function { .. })) =>
+                            if matches!(self.module.types.get(payload.ty), Some(HirType::Function { .. } | HirType::Struct { .. })) =>
                         {
                             self.module.types.register(HirType::Enum {
                                 name: "Option".to_string(),
@@ -1078,5 +1078,85 @@ impl Lowerer {
             },
             ty: TypeId::I64,
         }))
+    }
+}
+
+
+#[cfg(test)]
+mod some_record_payload_tests {
+    use crate::hir::lower::tests::parse_and_lower;
+    use crate::hir::types::{HirModule, HirStmt, HirType, TypeId};
+
+    fn returned_type(module: &HirModule, name: &str) -> TypeId {
+        module.functions.iter().find(|f| f.name == name).expect("fixture function")
+            .body.iter().find_map(|statement| match statement {
+                HirStmt::Return(Some(value)) => Some(value.ty),
+                _ => None,
+            }).expect("fixture return expression")
+    }
+
+    fn assert_nominal_record_binding(declaration: &str) {
+        let source = format!(
+            "{declaration} Record:\n    reducer: i64\n\nclass Decoy:\n    reducer: bool\n\nfn probe(value: Record) -> i64:\n    return match Some(value):\n        Some(owned): owned.reducer\n        nil: -1\n"
+        );
+        let module = parse_and_lower(&source).expect("Some(record variable) must lower with its nominal field owner");
+        let probe = module.functions.iter().find(|f| f.name == "probe").expect("probe");
+        let expected = probe.params.iter().find(|local| local.name == "value").expect("record input").ty;
+        let owned = probe.locals.iter().find(|local| local.name == "owned").expect("payload binding");
+        assert_eq!(owned.ty, expected, "Some payload must keep the input's exact nominal TypeId");
+        assert!(matches!(module.types.get(owned.ty), Some(HirType::Struct { name, .. }) if name == "Record"),
+            "payload owner must be Record, never the same-field Decoy: {:?}", module.types.get(owned.ty));
+    }
+
+    #[test]
+    fn some_class_variable_retains_its_exact_nominal_payload_owner() {
+        assert_nominal_record_binding("class");
+    }
+
+    #[test]
+    fn some_struct_variable_retains_its_exact_nominal_payload_owner() {
+        assert_nominal_record_binding("struct");
+    }
+
+    #[test]
+    fn scalar_dynamic_and_array_payloads_keep_the_existing_erased_route() {
+        for parameter in ["i64", "any", "[i64]"] {
+            let source = format!("fn wrap(value: {parameter}) -> any:\n    return Some(value)\n");
+            let module = parse_and_lower(&source).expect("unchanged Some fallback fixture");
+            assert_eq!(returned_type(&module, "wrap"), TypeId::ANY,
+                "non-record/function payload {parameter} must not acquire a nominal owner");
+        }
+    }
+
+    #[test]
+    fn existing_some_function_payload_keeps_its_function_binding() {
+        let module = parse_and_lower(
+            "fn wrap() -> any:\n    val callback = \\x: x + 1\n    return Some(callback)\n"
+        ).expect("existing Some(function) route");
+        let ty = returned_type(&module, "wrap");
+        match module.types.get(ty) {
+            Some(HirType::Enum { name, variants, type_bindings, .. }) => {
+                assert_eq!(name, "Option");
+                let payloads = variants.iter().find(|(variant, _)| variant == "Some")
+                    .and_then(|(_, payload)| payload.as_ref()).expect("Some function payload");
+                assert_eq!(payloads.len(), 1, "Some must retain exactly one function payload");
+                let payload = payloads[0];
+                assert!(matches!(module.types.get(payload), Some(HirType::Function { .. })));
+                assert_eq!(type_bindings.get("T"), Some(&payload));
+            }
+            other => panic!("Some(function) lost its typed Option: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn some_dynamic_payload_does_not_guess_an_unrelated_same_named_field_owner() {
+        let source = "class Record:\n    reducer: i64\n\nclass Decoy:\n    reducer: bool\n\nfn probe(value: any) -> i64:\n    return match Some(value):\n        Some(owned): owned.reducer\n        nil: -1\n";
+        let diagnostic = parse_and_lower(source).err()
+            .expect("a dynamic payload must not bypass the ambiguous field-owner rejection")
+            .to_string();
+        assert!(diagnostic.contains("cannot infer field type")
+            && diagnostic.contains("struct 'ANY'")
+            && diagnostic.contains("field 'reducer'"),
+            "expected the actual ambiguous dynamic-field diagnostic, got {diagnostic}");
     }
 }
