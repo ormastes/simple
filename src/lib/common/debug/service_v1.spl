@@ -1,225 +1,575 @@
-# Central debug service v1 -- minimal reference implementation.
-#
-# Every debug-capable transport (MCP DAP bridge, mcpgdb, OpenOCD/JTAG) opens
-# a session here, registers the targets/capabilities it can honestly claim,
-# and gets a policy-gated authorize/record receipt trail before and after
-# each live operation. This module owns only the session/authorization
-# bookkeeping -- it never talks to a real target itself (see the three call
-# sites named in `contracts_v1.spl`).
-#
-# In-process, module-level registry (mirrors the `DAP_SESSIONS` pattern
-# already used by `src/app/mcp/dap_bridge.spl`) -- no nogc imports, so this
-# stays usable from `common/`.
+# Central owner for V1 debug sessions, target graphs, policy, and receipts.
 
-use .contracts_v1.{
-    DebugSessionId, DebugPolicyV1, DebugReceiptV1, DebugCapabilityV1,
-    DebugVerificationV1, DebugPerturbationV1, DebugRootOperationV1,
-    DebugTargetNodeV1, DebugProbeKindV1, DebugProbeV1,
+use std.common.debug.contracts_v1.{
+    DebugSessionId, DebugCapabilityV1, DebugTargetNodeV1, DebugTargetEdgeV1, DebugTargetGraphV1,
+    DebugPolicyV1, DebugReceiptV1, DebugRootOperationV1,
+    DebugPerturbationV1, DebugProbeKindV1, DebugProbeStateV1, DebugProbeV1,
+    DebugEvidenceArtifactV1, DebugEvidenceManifestV1, DebugAuthorizationContextV1,
+    debug_policy_observe_only_v1, debug_policy_development_v1,
 }
 
-class _DebugSessionRecordV1:
-    id: text
+pub struct DebugSessionRecordV1:
+    session_id: DebugSessionId
     build_id: text
-    policy: DebugPolicyV1
     targets: [DebugTargetNodeV1]
+    edges: [DebugTargetEdgeV1]
     capabilities: [DebugCapabilityV1]
-    closed: bool
+    policy: DebugPolicyV1
+    opened_at_ns: i64
+    action_count: i64
+    open: bool
 
-var _DEBUG_SESSIONS_V1: [_DebugSessionRecordV1] = []
-var _DEBUG_NEXT_ID_V1: i64 = 1
-var _DEBUG_NEXT_RECEIPT_V1: i64 = 1
-var _DEBUG_NEXT_PROBE_V1: i64 = 1
+struct DebugActionStampV1:
+    session_id: DebugSessionId
+    timestamp_ns: i64
 
-fn _next_receipt_id(session_id: DebugSessionId) -> text:
-    """Session-bound receipt identifier. The session value is embedded so a
-    receipt read back out of a bundle can be tied to the session that issued
-    it without a side table."""
-    val n = _DEBUG_NEXT_RECEIPT_V1
-    _DEBUG_NEXT_RECEIPT_V1 = _DEBUG_NEXT_RECEIPT_V1 + 1
-    "receipt-" + session_id.value + "-" + str(n)
+pub struct DebugServiceLimitsV1:
+    max_sessions: i64
+    max_receipts: i64
+    max_probes: i64
+    max_action_stamps: i64
+    max_evidence_artifacts: i64
+    max_evidence_metadata_bytes: i64
 
-pub fn central_debug_service_v1_session_count() -> i64:
-    """Number of sessions that are currently OPEN. A closed session is retained
-    for its receipt trail but is not counted, so open+close is observably
-    balanced."""
-    var n = 0
-    for s in _DEBUG_SESSIONS_V1:
-        if not s.closed: n = n + 1
-    n
+pub struct DebugServiceResourceMetricsV1:
+    session_rejections: i64
+    session_evictions: i64
+    receipt_drops: i64
+    receipt_evictions: i64
+    probe_rejections: i64
+    probe_evictions: i64
+    action_stamp_rejections: i64
+    evidence_rejections: i64
 
-pub fn debug_policy_development_v1() -> DebugPolicyV1:
-    """Permissive development-mode policy: Control and Domain operations are
-    both allowed. Everything is still receipted -- nothing is silently
-    skipped -- it just never denies. Stricter (e.g. observe-only) policies
-    are a caller-constructed `DebugPolicyV1` value, not a separate type."""
-    DebugPolicyV1(name: "development", allow_control: true, allow_domain: true)
-
-pub fn debug_policy_observe_only_v1() -> DebugPolicyV1:
-    """Denies Control and Domain operations; Inspect/Observe/Evidence still
-    pass. Used by callers that only ever inspect a target."""
-    DebugPolicyV1(name: "observe-only", allow_control: false, allow_domain: false)
-
-fn _find_session(session_id: DebugSessionId) -> Option<_DebugSessionRecordV1>:
-    for s in _DEBUG_SESSIONS_V1:
-        if s.id == session_id.value and not s.closed:
-            return Some(s)
-    None
-
-pub fn central_debug_service_v1_open(build_id: text, policy: DebugPolicyV1) -> Result<DebugSessionId, text>:
-    if build_id.trim() == "":
-        return Err("central debug service v1: build_id is required")
-    val id = "dbgsvc-" + str(_DEBUG_NEXT_ID_V1)
-    _DEBUG_NEXT_ID_V1 = _DEBUG_NEXT_ID_V1 + 1
-    _DEBUG_SESSIONS_V1.push(_DebugSessionRecordV1(
-        id: id, build_id: build_id, policy: policy, targets: [], capabilities: [], closed: false,
-    ))
-    Ok(DebugSessionId(value: id))
-
-pub fn central_debug_service_v1_add_target(session_id: DebugSessionId, target: DebugTargetNodeV1, capability: DebugCapabilityV1) -> Result<(), text>:
-    var found = false
-    var new_sessions: [_DebugSessionRecordV1] = []
-    for s in _DEBUG_SESSIONS_V1:
-        if s.id == session_id.value and not s.closed:
-            found = true
-            var updated = s
-            updated.targets.push(target)
-            updated.capabilities.push(capability)
-            new_sessions.push(updated)
-        else:
-            new_sessions.push(s)
-    _DEBUG_SESSIONS_V1 = new_sessions
-    if not found:
-        return Err("central debug service v1: unknown or closed session " + session_id.value)
-    Ok(nil)
-
-pub fn central_debug_service_v1_authorize_at(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text, now_ns: i64) -> DebugReceiptV1:
-    """Policy decision for one operation, stamped with the CALLER's clock. The
-    service owns no clock, so `now_ns` is recorded verbatim on the receipt.
-
-    Probe is gated by `allow_control`: applying or removing a probe modifies the
-    debuggee, so a policy that denies Control denies Probe as well. No prior
-    requirement chose this -- it is stated here and in
-    `doc/08_tracking/bug/debug_service_v1_probe_and_adapter_call_undefined_symbols_2026-09-05.md`."""
-    match _find_session(session_id):
-        case None:
-            return DebugReceiptV1(
-                receipt_id: _next_receipt_id(session_id),
-                session_id: session_id.value, operation: operation, perturbation: perturbation,
-                action: action, allowed: false, succeeded: false, execution_changed: false,
-                reason: "central debug service v1: unknown or closed session",
-                captured_at_ns: now_ns,
-            )
-        case Some(s):
-            var allowed = true
-            var reason = ""
-            if operation == DebugRootOperationV1.Control and not s.policy.allow_control:
-                allowed = false
-                reason = "policy '" + s.policy.name + "' denies Control operations"
-            elif operation == DebugRootOperationV1.Probe and not s.policy.allow_control:
-                allowed = false
-                reason = "policy '" + s.policy.name + "' denies Probe operations"
-            elif operation == DebugRootOperationV1.Domain and not s.policy.allow_domain:
-                allowed = false
-                reason = "policy '" + s.policy.name + "' denies Domain operations"
-            DebugReceiptV1(
-                receipt_id: _next_receipt_id(session_id),
-                session_id: session_id.value, operation: operation, perturbation: perturbation,
-                action: action, allowed: allowed, succeeded: false, execution_changed: false,
-                reason: reason, captured_at_ns: now_ns,
-            )
-
-pub fn central_debug_service_v1_authorize(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text) -> DebugReceiptV1:
-    """Clockless authorization for callers that carry no clock. The receipt's
-    `captured_at_ns` is -1 ("caller supplied no time"), never a made-up one."""
-    central_debug_service_v1_authorize_at(session_id, operation, perturbation, action, -1)
-
-pub fn central_debug_service_v1_record_at(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text, succeeded: bool, execution_changed: bool, reason: text, now_ns: i64) -> DebugReceiptV1:
-    """Records an already-authorized operation, stamped with the CALLER's clock."""
-    DebugReceiptV1(
-        receipt_id: _next_receipt_id(session_id),
-        session_id: session_id.value, operation: operation, perturbation: perturbation,
-        action: action, allowed: true, succeeded: succeeded, execution_changed: execution_changed,
-        reason: reason, captured_at_ns: now_ns,
+pub fn debug_service_default_limits_v1() -> DebugServiceLimitsV1:
+    DebugServiceLimitsV1(
+        max_sessions: 64, max_receipts: 4096, max_probes: 256,
+        max_action_stamps: 4096, max_evidence_artifacts: 64,
+        max_evidence_metadata_bytes: 65536,
     )
 
+pub class DebugServiceV1:
+    sessions: [DebugSessionRecordV1]
+    receipts: [DebugReceiptV1]
+    probes: [DebugProbeV1]
+    action_stamps: [DebugActionStampV1]
+    next_session: i64
+    next_receipt: i64
+    next_probe: i64
+    limits: DebugServiceLimitsV1
+    metrics: DebugServiceResourceMetricsV1
+
+    static fn create() -> DebugServiceV1:
+        DebugServiceV1.create_with_limits(debug_service_default_limits_v1())
+
+    static fn create_with_limits(limits: DebugServiceLimitsV1) -> DebugServiceV1:
+        DebugServiceV1(
+            sessions: [], receipts: [], probes: [], action_stamps: [],
+            next_session: 1, next_receipt: 1, next_probe: 1, limits: limits,
+            metrics: DebugServiceResourceMetricsV1(0, 0, 0, 0, 0, 0, 0, 0),
+        )
+
+    fn resource_metrics() -> DebugServiceResourceMetricsV1:
+        self.metrics
+
+    fn session_count() -> i64:
+        self.sessions.filter(_.open).len()
+
+    fn receipt_count() -> i64:
+        self.receipts.len()
+
+    fn session(session_id: DebugSessionId) -> Option<DebugSessionRecordV1>:
+        for record in self.sessions:
+            if record.session_id.value == session_id.value:
+                return Some(record)
+        None
+
+    fn graph(session_id: DebugSessionId) -> Option<DebugTargetGraphV1>:
+        match self.session(session_id):
+            case Some(record):
+                Some(DebugTargetGraphV1(
+                    session_id: record.session_id,
+                    build_id: record.build_id,
+                    nodes: record.targets,
+                    edges: record.edges,
+                    capabilities: record.capabilities,
+                ))
+            case None: None
+
+    fn receipts_for(session_id: DebugSessionId) -> [DebugReceiptV1]:
+        self.receipts.filter(\r: r.session_id == session_id.value)
+
+    fn probes_for(session_id: DebugSessionId) -> [DebugProbeV1]:
+        self.probes.filter(\probe: probe.session_id == session_id.value and probe.state == DebugProbeStateV1.Applied)
+
+    me probes_for_at(session_id: DebugSessionId, now_ns: i64) -> [DebugProbeV1]:
+        self._expire_probes(session_id, now_ns)
+        self.probes_for(session_id)
+
+    me open_session(build_id: text, policy: DebugPolicyV1) -> Result<DebugSessionId, text>:
+        self.open_session_at(build_id, policy, -1)
+
+    me open_session_at(build_id: text, policy: DebugPolicyV1, opened_at_ns: i64) -> Result<DebugSessionId, text>:
+        if build_id.trim() == "":
+            return Err("debug session requires an exact build id")
+        self._reclaim_closed_session()
+        if self.limits.max_sessions <= 0 or self.sessions.len() >= self.limits.max_sessions:
+            self.metrics.session_rejections = self.metrics.session_rejections + 1
+            self.record_receipt(DebugSessionId(value: ""), DebugRootOperationV1.Observe, DebugPerturbationV1.Passive, "session.open", false, false, "debug session capacity reached")
+            return Err("debug session capacity reached")
+        val session_id = DebugSessionId(value: "debug-{self.next_session}")
+        self.next_session = self.next_session + 1
+        self.sessions.push(DebugSessionRecordV1(
+            session_id: session_id,
+            build_id: build_id,
+            targets: [],
+            edges: [],
+            capabilities: [],
+            policy: policy,
+            opened_at_ns: opened_at_ns,
+            action_count: 0,
+            open: true,
+        ))
+        self.record_receipt(session_id, DebugRootOperationV1.Observe, DebugPerturbationV1.Passive, "session.open", true, false, "")
+        Ok(session_id)
+
+    me open_observe_session(build_id: text) -> Result<DebugSessionId, text>:
+        self.open_session(build_id, debug_policy_observe_only_v1())
+
+    me add_target(session_id: DebugSessionId, node: DebugTargetNodeV1, capability: DebugCapabilityV1) -> Result<Nil, text>:
+        val idx = self._session_index(session_id)
+        if idx < 0:
+            return Err("central debug service v1: unknown or closed session")
+        if not self.sessions[idx].open:
+            return Err("central debug service v1: unknown or closed session")
+        if node.target_id.trim() == "":
+            return Err("debug target requires an id")
+        if capability.target_id != node.target_id:
+            return Err("debug capability target id must match its target node")
+        for existing in self.sessions[idx].targets:
+            if existing.target_id == node.target_id:
+                return Err("debug target id already exists")
+        var record = self.sessions[idx]
+        record.targets.push(node)
+        record.capabilities.push(capability)
+        self.sessions[idx] = record
+        self.record_receipt(session_id, DebugRootOperationV1.Observe, DebugPerturbationV1.Passive, "target.add", true, false, "")
+        Ok(nil)
+
+    me add_edge(session_id: DebugSessionId, edge: DebugTargetEdgeV1) -> Result<Nil, text>:
+        val idx = self._session_index(session_id)
+        if idx < 0:
+            return Err("central debug service v1: unknown or closed session")
+        if not self.sessions[idx].open:
+            return Err("central debug service v1: unknown or closed session")
+        if not self._target_exists(idx, edge.from_target_id) or not self._target_exists(idx, edge.to_target_id):
+            return Err("debug edge endpoints must exist")
+        var record = self.sessions[idx]
+        record.edges.push(edge)
+        self.sessions[idx] = record
+        self.record_receipt(session_id, DebugRootOperationV1.Observe, DebugPerturbationV1.Passive, "target.edge.add", true, false, "")
+        Ok(nil)
+
+    me update_target_capability(session_id: DebugSessionId, capability: DebugCapabilityV1) -> Result<Nil, text>:
+        self.update_target_capability_at(session_id, capability, -1)
+
+    me update_target_capability_at(session_id: DebugSessionId, capability: DebugCapabilityV1, now_ns: i64) -> Result<Nil, text>:
+        val idx = self._session_index(session_id)
+        if idx < 0 or not self.sessions[idx].open:
+            return Err("central debug service v1: unknown or closed session")
+        var capability_idx: i64 = -1
+        for (candidate_idx, existing) in self.sessions[idx].capabilities.enumerate():
+            if existing.target_id == capability.target_id:
+                capability_idx = candidate_idx
+                break
+        if capability_idx < 0:
+            return Err("central debug service v1: unregistered target " + capability.target_id)
+        var record = self.sessions[idx]
+        record.capabilities[capability_idx] = capability
+        self.sessions[idx] = record
+        self.record_receipt_at(session_id, DebugRootOperationV1.Observe, DebugPerturbationV1.Passive, "target.capability.update", true, false, capability.reason, now_ns)
+        Ok(nil)
+
+    me authorize(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text) -> DebugReceiptV1:
+        val idx = self._session_index(session_id)
+        if idx < 0:
+            return self.record_receipt(session_id, operation, perturbation, action, false, false, "central debug service v1: unknown or closed session")
+        val policy = self.sessions[idx].policy
+        self.authorize_with_context(session_id, operation, perturbation, action, DebugAuthorizationContextV1(
+            now_ns: -1,
+            environment: policy.environment,
+            privilege: policy.required_privilege,
+        ))
+
+    me authorize_at(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text, now_ns: i64) -> DebugReceiptV1:
+        val idx = self._session_index(session_id)
+        if idx < 0:
+            return self.record_receipt_at(session_id, operation, perturbation, action, false, false, "central debug service v1: unknown or closed session", now_ns)
+        val policy = self.sessions[idx].policy
+        self.authorize_with_context(session_id, operation, perturbation, action, DebugAuthorizationContextV1(
+            now_ns: now_ns,
+            environment: policy.environment,
+            privilege: policy.required_privilege,
+        ))
+
+    me authorize_with_context(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text, context: DebugAuthorizationContextV1) -> DebugReceiptV1:
+        val idx = self._session_index(session_id)
+        if idx < 0:
+            return self.record_receipt(session_id, operation, perturbation, action, false, false, "central debug service v1: unknown or closed session")
+        if not self.sessions[idx].open:
+            return self.record_receipt(session_id, operation, perturbation, action, false, false, "central debug service v1: unknown or closed session")
+        val policy = self.sessions[idx].policy
+        var allowed = true
+        var reason = ""
+        match operation:
+            case DebugRootOperationV1.Observe:
+                allowed = policy.allow_observe
+                reason = if allowed: "" else: "observe denied by policy"
+            case DebugRootOperationV1.Inspect:
+                allowed = policy.allow_inspect
+                reason = if allowed: "" else: "inspect denied by policy"
+            case DebugRootOperationV1.Control:
+                allowed = policy.allow_control
+                reason = if allowed: "" else: "policy '" + policy.name + "' denies Control operations"
+            case DebugRootOperationV1.Probe:
+                allowed = policy.allow_probe
+                reason = if allowed: "" else: "policy '" + policy.name + "' denies Probe operations"
+            case DebugRootOperationV1.Profile:
+                allowed = policy.allow_profile
+                reason = if allowed: "" else: "profile denied by policy"
+            case DebugRootOperationV1.Evidence:
+                allowed = policy.allow_evidence
+                reason = if allowed: "" else: "evidence denied by policy"
+            case DebugRootOperationV1.Domain:
+                allowed = policy.allow_domain
+                reason = if allowed: "" else: "domain operation denied by policy"
+        if perturbation == DebugPerturbationV1.Mutating and not policy.allow_mutation:
+            allowed = false
+            reason = "mutation denied by policy"
+        if allowed and policy.environment != "any" and context.environment != policy.environment:
+            allowed = false
+            reason = "environment denied by policy"
+        if allowed and context.privilege != policy.required_privilege:
+            allowed = false
+            reason = "privilege denied by policy"
+        val record = self.sessions[idx]
+        if allowed and self._policy_expired(record.opened_at_ns, policy.ttl_ms, context.now_ns):
+            allowed = false
+            reason = "debug session policy expired"
+        if allowed and context.now_ns >= 0 and policy.rate_limit_per_minute >= 0 and self._recent_action_count(session_id, context.now_ns) >= policy.rate_limit_per_minute:
+            allowed = false
+            reason = "debug session rate limit exceeded"
+        if allowed and context.now_ns >= 0:
+            self._prune_action_stamps(context.now_ns)
+            if self.limits.max_action_stamps <= 0 or self.action_stamps.len() >= self.limits.max_action_stamps:
+                allowed = false
+                reason = "debug action stamp capacity reached"
+                self.metrics.action_stamp_rejections = self.metrics.action_stamp_rejections + 1
+        if allowed:
+            var updated = record
+            updated.action_count = updated.action_count + 1
+            self.sessions[idx] = updated
+            if context.now_ns >= 0:
+                self.action_stamps.push(DebugActionStampV1(session_id: session_id, timestamp_ns: context.now_ns))
+        self.record_authorization_at(session_id, operation, perturbation, action, allowed, reason, context.now_ns)
+
+    me apply_probe(session_id: DebugSessionId, kind: DebugProbeKindV1, target_id: text, source_anchor: text, perturbation: DebugPerturbationV1, expires_at_ns: i64) -> Result<DebugProbeV1, text>:
+        val idx = self._session_index(session_id)
+        val policy = if idx >= 0: self.sessions[idx].policy else: debug_policy_observe_only_v1()
+        self.apply_probe_with_context(session_id, kind, target_id, source_anchor, perturbation, expires_at_ns, DebugAuthorizationContextV1(now_ns: -1, environment: policy.environment, privilege: policy.required_privilege))
+
+    me apply_probe_with_context(session_id: DebugSessionId, kind: DebugProbeKindV1, target_id: text, source_anchor: text, perturbation: DebugPerturbationV1, expires_at_ns: i64, context: DebugAuthorizationContextV1) -> Result<DebugProbeV1, text>:
+        val idx = self._session_index(session_id)
+        if idx < 0 or not self.sessions[idx].open:
+            return Err("central debug service v1: unknown or closed session")
+        if source_anchor.trim() == "":
+            return Err("central debug service v1: probe requires a source anchor")
+        if not self._target_exists(idx, target_id):
+            return Err("central debug service v1: unregistered probe target " + target_id)
+        if context.now_ns >= 0 and expires_at_ns >= 0 and expires_at_ns <= context.now_ns:
+            self.record_receipt_at(session_id, DebugRootOperationV1.Probe, perturbation, "probe.apply", false, false, "debug probe expiry must be in the future", context.now_ns)
+            return Err("debug probe expiry must be in the future")
+        self._reclaim_terminal_probe()
+        if self.limits.max_probes <= 0 or self.probes.len() >= self.limits.max_probes:
+            self.metrics.probe_rejections = self.metrics.probe_rejections + 1
+            self.record_receipt_at(session_id, DebugRootOperationV1.Probe, perturbation, "probe.apply", false, false, "debug probe capacity reached", context.now_ns)
+            return Err("debug probe capacity reached")
+        val receipt = self.authorize_with_context(session_id, DebugRootOperationV1.Probe, perturbation, "probe.apply", context)
+        if not receipt.allowed:
+            return Err(receipt.reason)
+        val probe = DebugProbeV1(
+            probe_id: "probe-{session_id.value}-{self.next_probe}",
+            session_id: session_id.value,
+            kind: kind,
+            target_id: target_id,
+            source_anchor: source_anchor,
+            perturbation: perturbation,
+            state: DebugProbeStateV1.Applied,
+            expires_at_ns: expires_at_ns,
+        )
+        self.next_probe = self.next_probe + 1
+        self.probes.push(probe)
+        Ok(probe)
+
+    me remove_probe(session_id: DebugSessionId, probe_id: text) -> Result<Nil, text>:
+        val receipt = self.authorize(session_id, DebugRootOperationV1.Probe, DebugPerturbationV1.Cooperative, "probe.remove")
+        if not receipt.allowed:
+            return Err(receipt.reason)
+        var idx = 0
+        while idx < self.probes.len():
+            if self.probes[idx].session_id == session_id.value and self.probes[idx].probe_id == probe_id:
+                var probe = self.probes[idx]
+                probe.state = DebugProbeStateV1.Removed
+                self.probes[idx] = probe
+                return Ok(nil)
+            idx = idx + 1
+        Err("debug probe not found")
+
+    me export_evidence(session_id: DebugSessionId, captured_at_ns: i64, artifacts: [DebugEvidenceArtifactV1]) -> Result<DebugEvidenceManifestV1, text>:
+        val idx = self._session_index(session_id)
+        val policy = if idx >= 0: self.sessions[idx].policy else: debug_policy_observe_only_v1()
+        self.export_evidence_with_context(session_id, captured_at_ns, artifacts, DebugAuthorizationContextV1(now_ns: -1, environment: policy.environment, privilege: policy.required_privilege))
+
+    me export_evidence_with_context(session_id: DebugSessionId, captured_at_ns: i64, artifacts: [DebugEvidenceArtifactV1], context: DebugAuthorizationContextV1) -> Result<DebugEvidenceManifestV1, text>:
+        val idx = self._session_index(session_id)
+        if self.limits.max_evidence_artifacts < 0 or artifacts.len() > self.limits.max_evidence_artifacts:
+            self.metrics.evidence_rejections = self.metrics.evidence_rejections + 1
+            self.record_receipt_at(session_id, DebugRootOperationV1.Evidence, DebugPerturbationV1.Passive, "evidence.export", false, false, "evidence artifact capacity exceeded", context.now_ns)
+            return Err("evidence artifact capacity exceeded")
+        var metadata_bytes: i64 = 0
+        for artifact in artifacts:
+            metadata_bytes = metadata_bytes + artifact.path.len() + artifact.media_type.len() + artifact.digest.len() + artifact.privacy_label.len()
+        if self.limits.max_evidence_metadata_bytes < 0 or metadata_bytes > self.limits.max_evidence_metadata_bytes:
+            self.metrics.evidence_rejections = self.metrics.evidence_rejections + 1
+            self.record_receipt_at(session_id, DebugRootOperationV1.Evidence, DebugPerturbationV1.Passive, "evidence.export", false, false, "evidence metadata capacity exceeded", context.now_ns)
+            return Err("evidence metadata capacity exceeded")
+        for artifact in artifacts:
+            if artifact.path.trim() == "" or artifact.digest.trim() == "":
+                self.record_receipt_at(session_id, DebugRootOperationV1.Evidence, DebugPerturbationV1.Passive, "evidence.export", false, false, "evidence artifacts require path and digest", context.now_ns)
+                return Err("evidence artifacts require path and digest")
+            if artifact.privacy_label.trim() == "":
+                self.record_receipt_at(session_id, DebugRootOperationV1.Evidence, DebugPerturbationV1.Passive, "evidence.export", false, false, "evidence artifacts require a privacy label", context.now_ns)
+                return Err("evidence artifacts require a privacy label")
+            if idx >= 0 and self.sessions[idx].policy.redact_payloads and artifact.privacy_label == "unredacted":
+                self.record_receipt_at(session_id, DebugRootOperationV1.Evidence, DebugPerturbationV1.Passive, "evidence.export", false, false, "unredacted evidence denied by policy", context.now_ns)
+                return Err("unredacted evidence denied by policy")
+        if idx >= 0 and context.now_ns >= 0 and captured_at_ns >= 0 and self._retention_expired(captured_at_ns, self.sessions[idx].policy.retention_ms, context.now_ns):
+            self.record_receipt_at(session_id, DebugRootOperationV1.Evidence, DebugPerturbationV1.Passive, "evidence.export", false, false, "evidence exceeds retention policy", context.now_ns)
+            return Err("evidence exceeds retention policy")
+        val receipt = self.authorize_with_context(session_id, DebugRootOperationV1.Evidence, DebugPerturbationV1.Passive, "evidence.export", context)
+        if not receipt.allowed:
+            return Err(receipt.reason)
+        val record = self.session(session_id)
+        match record:
+            case Some(value):
+                Ok(DebugEvidenceManifestV1(
+                    schema: "debug-evidence-v1",
+                    session_id: session_id,
+                    build_id: value.build_id,
+                    captured_at_ns: captured_at_ns,
+                    artifacts: artifacts,
+                ))
+            case None: Err("central debug service v1: unknown or closed session")
+
+    me close_session(session_id: DebugSessionId) -> Result<Nil, text>:
+        val idx = self._session_index(session_id)
+        if idx < 0:
+            return Err("central debug service v1: unknown or closed session")
+        if self.sessions[idx].open:
+            var record = self.sessions[idx]
+            record.open = false
+            self.sessions[idx] = record
+            var probe_idx = 0
+            while probe_idx < self.probes.len():
+                if self.probes[probe_idx].session_id == session_id.value and self.probes[probe_idx].state == DebugProbeStateV1.Applied:
+                    var probe = self.probes[probe_idx]
+                    probe.state = DebugProbeStateV1.Removed
+                    self.probes[probe_idx] = probe
+                probe_idx = probe_idx + 1
+            # Closing registry state is not evidence that target execution
+            # changed. Concrete detach/probe cleanup records its own outcome.
+            self.record_receipt(session_id, DebugRootOperationV1.Control, DebugPerturbationV1.Cooperative, "session.close", true, false, "")
+        Ok(nil)
+
+    fn _session_index(session_id: DebugSessionId) -> i64:
+        for (idx, record) in self.sessions.enumerate():
+            if record.session_id.value == session_id.value:
+                return idx
+        -1
+
+    me _reclaim_closed_session():
+        for (idx, record) in self.sessions.enumerate():
+            if not record.open:
+                self.sessions.remove(idx)
+                self.metrics.session_evictions = self.metrics.session_evictions + 1
+                return
+
+    me _reclaim_terminal_probe():
+        for (idx, probe) in self.probes.enumerate():
+            if probe.state != DebugProbeStateV1.Applied:
+                self.probes.remove(idx)
+                self.metrics.probe_evictions = self.metrics.probe_evictions + 1
+                return
+
+    fn _target_exists(session_index: i64, target_id: text) -> bool:
+        for target in self.sessions[session_index].targets:
+            if target.target_id == target_id:
+                return true
+        false
+
+    fn _policy_expired(opened_at_ns: i64, ttl_ms: i64, now_ns: i64) -> bool:
+        if opened_at_ns < 0 or ttl_ms < 0 or now_ns < opened_at_ns:
+            return false
+        (now_ns - opened_at_ns) / 1000000 >= ttl_ms
+
+    fn _retention_expired(captured_at_ns: i64, retention_ms: i64, now_ns: i64) -> bool:
+        if retention_ms < 0 or now_ns < captured_at_ns:
+            return false
+        (now_ns - captured_at_ns) / 1000000 > retention_ms
+
+    fn _recent_action_count(session_id: DebugSessionId, now_ns: i64) -> i64:
+        var count: i64 = 0
+        for stamp in self.action_stamps:
+            if stamp.session_id.value == session_id.value and stamp.timestamp_ns <= now_ns and now_ns - stamp.timestamp_ns < 60000000000:
+                count = count + 1
+        count
+
+    me _prune_action_stamps(now_ns: i64):
+        var idx = 0
+        while idx < self.action_stamps.len():
+            val stamp = self.action_stamps[idx]
+            if stamp.timestamp_ns <= now_ns and now_ns - stamp.timestamp_ns >= 60000000000:
+                self.action_stamps.remove(idx)
+            else:
+                idx = idx + 1
+
+    me _expire_probes(session_id: DebugSessionId, now_ns: i64):
+        if now_ns < 0:
+            return
+        var idx = 0
+        while idx < self.probes.len():
+            if self.probes[idx].session_id == session_id.value and self.probes[idx].state == DebugProbeStateV1.Applied and self.probes[idx].expires_at_ns >= 0 and self.probes[idx].expires_at_ns <= now_ns:
+                var probe = self.probes[idx]
+                probe.state = DebugProbeStateV1.Expired
+                self.probes[idx] = probe
+                self.record_receipt_at(session_id, DebugRootOperationV1.Probe, DebugPerturbationV1.Passive, "probe.expire", true, false, "probe TTL expired", now_ns)
+            idx = idx + 1
+
+    me record_receipt(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text, allowed: bool, execution_changed: bool, reason: text) -> DebugReceiptV1:
+        self.record_receipt_at(session_id, operation, perturbation, action, allowed, execution_changed, reason, -1)
+
+    # Registry event (session/target/probe bookkeeping): admitted and carried out
+    # in one step, so `succeeded` follows `allowed`.
+    me record_receipt_at(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text, allowed: bool, execution_changed: bool, reason: text, timestamp_ns: i64) -> DebugReceiptV1:
+        self._push_receipt(session_id, operation, perturbation, action, allowed, allowed, execution_changed, if allowed: "accepted" else: "denied", reason, timestamp_ns)
+
+    # Policy decision only: nothing has executed yet, so `succeeded` is false.
+    me record_authorization_at(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text, allowed: bool, reason: text, timestamp_ns: i64) -> DebugReceiptV1:
+        self._push_receipt(session_id, operation, perturbation, action, allowed, false, false, if allowed: "accepted" else: "denied", reason, timestamp_ns)
+
+    # Record the result of an action that was already authorized. This keeps
+    # policy admission (`allowed`) independent from execution outcome.
+    me record_outcome_receipt(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text, succeeded: bool, execution_changed: bool, reason: text) -> DebugReceiptV1:
+        self.record_outcome_receipt_at(session_id, operation, perturbation, action, succeeded, execution_changed, reason, -1)
+
+    me record_outcome_receipt_at(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text, succeeded: bool, execution_changed: bool, reason: text, timestamp_ns: i64) -> DebugReceiptV1:
+        self._push_receipt(session_id, operation, perturbation, action, true, succeeded, execution_changed, if succeeded: "succeeded" else: "failed", reason, timestamp_ns)
+
+    me _push_receipt(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text, allowed: bool, succeeded: bool, execution_changed: bool, outcome: text, reason: text, timestamp_ns: i64) -> DebugReceiptV1:
+        var build_id = ""
+        val idx = self._session_index(session_id)
+        if idx >= 0:
+            build_id = self.sessions[idx].build_id
+        val receipt = DebugReceiptV1(
+            receipt_id: "receipt-{session_id.value}-{self.next_receipt}",
+            session_id: session_id.value,
+            build_id: build_id,
+            operation: operation,
+            action: action,
+            actor: "debug-service-v1",
+            captured_at_ns: timestamp_ns,
+            perturbation: perturbation,
+            allowed: allowed,
+            succeeded: succeeded,
+            execution_changed: execution_changed,
+            outcome: outcome,
+            reason: reason,
+        )
+        self.next_receipt = self.next_receipt + 1
+        if self.limits.max_receipts <= 0:
+            self.metrics.receipt_drops = self.metrics.receipt_drops + 1
+            return receipt
+        if self.receipts.len() >= self.limits.max_receipts:
+            self.receipts.remove(0)
+            self.metrics.receipt_evictions = self.metrics.receipt_evictions + 1
+        self.receipts.push(receipt)
+        receipt
+
+# Production migration adapters share this one module-owned service. Clients
+# receive only DebugSessionId; adapters never construct private registries.
+var CENTRAL_DEBUG_SERVICE_V1 = DebugServiceV1.create()
+
+pub fn central_debug_service_v1_open(build_id: text, policy: DebugPolicyV1) -> Result<DebugSessionId, text>:
+    CENTRAL_DEBUG_SERVICE_V1.open_session(build_id, policy)
+
+pub fn central_debug_service_v1_authorize(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text) -> DebugReceiptV1:
+    CENTRAL_DEBUG_SERVICE_V1.authorize(session_id, operation, perturbation, action)
+
+pub fn central_debug_service_v1_authorize_at(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text, now_ns: i64) -> DebugReceiptV1:
+    CENTRAL_DEBUG_SERVICE_V1.authorize_at(session_id, operation, perturbation, action, now_ns)
+
+pub fn central_debug_service_v1_authorize_with_context(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text, context: DebugAuthorizationContextV1) -> DebugReceiptV1:
+    CENTRAL_DEBUG_SERVICE_V1.authorize_with_context(session_id, operation, perturbation, action, context)
+
 pub fn central_debug_service_v1_record(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text, succeeded: bool, execution_changed: bool, reason: text) -> DebugReceiptV1:
-    """Clockless record; `captured_at_ns` is -1. See `_authorize`."""
-    central_debug_service_v1_record_at(session_id, operation, perturbation, action, succeeded, execution_changed, reason, -1)
+    CENTRAL_DEBUG_SERVICE_V1.record_outcome_receipt(session_id, operation, perturbation, action, succeeded, execution_changed, reason)
 
-pub fn central_debug_service_v1_update_target_capability(session_id: DebugSessionId, capability: DebugCapabilityV1) -> Result<(), text>:
-    """Replaces the recorded capability of an ALREADY-registered target, so a
-    target that was only fixture-verified at registration can be raised to
-    live-verified once it has actually run. Fails closed on an unknown session
-    or an unregistered target -- it never registers a target as a side effect."""
-    var found_session = false
-    var found_target = false
-    var new_sessions: [_DebugSessionRecordV1] = []
-    for s in _DEBUG_SESSIONS_V1:
-        if s.id == session_id.value and not s.closed:
-            found_session = true
-            var updated = s
-            var caps: [DebugCapabilityV1] = []
-            for c in updated.capabilities:
-                if c.target_id == capability.target_id:
-                    found_target = true
-                    caps.push(capability)
-                else:
-                    caps.push(c)
-            updated.capabilities = caps
-            new_sessions.push(updated)
-        else:
-            new_sessions.push(s)
-    if not found_session:
-        return Err("central debug service v1: unknown or closed session " + session_id.value)
-    if not found_target:
-        return Err("central debug service v1: unregistered target " + capability.target_id)
-    _DEBUG_SESSIONS_V1 = new_sessions
-    Ok(nil)
-
-pub fn central_debug_service_v1_apply_probe(session_id: DebugSessionId, kind: DebugProbeKindV1, target_id: text, source_anchor: text, perturbation: DebugPerturbationV1, expires_at_ns: i64) -> Result<DebugProbeV1, text>:
-    """Registers a probe the CALLER has already applied through its own
-    transport, and mints the session-bound identity for it. This module never
-    talks to a target (see the header), so it validates that the session is open
-    and the target is registered, then returns the probe identity the caller
-    persists. It does not claim the probe is live -- that is the transport's
-    receipt, recorded separately."""
-    if source_anchor.trim() == "":
-        return Err("central debug service v1: probe requires a source anchor")
-    match _find_session(session_id):
-        case None: Err("central debug service v1: unknown or closed session " + session_id.value)
-        case Some(s):
-            var known = false
-            for t in s.targets:
-                if t.target_id == target_id: known = true
-            if not known:
-                return Err("central debug service v1: unregistered probe target " + target_id)
-            val n = _DEBUG_NEXT_PROBE_V1
-            _DEBUG_NEXT_PROBE_V1 = _DEBUG_NEXT_PROBE_V1 + 1
-            Ok(DebugProbeV1(
-                probe_id: "probe-" + session_id.value + "-" + str(n),
-                session_id: session_id.value, kind: kind, target_id: target_id,
-                source_anchor: source_anchor, perturbation: perturbation,
-                expires_at_ns: expires_at_ns,
-            ))
+pub fn central_debug_service_v1_record_at(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text, succeeded: bool, execution_changed: bool, reason: text, timestamp_ns: i64) -> DebugReceiptV1:
+    CENTRAL_DEBUG_SERVICE_V1.record_outcome_receipt_at(session_id, operation, perturbation, action, succeeded, execution_changed, reason, timestamp_ns)
 
 pub fn central_debug_service_v1_record_outcome(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text, succeeded: bool, execution_changed: bool, reason: text) -> DebugReceiptV1:
-    """Records the OUTCOME half of an authorize/record pair. Same shape as
-    `central_debug_service_v1_record`; the separate name exists because the
-    call sites record an outcome after an already-authorized operation."""
-    central_debug_service_v1_record(session_id, operation, perturbation, action, succeeded, execution_changed, reason)
+    CENTRAL_DEBUG_SERVICE_V1.record_outcome_receipt(session_id, operation, perturbation, action, succeeded, execution_changed, reason)
 
-pub fn central_debug_service_v1_close(session_id: DebugSessionId) -> Result<(), text>:
-    var found = false
-    var new_sessions: [_DebugSessionRecordV1] = []
-    for s in _DEBUG_SESSIONS_V1:
-        if s.id == session_id.value:
-            found = true
-            var updated = s
-            updated.closed = true
-            new_sessions.push(updated)
-        else:
-            new_sessions.push(s)
-    _DEBUG_SESSIONS_V1 = new_sessions
-    if not found:
-        return Err("central debug service v1: unknown session " + session_id.value)
-    Ok(nil)
+pub fn central_debug_service_v1_close(session_id: DebugSessionId) -> Result<Nil, text>:
+    CENTRAL_DEBUG_SERVICE_V1.close_session(session_id)
+
+pub fn central_debug_service_v1_session_count() -> i64:
+    CENTRAL_DEBUG_SERVICE_V1.session_count()
+
+pub fn central_debug_service_v1_receipts(session_id: DebugSessionId) -> [DebugReceiptV1]:
+    CENTRAL_DEBUG_SERVICE_V1.receipts_for(session_id)
+
+pub fn central_debug_service_v1_session(session_id: DebugSessionId) -> Option<DebugSessionRecordV1>:
+    CENTRAL_DEBUG_SERVICE_V1.session(session_id)
+
+pub fn central_debug_service_v1_graph(session_id: DebugSessionId) -> Option<DebugTargetGraphV1>:
+    CENTRAL_DEBUG_SERVICE_V1.graph(session_id)
+
+pub fn central_debug_service_v1_add_target(session_id: DebugSessionId, node: DebugTargetNodeV1, capability: DebugCapabilityV1) -> Result<Nil, text>:
+    CENTRAL_DEBUG_SERVICE_V1.add_target(session_id, node, capability)
+
+pub fn central_debug_service_v1_update_target_capability(session_id: DebugSessionId, capability: DebugCapabilityV1) -> Result<Nil, text>:
+    CENTRAL_DEBUG_SERVICE_V1.update_target_capability(session_id, capability)
+
+pub fn central_debug_service_v1_update_target_capability_at(session_id: DebugSessionId, capability: DebugCapabilityV1, now_ns: i64) -> Result<Nil, text>:
+    CENTRAL_DEBUG_SERVICE_V1.update_target_capability_at(session_id, capability, now_ns)
+
+pub fn central_debug_service_v1_probes(session_id: DebugSessionId) -> [DebugProbeV1]:
+    CENTRAL_DEBUG_SERVICE_V1.probes_for(session_id)
+
+pub fn central_debug_service_v1_apply_probe(session_id: DebugSessionId, kind: DebugProbeKindV1, target_id: text, source_anchor: text, perturbation: DebugPerturbationV1, expires_at_ns: i64) -> Result<DebugProbeV1, text>:
+    CENTRAL_DEBUG_SERVICE_V1.apply_probe(session_id, kind, target_id, source_anchor, perturbation, expires_at_ns)
+
+pub fn central_debug_service_v1_remove_probe(session_id: DebugSessionId, probe_id: text) -> Result<Nil, text>:
+    CENTRAL_DEBUG_SERVICE_V1.remove_probe(session_id, probe_id)
+
+pub fn central_debug_service_v1_export_evidence(session_id: DebugSessionId, captured_at_ns: i64, artifacts: [DebugEvidenceArtifactV1]) -> Result<DebugEvidenceManifestV1, text>:
+    CENTRAL_DEBUG_SERVICE_V1.export_evidence(session_id, captured_at_ns, artifacts)
+
+pub fn central_debug_service_v1_record_denied(session_id: DebugSessionId, operation: DebugRootOperationV1, perturbation: DebugPerturbationV1, action: text, reason: text) -> DebugReceiptV1:
+    """Receipts an operation the central owner refused to admit (`allowed` and
+    `succeeded` both false). Distinct from `_record`, which receipts the outcome
+    of an already-admitted operation."""
+    CENTRAL_DEBUG_SERVICE_V1.record_receipt(session_id, operation, perturbation, action, false, false, reason)
+
+export debug_policy_development_v1, debug_policy_observe_only_v1
