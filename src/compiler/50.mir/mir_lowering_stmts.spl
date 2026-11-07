@@ -4113,6 +4113,7 @@ impl MirLowering:
             self.bind_local(if_val_symbol_id, if_val_raw_local)
         var b3 = self.builder
         var result_defined = false
+        var merge_has_incoming = false
         if not b3.current_block_has_explicit_terminator():
             # `.?` + `??` extraction: if-val on lower_block_expected's
             # LocalId? evaluates FALSE on the stage4 lane (pairing class),
@@ -4138,6 +4139,7 @@ impl MirLowering:
                             inferred_known = true
                             inferred_ty = then_ty_found
             b3.terminate_goto(merge_block)
+            merge_has_incoming = true
         self.builder = b3
 
         # Else block
@@ -4163,13 +4165,21 @@ impl MirLowering:
                                 inferred_known = true
                                 inferred_ty = else_ty_found
                 b5.terminate_goto(merge_block)
+                merge_has_incoming = true
             self.builder = b5
         else:
             var b5 = self.builder
             b5.terminate_goto(merge_block)
+            merge_has_incoming = true
             self.builder = b5
 
         # Merge block
+        # Preserve the final return/abort when every arm diverges. Switching
+        # to the unused merge fabricates a live i64 value for enclosing ifs.
+        # Unreachable is the builder's unfinished-block sentinel, so retain
+        # the completed arm instead of trying to terminate the empty merge.
+        if not merge_has_incoming and self.builder.current_block_has_explicit_terminator():
+            return result
         self.builder.switch_to_block(merge_block)
         # The terminator guard skips emit_copy in arms that already returned;
         # if no arm defined result, the returned LocalId would be read while
@@ -4223,6 +4233,7 @@ impl MirLowering:
             b.emit_const(result, MirConstValue.Int(0), MirType.i64())
         self.builder = b
         var result_defined = false
+        var merge_has_incoming = false
         var inferred_known = false
         var inferred_ty = MirType.i64()
         var merged_arm_locals: [LocalId] = []
@@ -4309,6 +4320,7 @@ impl MirLowering:
                                 inferred_known = true
                                 inferred_ty = arm_ty
                 b_then.terminate_goto(merge_block)
+                merge_has_incoming = true
             b_then.switch_to_block(false_block)
             self.builder = b_then
             arm_index = arm_index + 1
@@ -4334,6 +4346,7 @@ impl MirLowering:
                                 inferred_known = true
                                 inferred_ty = else_ty
                 b_else.terminate_goto(merge_block)
+                merge_has_incoming = true
             self.builder = b_else
         else:
             var b_no_else = self.builder
@@ -4341,8 +4354,12 @@ impl MirLowering:
             # with the unit local, which has no runtime payload to define.
             result_defined = true
             b_no_else.terminate_goto(merge_block)
+            merge_has_incoming = true
             self.builder = b_no_else
 
+        # As with lower_if, an all-diverging chain has no merge value.
+        if not merge_has_incoming and self.builder.current_block_has_explicit_terminator():
+            return result
         self.builder.switch_to_block(merge_block)
         if not result_defined:
             self.builder.emit_const(result, MirConstValue.Int(0), MirType.i64())
