@@ -56,8 +56,9 @@ int64_t rt_process_observation_v4_reserved_state_value(int64_t token) {
     return result;
 }
 
-int64_t rt_process_observation_v4_reserved_start_pinned_value(
-    int64_t token, int64_t executable, int64_t cwd, SplArray* binding) {
+static int64_t pov4_reserved_start_admitted_impl(
+    int64_t token, int64_t executable, int64_t cwd, SplArray* binding,
+    int deadline_required, int64_t expires_at_unix_ms) {
     Pov4Reservation* r = pov4_reservation_acquire(token);
     if (!r) return -errno;
     if (r->state != 1) { pov4_reservation_release_busy(r); return -EALREADY; }
@@ -66,6 +67,15 @@ int64_t rt_process_observation_v4_reserved_start_pinned_value(
     r->state = 2;
     r->executable_pin = executable;
     r->cwd_pin = cwd;
+    r->submission_expires_unix_ms = deadline_required ? expires_at_unix_ms : 0;
+    int admission_error = deadline_required && expires_at_unix_ms<=0 ? EINVAL :
+        pov5_submission_admission_check(r->submission_expires_unix_ms);
+    if (admission_error) {
+        r->submission_admission_error = admission_error;
+        r->state = 3;
+        pov4_reservation_release_busy(r);
+        return -admission_error;
+    }
     Pov4Request request;
     if (!pov4_request_from_value(binding, &request)) {
         r->state = 3;
@@ -79,10 +89,22 @@ int64_t rt_process_observation_v4_reserved_start_pinned_value(
     /* This internal tuple is not authority. A NULL or malformed tuple cannot
      * lose the slot already bound before spawn; callers observe by reservation. */
     if (initial) pov4_tuple4_free(initial);
-    int64_t result = r->state == 4 ? 1 : 0;
-    if (!result) { r->state = 3; r->owner_index = UINT32_MAX; }
+    int64_t result = r->state == 4 ? 1 :
+        (r->submission_admission_error ? -r->submission_admission_error : 0);
+    if (r->state != 4) { r->state = 3; r->owner_index = UINT32_MAX; }
     pov4_reservation_release_busy(r);
     return result;
+}
+
+int64_t rt_process_observation_v4_reserved_start_pinned_value(
+    int64_t token, int64_t executable, int64_t cwd, SplArray* binding) {
+    return pov4_reserved_start_admitted_impl(token,executable,cwd,binding,0,0);
+}
+
+int64_t rt_process_observation_v5_reserved_start_admitted_value(
+    int64_t token, int64_t executable, int64_t cwd, SplArray* binding,
+    int64_t expires_at_unix_ms) {
+    return pov4_reserved_start_admitted_impl(token,executable,cwd,binding,1,expires_at_unix_ms);
 }
 
 SplArray* rt_process_observation_v4_reserved_observe_value(

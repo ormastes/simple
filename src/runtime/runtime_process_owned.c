@@ -63,6 +63,7 @@ static int64_t* owned_tuple3_value(int64_t stdout_value, int64_t stderr_value, S
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
+#include "runtime_process_submission_admission_v5.h"
 #include <unistd.h>
 #ifdef __linux__
 #include <dirent.h>
@@ -2618,6 +2619,8 @@ typedef struct Pov4Request {
     uint64_t atomic_input_len;
     uint8_t atomic_input_digest[32];
     int atomic_input_bound;
+    int64_t submission_expires_unix_ms;
+    int submission_admission_error;
 } Pov4Request;
 
 typedef struct Pov4Cursor {
@@ -2989,7 +2992,8 @@ static int pov4_darwin_main_image_is(pid_t pid, dev_t device, ino_t inode) {
 
 static int pov4_darwin_spawn_suspended(pid_t* pid, const char* image_path,
         int cwd_fd, int stdin_fd, int stdout_fd, int stderr_fd,
-        char* const* argv, char* const* environment) {
+        char* const* argv, char* const* environment,
+        int64_t submission_expires_unix_ms, int* admission_error) {
     posix_spawn_file_actions_t actions; posix_spawnattr_t attributes;
     int actions_ready = 0, attributes_ready = 0;
     int error = posix_spawn_file_actions_init(&actions);
@@ -3015,7 +3019,11 @@ static int pov4_darwin_spawn_suspended(pid_t* pid, const char* image_path,
     if (!error) error = posix_spawnattr_setflags(&attributes, (short)(
         POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGMASK |
         POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_START_SUSPENDED));
-    if (!error) error = posix_spawn(pid, image_path, &actions, &attributes, argv, environment);
+    if (!error) {
+        *admission_error=pov5_submission_admission_check(submission_expires_unix_ms);
+        error=*admission_error;
+        if (!error) error = posix_spawn(pid, image_path, &actions, &attributes, argv, environment);
+    }
     if (actions_ready) (void)posix_spawn_file_actions_destroy(&actions);
     if (attributes_ready) (void)posix_spawnattr_destroy(&attributes);
     return error;
@@ -3088,7 +3096,8 @@ static enum Pov4StartOutcome pov4_start_exact_darwin(
     pid_t pid = -1;
     int spawn_error = pov4_darwin_spawn_suspended(&pid, image_path, cwd_fd,
         request->atomic_input_bound ? in_pipe[0] : -1, out_pipe[1], err_pipe[1],
-        request->argv, request->environment);
+        request->argv, request->environment, request->submission_expires_unix_ms,
+        &request->submission_admission_error);
     close(out_pipe[1]); close(err_pipe[1]);
     if (request->atomic_input_bound) close(in_pipe[0]);
     close(cwd_fd);
@@ -3163,6 +3172,13 @@ static enum Pov4StartOutcome pov4_start_exact_darwin(
         if (confirmed_ns < 0) { failure = EIO; failure_class = RT_OWNED_EXEC_FAILURE_CLOCK_V4; }
         else if (confirmed_ns > confirm_deadline_ns) {
             failure = ETIMEDOUT; failure_class = RT_OWNED_EXEC_FAILURE_DEADLINE_V4;
+        }
+    }
+    if (!failure) {
+        int admission=pov5_submission_admission_check(request->submission_expires_unix_ms);
+        if (admission) {
+            failure=admission;
+            failure_class=admission==ETIMEDOUT?RT_OWNED_EXEC_FAILURE_DEADLINE_V4:RT_OWNED_EXEC_FAILURE_CLOCK_V4;
         }
     }
     if (!failure && kill(pid, SIGCONT) != 0) failure = errno ? errno : EIO;
@@ -3254,6 +3270,15 @@ static enum Pov4StartOutcome pov4_start_exact(
         close(executable_fd); close(cwd_fd); RT_OWNED_HOST_FREE(retained);
         owned_release(index,generation); errno=saved; return POV4_START_NO_CHILD;
     }
+    int admission=pov5_submission_admission_check(request->submission_expires_unix_ms);
+    if (admission) {
+        request->submission_admission_error=admission;
+        close(out_pipe[0]);close(out_pipe[1]);close(err_pipe[0]);close(err_pipe[1]);
+        close(exec_pipe[0]);close(exec_pipe[1]);
+        if (request->atomic_input_bound) {close(in_pipe[0]);close(in_pipe[1]);}
+        close(executable_fd);close(cwd_fd);RT_OWNED_HOST_FREE(retained);
+        owned_release(index,generation);errno=admission;return POV4_START_NO_CHILD;
+    }
     pid_t pid=fork();
     if(pid==0){
         close(exec_pipe[0]); close(out_pipe[0]); close(err_pipe[0]);
@@ -3284,6 +3309,8 @@ static enum Pov4StartOutcome pov4_start_exact(
             owned_child_exec_failed(exec_pipe[1],errno?errno:EIO);
         if(!owned_child_close_inherited_except2(executable_fd,exec_pipe[1]))
             owned_child_exec_failed(exec_pipe[1],errno?errno:EIO);
+        int exec_admission=pov5_submission_admission_check(request->submission_expires_unix_ms);
+        if(exec_admission) owned_child_exec_failed(exec_pipe[1],exec_admission);
         fexecve(executable_fd,request->argv,request->environment);
         owned_child_exec_failed(exec_pipe[1],errno);
     }
@@ -3423,6 +3450,8 @@ typedef struct Pov4Reservation {
     int state; /* 1 reserved, 2 attempting, 3 no child, 4 owned, 5 acked */
     uint32_t owner_index;
     int64_t executable_pin, cwd_pin;
+    int64_t submission_expires_unix_ms;
+    int submission_admission_error;
     uint8_t request_digest[32];
 } Pov4Reservation;
 static Pov4Reservation pov4_reservations[POV4_SLOTS];
@@ -4119,6 +4148,7 @@ static SplArray* pov4_start_pinned_impl(
         return pov4_rejected(ESTALE, POV4_FAIL_ADMISSION, POV4_REASON_BINDING,
                             started, 0, NULL);
     }
+    if (reservation) request.submission_expires_unix_ms=reservation->submission_expires_unix_ms;
     if (atomic_input_mode) {
         uint8_t expected_digest[32];
         if (!expected_input_digest ||
@@ -4300,6 +4330,7 @@ static SplArray* pov4_start_pinned_impl(
         started,prepared,execution_deadline,kill_deadline,cleanup_deadline,
         &owner->core,&exec_error,&exec_failure_class);
     if(outcome==POV4_START_NO_CHILD){
+        if (reservation) reservation->submission_admission_error=request.submission_admission_error;
         int saved=errno?errno:EIO; pov4_tuple4_free(start_result);
         RT_OWNED_HOST_FREE(owner->stdout_bytes); RT_OWNED_HOST_FREE(owner->stderr_bytes);
         pthread_mutex_lock(&pov4_slots_lock); memset(owner,0,sizeof(*owner));
@@ -6464,6 +6495,12 @@ int64_t rt_process_observation_v4_reserved_state_value(int64_t token) {
 int64_t rt_process_observation_v4_reserved_start_pinned_value(
     int64_t token, int64_t executable, int64_t cwd, SplArray* binding) {
     (void)token; (void)executable; (void)cwd; (void)binding; return -ENOTSUP;
+}
+int64_t rt_process_observation_v5_reserved_start_admitted_value(
+    int64_t token, int64_t executable, int64_t cwd, SplArray* binding,
+    int64_t expires_at_unix_ms) {
+    (void)token;(void)executable;(void)cwd;(void)binding;(void)expires_at_unix_ms;
+    return -ENOTSUP;
 }
 SplArray* rt_process_observation_v4_reserved_observe_value(
     int64_t token, int64_t wait_ns, int64_t retire) {

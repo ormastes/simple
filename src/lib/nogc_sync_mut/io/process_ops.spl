@@ -99,6 +99,8 @@ extern fn rt_process_observation_v4_reserved_matches_value(token: i64, rh: i64, 
 extern fn rt_process_observation_v4_reserved_state_value(token: i64) -> i64
 @unsafe(reason: "at most one start under preexisting reservation authority", capabilities: [ffi])
 extern fn rt_process_observation_v4_reserved_start_pinned_value(token: i64, executable: i64, cwd: i64, binding: [u8]) -> i64
+@unsafe(reason: "same retained reservation with final Unix submission deadline admission", capabilities: [ffi])
+extern fn rt_process_observation_v5_reserved_start_admitted_value(token: i64, executable: i64, cwd: i64, binding: [u8], expires_at_unix_ms: i64) -> i64
 @unsafe(reason: "nullable observation cannot consume reservation authority", capabilities: [ffi])
 extern fn rt_process_observation_v4_reserved_observe_value(token: i64, wait_ns: i64, retire: i64) -> ([u8], [u8], [u8], [i64])?
 @unsafe(reason: "idempotent frozen acknowledgement retained until confirmation", capabilities: [ffi])
@@ -1365,6 +1367,20 @@ pub class ProcessObservationReservationV4:
                 self.token, self.executable.handle, self.cwd.handle, encoded)
         if value < 0:
             return Err("process reservation start refused; retain owner and query state: {value}")
+        Ok(value)
+
+    # Caller verifies the grant before passing its Unix-millisecond deadline.
+    # This deadline controls submission, never the running workload's lifetime.
+    # Errors preserve this reservation; query state and retire an actual child.
+    pub me fn start_admitted(self, request: ProcessObservationRequestV4, expires_at_unix_ms: i64) -> Result<i64, text>:
+        if self.released: return Err("process reservation already released")
+        val bound = _process_observation_bound_request_v4(self.executable, self.cwd, request)?
+        val encoded = canonical_encode_process_observation_request_v4(bound)?
+        val value = unsafe(capabilities: [ffi]):
+            rt_process_observation_v5_reserved_start_admitted_value(
+                self.token, self.executable.handle, self.cwd.handle, encoded, expires_at_unix_ms)
+        if value < 0:
+            return Err("process reservation admission refused; retain owner and query state: {value}")
         Ok(value)
 
     pub fn observe(self, caller_wait_ns: i64, retire: bool) -> Result<ProcessObservationReceiptV4, text>:
