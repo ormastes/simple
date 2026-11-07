@@ -2,7 +2,7 @@
 # Policy is trusted caller input, never selected or overridden by the payload.
 # A serialized request is not a durable intent, journal, or replay authority.
 use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{
-    WindowsDockerPolicyV1, WindowsDockerRequestV1, windows_docker_request_digest_v1}
+    WindowsDockerPolicyV1, WindowsDockerRequestV1, WindowsDockerMountV1, windows_docker_request_digest_v1}
 use std.common.contracts.orchestration.resource_v1.{RejectionV1, reject,
     parse_resource_document, as_dict, as_array, as_int, only_known, require}
 use std.common.sdn.value.{SdnValue, SdnSpan}
@@ -19,7 +19,7 @@ pub fn windows_docker_request_encode_v1(policy: WindowsDockerPolicyV1,
         request: WindowsDockerRequestV1) -> Result<text, text>:
     val digest = windows_docker_request_digest_v1(policy, request)?
     var fields: Dict<text, SdnValue> = {
-        "version": SdnValue.Int(if request.working_directory == "": 1 else: 2), "kind": SdnValue.String("windows-docker-request"),
+        "version": SdnValue.Int(if request.mounts.len() > 0: 3 elif request.working_directory == "": 1 else: 2), "kind": SdnValue.String("windows-docker-request"),
         "podUid": SdnValue.String(request.pod_uid), "attempt": SdnValue.Int(request.attempt),
         "operationId": SdnValue.String(request.operation_id), "image": SdnValue.String(request.image),
         "command": text_array(request.command), "args": text_array(request.args),
@@ -27,6 +27,13 @@ pub fn windows_docker_request_encode_v1(policy: WindowsDockerPolicyV1,
         "network": SdnValue.String(request.network), "requestDigest": SdnValue.String(digest)
     }
     if request.working_directory != "": fields["workingDirectory"] = SdnValue.String(request.working_directory)
+    if request.mounts.len() > 0:
+        var mounts: [SdnValue] = []
+        for mount in request.mounts:
+            val item: Dict<text, SdnValue> = {"hostRoot": SdnValue.String(mount.host_root),
+                "guestRoot": SdnValue.String(mount.guest_root), "readOnly": SdnValue.Bool(mount.read_only)}
+            mounts = mounts.push(SdnValue.Dict(item))
+        fields["mounts"] = SdnValue.Array(mounts)
     val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
     if source.len() > WINDOWS_DOCKER_REQUEST_MAX_BYTES_V1: return Err("docker-request-record-byte-limit")
     Ok(source)
@@ -55,29 +62,43 @@ fn field_array(fields: Dict<text, SdnValue>, key: text,
         index = index + 1
     Ok(strings)
 
+fn field_mounts(fields: Dict<text, SdnValue>, spans: Dict<text, SdnSpan>) -> Result<[WindowsDockerMountV1], RejectionV1>:
+    val values = as_array(require(fields, "mounts", "", spans)?, "mounts", spans)?
+    if values.len() != 1: return Err(reject("limit", "mounts", "exactly one bind mount required", spans))
+    val item = as_dict(values[0], "mounts.0", spans)?
+    only_known(item, ["hostRoot", "guestRoot", "readOnly"], "mounts.0", spans)?
+    val read_only = match require(item, "readOnly", "mounts.0", spans)?:
+        case SdnValue.Bool(value): value
+        case _: return Err(reject("type", "mounts.0.readOnly", "expected bool", spans))
+    Ok([WindowsDockerMountV1(host_root: field_text(item, "hostRoot", spans)?,
+        guest_root: field_text(item, "guestRoot", spans)?, read_only: read_only)])
+
 fn decode_fields(policy: WindowsDockerPolicyV1,
         source: text) -> Result<WindowsDockerRequestV1, RejectionV1>:
     val parsed = parse_resource_document(source)?
     val spans = parsed.1
     val fields = as_dict(parsed.0, "", spans)?
     only_known(fields, ["version", "kind", "podUid", "attempt", "operationId", "image", "command",
-        "args", "cpuCount", "memoryLimitBytes", "network", "requestDigest", "workingDirectory"], "", spans)?
+        "args", "cpuCount", "memoryLimitBytes", "network", "requestDigest", "workingDirectory", "mounts"], "", spans)?
     val version = field_integer(fields, "version", spans)?
-    if version != 1 and version != 2:
+    if version != 1 and version != 2 and version != 3:
         return Err(reject("version", "version", "unsupported request version", spans))
     var working_directory = ""
-    if version == 2:
+    if version == 2 or version == 3:
         working_directory = field_text(fields, "workingDirectory", spans)?
         if working_directory == "": return Err(reject("request", "workingDirectory", "explicit directory required", spans))
     elif fields.has("workingDirectory"):
         return Err(reject("version", "workingDirectory", "directory requires version two", spans))
+    var mounts: [WindowsDockerMountV1] = []
+    if version == 3: mounts = field_mounts(fields, spans)?
+    elif fields.has("mounts"): return Err(reject("version", "mounts", "mounts require version three", spans))
     if field_text(fields, "kind", spans)? != "windows-docker-request":
         return Err(reject("kind", "kind", "wrong request kind", spans))
     val request = WindowsDockerRequestV1(pod_uid: field_text(fields, "podUid", spans)?,
         attempt: field_integer(fields, "attempt", spans)?, operation_id: field_text(fields, "operationId", spans)?,
         image: field_text(fields, "image", spans)?, command: field_array(fields, "command", spans)?,
         args: field_array(fields, "args", spans)?, cpu_count: field_integer(fields, "cpuCount", spans)?,
-        memory_limit_bytes: field_integer(fields, "memoryLimitBytes", spans)?, network: field_text(fields, "network", spans)?, working_directory: working_directory)
+        memory_limit_bytes: field_integer(fields, "memoryLimitBytes", spans)?, network: field_text(fields, "network", spans)?, working_directory: working_directory, mounts: mounts)
     val digest = match windows_docker_request_digest_v1(policy, request):
         case Ok(value): value
         case Err(reason): return Err(reject("request", "", reason, spans))

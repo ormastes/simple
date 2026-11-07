@@ -4,6 +4,7 @@
 use std.spec.*
 use std.nogc_async_mut.container.providers.windows.docker_contract_v1.*
 use std.nogc_async_mut.container.providers.windows.docker_codec_v1.*
+use std.nogc_async_mut.container.providers.windows.docker_policy_codec_v1.*
 
 fn contract_policy() -> WindowsDockerPolicyV1:
     WindowsDockerPolicyV1(docker_executable: "C:\\Program Files\\Docker\\docker.exe",
@@ -187,7 +188,7 @@ describe "Windows canonical SDN request records":
     it "rejects digest tampering, wrong schema and noncanonical serialization":
         val source = windows_docker_request_encode_v1(contract_policy(), contract_request()).unwrap()
         expect(codec_error(source.replace("cpuCount: 2", "cpuCount: 3"))).to_contain("digest:requestDigest")
-        expect(codec_error(source.replace("version: 1", "version: 3"))).to_contain("version:version")
+        expect(codec_error(source.replace("version: 1", "version: 4"))).to_contain("version:version")
         expect(codec_error(source.replace("windows-docker-request", "linux-request"))).to_contain("kind:kind")
         expect(codec_error(source + "\n")).to_equal("docker-request-record-not-canonical")
         expect(codec_error("")).to_equal("docker-request-record-byte-limit")
@@ -231,3 +232,104 @@ describe "Explicit Windows working directory":
         val explicit = windows_docker_request_encode_v1(policy, request).unwrap()
         expect(codec_error(explicit.replace("version: 2", "version: 1"))).to_contain("version:workingDirectory")
         expect(codec_error(explicit.replace("C:\\\\work", "C:\\\\else"))).to_contain("digest:requestDigest")
+
+
+fn workspace_contract_policy_v3() -> WindowsDockerPolicyV1:
+    var policy = contract_policy()
+    policy.workspace_root = "C:\\protected-workspaces"
+    policy
+
+fn workspace_contract_request_v3() -> WindowsDockerRequestV1:
+    var request = contract_request()
+    request.working_directory = "C:\\work\\src"
+    request.mounts = [WindowsDockerMountV1(host_root: "C:\\protected-workspaces\\attempt-a",
+        guest_root: "C:\\work", read_only: false)]
+    request
+
+describe "Windows protected workspace bind mount":
+    it "emits an actual bind mount and version three canonical record with strict typed fields":
+        step("Bind a protected attempt directory to the explicit in-container work root")
+        val policy = workspace_contract_policy_v3()
+        val request = workspace_contract_request_v3()
+        expect(windows_docker_request_reason_v1(policy, request)).to_equal("")
+        val command = windows_docker_create_command_v1(policy, request).unwrap()
+        expect(command.args.contains("--mount")).to_equal(true)
+        expect(command.args.contains("type=bind,source=C:\\protected-workspaces\\attempt-a,target=C:\\work")).to_equal(true)
+        val source = windows_docker_request_encode_v1(policy, request).unwrap()
+        expect(source.contains("version: 3")).to_equal(true)
+        expect(source.contains("mounts:")).to_equal(true)
+        val decoded = windows_docker_request_decode_v1(policy, source).unwrap()
+        expect(decoded.mounts.len()).to_equal(1)
+        expect(decoded.mounts[0].host_root).to_equal(request.mounts[0].host_root)
+        expect(decoded.mounts[0].guest_root).to_equal("C:\\work")
+        expect(decoded.mounts[0].read_only).to_equal(false)
+        expect(decoded.working_directory).to_equal("C:\\work\\src")
+        expect(windows_docker_request_encode_v1(policy, decoded).unwrap()).to_equal(source)
+
+    it "binds protected root and every typed mount field into the semantic digest":
+        val policy = workspace_contract_policy_v3()
+        val base = workspace_contract_request_v3()
+        val digest = contract_digest(policy, base)
+        var changed = workspace_contract_request_v3()
+        changed.mounts = [WindowsDockerMountV1(host_root: "C:\\protected-workspaces\\attempt-b", guest_root: "C:\\work", read_only: false)]
+        expect(contract_digest(policy, changed) == digest).to_equal(false)
+        changed = workspace_contract_request_v3()
+        changed.mounts = [WindowsDockerMountV1(host_root: base.mounts[0].host_root, guest_root: "C:\\other", read_only: false)]
+        changed.working_directory = "C:\\other\\src"
+        expect(contract_digest(policy, changed) == digest).to_equal(false)
+        changed = workspace_contract_request_v3()
+        changed.mounts = [WindowsDockerMountV1(host_root: base.mounts[0].host_root, guest_root: "C:\\work", read_only: true)]
+        expect(contract_digest(policy, changed) == digest).to_equal(false)
+        expect(windows_docker_create_command_v1(policy, changed).unwrap().args.contains("type=bind,source=C:\\protected-workspaces\\attempt-a,target=C:\\work,readonly")).to_equal(true)
+        var narrower = policy
+        narrower.workspace_root = "C:\\protected-workspaces\\attempt-a"
+        changed.mounts = [WindowsDockerMountV1(host_root: "C:\\protected-workspaces\\attempt-a\\child", guest_root: "C:\\work", read_only: false)]
+        expect(contract_digest(policy, changed) == contract_digest(narrower, changed)).to_equal(false)
+
+    it "requires one strict descendant of an administrator protected root and an in-mount directory":
+        var request = workspace_contract_request_v3()
+        expect(windows_docker_request_reason_v1(contract_policy(), request)).to_equal("docker-policy-workspace-root-required")
+        request.mounts = [WindowsDockerMountV1(host_root: "C:\\protected-workspaces", guest_root: "C:\\work", read_only: false)]
+        expect(windows_docker_request_reason_v1(workspace_contract_policy_v3(), request)).to_equal("docker-workspace-host-outside-protected-root")
+        request.mounts = [WindowsDockerMountV1(host_root: "C:\\protected-workspaces-evil\\attempt-a", guest_root: "C:\\work", read_only: false)]
+        expect(windows_docker_request_reason_v1(workspace_contract_policy_v3(), request)).to_equal("docker-workspace-host-outside-protected-root")
+        request = workspace_contract_request_v3()
+        request.working_directory = "C:\\work-evil"
+        expect(windows_docker_request_reason_v1(workspace_contract_policy_v3(), request)).to_equal("docker-workspace-directory-outside-mount")
+        request.working_directory = ""
+        expect(windows_docker_request_reason_v1(workspace_contract_policy_v3(), request)).to_equal("docker-workspace-directory-required")
+        request = workspace_contract_request_v3()
+        request.mounts = request.mounts + request.mounts
+        expect(windows_docker_request_reason_v1(workspace_contract_policy_v3(), request)).to_equal("docker-workspace-mount-count-invalid")
+
+    it "rejects mount-option injection, controls, relative paths, aliases and traversal":
+        for path in ["relative", "C:\\work,readonly", "C:\\work=other", "C:\\work\"quoted", "C:\\work|forged", "C:\\work\\..\\escape", "C:\\work\\.\\alias", "C:\\work\\child ", "C:\\work\nchild", "C:\\work:stream", "C:/work"]:
+            expect(windows_docker_mount_path_v1(path)).to_equal(false)
+        for path in ["C:\\protected-workspaces\\attempt-a", "C:\\Program Files\\workspace"]:
+            expect(windows_docker_mount_path_v1(path)).to_equal(true)
+
+    it "rejects duplicate, unknown, missing and mistyped nested mount records":
+        val policy = workspace_contract_policy_v3()
+        val source = windows_docker_request_encode_v1(policy, workspace_contract_request_v3()).unwrap()
+        expect(source.contains("readOnly: false")).to_equal(true)
+        for malformed in [source.replace("readOnly: false", "readOnly: false, readOnly: false"),
+                source.replace("readOnly: false", "readOnly: false, unknown: true"),
+                source.replace(", readOnly: false", ""),
+                source.replace("readOnly: false", "readOnly: \"false\""),
+                source.replace("mounts: [", "mounts: [nil, ")]:
+            expect(malformed == source).to_equal(false)
+            expect(windows_docker_request_decode_v1(policy, malformed).is_err()).to_equal(true)
+        expect(windows_docker_request_decode_v1(policy, source.replace("version: 3", "version: 2")).is_err()).to_equal(true)
+
+    it "keeps legacy policy version one bytes and adds protected roots only in version two":
+        val original = windows_docker_policy_encode_v1(contract_policy()).unwrap()
+        expect(original.contains("version: 1")).to_equal(true)
+        expect(original.contains("workspaceRoot")).to_equal(false)
+        val protected = windows_docker_policy_encode_v1(workspace_contract_policy_v3()).unwrap()
+        expect(protected.contains("version: 2")).to_equal(true)
+        expect(windows_docker_policy_decode_v1(protected).unwrap().workspace_root).to_equal("C:\\protected-workspaces")
+        expect(windows_docker_policy_decode_v1(protected.replace("version: 2", "version: 1")).is_err()).to_equal(true)
+        expect(windows_docker_policy_decode_v1(original.replace("version: 1", "version: 2")).is_err()).to_equal(true)
+        var invalid = contract_policy()
+        invalid.workspace_root = "C:\\"
+        expect(windows_docker_policy_reason_v1(invalid)).to_equal("docker-policy-workspace-root-invalid")

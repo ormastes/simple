@@ -18,3 +18,11 @@ Live criteria additionally require Docker/Windows versions, exact image digest,
 host/image compatibility, observed process isolation, no utility VM, timing/RSS,
 ordinary-client policy and retained artifact provenance. Synthetic scripts do not
 substitute for any live criterion.
+
+The additional common API service scenarios cover initial quarantine, exact
+scripted inventory refresh after journal ownership, unavailable inventory, wrong
+acknowledgment and candidate recovery-only promotion. Protected workspace cases
+cover policy/request versioning, literal mount argv, path escape and delimiter
+rejection, zero/one mount inspection and actual selected-user mismatch. The
+pinned remote producer's same-container workspace preflight and signed receipt
+remain end-to-end integration criteria. All new Simple cases are NOT_RUN.

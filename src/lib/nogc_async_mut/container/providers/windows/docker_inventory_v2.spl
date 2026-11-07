@@ -4,12 +4,14 @@
 use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{
     WindowsDockerPolicyV1, WINDOWS_DOCKER_ENGINE_V1, WINDOWS_DOCKER_INFO_FORMAT_V1,
     windows_docker_policy_reason_v1, windows_docker_id_v1, windows_docker_token_v1}
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_scope_fence_id_v2}
+use std.nogc_sync_mut.io.windows_host_identity_v1.{windows_machine_guid_decode_v1}
 
 pub const WINDOWS_DOCKER_INVENTORY_MAX_ENTRIES_V2: i64 = 64
 pub const WINDOWS_DOCKER_INVENTORY_IDS_FORMAT_V2 = "{{{{.ID}}}}"
 # The boot-key presence marker distinguishes a missing label from present empty
 # map[string]string values. Four source braces become two Go-template braces.
-pub const WINDOWS_DOCKER_INVENTORY_INSPECT_FORMAT_V2 = "{{{{.Id}}}}|{{{{index .Config.Labels \"simple.provider\"}}}}|{{{{index .Config.Labels \"simple.physical-host\"}}}}|{{{{index .Config.Labels \"simple.service-scope\"}}}}|{{{{index .Config.Labels \"simple.service-incarnation\"}}}}|{{{{index .Config.Labels \"simple.pod\"}}}}|{{{{index .Config.Labels \"simple.attempt\"}}}}|{{{{index .Config.Labels \"simple.operation\"}}}}|{{{{index .Config.Labels \"simple.generation\"}}}}|{{{{index .Config.Labels \"simple.boot\"}}}}|{{{{index .Config.Labels \"simple.request\"}}}}|{{{{.HostConfig.CpuCount}}}}|{{{{.HostConfig.Memory}}}}|{{{{.State.Status}}}}|{{{{range $key, $value := .Config.Labels}}}}{{{{if eq $key \"simple.boot\"}}}}present{{{{end}}}}{{{{end}}}}|{{{{index .Config.Labels \"simple.continuity-mode\"}}}}"
+pub const WINDOWS_DOCKER_INVENTORY_INSPECT_FORMAT_V2 = "{{{{.Id}}}}|{{{{index .Config.Labels \"simple.provider\"}}}}|{{{{index .Config.Labels \"simple.physical-host\"}}}}|{{{{index .Config.Labels \"simple.service-scope\"}}}}|{{{{index .Config.Labels \"simple.service-incarnation\"}}}}|{{{{index .Config.Labels \"simple.pod\"}}}}|{{{{index .Config.Labels \"simple.attempt\"}}}}|{{{{index .Config.Labels \"simple.operation\"}}}}|{{{{index .Config.Labels \"simple.generation\"}}}}|{{{{index .Config.Labels \"simple.boot\"}}}}|{{{{index .Config.Labels \"simple.request\"}}}}|{{{{.HostConfig.CpuCount}}}}|{{{{.HostConfig.Memory}}}}|{{{{.State.Status}}}}|{{{{range $key, $value := .Config.Labels}}}}{{{{if eq $key \"simple.boot\"}}}}present{{{{end}}}}{{{{end}}}}|{{{{index .Config.Labels \"simple.continuity-mode\"}}}}|{{{{index .Config.Labels \"simple.native-machine\"}}}}|{{{{index .Config.Labels \"simple.fence\"}}}}"
 
 pub struct WindowsManagedInventoryEntryV2:
     native_id: text
@@ -20,6 +22,8 @@ pub struct WindowsManagedInventoryEntryV2:
     provider_generation: i64
     boot_id: text
     service_incarnation_id: text
+    native_machine_id: text
+    scope_fence_id: text
     state: text
     cpu_millis: i64
     memory_bytes: i64
@@ -81,6 +85,17 @@ fn inventory_incarnation_v2(value: text) -> bool:
     val suffix = value.substring(prefix.len(), value.len())
     windows_docker_id_v1(suffix) and suffix != "0000000000000000000000000000000000000000000000000000000000000000"
 
+fn inventory_native_machine_v2(value: text) -> bool:
+    val prefix = "windows-machine-guid-v1:"
+    if value.len() != 60 or not value.starts_with(prefix): return false
+    var units: [i64] = []
+    for index in prefix.len()..value.len():
+        units = units.push(value.char_code_at(index))
+    units = units.push(0)
+    match windows_machine_guid_decode_v1(1, 74, units):
+        case Ok(canonical): canonical == value
+        case Err(_reason): false
+
 # Returns exact entry plus physical/service labels for scoped filtering. Validate
 # every provider-listed row before filtering, so malformed legacy/foreign rows
 # cannot silently disappear from completeness accounting.
@@ -89,7 +104,7 @@ pub fn windows_docker_inventory_inspect_decode_v2(expected_native_id: text, outp
     if not windows_docker_id_v1(expected_native_id): return Err("docker-inventory-expected-id-invalid")
     val line = inventory_line_v2(output, max_output_bytes)?
     val fields = line.split("|")
-    if fields.len() != 16: return Err("docker-inventory-inspection-field-count")
+    if fields.len() != 18: return Err("docker-inventory-inspection-field-count")
     if fields[0] != expected_native_id: return Err("docker-inventory-exact-native-id-mismatch")
     if fields[1] != WINDOWS_DOCKER_ENGINE_V1: return Err("docker-inventory-provider-label-mismatch")
     if not windows_docker_token_v1(fields[2]) or not windows_docker_token_v1(fields[3]):
@@ -108,9 +123,21 @@ pub fn windows_docker_inventory_inspect_decode_v2(expected_native_id: text, outp
     if memory < 16777216: return Err("docker-inventory-memory-ceiling-invalid")
     if not ["created", "restarting", "running", "removing", "paused", "exited", "dead"].contains(fields[13]):
         return Err("docker-inventory-state-invalid")
+    if not inventory_native_machine_v2(fields[16]): return Err("docker-inventory-native-machine-label-invalid")
+    # Reconstruct the recorded OLD scope, including its old native machine and
+    # service incarnation. Current-machine mismatch remains charged quarantine;
+    # only physical/service scope labels govern the later filtering decision.
+    val recorded_scope = ContainerHostScopeV2(physical_host_id: fields[2],
+        service_scope_id: fields[3], boot_id: "", provider_generation: generation,
+        native_machine_id: fields[16], continuity_mode: "service-incarnation-v1",
+        continuity_id: fields[4])
+    val expected_fence = container_scope_fence_id_v2(recorded_scope)?
+    if fields[17] == "" or fields[17] != expected_fence:
+        return Err("docker-inventory-scope-fence-label-mismatch")
     val entry = WindowsManagedInventoryEntryV2(native_id: fields[0], workload_uid: fields[5],
         attempt: attempt, operation_id: fields[7], request_digest: fields[10],
         provider_generation: generation, boot_id: "", service_incarnation_id: fields[4],
+        native_machine_id: fields[16], scope_fence_id: fields[17],
         state: fields[13], cpu_millis: cpu_count * 1000, memory_bytes: memory)
     Ok((entry, fields[2], fields[3]))
 

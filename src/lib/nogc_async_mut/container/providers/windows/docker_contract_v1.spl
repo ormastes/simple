@@ -15,6 +15,8 @@ pub const WINDOWS_DOCKER_INFO_FORMAT_V1 = "{{{{.OSType}}}}|{{{{.ID}}}}|{{{{.Kern
 pub const WINDOWS_DOCKER_IMAGE_FORMAT_V1 = "{{{{.Os}}}}|{{{{.Id}}}}|{{{{.OsVersion}}}}\n{{{{range .RepoDigests}}}}{{{{println .}}}}{{{{end}}}}"
 pub const WINDOWS_DOCKER_INSPECT_FORMAT_V1 = "{{{{.Id}}}}|{{{{.Image}}}}|{{{{.Config.Image}}}}|{{{{.HostConfig.Isolation}}}}|{{{{.Config.User}}}}|{{{{.HostConfig.NetworkMode}}}}|{{{{.HostConfig.CpuCount}}}}|{{{{.HostConfig.Memory}}}}|{{{{index .Config.Labels \"simple.provider\"}}}}|{{{{index .Config.Labels \"simple.pod\"}}}}|{{{{index .Config.Labels \"simple.attempt\"}}}}|{{{{index .Config.Labels \"simple.operation\"}}}}|{{{{index .Config.Labels \"simple.boot\"}}}}|{{{{index .Config.Labels \"simple.generation\"}}}}|{{{{index .Config.Labels \"simple.request\"}}}}|{{{{.State.Status}}}}|{{{{.State.ExitCode}}}}"
 
+pub const WINDOWS_DOCKER_MOUNTS_FORMAT_V3 = "|{{{{len .Mounts}}}}|{{{{range .Mounts}}}}{{{{.Type}}}}|{{{{.Source}}}}|{{{{.Destination}}}}|{{{{.RW}}}}{{{{end}}}}"
+
 pub struct WindowsDockerPolicyV1:
     docker_executable: text
     endpoint: text
@@ -28,6 +30,12 @@ pub struct WindowsDockerPolicyV1:
     max_output_bytes: i64
     system_root: text
     temp_directory: text
+    workspace_root: text = ""
+
+pub struct WindowsDockerMountV1:
+    host_root: text
+    guest_root: text
+    read_only: bool
 
 pub struct WindowsDockerRequestV1:
     pod_uid: text
@@ -41,6 +49,7 @@ pub struct WindowsDockerRequestV1:
     memory_limit_bytes: i64
     network: text
     working_directory: text = ""
+    mounts: [WindowsDockerMountV1] = []
 
 pub struct WindowsDockerScriptedResultV1:
     operation: text
@@ -76,6 +85,23 @@ fn absolute_windows_path(value: text) -> bool:
         value.byte_at(1) == 58 and value.byte_at(2) == 92 and
         not value.contains("..") and not value.contains("\"") and not value.contains("/")
 
+# Restricted canonical drive paths for one literal --mount CSV value. No
+# separators/options can escape their field, and Win32 alias syntax is refused.
+pub fn windows_docker_mount_path_v1(value: text) -> bool:
+    if value.len() < 3 or value.len() > 512: return false
+    val drive = value.char_code_at(0)
+    if not ((drive >= 65 and drive <= 90) or (drive >= 97 and drive <= 122)): return false
+    if value.byte_at(1) != 58 or value.byte_at(2) != 92: return false
+    for character in value.substring(2, value.len()).chars():
+        val scalar = character.char_code_at(0)
+        if scalar < 32 or (scalar >= 127 and scalar <= 159): return false
+        if scalar == 34 or scalar == 39 or scalar == 44 or scalar == 61 or scalar == 124 or scalar == 58 or scalar == 47 or scalar == 42 or scalar == 63: return false
+    if value.contains(".."): return false
+    if value.len() == 3: return true
+    for component in value.substring(3, value.len()).split("\\"):
+        if component == "" or component == "." or component.ends_with(".") or component.ends_with(" "): return false
+    true
+
 pub fn windows_docker_policy_reason_v1(policy: WindowsDockerPolicyV1) -> text:
     if not absolute_windows_path(policy.docker_executable) or
             not policy.docker_executable.ends_with("\\docker.exe"):
@@ -92,6 +118,8 @@ pub fn windows_docker_policy_reason_v1(policy: WindowsDockerPolicyV1) -> text:
     if policy.timeout_ms <= 0 or policy.timeout_ms > 300000 or
             policy.max_output_bytes < 4096 or policy.max_output_bytes > 1048576:
         return "docker-execution-bounds-invalid"
+    if policy.workspace_root != "" and (policy.workspace_root.len() <= 3 or not windows_docker_mount_path_v1(policy.workspace_root)):
+        return "docker-policy-workspace-root-invalid"
     if not absolute_windows_path(policy.system_root) or not absolute_windows_path(policy.temp_directory):
         return "docker-child-environment-invalid"
     ""
@@ -122,7 +150,20 @@ pub fn windows_docker_request_reason_v1(policy: WindowsDockerPolicyV1,
             request.memory_limit_bytes < 16777216 or request.memory_limit_bytes > 1099511627776:
         return "docker-resource-limit-invalid"
     if request.network != "none": return "docker-network-none-required"
-    if request.working_directory != "" and not absolute_windows_path(request.working_directory):
+    if request.mounts.len() > 1: return "docker-workspace-mount-count-invalid"
+    if request.mounts.len() == 1:
+        val mount = request.mounts[0]
+        if policy.workspace_root == "": return "docker-policy-workspace-root-required"
+        val host_prefix = if policy.workspace_root.ends_with("\\"): policy.workspace_root else: policy.workspace_root + "\\"
+        if mount.host_root == policy.workspace_root or not mount.host_root.starts_with(host_prefix):
+            return "docker-workspace-host-outside-protected-root"
+        if not windows_docker_mount_path_v1(mount.host_root) or not windows_docker_mount_path_v1(mount.guest_root):
+            return "docker-workspace-mount-path-invalid"
+        if not windows_docker_mount_path_v1(request.working_directory): return "docker-workspace-directory-required"
+        val prefix = if mount.guest_root.ends_with("\\"): mount.guest_root else: mount.guest_root + "\\"
+        if request.working_directory != mount.guest_root and not request.working_directory.starts_with(prefix):
+            return "docker-workspace-directory-outside-mount"
+    if request.mounts.len() == 0 and request.working_directory != "" and not absolute_windows_path(request.working_directory):
         return "docker-working-directory-invalid"
     ""
 
@@ -144,11 +185,19 @@ pub fn windows_docker_request_digest_v1(policy: WindowsDockerPolicyV1,
     if request.working_directory != "":
         fields.push(request.working_directory)
         body = "version: 2\nkind: windows-docker-request\nfields:\n"
+    if request.mounts.len() > 0:
+        fields.push(policy.workspace_root)
+        body = "version: 3\nkind: windows-docker-request\nfields:\n"
     for field in fields: body = body + "    - \"" + sha256_text(field) + "\"\n"
     body = body + "commandCount: " + request.command.len().to_text() + "\ncommand:\n"
     for value in request.command: body = body + "    - \"" + sha256_text(value) + "\"\n"
     body = body + "argumentCount: " + request.args.len().to_text() + "\narguments:\n"
     for value in request.args: body = body + "    - \"" + sha256_text(value) + "\"\n"
+    if request.mounts.len() > 0:
+        body = body + "mountCount: " + request.mounts.len().to_text() + "\nmounts:\n"
+        for mount in request.mounts:
+            for scalar in [mount.host_root, mount.guest_root, if mount.read_only: "true" else: "false"]:
+                body = body + "    - \"" + sha256_text(scalar) + "\"\n"
     Ok(sha256_text(body))
 
 pub fn windows_docker_name_v1(policy: WindowsDockerPolicyV1,
@@ -178,6 +227,10 @@ pub fn windows_docker_create_command_v1(policy: WindowsDockerPolicyV1,
         "simple.request=" + digest]
     for label in labels: args = args + ["--label", label]
     if request.working_directory != "": args = args + ["--workdir", request.working_directory]
+    for mount in request.mounts:
+        var specification = "type=bind,source=" + mount.host_root + ",target=" + mount.guest_root
+        if mount.read_only: specification = specification + ",readonly"
+        args = args + ["--mount", specification]
     args = args + ["--entrypoint", request.command[0], request.image]
     var index = 1
     while index < request.command.len():

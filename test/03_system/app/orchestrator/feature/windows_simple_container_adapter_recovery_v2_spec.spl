@@ -1,0 +1,156 @@
+# @req REQ-WDP-007 REQ-WDP-010
+# Explicit scripted actual owner/common API regression. AUTHORED_NOT_RUN.
+use std.spec.*
+use std.nogc_async_mut.container.api_v2.*
+use std.nogc_async_mut.container.service_v2.*
+use std.nogc_async_mut.container.providers.windows.simple_container_adapter_v2.{WindowsSimpleContainerAdapterV2, WindowsServiceInventorySampleV2}
+use std.nogc_async_mut.container.providers.windows.docker_runtime_v1.WindowsDockerRuntimeProviderV1
+use test.fixtures.orchestration.simple_container_windows_adapter_fixture_v2.*
+
+describe "Windows common Container API uncertain-create recovery":
+    it "retains candidate-only rights then promotes only after exact observed recovery":
+        step("Start an actual scripted Windows service owner in quarantine, with no caller readiness boolean")
+        val request = windows_adapter_request_fixture_v2()
+        val deadline = windows_adapter_deadline_fixture_v2()
+        var owner = windows_adapter_owner_fixture_v2(windows_adapter_recovery_lifecycle_script_v2(),
+            [WindowsServiceInventorySampleV2(entries: [], error: ""), WindowsServiceInventorySampleV2(entries: [], error: "")])
+        val closed = simple_container_apply_v2(owner, "prepare", request, deadline)
+        expect(closed.operation.status).to_equal("blocked")
+        expect(closed.operation.reason).to_equal("windows-container-startup-quarantine-pending")
+        owner = closed.owner
+        expect(windows_adapter_consumed_fixture_v2(owner)).to_equal(0)
+        val early = simple_container_complete_quarantine_v2(owner, windows_adapter_admission_fixture_v2([]))
+        expect(early.admitted).to_equal(false)
+        expect(early.error).to_equal("windows-container-startup-inventory-refresh-required")
+        owner = early.owner
+        val refreshed = simple_container_inventory_service_v2(owner)
+        expect(refreshed.error).to_equal("")
+        expect(refreshed.inventory.unwrap().len()).to_equal(0)
+        owner = refreshed.owner
+        val admitted = simple_container_complete_quarantine_v2(owner, windows_adapter_admission_fixture_v2([]))
+        expect(admitted.admitted).to_equal(true)
+        owner = admitted.owner
+        val prepared = simple_container_apply_v2(owner, "prepare", request, deadline)
+        expect(prepared.operation.status).to_equal("ok")
+        owner = prepared.owner
+        step("Return a valid native create ID, then fail the actual post-create engine query")
+        val failed = simple_container_apply_v2(owner, "create", request, deadline)
+        expect(failed.operation.status).to_equal("blocked")
+        owner = failed.owner
+        val intent = simple_container_intent_v2(owner, request).unwrap()
+        expect(intent.native_id).to_equal(windows_adapter_native_id_fixture_v2())
+        expect(intent.phase).to_equal("unknown")
+        expect(windows_adapter_consumed_fixture_v2(owner)).to_equal(6)
+        step("Refuse wrong-ID recovery and ordinary launch/cleanup before validated reconciliation")
+        var wrong = intent
+        wrong.native_id = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        val rejected = simple_container_recover_v2(owner, request, wrong)
+        expect(rejected.operation.status).to_equal("blocked")
+        expect(rejected.operation.reason).to_equal("windows-container-recovery-native-id-not-authorized")
+        owner = rejected.owner
+        for action in ["start", "stop", "destroy"]:
+            val blocked = simple_container_apply_v2(owner, action, request, deadline)
+            expect(blocked.operation.status).to_equal("blocked")
+            expect(blocked.operation.reason).to_equal("windows-container-candidate-recovery-only")
+            owner = blocked.owner
+            expect(windows_adapter_consumed_fixture_v2(owner)).to_equal(6)
+        val blocked_read = simple_container_read_v2(owner, "logs", request)
+        expect(blocked_read.operation.reason).to_equal("windows-container-candidate-recovery-only")
+        owner = blocked_read.owner
+        expect(windows_adapter_consumed_fixture_v2(owner)).to_equal(6)
+        step("Recover exactly the retained candidate by fresh engine, image and matching scoped native inspection")
+        val recovered = simple_container_recover_v2(owner, request, intent)
+        expect(recovered.operation.status).to_equal("ok")
+        expect(recovered.operation.state.identity.native_id).to_equal(intent.native_id)
+        expect(recovered.operation.state.phase).to_equal("created")
+        owner = recovered.owner
+        expect(windows_adapter_consumed_fixture_v2(owner)).to_equal(9)
+        step("Refused duplicate create preserves full rights without issuing a second native create")
+        val duplicate = simple_container_apply_v2(owner, "create", request, deadline)
+        expect(duplicate.operation.status).to_equal("blocked")
+        owner = duplicate.owner
+        expect(windows_adapter_consumed_fixture_v2(owner)).to_equal(9)
+        val started = simple_container_apply_v2(owner, "start", request, deadline)
+        expect(started.operation.status).to_equal("ok")
+        expect(started.operation.state.phase).to_equal("running")
+        owner = started.owner
+        expect(windows_adapter_consumed_fixture_v2(owner)).to_equal(14)
+        val stopped = simple_container_apply_v2(owner, "stop", request, deadline)
+        expect(stopped.operation.status).to_equal("ok")
+        expect(stopped.operation.state.phase).to_equal("exited")
+        owner = stopped.owner
+        val destroyed = simple_container_apply_v2(owner, "destroy", request, deadline)
+        expect(destroyed.operation.status).to_equal("ok")
+        owner = destroyed.owner
+        expect(windows_adapter_consumed_fixture_v2(owner)).to_equal(24)
+        step("Refused post-destroy create cannot resurrect retired recovery rights")
+        val retired = simple_container_apply_v2(owner, "create", request, deadline)
+        expect(retired.operation.status).to_equal("blocked")
+        owner = retired.owner
+        val resurrection = simple_container_recover_v2(owner, request, intent)
+        expect(resurrection.operation.status).to_equal("blocked")
+        expect(windows_adapter_consumed_fixture_v2(resurrection.owner)).to_equal(24)
+
+
+describe "Windows scripted startup inventory common service API":
+    it "requires actual scripted provider, fixture pin and a successful initial bounded sample":
+        val scope = windows_adapter_scope_fixture_v2()
+        val policy = windows_adapter_policy_fixture_v2()
+        val observation = windows_adapter_observation_fixture_v2()
+        val samples = [WindowsServiceInventorySampleV2(entries: [], error: "")]
+        expect(WindowsSimpleContainerAdapterV2.scripted_service_fixture_v2(scope,
+            WindowsDockerRuntimeProviderV1.new(policy), observation, samples, 5000).is_err()).to_equal(true)
+        var wrong = observation
+        wrong.provider_identity_digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        expect(WindowsSimpleContainerAdapterV2.scripted_service_fixture_v2(scope,
+            WindowsDockerRuntimeProviderV1.scripted(policy, []), wrong, samples, 5000).is_err()).to_equal(true)
+        expect(WindowsSimpleContainerAdapterV2.scripted_service_fixture_v2(scope,
+            WindowsDockerRuntimeProviderV1.scripted(policy, []), observation, [], 5000).is_err()).to_equal(true)
+        expect(WindowsSimpleContainerAdapterV2.scripted_service_fixture_v2(scope,
+            WindowsDockerRuntimeProviderV1.scripted(policy, []), observation,
+            [WindowsServiceInventorySampleV2(entries: [], error: "initial failure")], 5000).is_err()).to_equal(true)
+        expect(WindowsSimpleContainerAdapterV2.scripted_service_fixture_v2(scope,
+            WindowsDockerRuntimeProviderV1.scripted(policy, []), observation, samples, 4999).is_err()).to_equal(true)
+
+    it "consumes real scripted inventory refresh batches and refuses stale or uncommitted admission":
+        step("Keep actual old-scope inventory resource charged until a matching typed handoff")
+        val old = windows_adapter_inventory_fixture_v2()
+        var owner = windows_adapter_owner_fixture_v2([], [WindowsServiceInventorySampleV2(entries: [], error: ""),
+            WindowsServiceInventorySampleV2(entries: [old], error: "")])
+        val refreshed = simple_container_inventory_service_v2(owner)
+        expect(refreshed.error).to_equal("")
+        val entries = refreshed.inventory.unwrap()
+        expect(entries.len()).to_equal(1)
+        expect(entries[0].runtime.native_id).to_equal(old.runtime.native_id)
+        expect(entries[0].cpu_millis).to_equal(2000)
+        expect(entries[0].memory_bytes).to_equal(536870912)
+        owner = refreshed.owner
+        val stale = simple_container_complete_quarantine_v2(owner, windows_adapter_admission_fixture_v2([]))
+        expect(stale.admitted).to_equal(false)
+        owner = stale.owner
+        val no_commit = simple_container_complete_quarantine_v2(owner, windows_adapter_admission_fixture_v2([old]))
+        expect(no_commit.admitted).to_equal(false)
+        expect(no_commit.error).to_equal("windows-container-quarantine-journal-commit-required")
+        owner = no_commit.owner
+        # Synthetic typed contract input only; this is NOT a durable host receipt.
+        val admitted = simple_container_complete_quarantine_v2(owner, windows_adapter_admission_fixture_v2([old], 1))
+        expect(admitted.admitted).to_equal(true)
+        val closed = simple_container_inventory_service_v2(admitted.owner)
+        expect(closed.inventory).to_be_nil()
+        expect(closed.error).to_equal("windows-container-startup-inventory-refresh-closed")
+
+    it "returns an actual sample error without fallback and invalidates stale admission":
+        var owner = windows_adapter_owner_fixture_v2([], [WindowsServiceInventorySampleV2(entries: [], error: ""),
+            WindowsServiceInventorySampleV2(entries: [], error: "fixture actual inventory failure")])
+        val failed = simple_container_inventory_service_v2(owner)
+        expect(failed.inventory).to_be_nil()
+        expect(failed.inventory_digest).to_equal("")
+        expect(failed.error).to_equal("fixture actual inventory failure")
+        owner = failed.owner
+        val stale = simple_container_complete_quarantine_v2(owner, windows_adapter_admission_fixture_v2([]))
+        expect(stale.admitted).to_equal(false)
+        owner = stale.owner
+        val exhausted = simple_container_inventory_service_v2(owner)
+        expect(exhausted.inventory).to_be_nil()
+        expect(exhausted.error).to_equal("windows-container-fixture-inventory-exhausted")
+        expect(windows_adapter_consumed_fixture_v2(exhausted.owner)).to_equal(0)

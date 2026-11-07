@@ -13,8 +13,8 @@ pub const WINDOWS_DOCKER_POLICY_MAX_BYTES_V1: i64 = 16384
 pub fn windows_docker_policy_encode_v1(policy: WindowsDockerPolicyV1) -> Result<text, text>:
     val reason = windows_docker_policy_reason_v1(policy)
     if reason != "": return Err(reason)
-    val fields: Dict<text, SdnValue> = {
-        "version": SdnValue.Int(1), "kind": SdnValue.String("windows-docker-policy"),
+    var fields: Dict<text, SdnValue> = {
+        "version": SdnValue.Int(if policy.workspace_root == "": 1 else: 2), "kind": SdnValue.String("windows-docker-policy"),
         "dockerExecutable": SdnValue.String(policy.docker_executable), "endpoint": SdnValue.String(policy.endpoint),
         "engineId": SdnValue.String(policy.engine_id), "nodeBootId": SdnValue.String(policy.node_boot_id),
         "providerGeneration": SdnValue.Int(policy.provider_generation),
@@ -24,6 +24,7 @@ pub fn windows_docker_policy_encode_v1(policy: WindowsDockerPolicyV1) -> Result<
         "timeoutMs": SdnValue.Int(policy.timeout_ms), "maxOutputBytes": SdnValue.Int(policy.max_output_bytes),
         "systemRoot": SdnValue.String(policy.system_root), "tempDirectory": SdnValue.String(policy.temp_directory)
     }
+    if policy.workspace_root != "": fields["workspaceRoot"] = SdnValue.String(policy.workspace_root)
     val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
     if source.len() > WINDOWS_DOCKER_POLICY_MAX_BYTES_V1: return Err("docker-policy-record-byte-limit")
     Ok(source)
@@ -45,9 +46,16 @@ fn decode_fields(source: text) -> Result<WindowsDockerPolicyV1, RejectionV1>:
     val fields = as_dict(parsed.0, "", spans)?
     only_known(fields, ["version", "kind", "dockerExecutable", "endpoint", "engineId", "nodeBootId",
         "providerGeneration", "expectedKernelVersion", "imageOsVersion", "expectedImageId",
-        "timeoutMs", "maxOutputBytes", "systemRoot", "tempDirectory"], "", spans)?
-    if field_integer(fields, "version", spans)? != 1:
+        "timeoutMs", "maxOutputBytes", "systemRoot", "tempDirectory", "workspaceRoot"], "", spans)?
+    val version = field_integer(fields, "version", spans)?
+    if version != 1 and version != 2:
         return Err(reject("version", "version", "unsupported policy version", spans))
+    var workspace_root = ""
+    if version == 2:
+        workspace_root = field_text(fields, "workspaceRoot", spans)?
+        if workspace_root == "": return Err(reject("policy", "workspaceRoot", "explicit workspace root required", spans))
+    elif fields.has("workspaceRoot"):
+        return Err(reject("version", "workspaceRoot", "workspace root requires version two", spans))
     if field_text(fields, "kind", spans)? != "windows-docker-policy":
         return Err(reject("kind", "kind", "wrong policy kind", spans))
     val policy = WindowsDockerPolicyV1(docker_executable: field_text(fields, "dockerExecutable", spans)?,
@@ -56,7 +64,7 @@ fn decode_fields(source: text) -> Result<WindowsDockerPolicyV1, RejectionV1>:
         expected_kernel_version: field_text(fields, "expectedKernelVersion", spans)?,
         image_os_version: field_text(fields, "imageOsVersion", spans)?, expected_image_id: field_text(fields, "expectedImageId", spans)?,
         timeout_ms: field_integer(fields, "timeoutMs", spans)?, max_output_bytes: field_integer(fields, "maxOutputBytes", spans)?,
-        system_root: field_text(fields, "systemRoot", spans)?, temp_directory: field_text(fields, "tempDirectory", spans)?)
+        system_root: field_text(fields, "systemRoot", spans)?, temp_directory: field_text(fields, "tempDirectory", spans)?, workspace_root: workspace_root)
     val reason = windows_docker_policy_reason_v1(policy)
     if reason != "": return Err(reject("policy", "", reason, spans))
     Ok(policy)

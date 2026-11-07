@@ -9,7 +9,7 @@ pub use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{
 use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{
     WINDOWS_DOCKER_ENGINE_V1, WINDOWS_DOCKER_NATIVE_ENGINE_V1, WINDOWS_DOCKER_MAX_RECORDS_V1, WINDOWS_DOCKER_MAX_SCRIPT_V1,
     WINDOWS_DOCKER_MAX_SCRIPT_BYTES_V1, WINDOWS_DOCKER_INFO_FORMAT_V1,
-    WINDOWS_DOCKER_IMAGE_FORMAT_V1, WINDOWS_DOCKER_INSPECT_FORMAT_V1,
+    WINDOWS_DOCKER_IMAGE_FORMAT_V1, WINDOWS_DOCKER_INSPECT_FORMAT_V1, WINDOWS_DOCKER_MOUNTS_FORMAT_V3,
     windows_docker_request_reason_v1, windows_docker_policy_reason_v1,
     windows_docker_request_digest_v1, windows_docker_command_v1,
     windows_docker_create_command_v1, windows_docker_args_equal_v1, windows_docker_id_v1}
@@ -114,6 +114,8 @@ impl WindowsDockerRuntimeProviderV1:
         val remaining = container_effect_remaining_ms_v1(deadline, digest, request.operation_id, action, now_ms)?
         Ok(deadline.expires_at_unix_ms)
 
+    pub fn is_scripted_fixture_v1() -> bool: self.scripted_mode and self.script_error == ""
+
     pub fn retained_record_count() -> i64: self.records.len()
     pub fn consumed_script_count() -> i64: self.cursor
 
@@ -213,7 +215,12 @@ impl WindowsDockerRuntimeProviderV1:
         var format = match self.managed_scope:
             case Some(_): WINDOWS_DOCKER_SCOPED_INSPECT_FORMAT_V2
             case nil: WINDOWS_DOCKER_INSPECT_FORMAT_V1
+        var inspect_mounts = request.mounts.len() > 0 or request.working_directory != ""
+        match self.managed_scope:
+            case Some(_): inspect_mounts = true
+            case nil: ()
         if request.working_directory != "": format = format + "|{{{{.Config.WorkingDir}}}}"
+        if inspect_mounts: format = format + WINDOWS_DOCKER_MOUNTS_FORMAT_V3
         val command = windows_docker_command_v1(self.policy, "inspect",
             ["container", "inspect", "--format", format, native_id])
         val run = self._execute(command)?
@@ -236,9 +243,22 @@ impl WindowsDockerRuntimeProviderV1:
                     field = field + 1
             case nil: ()
         if request.working_directory != "":
-            if fields.len() != count + 1: return Err("docker-inspect-field-count")
+            if fields.len() < count + 1: return Err("docker-inspect-field-count")
             if fields[count] != request.working_directory: return Err("docker-inspect-working-directory-mismatch")
             count = count + 1
+        if inspect_mounts:
+            if request.mounts.len() == 0:
+                if fields.len() != count + 2: return Err("docker-inspect-mount-field-count")
+                if fields[count] != "0" or fields[count + 1] != "": return Err("docker-inspect-mount-mismatch")
+                count = count + 2
+            else:
+                if fields.len() != count + 5: return Err("docker-inspect-mount-field-count")
+                val mount = request.mounts[0]
+                val expected_rw = if mount.read_only: "false" else: "true"
+                if fields[count] != "1" or fields[count + 1] != "bind" or fields[count + 2] != mount.host_root or
+                        fields[count + 3] != mount.guest_root or fields[count + 4] != expected_rw:
+                    return Err("docker-inspect-mount-mismatch")
+                count = count + 5
         if fields.len() != count: return Err("docker-inspect-field-count")
         var index = 0
         while index < expected.len():
@@ -441,18 +461,45 @@ impl WindowsDockerRuntimeProviderV1:
             reason: "positive-empty-native-id-filter")
         Ok((fact, observed_ms))
 
+    # Fresh exact-object configured-user observation, separate from projection.
+    # This records Docker Config.User, not a guessed SID or process token proof.
+    pub me fn selected_user(request: WindowsDockerRequestV1) -> Result<(RuntimeOperationV1, text, i64), text>:
+        val state = self._guard(request)?
+        val command = windows_docker_command_v1(self.policy, "selected-user",
+            ["container", "inspect", "--format", "{{{{.Config.User}}}}", state.identity.native_id])
+        val run = self._execute(command)?
+        var selected = run.0
+        if selected.ends_with("\r\n"): selected = selected.substring(0, selected.len() - 2)
+        elif selected.ends_with("\n"): selected = selected.substring(0, selected.len() - 1)
+        if selected != "ContainerUser": return Err("docker-selected-user-observation-mismatch")
+        val engine_after = self._engine()?
+        val observed_ms = if self.scripted_mode:
+            match self.scripted_admission_clock_ms:
+                case Some(value): value
+                case nil: return Err("docker-script-observation-clock-required")
+        else:
+            val sampled = time_sample_unix_micros_or_failure()
+            if sampled < 0: return Err("docker-selected-user-clock-unavailable")
+            sampled / 1000
+        if observed_ms <= 0: return Err("docker-selected-user-clock-unavailable")
+        val fact = RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: "selected-user", command: command,
+            state: state, exit_code: run.2, stdout: run.0, stderr: run.1,
+            reason: "fresh-exact-native-object-configured-user")
+        Ok((fact, selected, observed_ms))
+
     pub me fn inspect(request: WindowsDockerRequestV1) -> RuntimeOperationV1:
         val state = match self._guard(request):
             case Ok(value): value
             case Err(error): return self._failure(request, "inspect", error)
         self._success(request, "inspect", runtime_command_empty(), state)
 
-    # Logs are bounded retained text; this is not byte-complete log transport.
+    # Capture the full finite stdout/stderr log stream or fail its output bound.
+    # No line-tail option may silently discard earlier workload evidence.
     pub me fn logs(request: WindowsDockerRequestV1) -> RuntimeOperationV1:
         val state = match self._guard(request):
             case Ok(value): value
             case Err(error): return self._failure(request, "logs", error)
-        val command = windows_docker_command_v1(self.policy, "logs", ["logs", "--tail", "1000", state.identity.native_id])
+        val command = windows_docker_command_v1(self.policy, "logs", ["logs", state.identity.native_id])
         val run = match self._execute(command):
             case Ok(value): value
             case Err(error): return self._failure(request, "logs", error)

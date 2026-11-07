@@ -65,8 +65,8 @@ arguments and an explicitly requested absolute working directory. A missing
 directory remains supported by the historical version-one lifecycle but cannot
 produce a resolved action projection. Version two adds `workingDirectory`, binds
 it in the semantic digest, emits Docker `--workdir`, and checks the actual
-`Config.WorkingDir` before accepting creation. No image default is guessed. The
-mount projection is empty because this provider has no workspace mount effect.
+`Config.WorkingDir` before accepting creation. No image default is guessed. Version three projects the exact protected-root
+bind mount described below; earlier unmounted requests project an empty list.
 
 The common runtime identity uses native engine `docker`; the ownership/provider
 label remains `windows-docker-process-v1`. A terminal inspection does not replace
@@ -74,3 +74,40 @@ the actual Docker wait command needed for an execution receipt.
 
 These amendments and their executable assertions remain NOT_RUN: no qualifying
 Windows Docker host or available admitted Simple compiler run was supplied.
+
+## Persistent service and protected workspace amendment
+
+`WindowsSimpleContainerAdapterV2.start_service` observes the actual machine and
+Docker engine, checks the administrator pin, mints a native CNG service nonce,
+captures the complete managed inventory, and observes the host again. Old rows
+retain their own native machine, service incarnation and verified scope fence.
+Same-machine old rows remain charged quarantine, including exited containers.
+A row from another native machine fails the entire startup for operator
+reconciliation; it is never dropped or adopted. No current nonce replaces old labels.
+The returned adapter blocks launch pending the persistent host's durable
+quarantine capability handoff; the counter never authorizes continuity.
+
+A separately configured administrator policy grants a protected workspace root.
+A request can bind at most one strict descendant attempt directory, with explicit
+guest root and read-only flag. Version-three requests bind that mount, the
+administrator root and the explicit working directory into the request digest.
+The common adapter resolves native path identities, checks containment and
+rejects reparse components before effects and rechecks after create/start. This
+uses the configured trusted, stable ancestor contract; path observations do not
+claim to defeat concurrent replacement by a hostile administrator. The provider
+never fabricates ACL protection or applies a broad host-user grant.
+
+Docker mount inspection proves count, bind type, source, destination and access
+mode. It does not prove guest access. The remote pinned producer must perform an
+exclusive write/read/delete preflight under the same actual selected container
+user before build/test execution, and its signed completion must bind that probe
+and the provider's actual selected-user observation. Automatic ACL provisioning
+is a separate administrative capability. The adapter opens its gate only for the trusted host
+admission matching its cached inventory and scope fence after a real journal
+commit; the persistent host must retain its exclusive writer lock through this
+handoff. Producer preflight remains a separate integration requirement, never
+a fact implied by mount inspection.
+
+A failed post-create observation can retain the exact native candidate from this
+owner's actual create invocation for recovery. Copied caller intents cannot mint
+that authority, and no missing candidate or failed query proves absence.

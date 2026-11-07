@@ -275,7 +275,7 @@ describe "Windows Docker recovery and exact cleanup":
     it "rejects truncated logs even when Docker itself exits zero":
         step("Keep output-limit failure separate from successful complete log capture")
         val script = [engine_response(), image_response(), inspect_response("exited", 17),
-            engine_response(), inspect_response("exited", 17), response("logs", ["logs", "--tail", "1000", runtime_id()], "prefix", 0, true)]
+            engine_response(), inspect_response("exited", 17), response("logs", ["logs", runtime_id()], "prefix", 0, true)]
         var provider = runtime_provider(script)
         expect(provider.recover(runtime_request(), retained_intent()).status).to_equal("ok")
         val result = provider.logs(runtime_request())
@@ -368,9 +368,9 @@ describe "Actual Windows working-directory observation":
             args: command.args, stdout: runtime_id(), stderr: "", exit_code: 0)
         for actual in ["C:\\work", "C:\\wrong"]:
             val original = observation("created").trim()
-            val output = original.replace(old_digest, digest) + "|" + actual + "\n"
+            val output = original.replace(old_digest, digest) + "|" + actual + "|0|\n"
             val inspected = response("inspect", ["container", "inspect", "--format",
-                WINDOWS_DOCKER_INSPECT_FORMAT_V1 + "|{{{{.Config.WorkingDir}}}}", runtime_id()], output)
+                WINDOWS_DOCKER_INSPECT_FORMAT_V1 + "|{{{{.Config.WorkingDir}}}}" + WINDOWS_DOCKER_MOUNTS_FORMAT_V3, runtime_id()], output)
             var provider = WindowsDockerRuntimeProviderV1.scripted(policy,
                 [engine_response(), image_response(), engine_response(), image_response(), created, engine_response(), inspected])
             val deadline = container_effect_deadline_v1(digest, request.operation_id, ["create"], 2000).unwrap()
@@ -386,3 +386,110 @@ describe "Actual Windows working-directory observation":
                 expect(result.reason).to_equal("docker-inspect-working-directory-mismatch")
                 expect(result.state.phase).to_equal("prepared")
             expect(provider.consumed_script_count()).to_equal(7)
+
+
+fn workspace_runtime_policy_v3() -> WindowsDockerPolicyV1:
+    var policy = runtime_policy()
+    policy.workspace_root = "C:\\protected-workspaces"
+    policy
+
+fn workspace_runtime_request_v3(read_only: bool) -> WindowsDockerRequestV1:
+    var request = runtime_request()
+    request.working_directory = "C:\\work"
+    request.mounts = [WindowsDockerMountV1(host_root: "C:\\protected-workspaces\\attempt-a", guest_root: "C:\\work", read_only: read_only)]
+    request
+
+fn workspace_runtime_provider_v3(request: WindowsDockerRequestV1, mount_output: text) -> WindowsDockerRuntimeProviderV1:
+    val policy = workspace_runtime_policy_v3()
+    val digest = windows_docker_request_digest_v1(policy, request).unwrap()
+    val old_digest = windows_docker_request_digest_v1(runtime_policy(), runtime_request()).unwrap()
+    val command = windows_docker_create_command_v1(policy, request).unwrap()
+    val created = WindowsDockerScriptedResultV1(operation: "create", program: command.program,
+        args: command.args, stdout: runtime_id(), stderr: "", exit_code: 0)
+    val output = observation("created").trim().replace(old_digest, digest) + "|" + request.working_directory + mount_output + "\n"
+    val inspected = response("inspect", ["container", "inspect", "--format",
+        WINDOWS_DOCKER_INSPECT_FORMAT_V1 + "|{{{{.Config.WorkingDir}}}}" + WINDOWS_DOCKER_MOUNTS_FORMAT_V3, runtime_id()], output)
+    var provider = WindowsDockerRuntimeProviderV1.scripted(policy,
+        [engine_response(), image_response(), engine_response(), image_response(), created, engine_response(), inspected])
+    val deadline = container_effect_deadline_v1(digest, request.operation_id, ["create"], 2000).unwrap()
+    expect(provider.set_launch_deadline_v1(deadline).unwrap()).to_equal(true)
+    expect(provider.set_scripted_admission_clock_v1(1000).unwrap()).to_equal(true)
+    provider
+
+describe "Windows actual workspace mount observation":
+    it "requires exact inspected bind source, destination and read-write mode":
+        step("Create with a real mount argument and accept only matching actual Mounts fields")
+        for read_only in [false, true]:
+            val request = workspace_runtime_request_v3(read_only)
+            val mode = if read_only: "false" else: "true"
+            var provider = workspace_runtime_provider_v3(request, "|1|bind|C:\\protected-workspaces\\attempt-a|C:\\work|" + mode)
+            expect(provider.prepare_pod(request).status).to_equal("ok")
+            val result = provider.create(request)
+            expect(result.status).to_equal("ok")
+            expect(result.state.identity.native_id).to_equal(runtime_id())
+            expect(provider.consumed_script_count()).to_equal(7)
+
+    it "blocks missing, wrong-type, swapped, unexpectedly writable and hidden image mounts":
+        val request = workspace_runtime_request_v3(true)
+        for actual in ["|0|", "|1|volume|C:\\protected-workspaces\\attempt-a|C:\\work|false",
+                "|1|bind|C:\\other|C:\\work|false", "|1|bind|C:\\protected-workspaces\\attempt-a|C:\\other|false",
+                "|1|bind|C:\\protected-workspaces\\attempt-a|C:\\work|true",
+                "|2|bind|C:\\protected-workspaces\\attempt-a|C:\\work|false|volume|hidden|C:\\hidden|true"]:
+            var provider = workspace_runtime_provider_v3(request, actual)
+            expect(provider.prepare_pod(request).status).to_equal("ok")
+            val result = provider.create(request)
+            expect(result.status).to_equal("blocked")
+            expect(result.reason.starts_with("docker-inspect-mount-")).to_equal(true)
+            expect(result.state.phase).to_equal("prepared")
+            expect(provider.consumed_script_count()).to_equal(7)
+
+    it "verifies zero actual mounts for an explicit empty workspace projection":
+        var request = runtime_request()
+        request.working_directory = "C:\\work"
+        var provider = workspace_runtime_provider_v3(request, "|0|")
+        expect(provider.prepare_pod(request).status).to_equal("ok")
+        expect(provider.create(request).status).to_equal("ok")
+        var hidden = workspace_runtime_provider_v3(request, "|1|volume|hidden|C:\\hidden|true")
+        expect(hidden.prepare_pod(request).status).to_equal("ok")
+        expect(hidden.create(request).status).to_equal("blocked")
+
+
+describe "Windows fresh selected-user fact":
+    it "captures the exact owned object user command and unmodified output":
+        step("Query actual Config.User after the retained exact-ID guard and bracket with engine observations")
+        var selected = response("selected-user", ["container", "inspect", "--format", "{{{{.Config.User}}}}", runtime_id()], "ContainerUser\r\n")
+        selected.stderr = "engine warning\n"
+        var provider = runtime_provider(creation_script() + [engine_response(), inspect_response("created"), selected, engine_response()])
+        expect(provider.prepare_pod(runtime_request()).status).to_equal("ok")
+        expect(provider.create(runtime_request()).status).to_equal("ok")
+        val fact = provider.selected_user(runtime_request()).unwrap()
+        expect(fact.1).to_equal("ContainerUser")
+        expect(fact.2).to_equal(1000)
+        expect(fact.0.status).to_equal("ok")
+        expect(fact.0.operation).to_equal("selected-user")
+        expect(fact.0.command.args).to_equal(selected.args)
+        expect(fact.0.state.identity.native_id).to_equal(runtime_id())
+        expect(fact.0.stdout).to_equal("ContainerUser\r\n")
+        expect(fact.0.stderr).to_equal("engine warning\n")
+        expect(fact.0.exit_code).to_equal(0)
+        expect(provider.consumed_script_count()).to_equal(11)
+
+    it "rejects another user, padding and extra lines instead of using static projection":
+        for output in ["ContainerAdministrator\n", " ContainerUser\n", "ContainerUser\n\n", "ContainerUser\r", ""]:
+            val selected = response("selected-user", ["container", "inspect", "--format", "{{{{.Config.User}}}}", runtime_id()], output)
+            var provider = runtime_provider(creation_script() + [engine_response(), inspect_response("created"), selected])
+            expect(provider.prepare_pod(runtime_request()).status).to_equal("ok")
+            expect(provider.create(runtime_request()).status).to_equal("ok")
+            match provider.selected_user(runtime_request()):
+                case Ok(_): fail("invalid selected-user observation accepted")
+                case Err(reason): expect(reason).to_equal("docker-selected-user-observation-mismatch")
+            expect(provider.consumed_script_count()).to_equal(10)
+
+    it "rejects a replacement engine after the selected-user query":
+        val selected = response("selected-user", ["container", "inspect", "--format", "{{{{.Config.User}}}}", runtime_id()], "ContainerUser\n")
+        var replacement = engine_response()
+        replacement.stdout = "windows|replacement-engine|other-kernel\n"
+        var provider = runtime_provider(creation_script() + [engine_response(), inspect_response("created"), selected, replacement])
+        expect(provider.prepare_pod(runtime_request()).status).to_equal("ok")
+        expect(provider.create(runtime_request()).status).to_equal("ok")
+        expect(provider.selected_user(runtime_request()).is_err()).to_equal(true)

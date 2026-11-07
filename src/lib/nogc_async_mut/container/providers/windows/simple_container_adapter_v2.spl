@@ -4,23 +4,41 @@
 # Recovery/cleanup require this instance's retained successful-create authority;
 # reopening cannot import copied RuntimeIntentV1 as cleanup authorization.
 use std.common.contracts.container.execution_v2.{ContainerHostScopeV2,
-    ContainerExecutionRequestV2, ContainerHostObservationV2, ContainerRequestProjectionV2, ContainerActionProjectionV2, container_scope_fence_id_v2}
+    ContainerExecutionRequestV2, ContainerHostObservationV2, ContainerRequestProjectionV2, ContainerActionProjectionV2, ContainerMountProjectionV2, ContainerServiceScopeBasisV2, ContainerServiceInventoryEntryV2, container_scope_fence_id_v2}
 use std.common.contracts.container.effect_deadline_v1.ContainerEffectDeadlineV1
+use std.common.contracts.container.service_v2.{ContainerServiceAdmissionV2, container_service_admission_valid_v2, container_service_inventory_digest_v2}
 use std.common.crypto.sha256.sha256_text
-use std.common.contracts.container.execution_evidence_v2.{ContainerAbsenceReceiptV2,
+use std.common.contracts.container.execution_evidence_v2.{ContainerAbsenceReceiptV2, ContainerExecutionUserReceiptV2,
     container_runtime_query_digest_v2, container_runtime_observation_digest_v2}
 use std.common.contracts.container.runtime_v1.{RuntimeIntentV1, RuntimeOperationV1, RuntimeIdentityV1,
     RuntimeProviderV1, runtime_state_empty, runtime_command_empty,
     RUNTIME_STATUS_OK, RUNTIME_STATUS_BLOCKED, RUNTIME_STATUS_REJECTED}
-use std.nogc_sync_mut.io.windows_host_identity_v1.windows_host_identity_v1
+use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_identity_contains, path_identity_same}
+use std.nogc_sync_mut.io.retained_file.retained_directory_is_real_no_follow
+use std.nogc_sync_mut.io.windows_host_identity_v1.{windows_host_identity_v1, windows_machine_guid_decode_v1}
+use std.nogc_sync_mut.io.windows_service_incarnation_v1.windows_service_incarnation_nonce_v1
+use std.nogc_async_mut.container.providers.windows.docker_inventory_v2.{WindowsManagedInventoryV2, windows_docker_managed_inventory_v2}
 use std.nogc_async_mut.container.providers.windows.docker_contract_v1.{
     WindowsDockerPolicyV1, WindowsDockerRequestV1, windows_docker_token_v1,
-    windows_docker_request_digest_v1, WINDOWS_DOCKER_MAX_RECORDS_V1}
-use std.nogc_async_mut.container.providers.windows.docker_policy_codec_v1.windows_docker_policy_decode_v1
+    windows_docker_request_digest_v1, windows_docker_id_v1, WINDOWS_DOCKER_MAX_RECORDS_V1}
+use std.nogc_async_mut.container.providers.windows.docker_policy_codec_v1.{windows_docker_policy_decode_v1, windows_docker_policy_encode_v1}
 use std.nogc_async_mut.container.providers.windows.docker_codec_v1.windows_docker_request_decode_v1
 use std.nogc_async_mut.container.providers.windows.docker_runtime_v1.WindowsDockerRuntimeProviderV1
 
 pub const WINDOWS_SIMPLE_CONTAINER_BACKEND_V2 = "windows-docker-process"
+
+# Explicit synthetic inventory batches, never a native inventory fallback.
+pub struct WindowsServiceInventorySampleV2:
+    entries: [ContainerServiceInventoryEntryV2]
+    error: text
+
+# Explicit fixture-only pin; native factories never derive or select this pin.
+pub fn windows_scripted_service_fixture_pin_v2(scope: ContainerHostScopeV2,
+        policy: WindowsDockerPolicyV1, observed: ContainerHostObservationV2) -> Result<text, text>:
+    val policy_bytes = windows_docker_policy_encode_v1(policy)?
+    val fence = container_scope_fence_id_v2(scope)?
+    Ok(sha256_text("windows-scripted-service-fixture-v2\n" + sha256_text(policy_bytes) + "\n" + fence + "\n" +
+        sha256_text(observed.native_machine_id) + "\n" + sha256_text(observed.architecture)))
 
 struct WindowsRetainedAuthorityV2:
     workload_uid: text
@@ -29,6 +47,7 @@ struct WindowsRetainedAuthorityV2:
     request_digest: text
     native_id: text
     active: bool
+    recovery_only: bool = false
 
 fn safe_state_root(root: text) -> bool:
     if root.len() < 4 or root.len() > 512: return false
@@ -44,6 +63,27 @@ fn rejected(action: text, reason: text, status: text = RUNTIME_STATUS_BLOCKED) -
     RuntimeOperationV1(status: status, operation: action, command: runtime_command_empty(),
         state: runtime_state_empty(), exit_code: -1, stdout: "", stderr: "", reason: reason)
 
+fn service_inventory_entries_v2(captured: WindowsManagedInventoryV2, forbidden_incarnation: text) -> Result<[ContainerServiceInventoryEntryV2], text>:
+    var inventory: [ContainerServiceInventoryEntryV2] = []
+    for entry in captured.entries:
+        val previous = ContainerHostScopeV2(physical_host_id: captured.physical_host_id,
+            service_scope_id: captured.service_scope_id, boot_id: entry.boot_id, provider_generation: entry.provider_generation,
+            native_machine_id: entry.native_machine_id, continuity_mode: "service-incarnation-v1",
+            continuity_id: entry.service_incarnation_id)
+        val previous_fence = container_scope_fence_id_v2(previous)?
+        if previous_fence != entry.scope_fence_id:
+            return Err("windows-container-inventory-fence-mismatch")
+        # A collision with the newly minted epoch cannot prove this instance
+        # created an existing object; refuse startup instead of adopting it.
+        if entry.service_incarnation_id == forbidden_incarnation:
+            return Err("windows-container-service-incarnation-collision")
+        val runtime = RuntimeIdentityV1(pod_uid: entry.workload_uid, attempt: entry.attempt,
+            provider_generation: entry.provider_generation, operation_id: entry.operation_id,
+            engine: "docker", native_id: entry.native_id, node_boot_id: previous_fence)
+        inventory.push(ContainerServiceInventoryEntryV2(scope: previous, runtime: runtime,
+            request_digest: entry.request_digest, cpu_millis: entry.cpu_millis, memory_bytes: entry.memory_bytes))
+    Ok(inventory)
+
 pub class WindowsSimpleContainerAdapterV2:
     policy: WindowsDockerPolicyV1
     policy_bytes: text
@@ -52,8 +92,74 @@ pub class WindowsSimpleContainerAdapterV2:
     observed: ContainerHostObservationV2
     var provider: WindowsDockerRuntimeProviderV1
     var authority: [WindowsRetainedAuthorityV2]
+    var startup_quarantined: bool = false
+    var service_inventory: [ContainerServiceInventoryEntryV2] = []
+    var service_inventory_digest: text = ""
+    var startup_inventory_refreshed: bool = false
+    scripted_fixture: bool = false
+    fixture_inventory_samples: [WindowsServiceInventorySampleV2] = []
+    var fixture_inventory_cursor: i64 = 0
 
 impl WindowsSimpleContainerAdapterV2:
+    pub fn is_scripted_fixture_v2() -> bool: self.scripted_fixture and self.provider.is_scripted_fixture_v1()
+
+    # Only an explicitly supplied ACTUAL scripted owner reaches this factory.
+    # It never creates a native owner, fabricates readiness or guesses inventory.
+    pub static fn scripted_service_fixture_v2(scope: ContainerHostScopeV2,
+            provider: WindowsDockerRuntimeProviderV1, observed: ContainerHostObservationV2,
+            inventory_samples: [WindowsServiceInventorySampleV2], timeout_ms: i64) -> Result<WindowsSimpleContainerAdapterV2, text>:
+        if not provider.is_scripted_fixture_v1(): return Err("windows-container-fixture-scripted-provider-required")
+        if provider.retained_record_count() != 0 or provider.consumed_script_count() != 0:
+            return Err("windows-container-fixture-fresh-provider-required")
+        val fence = container_scope_fence_id_v2(scope)?
+        if scope.continuity_mode != "service-incarnation-v1" or scope.boot_id != "":
+            return Err("windows-container-fixture-service-scope-required")
+        val prefix = "windows-service-incarnation-v1:"
+        if not scope.continuity_id.starts_with(prefix) or scope.continuity_id.len() != prefix.len() + 64:
+            return Err("windows-container-fixture-incarnation-invalid")
+        if not windows_docker_id_v1(scope.continuity_id.substring(prefix.len(), scope.continuity_id.len())):
+            return Err("windows-container-fixture-incarnation-invalid")
+        val machine_prefix = "windows-machine-guid-v1:"
+        if scope.native_machine_id.len() != 60 or not scope.native_machine_id.starts_with(machine_prefix):
+            return Err("windows-container-fixture-native-machine-invalid")
+        var guid_units: [i64] = []
+        for index in machine_prefix.len()..scope.native_machine_id.len():
+            guid_units.push(scope.native_machine_id.char_code_at(index))
+        guid_units.push(0)
+        if windows_machine_guid_decode_v1(1, 74, guid_units)? != scope.native_machine_id:
+            return Err("windows-container-fixture-native-machine-invalid")
+        if scope.continuity_id.substring(prefix.len(), scope.continuity_id.len()) == "0000000000000000000000000000000000000000000000000000000000000000":
+            return Err("windows-container-fixture-incarnation-invalid")
+        val policy = provider.policy
+        val policy_bytes = windows_docker_policy_encode_v1(policy)?
+        if policy.node_boot_id != fence or policy.provider_generation != scope.provider_generation or timeout_ms != policy.timeout_ms:
+            return Err("windows-container-fixture-policy-scope-mismatch")
+        val boot_counter = observed.boot_observation.to_i64() ?? -1
+        if observed.backend != WINDOWS_SIMPLE_CONTAINER_BACKEND_V2 or observed.execution_os != "windows" or
+                observed.native_machine_id != scope.native_machine_id or observed.native_boot_id != "" or
+                observed.continuity_assurance != "machine-boot-counter-v1" or
+                (observed.architecture != "x86_64" and observed.architecture != "aarch64") or
+                boot_counter <= 0 or boot_counter >= 4294967295 or boot_counter.to_text() != observed.boot_observation:
+            return Err("windows-container-fixture-observation-invalid")
+        if observed.provider_identity_digest != windows_scripted_service_fixture_pin_v2(scope, policy, observed)?:
+            return Err("windows-container-fixture-provider-pin-mismatch")
+        if inventory_samples.len() == 0 or inventory_samples.len() > 16:
+            return Err("windows-container-fixture-inventory-sample-bound")
+        for sample in inventory_samples:
+            if sample.entries.len() > 64 or sample.error.len() > 512 or (sample.error != "" and sample.entries.len() > 0):
+                return Err("windows-container-fixture-inventory-sample-bound")
+        val initial = inventory_samples[0]
+        if initial.error != "": return Err("windows-container-fixture-initial-inventory-required")
+        for entry in initial.entries:
+            if entry.scope.continuity_id == scope.continuity_id: return Err("windows-container-service-incarnation-collision")
+        val digest = container_service_inventory_digest_v2(WINDOWS_SIMPLE_CONTAINER_BACKEND_V2, scope, initial.entries)?
+        var owner = provider
+        val bound = owner.bind_managed_scope_v2(scope)?
+        Ok(WindowsSimpleContainerAdapterV2(policy: policy, policy_bytes: policy_bytes, state_root: "",
+            scope: scope, observed: observed, provider: owner, authority: [], startup_quarantined: true,
+            service_inventory: initial.entries, service_inventory_digest: digest, scripted_fixture: true,
+            fixture_inventory_samples: inventory_samples, fixture_inventory_cursor: 1))
+
     pub static fn observe(policy_bytes: text) -> Result<ContainerHostObservationV2, text>:
         val policy = windows_docker_policy_decode_v1(policy_bytes)?
         val native = windows_host_identity_v1()?
@@ -103,6 +209,100 @@ impl WindowsSimpleContainerAdapterV2:
         Ok(WindowsSimpleContainerAdapterV2(policy: effective_policy, policy_bytes: policy_bytes,
             state_root: state_root, scope: scope, observed: observed, provider: provider, authority: []))
 
+    # This constructor owns the native epoch and inventory capture. The returned
+    # adapter cannot launch until the persistent host records every inventory row
+    # durably as charged quarantine and completes the common capability handoff.
+    pub static fn start_service(policy_bytes: text, state_root: text, basis: ContainerServiceScopeBasisV2,
+            expected_pin: text, timeout_ms: i64) -> Result<(WindowsSimpleContainerAdapterV2, ContainerHostScopeV2, [ContainerServiceInventoryEntryV2]), text>:
+        val policy = windows_docker_policy_decode_v1(policy_bytes)?
+        if not safe_state_root(state_root): return Err("windows-container-state-root-invalid")
+        if not windows_docker_token_v1(basis.physical_host_id) or not windows_docker_token_v1(basis.service_scope_id):
+            return Err("windows-container-host-scope-invalid")
+        if timeout_ms != policy.timeout_ms or basis.provider_generation != policy.provider_generation:
+            return Err("windows-container-policy-scope-mismatch")
+        val observed = WindowsSimpleContainerAdapterV2.observe(policy_bytes)?
+        if basis.native_machine_id != observed.native_machine_id:
+            return Err("windows-container-native-machine-mismatch")
+        if expected_pin != observed.provider_identity_digest:
+            return Err("windows-container-provider-identity-mismatch")
+        if observed.continuity_assurance != "machine-boot-counter-v1" or observed.native_boot_id != "":
+            return Err("windows-container-service-observation-assurance-mismatch")
+        val incarnation = windows_service_incarnation_nonce_v1()?
+        val scope = ContainerHostScopeV2(physical_host_id: basis.physical_host_id,
+            service_scope_id: basis.service_scope_id, boot_id: "", provider_generation: basis.provider_generation,
+            native_machine_id: observed.native_machine_id, continuity_mode: "service-incarnation-v1", continuity_id: incarnation)
+        val fence = container_scope_fence_id_v2(scope)?
+        val captured = windows_docker_managed_inventory_v2(policy, basis.physical_host_id, basis.service_scope_id)?
+        val inventory = service_inventory_entries_v2(captured, incarnation)?
+        val inventory_digest = container_service_inventory_digest_v2(WINDOWS_SIMPLE_CONTAINER_BACKEND_V2, scope, inventory)?
+        val current = WindowsSimpleContainerAdapterV2.observe(policy_bytes)?
+        if current.native_machine_id != observed.native_machine_id or current.provider_identity_digest != observed.provider_identity_digest or
+                current.execution_os != observed.execution_os or current.architecture != observed.architecture or
+                current.continuity_assurance != observed.continuity_assurance or current.native_boot_id != "" or
+                current.boot_observation != observed.boot_observation:
+            return Err("windows-container-startup-host-or-provider-drift")
+        var effective_policy = policy
+        effective_policy.node_boot_id = fence
+        # Owner construction/scope binding are data-only: no handles, writer
+        # lock or workload effect exists for an outer error to clean up.
+        var provider = WindowsDockerRuntimeProviderV1.new(effective_policy)
+        val bound = provider.bind_managed_scope_v2(scope)?
+        val owner = WindowsSimpleContainerAdapterV2(policy: effective_policy, policy_bytes: policy_bytes,
+            state_root: state_root, scope: scope, observed: observed, provider: provider, authority: [], startup_quarantined: true,
+            service_inventory: inventory, service_inventory_digest: inventory_digest)
+        Ok((owner, scope, inventory))
+
+    pub me fn refresh_service_inventory() -> Result<[ContainerServiceInventoryEntryV2], text>:
+        if not self.startup_quarantined: return Err("windows-container-startup-inventory-refresh-closed")
+        # A failed fresh sample cannot leave an old admission digest reusable.
+        # Keep prior rows internally charged; never return them as fresh results.
+        self.service_inventory_digest = ""
+        self.startup_inventory_refreshed = false
+        if self.scope.continuity_mode != "service-incarnation-v1":
+            return Err("windows-container-service-inventory-mode-required")
+        val fresh = self._fresh()?
+        if self.scripted_fixture:
+            if self.fixture_inventory_cursor >= self.fixture_inventory_samples.len():
+                return Err("windows-container-fixture-inventory-exhausted")
+            val sample = self.fixture_inventory_samples[self.fixture_inventory_cursor]
+            self.fixture_inventory_cursor = self.fixture_inventory_cursor + 1
+            if sample.error != "": return Err(sample.error)
+            if self.startup_quarantined:
+                for entry in sample.entries:
+                    if entry.scope.continuity_id == self.scope.continuity_id: return Err("windows-container-service-incarnation-collision")
+            val digest = container_service_inventory_digest_v2(WINDOWS_SIMPLE_CONTAINER_BACKEND_V2, self.scope, sample.entries)?
+            self.service_inventory = sample.entries
+            self.service_inventory_digest = digest
+            self.startup_inventory_refreshed = true
+            return Ok(sample.entries)
+        val captured = windows_docker_managed_inventory_v2(self.policy, self.scope.physical_host_id, self.scope.service_scope_id)?
+        val forbidden = self.scope.continuity_id
+        val inventory = service_inventory_entries_v2(captured, forbidden)?
+        val digest = container_service_inventory_digest_v2(WINDOWS_SIMPLE_CONTAINER_BACKEND_V2, self.scope, inventory)?
+        val after = self._fresh()?
+        self.service_inventory = inventory
+        self.service_inventory_digest = digest
+        self.startup_inventory_refreshed = true
+        Ok(inventory)
+
+    # No wire decoder or caller readiness boolean. The trusted persistent host
+    # constructs this correlation only after its actual journal commit receipt;
+    # the host retains its exclusive writer lock through this handoff.
+    pub me fn complete_quarantine(admission: ContainerServiceAdmissionV2) -> Result<bool, text>:
+        if not self.startup_quarantined or self.scope.continuity_mode != "service-incarnation-v1":
+            return Err("windows-container-quarantine-transition-unavailable")
+        if not self.startup_inventory_refreshed:
+            return Err("windows-container-startup-inventory-refresh-required")
+        val valid = container_service_admission_valid_v2(admission)?
+        if admission.scope_fence_id != container_scope_fence_id_v2(self.scope)? or
+                admission.inventory_digest != self.service_inventory_digest:
+            return Err("windows-container-quarantine-admission-binding-mismatch")
+        if self.service_inventory.len() > 0 and admission.host_journal_revision == 0:
+            return Err("windows-container-quarantine-journal-commit-required")
+        val fresh = self._fresh()?
+        self.startup_quarantined = false
+        Ok(true)
+
     fn _decode(request: ContainerExecutionRequestV2) -> Result<WindowsDockerRequestV1, text>:
         val plan = request.plan
         if plan.backend != WINDOWS_SIMPLE_CONTAINER_BACKEND_V2 or
@@ -130,16 +330,54 @@ impl WindowsSimpleContainerAdapterV2:
         Ok(ContainerRequestProjectionV2(workload_uid: decoded.pod_uid, attempt: decoded.attempt,
             operation_id: decoded.operation_id, request_digest: digest, cpu_millis: decoded.cpu_count * 1000,
             memory_bytes: decoded.memory_limit_bytes, timeout_ms: self.policy.timeout_ms,
-            has_devices: false, has_workspace: false))
+            has_devices: false, has_workspace: decoded.mounts.len() > 0))
 
     pub fn action_project(request: ContainerExecutionRequestV2) -> Result<ContainerActionProjectionV2, text>:
         val decoded = self._decode(request)?
         if decoded.working_directory == "":
             return Err("windows-container-working-directory-unresolved")
+        var mounts: [ContainerMountProjectionV2] = []
+        for mount in decoded.mounts:
+            mounts.push(ContainerMountProjectionV2(host_root: mount.host_root, guest_root: mount.guest_root,
+                read_only: mount.read_only))
         Ok(ContainerActionProjectionV2(argv: decoded.command + decoded.args,
-            working_directory: decoded.working_directory, mounts: []))
+            working_directory: decoded.working_directory, mounts: mounts))
+
+    # The administrator configures a protected root and stable ancestors. This
+    # observes existing native paths and rejects reparse components; it does not
+    # create ACLs or claim protection against a hostile administrator replacing
+    # directories concurrently. Guest access is separately probed by the pinned
+    # producer under the actual selected ContainerUser before task execution.
+    fn _workspace_admit(decoded: WindowsDockerRequestV1) -> Result<bool, text>:
+        if decoded.mounts.len() == 0: return Ok(true)
+        val mount = decoded.mounts[0]
+        if self.policy.workspace_root == "": return Err("windows-container-workspace-capability-required")
+        val root = path_final_existing(self.policy.workspace_root)?
+        val child = path_final_existing(mount.host_root)?
+        if not path_identity_contains(root, child) or path_identity_same(root, child):
+            return Err("windows-container-workspace-outside-protected-root")
+        # Check all lexical components so an intermediate junction cannot be
+        # mistaken for the administrator's protected directory hierarchy.
+        var prefix = mount.host_root.substring(0, 3)
+        val drive_real = unsafe(capabilities: [ffi, raw_ptr]):
+            retained_directory_is_real_no_follow(prefix)
+        if not drive_real: return Err("windows-container-workspace-drive-not-real")
+        for component in mount.host_root.substring(3, mount.host_root.len()).split("\\"):
+            if not prefix.ends_with("\\"): prefix = prefix + "\\"
+            prefix = prefix + component
+            val real = unsafe(capabilities: [ffi, raw_ptr]):
+                retained_directory_is_real_no_follow(prefix)
+            if not real: return Err("windows-container-workspace-component-not-real")
+        val after_root = path_final_existing(self.policy.workspace_root)?
+        val after_child = path_final_existing(mount.host_root)?
+        if not path_identity_same(root, after_root) or not path_identity_same(child, after_child):
+            return Err("windows-container-workspace-path-drift")
+        Ok(true)
 
     fn _fresh() -> Result<bool, text>:
+        if self.scripted_fixture:
+            if not self.provider.is_scripted_fixture_v1(): return Err("windows-container-fixture-scripted-provider-required")
+            return Ok(true)
         val current = WindowsSimpleContainerAdapterV2.observe(self.policy_bytes)?
         if current.backend != self.observed.backend or current.native_machine_id != self.observed.native_machine_id or
                 current.native_boot_id != self.observed.native_boot_id or current.execution_os != self.observed.execution_os or
@@ -157,10 +395,12 @@ impl WindowsSimpleContainerAdapterV2:
             index = index + 1
         -1
 
-    fn _owned(request: ContainerExecutionRequestV2) -> Result<i64, text>:
+    fn _owned(request: ContainerExecutionRequestV2, allow_recovery: bool = false) -> Result<i64, text>:
         val index = self._authority_index(request)
         if index < 0: return Err("windows-container-no-retained-recovery-authority")
         val entry = self.authority[index]
+        if entry.recovery_only and not allow_recovery:
+            return Err("windows-container-candidate-recovery-only")
         if not entry.active or entry.operation_id != request.plan.operation_id or entry.request_digest != request.plan.request_digest:
             return Err("windows-container-retained-authority-mismatch")
         Ok(index)
@@ -198,9 +438,15 @@ impl WindowsSimpleContainerAdapterV2:
         if not ["prepare", "create", "start", "inspect", "logs", "wait", "stop", "destroy"].contains(action):
             return rejected(action, "windows-container-action-unsupported", RUNTIME_STATUS_REJECTED)
         if action == "inspect" or action == "logs" or action == "wait": return self.read(action, request)
+        if self.startup_quarantined and (action == "prepare" or action == "create" or action == "start"):
+            return rejected(action, "windows-container-startup-quarantine-pending")
         val decoded = match self._decode(request):
             case Ok(value): value
             case Err(reason): return rejected(action, reason, RUNTIME_STATUS_REJECTED)
+        if action == "prepare" or action == "create" or action == "start":
+            match self._workspace_admit(decoded):
+                case Err(reason): return rejected(action, reason)
+                case Ok(_): ()
         if action != "prepare" and action != "create":
             val owned = self._owned(request)
             match owned:
@@ -227,20 +473,48 @@ impl WindowsSimpleContainerAdapterV2:
             case "stop": self.provider.stop(decoded)
             case "destroy": self.provider.destroy(decoded)
             case _: return rejected(action, "windows-container-action-unsupported", RUNTIME_STATUS_REJECTED)
+        if action == "create":
+            # Only this owner's actual create path may supply a recovery ID.
+            # Observation failure can leave an exact native candidate; retain it
+            # for recovery without declaring success or native absence.
+            match self.provider.intent(decoded):
+                case Ok(intent):
+                    if windows_docker_id_v1(intent.native_id):
+                        var retained = WindowsRetainedAuthorityV2(workload_uid: request.plan.workload_uid,
+                            attempt: request.plan.attempt, operation_id: request.plan.operation_id,
+                            request_digest: request.plan.request_digest, native_id: intent.native_id, active: true,
+                            recovery_only: result.status != RUNTIME_STATUS_OK)
+                        val index = self._authority_index(request)
+                        if index < 0: self.authority.push(retained)
+                        elif self.authority[index].active:
+                            val previous = self.authority[index]
+                            if not previous.recovery_only and previous.operation_id == retained.operation_id and
+                                    previous.request_digest == retained.request_digest and previous.native_id == retained.native_id:
+                                retained.recovery_only = false
+                            self.authority[index] = retained
+                        # A refused duplicate create cannot revive retired rights.
+                case Err(_): ()
         if result.status == RUNTIME_STATUS_OK:
-            if action == "create" or action == "start": self._retain(request, result)
+            if action == "start": self._retain(request, result)
             if action == "destroy":
                 val index = self._authority_index(request)
                 var authority = self.authority[index]
                 authority.active = false
                 self.authority[index] = authority
+        if result.status == RUNTIME_STATUS_OK and (action == "create" or action == "start"):
+            match self._workspace_admit(decoded):
+                case Err(reason):
+                    return RuntimeOperationV1(status: RUNTIME_STATUS_BLOCKED, operation: action,
+                        command: result.command, state: result.state, exit_code: result.exit_code,
+                        stdout: result.stdout, stderr: result.stderr, reason: reason)
+                case Ok(_): ()
         result
 
     pub me fn recover(request: ContainerExecutionRequestV2, intent: RuntimeIntentV1) -> RuntimeOperationV1:
         val decoded = match self._decode(request):
             case Ok(value): value
             case Err(reason): return rejected("recover", reason, RUNTIME_STATUS_REJECTED)
-        val index = match self._owned(request):
+        val index = match self._owned(request, true):
             case Ok(value): value
             case Err(reason): return rejected("recover", reason)
         if self.authority[index].native_id != intent.native_id:
@@ -249,7 +523,29 @@ impl WindowsSimpleContainerAdapterV2:
         match fresh:
             case Err(reason): return rejected("recover", reason)
             case Ok(_): ()
-        self.provider.recover(decoded, intent)
+        val result = self.provider.recover(decoded, intent)
+        if result.status == RUNTIME_STATUS_OK: self._retain(request, result)
+        result
+
+    pub me fn execution_user(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1) -> Result<ContainerExecutionUserReceiptV2, text>:
+        val decoded = self._decode(request)?
+        val index = self._owned(request)?
+        if self.authority[index].native_id != expected.native_id:
+            return Err("windows-container-selected-user-native-id-not-owned")
+        val fresh = self._fresh()?
+        val actual = self.provider.selected_user(decoded)?
+        val identity = actual.0.state.identity
+        if identity.pod_uid != expected.pod_uid or identity.attempt != expected.attempt or
+                identity.operation_id != expected.operation_id or identity.provider_generation != expected.provider_generation or
+                identity.engine != expected.engine or identity.native_id != expected.native_id or identity.node_boot_id != expected.node_boot_id:
+            return Err("windows-container-selected-user-identity-mismatch")
+        val query_digest = container_runtime_query_digest_v2(actual.0.command)?
+        val evidence_digest = container_runtime_observation_digest_v2(actual.0)?
+        Ok(ContainerExecutionUserReceiptV2(backend: WINDOWS_SIMPLE_CONTAINER_BACKEND_V2, scope: self.scope,
+            identity: identity, request_digest: request.plan.request_digest,
+            provider_identity_digest: self.observed.provider_identity_digest, selected_user: actual.1,
+            observed_unix_ms: actual.2, query_digest: query_digest, evidence_digest: evidence_digest,
+            proof_kind: "exact-native-execution-user-v1"))
 
     pub me fn absence(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1) -> Result<ContainerAbsenceReceiptV2, text>:
         val decoded = self._decode(request)?
