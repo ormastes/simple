@@ -11,7 +11,7 @@ use std.daemon_sdk.types.{
     DAEMON_PUBLICATION_BLOCKED, DAEMON_ACKNOWLEDGEMENT_BLOCKED
 }
 use std.daemon_sdk.lock.{
-    try_acquire_daemon_lock, release_daemon_lock
+    DaemonLockReceiptV1, try_acquire_daemon_lock_owned, release_daemon_lock_owned
 }
 use std.daemon_sdk.protocol.{
     read_daemon_requests, write_daemon_response, acknowledge_processed_requests,
@@ -30,6 +30,7 @@ class DaemonRunner:
     config: DaemonConfig
     state: DaemonState
     lock_pid: i64
+    lock_receipt: DaemonLockReceiptV1
     running: bool
 
 impl DaemonRunner:
@@ -105,7 +106,7 @@ impl DaemonRunner:
     me shutdown():
         self.running = false
         self.state.status = DAEMON_SHUTTING_DOWN
-        release_daemon_lock(self.lock_pid, self.config.lock_path)
+        release_daemon_lock_owned(self.lock_receipt)
 
 # ============================================================================
 # Factory
@@ -115,11 +116,12 @@ fn daemon_runner_start(config: DaemonConfig) -> DaemonRunner:
     mkdir_p(config.request_dir)
     mkdir_p(config.response_dir)
 
-    val pid = try_acquire_daemon_lock(config.lock_path)
+    val receipt = try_acquire_daemon_lock_owned(config.lock_path)
 
     DaemonRunner(
         config: config,
         state: daemon_state_new(),
-        lock_pid: pid,
-        running: pid > 0
+        lock_pid: receipt.pid,
+        lock_receipt: receipt,
+        running: receipt.acquired
     )

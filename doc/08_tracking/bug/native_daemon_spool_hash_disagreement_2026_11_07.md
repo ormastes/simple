@@ -32,3 +32,36 @@ Build: LLVM, `core-c-bootstrap`, entry closure, one thread,
 `SIMPLE_NO_STUB_FALLBACK=1`; build exited 0, fixture exited 1.
 The diagnostic compiler is not admitted. Admitted SSpec and runtime gates are
 BLOCKED; this report does not certify a production regression or a repair.
+
+## Argument representation audit, 2026-11-07
+
+One new bounded GDB observation used the retained `program-v3` executable,
+SHA256 `62b0b1cb21cf4136647b062c3f39629413af4ee7178b0688ac3411860a6d5b5a`.
+Command: `timeout 30 gdb -q -batch -x hash-arguments.gdb program-v3`, with
+`run success` and a breakpoint at `rt_hash_text`. The inferior exited 1 at
+the unchanged successful-acknowledgement assertion; no source was rebuilt.
+
+All three calls received the same bytes `42656_1794027161092870`:
+
+| Call | Argument | Low tag bits | Representation |
+|---|---|---|---|
+| 1 | `0xaaaaaabe9b90` | 0 | Raw C string |
+| 2 | `0xaaaaaabec320` | 0 | Raw C string |
+| 3 | `0xaaaaaabf01f1` | 1 | Tagged string, bytes at untagged pointer +16 |
+
+Each stack was `rt_hash_text` ← `io_runtime.hash_text` ←
+`daemon_request_path_for`. Disassembly shows the Simple hash wrapper forwards
+its argument directly. The linked hash function requires a tagged string and
+returns zero for rejected raw pointers. This identifies the first failing
+boundary as inconsistent text representation entering the strict runtime hash
+decoder; the SDK uses one path algorithm throughout.
+
+The upstream producer of the mixed representation still needs isolation.
+Do not replace the SDK hash algorithm or label an extern char-pointer bridge
+as the proven cause: this executable's wrapper has no such bridge. A compiler
+repair must cover computed/interpolated text, stored request fields and decoded
+request identities without relaxing expected successful acknowledgement.
+
+Evidence: `/home/yoon/dev/simple-daemon-exact-lock-owner-20261107/build/daemon-hash-audit-20261107/`
+contains `hash-arguments.gdb` and `hash-arguments.log`. This diagnostic is not
+admitted-toolchain qualification and does not resolve the open bug.
