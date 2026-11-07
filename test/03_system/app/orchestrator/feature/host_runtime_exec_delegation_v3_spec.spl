@@ -1,0 +1,207 @@
+# @req ORCH-02 HOST-02
+# Pure DATA delegation/metadata integrity; real signed frames are not AUTH passes.
+# Execution NOT_RUN. No journal BEGIN, protected origin, native owner or installed loader is mocked.
+use std.common.contracts.orchestration.host_runtime_exec_delegation_v3.*
+use std.common.contracts.orchestration.host_runtime_exec_v3.*
+use std.common.contracts.orchestration.host_exec_control_installation_v3.*
+use std.common.contracts.orchestration.assignment_v1.controller_assignment_bytes_v1
+use std.common.contracts.container.exec_v3.*
+use std.common.contracts.container.exec_admission_v3.*
+use std.common.contracts.container.exec_control_v3.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.string_core.str_len
+use test.fixtures.orchestrator_acceptance.controller_container_dispatch_v2.controller_container_wire_fixture_v2
+
+fn delegation_admission_fixture_v3() -> ContainerExecAdmissionV3:
+    val scope = ContainerHostScopeV2(physical_host_id: "authorized-alias", service_scope_id: "service", boot_id: "boot",
+        provider_generation: 3, native_machine_id: "machine", continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot")
+    val parent = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: "workload", attempt: 1, operation_id: "parent-operation",
+        request_digest: "a".repeat(64), physical_host_id: scope.physical_host_id, service_scope_id: scope.service_scope_id,
+        boot_id: scope.boot_id, provider_generation: scope.provider_generation, native_machine_id: scope.native_machine_id,
+        continuity_mode: scope.continuity_mode, continuity_id: scope.continuity_id)
+    val runtime = RuntimeIdentityV1(pod_uid: parent.workload_uid, attempt: parent.attempt, operation_id: parent.operation_id,
+        provider_generation: parent.provider_generation, engine: "podman", native_id: "b".repeat(64), node_boot_id: container_scope_fence_id_v2(scope).unwrap())
+    val request = ContainerExecRequestV3(parent: parent, parent_runtime: runtime, operation_id: "exec-operation", nonce: "c".repeat(64),
+        argv: ["/usr/bin/agent", "--version"], environment: [], working_directory: "/workspace", selected_user: "1000:1000",
+        terminal_mode: "none", stdin_requested: false, timeout_ms: 1000)
+    val digest = container_exec_request_digest_v3(request).unwrap()
+    val intent = HostRuntimeExecIntentV3(request: request, parent_operation_digest: "e".repeat(64),
+        parent_assignment_digest: "f".repeat(64), parent_controller_operation_digest: "5".repeat(64), parent_provider_identity_digest: "3".repeat(64), exec_control_identity_digest: "1".repeat(64))
+    val operation = OperationEnvelopeV2(version: 2, id: request.operation_id, payload_digest: host_runtime_exec_intent_digest_v3(intent).unwrap(), principal: "user", project: "project",
+        host_id: parent.physical_host_id, operation: "host_runtime_exec_v3", environment_digest: "d".repeat(64), policy_revision: 1,
+        revocation_epoch: 0, session_generation: 1, memory_bytes: 4096, duration_ms: 1000)
+    ContainerExecAdmissionV3(intent: intent, request: request, operation: operation, parent_operation_digest: "e".repeat(64),
+        parent_assignment_digest: "f".repeat(64), provider_identity_digest: "1".repeat(64),
+        deadline: container_effect_deadline_v1(digest, request.operation_id, ["exec"], 1000).unwrap(),
+        grant_id: "grant", issuer_id: "issuer", approver_id: "approver", execution_proof_digest: "2".repeat(64))
+
+fn delegation_packet_fixture_v3() -> HostRuntimeExecRequestV3:
+    val admission = delegation_admission_fixture_v3()
+    val frames = controller_container_wire_fixture_v2("linux-podman").dispatch
+    var intent = admission.intent
+    intent.request.parent = frames.execution.plan
+    intent.request.parent_runtime.pod_uid = frames.execution.plan.workload_uid
+    intent.request.parent_runtime.attempt = frames.execution.plan.attempt
+    intent.request.parent_runtime.operation_id = frames.execution.plan.operation_id
+    intent.request.parent_runtime.provider_generation = frames.execution.plan.provider_generation
+    intent.request.parent_runtime.node_boot_id = frames.binding.host_intent.fence.boot_id
+    intent.parent_operation_digest = sha256_text(distributed_encode_operation_v2(frames.binding.host_operation).unwrap())
+    intent.parent_assignment_digest = sha256_text(controller_assignment_bytes_v1(frames.binding).unwrap())
+    intent.parent_controller_operation_digest = sha256_text(distributed_encode_operation_v2(frames.operation).unwrap())
+    var operation = admission.operation
+    operation.host_id = frames.execution.plan.physical_host_id
+    operation.payload_digest = host_runtime_exec_intent_digest_v3(intent).unwrap()
+    HostRuntimeExecRequestV3(intent: intent, parent_binding: frames.binding, parent_controller_operation: frames.operation,
+        operation: operation, signed: frames.host_execution_signed, approval: frames.host_execution_approval)
+
+fn delegation_wire_v3(source: text, key: text, value: SdnValue) -> text:
+    val parsed = parse_resource_document(source).unwrap()
+    var fields = as_dict(parsed.0, "", parsed.1).unwrap()
+    fields[key] = value
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+fn delegation_scope_v3(parent: ContainerExecutionPlanV2) -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: parent.physical_host_id, service_scope_id: parent.service_scope_id,
+        boot_id: parent.boot_id, provider_generation: parent.provider_generation, native_machine_id: parent.native_machine_id,
+        continuity_mode: parent.continuity_mode, continuity_id: parent.continuity_id)
+
+fn delegation_policy_bytes_v3() -> text:
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("pure-installed-policy-shape")}
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+fn delegation_observation_v3() -> ContainerExecControlObservationV3:
+    val packet = delegation_packet_fixture_v3()
+    ContainerExecControlObservationV3(backend: "linux-podman", scope: delegation_scope_v3(packet.intent.request.parent),
+        parent_runtime: packet.intent.request.parent_runtime, parent_request_digest: packet.intent.request.parent.request_digest,
+        parent_provider_identity_digest: packet.intent.parent_provider_identity_digest,
+        exec_control_identity_digest: packet.intent.exec_control_identity_digest, installed_policy_digest: sha256_text(delegation_policy_bytes_v3()),
+        api_version: "5.2.5", observed_unix_ms: 100, query_digest: "b".repeat(64), evidence_digest: "c".repeat(64))
+
+fn delegation_fixture_v3() -> HostRuntimeExecDelegationV3:
+    val packet = delegation_packet_fixture_v3()
+    val policy = delegation_policy_bytes_v3()
+    val installed = HostExecControlInstallationIntentV3(operation_id: "control-install", enrollment_binding_digest: "d".repeat(64),
+        scope: delegation_scope_v3(packet.intent.request.parent), provider_identity_digest: packet.intent.parent_provider_identity_digest,
+        control_policy_bytes: policy, control_policy_digest: sha256_text(policy))
+    var operation = packet.operation
+    operation.id = installed.operation_id
+    operation.operation = "host_exec_control_install_v3"
+    operation.environment_digest = installed.provider_identity_digest
+    operation.payload_digest = host_exec_control_installation_intent_digest_v3(installed).unwrap()
+    val installation = HostExecControlInstallationRequestV3(intent: installed, operation: operation, signed: packet.signed, approval: packet.approval)
+    HostRuntimeExecDelegationV3(request: packet, installation: installation,
+        installation_artifact_digest: host_exec_control_installation_intent_digest_v3(installed).unwrap(),
+        begin_journal_sequence: 1, begin_journal_commit_digest: "e".repeat(64),
+        control_observation_digest: container_exec_control_observation_digest_v3(delegation_observation_v3()).unwrap(), observed_unix_ms: 100,
+        deadline: container_effect_deadline_v1(container_exec_request_digest_v3(packet.intent.request).unwrap(), packet.operation.id, ["exec"], 1000).unwrap())
+
+describe "data exec delegation and all-field control observation hash":
+    it "round trips exact child installation recorded begin facts and deadline without constructing admission":
+        step("round trips exact child installation recorded begin facts and deadline without constructing admission")
+        val value = delegation_fixture_v3()
+        val source = host_runtime_exec_delegation_encode_v3(value).unwrap()
+        val decoded = host_runtime_exec_delegation_decode_v3(source).unwrap()
+        expect(host_runtime_exec_delegation_encode_v3(decoded).unwrap()).to_equal(source)
+        expect(host_runtime_exec_delegation_digest_v3(decoded).unwrap()).to_equal(sha256_text(source))
+        expect(host_runtime_exec_request_encode_v3(decoded.request).unwrap()).to_equal(host_runtime_exec_request_encode_v3(value.request).unwrap())
+        expect(host_exec_control_installation_request_encode_v3(decoded.installation).unwrap()).to_equal(host_exec_control_installation_request_encode_v3(value.installation).unwrap())
+        expect(decoded.begin_journal_sequence).to_equal(1)
+        # Generic canonical policy/frame syntax is not installed capability or fresh authorization.
+
+    it "refuses rebound installation artifact baseline and exact scope mismatches":
+        step("refuses rebound installation artifact baseline and exact scope mismatches")
+        val original = delegation_fixture_v3()
+        var changed = original
+        changed.installation_artifact_digest = sha256_text(host_exec_control_installation_request_encode_v3(changed.installation).unwrap())
+        expect(host_runtime_exec_delegation_encode_v3(changed).is_err()).to_equal(true)
+        changed = original
+        changed.installation.intent.scope.physical_host_id = "other-alias"
+        changed.installation.operation.host_id = "other-alias"
+        changed.installation.operation.payload_digest = host_exec_control_installation_intent_digest_v3(changed.installation.intent).unwrap()
+        changed.installation_artifact_digest = changed.installation.operation.payload_digest
+        expect(host_runtime_exec_delegation_encode_v3(changed).is_err()).to_equal(true)
+        changed = original
+        changed.installation.intent.provider_identity_digest = "f".repeat(64)
+        changed.installation.operation.environment_digest = changed.installation.intent.provider_identity_digest
+        changed.installation.operation.payload_digest = host_exec_control_installation_intent_digest_v3(changed.installation.intent).unwrap()
+        changed.installation_artifact_digest = changed.installation.operation.payload_digest
+        expect(host_runtime_exec_delegation_encode_v3(changed).is_err()).to_equal(true)
+
+    it "refuses changed child original parent or controller provenance despite rebound child hash":
+        step("refuses changed child original parent or controller provenance despite rebound child hash")
+        val original = delegation_fixture_v3()
+        for field in ["parent", "controller"]:
+            var changed = original
+            if field == "parent": changed.request.intent.parent_operation_digest = "f".repeat(64)
+            if field == "controller": changed.request.intent.parent_controller_operation_digest = "f".repeat(64)
+            changed.request.operation.payload_digest = host_runtime_exec_intent_digest_v3(changed.request.intent).unwrap()
+            expect(host_runtime_exec_delegation_encode_v3(changed).is_err()).to_equal(true)
+
+    it "requires positive recorded begin and observation before exact raw exec deadline":
+        step("requires positive recorded begin and observation before exact raw exec deadline")
+        val original = delegation_fixture_v3()
+        var changed = original
+        changed.begin_journal_sequence = 0
+        expect(host_runtime_exec_delegation_encode_v3(changed).is_err()).to_equal(true)
+        changed = original
+        changed.begin_journal_commit_digest = "bad"
+        expect(host_runtime_exec_delegation_encode_v3(changed).is_err()).to_equal(true)
+        changed = original
+        changed.observed_unix_ms = 0
+        expect(host_runtime_exec_delegation_encode_v3(changed).is_err()).to_equal(true)
+        changed.observed_unix_ms = changed.deadline.expires_at_unix_ms
+        expect(host_runtime_exec_delegation_encode_v3(changed).is_err()).to_equal(true)
+        changed = original
+        changed.deadline.request_digest = host_runtime_exec_intent_digest_v3(changed.request.intent).unwrap()
+        expect(host_runtime_exec_delegation_encode_v3(changed).is_err()).to_equal(true)
+        changed = original
+        changed.deadline.actions = ["exec", "attach"]
+        expect(host_runtime_exec_delegation_encode_v3(changed).is_err()).to_equal(true)
+
+    it "hashes all metadata runtime and scope fields while refusing malformed profile and native identity":
+        step("hashes all metadata runtime and scope fields while refusing malformed profile and native identity")
+        val original = delegation_observation_v3()
+        val digest = container_exec_control_observation_digest_v3(original).unwrap()
+        for field in ["query", "evidence", "time", "native", "operation", "attempt", "provider", "control", "policy", "request", "scope"]:
+            var changed = original
+            if field == "query": changed.query_digest = "f".repeat(64)
+            if field == "evidence": changed.evidence_digest = "f".repeat(64)
+            if field == "time": changed.observed_unix_ms = 101
+            if field == "native": changed.parent_runtime.native_id = "f".repeat(64)
+            if field == "operation": changed.parent_runtime.operation_id = "other-parent"
+            if field == "attempt": changed.parent_runtime.attempt = changed.parent_runtime.attempt + 1
+            if field == "provider": changed.parent_provider_identity_digest = "f".repeat(64)
+            if field == "control": changed.exec_control_identity_digest = "f".repeat(64)
+            if field == "policy": changed.installed_policy_digest = "f".repeat(64)
+            if field == "request": changed.parent_request_digest = "f".repeat(64)
+            if field == "scope":
+                changed.scope.native_machine_id = "other-machine"
+                changed.parent_runtime.node_boot_id = container_scope_fence_id_v2(changed.scope).unwrap()
+            expect(container_exec_control_observation_digest_v3(changed).unwrap() == digest).to_equal(false)
+        var invalid = original
+        invalid.parent_runtime.native_id = "short"
+        expect(container_exec_control_observation_digest_v3(invalid).is_err()).to_equal(true)
+        invalid = original
+        invalid.api_version = "unsupported"
+        expect(container_exec_control_observation_digest_v3(invalid).is_err()).to_equal(true)
+
+    it "refuses unknown typed duplicate noncanonical missing and overbound delegation wire":
+        step("refuses unknown typed duplicate noncanonical missing and overbound delegation wire")
+        val source = host_runtime_exec_delegation_encode_v3(delegation_fixture_v3()).unwrap()
+        expect(host_runtime_exec_delegation_decode_v3(delegation_wire_v3(source, "authority", SdnValue.Bool(true))).is_err()).to_equal(true)
+        expect(host_runtime_exec_delegation_decode_v3(delegation_wire_v3(source, "beginJournalSequence", SdnValue.String("1"))).is_err()).to_equal(true)
+        expect(host_runtime_exec_delegation_decode_v3(source + "\n").is_err()).to_equal(true)
+        val head = source.slice(0, source.len() - 2)
+        expect(host_runtime_exec_delegation_decode_v3(head + ", version: 3" + "}\n").is_err()).to_equal(true)
+        expect(host_runtime_exec_delegation_decode_v3("version: 3\nkind: host-runtime-exec-delegation\n").is_err()).to_equal(true)
+        val oversized = "é".repeat(2097153)
+        expect(str_len(oversized)).to_equal(4194306)
+        expect(host_runtime_exec_delegation_decode_v3(oversized).is_err()).to_equal(true)
