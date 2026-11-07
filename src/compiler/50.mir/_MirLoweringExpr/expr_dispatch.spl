@@ -4118,9 +4118,13 @@ impl MirLowering:
                 result_type = noted_elem_type
         val runtime_array = self.local_is_runtime_array(base_local)
         var typed_u8_runtime_read = false
+        var typed_u32_runtime_read = false
+        var typed_u64_runtime_read = false
         if runtime_array:
             val result_kind: MirTypeKind = result_type.kind
             typed_u8_runtime_read = rt_enum_discriminant(result_kind) == rt_enum_discriminant(MirTypeKind.U8)
+            typed_u32_runtime_read = rt_enum_discriminant(result_kind) == rt_enum_discriminant(MirTypeKind.U32)
+            typed_u64_runtime_read = rt_enum_discriminant(result_kind) == rt_enum_discriminant(MirTypeKind.U64)
         # Unsafe `Any` read: the receiver is an erased runtime value that may
         # hold a byte-packed `[u8]`, whose slots are raw octets. A raw GEP+load
         # (or rt_array_get under SIMPLE_BOOTSTRAP) misreads them, so go through
@@ -4158,7 +4162,16 @@ impl MirLowering:
             # layouts to one raw octet, preserves negative indexing and the
             # legacy out-of-bounds-zero behavior, and remains O(1),
             # allocation-free, and one direct runtime dispatch.
-            val getter_name = if typed_u8_runtime_read: "rt_bytes_u8_at" else: "rt_array_get"
+            # Checked word getters also normalize boxed and packed layouts.
+            # Their result is raw bits, so it must bypass tagged-value decode.
+            val getter_name = if typed_u8_runtime_read:
+                "rt_bytes_u8_at"
+            elif typed_u32_runtime_read:
+                "rt_typed_words_u32_at"
+            elif typed_u64_runtime_read:
+                "rt_typed_words_u64_at"
+            else:
+                "rt_array_get"
             val getter = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str(getter_name),
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.ptr(result_type, false), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
@@ -4167,11 +4180,13 @@ impl MirLowering:
             val getter_result = bg.emit_call(getter, [mir_operand_copy(base_local), mir_operand_copy(index_local)], MirType.i64())
             self.builder = bg
             if val getter_local = getter_result:
-                if typed_u8_runtime_read:
-                    var b_byte = self.builder
-                    val byte_value = b_byte.emit_cast(mir_operand_copy(getter_local), result_type)
-                    self.builder = b_byte
-                    return byte_value
+                if typed_u8_runtime_read or typed_u32_runtime_read or typed_u64_runtime_read:
+                    var b_typed = self.builder
+                    val typed_value = b_typed.emit_cast(mir_operand_copy(getter_local), result_type)
+                    self.builder = b_typed
+                    if not typed_u8_runtime_read:
+                        self.remember_array_index_projection_provenance(base_local, typed_value)
+                    return typed_value
                 # Bug s54/s54c/s54d: array_element_struct_syms is
                 # registered (lower_array_lit for local literals,
                 # function_lowering.spl's param-array Named-element
