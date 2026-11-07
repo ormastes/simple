@@ -40,13 +40,30 @@ export use std.gc_async_mut.gpu.engine2d.backend_emu_adv.{
 # Rectangle Outline — 4 filled edges
 # ============================================================================
 
-fn emu_draw_rect(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, color: u32):
-    if w <= 0 or h <= 0:
-        return
-    core.draw_rect_filled(x, y, w, 1, color)
-    core.draw_rect_filled(x, y + h - 1, w, 1, color)
-    core.draw_rect_filled(x, y + 1, 1, h - 2, color)
-    core.draw_rect_filled(x + w - 1, y + 1, 1, h - 2, color)
+# Clip half-open widened bounds before narrowing or backend pixel expansion.
+fn _emu_stamp_rect_wide(mut core: RenderBackend, x0: i64, y0: i64, x1: i64, y1: i64, color: u32):
+    var left = x0
+    var top = y0
+    var right = x1
+    var bottom = y1
+    if left < 0: left = 0
+    if top < 0: top = 0
+    if right > core.width().to_i64(): right = core.width().to_i64()
+    if bottom > core.height().to_i64(): bottom = core.height().to_i64()
+    if right <= left or bottom <= top: return
+    core.draw_rect_filled(left.to_i32(), top.to_i32(),
+                         (right - left).to_i32(), (bottom - top).to_i32(), color)
+
+pub fn emu_draw_rect(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, color: u32):
+    if w <= 0 or h <= 0: return
+    val left = x.to_i64()
+    val top = y.to_i64()
+    val right = left + w.to_i64()
+    val bottom = top + h.to_i64()
+    _emu_stamp_rect_wide(core, left, top, right, top + 1, color)
+    _emu_stamp_rect_wide(core, left, bottom - 1, right, bottom, color)
+    _emu_stamp_rect_wide(core, left, top + 1, left + 1, bottom - 1, color)
+    _emu_stamp_rect_wide(core, right - 1, top + 1, right, bottom - 1, color)
 
 # ============================================================================
 # Run batching helpers — one draw_rect_filled per RUN, not per pixel
@@ -66,15 +83,23 @@ fn emu_draw_rect(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, color:
 # Stamp the run whose endpoints are (x0, y0) and (x1, y1). Callers guarantee
 # the run is a single row or a single column of consecutive pixels.
 fn _emu_stamp_run(mut core: RenderBackend, x0: i32, y0: i32, x1: i32, y1: i32, color: u32, thickness: i32):
-    val xlo = _emu_min(x0, x1)
-    val xhi = _emu_max(x0, x1)
-    val ylo = _emu_min(y0, y1)
-    val yhi = _emu_max(y0, y1)
-    if thickness <= 1:
-        core.draw_rect_filled(xlo, ylo, xhi - xlo + 1, yhi - ylo + 1, color)
-    else:
-        val half = thickness / 2
-        core.draw_rect_filled(xlo - half, ylo - half, xhi - xlo + thickness, yhi - ylo + thickness, color)
+    # Widen before growing the run. Clip before narrowing or asking a backend
+    # to materialize pixels; a huge offscreen run must not allocate its area.
+    if core.width() <= 0 or core.height() <= 0:
+        return
+    val size = if thickness <= 1: 1 else: thickness
+    val half = if thickness <= 1: 0 else: thickness / 2
+    var left = _emu_min(x0, x1).to_i64() - half.to_i64()
+    var top = _emu_min(y0, y1).to_i64() - half.to_i64()
+    var right = _emu_max(x0, x1).to_i64() - half.to_i64() + size.to_i64()
+    var bottom = _emu_max(y0, y1).to_i64() - half.to_i64() + size.to_i64()
+    if left < 0: left = 0
+    if top < 0: top = 0
+    if right > core.width().to_i64(): right = core.width().to_i64()
+    if bottom > core.height().to_i64(): bottom = core.height().to_i64()
+    if right <= left or bottom <= top: return
+    core.draw_rect_filled(left.to_i32(), top.to_i32(),
+                         (right - left).to_i32(), (bottom - top).to_i32(), color)
 
 # Flush one constant-x segment of the 8-way symmetric midpoint circle: the
 # four (cx +- x, cy +- y) points form VERTICAL runs at a constant column and
@@ -112,24 +137,73 @@ fn _emu_ellipse_flush_v(mut core: RenderBackend, cx: i32, cy: i32, x: i32, ylo: 
 # Line — Bresenham
 # ============================================================================
 
-fn emu_draw_line(mut core: RenderBackend, x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
-    var dx = x2 - x1
-    var dy = y2 - y1
-    if dx < 0:
-        dx = -dx
-    if dy < 0:
-        dy = -dy
+# Work admission is pure and runs before any pixel publication. Permit one
+# viewport's worth of centre steps, with a 4096-step floor for tiny viewports.
+# Axis lines have a constant-work clipped-run path and need no walk budget.
+pub fn emu_line_host_work_admitted_v1(width: i32, height: i32, x1: i32, y1: i32, x2: i32, y2: i32, thickness: i32) -> bool:
+    if x1 == x2 or y1 == y2 or width <= 0 or height <= 0: return true
+    var dx = x2.to_i64() - x1.to_i64()
+    var dy = y2.to_i64() - y1.to_i64()
+    if dx < 0: dx = -dx
+    if dy < 0: dy = -dy
+    if dx > 2147483647 or dy > 2147483647: return false
+    val x_major = dx >= dy
+    val major = if x_major: dx else: dy
+    val origin = if x_major: x1.to_i64() else: y1.to_i64()
+    val endpoint = if x_major: x2.to_i64() else: y2.to_i64()
+    val extent = if x_major: width.to_i64() else: height.to_i64()
+    val size = if thickness <= 1: 1 else: thickness
+    val half = if thickness <= 1: 0 else: thickness / 2
+    val lower = half.to_i64() - size.to_i64() + 1
+    val upper = extent + half.to_i64() - 1
+    var first = if endpoint >= origin: lower - origin else: origin - upper
+    var last = if endpoint >= origin: upper - origin else: origin - lower
+    if first < 0: first = 0
+    if last > major: last = major
+    if last < first: return true
+    var budget = width.to_i64() * height.to_i64()
+    if budget < 4096: budget = 4096
+    return last - first + 1 <= budget
 
-    var sx: i32 = 1
-    if x1 > x2:
-        sx = -1
-    var sy: i32 = 1
-    if y1 > y2:
-        sy = -1
-
-    var err = dx - dy
-    var cx = x1
-    var cy = y1
+pub fn emu_draw_line(mut core: RenderBackend, x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32):
+    if not emu_line_host_work_admitted_v1(core.width(), core.height(), x1, y1, x2, y2, thickness):
+        return
+    # Axis walks have one exact run, including very large spans. Clipping in
+    # the run owner bounds both work and the backend's pixel allocation.
+    if x1 == x2 or y1 == y2:
+        _emu_stamp_run(core, x1, y1, x2, y2, color, thickness)
+        return
+    var dx = x2.to_i64() - x1.to_i64()
+    var dy = y2.to_i64() - y1.to_i64()
+    if dx < 0: dx = -dx
+    if dy < 0: dy = -dy
+    # The public Vulkan entrypoint enforces this same product domain.
+    if dx > 2147483647 or dy > 2147483647: return
+    val sx: i64 = if x1 > x2: -1 else: 1
+    val sy: i64 = if y1 > y2: -1 else: 1
+    val x_major = dx >= dy
+    val major = if x_major: dx else: dy
+    val minor = if x_major: dy else: dx
+    val origin = if x_major: x1.to_i64() else: y1.to_i64()
+    val direction = if x_major: sx else: sy
+    val extent = if x_major: core.width().to_i64() else: core.height().to_i64()
+    val size = if thickness <= 1: 1 else: thickness
+    val half = if thickness <= 1: 0 else: thickness / 2
+    # A centred stamp overlaps [0,extent) exactly in this major-axis range.
+    val lower = half.to_i64() - size.to_i64() + 1
+    val upper = extent + half.to_i64() - 1
+    var first = if direction > 0: lower - origin else: origin - upper
+    var last = if direction > 0: upper - origin else: origin - lower
+    if first < 0: first = 0
+    if last > major: last = major
+    if last < first or extent <= 0: return
+    var k = first
+    # Strict Bresenham comparisons round exact half ties toward the starting
+    # minor coordinate. Absolute k preserves that phase when offscreen steps
+    # are skipped; restarting Bresenham at a clipped endpoint does not.
+    val first_minor = (k * minor + (major - 1) / 2) / major
+    var cx = (x1.to_i64() + sx * (if x_major: k else: first_minor)).to_i32()
+    var cy = (y1.to_i64() + sy * (if x_major: first_minor else: k)).to_i32()
     val t = thickness
 
     # Same Bresenham walk, batched output. A shallow line advances +-1 in x
@@ -173,17 +247,13 @@ fn emu_draw_line(mut core: RenderBackend, x1: i32, y1: i32, x2: i32, y2: i32, co
             ly = cy
             axis = 0
 
-        if cx == x2 and cy == y2:
+        if k == last:
             _emu_stamp_run(core, rx0, ry0, lx, ly, color, t)
             return
-
-        val e2 = 2 * err
-        if e2 > -dy:
-            err = err - dy
-            cx = cx + sx
-        if e2 < dx:
-            err = err + dx
-            cy = cy + sy
+        k = k + 1
+        val minor_step = (k * minor + (major - 1) / 2) / major
+        cx = (x1.to_i64() + sx * (if x_major: k else: minor_step)).to_i32()
+        cy = (y1.to_i64() + sy * (if x_major: minor_step else: k)).to_i32()
 
 # ============================================================================
 # Circle Outline — Midpoint algorithm
@@ -225,25 +295,35 @@ fn emu_draw_circle(mut core: RenderBackend, cx: i32, cy: i32, r: i32, color: u32
 # Circle Filled — Per-row exact distance test (Metal-exact)
 # ============================================================================
 
-fn emu_draw_circle_filled(mut core: RenderBackend, cx: i32, cy: i32, r: i32, color: u32):
-    # r <= 0 stays a stray-center-pixel stamp here (unchanged, still diverges
-    # from sw's no-op guard by design — not part of the D2 reconciliation).
+pub fn emu_draw_circle_filled(mut core: RenderBackend, cx: i32, cy: i32, r: i32, color: u32):
+    # Preserve the shared helper's centre stamp for r<=0. Vulkan refuses
+    # negative radii at its entrypoint before calling this helper.
     if r <= 0:
         core.draw_rect_filled(cx, cy, 1, 1, color)
         return
-
-    # Body reconciled to canonical SW (backend_software.spl draw_circle_filled):
-    # per-row exact distance test (dx*dx + dy*dy <= r*r, half-width =
-    # floor(sqrt(r*r - dy*dy))) instead of the old midpoint scanline — matches
-    # the Metal kernel_draw_circle_filled distance test bit-for-bit. Alpha
-    # blending is handled inside core.draw_rect_filled, same as sw's
-    # has_alpha branch. reconciled to canonical sw 2026-07-06 (D2)
-    val r_sq = r * r
-    var dy: i32 = 0 - r
-    while dy <= r:
-        val half = _emu_isqrt(r_sq - dy * dy)
-        core.draw_rect_filled(cx - half, cy + dy, 2 * half + 1, 1, color)
-        dy = dy + 1
+    val radius = r.to_i64()
+    val r_sq = radius * radius
+    var top = cy.to_i64() - radius
+    var bottom = cy.to_i64() + radius
+    if top < 0: top = 0
+    if bottom >= core.height().to_i64(): bottom = core.height().to_i64() - 1
+    var py = top
+    while py <= bottom:
+        val dy = py - cy.to_i64()
+        val remaining = r_sq - dy * dy
+        # Binary floor square root, <=31 iterations for every positive i32
+        # radius. mid<=radius, so mid*mid cannot overflow signed i64.
+        var low: i64 = 0
+        var high = radius
+        while low < high:
+            val mid = low + (high - low + 1) / 2
+            if mid * mid <= remaining:
+                low = mid
+            else:
+                high = mid - 1
+        _emu_stamp_rect_wide(core, cx.to_i64() - low, py,
+                            cx.to_i64() + low + 1, py + 1, color)
+        py = py + 1
 
 # ============================================================================
 # Rounded Rectangle — 3 band rects + 4 anti-aliased corner boxes
@@ -423,7 +503,7 @@ fn _emu_corner_box_aa(mut core: RenderBackend, r: i32, color: u32, ax: i32, ay: 
 # Triangle Filled — Integer barycentric (Metal-exact)
 # ============================================================================
 
-fn emu_draw_triangle_filled(mut core: RenderBackend, x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
+pub fn emu_draw_triangle_filled(mut core: RenderBackend, x1: i32, y1: i32, x2: i32, y2: i32, x3: i32, y3: i32, color: u32):
     # Reconciled to canonical SW (backend_software.spl draw_triangle_filled):
     # integer barycentric (edge-function / 2x-area) bounding-box fill instead
     # of the old sort-and-scanline algorithm — matches the Metal
@@ -432,36 +512,42 @@ fn emu_draw_triangle_filled(mut core: RenderBackend, x1: i32, y1: i32, x2: i32, 
     # (it used to fill a degenerate line instead of no-op'ing). Alpha
     # blending is handled inside core.draw_rect_filled, same as sw's
     # has_alpha branch. reconciled to canonical sw 2026-07-06 (D2)
-    val d = (y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3)
-    if d == 0:
+    var min_x = _emu_min(x1, _emu_min(x2, x3)).to_i64()
+    var max_x = _emu_max(x1, _emu_max(x2, x3)).to_i64()
+    var min_y = _emu_min(y1, _emu_min(y2, y3)).to_i64()
+    var max_y = _emu_max(y1, _emu_max(y2, y3)).to_i64()
+    # A cross product is the sum of two signed products. This domain keeps
+    # even that conservative bound <= 2 * i32MAX^2 < i64MAX.
+    if max_x - min_x > 2147483647 or max_y - min_y > 2147483647:
         return
-    var min_x = x1
-    if x2 < min_x: min_x = x2
-    if x3 < min_x: min_x = x3
-    var max_x = x1
-    if x2 > max_x: max_x = x2
-    if x3 > max_x: max_x = x3
-    var min_y = y1
-    if y2 < min_y: min_y = y2
-    if y3 < min_y: min_y = y3
-    var max_y = y1
-    if y2 > max_y: max_y = y2
-    if y3 > max_y: max_y = y3
-
+    val ax = x1.to_i64()
+    val ay = y1.to_i64()
+    val bx = x2.to_i64()
+    val by = y2.to_i64()
+    val cx = x3.to_i64()
+    val cy = y3.to_i64()
+    val d = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy)
+    if d == 0 or core.width() <= 0 or core.height() <= 0: return
+    if min_x < 0: min_x = 0
+    if min_y < 0: min_y = 0
+    if max_x >= core.width().to_i64(): max_x = core.width().to_i64() - 1
+    if max_y >= core.height().to_i64(): max_y = core.height().to_i64() - 1
     var py = min_y
     while py <= max_y:
         var px = min_x
         while px <= max_x:
-            val w1 = (y2 - y3) * (px - x3) + (x3 - x2) * (py - y3)
-            val w2 = (y3 - y1) * (px - x3) + (x1 - x3) * (py - y3)
-            val w3 = d - w1 - w2
+            val w1 = (by - cy) * (px - cx) + (cx - bx) * (py - cy)
+            val w2 = (cy - ay) * (px - cx) + (ax - cx) * (py - cy)
+            # Evaluate the third edge directly: d-w1-w2 can overflow an
+            # intermediate even when each independently bounded edge fits.
+            val w3 = (ay - by) * (px - bx) + (bx - ax) * (py - by)
             var inside = false
             if d > 0:
                 inside = w1 >= 0 and w2 >= 0 and w3 >= 0
             else:
                 inside = w1 <= 0 and w2 <= 0 and w3 <= 0
             if inside:
-                core.draw_rect_filled(px, py, 1, 1, color)
+                core.draw_rect_filled(px.to_i32(), py.to_i32(), 1, 1, color)
             px = px + 1
         py = py + 1
 
@@ -469,28 +555,36 @@ fn emu_draw_triangle_filled(mut core: RenderBackend, x1: i32, y1: i32, x2: i32, 
 # Gradient Rectangle — Row-by-row color interpolation
 # ============================================================================
 
-fn emu_draw_gradient_rect(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
+pub fn emu_draw_gradient_rect(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
     if w <= 0 or h <= 0:
         return
 
-    val tr = color_r(top_color)
-    val tg = color_g(top_color)
-    val tb = color_b(top_color)
-    val ta = color_a(top_color)
-    val br = color_r(bottom_color)
-    val bg = color_g(bottom_color)
-    val bb = color_b(bottom_color)
-    val ba = color_a(bottom_color)
-
-    var row: i32 = 0
-    while row < h:
-        val r = tr + (br - tr) * row / _emu_max(h - 1, 1)
-        val g = tg + (bg - tg) * row / _emu_max(h - 1, 1)
-        val b = tb + (bb - tb) * row / _emu_max(h - 1, 1)
-        val a = ta + (ba - ta) * row / _emu_max(h - 1, 1)
-        val c = rgba(r, g, b, a)
-        core.draw_rect_filled(x, y + row, w, 1, c)
-        row = row + 1
+    val tr = color_r(top_color).to_i64()
+    val tg = color_g(top_color).to_i64()
+    val tb = color_b(top_color).to_i64()
+    val ta = color_a(top_color).to_i64()
+    val br = color_r(bottom_color).to_i64()
+    val bg = color_g(bottom_color).to_i64()
+    val bb = color_b(bottom_color).to_i64()
+    val ba = color_a(bottom_color).to_i64()
+    val left = x.to_i64()
+    val right = left + w.to_i64()
+    if right <= 0 or left >= core.width().to_i64(): return
+    var top = y.to_i64()
+    var bottom = top + h.to_i64()
+    if top < 0: top = 0
+    if bottom > core.height().to_i64(): bottom = core.height().to_i64()
+    val denominator = if h > 1: h.to_i64() - 1 else: 1
+    var py = top
+    while py < bottom:
+        val row = py - y.to_i64()
+        val r = tr + (br - tr) * row / denominator
+        val g = tg + (bg - tg) * row / denominator
+        val b = tb + (bb - tb) * row / denominator
+        val a = ta + (ba - ta) * row / denominator
+        val c = rgba(r.to_i32(), g.to_i32(), b.to_i32(), a.to_i32())
+        _emu_stamp_rect_wide(core, left, py, right, py + 1, c)
+        py = py + 1
 
 # ============================================================================
 # Text — Bitmap font glyph iteration
