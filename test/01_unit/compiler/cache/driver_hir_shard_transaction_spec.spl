@@ -1,4 +1,5 @@
-use std.spec.{describe, it, expect}
+use std.spec.{describe, it, expect, before_each}
+use std.io_runtime.{env_get, env_set}
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive}
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
@@ -13,6 +14,13 @@ use compiler.hir.hir_lowering.items.{bootstrap_hir_module_count}
 use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_key}
 
 describe "Driver HIR shard transaction ownership":
+    # The HIR cache needs a published compiler scope (hir_cache_enabled). The
+    # native-build orchestrator publishes it before any lowering
+    # (native_build_publish_cache_scope_v1); a bare driver in a spec does not.
+    before_each:
+        if (env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? "") == "":
+            env_set("SIMPLE_FRONTEND_CACHE_SCOPE", "spec-driver-hir-scope-v1")
+
     it "maps only actual cache hits and stores to the ledger cache flag":
         expect(driver_hir_shard_cache_stored_v1(0)).to_equal(true)
         expect(driver_hir_shard_cache_stored_v1(1)).to_equal(true)
@@ -31,10 +39,9 @@ describe "Driver HIR shard transaction ownership":
         var lowering = hirlowering_for_module(path, ModuleSurfacesByName.empty())
         val rows_before = bootstrap_hir_module_count()
         val receipt = driver.lower_streaming_hir_shard_receipt_transaction_v1(
-            lowering, source, false, "", nil, nil, -1)
+            lowering, source, false, "", nil, -1)
         expect(receipt.status).to_equal(-1)
         expect(receipt.archive.is_none()).to_equal(true)
-        expect(receipt.declaration_registration.is_none()).to_equal(true)
         expect(driver.ctx.errors.join("\n")).to_contain("HIR shard parser binding unavailable")
         expect(driver.ctx.hir_modules.len()).to_equal(0)
         expect(bootstrap_hir_module_count()).to_equal(rows_before)
@@ -50,10 +57,9 @@ describe "Driver HIR shard transaction ownership":
         var lowering = hirlowering_for_module(path, ModuleSurfacesByName.empty())
         val rows_before = bootstrap_hir_module_count()
         val receipt = driver.lower_streaming_hir_shard_receipt_transaction_v1(
-            lowering, source, false, "", nil, nil, -1)
+            lowering, source, false, "", nil, -1)
         expect(receipt.status).to_equal(2)
         expect(receipt.archive.is_none()).to_equal(true)
-        expect(receipt.declaration_registration.is_none()).to_equal(true)
         expect(bootstrap_hir_module_count()).to_equal(rows_before)
         expect(driver.ctx.hir_modules.len()).to_equal(0)
         expect(driver.ctx.errors.len()).to_be_greater_than(0)
@@ -83,19 +89,17 @@ describe "Driver HIR shard transaction ownership":
         var lowering = hirlowering_for_module(path, ModuleSurfacesByName.empty())
         val rows_before = bootstrap_hir_module_count()
         val receipt = driver.lower_streaming_hir_shard_receipt_transaction_v1(
-            lowering, source, false, key, nil, nil, -1)
+            lowering, source, false, key, nil, -1)
         expect(receipt.status).to_equal(1)
         expect(receipt.archive.is_none()).to_equal(true)
-        expect(receipt.declaration_registration.is_none()).to_equal(true)
         expect(driver.ctx.errors.len()).to_equal(0)
         expect(driver.ctx.hir_modules.len()).to_equal(0)
         expect(bootstrap_hir_module_count()).to_equal(rows_before)
         expect(transient_array_scope_state_v1()).to_equal(0)
         val cached = driver.lower_streaming_hir_shard_receipt_transaction_v1(
-            lowering, source, false, key, nil, nil, -1)
+            lowering, source, false, key, nil, -1)
         expect(cached.status).to_equal(0)
         expect(cached.archive.is_none()).to_equal(true)
-        expect(cached.declaration_registration.is_none()).to_equal(true)
         # The production integer wrapper requests no archive roots. Immediate
         # None values require no heap promotion under the actual core-C owner.
         expect(driver.lower_streaming_hir_shard_transaction_v1(
