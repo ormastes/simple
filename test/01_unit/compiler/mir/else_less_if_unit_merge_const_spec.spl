@@ -1,0 +1,180 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Else-less / early-return `if` merges never define an integer into a Unit slot
+
+Bug native_const_type_void_checked_join_host_facade_2026-11-07 (P1). The
+run-15 Stage 2 compiler failed native codegen with E-BACKEND-LLVM-CONST-TYPE
+"integer constant cannot define void" on three common shapes:
+
+- an early `return X` / `return None` followed by a final value,
+- `if c: return 1` followed by `0`,
+- an else-less `if` that assigns inside a loop.
+
+On the native path the statement-position `if` carries an attributed Unit
+type, so `lower_if` types its merge temp Unit. With no arm defining the temp
+the merge used to emit an unconditional `Const 0` into it. This spec models
+that attribution (every statement-position If/IfChain is marked Unit) and
+counts integer constants defined into Unit/Never MIR locals; it must be 0.
+Without the attribution (seed-interpreted inference) the shapes never reached
+the bad def, which is why earlier interpreted harnesses stayed green.
+"""
+
+# @tag: unit, compiler, mir
+
+use std.spec.*
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn unit_typed_if(expr: HirExpr) -> HirExpr:
+    var out = expr
+    match out.kind:
+        case HirExprKind.If(cond, then_, else_):
+            out.kind = HirExprKind.If(cond, unit_statement_ifs(then_), else_)
+            out.has_type_ = true
+            out.type_ = HirType(kind: HirTypeKind.Unit, span: out.span)
+        case HirExprKind.IfChain(_, _):
+            out.has_type_ = true
+            out.type_ = HirType(kind: HirTypeKind.Unit, span: out.span)
+        case HirExprKind.For(var_, iter, body, label):
+            out.kind = HirExprKind.For(var_, iter, unit_statement_ifs(body), label)
+        case HirExprKind.While(cond, body, label):
+            out.kind = HirExprKind.While(cond, unit_statement_ifs(body), label)
+        case HirExprKind.Loop(body, label):
+            out.kind = HirExprKind.Loop(unit_statement_ifs(body), label)
+        case _: ()
+    out
+
+fn unit_statement_ifs(block: HirBlock) -> HirBlock:
+    """Mark every statement-position if (not the block's tail value) Unit,
+    the attribution the native build path hands to MIR lowering."""
+    var result = block
+    var stmts: [HirStmt] = []
+    for raw_stmt in block.stmts:
+        var stmt: HirStmt = raw_stmt
+        match stmt.kind:
+            case HirStmtKind.Expr(expr):
+                stmt.kind = HirStmtKind.Expr(unit_typed_if(expr))
+            case _: ()
+        stmts = stmts.push(stmt)
+    result.stmts = stmts
+    result
+
+struct ConstAudit:
+    functions: i64
+    unit_locals: i64
+    illegal_constants: i64
+
+fn audit(source: text, attribute_unit: bool) -> ConstAudit:
+    val parsed = parse_full_frontend(source, "else_less.spl", "else_less", Logger(level: 0))
+    var lowering = HirLowering.with_filename("else_less.spl")
+    var hir = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    if attribute_unit:
+        for key in hir.functions.keys():
+            var function: HirFunction = hir.functions[key]
+            function.body = unit_statement_ifs(function.body)
+            hir.functions[key] = function
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    expect(mir_lowering.errors.len()).to_equal(0)
+    var units = 0
+    var illegal = 0
+    for raw_function in mir.functions.values():
+        val function: MirFunction = raw_function
+        var unit_ids: Dict<i64, bool> = {}
+        for raw_local in function.locals:
+            val local: MirLocal = raw_local
+            if local.type_.kind == MirTypeKind.Unit or local.type_.kind == MirTypeKind.Never:
+                unit_ids[local.id.id] = true
+                units = units + 1
+        for raw_block in function.blocks:
+            val block: MirBlock = raw_block
+            for raw_inst in block.instructions:
+                val inst: MirInst = raw_inst
+                match inst.kind:
+                    case MirInstKind.Const(destination, MirConstValue.Int(_), _):
+                        if unit_ids.has(destination.id):
+                            illegal = illegal + 1
+                    case _: ()
+    ConstAudit(functions: mir.functions.len(), unit_locals: units, illegal_constants: illegal)
+
+val EARLY_RETURN_INT = """
+fn ret1(c: bool) -> i64:
+    if c: return 1
+    0
+"""
+
+val EARLY_RETURN_TEXT = """
+fn ret_text(c: bool) -> text:
+    if c:
+        return "a"
+    "b"
+"""
+
+val EARLY_RETURN_NONE = """
+struct M:
+    matched: bool
+    count: i64
+
+fn m1(n: i64) -> Option<M>:
+    if n > 100: return None
+    Some(M(matched: n > 1, count: n))
+"""
+
+val LOOP_ASSIGN = """
+fn plain_flag(xs: [i64]) -> bool:
+    var found = false
+    for i in 0..xs.len():
+        if xs[i] == 2:
+            found = true
+    found
+"""
+
+val ASSIGN_NO_ELSE = """
+fn pick(c: bool) -> i64:
+    var x = 0
+    if c:
+        x = 1
+    x
+"""
+
+describe "else-less / early-return if merge with Unit attribution":
+    it "if c: return 1 then 0":
+        val result = audit(EARLY_RETURN_INT, true)
+        expect(result.functions).to_equal(1)
+        expect(result.unit_locals > 0).to_equal(true)
+        expect(result.illegal_constants).to_equal(0)
+
+    it "early return text then final text":
+        val result = audit(EARLY_RETURN_TEXT, true)
+        expect(result.unit_locals > 0).to_equal(true)
+        expect(result.illegal_constants).to_equal(0)
+
+    it "early return None then Some(record)":
+        val result = audit(EARLY_RETURN_NONE, true)
+        expect(result.unit_locals > 0).to_equal(true)
+        expect(result.illegal_constants).to_equal(0)
+
+    it "else-less assigning if inside a loop":
+        val result = audit(LOOP_ASSIGN, true)
+        expect(result.unit_locals > 0).to_equal(true)
+        expect(result.illegal_constants).to_equal(0)
+
+    it "else-less assigning if outside a loop":
+        val result = audit(ASSIGN_NO_ELSE, true)
+        expect(result.unit_locals > 0).to_equal(true)
+        expect(result.illegal_constants).to_equal(0)
+
+describe "else-less / early-return if merge with inferred types":
+    it "keeps every shape free of integer defs into Unit slots":
+        expect(audit(EARLY_RETURN_INT, false).illegal_constants).to_equal(0)
+        expect(audit(EARLY_RETURN_TEXT, false).illegal_constants).to_equal(0)
+        expect(audit(EARLY_RETURN_NONE, false).illegal_constants).to_equal(0)
+        expect(audit(LOOP_ASSIGN, false).illegal_constants).to_equal(0)
+        expect(audit(ASSIGN_NO_ELSE, false).illegal_constants).to_equal(0)
