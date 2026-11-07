@@ -1,0 +1,27 @@
+# @req REQ-SSPEC-UNIT
+"""
+# `simple src/app/cli/query.spl <subcmd> ...` keeps its subcommand
+
+The LSP heavy-query child launches query.spl directly. Its launcher-arg strip
+used a fixed skip of 2, which dropped the subcommand when the program name is
+not in argv ("Error: <file> requires <file> and <line>" / "invalid file path").
+Bug: lsp_heavy_query_child_drops_subcommand_2026_11_07.
+"""
+use std.spec.{describe, it, expect}
+use std.io_runtime.{write_file, file_exists, env_get}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use app.io.process_ops.{process_run_timeout}
+
+fn binary() -> text:
+    val env_bin = env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "": return env_bin
+    if file_exists("bin/simple.exe"): "bin/simple.exe" else: "bin/simple"
+
+describe "query.spl direct entry":
+    it "runs the requested subcommand when launched as a script":
+        val file = get_temp_dir().replace("\\", "/") + "/query_direct_entry_fx.spl"
+        val _ = write_file(file, "fn add_one(x: i64) -> i64:\n    x + 1\n")
+        val (out, err, rc) = process_run_timeout(binary(), ["src/app/cli/query.spl", "symbols", file], 300000)
+        expect(out.contains("requires <file>")).to_equal(false)
+        expect(out.contains("invalid file path")).to_equal(false)
+        expect(out.contains("add_one:fn:1")).to_equal(true)
