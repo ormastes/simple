@@ -1,0 +1,128 @@
+# Actual Windows read-only control session. Native probe owner is process-local,
+# never serialized, reconstructed from metadata, or permission to launch exec.
+# Linux uses the separate finite probe; no fake async Linux route is provided.
+# Windows adapter begin freshly validates host using its existing synchronous
+# bounded owner before Engine polling: this is not whole-host nonblocking.
+use std.common.contracts.container.exec_control_v3.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.nogc_async_mut.container.api_v2.{SimpleContainerOwnerV2, simple_container_backend_v2,
+    simple_container_scope_v2, simple_container_observation_v2, simple_container_project_v2}
+use std.nogc_async_mut.container.providers.windows.docker_exec_control_probe_v3.{WindowsDockerExecControlProbeV3,
+    WindowsDockerExecControlProbeOutcomeV3}
+
+pub enum ContainerExecControlSessionV3:
+    Windows(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1, scope: ContainerHostScopeV2,
+        baseline_digest: text, installed_policy_digest: text, probe: WindowsDockerExecControlProbeV3)
+
+pub struct ContainerExecControlSessionTurnV3:
+    owner: SimpleContainerOwnerV2
+    session: ContainerExecControlSessionV3?
+    observation: ContainerExecControlObservationV3?
+    phase: text
+    error: text
+
+fn control_session_error_v3(owner: SimpleContainerOwnerV2, session: ContainerExecControlSessionV3?,
+        reason: text) -> ContainerExecControlSessionTurnV3:
+    ContainerExecControlSessionTurnV3(owner: owner, session: session, observation: nil,
+        phase: if session == nil: "rejected" else: "cleanup-required", error: reason)
+
+fn control_session_owner_match_v3(owner: SimpleContainerOwnerV2, request: ContainerExecutionRequestV2,
+        expected: RuntimeIdentityV1, scope: ContainerHostScopeV2, baseline: text) -> Result<bool, text>:
+    if simple_container_backend_v2(owner) != "windows-docker-process": return Err("container-control-session-owner-backend-mismatch")
+    if (container_scope_fence_id_v2(simple_container_scope_v2(owner))? != container_scope_fence_id_v2(scope)? or
+            simple_container_observation_v2(owner).provider_identity_digest != baseline or not builder_digest_valid_v1(baseline)):
+        return Err("container-control-session-owner-scope-provider-mismatch")
+    val observed = simple_container_observation_v2(owner)
+    if (observed.backend != "windows-docker-process" or observed.execution_os != "windows" or
+            observed.native_machine_id != scope.native_machine_id):
+        return Err("container-control-session-owner-platform-mismatch")
+    val parent = container_exec_control_parent_match_v3(request, expected)?
+    val projected = simple_container_project_v2(owner, request)?
+    Ok(true)
+
+fn control_session_accept_v3(owner: SimpleContainerOwnerV2, request: ContainerExecutionRequestV2,
+        expected: RuntimeIdentityV1, scope: ContainerHostScopeV2, baseline: text, policy: text,
+        outcome: WindowsDockerExecControlProbeOutcomeV3,
+        previous: ContainerExecControlSessionV3? = nil) -> ContainerExecControlSessionTurnV3:
+    match outcome:
+        case WindowsDockerExecControlProbeOutcomeV3.Rejected(reason):
+            # Unexpected rejection after begin cannot discard the prior probe.
+            control_session_error_v3(owner, previous, reason)
+        case WindowsDockerExecControlProbeOutcomeV3.Pending(probe):
+            val session = ContainerExecControlSessionV3.Windows(request, expected, scope, baseline, policy, probe)
+            if probe.error_v3() != "": return control_session_error_v3(owner, Some(session), probe.error_v3())
+            ContainerExecControlSessionTurnV3(owner: owner, session: Some(session), observation: nil, phase: "pending", error: "")
+        case WindowsDockerExecControlProbeOutcomeV3.CleanupRequired(probe, reason):
+            val session = ContainerExecControlSessionV3.Windows(request, expected, scope, baseline, policy, probe)
+            control_session_error_v3(owner, Some(session), if reason == "": "container-control-session-cleanup-required" else: reason)
+        case WindowsDockerExecControlProbeOutcomeV3.Complete(probe):
+            val session = ContainerExecControlSessionV3.Windows(request, expected, scope, baseline, policy, probe)
+            if probe.error_v3() != "": return control_session_error_v3(owner, Some(session), probe.error_v3())
+            val value = match probe.observation_v3():
+                case Ok(value): value
+                case Err(reason): return control_session_error_v3(owner, Some(session), reason)
+            val checked = container_exec_control_observation_match_v3(value, request, expected, baseline, policy)
+            if checked.is_err(): return control_session_error_v3(owner, Some(session), checked.unwrap_err())
+            # Complete retains the actual probe for later real stream planning.
+            ContainerExecControlSessionTurnV3(owner: owner, session: Some(session), observation: Some(value), phase: "complete", error: "")
+        case WindowsDockerExecControlProbeOutcomeV3.Closed(probe):
+            if probe.has_owned_exchange_v3():
+                val session = ContainerExecControlSessionV3.Windows(request, expected, scope, baseline, policy, probe)
+                return control_session_error_v3(owner, Some(session), "container-control-session-close-unconfirmed")
+            ContainerExecControlSessionTurnV3(owner: owner, session: nil, observation: nil, phase: "closed", error: probe.error_v3())
+
+pub fn simple_container_exec_control_begin_v3(owner: SimpleContainerOwnerV2,
+        request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1,
+        installed_policy_bytes: text) -> ContainerExecControlSessionTurnV3:
+    if str_len(installed_policy_bytes) == 0 or str_len(installed_policy_bytes) > 1048576:
+        return control_session_error_v3(owner, nil, "container-control-session-policy-bound")
+    if simple_container_backend_v2(owner) != "windows-docker-process":
+        return control_session_error_v3(owner, nil, "container-control-session-linux-finite-route-required")
+    val scope = simple_container_scope_v2(owner)
+    val baseline = simple_container_observation_v2(owner).provider_identity_digest
+    val checked = control_session_owner_match_v3(owner, request, expected, scope, baseline)
+    if checked.is_err(): return control_session_error_v3(owner, nil, checked.unwrap_err())
+    # Actual adapter decoder enforces canonical installed wrapper before begin.
+    val policy = sha256_text(installed_policy_bytes)
+    match owner:
+        case SimpleContainerOwnerV2.Linux(_, _):
+            control_session_error_v3(owner, nil, "container-control-session-linux-finite-route-required")
+        case SimpleContainerOwnerV2.Windows(current_scope, adapter):
+            # Scripted owners may not open a real native pipe or claim readiness.
+            if adapter.is_scripted_fixture_v2():
+                return control_session_error_v3(owner, nil, "container-control-session-scripted-observer-forbidden")
+            var active = adapter
+            val outcome = active.begin_exec_control_probe_v3(installed_policy_bytes, request, expected)
+            val retained = SimpleContainerOwnerV2.Windows(current_scope, active)
+            control_session_accept_v3(retained, request, expected, scope, baseline, policy, outcome)
+
+pub fn simple_container_exec_control_poll_v3(owner: SimpleContainerOwnerV2,
+        session: ContainerExecControlSessionV3) -> ContainerExecControlSessionTurnV3:
+    match session:
+        case ContainerExecControlSessionV3.Windows(request, expected, scope, baseline, policy, probe):
+            val checked = control_session_owner_match_v3(owner, request, expected, scope, baseline)
+            if checked.is_err(): return control_session_error_v3(owner, Some(session), checked.unwrap_err())
+            var active = probe
+            val outcome = active.poll_v3()
+            control_session_accept_v3(owner, request, expected, scope, baseline, policy, outcome, Some(session))
+
+# Cleanup is independent of current parent admission, epoch or provider drift.
+# It closes only this retained probe's connections and grants no container effect.
+pub fn simple_container_exec_control_collect_v3(owner: SimpleContainerOwnerV2,
+        session: ContainerExecControlSessionV3) -> ContainerExecControlSessionTurnV3:
+    match session:
+        case ContainerExecControlSessionV3.Windows(request, expected, scope, baseline, policy, probe):
+            var active = probe
+            val outcome = active.collect_v3()
+            # No successful observation can be exposed from a cleanup call.
+            val cleanup_only = match outcome:
+                case WindowsDockerExecControlProbeOutcomeV3.Complete(retained):
+                    WindowsDockerExecControlProbeOutcomeV3.CleanupRequired(retained, "container-control-session-collection-unconfirmed")
+                case WindowsDockerExecControlProbeOutcomeV3.Pending(retained):
+                    WindowsDockerExecControlProbeOutcomeV3.CleanupRequired(retained, "container-control-session-collection-pending")
+                case _: outcome
+            control_session_accept_v3(owner, request, expected, scope, baseline, policy, cleanup_only, Some(session))
