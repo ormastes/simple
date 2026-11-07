@@ -5,7 +5,8 @@ Requirements: ORCH-02 exact immutable exec association; HOST-02 final effect bou
 Spec: `test/03_system/app/orchestrator/feature/container_exec_admission_v3_spec.spl`.
 
 Setup: construct a valid V3 exec request with full exact parent runtime CID and a
-positive shared operation envelope. Construct the trusted-carrier shape with raw64
+positive shared operation envelope whose payload hashes the ORIGINAL exec intent,
+not the raw exec request. Construct the trusted-carrier shape with raw64
 parent operation/assignment/provider/proof digests, canonical grant/issuer/approver
 IDs, and an exact exec-only deadline. No decoder or signature verifier exists for
 this carrier. No host journal, broker claim or provider is mocked.
@@ -21,9 +22,9 @@ this carrier. No host journal, broker claim or provider is mocked.
 The actual host must verify signatures, match retained parent digests, establish
 journal begin and hand the broker a verified live host lease. The broker must
 acquire an exclusive same-operation claim before native exec creation. A copied
-well-shaped carrier cannot provide either guarantee. Parent/proof digest fields
-are format-validated here, not independently read from journals. The provider pin
-is compared against the actual-owner expected baseline supplied by the consumer.
+well-shaped carrier cannot provide either guarantee. Original intent and flat request/parent fields must agree, with an intent-hashed
+operation. Parent/proof digest fields are not independently read from journals. The provider pin is the exec-control identity and must match the original intent
+and actual-owner expected control baseline; parent provider pin remains in intent.
 Deadline is a new-effect window only, never exec lifetime, PID stop, auto-kill or
 capacity release. Running/unknown execs remain owned and charged after expiry or
 disconnect. Builds/tests were prohibited for this source task.

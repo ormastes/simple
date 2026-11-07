@@ -2,6 +2,7 @@
 # Pure trusted-carrier integrity fixtures, NOT signature or native authority.
 # Execution NOT_RUN. No decoder, journal, broker claim or provider is mocked.
 use std.common.contracts.container.exec_v3.*
+use std.common.contracts.orchestration.host_runtime_exec_v3.*
 use std.common.contracts.container.exec_admission_v3.*
 use std.common.contracts.container.execution_v2.*
 use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
@@ -21,10 +22,12 @@ fn exec_admission_fixture_v3() -> ContainerExecAdmissionV3:
         argv: ["/usr/bin/agent", "--version"], environment: [], working_directory: "/workspace", selected_user: "1000:1000",
         terminal_mode: "none", stdin_requested: false, timeout_ms: 1000)
     val digest = container_exec_request_digest_v3(request).unwrap()
-    val operation = OperationEnvelopeV2(version: 2, id: request.operation_id, payload_digest: digest, principal: "user", project: "project",
+    val intent = HostRuntimeExecIntentV3(request: request, parent_operation_digest: "e".repeat(64),
+        parent_assignment_digest: "f".repeat(64), parent_controller_operation_digest: "5".repeat(64), parent_provider_identity_digest: "3".repeat(64), exec_control_identity_digest: "1".repeat(64))
+    val operation = OperationEnvelopeV2(version: 2, id: request.operation_id, payload_digest: host_runtime_exec_intent_digest_v3(intent).unwrap(), principal: "user", project: "project",
         host_id: parent.physical_host_id, operation: "host_runtime_exec_v3", environment_digest: "d".repeat(64), policy_revision: 1,
         revocation_epoch: 0, session_generation: 1, memory_bytes: 4096, duration_ms: 1000)
-    ContainerExecAdmissionV3(request: request, operation: operation, parent_operation_digest: "e".repeat(64),
+    ContainerExecAdmissionV3(intent: intent, request: request, operation: operation, parent_operation_digest: "e".repeat(64),
         parent_assignment_digest: "f".repeat(64), provider_identity_digest: "1".repeat(64),
         deadline: container_effect_deadline_v1(digest, request.operation_id, ["exec"], 1000).unwrap(),
         grant_id: "grant", issuer_id: "issuer", approver_id: "approver", execution_proof_digest: "2".repeat(64))
@@ -61,7 +64,7 @@ describe "nonserialized exec admission final-boundary integrity":
         changed.operation.operation = "host_execute_v1"
         expect(container_exec_admission_match_v3(changed, original.request, original.provider_identity_digest, 100).is_err()).to_equal(true)
         changed = original
-        changed.operation.payload_digest = "3".repeat(64)
+        changed.operation.payload_digest = container_exec_request_digest_v3(original.request).unwrap()
         expect(container_exec_admission_match_v3(changed, original.request, original.provider_identity_digest, 100).is_err()).to_equal(true)
         changed = original
         changed.operation.host_id = original.request.parent.native_machine_id

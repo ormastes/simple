@@ -5,14 +5,16 @@
 use std.common.contracts.container.exec_v3.*
 use std.common.contracts.container.effect_deadline_v1.{ContainerEffectDeadlineV1, container_effect_remaining_ms_v1}
 use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
-use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.contracts.orchestration.host_runtime_exec_v3.{HostRuntimeExecIntentV3, host_runtime_exec_match_operation_v3}
 use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
 
 pub struct ContainerExecAdmissionV3:
+    intent: HostRuntimeExecIntentV3
     request: ContainerExecRequestV3
     operation: OperationEnvelopeV2
     parent_operation_digest: text
     parent_assignment_digest: text
+    # Exec control owner pin; parent engine baseline remains in original intent.
     provider_identity_digest: text
     deadline: ContainerEffectDeadlineV1
     grant_id: text
@@ -26,11 +28,12 @@ pub fn container_exec_admission_match_v3(admission: ContainerExecAdmissionV3,
     val digest = container_exec_request_digest_v3(expected_request)?
     if container_exec_request_digest_v3(admission.request)? != digest:
         return Err("container-exec-admission-request-mismatch")
-    val encoded = distributed_encode_operation_v2(admission.operation)?
-    val operation = admission.operation
-    if (operation.id != expected_request.operation_id or operation.operation != "host_runtime_exec_v3" or
-            operation.payload_digest != digest or operation.host_id != expected_request.parent.physical_host_id):
-        return Err("container-exec-admission-operation-mismatch")
+    val matched = host_runtime_exec_match_operation_v3(admission.intent, admission.operation)?
+    if (container_exec_request_digest_v3(admission.intent.request)? != digest or
+            admission.parent_operation_digest != admission.intent.parent_operation_digest or
+            admission.parent_assignment_digest != admission.intent.parent_assignment_digest or
+            admission.provider_identity_digest != admission.intent.exec_control_identity_digest):
+        return Err("container-exec-admission-original-intent-mismatch")
     for value in [admission.parent_operation_digest, admission.parent_assignment_digest,
             admission.provider_identity_digest, admission.execution_proof_digest, expected_provider_identity_digest]:
         if not builder_digest_valid_v1(value): return Err("container-exec-admission-digest-invalid")
