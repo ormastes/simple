@@ -1689,6 +1689,36 @@ pub fn rt_process_write_stdin_some(args: &[Value]) -> Result<Value, CompileError
     }
 }
 
+/// Decode bytes already joined with the previous stdout tail. Malformed UTF-8
+/// follows the native owner's maximal-subpart replacement policy. Only a final
+/// incomplete valid prefix is retained while the OS observer is still pending.
+/// Stream state is an input: decoding cannot turn data errors into I/O errors or
+/// clear a genuine read failure. Valid text retains the original allocation.
+fn piped_stdout_text(mut bytes: Vec<u8>, stdout_state: i64, tail: &mut Vec<u8>) -> String {
+    if stdout_state == 0 {
+        let mut offset = 0;
+        while offset < bytes.len() {
+            match std::str::from_utf8(&bytes[offset..]) {
+                Ok(_) => break,
+                Err(error) => {
+                    offset += error.valid_up_to();
+                    match error.error_len() {
+                        Some(length) => offset += length,
+                        None => {
+                            *tail = bytes.split_off(offset);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => String::from_utf8_lossy(error.as_bytes()).into_owned(),
+    }
+}
+
 /// Non-blocking read of whatever is currently buffered on a piped child's stdout.
 ///
 /// Callable from Simple as: `rt_process_read_stdout(pid: i64) -> text`
@@ -1747,18 +1777,9 @@ pub fn rt_process_read_stdout(args: &[Value]) -> Result<Value, CompileError> {
                 }
             }
         }
-        match std::str::from_utf8(&out) {
-            Ok(_) => {}
-            Err(error) if error.error_len().is_none() && process.stdout_state == 0 => {
-                process.stdout_tail = out.split_off(error.valid_up_to());
-            }
-            Err(_) => {
-                process.stdout_state = -1;
-                out.clear();
-            }
-        }
+        return Ok(Value::text(piped_stdout_text(out, process.stdout_state, &mut process.stdout_tail)));
     }
-    Ok(Value::text(String::from_utf8(out).unwrap_or_default()))
+    Ok(Value::text(String::new()))
 }
 
 /// Preserve empty versus broken/error: only an observed broken pipe proves EOF.
@@ -2116,6 +2137,88 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    fn piped_text_chunk(tail: &mut Vec<u8>, chunk: &[u8], state: i64) -> String {
+        let mut bytes = Vec::new();
+        bytes.append(tail);
+        bytes.extend_from_slice(chunk);
+        piped_stdout_text(bytes, state, tail)
+    }
+
+    #[test]
+    fn piped_stdout_replaces_invalid_byte_without_retaining_it() {
+        let mut tail = Vec::new();
+        assert_eq!(piped_text_chunk(&mut tail, &[0xff], 0), "\u{fffd}");
+        assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn piped_stdout_replaces_maximal_subparts_and_truncated_eof() {
+        let mut tail = Vec::new();
+        assert_eq!(piped_text_chunk(&mut tail, &[0xe1, 0x80, 0x41, 0xe2, 0x82], 1),
+            "\u{fffd}A\u{fffd}");
+        assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn piped_stdout_scans_invalid_subparts_before_retaining_valid_suffix() {
+        let mut tail = Vec::new();
+        assert_eq!(piped_text_chunk(&mut tail, &[0xe1, 0x80, 0x41, 0xe2, 0x82], 0),
+            "\u{fffd}A");
+        assert_eq!(tail, vec![0xe2, 0x82]);
+        assert_eq!(piped_text_chunk(&mut tail, &[0xac], 1), "\u{20ac}");
+        assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn piped_stdout_scans_multiple_invalid_subparts_before_four_byte_tail() {
+        let mut tail = Vec::new();
+        assert_eq!(piped_text_chunk(&mut tail, &[0xff, 0xe1, 0x80, 0x41, 0xfe, 0xf0, 0x9f], 0),
+            "\u{fffd}\u{fffd}A\u{fffd}");
+        assert_eq!(tail, vec![0xf0, 0x9f]);
+        assert_eq!(piped_text_chunk(&mut tail, &[0x98, 0x80], 1), "\u{1f600}");
+        assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn piped_stdout_keeps_ready_and_split_scalar_without_premature_replacement() {
+        let mut tail = Vec::new();
+        assert_eq!(piped_text_chunk(&mut tail, b"ready\n\xe2\x82", 0), "ready\n");
+        assert_eq!(tail, vec![0xe2, 0x82]);
+        // An empty pending poll must not flush the still-valid suffix.
+        assert_eq!(piped_text_chunk(&mut tail, &[], 0), "");
+        assert_eq!(tail, vec![0xe2, 0x82]);
+        assert_eq!(piped_text_chunk(&mut tail, &[0xac], 1), "\u{20ac}");
+        assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn piped_stdout_flushes_retained_suffix_at_real_eof_or_read_failure() {
+        for state in [1, -1] {
+            let mut tail = vec![0xe2, 0x82];
+            assert_eq!(piped_text_chunk(&mut tail, &[], state), "\u{fffd}");
+            assert!(tail.is_empty());
+        }
+    }
+
+    #[test]
+    fn piped_stdout_does_not_defer_impossible_utf8_prefixes() {
+        let mut tail = Vec::new();
+        assert_eq!(piped_text_chunk(&mut tail, &[0xe0, 0x80, 0x80], 0),
+            "\u{fffd}\u{fffd}\u{fffd}");
+        assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn piped_stdout_valid_text_reuses_allocation_and_preserves_nul() {
+        let bytes = b"valid\0text".to_vec();
+        let pointer = bytes.as_ptr();
+        let mut tail = Vec::new();
+        let text = piped_stdout_text(bytes, 0, &mut tail);
+        assert_eq!(text.as_bytes(), b"valid\0text");
+        assert_eq!(text.as_ptr(), pointer);
+        assert!(tail.is_empty());
+    }
+
     fn piped_dispatch(name: &str, args: &[Value]) -> Value {
         let handler = crate::interpreter_extern::EXTERN_DISPATCH
             .get(name).unwrap_or_else(|| panic!("missing public extern {name}"));
@@ -2193,7 +2296,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn piped_dispatch_reports_real_invalid_utf8_as_stream_error() {
+    fn piped_dispatch_replaces_real_invalid_utf8_and_reports_clean_exit() {
         use std::time::{Duration, Instant};
         let Value::Int(pid) = piped_dispatch("rt_process_spawn_piped", &[
             Value::text("/bin/sh".to_string()),
@@ -2203,15 +2306,20 @@ mod tests {
         assert!(pid > 0);
         let args = [Value::Int(pid)];
         let deadline = Instant::now() + Duration::from_secs(5);
-        while piped_dispatch("rt_process_stdout_state", &args) == Value::Int(0) {
-            let _ = piped_dispatch("rt_process_read_stdout", &args);
-            assert!(Instant::now() < deadline, "invalid stream not observed");
+        let mut output = String::new();
+        let expected = Value::array(vec![Value::Int(1), Value::Int(1), Value::Int(0), Value::Int(0)]);
+        loop {
+            let Value::Str(chunk) = piped_dispatch("rt_process_read_stdout", &args) else { panic!("expected text"); };
+            output.push_str(&chunk);
+            assert_ne!(piped_dispatch("rt_process_stdout_state", &args), Value::Int(-1),
+                "malformed bytes are replacement text, not a read failure");
+            if piped_dispatch("rt_process_piped_exit_status_value", &args) == expected { break; }
+            assert!(Instant::now() < deadline, "replacement/EOF/exit receipt not observed");
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert_eq!(piped_dispatch("rt_process_stdout_state", &args), Value::Int(-1));
-        let Value::Array(receipt) = piped_dispatch("rt_process_piped_exit_status_value", &args) else { panic!("expected receipt"); };
-        assert_eq!(receipt[1], Value::Int(-1));
-        assert_ne!(receipt[3], Value::Int(0));
+        assert_eq!(output, "\u{fffd}");
+        assert_eq!(piped_dispatch("rt_process_stdout_state", &args), Value::Int(1));
+        assert_eq!(piped_dispatch("rt_process_piped_exit_status_value", &args), expected);
         assert_eq!(piped_dispatch("rt_process_close_piped", &args), Value::Bool(true));
     }
 
