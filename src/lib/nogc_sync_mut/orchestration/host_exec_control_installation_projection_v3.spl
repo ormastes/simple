@@ -1,0 +1,33 @@
+# Historical read-only metadata projection. No HostLocalRoot/capacity-owner
+# import cycle, current epoch promotion, signature reauthorization or allocation.
+use std.common.contracts.orchestration.host_exec_control_installation_v3.*
+use std.common.contracts.orchestration.host_capacity_v1.HostCapacityV1
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2, distributed_operation_journal_lookup_v2}
+use std.nogc_sync_mut.orchestration.host_cleanup_store_v1.host_cleanup_private_read_v1
+use std.common.crypto.sha256.sha256_text
+
+pub fn host_exec_control_installation_projection_v3(journal: DistributedOperationJournalV2,
+        capacity: HostCapacityV1, operation: OperationEnvelopeV2) -> Result<bool, text>:
+    val envelope = distributed_encode_operation_v2(operation)?
+    val row = distributed_operation_journal_lookup_v2(journal, operation.id)?
+    if row.envelope != envelope: return Err("host-exec-install-projection-envelope-mismatch")
+    val name = sha256_text(operation.id) + ".sdn"
+    val packet = host_cleanup_private_read_v1(journal.root + "/host-exec-control-installations", name, 4194304)?
+    val request = host_exec_control_installation_request_decode_v3(packet)?
+    if distributed_encode_operation_v2(request.operation)? != envelope: return Err("host-exec-install-projection-request-mismatch")
+    val matched = host_exec_control_installation_match_operation_v3(request.intent, operation)?
+    # The real finite root derives this trusted ledger authority from its
+    # installed enrollment binding. Old boot/provider values remain historical.
+    if (capacity.authority_id != "host-" + request.intent.enrollment_binding_digest or
+            capacity.physical_host_id != request.intent.scope.physical_host_id):
+        return Err("host-exec-install-projection-authority-mismatch")
+    if not ["admitted", "executing", "outcome-unknown", "completed"].contains(row.state):
+        return Err("host-exec-install-projection-state-unsupported")
+    if row.state == "completed":
+        val artifact = host_cleanup_private_read_v1(journal.root + "/host-exec-control-installation-artifacts", name, 4194304)?
+        if (artifact != host_exec_control_installation_intent_encode_v3(request.intent)? or
+                row.outcome_digest != sha256_text(artifact) or operation.payload_digest != sha256_text(artifact)):
+            return Err("host-exec-install-projection-completed-artifact-mismatch")
+    Ok(true)

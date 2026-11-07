@@ -1,0 +1,95 @@
+# Shared internal exec configuration/request/delegation publication. Trusted
+# parent paths only; no authorization, native effect or lease from a file token.
+# This Linux owner does not claim raceproof IO against trusted-admin renames.
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostReservationAuthorizationContextV1
+use std.nogc_sync_mut.orchestration.host_cleanup_store_v1.host_cleanup_private_read_v1
+use std.nogc_sync_mut.io.retained_file.*
+use std.nogc_sync_mut.io.file_ops.{file_exists, secure_temp_dir, file_publish_noreplace, file_remove, directory_fsync}
+use std.nogc_sync_mut.io_runtime.{dir_create, dir_remove}
+use std.common.base_encoding.utilities.base_encoding_text_to_bytes
+use std.common.string_core.str_len
+
+pub struct HostExecPrivatePublicationTurnV3:
+    context: Option<HostReservationAuthorizationContextV1>
+    published_new: bool
+    recovery_required: bool
+    error: text
+    # Exact private stage directory; record.sdn is the fixed complete leaf.
+    stage_path: text
+
+fn exec_private_name_valid_v3(name: text) -> bool:
+    if str_len(name) != 68 or not name.ends_with(".sdn"): return false
+    for index in 0..64:
+        val byte = name.byte_at(index) as i64
+        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)): return false
+    true
+
+fn exec_private_error_v3(context: Option<HostReservationAuthorizationContextV1>,
+        published_new: bool, stage: text, error: text, recovery_required: bool = true) -> HostExecPrivatePublicationTurnV3:
+    HostExecPrivatePublicationTurnV3(context, published_new, recovery_required, error, stage)
+
+fn exec_private_stage_write_v3(path: text, bytes: text) -> Result<bool, text>:
+    val source = base_encoding_text_to_bytes(bytes)
+    var file = retained_file_open(path, source.len() as u64, true)?
+    var offset = 0
+    var reason = ""
+    while offset < source.len() and reason == "":
+        val end = if source.len() - offset > 1048576: offset + 1048576 else: source.len()
+        val written = file.write(source[offset:end])
+        if written.is_err(): reason = written.unwrap_err()
+        elif not written.unwrap(): reason = "host-exec-install-stage-write-failed"
+        offset = end
+    val synced = if reason == "": retained_file_sync(file) else: false
+    val closed = file.close()
+    if reason != "": return Err(reason)
+    if not synced or not closed: return Err("host-exec-install-stage-sync-or-consumed-close-error")
+    Ok(true)
+
+# published_new is a fact only. A child lease requires published_new AND empty
+# error plus actual verified parent begin; existing/unknown never reissues it.
+pub fn host_exec_private_publish_v3(root: text, directory_name: text, name: text, bytes: text,
+        guard: fn() -> Result<HostReservationAuthorizationContextV1, text>) -> HostExecPrivatePublicationTurnV3:
+    @when(os="linux"):
+    val supported = true
+    @else:
+    val supported = false
+    @end
+    if not supported: return exec_private_error_v3(nil, false, "", "host-exec-private-host-unsupported", false)
+    if not ["host-exec-control-installations", "host-exec-control-installation-artifacts", "host-exec-control-installed-v3",
+            "host-runtime-exec-requests", "host-runtime-exec-delegations"].contains(directory_name):
+        return exec_private_error_v3(nil, false, "", "host-exec-private-kind-invalid", false)
+    if not exec_private_name_valid_v3(name) or str_len(bytes) == 0 or str_len(bytes) > 4194304:
+        return exec_private_error_v3(nil, false, "", "host-exec-private-name-or-size-invalid", false)
+    val parent_result = retained_directory_open_trusted_v1(root)
+    if parent_result.is_err(): return exec_private_error_v3(nil, false, "", parent_result.unwrap_err(), false)
+    var parent = parent_result.unwrap()
+    if not parent.close(): return exec_private_error_v3(nil, false, "", "host-exec-private-parent-consumed-close-error")
+    val directory = root + "/" + directory_name
+    if not file_exists(directory) and not dir_create(directory, true): return exec_private_error_v3(nil, false, "", "host-exec-private-directory-failed")
+    val directory_result = retained_directory_open_trusted_v1(directory)
+    if directory_result.is_err(): return exec_private_error_v3(nil, false, "", directory_result.unwrap_err())
+    var target = directory_result.unwrap()
+    if not target.close(): return exec_private_error_v3(nil, false, "", "host-exec-private-parent-consumed-close-error")
+    val staging = secure_temp_dir(root, "host-exec-stage-")
+    if staging.is_err(): return exec_private_error_v3(nil, false, "", staging.unwrap_err())
+    val stage = staging.unwrap()
+    val path = stage + "/record.sdn"
+    val written = exec_private_stage_write_v3(path, bytes)
+    if written.is_err(): return exec_private_error_v3(nil, false, stage, written.unwrap_err())
+    val staged = host_cleanup_private_read_v1(stage, "record.sdn", 4194304)
+    if staged.is_err(): return exec_private_error_v3(nil, false, stage, staged.unwrap_err())
+    if staged.unwrap() != bytes: return exec_private_error_v3(nil, false, stage, "host-exec-private-stage-readback-failed")
+    # Final authority guard runs after every expensive stage/readback operation.
+    val fresh = guard()
+    if fresh.is_err(): return exec_private_error_v3(nil, false, stage, fresh.unwrap_err())
+    val published = file_publish_noreplace(path, directory + "/" + name)
+    if published.is_err(): return exec_private_error_v3(Some(fresh.unwrap()), false, stage, "host-exec-private-publication-unknown:" + published.unwrap_err())
+    val final_bytes = host_cleanup_private_read_v1(directory, name, 4194304)
+    if final_bytes.is_err(): return exec_private_error_v3(Some(fresh.unwrap()), published.unwrap(), stage, final_bytes.unwrap_err())
+    if final_bytes.unwrap() != bytes: return exec_private_error_v3(Some(fresh.unwrap()), published.unwrap(), stage, "host-exec-install-retained-conflict")
+    if not directory_fsync(directory) or not directory_fsync(root): return exec_private_error_v3(Some(fresh.unwrap()), published.unwrap(), stage, "host-exec-private-directory-sync-failed")
+    # Cleanup only our known exact stage after actual exact durable publication.
+    val unlinked = if file_exists(path): file_remove(path) else: true
+    val removed = dir_remove(stage, false)
+    if not unlinked or not removed: return exec_private_error_v3(Some(fresh.unwrap()), published.unwrap(), stage, "host-exec-private-stage-cleanup-failed")
+    HostExecPrivatePublicationTurnV3(Some(fresh.unwrap()), published.unwrap(), false, "", "")

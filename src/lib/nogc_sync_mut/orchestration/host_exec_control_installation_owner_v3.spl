@@ -1,0 +1,256 @@
+# Actual signed configuration installation; no provider execution, readiness,
+# child delegation or second journal. Current root/worker are trusted owners.
+# Linux private-file capability only; Windows must use its native ACL owner.
+use std.common.contracts.orchestration.host_exec_control_installation_v3.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, distributed_grant_authorize_v2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2}
+use std.nogc_sync_mut.orchestration.host_local_root_v1.HostLocalRootV1
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostReservationAuthorizationContextV1
+use std.nogc_sync_mut.orchestration.host_enrollment_v1.host_enrollment_payload_digest_v1
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.local_authority_policy_load_v1
+use std.nogc_sync_mut.orchestration.host_cleanup_store_v1.host_cleanup_private_read_v1
+use std.nogc_sync_mut.orchestration.host_exec_private_publication_v3.{host_exec_private_publish_v3, HostExecPrivatePublicationTurnV3}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.{daemon_operation_exact_v2, daemon_operation_admit_v2, daemon_operation_begin_v2, daemon_operation_record_outcome_v2}
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_lookup_v2
+use std.nogc_async_mut.container.api_v2.{simple_container_scope_v2, simple_container_observation_v2, simple_container_backend_v2}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+
+pub struct HostExecControlInstalledV3:
+    intent: HostExecControlInstallationIntentV3
+    canonical_policy_bytes: text
+    artifact_digest: text
+    request: HostExecControlInstallationRequestV3
+
+pub struct HostExecControlInstallationTurnV3:
+    local: HostLocalRootV1
+    installation: Option<HostExecControlInstalledV3>
+    recovery_required: bool
+    error: text
+
+fn installation_host_supported_v3() -> bool:
+    @when(os="linux"):
+    true
+    @else:
+    false
+    @end
+
+fn installation_current_v3(local: HostLocalRootV1, intent: HostExecControlInstallationIntentV3) -> Result<bool, text>:
+    if not installation_host_supported_v3(): return Err("host-exec-install-private-host-unsupported")
+    val enrollment_digest = host_enrollment_payload_digest_v1(local.binding)?
+    val capacity = local.capacity.ledger.capacity
+    if (capacity.authority_id != "host-" + enrollment_digest or capacity.physical_host_id != local.scope.physical_host_id or
+            capacity.boot_id != container_scope_fence_id_v2(local.scope)? or capacity.provider_generation != local.scope.provider_generation or
+            intent.enrollment_binding_digest != enrollment_digest or
+            container_scope_fence_id_v2(intent.scope)? != container_scope_fence_id_v2(local.scope)? or
+            container_scope_fence_id_v2(simple_container_scope_v2(local.container))? != container_scope_fence_id_v2(local.scope)? or
+            simple_container_backend_v2(local.container) != "linux-podman" or
+            intent.provider_identity_digest != local.binding.provider_identity_digest or
+            simple_container_observation_v2(local.container).provider_identity_digest != local.binding.provider_identity_digest):
+        return Err("host-exec-install-current-root-mismatch")
+    val policy = local_authority_policy_load_v1(local.root, local.binding.policy_digest)?
+    if policy.source_digest != local.policy.source_digest: return Err("host-exec-install-current-policy-mismatch")
+    Ok(true)
+
+fn installation_fresh_v3(local: HostLocalRootV1, request: HostExecControlInstallationRequestV3,
+        grant: ExecutionGrantV2, before: HostReservationAuthorizationContextV1,
+        after: HostReservationAuthorizationContextV1) -> Result<HostReservationAuthorizationContextV1, text>:
+    if (after.grant_clock <= 0 or after.monotonic_ms < 0 or after.grant_clock < before.grant_clock or
+            after.monotonic_ms < before.monotonic_ms): return Err("host-exec-install-clock-invalid-or-regressed")
+    if (after.policy_revision != before.policy_revision or after.revocation_epoch != before.revocation_epoch or
+            after.session_generation != before.session_generation or after.policy_revision != local.policy.snapshot.policy_revision or
+            after.revocation_epoch != local.policy.snapshot.revocation_epoch or after.session_generation != local.policy.session_generation):
+        return Err("host-exec-install-context-changed")
+    if request.approval.expires_at <= after.grant_clock: return Err("APPROVAL_EXPIRED")
+    val reason = distributed_grant_authorize_v2(grant, request.operation, after.grant_clock,
+        after.policy_revision, after.revocation_epoch, after.session_generation)
+    if reason != "": return Err(reason)
+    Ok(after)
+
+fn installation_reference_bytes_v3(operation_id: text, artifact_digest: text, fence: text) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3), "kind": SdnValue.String("host-exec-control-installed"),
+        "operationId": SdnValue.String(operation_id), "artifactDigest": SdnValue.String(artifact_digest), "scopeFence": SdnValue.String(fence)}
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+fn installation_reference_operation_v3(bytes: text) -> Result<text, text>:
+    if str_len(bytes) == 0 or str_len(bytes) > 4096: return Err("host-exec-install-reference-size")
+    val parsed = match sdn_parse_strict_v1(bytes, SdnStrictLimitsV1(max_source_bytes: 4096, max_depth: 2,
+            max_nodes: 16, max_rows: 0, max_cells: 0, max_columns: 8)):
+        case Ok(value): value
+        case Err(issue): return Err("host-exec-install-reference-syntax:" + issue.code)
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("host-exec-install-reference-object")
+    val names = ["version", "kind", "operationId", "artifactDigest", "scopeFence"]
+    for name in fields.keys():
+        if not names.contains(name): return Err("host-exec-install-reference-unknown")
+    for name in names:
+        if not fields.contains_key(name): return Err("host-exec-install-reference-missing")
+    if fields["version"] != SdnValue.Int(3) or fields["kind"] != SdnValue.String("host-exec-control-installed"):
+        return Err("host-exec-install-reference-version")
+    match fields["operationId"]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("host-exec-install-reference-operation")
+
+fn installation_packet_v3(local: HostLocalRootV1, operation_id: text) -> Result<HostExecControlInstallationRequestV3, text>:
+    val bytes = host_cleanup_private_read_v1(local.capacity.journal.root + "/host-exec-control-installations",
+        sha256_text(operation_id) + ".sdn", 4194304)?
+    val packet = host_exec_control_installation_request_decode_v3(bytes)?
+    if packet.operation.id != operation_id: return Err("host-exec-install-retained-operation-mismatch")
+    Ok(packet)
+
+fn installation_artifact_v3(local: HostLocalRootV1, request: HostExecControlInstallationRequestV3) -> Result<HostExecControlInstalledV3, text>:
+    val bytes = host_cleanup_private_read_v1(local.capacity.journal.root + "/host-exec-control-installation-artifacts",
+        sha256_text(request.operation.id) + ".sdn", 4194304)?
+    if bytes != host_exec_control_installation_intent_encode_v3(request.intent)?: return Err("host-exec-install-artifact-mismatch")
+    val row = daemon_operation_exact_v2(local.capacity.journal, request.operation)?
+    val digest = sha256_text(bytes)
+    if row.state != "completed" or row.outcome_digest != digest or request.operation.payload_digest != digest:
+        return Err("host-exec-install-completed-evidence-required")
+    val current = installation_current_v3(local, request.intent)?
+    Ok(HostExecControlInstalledV3(request.intent, request.intent.control_policy_bytes, digest, request))
+
+pub fn host_exec_control_installation_load_v3(local: HostLocalRootV1) -> Result<HostExecControlInstalledV3, text>:
+    if not installation_host_supported_v3(): return Err("host-exec-install-private-host-unsupported")
+    val fence = container_scope_fence_id_v2(local.scope)?
+    val reference = host_cleanup_private_read_v1(local.root + "/host-exec-control-installed-v3", fence + ".sdn", 4096)?
+    val operation_id = installation_reference_operation_v3(reference)?
+    val request = installation_packet_v3(local, operation_id)?
+    val installed = installation_artifact_v3(local, request)?
+    if reference != installation_reference_bytes_v3(operation_id, installed.artifact_digest, fence): return Err("host-exec-install-reference-mismatch")
+    Ok(installed)
+
+fn installation_scope_unique_v3(local: HostLocalRootV1, request: HostExecControlInstallationRequestV3) -> Result<bool, text>:
+    if local.capacity.journal.operations.len() > 4096: return Err("host-exec-install-history-full")
+    val fence = container_scope_fence_id_v2(local.scope)?
+    for id in local.capacity.journal.operations.keys():
+        val row = distributed_operation_journal_lookup_v2(local.capacity.journal, id)?
+        val operation = distributed_decode_operation_v2(row.envelope)?
+        if operation.operation != "host_exec_control_install_v3": continue
+        val retained = installation_packet_v3(local, id)?
+        if distributed_encode_operation_v2(retained.operation)? != distributed_encode_operation_v2(operation)?: return Err("host-exec-install-history-mismatch")
+        if container_scope_fence_id_v2(retained.intent.scope)? == fence and id != request.operation.id:
+            return Err("host-exec-install-scope-already-bound")
+    Ok(true)
+
+fn installation_publication_error_v3(turn: HostExecPrivatePublicationTurnV3) -> text:
+    if turn.stage_path != "": turn.error + ":retainedStage=" + turn.stage_path
+    else: turn.error
+
+pub fn host_exec_control_installation_install_v3(local: HostLocalRootV1, packet: text,
+        context: HostReservationAuthorizationContextV1,
+        refresh: fn() -> HostReservationAuthorizationContextV1) -> HostExecControlInstallationTurnV3:
+    var current = local
+    if not installation_host_supported_v3(): return HostExecControlInstallationTurnV3(current, nil, false, "host-exec-install-private-host-unsupported")
+    val decoded = host_exec_control_installation_request_decode_v3(packet)
+    if decoded.is_err(): return HostExecControlInstallationTurnV3(current, nil, false, decoded.unwrap_err())
+    val request = decoded.unwrap()
+    val row = distributed_operation_journal_lookup_v2(current.capacity.journal, request.operation.id)
+    if row.is_err() and row.unwrap_err() != "OPERATION_NOT_FOUND": return HostExecControlInstallationTurnV3(current, nil, true, row.unwrap_err())
+    val prior_mutation = row.is_ok()
+    val pins = installation_current_v3(current, request.intent)
+    if pins.is_err(): return HostExecControlInstallationTurnV3(current, nil, prior_mutation, pins.unwrap_err())
+    if not current.capacity.ledger.continuity_proven: return HostExecControlInstallationTurnV3(current, nil, true, "host-reconciliation-required")
+    val unique = installation_scope_unique_v3(current, request)
+    if unique.is_err(): return HostExecControlInstallationTurnV3(current, nil, prior_mutation, unique.unwrap_err())
+    val name = sha256_text(request.operation.id) + ".sdn"
+    if row.is_ok():
+        val original = installation_packet_v3(current, request.operation.id)
+        if original.is_err(): return HostExecControlInstallationTurnV3(current, nil, true, original.unwrap_err())
+        val bytes = host_exec_control_installation_request_encode_v3(original.unwrap())
+        if bytes.is_err(): return HostExecControlInstallationTurnV3(current, nil, true, bytes.unwrap_err())
+        if bytes.unwrap() != packet: return HostExecControlInstallationTurnV3(current, nil, true, "host-exec-install-retained-conflict")
+        val exact = daemon_operation_exact_v2(current.capacity.journal, request.operation)
+        if exact.is_err(): return HostExecControlInstallationTurnV3(current, nil, true, exact.unwrap_err())
+        if row.unwrap().state == "completed":
+            val installed = installation_artifact_v3(current, request)
+            if installed.is_err(): return HostExecControlInstallationTurnV3(current, nil, true, installed.unwrap_err())
+            val configured = host_exec_control_installation_load_v3(current)
+            if configured.is_ok(): return HostExecControlInstallationTurnV3(current, Some(configured.unwrap()), false, "")
+            # The exact completed transaction is historical authority for its
+            # original config; repairing only its missing scope index does not
+            # renew old grants, re-admit, rewrite artifact or mint a child lease.
+            val completed_local = current
+            val completed_guard = fn() -> Result<HostReservationAuthorizationContextV1, text>:
+                val exact = installation_artifact_v3(completed_local, request)?
+                val now = refresh()
+                if (now.grant_clock <= 0 or now.monotonic_ms < 0 or
+                        now.policy_revision != completed_local.policy.snapshot.policy_revision or
+                        now.revocation_epoch != completed_local.policy.snapshot.revocation_epoch or
+                        now.session_generation != completed_local.policy.session_generation):
+                    return Err("host-exec-install-current-context-invalid")
+                Ok(now)
+            val fence = container_scope_fence_id_v2(current.scope)
+            if fence.is_err(): return HostExecControlInstallationTurnV3(current, nil, true, fence.unwrap_err())
+            val reference = installation_reference_bytes_v3(request.operation.id, installed.unwrap().artifact_digest, fence.unwrap())
+            val repair = host_exec_private_publish_v3(current.root, "host-exec-control-installed-v3", fence.unwrap() + ".sdn", reference, completed_guard)
+            if repair.error != "": return HostExecControlInstallationTurnV3(current, nil, true, installation_publication_error_v3(repair))
+            val loaded = host_exec_control_installation_load_v3(current)
+            if loaded.is_err(): return HostExecControlInstallationTurnV3(current, nil, true, loaded.unwrap_err())
+            return HostExecControlInstallationTurnV3(current, Some(loaded.unwrap()), false, "")
+        elif not ["admitted", "executing", "outcome-unknown"].contains(row.unwrap().state):
+            return HostExecControlInstallationTurnV3(current, nil, true, "host-exec-install-operation-state")
+    val verified = distributed_verify_grant_approval_from_snapshot_v2(current.policy.snapshot, request.signed, request.approval,
+        request.operation, context.grant_clock, current.policy.snapshot.generation, context.policy_revision,
+        context.revocation_epoch, context.session_generation)
+    if verified.is_err(): return HostExecControlInstallationTurnV3(current, nil, prior_mutation, verified.unwrap_err())
+    val grant = verified.unwrap()
+    val initial = installation_fresh_v3(current, request, grant, context, context)
+    if initial.is_err(): return HostExecControlInstallationTurnV3(current, nil, prior_mutation, initial.unwrap_err())
+    val archive_guard = fn() -> Result<HostReservationAuthorizationContextV1, text>:
+        val current_pins = installation_current_v3(local, request.intent)?
+        installation_fresh_v3(local, request, grant, context, refresh())
+    val archived = host_exec_private_publish_v3(current.capacity.journal.root, "host-exec-control-installations", name, packet, archive_guard)
+    if archived.error != "": return HostExecControlInstallationTurnV3(current, nil, true, installation_publication_error_v3(archived))
+    var latest = archived.context.unwrap()
+    val admit_pins = installation_current_v3(current, request.intent)
+    if admit_pins.is_err(): return HostExecControlInstallationTurnV3(current, nil, true, admit_pins.unwrap_err())
+    val fresh = installation_fresh_v3(current, request, grant, latest, refresh())
+    if fresh.is_err(): return HostExecControlInstallationTurnV3(current, nil, true, fresh.unwrap_err())
+    latest = fresh.unwrap()
+    val admitted = daemon_operation_admit_v2(current.capacity.journal, request.operation)
+    if admitted.is_err(): return HostExecControlInstallationTurnV3(current, nil, true, admitted.unwrap_err())
+    current.capacity.journal = admitted.unwrap().journal
+    current.capacity.ledger.revision = current.capacity.journal.sequence + 1
+    if admitted.unwrap().state == "admitted":
+        val begin_pins = installation_current_v3(current, request.intent)
+        if begin_pins.is_err(): return HostExecControlInstallationTurnV3(current, nil, true, begin_pins.unwrap_err())
+        val before_begin = installation_fresh_v3(current, request, grant, latest, refresh())
+        if before_begin.is_err(): return HostExecControlInstallationTurnV3(current, nil, true, before_begin.unwrap_err())
+        latest = before_begin.unwrap()
+        val begun = daemon_operation_begin_v2(current.capacity.journal, request.operation)
+        if begun.is_err(): return HostExecControlInstallationTurnV3(current, nil, true, begun.unwrap_err())
+        current.capacity.journal = begun.unwrap()
+        current.capacity.ledger.revision = current.capacity.journal.sequence + 1
+    val artifact_bytes = host_exec_control_installation_intent_encode_v3(request.intent)
+    if artifact_bytes.is_err(): return HostExecControlInstallationTurnV3(current, nil, true, artifact_bytes.unwrap_err())
+    val artifact_context = latest
+    val artifact_guard = fn() -> Result<HostReservationAuthorizationContextV1, text>:
+        val current_pins = installation_current_v3(local, request.intent)?
+        installation_fresh_v3(local, request, grant, artifact_context, refresh())
+    val artifact = host_exec_private_publish_v3(current.capacity.journal.root, "host-exec-control-installation-artifacts", name, artifact_bytes.unwrap(), artifact_guard)
+    if artifact.error != "": return HostExecControlInstallationTurnV3(current, nil, true, installation_publication_error_v3(artifact))
+    latest = artifact.context.unwrap()
+    val digest = sha256_text(artifact_bytes.unwrap())
+    val outcome = daemon_operation_record_outcome_v2(current.capacity.journal, request.operation, "completed", digest)
+    if outcome.is_err(): return HostExecControlInstallationTurnV3(current, nil, true, outcome.unwrap_err())
+    current.capacity.journal = outcome.unwrap()
+    current.capacity.ledger.revision = current.capacity.journal.sequence + 1
+    val fence = container_scope_fence_id_v2(current.scope)
+    if fence.is_err(): return HostExecControlInstallationTurnV3(current, nil, true, fence.unwrap_err())
+    val reference = installation_reference_bytes_v3(request.operation.id, digest, fence.unwrap())
+    val reference_context = latest
+    val reference_guard = fn() -> Result<HostReservationAuthorizationContextV1, text>:
+        val current_pins = installation_current_v3(local, request.intent)?
+        installation_fresh_v3(local, request, grant, reference_context, refresh())
+    val published = host_exec_private_publish_v3(current.root, "host-exec-control-installed-v3", fence.unwrap() + ".sdn", reference, reference_guard)
+    if published.error != "": return HostExecControlInstallationTurnV3(current, nil, true, installation_publication_error_v3(published))
+    val installed = host_exec_control_installation_load_v3(current)
+    if installed.is_err(): return HostExecControlInstallationTurnV3(current, nil, true, installed.unwrap_err())
+    HostExecControlInstallationTurnV3(current, Some(installed.unwrap()), false, "")
