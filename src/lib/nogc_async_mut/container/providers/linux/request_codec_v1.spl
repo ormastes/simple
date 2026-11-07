@@ -1,0 +1,130 @@
+# Canonical retained request bodies. Uses the shared SDN parser/serializer;
+# decoding is data-only and grants no runtime or filesystem authority.
+use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_bounds_v1, linux_oci_request_digest_v1}
+use std.common.contracts.container.execution_options_v1.OciEnvironmentEntryV1
+use std.common.contracts.orchestration.resource_v1.{RejectionV1, reject, parse_resource_document, as_dict, as_array, as_int, only_known, require}
+use std.common.sdn.value.{SdnValue, SdnSpan}
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+
+fn request_text_array_v1(values: [text]) -> SdnValue:
+    var items: [SdnValue] = []
+    for value in values: items.push(SdnValue.String(value))
+    SdnValue.Array(items)
+
+pub fn linux_oci_retained_request_encode_v1(request: LinuxOciRequestV1) -> Result<text, text>:
+    val bounded = linux_oci_request_bounds_v1(request)?
+    if not builder_identifier_valid_v1(request.operation_id) or
+            not builder_identifier_valid_v1(request.pod_uid) or request.attempt <= 0:
+        return Err("retained-request-identity-invalid")
+    val digest = linux_oci_request_digest_v1(request)?
+    var environment: [SdnValue] = []
+    for entry in request.environment:
+        environment.push(SdnValue.Dict({"name": SdnValue.String(entry.name), "value": SdnValue.String(entry.value)}))
+    var fields: Dict<text, SdnValue> = {
+        "version": SdnValue.Int(1), "kind": SdnValue.String("linux-oci-retained-request"),
+        "podUid": SdnValue.String(request.pod_uid), "attempt": SdnValue.Int(request.attempt),
+        "operationId": SdnValue.String(request.operation_id), "requestDigest": SdnValue.String(digest),
+        "image": SdnValue.String(request.image), "bundlePath": SdnValue.String(request.bundle_path),
+        "command": request_text_array_v1(request.command), "args": request_text_array_v1(request.args),
+        "timeoutMs": SdnValue.Int(request.timeout_ms), "cpuLimitMillis": SdnValue.Int(request.cpu_limit_millis),
+        "memoryLimitBytes": SdnValue.Int(request.memory_limit_bytes), "pidLimit": SdnValue.Int(request.pid_limit),
+        "networkPolicy": SdnValue.String(request.network_policy), "filesystemPolicy": SdnValue.String(request.filesystem_policy),
+        "buildInputRoot": SdnValue.String(request.build_input_root), "buildOutputRoot": SdnValue.String(request.build_output_root),
+        "replaceEntrypoint": SdnValue.Bool(request.replace_entrypoint), "environment": SdnValue.Array(environment),
+        "workingDirectory": SdnValue.String(request.working_directory)
+    }
+    if request.terminal_mode != "none":
+        fields["version"] = SdnValue.Int(2)
+        fields["terminalMode"] = SdnValue.String(request.terminal_mode)
+    val body = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if body.len() > 1048576: return Err("retained-request-record-too-large")
+    Ok(body)
+
+fn request_string_v1(value: SdnValue, path: text, spans: Dict<text, SdnSpan>) -> Result<text, RejectionV1>:
+    match value:
+        case SdnValue.String(text_value): Ok(text_value)
+        case _: Err(reject("type", path, "expected text", spans))
+
+fn request_field_text_v1(fields: Dict<text, SdnValue>, key: text, spans: Dict<text, SdnSpan>) -> Result<text, RejectionV1>:
+    request_string_v1(require(fields, key, "", spans)?, key, spans)
+
+fn request_field_integer_v1(fields: Dict<text, SdnValue>, key: text, spans: Dict<text, SdnSpan>) -> Result<i64, RejectionV1>:
+    as_int(require(fields, key, "", spans)?, key, spans)
+
+fn request_field_array_v1(fields: Dict<text, SdnValue>, key: text, spans: Dict<text, SdnSpan>) -> Result<[text], RejectionV1>:
+    val values = as_array(require(fields, key, "", spans)?, key, spans)?
+    if values.len() > 256: return Err(reject("limit", key, "too many arguments", spans))
+    var strings: [text] = []
+    var index = 0
+    for value in values:
+        strings.push(request_string_v1(value, key + "." + index.to_text(), spans)?)
+        index = index + 1
+    Ok(strings)
+
+fn request_fields_decode_v1(source: text) -> Result<LinuxOciRequestV1, RejectionV1>:
+    val parsed = parse_resource_document(source)?
+    val spans = parsed.1
+    val fields = as_dict(parsed.0, "", spans)?
+    only_known(fields, ["version", "kind", "podUid", "attempt", "operationId", "requestDigest", "image",
+        "bundlePath", "command", "args", "timeoutMs", "cpuLimitMillis", "memoryLimitBytes", "pidLimit",
+        "networkPolicy", "filesystemPolicy", "buildInputRoot", "buildOutputRoot", "replaceEntrypoint",
+        "environment", "workingDirectory", "terminalMode"], "", spans)?
+    val version = request_field_integer_v1(fields, "version", spans)?
+    if version != 1 and version != 2:
+        return Err(reject("version", "version", "unsupported retained request version", spans))
+    var terminal_mode = "none"
+    if version == 2:
+        terminal_mode = request_field_text_v1(fields, "terminalMode", spans)?
+        if terminal_mode != "stdin" and terminal_mode != "tty":
+            return Err(reject("terminal", "terminalMode", "unsupported interactive terminal mode", spans))
+    elif fields.contains_key("terminalMode"):
+        return Err(reject("version", "terminalMode", "terminal mode requires version 2", spans))
+    if request_field_text_v1(fields, "kind", spans)? != "linux-oci-retained-request":
+        return Err(reject("kind", "kind", "unsupported retained request kind", spans))
+    val replace_entrypoint = match require(fields, "replaceEntrypoint", "", spans)?:
+        case SdnValue.Bool(value): value
+        case _: return Err(reject("type", "replaceEntrypoint", "expected boolean", spans))
+    val entries = as_array(require(fields, "environment", "", spans)?, "environment", spans)?
+    if entries.len() > 128: return Err(reject("limit", "environment", "too many entries", spans))
+    var environment: [OciEnvironmentEntryV1] = []
+    var index = 0
+    for entry in entries:
+        val path = "environment." + index.to_text()
+        val pair = as_dict(entry, path, spans)?
+        only_known(pair, ["name", "value"], path, spans)?
+        val name = request_string_v1(require(pair, "name", path, spans)?, path + ".name", spans)?
+        val value = request_string_v1(require(pair, "value", path, spans)?, path + ".value", spans)?
+        environment.push(OciEnvironmentEntryV1(name: name, value: value))
+        index = index + 1
+    val request = LinuxOciRequestV1(pod_uid: request_field_text_v1(fields, "podUid", spans)?,
+        attempt: request_field_integer_v1(fields, "attempt", spans)?,
+        operation_id: request_field_text_v1(fields, "operationId", spans)?,
+        image: request_field_text_v1(fields, "image", spans)?,
+        bundle_path: request_field_text_v1(fields, "bundlePath", spans)?,
+        command: request_field_array_v1(fields, "command", spans)?, args: request_field_array_v1(fields, "args", spans)?,
+        timeout_ms: request_field_integer_v1(fields, "timeoutMs", spans)?,
+        cpu_limit_millis: request_field_integer_v1(fields, "cpuLimitMillis", spans)?,
+        memory_limit_bytes: request_field_integer_v1(fields, "memoryLimitBytes", spans)?,
+        pid_limit: request_field_integer_v1(fields, "pidLimit", spans)?,
+        network_policy: request_field_text_v1(fields, "networkPolicy", spans)?,
+        filesystem_policy: request_field_text_v1(fields, "filesystemPolicy", spans)?,
+        build_input_root: request_field_text_v1(fields, "buildInputRoot", spans)?,
+        build_output_root: request_field_text_v1(fields, "buildOutputRoot", spans)?,
+        replace_entrypoint: replace_entrypoint, environment: environment,
+        working_directory: request_field_text_v1(fields, "workingDirectory", spans)?, terminal_mode: terminal_mode)
+    val digest = match linux_oci_request_digest_v1(request):
+        case Ok(value): value
+        case Err(reason): return Err(reject("request", "", reason, spans))
+    if request_field_text_v1(fields, "requestDigest", spans)? != digest:
+        return Err(reject("digest", "requestDigest", "request digest mismatch", spans))
+    Ok(request)
+
+pub fn linux_oci_retained_request_decode_v1(source: text) -> Result<LinuxOciRequestV1, text>:
+    if source.len() > 1048576: return Err("retained-request-record-too-large")
+    val request = match request_fields_decode_v1(source):
+        case Ok(value): value
+        case Err(reason): return Err("retained-request-invalid:" + reason.kind + ":" + reason.path)
+    val canonical = linux_oci_retained_request_encode_v1(request)?
+    if canonical != source: return Err("retained-request-not-canonical")
+    Ok(request)

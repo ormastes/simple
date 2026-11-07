@@ -1,0 +1,142 @@
+# @req ORCH-01 ORCH-02 HOST-02
+# Pure proposals only; SSpec NOT_RUN pending qualified tooling.
+use std.common.contracts.orchestration.placement_v1.*
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.orchestration.profile_v1.*
+use std.common.contracts.orchestration.resource_v1.ObjectMetaV1
+
+fn placement_request() -> PlacementRequestV1:
+    val profile = ResourceProfileV1(meta: ObjectMetaV1(name: "agent", ns: "caret", labels: {}),
+        cpu: ResourceAmountRangeV1(minimum: 1000, recommended: 2000, preferred: 4000, limit: 4000),
+        memory: ResourceAmountRangeV1(minimum: 2000, recommended: 4000, preferred: 8000, limit: 8000),
+        gpu_required: false, preserve_scarce_gpu_hosts: true)
+    PlacementRequestV1(pool_id: "development", execution_os: "linux", architecture: "aarch64",
+        runtime_class: "podman-rootless", profile: profile, gpu_mode: "none", allow_preferred: false)
+
+fn placement_host(id: text, devices: [text], cpu: i64, memory: i64) -> PlacementHostV1:
+    val capacity = HostCapacityV1(physical_host_id: id, authority_id: "machine-owner", boot_id: "boot",
+        provider_generation: 1, cpu_millis: cpu, memory_bytes: memory, exclusive_devices: devices)
+    PlacementHostV1(pool_id: "development", service_scope_id: "user", execution_os: "linux",
+        architecture: "aarch64", runtime_class: "podman-rootless", authorized: true, healthy: true,
+        draining: false, limits_enforced: true, gpu_devices: devices,
+        ledger: HostCapacityLedgerV1(capacity: capacity, revision: 1, continuity_proven: true, reservations: []))
+
+describe "native host placement proposals":
+    it "preserves GPU hosts for CPU work and publishes effective caps":
+        step("Prefer a feasible CPU host and inspect reserved-equivalent caps")
+        val plan = plan_host_placement_v1(placement_request(), [placement_host("gpu", ["gpu-0"], 8000, 24000), placement_host("cpu", [], 4000, 8000)]).unwrap()
+        val selected = plan.offers[plan.selected_index]
+        expect(selected.physical_host_id).to_equal("cpu")
+        expect(selected.allocation.cpu_millis).to_equal(2000)
+        expect(selected.allocation.cpu_cap_millis).to_equal(2000)
+        expect(selected.allocation.memory_cap_bytes).to_equal(4000)
+
+    it "queues below minimum and exposes the rejection reason":
+        step("Refuse a host below the declared CPU floor")
+        val plan = plan_host_placement_v1(placement_request(), [placement_host("small", [], 999, 8000)]).unwrap()
+        expect(plan.selected_index).to_equal(-1)
+        expect(plan.rejected[0].reason).to_equal("insufficient-cpu-minimum")
+
+    it "allocates between minimum and recommendation without increasing caps":
+        step("Expose constrained admission instead of pretending to meet recommendation")
+        val plan = plan_host_placement_v1(placement_request(), [placement_host("small", [], 1500, 3000)]).unwrap()
+        expect(plan.offers[0].allocation.below_recommendation).to_equal(true)
+        expect(plan.offers[0].allocation.cpu_cap_millis).to_equal(1500)
+        expect(plan.offers[0].allocation.memory_cap_bytes).to_equal(3000)
+
+    it "rejects duplicate physical capacity and unsupported GPU sharing":
+        step("Reject two inventory rows for one machine and an unqualified sharing mode")
+        val host = placement_host("same", [], 4000, 8000)
+        expect(plan_host_placement_v1(placement_request(), [host, host]).unwrap_err()).to_equal("duplicate-physical-host")
+        var request = placement_request()
+        request.gpu_mode = "shared"
+        expect(plan_host_placement_v1(request, [host]).unwrap_err()).to_equal("unsupported-gpu-mode")
+
+    it "never downgrades a required GPU claim to CPU":
+        step("Require an explicit GPU claim and a feasible device")
+        var request = placement_request()
+        request.profile.gpu_required = true
+        val cpu = placement_host("cpu", [], 4000, 8000)
+        expect(plan_host_placement_v1(request, [cpu]).unwrap_err()).to_equal("required-gpu-claim-missing")
+        request.gpu_mode = "whole-exclusive"
+        val plan = plan_host_placement_v1(request, [cpu]).unwrap()
+        expect(plan.selected_index).to_equal(-1)
+        expect(plan.rejected[0].reason).to_equal("exclusive-gpu-unavailable")
+
+    it "requires current authorization health and enforcement":
+        step("Refuse unauthorized, draining, unhealthy and unenforced host snapshots")
+        val base = placement_host("host", [], 4000, 8000)
+        var host = base
+        host.authorized = false
+        expect(plan_host_placement_v1(placement_request(), [host]).unwrap().rejected[0].reason).to_equal("host-not-authorized")
+        host = base
+        host.draining = true
+        expect(plan_host_placement_v1(placement_request(), [host]).unwrap().rejected[0].reason).to_equal("host-draining")
+        host = base
+        host.healthy = false
+        expect(plan_host_placement_v1(placement_request(), [host]).unwrap().rejected[0].reason).to_equal("host-unhealthy")
+        host = base
+        host.limits_enforced = false
+        expect(plan_host_placement_v1(placement_request(), [host]).unwrap().rejected[0].reason).to_equal("resource-enforcement-unavailable")
+
+    it "rejects stale continuity and mismatched runtime eligibility":
+        step("Refuse uncertain inventory and mismatched execution targets")
+        val base = placement_host("host", [], 4000, 8000)
+        var host = base
+        host.ledger.continuity_proven = false
+        expect(plan_host_placement_v1(placement_request(), [host]).unwrap().rejected[0].reason).to_equal("host-reconciliation-required")
+        host = base
+        host.runtime_class = "docker-process"
+        expect(plan_host_placement_v1(placement_request(), [host]).unwrap().rejected[0].reason).to_equal("runtime-class-mismatch")
+        host = base
+        host.architecture = "x86_64"
+        expect(plan_host_placement_v1(placement_request(), [host]).unwrap().rejected[0].reason).to_equal("architecture-mismatch")
+
+    it "uses a stable host identity tie break independent of inventory order":
+        step("Permute equivalent hosts and preserve the selected identity")
+        val a = placement_host("a", [], 4000, 8000)
+        val b = placement_host("b", [], 4000, 8000)
+        val first = plan_host_placement_v1(placement_request(), [b, a]).unwrap()
+        val second = plan_host_placement_v1(placement_request(), [a, b]).unwrap()
+        expect(first.offers[first.selected_index].physical_host_id).to_equal("a")
+        expect(second.offers[second.selected_index].physical_host_id).to_equal("a")
+
+    it "binds the selected offer and attempt identity into canonical host intent":
+        step("Carry exact host fence, allocation and immutable plan identity to admission")
+        val plan = plan_host_placement_v1(placement_request(), [placement_host("host", [], 4000, 8000)]).unwrap()
+        val identity = PlacementAttemptIdentityV1(reservation_id: "one", operation_id: "op-one",
+            assignment_generation: 2, nonce: "nonce-one", plan_digest: "1".repeat(64), prepare_deadline_ms: 100)
+        val intent = placement_reservation_intent_v1(plan, identity).unwrap()
+        expect(intent.physical_host_id).to_equal("host")
+        expect(intent.fence.revision).to_equal(plan.offers[0].fence.revision)
+        expect(intent.reservation.cpu_millis).to_equal(plan.offers[0].allocation.cpu_millis)
+        expect(intent.reservation.memory_bytes).to_equal(plan.offers[0].allocation.memory_bytes)
+        expect(intent.reservation.assignment_generation).to_equal(2)
+        expect(intent.plan_digest).to_equal(identity.plan_digest)
+        var changed = identity
+        changed.plan_digest = "2".repeat(64)
+        expect(placement_reservation_intent_v1(plan, changed).unwrap().reservation.payload_digest == intent.reservation.payload_digest).to_equal(false)
+
+    it "cannot construct a reservation for a queued or invalid selection":
+        step("Reject missing selection before indexing any host or creating an intent")
+        val identity = PlacementAttemptIdentityV1(reservation_id: "one", operation_id: "op-one",
+            assignment_generation: 1, nonce: "nonce-one", plan_digest: "1".repeat(64), prepare_deadline_ms: 100)
+        val empty = plan_host_placement_v1(placement_request(), []).unwrap()
+        expect(placement_reservation_intent_v1(empty, identity).unwrap_err()).to_equal("placement-queued")
+        var invalid = empty
+        invalid.selected_index = 1
+        expect(placement_reservation_intent_v1(invalid, identity).unwrap_err()).to_equal("invalid-selected-offer")
+
+    it "rejects unresolved devices or allocation and cap disagreement":
+        step("Fail closed on an inconsistent programmatically constructed offer")
+        val plan = plan_host_placement_v1(placement_request(), [placement_host("host", [], 4000, 8000)]).unwrap()
+        val identity = PlacementAttemptIdentityV1(reservation_id: "one", operation_id: "op-one",
+            assignment_generation: 1, nonce: "nonce-one", plan_digest: "1".repeat(64), prepare_deadline_ms: 100)
+        var offer = plan.offers[0]
+        offer.allocation.requires_gpu_resolution = true
+        val unresolved = PlacementPlanV1(offers: [offer], rejected: [], selected_index: 0)
+        expect(placement_reservation_intent_v1(unresolved, identity).unwrap_err()).to_equal("unresolved-device-claim")
+        offer = plan.offers[0]
+        offer.allocation.cpu_cap_millis = 4000
+        val uncapped = PlacementPlanV1(offers: [offer], rejected: [], selected_index: 0)
+        expect(placement_reservation_intent_v1(uncapped, identity).unwrap_err()).to_equal("allocation-cap-mismatch")

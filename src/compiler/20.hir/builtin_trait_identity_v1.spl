@@ -1,0 +1,205 @@
+# Compiler-owned declaration identity; no solver or primitive policy dependency.
+use compiler.hir.hir_types.{SymbolTable, HirSymbol, SymbolId, SymbolKind, ScopeId, Scope, ScopeKind, Visibility, BUILTIN_METHOD_NONE}
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.common.diagnostics.span.{Span}
+
+pub enum BuiltinTraitKindV1:
+    Clone
+    Copy
+    Debug
+    Default
+    Drop
+    Eq
+    Ord
+
+pub struct BuiltinTraitBindingV1:
+    kind: BuiltinTraitKindV1
+    symbol: SymbolId
+
+pub struct BuiltinTraitDeclarationsV1:
+    owner: SymbolId
+    scope: ScopeId
+    bindings: [BuiltinTraitBindingV1]
+
+pub struct BuiltinTraitDeclarationOwnerV1:
+    symbols: SymbolTable
+    declarations: BuiltinTraitDeclarationsV1
+
+pub fn builtin_trait_kinds_v1() -> [BuiltinTraitKindV1]:
+    [BuiltinTraitKindV1.Clone, BuiltinTraitKindV1.Copy, BuiltinTraitKindV1.Debug,
+        BuiltinTraitKindV1.Default, BuiltinTraitKindV1.Drop, BuiltinTraitKindV1.Eq, BuiltinTraitKindV1.Ord]
+
+pub fn builtin_trait_spelling_v1(kind: BuiltinTraitKindV1) -> text:
+    match kind:
+        case BuiltinTraitKindV1.Clone: "Clone"
+        case BuiltinTraitKindV1.Copy: "Copy"
+        case BuiltinTraitKindV1.Debug: "Debug"
+        case BuiltinTraitKindV1.Default: "Default"
+        case BuiltinTraitKindV1.Drop: "Drop"
+        case BuiltinTraitKindV1.Eq: "Eq"
+        case BuiltinTraitKindV1.Ord: "Ord"
+
+fn builtin_trait_owner_name_v1() -> text:
+    "<simple:builtin-traits:v1>"
+
+fn builtin_trait_internal_name_v1(kind: BuiltinTraitKindV1) -> text:
+    "<builtin:" + builtin_trait_spelling_v1(kind) + ">"
+
+# Canonical define skips occupied structural-union IDs at/above 900000000.
+# Simulate precisely that finite allocation window before copying any table.
+fn builtin_trait_allocation_end_v1(source: SymbolTable) -> Result<i64, text>:
+    val maximum = 9223372036854775807
+    if source.next_symbol_id < 0 or source.next_scope_id < 1 or source.next_scope_id >= maximum:
+        return Err("builtin-allocator-exhausted")
+    var next = source.next_symbol_id
+    for index in 0..8:
+        while next >= 900000000 and source.structural_union_owners.contains_key(next):
+            if next >= maximum: return Err("builtin-allocator-exhausted")
+            next = next + 1
+        if next >= maximum: return Err("builtin-allocator-exhausted")
+        next = next + 1
+    Ok(next)
+
+fn builtin_copy_name_ids_v1(source: Dict<text, i64>) -> Dict<text, i64>:
+    var copied: Dict<text, i64> = {}
+    for key in source.keys(): copied[key] = source[key]
+    copied
+
+fn builtin_copy_names_v1(source: Dict<text, text>) -> Dict<text, text>:
+    var copied: Dict<text, text> = {}
+    for key in source.keys(): copied[key] = source[key]
+    copied
+
+# module_snapshot creates a distinct class owner but aliases its containers.
+# Isolate every map before speculative allocation; failure cannot publish IDs.
+fn builtin_trait_table_copy_v1(source: SymbolTable) -> SymbolTable:
+    val copied = source.module_snapshot()
+    copied.symbols = {}
+    for key in source.symbols.keys(): copied.symbols[key] = source.symbols[key]
+    copied.scopes = {}
+    for key in source.scopes.keys():
+        val original = source.scopes[key]
+        copied.scopes[key] = Scope(..original, symbols: builtin_copy_name_ids_v1(original.symbols))
+    copied.gpu_function_targets = builtin_copy_names_v1(source.gpu_function_targets)
+    copied.gpu_function_backend_orders = builtin_copy_names_v1(source.gpu_function_backend_orders)
+    copied.qualified_functions = builtin_copy_name_ids_v1(source.qualified_functions)
+    copied.qualified_types = builtin_copy_name_ids_v1(source.qualified_types)
+    copied.exact_symbols = builtin_copy_name_ids_v1(source.exact_symbols)
+    copied.module_callables = builtin_copy_name_ids_v1(source.module_callables)
+    # Preserve the canonical root mirror alias within the new owner, without
+    # sharing either dictionary with the input table.
+    copied.root_scope_symbols = copied.scopes[0].symbols
+    copied.structural_union_symbols = builtin_copy_name_ids_v1(source.structural_union_symbols)
+    copied.structural_union_owners = {}
+    for key in source.structural_union_owners.keys():
+        copied.structural_union_owners[key] = source.structural_union_owners[key]
+    copied
+
+pub fn builtin_trait_declarations_validate_v1(registry: BuiltinTraitDeclarationsV1, symbols: SymbolTable) -> text:
+    if symbols == nil or not symbols.symbols.contains_key(registry.owner.id): return "builtin-owner-missing"
+    if symbols.next_symbol_id < 0 or symbols.next_scope_id < 1:
+        return "builtin-allocator-invalid"
+    if registry.owner.id < 0 or registry.owner.id >= symbols.next_symbol_id:
+        return "builtin-owner-id-range"
+    if registry.scope.id < 0 or registry.scope.id >= symbols.next_scope_id:
+        return "builtin-private-scope-range"
+    val owner = symbols.symbols[registry.owner.id]
+    val owner_name = builtin_trait_owner_name_v1()
+    if owner.id.id != registry.owner.id or owner.kind != SymbolKind.Module or owner.name != owner_name:
+        return "builtin-owner-identity"
+    if owner.visibility != Visibility.Private or owner.is_public:
+        return "builtin-owner-privacy"
+    if owner.type_ != nil or owner.is_mutable or owner.generic_param_count != 0 or owner.builtin_method_tag != BUILTIN_METHOD_NONE:
+        return "builtin-owner-shape"
+    if owner.defining_module == nil or owner.defining_module.unwrap() != owner_name:
+        return "builtin-owner-origin"
+    if not symbols.scopes.contains_key(owner.scope.id): return "builtin-owner-scope-missing"
+    if owner.scope.id < 0 or owner.scope.id >= symbols.next_scope_id: return "builtin-owner-scope-range"
+    val owner_scope = symbols.scopes[owner.scope.id]
+    if not owner_scope.symbols.contains_key(owner_name) or owner_scope.symbols[owner_name] != owner.id.id:
+        return "builtin-owner-binding"
+    if not symbols.scopes.contains_key(registry.scope.id): return "builtin-private-scope-missing"
+    val private_scope = symbols.scopes[registry.scope.id]
+    if private_scope.id.id != registry.scope.id or private_scope.kind != ScopeKind.Module:
+        return "builtin-private-scope-identity"
+    if private_scope.parent == nil or private_scope.parent.unwrap().id != owner.scope.id:
+        return "builtin-private-scope-owner"
+    val kinds = builtin_trait_kinds_v1()
+    if registry.bindings.len() != kinds.len(): return "builtin-declaration-count"
+    var seen: [i64] = []
+    for index in 0..kinds.len():
+        val binding = registry.bindings[index]
+        if binding.symbol.id < 0 or binding.symbol.id >= symbols.next_symbol_id:
+            return "builtin-declaration-id-range"
+        if binding.kind != kinds[index] or seen.contains(binding.symbol.id): return "builtin-declaration-duplicate"
+        if binding.symbol.id == registry.owner.id or not symbols.symbols.contains_key(binding.symbol.id):
+            return "builtin-declaration-missing"
+        val declaration = symbols.symbols[binding.symbol.id]
+        val name = builtin_trait_internal_name_v1(binding.kind)
+        if declaration.id.id != binding.symbol.id or declaration.kind != SymbolKind.Trait or declaration.name != name:
+            return "builtin-declaration-identity"
+        if declaration.scope.id != registry.scope.id or declaration.defining_module == nil:
+            return "builtin-declaration-scope"
+        if declaration.visibility != Visibility.Private or declaration.is_public:
+            return "builtin-declaration-privacy"
+        if declaration.type_ != nil or declaration.is_mutable or declaration.generic_param_count != 0 or declaration.builtin_method_tag != BUILTIN_METHOD_NONE:
+            return "builtin-declaration-shape"
+        if declaration.defining_module.unwrap() != owner_name: return "builtin-declaration-owner"
+        if not private_scope.symbols.contains_key(name) or private_scope.symbols[name] != binding.symbol.id:
+            return "builtin-declaration-binding"
+        seen.push(binding.symbol.id)
+    ""
+
+pub fn builtin_trait_declarations_create_v1(source: SymbolTable) -> Result<BuiltinTraitDeclarationOwnerV1, text>:
+    if source == nil or not source.scopes.contains_key(0) or not source.scopes.contains_key(source.current_scope.id):
+        return Err("builtin-caller-scope")
+    if source.next_symbol_id < 0 or source.next_scope_id <= source.current_scope.id:
+        return Err("builtin-allocator-state")
+    if source.current_scope.id < 0: return Err("builtin-caller-scope")
+    val allocation_end = builtin_trait_allocation_end_v1(source)?
+    var reserved = [builtin_trait_owner_name_v1()]
+    for kind in builtin_trait_kinds_v1(): reserved.push(builtin_trait_internal_name_v1(kind))
+    for key in source.symbols.keys():
+        val row = source.symbols[key]
+        if key < 0 or row.id.id != key or key >= source.next_symbol_id: return Err("builtin-allocator-symbol-state")
+        if reserved.contains(row.name): return Err("builtin-internal-name-already-present")
+    for name in reserved:
+        if source.exact_symbols.contains_key(name): return Err("builtin-internal-index-already-present")
+    for key in source.scopes.keys():
+        if key < 0 or key >= source.next_scope_id or source.scopes[key].id.id != key: return Err("builtin-allocator-scope-state")
+        for name in reserved:
+            if source.scopes[key].symbols.contains_key(name): return Err("builtin-internal-binding-already-present")
+    var symbols = builtin_trait_table_copy_v1(source)
+    val caller_scope = symbols.current_scope
+    val span = Span.empty()
+    val owner_name = builtin_trait_owner_name_v1()
+    val owner = symbols.define(owner_name, SymbolKind.Module, nil, span, Visibility.Private, false, Some(owner_name))
+    val scope = symbols.push_scope(ScopeKind.Module)
+    var bindings: [BuiltinTraitBindingV1] = []
+    for kind in builtin_trait_kinds_v1():
+        val symbol = symbols.define(builtin_trait_internal_name_v1(kind), SymbolKind.Trait,
+            nil, span, Visibility.Private, false, Some(owner_name))
+        bindings.push(BuiltinTraitBindingV1(kind: kind, symbol: symbol))
+    symbols.pop_scope()
+    if symbols.current_scope.id != caller_scope.id: return Err("builtin-caller-scope-not-restored")
+    if symbols.next_symbol_id != allocation_end or symbols.next_scope_id != source.next_scope_id + 1:
+        return Err("builtin-allocator-result-mismatch")
+    val registry = BuiltinTraitDeclarationsV1(owner: owner, scope: scope, bindings: bindings)
+    val invalid = builtin_trait_declarations_validate_v1(registry, symbols)
+    if invalid != "": return Err(invalid)
+    Ok(BuiltinTraitDeclarationOwnerV1(symbols: symbols, declarations: registry))
+
+pub fn builtin_trait_declaration_v1(registry: BuiltinTraitDeclarationsV1, symbols: SymbolTable,
+        kind: BuiltinTraitKindV1) -> Result<HirSymbol, text>:
+    val invalid = builtin_trait_declarations_validate_v1(registry, symbols)
+    if invalid != "": return Err(invalid)
+    for binding in registry.bindings:
+        if binding.kind == kind: return Ok(symbols.symbols[binding.symbol.id])
+    Err("builtin-kind-missing")
+
+# A transport operation has two live owners. No external string or module-local
+# numeric ID is accepted as a declaration grant.
+pub fn builtin_trait_declaration_rebind_v1(provider: BuiltinTraitDeclarationOwnerV1,
+        consumer: BuiltinTraitDeclarationOwnerV1, kind: BuiltinTraitKindV1) -> Result<HirSymbol, text>:
+    val _origin = builtin_trait_declaration_v1(provider.declarations, provider.symbols, kind)?
+    builtin_trait_declaration_v1(consumer.declarations, consumer.symbols, kind)

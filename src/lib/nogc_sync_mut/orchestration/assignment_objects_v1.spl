@@ -1,0 +1,44 @@
+# Immutable objects under an already-authorized controller root. The workload
+# journal owns reachability; these files alone never authorize an assignment.
+use std.common.contracts.orchestration.assignment_v1.*
+use std.common.contracts.orchestration.host_reservation_codec_v1.host_reservation_encode_intent_v1
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_read_regular_no_follow_bounded, file_exists}
+use std.nogc_sync_mut.io_runtime.dir_create
+
+fn assignment_object_put_v1(root: text, digest: text, suffix: text,
+        bytes: text, maximum: i64) -> Result<bool, text>:
+    if not builder_digest_valid_v1(digest) or sha256_text(bytes) != digest or bytes.len() > maximum:
+        return Err("assignment-object-invalid")
+    val path = root + "/assignment-objects/" + digest + suffix
+    if not file_exists(path):
+        dir_create(root + "/assignment-objects", true)
+        if not file_atomic_write(path, bytes): return Err("assignment-object-publication-failed")
+    val retained = file_read_regular_no_follow_bounded(path, maximum)?
+    if retained != bytes: return Err("assignment-object-publication-mismatch")
+    Ok(true)
+
+pub fn assignment_objects_retain_v1(root: text, binding: ControllerAssignmentBindingV1) -> Result<text, text>:
+    val manifest = controller_assignment_bytes_v1(binding)?
+    val reference = controller_assignment_decode_reference_v1(manifest)?
+    val intent = host_reservation_encode_intent_v1(binding.host_intent)?
+    val envelope = distributed_encode_operation_v2(binding.host_operation)?
+    val intent_saved = assignment_object_put_v1(root, reference.host_intent_digest, ".sdn", intent, 65536)?
+    # Preserve the existing V2 wire encoding at this explicit boundary. Native
+    # metadata and intent stay SDN; no alternate operation codec is invented.
+    val envelope_saved = assignment_object_put_v1(root, reference.host_envelope_digest, ".frame", envelope, 65536)?
+    val digest = sha256_text(manifest)
+    val manifest_saved = assignment_object_put_v1(root, digest, ".sdn", manifest, 4096)?
+    Ok(digest)
+
+pub fn assignment_objects_read_v1(root: text, digest: text) -> Result<ControllerAssignmentBindingV1, text>:
+    if not builder_digest_valid_v1(digest): return Err("assignment-object-digest-invalid")
+    val base = root + "/assignment-objects/"
+    val manifest = file_read_regular_no_follow_bounded(base + digest + ".sdn", 4096)?
+    if sha256_text(manifest) != digest: return Err("assignment-object-digest-mismatch")
+    val reference = controller_assignment_decode_reference_v1(manifest)?
+    val intent = file_read_regular_no_follow_bounded(base + reference.host_intent_digest + ".sdn", 65536)?
+    val envelope = file_read_regular_no_follow_bounded(base + reference.host_envelope_digest + ".frame", 65536)?
+    controller_assignment_restore_v1(reference, intent, envelope)

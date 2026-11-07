@@ -1,0 +1,69 @@
+# Read-only policy explanation. This never opens a controller journal or host.
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use std.common.contracts.orchestration.agent_policy_resolution_v1.resolve_agent_policy_v1
+use std.common.contracts.orchestration.profile_v1.ResourceAmountRangeV1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+
+fn explain_reply_v1(fields: Dict<text, SdnValue>, exit_code: i64) -> OrchestratorValidationReplyV1:
+    OrchestratorValidationReplyV1(exit_code: exit_code, output: sdn_encode_canonical(SdnValue.Dict(fields)))
+
+fn explain_failure_v1(code: text, exit_code: i64) -> OrchestratorValidationReplyV1:
+    explain_reply_v1({"version": SdnValue.Int(1), "kind": SdnValue.String("orchestrator-explanation"),
+        "status": SdnValue.String("rejected"), "code": SdnValue.String(code),
+        "authorized": SdnValue.Bool(false), "executable": SdnValue.Bool(false),
+        "policyReferencesResolved": SdnValue.Bool(false)}, exit_code)
+
+fn explain_range_v1(amount: ResourceAmountRangeV1) -> SdnValue:
+    SdnValue.Dict({"min": SdnValue.Int(amount.minimum), "recommend": SdnValue.Int(amount.recommended),
+        "prefer": SdnValue.Int(amount.preferred), "limit": SdnValue.Int(amount.limit)})
+
+# The digest fields identify exact input snapshots, never executable plans.
+pub fn orchestrator_explain_source_v1(source: text, catalog: text, ns: text, name: text) -> OrchestratorValidationReplyV1:
+    if source.len() > 1048576 or catalog.len() > 1048576:
+        return explain_failure_v1("input-size-limit", 1)
+    if ns == "" or name == "": return explain_failure_v1("session-selector-required", 2)
+    val resolved = resolve_agent_policy_v1(source, catalog, ns, name)
+    if resolved.is_err(): return explain_failure_v1(resolved.unwrap_err(), 1)
+    val policy = resolved.unwrap()
+    val session = policy.session
+    val pending: [SdnValue] = [SdnValue.String("authorization"), SdnValue.String("task-content"),
+        SdnValue.String("repository-revision"), SdnValue.String("immutable-image"),
+        SdnValue.String("installed-agent-cli"), SdnValue.String("workspace-ownership"),
+        SdnValue.String("live-host-capabilities"), SdnValue.String("placement-and-reservation"),
+        SdnValue.String("runtime-and-terminal-binding")]
+    explain_reply_v1({"version": SdnValue.Int(1), "kind": SdnValue.String("orchestrator-explanation"),
+        "status": SdnValue.String("policy-resolved"), "authorized": SdnValue.Bool(false),
+        "executable": SdnValue.Bool(false), "policyReferencesResolved": SdnValue.Bool(true),
+        "sourceDigest": SdnValue.String(policy.source_digest), "catalogDigest": SdnValue.String(policy.catalog_digest),
+        "namespace": SdnValue.String(session.meta.ns), "session": SdnValue.String(session.meta.name),
+        "resourceProfile": SdnValue.String(policy.profile.meta.name), "hostPool": SdnValue.String(policy.pool.meta.name),
+        "runtimeClass": SdnValue.String(policy.runtime.meta.name), "provider": SdnValue.String(policy.runtime.provider),
+        "executionOS": SdnValue.String(policy.runtime.execution_os), "architecture": SdnValue.String(policy.runtime.architecture),
+        "isolation": SdnValue.String(policy.runtime.isolation), "trustClass": SdnValue.String(policy.pool.trust_class),
+        "cpuMillis": explain_range_v1(policy.profile.cpu), "memoryBytes": explain_range_v1(policy.profile.memory),
+        "gpuRequired": SdnValue.Bool(policy.profile.gpu_required),
+        "preserveScarceGpuHosts": SdnValue.Bool(policy.profile.preserve_scarce_gpu_hosts),
+        "agentProvider": SdnValue.String(session.agent.provider), "taskRef": SdnValue.String(session.agent.task_ref),
+        "repositoryRef": SdnValue.String(session.workspace.repository_ref), "revisionRef": SdnValue.String(session.workspace.revision_ref),
+        "workspaceRetention": SdnValue.String(session.workspace.retention),
+        "disconnectPolicy": SdnValue.String(session.session.disconnect_policy),
+        "pendingExecutionChecks": SdnValue.Array(pending)}, 0)
+
+# Argument checks precede bounded no-follow reads. Catalog omission permits a
+# combined ResourceList; no ambient catalog or host inventory is consulted.
+pub fn orchestrator_explain_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
+    if args.len() != 4 and args.len() != 5:
+        return explain_failure_v1("usage: simple-orchestrator explain <file> <namespace> <session> [catalog]", 2)
+    if args[0] != "explain" or args[1] == "" or args[2] == "" or args[3] == "":
+        return explain_failure_v1("invalid-explain-arguments", 2)
+    if args.len() == 5 and args[4] == "": return explain_failure_v1("empty-catalog-path", 2)
+    val source = file_read_regular_no_follow_bounded(args[1], 1048576)
+    if source.is_err(): return explain_failure_v1("input-unavailable", 1)
+    var catalog = ""
+    if args.len() == 5:
+        val loaded = file_read_regular_no_follow_bounded(args[4], 1048576)
+        if loaded.is_err(): return explain_failure_v1("catalog-unavailable", 1)
+        catalog = loaded.unwrap()
+    orchestrator_explain_source_v1(source.unwrap(), catalog, args[2], args[3])

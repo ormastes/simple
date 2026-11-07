@@ -1,0 +1,38 @@
+# Strict decoder for retained/wire launch plans. Integrity is not authority.
+use std.common.contracts.orchestration.linux_launch_plan_v1.*
+use std.common.contracts.orchestration.resource_v1.{RejectionV1, parse_resource_document, as_dict, as_text, as_int, only_known, require, reject}
+
+fn launch_plan_fields_v1(source: text) -> Result<HostLinuxLaunchPlanV1, RejectionV1>:
+    val parsed = parse_resource_document(source)?
+    val spans = parsed.1
+    val fields = as_dict(parsed.0, "", spans)?
+    val version = as_int(require(fields, "version", "", spans)?, "version", spans)?
+    if version != 1 and version != 2:
+        return Err(reject("version", "version", "unsupported launch plan version", spans))
+    if version == 1:
+        only_known(fields, ["version", "kind", "workloadUid", "attempt", "runtimeClass", "serviceScopeId", "requestDigest"], "", spans)?
+    else:
+        only_known(fields, ["version", "kind", "workloadUid", "attempt", "runtimeClass", "serviceScopeId", "requestDigest", "physicalHostId", "bootId", "providerGeneration"], "", spans)?
+    val kind = as_text(require(fields, "kind", "", spans)?, "kind", spans)?
+    if kind != "host-linux-launch": return Err(reject("kind", "kind", "unsupported launch plan kind", spans))
+    val uid = as_text(require(fields, "workloadUid", "", spans)?, "workloadUid", spans)?
+    val attempt = as_int(require(fields, "attempt", "", spans)?, "attempt", spans)?
+    val runtime = as_text(require(fields, "runtimeClass", "", spans)?, "runtimeClass", spans)?
+    val scope = as_text(require(fields, "serviceScopeId", "", spans)?, "serviceScopeId", spans)?
+    val digest = as_text(require(fields, "requestDigest", "", spans)?, "requestDigest", spans)?
+    var plan = HostLinuxLaunchPlanV1(workload_uid: uid, attempt: attempt, runtime_class: runtime,
+        service_scope_id: scope, request_digest: digest)
+    if version == 2:
+        plan.physical_host_id = as_text(require(fields, "physicalHostId", "", spans)?, "physicalHostId", spans)?
+        plan.boot_id = as_text(require(fields, "bootId", "", spans)?, "bootId", spans)?
+        plan.provider_generation = as_int(require(fields, "providerGeneration", "", spans)?, "providerGeneration", spans)?
+    Ok(plan)
+
+pub fn host_linux_launch_plan_decode_v1(source: text) -> Result<HostLinuxLaunchPlanV1, text>:
+    if source.len() > 4096: return Err("launch-plan-record-too-large")
+    val plan = match launch_plan_fields_v1(source):
+        case Ok(value): value
+        case Err(reason): return Err("launch-plan-invalid:" + reason.kind + ":" + reason.path)
+    val canonical = host_linux_launch_plan_bytes_v1(plan)?
+    if canonical != source: return Err("launch-plan-not-canonical")
+    Ok(plan)

@@ -31,7 +31,7 @@
 # piped pid, and is what the oracle asserts teardown against.
 
 use app.io.process_ops.{process_pid_exists}
-use app.llm_caret.agent_plan.{AgentLaunchRequest, build_agent_launch_plan}
+use app.llm_caret.agent_plan.{AgentLaunchRequest, build_agent_launch_plan, agent_plan_launch_error_v1}
 use app.llm_caret.agent_runtime.{AgentProcess, AgentTeamProcess,
     is_known_agent_provider, agent_command_for_provider_with_all,
     summarize_agent_team}
@@ -101,6 +101,16 @@ pub fn launch_pane_team(manager_id: text, requests: [AgentLaunchRequest],
         return _failed(manager_id, capacity, "requests_required")
     if requests.len() > capacity:
         return _failed(manager_id, capacity, "capacity_exceeded")
+
+    # Validate the whole batch before smux registry or process effects. An
+    # unsupported later member must not launch an earlier valid member.
+    for req in requests:
+        val plan = build_agent_launch_plan(req)
+        if not is_known_agent_provider(plan.provider):
+            return _failed(manager_id, capacity, "unknown_provider:" + plan.provider)
+        val plan_error = agent_plan_launch_error_v1(plan)
+        if plan_error != "":
+            return _failed(manager_id, capacity, plan_error)
 
     val session = smux_create_session(manager_id)
     if session.id == "":

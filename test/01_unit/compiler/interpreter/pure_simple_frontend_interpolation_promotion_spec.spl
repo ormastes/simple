@@ -25,7 +25,7 @@
 # @cover src/compiler/10.frontend/core/frontend.spl
 
 use std.spec.{describe, it, expect}
-use compiler.core.ast.{ast_reset}
+use compiler.core.ast.{ast_reset, expr_get_str}
 use compiler.core.ast_expr.{
     EXPR_INTERPOLATED_STRING, EXPR_STRING_LIT,
     expr_count, expr_owner_tag
@@ -97,3 +97,33 @@ describe "pure-Simple frontend string interpolation promotion":
         )
         expect(parse_src(src)).to_equal(true)
         expect(count_tag(EXPR_INTERPOLATED_STRING)).to_equal(0)
+
+    it "preserves nested literal regions after core interpolation expansion":
+        val nested = lb() + "spec: " + lb() + "maximumJournalEvents: 10000" + rb() + rb()
+        expect(parse_src("fn main():\n    \"" + nested + "\"\n")).to_equal(true)
+        expect(count_tag(EXPR_INTERPOLATED_STRING)).to_equal(0)
+        var found = false
+        var idx = 0
+        while idx < expr_count():
+            if expr_owner_tag(idx) == EXPR_STRING_LIT:
+                val decoded = expr_get_str(idx)
+                expect(decoded).to_equal(nested)
+                expect(decoded.len()).to_equal(37)
+                expect(decoded.byte_at(35)).to_equal(125)
+                expect(decoded.byte_at(36)).to_equal(125)
+                found = true
+            idx = idx + 1
+        expect(found).to_equal(true)
+
+    it "decodes intentional doubled escapes without creating interpolation nodes":
+        val escaped = lb() + lb() + "literal" + rb() + rb()
+        expect(parse_src("fn main():\n    \"" + escaped + "\"\n")).to_equal(true)
+        expect(count_tag(EXPR_INTERPOLATED_STRING)).to_equal(0)
+        var found = false
+        var idx = 0
+        while idx < expr_count():
+            if expr_owner_tag(idx) == EXPR_STRING_LIT:
+                expect(expr_get_str(idx)).to_equal(lb() + "literal" + rb())
+                found = true
+            idx = idx + 1
+        expect(found).to_equal(true)

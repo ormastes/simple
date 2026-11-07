@@ -10,6 +10,8 @@ extern fn rt_string_len(value: i64) -> i64
 extern fn rt_string_new(bytes: i64, len: i64) -> text
 @unsafe(reason: "read fields of the provider's three-word result block", capabilities: [ffi, raw_ptr])
 extern fn rt_ptr_read_i64(address: i64, offset: i64) -> i64
+@unsafe(reason: "release the owned raw result block after copying its payloads", capabilities: [ffi, raw_ptr])
+extern fn rt_free(address: i64)
 @unsafe(reason: "existing native bounded tuple provider takes explicit command pointer and length", capabilities: [ffi, raw_ptr])
 extern fn rt_process_run_bounded_tuple(command_ptr: i64, command_len: i64, args: [text], timeout_ms: i64, max_output_bytes: i64) -> i64
 @unsafe(reason: "existing native unbounded tuple provider takes explicit command pointer and length", capabilities: [ffi, raw_ptr])
@@ -28,6 +30,7 @@ fn process_capture_result(block: i64) -> (text, text, i64):
     val stderr_len = unsafe(capabilities: [ffi]): rt_string_len(stderr_handle)
     # Native process providers represent an empty output stream as nil.
     if (stdout_handle != 3 and stdout_len < 0) or (stderr_handle != 3 and stderr_len < 0) or (stdout_data == 0 and stdout_len > 0) or (stderr_data == 0 and stderr_len > 0):
+        unsafe(capabilities: [ffi, raw_ptr]): rt_free(block)
         return ("", "native process capture returned invalid text", -1)
     var stdout_text = ""
     if stdout_len > 0:
@@ -35,6 +38,10 @@ fn process_capture_result(block: i64) -> (text, text, i64):
     var stderr_text = ""
     if stderr_len > 0:
         stderr_text = unsafe(capabilities: [ffi, raw_ptr]): rt_string_new(stderr_data, stderr_len)
+    # Both tuple providers return a fresh rt_alloc block. The payload strings
+    # belong to their runtime owner; only this three-word block is released.
+    # rt_free also removes it from any enclosing transient raw scope.
+    unsafe(capabilities: [ffi, raw_ptr]): rt_free(block)
     (stdout_text, stderr_text, status)
 
 # @workaround bug=phase2_bounded_process_text_abi_2026_10_27 reason=Preserve the existing unbounded native provider with explicit command pointer and UTF8 length instead of changing its capture or timeout policy

@@ -16,7 +16,7 @@ use compiler.core.ast.{DECL_CE, decl_ce_block}
 use compiler.core.ast.{decl_fn, decl_extern_fn, decl_struct_def}
 use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding, decl_type_alias}
 use compiler.core.ast.{decl_use_import, decl_export_names, decl_enum_def, decl_enum_payload_unnamed_marker, decl_set_lazy}
-use compiler.core.ast.{decl_set_type_params}
+use compiler.core.ast.{decl_set_type_params, decl_set_type_param_constraints}
 use compiler.core.ast.{decl_set_hardware, decl_set_clocked_args, decl_set_vhdl_generic_args, decl_set_flatten_struct_output}
 use compiler.core.ast.{decl_impl_block}
 use compiler.frontend.core._Ast.decl_nodes.{decl_impl_block_typed}
@@ -422,8 +422,10 @@ fn parse_enum_decl() -> i64:
     val enum_name = par_text_get()
     parser_expect(6)
 
-    # Parse optional type parameters: enum Result<T, E>:
-    val type_params = parse_type_params()
+    # Preserve the canonical generic declaration's names and bound/default rows.
+    val parsed_type_params = parse_type_params_with_trait_bounds()
+    val type_params = parsed_type_params.0
+    val type_param_constraints = parsed_type_params.1
 
     # Pre-register enum name so type references resolve during parsing (same
     # reason struct decls do this -- see parse_struct_decl). Without this,
@@ -627,6 +629,7 @@ fn parse_enum_decl() -> i64:
     # doc/08_tracking/bug/enum_payload_type_param_erased_to_any_in_flat_ast_2026-08-21.md
     if type_params.len() > 0:
         decl_set_type_params(enum_d, type_params)
+        decl_set_type_param_constraints(enum_d, type_param_constraints)
     if parse_enum_method_ids.len() > 0:
         # This construction site proves the impl is synthetic. Preserve the
         # enum's ordered binders and applied receiver here; a missing target
@@ -1069,6 +1072,35 @@ pub fn parser_declaration_metadata_promote_transient_owner() -> bool:
         rt_transient_heap_promote(ENUM_OPEN_REGIONS) and
         representation_parser_promote_transient_owner_v1() and
         lock_level_metadata_promote()
+
+# The PENDING_* pools are encoded by the cache capture and read after the
+# per-file transient scope ends (see extend_decls.spl's promote note). They
+# are private to this module, so they are promoted here rather than from
+# extend_decls, whose cross-module read of them had no import and failed
+# native codegen (stage2 run 15: imported non-public module static
+# PENDING_CLOCKED_ARGS).
+# @workaround bug=stage2_mir_shard_flat_pool_text_len_minus1_2026_10_22 reason=extend_pending_pools_dangle_across_transient_scope
+extern fn rt_array_free<T>(array: [T])
+
+fn _pending_pool_promote_i64(root: [[i64]]) -> bool:
+    val promoted = rt_transient_heap_promote(root)
+    rt_array_free(root)
+    promoted
+
+fn _pending_pool_promote_text(root: [[text]]) -> bool:
+    val promoted = rt_transient_heap_promote(root)
+    rt_array_free(root)
+    promoted
+
+pub fn parser_pending_pools_promote_transient_owners() -> bool:
+    var promoted = true
+    promoted = _pending_pool_promote_text([PENDING_SFFI_KEYS]) and promoted
+    promoted = _pending_pool_promote_text([PENDING_SFFI_VALUES]) and promoted
+    promoted = _pending_pool_promote_text([PENDING_CLOCKED_ARGS]) and promoted
+    promoted = _pending_pool_promote_i64([PENDING_VHDL_GENERIC_ARGS]) and promoted
+    promoted = _pending_pool_promote_text([PENDING_UNSAFE_CAPS]) and promoted
+    promoted = _pending_pool_promote_text([PENDING_DECL_ATTRS]) and promoted
+    promoted
 
 fn parser_record_enum_open_regions(enum_name: text, complete_open: bool, dyn_open: bool):
     val c = if complete_open: "1" else: "0"
@@ -2119,26 +2151,24 @@ fn parse_module_body():
             parser_advance()
             parser_skip_newlines_and_semicolons()
         elif par_kind_get() == 35:
-            # Type alias: type X = Y -- capture name + aliased type into the
-            # arena (bug type_alias_declarations_discarded_at_parse_2026-07-29,
-            # lane TAL1). Pure plumbing: no semantic alias registry yet -- a
-            # later lane consumes module.type_aliases.
+            # Type aliases share declaration generic syntax, bounds/default
+            # transport, and the existing semantic alias owner.
             parser_advance()
             var ta_name: text = ""
             if par_kind_get() == 6:
                 ta_name = par_text_get()
                 parser_advance()
+            val ta_parameters = parse_type_params_with_trait_bounds()
             var ta_type_tag: i64 = 0
-            if par_kind_get() == TOK_ASSIGN:
-                parser_advance()
+            if parser_expect(TOK_ASSIGN):
                 ta_type_tag = parser_parse_type()
             if ta_name != "":
                 val ta_d = decl_type_alias(ta_name, ta_type_tag, 0)
+                decl_set_type_params(ta_d, ta_parameters.0)
+                decl_set_type_param_constraints(ta_d, ta_parameters.1)
                 module_add_decl(ta_d)
-            # Defensive skip-to-newline: this minimal capture does not parse
-            # generic type-alias params (`type X<T> = ...`) or where-clauses,
-            # so consume any leftover tokens the same way the old skip loop
-            # did rather than risking a parse desync.
+            # Preserve the existing recovery boundary for unsupported trailing
+            # syntax; generic parameters and the RHS have been consumed.
             while true:
                 val type_is_nl: bool = par_kind_get() == 180
                 val type_is_ded: bool = par_kind_get() == 182
@@ -2373,6 +2403,7 @@ fn parse_module_body():
 
 export parse_enum_decl, parse_module_body, parser_enum_attributes_for, parser_class_attributes_for, parser_record_class_attributes
 export parser_enum_open_regions_for
+export parser_pending_pools_promote_transient_owners
 
 # ===== Bitfield Declaration =====
 

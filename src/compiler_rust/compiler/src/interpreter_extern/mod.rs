@@ -2520,6 +2520,12 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("spl_mutex_try_lock", concurrency::spl_mutex_try_lock);
     insert_simple!("spl_mutex_unlock", concurrency::spl_mutex_unlock);
     insert_simple!("spl_mutex_destroy", concurrency::spl_mutex_destroy);
+    insert_simple!("spl_condvar_create", concurrency::spl_condvar_create);
+    insert_simple!("spl_condvar_wait", concurrency::spl_condvar_wait);
+    insert_simple!("spl_condvar_wait_timeout", concurrency::spl_condvar_wait_timeout);
+    insert_simple!("spl_condvar_signal", concurrency::spl_condvar_signal);
+    insert_simple!("spl_condvar_broadcast", concurrency::spl_condvar_broadcast);
+    insert_simple!("spl_condvar_destroy", concurrency::spl_condvar_destroy);
     insert_simple!("rt_thread_free", concurrency::rt_thread_free);
     insert_simple!("rt_thread_id", concurrency::rt_thread_id);
     insert_simple!("rt_thread_is_done", concurrency::rt_thread_is_done);
@@ -3413,12 +3419,17 @@ pub(crate) fn call_extern_function(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     // Evaluate all arguments upfront
+    crate::perf_counters::bump(&crate::perf_counters::EXTERN_CALLS, 1);
+    let t = crate::perf_counters::phase_start();
     let evaluated: Vec<Value> = args
         .iter()
         .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
         .collect::<Result<Vec<_>, _>>()?;
+    crate::perf_counters::phase_end(&crate::perf_counters::EXTERN_NS_ARGS, t);
 
+    let t = crate::perf_counters::phase_start();
     let result = call_extern_function_with_values(name, &evaluated, env, functions, classes, enums, impl_methods);
+    crate::perf_counters::phase_end(&crate::perf_counters::EXTERN_NS_DISPATCH, t);
     // `&mut x` on an extern argument must actually write back to `x`.
     //
     // `UnaryOp::RefMut` evaluates its operand to a COPY and wraps that copy

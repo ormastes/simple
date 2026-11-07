@@ -113,7 +113,7 @@ fn rti_decl_ref_same(a: DeclRef, b: DeclRef) -> bool:
 fn rti_last_segment(name: text) -> text:
     var cut = 0
     var i = 0
-    while i < name.len():
+    while i < name.byte_len():
         val code = name.char_code_at(i)
         if code == 46 or code == 58:
             cut = i + 1
@@ -126,10 +126,10 @@ fn rti_qualified_free_callable_v1(name: text) -> DeclRef?:
     if rti_method_parts(name).len() > 0: return nil
     var cut = -1
     var index = 0
-    while index < name.len():
+    while index < name.byte_len():
         if name.char_code_at(index) == 46: cut = index
         index = index + 1
-    if cut <= 0 or cut + 1 >= name.len(): return nil
+    if cut <= 0 or cut + 1 >= name.byte_len(): return nil
     Some(rti_fn_ref(rti_module_id(name.substring(0, cut)), name.substring(cut + 1)))
 
 fn rti_kind_display(kind: SymbolKind) -> text:
@@ -307,7 +307,7 @@ fn rti_owner_kind_at(symbols: SymbolTable, module_id: text, raw: i64) -> text:
 fn rti_method_parts(qualified: text) -> [text]:
     """`pkg.mod.Owner::method` -> [Owner, method]; [] when not a method name."""
     var i = 0
-    while i + 1 < qualified.len():
+    while i + 1 < qualified.byte_len():
         if qualified.char_code_at(i) == 58 and qualified.char_code_at(i + 1) == 58:
             return [rti_last_segment(qualified.substring(0, i)), qualified.substring(i + 2)]
         i = i + 1
@@ -741,6 +741,18 @@ impl ReturnTypeInterfaceTable:
                         if own_module != "" and rti_decl_ref_same(own_decl, qualified):
                             # @workaround bug=mono_generic_return_ctx_inference_2026-10-27 recover=902437eff3b8 reason=phase1-e05b9162-lacks-expected-return-inference
                             return Err(rti_error("E-RTI-001", "qualified callee '{name}' has no return-type row for the same declared callable"))
+                    case SymbolKind.Struct | SymbolKind.Class:
+                        # A rewritten field default (`c: C = C()`) carries the
+                        # constructor's qualified declaration name into every
+                        # construction site. Constructors publish no row, so
+                        # with exact same-declaration proof this is the same
+                        # no-answer as the unqualified `C()` call -- never a
+                        # suffix or alias match.
+                        val ctor_module = rti_symbol_module(symbols, raw)
+                        val ctor_decl = rti_fn_ref(ctor_module, rti_last_segment(symbol.name))
+                        if ctor_module != "" and rti_decl_ref_same(ctor_decl, qualified):
+                            # @workaround bug=mono_generic_return_ctx_inference_2026-10-27 recover=902437eff3b8 reason=phase1-e05b9162-lacks-expected-return-inference
+                            return Err(rti_error("E-RTI-001", "qualified callee '{name}' is the constructor of the same declared type; constructors publish no return-type row"))
                     case _: ()
             # @workaround bug=mono_generic_return_ctx_inference_2026-10-27 recover=902437eff3b8 reason=phase1-e05b9162-lacks-expected-return-inference
             return Err(rti_error("E-RTI-002", "qualified callee '{name}' has no exact return-type row; raw symbol fallback is not authoritative"))

@@ -13,6 +13,7 @@ use std.common.crypto.sha256.{sha256_text}
 use std.common.sdn.value.{SdnValue, SdnSpan, sdn_value_to_text}
 use std.common.sdn.parser.{parse_with_spans_and_issues}
 use compiler.common.data.data_schema_contracts.*
+use compiler.common.data.data_schema_core_v1.{DataSchemaCoreDeclV1, data_schema_reduce_v1}
 
 fn data_sort_texts_v1(items: [text]) -> [text]:
     var out: [text] = []
@@ -106,12 +107,6 @@ fn data_conflict_v1(kind: DataSchemaErrorKindV1, subject: text, label: text, lef
     val message = "{label} '{subject}': '{left}' at {data_decl_provenance_text_v1(p0)} conflicts with '{right}' at {data_decl_provenance_text_v1(p1)}"
     data_schema_diagnostic_v1(kind, subject, p0, p1, message)
 
-fn data_requiredness_name_v1(value: DataRequirednessV1) -> text:
-    match value:
-        case DataRequirednessV1.Required: "required"
-        case DataRequirednessV1.Optional: "optional"
-        case DataRequirednessV1.Defaulted: "defaulted"
-
 fn data_decl_shape_error_v1(decl: DataAttrDeclV1) -> text:
     if decl.tree.len() == 0 or decl.view.len() == 0 or decl.name.len() == 0 or decl.type_ref.path.len() == 0:
         return "incomplete attribute declaration"
@@ -135,7 +130,7 @@ pub fn data_schema_resolve_v1(authority: DataSchemaAuthorityV1, decls: [DataAttr
             val none = data_decl_provenance_v1(DataDeclOriginV1.Spl, "", 0, "")
             return Err([data_schema_diagnostic_v1(DataSchemaErrorKindV1.InvalidDeclaration, "", none, none, message)])
         case Ok(_): pass
-    var names: [text] = []
+    var core_decls: [DataSchemaCoreDeclV1] = []
     for decl in decls:
         val where = data_decl_provenance_text_v1(decl.provenance)
         val shape = data_decl_shape_error_v1(decl)
@@ -145,45 +140,19 @@ pub fn data_schema_resolve_v1(authority: DataSchemaAuthorityV1, decls: [DataAttr
             diags.push(data_schema_diagnostic_v1(DataSchemaErrorKindV1.UnauthorizedInjection, decl.name,
                 decl.provenance, decl.provenance,
                 "owner '{decl.provenance.owner}' has no authority over tree '{decl.tree}' (schema '{authority.tree}') at {where}"))
-        elif not data_texts_contain_v1(names, decl.name):
-            names.push(decl.name)
+        else:
+            core_decls.push(DataSchemaCoreDeclV1(view: decl.view, name: decl.name,
+                type_key: data_type_canonical_v1(decl.type_ref, aliases),
+                requiredness: decl.requiredness, default_value: decl.default_value,
+                provenance: decl.provenance))
     if diags.len() > 0:
         return Err(diags)
+    val reduced = data_schema_reduce_v1(authority.tree, core_decls)?
     var attrs: [DataResolvedAttrV1] = []
-    var ordinal = 0
-    for name in data_sort_texts_v1(names):
-        var has_first = false
-        var first = decls[0]
-        var first_type = ""
-        var views: [text] = []
-        var provenances: [DataDeclProvenanceV1] = []
-        for decl in decls:
-            if decl.name == name:
-                val canonical = data_type_canonical_v1(decl.type_ref, aliases)
-                if not has_first:
-                    has_first = true
-                    first = decl
-                    first_type = canonical
-                elif canonical != first_type:
-                    diags.push(data_conflict_v1(DataSchemaErrorKindV1.TypeConflict, name, "attribute type",
-                        first_type, first.provenance, canonical, decl.provenance))
-                elif data_requiredness_code_v1(decl.requiredness) != data_requiredness_code_v1(first.requiredness):
-                    diags.push(data_conflict_v1(DataSchemaErrorKindV1.RequirednessConflict, name, "attribute requiredness",
-                        data_requiredness_name_v1(first.requiredness), first.provenance,
-                        data_requiredness_name_v1(decl.requiredness), decl.provenance))
-                elif decl.default_value != first.default_value:
-                    diags.push(data_conflict_v1(DataSchemaErrorKindV1.DefaultConflict, name, "attribute default",
-                        first.default_value, first.provenance, decl.default_value, decl.provenance))
-                if not data_texts_contain_v1(views, decl.view):
-                    views.push(decl.view)
-                provenances.push(decl.provenance)
-        ordinal = ordinal + 1
-        attrs.push(DataResolvedAttrV1(id: DataAttrIdV1(tree: authority.tree, ordinal: ordinal),
-            name: name, type_canonical: first_type, requiredness: first.requiredness,
-            default_value: first.default_value, views: data_sort_texts_v1(views),
-            provenances: provenances))
-    if diags.len() > 0:
-        return Err(diags)
+    for attr in reduced:
+        attrs.push(DataResolvedAttrV1(id: attr.id, name: attr.name, type_canonical: attr.type_key,
+            requiredness: attr.requiredness, default_value: attr.default_value,
+            views: attr.views, provenances: attr.provenances))
     Ok(DataSchemaSurfaceV1(contract_version: DATA_SCHEMA_CONTRACT_V1, tree: authority.tree,
         attrs: attrs, schema_digest: data_schema_digest_v1(authority.tree, attrs)))
 

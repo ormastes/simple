@@ -124,6 +124,22 @@ var expr_trace_tags_cached: bool = false
 var ast_gen_slot: [i64] = [0]
 var ast_gen_last_report_slot: [i64] = [-1]
 
+# Ready-handle authority is independent of the serialized diagnostic generation.
+# Store replacement invalidates references even when snapshots restore old ids.
+# Zero permanently retires the authority rather than wrapping its incarnation.
+var expr_lifetime_incarnation_slot_v1: [i64] = [1]
+
+pub fn expr_lifetime_next_incarnation_v1(current: i64) -> i64:
+    if current <= 0 or current == 9223372036854775807: return 0
+    current + 1
+
+pub fn expr_lifetime_incarnation_v1() -> i64:
+    expr_lifetime_incarnation_slot_v1[0]
+
+fn expr_lifetime_invalidate_v1():
+    expr_lifetime_incarnation_slot_v1[0] = expr_lifetime_next_incarnation_v1(
+        expr_lifetime_incarnation_slot_v1[0])
+
 # High-water mark of the largest expr index ever mirrored into the environment
 # since the last expr_reset().  expr_count_set(0) inside expr_reset() would
 # otherwise erase the only record of how far the mirror reaches, and a SMALLER
@@ -464,6 +480,7 @@ fn ast_gen_check_index(kind: text, idx: i64, minted_gen: i64) -> bool:
     true
 
 fn expr_reset():
+    expr_lifetime_invalidate_v1()
     # Allocate nil module arrays once, then retain their storage across files.
     expr_mode_slots_refresh()
     # Drop the per-index env mirror BEFORE the arrays are cleared: it is read
@@ -1121,6 +1138,8 @@ pub fn flat_expr_pools_dump() -> text:
 # Returns false when the blob ran short or was malformed; the caller must
 # treat that as a cache MISS and reparse, never as an empty parse.
 pub fn flat_expr_pools_restore(r: FlatPoolReader) -> bool:
+    # Invalidate before a partial or malformed restore can mutate live storage.
+    expr_lifetime_invalidate_v1()
     asm_arm_abi = flat_pool_dec_text_into(asm_arm_abi, r)
     asm_arm_archs = flat_pool_dec_text_list_into(asm_arm_archs, r)
     asm_arm_asm_text = flat_pool_dec_text_into(asm_arm_asm_text, r)
@@ -1200,6 +1219,7 @@ pub struct ExprStoreState:
     asm_arm_is_wildcard: [bool]
 
 pub fn expr_store_state_take() -> ExprStoreState:
+    expr_lifetime_invalidate_v1()
     val s = ExprStoreState(
         expr_env_mirror_high_slot: expr_env_mirror_high_slot,
         expr_tag: expr_tag,
@@ -1261,6 +1281,7 @@ pub fn expr_store_state_take() -> ExprStoreState:
     s
 
 pub fn expr_store_state_install(s: ExprStoreState):
+    expr_lifetime_invalidate_v1()
     expr_env_mirror_high_slot = s.expr_env_mirror_high_slot
     expr_tag = s.expr_tag
     expr_span = s.expr_span

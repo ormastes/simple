@@ -1,0 +1,88 @@
+# Internal normalized reducer shared by versioned schema wrappers. A type_key
+# is supplied by its type owner after validation; this module never parses or
+# resolves a type, authorizes a declaration, or publishes a public schema.
+use compiler.common.data.data_schema_contracts.*
+
+pub struct DataSchemaCoreDeclV1:
+    view: text
+    name: text
+    type_key: text
+    requiredness: DataRequirednessV1
+    default_value: text
+    provenance: DataDeclProvenanceV1
+
+pub struct DataSchemaCoreAttrV1:
+    id: DataAttrIdV1
+    name: text
+    type_key: text
+    requiredness: DataRequirednessV1
+    default_value: text
+    views: [text]
+    provenances: [DataDeclProvenanceV1]
+
+pub fn data_schema_core_sorted_names_v1(items: [text]) -> [text]:
+    var out: [text] = []
+    for item in items:
+        if out.contains(item):
+            continue
+        var index = out.len()
+        out.push(item)
+        while index > 0 and out[index] < out[index - 1]:
+            val previous = out[index - 1]
+            out[index - 1] = out[index]
+            out[index] = previous
+            index = index - 1
+    out
+
+fn data_schema_core_requiredness_name_v1(value: DataRequirednessV1) -> text:
+    match value:
+        case DataRequirednessV1.Required: "required"
+        case DataRequirednessV1.Optional: "optional"
+        case DataRequirednessV1.Defaulted: "defaulted"
+
+fn data_schema_core_conflict_v1(kind: DataSchemaErrorKindV1, subject: text, label: text,
+                               left: text, p0: DataDeclProvenanceV1,
+                               right: text, p1: DataDeclProvenanceV1) -> DataSchemaDiagnosticV1:
+    val message = "{label} '{subject}': '{left}' at {data_decl_provenance_text_v1(p0)} conflicts with '{right}' at {data_decl_provenance_text_v1(p1)}"
+    data_schema_diagnostic_v1(kind, subject, p0, p1, message)
+
+# Wrappers preserve their own input validation and exact type-owner boundary.
+# Ordering/merge/conflict behavior here is the original V1 reduction algorithm.
+pub fn data_schema_reduce_v1(tree: text, decls: [DataSchemaCoreDeclV1]) -> Result<[DataSchemaCoreAttrV1], [DataSchemaDiagnosticV1]>:
+    var names: [text] = []
+    for decl in decls:
+        if not names.contains(decl.name):
+            names.push(decl.name)
+    var attrs: [DataSchemaCoreAttrV1] = []
+    var diags: [DataSchemaDiagnosticV1] = []
+    var ordinal = 0
+    for name in data_schema_core_sorted_names_v1(names):
+        var has_first = false
+        var first = decls[0]
+        var views: [text] = []
+        var provenances: [DataDeclProvenanceV1] = []
+        for decl in decls:
+            if decl.name == name:
+                if not has_first:
+                    has_first = true
+                    first = decl
+                elif decl.type_key != first.type_key:
+                    diags.push(data_schema_core_conflict_v1(DataSchemaErrorKindV1.TypeConflict, name,
+                        "attribute type", first.type_key, first.provenance, decl.type_key, decl.provenance))
+                elif data_requiredness_code_v1(decl.requiredness) != data_requiredness_code_v1(first.requiredness):
+                    diags.push(data_schema_core_conflict_v1(DataSchemaErrorKindV1.RequirednessConflict, name,
+                        "attribute requiredness", data_schema_core_requiredness_name_v1(first.requiredness),
+                        first.provenance, data_schema_core_requiredness_name_v1(decl.requiredness), decl.provenance))
+                elif decl.default_value != first.default_value:
+                    diags.push(data_schema_core_conflict_v1(DataSchemaErrorKindV1.DefaultConflict, name,
+                        "attribute default", first.default_value, first.provenance, decl.default_value, decl.provenance))
+                if not views.contains(decl.view):
+                    views.push(decl.view)
+                provenances.push(decl.provenance)
+        ordinal = ordinal + 1
+        attrs.push(DataSchemaCoreAttrV1(id: DataAttrIdV1(tree: tree, ordinal: ordinal), name: name,
+            type_key: first.type_key, requiredness: first.requiredness, default_value: first.default_value,
+            views: data_schema_core_sorted_names_v1(views), provenances: provenances))
+    if diags.len() > 0:
+        return Err(diags)
+    Ok(attrs)

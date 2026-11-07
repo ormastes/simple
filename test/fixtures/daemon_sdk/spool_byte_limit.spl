@@ -1,0 +1,75 @@
+# @req DAE-01 HOST-01
+# Real spool writer/read boundary cases, shared with SSpec.
+use std.nogc_sync_mut.daemon_sdk.protocol.{write_daemon_request, write_daemon_response, parse_request_file, read_daemon_response, daemon_request_path_for}
+use std.nogc_sync_mut.daemon_sdk.types.{DaemonRequest, DaemonResponse}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.io_runtime.{file_read_bytes_result, file_exists, dir_remove}
+
+fn ascii_payload(size: i64) -> text:
+    assert(size >= 0 and size <= 1048576)
+    var block = "x"
+    var exponent = 0
+    while exponent < 20:
+        block = block + block
+        exponent = exponent + 1
+    block.substring(0, size)
+
+pub fn spool_request_byte_boundaries() -> i64:
+    val root = secure_temp_dir("build", "spool-request-bytes").unwrap()
+    # Literal ASCII framing: id/kind/timestamp/field prefix plus final LF.
+    val payload = ascii_payload(1048576 - 40)
+    val request = DaemonRequest(id: "limit", kind: 1, timestamp: 1, fields: {"data": payload})
+    val path = write_daemon_request(request, root + "/exact")
+    assert(path != "")
+    assert(file_read_bytes_result(path).unwrap().len() == 1048576)
+    val decoded = parse_request_file(path)
+    assert(decoded.id == "limit")
+    assert(decoded.get_field("data") == payload)
+    val oversized = DaemonRequest(id: "limit", kind: 1, timestamp: 1, fields: {"data": payload + "x"})
+    assert(write_daemon_request(oversized, root + "/over") == "")
+    assert(not file_exists(daemon_request_path_for("limit", root + "/over")))
+    assert(dir_remove(root, true))
+    0
+
+pub fn spool_response_byte_boundaries() -> i64:
+    val root = secure_temp_dir("build", "spool-response-bytes").unwrap()
+    val payload = ascii_payload(1048576 - 50)
+    val response = DaemonResponse(request_id: "limit", status: 0, timestamp: 1, fields: {"data": payload})
+    assert(write_daemon_response(response, root + "/exact"))
+    assert(file_read_bytes_result(root + "/exact/limit.resp").unwrap().len() == 1048576)
+    val decoded = read_daemon_response("limit", root + "/exact")
+    assert(decoded.request_id == "limit")
+    assert(decoded.get_field("data") == payload)
+    val oversized = DaemonResponse(request_id: "limit", status: 0, timestamp: 1, fields: {"data": payload + "x"})
+    assert(not write_daemon_response(oversized, root + "/over"))
+    assert(not file_exists(root + "/over/limit.resp"))
+    assert(dir_remove(root, true))
+    0
+
+pub fn spool_multibyte_limit() -> i64:
+    val root = secure_temp_dir("build", "spool-multibyte-bytes").unwrap()
+    # 2^19 copies of a two-byte UTF-8 scalar: payload alone is 1 MiB.
+    # Character count plus headers fits the cap; byte count plus headers does not.
+    var payload = "é"
+    var exponent = 0
+    while exponent < 19:
+        payload = payload + payload
+        exponent = exponent + 1
+    val request = DaemonRequest(id: "limit", kind: 1, timestamp: 1, fields: {"data": payload})
+    assert(write_daemon_request(request, root + "/requests") == "")
+    assert(not file_exists(daemon_request_path_for("limit", root + "/requests")))
+    val response = DaemonResponse(request_id: "limit", status: 0, timestamp: 1, fields: {"data": payload})
+    assert(not write_daemon_response(response, root + "/responses"))
+    assert(not file_exists(root + "/responses/limit.resp"))
+    assert(dir_remove(root, true))
+    0
+
+fn main() -> i64:
+    print "spool bytes: request boundary"
+    spool_request_byte_boundaries()
+    print "spool bytes: response boundary"
+    spool_response_byte_boundaries()
+    print "spool bytes: multibyte refusal"
+    spool_multibyte_limit()
+    print "spool byte limits passed"
+    0

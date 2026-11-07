@@ -2410,9 +2410,13 @@ impl MirTextCodegen for MirToLlvm:
         # entry stays unset (default false/signed) even though its source
         # temp was correctly marked unsigned, and a later print(x) would
         # sign-extend a high-bit-set unsigned value incorrectly.
-        if not self.unsigned_locals.has(dest_id):
-            if self.unsigned_locals.has(src_id):
-                self.unsigned_locals[dest_id] = self.unsigned_locals[src_id]
+        # Copy/Move already replaces the destination LLVM type with `ty`.
+        # Replace signedness as well: an inferred local can have a preseeded
+        # false entry even when its source is U8. Keeping that entry makes
+        # `val byte = bytes[i]; byte as i64` sign-extend bytes above 127.
+        # Conversions belong to Cast; a copy preserves its source value.
+        val source_unsigned = if self.unsigned_locals.has(src_id): self.unsigned_locals[src_id] else: false
+        self.unsigned_locals[dest_id] = source_unsigned
 
         if is_float_type(ty):
             # -0.0 sign fix: see translate_cast_float_signsafe above for
@@ -3330,7 +3334,13 @@ impl MirTextCodegen for MirToLlvm:
         val store_ty_raw = if slot_elem != "": slot_elem else: self.valid_llvm_type(self.get_operand_type(value))
         # See translate_alloc: void spill slots are materialized as i64.
         val store_ty = if store_ty_raw == "void": "i64" else: store_ty_raw
-        val value_val = self.value_as_type(raw_value_val, self.get_operand_type(value), store_ty)
+        # SSA spills can retain an inferred i64 slot while their defining
+        # value has since resolved to U8. Widen using the value's signedness:
+        # the signed-default helper turns high-bit octets into negative ints
+        # before the load, even when Copy/Move preserved the source metadata.
+        # Keep noninteger slot conversion behavior unchanged in this repair.
+        val source_unsigned = is_integer_type(store_ty) and self.get_operand_unsigned(value)
+        val value_val = self.value_as_type_signed(raw_value_val, self.get_operand_type(value), store_ty, source_unsigned)
         self.builder.emit_store(store_ty, value_val, ptr_val)
 
     # mutglobal lane (module-level `var` mutation storage, see

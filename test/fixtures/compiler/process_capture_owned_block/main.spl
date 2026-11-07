@@ -1,0 +1,54 @@
+# Actual-owner lifecycle probe. Launch with SIMPLE_MEM_HARDEN=1 before startup
+# so the allocator quarantine prevents address reuse from hiding a stale block.
+# P1 execution is diagnostic; qualification requires a source-matched P2.
+use std.io_runtime.{host_os, env_get}
+use std.nogc_sync_mut.sffi.process_capture.{process_capture_result, rt_process_run_tuple}
+use std.nogc_sync_mut.sffi.process_capture_text.{process_capture_text_data_v1}
+
+@unsafe(reason: "exercise the actual transient raw allocation owner", capabilities: [ffi, raw_ptr])
+extern fn rt_transient_raw_scope_begin() -> i32
+@unsafe(reason: "prove release removes the block before real scope teardown", capabilities: [ffi, raw_ptr])
+extern fn rt_transient_raw_scope_end() -> i32
+@unsafe(reason: "verify the actual scope has no stale raw-block entry before teardown", capabilities: [ffi, raw_ptr])
+extern fn rt_transient_raw_words(value: i64, words_out: i64, canonical_out: i64) -> i64
+@unsafe(reason: "allocate an owned invalid-text result block", capabilities: [ffi, raw_ptr])
+extern fn rt_alloc(bytes: i64) -> i64
+@unsafe(reason: "write the actual three-word result layout", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_write_i64(address: i64, offset: i64, value: i64)
+
+fn main() -> i64:
+    if env_get("SIMPLE_MEM_HARDEN") != "1": return 10
+    val began = unsafe(capabilities: [ffi, raw_ptr]): rt_transient_raw_scope_begin()
+    if began != 1: return 11
+    var command = "/bin/sh"
+    var args = ["-c", "printf retained-out; printf retained-err >&2; exit 7"]
+    if host_os() == "windows":
+        command = "cmd.exe"
+        args = ["/d", "/c", "(echo retained-out)&(echo retained-err 1>&2)&exit /b 7"]
+    val pointer = process_capture_text_data_v1(command)
+    val block = unsafe(capabilities: [ffi, raw_ptr]): rt_process_run_tuple(pointer, command.len(), args)
+    if block == 0: return 12
+    val scoped_words_before = unsafe(capabilities: [ffi, raw_ptr]): rt_transient_raw_words(block, 0, 0)
+    val (stdout, stderr, status) = process_capture_result(block)
+    val scoped_words_after = unsafe(capabilities: [ffi, raw_ptr]): rt_transient_raw_words(block, 0, 0)
+    val invalid = unsafe(capabilities: [ffi, raw_ptr]): rt_alloc(24)
+    if invalid == 0: return 13
+    unsafe(capabilities: [ffi, raw_ptr]):
+        rt_ptr_write_i64(invalid, 0, -1)
+        rt_ptr_write_i64(invalid, 8, 3)
+        rt_ptr_write_i64(invalid, 16, 0)
+    val invalid_scoped_words_before = unsafe(capabilities: [ffi, raw_ptr]): rt_transient_raw_words(invalid, 0, 0)
+    val (invalid_out, invalid_err, invalid_status) = process_capture_result(invalid)
+    val invalid_scoped_words_after = unsafe(capabilities: [ffi, raw_ptr]): rt_transient_raw_words(invalid, 0, 0)
+    val ended = unsafe(capabilities: [ffi, raw_ptr]): rt_transient_raw_scope_end()
+    if scoped_words_before != 3: return 14
+    if invalid_scoped_words_before != 3: return 15
+    if scoped_words_after != -1 or invalid_scoped_words_after != -1: return 21
+    if ended != 1: return 16
+    if status != 7 or not stdout.contains("retained-out") or not stderr.contains("retained-err"): return 17
+    if invalid_out != "" or invalid_err != "native process capture returned invalid text" or invalid_status != -1: return 18
+    # Access the copied managed strings after their raw blocks and scope ended.
+    if not (stdout + "-alive").contains("retained-out"): return 19
+    if not (stderr + "-alive").contains("retained-err"): return 20
+    print "process capture owned block OK"
+    0

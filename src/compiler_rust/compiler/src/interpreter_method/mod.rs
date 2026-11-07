@@ -2126,7 +2126,7 @@ pub(crate) fn evaluate_method_call_with_self_update(
                 .iter()
                 .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
                 .collect::<Result<Vec<_>, _>>()?;
-            if let Some(class_def) = classes.get(module_name.as_str()).cloned() {
+            if let Some(class_def) = crate::interpreter::resolve_class_in_scope(classes, module_name.as_str())? {
                 if let Some(func) = select_named_static_overload(class_def.methods.iter(), "new", &evaluated_args) {
                     let result =
                         exec_function_with_values(&func, &evaluated_args, env, functions, classes, enums, impl_methods)?;
@@ -2332,6 +2332,8 @@ pub(crate) fn evaluate_method_call_with_self_update(
         "drain",
         // Bulk in-place span copy (returns the COUNT, receiver derived below like `pop`)
         "write_span",
+        // Bulk in-place volatile fill (returns the COUNT, receiver derived below like `pop`)
+        "fill_span",
         // Dict / Map in-place mutators
         "update",
         "set",
@@ -2473,6 +2475,36 @@ pub(crate) fn evaluate_method_call_with_self_update(
             }
             let mut updated = bytes.as_ref().clone();
             let written = collections::byte_array_write_span(&mut updated, &src, dst_off, src_off, count)?;
+            let new_value = match written {
+                collections::ByteSpanWrite::InPlace(_) => Value::byte_array(updated),
+                collections::ByteSpanWrite::Widened(values, _) => Value::array(values),
+            };
+            return Ok((result, Some(new_value)));
+        }
+    }
+
+    // `fill_span(dst_off, count, value)` is the fourth such mutator: its result is
+    // the COUNT WRITTEN, so the mutated receiver is re-derived from `recv_val`
+    // here exactly like `write_span` above, for the same silent-drop hazard.
+    if method == "fill_span" {
+        if let Value::Array(arr) = &recv_val {
+            let (dst_off, count, value) =
+                collections::eval_fill_span_args(args, env, functions, classes, enums, impl_methods)?;
+            if count <= 0 {
+                return Ok((result, None));
+            }
+            let mut updated = arr.as_ref().clone();
+            collections::array_fill_span(&mut updated, dst_off, count, &value)?;
+            return Ok((result, Some(Value::array(updated))));
+        }
+        if let Value::ByteArray(bytes) = &recv_val {
+            let (dst_off, count, value) =
+                collections::eval_fill_span_args(args, env, functions, classes, enums, impl_methods)?;
+            if count <= 0 {
+                return Ok((result, None));
+            }
+            let mut updated = bytes.as_ref().clone();
+            let written = collections::byte_array_fill_span(&mut updated, dst_off, count, &value)?;
             let new_value = match written {
                 collections::ByteSpanWrite::InPlace(_) => Value::byte_array(updated),
                 collections::ByteSpanWrite::Widened(values, _) => Value::array(values),

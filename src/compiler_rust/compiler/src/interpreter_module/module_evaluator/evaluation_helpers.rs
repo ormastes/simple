@@ -331,6 +331,7 @@ pub(super) fn register_definitions(
                             .methods
                             .extend(impl_block.methods.iter().map(tagged_method));
                     }
+                    let prior_global_class = global_classes.get(&type_name).cloned();
                     if let Some(class_def) = global_classes.get_mut(&type_name) {
                         Arc::make_mut(class_def)
                             .methods
@@ -374,18 +375,13 @@ pub(super) fn register_definitions(
                         let methods = global_impls.entry(type_name.clone()).or_default();
                         methods.extend(impl_block.methods.iter().map(|m| Arc::new(tagged_method(m))));
                     });
-                    // Update MODULE_CLASSES_CACHE with the enriched class definition
-                    // so cross-module fallback lookups find impl-added methods
-                    if let Some(enriched_class) = global_classes.get(&type_name) {
-                        let enriched_clone = enriched_class.clone();
-                        MODULE_CLASSES_CACHE.with(|cache| {
-                            let mut cache = cache.borrow_mut();
-                            for (_path, module_classes) in cache.iter_mut() {
-                                if module_classes.contains_key(&type_name) {
-                                    module_classes.insert(type_name.clone(), enriched_clone.clone());
-                                }
-                            }
-                        });
+                    // Point the owner-keyed slots that held the PRE-enrichment
+                    // allocation at the enriched one (an extension `impl` of a
+                    // class another module declares). Keyed by allocation, not
+                    // by bare name: module A's cached `Config` must survive
+                    // module B's `impl Config:`.
+                    if let (Some(prior), Some(enriched)) = (prior_global_class.as_ref(), global_classes.get(&type_name)) {
+                        crate::interpreter::refresh_cached_class(prior, enriched);
                     }
                 }
             }

@@ -86,7 +86,7 @@ fn env_value_nul_free(value: text) -> bool:
     # single-byte heap string PER SOURCE BYTE on every lex_init_with_path
     # (13 M allocations across the 717-file bootstrap closure).
     var i: i64 = 0
-    val n: i64 = value.len()
+    val n: i64 = value.byte_len()
     while i < n:
         if (value.byte_at(i) as i64) == 0:
             return false
@@ -360,21 +360,29 @@ impl CoreLexer:
     # Reads self.source_chars directly (never passed as an argument: under the
     # tree-walk interpreter an array argument is deep-copied per call, which
     # made this O(source) per token). PERF (2026-08-28): byte compare instead
-    # of allocating a one-byte slice of `value` per character; same outcome --
-    # a multi-byte codepoint never equals a one-byte slice, and a one-byte
-    # codepoint equals it exactly when the bytes match.
+    # of allocating a one-byte slice of `value` per character. Units
+    # (2026-11-07, design text_len_counts_characters): source_chars holds one
+    # CODE POINT per slot while `value` is walked by BYTE offset, so the
+    # token length is `value.byte_len()` consumed one code point's width at a
+    # time; the old `len() != end - start` / `ch.len() != 1` form rejected
+    # every multi-byte token.
     fn chars_match(start: i64, end: i64, value: text) -> bool:
-        if value.len() != end - start:
-            return false
+        val vlen: i64 = value.byte_len()
+        var off: i64 = 0
         var i = start
         while i < end:
             val ch: text = self.source_chars[i]
-            if ch.len() != 1:
+            val w: i64 = ch.byte_len()
+            if off + w > vlen:
                 return false
-            if (ch.byte_at(0) as i64) != (value.byte_at(i - start) as i64):
+            if w == 1:
+                if (ch.byte_at(0) as i64) != (value.byte_at(off) as i64):
+                    return false
+            elif value.substring(off, off + w) != ch:
                 return false
+            off = off + w
             i = i + 1
-        true
+        off == vlen
 
     fn char_slice(start: i64, end: i64) -> text:
         var s: i64 = start

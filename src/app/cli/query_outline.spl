@@ -1,6 +1,7 @@
 # Shared lightweight outline parser for query CLI surfaces.
 
 use app.cli.query_rich_common.{query_file_read_rich}
+use app.cli.query_visibility.{strip_visibility_prefix}
 use app.cli.query_helpers.{_extract_params_from, _extract_ident_from, _extract_return_from, _count_indent}
 
 struct OutlineSymbol:
@@ -196,7 +197,7 @@ fn _append_nested_symbol(symbols: [OutlineSymbol], trimmed: text, line_num: i64,
                 symbols.push(_symbol(name: field_name, kind: "field", line_num: line_num, signature: trimmed, doc: doc, parent: parent, return_type: field_type, params: ""))
 
 fn _parse_fn(trimmed: text, line_num: i64, doc: text, parent: text) -> OutlineSymbol:
-    var rest = trimmed
+    var rest = strip_visibility_prefix(trimmed)
     var kind = "fn"
     if rest.starts_with("extern fn "):
         rest = rest.substring(10)
@@ -226,12 +227,38 @@ fn _symbol_start_col(signature: text, kind: text, name: text) -> i64:
         return 0
     val name_len = _text_len(name)
     val signature_len = _text_len(signature)
-    var i = 0
+    # A name may also spell part of its declaration keyword or visibility
+    # scope (fn f, pub fn p, pub(package) fn package). Search only the
+    # identifier portion already classified by the outline owner.
+    var i = _declaration_name_start_col(signature: signature, kind: kind)
     while i + name_len <= signature_len:
         if signature.substring(i, i + name_len) == name:
             return i
         i = i + 1
     0
+
+fn _declaration_name_start_col(signature: text, kind: text) -> i64:
+    val declaration = strip_visibility_prefix(signature)
+    var prefix_width = 0
+    if kind == "fn" or kind == "method" or kind == "static_method" or kind == "extern_fn":
+        if declaration.starts_with("static fn ") or declaration.starts_with("extern fn "):
+            prefix_width = 10
+        elif declaration.starts_with("fn ") or declaration.starts_with("me "):
+            prefix_width = 3
+    elif kind == "class" or kind == "struct" or kind == "enum" or kind == "trait" or kind == "impl" or kind == "val" or kind == "var":
+        val prefix = kind + " "
+        if declaration.starts_with(prefix):
+            prefix_width = _text_len(prefix)
+    elif kind == "import":
+        if declaration.starts_with("use "):
+            prefix_width = 4
+        elif declaration.starts_with("import "):
+            prefix_width = 7
+    if prefix_width == 0:
+        return 0
+    # Outline signatures have already been trimmed. The canonical visibility
+    # owner removes only the leading modifier here; authored text is retained.
+    _text_len(signature) - _text_len(declaration) + prefix_width
 
 fn _symbol_end_col(signature: text, kind: text, name: text, start_col: i64) -> i64:
     if kind == "domain":
@@ -248,7 +275,8 @@ fn _text_len(value: text) -> i64:
     count
 
 fn _is_function_decl(trimmed: text) -> bool:
-    trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("static fn ") or trimmed.starts_with("extern fn ")
+    val declaration = strip_visibility_prefix(trimmed)
+    declaration.starts_with("fn ") or declaration.starts_with("me ") or declaration.starts_with("static fn ") or declaration.starts_with("extern fn ")
 
 fn _binding_type(trimmed: text, options: OutlineOptions) -> text:
     if not options.extract_binding_types:

@@ -1,0 +1,60 @@
+use std.common.contracts.orchestration.agent_policy_snapshot_v1.*
+use std.common.contracts.orchestration.agent_policy_resolution_v1.*
+use std.common.contracts.orchestration.desired_input_v1.*
+use std.common.contracts.orchestration.resource_set_v1.{ResourceSetItemV1, decode_resource_set, resource_set_item_identity}
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.task_runner.distributed_operation_journal_v2.DistributedOperationJournalV2
+use std.nogc_sync_mut.orchestration.desired_input_objects_v1.*
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.common.crypto.sha256.sha256_text
+use std.common.build_manager.contracts.builder_digest_valid_v1
+
+pub fn controller_agent_policy_operation_v1(input: ControllerDesiredInputV1, catalog_digest: text) -> Result<OperationEnvelopeV2, text>:
+    var operation = controller_desired_operation_v1(input)?
+    val snapshot = AgentPolicySnapshotV1(input_digest: operation.payload_digest, catalog_digest: catalog_digest)
+    operation.id = "policy-" + operation.id
+    operation.operation = "controller_agent_policy_v1"
+    operation.payload_digest = sha256_text(agent_policy_snapshot_encode_v1(snapshot)?)
+    Ok(operation)
+
+fn policy_object_read_v1(root: text, digest: text, maximum: i64) -> Result<text, text>:
+    if not builder_digest_valid_v1(digest): return Err("policy-object-digest-invalid")
+    val bytes = file_read_regular_no_follow_bounded(root + "/desired-input-objects/" + digest + ".sdn", maximum)?
+    if sha256_text(bytes) != digest: return Err("policy-object-content-mismatch")
+    Ok(bytes)
+
+pub fn controller_agent_policy_retain_v1(root: text, input: ControllerDesiredInputV1, catalog: text) -> Result<bool, text>:
+    val input_digest = sha256_text(controller_desired_input_encode_v1(input)?)
+    val snapshot = AgentPolicySnapshotV1(input_digest: input_digest, catalog_digest: sha256_text(catalog))
+    val bytes = agent_policy_snapshot_encode_v1(snapshot)?
+    val saved_catalog = desired_object_put_v1(root, snapshot.catalog_digest, catalog, 1048576)?
+    desired_object_put_v1(root, sha256_text(bytes), bytes, 1024)
+
+# Recompute policy from retained immutable bytes. Original submission must be
+# committed. Replay allows later cancellation, preserving historical evidence.
+pub fn controller_agent_policy_read_v1(journal: DistributedOperationJournalV2,
+        operation: OperationEnvelopeV2, controller_id: text) -> Result<AgentPolicyResolutionV1, text>:
+    val encoded = distributed_encode_operation_v2(operation)?
+    if operation.operation != "controller_agent_policy_v1" or operation.host_id != controller_id:
+        return Err("policy-snapshot-controller-mismatch")
+    val snapshot = agent_policy_snapshot_decode_v1(policy_object_read_v1(journal.root, operation.payload_digest, 1024)?)?
+    val input = controller_desired_input_decode_v1(policy_object_read_v1(journal.root, snapshot.input_digest, 8192)?)?
+    if input.controller_id != controller_id: return Err("policy-snapshot-controller-mismatch")
+    val expected = controller_agent_policy_operation_v1(input, snapshot.catalog_digest)?
+    if distributed_encode_operation_v2(expected)? != encoded: return Err("policy-snapshot-envelope-mismatch")
+    val parent_operation = controller_desired_operation_v1(input)?
+    val parent = daemon_operation_exact_v2(journal, parent_operation)?
+    if parent.state != "completed" or parent.outcome_digest != snapshot.input_digest: return Err("policy-snapshot-parent-not-committed")
+    val source = controller_desired_source_read_v1(journal.root, input)?
+    val catalog = policy_object_read_v1(journal.root, snapshot.catalog_digest, 1048576)?
+    val decoded = decode_resource_set(source)
+    if decoded.is_err(): return Err("policy-snapshot-source-invalid")
+    for item in decoded.unwrap().items:
+        if resource_set_item_identity(item) == input.resource_identity:
+            match item:
+                case ResourceSetItemV1.AgentSession(session):
+                    return resolve_agent_policy_v1(source, catalog, session.meta.ns, session.meta.name)
+                case _: return Err("policy-snapshot-session-invalid")
+    Err("policy-snapshot-session-missing")

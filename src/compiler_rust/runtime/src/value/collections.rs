@@ -197,7 +197,10 @@ struct TransientPromoteShare {
 /// Erase a freed heap object from the open share window so a recycled address
 /// is never mistaken for a committed node. Called by `unregister_heap_ptr`.
 pub(crate) fn transient_promote_share_forget(addr: usize) {
-    TRANSIENT_PROMOTE_SHARE.with(|slot| {
+    // A runtime-owned TLS destructor can free a string after this optional
+    // per-thread cache has been destroyed. The cache is already gone then;
+    // registry removal, accounting and the real deallocation still proceed.
+    let _ = TRANSIENT_PROMOTE_SHARE.try_with(|slot| {
         if let Ok(mut slot) = slot.try_borrow_mut() {
             if let Some(share) = slot.as_mut() {
                 share.heap.remove(&addr);
@@ -8024,6 +8027,60 @@ fn write_span_range_check(dst_off: i64, src_off: i64, count: i64, dst_len: i64, 
 fn write_span_fail(message: &str) -> ! {
     eprintln!("error: semantic: {message}");
     std::process::exit(1);
+}
+
+/// Bulk in-place VOLATILE fill: dst[dst_off..dst_off+count] = value.
+///
+/// JIT/native counterpart of the interpreter's `arr.fill_span(dst_off, count,
+/// value)` mutating method (interpreter_method/collections.rs
+/// `byte_array_fill_span` / `array_fill_span`), the compiler-owned byte
+/// write the secure-memory owner uses instead of handing raw data pointers
+/// to Simple code (doc/08_tracking/bug/secure_memory_interpreter_raw_pointer_aliasing_2026-08-24.md).
+/// Every store is `write_volatile` and the fill ends with a SeqCst fence, so a
+/// secret wipe through it is never elided or reordered past the call.
+///
+/// Contract shape is `rt_array_write_span`'s: count <= 0 is a no-op returning
+/// 0; an out-of-range span NEVER writes and fails with the interpreter's exact
+/// diagnostic (`fill_span out of range: ...`, exit 1); an invalid destination
+/// handle answers -1 (ABI misuse, the compiler only emits this for an array
+/// receiver). Returns the RAW `i64` count written. A packed `[u8]` receives the
+/// low byte; a boxed slot array receives `value` as an ordinary int word.
+#[no_mangle]
+pub extern "C" fn rt_array_fill_span(dst: RuntimeValue, dst_off: i64, count: i64, value: i64) -> i64 {
+    if count <= 0 {
+        return 0;
+    }
+    let err = -1;
+    let dst_arr = as_typed_ptr_packed!(mut dst, HeapObjectType::Array, RuntimeArray, err);
+    unsafe {
+        let dst_len = (*dst_arr).len as i64;
+        let dst_end = dst_off.checked_add(count);
+        if dst_off < 0 || !dst_end.is_some_and(|end| end <= dst_len) {
+            write_span_fail(&format!(
+                "fill_span out of range: dst_off={dst_off} count={count} dst_len={dst_len}"
+            ));
+        }
+        let (off, n) = (dst_off as usize, count as usize);
+        if (*dst_arr).is_byte_packed() {
+            let base = (*dst_arr).data.cast::<u8>().add(off);
+            for i in 0..n {
+                base.add(i).write_volatile(value as u8);
+            }
+        } else if (*dst_arr).is_u64_packed() {
+            let base = (*dst_arr).data.cast::<u64>().add(off);
+            for i in 0..n {
+                base.add(i).write_volatile(value as u64);
+            }
+        } else {
+            let word = RuntimeValue::from_int(value);
+            let base = (*dst_arr).data.add(off);
+            for i in 0..n {
+                base.add(i).write_volatile(word);
+            }
+        }
+    }
+    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    count
 }
 
 #[cfg(test)]

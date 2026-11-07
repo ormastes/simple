@@ -97,27 +97,40 @@ expect(tagged_text_consumer_call()).to_equal("count=42")
 
 </details>
 
-#### preserves every scalar renderer signature and SSA bridge into raw concatenation
+#### preserves every scalar renderer signature and tagged word into counted concatenation
 
-- preserves every scalar renderer signature and SSA bridge into raw concatenation
+The real frontend → HIR → MIR → LLVM pipeline must retain renderer handles
+through `inttoptr` into `rt_strcat_tagged`, without `rt_interp_cstr` unwrapping
+or raw `rt_strcat`. Counted segment constructor arguments must retain the
+three-byte Unicode prefix and two-byte embedded-NUL prefix lengths, scoped
+to their respective named function bodies so other fixture segments cannot
+satisfy the assertions.
 
+This scenario has been updated manually from the executable SSpec; execution
+is pending a rebuilt compiler. It does not assert a passing runtime result.
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
 # @req REQ-SSPEC-COMPILER
-step("preserves every scalar renderer signature and SSA bridge into raw concatenation")
+step("preserves every scalar renderer signature and tagged word into counted concatenation")
 val llvm = compile_numeric_interpolation_fixture()
 assert_true(not llvm.starts_with("MIR_LOWERING_ERRORS:"), "fixture failed to lower to MIR: " + llvm)
 expect(llvm).to_contain("declare i64 @rt_raw_i64_to_string(i64)")
 expect(llvm).to_contain("declare i64 @rt_raw_u64_to_string(i64)")
 expect(llvm).to_contain("declare i64 @rt_raw_bool_to_string(i64)")
 expect(llvm).to_contain("declare i64 @rt_raw_f64_to_string(double)")
-expect(llvm).to_contain("declare ptr @rt_interp_cstr(i64)")
+expect(llvm).to_contain("declare ptr @rt_strcat_tagged(ptr, ptr)")
+expect(find_call_line(llvm, "rt_string_new(")).to_contain("= call i64 @rt_string_new(ptr ")
+expect(find_call_line(llvm, "rt_strcat(")).to_equal("")
+# The prefix hé is three UTF-8 bytes; a\0 is two counted bytes.
+val unicode_body = named_fixture_function_body(llvm, "unicode_segment")
+val nul_body = named_fixture_function_body(llvm, "nul_segment")
+expect(unicode_body != "").to_equal(true)
+expect(nul_body != "").to_equal(true)
+expect(counted_segment_flow(unicode_body, 3)).to_equal(true)
+expect(counted_segment_flow(nul_body, 2)).to_equal(true)
 
 val i64_call = find_call_line(llvm, "rt_raw_i64_to_string(")
 val u64_call = find_call_line(llvm, "rt_raw_u64_to_string(")
@@ -128,11 +141,10 @@ expect(u64_call).to_contain("= call i64 @rt_raw_u64_to_string(i64 ")
 expect(bool_call).to_contain("= call i64 @rt_raw_bool_to_string(i64 ")
 expect(f64_call).to_contain("= call i64 @rt_raw_f64_to_string(double ")
 
-assert_true(renderer_cstr_strcat_flow(llvm, "rt_raw_i64_to_string"), "i64 renderer must flow through rt_interp_cstr into rt_strcat")
-assert_true(renderer_cstr_strcat_flow(llvm, "rt_raw_u64_to_string"), "u64 renderer must flow through rt_interp_cstr into rt_strcat")
-assert_true(renderer_cstr_strcat_flow(llvm, "rt_raw_bool_to_string"), "bool renderer must flow through rt_interp_cstr into rt_strcat")
-assert_true(renderer_cstr_strcat_flow(llvm, "rt_raw_f64_to_string"), "f64 renderer must flow through rt_interp_cstr into rt_strcat")
-assert_true(tagged_text_direct_param_flow(llvm), "tagged scalar text must bridge through rt_interp_cstr before a user text parameter")
+assert_true(renderer_tagged_concat_flow(llvm, "rt_raw_i64_to_string"), "i64 renderer must retain its tagged word into rt_strcat_tagged")
+assert_true(renderer_tagged_concat_flow(llvm, "rt_raw_u64_to_string"), "u64 renderer must retain its tagged word into rt_strcat_tagged")
+assert_true(renderer_tagged_concat_flow(llvm, "rt_raw_bool_to_string"), "bool renderer must retain its tagged word into rt_strcat_tagged")
+assert_true(renderer_tagged_concat_flow(llvm, "rt_raw_f64_to_string"), "f64 renderer must retain its tagged word into rt_strcat_tagged")
 ```
 
 </details>

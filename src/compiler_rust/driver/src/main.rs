@@ -1398,6 +1398,11 @@ fn real_main() {
     // census explicitly here; report() is idempotent enough to double-print
     // only on paths that also unwind, and is a no-op unless SIMPLE_MEM_TRACE=1.
     simple_compiler::mem_trace::report("process exit");
+    // Same reason for the two profilers: their `atexit` dump never fires on
+    // Windows (`process::exit` is `ExitProcess` there). Both are once-guarded
+    // and no-ops unless SIMPLE_PERF_COUNTERS=1 / SIMPLE_INTERP_SAMPLE=1.
+    simple_compiler::perf_counters::flush_at_process_exit();
+    simple_compiler::interpreter::sampler::flush_at_process_exit();
 
     if metrics_enabled {
         exit_with_metrics(exit_code, &metrics);

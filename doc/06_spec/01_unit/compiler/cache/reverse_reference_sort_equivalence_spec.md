@@ -1,6 +1,6 @@
 # Reverse-reference receipt ordering and publication
 
-**Status:** AUTHORED / NOT_RUN. This manual describes five executable scenarios in [the spec](../../../../../test/01_unit/compiler/cache/reverse_reference_sort_equivalence_spec.spl). It is not a runner result or a generated-document validation receipt.
+**Status:** AUTHORED / NOT_RUN. This manual describes seven executable scenarios in [the spec](../../../../../test/01_unit/compiler/cache/reverse_reference_sort_equivalence_spec.spl). It is not a runner result or a generated-document validation receipt.
 
 The production receipt owner now sorts ordinary NUL-free inputs through the canonical ordering helper and reuses encoded bytes for the publication digest. These scenarios compare actual production output against a preserved historical insertion-order oracle. They protect serialized compatibility; they do not measure throughput or qualify a full compiler build.
 
@@ -26,6 +26,20 @@ This is provider-specific execution evidence when run. One provider’s result c
 
 The control preserves the active provider’s legacy NUL ordering. It does not require different providers to assign identical ordering to embedded NUL.
 
+## Find NUL after multibyte characters
+
+1. Construct two equal-prefix pairs from explicit UTF-8 bytes: three accented Latin characters or two emoji, then NUL and `z`/`a`.
+2. Check the stored byte counts (8 and 10), NUL offsets (6 and 8), and suffix bytes before invoking the receipt owner. The NUL offsets exceed the respective code-point counts.
+3. Put `z` before `a`, retain a duplicate and a NUL-free Unicode control, and require the encoded bytes and digest to match the independent legacy oracle.
+
+This catches a character-count loop bound on the core-C provider, where NUL terminates legacy comparison. A hosted provider that compares all stored bytes can produce the same order through either path; its PASS alone would not establish the core-C regression. Wire-length fields in the oracle use the existing byte-count owner, independent of text `len()` semantics.
+
+## Preserve terminal NUL
+
+1. Build two accented characters followed by NUL using five explicit bytes.
+2. Require the terminal byte at offset 4 to remain present.
+3. Encode duplicate terminal-NUL rows with ordinary controls and compare against the legacy oracle.
+
 ## Preserve empty and invalid inputs
 
 1. Encode an empty generation and compare its header/body with the historical oracle.
@@ -44,7 +58,7 @@ Publication uses real filesystem operations. Missing pointer/body data fails ass
 
 ## Execution and remaining qualification
 
-An admitted source-matched full CLI must run this exact spec once under the campaign’s canonical process-tree watchdog, with retained logs, nonzero discovery, five executed scenarios and no skipped requirement. The finite execution manifest assigns 120 seconds and a single native slot. Do not rerun an unchanged green result.
+An admitted source-matched full CLI must run this exact spec once under the campaign’s canonical process-tree watchdog, with retained logs, nonzero discovery, seven executed scenarios and no skipped requirement. The finite execution manifest assigns 120 seconds and a single native slot. Do not rerun an unchanged green result.
 
 The separate cardinality spec and production performance probe cover other obligations. No runtime, branch-coverage, latency or RSS PASS is claimed here.
 

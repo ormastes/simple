@@ -1190,6 +1190,9 @@ pub(crate) fn compile_file_safe(
                         file_path.display()
                     );
                 }
+                if crate::mem_trace::enabled() {
+                    crate::mem_trace::snapshot(&format!("native-build: after file {}", file_path.display()));
+                }
                 let _ = tx.send(());
                 result
             })

@@ -1,0 +1,60 @@
+# Focused shared CI decoder regression; NOT_RUN, no execution authority.
+# Adapted from resource_set_spec singleton/prefix cases; uses existing fixtures.
+use std.common.contracts.orchestration.resource_set_v1.*
+use std.common.contracts.orchestration.ci_v1.{decode_job, decode_pipeline}
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+
+fn ci_list(source: text) -> text:
+    val lines = source.trim().split("\n")
+    var out = "apiVersion: orchestration.simple/v1alpha1\nkind: ResourceList\nmetadata:\n    name: ci-prefix\nspec:\n    items:\n        - " + lines[0] + "\n"
+    var index = 1
+    while index < lines.len():
+        out = out + "          " + lines[index] + "\n"
+        index = index + 1
+    out
+
+pub fn resource_set_ci_prefix_checks():
+    val job_source = file_read_regular_no_follow_bounded("test/fixtures/orchestration/ci_job_process.sdn", 1048576).unwrap()
+    val pipeline_source = file_read_regular_no_follow_bounded("test/fixtures/orchestration/ci_pipeline.sdn", 1048576).unwrap()
+    val job = decode_job(job_source).unwrap()
+    val singleton = decode_resource_set(job_source).unwrap()
+    assert(singleton.items.len() == 1)
+    match singleton.items[0]:
+        case ResourceSetItemV1.Job(actual):
+            assert(actual.meta.name == job.meta.name)
+            assert(actual.backoff_limit == job.backoff_limit)
+            assert(actual.template.containers[0].command == job.template.containers[0].command)
+        case _: assert(false)
+    val pipeline = decode_pipeline(pipeline_source).unwrap()
+    val nested = decode_resource_set(ci_list(pipeline_source)).unwrap()
+    assert(nested.items.len() == 1)
+    match nested.items[0]:
+        case ResourceSetItemV1.Pipeline(actual):
+            assert(actual.meta.name == pipeline.meta.name)
+            assert(actual.jobs.len() == pipeline.jobs.len())
+            assert(actual.jobs[3].run_after == pipeline.jobs[3].run_after)
+        case _: assert(false)
+    val job_bad = job_source.replace("backoffLimit: 0", "backoffLimit: -1")
+    assert(decode_job(job_bad).unwrap_err().path == "spec.backoffLimit")
+    val job_error = decode_resource_set(ci_list(job_bad)).unwrap_err()
+    assert(job_error.kind == "range")
+    assert(job_error.path == "spec.items.0.spec.backoffLimit")
+    assert(job_error.line > 0)
+    assert(job_error.col > 0)
+    val pipeline_bad = pipeline_source.replace("runPolicy: always", "runPolicy: sometimes")
+    assert(decode_pipeline(pipeline_bad).unwrap_err().path == "spec.jobs.3.runPolicy")
+    val pipeline_error = decode_resource_set(ci_list(pipeline_bad)).unwrap_err()
+    assert(pipeline_error.kind == "unsupported_run_policy")
+    assert(pipeline_error.path == "spec.items.0.spec.jobs.3.runPolicy")
+    assert(pipeline_error.line > 0)
+    val unknown = job_source.replace("    backoffLimit: 0", "    backoffLimit: 0\n    unexpected: true")
+    val unknown_error = decode_resource_set(ci_list(unknown)).unwrap_err()
+    assert(unknown_error.kind == "unknown_field")
+    assert(unknown_error.path == "spec.items.0.spec.unexpected")
+    val duplicate = job_source.replace("    backoffLimit: 0", "    backoffLimit: 0\n    backoffLimit: 1")
+    assert(decode_resource_set(ci_list(duplicate)).unwrap_err().kind == "duplicate_key")
+    print "resource-set-ci-prefix-probe: shared CI paths and strict rejection assertions passed"
+
+fn main() -> i64:
+    resource_set_ci_prefix_checks()
+    0

@@ -2562,6 +2562,18 @@ impl LlvmBackend {
                     return Ok(());
                 }
 
+                let text_byte_len = super::resolved_text_runtime_method(func_name) == Some("rt_string_len");
+                if text_byte_len {
+                    if !args.is_empty() {
+                        return Err(CompileError::semantic("text.byte_len expects no arguments"));
+                    }
+                    if vreg_types.get(receiver).is_some_and(|ty| {
+                        *ty != crate::hir::TypeId::STRING && *ty != crate::hir::TypeId::ANY
+                    }) {
+                        return Err(CompileError::semantic("text.byte_len requires a text receiver"));
+                    }
+                }
+
                 // Builtin-receiver methods that today resolve ONLY through the
                 // qualifier-discarding fallback in `resolve_name_variants`
                 // (pipeline/native_project/imports.rs). That fallback matches on
@@ -3086,6 +3098,7 @@ impl LlvmBackend {
                     // Copied verbatim from Cranelift lines 3163-3200
                     "contains" | "contains_key" | "has_key" | "has" => Some("rt_contains"),
                     "len" | "length" => Some("rt_len"),
+                    "byte_len" if text_byte_len => Some("rt_string_len"),
                     "starts_with" => Some("rt_string_starts_with"),
                     "ends_with" => Some("rt_string_ends_with"),
                     "concat" => Some("rt_string_concat"),
@@ -3103,6 +3116,7 @@ impl LlvmBackend {
                     "char_count" => Some("rt_string_char_count"),
                     "push" => Some("rt_array_push"),
                     "write_span" => Some("rt_array_write_span"),
+                    "fill_span" => Some("rt_array_fill_span"),
                     "pop" => Some("rt_array_pop"),
                     // Keep the LLVM bootstrap table synchronized with the
                     // Cranelift and pure-Simple lowerers. `write_span` is an
@@ -3111,6 +3125,7 @@ impl LlvmBackend {
                     // is correct; interpreter write-back remains owned by its
                     // dedicated mutating-method channel.
                     "write_span" => Some("rt_array_write_span"),
+                    "fill_span" => Some("rt_array_fill_span"),
                     "clear" => Some("rt_array_clear"),
                     "enumerate" => Some("rt_array_enumerate"),
                     "join" => Some("rt_string_join"),
@@ -3333,7 +3348,9 @@ impl LlvmBackend {
                         } else if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                             let ret_val = if returns_bool {
                                 self.coerce_value_to_type(ret_val, Some(i64_type.into()), builder)?
-                            } else if rt_name == "rt_array_write_span" && ret_val.is_int_value() {
+                            } else if (rt_name == "rt_array_write_span" || rt_name == "rt_array_fill_span")
+                                && ret_val.is_int_value()
+                            {
                                 // Raw i64 count from both runtimes; this result is
                                 // consumed as a tagged value, so tag it like
                                 // `rt_value_int`: `(v << 3) | INT(0)`. Same as the
@@ -3712,6 +3729,19 @@ impl LlvmBackend {
             } => {
                 // Map builtin method calls to runtime functions (matching Cranelift backend)
                 let i64_type = self.runtime_int_type();
+                if method == "byte_len" {
+                    if !matches!(receiver_type.as_str(), "str" | "text" | "String" | "string") {
+                        return Err(CompileError::semantic("byte_len requires a text receiver"));
+                    }
+                    if !args.is_empty() {
+                        return Err(CompileError::semantic("text.byte_len expects no arguments"));
+                    }
+                    if vreg_types.get(receiver).is_some_and(|ty| {
+                        *ty != crate::hir::TypeId::STRING && *ty != crate::hir::TypeId::ANY
+                    }) {
+                        return Err(CompileError::semantic("text.byte_len requires a text receiver"));
+                    }
+                }
                 let receiver_val = self.get_vreg(receiver, vreg_map)?;
                 let receiver_i64 = self.coerce_value_to_type(receiver_val, Some(i64_type.into()), builder)?;
 
@@ -3724,6 +3754,7 @@ impl LlvmBackend {
                     ("Array" | "array", "pop") => Some("rt_array_pop"),
                     ("Array" | "array", "clear") => Some("rt_array_clear"),
                     ("String" | "string", "len") => Some("rt_string_len"),
+                    ("str" | "text" | "String" | "string", "byte_len") => Some("rt_string_len"),
                     ("String" | "string", "concat") => Some("rt_string_concat"),
                     ("String" | "string", "starts_with") => Some("rt_string_starts_with"),
                     ("String" | "string", "ends_with") => Some("rt_string_ends_with"),
@@ -4122,6 +4153,143 @@ mod tests {
     use crate::mir::{CallTarget, LocalKind, MirInst, MirLocal, Terminator, VReg};
     use simple_common::target::{Target, TargetArch, TargetOS};
     use std::collections::HashMap;
+
+    fn byte_len_dispatch_ir(inst: MirInst, receiver_type: crate::hir::TypeId) -> Result<String, CompileError> {
+        let backend = LlvmBackend::new(Target::host())?;
+        backend.create_module("byte_len_dispatch")?;
+        let mut function = MirFunction::new(
+            "probe".to_string(), crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        function.params.push(MirLocal {
+            name: "receiver".to_string(), ty: receiver_type,
+            kind: LocalKind::Parameter, is_ghost: false,
+        });
+        function.blocks[0].instructions.push(inst);
+        function.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+        backend.compile_function(&function)?;
+        backend.verify()?;
+        backend.get_ir()
+    }
+
+    #[test]
+    fn text_byte_len_dispatch_uses_one_argument_byte_abi_for_every_text_alias() {
+        for owner in ["str", "text", "String", "string", "lib__common__string_core__str"] {
+            for separator in [".", "_dot_"] {
+                let name = format!("{owner}{separator}byte_len");
+                for inst in [
+                    MirInst::Call {
+                        dest: Some(VReg(1)), target: CallTarget::from_name(&name), args: vec![VReg(0)],
+                    },
+                    MirInst::MethodCallStatic {
+                        dest: Some(VReg(1)), receiver: VReg(0), func_name: name.clone(), args: vec![],
+                    },
+                ] {
+                    let ir = byte_len_dispatch_ir(inst, crate::hir::TypeId::STRING).unwrap();
+                    assert!(ir.contains("call i64 @rt_string_len(i64 "), "{name}: {ir}");
+                    assert!(ir.contains("declare i64 @rt_string_len(i64)"), "{name}: {ir}");
+                    assert!(!ir.contains("rt_string_char_count"), "{name}: {ir}");
+                }
+            }
+        }
+        for owner in ["str", "text", "String", "string"] {
+            let inst = MirInst::BuiltinMethod {
+                dest: Some(VReg(1)), receiver: VReg(0), receiver_type: owner.to_string(),
+                method: "byte_len".to_string(), args: vec![],
+            };
+            let ir = byte_len_dispatch_ir(inst, crate::hir::TypeId::STRING).unwrap();
+            assert!(ir.contains("call i64 @rt_string_len(i64 "), "{owner}: {ir}");
+            assert!(ir.contains("declare i64 @rt_string_len(i64)"), "{owner}: {ir}");
+        }
+    }
+
+    #[test]
+    fn text_byte_len_rejects_extra_or_missing_arguments_and_nontext_receivers() {
+        let malformed = [
+            MirInst::Call { dest: Some(VReg(1)), target: CallTarget::from_name("str.byte_len"), args: vec![] },
+            MirInst::Call { dest: Some(VReg(1)), target: CallTarget::from_name("str_dot_byte_len"), args: vec![VReg(0), VReg(0)] },
+            MirInst::MethodCallStatic { dest: Some(VReg(1)), receiver: VReg(0), func_name: "str.byte_len".to_string(), args: vec![VReg(0)] },
+            MirInst::BuiltinMethod { dest: Some(VReg(1)), receiver: VReg(0), receiver_type: "text".to_string(), method: "byte_len".to_string(), args: vec![VReg(0)] },
+        ];
+        for inst in malformed {
+            let error = byte_len_dispatch_ir(inst, crate::hir::TypeId::STRING).unwrap_err();
+            assert!(error.to_string().contains("byte_len"), "{error}");
+        }
+        for owner in ["str", "Array", "i64"] {
+            for inst in [
+                MirInst::Call { dest: Some(VReg(1)), target: CallTarget::from_name(&format!("{owner}.byte_len")), args: vec![VReg(0)] },
+                MirInst::MethodCallStatic { dest: Some(VReg(1)), receiver: VReg(0), func_name: format!("{owner}.byte_len"), args: vec![] },
+                MirInst::BuiltinMethod { dest: Some(VReg(1)), receiver: VReg(0), receiver_type: owner.to_string(), method: "byte_len".to_string(), args: vec![] },
+            ] {
+                assert!(byte_len_dispatch_ir(inst, crate::hir::TypeId::I64).is_err(), "nontext {owner}.byte_len must fail closed");
+            }
+        }
+        let unknown = MirInst::MethodCallStatic {
+            dest: Some(VReg(1)), receiver: VReg(0), func_name: "str.byte_length".to_string(), args: vec![],
+        };
+        assert!(byte_len_dispatch_ir(unknown, crate::hir::TypeId::STRING).is_err());
+    }
+
+    #[test]
+    fn text_byte_len_keeps_codepoint_and_existing_len_dispatch_separate() {
+        let char_count = MirInst::MethodCallStatic {
+            dest: Some(VReg(1)), receiver: VReg(0), func_name: "str.char_count".to_string(), args: vec![],
+        };
+        let ir = byte_len_dispatch_ir(char_count, crate::hir::TypeId::STRING).unwrap();
+        assert!(ir.contains("call i64 @rt_string_char_count("), "{ir}");
+        assert!(!ir.contains("@rt_string_len("), "{ir}");
+        let len = MirInst::MethodCallStatic {
+            dest: Some(VReg(1)), receiver: VReg(0), func_name: "str.len".to_string(), args: vec![],
+        };
+        let ir = byte_len_dispatch_ir(len, crate::hir::TypeId::STRING).unwrap();
+        assert!(ir.contains("len_string_or_array"), "existing len must keep its inline path: {ir}");
+        assert!(!ir.contains("@rt_string_len("), "byte_len redirect must not replace len: {ir}");
+    }
+
+    #[test]
+    fn byte_len_named_user_methods_keep_their_exact_callee() {
+        for (name, call_route) in [
+            ("UserText.byte_len", true), ("UserText.byte_len", false),
+            ("User__String.byte_len", true), ("User__String.byte_len", false),
+            ("custom.str.byte_len", true), ("custom.str.byte_len", false),
+        ] {
+            let backend = LlvmBackend::new(Target::host()).unwrap();
+            backend.create_module("user_byte_len").unwrap();
+            let mut user = MirFunction::new(name.to_string(), crate::hir::TypeId::I64, simple_parser::ast::Visibility::Public);
+            user.params.push(MirLocal { name: "self".to_string(), ty: crate::hir::TypeId::I64, kind: LocalKind::Parameter, is_ghost: false });
+            user.blocks[0].terminator = Terminator::Return(Some(VReg(0)));
+            backend.compile_function(&user).unwrap();
+            let mut caller = MirFunction::new("caller".to_string(), crate::hir::TypeId::I64, simple_parser::ast::Visibility::Public);
+            caller.blocks[0].instructions.push(MirInst::ConstInt { dest: VReg(0), value: 41 });
+            caller.blocks[0].instructions.push(if call_route {
+                MirInst::Call { dest: Some(VReg(1)), target: CallTarget::from_name(name), args: vec![VReg(0)] }
+            } else {
+                MirInst::MethodCallStatic { dest: Some(VReg(1)), receiver: VReg(0), func_name: name.to_string(), args: vec![] }
+            });
+            caller.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+            backend.compile_function(&caller).unwrap();
+            backend.verify().unwrap();
+            let ir = backend.get_ir().unwrap();
+            assert!(ir.lines().any(|line| line.contains("call i64") && line.contains(name)), "{name}: {ir}");
+            assert!(!ir.contains("@rt_string_len("), "{ir}");
+        }
+    }
+
+    #[test]
+    fn text_byte_len_source_materializes_the_byte_runtime_call() {
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../test/fixtures/native/text_byte_len_dispatch/main.spl"));
+        let ast = simple_parser::Parser::new(source).parse().unwrap();
+        let hir = crate::hir::lower(&ast).unwrap();
+        let mir = crate::mir::lower_to_mir(&hir).unwrap();
+        let backend = LlvmBackend::new(Target::host()).unwrap();
+        backend.create_module("byte_len_source").unwrap();
+        backend.compile(&mir).unwrap();
+        backend.verify().unwrap();
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("call i64 @rt_string_len(i64 "), "{ir}");
+        assert!(ir.contains("call i64 @rt_string_char_count("), "{ir}");
+        assert!(!ir.lines().any(|line| line.contains("call") && line.contains("str.byte_len")), "unresolved source method leaked: {ir}");
+    }
 
     #[test]
     fn rt_pool_join_result_is_not_shifted() {

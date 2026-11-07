@@ -375,3 +375,38 @@ which is a seed-interpreter issue owned by the Rust lane.
 - Remaining: the seed per-call constant is reduced, not zero; the strategic fix
   stays the self-hosted deploy. zca_rows full-file lint should be re-measured
   next session against the ~99s/decl history.
+
+## 2026-11-07 — Windows round 15: zca_rows lint terminates in 502 s; first sampled profile of the lint lane; byte-offset conversion made O(1)
+
+Binary: `D:/dev/wt/seed/simple.exe` (release seed, 17847296 B, 2026-11-06
+15:11) for the two wall times; `simple-sampler.exe` (tip `4eb1de2ecbd` +
+the round-15 sampler port, sha256 `8535005190ed1ec3…`) for the profile.
+Windows 11, idle apart from one cargo build.
+
+| command | wall | verdict |
+|---|---|---|
+| `lint src/compiler/80.driver/driver_types.spl` (82 KB) | 162 s | `Found 1 error(s), 20 warning(s)` — the 1 error is `W-ANY-NOTRUN` (the any-rules `check` child exits 1 here: no `SIMPLE_BINARY`), so Windows timings exclude that lane |
+| `lint src/compiler/50.mir/hwir/zca_rows.spl` (1901 lines) | **502 s** | terminates, 399 output lines — the ">2400 s killed" row above was a loaded-box lower bound |
+
+**Profile** (`SIMPLE_INTERP_SAMPLE=1`, 10 ms wall ticks, 10,114 samples,
+`driver_types.spl`, 126 s): the pure-Simple lexer is 40% inclusive
+(`lex_next` 40.6%, `scan_token` 34.2%, `scan_ident` 19.1%,
+`is_ident_char` 10.1%, `handle_indentation` 8.3%), `parser_advance`
+43.8% inclusive; top self-time leaves `lex_source_byte_offset` 12.8%,
+`lex_next` 4.0%, `scan_token` 3.6%, `char_code` 3.4%,
+`char_code_inline` 3.1%, `is_ident_char` 2.7%, `expr_alloc` 2.6%.
+No single pure-Simple algorithm dominates; the lexer is linear and the
+cost is the seed's per-call and per-global-read constant (micro-benched
+the same day: a module-owned `min_i64(i, 7)` is 15.5 us per call, an
+inline module-global array read 2.4 us, a local `arr[0] = arr[0] + arr[1]`
+2.6 us, a same-file `x + 1` call 35 ns — see the 2026-11-07 note in
+seed_per_call_env_rebuild_o_globals_regression_2026-08-21.md).
+
+**Landed:** `lex_source_byte_offset` takes an O(1) path on all-ASCII
+sources (281 us -> 27 us per call on a 54 KB source with calls 25 chars
+apart; backward seeks 29 us instead of an O(position) rescan), pinned by
+`test/01_unit/compiler/frontend/lexer_byte_span_offset_prevention_spec.spl`.
+`lint driver_types.spl` wall is unchanged at 124 s both arms on
+`simple-base.exe`, so this is recorded as an algorithmic fix, not a lint
+speed-up: the function's sampled self time is the per-call constant, which
+only a seed-side change moves.

@@ -1,0 +1,36 @@
+# Compatibility API and solver installation. Identity ownership lives in HIR.
+export use compiler.hir.builtin_trait_identity_v1.{BuiltinTraitKindV1, BuiltinTraitBindingV1, BuiltinTraitDeclarationsV1, BuiltinTraitDeclarationOwnerV1, builtin_trait_kinds_v1, builtin_trait_spelling_v1, builtin_trait_declarations_validate_v1, builtin_trait_declarations_create_v1, builtin_trait_declaration_v1, builtin_trait_declaration_rebind_v1}
+use compiler.common.diagnostics.span.{Span}
+use compiler.traits.trait_def.{SolverTraitDef}
+use compiler.traits.trait_solver.{TraitSolver}
+
+pub fn builtin_trait_declarations_install_v1(owner: BuiltinTraitDeclarationOwnerV1,
+        solver: TraitSolver) -> Result<(), text>:
+    val invalid = builtin_trait_declarations_validate_v1(owner.declarations, owner.symbols)
+    if invalid != "": return Err(invalid)
+    if solver.reverse_symbols == nil: return Err("builtin-solver-symbol-owner-required")
+    val solver_invalid = builtin_trait_declarations_validate_v1(owner.declarations, solver.reverse_symbols.unwrap())
+    if solver_invalid != "": return Err("builtin-solver-symbol-owner-mismatch:" + solver_invalid)
+    val solver_symbols = solver.reverse_symbols.unwrap()
+    if solver_symbols.symbols[owner.declarations.owner.id] != owner.symbols.symbols[owner.declarations.owner.id]:
+        return Err("builtin-solver-owner-row-mismatch")
+    var definitions: [SolverTraitDef] = []
+    for binding in owner.declarations.bindings:
+        val symbol = builtin_trait_declaration_v1(owner.declarations, owner.symbols, binding.kind)?
+        if solver_symbols.symbols[binding.symbol.id] != symbol:
+            return Err("builtin-solver-declaration-row-mismatch")
+        # Reject replacement before any add_trait clears caches or mutates the
+        # associated-type resolver. Installation is all-or-nothing on error.
+        if solver.traits.contains_key(symbol): return Err("builtin-solver-already-registered")
+        for installed in solver.traits.values():
+            if installed.name.name == symbol.name: return Err("builtin-solver-internal-name-collision")
+        for installed in solver.assoc_resolver.traits.values():
+            if installed.name.name == symbol.name: return Err("builtin-assoc-internal-name-collision")
+        var definition = SolverTraitDef.create(symbol, Span.empty())
+        if binding.kind == BuiltinTraitKindV1.Copy:
+            definition.supertraits = [builtin_trait_declaration_v1(owner.declarations, owner.symbols, BuiltinTraitKindV1.Clone)?]
+        if binding.kind == BuiltinTraitKindV1.Ord:
+            definition.supertraits = [builtin_trait_declaration_v1(owner.declarations, owner.symbols, BuiltinTraitKindV1.Eq)?]
+        definitions.push(definition)
+    for definition in definitions: solver.add_trait(definition)
+    Ok(())

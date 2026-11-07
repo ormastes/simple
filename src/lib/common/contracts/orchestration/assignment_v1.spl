@@ -1,0 +1,129 @@
+# Immutable controller-to-host assignment binding. No transport authority.
+use std.common.contracts.orchestration.host_reservation_codec_v1.*
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.contracts.orchestration.resource_v1.{RejectionV1, parse_resource_document,
+    as_dict, as_text, as_int, only_known, require, reject}
+use std.common.sdn.value.{SdnValue, SdnSpan}
+
+pub struct ControllerAssignmentBindingV1:
+    controller_id: text
+    controller_epoch: i64
+    workload_uid: text
+    desired_revision: i64
+    host_intent: HostReservationIntentV1
+    host_operation: OperationEnvelopeV2
+
+pub struct ControllerAssignmentReferenceV1:
+    controller_id: text
+    controller_epoch: i64
+    workload_uid: text
+    desired_revision: i64
+    host_intent_digest: text
+    host_envelope_digest: text
+
+# A transient readiness observation for a trusted dispatcher, not a signed
+# capability or durable permission to launch after cancellation or expiry.
+pub struct ControllerExecutionReadinessV1:
+    workload_uid: text
+    workload_revision: i64
+    assignment_digest: text
+    controller_operation_id: text
+    outcome_digest: text
+    host_receipt: HostPreparedReservationReceiptV1
+
+pub fn controller_assignment_reference_bytes_v1(reference: ControllerAssignmentReferenceV1) -> Result<text, text>:
+    if not builder_identifier_valid_v1(reference.controller_id) or not builder_identifier_valid_v1(reference.workload_uid) or
+            reference.controller_epoch <= 0 or reference.desired_revision <= 0 or
+            not builder_digest_valid_v1(reference.host_intent_digest) or not builder_digest_valid_v1(reference.host_envelope_digest):
+        return Err("invalid-assignment-reference")
+    Ok("kind: controller-assignment-v1\ncontrollerId: \"{reference.controller_id}\"\ncontrollerEpoch: {reference.controller_epoch}\nworkloadUid: \"{reference.workload_uid}\"\ndesiredRevision: {reference.desired_revision}\nhostIntentDigest: \"{reference.host_intent_digest}\"\nhostEnvelopeDigest: \"{reference.host_envelope_digest}\"\n")
+
+fn assignment_ref_text_v1(fields: Dict<text, SdnValue>, key: text, spans: Dict<text, SdnSpan>) -> Result<text, RejectionV1>:
+    val value = require(fields, key, "", spans)?
+    as_text(value, key, spans)
+
+fn assignment_ref_int_v1(fields: Dict<text, SdnValue>, key: text, spans: Dict<text, SdnSpan>) -> Result<i64, RejectionV1>:
+    val value = require(fields, key, "", spans)?
+    as_int(value, key, spans)
+
+fn assignment_ref_fields_v1(source: text) -> Result<ControllerAssignmentReferenceV1, RejectionV1>:
+    val parsed = parse_resource_document(source)?
+    val spans = parsed.1
+    val fields = as_dict(parsed.0, "", spans)?
+    only_known(fields, ["kind", "controllerId", "controllerEpoch", "workloadUid", "desiredRevision",
+        "hostIntentDigest", "hostEnvelopeDigest"], "", spans)?
+    val kind = assignment_ref_text_v1(fields, "kind", spans)?
+    if kind != "controller-assignment-v1": return Err(reject("kind", "kind", "unsupported assignment reference", spans))
+    val controller = assignment_ref_text_v1(fields, "controllerId", spans)?
+    val epoch = assignment_ref_int_v1(fields, "controllerEpoch", spans)?
+    val uid = assignment_ref_text_v1(fields, "workloadUid", spans)?
+    val desired = assignment_ref_int_v1(fields, "desiredRevision", spans)?
+    val intent = assignment_ref_text_v1(fields, "hostIntentDigest", spans)?
+    val envelope = assignment_ref_text_v1(fields, "hostEnvelopeDigest", spans)?
+    Ok(ControllerAssignmentReferenceV1(controller_id: controller, controller_epoch: epoch,
+        workload_uid: uid, desired_revision: desired, host_intent_digest: intent, host_envelope_digest: envelope))
+
+pub fn controller_assignment_decode_reference_v1(source: text) -> Result<ControllerAssignmentReferenceV1, text>:
+    if source.len() > 4096: return Err("assignment-reference-too-large")
+    val reference = match assignment_ref_fields_v1(source):
+        case Ok(value): value
+        case Err(reason): return Err("assignment-reference-invalid:" + reason.path + ":" + reason.kind)
+    val canonical = controller_assignment_reference_bytes_v1(reference)?
+    if canonical != source: return Err("assignment-reference-not-canonical")
+    Ok(reference)
+
+pub fn controller_assignment_authority_v1(controller_id: text) -> Result<text, text>:
+    if not builder_identifier_valid_v1(controller_id): return Err("invalid-controller-id")
+    Ok(sha256_text("CONTROLLER-ASSIGNMENT-AUTHORITY-V1\n" + controller_id + "\n"))
+
+pub fn controller_assignment_bytes_v1(binding: ControllerAssignmentBindingV1) -> Result<text, text>:
+    if not builder_identifier_valid_v1(binding.controller_id) or not builder_identifier_valid_v1(binding.workload_uid) or
+            binding.controller_epoch <= 0 or binding.desired_revision <= 0:
+        return Err("invalid-assignment-binding")
+    val matching = host_reservation_match_operation_v1(binding.host_intent, binding.host_operation)?
+    val host_envelope = distributed_encode_operation_v2(binding.host_operation)?
+    val envelope_digest = sha256_text(host_envelope)
+    val intent_digest = binding.host_operation.payload_digest
+    controller_assignment_reference_bytes_v1(ControllerAssignmentReferenceV1(controller_id: binding.controller_id,
+        controller_epoch: binding.controller_epoch, workload_uid: binding.workload_uid,
+        desired_revision: binding.desired_revision, host_intent_digest: intent_digest, host_envelope_digest: envelope_digest))
+
+pub fn controller_assignment_restore_v1(reference: ControllerAssignmentReferenceV1,
+        intent_bytes: text, envelope_bytes: text) -> Result<ControllerAssignmentBindingV1, text>:
+    val manifest = controller_assignment_reference_bytes_v1(reference)?
+    if sha256_text(intent_bytes) != reference.host_intent_digest or sha256_text(envelope_bytes) != reference.host_envelope_digest:
+        return Err("assignment-object-digest-mismatch")
+    val intent = host_reservation_decode_intent_v1(intent_bytes)?
+    val operation = distributed_decode_operation_v2(envelope_bytes)?
+    val binding = ControllerAssignmentBindingV1(controller_id: reference.controller_id,
+        controller_epoch: reference.controller_epoch, workload_uid: reference.workload_uid,
+        desired_revision: reference.desired_revision, host_intent: intent, host_operation: operation)
+    val reconstructed = controller_assignment_bytes_v1(binding)?
+    if reconstructed != manifest: return Err("assignment-reference-mismatch")
+    Ok(binding)
+
+pub fn controller_assignment_match_v1(binding: ControllerAssignmentBindingV1,
+        operation: OperationEnvelopeV2) -> Result<bool, text>:
+    val bytes = controller_assignment_bytes_v1(binding)?
+    val encoded = distributed_encode_operation_v2(operation)?
+    val host = binding.host_operation
+    if operation.operation != "controller_assignment_v1" or operation.host_id != binding.controller_id or
+            operation.payload_digest != sha256_text(bytes) or operation.principal != host.principal or
+            operation.project != host.project or operation.environment_digest != host.environment_digest or
+            operation.policy_revision != host.policy_revision or operation.revocation_epoch != host.revocation_epoch or
+            operation.session_generation != host.session_generation or operation.memory_bytes != host.memory_bytes or
+            operation.duration_ms != host.duration_ms:
+        return Err("controller-assignment-envelope-mismatch")
+    Ok(true)
+
+# Deterministic bytes are recoverable from the immutable desired assignment and
+# exact host receipt. A completed assignment is not a completed workload.
+pub fn controller_assignment_outcome_v1(binding: ControllerAssignmentBindingV1,
+        receipt: HostPreparedReservationReceiptV1) -> Result<text, text>:
+    val checked = host_reservation_match_receipt_v1(receipt, binding.host_intent, binding.host_operation)?
+    val bytes = controller_assignment_bytes_v1(binding)?
+    val digest = sha256_text(bytes)
+    Ok("kind: controller-assignment-committed-v1\nassignmentDigest: \"{digest}\"\nhostReceiptDigest: \"{receipt.receipt_digest}\"\n")

@@ -1,0 +1,111 @@
+# AUTHORED / NOT_RUN: source-only range regression, no admitted runtime used.
+use std.spec.{describe, it, expect, step}
+use app.cli.query_outline.{OutlineOptions, OutlineSymbol, parse_outline_source}
+
+fn lsp_invoke_real_owner(source: text) -> [OutlineSymbol]:
+    parse_outline_source(source, OutlineOptions(parent_for_types: true,
+        include_import_symbols: true, include_fields: true,
+        extract_binding_types: true))
+
+fn lsp_assert_contract(symbol: OutlineSymbol, name: text, kind: text,
+        signature: text, start: i64, end: i64):
+    expect(symbol.name).to_equal(name)
+    expect(symbol.kind).to_equal(kind)
+    expect(symbol.signature).to_equal(signature)
+    expect(symbol.token_start).to_equal(start)
+    expect(symbol.token_end).to_equal(end)
+    expect(symbol.signature.substring(start, end)).to_equal(name)
+
+describe "LSP outline identifier ranges":
+    it "locates a short function name after its keyword":
+        step("Prepare the real fixture")
+        val source = "fn f(f: i64) -> i64:\n    return f\n"
+        step("Invoke the production owner")
+        val symbols = lsp_invoke_real_owner(source)
+        step("Check the observed contract")
+        expect(symbols.len()).to_equal(1)
+        lsp_assert_contract(symbols[0], "f", "fn", "fn f(f: i64) -> i64:", 3, 4)
+        expect(symbols[0].params).to_equal("f: i64")
+        expect(symbols[0].return_type).to_equal("i64")
+
+    it "skips public and private visibility letters without changing authored metadata":
+        step("Prepare the real fixture")
+        val source = "# Public p.\npub fn p() -> i64:\n    return 1\npri fn r() -> text:\n    return \"r\"\n"
+        step("Invoke the production owner")
+        val symbols = lsp_invoke_real_owner(source)
+        step("Check the observed contract")
+        expect(symbols.len()).to_equal(2)
+        lsp_assert_contract(symbols[0], "p", "fn", "pub fn p() -> i64:", 7, 8)
+        expect(symbols[0].doc_comment).to_equal("Public p.")
+        expect(symbols[0].line).to_equal(2)
+        lsp_assert_contract(symbols[1], "r", "fn", "pri fn r() -> text:", 7, 8)
+
+    it "skips an identical scoped visibility name":
+        step("Prepare the real fixture")
+        val source = "pub(package) fn package() -> i64:\n    return 1\npub(peer) fn peer() -> text:\n    return \"peer\"\n"
+        step("Invoke the production owner")
+        val symbols = lsp_invoke_real_owner(source)
+        step("Check the observed contract")
+        expect(symbols.len()).to_equal(2)
+        lsp_assert_contract(symbols[0], "package", "fn", "pub(package) fn package() -> i64:", 16, 23)
+        lsp_assert_contract(symbols[1], "peer", "fn", "pub(peer) fn peer() -> text:", 13, 17)
+
+    it "retains nested method and static ranges in the existing trimmed-signature convention":
+        step("Prepare the real fixture")
+        val source = "class C:\n    me m() -> i64:\n        return 1\n    static fn s() -> i64:\n        return 2\n"
+        step("Invoke the production owner")
+        val symbols = lsp_invoke_real_owner(source)
+        step("Check the observed contract")
+        expect(symbols.len()).to_equal(3)
+        lsp_assert_contract(symbols[1], "m", "method", "me m() -> i64:", 3, 4)
+        lsp_assert_contract(symbols[2], "s", "static_method", "static fn s() -> i64:", 10, 11)
+        expect(symbols[1].parent).to_equal("C")
+        expect(symbols[2].parent).to_equal("C")
+        expect(symbols[2].line).to_equal(4)
+
+    it "skips extern and function keywords before repeated names":
+        step("Prepare the real fixture")
+        val source = "extern fn e() -> i64\nfn n(n: text) -> text:\n    return n\n"
+        step("Invoke the production owner")
+        val symbols = lsp_invoke_real_owner(source)
+        step("Check the observed contract")
+        expect(symbols.len()).to_equal(2)
+        lsp_assert_contract(symbols[0], "e", "extern_fn", "extern fn e() -> i64", 10, 11)
+        lsp_assert_contract(symbols[1], "n", "fn", "fn n(n: text) -> text:", 3, 4)
+
+    it "uses declaration starts for type and binding names too":
+        step("Prepare the real fixture")
+        val source = "class c:\nstruct s:\nenum e:\ntrait t:\nimpl i:\nval v: i64 = 1\nvar a: text = \"a\"\n"
+        step("Invoke the production owner")
+        val symbols = lsp_invoke_real_owner(source)
+        step("Check the observed contract")
+        expect(symbols.len()).to_equal(7)
+        lsp_assert_contract(symbols[0], "c", "class", "class c:", 6, 7)
+        lsp_assert_contract(symbols[1], "s", "struct", "struct s:", 7, 8)
+        lsp_assert_contract(symbols[2], "e", "enum", "enum e:", 5, 6)
+        lsp_assert_contract(symbols[3], "t", "trait", "trait t:", 6, 7)
+        lsp_assert_contract(symbols[4], "i", "impl", "impl i:", 5, 6)
+        lsp_assert_contract(symbols[5], "v", "val", "val v: i64 = 1", 4, 5)
+        lsp_assert_contract(symbols[6], "a", "var", "var a: text = \"a\"", 4, 5)
+
+    it "retains import field and domain behavior outside function prefixes":
+        step("Prepare the real fixture")
+        val source = "use u\nimport i\nclass C:\n    f: i64\nschema{}\n"
+        step("Invoke the production owner")
+        val symbols = lsp_invoke_real_owner(source)
+        step("Check the observed contract")
+        expect(symbols.len()).to_equal(5)
+        lsp_assert_contract(symbols[0], "u", "import", "use u", 4, 5)
+        lsp_assert_contract(symbols[1], "i", "import", "import i", 7, 8)
+        lsp_assert_contract(symbols[3], "f", "field", "f: i64", 0, 1)
+        expect(symbols[4].name).to_equal("schema{}")
+        expect(symbols[4].token_start).to_equal(0)
+        expect(symbols[4].token_end).to_equal(6)
+
+    it "does not introduce new declaration recognition":
+        step("Prepare the real fixture")
+        val source = "async fn a():\n    return 1\npubfn_not_a_declaration = 1\n"
+        step("Invoke the production owner")
+        val symbols = lsp_invoke_real_owner(source)
+        step("Check the neighboring failure case")
+        expect(symbols.len()).to_equal(0)

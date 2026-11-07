@@ -199,8 +199,16 @@ pub(crate) const ARRAY_MUTATING_METHODS: &[&str] = &[
     "extend",
     "clear",
     "write_span",
+    "fill_span",
     "set",
 ];
+
+/// The span mutators take their own operand lists (`write_span` four,
+/// `fill_span` three) and have dedicated paths everywhere below; the generic
+/// item/idx/second plumbing must never see them.
+fn is_span_mutator(method: &str) -> bool {
+    matches!(method, "write_span" | "fill_span")
+}
 
 /// Apply an array mutating method to a `&mut Vec<Value>` in place.
 ///
@@ -531,9 +539,9 @@ pub(crate) fn try_field_array_mutation_in_place(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
-    // `write_span` takes four arguments and is handled by its own path; keep this
-    // helper to the generic item/idx/second mutators.
-    if method == "write_span" {
+    // The span mutators take their own operands and are handled by their own
+    // paths; keep this helper to the generic item/idx/second mutators.
+    if is_span_mutator(method) {
         return Ok(None);
     }
     let is_array_method = ARRAY_MUTATING_METHODS.contains(&method);
@@ -639,6 +647,9 @@ enum PlaceMutation {
     /// `[T]` leaf reached by `write_span(src, dst_off, src_off, count)`, the
     /// four-operand bulk span copy whose expression result is the COUNT.
     WriteSpan,
+    /// `[T]` leaf reached by `fill_span(dst_off, count, value)`, the
+    /// three-operand bulk volatile fill whose expression result is the COUNT.
+    FillSpan,
     /// Packed `[u8]` leaf reached by `push`/`append` (`self.buf.push(b)`).
     BytePush,
     /// `{K: V}` leaf reached by a `DICT_MUTATING_METHODS` method.
@@ -753,7 +764,7 @@ pub(crate) fn try_place_mutation_in_place(
     // (read the array, mutate a copy, `write_place` it back) -- O(len) per push.
     // Mutate the array where it lives, under the owning instance's lock, as the
     // single-hop `try_field_array_mutation_in_place` does.
-    if method != "write_span" && ARRAY_MUTATING_METHODS.contains(&method) {
+    if !is_span_mutator(method) && ARRAY_MUTATING_METHODS.contains(&method) {
         if let Some((instance, field)) = class_hop_leaf(env, &target) {
             let is_array = instance.field_mut(&field, |v| matches!(v, Value::Array(_)));
             if is_array == Some(true) {
@@ -781,6 +792,8 @@ pub(crate) fn try_place_mutation_in_place(
     let kind = match place::place_slot_ref(env, &target) {
         // `write_span` takes four operands and has its own path.
         Some(Value::Array(_) | Value::ByteArray(_)) if method == "write_span" => PlaceMutation::WriteSpan,
+        // `fill_span` takes three operands and has its own path.
+        Some(Value::Array(_) | Value::ByteArray(_)) if method == "fill_span" => PlaceMutation::FillSpan,
         Some(Value::Array(_)) if ARRAY_MUTATING_METHODS.contains(&method) => PlaceMutation::Array,
         Some(Value::ByteArray(_)) if matches!(method, "push" | "append") => PlaceMutation::BytePush,
         Some(Value::Dict(_)) if DICT_MUTATING_METHODS.contains(&method) => PlaceMutation::Dict,
@@ -788,7 +801,7 @@ pub(crate) fn try_place_mutation_in_place(
         // after argument evaluation and must still hold an object of the same
         // class — so this one keeps its `clone()`. The resolution rides along so
         // the executor does not probe the method table a second time.
-        Some(Value::Object { class, .. }) => match resolve_object_method(classes, impl_methods, class, method) {
+        Some(Value::Object { class, fields }) => match resolve_object_method(classes, impl_methods, class, fields, method) {
             Some(resolved) => PlaceMutation::Object(class.clone(), resolved),
             None => return Ok(None),
         },
@@ -869,6 +882,46 @@ pub(crate) fn try_place_mutation_in_place(
                         ints[0],
                         ints[1],
                         ints[2],
+                    )?;
+                    match written {
+                        super::super::interpreter_method::collections::ByteSpanWrite::InPlace(count) => Value::Int(count),
+                        super::super::interpreter_method::collections::ByteSpanWrite::Widened(values, count) => {
+                            *slot = Value::array(values);
+                            Value::Int(count)
+                        }
+                    }
+                }
+                _ => return Ok(None),
+            }
+        }
+        PlaceMutation::FillSpan => {
+            // Same discipline as `WriteSpan`: operands evaluated once, in order,
+            // then the leaf is re-read and filled through `Arc::make_mut`, so a
+            // secret buffer held in a field (`self.key.fill_span(0, n, 0u8)`) is
+            // wiped on the caller's exclusive storage and never through a raw
+            // pointer into a shared allocation.
+            let (dst_off, count, value) = super::super::interpreter_method::collections::eval_fill_span_args(
+                args, env, functions, classes, enums, impl_methods,
+            )?;
+            match place::place_slot_mut(env, &target) {
+                Some(Value::Array(arc)) => {
+                    note_place_mutation(arc.len(), Arc::strong_count(arc));
+                    let written = super::super::interpreter_method::collections::array_fill_span(
+                        Arc::make_mut(arc),
+                        dst_off,
+                        count,
+                        &value,
+                    )?;
+                    Value::Int(written)
+                }
+                Some(slot @ Value::ByteArray(_)) => {
+                    let Value::ByteArray(arc) = slot else { unreachable!("matched ByteArray") };
+                    note_place_mutation(arc.len(), Arc::strong_count(arc));
+                    let written = super::super::interpreter_method::collections::byte_array_fill_span(
+                        Arc::make_mut(arc),
+                        dst_off,
+                        count,
+                        &value,
                     )?;
                     match written {
                         super::super::interpreter_method::collections::ByteSpanWrite::InPlace(count) => Value::Int(count),
@@ -1180,7 +1233,7 @@ fn handle_method_call_with_self_update_inner(
             // non-self reference-typed argument such as `buf`. See
             // doc/08_tracking/bug/bytebuffer_struct_param_mutation_not_persisted_2026-09-01.md.
             if let Value::Object { class, fields } = &inner_result {
-                if let Some(resolved) = resolve_object_method(classes, impl_methods, class, method) {
+                if let Some(resolved) = resolve_object_method(classes, impl_methods, class, fields, method) {
                     let eval_args = evaluate_call_args(args, env, functions, classes, enums, impl_methods)?;
                     // The chain threads one mutable identity only when the
                     // inner `me` returned its own self (same field storage) and
@@ -1338,8 +1391,8 @@ fn handle_method_call_with_self_update_inner(
                     Some(Value::Object {
                         fields: parent_fields, ..
                     }) => match parent_fields.get(field) {
-                        Some(Value::Object { class: field_class, .. }) => {
-                            resolve_object_method(classes, impl_methods, field_class, method)
+                        Some(Value::Object { class: field_class, fields: field_fields }) => {
+                            resolve_object_method(classes, impl_methods, field_class, field_fields, method)
                         }
                         _ => None,
                     },
@@ -1615,7 +1668,7 @@ fn handle_method_call_with_self_update_inner(
             // The outer `Option` is "the receiver is an Object" (which selects
             // this arm at all); the inner one is "its class defines `method`".
             let receiver_method = match env.get(obj_name) {
-                Some(Value::Object { class, .. }) => Some(resolve_object_method(classes, impl_methods, class, method)),
+                Some(Value::Object { class, fields }) => Some(resolve_object_method(classes, impl_methods, class, fields, method)),
                 _ => None,
             };
             if let Some(resolved) = receiver_method {
@@ -1744,6 +1797,25 @@ fn handle_method_call_with_self_update_inner(
                     // holds a second strong ref) → clone-then-mutate, which is exactly what
                     // gives the documented memmove-style overlap semantics (the src Value is
                     // a pre-copy snapshot). Expression result is the COUNT WRITTEN.
+                    //
+                    // `fill_span(dst_off, count, value)` -- bulk in-place volatile fill --
+                    // follows the same discipline with three operands.
+                    if method.as_str() == "fill_span" {
+                        let (dst_off, count, value) =
+                            super::super::interpreter_method::collections::eval_fill_span_args(
+                                args, env, functions, classes, enums, impl_methods,
+                            )?;
+                        if let Some(Value::Array(arc)) = env.get_mut(obj_name) {
+                            let written = super::super::interpreter_method::collections::array_fill_span(
+                                Arc::make_mut(arc),
+                                dst_off,
+                                count,
+                                &value,
+                            )?;
+                            let new_array_val = Value::Array(Arc::clone(arc));
+                            return Ok((Value::Int(written), Some((obj_name.clone(), new_array_val))));
+                        }
+                    }
                     if method.as_str() == "write_span" {
                         let src = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
                         let mut ints = [-1i64, -1, 0];
@@ -1986,6 +2058,35 @@ fn handle_method_call_with_self_update_inner(
                         ));
                     }
 
+                    // `fill_span` on a packed binding: the secure-memory owner's
+                    // wipe of a `mut bytes: [u8]` parameter lands here. The fill
+                    // runs on the binding's exclusive storage (`Arc::make_mut`)
+                    // and the result is published to the binding, which the
+                    // `mut`-parameter write-back then carries to the caller's
+                    // place -- no raw pointer, no shared-allocation write.
+                    if method.as_str() == "fill_span" {
+                        let (dst_off, count, value) =
+                            super::super::interpreter_method::collections::eval_fill_span_args(
+                                args, env, functions, classes, enums, impl_methods,
+                            )?;
+                        if let Some(Value::ByteArray(arc)) = env.get_mut(obj_name) {
+                            let written = super::super::interpreter_method::collections::byte_array_fill_span(
+                                Arc::make_mut(arc),
+                                dst_off,
+                                count,
+                                &value,
+                            )?;
+                            let (new_value, count) = match written {
+                                super::super::interpreter_method::collections::ByteSpanWrite::InPlace(count) => {
+                                    (Value::ByteArray(Arc::clone(arc)), count)
+                                }
+                                super::super::interpreter_method::collections::ByteSpanWrite::Widened(values, count) => {
+                                    (Value::array(values), count)
+                                }
+                            };
+                            return Ok((Value::Int(count), Some((obj_name.clone(), new_value))));
+                        }
+                    }
                     // `write_span` on a packed binding: same operand order and
                     // ownership-gated `Arc::make_mut` discipline as the boxed
                     // identifier path above. It used to fall through to the

@@ -2667,6 +2667,11 @@ impl ClassInstance {
         self.fields.read().unwrap().clone()
     }
 
+    /// Read the field table under the read lock without cloning it.
+    pub fn with_fields<R>(&self, f: impl FnOnce(&HashMap<String, Value>) -> R) -> R {
+        f(&self.fields.read().unwrap())
+    }
+
     /// Swap a field's value, returning the old one; `None` (nothing swapped)
     /// when the field does not exist. Lets a nested place write move the
     /// field out, mutate it with NO lock held, and put it back

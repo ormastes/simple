@@ -1,0 +1,93 @@
+# Native parent fixture: canonical app process facade, actual selected C owner.
+use app.io.process_ops.{process_run_bounded_environment_v1, process_wait, process_is_running}
+use app.io.process_env_ops.{process_spawn_async_env}
+use app.io.env_ops.{env_get}
+use app.io.mod.{file_read, file_exists, file_write}
+use std.cli.cli_util.{get_cli_args}
+
+fn exact_environment(value: text) -> [(text, text)]:
+    [("SERIAL_CASE", value), ("EMPTY", ""), ("Δ变量", "Grüße 한글 😀"), ("=C:", "C:\\")]
+
+fn check_parent(before: text):
+    assert((env_get("SERIAL_CASE") ?? "") == before)
+    assert((env_get("PARENT_ONLY") ?? "") == "parent-sentinel")
+
+fn main() -> i32:
+    val args = get_cli_args()
+    assert(args.len() == 2)
+    val observer = args[0]
+    val directory = args[1]
+    val before = env_get("SERIAL_CASE") ?? ""
+    assert(before == "parent-case")
+    val first = process_run_bounded_environment_v1(observer, ["--observe", "first", "exact"], exact_environment("first"), 5000, 8192).unwrap()
+    assert(first.exit_code == 0 and not first.limit_exceeded)
+    assert(first.stdout.contains("case: \"first\""))
+    assert(first.stdout.contains("unicode: \"Grüße 한글 😀\""))
+    assert(first.stdout.contains("empty_present: true"))
+    assert(first.stdout.contains("parent_only_present: false"))
+    assert(first.stdout.contains("hidden_drive: true"))
+    assert(first.stdout.contains("sorted: true"))
+    assert(first.stdout.contains("unexpected: false"))
+    check_parent(before)
+    # Same shebang command follows ordinary async routing in both env modes.
+    val routing_script = directory + "/routing-parity.shs"
+    val routing_empty = directory + "/routing-empty.sdn"
+    val routing_overlay = directory + "/routing-overlay.sdn"
+    assert(file_write(routing_script, "#!/bin/sh\nprintf 'routing: pass\\n' > \"$1\"\n"))
+    val empty_route = process_spawn_async_env(routing_script, [routing_empty], {})
+    assert(empty_route > 0 and process_wait(empty_route, 5000) == 0)
+    val overlay_route = process_spawn_async_env(routing_script, [routing_overlay], {"SERIAL_CASE": "route"})
+    assert(overlay_route > 0 and process_wait(overlay_route, 5000) == 0)
+    assert(file_read(routing_empty) == "routing: pass\n")
+    assert(file_read(routing_overlay) == "routing: pass\n")
+    check_parent(before)
+    # Exact replacement does not inherit parent variables, including empty lists.
+    val empty = process_run_bounded_environment_v1(observer, ["--empty"], [], 5000, 8192).unwrap()
+    assert(empty.exit_code == 0 and empty.stdout.contains("empty_block: true"))
+    val timed = process_run_bounded_environment_v1(observer, ["--sleep"], exact_environment("first"), 30, 8192).unwrap()
+    assert(timed.limit_exceeded and timed.limit_type == "timeout")
+    # Invalid original names and case-insensitive aliases reject before launch.
+    assert(process_run_bounded_environment_v1(observer, ["--observe", "bad", "exact"], [("A=B", "value")], 5000, 8192).is_err())
+    assert(process_run_bounded_environment_v1(observer, ["--observe", "bad", "exact"], [("Path", "one"), ("PATH", "two")], 5000, 8192).is_err())
+    assert(process_run_bounded_environment_v1(observer, ["--observe", "bad", "exact"], [("ΔKEY", "one"), ("δkey", "two")], 5000, 8192).is_err())
+    assert(process_run_bounded_environment_v1(observer, ["--observe", "bad", "exact"], [("É", "one"), ("é", "two")], 5000, 8192).is_err())
+    check_parent(before)
+    val limited = process_run_bounded_environment_v1(observer, ["--flood"], exact_environment("first"), 5000, 128).unwrap()
+    assert(limited.limit_exceeded and limited.limit_type == "output")
+    assert(limited.stdout == "")
+    val marker = directory + "/grandchild-ready.sdn"
+    val cancelled = process_run_bounded_environment_v1(observer, ["--spawn-grandchild", marker], exact_environment("first"), 2000, 8192).unwrap()
+    assert(cancelled.limit_exceeded and cancelled.limit_type == "timeout")
+    assert(file_exists(marker))
+    # Two ordinary async children overlap; overlays must not race via parent env.
+    val first_report = directory + "/first-report.sdn"
+    val second_report = directory + "/second-report.sdn"
+    val gate = directory + "/parallel-release.sdn"
+    val child1 = process_spawn_async_env(observer, ["--hold", "first", "overlay", first_report, gate], {"SERIAL_CASE": "first", "EMPTY": "", "Δ变量": "Grüße 한글 😀"})
+    val child2 = process_spawn_async_env(observer, ["--hold", "second", "overlay", second_report, gate], {"serial_case": "second", "EMPTY": "", "Δ变量": "Grüße 한글 😀"})
+    assert(child1 > 0 and child2 > 0 and child1 != child2)
+    assert(process_is_running(child1) and process_is_running(child2))
+    check_parent(before)
+    assert(file_write(gate, "released: true\n"))
+    assert(process_wait(child1, 5000) == 0)
+    assert(process_wait(child2, 5000) == 0)
+    assert(file_read(first_report).contains("case: \"first\""))
+    assert(file_read(second_report).contains("case: \"second\""))
+    check_parent(before)
+    # One finite warm leak criterion: each real child observes its live parent's
+    # handle count. No PID/handle is serialized across this test boundary.
+    val baseline_result = process_run_bounded_environment_v1(observer, ["--parent-handles"], exact_environment("first"), 5000, 8192).unwrap()
+    assert(baseline_result.exit_code == 0)
+    val baseline_fields = baseline_result.stdout.trim().split(":")
+    assert(baseline_fields.len() == 2)
+    val baseline = baseline_fields[1].trim().to_int()
+    assert(baseline > 0)
+    for iteration in 0..16:
+        val observed = process_run_bounded_environment_v1(observer, ["--parent-handles"], exact_environment("first"), 5000, 8192).unwrap()
+        assert(observed.exit_code == 0)
+        val fields = observed.stdout.trim().split(":")
+        assert(fields.len() == 2)
+        assert(fields[1].trim().to_int() == baseline)
+    check_parent(before)
+    print "windows-child-env: full replacement, Unicode, empty values, isolated overlays, bounds and parent immutability checked"
+    0

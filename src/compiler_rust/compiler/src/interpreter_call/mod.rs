@@ -690,6 +690,16 @@ fn warn_prelude_shadow_once(name: &str, functions: &HashMap<String, Arc<Function
     }
 }
 
+/// Adds the elapsed phase time to its counter on drop, so a phase that ends
+/// in several `return`s is still accounted.
+struct PhaseGuard(&'static std::sync::atomic::AtomicU64, Option<std::time::Instant>);
+
+impl Drop for PhaseGuard {
+    fn drop(&mut self) {
+        crate::perf_counters::phase_end(self.0, self.1);
+    }
+}
+
 pub(crate) fn evaluate_call(
     callee: &Box<Expr>,
     args: &[Argument],
@@ -701,6 +711,9 @@ pub(crate) fn evaluate_call(
 ) -> Result<Value, CompileError> {
     // Priority 1: Check extern functions first (before builtins)
     if let Expr::Identifier(name) = callee.as_ref() {
+        use crate::perf_counters::{self as pc, phase_end, phase_start};
+        pc::bump(&pc::EVALCALL_IDENT_CALLS, 1);
+        let t = phase_start();
         let is_extern = EXTERN_FUNCTIONS.with(|cell| {
             let externs = cell.borrow();
             let contains = externs.contains(name);
@@ -749,18 +762,27 @@ pub(crate) fn evaluate_call(
         }
         // A fn-typed local/parameter named like a prelude builtin (`fn f(str: fn(i64) -> text)`)
         // is a value call and must win over the extern/builtin of the same name.
-        let local_callable_shadows = !super::interpreter_eval::PRELUDE_UNSHADOWABLE.contains(&name.as_str())
-            && matches!(env.get(name.as_str()), Some(Value::Function { .. }) | Some(Value::Lambda { .. }));
-        if is_extern && !has_local_def && !local_callable_shadows {
+        // Evaluated only on the two branches that read it: the `env.get`
+        // cascade it runs costs ~300 ns on an owned frame, and the common
+        // user-function call (Priority 5) never needs the answer.
+        let local_callable_shadows = |env: &Env| {
+            !super::interpreter_eval::PRELUDE_UNSHADOWABLE.contains(&name.as_str())
+                && matches!(env.get(name.as_str()), Some(Value::Function { .. }) | Some(Value::Lambda { .. }))
+        };
+        phase_end(&pc::EVALCALL_NS_P1_EXTERN_CHECK, t);
+        if is_extern && !has_local_def && !local_callable_shadows(env) {
             if runtime_profile::is_profiling_active() {
                 runtime_profile::record_full_call(name, None, vec![], runtime_profile::CallType::Ffi);
             }
+            let t = phase_start();
             let result = call_extern_function(name, args, env, functions, classes, enums, impl_methods);
+            phase_end(&pc::EVALCALL_NS_P1_EXTERN_CALL, t);
             if runtime_profile::is_profiling_active() {
                 runtime_profile::record_full_return(None);
             }
             return result;
         }
+        let t = phase_start();
 
         // Priority 2: Try built-ins.
         //
@@ -786,11 +808,13 @@ pub(crate) fn evaluate_call(
         if user_defined && !builtin_wins && super::interpreter_eval::is_user_facing_prelude(name.as_str()) {
             warn_prelude_shadow_once(name.as_str(), functions, false);
         }
-        if builtin_wins && !local_callable_shadows {
+        if builtin_wins && !local_callable_shadows(env) {
             if let Some(result) = builtins::eval_builtin(name, args, env, functions, classes, enums, impl_methods)? {
                 return Ok(result);
             }
         }
+        phase_end(&pc::EVALCALL_NS_P2_BUILTIN, t);
+        let t = phase_start();
 
         // Priority 3: Try BDD framework for spec DSL names (describe/it/before_each/…).
         //
@@ -808,6 +832,8 @@ pub(crate) fn evaluate_call(
         if let Some(result) = bdd::eval_bdd_builtin(name, args, env, functions, classes, enums, impl_methods)? {
             return Ok(result);
         }
+        phase_end(&pc::EVALCALL_NS_P3_BDD, t);
+        let t = phase_start();
 
         // Priority 3.9: a LEXICAL local bound to a callable (`val resolve =
         // loader.resolve_fn`, a fn-typed parameter) shadows every module-level
@@ -824,6 +850,8 @@ pub(crate) fn evaluate_call(
             }
         }
 
+        phase_end(&pc::EVALCALL_NS_P39_LOCAL, t);
+        let t = phase_start();
         // Priority 4: Check overloaded regular functions before the flat map fallback.
         let overloads = FUNCTION_OVERLOADS.with(|cell| cell.borrow().get(name).cloned());
         if let Some(overloads) = overloads {
@@ -881,13 +909,19 @@ pub(crate) fn evaluate_call(
             }
         }
 
+        phase_end(&pc::EVALCALL_NS_P4_OVERLOADS, t);
+        let t = phase_start();
         // Priority 4.5: a function rebound by a user-defined decorator. The
         // decorated closure lives in `env` under `name`, but the undecorated
         // definition is still in `functions` (the original body needs it to
         // recurse), and Priority 5 below would therefore shadow the wrapper.
         // The sentinel is written by crate::decorator_apply and is scoped to
         // the same Env as the binding.
-        if env.get(&crate::decorator_apply::decorated_fn_key(name)).is_some() {
+        // Only worth the key build + env cascade once a decorator has bound
+        // anything in this process (see decorator_apply::DECORATED_FN_BOUND).
+        if crate::decorator_apply::any_decorated_fn_bound()
+            && env.get(&crate::decorator_apply::decorated_fn_key(name)).is_some()
+        {
             if let Some(val) = env.get(name).cloned() {
                 if let Some(result) = call_value_as_callable(val, args, env, functions, classes, enums, impl_methods)? {
                     return Ok(result);
@@ -895,6 +929,8 @@ pub(crate) fn evaluate_call(
             }
         }
 
+        phase_end(&pc::EVALCALL_NS_P45_DECORATED, t);
+        let t = phase_start();
         // Priority 4.9: a nested `fn` declared inside a BLOCK CLOSURE (an `it`
         // block, or any lambda body) is registered TWICE by
         // `exec_block_closure_into`: once in `functions`, so the body can recurse,
@@ -944,8 +980,11 @@ pub(crate) fn evaluate_call(
             }
         }
 
+        phase_end(&pc::EVALCALL_NS_P49_ENV_SHADOW, t);
         // Priority 5: Check regular functions (user-defined) — most common case
         if let Some(func) = functions.get(name).cloned() {
+            let t = phase_start();
+            let _flat_exec = PhaseGuard(&pc::EVALCALL_NS_P5_FLAT_EXEC, t);
             if debug_dupdispatch() {
                 eprintln!(
                     "[dupdispatch] P5-flat name={name} owner={:?} current={:?}",
@@ -1105,17 +1144,18 @@ pub(crate) fn evaluate_call(
                     return Ok(value);
                 }
             }
-            // Try local impl_methods first, then GLOBAL_IMPL_METHODS fallback
-            let impl_methods_for_type = impl_methods
-                .get(module_name)
-                .cloned()
-                .or_else(|| GLOBAL_IMPL_METHODS.with(|cell| cell.borrow().get(module_name).cloned()));
-            if let Some(methods) = impl_methods_for_type {
+            // Class static methods, module-qualified: the class this source
+            // module declares or imports under the name. This must run BEFORE
+            // the impl-method tables below, which are merged by BARE type name
+            // across every loaded module (`Config.default()` from a module that
+            // imported A's `Config` used to run B's `impl Config: default`).
+            let scoped_fa_class = crate::interpreter::resolve_class_in_scope(classes, module_name)?;
+            if let Some(class_def) = scoped_fa_class.clone() {
                 let evaluated_args: Vec<Value> = args
                     .iter()
                     .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
                     .collect::<Result<Vec<_>, _>>()?;
-                if let Some(func) = select_named_static_overload(methods.iter(), field, &evaluated_args) {
+                if let Some(func) = select_named_static_overload(class_def.methods.iter(), field, &evaluated_args) {
                     // If calling a `new` method, mark it to prevent double execution via instantiate_class
                     let is_new_method = field == "new";
                     if is_new_method {
@@ -1137,13 +1177,17 @@ pub(crate) fn evaluate_call(
                     return result;
                 }
             }
-            // Check for class static methods
-            if let Some(class_def) = classes.get(module_name).cloned() {
+            // Try local impl_methods first, then GLOBAL_IMPL_METHODS fallback
+            let impl_methods_for_type = impl_methods
+                .get(module_name)
+                .cloned()
+                .or_else(|| GLOBAL_IMPL_METHODS.with(|cell| cell.borrow().get(module_name).cloned()));
+            if let Some(methods) = impl_methods_for_type {
                 let evaluated_args: Vec<Value> = args
                     .iter()
                     .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
                     .collect::<Result<Vec<_>, _>>()?;
-                if let Some(func) = select_named_static_overload(class_def.methods.iter(), field, &evaluated_args) {
+                if let Some(func) = select_named_static_overload(methods.iter(), field, &evaluated_args) {
                     // If calling a `new` method, mark it to prevent double execution via instantiate_class
                     let is_new_method = field == "new";
                     if is_new_method {
@@ -1281,19 +1325,12 @@ pub(crate) fn evaluate_call(
                 );
             }
 
-            // Cross-module fallback for FieldAccess: search MODULE_CLASSES_CACHE
-            // for the class definition when it's not in the local classes map.
-            let cached_fa_class: Option<Arc<ClassDef>> = MODULE_CLASSES_CACHE.with(|cache| {
-                let cache = cache.borrow();
-                for (_path, module_classes) in cache.iter() {
-                    if let Some(class_def) = module_classes.get(module_name.as_str()) {
-                        return Some(class_def.clone());
-                    }
-                }
-                None
-            });
-            if let Some(class_def) = cached_fa_class {
-                classes.insert(module_name.clone(), class_def.clone());
+            // Cross-module fallback for FieldAccess: the module-qualified class
+            // resolved above (it may not be in the local classes map). This
+            // used to take the first MODULE_CLASSES_CACHE entry in hash order
+            // that had the bare name.
+            if let Some(class_def) = scoped_fa_class {
+                classes.entry(module_name.clone()).or_insert_with(|| class_def.clone());
                 if let Some(func) = class_def.methods.iter().find(|m| &m.name == field) {
                     let is_new_method = field == "new";
                     if is_new_method {
@@ -1418,6 +1455,41 @@ pub(crate) fn evaluate_call(
                         variant: method_name.clone(),
                         payload,
                     });
+                }
+            }
+
+            // Module-qualified resolution first: the class the SOURCE module
+            // declares or imports under `type_name`. This runs before the
+            // impl-method tables, which are merged by BARE type name across
+            // every loaded module and used to hand `physics/config.spl`'s
+            // `Vec3` methods to code that imported `math3d.Vec3`. An
+            // ambiguous bare name (two owned definitions, none in scope) is
+            // an error here instead of a last-registration-wins pick.
+            let scoped_class = crate::interpreter::resolve_class_in_scope(classes, type_name)?;
+            if let Some(class_def) = scoped_class.as_ref() {
+                let evaluated_args: Vec<Value> = args
+                    .iter()
+                    .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if let Some(func) = select_named_static_overload(class_def.methods.iter(), method_name, &evaluated_args)
+                {
+                    let is_new_method = method_name == "new";
+                    if is_new_method {
+                        core::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(type_name.to_string()));
+                    }
+                    let result = core::exec_function_with_values(
+                        &func,
+                        &evaluated_args,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    );
+                    if is_new_method {
+                        core::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(type_name));
+                    }
+                    return result;
                 }
             }
 
@@ -1657,8 +1729,10 @@ pub(crate) fn evaluate_call(
             let type_name = &segments[0];
             let method_name = &segments[1];
 
-            // Check class methods for static methods
-            if let Some(class_def) = classes.get(type_name.as_str()).cloned() {
+            // Check class methods for static methods (module-qualified: the
+            // class this source module declares or imports under the name).
+            let scoped_class = crate::interpreter::resolve_class_in_scope(classes, type_name.as_str())?;
+            if let Some(class_def) = scoped_class.clone() {
                 let evaluated_args: Vec<Value> = args
                     .iter()
                     .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
@@ -1742,22 +1816,15 @@ pub(crate) fn evaluate_call(
                 }
             }
 
-            // Cross-module fallback: search MODULE_CLASSES_CACHE for the class definition.
-            // When a class is imported from another module, its ClassDef may not be in the
-            // local `classes` map if the import path didn't fully merge definitions.
-            // Search all cached module definitions for the class and dispatch the method.
-            let cached_class_def: Option<Arc<ClassDef>> = MODULE_CLASSES_CACHE.with(|cache| {
-                let cache = cache.borrow();
-                for (_path, module_classes) in cache.iter() {
-                    if let Some(class_def) = module_classes.get(type_name.as_str()) {
-                        return Some(class_def.clone());
-                    }
-                }
-                None
-            });
-            if let Some(class_def) = cached_class_def {
-                // Also insert into local classes map so subsequent lookups are fast
-                classes.insert(type_name.clone(), class_def.clone());
+            // Cross-module fallback: the module-qualified class resolved above
+            // (its ClassDef may not be in the local `classes` map if the import
+            // path didn't fully merge definitions). This used to scan
+            // MODULE_CLASSES_CACHE in hash order and take the FIRST module that
+            // had the bare name.
+            if let Some(class_def) = scoped_class.clone() {
+                // Make the flat map see this class too, without displacing a
+                // definition that is already there.
+                classes.entry(type_name.clone()).or_insert_with(|| class_def.clone());
 
                 // Try any method (static or instance-as-static)
                 if let Some(method) = class_def.methods.iter().find(|m| m.name == *method_name) {

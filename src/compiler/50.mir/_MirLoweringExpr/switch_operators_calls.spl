@@ -777,6 +777,14 @@ impl MirLowering:
         val static_scalar_some = disc == 0 and not option_payload_is_boxed(option_type) and self.local_is_provably_scalar_payload(local)
         if disc == 0 and not static_scalar_some:
             return self.normalize_option_handle(local, option_type)
+        self.emit_option_handle_with_disc(local, option_type, disc)
+
+    me emit_option_handle_with_disc(local: LocalId, option_type: HirType, disc: i64) -> LocalId:
+        """Build the canonical enum-id-1 Option handle with a discriminant
+        fixed at compile time (0 = Some(local), 1 = None). Callers must know
+        presence by construction: ensure_option_handle (nil literal or a
+        provably scalar payload) and the bounds-checked some-arm of
+        lower_array_first_or_last, whose payload word may legally be 3."""
         var b = self.builder
         val enum_id_local = b.new_temp(MirType(kind: MirTypeKind.I32))
         b.emit_const(enum_id_local, MirConstValue.Int(1), MirType(kind: MirTypeKind.I32))
@@ -932,6 +940,66 @@ impl MirLowering:
             self.static_scalar_locals[payload_local.id] = true
         payload_local
 
+    me option_payload_for_int_sink(local: LocalId, sink_type: HirType) -> LocalId:
+        """Payload-typed USE of an Optional local in a declared INTEGER sink
+        (`-> i64` tail/return, `val y: i64 = ...`).
+
+        Extends option_scalar_payload_of to an `Optional(Any)` local: a
+        `list` (= `Array(Any)`) `get`/`at` result (lower_array_first_or_last)
+        is a real Option handle whose payload was already decoded to a raw
+        i64 word (lower_type(Any) = i64). option_scalar_payload_of skips it
+        because Any is not a plain scalar, so the HANDLE pointer reached the
+        integer slot (`w.get(0)` with w = [4] read back 200634408607585).
+        Only integer sinks are covered: the decoded payload is an integer
+        word, and a float/bool sink would reinterpret it.
+        Limit: the "payload already decoded" premise holds only for the
+        array get/at/first/last producer. Other Optional(Any) producers
+        (`any?` params, tagged raw-probe dict reads) carry a TAGGED payload;
+        for those this returns the tagged word instead of the handle --
+        still wrong, no longer a pointer. A MISS (None, payload 3) also
+        yields 3 here, as rt_unwrap_or_self does for typed `[i64].get`.
+        Both are tracked in
+        doc/08_tracking/bug/native_option_int_sink_miss_and_payload_three_2026-11-07.md
+        doc/08_tracking/bug/native_list_any_get_i64_sink_returns_option_handle_2026-11-07.md"""
+        val scalar_payload = self.option_scalar_payload_of(local)
+        if scalar_payload.id != local.id:
+            return scalar_payload
+        match sink_type.kind:
+            case HirTypeKind.Int(_, _): ()
+            case _: return local
+        var inner_is_any = false
+        match self.find_local_hir_type(local.id):
+            case Some(found):
+                if found != nil and found != 0:
+                    match found.kind:
+                        case HirTypeKind.Optional(optional_inner):
+                            match optional_inner.kind:
+                                case HirTypeKind.Any: inner_is_any = true
+                                case _: ()
+                        case _: ()
+            case None: ()
+        if not inner_is_any:
+            return local
+        var b = self.builder
+        val unwrap_fn = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_unwrap_or_self"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        val unwrapped = b.emit_call(unwrap_fn, [mir_operand_copy(local)], MirType.i64())
+        var payload_local = unwrapped ?? local
+        if unwrapped != nil:
+            val sink_mir_type = self.lower_type(sink_type)
+            if sink_mir_type.kind != MirTypeKind.I64:
+                payload_local = b.emit_cast(mir_operand_copy(payload_local), sink_mir_type)
+        self.builder = b
+        if unwrapped != nil:
+            # Raw integer word: register the sink's scalar type so the
+            # following local_needs_erased_decode check does not decode it
+            # a second time.
+            self.remember_local_hir_type(payload_local.id, sink_type, 0, 0)
+            self.static_scalar_locals[payload_local.id] = true
+        payload_local
+
     me local_is_declared_scalar_optional(local: LocalId) -> bool:
         match self.find_local_hir_type(local.id):
             case Some(found):
@@ -1003,6 +1071,19 @@ impl MirLowering:
         is what makes `nil` a real, distinct value for scalar optionals:
         Some(3), Some(true) and Some(0) are heap handles, never the raw
         sentinel, and a handle is never wrapped twice."""
+        self.classify_option_word(local, option_type, true)
+
+    me normalize_present_option_handle(local: LocalId, option_type: HirType) -> LocalId:
+        """normalize_option_handle for a word that is PRESENT by construction
+        (the bounds-checked array get some-arm) whose element type does not
+        rule out a stored Option handle (`Any`, a type parameter): an
+        enum-id-1 handle passes through unchanged (the interpreter returns a
+        stored Option as-is), anything else -- including the word 3 -- is
+        Some(word). No nil-sentinel test.
+        doc/08_tracking/bug/native_option_int_sink_miss_and_payload_three_2026-11-07.md"""
+        self.classify_option_word(local, option_type, false)
+
+    me classify_option_word(local: LocalId, option_type: HirType, sentinel_is_nil: bool) -> LocalId:
         if val float_word_type = self.local_mir_type_of(local):
             match float_word_type.kind:
                 case MirTypeKind.F32 | MirTypeKind.F64:
@@ -1018,9 +1099,10 @@ impl MirLowering:
         val id_local = id_res ?? LocalId(id: 0)
         val option_id = b.emit_const_int(1)
         val is_handle = b.emit_binop(MirBinOp.Eq, mir_operand_copy(id_local), mir_operand_copy(option_id), MirType.bool())
-        val handle_block = b.new_block(Some("option_norm_handle"))
-        val raw_block = b.new_block(Some("option_norm_raw"))
-        val merge_block = b.new_block(Some("option_norm_merge"))
+        val label_prefix = if sentinel_is_nil: "option_norm" else: "option_present"
+        val handle_block = b.new_block(Some("{label_prefix}_handle"))
+        val raw_block = b.new_block(Some("{label_prefix}_raw"))
+        val merge_block = b.new_block(Some("{label_prefix}_merge"))
         val result = b.new_temp(MirType.i64())
         b.terminate_if(mir_operand_copy(is_handle), handle_block, raw_block)
         b.switch_to_block(handle_block)
@@ -1029,11 +1111,15 @@ impl MirLowering:
         b.switch_to_block(raw_block)
         # None=1 exactly when the word is the nil sentinel (3); the payload
         # word is passed through untouched either way.
-        val nil_key = b.emit_const_int(3)
-        val is_nil = b.emit_binop(MirBinOp.Eq, mir_operand_copy(local), mir_operand_copy(nil_key), MirType.bool())
         val enum_id_local = b.new_temp(MirType(kind: MirTypeKind.I32))
         b.emit_const(enum_id_local, MirConstValue.Int(1), MirType(kind: MirTypeKind.I32))
-        val disc_local = b.emit_cast(mir_operand_copy(is_nil), MirType(kind: MirTypeKind.I32))
+        var disc_local = b.new_temp(MirType(kind: MirTypeKind.I32))
+        if sentinel_is_nil:
+            val nil_key = b.emit_const_int(3)
+            val is_nil = b.emit_binop(MirBinOp.Eq, mir_operand_copy(local), mir_operand_copy(nil_key), MirType.bool())
+            disc_local = b.emit_cast(mir_operand_copy(is_nil), MirType(kind: MirTypeKind.I32))
+        else:
+            b.emit_const(disc_local, MirConstValue.Int(0), MirType(kind: MirTypeKind.I32))
         val ctor = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_enum_new"),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType(kind: MirTypeKind.I32), MirType(kind: MirTypeKind.I32), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
@@ -4855,6 +4941,23 @@ impl MirLowering:
                                 case _: ()
                             val instantiated_payload_type = self.substitute_enum_payload_type_params_v1(payload_owner_key, enum_name, bound_payload_type, payload_instance)
                             self.remember_local_hir_type(bound_payload.id, instantiated_payload_type, 0, 0)
+                    if enum_name == "Result" and enum_variants[ci] == "Err" and (mir_lower_env_get("SIMPLE_ENUM_PAYLOAD_PATH_TRACE") ?? "") == "1":
+                        # Scalar diagnostic evidence only: do not interpolate
+                        # optional type payloads through value-position unwraps.
+                        val declared_present: bool = result_payload_type.?
+                        val effective_present: bool = effective_payload_type.?
+                        val remembered = self.find_local_hir_type(bound_payload.id)
+                        val remembered_present: bool = remembered.?
+                        var remembered_kind: i64 = -1
+                        if val remembered_type = remembered:
+                            remembered_kind = _sffi_enum_discriminant<HirTypeKind>(remembered_type.kind)
+                        val bound_mir = self.local_mir_type_of(bound_payload)
+                        val bound_mir_present: bool = bound_mir.?
+                        var bound_mir_kind: i64 = -1
+                        if val mir_type = bound_mir:
+                            bound_mir_kind = _sffi_enum_discriminant<MirTypeKind>(mir_type.kind)
+                        val route = if exact_err_record: "exact-record" else: if effective_present: "declared" else: "unknown"
+                        eprint("[result-err-bind] module={self.current_module_id} function={self.mir_tag_probe_active_function} subject={scrut_local.id} binding={bind_syms[0].id} raw={pl.id} bound={bound_payload.id} route={route} declared_present={declared_present} effective_present={effective_present} remembered_present={remembered_present} remembered_kind={remembered_kind} mir_present={bound_mir_present} mir_kind={bound_mir_kind}\n")
                     if result_match_candidate:
                         if enum_variants[ci] == "Ok": result_ok_payload = bound_payload
                         elif enum_variants[ci] == "Err": result_err_payload = bound_payload
@@ -9420,6 +9523,7 @@ impl MirLowering:
         match name:
             case "push": true
             case "write_span": true
+            case "fill_span": true
             case "pop": true
             case "insert": true
             case "remove": true

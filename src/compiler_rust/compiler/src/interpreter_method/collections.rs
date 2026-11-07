@@ -236,6 +236,110 @@ pub(crate) fn byte_array_write_span(
     }
 }
 
+/// The one bounds rule (and message) for every `fill_span` destination.
+/// Mirrors `write_span_range_check`; the native twins print the same text.
+pub(crate) fn fill_span_range_check(dst_len: usize, dst_off: i64, count: i64) -> Result<(), CompileError> {
+    let dst_len = dst_len as i64;
+    if dst_off < 0 || dst_off.checked_add(count).is_none_or(|end| end > dst_len) {
+        let ctx = ErrorContext::new()
+            .with_code(codes::INDEX_OUT_OF_BOUNDS)
+            .with_help("fill_span never grows the destination; ensure dst_off+count <= dst.len()");
+        return Err(CompileError::semantic_with_context(
+            format!("fill_span out of range: dst_off={dst_off} count={count} dst_len={dst_len}"),
+            ctx,
+        ));
+    }
+    Ok(())
+}
+
+/// Volatile in-place fill of a boxed/packed-word array:
+/// `dst[dst_off..dst_off+count] = value`. Returns the count written.
+///
+/// Compiler-owned twin of `rt_array_fill_span` (both runtimes). The write
+/// happens on the caller's exclusive storage -- every owner reaches this
+/// kernel through `Arc::make_mut` on the place it resolved -- so no raw
+/// pointer ever leaves the runtime boundary and no per-element allocation
+/// happens. `count <= 0` is a no-op returning 0; an out-of-range span never
+/// writes. Bug: doc/08_tracking/bug/secure_memory_interpreter_raw_pointer_aliasing_2026-08-24.md
+pub(crate) fn array_fill_span(
+    dst: &mut crate::value::ArrayData,
+    dst_off: i64,
+    count: i64,
+    value: &Value,
+) -> Result<i64, CompileError> {
+    if count <= 0 {
+        return Ok(0);
+    }
+    fill_span_range_check(dst.len(), dst_off, count)?;
+    let (d, n) = (dst_off as usize, count as usize);
+    for k in 0..n {
+        dst.assign_index(d + k, value.clone());
+    }
+    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    Ok(count)
+}
+
+/// Volatile in-place fill of packed `[u8]` storage. A byte-representable
+/// value (`u8`, or an `Int` in `0..=255`, exactly what an index store accepts)
+/// is written with `write_volatile` and sealed with a SeqCst fence, so a
+/// secret wipe is never elided; any other value widens the destination to
+/// boxed values exactly as `write_span` does.
+pub(crate) fn byte_array_fill_span(
+    dst: &mut Vec<u8>,
+    dst_off: i64,
+    count: i64,
+    value: &Value,
+) -> Result<ByteSpanWrite, CompileError> {
+    if count <= 0 {
+        return Ok(ByteSpanWrite::InPlace(0));
+    }
+    fill_span_range_check(dst.len(), dst_off, count)?;
+    let (d, n) = (dst_off as usize, count as usize);
+    let byte = match value {
+        Value::UInt { value, width: 8 } => u8::try_from(*value).ok(),
+        Value::Int(value) => u8::try_from(*value).ok(),
+        _ => None,
+    };
+    match byte {
+        Some(byte) => {
+            let base = dst[d..d + n].as_mut_ptr();
+            for k in 0..n {
+                // SAFETY: `d + k < dst.len()` was validated above and `base`
+                // points into the uniquely borrowed `dst`.
+                unsafe { base.add(k).write_volatile(byte) };
+            }
+            std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+            Ok(ByteSpanWrite::InPlace(count))
+        }
+        None => {
+            let mut widened = Value::byte_array_values(dst);
+            for slot in &mut widened[d..d + n] {
+                *slot = value.clone();
+            }
+            Ok(ByteSpanWrite::Widened(widened, count))
+        }
+    }
+}
+
+/// Evaluate `fill_span(dst_off, count, value)`'s operands once, in order.
+pub(crate) fn eval_fill_span_args(
+    args: &[Argument],
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<(i64, i64, Value), CompileError> {
+    let dst_off = eval_arg(args, 0, Value::Int(-1), env, functions, classes, enums, impl_methods)?
+        .as_int()
+        .unwrap_or(-1);
+    let count = eval_arg(args, 1, Value::Int(0), env, functions, classes, enums, impl_methods)?
+        .as_int()
+        .unwrap_or(0);
+    let value = eval_arg(args, 2, Value::Int(0), env, functions, classes, enums, impl_methods)?;
+    Ok((dst_off, count, value))
+}
+
 /// A value packed `[u8]` storage can hold without changing what reading it
 /// back yields: exactly a `u8`-typed value.
 fn packed_byte_of(value: &Value) -> Option<u8> {
@@ -315,6 +419,17 @@ pub fn handle_packed_array_methods(
                     _ => write_span_source(&src)?.len(),
                 };
                 write_span_range_check(arr.len(), src_len, dst_off, src_off, count)?;
+                Value::Int(count)
+            }
+        }
+        // Same evaluation order and errors as the boxed `fill_span` arm.
+        "fill_span" => {
+            let (dst_off, count, _value) =
+                eval_fill_span_args(args, env, functions, classes, enums, impl_methods)?;
+            if count <= 0 {
+                Value::Int(0)
+            } else {
+                fill_span_range_check(arr.len(), dst_off, count)?;
                 Value::Int(count)
             }
         }
@@ -443,6 +558,20 @@ pub fn handle_array_methods(
                     _ => write_span_source(&src)?.len(),
                 };
                 write_span_range_check(arr.len(), src_len, dst_off, src_off, count)?;
+                Value::Int(count)
+            }
+        }
+        // Bulk in-place volatile fill: validation and count only, exactly like
+        // `write_span` above -- the owning caller performs the write on the
+        // place it resolved (identifier fast path / place-mutation leaf /
+        // `evaluate_method_call_with_self_update` write-back).
+        "fill_span" => {
+            let (dst_off, count, _value) =
+                eval_fill_span_args(args, env, functions, classes, enums, impl_methods)?;
+            if count <= 0 {
+                Value::Int(0)
+            } else {
+                fill_span_range_check(arr.len(), dst_off, count)?;
                 Value::Int(count)
             }
         }

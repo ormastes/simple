@@ -2,10 +2,15 @@
 
 use std::cmp::Ordering;
 
-use crate::value::collections::{rt_string_data, rt_string_len};
+use crate::value::collections::{rt_hash_text, rt_string_data, rt_string_len};
 use crate::value::core::RuntimeValue;
 use crate::value::heap::{is_registered_heap_ptr, HeapHeader, HeapObjectType};
 use crate::value::tags;
+
+extern "C" {
+    // runtime_memory.c: true for a live record allocation (rt_struct_alloc).
+    fn rt_struct_receiver_valid(receiver: i64, byte_offset: i64, access_width: i64) -> i8;
+}
 
 fn relation(order: Ordering) -> i64 {
     match order {
@@ -142,6 +147,57 @@ pub extern "C" fn spl_ordered_key_cmp(left: i64, right: i64) -> i64 {
     )
 }
 
+/// `.hash()` on an erased generic value (`key.hash()` with `key: K`), matching
+/// the core-C `spl_erased_key_hash`. Keys equal under `rt_native_eq` hash
+/// equally: text by FNV-1a content (= `rt_hash_text`), integer words and
+/// wide/unsigned boxes by value, boxed floats by IEEE bits with both zeros
+/// hashing to 0. Any other registered handle (array, tuple, dict, enum, struct
+/// allocation) has no address-free hash here, so the process aborts instead of
+/// hashing an address. A non-heap word equals only the identical word under
+/// `rt_native_eq`, so hashing its value is consistent; float/bool hash values
+/// need not match std.hash's typed impls.
+#[no_mangle]
+pub extern "C" fn spl_erased_key_hash(value: i64) -> i64 {
+    fn refuse(what: &str) -> ! {
+        eprintln!("spl_erased_key_hash: key type has no supported native hash ({})", what);
+        std::process::abort();
+    }
+    let registered_leaf = match registered_kind(value) {
+        Some(HeapObjectType::String | HeapObjectType::Float | HeapObjectType::Int | HeapObjectType::UInt) => true,
+        Some(kind) => refuse(&format!("{:?}", kind)),
+        None => false,
+    };
+    // Records live in runtime_memory.c's struct allocation registry.
+    if unsafe { rt_struct_receiver_valid(value, 0, 1) } != 0 {
+        refuse("struct allocation");
+    }
+    let v = RuntimeValue::from_raw(value as u64);
+    if registered_leaf && v.heap_type().is_none() {
+        // An untagged leaf pointer would otherwise hash its address.
+        refuse("undecoded registered leaf");
+    }
+    match v.heap_type() {
+        Some(HeapObjectType::String) => rt_hash_text(v),
+        Some(HeapObjectType::Float) => {
+            let f = v.as_float();
+            if f == 0.0 {
+                0
+            } else {
+                f.to_bits() as i64
+            }
+        }
+        _ => {
+            if let Some(unsigned) = v.as_heap_u64() {
+                unsigned as i64
+            } else if let Some(wide) = v.as_heap_i64() {
+                wide
+            } else {
+                numeric_word(value)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,5 +318,24 @@ mod tests {
         let nan = boxed_float(f64::NAN);
         assert_eq!(spl_ordered_key_cmp(nan, one), 0);
         assert_eq!(spl_ordered_key_cmp(one, nan), 0);
+    }
+
+    #[test]
+    fn erased_key_hash_agrees_with_equality_for_supported_keys() {
+        let left = text(b"equal text");
+        let right = text(b"equal text");
+        assert_ne!(left, right);
+        assert_eq!(spl_erased_key_hash(left), spl_erased_key_hash(right));
+        assert_eq!(spl_erased_key_hash(left), rt_hash_text(RuntimeValue::from_raw(left as u64)));
+        assert_eq!(spl_erased_key_hash(text(b"")), 14695981039346656037u64 as i64);
+        assert_ne!(spl_erased_key_hash(text(b"a")), spl_erased_key_hash(text(b"b")));
+        assert_eq!(spl_erased_key_hash(raw(RuntimeValue::from_int(42))), 42);
+        assert_eq!(spl_erased_key_hash(raw(RuntimeValue::from_int(-5))), -5);
+        assert_eq!(spl_erased_key_hash(raw(RuntimeValue::from_int(i64::MIN))), i64::MIN);
+        assert_eq!(spl_erased_key_hash(17), spl_erased_key_hash(17));
+        assert_eq!(spl_erased_key_hash(raw(RuntimeValue::from_u64(u64::MAX))), -1);
+        assert_eq!(spl_erased_key_hash(boxed_float(-0.0)), 0);
+        assert_eq!(spl_erased_key_hash(boxed_float(0.0)), 0);
+        assert_eq!(spl_erased_key_hash(boxed_float(1.5)), spl_erased_key_hash(boxed_float(1.5)));
     }
 }

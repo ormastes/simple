@@ -727,6 +727,16 @@ impl ExecCore {
         // must not be reported as either. Stamped here, immediately before the
         // module's own entry points are called.
         simple_common::engine_receipt::stamp(simple_common::engine_receipt::Engine::Native);
+        // An SMF whose hybrid transform routed functions to `rt_interp_call`
+        // carries their source in `.interp_snapshot`; seed the interpreter
+        // definitions from it BEFORE any compiled code can reach a routed
+        // call. Without this the bridge answered `function not found` (NIL).
+        // doc/08_tracking/bug/smf_standalone_interp_fallback_functions_unavailable_2026-06-14.md
+        if let Some(payload) = module.interp_snapshot.as_deref() {
+            simple_compiler::interpreter_sffi::init_interpreter_handlers();
+            simple_compiler::pipeline::seed_interpreter_from_smf_snapshot(payload)
+                .map_err(|e| format!("cannot run {}: {e}", module.path.display()))?;
+        }
         run_module_init(module)?;
         let exit = run_main(module)?;
         self.collect_gc();
@@ -2360,5 +2370,56 @@ mod jit_top_level_statement_tests {
     fn bindings_and_bare_main_call_stay_on_jit() {
         let src = "val greeting = \"hi\"\nfn main():\n    print greeting\nmain()\n";
         assert_eq!(skipped(src), 0);
+    }
+
+    /// Entry whose `present` is interpreter-only (`.?` existence check is a
+    /// `FallbackReason::TryOperator` under AotNative), so the hybrid transform
+    /// routes `main`'s call to it through `rt_interp_call`.
+    const INTERP_FALLBACK_ENTRY: &str =
+        "fn present(v: i64?) -> i64:\n    if v.?:\n        7\n    else:\n        3\n\nfn main() -> i64:\n    present(1)\n";
+
+    /// Reproducer for
+    /// doc/08_tracking/bug/smf_standalone_interp_fallback_functions_unavailable_2026-06-14.md:
+    /// a standalone SMF with an interp-routed function used to be refused at
+    /// compile time (and, before that gate, died with `rt_interp_call:
+    /// function not found`). The `.interp_snapshot` section now seeds the
+    /// interpreter before `main`, so the routed call resolves and the exit
+    /// code is the interpreter-computed 7.
+    #[test]
+    fn smf_with_interp_fallback_function_runs_through_embedded_snapshot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("fb.spl");
+        let out = dir.path().join("fb.smf");
+        std::fs::write(&src, INTERP_FALLBACK_ENTRY).unwrap();
+        let core = ExecCore::new();
+        core.compile_file(&src, &out)
+            .expect("a file-backed SMF with an interp-only function must compile");
+        let module = core.load_module(&out).expect("load");
+        assert!(module.interp_snapshot.is_some(), "SMF must carry .interp_snapshot");
+        assert_eq!(core.run_smf_with_args(&out, vec![]), Ok(7));
+    }
+
+    /// Prevention, general shape: the snapshot travels WITH the artifact. With
+    /// the pinned entry source deleted (artifact moved to another box), the
+    /// embedded text is materialised and the routed call still resolves; and a
+    /// module whose every function compiled natively carries no section at all.
+    #[test]
+    fn smf_interp_snapshot_survives_source_removal_and_is_absent_without_fallback() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("fb.spl");
+        let out = dir.path().join("fb.smf");
+        std::fs::write(&src, INTERP_FALLBACK_ENTRY).unwrap();
+        let core = ExecCore::new();
+        core.compile_file(&src, &out).expect("compile");
+        std::fs::remove_file(&src).expect("remove pinned entry");
+        assert_eq!(core.run_smf_with_args(&out, vec![]), Ok(7));
+
+        let plain_src = dir.path().join("plain.spl");
+        let plain_out = dir.path().join("plain.smf");
+        std::fs::write(&plain_src, "fn main() -> i64:\n    5\n").unwrap();
+        core.compile_file(&plain_src, &plain_out).expect("compile");
+        let module = core.load_module(&plain_out).expect("load");
+        assert!(module.interp_snapshot.is_none(), "natively compiled SMF must not carry a snapshot");
+        assert_eq!(core.run_smf_with_args(&plain_out, vec![]), Ok(5));
     }
 }

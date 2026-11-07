@@ -1,0 +1,90 @@
+# Linux OCI execution request values and immutable payload identity.
+use std.common.contracts.container.execution_options_v1.{OciEnvironmentEntryV1, oci_execution_options_v1}
+use std.common.crypto.sha256.sha256_text
+
+pub struct LinuxOciRequestV1:
+    pod_uid: text
+    attempt: i64
+    # Filled from the durable intent record during restart recovery. Empty on
+    # first create; the provider then mints and labels one before side effects.
+    operation_id: text
+    image: text
+    bundle_path: text
+    command: [text]
+    args: [text]
+    timeout_ms: i64
+    cpu_limit_millis: i64
+    memory_limit_bytes: i64
+    pid_limit: i64
+    network_policy: text
+    filesystem_policy: text
+    # Build mode (both set): command[0] overrides the image entrypoint, the
+    # staged inputs are mounted read-only and the outputs directory writable.
+    build_input_root: text = ""
+    build_output_root: text = ""
+    # Explicit additive mode. False preserves V1 positional CMD behavior.
+    # True selects command[0] as ENTRYPOINT and passes only its tail + args.
+    replace_entrypoint: bool = false
+    # Explicit non-secret values, already authorized by the caller's host policy.
+    environment: [OciEnvironmentEntryV1] = []
+    working_directory: text = ""
+    # Non-default modes use retained-request/digest version 2.
+    # none preserves the exact historical V1 identity and serialized bytes.
+    terminal_mode: text = "none"
+
+# The operation ID is recovery metadata, checked separately against the bound
+# intent. Every execution field, including currently inert fields, is included.
+# Field hashes keep arbitrary UTF-8 and delimiters unambiguous in canonical SDN.
+fn request_fields_v1(request: LinuxOciRequestV1) -> Result<[text], text>:
+    if request.terminal_mode != "none" and request.terminal_mode != "stdin" and request.terminal_mode != "tty":
+        return Err("request-terminal-mode-invalid")
+    if request.command.len() > 256 or request.args.len() > 256:
+        return Err("request-argument-count-exceeded")
+    val options = oci_execution_options_v1(request.environment, request.working_directory)?
+    var values: [text] = [request.pod_uid, request.attempt.to_text(), request.image,
+        request.bundle_path, request.timeout_ms.to_text(), request.cpu_limit_millis.to_text(),
+        request.memory_limit_bytes.to_text(), request.pid_limit.to_text(),
+        request.network_policy, request.filesystem_policy, request.build_input_root,
+        request.build_output_root, if request.replace_entrypoint: "true" else: "false",
+        request.working_directory]
+    for value in request.command: values.push(value)
+    for value in request.args: values.push(value)
+    for entry in request.environment:
+        values.push(entry.name)
+        values.push(entry.value)
+    var total = 0
+    for value in values:
+        if value.contains("\0"): return Err("request-field-contains-nul")
+        if value.len() > 16384: return Err("request-field-too-large")
+        total = total + value.len()
+        if total > 1048576: return Err("request-payload-too-large")
+    Ok(values)
+
+pub fn linux_oci_request_bounds_v1(request: LinuxOciRequestV1) -> Result<bool, text>:
+    val fields = request_fields_v1(request)?
+    Ok(true)
+
+pub fn linux_oci_request_digest_v1(request: LinuxOciRequestV1) -> Result<text, text>:
+    val values = request_fields_v1(request)?
+    val names = ["podUid", "attempt", "image", "bundlePath", "timeoutMs",
+        "cpuLimitMillis", "memoryLimitBytes", "pidLimit", "networkPolicy",
+        "filesystemPolicy", "buildInputRoot", "buildOutputRoot", "replaceEntrypoint",
+        "workingDirectory"]
+    var body = "version: 1\nkind: linux-oci-request-digest\n"
+    if request.terminal_mode != "none":
+        body = "version: 2\nkind: linux-oci-request-digest\nterminalMode: " + request.terminal_mode + "\n"
+    var index = 0
+    while index < names.len():
+        body = body + names[index] + "Digest: \"" + sha256_text(values[index]) + "\"\n"
+        index = index + 1
+    body = body + "commandCount: " + request.command.len().to_text() + "\ncommand:\n"
+    for value in request.command:
+        body = body + "    - \"" + sha256_text(value) + "\"\n"
+    body = body + "argumentCount: " + request.args.len().to_text() + "\narguments:\n"
+    for value in request.args:
+        body = body + "    - \"" + sha256_text(value) + "\"\n"
+    body = body + "environmentCount: " + request.environment.len().to_text() + "\nenvironment:\n"
+    for entry in request.environment:
+        body = body + "    - nameDigest: \"" + sha256_text(entry.name) + "\"\n"
+        body = body + "      valueDigest: \"" + sha256_text(entry.value) + "\"\n"
+    Ok(sha256_text(body))

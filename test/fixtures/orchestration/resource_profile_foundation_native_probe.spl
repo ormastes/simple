@@ -1,0 +1,38 @@
+# Diagnostic only: native execution is not admitted SSpec qualification.
+use std.common.contracts.orchestration.profile_v1.*
+use std.common.contracts.orchestration.resource_v1.{parse_cpu_millis, parse_memory_bytes, parse_resource_document, as_dict, as_int}
+use std.io_runtime.file_read
+
+fn main() -> i64:
+    # Indented syntax avoids adjacent closing-brace literal interpolation.
+    val parsed = parse_resource_document("outer:\n    value: 10000\n").unwrap()
+    val root = as_dict(parsed.0, "", parsed.1).unwrap()
+    val nested = as_dict(root["outer"], "outer", parsed.1).unwrap()
+    assert(as_int(nested["value"], "outer.value", parsed.1).unwrap() == 10000)
+    assert(parse_cpu_millis("9223372036854775807m") == 9223372036854775807)
+    assert(parse_cpu_millis("9223372036854775808m") == -1)
+    assert(parse_cpu_millis("18446744073709551616m") == -1)
+    assert(parse_cpu_millis("9223372036854775") == 9223372036854775000)
+    assert(parse_cpu_millis("9223372036854776") == -1)
+    assert(parse_memory_bytes("9223372036854775807") == 9223372036854775807)
+    assert(parse_memory_bytes("9223372036854775808") == -1)
+    assert(parse_memory_bytes("8589934591Gi") == 9223372035781033984)
+    assert(parse_memory_bytes("8589934592Gi") == -1)
+    # Native optional-text unwrap failure is recorded in the foundation design
+    # diagnostic section; absence must still fail this fixture immediately.
+    val source = file_read("test/fixtures/orchestration/agent_cpu_profile.sdn") ?? ""
+    assert(source.len() > 0)
+    val profile = decode_resource_profile(source).unwrap()
+    assert(profile.cpu.minimum == 1000)
+    assert(profile.memory.minimum == 2147483648)
+    val proposal = propose_profile_allocation(profile, 8000, 25769803776, false).unwrap()
+    assert(proposal.cpu_millis == 2000)
+    assert(proposal.memory_bytes == 4294967296)
+    assert(proposal.cpu_cap_millis == proposal.cpu_millis)
+    assert(proposal.memory_cap_bytes == proposal.memory_bytes)
+    assert(propose_profile_allocation(profile, 999, 25769803776, false).is_err())
+    assert(propose_profile_allocation(profile, 8000, 2147483647, false).is_err())
+    val duplicate = source.replace("        min: \"1000m\"", "        min: \"1000m\"\n        min: \"2000m\"")
+    assert(decode_resource_profile(duplicate).is_err())
+    print "resource-profile-foundation-native-probe: diagnostic assertions passed"
+    0

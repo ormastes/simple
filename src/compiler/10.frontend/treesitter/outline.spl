@@ -25,7 +25,6 @@ use compiler.frontend.treesitter.outline_lexer.{TreeSitter}
 use compiler.frontend.treesitter.outline_types.*
 use compiler.frontend.treesitter.outline_decls.*
 use compiler.frontend.treesitter.outline_members.*
-use compiler.frontend.parser_types.{Attribute}
 
 # Enum constructor helpers (legacy lowering expects free functions)
 fn toplevelitem_Import(item: ImportOutline) -> TopLevelItem: TopLevelItem.Import(item)
@@ -223,6 +222,9 @@ impl TreeSitter:
             static_asserts: [],
             inline_blocks: [],
             asm_blocks: [],
+            friends: [],
+            internal_exports: [],
+            authority_spans: [],
             errors: []
         )
 
@@ -337,7 +339,7 @@ impl TreeSitter:
     me parse_top_level_item() -> TopLevelItem:
         """Parse a top-level item."""
         # Parse attributes before the declaration (@repr, @packed, @align, etc.)
-        val attrs: [Attribute] = self.parse_attributes()
+        val attrs: [AttributeOutline] = self.parse_attributes()
 
         val doc = self.take_doc_comment()
         val visibility = self.parse_visibility()
@@ -367,6 +369,8 @@ impl TreeSitter:
 
         val peeked = self.peek()
         match peeked:
+            case TokenKind.KwUse:
+                toplevelitem_Import(self.parse_import())
             case TokenKind.KwImport:
                 toplevelitem_Import(self.parse_import())
             case TokenKind.KwExport:
@@ -486,8 +490,8 @@ impl TreeSitter:
         self.advance()  # Consume 'import'
 
         # Check for 'use lazy' / 'import lazy' modifier
-        var is_lazy = false
-        if self.check(TokenKind.Ident):
+        var is_lazy = self.match_token(TokenKind.KwLazy)
+        if not is_lazy and self.check(TokenKind.Ident):
             if self.current.text == "lazy":
                 is_lazy = true
                 self.advance()
@@ -501,7 +505,13 @@ impl TreeSitter:
         # import foo.bar.{a, b, c}
         # import foo.bar as fb
 
-        if self.match_token(TokenKind.Dot):
+        # parse_module_path already consumes the dot before a group or star.
+        if self.match_token(TokenKind.LBrace):
+            items = self.parse_import_items()
+            self.expect(TokenKind.RBrace, "expected '}' after import items")
+        elif self.match_token(TokenKind.Star):
+            items = ["*"]
+        elif self.match_token(TokenKind.Dot):
             if self.match_token(TokenKind.LBrace):
                 items = self.parse_import_items()
                 self.expect(TokenKind.RBrace, "expected '}' after import items")
@@ -550,7 +560,17 @@ impl TreeSitter:
 
     me parse_module_path() -> text:
         """Parse a.b.c module path."""
-        var path = self.parse_identifier()
+        var prefix = ""
+        while self.check(TokenKind.Dot) or self.check(TokenKind.DotDot) or self.check(TokenKind.Ellipsis):
+            if self.match_token(TokenKind.Dot):
+                prefix = prefix + "."
+            elif self.match_token(TokenKind.DotDot):
+                prefix = prefix + ".."
+            elif self.match_token(TokenKind.Ellipsis):
+                prefix = prefix + "..."
+        if prefix != "" and (self.check(TokenKind.LBrace) or self.check(TokenKind.Star)):
+            return prefix
+        var path = prefix + self.parse_identifier()
 
         while self.match_token(TokenKind.Dot):
             if self.check(TokenKind.LBrace) or self.check(TokenKind.Star):
@@ -915,6 +935,20 @@ impl TreeSitter:
 
     me skip_block():
         """Skip an indented body while collecting inline asm outlines."""
+        # An inline expression has no matching Dedent. Starting depth=1 in
+        # that case consumed subsequent declarations through EOF.
+        if not self.check(TokenKind.Indent):
+            while not self.check(TokenKind.Newline) and not self.is_at_end():
+                if self.check(TokenKind.KwAsm):
+                    val outline = self.parse_asm_outline()
+                    self.asm_blocks.push(outline)
+                elif self.check(TokenKind.BlockStart):
+                    var nested = self.parse_block_outline()
+                    nested = self.apply_outline_policy(nested)
+                    self.inline_blocks.push(nested)
+                else:
+                    self.advance()
+            return
         if self.check(TokenKind.Indent):
             self.advance()
 

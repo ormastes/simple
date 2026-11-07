@@ -140,7 +140,7 @@ pub(crate) use interpreter_control::exec_with;
 // `expr.rs` still calls `crate::interpreter::dispatch_profile::record`, which
 // left the seed unbuildable (E0433).
 pub(crate) mod dispatch_profile;
-pub(crate) mod sampler;
+pub mod sampler;
 mod expr;
 pub(crate) use expr::evaluate_expr;
 
@@ -166,6 +166,7 @@ pub(crate) use interpreter_helpers::{
 pub(crate) mod interpreter_call;
 pub(crate) use interpreter_call::IN_NEW_METHOD;
 pub(crate) use interpreter_call::exec_block_value;
+pub(crate) use interpreter_call::exec_function_with_values as exec_function_with_value_args;
 pub(crate) use interpreter_call::{
     captured_env_with_live_globals, execute_function_body, publish_and_repoint, publish_live_bound_globals,
     sync_owned_captured_globals,
@@ -180,7 +181,12 @@ use interpreter_call::{
 // Module caching and loading state
 #[path = "../module_cache.rs"]
 mod module_cache;
-pub use module_cache::{owner_module_class, owner_module_enum, record_flattened_owner_class, record_flattened_owner_enum, resolve_class};
+pub(crate) use module_cache::bump_registry_generation;
+pub use module_cache::{
+    clear_entry_owner_classes, owner_module_class, owner_module_enum, record_entry_owner_class, record_flattened_owner_class,
+    record_flattened_owner_enum, refresh_cached_class, resolve_class_for_instance, resolve_class_for_receiver,
+    resolve_class_in_scope,
+};
 pub use module_cache::clear_module_cache;
 pub use module_cache::{clear_probe_source_cache, probe_source_cached};
 pub use module_cache::{
@@ -217,6 +223,7 @@ pub use interpreter_eval::PRELUDE_UNSHADOWABLE;
 // Re-exported so crate::decorator_apply can invoke a Value as a callable when
 // applying runtime function decorators.
 pub(crate) use interpreter_eval::call_value_with_args;
+pub(crate) use interpreter_eval::initialize_extern_functions;
 
 #[path = "../interpreter_method/mod.rs"]
 mod interpreter_method;

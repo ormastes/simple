@@ -1,0 +1,99 @@
+use std.spec.*
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.mir.mir_data.*
+
+# Exercise stale destination metadata in both Copy and Move without relying
+# on frontend inference to happen to produce that state.
+fn copied_widening_ir(unsigned_source: bool, is_move: bool) -> text:
+    var translator = MirToLlvm.create("test.copy_unsigned", CodegenTarget.X86_64, nil)
+    translator.local_types[0] = "i8"
+    translator.defined_locals[0] = true
+    translator.unsigned_locals[0] = unsigned_source
+    translator.local_types[1] = "i64"
+    translator.unsigned_locals[1] = not unsigned_source
+    translator.translate_copy_move(LocalId(id: 1), LocalId(id: 0), is_move)
+    translator.llvm_cast_impl(LocalId(id: 2), mir_operand_copy(LocalId(id: 1)), MirType.i64())
+    translator.builder.build()
+
+fn spilled_widening_ir(unsigned_source: bool) -> text:
+    var translator = MirToLlvm.create("test.spill_unsigned", CodegenTarget.X86_64, nil)
+    translator.local_types[0] = "i8"
+    translator.defined_locals[0] = true
+    translator.unsigned_locals[0] = unsigned_source
+    # Model an original inferred i64 local that receives a resolved byte.
+    # SSA retains this original slot width across validation branches.
+    val slot = LocalId(id: 9)
+    translator.translate_alloc(slot, MirType.i64())
+    translator.translate_store(mir_operand_copy(slot), mir_operand_copy(LocalId(id: 0)))
+    translator.translate_load(LocalId(id: 2), mir_operand_copy(slot))
+    translator.builder.build()
+
+fn copied_octet_as_i64(values: [u8], index: i64) -> i64:
+    val byte = values[index]
+    byte as i64
+
+fn copied_signed_as_i64(value: i8) -> i64:
+    val copied = value
+    copied as i64
+
+fn checked_octet_window(values: [u8]) -> Result<[u8], text>:
+    var result: [u8] = []
+    for index in 0..values.len():
+        val byte = values[index]
+        val value = byte as i64
+        if value < 0 or value > 255:
+            return Err("octet range")
+        result.push(byte)
+    Ok(result)
+
+describe "integer signedness after an inferred local copy":
+    it "zero-extends an unsigned byte into an i64 spill slot":
+        step("Spilling a resolved U8 preserves its numeric value before reload")
+        val ir = spilled_widening_ir(true)
+        expect(ir).to_contain("zext i8 %l0 to i64")
+        expect(ir.contains("sext i8 %l0 to i64")).to_equal(false)
+        expect(ir).to_contain("store i64")
+        expect(ir).to_contain("load i64, ptr %l9")
+
+    it "sign-extends a signed byte into an i64 spill slot":
+        step("The same spill keeps signed I8 negative instead of zero-extending it")
+        val ir = spilled_widening_ir(false)
+        expect(ir).to_contain("sext i8 %l0 to i64")
+        expect(ir.contains("zext i8 %l0 to i64")).to_equal(false)
+        expect(ir).to_contain("store i64")
+        expect(ir).to_contain("load i64, ptr %l9")
+
+    it "replaces stale signed destination metadata for Copy and Move":
+        step("Unsigned byte copies and moves zero-extend after replacing stale metadata")
+        for is_move in [false, true]:
+            val ir = copied_widening_ir(true, is_move)
+            expect(ir).to_contain("zext i8 %l1 to i64")
+            expect(ir.contains("sext i8 %l1 to i64")).to_equal(false)
+
+    it "replaces stale unsigned destination metadata for Copy and Move":
+        step("Signed byte copies and moves sign-extend after replacing stale metadata")
+        for is_move in [false, true]:
+            val ir = copied_widening_ir(false, is_move)
+            expect(ir).to_contain("sext i8 %l1 to i64")
+            expect(ir.contains("zext i8 %l1 to i64")).to_equal(false)
+
+    it "preserves high-bit unsigned octets when widening":
+        step("Inferred unsigned locals preserve exact octet values")
+        val bytes: [u8] = [0, 127, 128, 153, 255]
+        expect(copied_octet_as_i64(bytes, 0)).to_equal(0)
+        expect(copied_octet_as_i64(bytes, 1)).to_equal(127)
+        expect(copied_octet_as_i64(bytes, 2)).to_equal(128)
+        expect(copied_octet_as_i64(bytes, 3)).to_equal(153)
+        expect(copied_octet_as_i64(bytes, 4)).to_equal(255)
+
+    it "preserves negative signed values when widening":
+        step("Signed controls remain negative")
+        expect(copied_signed_as_i64(-1 as i8)).to_equal(-1)
+        expect(copied_signed_as_i64(-128 as i8)).to_equal(-128)
+
+    it "preserves octets through a range check and array push":
+        step("The unresolved checked window must preserve all four real octets")
+        val result = checked_octet_window([127, 128, 153, 255])
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap()).to_equal([127, 128, 153, 255])

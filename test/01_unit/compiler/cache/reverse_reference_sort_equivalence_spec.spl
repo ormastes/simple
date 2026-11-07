@@ -1,6 +1,7 @@
 # NOT_RUN: requires an admitted compiler/test runner for this source revision.
 use std.spec.*
 use std.common.crypto.sha256.{sha256_text}
+use std.common.string_core.{str_len}
 use std.common.text_bytes.{bytes_to_text}
 use compiler.common.cache.canonical_identity.{canonical_identity_text_lt}
 use compiler.common.cache.reverse_reference_key.{ReverseReferenceKeyV1, reverse_reference_key_encode_v1}
@@ -28,7 +29,7 @@ fn legacy_receipt_bytes(consumers: [text]) -> text:
     val frame = reverse_reference_key_encode_v1(sort_key())
     var rows: [text] = []
     for consumer in consumers:
-        rows.push("{frame.len()}:{frame}{consumer.len()}:{consumer}")
+        rows.push("{str_len(frame)}:{frame}{str_len(consumer)}:{consumer}")
     var index = 1
     while index < rows.len():
         val value = rows[index]
@@ -70,6 +71,36 @@ describe "Reverse-reference canonical sort preserves receipt bytes":
         expect(consumers[0].byte_at(2)).to_equal(122)
         expect(consumers[1].len()).to_equal(3)
         expect(consumers[1].byte_at(2)).to_equal(97)
+        expect(reverse_reference_receipt_encode_v1(sort_receipt(consumers))).to_equal(legacy_receipt_bytes(consumers))
+
+    it "finds NUL beyond the code-point count of a UTF-8 row":
+        val latin_z = bytes_to_text([195u8, 169u8, 195u8, 169u8, 195u8, 169u8, 0u8, 122u8])
+        val latin_a = bytes_to_text([195u8, 169u8, 195u8, 169u8, 195u8, 169u8, 0u8, 97u8])
+        val emoji_z = bytes_to_text([240u8, 159u8, 152u8, 128u8, 240u8, 159u8, 152u8, 128u8, 0u8, 122u8])
+        val emoji_a = bytes_to_text([240u8, 159u8, 152u8, 128u8, 240u8, 159u8, 152u8, 128u8, 0u8, 97u8])
+        # These carriers have five/four code points, but NUL is at byte 6/8.
+        # On the core-C comparator, z-before-a must retain legacy stability.
+        expect(str_len(latin_z)).to_equal(8)
+        expect(latin_z.byte_at(6)).to_equal(0)
+        expect(latin_z.byte_at(7)).to_equal(122)
+        expect(str_len(latin_a)).to_equal(8)
+        expect(latin_a.byte_at(7)).to_equal(97)
+        expect(str_len(emoji_z)).to_equal(10)
+        expect(emoji_z.byte_at(8)).to_equal(0)
+        expect(emoji_z.byte_at(9)).to_equal(122)
+        expect(str_len(emoji_a)).to_equal(10)
+        expect(emoji_a.byte_at(9)).to_equal(97)
+        val consumers = [latin_z, latin_a, latin_z, emoji_z, emoji_a, "éééz"]
+        val expected = legacy_receipt_bytes(consumers)
+        val receipt = sort_receipt(consumers)
+        expect(reverse_reference_receipt_encode_v1(receipt)).to_equal(expected)
+        expect(reverse_reference_receipt_digest_v1(receipt)).to_equal("sha256:" + sha256_text(expected))
+
+    it "retains a terminal NUL after multibyte characters":
+        val terminal = bytes_to_text([195u8, 169u8, 195u8, 169u8, 0u8])
+        expect(str_len(terminal)).to_equal(5)
+        expect(terminal.byte_at(4)).to_equal(0)
+        val consumers = [terminal, "éé", terminal, "z"]
         expect(reverse_reference_receipt_encode_v1(sort_receipt(consumers))).to_equal(legacy_receipt_bytes(consumers))
 
     it "preserves empty generation and invalid consumer behavior":

@@ -1,0 +1,75 @@
+# Declarative policy, not host registration, enrollment or capability evidence.
+use std.common.sdn.value.{SdnValue, SdnSpan}
+use std.common.contracts.orchestration.resource_v1.{ObjectMetaV1, RejectionV1, ORCHESTRATION_API_VERSION_V1, decode_resource_envelope, resource_envelope_path, decode_meta, as_dict, as_array, require, only_known, reject}
+
+pub struct HostPoolV1:
+    meta: ObjectMetaV1
+    execution_os: text
+    architecture: text
+    runtime_class_refs: [text]
+    trust_class: text
+
+pub struct RuntimeClassV1:
+    meta: ObjectMetaV1
+    provider: text
+    execution_os: text
+    architecture: text
+    isolation: text
+
+fn policy_text(value: SdnValue, path: text, spans: Dict<text, SdnSpan>) -> Result<text, RejectionV1>:
+    match value:
+        case SdnValue.String(raw):
+            if raw.len() == 0 or raw.len() > 256 or raw.trim() != raw or raw.contains("\n") or raw.contains("\r") or raw.contains("\t") or raw.contains("\0"):
+                return Err(reject("invalid_policy_text", path, "expected bounded nonempty text without control characters", spans))
+            Ok(raw)
+        case _: Err(reject("type", path, "expected text", spans))
+
+fn policy_field(fields: Dict<text, SdnValue>, key: text, path: text, spans: Dict<text, SdnSpan>) -> Result<text, RejectionV1>:
+    policy_text(require(fields, key, path, spans)?, path + "." + key, spans)
+
+fn policy_choice(fields: Dict<text, SdnValue>, key: text, path: text, choices: [text], spans: Dict<text, SdnSpan>) -> Result<text, RejectionV1>:
+    val raw = policy_field(fields, key, path, spans)?
+    if not choices.contains(raw): return Err(reject("unsupported_policy", path + "." + key, "unsupported " + key, spans))
+    Ok(raw)
+
+pub fn decode_host_pool_value(value: SdnValue, spans: Dict<text, SdnSpan>, prefix: text) -> Result<HostPoolV1, RejectionV1>:
+    val envelope = resource_envelope_path(prefix)
+    val top = decode_resource_envelope(value, spans, prefix, ORCHESTRATION_API_VERSION_V1)?
+    if policy_text(require(top, "kind", envelope, spans)?, prefix + "kind", spans)? != "HostPool":
+        return Err(reject("unsupported_kind", prefix + "kind", "expected HostPool", spans))
+    val meta = decode_meta(require(top, "metadata", envelope, spans)?, prefix + "metadata", spans)?
+    val path = prefix + "spec"
+    val fields = as_dict(require(top, "spec", envelope, spans)?, path, spans)?
+    only_known(fields, ["executionOS", "architecture", "runtimeClassRefs", "trustClass"], path, spans)?
+    val execution_os = policy_choice(fields, "executionOS", path, ["linux", "windows", "freebsd", "macos"], spans)?
+    val architecture = policy_choice(fields, "architecture", path, ["aarch64", "x86_64"], spans)?
+    val trust = policy_field(fields, "trustClass", path, spans)?
+    val refs = as_array(require(fields, "runtimeClassRefs", path, spans)?, path + ".runtimeClassRefs", spans)?
+    if refs.len() == 0 or refs.len() > 64:
+        return Err(reject("policy_limit", path + ".runtimeClassRefs", "expected 1 to 64 runtime class references", spans))
+    var names: [text] = []
+    var index: i64 = 0
+    for item in refs:
+        val item_path = path + ".runtimeClassRefs." + index.to_text()
+        val name = policy_text(item, item_path, spans)?
+        if names.contains(name): return Err(reject("duplicate_reference", item_path, "duplicate runtime class reference", spans))
+        names.push(name)
+        index = index + 1
+    Ok(HostPoolV1(meta: meta, execution_os: execution_os, architecture: architecture, runtime_class_refs: names, trust_class: trust))
+
+pub fn decode_runtime_class_value(value: SdnValue, spans: Dict<text, SdnSpan>, prefix: text) -> Result<RuntimeClassV1, RejectionV1>:
+    val envelope = resource_envelope_path(prefix)
+    val top = decode_resource_envelope(value, spans, prefix, ORCHESTRATION_API_VERSION_V1)?
+    if policy_text(require(top, "kind", envelope, spans)?, prefix + "kind", spans)? != "RuntimeClass":
+        return Err(reject("unsupported_kind", prefix + "kind", "expected RuntimeClass", spans))
+    val meta = decode_meta(require(top, "metadata", envelope, spans)?, prefix + "metadata", spans)?
+    val path = prefix + "spec"
+    val fields = as_dict(require(top, "spec", envelope, spans)?, path, spans)?
+    only_known(fields, ["provider", "executionOS", "architecture", "isolation"], path, spans)?
+    # First executable provider lane. Adding another lane requires its own
+    # explicit schema and provider integration; there is no fallback here.
+    val provider = policy_choice(fields, "provider", path, ["podman"], spans)?
+    val execution_os = policy_choice(fields, "executionOS", path, ["linux"], spans)?
+    val architecture = policy_choice(fields, "architecture", path, ["aarch64", "x86_64"], spans)?
+    val isolation = policy_choice(fields, "isolation", path, ["rootless"], spans)?
+    Ok(RuntimeClassV1(meta: meta, provider: provider, execution_os: execution_os, architecture: architecture, isolation: isolation))

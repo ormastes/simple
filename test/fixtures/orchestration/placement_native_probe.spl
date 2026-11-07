@@ -1,0 +1,84 @@
+# Pure placement diagnostic; no host registration, launch or admission claim.
+use std.common.contracts.orchestration.placement_v1.*
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.orchestration.profile_v1.*
+use std.common.contracts.orchestration.resource_v1.ObjectMetaV1
+
+fn placement_request() -> PlacementRequestV1:
+    val profile = ResourceProfileV1(meta: ObjectMetaV1(name: "agent", ns: "caret", labels: {}),
+        cpu: ResourceAmountRangeV1(minimum: 1000, recommended: 2000, preferred: 4000, limit: 4000),
+        memory: ResourceAmountRangeV1(minimum: 2000, recommended: 4000, preferred: 8000, limit: 8000),
+        gpu_required: false, preserve_scarce_gpu_hosts: true)
+    PlacementRequestV1(pool_id: "development", execution_os: "linux", architecture: "aarch64",
+        runtime_class: "podman-rootless", profile: profile, gpu_mode: "none", allow_preferred: false)
+
+fn placement_host(id: text, devices: [text], cpu: i64, memory: i64) -> PlacementHostV1:
+    val capacity = HostCapacityV1(physical_host_id: id, authority_id: "machine-owner", boot_id: "boot",
+        provider_generation: 1, cpu_millis: cpu, memory_bytes: memory, exclusive_devices: devices)
+    PlacementHostV1(pool_id: "development", service_scope_id: "user", execution_os: "linux",
+        architecture: "aarch64", runtime_class: "podman-rootless", authorized: true, healthy: true,
+        draining: false, limits_enforced: true, gpu_devices: devices,
+        ledger: HostCapacityLedgerV1(capacity: capacity, revision: 1, continuity_proven: true, reservations: []))
+
+fn main() -> i64:
+    val request = placement_request()
+    val gpu_host = placement_host("gpu-host", ["gpu-0"], 8000, 24000)
+    val cpu_host = placement_host("cpu-host", [], 4000, 8000)
+    val plan = plan_host_placement_v1(request, [gpu_host, cpu_host]).unwrap()
+    assert(plan.offers.len() == 2)
+    assert(plan.offers[plan.selected_index].physical_host_id == "cpu-host")
+    assert(plan.offers[plan.selected_index].allocation.cpu_millis == 2000)
+    assert(plan.offers[plan.selected_index].allocation.memory_cap_bytes == 4000)
+    assert(plan.offers[0].scarce_gpu_penalty)
+    val smaller = placement_host("small", [], 1500, 3000)
+    val constrained = plan_host_placement_v1(request, [smaller]).unwrap()
+    assert(constrained.offers[0].allocation.below_recommendation)
+    assert(constrained.offers[0].allocation.cpu_cap_millis == 1500)
+    assert(constrained.offers[0].allocation.memory_bytes == 3000)
+    val too_small = plan_host_placement_v1(request, [placement_host("tiny", [], 999, 3000)]).unwrap()
+    assert(too_small.selected_index == -1)
+    assert(too_small.rejected[0].reason == "insufficient-cpu-minimum")
+    var gpu_request = request
+    gpu_request.profile.gpu_required = true
+    assert(plan_host_placement_v1(gpu_request, [gpu_host]).is_err())
+    gpu_request.gpu_mode = "whole-exclusive"
+    val gpu_plan = plan_host_placement_v1(gpu_request, [cpu_host, gpu_host]).unwrap()
+    assert(gpu_plan.offers[gpu_plan.selected_index].physical_host_id == "gpu-host")
+    assert(gpu_plan.offers[0].exclusive_devices == ["gpu-0"])
+    assert(not gpu_plan.offers[0].allocation.requires_gpu_resolution)
+    val offer = gpu_plan.offers[0]
+    val reservation = HostReservationV1(id: "one", operation_id: "op-one", payload_digest: "a".repeat(64),
+        service_scope_id: offer.service_scope_id, assignment_generation: 1, nonce: "nonce-one",
+        cpu_millis: offer.allocation.cpu_millis, memory_bytes: offer.allocation.memory_bytes,
+        exclusive_devices: offer.exclusive_devices, prepare_deadline_ms: 100, state: HostReservationStateV1.Prepared)
+    var busy = gpu_host
+    busy.ledger = host_prepare_reservation_v1(gpu_host.ledger, offer.fence, reservation, 1).unwrap()
+    val queued = plan_host_placement_v1(gpu_request, [busy]).unwrap()
+    assert(queued.selected_index == -1)
+    assert(queued.rejected[0].reason == "exclusive-gpu-unavailable")
+    assert(host_available_capacity_v1(busy.ledger).unwrap().cpu_millis == 6000)
+    assert(gpu_host.ledger.reservations.len() == 0)
+    var suspect = cpu_host
+    suspect.ledger.continuity_proven = false
+    assert(plan_host_placement_v1(request, [suspect]).unwrap().rejected[0].reason == "host-reconciliation-required")
+    var wrong_os = cpu_host
+    wrong_os.execution_os = "windows"
+    assert(plan_host_placement_v1(request, [wrong_os]).unwrap().rejected[0].reason == "execution-os-mismatch")
+    var unenforced = cpu_host
+    unenforced.limits_enforced = false
+    assert(plan_host_placement_v1(request, [unenforced]).unwrap().rejected[0].reason == "resource-enforcement-unavailable")
+    assert(plan_host_placement_v1(request, [cpu_host, cpu_host]).is_err())
+    val a = placement_host("a", [], 4000, 8000)
+    val b = placement_host("b", [], 4000, 8000)
+    val ordered = plan_host_placement_v1(request, [b, a]).unwrap()
+    assert(ordered.offers[ordered.selected_index].physical_host_id == "a")
+    val reversed = plan_host_placement_v1(request, [a, b]).unwrap()
+    assert(reversed.offers[reversed.selected_index].physical_host_id == "a")
+    var preferred = request
+    preferred.allow_preferred = true
+    assert(plan_host_placement_v1(preferred, [cpu_host]).unwrap().offers[0].allocation.cpu_millis == 4000)
+    preferred.gpu_mode = "shared"
+    assert(plan_host_placement_v1(preferred, [gpu_host]).is_err())
+    assert(plan_host_placement_v1(request, []).unwrap().selected_index == -1)
+    print "placement-probe: 27 assertions passed"
+    0

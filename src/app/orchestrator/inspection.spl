@@ -1,0 +1,48 @@
+# Read-only projection of retained controller evidence. A binding is not a host
+# reservation receipt, runtime observation, or permission to launch.
+use std.nogc_sync_mut.orchestration.workload_store_v1.*
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+
+pub fn orchestrator_inspect_fields_v1(owner: ControllerWorkloadStoreV1,
+        uid: text) -> Result<Dict<text, SdnValue>, text>:
+    val source = controller_workload_store_agent_source_v1(owner, uid)?
+    var cancelled = controller_workload_store_agent_cancelled_v1(owner, uid)?
+    var fields: Dict<text, SdnValue> = {
+        "controllerId": SdnValue.String(owner.controller_id),
+        "requestUid": SdnValue.String(uid),
+        "sourceDigest": SdnValue.String(sha256_text(source)),
+        "assignmentState": SdnValue.String("unbound"),
+        "schedulingState": SdnValue.String("intent-retained"),
+        "runtimeState": SdnValue.String("unobserved"),
+        "terminationObserved": SdnValue.Bool(false)}
+    val observed = controller_workload_store_lookup_v1(owner, uid)
+    match observed:
+        case Err(reason):
+            if reason != "workload-not-found": return Err(reason)
+        case Ok(state):
+            cancelled = cancelled or state.cancellation_requested
+            fields["controllerEpoch"] = SdnValue.Int(state.controller_epoch)
+            fields["desiredRevision"] = SdnValue.Int(state.desired_revision)
+            fields["workloadRevision"] = SdnValue.Int(state.revision)
+            fields["planDigest"] = SdnValue.String(state.plan_digest)
+            fields["assignmentGeneration"] = SdnValue.Int(state.assignment_generation)
+            fields["schedulingState"] = SdnValue.String("unassigned")
+            if state.assignment_digest != "":
+                # This validates the retained object and exact workload fence;
+                # a missing/corrupt object is an error, never an unbound result.
+                val binding = controller_workload_store_assignment_v1(owner, uid)?
+                fields["assignmentState"] = SdnValue.String("binding-retained")
+                fields["schedulingState"] = SdnValue.String("assignment-bound")
+                fields["assignmentDigest"] = SdnValue.String(state.assignment_digest)
+                fields["hostOperationId"] = SdnValue.String(binding.host_operation.id)
+                fields["physicalHostId"] = SdnValue.String(binding.host_intent.physical_host_id)
+                fields["hostAuthorityId"] = SdnValue.String(binding.host_intent.fence.authority_id)
+                fields["hostBootId"] = SdnValue.String(binding.host_intent.fence.boot_id)
+                fields["providerGeneration"] = SdnValue.Int(binding.host_intent.fence.provider_generation)
+                fields["serviceScopeId"] = SdnValue.String(binding.host_intent.reservation.service_scope_id)
+                fields["assignedCpuMillis"] = SdnValue.Int(binding.host_intent.reservation.cpu_millis)
+                fields["assignedMemoryBytes"] = SdnValue.Int(binding.host_intent.reservation.memory_bytes)
+    fields["status"] = SdnValue.String(if cancelled: "intent-cancelled" else: "intent-retained")
+    fields["desiredState"] = SdnValue.String(if cancelled: "cancellation-requested" else: "active")
+    Ok(fields)

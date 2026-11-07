@@ -1,0 +1,42 @@
+# UNEXECUTED: native and SSpec qualification are separate requirements.
+# design: doc/05_design/language/text/text_len_counts_characters_2026-11-07.md
+# Feeds real migrated compiler/stdlib sources (byte_len() callers) through the
+# pure-Simple frontend + MIR lowering. A single-file harness cannot resolve a
+# module's cross-module imports, so files with imports keep their pre-existing
+# import errors (measured identical before and after the migration); what this
+# spec pins is that NO lowering error is about byte_len / char_count, i.e. the
+# migrated calls reach the new MIR arms instead of "unresolved method call".
+use std.spec.*
+use std.nogc_sync_mut.io.file.{read_file}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir.*
+
+fn len_unit_error_count(path: text) -> i64:
+    val source = read_file(path) ?? ""
+    expect(source.byte_len() > 0).to_equal(true)
+    val parsed = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    expect(serialize_mir_module(mir)).to_contain("rt_string_len")
+    var hits = 0
+    for e in hir_lowering.errors:
+        if "{e}".contains("byte_len") or "{e}".contains("char_count"):
+            hits = hits + 1
+    for e in mir_lowering.errors:
+        if "{e}".contains("byte_len") or "{e}".contains("char_count"):
+            hits = hits + 1
+    hits
+
+describe "migrated byte_len() compiler sources lower through MIR":
+    it "lexer: no byte_len/char_count lowering error":
+        expect(len_unit_error_count("src/compiler/10.frontend/core/lexer_struct.spl")).to_equal(0)
+
+    it "string_core: no byte_len/char_count lowering error":
+        expect(len_unit_error_count("src/lib/common/string_core.spl")).to_equal(0)
+
+    it "json tokenizer: no byte_len/char_count lowering error":
+        expect(len_unit_error_count("src/lib/common/json/tokenizer.spl")).to_equal(0)

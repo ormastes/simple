@@ -5,6 +5,7 @@
 
 use std.nogc_sync_mut.io.process_ops.{process_run}
 use std.io_runtime.{file_exists, dir_list, get_args}
+use std.common.string_core.{str_len}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use std.nogc_sync_mut.io.file_ops.{file_mmap_read_text}
 
@@ -88,14 +89,14 @@ fn _diag_rewrite_severity(json_str: text, sev: i64) -> text:
         return json_str
     val vstart = start + marker.len()
     var vend = vstart
-    while vend < json_str.len() and _diag_is_digit_byte(json_str.byte_at(vend)):
+    while vend < json_str.byte_len() and _diag_is_digit_byte(json_str.byte_at(vend)):
         vend = vend + 1
     if vend == vstart:
         return json_str
     val severity_text = sev.to_string()
-    var same = severity_text.len() == vend - vstart
+    var same = severity_text.byte_len() == vend - vstart
     var si = 0
-    while same and si < severity_text.len():
+    while same and si < severity_text.byte_len():
         if json_str.byte_at(vstart + si) != severity_text.byte_at(si):
             same = false
         si = si + 1
@@ -145,7 +146,7 @@ fn query_json_escape(value: text) -> text:
     var parts: [text] = []
     var span_start = 0
     var i = 0
-    while i < value.len():
+    while i < value.byte_len():
         val ch = value.byte_at(i)
         var escaped = ""
         if ch == 92:
@@ -164,28 +165,32 @@ fn query_json_escape(value: text) -> text:
             parts.push(escaped)
             span_start = i + 1
         i = i + 1
-    if span_start < value.len():
+    if span_start < value.byte_len():
         parts.push(value.substring(span_start))
     parts.join("")
 
 fn _find_in_line(line: text, pattern: text) -> i64:
-    """Find the 0-based position of pattern in line. Returns 0 if not found."""
+    """Find the 0-based byte offset of pattern in line. Returns 0 if not found."""
+    # substring consumes bytes, independently of text.len() character semantics.
+    val line_bytes = str_len(line)
+    val pattern_bytes = str_len(pattern)
     var pos = 0
-    while pos <= line.len() - pattern.len():
-        if line.substring(pos, pos + pattern.len()) == pattern:
+    while pos <= line_bytes - pattern_bytes:
+        if line.substring(pos, pos + pattern_bytes) == pattern:
             return pos
         pos = pos + 1
     0
 
 fn _find_in_line_from(line: text, needle: text, start: i64) -> i64:
-    """Find needle in line starting from a given position. Returns -1 if not found."""
+    """Find needle from a byte offset (negative becomes zero). Returns -1 if absent."""
     var i = if start < 0: 0 else: start
-    val nlen = needle.len()
+    val line_bytes = str_len(line)
+    val nlen = str_len(needle)
     if nlen == 0:
-        if i <= line.len():
+        if i <= line_bytes:
             return i
         return -1
-    while i <= line.len() - nlen:
+    while i <= line_bytes - nlen:
         var matched = true
         var ni = 0
         while ni < nlen:
@@ -212,7 +217,7 @@ fn _parse_error_location(err: text) -> (i64, i64, text):
     var colon1 = -1
     var colon2 = -1
     var ci = 0
-    while ci < err.len():
+    while ci < err.byte_len():
         if err.byte_at(ci) == 58:
             if colon1 == -1:
                 colon1 = ci
@@ -241,9 +246,9 @@ fn query_split_structured_error(err: text) -> (text, [text], text):
     var related: [text] = []
     var help = ""
     var segment_start = first_separator + separator.len()
-    while segment_start <= err.len():
+    while segment_start <= err.byte_len():
         val next_separator = _find_in_line_from(err, separator, segment_start)
-        val segment_end = if next_separator < 0: err.len() else: next_separator
+        val segment_end = if next_separator < 0: err.byte_len() else: next_separator
         val segment = err.substring(segment_start, segment_end).trim()
         if segment.starts_with("RELATED:"):
             related.push(segment.substring(8))

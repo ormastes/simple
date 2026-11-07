@@ -11,26 +11,55 @@ use std.io_runtime.{mkdir_p}
 use std.io_runtime.{getpid}
 use std.nogc_sync_mut.io.file_ops.{file_create_exclusive, file_lock, file_unlock, file_modified_time}
 use std.io_runtime.{time_now_unix_micros}
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
 extern fn rt_process_exists(pid: i64) -> bool
 
 # ============================================================================
 # Lock Acquisition
 # ============================================================================
 
-fn try_acquire_daemon_lock(lock_path: text) -> i64:
-    val parent = lock_path_parent(lock_path)
-    mkdir_p(parent)
+# Receipts bind release to one acquisition, including replacements in this PID.
+# A missing receipt never authorizes deletion. The guard inode is never removed.
+struct DaemonLockReceiptV1:
+    path: text
+    pid: i64
+    record: text
+    acquired: bool
 
+fn try_acquire_daemon_lock_owned(lock_path: text) -> DaemonLockReceiptV1:
+    val denied = DaemonLockReceiptV1(lock_path, -1, "", false)
+    mkdir_p(lock_path_parent(lock_path))
+    val handle = file_lock(lock_path + ".break", 0)
+    if handle < 0:
+        return denied
+    val nonce = random_hex(32) ?? ""
+    if nonce == "":
+        file_unlock(handle)
+        return denied
+    val pid = getpid()
+    val timestamp = time_now_unix_micros()
+    val content = "{pid}\n{timestamp}\nowned_generation_v1: {nonce}"
+    var acquired = false
+    if _daemon_lock_path_free_guarded(lock_path):
+        acquired = file_create_exclusive(lock_path, content)
+    file_unlock(handle)
+    if not acquired:
+        return denied
+    DaemonLockReceiptV1(lock_path, pid, content, true)
+
+fn try_acquire_daemon_lock(lock_path: text) -> i64:
+    mkdir_p(lock_path_parent(lock_path))
+    val handle = file_lock(lock_path + ".break", 0)
+    if handle < 0:
+        return -1
     val pid = getpid()
     val timestamp = time_now_unix_micros()
     val content = "{pid}\n{timestamp}"
-    # Exclusive create is the only acquisition path: the kernel picks one winner.
-    if file_create_exclusive(lock_path, content):
-        return pid
-    # Held. Break only a provably stale lock, then retry the exclusive create once.
-    if not _break_stale_lock(lock_path):
-        return -1
-    if file_create_exclusive(lock_path, content):
+    var acquired = false
+    if _daemon_lock_path_free_guarded(lock_path):
+        acquired = file_create_exclusive(lock_path, content)
+    file_unlock(handle)
+    if acquired:
         return pid
     -1
 
@@ -46,38 +75,67 @@ fn _lock_is_complete(content: text) -> bool:
 # lock that is complete, unchanged since judged, and owned by a dead pid.
 # Returns true when the path is free (deleted or already gone).
 fn _break_stale_lock(lock_path: text) -> bool:
-    val handle = file_lock(lock_path + ".break", 5)
+    val handle = file_lock(lock_path + ".break", 0)
     if handle < 0:
         return false
-    var freed = false
-    val judged = read_file_text(lock_path)
-    if not file_exists(lock_path):
-        freed = true
-    elif _lock_is_complete(judged):
-        val owner = read_daemon_pid(lock_path)
-        if owner > 0 and not is_pid_alive(owner) and read_file_text(lock_path) == judged:
-            freed = file_delete(lock_path)
-    else:
-        val mtime = file_modified_time(lock_path)
-        val now_secs = time_now_unix_micros() / 1000000
-        if mtime > 0 and now_secs - mtime > LOCK_PARTIAL_GRACE_SECS and read_file_text(lock_path) == judged:
-            freed = file_delete(lock_path)
+    val freed = _daemon_lock_path_free_guarded(lock_path)
     file_unlock(handle)
     freed
+
+# Internal: caller holds the stable .break guard across judgment and mutation.
+fn _daemon_lock_path_free_guarded(lock_path: text) -> bool:
+    val judged = read_file_text(lock_path)
+    if not file_exists(lock_path):
+        return true
+    if _lock_is_complete(judged):
+        val lines = judged.split("\n")
+        val owner = lines[0].trim().to_i64() ?? -1
+        if owner > 0 and not is_pid_alive(owner) and read_file_text(lock_path) == judged:
+            return file_delete(lock_path)
+        return false
+    val mtime = file_modified_time(lock_path)
+    val now_secs = time_now_unix_micros() / 1000000
+    if mtime > 0 and now_secs - mtime > LOCK_PARTIAL_GRACE_SECS and read_file_text(lock_path) == judged:
+        return file_delete(lock_path)
+    false
 
 # ============================================================================
 # Lock Release
 # ============================================================================
 
-fn release_daemon_lock(pid: i64, lock_path: text) -> bool:
-    if not file_exists(lock_path):
-        return true
-
-    val lock_pid = read_daemon_pid(lock_path)
-    if lock_pid != pid:
+fn release_daemon_lock_owned(receipt: DaemonLockReceiptV1) -> bool:
+    if not receipt.acquired or receipt.pid <= 0 or receipt.record == "":
         return false
+    val handle = file_lock(receipt.path + ".break", 0)
+    if handle < 0:
+        return false
+    var released = false
+    if not file_exists(receipt.path):
+        released = true
+    elif read_file_text(receipt.path) == receipt.record:
+        released = file_delete(receipt.path)
+    file_unlock(handle)
+    released
 
-    file_delete(lock_path)
+fn release_daemon_lock(pid: i64, lock_path: text) -> bool:
+    if pid <= 0:
+        return false
+    val handle = file_lock(lock_path + ".break", 0)
+    if handle < 0:
+        return false
+    var released = false
+    if not file_exists(lock_path):
+        released = true
+    else:
+        val content = read_file_text(lock_path)
+        val lines = content.split("\n")
+        # Legacy PID-only callers cannot release generation-owned records.
+        if lines.len() == 2 and _lock_is_complete(content):
+            val lock_pid = lines[0].trim().to_i64() ?? -1
+            if lock_pid == pid:
+                released = file_delete(lock_path)
+    file_unlock(handle)
+    released
 
 # ============================================================================
 # Lock Status

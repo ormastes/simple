@@ -1,0 +1,93 @@
+# Mechanisms under the existing controller journal writer. Object files alone
+# confer no desired-state, scheduling, or runtime authority.
+use std.common.contracts.orchestration.desired_input_v1.*
+use std.common.contracts.orchestration.assignment_v1.controller_assignment_authority_v1
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.task_runner.distributed_operation_journal_v2.DistributedOperationJournalV2
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.{daemon_operation_exact_v2, daemon_operation_begin_v2, daemon_operation_record_outcome_v2}
+use std.common.crypto.sha256.sha256_text
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io_runtime.dir_create
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+
+pub struct ControllerDesiredObjectsV1:
+    input: ControllerDesiredInputV1
+    source: text
+
+pub fn controller_desired_operation_id_v1(controller_id: text, uid: text) -> Result<text, text>:
+    if not builder_identifier_valid_v1(controller_id) or not builder_identifier_valid_v1(uid): return Err("desired-input-identity-invalid")
+    Ok("desired-" + sha256_text("DESIRED-INPUT-V1\n{controller_id}\n{uid}\n"))
+
+pub fn controller_desired_operation_v1(input: ControllerDesiredInputV1) -> Result<OperationEnvelopeV2, text>:
+    val bytes = controller_desired_input_encode_v1(input)?
+    val authority = controller_assignment_authority_v1(input.controller_id)?
+    val id = controller_desired_operation_id_v1(input.controller_id, input.workload_uid)?
+    # Positive unit fields satisfy the shared envelope, never capacity grants.
+    Ok(OperationEnvelopeV2(version: 2, id: id, payload_digest: sha256_text(bytes),
+        principal: input.controller_id, project: input.controller_id, host_id: input.controller_id,
+        operation: "controller_desired_input_v1", environment_digest: authority, policy_revision: 1,
+        revocation_epoch: 0, session_generation: 1, memory_bytes: 1, duration_ms: 1))
+
+pub fn controller_desired_cancel_operation_v1(input: ControllerDesiredInputV1) -> Result<OperationEnvelopeV2, text>:
+    var operation = controller_desired_operation_v1(input)?
+    operation.id = "cancel-" + operation.id
+    operation.operation = "controller_desired_cancel_v1"
+    Ok(operation)
+
+# Shared immutable object publication beneath the existing controller owner.
+pub fn desired_object_put_v1(root: text, digest: text, bytes: text, maximum: i64) -> Result<bool, text>:
+    if bytes.len() > maximum or sha256_text(bytes) != digest: return Err("desired-object-invalid")
+    val directory = root + "/desired-input-objects"
+    if not file_exists(directory) and not dir_create(directory, true): return Err("desired-object-directory-unavailable")
+    val path = directory + "/" + digest + ".sdn"
+    if not file_exists(path):
+        if not file_atomic_write_mode(path, bytes, 0o600): return Err("desired-object-publication-failed")
+    if file_read_regular_no_follow_bounded(path, maximum)? != bytes: return Err("desired-object-content-mismatch")
+    Ok(true)
+
+pub fn controller_desired_objects_retain_v1(root: text, input: ControllerDesiredInputV1, source: text) -> Result<bool, text>:
+    val matches = controller_desired_input_matches_v1(input, source)?
+    val manifest = controller_desired_input_encode_v1(input)?
+    val saved_source = desired_object_put_v1(root, input.source_digest, source, 1048576)?
+    desired_object_put_v1(root, sha256_text(manifest), manifest, 8192)
+
+pub fn controller_desired_source_read_v1(root: text, input: ControllerDesiredInputV1) -> Result<text, text>:
+    val checked = controller_desired_input_encode_v1(input)?
+    val source = file_read_regular_no_follow_bounded(root + "/desired-input-objects/" + input.source_digest + ".sdn", 1048576)?
+    val matches = controller_desired_input_matches_v1(input, source)?
+    Ok(source)
+
+pub fn controller_desired_objects_read_v1(root: text, operation: OperationEnvelopeV2,
+        controller_id: text) -> Result<ControllerDesiredObjectsV1, text>:
+    if (operation.operation != "controller_desired_input_v1" and operation.operation != "controller_desired_cancel_v1") or operation.host_id != controller_id:
+        return Err("desired-input-controller-mismatch")
+    # Envelope validation bounds and validates the digest before constructing a path.
+    val encoded = distributed_encode_operation_v2(operation)?
+    val bytes = file_read_regular_no_follow_bounded(root + "/desired-input-objects/" + operation.payload_digest + ".sdn", 8192)?
+    if sha256_text(bytes) != operation.payload_digest: return Err("desired-input-manifest-mismatch")
+    val input = controller_desired_input_decode_v1(bytes)?
+    if input.controller_id != controller_id: return Err("desired-input-controller-mismatch")
+    var expected = controller_desired_operation_v1(input)?
+    if operation.operation == "controller_desired_cancel_v1": expected = controller_desired_cancel_operation_v1(input)?
+    if distributed_encode_operation_v2(expected)? != encoded: return Err("desired-input-envelope-mismatch")
+    val source = controller_desired_source_read_v1(root, input)?
+    Ok(ControllerDesiredObjectsV1(input: input, source: source))
+
+# Cancellation must reference a completed, exact original submission. It never
+# cancels a runtime or releases reservations; this is pre-plan desired state.
+pub fn controller_desired_cancel_parent_v1(journal: DistributedOperationJournalV2,
+        input: ControllerDesiredInputV1) -> Result<bool, text>:
+    val original = controller_desired_operation_v1(input)?
+    val parent = daemon_operation_exact_v2(journal, original)?
+    if parent.state != "completed" or parent.outcome_digest != original.payload_digest:
+        return Err("desired-cancel-parent-not-committed")
+    Ok(true)
+
+pub fn controller_desired_complete_v1(journal: DistributedOperationJournalV2,
+        operation: OperationEnvelopeV2) -> Result<DistributedOperationJournalV2, text>:
+    val prior = daemon_operation_exact_v2(journal, operation)?
+    var current = journal
+    if prior.state == "admitted": current = daemon_operation_begin_v2(current, operation)?
+    daemon_operation_record_outcome_v2(current, operation, "completed", operation.payload_digest)

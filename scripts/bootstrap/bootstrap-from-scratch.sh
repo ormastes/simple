@@ -2997,13 +2997,35 @@ bootstrap_acquire_shared_rust_cargo_cache() {
   else
     rust_cache_common_now=$(bootstrap_authority_git_common_dir "${repo_root}") || return 1
   fi
-  [ "${rust_cache_common_now}" = "${rust_shared_cache_common_dir}" ] || return 1
+  [ "${rust_cache_common_now}" = "${rust_shared_cache_common_dir}" ] || {
+    echo "error: shared Rust cargo cache moved during this run: ${rust_shared_cache_common_dir} -> ${rust_cache_common_now}" >&2
+    return 1
+  }
   if [ -n "${rust_shared_cache_lock_handle}" ]; then
-    bootstrap_authority_require_owned_lock "${rust_shared_cache_lock_handle}"
-    return $?
+    bootstrap_authority_require_owned_lock "${rust_shared_cache_lock_handle}" || {
+      echo "error: shared Rust cargo cache lock ownership was lost" >&2
+      return 1
+    }
+    return 0
   fi
-  portable_lock_acquire "${rust_shared_cache_common_dir}/simple-rust-cargo-cache-locks" \
-    authority "${SIMPLE_BOOTSTRAP_AUTHORITY_LOCK_WAIT_SECONDS:-120}" || return 1
+  # Every linked worktree serialises here, so a sibling lane's build holds
+  # this lock for as long as its cargo runs. A silent failure here aborted a
+  # Windows Stage 2 lane (2026-11-07) with nothing but "preflight failed".
+  bsrcc_lock_dir="${rust_shared_cache_common_dir}/simple-rust-cargo-cache-locks"
+  bsrcc_wait=${SIMPLE_BOOTSTRAP_AUTHORITY_LOCK_WAIT_SECONDS:-120}
+  portable_lock_acquire "${bsrcc_lock_dir}" authority "${bsrcc_wait}" || {
+    bsrcc_rc=$?
+    # Return codes are portable_lock_acquire's own (scripts/check/lib/portable-process-lock.shs).
+    case "${bsrcc_rc}" in
+      75) echo "error: timed out after ${bsrcc_wait}s waiting for the shared Rust cargo cache lock in ${bsrcc_lock_dir} (another worktree's build may hold it; raise SIMPLE_BOOTSTRAP_AUTHORITY_LOCK_WAIT_SECONDS)" >&2 ;;
+      64) echo "error: shared Rust cargo cache lock refused its inputs: lock dir '${bsrcc_lock_dir}' or wait '${bsrcc_wait}' (SIMPLE_BOOTSTRAP_AUTHORITY_LOCK_WAIT_SECONDS must be a whole number of seconds)" >&2 ;;
+      69) echo "error: shared Rust cargo cache lock helper is missing: PORTABLE_LOCK_ATOMIC_HELPER_PATH='${PORTABLE_LOCK_ATOMIC_HELPER_PATH:-}'" >&2 ;;
+      70) echo "error: shared Rust cargo cache lock could not establish this process's identity or nonce" >&2 ;;
+      73) echo "error: shared Rust cargo cache lock could not create or link its claim under ${bsrcc_lock_dir}" >&2 ;;
+      *) echo "error: shared Rust cargo cache lock in ${bsrcc_lock_dir} was not acquired (portable_lock_acquire rc=${bsrcc_rc})" >&2 ;;
+    esac
+    return 1
+  }
   rust_shared_cache_lock_handle=${PORTABLE_LOCK_HANDLE}
 }
 

@@ -1,0 +1,252 @@
+# Local host reservation owner over the existing distributed-operation journal.
+# No provider launch or remote endpoint. Callers supply authenticated grants and
+# trusted capacity/continuity; schemas and digests do not authenticate callers.
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.orchestration.host_reservation_codec_v1.*
+use std.common.contracts.distributed_control_v2.{OperationEnvelopeV2, ExecutionGrantV2,
+    distributed_grant_authorize_v2}
+use std.common.contracts.distributed_control_codec_v2.distributed_decode_operation_v2
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
+    distributed_operation_journal_open_v2, distributed_operation_journal_close_v2,
+    distributed_operation_journal_lookup_v2, distributed_operation_journal_recover_execution_v2}
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.{daemon_operation_admit_v2,
+    daemon_operation_exact_v2, daemon_operation_begin_v2, daemon_operation_record_outcome_v2}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_read_regular_no_follow_bounded, file_exists}
+use std.nogc_sync_mut.io_runtime.dir_create
+use std.common.crypto.sha256.sha256_text
+
+pub struct HostCapacityOwnerV1:
+    journal: DistributedOperationJournalV2
+    ledger: HostCapacityLedgerV1
+
+pub struct HostReservationAuthorizationContextV1:
+    grant_clock: i64
+    monotonic_ms: i64
+    policy_revision: i64
+    revocation_epoch: i64
+    session_generation: i64
+
+fn host_capacity_authority_digest_v1(capacity: HostCapacityV1) -> text:
+    # Each independent capacity authority owns its own journal. Boot/provider
+    # checks are in every retained intent, so a changed boot cannot adopt it.
+    sha256_text("HOST-CAPACITY-AUTHORITY-V1\n" + capacity.physical_host_id + "\n" + capacity.authority_id + "\n")
+
+fn host_capacity_payload_path_v1(journal: DistributedOperationJournalV2, digest: text) -> text:
+    journal.root + "/reservation-payloads/" + digest + ".sdn"
+
+fn host_capacity_projection_v1(journal: DistributedOperationJournalV2, capacity: HostCapacityV1,
+        continuity_proven: bool) -> Result<HostCapacityLedgerV1, text>:
+    if journal.operations.len() > 4096:
+        return Err("reservation-history-full")
+    var rows: [HostReservationV1] = []
+    for operation_id in journal.operations.keys():
+        # The indexed journal read also verifies writer lease and current revision.
+        val state = distributed_operation_journal_lookup_v2(journal, operation_id)?
+        val operation = distributed_decode_operation_v2(state.envelope)?
+        val bytes = file_read_regular_no_follow_bounded(host_capacity_payload_path_v1(journal, operation.payload_digest), 65536)?
+        val intent = host_reservation_decode_intent_v1(bytes)?
+        val matching = host_reservation_match_operation_v1(intent, operation)?
+        if intent.physical_host_id != capacity.physical_host_id or intent.fence.authority_id != capacity.authority_id or
+                intent.fence.boot_id != capacity.boot_id or intent.fence.provider_generation != capacity.provider_generation:
+            return Err("retained-reservation-host-fence-mismatch")
+        var row = intent.reservation
+        val abort_outcome = host_reservation_abort_outcome_v1(intent, operation)?
+        if state.state == "cancelled" and state.outcome_digest == sha256_text(abort_outcome) and continuity_proven:
+            row.state = HostReservationStateV1.Released
+        elif state.state != "admitted":
+            # Terminal create/cancel is not native absence. Recovery remains
+            # conservative until a separately verified absence receipt exists.
+            row.state = HostReservationStateV1.Uncertain
+        rows.push(row)
+    val ledger = HostCapacityLedgerV1(capacity: capacity, revision: journal.sequence + 1,
+        continuity_proven: continuity_proven, reservations: rows)
+    val checked = host_available_capacity_v1(ledger)?
+    Ok(ledger)
+
+pub fn host_capacity_owner_open_v1(root: text, capacity: HostCapacityV1, nonce: text,
+        maximum_events: i64, continuity_proven: bool) -> Result<HostCapacityOwnerV1, text>:
+    val empty = HostCapacityLedgerV1(capacity: capacity, revision: 1,
+        continuity_proven: false, reservations: [])
+    val valid = host_available_capacity_v1(empty)?
+    var journal = distributed_operation_journal_open_v2(root, host_capacity_authority_digest_v1(capacity), nonce, maximum_events)?
+    val projection = host_capacity_projection_v1(journal, capacity, continuity_proven)
+    if projection.is_err():
+        val released = distributed_operation_journal_close_v2(journal)
+        if released.is_err(): return Err("host-open-rejected-and-journal-close-failed:" + projection.unwrap_err())
+        return Err(projection.unwrap_err())
+    # Use the existing V2 recovery transition, never a competing host oracle.
+    val ids = journal.operations.keys()
+    for operation_id in ids:
+        val recovered = distributed_operation_journal_recover_execution_v2(journal, operation_id)
+        if recovered.is_err():
+            val released = distributed_operation_journal_close_v2(journal)
+            return Err("host-execution-recovery-failed:" + recovered.unwrap_err())
+        journal = recovered.unwrap()
+    var ledger = projection.unwrap()
+    ledger.revision = journal.sequence + 1
+    Ok(HostCapacityOwnerV1(journal: journal, ledger: ledger))
+
+# Preparation has one authoritative commit: the V2 admitted journal row.
+# Payload publication precedes it; an orphan payload is not a reservation.
+pub fn host_capacity_owner_prepare_v1(owner: HostCapacityOwnerV1,
+        intent: HostReservationIntentV1, operation: OperationEnvelopeV2,
+        grant: ExecutionGrantV2, context: HostReservationAuthorizationContextV1) -> Result<HostCapacityOwnerV1, text>:
+    val authorized = distributed_grant_authorize_v2(grant, operation, context.grant_clock,
+        context.policy_revision, context.revocation_epoch, context.session_generation)
+    if authorized != "": return Err(authorized)
+    val matching = host_reservation_match_operation_v1(intent, operation)?
+    if intent.physical_host_id != owner.ledger.capacity.physical_host_id or
+            owner.journal.authority_digest != host_capacity_authority_digest_v1(owner.ledger.capacity) or
+            owner.ledger.revision != owner.journal.sequence + 1:
+        return Err("host-owner-projection-mismatch")
+    val candidate = host_prepare_reservation_v1(owner.ledger, intent.fence, intent.reservation, context.monotonic_ms)?
+    # Verify the live writer even before any payload filesystem mutation.
+    match distributed_operation_journal_lookup_v2(owner.journal, operation.id):
+        case Ok(_):
+            # Exact replay is a live preparation response, not permission to
+            # republish a receipt for expired, consumed or uncertain capacity.
+            # Validate retained bytes/state before any filesystem publication.
+            val receipt = host_capacity_owner_prepared_receipt_v1(owner, intent, operation, grant, context)?
+            return Ok(owner)
+        case Err(reason):
+            if reason != "OPERATION_NOT_FOUND": return Err(reason)
+    val bytes = host_reservation_encode_intent_v1(intent)?
+    val path = host_capacity_payload_path_v1(owner.journal, intent.reservation.payload_digest)
+    if file_exists(path):
+        val retained = file_read_regular_no_follow_bounded(path, 65536)?
+        if retained != bytes: return Err("retained-reservation-payload-mismatch")
+    else:
+        dir_create(owner.journal.root + "/reservation-payloads", true)
+        if not file_atomic_write(path, bytes): return Err("reservation-payload-publication-failed")
+        val retained = file_read_regular_no_follow_bounded(path, 65536)?
+        if retained != bytes: return Err("reservation-payload-publication-mismatch")
+    val admitted = daemon_operation_admit_v2(owner.journal, operation)?
+    if candidate.revision != admitted.journal.sequence + 1:
+        # Journal may already be committed. Reopen and reconstruct; never publish
+        # this candidate or retry a native effect from an ambiguous return value.
+        return Err("host-projection-reopen-required")
+    Ok(HostCapacityOwnerV1(journal: admitted.journal, ledger: candidate))
+
+# Internal authenticated-owner boundary, not a remote execution endpoint.
+# A successful return is a newly committed execution intent. Errors after commit
+# require reopening/reconciliation; callers must never infer permission to retry
+# a native launch from an error or from an already-executing journal record.
+# The separate host_execute_v1 grant prevents a preparation-only caller from
+# consuming capacity. The original immutable reservation envelope stays intact.
+pub fn host_capacity_owner_begin_v1(owner: HostCapacityOwnerV1,
+        intent: HostReservationIntentV1, operation: OperationEnvelopeV2,
+        receipt: HostPreparedReservationReceiptV1, fence: HostLedgerFenceV1, grant: ExecutionGrantV2,
+        context: HostReservationAuthorizationContextV1) -> Result<HostCapacityOwnerV1, text>:
+    var execution_request = operation
+    execution_request.operation = "host_execute_v1"
+    val authorized = distributed_grant_authorize_v2(grant, execution_request, context.grant_clock,
+        context.policy_revision, context.revocation_epoch, context.session_generation)
+    if authorized != "": return Err(authorized)
+    val receipt_match = host_reservation_match_receipt_v1(receipt, intent, operation)?
+    val admitted = host_capacity_owner_check_admitted_v1(owner, intent, operation)?
+    val row = intent.reservation
+    val candidate = host_transition_prepared_v1(owner.ledger, fence, row.id, row.nonce,
+        row.assignment_generation, context.monotonic_ms, true)?
+    # One V2 transaction is authoritative for both execution intent and capacity.
+    # Reopen conservatively maps executing to uncertain before admitting work.
+    val journal = daemon_operation_begin_v2(owner.journal, operation)?
+    if candidate.revision != journal.sequence + 1:
+        return Err("host-projection-reopen-required")
+    Ok(HostCapacityOwnerV1(journal: journal, ledger: candidate))
+
+# Reconstructs the same immutable receipt after a lost prepare response, without
+# another journal or mutable receipt store. No receipt is issued for unknown,
+# expired or already-consumed preparations.
+pub fn host_capacity_owner_prepared_receipt_v1(owner: HostCapacityOwnerV1,
+        intent: HostReservationIntentV1, operation: OperationEnvelopeV2,
+        grant: ExecutionGrantV2, context: HostReservationAuthorizationContextV1) -> Result<HostPreparedReservationReceiptV1, text>:
+    val authorized = distributed_grant_authorize_v2(grant, operation, context.grant_clock,
+        context.policy_revision, context.revocation_epoch, context.session_generation)
+    if authorized != "": return Err(authorized)
+    val admitted = host_capacity_owner_check_admitted_v1(owner, intent, operation)?
+    if not owner.ledger.continuity_proven: return Err("host-reconciliation-required")
+    if context.monotonic_ms < 0: return Err("invalid-clock")
+    if context.monotonic_ms >= intent.reservation.prepare_deadline_ms:
+        return Err("prepare-expired")
+    host_reservation_receipt_v1(intent, operation)
+
+fn host_capacity_owner_check_admitted_v1(owner: HostCapacityOwnerV1,
+        intent: HostReservationIntentV1, operation: OperationEnvelopeV2) -> Result<bool, text>:
+    val retained = host_capacity_owner_check_retained_v1(owner, intent, operation)?
+    val prior = daemon_operation_exact_v2(owner.journal, operation)?
+    if prior.state != "admitted": return Err("execution-reconciliation-required")
+    Ok(true)
+
+fn host_capacity_owner_check_retained_v1(owner: HostCapacityOwnerV1,
+        intent: HostReservationIntentV1, operation: OperationEnvelopeV2) -> Result<bool, text>:
+    val matching = host_reservation_match_operation_v1(intent, operation)?
+    if intent.physical_host_id != owner.ledger.capacity.physical_host_id or
+            owner.journal.authority_digest != host_capacity_authority_digest_v1(owner.ledger.capacity) or
+            owner.ledger.revision != owner.journal.sequence + 1:
+        return Err("host-owner-projection-mismatch")
+    val prior = daemon_operation_exact_v2(owner.journal, operation)?
+    val retained = file_read_regular_no_follow_bounded(
+        host_capacity_payload_path_v1(owner.journal, operation.payload_digest), 65536)?
+    val expected = host_reservation_encode_intent_v1(intent)?
+    if retained != expected:
+        return Err("retained-reservation-payload-mismatch")
+    Ok(true)
+
+# Abort is not cancellation of a running workload. It consumes only an admitted
+# preparation, under the same single-writer journal lock as begin. A deadline
+# may have expired; uncertain continuity or any execution intent forbids release.
+pub fn host_capacity_owner_abort_prepared_v1(owner: HostCapacityOwnerV1,
+        intent: HostReservationIntentV1, operation: OperationEnvelopeV2,
+        receipt: HostPreparedReservationReceiptV1, fence: HostLedgerFenceV1,
+        grant: ExecutionGrantV2, context: HostReservationAuthorizationContextV1) -> Result<HostCapacityOwnerV1, text>:
+    var abort_request = operation
+    abort_request.operation = "host_abort_prepared_v1"
+    val authorized = distributed_grant_authorize_v2(grant, abort_request, context.grant_clock,
+        context.policy_revision, context.revocation_epoch, context.session_generation)
+    if authorized != "": return Err(authorized)
+    host_capacity_owner_release_prepared_v1(owner, intent, operation, receipt, fence, context.monotonic_ms)
+
+# Called only by the trusted host owner/timer using this boot's monotonic clock.
+# Operation identity selects retained evidence; no caller-supplied payload,
+# receipt, grant, or clock from a remote request is admitted here.
+pub fn host_capacity_owner_expire_prepared_v1(owner: HostCapacityOwnerV1,
+        operation_id: text, now_ms: i64) -> Result<HostCapacityOwnerV1, text>:
+    if now_ms < 0: return Err("invalid-clock")
+    val state = distributed_operation_journal_lookup_v2(owner.journal, operation_id)?
+    val operation = distributed_decode_operation_v2(state.envelope)?
+    val bytes = file_read_regular_no_follow_bounded(
+        host_capacity_payload_path_v1(owner.journal, operation.payload_digest), 65536)?
+    val intent = host_reservation_decode_intent_v1(bytes)?
+    val matching = host_reservation_match_operation_v1(intent, operation)?
+    if now_ms < intent.reservation.prepare_deadline_ms: return Err("prepare-not-expired")
+    val receipt = host_reservation_receipt_v1(intent, operation)?
+    val capacity = owner.ledger.capacity
+    if intent.fence.authority_id != capacity.authority_id or intent.fence.boot_id != capacity.boot_id or
+            intent.fence.provider_generation != capacity.provider_generation:
+        return Err("retained-reservation-host-fence-mismatch")
+    val fence = HostLedgerFenceV1(authority_id: capacity.authority_id,
+        boot_id: capacity.boot_id, provider_generation: capacity.provider_generation,
+        revision: owner.ledger.revision)
+    host_capacity_owner_release_prepared_v1(owner, intent, operation, receipt, fence, now_ms)
+
+fn host_capacity_owner_release_prepared_v1(owner: HostCapacityOwnerV1,
+        intent: HostReservationIntentV1, operation: OperationEnvelopeV2,
+        receipt: HostPreparedReservationReceiptV1, fence: HostLedgerFenceV1,
+        now_ms: i64) -> Result<HostCapacityOwnerV1, text>:
+    val matched = host_reservation_match_receipt_v1(receipt, intent, operation)?
+    val retained = host_capacity_owner_check_retained_v1(owner, intent, operation)?
+    if not owner.ledger.continuity_proven: return Err("host-reconciliation-required")
+    val prior = daemon_operation_exact_v2(owner.journal, operation)?
+    val outcome = host_reservation_abort_outcome_v1(intent, operation)?
+    val digest = sha256_text(outcome)
+    if prior.state != "admitted" and not (prior.state == "cancelled" and prior.outcome_digest == digest):
+        return Err("execution-reconciliation-required")
+    val row = intent.reservation
+    val candidate = host_transition_prepared_v1(owner.ledger, fence, row.id, row.nonce,
+        row.assignment_generation, now_ms, false)?
+    val journal = daemon_operation_record_outcome_v2(owner.journal, operation, "cancelled", digest)?
+    if candidate.revision != journal.sequence + 1: return Err("host-projection-reopen-required")
+    Ok(HostCapacityOwnerV1(journal: journal, ledger: candidate))
+
+pub fn host_capacity_owner_close_v1(owner: HostCapacityOwnerV1) -> Result<bool, text>:
+    distributed_operation_journal_close_v2(owner.journal)

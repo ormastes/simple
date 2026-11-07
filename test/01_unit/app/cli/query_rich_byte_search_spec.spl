@@ -1,0 +1,83 @@
+# @req REQ-CLI-QUERY-RICH-BYTE-SEARCH
+# Source-authored regression/prevention; runtime NOT_RUN.
+use std.spec.*
+use std.common.text_bytes.{bytes_to_text}
+use std.common.string_core.{str_len}
+use app.cli.query_rich_common.{_find_in_line, _find_in_line_from}
+
+describe "rich-query searches preserve byte offsets across text length semantics":
+    it "finds multibyte needles after ASCII and multibyte prefixes":
+        step("Prepare the real fixture")
+        val line = "A한éZé"
+        step("Invoke the production owner")
+        val first = _find_in_line(line, "é")
+        val later = _find_in_line_from(line, "é", 5)
+        step("Check the observed contract")
+        expect(first).to_equal(4)
+        expect(later).to_equal(7)
+        expect(_find_in_line("é한😀", "😀")).to_equal(5)
+        expect(_find_in_line_from(line, "é", 4)).to_equal(4)
+        step("Check the neighboring failure case")
+        expect(_find_in_line_from(line, "é", 8)).to_equal(-1)
+        expect(_find_in_line_from(line, "é", 9)).to_equal(-1)
+
+    it "preserves absent and longer-needle sentinels without inventing a match":
+        step("Prepare the real fixture")
+        val line = "é한"
+        step("Invoke the production owner")
+        val absent = _find_in_line(line, "😀")
+        val longer = _find_in_line_from(line, "é한😀", 0)
+        step("Check the observed contract")
+        expect(absent).to_equal(0)
+        expect(longer).to_equal(-1)
+        expect(_find_in_line(line, "é한😀")).to_equal(0)
+        expect(_find_in_line_from(line, "😀", 0)).to_equal(-1)
+        step("Check the neighboring failure case")
+        expect(_find_in_line(line, "é")).to_equal(0)
+        expect(_find_in_line_from(line, "é", 0)).to_equal(0)
+
+    it "clamps negative starts and uses the byte end for empty needles":
+        step("Prepare the real fixture")
+        val line = "é"
+        step("Invoke the production owner")
+        val negative = _find_in_line_from(line, "é", -3)
+        val at_end = _find_in_line_from(line, "", 2)
+        step("Check the observed contract")
+        expect(negative).to_equal(0)
+        expect(at_end).to_equal(2)
+        expect(_find_in_line(line, "")).to_equal(0)
+        expect(_find_in_line_from(line, "", -1)).to_equal(0)
+        expect(_find_in_line_from("", "", 0)).to_equal(0)
+        expect(_find_in_line("", "")).to_equal(0)
+        step("Check the neighboring failure case")
+        expect(_find_in_line_from(line, "", 3)).to_equal(-1)
+        expect(_find_in_line_from(line, "é", 2)).to_equal(-1)
+        expect(_find_in_line_from("", "é", 0)).to_equal(-1)
+
+    it "searches embedded NUL bytes without truncating their carrier":
+        step("Prepare the real fixture")
+        # Avoid C-string literal promotion truncating the fixture itself.
+        val line = bytes_to_text([195u8, 169u8, 0u8, 237u8, 149u8, 156u8, 0u8])
+        val nul = bytes_to_text([0u8])
+        val nul_han = bytes_to_text([0u8, 237u8, 149u8, 156u8])
+        val nul_x = bytes_to_text([0u8, 120u8])
+        expect(str_len(line)).to_equal(7)
+        expect(line.byte_at(2)).to_equal(0)
+        expect(line.byte_at(3)).to_equal(237)
+        expect(line.byte_at(4)).to_equal(149)
+        expect(line.byte_at(5)).to_equal(156)
+        expect(line.byte_at(6)).to_equal(0)
+        expect(str_len(nul)).to_equal(1)
+        expect(str_len(nul_han)).to_equal(4)
+        expect(str_len(nul_x)).to_equal(2)
+        step("Invoke the production owner")
+        val first = _find_in_line(line, nul)
+        val later = _find_in_line_from(line, nul, 3)
+        step("Check the observed contract")
+        expect(first).to_equal(2)
+        expect(later).to_equal(6)
+        expect(_find_in_line(line, nul_han)).to_equal(2)
+        expect(_find_in_line_from(line, "", 7)).to_equal(7)
+        step("Check the neighboring failure case")
+        expect(_find_in_line(line, nul_x)).to_equal(0)
+        expect(_find_in_line_from(line, nul_x, 0)).to_equal(-1)

@@ -1,0 +1,142 @@
+"""
+Regression: bug native_list_any_get_i64_sink_returns_option_handle_2026-11-07.
+
+`fn f(w: list, i: i64) -> i64: w.get(i)` -- `list` is `Array(Any)`, so the
+native array `get` lowering (lower_array_first_or_last) builds an
+`Optional(Any)` handle. The scalar sinks (`-> i64` implicit tail, explicit
+`return`, `val y: i64 = ...`) only unwrapped Optionals whose inner type is a
+plain scalar, so the Option HANDLE pointer reached the i64 slot: the Stage 2
+native binary printed 200634408607585 instead of 4. The `[i64]` receiver was
+already correct (Optional(i64) is unwrapped through rt_unwrap_or_self).
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+fn lower_module_json(src: text) -> Dict<text, text>:
+    val module = parse_full_frontend(src, "list_get.spl", "list_get.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("list_get.spl")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var out: Dict<text, text> = {}
+    for function in mir.functions.values():
+        val dot = function.name.rfind(".")
+        val short = if dot >= 0: function.name.substring(dot + 1, function.name.len()) else: function.name
+        out[short] = serialize_mir_function(function)
+    out
+
+fn count_of(hay: text, needle: text) -> i64:
+    var n = 0
+    var i = 0
+    while i + needle.len() <= hay.len():
+        if hay.substring(i, i + needle.len()) == needle:
+            n = n + 1
+            i = i + needle.len()
+        else:
+            i = i + 1
+    n
+
+val SRC = (
+    "fn tail_list(w: list, i: i64) -> i64:\n    val x = w.get(i)\n    x\n\n" +
+    "fn ret_list(w: list, i: i64) -> i64:\n    return w.get(i)\n\n" +
+    "fn bind_list(w: list, i: i64) -> i64:\n    val y: i64 = w.get(i)\n    y\n\n" +
+    "fn tail_typed(w: [i64], i: i64) -> i64:\n    val x = w.get(i)\n    x\n\n" +
+    "fn opt_list(w: list, i: i64) -> bool:\n    w.get(i).?\n"
+)
+
+describe "list (Array(Any)) get into an i64 sink unwraps the Option handle":
+    it "unwraps at the implicit tail, explicit return and annotated binding":
+        val fns = lower_module_json(SRC)
+        for name in ["tail_list", "ret_list", "bind_list"]:
+            val j = fns[name] ?? ""
+            expect(j.len() > 0).to_equal(true)
+            expect(j).to_contain("rt_array_get")
+            expect(j).to_contain("rt_unwrap_or_self")
+            # the payload is decoded once (in the producer), never again at the sink
+            expect(count_of(j, "rt_value_as_int_wide")).to_equal(1)
+
+    it "keeps the already-correct [i64] receiver unwrapped":
+        val fns = lower_module_json(SRC)
+        val j = fns["tail_typed"] ?? ""
+        expect(j).to_contain("rt_unwrap_or_self")
+
+    it "does not unwrap a presence test on the same Optional(Any)":
+        val fns = lower_module_json(SRC)
+        val j = fns["opt_list"] ?? ""
+        expect(j.len() > 0).to_equal(true)
+        expect(j.contains("rt_unwrap_or_self")).to_equal(false)
+
+# bug native_option_int_sink_miss_and_payload_three_2026-11-07 (defect 2):
+# the bounds-checked some-arm re-derived presence at runtime
+# (normalize_option_handle: rt_enum_id, then `word == 3` in option_norm_raw),
+# so a stored element 3 read back as None: native `[3].get(0) ?? -1` gave -1
+# for both `list` and `[i64]` receivers.
+val SOME_SRC = (
+    "fn coal_list(w: list, i: i64) -> i64:\n    w.get(i) ?? -1\n\n" +
+    "fn coal_typed(w: [i64], i: i64) -> i64:\n    w.get(i) ?? -1\n\n" +
+    "fn coal_text(t: [text], i: i64) -> text:\n    t.get(i) ?? \"none\"\n\n" +
+    "fn ifval_list(w: list) -> i64:\n    if val v = w.get(0):\n        return v + 1\n    -1\n\n" +
+    "fn gen_get<T>(xs: [T], i: i64) -> T?:\n    xs.get(i)\n"
+)
+
+fn block_of(j: text, label: text) -> text:
+    val start = j.find("\"label\":\"{label}\"")
+    if start < 0:
+        return ""
+    val rest = j.substring(start + 1, j.len())
+    val next = rest.find("\"label\":")
+    if next < 0:
+        return rest
+    rest.substring(0, next)
+
+describe "array get some-arm builds Some statically (a stored 3 is present)":
+    it "does not test the element word against the nil sentinel for list and [i64]":
+        val fns = lower_module_json(SOME_SRC)
+        for name in ["coal_list", "coal_typed"]:
+            val j = fns[name] ?? ""
+            expect(j.len() > 0).to_equal(true)
+            expect(j).to_contain("get_some")
+            expect(j.contains("option_norm_raw")).to_equal(false)
+            # presence is still read off the handle, and the payload decoded once
+            expect(j).to_contain("rt_is_some")
+            expect(j).to_contain("rt_unwrap_or_self")
+            expect(count_of(j, "rt_value_as_int_wide")).to_equal(1)
+        # a concrete scalar element is Some by construction: no handle probe
+        val typed = fns["coal_typed"] ?? ""
+        expect(block_of(typed, "get_some").contains("rt_enum_id")).to_equal(false)
+        expect(block_of(typed, "get_some")).to_contain("rt_enum_new")
+        expect(typed.contains("option_present_handle")).to_equal(false)
+
+    it "passes a stored Option handle through for Any and type-parameter elements":
+        # rt_value_as_int_wide passes heap handles through, so a `list`
+        # element may itself be an Option handle; wrapping it again made
+        # `xs.get(0) ?? d` return the inner handle (Some(Some(x))). The
+        # interpreter returns the stored Option as-is.
+        val fns = lower_module_json(SOME_SRC)
+        for name in ["coal_list", "gen_get"]:
+            val j = fns[name] ?? ""
+            expect(j.len() > 0).to_equal(true)
+            expect(block_of(j, "get_some")).to_contain("rt_enum_id")
+            expect(j).to_contain("option_present_handle")
+            expect(j.contains("option_norm_raw")).to_equal(false)
+
+    it "keeps runtime classification for a boxed [text] element":
+        val fns = lower_module_json(SOME_SRC)
+        val j = fns["coal_text"] ?? ""
+        expect(j.len() > 0).to_equal(true)
+        expect(j).to_contain("option_norm_raw")
+
+    it "decodes an if-val binder on a list get exactly once":
+        val fns = lower_module_json(SOME_SRC)
+        val j = fns["ifval_list"] ?? ""
+        expect(j.len() > 0).to_equal(true)
+        expect(count_of(j, "rt_value_as_int_wide")).to_equal(1)
+        expect(block_of(j, "if_chain_then").contains("rt_value_as_int_wide")).to_equal(false)
+        expect(block_of(j, "exists_check_some").contains("rt_value_as_int_wide")).to_equal(false)

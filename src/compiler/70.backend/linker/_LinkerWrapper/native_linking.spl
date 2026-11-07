@@ -773,11 +773,11 @@ fn internal_simpleos_flags(extra_flags: [text]) -> Result<InternalSimpleOsFlags,
             continue
 
         var equals: i64 = 0
-        while equals < defsym_value.len() and defsym_value[equals:equals + 1] != "=":
+        while equals < defsym_value.byte_len() and defsym_value.substring(equals, equals + 1) != "=":
             equals = equals + 1
         if equals <= 0 or equals + 1 >= defsym_value.len():
             return Err("internal SimpleOS --defsym requires non-empty name=expression")
-        val name = defsym_value[0:equals]
+        val name = defsym_value.substring(0, equals)
         val expr = defsym_value.substring(equals + 1)
         if not _internal_simpleos_symbol_name_valid(name) or expr.contains("\0"):
             return Err("internal SimpleOS --defsym has an invalid symbol name or expression")
@@ -926,12 +926,12 @@ fn _internal_coff_number(value: text) -> Result<i64, text>:
     if value == "": return Err("empty numeric value")
     var base: i64 = 10
     var index: i64 = 0
-    if value.len() > 2 and value.substring(0, 2).lower() == "0x":
+    if value.byte_len() > 2 and value.substring(0, 2).lower() == "0x":
         base = 16
         index = 2
-    if index >= value.len(): return Err("empty hexadecimal value")
+    if index >= value.byte_len(): return Err("empty hexadecimal value")
     var result: i64 = 0
-    while index < value.len():
+    while index < value.byte_len():
         val byte = value.byte_at(index) as i64
         var digit: i64 = -1
         if byte >= 48 and byte <= 57:
@@ -976,7 +976,7 @@ fn _internal_coff_version(value: text, kind: text) -> Result<(i64, i64), text>:
 fn _internal_coff_entry_valid(entry: text) -> bool:
     if entry == "": return false
     var index: i64 = 0
-    while index < entry.len():
+    while index < entry.byte_len():
         if (entry.byte_at(index) as i64) <= 32: return false
         index = index + 1
     true
@@ -2217,6 +2217,30 @@ pub fn native_cc_platform_flags(os: text, strip_output: bool = false) -> [text]:
         return flags
     []
 
+pub fn native_cc_icf_safe_supported(linker_selector: text, hosted_cross: bool) -> bool:
+    """Whether the cc-selected ELF linker accepts `--icf=safe`.
+
+    An empty selector uses this path's native-host LLD default.  Managed tool
+    authority instead returns an absolute `-fuse-ld=<path>` selector, so test
+    the selected engine rather than comparing the whole flag with the named
+    `-fuse-ld=bfd` spelling.  GNU BFD rejects every ICF option.
+    """
+    if hosted_cross: return false
+    if linker_selector == "": return true
+    val selected = linker_selector.lower().replace("\\", "/")
+    val linker_path = if selected.starts_with("-fuse-ld="): selected[9:] else: selected
+    val parts = linker_path.split("/")
+    if parts.len() == 0: return false
+    var executable = parts[parts.len() - 1]
+    if executable.ends_with(".exe"): executable = executable[0:executable.len() - 4]
+    if executable == "lld-link" or executable.starts_with("lld-link-") or
+            executable == "lld-coff" or executable.starts_with("lld-coff-"):
+        return false
+    executable == "lld" or executable == "ld.lld" or
+        executable.starts_with("lld-") or executable.starts_with("ld.lld-") or
+        executable == "mold" or executable.starts_with("mold-") or
+        executable == "gold" or executable == "ld.gold" or executable.starts_with("ld.gold-")
+
 fn cc_requested_fuse_ld_flag(os_name: text, hosted_cross: bool) -> Result<text, text>:
     """Resolve SIMPLE_LINKER into a -fuse-ld= flag for the cc fallback path.
 
@@ -2460,10 +2484,11 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         args.push("-Wl,--gc-sections")
         if config.strip_output:
             args.push("-Wl,--strip-all")
-        # --icf is an lld/mold/gold extension; GNU bfd rejects it outright, so
-        # honouring SIMPLE_LINKER=ld/gnu/bfd here means dropping the flag
-        # rather than handing bfd an option that fails the link.
-        if not hosted_cross and requested_fuse_ld != "-fuse-ld=bfd":
+        # --icf is an lld/mold/gold extension; GNU bfd rejects it outright.
+        # Managed authority uses an absolute selector (for example
+        # -fuse-ld=/usr/bin/x86_64-linux-gnu-ld.bfd), so decide from the
+        # selected engine rather than one exact named spelling.
+        if native_cc_icf_safe_supported(requested_fuse_ld, hosted_cross):
             args.push("-Wl,--icf=safe")
         args.push("-o")
         args.push(output)

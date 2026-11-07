@@ -45,9 +45,100 @@ fn assigns_to_main(items: &[Node]) -> bool {
     })
 }
 
+/// Section name of the interpreter fallback snapshot a standalone SMF carries
+/// when its hybrid transform routed functions to `rt_interp_call`.
+pub const INTERP_SNAPSHOT_SECTION_NAME: &str = ".interp_snapshot";
+
+/// Wire version of the `.interp_snapshot` payload record.
+const INTERP_SNAPSHOT_VERSION: u64 = 1;
+
+/// Build the `.interp_snapshot` payload for an SMF compiled from `source_path`.
+///
+/// The record pins the ENTRY source the artifact was compiled from (path +
+/// verbatim text). It is the minimum the interpreter needs: at run time the
+/// driver re-flattens that entry through the ordinary module loader (the same
+/// `load_module_with_imports` the JIT lane seeds from), so `use` imports and
+/// the stdlib resolve exactly as they did for the compile. The text travels
+/// with the artifact so a moved or edited source cannot silently seed
+/// different bodies than the ones the native half was compiled against.
+fn interp_snapshot_payload(source_path: &Path) -> Result<Vec<u8>, CompileError> {
+    let source = fs::read_to_string(source_path)
+        .map_err(|e| CompileError::Io(format!("interp snapshot: cannot read {}: {e}", source_path.display())))?;
+    let record = serde_json::json!({
+        "version": INTERP_SNAPSHOT_VERSION,
+        "path": source_path.display().to_string(),
+        "source": source,
+    });
+    Ok(record.to_string().into_bytes())
+}
+
+/// Re-seed the interpreter definitions from an SMF's `.interp_snapshot`
+/// payload so its `rt_interp_call`-routed functions resolve.
+///
+/// When the pinned entry source still exists on disk with the exact text the
+/// snapshot carries, it is flattened in place (relative imports resolve as at
+/// compile time). Otherwise the embedded text is materialised in a private
+/// temporary directory and flattened from there: stdlib imports still resolve,
+/// and a relative import that no longer exists surfaces as the loader's own
+/// error rather than a silent `function not found` at the first routed call.
+pub fn seed_interpreter_from_smf_snapshot(payload: &[u8]) -> Result<(), CompileError> {
+    let record: serde_json::Value = serde_json::from_slice(payload)
+        .map_err(|e| CompileError::Io(format!("interp snapshot: malformed payload: {e}")))?;
+    let version = record.get("version").and_then(serde_json::Value::as_u64);
+    if version != Some(INTERP_SNAPSHOT_VERSION) {
+        return Err(CompileError::Io(format!(
+            "interp snapshot: unsupported payload version {version:?} (expected {INTERP_SNAPSHOT_VERSION})"
+        )));
+    }
+    let path = record
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| CompileError::Io("interp snapshot: payload has no entry path".to_string()))?;
+    let source = record
+        .get("source")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| CompileError::Io("interp snapshot: payload has no entry source".to_string()))?;
+    let pinned = PathBuf::from(path);
+    let on_disk_matches = fs::read_to_string(&pinned).ok().as_deref() == Some(source);
+    // Kept alive until the flattened AST has been taken over by the
+    // interpreter state below; dropped (and deleted) on every exit path.
+    let mut materialised: Option<tempfile::TempDir> = None;
+    let entry = if on_disk_matches {
+        pinned
+    } else {
+        let dir = tempfile::tempdir()
+            .map_err(|e| CompileError::Io(format!("interp snapshot: cannot create temp dir: {e}")))?;
+        let file_name = pinned
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_else(|| std::ffi::OsString::from("entry.spl"));
+        let entry = dir.path().join(file_name);
+        fs::write(&entry, source)
+            .map_err(|e| CompileError::Io(format!("interp snapshot: cannot materialise entry: {e}")))?;
+        materialised = Some(dir);
+        entry
+    };
+    let mut module = load_module_with_imports(&entry, &mut HashSet::new()).map_err(|e| {
+        CompileError::Io(format!(
+            "interp snapshot: cannot flatten pinned entry {} ({}): {e}",
+            entry.display(),
+            if on_disk_matches { "on disk" } else { "materialised from the artifact" }
+        ))
+    })?;
+    crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns_for_host(&mut module);
+    // The same registry pass `evaluate_module` runs before executing anything:
+    // without it the routed body cannot resolve prelude externs (`print`,
+    // `rt_*`) and the bridge answers NIL for an error it never printed.
+    crate::interpreter::initialize_extern_functions();
+    crate::interpreter_sffi::init_interpreter_state(&module.items);
+    drop(materialised);
+    Ok(())
+}
+
 fn generate_linked_smf_from_object(
     object_code: &[u8],
     mir_module: &crate::mir::MirModule,
+    interp_snapshot: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, CompileError> {
     let mut writer = crate::linker::SmfWriter::from_object_code(object_code, mir_module).map_err(|e| {
         CompileError::Codegen(format!(
@@ -55,6 +146,15 @@ fn generate_linked_smf_from_object(
             e
         ))
     })?;
+    if let Some(payload) = interp_snapshot {
+        writer.add_custom_section(
+            INTERP_SNAPSHOT_SECTION_NAME,
+            simple_common::smf::SectionType::InterpSnapshot,
+            simple_common::smf::SECTION_FLAG_READ,
+            payload,
+            1,
+        );
+    }
     let mut buf = Vec::new();
     writer
         .write(&mut buf)
@@ -279,7 +379,11 @@ fn standalone_smf_fallback_error(
     flagged.sort();
     let ctx = ErrorContext::new()
         .with_code(codes::UNSUPPORTED_FEATURE)
-        .with_help("Rewrite the flagged constructs; standalone SMF artifacts cannot call an embedded interpreter.");
+        .with_help(
+            "Rewrite the flagged constructs, or compile from a source FILE: a file-backed SMF embeds an \
+             `.interp_snapshot` the driver re-seeds the interpreter from, but an in-memory or WASM module \
+             has no entry source to pin.",
+        );
     CompileError::semantic_with_context(
         format!(
             "cannot compile to standalone SMF: {} function(s) contain constructs that require the interpreter:\n{}",
@@ -608,9 +712,13 @@ impl CompilerPipeline {
             return Ok(generate_smf_bytes(main_value, self.gc.as_ref()));
         }
 
-        if !non_compilable.is_empty() {
-            return Err(standalone_smf_fallback_error(&compilability, &non_compilable));
-        }
+        let interp_snapshot = self.prepare_smf_interp_fallback(
+            &mut mir_module,
+            &ast_module.items,
+            &compilability,
+            &non_compilable,
+            source_file,
+        )?;
 
         // 9. Generate machine code via selected backend
         let object_code = self.compile_mir_to_object(
@@ -623,7 +731,7 @@ impl CompilerPipeline {
 
         // 10. Wrap object code in SMF format. Generic functions are lowered
         // type-erased (type params resolve to ANY), so no template sections.
-        generate_linked_smf_from_object(&object_code, &mir_module)
+        generate_linked_smf_from_object(&object_code, &mir_module, interp_snapshot)
     }
 
     /// Compile source code to SMF bytes for a specific target architecture.
@@ -762,9 +870,17 @@ impl CompilerPipeline {
             return Ok(generate_smf_bytes_for_target(main_value, self.gc.as_ref(), target));
         }
 
-        if !non_compilable.is_empty() {
+        if target.arch.is_wasm() && !non_compilable.is_empty() {
+            // A WASM module has no host interpreter to seed.
             return Err(standalone_smf_fallback_error(&compilability, &non_compilable));
         }
+        let interp_snapshot = self.prepare_smf_interp_fallback(
+            &mut mir_module,
+            &ast_module.items,
+            &compilability,
+            &non_compilable,
+            source_path,
+        )?;
 
         // 9. Generate machine code via selected backend for the target architecture
         let object_code = self.compile_mir_to_object(
@@ -781,8 +897,40 @@ impl CompilerPipeline {
             link_wasm_object(&object_code)
         } else {
             // Wrap object code in SMF format for native targets.
-            generate_linked_smf_from_object(&object_code, &mir_module)
+            generate_linked_smf_from_object(&object_code, &mir_module, interp_snapshot)
         }
+    }
+
+    /// Route the interpreter-only functions of a standalone SMF through the
+    /// hybrid transform and build the `.interp_snapshot` payload that lets the
+    /// driver resolve them at run time.
+    ///
+    /// `None` when every function compiled natively (no section is emitted).
+    /// An in-memory module (no source path) has no entry the snapshot could
+    /// pin, so it keeps the fail-closed diagnostic instead of shipping an SMF
+    /// whose routed calls would resolve to NIL.
+    fn prepare_smf_interp_fallback(
+        &self,
+        mir_module: &mut crate::mir::MirModule,
+        items: &[Node],
+        compilability: &HashMap<String, CompilabilityStatus>,
+        non_compilable: &HashSet<String>,
+        source_path: Option<&Path>,
+    ) -> Result<Option<Vec<u8>>, CompileError> {
+        if non_compilable.is_empty() {
+            return Ok(None);
+        }
+        let Some(source_path) = source_path else {
+            return Err(standalone_smf_fallback_error(compilability, non_compilable));
+        };
+        let payload = interp_snapshot_payload(source_path)?;
+        let boxed_returns = boxed_return_functions(items);
+        mir::apply_hybrid_transform(mir_module, non_compilable, &boxed_returns);
+        tracing::debug!(
+            "Hybrid execution (standalone SMF): {} function(s) routed to the embedded interp snapshot",
+            non_compilable.len()
+        );
+        Ok(Some(payload))
     }
 
     /// Compile source to a standalone native binary.
@@ -1349,6 +1497,68 @@ mod tests {
         assert_eq!(bytes.len(), stub.len());
         assert!(bytes.ends_with(b"main\0"));
         assert!(!contains_bytes(&bytes, b"\0f\0"), "real code was emitted for `f`");
+    }
+
+    /// Entry with an interpreter-only function (`.?` is `TryOperator` under
+    /// AotNative) called from a natively compiled `main`.
+    const INTERP_FALLBACK_ENTRY: &str =
+        "fn present(v: i64?) -> i64:\n    if v.?:\n        7\n    else:\n        3\n\nfn main() -> i64:\n    present(1)\n";
+
+    /// Reproducer (compile side) for
+    /// doc/08_tracking/bug/smf_standalone_interp_fallback_functions_unavailable_2026-06-14.md:
+    /// a file-backed module with an interp-routed function compiles to an SMF
+    /// that carries the `.interp_snapshot` record pinning its entry source.
+    #[test]
+    fn file_backed_smf_with_interp_fallback_embeds_snapshot_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("fb.spl");
+        let out = dir.path().join("fb.smf");
+        std::fs::write(&src, INTERP_FALLBACK_ENTRY).unwrap();
+        crate::CompilerPipeline::new()
+            .unwrap()
+            .compile(&src, &out)
+            .expect("interp-only function must not refuse a file-backed SMF");
+        let bytes = std::fs::read(&out).unwrap();
+        assert!(contains_bytes(&bytes, super::INTERP_SNAPSHOT_SECTION_NAME.as_bytes()));
+        assert!(contains_bytes(&bytes, b"\"version\":1"));
+        assert!(contains_bytes(&bytes, b"fn present(v: i64?)"), "entry text must travel with the artifact");
+    }
+
+    /// Prevention: the snapshot is only ever a pinned ENTRY. An in-memory
+    /// module has nothing to pin, so it keeps the fail-closed diagnostic
+    /// instead of shipping an SMF whose routed calls resolve to NIL; and a
+    /// fully native module emits no section.
+    #[test]
+    fn interp_snapshot_requires_a_file_backed_entry_and_is_absent_without_fallback() {
+        let err = crate::CompilerPipeline::new()
+            .unwrap()
+            .compile_source_to_memory(INTERP_FALLBACK_ENTRY)
+            .expect_err("in-memory interp-only module must stay fail-closed");
+        assert!(format!("{err}").contains("cannot compile to standalone SMF"), "{err}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("plain.spl");
+        let out = dir.path().join("plain.smf");
+        std::fs::write(&src, "fn main() -> i64:\n    5\n").unwrap();
+        crate::CompilerPipeline::new().unwrap().compile(&src, &out).unwrap();
+        let bytes = std::fs::read(&out).unwrap();
+        assert!(!contains_bytes(&bytes, super::INTERP_SNAPSHOT_SECTION_NAME.as_bytes()));
+    }
+
+    /// The seeding path round-trips the payload shape the compiler emits and
+    /// refuses a foreign version rather than seeding nothing silently.
+    #[test]
+    fn interp_snapshot_payload_round_trips_and_rejects_unknown_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("fb.spl");
+        std::fs::write(&src, INTERP_FALLBACK_ENTRY).unwrap();
+        let payload = super::interp_snapshot_payload(&src).unwrap();
+        super::seed_interpreter_from_smf_snapshot(&payload).expect("seed from pinned entry on disk");
+        std::fs::remove_file(&src).unwrap();
+        super::seed_interpreter_from_smf_snapshot(&payload).expect("seed from materialised entry");
+        let foreign = br#"{"version":99,"path":"x.spl","source":""}"#;
+        let err = super::seed_interpreter_from_smf_snapshot(foreign).expect_err("unknown version");
+        assert!(format!("{err}").contains("unsupported payload version"), "{err}");
     }
 
     /// Build `source` as a standalone native binary, run it, return stdout.

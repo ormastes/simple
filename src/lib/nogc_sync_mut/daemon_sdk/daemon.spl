@@ -11,7 +11,7 @@ use std.daemon_sdk.types.{
     DAEMON_PUBLICATION_BLOCKED, DAEMON_ACKNOWLEDGEMENT_BLOCKED
 }
 use std.daemon_sdk.lock.{
-    try_acquire_daemon_lock, release_daemon_lock
+    DaemonLockReceiptV1, try_acquire_daemon_lock_owned, release_daemon_lock_owned
 }
 use std.daemon_sdk.protocol.{
     read_daemon_requests, write_daemon_response, acknowledge_processed_requests,
@@ -26,10 +26,17 @@ use std.io_runtime.{thread_sleep}
 # Daemon Runner
 # ============================================================================
 
+# A handler returns the domain owner before the runner publishes its response.
+# Callers must retain the owner returned by run_poll_cycle_owned_v1.
+struct DaemonOwnedResponseV1<T>:
+    owner: T
+    response: DaemonResponse
+
 class DaemonRunner:
     config: DaemonConfig
     state: DaemonState
     lock_pid: i64
+    lock_receipt: DaemonLockReceiptV1
     running: bool
 
 impl DaemonRunner:
@@ -45,8 +52,16 @@ impl DaemonRunner:
     # --- Poll cycle: read requests, dispatch to handler, write responses ---
 
     me run_poll_cycle(handler: fn(DaemonRequest) -> DaemonResponse):
+        # Compatibility adapter captures only the immutable handler. Mutable
+        # domain owners are explicit arguments/results of the shared core.
+        val ignored = self.run_poll_cycle_owned_v1(0i64, \state, request:
+            DaemonOwnedResponseV1(owner: state, response: handler(request)))
+
+    me run_poll_cycle_owned_v1<T>(owner: T,
+            handler: fn(T, DaemonRequest) -> DaemonOwnedResponseV1<T>) -> T:
+        var current_owner = owner
         if not self.running:
-            return
+            return current_owner
 
         self.state.status = DAEMON_POLLING
         self.state.last_poll_time = time_now_unix_micros()
@@ -55,7 +70,7 @@ impl DaemonRunner:
         if requests.len() == 0:
             self.state.cycle_count = self.state.cycle_count + 1
             self.state.status = DAEMON_IDLE
-            return
+            return current_owner
 
         self.state.status = DAEMON_PROCESSING
 
@@ -64,7 +79,11 @@ impl DaemonRunner:
         var i = 0
         while i < requests.len() and count < self.config.max_concurrent:
             val req = requests[i]
-            val resp = handler(req)
+            val handled = handler(current_owner, req)
+            # Retain effects in the domain owner even when publication or
+            # acknowledgement subsequently fails and stops the runner.
+            current_owner = handled.owner
+            val resp = handled.response
             if resp.request_id != req.id or not write_daemon_response(resp, self.config.response_dir):
                 # V1 has no durable execution ledger: retain the unacknowledged
                 # request and stop rather than re-run its handler next poll.
@@ -86,6 +105,7 @@ impl DaemonRunner:
         self.state.cycle_count = self.state.cycle_count + 1
         if self.running:
             self.state.status = DAEMON_IDLE
+        current_owner
 
     # --- Main loop: poll + sleep + periodic cleanup ---
 
@@ -105,7 +125,7 @@ impl DaemonRunner:
     me shutdown():
         self.running = false
         self.state.status = DAEMON_SHUTTING_DOWN
-        release_daemon_lock(self.lock_pid, self.config.lock_path)
+        release_daemon_lock_owned(self.lock_receipt)
 
 # ============================================================================
 # Factory
@@ -115,11 +135,12 @@ fn daemon_runner_start(config: DaemonConfig) -> DaemonRunner:
     mkdir_p(config.request_dir)
     mkdir_p(config.response_dir)
 
-    val pid = try_acquire_daemon_lock(config.lock_path)
+    val receipt = try_acquire_daemon_lock_owned(config.lock_path)
 
     DaemonRunner(
         config: config,
         state: daemon_state_new(),
-        lock_pid: pid,
-        running: pid > 0
+        lock_pid: receipt.pid,
+        lock_receipt: receipt,
+        running: receipt.acquired
     )

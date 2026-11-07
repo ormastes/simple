@@ -189,3 +189,35 @@ would be a lower bound rather than a measurement.
 3. Only then decide between fixing the identified retention (term 2, small
    change, likely in the interpreted `parse_module` path) and filing term 1 as
    the redesign it is.
+
+## 2026-11-07 — term 1 re-measured on Windows: 3.09 GB before the build starts; term 2 not reproducible on this host
+
+Binary `simple-base.exe` (tip `4eb1de2ecbd`, bootstrap profile, sha256
+`c0c47b2cdd6cd6ee…`), Windows 11 with ~2.4 GB free of 64 GB (other lanes
+building), exact reproducer argv from above with the LLVM 23.1.1 PATH:
+
+```
+SIMPLE_BOOTSTRAP=1 sh scripts/perf/measure-peak-rss.shs -- simple-base.exe native-build \
+  --source test/fixtures/native_trailing_default_param \
+  --entry  test/fixtures/native_trailing_default_param/main.spl --entry-closure -o out.exe
+peak-rss: label=nb_fixture wall_ms=84223 peak_kib=3087468 exit=3 method=ps-sample
+error: build refused: 2477 MiB of RAM/commit headroom free, below the 24576 MiB reserve
+```
+
+- **Term 1 (fixed import-closure load) = 3.09 GB peak here**, reached in
+  84 s before any `[build]` step — higher than the 1.99 GB no-arg
+  `native_build_worker.spl` floor measured the same day, because the
+  `--source/--entry` form loads the full driver closure in the parent.
+- **Term 2 (creep inside `parse`) could not be exercised**: the build was
+  refused by the memory-reserve guard (`SIMPLE_BUILD_MEMORY_RESERVE_BYTES`,
+  24 GiB) before reaching `parse 0/2`, and lowering the reserve on a host at
+  2.4 GB free would reproduce the earlyoom conditions of the original halt
+  rather than the defect. No sampler on the parse step was taken.
+
+Verification pending, exact command and host: on a Linux box with >= 8 GB
+free and `gdb`, the "Next steps" item 2 above —
+`ulimit -v 6000000; gdb -q -batch -x cmds --args $(readlink -f bin/simple) run src/app/cli/native_build_worker.spl --source test/fixtures/native_trailing_default_param --entry test/fixtures/native_trailing_default_param/main.spl --entry-closure -o out.bin`
+with `break abort` / `break alloc::alloc::handle_alloc_error`, `bt 60` at the
+2^31-byte request. The in-process sampler now also runs on Windows
+(`SIMPLE_INTERP_SAMPLE=1`, round-15 seed change), so on a host that reaches
+`parse` the creep can be attributed to a Simple function without gdb.
