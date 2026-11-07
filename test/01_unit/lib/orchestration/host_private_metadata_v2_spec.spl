@@ -1,0 +1,73 @@
+# Source-only authored cases: NOT_RUN. Pure metadata validation proves neither
+# native privacy nor enrollment/provider authority.
+use std.spec
+use std.nogc_sync_mut.orchestration.host_private_metadata_v2.*
+use test.fixtures.orchestration.host_private_metadata_v2.*
+use std.common.base_encoding.utilities.base_encoding_text_to_bytes
+
+fn metadata_decode_fixture_v2(bytes: [[u8]], pins: HostPrivateMetadataPinsV2) -> Result<HostPrivateMetadataV2, text>:
+    host_private_metadata_decode_v2(pins, bytes[0], bytes[1], bytes[2], bytes[3])
+
+describe "Pinned installed public metadata decoder":
+    it "decodes exact raw pins with the existing policy and configuration decoders":
+        val bytes = host_private_metadata_fixture_bytes_v2()
+        val pins = host_private_metadata_fixture_pins_v2(bytes)
+        val metadata = metadata_decode_fixture_v2(bytes, pins).unwrap()
+        expect(metadata.policy.source_digest).to_equal(pins.policy_digest)
+        expect(metadata.policy.session_generation).to_equal(3)
+        expect(metadata.configuration.physical_host_id).to_equal("machine")
+        expect(metadata.configuration.runtime_class_ref).to_equal("windows-docker-process")
+        expect(metadata.configuration.memory_ceiling_bytes).to_equal(4294967296)
+        expect(base_encoding_text_to_bytes(metadata.engine_policy_bytes)).to_equal(bytes[2])
+        expect(base_encoding_text_to_bytes(metadata.broker_policy_bytes)).to_equal(bytes[3])
+
+    it "rejects noncanonical trusted pins before opening any native root":
+        val bytes = host_private_metadata_fixture_bytes_v2()
+        var pins = host_private_metadata_fixture_pins_v2(bytes)
+        pins.broker_policy_digest = "AB".repeat(32)
+        expect(host_private_metadata_pins_check_v2(pins).unwrap_err()).to_equal("host-private-metadata-pin-invalid")
+        match host_private_metadata_open_v2("not-a-native-path", pins):
+            case HostPrivateMetadataOpenV2.Rejected(error): expect(error).to_equal("host-private-metadata-pin-invalid")
+            case _: fail("invalid pins reached native acquisition")
+
+    it "pins all four raw sources before parsing any one source":
+        val original = host_private_metadata_fixture_bytes_v2()
+        val pins = host_private_metadata_fixture_pins_v2(original)
+        val names = ["authority-policy.sdn", "host-config.sdn", "engine-policy.sdn", "broker-policy.sdn"]
+        for index in 0..4:
+            var changed = original
+            changed[index] = base_encoding_text_to_bytes("malformed: [\n")
+            expect(metadata_decode_fixture_v2(changed, pins).unwrap_err()).to_equal(
+                "host-private-metadata-digest-mismatch:" + names[index])
+        var pin_before_parse = original
+        pin_before_parse[0] = base_encoding_text_to_bytes("not policy")
+        var corresponding = host_private_metadata_fixture_pins_v2(pin_before_parse)
+        corresponding.broker_policy_digest = "a".repeat(64)
+        expect(metadata_decode_fixture_v2(pin_before_parse, corresponding).unwrap_err()).to_equal(
+            "host-private-metadata-digest-mismatch:broker-policy.sdn")
+
+    it "refuses malformed UTF8 even when its exact raw digest is pinned":
+        var bytes = host_private_metadata_fixture_bytes_v2()
+        bytes[2] = [255u8, 254u8]
+        val pins = host_private_metadata_fixture_pins_v2(bytes)
+        expect(metadata_decode_fixture_v2(bytes, pins).is_err()).to_equal(true)
+
+    it "bounds every source before hashing and rejects empty installed files":
+        var bytes = host_private_metadata_fixture_bytes_v2()
+        bytes[3] = []
+        var pins = host_private_metadata_fixture_pins_v2(bytes)
+        expect(metadata_decode_fixture_v2(bytes, pins).unwrap_err()).to_equal(
+            "host-private-metadata-byte-limit:broker-policy.sdn")
+        bytes[3] = base_encoding_text_to_bytes("x".repeat(1048577))
+        # A canonical arbitrary digest is sufficient: size must fail first.
+        pins.broker_policy_digest = "a".repeat(64)
+        expect(metadata_decode_fixture_v2(bytes, pins).unwrap_err()).to_equal(
+            "host-private-metadata-byte-limit:broker-policy.sdn")
+
+    it "uses the real public policy and configuration validation after matching pins":
+        var bytes = host_private_metadata_fixture_bytes_v2()
+        bytes[0] = base_encoding_text_to_bytes("version: 9\n")
+        expect(metadata_decode_fixture_v2(bytes, host_private_metadata_fixture_pins_v2(bytes)).is_err()).to_equal(true)
+        bytes = host_private_metadata_fixture_bytes_v2()
+        bytes[1] = base_encoding_text_to_bytes("apiVersion: wrong\nkind: HostConfig\n")
+        expect(metadata_decode_fixture_v2(bytes, host_private_metadata_fixture_pins_v2(bytes)).is_err()).to_equal(true)
