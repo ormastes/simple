@@ -1953,9 +1953,9 @@ pub fn process_bounded_kill_signal(exit_code: i64) -> i64:
 # Copying a Ref does not create another stdout reader or remote authority.
 use std.common.text_bytes.{boxed_text_bytes_checked}
 use std.common.string_core.{str_len}
-use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2, group_process_stream_launch_validate_v2, group_process_stream_launch_encode_v2, group_process_stream_identity_v2}
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2, group_process_stream_launch_validate_profiled_v3, group_process_stream_launch_encode_profiled_v3, group_process_stream_identity_profiled_v3}
 use std.nogc_sync_mut.io.group_process_owner.{GroupProcessStreamOwnerV2, group_process_stream_owner_validate_v2, group_process_stream_prepare_v2, group_process_stream_recover_v2, group_process_stream_confirm_v2, group_process_stream_probe_bound_v2, group_process_stream_cancel_v2, group_process_stream_cleanup_proof_v2}
-use std.nogc_sync_mut.io.linux_process_owner.{linux_process_stream_admit_v2, linux_process_launch_stream_broker_v2}
+use std.nogc_sync_mut.io.linux_process_owner.{linux_process_stream_admit_profiled_v3, linux_process_launch_stream_broker_profiled_v3}
 
 struct PipedProcessRefV1:
     pid: i64
@@ -2022,30 +2022,30 @@ fn _piped_ref_input_error_v1(value: text) -> text:
     ""
 
 fn _piped_ref_valid_v1(process: PipedProcessRefV1) -> bool:
-    process.pid > 0 and process.generation > 0 and ((process.group_root == "" and process.group_identity == "") or
-        (process.group_root != "" and process.group_identity != ""))
+    (process.pid > 0 and process.generation > 0 and ((process.group_root == "" and process.group_identity == "") or
+        (process.group_root != "" and process.group_identity != "")))
 
 pub fn process_piped_ref_equal_v1(left: PipedProcessRefV1, right: PipedProcessRefV1) -> bool:
-    left.pid == right.pid and left.generation == right.generation and
-        left.group_root == right.group_root and left.group_identity == right.group_identity
+    (left.pid == right.pid and left.generation == right.generation and
+        left.group_root == right.group_root and left.group_identity == right.group_identity)
 
 pub fn process_validate_piped_owned_transfer_v2(transfer: PipedProcessOwnedTransferV2) -> Result<(), text>:
     val owner = transfer.owner
     val invalid = group_process_stream_owner_validate_v2(owner)
     if invalid != "": return Err(invalid)
     val reference = transfer.reference
-    if reference.group_root != owner.launch.root or reference.group_identity != owner.identity_digest or
-            reference.generation != owner.launch.transport_generation:
+    if (reference.group_root != owner.launch.root or reference.group_identity != owner.identity_digest or
+            reference.generation != owner.launch.transport_generation):
         return Err("process_owned_transfer_binding_mismatch")
     process_validate_piped_ref_v1(reference)
 
 pub fn process_piped_owned_transfer_equal_v2(left: PipedProcessOwnedTransferV2,
         right: PipedProcessOwnedTransferV2) -> bool:
-    if group_process_stream_owner_validate_v2(left.owner) != "" or
-            group_process_stream_owner_validate_v2(right.owner) != "": return false
-    process_piped_ref_equal_v1(left.reference, right.reference) and
+    if (group_process_stream_owner_validate_v2(left.owner) != "" or
+            group_process_stream_owner_validate_v2(right.owner) != ""): return false
+    (process_piped_ref_equal_v1(left.reference, right.reference) and
         left.owner.identity_digest == right.owner.identity_digest and
-        group_process_stream_launch_encode_v2(left.owner.launch) == group_process_stream_launch_encode_v2(right.owner.launch)
+        group_process_stream_launch_encode_profiled_v3(left.owner.launch) == group_process_stream_launch_encode_profiled_v3(right.owner.launch))
 
 fn _process_stream_reference_v2(owner: GroupProcessStreamOwnerV2) -> PipedProcessRefV1?:
     val launch = owner.launch
@@ -2066,12 +2066,12 @@ fn _process_stream_reject_or_retain_v2(owner: GroupProcessStreamOwnerV2, reason:
 
 pub fn process_spawn_piped_owned_v2(launch: GroupProcessStreamLaunchV2) -> PipedProcessOwnedSpawnV2:
     if launch.transport_generation != 0: return PipedProcessOwnedSpawnV2.Rejected("process_transport_already_assigned")
-    val invalid = group_process_stream_launch_validate_v2(launch)
+    val invalid = group_process_stream_launch_validate_profiled_v3(launch)
     if invalid != "": return PipedProcessOwnedSpawnV2.Rejected(invalid)
-    if group_process_stream_launch_encode_v2(launch) == "":
+    if group_process_stream_launch_encode_profiled_v3(launch) == "":
         return PipedProcessOwnedSpawnV2.Rejected("process_stream_request_exceeds_wire_bound")
     # Admission checks the actual platform and delegation before any ticket or fork.
-    match linux_process_stream_admit_v2(launch.delegated_cgroup_path):
+    match linux_process_stream_admit_profiled_v3(launch):
         case Err(reason): return PipedProcessOwnedSpawnV2.Rejected(reason)
         case Ok(_): pass
     val now = time_now_unix_micros()
@@ -2081,7 +2081,7 @@ pub fn process_spawn_piped_owned_v2(launch: GroupProcessStreamLaunchV2) -> Piped
     if generation <= 0: return PipedProcessOwnedSpawnV2.Rejected("process_stream_reservation_failed")
     var prepared = launch
     prepared.transport_generation = generation
-    val owner = GroupProcessStreamOwnerV2(launch: prepared, identity_digest: group_process_stream_identity_v2(prepared))
+    val owner = GroupProcessStreamOwnerV2(launch: prepared, identity_digest: group_process_stream_identity_profiled_v3(prepared))
     val bound = unsafe(capabilities: [ffi]):
         rt_process_stream_bind_v2(generation, prepared.root, str_len(prepared.root),
             owner.identity_digest, str_len(owner.identity_digest))
@@ -2089,10 +2089,7 @@ pub fn process_spawn_piped_owned_v2(launch: GroupProcessStreamLaunchV2) -> Piped
     match group_process_stream_prepare_v2(prepared):
         case Err(reason): return _process_stream_reject_or_retain_v2(owner, reason)
         case Ok(_): pass
-    val broker_args = ["--broker-root", prepared.root, "--request-digest", owner.identity_digest]
-    match linux_process_launch_stream_broker_v2(prepared.request.broker_program, prepared.request.broker_digest,
-            broker_args, generation, prepared.root, owner.identity_digest,
-            prepared.delegated_cgroup_path, prepared.request.launch_deadline_unix_ms):
+    match linux_process_launch_stream_broker_profiled_v3(prepared, owner.identity_digest):
         case Err(reason): return _process_stream_reject_or_retain_v2(owner, reason)
         case Ok(_): pass
     val reference = _process_stream_reference_v2(owner)

@@ -1,0 +1,158 @@
+# Versioned CPU and authenticated shared-broker budget. No host admission here.
+use std.common.build_manager.codec.{BuilderWireReaderV1, builder_wire_line_v1}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.string_core.{str_len}
+
+val GROUP_PROCESS_PROFILE_INTEGER_MAX_V3: i64 = 9223372036854775807
+
+struct GroupProcessCpuQuotaV3:
+    cpu_millis: i64
+    quota_us: i64
+    period_us: i64
+
+struct GroupProcessBrokerBudgetV3:
+    cgroup_path: text
+    device: i64
+    inode: i64
+    generation: i64
+    policy_digest: text
+    cpu_quota_us: i64
+    cpu_period_us: i64
+    reserved_cpu_millis: i64
+    memory_limit_bytes: i64
+    reserved_memory_bytes: i64
+
+struct GroupProcessStreamProfileV3:
+    helper_cpu: GroupProcessCpuQuotaV3
+    broker: GroupProcessBrokerBudgetV3
+    child_image_mode: text
+
+fn group_process_cpu_quota_v3(cpu_millis: i64) -> Result<GroupProcessCpuQuotaV3, text>:
+    if cpu_millis <= 0: return Err("helper CPU must be positive millicores")
+    val period = if cpu_millis < 10: 1000000 else: 100000
+    val scale = if cpu_millis < 10: 1000 else: 100
+    if cpu_millis > GROUP_PROCESS_PROFILE_INTEGER_MAX_V3 / scale:
+        return Err("helper CPU quota arithmetic overflow")
+    Ok(GroupProcessCpuQuotaV3(cpu_millis: cpu_millis, quota_us: cpu_millis * scale, period_us: period))
+
+# Exact comparison to integer reserved millicores, without overflowing a cross
+# product or rounding the actual kernel cap. Division just proves the inequality.
+fn group_process_broker_cpu_within_reservation_v3(quota: i64, period: i64, reserved: i64) -> bool:
+    if quota < 1000 or period < 1000 or period > 1000000 or reserved <= 0: return false
+    val whole = quota / period
+    if whole > GROUP_PROCESS_PROFILE_INTEGER_MAX_V3 / 1000: return false
+    val base = whole * 1000
+    val rest = quota % period
+    val fractional = (rest * 1000 + period - 1) / period
+    if base > GROUP_PROCESS_PROFILE_INTEGER_MAX_V3 - fractional: return false
+    base + fractional <= reserved
+
+fn group_process_stream_path_absolute_v3(path: text) -> bool:
+    if path == "" or path.contains("\0"): return false
+    if path.starts_with("/"): return true
+    val forward = path.replace("\\", "/")
+    if str_len(forward) >= 3 and forward.substring(1, 2) == ":" and forward.substring(2, 3) == "/":
+        return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".contains(forward.substring(0, 1))
+    if not forward.starts_with("//"): return false
+    val parts = forward.substring(2, forward.len()).split("/")
+    (parts.len() >= 2 and parts[0] != "" and parts[0] != "." and parts[0] != ".." and
+        parts[1] != "" and parts[1] != "." and parts[1] != "..")
+
+fn group_process_stream_profile_validate_v3(profile: GroupProcessStreamProfileV3) -> text:
+    val helper = profile.helper_cpu
+    match group_process_cpu_quota_v3(helper.cpu_millis):
+        case Err(reason): return reason
+        case Ok(derived):
+            if helper.quota_us != derived.quota_us or helper.period_us != derived.period_us:
+                return "helper CPU quota differs from exact derivation"
+    val broker = profile.broker
+    if not group_process_stream_path_absolute_v3(broker.cgroup_path) or str_len(broker.cgroup_path) > 4095:
+        return "invalid broker cgroup path shape"
+    if broker.device < 0 or broker.inode <= 0 or broker.generation <= 0 or not builder_digest_valid_v1(broker.policy_digest):
+        return "invalid authenticated broker budget identity"
+    if not group_process_broker_cpu_within_reservation_v3(broker.cpu_quota_us,
+            broker.cpu_period_us, broker.reserved_cpu_millis):
+        return "broker CPU cap exceeds authenticated reservation"
+    if (broker.memory_limit_bytes <= 0 or broker.reserved_memory_bytes <= 0 or
+            broker.memory_limit_bytes > broker.reserved_memory_bytes):
+        return "broker memory cap exceeds authenticated reservation"
+    if (profile.child_image_mode != "sealed-main-image-v1" and
+            profile.child_image_mode != "trusted-local-admin-image-fd-v1"):
+        return "unknown child image policy"
+    ""
+
+fn group_process_profile_number_v3(field: text, limit: i64) -> Result<i64, text>:
+    val length = str_len(field)
+    if length < 1 or length > 19 or (length > 1 and field.starts_with("0")):
+        return Err("noncanonical stream integer")
+    var value: i64 = 0
+    for i in 0..length:
+        val digit = (field.byte_at(i) as i64) - 48
+        if digit < 0 or digit > 9: return Err("noncanonical stream integer")
+        if digit > limit or value > (limit - digit) / 10: return Err("stream integer exceeds bound")
+        value = value * 10 + digit
+    Ok(value)
+
+fn group_process_stream_profile_encode_v3(profile: GroupProcessStreamProfileV3) -> text:
+    if group_process_stream_profile_validate_v3(profile) != "": return ""
+    val helper = profile.helper_cpu
+    val broker = profile.broker
+    var fields: [text] = []
+    for field in ["SIMPLE-GROUP-STREAM-PROFILE-3", "{helper.cpu_millis}", "{helper.quota_us}",
+            "{helper.period_us}", broker.cgroup_path, "{broker.device}", "{broker.inode}",
+            "{broker.generation}", broker.policy_digest, "{broker.cpu_quota_us}",
+            "{broker.cpu_period_us}", "{broker.reserved_cpu_millis}", "{broker.memory_limit_bytes}",
+            "{broker.reserved_memory_bytes}", profile.child_image_mode]:
+        fields.push(builder_wire_line_v1(field))
+    fields.join("")
+
+fn group_process_stream_profile_decode_v3(payload: text) -> Result<GroupProcessStreamProfileV3, text>:
+    if str_len(payload) > 16384: return Err("stream resource profile exceeds bound")
+    var reader = BuilderWireReaderV1.create(payload)
+    if reader.scalar() != "SIMPLE-GROUP-STREAM-PROFILE-3": return Err("invalid stream resource profile header")
+    val cpu = group_process_profile_number_v3(reader.scalar(), GROUP_PROCESS_PROFILE_INTEGER_MAX_V3)?
+    val quota = group_process_profile_number_v3(reader.scalar(), GROUP_PROCESS_PROFILE_INTEGER_MAX_V3)?
+    val period = group_process_profile_number_v3(reader.scalar(), 1000000)?
+    val path = reader.scalar()
+    val device = group_process_profile_number_v3(reader.scalar(), GROUP_PROCESS_PROFILE_INTEGER_MAX_V3)?
+    val inode = group_process_profile_number_v3(reader.scalar(), GROUP_PROCESS_PROFILE_INTEGER_MAX_V3)?
+    val generation = group_process_profile_number_v3(reader.scalar(), GROUP_PROCESS_PROFILE_INTEGER_MAX_V3)?
+    val policy = reader.scalar()
+    val broker_quota = group_process_profile_number_v3(reader.scalar(), GROUP_PROCESS_PROFILE_INTEGER_MAX_V3)?
+    val broker_period = group_process_profile_number_v3(reader.scalar(), 1000000)?
+    val reserved_cpu = group_process_profile_number_v3(reader.scalar(), GROUP_PROCESS_PROFILE_INTEGER_MAX_V3)?
+    val memory = group_process_profile_number_v3(reader.scalar(), GROUP_PROCESS_PROFILE_INTEGER_MAX_V3)?
+    val reserved_memory = group_process_profile_number_v3(reader.scalar(), GROUP_PROCESS_PROFILE_INTEGER_MAX_V3)?
+    val mode = reader.scalar()
+    val error = reader.complete_error()
+    if error != "": return Err(error)
+    val profile = GroupProcessStreamProfileV3(helper_cpu: GroupProcessCpuQuotaV3(cpu, quota, period),
+        broker: GroupProcessBrokerBudgetV3(path, device, inode, generation, policy, broker_quota,
+            broker_period, reserved_cpu, memory, reserved_memory), child_image_mode: mode)
+    if group_process_stream_profile_encode_v3(profile) != payload: return Err("noncanonical/invalid stream resource profile")
+    Ok(profile)
+
+fn group_process_stream_resource_receipt_v3(identity: text, profile: GroupProcessStreamProfileV3) -> text:
+    if not builder_digest_valid_v1(identity): return ""
+    val encoded = group_process_stream_profile_encode_v3(profile)
+    if encoded == "": return ""
+    val helper = profile.helper_cpu
+    val broker = profile.broker
+    var fields: [text] = []
+    for field in ["SIMPLE-GROUP-STREAM-RESOURCES-3", identity, sha256_text(encoded),
+            "{helper.cpu_millis}", "{helper.quota_us}", "{helper.period_us}",
+            "{broker.device}", "{broker.inode}", "{broker.generation}", broker.policy_digest,
+            "{broker.cpu_quota_us}", "{broker.cpu_period_us}", "{broker.reserved_cpu_millis}",
+            "{broker.memory_limit_bytes}", "{broker.reserved_memory_bytes}", profile.child_image_mode]:
+        fields.push(builder_wire_line_v1(field))
+    val receipt = fields.join("")
+    if str_len(receipt) > 4096: return ""
+    receipt
+
+export GroupProcessCpuQuotaV3, GroupProcessBrokerBudgetV3, GroupProcessStreamProfileV3
+export group_process_cpu_quota_v3, group_process_stream_profile_validate_v3
+export group_process_stream_profile_encode_v3, group_process_stream_profile_decode_v3
+export group_process_stream_resource_receipt_v3, group_process_profile_number_v3
+
+export group_process_stream_path_absolute_v3

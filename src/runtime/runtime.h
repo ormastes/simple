@@ -1500,6 +1500,17 @@ SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket);
  * Unsupported hosts fail closed. */
 #ifdef __linux__
 /* Counted-byte group-stream profile; unsupported providers return explicit errors. */
+/* V3 numeric profile is exactly twelve tagged i64 words, as documented in
+ * piped_group_cpu_profile_v3.md. No new ABI alters a V2 entry point. */
+int64_t rt_linux_group_stream_admit_profiled_v3(const char*,int64_t,const char*,int64_t,const char*,int64_t,SplArray*);
+int64_t rt_linux_group_stream_verify_broker_profiled_v3(const char*,int64_t,const char*,int64_t,const char*,int64_t,SplArray*);
+SplArray* rt_linux_group_parent_acquire_profiled_at_v3(const char*,uint64_t,const char*,uint64_t,const char*,uint64_t);
+SplArray* rt_linux_group_launch_stream_broker_profiled_v3(const char*,int64_t,const char*,int64_t,
+    SplArray*,int64_t,const char*,int64_t,const char*,int64_t,const char*,int64_t,int64_t,
+    const char*,int64_t,const char*,int64_t,SplArray*);
+SplArray* rt_linux_group_start_stream_profiled_v3(const char*,int64_t,const char*,int64_t,
+    SplArray*,SplArray*,const char*,int64_t,const char*,int64_t,const char*,int64_t,int64_t,int64_t,int64_t,
+    const char*,int64_t,const char*,int64_t,SplArray*);
 int64_t rt_linux_group_stream_admit_v2(const char*,int64_t);
 SplArray* rt_linux_group_launch_stream_broker_v2(const char*,int64_t,const char*,int64_t,
     SplArray*,int64_t,const char*,int64_t,const char*,int64_t,const char*,int64_t,int64_t);
