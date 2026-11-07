@@ -96,3 +96,7 @@ Native cross-module storage/accessor/ABI proof and broad compiler/MCP gates rema
 pending. Do not use the earlier four `pub val` source workarounds as root repair,
 or a private inline literal as sufficient static-rejection evidence. Cycle7 and
 planner attempt caps remain unchanged. Two bounded helper compilations were attempted: the first stopped at source admission, and the corrected-input attempt reached MIR before failing on a builtin unsupported by the retained producer. Neither produced a probe executable; zero diagnostic assertions ran. No new full-bootstrap build occurred.
+
+### Final scoped diagnostic update
+
+Attempt3 used admitted7cca producer/runtime with the unchanged actual helper and fourteen-predicate fixture. It timed out at180seconds during MIR processing (exit124, quiescent1, peak1797696KiB); zero assertions executed. Source/authority hashes remained unchanged. All three scoped helper attempts are exhausted; no further retry occurred. Actual lowering SSpecs and generated-manual/runtime qualification remain unexecuted. See `.spipe/hir_export_visibility/diagnostic-attempt3.md` for exact evidence.

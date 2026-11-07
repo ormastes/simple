@@ -42,3 +42,7 @@ It does not replace these real lowering paths, imported static/accessor linkage,
 cache/interface identity, or broad compiler/MCP qualification. A private literal
 is not sufficient negative proof of imported-static rejection. Generated-manual
 review remains pending a capable source-matched runner; no PASS is implied here.
+
+### Final scoped diagnostic update
+
+Attempt3 used admitted7cca producer/runtime with the unchanged actual helper and fourteen-predicate fixture. It timed out at180seconds during MIR processing (exit124, quiescent1, peak1797696KiB); zero assertions executed. Source/authority hashes remained unchanged. All three scoped helper attempts are exhausted; no further retry occurred. Actual lowering SSpecs and generated-manual/runtime qualification remain unexecuted. See `.spipe/hir_export_visibility/diagnostic-attempt3.md` for exact evidence.
