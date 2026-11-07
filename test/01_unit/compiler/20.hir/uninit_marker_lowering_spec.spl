@@ -1,0 +1,56 @@
+# @req REQ-SSPEC-UNIT
+# @tag:phase3
+"""
+Real HIR lowering: an AST `var x` with NO initializer lowers to a Let whose
+init carries `is_uninit_marker`; an explicit `nil` initializer (from source
+text, through the parser) and a defaulted scalar `var x: i64` do not. The
+interpreter's strict-mem trap reads only this marker.
+
+Note: the pure-Simple frontend itself rejects/defaults a missing initializer
+for most declared types, so the no-initializer case is driven at the AST
+boundary (`lower_hir_stmt`) rather than from source text.
+"""
+
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.parser_types_expr.*
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+
+fn let_init_marker(h: HirStmt) -> bool:
+    match h.kind:
+        case HirStmtKind.Let(_, _, init):
+            init.is_uninit_marker
+        case _:
+            false
+
+fn source_let_marker(src: text) -> bool:
+    val file = "testdata/fixture_uninit_marker.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_uninit_marker", Logger(level: 0))
+    var lowering = HirLowering.with_filename(file)
+    val hir = lowering.lower_module(parsed)
+    var marked = false
+    for f in hir.functions.values():
+        if f.name != "f":
+            continue
+        for st in f.body.stmts:
+            if let_init_marker(st):
+                marked = true
+    marked
+
+describe "HIR lowering: no-initializer vs explicit nil":
+    it "marks an AST var with no initializer":
+        var lowering = HirLowering.with_filename("testdata/uninit_ast.spl")
+        val stmt = Stmt(kind: StmtKind.Var("x", nil, nil), span: Span.empty())
+        expect(let_init_marker(lowering.lower_hir_stmt(stmt))).to_equal(true)
+
+    it "does not mark `var x: i64? = nil` parsed from source":
+        expect(source_let_marker("fn f() -> i64:\n    var x: i64? = nil\n    1\n")).to_equal(false)
+
+    it "does not mark `var x: i64 = 5` parsed from source":
+        expect(source_let_marker("fn f() -> i64:\n    var x: i64 = 5\n    1\n")).to_equal(false)
