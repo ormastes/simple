@@ -3318,7 +3318,7 @@ static bool rt_mcp_async_std(DWORD which, HANDLE* duplicate) {
     return true;
 }
 
-static int64_t rt_process_spawn_async_owned_environment_windows_v1(const char* cmd, const char** args, int64_t arg_count, const wchar_t* environment) {
+static int64_t win_process_spawn_async_owned_environment_v1(const char* cmd, const char** args, int64_t arg_count, const wchar_t* environment) {
     if (!cmd || !*cmd || arg_count < 0 || (arg_count > 0 && !args)) return -1;
     char* line = win_cmd_build_line(cmd, args, arg_count);
     if (!line) return -1;
@@ -3373,7 +3373,7 @@ static int64_t rt_process_spawn_async_owned_environment_windows_v1(const char* c
 }
 
 int64_t rt_process_spawn_async_owned_windows(const char* cmd,const char** args,int64_t count) {
-    return rt_process_spawn_async_owned_environment_windows_v1(cmd,args,count,NULL);
+    return win_process_spawn_async_owned_environment_v1(cmd,args,count,NULL);
 }
 
 int64_t rt_process_spawn_async_environment_v1(const char* cmd,uint64_t cmd_len,
@@ -3390,7 +3390,7 @@ int64_t rt_process_spawn_async_environment_v1(const char* cmd,uint64_t cmd_len,
         if(text==3){argv[i]="";continue;}
         if(!data||length>16777216||memchr(data,0,(size_t)length)){pid=-22;goto done;}argv[i]=data;
     }
-    pid=rt_process_spawn_async_owned_environment_windows_v1(command,argv,count,copied);
+    pid=win_process_spawn_async_owned_environment_v1(command,argv,count,copied);
  done:
     free(command);free(argv);free(copied);return pid;
 }
