@@ -32,7 +32,7 @@
 #include <unistd.h>
 #endif
 
-#include "runtime_file_lock_owned_v2.h"
+#include "runtime_file_lock_owned_v2.c"
 
 #define RT_HOST_FILE_PATH_MAX 4096U
 

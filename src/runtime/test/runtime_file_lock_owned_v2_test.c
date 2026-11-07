@@ -34,7 +34,7 @@ static int test_close(int fd) {
 }
 #define SPL_OWNED_LOCK_UNLOCK_V2(h, o) test_unlock(h)
 #define SPL_OWNED_LOCK_CLOSE_V2(h) test_close(h)
-#include "../runtime_file_lock_owned_v2.h"
+#include "../runtime_file_lock_owned_v2.c"
 
 static int64_t acquire(const char *path) {
     return rt_file_lock_owned_acquire_v2((const uint8_t *)path, strlen(path), 0);
