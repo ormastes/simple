@@ -12,6 +12,7 @@ use compiler.driver.cache.package_tldr_metadata.{
     ConfigVariantKeyV1, config_variant_digest_v1
 }
 use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_snapshot_values_v1.{scv_compile_snapshot_revision_supported_v1, scv_compile_snapshot_header_for_revision_v1, scv_compile_snapshot_receipt_path_v1}
 use std.common.build_manager.contracts.{
     builder_digest_valid_v1, builder_identifier_valid_v1,
     builder_relative_path_valid_v1
@@ -345,7 +346,8 @@ fn native_group_scc_inventory_v1(
         return Err("native-scc-receipt-digest-mismatch")
     val receipt_lines = receipt_text.split("\n")
     if (receipt_lines.len() != 7 or
-            receipt_lines[0] != "simple-scv-compile-snapshot-v1" or
+            not (receipt_lines[0] == "simple-scv-compile-snapshot-v1" or
+                receipt_lines[0] == "simple-scv-compile-snapshot-v2") or
             not receipt_lines[1].starts_with("revision=") or
             not receipt_lines[2].starts_with("commit=") or
             not receipt_lines[3].starts_with("tree=") or
@@ -358,14 +360,16 @@ fn native_group_scc_inventory_v1(
     val tree_id = receipt_lines[3].substring(5)
     val source_snapshot_digest = receipt_lines[4].substring(10)
     val receipt_count = receipt_lines[5].substring(6).to_i64() ?? -1
-    if (not revision_id.starts_with("scv-revision-v1-") or
+    if (not scv_compile_snapshot_revision_supported_v1(revision_id) or
+            receipt_lines[0] != scv_compile_snapshot_header_for_revision_v1(revision_id) or
             commit_id == "" or tree_id == "" or receipt_count < 0 or
             not builder_digest_valid_v1(source_snapshot_digest) or
             receipt_lines[6] != "snapshot=snapshots/{revision_id}"):
         return Err("native-scc-receipt-binding-invalid")
     var cache_root = ""
     for candidate in ["{root}/build/scv", "{root}/.simple/scv"]:
-        if receipt_path == "{candidate}/receipts/{revision_id}.receipt":
+        if receipt_path == scv_compile_snapshot_receipt_path_v1(candidate,
+                "{candidate}/snapshots/{revision_id}", revision_id):
             cache_root = candidate
     if cache_root == "":
         return Err("native-scc-receipt-owner-invalid")
