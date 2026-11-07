@@ -1,0 +1,155 @@
+# Distinct readonly capabilities, never deployment or executable authority.
+# All access/profile/generation checks and transitions are native-authoritative.
+use std.nogc_sync_mut.io.windows_private_read_abi.*
+use std.nogc_sync_mut.io.windows_private_file_v1.{WindowsPrivateRootV1, WindowsPrivateFileV1}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u16, volatile_read_u8, volatile_read_u64}
+
+pub struct WindowsPrivateReadErrorV2:
+    message: text
+    cleanup_root: Option<WindowsPrivateReadRootV2>
+    cleanup_file: Option<WindowsPrivateReadFileV2>
+
+pub struct WindowsPrivateSharedReadTurnV2:
+    reader: Option<WindowsPrivateReadFileV2>
+    stage: Option<WindowsPrivateFileV1>
+    published_new: bool
+    error: text
+
+fn _read_error(message: text) -> WindowsPrivateReadErrorV2:
+    WindowsPrivateReadErrorV2(message: message, cleanup_root: None, cleanup_file: None)
+
+@unsafe(reason: "encodes bounded UTF16 using infallibly released private buffer", capabilities: [ffi, raw_ptr])
+fn _read_path(path: text) -> i64:
+    if path.byte_len() == 0 or path.byte_len() > 32760: return 0
+    val ptr = rt_windows_private_alloc_v1((path.byte_len() + 1) * 2)
+    if ptr == 0: return 0
+    var consumed = 0
+    var ordinal = 0
+    var offset = 0
+    while consumed < path.byte_len():
+        val scalar = path.char_code_at(ordinal)
+        if scalar <= 0 or scalar > 1114111 or (scalar >= 55296 and scalar <= 57343):
+            rt_windows_private_free_v1(ptr)
+            return 0
+        if scalar < 65536:
+            volatile_write_u16(ptr + offset * 2, scalar)
+            offset = offset + 1
+        else:
+            val value = scalar - 65536
+            volatile_write_u16(ptr + offset * 2, 55296 + (value >> 10))
+            volatile_write_u16(ptr + (offset + 1) * 2, 56320 + (value & 1023))
+            offset = offset + 2
+        ordinal = ordinal + 1
+        if scalar < 128: consumed = consumed + 1
+        elif scalar < 2048: consumed = consumed + 2
+        elif scalar < 65536: consumed = consumed + 3
+        else: consumed = consumed + 4
+    ptr
+
+fn _read_root_admit(token: i64) -> Result<WindowsPrivateReadRootV2, WindowsPrivateReadErrorV2>:
+    if token == -1: return Err(_read_error("WINDOWS_PRIVATE_READ_ROOT_OPEN"))
+    val root = WindowsPrivateReadRootV2(token: token)
+    if root.security_current(): return Ok(root)
+    Err(WindowsPrivateReadErrorV2(message: "WINDOWS_PRIVATE_READ_ROOT_CLEANUP_REQUIRED", cleanup_root: Some(root), cleanup_file: None))
+
+pub class WindowsPrivateReadRootV2:
+    token: i64
+
+    pub fn security_current() -> bool:
+        rt_windows_private_read_root_ready_v2(self.token) == 1
+
+    pub fn child_directory(name: text) -> Result<WindowsPrivateReadRootV2, WindowsPrivateReadErrorV2>:
+        val path = _read_path(name)
+        if path == 0: return Err(_read_error("WINDOWS_PRIVATE_READ_NAME"))
+        val token = rt_windows_private_read_directory_v2(self.token, path)
+        rt_windows_private_free_v1(path)
+        _read_root_admit(token)
+
+    pub fn open_file(name: text, maximum: u64) -> Result<WindowsPrivateReadFileV2, WindowsPrivateReadErrorV2>:
+        if maximum > 8388608u64: return Err(_read_error("WINDOWS_PRIVATE_READ_QUOTA"))
+        val path = _read_path(name)
+        if path == 0: return Err(_read_error("WINDOWS_PRIVATE_READ_NAME"))
+        val token = rt_windows_private_read_file_open_v2(self.token, path, maximum as i64)
+        rt_windows_private_free_v1(path)
+        if token == -1: return Err(_read_error("WINDOWS_PRIVATE_READ_FILE_OPEN"))
+        val file = WindowsPrivateReadFileV2(token: token)
+        if file.security_current(): return Ok(file)
+        Err(WindowsPrivateReadErrorV2(message: "WINDOWS_PRIVATE_READ_FILE_CLEANUP_REQUIRED", cleanup_root: None, cleanup_file: Some(file)))
+
+    pub me close() -> bool:
+        rt_windows_private_read_root_close_v2(self.token) == 1
+
+pub class WindowsPrivateReadFileV2:
+    token: i64
+
+    pub fn security_current() -> bool:
+        rt_windows_private_read_file_check_v2(self.token, 8388608) == 1
+
+    @unsafe(reason: "reads bounded readonly bytes using exact generation and identity", capabilities: [ffi, raw_ptr])
+    pub me read_all_bounded(maximum: i64) -> Result<[u8], text>:
+        if maximum < 0 or maximum > 8388608: return Err("WINDOWS_PRIVATE_READ_QUOTA")
+        val size = rt_windows_private_read_file_size_v2(self.token)
+        if size < 0 or size > maximum: return Err("WINDOWS_PRIVATE_READ_STATE")
+        val buffer = rt_windows_private_alloc_v1(1048576)
+        if buffer == 0: return Err("WINDOWS_PRIVATE_READ_MEMORY")
+        var bytes: [u8] = []
+        var offset = 0
+        while offset < size:
+            val wanted = if size - offset > 1048576: 1048576 else: size - offset
+            val count = rt_windows_private_read_file_read_v2(self.token, offset, buffer, wanted)
+            if count != wanted:
+                rt_windows_private_free_v1(buffer)
+                return Err("WINDOWS_PRIVATE_READ_FAILED")
+            for index in 0..count: bytes.push(volatile_read_u8(buffer + index) as u8)
+            offset = offset + count
+        rt_windows_private_free_v1(buffer)
+        if rt_windows_private_read_file_size_v2(self.token) != size: return Err("WINDOWS_PRIVATE_READ_CHANGED")
+        Ok(bytes)
+
+    pub me close() -> bool:
+        rt_windows_private_read_file_close_v2(self.token) == 1
+
+pub fn windows_private_read_root_open_v2(path: text) -> Result<WindowsPrivateReadRootV2, WindowsPrivateReadErrorV2>:
+    @when(os="windows"):
+    val native = _read_path(path.replace("/", "\\"))
+    if native == 0: return Err(_read_error("WINDOWS_PRIVATE_READ_ROOT_PATH"))
+    val token = rt_windows_private_read_root_open_v2(native)
+    rt_windows_private_free_v1(native)
+    _read_root_admit(token)
+    @else:
+    Err(_read_error("WINDOWS_PRIVATE_READ_HOST_UNSUPPORTED"))
+    @end
+
+# Only this turn's exact successful shape grants a readonly result. The boolean
+# is a historical rename fact even on error, never an admission/readiness flag.
+@unsafe(reason: "borrows fixed native turn buffer without nullable authority transfer", capabilities: [ffi, raw_ptr])
+pub fn windows_private_publish_shared_read_v2(root: WindowsPrivateRootV1, stage: WindowsPrivateFileV1,
+        final_name: text) -> WindowsPrivateSharedReadTurnV2:
+    @when(os="windows"):
+    val path = _read_path(final_name)
+    if path == 0:
+        return WindowsPrivateSharedReadTurnV2(reader: None, stage: Some(stage), published_new: false, error: "WINDOWS_PRIVATE_READ_NAME")
+    val output = rt_windows_private_alloc_v1(24)
+    if output == 0:
+        rt_windows_private_free_v1(path)
+        return WindowsPrivateSharedReadTurnV2(reader: None, stage: Some(stage), published_new: false, error: "WINDOWS_PRIVATE_READ_MEMORY")
+    val status = rt_windows_private_publish_shared_read_v2(root.token, stage.token, path, output)
+    val reader_token = volatile_read_u64(output) as i64
+    val stage_token = volatile_read_u64(output + 8) as i64
+    val published = volatile_read_u64(output + 16) == 1u64
+    rt_windows_private_free_v1(output)
+    rt_windows_private_free_v1(path)
+    val reader = if reader_token > 0: Some(WindowsPrivateReadFileV2(token: reader_token)) else: None
+    val remaining = if stage_token > 0: Some(WindowsPrivateFileV1(token: stage_token)) else: None
+    var failure = ""
+    if ((status != 0 and status != 1) or
+            (status == 0 and (not published or reader_token <= 0 or stage_token > 0)) or
+            (status == 1 and (published or reader_token > 0 or stage_token <= 0))):
+        failure = "WINDOWS_PRIVATE_SHARED_READ_TRANSITION"
+    WindowsPrivateSharedReadTurnV2(reader: reader, stage: remaining, published_new: published, error: failure)
+    @else:
+    WindowsPrivateSharedReadTurnV2(reader: None, stage: Some(stage), published_new: false, error: "WINDOWS_PRIVATE_READ_HOST_UNSUPPORTED")
+    @end
+
+export WindowsPrivateReadErrorV2, WindowsPrivateReadRootV2, WindowsPrivateReadFileV2
+export WindowsPrivateSharedReadTurnV2, windows_private_read_root_open_v2, windows_private_publish_shared_read_v2

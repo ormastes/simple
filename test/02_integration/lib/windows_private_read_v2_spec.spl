@@ -1,0 +1,75 @@
+# New readonly capability controls, NOT_RUN without actual Windows fixtures.
+use std.spec
+use std.nogc_sync_mut.io.env_ops.{host_os, env_get}
+use std.nogc_sync_mut.io.windows_private_read_v2.*
+use std.nogc_sync_mut.io.windows_private_file_v1.{WindowsPrivateFileV1}
+use std.common.base_encoding.utilities.{base_encoding_text_to_bytes}
+
+fn cleanup_read_error(error: WindowsPrivateReadErrorV2):
+    if val retained = error.cleanup_file:
+        var file = retained
+        expect(file.close()).to_equal(true)
+    if val retained = error.cleanup_root:
+        var root = retained
+        expect(root.close()).to_equal(true)
+
+fn simultaneous_readers(path: text) -> bool:
+    match windows_private_read_root_open_v2(path):
+        case Err(error):
+            cleanup_read_error(error)
+            false
+        case Ok(owner):
+            var root = owner
+            match root.open_file("artifact.sdn", 1024u64):
+                case Err(error):
+                    cleanup_read_error(error)
+                    expect(root.close()).to_equal(true)
+                    false
+                case Ok(first_owner):
+                    var first = first_owner
+                    match root.open_file("artifact.sdn", 1024u64):
+                        case Err(error):
+                            cleanup_read_error(error)
+                            expect(first.close()).to_equal(true)
+                            expect(root.close()).to_equal(true)
+                            false
+                        case Ok(second_owner):
+                            var second = second_owner
+                            val expected = base_encoding_text_to_bytes("private artifact\n")
+                            expect(first.read_all_bounded(1024)).to_equal(Ok(expected))
+                            expect(second.read_all_bounded(1024)).to_equal(Ok(expected))
+                            var forged = WindowsPrivateFileV1(token: first.token)
+                            expect(forged.write([88u8])).to_equal(Err("WINDOWS_PRIVATE_FILE_WRITE"))
+                            expect(forged.close()).to_equal(false)
+                            expect(first.security_current()).to_equal(true)
+                            expect(first.read_all_bounded(1024)).to_equal(Ok(expected))
+                            expect(second.close()).to_equal(true)
+                            expect(first.close()).to_equal(true)
+                            root.close()
+
+describe "Windows private shared readonly capabilities":
+    it "REQ-WIN-READ-001 REQ-WIN-READ-002 permits simultaneous readers and refuses forged V1 mutation":
+        expect(host_os()).to_equal("windows")
+        val path = env_get("SIMPLE_WINDOWS_PRIVATE_READ_INSTALLED_ROOT") ?? ""
+        expect(path != "").to_equal(true)
+        expect(simultaneous_readers(path)).to_equal(true)
+
+    it "REQ-WIN-READ-003 never creates a missing readonly child directory":
+        expect(host_os()).to_equal("windows")
+        val path = env_get("SIMPLE_WINDOWS_PRIVATE_READ_INSTALLED_ROOT") ?? ""
+        expect(path != "").to_equal(true)
+        match windows_private_read_root_open_v2(path):
+            case Err(error):
+                cleanup_read_error(error)
+                expect(error.message).to_equal("")
+            case Ok(owner):
+                var root = owner
+                var opened = false
+                match root.child_directory("missing-child-must-not-create"):
+                    case Err(error): cleanup_read_error(error)
+                    case Ok(child_owner):
+                        var child = child_owner
+                        opened = true
+                        expect(child.close()).to_equal(true)
+                expect(opened).to_equal(false)
+                expect(root.close()).to_equal(true)
