@@ -40,9 +40,11 @@ fn installed_monotonic_ms_v3() -> i64:
     if nanos <= 0: return -1
     nanos / 1000000
 
-fn installed_deadline_live_v3(deadline: i64) -> bool:
-    val now = installed_monotonic_ms_v3()
+pub fn linux_oci_installed_deadline_live_v3(deadline: i64, now: i64) -> bool:
     now > 0 and now < deadline
+
+fn installed_deadline_live_v3(deadline: i64) -> bool:
+    linux_oci_installed_deadline_live_v3(deadline, installed_monotonic_ms_v3())
 
 pub fn linux_oci_installed_probe_close_v3(connection: LocalUnixConnectionV1) -> LinuxOciInstalledProbeTurnV3:
     val closed = local_unix_close_v1(connection)
@@ -144,8 +146,13 @@ pub fn linux_oci_installed_probe_v3(policy: LinuxOciInstalledPolicyV3, timeout_m
         if read.bytes.len() == 0: return installed_probe_failed_v3(Some(connection), "installed-probe-read-no-progress")
     val closed = linux_oci_installed_probe_close_v3(connection)
     if closed.error != "" or closed.connection.?: return closed
+    if not installed_deadline_live_v3(deadline):
+        return installed_probe_failed_v3(nil, "installed-probe-deadline-expired")
     val micros = time_sample_unix_micros_or_failure()
     if micros <= 0: return installed_probe_failed_v3(nil, "installed-probe-observation-clock-unavailable")
     match linux_oci_installed_correlate_v3(policy, cli, peer, wire, micros / 1000):
-        case Ok(observation): LinuxOciInstalledProbeTurnV3(connection: nil, observation: Some(observation), error: "")
+        case Ok(observation):
+            if not installed_deadline_live_v3(deadline):
+                return installed_probe_failed_v3(nil, "installed-probe-deadline-expired")
+            LinuxOciInstalledProbeTurnV3(connection: nil, observation: Some(observation), error: "")
         case Err(reason): installed_probe_failed_v3(nil, reason)
