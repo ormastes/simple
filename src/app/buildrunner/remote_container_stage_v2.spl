@@ -1,0 +1,83 @@
+# Portable byte staging only. Platform workspace/ACL preparation and all engine
+# effects belong to the Simple Container API's host provider, never this app.
+use std.common.build_manager.contracts.{BuildTaskV1, builder_validate_task_v1}
+use std.common.build_manager.codec.builder_encode_task_v1
+use std.common.crypto.sha256.sha256_u8_hex
+use app.bootstrap_builder.link_inputs.builder_regular_input_parents_safe_v1
+use app.io.file_ops.{secure_temp_dir, file_create_exclusive, file_atomic_write,
+    file_atomic_write_bytes, file_read_regular_no_follow_bounded_bytes, file_hash_sha256, file_remove}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_is_real_no_follow}
+use std.nogc_sync_mut.io.crypto_sffi.random_hex
+
+fn remote_container_reserve_root_v2(state_root: text) -> Result<text, text>:
+    # Reserve before constructing/approving the request that binds this exact
+    # root. The caller retains this host-owned root; do not accept a wire token
+    # as proof that an arbitrary directory belongs to this service.
+    secure_temp_dir(state_root, "remote-container-attempt")
+
+fn remote_container_reserve_nonce_v2(owned_root: text) -> Result<text, text>:
+    if not dir_is_real_no_follow(owned_root): return Err("REMOTE_CONTAINER_STAGE_ROOT_UNSAFE")
+    val generated = random_hex(32)
+    if generated == nil: return Err("REMOTE_CONTAINER_NONCE_ENTROPY_UNAVAILABLE")
+    val nonce = generated.unwrap()
+    # Host-private, single-use admission before constructing the approved task.
+    # The returned bytes become the declared remote-workspace/<id>.nonce input.
+    if not file_create_exclusive(owned_root + "/workspace-nonce.claim", nonce + "\n"):
+        return Err("REMOTE_CONTAINER_NONCE_ALREADY_CLAIMED")
+    Ok(nonce + "\n")
+
+fn remote_container_stage_destination_v2(root: text, relative: text) -> Result<text, text>:
+    if not dir_is_real_no_follow(root): return Err("REMOTE_CONTAINER_STAGE_ROOT_UNSAFE")
+    val pieces = relative.split("/")
+    var directory = root
+    for index in 0..pieces.len() - 1:
+        directory = directory + "/" + pieces[index]
+        if not dir_create_all(directory) or not dir_is_real_no_follow(directory):
+            return Err("REMOTE_CONTAINER_STAGE_PARENT_UNSAFE")
+    Ok(root + "/" + relative)
+
+fn remote_container_stage_v2(task: BuildTaskV1, source_root: text, producer_source: text,
+        owned_root: text, maximum_input_bytes: i64) -> Result<bool, text>:
+    val invalid = builder_validate_task_v1(task)
+    if invalid != "": return Err(invalid)
+    if maximum_input_bytes < 1 or maximum_input_bytes > 1073741824:
+        return Err("REMOTE_CONTAINER_STAGE_BOUND_INVALID")
+    # Typed symlink staging needs platform privilege/capability admission. Do not
+    # flatten links or silently follow them across this portable boundary.
+    if task.links.len() != 0: return Err("REMOTE_CONTAINER_STAGE_LINKS_UNSUPPORTED")
+    if not builder_regular_input_parents_safe_v1(task, source_root) or not dir_is_real_no_follow(owned_root):
+        return Err("REMOTE_CONTAINER_STAGE_ROOT_UNSAFE")
+    if not file_create_exclusive(owned_root + "/stage.claim", "SIMPLE-REMOTE-CONTAINER-STAGE-2\n"):
+        return Err("REMOTE_CONTAINER_STAGE_ALREADY_CLAIMED")
+    var remaining = maximum_input_bytes
+    val producer = file_read_regular_no_follow_bounded_bytes(producer_source, remaining)?
+    if sha256_u8_hex(producer) != task.producer_digest: return Err("REMOTE_CONTAINER_STAGE_PRODUCER_CHANGED")
+    remaining = remaining - producer.len()
+    if not file_atomic_write_bytes(owned_root + "/producer.exe", producer):
+        return Err("REMOTE_CONTAINER_STAGE_WRITE_FAILED")
+    val producer_digest = file_hash_sha256(owned_root + "/producer.exe")
+    if producer_digest == nil or producer_digest.unwrap() != task.producer_digest:
+        return Err("REMOTE_CONTAINER_STAGE_READBACK_DIFFERS")
+    if not dir_create_all(owned_root + "/work") or not dir_is_real_no_follow(owned_root + "/work"):
+        return Err("REMOTE_CONTAINER_STAGE_PARENT_UNSAFE")
+    for input in task.inputs:
+        val content = file_read_regular_no_follow_bounded_bytes(source_root + "/" + input.path, remaining)?
+        if sha256_u8_hex(content) != input.digest: return Err("REMOTE_CONTAINER_STAGE_INPUT_CHANGED")
+        remaining = remaining - content.len()
+        val destination = remote_container_stage_destination_v2(owned_root + "/work", input.path)?
+        if not file_atomic_write_bytes(destination, content): return Err("REMOTE_CONTAINER_STAGE_WRITE_FAILED")
+        val digest = file_hash_sha256(destination)
+        if digest == nil or digest.unwrap() != input.digest: return Err("REMOTE_CONTAINER_STAGE_READBACK_DIFFERS")
+    for output in task.outputs:
+        val destination = remote_container_stage_destination_v2(owned_root + "/work", output)?
+        # Exclusive creation rejects every existing leaf, including dangling
+        # symlinks/reparse points that a following exists predicate can miss.
+        # Remove only the file this owner just created; outputs start absent.
+        if not file_create_exclusive(destination, "SIMPLE-REMOTE-OUTPUT-RESERVATION-2\n"):
+            return Err("REMOTE_CONTAINER_STAGE_OUTPUT_ALREADY_EXISTS")
+        if not file_remove(destination): return Err("REMOTE_CONTAINER_STAGE_OUTPUT_RESERVATION_REMOVE_FAILED")
+    if not file_atomic_write(owned_root + "/request.sdn", builder_encode_task_v1(task)):
+        return Err("REMOTE_CONTAINER_STAGE_MANIFEST_WRITE_FAILED")
+    Ok(true)
+
+export remote_container_reserve_root_v2, remote_container_reserve_nonce_v2, remote_container_stage_v2

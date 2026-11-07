@@ -41,6 +41,14 @@ exit zero, a signed digest, a start observation nor an unbound reap file suffice
 | `remote_session_v1` | Serialized parent cancellation, journal admission, recovery and output publication |
 | `remote_test_report_v1` | Pinned TraceRunPlan plus actual start/finish events to exact report; no count-based pass inference |
 | `remote_test_runner_v1` | Dedicated producer calls the existing native test executor and writes the verified report before worker finalization |
+| `remote_container_authority_v2` | Separate container completion signature domain, original scoped grant/approval and enrolled host verification |
+| `remote_container_evidence_v2` | Pinned common container request/provider, actual wait/absence evidence and transferred output bytes |
+| `remote_container_host_v2` | Shared Container API lifecycle, retained actual wait before destruction, exact independent absence and host signing |
+| `remote_container_session_v2` | Container parent admission using the existing operation and task journals |
+| `remote_container_stage_v2` | Bounded immutable byte staging with exclusive claims and absent output leaves |
+| `remote_container_producer_v2` | Dedicated in-container build/test entrypoint; nonce access preflight precedes every action |
+| `remote_container_workspace_probe_v2` | Actual same-process exclusive write/read/delete cycle, bound to task identity and fresh host nonce |
+| `task_runner.execution_identity_v2` | Tagged native/container attempts; native encoding remains unchanged and container records contain no invented PID |
 
 Host/private process objects and signing keys never cross the wire. Workers own
 their isolated execution data but cannot open the parent's journals or publish
@@ -80,6 +88,35 @@ its exact runtime identity, owner cleanup/absence receipt and actual output
 capture. The native-domain adapter and existing host create/start observation
 do not constitute container completion. No raw engine CLI or SSH-completion
 shortcut is introduced by this slice.
+
+The V2 producer consumes the common owner, exact action/mount projection, actual
+wait and logs, then destroys the exact object and requests a positive absence
+observation. It retains the original wait across destruction. Its effect
+deadline is derived from the original grant/approval expiry; cleanup remains
+available after expiry. The signature binds the canonical common execution
+evidence, all output bytes and the exact test report. The parent recomputes
+these bindings before publication. Native V1 admission remains native-process
+only; container V2 cannot be downgraded into a native process record.
+
+V2 extends the existing task journal table and WAL replay with a tagged record;
+it does not create a second journal. Native public readers reject container
+records rather than losing their execution identity. Mixed history and snapshot
+readers preserve both variants. Container projection rows are bounded before
+the WAL commit so filtered snapshot groups remain decodable.
+
+Workspace byte staging does not establish executable permissions. Those require
+the shared provider's protected workspace capability. The portable stager
+neither changes ACLs nor invokes engine or platform commands. Before task
+approval it reserves a cryptographically random nonce under an exclusive host
+claim. The approved task pins the nonce input and declares the probe output.
+After create and before start the host obtains the exact engine-selected-user
+receipt. The dedicated producer then performs the actual same-process access
+cycle before invoking build or tests. The completion signature binds both
+receipts, and the parent checks the nonce and exact successful output bytes.
+The engine receipt identifies the configured selected user; it does not claim
+to observe an effective OS UID or Windows SID. Least-privilege token/ACL
+behavior requires real platform qualification. Provider capture must reject
+truncated logs before the completion signer can accept them.
 
 ## Bounds and qualification
 

@@ -6,6 +6,11 @@ use std.nogc_sync_mut.database.wal_segmented.{DatabaseWalRevisionV1,
     database_wal_current_v1, database_wal_commit_v1, database_wal_revision_open_v1,
     database_wal_segment_read_strict_v1}
 use std.common.task_runner.contracts.{TaskRunnerIdentityV1, TaskRunnerAttemptV1, task_runner_identity_v1}
+use std.common.task_runner.execution_identity_v2.{TaskRunnerAttemptRecordV2,
+    task_runner_record_encode_v2, task_runner_record_decode_v2,
+    task_runner_record_identity_v2, task_runner_record_group_v2, task_runner_record_attempt_v2}
+use std.common.task_runner.index_v2.{task_runner_index_apply_v2, task_runner_index_history_v2,
+    task_runner_index_prepare_v2}
 use std.common.task_runner.index.{task_runner_index_apply_v1, task_runner_index_history_v1,
     task_runner_attempt_encode_v1, task_runner_attempt_decode_v1,
     task_runner_storage_escape_v1, task_runner_storage_unescape_v1, task_runner_inventory_encode_v1,
@@ -128,10 +133,10 @@ fn task_runner_journal_open_locked_v2(root: text, nonce: text, source: text,
                 val _registered = task_runner_inventory_registered_v1(db, entry.row_key)?
                 val payload = task_runner_storage_unescape_v1(entry.data)
                 if task_runner_storage_escape_v1(payload) != entry.data: return Err("noncanonical task WAL payload")
-                val row = task_runner_attempt_decode_v1(payload)?
-                if row.identity_digest != entry.row_key: return Err("task WAL key differs")
+                val row = task_runner_record_decode_v2(payload)?
+                if task_runner_record_identity_v2(row) != entry.row_key: return Err("task WAL key differs")
                 if entry.sequence < first_task_sequence: first_task_sequence = entry.sequence
-                db = task_runner_index_apply_v1(db, entry.sequence, row)?
+                db = task_runner_index_apply_v2(db, entry.sequence, row)?
             else: return Err("task database WAL table unsupported")
         segments_seen = segments_seen + 1
         revision = current.parent
@@ -150,27 +155,10 @@ fn task_runner_journal_history_v1(owner: TaskRunnerJournalV1,
 
 fn task_runner_journal_append_v1(owner: TaskRunnerJournalV1,
         row: TaskRunnerAttemptV1) -> Result<TaskRunnerJournalV1, text>:
-    val _lease = task_runner_journal_lease_check_v1(owner)?
-    val current = database_wal_current_v1(owner.root + "/database-wal", owner.database_identity)?
-    if current != owner.revision: return Err("stale task database writer revision")
-    val _registered = task_runner_inventory_registered_v1(owner.db, row.identity_digest)?
-    val encoded = task_runner_attempt_encode_v1(row)?
-    val history = task_runner_index_history_v1(owner.db, row.identity_digest)?
-    for prior in history:
-        if prior.group_id == row.group_id and prior.attempt >= row.attempt:
-            return Err("duplicate task attempt within run group")
-    val event = WalEntry(0, WalEntryType.Insert, "task_attempts", row.identity_digest,
-        task_runner_storage_escape_v1(encoded), 0)
-    val committed = database_wal_commit_v1(owner.root + "/database-wal",
-        owner.database_identity, owner.revision, [event])?
-    # Durable publication precedes mutable cache changes. Failure rebuilding
-    # this index requires reopen, never retrying an already committed event.
-    val applied = task_runner_index_apply_v1(owner.db, committed.last_sequence, row)
-    if applied.is_err(): return Err("task revision committed; reopen to rebuild index")
-    val updated = applied.unwrap()
-    val _still_owned = task_runner_journal_lease_check_v1(owner)?
-    Ok(TaskRunnerJournalV1(owner.root, owner.lease_digest, owner.source_authority_digest,
-        owner.database_identity, committed.last_sequence, committed.digest, updated, owner.parent_lock))
+    # Preserve the native-only caller boundary, while both versions share one
+    # authoritative publication implementation and the same physical journal.
+    val _native_history = task_runner_index_history_v1(owner.db, row.identity_digest)?
+    task_runner_journal_append_v2(owner, TaskRunnerAttemptRecordV2.Native(row))
 
 fn task_runner_journal_release_v1(owner: TaskRunnerJournalV1) -> Result<bool, text>:
     val _lease = task_runner_journal_lease_check_v1(owner)?
@@ -197,10 +185,49 @@ fn task_runner_journal_missing_v1(owner: TaskRunnerJournalV1) -> Result<[text], 
     var missing: [text] = []
     for row in expected:
         val identity = row.get_text("identity") ?? ""
-        val history = task_runner_index_history_v1(owner.db, identity)?
+        val history = task_runner_index_history_v2(owner.db, identity)?
         if history.len() == 0: missing = missing.push(identity)
     Ok(missing)
+
+# Both execution variants use the same lease, inventory, database, WAL table and
+# bounded projection. V1 callers retain their native-only typed history API;
+# they may not reinterpret a container identity as an invented native PID.
+fn task_runner_journal_history_v2(owner: TaskRunnerJournalV1,
+        identity: text) -> Result<[TaskRunnerAttemptRecordV2], text>:
+    val _lease = task_runner_journal_lease_check_v1(owner)?
+    val current = database_wal_current_v1(owner.root + "/database-wal", owner.database_identity)?
+    if current != owner.revision: return Err("stale task database read revision")
+    val _registered = task_runner_inventory_registered_v1(owner.db, identity)?
+    task_runner_index_history_v2(owner.db, identity)
+
+fn task_runner_journal_append_v2(owner: TaskRunnerJournalV1,
+        row: TaskRunnerAttemptRecordV2) -> Result<TaskRunnerJournalV1, text>:
+    val _lease = task_runner_journal_lease_check_v1(owner)?
+    val current = database_wal_current_v1(owner.root + "/database-wal", owner.database_identity)?
+    if current != owner.revision: return Err("stale task database writer revision")
+    val identity = task_runner_record_identity_v2(row)
+    val _registered = task_runner_inventory_registered_v1(owner.db, identity)?
+    val encoded = task_runner_record_encode_v2(row)?
+    val history = task_runner_index_history_v2(owner.db, identity)?
+    for prior in history:
+        if task_runner_record_group_v2(prior) == task_runner_record_group_v2(row) and
+                task_runner_record_attempt_v2(prior) >= task_runner_record_attempt_v2(row):
+            return Err("duplicate task attempt within run group")
+    # Larger typed container evidence must fit the bounded projection before
+    # durability; otherwise replay could never reconstruct a committed row.
+    val _projection = task_runner_index_prepare_v2(owner.db, owner.sequence + 1, row)?
+    val event = WalEntry(0, WalEntryType.Insert, "task_attempts", identity,
+        task_runner_storage_escape_v1(encoded), 0)
+    val committed = database_wal_commit_v1(owner.root + "/database-wal",
+        owner.database_identity, owner.revision, [event])?
+    val applied = task_runner_index_apply_v2(owner.db, committed.last_sequence, row)
+    if applied.is_err(): return Err("task revision committed; reopen to rebuild index")
+    val updated = applied.unwrap()
+    val _still_owned = task_runner_journal_lease_check_v1(owner)?
+    Ok(TaskRunnerJournalV1(owner.root, owner.lease_digest, owner.source_authority_digest,
+        owner.database_identity, committed.last_sequence, committed.digest, updated, owner.parent_lock))
 
 export TaskRunnerJournalV1, task_runner_journal_open_v1, task_runner_journal_append_v1
 export task_runner_journal_history_v1, task_runner_journal_lease_check_v1, task_runner_journal_release_v1
 export task_runner_journal_identity_v1, task_runner_journal_missing_v1
+export task_runner_journal_history_v2, task_runner_journal_append_v2

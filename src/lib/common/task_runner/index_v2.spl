@@ -1,0 +1,101 @@
+# Mixed native/container projection over the existing task_history table.
+# Journal/snapshot owners choose replay order; this adapter keeps <=8 records
+# ordered by durable sequence, retaining the earliest confirmed native crash.
+use std.database.pure_sql.PureDatabase
+use std.database.sql.types.DbValue
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.task_runner.index.{task_runner_storage_escape_v1, task_runner_storage_unescape_v1}
+use std.common.task_runner.execution_identity_v2.*
+
+struct TaskRunnerIndexedAttemptV2:
+    sequence: i64
+    row: TaskRunnerAttemptRecordV2
+
+fn task_runner_index_rows_v2(db: PureDatabase, identity: text) -> Result<[TaskRunnerIndexedAttemptV2], text>:
+    if not builder_digest_valid_v1(identity): return Err("invalid indexed task identity")
+    val found = db.get("task_history", "identity", DbValue.Text(identity))
+    if found.is_err(): return Err("task database history lookup failed")
+    val optional = found.unwrap()
+    if optional == nil: return Ok([])
+    val payload = optional.unwrap().get_text("projection") ?? ""
+    if payload.byte_len() > 131072: return Err("task projection exceeds bound")
+    var records: [TaskRunnerIndexedAttemptV2] = []
+    for line in payload.split("\n"):
+        if line == "": continue
+        val fields = line.split("\t")
+        if fields.len() != 2 or records.len() >= 8: return Err("invalid task projection")
+        val sequence = fields[0].to_int() ?? -1
+        if sequence < 1 or str(sequence) != fields[0]: return Err("invalid projected sequence")
+        val encoded = task_runner_storage_unescape_v1(fields[1])
+        if task_runner_storage_escape_v1(encoded) != fields[1]: return Err("noncanonical projection")
+        val row = task_runner_record_decode_v2(encoded)?
+        if task_runner_record_identity_v2(row) != identity: return Err("task projection identity differs")
+        if records.len() > 0 and records[records.len() - 1].sequence >= sequence:
+            return Err("task projection order differs")
+        records.push(TaskRunnerIndexedAttemptV2(sequence: sequence, row: row))
+    Ok(records)
+
+fn task_runner_index_history_v2(db: PureDatabase, identity: text) -> Result<[TaskRunnerAttemptRecordV2], text>:
+    val records = task_runner_index_rows_v2(db, identity)?
+    var rows: [TaskRunnerAttemptRecordV2] = []
+    for record in records: rows.push(record.row)
+    Ok(rows)
+
+fn task_runner_index_prepare_v2(db: PureDatabase, sequence: i64,
+        row: TaskRunnerAttemptRecordV2) -> Result<text, text>:
+    if sequence < 1: return Err("invalid durable task sequence")
+    val _encoded = task_runner_record_encode_v2(row)?
+    val identity = task_runner_record_identity_v2(row)
+    var records = task_runner_index_rows_v2(db, identity)?
+    for record in records:
+        if record.sequence == sequence: return Err("duplicate durable task sequence")
+        if task_runner_record_group_v2(record.row) == task_runner_record_group_v2(row) and
+                task_runner_record_attempt_v2(record.row) == task_runner_record_attempt_v2(row):
+            return Err("duplicate attempt in run group")
+    records.push(TaskRunnerIndexedAttemptV2(sequence: sequence, row: row))
+    var at = 1
+    while at < records.len():
+        var cursor = at
+        while cursor > 0 and records[cursor - 1].sequence > records[cursor].sequence:
+            val saved = records[cursor]
+            records[cursor] = records[cursor - 1]
+            records[cursor - 1] = saved
+            cursor = cursor - 1
+        at = at + 1
+    var first_crash: i64 = -1
+    for index in 0..records.len():
+        if first_crash < 0 and task_runner_record_status_v2(records[index].row) == "crashed":
+            first_crash = index
+    var selected: [TaskRunnerIndexedAttemptV2] = []
+    var start = if records.len() > 8: records.len() - 8 else: 0
+    if first_crash >= 0 and first_crash < start: start = records.len() - 7
+    if first_crash >= 0 and first_crash < start: selected.push(records[first_crash])
+    for index in start..records.len(): selected.push(records[index])
+    var lines: [text] = []
+    for record in selected:
+        lines.push(str(record.sequence) + "\t" +
+            task_runner_storage_escape_v1(task_runner_record_encode_v2(record.row)?))
+    val projection = lines.join("\n") + "\n"
+    if projection.byte_len() > 131072: return Err("task projection exceeds bound")
+    Ok(projection)
+
+# Prepare before durable WAL commit, then store through this same calculation.
+# Preparation reads the old projection and never mutates the PureDatabase.
+fn task_runner_index_apply_v2(db: PureDatabase, sequence: i64,
+        row: TaskRunnerAttemptRecordV2) -> Result<PureDatabase, text>:
+    val projection = task_runner_index_prepare_v2(db, sequence, row)?
+    val identity = task_runner_record_identity_v2(row)
+    var updated = db
+    val existing = updated.get("task_history", "identity", DbValue.Text(identity))
+    if existing.is_err(): return Err("task database lookup failed")
+    if existing.unwrap() != nil:
+        val changed = updated.update_value_by_key("task_history", "identity", DbValue.Text(identity),
+            "projection", DbValue.Text(projection))
+        if changed.is_err() or changed.unwrap() != 1: return Err("task database indexed update failed")
+    else:
+        val inserted = updated.put("task_history", [DbValue.Text(identity), DbValue.Text(projection)])
+        if inserted.is_err(): return Err("task database indexed insert failed")
+    Ok(updated)
+
+export TaskRunnerIndexedAttemptV2, task_runner_index_rows_v2
+export task_runner_index_history_v2, task_runner_index_prepare_v2, task_runner_index_apply_v2

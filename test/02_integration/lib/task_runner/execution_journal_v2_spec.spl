@@ -1,0 +1,216 @@
+# AWAITING_VERIFICATION. These specs invoke the actual temp-dir journal, lock,
+# segmented WAL publication/reopen and snapshot replay APIs when executed.
+# Process/container observations remain synthetic; no execution proof is claimed.
+use std.spec.{describe, it, expect, fail}
+use std.common.crypto.sha256.sha256_text
+use std.common.task_runner.contracts.{TaskRunnerIdentityV1, TaskRunnerAttemptV1,
+    task_runner_identity_v1}
+use std.common.task_runner.execution_identity_v2.*
+use std.common.task_runner.index.task_runner_storage_unescape_v1
+use std.common.task_runner.journal.{TaskRunnerJournalV1, task_runner_journal_open_v1,
+    task_runner_journal_append_v1, task_runner_journal_append_v2,
+    task_runner_journal_history_v1, task_runner_journal_history_v2,
+    task_runner_journal_missing_v1, task_runner_journal_release_v1}
+use std.common.task_runner.snapshot.{task_runner_snapshot_commit_v1,
+    task_runner_snapshot_view_v1, task_runner_snapshot_inventory_v1,
+    task_runner_snapshot_history_v1, task_runner_snapshot_history_v2,
+    task_runner_snapshot_window_history_v1, task_runner_snapshot_window_history_v2}
+use std.nogc_sync_mut.database.wal_segmented.{database_wal_current_v1,
+    database_wal_revision_open_v1, database_wal_segment_read_strict_v1}
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.nogc_sync_mut.io_runtime.dir_remove
+use test.fixtures.task_runner.execution_identity_v2.{native_attempt_fixture_v2,
+    container_attempt_fixture_v2, container_execution_fixture_v2}
+
+fn execution_journal_identity_v2(source: text, case_id: text = "mixed_case") -> TaskRunnerIdentityV1:
+    val digest = sha256_text("registered-journal-producer-runtime-toolchain-policy")
+    TaskRunnerIdentityV1(kind: "test", task_id: "execution-journal-fixture", case_id: case_id,
+        backend: "llvm", phase: "phase4", producer_digest: digest, source_digest: source,
+        runtime_digest: digest, toolchain_digest: digest, policy_digest: digest, execution_digest: digest)
+
+fn execution_journal_native_v2(identity: text, group: text,
+        attempt: i64 = 1) -> TaskRunnerAttemptV1:
+    var row = native_attempt_fixture_v2(group, attempt)
+    row.identity_digest = identity
+    row.result_digest = sha256_text(identity + ":native:" + group + ":" + str(attempt))
+    row
+
+fn execution_journal_container_v2(identity: text, group: text,
+        attempt: i64 = 3) -> TaskRunnerAttemptRecordV2:
+    var row = container_attempt_fixture_v2(container_execution_fixture_v2(0, attempt), group)
+    row.identity_digest = identity
+    row.result_digest = sha256_text(identity + ":container:" + group + ":" + str(attempt))
+    TaskRunnerAttemptRecordV2.Container(row)
+
+# Read the real committed chain. An extra table or alternative attempt WAL
+# representation fails; this helper never mocks a revision or commit result.
+fn execution_journal_physical_kinds_v2(owner: TaskRunnerJournalV1) -> [text]:
+    var cursor = owner.revision
+    var kinds: [text] = []
+    while cursor != "":
+        val revision = database_wal_revision_open_v1(owner.root + "/database-wal", cursor).unwrap()
+        expect(revision.database_identity).to_equal(owner.database_identity)
+        val entries = database_wal_segment_read_strict_v1(owner.root + "/database-wal", revision).unwrap()
+        for entry in entries:
+            if entry.table_name == "task_attempts":
+                val row = task_runner_record_decode_v2(task_runner_storage_unescape_v1(entry.data)).unwrap()
+                expect(task_runner_record_identity_v2(row)).to_equal(entry.row_key)
+                match row:
+                    Native(_): kinds.push("native")
+                    Container(_): kinds.push("container")
+            elif entry.table_name != "task_inventory" and entry.table_name != "task_inventory_complete":
+                fail("execution journal used an unexpected WAL table: " + entry.table_name)
+        cursor = revision.parent
+    kinds
+
+describe "same-WAL typed execution journal and snapshot V2":
+    it "publishes native then container, releases and reopens both exact variants":
+        val root = secure_temp_dir("build", "execution-journal-v2-mixed").unwrap()
+        val source = sha256_text("execution-journal-source")
+        val expected = [execution_journal_identity_v2(source)]
+        val identity = task_runner_identity_v1(expected[0]).unwrap()
+        var owner = task_runner_journal_open_v1(root, sha256_text("writer_a"), source, expected).unwrap()
+        expect(task_runner_journal_missing_v1(owner).unwrap()).to_equal([identity])
+        owner = task_runner_journal_append_v1(owner,
+            execution_journal_native_v2(identity, "selected_run", 1)).unwrap()
+        owner = task_runner_journal_append_v2(owner,
+            execution_journal_container_v2(identity, "selected_run", 3)).unwrap()
+        val history = task_runner_journal_history_v2(owner, identity).unwrap()
+        expect(history.len()).to_equal(2)
+        match history[0]:
+            Native(row): expect(row.pid).to_equal(41)
+            Container(_): fail("first native record changed variant")
+        match history[1]:
+            Native(_): fail("container record gained a fake native PID")
+            Container(row):
+                expect(row.attempt).to_equal(3)
+                expect(row.execution.execution.attempt).to_equal(3)
+                expect(row.execution.runtime.attempt).to_equal(3)
+                expect(row.execution.absence.identity.attempt).to_equal(3)
+        expect(task_runner_journal_history_v1(owner, identity).is_err()).to_equal(true)
+        expect(task_runner_journal_missing_v1(owner).unwrap().len()).to_equal(0)
+        expect(execution_journal_physical_kinds_v2(owner)).to_equal(["container", "native"])
+        val committed = task_runner_snapshot_commit_v1(owner, owner.revision).unwrap()
+        expect(task_runner_journal_release_v1(owner).unwrap()).to_equal(true)
+        val reopened = task_runner_journal_open_v1(root, sha256_text("writer_b"), source, expected).unwrap()
+        expect(reopened.revision).to_equal(committed)
+        val recovered = task_runner_journal_history_v2(reopened, identity).unwrap()
+        expect(recovered.len()).to_equal(2)
+        expect(task_runner_record_attempt_v2(recovered[0])).to_equal(1)
+        expect(task_runner_record_attempt_v2(recovered[1])).to_equal(3)
+        expect(execution_journal_physical_kinds_v2(reopened)).to_equal(["container", "native"])
+        expect(task_runner_journal_history_v1(reopened, identity).is_err()).to_equal(true)
+        expect(task_runner_journal_release_v1(reopened).unwrap()).to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "replays the selected mixed group independently of newer unrelated runs":
+        val root = secure_temp_dir("build", "execution-journal-v2-window").unwrap()
+        val source = sha256_text("execution-journal-source")
+        val expected = [execution_journal_identity_v2(source)]
+        val identity = task_runner_identity_v1(expected[0]).unwrap()
+        var owner = task_runner_journal_open_v1(root, sha256_text("window_writer"), source, expected).unwrap()
+        owner = task_runner_journal_append_v1(owner,
+            execution_journal_native_v2(identity, "selected_run", 1)).unwrap()
+        owner = task_runner_journal_append_v2(owner,
+            execution_journal_container_v2(identity, "selected_run", 3)).unwrap()
+        for i in 1..11:
+            owner = task_runner_journal_append_v2(owner, TaskRunnerAttemptRecordV2.Native(
+                execution_journal_native_v2(identity, "newer_run_" + str(i)))).unwrap()
+        val frozen = task_runner_snapshot_commit_v1(owner, owner.revision).unwrap()
+        val view = task_runner_snapshot_view_v1(root, frozen, source, expected, "selected_run").unwrap()
+        expect(task_runner_snapshot_inventory_v1(view).unwrap()).to_equal(expected)
+        val global = task_runner_snapshot_history_v2(view, identity).unwrap()
+        expect(global.len()).to_equal(8)
+        expect(task_runner_record_group_v2(global[0])).to_equal("newer_run_3")
+        val selected = task_runner_snapshot_window_history_v2(view, identity).unwrap()
+        expect(selected.len()).to_equal(2)
+        expect(task_runner_record_group_v2(selected[0])).to_equal("selected_run")
+        expect(task_runner_record_group_v2(selected[1])).to_equal("selected_run")
+        match selected[0]:
+            Native(row): expect(row.attempt).to_equal(1)
+            Container(_): fail("selected native attempt changed variant")
+        match selected[1]:
+            Native(_): fail("selected container attempt changed variant")
+            Container(row): expect(row.execution.runtime.attempt).to_equal(3)
+        expect(task_runner_snapshot_window_history_v1(view, identity).is_err()).to_equal(true)
+        expect(task_runner_snapshot_history_v1(view, identity).unwrap().len()).to_equal(8)
+        expect(owner.revision).to_equal(frozen)
+        expect(task_runner_journal_release_v1(owner).unwrap()).to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "rejects duplicate and native-downgrade appends without changing durable revision":
+        val root = secure_temp_dir("build", "execution-journal-v2-duplicate").unwrap()
+        val source = sha256_text("execution-journal-source")
+        val expected = [execution_journal_identity_v2(source)]
+        val identity = task_runner_identity_v1(expected[0]).unwrap()
+        var owner = task_runner_journal_open_v1(root, sha256_text("duplicate_writer"), source, expected).unwrap()
+        val row = execution_journal_container_v2(identity, "selected_run", 3)
+        owner = task_runner_journal_append_v2(owner, row).unwrap()
+        val before = database_wal_current_v1(root + "/database-wal", owner.database_identity).unwrap()
+        expect(task_runner_journal_append_v2(owner, row).is_err()).to_equal(true)
+        expect(task_runner_journal_append_v1(owner,
+            execution_journal_native_v2(identity, "selected_run", 4)).is_err()).to_equal(true)
+        match task_runner_journal_append_v2(owner,
+                execution_journal_container_v2(identity, "%".repeat(4090) + "x", 4)):
+            Ok(_): fail("oversized container line became a durable journal row")
+            Err(reason): expect(reason).to_equal("container attempt exceeds projection row bound")
+        expect(database_wal_current_v1(root + "/database-wal", owner.database_identity).unwrap()).to_equal(before)
+        expect(owner.revision).to_equal(before)
+        expect(task_runner_journal_history_v2(owner, identity).unwrap().len()).to_equal(1)
+        expect(task_runner_journal_release_v1(owner).unwrap()).to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "clears missing inventory for a container-only registered identity across reopen":
+        val root = secure_temp_dir("build", "execution-journal-v2-inventory").unwrap()
+        val source = sha256_text("execution-journal-source")
+        val expected = [execution_journal_identity_v2(source, "native_case"),
+            execution_journal_identity_v2(source, "container_only_case")]
+        val native_identity = task_runner_identity_v1(expected[0]).unwrap()
+        val container_identity = task_runner_identity_v1(expected[1]).unwrap()
+        var owner = task_runner_journal_open_v1(root, sha256_text("inventory_writer"), source, expected).unwrap()
+        expect(task_runner_journal_missing_v1(owner).unwrap().len()).to_equal(2)
+        owner = task_runner_journal_append_v2(owner,
+            execution_journal_container_v2(container_identity, "container_only_run", 3)).unwrap()
+        expect(task_runner_journal_missing_v1(owner).unwrap()).to_equal([native_identity])
+        owner = task_runner_journal_append_v1(owner,
+            execution_journal_native_v2(native_identity, "native_only_run")).unwrap()
+        expect(task_runner_journal_missing_v1(owner).unwrap().len()).to_equal(0)
+        val frozen = owner.revision
+        expect(task_runner_journal_release_v1(owner).unwrap()).to_equal(true)
+        val reopened = task_runner_journal_open_v1(root, sha256_text("inventory_reopened"), source, expected).unwrap()
+        expect(reopened.revision).to_equal(frozen)
+        expect(task_runner_journal_missing_v1(reopened).unwrap().len()).to_equal(0)
+        val history = task_runner_journal_history_v2(reopened, container_identity).unwrap()
+        expect(history.len()).to_equal(1)
+        match history[0]:
+            Native(_): fail("container-only inventory acquired a fake native record")
+            Container(row): expect(row.execution.runtime.attempt).to_equal(3)
+        expect(task_runner_journal_history_v1(reopened, container_identity).is_err()).to_equal(true)
+        expect(task_runner_journal_release_v1(reopened).unwrap()).to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "reconstructs eight bounded container group rows despite interleaved native history":
+        val root = secure_temp_dir("build", "execution-journal-v2-bounded-window").unwrap()
+        val source = sha256_text("execution-journal-source")
+        val expected = [execution_journal_identity_v2(source)]
+        val identity = task_runner_identity_v1(expected[0]).unwrap()
+        val selected_group = "selected_window_" + "%".repeat(1000)
+        var owner = task_runner_journal_open_v1(root, sha256_text("bounded_window_writer"), source, expected).unwrap()
+        for attempt in 1..9:
+            owner = task_runner_journal_append_v2(owner,
+                execution_journal_container_v2(identity, selected_group, attempt)).unwrap()
+            owner = task_runner_journal_append_v2(owner, TaskRunnerAttemptRecordV2.Native(
+                execution_journal_native_v2(identity, "interleaved_" + str(attempt)))).unwrap()
+        val view = task_runner_snapshot_view_v1(root, owner.revision, source, expected, selected_group).unwrap()
+        val global = task_runner_snapshot_history_v2(view, identity).unwrap()
+        val selected = task_runner_snapshot_window_history_v2(view, identity).unwrap()
+        expect(global.len()).to_equal(8)
+        expect(selected.len()).to_equal(8)
+        for i in 0..8:
+            expect(task_runner_record_group_v2(selected[i])).to_equal(selected_group)
+            expect(task_runner_record_attempt_v2(selected[i])).to_equal(i + 1)
+            match selected[i]:
+                Native(_): fail("bounded container window gained a native surrogate")
+                Container(row): expect(row.execution.runtime.attempt).to_equal(i + 1)
+        expect(task_runner_journal_release_v1(owner).unwrap()).to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)

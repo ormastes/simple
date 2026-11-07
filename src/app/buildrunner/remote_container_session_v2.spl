@@ -1,0 +1,121 @@
+# The container variant uses the SAME parent session, operation WAL and task
+# journal. Its typed record has no PID or synthetic native tree-reap fields.
+use app.buildrunner.remote_session_v1.{RemoteDatabaseSessionV1, RemoteAcceptedResultV1,
+    remote_operation_collectable_v1, remote_parent_output_path_v1}
+use app.buildrunner.remote_container_evidence_v2.*
+use app.buildrunner.remote_container_authority_v2.*
+use app.buildrunner.remote_container_bundle_codec_v2.remote_container_bundle_decode_v2
+use app.buildrunner.remote_context_v1.{RemoteAuthorityContextV1, remote_context_admit_v1}
+use std.common.contracts.container.execution_v2.ContainerExecutionRequestV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.contracts.distributed_operation_state_v2.distributed_operation_transition_v2
+use std.common.task_runner.distributed_operation_journal_v2.{distributed_operation_journal_lookup_v2,
+    distributed_operation_journal_commit_v2}
+use std.common.task_runner.execution_identity_v2.{TaskRunnerContainerAttemptV2, TaskRunnerAttemptRecordV2,
+    task_runner_record_group_v2, task_runner_record_attempt_v2, task_runner_record_result_digest_v2}
+use std.common.task_runner.journal.{task_runner_journal_history_v2, task_runner_journal_append_v2}
+use std.common.build_manager.contracts.{BuildTaskV1, builder_task_identity_v1}
+use std.common.crypto.sha256.sha256_text
+use app.io.file_ops.{file_atomic_write_bytes, file_hash_sha256}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_is_real_no_follow}
+
+class RemoteContainerDatabaseSessionV2:
+    parent: RemoteDatabaseSessionV1
+    requests: Dict<text, ContainerExecutionRequestV2>
+    provider_identities: Dict<text, text>
+
+impl RemoteContainerDatabaseSessionV2:
+    me accept_wire(task: BuildTaskV1, payload: text,
+            context: RemoteAuthorityContextV1) -> Result<RemoteAcceptedResultV1, text>:
+        self.accept(task, remote_container_bundle_decode_v2(payload)?, context)
+
+    me cancel(operation_id: text, cancellation_digest: text) -> Result<bool, text>:
+        self.parent.cancel(operation_id, cancellation_digest)
+
+    me accept(task: BuildTaskV1, bundle: RemoteContainerBundleV2,
+            context: RemoteAuthorityContextV1) -> Result<RemoteAcceptedResultV1, text>:
+        if not self.parent.policies.contains_key(task.id) or not self.parent.identities.contains_key(task.id) or
+                self.parent.identities[task.id] != builder_task_identity_v1(task) or
+                not self.requests.contains_key(task.id) or not self.provider_identities.contains_key(task.id):
+            return Err("REMOTE_CONTAINER_TASK_NOT_ADMITTED")
+        val policy = self.parent.policies[task.id]
+        val _authority = remote_context_admit_v1(context, task, policy)?
+        if context.requested.isolation_class != "native-container" or
+                context.observed.isolation_class != "native-container":
+            return Err("REMOTE_CONTAINER_ISOLATION_REQUIRED")
+        val envelope = distributed_encode_operation_v2(context.request)?
+        val prior = distributed_operation_journal_lookup_v2(self.parent.operations, policy.operation_id)?
+        val _collectable = remote_operation_collectable_v1(prior, policy.operation_id, envelope)?
+        val frozen = remote_container_evidence_freeze_v2(task, bundle.result, policy,
+            self.requests[task.id], self.provider_identities[task.id], bundle.evidence)?
+        val expected = RemoteContainerBindingV2(builder_task_identity_v1(task), policy.host_id,
+            policy.assignment_digest, policy.controller_epoch, policy.operation_id,
+            frozen.result_digest, frozen.execution_digest, frozen.stdout_digest, frozen.stderr_digest,
+            frozen.output_inventory_digest, frozen.tests_digest)
+        val completion = remote_container_verify_completion_v2(bundle.completion, context.signed,
+            context.approval, context.issuer, context.approver, context.host_key, context.request,
+            task, expected, context.now, context.policy_revision, context.revocation_epoch,
+            context.session_generation)?
+        if completion.completed_at < bundle.evidence.execution.absence.observed_unix_ms:
+            return Err("REMOTE_CONTAINER_COMPLETION_PRECEDES_ABSENCE")
+        val completion_digest = sha256_text(remote_container_completion_encode_v2(completion)?)
+        if not dir_is_real_no_follow(self.parent.database.window_root): return Err("REMOTE_PARENT_ROOT_UNSAFE")
+        val output_root = self.parent.database.window_root + "/accepted-" + completion_digest
+        if not dir_create_all(output_root) or not dir_is_real_no_follow(output_root):
+            return Err("REMOTE_PARENT_ROOT_UNSAFE")
+        for output in frozen.bytes.outputs:
+            val destination = remote_parent_output_path_v1(output_root, output.path)?
+            if not file_atomic_write_bytes(destination, output.content): return Err("REMOTE_PARENT_OUTPUT_WRITE_FAILED")
+            val actual = file_hash_sha256(destination)
+            var expected_digest = ""
+            for observed in frozen.observed:
+                if observed.path == output.path: expected_digest = observed.digest
+            if actual == nil or actual.unwrap() != expected_digest: return Err("REMOTE_PARENT_OUTPUT_READBACK_DIFFERS")
+        val identity = self.parent.journal_identities[task.id]
+        val history = task_runner_journal_history_v2(self.parent.database.journal, identity)?
+        # The durable result binds the whole signed completion, including exact
+        # container scope, wait and absence observations. No native row is made.
+        var retained = false
+        for row in history:
+            if task_runner_record_group_v2(row) == policy.operation_id and
+                    task_runner_record_attempt_v2(row) == task.attempt:
+                if task_runner_record_result_digest_v2(row) != completion_digest:
+                    return Err("REMOTE_CONTAINER_RECOVERY_EVIDENCE_DIFFERS")
+                retained = true
+        if not retained:
+            val succeeded = bundle.result.status == "OK"
+            val ordinary_failure = bundle.result.exit_code == 1
+            val row = TaskRunnerContainerAttemptV2(identity_digest: identity,
+                group_id: policy.operation_id, attempt: task.attempt, mode: "isolated",
+                status: if succeeded: "passed" else: if ordinary_failure: "failed" else: "aborted",
+                reason: if succeeded: "" else: if not ordinary_failure: "infrastructure" else:
+                    if policy.action_kind == "test": "assertion" else: "compile",
+                task_exit_code: if succeeded or ordinary_failure: bundle.result.exit_code else: -1,
+                result_validated: succeeded or ordinary_failure,
+                stdout_digest: frozen.stdout_digest, stderr_digest: frozen.stderr_digest,
+                result_digest: completion_digest, execution: frozen.bytes.execution)
+            self.parent.database.journal = task_runner_journal_append_v2(self.parent.database.journal,
+                TaskRunnerAttemptRecordV2.Container(row))?
+        val terminal = if bundle.result.status == "OK": "completed" else: "failed"
+        self.parent.operations = distributed_operation_journal_commit_v2(self.parent.operations,
+            distributed_operation_transition_v2(prior, terminal, completion_digest)?)?
+        self.parent.database.recorded[task.id + ":" + str(task.attempt)] = true
+        Ok(RemoteAcceptedResultV1(bundle.result, output_root, completion_digest))
+
+fn remote_container_session_v2(parent: RemoteDatabaseSessionV1,
+        tasks: [BuildTaskV1], requests: Dict<text, ContainerExecutionRequestV2>,
+        provider_identities: Dict<text, text>) -> Result<RemoteContainerDatabaseSessionV2, text>:
+    if tasks.len() != parent.policies.len() or requests.len() != tasks.len() or
+            provider_identities.len() != tasks.len(): return Err("REMOTE_CONTAINER_INVENTORY_DIFFERS")
+    var seen: Dict<text, bool> = {}
+    for task in tasks:
+        if seen.contains_key(task.id) or not parent.policies.contains_key(task.id) or not requests.contains_key(task.id) or
+                not provider_identities.contains_key(task.id) or
+                parent.identities[task.id] != builder_task_identity_v1(task):
+            return Err("REMOTE_CONTAINER_TASK_NOT_ADMITTED")
+        seen[task.id] = true
+        val _bound = remote_container_request_bind_v2(task, parent.policies[task.id], requests[task.id],
+            provider_identities[task.id])?
+    Ok(RemoteContainerDatabaseSessionV2(parent, requests, provider_identities))
+
+export RemoteContainerDatabaseSessionV2, remote_container_session_v2
