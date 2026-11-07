@@ -138,6 +138,28 @@ pub fn simple_container_project_v2(owner: SimpleContainerOwnerV2,
             val projection = adapter.project(request)?
             container_api_projection_v2(request, projection)
 
+pub fn simple_container_action_project_v2(owner: SimpleContainerOwnerV2,
+        request: ContainerExecutionRequestV2) -> Result<ContainerActionProjectionV2, text>:
+    val resources = simple_container_project_v2(owner, request)?
+    val projected = match owner:
+        case SimpleContainerOwnerV2.Linux(_, adapter): adapter.action_project(request)?
+        case SimpleContainerOwnerV2.Windows(_, adapter): adapter.action_project(request)?
+    if projected.argv.len() == 0 or projected.argv.len() > 4096 or projected.mounts.len() > 256 or
+            not container_api_text_v2(projected.working_directory):
+        return Err("container-api-action-projection-invalid")
+    var argument_bytes = 0
+    for argument in projected.argv:
+        if str_len(argument) > 1048576 or argument.contains("\0"): return Err("container-api-action-argument-invalid")
+        argument_bytes = argument_bytes + str_len(argument)
+        if argument_bytes > 1048576: return Err("container-api-action-arguments-too-large")
+    if projected.argv[0] == "": return Err("container-api-action-program-empty")
+    var targets: [text] = []
+    for mount in projected.mounts:
+        if not container_api_text_v2(mount.host_root) or not container_api_text_v2(mount.guest_root) or
+                targets.contains(mount.guest_root): return Err("container-api-action-mount-invalid")
+        targets.push(mount.guest_root)
+    Ok(projected)
+
 fn container_api_rejected_v2(owner: SimpleContainerOwnerV2, action: text, reason: text) -> ContainerOperationTurnV2:
     var rejected = runtime_operation_empty()
     rejected.operation = action
