@@ -1,6 +1,6 @@
 # Optional record owner is lost when an if/match arm is `Some(<record literal>)`
 
-Status: Some-literal half FIXED (see "Fix" below); match-arm `case None: None`
+Status: Some-literal half fix-implemented-verification-pending (see "Fix" below); match-arm `case None: None`
 half OPEN (see "Second cause"). Related to
 `mir_optional_record_nil_join_2026_10_18` (nil arm half fixed in
 `622b92cae46`); this is the remaining untracked non-nil arm case.
